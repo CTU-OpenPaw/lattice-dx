@@ -40,4 +40,3 @@ Files: apps/web/src/app/{layout.tsx,page.tsx,globals.css}, apps/web/src/app/api/
 - [x] Document commands, service ports, extension rules, and limitations.
 - [x] Run pnpm typecheck, pnpm test, pnpm build; start all three services and smoke-test the web proxy.
 - [x] Review the working tree and report verified results without committing or publishing.
-
