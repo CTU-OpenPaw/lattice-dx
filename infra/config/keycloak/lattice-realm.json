@@ -1,0 +1,35 @@
+{
+  "realm": "lattice", "enabled": true, "sslRequired": "none",
+  "roles": { "realm": [{ "name": "records:read" }, { "name": "records:write" }] },
+  "clients": [
+    {
+      "clientId": "dx-local", "enabled": true, "publicClient": true,
+      "directAccessGrantsEnabled": true, "standardFlowEnabled": false,
+      "protocol": "openid-connect",
+      "protocolMappers": [{
+        "name": "api-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
+        "config": { "included.client.audience": "dx-api", "access.token.claim": "true", "id.token.claim": "false" }
+      }]
+    },
+    { "clientId": "dx-api", "enabled": true, "bearerOnly": true, "protocol": "openid-connect" },
+    {
+      "clientId": "dx-gateway", "enabled": true, "publicClient": false,
+      "secret": "local-gateway-secret", "standardFlowEnabled": false,
+      "protocol": "openid-connect"
+    }
+  ],
+  "users": [
+    {
+      "username": "alice", "enabled": true, "emailVerified": true,
+      "firstName": "Alice", "lastName": "Demo", "email": "alice@example.invalid",
+      "credentials": [{ "type": "password", "value": "local-alice-password", "temporary": false }],
+      "realmRoles": ["records:read", "records:write"]
+    },
+    {
+      "username": "bob", "enabled": true, "emailVerified": true,
+      "firstName": "Bob", "lastName": "Demo", "email": "bob@example.invalid",
+      "credentials": [{ "type": "password", "value": "local-bob-password", "temporary": false }],
+      "realmRoles": ["records:read"]
+    }
+  ]
+}

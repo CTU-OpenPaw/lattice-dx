@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+name: lattice-dx
+services:
+  postgres:
+    image: postgres:16.13-alpine
+    environment:
+      POSTGRES_DB: lattice
+      POSTGRES_USER: lattice
+      POSTGRES_PASSWORD: local-demo-password
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../config/postgres/init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lattice -d lattice"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: lattice
+      KC_DB_PASSWORD: local-demo-password
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: local-admin-password
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ../config/keycloak/lattice-realm.json:/opt/keycloak/data/import/lattice-realm.json:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    environment:
+      API_HOST: 0.0.0.0
+      DATABASE_URL: postgres://lattice:local-demo-password@postgres:5432/lattice
+      OIDC_ISSUER: http://localhost:8081/realms/lattice
+      OIDC_JWKS_URL: http://keycloak:8080/realms/lattice/protocol/openid-connect/certs
+      OIDC_AUDIENCE: dx-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  gateway:
+    image: apache/apisix:3.19.0-debian
+    volumes:
+      - ../config/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ../config/apisix/apisix.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+    ports:
+      - "127.0.0.1:8080:9080"
+    depends_on:
+      api:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+
+volumes:
+  postgres-data:

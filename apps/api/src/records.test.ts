@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: Apache-2.0
+import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from 'jose';
+import { expect, test } from 'vitest';
+import { createApi } from './app';
+import type { RecordItem, RecordRepository } from './records';
+
+const { publicKey, privateKey } = await generateKeyPair('RS256');
+const key = createLocalJWKSet({ keys: [{ ...await exportJWK(publicKey), kid: 'test-key', alg: 'RS256' }] });
+async function token(subject = 'alice', roles = ['records:read', 'records:write'], issuer = 'https://identity.test', audience = 'dx-api') {
+  return new SignJWT({ realm_access: { roles } }).setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
+    .setIssuer(issuer).setAudience(audience).setSubject(subject).setIssuedAt().setExpirationTime('5m').sign(privateKey);
+}
+function setup() {
+  const rows: RecordItem[] = [];
+  const records: RecordRepository = {
+    async create(title, ownerId) { const row = { id: crypto.randomUUID(), title, ownerId, createdAt: new Date().toISOString() }; rows.push(row); return row; },
+    async list(ownerId) { return rows.filter(row => row.ownerId === ownerId); },
+  };
+  return createApi({ workerUrl: 'http://127.0.0.1:1', records, identity: { key, issuer: 'https://identity.test', audience: 'dx-api' } });
+}
+
+test('records require authentication', async () => {
+  const app = setup();
+  try { expect((await app.inject({ url: '/v1/records' })).statusCode).toBe(401); } finally { await app.close(); }
+});
+test.each([
+  ['issuer', 'https://wrong.test', 'dx-api'], ['audience', 'https://identity.test', 'other-api'],
+])('rejects a signed token with wrong %s', async (_, issuer, audience) => {
+  const app = setup();
+  try { expect((await app.inject({ url: '/v1/records', headers: { authorization: `Bearer ${await token('alice', ['records:read'], issuer, audience)}` } })).statusCode).toBe(401); } finally { await app.close(); }
+});
+test('a reader cannot create a record', async () => {
+  const app = setup();
+  try { expect((await app.inject({ method: 'POST', url: '/v1/records', headers: { authorization: `Bearer ${await token('bob', ['records:read'])}` }, payload: { title: 'Denied' } })).statusCode).toBe(403); } finally { await app.close(); }
+});
+test('records cannot be read by another owner', async () => {
+  const app = setup();
+  try {
+    const alice = { authorization: `Bearer ${await token()}` };
+    const created = await app.inject({ method: 'POST', url: '/v1/records', headers: alice, payload: { title: '  Hồ sơ mẫu  ', ownerId: 'bob' } });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ title: 'Hồ sơ mẫu', ownerId: 'alice' });
+    expect((await app.inject({ url: '/v1/records', headers: alice })).json().items).toHaveLength(1);
+    expect((await app.inject({ url: '/v1/records', headers: { authorization: `Bearer ${await token('bob', ['records:read'])}` } })).json().items).toEqual([]);
+  } finally { await app.close(); }
+});
+test('rejects a blank title', async () => {
+  const app = setup();
+  try { expect((await app.inject({ method: 'POST', url: '/v1/records', headers: { authorization: `Bearer ${await token()}` }, payload: { title: ' ' } })).statusCode).toBe(400); } finally { await app.close(); }
+});

@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+apisix:
+  node_listen: 9080
+deployment:
+  role: data_plane
+  role_data_plane:
+    config_provider: yaml
+plugins:
+  - openid-connect
+  - limit-count
+  - request-id
