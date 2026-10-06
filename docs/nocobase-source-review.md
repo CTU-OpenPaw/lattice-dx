@@ -4,7 +4,7 @@ Ngày kiểm tra: 2026-10-06.
 
 - Nguồn: https://github.com/nocobase/nocobase.git
 - Commit: `5b47bec116c52239348c09d360e4bd2649c99efc` trên nhánh `main` tại thời điểm clone.
-- Bản local: `upstream/nocobase/`, được loại khỏi Git của dự án chính.
+- Bản nguồn: `upstream/nocobase/`, được đăng ký làm Git submodule của dự án chính và khóa tại commit trên.
 - Clone bằng `git clone --filter=blob:none`: giữ lịch sử Git, tải blob bổ sung khi cần.
 - Working tree upstream sạch sau clone; chưa sửa source, cài dependencies hoặc chạy NocoBase.
 
@@ -24,4 +24,4 @@ Nguồn đối chiếu:
 - https://vfossa.vn/tin-tuc/the-le-olp-phan-mem-nguon-mo-nam-2026-760.html
 - https://opensource.org/osd
 
-Giữ nguyên LICENSE, header bản quyền và lịch sử upstream. Giấy phép Apache-2.0 của mã nhóm không thay thế giấy phép upstream. Chưa đưa checkout vào workspace pnpm, build, runtime hoặc bản phát hành. Việc đặt ngoài repo chính giúp tách mã tham khảo; không tự giải quyết nghĩa vụ cấp phép nếu tích hợp sau này.
+Giữ nguyên LICENSE, header bản quyền và lịch sử upstream. Giấy phép Apache-2.0 của mã nhóm không thay thế giấy phép upstream. Submodule giúp tải đúng bản nguồn cùng dự án; chưa đưa checkout vào workspace pnpm, build hoặc runtime. Cách tổ chức bằng submodule không tự giải quyết nghĩa vụ cấp phép hay xác nhận đủ điều kiện dự thi.

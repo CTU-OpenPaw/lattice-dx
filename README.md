@@ -17,7 +17,14 @@ Cấu hình này dùng mật khẩu PUBLIC cho môi trường local, được gh
 
 ## Chạy tại máy phát triển
 
-Yêu cầu Node.js 24 và pnpm 10.23.0.
+Yêu cầu Node.js 24 và pnpm 10.23.0. Clone kèm bản nguồn NocoBase:
+
+```sh
+git clone --recurse-submodules https://github.com/TrDuy-pan3000/LatticeDX.git
+cd LatticeDX
+```
+
+Nếu đã clone repo trước đó, chạy `git submodule update --init --recursive` để tải NocoBase tại commit được khóa. Submodule hiện dùng để khảo sát nguồn; các lệnh chạy bên dưới chưa cài hoặc khởi động NocoBase.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -45,6 +52,7 @@ Các biến môi trường có giá trị mặc định được mô tả ở `.
 | `apps/agent-worker` | Điểm chạy tác vụ agent; hiện chỉ có demo xác nhận yêu cầu |
 | `packages/contracts` | Cấu trúc và kiểm tra dữ liệu giữa các thành phần |
 | `plugins/nocobase` | Vị trí dành cho plugin NocoBase của nhóm |
+| `upstream/nocobase` | Git submodule chứa bản nguồn NocoBase, khóa tại commit đã khảo sát |
 | `infra` | Quy ước cấu hình và triển khai dịch vụ ngoài |
 | `solutions` | Quy ước lưu ứng dụng nghiệp vụ, workflow và dữ liệu demo |
 | `tests` | Kiểm thử giao tiếp nhiều thành phần |
@@ -61,4 +69,4 @@ Thêm server độc lập vào `apps/`, thư viện tái sử dụng vào `packa
 
 ## Giấy phép
 
-Mã gốc của nhóm trong repo này dùng Apache-2.0; xem `LICENSE`. Dependency giữ giấy phép riêng. Phiên bản được khóa trong `pnpm-lock.yaml`; chưa thực hiện kiểm toán giấy phép toàn bộ cây dependency. NocoBase đã được clone riêng trong `upstream/nocobase/` để khảo sát, được loại khỏi Git của dự án chính và chưa cài dependencies hoặc tích hợp runtime. Xem [ghi nhận nguồn và giấy phép](docs/nocobase-source-review.md).
+Mã gốc của nhóm trong repo này dùng Apache-2.0; xem `LICENSE`. Dependency giữ giấy phép riêng. Phiên bản được khóa trong `pnpm-lock.yaml`; chưa thực hiện kiểm toán giấy phép toàn bộ cây dependency. NocoBase được tham chiếu bằng Git submodule trong `upstream/nocobase/`, giữ nguyên giấy phép của upstream và chưa cài dependencies hoặc tích hợp runtime. Checkout này có các điều khoản bổ sung và thông báo giấy phép khác nhau; chưa xác nhận đủ điều kiện dự thi. Xem [ghi nhận nguồn và giấy phép](docs/nocobase-source-review.md).
