@@ -91,3 +91,29 @@ test('file upload requires permission and valid canonical base64',async()=>{
     expect(writes()).toBe(0);
   }finally{await app.close();}
 });
+
+test.each(['../a.txt','a\\b.txt','a\n.txt',''])('rejects unsafe file name %j',async(filename)=>{
+  const {app,writes}=configured();
+  try{
+    expect((await app.inject({method:'POST',url:'/v1/files',headers:await headers(['files:write']),payload:{filename,contentBase64:'YQ=='}})).statusCode).toBe(400);
+    expect(writes()).toBe(0);
+  }finally{await app.close();}
+});
+
+test('upload rejects bytes over 1 MiB and honors the boundary without leaking metadata content',async()=>{
+  const {app,writes}=configured();
+  try{
+    const h=await headers(['files:write','files:read']);
+    const tooLarge=await app.inject({method:'POST',url:'/v1/files',headers:h,payload:{filename:'large.txt',contentBase64:Buffer.alloc(1_048_577,65).toString('base64')}});
+    expect(tooLarge.statusCode).toBe(413);expect(writes()).toBe(0);
+    const boundary=await app.inject({method:'POST',url:'/v1/files',headers:h,payload:{filename:'boundary.txt',contentBase64:Buffer.alloc(1_048_576,65).toString('base64')}});
+    expect(boundary.statusCode).toBe(201);expect(boundary.json().size).toBe(1_048_576);
+    const metadata=await app.inject({url:'/v1/files/file-1',headers:h});
+    expect(metadata.statusCode).toBe(200);expect(metadata.json()).not.toHaveProperty('content');
+  }finally{await app.close();}
+});
+
+test.each(['/v1/tasks','/v1/files/file-1','/v1/files/file-1/content'])('foundation read %s requires authentication',async(url)=>{
+  const {app}=configured();
+  try{expect((await app.inject({url})).statusCode).toBe(401);}finally{await app.close();}
+});

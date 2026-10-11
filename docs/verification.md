@@ -2,7 +2,7 @@
 
 ## Giai đoạn 1 — kiểm chứng thực tế
 
-- `pnpm check`: typecheck, 26 tests và build đạt.
+- `pnpm check`: typecheck, 38 tests và build đạt sau đợt kiểm tra bổ sung.
 - Core Docker build/up đạt; Keycloak 26.8.0, APISIX 3.19.0, PostgreSQL 16.13, API chạy thật.
 - `pnpm test:infra`: token → Gateway → API → PostgreSQL; quyền ghi, owner và organization scope đạt.
 - `pnpm test:foundation`: task tạo/đọc/quyết định lưu PostgreSQL; hai quyết định cùng version chỉ một thành công; đơn vị khác không thấy/duyệt task.
@@ -11,6 +11,13 @@
 - NocoBase runtime 2.2.20 xác nhận qua package server trong container. `pnpm test:nocobase`: API metadata và frontend đạt, http://localhost:13000.
 - Compose core/NocoBase parse hợp lệ. Hai dịch vụ có database/volume riêng; NocoBase chưa SSO và chưa plugin nhóm.
 - Review độc lập không có lỗi critical/important; đã sửa lỗi tên tệp chứa Unicode malformed và thêm regression test.
+
+## Kiểm tra bổ sung qua UI và lỗi biên
+
+- Đăng nhập NocoBase qua trình duyệt bằng fixture local thành công, chuyển đến `/admin`. Trang báo No pages yet vì chưa có app/plugin của nhóm; không coi UI trống là lỗi runtime. Ảnh kiểm chứng local: `output/verification/nocobase-admin.png`.
+- Unit tests mới kiểm tra tên tệp chứa đường dẫn/ký tự điều khiển, metadata không lộ content, giới hạn 1 MiB chính xác và đọc task/tệp cần token.
+- TCP scanner test kiểm tra framing INSTREAM, kết quả clean/rejected, lỗi daemon và response thiếu terminator; lỗi scanner không được coi là clean.
+- `pnpm test:scanner-outage` tắt ClamAV thật, upload tệp thử và xác nhận scanStatus error/download 409; script khởi động lại ClamAV trong finally. Script này gián đoạn scanner local ngắn, không chạy chung với người đang upload.
 
 ## Docker Desktop recovery
 
