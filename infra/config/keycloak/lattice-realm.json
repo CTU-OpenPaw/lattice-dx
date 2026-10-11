@@ -1,35 +1,135 @@
 {
-  "realm": "lattice", "enabled": true, "sslRequired": "none",
-  "roles": { "realm": [{ "name": "records:read" }, { "name": "records:write" }] },
+  "realm": "lattice",
+  "enabled": true,
+  "sslRequired": "none",
+  "roles": {
+    "realm": [
+      {
+        "name": "records:read"
+      },
+      {
+        "name": "records:write"
+      },
+      {
+        "name": "tasks:read"
+      },
+      {
+        "name": "tasks:assign"
+      },
+      {
+        "name": "tasks:decide"
+      },
+      {
+        "name": "files:read"
+      },
+      {
+        "name": "files:write"
+      }
+    ]
+  },
   "clients": [
     {
-      "clientId": "dx-local", "enabled": true, "publicClient": true,
-      "directAccessGrantsEnabled": true, "standardFlowEnabled": false,
+      "clientId": "dx-local",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": false,
       "protocol": "openid-connect",
-      "protocolMappers": [{
-        "name": "api-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
-        "config": { "included.client.audience": "dx-api", "access.token.claim": "true", "id.token.claim": "false" }
-      }]
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "dx-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "protocol": "openid-connect",
+          "config": {
+            "access.token.claim": "true",
+            "id.token.claim": "false",
+            "user.attribute": "organization_id",
+            "claim.name": "organization_id",
+            "jsonType.label": "String"
+          },
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "name": "organization"
+        }
+      ]
     },
-    { "clientId": "dx-api", "enabled": true, "bearerOnly": true, "protocol": "openid-connect" },
     {
-      "clientId": "dx-gateway", "enabled": true, "publicClient": false,
-      "secret": "local-gateway-secret", "standardFlowEnabled": false,
+      "clientId": "dx-api",
+      "enabled": true,
+      "bearerOnly": true,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "dx-gateway",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "local-gateway-secret",
+      "standardFlowEnabled": false,
       "protocol": "openid-connect"
     }
   ],
   "users": [
     {
-      "username": "alice", "enabled": true, "emailVerified": true,
-      "firstName": "Alice", "lastName": "Demo", "email": "alice@example.invalid",
-      "credentials": [{ "type": "password", "value": "local-alice-password", "temporary": false }],
-      "realmRoles": ["records:read", "records:write"]
+      "username": "alice",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Alice",
+      "lastName": "Demo",
+      "email": "alice@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-alice-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "records:read",
+        "records:write",
+        "tasks:read",
+        "tasks:assign",
+        "tasks:decide",
+        "files:read",
+        "files:write"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      }
     },
     {
-      "username": "bob", "enabled": true, "emailVerified": true,
-      "firstName": "Bob", "lastName": "Demo", "email": "bob@example.invalid",
-      "credentials": [{ "type": "password", "value": "local-bob-password", "temporary": false }],
-      "realmRoles": ["records:read"]
+      "username": "bob",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Bob",
+      "lastName": "Demo",
+      "email": "bob@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-bob-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "records:read",
+        "tasks:read",
+        "tasks:decide",
+        "files:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-b"
+        ]
+      }
     }
   ]
 }

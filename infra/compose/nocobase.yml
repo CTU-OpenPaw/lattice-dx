@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+name: lattice-dx
+services:
+  nocobase-db:
+    image: postgres:16.13-alpine
+    environment:
+      POSTGRES_DB: nocobase
+      POSTGRES_USER: nocobase
+      POSTGRES_PASSWORD: local-nocobase-password
+    volumes:
+      - nocobase-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nocobase -d nocobase"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  nocobase:
+    image: nocobase/nocobase:2.2.20@sha256:4d57058347c9862dc10b0fd9d0163a8d88918ba14a1c591a61cb76bb60a0cff3
+    init: true
+    environment:
+      APP_KEY: local-nocobase-app-key-public-fixture
+      ENCRYPTION_FIELD_KEY: local-nocobase-encryption-public-fixture
+      DB_DIALECT: postgres
+      DB_HOST: nocobase-db
+      DB_PORT: 5432
+      DB_DATABASE: nocobase
+      DB_USER: nocobase
+      DB_PASSWORD: local-nocobase-password
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - nocobase-storage:/app/nocobase/storage
+    ports:
+      - "127.0.0.1:13000:80"
+    depends_on:
+      nocobase-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1/api/app:getLang').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+volumes:
+  nocobase-db-data:
+  nocobase-storage:

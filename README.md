@@ -1,6 +1,6 @@
 # LatticeDX · PMNM 2026
 
-Bộ khung nền tảng chuyển đổi số của nhóm, tên repo dự kiến `lattice-dx`. Có cổng web, API và agent worker độc lập; cấu hình core local gồm Keycloak, APISIX và PostgreSQL. NocoBase, NGSI-LD, workflow, lưu tệp và mô hình AI chưa được tích hợp.
+Bộ khung nền tảng chuyển đổi số của nhóm, tên repo dự kiến `lattice-dx`. Có cổng web, API và agent worker độc lập; core local gồm Keycloak, APISIX, PostgreSQL và ClamAV. Có runtime NocoBase riêng, API task/quyết định và lưu/quét tệp nhỏ. NGSI-LD, workflow UC1 đầy đủ và mô hình AI chưa được tích hợp.
 
 ## Chạy core bằng Docker
 
@@ -9,6 +9,8 @@ Yêu cầu Docker Engine với Linux containers và Docker Compose. Từ root re
 ```sh
 pnpm infra:up
 pnpm test:infra
+pnpm identity:sync-local
+pnpm test:foundation
 ```
 
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
@@ -24,7 +26,7 @@ git clone --recurse-submodules https://github.com/TrDuy-pan3000/LatticeDX.git
 cd LatticeDX
 ```
 
-Nếu đã clone repo trước đó, chạy `git submodule update --init --recursive` để tải NocoBase tại commit được khóa. Submodule hiện dùng để khảo sát nguồn; các lệnh chạy bên dưới chưa cài hoặc khởi động NocoBase.
+Nếu đã clone repo trước đó, chạy `git submodule update --init --recursive` để tải NocoBase tại commit được khóa. Submodule dùng để khảo sát nguồn; `pnpm dev` chưa khởi động NocoBase. Chạy runtime riêng bằng `pnpm nocobase:up`, mở http://localhost:13000. Đọc [hợp đồng nền và bàn giao giai đoạn 1](docs/phase-one-handoff.md); SSO NocoBase chưa tích hợp.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -63,7 +65,8 @@ Thêm server độc lập vào `apps/`, thư viện tái sử dụng vào `packa
 
 - Worker trả kết quả xác định, không phân tích bằng AI, không gọi công cụ nghiệp vụ.
 - API gọi worker đồng bộ bằng HTTP; không có hàng đợi, lưu tác vụ hay retry.
-- API hồ sơ trong core xác minh JWT và quyền read/write, giới hạn theo chủ sở hữu; chưa phân tách tổ chức. `pnpm dev` không tự nạp cấu hình core và endpoint hồ sơ trả 503 nếu thiếu cấu hình identity/database.
+- API hồ sơ trong core xác minh JWT và quyền read/write, giới hạn theo chủ sở hữu và claim đơn vị `organization_id` đã ký. Token thiếu đơn vị bị từ chối. Bản ghi cũ chưa có đơn vị không tự được gán quyền. `pnpm dev` không tự nạp cấu hình core và endpoint hồ sơ trả 503 nếu thiếu cấu hình identity/database.
+- Task/decision nền có lưu bền và kiểm tra phiên bản; chưa tự đổi trạng thái hồ sơ mua sắm. Tệp 1 MiB lưu PostgreSQL bytea, quét ClamAV trước khi tải; chưa có object storage hoặc quét lại nền. Đọc [hợp đồng nền](docs/phase-one-handoff.md).
 - Endpoint demo agent là kiểm tra kết nối cục bộ; không được công bố qua gateway core và chưa có xác thực.
 - Các thẻ ứng dụng/dữ liệu trên giao diện ghi rõ chưa tích hợp; không phải kiểm tra sức khỏe dịch vụ.
 

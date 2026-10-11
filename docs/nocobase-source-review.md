@@ -2,6 +2,8 @@
 
 Ngày kiểm tra: 2026-10-06.
 
+Cập nhật runtime 2026-10-11: thêm `infra/compose/nocobase.yml` chạy image chính thức 2.2.20 với digest khóa. Version server trong container xác nhận 2.2.20; smoke API/frontend đạt. Submodule vẫn giữ nguyên commit, không cài dependency/sửa source. Runtime là dịch vụ riêng, chưa SSO Keycloak hoặc plugin của nhóm. Các nhận xét giấy phép dưới đây vẫn là giới hạn cần xử lý, không được coi là chứng nhận tuân thủ dự thi.
+
 - Nguồn: https://github.com/nocobase/nocobase.git
 - Commit: `5b47bec116c52239348c09d360e4bd2649c99efc` trên nhánh `main` tại thời điểm clone.
 - Bản nguồn: `upstream/nocobase/`, được đăng ký làm Git submodule của dự án chính và khóa tại commit trên.

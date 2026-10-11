@@ -6,15 +6,15 @@ import type { RecordItem, RecordRepository } from './records';
 
 const { publicKey, privateKey } = await generateKeyPair('RS256');
 const key = createLocalJWKSet({ keys: [{ ...await exportJWK(publicKey), kid: 'test-key', alg: 'RS256' }] });
-async function token(subject = 'alice', roles = ['records:read', 'records:write'], issuer = 'https://identity.test', audience = 'dx-api') {
-  return new SignJWT({ realm_access: { roles } }).setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
-    .setIssuer(issuer).setAudience(audience).setSubject(subject).setIssuedAt().setExpirationTime('5m').sign(privateKey);
+async function token(subject = 'alice', roles = ['records:read', 'records:write'], issuer = 'https://identity.test', audience = 'dx-api', organizationId: string | null = 'org-a', expiration = '5m') {
+  return new SignJWT({ realm_access: { roles }, ...(organizationId ? { organization_id: organizationId } : {}) }).setProtectedHeader({ alg: 'RS256', kid: 'test-key' })
+    .setIssuer(issuer).setAudience(audience).setSubject(subject).setIssuedAt().setExpirationTime(expiration).sign(privateKey);
 }
 function setup() {
   const rows: RecordItem[] = [];
   const records: RecordRepository = {
-    async create(title, ownerId) { const row = { id: crypto.randomUUID(), title, ownerId, createdAt: new Date().toISOString() }; rows.push(row); return row; },
-    async list(ownerId) { return rows.filter(row => row.ownerId === ownerId); },
+    async create(title, ownerId, organizationId) { const row = { id: crypto.randomUUID(), title, ownerId, organizationId, createdAt: new Date().toISOString() }; rows.push(row); return row; },
+    async list(ownerId, organizationId) { return rows.filter(row => row.ownerId === ownerId && row.organizationId === organizationId); },
   };
   return createApi({ workerUrl: 'http://127.0.0.1:1', records, identity: { key, issuer: 'https://identity.test', audience: 'dx-api' } });
 }
@@ -22,6 +22,29 @@ function setup() {
 test('records require authentication', async () => {
   const app = setup();
   try { expect((await app.inject({ url: '/v1/records' })).statusCode).toBe(401); } finally { await app.close(); }
+});
+
+test('signed organization scope cannot be overridden by request body', async () => {
+  const app = setup();
+  try {
+    const headers = { authorization: `Bearer ${await token()}` };
+    const created = await app.inject({ method: 'POST', url: '/v1/records', headers, payload: { title: 'Scoped', organizationId: 'org-b' } });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ organizationId: 'org-a' });
+    const anotherOrganization = await app.inject({ url: '/v1/records', headers: { authorization: `Bearer ${await token('alice', ['records:read'], 'https://identity.test', 'dx-api', 'org-b')}` } });
+    expect(anotherOrganization.statusCode).toBe(200);
+    expect(anotherOrganization.json().items).toEqual([]);
+  } finally { await app.close(); }
+});
+
+test('a valid token without organization scope is forbidden', async () => {
+  const app = setup();
+  try { expect((await app.inject({ url: '/v1/records', headers: { authorization: `Bearer ${await token('alice', ['records:read'], 'https://identity.test', 'dx-api', null)}` } })).statusCode).toBe(403); } finally { await app.close(); }
+});
+
+test('an expired signed token is rejected', async () => {
+  const app = setup();
+  try { expect((await app.inject({ url: '/v1/records', headers: { authorization: `Bearer ${await token('alice', ['records:read'], 'https://identity.test', 'dx-api', 'org-a', '-1m')}` } })).statusCode).toBe(401); } finally { await app.close(); }
 });
 test.each([
   ['issuer', 'https://wrong.test', 'dx-api'], ['audience', 'https://identity.test', 'other-api'],
