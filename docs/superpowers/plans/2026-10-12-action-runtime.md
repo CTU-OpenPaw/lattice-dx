@@ -21,8 +21,11 @@ No automatic retry or idempotency guarantee for creation; no durable action-run 
 - [x] 5. Write `docs/action-runtime.md` with exact requests/responses, role table, UI and n8n integration instructions, credentials boundary, error handling, duplicate-creation warning and explicit incomplete engine capabilities. Link from phase-one handoff.
 - [x] 6. Run `pnpm check`, both Compose config checks and `git diff --check`. Rebuild core with `pnpm infra:up`, then run `pnpm test:actions`, `pnpm test:infra`, `pnpm test:foundation`. Inspect every result. No repeated scanner-outage test unless scanner behavior changed.
 - [x] 7. Review code locally for permission bypass, schema/validator mismatch, unintended existing-route changes and claims beyond implementation. Record verification in handoff. Commit only task files; preserve `CV.pdf`, `a.png`, `output/`.
-- [ ] 8. Push foundation and action branches. Create or reuse foundation PR into main, and dependent action PR into foundation; attach created PRs to this chat. Do not merge PRs. Explain merge order and remaining team integration.
+- [x] 8. Push foundation and action branches. Create or reuse foundation PR into main, and dependent action PR into foundation; attach created PRs to this chat. Do not merge PRs. Explain merge order and remaining team integration.
 
 ## Acceptance
 
 Two different clients can use the documented interface; real gateway smoke proves both actions write through existing scoped repositories. Unauthorized calls do not invoke actions. CI checks pass. This is the first synchronous action runtime slice, not proof that block graphs, shared SSO or automated workflow already work.
+
+
+Published: foundation PR https://github.com/TrDuy-pan3000/LatticeDX/pull/1; dependent action PR https://github.com/TrDuy-pan3000/LatticeDX/pull/2. Both are open for review, unmerged.
