@@ -21,6 +21,8 @@
     "test:nocobase": "node scripts/smoke-nocobase.mjs",
     "test:foundation": "node scripts/smoke-foundation.mjs",
     "test:actions": "node scripts/smoke-actions.mjs",
+    "workflow:seed-local": "node scripts/seed-workflow-demo.mjs",
+    "test:workflows": "node scripts/smoke-workflows.mjs",
     "test:record-links": "node scripts/smoke-record-links.mjs",
     "nocobase:bridge:install": "node scripts/install-nocobase-bridge.mjs",
     "test:nocobase:bridge": "node scripts/smoke-nocobase-bridge.mjs",

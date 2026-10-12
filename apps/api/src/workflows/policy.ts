@@ -1,0 +1,46 @@
+// SPDX-License-Identifier: Apache-2.0
+import { isRecordId, type WorkflowActor, type WorkflowDefinition, type WorkflowRun, type WorkflowTransition, type WorkflowField, type TransitionCommand, type CreateWorkflow } from '@dx/contracts';
+export class WorkflowError extends Error {
+  constructor(public readonly statusCode:400|403|404|409|503,message:string){super(message);}
+}
+function object(value:unknown):value is Record<string,unknown>{return !!value&&typeof value==='object'&&!Array.isArray(value);}
+function shape(value:unknown,keys:string[]):value is Record<string,unknown>{return object(value)&&Object.keys(value).every(k=>keys.includes(k));}
+function text(value:unknown,max=200):value is string{return typeof value==='string'&&!!value.trim()&&Array.from(value).length<=max;}
+function input(value:unknown):value is Record<string,string>{return object(value)&&Object.values(value).every(v=>text(v,2000));}
+export function parseCreate(value:unknown):CreateWorkflow|undefined {
+  if(!shape(value,['definitionId','title','input'])||!text(value.definitionId,80)||!text(value.title)||!input(value.input))return;
+  return {definitionId:value.definitionId,title:value.title.trim(),input:value.input};
+}
+export function parseCommand(value:unknown):TransitionCommand|undefined {
+  if(!shape(value,['action','expectedVersion','input'])||!text(value.action,80)||!Number.isSafeInteger(value.expectedVersion)||Number(value.expectedVersion)<1||!input(value.input))return;
+  return {action:value.action,expectedVersion:Number(value.expectedVersion),input:value.input};
+}
+export function validateInput(fields:Record<string,WorkflowField>,value:Record<string,string>):Record<string,string>{
+  if(!shape(value,Object.keys(fields))||Object.keys(fields).some(k=>!text(value[k],fields[k]==='text'?2000:100)))throw new WorkflowError(400,'Dữ liệu bước không hợp lệ.');
+  const result:Record<string,string>={};
+  for(const [name,kind] of Object.entries(fields)){
+    if(kind==='file'&&!isRecordId(value[name]))throw new WorkflowError(400,'Dữ liệu tệp phải là UUID.');
+    result[name]=kind==='text'?value[name].trim():value[name];
+  }
+  return result;
+}
+export function canReadRun(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor):boolean {
+  return run.organizationId===actor.organizationId&&(run.ownerId===actor.subject||def.readerRoles.some(r=>actor.roles.includes(r)));
+}
+export function canUseEvidence(file:{ownerId:string;organizationId:string;scanStatus:string},actor:WorkflowActor,links:{definition:WorkflowDefinition;run:WorkflowRun}[]):boolean {
+  return file.organizationId===actor.organizationId&&file.scanStatus==='clean'
+    &&(file.ownerId===actor.subject||links.some(link=>canReadRun(link.definition,link.run,actor)));
+}
+export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRun,actor:WorkflowActor){
+  if(run.organizationId!==actor.organizationId||!actor.roles.includes(transition.role)||(transition.ownerOnly&&actor.subject!==run.ownerId))throw new WorkflowError(403,'Không có quyền thực hiện bước.');
+}
+export function availableTransitions(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor){
+  return def.transitions.filter(t=>t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&actor.organizationId===run.organizationId);
+}
+export function planTransition(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand){
+  const transition=def.transitions.find(t=>t.id===command.action);
+  if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
+  authorizeTransition(transition,run,actor);
+  if(run.state!==transition.from||run.version!==command.expectedVersion)throw new WorkflowError(409,'Trạng thái hoặc phiên bản không phù hợp.');
+  return {transition,input:validateInput(transition.fields,command.input)};
+}
