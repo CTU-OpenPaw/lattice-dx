@@ -23,6 +23,9 @@ This is account linking, not NocoBase SSO: user deliberately authenticates both 
 - [x] 5. Add plugin bind mount and local endpoint env configuration in NocoBase Compose. Provide repeatable install/enable script using NocoBase's CLI. Verify runtime resource routes, default ACL, package discovery and persistence after container recreation.
 - [x] 6. Add real integration smoke: NocoBase login; anonymous/unsupported calls rejected; follow real Keycloak code flow as Alice; callback rejects wrong cookie, valid callback links; run action through NocoBase; caller scope matches Alice; second browser lacks access; disconnect blocks subsequent execution. Use fixture passwords only in server-side local script, never emit credentials/tokens/codes. Test creates data without deleting it.
 - [x] 7. Document routes, Hưng's integration instructions, two-sign-in limitation, connection lifetime, errors, restart behavior, deployment/SSO/idempotency limitations and license provenance. Run full `pnpm check`, runtime smoke, prior action/foundation smoke, Compose and whitespace checks.
-- [ ] 8. Obtain independent security review, resolve important findings, commit/push and create dependent PR against `codex/action-runtime`. Attach PR, do not merge. Record exact tests and remaining integration work.
+- [x] 8. Obtain independent security review, resolve important findings, commit/push and create dependent PR against `codex/action-runtime`. Attach PR, do not merge. Record exact tests and remaining integration work.
 
 Success means an authenticated NocoBase request executes an action under the explicitly linked Keycloak identity without a fixed user credential or Keycloak token in the client. It does not prove reusable UI blocks or complete enterprise SSO.
+
+
+Published PR: https://github.com/TrDuy-pan3000/LatticeDX/pull/3 (dependent on PR #2, open for review, not merged). Verification: 76 tests; real bridge/action/foundation smoke; package persists after container recreation. Independent review found no remaining concrete important issue after fixes.
