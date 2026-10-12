@@ -1,0 +1,22 @@
+{
+  "clientId": "dx-nocobase",
+  "enabled": true,
+  "publicClient": true,
+  "directAccessGrantsEnabled": false,
+  "standardFlowEnabled": true,
+  "implicitFlowEnabled": false,
+  "protocol": "openid-connect",
+  "redirectUris": ["http://localhost:13000/api/dxActions:callback"],
+  "webOrigins": [],
+  "attributes": {"pkce.code.challenge.method": "S256"},
+  "protocolMappers": [
+    {
+      "name": "api-audience", "protocol": "openid-connect", "protocolMapper": "oidc-audience-mapper",
+      "config": {"included.client.audience": "dx-api", "access.token.claim": "true", "id.token.claim": "false"}
+    },
+    {
+      "name": "organization", "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-attribute-mapper",
+      "config": {"user.attribute": "organization_id", "claim.name": "organization_id", "jsonType.label": "String", "access.token.claim": "true", "id.token.claim": "false"}
+    }
+  ]
+}

@@ -19,3 +19,5 @@ Thông tin trên là danh sách nguồn/license cấp project, không phải aud
 Dependencies npm khóa bằng `pnpm-lock.yaml`; container tags ở `infra/compose/core.yml` và `apps/api/Dockerfile`. Trước phát hành: lưu bản license/NOTICE cần thiết, xuất danh sách dependency/SBOM, kiểm tra compatibility từng phiên bản, bổ sung image digest, ghi nguồn dữ liệu/model nếu có. Không đóng gói source upstream đã sửa mà không ghi nhận thay đổi và quyền phân phối.
 
 Build từ nguồn của mã nhóm được mô tả ở README; source/build upstream tham khảo repository của từng thành phần. Container image có sẵn không được coi là thay thế hoàn toàn tài liệu build upstream trong hồ sơ dự thi.
+
+Plugin nhóm `@latticedx/plugin-action-bridge` (12/10/2026): source original Apache-2.0, không sao chép implementation auth upstream; runtime dùng public SDK `@nocobase/server` do host cung cấp. Giữ license nhóm trong package, giữ notices upstream trong host/submodule. Việc import SDK không tự giải quyết nghĩa vụ tương thích/phân phối theo giấy phép upstream; chưa kết luận toàn bộ plugin + host có thể phát hành chỉ dưới Apache-2.0.

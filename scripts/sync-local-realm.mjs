@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 const base='http://localhost:8081';
 const realm=JSON.parse(await readFile(new URL('../infra/config/keycloak/lattice-realm.json',import.meta.url),'utf8'));
+const bridgeClient=JSON.parse(await readFile(new URL('../infra/config/keycloak/nocobase-client.json',import.meta.url),'utf8'));
 const auth=await fetch(`${base}/realms/master/protocol/openid-connect/token`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'password',client_id:'admin-cli',username:'admin',password:'local-admin-password'})});
 if(!auth.ok)throw new Error('Cannot authenticate local fixture admin');
 const {access_token}=await auth.json();
@@ -16,6 +17,9 @@ for(const role of realm.roles.realm)if(!existing.some(r=>r.name===role.name))awa
 const clients=await call('clients?clientId=dx-local');
 const mappers=await call(`clients/${clients[0].id}/protocol-mappers/models`);
 for(const mapper of realm.clients[0].protocolMappers)if(!mappers.some(m=>m.name===mapper.name))await call(`clients/${clients[0].id}/protocol-mappers/models`,'POST',mapper);
+const bridgeClients=await call(`clients?clientId=${bridgeClient.clientId}`);
+if(!bridgeClients.length)await call('clients','POST',bridgeClient);
+else await call(`clients/${bridgeClients[0].id}`,'PUT',{...bridgeClient,id:bridgeClients[0].id});
 for(const fixture of realm.users){
   const users=await call(`users?username=${encodeURIComponent(fixture.username)}&exact=true`);if(users.length!==1)throw new Error('Fixture user missing');
   const user=await call(`users/${users[0].id}`);
@@ -23,4 +27,4 @@ for(const fixture of realm.users){
   const roles=await Promise.all(fixture.realmRoles.map(name=>call(`roles/${encodeURIComponent(name)}`)));
   await call(`users/${user.id}/role-mappings/realm`,'POST',roles);
 }
-console.log('Local fixture roles, organization mapper and attributes synchronized; no user/password/volume deleted.');
+console.log('Local fixture roles, organization mapper, PKCE bridge client and attributes synchronized; no user/password/volume deleted.');

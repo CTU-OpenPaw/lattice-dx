@@ -1,6 +1,6 @@
 # NocoBase plugins
 
-Vị trí dành cho plugin do nhóm phát triển. Chưa có plugin hoặc dependency NocoBase được cài trong bản 0.1.
+Vị trí dành cho plugin do nhóm phát triển. Plugin đầu tiên: [Action Bridge](action-bridge/README.md), server-side account linking và proxy action, đã thử với runtime 2.2.20. Chưa có client block nghiệp vụ của nhóm.
 
 Bản nguồn upstream đã clone riêng tại `upstream/nocobase/` để khảo sát. Xem [ghi nhận nguồn và giấy phép](../../docs/nocobase-source-review.md). Toàn bộ nền tảng NocoBase không phải plugin để đặt vào thư mục này.
 

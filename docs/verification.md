@@ -1,5 +1,14 @@
 # Verification — 2026-10-12
 
+## NocoBase action authentication bridge
+
+- `pnpm check`: 76 tests (18 plugin tests), workspace typecheck/build đạt. Plugin CommonJS kiểm tra syntax riêng bằng node --check; không claim có TypeScript typecheck cho plugin runtime JS.
+- `pnpm test:nocobase:bridge`: auth NocoBase thật → Keycloak code + S256 PKCE → cookie-bound callback → plugin → Gateway/API → record PostgreSQL đúng Alice/org-a. Thiếu cookie, replay, browser khác và disconnect bị chặn.
+- Recreate NocoBase giữ package bằng mount và trạng thái enabled trong DB; smoke metadata/frontend và bridge chạy lại đạt. Không giữ linked token qua restart.
+- `pnpm test:actions` và `pnpm test:foundation` tiếp tục đạt.
+- Review phát hiện capacity của callback đang trao đổi, disconnect hồi sinh session và dọn token hết hạn bằng request. Đã sửa reservation/cancellation, timer tự dọn; test hồi quy đạt.
+- Kết nối tài khoản hai lần đăng nhập, chưa SSO; single-process short-lived session, chưa client block, refresh hoặc production deployment.
+
 ## Action runtime
 
 - `pnpm check`: typecheck, 58 tests (20 action tests) và build đạt. Các test action ban đầu thất bại vì route chưa tồn tại, sau triển khai đạt.
