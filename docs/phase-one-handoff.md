@@ -1,5 +1,7 @@
 # Giai đoạn 1 — hợp đồng nền
 
+Hợp đồng engine đầu tiên (12/10): [Action runtime — bàn giao Hưng/Nhi](action-runtime.md). Catalog và hai action tạo record/task; còn giới hạn idempotency, SSO và graph execution được ghi rõ trong tài liệu.
+
 ## Phân chia
 
 - Duy: identity, Gateway, runtime, API và chính sách truy cập.
