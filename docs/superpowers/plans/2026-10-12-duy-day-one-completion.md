@@ -28,9 +28,13 @@ Branch: `codex/phase-one-handoff-complete`, created from `origin/main`. PR #2 wa
 - [x] 4. Define logistics fixture/model/state/role contract in solutions/logistics with Apache notices and README. Write tests for valid relationships, missing references, mixed organization, duplicate IDs and unknown states. Keep shipping-specific config separate from core packages.
 - [x] 5. Add a real smoke script that creates a record, linked task and linked clean file via authenticated Gateway, checks metadata/list/download/decision and cross-scope denial. No token/password output, no shared-data deletion. Re-run baseline foundation/actions/bridge smoke and scanner outage when available.
 - [x] 6. Write an integration handoff with exact payloads, schema/model links, current vs planned roles, UC1/logistics states, startup/health and test commands. Update root phase-one handoff and verification with actual outcomes. Record remaining limitations.
-- [ ] 7. Independent review, resolve important findings, verify build/typecheck/tests, Compose and whitespace. Commit/push and create a single PR into main that includes recovered action/bridge history plus today's additions. Attach it; no release or automatic merge.
-- [ ] 8. Update only the two remaining Duy phase-one checkboxes after verification/review; add concise evidence and PR links, explicitly leave group integration/other people's tasks and overall phase acceptance unchecked. Mark this plan complete and report outcomes.
+- [x] 7. Independent review, resolve important findings, verify build/typecheck/tests, Compose and whitespace. Commit/push and create a single PR into main that includes recovered action/bridge history plus today's additions. Attach it; no release or automatic merge.
+- [x] 8. Update only the two remaining Duy phase-one checkboxes after verification/review; add concise evidence and PR links, explicitly leave group integration/other people's tasks and overall phase acceptance unchecked. Mark this plan complete and report outcomes.
 
 ## Acceptance
 
 Task/file endpoints, optional links and actual quarantine behavior pass real runtime tests. Hưng/Nhi can use checked examples and a consistent logistics contract without guessing scope or states. All Duy phase-one deliverables are evidenced; the group UI/broker/complete logistics workflow remain separate work. A new PR directly into main repairs the missing stacked merges.
+
+## Result
+
+PR: https://github.com/TrDuy-pan3000/LatticeDX/pull/4 (base main, awaiting merge). All eight steps completed. pnpm check passed with 96 tests; runtime smoke and independent review passed. Two Duy checkboxes updated in the existing Notion hub (5 checked of 96 total); other owners and phase acceptance unchanged. Docker restart recovery also verified; reboot/logon and upstream bug resolution remain unverified.
