@@ -73,6 +73,8 @@ importers:
 
   packages/contracts: {}
 
+  plugins/nocobase/action-bridge: {}
+
 packages:
 
   '@emnapi/runtime@1.11.3':

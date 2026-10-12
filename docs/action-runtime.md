@@ -2,6 +2,8 @@
 
 Ngày 12/10/2026. Đây là lát đầu của engine: catalog các action phía server và thực thi đồng bộ có kiểm tra quyền. Chưa có graph nối block, lịch chạy, journal action hoặc workflow tổng quát.
 
+Đường xác thực cho block đã bổ sung ở [NocoBase action bridge](nocobase-action-auth.md): kết nối Keycloak bằng code + PKCE và proxy qua plugin server, chưa phải SSO.
+
 ## Chạy và kiểm chứng
 
 ```powershell
@@ -100,7 +102,7 @@ Lỗi dự kiến của API có `{error:string}`; Gateway/framework có thể c�
 1. Qua adapter phía server/BFF đã có identity hợp lệ, đọc catalog và chọn action.
 2. Dựng form theo inputSchema, lưu `actionId`, `version` và mapping input trong cấu hình block.
 3. Khi nhấn nút, gọi action, chặn bấm lặp khi đang chờ, hiển thị result/lỗi.
-4. Không nhúng password Alice/admin vào browser. NocoBase login và Keycloak vẫn riêng; chưa có SSO, CORS hoặc BFF tự chuyển danh tính. Phải triển khai adapter auth hợp lệ trước khi tuyên bố người dùng NocoBase gọi action đúng danh tính.
+4. Không nhúng password Alice/admin vào browser. Dùng plugin server bridge theo [hướng dẫn xác thực](nocobase-action-auth.md). NocoBase login và Keycloak vẫn riêng; plugin chuyển tiếp token của tài khoản đã kết nối rõ ràng, chưa phải SSO.
 
 ## Nhi: connector n8n
 
