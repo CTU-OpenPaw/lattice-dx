@@ -18,6 +18,10 @@ export async function connectRecords(connectionString: string) {
     return { ...row, createdAt: new Date(row.createdAt).toISOString() };
   }
   const repository: RecordRepository = {
+    async find(id, ownerId, organizationId) {
+      const result = await pool.query(`SELECT ${columns} FROM records WHERE id::text=$1 AND owner_id=$2 AND organization_id=$3`, [id.toLowerCase(), ownerId, organizationId]);
+      return result.rows[0] ? serialize(result.rows[0]) : undefined;
+    },
     async create(title, ownerId, organizationId) {
       const result = await pool.query(`INSERT INTO records(id, title, owner_id, organization_id) VALUES ($1, $2, $3, $4) RETURNING ${columns}`, [crypto.randomUUID(), title, ownerId, organizationId]);
       return serialize(result.rows[0]);

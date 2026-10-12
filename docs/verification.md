@@ -21,7 +21,29 @@
 
 ---
 
-# Verification — 2026-10-11
+# Verification — 2026-10-12
+
+## Duy — bàn giao nền hôm nay
+
+- `pnpm check`: typecheck cả logistics contract, **96 tests / 9 files** và build đạt. Test liên kết chạy đỏ trước khi hiện thực; ca lookup outage chạy đỏ rồi sửa trả 503.
+- `pnpm test:infra`, `test:foundation`, `test:actions`, `test:record-links`, `test:nocobase`, `test:nocobase:bridge` đều đạt trên container thật. Liên kết task/file/action lưu PostgreSQL, decision giữ recordId, metadata/download và ClamAV clean/rejected đạt. Request không có recordId vẫn dùng được qua smoke cũ.
+- Unit tests với token RSA thật kiểm tra người khác cùng đơn vị và cùng subject khác đơn vị đều không được liên kết; không ghi dữ liệu hoặc scan khi bị từ chối. Real smoke kiểm tra role denial, missing record, UUID sai; chưa kiểm tra cùng-role cross-scope bằng realm fixture hiện tại.
+- `pnpm test:scanner-outage`: scanner thật bị dừng → upload error quarantine → download 409; scanner khởi động lại và healthy.
+- Compose core/NocoBase parse hợp lệ; `git diff --check` đạt. Không thêm dependency/runtime version hoặc release.
+- Logistics fixture/model/state/role ở `solutions/logistics`; kiểm tra local references, duplicate IDs, organization và state. Chưa provision roles/collections hoặc thực thi workflow logistics.
+- Review độc lập: lỗi important về Docker context đã sửa; launcher probe và local:up nhắm desktop-linux rõ ràng. Kiểm tra với DOCKER_CONTEXT không tồn tại vẫn nhận đúng Engine local. Không có finding important ở API.
+
+Tài liệu: [API/payload/giới hạn](phase-one-integration-handoff.md), [logistics](../solutions/logistics/README.md), [Docker recovery](docker-desktop-recovery.md). Hai task Duy còn lại là bàn giao backend; UI, broker/n8n/agent, workflow đa bước và nghiệm thu cả nhóm vẫn chưa hoàn thành.
+
+## Docker — lỗi tái diễn và đường khởi động
+
+Lỗi dockerInference tái hiện sau orderly stop. Hai vòng restart đã phục hồi qua archive runtime socket và Engine 29.2.1 sẵn sàng; bốn volume lattice-dx giữ nguyên. Launcher đã cài cho shortcut Desktop và HKCU Run của máy Duy, có backup bản gốc. Chưa thử Windows reboot/logon; chưa xác nhận lỗi upstream hết. Xem runbook để dùng pnpm docker:start/stop/restart thay đường restart trong tray.
+
+Sau sửa context/guard, thêm một vòng pnpm docker:restart và pnpm local:up đạt. Trước/sau restart: 14 records, 14 tasks, 17 files; 2 task links và 1 file link giữ nguyên. Đây là kiểm tra số lượng/liên kết, không thay thế backup/restore hay đối chiếu toàn nội dung.
+
+---
+
+# Kết quả — 2026-10-11
 
 ## Giai đoạn 1 — kiểm chứng thực tế
 
@@ -50,7 +72,7 @@ Lỗi tương tự được báo ở https://github.com/docker/desktop-feedback/
 
 ## Giới hạn còn lại
 
-API task nền chưa liên kết UC1/recordId, directory assignee, outbox hoặc workflow đa bước. Tệp tối đa 1 MiB trong PostgreSQL bytea, chưa object storage hay quét lại nền. UI/plugin của Hưng và broker/n8n/agent của Nhi chưa tích hợp. Chưa nghiệm thu toàn bộ giai đoạn 1; chưa kiểm toán đủ license upstream/dependency và chưa đạt chứng nhận an toàn nào.
+Tại mốc 11/10 API task nền chưa liên kết UC1/recordId; recordId đã bổ sung ngày 12/10. Directory assignee, outbox và workflow đa bước vẫn chưa có. Tệp tối đa 1 MiB trong PostgreSQL bytea, chưa object storage hay quét lại nền. UI/plugin của Hưng và broker/n8n/agent của Nhi chưa tích hợp. Chưa nghiệm thu toàn bộ giai đoạn 1; chưa kiểm toán đủ license upstream/dependency và chưa đạt chứng nhận an toàn nào.
 
 ---
 

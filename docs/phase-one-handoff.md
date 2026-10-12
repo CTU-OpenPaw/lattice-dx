@@ -1,5 +1,7 @@
 # Giai đoạn 1 — hợp đồng nền
 
+Cập nhật 12/10: [bàn giao task/tệp, recordId và logistics](phase-one-integration-handoff.md). Task/tệp liên kết được bản ghi đúng scope; hợp đồng logistics vẫn là cấu hình/fixture, chưa triển khai workflow.
+
 Hợp đồng engine đầu tiên (12/10): [Action runtime — bàn giao Hưng/Nhi](action-runtime.md). Catalog và hai action tạo record/task; còn giới hạn idempotency, SSO và graph execution được ghi rõ trong tài liệu.
 
 Đường kết nối tài khoản NocoBase → Keycloak và proxy action: [hướng dẫn plugin bridge](nocobase-action-auth.md). Đã có server plugin, chưa có client block/SSO.
@@ -40,7 +42,7 @@ Role `files:write` upload; `files:read` đọc metadata/nội dung tệp của m
 - GET `/v1/files/:id`: metadata, không trả nội dung.
 - GET `/v1/files/:id/content`: attachment/octet-stream chỉ khi clean và đúng scope. Khác scope trả 404; pending/rejected/error trả 409.
 
-Scanner TCP nội bộ timeout 15 giây; chưa cấu hình hoặc lỗi trả error, không cấp quyền tải. Upload chờ scan; tiến trình ngắt giữ pending và chặn tải. Chưa có worker quét lại, có thể upload lại. Tệp dùng PostgreSQL bytea ở bootstrap, **chưa phải object storage/lakehouse**, chưa có API gắn tệp vào hồ sơ. Khi đưa S3/MinIO vào, giữ hợp đồng metadata/quyền và thay adapter nội dung. Scan clean không là chứng nhận tệp tuyệt đối an toàn.
+Scanner TCP nội bộ timeout 15 giây; chưa cấu hình hoặc lỗi trả error, không cấp quyền tải. Upload chờ scan; tiến trình ngắt giữ pending và chặn tải. Chưa có worker quét lại, có thể upload lại. Tệp dùng PostgreSQL bytea ở bootstrap, **chưa phải object storage/lakehouse**; thêm recordId tùy chọn để gắn tệp vào bản ghi đúng scope. Khi đưa S3/MinIO vào, giữ hợp đồng metadata/quyền và thay adapter nội dung. Scan clean không là chứng nhận tệp tuyệt đối an toàn.
 
 `pnpm identity:sync-local` đồng bộ mapper/thuộc tính/role fixture local, không xóa user/mật khẩu/volume. Alice có role trên; bob có read/decide nhưng khác đơn vị. `pnpm test:foundation` kiểm tra task, quyết định đồng thời và ClamAV thật.
 
@@ -48,7 +50,7 @@ Scanner TCP nội bộ timeout 15 giây; chưa cấu hình hoặc lỗi trả er
 
 Trạng thái: `draft → submitted → approved → received → accepted → handed_over`; `submitted → rejected`. Từ chối cần lý do. Nhân viên tạo/gửi hồ sơ của mình; quản lý trong đơn vị duyệt; người được phân công nhận/nghiệm thu/bàn giao. Server kiểm tra quyền/version, ghi audit và chống thao tác lặp.
 
-Task engine nền chưa liên kết recordId hoặc đổi trạng thái hồ sơ UC1. UC1 cần association, audit vòng đời và workflow nghiệp vụ. Chưa kiểm tra assignee thuộc đơn vị trong directory; endpoint assign chỉ cho principal đáng tin, task khác scope không thể xử lý. Trước production cần directory check và chống tạo task lặp.
+Task engine nền đã liên kết recordId tùy chọn nhưng chưa đổi trạng thái hồ sơ UC1. UC1 cần audit vòng đời và workflow nghiệp vụ. Chưa kiểm tra assignee thuộc đơn vị trong directory; endpoint assign chỉ cho principal đáng tin, task khác scope không thể xử lý. Trước production cần directory check và chống tạo task lặp.
 
 Sự kiện bàn giao dự kiến: `{eventId,eventType:"asset.handed_over",organizationId,assetId,occurredAt,sourceId,version}`. Nhi ánh xạ assetId→URN; broker không là bước commit giao dịch. Cần job/outbox trước khi xác nhận retry/dedupe hoạt động.
 
