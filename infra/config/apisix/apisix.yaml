@@ -8,7 +8,7 @@ routes:
       nodes:
         "api:4000": 1
   - id: records
-    uris: [/v1/records, /v1/tasks, /v1/tasks/*, /v1/files, /v1/files/*]
+    uris: [/v1/records, /v1/tasks, /v1/tasks/*, /v1/files, /v1/files/*, /v1/actions, /v1/actions/*]
     methods: [GET, POST]
     plugins:
       openid-connect:

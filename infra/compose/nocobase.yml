@@ -27,8 +27,13 @@ services:
       DB_USER: nocobase
       DB_PASSWORD: local-nocobase-password
       TZ: Asia/Ho_Chi_Minh
+      DX_BRIDGE_ISSUER: http://localhost:8081/realms/lattice
+      DX_BRIDGE_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
+      DX_BRIDGE_GATEWAY_URL: http://gateway:9080
+      DX_BRIDGE_CALLBACK_URL: http://localhost:13000/api/dxActions:callback
     volumes:
       - nocobase-storage:/app/nocobase/storage
+      - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
     ports:
       - "127.0.0.1:13000:80"
     depends_on:

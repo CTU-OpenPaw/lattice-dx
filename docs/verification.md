@@ -1,3 +1,26 @@
+# Verification — 2026-10-12
+
+## NocoBase action authentication bridge
+
+- `pnpm check`: 76 tests (18 plugin tests), workspace typecheck/build đạt. Plugin CommonJS kiểm tra syntax riêng bằng node --check; không claim có TypeScript typecheck cho plugin runtime JS.
+- `pnpm test:nocobase:bridge`: auth NocoBase thật → Keycloak code + S256 PKCE → cookie-bound callback → plugin → Gateway/API → record PostgreSQL đúng Alice/org-a. Thiếu cookie, replay, browser khác và disconnect bị chặn.
+- Recreate NocoBase giữ package bằng mount và trạng thái enabled trong DB; smoke metadata/frontend và bridge chạy lại đạt. Không giữ linked token qua restart.
+- `pnpm test:actions` và `pnpm test:foundation` tiếp tục đạt.
+- Review phát hiện capacity của callback đang trao đổi, disconnect hồi sinh session và dọn token hết hạn bằng request. Đã sửa reservation/cancellation, timer tự dọn; test hồi quy đạt.
+- Kết nối tài khoản hai lần đăng nhập, chưa SSO; single-process short-lived session, chưa client block, refresh hoặc production deployment.
+
+## Action runtime
+
+- `pnpm check`: typecheck, 58 tests (20 action tests) và build đạt. Các test action ban đầu thất bại vì route chưa tồn tại, sau triển khai đạt.
+- `pnpm test:actions`: gọi qua Keycloak/APISIX, catalog theo quyền, chặn role/scope giả và tạo record/task thật trong PostgreSQL; scope khác không đọc được dữ liệu đã tạo.
+- `pnpm test:infra` và `pnpm test:foundation`: các luồng cũ tiếp tục đạt, gồm quyết định đồng thời và ClamAV thật.
+- Compose core/NocoBase config, script syntax và git diff whitespace check đạt.
+- Reviewer phát hiện schema maxLength và validator UTF-16 không khớp. Action parsers chuyển sang Unicode code points; thêm test biên 200/201 title và 100/101 assignee; reviewer xác nhận không còn finding trong phạm vi review. REST cũ giữ hành vi.
+- Docker Desktop gặp lại socket runtime cũ sau khởi động; giữ bản sao hai thư mục runtime và tái tạo đường kết nối, không xóa ổ/volume. Engine 29.2.1 chạy lại, core được rebuild và smoke đạt. Chưa sửa nguyên nhân dài hạn của lỗi Docker.
+- Catalog/execute là action runtime đồng bộ đầu tiên; không phải graph engine, workflow hoàn chỉnh, idempotency hoặc SSO NocoBase. Xem `action-runtime.md`.
+
+---
+
 # Verification — 2026-10-11
 
 ## Giai đoạn 1 — kiểm chứng thực tế

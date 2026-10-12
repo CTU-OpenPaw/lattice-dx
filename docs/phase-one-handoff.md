@@ -1,5 +1,9 @@
 # Giai đoạn 1 — hợp đồng nền
 
+Hợp đồng engine đầu tiên (12/10): [Action runtime — bàn giao Hưng/Nhi](action-runtime.md). Catalog và hai action tạo record/task; còn giới hạn idempotency, SSO và graph execution được ghi rõ trong tài liệu.
+
+Đường kết nối tài khoản NocoBase → Keycloak và proxy action: [hướng dẫn plugin bridge](nocobase-action-auth.md). Đã có server plugin, chưa có client block/SSO.
+
 ## Phân chia
 
 - Duy: identity, Gateway, runtime, API và chính sách truy cập.

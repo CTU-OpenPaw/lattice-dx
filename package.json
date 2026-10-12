@@ -16,6 +16,9 @@
     "nocobase:logs": "docker compose -f infra/compose/nocobase.yml logs --tail 100",
     "test:nocobase": "node scripts/smoke-nocobase.mjs",
     "test:foundation": "node scripts/smoke-foundation.mjs",
+    "test:actions": "node scripts/smoke-actions.mjs",
+    "nocobase:bridge:install": "node scripts/install-nocobase-bridge.mjs",
+    "test:nocobase:bridge": "node scripts/smoke-nocobase-bridge.mjs",
     "test:scanner-outage": "node scripts/smoke-scanner-outage.mjs",
     "identity:sync-local": "node scripts/sync-local-realm.mjs",
     "test:infra": "node scripts/smoke-core.mjs"

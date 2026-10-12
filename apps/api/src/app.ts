@@ -4,10 +4,12 @@ import { isDemoResult, parseDemoRequest } from '@dx/contracts';
 import { verifyIdentity, type IdentityConfig } from './identity.js';
 import type { RecordRepository } from './records.js';
 import { registerFoundation, type FoundationOptions } from './foundation.js';
+import { registerActions } from './actions.js';
 export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions) {
   const app = Fastify({ bodyLimit: 16_384 });
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
   registerFoundation(app,options);
+  registerActions(app,options);
   app.route({
     method: ['GET', 'POST'], url: '/v1/records',
     handler: async (request, reply) => {
