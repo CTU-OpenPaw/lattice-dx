@@ -11,6 +11,13 @@
     "infra:up": "docker compose -f infra/compose/core.yml up -d --build",
     "infra:down": "docker compose -f infra/compose/core.yml down",
     "infra:logs": "docker compose -f infra/compose/core.yml logs --tail 100",
+    "nocobase:up": "docker compose -f infra/compose/nocobase.yml up -d",
+    "nocobase:down": "docker compose -f infra/compose/nocobase.yml down",
+    "nocobase:logs": "docker compose -f infra/compose/nocobase.yml logs --tail 100",
+    "test:nocobase": "node scripts/smoke-nocobase.mjs",
+    "test:foundation": "node scripts/smoke-foundation.mjs",
+    "test:scanner-outage": "node scripts/smoke-scanner-outage.mjs",
+    "identity:sync-local": "node scripts/sync-local-realm.mjs",
     "test:infra": "node scripts/smoke-core.mjs"
   },
   "devDependencies": { "typescript": "7.0.2", "tsx": "4.23.15", "vitest": "5.0.3", "@types/node": "26.6.4" },

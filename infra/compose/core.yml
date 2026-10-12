@@ -47,6 +47,7 @@ services:
       OIDC_ISSUER: http://localhost:8081/realms/lattice
       OIDC_JWKS_URL: http://keycloak:8080/realms/lattice/protocol/openid-connect/certs
       OIDC_AUDIENCE: dx-api
+      CLAMD_HOST: clamav
     depends_on:
       postgres:
         condition: service_healthy
@@ -69,5 +70,18 @@ services:
       keycloak:
         condition: service_started
 
+  clamav:
+    image: clamav/clamav:1.4.3@sha256:75fb5fd95fcbe1d7e6d240c369c1572b686ee2c95949d1042b5148de8eddebb4
+    volumes:
+      - clamav-signatures:/var/lib/clamav
+    # Internal only: clamd is not an authenticated public API.
+    healthcheck:
+      test: ["CMD-SHELL", "clamdcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
 volumes:
   postgres-data:
+  clamav-signatures:

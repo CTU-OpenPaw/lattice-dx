@@ -29,6 +29,7 @@ const headers = { authorization: `Bearer ${alice}`, 'content-type': 'application
 const created = await fetch(`${gateway}/v1/records`, { method: 'POST', headers, body: JSON.stringify({ title: `Smoke ${new Date().toISOString()}` }) });
 assert.equal(created.status, 201, 'Writer must create a persisted record');
 const record = await created.json();
+assert.equal(record.organizationId, 'org-a', 'Organization must come from signed Keycloak claims');
 const own = await fetch(`${gateway}/v1/records`, { headers });
 assert.equal(own.status, 200);
 assert.ok((await own.json()).items.some(item => item.id === record.id), 'Record must be queryable');
@@ -36,4 +37,4 @@ const other = await fetch(`${gateway}/v1/records`, { headers: { authorization: `
 assert.equal(other.status, 200);
 assert.ok(!(await other.json()).items.some(item => item.id === record.id), 'Other user cannot read this record');
 assert.equal((await fetch(`${gateway}/v1/records`, { method: 'POST', headers: { authorization: `Bearer ${bob}`, 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Denied' }) })).status, 403);
-console.log('Core smoke passed: Keycloak → APISIX → API → PostgreSQL; role and owner checks passed.');
+console.log('Core smoke passed: Keycloak → APISIX → API → PostgreSQL; role, owner and organization checks passed.');

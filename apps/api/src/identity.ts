@@ -10,5 +10,7 @@ export async function verifyIdentity(header: string | undefined, config: Identit
   const access = payload.realm_access;
   const roles = access && typeof access === 'object' && 'roles' in access && Array.isArray(access.roles)
     ? access.roles.filter((role): role is string => typeof role === 'string') : [];
-  return { subject: payload.sub, roles };
+  const organizationId = typeof payload.organization_id === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(payload.organization_id)
+    ? payload.organization_id : undefined;
+  return { subject: payload.sub, roles, organizationId };
 }

@@ -1,6 +1,6 @@
 # Nguồn và giấy phép
 
-Mã gốc LatticeDX dùng Apache-2.0, toàn văn ở root `LICENSE`. Giấy phép đó không thay giấy phép dependency. Bản upstream NocoBase nằm ngoài release và được loại khỏi Git, Docker build context và phạm vi Vitest.
+Mã gốc LatticeDX dùng Apache-2.0, toàn văn ở root `LICENSE`. Giấy phép đó không thay giấy phép dependency. Source NocoBase được tham chiếu bằng submodule và không sao chép vào Docker build của API hoặc phạm vi Vitest. Runtime riêng dùng image upstream; kiểm tra nguồn/license ở `nocobase-source-review.md`.
 
 | Thành phần trực tiếp | Nguồn / license |
 | --- | --- |
@@ -11,6 +11,8 @@ Mã gốc LatticeDX dùng Apache-2.0, toàn văn ở root `LICENSE`. Giấy phé
 | Keycloak | https://github.com/keycloak/keycloak — Apache-2.0 |
 | APISIX | https://github.com/apache/apisix — Apache-2.0 |
 | PostgreSQL | https://www.postgresql.org/about/licence/ — PostgreSQL License |
+| NocoBase runtime 2.2.20 | https://github.com/nocobase/nocobase — điều khoản upstream riêng, chưa xác nhận Apache-2.0 thuần; giữ nguyên notices |
+| ClamAV 1.4.3 | https://github.com/Cisco-Talos/clamav — GPL-2.0; chạy dịch vụ độc lập, không sao chép implementation vào API |
 
 Thông tin trên là danh sách nguồn/license cấp project, không phải audit toàn bộ bản phân phối. Node, pnpm, TypeScript, Vitest, tsx, typings và dependency gián tiếp giữ thông báo riêng trong package. Linux image có thêm package hệ thống với license riêng.
 

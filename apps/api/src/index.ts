@@ -2,13 +2,15 @@
 import { createApi } from './app.js';
 import { createRemoteJWKSet } from 'jose';
 import { connectRecords } from './database.js';
+import { scanWithClamd } from './scanner.js';
 const database = process.env.DATABASE_URL ? await connectRecords(process.env.DATABASE_URL) : undefined;
 const identity = process.env.OIDC_ISSUER && process.env.OIDC_JWKS_URL ? {
   issuer: process.env.OIDC_ISSUER,
   audience: process.env.OIDC_AUDIENCE ?? 'dx-api',
   key: createRemoteJWKSet(new URL(process.env.OIDC_JWKS_URL)),
 } : undefined;
-const app = createApi({ workerUrl: process.env.WORKER_URL ?? 'http://127.0.0.1:4001', identity, records: database?.repository });
+const app = createApi({ workerUrl: process.env.WORKER_URL ?? 'http://127.0.0.1:4001', identity, records: database?.repository,foundation:database?.foundation,
+  scan:process.env.CLAMD_HOST ? content=>scanWithClamd(content,process.env.CLAMD_HOST!,Number(process.env.CLAMD_PORT??3310)):undefined });
 if (database) app.addHook('onClose', () => database.close());
 await app.listen({ host: process.env.API_HOST ?? '127.0.0.1', port: Number(process.env.API_PORT ?? 4000) });
 console.log(`API listening on port ${process.env.API_PORT ?? 4000}`);

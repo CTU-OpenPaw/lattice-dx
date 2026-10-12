@@ -2,9 +2,9 @@
 
 ## Phạm vi
 
-Keycloak cấp access token; APISIX kiểm tra bearer token và định tuyến; API kiểm tra lại chữ ký RS256, issuer, audience, subject, thời hạn và role. PostgreSQL lưu hồ sơ theo chủ sở hữu lấy từ token. Client không được chọn owner.
+Keycloak cấp access token; APISIX kiểm tra bearer token và định tuyến; API kiểm tra lại chữ ký RS256, issuer, audience, subject, thời hạn và role. PostgreSQL giới hạn hồ sơ theo chủ sở hữu và đơn vị `organization_id` lấy từ token đã ký. Client không được chọn owner hoặc đơn vị.
 
-Đây là bản phát triển local. Chưa có SSO trong web, multi-tenancy, refresh/session UI, workflow, tệp hoặc agent thật. Role cấp quyền hành động; owner filter giới hạn dữ liệu. Không tuyên bố hoàn tất Zero-Trust/GitOps.
+Đây là bản phát triển local. Chưa có SSO trong web/NocoBase, refresh/session UI, workflow UC1 đầy đủ hoặc agent thật. API hồ sơ có scope đơn vị, chưa phải multi-tenancy đầy đủ của toàn nền tảng. Role cấp quyền hành động; owner + organization filter giới hạn dữ liệu. Không tuyên bố hoàn tất Zero-Trust/GitOps.
 
 ## Chạy
 
@@ -37,7 +37,9 @@ Database và gateway cũng dùng credential fixture trong Compose/config. Khi t�
 
 - `GET /health`: tình trạng tiến trình API; không là readiness đầy đủ của tất cả dịch vụ.
 - `POST /v1/records`: JSON `{ "title": "Hồ sơ mẫu" }`, cần role records:write.
-- `GET /v1/records`: cần records:read; trả tối đa 100 hồ sơ gần nhất của subject hiện tại.
+- `GET /v1/records`: cần records:read; trả tối đa 100 hồ sơ gần nhất của subject và đơn vị hiện tại.
+
+Token thiếu `organization_id` trả 403. Fixture alice thuộc `org-a`, bob thuộc `org-b`. Realm có sẵn cần thêm mapper/thuộc tính theo [hợp đồng nền](phase-one-handoff.md); không xóa dữ liệu cũ. Hồ sơ trước migration thiếu đơn vị được giữ nhưng không hiển thị cho đến khi quản trị gán scope có kiểm chứng.
 
 Gọi API thông qua gateway ở http://localhost:8080. Keycloak issuer phải là `http://localhost:8081/realms/lattice` và audience phải có `dx-api`. Không thay `localhost` thành IP khác trong cấu hình issuer nếu không đồng thời sửa realm/client và runtime.
 
