@@ -1,10 +1,12 @@
 # LatticeDX · PMNM 2026
 
-Bộ khung nền tảng chuyển đổi số của nhóm, tên repo dự kiến `lattice-dx`. Có cổng web, API và agent worker độc lập; core local gồm Keycloak, APISIX, PostgreSQL và ClamAV. Có runtime NocoBase riêng, API task/quyết định và lưu/quét tệp nhỏ. NGSI-LD, workflow UC1 đầy đủ và mô hình AI chưa được tích hợp.
+Bộ khung nền tảng chuyển đổi số LatticeDX. Có cổng web, API và agent worker độc lập; core local gồm Keycloak, APISIX, PostgreSQL và ClamAV. Có runtime NocoBase, action catalog/runtime, plugin server kết nối Keycloak bằng PKCE, API task/quyết định và lưu/quét tệp nhỏ. NGSI-LD, workflow UC1 đầy đủ và mô hình AI chưa được tích hợp.
 
 ## Chạy core bằng Docker
 
 Yêu cầu Docker Engine với Linux containers và Docker Compose. Từ root repo:
+
+Trên Windows máy Duy, dùng `pnpm local:up` để khởi động Docker có phục hồi lỗi socket rồi chạy core/NocoBase. Dừng/khởi động lại Desktop bằng `pnpm docker:stop` / `pnpm docker:restart`; xem [cách phục hồi Docker](docs/docker-desktop-recovery.md).
 
 ```sh
 pnpm infra:up
@@ -72,4 +74,4 @@ Thêm server độc lập vào `apps/`, thư viện tái sử dụng vào `packa
 
 ## Giấy phép
 
-Mã gốc của nhóm trong repo này dùng Apache-2.0; xem `LICENSE`. Dependency giữ giấy phép riêng. Phiên bản được khóa trong `pnpm-lock.yaml`; chưa thực hiện kiểm toán giấy phép toàn bộ cây dependency. NocoBase được tham chiếu bằng Git submodule trong `upstream/nocobase/`, giữ nguyên giấy phép của upstream và chưa cài dependencies hoặc tích hợp runtime. Checkout này có các điều khoản bổ sung và thông báo giấy phép khác nhau; chưa xác nhận đủ điều kiện dự thi. Xem [ghi nhận nguồn và giấy phép](docs/nocobase-source-review.md).
+Mã gốc của nhóm trong repo này dùng Apache-2.0; xem `LICENSE`. Dependency giữ giấy phép riêng. Phiên bản khóa trong `pnpm-lock.yaml`; chưa kiểm toán giấy phép toàn bộ dependency. NocoBase source giữ nguyên trong submodule `upstream/nocobase/`; runtime 2.2.20 chạy riêng và có plugin server nhóm. Checkout có điều khoản bổ sung và thông báo giấy phép khác nhau; chưa xác nhận đủ điều kiện dự thi. Plugin dùng SDK upstream không tự giải quyết nghĩa vụ phân phối của SDK/host. Xem [ghi nhận nguồn và giấy phép](docs/nocobase-source-review.md).
