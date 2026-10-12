@@ -79,9 +79,11 @@ Files: docs/workflow-runtime.md, docs/verification.md, README.md, this plan. Exi
 - [x] Document schema, roles/accounts, API payloads, group queues, input constraints, idempotency, audit, connector credentials/event contract, retry commands, limits and bootstrap references.
 - [x] Run `pnpm check`, Compose config and `git diff --check`; record actual results.
 - [x] Independent review of policy/SQL/worker; fix important findings and rerun affected checks.
-- [ ] Commit/push, PR directly main, attach PR, verify CI. No merge/release.
+- [x] Commit/push, PR directly main, attach PR, verify CI. No merge/release.
 - [x] Reconcile each of six Duy tasks with evidence in the PR/docs. Leave all Notion checkboxes unchanged per the latest user instruction; real broker/UI-dependent acceptance remains pending.
 
 ## Execution evidence
 
 Implementation and review completed locally: pnpm check passes 120 tests/12 files, baseline container smoke passes, workflow REST/real SQL controlled-receiver smoke passes, and workflow/audit/outbox hashes persist across PostgreSQL/API restart. See docs/verification.md and docs/workflow-runtime.md for limitations and local stack recovery. Two important review findings fixed and reviewed again. No Notion checkbox was changed. Implementation was committed together after acceptance rather than as individual partial feature commits.
+
+PR: https://github.com/TrDuy-pan3000/LatticeDX/pull/5 (open, attached). Push and PR CI checks passed for implementation commit 820b1df. CodeRabbit reported review rate limited, so its status is not treated as a completed review; the independent implementation review above is the review evidence. No merge, release or Notion edits.
