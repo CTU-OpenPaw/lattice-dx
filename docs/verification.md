@@ -1,5 +1,18 @@
 # Verification — 2026-10-12
 
+## Duy — backend workflow giai đoạn 2
+
+- `pnpm check`: typecheck, **120 tests / 12 files** và build đạt. Policy/routes/manual retry/shared evidence đã có lượt test đỏ trước triển khai hoặc sửa; không thêm dependency.
+- `pnpm test:infra`, `test:foundation`, `test:actions`, `test:record-links`, `test:nocobase`, `test:nocobase:bridge` chạy lại đạt sau bổ sung workflow/claim đơn vị. Task/action/file cũ tiếp tục hoạt động, NocoBase vẫn kết nối PKCE và giữ token ở server plugin.
+- Smoke workflow đã chạy thật hai cấu hình procurement/onboarding qua Keycloak → APISIX → API → PostgreSQL. Kiểm tra version/quyền, tạo/chuyển bước lặp, hai quyết định đồng thời, lý do từ chối, tham chiếu người nhận/đơn vị/vị trí, tệp clean/rejected và participant sharing. Kết quả worker dùng schema SQL riêng và receiver HTTP local: hai delivery cùng eventId, một xử lý hiệu lực; lease/fencing/retry và production job isolation đạt. Chưa gọi broker NGSI-LD/n8n thật.
+- Lượt cuối `pnpm test:workflows` đạt, exit 0 sau phục hồi stack: procurement `d73231d2-5284-4a46-b6ab-afcb471889b9`, rejected `0e77148f-68b0-4ade-ba97-6a8340ed4808`, onboarding `d81c3c06-e53b-4f50-bc5a-9719478e1aaf`; controlled receiver event `495f7267-50d3-48e9-9210-340011c64b5f`. Manual retry replay không reset lại attempt budget; key mới reset đúng job failed.
+- Lượt baseline đầu lúc tiếp tục bị connection refused vì Docker Engine chưa chạy. `pnpm local:up` phục hồi socket runtime cũ và rebuild/up thành công; không đổi dữ liệu Docker. Lượt smoke workflow chạy sát toàn bộ baseline gặp HTTP 429 do Gateway giới hạn 120 request/phút; cần chạy riêng sau cửa sổ giới hạn, không tăng limit.
+- Review độc lập phát hiện hai lỗi important: không cho participant gắn lại evidence đã chia sẻ, và manual retry chưa lưu kết quả idempotent. Đã sửa cùng regression tests; reviewer xác nhận không còn finding important trong phạm vi policy/repository/routes/outbox/identity wiring.
+- Sau restart PostgreSQL/API, số lượng và hash toàn row của 6 workflow runs, 28 audit rows, 4 outbox jobs giống trước restart. Keycloak còn connection pool cũ, login đầu trả 500 với log PostgreSQL connection closed. Gateway trả 502 do còn IP API 172.18.0.4 trong khi container/DNS đã là 172.18.0.3. Restart Keycloak/Gateway để nạp lại kết nối trước smoke cuối; đã ghi runbook. Kiểm tra persistence này không thay thế backup/restore hoặc phục hồi production tự động.
+- Compose core/NocoBase config, cú pháp seed/smoke và `git diff --check` đạt. Giữ nguyên mọi checkbox Notion theo yêu cầu Duy; không merge hoặc release tự động.
+
+Đối chiếu sáu task backend: tạo/gửi/duyệt/từ chối và nhận/nghiệm thu nằm trong cấu hình + transition policy; bàn giao có scoped references và transaction; outbox có lease/retry/eventId; lịch sử có actor/time/from/to/version; smoke kiểm tra race/replay/role. Các tiêu chí UI và asset hiện trong broker vẫn chờ tích hợp Hưng/Nhi. Xem [hợp đồng workflow](workflow-runtime.md).
+
 ## NocoBase action authentication bridge
 
 - `pnpm check`: 76 tests (18 plugin tests), workspace typecheck/build đạt. Plugin CommonJS kiểm tra syntax riêng bằng node --check; không claim có TypeScript typecheck cho plugin runtime JS.

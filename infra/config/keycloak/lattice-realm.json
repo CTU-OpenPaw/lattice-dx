@@ -24,6 +24,30 @@
       },
       {
         "name": "files:write"
+      },
+      {
+        "name": "employee"
+      },
+      {
+        "name": "workflow:start"
+      },
+      {
+        "name": "procurement:manager"
+      },
+      {
+        "name": "workflow:sync"
+      },
+      {
+        "name": "department:warehouse"
+      },
+      {
+        "name": "department:hr"
+      },
+      {
+        "name": "department:it"
+      },
+      {
+        "name": "department:administration"
       }
     ]
   },
@@ -97,7 +121,9 @@
         "tasks:assign",
         "tasks:decide",
         "files:read",
-        "files:write"
+        "files:write",
+        "employee",
+        "workflow:start"
       ],
       "attributes": {
         "organization_id": [
@@ -130,6 +156,180 @@
           "org-b"
         ]
       }
+    },
+    {
+      "username": "manager",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "manager@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-manager-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "procurement:manager",
+        "workflow:sync",
+        "files:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "manager",
+      "lastName": "Demo"
+    },
+    {
+      "username": "warehouse",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "warehouse@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-warehouse-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:warehouse",
+        "files:read",
+        "files:write"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "warehouse",
+      "lastName": "Demo"
+    },
+    {
+      "username": "warehouse2",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "warehouse2@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-warehouse2-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:warehouse",
+        "files:read",
+        "files:write"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "warehouse2",
+      "lastName": "Demo"
+    },
+    {
+      "username": "hr-demo",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "hr-demo@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-hr-demo-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:hr",
+        "workflow:start",
+        "files:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "hr-demo",
+      "lastName": "Demo"
+    },
+    {
+      "username": "it-demo",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "it-demo@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-it-demo-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:it",
+        "files:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "it-demo",
+      "lastName": "Demo"
+    },
+    {
+      "username": "administration",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "administration@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-administration-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:administration",
+        "files:read",
+        "files:write"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "administration",
+      "lastName": "Demo"
+    },
+    {
+      "username": "receiver",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "receiver@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-receiver-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "employee",
+        "workflow:start",
+        "files:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "receiver",
+      "lastName": "Demo"
     }
   ]
 }

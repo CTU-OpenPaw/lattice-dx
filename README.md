@@ -1,6 +1,6 @@
 # LatticeDX · PMNM 2026
 
-Bộ khung nền tảng chuyển đổi số LatticeDX. Có cổng web, API và agent worker độc lập; core local gồm Keycloak, APISIX, PostgreSQL và ClamAV. Có runtime NocoBase, action catalog/runtime, plugin server kết nối Keycloak bằng PKCE, API task/quyết định và lưu/quét tệp nhỏ. NGSI-LD, workflow UC1 đầy đủ và mô hình AI chưa được tích hợp.
+Bộ khung nền tảng chuyển đổi số LatticeDX. Có cổng web, API và agent worker độc lập; core local gồm Keycloak, APISIX, PostgreSQL và ClamAV. Có runtime NocoBase, action catalog/runtime, plugin server kết nối Keycloak bằng PKCE, API task/quyết định và lưu/quét tệp nhỏ. Backend workflow dùng chung đã chạy được mua sắm–bàn giao và tiếp nhận nhân viên liên phòng ban, có lịch sử và outbox retry. UI workflow, NGSI-LD và mô hình AI còn chờ tích hợp.
 
 ## Chạy core bằng Docker
 
@@ -14,6 +14,8 @@ pnpm test:infra
 pnpm identity:sync-local
 pnpm test:foundation
 ```
+
+Thử backend giai đoạn 2 sau khi core chạy: `pnpm workflow:seed-local` rồi `pnpm test:workflows`. Xem [workflow runtime và bàn giao tích hợp](docs/workflow-runtime.md) để biết tài khoản, payload, quyền và giới hạn. Smoke giữ dữ liệu demo, kiểm chứng worker bằng receiver HTTP local; chưa gọi broker thật.
 
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 
@@ -66,9 +68,10 @@ Thêm server độc lập vào `apps/`, thư viện tái sử dụng vào `packa
 ## Phạm vi bản đầu
 
 - Worker trả kết quả xác định, không phân tích bằng AI, không gọi công cụ nghiệp vụ.
-- API gọi worker đồng bộ bằng HTTP; không có hàng đợi, lưu tác vụ hay retry.
+- API demo gọi agent worker đồng bộ bằng HTTP. Workflow nghiệp vụ có trạng thái bền vững và PostgreSQL outbox với retry riêng; chưa có hàng đợi tác vụ agent.
 - API hồ sơ trong core xác minh JWT và quyền read/write, giới hạn theo chủ sở hữu và claim đơn vị `organization_id` đã ký. Token thiếu đơn vị bị từ chối. Bản ghi cũ chưa có đơn vị không tự được gán quyền. `pnpm dev` không tự nạp cấu hình core và endpoint hồ sơ trả 503 nếu thiếu cấu hình identity/database.
 - Task/decision nền có lưu bền và kiểm tra phiên bản; chưa tự đổi trạng thái hồ sơ mua sắm. Tệp 1 MiB lưu PostgreSQL bytea, quét ClamAV trước khi tải; chưa có object storage hoặc quét lại nền. Đọc [hợp đồng nền](docs/phase-one-handoff.md).
+- Workflow API thực thi cấu hình trạng thái/role được quản lý trong source, với kiểm tra phiên bản và Idempotency-Key. Inbox là các run có bước actor được phép xử lý; không sinh task nền thứ hai. Chưa có trình thiết kế workflow hoặc gán việc cá nhân.
 - Endpoint demo agent là kiểm tra kết nối cục bộ; không được công bố qua gateway core và chưa có xác thực.
 - Các thẻ ứng dụng/dữ liệu trên giao diện ghi rõ chưa tích hợp; không phải kiểm tra sức khỏe dịch vụ.
 

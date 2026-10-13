@@ -48,6 +48,8 @@ services:
       OIDC_JWKS_URL: http://keycloak:8080/realms/lattice/protocol/openid-connect/certs
       OIDC_AUDIENCE: dx-api
       CLAMD_HOST: clamav
+      WORKFLOW_EVENT_URL: ${WORKFLOW_EVENT_URL:-}
+      WORKFLOW_EVENT_TOKEN: ${WORKFLOW_EVENT_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy

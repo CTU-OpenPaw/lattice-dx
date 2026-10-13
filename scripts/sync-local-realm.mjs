@@ -14,6 +14,11 @@ async function call(path,method='GET',body){
 }
 const existing=await call('roles');
 for(const role of realm.roles.realm)if(!existing.some(r=>r.name===role.name))await call('roles','POST',role);
+// Managed, admin-editable scope: newer Keycloak drops unmanaged attributes for new users.
+const profile=await call('users/profile');
+const scopeAttribute={name:'organization_id',displayName:'Organization',multivalued:false,
+  permissions:{view:['admin','user'],edit:['admin']},validations:{length:{min:1,max:80},pattern:{pattern:'^[a-zA-Z0-9_-]{1,80}$'}}};
+await call('users/profile','PUT',{...profile,attributes:[...profile.attributes.filter(a=>a.name!=='organization_id'),scopeAttribute]});
 const clients=await call('clients?clientId=dx-local');
 const mappers=await call(`clients/${clients[0].id}/protocol-mappers/models`);
 for(const mapper of realm.clients[0].protocolMappers)if(!mappers.some(m=>m.name===mapper.name))await call(`clients/${clients[0].id}/protocol-mappers/models`,'POST',mapper);
@@ -21,9 +26,11 @@ const bridgeClients=await call(`clients?clientId=${bridgeClient.clientId}`);
 if(!bridgeClients.length)await call('clients','POST',bridgeClient);
 else await call(`clients/${bridgeClients[0].id}`,'PUT',{...bridgeClient,id:bridgeClients[0].id});
 for(const fixture of realm.users){
-  const users=await call(`users?username=${encodeURIComponent(fixture.username)}&exact=true`);if(users.length!==1)throw new Error('Fixture user missing');
+  let users=await call(`users?username=${encodeURIComponent(fixture.username)}&exact=true`);
+  if(!users.length){await call('users','POST',fixture);users=await call(`users?username=${encodeURIComponent(fixture.username)}&exact=true`);}
+  if(users.length!==1)throw new Error('Fixture user lookup is ambiguous');
   const user=await call(`users/${users[0].id}`);
-  await call(`users/${user.id}`,'PUT',{...user,attributes:{...user.attributes,...fixture.attributes}});
+  await call(`users/${user.id}`,'PUT',{...user,firstName:user.firstName||fixture.firstName,lastName:user.lastName||fixture.lastName,attributes:{...user.attributes,...fixture.attributes}});
   const roles=await Promise.all(fixture.realmRoles.map(name=>call(`roles/${encodeURIComponent(name)}`)));
   await call(`users/${user.id}/role-mappings/realm`,'POST',roles);
 }
