@@ -34,6 +34,11 @@ export async function createWorkflowTables(pool:Pool) {
       payload jsonb NOT NULL, status text NOT NULL DEFAULT 'pending', attempts integer NOT NULL DEFAULT 0,
       available_at timestamptz NOT NULL DEFAULT now(), lease_until timestamptz, lease_token uuid,
       last_error text, created_at timestamptz NOT NULL DEFAULT now())`,
+    `CREATE TABLE IF NOT EXISTS workflow_action_results (
+      run_id uuid NOT NULL REFERENCES workflow_runs(id), version integer NOT NULL, step_id text NOT NULL, step_index integer NOT NULL DEFAULT 0,
+      actor_id text NOT NULL, action text NOT NULL, input jsonb NOT NULL, result jsonb NOT NULL,
+      occurred_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(run_id,version,step_id))`,
+    'ALTER TABLE workflow_action_results ADD COLUMN IF NOT EXISTS step_index integer NOT NULL DEFAULT 0',
     'CREATE INDEX IF NOT EXISTS workflow_jobs_ready ON workflow_jobs(status,available_at)',
   ];
   for(const statement of statements) await pool.query(statement);

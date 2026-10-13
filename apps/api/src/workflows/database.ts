@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { isRecordId, type CreateWorkflow, type TransitionCommand, type WorkflowActor, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowEvent } from '@dx/contracts';
 import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { authorizeTransition, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
+import { executeBlocks } from './block-database.js';
 import { createWorkflowTables } from './schema.js';
 import type { WorkflowRepository } from './types.js';
 import { pageResult, type PageQuery } from '../pagination.js';
@@ -142,6 +143,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
           const event:WorkflowEvent={eventId,eventType:transition.eventType,organizationId:actor.organizationId,runId:id,recordId:id,definitionId:def.id,version:next.version,occurredAt:next.updatedAt,data:next.data};
           await client.query('INSERT INTO workflow_jobs(id,run_id,organization_id,payload) VALUES($1,$2,$3,$4)',[eventId,id,actor.organizationId,JSON.stringify(event)]);
         }
+        await executeBlocks(client,transition.steps ?? [],next,input,actor);
         await client.query('INSERT INTO workflow_commands(run_id,key,actor_id,fingerprint,result) VALUES($1,$2,$3,$4,$5)',[id,key,actor.subject,hash,JSON.stringify(next)]);
         return next;
       });
@@ -150,6 +152,11 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     async history(id,actor) {
       await get(id,actor);
       const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version LIMIT 100',[id])).rows;
+      return rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()}));
+    },
+    async executions(id,actor,query) {
+      await get(id,actor);
+      const rows=(await pool.query('SELECT run_id AS "runId",version,step_id AS "stepId",step_index AS "stepIndex",actor_id AS "actorId",action,input,result,occurred_at AS "occurredAt" FROM workflow_action_results WHERE run_id=$1 ORDER BY version,step_index,step_id LIMIT $2 OFFSET $3',[id,query?query.limit+1:100,query?.offset??0])).rows;
       return rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()}));
     },
     async jobs(id,actor) {await get(id,actor);return (await pool.query('SELECT id,status,attempts,last_error AS "lastError" FROM workflow_jobs WHERE run_id=$1 ORDER BY created_at LIMIT 100',[id])).rows;},

@@ -4,7 +4,7 @@ export type WorkflowField = 'text' | 'subject' | 'department' | 'location' | 'fi
 export type WorkflowTransition = {
   id: string; from: string; to: string; role: string; ownerOnly?: boolean;
   fields: Record<string, WorkflowField>; eventType?: string;
-  assigneeField?: string; task?: 'assign' | 'complete';
+  assigneeField?: string; task?: 'assign' | 'complete'; steps?: WorkflowStep[];
 };
 export type WorkflowDefinition = {
   id: string; version: number; title: string; startRole: string; initialState: string;
@@ -22,3 +22,19 @@ export type CreateWorkflow = { definitionId: string; title: string; input: Recor
 export type TransitionCommand = { action: string; expectedVersion: number; input: Record<string,string> };
 export type WorkflowAudit = {id:string;actorId:string;action:string;fromState:string|null;toState:string;version:number;occurredAt:string};
 export type WorkflowEvent = {eventId:string;eventType:string;organizationId:string;runId:string;recordId:string;definitionId:string;version:number;occurredAt:string;data:Record<string,string>};
+
+export type WorkflowBinding =
+  | { source: 'literal'; value: string }
+  | { source: 'data' | 'input'; field: string }
+  | { source: 'context'; field: 'recordId' | 'title' | 'ownerId' | 'actorId' }
+  | { source: 'result'; stepId: string; field: 'id' };
+export type WorkflowConnector = 'n8n' | 'ngsi-ld' | 'agent';
+export type WorkflowStep =
+  | { id: string; action: 'records.create'; input: { title: WorkflowBinding } }
+  | { id: string; action: 'tasks.create'; input: { title: WorkflowBinding; assigneeId?: WorkflowBinding; recordId?: WorkflowBinding }; assignment?: { kind: 'department'; department: WorkflowBinding; role: string; assigneeId?: WorkflowBinding } }
+  | { id: string; action: 'connectors.dispatch'; input: { connectorId: { source: 'literal'; value: WorkflowConnector }; operation: { source: 'literal'; value: string }; payload?: Record<string, WorkflowBinding> } };
+export type WorkflowActionResult = {
+  runId: string; version: number; stepId: string; stepIndex: number; actorId: string; action: WorkflowStep['action'];
+  input: Record<string, string | Record<string, string>>; result: { id?: string; eventId?: string }; occurredAt: string;
+};
+export type WorkflowConnectorEvent = WorkflowEvent & { connectorId: WorkflowConnector; operation: string };

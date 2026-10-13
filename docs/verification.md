@@ -1,5 +1,17 @@
 # Verification — 2026-10-13
 
+## Workflow blocks và giao việc theo phòng ban
+
+- `pnpm check` cuối đạt **166 tests / 23 files**, typecheck và build. Baseline increment trước 150 tests. RED đã quan sát cho block schema, runtime thiếu module, department catalogue, nested audit payload, step ordinal, malformed transition và chọn người trong phòng ban. Review phát hiện transition null có thể gây 500; validator chuyển sang hai lượt kiểm tra để trả 400.
+- `pnpm test:workflow-blocks` chạy thật Keycloak/APISIX/API/PostgreSQL: catalogue block lọc theo role, department API, record → department task → connector request, explicit-person task, task record read đúng người, executions scoped/paged/ordered, replay không thêm side effect, thiếu integrate role rollback, department sai/ambiguous từ chối. Transition thay thế được publish sẵn cho chọn người trong phòng ban: chọn IT cho kho bị chặn; chọn đúng kho thành công trên cùng bản workflow đang chạy.
+- Live demo cuối: definition `blocks-15b1bab84b5345eaa25db21ad1cf9065`, workflow `2eb86877-66e3-499e-83ee-8e7510269205`, record `a6208585-0481-4fdb-bee1-daa408da8570`, task IT `dce2e74c-66c1-43cd-bbcb-2047e3d8e840`. Dữ liệu demo giữ lại.
+- SQL schema riêng kiểm tra rollback đầy đủ record/task/job/result khi block cuối thất bại; assignee foreign/disabled/missing/wrong-department không được giao; selector chọn từ hai người chỉ nhận người active đúng role/department/tenant, không fallback. Năm transition cùng expectedVersion/pool một connection chỉ một thành công. Replay giữ số row. Lịch sử 105 execution được tạo bằng 21 transition thật và phân trang 100+5, giữ đúng ordinal; 106 department phân trang 100+6. Chỉ schema fixture có tên UUID đã kiểm tra được drop.
+- Worker outbox gửi sáu job đến receiver HTTP local với ba connector ID n8n/ngsi-ld/agent; kiểm tra bearer token và Idempotency-Key bằng eventId. Đây là kiểm thử hợp đồng và worker, không phải adapter n8n/broker/LLM thật. Local production-demo outbox chưa cấu hình endpoint vẫn pending.
+- Review độc lập spec/quality đạt sau fix, không còn critical/important finding: 45 targeted tests; refinement selector 13 targeted tests. Không thêm dependency/framework, không sửa upstream, không tick Notion hoặc merge/release.
+- Regression Studio sau wiring đạt version pinning/replay/paging; Logistics đạt scoped reads và atomic task/state. Smoke workflow nguồn mua sắm/onboarding và durable outbox/manual retry đã qua: procurement `1a632a11-f6f3-4ca7-a2b1-b76a9a868d9a`, onboarding `032dc1e2-5452-4e46-8ad9-f3fe2296d7c4`. Directory tiếp tục là admin snapshot; generic task block chưa tự chuyển trạng thái workflow hoặc cấp workflow read. Chưa có nested department hierarchy hay auto manager selection.
+
+Hợp đồng cho Hưng và Nhi: [Workflow blocks](workflow-blocks.md).
+
 ## Engine cấu hình workflow — bản nháp và publish
 
 - Baseline 145 tests / 18 files; sau mở rộng `pnpm check` đạt 150 tests / 21 files, typecheck và build. Validator được kiểm tra RED thiếu module, sau đó RED phát hiện enum field nhận nhầm array; đã sửa. Studio smoke trước triển khai RED 404 ở route draft.

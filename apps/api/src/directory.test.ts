@@ -52,3 +52,15 @@ test('directory denies missing signed organization and invalid JWT despite calle
     expect((await app.inject({url:'/v1/directory/people',headers:{authorization:'Bearer invalid'}})).statusCode).toBe(401);
   }finally{await app.close();}
 });
+
+test('department catalogue requires directory permission and uses signed organization',async()=>{
+  let observed:unknown;
+  const {app}=setup({async departments(org:string,query:unknown){observed={org,query};return {items:[{id:'it',name:'IT',memberCount:1,internal:'secret'}],page:{limit:1,offset:0,hasMore:false,nextOffset:null}}}});
+  try{
+    expect((await app.inject({url:'/v1/directory/departments'})).statusCode).toBe(401);
+    expect((await app.inject({url:'/v1/directory/departments',headers:await auth([])})).statusCode).toBe(403);
+    const result=await app.inject({url:'/v1/directory/departments?limit=1&role=tasks%3Adecide',headers:await auth()});
+    expect(result.statusCode).toBe(200);expect(result.json().items).toEqual([{id:'it',name:'IT',memberCount:1}]);
+    expect(observed).toEqual({org:'org-a',query:{limit:1,offset:0,role:'tasks:decide'}});
+  }finally{await app.close();}
+});

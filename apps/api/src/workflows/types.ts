@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowAudit, WorkflowEvent, WorkflowRun } from '@dx/contracts';
+import type { CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowActionResult, WorkflowAudit, WorkflowEvent, WorkflowRun } from '@dx/contracts';
 import type { FileItem } from '../foundation.js';
 import type { Page, PageQuery } from '../pagination.js';
 export type WorkflowQuery=PageQuery & {state?:string;definitionId?:string};
@@ -17,6 +17,7 @@ export interface WorkflowRepository {
   listPage?(actor:WorkflowActor,inbox:boolean,query:WorkflowQuery):Promise<Page<WorkflowRun>>;
   get(id:string,actor:WorkflowActor):Promise<WorkflowRun>;
   history(id:string,actor:WorkflowActor):Promise<WorkflowAudit[]>;
+  executions?(id:string,actor:WorkflowActor,query?:PageQuery):Promise<WorkflowActionResult[]>;
   jobs(id:string,actor:WorkflowActor):Promise<SyncJob[]>;
   retryJobs(id:string,actor:WorkflowActor,key:string):Promise<number>;
   registerMember(actor:WorkflowActor):Promise<void>;

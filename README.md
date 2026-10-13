@@ -19,7 +19,7 @@ Thử backend giai đoạn 2 sau khi core chạy: `pnpm workflow:seed-local` r�
 
 Giao việc hiện cần directory đã đồng bộ: sau `pnpm identity:sync-local` chạy `pnpm directory:sync-local` trước smoke/task writes. Thử kinh doanh → kho bằng `pnpm test:logistics`; xem [API bàn giao UI Logistics](docs/logistics-ui-handoff.md). Order/task/workflow/record lists có phân trang/lọc; shared read theo assignee không mở quyền ghi hồ sơ.
 
-Mở rộng engine bằng cấu hình quy trình: [hợp đồng Workflow Studio](docs/workflow-studio.md), smoke `pnpm test:workflow-studio`. Bản nháp được quản lý theo đơn vị, publish tạo phiên bản bất biến; hồ sơ đang chạy giữ phiên bản ban đầu. Studio UI và các block connector mở rộng cần tích hợp tiếp.
+Mở rộng engine bằng cấu hình quy trình: [hợp đồng Workflow Studio](docs/workflow-studio.md), smoke `pnpm test:workflow-studio`. Bản nháp được quản lý theo đơn vị, publish tạo phiên bản bất biến; hồ sơ đang chạy giữ phiên bản ban đầu. [Workflow blocks](docs/workflow-blocks.md) bổ sung tạo hồ sơ, giao việc theo người/phòng ban và outbox connector; smoke `pnpm test:workflow-blocks`. Studio UI và adapter ngoài cần tích hợp tiếp.
 
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 

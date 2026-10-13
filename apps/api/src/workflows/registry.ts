@@ -3,6 +3,7 @@ import type { PoolClient } from 'pg';
 import type { WorkflowActor, WorkflowDefinition } from '@dx/contracts';
 import { getDefinition, workflowDefinitions } from '../../../../solutions/workflows/definitions.js';
 import type { Page, PageQuery } from '../pagination.js';
+import { validateSteps } from './block-policy.js';
 import { WorkflowError } from './policy.js';
 
 export type DraftDefinition = Omit<WorkflowDefinition, 'version'>;
@@ -100,7 +101,7 @@ export function validateDefinition(value: unknown): DraftDefinition {
   const states = new Set<string>([value.initialState]);
   const subjects = new Set(Object.entries(required).filter(([, type]) => type === 'subject').map(([key]) => key));
   for (const transition of value.transitions) {
-    keys(transition, ['id', 'from', 'to', 'role', 'ownerOnly', 'fields', 'eventType', 'assigneeField']);
+    keys(transition, ['id', 'from', 'to', 'role', 'ownerOnly', 'fields', 'eventType', 'assigneeField', 'steps']);
     if (!name(transition.id) || ids.has(transition.id) || !name(transition.from) || !name(transition.to)
       || !name(transition.role, true)
       || (transition.ownerOnly !== undefined && typeof transition.ownerOnly !== 'boolean')
@@ -114,6 +115,14 @@ export function validateDefinition(value: unknown): DraftDefinition {
     if (transition.assigneeField !== undefined
       && (!name(transition.assigneeField) || !subjects.has(transition.assigneeField))) {
       fail();
+    }
+  }
+
+  // All transition structures have been validated before reading cross-transition fields.
+  const dataFields = new Set([...Object.keys(required), ...Object.keys(optional), ...value.transitions.flatMap(t => Object.keys(t.fields))]);
+  for (const transition of value.transitions) {
+    if (transition.steps !== undefined) {
+      validateSteps(transition.steps, dataFields, new Set(Object.keys(transition.fields)));
     }
   }
 
