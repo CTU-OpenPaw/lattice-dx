@@ -104,7 +104,9 @@ import {parseBundle} from './src/workflows/bundles.ts';
   assert.equal((await registry.getDraft(first.id,b)).definition.title,'Changed destination');
   await assert.rejects(()=>registry.createMany([{...first,id:'aaa-rollback'},second],b),e=>e.statusCode===409);
   await assert.rejects(()=>registry.getDraft('aaa-rollback',b),e=>e.statusCode===404);
-  // Check reconnection with max 1, then use distinct connections for a real write race.
+  // Recreate a max-1 pool to verify persisted drafts, then use two connections for a real write race.
+  await pool.end();
+  pool=new pg.Pool({connectionString:process.env.DATABASE_URL,options:'-c search_path='+schema,max:1,connectionTimeoutMillis:5000});
   const singleConnection=await definitionDatabase(pool);
   assert.equal((await singleConnection.getDraft(first.id,b)).revision,2);
   await pool.end();
