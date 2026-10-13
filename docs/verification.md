@@ -1,5 +1,17 @@
 # Verification — 2026-10-13
 
+## Engine cấu hình workflow — bản nháp và publish
+
+- Baseline 145 tests / 18 files; sau mở rộng `pnpm check` đạt 150 tests / 21 files, typecheck và build. Validator được kiểm tra RED thiếu module, sau đó RED phát hiện enum field nhận nhầm array; đã sửa. Studio smoke trước triển khai RED 404 ở route draft.
+- `pnpm test:workflow-studio` đạt trên Keycloak → APISIX → API → PostgreSQL: role thiết kế, reserved ID, cấu hình sai/graph không tới được, revision conflict, publication đồng thời, catalogue theo tenant, workflow mới dùng latest, workflow cũ giữ v1, replay start v1 sau khi v2 thêm trường bắt buộc, inbox động, history và outbox.
+- Isolated PostgreSQL schema kiểm tra hai tenant dùng cùng ID nhưng khác cấu hình, hai save cùng revision chỉ một thành công, hai publication cùng revision trả cùng version; 106 draft phân trang 100+6 không trùng. Khởi tạo lại registry vẫn đọc được v1/v2. Năm create và năm transition đồng thời với pool chỉ một connection chạy thành công, chứng minh resolver không chiếm thêm connection trong transaction. Schema fixture được xóa riêng theo tên UUID đã kiểm tra; dữ liệu doanh nghiệp giữ nguyên.
+- Đã restart API và đọc lại hai workflow demo: v1 `8245f3fb-9023-4a66-a6f9-6701908763ad`, v2 `5de3c874-52fc-4ed8-907a-859bd49e7ddf`; definition `studio-a1f50b55553343f0a092a9c58c03205e` vẫn pin đúng phiên bản.
+- Regression `pnpm test:logistics` đạt: Order `934e2c56-27eb-4838-b13e-f7c2d02ba08c`, task `b3381295-e75c-4fb6-a186-9792a3d21d0a`; `pnpm test:workflows` đạt procurement, onboarding, file sharing và isolated SQL outbox/manual retry.
+- Independent review nhận xét spec/quality đạt, không critical/important finding; reviewer chạy 9 tests về validator, draft routes và workflow routes. Test runtime registry riêng có tên `database-registry.test.ts`; full suite của lượt triển khai đã chạy nó.
+- Không thêm dependency, không sửa nguồn NocoBase, không tick Notion hoặc tự merge/release. Custom definition chưa nhận task hook và chưa có canvas/page builder. Block action, n8n, broker và agent mở rộng thuộc increment tiếp theo; outbox pending không phải bằng chứng connector ngoài đã xử lý.
+
+API bàn giao: [Workflow Studio](workflow-studio.md). Local designer `alice` cần `identity:sync-local`; quyền này không tự cấp production.
+
 ## Bổ sung backend cho UI Logistics
 
 - `pnpm check`: typecheck, **145 tests / 18 files**, workspace build đạt. Directory có lượt RED REST/action nhận assignee không hợp lệ và route thiếu, rồi GREEN; policy Logistics RED thiếu cấu hình, facade RED 404 trước triển khai, pagination RED thiếu module. Full suite giữ các regression workflow/action/file/bridge cũ.

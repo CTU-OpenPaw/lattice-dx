@@ -57,6 +57,9 @@
       },
       {
         "name": "logistics:warehouse"
+      },
+      {
+        "name": "workflow:design"
       }
     ]
   },
@@ -134,7 +137,8 @@
         "employee",
         "workflow:start",
         "directory:read",
-        "logistics:sales"
+        "logistics:sales",
+        "workflow:design"
       ],
       "attributes": {
         "organization_id": [

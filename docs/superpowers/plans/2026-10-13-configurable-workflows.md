@@ -20,27 +20,30 @@
 
 Files: new focused registry types/validator/database/routes/tests under `apps/api/src/workflows`; existing app/database/index wiring.
 
-- [ ] Write failing tests for unknown fields, invalid graph, reserved IDs, draft conflict, role denial and tenant isolation. Run `pnpm test` and observe the missing behavior.
-- [ ] Implement pure configuration validation, bounded input and safe field/role/transition names. Preserve JSON content without prototype-sensitive dictionary assignments.
-- [ ] Implement draft create/list/get/update and publish with optimistic revision, row locks, unique tenant/version keys, actor/timestamp audit and publication replay.
-- [ ] Expose authenticated draft API; missing services 503, JWT failure 401, role denial 403, invalid payload 400, hidden record 404 and conflict 409.
+- [x] Write failing tests for unknown fields, invalid graph, reserved IDs, draft conflict, role denial and tenant isolation. Run `pnpm test` and observe the missing behavior.
+- [x] Implement pure configuration validation, bounded input and safe field/role/transition names. Preserve JSON content without prototype-sensitive dictionary assignments.
+- [x] Implement draft create/list/get/update and publish with optimistic revision, row locks, unique tenant/version keys, actor/timestamp audit and publication replay.
+- [x] Expose authenticated draft API; missing services 503, JWT failure 401, role denial 403, invalid payload 400, hidden record 404 and conflict 409.
 
 Interfaces: `DefinitionRegistry.get(organizationId,id,version?)` returns latest or pinned definition; `list(organizationId)` returns immutable published definitions needed by runtime policies. Runtime repository receives this registry explicitly, without process-global caching.
 
 ## Task 2 — Reuse registry throughout runtime
 
-- [ ] Write failing tests proving tenant definitions appear in catalogue and running v1 keeps its transitions after v2 publishes.
-- [ ] Replace source-only resolution in runtime SQL, route views, list/inbox, evidence and retry with tenant-aware resolution; preserve built-in fallback.
-- [ ] Start replay must resolve the stored version before applying changed configuration. No publication may change an already accepted idempotent command.
-- [ ] Add Gateway draft allowlist and local designer role fixture; no automatic production permission grants.
+- [x] Write failing tests proving tenant definitions appear in catalogue and running v1 keeps its transitions after v2 publishes.
+- [x] Replace source-only resolution in runtime SQL, route views, list/inbox, evidence and retry with tenant-aware resolution; preserve built-in fallback.
+- [x] Start replay must resolve the stored version before applying changed configuration. No publication may change an already accepted idempotent command.
+- [x] Add Gateway draft allowlist and local designer role fixture; no automatic production permission grants.
 
 ## Task 3 — Integration and handoff
 
-- [ ] Add live smoke script exercising create/update/publish/start/transition, v2 pinning, conflict, tenant isolation, restart persistence and list paging.
-- [ ] Run `pnpm check`, rebuild API and run applicable existing workflow/logistics smoke tests. Record actual results and limits.
-- [ ] Add Studio API contract and example HR/IT configuration; update verification evidence.
-- [ ] Request independent code review, fix findings and rerun affected checks. Commit changes, retain branch for review; no automatic merge/release.
+- [x] Add live smoke script exercising create/update/publish/start/transition, v2 pinning, conflict, tenant isolation, restart persistence and list paging.
+- [x] Run `pnpm check`, rebuild API and run applicable existing workflow/logistics smoke tests. Record actual results and limits.
+- [x] Add Studio API contract and example HR/IT configuration; update verification evidence.
+- [x] Request independent code review, fix findings and rerun affected checks. Commit changes, retain branch for review; no automatic merge/release.
 
 ## Baseline
 
 13 October 2026: 145 tests / 18 files passed before implementation. Current main work is PR #6, so this feature depends on its branch until prior PRs merge.
+
+## Execution evidence
+Completed first deliverable: 150 tests / 21 files, typecheck and build passed. Live Studio smoke passed including 106-row SQL paging and pool-max-1 concurrency. Existing Logistics and workflow smoke passed. Independent full review approved spec and quality, 11 targeted tests passed. UI and connector/action blocks remain next increments; no Notion completion boxes updated.
