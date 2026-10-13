@@ -27,6 +27,7 @@
     "test:workflows": "node scripts/smoke-workflows.mjs",
     "test:workflow-studio": "node scripts/smoke-workflow-studio.mjs",
     "test:workflow-blocks": "node scripts/smoke-workflow-blocks.mjs",
+    "test:workflow-completion": "node scripts/smoke-workflow-completion.mjs",
     "test:record-links": "node scripts/smoke-record-links.mjs",
     "nocobase:bridge:install": "node scripts/install-nocobase-bridge.mjs",
     "test:nocobase:bridge": "node scripts/smoke-nocobase-bridge.mjs",

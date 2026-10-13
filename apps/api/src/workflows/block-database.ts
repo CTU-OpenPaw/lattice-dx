@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { isRecordId, type WorkflowActor, type WorkflowConnectorEvent, type WorkflowRun, type WorkflowStep } from '@dx/contracts';
+import { isRecordId, type WorkflowActor, type WorkflowConnectorEvent, type WorkflowRun, type WorkflowStep, type WorkflowWaitConfig } from '@dx/contracts';
 import { authorizeBlock, boundedString, resolveBinding } from './block-policy.js';
 import { WorkflowError } from './policy.js';
 function title(value: string) {
@@ -13,7 +13,7 @@ function subject(value: string) {
   return value;
 }
 /** All reads and writes use the caller's transaction connection, including directory routing. */
-export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], run: WorkflowRun, input: Record<string, string>, actor: WorkflowActor): Promise<void> {
+export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], run: WorkflowRun, input: Record<string, string>, actor: WorkflowActor, wait?: WorkflowWaitConfig): Promise<void> {
   const results = new Map<string, { id?: string; eventId?: string }>();
   for (const [stepIndex, step] of steps.entries()) {
     authorizeBlock(step, actor);
@@ -76,5 +76,12 @@ export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], r
     }
     await client.query('INSERT INTO workflow_action_results(run_id,version,step_id,actor_id,action,input,result,step_index) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [run.id, run.version, step.id, actor.subject, step.action, JSON.stringify(resolved), JSON.stringify(result), stepIndex]);
     results.set(step.id, result);
+    if (wait && step.id === wait.stepId) {
+      await client.query(`INSERT INTO workflow_waits(id,run_id,organization_id,version,kind,assignee_id,connector_id,config,deadline)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()+$9 * interval '1 second')`,
+      [result.id ?? result.eventId,run.id,actor.organizationId,run.version,step.action === 'tasks.create' ? 'task' : 'connector',
+        resolved.assigneeId ?? null,resolved.connectorId ?? null,JSON.stringify(wait),wait.timeoutSeconds]);
+      run.waiting = true;
+    }
   }
 }

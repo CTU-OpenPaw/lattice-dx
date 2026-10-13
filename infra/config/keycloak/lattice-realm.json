@@ -63,6 +63,18 @@
       },
       {
         "name": "workflow:integrate"
+      },
+      {
+        "name": "workflow:callback"
+      },
+      {
+        "name": "connector:n8n"
+      },
+      {
+        "name": "connector:ngsi-ld"
+      },
+      {
+        "name": "connector:agent"
       }
     ]
   },
@@ -445,6 +457,78 @@
         "files:read"
       ],
       "email": "disabled-demo@local.invalid"
+    },
+    {
+      "credentials": [
+        {
+          "temporary": false,
+          "type": "password",
+          "value": "local-connector-demo-password"
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "lastName": "Demo",
+      "emailVerified": true,
+      "enabled": true,
+      "email": "connector-demo@example.invalid",
+      "firstName": "connector-demo",
+      "username": "connector-demo",
+      "realmRoles": [
+        "workflow:callback",
+        "connector:n8n"
+      ]
+    },
+    {
+      "credentials": [
+        {
+          "temporary": false,
+          "type": "password",
+          "value": "local-connector-b-password"
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-b"
+        ]
+      },
+      "lastName": "Demo",
+      "emailVerified": true,
+      "enabled": true,
+      "email": "connector-b@example.invalid",
+      "firstName": "connector-b",
+      "username": "connector-b",
+      "realmRoles": [
+        "workflow:callback",
+        "connector:n8n"
+      ]
+    },
+    {
+      "credentials": [
+        {
+          "temporary": false,
+          "type": "password",
+          "value": "local-connector-agent-password"
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "lastName": "Demo",
+      "emailVerified": true,
+      "enabled": true,
+      "email": "connector-agent@example.invalid",
+      "firstName": "connector-agent",
+      "username": "connector-agent",
+      "realmRoles": [
+        "workflow:callback",
+        "connector:agent"
+      ]
     }
   ]
 }
