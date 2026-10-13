@@ -13,7 +13,7 @@ function setup(){
   const drafts=new Map<string,WorkflowDraft>(),published=new Map<string,ReturnType<typeof validateDefinition>&{version:number}>();
   const registry:DefinitionRegistry={...sourceRegistry,
     async create(value,actor){const d=validateDefinition(value),k=actor.organizationId+':'+d.id;if(drafts.has(k))throw new WorkflowError(409,'exists');const draft={id:d.id,revision:1,definition:d,createdBy:actor.subject,updatedBy:actor.subject,createdAt:'2026-10-13',updatedAt:'2026-10-13'};drafts.set(k,draft);return draft;},
-    async createMany(values,actor){return Promise.all(values.map(value=>this.create(value,actor)));},
+    async createMany(values,actor){const definitions=values.map(validateDefinition),ids=definitions.map(d=>d.id);if(new Set(ids).size!==ids.length||ids.some(id=>drafts.has(actor.organizationId+':'+id)))throw new WorkflowError(409,'exists');return Promise.all(definitions.map(value=>this.create(value,actor)));},
     async getDraft(id,actor){const d=drafts.get(actor.organizationId+':'+id);if(!d)throw new WorkflowError(404,'hidden');return d;},
     async updateDraft(id,revision,value,actor){const d=await this.getDraft(id,actor);if(d.revision!==revision)throw new WorkflowError(409,'changed');const next={...d,definition:validateDefinition(value),revision:revision+1};drafts.set(actor.organizationId+':'+id,next);return next;},
     async publish(id,revision,actor){const d=await this.getDraft(id,actor);if(d.revision!==revision)throw new WorkflowError(409,'changed');const p={...d.definition,version:revision};published.set(actor.organizationId+':'+id,p);return p;},
@@ -47,4 +47,16 @@ test('tenant publication appears in catalogue and resolves runtime views',async(
     expect(created.statusCode).toBe(201);expect(created.json().availableTransitions.map((t:{id:string})=>t.id)).toEqual(['submit']);
     expect((await app.inject({url:'/v1/workflows',headers})).json().items[0].availableTransitions[0].id).toBe('submit');
   }finally{await app.close();}
+});
+
+
+test('batch registry fixture leaves no early draft after a later ID collision',async()=>{
+ const app=setup();try{
+ const headers=await auth();
+ expect((await app.inject({method:'POST',url:'/v1/workflow-drafts',headers,payload:{definition}})).statusCode).toBe(201);
+ const first={...definition,id:'first-new'};
+ const result=await app.inject({method:'POST',url:'/v1/workflow-bundles/import',headers,payload:{bundle:{format:'latticedx.workflow-bundle',formatVersion:1,definitions:[first,definition]}}});
+ expect(result.statusCode).toBe(409);
+ expect((await app.inject({url:'/v1/workflow-drafts/first-new',headers})).statusCode).toBe(404);
+ }finally{await app.close();}
 });
