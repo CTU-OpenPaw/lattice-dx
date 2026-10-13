@@ -15,27 +15,33 @@ export function parseCommand(value:unknown):TransitionCommand|undefined {
   if(!shape(value,['action','expectedVersion','input'])||!text(value.action,80)||!Number.isSafeInteger(value.expectedVersion)||Number(value.expectedVersion)<1||!input(value.input))return;
   return {action:value.action,expectedVersion:Number(value.expectedVersion),input:value.input};
 }
-export function validateInput(fields:Record<string,WorkflowField>,value:Record<string,string>):Record<string,string>{
-  if(!shape(value,Object.keys(fields))||Object.keys(fields).some(k=>!text(value[k],fields[k]==='text'?2000:100)))throw new WorkflowError(400,'Dữ liệu bước không hợp lệ.');
+export function validateInput(fields:Record<string,WorkflowField>,value:Record<string,string>,optional:Record<string,WorkflowField>={}):Record<string,string>{
+  if(!shape(value,[...Object.keys(fields),...Object.keys(optional)])||Object.keys(fields).some(k=>!text(value[k],fields[k]==='text'?2000:100)))throw new WorkflowError(400,'Dữ liệu bước không hợp lệ.');
   const result:Record<string,string>={};
-  for(const [name,kind] of Object.entries(fields)){
+  for(const [name,kind] of Object.entries({...fields,...optional})){
+    if(value[name]===undefined&&name in optional)continue;
+    if(!text(value[name],kind==='text'?2000:100))throw new WorkflowError(400,'Dữ liệu bước không hợp lệ.');
     if(kind==='file'&&!isRecordId(value[name]))throw new WorkflowError(400,'Dữ liệu tệp phải là UUID.');
+    if(kind==='positiveInteger'&&(!/^[1-9][0-9]*$/.test(value[name])||Number(value[name])>1_000_000))throw new WorkflowError(400,'Số lượng phải là số nguyên dương ≤ 1000000.');
     result[name]=kind==='text'?value[name].trim():value[name];
   }
   return result;
 }
 export function canReadRun(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor):boolean {
-  return run.organizationId===actor.organizationId&&(run.ownerId===actor.subject||def.readerRoles.some(r=>actor.roles.includes(r)));
+  const assigned=def.assignedReader;
+  return run.organizationId===actor.organizationId&&(run.ownerId===actor.subject||def.readerRoles.some(r=>actor.roles.includes(r))
+    ||!!assigned&&assigned.states.includes(run.state)&&actor.roles.includes(assigned.role)&&run.data[assigned.field]===actor.subject);
 }
 export function canUseEvidence(file:{ownerId:string;organizationId:string;scanStatus:string},actor:WorkflowActor,links:{definition:WorkflowDefinition;run:WorkflowRun}[]):boolean {
   return file.organizationId===actor.organizationId&&file.scanStatus==='clean'
     &&(file.ownerId===actor.subject||links.some(link=>canReadRun(link.definition,link.run,actor)));
 }
 export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRun,actor:WorkflowActor){
-  if(run.organizationId!==actor.organizationId||!actor.roles.includes(transition.role)||(transition.ownerOnly&&actor.subject!==run.ownerId))throw new WorkflowError(403,'Không có quyền thực hiện bước.');
+  if(run.organizationId!==actor.organizationId||!actor.roles.includes(transition.role)||(transition.ownerOnly&&actor.subject!==run.ownerId)
+    ||transition.assigneeField&&run.data[transition.assigneeField]!==actor.subject)throw new WorkflowError(403,'Không có quyền thực hiện bước.');
 }
 export function availableTransitions(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor){
-  return def.transitions.filter(t=>t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&actor.organizationId===run.organizationId);
+  return def.transitions.filter(t=>t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
 }
 export function planTransition(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand){
   const transition=def.transitions.find(t=>t.id===command.action);

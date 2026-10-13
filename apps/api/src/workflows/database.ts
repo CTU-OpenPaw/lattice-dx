@@ -6,6 +6,7 @@ import { getDefinition, workflowDefinitions } from '../../../../solutions/workfl
 import { authorizeTransition, availableTransitions, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
 import { createWorkflowTables } from './schema.js';
 import type { WorkflowRepository } from './types.js';
+import { pageResult, type PageQuery } from '../pagination.js';
 
 const runColumns='id,id AS "recordId",definition_id AS "definitionId",definition_version AS "definitionVersion",title,owner_id AS "ownerId",organization_id AS "organizationId",state,version,data,created_at AS "createdAt",updated_at AS "updatedAt"';
 function serializeRun(row:WorkflowRun):WorkflowRun {
@@ -28,6 +29,7 @@ async function transaction<T>(pool:Pool,fn:(client:PoolClient)=>Promise<T>):Prom
 }
 async function validateReferences(client:PoolClient,fields:Record<string,WorkflowField>,input:Record<string,string>,actor:WorkflowActor) {
   for(const [name,kind] of Object.entries(fields)) {
+    if(input[name]===undefined)continue;
     let found=true;
     if(kind==='subject') found=!!(await client.query('SELECT 1 FROM workflow_members WHERE organization_id=$1 AND subject=$2',[actor.organizationId,input[name]])).rowCount;
     if(kind==='department'||kind==='location') found=!!(await client.query('SELECT 1 FROM workflow_references WHERE organization_id=$1 AND kind=$2 AND id=$3',[actor.organizationId,kind,input[name]])).rowCount;
@@ -41,37 +43,69 @@ async function validateReferences(client:PoolClient,fields:Record<string,Workflo
 }
 async function attachFiles(client:PoolClient,runId:string,fields:Record<string,WorkflowField>,input:Record<string,string>) {
   for(const [name,kind] of Object.entries(fields)) {
-    if(kind==='file') await client.query('INSERT INTO workflow_files(run_id,file_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[runId,input[name]]);
+    if(kind==='file'&&input[name]!==undefined) await client.query('INSERT INTO workflow_files(run_id,file_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[runId,input[name]]);
   }
 }
 
 export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
   await createWorkflowTables(pool);
+  async function taskIds(runs:WorkflowRun[],client:Pool|PoolClient=pool) {
+    if(!runs.length)return runs;
+    const links=(await client.query('SELECT run_id,task_id FROM workflow_task_links WHERE run_id=ANY($1::uuid[])',[runs.map(r=>r.id)])).rows;
+    return runs.map(r=>({...r,...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
+  }
+  async function checkAssigned(client:PoolClient,def:WorkflowDefinition,data:Record<string,string>,actor:WorkflowActor) {
+    if(!def.assignedReader)return;
+    const {field,role}=def.assignedReader;
+    const found=await client.query('SELECT 1 FROM directory_people WHERE subject=$1 AND organization_id=$2 AND enabled=true AND roles @> $3::jsonb FOR SHARE',[data[field],actor.organizationId,JSON.stringify([role])]);
+    if(!found.rowCount)throw new WorkflowError(400,'Người được giao không tồn tại, đã tắt hoặc không có vai trò phù hợp trong đơn vị.');
+  }
+  async function listPage(actor:WorkflowActor,inbox:boolean,query:PageQuery&{state?:string;definitionId?:string}) {
+    const values:unknown[]=[actor.organizationId,actor.subject];
+    const bind=(value:unknown)=>{values.push(value);return '$'+values.length;};
+    const roleReaders=workflowDefinitions.filter(d=>d.readerRoles.some(r=>actor.roles.includes(r))).map(d=>`${d.id}:${d.version}`);
+    const readers=[`owner_id=$2`,`(definition_id||':'||definition_version)=ANY(${bind(roleReaders)}::text[])`];
+    for(const d of workflowDefinitions){const a=d.assignedReader;if(a&&actor.roles.includes(a.role))readers.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=ANY(${bind(a.states)}::text[]) AND data->>${bind(a.field)}=$2)`);}
+    const where=['organization_id=$1',`(${readers.join(' OR ')})`];
+    if(inbox){
+      const choices:string[]=[];
+      for(const d of workflowDefinitions)for(const t of d.transitions)if(actor.roles.includes(t.role))choices.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''})`);
+      where.push(choices.length?`(${choices.join(' OR ')})`:'false');
+    }
+    if(query.definitionId)where.push(`definition_id=${bind(query.definitionId)}`);
+    if(query.state)where.push(`state=${bind(query.state)}`);
+    if(query.q)where.push(`strpos(lower(title),lower(${bind(query.q)}))>0`);
+    const rows=(await pool.query(`SELECT ${runColumns} FROM workflow_runs WHERE ${where.join(' AND ')} ORDER BY updated_at DESC,id DESC LIMIT ${bind(query.limit+1)} OFFSET ${bind(query.offset)}`,values)).rows.map(serializeRun);
+    return pageResult(await taskIds(rows),query);
+  }
   async function get(id:string,actor:WorkflowActor):Promise<WorkflowRun> {
     const result=await pool.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2`,[id,actor.organizationId]);
     if(!result.rows[0]) throw new WorkflowError(404,'Không tìm thấy quy trình.');
     const run=serializeRun(result.rows[0]);
     if(!canReadRun(definition(run),run,actor)) throw new WorkflowError(404,'Không tìm thấy quy trình.');
-    return run;
+    return (await taskIds([run]))[0];
   }
   return {
-    get,
+    get,listPage,
     async create(value,actor,key) {
       const def=getDefinition(value.definitionId);
       if(!def) throw new WorkflowError(400,'Quy trình không tồn tại.');
       if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole)) throw new WorkflowError(403,'Không có quyền tạo quy trình.');
-      const input=validateInput(def.startFields,value.input),hash=fingerprint({...value,input});
+      const input=validateInput(def.startFields,value.input,def.optionalStartFields),hash=fingerprint({...value,input});
       return transaction(pool,async client=>{
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify([actor.organizationId,actor.subject,key])]);
         const replay=(await client.query('SELECT fingerprint,result FROM workflow_starts WHERE organization_id=$1 AND actor_id=$2 AND key=$3',[actor.organizationId,actor.subject,key])).rows[0];
         if(replay){if(replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
-        await validateReferences(client,def.startFields,input,actor);
+        const referenceFields={...def.startFields,...def.optionalStartFields};
+        if(def.assignedReader)delete referenceFields[def.assignedReader.field];
+        await validateReferences(client,referenceFields,input,actor);
+        await checkAssigned(client,def,input,actor);
         const id=randomUUID();
         await client.query('INSERT INTO records(id,title,owner_id,organization_id) VALUES($1,$2,$3,$4)',[id,value.title,actor.subject,actor.organizationId]);
         const row=(await client.query(`INSERT INTO workflow_runs(id,definition_id,definition_version,title,owner_id,organization_id,state,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${runColumns}`,[id,def.id,def.version,value.title,actor.subject,actor.organizationId,def.initialState,JSON.stringify(input)])).rows[0];
         const run=serializeRun(row);
         await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,to_state,version) VALUES($1,$2,$3,$4,$5,1)',[randomUUID(),id,actor.subject,'create',def.initialState]);
-        await attachFiles(client,id,def.startFields,input);
+        await attachFiles(client,id,{...def.startFields,...def.optionalStartFields},input);
         await client.query('INSERT INTO workflow_starts(organization_id,actor_id,key,fingerprint,run_id,result) VALUES($1,$2,$3,$4,$5,$6)',[actor.organizationId,actor.subject,key,hash,id,JSON.stringify(run)]);
         return run;
       });
@@ -90,10 +124,23 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
         if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
         planTransition(def,run,actor,{...value,input});
         await validateReferences(client,transition.fields,input,actor);
+        if(transition.task)await checkAssigned(client,def,run.data,actor);
         const next=serializeRun((await client.query(`UPDATE workflow_runs SET state=$1,version=version+1,data=data||$2::jsonb,updated_at=now() WHERE id=$3 RETURNING ${runColumns}`,[transition.to,JSON.stringify(input),id])).rows[0]);
         const eventId=randomUUID();
         await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,from_state,to_state,version) VALUES($1,$2,$3,$4,$5,$6,$7)',[eventId,id,actor.subject,transition.id,run.state,next.state,next.version]);
         await attachFiles(client,id,transition.fields,input);
+        if(transition.task==='assign') {
+          const assigned=def.assignedReader!;
+          const taskId=randomUUID();
+          await client.query('INSERT INTO foundation_tasks(id,title,organization_id,assignee_id,created_by,record_id) VALUES($1,$2,$3,$4,$5,$6)',[taskId,next.title,actor.organizationId,next.data[assigned.field],next.ownerId,id]);
+          await client.query('INSERT INTO workflow_task_links(run_id,task_id) VALUES($1,$2)',[id,taskId]);
+          next.taskId=taskId;
+        }
+        if(transition.task==='complete') {
+          const task=(await client.query("UPDATE foundation_tasks SET status='completed',version=version+1,reason=$1,decided_by=$2,decided_at=now() WHERE id=(SELECT task_id FROM workflow_task_links WHERE run_id=$3) AND organization_id=$4 AND assignee_id=$2 AND status='pending' RETURNING id",[input.receiptNote??'',actor.subject,id,actor.organizationId])).rows[0];
+          if(!task)throw new WorkflowError(409,'Việc liên kết không khả dụng.');
+          next.taskId=task.id;
+        }
         if(transition.eventType) {
           const event:WorkflowEvent={eventId,eventType:transition.eventType,organizationId:actor.organizationId,runId:id,recordId:id,definitionId:def.id,version:next.version,occurredAt:next.updatedAt,data:next.data};
           await client.query('INSERT INTO workflow_jobs(id,run_id,organization_id,payload) VALUES($1,$2,$3,$4)',[eventId,id,actor.organizationId,JSON.stringify(event)]);
@@ -102,15 +149,7 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
         return next;
       });
     },
-    async list(actor,inbox) {
-      const readable=workflowDefinitions.filter(d=>d.readerRoles.some(r=>actor.roles.includes(r))).map(d=>`${d.id}:${d.version}`);
-      const anyStates:string[]=[],ownStates:string[]=[];
-      for(const d of workflowDefinitions)for(const t of d.transitions)if(actor.roles.includes(t.role))(t.ownerOnly?ownStates:anyStates).push(`${d.id}:${d.version}:${t.from}`);
-      const filter=inbox?" AND ((definition_id||':'||definition_version||':'||state)=ANY($4::text[]) OR (owner_id=$2 AND (definition_id||':'||definition_version||':'||state)=ANY($5::text[])))":'';
-      const params:unknown[]=[actor.organizationId,actor.subject,readable];if(inbox)params.push(anyStates,ownStates);
-      const rows=(await pool.query(`SELECT ${runColumns} FROM workflow_runs WHERE organization_id=$1 AND (owner_id=$2 OR (definition_id||':'||definition_version)=ANY($3::text[]))${filter} ORDER BY updated_at DESC LIMIT 100`,params)).rows;
-      return rows.map(serializeRun).filter(r=>!inbox||availableTransitions(definition(r),r,actor).length>0);
-    },
+    async list(actor,inbox) {return (await listPage(actor,inbox,{limit:100,offset:0,q:''})).items;},
     async history(id,actor) {
       await get(id,actor);
       const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version LIMIT 100',[id])).rows;

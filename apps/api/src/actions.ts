@@ -9,8 +9,9 @@ import { verifyIdentity, type IdentityConfig } from './identity.js';
 import type { RecordRepository } from './records.js';
 import type { FoundationRepository, Scope } from './foundation.js';
 import { resolveRecordLink, RecordLinkError } from './record-link.js';
+import { requireAssignee, DirectoryError, type DirectoryOptions } from './directory.js';
 
-interface Options { identity?: IdentityConfig; records?: RecordRepository; foundation?: FoundationRepository }
+interface Options extends DirectoryOptions { identity?: IdentityConfig; records?: RecordRepository; foundation?: FoundationRepository }
 interface RegisteredAction {
   descriptor: ActionDescriptor;
   available: boolean;
@@ -35,6 +36,7 @@ export function registerActions(app: FastifyInstance, options: Options) {
       async execute(value, scope) {
         const input = parseTaskCreateInput(value);
         if (!input) throw new InvalidInput();
+        await requireAssignee(input.assigneeId,scope,options.directory);
         const recordId = await resolveRecordLink(input.recordId, scope, options.records);
         if (recordId) input.recordId = recordId;
         return options.foundation!.createTask({ ...input, organizationId: scope.organizationId, createdBy: scope.subject });
@@ -68,7 +70,7 @@ export function registerActions(app: FastifyInstance, options: Options) {
         const response: ActionRunResult = { actionId: action.descriptor.id, version: action.descriptor.version, status: 'succeeded', result };
         return response;
       } catch (error) {
-        if (error instanceof RecordLinkError) return reply.code(error.statusCode).send({error: error.message});
+        if (error instanceof RecordLinkError || error instanceof DirectoryError) return reply.code(error.statusCode).send({error: error.message});
         if (error instanceof InvalidInput) return reply.code(400).send({ error: 'Input không đúng cấu trúc action.' });
         throw error;
       }

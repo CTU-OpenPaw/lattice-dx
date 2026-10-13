@@ -2,6 +2,7 @@
 import { test, expect } from 'vitest';
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from 'jose';
 import { createApi } from './app';
+import { unitDirectory } from './directory-fixture';
 import type { FoundationRepository } from './foundation';
 
 const { privateKey, publicKey } = await generateKeyPair('RS256');
@@ -26,7 +27,7 @@ function setup() {
     records: { async list() { return []; }, async create(title, ownerId, organizationId) {
       const record = { id: 'record-1', title, ownerId, organizationId, createdAt: '2026-10-12T00:00:00Z' };
       writes.push(record); return record;
-    } }, foundation });
+    } }, foundation, directory:unitDirectory });
   return { app, writes };
 }
 

@@ -4,6 +4,10 @@ import { verifyIdentity, type IdentityConfig } from './identity.js';
 import type { RecordRepository } from './records.js';
 import { resolveRecordLink, RecordLinkError } from './record-link.js';
 import type { WorkflowActor } from '@dx/contracts';
+import { isRecordId } from '@dx/contracts';
+import { PageError,parsePage,textFilter,type Page,type PageQuery } from './pagination.js';
+export type TaskQuery=PageQuery & {status?:string;recordId?:string};
+import { requireAssignee, DirectoryError, type DirectoryOptions } from './directory.js';
 export type Scope = {subject:string; organizationId:string};
 export type TaskInput = {title:string;assigneeId:string;organizationId:string;createdBy:string;recordId?:string};
 export type Task = Omit<TaskInput,'recordId'> & {id:string;status:string;version:number;recordId?:string|null};
@@ -12,18 +16,21 @@ export type FileInput = {filename:string;ownerId:string;organizationId:string;co
 export type FileItem = Omit<FileInput,'content'|'recordId'> & {id:string;size:number;scanStatus:ScanStatus;recordId?:string|null};
 export interface FoundationRepository {
   listTasks(scope:Scope):Promise<Task[]>;
+  listTasksPage?(scope:Scope,query:TaskQuery):Promise<Page<Task>>;
+  readTask?(id:string,scope:Scope):Promise<Task|undefined>;
+  readTaskFile?(id:string,scope:Scope):Promise<(FileItem&{content:Buffer})|undefined>;
   createTask(input:TaskInput):Promise<Task>;
   decideTask(id:string,scope:Scope,decision:'approve'|'reject',reason:string,version:number):Promise<Task|undefined>;
   createFile(input:FileInput):Promise<FileItem>;
   markFile(id:string,status:ScanStatus):Promise<void>;
   readFile(id:string,scope:Scope):Promise<(FileItem & {content:Buffer})|undefined>;
 }
-export type FoundationOptions = {identity?:IdentityConfig; records?:RecordRepository; foundation?:FoundationRepository;readSharedFile?:(id:string,actor:WorkflowActor)=>Promise<(FileItem&{content:Buffer})|undefined>;scan?:(content:Buffer)=>Promise<'clean'|'rejected'>};
+export type FoundationOptions = DirectoryOptions & {identity?:IdentityConfig; records?:RecordRepository; foundation?:FoundationRepository;readSharedFile?:(id:string,actor:WorkflowActor)=>Promise<(FileItem&{content:Buffer})|undefined>;scan?:(content:Buffer)=>Promise<'clean'|'rejected'>};
 export function registerFoundation(app:FastifyInstance,options:FoundationOptions){
   // This authorization applies before accessing every task/file repository method.
   app.register(async routes=>{
     routes.setErrorHandler((error, _req, reply) => {
-      if (error instanceof RecordLinkError) return reply.code(error.statusCode).send({error: error.message});
+      if (error instanceof RecordLinkError || error instanceof DirectoryError || error instanceof PageError) return reply.code(error.statusCode).send({error: error.message});
       return reply.send(error);
     });
     routes.addHook('preHandler',async(req,reply)=>{
@@ -38,11 +45,22 @@ export function registerFoundation(app:FastifyInstance,options:FoundationOptions
     });
     const scopes=new WeakMap<object,WorkflowActor>();
     const repo=options.foundation!;
-    routes.get('/v1/tasks',async(req)=>({items:await repo.listTasks(scopes.get(req)!)}));
+    routes.get<{Querystring:Record<string,unknown>}>('/v1/tasks',async req=>{
+      const query={...parsePage(req.query),status:textFilter(req.query.status),recordId:textFilter(req.query.recordId)};
+      if(query.recordId&&!isRecordId(query.recordId))throw new PageError('recordId phải là UUID.');
+      if(repo.listTasksPage)return repo.listTasksPage(scopes.get(req)!,query);
+      return {items:await repo.listTasks(scopes.get(req)!)};
+    });
+    routes.get<{Params:{id:string}}>('/v1/tasks/:id',async(req,reply)=>{
+      if(!isRecordId(req.params.id))return reply.code(400).send({error:'Task ID phải là UUID.'});
+      if(!repo.readTask)return reply.code(503).send({error:'Task detail chưa cấu hình.'});
+      return await repo.readTask(req.params.id,scopes.get(req)!)??reply.code(404).send({error:'Không tìm thấy task.'});
+    });
     routes.post<{Body:{title?:unknown;assigneeId?:unknown;recordId?:unknown}}>('/v1/tasks',async(req,reply)=>{
       const {title,assigneeId}=req.body??{};
       if(typeof title!=='string'||!title.trim()||title.length>200||typeof assigneeId!=='string'||!assigneeId.trim()||assigneeId.length>100)return reply.code(400).send({error:'Title/assignee không hợp lệ.'});
       const scope=scopes.get(req)!;
+      await requireAssignee(assigneeId,scope,options.directory);
       const recordId=await resolveRecordLink(req.body?.recordId,scope,options.records);
       return reply.code(201).send(await repo.createTask({title:title.trim(),assigneeId,organizationId:scope.organizationId,createdBy:scope.subject,...(recordId?{recordId}:{})}));
     });
@@ -68,12 +86,12 @@ export function registerFoundation(app:FastifyInstance,options:FoundationOptions
       return reply.code(201).send({...file,scanStatus:status});
     });
     routes.get<{Params:{id:string}}>('/v1/files/:id',async(req,reply)=>{
-      const file=await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!);
+      const file=await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!)??await repo.readTaskFile?.(req.params.id,scopes.get(req)!);
       if(!file)return reply.code(404).send({error:'Không tìm thấy tệp.'});
       const {content,...metadata}=file;return metadata;
     });
     routes.get<{Params:{id:string}}>('/v1/files/:id/content',async(req,reply)=>{
-      const file=await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!);
+      const file=await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!)??await repo.readTaskFile?.(req.params.id,scopes.get(req)!);
       if(!file)return reply.code(404).send({error:'Không tìm thấy tệp.'});
       if(file.scanStatus!=='clean')return reply.code(409).send({error:'Tệp chưa được phép sử dụng.'});
       return reply.type('application/octet-stream').header('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}`).header('X-Content-Type-Options','nosniff').send(file.content);

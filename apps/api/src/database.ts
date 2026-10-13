@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { Pool } from 'pg';
+import { createDirectoryDatabase } from './directory-database.js';
+import { pageResult } from './pagination.js';
 import type { RecordItem, RecordRepository } from './records.js';
 import { foundationDatabase } from './foundation-database.js';
 import { workflowDatabase } from './workflows/database.js';
@@ -20,6 +22,17 @@ export async function connectRecords(connectionString: string) {
     return { ...row, createdAt: new Date(row.createdAt).toISOString() };
   }
   const repository: RecordRepository = {
+    async listPage(subject,organizationId,query) {
+      const rows=(await pool.query(`SELECT ${columns} FROM records r WHERE organization_id=$1 AND
+        (owner_id=$2 OR (NOT EXISTS(SELECT 1 FROM workflow_runs w WHERE w.id=r.id) AND EXISTS(SELECT 1 FROM foundation_tasks t WHERE t.record_id=r.id AND t.organization_id=$1 AND t.assignee_id=$2 AND t.created_by=r.owner_id)))
+        AND ($3='' OR strpos(lower(title),lower($3))>0) ORDER BY created_at DESC,id DESC LIMIT $4 OFFSET $5`,[organizationId,subject,query.q,query.limit+1,query.offset])).rows.map(serialize);
+      return pageResult(rows,query);
+    },
+    async findReadable(id,subject,organizationId) {
+      const rows=(await pool.query(`SELECT ${columns} FROM records r WHERE id::text=$1 AND organization_id=$3 AND
+        (owner_id=$2 OR (NOT EXISTS(SELECT 1 FROM workflow_runs w WHERE w.id=r.id) AND EXISTS(SELECT 1 FROM foundation_tasks t WHERE t.record_id=r.id AND t.organization_id=$3 AND t.assignee_id=$2 AND t.created_by=r.owner_id)))`,[id.toLowerCase(),subject,organizationId])).rows;
+      return rows[0]?serialize(rows[0]):undefined;
+    },
     async find(id, ownerId, organizationId) {
       const result = await pool.query(`SELECT ${columns} FROM records WHERE id::text=$1 AND owner_id=$2 AND organization_id=$3`, [id.toLowerCase(), ownerId, organizationId]);
       return result.rows[0] ? serialize(result.rows[0]) : undefined;
@@ -34,9 +47,10 @@ export async function connectRecords(connectionString: string) {
     },
   };
   try {
+    const directory=await createDirectoryDatabase(pool);
     const foundation=await foundationDatabase(pool);
     const workflows=await workflowDatabase(pool);
-    return {repository,foundation,workflows,jobs:workflowJobDatabase(pool),close:()=>pool.end()};
+    return {repository,foundation,directory,workflows,jobs:workflowJobDatabase(pool),close:()=>pool.end()};
   }
   catch(error){await pool.end();throw error;}
 }
