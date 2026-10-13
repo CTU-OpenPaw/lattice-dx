@@ -6,6 +6,7 @@ import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { availableTransitions, parseCreate, parseCommand, WorkflowError } from './policy.js';
 import type { WorkflowRepository } from './types.js';
 import { PageError,pageResult,parsePage,textFilter } from '../pagination.js';
+import { parseCompletion } from './completion-policy.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository;definitionRegistry?:DefinitionRegistry};
 function idempotencyKey(req:FastifyRequest):string {
   const key=req.headers['idempotency-key'];
@@ -34,6 +35,15 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       actors.set(req,{...identity,organizationId:identity.organizationId});
     });
     const repo=options.workflows!;
+    routes.post<{Params:{id:string}}>('/v1/workflow-waits/:id/complete',async req=>{
+      const value=parseCompletion(req.body);if(!value)throw new WorkflowError(400,'Dữ liệu hoàn thành không hợp lệ.');
+      if(!repo.completeWait)throw new WorkflowError(503,'Workflow completion chưa cấu hình.');
+      return repo.completeWait(workflowId(req.params.id),value,actors.get(req)!,idempotencyKey(req));
+    });
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/waits',async req=>{
+      if(!repo.listWaits)throw new WorkflowError(503,'Workflow waits chưa cấu hình.');
+      return repo.listWaits(workflowId(req.params.id),actors.get(req)!,parsePage(req.query));
+    });
     routes.get('/v1/workflow-blocks',async req=>({items:[
       {id:'records.create',version:1,title:'Create record',requiredRole:'records:write'},
       {id:'tasks.create',version:1,title:'Create task',requiredRole:'tasks:assign'},

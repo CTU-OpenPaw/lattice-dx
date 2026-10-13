@@ -75,6 +75,8 @@ Giao việc theo phòng ban lọc active + đúng đơn vị + department + role
 
 Task được tạo là task foundation. Nếu liên kết record, backend kiểm tra quyền sở hữu record của người tạo task; record vừa tạo bằng block trước đáp ứng điều kiện này. Với record foundation độc lập, người nhận đọc đúng record qua cơ chế task sharing hiện có. Nếu liên kết record nền của workflow bằng context.recordId, người nhận vẫn cần quyền đọc workflow; task không tự mở quyền này. Nhận task không tự cấp quyền đọc toàn bộ workflow hay lịch sử block. Hoàn thành task foundation chưa tự chuyển trạng thái workflow; muốn phối hợp hai trạng thái cần cấu hình/adapter nghiệp vụ tiếp theo. Logistics vẫn giữ liên kết và hành vi riêng đã có.
 
+Đợt [Workflow completion](workflow-completion.md) cho phép khai báo `wait` trên task/connector block cuối. Khi đó task và workflow được hoàn thành đồng thời qua API completion; task không khai báo wait vẫn giữ hành vi foundation ở trên.
+
 ## Kết quả chạy và adapter
 
 `GET /v1/workflows/:id/executions?limit=50&offset=0` trả `{items:[...],page}` với `runId`, `version`, `stepId`, `stepIndex`, `actorId`, `action`, `input`, `result`, `occurredAt`. Thứ tự theo version và stepIndex thực thi, không theo tên block. Chỉ người có quyền đọc workflow được xem. Đọc trạng thái outbox bằng endpoint `/sync` hiện có; retry vẫn cần `workflow:sync`.

@@ -6,6 +6,8 @@ import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { authorizeTransition, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
 import { executeBlocks } from './block-database.js';
 import { createWorkflowTables } from './schema.js';
+import { waitDatabase } from './waits-database.js';
+import { numericPattern } from './completion-policy.js';
 import type { WorkflowRepository } from './types.js';
 import { pageResult, type PageQuery } from '../pagination.js';
 
@@ -49,7 +51,8 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
   async function taskIds(runs:WorkflowRun[],client:Pool|PoolClient=pool) {
     if(!runs.length)return runs;
     const links=(await client.query('SELECT run_id,task_id FROM workflow_task_links WHERE run_id=ANY($1::uuid[])',[runs.map(r=>r.id)])).rows;
-    return runs.map(r=>({...r,...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
+    const waits=(await client.query("SELECT run_id FROM workflow_waits WHERE run_id=ANY($1::uuid[]) AND status='pending'",[runs.map(r=>r.id)])).rows;
+    return runs.map(r=>({...r,waiting:waits.some(w=>w.run_id===r.id),...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
   }
   async function checkAssigned(client:PoolClient,def:WorkflowDefinition,data:Record<string,string>,actor:WorkflowActor) {
     if(!def.assignedReader)return;
@@ -67,7 +70,18 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     const where=['organization_id=$1',`(${readers.join(' OR ')})`];
     if(inbox){
       const choices:string[]=[];
-      for(const d of workflowDefinitions)for(const t of d.transitions)if(actor.roles.includes(t.role))choices.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''})`);
+      for(const d of workflowDefinitions)for(const t of d.transitions)if(actor.roles.includes(t.role)) {
+        let guard='';
+        if(t.condition) {
+          const field=bind(t.condition.field), raw=`data->${field}`, text=`data->>${field}`;
+          const typed=`jsonb_typeof(${raw})='string'`;
+          if(t.condition.operator==='exists') guard=` AND (${typed} AND length(${text})>0)`;
+          else if(t.condition.operator==='eq') guard=` AND (${typed} AND ${text}=${bind(t.condition.value)})`;
+          else guard=` AND (CASE WHEN ${typed} AND length(${text})<=20 AND ${text} ~ ${bind(numericPattern)} AND ${text} !~ '[^0-9.-]' THEN (${text})::double precision>${bind(t.condition.value)}::double precision ELSE false END)`;
+        }
+        choices.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''}${guard})`);
+      }
+      where.push("NOT EXISTS(SELECT 1 FROM workflow_waits w WHERE w.run_id=workflow_runs.id AND w.status='pending')");
       where.push(choices.length?`(${choices.join(' OR ')})`:'false');
     }
     if(query.definitionId)where.push(`definition_id=${bind(query.definitionId)}`);
@@ -84,7 +98,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     return (await taskIds([run]))[0];
   }
   return {
-    get,listPage,
+    get,listPage,...waitDatabase(pool,get),
     async create(value,actor,key) {
       return transaction(pool,async client=>{
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify([actor.organizationId,actor.subject,key])]);
@@ -120,6 +134,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         const input=validateInput(transition.fields,value.input),hash=fingerprint({...value,input});
         const replay=(await client.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
         if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
+        run.waiting=!!(await client.query("SELECT 1 FROM workflow_waits WHERE run_id=$1 AND status='pending'",[id])).rowCount;
         planTransition(def,run,actor,{...value,input});
         await validateReferences(client,transition.fields,input,actor,run=>definition(run,client));
         if(transition.task)await checkAssigned(client,def,run.data,actor);
@@ -143,7 +158,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
           const event:WorkflowEvent={eventId,eventType:transition.eventType,organizationId:actor.organizationId,runId:id,recordId:id,definitionId:def.id,version:next.version,occurredAt:next.updatedAt,data:next.data};
           await client.query('INSERT INTO workflow_jobs(id,run_id,organization_id,payload) VALUES($1,$2,$3,$4)',[eventId,id,actor.organizationId,JSON.stringify(event)]);
         }
-        await executeBlocks(client,transition.steps ?? [],next,input,actor);
+        await executeBlocks(client,transition.steps ?? [],next,input,actor,transition.wait);
         await client.query('INSERT INTO workflow_commands(run_id,key,actor_id,fingerprint,result) VALUES($1,$2,$3,$4,$5)',[id,key,actor.subject,hash,JSON.stringify(next)]);
         return next;
       });
@@ -168,7 +183,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         const hash=fingerprint({action:'sync.retry',expectedVersion:0,input:{}});
         const replay=(await client.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
         if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result.retried;}
-        const count=(await client.query("UPDATE workflow_jobs SET status='pending',attempts=0,available_at=now(),lease_until=NULL,lease_token=NULL,last_error=NULL WHERE run_id=$1 AND organization_id=$2 AND status='failed'",[id,actor.organizationId])).rowCount??0;
+        const count=(await client.query("UPDATE workflow_jobs SET status='pending',attempts=0,available_at=now(),lease_until=NULL,lease_token=NULL,last_error=NULL WHERE run_id=$1 AND organization_id=$2 AND status='failed' AND NOT EXISTS(SELECT 1 FROM workflow_waits w WHERE w.id=workflow_jobs.id AND w.status<>'pending')",[id,actor.organizationId])).rowCount??0;
         await client.query('INSERT INTO workflow_commands(run_id,key,actor_id,fingerprint,result) VALUES($1,$2,$3,$4,$5)',[id,key,actor.subject,hash,JSON.stringify({retried:count})]);
         return count;
       });
@@ -183,3 +198,5 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     },
   };
 }
+
+

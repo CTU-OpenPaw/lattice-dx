@@ -1,5 +1,18 @@
 # Verification — 2026-10-13
 
+## Durable completion và guard
+
+- `pnpm check` cuối đạt **175 tests / 25 files**, typecheck và build; baseline 166 tests / 23 files. Completion policy/repository/config tests xác minh ký quyền, resource identity, result schema, locked ordering, exact key replay, minimal receipt và deadline. Status/operator array không được coi là enum string. Numeric guard nhận plain decimal hữu hạn tối đa 20 ký tự, JS/SQL khớp; CASE bảo vệ SQL cast. Regression newline positiveInteger đã qua với policy hiện có, không cần đổi production regex.
+- `pnpm test:workflow-completion` đạt trên Gateway/Keycloak/PostgreSQL thật: task và wait cùng commit, restart API khi pending vẫn giữ yêu cầu, generic task decision bị chặn, early transition/inbox không được chạy, IT nhận completion receipt không có workflow data, duplicate key trả receipt cũ, payload khác/actor sai/connector sai bị chặn. Connector callback đồng thời chỉ một kết quả được nhận. Worker thực tế settle wait hai giây và chặn callback muộn.
+- Demo cuối: run `64950f04-21cd-4baa-8f5d-c28ba7f5018d`, task `22997921-57aa-491d-bbc0-912fd43c1392`, connector event `e98072e9-8398-42d0-8c21-79b89516332c`. Acceptance cuối xác minh authorized failure evidence và guard SQL với scientific/Infinity/control character/numeric JSON/null. Dữ liệu REST demo giữ; private schema SQL có tên UUID được kiểm tra rồi drop.
+- SQL private pool một connection kiểm tra năm completion khác nhau chỉ một thành công, task/run/audit đúng version, failed result, late callback bị từ chối trước timeout settle, reinitialize repository vẫn xử lý deadline lưu bền vững. Callback receipt không cấp quyền đọc wait listing; listing được quyền có failure reason để UI hiển thị.
+- Independent review không critical/important finding; targeted 8 tests qua trước evidence closure. Hai giới hạn ghi nhận: read có thể là snapshot cũ khi concurrent completion (mutation vẫn kiểm tra version dưới lock); timeout batch có thể dừng nếu DBA trực tiếp làm lệch task/run mà API hỗ trợ không tạo ra.
+- Docker build từng gặp TLS handshake timeout khi lấy metadata Node image, retry thành công; không reset Desktop/volume. Lượt SQL smoke đầu lỗi escape quote trong script eval; sửa sang parameterized status query rồi acceptance qua. Không kết luận đây là lỗi runtime workflow.
+- Regression cuối Studio, blocks, Logistics và source workflows đạt: Logistics `a89be6b2-8876-4aa4-ac2f-5ac427f14c2d`, procurement `8083bf8a-b7bf-4f52-a63e-bfd8c37f1dde`, onboarding `dda5b3fe-10c2-4736-800a-768b0853e4e4`. Legacy task/state/outbox/manual retry vẫn hoạt động.
+- Không thêm dependency/framework, không sửa upstream hoặc tick Notion/merge/release. Completion tự chuyển trạng thái, không tự chạy action với owner-role snapshot. Adapter nghiệp vụ và Studio UI vẫn cần Hưng/Nhi nối; timeout không bảo đảm hủy side effect bên ngoài.
+
+Hợp đồng: [Workflow completion](workflow-completion.md).
+
 ## Workflow blocks và giao việc theo phòng ban
 
 - `pnpm check` cuối đạt **166 tests / 23 files**, typecheck và build. Baseline increment trước 150 tests. RED đã quan sát cho block schema, runtime thiếu module, department catalogue, nested audit payload, step ordinal, malformed transition và chọn người trong phòng ban. Review phát hiện transition null có thể gây 500; validator chuyển sang hai lượt kiểm tra để trả 400.

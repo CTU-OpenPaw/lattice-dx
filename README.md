@@ -21,6 +21,8 @@ Giao việc hiện cần directory đã đồng bộ: sau `pnpm identity:sync-lo
 
 Mở rộng engine bằng cấu hình quy trình: [hợp đồng Workflow Studio](docs/workflow-studio.md), smoke `pnpm test:workflow-studio`. Bản nháp được quản lý theo đơn vị, publish tạo phiên bản bất biến; hồ sơ đang chạy giữ phiên bản ban đầu. [Workflow blocks](docs/workflow-blocks.md) bổ sung tạo hồ sơ, giao việc theo người/phòng ban và outbox connector; smoke `pnpm test:workflow-blocks`. Studio UI và adapter ngoài cần tích hợp tiếp.
 
+[Workflow completion](docs/workflow-completion.md) bổ sung chờ kết quả task/connector, callback theo quyền, deadline bền vững và guard eq/gt/exists; thử `pnpm test:workflow-completion`. Completion tự chuyển trạng thái đã cấu hình; action ở bước tiếp vẫn cần quyền của người gọi.
+
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 
 Cấu hình này dùng mật khẩu PUBLIC cho môi trường local, được ghi rõ trong hướng dẫn. Không dùng cấu hình này để triển khai Internet. Xem [nguồn và giấy phép](docs/third-party.md).

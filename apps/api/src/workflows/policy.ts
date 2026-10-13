@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { isRecordId, type WorkflowActor, type WorkflowDefinition, type WorkflowRun, type WorkflowTransition, type WorkflowField, type TransitionCommand, type CreateWorkflow } from '@dx/contracts';
+import { conditionMatches } from './completion-policy.js';
 export class WorkflowError extends Error {
   constructor(public readonly statusCode:400|403|404|409|503,message:string){super(message);}
 }
@@ -41,12 +42,12 @@ export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRu
     ||transition.assigneeField&&run.data[transition.assigneeField]!==actor.subject)throw new WorkflowError(403,'Không có quyền thực hiện bước.');
 }
 export function availableTransitions(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor){
-  return def.transitions.filter(t=>t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
+  return def.transitions.filter(t=>!run.waiting&&conditionMatches(t.condition,run.data)&&t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
 }
 export function planTransition(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand){
   const transition=def.transitions.find(t=>t.id===command.action);
   if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
   authorizeTransition(transition,run,actor);
-  if(run.state!==transition.from||run.version!==command.expectedVersion)throw new WorkflowError(409,'Trạng thái hoặc phiên bản không phù hợp.');
+  if(run.waiting||!conditionMatches(transition.condition,run.data)||run.state!==transition.from||run.version!==command.expectedVersion)throw new WorkflowError(409,'Trạng thái hoặc phiên bản không phù hợp.');
   return {transition,input:validateInput(transition.fields,command.input)};
 }
