@@ -2,6 +2,7 @@
 import { test, expect } from 'vitest';
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from 'jose';
 import { createApi } from './app';
+import { unitDirectory } from './directory-fixture';
 import type { TaskInput, FileInput, FileItem, FoundationRepository } from './foundation';
 
 // Real PostgreSQL integration runs separately through the gateway smoke script.
@@ -35,7 +36,7 @@ function configured(scan:()=>Promise<'clean'|'rejected'>=async()=> 'clean') {
     async markFile(id,status) {if(stored)stored.scanStatus=status;},
     async readFile(id,scope) { return stored?.id===id&&stored.organizationId===scope.organizationId&&stored.ownerId===scope.subject?stored:undefined; },
   };
-  return {app:createApi({workerUrl:'http://localhost:1',identity:{key,issuer:'https://identity.test',audience:'dx-api'},foundation:repository,scan}),writes:()=>writes};
+  return {app:createApi({workerUrl:'http://localhost:1',identity:{key,issuer:'https://identity.test',audience:'dx-api'},foundation:repository,directory:unitDirectory,scan}),writes:()=>writes};
 }
 test('task assignment requires a specific role and signed organization scope', async()=>{
   const {app,writes}=configured();

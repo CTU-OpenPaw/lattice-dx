@@ -30,7 +30,7 @@ for(const fixture of realm.users){
   if(!users.length){await call('users','POST',fixture);users=await call(`users?username=${encodeURIComponent(fixture.username)}&exact=true`);}
   if(users.length!==1)throw new Error('Fixture user lookup is ambiguous');
   const user=await call(`users/${users[0].id}`);
-  await call(`users/${user.id}`,'PUT',{...user,firstName:user.firstName||fixture.firstName,lastName:user.lastName||fixture.lastName,attributes:{...user.attributes,...fixture.attributes}});
+  await call(`users/${user.id}`,'PUT',{...user,firstName:user.firstName||fixture.firstName,lastName:user.lastName||fixture.lastName,...(!user.email&&fixture.email?{email:fixture.email}:{}),attributes:{...user.attributes,...fixture.attributes}});
   const roles=await Promise.all(fixture.realmRoles.map(name=>call(`roles/${encodeURIComponent(name)}`)));
   await call(`users/${user.id}/role-mappings/realm`,'POST',roles);
 }

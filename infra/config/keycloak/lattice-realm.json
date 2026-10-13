@@ -48,6 +48,15 @@
       },
       {
         "name": "department:administration"
+      },
+      {
+        "name": "directory:read"
+      },
+      {
+        "name": "logistics:sales"
+      },
+      {
+        "name": "logistics:warehouse"
       }
     ]
   },
@@ -123,7 +132,9 @@
         "files:read",
         "files:write",
         "employee",
-        "workflow:start"
+        "workflow:start",
+        "directory:read",
+        "logistics:sales"
       ],
       "attributes": {
         "organization_id": [
@@ -197,7 +208,11 @@
       "realmRoles": [
         "department:warehouse",
         "files:read",
-        "files:write"
+        "files:write",
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:decide",
+        "records:read"
       ],
       "attributes": {
         "organization_id": [
@@ -222,7 +237,11 @@
       "realmRoles": [
         "department:warehouse",
         "files:read",
-        "files:write"
+        "files:write",
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:decide",
+        "records:read"
       ],
       "attributes": {
         "organization_id": [
@@ -330,6 +349,91 @@
       },
       "firstName": "receiver",
       "lastName": "Demo"
+    },
+    {
+      "username": "sales2",
+      "firstName": "sales2",
+      "lastName": "Demo",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-sales2-password",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "realmRoles": [
+        "logistics:sales",
+        "workflow:start",
+        "directory:read",
+        "records:read",
+        "records:write",
+        "tasks:read",
+        "tasks:assign",
+        "files:read",
+        "files:write"
+      ],
+      "email": "sales2@local.invalid"
+    },
+    {
+      "username": "warehouse-b",
+      "firstName": "warehouse-b",
+      "lastName": "Demo",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-warehouse-b-password",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-b"
+        ]
+      },
+      "realmRoles": [
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:decide",
+        "records:read",
+        "files:read"
+      ],
+      "email": "warehouse-b@local.invalid"
+    },
+    {
+      "username": "disabled-demo",
+      "firstName": "disabled-demo",
+      "lastName": "Demo",
+      "enabled": false,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-disabled-demo-password",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "realmRoles": [
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:decide",
+        "records:read",
+        "files:read"
+      ],
+      "email": "disabled-demo@local.invalid"
     }
   ]
 }
