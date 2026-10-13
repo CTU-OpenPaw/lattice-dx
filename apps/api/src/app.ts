@@ -7,6 +7,7 @@ import { registerFoundation, type FoundationOptions } from './foundation.js';
 import { registerActions } from './actions.js';
 import { registerDirectory } from './directory-routes.js';
 import { registerWorkflows, type WorkflowOptions } from './workflows/routes.js';
+import { registerWorkflowDrafts } from './workflows/registry-routes.js';
 import { registerLogistics } from './logistics.js';
 import { isRecordId } from '@dx/contracts';
 import { parsePage } from './pagination.js';
@@ -17,6 +18,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerActions(app,options);
   registerDirectory(app,options);
   registerWorkflows(app,options);
+  registerWorkflowDrafts(app,options);
   registerLogistics(app,options);
   app.route({
     method: ['GET', 'POST'], url: '/v1/records',

@@ -4,6 +4,7 @@ import { createDirectoryDatabase } from './directory-database.js';
 import { pageResult } from './pagination.js';
 import type { RecordItem, RecordRepository } from './records.js';
 import { foundationDatabase } from './foundation-database.js';
+import { definitionDatabase } from './workflows/registry-database.js';
 import { workflowDatabase } from './workflows/database.js';
 import { workflowJobDatabase } from './workflows/job-database.js';
 export async function connectRecords(connectionString: string) {
@@ -49,8 +50,9 @@ export async function connectRecords(connectionString: string) {
   try {
     const directory=await createDirectoryDatabase(pool);
     const foundation=await foundationDatabase(pool);
-    const workflows=await workflowDatabase(pool);
-    return {repository,foundation,directory,workflows,jobs:workflowJobDatabase(pool),close:()=>pool.end()};
+    const definitionRegistry=await definitionDatabase(pool);
+    const workflows=await workflowDatabase(pool,definitionRegistry);
+    return {repository,foundation,directory,workflows,definitionRegistry,jobs:workflowJobDatabase(pool),close:()=>pool.end()};
   }
   catch(error){await pool.end();throw error;}
 }
