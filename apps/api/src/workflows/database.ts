@@ -198,5 +198,3 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     },
   };
 }
-
-

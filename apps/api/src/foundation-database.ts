@@ -39,4 +39,3 @@ export async function foundationDatabase(pool:Pool):Promise<FoundationRepository
     async readFile(id,s){return (await pool.query(`SELECT ${fc},content FROM foundation_files WHERE id::text=$1 AND owner_id=$2 AND organization_id=$3`,[id,s.subject,s.organizationId])).rows[0];},
   };
 }
-
