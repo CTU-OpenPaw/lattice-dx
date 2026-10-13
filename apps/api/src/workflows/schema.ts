@@ -22,6 +22,8 @@ export async function createWorkflowTables(pool:Pool) {
     `CREATE TABLE IF NOT EXISTS workflow_files (
       run_id uuid NOT NULL REFERENCES workflow_runs(id), file_id uuid NOT NULL REFERENCES foundation_files(id),
       PRIMARY KEY(run_id,file_id))`,
+    `CREATE TABLE IF NOT EXISTS workflow_task_links (
+      run_id uuid PRIMARY KEY REFERENCES workflow_runs(id), task_id uuid NOT NULL UNIQUE REFERENCES foundation_tasks(id))`,
     `CREATE TABLE IF NOT EXISTS workflow_members (
       organization_id text NOT NULL, subject text NOT NULL, PRIMARY KEY(organization_id,subject))`,
     `CREATE TABLE IF NOT EXISTS workflow_references (

@@ -3,6 +3,16 @@ import type { WorkflowDefinition } from '../../packages/contracts/src/workflows.
 // Immutable versions: changing a workflow requires a new version, not editing an active one.
 export const workflowDefinitions: WorkflowDefinition[] = [
   {
+    id:'logistics_order',version:1,title:'Đơn Logistics và giao kho',startRole:'logistics:sales',initialState:'draft',
+    startFields:{customerName:'text',deliveryAddress:'text',sku:'text',quantity:'positiveInteger',warehouseAssigneeId:'subject'},
+    optionalStartFields:{attachmentId:'file'},readerRoles:[],
+    assignedReader:{field:'warehouseAssigneeId',role:'logistics:warehouse',states:['submitted','received']},
+    transitions:[
+      {id:'submit',from:'draft',to:'submitted',role:'logistics:sales',ownerOnly:true,fields:{},task:'assign'},
+      {id:'receive',from:'submitted',to:'received',role:'logistics:warehouse',assigneeField:'warehouseAssigneeId',fields:{receiptNote:'text'},task:'complete'},
+    ],
+  },
+  {
     id:'procurement',version:1,title:'Mua sắm và bàn giao tài sản',startRole:'employee',initialState:'draft',startFields:{},
     readerRoles:['procurement:manager','department:warehouse','workflow:sync'],
     transitions:[

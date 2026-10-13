@@ -9,6 +9,7 @@ Từ root repo, với Node 24, pnpm và Docker Linux containers:
 ```powershell
 pnpm local:up
 pnpm identity:sync-local
+pnpm directory:sync-local
 pnpm workflow:seed-local
 pnpm test:workflows
 ```

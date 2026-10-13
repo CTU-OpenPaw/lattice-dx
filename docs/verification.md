@@ -1,3 +1,20 @@
+# Verification — 2026-10-13
+
+## Bổ sung backend cho UI Logistics
+
+- `pnpm check`: typecheck, **145 tests / 18 files**, workspace build đạt. Directory có lượt RED REST/action nhận assignee không hợp lệ và route thiếu, rồi GREEN; policy Logistics RED thiếu cấu hình, facade RED 404 trước triển khai, pagination RED thiếu module. Full suite giữ các regression workflow/action/file/bridge cũ.
+- `pnpm test:logistics` đã chạy thật Keycloak → APISIX → API → PostgreSQL. Directory dropdown theo role/department và page; REST/action chặn unknown/disabled/foreign assignee; Order draft không lộ cho kho, submit tạo một task, replay giữ taskId; đúng kho mở detail/file, cùng-role peer và org-b bị chặn. Hai receive cùng version chỉ một thành công, workflow và linked task hoàn thành cùng giao dịch; quyết định task riêng bị chặn. Task chung mở đúng record/file, không mở cả đơn vị.
+- Pagination acceptance seed 106 workflow/record/task fixture trong SQL, đọc 100 + 6 qua Order/workflow/task/record lists, kiểm tra không trùng ID, peer inbox không lộ. Chỉ fixture có UUID do script tạo được dọn, business demo giữ lại. Directory đã thử limit/offset và literal role/department filter; chưa tải hàng nghìn user thật từ Keycloak.
+- Lượt `pnpm test:logistics` cuối chạy riêng đạt exit 0, thêm kiểm tra optional attachment rejected bởi ClamAV và tệp của actor khác bị từ chối khi tạo đơn: order `358e6c6b-587a-4e15-8e38-737e95f51ad5`, linked task `60d9dbb2-dffd-45d2-8aed-1cc880a1e93c`, generic shared record `b43d38d3-8b94-489a-8f7e-c96fd5e21188`. Lượt trước chạy sát workflow smoke gặp 429 ở concurrent receive; không thay rate limit, chạy lại sau cửa sổ 60 giây.
+- `test:infra`, `test:foundation`, `test:actions`, `test:record-links`, `test:nocobase:bridge`, `test:workflows` đạt sau wiring. Procurement/onboarding và isolated real SQL outbox/manual retry tiếp tục đạt, chưa gọi n8n/broker thật.
+- Directory task review và whole-change review độc lập đều đạt, không finding important. Whole reviewer chạy lại 28 tests về facade/policy/pagination/record links; đọc SQL transaction/permission/lease integration. Directory reviewer chạy lại 64 tests. Các reviewer không tự chạy live acceptance, kết quả live là của lượt triển khai này.
+- Local Docker cần archive runtime socket cũ rồi startup bằng launcher hiện có. Directory pnpm process có một lần Windows fail-fast; chạy lại bằng Node và pnpm đều sync thành công. Fixture sales2 mới báo account not fully set up do thiếu email; thêm email local và sync chỉ điền email còn thiếu, không reset mật khẩu. Không kết luận Node/Docker upstream đã hết lỗi.
+- Không thêm dependency, không sửa upstream NocoBase, không tick Notion hoặc tự merge/release. Directory là admin snapshot, phải sync sau identity changes; generic task read giữ sau hoàn thành, chưa revoke/reassignment. Order một SKU, nhận việc chưa là xuất kho/giao hàng. UI/proxy NocoBase và broker/n8n vẫn chờ tích hợp.
+
+Hợp đồng đầy đủ: [Logistics UI handoff](logistics-ui-handoff.md), [directory](directory.md).
+
+---
+
 # Verification — 2026-10-12
 
 ## Duy — backend workflow giai đoạn 2

@@ -5,6 +5,7 @@ import { verifyIdentity, type IdentityConfig } from '../identity.js';
 import { getDefinition, workflowDefinitions } from '../../../../solutions/workflows/definitions.js';
 import { availableTransitions, parseCreate, parseCommand, WorkflowError } from './policy.js';
 import type { WorkflowRepository } from './types.js';
+import { PageError,parsePage,textFilter } from '../pagination.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository};
 function idempotencyKey(req:FastifyRequest):string {
   const key=req.headers['idempotency-key'];
@@ -23,7 +24,7 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
   app.register(async routes=>{
     const actors=new WeakMap<object,WorkflowActor>();
     routes.setErrorHandler((error,_request,reply)=>{
-      if(error instanceof WorkflowError)return reply.code(error.statusCode).send({error:error.message});
+      if(error instanceof WorkflowError||error instanceof PageError)return reply.code(error.statusCode).send({error:error.message});
       return reply.send(error);
     });
     routes.addHook('preHandler',async(req,reply)=>{
@@ -37,7 +38,7 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
     const repo=options.workflows!;
     routes.get('/v1/workflow-definitions',async req=>{
       const actor=actors.get(req)!;
-      return {items:workflowDefinitions.filter(d=>actor.roles.includes(d.startRole)||d.readerRoles.some(r=>actor.roles.includes(r)))};
+      return {items:workflowDefinitions.filter(d=>actor.roles.includes(d.startRole)||d.readerRoles.some(r=>actor.roles.includes(r))||!!d.assignedReader&&actor.roles.includes(d.assignedReader.role))};
     });
     routes.post('/v1/workflow-members/me',async req=>{
       if(req.body!==undefined&&(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||Object.keys(req.body).length))throw new WorkflowError(400,'Không nhận định danh từ body.');
@@ -52,9 +53,11 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
       return reply.code(201).send(view(await repo.create(input,actor,idempotencyKey(req)),actor));
     });
-    routes.get<{Querystring:{inbox?:string}}>('/v1/workflows',async req=>{
-      if(req.query.inbox!==undefined&&!['true','false'].includes(req.query.inbox))throw new WorkflowError(400,'inbox phải là true/false.');
+    routes.get<{Querystring:Record<string,unknown>}>('/v1/workflows',async req=>{
+      if(req.query.inbox!==undefined&&req.query.inbox!=='true'&&req.query.inbox!=='false')throw new WorkflowError(400,'inbox phải là true/false.');
       const actor=actors.get(req)!;
+      const query={...parsePage(req.query),state:textFilter(req.query.state),definitionId:textFilter(req.query.definitionId)};
+      if(repo.listPage){const result=await repo.listPage(actor,req.query.inbox==='true',query);return {...result,items:result.items.map(run=>view(run,actor))};}
       return {items:(await repo.list(actor,req.query.inbox==='true')).map(run=>view(run,actor))};
     });
     routes.get<{Params:{id:string}}>('/v1/workflows/:id',async req=>view(await repo.get(workflowId(req.params.id),actors.get(req)!),actors.get(req)!));
