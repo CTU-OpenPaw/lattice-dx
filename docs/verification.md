@@ -1,5 +1,17 @@
 # Verification — 2026-10-13
 
+## Bộ mẫu workflow — xuất, kiểm tra và nhập nguyên bộ
+
+- `pnpm check` đạt **183 tests / 27 files**, typecheck và workspace build. Policy/route có RED thiếu module và endpoint; live smoke trên image cũ RED 404 ở export, sau build/recreate API thì GREEN. Bộ mẫu giới hạn 1–10 custom definitions, 12,288 byte UTF-8 mỗi definition; HTTP request tối đa 131,072 byte. Test byte dùng cấu hình vẫn hợp lệ theo validator cơ sở để phân biệt đúng giới hạn, gồm ký tự nhiều byte.
+- `pnpm test:workflow-bundles` đạt qua Keycloak → APISIX → API → PostgreSQL thật: export đúng published v1 sau v2, preview không ghi draft, signed design role, body không được chọn tenant, nhập draft-only, xung đột không ghi dở, publish rõ ràng trước khi tạo/chạy workflow. Bundle không có runtime version hoặc tenant/actor của draft nguồn.
+- Private PostgreSQL schema kiểm tra nhập cấu hình vào tenant khác, createdBy/updatedBy của người nhập, cấu hình đích chưa publish không chạy được, chỉnh sửa đích không đổi nguồn. Lỗi ở item sau rollback item trước. Hai import đảo thứ tự trên **hai connection** chỉ một thành công; thứ tự insert ổn định tránh deadlock. Import và reconnect cũng chạy với pool max 1. Chỉ schema tên UUID đã xác minh được drop; dữ liệu REST demo giữ nguyên.
+- Demo import gồm `bundle-hr-00f1f1f59a884402850e537202e0c945-copy` và `bundle-purchase-00f1f1f59a884402850e537202e0c945-copy`, run hoàn thành `8a469d38-e206-4294-ac02-12c91b033ad0`.
+- Regression `pnpm test:workflow-studio` đạt: tenant registry, version pin/replay, 106 draft phân trang, pool max 1 starts/transitions. `pnpm test:workflow-completion` đạt task/wait/callback/guard/restart/deadline và private SQL; demo run `d1b63d02-28a0-4f15-9f5d-ace69ecfb886`.
+- Task review và whole-branch review độc lập đạt spec/quality, không còn finding critical/important/minor. Đã sửa fixture registry để không ghi dở batch và bổ sung regression; đã sửa smoke để thực sự đóng/mở pool max 1 trước khi xác nhận đọc dữ liệu nhập lưu bền. Hai tenant được test ở registry PostgreSQL thật; quyền signed foreign-tenant export được test ở route, chưa phải demo provisioning hai designer qua Gateway.
+- Không thêm dependencies, không thay NocoBase/license hoặc role grants, không tick Notion/merge/release. Bundle chỉ vận chuyển workflow cấu hình; không gồm UI layouts hay dịch vụ ngoài. Literal văn bản khác vẫn giữ nguyên, người xuất phải kiểm tra nội dung bí mật. Preview requiredRoles tổng hợp các vai trò khác nhau, không khuyến nghị cấp tất cả cho một user.
+
+Hợp đồng bàn giao: [Workflow bundles](workflow-bundles.md).
+
 ## Durable completion và guard
 
 - `pnpm check` cuối đạt **175 tests / 25 files**, typecheck và build; baseline 166 tests / 23 files. Completion policy/repository/config tests xác minh ký quyền, resource identity, result schema, locked ordering, exact key replay, minimal receipt và deadline. Status/operator array không được coi là enum string. Numeric guard nhận plain decimal hữu hạn tối đa 20 ký tự, JS/SQL khớp; CASE bảo vệ SQL cast. Regression newline positiveInteger đã qua với policy hiện có, không cần đổi production regex.

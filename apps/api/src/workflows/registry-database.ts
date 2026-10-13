@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Pool, PoolClient } from 'pg';
+import type { WorkflowActor } from '@dx/contracts';
 import { workflowDefinitions, getDefinition } from '../../../../solutions/workflows/definitions.js';
 import { pageResult } from '../pagination.js';
 import { WorkflowError } from './policy.js';
-import { definitionId, validateDefinition, type DefinitionRegistry, type WorkflowDraft } from './registry.js';
+import { definitionId, validateDefinition, type DefinitionRegistry, type DraftDefinition, type WorkflowDraft } from './registry.js';
 
 const columns = 'id,revision,definition,created_by AS "createdBy",updated_by AS "updatedBy",created_at AS "createdAt",updated_at AS "updatedAt"';
 
@@ -15,6 +16,15 @@ function serialize(row: WorkflowDraft): WorkflowDraft {
   };
 }
 
+async function insertDraft(queryable: Pool | PoolClient, definition: DraftDefinition, actor: WorkflowActor): Promise<WorkflowDraft> {
+  const result = await queryable.query(
+    `INSERT INTO workflow_definition_drafts(organization_id,id,definition,created_by,updated_by)
+     VALUES($1,$2,$3,$4,$4) ON CONFLICT DO NOTHING RETURNING ${columns}`,
+    [actor.organizationId, definition.id, JSON.stringify(definition), actor.subject],
+  );
+  if (!result.rowCount) throw new WorkflowError(409, 'Bản nháp đã tồn tại.');
+  return serialize(result.rows[0]);
+}
 export async function definitionDatabase(pool: Pool): Promise<DefinitionRegistry> {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS workflow_definition_drafts (
@@ -96,18 +106,29 @@ export async function definitionDatabase(pool: Pool): Promise<DefinitionRegistry
     },
 
     async create(value, actor) {
-      const definition = validateDefinition(value);
-      const result = await pool.query(
-        `INSERT INTO workflow_definition_drafts(organization_id,id,definition,created_by,updated_by)
-         VALUES($1,$2,$3,$4,$4) ON CONFLICT DO NOTHING RETURNING ${columns}`,
-        [actor.organizationId, definition.id, JSON.stringify(definition), actor.subject],
-      );
-      if (!result.rowCount) {
-        throw new WorkflowError(409, 'Bản nháp đã tồn tại.');
-      }
-      return serialize(result.rows[0]);
+      return insertDraft(pool, validateDefinition(value), actor);
     },
 
+    async createMany(values, actor) {
+      if (!Array.isArray(values) || !values.length || values.length > 10) throw new WorkflowError(400, 'Batch không hợp lệ.');
+      const definitions = values.map(validateDefinition);
+      if (new Set(definitions.map(d => d.id)).size !== definitions.length) throw new WorkflowError(400, 'Workflow ID trùng lặp.');
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const drafts = new Map<string, WorkflowDraft>();
+        for (const definition of [...definitions].sort((a,b) => a.id.localeCompare(b.id))) {
+          drafts.set(definition.id, await insertDraft(client, definition, actor));
+        }
+        await client.query('COMMIT');
+        return definitions.map(d => drafts.get(d.id)!);
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
     async listDrafts(actor, page) {
       const result = await pool.query(
         `SELECT ${columns} FROM workflow_definition_drafts

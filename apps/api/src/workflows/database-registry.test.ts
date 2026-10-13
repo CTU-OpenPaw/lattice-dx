@@ -28,3 +28,24 @@ test('list and inbox include all tenant publication versions and resolve reader/
   const call=vi.mocked(pool.query).mock.calls.at(-1)!;
   expect(call[1]).toEqual(expect.arrayContaining([['hr-request:1','hr-request:2'],1,2,'draft','review']));
 });
+
+test('batch validates before connecting and rolls back a late collision on its single client',async()=>{
+ const {definitionDatabase}=await import('./registry-database.js');
+ const query=vi.fn(async(sql:string,values?:unknown[])=>{
+ if (!sql.startsWith('INSERT')) return {rows:[],rowCount:0};
+ if(values?.[1]==='z-conflict') return {rows:[],rowCount:0};
+ return {rows:[{id:values?.[1],revision:1,definition:JSON.parse(values?.[2] as string),createdBy:'alice',updatedBy:'alice',createdAt:'2026-10-13',updatedAt:'2026-10-13'}],rowCount:1};
+ });
+ const client={query,release:vi.fn()};
+ const pool={query:vi.fn(async()=>({rows:[],rowCount:0})),connect:vi.fn(async()=>client)} as unknown as Pool;
+ const registry=await definitionDatabase(pool);const {version:_,...draft}=def;
+ await expect(registry.createMany([{...draft,title:''}],actor)).rejects.toMatchObject({statusCode:400});
+ expect(pool.connect).not.toHaveBeenCalled();
+ await expect(registry.createMany([{...draft,id:'z-conflict'},{...draft,id:'a-new'}],actor)).rejects.toMatchObject({statusCode:409});
+ expect(query.mock.calls.map(([sql])=>sql.startsWith('INSERT')?'INSERT':sql)).toEqual(['BEGIN','INSERT','INSERT','ROLLBACK']);
+ expect(query.mock.calls.filter(([sql])=>sql.startsWith('INSERT')).map(([,values])=>values?.[1])).toEqual(['a-new','z-conflict']);
+ expect(client.release).toHaveBeenCalledOnce();expect(pool.query).toHaveBeenCalledOnce();
+ query.mockClear();
+ expect((await registry.createMany([{...draft,id:'b-new'},{...draft,id:'a-new'}],actor)).map(d=>d.id)).toEqual(['b-new','a-new']);
+ expect(query.mock.calls.at(-1)?.[0]).toBe('COMMIT');
+});
