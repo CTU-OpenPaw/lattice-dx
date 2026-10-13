@@ -2,6 +2,8 @@
 import { Pool } from 'pg';
 import type { RecordItem, RecordRepository } from './records.js';
 import { foundationDatabase } from './foundation-database.js';
+import { workflowDatabase } from './workflows/database.js';
+import { workflowJobDatabase } from './workflows/job-database.js';
 export async function connectRecords(connectionString: string) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
@@ -31,6 +33,10 @@ export async function connectRecords(connectionString: string) {
       return result.rows.map(serialize);
     },
   };
-  try { return { repository, foundation:await foundationDatabase(pool), close: () => pool.end() }; }
+  try {
+    const foundation=await foundationDatabase(pool);
+    const workflows=await workflowDatabase(pool);
+    return {repository,foundation,workflows,jobs:workflowJobDatabase(pool),close:()=>pool.end()};
+  }
   catch(error){await pool.end();throw error;}
 }

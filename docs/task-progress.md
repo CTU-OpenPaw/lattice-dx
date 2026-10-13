@@ -2,6 +2,8 @@
 
 Cập nhật: 2026-10-13. Phân biệt phần đã code, phần đã kiểm tra trên runtime và phần còn thiếu. Không coi các phép thử local là chứng nhận production.
 
+Trên nhánh tích hợp feat/nocobase-workflow-integration, PR #5 đã bổ sung source API procurement/onboarding, membership và shared evidence. Chưa triển khai API mới hoặc nối UI; các kết quả runtime phía dưới là mốc Foundation 0.6.0 trước tích hợp. Xem [checkpoint tích hợp](workflow-integration-checkpoint.md).
+
 ## Tổng quan sáu bước
 
 | Bước | Trạng thái | Kết quả hiện có |

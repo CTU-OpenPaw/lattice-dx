@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { verifyIdentity, type IdentityConfig } from './identity.js';
 import type { RecordRepository } from './records.js';
 import { resolveRecordLink, RecordLinkError } from './record-link.js';
+import type { WorkflowActor } from '@dx/contracts';
 export type Scope = {subject:string; organizationId:string};
 export type TaskInput = {title:string;assigneeId:string;organizationId:string;createdBy:string;recordId?:string};
 export type Task = Omit<TaskInput,'recordId'> & {id:string;status:string;version:number;recordId?:string|null};
@@ -17,7 +18,7 @@ export interface FoundationRepository {
   markFile(id:string,status:ScanStatus):Promise<void>;
   readFile(id:string,scope:Scope):Promise<(FileItem & {content:Buffer})|undefined>;
 }
-export type FoundationOptions = {identity?:IdentityConfig; records?:RecordRepository; foundation?:FoundationRepository;scan?:(content:Buffer)=>Promise<'clean'|'rejected'>};
+export type FoundationOptions = {identity?:IdentityConfig; records?:RecordRepository; foundation?:FoundationRepository;readSharedFile?:(id:string,actor:WorkflowActor)=>Promise<(FileItem&{content:Buffer})|undefined>;scan?:(content:Buffer)=>Promise<'clean'|'rejected'>};
 export function registerFoundation(app:FastifyInstance,options:FoundationOptions){
   // This authorization applies before accessing every task/file repository method.
   app.register(async routes=>{
@@ -33,9 +34,9 @@ export function registerFoundation(app:FastifyInstance,options:FoundationOptions
       const role=req.url.split('?')[0].startsWith('/v1/files')?(req.method==='POST'?'files:write':'files:read'):
         req.method==='GET'?'tasks:read':req.url.split('?')[0].endsWith('/decisions')?'tasks:decide':'tasks:assign';
       if(!user.roles.includes(role))return reply.code(403).send({error:'Không có quyền thực hiện tác vụ.'});
-      scopes.set(req,{subject:user.subject,organizationId:user.organizationId});
+      scopes.set(req,{subject:user.subject,organizationId:user.organizationId,roles:user.roles});
     });
-    const scopes=new WeakMap<object,Scope>();
+    const scopes=new WeakMap<object,WorkflowActor>();
     const repo=options.foundation!;
     routes.get('/v1/tasks',async(req)=>({items:await repo.listTasks(scopes.get(req)!)}));
     routes.post<{Body:{title?:unknown;assigneeId?:unknown;recordId?:unknown}}>('/v1/tasks',async(req,reply)=>{
@@ -67,12 +68,12 @@ export function registerFoundation(app:FastifyInstance,options:FoundationOptions
       return reply.code(201).send({...file,scanStatus:status});
     });
     routes.get<{Params:{id:string}}>('/v1/files/:id',async(req,reply)=>{
-      const file=await repo.readFile(req.params.id,scopes.get(req)!);
+      const file=await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!);
       if(!file)return reply.code(404).send({error:'Không tìm thấy tệp.'});
       const {content,...metadata}=file;return metadata;
     });
     routes.get<{Params:{id:string}}>('/v1/files/:id/content',async(req,reply)=>{
-      const file=await repo.readFile(req.params.id,scopes.get(req)!);
+      const file=await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!);
       if(!file)return reply.code(404).send({error:'Không tìm thấy tệp.'});
       if(file.scanStatus!=='clean')return reply.code(409).send({error:'Tệp chưa được phép sử dụng.'});
       return reply.type('application/octet-stream').header('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}`).header('X-Content-Type-Options','nosniff').send(file.content);
