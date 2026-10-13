@@ -7,6 +7,7 @@ import { registerFoundation, type FoundationOptions } from './foundation.js';
 import { registerActions } from './actions.js';
 import { registerDirectory } from './directory-routes.js';
 import { registerWorkflows, type WorkflowOptions } from './workflows/routes.js';
+import { registerWorkflowBundles } from './workflows/bundle-routes.js';
 import { registerWorkflowDrafts } from './workflows/registry-routes.js';
 import { registerLogistics } from './logistics.js';
 import { isRecordId } from '@dx/contracts';
@@ -19,6 +20,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerDirectory(app,options);
   registerWorkflows(app,options);
   registerWorkflowDrafts(app,options);
+  registerWorkflowBundles(app,options);
   registerLogistics(app,options);
   app.route({
     method: ['GET', 'POST'], url: '/v1/records',

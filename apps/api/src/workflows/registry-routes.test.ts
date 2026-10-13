@@ -13,6 +13,7 @@ function setup(){
   const drafts=new Map<string,WorkflowDraft>(),published=new Map<string,ReturnType<typeof validateDefinition>&{version:number}>();
   const registry:DefinitionRegistry={...sourceRegistry,
     async create(value,actor){const d=validateDefinition(value),k=actor.organizationId+':'+d.id;if(drafts.has(k))throw new WorkflowError(409,'exists');const draft={id:d.id,revision:1,definition:d,createdBy:actor.subject,updatedBy:actor.subject,createdAt:'2026-10-13',updatedAt:'2026-10-13'};drafts.set(k,draft);return draft;},
+    async createMany(values,actor){return Promise.all(values.map(value=>this.create(value,actor)));},
     async getDraft(id,actor){const d=drafts.get(actor.organizationId+':'+id);if(!d)throw new WorkflowError(404,'hidden');return d;},
     async updateDraft(id,revision,value,actor){const d=await this.getDraft(id,actor);if(d.revision!==revision)throw new WorkflowError(409,'changed');const next={...d,definition:validateDefinition(value),revision:revision+1};drafts.set(actor.organizationId+':'+id,next);return next;},
     async publish(id,revision,actor){const d=await this.getDraft(id,actor);if(d.revision!==revision)throw new WorkflowError(409,'changed');const p={...d.definition,version:revision};published.set(actor.organizationId+':'+id,p);return p;},

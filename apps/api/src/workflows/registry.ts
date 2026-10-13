@@ -22,6 +22,7 @@ export interface DefinitionRegistry {
   get(organizationId: string, id: string, version?: number, client?: PoolClient): Promise<WorkflowDefinition | undefined>;
   list(organizationId: string): Promise<WorkflowDefinition[]>;
   create(definition: unknown, actor: WorkflowActor): Promise<WorkflowDraft>;
+  createMany(definitions: unknown[], actor: WorkflowActor): Promise<WorkflowDraft[]>;
   listDrafts(actor: WorkflowActor, page: PageQuery): Promise<Page<WorkflowDraft>>;
   getDraft(id: string, actor: WorkflowActor): Promise<WorkflowDraft>;
   updateDraft(id: string, revision: number, definition: unknown, actor: WorkflowActor): Promise<WorkflowDraft>;
