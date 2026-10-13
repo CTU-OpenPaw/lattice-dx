@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Scope } from './foundation.js';
 export interface DirectoryPerson { subject:string; organizationId:string; displayName:string; departmentId?:string; roles:string[] }
+export interface DirectoryDepartment { id:string; name:string; memberCount:number }
 export interface DirectoryQuery { limit:number; offset:number; q?:string; role?:string; department?:string }
 export interface DirectoryPage { limit:number; offset:number; hasMore:boolean; nextOffset:number|null }
 export interface DirectoryRepository {
   /** Only active members are returned by the authoritative snapshot. */
   find(subject:string,organizationId:string):Promise<DirectoryPerson|undefined>;
+  departments?(organizationId:string,query:DirectoryQuery):Promise<{items:DirectoryDepartment[];page:DirectoryPage}>;
   list(organizationId:string,query:DirectoryQuery):Promise<{items:DirectoryPerson[];page:DirectoryPage}>;
 }
 export interface DirectoryOptions { directory?:DirectoryRepository }

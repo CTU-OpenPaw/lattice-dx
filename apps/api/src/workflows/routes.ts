@@ -5,7 +5,7 @@ import { verifyIdentity, type IdentityConfig } from '../identity.js';
 import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { availableTransitions, parseCreate, parseCommand, WorkflowError } from './policy.js';
 import type { WorkflowRepository } from './types.js';
-import { PageError,parsePage,textFilter } from '../pagination.js';
+import { PageError,pageResult,parsePage,textFilter } from '../pagination.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository;definitionRegistry?:DefinitionRegistry};
 function idempotencyKey(req:FastifyRequest):string {
   const key=req.headers['idempotency-key'];
@@ -34,6 +34,11 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       actors.set(req,{...identity,organizationId:identity.organizationId});
     });
     const repo=options.workflows!;
+    routes.get('/v1/workflow-blocks',async req=>({items:[
+      {id:'records.create',version:1,title:'Create record',requiredRole:'records:write'},
+      {id:'tasks.create',version:1,title:'Create task',requiredRole:'tasks:assign'},
+      {id:'connectors.dispatch',version:1,title:'Dispatch connector',requiredRole:'workflow:integrate'},
+    ].filter(block=>actors.get(req)!.roles.includes(block.requiredRole))}));
     routes.get('/v1/workflow-definitions',async req=>{
       const actor=actors.get(req)!;
       const definitions=await registry.list(actor.organizationId);
@@ -64,6 +69,11 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       const input=parseCommand(req.body);if(!input)throw new WorkflowError(400,'Dữ liệu chuyển bước không hợp lệ.');
       const actor=actors.get(req)!;
       return view(await repo.transition(workflowId(req.params.id),input,actor,idempotencyKey(req)),actor);
+    });
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/executions',async req=>{
+      const id=workflowId(req.params.id),actor=actors.get(req)!,query=parsePage(req.query);
+      await repo.get(id,actor);
+      return pageResult(repo.executions?await repo.executions(id,actor,query):[],query);
     });
     routes.get<{Params:{id:string}}>('/v1/workflows/:id/history',async req=>({items:await repo.history(workflowId(req.params.id),actors.get(req)!)}));
     routes.get<{Params:{id:string}}>('/v1/workflows/:id/sync',async req=>({items:await repo.jobs(workflowId(req.params.id),actors.get(req)!)}));

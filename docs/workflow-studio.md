@@ -50,7 +50,7 @@ Mã lỗi: 400 payload/cấu hình sai; 401 token sai; 403 thiếu quyền; 404 
 
 - Xuất bản cấu hình được phép là quyết định quản trị: `readerRoles` xác định ai trong đơn vị đọc được quy trình đó. Không trao `workflow:design` cho mọi nhân viên.
 - Event đi qua outbox và URL connector do máy chủ cấu hình. Payload không được chứa mã thực thi, URL tùy ý hay bí mật. Sự kiện pending chưa chứng minh n8n/broker đã xử lý.
-- Custom definition chưa nhận task hook `assign/complete`; các hook Logistics nguồn hiện có giữ nguyên. Giao việc nhiều bước, action nội bộ và connector n8n/NGSI-LD/agent là đợt mở rộng sau.
+- Custom definition chưa nhận task hook `assign/complete`; các hook Logistics nguồn hiện có giữ nguyên. Đợt mở rộng [workflow blocks](workflow-blocks.md) bổ sung `steps` tạo hồ sơ/task và gửi yêu cầu connector; task block foundation chưa tự chuyển trạng thái workflow.
 - Chưa có canvas Studio, phát sinh page/collection NocoBase, role editor, xóa định nghĩa, rollback publication hoặc đồng bộ nguồn cấu hình Git. Người dùng có thể sửa bản nháp và publish phiên bản mới để thay đổi quy trình tương lai.
 
 ## Chạy kiểm chứng local

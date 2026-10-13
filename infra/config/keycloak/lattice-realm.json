@@ -60,6 +60,9 @@
       },
       {
         "name": "workflow:design"
+      },
+      {
+        "name": "workflow:integrate"
       }
     ]
   },
@@ -138,7 +141,8 @@
         "workflow:start",
         "directory:read",
         "logistics:sales",
-        "workflow:design"
+        "workflow:design",
+        "workflow:integrate"
       ],
       "attributes": {
         "organization_id": [
@@ -294,7 +298,10 @@
       ],
       "realmRoles": [
         "department:it",
-        "files:read"
+        "files:read",
+        "tasks:read",
+        "tasks:decide",
+        "records:read"
       ],
       "attributes": {
         "organization_id": [

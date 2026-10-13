@@ -16,7 +16,7 @@ Action result rows are keyed by run/version/step and store actor, action, bounde
 
 ## Assignment and departments
 
-Task recipient can be an explicit subject binding or a department assignment {department binding, required role}. Department routing uses the admin-managed directory snapshot in the same tenant and only active members with the required role. Exactly one eligible member succeeds; zero rejects 400 and multiple rejects 409 so the user must select a person explicitly. Never choose an arbitrary employee or claim a manager relationship absent from directory data.
+Task recipient can be an explicit subject binding or a department assignment {department binding, required role, optional assigneeId binding}. Department routing uses the admin-managed directory snapshot in the same tenant and only active members with the required role. Without a selector exactly one eligible member succeeds; zero rejects 400 and multiple rejects 409. A configured alternate transition from the same state can supply an explicit selected subject: it must belong to the same department/role/tenant and be active, otherwise 400. This resolves ambiguity on existing runs without republishing their pinned definition. Never choose an arbitrary employee or claim a manager relationship absent from directory data.
 
 `GET /v1/directory/departments` requires directory:read and returns paginated department IDs, display names where a reference exists, and active member counts derived from the directory snapshot. Role/q filters are applied before pagination. Department identity stays separate from organization identity. No public department write API or nested hierarchy in this increment.
 
