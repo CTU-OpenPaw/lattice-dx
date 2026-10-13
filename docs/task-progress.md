@@ -1,0 +1,83 @@
+# Tiến độ Lattice — ghi chú bàn giao
+
+Cập nhật: 2026-10-13. Phân biệt phần đã code, phần đã kiểm tra trên runtime và phần còn thiếu. Không coi các phép thử local là chứng nhận production.
+
+## Tổng quan sáu bước
+
+| Bước | Trạng thái | Kết quả hiện có |
+| --- | --- | --- |
+| 1. Plugin nền tảng | Đã làm trong phạm vi demo | Package Foundation, build/cài/bật trên NocoBase; collection Department, Employee, Location, Asset; migration và seed hai đơn vị. |
+| 2. Cấu hình ứng dụng và API nghiệp vụ | Hoàn thành một phần | Manifest ứng dụng, route, block, action; lưu record/task qua API và đọc lại database thật. Chuyển trạng thái nghiệp vụ còn chờ API của Duy. |
+| 3. Workspace và API client | Đã làm phần chức năng | Chọn ứng dụng, điều hướng, đăng nhập/đăng xuất, kết nối tài khoản nghiệp vụ, loading/lỗi và xử lý phiên. Giao diện hiện là bản cơ bản. |
+| 4. Form/list dùng chung | Đã làm phần chức năng; còn kiểm chứng builder | Form cấu hình, validation, bảng lọc/phân trang, đọc/ghi thật; đăng ký hai block vào menu native builder. |
+| 5. Mẫu nghiệp vụ hoàn chỉnh và tệp | Đã triển khai phần có API; còn blocker nghiệp vụ | Hai mẫu dùng block chung, upload/scan/download thật và giao việc sang tài khoản kho cùng đơn vị đã PASS; chưa phải quy trình Order/Shipment hoàn chỉnh. |
+| 6. Kiểm tra tích hợp toàn bộ | Đã kiểm phần sẵn sàng; chưa nghiệm thu toàn sản phẩm | Test dự án/plugin, browser, API, scanner và native builder PASS; các workflow/API còn thiếu được đánh dấu chưa kiểm được. |
+
+## Những việc chưa hoàn thành / giới hạn cần giữ lại
+
+### Bước 1
+
+- [ ] Kiểm chứng migration trên dữ liệu nâng cấp thực tế, ngoài kiểm tra lặp lại seed local.
+- [ ] Chốt mapping nhân viên với tài khoản nghiệp vụ và chính sách phân quyền đa đơn vị thực tế.
+- [ ] Chốt có cần đồng bộ collection nền tảng trong NocoBase với database API nghiệp vụ không. Hiện không được giả nhận hai nguồn đã đồng bộ.
+
+### Bước 2
+
+- [ ] Duy cung cấp/chốt API chuyển trạng thái nghiệp vụ, quyền và quy tắc chuyển; tích hợp và kiểm tra end-to-end sau đó.
+- [ ] Phân biệt tạo generic record/task với tạo đơn hàng, vận chuyển và duyệt nghiệp vụ thật. Chưa tuyên bố các workflow đó hoàn tất.
+- Manifest hiện được cấu hình bằng file; chưa có trình sửa manifest tổng quát trên giao diện.
+
+### Bước 3
+
+- [ ] Hoàn thiện giao diện sau sáu bước theo quyết định của người dùng.
+- [ ] Chốt cấu hình origin/auth khi triển khai ngoài local; cấu hình đã thử là runtime local.
+- NocoBase và tài khoản nghiệp vụ là hai phiên riêng, chưa phải đăng nhập một lần (SSO).
+- Chưa xây Workspace riêng hoàn chỉnh cho client-v2; đã đăng ký FlowModel native cho block trên runtime hiện tại.
+
+### Bước 4
+
+- [x] Thử thêm Form/List, lưu binding và tải lại trên trang native thử riêng; UI và model lưu qua API PASS. Schema trang cũ không đổi.
+- [ ] Khi cần vượt 100 bản ghi, bổ sung phân trang/lọc phía API. Hiện bảng chỉ chia trang/lọc trong tối đa 100 bản ghi API trả về.
+- [ ] Bổ sung các kiểu trường và nghiệp vụ cần cho bước 5; không coi các form record/task hiện tại là bộ form tổng quát cho mọi collection.
+
+### Bước 5
+
+- [ ] Hoàn thiện form mua sắm và đơn hàng logistics theo cấu hình chung.
+- [ ] Hoàn thiện luồng kinh doanh tạo đơn và kho nhận/xử lý công việc với API và quyền thật.
+- [x] Tích hợp tải tệp và liên kết tệp vào bản ghi qua dịch vụ thật; metadata/download và byte đọc lại PASS.
+- [x] Khởi động ClamAV healthy; tệp thử scan clean; kiểm giới hạn 1 MiB và quyền riêng chủ tệp.
+- [x] Kinh doanh giao task liên kết hồ sơ; tài khoản kho riêng cùng đơn vị đọc task qua UI.
+- [ ] API kiểm assignee thuộc đơn vị; directory, chia sẻ hồ sơ/tệp với kho và phân loại hồ sơ theo ứng dụng còn thiếu. Xem [ghi chú bước 5](lattice-step5.md).
+
+### Bước 6
+
+- [x] Kiểm xuyên suốt phần tạo/đọc/task/tệp đã có API; nghiệp vụ chuyển trạng thái mua sắm/Order/Shipment vẫn chưa kiểm được.
+- [x] Kiểm quyền API, hết phiên bridge thật, lỗi mô phỏng, chống gửi lặp và hồi quy phản hồi muộn. Chưa load test/production certification.
+- [x] Kiểm block dùng chung qua hai ứng dụng và native builder lưu/reload binding.
+- [x] Ghi [báo cáo bước 6](lattice-step6.md), lệnh chạy và giới hạn còn lại. Chưa nghiệm thu phần API còn thiếu.
+
+## Bằng chứng hiện có
+
+- Bước 2: [cấu hình ứng dụng](lattice-application-config.md), [lưu form end-to-end](lattice-form-e2e.md).
+- Bước 3: [Workspace](lattice-workspace.md).
+- Bước 4: [block và các phép kiểm](lattice-blocks.md).
+- Bước 5: [mẫu ứng dụng, tệp và blocker](lattice-step5.md).
+- Bước 6: [kiểm tra tích hợp](lattice-step6.md).
+- Sau bước 6: 20 Node tests Foundation/bridge và 96 Vitest tests PASS; browser file, hai tài khoản và builder binding PASS.
+- Browser đã tạo record/task thật, đọc lại bảng; SQL xác nhận liên kết. Native builder thêm/lưu block trên trang thử riêng, không sửa schema trang cũ.
+- Runtime đã thử: NocoBase 2.2.22, Foundation 0.6.0. Compose riêng trong repo pin 2.2.20 chưa được chạy trong lần này.
+
+## Git và nguyên tắc tiếp tục
+
+- Nền code e8d7635; checkpoint bước 1–6 được lưu trên nhánh feat/nocobase-foundation-config theo xác nhận mới của người dùng. Xem git log -1 trên nhánh để lấy SHA; không coi checkpoint là nghiệm thu các API/workflow còn thiếu.
+- [x] Tạo nhánh riêng để commit tiến độ trước khi tích hợp PR #5 của Duy. Chưa push, chưa merge PR hoặc đổi runtime trong thao tác checkpoint.
+- Bước 5 và 6 đã được người dùng xác nhận, đã triển khai/kiểm phần sẵn sàng; vẫn chờ API còn thiếu. Mỗi bước tiếp theo phải trình bày việc sẽ làm trước.
+- Không reset dữ liệu hoặc xóa các bản ghi cũ để làm phép thử PASS.
+
+## Thuật ngữ
+
+- Manifest: file mô tả ứng dụng dùng route, collection, block và action nào.
+- Binding: cấu hình nối một block với ứng dụng/nguồn dữ liệu cụ thể.
+- End-to-end: thử từ thao tác giao diện qua API tới dữ liệu thật và kiểm kết quả.
+- Workflow: chuỗi trạng thái và thao tác nghiệp vụ, ví dụ tạo đơn rồi duyệt/giao kho.
+- Production: môi trường dùng thật, cần kiểm bảo mật và vận hành ngoài demo local.

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1, "id": "logistics", "name": "Logistics", "route": "/lattice/apps/logistics",
+  "permissions": ["records:read", "tasks:read"],
+  "collections": [{"id": "order-records", "source": "lattice-api", "resource": "records"}, {"id": "warehouse-tasks", "source": "lattice-api", "resource": "tasks"}],
+  "blocks": [
+    {"id": "create-order-record", "type": "form", "title": "Kinh doanh tạo hồ sơ đơn hàng", "collection": "order-records", "permissions": ["records:write"],
+      "fields": [{"name": "title", "title": "Nội dung đơn hàng", "type": "string", "required": true, "maxLength": 200}],
+      "submit": {"actionId": "records.create", "version": 1}, "attachments": true},
+    {"id": "order-list", "type": "list", "title": "Hồ sơ đơn hàng của tôi", "collection": "order-records", "permissions": ["records:read"], "columns": ["id", "title", "createdAt"]},
+    {"id": "assign-warehouse-task", "type": "form", "title": "Giao việc cho kho", "collection": "warehouse-tasks", "permissions": ["tasks:assign"],
+      "fields": [
+        {"name": "title", "title": "Công việc", "type": "string", "required": true, "maxLength": 200},
+        {"name": "assigneeId", "title": "Keycloak subject của người nhận", "type": "string", "required": true, "maxLength": 100},
+        {"name": "recordId", "title": "ID hồ sơ đơn hàng đã tạo", "type": "string", "required": true, "maxLength": 36, "pattern": "uuid", "reference": "records"}
+      ], "submit": {"actionId": "tasks.create", "version": 1}},
+    {"id": "warehouse-inbox", "type": "list", "title": "Kho nhận việc", "collection": "warehouse-tasks", "permissions": ["tasks:read"], "columns": ["title", "status", "version", "recordId"]}
+  ],
+  "transitions": [{"id": "submit-order", "collection": "order-records", "from": "draft", "to": "submitted", "permission": "logistics:sales", "availability": "unavailable", "reason": "Chưa có API chuyển trạng thái Order; quyết định task không thay đổi trạng thái đơn hàng."}]
+}

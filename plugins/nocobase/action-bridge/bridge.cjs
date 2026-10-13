@@ -33,7 +33,8 @@ function createBridge(config, dependencies = {}) {
   };
   async function request(url, options, message, preserveStatus = false) {
     let response;
-    try { response = await http(url, { ...options, signal: AbortSignal.timeout(10000), redirect: 'error' }); }
+    const {timeout = 10000, ...requestOptions} = options;
+    try { response = await http(url, { ...requestOptions, signal: AbortSignal.timeout(timeout), redirect: 'error' }); }
     catch { throw new BridgeError(502, message); }
     if (!response.ok) throw new BridgeError(preserveStatus && [400, 401, 403, 404, 409, 413, 429, 503].includes(response.status) ? response.status : 502, message);
     try { return await response.json(); }
@@ -90,6 +91,13 @@ function createBridge(config, dependencies = {}) {
       return item?.userId === userId ? { connected: true, identity: item.identity, expiresAt: new Date(item.expiresAt).toISOString() } : { connected: false };
     },
     async catalog(userId, browserId) { return catalogForToken(session(userId, browserId).token); },
+    async list(userId, browserId, resource) {
+      if (!['records','tasks'].includes(resource)) throw new BridgeError(400, 'Unsupported list resource.');
+      const item = session(userId, browserId);
+      const result = await request(`${config.gatewayUrl}/v1/${resource}`, {headers:{authorization:`Bearer ${item.token}`}}, 'List request failed.', true);
+      if (!result || !Array.isArray(result.items) || result.items.length > 100) throw new BridgeError(502, 'Invalid list result.');
+      return {items:result.items};
+    },
     async run(userId, browserId, input) {
       const item = session(userId, browserId);
       if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['actionId', 'version', 'input'].includes(key))
@@ -98,6 +106,40 @@ function createBridge(config, dependencies = {}) {
         body: JSON.stringify({ version: input.version, input: input.input }) }, 'Action execution failed; do not automatically retry.', true);
       if (!result || result.actionId !== input.actionId || result.version !== input.version || result.status !== 'succeeded' || !('result' in result)) throw new BridgeError(502, 'Invalid action result.');
       return { actionId: result.actionId, version: result.version, status: result.status, result: result.result };
+    },
+    async files(userId, browserId, input) {
+      const item = session(userId, browserId);
+      const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+      if (!input || typeof input !== 'object' || Array.isArray(input)) throw new BridgeError(400, 'Invalid file request.');
+      const headers = {authorization:`Bearer ${item.token}`};
+      if (input.operation === 'upload') {
+        if (Object.keys(input).some(k=>!['operation','filename','contentBase64','recordId'].includes(k)) ||
+            typeof input.filename !== 'string' || !input.filename.trim() || input.filename.length>200 || /[\x00-\x1f/\\]/.test(input.filename) ||
+            typeof input.contentBase64 !== 'string' || !input.contentBase64.length) throw new BridgeError(400, 'Invalid file payload.');
+        if (input.contentBase64.length>1398104) throw new BridgeError(413, 'File limit is 1 MiB.');
+        const bytes=Buffer.from(input.contentBase64,'base64');
+        if (bytes.length>1048576) throw new BridgeError(413, 'File limit is 1 MiB.');
+        if (bytes.toString('base64')!==input.contentBase64 || (input.recordId!==undefined&&!uuid.test(input.recordId))) throw new BridgeError(400, 'Invalid file encoding or record ID.');
+        const {operation,...payload}=input;
+        const result=await request(`${config.gatewayUrl}/v1/files`,{method:'POST',headers:{...headers,'content-type':'application/json'},body:JSON.stringify(payload),timeout:25000},'File upload failed; check before retrying.',true);
+        if (!result || !uuid.test(result.id) || !['clean','pending','error','rejected'].includes(result.scanStatus)) throw new BridgeError(502,'Invalid file metadata.');
+        return result;
+      }
+      if (!['metadata','content'].includes(input.operation) || Object.keys(input).some(k=>!['operation','id'].includes(k)) || typeof input.id!=='string' || !uuid.test(input.id)) throw new BridgeError(400,'Invalid file operation/ID.');
+      const url=`${config.gatewayUrl}/v1/files/${input.id}`;
+      const metadata=await request(url,{headers},'File metadata request failed.',true);
+      if (metadata?.id!==input.id || !Number.isInteger(metadata.size) || metadata.size<1 || metadata.size>1048576) throw new BridgeError(502,'Invalid file metadata.');
+      if (input.operation==='metadata') return metadata;
+      if (metadata.scanStatus!=='clean') throw new BridgeError(409,'File is quarantined; download is unavailable.');
+      let response;
+      try {response=await http(url+'/content',{headers,redirect:'error',signal:AbortSignal.timeout(10000)});} catch {throw new BridgeError(502,'File download failed.');}
+      if (!response.ok) throw new BridgeError([401,403,404,409].includes(response.status)?response.status:502,'File download denied.');
+      if (Number(response.headers.get('content-length'))>1048576) throw new BridgeError(502,'Invalid file size.');
+      // Bound the streamed response too: do not trust an absent Content-Length.
+      const reader=response.body.getReader(),chunks=[];let size=0;
+      try {while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>1048576){await reader.cancel();throw new BridgeError(502,'Invalid file size.');}chunks.push(Buffer.from(value));}} finally {reader.releaseLock();}
+      if (size!==metadata.size) throw new BridgeError(502,'File size mismatch.');
+      return {...metadata,contentBase64:Buffer.concat(chunks).toString('base64')};
     },
     disconnect(userId, browserId) {
       if (exchanges.get(browserId)?.userId === userId) exchanges.get(browserId).cancelled = true;
