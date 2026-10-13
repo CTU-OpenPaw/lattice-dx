@@ -27,8 +27,10 @@ Constraints: E:/pmnm2026 in-place feature branch (existing user preference); pre
 - [x] Add `scripts/smoke-logistics.mjs` covering real identity/directory/action/task/record/files/engine, input/role/org denial, duplicates/concurrency, pagination beyond 100 (isolated SQL fixture or authorized seed), no change to old business states.
 - [x] Run check + existing compatibility smoke spaced for Gateway rate limits; Compose parse/whitespace. Keep infrastructure outages distinct from app regressions.
 - [x] Independent review, repair important findings and rerun affected tests. Write endpoint/request/response/roles/errors/limits handoff, exact verification evidence; no Notion tick.
-- [ ] Commit/push PR targeting codex/phase-two-workflow-runtime while #5 open, attach PR, verify CI. If #5 merged first target main instead.
+- [x] Commit/push PR targeting codex/phase-two-workflow-runtime while #5 open, attach PR, verify CI. If #5 merged first target main instead.
 
 ## Execution evidence
 
 Directory review passed; whole implementation review passed with no important findings. pnpm check: 145 tests/18 files, typecheck and build pass. Real Logistics smoke covers directory/assignment/state/tasks/files and pagination over 106 scoped fixtures; existing foundation/action/record-link/NocoBase bridge and procurement/onboarding/outbox smoke pass. Gateway rate limiting requires separated smoke batches; final isolated rerun is recorded in docs/verification.md. No Notion writes. Handoff: docs/logistics-ui-handoff.md. Branch starts at PR5 head 06797e0, no upstream or dependency changes.
+
+PR: https://github.com/TrDuy-pan3000/LatticeDX/pull/6, attached, base codex/phase-two-workflow-runtime while PR5 is open. Push/PR check jobs passed for implementation 0fbaf18. CodeRabbit skipped review for this base branch; independent directory/whole-change reviewers above are the review evidence. Retarget to main after PR5 merges before merging this PR. No merge/release or Notion checkbox edits.
