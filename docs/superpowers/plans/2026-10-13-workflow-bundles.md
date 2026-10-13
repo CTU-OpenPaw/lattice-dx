@@ -21,19 +21,19 @@
 
 **Interfaces:** `parseBundle(value:unknown)` returns the strict bundle; `bundlePreview(bundle)` returns workflowCount and definitions metadata; `DefinitionRegistry.createMany(definitions:unknown[], actor:WorkflowActor):Promise<WorkflowDraft[]>` performs insert-only transaction. Exports use existing registry.get(org,id,version).
 
-- [ ] Write failing policy and signed-route tests before implementation. Include rejected duplicated IDs/unsafe source IDs, explicit version lookup, no tenant overrides, writes absent on preview, and missing configuration 503.
-- [ ] Run `pnpm exec vitest run apps/api/src/workflows/bundles.test.ts apps/api/src/workflows/bundle-routes.test.ts`; observe missing feature failures.
-- [ ] Implement strict keys/types/format/bounds with validateDefinition, portability checks and derived requiredRole/connector/inputFields preview. Validate entire import before opening transaction. Reuse draft INSERT helper and reject collisions with WorkflowError(409), rolling back/releasing clients.
-- [ ] Register POST export/validate/import; map domain 400/404/409 and identity 401/403/503 consistently with draft routes. Forward through gateway with the same rate/auth policy.
-- [ ] Run targeted tests and `pnpm typecheck`; adapt existing registry fixtures to new required createMany interface without weakening assertions.
-- [ ] Commit implementation and tests; write report with RED/GREEN evidence and concerns to output/reviews/workflow-bundles-implementation.md.
+- [x] Write failing policy and signed-route tests before implementation. Include rejected duplicated IDs/unsafe source IDs, explicit version lookup, no tenant overrides, writes absent on preview, and missing configuration 503.
+- [x] Run `pnpm exec vitest run apps/api/src/workflows/bundles.test.ts apps/api/src/workflows/bundle-routes.test.ts`; observe missing feature failures.
+- [x] Implement strict keys/types/format/bounds with validateDefinition, portability checks and derived requiredRole/connector/inputFields preview. Validate entire import before opening transaction. Reuse draft INSERT helper and reject collisions with WorkflowError(409), rolling back/releasing clients.
+- [x] Register POST export/validate/import; map domain 400/404/409 and identity 401/403/503 consistently with draft routes. Forward through gateway with the same rate/auth policy.
+- [x] Run targeted tests and `pnpm typecheck`; adapt existing registry fixtures to new required createMany interface without weakening assertions.
+- [x] Commit implementation and tests; write report with RED/GREEN evidence and concerns to output/reviews/workflow-bundles-implementation.md.
 
 ### Task 2: Live verification and team handoff
 
 **Files:** Create scripts/smoke-workflow-bundles.mjs and docs/workflow-bundles.md. Modify package.json test:workflow-bundles, README.md and docs/verification.md.
 
-- [ ] Add real HTTP preview/export/import/publish/start smoke using local Keycloak users and unique demo IDs. Verify explicit published v1 export after v2 exists and unpublished imported definitions cannot start.
-- [ ] Use a random, validated private PostgreSQL schema for two-tenant import, last-item conflict rollback, and simultaneous duplicate imports. Verify pool max 1 works without nested connection acquisition; drop only the generated private schema.
-- [ ] Build/recreate API and gateway only if needed, preserving volumes and other services. Run `pnpm test:workflow-bundles`, `pnpm test:workflow-studio`, `pnpm test:workflow-completion` and `pnpm check`.
-- [ ] Write handoff with exact endpoint/request/response/errors and explicit scope: workflow templates only; roles and external adapters are not provisioned; imported drafts still need review/publish.
-- [ ] Independent spec/quality review, address important findings and rerun affected checks. Run git diff --check, commit, push feature branch and create/attach PR against codex/workflow-waits-conditions. Inspect CI without merging or releasing.
+- [x] Add real HTTP preview/export/import/publish/start smoke using local Keycloak users and unique demo IDs. Verify explicit published v1 export after v2 exists and unpublished imported definitions cannot start.
+- [x] Use a random, validated private PostgreSQL schema for two-tenant import, last-item conflict rollback, and simultaneous duplicate imports. Verify pool max 1 works without nested connection acquisition; drop only the generated private schema.
+- [x] Build/recreate API and gateway only if needed, preserving volumes and other services. Run `pnpm test:workflow-bundles`, `pnpm test:workflow-studio`, `pnpm test:workflow-completion` and `pnpm check`.
+- [x] Write handoff with exact endpoint/request/response/errors and explicit scope: workflow templates only; roles and external adapters are not provisioned; imported drafts still need review/publish.
+- [x] Independent spec/quality review, address important findings and rerun affected checks. Run git diff --check, commit, push feature branch and create/attach PR against codex/workflow-waits-conditions. Inspect CI without merging or releasing.
