@@ -30,6 +30,13 @@ function createWorkspaceApi({apiClient, onExpired = () => {}, notify = () => {}}
       if (!Array.isArray(result?.items) || result.items.length>100) throw new WorkspaceApiError('Dữ liệu danh sách không hợp lệ.',502,'bridge');
       return result.items;
     },
+    async listPage(resource,query) {
+      if(!['records','tasks','orders'].includes(resource))throw new WorkspaceApiError('Nguồn danh sách không được hỗ trợ.',400,'bridge');
+      const result=resource==='orders'?await this.logistics('orders',{query}):(await request({url:'dxActions:list',method:'get',params:{resource,...query}})).data;
+      if(!['records','tasks','orders'].includes(resource)||!Array.isArray(result?.items)||result.items.length>100||!result.page||!Number.isInteger(result.page.limit)||result.page.limit<1||result.page.limit>100||!Number.isInteger(result.page.offset)||result.page.offset<0||typeof result.page.hasMore!=='boolean'||(result.page.hasMore?result.page.nextOffset!==result.page.offset+result.page.limit:result.page.nextOffset!==null))throw new WorkspaceApiError('Phân trang API không hợp lệ.',502,'bridge');
+      return result;
+    },
+    async logistics(operation,payload={}) {return (await request({url:'dxActions:logistics',method:'post',data:{...payload,operation}})).data;},
     async file(operation, payload) {
       if (!['upload','metadata','content'].includes(operation)) throw new WorkspaceApiError('Thao tác tệp không hợp lệ.',400,'bridge');
       return (await request({url:'dxActions:files',method:'post',timeout:30000,data:{...payload,operation}})).data;

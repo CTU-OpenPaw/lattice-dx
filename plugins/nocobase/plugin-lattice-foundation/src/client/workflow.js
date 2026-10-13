@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-function createWorkflowCommands({api,actorId,newKey=()=>globalThis.crypto.randomUUID()}) {
+function createWorkflowCommands({api,actorId,channel='workflow',newKey=()=>globalThis.crypto.randomUUID()}) {
   let pending=null,busy=false;
   async function send(){
     if(busy)throw new Error('Lệnh đang xử lý.');if(!pending)throw new Error('Không có lệnh cần thử lại.');
     busy=true;
-    try{const result=await api.workflow(pending.operation,{...(pending.id?{id:pending.id}:{}),key:pending.key,body:pending.body});pending=null;return result;}
+    try{const result=await api[channel](pending.operation,{...(pending.id?{id:pending.id}:{}),key:pending.key,body:pending.body});pending=null;return result;}
     catch(error){const status=error.status||error.response?.status;if(status>=400&&status<500&&status!==429)pending=null;throw error;}
     finally{busy=false;}
   }
@@ -19,7 +19,7 @@ function createWorkflowComponent(React){
     const [title,setTitle]=React.useState(''),[values,setValues]=React.useState({}),[error,setError]=React.useState(''),[busy,setBusy]=React.useState(false),[inbox,setInbox]=React.useState(false),[file,setFile]=React.useState(null),[fileInfo,setFileInfo]=React.useState(null);
     const lock=React.useRef(false),epoch=React.useRef(0);
     const commands=React.useMemo(()=>createWorkflowCommands({api,actorId:subject}),[api,subject]);
-    async function list(){const result=await api.workflow(inbox?'inbox':'list');return result.items.filter(r=>r.definitionId==='procurement');}
+    async function list(){let result=await api.workflow(inbox?'inbox':'list',{query:{definitionId:'procurement',limit:'100',offset:'0'}});const rows=[...result.items];while(result.page?.hasMore){if(rows.length>=10000)throw new Error('Thu hẹp danh sách workflow trước khi tải thêm.');const offset=result.page.nextOffset;result=await api.workflow(inbox?'inbox':'list',{query:{definitionId:'procurement',limit:'100',offset:String(offset)}});if(result.page.offset!==offset||result.page.nextOffset===offset)throw new Error('Phân trang workflow không hợp lệ.');rows.push(...result.items);}return rows;}
     React.useEffect(()=>{const current=++epoch.current;setRuns([]);setRun(null);setHistory([]);setValues({});setFileInfo(null);setError('');setBusy(false);
       if(connected)Promise.all([list(),api.workflow('references')]).then(([rows,result])=>{if(current===epoch.current){setRuns(rows);setRefs(result.items)}}).catch(e=>{if(current===epoch.current)setError(e.message)});
       return()=>{epoch.current++};},[api,connected,subject,inbox]);
@@ -35,7 +35,7 @@ function createWorkflowComponent(React){
     }
     async function download(id,current){const result=await api.file('content',{id});if(current!==epoch.current)return;const url=URL.createObjectURL(new Blob([Uint8Array.from(atob(result.contentBase64),c=>c.charCodeAt(0))]));const link=document.createElement('a');link.href=url;link.download=result.filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
     return h('section',{'data-testid':'procurement-workflow',style:{border:'1px solid #cad5e2',padding:16,marginBottom:20,borderRadius:8}},
-      h('h3',null,'Quy trình mua sắm và bàn giao'),h('p',null,'Các bước và quyền lấy từ API. Danh sách tối đa 100 quy trình; gửi sự kiện ngoài chưa bật.'),
+      h('h3',null,'Quy trình mua sắm và bàn giao'),h('p',null,'Các bước và quyền lấy từ API. Danh sách chỉ lấy workflow mua sắm, theo từng trang API; gửi sự kiện ngoài chưa bật.'),
       !connected&&h('p',null,'Kết nối tài khoản nghiệp vụ để sử dụng workflow.'),
       h('form',{onSubmit:e=>{e.preventDefault();perform(async current=>{if(!title.trim()||Array.from(title).length>200)throw new Error('Nội dung phải có 1–200 ký tự.');await saved(await commands.execute('create',{definitionId:'procurement',title:title.trim(),input:{}}),current);if(current===epoch.current)setTitle('');})}},
         h('label',null,'Nội dung workflow ',h('input',{value:title,onChange:e=>setTitle(e.target.value),disabled:busy||!connected||commands.uncertain})),

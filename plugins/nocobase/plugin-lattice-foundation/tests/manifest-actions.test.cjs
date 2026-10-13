@@ -36,8 +36,10 @@ test('save calls authenticated bridge catalog/run without arbitrary scope fields
   await assert.rejects(controller.submit({title: 'x', organizationId: 'other'}), {code: 'VALIDATION'});
   assert.equal(calls.length, 2);
 });
-test('logistics uses the same controller and preserves actual assignee subject and record UUID', async () => {
-  const {controller, calls} = setup(logistics, 'assign-warehouse-task', async () => ({data: {actionId: 'tasks.create', version: 1, status: 'succeeded', result: {id: 'task-1'}}}));
+test('generic task controller preserves actual assignee subject and record UUID', async () => {
+  const taskManifest=structuredClone(logistics);
+  taskManifest.blocks=[{id:'assign-warehouse-task',type:'form',title:'Giao việc',collection:'warehouse-tasks',permissions:['tasks:assign'],fields:[{name:'title',title:'Nội dung',type:'string',required:true,maxLength:200},{name:'assigneeId',title:'Subject',type:'string',required:true,maxLength:100},{name:'recordId',title:'Hồ sơ',type:'string',required:false,maxLength:36,pattern:'uuid',reference:'records'}],submit:{actionId:'tasks.create',version:1}}];
+  const {controller, calls} = setup(taskManifest, 'assign-warehouse-task', async () => ({data: {actionId: 'tasks.create', version: 1, status: 'succeeded', result: {id: 'task-1'}}}));
   const input = {title: 'Chuẩn bị hàng', assigneeId: 'keycloak-subject', recordId: '11111111-1111-4111-8111-111111111111'};
   await controller.submit(input);
   assert.deepEqual(calls[1].data.input, input);
@@ -93,8 +95,8 @@ test('built browser entrypoints load through AMD without CommonJS require or mis
       const fields=await models.LatticeFormBlockModel.flow.steps.binding.uiSchema({api:{request:async()=>({data:{data:{items:[purchasing,logistics]}}})}});
       assert.equal(fields.binding.enum.length,3);
       let binding;
-      models.LatticeFormBlockModel.flow.steps.binding.handler({model:{setProps:props=>{binding=props}}},{binding:'logistics:assign-warehouse-task'});
-      assert.equal(binding.manifestId,'logistics');assert.equal(binding.blockId,'assign-warehouse-task');
+      models.LatticeFormBlockModel.flow.steps.binding.handler({model:{setProps:props=>{binding=props}}},{binding:'logistics:create-order-record'});
+      assert.equal(binding.manifestId,'logistics');assert.equal(binding.blockId,'create-order-record');
     }
   }
 });

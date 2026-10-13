@@ -23,7 +23,7 @@ Form workflow ở phần trên, khác với form hồ sơ nền cũ bên dưới
 5. Bàn giao cần assetId, signed subject người nhận đã self-register, Department/Location lấy từ references API và UUID tệp clean. Run handed_over/version 6.
 6. Actor được policy workflow cho phép đọc có thể tải tệp đã liên kết; người ngoài đơn vị không được đọc. Người nhận bàn giao không tự có quyền đọc run chỉ vì nằm trong membership.
 
-Danh sách thường và checkbox inbox chỉ trong tối đa 100 run API trả về. UI hiện lọc procurement sau khi tải danh sách; nếu bị 100 run workflow khác chiếm hết, cần filter/pagination phía server. Chưa có directory người nhận; nhập subject thật, không nhập username.
+Từ Foundation 0.8.0, danh sách gửi definitionId=procurement và tải từng trang API, với giới hạn an toàn 10000 run. Chưa có directory selector cho người nhận bàn giao; nhập subject thật, không nhập username.
 
 ## Xử lý lỗi
 
@@ -56,7 +56,7 @@ Danh sách thường và checkbox inbox chỉ trong tối đa 100 run API trả 
 
 ## Còn thiếu / ngoài phạm vi
 
-- Order/Shipment logistics, UI onboarding, directory và individual assignment, chia sẻ record/task cũ, list/pagination server, designer và connector n8n/NGSI-LD thật.
+- Sau PR #6, Logistics Order tối thiểu, directory snapshot, individual assignment, chia sẻ record/task và list/pagination server đã có; xem logistics-workspace-deployment.md. Shipment, UI onboarding, designer và connector n8n/NGSI-LD thật còn thiếu.
 - Department/Location dùng registry workflow bootstrap của API, chưa đồng bộ với collection nền NocoBase. assetId là mã nhập trong bước bàn giao; chưa có thao tác cập nhật tài sản NocoBase hoặc inventory/ERP thực tế.
 - Reject là nhánh có nút/API và unit tests, chưa có phép browser end-to-end reject riêng trong lượt deploy này.
 - Chưa bật event delivery hoặc chứng nhận production/SSO. Chưa tự thay main, push code hay merge PR trên GitHub.

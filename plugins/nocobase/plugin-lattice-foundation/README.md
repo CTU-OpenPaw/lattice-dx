@@ -25,7 +25,7 @@ Build validates and copies authored CommonJS into dist. The runtime supplies the
 Copy the generated tgz into the container, then install with the official package manager. It extracts into persistent storage/plugins and links the package for Node.js. Inside the container:
 
 ```sh
-yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.6.0.tgz
+yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.8.0.tgz
 yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 yarn nocobase pm list
 yarn nocobase pm disable @latticedx/plugin-lattice-foundation
@@ -33,6 +33,10 @@ yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 ```
 
 The repository's official Compose also mounts this package read-only; build before starting/recreating NocoBase. Existing test runtime uses persistent storage/plugins and keeps its existing database. Never remove storage or database volumes to install a plugin. Generic CRUD here does not implement logistics/mua-sam transitions; those must use Duy's authorized API.
+
+## Logistics in 0.8.0
+
+`/lattice/apps/logistics` uses the shared Form/List blocks for real orders, a scoped warehouse directory selector, clean attachments and server pagination. Order detail uses Duy's submit/receive API with expectedVersion and idempotency keys. Native builder bindings expose the same configured Form/List; their Workspace link opens business actions. The old `assign-warehouse-task` binding remains for existing generic task blocks, but is hidden from the business Workspace. The `create-order-record` binding now creates an order with required customer/address/SKU/quantity/warehouse fields, instead of a generic record; existing instances need those inputs. See ../../../docs/logistics-workspace-deployment.md for evidence and limits.
 
 ## Terms
 

@@ -24,6 +24,7 @@ const actionSource = await readFile(join(root, 'src/client/actions.js'), 'utf8')
 const workspaceApiSource = await readFile(join(root, 'src/client/workspace-api.js'), 'utf8');
 const workspaceSource = await readFile(join(root, 'src/client/workspace.js'), 'utf8');
 const workflowSource = await readFile(join(root, 'src/client/workflow.js'), 'utf8');
+const logisticsSource = await readFile(join(root, 'src/client/logistics.js'), 'utf8');
 const blocksSource = await readFile(join(root, 'src/client/blocks.js'), 'utf8');
 const listSource = await readFile(join(root, 'src/client/list-data.js'), 'utf8');
 const bundledActions = `const manifestModule = (() => {const module = {exports: {}};\n${manifestSource}\nreturn module.exports;})();
@@ -41,7 +42,9 @@ if(name==='./actions')return actions;if(name==='./workspace-api')return workspac
 ${blocksSource}\nreturn module.exports;})();`;
   const workspaceModule = `const workflowModule=(()=>{const module={exports:{}};\n${workflowSource}\nreturn module.exports;})();
 const {createWorkspaceComponent} = (() => {const module={exports:{}};
-const require = name => {if (name === './workspace-api') return workspaceApiModule;if(name==='./workflow')return workflowModule; throw new Error('Unknown bundled module: ' + name);};
+const logisticsModule=(()=>{const module={exports:{}};const require=name=>{if(name==='./workflow')return workflowModule;throw new Error('Unknown logistics module: '+name);};
+${logisticsSource}\nreturn module.exports;})();
+const require = name => {if (name === './workspace-api') return workspaceApiModule;if(name==='./workflow')return workflowModule;if(name==='./logistics')return logisticsModule; throw new Error('Unknown bundled module: ' + name);};
 ${workspaceSource}\nreturn module.exports;})();`;
   bundled = bundled.replace("const {createWorkspaceComponent} = require('./workspace');", () => apiModule+'\n'+blocksModule+'\n'+workspaceModule);
   bundled = bundled.replace("const {createBlockComponents} = require('./blocks');", 'const {createBlockComponents} = blocksModule;');

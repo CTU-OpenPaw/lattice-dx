@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 const {createWorkspaceApi} = require('./workspace-api');
 const {createWorkflowComponent} = require('./workflow');
+const {createLogisticsComponent} = require('./logistics');
 function createWorkspaceComponent(client, React, blocks) {
   const h = React.createElement;
   const ProcurementWorkflow=createWorkflowComponent(React);
+  const LogisticsDetail=createLogisticsComponent(React);
   const buttonStyle = {padding:'10px 16px',border:'1px solid #cad5e2',borderRadius:8,background:'#fff',cursor:'pointer'};
   function Workspace() {
     const apiClient = client.useAPIClient();
@@ -13,6 +15,8 @@ function createWorkspaceComponent(client, React, blocks) {
     const [expired,setExpired] = React.useState(false), [notice,setNotice] = React.useState(null);
     const [loadFailed,setLoadFailed] = React.useState(false);
     const [refreshKey,setRefreshKey] = React.useState(0);
+    const [orderId,setOrderId] = React.useState(null);
+    const [orderLocked,setOrderLocked] = React.useState(false);
     const mounted = React.useRef(true), operating = React.useRef(false);
     const api = React.useMemo(() => createWorkspaceApi({apiClient,
       notify: value => {if (mounted.current) setNotice(value);},
@@ -58,6 +62,7 @@ function createWorkspaceComponent(client, React, blocks) {
     }
     const appId = window.location.pathname.startsWith('/lattice/apps/') ? window.location.pathname.slice('/lattice/apps/'.length) : null;
     const selected = apps.find(app=>app.id===appId);
+    React.useEffect(()=>{setOrderId(null);setOrderLocked(false);},[appId,connection.connected,connection.identity?.subject]);
     const loginLink = '/signin?redirect='+encodeURIComponent(window.location.pathname);
     const controls = [];
     if (expired) controls.push(h('a',{key:'login',href:loginLink,style:buttonStyle},'Đăng nhập lại'));
@@ -85,7 +90,8 @@ function createWorkspaceComponent(client, React, blocks) {
         !loading&&!expired&&!loadFailed&&(appId?(selected?h('section',{style:{background:'#fff',padding:24,borderRadius:12}},
           h('a',{href:'/lattice'},'← Chọn ứng dụng khác'),h('h2',null,selected.name),
           selected.id==='purchasing'&&h(ProcurementWorkflow,{api,connection}),
-          ...selected.blocks.map(block=>h(block.type==='form'?blocks.FormBlock:blocks.ListBlock,{key:block.id,manifest:selected,block,api,connected:connection.connected,refreshKey,onSaved:()=>setRefreshKey(n=>n+1)})),
+          selected.id==='logistics'&&h(LogisticsDetail,{key:orderId||'empty',api,connection,orderId,onLocked:setOrderLocked,onChanged:()=>setRefreshKey(n=>n+1)}),
+          ...selected.blocks.filter(block=>block.id!=='assign-warehouse-task').map(block=>h(block.type==='form'?blocks.FormBlock:blocks.ListBlock,{key:block.id+':'+(connection.identity?.subject||''),manifest:selected,block,api,connected:connection.connected,refreshKey,openDisabled:orderLocked,onSaved:result=>{setRefreshKey(n=>n+1);if(selected.id==='logistics'&&!orderLocked)setOrderId(result.id);},onOpen:selected.id==='logistics'?row=>{if(!orderLocked)setOrderId(row.definitionId==='logistics_order'?row.id:row.recordId);}:undefined})),
           ...(selected.id==='purchasing'?[h('p',{key:'legacy'},'Các form hồ sơ nền bên dưới không thay thế workflow mua sắm ở trên.')]:selected.transitions.map(t=>h('p',{key:t.id},'Chuyển trạng thái: Chưa khả dụng. '+t.reason))))
           :h('p',{role:'alert'},'Không tìm thấy ứng dụng. ',h('a',{href:'/lattice'},'Về Workspace')))
           :h('section',{'aria-label':'Ứng dụng',style:{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(260px,1fr))',gap:20}},

@@ -4,6 +4,9 @@
 const assert=require('node:assert/strict');const {randomBytes}=require('node:crypto');
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 (async()=>{const base='http://localhost:13000';
+const logistics=process.env.LATTICE_BUILDER_APP==='logistics';
+const appId=logistics?'logistics':'purchasing',formId=logistics?'create-order-record':'create-request',listId=logistics?'order-list':'request-list';
+const formLabel=logistics?'Logistics — Tạo đơn Logistics':'Mua sắm nội bộ — Tạo hồ sơ yêu cầu mua sắm',listLabel=logistics?'Logistics — Đơn Logistics của tôi':'Mua sắm nội bộ — Hồ sơ của tôi';
 const login=await fetch(base+'/api/auth:signIn',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'admin@nocobase.com',password:'admin123'})});assert.equal(login.status,200);const token=(await login.json()).data.token;
 async function api(action,body){const response=await fetch(base+'/api/'+action,{method:body?'POST':'GET',headers:{authorization:'Bearer '+token,'content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});assert.ok(response.ok,action+' HTTP '+response.status);return (await response.json()).data;}
 const originalSchema=JSON.stringify(await api('flowModels:findOne?uid=diox035kb4o&includeAsyncNode=true'));
@@ -24,17 +27,17 @@ if(!process.env.LATTICE_NATIVE_TEST_ROOT){await page.getByText('Add block',{exac
 await page.keyboard.press('Escape');await page.getByText('Chưa chọn cấu hình.',{exact:false}).last().hover();
 await page.locator('svg[data-icon="menu"]').last().hover();
 await page.getByText('Chọn ứng dụng và block',{exact:true}).click();
-await page.locator('.ant-modal .ant-select-selector').click();await page.getByText('Mua sắm nội bộ — Tạo hồ sơ yêu cầu mua sắm',{exact:true}).click();await page.getByRole('button',{name:'Save',exact:true}).click();
-await page.locator('[data-block-id="create-request"]').waitFor();
+await page.locator('.ant-modal .ant-select-selector').click();await page.getByText(formLabel,{exact:true}).click();await page.getByRole('button',{name:'Save',exact:true}).click();
+await page.locator(`[data-block-id="${formId}"]`).waitFor();
 await page.getByText('Add block',{exact:true}).click();await page.getByText('Lattice Danh sách',{exact:true}).click();await page.keyboard.press('Escape');await page.getByText('Chưa chọn cấu hình.',{exact:false}).last().hover();await page.locator('svg[data-icon="menu"]').last().hover();await page.getByText('Chọn ứng dụng và block',{exact:true}).click();
-await page.locator('.ant-modal .ant-select-selector').click();await page.getByText('Mua sắm nội bộ — Hồ sơ của tôi',{exact:true}).click();await page.getByRole('button',{name:'Save',exact:true}).click();await page.locator('[data-block-id="request-list"]').waitFor();
-await page.reload();await page.locator('[data-block-id="create-request"]').waitFor();await page.locator('[data-block-id="request-list"]').waitFor();
+await page.locator('.ant-modal .ant-select-selector').click();await page.getByText(listLabel,{exact:true}).click();await page.getByRole('button',{name:'Save',exact:true}).click();await page.locator(`[data-block-id="${listId}"]`).waitFor();
+await page.reload();await page.locator(`[data-block-id="${formId}"]`).waitFor();await page.locator(`[data-block-id="${listId}"]`).waitFor();
 const routes=await api('desktopRoutes:list?paginate=false');const route=routes.find(r=>r.schemaUid===root);const child=routes.find(r=>r.parentId===route.id&&r.type==='tabs');assert.ok(child);
 const stored=JSON.stringify(await api('flowModels:findOne?uid='+child.schemaUid+'&includeAsyncNode=true'));
-assert.ok(stored.includes('purchasing:create-request'));assert.ok(stored.includes('purchasing:request-list'));
+assert.ok(stored.includes(appId+':'+formId));assert.ok(stored.includes(appId+':'+listId));
 assert.equal(JSON.stringify(await api('flowModels:findOne?uid=diox035kb4o&includeAsyncNode=true')),originalSchema,'existing expense page schema unchanged');
-await page.screenshot({path:'output/lattice-builder-save.png',fullPage:true});
+await page.screenshot({path:logistics?'output/lattice-builder-logistics-save.png':'output/lattice-builder-save.png',fullPage:true});
 assert.deepEqual(errors,[]);
-console.log(JSON.stringify({result:'PASS',path:'/admin/'+root,formBinding:'persisted',listBinding:'persisted',reload:'PASS',originalPageUnchanged:true}));
+console.log(JSON.stringify({result:'PASS',appId,path:'/admin/'+root,formBinding:'persisted',listBinding:'persisted',reload:'PASS',originalPageUnchanged:true}));
 }finally{await browser.close()}
 })().catch(e=>{console.error(e.message);process.exitCode=1});

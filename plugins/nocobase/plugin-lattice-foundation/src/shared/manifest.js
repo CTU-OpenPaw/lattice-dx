@@ -4,7 +4,8 @@ const id = /^[a-z][a-z0-9-]{0,63}$/;
 const roles = /^[a-z][a-z0-9:_-]{0,79}$/;
 const fieldName = /^[a-z][a-zA-Z0-9]{0,63}$/;
 const actions = new Map([['records.create', ['records', 'records:write', ['title']]],
-  ['tasks.create', ['tasks', 'tasks:assign', ['title', 'assigneeId', 'recordId']]]]);
+  ['tasks.create', ['tasks', 'tasks:assign', ['title', 'assigneeId', 'recordId']]],
+  ['logistics.create',['orders','logistics:sales',['title','customerName','deliveryAddress','sku','quantity','warehouseAssigneeId','attachmentId']]]]);
 const registries = new Set(['latticeDepartments', 'latticeEmployees', 'latticeLocations', 'latticeAssets']);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 function validateManifest(value) {
@@ -33,7 +34,7 @@ function validateManifest(value) {
     if (typeof c.id !== 'string' || !id.test(c.id) || collections.has(c.id)) error(`${path}.id`, 'invalid or duplicate');
     collections.set(c.id, c);
     if (c.source === 'lattice-api') {
-      if (!['records', 'tasks'].includes(c.resource)) error(`${path}.resource`, 'unsupported API collection');
+      if (!['records', 'tasks', 'orders'].includes(c.resource)) error(`${path}.resource`, 'unsupported API collection');
     } else if (c.source === 'nocobase') {
       if (!registries.has(c.resource)) error(`${path}.resource`, 'unknown foundation collection');
     } else error(`${path}.source`, 'expected lattice-api or nocobase');
@@ -50,16 +51,16 @@ function validateManifest(value) {
     const collection = collections.get(b.collection);
     if (!collection) error(`${path}.collection`, 'unknown reference');
     if (b.type === 'form') {
-      if (b.attachments !== undefined && (b.attachments !== true || b.submit?.actionId !== 'records.create')) error(`${path}.attachments`, 'attachments require a record creation form');
+      if (b.attachments !== undefined && (b.attachments !== true || !['records.create','logistics.create'].includes(b.submit?.actionId))) error(`${path}.attachments`, 'attachments require record/order creation');
       const fields = new Set();
       if (!Array.isArray(b.fields) || !b.fields.length) error(`${path}.fields`, 'non-empty list required');
       else b.fields.forEach((f, i) => {
         if (!keys(f, ['name', 'title', 'type', 'required', 'maxLength', 'pattern', 'reference'], `${path}.fields[${i}]`)) return;
         if (typeof f.name !== 'string' || !fieldName.test(f.name) || fields.has(f.name)) error(`${path}.fields[${i}].name`, 'invalid or duplicate');
         fields.add(f.name);
-        if (!label(f.title) || f.type !== 'string' || typeof f.required !== 'boolean' || !Number.isInteger(f.maxLength) || f.maxLength < 1 || f.maxLength > 2000) error(`${path}.fields[${i}]`, 'invalid field definition');
+        if (!label(f.title) || !['string','positiveInteger'].includes(f.type) || (f.type==='positiveInteger'&&f.name!=='quantity') || typeof f.required !== 'boolean' || !Number.isInteger(f.maxLength) || f.maxLength < 1 || f.maxLength > 2000) error(`${path}.fields[${i}]`, 'invalid field definition');
         if (f.pattern !== undefined && f.pattern !== 'uuid') error(`${path}.fields[${i}].pattern`, 'only uuid supported');
-        if (f.reference !== undefined && (f.reference !== 'records' || f.name !== 'recordId' || f.pattern !== 'uuid')) error(`${path}.fields[${i}].reference`, 'only recordId -> records supported');
+        if (f.reference !== undefined && !((f.reference==='records'&&f.name==='recordId'&&f.pattern==='uuid')||(f.reference==='warehousePeople'&&f.name==='warehouseAssigneeId'))) error(`${path}.fields[${i}].reference`, 'unsupported reference');
       });
       if (keys(b.submit, ['actionId', 'version'], `${path}.submit`)) {
         const action = actions.get(b.submit.actionId);
@@ -70,11 +71,12 @@ function validateManifest(value) {
           for (const f of fields) if (!action[2].includes(f)) error(`${path}.fields`, `API does not accept ${f}`);
           if (Array.isArray(b.fields)) for (const f of b.fields) {
             if (!object(f)) continue;
-            const limit = {title: 200, assigneeId: 100, recordId: 36}[f.name];
+            const limit = {title: 200, assigneeId: 100, warehouseAssigneeId:100, attachmentId:36,quantity:7, recordId: 36}[f.name];
             if (limit && f.maxLength > limit) error(`${path}.fields`, `${f.name} exceeds API maximum ${limit}`);
             if (f.name === 'recordId' && (f.pattern !== 'uuid' || f.maxLength !== 36)) error(`${path}.fields`, 'recordId requires uuid pattern and maxLength 36');
           }
-          for (const required of b.submit.actionId === 'tasks.create' ? ['title', 'assigneeId'] : ['title']) {
+          if(b.submit.actionId==='logistics.create'&&(!Array.isArray(b.fields)||!b.fields.some(f=>f?.name==='quantity'&&f.type==='positiveInteger')||!b.fields.some(f=>f?.name==='warehouseAssigneeId'&&f.reference==='warehousePeople')))error(path,'Order requires numeric quantity and directory reference');
+          for (const required of b.submit.actionId === 'tasks.create' ? ['title', 'assigneeId'] : b.submit.actionId==='logistics.create'?['title','customerName','deliveryAddress','sku','quantity','warehouseAssigneeId']:['title']) {
             if (!Array.isArray(b.fields) || !b.fields.some(f => f?.name === required && f.required)) error(`${path}.fields`, `required API field missing: ${required}`);
           }
         }

@@ -5,6 +5,17 @@ const { randomBytes, createHash } = require('node:crypto');
 class BridgeError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
+function validatedQuery(query,allowed) {
+  if(query===undefined)return '';
+  if(!query||typeof query!=='object'||Array.isArray(query)||Object.keys(query).some(k=>!allowed.includes(k)))throw new BridgeError(400,'Invalid list query.');
+  const params=new URLSearchParams();
+  for(const [key,value] of Object.entries(query)){
+    if(typeof value!=='string'||value.length>200||/[\x00-\x1f\x7f]/.test(value))throw new BridgeError(400,'Invalid query value.');
+    if(['limit','offset'].includes(key)&&(!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value))||Number(value)<(key==='limit'?1:0)||Number(value)>(key==='limit'?100:Number.MAX_SAFE_INTEGER-101)))throw new BridgeError(400,'Invalid pagination.');
+    params.set(key,value);
+  }
+  return params.toString();
+}
 function createBridge(config, dependencies = {}) {
   const http = dependencies.fetch || globalThis.fetch;
   const now = dependencies.now || Date.now;
@@ -91,10 +102,27 @@ function createBridge(config, dependencies = {}) {
       return item?.userId === userId ? { connected: true, identity: item.identity, expiresAt: new Date(item.expiresAt).toISOString() } : { connected: false };
     },
     async catalog(userId, browserId) { return catalogForToken(session(userId, browserId).token); },
+    async logistics(userId, browserId, input) {
+      const item=session(userId,browserId);
+      const operations={people:['GET','directory/people'],orders:['GET','logistics/orders'],create:['POST','logistics/orders'],detail:['GET',''],submit:['POST',''],receive:['POST',''],history:['GET',''],task:['GET','']};
+      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid Logistics operation.');
+      const [method,resource]=operations[input.operation];let path=resource;
+      if(['detail','submit','receive','history','task'].includes(input.operation)){
+        if(typeof input.id!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid Logistics ID.');
+        path=input.operation==='history'?`workflows/${input.id}/history`:input.operation==='task'?`tasks/${input.id}`:`logistics/orders/${input.id}`+({detail:'',submit:'/submit',receive:'/receive'}[input.operation]);
+      }else if(input.id!==undefined)throw new BridgeError(400,'Unexpected ID.');
+      const write=['create','submit','receive'].includes(input.operation);
+      if(write){if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!input.body||typeof input.body!=='object'||Array.isArray(input.body))throw new BridgeError(400,'Command requires body and idempotency key.');}
+      else if(input.body!==undefined||input.key!==undefined)throw new BridgeError(400,'Unexpected command payload.');
+      const query=validatedQuery(input.query,input.operation==='people'?['limit','offset','q','role','department']:['limit','offset','q','state']);
+      if(input.query!==undefined&&!['people','orders'].includes(input.operation))throw new BridgeError(400,'Unexpected query.');
+      if(query)path+='?'+query;
+      return request(`${config.gatewayUrl}/v1/${path}`,{method,headers:{authorization:`Bearer ${item.token}`,...(write?{'content-type':'application/json','idempotency-key':input.key}:{})},...(write?{body:JSON.stringify(input.body)}:{})},'Logistics request failed; reload before retrying the same command.',true);
+    },
     async workflow(userId, browserId, input) {
       const item=session(userId,browserId);
       const operations={definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST','']};
-      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid workflow operation.');
+      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid workflow operation.');
       const [method,resource]=operations[input.operation];let path=resource;
       if(['detail','history','sync','transition'].includes(input.operation)){
         if(typeof input.id!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid workflow ID.');
@@ -103,15 +131,19 @@ function createBridge(config, dependencies = {}) {
       const write=['create','transition'].includes(input.operation);
       if(write){if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!input.body||typeof input.body!=='object'||Array.isArray(input.body))throw new BridgeError(400,'Workflow command requires body and idempotency key.');}
       else if(input.key!==undefined||input.body!==undefined)throw new BridgeError(400,'Unexpected workflow command payload.');
+      if(input.query!==undefined&&!['list','inbox'].includes(input.operation))throw new BridgeError(400,'Unexpected query.');
+      const query=validatedQuery(input.query,['limit','offset','q','state','definitionId']);
+      if(query)path+=(path.includes('?')?'&':'?')+query;
       const headers={authorization:`Bearer ${item.token}`,...(method==='POST'?{'content-type':'application/json'}:{}),...(write?{'idempotency-key':input.key}:{})};
       return request(`${config.gatewayUrl}/v1/${path}`,{method,headers,...(method==='POST'?{body:JSON.stringify(write?input.body:{})}:{})},'Workflow request failed; reload or retry only the same command key.',true);
     },
-    async list(userId, browserId, resource) {
+    async list(userId, browserId, resource, query) {
       if (!['records','tasks'].includes(resource)) throw new BridgeError(400, 'Unsupported list resource.');
       const item = session(userId, browserId);
-      const result = await request(`${config.gatewayUrl}/v1/${resource}`, {headers:{authorization:`Bearer ${item.token}`}}, 'List request failed.', true);
+      const search=validatedQuery(query,resource==='tasks'?['limit','offset','q','status','recordId']:['limit','offset','q']);
+      const result = await request(`${config.gatewayUrl}/v1/${resource}${search?'?'+search:''}`, {headers:{authorization:`Bearer ${item.token}`}}, 'List request failed.', true);
       if (!result || !Array.isArray(result.items) || result.items.length > 100) throw new BridgeError(502, 'Invalid list result.');
-      return {items:result.items};
+      return {items:result.items,...(result.page?{page:result.page}:{})};
     },
     async run(userId, browserId, input) {
       const item = session(userId, browserId);
