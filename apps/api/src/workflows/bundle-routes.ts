@@ -48,4 +48,3 @@ export function registerWorkflowBundles(app: FastifyInstance, options: { identit
     });
   });
 }
-

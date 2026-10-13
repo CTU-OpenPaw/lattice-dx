@@ -46,6 +46,3 @@ export function bundlePreview(bundle: WorkflowBundle) {
         transitions: Object.fromEntries(definition.transitions.map(t => [t.id, t.fields])) } };
   }) };
 }
-
-
-
