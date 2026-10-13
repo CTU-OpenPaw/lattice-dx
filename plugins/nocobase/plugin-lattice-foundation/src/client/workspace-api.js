@@ -34,6 +34,9 @@ function createWorkspaceApi({apiClient, onExpired = () => {}, notify = () => {}}
       if (!['upload','metadata','content'].includes(operation)) throw new WorkspaceApiError('Thao tác tệp không hợp lệ.',400,'bridge');
       return (await request({url:'dxActions:files',method:'post',timeout:30000,data:{...payload,operation}})).data;
     },
+    async workflow(operation,payload={}) {
+      return (await request({url:'dxActions:workflow',method:'post',data:{...payload,operation}})).data;
+    },
     async connect() {
       const result = (await request({url:'dxActions:connect',method:'post'})).data;
       const url = new URL(result.authorizationUrl);

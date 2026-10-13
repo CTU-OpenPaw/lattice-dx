@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 const {createWorkspaceApi} = require('./workspace-api');
+const {createWorkflowComponent} = require('./workflow');
 function createWorkspaceComponent(client, React, blocks) {
   const h = React.createElement;
+  const ProcurementWorkflow=createWorkflowComponent(React);
   const buttonStyle = {padding:'10px 16px',border:'1px solid #cad5e2',borderRadius:8,background:'#fff',cursor:'pointer'};
   function Workspace() {
     const apiClient = client.useAPIClient();
@@ -82,8 +84,9 @@ function createWorkspaceComponent(client, React, blocks) {
         loadFailed&&!expired&&h('button',{style:buttonStyle,onClick:()=>window.location.reload()},'Tải lại Workspace'),
         !loading&&!expired&&!loadFailed&&(appId?(selected?h('section',{style:{background:'#fff',padding:24,borderRadius:12}},
           h('a',{href:'/lattice'},'← Chọn ứng dụng khác'),h('h2',null,selected.name),
+          selected.id==='purchasing'&&h(ProcurementWorkflow,{api,connection}),
           ...selected.blocks.map(block=>h(block.type==='form'?blocks.FormBlock:blocks.ListBlock,{key:block.id,manifest:selected,block,api,connected:connection.connected,refreshKey,onSaved:()=>setRefreshKey(n=>n+1)})),
-          ...selected.transitions.map(t=>h('p',{key:t.id},'Chuyển trạng thái: Chưa khả dụng. '+t.reason)))
+          ...(selected.id==='purchasing'?[h('p',{key:'legacy'},'Các form hồ sơ nền bên dưới không thay thế workflow mua sắm ở trên.')]:selected.transitions.map(t=>h('p',{key:t.id},'Chuyển trạng thái: Chưa khả dụng. '+t.reason))))
           :h('p',{role:'alert'},'Không tìm thấy ứng dụng. ',h('a',{href:'/lattice'},'Về Workspace')))
           :h('section',{'aria-label':'Ứng dụng',style:{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(260px,1fr))',gap:20}},
             ...apps.map(app=>h('article',{key:app.id,style:{padding:24,background:'#fff',borderRadius:12,border:'1px solid #e0e7ef'}},

@@ -2,14 +2,16 @@
 
 Cập nhật: 2026-10-13. Phân biệt phần đã code, phần đã kiểm tra trên runtime và phần còn thiếu. Không coi các phép thử local là chứng nhận production.
 
-Trên nhánh tích hợp feat/nocobase-workflow-integration, PR #5 đã bổ sung source API procurement/onboarding, membership và shared evidence. Chưa triển khai API mới hoặc nối UI; các kết quả runtime phía dưới là mốc Foundation 0.6.0 trước tích hợp. Xem [checkpoint tích hợp](workflow-integration-checkpoint.md).
+Trên nhánh tích hợp feat/nocobase-workflow-integration, PR #5 đã bổ sung source API procurement/onboarding, membership và shared evidence. [Checkpoint tích hợp](workflow-integration-checkpoint.md) ghi mốc chỉ code, trước khi triển khai runtime.
+
+Cập nhật sau phê duyệt deploy: API mới + bridge và UI procurement đã chạy trên runtime cũ với Foundation 0.7.0; luồng browser tạo/gửi/duyệt/nhận/nghiệm thu/bàn giao và shared file PASS. Outbox worker vẫn tắt. Xem [triển khai mua sắm](procurement-workflow-deployment.md); đây không phải nghiệm thu Order/Shipment logistics hoặc onboarding UI.
 
 ## Tổng quan sáu bước
 
 | Bước | Trạng thái | Kết quả hiện có |
 | --- | --- | --- |
 | 1. Plugin nền tảng | Đã làm trong phạm vi demo | Package Foundation, build/cài/bật trên NocoBase; collection Department, Employee, Location, Asset; migration và seed hai đơn vị. |
-| 2. Cấu hình ứng dụng và API nghiệp vụ | Hoàn thành một phần | Manifest ứng dụng, route, block, action; lưu record/task qua API và đọc lại database thật. Chuyển trạng thái nghiệp vụ còn chờ API của Duy. |
+| 2. Cấu hình ứng dụng và API nghiệp vụ | Hoàn thành một phần | Manifest và lưu record/task thật; procurement workflow API/bridge/UI đã PASS sau PR #5. Order/Shipment logistics còn thiếu. |
 | 3. Workspace và API client | Đã làm phần chức năng | Chọn ứng dụng, điều hướng, đăng nhập/đăng xuất, kết nối tài khoản nghiệp vụ, loading/lỗi và xử lý phiên. Giao diện hiện là bản cơ bản. |
 | 4. Form/list dùng chung | Đã làm phần chức năng; còn kiểm chứng builder | Form cấu hình, validation, bảng lọc/phân trang, đọc/ghi thật; đăng ký hai block vào menu native builder. |
 | 5. Mẫu nghiệp vụ hoàn chỉnh và tệp | Đã triển khai phần có API; còn blocker nghiệp vụ | Hai mẫu dùng block chung, upload/scan/download thật và giao việc sang tài khoản kho cùng đơn vị đã PASS; chưa phải quy trình Order/Shipment hoàn chỉnh. |
@@ -25,7 +27,8 @@ Trên nhánh tích hợp feat/nocobase-workflow-integration, PR #5 đã bổ sun
 
 ### Bước 2
 
-- [ ] Duy cung cấp/chốt API chuyển trạng thái nghiệp vụ, quyền và quy tắc chuyển; tích hợp và kiểm tra end-to-end sau đó.
+- [x] Duy cung cấp API procurement/onboarding qua PR #5; procurement đã nối bridge/UI và kiểm end-to-end.
+- [ ] Order/Shipment logistics chưa có definition/API; onboarding mới có backend, chưa có UI trong phạm vi này.
 - [ ] Phân biệt tạo generic record/task với tạo đơn hàng, vận chuyển và duyệt nghiệp vụ thật. Chưa tuyên bố các workflow đó hoàn tất.
 - Manifest hiện được cấu hình bằng file; chưa có trình sửa manifest tổng quát trên giao diện.
 

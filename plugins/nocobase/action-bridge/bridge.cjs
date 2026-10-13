@@ -91,6 +91,21 @@ function createBridge(config, dependencies = {}) {
       return item?.userId === userId ? { connected: true, identity: item.identity, expiresAt: new Date(item.expiresAt).toISOString() } : { connected: false };
     },
     async catalog(userId, browserId) { return catalogForToken(session(userId, browserId).token); },
+    async workflow(userId, browserId, input) {
+      const item=session(userId,browserId);
+      const operations={definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST','']};
+      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid workflow operation.');
+      const [method,resource]=operations[input.operation];let path=resource;
+      if(['detail','history','sync','transition'].includes(input.operation)){
+        if(typeof input.id!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid workflow ID.');
+        path=`workflows/${input.id}`+({detail:'',history:'/history',sync:'/sync',transition:'/transitions'}[input.operation]);
+      }else if(input.id!==undefined)throw new BridgeError(400,'Unexpected workflow ID.');
+      const write=['create','transition'].includes(input.operation);
+      if(write){if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!input.body||typeof input.body!=='object'||Array.isArray(input.body))throw new BridgeError(400,'Workflow command requires body and idempotency key.');}
+      else if(input.key!==undefined||input.body!==undefined)throw new BridgeError(400,'Unexpected workflow command payload.');
+      const headers={authorization:`Bearer ${item.token}`,...(method==='POST'?{'content-type':'application/json'}:{}),...(write?{'idempotency-key':input.key}:{})};
+      return request(`${config.gatewayUrl}/v1/${path}`,{method,headers,...(method==='POST'?{body:JSON.stringify(write?input.body:{})}:{})},'Workflow request failed; reload or retry only the same command key.',true);
+    },
     async list(userId, browserId, resource) {
       if (!['records','tasks'].includes(resource)) throw new BridgeError(400, 'Unsupported list resource.');
       const item = session(userId, browserId);

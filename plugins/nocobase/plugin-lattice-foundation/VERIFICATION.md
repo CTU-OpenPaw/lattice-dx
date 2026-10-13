@@ -49,3 +49,7 @@ Follow-up 2026-10-13: deployed core and Action Bridge on the existing runtime. s
 ## Step 6 — 0.6.0
 
 20 combined Foundation/bridge Node tests and 96 monorepo Vitest tests PASS. Workspace login/logout/error handling PASS; real bridge expiry after ~296s disables form and clears list. Native Form/List bindings configured through the UI, saved and present after reload/API readback on a separate hidden test page; original expense schema unchanged. Real clean/rejected scans, scanner outage quarantine, record links and concurrent task decision API checks PASS. Fixed delayed form results, UTF-16 length agreement and native block expiry handling (native expiry timer unit-tested; real browser expiry test covers Workspace). No business workflow completion or production certification claimed. Full evidence and pending items: docs/lattice-step6.md.
+
+## Procurement deployment — 0.7.0
+
+Existing runtime retained; new workflow API deployed from integrated PR #5 after DB backups. Allowlisted session-bound workflow proxy and procurement Workspace UI added. 23 Node tests and 120 Vitest tests PASS; browser Alice/Manager/Warehouse full procurement sequence PASS through handed_over/version 6, clean evidence and manager shared-download bytes verified. SQL audit versions 1–6; outbox remains pending/0 and worker disabled. Cross-org run/file requests return 404. See docs/procurement-workflow-deployment.md for retained failed-test run, backups and explicit limits. Reject branch/onboarding UI/Order/Shipment and production are not claimed browser-verified.

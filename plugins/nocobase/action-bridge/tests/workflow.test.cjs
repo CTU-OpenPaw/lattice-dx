@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+const {test}=require('node:test');const assert=require('node:assert/strict');const {createBridge}=require('../bridge.cjs');
+test('workflow proxy stays user-bound, allowlisted and forwards idempotency without token leaks',async()=>{
+  const calls=[];const bridge=createBridge({gatewayUrl:'http://gateway',tokenUrl:'http://identity/token',userinfoUrl:'http://identity/user',authorizationUrl:'http://identity/auth',clientId:'fixture',callbackUrl:'http://localhost/callback'},
+    {schedule:()=>({unref(){}}),cancelTimer:()=>{},fetch:async(url,options)=>{calls.push({url,options});const data=url.endsWith('/token')?{access_token:'fixture-token',expires_in:300}:url.endsWith('/user')?{sub:'alice'}:url.endsWith('/actions')?{items:[]}:{id:'run',state:'draft'};return new Response(JSON.stringify(data));}});
+  const start=bridge.connect('noco');await bridge.callback({state:new URL(start.authorizationUrl).searchParams.get('state'),code:'fixture'},start.browserId);
+  const count=calls.length;await assert.rejects(bridge.workflow('other',start.browserId,{operation:'list'}),{status:401});await assert.rejects(bridge.workflow('noco',start.browserId,{operation:'__proto__'}),{status:400});await assert.rejects(bridge.workflow('noco',start.browserId,{operation:'detail',id:'../files'}),{status:400});await assert.rejects(bridge.workflow('noco',start.browserId,{operation:'create',body:{},key:'key',url:'https://other'}),{status:400});assert.equal(calls.length,count);
+  const result=await bridge.workflow('noco',start.browserId,{operation:'create',key:'ui-fixed',body:{definitionId:'procurement',title:'x',input:{}}});assert.equal(result.token,undefined);assert.equal(calls.at(-1).url,'http://gateway/v1/workflows');assert.equal(calls.at(-1).options.headers['idempotency-key'],'ui-fixed');assert.equal(calls.at(-1).options.headers.authorization,'Bearer fixture-token');bridge.disconnect('noco',start.browserId);
+});
