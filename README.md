@@ -23,6 +23,8 @@ Mở rộng engine bằng cấu hình quy trình: [hợp đồng Workflow Studio
 
 [Workflow completion](docs/workflow-completion.md) bổ sung chờ kết quả task/connector, callback theo quyền, deadline bền vững và guard eq/gt/exists; thử `pnpm test:workflow-completion`. Completion tự chuyển trạng thái đã cấu hình; action ở bước tiếp vẫn cần quyền của người gọi.
 
+[Workflow bundles](docs/workflow-bundles.md) cho phép xuất nhiều published workflow, xem trước và nhập nguyên bộ thành bản nháp trong đơn vị đích; thử `pnpm test:workflow-bundles`. Không chuyển người dùng/quyền, dữ liệu đang chạy hoặc bố cục UI, không tự publish và không ghi đè cấu hình đích.
+
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 
 Cấu hình này dùng mật khẩu PUBLIC cho môi trường local, được ghi rõ trong hướng dẫn. Không dùng cấu hình này để triển khai Internet. Xem [nguồn và giấy phép](docs/third-party.md).
@@ -77,7 +79,7 @@ Thêm server độc lập vào `apps/`, thư viện tái sử dụng vào `packa
 - API demo gọi agent worker đồng bộ bằng HTTP. Workflow nghiệp vụ có trạng thái bền vững và PostgreSQL outbox với retry riêng; chưa có hàng đợi tác vụ agent.
 - API hồ sơ trong core xác minh JWT và quyền read/write, giới hạn theo chủ sở hữu và claim đơn vị `organization_id` đã ký. Token thiếu đơn vị bị từ chối. Bản ghi cũ chưa có đơn vị không tự được gán quyền. `pnpm dev` không tự nạp cấu hình core và endpoint hồ sơ trả 503 nếu thiếu cấu hình identity/database.
 - Task/decision nền có lưu bền và kiểm tra phiên bản; chưa tự đổi trạng thái hồ sơ mua sắm. Tệp 1 MiB lưu PostgreSQL bytea, quét ClamAV trước khi tải; chưa có object storage hoặc quét lại nền. Đọc [hợp đồng nền](docs/phase-one-handoff.md).
-- Workflow API thực thi cấu hình trạng thái/role được quản lý trong source, với kiểm tra phiên bản và Idempotency-Key. Inbox là các run có bước actor được phép xử lý; không sinh task nền thứ hai. Chưa có trình thiết kế workflow hoặc gán việc cá nhân.
+- Workflow API chạy cả cấu hình builtin trong source và cấu hình custom publish theo đơn vị; run giữ phiên bản bất biến. Các block có thể giao task theo người/phòng ban hoặc dispatch connector, chờ kết quả và áp dụng điều kiện. API draft/publish và bundle đã có; Studio UI, adapter ngoài và bộ dựng biểu mẫu cần tích hợp tiếp.
 - Endpoint demo agent là kiểm tra kết nối cục bộ; không được công bố qua gateway core và chưa có xác thực.
 - Các thẻ ứng dụng/dữ liệu trên giao diện ghi rõ chưa tích hợp; không phải kiểm tra sức khỏe dịch vụ.
 
