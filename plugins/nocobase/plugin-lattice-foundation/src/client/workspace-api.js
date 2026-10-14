@@ -22,6 +22,7 @@ function createWorkspaceApi({apiClient, onExpired = () => {}, notify = () => {}}
   };
   const api = {
     request,
+    clearNotice(){notify({type:'success',message:''});},
     async user() {return (await request({url:'auth:check',method:'get'})).data.data;},
     async applications() {return (await request({url:'latticeApps:list',method:'get'})).data.data.items;},
     async connection() {return (await request({url:'dxActions:status',method:'get'})).data;},

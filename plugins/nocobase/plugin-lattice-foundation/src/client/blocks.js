@@ -3,8 +3,10 @@ const {createFormActions} = require('./actions');
 const {createWorkspaceApi} = require('./workspace-api');
 const {defaultContracts}=require('../shared/contracts');
 const {loadFormContext}=require('./reference-data');
+const {createInboxComponents}=require('./inbox-blocks');
 function createBlockComponents(client,React,antd) {
   const h=React.createElement;
+  const {TaskInboxBlock,ApprovalBlock}=createInboxComponents(React);
   const style={padding:14,border:'1px solid #e0e7ef',borderRadius:8,marginBottom:16};
   function AttachmentPanel({api,recordId,connected,allowUnbound=false,onUploaded}) {
     const [file,setFile]=React.useState(null),[saved,setSaved]=React.useState(null),[lookup,setLookup]=React.useState('');
@@ -129,7 +131,7 @@ function createBlockComponents(client,React,antd) {
     if(block&&expectedType&&block.type!==expectedType)return h('p',{role:'alert'},'Loại block không khớp cấu hình đã chọn.');
     return h('div',null,notice&&h('p',{role:'alert'},notice),!connected&&h('a',{href:'/lattice'},'Mở Workspace để kết nối API'),
       connected&&manifest?.workspace?.panels?.length>0&&h('a',{href:manifest.route},'Mở Workspace để xử lý công việc'),
-      block?h(block.type==='form'?FormBlock:ListBlock,{manifest,block,api,connected,refreshKey:refresh,onSaved:()=>setRefresh(n=>n+1)}):h('p',null,'Đang tải hoặc không tìm thấy cấu hình block.'));
+      block?h({form:FormBlock,list:ListBlock,'task-inbox':TaskInboxBlock,approval:ApprovalBlock}[block.type],{manifest,block,api,connected,actorId:connection.identity?.subject,refreshKey:refresh,onSaved:()=>setRefresh(n=>n+1)}):h('p',null,'Đang tải hoặc không tìm thấy cấu hình block.'));
   }
   function Initializer() {
     const item=client.useSchemaInitializerItem();
@@ -142,7 +144,7 @@ function createBlockComponents(client,React,antd) {
         const options=apps.flatMap(app=>app.blocks.filter(b=>b.type===item.blockType).map(block=>({app,block})));
         if(!options.length)throw new Error('Không có cấu hình block phù hợp.');
         let selected=0;
-        antd.Modal.confirm({title:'Chọn cấu hình '+(item.blockType==='form'?'Form':'Danh sách'),
+        antd.Modal.confirm({title:'Chọn cấu hình '+({form:'Form',list:'Danh sách','task-inbox':'Task Inbox',approval:'Approval'}[item.blockType]||item.blockType),
           content:h('select',{'aria-label':'Cấu hình block',defaultValue:0,onChange:e=>{selected=Number(e.target.value)}},
             ...options.map((o,i)=>h('option',{key:i,value:i},o.app.name+' — '+o.block.title))),
           onOk:()=>{const {app,block}=options[selected];insert({type:'void','x-decorator':'BlockItem','x-component':'LatticeConfiguredBlock','x-component-props':{manifestId:app.id,blockId:block.id}});},
@@ -150,6 +152,6 @@ function createBlockComponents(client,React,antd) {
       }catch(e){antd.message.error(e.message)}
     }});
   }
-  return {FormBlock,ListBlock,ConfiguredBlock,Initializer};
+  return {FormBlock,ListBlock,TaskInboxBlock,ApprovalBlock,ConfiguredBlock,Initializer};
 }
 module.exports={createBlockComponents};

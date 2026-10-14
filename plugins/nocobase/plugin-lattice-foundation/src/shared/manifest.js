@@ -41,14 +41,29 @@ function validateManifest(value, contracts=defaultContracts) {
   if (!Array.isArray(value.blocks) || !value.blocks.length) error('blocks', 'non-empty list required');
   else value.blocks.forEach((b, n) => {
     const path = `blocks[${n}]`;
-    if (!keys(b, ['id', 'type', 'title', 'collection', 'permissions', 'fields', 'submit', 'columns', 'attachments'], path)) return;
+    if (!keys(b, ['id', 'type', 'title', 'collection', 'permissions', 'fields', 'submit', 'columns', 'attachments','definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels'], path)) return;
     if (typeof b.id !== 'string' || !id.test(b.id) || blockIds.has(b.id)) error(`${path}.id`, 'invalid or duplicate');
     blockIds.add(b.id);
     if (!label(b.title)) error(`${path}.title`, 'required');
     permission(b.permissions, `${path}.permissions`);
     const collection = collections.get(b.collection);
     if (!collection) error(`${path}.collection`, 'unknown reference');
-    if (b.type === 'form') {
+    const workflowBlock=['task-inbox','approval'].includes(b.type);
+    for(const name of ['definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels'])if(name in b&&!workflowBlock)error(path,'workflow options require Inbox/Approval');
+    if(workflowBlock){
+      if(collection?.source!=='lattice-api'||collection.resource!=='workflows')error(path,'Inbox/Approval requires workflows resource');
+      for(const name of ['fields','submit','columns','attachments'])if(name in b)error(path,'workflow block uses API action schema');
+      if(b.definitionId!==undefined&&(typeof b.definitionId!=='string'||! /^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/.test(b.definitionId)))error(path,'invalid workflow definition ID');
+      if(b.type==='task-inbox'){
+        if(b.pageSize!==undefined&&(!Number.isInteger(b.pageSize)||b.pageSize<1||b.pageSize>100))error(path,'page size must be 1–100');
+        if(b.runId!==undefined)error(path,'Inbox cannot bind fixed run ID');
+        if(b.approvalBlockId!==undefined&&(!id.test(b.approvalBlockId)||!value.blocks.some(other=>other?.id===b.approvalBlockId&&other.type==='approval'&&other.definitionId===b.definitionId)))error(path,'approval reference must match definition scope');
+      }else{
+        if(b.pageSize!==undefined||b.approvalBlockId!==undefined)error(path,'Approval cannot configure Inbox pagination/link');
+        if(b.runId!==undefined&&(typeof b.runId!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(b.runId)))error(path,'run ID must be UUID');
+      }
+      for(const name of ['actionLabels','fieldLabels','stateLabels'])if(b[name]!==undefined&&(!object(b[name])||Object.entries(b[name]).some(([key,text])=>! /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(key)||['constructor','prototype','__proto__'].includes(key)||!label(text))))error(path,'labels must map safe IDs to plain text');
+    } else if (b.type === 'form') {
       if (b.attachments !== undefined && (b.attachments !== true || !contracts.action(b.submit?.actionId)?.attachments)) error(`${path}.attachments`, 'attachments require record/order creation');
       const fields = new Set();
       if (!Array.isArray(b.fields) || !b.fields.length) error(`${path}.fields`, 'non-empty list required');

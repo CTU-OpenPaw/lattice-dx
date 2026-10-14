@@ -12,7 +12,7 @@ function createWorkspaceComponent(client, React, runtime) {
     const [loadFailed,setLoadFailed] = React.useState(false);
     const mounted = React.useRef(true), operating = React.useRef(false);
     const api = React.useMemo(() => createWorkspaceApi({apiClient,
-      notify: value => {if (mounted.current) setNotice(value);},
+      notify: value => {if (mounted.current) setNotice(value?.message?value:null);},
       onExpired: source => {if (mounted.current) {if (source==='nocobase') setExpired(true); else setConnection({connected:false});}},
     }), [apiClient]);
     React.useEffect(() => {

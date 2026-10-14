@@ -25,7 +25,7 @@ Build validates and copies authored CommonJS into dist. The runtime supplies the
 Copy the generated tgz into the container, then install with the official package manager. It extracts into persistent storage/plugins and links the package for Node.js. Inside the container:
 
 ```sh
-yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.9.1.tgz
+yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.10.0.tgz
 yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 yarn nocobase pm list
 yarn nocobase pm disable @latticedx/plugin-lattice-foundation
@@ -47,6 +47,12 @@ Workspace is a shell: it delegates to the application runtime and contains no pu
 Record/task forms use the backend's Unicode code-point limits. Their catalog actions send an idempotency key through the server bridge. An uncertain result locks new submissions; manual retry preserves the original key and payload and checks current action permissions again. A confirmed result clears the command; a deliberate new submission receives a new key. File uploads are not automatically retried.
 
 The workflow bridge also exposes fixed, session-bound operations `waits`, `executions`, `completeWait` and `retrySync`. Mutation operations require a key and body; the backend remains responsible for permissions and business validation. These adapters do not add Inbox/Approval/Timeline/Context blocks or a workflow designer.
+
+## Inbox and Approval in 0.10.0
+
+`/lattice/apps/work` demonstrates reusable workflow Inbox and Approval blocks across the caller's permitted workflows. Both are registered as native FlowModels and in the Add block menu. Builders select an installed manifest/block; the Inbox's `approvalBlockId` opens its configured Approval inline. Standalone Approval needs a manifest `runId` or a Workspace selection binding. See [configuration, semantics and test evidence](../../../docs/inbox-approval-blocks.md).
+
+These are workflow work items. Independent foundation tasks and task/connector wait completion are not included. Permissions are enforced by the backend; manifest labels and permission metadata do not grant roles.
 
 ## Terms
 

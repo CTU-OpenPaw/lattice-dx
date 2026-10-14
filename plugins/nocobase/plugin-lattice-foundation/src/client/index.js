@@ -37,7 +37,13 @@
       class LatticeListBlockModel extends clientV2.BlockModel {
         renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'list'});}
       }
-      for(const [Model,type,label] of [[LatticeFormBlockModel,'form','Lattice Form'],[LatticeListBlockModel,'list','Lattice Danh sách']]){
+      class LatticeTaskInboxBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'task-inbox'});}
+      }
+      class LatticeApprovalBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'approval'});}
+      }
+      for(const [Model,type,label] of [[LatticeFormBlockModel,'form','Lattice Form'],[LatticeListBlockModel,'list','Lattice Danh sách'],[LatticeTaskInboxBlockModel,'task-inbox','Lattice Task Inbox'],[LatticeApprovalBlockModel,'approval','Lattice Approval']]){
         Model.define({label});
         Model.registerFlow({key:'latticeBinding',title:'Cấu hình Lattice',on:'beforeRender',steps:{binding:{
           title:'Chọn ứng dụng và block',defaultParams:{binding:''},
@@ -50,7 +56,7 @@
           handler(ctx,params){const [manifestId,blockId]=typeof params.binding==='string'?params.binding.split(':'):[];ctx.model.setProps({manifestId,blockId});},
         }}});
       }
-      this.flowEngine.registerModels({LatticeFormBlockModel,LatticeListBlockModel});
+      this.flowEngine.registerModels({LatticeFormBlockModel,LatticeListBlockModel,LatticeTaskInboxBlockModel,LatticeApprovalBlockModel});
       this.app.addComponents({LatticeFormBlock:blocks.FormBlock,LatticeListBlock:blocks.ListBlock,LatticeConfiguredBlock:blocks.ConfiguredBlock,LatticeBlockInitializer:blocks.Initializer});
       const registerBlocks=()=>{
         for (const name of ['page:addBlock','RecordBlockInitializers']) {
@@ -58,6 +64,8 @@
           if (initializer) {
             initializer.add('otherBlocks.latticeForm',{type:'item',title:'Lattice Form',Component:blocks.Initializer,blockType:'form'});
             initializer.add('otherBlocks.latticeList',{type:'item',title:'Lattice Danh sách',Component:blocks.Initializer,blockType:'list'});
+            initializer.add('otherBlocks.latticeTaskInbox',{type:'item',title:'Lattice Task Inbox',Component:blocks.Initializer,blockType:'task-inbox'});
+            initializer.add('otherBlocks.latticeApproval',{type:'item',title:'Lattice Approval',Component:blocks.Initializer,blockType:'approval'});
           }
         }
       };

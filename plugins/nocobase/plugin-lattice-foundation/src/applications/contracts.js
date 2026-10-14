@@ -4,6 +4,7 @@
 function registerApplicationContracts(registry) {
   registry.registerResource('records',{url:'dxActions:list',method:'get',resource:'records'});
   registry.registerResource('tasks',{url:'dxActions:list',method:'get',resource:'tasks'});
+  registry.registerResource('workflows',{url:'dxActions:workflow',method:'post',operation:'list'});
   registry.registerResource('orders',{url:'dxActions:logistics',method:'post',operation:'orders'});
   registry.registerReference('records',{mode:'suggestion',resource:'records',value:'id',label:'title'});
   registry.registerReference('warehousePeople',{mode:'select',url:'dxActions:logistics',operation:'people',query:{role:'logistics:warehouse'},value:'subject',label:'displayName',placeholder:'Chọn người kho…'});

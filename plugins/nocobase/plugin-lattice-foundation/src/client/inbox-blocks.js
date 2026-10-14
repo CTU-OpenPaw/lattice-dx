@@ -1,0 +1,76 @@
+// SPDX-License-Identifier: Apache-2.0
+const {assertRun,createApprovalController}=require('./approval');
+function createInboxComponents(React) {
+  const defaults={button:{padding:'8px 12px',margin:'4px 4px 4px 0',border:'1px solid #cad5e2',borderRadius:6,background:'#fff',color:'#172b4d',cursor:'pointer'},input:{padding:8,border:'1px solid #cad5e2',borderRadius:6},select:{padding:8,border:'1px solid #cad5e2',borderRadius:6},textarea:{display:'block',width:'100%',boxSizing:'border-box',padding:8,marginTop:6,border:'1px solid #cad5e2',borderRadius:6},table:{width:'100%',borderCollapse:'collapse',marginTop:12},th:{padding:10,textAlign:'left',background:'#f3f6fa',borderBottom:'1px solid #dce3ed'},td:{padding:10,textAlign:'left',borderBottom:'1px solid #e8edf4',maxWidth:250,overflowWrap:'anywhere'},form:{margin:'8px 0'},nav:{marginTop:12}};
+  function h(type,props,...children){const value=props||{};return React.createElement(type,{...value,...(typeof type==='string'&&defaults[type]?{style:{...defaults[type],...(type==='button'&&value['aria-pressed']?{background:'#eaf1ff',borderColor:'#2563eb'}:{}),...(type==='button'&&value.disabled?{cursor:'default',opacity:0.55}:{}),...value.style}}:{})},...children);}
+  const style={padding:16,border:'1px solid #dce3ed',borderRadius:8,marginBottom:16};
+  function ApprovalBlock({block,api,connected,selectedId,actorId,onSaved,onLocked}) {
+    const id=selectedId||block.runId;
+    const [run,setRun]=React.useState(null),[values,setValues]=React.useState({}),[refs,setRefs]=React.useState([]);
+    const [loading,setLoading]=React.useState(false),[busy,setBusy]=React.useState(false),[error,setError]=React.useState(''),[notice,setNotice]=React.useState(''),[reload,setReload]=React.useState(0);
+    const epoch=React.useRef(0);
+    const controller=React.useMemo(()=>createApprovalController({api,actorId:connected?(actorId||'session'):null,definitionId:block.definitionId}),[api,id,connected,actorId,block.definitionId]);
+    React.useEffect(()=>{const current=++epoch.current;let active=true;setRun(null);setValues({});setError('');setNotice('');setBusy(false);onLocked?.(false);
+      if(!id||!connected){setLoading(false);return()=>{active=false;epoch.current++;};}
+      setLoading(true);
+      api.workflow('detail',{id}).then(value=>{if(active){assertRun(value,block.definitionId);if(value.id!==id)throw new Error('ID công việc không khớp.');controller.load(value);setRun(value);}}).catch(e=>{if(active)setError(e.message)}).finally(()=>{if(active&&current===epoch.current)setLoading(false)});
+      return()=>{active=false;epoch.current++;};
+    },[controller,id,connected,reload]);
+    React.useEffect(()=>{let active=true;setRefs([]);if(connected&&run?.availableTransitions.some(a=>Object.values(a.fields).some(k=>['department','location'].includes(k))))api.workflow('references').then(result=>{if(active)setRefs(result.items||[])}).catch(()=>{});return()=>{active=false};},[api,connected,run]);
+    React.useEffect(()=>()=>onLocked?.(false),[onLocked]);
+    async function perform(action,retry=false){
+      if(!connected||controller.busy||(!retry&&controller.uncertain))return;
+      const current=epoch.current;setBusy(true);setError('');setNotice('');onLocked?.(true);
+      try{const result=retry?await controller.retry():await controller.execute(action.id,values[action.id]||{});if(current===epoch.current){setRun(result);setValues({});setNotice('Đã xử lý thành công — trạng thái: '+result.state);api.clearNotice?.();onSaved?.(result);}}
+      catch(e){if(current===epoch.current)setError(e.message);}
+      finally{if(current===epoch.current){setBusy(false);onLocked?.(controller.uncertain);}}
+    }
+    const locked=busy||controller.uncertain;
+    return h('article',{style,'data-block-id':block.id,'data-testid':'lattice-approval'},h('h3',null,block.title),
+      !connected&&h('p',null,'Kết nối tài khoản nghiệp vụ để xử lý công việc.'),
+      connected&&!id&&h('p',null,'Chọn một công việc trong Inbox hoặc cấu hình ID hồ sơ.'),
+      loading&&h('p',{role:'status'},'Đang tải chi tiết…'),error&&h('p',{role:'alert'},error),notice&&h('p',{role:'status'},notice),
+      id&&connected&&h('button',{type:'button',disabled:locked||loading,onClick:()=>setReload(n=>n+1)},'Tải lại chi tiết'),
+      run&&h('div',null,h('h4',null,run.title),h('p',{'data-testid':'approval-state'},`${run.definitionId} — ${run.state} — v${run.version}`),h('small',null,'ID: '+run.id),
+        h('dl',null,...Object.entries(run.data||{}).map(([name,value])=>h('div',{key:name},h('dt',null,block.fieldLabels?.[name]||name),h('dd',null,String(value))))),
+        run.waiting&&h('p',null,'Quy trình đang chờ tác vụ hoặc dịch vụ hoàn tất. Chưa có hành động chuyển bước.'),
+        !run.waiting&&!run.availableTransitions.length&&h('p',null,'Không có hành động được phép ở trạng thái hiện tại.'),
+        ...run.availableTransitions.map(action=>h('form',{key:action.id,'data-transition':action.id,onSubmit:e=>{e.preventDefault();perform(action);},noValidate:true},
+          h('h4',null,block.actionLabels?.[action.id]||action.id),
+          ...Object.entries(action.fields).map(([name,kind])=>{
+            const label=block.fieldLabels?.[name]||name;const inputProps={'aria-label':label,name,required:true,disabled:locked||!connected,value:values[action.id]?.[name]||'',onChange:e=>setValues(old=>({...old,[action.id]:{...old[action.id],[name]:e.target.value}}))};
+            return h('label',{key:name,style:{display:'block',margin:'8px 0'}},label+' * ',
+              ['department','location'].includes(kind)?h('select',inputProps,h('option',{value:''},'Chọn…'),...refs.filter(r=>r.kind===kind).map(r=>h('option',{key:r.id,value:r.id},r.name))):kind==='text'?h('textarea',{...inputProps,rows:3}):h('input',{...inputProps,type:kind==='positiveInteger'?'number':'text',...(kind==='positiveInteger'?{min:1,max:1000000,step:1}:{})}),
+              kind==='subject'&&h('small',null,' Dùng định danh tài khoản trong danh bạ.'),kind==='file'&&h('small',null,' Dùng ID tệp đã được quét sạch.'));
+          }),
+          h('button',{type:'submit',disabled:locked||!connected},busy?'Đang xử lý…':block.actionLabels?.[action.id]||action.id)))),
+      controller.uncertain&&h('div',null,h('p',{role:'alert'},'Kết quả chưa xác định. Không đổi công việc; thử lại sẽ dùng đúng lệnh và khóa cũ.'),h('button',{type:'button',disabled:busy||!connected,onClick:()=>perform(null,true)},'Thử lại lệnh cũ')));
+  }
+  function TaskInboxBlock({manifest,block,api,connected,actorId,refreshKey,onOpen,openDisabled=false}) {
+    const [items,setItems]=React.useState([]),[page,setPage]=React.useState(0),[next,setNext]=React.useState(false),[q,setQ]=React.useState(''),[search,setSearch]=React.useState(''),[state,setState]=React.useState(''),[mode,setMode]=React.useState('inbox');
+    const [loading,setLoading]=React.useState(false),[error,setError]=React.useState(''),[reload,setReload]=React.useState(0),[selected,setSelected]=React.useState(null),[locked,setLocked]=React.useState(false);
+    const [states,setStates]=React.useState([]);const limit=block.pageSize||10;
+    React.useEffect(()=>{setPage(0);setSelected(null);setLocked(false);},[connected,actorId,block.id]);
+    React.useEffect(()=>{let active=true;setItems([]);setNext(false);setError('');if(!connected){setLoading(false);return()=>{active=false};}setLoading(true);
+      api.workflow(mode,{query:{limit:String(limit),offset:String(page*limit),q:search,...(state?{state}:{}),...(block.definitionId?{definitionId:block.definitionId}:{})}}).then(result=>{
+        if(!Array.isArray(result?.items)||result.items.length>limit||!result.page||result.page.offset!==page*limit||result.page.limit!==limit||typeof result.page.hasMore!=='boolean')throw new Error('Phân trang Inbox không hợp lệ.');
+        result.items.forEach(row=>assertRun(row,block.definitionId));if(active){setItems(result.items);setNext(result.page.hasMore);}
+      }).catch(e=>{if(active)setError(e.message)}).finally(()=>{if(active)setLoading(false)});return()=>{active=false};
+    },[api,connected,actorId,block.definitionId,limit,page,state,mode,search,reload,refreshKey]);
+    React.useEffect(()=>{let active=true;setStates([]);if(connected)api.workflow('definitions').then(result=>{if(active)setStates([...new Set((result.items||[]).filter(d=>!block.definitionId||d.id===block.definitionId).flatMap(d=>[d.initialState,...d.transitions.flatMap(t=>[t.from,t.to])]))].sort())}).catch(()=>{});return()=>{active=false};},[api,connected,block.definitionId]);
+    const approval=manifest.blocks.find(b=>b.id===block.approvalBlockId);
+    const disabled=locked||openDisabled;
+    return h('article',{style,'data-block-id':block.id,'data-testid':'lattice-task-inbox'},h('h3',null,block.title),
+      h('p',null,'Danh sách theo quyền và bước xử lý do API quyết định.'),!connected&&h('p',null,'Kết nối tài khoản nghiệp vụ để xem công việc.'),
+      h('div',{'aria-label':'Phạm vi công việc'},...[['inbox','Cần xử lý'],['list','Có quyền xem']].map(([value,label])=>h('button',{key:value,type:'button','aria-pressed':mode===value,disabled:disabled||!connected,onClick:()=>{setMode(value);setPage(0);setSelected(null)}},label))),
+      h('form',{onSubmit:e=>{e.preventDefault();setSearch(q.trim());setPage(0);setSelected(null)}},h('label',null,'Tìm công việc ',h('input',{'aria-label':'Tìm công việc',value:q,disabled:disabled||!connected,onChange:e=>setQ(e.target.value)})),h('button',{type:'submit',disabled:disabled||!connected},'Tìm')),
+      h('label',null,'Trạng thái ',h('select',{'aria-label':'Trạng thái công việc',value:state,disabled:disabled||!connected,onChange:e=>{setState(e.target.value);setPage(0);setSelected(null)}},h('option',{value:''},'Tất cả'),...states.map(s=>h('option',{key:s,value:s},block.stateLabels?.[s]||s)))),
+      h('button',{type:'button',disabled:disabled||loading||!connected,onClick:()=>setReload(n=>n+1)},'Tải lại Inbox'),
+      loading&&h('p',{role:'status'},'Đang tải công việc…'),error&&h('p',{role:'alert'},error),connected&&!loading&&!error&&!items.length&&h('p',null,'Không có công việc phù hợp.'),
+      connected&&!loading&&!error&&h('div',{style:{overflowX:'auto'}},h('table',null,h('thead',null,h('tr',null,...['Công việc','Quy trình','Trạng thái','Cập nhật','Thao tác'].map(t=>h('th',{key:t,scope:'col'},t)))),h('tbody',null,...items.map(row=>h('tr',{key:row.id},h('td',null,row.title),h('td',null,row.definitionId),h('td',null,block.stateLabels?.[row.state]||row.state),h('td',null,row.updatedAt?new Date(row.updatedAt).toLocaleString('vi-VN'):'—'),h('td',null,h('button',{type:'button','aria-label':'Mở '+row.title,disabled,onClick:()=>{setSelected(row.id);onOpen?.(row)}},'Mở chi tiết'))))))),
+      h('nav',{'aria-label':'Phân trang Inbox'},h('button',{disabled:disabled||loading||!connected||page===0,onClick:()=>{setPage(n=>n-1);setSelected(null)}},'Trước'),h('span',null,` Trang ${page+1} `),h('button',{disabled:disabled||loading||!connected||!next,onClick:()=>{setPage(n=>n+1);setSelected(null)}},'Sau')),
+      approval&&selected&&h(ApprovalBlock,{key:selected+':'+(actorId||''),block:approval,api,connected,actorId,selectedId:selected,onLocked:setLocked,onSaved:()=>setReload(n=>n+1)}));
+  }
+  return {TaskInboxBlock,ApprovalBlock};
+}
+module.exports={createInboxComponents};

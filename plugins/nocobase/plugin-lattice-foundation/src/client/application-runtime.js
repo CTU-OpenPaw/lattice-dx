@@ -19,7 +19,7 @@ function createApplicationRuntime(React,blocks) {
       ...bindings.map(binding=>{
         const block=manifest.blocks.find(item=>item.id===binding.blockId);
         if(!block)return h('p',{key:binding.blockId,role:'alert'},'Không tìm thấy cấu hình block.');
-        return h(block.type==='form'?blocks.FormBlock:blocks.ListBlock,{key:block.id+':'+(connection.identity?.subject||''),manifest,block,api,connected:connection.connected,refreshKey:refresh,openDisabled:locked,
+        return h({form:blocks.FormBlock,list:blocks.ListBlock,'task-inbox':blocks.TaskInboxBlock,approval:blocks.ApprovalBlock}[block.type],{key:block.id+':'+(connection.identity?.subject||''),manifest,block,api,connected:connection.connected,actorId:connection.identity?.subject,selectedId,refreshKey:refresh,openDisabled:locked,onLocked:setLocked,
           onSaved:result=>{setRefresh(n=>n+1);open(result,binding);},onOpen:binding.selectFrom?row=>open(row,binding):undefined});
       }),
       layout.note&&h('p',null,layout.note),
