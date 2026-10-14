@@ -10,6 +10,7 @@
       { "name": "data:share" },
       { "name": "directory:manage" },
       { "name": "platform:operate" },
+      { "name": "workflow:event:receive" },
       {
         "name": "records:read"
       },
@@ -151,6 +152,7 @@
         "data:design",
         "directory:manage",
         "platform:operate",
+        "workflow:event:receive",
         "data:read",
         "data:write",
         "records:read",

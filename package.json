@@ -28,6 +28,7 @@
     "test:entity-query-blocks": "node scripts/smoke-entity-query-blocks.mjs",
     "test:workflow-lifecycle": "node scripts/smoke-workflow-lifecycle.mjs",
     "test:organization-operations": "node scripts/smoke-organization-operations.mjs",
+    "test:inbound-events": "node scripts/smoke-inbound-events.mjs",
     "backup:core": "node scripts/backup-core.mjs backup",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "workflow:seed-local": "node scripts/seed-workflow-demo.mjs",
