@@ -40,7 +40,10 @@ import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';i
   let denied=await repo.create({...create,title:'Authority revoked'},actor,'denied-create');denied=await repo.transition(denied.id,{action:'schedule',expectedVersion:1,input:{}},actor,'denied-schedule');
   await pool.query("UPDATE directory_people SET enabled=false WHERE subject='service' AND organization_id='a'");await pool.query("UPDATE workflow_timers SET due_at=now()-interval '1 second',available_at=now()-interval '1 second' WHERE run_id=$1",[denied.id]);await repo.tickOne();
   const failed=(await repo.listTimers(denied.id,actor,{limit:100,offset:0,q:''})).items[0];assert.equal(failed.status,'failed');assert.equal((await pool.query("SELECT count(*) FROM records WHERE owner_id='service'")).rows[0].count,'2');
-  await pool.query("UPDATE directory_people SET enabled=true WHERE subject='service' AND organization_id='a'");await repo.retryTimer(denied.id,failed.id,denied.version,actor,'retry');
+  await pool.query("UPDATE directory_people SET enabled=true,roles=$1 WHERE subject='service' AND organization_id='a'",[JSON.stringify(['workflow:service','automation'])]);
+  await assert.rejects(()=>repo.retryTimer(denied.id,failed.id,denied.version,actor,'retry'),e=>e.statusCode===403);
+  assert.equal((await repo.listTimers(denied.id,actor,{limit:100,offset:0,q:''})).items[0].status,'failed');
+  await pool.query("UPDATE directory_people SET roles=$1 WHERE subject='service' AND organization_id='a'",[JSON.stringify(service.roles)]);await repo.retryTimer(denied.id,failed.id,denied.version,actor,'retry');
   await pool.query("UPDATE workflow_timers SET due_at=now()-interval '1 second',available_at=now()-interval '1 second' WHERE run_id=$1",[denied.id]);
   await pool.end();pool=new pg.Pool({connectionString:process.env.DATABASE_URL,options:'-c search_path='+schema,max:1});registry=await definitionDatabase(pool);repo=await workflowDatabase(pool,registry);await repo.tickOne();assert.equal((await repo.get(denied.id,actor)).state,'done');
   let cancelled=await repo.create({...create,title:'Cancelled timer'},actor,'cancel-create');cancelled=await repo.transition(cancelled.id,{action:'schedule',expectedVersion:1,input:{}},actor,'cancel-schedule');await repo.cancel(cancelled.id,{expectedVersion:cancelled.version,reason:'Stop'},actor,'cancel');

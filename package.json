@@ -31,6 +31,7 @@
     "test:inbound-events": "node scripts/smoke-inbound-events.mjs",
     "test:enterprise-modules": "node scripts/smoke-enterprise-modules.mjs",
     "test:workflow-timers": "node scripts/smoke-workflow-timers.mjs",
+    "test:entity-data-tools": "node scripts/smoke-entity-data-tools.mjs",
     "backup:core": "node scripts/backup-core.mjs backup",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "workflow:seed-local": "node scripts/seed-workflow-demo.mjs",

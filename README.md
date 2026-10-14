@@ -35,6 +35,8 @@ Theo dõi nền backend ở [kế hoạch hoàn thiện](docs/backend-completion
 
 Kiểm vận hành bằng [operations](docs/operations.md), local backup/restore rehearsal theo [recovery](docs/recovery.md). Các mục chưa nghiệm thu trong kế hoạch không được coi đã hoàn thành.
 
+[Workflow timers](docs/workflow-timers.md) thực thi bước đã cấu hình bằng danh tính dịch vụ có quyền hiện tại; [entity data tools](docs/entity-data-tools.md) bổ sung tệp theo quyền thực thể, nhập JSON/CSV theo publication pin, xuất dữ liệu có giới hạn và nâng schema explicit. Thử bằng `pnpm test:workflow-timers` và `pnpm test:entity-data-tools`. Các kết quả kiểm thử và mục chưa chốt được ghi ở [verification](docs/verification.md).
+
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 
 Cấu hình này dùng mật khẩu PUBLIC cho môi trường local, được ghi rõ trong hướng dẫn. Không dùng cấu hình này để triển khai Internet. Xem [nguồn và giấy phép](docs/third-party.md).
