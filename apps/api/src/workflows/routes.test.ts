@@ -82,7 +82,7 @@ test('block catalogue requires signed organization and filters each action by ca
     expect(result.statusCode).toBe(200);expect(result.json().items.map((item:{id:string})=>item.id)).toEqual(['tasks.create']);
     expect((await app.inject({url:'/v1/workflow-blocks',headers:await auth([])})).json().items).toEqual([]);
       const entityItems=(await app.inject({url:'/v1/workflow-blocks',headers:await auth(['data:read','data:write'])})).json().items;
-      expect(entityItems.map((item:{id:string})=>item.id)).toEqual(['entities.create','entities.read','entities.query','entities.update','entities.archive','entities.link','entities.unlink']);
+      expect(entityItems.map((item:{id:string})=>item.id)).toEqual(['entities.create','entities.project','data.evaluate','data.assert','entities.read','entities.query','entities.update','entities.archive','entities.link','entities.unlink']);
       expect(entityItems.every((item:{input:unknown;output:unknown})=>item.input&&item.output)).toBe(true);
   }finally{await app.close();}
 });
