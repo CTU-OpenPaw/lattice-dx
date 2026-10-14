@@ -9,6 +9,8 @@ import { bad, EntityError, uuid, version } from './policy.js';
 import { pageResult, type PageQuery } from '../pagination.js';
 import type { Entity, Scope } from './types.js';
 import type { AttachmentInput, EntityDataToolsRepository } from './data-tools-types.js';
+import {loadFileContentWithClient} from '../files/content.js';
+import type {ObjectStore} from '../files/object-store.js';
 type FileRow={fileId:string;filename:string;size:number;scanStatus:string;ownerId:string;organizationId:string;recordId:string|null;content?:Buffer};
 const fileColumns='id AS "fileId",filename,size,scan_status AS "scanStatus",owner_id AS "ownerId",organization_id AS "organizationId",record_id AS "recordId"';
 async function lockFile(client:PoolClient,scope:Scope,id:string,bytes=false):Promise<FileRow> {
@@ -25,7 +27,7 @@ async function contextualEntity(client:PoolClient,scope:Scope,id:string):Promise
  return found;
 }
 function boundedPage(page:PageQuery){if(!Number.isSafeInteger(page.limit)||page.limit<1||page.limit>100||!Number.isSafeInteger(page.offset)||page.offset<0||page.offset>Number.MAX_SAFE_INTEGER-101||typeof page.q!=='string'||Array.from(page.q).length>200)bad('Invalid pagination.');}
-export async function entityDataToolsDatabase(pool:Pool):Promise<EntityDataToolsRepository>{
+export async function entityDataToolsDatabase(pool:Pool,store?:ObjectStore):Promise<EntityDataToolsRepository>{
  await pool.query(`CREATE TABLE IF NOT EXISTS enterprise_entity_attachments (
   entity_id uuid NOT NULL REFERENCES enterprise_entities(id),file_id uuid NOT NULL REFERENCES foundation_files(id),
   organization_id text NOT NULL,created_by text NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(entity_id,file_id)
@@ -64,11 +66,8 @@ export async function entityDataToolsDatabase(pool:Pool):Promise<EntityDataTools
   async attachmentContent(scope,id,fileId){
    id=uuid(id);fileId=uuid(fileId);
    return withEntityTransaction(pool,async client=>{
-    await contextualEntity(client,scope,id);
-    const link=(await client.query('SELECT file_id FROM enterprise_entity_attachments WHERE entity_id=$1 AND file_id=$2 AND organization_id=$3',[id,fileId,scope.organizationId])).rows[0];
-    if(!link)throw missing();
-    const file=await lockFile(client,scope,fileId,true);clean(file);
-    return {filename:file.filename,content:file.content!};
+    const file=await loadFileContentWithClient(client,{subject:scope.actorId,organizationId:scope.organizationId,roles:['data:read','files:read']},fileId,{kind:'entityAttachment',entityId:id},store);
+    if(!file)throw missing();return file;
    });
   },
  };

@@ -36,5 +36,5 @@ export interface WorkflowRepository {
   retryJobs(id:string,actor:WorkflowActor,key:string):Promise<number>;
   registerMember(actor:WorkflowActor):Promise<void>;
   references(actor:WorkflowActor):Promise<{kind:string;id:string;name:string}[]>;
-  readSharedFile(id:string,actor:WorkflowActor):Promise<(FileItem&{content:Buffer})|undefined>;
+  readSharedFile(id:string,actor:WorkflowActor):Promise<(FileItem&{content?:Buffer})|undefined>;
 }

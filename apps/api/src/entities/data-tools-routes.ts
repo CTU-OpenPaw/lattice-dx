@@ -8,6 +8,7 @@ import type { Scope } from './types.js';
 import { format, parseImportInput, parseMigrationInput } from './data-tools-policy.js';
 import { parseEntityQuery } from './query.js';
 import type { EntityDataToolsRepository } from './data-tools-types.js';
+import {FileReadError} from '../files/content.js';
 export type EntityDataToolsOptions={identity?:IdentityConfig;dataTools?:EntityDataToolsRepository};
 function key(request:FastifyRequest){const value=parseCreateKey(request.headers['idempotency-key'],request.raw.rawHeaders);if(!value)bad('Idempotency-Key is required.');return value;}
 function path(request:FastifyRequest){return request.params as Record<string,string>;}
@@ -18,7 +19,7 @@ export function registerEntityDataTools(app:FastifyInstance,options:EntityDataTo
    let actor;try{actor=await verifyIdentity(request.headers.authorization,options.identity);}catch{return reply.code(401).send({error:'Invalid token.'});}
    if(!actor.organizationId||roles.some(role=>!actor.roles.includes(role)))return reply.code(403).send({error:'Forbidden.'});
    try{if(method!=='GET')exact(request.query,[]);return await handler(request,options.dataTools,{actorId:actor.subject,organizationId:actor.organizationId},reply);}
-   catch(error){if(error instanceof EntityError||error instanceof CreateCommandError||error instanceof PageError)return reply.code(error.statusCode).send({error:error.message});throw error;}
+   catch(error){if(error instanceof FileReadError||error instanceof EntityError||error instanceof CreateCommandError||error instanceof PageError)return reply.code(error.statusCode).send({error:error.message});throw error;}
   }});
  }
  route('POST','/v1/entities/:id/attachments',['data:write'],async(request,repo,scope)=>{

@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import {readFileMetadataWithClient} from '../files/content.js';
+import type {ObjectStore} from '../files/object-store.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { isRecordId, type CreateWorkflow, type TransitionCommand, type WorkflowActor, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowEvent } from '@dx/contracts';
@@ -52,7 +54,7 @@ async function attachFiles(client:PoolClient,runId:string,fields:Record<string,W
   }
 }
 
-export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'|'list'>=sourceRegistry):Promise<WorkflowRepository> {
+export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'|'list'>=sourceRegistry,store?:ObjectStore):Promise<WorkflowRepository> {
   await createWorkflowTables(pool);
   await initializeModuleTables(pool);
   async function definition(run:WorkflowRun,client?:PoolClient):Promise<WorkflowDefinition>{const def=await registry.get(run.organizationId,run.definitionId,run.definitionVersion,client);if(!def)throw new WorkflowError(503,'Phiên bản quy trình không khả dụng.');return def;}
@@ -256,10 +258,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     async registerMember(actor) {await pool.query('INSERT INTO workflow_members(organization_id,subject) VALUES($1,$2) ON CONFLICT DO NOTHING',[actor.organizationId,actor.subject]);},
     async references(actor) {return (await pool.query('SELECT kind,id,name FROM workflow_references WHERE organization_id=$1 ORDER BY kind,id LIMIT 100',[actor.organizationId])).rows;},
     async readSharedFile(id,actor) {
-      if(!isRecordId(id))return;
-      const rows=(await pool.query(`SELECT ${runColumns.split(',').map(c=>'r.'+c).join(',')} FROM workflow_runs r JOIN workflow_files wf ON wf.run_id=r.id WHERE wf.file_id=$1 AND r.organization_id=$2`,[id,actor.organizationId])).rows;
-      if(!(await Promise.all(rows.map(async row=>canReadRun(await definition(row),row,actor)))).some(Boolean))return;
-      return (await pool.query('SELECT id,filename,owner_id AS "ownerId",organization_id AS "organizationId",record_id AS "recordId",size,scan_status AS "scanStatus",content FROM foundation_files WHERE id=$1 AND organization_id=$2',[id,actor.organizationId])).rows[0];
+      return transaction(pool,client=>readFileMetadataWithClient(client,actor,id,{kind:'foundation'}));
     },
   };
 }

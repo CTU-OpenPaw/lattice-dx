@@ -17,19 +17,20 @@ import {operationsDatabase} from './operations/database.js';
 import {eventsDatabase} from './events/database.js';
 import {modulesDatabase} from './modules/database.js';
 import {automationsDatabase} from './automations/database.js';
-export async function connectRecords(connectionString: string) {
+import type {ObjectStore} from './files/object-store.js';
+export async function connectRecords(connectionString: string,options:{store?:ObjectStore}={}) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
     const repository=await recordDatabase(pool);
     const directory=await createDirectoryDatabase(pool);
     const organization=await organizationDatabase(pool);
-    const foundation=await foundationDatabase(pool);
+    const foundation=await foundationDatabase(pool,options.store);
     const definitionRegistry=await definitionDatabase(pool);
-    const workflows=await workflowDatabase(pool,definitionRegistry);
+    const workflows=await workflowDatabase(pool,definitionRegistry,options.store);
     const events=await eventsDatabase(pool,definitionRegistry,workflows);
     const entities=await entityDatabase(pool);
     const automations=await automationsDatabase(pool,definitionRegistry,workflows);
-    const dataTools=await entityDataToolsDatabase(pool);
+    const dataTools=await entityDataToolsDatabase(pool,options.store);
     const reports=await reportsDatabase(pool);
     const modules=await modulesDatabase(pool,workflows);
     const taskLifecycle=await taskLifecycleDatabase(pool);
