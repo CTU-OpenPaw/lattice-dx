@@ -37,6 +37,7 @@
     "test:entity-workflow-context": "node scripts/smoke-entity-workflow-context.mjs",
     "test:entity-events": "node scripts/smoke-entity-events.mjs",
     "test:entity-automations": "node scripts/smoke-entity-automations.mjs",
+    "test:private-workflow-blocks": "node scripts/smoke-private-workflow-blocks.mjs",
     "backup:core": "node scripts/backup-core.mjs backup",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "workflow:seed-local": "node scripts/seed-workflow-demo.mjs",
