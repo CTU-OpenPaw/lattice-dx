@@ -139,3 +139,15 @@ test.each(['', ' ', 'a'.repeat(101)])('task action rejects invalid assignee %j',
     expect(writes).toEqual([]);
   } finally { await app.close(); }
 });
+test('action keyed fixtures fail closed and malformed keys return400 after role authorization',async()=>{
+ const {app,writes}=setup();try{
+ for(const id of ['records.create','tasks.create']) {
+ const input=id==='records.create'?{title:'Hello'}:{title:'Hello',assigneeId:'alice'};
+ const headers=await auth(['records:write','tasks:assign']);
+ expect((await app.inject({method:'POST',url:`/v1/actions/${id}/run`,headers:{...headers,'idempotency-key':'valid'},payload:{version:1,input}})).statusCode).toBe(503);
+ expect((await app.inject({method:'POST',url:`/v1/actions/${id}/run`,headers:{...headers,'idempotency-key':'a,b'},payload:{version:1,input}})).statusCode).toBe(400);
+ expect((await app.inject({method:'POST',url:`/v1/actions/${id}/run`,headers:{...await auth([]),'idempotency-key':'a,b'},payload:{version:1,input}})).statusCode).toBe(403);
+ }
+ expect(writes).toEqual([]);
+ }finally{await app.close();}
+});

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CreateCommandError,parseCreateKey,requireCreateCapability } from './create-command.js';
 import Fastify from 'fastify';
 import { isDemoResult, parseDemoRequest } from '@dx/contracts';
 import { verifyIdentity, type IdentityConfig } from './identity.js';
@@ -10,7 +11,7 @@ import { registerWorkflows, type WorkflowOptions } from './workflows/routes.js';
 import { registerWorkflowBundles } from './workflows/bundle-routes.js';
 import { registerWorkflowDrafts } from './workflows/registry-routes.js';
 import { registerLogistics } from './logistics.js';
-import { isRecordId } from '@dx/contracts';
+import { isRecordId,parseRecordCreateInput } from '@dx/contracts';
 import { parsePage } from './pagination.js';
 export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions) {
   const app = Fastify({ bodyLimit: 16_384 });
@@ -37,11 +38,16 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
         if(options.records.listPage)return options.records.listPage(identity.subject,identity.organizationId,query);
         return { items: await options.records.list(identity.subject, identity.organizationId) };
       }
-      const body: unknown = request.body;
-      if (!body || typeof body !== 'object' || !('title' in body) || typeof body.title !== 'string' || !body.title.trim() || body.title.length > 200) {
-        return reply.code(400).send({ error: 'Tiêu đề phải có từ 1 đến 200 ký tự.' });
+      const input=parseRecordCreateInput(request.body);
+      if(!input)return reply.code(400).send({error:'Input bản ghi không hợp lệ.'});
+      try {
+        const key=parseCreateKey(request.headers['idempotency-key'],request.raw.rawHeaders);
+        requireCreateCapability(key,options.records);
+        return reply.code(201).send(await options.records.create(input.title,identity.subject,identity.organizationId,key));
+      } catch(error) {
+        if(error instanceof CreateCommandError)return reply.code(error.statusCode).send({error:error.message});
+        throw error;
       }
-      return reply.code(201).send(await options.records.create(body.title.trim(), identity.subject, identity.organizationId));
     },
   });
   app.get<{Params:{id:string}}>('/v1/records/:id',async(request,reply)=>{

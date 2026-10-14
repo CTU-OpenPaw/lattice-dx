@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CreateCommandError,parseCreateKey,requireCreateCapability } from './create-command.js';
 import type { FastifyInstance } from 'fastify';
 import {
   parseActionRunRequest, parseRecordCreateInput, parseTaskCreateInput,
@@ -15,7 +16,7 @@ interface Options extends DirectoryOptions { identity?: IdentityConfig; records?
 interface RegisteredAction {
   descriptor: ActionDescriptor;
   available: boolean;
-  execute(input: unknown, scope: Scope): Promise<unknown>;
+  execute(input: unknown, scope: Scope,key?:string): Promise<unknown>;
 }
 class InvalidInput extends Error {}
 
@@ -24,22 +25,24 @@ export function registerActions(app: FastifyInstance, options: Options) {
     {
       descriptor: { id: 'records.create', version: 1, title: 'Tạo bản ghi', requiredRole: 'records:write', inputSchema: recordCreateSchema },
       available: !!options.records,
-      async execute(value, scope) {
+      async execute(value, scope,key) {
         const input = parseRecordCreateInput(value);
         if (!input) throw new InvalidInput();
-        return options.records!.create(input.title, scope.subject, scope.organizationId);
+        requireCreateCapability(key,options.records!);
+        return options.records!.create(input.title, scope.subject, scope.organizationId,key);
       },
     },
     {
       descriptor: { id: 'tasks.create', version: 1, title: 'Tạo nhiệm vụ', requiredRole: 'tasks:assign', inputSchema: taskCreateSchema },
       available: !!options.foundation,
-      async execute(value, scope) {
+      async execute(value, scope,key) {
         const input = parseTaskCreateInput(value);
         if (!input) throw new InvalidInput();
+        requireCreateCapability(key,options.foundation!);
         await requireAssignee(input.assigneeId,scope,options.directory);
         const recordId = await resolveRecordLink(input.recordId, scope, options.records);
         if (recordId) input.recordId = recordId;
-        return options.foundation!.createTask({ ...input, organizationId: scope.organizationId, createdBy: scope.subject });
+        return options.foundation!.createTask({ ...input, organizationId: scope.organizationId, createdBy: scope.subject },key);
       },
     },
   ];
@@ -66,11 +69,12 @@ export function registerActions(app: FastifyInstance, options: Options) {
       const envelope = parseActionRunRequest(request.body);
       if (!envelope) return reply.code(400).send({ error: 'Phiên bản hoặc request action không hợp lệ.' });
       try {
-        const result = await action.execute(envelope.input, identity);
+        const key=parseCreateKey(request.headers['idempotency-key'],request.raw.rawHeaders);
+        const result = await action.execute(envelope.input, identity,key);
         const response: ActionRunResult = { actionId: action.descriptor.id, version: action.descriptor.version, status: 'succeeded', result };
         return response;
       } catch (error) {
-        if (error instanceof RecordLinkError || error instanceof DirectoryError) return reply.code(error.statusCode).send({error: error.message});
+        if (error instanceof RecordLinkError || error instanceof DirectoryError || error instanceof CreateCommandError) return reply.code(error.statusCode).send({error: error.message});
         if (error instanceof InvalidInput) return reply.code(400).send({ error: 'Input không đúng cấu trúc action.' });
         throw error;
       }
