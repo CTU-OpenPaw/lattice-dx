@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Page, PageQuery } from '../pagination.js';
 export type Scope = { actorId: string; organizationId: string };
+export type EntitySearch = {q:string;schemaId?:string;schemaVersion?:number;limit:number;offset:number};
 export type Field = { type: 'text'|'boolean'|'integer'|'decimal'|'date'|'enum'; required?: boolean; maxLength?: number; choices?: string[] };
 export type SchemaDefinition = { id: string; title: string; fields: Record<string, Field>; relations: Record<string, {targetSchemaId:string}> };
 export type SchemaDraft = SchemaDefinition & { revision: number; publishedVersion: number; createdAt: string; updatedAt: string };
@@ -19,6 +20,7 @@ export type RevokeShareInput = {expectedVersion:number;kind:Principal['kind'];pr
 export type QueryOperator = 'eq'|'ne'|'gt'|'gte'|'lt'|'lte'|'contains'|'exists';
 export type EntityQuery = {schemaId:string;schemaVersion:number;filters?:{field:string;operator:QueryOperator;value?:string|number|boolean}[];sort?:{field:string;direction:'asc'|'desc'};limit?:number;offset?:number};
 export interface EntityRepository {
+  search?(scope:Scope,input:EntitySearch):Promise<Page<Entity>>;
   aggregate?(scope:Scope,input:import('./aggregate-types.js').AggregateQuery):Promise<import('./aggregate-types.js').AggregateResult>;
   events?(scope:Scope,id:string,page:PageQuery):Promise<Page<import('./events.js').EntityEvent>>;
   query?(scope:Scope,input:EntityQuery):Promise<Page<Entity>>;

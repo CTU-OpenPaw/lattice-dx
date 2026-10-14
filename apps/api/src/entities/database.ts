@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import { accessPredicate, checkAccess, type AccessMode } from './access.js';
 import {compileEntityQuery,parseEntityQuery} from './query.js';
 import {aggregateEntitiesWithClient} from './aggregate-database.js';
+import {searchEntities} from './search-client.js';
 import { createDirectoryDatabase } from '../directory-database.js';
 import {initializeEntityEvents,type EntityEvent} from './events.js';
 import { parseCreateKey } from '../create-command.js';
@@ -69,6 +70,12 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     fingerprint text NOT NULL, result jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(organization_id,actor_id,operation,key)
   )`);
   await initializeEntityEvents(pool);
+  await pool.query(`ALTER TABLE enterprise_entities ADD COLUMN IF NOT EXISTS search_vector tsvector
+    GENERATED ALWAYS AS (
+      to_tsvector('simple'::regconfig,coalesce(title,'')) ||
+      jsonb_to_tsvector('simple'::regconfig,attributes,'["string","numeric","boolean"]'::jsonb)
+    ) STORED;
+    CREATE INDEX IF NOT EXISTS enterprise_entities_search_idx ON enterprise_entities USING gin(search_vector)`);
 
   async function getDraft(db:Queryable,scope:Scope,id:string,lock=false):Promise<SchemaDraft|undefined> {
     const row=(await db.query(`SELECT ${draftColumns} FROM enterprise_schemas WHERE organization_id=$1 AND id=$2${lock?' FOR UPDATE':''}`,[scope.organizationId,id])).rows[0];
@@ -119,6 +126,7 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     },'owner');
   }
   return {
+    search(scope,query) {return searchEntities(pool,scope,query);},
     async aggregate(scope,input) {
       return transaction(pool,client=>aggregateEntitiesWithClient(client,scope,input));
     },

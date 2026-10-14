@@ -7,6 +7,8 @@ import { bad, EntityError, exact, name, object, parseSchema, parseShare, princip
 import type { Attributes, EntityRepository, Scope } from './types.js';
 import {parseEntityQuery} from './query.js';
 import {aggregateRoute} from './aggregate-routes.js';
+import {searchRoute} from './search-routes.js';
+import {SearchUnavailableError} from './search-client.js';
 export type EntityOptions = {identity?:IdentityConfig;entities?:EntityRepository};
 function commandKey(request:FastifyRequest):string {
   const key=parseCreateKey(request.headers['idempotency-key'],request.raw.rawHeaders);
@@ -22,7 +24,7 @@ function attributes(value:unknown):Attributes { return object(value) as Attribut
 
 export function registerEntities(app:FastifyInstance,options:EntityOptions) {
   function route(method:HTTPMethods,url:string,role:string,handler:(request:FastifyRequest,repository:EntityRepository,scope:Scope)=>Promise<unknown>,statusCode=200) {
-    app.route({method,url,handler:async(request,reply)=>{
+    app.route({method,url,...(url==='/v1/entities/search'?{bodyLimit:4096}:{}),handler:async(request,reply)=>{
       if(!options.identity||!options.entities) return reply.code(503).send({error:'Dịch vụ dữ liệu chưa được cấu hình.'});
       let actor;
       try { actor=await verifyIdentity(request.headers.authorization,options.identity); }
@@ -34,6 +36,7 @@ export function registerEntities(app:FastifyInstance,options:EntityOptions) {
         if(result===undefined) return reply.code(404).send({error:'Không tìm thấy dữ liệu.'});
         return reply.code(statusCode).send(result);
       } catch(error) {
+        if(error instanceof SearchUnavailableError) return reply.code(503).send({error:'search_unavailable'});
         if(error instanceof EntityError||error instanceof CreateCommandError||error instanceof PageError) return reply.code(error.statusCode).send({error:error.message});
         throw error;
       }
@@ -67,6 +70,7 @@ export function registerEntities(app:FastifyInstance,options:EntityOptions) {
   },201);
   route('GET','/v1/entities','data:read',async(request,repository,scope)=>repository.list(scope,page(request,true)));
   route('POST','/v1/entities/aggregate','data:read',aggregateRoute);
+  route('POST','/v1/entities/search','data:read',searchRoute);
   route('POST','/v1/entities/query','data:read',async(request,repository,scope)=>{
     const input=parseEntityQuery(request.body);
     if(!repository.query) throw new EntityError(503,'Entity query is unavailable.');
