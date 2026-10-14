@@ -36,6 +36,16 @@ test('journal initializes after entity DDL and reads metadata through current AC
  expect(selection.sql.indexOf('enterprise_entity_shares')).toBeLessThan(selection.sql.indexOf('LIMIT'));
  expect(selection.sql).not.toContain('a.input');
  expect(selection.sql).not.toContain('actor_subject=$');
+ expect(selection.sql).toContain('(e.archived_at IS NULL OR e.owner_id=$3)');
+});
+test('archived journal remains readable by owner but is hidden from shared recipient',async()=>{
+ const calls:string[]=[];
+ const id='11111111-1111-1111-1111-111111111111';
+ const pool={async query(sql:string){calls.push(sql);if(sql.includes('SELECT id, schema_id'))return {rows:[{id,ownerId:'alice',organizationId:'org-a',archivedAt:new Date(),createdAt:new Date(),updatedAt:new Date()}]};return {rows:[]};}} as unknown as Pool;
+ const repository=await entityDatabase(pool);
+ await expect(repository.events!({...scope,actorId:'bob'},id,{limit:1,offset:0,q:''})).rejects.toMatchObject({statusCode:404});
+ expect(calls.some(sql=>sql.includes('FROM enterprise_entity_events a'))).toBe(false);
+ await expect(repository.events!(scope,id,{limit:1,offset:0,q:''})).resolves.toMatchObject({items:[]});
 });
 test('journal rejects invisible entity and invalid pagination before event selection',async()=>{
  const calls:string[]=[];

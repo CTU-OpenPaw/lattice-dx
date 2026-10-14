@@ -120,11 +120,13 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
   return {
     async events(scope,id,page) {
       validatePage(page);id=uuid(id);
-      if(!await scopedEntity(pool,scope,id)) throw missing();
+      const visible=await scopedEntity(pool,scope,id);
+      if(!visible||(visible.archivedAt&&visible.ownerId!==scope.actorId)) throw missing();
       const result=await pool.query(`SELECT a.id,a.entity_id AS "entityId",a.schema_id AS "schemaId",a.schema_version AS "schemaVersion",
         a.from_version AS "fromVersion",a.to_version AS "toVersion",a.operation,a.actor_subject AS "actorSubject",a.occurred_at AS "occurredAt"
         FROM enterprise_entity_events a JOIN enterprise_entities e ON e.id=a.entity_id
         WHERE a.entity_id=$1 AND a.organization_id=$2 AND ${accessPredicate('e','$3','$2','read')}
+        AND (e.archived_at IS NULL OR e.owner_id=$3)
         AND ($4='' OR strpos(lower(a.operation),lower($4))>0) ORDER BY a.occurred_at DESC,a.id DESC LIMIT $5 OFFSET $6`,[id,scope.organizationId,scope.actorId,page.q,page.limit+1,page.offset]);
       return pageResult(result.rows.map((row:EntityEvent)=>({...row,occurredAt:new Date(row.occurredAt).toISOString()})),page);
     },
