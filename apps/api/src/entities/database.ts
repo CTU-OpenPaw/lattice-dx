@@ -1,87 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { accessPredicate, checkAccess, type AccessMode } from './access.js';
 import {compileEntityQuery,parseEntityQuery} from './query.js';
 import { createDirectoryDatabase } from '../directory-database.js';
 import { parseCreateKey } from '../create-command.js';
 import { pageResult, type PageQuery } from '../pagination.js';
-import { bad, canonicalJson, EntityError, parseSchema, parseShare, principalKind, principalId, title, uuid, validateAttributes, version } from './policy.js';
+import { bad, EntityError, parseSchema, parseShare, principalKind, principalId, title, uuid, validateAttributes, version } from './policy.js';
 import type { Entity, EntityAudit, EntityRepository, RelationInput, SchemaDraft, SchemaPublication, Scope, Share, ShareInput, RevokeShareInput } from './types.js';
 
+import { withEntityTransaction as transaction, runEntityCommandInTransaction } from './commands.js';
+import { entityColumns, entity, current, scopedEntity, publication, audit, updateRow, missing, createEntityAtPublication } from './client.js';
 type Queryable = Pick<PoolClient,'query'>;
-async function transaction<T>(pool:Pool, work:(client:PoolClient)=>Promise<T>):Promise<T> {
-  const client=await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const result=await work(client);
-    await client.query('COMMIT');
-    return result;
-  } catch(error) { await client.query('ROLLBACK'); throw error; }
-  finally { client.release(); }
-}
-export async function runEntityCommand<T>(pool:Pool,scope:Scope,operation:string,key:string,input:unknown,validate:(client:PoolClient)=>Promise<void>,execute:(client:PoolClient)=>Promise<T>,validateReplay?:(client:PoolClient,result:T)=>Promise<void>):Promise<T> {
-  if(!parseCreateKey(key)) bad('Idempotency-Key is required.');
-  return transaction(pool,async client=>{
-    const tuple=[scope.organizationId,scope.actorId,operation,key];
-    const lock=createHash('sha256').update(canonicalJson(tuple)).digest().readBigInt64BE(0).toString();
-    await client.query('SELECT pg_advisory_xact_lock($1::bigint)',[lock]);
-    await validate(client);
-    const fingerprint=createHash('sha256').update(canonicalJson(input)).digest('hex');
-    const receipt=(await client.query('SELECT fingerprint,result FROM enterprise_commands WHERE organization_id=$1 AND actor_id=$2 AND operation=$3 AND key=$4',tuple)).rows[0];
-    if(receipt) {
-      if(receipt.fingerprint!==fingerprint) throw new EntityError(409,'Idempotency-Key was used with different input.');
-      await validateReplay?.(client,receipt.result as T);
-      return receipt.result as T;
-    }
-    const result=await execute(client);
-    await client.query('INSERT INTO enterprise_commands(organization_id,actor_id,operation,key,fingerprint,result) VALUES($1,$2,$3,$4,$5,$6::jsonb)',[...tuple,fingerprint,JSON.stringify(result)]);
-    return result;
-  });
-}
-
-const entityColumns=`id, schema_id AS "schemaId", schema_version AS "schemaVersion", title, attributes,
-  owner_id AS "ownerId", organization_id AS "organizationId", version, archived_at AS "archivedAt",
-  created_at AS "createdAt", updated_at AS "updatedAt"`;
-function entity(row:Entity):Entity {
-  return {...row,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString(),archivedAt:row.archivedAt?new Date(row.archivedAt).toISOString():null};
-}
 function draft(row:{definition:SchemaDraft;revision:number;publishedVersion:number;createdAt:string;updatedAt:string}):SchemaDraft {
   return {...row.definition,revision:row.revision,publishedVersion:row.publishedVersion,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString()};
 }
 const draftColumns=`definition, revision, published_version AS "publishedVersion", created_at AS "createdAt", updated_at AS "updatedAt"`;
-const missing=()=>new EntityError(404,'Entity or schema not found.');
-function current(row:Entity,expected:number) {
-  if(row.archivedAt) throw new EntityError(409,'Archived entity cannot mutate.');
-  if(row.version!==expected) throw new EntityError(409,'Entity version conflict.');
+export async function runEntityCommand<T>(pool:Pool,scope:Scope,operation:string,key:string,input:unknown,validate:(client:PoolClient)=>Promise<void>,execute:(client:PoolClient)=>Promise<T>,validateReplay?:(client:PoolClient,result:T)=>Promise<void>):Promise<T> {
+  if(!parseCreateKey(key)) bad('Idempotency-Key is required.');
+  return transaction(pool,client=>runEntityCommandInTransaction(client,scope,operation,key,input,validate,execute,validateReplay));
 }
-async function scopedEntity(db:Queryable,scope:Scope,id:string,lock=false,mode:AccessMode='read'):Promise<Entity|undefined> {
-  const predicate=lock?'organization_id=$2':accessPredicate('enterprise_entities','$2','$3',mode);
-  const row=(await db.query(`SELECT ${entityColumns} FROM enterprise_entities WHERE id=$1 AND ${predicate}${lock?' FOR UPDATE':''}`,(lock?[id,scope.organizationId]:[id,scope.actorId,scope.organizationId]))).rows[0];
-  if(!row) return undefined;
-  const found=entity(row);
-  if(lock) await checkAccess(db,scope,found,mode);
-  return found;
-}
-async function publication(db:Queryable,scope:Scope,id:string,pinned?:number):Promise<SchemaPublication> {
-  const result=await db.query(`SELECT definition,version FROM enterprise_schema_versions WHERE organization_id=$1 AND schema_id=$2 ${pinned===undefined?'ORDER BY version DESC LIMIT 1':'AND version=$3'}`,
-    pinned===undefined?[scope.organizationId,id]:[scope.organizationId,id,pinned]);
-  const row=result.rows[0];
-  if(!row) throw missing();
-  return {...row.definition,version:row.version};
-}
-async function audit(db:Queryable,scope:Scope,before:Entity|undefined,after:Entity,operation:string,input:unknown) {
-  await db.query(`INSERT INTO enterprise_audit(id,organization_id,owner_id,entity_id,actor_id,operation,from_version,to_version,input,result)
-    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`,
-    [randomUUID(),scope.organizationId,after.ownerId,after.id,scope.actorId,operation,before?.version??0,after.version,JSON.stringify(input),JSON.stringify(after)]);
-}
-async function updateRow(db:Queryable,scope:Scope,before:Entity,operation:string,input:unknown,changes?:{title:string;attributes:Entity['attributes']},archive=false):Promise<Entity> {
-  const row=(await db.query(`UPDATE enterprise_entities SET title=$2,attributes=$3::jsonb,version=version+1,updated_at=now(),archived_at=CASE WHEN $4 THEN now() ELSE archived_at END WHERE id=$1 RETURNING ${entityColumns}`,
-    [before.id,changes?.title??before.title,JSON.stringify(changes?.attributes??before.attributes),archive])).rows[0];
-  const result=entity(row);
-  await audit(db,scope,before,result,operation,input);
-  return result;
-}
+
 function validatePage(page:PageQuery) {
   if(!Number.isSafeInteger(page.limit)||page.limit<1||page.limit>100||!Number.isSafeInteger(page.offset)||page.offset<0||page.offset>Number.MAX_SAFE_INTEGER-101||typeof page.q!=='string'||Array.from(page.q).length>200) bad('Invalid pagination.');
 }
@@ -261,16 +199,11 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     },
     async create(scope,input,key) {
       input={...input,title:title(input.title)};
+      let schema:SchemaPublication;
       return runEntityCommand(pool,scope,'entity.create',key,input,async client=>{
-        await publication(client,scope,input.schemaId);
+        schema=await publication(client,scope,input.schemaId);
       },async client=>{
-        const schema=await publication(client,scope,input.schemaId);
-        const attributes=validateAttributes(schema,input.attributes);
-        const result=await client.query(`INSERT INTO enterprise_entities(id,organization_id,owner_id,schema_id,schema_version,title,attributes) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING ${entityColumns}`,
-          [randomUUID(),scope.organizationId,scope.actorId,input.schemaId,schema.version,input.title,JSON.stringify(attributes)]);
-        const created=entity(result.rows[0]);
-        await audit(client,scope,undefined,created,'entity.create',input);
-        return created;
+        return createEntityAtPublication(client,scope,{...input,schemaVersion:schema.version});
       },async(client,accepted)=>{
         if(!await scopedEntity(client,scope,accepted.id,true)) throw missing();
       });
