@@ -3,6 +3,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import type {Pool,PoolClient} from 'pg';
 import type {WorkflowActor,WorkflowRun,WorkflowDefinition,WorkflowStep,WorkflowTimer,TransitionCommand} from '@dx/contracts';
 import {canReadRun,authorizeTransition,validateInput,WorkflowError} from './policy.js';
+import {authorizeBlock} from './block-policy.js';
 import {TimerError,classifyTimerError} from './timer-policy.js';
 import {pageResult,type PageQuery} from '../pagination.js';
 
@@ -96,6 +97,7 @@ export function timerDatabase(s:Services) {
         const service=await resolveServiceActor(client,run.organizationId,timer.service_id);
         if(!canReadRun(def,run,service))throw new TimerError('authority_denied',403);
         authorizeTransition(target,run,service,true);validateInput(target.fields,timer.input);
+        for(const step of target.steps??[])authorizeBlock(step,service);
         if((await client.query("SELECT 1 FROM workflow_timers WHERE run_id=$1 AND status='pending' UNION ALL SELECT 1 FROM workflow_waits WHERE run_id=$1 AND status='pending'",[id])).rowCount)throw new WorkflowError(409,'Workflow is waiting.');
         const result=serialize((await client.query(`UPDATE workflow_timers SET status='pending',attempts=0,last_error_code=NULL,completed_at=NULL,available_at=now() WHERE id=$1 RETURNING ${timerColumns}`,[timerId])).rows[0]);
         await client.query("INSERT INTO workflow_timer_commands(organization_id,actor_id,operation,key,fingerprint,result) VALUES($1,$2,'retry',$3,$4,$5)",[actor.organizationId,actor.subject,key,hash,JSON.stringify(result)]);
