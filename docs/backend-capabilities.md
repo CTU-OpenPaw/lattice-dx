@@ -6,7 +6,7 @@ Quyết định 14/10/2026: **engine quản lý dữ liệu nghiệp vụ dùng 
 
 | Nhóm | Nền hiện có | Phần phải xây thêm |
 | --- | --- | --- |
-| Dữ liệu nghiệp vụ | Records nền, task/file links, pagination và keyed creates | Schema có phiên bản, thực thể có kiểu, CRUD, quan hệ, archive, audit |
+| Dữ liệu nghiệp vụ | Records nền, task/file links; increment dữ liệu đã thêm schema có phiên bản, typed entity CRUD/quan hệ/archive/audit | Chia sẻ quyền, block dữ liệu trong workflow, query theo thuộc tính, bulkimport/migration cần đợt tiếp |
 | Tổ chức và quyền | Keycloak, JWT tenant/role, owner/exact-assignee guards, directory snapshot | Người phụ trách, membership lifecycle, policy theo phạm vi, chia sẻ/thu hồi rõ ràng |
 | Công việc và phê duyệt | Giao cá nhân/phòng ban, quyết định, workflow waits/deadline | Claim, chuyển giao, hủy, hạn xử lý, quyền người nhận cũ được thu hồi |
 | Action/block | Create record/task, connector dispatch, input binding và execution evidence | Hợp đồng đăng ký/version/output chung; read/query/update/link/archive và lifecycle blocks |
@@ -15,7 +15,7 @@ Quyết định 14/10/2026: **engine quản lý dữ liệu nghiệp vụ dùng 
 | Vòng đời module | Workflow export/import bundle | Manifest nhóm schemas/actions/workflows/permissions; dependencies, enable/disable, phiên bản và gói cấu hình |
 | Vận hành/khôi phục | CI/tests, container config, health, restart persistence, scoped audit | Readiness/diagnostics, backup/isolated restore, quản lý retention và bằng chứng phục hồi |
 
-Đây là phạm vi đích; các ô phải xây thêm chưa được coi là đã có. Không gọi toàn bộ nền tảng hoàn chỉnh chỉ vì có sơ đồ hoặc các route khai báo.
+Đây là phạm vi đích; các ô phải xây thêm chưa được coi là đã có. Nhóm dữ liệu đầu tiên có implementation và bằng chứng trong [enterprise data](enterprise-data.md)/[verification](verification.md); các nhóm còn lại chỉ hiện thực những phần ghi ở cột nền hiện có. Không gọi toàn bộ nền tảng hoàn chỉnh chỉ vì có sơ đồ hoặc các route khai báo.
 
 ## Trình tự triển khai
 

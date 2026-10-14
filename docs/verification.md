@@ -9,6 +9,7 @@
 - Independentreview phát hiện create replay chưa kiểm currentowner/entitytenant. ParentSQL đã tái hiệnRED; 4ad1ad1 thêm scopedlock trước trảsnapshot. Unit18tests và live mới xác nhận owner/tenant đã đổi trả404; archivedsameowner vẫn nhận historicalreceipt, schema pin/replay đúng. Reviewer rereview chấp thuận, không cònfinding. Không có APItransferowner ởincrementnày; SQLfixture mô phỏng thay đổi phạmvi để kiểm ranhgiới truycập.
 - Lượt live cuối: schema `asset-b9dda6093d8c4f08bee62a71a64b110a`, archivedentity `7309693e-293a-4426-a929-2cba146dca22`, latestentity `15021237-37d5-42cf-894a-77dc9aa14976`. Dữliệu RESTdemo giữnguyên.
 - Regression `test:create-reliability`, `test:workflow-completion` và `test:workflow-bundles` đạt trênbản rebuild. Typedstore dùng tables/receipts riêng, không sửa oldrecord/task/workflow contracts. Local3data roles chỉgánAlice qua sync khôngresetcredentials. No dependency/upstream/license/Notionticks/merge/release.
+- Whole-branch review cuối đạt spec/quality cho increment1, không còn finding. Một mô tả roadmap từng xếp nhầm typeddata đã triển khai vào cột tương lai; đã sửa đúng trạng thái. Lượt `pnpm check` cuối khi chốt PR tiếp tục đạt219tests/31files, typecheck/build. Nhóm2–8 chưa được đánh dấu hoàn thành.
 
 Hợp đồng: [Enterprise data](enterprise-data.md), [phạm vi backend](backend-capabilities.md).
 

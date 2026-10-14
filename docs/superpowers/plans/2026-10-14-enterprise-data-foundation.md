@@ -16,25 +16,25 @@ Read exact approved source: docs/superpowers/specs/2026-10-14-enterprise-backend
 
 Files: create apps/api/src/entities/{types.ts,policy.ts,policy.test.ts,database.ts,database.test.ts}. Modify create-command only if reusable typed fingerprint requires explicit operation expansion; retain original normalization guarantees.
 
-- [ ] RED typed/date/decimal/enum/authority/schema constraints and pinned updates before production.
-- [ ] Schema drafts/revision/publish, typed entity CRUD/archive/relations/history, scoped command receipts, stablelocks implemented in one focused repository. Keep pagination exact and validation complete before writes.
-- [ ] Tests demonstrate domainbehavior, not only SQLstrings; targetedGREEN/typecheck before scopedcommit; implementationreport output/reviews/enterprise-data-storage.md.
+- [x] RED typed/date/decimal/enum/authority/schema constraints and pinned updates before production.
+- [x] Schema drafts/revision/publish, typed entity CRUD/archive/relations/history, scoped command receipts, stablelocks implemented in one focused repository. Keep pagination exact and validation complete before writes.
+- [x] Tests demonstrate domainbehavior, not only SQLstrings; targetedGREEN/typecheck before scopedcommit; implementationreport output/reviews/enterprise-data-storage.md.
 
 ### Task 2: Signed API and wiring
 
 Files: create apps/api/src/entities/{routes.ts,routes.test.ts}; modify app.ts/index.ts/database.ts bootstrap, gatewayroutes, localrealmroles.
 
-- [ ] RED missing route/auth and strictpayload tests.
-- [ ] Signedactor/tenant roleenforcement, strictpaths/body/key/paging, domainerror mapping, explicit503 missingrepository.
-- [ ] Forward PATCH/DELETE only entitypaths atGateway; no weakeningexistingroutes. Localfixture roles for alice only as needed; no resetting accounts.
-- [ ] TargetedGREEN/typecheck, scopedcommit/report output/reviews/enterprise-data-api.md.
+- [x] RED missing route/auth and strictpayload tests.
+- [x] Signedactor/tenant roleenforcement, strictpaths/body/key/paging, domainerror mapping, explicit503 missingrepository.
+- [x] Forward PATCH/DELETE only entitypaths atGateway; no weakeningexistingroutes. Localfixture roles for alice only as needed; no resetting accounts.
+- [x] TargetedGREEN/typecheck, scopedcommit/report output/reviews/enterprise-data-api.md.
 
 ### Task 3: Acceptance, handoff and review
 
 Files: script smoke-enterprise-data.mjs, docs/enterprise-data.md, packagejson smokecommand, README/docsverification/mastercapability status.
 
-- [ ] RealPG private schema tests typeddata/schema-pin/audit/commandraces/rollback/relations/archive/paging and freshpoolmax1. Clean only verifiedprivatefixture.
-- [ ] LiveJWTGateway CRUD/versionpin/relations/scopeddenial; installlocalroles withoutchangingcredentials. Build/recreateAPI/Gatewayonly, preservevolumes.
-- [ ] pnpmcheck and impacted create/workflow regressions with existingratelimit windows.
-- [ ] Independentreview, fiximportantfindings, reruncoveringchecks.
-- [ ] OnePRmain, attach, inspectCI, noautomerge. Reportactualfirstincrementcompletion separately from groups2–8 stillplanned.
+- [x] RealPG private schema tests typeddata/schema-pin/audit/commandraces/rollback/relations/archive/paging and freshpoolmax1. Clean only verifiedprivatefixture.
+- [x] LiveJWTGateway CRUD/versionpin/relations/scopeddenial; installlocalroles withoutchangingcredentials. Build/recreateAPI/Gatewayonly, preservevolumes.
+- [x] pnpmcheck and impacted create/workflow regressions with existingratelimit windows.
+- [x] Independentreview, fiximportantfindings, reruncoveringchecks.
+- [x] OnePRmain, attach, inspectCI, noautomerge. Reportactualfirstincrementcompletion separately from groups2–8 stillplanned.
