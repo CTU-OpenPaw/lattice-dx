@@ -1,5 +1,17 @@
 # Verification — 2026-10-14
 
+## Enterprise typed data — nền dữ liệu của engine
+
+- Quyết định của Duy: engine giữ dữ liệu dùng chung, NocoBase là Studio/UI. Phạm vi đích gồm tám nhóm trong backend-capabilities; increment này triển khai nhóm dữ liệu, chưa hoàn thành các nhóm2–8.
+- `pnpm check` sau bản sửa đạt **219 tests/31 files**, typecheck và build; baseline201tests. Schema/typedvalues, canonical commands, signed endpoints và query parsing có RED/GREEN. Live image cũ RED404 route mới. Lượt live đầu phát hiện validFastifyquery bị400; regression tái hiện rồi sửa clone own query properties, không nới validation JSONbody. Những lượt fullcheck chạy cùng lúc đang viết test mới từng thấy RED policy bounds, đã rerun sau code ổn định và đạt.
+- `pnpm test:enterprise-data` chạy thật Keycloak/APISIX/API/PostgreSQL: typeddecimal chính xác, calendar date, required fields, unknown authority/type rejection, immutable schema v1/v2, pinned v1 update sau v2, public publishedschema read theo đúng version, create/update/link/archive replay và optimistic conflicts, audit/relations paging. Archive ẩn khỏi active list nhưng owner vẫn đọc detail.
+- Private SQL nhiều connections: publish cùngrevision mộtversion; hai save chỉ mộtthànhcông; equal create commands mộtentity; fivewayupdate mộtwinner; hiddenowner/org và relationtarget bịchặn; relationno-op không tăngversion; targetarchive bịlọc trước paging và unlink dọn được. 105entities trả100+5 khôngtrùng vàpeer khôngđọcđược. CHECKfixture cốý làm receiptINSERT fail: entityversion/auditcounts khôngđổi, bỏconstraint rồiretry thànhcông. Freshpoolmax1 giữreceipt/version/audit. Chỉ privateUUIDschema đượcdrop.
+- Independentreview phát hiện create replay chưa kiểm currentowner/entitytenant. ParentSQL đã tái hiệnRED; 4ad1ad1 thêm scopedlock trước trảsnapshot. Unit18tests và live mới xác nhận owner/tenant đã đổi trả404; archivedsameowner vẫn nhận historicalreceipt, schema pin/replay đúng. Reviewer rereview chấp thuận, không cònfinding. Không có APItransferowner ởincrementnày; SQLfixture mô phỏng thay đổi phạmvi để kiểm ranhgiới truycập.
+- Lượt live cuối: schema `asset-b9dda6093d8c4f08bee62a71a64b110a`, archivedentity `7309693e-293a-4426-a929-2cba146dca22`, latestentity `15021237-37d5-42cf-894a-77dc9aa14976`. Dữliệu RESTdemo giữnguyên.
+- Regression `test:create-reliability`, `test:workflow-completion` và `test:workflow-bundles` đạt trênbản rebuild. Typedstore dùng tables/receipts riêng, không sửa oldrecord/task/workflow contracts. Local3data roles chỉgánAlice qua sync khôngresetcredentials. No dependency/upstream/license/Notionticks/merge/release.
+
+Hợp đồng: [Enterprise data](enterprise-data.md), [phạm vi backend](backend-capabilities.md).
+
 ## Independent create reliability — REST/action record và task
 
 - Baseline `pnpm check` đạt183 tests/27 files. Sau production, `pnpm check` đạt **201 tests/28 files**, typecheck và workspace build. Targeted64 tests/4 files đạt. RED helper thiếu module; live RED image cũ tạo hai record ID khác nhau với cùng key qua REST/action. Strict REST parser đã được kiểm tra bằng malformed/unknown/authority fields và Unicode code-point bounds.
