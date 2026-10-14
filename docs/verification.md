@@ -1,5 +1,12 @@
 # Verification — 2026-10-14
 
+## Module and aggregate checkpoint — ca0a0bf
+
+- Full `pnpm check`: **460 tests /78 files**, typechecks and build passed on completed aggregate source. A previous overlapping run caught an unfinished TDD file while implementation was active; the completed-source rerun resolves that build failure.
+- Business bindings 3685781/87e031c: signed server-resolved binding start, generic context requirement and transition allowlist; private PostgreSQL five-way dedupe, late receipt rollback of run/context, historical run policy after module disable, max1 reconnect. Disabling an external schema dependency was reproduced RED, fixed with ordered current dependency locks, and rebuilt acceptance passed. Independent source review closed; 17 independent database tests passed.
+- Aggregates ca0a0bf: actual PostgreSQL exact large sum and rounded average, missing numeric fields still counted, current grant/revoke and inaccessible source exclusion, mixed-schema invalid numeric data safe, ordinary aggregate over5100 rows uncapped, group201 rejection and max1. Numeric1.0/1.00 grouping was reproduced RED then fixed to group numerically before text output; rebuilt result is one group. Signed aggregate and unknown SQL-field rejection passed. Query/block and durable automation regressions passed.
+- Snapshots/storage/search/runtime remain planned implementation work. Whole composition review, final push and latest-head CI are still outstanding.
+
 ## Enterprise composition checkpoint — 5f3c019
 
 This extends the prior accepted backend; it is not whole-plan completion. Tasks6–12 remain in progress in the composition ledger.
