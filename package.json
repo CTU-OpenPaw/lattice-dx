@@ -44,6 +44,8 @@
     "test:file-storage": "node scripts/smoke-file-storage.mjs",
     "test:file-content": "node scripts/smoke-file-content.mjs",
     "test:entity-search": "node scripts/smoke-entity-search.mjs",
+    "test:runtime-config": "node scripts/smoke-runtime-config.mjs",
+    "test:enterprise-composition": "node scripts/smoke-enterprise-composition.mjs",
     "backup:core": "node scripts/backup-core.mjs backup",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "workflow:seed-local": "node scripts/seed-workflow-demo.mjs",
