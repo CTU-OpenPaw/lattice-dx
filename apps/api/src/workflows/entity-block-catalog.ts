@@ -6,7 +6,22 @@ const string={type:'string'},positive={type:'integer',minimum:1};
 const binding={oneOf:[object({source:{const:'literal'},value:string}),object({source:{enum:['data','input']},field:string}),object({source:{const:'context'},field:{enum:['recordId','title','ownerId','actorId']}}),object({source:{const:'result'},stepId:string,field:{const:'id'}})]};
 const expression={$ref:'#/$defs/expression'};
 const scalarTypes=['text','integer','decimal','boolean','date','enum'];
-const expressionDefs={expression:{oneOf:[object({op:{const:'literal'},value:{oneOf:[...scalarTypes.map(type=>object({type:{const:type},value:{type:type==='integer'?'integer':type==='boolean'?'boolean':'string'}})),object({type:{const:'null'},value:{type:'null'}})]}}),object({op:{const:'ref'},source:{enum:['data','input']},field:string,as:{enum:scalarTypes}}),object({op:{const:'ref'},source:{enum:['projection','evaluation']},stepId:string,field:string}),...['add','subtract','multiply','divide','eq','ne','gt','gte','lt','lte','all','any','not','coalesce'].map(op=>{const exact=op==='not'?1:['subtract','divide','eq','ne','gt','gte','lt','lte'].includes(op)?2:undefined;return object({op:{const:op},args:{type:'array',minItems:exact??(['add','multiply'].includes(op)?2:1),maxItems:exact??20,items:expression}});})]}};
+const scalarSchemas:Record<string,Record<string,unknown>>={
+  integer:{type:'integer',minimum:Number.MIN_SAFE_INTEGER,maximum:Number.MAX_SAFE_INTEGER},
+  decimal:{type:'string',pattern:'^-?(?=(?:[0-9]\\.?){1,80}$)(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,18})?$'},
+  boolean:{type:'boolean'},date:{type:'string',pattern:'^[0-9]{4}-[0-9]{2}-[0-9]{2}$'},
+  text:{type:'string',maxLength:4000,pattern:'^[^\\u0000-\\u001f\\u007f-\\u009f]*$'},
+  enum:{type:'string',maxLength:200,pattern:'^[^\\u0000-\\u001f\\u007f-\\u009f]*$'},
+};
+const expressionOperators=['add','subtract','multiply','divide','eq','ne','gt','gte','lt','lte','all','any','not','coalesce'];
+function operatorSchema(op:string) {
+  const binary=['subtract','divide','eq','ne','gt','gte','lt','lte'];
+  const exact=op==='not'?1:binary.includes(op)?2:undefined;
+  const minItems=exact??(['add','multiply'].includes(op)?2:1);
+  const maxItems=exact??20;
+  return object({op:{const:op},args:{type:'array',minItems,maxItems,items:expression}});
+}
+const expressionDefs={expression:{oneOf:[object({op:{const:'literal'},value:{oneOf:[...scalarTypes.map(type=>object({type:{const:type},value:scalarSchemas[type]})),object({type:{const:'null'},value:{type:'null'}})]}}),object({op:{const:'ref'},source:{enum:['data','input']},field:string,as:{enum:scalarTypes}}),object({op:{const:'ref'},source:{enum:['projection','evaluation']},stepId:string,field:string}),...expressionOperators.map(operatorSchema)]}};
 const typed={oneOf:[object({source:{const:'expression'},expression}),object({source:{const:'literal'},value:{type:['string','number','boolean']}}),object({source:{enum:['data','input']},field:string,as:{enum:['text','integer','decimal','boolean','date','enum']}})]};
 const expected={oneOf:[positive,object({source:{const:'result'},stepId:string,field:{const:'version'}}),object({source:{enum:['data','input']},field:string,as:{const:'integer'}})]};
 const attributes={type:'object',maxProperties:50,additionalProperties:typed};
