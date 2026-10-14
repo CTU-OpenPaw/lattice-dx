@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import type { WorkflowActor, CreateWorkflow } from "@dx/contracts";
+import type { WorkflowActor } from "@dx/contracts";
 import { verifyIdentity, type IdentityConfig } from "../identity.js";
 import { parseCreateKey, CreateCommandError } from "../create-command.js";
 import { parsePage, PageError } from "../pagination.js";
-import { WorkflowError } from "../workflows/policy.js";
+import { parseCreate, WorkflowError } from "../workflows/policy.js";
 import {
   EntityError,
-  object,
   slug,
-  title,
   version as revision,
 } from "../entities/policy.js";
 import { bundleKeys } from "../workflows/bundles.js";
@@ -148,26 +146,38 @@ export function registerModules(
         );
       },
     );
+    routes.post<{Params: Params & {bindingId: string}}>(
+      "/v1/enterprise-modules/:id/versions/:version/bindings/:bindingId/start",
+      async (request, reply) => {
+        const actor = actors.get(request)!;
+        if (!actor.roles.includes("workflow:start"))
+          throw new WorkflowError(403, "workflow:start required.");
+        bundleKeys(request.body, ["entityId", "title", "input"]);
+        const value = parseCreate({
+          definitionId: "binding",
+          title: request.body.title,
+          input: request.body.input,
+          entityContext: {entityId: request.body.entityId},
+        });
+        if (!value) throw new WorkflowError(400, "Invalid binding start body.");
+        return reply.code(201).send(await options.modules!.startBinding(
+          slug(request.params.id),
+          semver(request.params.version),
+          slug(request.params.bindingId),
+          {entityId: value.entityContext!.entityId, title: value.title, input: value.input},
+          actor,
+          key(request),
+        ));
+      },
+    );
     routes.post<{ Params: Params }>(
       "/v1/enterprise-modules/:id/versions/:version/start",
       async (request, reply) => {
         const actor = actors.get(request)!;
         if (!actor.roles.includes("workflow:start"))
           throw new WorkflowError(403, "workflow:start required.");
-        bundleKeys(request.body, ["definitionId", "title", "input"]);
-        const input = object(request.body.input);
-        if (
-          Object.keys(input).length > 50 ||
-          Object.values(input).some(
-            (v) => typeof v !== "string" || v.length > 4000,
-          )
-        )
-          throw new WorkflowError(400, "Invalid workflow input.");
-        const value: CreateWorkflow = {
-          definitionId: slug(request.body.definitionId),
-          title: title(request.body.title),
-          input: input as Record<string, string>,
-        };
+        const value = parseCreate(request.body);
+        if (!value) throw new WorkflowError(400,"Invalid workflow start body.");
         return reply
           .code(201)
           .send(

@@ -45,6 +45,7 @@ export function parseManifest(value: unknown): ModuleManifest {
     "bundle",
     "blocks",
     "dependencies",
+    ...(value && typeof value === "object" && Object.hasOwn(value,"bindings") ? ["bindings"] : []),
   ]);
   if (
     Buffer.byteLength(canonicalJson(value)) > 128 * 1024 ||
@@ -82,14 +83,38 @@ export function parseManifest(value: unknown): ModuleManifest {
     dependencies.some((d) => d.id === id)
   )
     throw new WorkflowError(400, "Duplicate resource or self dependency.");
+  const bundle = parseBundle(value.bundle);
+  let bindings: ModuleManifest["bindings"];
+  if (Object.hasOwn(value, "bindings")) {
+    if (!Array.isArray(value.bindings) || value.bindings.length > 10)
+      throw new WorkflowError(400, "Manifest binding bounds exceeded.");
+    bindings = value.bindings.map((binding) => {
+      bundleKeys(binding, ["id", "schemaId", "schemaVersion", "definitionId", "allowedTransitions"]);
+      const definitionId = slug(binding.definitionId), schemaId = slug(binding.schemaId);
+      const definition = bundle.definitions.find(d => d.id === definitionId);
+      if (!definition || !Number.isSafeInteger(binding.schemaVersion) || Number(binding.schemaVersion) < 1 || Number(binding.schemaVersion)>2147483647)
+        throw new WorkflowError(400, "Binding requires an own workflow and bounded schema publication.");
+      if (schemas.some(s => s.id === schemaId) && binding.schemaVersion !== 1)
+        throw new WorkflowError(400, "Own schema binding must pin publication 1.");
+      if (!Array.isArray(binding.allowedTransitions) || binding.allowedTransitions.length < 1 || binding.allowedTransitions.length > 20)
+        throw new WorkflowError(400, "Binding transition bounds exceeded.");
+      const allowedTransitions = binding.allowedTransitions.map(slug);
+      if (new Set(allowedTransitions).size !== allowedTransitions.length || allowedTransitions.some(id => !definition.transitions.some(t => t.id === id)))
+        throw new WorkflowError(400, "Binding transition is unknown or duplicated.");
+      return {id: slug(binding.id), schemaId, schemaVersion: Number(binding.schemaVersion), definitionId, allowedTransitions};
+    });
+    if (new Set(bindings.map(b=>b.id)).size !== bindings.length || new Set(bindings.map(b=>b.definitionId)).size !== bindings.length)
+      throw new WorkflowError(400, "Duplicate binding ID or workflow binding.");
+  }
   return {
+    ...(bindings ? {bindings} : {}),
     format: "latticedx.enterprise-module",
     formatVersion: 1,
     id,
     version: semver(value.version),
     title: title(value.title),
     schemas,
-    bundle: parseBundle(value.bundle),
+    bundle,
     blocks,
     dependencies,
   };

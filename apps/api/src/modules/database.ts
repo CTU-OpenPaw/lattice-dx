@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import type { WorkflowActor } from "@dx/contracts";
+import type { WorkflowActor, WorkflowBusinessBinding } from "@dx/contracts";
 import { workflowDefinitions } from "../../../../solutions/workflows/definitions.js";
 import { insertDraft } from "../workflows/registry-database.js";
 import { bundlePreview } from "../workflows/bundles.js";
@@ -25,6 +25,7 @@ import type {
   ModuleVersion,
 } from "./types.js";
 type Queryable = Pick<PoolClient, "query">;
+type ModuleBindingPlan = {schemaId: string; schemaVersion: number; binding: WorkflowBusinessBinding};
 export async function initializeModuleTables(pool: Queryable): Promise<void> {
   await pool.query(`CREATE TABLE IF NOT EXISTS enterprise_module_versions(
  organization_id text NOT NULL,id text NOT NULL,version text NOT NULL,title text NOT NULL,hash text NOT NULL,manifest jsonb NOT NULL,
@@ -45,10 +46,10 @@ export async function assertModuleStartEligible(
   org: string,
   id: string,
   version: number,
-): Promise<void> {
+): Promise<ModuleBindingPlan | undefined> {
   const rows = (
     await client.query(
-      `SELECT m.enabled,w.definition_version AS "definitionVersion" FROM enterprise_module_versions m
+      `SELECT m.enabled,m.id,m.version,m.manifest,w.definition_version AS "definitionVersion" FROM enterprise_module_versions m
  JOIN enterprise_module_workflows w ON w.organization_id=m.organization_id AND w.module_id=m.id AND w.module_version=m.version
  WHERE w.organization_id=$1 AND w.definition_id=$2 FOR SHARE OF m`,
       [org, id],
@@ -59,6 +60,21 @@ export async function assertModuleStartEligible(
       409,
       "Module workflow is disabled or publication is outside the active mapping.",
     );
+  const row = rows[0];
+  const binding = row?.manifest?.bindings?.find(
+    (candidate: {definitionId: string}) => candidate.definitionId === id,
+  );
+  if (!binding) return;
+  return {
+    schemaId: binding.schemaId,
+    schemaVersion: binding.schemaVersion,
+    binding: {
+      moduleId: row.id,
+      moduleVersion: row.version,
+      bindingId: binding.id,
+      allowedTransitions: [...binding.allowedTransitions],
+    },
+  };
 }
 function identity(id: string, version: string) {
   slug(id);
@@ -95,6 +111,7 @@ async function detail(
     })),
     blocks: row.manifest.blocks,
     dependencies: row.manifest.dependencies,
+    ...(row.manifest.bindings ? {bindings:row.manifest.bindings.map((b: {definitionId:string})=>({...b,definitionVersion:mappings.find(w=>w.definitionId===b.definitionId)?.definitionVersion??undefined}))} : {}),
   };
 }
 async function dependencies(
@@ -131,6 +148,58 @@ async function dependencies(
   if (manifest.dependencies.some((d) => cycle(d.id, d.version, new Set())))
     errors.push("Module dependency cycle.");
   return errors;
+}
+async function schemaPublicationExists(
+  db: Queryable, org: string, schemaId: string, version: number,
+): Promise<boolean> {
+  const publication = await db.query(
+    "SELECT 1 FROM enterprise_schema_versions WHERE organization_id=$1 AND schema_id=$2 AND version=$3",
+    [org, schemaId, version],
+  );
+  return !!publication.rowCount;
+}
+async function bindingErrors(
+  db: Queryable, org: string, manifest: ModuleManifest,
+): Promise<string[]> {
+  const errors: string[] = [];
+  const external = (manifest.bindings ?? []).filter(
+    binding => !manifest.schemas.some(schema => schema.id === binding.schemaId),
+  );
+  const owners = external.length ? (await db.query(
+    "SELECT id,version,enabled,manifest FROM enterprise_module_versions WHERE organization_id=$1",
+    [org],
+  )).rows : [];
+  for (const binding of external) {
+    const declaredOwner = owners.some(row =>
+      row.enabled &&
+      manifest.dependencies.some(dep => dep.id === row.id && dep.version === row.version) &&
+      row.manifest.schemas.some((schema: {id: string}) => schema.id === binding.schemaId),
+    );
+    if (!declaredOwner)
+      errors.push(`Binding ${binding.id} schema must belong to an exact enabled dependency.`);
+    if (!await schemaPublicationExists(db, org, binding.schemaId, binding.schemaVersion))
+      errors.push(`Binding ${binding.id} schema publication is unavailable.`);
+  }
+  return errors;
+}
+async function validatePublishedBindings(
+  db: Queryable, org: string, manifest: ModuleManifest,
+  workflows: ModuleVersion["workflows"],
+): Promise<void> {
+  const errors = await bindingErrors(db, org, manifest);
+  for (const binding of manifest.bindings ?? []) {
+    const mapping = workflows.find(workflow => workflow.definitionId === binding.definitionId);
+    const row = (await db.query(
+      "SELECT definition FROM workflow_definition_versions WHERE organization_id=$1 AND id=$2 AND version=$3",
+      [org, binding.definitionId, mapping?.definitionVersion],
+    )).rows[0];
+    if (!row || binding.allowedTransitions.some(id =>
+      !row.definition.transitions.some((transition: {id: string}) => transition.id === id),
+    )) errors.push(`Binding ${binding.id} workflow publication or transition is unavailable.`);
+    if (!await schemaPublicationExists(db, org, binding.schemaId, binding.schemaVersion))
+      errors.push(`Binding ${binding.id} schema publication is unavailable.`);
+  }
+  if (errors.length) throw new WorkflowError(409, errors.join(" "));
 }
 async function preview(
   db: Queryable,
@@ -189,7 +258,8 @@ async function preview(
     ].sort(),
     connectors: [...new Set(summaries.flatMap((d) => d.connectors))].sort(),
     conflicts,
-    dependencyErrors: await dependencies(db, actor.organizationId, manifest),
+    dependencyErrors: [...await dependencies(db, actor.organizationId, manifest), ...await bindingErrors(db,actor.organizationId,manifest)],
+    ...(manifest.bindings ? {bindings:manifest.bindings} : {}),
   };
 }
 export async function modulesDatabase(
@@ -366,6 +436,7 @@ export async function modulesDatabase(
           })),
           blocks: manifest.blocks,
           dependencies: manifest.dependencies,
+          ...(manifest.bindings ? {bindings:manifest.bindings} : {}),
         };
         await audit(client, actor, result, "install");
         return result;
@@ -411,6 +482,11 @@ export async function modulesDatabase(
         key,
         { id, version, ...input },
         async (client) => {
+          // Acquire owner and exact dependency row locks in deterministic order.
+          const owner = (await client.query("SELECT manifest FROM enterprise_module_versions WHERE organization_id=$1 AND id=$2 AND version=$3",[actor.organizationId,id,version])).rows[0];
+          if (!owner) throw new WorkflowError(404,"Module version not found.");
+          const locks = [{id,version},...owner.manifest.dependencies].sort((a,b)=>a.id.localeCompare(b.id)||a.version.localeCompare(b.version));
+          for(const lock of locks)await client.query("SELECT id FROM enterprise_module_versions WHERE organization_id=$1 AND id=$2 AND version=$3 FOR UPDATE",[actor.organizationId,lock.id,lock.version]);
           const module = await detail(
             client,
             actor.organizationId,
@@ -470,6 +546,8 @@ export async function modulesDatabase(
                 );
               module.workflows = chosen;
             }
+            await validatePublishedBindings(client,actor.organizationId,manifest,module.workflows);
+            if(module.bindings)module.bindings=module.bindings.map(b=>({...b,definitionVersion:module.workflows.find(w=>w.definitionId===b.definitionId)?.definitionVersion}));
           }
           await client.query(
             "UPDATE enterprise_module_versions SET enabled=$4,revision=revision+1 WHERE organization_id=$1 AND id=$2 AND version=$3",
@@ -489,6 +567,34 @@ export async function modulesDatabase(
           return result;
         },
       );
+    },
+    async startBinding(id, version, bindingId, input, actor, key) {
+      identity(id, version);
+      slug(bindingId);
+      if (!actor.roles.includes("workflow:start"))
+        throw new WorkflowError(403, "workflow:start required.");
+      if (!parseCreateKey(key))
+        throw new WorkflowError(400, "Idempotency-Key required.");
+      return transaction(actor, async client => {
+        const module = await detail(client, actor.organizationId, id, version, "FOR SHARE");
+        const binding = module.bindings?.find(candidate => candidate.id === bindingId);
+        if (!binding) throw new WorkflowError(404, "Module binding not found.");
+        const mapping = module.workflows.find(workflow => workflow.definitionId === binding.definitionId);
+        if (!module.enabled || !mapping?.definitionVersion)
+          throw new WorkflowError(409, "Module workflow is not enabled.");
+        return workflows.createWithClient!(
+          client,
+          {
+            definitionId: binding.definitionId,
+            definitionVersion: mapping.definitionVersion,
+            title: input.title,
+            input: input.input,
+            entityContext: {entityId: input.entityId},
+          },
+          actor,
+          "module-binding:" + id + ":" + version + ":" + bindingId + ":" + key,
+        );
+      });
     },
     async start(id, version, input, actor, key) {
       identity(id, version);

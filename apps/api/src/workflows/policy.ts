@@ -44,12 +44,13 @@ export function canUseEvidence(file:{ownerId:string;organizationId:string;scanSt
     &&(file.ownerId===actor.subject||links.some(link=>canReadRun(link.definition,link.run,actor)));
 }
 export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRun,actor:WorkflowActor,service=false){
+  if(run.binding&&!run.binding.allowedTransitions.includes(transition.id))throw new WorkflowError(403,'Transition is outside the immutable business binding.');
   if(transition.execution==='service'&&!service)throw new WorkflowError(403,'Service transition requires scheduler authority.');
   if(run.organizationId!==actor.organizationId||!actor.roles.includes(transition.role)||(transition.ownerOnly&&actor.subject!==run.ownerId)
     ||transition.assigneeField&&run.data[transition.assigneeField]!==actor.subject)throw new WorkflowError(403,'Không có quyền thực hiện bước.');
 }
 export function availableTransitions(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor){
-  return def.transitions.filter(t=>t.execution!=='service'&&run.status!=='cancelled'&&!run.waiting&&conditionMatches(t.condition,run.data)&&t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
+  return def.transitions.filter(t=>(!run.binding||run.binding.allowedTransitions.includes(t.id))&&t.execution!=='service'&&run.status!=='cancelled'&&!run.waiting&&conditionMatches(t.condition,run.data)&&t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
 }
 export function planTransition(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand,service=false){
   const transition=def.transitions.find(t=>t.id===command.action);

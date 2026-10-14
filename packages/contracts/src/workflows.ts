@@ -20,7 +20,9 @@ export type WorkflowDefinition = {
   assignedReader?: { field: string; role: string; states: string[] };
 };
 export type EntityWorkflowContext = {entityId:string;schemaId:string;schemaVersion:number;entityVersion:number};
+export type WorkflowBusinessBinding = {moduleId:string;moduleVersion:string;bindingId:string;allowedTransitions:string[]};
 export type WorkflowRun = {
+  binding?:WorkflowBusinessBinding;
   entityContext?:EntityWorkflowContext;
   id: string; recordId: string; definitionId: string; definitionVersion: number; title: string;
   ownerId: string; organizationId: string; state: string; version: number; data: Record<string,string>;

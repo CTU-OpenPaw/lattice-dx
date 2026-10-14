@@ -17,9 +17,10 @@ import {workflowReadPredicate} from './read-predicate.js';
 import {contextColumns,readContext,lockContextEntity,requireEntityRead} from './entity-context.js';
 import {initializeModuleTables,assertModuleStartEligible} from '../modules/database.js';
 
-const runColumns='id,id AS "recordId",definition_id AS "definitionId",definition_version AS "definitionVersion",title,owner_id AS "ownerId",organization_id AS "organizationId",state,version,data,status,cancellation,created_at AS "createdAt",updated_at AS "updatedAt"';
+const runColumns='id,id AS "recordId",definition_id AS "definitionId",definition_version AS "definitionVersion",title,owner_id AS "ownerId",organization_id AS "organizationId",state,version,data,status,cancellation,binding,created_at AS "createdAt",updated_at AS "updatedAt"';
 function serializeRun(row:WorkflowRun):WorkflowRun {
-  return {...row,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString()};
+  const {binding,...rest}=row;
+  return {...rest,...(binding?{binding}:{}),createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString()};
 }
 function fingerprint(value:CreateWorkflow|TransitionCommand):string {
   const sortedInput=Object.fromEntries(Object.entries(value.input).sort(([a],[b])=>a.localeCompare(b)));
@@ -81,7 +82,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
       for(const d of workflowDefinitions)for(const t of d.transitions)if(t.execution!=='service'&&actor.roles.includes(t.role)) {
         let guard='';
         if(t.condition) guard=` AND ${compileCondition(t.condition,bind)}`;
-        choices.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''}${guard})`);
+        choices.push(`((binding IS NULL OR binding->'allowedTransitions' ? ${bind(t.id)}) AND definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''}${guard})`);
       }
       where.push("NOT EXISTS(SELECT 1 FROM workflow_waits w WHERE w.run_id=workflow_runs.id AND w.status='pending')");
       where.push("NOT EXISTS(SELECT 1 FROM workflow_timers t WHERE t.run_id=workflow_runs.id AND t.status='pending')");
@@ -116,21 +117,24 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     }
     const input=validateInput(def.startFields,value.input,def.optionalStartFields),hash=fingerprint({...value,input});
     if(replay){if(replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
-    await assertModuleStartEligible(client,actor.organizationId,def.id,def.version);
+    const bindingPlan=await assertModuleStartEligible(client,actor.organizationId,def.id,def.version);
+    if(bindingPlan&&!contextInput)throw new WorkflowError(409,"Bound workflow requires entity context.");
     const referenceFields={...def.startFields,...def.optionalStartFields};
     if(def.assignedReader)delete referenceFields[def.assignedReader.field];
     await validateReferences(client,referenceFields,input,actor,run=>definition(run,client));
     await checkAssigned(client,def,input,actor);
     const source=contextInput?await lockContextEntity(client,contextInput.entityId,actor,true):undefined;
+    if(bindingPlan&&(!source||source.schemaId!==bindingPlan.schemaId||source.schemaVersion!==bindingPlan.schemaVersion))throw new WorkflowError(409,"Entity schema does not match business binding.");
     const id=randomUUID();
     await client.query('INSERT INTO records(id,title,owner_id,organization_id) VALUES($1,$2,$3,$4)',[id,value.title,actor.subject,actor.organizationId]);
-    const row=(await client.query(`INSERT INTO workflow_runs(id,definition_id,definition_version,title,owner_id,organization_id,state,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${runColumns}`,[id,def.id,def.version,value.title,actor.subject,actor.organizationId,def.initialState,JSON.stringify(input)])).rows[0];
+    const row=(await client.query(`INSERT INTO workflow_runs(id,definition_id,definition_version,title,owner_id,organization_id,state,data,binding) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING ${runColumns}`,[id,def.id,def.version,value.title,actor.subject,actor.organizationId,def.initialState,JSON.stringify(input),bindingPlan?JSON.stringify(bindingPlan.binding):null])).rows[0];
     const run=serializeRun(row);
+    if(bindingPlan)run.binding=bindingPlan.binding;
     if(source){
       run.entityContext={entityId:source.id,schemaId:source.schemaId,schemaVersion:source.schemaVersion,entityVersion:source.version};
       await client.query('INSERT INTO workflow_entity_contexts(run_id,organization_id,entity_id,schema_id,schema_version,entity_version) VALUES($1,$2,$3,$4,$5,$6)',[id,actor.organizationId,source.id,source.schemaId,source.schemaVersion,source.version]);
     }
-    await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,to_state,version,metadata) VALUES($1,$2,$3,$4,$5,1,$6)',[randomUUID(),id,actor.subject,'create',def.initialState,run.entityContext?JSON.stringify({entityContext:run.entityContext}):null]);
+    await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,to_state,version,metadata) VALUES($1,$2,$3,$4,$5,1,$6)',[randomUUID(),id,actor.subject,'create',def.initialState,run.entityContext?JSON.stringify({entityContext:run.entityContext,...(run.binding?{binding:run.binding}:{})}):null]);
     await attachFiles(client,id,{...def.startFields,...def.optionalStartFields},input);
     await client.query('INSERT INTO workflow_starts(organization_id,actor_id,key,fingerprint,run_id,result) VALUES($1,$2,$3,$4,$5,$6)',[actor.organizationId,actor.subject,key,hash,id,JSON.stringify(run)]);
     return run;

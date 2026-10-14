@@ -9,6 +9,7 @@ export async function createWorkflowTables(pool:Pool) {
       created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())`,
     "ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active' CHECK(status IN ('active','cancelled'))",
     'ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS cancellation jsonb',
+    'ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS binding jsonb',
     'CREATE INDEX IF NOT EXISTS workflow_runs_scope ON workflow_runs(organization_id,updated_at)',
     `CREATE TABLE IF NOT EXISTS workflow_entity_contexts (
       run_id uuid PRIMARY KEY REFERENCES workflow_runs(id),organization_id text NOT NULL,entity_id uuid NOT NULL,

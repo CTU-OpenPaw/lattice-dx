@@ -101,3 +101,17 @@ it("module routes enforce current roles, strict envelopes, required keys and JWT
     await app.close();
   }
 });
+it('binding start uses server definition and accepts context on legacy module start',async()=>{
+ const startBinding=vi.fn(async()=>({id:'run'})),start=vi.fn(async()=>({id:'run'}));
+ const app=createApi({workerUrl:'http://localhost:1',identity:{issuer:'https://identity.test',audience:'dx-api',key},modules:{startBinding,start} as unknown as ModuleRepository});
+ try{
+ const entityId='11111111-1111-4111-8111-111111111111',headers={...await auth(['workflow:start','data:read']),'idempotency-key':'start'};
+ const url='/v1/enterprise-modules/sample/versions/1.0.0/bindings/business/start',payload={entityId,title:'Bound',input:{}};
+ expect((await app.inject({method:'POST',url,headers,payload})).statusCode).toBe(201);
+ expect(startBinding.mock.calls[0]).toEqual(['sample','1.0.0','business',payload,{subject:'alice',organizationId:'org-a',roles:['workflow:start','data:read']},'start']);
+ for(const extra of [{definitionId:'injected'},{binding:{}},{roles:['admin']}])expect((await app.inject({method:'POST',url,headers,payload:{...payload,...extra}})).statusCode).toBe(400);
+ expect((await app.inject({method:'POST',url,headers:{...await auth(['workflow:start'])},payload})).statusCode).toBe(400);
+ expect((await app.inject({method:'POST',url: '/v1/enterprise-modules/sample/versions/1.0.0/start',headers,payload:{definitionId:'flow',title:'Bound',input:{},entityContext:{entityId}}})).statusCode).toBe(201);
+ expect(start).toHaveBeenCalledWith('sample','1.0.0',expect.objectContaining({entityContext:{entityId}}),expect.any(Object),'start');
+ }finally{await app.close();}
+});
