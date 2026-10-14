@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import {createHash,randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
+import {isRecordId} from '@dx/contracts';
+import {parseCreateKey,CreateCommandError} from '../create-command.js';
 import type {WorkflowRun,WorkflowActor,WorkflowDefinition,CancelWorkflow,TransferWorkflowTask} from '@dx/contracts';
 import {WorkflowError} from './policy.js';
 export function parseLifecycle(value:unknown,transfer=false):CancelWorkflow|TransferWorkflowTask|undefined {
  if(!value||typeof value!=='object'||Array.isArray(value))return;
  const v=value as Record<string,unknown>,allowed=transfer?['taskId','assigneeId','expectedVersion','reason']:['expectedVersion','reason'];
  if(Object.keys(v).some(k=>!allowed.includes(k))||!Number.isSafeInteger(v.expectedVersion)||Number(v.expectedVersion)<1||typeof v.reason!=='string'||!v.reason.trim()||Array.from(v.reason).length>500)return;
- if(transfer&&(typeof v.taskId!=='string'||!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v.taskId)||typeof v.assigneeId!=='string'||!v.assigneeId.trim()||v.assigneeId.length>200))return;
+ if(transfer&&(typeof v.taskId!=='string'||!isRecordId(v.taskId)||typeof v.assigneeId!=='string'||!v.assigneeId.trim()||v.assigneeId!==v.assigneeId.trim()||Array.from(v.assigneeId).length>100||/[\x00-\x1f\x7f]/.test(v.assigneeId)))return;
  return {expectedVersion:Number(v.expectedVersion),reason:v.reason.trim(),...(transfer?{taskId:(v.taskId as string).toLowerCase(),assigneeId:v.assigneeId as string}:{})} as CancelWorkflow|TransferWorkflowTask;
 }
 export async function taskHistory(client:PoolClient,task:{id:string;version:number},actor:WorkflowActor,operation:string) {
@@ -17,13 +19,18 @@ export async function taskHistory(client:PoolClient,task:{id:string;version:numb
 type Services={transaction:<T>(fn:(client:PoolClient)=>Promise<T>)=>Promise<T>;columns:string;serialize:(run:WorkflowRun)=>WorkflowRun;definition:(run:WorkflowRun,client:PoolClient)=>Promise<WorkflowDefinition>};
 export function lifecycleDatabase(s:Services){
  async function mutate(id:string,value:CancelWorkflow|TransferWorkflowTask,actor:WorkflowActor,key:string,operation:'cancel'|'task-transfer') {
+  if(typeof id!=='string'||!isRecordId(id))throw new WorkflowError(400,'ID quy trình phải là UUID.');
+  id=id.toLowerCase();
   return s.transaction(async c=>{
    const row=(await c.query(`SELECT ${s.columns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0];
    if(!row||row.ownerId!==actor.subject)throw new WorkflowError(404,'Không tìm thấy quy trình.');
    if(!actor.roles.includes('workflow:start')||operation==='task-transfer'&&!actor.roles.includes('tasks:assign'))throw new WorkflowError(403,'Không có quyền cập nhật quy trình.');
-   // Route parsing is repeated at the repository boundary for non-HTTP callers.
-   if(!Number.isSafeInteger(value.expectedVersion)||value.expectedVersion<1||typeof value.reason!=='string'||!value.reason.trim()||Array.from(value.reason).length>500)throw new WorkflowError(400,'Dữ liệu cập nhật không hợp lệ.');
-   const normalized={operation,expectedVersion:value.expectedVersion,reason:value.reason.trim(),...(operation==='task-transfer'?{taskId:(value as TransferWorkflowTask).taskId,assigneeId:(value as TransferWorkflowTask).assigneeId}:{})};
+   const parsed=parseLifecycle(value,operation==='task-transfer');
+   if(!parsed)throw new WorkflowError(400,'Dữ liệu cập nhật không hợp lệ.');
+   value=parsed;
+   try{const parsedKey=parseCreateKey(key);if(!parsedKey)throw new WorkflowError(400,'Idempotency-Key bắt buộc.');key=parsedKey;}
+   catch(error){if(error instanceof CreateCommandError)throw new WorkflowError(400,error.message);throw error;}
+   const normalized={operation,...parsed};
    const hash=createHash('sha256').update(JSON.stringify(normalized)).digest('hex');
    const replay=(await c.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
    if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result as WorkflowRun;}
@@ -44,7 +51,6 @@ export function lifecycleDatabase(s:Services){
     next=s.serialize((await c.query(`UPDATE workflow_runs SET status='cancelled',cancellation=jsonb_build_object('actorId',$2::text,'reason',$3::text,'at',clock_timestamp()),version=version+1,updated_at=now() WHERE id=$1 RETURNING ${s.columns}`,[id,actor.subject,normalized.reason])).rows[0]);
    }else{
     const v=value as TransferWorkflowTask;
-    if(typeof v.taskId!=='string'||typeof v.assigneeId!=='string'||!v.assigneeId.trim()||v.assigneeId.length>200)throw new WorkflowError(400,'Dữ liệu chuyển giao không hợp lệ.');
     const link=(await c.query('SELECT task_id FROM workflow_task_links WHERE run_id=$1 AND task_id=$2',[id,v.taskId])).rows[0];
     const wait=waits.find(w=>w.id===v.taskId&&w.kind==='task');
     if(!link&&!wait)throw new WorkflowError(409,'Việc không thuộc yêu cầu có thể chuyển giao.');
