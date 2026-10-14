@@ -20,7 +20,8 @@ import {registerOrganization,type OrganizationOptions} from './organization/rout
 import {registerOperations,type OperationsOptions} from './operations/routes.js';
 import {correlationId} from './operations/policy.js';
 import {registerWorkflowEvents,type EventOptions} from './events/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions) {
+import {registerModules,type ModuleOptions} from './modules/routes.js';
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions) {
   const app = Fastify({ bodyLimit: 16_384,genReqId:request=>correlationId(request.headers['x-request-id']) });
   app.addHook('onSend',async(request,reply)=>{reply.header('X-Request-Id',request.id);});
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
@@ -34,6 +35,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerWorkflowDrafts(app,options);
   registerWorkflowBundles(app,options);
   registerWorkflowEvents(app,options);
+  registerModules(app,options);
   registerLogistics(app,options);
   registerEntities(app,options);
   registerBlocks(app,options);

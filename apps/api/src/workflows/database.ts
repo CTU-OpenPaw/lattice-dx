@@ -11,6 +11,7 @@ import { compileCondition } from './conditions.js';
 import {lifecycleDatabase} from './lifecycle-database.js';
 import type { WorkflowRepository } from './types.js';
 import { pageResult, type PageQuery } from '../pagination.js';
+import {initializeModuleTables,assertModuleStartEligible} from '../modules/database.js';
 
 const runColumns='id,id AS "recordId",definition_id AS "definitionId",definition_version AS "definitionVersion",title,owner_id AS "ownerId",organization_id AS "organizationId",state,version,data,status,cancellation,created_at AS "createdAt",updated_at AS "updatedAt"';
 function serializeRun(row:WorkflowRun):WorkflowRun {
@@ -48,6 +49,7 @@ async function attachFiles(client:PoolClient,runId:string,fields:Record<string,W
 
 export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'|'list'>=sourceRegistry):Promise<WorkflowRepository> {
   await createWorkflowTables(pool);
+  await initializeModuleTables(pool);
   async function definition(run:WorkflowRun,client?:PoolClient):Promise<WorkflowDefinition>{const def=await registry.get(run.organizationId,run.definitionId,run.definitionVersion,client);if(!def)throw new WorkflowError(503,'Phiên bản quy trình không khả dụng.');return def;}
   async function taskIds(runs:WorkflowRun[],client:Pool|PoolClient=pool) {
     if(!runs.length)return runs;
@@ -101,6 +103,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
     const input=validateInput(def.startFields,value.input,def.optionalStartFields),hash=fingerprint({...value,input});
     if(replay){if(replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
+    await assertModuleStartEligible(client,actor.organizationId,def.id,def.version);
     const referenceFields={...def.startFields,...def.optionalStartFields};
     if(def.assignedReader)delete referenceFields[def.assignedReader.field];
     await validateReferences(client,referenceFields,input,actor,run=>definition(run,client));
