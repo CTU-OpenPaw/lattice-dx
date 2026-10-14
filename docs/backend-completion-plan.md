@@ -56,11 +56,11 @@ Backend nền hoàn thiện khi mỗi năng lực dưới đây có implementati
 | --- | --- | --- |
 | 1 | Hoàn thành generic task lifecycle; workflow liên kết thuộc đợt3 | Signed HTTP/PG claim/transfer/cancel/deadline, 105 queue +107 history paging, rollback/replay/max1, review fix7daf50a |
 | 2 | Typed query +7 entity block APIs hoàn thành; execution trong workflow thuộc đợt3 | Precision/ACL/pinned schema/mixed type/105 paging/max1; REST↔block receipts; reviewfixf7b977f |
-| 3 | Compound/cancel/transfer và timerservice đã test; timer review đang chốt |19fff8a actualcurrentservice/noimpersonation/race/rollback/max1. Typed entity workflow execution còn riêng |
+| 3 | Compound/cancel/transfer và timerservice đã nghiệm thu/review; typed execution đang làm |19fff8a/207a993 actualcurrentservice/noimpersonation/race/rollback/max1, retry thiếu block capability403/no reset. Typed entity workflow execution còn riêng |
 | 4 | Hoàn thành metadata hierarchy/current directory snapshot | Signed role checks +private snapshotmove/disable/rollback/cycle race/105paging/max1; Unicode canonical và diagnosticsreview đã sửa |
 | 5 | Signed ingress/subscriptions đã nghiệm thu | fc84078, atomic multi-sub PG rollback/dedupe/race/current source/max1; review không còn lỗi |
 | 6 | Module nghiệm thu/review đạt |49905be +763b24e, reversedbundle/installPGdeadlockRED→sortedGREEN; atomicresources/startgates/history/max1 |
-| 7 | Đang triển khai contextual attachment/import/export/migration |Không tính xong trước kiểm PostgreSQL batchrollback/ACL/migration pins |
+| 7 | Hoàn thành contextual attachment/import/export/migration, review đạt |97da1ae/6eccd6b/94e6f45; rebuilt signed HTTP +PG batchrollback/5waydedupe/scan/revoke/tenant/migrationrace/relations/pin/max1, query/sharing regressions đạt |
 | 8 | Local recovery/readiness/diagnostics/retention preview đã kiểm | Dump/checksum, restore27 bảng +sentinel; signed diagnostics/currenttenantdryrun. Offsite/automaticretention/HA vẫn ngoài local v1 |
 | 9 | Chưa thực hiện | Nghiệm thu sau toàn bộ các đợt |
 
