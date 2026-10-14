@@ -24,3 +24,7 @@ Persist optional `WorkflowRun.binding:{moduleId,moduleVersion,bindingId,allowedT
 `POST /v1/enterprise-modules/:id/versions/:version/bindings/:bindingId/start` body `{entityId,title,input}` keyrequired; resolvebounddefinition server-side anddelegate sameworkflowcaller-client createpath. Existing module `start` parseCreate gains optionalcontext naturally. Wrongbinding404/wrongschema409/role403/invisibleentity404/disabledmodule409. Returnedmodule detail/previewincludesbinding metadata and resolved workflow publication whereavailable. Exportmanifestportable contains schema/definitionnames, no literalentityUUID or policy grants.
 
 Acceptance: oldmanifesthash/preview unchanged, unknownresource/unpublishedpin/action/differenttenant/dependencydeny, allstartpaths missing/wrongcontext fail, blockedtransitionlistandexecutionconsistent, persistedboundrun policyunchangedaftermoduledisable, acceptedstartreplaycurrententityACL, forcedcontext/bindingreceiptrollback, start/disable race, max1newexecution andserialization. No broad bindingmutation/uninstall/upgrade engine added.
+
+## Current dependency eligibility
+
+For new starts of a bound consumer workflow, exact dependencies supplying its schema must still be enabled. Acquire owner and exact dependency row locks in deterministic module ID/version order before entity context locks and recheck eligibility. This does not revoke schema CRUD or alter already-running immutable bindings. Installation/enable-time checks alone are insufficient for this fresh-start policy.
