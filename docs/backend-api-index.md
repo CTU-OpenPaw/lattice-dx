@@ -7,6 +7,7 @@ The engine is the authority for business data, workflows and permissions. Studio
 | Typed schema and entity lifecycle | `/v1/entity-schemas`, `/v1/entities` | [Enterprise data](enterprise-data.md) | `pnpm test:enterprise-data` |
 | Person/department grants | `/v1/entities/:id/shares` | [Entity sharing](entity-sharing.md) | `pnpm test:entity-sharing` |
 | Frozen reports with current source access | `/v1/entity-report-snapshots/*` | [Entity reporting](entity-reporting.md) | `pnpm test:report-snapshots` |
+| Full text entity search | `/v1/entities/search` | [Entity search](entity-search.md) | `pnpm test:entity-search` |
 | Exact scoped aggregates | `/v1/entities/aggregate` | [Entity reporting](entity-reporting.md) | `pnpm test:entity-aggregates` |
 | Typed query and API data blocks | `/v1/entities/query`, `/v1/blocks` | [Query and blocks](entity-query-blocks.md) | `pnpm test:entity-query-blocks` |
 | Contextual documents and batch data | `/v1/entities/:id/attachments`, `/v1/entity-imports/*`, `/v1/entities/export`, migration | [Data tools](entity-data-tools.md) | `pnpm test:entity-data-tools` |
