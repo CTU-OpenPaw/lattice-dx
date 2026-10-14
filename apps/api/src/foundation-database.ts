@@ -5,6 +5,7 @@ import { RecordLinkError } from './record-link.js';
 import type { FoundationRepository } from './foundation.js';
 import { DirectoryError } from './directory.js';
 import { pageResult } from './pagination.js';
+import { initializeFileStorage } from './files/storage-database.js';
 export async function foundationDatabase(pool:Pool):Promise<FoundationRepository>{
   await pool.query(`CREATE TABLE IF NOT EXISTS foundation_tasks (
     id uuid PRIMARY KEY,title text NOT NULL,organization_id text NOT NULL,assignee_id text NOT NULL,
@@ -17,6 +18,7 @@ export async function foundationDatabase(pool:Pool):Promise<FoundationRepository
     content bytea NOT NULL,size integer NOT NULL,scan_status text NOT NULL DEFAULT 'pending',created_at timestamptz NOT NULL DEFAULT now()
   )`);
   await pool.query('ALTER TABLE foundation_tasks ADD COLUMN IF NOT EXISTS record_id uuid REFERENCES records(id)');
+  await initializeFileStorage(pool);
   await pool.query('ALTER TABLE foundation_files ADD COLUMN IF NOT EXISTS record_id uuid REFERENCES records(id)');
   await pool.query('CREATE INDEX IF NOT EXISTS foundation_tasks_record ON foundation_tasks(record_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS foundation_files_record ON foundation_files(record_id)');
