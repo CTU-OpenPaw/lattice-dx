@@ -20,8 +20,10 @@ export async function foundationDatabase(pool:Pool):Promise<FoundationRepository
   await pool.query('ALTER TABLE foundation_files ADD COLUMN IF NOT EXISTS record_id uuid REFERENCES records(id)');
   await pool.query('CREATE INDEX IF NOT EXISTS foundation_tasks_record ON foundation_tasks(record_id)');
   await pool.query('CREATE INDEX IF NOT EXISTS foundation_files_record ON foundation_files(record_id)');
+  await pool.query('ALTER TABLE foundation_tasks ADD COLUMN IF NOT EXISTS department_id text');
+  await pool.query('ALTER TABLE foundation_tasks ADD COLUMN IF NOT EXISTS due_at timestamptz');
   await initializeCreateCommands(pool);
-  const tc=`id,title,organization_id AS "organizationId",assignee_id AS "assigneeId",created_by AS "createdBy",status,version,record_id AS "recordId",(SELECT w.id FROM workflow_waits w WHERE w.id=foundation_tasks.id AND w.kind='task') AS "workflowWaitId"`;
+  const tc=`id,title,organization_id AS "organizationId",assignee_id AS "assigneeId",created_by AS "createdBy",status,version,department_id AS "departmentId",due_at AS "dueAt",record_id AS "recordId",(SELECT w.id FROM workflow_waits w WHERE w.id=foundation_tasks.id AND w.kind='task') AS "workflowWaitId"`;
   const fc='id,filename,owner_id AS "ownerId",organization_id AS "organizationId",size,scan_status AS "scanStatus",record_id AS "recordId"';
   return {
     supportsCreateCommands:true,
@@ -29,9 +31,9 @@ export async function foundationDatabase(pool:Pool):Promise<FoundationRepository
       const rows=(await pool.query(`SELECT ${tc} FROM foundation_tasks WHERE organization_id=$1 AND assignee_id=$2 AND ($3::text IS NULL OR status=$3) AND ($4::text IS NULL OR record_id::text=$4) AND ($5='' OR strpos(lower(title),lower($5))>0) ORDER BY created_at DESC,id DESC LIMIT $6 OFFSET $7`,[s.organizationId,s.subject,q.status??null,q.recordId??null,q.q,q.limit+1,q.offset])).rows;
       return pageResult(rows,q);
     },
-    async readTask(id,s) {return (await pool.query(`SELECT ${tc} FROM foundation_tasks WHERE id::text=$1 AND organization_id=$2 AND (assignee_id=$3 OR created_by=$3)`,[id.toLowerCase(),s.organizationId,s.subject])).rows[0];},
+    async readTask(id,s) {return (await pool.query(`SELECT ${tc} FROM foundation_tasks WHERE id::text=$1 AND organization_id=$2 AND (assignee_id=$3 OR created_by=$3 OR (assignee_id='' AND status='pending' AND EXISTS(SELECT 1 FROM directory_people p WHERE p.organization_id=$2 AND p.subject=$3 AND p.enabled=true AND p.department_id=foundation_tasks.department_id)))`,[id.toLowerCase(),s.organizationId,s.subject])).rows[0];},
     async readTaskFile(id,s) {
-      return (await pool.query(`SELECT ${fc.split(',').map(c=>'f.'+c).join(',')},f.content FROM foundation_files f JOIN records r ON r.id=f.record_id WHERE f.id::text=$1 AND f.organization_id=$2 AND r.organization_id=$2 AND f.owner_id=r.owner_id AND NOT EXISTS(SELECT 1 FROM workflow_runs w WHERE w.id=r.id) AND EXISTS(SELECT 1 FROM foundation_tasks t WHERE t.record_id=r.id AND t.organization_id=$2 AND t.assignee_id=$3 AND t.created_by=r.owner_id)`,[id.toLowerCase(),s.organizationId,s.subject])).rows[0];
+      return (await pool.query(`SELECT ${fc.split(',').map(c=>'f.'+c).join(',')},f.content FROM foundation_files f JOIN records r ON r.id=f.record_id WHERE f.id::text=$1 AND f.organization_id=$2 AND r.organization_id=$2 AND f.owner_id=r.owner_id AND NOT EXISTS(SELECT 1 FROM workflow_runs w WHERE w.id=r.id) AND EXISTS(SELECT 1 FROM foundation_tasks t WHERE t.record_id=r.id AND t.organization_id=$2 AND t.assignee_id=$3 AND t.created_by=r.owner_id AND t.status<>'cancelled')`,[id.toLowerCase(),s.organizationId,s.subject])).rows[0];
     },
     async listTasks(s){return (await pool.query(`SELECT ${tc} FROM foundation_tasks WHERE organization_id=$1 AND assignee_id=$2 ORDER BY created_at DESC LIMIT 100`,[s.organizationId,s.subject])).rows;},
     async createTask(input,key){

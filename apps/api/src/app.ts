@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { CreateCommandError,parseCreateKey,requireCreateCapability } from './create-command.js';
 import Fastify from 'fastify';
+import {registerTaskLifecycle,type TaskLifecycleOptions} from './tasks/routes.js';
 import { isDemoResult, parseDemoRequest } from '@dx/contracts';
 import { verifyIdentity, type IdentityConfig } from './identity.js';
 import type { RecordRepository } from './records.js';
@@ -14,10 +15,11 @@ import { registerLogistics } from './logistics.js';
 import { isRecordId,parseRecordCreateInput } from '@dx/contracts';
 import { parsePage } from './pagination.js';
 import { registerEntities, type EntityOptions } from './entities/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions) {
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions) {
   const app = Fastify({ bodyLimit: 16_384 });
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
   registerFoundation(app,options);
+  registerTaskLifecycle(app,options);
   registerActions(app,options);
   registerDirectory(app,options);
   registerWorkflows(app,options);

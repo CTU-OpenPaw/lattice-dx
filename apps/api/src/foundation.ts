@@ -11,7 +11,7 @@ export type TaskQuery=PageQuery & {status?:string;recordId?:string};
 import { requireAssignee, DirectoryError, type DirectoryOptions } from './directory.js';
 export type Scope = {subject:string; organizationId:string};
 export type TaskInput = {title:string;assigneeId:string;organizationId:string;createdBy:string;recordId?:string};
-export type Task = Omit<TaskInput,'recordId'> & {id:string;status:string;version:number;recordId?:string|null;workflowWaitId?:string|null};
+export type Task = Omit<TaskInput,'recordId'> & {id:string;status:string;version:number;recordId?:string|null;workflowWaitId?:string|null;departmentId?:string|null;dueAt?:string|null};
 export type ScanStatus = 'pending'|'clean'|'rejected'|'error';
 export type FileInput = {filename:string;ownerId:string;organizationId:string;content:Buffer;recordId?:string};
 export type FileItem = Omit<FileInput,'content'|'recordId'> & {id:string;size:number;scanStatus:ScanStatus;recordId?:string|null};
