@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { isRecordId, type WorkflowActor, type WorkflowConnectorEvent, type WorkflowRun, type WorkflowStep, type WorkflowWaitConfig, type WorkflowDefinition } from '@dx/contracts';
-import { authorizeBlock, boundedString, resolveBinding } from './block-policy.js';
+import { isRecordId, type WorkflowActor, type WorkflowConnectorEvent, type WorkflowRun, type WorkflowStep, type WorkflowWaitConfig, type WorkflowDefinition, type WorkflowBlockResult, type WorkflowEntityStep } from '@dx/contracts';
+import { authorizeBlock, boundedString, resolveBinding, resolveTypedBinding, resolveEntityVersion } from './block-policy.js';
+import {createEntityAtPublication,lockEntities,applyEntityUpdateWithClient,applyEntityArchiveWithClient,applyEntityRelationWithClient,scopedEntity,missing,queryEntitiesWithClient} from '../entities/client.js';
+import {checkAccess} from '../entities/access.js';
+import {EntityError,uuid} from '../entities/policy.js';
+import type {Entity} from '../entities/types.js';
 import { scheduleTimer } from './timer-database.js';
 import { WorkflowError } from './policy.js';
 function title(value: string) {
@@ -15,13 +19,50 @@ function subject(value: string) {
 }
 /** All reads and writes use the caller's transaction connection, including directory routing. */
 export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], run: WorkflowRun, input: Record<string, string>, actor: WorkflowActor, wait?: WorkflowWaitConfig, definition?:WorkflowDefinition): Promise<void> {
-  const results = new Map<string, { id?: string; eventId?: string }>();
+  const results = new Map<string, WorkflowBlockResult>();
+  const scope={actorId:actor.subject,organizationId:actor.organizationId};
+  const entitySteps=steps.filter((step):step is WorkflowEntityStep=>step.action.startsWith('entities.'));
+  for(const step of steps)authorizeBlock(step,actor);
+  // Validated result IDs refer only to earlier blocks: existing entity aliases
+  // ultimately have a non-result ID here; created IDs belong to this transaction.
+  let locked:Map<string,Entity>;
+  try {
+    const ids:string[]=[];
+    for(const step of entitySteps)if('id' in step.input){for(const binding of [step.input.id,...('targetId' in step.input?[step.input.targetId]:[])])if(binding.source!=='result')ids.push(uuid(resolveBinding(binding,run,input,actor,results)));}
+    locked=await lockEntities(client,scope,ids);
+  }catch(error){if(error instanceof EntityError)throw new WorkflowError(error.statusCode,error.message);throw error;}
   for (const [stepIndex, step] of steps.entries()) {
     authorizeBlock(step, actor);
     const resolve = (binding: Parameters<typeof resolveBinding>[0]) => resolveBinding(binding, run, input, actor, results);
-    let resolved: Record<string, string | Record<string, string>>;
-    let result: { id?: string; eventId?: string };
-    if (step.action === 'records.create') {
+    let resolved: Record<string, unknown>;
+    let result: WorkflowBlockResult;
+    if(step.action.startsWith('entities.')) {
+      const entityStep=step as WorkflowEntityStep;
+      const metadata=(row:Entity)=>({id:row.id,version:row.version,schemaVersion:row.schemaVersion});
+      const attributes=(values:Record<string,import('@dx/contracts').WorkflowTypedBinding>)=>Object.fromEntries(Object.entries(values).map(([key,binding])=>[key,resolveTypedBinding(binding,run,input)]));
+      const rowFor=async(binding:import('@dx/contracts').WorkflowBinding):Promise<Entity>=>{const id=uuid(resolve(binding));let row=locked.get(id);if(!row){row=await scopedEntity(client,scope,id,true);if(!row)throw missing();locked.set(id,row);}return row;};
+      try {
+        if(entityStep.action==='entities.query') {
+          const config=entityStep.input;
+          const page=await queryEntitiesWithClient(client,scope,{schemaId:config.schemaId,schemaVersion:config.schemaVersion,limit:config.limit??50,filters:(config.filters??[]).map(filter=>({field:filter.field,operator:filter.operator,...(filter.value?{value:resolveTypedBinding(filter.value,run,input)}:{})}))});
+          resolved={schemaId:config.schemaId,schemaVersion:config.schemaVersion,limit:config.limit??50};result={items:page.items.map(metadata),page:page.page};
+        } else {
+          let row:Entity;
+          if(entityStep.action==='entities.create') {row=await createEntityAtPublication(client,scope,{...entityStep.input,title:resolve(entityStep.input.title),attributes:attributes(entityStep.input.attributes)});resolved={schemaId:entityStep.input.schemaId,schemaVersion:entityStep.input.schemaVersion};}
+          else {
+            const before=await rowFor(entityStep.input.id);resolved={id:before.id};
+            if(entityStep.action==='entities.read'){await checkAccess(client,scope,before,'read');row=before;}
+            else {
+              const expectedVersion=resolveEntityVersion(entityStep.input.expectedVersion,run,input,results);resolved.expectedVersion=expectedVersion;
+              if(entityStep.action==='entities.update')row=await applyEntityUpdateWithClient(client,scope,before,{expectedVersion,title:resolve(entityStep.input.title),attributes:attributes(entityStep.input.attributes)});
+              else if(entityStep.action==='entities.archive')row=await applyEntityArchiveWithClient(client,scope,before,expectedVersion);
+              else {const target=await rowFor(entityStep.input.targetId);resolved={...resolved,targetId:target.id,name:entityStep.input.name};row=await applyEntityRelationWithClient(client,scope,before,target,{expectedVersion,name:entityStep.input.name,targetId:target.id},entityStep.action==='entities.unlink');}
+            }
+          }
+          locked.set(row.id,row);result=metadata(row);
+        }
+      }catch(error){if(error instanceof EntityError)throw new WorkflowError(error.statusCode,error.message);throw error;}
+    } else if (step.action === 'records.create') {
       resolved = { title: title(resolve(step.input.title)) };
       const id = randomUUID();
       await client.query('INSERT INTO records(id,title,owner_id,organization_id) VALUES($1,$2,$3,$4)', [id, resolved.title, actor.subject, actor.organizationId]);
@@ -69,7 +110,7 @@ export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], r
       const timer=await scheduleTimer(client,run,step,snapshot,definition);
       resolved={afterSeconds:String(step.input.afterSeconds),serviceId:step.input.serviceId,transitionId:step.input.transitionId,input:snapshot};
       result={id:timer.id};run.waiting=true;
-    } else {
+    } else if(step.action==='connectors.dispatch') {
       const payload = Object.fromEntries(Object.entries(step.input.payload ?? {}).map(([key, binding]) => [key, resolve(binding)]));
       const eventId = randomUUID();
       const event: WorkflowConnectorEvent = {
@@ -80,7 +121,7 @@ export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], r
       await client.query('INSERT INTO workflow_jobs(id,run_id,organization_id,payload) VALUES($1,$2,$3,$4)', [eventId, run.id, actor.organizationId, JSON.stringify(event)]);
       resolved = { connectorId: event.connectorId, operation: event.operation, payload };
       result = { eventId };
-    }
+    } else throw new WorkflowError(400,'Unknown workflow block.');
     await client.query('INSERT INTO workflow_action_results(run_id,version,step_id,actor_id,action,input,result,step_index) VALUES($1,$2,$3,$4,$5,$6,$7,$8)', [run.id, run.version, step.id, actor.subject, step.action, JSON.stringify(resolved), JSON.stringify(result), stepIndex]);
     results.set(step.id, result);
     if (wait && step.id === wait.stepId) {

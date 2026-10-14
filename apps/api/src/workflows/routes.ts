@@ -9,6 +9,7 @@ import { PageError,pageResult,parsePage,textFilter } from '../pagination.js';
 import {parseTimerRetry} from './timer-policy.js';
 import {parseLifecycle} from './lifecycle-database.js';
 import { parseCompletion } from './completion-policy.js';
+import {entityWorkflowBlocks} from './entity-block-catalog.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository;definitionRegistry?:DefinitionRegistry};
 function idempotencyKey(req:FastifyRequest):string {
   const key=req.headers['idempotency-key'];
@@ -64,6 +65,7 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       {id:'tasks.create',version:1,title:'Create task',requiredRole:'tasks:assign'},
       {id:'connectors.dispatch',version:1,title:'Dispatch connector',requiredRole:'workflow:integrate'},
       {id:'timers.schedule',version:1,title:'Schedule service transition',requiredRole:'workflow:schedule'},
+      ...entityWorkflowBlocks,
     ].filter(block=>actors.get(req)!.roles.includes(block.requiredRole))}));
     routes.get('/v1/workflow-definitions',async req=>{
       const actor=actors.get(req)!;

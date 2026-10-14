@@ -81,6 +81,9 @@ test('block catalogue requires signed organization and filters each action by ca
     const result=await app.inject({url:'/v1/workflow-blocks',headers:await auth(['tasks:assign'])});
     expect(result.statusCode).toBe(200);expect(result.json().items.map((item:{id:string})=>item.id)).toEqual(['tasks.create']);
     expect((await app.inject({url:'/v1/workflow-blocks',headers:await auth([])})).json().items).toEqual([]);
+      const entityItems=(await app.inject({url:'/v1/workflow-blocks',headers:await auth(['data:read','data:write'])})).json().items;
+      expect(entityItems.map((item:{id:string})=>item.id)).toEqual(['entities.create','entities.read','entities.query','entities.update','entities.archive','entities.link','entities.unlink']);
+      expect(entityItems.every((item:{input:unknown;output:unknown})=>item.input&&item.output)).toBe(true);
   }finally{await app.close();}
 });
 test('execution history authorizes run access and returns bounded page even for legacy fixture',async()=>{

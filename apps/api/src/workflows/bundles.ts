@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { WorkflowError } from './policy.js';
 import { validateDefinition, type DraftDefinition } from './registry.js';
+import {blockRole} from './block-policy.js';
 export type WorkflowBundle = { format: 'latticedx.workflow-bundle'; formatVersion: 1; definitions: DraftDefinition[] };
 export function bundleKeys(value: unknown, allowed: string[]): asserts value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -16,6 +17,10 @@ export function parseBundle(value: unknown): WorkflowBundle {
     if (Buffer.byteLength(JSON.stringify(item) ?? '', 'utf8') > 12288) throw new WorkflowError(400, 'Workflow definition quá lớn.');
     const definition = validateDefinition(item);
     for (const transition of definition.transitions) for (const step of transition.steps ?? []) {
+      if(step.action.startsWith('entities.')) {
+        const input=step.input as {id?:import('@dx/contracts').WorkflowBinding;targetId?:import('@dx/contracts').WorkflowBinding};
+        if([input.id,input.targetId].some(binding=>binding?.source==='literal'))throw new WorkflowError(400,'Bundle chứa liên kết tài nguyên nguồn.');
+      }
       if (step.action !== 'tasks.create') continue;
       if ([step.input.assigneeId, step.input.recordId, step.assignment?.department, step.assignment?.assigneeId].some(binding => binding?.source === 'literal')) throw new WorkflowError(400, 'Bundle chứa liên kết tài nguyên nguồn.');
     }
@@ -32,7 +37,7 @@ export function bundlePreview(bundle: WorkflowBundle) {
     for (const transition of definition.transitions) {
       roles.add(transition.role);
       for (const step of transition.steps ?? []) {
-        roles.add({ 'records.create': 'records:write', 'tasks.create': 'tasks:assign', 'connectors.dispatch': 'workflow:integrate', 'timers.schedule': 'workflow:schedule' }[step.action]);
+        roles.add(blockRole(step.action));
         if (step.action === 'tasks.create' && step.assignment) roles.add(step.assignment.role);
         if (step.action === 'tasks.create' && transition.wait?.stepId === step.id) roles.add('tasks:decide');
         if (step.action === 'connectors.dispatch' && step.input.connectorId.source === 'literal') {

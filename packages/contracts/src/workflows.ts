@@ -38,15 +38,27 @@ export type WorkflowBinding =
   | { source: 'context'; field: 'recordId' | 'title' | 'ownerId' | 'actorId' }
   | { source: 'result'; stepId: string; field: 'id' };
 export type WorkflowConnector = 'n8n' | 'ngsi-ld' | 'agent';
+export type WorkflowTypedBinding = {source:'literal';value:string|number|boolean} | {source:'data'|'input';field:string;as:'text'|'integer'|'decimal'|'boolean'|'date'|'enum'};
+export type WorkflowEntityVersion = number | {source:'result';stepId:string;field:'version'} | {source:'data'|'input';field:string;as:'integer'};
+export type WorkflowEntityMetadata = {id:string;version:number;schemaVersion:number};
+export type WorkflowBlockResult = {id?:string;eventId?:string;version?:number;schemaVersion?:number;items?:WorkflowEntityMetadata[];page?:{limit:number;offset:number;hasMore:boolean;nextOffset:number|null}};
+export type WorkflowEntityStep =
+  | {id:string;action:'entities.create';input:{schemaId:string;schemaVersion:number;title:WorkflowBinding;attributes:Record<string,WorkflowTypedBinding>}}
+  | {id:string;action:'entities.read';input:{id:WorkflowBinding}}
+  | {id:string;action:'entities.query';input:{schemaId:string;schemaVersion:number;filters?:{field:string;operator:'eq'|'ne'|'gt'|'gte'|'lt'|'lte'|'contains'|'exists';value?:WorkflowTypedBinding}[];limit?:number}}
+  | {id:string;action:'entities.update';input:{id:WorkflowBinding;expectedVersion:WorkflowEntityVersion;title:WorkflowBinding;attributes:Record<string,WorkflowTypedBinding>}}
+  | {id:string;action:'entities.archive';input:{id:WorkflowBinding;expectedVersion:WorkflowEntityVersion}}
+  | {id:string;action:'entities.link'|'entities.unlink';input:{id:WorkflowBinding;targetId:WorkflowBinding;name:string;expectedVersion:WorkflowEntityVersion}};
 export type WorkflowTimer = {id:string;runId:string;definitionId:string;definitionVersion:number;runVersion:number;stepId:string;serviceId:string;transitionId:string;status:'pending'|'succeeded'|'failed'|'cancelled';attempts:number;lastErrorCode:string|null;dueAt:string;availableAt:string;createdAt:string;completedAt:string|null;receipt:WorkflowRun|null};
 export type WorkflowStep =
+  | WorkflowEntityStep
   | {id:string;action:'timers.schedule';input:{afterSeconds:number;serviceId:string;transitionId:string;input:Record<string,WorkflowBinding>}}
   | { id: string; action: 'records.create'; input: { title: WorkflowBinding } }
   | { id: string; action: 'tasks.create'; input: { title: WorkflowBinding; assigneeId?: WorkflowBinding; recordId?: WorkflowBinding }; assignment?: { kind: 'department'; department: WorkflowBinding; role: string; assigneeId?: WorkflowBinding } }
   | { id: string; action: 'connectors.dispatch'; input: { connectorId: { source: 'literal'; value: WorkflowConnector }; operation: { source: 'literal'; value: string }; payload?: Record<string, WorkflowBinding> } };
 export type WorkflowActionResult = {
   runId: string; version: number; stepId: string; stepIndex: number; actorId: string; action: WorkflowStep['action'];
-  input: Record<string, string | Record<string, string>>; result: { id?: string; eventId?: string }; occurredAt: string;
+  input: Record<string, unknown>; result: WorkflowBlockResult; occurredAt: string;
 };
 export type WorkflowConnectorEvent = WorkflowEvent & { connectorId: WorkflowConnector; operation: string };
 

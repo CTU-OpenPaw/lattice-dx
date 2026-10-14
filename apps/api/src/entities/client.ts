@@ -4,6 +4,8 @@ import type { PoolClient } from 'pg';
 import { accessPredicate, checkAccess, type AccessMode } from './access.js';
 import { title, uuid, version, validateAttributes, EntityError, bad } from './policy.js';
 import type { Entity, EntityCreate, EntityUpdate, RelationInput, SchemaPublication, Scope } from './types.js';
+import {compileEntityQuery,parseEntityQuery} from './query.js';
+import {pageResult} from '../pagination.js';
 export type EntityClient = Pick<PoolClient,'query'>;
 type Queryable = EntityClient;
 export const entityColumns=`id, schema_id AS "schemaId", schema_version AS "schemaVersion", title, attributes,
@@ -110,4 +112,12 @@ export async function linkEntityWithClient(client:EntityClient,scope:Scope,id:st
 }
 export function unlinkEntityWithClient(client:EntityClient,scope:Scope,id:string,input:RelationInput) {
   return linkEntityWithClient(client,scope,id,input,true);
+}
+/** ACL is part of the predicate before pagination; uses only the supplied connection. */
+export async function queryEntitiesWithClient(client:EntityClient,scope:Scope,input:import('./types.js').EntityQuery) {
+  const query=parseEntityQuery(input),schema=await publication(client,scope,query.schemaId,query.schemaVersion);
+  const compiled=compileEntityQuery(query,schema,5);
+  const values=[scope.organizationId,scope.actorId,query.schemaId,query.schemaVersion,...compiled.values,query.limit+1,query.offset];
+  const rows=(await client.query(`SELECT ${entityColumns} FROM enterprise_entities WHERE ${accessPredicate('enterprise_entities','$2','$1','read')} AND archived_at IS NULL AND schema_id=$3 AND schema_version=$4 AND ${compiled.predicate} ORDER BY ${compiled.order} LIMIT $${values.length-1} OFFSET $${values.length}`,values)).rows;
+  return pageResult(rows.map(entity),{limit:query.limit,offset:query.offset,q:''});
 }
