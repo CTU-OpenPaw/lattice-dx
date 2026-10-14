@@ -1,9 +1,33 @@
 // SPDX-License-Identifier: Apache-2.0
-import {test,expect} from 'vitest';
-import {mkdtemp,writeFile,symlink,mkdir,readFile,rename} from 'node:fs/promises';
+import {test,expect,vi} from 'vitest';
+import {mkdtemp,writeFile,symlink,mkdir,readFile,rename,lstat} from 'node:fs/promises';
 import {join} from 'node:path';
-import {createFilesystemStore} from './filesystem-store.js';
+import {createFilesystemStore as createStore} from './filesystem-store.js';
+// Windows cannot fsync a directory. Simulate that boundary for portable object tests.
+const portableRoot=process.platform==='win32'?{openRoot:async(root:string)=>({stat:()=>lstat(root),sync:async()=>{},close:async()=>{}})}:{};
+const createFilesystemStore=(root:string,testing?:Parameters<typeof createStore>[1])=>createStore(root,{...portableRoot,...testing});
 async function fixture(){const base=join(process.cwd(),'output');await mkdir(base,{recursive:true});return mkdtemp(join(base,'dx-store-'));}
+
+test('directory sync failure rejects publication and closes the pinned root handle',async()=>{
+ const root=await fixture();const close=vi.fn(async()=>{});const sync=vi.fn(async()=>{throw new Error('directory sync failed');});
+ const store=await createFilesystemStore(root,{openRoot:async()=>({stat:()=>lstat(root),sync,close})});
+ await expect(store.writeVerified(Buffer.from('retained'))).rejects.toThrow('directory sync failed');
+ expect(sync).toHaveBeenCalledTimes(1);expect(close).toHaveBeenCalledTimes(1);
+});
+
+test('publication waits for directory sync and closes the root after sync',async()=>{
+ const root=await fixture();const events:string[]=[];let finish!:()=>void;
+ const pending=new Promise<void>(resolve=>{finish=resolve;});let entered!:()=>void;
+ const started=new Promise<void>(resolve=>{entered=resolve;});
+ const store=await createFilesystemStore(root,{openRoot:async()=>({stat:()=>lstat(root),sync:async()=>{events.push('sync');entered();await pending;},close:async()=>{events.push('close');}})});
+ const write=store.writeVerified(Buffer.from('durable')).then(object=>{events.push('published');return object;});
+ await started;expect(events).toEqual(['sync']);finish();await write;expect(events).toEqual(['sync','close','published']);
+});
+
+test.runIf(process.platform==='win32')('Windows writes fail closed without a directory durability implementation',async()=>{
+ const store=await createStore(await fixture());
+ await expect(store.writeVerified(Buffer.from('retained'))).rejects.toThrow('directory sync');
+});
 
 test('immutable bounded objects verify size, digest, and key grammar',async()=>{
  const root=await fixture();

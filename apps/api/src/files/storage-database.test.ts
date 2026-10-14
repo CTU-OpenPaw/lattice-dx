@@ -1,7 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 import {test,expect,vi} from 'vitest';
 import type {PoolClient} from 'pg';
+import {mkdtemp,mkdir,lstat,readFile} from 'node:fs/promises';
+import {join} from 'node:path';
+import {createFilesystemStore} from './filesystem-store.js';
 import {offloadFileWithClient,initializeFileStorage,offloadOneFile,assertFileStorageReadable} from './storage-database.js';
+
+test('directory sync failure rolls back offload and retains postgres bytes',async()=>{
+ const base=join(process.cwd(),'output');await mkdir(base,{recursive:true});const root=await mkdtemp(join(base,'dx-sync-'));
+ const bytes=Buffer.from('database original');const key='12345678-1234-4234-8234-123456789abc';
+ const close=vi.fn(async()=>{});
+ const store=await createFilesystemStore(root,{objectKey:()=>key,openRoot:async()=>({stat:()=>lstat(root),sync:async()=>{throw new Error('directory sync failed');},close})});
+ const row={id:'id',storage_provider:'postgres',storage_version:1,scan_status:'clean',content:bytes,size:bytes.length};
+ const statements:string[]=[];const release=vi.fn();
+ const query=vi.fn(async(sql:string)=>{statements.push(sql);if(sql.startsWith('SELECT'))return {rows:[row]};if(sql.startsWith('UPDATE')){row.content=null as never;return {rowCount:1};}return {rows:[]};});
+ await expect(offloadOneFile({connect:async()=>({query,release})} as never,store)).rejects.toThrow('directory sync failed');
+ expect(statements.at(-1)).toBe('ROLLBACK');expect(statements.some(sql=>sql.startsWith('UPDATE')||sql==='COMMIT')).toBe(false);
+ expect(row.content).toEqual(bytes);expect(await readFile(join(root,key))).toEqual(bytes);expect(release).toHaveBeenCalledTimes(1);expect(close).toHaveBeenCalledTimes(1);
+});
 
 test('startup refuses filesystem pointers without configured store and permits postgres-only rows',async()=>{
  const query=vi.fn(async()=>({rows:[{exists:true}]}));

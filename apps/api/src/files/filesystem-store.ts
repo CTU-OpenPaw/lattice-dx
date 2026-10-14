@@ -33,8 +33,9 @@ async function readHandle(handle:FileHandle,size:number,sha256:string) {
  if(offset!==size||digest(bytes.subarray(0,offset))!==sha256)throw new Error('Object verification failed');
  same(stat,await handle.stat());return bytes.subarray(0,offset);
 }
-/** Root ownership/ACL isolation against local replacement is a deployment precondition. */
-export async function createFilesystemStore(root:string,testing?:{objectKey?:()=>string;write?:(handle:FileHandle,content:Buffer)=>Promise<void>}):Promise<ObjectStore> {
+/** Root ownership/ACL isolation against local replacement is a deployment precondition.
+ * Durable publication requires directory fsync (deployed Linux); Windows writes fail closed. */
+export async function createFilesystemStore(root:string,testing?:{objectKey?:()=>string;write?:(handle:FileHandle,content:Buffer)=>Promise<void>;openRoot?:(root:string)=>Promise<{stat:()=>Promise<Stats>;sync:()=>Promise<void>;close:()=>Promise<void>}>}):Promise<ObjectStore> {
  const initial=await validateRoot(root);
  async function checkRoot(){const next=await validateRoot(root);if(initial.dev!==next.dev||initial.ino!==next.ino)throw new Error('Storage root changed');}
  async function readVerified(pointer:Extract<StoragePointer,{provider:'filesystem'}>) {
@@ -48,6 +49,11 @@ export async function createFilesystemStore(root:string,testing?:{objectKey?:()=
  return {readVerified,async writeVerified(content){
   if(!Buffer.isBuffer(content)||content.length>MAX_FILE_BYTES)throw new Error('Invalid object content');
   content=Buffer.from(content);
+  await checkRoot();
+  if(process.platform==='win32'&&!testing?.openRoot)throw new Error('Durable filesystem publication requires directory sync; Windows writes are unsupported');
+  const directory=testing?.openRoot?await testing.openRoot(root):await open(root,constants.O_RDONLY|(constants.O_DIRECTORY??0)|(constants.O_NOFOLLOW??0));
+  try {
+  const pinned=await directory.stat();if(!pinned.isDirectory()||pinned.dev!==initial.dev||pinned.ino!==initial.ino)throw new Error('Storage root changed');
   await checkRoot();const objectKey=testing?.objectKey?.()??randomUUID();if(!keyPattern.test(objectKey))throw new Error('Invalid generated object key');
   const size=content.length;const sha256=digest(content);const path=join(root,objectKey);
   const handle=await open(path,constants.O_RDWR|constants.O_CREAT|constants.O_EXCL|(constants.O_NOFOLLOW??0),0o600);
@@ -56,6 +62,9 @@ export async function createFilesystemStore(root:string,testing?:{objectKey?:()=
   finally {await handle.close();}
   const bytes=await readVerified({provider:'filesystem',objectKey,size,sha256});
   same(identity!,await lstat(path));if(!bytes.equals(content))throw new Error('Object verification failed');
+  // File fsync persists bytes; directory fsync persists the newly created name.
+  await directory.sync();await checkRoot();
   return {objectKey,size,sha256};
+  } finally {await directory.close();}
  }};
 }
