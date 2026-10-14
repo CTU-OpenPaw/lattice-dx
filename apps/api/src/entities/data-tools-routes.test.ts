@@ -20,3 +20,25 @@ test('attachment endpoints enforce signed capabilities, strict body and mandator
   expect((await app.inject({url:`${url}/${fileId}/content`,headers:{authorization:`Bearer ${await token(['data:read'])}`}})).statusCode).toBe(403);
  }finally{await app.close();}
 });
+
+test('import/export/migration routes validate strict bodies, pins, keys and signed roles',async()=>{
+ const importDryRun=vi.fn(async()=>({valid:true,digest:'a'.repeat(64)})),importCommit=vi.fn(async()=>({entityIds:[id]})),exportRows=vi.fn(async()=>({format:'json',content:'[]',page:{}})),migrationDryRun=vi.fn(async()=>({valid:true})),migrationCommit=vi.fn(async()=>({id,schemaVersion:2}));
+ const dataTools={importDryRun,importCommit,export:exportRows,migrationDryRun,migrationCommit} as unknown as EntityDataToolsRepository;
+ const app=createApi({workerUrl:'http://localhost:1',identity,dataTools});
+ try{
+  const headers={authorization:`Bearer ${await token(['data:write','data:read'])}`,'idempotency-key':'key'};
+  const input={schemaId:'invoice',schemaVersion:1,format:'json',content:'[{"title":"A","attributes":{}}]'};
+  expect((await app.inject({method:'POST',url:'/v1/entity-imports/dry-run',headers,payload:input})).statusCode).toBe(200);
+  expect((await app.inject({method:'POST',url:'/v1/entity-imports/commit',headers,payload:{...input,expectedDigest:'a'.repeat(64)}})).statusCode).toBe(200);
+  expect((await app.inject({method:'POST',url:'/v1/entity-imports/commit',headers:{authorization:headers.authorization},payload:{...input,expectedDigest:'a'.repeat(64)}})).statusCode).toBe(400);
+  expect((await app.inject({method:'POST',url:'/v1/entity-imports/dry-run',headers,payload:{...input,schemaVersion:'1'}})).statusCode).toBe(400);
+  expect((await app.inject({method:'POST',url:'/v1/entity-imports/dry-run',headers,payload:{...input,content:'x'.repeat(262145)}})).statusCode).toBe(400);
+  expect((await app.inject({method:'POST',url:'/v1/entities/export',headers,payload:{query:{schemaId:'invoice',schemaVersion:1,limit:100},format:'csv'}})).statusCode).toBe(200);
+  expect((await app.inject({method:'POST',url:'/v1/entities/export',headers,payload:{query:{schemaId:'invoice',schemaVersion:1,limit:101},format:'csv'}})).statusCode).toBe(400);
+  const migration={expectedVersion:1,targetSchemaVersion:2,attributes:{}};
+  expect((await app.inject({method:'POST',url:`/v1/entities/${id}/migration/dry-run`,headers,payload:migration})).statusCode).toBe(200);
+  expect((await app.inject({method:'POST',url:`/v1/entities/${id}/migration/commit`,headers,payload:{...migration,expectedDigest:'b'.repeat(64)}})).statusCode).toBe(200);
+  expect((await app.inject({method:'POST',url:`/v1/entities/${id}/migration/dry-run`,headers,payload:{...migration,ownerId:'bob'}})).statusCode).toBe(400);
+  expect((await app.inject({method:'POST',url:'/v1/entity-imports/dry-run',headers:{authorization:`Bearer ${await token(['data:read'])}`},payload:input})).statusCode).toBe(403);
+ }finally{await app.close();}
+});

@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Pool, PoolClient } from 'pg';
+import { importExportRepository } from './data-tools-import-database.js';
+import { migrationRepository } from './data-tools-migration-database.js';
 import { accessPredicate, checkAccess } from './access.js';
 import { current, entity, entityColumns, missing, scopedEntity, updateRow } from './client.js';
 import { runEntityCommandInTransaction, withEntityTransaction } from './commands.js';
@@ -43,6 +45,8 @@ export async function entityDataToolsDatabase(pool:Pool):Promise<EntityDataTools
   }));
  }
  return {
+  ...importExportRepository(pool),
+  ...migrationRepository(pool),
   attach:(scope,id,input,key)=>attachmentCommand(scope,id,input,key,false),
   detach:(scope,id,input,key)=>attachmentCommand(scope,id,input,key,true),
   async attachments(scope,id,page){

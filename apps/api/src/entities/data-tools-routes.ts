@@ -5,6 +5,8 @@ import { verifyIdentity, type IdentityConfig } from '../identity.js';
 import { PageError, parsePage } from '../pagination.js';
 import { bad, EntityError, exact, uuid, version } from './policy.js';
 import type { Scope } from './types.js';
+import { format, parseImportInput, parseMigrationInput } from './data-tools-policy.js';
+import { parseEntityQuery } from './query.js';
 import type { EntityDataToolsRepository } from './data-tools-types.js';
 export type EntityDataToolsOptions={identity?:IdentityConfig;dataTools?:EntityDataToolsRepository};
 function key(request:FastifyRequest){const value=parseCreateKey(request.headers['idempotency-key'],request.raw.rawHeaders);if(!value)bad('Idempotency-Key is required.');return value;}
@@ -30,4 +32,21 @@ export function registerEntityDataTools(app:FastifyInstance,options:EntityDataTo
   exact(request.query,[]);const result=await repo.attachmentContent(scope,uuid(path(request).id),uuid(path(request).fileId));
   reply.type('application/octet-stream').header('X-Content-Type-Options','nosniff').header('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent(result.filename)}`);return result.content;
  });
+ route('POST','/v1/entity-imports/dry-run',['data:write'],async(request,repo,scope)=>repo.importDryRun(scope,parseImportInput(request.body)));
+ route('POST','/v1/entity-imports/commit',['data:write'],async(request,repo,scope)=>{
+  const input=parseImportInput(request.body,true);
+  return repo.importCommit(scope,{...input,expectedDigest:input.expectedDigest!},key(request));
+ });
+ route('POST','/v1/entities/export',['data:read'],async(request,repo,scope)=>{
+  const body=exact(request.body,['query','format']);
+  const queryBody=exact(body.query,['schemaId','schemaVersion','filters','sort','limit','offset']);
+  if(queryBody.limit===undefined)bad('Export query requires a limit at most 100.');
+  return repo.export(scope,{query:parseEntityQuery(queryBody),format:format(body.format)});
+ });
+ route('POST','/v1/entities/:id/migration/dry-run',['data:write'],async(request,repo,scope)=>repo.migrationDryRun(scope,uuid(path(request).id),parseMigrationInput(request.body)));
+ route('POST','/v1/entities/:id/migration/commit',['data:write'],async(request,repo,scope)=>{
+  const input=parseMigrationInput(request.body,true);
+  return repo.migrationCommit(scope,uuid(path(request).id),{...input,expectedDigest:input.expectedDigest!},key(request));
+ });
+
 }
