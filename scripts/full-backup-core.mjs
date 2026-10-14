@@ -59,8 +59,10 @@ function verifyRestoredDownload(database,objectRoot,inventory){
  const result=JSON.parse(apiSource(source).toString('utf8')),expected=inventory.find(entry=>entry.fileId===result.fileId);
  if(!expected||expected.sha256!==result.sha256||expected.size!==result.size)throw new Error('Restored application bytes differ.');return true;
 }
-export function backupFull(){
+export function backupFull(options={}){
  const db=backup(),bytes=boundedRead(db.path,256*1024*1024);verifyBackup(bytes,db.manifest);
+ // Internal synchronous seam for proving inventory follows the dump while live rows change.
+ options.afterDump?.();
  const inventory=restore(bytes,target=>restoredInventory(target));
  const path=join(backupRoot,'full-'+randomUUID().replaceAll('-',''));mkdirSync(path);artifactDirectory(path);mkdirSync(join(path,'objects'));
  const dump={name:basename(db.path),sha256:db.manifest.sha256,bytes:bytes.length};writeFileSync(join(path,dump.name),bytes,{flag:'wx'});
