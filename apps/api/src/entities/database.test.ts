@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { expect, test } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { entityDatabase, runEntityCommand } from './database.js';
 import type { Entity } from './types.js';
+import { canonicalJson } from './policy.js';
 
 function fixture() {
   const statements:string[]=[];
@@ -71,4 +73,32 @@ test('unlink cleans an archived target while new linking still rejects it and lo
   await expect(repository.link(scope,sourceId,input,'link')).rejects.toMatchObject({statusCode:409});
   expect(await repository.unlink(scope,sourceId,input,'unlink')).toMatchObject({id:sourceId,version:2});
   expect(locks).toEqual([targetId,sourceId,targetId,sourceId]);
+});
+
+test('create receipt replay checks current entity scope and retains archived pinned snapshots',async()=>{
+  const input={schemaId:'invoice',title:'Invoice',attributes:{label:'Original'}};
+  const accepted:Entity={id:'12345678-1234-1234-1234-123456789abc',schemaId:'invoice',schemaVersion:1,title:'Invoice',attributes:input.attributes,ownerId:'alice',organizationId:'org-a',version:1,archivedAt:null,createdAt:'2026-01-01T00:00:00Z',updatedAt:'2026-01-01T00:00:00Z'};
+  let current:Entity={...accepted,version:2,archivedAt:'2026-01-02T00:00:00Z'};
+  const scopedReads:unknown[][]=[];
+  const receipt={fingerprint:createHash('sha256').update(canonicalJson(input)).digest('hex'),result:accepted};
+  const client={async query(sql:string,values:unknown[]=[]) {
+    if(sql.startsWith('SELECT fingerprint')) return {rows:[receipt]};
+    if(sql.includes('FROM enterprise_schema_versions')) return {rows:[{definition:{id:'invoice',title:'New invoice',fields:{different:{type:'boolean',required:true}},relations:{}},version:2}]};
+    if(sql.includes('FROM enterprise_entities WHERE')) {
+      scopedReads.push(values);
+      expect(sql).toContain('FOR UPDATE');
+      return {rows:current.id===values[0]&&current.ownerId===values[1]&&current.organizationId===values[2]?[current]:[]};
+    }
+    return {rows:[]};
+  },release(){}} as unknown as PoolClient;
+  let connections=0;
+  const pool={query:client.query.bind(client),async connect(){connections++;return client;}} as unknown as Pool;
+  const repository=await entityDatabase(pool);
+  expect(await repository.create(scope,input,'create')).toEqual(accepted);
+  current={...current,ownerId:'bob'};
+  await expect(repository.create(scope,input,'create')).rejects.toMatchObject({statusCode:404});
+  current={...current,ownerId:'alice',organizationId:'org-b'};
+  await expect(repository.create(scope,input,'create')).rejects.toMatchObject({statusCode:404});
+  expect(scopedReads).toHaveLength(3);
+  expect(connections).toBe(3);
 });

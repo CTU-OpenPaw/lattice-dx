@@ -30,3 +30,18 @@ Fastify exposes strict schema draft/publish/version and entity CRUD/archive/rela
 - Impacted entity/create-command/records/foundation/workflow regression run: 17 files, 108 tests passed before the final added route coverage/pagination fix; the final entity rerun covers those changes.
 
 The parent agent owns real private PostgreSQL acceptance, live signed gateway acceptance, full workspace checks, independent review and publication/PR handling. Those checks are not claimed by this implementation report. Command unit tests use a controlled query boundary to exercise transaction/replay control; SQL isolation, races, rollback and persistence require the parent's real-database smoke.
+
+## Independent review correction — creation replay revocation
+
+Read `enterprise-data-task-review.md` and confirmed its Important finding: a create receipt replay checked only schema publication existence, allowing the historical result to remain readable after current entity ownership or tenant changed. Added a focused `repository.create` regression; the RED run returned the accepted attributes instead of rejecting the moved-owner replay with 404.
+
+The command helper now accepts an optional receipt-result validator. Only `entity.create` supplies the new validator: it locks and loads the receipt's entity ID with current actor and organization filtering on the same transaction client before returning the snapshot. Hidden entities return 404. Current same-owner archived entities still replay the original accepted version and attributes, including schema v1 after an incompatible v2 publication. Fingerprint conflicts retain their existing 409 behavior. No route, schema or generic workflow contracts changed.
+
+Fresh verification after this correction (14 October 2026, 10:52 local):
+
+- `pnpm exec vitest run apps/api/src/entities/database.test.ts` before the fix: 1 failed, 4 passed; failure explicitly reproduced disclosure after owner revocation.
+- `pnpm exec vitest run apps/api/src/entities` after the fix: 3 files, 18 tests passed.
+- `pnpm --filter @dx/api typecheck`: passed.
+- `git diff --check`: passed.
+
+The new repository regression checks current owner and tenant denial, same-owner archive replay, preserved schema v1/result after v2 publication, row locking and exactly one connection per command. Parent real PostgreSQL revocation acceptance and rebuilt live API acceptance remain separate required checks.

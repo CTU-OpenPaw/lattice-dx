@@ -17,7 +17,7 @@ async function transaction<T>(pool:Pool, work:(client:PoolClient)=>Promise<T>):P
   } catch(error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
 }
-export async function runEntityCommand<T>(pool:Pool,scope:Scope,operation:string,key:string,input:unknown,validate:(client:PoolClient)=>Promise<void>,execute:(client:PoolClient)=>Promise<T>):Promise<T> {
+export async function runEntityCommand<T>(pool:Pool,scope:Scope,operation:string,key:string,input:unknown,validate:(client:PoolClient)=>Promise<void>,execute:(client:PoolClient)=>Promise<T>,validateReplay?:(client:PoolClient,result:T)=>Promise<void>):Promise<T> {
   if(!parseCreateKey(key)) bad('Idempotency-Key is required.');
   return transaction(pool,async client=>{
     const tuple=[scope.organizationId,scope.actorId,operation,key];
@@ -28,6 +28,7 @@ export async function runEntityCommand<T>(pool:Pool,scope:Scope,operation:string
     const receipt=(await client.query('SELECT fingerprint,result FROM enterprise_commands WHERE organization_id=$1 AND actor_id=$2 AND operation=$3 AND key=$4',tuple)).rows[0];
     if(receipt) {
       if(receipt.fingerprint!==fingerprint) throw new EntityError(409,'Idempotency-Key was used with different input.');
+      await validateReplay?.(client,receipt.result as T);
       return receipt.result as T;
     }
     const result=await execute(client);
@@ -219,6 +220,8 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
         const created=entity(result.rows[0]);
         await audit(client,scope,undefined,created,'entity.create',input);
         return created;
+      },async(client,accepted)=>{
+        if(!await scopedEntity(client,scope,accepted.id,true)) throw missing();
       });
     },
     async list(scope,page) {
