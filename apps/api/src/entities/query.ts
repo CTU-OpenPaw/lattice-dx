@@ -27,7 +27,14 @@ export function compileEntityQuery(input:EntityQuery,schema:SchemaPublication,st
  const query=parseEntityQuery(input),values:unknown[]=[];
  const bind=(value:unknown)=>{values.push(value);return `$${start+values.length-1}`;};
  const fieldType=(key:string):Field=>{if(!Object.hasOwn(schema.fields,key))bad('Unknown query field.');return schema.fields[key];};
- const expression=(key:string,field:Field)=>`(attributes ->> ${key})${field.type==='decimal'||field.type==='integer'?'::numeric':''}`;
+ // PostgreSQL can reorder WHERE evaluation: guard casts inside CASE even for
+ // unrelated schema rows whose same-named attribute contains arbitrary text.
+ const expression=(key:string,field:Field)=>{
+  const text=`(attributes ->> ${key})`;
+  if(field.type==='decimal')return `CASE WHEN jsonb_typeof(attributes -> ${key})='string' AND ${text} ~ '^-?(0|[1-9][0-9]{0,37})([.][0-9]{1,18})?$' AND length(translate(${text},'-.',''))<=38 THEN ${text}::numeric END`;
+  if(field.type==='integer')return `CASE WHEN jsonb_typeof(attributes -> ${key})='number' AND ${text} ~ '^-?(0|[1-9][0-9]{0,15})$' THEN ${text}::numeric END`;
+  return text;
+ };
  const comparisons={eq:'=',ne:'<>',gt:'>',gte:'>=',lt:'<',lte:'<='};
  const predicates=query.filters.map(filter=>{
   const field=fieldType(filter.field),key=bind(filter.field),exists=`attributes ? ${key}`;

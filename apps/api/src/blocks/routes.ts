@@ -13,7 +13,7 @@ export function registerBlocks(app:FastifyInstance,options:EntityOptions){
  }
  app.get('/v1/blocks',async(request,reply)=>{
   const auth=await authenticate(request);if(auth.error)return reply.code(auth.error).send({error:'Block service unavailable or unauthorized.'});
-  try{exact(request.query,[]);return {items:blockCatalog.filter(block=>auth.actor.roles.includes(block.requiredRole))};}catch(error){if(error instanceof EntityError)return reply.code(error.statusCode).send({error:error.message});throw error;}
+  try{exact(request.query,[]);return {items:blockCatalog.filter(block=>auth.actor.roles.includes(block.requiredRole)&&(block.id!=='entities.query'||!!options.entities?.query))};}catch(error){if(error instanceof EntityError)return reply.code(error.statusCode).send({error:error.message});throw error;}
  });
  app.post<{Params:{id:string}}>('/v1/blocks/:id/run',async(request,reply)=>{
   const auth=await authenticate(request);if(auth.error)return reply.code(auth.error).send({error:'Block service unavailable or unauthorized.'});

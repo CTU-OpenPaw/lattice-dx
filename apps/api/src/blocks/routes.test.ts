@@ -9,7 +9,7 @@ test('catalog and execution enforce signed roles version and strict authority-fr
  const create=vi.fn(async()=>({id:'entity',version:1}));const entities={create} as unknown as EntityRepository;const app=createApi({workerUrl:'http://localhost:1',identity,entities});
  try{
   expect((await app.inject({url:'/v1/blocks'})).statusCode).toBe(401);
-  const headers={authorization:await authorization(['data:read'])};const catalog=await app.inject({url:'/v1/blocks',headers});expect(catalog.statusCode).toBe(200);expect(catalog.json().items.map((x:{id:string})=>x.id)).toEqual(['entities.read','entities.query']);
+  const headers={authorization:await authorization(['data:read'])};const catalog=await app.inject({url:'/v1/blocks',headers});expect(catalog.statusCode).toBe(200);expect(catalog.json().items.map((x:{id:string})=>x.id)).toEqual(['entities.read']);
   expect((await app.inject({method:'POST',url:'/v1/blocks/entities.create/run',headers,payload:{version:1,input:{}}})).statusCode).toBe(403);
   const writeHeaders={authorization:await authorization(),'idempotency-key':'same-key'};const input={schemaId:'invoice',title:'A',attributes:{}};
   for(const payload of [{version:2,input},{version:1,input:{...input,actorId:'bob'}},{version:1,input,code:'x'}])expect((await app.inject({method:'POST',url:'/v1/blocks/entities.create/run',headers:writeHeaders,payload})).statusCode).toBe(400);
@@ -28,6 +28,7 @@ test('read query and all mutations delegate their strict normalized arguments an
  const app=createApi({workerUrl:'http://localhost:1',identity,entities:methods as unknown as EntityRepository});const headers={authorization:await authorization(),'idempotency-key':'shared-key'};const scope={actorId:'alice',organizationId:'org-a'};
  try{
   const inputs={create:{schemaId:'invoice',title:'A',attributes:{}},read:{id},query:{schemaId:'invoice',schemaVersion:1},update:{id,expectedVersion:1,title:'A',attributes:{}},archive:{id,expectedVersion:1},link:{id,expectedVersion:1,name:'parent',targetId:id},unlink:{id,expectedVersion:1,name:'parent',targetId:id}};
+  expect((await app.inject({url:'/v1/blocks',headers})).json().items.map((block:{id:string})=>block.id)).toContain('entities.query');
   for(const [operation,input]of Object.entries(inputs))expect((await app.inject({method:'POST',url:`/v1/blocks/entities.${operation}/run`,headers,payload:{version:1,input}})).statusCode).toBe(200);
   expect(methods.find).toHaveBeenCalledWith(scope,id);expect(methods.query).toHaveBeenCalledWith(scope,{schemaId:'invoice',schemaVersion:1,filters:[],limit:50,offset:0});expect(methods.update).toHaveBeenCalledWith(scope,id,{expectedVersion:1,title:'A',attributes:{}},'shared-key');expect(methods.archive).toHaveBeenCalledWith(scope,id,1,'shared-key');
   for(const operation of ['link','unlink'] as const)expect(methods[operation]).toHaveBeenCalledWith(scope,id,{expectedVersion:1,name:'parent',targetId:id},'shared-key');
