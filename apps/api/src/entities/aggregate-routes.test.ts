@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import {createLocalJWKSet,exportJWK,generateKeyPair,SignJWT} from 'jose';
 import {expect,test,vi} from 'vitest';
 import {createApi} from '../app.js';

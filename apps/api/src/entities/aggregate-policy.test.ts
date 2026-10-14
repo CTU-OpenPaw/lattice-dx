@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import {expect,test} from 'vitest';
 import {parseAggregateQuery,compileAggregateQuery} from './aggregate-policy.js';
 import type {SchemaPublication} from './types.js';

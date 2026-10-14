@@ -148,6 +148,6 @@ Parent scripts/docs/APIindex/verification/masterledger, no teammate UI/adapters 
 | 2–3 | Accepted locally | Journal: a27148b/bfe2b6b; automations: d441995/cb79660/8f33d10. Independent runtime review clear; 190 focused tests; actual PG five-way dispatch/current authority/retry/atomic rollback/cancellation/depth8/max1/worker drain; signed catalog |
 | 4–5 | Accepted locally | 02b56cc/8c53f70 +catalog fixes7b99ff1/5f3c019; review closed. Full check427tests70files; rebuilt signed execution/private PG exact decimals/privacy/current revoke/5-way receipt/falseassert rollback/max1; typed-block and bundle regressions pass |
 | 6 | Accepted locally | 3685781/87e031c; review closed. Signed binding start/context/transition policies; PG 5-way receipt/atomic rollback/historical policy/max1. Disabled external dependency RED reproduced then rebuilt GREEN; deterministic module locks |
-| 7–8 | Aggregate implementing; snapshot planned | Detailed exact scoped aggregate/snapshot contracts; parent PG fixtures prepared |
+| 7–8 | Aggregate accepted; snapshots implementing | ca0a0bf; review clear, actual PG precision/currentACL/5100uncapped/group201/max1/numericgroup RED→GREEN. Fullcheck460tests78files; snapshot fixture prepared |
 | 9–11 | Planned | Concrete local object provider/search/observable runtime |
 | 12 | Planned | Full scenario/review/CI only after implementations |

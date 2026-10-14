@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import {expect,test,vi} from 'vitest';
 import {aggregateEntitiesWithClient} from './aggregate-database.js';
 import type {EntityClient} from './client.js';
