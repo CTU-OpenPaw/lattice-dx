@@ -51,3 +51,7 @@ test('only signed management role grants snapshot authority',()=>{
     subject:'alice',organizationId:'org',roles:['directory:manage']
   })).not.toThrow();
 });
+test('opaque Unicode subjects have deterministic snapshot ordering',()=>{
+ const people=['é','e\u0301'].map(subject=>({subject,displayName:subject,roles:[],enabled:true}));
+ expect(canonicalSnapshot({expectedRevision:0,people})).toBe(canonicalSnapshot({expectedRevision:0,people:[...people].reverse()}));
+});

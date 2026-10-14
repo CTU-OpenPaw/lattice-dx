@@ -2,7 +2,7 @@
 # All credentials below are PUBLIC LOCAL DEVELOPMENT FIXTURES.
 routes:
   - id: health
-    uri: /health
+    uris: [/health, /ready]
     upstream:
       type: roundrobin
       nodes:
@@ -56,7 +56,7 @@ routes:
       nodes:
         "api:4000": 1
   - id: enterprise-data
-    uris: [/v1/entity-schemas, /v1/entity-schemas/*, /v1/entities, /v1/entities/*, /v1/blocks, /v1/blocks/*]
+    uris: [/v1/entity-schemas, /v1/entity-schemas/*, /v1/entities, /v1/entities/*, /v1/blocks, /v1/blocks/*, /v1/organization/departments, /v1/organization/departments/*, /v1/organization/directory-state, /v1/organization/directory-snapshot, /v1/operations/diagnostics, /v1/operations/retention-preview]
     methods: [GET, POST, PUT, PATCH, DELETE]
     plugins:
       openid-connect:

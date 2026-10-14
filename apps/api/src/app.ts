@@ -17,9 +17,13 @@ import { parsePage } from './pagination.js';
 import { registerEntities, type EntityOptions } from './entities/routes.js';
 import {registerBlocks} from './blocks/routes.js';
 import {registerOrganization,type OrganizationOptions} from './organization/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions) {
-  const app = Fastify({ bodyLimit: 16_384 });
+import {registerOperations,type OperationsOptions} from './operations/routes.js';
+import {correlationId} from './operations/policy.js';
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions) {
+  const app = Fastify({ bodyLimit: 16_384,genReqId:request=>correlationId(request.headers['x-request-id']) });
+  app.addHook('onSend',async(request,reply)=>{reply.header('X-Request-Id',request.id);});
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
+  registerOperations(app,{...options,coreConfigured:!!(options.records&&options.foundation&&options.entities&&options.workflows),coreCapabilities:{records:!!options.records,foundation:!!options.foundation,entities:!!options.entities,workflows:!!options.workflows}});
   registerFoundation(app,options);
   registerTaskLifecycle(app,options);
   registerActions(app,options);

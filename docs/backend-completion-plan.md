@@ -56,12 +56,12 @@ Backend nền hoàn thiện khi mỗi năng lực dưới đây có implementati
 | --- | --- | --- |
 | 1 | Hoàn thành generic task lifecycle; workflow liên kết thuộc đợt3 | Signed HTTP/PG claim/transfer/cancel/deadline, 105 queue +107 history paging, rollback/replay/max1, review fix7daf50a |
 | 2 | Typed query +7 entity block APIs hoàn thành; execution trong workflow thuộc đợt3 | Precision/ACL/pinned schema/mixed type/105 paging/max1; REST↔block receipts; reviewfixf7b977f |
-| 3 | Đang triển khai compound conditions/cancel/transfer | Timers/service authority và typed workflow execution còn riêng, không coi cả đợt đã xong |
-| 4 | Chưa thực hiện | Directory hiện là snapshot, chưa hierarchy |
-| 5 | Chưa thực hiện | Existing outbox chỉ là năng lực đi ra |
+| 3 | Compound conditions/cancel/transfer đã nghiệm thu | Live race/rollback/job fence/currentrecipient; fixes9a5ca8f/ad86575. Timers/service authority và typed workflow execution còn riêng |
+| 4 | Hoàn thành metadata hierarchy/current directory snapshot | Signed role checks +private snapshotmove/disable/rollback/cycle race/105paging/max1; Unicode canonical và diagnosticsreview đã sửa |
+| 5 | Đang triển khai signed ingress/subscriptions | Chưa tính hoàn thành trước atomic receive PG acceptance |
 | 6 | Chưa thực hiện | Workflow bundle chưa phải enterprise module |
 | 7 | Chưa thực hiện | Files/typed entities hiện chưa nối attachment/import |
-| 8 | Một phần: local backup/restore rehearsal đã kiểm | Dump/checksum, restore27 bảng vào DB riêng +sentinel; readiness/retention/diagnostics còn cần làm |
+| 8 | Local recovery/readiness/diagnostics/retention preview đã kiểm | Dump/checksum, restore27 bảng +sentinel; signed diagnostics/currenttenantdryrun. Offsite/automaticretention/HA vẫn ngoài local v1 |
 | 9 | Chưa thực hiện | Nghiệm thu sau toàn bộ các đợt |
 
 Docker Desktop bị lỗi khởi động là vấn đề môi trường riêng; phục hồi socket không phải chứng minh root cause đã được sửa.

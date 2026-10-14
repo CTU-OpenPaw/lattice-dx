@@ -11,6 +11,7 @@ import { workflowDatabase } from './workflows/database.js';
 import { workflowJobDatabase } from './workflows/job-database.js';
 import { entityDatabase } from './entities/database.js';
 import { organizationDatabase } from './organization/database.js';
+import {operationsDatabase} from './operations/database.js';
 export async function connectRecords(connectionString: string) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
@@ -22,7 +23,7 @@ export async function connectRecords(connectionString: string) {
     const workflows=await workflowDatabase(pool,definitionRegistry);
     const entities=await entityDatabase(pool);
     const taskLifecycle=await taskLifecycleDatabase(pool);
-    return {repository,foundation,directory,organization,workflows,taskLifecycle,definitionRegistry,entities,jobs:workflowJobDatabase(pool),close:()=>pool.end()};
+    return {repository,foundation,directory,organization,workflows,taskLifecycle,definitionRegistry,entities,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }
 export async function recordDatabase(pool:Pool):Promise<RecordRepository> {

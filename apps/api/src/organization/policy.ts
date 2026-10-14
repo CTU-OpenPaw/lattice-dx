@@ -66,7 +66,7 @@ export function parseSnapshot(value:unknown):SnapshotInput{
     };
   });
   return {
-    expectedRevision:revision(o.expectedRevision),people:people.sort((a,b)=>a.subject.localeCompare(b.subject))
+    expectedRevision:revision(o.expectedRevision),people:people.sort((a,b)=>a.subject<b.subject?-1:a.subject>b.subject?1:0)
   };
 }
 export function canonicalSnapshot(input:SnapshotInput):string{

@@ -8,6 +8,8 @@
       { "name": "data:read" },
       { "name": "data:write" },
       { "name": "data:share" },
+      { "name": "directory:manage" },
+      { "name": "platform:operate" },
       {
         "name": "records:read"
       },
@@ -147,6 +149,8 @@
       ],
       "realmRoles": [
         "data:design",
+        "directory:manage",
+        "platform:operate",
         "data:read",
         "data:write",
         "records:read",
