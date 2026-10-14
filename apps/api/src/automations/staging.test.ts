@@ -12,3 +12,8 @@ test('staging snapshots bounded matching current rules on caller connection with
  expect(calls[1].sql).toContain('LIMIT 10');expect(calls[1].sql).not.toMatch(/FOR (UPDATE|SHARE)/);
  expect(calls[2].sql).toContain('INSERT INTO entity_automation_deliveries');expect(calls[2].v).toContain(JSON.stringify({id:'rule',enabled:true}));
 });
+test('server derived chain depth eight journals without enqueueing recursive same schema creates',async()=>{
+ const calls:string[]=[];
+ await stageEntityEvent({async query(sql:string){calls.push(sql);if(sql.includes('to_regclass'))return {rows:[{present:true}]};return {rows:[{id:'rule',revision:1,snapshot:{schemaId:'invoice',operations:['entity.create']}}]};}} as unknown as PoolClient,'org',{...event,automationDepth:8});
+ expect(calls).toHaveLength(0);
+});

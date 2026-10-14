@@ -6,6 +6,8 @@ import { scanWithClamd } from './scanner.js';
 import { sendHttpEvent, startOutboxWorker } from './workflows/outbox.js';
 import { startWorkflowTimerWorker } from './workflows/timer-worker.js';
 import { startWaitTimeoutWorker } from './workflows/timeouts.js';
+import {parseAutomationWorkerEnabled,startAutomationWorker} from './automations/worker.js';
+const automationWorkerEnabled=parseAutomationWorkerEnabled(process.env.ENTITY_AUTOMATION_WORKER);
 const database = process.env.DATABASE_URL ? await connectRecords(process.env.DATABASE_URL) : undefined;
 const identity = process.env.OIDC_ISSUER && process.env.OIDC_JWKS_URL ? {
   issuer: process.env.OIDC_ISSUER,
@@ -20,8 +22,9 @@ const eventUrl=process.env.WORKFLOW_EVENT_URL,eventToken=process.env.WORKFLOW_EV
 if(eventUrl&&(!eventToken||!['http:','https:'].includes(new URL(eventUrl).protocol)))throw new Error('Workflow connector URL/token configuration invalid.');
 const outbox=database&&eventUrl&&eventToken?startOutboxWorker(database.jobs,job=>sendHttpEvent(job,eventUrl,eventToken)):undefined;
 const workflowTimers=database && process.env.WORKFLOW_TIMER_WORKER === 'true' ? startWorkflowTimerWorker(database.workflows) : undefined;
+const entityAutomations=database&&automationWorkerEnabled?startAutomationWorker(database.automations):undefined;
 const waitTimeouts=database && process.env.WORKFLOW_WAIT_TIMEOUT_WORKER !== 'false' ? startWaitTimeoutWorker(database.workflows) : undefined;
-if (database) app.addHook('onClose', async () => {await outbox?.stop();await workflowTimers?.stop();await waitTimeouts?.stop();await database.close();});
+if (database) app.addHook('onClose', async () => {await entityAutomations?.stop();await outbox?.stop();await workflowTimers?.stop();await waitTimeouts?.stop();await database.close();});
 await app.listen({ host: process.env.API_HOST ?? '127.0.0.1', port: Number(process.env.API_PORT ?? 4000) });
 console.log(`API listening on port ${process.env.API_PORT ?? 4000}`);
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {

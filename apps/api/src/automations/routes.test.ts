@@ -23,3 +23,11 @@ test('unconfigured automation endpoints report feature unavailable after authent
  const app=createApi({workerUrl:'http://localhost:1',identity:{issuer:'https://id.test',audience:'dx-api',key}});
  try{expect((await app.inject({url:'/v1/entity-automations',headers:await auth()})).statusCode).toBe(503);}finally{await app.close();}
 });
+test('framework body errors retain sanitized client status codes',async()=>{
+ const app=createApi({workerUrl:'http://localhost:1',identity:{issuer:'https://id.test',audience:'dx-api',key},automations:{} as never});
+ try{const req={method:'POST' as const,url:'/v1/entity-automations',headers:{...await auth(),'idempotency-key':'rule-1'}};
+  expect((await app.inject({...req,headers:{...req.headers,'content-type':'application/json'},payload:'{"secret":'})).statusCode).toBe(400);
+  expect((await app.inject({...req,headers:{...req.headers,'content-type':'application/xml'},payload:'<secret/>'})).statusCode).toBe(415);
+  const oversized=await app.inject({...req,payload:{...rule,title:{source:'literal',value:'s'.repeat(20000)}}});expect(oversized.statusCode).toBe(413);expect(oversized.body).not.toContain('ssss');
+ }finally{await app.close();}
+});

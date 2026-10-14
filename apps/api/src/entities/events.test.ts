@@ -2,8 +2,18 @@ import {expect,test} from 'vitest';
 import type {PoolClient} from 'pg';
 import {audit,applyEntityRelationWithClient} from './client.js';
 import {runEntityCommandInTransaction} from './commands.js';
+import {appendEntityEventWithClient} from './events.js';
 const scope={actorId:'alice',organizationId:'org-a'};
 const row={id:'11111111-1111-1111-1111-111111111111',schemaId:'invoice',schemaVersion:2,title:'secret',attributes:{secret:'token'},ownerId:'alice',organizationId:'org-a',version:2,archivedAt:null,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString()};
+test('delivery snapshot preserves database journal timestamp and server recursion depth',async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const db={async query(sql:string,values:unknown[]=[]){calls.push({sql,values});if(sql.startsWith('INSERT INTO enterprise_entity_events'))return {rows:[{occurredAt:'2026-10-01T01:02:03.000Z',automationDepth:7}]};if(sql.includes('to_regclass'))return {rows:[{present:true}]};if(sql.startsWith('SELECT id,revision,snapshot'))return {rows:[{id:'rule',revision:1,snapshot:{}}]};return {rows:[]};}} as unknown as PoolClient;
+ await appendEntityEventWithClient(db,scope,{operation:'entity.create',entityId:row.id,schemaId:row.schemaId,schemaVersion:2,fromVersion:0,toVersion:1});
+ const inserted=calls.find(c=>c.sql.startsWith('INSERT INTO enterprise_entity_events'))!;
+ const delivery=calls.find(c=>c.sql.startsWith('INSERT INTO entity_automation_deliveries'))!;
+ expect(JSON.parse(delivery.values[6] as string)).toMatchObject({id:inserted.values[0],occurredAt:'2026-10-01T01:02:03.000Z',automationDepth:7});
+ expect(inserted.sql).toContain("current_setting('latticedx.automation_depth',true)");
+});
 test('shared audit appends only whitelisted metadata on the caller connection after audit',async()=>{
  const calls:{sql:string;values:unknown[]}[]=[];
  const db={async query(sql:string,values:unknown[]=[]){calls.push({sql,values});return {rows:[]};}} as unknown as PoolClient;

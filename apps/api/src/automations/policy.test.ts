@@ -5,7 +5,7 @@ const actor={subject:'service',organizationId:'org',roles:['workflow:service','w
 const def={id:'invoice-flow',version:1,title:'Flow',startRole:'start',initialState:'new',startFields:{},readerRoles:[],transitions:[{id:'advance',from:'new',to:'done',role:'step',fields:{}}]};
 test('strict automation bodies reject actor snapshots unknown fields and unsafe mappings',()=>{
  expect(parseRule(rule)).toEqual(rule);
- for(const value of [{...rule,roles:['start']},{...rule,input:{x:{source:'event',field:'actorSubject'}}},{...rule,operations:[]},{...rule,definitionVersion:0},{...rule,enabled:'true'}])expect(()=>parseRule(value)).toThrow();
+ for(const value of [{...rule,automationDepth:0},{...rule,roles:['start']},{...rule,input:{x:{source:'event',field:'actorSubject'}}},{...rule,operations:[]},{...rule,definitionVersion:0},{...rule,enabled:'true'}])expect(()=>parseRule(value)).toThrow();
 });
 test('start mappings enforce declared required fields literal types and actual start authority',()=>{
  expect(()=>validateRuleDefinition(parseRule(rule),def,actor)).not.toThrow();

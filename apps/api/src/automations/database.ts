@@ -8,6 +8,7 @@ import {resolveServiceActor} from '../workflows/timer-database.js';
 import {pageResult} from '../pagination.js';
 import {AutomationError,parseRule,requireConfiguration,requireKey,validateRuleDefinition} from './policy.js';
 import type {AutomationRepository,AutomationRule,AutomationRuleInput,AutomationDelivery} from './types.js';
+import {automationRuntime} from './runtime.js';
 export const deliveryColumns='id,event_id AS "eventId",rule_id AS "ruleId",rule_revision AS "ruleRevision",status,version,attempts,last_error_code AS "lastErrorCode",available_at AS "availableAt",created_at AS "createdAt",completed_at AS "completedAt",receipt';
 export function serializeDelivery(row:AutomationDelivery):AutomationDelivery{return {...row,availableAt:new Date(row.availableAt).toISOString(),createdAt:new Date(row.createdAt).toISOString(),completedAt:row.completedAt?new Date(row.completedAt).toISOString():null};}
 function serializeRule(row:{snapshot:AutomationRuleInput;revision:number;createdAt:Date|string;updatedAt:Date|string}):AutomationRule{return {...row.snapshot,revision:row.revision,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString()};}
@@ -50,12 +51,13 @@ export async function automationsDatabase(pool:Pool,registry:DefinitionRegistry,
    return result;
   });
  }
+ const runtime=automationRuntime(pool,registry,workflows);
  return {
   create:(value,actor,key)=>mutate(value,actor,key,false),
   update:(id,value,actor,key)=>{if(id!==value.id)throw new AutomationError('validation_failed',400);return mutate(value,actor,key,true);},
   async list(actor,page){requireConfiguration(actor);const rows=(await pool.query('SELECT snapshot,revision,created_at AS "createdAt",updated_at AS "updatedAt" FROM entity_automation_rules WHERE organization_id=$1 ORDER BY id LIMIT $2 OFFSET $3',[actor.organizationId,page.limit+1,page.offset])).rows;return pageResult(rows.map(serializeRule),page);},
   async deliveries(id,actor,page){requireConfiguration(actor);if(!(await pool.query('SELECT 1 FROM entity_automation_rules WHERE organization_id=$1 AND id=$2',[actor.organizationId,id])).rowCount)throw new AutomationError('rule_unavailable',404);return pageResult((await pool.query(`SELECT ${deliveryColumns} FROM entity_automation_deliveries WHERE organization_id=$1 AND rule_id=$2 ORDER BY created_at,id LIMIT $3 OFFSET $4`,[actor.organizationId,id,page.limit+1,page.offset])).rows.map(serializeDelivery),page);},
-  async retry(){throw new AutomationError('runtime_unavailable',503);},
-  async tickOne(){return undefined;},
+  retry:runtime.retry,
+  tickOne:runtime.tickOne,
  };
 }

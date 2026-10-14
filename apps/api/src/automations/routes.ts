@@ -10,7 +10,12 @@ import type {AutomationRepository} from './types.js';
 export type AutomationOptions={identity?:IdentityConfig;automations?:AutomationRepository};
 export function registerAutomations(app:FastifyInstance,options:AutomationOptions){app.register(async routes=>{
  const actors=new WeakMap<object,WorkflowActor>();
- routes.setErrorHandler((error,_req,reply)=>error instanceof WorkflowError||error instanceof PageError?reply.code(error.statusCode).send({error:error instanceof AutomationError?error.code:'validation_failed'}):reply.code(500).send({error:'internal_error'}));
+ routes.setErrorHandler((error,_req,reply)=>{
+  if(error instanceof WorkflowError||error instanceof PageError)return reply.code(error.statusCode).send({error:error instanceof AutomationError?error.code:'validation_failed'});
+  const framework=error as {statusCode?:number;code?:string};
+  if(framework.code?.startsWith('FST_ERR_CTP_')&&[400,413,415].includes(framework.statusCode??0))return reply.code(framework.statusCode!).send({error:'validation_failed'});
+  return reply.code(500).send({error:'internal_error'});
+ });
  routes.addHook('preHandler',async(req,reply)=>{
   if(!options.identity)return reply.code(503).send({error:'identity_unavailable'});
   let identity;try{identity=await verifyIdentity(req.headers.authorization,options.identity);}catch{return reply.code(401).send({error:'invalid_token'});}

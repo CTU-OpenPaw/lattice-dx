@@ -16,12 +16,13 @@ export async function initializeEntityEvents(client:Pick<PoolClient,'query'>):Pr
   operation text NOT NULL CHECK(operation IN ('entity.create','entity.update','entity.archive','entity.link','entity.unlink','entity.schema.migrate')),
   actor_subject text NOT NULL, occurred_at timestamptz NOT NULL DEFAULT now(), UNIQUE(entity_id,to_version,operation)
  );
+ ALTER TABLE enterprise_entity_events ADD COLUMN IF NOT EXISTS automation_depth integer NOT NULL DEFAULT 0 CHECK(automation_depth BETWEEN 0 AND 8);
  CREATE INDEX IF NOT EXISTS enterprise_entity_events_scope_idx ON enterprise_entity_events(organization_id,entity_id,occurred_at,id)`);
 }
 /** Append metadata only, using the transaction that owns the resource mutation. */
 export async function appendEntityEventWithClient(client:Pick<PoolClient,'query'>,scope:Scope,change:{operation:EntityEventOperation;entityId:string;schemaId:string;schemaVersion:number;fromVersion:number;toVersion:number}):Promise<void> {
  const id=randomUUID();
- await client.query(`INSERT INTO enterprise_entity_events(id,organization_id,entity_id,schema_id,schema_version,from_version,to_version,operation,actor_subject)
-  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING occurred_at AS "occurredAt"`,[id,scope.organizationId,change.entityId,change.schemaId,change.schemaVersion,change.fromVersion,change.toVersion,change.operation,scope.actorId]);
- await stageEntityEvent(client,scope.organizationId,{id,...change,actorSubject:scope.actorId,occurredAt:new Date().toISOString()});
+ const row=(await client.query(`INSERT INTO enterprise_entity_events(id,organization_id,entity_id,schema_id,schema_version,from_version,to_version,operation,actor_subject,automation_depth)
+  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,CASE WHEN current_setting('latticedx.automation_depth',true) ~ '^[0-8]$' THEN current_setting('latticedx.automation_depth',true)::integer ELSE 0 END) RETURNING occurred_at AS "occurredAt",automation_depth AS "automationDepth"`,[id,scope.organizationId,change.entityId,change.schemaId,change.schemaVersion,change.fromVersion,change.toVersion,change.operation,scope.actorId])).rows[0];
+ await stageEntityEvent(client,scope.organizationId,{id,...change,actorSubject:scope.actorId,occurredAt:row?.occurredAt?new Date(row.occurredAt).toISOString():new Date().toISOString(),automationDepth:row?.automationDepth??0});
 }
