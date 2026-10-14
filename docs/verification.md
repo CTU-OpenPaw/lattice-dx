@@ -1,3 +1,16 @@
+# Verification — 2026-10-14
+
+## Independent create reliability — REST/action record và task
+
+- Baseline `pnpm check` đạt183 tests/27 files. Sau production, `pnpm check` đạt **201 tests/28 files**, typecheck và workspace build. Targeted64 tests/4 files đạt. RED helper thiếu module; live RED image cũ tạo hai record ID khác nhau với cùng key qua REST/action. Strict REST parser đã được kiểm tra bằng malformed/unknown/authority fields và Unicode code-point bounds.
+- `pnpm test:create-reliability` qua Keycloak → APISIX → API → PostgreSQL: optional key, cross REST/action replay, fingerprint title/UUID normalized, khác input409, role denial, malformed key/authority400, key khác operation độc lập, request không-key vẫn tạo riêng, năm request cùng key có một ID. Task receipt vẫn pending sau approve trong khi detail trả approved.
+- Private SQL trên nhiều connection chứng minh five-way task creates cùng key chỉ một ID; inputs khác chỉ một thắng, các caller còn lại409. Namespace actor/org/operation tách biệt; replay kiểm tra assignee active và owner record link hiện tại. Lỗi validation không consume key. CHECK constraint fixture cố ý làm receipt INSERT thất bại: entity cũng rollback, bỏ constraint rồi retry tạo được. Pool mới max1 đọc receipt bền vững và chạy concurrent callers không acquire client lồng nhau. Chỉ private schema UUID đã xác minh được drop.
+- Regression actions, foundation/ClamAV, workflow-blocks, workflow-completion và workflow-bundles đã đạt. Một batch completion gặp HTML429; Gateway log xác nhận rate-limit120/phút, không phải lỗi workflow; giữ nguyên limit và rerun sau cửa sổ giới hạn đạt. Docker launcher archive stale runtime sockets theo cơ chế đã có, không reset dữ liệu/volume.
+- Bản đầu chưa prune receipts; request không-key chưa có bảo đảm chống trùng. Keyed repository không được cấu hình trả503 thay vì âm thầm bỏ qua key. Không thêm chống trùng upload/task decision độc lập, không đổi workflow command, plugin UI, adapter, dependencies, license hay upstream; không tick Notion/merge/release.
+- Live create smoke cuối trên image production mới: record `ed058bce-c24e-46ee-bc36-6080b3e0600d`, task `24bebd3d-141a-4b15-aa7c-ab4068b7cce1`, concurrent record `b3d11c8c-84f9-4f0e-bb00-8c923abd0c95`. Receipt failure đã thử cả record và task, rollback counts không đổi rồi retry tạo đúng một entity. Independent production task review đạt spec/quality, không có finding cần xử lý.
+
+Hợp đồng: [Create reliability](create-reliability.md).
+
 # Verification — 2026-10-13
 
 ## Bộ mẫu workflow — xuất, kiểm tra và nhập nguyên bộ
