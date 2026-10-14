@@ -108,7 +108,7 @@ it("receipt failure rolls back schemas, publication, draft, provenance and ledge
 });
 it("normal new starts lock module ownership and deny disabled or inactive pins", async () => {
   const query = vi.fn(async (_sql: string) => ({
-    rows: [{ enabled: false, definitionVersion: 1 }],
+    rows: [{ enabled: false, definitionVersion: 1, isOwner: true }],
     rowCount: 1,
   }));
   await expect(

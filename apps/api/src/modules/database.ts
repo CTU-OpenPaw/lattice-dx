@@ -49,22 +49,36 @@ export async function assertModuleStartEligible(
 ): Promise<ModuleBindingPlan | undefined> {
   const rows = (
     await client.query(
-      `SELECT m.enabled,m.id,m.version,m.manifest,w.definition_version AS "definitionVersion" FROM enterprise_module_versions m
- JOIN enterprise_module_workflows w ON w.organization_id=m.organization_id AND w.module_id=m.id AND w.module_version=m.version
- WHERE w.organization_id=$1 AND w.definition_id=$2 FOR SHARE OF m`,
+      `WITH ownership AS (
+ SELECT owner.id,owner.version,owner.manifest,w.definition_version
+ FROM enterprise_module_versions owner JOIN enterprise_module_workflows w
+ ON w.organization_id=owner.organization_id AND w.module_id=owner.id AND w.module_version=owner.version
+ WHERE w.organization_id=$1 AND w.definition_id=$2
+ ) SELECT m.enabled,m.id,m.version,m.manifest,o.definition_version AS "definitionVersion",
+ (m.id=o.id AND m.version=o.version) AS "isOwner"
+ FROM enterprise_module_versions m CROSS JOIN ownership o
+ WHERE m.organization_id=$1 AND ((m.id=o.id AND m.version=o.version) OR EXISTS (
+ SELECT 1 FROM jsonb_array_elements(o.manifest->'dependencies') dep
+ WHERE dep->>'id'=m.id AND dep->>'version'=m.version))
+ ORDER BY m.id COLLATE "C",m.version COLLATE "C" FOR SHARE OF m`,
       [org, id],
     )
   ).rows;
-  if (rows.some((row) => !row.enabled || row.definitionVersion !== version))
+  const row = rows.find(candidate => candidate.isOwner);
+  if (row && (!row.enabled || row.definitionVersion !== version))
     throw new WorkflowError(
       409,
       "Module workflow is disabled or publication is outside the active mapping.",
     );
-  const row = rows[0];
   const binding = row?.manifest?.bindings?.find(
     (candidate: {definitionId: string}) => candidate.definitionId === id,
   );
   if (!binding) return;
+  if (!row.manifest.schemas.some((schema: {id: string}) => schema.id === binding.schemaId) &&
+      !rows.some(dependency => dependency.enabled &&
+        row.manifest.dependencies.some((dep: {id: string; version: string}) => dep.id === dependency.id && dep.version === dependency.version) &&
+        dependency.manifest.schemas.some((schema: {id: string}) => schema.id === binding.schemaId)))
+    throw new WorkflowError(409, "Binding schema must belong to an exact enabled dependency.");
   return {
     schemaId: binding.schemaId,
     schemaVersion: binding.schemaVersion,
@@ -485,7 +499,7 @@ export async function modulesDatabase(
           // Acquire owner and exact dependency row locks in deterministic order.
           const owner = (await client.query("SELECT manifest FROM enterprise_module_versions WHERE organization_id=$1 AND id=$2 AND version=$3",[actor.organizationId,id,version])).rows[0];
           if (!owner) throw new WorkflowError(404,"Module version not found.");
-          const locks = [{id,version},...owner.manifest.dependencies].sort((a,b)=>a.id.localeCompare(b.id)||a.version.localeCompare(b.version));
+          const locks = [{id,version},...owner.manifest.dependencies].sort((a,b)=>a.id<b.id?-1:a.id>b.id?1:a.version<b.version?-1:a.version>b.version?1:0);
           for(const lock of locks)await client.query("SELECT id FROM enterprise_module_versions WHERE organization_id=$1 AND id=$2 AND version=$3 FOR UPDATE",[actor.organizationId,lock.id,lock.version]);
           const module = await detail(
             client,
@@ -576,7 +590,7 @@ export async function modulesDatabase(
       if (!parseCreateKey(key))
         throw new WorkflowError(400, "Idempotency-Key required.");
       return transaction(actor, async client => {
-        const module = await detail(client, actor.organizationId, id, version, "FOR SHARE");
+        const module = await detail(client, actor.organizationId, id, version);
         const binding = module.bindings?.find(candidate => candidate.id === bindingId);
         if (!binding) throw new WorkflowError(404, "Module binding not found.");
         const mapping = module.workflows.find(workflow => workflow.definitionId === binding.definitionId);
@@ -608,7 +622,7 @@ export async function modulesDatabase(
           actor.organizationId,
           id,
           version,
-          "FOR SHARE",
+          "",
         );
         const mapping = module.workflows.find(
           (w) => w.definitionId === input.definitionId,
