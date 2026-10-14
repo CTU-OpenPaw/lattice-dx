@@ -6,8 +6,8 @@ Quyết định 14/10/2026: **engine quản lý dữ liệu nghiệp vụ dùng 
 
 | Nhóm | Nền hiện có | Phần phải xây thêm |
 | --- | --- | --- |
-| Dữ liệu nghiệp vụ | Records nền, task/file links; increment dữ liệu đã thêm schema có phiên bản, typed entity CRUD/quan hệ/archive/audit | Chia sẻ quyền, block dữ liệu trong workflow, query theo thuộc tính, bulkimport/migration cần đợt tiếp |
-| Tổ chức và quyền | Keycloak, JWT tenant/role, owner/exact-assignee guards, directory snapshot | Người phụ trách, membership lifecycle, policy theo phạm vi, chia sẻ/thu hồi rõ ràng |
+| Dữ liệu nghiệp vụ | Records nền, task/file links; schema có phiên bản, typed entity CRUD/quan hệ/archive/audit; chia sẻ read/edit cho người/phòng ban | Block dữ liệu trong workflow, query theo thuộc tính, bulkimport/migration cần đợt tiếp |
+| Tổ chức và quyền | Keycloak, JWT tenant/role, owner/exact-assignee guards, directory snapshot; entity grants và thu hồi với current membership | Người phụ trách, membership lifecycle, phân cấp tổ chức và delegation nghiệp vụ |
 | Công việc và phê duyệt | Giao cá nhân/phòng ban, quyết định, workflow waits/deadline | Claim, chuyển giao, hủy, hạn xử lý, quyền người nhận cũ được thu hồi |
 | Action/block | Create record/task, connector dispatch, input binding và execution evidence | Hợp đồng đăng ký/version/output chung; read/query/update/link/archive và lifecycle blocks |
 | Quy trình | Draft/publish, pinned version, state/role guards, audit, waits/callback, eq/gt/exists | Timer/compound conditions/cancel, service step chạy dưới authority rõ ràng; parallel/join cần thiết kế riêng |

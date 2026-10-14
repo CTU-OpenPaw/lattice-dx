@@ -29,6 +29,8 @@ Mở rộng engine bằng cấu hình quy trình: [hợp đồng Workflow Studio
 
 Engine quản lý dữ liệu nghiệp vụ dùng chung theo [backend capabilities](docs/backend-capabilities.md). [Enterprise data](docs/enterprise-data.md) thêm schema typed có phiên bản, CRUD/quan hệ/archive/audit và published schema API để Studio dựng biểu mẫu; smoke `pnpm test:enterprise-data`. Đây là increment dữ liệu, các nhóm quyền/lifecycle/block/module mở rộng trong roadmap chưa được coi là đã triển khai.
 
+[Entity sharing](docs/entity-sharing.md) bổ sung quyền read/edit cho người hoặc phòng ban cùng đơn vị, thu hồi quyền và lịch sử rút gọn cho người nhận. Thử bằng `pnpm test:entity-sharing` sau khi đồng bộ local identity/directory và rebuild API. Đây là phần chia sẻ của nhóm quyền; phân cấp tổ chức và lifecycle task vẫn thuộc các đợt tiếp theo.
+
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 
 Cấu hình này dùng mật khẩu PUBLIC cho môi trường local, được ghi rõ trong hướng dẫn. Không dùng cấu hình này để triển khai Internet. Xem [nguồn và giấy phép](docs/third-party.md).

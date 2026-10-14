@@ -1,5 +1,16 @@
 # Verification — 2026-10-14
 
+## Entity sharing — người và phòng ban
+
+- `pnpm check` đạt **228 tests / 33 files**, typecheck và build. Trước rebuild, smoke mới gặp 404 ở route shares trên image cũ; sau rebuild API và restart Gateway, signed HTTP scenario đạt.
+- `pnpm test:entity-sharing`: owner cấp read rồi edit, người nhận sửa được; peer không được đọc, người nhận không được archive hoặc quản lý grant. Thu hồi chặn cả request mới và replay mutation đã chấp nhận. Shared history không có input/result; owner vẫn xem đủ.
+- Private PostgreSQL: department membership hiện tại, chuyển phòng/tắt account, revoke người đã tắt, no-op grant, concurrent revoke/update chỉ một thành công và phía thua trả 404/409. Transaction gọi production checkAccess giữ directory row; connection khác disable bị lock timeout. Forced receipt failure rollback grant/version/audit, cùng key retry thành công sau bỏ constraint.
+- Shared relations cần source edit/target read; target chưa chia sẻ bị chặn, không lan truyền quyền. Target revoke chặn replay, mixed visible/hidden targets lọc trước LIMIT, unlink target đã archive chạy được. Shared entity list 105 dòng trả 100+5 không trùng; pool mới max1 giữ quyền/receipt và revoke.
+- Regressions `test:enterprise-data`, `test:create-reliability`, `test:workflow-completion` đều đạt. Chỉ schema fixture có UUID đã kiểm tra được drop; REST fixture giữ lại, không xóa volume. Roles local bổ sung có chọn lọc, không đổi credentials.
+- Không sửa NocoBase plugin/UI, adapter của Nhi, upstream license hay Notion. Directory vẫn là snapshot phải đồng bộ; chưa có field-level ACL, owner transfer hoặc org-wide admin bypass.
+
+Hợp đồng: [Entity sharing](entity-sharing.md).
+
 ## Enterprise typed data — nền dữ liệu của engine
 
 - Quyết định của Duy: engine giữ dữ liệu dùng chung, NocoBase là Studio/UI. Phạm vi đích gồm tám nhóm trong backend-capabilities; increment này triển khai nhóm dữ liệu, chưa hoàn thành các nhóm2–8.
