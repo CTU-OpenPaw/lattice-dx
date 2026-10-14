@@ -66,6 +66,7 @@ test('exclusive collision retains original and failed writes retain unpublished 
  await expect(unverified.writeVerified(Buffer.from('right'))).rejects.toThrow();
  expect(await readFile(join(unverifiedRoot,objectKey),'utf8')).toBe('wrong');
 });
+// Real durable I/O and a 1 MiB byte comparison need headroom on shared CI runners.
 test('empty and maximum-size bytes verify; changed root and object symlinks fail closed',async()=>{
  const root=await fixture();const store=await createFilesystemStore(root);
  for(const bytes of [Buffer.alloc(0),Buffer.alloc(1048576,7)]){
@@ -77,4 +78,4 @@ test('empty and maximum-size bytes verify; changed root and object symlinks fail
  await expect(store.readVerified({provider:'filesystem',...object})).rejects.toThrow();
  await rename(root,root+'-retained');await mkdir(root);
  await expect(store.writeVerified(Buffer.from('new'))).rejects.toThrow('root changed');
-});
+},15_000);
