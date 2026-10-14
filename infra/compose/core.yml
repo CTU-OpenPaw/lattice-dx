@@ -50,6 +50,7 @@ services:
       CLAMD_HOST: clamav
       WORKFLOW_EVENT_URL: ${WORKFLOW_EVENT_URL:-}
       WORKFLOW_EVENT_TOKEN: ${WORKFLOW_EVENT_TOKEN:-}
+      ENTITY_AUTOMATION_WORKER: ${ENTITY_AUTOMATION_WORKER:-false}
     depends_on:
       postgres:
         condition: service_healthy

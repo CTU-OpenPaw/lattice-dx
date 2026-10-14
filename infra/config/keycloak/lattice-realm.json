@@ -8,6 +8,7 @@
       { "name": "data:read" },
       { "name": "data:write" },
       { "name": "data:share" },
+      { "name": "data:automate" },
       { "name": "directory:manage" },
       { "name": "platform:operate" },
       { "name": "workflow:event:receive" },
@@ -168,7 +169,8 @@
         "logistics:sales",
         "workflow:design",
         "workflow:integrate",
-        "data:share"
+        "data:share",
+        "data:automate"
       ],
       "attributes": {
         "organization_id": [

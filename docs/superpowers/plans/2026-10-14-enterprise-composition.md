@@ -145,7 +145,7 @@ Parent scripts/docs/APIindex/verification/masterledger, no teammate UI/adapters 
 | Task | Status | Evidence |
 | --- | --- | --- |
 | 1 | Accepted locally | c351c22; signed HTTP/private PG rollback/5-way dedupe/current ACL replay/106 visible run paging/pin migration/max1. Independent16tests/noP1/P2 |
-| 2–3 | Journal implementation in progress | Metadata journal first; automation runtime follows journal review |
+| 2–3 | Journal accepted; automation runtime implementing | a27148b/bfe2b6b, six operations/noop/replay/same-txn rollback/current metadata/max1. Archived shared denial RED→GREEN; review closed |
 | 4–5 | Planned | Pure expressions +transient private projections |
 | 6 | Planned | Declarative business bindings |
 | 7–8 | Planned | Exact scoped aggregates +revocable snapshots |
