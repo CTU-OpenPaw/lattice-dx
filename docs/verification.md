@@ -1,5 +1,15 @@
 # Verification — 2026-10-14
 
+## Composition/runtime acceptance — 65d0f48 / fa46d81
+
+- `pnpm check` passed **519 tests /94 files**, workspace typecheck and build on f0a8204 source. No new dependencies; lockfile unchanged. A subsequent broad review identified filesystem directory-entry durability; final fix/verification is recorded separately below when accepted.
+- All new acceptance commands passed after rebuilding API: entity context, event journal, durable automations, private blocks, module bindings, aggregates, frozen snapshots, filesystem provider/content, full-text search and runtime config. Their assertions cover actual PostgreSQL transactions/current authority, concurrent replay/rollback, exact decimals, private evidence and poolmax1.
+- `test:enterprise-composition` passed the complete isolated chain: module → entity → committed event → current service delivery → bound workflow → private calculation/update/assert → search/aggregate/report. A wider workflow reader cannot see projected values; false assertion rolls back the data and run.
+- `test:runtime-operations` passed signed Gateway metrics/role/query checks and generated UUID correlation. Private PostgreSQL proved per-tenant queue counts/zeros, real3s lock timeout, rollback and reuse with max1. Gateway unsigned401 can return HTML; the smoke now checks status before decoding content type.
+- Extended `test:runtime-config` passed actual src/index.ts startup twice in an isolated schema with automation/timer/wait-timeout workers explicitly enabled. All three emitted idle telemetry; repeated SIGTERM exited0; restart reset process timestamps/counters and resumed schedules. Five-worker active-work/single-flight/drain/failure paths are covered by unit tests; this process fixture does not exercise real connector delivery or all-five busy shutdown.
+- Paired backup passed with real ClamAV-clean offloaded bytes, inventory derived from the restored dump, concurrent post-dump offload excluded, isolated object restore and central application download (`downloadVerified:true`). Missing/corrupt/omitted object references were denied; original artifacts retained. Recovery task review cleared after65d0f48 commands/manual-procedure docs.
+- Affected regressions passed: typed workflow blocks, portable bundles, entity data tools, actual clean record-file downloads, organization/operations, enterprise modules and core signed identity chain. UI/adapters, remote storage, HA/offsite and Windows reboot remain outside this evidence.
+
 ## Module and aggregate checkpoint — ca0a0bf
 
 - Full `pnpm check`: **460 tests /78 files**, typechecks and build passed on completed aggregate source. A previous overlapping run caught an unfinished TDD file while implementation was active; the completed-source rerun resolves that build failure.
