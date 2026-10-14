@@ -87,7 +87,7 @@ test('create receipt replay checks current entity scope and retains archived pin
     if(sql.includes('FROM enterprise_entities WHERE')) {
       scopedReads.push(values);
       expect(sql).toContain('FOR UPDATE');
-      return {rows:current.id===values[0]&&current.ownerId===values[1]&&current.organizationId===values[2]?[current]:[]};
+      return {rows:current.id===values[0]&&current.organizationId===values[1]?[current]:[]};
     }
     return {rows:[]};
   },release(){}} as unknown as PoolClient;

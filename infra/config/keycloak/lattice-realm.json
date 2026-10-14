@@ -7,6 +7,7 @@
       { "name": "data:design" },
       { "name": "data:read" },
       { "name": "data:write" },
+      { "name": "data:share" },
       {
         "name": "records:read"
       },
@@ -160,7 +161,8 @@
         "directory:read",
         "logistics:sales",
         "workflow:design",
-        "workflow:integrate"
+        "workflow:integrate",
+        "data:share"
       ],
       "attributes": {
         "organization_id": [
@@ -238,7 +240,9 @@
         "logistics:warehouse",
         "tasks:read",
         "tasks:decide",
-        "records:read"
+        "records:read",
+        "data:read",
+        "data:write"
       ],
       "attributes": {
         "organization_id": [
@@ -406,7 +410,9 @@
         "tasks:read",
         "tasks:assign",
         "files:read",
-        "files:write"
+        "files:write",
+        "data:read",
+        "data:write"
       ],
       "email": "sales2@local.invalid"
     },

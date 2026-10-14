@@ -11,8 +11,15 @@ export type EntityCreate = {schemaId:string;title:string;attributes:Attributes};
 export type EntityUpdate = {expectedVersion:number;title:string;attributes:Attributes};
 export type RelationInput = {name:string;targetId:string;expectedVersion:number};
 export type Relation = {name:string;targetId:string;createdAt:string};
-export type EntityAudit = {id:string;entityId:string;actorId:string;operation:string;fromVersion:number;toVersion:number;occurredAt:string;input:unknown;result:Entity};
+export type EntityAudit = {id:string;entityId:string;actorId:string;operation:string;fromVersion:number;toVersion:number;occurredAt:string;input?:unknown;result?:Entity};
+export type Principal = {kind:'person'|'department';id:string};
+export type Share = {principal:Principal;permission:'read'|'edit';createdAt:string;updatedAt:string};
+export type ShareInput = {expectedVersion:number;principal:Principal;permission:'read'|'edit'};
+export type RevokeShareInput = {expectedVersion:number;kind:Principal['kind'];principalId:string};
 export interface EntityRepository {
+  share?(scope:Scope,id:string,input:ShareInput,key:string):Promise<Entity>;
+  revokeShare?(scope:Scope,id:string,input:RevokeShareInput,key:string):Promise<Entity>;
+  shares?(scope:Scope,id:string,page:PageQuery):Promise<Page<Share>>;
   createSchema(scope:Scope, definition:SchemaDefinition):Promise<SchemaDraft>;
   listSchemas(scope:Scope, page:PageQuery):Promise<Page<SchemaDraft>>;
   getSchema(scope:Scope, id:string):Promise<SchemaDraft|undefined>;

@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyRequest, HTTPMethods } from 'fastify';
 import { CreateCommandError, parseCreateKey } from '../create-command.js';
 import { verifyIdentity, type IdentityConfig } from '../identity.js';
 import { PageError, parsePage } from '../pagination.js';
-import { bad, EntityError, exact, name, object, parseSchema, slug, title, uuid, version } from './policy.js';
+import { bad, EntityError, exact, name, object, parseSchema, parseShare, principalKind, principalId, slug, title, uuid, version } from './policy.js';
 import type { Attributes, EntityRepository, Scope } from './types.js';
 export type EntityOptions = {identity?:IdentityConfig;entities?:EntityRepository};
 function commandKey(request:FastifyRequest):string {
@@ -86,5 +86,21 @@ export function registerEntities(app:FastifyInstance,options:EntityOptions) {
     return repository.unlink(scope,uuid(path.id),{name:name(path.name),targetId:uuid(path.targetId),expectedVersion:version(body.expectedVersion)},commandKey(request));
   });
   route('GET','/v1/entities/:id/relations','data:read',async(request,repository,scope)=>repository.relations(scope,uuid(params(request).id),page(request)));
+  route('POST','/v1/entities/:id/shares','data:share',async(request,repository,scope)=>{
+    const id=uuid(params(request).id), input=parseShare(request.body), key=commandKey(request);
+    if(!repository.share) throw new EntityError(503,'Entity sharing is unavailable.');
+    return repository.share(scope,id,input,key);
+  });
+  route('DELETE','/v1/entities/:id/shares/:kind/:principalId','data:share',async(request,repository,scope)=>{
+    const body=exact(request.body,['expectedVersion']), path=params(request);
+    const id=uuid(path.id), input={expectedVersion:version(body.expectedVersion),kind:principalKind(path.kind),principalId:principalId(path.principalId)},key=commandKey(request);
+    if(!repository.revokeShare) throw new EntityError(503,'Entity sharing is unavailable.');
+    return repository.revokeShare(scope,id,input,key);
+  });
+  route('GET','/v1/entities/:id/shares','data:share',async(request,repository,scope)=>{
+    const id=uuid(params(request).id), query=page(request);
+    if(!repository.shares) throw new EntityError(503,'Entity sharing is unavailable.');
+    return repository.shares(scope,id,query);
+  });
   route('GET','/v1/entities/:id/history','data:read',async(request,repository,scope)=>repository.history(scope,uuid(params(request).id),page(request)));
 }
