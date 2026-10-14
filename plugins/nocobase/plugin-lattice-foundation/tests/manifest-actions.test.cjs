@@ -32,7 +32,9 @@ function setup(manifest = purchasing, blockId = 'create-request', run = async ()
 test('save calls authenticated bridge catalog/run without arbitrary scope fields', async () => {
   const {controller, calls} = setup();
   assert.deepEqual(await controller.submit({title: '  Mua máy tính  '}), {id: 'record-1'});
-  assert.deepEqual(calls[1].data, {actionId: 'records.create', version: 1, input: {title: 'Mua máy tính'}});
+  const {key,...payload}=calls[1].data;
+  assert.match(key,/^ui-[0-9a-f-]{36}$/);
+  assert.deepEqual(payload, {actionId: 'records.create', version: 1, input: {title: 'Mua máy tính'}});
   await assert.rejects(controller.submit({title: 'x', organizationId: 'other'}), {code: 'VALIDATION'});
   assert.equal(calls.length, 2);
 });
@@ -53,6 +55,22 @@ test('401/403/timeout errors propagate with no automatic retry', async () => {
     assert.equal(calls.length, 2);
     assert.equal(controller.pending, false);
   }
+});
+test('uncertain catalog writes retry the same key/body and new submissions get a new key', async () => {
+  let attempt=0;
+  const {controller,calls}=setup(purchasing,'create-request',async()=>{
+    if(++attempt===1)throw {response:{status:502}};
+    return {data:{actionId:'records.create',version:1,status:'succeeded',result:{id:'record-1'}}};
+  });
+  await assert.rejects(controller.submit({title:'Original'}));
+  assert.equal(controller.uncertain,true);
+  await assert.rejects(controller.submit({title:'Changed'}),{code:'BUSY'});
+  assert.equal((await controller.retry()).id,'record-1');
+  const writes=calls.filter(call=>call.url==='dxActions:run');
+  assert.deepEqual(writes[0].data,writes[1].data);
+  assert.equal(controller.uncertain,false);
+  await controller.submit({title:'New request'});
+  assert.notEqual(calls.at(-1).data.key,writes[0].data.key);
 });
 test('double click is blocked, unavailable transition never issues a write', async () => {
   let finish;

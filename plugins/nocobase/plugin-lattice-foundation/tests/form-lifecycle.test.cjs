@@ -25,9 +25,10 @@ test('form ignores delayed write results and callbacks after disconnect',async()
   resolve({data:{status:'succeeded',actionId:'records.create',version:1,result:{id:'late-record'}}});await submission;
   assert.equal(env.slots[2].value,null);assert.equal(env.slots[3].value,false);assert.equal(saved,0);
 });
-test('text length uses the same UTF-16 limit as the API, including emoji',async()=>{
-  let requests=0;const controller=createFormActions({manifest,blockId:'create-request',apiClient:{request:async()=>{requests++;return {}}}});
-  await assert.rejects(controller.submit({title:'😀'.repeat(101)}),{code:'VALIDATION'});assert.equal(requests,0);
+test('text length uses the API Unicode code-point limit, including emoji',async()=>{
+  let requests=0;const controller=createFormActions({manifest,blockId:'create-request',apiClient:{request:async options=>{requests++;return options.url==='dxActions:catalog'?{data:{items:[{id:'records.create',version:1}]}}:{data:{actionId:'records.create',version:1,status:'succeeded',result:{id:'record-1'}}}}}});
+  await assert.rejects(controller.submit({title:'😀'.repeat(201)}),{code:'VALIDATION'});assert.equal(requests,0);
+  assert.equal((await controller.submit({title:'😀'.repeat(200)})).id,'record-1');assert.equal(requests,2);
 });
 test('native configured block clears its connection at declared expiry',async t=>{
   t.mock.timers.enable({apis:['Date','setTimeout','setInterval'],now:Date.now()});

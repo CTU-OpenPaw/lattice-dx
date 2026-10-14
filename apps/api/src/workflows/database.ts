@@ -2,20 +2,18 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { isRecordId, type CreateWorkflow, type TransitionCommand, type WorkflowActor, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowEvent } from '@dx/contracts';
-import { getDefinition, workflowDefinitions } from '../../../../solutions/workflows/definitions.js';
-import { authorizeTransition, availableTransitions, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
+import { sourceRegistry,type DefinitionRegistry } from './registry.js';
+import { authorizeTransition, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
+import { executeBlocks } from './block-database.js';
 import { createWorkflowTables } from './schema.js';
+import { waitDatabase } from './waits-database.js';
+import { numericPattern } from './completion-policy.js';
 import type { WorkflowRepository } from './types.js';
 import { pageResult, type PageQuery } from '../pagination.js';
 
 const runColumns='id,id AS "recordId",definition_id AS "definitionId",definition_version AS "definitionVersion",title,owner_id AS "ownerId",organization_id AS "organizationId",state,version,data,created_at AS "createdAt",updated_at AS "updatedAt"';
 function serializeRun(row:WorkflowRun):WorkflowRun {
   return {...row,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString()};
-}
-function definition(run:WorkflowRun):WorkflowDefinition {
-  const def=getDefinition(run.definitionId,run.definitionVersion);
-  if(!def) throw new WorkflowError(503,'Phiên bản quy trình không khả dụng.');
-  return def;
 }
 function fingerprint(value:CreateWorkflow|TransitionCommand):string {
   const sortedInput=Object.fromEntries(Object.entries(value.input).sort(([a],[b])=>a.localeCompare(b)));
@@ -27,7 +25,7 @@ async function transaction<T>(pool:Pool,fn:(client:PoolClient)=>Promise<T>):Prom
   catch(error){await client.query('ROLLBACK');throw error;}
   finally{client.release();}
 }
-async function validateReferences(client:PoolClient,fields:Record<string,WorkflowField>,input:Record<string,string>,actor:WorkflowActor) {
+async function validateReferences(client:PoolClient,fields:Record<string,WorkflowField>,input:Record<string,string>,actor:WorkflowActor,definition:(run:WorkflowRun)=>Promise<WorkflowDefinition>) {
   for(const [name,kind] of Object.entries(fields)) {
     if(input[name]===undefined)continue;
     let found=true;
@@ -36,7 +34,7 @@ async function validateReferences(client:PoolClient,fields:Record<string,Workflo
     if(kind==='file') {
       const file=(await client.query('SELECT owner_id AS "ownerId",organization_id AS "organizationId",scan_status AS "scanStatus" FROM foundation_files WHERE id=$1 AND organization_id=$2',[input[name],actor.organizationId])).rows[0];
       const linkedRuns=(await client.query(`SELECT ${runColumns.split(',').map(c=>'r.'+c).join(',')} FROM workflow_runs r JOIN workflow_files wf ON wf.run_id=r.id WHERE wf.file_id=$1 AND r.organization_id=$2`,[input[name],actor.organizationId])).rows;
-      found=!!file&&canUseEvidence(file,actor,linkedRuns.map(run=>({definition:definition(run),run})));
+      found=!!file&&canUseEvidence(file,actor,await Promise.all(linkedRuns.map(async run=>({definition:await definition(run),run}))));
     }
     if(!found) throw new WorkflowError(400,`Tham chiếu ${name} không khả dụng hoặc chưa được phép.`);
   }
@@ -47,12 +45,14 @@ async function attachFiles(client:PoolClient,runId:string,fields:Record<string,W
   }
 }
 
-export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
+export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'|'list'>=sourceRegistry):Promise<WorkflowRepository> {
   await createWorkflowTables(pool);
+  async function definition(run:WorkflowRun,client?:PoolClient):Promise<WorkflowDefinition>{const def=await registry.get(run.organizationId,run.definitionId,run.definitionVersion,client);if(!def)throw new WorkflowError(503,'Phiên bản quy trình không khả dụng.');return def;}
   async function taskIds(runs:WorkflowRun[],client:Pool|PoolClient=pool) {
     if(!runs.length)return runs;
     const links=(await client.query('SELECT run_id,task_id FROM workflow_task_links WHERE run_id=ANY($1::uuid[])',[runs.map(r=>r.id)])).rows;
-    return runs.map(r=>({...r,...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
+    const waits=(await client.query("SELECT run_id FROM workflow_waits WHERE run_id=ANY($1::uuid[]) AND status='pending'",[runs.map(r=>r.id)])).rows;
+    return runs.map(r=>({...r,waiting:waits.some(w=>w.run_id===r.id),...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
   }
   async function checkAssigned(client:PoolClient,def:WorkflowDefinition,data:Record<string,string>,actor:WorkflowActor) {
     if(!def.assignedReader)return;
@@ -61,6 +61,7 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
     if(!found.rowCount)throw new WorkflowError(400,'Người được giao không tồn tại, đã tắt hoặc không có vai trò phù hợp trong đơn vị.');
   }
   async function listPage(actor:WorkflowActor,inbox:boolean,query:PageQuery&{state?:string;definitionId?:string}) {
+    const workflowDefinitions=await registry.list(actor.organizationId);
     const values:unknown[]=[actor.organizationId,actor.subject];
     const bind=(value:unknown)=>{values.push(value);return '$'+values.length;};
     const roleReaders=workflowDefinitions.filter(d=>d.readerRoles.some(r=>actor.roles.includes(r))).map(d=>`${d.id}:${d.version}`);
@@ -69,7 +70,18 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
     const where=['organization_id=$1',`(${readers.join(' OR ')})`];
     if(inbox){
       const choices:string[]=[];
-      for(const d of workflowDefinitions)for(const t of d.transitions)if(actor.roles.includes(t.role))choices.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''})`);
+      for(const d of workflowDefinitions)for(const t of d.transitions)if(actor.roles.includes(t.role)) {
+        let guard='';
+        if(t.condition) {
+          const field=bind(t.condition.field), raw=`data->${field}`, text=`data->>${field}`;
+          const typed=`jsonb_typeof(${raw})='string'`;
+          if(t.condition.operator==='exists') guard=` AND (${typed} AND length(${text})>0)`;
+          else if(t.condition.operator==='eq') guard=` AND (${typed} AND ${text}=${bind(t.condition.value)})`;
+          else guard=` AND (CASE WHEN ${typed} AND length(${text})<=20 AND ${text} ~ ${bind(numericPattern)} AND ${text} !~ '[^0-9.-]' THEN (${text})::double precision>${bind(t.condition.value)}::double precision ELSE false END)`;
+        }
+        choices.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''}${guard})`);
+      }
+      where.push("NOT EXISTS(SELECT 1 FROM workflow_waits w WHERE w.run_id=workflow_runs.id AND w.status='pending')");
       where.push(choices.length?`(${choices.join(' OR ')})`:'false');
     }
     if(query.definitionId)where.push(`definition_id=${bind(query.definitionId)}`);
@@ -82,23 +94,23 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
     const result=await pool.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2`,[id,actor.organizationId]);
     if(!result.rows[0]) throw new WorkflowError(404,'Không tìm thấy quy trình.');
     const run=serializeRun(result.rows[0]);
-    if(!canReadRun(definition(run),run,actor)) throw new WorkflowError(404,'Không tìm thấy quy trình.');
+    if(!canReadRun(await definition(run),run,actor)) throw new WorkflowError(404,'Không tìm thấy quy trình.');
     return (await taskIds([run]))[0];
   }
   return {
-    get,listPage,
+    get,listPage,...waitDatabase(pool,get),
     async create(value,actor,key) {
-      const def=getDefinition(value.definitionId);
-      if(!def) throw new WorkflowError(400,'Quy trình không tồn tại.');
-      if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole)) throw new WorkflowError(403,'Không có quyền tạo quy trình.');
-      const input=validateInput(def.startFields,value.input,def.optionalStartFields),hash=fingerprint({...value,input});
       return transaction(pool,async client=>{
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify([actor.organizationId,actor.subject,key])]);
         const replay=(await client.query('SELECT fingerprint,result FROM workflow_starts WHERE organization_id=$1 AND actor_id=$2 AND key=$3',[actor.organizationId,actor.subject,key])).rows[0];
+        const def=replay?await definition(replay.result,client):await registry.get(actor.organizationId,value.definitionId,undefined,client);
+        if(!def)throw new WorkflowError(400,'Phiên bản quy trình không khả dụng.');
+        if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
+        const input=validateInput(def.startFields,value.input,def.optionalStartFields),hash=fingerprint({...value,input});
         if(replay){if(replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
         const referenceFields={...def.startFields,...def.optionalStartFields};
         if(def.assignedReader)delete referenceFields[def.assignedReader.field];
-        await validateReferences(client,referenceFields,input,actor);
+        await validateReferences(client,referenceFields,input,actor,run=>definition(run,client));
         await checkAssigned(client,def,input,actor);
         const id=randomUUID();
         await client.query('INSERT INTO records(id,title,owner_id,organization_id) VALUES($1,$2,$3,$4)',[id,value.title,actor.subject,actor.organizationId]);
@@ -114,7 +126,7 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
       return transaction(pool,async client=>{
         const row=(await client.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0];
         if(!row)throw new WorkflowError(404,'Không tìm thấy quy trình.');
-        const run=serializeRun(row),def=definition(run);
+        const run=serializeRun(row),def=await definition(run,client);
         if(!canReadRun(def,run,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
         const transition=def.transitions.find(t=>t.id===value.action);
         if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
@@ -122,8 +134,9 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
         const input=validateInput(transition.fields,value.input),hash=fingerprint({...value,input});
         const replay=(await client.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
         if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
+        run.waiting=!!(await client.query("SELECT 1 FROM workflow_waits WHERE run_id=$1 AND status='pending'",[id])).rowCount;
         planTransition(def,run,actor,{...value,input});
-        await validateReferences(client,transition.fields,input,actor);
+        await validateReferences(client,transition.fields,input,actor,run=>definition(run,client));
         if(transition.task)await checkAssigned(client,def,run.data,actor);
         const next=serializeRun((await client.query(`UPDATE workflow_runs SET state=$1,version=version+1,data=data||$2::jsonb,updated_at=now() WHERE id=$3 RETURNING ${runColumns}`,[transition.to,JSON.stringify(input),id])).rows[0]);
         const eventId=randomUUID();
@@ -145,6 +158,7 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
           const event:WorkflowEvent={eventId,eventType:transition.eventType,organizationId:actor.organizationId,runId:id,recordId:id,definitionId:def.id,version:next.version,occurredAt:next.updatedAt,data:next.data};
           await client.query('INSERT INTO workflow_jobs(id,run_id,organization_id,payload) VALUES($1,$2,$3,$4)',[eventId,id,actor.organizationId,JSON.stringify(event)]);
         }
+        await executeBlocks(client,transition.steps ?? [],next,input,actor,transition.wait);
         await client.query('INSERT INTO workflow_commands(run_id,key,actor_id,fingerprint,result) VALUES($1,$2,$3,$4,$5)',[id,key,actor.subject,hash,JSON.stringify(next)]);
         return next;
       });
@@ -155,16 +169,21 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
       const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version LIMIT 100',[id])).rows;
       return rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()}));
     },
+    async executions(id,actor,query) {
+      await get(id,actor);
+      const rows=(await pool.query('SELECT run_id AS "runId",version,step_id AS "stepId",step_index AS "stepIndex",actor_id AS "actorId",action,input,result,occurred_at AS "occurredAt" FROM workflow_action_results WHERE run_id=$1 ORDER BY version,step_index,step_id LIMIT $2 OFFSET $3',[id,query?query.limit+1:100,query?.offset??0])).rows;
+      return rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()}));
+    },
     async jobs(id,actor) {await get(id,actor);return (await pool.query('SELECT id,status,attempts,last_error AS "lastError" FROM workflow_jobs WHERE run_id=$1 ORDER BY created_at LIMIT 100',[id])).rows;},
     async retryJobs(id,actor,key) {
       return transaction(pool,async client=>{
         const row=(await client.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0];
-        if(!row||!canReadRun(definition(row),row,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
+        if(!row||!canReadRun(await definition(row,client),row,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
         if(!actor.roles.includes('workflow:sync'))throw new WorkflowError(403,'Không có quyền chạy lại đồng bộ.');
         const hash=fingerprint({action:'sync.retry',expectedVersion:0,input:{}});
         const replay=(await client.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
         if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result.retried;}
-        const count=(await client.query("UPDATE workflow_jobs SET status='pending',attempts=0,available_at=now(),lease_until=NULL,lease_token=NULL,last_error=NULL WHERE run_id=$1 AND organization_id=$2 AND status='failed'",[id,actor.organizationId])).rowCount??0;
+        const count=(await client.query("UPDATE workflow_jobs SET status='pending',attempts=0,available_at=now(),lease_until=NULL,lease_token=NULL,last_error=NULL WHERE run_id=$1 AND organization_id=$2 AND status='failed' AND NOT EXISTS(SELECT 1 FROM workflow_waits w WHERE w.id=workflow_jobs.id AND w.status<>'pending')",[id,actor.organizationId])).rowCount??0;
         await client.query('INSERT INTO workflow_commands(run_id,key,actor_id,fingerprint,result) VALUES($1,$2,$3,$4,$5)',[id,key,actor.subject,hash,JSON.stringify({retried:count})]);
         return count;
       });
@@ -174,7 +193,7 @@ export async function workflowDatabase(pool:Pool):Promise<WorkflowRepository> {
     async readSharedFile(id,actor) {
       if(!isRecordId(id))return;
       const rows=(await pool.query(`SELECT ${runColumns.split(',').map(c=>'r.'+c).join(',')} FROM workflow_runs r JOIN workflow_files wf ON wf.run_id=r.id WHERE wf.file_id=$1 AND r.organization_id=$2`,[id,actor.organizationId])).rows;
-      if(!rows.some(row=>canReadRun(definition(row),row,actor)))return;
+      if(!(await Promise.all(rows.map(async row=>canReadRun(await definition(row),row,actor)))).some(Boolean))return;
       return (await pool.query('SELECT id,filename,owner_id AS "ownerId",organization_id AS "organizationId",record_id AS "recordId",size,scan_status AS "scanStatus",content FROM foundation_files WHERE id=$1 AND organization_id=$2',[id,actor.organizationId])).rows[0];
     },
   };

@@ -28,7 +28,8 @@ test('signed organization scope cannot be overridden by request body', async () 
   const app = setup();
   try {
     const headers = { authorization: `Bearer ${await token()}` };
-    const created = await app.inject({ method: 'POST', url: '/v1/records', headers, payload: { title: 'Scoped', organizationId: 'org-b' } });
+    expect((await app.inject({ method: 'POST', url: '/v1/records', headers, payload: { title: 'Scoped', organizationId: 'org-b' } })).statusCode).toBe(400);
+    const created = await app.inject({ method: 'POST', url: '/v1/records', headers, payload: { title: 'Scoped' } });
     expect(created.statusCode).toBe(201);
     expect(created.json()).toMatchObject({ organizationId: 'org-a' });
     const anotherOrganization = await app.inject({ url: '/v1/records', headers: { authorization: `Bearer ${await token('alice', ['records:read'], 'https://identity.test', 'dx-api', 'org-b')}` } });
@@ -60,7 +61,7 @@ test('records cannot be read by another owner', async () => {
   const app = setup();
   try {
     const alice = { authorization: `Bearer ${await token()}` };
-    const created = await app.inject({ method: 'POST', url: '/v1/records', headers: alice, payload: { title: '  Hồ sơ mẫu  ', ownerId: 'bob' } });
+    const created = await app.inject({ method: 'POST', url: '/v1/records', headers: alice, payload: { title: '  Hồ sơ mẫu  ' } });
     expect(created.statusCode).toBe(201);
     expect(created.json()).toMatchObject({ title: 'Hồ sơ mẫu', ownerId: 'alice' });
     expect((await app.inject({ url: '/v1/records', headers: alice })).json().items).toHaveLength(1);
@@ -70,4 +71,15 @@ test('records cannot be read by another owner', async () => {
 test('rejects a blank title', async () => {
   const app = setup();
   try { expect((await app.inject({ method: 'POST', url: '/v1/records', headers: { authorization: `Bearer ${await token()}` }, payload: { title: ' ' } })).statusCode).toBe(400); } finally { await app.close(); }
+});
+test.each([null, [], {title:'ok',ownerId:'bob'}, {title:'ok',extra:true}, {title:'x'.repeat(201)}])('REST record parser strictly rejects malformed body %j',async payload=>{
+ const app=setup();try {expect((await app.inject({method:'POST',url:'/v1/records',headers:{authorization:`Bearer ${await token()}`,'content-type':'application/json'},payload:payload===null?'null':payload})).statusCode).toBe(400);}finally{await app.close();}
+});
+test('REST accepts code point title length, rejects malformed keys and missing keyed capability',async()=>{
+ const app=setup();try {
+ const headers={authorization:`Bearer ${await token()}`};
+ expect((await app.inject({method:'POST',url:'/v1/records',headers,payload:{title:'😀'.repeat(200)}})).statusCode).toBe(201);
+ for(const value of ['a,b','bad key','x'.repeat(129)])expect((await app.inject({method:'POST',url:'/v1/records',headers:{...headers,'idempotency-key':value},payload:{title:'ok'}})).statusCode).toBe(400);
+ expect((await app.inject({method:'POST',url:'/v1/records',headers:{...headers,'idempotency-key':'valid'},payload:{title:'ok'}})).statusCode).toBe(503);
+ }finally{await app.close();}
 });

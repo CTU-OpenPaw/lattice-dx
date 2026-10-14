@@ -34,7 +34,20 @@ export async function createWorkflowTables(pool:Pool) {
       payload jsonb NOT NULL, status text NOT NULL DEFAULT 'pending', attempts integer NOT NULL DEFAULT 0,
       available_at timestamptz NOT NULL DEFAULT now(), lease_until timestamptz, lease_token uuid,
       last_error text, created_at timestamptz NOT NULL DEFAULT now())`,
+    `CREATE TABLE IF NOT EXISTS workflow_action_results (
+      run_id uuid NOT NULL REFERENCES workflow_runs(id), version integer NOT NULL, step_id text NOT NULL, step_index integer NOT NULL DEFAULT 0,
+      actor_id text NOT NULL, action text NOT NULL, input jsonb NOT NULL, result jsonb NOT NULL,
+      occurred_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(run_id,version,step_id))`,
+    'ALTER TABLE workflow_action_results ADD COLUMN IF NOT EXISTS step_index integer NOT NULL DEFAULT 0',
     'CREATE INDEX IF NOT EXISTS workflow_jobs_ready ON workflow_jobs(status,available_at)',
+    `CREATE TABLE IF NOT EXISTS workflow_waits (
+      id uuid PRIMARY KEY, run_id uuid NOT NULL REFERENCES workflow_runs(id), organization_id text NOT NULL,
+      version integer NOT NULL, kind text NOT NULL CHECK(kind IN ('task','connector')), assignee_id text, connector_id text,
+      config jsonb NOT NULL, status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','timed_out')),
+      deadline timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz,
+      completion_key text, completion_fingerprint text, completion_actor text, receipt jsonb, evidence jsonb)`,
+    "CREATE UNIQUE INDEX IF NOT EXISTS workflow_waits_pending_run ON workflow_waits(run_id) WHERE status='pending'",
+    "CREATE INDEX IF NOT EXISTS workflow_waits_deadline ON workflow_waits(deadline) WHERE status='pending'",
   ];
   for(const statement of statements) await pool.query(statement);
 }

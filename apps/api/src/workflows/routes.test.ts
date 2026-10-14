@@ -73,3 +73,21 @@ test('manual sync retry requires an idempotency key',async()=>{
     expect((await app.inject({method:'POST',url:`/v1/workflows/${run.id}/sync/retry`,headers:await auth(['workflow:sync']),payload:{}})).statusCode).toBe(400);
   }finally{await app.close();}
 });
+
+test('block catalogue requires signed organization and filters each action by caller role',async()=>{
+  const {app}=setup();try{
+    expect((await app.inject({url:'/v1/workflow-blocks'})).statusCode).toBe(401);
+    expect((await app.inject({url:'/v1/workflow-blocks',headers:await auth(['tasks:assign'],'alice','')})).statusCode).toBe(403);
+    const result=await app.inject({url:'/v1/workflow-blocks',headers:await auth(['tasks:assign'])});
+    expect(result.statusCode).toBe(200);expect(result.json().items.map((item:{id:string})=>item.id)).toEqual(['tasks.create']);
+    expect((await app.inject({url:'/v1/workflow-blocks',headers:await auth([])})).json().items).toEqual([]);
+  }finally{await app.close();}
+});
+test('execution history authorizes run access and returns bounded page even for legacy fixture',async()=>{
+  const {app}=setup();try{
+    expect((await app.inject({url:`/v1/workflows/${run.id}/executions`,headers:await auth([], 'outsider')})).statusCode).toBe(404);
+    const result=await app.inject({url:`/v1/workflows/${run.id}/executions?limit=2&offset=3`,headers:await auth()});
+    expect(result.statusCode).toBe(200);expect(result.json()).toEqual({items:[],page:{limit:2,offset:3,hasMore:false,nextOffset:null}});
+    expect((await app.inject({url:`/v1/workflows/${run.id}/executions?limit=101`,headers:await auth()})).statusCode).toBe(400);
+  }finally{await app.close();}
+});

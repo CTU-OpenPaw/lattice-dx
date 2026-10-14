@@ -25,7 +25,7 @@ Build validates and copies authored CommonJS into dist. The runtime supplies the
 Copy the generated tgz into the container, then install with the official package manager. It extracts into persistent storage/plugins and links the package for Node.js. Inside the container:
 
 ```sh
-yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.9.0.tgz
+yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.9.1.tgz
 yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 yarn nocobase pm list
 yarn nocobase pm disable @latticedx/plugin-lattice-foundation
@@ -41,6 +41,12 @@ The repository's official Compose also mounts this package read-only; build befo
 ## Application extensions in 0.9.0
 
 Workspace is a shell: it delegates to the application runtime and contains no purchasing/Logistics branches. Manifest workspace panels reference trusted registered renderers; block bindings declare selection fields. Generic Form/List/actions/validation read registered contracts. Sample-specific views and API adapters live in src/applications. Native bindings and current endpoints are preserved. Trusted plugins can register views via app.latticeRuntime, contracts via app.latticeContracts, and server manifests via app.latticeApplications after Foundation loads. See ../../../docs/workspace-extension-runtime.md for extension steps, security boundaries and regression evidence. Dynamic publication and a universal workflow designer are still outside this release.
+
+## Backend compatibility in 0.9.1
+
+Record/task forms use the backend's Unicode code-point limits. Their catalog actions send an idempotency key through the server bridge. An uncertain result locks new submissions; manual retry preserves the original key and payload and checks current action permissions again. A confirmed result clears the command; a deliberate new submission receives a new key. File uploads are not automatically retried.
+
+The workflow bridge also exposes fixed, session-bound operations `waits`, `executions`, `completeWait` and `retrySync`. Mutation operations require a key and body; the backend remains responsible for permissions and business validation. These adapters do not add Inbox/Approval/Timeline/Context blocks or a workflow designer.
 
 ## Terms
 

@@ -28,23 +28,30 @@ function createFormActions({apiClient, manifest, blockId, contracts=defaultContr
       input[field.name] = contract.fields[field.name].trim ? value.trim() : value;
     }
     if(contract.transport.kind==='command'){uncertain={operation:contract.transport.operation,body:input,key:'ui-'+globalThis.crypto.randomUUID()};return retry();}
+    if(contract.transport.idempotent){uncertain={...block.submit,input,key:'ui-'+globalThis.crypto.randomUUID()};return retry();}
+    return runCatalog({...block.submit,input});
+  }
+  async function runCatalog(command) {
     pending = true;
     try {
       const {data: catalog} = await apiClient.request({url: 'dxActions:catalog', method: 'get'});
       const descriptor = catalog?.items?.find(a => a.id === block.submit.actionId && a.version === block.submit.version);
       if (!descriptor) throw new FormActionError('ACTION_UNAVAILABLE', 'Action chưa được cấp quyền hoặc chưa sẵn sàng.');
-      const {data: result} = await apiClient.request({url: 'dxActions:run', method: 'post', data: {...block.submit, input}});
+      const {data: result} = await apiClient.request({url: 'dxActions:run', method: 'post', data: command});
       if (result?.status !== 'succeeded' || result.actionId !== block.submit.actionId || result.version !== block.submit.version || !result.result || typeof result.result.id !== 'string') throw new FormActionError('INVALID_RESPONSE', 'Không xác nhận được kết quả lưu; kiểm tra trước khi gửi lại.');
+      uncertain=null;
       return result.result;
     } catch (error) {
-      if (error instanceof FormActionError) throw error;
-      const status = error.response?.status;
+      if (error instanceof FormActionError) {if(error.code==='ACTION_UNAVAILABLE')uncertain=null;throw error;}
+      const status = error.status || error.response?.status;
+      if(status>=400&&status<500&&status!==429)uncertain=null;
       throw new FormActionError(status === 401 ? 'AUTH_REQUIRED' : status === 403 ? 'FORBIDDEN' : 'API_FAILED',
         status === 401 ? 'Hãy kết nối lại tài khoản để tiếp tục.' : status === 403 ? 'Không có quyền thực hiện thao tác.' : 'Gọi API thất bại; kiểm tra kết quả trước khi gửi lại.', status);
     } finally {pending = false;}
   }
   async function retry(){
     if(pending||!uncertain)throw new FormActionError('BUSY','Không có lệnh cần thử lại hoặc lệnh đang chạy.');
+    if(contract.transport.kind==='catalog')return runCatalog(uncertain);
     pending=true;
     try{const {data:result}=await apiClient.request({url:contract.transport.url,method:'post',data:uncertain});if((contract.transport.definitionId&&result?.definitionId!==contract.transport.definitionId)||typeof result.id!=='string')throw new FormActionError('INVALID_RESPONSE','Không xác nhận được kết quả đã lưu.');uncertain=null;return result;}
     catch(e){const status=e.status||e.response?.status;if(status>=400&&status<500&&status!==429)uncertain=null;throw e;}finally{pending=false;}

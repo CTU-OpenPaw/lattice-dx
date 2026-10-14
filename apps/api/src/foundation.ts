@@ -1,25 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CreateCommandError,parseCreateKey,requireCreateCapability } from './create-command.js';
 import type { FastifyInstance } from 'fastify';
 import { verifyIdentity, type IdentityConfig } from './identity.js';
 import type { RecordRepository } from './records.js';
 import { resolveRecordLink, RecordLinkError } from './record-link.js';
 import type { WorkflowActor } from '@dx/contracts';
-import { isRecordId } from '@dx/contracts';
+import { isRecordId,parseTaskCreateInput } from '@dx/contracts';
 import { PageError,parsePage,textFilter,type Page,type PageQuery } from './pagination.js';
 export type TaskQuery=PageQuery & {status?:string;recordId?:string};
 import { requireAssignee, DirectoryError, type DirectoryOptions } from './directory.js';
 export type Scope = {subject:string; organizationId:string};
 export type TaskInput = {title:string;assigneeId:string;organizationId:string;createdBy:string;recordId?:string};
-export type Task = Omit<TaskInput,'recordId'> & {id:string;status:string;version:number;recordId?:string|null};
+export type Task = Omit<TaskInput,'recordId'> & {id:string;status:string;version:number;recordId?:string|null;workflowWaitId?:string|null};
 export type ScanStatus = 'pending'|'clean'|'rejected'|'error';
 export type FileInput = {filename:string;ownerId:string;organizationId:string;content:Buffer;recordId?:string};
 export type FileItem = Omit<FileInput,'content'|'recordId'> & {id:string;size:number;scanStatus:ScanStatus;recordId?:string|null};
 export interface FoundationRepository {
+  supportsCreateCommands?:boolean;
   listTasks(scope:Scope):Promise<Task[]>;
   listTasksPage?(scope:Scope,query:TaskQuery):Promise<Page<Task>>;
   readTask?(id:string,scope:Scope):Promise<Task|undefined>;
   readTaskFile?(id:string,scope:Scope):Promise<(FileItem&{content:Buffer})|undefined>;
-  createTask(input:TaskInput):Promise<Task>;
+  createTask(input:TaskInput,key?:string):Promise<Task>;
   decideTask(id:string,scope:Scope,decision:'approve'|'reject',reason:string,version:number):Promise<Task|undefined>;
   createFile(input:FileInput):Promise<FileItem>;
   markFile(id:string,status:ScanStatus):Promise<void>;
@@ -30,7 +32,7 @@ export function registerFoundation(app:FastifyInstance,options:FoundationOptions
   // This authorization applies before accessing every task/file repository method.
   app.register(async routes=>{
     routes.setErrorHandler((error, _req, reply) => {
-      if (error instanceof RecordLinkError || error instanceof DirectoryError || error instanceof PageError) return reply.code(error.statusCode).send({error: error.message});
+      if (error instanceof RecordLinkError || error instanceof DirectoryError || error instanceof PageError || error instanceof CreateCommandError) return reply.code(error.statusCode).send({error: error.message});
       return reply.send(error);
     });
     routes.addHook('preHandler',async(req,reply)=>{
@@ -57,12 +59,14 @@ export function registerFoundation(app:FastifyInstance,options:FoundationOptions
       return await repo.readTask(req.params.id,scopes.get(req)!)??reply.code(404).send({error:'Không tìm thấy task.'});
     });
     routes.post<{Body:{title?:unknown;assigneeId?:unknown;recordId?:unknown}}>('/v1/tasks',async(req,reply)=>{
-      const {title,assigneeId}=req.body??{};
-      if(typeof title!=='string'||!title.trim()||title.length>200||typeof assigneeId!=='string'||!assigneeId.trim()||assigneeId.length>100)return reply.code(400).send({error:'Title/assignee không hợp lệ.'});
+      const input=parseTaskCreateInput(req.body);
+      if(!input)return reply.code(400).send({error:'Input nhiệm vụ không hợp lệ.'});
+      const key=parseCreateKey(req.headers['idempotency-key'],req.raw.rawHeaders);
+      requireCreateCapability(key,repo);
       const scope=scopes.get(req)!;
-      await requireAssignee(assigneeId,scope,options.directory);
-      const recordId=await resolveRecordLink(req.body?.recordId,scope,options.records);
-      return reply.code(201).send(await repo.createTask({title:title.trim(),assigneeId,organizationId:scope.organizationId,createdBy:scope.subject,...(recordId?{recordId}:{})}));
+      await requireAssignee(input.assigneeId,scope,options.directory);
+      const recordId=await resolveRecordLink(input.recordId,scope,options.records);
+      return reply.code(201).send(await repo.createTask({...input,organizationId:scope.organizationId,createdBy:scope.subject,...(recordId?{recordId}:{})},key));
     });
     routes.post<{Params:{id:string};Body:{decision?:unknown;reason?:unknown;expectedVersion?:unknown}}>('/v1/tasks/:id/decisions',async(req,reply)=>{
       const {decision,reason='',expectedVersion}=req.body??{};

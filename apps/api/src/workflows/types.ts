@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowAudit, WorkflowEvent, WorkflowRun } from '@dx/contracts';
+import type { CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowActionResult, WorkflowAudit, WorkflowEvent, WorkflowRun, WorkflowWait, WorkflowCompletion, WorkflowCompletionReceipt } from '@dx/contracts';
 import type { FileItem } from '../foundation.js';
 import type { Page, PageQuery } from '../pagination.js';
 export type WorkflowQuery=PageQuery & {state?:string;definitionId?:string};
@@ -11,12 +11,16 @@ export interface WorkflowJobs {
 }
 export type SyncJob={id:string;status:'pending'|'processing'|'succeeded'|'failed';attempts:number;lastError:string|null};
 export interface WorkflowRepository {
+  listWaits?(id:string,actor:WorkflowActor,query:PageQuery):Promise<Page<WorkflowWait>>;
+  completeWait?(id:string,value:WorkflowCompletion,actor:WorkflowActor,key:string):Promise<WorkflowCompletionReceipt>;
+  expireWaits?():Promise<number>;
   create(input:CreateWorkflow,actor:WorkflowActor,key:string):Promise<WorkflowRun>;
   transition(id:string,input:TransitionCommand,actor:WorkflowActor,key:string):Promise<WorkflowRun>;
   list(actor:WorkflowActor,inbox:boolean):Promise<WorkflowRun[]>;
   listPage?(actor:WorkflowActor,inbox:boolean,query:WorkflowQuery):Promise<Page<WorkflowRun>>;
   get(id:string,actor:WorkflowActor):Promise<WorkflowRun>;
   history(id:string,actor:WorkflowActor):Promise<WorkflowAudit[]>;
+  executions?(id:string,actor:WorkflowActor,query?:PageQuery):Promise<WorkflowActionResult[]>;
   jobs(id:string,actor:WorkflowActor):Promise<SyncJob[]>;
   retryJobs(id:string,actor:WorkflowActor,key:string):Promise<number>;
   registerMember(actor:WorkflowActor):Promise<void>;

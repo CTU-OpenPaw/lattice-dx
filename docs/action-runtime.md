@@ -42,14 +42,14 @@ Gateway: `http://localhost:8080`. Script kiểm tra bằng Keycloak, Gateway và
 
 Danh sách chỉ chứa action có dependency được cấu hình và caller có role phù hợp. Alice local nhìn thấy cả hai action; Bob local không có role tạo nên nhận `{items:[]}`. Catalog hỗ trợ UI, không thay việc kiểm tra quyền lúc thực thi. Registry hiện định nghĩa trong code server; không có API để người dùng upload handler hoặc thay requiredRole.
 
-Giới hạn độ dài input action đếm Unicode code points theo JSON Schema (emoji tính một code point); endpoint REST cũ vẫn giữ cách kiểm tra UTF-16 code units. Đây không phải giới hạn byte hay số ký tự hiển thị theo grapheme.
+Giới hạn độ dài input action và REST create đếm Unicode code points theo JSON Schema (emoji tính một code point). Đây không phải giới hạn byte hay số ký tự hiển thị theo grapheme. [Create reliability](create-reliability.md) bổ sung optional Idempotency-Key và kết quả chống trùng dùng chung REST/action.
 
 | Action | Role | Input bắt buộc | Kết quả |
 | --- | --- | --- | --- |
 | `records.create`, version 1 | `records:write` | `title`: chuỗi 1–200 ký tự, không toàn khoảng trắng | Record hiện có, gồm id/title/ownerId/organizationId/createdAt |
 | `tasks.create`, version 1 | `tasks:assign` | `title` như trên; `assigneeId`: subject Keycloak, 1–100 ký tự, không toàn khoảng trắng | Task hiện có, gồm id/title/assigneeId/createdBy/organizationId/status/version |
 
-`title` được trim. `assigneeId` là định danh opaque, giữ nguyên. Không nhận trường ngoài schema: ownerId/organizationId/createdBy không phải input của client. Scope lấy từ JWT đã xác minh. Task assignment hiện chỉ dành cho caller đáng tin; chưa kiểm chứng assignee thuộc cùng đơn vị bằng directory.
+`title` được trim. `assigneeId` là định danh opaque, giữ nguyên. Không nhận trường ngoài schema: ownerId/organizationId/createdBy không phải input của client. Scope lấy từ JWT đã xác minh. Task assignment kiểm tra active assignee đúng đơn vị qua directory admin snapshot; cần sync sau identity changes.
 
 ## Thực thi
 
@@ -82,7 +82,7 @@ HTTP 200:
 {"version":1,"input":{"title":"Kiểm tra thiết bị","assigneeId":"<subject người nhận>"}}
 ```
 
-Kết quả `status:"succeeded"` nói action đã tạo task thành công; **task bên trong vẫn `pending`**, chưa được duyệt. `version` của action là phiên bản hợp đồng (1); `result.version` của task là phiên bản cập nhật task. Task này đọc/duyệt qua API task hiện có; chưa liên kết với recordId.
+Kết quả `status:"succeeded"` nói action đã tạo task thành công; **snapshot task lúc tạo là `pending`**, chưa được duyệt. `version` của action là phiên bản hợp đồng (1); `result.version` của task là phiên bản cập nhật task. Task có thể liên kết qua optional recordId đúng quyền owner/đơn vị; đọc trạng thái hiện tại bằng API task detail.
 
 | HTTP | Client xử lý |
 | --- | --- |
@@ -108,8 +108,8 @@ Lỗi dự kiến của API có `{error:string}`; Gateway/framework có thể c�
 
 HTTP Request node gọi cùng endpoint/envelope; cấu hình bearer credential trong vùng credential của n8n. Production cần danh tính dịch vụ đúng đơn vị và role giới hạn; không triển khai service-account tự chọn organization bằng body. Password grant `dx-local` chỉ dùng thử local, chưa phải phương án cấp credential production.
 
-Không bật automatic retry cho action tạo dữ liệu: chưa có idempotency key. Nếu timeout sau khi server đã ghi, gọi lại có thể tạo bản sao. Chưa có n8n workflow chạy trong repo; đây là hợp đồng bàn giao.
+Chỉ bật retry khi client/connector giữ và truyền cùng Idempotency-Key cho cùng thao tác theo [create reliability](create-reliability.md). Nếu không gửi key, timeout sau khi server đã ghi rồi gọi lại vẫn có thể tạo bản sao. Chưa có n8n workflow chạy trong repo; đây là hợp đồng bàn giao.
 
 ## Phạm vi mở rộng
 
-Các action tiếp theo đăng ký handler server, schema/version/role và kiểm thử quyền trước khi đưa vào catalog. Cần bổ sung idempotency, lịch sử thực thi, điều phối graph và adapter sự kiện để đi từ action runtime này tới engine nối block. Không mặc định registry đồng bộ này đã giải quyết mọi năng lực đó.
+Các action tiếp theo đăng ký handler server, schema/version/role và kiểm thử quyền trước khi đưa vào catalog. Workflow hiện có block, audit và outbox riêng; xem [workflow blocks](workflow-blocks.md). Independent create hỗ trợ key theo hợp đồng trên, nhưng không có journal tổng quát cho mọi action hoặc điều phối graph tùy ý. Registry đồng bộ này chỉ cung cấp catalog và thực thi action được server cho phép.
