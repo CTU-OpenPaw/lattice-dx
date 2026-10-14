@@ -65,3 +65,5 @@ Backend nền hoàn thiện khi mỗi năng lực dưới đây có implementati
 | 9 | Nghiệm thu local và final review đạt; PR #13 đã cập nhật, CI kiểm riêng trên GitHub |375 tests/59 files, typecheck/build; API index/catalog/handoff và installed dependency inventory; final review không còn P1/P2. Chưa merge/release |
 
 Docker Desktop từng bị lỗi khởi động riêng ở môi trường. Ngày14/10 máy nâng tại chỗ 4.64→4.94 theo bản sửa upstream; ba lần startup gốc đều đạt, không dùng socket recovery. Xem docker-desktop-recovery.md. Chưa kiểm Windows reboot/logon.
+
+Đợt mở rộng tiếp theo được quản lý tại [enterprise composition ledger](superpowers/plans/2026-10-14-enterprise-composition.md): context/journal/automation, private calculation, bindings, aggregates/snapshots, filesystem/search và runtime operations đã có source và local acceptance. Ngày14/10 full check đạt519tests94files trước sửa durability cuối; final review và latest-head CI được ghi riêng, không suy ra từ checkpoint375tests ở trên.

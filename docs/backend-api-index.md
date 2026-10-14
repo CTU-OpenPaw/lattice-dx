@@ -26,6 +26,9 @@ The engine is the authority for business data, workflows and permissions. Studio
 | Versioned enterprise modules | `/v1/enterprise-modules/*` | [Modules](enterprise-modules.md) | `pnpm test:enterprise-modules` |
 | Readiness, diagnostics and retention preview | `/health`, `/ready`, `/v1/operations/*` | [Operations](operations.md) | `pnpm test:organization-operations` |
 | Local PostgreSQL recovery | CLI only, no browser restore endpoint | [Recovery](recovery.md) | `pnpm backup:core`, `pnpm backup:rehearse -- <dump>` |
+| Verified filesystem objects and current authorized downloads | Existing file/content APIs, server-controlled provider | [Filesystem storage](filesystem-storage.md) | `pnpm test:file-storage`, `pnpm test:file-content` |
+| Process telemetry and tenant queue diagnostics | `/v1/operations/metrics`, `/v1/operations/queues` | [Operations](operations.md) | `pnpm test:runtime-operations`, `pnpm test:runtime-config` |
+| Paired database/object recovery | CLI only, generated isolated targets | [Recovery](recovery.md) | `pnpm backup:full`, `pnpm backup:rehearse-full -- <directory>` |
 
 The contracts above include their exact request/response bodies and roles. REST entity blocks and workflow blocks have separate catalogs because workflow bindings are declarative and run inside the workflow transaction. Check the completion ledger before assuming an API capability also has a workflow executor.
 

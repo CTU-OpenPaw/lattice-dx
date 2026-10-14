@@ -12,7 +12,7 @@ LatticeDX owns shared business schemas, entities and authorization on PostgreSQL
 6. A module binding constrains which published schema and workflow belong together and which transitions a bound run may execute. Installation does not grant users or services permission.
 7. Scoped aggregation and frozen report snapshots support reporting across authorized data. Snapshot ownership does not bypass current source access.
 
-Items 5–7 are tracked implementation work until their corresponding acceptance gates are recorded. Consult the [execution ledger](superpowers/plans/2026-10-14-enterprise-composition.md) for the precise implemented state.
+Items 5–7 have passed their local implementation and acceptance gates. Consult the [execution ledger](superpowers/plans/2026-10-14-enterprise-composition.md) for review, verification and delivery evidence.
 
 ## Responsibilities and integration
 

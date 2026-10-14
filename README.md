@@ -90,10 +90,12 @@ Thêm server độc lập vào `apps/`, thư viện tái sử dụng vào `packa
 - Worker trả kết quả xác định, không phân tích bằng AI, không gọi công cụ nghiệp vụ.
 - API demo gọi agent worker đồng bộ bằng HTTP. Workflow nghiệp vụ có trạng thái bền vững và PostgreSQL outbox với retry riêng; chưa có hàng đợi tác vụ agent.
 - API hồ sơ trong core xác minh JWT và quyền read/write, giới hạn theo chủ sở hữu và claim đơn vị `organization_id` đã ký. Token thiếu đơn vị bị từ chối. Bản ghi cũ chưa có đơn vị không tự được gán quyền. `pnpm dev` không tự nạp cấu hình core và endpoint hồ sơ trả 503 nếu thiếu cấu hình identity/database.
-- Task/decision nền có lưu bền và kiểm tra phiên bản; chưa tự đổi trạng thái hồ sơ mua sắm. Tệp 1 MiB lưu PostgreSQL bytea, quét ClamAV trước khi tải; chưa có object storage hoặc quét lại nền. Đọc [hợp đồng nền](docs/phase-one-handoff.md).
+- Task/decision nền có lưu bền và kiểm tra phiên bản. Tệp 1 MiB mặc định lưu PostgreSQL bytea, quét ClamAV trước khi tải; có filesystem provider với chuyển bytes được kiểm SHA256, quyền tải hiện tại và sao lưu ghép database/object. Chưa có remote object provider hoặc quét lại nền. Đọc [hợp đồng nền](docs/phase-one-handoff.md) và [filesystem storage](docs/filesystem-storage.md).
 - Workflow API chạy cả cấu hình builtin trong source và cấu hình custom publish theo đơn vị; run giữ phiên bản bất biến. Các block có thể giao task theo người/phòng ban hoặc dispatch connector, chờ kết quả và áp dụng điều kiện. API draft/publish và bundle đã có; Studio UI, adapter ngoài và bộ dựng biểu mẫu cần tích hợp tiếp.
 - Endpoint demo agent là kiểm tra kết nối cục bộ; không được công bố qua gateway core và chưa có xác thực.
 - Các thẻ ứng dụng/dữ liệu trên giao diện ghi rõ chưa tích hợp; không phải kiểm tra sức khỏe dịch vụ.
+
+Backend đã bổ sung liên kết thực thể–workflow, journal giao dịch, automation bền vững, phép tính kiểu dữ liệu trong workflow, module binding, aggregate chính xác, snapshot kiểm lại quyền và full-text search. Xem [API index](docs/backend-api-index.md) để Studio/adapters nối đúng contract; `pnpm test:enterprise-composition` kiểm luồng xuyên các năng lực bằng PostgreSQL thật. Worker cần bật rõ bằng env, metrics thuộc process và queue diagnostics thuộc tenant. Những năng lực backend này chưa xác nhận UI, broker, n8n hoặc agent đã tích hợp hoàn chỉnh.
 
 ## Giấy phép
 
