@@ -6,9 +6,9 @@ import type { FoundationRepository } from './foundation.js';
 import { DirectoryError } from './directory.js';
 import { pageResult } from './pagination.js';
 import { initializeFileStorage } from './files/storage-database.js';
-import {loadFileContentWithClient,readFileMetadataWithClient,readFoundationPathMetadataWithClient} from './files/content.js';
+import {loadFileContentWithClient,readFileMetadataWithClient,readFoundationPathMetadataWithClient,type FileDefinitionResolver} from './files/content.js';
 import type {ObjectStore} from './files/object-store.js';
-export async function foundationDatabase(pool:Pool,store?:ObjectStore):Promise<FoundationRepository>{
+export async function foundationDatabase(pool:Pool,store?:ObjectStore,resolveDefinition?:FileDefinitionResolver):Promise<FoundationRepository>{
   await pool.query(`CREATE TABLE IF NOT EXISTS foundation_tasks (
     id uuid PRIMARY KEY,title text NOT NULL,organization_id text NOT NULL,assignee_id text NOT NULL,
     created_by text NOT NULL,status text NOT NULL DEFAULT 'pending',version integer NOT NULL DEFAULT 1,
@@ -35,8 +35,8 @@ export async function foundationDatabase(pool:Pool,store?:ObjectStore):Promise<F
     catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
   }
   return {
-    readFileMetadata:(id,s)=>read(client=>readFileMetadataWithClient(client,{...s,roles:'roles' in s?s.roles as string[]:[]},id,{kind:'foundation'})),
-    loadFileContent:(id,s)=>read(client=>loadFileContentWithClient(client,{...s,roles:'roles' in s?s.roles as string[]:[]},id,{kind:'foundation'},store)),
+    readFileMetadata:(id,s)=>read(client=>readFileMetadataWithClient(client,{...s,roles:'roles' in s?s.roles as string[]:[]},id,{kind:'foundation'},resolveDefinition)),
+    loadFileContent:(id,s)=>read(client=>loadFileContentWithClient(client,{...s,roles:'roles' in s?s.roles as string[]:[]},id,{kind:'foundation'},store,resolveDefinition)),
     supportsCreateCommands:true,
     async listTasksPage(s,q) {
       const rows=(await pool.query(`SELECT ${tc} FROM foundation_tasks WHERE organization_id=$1 AND assignee_id=$2 AND ($3::text IS NULL OR status=$3) AND ($4::text IS NULL OR record_id::text=$4) AND ($5='' OR strpos(lower(title),lower($5))>0) ORDER BY created_at DESC,id DESC LIMIT $6 OFFSET $7`,[s.organizationId,s.subject,q.status??null,q.recordId??null,q.q,q.limit+1,q.offset])).rows;

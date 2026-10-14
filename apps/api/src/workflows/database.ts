@@ -258,7 +258,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     async registerMember(actor) {await pool.query('INSERT INTO workflow_members(organization_id,subject) VALUES($1,$2) ON CONFLICT DO NOTHING',[actor.organizationId,actor.subject]);},
     async references(actor) {return (await pool.query('SELECT kind,id,name FROM workflow_references WHERE organization_id=$1 ORDER BY kind,id LIMIT 100',[actor.organizationId])).rows;},
     async readSharedFile(id,actor) {
-      return transaction(pool,client=>readFoundationPathMetadataWithClient(client,actor,id,'workflow'));
+      return transaction(pool,client=>readFoundationPathMetadataWithClient(client,actor,id,'workflow',(db,run)=>registry.get(run.organizationId,run.definitionId,run.definitionVersion,db)));
     },
   };
 }

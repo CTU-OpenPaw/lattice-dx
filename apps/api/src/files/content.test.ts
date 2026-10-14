@@ -36,3 +36,24 @@ it('absent optional workflow module never queries its tables or grants access',a
  });const readVerified=vi.fn();
  expect(await loadFileContentWithClient({query} as any,actor,id,{kind:'foundation'},{readVerified,writeVerified:vi.fn()})).toBeUndefined();expect(readVerified).not.toHaveBeenCalled();
 });
+import {workflowDatabase} from '../workflows/database.js';
+for(const roles of [[],['files:read'],['data:read']])it(`entity attachment direct caller missing capability ${roles.join(',')}`,async()=>{
+ const query=vi.fn();const readVerified=vi.fn();const denied={...actor,roles};
+ expect(await readFileMetadataWithClient({query} as any,denied,id,{kind:'entityAttachment',entityId:id})).toBeUndefined();
+ expect(await loadFileContentWithClient({query} as any,denied,id,{kind:'entityAttachment',entityId:id},{readVerified,writeVerified:vi.fn()})).toBeUndefined();
+ expect(query).not.toHaveBeenCalled();expect(readVerified).not.toHaveBeenCalled();
+});
+it('workflow repository preserves its injected custom definition registry on the caller client',async()=>{
+ const run={id,ownerId:'different',organizationId:'org',definitionId:'custom-reader',definitionVersion:1,state:'submitted',data:{}};
+ const query=vi.fn(async(sql:string)=>{
+  if(sql.startsWith('SELECT id,owner_id'))return {rows:[]};
+  if(sql.startsWith('SELECT to_regclass'))return {rows:[{runs:'workflow_runs',files:'workflow_files'}]};
+  if(sql.startsWith('SELECT r.id,r.owner_id'))return {rows:[run]};
+  if(sql.startsWith('SELECT id,filename'))return {rows:[pointer]};
+  if(sql.includes('workflow_definition_versions')&&sql.startsWith('SELECT'))throw Error('injected registry bypassed');
+  return {rows:[]};
+ });const client={query,release:vi.fn()};const pool={query,connect:vi.fn(async()=>client)};
+ const get=vi.fn(async(org:string,definitionId:string,version:number,db:unknown)=>{expect(db).toBe(client);expect([org,definitionId,version]).toEqual(['org','custom-reader',1]);return {readerRoles:['files:read']} as any;});
+ const repo=await workflowDatabase(pool as any,{get,list:vi.fn(async()=>[])});
+ expect(await repo.readSharedFile(id,actor)).toMatchObject({id,scanStatus:'pending'});expect(get).toHaveBeenCalledOnce();expect(pool.connect).toHaveBeenCalledOnce();
+});

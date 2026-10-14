@@ -24,8 +24,8 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const repository=await recordDatabase(pool);
     const directory=await createDirectoryDatabase(pool);
     const organization=await organizationDatabase(pool);
-    const foundation=await foundationDatabase(pool,options.store);
     const definitionRegistry=await definitionDatabase(pool);
+    const foundation=await foundationDatabase(pool,options.store,(client,run)=>definitionRegistry.get(run.organizationId,run.definitionId,run.definitionVersion,client));
     const workflows=await workflowDatabase(pool,definitionRegistry,options.store);
     const events=await eventsDatabase(pool,definitionRegistry,workflows);
     const entities=await entityDatabase(pool);
