@@ -239,6 +239,7 @@
         "files:write",
         "logistics:warehouse",
         "tasks:read",
+        "tasks:assign",
         "tasks:decide",
         "records:read",
         "data:read",

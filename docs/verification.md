@@ -1,5 +1,14 @@
 # Verification — 2026-10-14
 
+## Mở rộng nền backend — kế hoạch và các đợt đang thực hiện
+
+- Phạm vi và ledger ở [backend completion plan](backend-completion-plan.md), chưa đánh dấu toàn bộ backend hoàn thiện.
+- Task lifecycle: production93749be, reviewfix7daf50a; signed HTTP/PG claim/reassign/cancel/deadline/history đạt. Private tests claim/reassign-cancel races, cancelled/old assignee record/file denial, disabled ordinary recipient400, workflow-linked guard409, deadline clear/bounds, 105 queue +107 history paging, forced receipt rollback, changedcreator replay404 trước fingerprint409, poolmax1. Full check lúc chốt bản đầu đạt241tests/37files; targeted cuối67tests, full check cuối toàn nhánh chạy sau các đợt.
+- Typed query/blocks de3de7e +f7b977f: target7files38tests/typecheck; live HTTP và private PG exactdecimal beyondJSfloat, missing ne/exists, type errors, pinned v1/v2, ACL, NULL-last sort, 105 paging, max1; mixed-schema text adversary không gây numeric cast error. Cross REST/block create/update receipt và revokedgrant denial đạt. Review đã sửa catalog unavailable query và guard cast.
+- Recovery:7 policytests, checksum/byte limits/uncertaincreate cleanup/double-error tests. Binary pg_dump/restore rehearsal27tables vào databasefixture, sentinel1a4e46f2-e141-4a58-8c52-fd0308d1bda6 tồn tại sau restore; cùng backup rehearse lại thành công. Artifacts nằm output/backups được gitignore, nguồn/volume giữ nguyên. Đây là local DB recovery, chưa toàn bộ phase8.
+
+Handoff: [Task lifecycle](task-lifecycle.md), [Query/blocks](entity-query-blocks.md), [Recovery](recovery.md).
+
 ## Entity sharing — người và phòng ban
 
 - `pnpm check` đạt **228 tests / 33 files**, typecheck và build. Trước rebuild, smoke mới gặp 404 ở route shares trên image cũ; sau rebuild API và restart Gateway, signed HTTP scenario đạt.

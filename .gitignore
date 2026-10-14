@@ -7,5 +7,6 @@ coverage/
 !.env.example
 *.tsbuildinfo
 .worktrees/
+output/backups/
 upstream/*
 !upstream/nocobase/

@@ -8,7 +8,7 @@ routes:
       nodes:
         "api:4000": 1
   - id: records
-    uris: [/v1/records, /v1/records/*, /v1/tasks, /v1/tasks/*, /v1/files, /v1/files/*, /v1/actions, /v1/actions/*, /v1/directory/people, /v1/directory/departments, /v1/workflow-blocks, /v1/logistics/orders, /v1/logistics/orders/*, /v1/workflow-drafts, /v1/workflow-drafts/*, /v1/workflow-definitions, /v1/workflow-bundles/export, /v1/workflow-bundles/validate, /v1/workflow-bundles/import, /v1/workflow-members/me, /v1/workflow-references, /v1/workflows, /v1/workflows/*, /v1/workflow-waits/*/complete]
+    uris: [/v1/records, /v1/records/*, /v1/tasks, /v1/tasks/*, /v1/task-queues, /v1/files, /v1/files/*, /v1/actions, /v1/actions/*, /v1/directory/people, /v1/directory/departments, /v1/workflow-blocks, /v1/logistics/orders, /v1/logistics/orders/*, /v1/workflow-drafts, /v1/workflow-drafts/*, /v1/workflow-definitions, /v1/workflow-bundles/export, /v1/workflow-bundles/validate, /v1/workflow-bundles/import, /v1/workflow-members/me, /v1/workflow-references, /v1/workflows, /v1/workflows/*, /v1/workflow-waits/*/complete]
     methods: [GET, POST]
     plugins:
       openid-connect:
@@ -56,7 +56,7 @@ routes:
       nodes:
         "api:4000": 1
   - id: enterprise-data
-    uris: [/v1/entity-schemas, /v1/entity-schemas/*, /v1/entities, /v1/entities/*]
+    uris: [/v1/entity-schemas, /v1/entity-schemas/*, /v1/entities, /v1/entities/*, /v1/blocks, /v1/blocks/*]
     methods: [GET, POST, PUT, PATCH, DELETE]
     plugins:
       openid-connect:

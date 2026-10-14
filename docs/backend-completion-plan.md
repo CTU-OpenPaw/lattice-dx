@@ -54,14 +54,14 @@ Backend nền hoàn thiện khi mỗi năng lực dưới đây có implementati
 
 | Đợt | Trạng thái | Bằng chứng |
 | --- | --- | --- |
-| 1 | Đang thiết kế/triển khai | Spec và plan task lifecycle trong docs/superpowers |
-| 2 | Chưa thực hiện | Không tính catalog hai action cũ là block registry đầy đủ |
-| 3 | Chưa thực hiện | Existing waits/timeouts giữ nguyên |
+| 1 | Hoàn thành generic task lifecycle; workflow liên kết thuộc đợt3 | Signed HTTP/PG claim/transfer/cancel/deadline, 105 queue +107 history paging, rollback/replay/max1, review fix7daf50a |
+| 2 | Typed query +7 entity block APIs hoàn thành; execution trong workflow thuộc đợt3 | Precision/ACL/pinned schema/mixed type/105 paging/max1; REST↔block receipts; reviewfixf7b977f |
+| 3 | Đang triển khai compound conditions/cancel/transfer | Timers/service authority và typed workflow execution còn riêng, không coi cả đợt đã xong |
 | 4 | Chưa thực hiện | Directory hiện là snapshot, chưa hierarchy |
 | 5 | Chưa thực hiện | Existing outbox chỉ là năng lực đi ra |
 | 6 | Chưa thực hiện | Workflow bundle chưa phải enterprise module |
 | 7 | Chưa thực hiện | Files/typed entities hiện chưa nối attachment/import |
-| 8 | Chưa thực hiện | Health/restart chưa thay bằng chứng restore |
+| 8 | Một phần: local backup/restore rehearsal đã kiểm | Dump/checksum, restore27 bảng vào DB riêng +sentinel; readiness/retention/diagnostics còn cần làm |
 | 9 | Chưa thực hiện | Nghiệm thu sau toàn bộ các đợt |
 
 Docker Desktop bị lỗi khởi động là vấn đề môi trường riêng; phục hồi socket không phải chứng minh root cause đã được sửa.
