@@ -19,6 +19,7 @@ The engine is the authority for business data, workflows and permissions. Studio
 | Organization metadata and directory snapshot | `/v1/organization/*` | [Organization](organization-directory.md) | `pnpm test:organization-operations` |
 | Signed ingress and subscriptions | `/v1/workflow-events`, `/v1/workflow-event-subscriptions` | [Inbound events](inbound-events.md) | `pnpm test:inbound-events` |
 | Portable workflow bundles | `/v1/workflow-bundles/*` | [Bundles](workflow-bundles.md) | `pnpm test:workflow-bundles` |
+| Declarative business bindings | `/v1/enterprise-modules/:id/versions/:version/bindings/:bindingId/start` | [Business bindings](module-business-bindings.md) | `pnpm test:module-bindings` |
 | Versioned enterprise modules | `/v1/enterprise-modules/*` | [Modules](enterprise-modules.md) | `pnpm test:enterprise-modules` |
 | Readiness, diagnostics and retention preview | `/health`, `/ready`, `/v1/operations/*` | [Operations](operations.md) | `pnpm test:organization-operations` |
 | Local PostgreSQL recovery | CLI only, no browser restore endpoint | [Recovery](recovery.md) | `pnpm backup:core`, `pnpm backup:rehearse -- <dump>` |
