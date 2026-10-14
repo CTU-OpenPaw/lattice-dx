@@ -44,3 +44,7 @@ Lock ordering: entitywrite→event→delivery **never workflow**. Dispatcherdeli
 ## Acceptance
 
 Journal signedAPI and PG CRUD/relationnoops/migration/rollback/replay/max1. Rule strictactor/mapping/pin/config bounds; journalstage rollbackcoherence; fiveworkers one run/context, disabledrule/service/grantrevoked queuedafterstaging denial; optionalinitialtransition capability removal, lateworkflowreceipt rollback no run/effects, retryafterrepair, contextpins, restart/max1freshdelivery. Runtime opt-in/drain exercised; legacy inboundevent/module/timer/blocksmokes remain compatible. Independent review no public provisioner, no Notion ticks.
+
+## Server-derived recursion limit
+
+Journal stores hidden `automation_depth` from transaction-local `latticedx.automation_depth`, validated 0�8. A dispatched delivery sets depth to its source depth plus one. Events at depth eight remain journaled but stage no further deliveries. Clients cannot supply this depth or alter service authority through event payloads. Actual database journal timestamps are preserved in snapshots.
