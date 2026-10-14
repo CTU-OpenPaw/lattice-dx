@@ -64,30 +64,50 @@ export async function lockEntities(client:EntityClient,scope:Scope,ids:string[])
   }
   return locked;
 }
+/** Apply to rows already locked by the caller; recheck shared authority and typed policy. */
+export async function applyEntityUpdateWithClient(client:EntityClient,scope:Scope,before:Entity,input:EntityUpdate):Promise<Entity> {
+  await checkAccess(client,scope,before,'edit');
+  current(before,version(input.expectedVersion));
+  const normalized={...input,title:title(input.title)};
+  const schema=await publication(client,scope,before.schemaId,before.schemaVersion);
+  return updateRow(client,scope,before,'entity.update',normalized,{title:normalized.title,attributes:validateAttributes(schema,input.attributes)});
+}
 export async function updateEntityWithClient(client:EntityClient,scope:Scope,id:string,input:EntityUpdate):Promise<Entity> {
   const before=await scopedEntity(client,scope,uuid(id),true,'edit');
   if(!before) throw missing();
-  current(before,version(input.expectedVersion));
-  const schema=await publication(client,scope,before.schemaId,before.schemaVersion);
-  return updateRow(client,scope,before,'entity.update',input,{title:title(input.title),attributes:validateAttributes(schema,input.attributes)});
+  return applyEntityUpdateWithClient(client,scope,before,input);
+}
+export async function applyEntityArchiveWithClient(client:EntityClient,scope:Scope,before:Entity,expectedVersion:number):Promise<Entity> {
+  await checkAccess(client,scope,before,'owner');
+  current(before,version(expectedVersion));
+  return updateRow(client,scope,before,'entity.archive',{expectedVersion},undefined,true);
 }
 export async function archiveEntityWithClient(client:EntityClient,scope:Scope,id:string,expectedVersion:number):Promise<Entity> {
   const before=await scopedEntity(client,scope,uuid(id),true,'owner');
   if(!before) throw missing();
-  current(before,version(expectedVersion));
-  return updateRow(client,scope,before,'entity.archive',{expectedVersion},undefined,true);
+  return applyEntityArchiveWithClient(client,scope,before,expectedVersion);
 }
-export async function linkEntityWithClient(client:EntityClient,scope:Scope,id:string,input:RelationInput,remove=false):Promise<Entity> {
-  id=uuid(id);input={...input,targetId:uuid(input.targetId),expectedVersion:version(input.expectedVersion)};
-  const rows=await lockEntities(client,scope,[id,input.targetId]);
-  const source=rows.get(id)!,target=rows.get(input.targetId)!;
-  await checkAccess(client,scope,source,'edit');await checkAccess(client,scope,target,'read');
-  current(source,input.expectedVersion);
+export async function applyEntityRelationWithClient(client:EntityClient,scope:Scope,source:Entity,target:Entity,input:RelationInput,remove:boolean):Promise<Entity> {
+  await checkAccess(client,scope,source,'edit');
+  await checkAccess(client,scope,target,'read');
+  current(source,version(input.expectedVersion));
   if(!remove&&target.archivedAt) throw new EntityError(409,'Archived target cannot link.');
   const schema=await publication(client,scope,source.schemaId,source.schemaVersion);
   const declaration=Object.hasOwn(schema.relations,input.name)?schema.relations[input.name]:undefined;
   if(!declaration||declaration.targetSchemaId!==target.schemaId) bad('Undeclared relation or wrong target schema.');
-  const changed=await client.query(remove?'DELETE FROM enterprise_relations WHERE source_id=$1 AND name=$2 AND target_id=$3 RETURNING source_id':'INSERT INTO enterprise_relations(source_id,name,target_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING source_id',[id,input.name,input.targetId]);
+  if(uuid(input.targetId)!==target.id) bad('Relation target mismatch.');
+  const changed=await client.query(remove
+    ?'DELETE FROM enterprise_relations WHERE source_id=$1 AND name=$2 AND target_id=$3 RETURNING source_id'
+    :'INSERT INTO enterprise_relations(source_id,name,target_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING source_id',
+    [source.id,input.name,input.targetId]);
   return changed.rows.length?updateRow(client,scope,source,remove?'entity.unlink':'entity.link',input):source;
 }
-export function unlinkEntityWithClient(client:EntityClient,scope:Scope,id:string,input:RelationInput) {return linkEntityWithClient(client,scope,id,input,true);}
+export async function linkEntityWithClient(client:EntityClient,scope:Scope,id:string,input:RelationInput,remove=false):Promise<Entity> {
+  id=uuid(id);
+  input={...input,targetId:uuid(input.targetId),expectedVersion:version(input.expectedVersion)};
+  const rows=await lockEntities(client,scope,[id,input.targetId]);
+  return applyEntityRelationWithClient(client,scope,rows.get(id)!,rows.get(input.targetId)!,input,remove);
+}
+export function unlinkEntityWithClient(client:EntityClient,scope:Scope,id:string,input:RelationInput) {
+  return linkEntityWithClient(client,scope,id,input,true);
+}

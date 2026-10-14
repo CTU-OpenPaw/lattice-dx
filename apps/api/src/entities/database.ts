@@ -5,11 +5,11 @@ import {compileEntityQuery,parseEntityQuery} from './query.js';
 import { createDirectoryDatabase } from '../directory-database.js';
 import { parseCreateKey } from '../create-command.js';
 import { pageResult, type PageQuery } from '../pagination.js';
-import { bad, EntityError, parseSchema, parseShare, principalKind, principalId, title, uuid, validateAttributes, version } from './policy.js';
+import { bad, EntityError, parseSchema, parseShare, principalKind, principalId, title, uuid, version } from './policy.js';
 import type { Entity, EntityAudit, EntityRepository, RelationInput, SchemaDraft, SchemaPublication, Scope, Share, ShareInput, RevokeShareInput } from './types.js';
 
 import { withEntityTransaction as transaction, runEntityCommandInTransaction } from './commands.js';
-import { entityColumns, entity, current, scopedEntity, publication, audit, updateRow, missing, createEntityAtPublication } from './client.js';
+import { entityColumns, entity, current, scopedEntity, publication, updateRow, missing, createEntityAtPublication, lockEntities, applyEntityUpdateWithClient, applyEntityArchiveWithClient, applyEntityRelationWithClient } from './client.js';
 type Queryable = Pick<PoolClient,'query'>;
 function draft(row:{definition:SchemaDraft;revision:number;publishedVersion:number;createdAt:string;updatedAt:string}):SchemaDraft {
   return {...row.definition,revision:row.revision,publishedVersion:row.publishedVersion,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString()};
@@ -89,29 +89,12 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     let source:Entity,target:Entity;
     const operation=remove?'entity.unlink':'entity.link';
     return runEntityCommand(pool,scope,operation,key,{id,...input},async client=>{
-      const ids=[...new Set([id,input.targetId])].sort();
-      const locked=new Map<string,Entity>();
-      for(const candidate of ids) {
-        const raw=(await client.query(`SELECT ${entityColumns} FROM enterprise_entities WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[candidate,scope.organizationId])).rows[0];
-        const row=raw?entity(raw):undefined;
-        if(!row) throw missing();
-        locked.set(candidate,row);
-      }
+      const locked=await lockEntities(client,scope,[id,input.targetId]);
       source=locked.get(id)!; target=locked.get(input.targetId)!;
       await checkAccess(client,scope,source,'edit');
       await checkAccess(client,scope,target,'read');
     },async client=>{
-      current(source,input.expectedVersion);
-      if(!remove&&target.archivedAt) throw new EntityError(409,'Archived target cannot link.');
-      const schema=await publication(client,scope,source.schemaId,source.schemaVersion);
-      const declaration=Object.hasOwn(schema.relations,input.name)?schema.relations[input.name]:undefined;
-      if(!declaration||declaration.targetSchemaId!==target.schemaId) bad('Undeclared relation or wrong target schema.');
-      const params=[id,input.name,input.targetId];
-      const changed=remove
-        ?await client.query('DELETE FROM enterprise_relations WHERE source_id=$1 AND name=$2 AND target_id=$3 RETURNING source_id',params)
-        :await client.query('INSERT INTO enterprise_relations(source_id,name,target_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING source_id',params);
-      if(!changed.rows.length) return source;
-      return updateRow(client,scope,source,operation,input);
+      return applyEntityRelationWithClient(client,scope,source,target,input,remove);
     });
   }
 
@@ -226,14 +209,10 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     find(scope,id) { return scopedEntity(pool,scope,uuid(id)); },
     update(scope,id,input,key) {
       input={...input,title:title(input.title)};
-      return mutate(scope,id,input.expectedVersion,key,'entity.update',input,async(client,before)=>{
-        const schema=await publication(client,scope,before.schemaId,before.schemaVersion);
-        const attributes=validateAttributes(schema,input.attributes);
-        return updateRow(client,scope,before,'entity.update',input,{title:input.title,attributes});
-      });
+      return mutate(scope,id,input.expectedVersion,key,'entity.update',input,(client,before)=>applyEntityUpdateWithClient(client,scope,before,input));
     },
     archive(scope,id,expectedVersion,key) {
-      return mutate(scope,id,expectedVersion,key,'entity.archive',{expectedVersion},(client,before)=>updateRow(client,scope,before,'entity.archive',{expectedVersion},undefined,true),'owner');
+      return mutate(scope,id,expectedVersion,key,'entity.archive',{expectedVersion},(client,before)=>applyEntityArchiveWithClient(client,scope,before,expectedVersion),'owner');
     },
     link(scope,id,input,key) { return relationCommand(scope,id,input,key,false); },
     unlink(scope,id,input,key) { return relationCommand(scope,id,input,key,true); },
