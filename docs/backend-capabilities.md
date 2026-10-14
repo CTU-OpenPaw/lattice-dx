@@ -6,14 +6,14 @@ Quyết định 14/10/2026: **engine quản lý dữ liệu nghiệp vụ dùng 
 
 | Nhóm | Nền hiện có | Phần phải xây thêm |
 | --- | --- | --- |
-| Dữ liệu nghiệp vụ | Records nền, task/file links; schema có phiên bản, typed entity CRUD/quan hệ/archive/audit; chia sẻ read/edit cho người/phòng ban | Block dữ liệu trong workflow, query theo thuộc tính, bulkimport/migration cần đợt tiếp |
-| Tổ chức và quyền | Keycloak, JWT tenant/role, owner/exact-assignee guards, directory snapshot; entity grants và thu hồi với current membership | Người phụ trách, membership lifecycle, phân cấp tổ chức và delegation nghiệp vụ |
-| Công việc và phê duyệt | Giao cá nhân/phòng ban, quyết định, workflow waits/deadline | Claim, chuyển giao, hủy, hạn xử lý, quyền người nhận cũ được thu hồi |
-| Action/block | Create record/task, connector dispatch, input binding và execution evidence | Hợp đồng đăng ký/version/output chung; read/query/update/link/archive và lifecycle blocks |
-| Quy trình | Draft/publish, pinned version, state/role guards, audit, waits/callback, eq/gt/exists | Timer/compound conditions/cancel, service step chạy dưới authority rõ ràng; parallel/join cần thiết kế riêng |
-| Sự kiện/tích hợp | Durable outbox, retry/lease, fixed receiver, callback quyền connector | Catalog/ingress/source provenance/subscriptions/configuration server-side và diagnostics |
-| Vòng đời module | Workflow export/import bundle | Manifest nhóm schemas/actions/workflows/permissions; dependencies, enable/disable, phiên bản và gói cấu hình |
-| Vận hành/khôi phục | CI/tests, container config, health, restart persistence, scoped audit | Readiness/diagnostics, backup/isolated restore, quản lý retention và bằng chứng phục hồi |
+| Dữ liệu nghiệp vụ | Records/task/files; typed schema publication/CRUD/relations/archive/audit; grants; pinned typed query theo thuộc tính | Bulk import/export/migration và contextual attachments đang theo kế hoạch tiếp |
+| Tổ chức và quyền | Keycloak/JWT, exact-resource guards; current directory/grants; hierarchy metadata/manager và snapshot revision | Federation/account provisioning, delegation và field ACL ngoài v1 |
+| Công việc và phê duyệt | Giao việc/claim queue/chuyển/hủy/deadline/history; thu hồi evidence người cũ; workflow waits/completion | Cấu hình lifecycle thành block và escalation nghiệp vụ cần nối orchestration |
+| Action/block | Record/task/connector workflow blocks;7 entity builtin API blocks có input/output/version | Typed entity execution trong workflow chưa nghiệm thu |
+| Quy trình | Draft/publish/pin, guards AND/OR, audit, waits/callback, cancel/transfer atomically | Timer/service step đang triển khai; parallel/join ngoài v1 |
+| Sự kiện/tích hợp | Durable outbox/retry/lease; signed ingress +pinned subscriptions/provenance/dedupe | Adapter n8n/broker/agent do Nhi nối; event-to-transition correlation ngoài v1 |
+| Vòng đời module | Bundle và enterprise manifest schemas/blocks/workflows/dependencies; install/enable/disable newstarts | Dynamic executable plugin, destructive uninstall/migration không thuộc v1 |
+| Vận hành/khôi phục | CI,health/readiness/diagnostics/correlation,retention preview; local backup+isolated restore evidence | Offsite/encryption/automatic retention/HA không được coi đã triển khai |
 
 Đây là phạm vi đích; các ô phải xây thêm chưa được coi là đã có. Nhóm dữ liệu đầu tiên có implementation và bằng chứng trong [enterprise data](enterprise-data.md)/[verification](verification.md); các nhóm còn lại chỉ hiện thực những phần ghi ở cột nền hiện có. Không gọi toàn bộ nền tảng hoàn chỉnh chỉ vì có sơ đồ hoặc các route khai báo.
 
