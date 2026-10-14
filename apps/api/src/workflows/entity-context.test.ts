@@ -61,4 +61,3 @@ test('entity list uses shared owner role and assignee SQL policy before limit on
  expect(call[0]).toContain('r.owner_id=$2');expect(call[0]).toContain('r.data->>');expect(call[0].indexOf('r.data->>')).toBeLessThan(call[0].indexOf(' LIMIT '));expect(call[1]).toEqual(expect.arrayContaining([['x:1'],['assigned'],11,20]));
  expect(f.list).toHaveBeenCalledWith('org',expect.objectContaining({query:f.query}));expect(f.pool.query).not.toHaveBeenCalled();
 });
-
