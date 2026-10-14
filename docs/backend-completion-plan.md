@@ -56,12 +56,12 @@ Backend nền hoàn thiện khi mỗi năng lực dưới đây có implementati
 | --- | --- | --- |
 | 1 | Hoàn thành generic task lifecycle; workflow liên kết thuộc đợt3 | Signed HTTP/PG claim/transfer/cancel/deadline, 105 queue +107 history paging, rollback/replay/max1, review fix7daf50a |
 | 2 | Typed query +7 entity block APIs hoàn thành; execution trong workflow thuộc đợt3 | Precision/ACL/pinned schema/mixed type/105 paging/max1; REST↔block receipts; reviewfixf7b977f |
-| 3 | Compound/cancel/transfer, timerservice và 7 typed entity workflow blocks đã nghiệm thu; final re-review đang chốt |19fff8a/207a993/bfc64a2/410c488; current service, pin, same-client rollback, metadata-only evidence, grant/revoke, replay current block capability, 5-way dedupe/max1 |
+| 3 | Compound/cancel/transfer, timerservice và 7 typed entity workflow blocks đã nghiệm thu/review |19fff8a/207a993/bfc64a2/410c488; current service, pin, same-client rollback, metadata-only evidence, grant/revoke, replay current block capability, 5-way dedupe/max1 |
 | 4 | Hoàn thành metadata hierarchy/current directory snapshot | Signed role checks +private snapshotmove/disable/rollback/cycle race/105paging/max1; Unicode canonical và diagnosticsreview đã sửa |
 | 5 | Signed ingress/subscriptions đã nghiệm thu | fc84078, atomic multi-sub PG rollback/dedupe/race/current source/max1; review không còn lỗi |
 | 6 | Module nghiệm thu/review đạt |49905be +763b24e, reversedbundle/installPGdeadlockRED→sortedGREEN; atomicresources/startgates/history/max1 |
 | 7 | Hoàn thành contextual attachment/import/export/migration, review đạt |97da1ae/6eccd6b/94e6f45; rebuilt signed HTTP +PG batchrollback/5waydedupe/scan/revoke/tenant/migrationrace/relations/pin/max1, query/sharing regressions đạt |
 | 8 | Local recovery/readiness/diagnostics/retention preview đã kiểm | Dump/checksum, final restore46 bảng +sentinel; signed diagnostics/currenttenantdryrun. Offsite/automaticretention/HA vẫn ngoài local v1 |
-| 9 | Whole check và regression chain đã chạy; final review/CI đang chốt |375 tests/59 files, typecheck/build; API index/catalog/handoff và installed dependency inventory; không thêm dependency hoặc sửa upstream |
+| 9 | Nghiệm thu local và final review đạt; PR #13 đã cập nhật, CI kiểm riêng trên GitHub |375 tests/59 files, typecheck/build; API index/catalog/handoff và installed dependency inventory; final review không còn P1/P2. Chưa merge/release |
 
 Docker Desktop bị lỗi khởi động là vấn đề môi trường riêng; phục hồi socket không phải chứng minh root cause đã được sửa.
