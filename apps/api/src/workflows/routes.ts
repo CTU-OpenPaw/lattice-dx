@@ -6,6 +6,7 @@ import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { availableTransitions, parseCreate, parseCommand, WorkflowError } from './policy.js';
 import type { WorkflowRepository } from './types.js';
 import { PageError,pageResult,parsePage,textFilter } from '../pagination.js';
+import {parseTimerRetry} from './timer-policy.js';
 import {parseLifecycle} from './lifecycle-database.js';
 import { parseCompletion } from './completion-policy.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository;definitionRegistry?:DefinitionRegistry};
@@ -45,10 +46,24 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       if(!repo.listWaits)throw new WorkflowError(503,'Workflow waits chưa cấu hình.');
       return repo.listWaits(workflowId(req.params.id),actors.get(req)!,parsePage(req.query));
     });
+    routes.get('/v1/workflow-services',async req=>{
+      if(!repo.listServices)throw new WorkflowError(503,'Workflow services unavailable.');
+      return {items:await repo.listServices(actors.get(req)!)};
+    });
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/timers',async req=>{
+      if(!repo.listTimers)throw new WorkflowError(503,'Workflow timers unavailable.');
+      return repo.listTimers(workflowId(req.params.id),actors.get(req)!,parsePage(req.query));
+    });
+    routes.post<{Params:{id:string;timerId:string}}>('/v1/workflows/:id/timers/:timerId/retry',async req=>{
+      const value=parseTimerRetry(req.body);if(!value)throw new WorkflowError(400,'Invalid timer retry.');
+      if(!repo.retryTimer)throw new WorkflowError(503,'Workflow timers unavailable.');
+      return repo.retryTimer(workflowId(req.params.id),workflowId(req.params.timerId),value.expectedVersion,actors.get(req)!,idempotencyKey(req));
+    });
     routes.get('/v1/workflow-blocks',async req=>({items:[
       {id:'records.create',version:1,title:'Create record',requiredRole:'records:write'},
       {id:'tasks.create',version:1,title:'Create task',requiredRole:'tasks:assign'},
       {id:'connectors.dispatch',version:1,title:'Dispatch connector',requiredRole:'workflow:integrate'},
+      {id:'timers.schedule',version:1,title:'Schedule service transition',requiredRole:'workflow:schedule'},
     ].filter(block=>actors.get(req)!.roles.includes(block.requiredRole))}));
     routes.get('/v1/workflow-definitions',async req=>{
       const actor=actors.get(req)!;

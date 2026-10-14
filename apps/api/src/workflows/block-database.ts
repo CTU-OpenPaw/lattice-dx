@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import { randomUUID } from 'node:crypto';
 import type { PoolClient } from 'pg';
-import { isRecordId, type WorkflowActor, type WorkflowConnectorEvent, type WorkflowRun, type WorkflowStep, type WorkflowWaitConfig } from '@dx/contracts';
+import { isRecordId, type WorkflowActor, type WorkflowConnectorEvent, type WorkflowRun, type WorkflowStep, type WorkflowWaitConfig, type WorkflowDefinition } from '@dx/contracts';
 import { authorizeBlock, boundedString, resolveBinding } from './block-policy.js';
+import { scheduleTimer } from './timer-database.js';
 import { WorkflowError } from './policy.js';
 function title(value: string) {
   if (!boundedString(value, 200) || !value.trim()) throw new WorkflowError(400, 'Title block không hợp lệ.');
@@ -13,7 +14,7 @@ function subject(value: string) {
   return value;
 }
 /** All reads and writes use the caller's transaction connection, including directory routing. */
-export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], run: WorkflowRun, input: Record<string, string>, actor: WorkflowActor, wait?: WorkflowWaitConfig): Promise<void> {
+export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], run: WorkflowRun, input: Record<string, string>, actor: WorkflowActor, wait?: WorkflowWaitConfig, definition?:WorkflowDefinition): Promise<void> {
   const results = new Map<string, { id?: string; eventId?: string }>();
   for (const [stepIndex, step] of steps.entries()) {
     authorizeBlock(step, actor);
@@ -62,6 +63,12 @@ export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], r
       const id = randomUUID();
       await client.query('INSERT INTO foundation_tasks(id,title,organization_id,assignee_id,created_by,record_id) VALUES($1,$2,$3,$4,$5,$6)', [id, taskTitle, actor.organizationId, assigneeId, actor.subject, recordId ?? null]);
       result = { id };
+    } else if (step.action === 'timers.schedule') {
+      const snapshot=Object.fromEntries(Object.entries(step.input.input).map(([name,binding])=>[name,resolve(binding)]));
+      if(!definition)throw new WorkflowError(400,'Timer definition unavailable.');
+      const timer=await scheduleTimer(client,run,step,snapshot,definition);
+      resolved={afterSeconds:String(step.input.afterSeconds),serviceId:step.input.serviceId,transitionId:step.input.transitionId,input:snapshot};
+      result={id:timer.id};run.waiting=true;
     } else {
       const payload = Object.fromEntries(Object.entries(step.input.payload ?? {}).map(([key, binding]) => [key, resolve(binding)]));
       const eventId = randomUUID();

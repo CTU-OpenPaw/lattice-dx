@@ -78,12 +78,18 @@ export function validateSteps(value: unknown, dataFields: Set<string>, inputFiel
           binding(value);
         }
       }
+    } else if (step.action === 'timers.schedule') {
+      if (step.assignment !== undefined || step !== value.at(-1)) fail();
+      keys(step.input, ['afterSeconds','serviceId','transitionId','input']);
+      if (!Number.isSafeInteger(step.input.afterSeconds) || Number(step.input.afterSeconds)<1 || Number(step.input.afterSeconds)>604800 || typeof step.input.serviceId !== 'string' || step.input.serviceId.length>64 || !/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/.test(step.input.serviceId) || !safeBlockName(step.input.transitionId)) fail();
+      if (!object(step.input.input) || Object.keys(step.input.input).length>50) fail();
+      for (const [name,value] of Object.entries(step.input.input)) {if (!safeBlockName(name)) fail();binding(value);}
     } else fail();
     earlier.set(step.id, step.action);
   }
 }
 export function authorizeBlock(step: WorkflowStep, actor: WorkflowActor) {
-  const role = { 'records.create': 'records:write', 'tasks.create': 'tasks:assign', 'connectors.dispatch': 'workflow:integrate' }[step.action];
+  const role = { 'records.create': 'records:write', 'tasks.create': 'tasks:assign', 'connectors.dispatch': 'workflow:integrate', 'timers.schedule':'workflow:schedule' }[step.action];
   if (!actor.roles.includes(role)) throw new WorkflowError(403, 'Không có quyền thực hiện block.');
 }
 export function resolveBinding(binding: WorkflowBinding, run: WorkflowRun, input: Record<string, string>, actor: WorkflowActor, results: Map<string, { id?: string }>): string {

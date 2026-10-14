@@ -39,6 +39,8 @@ export function lifecycleDatabase(s:Services){
    const waits=(await c.query("SELECT * FROM workflow_waits WHERE run_id=$1 AND status='pending' ORDER BY id FOR UPDATE",[id])).rows;
    let next:WorkflowRun;
    if(operation==='cancel'){
+    await c.query("SELECT id FROM workflow_timers WHERE run_id=$1 AND status='pending' ORDER BY id FOR UPDATE",[id]);
+    await c.query("UPDATE workflow_timers SET status='cancelled',completed_at=now() WHERE run_id=$1 AND status='pending'",[id]);
     const tasks=(await c.query(`SELECT * FROM foundation_tasks WHERE organization_id=$2 AND status='pending' AND id IN (
      SELECT task_id FROM workflow_task_links WHERE run_id=$1 UNION SELECT id FROM workflow_waits WHERE run_id=$1 AND kind='task'
      UNION SELECT (result->>'id')::uuid FROM workflow_action_results WHERE run_id=$1 AND action='tasks.create' AND result->>'id' IS NOT NULL

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CancelWorkflow, TransferWorkflowTask, CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowActionResult, WorkflowAudit, WorkflowEvent, WorkflowRun, WorkflowWait, WorkflowCompletion, WorkflowCompletionReceipt } from '@dx/contracts';
+import type { CancelWorkflow, TransferWorkflowTask, CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowActionResult, WorkflowAudit, WorkflowEvent, WorkflowRun, WorkflowWait, WorkflowCompletion, WorkflowCompletionReceipt, WorkflowTimer } from '@dx/contracts';
 import type {PoolClient} from 'pg';
 import type { FileItem } from '../foundation.js';
 import type { Page, PageQuery } from '../pagination.js';
@@ -12,6 +12,11 @@ export interface WorkflowJobs {
 }
 export type SyncJob={id:string;status:'pending'|'processing'|'succeeded'|'failed'|'cancelled';attempts:number;lastError:string|null};
 export interface WorkflowRepository {
+  transitionWithClient?(client:PoolClient,id:string,input:TransitionCommand,actor:WorkflowActor,key:string,internal?:{timerId:string}):Promise<WorkflowRun>;
+  tickOne?():Promise<{timerId:string;status:WorkflowTimer['status']}|undefined>;
+  listTimers?(id:string,actor:WorkflowActor,page:PageQuery):Promise<Page<WorkflowTimer>>;
+  retryTimer?(id:string,timerId:string,expectedVersion:number,actor:WorkflowActor,key:string):Promise<WorkflowTimer>;
+  listServices?(actor:WorkflowActor):Promise<{id:string;enabled:boolean}[]>;
   createWithClient?(client:PoolClient,input:CreateWorkflow & {definitionVersion?:number},actor:WorkflowActor,key:string):Promise<WorkflowRun>;
   cancel?(id:string,value:CancelWorkflow,actor:WorkflowActor,key:string):Promise<WorkflowRun>;
   taskTransfer?(id:string,value:TransferWorkflowTask,actor:WorkflowActor,key:string):Promise<WorkflowRun>;

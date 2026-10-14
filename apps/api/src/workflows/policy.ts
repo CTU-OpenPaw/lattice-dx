@@ -37,17 +37,18 @@ export function canUseEvidence(file:{ownerId:string;organizationId:string;scanSt
   return file.organizationId===actor.organizationId&&file.scanStatus==='clean'
     &&(file.ownerId===actor.subject||links.some(link=>canReadRun(link.definition,link.run,actor)));
 }
-export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRun,actor:WorkflowActor){
+export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRun,actor:WorkflowActor,service=false){
+  if(transition.execution==='service'&&!service)throw new WorkflowError(403,'Service transition requires scheduler authority.');
   if(run.organizationId!==actor.organizationId||!actor.roles.includes(transition.role)||(transition.ownerOnly&&actor.subject!==run.ownerId)
     ||transition.assigneeField&&run.data[transition.assigneeField]!==actor.subject)throw new WorkflowError(403,'Không có quyền thực hiện bước.');
 }
 export function availableTransitions(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor){
-  return def.transitions.filter(t=>run.status!=='cancelled'&&!run.waiting&&conditionMatches(t.condition,run.data)&&t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
+  return def.transitions.filter(t=>t.execution!=='service'&&run.status!=='cancelled'&&!run.waiting&&conditionMatches(t.condition,run.data)&&t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
 }
-export function planTransition(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand){
+export function planTransition(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand,service=false){
   const transition=def.transitions.find(t=>t.id===command.action);
   if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
-  authorizeTransition(transition,run,actor);
+  authorizeTransition(transition,run,actor,service);
   if(run.status==='cancelled'||run.waiting||!conditionMatches(transition.condition,run.data)||run.state!==transition.from||run.version!==command.expectedVersion)throw new WorkflowError(409,'Trạng thái hoặc phiên bản không phù hợp.');
   return {transition,input:validateInput(transition.fields,command.input)};
 }

@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from 'pg';
 import { isRecordId, type CreateWorkflow, type TransitionCommand, type WorkflowActor, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowEvent } from '@dx/contracts';
 import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { authorizeTransition, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
+import { timerDatabase,resolveServiceActor } from './timer-database.js';
 import { executeBlocks } from './block-database.js';
 import { createWorkflowTables } from './schema.js';
 import { waitDatabase } from './waits-database.js';
@@ -55,7 +56,8 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     if(!runs.length)return runs;
     const links=(await client.query('SELECT run_id,task_id FROM workflow_task_links WHERE run_id=ANY($1::uuid[])',[runs.map(r=>r.id)])).rows;
     const waits=(await client.query("SELECT run_id FROM workflow_waits WHERE run_id=ANY($1::uuid[]) AND status='pending'",[runs.map(r=>r.id)])).rows;
-    return runs.map(r=>({...r,waiting:waits.some(w=>w.run_id===r.id),...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
+    const timers=(await client.query("SELECT run_id FROM workflow_timers WHERE run_id=ANY($1::uuid[]) AND status='pending'",[runs.map(r=>r.id)])).rows;
+    return runs.map(r=>({...r,waiting:waits.some(w=>w.run_id===r.id)||timers.some(t=>t.run_id===r.id),...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
   }
   async function checkAssigned(client:PoolClient,def:WorkflowDefinition,data:Record<string,string>,actor:WorkflowActor) {
     if(!def.assignedReader)return;
@@ -74,12 +76,13 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     if(inbox){
       where.push("status='active'");
       const choices:string[]=[];
-      for(const d of workflowDefinitions)for(const t of d.transitions)if(actor.roles.includes(t.role)) {
+      for(const d of workflowDefinitions)for(const t of d.transitions)if(t.execution!=='service'&&actor.roles.includes(t.role)) {
         let guard='';
         if(t.condition) guard=` AND ${compileCondition(t.condition,bind)}`;
         choices.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''}${guard})`);
       }
       where.push("NOT EXISTS(SELECT 1 FROM workflow_waits w WHERE w.run_id=workflow_runs.id AND w.status='pending')");
+      where.push("NOT EXISTS(SELECT 1 FROM workflow_timers t WHERE t.run_id=workflow_runs.id AND t.status='pending')");
       where.push(choices.length?`(${choices.join(' OR ')})`:'false');
     }
     if(query.definitionId)where.push(`definition_id=${bind(query.definitionId)}`);
@@ -117,14 +120,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     await client.query('INSERT INTO workflow_starts(organization_id,actor_id,key,fingerprint,run_id,result) VALUES($1,$2,$3,$4,$5,$6)',[actor.organizationId,actor.subject,key,hash,id,JSON.stringify(run)]);
     return run;
   }
-  return {
-    get,listPage,...waitDatabase(pool,get),...lifecycleDatabase({transaction:fn=>transaction(pool,fn),columns:runColumns,serialize:serializeRun,definition}),
-    createWithClient,
-    async create(value,actor,key) {
-      return transaction(pool,client=>createWithClient(client,value,actor,key));
-    },
-    async transition(id,value,actor,key) {
-      return transaction(pool,async client=>{
+  async function transitionWithClient(client:PoolClient,id:string,value:TransitionCommand,actor:WorkflowActor,key:string,internal?:{timerId:string}):Promise<WorkflowRun> {
         const row=(await client.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0];
         if(!row)throw new WorkflowError(404,'Không tìm thấy quy trình.');
         const run=serializeRun(row),def=await definition(run,client);
@@ -132,13 +128,24 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         if(run.status==='cancelled')throw new WorkflowError(409,'Quy trình đã huỷ.');
         const transition=def.transitions.find(t=>t.id===value.action);
         if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
-        authorizeTransition(transition,run,actor);
+        authorizeTransition(transition,run,actor,!!internal);
         const input=validateInput(transition.fields,value.input),hash=fingerprint({...value,input});
         const replay=(await client.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
         if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
+        if(internal) {
+          const timer=(await client.query("SELECT *,due_at<=clock_timestamp() AND available_at<=clock_timestamp() AS due FROM workflow_timers WHERE id=$1 AND run_id=$2 AND status='pending' FOR UPDATE",[internal.timerId,id])).rows[0];
+          if(!timer || !timer.due || timer.organization_id!==run.organizationId || timer.run_version!==run.version || timer.definition_id!==def.id || timer.definition_version!==def.version || timer.transition_id!==value.action || transition.execution!=='service' || key!==`timer:${timer.id}` || fingerprint({action:value.action,expectedVersion:run.version,input:timer.input})!==hash)throw new WorkflowError(403,'Invalid timer execution context.');
+          const current=await resolveServiceActor(client,run.organizationId,timer.service_id);
+          if(current.subject!==actor.subject || JSON.stringify(current.roles)!==JSON.stringify(actor.roles))throw new WorkflowError(403,'Timer authority changed.');
+        }
         run.waiting=!!(await client.query("SELECT 1 FROM workflow_waits WHERE run_id=$1 AND status='pending'",[id])).rowCount;
-        planTransition(def,run,actor,{...value,input});
+        run.waiting=run.waiting || !!(await client.query("SELECT 1 FROM workflow_timers WHERE run_id=$1 AND status='pending' AND ($2::uuid IS NULL OR id<>$2)",[id,internal?.timerId??null])).rowCount;
+        planTransition(def,run,actor,{...value,input},!!internal);
         await validateReferences(client,transition.fields,input,actor,run=>definition(run,client));
+        for(const step of transition.steps??[])if(step.action==='timers.schedule') {
+          const target=def.transitions.find(t=>t.id===step.input.transitionId);
+          if(!target||target.execution!=='service'||target.from!==transition.to||target.ownerOnly||target.assigneeField||transition.wait||transition.task)throw new WorkflowError(400,'Invalid timer target.');
+        }
         if(transition.task)await checkAssigned(client,def,run.data,actor);
         const next=serializeRun((await client.query(`UPDATE workflow_runs SET state=$1,version=version+1,data=data||$2::jsonb,updated_at=now() WHERE id=$3 RETURNING ${runColumns}`,[transition.to,JSON.stringify(input),id])).rows[0]);
         const eventId=randomUUID();
@@ -160,11 +167,20 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
           const event:WorkflowEvent={eventId,eventType:transition.eventType,organizationId:actor.organizationId,runId:id,recordId:id,definitionId:def.id,version:next.version,occurredAt:next.updatedAt,data:next.data};
           await client.query('INSERT INTO workflow_jobs(id,run_id,organization_id,payload) VALUES($1,$2,$3,$4)',[eventId,id,actor.organizationId,JSON.stringify(event)]);
         }
-        await executeBlocks(client,transition.steps ?? [],next,input,actor,transition.wait);
+        if(internal)await client.query("UPDATE workflow_timers SET status='succeeded',completed_at=now() WHERE id=$1",[internal.timerId]);
+        await executeBlocks(client,transition.steps ?? [],next,input,actor,transition.wait,def);
         await client.query('INSERT INTO workflow_commands(run_id,key,actor_id,fingerprint,result) VALUES($1,$2,$3,$4,$5)',[id,key,actor.subject,hash,JSON.stringify(next)]);
         return next;
-      });
+  }
+  return {
+    ...timerDatabase({pool,transaction:fn=>transaction(pool,fn),get,definition,transitionWithClient,columns:runColumns,serialize:serializeRun}),
+    get,listPage,...waitDatabase(pool,get),...lifecycleDatabase({transaction:fn=>transaction(pool,fn),columns:runColumns,serialize:serializeRun,definition}),
+    createWithClient,
+    async create(value,actor,key) {
+      return transaction(pool,client=>createWithClient(client,value,actor,key));
     },
+    transitionWithClient,
+    async transition(id,value,actor,key) {return transaction(pool,client=>transitionWithClient(client,id,value,actor,key));},
     async list(actor,inbox) {return (await listPage(actor,inbox,{limit:100,offset:0,q:''})).items;},
     async history(id,actor) {
       await get(id,actor);

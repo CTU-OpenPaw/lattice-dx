@@ -51,6 +51,23 @@ export async function createWorkflowTables(pool:Pool) {
       completion_key text, completion_fingerprint text, completion_actor text, receipt jsonb, evidence jsonb)`,
     "CREATE UNIQUE INDEX IF NOT EXISTS workflow_waits_pending_run ON workflow_waits(run_id) WHERE status='pending'",
     "CREATE INDEX IF NOT EXISTS workflow_waits_deadline ON workflow_waits(deadline) WHERE status='pending'",
+    `CREATE TABLE IF NOT EXISTS workflow_services (
+      organization_id text NOT NULL,id text NOT NULL,subject text NOT NULL,enabled boolean NOT NULL DEFAULT true,
+      revision integer NOT NULL DEFAULT 1,PRIMARY KEY(organization_id,id))`,
+    `CREATE TABLE IF NOT EXISTS workflow_timers (
+      id uuid PRIMARY KEY,run_id uuid NOT NULL REFERENCES workflow_runs(id),organization_id text NOT NULL,
+      definition_id text NOT NULL,definition_version integer NOT NULL,run_version integer NOT NULL,
+      step_id text NOT NULL,service_id text NOT NULL,transition_id text NOT NULL,input jsonb NOT NULL,
+      due_at timestamptz NOT NULL,available_at timestamptz NOT NULL,
+      status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','cancelled')),
+      attempts integer NOT NULL DEFAULT 0,last_error_code text,receipt jsonb,
+      created_at timestamptz NOT NULL DEFAULT now(),completed_at timestamptz,
+      UNIQUE(run_id,run_version,step_id))`,
+    "CREATE UNIQUE INDEX IF NOT EXISTS workflow_timers_pending_run ON workflow_timers(run_id) WHERE status='pending'",
+    "CREATE INDEX IF NOT EXISTS workflow_timers_ready ON workflow_timers(available_at,id) WHERE status='pending'",
+    `CREATE TABLE IF NOT EXISTS workflow_timer_commands (
+      organization_id text NOT NULL,actor_id text NOT NULL,operation text NOT NULL,key text NOT NULL,
+      fingerprint text NOT NULL,result jsonb NOT NULL,PRIMARY KEY(organization_id,actor_id,operation,key))`,
   ];
   // Replace the old status constraint atomically so concurrent writes never see an unconstrained status.
   statements.push(`DO $$ BEGIN

@@ -104,9 +104,10 @@ export function validateDefinition(value: unknown): DraftDefinition {
   const states = new Set<string>([value.initialState]);
   const subjects = new Set(Object.entries(required).filter(([, type]) => type === 'subject').map(([key]) => key));
   for (const transition of value.transitions) {
-    keys(transition, ['id', 'from', 'to', 'role', 'ownerOnly', 'fields', 'eventType', 'assigneeField', 'steps', 'condition', 'wait']);
+    keys(transition, ['id', 'from', 'to', 'role', 'ownerOnly', 'fields', 'eventType', 'assigneeField', 'steps', 'condition', 'wait', 'execution']);
     if (!name(transition.id) || ids.has(transition.id) || !name(transition.from) || !name(transition.to)
       || !name(transition.role, true)
+      || (transition.execution !== undefined && !['interactive','service'].includes(transition.execution as string))
       || (transition.ownerOnly !== undefined && typeof transition.ownerOnly !== 'boolean')
       || (transition.eventType !== undefined && !name(transition.eventType, true))) {
       fail();
@@ -140,6 +141,10 @@ export function validateDefinition(value: unknown): DraftDefinition {
   for (const transition of value.transitions) {
     if (transition.steps !== undefined) {
       validateSteps(transition.steps, dataFields, new Set(Object.keys(transition.fields)));
+    }
+    for (const step of (transition.steps ?? [])) if (step.action === 'timers.schedule') {
+      const target=value.transitions.find(t=>t.id===step.input.transitionId);
+      if (transition.wait || transition.task || !target || target.from!==transition.to || target.execution!=='service' || target.ownerOnly || target.assigneeField || Object.keys(target.fields).sort().join(',')!==Object.keys(step.input.input).sort().join(',')) fail();
     }
     if (transition.wait) {
       const final = Array.isArray(transition.steps) ? transition.steps.at(-1) : undefined;

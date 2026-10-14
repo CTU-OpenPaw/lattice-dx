@@ -7,7 +7,7 @@ export type WorkflowCompletion = { status: 'succeeded' | 'failed'; result: Recor
 export type WorkflowCompletionReceipt = { waitId: string; runId: string; status: 'succeeded' | 'failed' | 'timed_out'; state: string; version: number };
 export type WorkflowWait = { id: string; runId: string; version: number; kind: 'task' | 'connector'; status: 'pending' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled'; config: WorkflowWaitConfig; deadline: string; createdAt: string; completedAt: string | null; evidence?: {result:Record<string,string>;reason:string|null} | null };
 export type WorkflowTransition = {
-  id: string; from: string; to: string; role: string; ownerOnly?: boolean;
+  id: string; from: string; to: string; role: string; execution?: 'interactive' | 'service'; ownerOnly?: boolean;
   fields: Record<string, WorkflowField>; eventType?: string;
   assigneeField?: string; task?: 'assign' | 'complete'; steps?: WorkflowStep[];
   condition?: WorkflowCondition; wait?: WorkflowWaitConfig;
@@ -38,7 +38,9 @@ export type WorkflowBinding =
   | { source: 'context'; field: 'recordId' | 'title' | 'ownerId' | 'actorId' }
   | { source: 'result'; stepId: string; field: 'id' };
 export type WorkflowConnector = 'n8n' | 'ngsi-ld' | 'agent';
+export type WorkflowTimer = {id:string;runId:string;definitionId:string;definitionVersion:number;runVersion:number;stepId:string;serviceId:string;transitionId:string;status:'pending'|'succeeded'|'failed'|'cancelled';attempts:number;lastErrorCode:string|null;dueAt:string;availableAt:string;createdAt:string;completedAt:string|null;receipt:WorkflowRun|null};
 export type WorkflowStep =
+  | {id:string;action:'timers.schedule';input:{afterSeconds:number;serviceId:string;transitionId:string;input:Record<string,WorkflowBinding>}}
   | { id: string; action: 'records.create'; input: { title: WorkflowBinding } }
   | { id: string; action: 'tasks.create'; input: { title: WorkflowBinding; assigneeId?: WorkflowBinding; recordId?: WorkflowBinding }; assignment?: { kind: 'department'; department: WorkflowBinding; role: string; assigneeId?: WorkflowBinding } }
   | { id: string; action: 'connectors.dispatch'; input: { connectorId: { source: 'literal'; value: WorkflowConnector }; operation: { source: 'literal'; value: string }; payload?: Record<string, WorkflowBinding> } };

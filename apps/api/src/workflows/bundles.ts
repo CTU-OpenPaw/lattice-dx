@@ -32,7 +32,7 @@ export function bundlePreview(bundle: WorkflowBundle) {
     for (const transition of definition.transitions) {
       roles.add(transition.role);
       for (const step of transition.steps ?? []) {
-        roles.add({ 'records.create': 'records:write', 'tasks.create': 'tasks:assign', 'connectors.dispatch': 'workflow:integrate' }[step.action]);
+        roles.add({ 'records.create': 'records:write', 'tasks.create': 'tasks:assign', 'connectors.dispatch': 'workflow:integrate', 'timers.schedule': 'workflow:schedule' }[step.action]);
         if (step.action === 'tasks.create' && step.assignment) roles.add(step.assignment.role);
         if (step.action === 'tasks.create' && transition.wait?.stepId === step.id) roles.add('tasks:decide');
         if (step.action === 'connectors.dispatch' && step.input.connectorId.source === 'literal') {
