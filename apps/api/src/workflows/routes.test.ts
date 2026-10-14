@@ -91,3 +91,15 @@ test('execution history authorizes run access and returns bounded page even for 
     expect((await app.inject({url:`/v1/workflows/${run.id}/executions?limit=101`,headers:await auth()})).statusCode).toBe(400);
   }finally{await app.close();}
 });
+
+test('lifecycle routes validate roles, body, key and UUID before optional repository dispatch',async()=>{
+ const {app}=setup();try{
+  const good={...await auth(['employee','workflow:start','tasks:assign']),'idempotency-key':'cancel'};
+  const url=`/v1/workflows/${run.id}/cancel`,payload={expectedVersion:1,reason:'Stop'};
+  expect((await app.inject({method:'POST',url,headers:await auth(['workflow:start']),payload})).statusCode).toBe(400);
+  expect((await app.inject({method:'POST',url,headers:{...await auth(['manager']),'idempotency-key':'x'},payload})).statusCode).toBe(403);
+  for(const reason of ['', ' ', '🧩'.repeat(501)])expect((await app.inject({method:'POST',url,headers:good,payload:{...payload,reason}})).statusCode).toBe(400);
+  expect((await app.inject({method:'POST',url,headers:good,payload:{...payload,organizationId:'other'}})).statusCode).toBe(400);
+  expect((await app.inject({method:'POST',url:`/v1/workflows/${run.id}/task-transfer`,headers:good,payload:{taskId:run.id,expectedVersion:1,assigneeId:'bob',reason:'Handoff'}})).statusCode).toBe(503);
+ }finally{await app.close();}
+});

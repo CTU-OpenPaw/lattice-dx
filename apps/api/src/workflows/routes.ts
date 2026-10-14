@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { isRecordId, type WorkflowActor, type WorkflowRun } from '@dx/contracts';
+import { isRecordId, type WorkflowActor, type WorkflowRun, type TransferWorkflowTask } from '@dx/contracts';
 import { verifyIdentity, type IdentityConfig } from '../identity.js';
 import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { availableTransitions, parseCreate, parseCommand, WorkflowError } from './policy.js';
 import type { WorkflowRepository } from './types.js';
 import { PageError,pageResult,parsePage,textFilter } from '../pagination.js';
+import {parseLifecycle} from './lifecycle-database.js';
 import { parseCompletion } from './completion-policy.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository;definitionRegistry?:DefinitionRegistry};
 function idempotencyKey(req:FastifyRequest):string {
@@ -79,6 +80,18 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       const input=parseCommand(req.body);if(!input)throw new WorkflowError(400,'Dữ liệu chuyển bước không hợp lệ.');
       const actor=actors.get(req)!;
       return view(await repo.transition(workflowId(req.params.id),input,actor,idempotencyKey(req)),actor);
+    });
+    routes.post<{Params:{id:string}}>('/v1/workflows/:id/cancel',async req=>{
+      const value=parseLifecycle(req.body);if(!value)throw new WorkflowError(400,'Dữ liệu huỷ không hợp lệ.');
+      const actor=actors.get(req)!;if(!actor.roles.includes('workflow:start'))throw new WorkflowError(403,'Không có quyền huỷ quy trình.');
+      const key=idempotencyKey(req);if(!repo.cancel)throw new WorkflowError(503,'Workflow lifecycle chưa cấu hình.');
+      return view(await repo.cancel(workflowId(req.params.id),value,actor,key),actor);
+    });
+    routes.post<{Params:{id:string}}>('/v1/workflows/:id/task-transfer',async req=>{
+      const value=parseLifecycle(req.body,true);if(!value)throw new WorkflowError(400,'Dữ liệu chuyển giao không hợp lệ.');
+      const actor=actors.get(req)!;if(!actor.roles.includes('workflow:start')||!actor.roles.includes('tasks:assign'))throw new WorkflowError(403,'Không có quyền chuyển giao việc.');
+      const key=idempotencyKey(req);if(!repo.taskTransfer)throw new WorkflowError(503,'Workflow lifecycle chưa cấu hình.');
+      return view(await repo.taskTransfer(workflowId(req.params.id),value as TransferWorkflowTask,actor,key),actor);
     });
     routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/executions',async req=>{
       const id=workflowId(req.params.id),actor=actors.get(req)!,query=parsePage(req.query);

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 export type WorkflowActor = { subject: string; organizationId: string; roles: string[] };
 export type WorkflowField = 'text' | 'subject' | 'department' | 'location' | 'file' | 'positiveInteger';
-export type WorkflowCondition = { field: string; operator: 'eq' | 'gt' | 'exists'; value?: string };
+export type WorkflowCondition = { field: string; operator: 'eq' | 'gt' | 'exists'; value?: string } | {all: WorkflowCondition[]} | {any: WorkflowCondition[]};
 export type WorkflowWaitConfig = { stepId: string; successState: string; failureState: string; resultFields: Record<string, 'text' | 'positiveInteger'>; timeoutSeconds: number };
 export type WorkflowCompletion = { status: 'succeeded' | 'failed'; result: Record<string,string>; reason?: string };
 export type WorkflowCompletionReceipt = { waitId: string; runId: string; status: 'succeeded' | 'failed' | 'timed_out'; state: string; version: number };
-export type WorkflowWait = { id: string; runId: string; version: number; kind: 'task' | 'connector'; status: 'pending' | 'succeeded' | 'failed' | 'timed_out'; config: WorkflowWaitConfig; deadline: string; createdAt: string; completedAt: string | null; evidence?: {result:Record<string,string>;reason:string|null} | null };
+export type WorkflowWait = { id: string; runId: string; version: number; kind: 'task' | 'connector'; status: 'pending' | 'succeeded' | 'failed' | 'timed_out' | 'cancelled'; config: WorkflowWaitConfig; deadline: string; createdAt: string; completedAt: string | null; evidence?: {result:Record<string,string>;reason:string|null} | null };
 export type WorkflowTransition = {
   id: string; from: string; to: string; role: string; ownerOnly?: boolean;
   fields: Record<string, WorkflowField>; eventType?: string;
@@ -22,12 +22,14 @@ export type WorkflowRun = {
   id: string; recordId: string; definitionId: string; definitionVersion: number; title: string;
   ownerId: string; organizationId: string; state: string; version: number; data: Record<string,string>;
   createdAt: string; updatedAt: string;
+  status?: 'active' | 'cancelled';
+  cancellation?: {actorId:string;reason:string;at:string} | null;
   taskId?: string;
   waiting?: boolean;
 };
 export type CreateWorkflow = { definitionId: string; title: string; input: Record<string,string> };
 export type TransitionCommand = { action: string; expectedVersion: number; input: Record<string,string> };
-export type WorkflowAudit = {id:string;actorId:string;action:string;fromState:string|null;toState:string;version:number;occurredAt:string};
+export type WorkflowAudit = {id:string;actorId:string;action:string;fromState:string|null;toState:string;version:number;occurredAt:string;metadata?:Record<string,unknown>|null};
 export type WorkflowEvent = {eventId:string;eventType:string;organizationId:string;runId:string;recordId:string;definitionId:string;version:number;occurredAt:string;data:Record<string,string>};
 
 export type WorkflowBinding =
@@ -45,3 +47,6 @@ export type WorkflowActionResult = {
   input: Record<string, string | Record<string, string>>; result: { id?: string; eventId?: string }; occurredAt: string;
 };
 export type WorkflowConnectorEvent = WorkflowEvent & { connectorId: WorkflowConnector; operation: string };
+
+export type CancelWorkflow = {expectedVersion:number;reason:string};
+export type TransferWorkflowTask = CancelWorkflow & {taskId:string;assigneeId:string};

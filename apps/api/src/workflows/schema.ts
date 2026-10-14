@@ -7,6 +7,8 @@ export async function createWorkflowTables(pool:Pool) {
       title text NOT NULL, owner_id text NOT NULL, organization_id text NOT NULL, state text NOT NULL,
       version integer NOT NULL DEFAULT 1, data jsonb NOT NULL DEFAULT '{}',
       created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now())`,
+    "ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active' CHECK(status IN ('active','cancelled'))",
+    'ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS cancellation jsonb',
     'CREATE INDEX IF NOT EXISTS workflow_runs_scope ON workflow_runs(organization_id,updated_at)',
     `CREATE TABLE IF NOT EXISTS workflow_starts (
       organization_id text NOT NULL, actor_id text NOT NULL, key text NOT NULL, fingerprint text NOT NULL,
@@ -19,6 +21,7 @@ export async function createWorkflowTables(pool:Pool) {
       id uuid PRIMARY KEY, run_id uuid NOT NULL REFERENCES workflow_runs(id), actor_id text NOT NULL,
       action text NOT NULL, from_state text, to_state text NOT NULL, version integer NOT NULL,
       occurred_at timestamptz NOT NULL DEFAULT now(), UNIQUE(run_id,version))`,
+    'ALTER TABLE workflow_audit ADD COLUMN IF NOT EXISTS metadata jsonb',
     `CREATE TABLE IF NOT EXISTS workflow_files (
       run_id uuid NOT NULL REFERENCES workflow_runs(id), file_id uuid NOT NULL REFERENCES foundation_files(id),
       PRIMARY KEY(run_id,file_id))`,
@@ -43,11 +46,16 @@ export async function createWorkflowTables(pool:Pool) {
     `CREATE TABLE IF NOT EXISTS workflow_waits (
       id uuid PRIMARY KEY, run_id uuid NOT NULL REFERENCES workflow_runs(id), organization_id text NOT NULL,
       version integer NOT NULL, kind text NOT NULL CHECK(kind IN ('task','connector')), assignee_id text, connector_id text,
-      config jsonb NOT NULL, status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','timed_out')),
+      config jsonb NOT NULL, status text NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','succeeded','failed','timed_out','cancelled')),
       deadline timestamptz NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz,
       completion_key text, completion_fingerprint text, completion_actor text, receipt jsonb, evidence jsonb)`,
     "CREATE UNIQUE INDEX IF NOT EXISTS workflow_waits_pending_run ON workflow_waits(run_id) WHERE status='pending'",
     "CREATE INDEX IF NOT EXISTS workflow_waits_deadline ON workflow_waits(deadline) WHERE status='pending'",
   ];
+  // Replace the old status constraint atomically so concurrent writes never see an unconstrained status.
+  statements.push(`DO $$ BEGIN
+    ALTER TABLE workflow_waits DROP CONSTRAINT IF EXISTS workflow_waits_status_check;
+    ALTER TABLE workflow_waits ADD CONSTRAINT workflow_waits_status_check CHECK(status IN ('pending','succeeded','failed','timed_out','cancelled'));
+  END $$`);
   for(const statement of statements) await pool.query(statement);
 }

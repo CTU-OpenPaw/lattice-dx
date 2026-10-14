@@ -7,11 +7,12 @@ import { authorizeTransition, canReadRun, canUseEvidence, planTransition, valida
 import { executeBlocks } from './block-database.js';
 import { createWorkflowTables } from './schema.js';
 import { waitDatabase } from './waits-database.js';
-import { numericPattern } from './completion-policy.js';
+import { compileCondition } from './conditions.js';
+import {lifecycleDatabase} from './lifecycle-database.js';
 import type { WorkflowRepository } from './types.js';
 import { pageResult, type PageQuery } from '../pagination.js';
 
-const runColumns='id,id AS "recordId",definition_id AS "definitionId",definition_version AS "definitionVersion",title,owner_id AS "ownerId",organization_id AS "organizationId",state,version,data,created_at AS "createdAt",updated_at AS "updatedAt"';
+const runColumns='id,id AS "recordId",definition_id AS "definitionId",definition_version AS "definitionVersion",title,owner_id AS "ownerId",organization_id AS "organizationId",state,version,data,status,cancellation,created_at AS "createdAt",updated_at AS "updatedAt"';
 function serializeRun(row:WorkflowRun):WorkflowRun {
   return {...row,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString()};
 }
@@ -69,16 +70,11 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     for(const d of workflowDefinitions){const a=d.assignedReader;if(a&&actor.roles.includes(a.role))readers.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=ANY(${bind(a.states)}::text[]) AND data->>${bind(a.field)}=$2)`);}
     const where=['organization_id=$1',`(${readers.join(' OR ')})`];
     if(inbox){
+      where.push("status='active'");
       const choices:string[]=[];
       for(const d of workflowDefinitions)for(const t of d.transitions)if(actor.roles.includes(t.role)) {
         let guard='';
-        if(t.condition) {
-          const field=bind(t.condition.field), raw=`data->${field}`, text=`data->>${field}`;
-          const typed=`jsonb_typeof(${raw})='string'`;
-          if(t.condition.operator==='exists') guard=` AND (${typed} AND length(${text})>0)`;
-          else if(t.condition.operator==='eq') guard=` AND (${typed} AND ${text}=${bind(t.condition.value)})`;
-          else guard=` AND (CASE WHEN ${typed} AND length(${text})<=20 AND ${text} ~ ${bind(numericPattern)} AND ${text} !~ '[^0-9.-]' THEN (${text})::double precision>${bind(t.condition.value)}::double precision ELSE false END)`;
-        }
+        if(t.condition) guard=` AND ${compileCondition(t.condition,bind)}`;
         choices.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''}${guard})`);
       }
       where.push("NOT EXISTS(SELECT 1 FROM workflow_waits w WHERE w.run_id=workflow_runs.id AND w.status='pending')");
@@ -98,7 +94,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     return (await taskIds([run]))[0];
   }
   return {
-    get,listPage,...waitDatabase(pool,get),
+    get,listPage,...waitDatabase(pool,get),...lifecycleDatabase({transaction:fn=>transaction(pool,fn),columns:runColumns,serialize:serializeRun,definition}),
     async create(value,actor,key) {
       return transaction(pool,async client=>{
         await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify([actor.organizationId,actor.subject,key])]);
@@ -128,6 +124,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         if(!row)throw new WorkflowError(404,'Không tìm thấy quy trình.');
         const run=serializeRun(row),def=await definition(run,client);
         if(!canReadRun(def,run,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
+        if(run.status==='cancelled')throw new WorkflowError(409,'Quy trình đã huỷ.');
         const transition=def.transitions.find(t=>t.id===value.action);
         if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
         authorizeTransition(transition,run,actor);
@@ -166,7 +163,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     async list(actor,inbox) {return (await listPage(actor,inbox,{limit:100,offset:0,q:''})).items;},
     async history(id,actor) {
       await get(id,actor);
-      const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version LIMIT 100',[id])).rows;
+      const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,metadata,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version LIMIT 100',[id])).rows;
       return rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()}));
     },
     async executions(id,actor,query) {
@@ -180,6 +177,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         const row=(await client.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0];
         if(!row||!canReadRun(await definition(row,client),row,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
         if(!actor.roles.includes('workflow:sync'))throw new WorkflowError(403,'Không có quyền chạy lại đồng bộ.');
+        if(row.status==='cancelled')throw new WorkflowError(409,'Quy trình đã huỷ.');
         const hash=fingerprint({action:'sync.retry',expectedVersion:0,input:{}});
         const replay=(await client.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
         if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result.retried;}

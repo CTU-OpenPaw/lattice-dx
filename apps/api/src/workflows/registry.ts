@@ -5,7 +5,7 @@ import { getDefinition, workflowDefinitions } from '../../../../solutions/workfl
 import type { Page, PageQuery } from '../pagination.js';
 import { validateSteps } from './block-policy.js';
 import { WorkflowError } from './policy.js';
-import { strictNumber } from './completion-policy.js';
+import { validCondition } from './conditions.js';
 
 export type DraftDefinition = Omit<WorkflowDefinition, 'version'>;
 export type WorkflowDraft = {
@@ -146,11 +146,7 @@ export function validateDefinition(value: unknown): DraftDefinition {
       if (!final || final.id !== transition.wait.stepId || !['tasks.create','connectors.dispatch'].includes(final.action)) fail();
     }
     if (transition.condition !== undefined) {
-      keys(transition.condition, ['field','operator','value']);
-      const condition = transition.condition;
-      if (!name(condition.field) || !dataFields.has(condition.field) || typeof condition.operator !== 'string' || !['eq','gt','exists'].includes(condition.operator)
-        || (condition.operator === 'exists' ? condition.value !== undefined : typeof condition.value !== 'string' || condition.value.length > 2000)
-        || condition.operator === 'gt' && strictNumber(condition.value) === undefined) fail();
+      if(!validCondition(transition.condition,dataFields)) fail();
     }
   }
 

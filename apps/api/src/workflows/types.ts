@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowActionResult, WorkflowAudit, WorkflowEvent, WorkflowRun, WorkflowWait, WorkflowCompletion, WorkflowCompletionReceipt } from '@dx/contracts';
+import type { CancelWorkflow, TransferWorkflowTask, CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowActionResult, WorkflowAudit, WorkflowEvent, WorkflowRun, WorkflowWait, WorkflowCompletion, WorkflowCompletionReceipt } from '@dx/contracts';
 import type { FileItem } from '../foundation.js';
 import type { Page, PageQuery } from '../pagination.js';
 export type WorkflowQuery=PageQuery & {state?:string;definitionId?:string};
@@ -9,8 +9,10 @@ export interface WorkflowJobs {
   succeed(job:OutboxJob):Promise<void>;
   fail(job:OutboxJob,error:string):Promise<void>;
 }
-export type SyncJob={id:string;status:'pending'|'processing'|'succeeded'|'failed';attempts:number;lastError:string|null};
+export type SyncJob={id:string;status:'pending'|'processing'|'succeeded'|'failed'|'cancelled';attempts:number;lastError:string|null};
 export interface WorkflowRepository {
+  cancel?(id:string,value:CancelWorkflow,actor:WorkflowActor,key:string):Promise<WorkflowRun>;
+  taskTransfer?(id:string,value:TransferWorkflowTask,actor:WorkflowActor,key:string):Promise<WorkflowRun>;
   listWaits?(id:string,actor:WorkflowActor,query:PageQuery):Promise<Page<WorkflowWait>>;
   completeWait?(id:string,value:WorkflowCompletion,actor:WorkflowActor,key:string):Promise<WorkflowCompletionReceipt>;
   expireWaits?():Promise<number>;
