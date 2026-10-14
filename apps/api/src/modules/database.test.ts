@@ -42,7 +42,7 @@ const manifest = {
 };
 function fixture(failReceipt = false) {
   const sql: string[] = [];
-  const query = vi.fn(async (text: string) => {
+  const query = vi.fn(async (text: string, _values?: unknown[]) => {
     sql.push(text);
     if (
       failReceipt &&
@@ -73,6 +73,21 @@ it("preview checks resources without mutations or acquiring a pool connection", 
   expect(result.hash).toBe(manifestHash(manifest));
   expect(f.sql.every((s) => s.startsWith("SELECT"))).toBe(true);
   expect(f.pool.connect).not.toHaveBeenCalled();
+});
+it("inserts schemas and workflows in canonical ID order for concurrent imports", async () => {
+  const f = fixture();
+  const repo = await modulesDatabase(f.pool, {} as never);
+  const reversed = {
+    ...manifest,
+    schemas: ["schema-b", "schema-a"].map(id => ({id,title:id,fields:{}})),
+    bundle: {...manifest.bundle, definitions: ["flow-b", "flow-a"].map(id => ({...manifest.bundle.definitions[0],id}))},
+  };
+  const result = await repo.install(reversed, actor, "ordered");
+  const calls = (f.client.query as ReturnType<typeof vi.fn>).mock.calls;
+  const insertedIds = (prefix:string) => calls.filter(([sql]) => sql.startsWith(prefix)).map(([,values]) => values[1]);
+  expect(insertedIds("INSERT INTO enterprise_schemas")).toEqual(["schema-a", "schema-b"]);
+  expect(insertedIds("INSERT INTO workflow_definition_drafts")).toEqual(["flow-a", "flow-b"]);
+  expect(result.workflows.map(w => w.definitionId)).toEqual(["flow-a", "flow-b"]);
 });
 it("receipt failure rolls back schemas, publication, draft, provenance and ledger on one client", async () => {
   const f = fixture(true);

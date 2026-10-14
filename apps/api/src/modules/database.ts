@@ -327,7 +327,10 @@ export async function modulesDatabase(
             actor.subject,
           ],
         );
-        for (const schema of manifest.schemas) {
+        // Match registry batch imports so concurrent inserts acquire unique-key locks
+        // in the same order, regardless of the manifest's resource ordering.
+        const schemas = [...manifest.schemas].sort((a, b) => a.id.localeCompare(b.id));
+        for (const schema of schemas) {
           await client.query(
             "INSERT INTO enterprise_schemas(organization_id,id,definition,published_version,published_revision) VALUES($1,$2,$3,1,1)",
             [actor.organizationId, schema.id, JSON.stringify(schema)],
@@ -337,7 +340,8 @@ export async function modulesDatabase(
             [actor.organizationId, schema.id, JSON.stringify(schema)],
           );
         }
-        for (const definition of manifest.bundle.definitions) {
+        const definitions = [...manifest.bundle.definitions].sort((a, b) => a.id.localeCompare(b.id));
+        for (const definition of definitions) {
           await insertDraft(client, definition, actor);
           await client.query(
             "INSERT INTO enterprise_module_workflows(organization_id,module_id,module_version,definition_id) VALUES($1,$2,$3,$4)",
@@ -356,8 +360,8 @@ export async function modulesDatabase(
           hash: check.hash,
           revision: 1,
           enabled: false,
-          schemas: check.resources.schemas,
-          workflows: check.resources.workflows.map((definitionId) => ({
+          schemas: [...check.resources.schemas].sort(),
+          workflows: [...check.resources.workflows].sort().map((definitionId) => ({
             definitionId,
           })),
           blocks: manifest.blocks,
