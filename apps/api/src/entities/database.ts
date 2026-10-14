@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from 'pg';
 import { accessPredicate, checkAccess, type AccessMode } from './access.js';
 import {compileEntityQuery,parseEntityQuery} from './query.js';
 import { createDirectoryDatabase } from '../directory-database.js';
+import {initializeEntityEvents,type EntityEvent} from './events.js';
 import { parseCreateKey } from '../create-command.js';
 import { pageResult, type PageQuery } from '../pagination.js';
 import { bad, EntityError, parseSchema, parseShare, principalKind, principalId, title, uuid, version } from './policy.js';
@@ -66,6 +67,7 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     organization_id text NOT NULL, actor_id text NOT NULL, operation text NOT NULL, key text NOT NULL,
     fingerprint text NOT NULL, result jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(organization_id,actor_id,operation,key)
   )`);
+  await initializeEntityEvents(pool);
 
   async function getDraft(db:Queryable,scope:Scope,id:string,lock=false):Promise<SchemaDraft|undefined> {
     const row=(await db.query(`SELECT ${draftColumns} FROM enterprise_schemas WHERE organization_id=$1 AND id=$2${lock?' FOR UPDATE':''}`,[scope.organizationId,id])).rows[0];
@@ -116,6 +118,16 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     },'owner');
   }
   return {
+    async events(scope,id,page) {
+      validatePage(page);id=uuid(id);
+      if(!await scopedEntity(pool,scope,id)) throw missing();
+      const result=await pool.query(`SELECT a.id,a.entity_id AS "entityId",a.schema_id AS "schemaId",a.schema_version AS "schemaVersion",
+        a.from_version AS "fromVersion",a.to_version AS "toVersion",a.operation,a.actor_subject AS "actorSubject",a.occurred_at AS "occurredAt"
+        FROM enterprise_entity_events a JOIN enterprise_entities e ON e.id=a.entity_id
+        WHERE a.entity_id=$1 AND a.organization_id=$2 AND ${accessPredicate('e','$3','$2','read')}
+        AND ($4='' OR strpos(lower(a.operation),lower($4))>0) ORDER BY a.occurred_at DESC,a.id DESC LIMIT $5 OFFSET $6`,[id,scope.organizationId,scope.actorId,page.q,page.limit+1,page.offset]);
+      return pageResult(result.rows.map((row:EntityEvent)=>({...row,occurredAt:new Date(row.occurredAt).toISOString()})),page);
+    },
     share(scope,id,input,key) { return changeShare(scope,uuid(id),parseShare(input),key,false); },
     revokeShare(scope,id,input,key) {
       input={expectedVersion:version(input.expectedVersion),kind:principalKind(input.kind),principalId:principalId(input.principalId)};

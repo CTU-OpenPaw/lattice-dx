@@ -109,4 +109,9 @@ export function registerEntities(app:FastifyInstance,options:EntityOptions) {
     return repository.shares(scope,id,query);
   });
   route('GET','/v1/entities/:id/history','data:read',async(request,repository,scope)=>repository.history(scope,uuid(params(request).id),page(request)));
+  route('GET','/v1/entities/:id/events','data:read',async(request,repository,scope)=>{
+    const id=uuid(params(request).id),query=page(request);
+    if(!repository.events) throw new EntityError(503,'Entity events are unavailable.');
+    return repository.events(scope,id,query);
+  });
 }

@@ -29,9 +29,27 @@ function setup() {
     publishSchema:vi.fn(async()=>({version:1})),
     relations:vi.fn(async()=>({items:[]})),
     history:vi.fn(async()=>({items:[]})),
+    events:vi.fn(async()=>({items:[],page:{limit:2,offset:1,hasMore:false,nextOffset:null}})),
   } as unknown as EntityRepository;
   return {app:createApi({workerUrl:'http://localhost:1',identity,entities}),entities};
 }
+
+test('event journal requires current signed capability and validates pagination before repository access',async()=>{
+ const {app,entities}=setup();
+ const url=`/v1/entities/${id}/events`;
+ try {
+  expect((await app.inject({url})).statusCode).toBe(401);
+  expect((await app.inject({url,headers:{authorization:`Bearer ${await token([])}`}})).statusCode).toBe(403);
+  const authorization=`Bearer ${await token(['data:read'])}`;
+  expect((await app.inject({url:url+'?limit=2&offset=1',headers:{authorization}})).statusCode).toBe(200);
+  expect(entities.events).toHaveBeenCalledWith({actorId:'alice',organizationId:'org-a'},id,{limit:2,offset:1,q:''});
+  vi.mocked(entities.events!).mockClear();
+  for(const suffix of ['?limit=101','?actorSubject=admin','?offset=-1']) expect((await app.inject({url:url+suffix,headers:{authorization}})).statusCode).toBe(400);
+  expect(entities.events).not.toHaveBeenCalled();
+  vi.mocked(entities.events!).mockRejectedValueOnce(new EntityError(404,'Entity or schema not found.'));
+  expect((await app.inject({url,headers:{authorization}})).statusCode).toBe(404);
+ } finally {await app.close();}
+});
 
 test('all entity endpoints require signed capability and signed tenant',async()=>{
   const {app}=setup();

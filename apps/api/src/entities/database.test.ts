@@ -21,6 +21,31 @@ function fixture() {
   return {pool,statements};
 }
 const scope={actorId:'alice',organizationId:'org-a'};
+test('journal initializes after entity DDL and reads metadata through current ACL before pagination',async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const id='11111111-1111-1111-1111-111111111111';
+ const pool={async query(sql:string,values:unknown[]=[]){calls.push({sql,values});if(sql.includes('SELECT id, schema_id'))return {rows:[{id,ownerId:'alice',organizationId:'org-a',createdAt:new Date(),updatedAt:new Date(),archivedAt:new Date()}]};if(sql.includes('FROM enterprise_entity_events a'))return {rows:[{id,entityId:id,schemaId:'invoice',schemaVersion:2,fromVersion:1,toVersion:2,operation:'entity.update',actorSubject:'admin',occurredAt:new Date('2026-01-01')}]};return {rows:[]};}} as unknown as Pool;
+ const repository=await entityDatabase(pool);
+ expect(calls.findIndex(c=>c.sql.includes('CREATE TABLE IF NOT EXISTS enterprise_entity_events'))).toBeGreaterThan(calls.findIndex(c=>c.sql.includes('CREATE TABLE IF NOT EXISTS enterprise_entities')));
+ expect(repository.events).toBeTypeOf('function');
+ const result=await repository.events!(scope,id,{limit:1,offset:3,q:'update'});
+ expect(result.items[0]).toEqual({id,entityId:id,schemaId:'invoice',schemaVersion:2,fromVersion:1,toVersion:2,operation:'entity.update',actorSubject:'admin',occurredAt:'2026-01-01T00:00:00.000Z'});
+ const selection=calls.at(-1)!;
+ expect(selection.values).toEqual([id,'org-a','alice','update',2,3]);
+ expect(selection.sql).toContain('enterprise_entity_shares');
+ expect(selection.sql.indexOf('enterprise_entity_shares')).toBeLessThan(selection.sql.indexOf('LIMIT'));
+ expect(selection.sql).not.toContain('a.input');
+ expect(selection.sql).not.toContain('actor_subject=$');
+});
+test('journal rejects invisible entity and invalid pagination before event selection',async()=>{
+ const calls:string[]=[];
+ const pool={async query(sql:string){calls.push(sql);return {rows:[]};}} as unknown as Pool;
+ const repository=await entityDatabase(pool);
+ expect(repository.events).toBeTypeOf('function');
+ await expect(repository.events!(scope,'11111111-1111-1111-1111-111111111111',{limit:1,offset:0,q:''})).rejects.toMatchObject({statusCode:404});
+ await expect(repository.events!(scope,'11111111-1111-1111-1111-111111111111',{limit:101,offset:0,q:''})).rejects.toMatchObject({statusCode:400});
+ expect(calls.some(sql=>sql.includes('FROM enterprise_entity_events'))).toBe(false);
+});
 test('typed query uses pinned publication and SQL ACL before numeric ordering and paging without a transaction',async()=>{
  const calls:{sql:string;values:unknown[]}[]=[];
  const pool={async query(sql:string,values:unknown[]=[]){calls.push({sql,values});return {rows:sql.includes('FROM enterprise_schema_versions')?[{definition:{id:'invoice',title:'Invoice',fields:{amount:{type:'decimal'}},relations:{}},version:2}]:[]};},async connect(){throw new Error('Read must not hold a transaction client');}} as unknown as Pool;

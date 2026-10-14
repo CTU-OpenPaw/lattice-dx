@@ -6,6 +6,7 @@ import { title, uuid, version, validateAttributes, EntityError, bad } from './po
 import type { Entity, EntityCreate, EntityUpdate, RelationInput, SchemaPublication, Scope } from './types.js';
 import {compileEntityQuery,parseEntityQuery} from './query.js';
 import {pageResult} from '../pagination.js';
+import {appendEntityEventWithClient,isEntityEventOperation} from './events.js';
 export type EntityClient = Pick<PoolClient,'query'>;
 type Queryable = EntityClient;
 export const entityColumns=`id, schema_id AS "schemaId", schema_version AS "schemaVersion", title, attributes,
@@ -38,6 +39,7 @@ export async function audit(db:Queryable,scope:Scope,before:Entity|undefined,aft
   await db.query(`INSERT INTO enterprise_audit(id,organization_id,owner_id,entity_id,actor_id,operation,from_version,to_version,input,result)
     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`,
     [randomUUID(),scope.organizationId,after.ownerId,after.id,scope.actorId,operation,before?.version??0,after.version,JSON.stringify(input),JSON.stringify(after)]);
+  if(isEntityEventOperation(operation)) await appendEntityEventWithClient(db,scope,{operation,entityId:after.id,schemaId:after.schemaId,schemaVersion:after.schemaVersion,fromVersion:before?.version??0,toVersion:after.version});
 }
 export async function updateRow(db:Queryable,scope:Scope,before:Entity,operation:string,input:unknown,changes?:{title:string;attributes:Entity['attributes']},archive=false):Promise<Entity> {
   const row=(await db.query(`UPDATE enterprise_entities SET title=$2,attributes=$3::jsonb,version=version+1,updated_at=now(),archived_at=CASE WHEN $4 THEN now() ELSE archived_at END WHERE id=$1 RETURNING ${entityColumns}`,
