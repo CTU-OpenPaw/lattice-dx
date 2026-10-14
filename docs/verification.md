@@ -1,5 +1,15 @@
 # Verification — 2026-10-14
 
+## Final-source acceptance — 410c488
+
+- `pnpm check` thành công: **375 tests / 59 files**, workspace TypeScript và build. Không thêm dependency; `pnpm-lock.yaml` giữ nguyên trong increment hoàn thiện backend.
+- `test:typed-workflow-blocks`: signed HTTP tạo/sửa/đọc/query, strict conversion và replay; private PostgreSQL cả bảy action, late receipt failure rollback entity/run/audit/action results, 5 concurrent commands một effect, pin v1 sau publish v2, metadata-only evidence cho workflow reader, max1 replay và execution mới. Peer edit grant cho phép workflow sửa; revoke chặn fresh execution404 và run giữ version1.
+- Replay mất `data:write` tái hiện RED trên image trước fix (Missing expected rejection); 410c488 kiểm authorizeBlock trước receipt. Rebuilt image trả403 như mong đợi, không tạo effect mới. Đây là current capability check; receipt trả workflow snapshot theo current run policy, không thực hiện lại entity reads/writes.
+- `test:directory-concurrency`: production event nhận source z-source rồi kiểm assignee a-assignee đồng thời snapshot update được tái hiện lỗi40P01 trên image cũ. Snapshot lấy directory EXCLUSIVE table gate trước person rows; rebuilt source cho cả event và snapshot hoàn thành. Unit khóa gate có RED/GREEN. Tradeoff: locking directory consumers và snapshots các tenant tạm thời tuần tự hóa; plain reads vẫn hoạt động.
+- Regression đã đạt: workflow blocks/bundles/completion/lifecycle/timers, task lifecycle, inbound events, enterprise modules, organization/operations, query blocks, entity sharing, actions và core infrastructure. Một lượt logistics gặp Gateway429 khi chạy quá nhiều smoke liên tục; chạy lại sau cửa sổ rate limit đã đạt toàn bộ Logistics acceptance; không nới cấu hình120/phút.
+- Final local backup `core-0af5b98e808c48ca8c6ccd8592375d6b.dump`, SHA256 `4d9be707fac54e56fb29fc7ee5884fde276d2480f70785ccff31bb5c9a32820b`, 229664 bytes. Restore vào database fixture riêng thành công **46 bảng**, record sentinel `289166ec-d8ff-4b47-89a1-d20ea6c4ac3a` tồn tại; fixture được dọn đúng tên. Dữ liệu nguồn và volumes giữ nguyên.
+- Handoff tập trung ở [API index](backend-api-index.md). Metadata license snapshot ở [dependency inventory](dependency-inventory.md), không phải chứng nhận compatibility hoặc audit toàn bộ image/upstream. Final independent review và GitHub CI đang chốt; chưa merge/release, không tick Notion.
+
 ## Mở rộng nền backend — kế hoạch và các đợt đang thực hiện
 
 - Phạm vi và ledger ở [backend completion plan](backend-completion-plan.md), chưa đánh dấu toàn bộ backend hoàn thiện.

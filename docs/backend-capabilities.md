@@ -9,7 +9,7 @@ Quyết định 14/10/2026: **engine quản lý dữ liệu nghiệp vụ dùng 
 | Dữ liệu nghiệp vụ | Records/task/files; typed schema publication/CRUD/relations/archive/audit; grants; pinned typed query; bounded import/export, explicit migration và contextual attachments | Upsert/bulk relation import, arbitrary mapping DSL ngoài v1 |
 | Tổ chức và quyền | Keycloak/JWT, exact-resource guards; current directory/grants; hierarchy metadata/manager và snapshot revision | Federation/account provisioning, delegation và field ACL ngoài v1 |
 | Công việc và phê duyệt | Giao việc/claim queue/chuyển/hủy/deadline/history; thu hồi evidence người cũ; workflow waits/completion | Cấu hình lifecycle thành block và escalation nghiệp vụ cần nối orchestration |
-| Action/block | Record/task/connector workflow blocks;7 entity builtin API blocks có input/output/version | Typed entity execution trong workflow chưa nghiệm thu |
+| Action/block | Record/task/connector/timer workflow blocks;7 entity API và workflow blocks với input/output/version, typed bindings và same-client execution | Arbitrary executable code/plugin ngoài v1 |
 | Quy trình | Draft/publish/pin, guards AND/OR, audit, waits/callback, cancel/transfer atomically; durable timer chạy bằng service authority hiện tại | Parallel/join ngoài v1 |
 | Sự kiện/tích hợp | Durable outbox/retry/lease; signed ingress +pinned subscriptions/provenance/dedupe | Adapter n8n/broker/agent do Nhi nối; event-to-transition correlation ngoài v1 |
 | Vòng đời module | Bundle và enterprise manifest schemas/blocks/workflows/dependencies; install/enable/disable newstarts | Dynamic executable plugin, destructive uninstall/migration không thuộc v1 |
