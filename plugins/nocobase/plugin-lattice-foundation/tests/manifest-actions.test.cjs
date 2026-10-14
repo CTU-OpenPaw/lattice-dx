@@ -38,6 +38,7 @@ test('save calls authenticated bridge catalog/run without arbitrary scope fields
 });
 test('generic task controller preserves actual assignee subject and record UUID', async () => {
   const taskManifest=structuredClone(logistics);
+  delete taskManifest.workspace;
   taskManifest.blocks=[{id:'assign-warehouse-task',type:'form',title:'Giao việc',collection:'warehouse-tasks',permissions:['tasks:assign'],fields:[{name:'title',title:'Nội dung',type:'string',required:true,maxLength:200},{name:'assigneeId',title:'Subject',type:'string',required:true,maxLength:100},{name:'recordId',title:'Hồ sơ',type:'string',required:false,maxLength:36,pattern:'uuid',reference:'records'}],submit:{actionId:'tasks.create',version:1}}];
   const {controller, calls} = setup(taskManifest, 'assign-warehouse-task', async () => ({data: {actionId: 'tasks.create', version: 1, status: 'succeeded', result: {id: 'task-1'}}}));
   const input = {title: 'Chuẩn bị hàng', assigneeId: 'keycloak-subject', recordId: '11111111-1111-4111-8111-111111111111'};

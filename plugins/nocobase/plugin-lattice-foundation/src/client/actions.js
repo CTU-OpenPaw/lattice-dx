@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 const {assertManifest} = require('../shared/manifest');
+const {defaultContracts}=require('../shared/contracts');
 class FormActionError extends Error {
   constructor(code, message, status) {super(message); this.code = code; this.status = status;}
 }
-function createFormActions({apiClient, manifest, blockId}) {
-  assertManifest(manifest);
+function createFormActions({apiClient, manifest, blockId, contracts=defaultContracts}) {
+  assertManifest(manifest,contracts);
   const block = manifest.blocks.find(b => b.id === blockId);
   if (!block || block.type !== 'form') throw new FormActionError('INVALID_BLOCK', 'Không tìm thấy form.');
+  const contract=contracts.action(block.submit.actionId);
   let pending = false, uncertain=null;
   async function submit(values) {
     if (pending||uncertain) throw new FormActionError('BUSY', 'Kiểm tra hoặc thử lại lệnh cũ trước.');
@@ -20,12 +22,12 @@ function createFormActions({apiClient, manifest, blockId}) {
         if (field.required) throw new FormActionError('VALIDATION', `Thiếu ${field.title}.`);
         continue;
       }
-      if (typeof value !== 'string' || !value.trim() || (block.submit.actionId==='logistics.create'?Array.from(value).length:value.length) > field.maxLength) throw new FormActionError('VALIDATION', `${field.title} không hợp lệ.`);
-      if(field.type==='positiveInteger') {if(!/^[1-9][0-9]*$/.test(value)||Number(value)>1000000)throw new FormActionError('VALIDATION','Số lượng phải là số nguyên dương ≤ 1000000.');input[field.name]=Number(value);continue;}
-      if (field.pattern === 'uuid' && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) throw new FormActionError('VALIDATION', 'recordId phải là UUID của hồ sơ thật.');
-      input[field.name] = field.name === 'title' ? value.trim() : value;
+      if (typeof value !== 'string' || !value.trim() || (contract.lengthMode==='codepoints'?Array.from(value).length:value.length) > field.maxLength) throw new FormActionError('VALIDATION', `${field.title} không hợp lệ.`);
+      if(field.type==='positiveInteger') {const maximum=contract.fields[field.name].maximum;if(!/^[1-9][0-9]*$/.test(value)||!Number.isSafeInteger(Number(value))||Number(value)>maximum)throw new FormActionError('VALIDATION',`${field.title} phải là số nguyên dương ≤ ${maximum}.`);input[field.name]=Number(value);continue;}
+      if (field.pattern === 'uuid' && !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value)) throw new FormActionError('VALIDATION', `${field.title} phải là UUID hợp lệ.`);
+      input[field.name] = contract.fields[field.name].trim ? value.trim() : value;
     }
-    if(block.submit.actionId==='logistics.create'){uncertain={operation:'create',body:input,key:'ui-'+globalThis.crypto.randomUUID()};return retry();}
+    if(contract.transport.kind==='command'){uncertain={operation:contract.transport.operation,body:input,key:'ui-'+globalThis.crypto.randomUUID()};return retry();}
     pending = true;
     try {
       const {data: catalog} = await apiClient.request({url: 'dxActions:catalog', method: 'get'});
@@ -44,7 +46,7 @@ function createFormActions({apiClient, manifest, blockId}) {
   async function retry(){
     if(pending||!uncertain)throw new FormActionError('BUSY','Không có lệnh cần thử lại hoặc lệnh đang chạy.');
     pending=true;
-    try{const {data:result}=await apiClient.request({url:'dxActions:logistics',method:'post',data:uncertain});if(result?.definitionId!=='logistics_order'||typeof result.id!=='string')throw new FormActionError('INVALID_RESPONSE','Không xác nhận được đơn đã lưu.');uncertain=null;return result;}
+    try{const {data:result}=await apiClient.request({url:contract.transport.url,method:'post',data:uncertain});if((contract.transport.definitionId&&result?.definitionId!==contract.transport.definitionId)||typeof result.id!=='string')throw new FormActionError('INVALID_RESPONSE','Không xác nhận được kết quả đã lưu.');uncertain=null;return result;}
     catch(e){const status=e.status||e.response?.status;if(status>=400&&status<500&&status!==429)uncertain=null;throw e;}finally{pending=false;}
   }
   async function transition(transitionId) {

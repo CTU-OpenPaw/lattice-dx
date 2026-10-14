@@ -3,12 +3,10 @@
 const id = /^[a-z][a-z0-9-]{0,63}$/;
 const roles = /^[a-z][a-z0-9:_-]{0,79}$/;
 const fieldName = /^[a-z][a-zA-Z0-9]{0,63}$/;
-const actions = new Map([['records.create', ['records', 'records:write', ['title']]],
-  ['tasks.create', ['tasks', 'tasks:assign', ['title', 'assigneeId', 'recordId']]],
-  ['logistics.create',['orders','logistics:sales',['title','customerName','deliveryAddress','sku','quantity','warehouseAssigneeId','attachmentId']]]]);
+const {defaultContracts}=require('./contracts');
 const registries = new Set(['latticeDepartments', 'latticeEmployees', 'latticeLocations', 'latticeAssets']);
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
-function validateManifest(value) {
+function validateManifest(value, contracts=defaultContracts) {
   const errors = [];
   const error = (path, message) => errors.push(`${path}: ${message}`);
   const keys = (v, allowed, path) => {
@@ -17,7 +15,7 @@ function validateManifest(value) {
     return true;
   };
   const label = v => typeof v === 'string' && !!v.trim() && v.length <= 200;
-  if (!keys(value, ['schemaVersion', 'id', 'name', 'route', 'permissions', 'collections', 'blocks', 'transitions'], '$')) return errors;
+  if (!keys(value, ['schemaVersion', 'id', 'name', 'route', 'permissions', 'collections', 'blocks', 'transitions', 'workspace'], '$')) return errors;
   if (value.schemaVersion !== 1) error('schemaVersion', 'expected 1');
   if (typeof value.id !== 'string' || !id.test(value.id)) error('id', 'invalid id');
   if (!label(value.name)) error('name', 'required, max 200 characters');
@@ -34,7 +32,7 @@ function validateManifest(value) {
     if (typeof c.id !== 'string' || !id.test(c.id) || collections.has(c.id)) error(`${path}.id`, 'invalid or duplicate');
     collections.set(c.id, c);
     if (c.source === 'lattice-api') {
-      if (!['records', 'tasks', 'orders'].includes(c.resource)) error(`${path}.resource`, 'unsupported API collection');
+      if (!contracts.resource(c.resource)) error(`${path}.resource`, 'unsupported API collection');
     } else if (c.source === 'nocobase') {
       if (!registries.has(c.resource)) error(`${path}.resource`, 'unknown foundation collection');
     } else error(`${path}.source`, 'expected lattice-api or nocobase');
@@ -51,34 +49,33 @@ function validateManifest(value) {
     const collection = collections.get(b.collection);
     if (!collection) error(`${path}.collection`, 'unknown reference');
     if (b.type === 'form') {
-      if (b.attachments !== undefined && (b.attachments !== true || !['records.create','logistics.create'].includes(b.submit?.actionId))) error(`${path}.attachments`, 'attachments require record/order creation');
+      if (b.attachments !== undefined && (b.attachments !== true || !contracts.action(b.submit?.actionId)?.attachments)) error(`${path}.attachments`, 'attachments require record/order creation');
       const fields = new Set();
       if (!Array.isArray(b.fields) || !b.fields.length) error(`${path}.fields`, 'non-empty list required');
       else b.fields.forEach((f, i) => {
         if (!keys(f, ['name', 'title', 'type', 'required', 'maxLength', 'pattern', 'reference'], `${path}.fields[${i}]`)) return;
         if (typeof f.name !== 'string' || !fieldName.test(f.name) || fields.has(f.name)) error(`${path}.fields[${i}].name`, 'invalid or duplicate');
         fields.add(f.name);
-        if (!label(f.title) || !['string','positiveInteger'].includes(f.type) || (f.type==='positiveInteger'&&f.name!=='quantity') || typeof f.required !== 'boolean' || !Number.isInteger(f.maxLength) || f.maxLength < 1 || f.maxLength > 2000) error(`${path}.fields[${i}]`, 'invalid field definition');
+        if (!label(f.title) || !['string','positiveInteger'].includes(f.type) || typeof f.required !== 'boolean' || !Number.isInteger(f.maxLength) || f.maxLength < 1 || f.maxLength > 2000) error(`${path}.fields[${i}]`, 'invalid field definition');
         if (f.pattern !== undefined && f.pattern !== 'uuid') error(`${path}.fields[${i}].pattern`, 'only uuid supported');
-        if (f.reference !== undefined && !((f.reference==='records'&&f.name==='recordId'&&f.pattern==='uuid')||(f.reference==='warehousePeople'&&f.name==='warehouseAssigneeId'))) error(`${path}.fields[${i}].reference`, 'unsupported reference');
+        if (f.reference !== undefined && !contracts.reference(f.reference)) error(`${path}.fields[${i}].reference`, 'unsupported reference');
       });
       if (keys(b.submit, ['actionId', 'version'], `${path}.submit`)) {
-        const action = actions.get(b.submit.actionId);
-        if (!action || b.submit.version !== 1) error(`${path}.submit`, 'unsupported action/version');
+        const action = contracts.action(b.submit.actionId);
+        if (!action || b.submit.version !== action.version) error(`${path}.submit`, 'unsupported action/version');
         else {
-          if (collection?.source !== 'lattice-api' || collection.resource !== action[0]) error(`${path}.submit`, 'action/collection source mismatch');
-          if (!Array.isArray(b.permissions) || !b.permissions.includes(action[1])) error(`${path}.permissions`, 'must include API action role');
-          for (const f of fields) if (!action[2].includes(f)) error(`${path}.fields`, `API does not accept ${f}`);
+          if (collection?.source !== 'lattice-api' || collection.resource !== action.resource) error(`${path}.submit`, 'action/collection source mismatch');
+          if (!Array.isArray(b.permissions) || !b.permissions.includes(action.role)) error(`${path}.permissions`, 'must include API action role');
+          for (const f of fields) if (!Object.hasOwn(action.fields,f)) error(`${path}.fields`, `API does not accept ${f}`);
           if (Array.isArray(b.fields)) for (const f of b.fields) {
             if (!object(f)) continue;
-            const limit = {title: 200, assigneeId: 100, warehouseAssigneeId:100, attachmentId:36,quantity:7, recordId: 36}[f.name];
-            if (limit && f.maxLength > limit) error(`${path}.fields`, `${f.name} exceeds API maximum ${limit}`);
-            if (f.name === 'recordId' && (f.pattern !== 'uuid' || f.maxLength !== 36)) error(`${path}.fields`, 'recordId requires uuid pattern and maxLength 36');
+            const rule=action.fields[f.name];if(!rule)continue;
+            if(f.maxLength>rule.maxLength)error(`${path}.fields`,`${f.name} exceeds API maximum ${rule.maxLength}`);
+            if(f.type!==(rule.type||'string'))error(`${path}.fields`,`${f.name} requires ${rule.type||'string'}`);
+            if(rule.pattern&&(f.pattern!==rule.pattern||f.maxLength!==rule.maxLength))error(`${path}.fields`,`${f.name} requires ${rule.pattern} pattern and maxLength ${rule.maxLength}`);
+            if(f.reference!==rule.reference)error(`${path}.fields`,`${f.name} has incompatible reference`);
           }
-          if(b.submit.actionId==='logistics.create'&&(!Array.isArray(b.fields)||!b.fields.some(f=>f?.name==='quantity'&&f.type==='positiveInteger')||!b.fields.some(f=>f?.name==='warehouseAssigneeId'&&f.reference==='warehousePeople')))error(path,'Order requires numeric quantity and directory reference');
-          for (const required of b.submit.actionId === 'tasks.create' ? ['title', 'assigneeId'] : b.submit.actionId==='logistics.create'?['title','customerName','deliveryAddress','sku','quantity','warehouseAssigneeId']:['title']) {
-            if (!Array.isArray(b.fields) || !b.fields.some(f => f?.name === required && f.required)) error(`${path}.fields`, `required API field missing: ${required}`);
-          }
+          for(const [name,rule] of Object.entries(action.fields))if(rule.required&&(!Array.isArray(b.fields)||!b.fields.some(f=>f?.name===name&&f.required)))error(`${path}.fields`,`required API field missing: ${name}`);
         }
       }
       if ('columns' in b) error(path, 'form cannot have columns');
@@ -97,17 +94,40 @@ function validateManifest(value) {
     if (!collections.has(t.collection) || !label(t.from) || !label(t.to) || typeof t.permission !== 'string' || !roles.test(t.permission)) error(path, 'invalid transition');
     if (t.availability !== 'unavailable' || !label(t.reason)) error(path, 'business transition API is not implemented; reason required');
   });
+  if(value.workspace!==undefined&&keys(value.workspace,['panels','blocks','note','showTransitions'],'workspace')) {
+    const layout=value.workspace;
+    if(layout.note!==undefined&&(typeof layout.note!=='string'||layout.note.length>2000))error('workspace.note','text required, max 2000');
+    if(layout.showTransitions!==undefined&&typeof layout.showTransitions!=='boolean')error('workspace.showTransitions','boolean required');
+    const panelIds=new Set();
+    if(layout.panels!==undefined) {
+      if(!Array.isArray(layout.panels)||layout.panels.length>20)error('workspace.panels','list required, max 20');
+      else layout.panels.forEach((panel,n)=>{
+        const path=`workspace.panels[${n}]`;if(!keys(panel,['id','renderer'],path))return;
+        if(typeof panel.id!=='string'||!id.test(panel.id)||panelIds.has(panel.id))error(path,'invalid or duplicate panel id');panelIds.add(panel.id);
+        if(typeof panel.renderer!=='string'||!/^[a-z][a-z0-9.-]{0,79}$/.test(panel.renderer))error(path,'registered renderer name required');
+      });
+    }
+    if(layout.blocks!==undefined) {
+      const used=new Set();
+      if(!Array.isArray(layout.blocks))error('workspace.blocks','list required');
+      else layout.blocks.forEach((binding,n)=>{
+        const path=`workspace.blocks[${n}]`;if(!keys(binding,['blockId','selectFrom'],path))return;
+        if(!blockIds.has(binding.blockId)||used.has(binding.blockId))error(path,'unknown or duplicate block binding');used.add(binding.blockId);
+        if(binding.selectFrom!==undefined&&(typeof binding.selectFrom!=='string'||!fieldName.test(binding.selectFrom)||['constructor','prototype'].includes(binding.selectFrom)))error(path,'safe result field required');
+      });
+    }
+  }
   return errors;
 }
-function assertManifest(value) {
-  const errors = validateManifest(value);
+function assertManifest(value,contracts=defaultContracts) {
+  const errors = validateManifest(value,contracts);
   if (errors.length) throw new Error(`Invalid application manifest: ${errors.join('; ')}`);
   return value;
 }
-function validateCatalog(manifests) {
+function validateCatalog(manifests,contracts=defaultContracts) {
   const errors = [], ids = new Set(), routes = new Set();
   for (const m of manifests) {
-    errors.push(...validateManifest(m));
+    errors.push(...validateManifest(m,contracts));
     if (!object(m)) continue;
     if (ids.has(m.id)) errors.push(`duplicate application id: ${m.id}`);
     if (routes.has(m.route)) errors.push(`duplicate application route: ${m.route}`);

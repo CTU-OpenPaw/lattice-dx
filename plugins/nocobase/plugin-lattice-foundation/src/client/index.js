@@ -11,6 +11,9 @@
   const {createWorkspaceComponent} = require('./workspace');
   const {createWorkspaceApi} = require('./workspace-api');
   const {createBlockComponents} = require('./blocks');
+  const {createApplicationRuntime} = require('./application-runtime');
+  const {registerApplicationViews} = require('../applications/views');
+  const {defaultContracts}=require('../shared/contracts');
   function useLatticeFormAction(manifest, blockId) {
     const apiClient = client.useAPIClient();
     const sharedApi = React.useMemo(() => createWorkspaceApi({apiClient}), [apiClient]);
@@ -63,7 +66,11 @@
         React.useEffect(registerBlocks,[]);
         return React.createElement(client.SchemaComponentOptions,{components:{LatticeFormBlock:blocks.FormBlock,LatticeListBlock:blocks.ListBlock,LatticeConfiguredBlock:blocks.ConfiguredBlock,LatticeBlockInitializer:blocks.Initializer}},props.children);
       });
-      const Workspace = createWorkspaceComponent(client,React,blocks);
+      const runtime=createApplicationRuntime(React,blocks);
+      registerApplicationViews(runtime,React);
+      this.app.latticeRuntime=runtime;
+      this.app.latticeContracts=defaultContracts;
+      const Workspace = createWorkspaceComponent(client,React,runtime);
       this.app.router.add('lattice-workspace',{path:'/lattice',Component:Workspace});
       this.app.router.add('lattice-application',{path:'/lattice/apps/:applicationId',Component:Workspace});
       if (window.location.hostname === '127.0.0.1' && window.location.pathname.startsWith('/lattice')) {

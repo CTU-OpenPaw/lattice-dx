@@ -2,6 +2,8 @@
 
 Cập nhật: 2026-10-13. Phân biệt phần đã code, phần đã kiểm tra trên runtime và phần còn thiếu. Không coi các phép thử local là chứng nhận production.
 
+14/10/2026: sau review của Hưng, Foundation 0.9.0 tách Workspace/application runtime dùng chung khỏi panel mẫu, dùng contract/view/catalog registry. Thêm app thứ ba được kiểm bằng test contract giả; hai workflow thật và native builder hồi quy PASS. Xem [cơ chế mở rộng](workspace-extension-runtime.md). Đây chưa phải App Registry/publish UI hay engine dựng mọi nghiệp vụ bằng zero-code.
+
 Trên nhánh tích hợp feat/nocobase-workflow-integration, PR #5 đã bổ sung source API procurement/onboarding, membership và shared evidence. [Checkpoint tích hợp](workflow-integration-checkpoint.md) ghi mốc chỉ code, trước khi triển khai runtime.
 
 Cập nhật sau phê duyệt deploy: API mới + bridge và UI procurement đã chạy trên runtime cũ với Foundation 0.7.0; luồng browser tạo/gửi/duyệt/nhận/nghiệm thu/bàn giao và shared file PASS. Outbox worker vẫn tắt. Xem [triển khai mua sắm](procurement-workflow-deployment.md); đây không phải nghiệm thu Order/Shipment logistics hoặc onboarding UI.

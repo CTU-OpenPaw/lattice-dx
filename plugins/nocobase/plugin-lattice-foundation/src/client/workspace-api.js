@@ -1,3 +1,5 @@
+const {defaultContracts}=require('../shared/contracts');
+const {attachApplicationApi}=require('../applications/api');
 // SPDX-License-Identifier: Apache-2.0
 class WorkspaceApiError extends Error {
   constructor(message, status, source) {super(message); this.status = status; this.source = source; this.response = {status};}
@@ -18,31 +20,29 @@ function createWorkspaceApi({apiClient, onExpired = () => {}, notify = () => {}}
       throw new WorkspaceApiError(message, status, source);
     }
   };
-  return {
+  const api = {
     request,
     async user() {return (await request({url:'auth:check',method:'get'})).data.data;},
     async applications() {return (await request({url:'latticeApps:list',method:'get'})).data.data.items;},
     async connection() {return (await request({url:'dxActions:status',method:'get'})).data;},
     async catalog() {return (await request({url:'dxActions:catalog',method:'get'})).data.items;},
     async list(resource) {
-      if (!['records','tasks'].includes(resource)) throw new WorkspaceApiError('Nguồn danh sách không được hỗ trợ.',400,'bridge');
-      const result=(await request({url:'dxActions:list',method:'get',params:{resource}})).data;
+      if (!defaultContracts.resource(resource)) throw new WorkspaceApiError('Nguồn danh sách không được hỗ trợ.',400,'bridge');
+      const binding=defaultContracts.resource(resource);
+      const result=(await request(binding.method==='post'?{url:binding.url,method:'post',data:{operation:binding.operation}}:{url:binding.url,method:'get',params:{resource:binding.resource}})).data;
       if (!Array.isArray(result?.items) || result.items.length>100) throw new WorkspaceApiError('Dữ liệu danh sách không hợp lệ.',502,'bridge');
       return result.items;
     },
     async listPage(resource,query) {
-      if(!['records','tasks','orders'].includes(resource))throw new WorkspaceApiError('Nguồn danh sách không được hỗ trợ.',400,'bridge');
-      const result=resource==='orders'?await this.logistics('orders',{query}):(await request({url:'dxActions:list',method:'get',params:{resource,...query}})).data;
-      if(!['records','tasks','orders'].includes(resource)||!Array.isArray(result?.items)||result.items.length>100||!result.page||!Number.isInteger(result.page.limit)||result.page.limit<1||result.page.limit>100||!Number.isInteger(result.page.offset)||result.page.offset<0||typeof result.page.hasMore!=='boolean'||(result.page.hasMore?result.page.nextOffset!==result.page.offset+result.page.limit:result.page.nextOffset!==null))throw new WorkspaceApiError('Phân trang API không hợp lệ.',502,'bridge');
+      if(!defaultContracts.resource(resource))throw new WorkspaceApiError('Nguồn danh sách không được hỗ trợ.',400,'bridge');
+      const binding=defaultContracts.resource(resource);
+      const result=(await request(binding.method==='post'?{url:binding.url,method:'post',data:{operation:binding.operation,query}}:{url:binding.url,method:'get',params:{resource:binding.resource,...query}})).data;
+      if(!Array.isArray(result?.items)||result.items.length>100||!result.page||!Number.isInteger(result.page.limit)||result.page.limit<1||result.page.limit>100||!Number.isInteger(result.page.offset)||result.page.offset<0||typeof result.page.hasMore!=='boolean'||(result.page.hasMore?result.page.nextOffset!==result.page.offset+result.page.limit:result.page.nextOffset!==null))throw new WorkspaceApiError('Phân trang API không hợp lệ.',502,'bridge');
       return result;
     },
-    async logistics(operation,payload={}) {return (await request({url:'dxActions:logistics',method:'post',data:{...payload,operation}})).data;},
     async file(operation, payload) {
       if (!['upload','metadata','content'].includes(operation)) throw new WorkspaceApiError('Thao tác tệp không hợp lệ.',400,'bridge');
       return (await request({url:'dxActions:files',method:'post',timeout:30000,data:{...payload,operation}})).data;
-    },
-    async workflow(operation,payload={}) {
-      return (await request({url:'dxActions:workflow',method:'post',data:{...payload,operation}})).data;
     },
     async connect() {
       const result = (await request({url:'dxActions:connect',method:'post'})).data;
@@ -60,5 +60,6 @@ function createWorkspaceApi({apiClient, onExpired = () => {}, notify = () => {}}
       catch (cause) {notify({type:'error',message:'Đăng xuất thất bại. Hãy thử lại.'}); throw cause;}
     },
   };
+  return attachApplicationApi(api);
 }
 module.exports = {createWorkspaceApi, WorkspaceApiError};

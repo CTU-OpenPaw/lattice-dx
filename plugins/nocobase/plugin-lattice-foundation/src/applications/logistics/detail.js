@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-const {createWorkflowCommands}=require('./workflow');
+const {createWorkflowCommands}=require('../../client/workflow');
 function createLogisticsComponent(React){
   const h=React.createElement;
   return function LogisticsDetail({api,connection,orderId,onChanged,onLocked}){

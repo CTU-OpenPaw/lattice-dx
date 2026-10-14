@@ -25,7 +25,7 @@ Build validates and copies authored CommonJS into dist. The runtime supplies the
 Copy the generated tgz into the container, then install with the official package manager. It extracts into persistent storage/plugins and links the package for Node.js. Inside the container:
 
 ```sh
-yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.8.0.tgz
+yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.9.0.tgz
 yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 yarn nocobase pm list
 yarn nocobase pm disable @latticedx/plugin-lattice-foundation
@@ -37,6 +37,10 @@ The repository's official Compose also mounts this package read-only; build befo
 ## Logistics in 0.8.0
 
 `/lattice/apps/logistics` uses the shared Form/List blocks for real orders, a scoped warehouse directory selector, clean attachments and server pagination. Order detail uses Duy's submit/receive API with expectedVersion and idempotency keys. Native builder bindings expose the same configured Form/List; their Workspace link opens business actions. The old `assign-warehouse-task` binding remains for existing generic task blocks, but is hidden from the business Workspace. The `create-order-record` binding now creates an order with required customer/address/SKU/quantity/warehouse fields, instead of a generic record; existing instances need those inputs. See ../../../docs/logistics-workspace-deployment.md for evidence and limits.
+
+## Application extensions in 0.9.0
+
+Workspace is a shell: it delegates to the application runtime and contains no purchasing/Logistics branches. Manifest workspace panels reference trusted registered renderers; block bindings declare selection fields. Generic Form/List/actions/validation read registered contracts. Sample-specific views and API adapters live in src/applications. Native bindings and current endpoints are preserved. Trusted plugins can register views via app.latticeRuntime, contracts via app.latticeContracts, and server manifests via app.latticeApplications after Foundation loads. See ../../../docs/workspace-extension-runtime.md for extension steps, security boundaries and regression evidence. Dynamic publication and a universal workflow designer are still outside this release.
 
 ## Terms
 

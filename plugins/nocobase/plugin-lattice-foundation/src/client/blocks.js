@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 const {createFormActions} = require('./actions');
 const {createWorkspaceApi} = require('./workspace-api');
-const {filterPage} = require('./list-data');
+const {defaultContracts}=require('../shared/contracts');
+const {loadFormContext}=require('./reference-data');
 function createBlockComponents(client,React,antd) {
   const h=React.createElement;
   const style={padding:14,border:'1px solid #e0e7ef',borderRadius:8,marginBottom:16};
@@ -29,7 +30,7 @@ function createBlockComponents(client,React,antd) {
       const link=document.createElement('a');link.href=url;link.download=result.filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
     }
     return h('section',{'aria-label':'Tệp hồ sơ',style:{marginTop:12,borderTop:'1px solid #ddd',paddingTop:12}},
-      h('h4',null,'Tệp đính kèm'),h('p',null,allowUnbound?'Tải tệp sạch trước khi tạo đơn; API chỉ chia sẻ với người kho được giao sau khi gửi đơn.':'Tải tệp sau khi lưu hồ sơ. Quyền đọc theo API; tối đa 1 MiB.'),
+      h('h4',null,'Tệp đính kèm'),h('p',null,allowUnbound?'Tải tệp sạch trước khi lưu. Quyền liên kết và chia sẻ do API kiểm tra.':'Tải tệp sau khi lưu hồ sơ. Quyền đọc theo API; tối đa 1 MiB.'),
       h('label',null,'Chọn tệp ',h('input',{type:'file',disabled:busy||!connected||(!recordId&&!allowUnbound),onChange:e=>setFile(e.target.files[0]||null)})),
       h('button',{type:'button',disabled:busy||!connected||(!recordId&&!allowUnbound)||!file,onClick:()=>perform(upload)},'Tải tệp lên'),
       h('label',{style:{display:'block',marginTop:8}},'ID tệp đã lưu ',h('input',{value:lookup,onChange:e=>setLookup(e.target.value),disabled:busy||!connected})),
@@ -42,21 +43,20 @@ function createBlockComponents(client,React,antd) {
   function FormBlock({manifest,block,api,connected,onSaved,refreshKey}) {
     const [values,setValues]=React.useState({}),[error,setError]=React.useState(''),[result,setResult]=React.useState(null);
     const [busy,setBusy]=React.useState(false),[available,setAvailable]=React.useState(false);
-    const order=block.submit.actionId==='logistics.create';
-    const [people,setPeople]=React.useState([]);
+    const contract=defaultContracts.action(block.submit.actionId);
+    const before=contract.attachments?.phase==='before';
     const generation=React.useRef(0);
     React.useEffect(()=>{generation.current++;setResult(null);setError('');setBusy(false);return()=>{generation.current++};},[connected,manifest.id,block.id]);
-    const [records,setRecords]=React.useState([]),[referenceError,setReferenceError]=React.useState('');
-    const hasReference=block.fields.some(f=>f.reference==='records');
-    React.useEffect(()=>{let active=true;setRecords([]);setReferenceError('');if(connected&&hasReference)api.list('records').then(rows=>{if(active)setRecords(rows)}).catch(e=>{if(active)setReferenceError(e.message)});return()=>{active=false};},[api,connected,hasReference,refreshKey]);
+    const [referenceOptions,setReferenceOptions]=React.useState({}),[referenceError,setReferenceError]=React.useState('');
     React.useEffect(()=>{if(!connected){setResult(null);setValues({});}},[connected]);
     const controller=React.useMemo(()=>createFormActions({apiClient:api,manifest,blockId:block.id}),[api,manifest,block.id]);
-    React.useEffect(()=>{let active=true;setAvailable(false);setPeople([]);if(connected&&!order)api.catalog().then(items=>{
-      if(active)setAvailable(items.some(a=>a.id===block.submit.actionId&&a.version===block.submit.version));
-    }).catch(()=>{});if(connected&&order)api.logistics('people',{query:{role:'logistics:warehouse',limit:'100',offset:'0'}}).then(async result=>{
-      const rows=[...result.items];let page=result.page;while(page.hasMore){if(rows.length>=10000)throw new Error('Directory quá lớn; cần lọc trước.');const next=await api.logistics('people',{query:{role:'logistics:warehouse',limit:'100',offset:String(page.nextOffset)}});if(next.page.offset!==page.nextOffset||next.page.nextOffset===page.nextOffset)throw new Error('Directory pagination invalid');rows.push(...next.items);page=next.page;}
-      if(active){setPeople(rows);setAvailable(true);}
-    }).catch(e=>{if(active)setError(e.message)});return()=>{active=false};},[api,connected,block.submit.actionId,block.submit.version]);
+    React.useEffect(()=>{
+      let active=true;setAvailable(false);setReferenceOptions({});setReferenceError('');
+      if(connected){
+        loadFormContext(api,block,contract,defaultContracts).then(context=>{if(active){setReferenceOptions(context.options);setAvailable(context.available);setReferenceError(context.error);}}).catch(e=>{if(active)setReferenceError(e.message)});
+      }
+      return()=>{active=false};
+    },[api,connected,block,contract,refreshKey]);
     async function submit(event) {
       event.preventDefault();if(controller.pending)return;
       const current=generation.current;setBusy(true);setError('');setResult(null);
@@ -64,23 +64,23 @@ function createBlockComponents(client,React,antd) {
       catch(e){if(current===generation.current)setError(e.message);}
       finally{if(current===generation.current)setBusy(false);}
     }
-    if(order&&connected&&!available)return h('article',{style,'data-block-id':block.id},h('h3',null,block.title),h('p',null,'Chỉ tài khoản kinh doanh có quyền directory mới tạo đơn. '+error));
+    if(before&&connected&&!available)return h('article',{style,'data-block-id':block.id},h('h3',null,block.title),h('p',null,'Đang kiểm tra quyền và dữ liệu lựa chọn. '+referenceError));
     return h('article',{style,'data-block-id':block.id},h('h3',null,block.title),
       !connected&&h('p',null,'Kết nối tài khoản nghiệp vụ để sử dụng form.'),
       connected&&!available&&h('p',null,'Action chưa được cấp quyền hoặc đang kiểm tra quyền.'),
       referenceError&&h('p',{role:'alert'},referenceError),
-      order&&block.attachments&&h(AttachmentPanel,{api,connected:connected&&available&&!busy&&!controller.uncertain,allowUnbound:true,onUploaded:metadata=>setValues(old=>({...old,attachmentId:metadata.id}))}),
+      before&&block.attachments&&h(AttachmentPanel,{api,connected:connected&&available&&!busy&&!controller.uncertain,allowUnbound:true,onUploaded:metadata=>setValues(old=>({...old,[contract.attachments.field]:metadata.id}))}),
       h('form',{onSubmit:submit,noValidate:true},...block.fields.map(field=>h('label',{key:field.name,style:{display:'block',marginBottom:12}},
         h('span',null,field.title+(field.required?' *':'')),
-        field.reference==='warehousePeople'?h('select',{'aria-label':field.title,name:field.name,value:values[field.name]||'',disabled:busy||!connected||!available||controller.uncertain,onChange:e=>setValues(old=>({...old,[field.name]:e.target.value}))},h('option',{value:''},'Chọn người kho…'),...people.map(p=>h('option',{key:p.subject,value:p.subject},p.displayName))):h('input',{name:field.name,type:field.type==='positiveInteger'?'number':'text',value:values[field.name]||'',disabled:busy||!connected||!available||controller.uncertain,
+        defaultContracts.reference(field.reference)?.mode==='select'?h('select',{'aria-label':field.title,name:field.name,value:values[field.name]||'',disabled:busy||!connected||!available||controller.uncertain,onChange:e=>setValues(old=>({...old,[field.name]:e.target.value}))},h('option',{value:''},defaultContracts.reference(field.reference).placeholder||'Chọn…'),...(referenceOptions[field.reference]||[]).map(p=>h('option',{key:p[defaultContracts.reference(field.reference).value],value:p[defaultContracts.reference(field.reference).value]},p[defaultContracts.reference(field.reference).label]))):h('input',{name:field.name,type:field.type==='positiveInteger'?'number':'text',value:values[field.name]||'',disabled:busy||!connected||!available||controller.uncertain,
           'aria-required':field.required,style:{display:'block',width:'100%',padding:8,marginTop:6,boxSizing:'border-box'},
           list:field.reference?block.id+'-'+field.name:undefined,
           onChange:event=>setValues(old=>({...old,[field.name]:event.target.value}))}),
-        field.reference&&h('datalist',{id:block.id+'-'+field.name},...records.map(row=>h('option',{key:row.id,value:row.id},row.title))))),
+        defaultContracts.reference(field.reference)?.mode==='suggestion'&&h('datalist',{id:block.id+'-'+field.name},...(referenceOptions[field.reference]||[]).map(row=>h('option',{key:row[defaultContracts.reference(field.reference).value],value:row[defaultContracts.reference(field.reference).value]},row[defaultContracts.reference(field.reference).label]))))),
         h('button',{type:'submit',disabled:busy||!connected||!available||controller.uncertain,style:{padding:'8px 16px'}},busy?'Đang lưu…':'Lưu')),
       controller.uncertain&&h('button',{disabled:busy||!connected,onClick:async()=>{const current=generation.current;setBusy(true);try{const saved=await controller.retry();if(current===generation.current){setResult(saved);setValues({});onSaved?.(saved);}}catch(e){if(current===generation.current)setError(e.message)}finally{if(current===generation.current)setBusy(false)}}},'Thử lại lệnh cũ'),
       error&&h('p',{role:'alert'},error),result&&h('p',{role:'status'},'Đã lưu thành công. ID: '+result.id),
-      block.attachments&&!order&&h(AttachmentPanel,{api,recordId:result?.id,connected}));
+      block.attachments&&!before&&h(AttachmentPanel,{api,recordId:result?.id,connected}));
   }
   const labels={title:'Nội dung',createdAt:'Ngày tạo',status:'Trạng thái',version:'Phiên bản',recordId:'ID hồ sơ'};
   function ListBlock({manifest,block,api,connected,refreshKey,onOpen,openDisabled=false}) {
@@ -105,7 +105,7 @@ function createBlockComponents(client,React,antd) {
       busy&&h('p',{role:'status'},'Đang tải danh sách…'),error&&h('p',{role:'alert'},error),
       connected&&!busy&&!error&&h('div',{style:{overflowX:'auto'}},h('table',{style:{width:'100%',borderCollapse:'collapse'}},
         h('thead',null,h('tr',null,...block.columns.map(c=>h('th',{key:c,style:{padding:8,textAlign:'left',borderBottom:'1px solid #ddd'}},labels[c]||c)))),
-        h('tbody',null,...data.items.map(row=>h('tr',{key:row.id},...block.columns.map(c=>h('td',{key:c,style:{padding:8,borderBottom:'1px solid #eee'}},c==='title'&&onOpen?h('button',{disabled:openDisabled,onClick:()=>onOpen(row)},String(row[c]??'')):String(row[c]??''))))))),
+        h('tbody',null,...data.items.map(row=>h('tr',{key:row.id},...block.columns.map(c=>h('td',{key:c,style:{padding:8,borderBottom:'1px solid #eee'}},c===block.columns[0]&&onOpen?h('button',{disabled:openDisabled,onClick:()=>onOpen(row)},String(row[c]??'')):String(row[c]??''))))))),
         !data.total&&h('p',null,'Không có bản ghi phù hợp.'),
         h('nav',{'aria-label':'Phân trang '+block.title},
           h('button',{disabled:data.page<=1,onClick:()=>setPage(data.page-1)},'Trước'),
@@ -128,7 +128,7 @@ function createBlockComponents(client,React,antd) {
     if(!manifestId||!blockId)return h('p',null,'Chưa chọn cấu hình. Mở cài đặt block → Chọn ứng dụng và block.');
     if(block&&expectedType&&block.type!==expectedType)return h('p',{role:'alert'},'Loại block không khớp cấu hình đã chọn.');
     return h('div',null,notice&&h('p',{role:'alert'},notice),!connected&&h('a',{href:'/lattice'},'Mở Workspace để kết nối API'),
-      connected&&manifestId==='logistics'&&h('a',{href:'/lattice/apps/logistics'},'Mở Workspace Logistics để xem đơn và nhận việc'),
+      connected&&manifest?.workspace?.panels?.length>0&&h('a',{href:manifest.route},'Mở Workspace để xử lý công việc'),
       block?h(block.type==='form'?FormBlock:ListBlock,{manifest,block,api,connected,refreshKey:refresh,onSaved:()=>setRefresh(n=>n+1)}):h('p',null,'Đang tải hoặc không tìm thấy cấu hình block.'));
   }
   function Initializer() {
