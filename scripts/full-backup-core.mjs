@@ -29,7 +29,10 @@ function restore(bytes,work){
 function restoredInventory(target){
  const exists=sql(target,"SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='foundation_files' AND column_name='storage_provider'");
  if(exists==='0')return [];
- const value=sql(target,`SELECT coalesce(jsonb_agg(jsonb_build_object('fileId',id::text,'objectKey',object_key::text,'size',size,'sha256',content_sha256) ORDER BY id),'[]'::jsonb) FROM foundation_files WHERE storage_provider='filesystem'`);
+ const value=sql(target,`WITH bounded AS (
+  SELECT id,object_key,size,content_sha256 FROM foundation_files
+  WHERE storage_provider='filesystem' ORDER BY id LIMIT 10001
+ ) SELECT coalesce(jsonb_agg(jsonb_build_object('fileId',id::text,'objectKey',object_key::text,'size',size,'sha256',content_sha256) ORDER BY id),'[]'::jsonb) FROM bounded`);
  if(Buffer.byteLength(value)>maxObjectManifestBytes)throw new Error('Object inventory exceeds bound.');return validateObjectInventory(JSON.parse(value));
 }
 function apiSource(source,input){
