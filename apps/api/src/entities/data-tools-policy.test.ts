@@ -28,4 +28,3 @@ test('CSV export protects formula text including whitespace, preserves negative 
  const rows=[{title:' =SUM(1)',attributes:{label:'@evil',count:-2,amount:'-0.0100'}}];
  expect(exportContent(schema,rows,'csv')).toContain("' =SUM(1)");expect(exportContent(schema,rows,'csv')).toContain("'@evil,-2,,-0.0100");expect(JSON.parse(exportContent(schema,rows,'json'))).toEqual(rows);
 });
-

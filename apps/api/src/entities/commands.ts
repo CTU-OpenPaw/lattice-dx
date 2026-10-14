@@ -31,4 +31,3 @@ export async function runEntityCommandInTransaction<T>(client:PoolClient,scope:S
     await client.query('INSERT INTO enterprise_commands(organization_id,actor_id,operation,key,fingerprint,result) VALUES($1,$2,$3,$4,$5,$6::jsonb)',[...tuple,fingerprint,JSON.stringify(result)]);
     return result;
 }
-
