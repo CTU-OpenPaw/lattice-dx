@@ -41,6 +41,7 @@
     "test:module-bindings": "node scripts/smoke-module-bindings.mjs",
     "test:entity-aggregates": "node scripts/smoke-entity-aggregates.mjs",
     "test:report-snapshots": "node scripts/smoke-report-snapshots.mjs",
+    "test:file-storage": "node scripts/smoke-file-storage.mjs",
     "backup:core": "node scripts/backup-core.mjs backup",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "workflow:seed-local": "node scripts/seed-workflow-demo.mjs",
