@@ -7,6 +7,7 @@
 - Private PostgreSQL: department membership hiện tại, chuyển phòng/tắt account, revoke người đã tắt, no-op grant, concurrent revoke/update chỉ một thành công và phía thua trả 404/409. Transaction gọi production checkAccess giữ directory row; connection khác disable bị lock timeout. Forced receipt failure rollback grant/version/audit, cùng key retry thành công sau bỏ constraint.
 - Shared relations cần source edit/target read; target chưa chia sẻ bị chặn, không lan truyền quyền. Target revoke chặn replay, mixed visible/hidden targets lọc trước LIMIT, unlink target đã archive chạy được. Shared entity list 105 dòng trả 100+5 không trùng; pool mới max1 giữ quyền/receipt và revoke.
 - Regressions `test:enterprise-data`, `test:create-reliability`, `test:workflow-completion` đều đạt. Chỉ schema fixture có UUID đã kiểm tra được drop; REST fixture giữ lại, không xóa volume. Roles local bổ sung có chọn lọc, không đổi credentials.
+- Review độc lập không tìm thấy lỗi production. Hai thiếu sót nghiệm thu về shared relations và concurrent directory locks được bổ sung; re-review xác nhận không còn finding cần sửa. PR #13 giữ toàn bộ increment trên một nhánh, không tự merge hoặc release.
 - Không sửa NocoBase plugin/UI, adapter của Nhi, upstream license hay Notion. Directory vẫn là snapshot phải đồng bộ; chưa có field-level ACL, owner transfer hoặc org-wide admin bypass.
 
 Hợp đồng: [Entity sharing](entity-sharing.md).

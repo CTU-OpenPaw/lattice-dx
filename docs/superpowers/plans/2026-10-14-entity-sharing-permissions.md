@@ -30,4 +30,4 @@ Files: smoke-entity-sharing.mjs, docs/entity-sharing.md, packagejsoncommand, ver
 - [x] LocalJWTGateway scenario owner Alice, designatedsameorgrecipient+peer/foreigndenials; realm grants onlyneededlocalfixtures, syncpreservecredentials. Build/recreateAPIandGatewayonly.
 - [x] pnpmcheck+test:enterprise-data/create-reliability/workflow-completionregressions, existingGatewayratelimit retained.
 - [x] Independenttask/wholebranchreview, fiximportantissues andreruncoveringchecks.
-- [ ] Commit/pushonePRmain/attach/inspectCI; reportgroup2shareincrementlimits, don'tmarkallorganizationcapabilitiesdone.
+- [x] Commit/pushonePRmain/attach/inspectCI; reportgroup2shareincrementlimits, don'tmarkallorganizationcapabilitiesdone.
