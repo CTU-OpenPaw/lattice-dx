@@ -43,7 +43,8 @@ test('task assignment requires a specific role and signed organization scope', a
   try {
     expect((await app.inject({method:'POST',url:'/v1/tasks',headers:await headers(['records:write']),payload:{title:'Approve',assigneeId:'bob'}})).statusCode).toBe(403);
     expect(writes()).toBe(0);
-    const created=await app.inject({method:'POST',url:'/v1/tasks',headers:await headers(['tasks:assign']),payload:{title:'Approve',assigneeId:'alice',organizationId:'org-b'}});
+    expect((await app.inject({method:'POST',url:'/v1/tasks',headers:await headers(['tasks:assign']),payload:{title:'Approve',assigneeId:'alice',organizationId:'org-b'}})).statusCode).toBe(400);
+    const created=await app.inject({method:'POST',url:'/v1/tasks',headers:await headers(['tasks:assign']),payload:{title:'Approve',assigneeId:'alice'}});
     expect(created.statusCode).toBe(201); expect(created.json().organizationId).toBe('org-a');
   }finally{await app.close();}
 });
@@ -117,4 +118,15 @@ test('upload rejects bytes over 1 MiB and honors the boundary without leaking me
 test.each(['/v1/tasks','/v1/files/file-1','/v1/files/file-1/content'])('foundation read %s requires authentication',async(url)=>{
   const {app}=configured();
   try{expect((await app.inject({url})).statusCode).toBe(401);}finally{await app.close();}
+});
+test.each([null,[],{title:'ok',assigneeId:'alice',createdBy:'bob'},{title:'ok',assigneeId:'alice',extra:true},{title:'ok',assigneeId:'alice',recordId:'bad'}])('REST task parser rejects malformed body %j',async payload=>{
+ const {app,writes}=configured();try {expect((await app.inject({method:'POST',url:'/v1/tasks',headers:{...await headers(['tasks:assign']),'content-type':'application/json'},payload:payload===null?'null':payload})).statusCode).toBe(400);expect(writes()).toBe(0);}finally{await app.close();}
+});
+test('task keyed requests fail closed for fixtures and role denial precedes header validation',async()=>{
+ const {app,writes}=configured();try{
+ const payload={title:'ok',assigneeId:'alice'};
+ expect((await app.inject({method:'POST',url:'/v1/tasks',headers:{...await headers(['tasks:assign']),'idempotency-key':'valid'},payload})).statusCode).toBe(503);
+ expect((await app.inject({method:'POST',url:'/v1/tasks',headers:{...await headers([]),'idempotency-key':'bad key'},payload})).statusCode).toBe(403);
+ expect(writes()).toBe(0);
+ }finally{await app.close();}
 });

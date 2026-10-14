@@ -1,8 +1,10 @@
 # Giai đoạn 1 — hợp đồng nền
 
+Cập nhật 14/10: [chống gửi lặp record/task](create-reliability.md) dùng optional Idempotency-Key xuyên REST/action. REST create dùng cùng parser với action và từ chối field thừa; clients giữ key khi retry. Không thay plugin/UI hoặc adapter của đồng đội trong đợt này.
+
 Cập nhật 12/10: [bàn giao task/tệp, recordId và logistics](phase-one-integration-handoff.md). Task/tệp liên kết được bản ghi đúng scope; hợp đồng logistics vẫn là cấu hình/fixture, chưa triển khai workflow.
 
-Hợp đồng engine đầu tiên (12/10): [Action runtime — bàn giao Hưng/Nhi](action-runtime.md). Catalog và hai action tạo record/task; còn giới hạn idempotency, SSO và graph execution được ghi rõ trong tài liệu.
+Hợp đồng engine đầu tiên (12/10): [Action runtime — bàn giao Hưng/Nhi](action-runtime.md). Catalog và hai action tạo record/task hỗ trợ optional key chống gửi lặp; giới hạn SSO và registry thực thi được ghi rõ trong tài liệu.
 
 Đường kết nối tài khoản NocoBase → Keycloak và proxy action: [hướng dẫn plugin bridge](nocobase-action-auth.md). Đã có server plugin, chưa có client block/SSO.
 
@@ -50,7 +52,7 @@ Scanner TCP nội bộ timeout 15 giây; chưa cấu hình hoặc lỗi trả er
 
 Trạng thái: `draft → submitted → approved → received → accepted → handed_over`; `submitted → rejected`. Từ chối cần lý do. Nhân viên tạo/gửi hồ sơ của mình; quản lý trong đơn vị duyệt; người được phân công nhận/nghiệm thu/bàn giao. Server kiểm tra quyền/version, ghi audit và chống thao tác lặp.
 
-Task engine nền đã liên kết recordId tùy chọn nhưng chưa đổi trạng thái hồ sơ UC1. UC1 cần audit vòng đời và workflow nghiệp vụ. Chưa kiểm tra assignee thuộc đơn vị trong directory; endpoint assign chỉ cho principal đáng tin, task khác scope không thể xử lý. Trước production cần directory check và chống tạo task lặp.
+Task engine nền liên kết recordId tùy chọn; task độc lập không tự đổi trạng thái hồ sơ. Workflow có runtime/audit riêng và task gắn wait được xử lý qua completion theo hợp đồng. Task creation kiểm tra active assignee cùng đơn vị qua directory snapshot, khóa/kiểm tra owner record trong transaction và hỗ trợ optional key chống tạo lặp. Request không-key vẫn có thể tạo nhiều task; directory cần sync sau identity changes.
 
 Sự kiện bàn giao dự kiến: `{eventId,eventType:"asset.handed_over",organizationId,assetId,occurredAt,sourceId,version}`. Nhi ánh xạ assetId→URN; broker không là bước commit giao dịch. Cần job/outbox trước khi xác nhận retry/dedupe hoạt động.
 

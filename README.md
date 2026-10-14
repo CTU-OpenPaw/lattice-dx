@@ -25,6 +25,8 @@ Mở rộng engine bằng cấu hình quy trình: [hợp đồng Workflow Studio
 
 [Workflow bundles](docs/workflow-bundles.md) cho phép xuất nhiều published workflow, xem trước và nhập nguyên bộ thành bản nháp trong đơn vị đích; thử `pnpm test:workflow-bundles`. Không chuyển người dùng/quyền, dữ liệu đang chạy hoặc bố cục UI, không tự publish và không ghi đè cấu hình đích.
 
+[Create reliability](docs/create-reliability.md) bổ sung optional `Idempotency-Key` cho REST/action tạo record/task, với kiểm tra đầu vào thống nhất và kết quả lưu trong cùng giao dịch; thử `pnpm test:create-reliability`. Không-key giữ hành vi cũ, replay trả snapshot lúc tạo và vẫn kiểm tra quyền/tham chiếu hiện tại.
+
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 
 Cấu hình này dùng mật khẩu PUBLIC cho môi trường local, được ghi rõ trong hướng dẫn. Không dùng cấu hình này để triển khai Internet. Xem [nguồn và giấy phép](docs/third-party.md).
