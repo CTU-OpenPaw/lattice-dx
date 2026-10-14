@@ -1,0 +1,264 @@
+// SPDX-License-Identifier: Apache-2.0
+import { createHash, randomUUID } from 'node:crypto';
+import type { Pool, PoolClient } from 'pg';
+import { parseCreateKey } from '../create-command.js';
+import { pageResult, type PageQuery } from '../pagination.js';
+import { bad, canonicalJson, EntityError, parseSchema, title, uuid, validateAttributes, version } from './policy.js';
+import type { Entity, EntityAudit, EntityRepository, RelationInput, SchemaDraft, SchemaPublication, Scope } from './types.js';
+
+type Queryable = Pick<PoolClient,'query'>;
+async function transaction<T>(pool:Pool, work:(client:PoolClient)=>Promise<T>):Promise<T> {
+  const client=await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result=await work(client);
+    await client.query('COMMIT');
+    return result;
+  } catch(error) { await client.query('ROLLBACK'); throw error; }
+  finally { client.release(); }
+}
+export async function runEntityCommand<T>(pool:Pool,scope:Scope,operation:string,key:string,input:unknown,validate:(client:PoolClient)=>Promise<void>,execute:(client:PoolClient)=>Promise<T>):Promise<T> {
+  if(!parseCreateKey(key)) bad('Idempotency-Key is required.');
+  return transaction(pool,async client=>{
+    const tuple=[scope.organizationId,scope.actorId,operation,key];
+    const lock=createHash('sha256').update(canonicalJson(tuple)).digest().readBigInt64BE(0).toString();
+    await client.query('SELECT pg_advisory_xact_lock($1::bigint)',[lock]);
+    await validate(client);
+    const fingerprint=createHash('sha256').update(canonicalJson(input)).digest('hex');
+    const receipt=(await client.query('SELECT fingerprint,result FROM enterprise_commands WHERE organization_id=$1 AND actor_id=$2 AND operation=$3 AND key=$4',tuple)).rows[0];
+    if(receipt) {
+      if(receipt.fingerprint!==fingerprint) throw new EntityError(409,'Idempotency-Key was used with different input.');
+      return receipt.result as T;
+    }
+    const result=await execute(client);
+    await client.query('INSERT INTO enterprise_commands(organization_id,actor_id,operation,key,fingerprint,result) VALUES($1,$2,$3,$4,$5,$6::jsonb)',[...tuple,fingerprint,JSON.stringify(result)]);
+    return result;
+  });
+}
+
+const entityColumns=`id, schema_id AS "schemaId", schema_version AS "schemaVersion", title, attributes,
+  owner_id AS "ownerId", organization_id AS "organizationId", version, archived_at AS "archivedAt",
+  created_at AS "createdAt", updated_at AS "updatedAt"`;
+function entity(row:Entity):Entity {
+  return {...row,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString(),archivedAt:row.archivedAt?new Date(row.archivedAt).toISOString():null};
+}
+function draft(row:{definition:SchemaDraft;revision:number;publishedVersion:number;createdAt:string;updatedAt:string}):SchemaDraft {
+  return {...row.definition,revision:row.revision,publishedVersion:row.publishedVersion,createdAt:new Date(row.createdAt).toISOString(),updatedAt:new Date(row.updatedAt).toISOString()};
+}
+const draftColumns=`definition, revision, published_version AS "publishedVersion", created_at AS "createdAt", updated_at AS "updatedAt"`;
+const missing=()=>new EntityError(404,'Entity or schema not found.');
+function current(row:Entity,expected:number) {
+  if(row.archivedAt) throw new EntityError(409,'Archived entity cannot mutate.');
+  if(row.version!==expected) throw new EntityError(409,'Entity version conflict.');
+}
+async function scopedEntity(db:Queryable,scope:Scope,id:string,lock=false):Promise<Entity|undefined> {
+  const row=(await db.query(`SELECT ${entityColumns} FROM enterprise_entities WHERE id=$1 AND owner_id=$2 AND organization_id=$3${lock?' FOR UPDATE':''}`,[id,scope.actorId,scope.organizationId])).rows[0];
+  return row?entity(row):undefined;
+}
+async function publication(db:Queryable,scope:Scope,id:string,pinned?:number):Promise<SchemaPublication> {
+  const result=await db.query(`SELECT definition,version FROM enterprise_schema_versions WHERE organization_id=$1 AND schema_id=$2 ${pinned===undefined?'ORDER BY version DESC LIMIT 1':'AND version=$3'}`,
+    pinned===undefined?[scope.organizationId,id]:[scope.organizationId,id,pinned]);
+  const row=result.rows[0];
+  if(!row) throw missing();
+  return {...row.definition,version:row.version};
+}
+async function audit(db:Queryable,scope:Scope,before:Entity|undefined,after:Entity,operation:string,input:unknown) {
+  await db.query(`INSERT INTO enterprise_audit(id,organization_id,owner_id,entity_id,actor_id,operation,from_version,to_version,input,result)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`,
+    [randomUUID(),scope.organizationId,scope.actorId,after.id,scope.actorId,operation,before?.version??0,after.version,JSON.stringify(input),JSON.stringify(after)]);
+}
+async function updateRow(db:Queryable,scope:Scope,before:Entity,operation:string,input:unknown,changes?:{title:string;attributes:Entity['attributes']},archive=false):Promise<Entity> {
+  const row=(await db.query(`UPDATE enterprise_entities SET title=$2,attributes=$3::jsonb,version=version+1,updated_at=now(),archived_at=CASE WHEN $4 THEN now() ELSE archived_at END WHERE id=$1 RETURNING ${entityColumns}`,
+    [before.id,changes?.title??before.title,JSON.stringify(changes?.attributes??before.attributes),archive])).rows[0];
+  const result=entity(row);
+  await audit(db,scope,before,result,operation,input);
+  return result;
+}
+function validatePage(page:PageQuery) {
+  if(!Number.isSafeInteger(page.limit)||page.limit<1||page.limit>100||!Number.isSafeInteger(page.offset)||page.offset<0||page.offset>Number.MAX_SAFE_INTEGER-101||typeof page.q!=='string'||Array.from(page.q).length>200) bad('Invalid pagination.');
+}
+
+export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
+  await pool.query(`CREATE TABLE IF NOT EXISTS enterprise_schemas (
+    organization_id text NOT NULL, id text NOT NULL, definition jsonb NOT NULL, revision integer NOT NULL DEFAULT 1,
+    published_version integer NOT NULL DEFAULT 0, published_revision integer,
+    created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(organization_id,id)
+  );
+  CREATE TABLE IF NOT EXISTS enterprise_schema_versions (
+    organization_id text NOT NULL, schema_id text NOT NULL, version integer NOT NULL, definition jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(organization_id,schema_id,version),
+    FOREIGN KEY(organization_id,schema_id) REFERENCES enterprise_schemas(organization_id,id)
+  );
+  CREATE TABLE IF NOT EXISTS enterprise_entities (
+    id uuid PRIMARY KEY, organization_id text NOT NULL, owner_id text NOT NULL, schema_id text NOT NULL, schema_version integer NOT NULL,
+    title text NOT NULL, attributes jsonb NOT NULL, version integer NOT NULL DEFAULT 1, archived_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+    FOREIGN KEY(organization_id,schema_id,schema_version) REFERENCES enterprise_schema_versions(organization_id,schema_id,version)
+  );
+  CREATE INDEX IF NOT EXISTS enterprise_entities_scope_idx ON enterprise_entities(organization_id,owner_id,created_at,id);
+  CREATE TABLE IF NOT EXISTS enterprise_relations (
+    source_id uuid NOT NULL REFERENCES enterprise_entities(id), name text NOT NULL,
+    target_id uuid NOT NULL REFERENCES enterprise_entities(id), created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(source_id,name,target_id)
+  );
+  CREATE TABLE IF NOT EXISTS enterprise_audit (
+    id uuid PRIMARY KEY, organization_id text NOT NULL, owner_id text NOT NULL, entity_id uuid NOT NULL REFERENCES enterprise_entities(id),
+    actor_id text NOT NULL, operation text NOT NULL, from_version integer NOT NULL, to_version integer NOT NULL,
+    occurred_at timestamptz NOT NULL DEFAULT now(), input jsonb NOT NULL, result jsonb NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS enterprise_audit_scope_idx ON enterprise_audit(organization_id,owner_id,entity_id,occurred_at,id);
+  CREATE TABLE IF NOT EXISTS enterprise_commands (
+    organization_id text NOT NULL, actor_id text NOT NULL, operation text NOT NULL, key text NOT NULL,
+    fingerprint text NOT NULL, result jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(organization_id,actor_id,operation,key)
+  )`);
+
+  async function getDraft(db:Queryable,scope:Scope,id:string,lock=false):Promise<SchemaDraft|undefined> {
+    const row=(await db.query(`SELECT ${draftColumns} FROM enterprise_schemas WHERE organization_id=$1 AND id=$2${lock?' FOR UPDATE':''}`,[scope.organizationId,id])).rows[0];
+    return row?draft(row):undefined;
+  }
+  async function mutate(scope:Scope,id:string,expectedVersion:number,key:string,operation:string,input:unknown,apply:(client:PoolClient,before:Entity)=>Promise<Entity>):Promise<Entity> {
+    id=uuid(id); version(expectedVersion);
+    let before:Entity;
+    return runEntityCommand(pool,scope,operation,key,{id,...input as object},async client=>{
+      const row=await scopedEntity(client,scope,id,true);
+      if(!row) throw missing();
+      before=row;
+    },async client=>{
+      current(before,expectedVersion);
+      return apply(client,before);
+    });
+  }
+  async function relationCommand(scope:Scope,id:string,input:RelationInput,key:string,remove:boolean):Promise<Entity> {
+    id=uuid(id);
+    input={...input,targetId:uuid(input.targetId),expectedVersion:version(input.expectedVersion)};
+    let source:Entity,target:Entity;
+    const operation=remove?'entity.unlink':'entity.link';
+    return runEntityCommand(pool,scope,operation,key,{id,...input},async client=>{
+      const ids=[...new Set([id,input.targetId])].sort();
+      const locked=new Map<string,Entity>();
+      for(const candidate of ids) {
+        const row=await scopedEntity(client,scope,candidate,true);
+        if(!row) throw missing();
+        locked.set(candidate,row);
+      }
+      source=locked.get(id)!; target=locked.get(input.targetId)!;
+    },async client=>{
+      current(source,input.expectedVersion);
+      if(!remove&&target.archivedAt) throw new EntityError(409,'Archived target cannot link.');
+      const schema=await publication(client,scope,source.schemaId,source.schemaVersion);
+      const declaration=Object.hasOwn(schema.relations,input.name)?schema.relations[input.name]:undefined;
+      if(!declaration||declaration.targetSchemaId!==target.schemaId) bad('Undeclared relation or wrong target schema.');
+      const params=[id,input.name,input.targetId];
+      const changed=remove
+        ?await client.query('DELETE FROM enterprise_relations WHERE source_id=$1 AND name=$2 AND target_id=$3 RETURNING source_id',params)
+        :await client.query('INSERT INTO enterprise_relations(source_id,name,target_id) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING source_id',params);
+      if(!changed.rows.length) return source;
+      return updateRow(client,scope,source,operation,input);
+    });
+  }
+
+  return {
+    async createSchema(scope,definition) {
+      definition=parseSchema(definition);
+      const result=await pool.query(`INSERT INTO enterprise_schemas(organization_id,id,definition) VALUES($1,$2,$3::jsonb) ON CONFLICT DO NOTHING RETURNING ${draftColumns}`,[scope.organizationId,definition.id,JSON.stringify(definition)]);
+      if(!result.rows[0]) throw new EntityError(409,'Schema already exists.');
+      return draft(result.rows[0]);
+    },
+    async listSchemas(scope,page) {
+      validatePage(page);
+      const result=await pool.query(`SELECT ${draftColumns} FROM enterprise_schemas WHERE organization_id=$1 AND ($2='' OR strpos(lower(definition->>'title'),lower($2))>0) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4`,[scope.organizationId,page.q,page.limit+1,page.offset]);
+      return pageResult(result.rows.map(draft),page);
+    },
+    getSchema(scope,id) { return getDraft(pool,scope,id); },
+    async getPublishedSchema(scope,id,pinned) {
+      version(pinned);
+      if(pinned>2147483647) bad('Invalid schema version.');
+      try { return await publication(pool,scope,id,pinned); }
+      catch(error) {
+        if(error instanceof EntityError&&error.statusCode===404) return undefined;
+        throw error;
+      }
+    },
+    async saveSchema(scope,id,input) {
+      version(input.expectedRevision);
+      const definition=parseSchema({id,title:input.title,fields:input.fields,relations:input.relations});
+      return transaction(pool,async client=>{
+        const existing=await getDraft(client,scope,id,true);
+        if(!existing) throw missing();
+        if(existing.revision!==input.expectedRevision) throw new EntityError(409,'Schema revision conflict.');
+        const result=await client.query(`UPDATE enterprise_schemas SET definition=$3::jsonb,revision=revision+1,updated_at=now() WHERE organization_id=$1 AND id=$2 RETURNING ${draftColumns}`,[scope.organizationId,id,JSON.stringify(definition)]);
+        return draft(result.rows[0]);
+      });
+    },
+    async publishSchema(scope,id,expectedRevision) {
+      version(expectedRevision);
+      return transaction(pool,async client=>{
+        const existing=await getDraft(client,scope,id,true);
+        if(!existing) throw missing();
+        if(existing.revision!==expectedRevision) throw new EntityError(409,'Schema revision conflict.');
+        const state=(await client.query('SELECT published_revision FROM enterprise_schemas WHERE organization_id=$1 AND id=$2',[scope.organizationId,id])).rows[0];
+        if(state.published_revision===expectedRevision) return publication(client,scope,id,existing.publishedVersion);
+        for(const relation of Object.values(existing.relations)) {
+          if(relation.targetSchemaId!==id) await publication(client,scope,relation.targetSchemaId);
+        }
+        const publishedVersion=existing.publishedVersion+1;
+        const definition={id:existing.id,title:existing.title,fields:existing.fields,relations:existing.relations};
+        await client.query('INSERT INTO enterprise_schema_versions(organization_id,schema_id,version,definition) VALUES($1,$2,$3,$4::jsonb)',[scope.organizationId,id,publishedVersion,JSON.stringify(definition)]);
+        await client.query('UPDATE enterprise_schemas SET published_version=$3,published_revision=$4,updated_at=now() WHERE organization_id=$1 AND id=$2',[scope.organizationId,id,publishedVersion,expectedRevision]);
+        return {...definition,version:publishedVersion};
+      });
+    },
+    async create(scope,input,key) {
+      input={...input,title:title(input.title)};
+      return runEntityCommand(pool,scope,'entity.create',key,input,async client=>{
+        await publication(client,scope,input.schemaId);
+      },async client=>{
+        const schema=await publication(client,scope,input.schemaId);
+        const attributes=validateAttributes(schema,input.attributes);
+        const result=await client.query(`INSERT INTO enterprise_entities(id,organization_id,owner_id,schema_id,schema_version,title,attributes) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING ${entityColumns}`,
+          [randomUUID(),scope.organizationId,scope.actorId,input.schemaId,schema.version,input.title,JSON.stringify(attributes)]);
+        const created=entity(result.rows[0]);
+        await audit(client,scope,undefined,created,'entity.create',input);
+        return created;
+      });
+    },
+    async list(scope,page) {
+      validatePage(page);
+      const result=await pool.query(`SELECT ${entityColumns} FROM enterprise_entities WHERE organization_id=$1 AND owner_id=$2 AND archived_at IS NULL
+        AND ($3='' OR strpos(lower(title),lower($3))>0) AND ($4::text IS NULL OR schema_id=$4) ORDER BY created_at DESC,id DESC LIMIT $5 OFFSET $6`,
+        [scope.organizationId,scope.actorId,page.q,page.schemaId??null,page.limit+1,page.offset]);
+      return pageResult(result.rows.map(entity),page);
+    },
+    find(scope,id) { return scopedEntity(pool,scope,uuid(id)); },
+    update(scope,id,input,key) {
+      input={...input,title:title(input.title)};
+      return mutate(scope,id,input.expectedVersion,key,'entity.update',input,async(client,before)=>{
+        const schema=await publication(client,scope,before.schemaId,before.schemaVersion);
+        const attributes=validateAttributes(schema,input.attributes);
+        return updateRow(client,scope,before,'entity.update',input,{title:input.title,attributes});
+      });
+    },
+    archive(scope,id,expectedVersion,key) {
+      return mutate(scope,id,expectedVersion,key,'entity.archive',{expectedVersion},(client,before)=>updateRow(client,scope,before,'entity.archive',{expectedVersion},undefined,true));
+    },
+    link(scope,id,input,key) { return relationCommand(scope,id,input,key,false); },
+    unlink(scope,id,input,key) { return relationCommand(scope,id,input,key,true); },
+    async relations(scope,id,page) {
+      validatePage(page); id=uuid(id);
+      if(!await scopedEntity(pool,scope,id)) throw missing();
+      const result=await pool.query(`SELECT r.name,r.target_id AS "targetId",r.created_at AS "createdAt" FROM enterprise_relations r
+        JOIN enterprise_entities t ON t.id=r.target_id JOIN enterprise_entities s ON s.id=r.source_id
+        WHERE r.source_id=$1 AND s.organization_id=$2 AND s.owner_id=$3 AND t.organization_id=$2 AND t.owner_id=$3 AND t.archived_at IS NULL
+        AND ($4='' OR strpos(lower(r.name),lower($4))>0) ORDER BY r.created_at DESC,r.name DESC,r.target_id DESC LIMIT $5 OFFSET $6`,[id,scope.organizationId,scope.actorId,page.q,page.limit+1,page.offset]);
+      return pageResult(result.rows.map(row=>({...row,createdAt:new Date(row.createdAt).toISOString()})),page);
+    },
+    async history(scope,id,page) {
+      validatePage(page); id=uuid(id);
+      if(!await scopedEntity(pool,scope,id)) throw missing();
+      const result=await pool.query(`SELECT a.id,a.entity_id AS "entityId",a.actor_id AS "actorId",a.operation,a.from_version AS "fromVersion",a.to_version AS "toVersion",a.occurred_at AS "occurredAt",a.input,a.result
+        FROM enterprise_audit a JOIN enterprise_entities e ON e.id=a.entity_id
+        WHERE a.entity_id=$1 AND a.organization_id=$2 AND a.owner_id=$3 AND e.organization_id=$2 AND e.owner_id=$3
+        AND ($4='' OR strpos(lower(a.operation),lower($4))>0) ORDER BY a.occurred_at DESC,a.id DESC LIMIT $5 OFFSET $6`,[id,scope.organizationId,scope.actorId,page.q,page.limit+1,page.offset]);
+      return pageResult(result.rows.map((row:EntityAudit)=>({...row,occurredAt:new Date(row.occurredAt).toISOString()})),page);
+    },
+  };
+}

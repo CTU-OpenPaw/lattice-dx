@@ -4,6 +4,9 @@
   "sslRequired": "none",
   "roles": {
     "realm": [
+      { "name": "data:design" },
+      { "name": "data:read" },
+      { "name": "data:write" },
       {
         "name": "records:read"
       },
@@ -142,6 +145,9 @@
         }
       ],
       "realmRoles": [
+        "data:design",
+        "data:read",
+        "data:write",
         "records:read",
         "records:write",
         "tasks:read",

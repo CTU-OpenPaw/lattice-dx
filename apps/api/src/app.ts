@@ -13,7 +13,8 @@ import { registerWorkflowDrafts } from './workflows/registry-routes.js';
 import { registerLogistics } from './logistics.js';
 import { isRecordId,parseRecordCreateInput } from '@dx/contracts';
 import { parsePage } from './pagination.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions) {
+import { registerEntities, type EntityOptions } from './entities/routes.js';
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions) {
   const app = Fastify({ bodyLimit: 16_384 });
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
   registerFoundation(app,options);
@@ -23,6 +24,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerWorkflowDrafts(app,options);
   registerWorkflowBundles(app,options);
   registerLogistics(app,options);
+  registerEntities(app,options);
   app.route({
     method: ['GET', 'POST'], url: '/v1/records',
     handler: async (request, reply) => {
