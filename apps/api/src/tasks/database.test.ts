@@ -30,3 +30,15 @@ test('queue create replay checks current creator before historical receipt',asyn
  await expect(repo.createQueue({subject:'alice',organizationId:'org-a'},input,'create')).rejects.toMatchObject({statusCode:404});
  expect(f.log).toContain('ROLLBACK');
 });
+test('revoked queue creator altered body remains404 before fingerprint conflict',async()=>{
+ const f=fixture({receipt:true,fingerprint:createFingerprint({title:'Task',departmentId:'warehouse'}),createdBy:'carol'});
+ const repo=await taskLifecycleDatabase(f.pool);
+ await expect(repo.createQueue({subject:'alice',organizationId:'org-a'},{title:'Changed',departmentId:'warehouse'},'create')).rejects.toMatchObject({statusCode:404});
+ expect(f.log).toContain('ROLLBACK');
+});
+test('authorized queue creator altered body receives409 after authority check',async()=>{
+ const f=fixture({receipt:true,fingerprint:createFingerprint({title:'Task',departmentId:'warehouse'})});
+ const repo=await taskLifecycleDatabase(f.pool);
+ await expect(repo.createQueue({subject:'alice',organizationId:'org-a'},{title:'Changed',departmentId:'warehouse'},'create')).rejects.toMatchObject({statusCode:409});
+ expect(f.log.some(s=>s.includes('FROM foundation_tasks')&&s.includes('FOR UPDATE'))).toBe(true);
+});

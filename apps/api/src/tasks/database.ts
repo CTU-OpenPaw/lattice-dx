@@ -15,7 +15,7 @@ export async function taskLifecycleDatabase(pool:Pool):Promise<TaskLifecycleRepo
  await pool.query(`CREATE TABLE IF NOT EXISTS task_lifecycle_history(id uuid PRIMARY KEY,task_id uuid NOT NULL REFERENCES foundation_tasks(id),organization_id text NOT NULL,actor_id text NOT NULL,operation text NOT NULL,from_version integer NOT NULL,to_version integer NOT NULL,occurred_at timestamptz NOT NULL DEFAULT now())`);
  await pool.query('CREATE INDEX IF NOT EXISTS task_lifecycle_history_task ON task_lifecycle_history(task_id,occurred_at,id)');
  await pool.query(`CREATE TABLE IF NOT EXISTS task_lifecycle_commands(organization_id text NOT NULL,actor_id text NOT NULL,operation text NOT NULL,key text NOT NULL,fingerprint text NOT NULL,result jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),PRIMARY KEY(organization_id,actor_id,operation,key))`);
- async function command(actor:Scope,op:string,key:string,input:Record<string,unknown>,execute:(c:PoolClient,receipt:()=>Promise<Task|undefined>)=>Promise<Task>):Promise<Task>{
+ async function command(actor:Scope,op:string,key:string,input:Record<string,unknown>,execute:(c:PoolClient,receipt:(authorize?:(id:string)=>Promise<void>)=>Promise<Task|undefined>)=>Promise<Task>):Promise<Task>{
   principal(actor.subject);principal(actor.organizationId);
   if(!parseCreateKey(key))throw new TaskLifecycleError(400,'Idempotency-Key bắt buộc.');
   const c=await pool.connect(),tuple=[actor.organizationId,actor.subject,op,key],fingerprint=createFingerprint(input);
@@ -24,9 +24,9 @@ export async function taskLifecycleDatabase(pool:Pool):Promise<TaskLifecycleRepo
    const lock=createHash('sha256').update(JSON.stringify(tuple)).digest().readBigInt64BE(0).toString();
    await c.query('SELECT pg_advisory_xact_lock($1::bigint)',[lock]);
    let replayed=false;
-   const receipt=async()=>{
+   const receipt=async(authorize?:(id:string)=>Promise<void>)=>{
     const r=(await c.query('SELECT fingerprint,result FROM task_lifecycle_commands WHERE organization_id=$1 AND actor_id=$2 AND operation=$3 AND key=$4',tuple)).rows[0];
-    if(!r)return undefined;if(r.fingerprint!==fingerprint)throw new TaskLifecycleError(409,'Idempotency-Key đã được dùng với nội dung khác.');replayed=true;return r.result as Task;
+    if(!r)return undefined;if(authorize)await authorize((r.result as Task).id);if(r.fingerprint!==fingerprint)throw new TaskLifecycleError(409,'Idempotency-Key đã được dùng với nội dung khác.');replayed=true;return r.result as Task;
    };
    const result=await execute(c,receipt);
    // A replay is never rewritten: the immutable stored receipt determines its result.
@@ -69,12 +69,11 @@ export async function taskLifecycleDatabase(pool:Pool):Promise<TaskLifecycleRepo
     const members=(await c.query('SELECT subject FROM directory_people WHERE organization_id=$1 AND department_id=$2 AND enabled=true FOR SHARE',[actor.organizationId,input.departmentId])).rows;
     if(!members.length)throw new TaskLifecycleError(400,'Department không khả dụng trong đơn vị.');
     if(input.recordId&&!((await c.query('SELECT id FROM records WHERE id=$1 AND owner_id=$2 AND organization_id=$3 FOR SHARE',[input.recordId,actor.subject,actor.organizationId])).rows[0]))throw new TaskLifecycleError(404,'Không tìm thấy bản ghi trong phạm vi được phép.');
-    const prior=await receipt();
-    if(prior){
-     const current=(await c.query(`SELECT ${columns} FROM foundation_tasks WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[prior.id,actor.organizationId])).rows[0] as Task|undefined;
+    const prior=await receipt(async id=>{
+     const current=(await c.query(`SELECT ${columns} FROM foundation_tasks WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0] as Task|undefined;
      assertAuthority(current,actor,'cancel',false);
-     return prior;
-    }
+    });
+    if(prior)return prior;
     if(input.dueAt)normalizeDueAt(input.dueAt,Date.now());
     const result=serialize((await c.query(`INSERT INTO foundation_tasks(id,title,organization_id,assignee_id,created_by,department_id,record_id,due_at) VALUES($1,$2,$3,'',$4,$5,$6,$7) RETURNING ${columns}`,[randomUUID(),input.title,actor.organizationId,actor.subject,input.departmentId,input.recordId??null,input.dueAt??null])).rows[0]);
     await c.query('INSERT INTO task_lifecycle_history(id,task_id,organization_id,actor_id,operation,from_version,to_version) VALUES($1,$2,$3,$4,$5,$6,$7)',[randomUUID(),result.id,actor.organizationId,actor.subject,'createQueue',0,1]);
