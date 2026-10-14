@@ -9,17 +9,17 @@ import {assertBackupPath,assertRegularBackup,assertRestoreTarget,verifyBackup,ru
 const root=fileURLToPath(new URL('../',import.meta.url));
 const backupRoot=join(root,'output','backups');
 const dockerPrefix=['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','postgres'];
-function postgres(args,input){
+export function postgres(args,input){
  return execFileSync('docker',[...dockerPrefix,...args],{cwd:root,input,timeout:120000,maxBuffer:256*1024*1024,stdio:['pipe','pipe','pipe']});
 }
-function sql(database,statement){
+export function sql(database,statement){
  return postgres(['psql','-X','-v','ON_ERROR_STOP=1','-U','lattice','-d',database,'-At','-c',statement]).toString().trim();
 }
 export function backup(){
  mkdirSync(backupRoot,{recursive:true});
  const path=assertBackupPath(join(backupRoot,'core-'+randomUUID().replaceAll('-','')+'.dump'),backupRoot);
  const bytes=postgres(['pg_dump','--format=custom','--no-owner','--no-acl','-U','lattice','-d','lattice']);
- const manifest={format:'latticedx.pg-backup',version:1,createdAt:new Date().toISOString(),sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length,database:'lattice'};
+ const manifest={format:'latticedx.pg-backup',version:1,scope:'database-only',createdAt:new Date().toISOString(),sha256:createHash('sha256').update(bytes).digest('hex'),bytes:bytes.length,database:'lattice'};
  // Fail rather than overwrite any existing artifact; retain both files locally.
  writeFileSync(path,bytes,{flag:'wx'});writeFileSync(path+'.json',JSON.stringify(manifest,null,2)+'\n',{flag:'wx'});
  return {path,manifest};
@@ -45,7 +45,7 @@ export function rehearse(file,recordId){
    if(!inventory.some(table=>table.name===name))throw new Error('Restored store missing: '+name);
   }
   if(recordId!==undefined&&sql(database,`SELECT count(*) FROM records WHERE id='${recordId}'::uuid`)!=='1')throw new Error('Sentinel row did not survive restore.');
-  const report={format:'latticedx.restore-rehearsal',version:1,completedAt:new Date().toISOString(),backupSha256:manifest.sha256,fixtureDatabase:database,inventory,...(recordId?{sentinelRecordId:recordId}:{})};
+  const report={format:'latticedx.restore-rehearsal',version:1,scope:'database-only',fullRecoverability:false,objectsVerified:false,completedAt:new Date().toISOString(),backupSha256:manifest.sha256,fixtureDatabase:database,inventory,...(recordId?{sentinelRecordId:recordId}:{})};
   writeFileSync(path+'.restore-'+randomUUID().replaceAll('-','')+'.json',JSON.stringify(report,null,2)+'\n',{flag:'wx'});
   return report;
  },()=>{assertRestoreTarget(database);sql('postgres',`DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);});

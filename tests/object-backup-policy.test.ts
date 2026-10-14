@@ -9,6 +9,7 @@ const manifest={format:'latticedx.full-backup',version:1,createdAt:'2026-10-14T0
 describe('paired object backup policies',()=>{
  it('verifies exact immutable references and content',()=>{
   expect(validateObjectInventory([entry])).toEqual([entry]);expect(()=>verifyObjectBytes(bytes,entry)).not.toThrow();expect(validateFullManifest(JSON.stringify(manifest))).toEqual(manifest);expect(()=>compareObjectInventories([entry],[entry])).not.toThrow();
+  expect(()=>compareObjectInventories([entry],[{sha256:entry.sha256,size:entry.size,objectKey:entry.objectKey,fileId:entry.fileId}])).not.toThrow();
  });
  it('rejects path keys, duplicates, invalid sizes and extra fields',()=>{
   for(const value of [[{...entry,objectKey:'../outside'}],[entry,entry],[{...entry,size:-1}],[{...entry,size:1048577}],[{...entry,sha256:'f'.repeat(63)}],[{...entry,path:'secret'}]])expect(()=>validateObjectInventory(value)).toThrow();

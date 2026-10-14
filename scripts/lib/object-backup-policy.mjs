@@ -16,7 +16,7 @@ export function validateObjectInventory(value){
   if(typeof entry.fileId!=='string'||!uuid.test(entry.fileId)||typeof entry.objectKey!=='string'||!objectKey.test(entry.objectKey)||typeof entry.sha256!=='string'||!digest.test(entry.sha256)||!Number.isSafeInteger(entry.size)||entry.size<0||entry.size>1048576||files.has(entry.fileId)||objects.has(entry.objectKey))fail();
   files.add(entry.fileId);objects.add(entry.objectKey);total+=entry.size;if(total>1024*1024*1024)fail();
  }
- return value.map(entry=>({...entry}));
+ return value.map(({fileId,objectKey,size,sha256})=>({fileId,objectKey,size,sha256}));
 }
 export function verifyObjectBytes(bytes,entry){
  validateObjectInventory([entry]);
