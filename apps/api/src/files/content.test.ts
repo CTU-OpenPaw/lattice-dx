@@ -14,6 +14,7 @@ for(const path of ['task','workflow','entity'] as const)it(`${path} current auth
  const queries:string[]=[];const readVerified=vi.fn();
  const client={query:vi.fn(async(sql:string)=>{queries.push(sql);
   if(sql.startsWith('SELECT id,owner_id FROM foundation_files'))return {rows:[]};
+  if(sql.startsWith('SELECT to_regclass'))return {rows:[{runs:'workflow_runs',files:'workflow_files'}]};
   if(sql.startsWith('SELECT r.id,r.owner_id'))return {rows:[]};
   if(sql.includes('FROM records'))return {rows:path==='task'?[{id,task_id:id}]:[]};
   if(sql.includes('FROM enterprise_entities'))return {rows:[{id,ownerId:actor.subject,organizationId:'org',archivedAt:null}]};
@@ -25,4 +26,13 @@ for(const path of ['task','workflow','entity'] as const)it(`${path} current auth
  expect(readVerified).not.toHaveBeenCalled();
  if(path==='task')expect(queries.find(sql=>sql.includes('FROM records'))).toContain("t.status<>'cancelled'");
  if(path==='entity')expect(queries.findIndex(sql=>sql.includes('FROM enterprise_entity_attachments'))).toBeLessThan(queries.findIndex(sql=>sql.includes('SELECT id,filename')));
+});
+
+it('absent optional workflow module never queries its tables or grants access',async()=>{
+ const query=vi.fn(async(sql:string,params:unknown[])=>{
+  if(sql.startsWith('SELECT to_regclass')){expect(params).toEqual(['workflow_runs','workflow_files']);return {rows:[{runs:null,files:null}]};}
+  if(sql.includes('FROM workflow_runs')||sql.includes('JOIN workflow_files'))throw Error('absent optional relation queried');
+  return {rows:[]};
+ });const readVerified=vi.fn();
+ expect(await loadFileContentWithClient({query} as any,actor,id,{kind:'foundation'},{readVerified,writeVerified:vi.fn()})).toBeUndefined();expect(readVerified).not.toHaveBeenCalled();
 });

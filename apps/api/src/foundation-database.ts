@@ -6,7 +6,7 @@ import type { FoundationRepository } from './foundation.js';
 import { DirectoryError } from './directory.js';
 import { pageResult } from './pagination.js';
 import { initializeFileStorage } from './files/storage-database.js';
-import {loadFileContentWithClient,readFileMetadataWithClient} from './files/content.js';
+import {loadFileContentWithClient,readFileMetadataWithClient,readFoundationPathMetadataWithClient} from './files/content.js';
 import type {ObjectStore} from './files/object-store.js';
 export async function foundationDatabase(pool:Pool,store?:ObjectStore):Promise<FoundationRepository>{
   await pool.query(`CREATE TABLE IF NOT EXISTS foundation_tasks (
@@ -43,7 +43,7 @@ export async function foundationDatabase(pool:Pool,store?:ObjectStore):Promise<F
       return pageResult(rows,q);
     },
     async readTask(id,s) {return (await pool.query(`SELECT ${tc} FROM foundation_tasks WHERE id::text=$1 AND organization_id=$2 AND (assignee_id=$3 OR created_by=$3 OR (assignee_id='' AND status='pending' AND EXISTS(SELECT 1 FROM directory_people p WHERE p.organization_id=$2 AND p.subject=$3 AND p.enabled=true AND p.department_id=foundation_tasks.department_id)))`,[id.toLowerCase(),s.organizationId,s.subject])).rows[0];},
-    readTaskFile:(id,s)=>read(client=>readFileMetadataWithClient(client,{...s,roles:[]},id,{kind:'foundation'})),
+    readTaskFile:(id,s)=>read(client=>readFoundationPathMetadataWithClient(client,{...s,roles:[]},id,'task')),
     async listTasks(s){return (await pool.query(`SELECT ${tc} FROM foundation_tasks WHERE organization_id=$1 AND assignee_id=$2 ORDER BY created_at DESC LIMIT 100`,[s.organizationId,s.subject])).rows;},
     async createTask(input,key){
       const i={...input,title:input.title.trim(),...(input.recordId?{recordId:input.recordId.toLowerCase()}:{})};
@@ -62,7 +62,7 @@ export async function foundationDatabase(pool:Pool,store?:ObjectStore):Promise<F
     },
     async createFile(i){return (await pool.query(`INSERT INTO foundation_files(id,filename,owner_id,organization_id,content,size,record_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING ${fc}`,[crypto.randomUUID(),i.filename,i.ownerId,i.organizationId,i.content,i.content.length,i.recordId??null])).rows[0];},
     async markFile(id,status){await pool.query('UPDATE foundation_files SET scan_status=$1 WHERE id=$2',[status,id]);},
-    readFile:(id,s)=>read(client=>readFileMetadataWithClient(client,{...s,roles:[]},id,{kind:'foundation'})),
+    readFile:(id,s)=>read(client=>readFoundationPathMetadataWithClient(client,{...s,roles:[]},id,'owner')),
   };
 }
 

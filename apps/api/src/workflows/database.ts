@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import {readFileMetadataWithClient} from '../files/content.js';
+import {readFoundationPathMetadataWithClient} from '../files/content.js';
 import type {ObjectStore} from '../files/object-store.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
@@ -258,7 +258,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     async registerMember(actor) {await pool.query('INSERT INTO workflow_members(organization_id,subject) VALUES($1,$2) ON CONFLICT DO NOTHING',[actor.organizationId,actor.subject]);},
     async references(actor) {return (await pool.query('SELECT kind,id,name FROM workflow_references WHERE organization_id=$1 ORDER BY kind,id LIMIT 100',[actor.organizationId])).rows;},
     async readSharedFile(id,actor) {
-      return transaction(pool,client=>readFileMetadataWithClient(client,actor,id,{kind:'foundation'}));
+      return transaction(pool,client=>readFoundationPathMetadataWithClient(client,actor,id,'workflow'));
     },
   };
 }
