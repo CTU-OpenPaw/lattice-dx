@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { isRecordId, type CreateWorkflow, type TransitionCommand, type WorkflowActor, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowEvent } from '@dx/contracts';
 import { sourceRegistry,type DefinitionRegistry } from './registry.js';
-import { authorizeTransition, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
+import { authorizeTransition, parseEntityContext, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
 import { timerDatabase,resolveServiceActor } from './timer-database.js';
 import { executeBlocks } from './block-database.js';
 import { authorizeBlock } from './block-policy.js';
@@ -13,6 +13,8 @@ import { compileCondition } from './conditions.js';
 import {lifecycleDatabase} from './lifecycle-database.js';
 import type { WorkflowRepository } from './types.js';
 import { pageResult, type PageQuery } from '../pagination.js';
+import {workflowReadPredicate} from './read-predicate.js';
+import {contextColumns,readContext,lockContextEntity,requireEntityRead} from './entity-context.js';
 import {initializeModuleTables,assertModuleStartEligible} from '../modules/database.js';
 
 const runColumns='id,id AS "recordId",definition_id AS "definitionId",definition_version AS "definitionVersion",title,owner_id AS "ownerId",organization_id AS "organizationId",state,version,data,status,cancellation,created_at AS "createdAt",updated_at AS "updatedAt"';
@@ -58,7 +60,9 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     const links=(await client.query('SELECT run_id,task_id FROM workflow_task_links WHERE run_id=ANY($1::uuid[])',[runs.map(r=>r.id)])).rows;
     const waits=(await client.query("SELECT run_id FROM workflow_waits WHERE run_id=ANY($1::uuid[]) AND status='pending'",[runs.map(r=>r.id)])).rows;
     const timers=(await client.query("SELECT run_id FROM workflow_timers WHERE run_id=ANY($1::uuid[]) AND status='pending'",[runs.map(r=>r.id)])).rows;
-    return runs.map(r=>({...r,waiting:waits.some(w=>w.run_id===r.id)||timers.some(t=>t.run_id===r.id),...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
+    const contexts=(await client.query(`SELECT run_id,${contextColumns} FROM workflow_entity_contexts WHERE run_id=ANY($1::uuid[])`,[runs.map(r=>r.id)])).rows;
+    const byRun=new Map(contexts.map(({run_id,...context})=>[run_id,context]));
+    return runs.map(r=>({...r,...(byRun.has(r.id)?{entityContext:byRun.get(r.id)}:{}),waiting:waits.some(w=>w.run_id===r.id)||timers.some(t=>t.run_id===r.id),...(links.find(l=>l.run_id===r.id)?{taskId:links.find(l=>l.run_id===r.id).task_id}:{})}));
   }
   async function checkAssigned(client:PoolClient,def:WorkflowDefinition,data:Record<string,string>,actor:WorkflowActor) {
     if(!def.assignedReader)return;
@@ -70,10 +74,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     const workflowDefinitions=await registry.list(actor.organizationId);
     const values:unknown[]=[actor.organizationId,actor.subject];
     const bind=(value:unknown)=>{values.push(value);return '$'+values.length;};
-    const roleReaders=workflowDefinitions.filter(d=>d.readerRoles.some(r=>actor.roles.includes(r))).map(d=>`${d.id}:${d.version}`);
-    const readers=[`owner_id=$2`,`(definition_id||':'||definition_version)=ANY(${bind(roleReaders)}::text[])`];
-    for(const d of workflowDefinitions){const a=d.assignedReader;if(a&&actor.roles.includes(a.role))readers.push(`(definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=ANY(${bind(a.states)}::text[]) AND data->>${bind(a.field)}=$2)`);}
-    const where=['organization_id=$1',`(${readers.join(' OR ')})`];
+    const where=['organization_id=$1',workflowReadPredicate(workflowDefinitions,actor,bind)];
     if(inbox){
       where.push("status='active'");
       const choices:string[]=[];
@@ -100,11 +101,19 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     return (await taskIds([run]))[0];
   }
   async function createWithClient(client:PoolClient,value:CreateWorkflow & {definitionVersion?:number},actor:WorkflowActor,key:string):Promise<WorkflowRun> {
+    const contextInput=parseEntityContext(value.entityContext);
+    if(value.entityContext!==undefined&&!contextInput)throw new WorkflowError(400,'Invalid entity context.');
+    if(contextInput){requireEntityRead(actor);value={...value,entityContext:contextInput};}
     await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify([actor.organizationId,actor.subject,key])]);
     const replay=(await client.query('SELECT fingerprint,result FROM workflow_starts WHERE organization_id=$1 AND actor_id=$2 AND key=$3',[actor.organizationId,actor.subject,key])).rows[0];
     const def=replay?await definition(replay.result,client):await registry.get(actor.organizationId,value.definitionId,value.definitionVersion,client);
     if(!def)throw new WorkflowError(400,'Phiên bản quy trình không khả dụng.');
     if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
+    if(replay){
+      await client.query('SELECT id FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR SHARE',[replay.result.id,actor.organizationId]);
+      const stored=await readContext(client,replay.result.id,actor.organizationId);
+      if(stored)await lockContextEntity(client,stored.entityId,actor);
+    }
     const input=validateInput(def.startFields,value.input,def.optionalStartFields),hash=fingerprint({...value,input});
     if(replay){if(replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
     await assertModuleStartEligible(client,actor.organizationId,def.id,def.version);
@@ -112,11 +121,16 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     if(def.assignedReader)delete referenceFields[def.assignedReader.field];
     await validateReferences(client,referenceFields,input,actor,run=>definition(run,client));
     await checkAssigned(client,def,input,actor);
+    const source=contextInput?await lockContextEntity(client,contextInput.entityId,actor,true):undefined;
     const id=randomUUID();
     await client.query('INSERT INTO records(id,title,owner_id,organization_id) VALUES($1,$2,$3,$4)',[id,value.title,actor.subject,actor.organizationId]);
     const row=(await client.query(`INSERT INTO workflow_runs(id,definition_id,definition_version,title,owner_id,organization_id,state,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${runColumns}`,[id,def.id,def.version,value.title,actor.subject,actor.organizationId,def.initialState,JSON.stringify(input)])).rows[0];
     const run=serializeRun(row);
-    await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,to_state,version) VALUES($1,$2,$3,$4,$5,1)',[randomUUID(),id,actor.subject,'create',def.initialState]);
+    if(source){
+      run.entityContext={entityId:source.id,schemaId:source.schemaId,schemaVersion:source.schemaVersion,entityVersion:source.version};
+      await client.query('INSERT INTO workflow_entity_contexts(run_id,organization_id,entity_id,schema_id,schema_version,entity_version) VALUES($1,$2,$3,$4,$5,$6)',[id,actor.organizationId,source.id,source.schemaId,source.schemaVersion,source.version]);
+    }
+    await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,to_state,version,metadata) VALUES($1,$2,$3,$4,$5,1,$6)',[randomUUID(),id,actor.subject,'create',def.initialState,run.entityContext?JSON.stringify({entityContext:run.entityContext}):null]);
     await attachFiles(client,id,{...def.startFields,...def.optionalStartFields},input);
     await client.query('INSERT INTO workflow_starts(organization_id,actor_id,key,fingerprint,run_id,result) VALUES($1,$2,$3,$4,$5,$6)',[actor.organizationId,actor.subject,key,hash,id,JSON.stringify(run)]);
     return run;
@@ -177,6 +191,32 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
   return {
     ...timerDatabase({pool,transaction:fn=>transaction(pool,fn),get,definition,transitionWithClient,columns:runColumns,serialize:serializeRun}),
     get,listPage,...waitDatabase(pool,get),...lifecycleDatabase({transaction:fn=>transaction(pool,fn),columns:runColumns,serialize:serializeRun,definition}),
+    async entityContext(id,actor){
+      requireEntityRead(actor);
+      if(!isRecordId(id))throw new WorkflowError(400,'Invalid workflow ID.');
+      return transaction(pool,async client=>{
+        const row=(await client.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR SHARE`,[id,actor.organizationId])).rows[0];
+        if(!row||!canReadRun(await definition(row,client),row,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
+        const context=await readContext(client,id,actor.organizationId);
+        if(!context)throw new WorkflowError(404,'Workflow entity context not found.');
+        return {context,current:await lockContextEntity(client,context.entityId,actor)};
+      });
+    },
+    async listEntityWorkflows(id,actor,query){
+      requireEntityRead(actor);
+      if(!isRecordId(id))throw new WorkflowError(400,'Invalid entity ID.');
+      if(!Number.isSafeInteger(query.limit)||query.limit<1||query.limit>100||!Number.isSafeInteger(query.offset)||query.offset<0||query.offset>Number.MAX_SAFE_INTEGER-101||typeof query.q!=='string'||Array.from(query.q).length>200)throw new WorkflowError(400,'Invalid page.');
+      return transaction(pool,async client=>{
+        await lockContextEntity(client,id,actor);
+        const definitions=await registry.list(actor.organizationId,client);
+        const values:unknown[]=[actor.organizationId,actor.subject,id];
+        const bind=(value:unknown)=>{values.push(value);return '$'+values.length;};
+        const where=['r.organization_id=$1','c.organization_id=$1','c.entity_id=$3',workflowReadPredicate(definitions,actor,bind,'r')];
+        if(query.q)where.push(`strpos(lower(r.title),lower(${bind(query.q)}))>0`);
+        const rows=(await client.query(`SELECT ${runColumns.split(',').map(c=>'r.'+c).join(',')} FROM workflow_runs r JOIN workflow_entity_contexts c ON c.run_id=r.id WHERE ${where.join(' AND ')} ORDER BY r.updated_at DESC,r.id DESC LIMIT ${bind(query.limit+1)} OFFSET ${bind(query.offset)}`,values)).rows.map(serializeRun);
+        return pageResult(await taskIds(rows,client),query);
+      });
+    },
     createWithClient,
     async create(value,actor,key) {
       return transaction(pool,client=>createWithClient(client,value,actor,key));

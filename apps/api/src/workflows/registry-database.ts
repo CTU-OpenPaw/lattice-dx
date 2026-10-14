@@ -97,8 +97,8 @@ export async function definitionDatabase(pool: Pool): Promise<DefinitionRegistry
       return result.rows[0]?.definition;
     },
 
-    async list(org) {
-      const result = await pool.query(
+    async list(org, client) {
+      const result = await (client ?? pool).query(
         'SELECT definition FROM workflow_definition_versions WHERE organization_id=$1 ORDER BY id,version',
         [org],
       );

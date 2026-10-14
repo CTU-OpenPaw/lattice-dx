@@ -9,6 +9,7 @@ import { PageError,pageResult,parsePage,textFilter } from '../pagination.js';
 import {parseTimerRetry} from './timer-policy.js';
 import {parseLifecycle} from './lifecycle-database.js';
 import { parseCompletion } from './completion-policy.js';
+import {requireEntityRead} from './entity-context.js';
 import {entityWorkflowBlocks} from './entity-block-catalog.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository;definitionRegistry?:DefinitionRegistry};
 function idempotencyKey(req:FastifyRequest):string {
@@ -46,6 +47,20 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
     routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/waits',async req=>{
       if(!repo.listWaits)throw new WorkflowError(503,'Workflow waits chưa cấu hình.');
       return repo.listWaits(workflowId(req.params.id),actors.get(req)!,parsePage(req.query));
+    });
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/entity-context',async req=>{
+      const actor=actors.get(req)!;requireEntityRead(actor);
+      if(Object.keys(req.query).length)throw new WorkflowError(400,'Invalid query.');
+      const id=workflowId(req.params.id);
+      if(!repo.entityContext)throw new WorkflowError(503,'Workflow entity context unavailable.');
+      return repo.entityContext(id,actor);
+    });
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/entities/:id/workflows',async req=>{
+      const actor=actors.get(req)!;requireEntityRead(actor);
+      if(Object.keys(req.query).some(k=>!['limit','offset','q'].includes(k)))throw new WorkflowError(400,'Invalid query.');
+      const id=workflowId(req.params.id),page=parsePage(req.query);
+      if(!repo.listEntityWorkflows)throw new WorkflowError(503,'Workflow entity context unavailable.');
+      return repo.listEntityWorkflows(id,actor,page);
     });
     routes.get('/v1/workflow-services',async req=>{
       if(!repo.listServices)throw new WorkflowError(503,'Workflow services unavailable.');

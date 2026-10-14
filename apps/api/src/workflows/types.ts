@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { CancelWorkflow, TransferWorkflowTask, CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowActionResult, WorkflowAudit, WorkflowEvent, WorkflowRun, WorkflowWait, WorkflowCompletion, WorkflowCompletionReceipt, WorkflowTimer } from '@dx/contracts';
+import type { CancelWorkflow, TransferWorkflowTask, CreateWorkflow, TransitionCommand, WorkflowActor, WorkflowActionResult, WorkflowAudit, WorkflowEvent, WorkflowRun, WorkflowWait, WorkflowCompletion, WorkflowCompletionReceipt, WorkflowTimer, EntityWorkflowContext } from '@dx/contracts';
 import type {PoolClient} from 'pg';
 import type { FileItem } from '../foundation.js';
 import type { Page, PageQuery } from '../pagination.js';
@@ -12,6 +12,8 @@ export interface WorkflowJobs {
 }
 export type SyncJob={id:string;status:'pending'|'processing'|'succeeded'|'failed'|'cancelled';attempts:number;lastError:string|null};
 export interface WorkflowRepository {
+  entityContext?(id:string,actor:WorkflowActor):Promise<{context:EntityWorkflowContext;current:{id:string;schemaId:string;schemaVersion:number;version:number;archivedAt:string|null}}>;
+  listEntityWorkflows?(id:string,actor:WorkflowActor,page:PageQuery):Promise<Page<WorkflowRun>>;
   transitionWithClient?(client:PoolClient,id:string,input:TransitionCommand,actor:WorkflowActor,key:string,internal?:{timerId:string}):Promise<WorkflowRun>;
   tickOne?():Promise<{timerId:string;status:WorkflowTimer['status']}|undefined>;
   listTimers?(id:string,actor:WorkflowActor,page:PageQuery):Promise<Page<WorkflowTimer>>;

@@ -106,3 +106,10 @@ test('lifecycle routes validate roles, body, key and UUID before optional reposi
   expect((await app.inject({method:'POST',url:`/v1/workflows/${run.id}/task-transfer`,headers:good,payload:{taskId:run.id,expectedVersion:1,assigneeId:'bob',reason:'Handoff'}})).statusCode).toBe(503);
  }finally{await app.close();}
 });
+test('context navigation requires signed entity role and strict query',async()=>{
+ const {app}=setup();try{
+  expect((await app.inject({url:`/v1/workflows/${run.id}/entity-context`,headers:await auth()})).statusCode).toBe(403);
+  expect((await app.inject({url:`/v1/entities/${run.id}/workflows`,headers:await auth()})).statusCode).toBe(403);
+  expect((await app.inject({url:`/v1/entities/${run.id}/workflows?unknown=x`,headers:await auth(['data:read'])})).statusCode).toBe(400);
+ }finally{await app.close();}
+});

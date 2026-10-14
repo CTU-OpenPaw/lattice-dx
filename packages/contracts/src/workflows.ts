@@ -18,7 +18,9 @@ export type WorkflowDefinition = {
   optionalStartFields?: Record<string, WorkflowField>;
   assignedReader?: { field: string; role: string; states: string[] };
 };
+export type EntityWorkflowContext = {entityId:string;schemaId:string;schemaVersion:number;entityVersion:number};
 export type WorkflowRun = {
+  entityContext?:EntityWorkflowContext;
   id: string; recordId: string; definitionId: string; definitionVersion: number; title: string;
   ownerId: string; organizationId: string; state: string; version: number; data: Record<string,string>;
   createdAt: string; updatedAt: string;
@@ -27,7 +29,7 @@ export type WorkflowRun = {
   taskId?: string;
   waiting?: boolean;
 };
-export type CreateWorkflow = { definitionId: string; title: string; input: Record<string,string> };
+export type CreateWorkflow = { definitionId: string; title: string; input: Record<string,string>; entityContext?:{entityId:string} };
 export type TransitionCommand = { action: string; expectedVersion: number; input: Record<string,string> };
 export type WorkflowAudit = {id:string;actorId:string;action:string;fromState:string|null;toState:string;version:number;occurredAt:string;metadata?:Record<string,unknown>|null};
 export type WorkflowEvent = {eventId:string;eventType:string;organizationId:string;runId:string;recordId:string;definitionId:string;version:number;occurredAt:string;data:Record<string,string>};

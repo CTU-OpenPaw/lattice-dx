@@ -10,6 +10,10 @@ export async function createWorkflowTables(pool:Pool) {
     "ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active' CHECK(status IN ('active','cancelled'))",
     'ALTER TABLE workflow_runs ADD COLUMN IF NOT EXISTS cancellation jsonb',
     'CREATE INDEX IF NOT EXISTS workflow_runs_scope ON workflow_runs(organization_id,updated_at)',
+    `CREATE TABLE IF NOT EXISTS workflow_entity_contexts (
+      run_id uuid PRIMARY KEY REFERENCES workflow_runs(id),organization_id text NOT NULL,entity_id uuid NOT NULL,
+      schema_id text NOT NULL,schema_version integer NOT NULL,entity_version integer NOT NULL,created_at timestamptz NOT NULL DEFAULT now())`,
+    'CREATE INDEX IF NOT EXISTS workflow_entity_contexts_entity ON workflow_entity_contexts(organization_id,entity_id,created_at,run_id)',
     `CREATE TABLE IF NOT EXISTS workflow_starts (
       organization_id text NOT NULL, actor_id text NOT NULL, key text NOT NULL, fingerprint text NOT NULL,
       run_id uuid NOT NULL REFERENCES workflow_runs(id), result jsonb NOT NULL,
