@@ -12,6 +12,7 @@ The engine is the authority for business data, workflows and permissions. Studio
 | Workflow authoring and publication | `/v1/workflow-drafts`, `/v1/workflow-definitions` | [Workflow Studio](workflow-studio.md) | `pnpm test:workflow-studio` |
 | Workflow execution, waiting and cancellation | `/v1/workflows`, `/v1/workflow-waits` | [Runtime](workflow-runtime.md), [completion](workflow-completion.md), [lifecycle](workflow-lifecycle.md) | `pnpm test:workflow-lifecycle` |
 | Business entity/workflow context | `/v1/entities/:id/workflows`, `/v1/workflows/:id/entity-context` | [Entity workflow context](entity-workflow-context.md) | `pnpm test:entity-workflow-context` |
+| Committed-event automations | `/v1/entity-automations/*` | [Automations](entity-automations.md) | `pnpm test:entity-automations` |
 | Committed business data events | `/v1/entities/:id/events` | [Entity event journal](entity-events.md) | `pnpm test:entity-events` |
 | Durable designated-service timers | `/v1/workflow-services`, `/v1/workflows/:id/timers` | [Timers](workflow-timers.md) | `pnpm test:workflow-timers` |
 | Organization metadata and directory snapshot | `/v1/organization/*` | [Organization](organization-directory.md) | `pnpm test:organization-operations` |
