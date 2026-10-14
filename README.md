@@ -6,7 +6,7 @@ Bộ khung nền tảng chuyển đổi số LatticeDX. Có cổng web, API và 
 
 Yêu cầu Docker Engine với Linux containers và Docker Compose. Từ root repo:
 
-Trên Windows máy Duy, dùng `pnpm local:up` để khởi động Docker có phục hồi lỗi socket rồi chạy core/NocoBase. Dừng/khởi động lại Desktop bằng `pnpm docker:stop` / `pnpm docker:restart`; xem [cách phục hồi Docker](docs/docker-desktop-recovery.md).
+Trên Windows máy Duy, Docker đã nâng lên 4.94.0 và kiểm tra ba lần startup chuẩn sau lỗi socket ở 4.64. Dùng `pnpm local:up` để chạy Docker và core/NocoBase. Dừng/khởi động lại Desktop bằng `pnpm docker:stop` / `pnpm docker:restart`; xem [bản sửa và lịch sử phục hồi Docker](docs/docker-desktop-recovery.md).
 
 ```sh
 pnpm infra:up

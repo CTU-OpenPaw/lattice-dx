@@ -64,4 +64,4 @@ Backend nền hoàn thiện khi mỗi năng lực dưới đây có implementati
 | 8 | Local recovery/readiness/diagnostics/retention preview đã kiểm | Dump/checksum, final restore46 bảng +sentinel; signed diagnostics/currenttenantdryrun. Offsite/automaticretention/HA vẫn ngoài local v1 |
 | 9 | Nghiệm thu local và final review đạt; PR #13 đã cập nhật, CI kiểm riêng trên GitHub |375 tests/59 files, typecheck/build; API index/catalog/handoff và installed dependency inventory; final review không còn P1/P2. Chưa merge/release |
 
-Docker Desktop bị lỗi khởi động là vấn đề môi trường riêng; phục hồi socket không phải chứng minh root cause đã được sửa.
+Docker Desktop từng bị lỗi khởi động riêng ở môi trường. Ngày14/10 máy nâng tại chỗ 4.64→4.94 theo bản sửa upstream; ba lần startup gốc đều đạt, không dùng socket recovery. Xem docker-desktop-recovery.md. Chưa kiểm Windows reboot/logon.
