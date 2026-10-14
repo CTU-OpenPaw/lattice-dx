@@ -16,13 +16,15 @@ import { isRecordId,parseRecordCreateInput } from '@dx/contracts';
 import { parsePage } from './pagination.js';
 import { registerEntities, type EntityOptions } from './entities/routes.js';
 import {registerBlocks} from './blocks/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions) {
+import {registerOrganization,type OrganizationOptions} from './organization/routes.js';
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions) {
   const app = Fastify({ bodyLimit: 16_384 });
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
   registerFoundation(app,options);
   registerTaskLifecycle(app,options);
   registerActions(app,options);
   registerDirectory(app,options);
+  registerOrganization(app,options);
   registerWorkflows(app,options);
   registerWorkflowDrafts(app,options);
   registerWorkflowBundles(app,options);
