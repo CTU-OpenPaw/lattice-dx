@@ -2,6 +2,7 @@
 import {randomUUID} from 'node:crypto';
 import type {PoolClient} from 'pg';
 import type {Scope} from './types.js';
+import {stageEntityEvent} from '../automations/staging.js';
 export const entityEventOperations=['entity.create','entity.update','entity.archive','entity.link','entity.unlink','entity.schema.migrate'] as const;
 export type EntityEventOperation=typeof entityEventOperations[number];
 export type EntityEvent={id:string;entityId:string;schemaId:string;schemaVersion:number;fromVersion:number;toVersion:number;operation:EntityEventOperation;actorSubject:string;occurredAt:string};
@@ -19,6 +20,8 @@ export async function initializeEntityEvents(client:Pick<PoolClient,'query'>):Pr
 }
 /** Append metadata only, using the transaction that owns the resource mutation. */
 export async function appendEntityEventWithClient(client:Pick<PoolClient,'query'>,scope:Scope,change:{operation:EntityEventOperation;entityId:string;schemaId:string;schemaVersion:number;fromVersion:number;toVersion:number}):Promise<void> {
+ const id=randomUUID();
  await client.query(`INSERT INTO enterprise_entity_events(id,organization_id,entity_id,schema_id,schema_version,from_version,to_version,operation,actor_subject)
-  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[randomUUID(),scope.organizationId,change.entityId,change.schemaId,change.schemaVersion,change.fromVersion,change.toVersion,change.operation,scope.actorId]);
+  VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING occurred_at AS "occurredAt"`,[id,scope.organizationId,change.entityId,change.schemaId,change.schemaVersion,change.fromVersion,change.toVersion,change.operation,scope.actorId]);
+ await stageEntityEvent(client,scope.organizationId,{id,...change,actorSubject:scope.actorId,occurredAt:new Date().toISOString()});
 }

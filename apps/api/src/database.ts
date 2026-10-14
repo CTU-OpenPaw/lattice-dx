@@ -15,6 +15,7 @@ import { organizationDatabase } from './organization/database.js';
 import {operationsDatabase} from './operations/database.js';
 import {eventsDatabase} from './events/database.js';
 import {modulesDatabase} from './modules/database.js';
+import {automationsDatabase} from './automations/database.js';
 export async function connectRecords(connectionString: string) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
@@ -26,10 +27,11 @@ export async function connectRecords(connectionString: string) {
     const workflows=await workflowDatabase(pool,definitionRegistry);
     const events=await eventsDatabase(pool,definitionRegistry,workflows);
     const entities=await entityDatabase(pool);
+    const automations=await automationsDatabase(pool,definitionRegistry,workflows);
     const dataTools=await entityDataToolsDatabase(pool);
     const modules=await modulesDatabase(pool,workflows);
     const taskLifecycle=await taskLifecycleDatabase(pool);
-    return {repository,foundation,directory,organization,workflows,events,modules,taskLifecycle,definitionRegistry,entities,dataTools,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),close:()=>pool.end()};
+    return {repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,dataTools,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }
 export async function recordDatabase(pool:Pool):Promise<RecordRepository> {
