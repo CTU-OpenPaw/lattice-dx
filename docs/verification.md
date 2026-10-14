@@ -1,6 +1,17 @@
 # Verification — 2026-10-14
 
-## Final-source acceptance — 410c488
+## Enterprise composition checkpoint — 5f3c019
+
+This extends the prior accepted backend; it is not whole-plan completion. Tasks6–12 remain in progress in the composition ledger.
+
+- Full `pnpm check` passed: **427 tests /70 files**, workspace typechecks and builds, with no new dependencies.
+- Entity context: signed API and isolated PostgreSQL prove independent business entity/run IDs, both resource policies, current grant before replay, version pins, atomic rollback, five-way start deduplication, 106 visible run pagination and poolmax1.
+- Entity journal: six committed mutation kinds, no duplicate replay/no-op events, no private attributes, atomic entity/workflow rollback, current actor provenance and archived shared-reader denial.
+- Durable automations: independent review clear; actual PG five-way dispatch creates one linked run/effect/receipt, current service disable/capability removal and entity revoke deny execution/retry, rule supersession cancels, enabling does not backfill, late receipt failure leaves no partial effects. Server-derived cascade ends at depth8; restart/poolmax1 and worker drain passed. Signed Gateway catalog and unsigned denial passed.
+- Private blocks: source review found catalog operator arity/scalar-bound mismatch; fixes7b99ff1/5f3c019 reviewed clear. Rebuilt signed API runs published projection/calculation/assert. Private PG proves exact large decimal update, wider workflow readers see metadata only, current grant revocation blocks projection, false late assertion restores entity/events/run/results, five-way receipt and max1 restart/fresh execution. Typed workflow and portable bundle regressions passed.
+- No Notion ticks, automatic merge/release or UI/adapter changes. Composition commits are local until final review/push/CI gate.
+
+## Prior backend acceptance — 410c488
 
 - `pnpm check` thành công: **375 tests / 59 files**, workspace TypeScript và build. Không thêm dependency; `pnpm-lock.yaml` giữ nguyên trong increment hoàn thiện backend.
 - `test:typed-workflow-blocks`: signed HTTP tạo/sửa/đọc/query, strict conversion và replay; private PostgreSQL cả bảy action, late receipt failure rollback entity/run/audit/action results, 5 concurrent commands một effect, pin v1 sau publish v2, metadata-only evidence cho workflow reader, max1 replay và execution mới. Peer edit grant cho phép workflow sửa; revoke chặn fresh execution404 và run giữ version1.
