@@ -10,12 +10,16 @@ import {startAutomationWorker} from './automations/worker.js';
 import {createFilesystemStore} from './files/filesystem-store.js';
 import {startFileStorageWorker} from './files/storage-worker.js';
 import {bootstrapRuntime,startConfiguredWorkers} from './operations/runtime-lifecycle.js';
+import {createTelemetry,type WorkerId,type WorkerObserver} from './operations/telemetry.js';
+
+const telemetry=createTelemetry();
+const observer=(worker:WorkerId):WorkerObserver=>(result,duration)=>telemetry.recordWorker(worker,result,duration);
 
 const runtime=await bootstrapRuntime(process.env,{
  createStore:createFilesystemStore,connect:connectRecords,
  createApp:(config,database)=>{
   const identity=config.identity?{issuer:config.identity.issuer,audience:config.identity.audience,key:createRemoteJWKSet(new URL(config.identity.jwksUrl))}:undefined;
-  return createApi({workerUrl:config.workerUrl,identity,records:database?.repository,foundation:database?.foundation,
+  return createApi({workerUrl:config.workerUrl,identity,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
    entities:database?.entities,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
    definitionRegistry:database?.definitionRegistry,directory:database?.directory,workflows:database?.workflows,readSharedFile:database?.workflows.readSharedFile,
    scan:config.scanner?content=>scanWithClamd(content,config.scanner!.host,config.scanner!.port):undefined});
@@ -23,10 +27,10 @@ const runtime=await bootstrapRuntime(process.env,{
  startWorkers:(config,database,add)=>{
   if(!database)return;
   startConfiguredWorkers(config,{
-   automations:()=>startAutomationWorker(database.automations),timers:()=>startWorkflowTimerWorker(database.workflows),
-   waitTimeouts:()=>startWaitTimeoutWorker(database.workflows),
-   outbox:()=>startOutboxWorker(database.jobs,job=>sendHttpEvent(job,config.connector!.url,config.connector!.token)),
-   fileStorage:()=>startFileStorageWorker(()=>database.offloadFile()),
+   automations:()=>startAutomationWorker(database.automations,1000,observer('automations')),timers:()=>startWorkflowTimerWorker(database.workflows,1000,observer('timers')),
+   waitTimeouts:()=>startWaitTimeoutWorker(database.workflows,1000,observer('waitTimeouts')),
+   outbox:()=>startOutboxWorker(database.jobs,job=>sendHttpEvent(job,config.connector!.url,config.connector!.token),1000,observer('outbox')),
+   fileStorage:()=>startFileStorageWorker(()=>database.offloadFile(),1000,undefined,observer('fileStorage')),
   },add);
  },
 });

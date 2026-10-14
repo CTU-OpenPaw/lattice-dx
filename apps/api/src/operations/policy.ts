@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import {randomUUID} from 'node:crypto';
 export class OperationsError extends Error {constructor(public statusCode:400|503,message:string){super(message);}}
-export function correlationId(value:unknown):string{
- return typeof value==='string'&&/^[A-Za-z0-9._:-]{1,128}$/.test(value)?value:randomUUID();
+export function correlationId(_value?:unknown):string{
+ return randomUUID();
 }
 export function parseCutoff(value:unknown):string{
  if(typeof value!=='string'||value.startsWith('0000')||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/.test(value))throw new OperationsError(400,'before must be a UTC timestamp.');

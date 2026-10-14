@@ -4,6 +4,8 @@ import Fastify from 'fastify';
 import {generateKeyPair,SignJWT} from 'jose';
 import {registerOperations} from './routes.js';
 import {parseCutoff,correlationId} from './policy.js';
+import {createApi} from '../app.js';
+import {createTelemetry} from './telemetry.js';
 describe('core operation boundaries',()=>{
  it('keeps readiness fail closed when stores or DB are unavailable',async()=>{
   const app=Fastify();registerOperations(app,{coreConfigured:false});
@@ -41,7 +43,37 @@ describe('core operation boundaries',()=>{
   expect(parseCutoff('2020-01-01T00:00:00Z')).toBe('2020-01-01T00:00:00.000Z');
  });
  it('does not reflect unsafe or oversized correlation input',()=>{
-  expect(correlationId('team-request-1')).toBe('team-request-1');
-  for(const value of ['line\nbreak','x'.repeat(129),['duplicate']])expect(correlationId(value)).toMatch(/^[a-f0-9-]{36}$/);
+  const ids=['team-request-1','line\nbreak','x'.repeat(129),['duplicate']].map(correlationId);
+  for(const id of ids)expect(id).toMatch(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/);
+  expect(new Set(ids).size).toBe(ids.length);
+ });
+ it('records each completed failure once and uses server correlation UUIDs',async()=>{
+  const telemetry=createTelemetry();const app=createApi({workerUrl:'http://localhost',telemetry});
+  const response=await app.inject({url:'/v1/records',headers:{'x-request-id':'private-caller-id'}});
+  expect(response.statusCode).toBe(503);expect(response.headers['x-request-id']).toMatch(/^[a-f0-9-]{36}$/);
+  expect(response.headers['x-request-id']).not.toBe('private-caller-id');
+  expect(telemetry.snapshot().http).toEqual([expect.objectContaining({route:'/v1/records',statusClass:'5xx',count:1})]);
+  expect(JSON.stringify(telemetry.snapshot())).not.toContain('private-caller-id');await app.close();
+ });
+ it('signs metrics and tenant queues and rejects query/body without leaking failures',async()=>{
+  const {privateKey,publicKey}=await generateKeyPair('RS256');
+  const identity={issuer:'https://identity.test',audience:'api',key:async()=>publicKey};
+  const token=async(roles:string[])=>new SignJWT({organization_id:'tenant-a',realm_access:{roles}}).setProtectedHeader({alg:'RS256'}).setSubject('private-subject').setIssuer(identity.issuer).setAudience(identity.audience).setExpirationTime('5m').sign(privateKey);
+  const tenants:string[]=[];let fail=false;
+  const app=createApi({workerUrl:'http://localhost',identity,runtimeWorkers:{outbox:true,timers:false,waitTimeouts:false,automations:false,fileStorage:false},operations:{ready:async()=>true,retentionPreview:async()=>{throw Error('unused');},queues:async org=>{tenants.push(org);if(fail)throw Error('private DB password');return [{queue:'outbox',status:'pending',count:'2',oldestPendingAt:null}];}}});
+  for(const route of ['metrics','queues']){
+   const url='/v1/operations/'+route;
+   expect((await app.inject({url})).statusCode).toBe(401);
+   expect((await app.inject({url,headers:{authorization:'Bearer '+await token([])}})).statusCode).toBe(403);
+   const headers={authorization:'Bearer '+await token(['platform:operate'])};
+   expect((await app.inject({url:url+'?tenant=foreign',headers})).statusCode).toBe(400);
+   expect((await app.inject({url,method:'GET',headers,payload:{private:'body'}})).statusCode).toBe(400);
+   const response=await app.inject({url,headers});expect(response.statusCode).toBe(200);
+   if(route==='metrics')expect(response.json().scope).toBe('process');
+   else expect(response.json().workers.outbox).toBe(true);
+  }
+  expect(tenants).toEqual(['tenant-a']);fail=true;
+  const response=await app.inject({url:'/v1/operations/queues',headers:{authorization:'Bearer '+await token(['platform:operate'])}});
+  expect(response.statusCode).toBe(503);expect(response.body).not.toContain('private');await app.close();
  });
 });

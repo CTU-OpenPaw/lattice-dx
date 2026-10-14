@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { OutboxJob, WorkflowJobs } from './types.js';
+import {observedTick,type WorkerObserver,type WorkerResult} from '../operations/telemetry.js';
 
 export async function sendHttpEvent(job: OutboxJob, url: string, token: string): Promise<void> {
   if (!token.trim()) throw new Error('Workflow connector token is required');
@@ -16,23 +17,24 @@ export async function sendHttpEvent(job: OutboxJob, url: string, token: string):
   }
 }
 
-export async function drainOne(jobs: WorkflowJobs, send: (job: OutboxJob) => Promise<void>): Promise<void> {
+export async function drainOne(jobs: WorkflowJobs, send: (job: OutboxJob) => Promise<void>): Promise<WorkerResult> {
   const job = await jobs.claim();
-  if (!job) return;
+  if (!job) return 'idle';
   try {
     await send(job);
   } catch {
     await jobs.fail(job, 'Workflow event delivery failed');
-    return;
+    return 'failure';
   }
   await jobs.succeed(job);
+  return 'success';
 }
 
-export function startOutboxWorker(jobs: WorkflowJobs, send: (job: OutboxJob) => Promise<void>, intervalMs = 1000): { stop(): Promise<void> } {
+export function startOutboxWorker(jobs: WorkflowJobs, send: (job: OutboxJob) => Promise<void>, intervalMs = 1000,observer?:WorkerObserver): { stop(): Promise<void> } {
   let flight: Promise<void> | undefined;
   const timer = setInterval(() => {
     if (flight) return;
-    flight = drainOne(jobs, send)
+    flight = observedTick(()=>drainOne(jobs, send),observer)
       .catch(() => { console.error('Workflow outbox poll failed'); })
       .finally(() => { flight = undefined; });
   }, intervalMs);

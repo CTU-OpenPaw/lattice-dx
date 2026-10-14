@@ -21,14 +21,25 @@ import {registerBlocks} from './blocks/routes.js';
 import {registerOrganization,type OrganizationOptions} from './organization/routes.js';
 import {registerOperations,type OperationsOptions} from './operations/routes.js';
 import {correlationId} from './operations/policy.js';
+import {createTelemetry,type StatusClass} from './operations/telemetry.js';
 import {registerWorkflowEvents,type EventOptions} from './events/routes.js';
 import {registerModules,type ModuleOptions} from './modules/routes.js';
 import {registerAutomations,type AutomationOptions} from './automations/routes.js';
 export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & ReportsOptions & AutomationOptions) {
-  const app = Fastify({ bodyLimit: 16_384,genReqId:request=>correlationId(request.headers['x-request-id']) });
+  const telemetry=options.telemetry??createTelemetry();
+  const app = Fastify({ bodyLimit: 16_384,genReqId:()=>correlationId() });
+  const templates=new Set(['/v1/operations/metrics','/v1/operations/queues','/v1/operations/diagnostics']);
+  for(const route of templates)telemetry.registerRoute(route);
+  app.addHook('onRoute',route=>{if(!templates.has(route.url)&&templates.size<128){templates.add(route.url);telemetry.registerRoute(route.url);}});
+  const starts=new WeakMap<object,number>();
+  app.addHook('onRequest',async request=>{starts.set(request,performance.now());});
+  app.addHook('onResponse',async(request,reply)=>{
+   const started=starts.get(request);if(started===undefined)return;starts.delete(request);
+   telemetry.recordHttp(request.routeOptions.url??'unmatched',request.method,`${Math.min(5,Math.max(1,Math.floor(reply.statusCode/100)))}xx` as StatusClass,Math.max(0,performance.now()-started));
+  });
   app.addHook('onSend',async(request,reply)=>{reply.header('X-Request-Id',request.id);});
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
-  registerOperations(app,{...options,coreConfigured:!!(options.records&&options.foundation&&options.entities&&options.workflows),coreCapabilities:{records:!!options.records,foundation:!!options.foundation,entities:!!options.entities,workflows:!!options.workflows}});
+  registerOperations(app,{...options,telemetry,coreConfigured:!!(options.records&&options.foundation&&options.entities&&options.workflows),coreCapabilities:{records:!!options.records,foundation:!!options.foundation,entities:!!options.entities,workflows:!!options.workflows}});
   registerFoundation(app,options);
   registerTaskLifecycle(app,options);
   registerActions(app,options);
