@@ -68,6 +68,9 @@ test('snapshot locks organization before directory writes and commits receipt au
   });
   expect(statements.indexOf('BEGIN')).toBeLessThan(statements.findIndex(s=>s.includes('pg_advisory_xact_lock')));
   expect(statements.findIndex(s=>s.includes('pg_advisory_xact_lock'))).toBeLessThan(statements.findIndex(s=>s.includes('UPDATE directory_people')));
+  const directoryGate=statements.indexOf('LOCK TABLE directory_people IN EXCLUSIVE MODE');
+  expect(directoryGate).toBeGreaterThan(statements.indexOf('BEGIN'));
+  expect(directoryGate).toBeLessThan(statements.findIndex(s=>s.includes('SELECT revision')));
   expect(statements.some(s=>s.includes('INSERT INTO organization_snapshot_audit'))).toBe(true);
   expect(statements.at(-2)).toBe('COMMIT');
 });

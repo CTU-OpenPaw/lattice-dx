@@ -114,6 +114,10 @@ export async function organizationDatabase(pool:Pool):Promise<OrganizationReposi
     async replaceSnapshot(actor,value,key){
       const input=parseSnapshot(value);
       return command(actor,'directory.replaceSnapshot',key,input,async client=>{
+        // Acquire the directory gate before any person row. Existing transactions
+        // may hold source/service and recipient rows in different orders.
+        // Plain reads remain available; snapshots wait for locking consumers.
+        await client.query('LOCK TABLE directory_people IN EXCLUSIVE MODE');
         await client.query('INSERT INTO organization_directory_state(organization_id) VALUES($1) ON CONFLICT DO NOTHING',[actor.organizationId]);
         const current=(await client.query('SELECT revision FROM organization_directory_state WHERE organization_id=$1 FOR UPDATE',[actor.organizationId])).rows[0];
         if (current.revision!==input.expectedRevision)throw new OrganizationError(409,'Directory revision conflict.');

@@ -6,6 +6,7 @@ import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { authorizeTransition, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
 import { timerDatabase,resolveServiceActor } from './timer-database.js';
 import { executeBlocks } from './block-database.js';
+import { authorizeBlock } from './block-policy.js';
 import { createWorkflowTables } from './schema.js';
 import { waitDatabase } from './waits-database.js';
 import { compileCondition } from './conditions.js';
@@ -129,6 +130,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         const transition=def.transitions.find(t=>t.id===value.action);
         if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
         authorizeTransition(transition,run,actor,!!internal);
+        for(const step of transition.steps??[])authorizeBlock(step,actor);
         const input=validateInput(transition.fields,value.input),hash=fingerprint({...value,input});
         const replay=(await client.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
         if(replay){if(replay.actor_id!==actor.subject||replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
