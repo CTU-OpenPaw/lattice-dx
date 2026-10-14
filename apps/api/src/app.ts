@@ -15,6 +15,7 @@ import { registerLogistics } from './logistics.js';
 import { isRecordId,parseRecordCreateInput } from '@dx/contracts';
 import { parsePage } from './pagination.js';
 import { registerEntities, type EntityOptions } from './entities/routes.js';
+import {registerBlocks} from './blocks/routes.js';
 export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions) {
   const app = Fastify({ bodyLimit: 16_384 });
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
@@ -27,6 +28,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerWorkflowBundles(app,options);
   registerLogistics(app,options);
   registerEntities(app,options);
+  registerBlocks(app,options);
   app.route({
     method: ['GET', 'POST'], url: '/v1/records',
     handler: async (request, reply) => {

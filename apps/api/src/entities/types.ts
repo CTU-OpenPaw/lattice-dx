@@ -16,7 +16,10 @@ export type Principal = {kind:'person'|'department';id:string};
 export type Share = {principal:Principal;permission:'read'|'edit';createdAt:string;updatedAt:string};
 export type ShareInput = {expectedVersion:number;principal:Principal;permission:'read'|'edit'};
 export type RevokeShareInput = {expectedVersion:number;kind:Principal['kind'];principalId:string};
+export type QueryOperator = 'eq'|'ne'|'gt'|'gte'|'lt'|'lte'|'contains'|'exists';
+export type EntityQuery = {schemaId:string;schemaVersion:number;filters?:{field:string;operator:QueryOperator;value?:string|number|boolean}[];sort?:{field:string;direction:'asc'|'desc'};limit?:number;offset?:number};
 export interface EntityRepository {
+  query?(scope:Scope,input:EntityQuery):Promise<Page<Entity>>;
   share?(scope:Scope,id:string,input:ShareInput,key:string):Promise<Entity>;
   revokeShare?(scope:Scope,id:string,input:RevokeShareInput,key:string):Promise<Entity>;
   shares?(scope:Scope,id:string,page:PageQuery):Promise<Page<Share>>;

@@ -5,6 +5,7 @@ import { verifyIdentity, type IdentityConfig } from '../identity.js';
 import { PageError, parsePage } from '../pagination.js';
 import { bad, EntityError, exact, name, object, parseSchema, parseShare, principalKind, principalId, slug, title, uuid, version } from './policy.js';
 import type { Attributes, EntityRepository, Scope } from './types.js';
+import {parseEntityQuery} from './query.js';
 export type EntityOptions = {identity?:IdentityConfig;entities?:EntityRepository};
 function commandKey(request:FastifyRequest):string {
   const key=parseCreateKey(request.headers['idempotency-key'],request.raw.rawHeaders);
@@ -64,6 +65,11 @@ export function registerEntities(app:FastifyInstance,options:EntityOptions) {
     return repository.create(scope,{schemaId:slug(body.schemaId),title:title(body.title),attributes:attributes(body.attributes)},commandKey(request));
   },201);
   route('GET','/v1/entities','data:read',async(request,repository,scope)=>repository.list(scope,page(request,true)));
+  route('POST','/v1/entities/query','data:read',async(request,repository,scope)=>{
+    const input=parseEntityQuery(request.body);
+    if(!repository.query) throw new EntityError(503,'Entity query is unavailable.');
+    return repository.query(scope,input);
+  });
   route('GET','/v1/entities/:id','data:read',async(request,repository,scope)=>{
     exact(request.query,[]);
     return repository.find(scope,uuid(params(request).id));

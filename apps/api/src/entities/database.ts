@@ -2,6 +2,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { accessPredicate, checkAccess, type AccessMode } from './access.js';
+import {compileEntityQuery,parseEntityQuery} from './query.js';
 import { createDirectoryDatabase } from '../directory-database.js';
 import { parseCreateKey } from '../create-command.js';
 import { pageResult, type PageQuery } from '../pagination.js';
@@ -104,6 +105,7 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     FOREIGN KEY(organization_id,schema_id,schema_version) REFERENCES enterprise_schema_versions(organization_id,schema_id,version)
   );
   CREATE INDEX IF NOT EXISTS enterprise_entities_scope_idx ON enterprise_entities(organization_id,owner_id,created_at,id);
+  CREATE INDEX IF NOT EXISTS enterprise_entities_schema_scope_idx ON enterprise_entities(organization_id,schema_id,schema_version,created_at,id) WHERE archived_at IS NULL;
   CREATE TABLE IF NOT EXISTS enterprise_entity_shares (
     entity_id uuid NOT NULL REFERENCES enterprise_entities(id), organization_id text NOT NULL,
     kind text NOT NULL CHECK(kind IN ('person','department')), principal_id text NOT NULL,
@@ -272,6 +274,14 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
       },async(client,accepted)=>{
         if(!await scopedEntity(client,scope,accepted.id,true)) throw missing();
       });
+    },
+    async query(scope,input) {
+      const query=parseEntityQuery(input);
+      const schema=await publication(pool,scope,query.schemaId,query.schemaVersion);
+      const compiled=compileEntityQuery(query,schema,5);
+      const values=[scope.organizationId,scope.actorId,query.schemaId,query.schemaVersion,...compiled.values,query.limit+1,query.offset];
+      const result=await pool.query(`SELECT ${entityColumns} FROM enterprise_entities WHERE ${accessPredicate('enterprise_entities','$2','$1','read')} AND archived_at IS NULL AND schema_id=$3 AND schema_version=$4 AND ${compiled.predicate} ORDER BY ${compiled.order} LIMIT $${values.length-1} OFFSET $${values.length}`,values);
+      return pageResult(result.rows.map(entity),{limit:query.limit,offset:query.offset,q:''});
     },
     async list(scope,page) {
       validatePage(page);

@@ -21,6 +21,19 @@ function fixture() {
   return {pool,statements};
 }
 const scope={actorId:'alice',organizationId:'org-a'};
+test('typed query uses pinned publication and SQL ACL before numeric ordering and paging without a transaction',async()=>{
+ const calls:{sql:string;values:unknown[]}[]=[];
+ const pool={async query(sql:string,values:unknown[]=[]){calls.push({sql,values});return {rows:sql.includes('FROM enterprise_schema_versions')?[{definition:{id:'invoice',title:'Invoice',fields:{amount:{type:'decimal'}},relations:{}},version:2}]:[]};},async connect(){throw new Error('Read must not hold a transaction client');}} as unknown as Pool;
+ const repository=await entityDatabase(pool);
+ expect(repository.query).toBeTypeOf('function');
+ expect(await repository.query!(scope,{schemaId:'invoice',schemaVersion:2,filters:[{field:'amount',operator:'gt',value:'1.000000000000000001'}],sort:{field:'amount',direction:'desc'},limit:1,offset:3})).toEqual({items:[],page:{limit:1,offset:3,hasMore:false,nextOffset:null}});
+ const publication=calls.find(call=>call.sql.includes('FROM enterprise_schema_versions'))!;expect(publication.values).toEqual(['org-a','invoice',2]);expect(publication.sql).toContain('version=$3');
+ const selection=calls.at(-1)!;expect(selection.values).toEqual(['org-a','alice','invoice',2,'amount','1.000000000000000001','amount',2,3]);expect(selection.sql).toContain('schema_version=$4');expect(selection.sql).toContain('::numeric');expect(selection.sql.indexOf('enterprise_entity_shares')).toBeLessThan(selection.sql.indexOf('LIMIT'));expect(selection.sql).toContain('archived_at IS NULL');
+});
+test('typed query missing publication fails 404 before entity SQL',async()=>{
+ const statements:string[]=[];const pool={async query(sql:string){statements.push(sql);return {rows:[]};}} as unknown as Pool;
+ const repository=await entityDatabase(pool);await expect(repository.query!(scope,{schemaId:'invoice',schemaVersion:9})).rejects.toMatchObject({statusCode:404});expect(statements.some(sql=>sql.includes('SELECT')&&sql.includes('FROM enterprise_entities'))).toBe(false);
+});
 
 test('typed equal command replay executes one mutation and stores original result',async()=>{
   const {pool,statements}=fixture();
