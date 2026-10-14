@@ -26,7 +26,7 @@ async function transaction<T>(pool:Pool,fn:(client:PoolClient)=>Promise<T>):Prom
   catch(error){await client.query('ROLLBACK');throw error;}
   finally{client.release();}
 }
-async function validateReferences(client:PoolClient,fields:Record<string,WorkflowField>,input:Record<string,string>,actor:WorkflowActor,definition:(run:WorkflowRun)=>Promise<WorkflowDefinition>) {
+export async function validateReferences(client:PoolClient,fields:Record<string,WorkflowField>,input:Record<string,string>,actor:WorkflowActor,definition:(run:WorkflowRun)=>Promise<WorkflowDefinition>) {
   for(const [name,kind] of Object.entries(fields)) {
     if(input[name]===undefined)continue;
     let found=true;
@@ -93,30 +93,32 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     if(!canReadRun(await definition(run),run,actor)) throw new WorkflowError(404,'Không tìm thấy quy trình.');
     return (await taskIds([run]))[0];
   }
+  async function createWithClient(client:PoolClient,value:CreateWorkflow & {definitionVersion?:number},actor:WorkflowActor,key:string):Promise<WorkflowRun> {
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify([actor.organizationId,actor.subject,key])]);
+    const replay=(await client.query('SELECT fingerprint,result FROM workflow_starts WHERE organization_id=$1 AND actor_id=$2 AND key=$3',[actor.organizationId,actor.subject,key])).rows[0];
+    const def=replay?await definition(replay.result,client):await registry.get(actor.organizationId,value.definitionId,value.definitionVersion,client);
+    if(!def)throw new WorkflowError(400,'Phiên bản quy trình không khả dụng.');
+    if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
+    const input=validateInput(def.startFields,value.input,def.optionalStartFields),hash=fingerprint({...value,input});
+    if(replay){if(replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
+    const referenceFields={...def.startFields,...def.optionalStartFields};
+    if(def.assignedReader)delete referenceFields[def.assignedReader.field];
+    await validateReferences(client,referenceFields,input,actor,run=>definition(run,client));
+    await checkAssigned(client,def,input,actor);
+    const id=randomUUID();
+    await client.query('INSERT INTO records(id,title,owner_id,organization_id) VALUES($1,$2,$3,$4)',[id,value.title,actor.subject,actor.organizationId]);
+    const row=(await client.query(`INSERT INTO workflow_runs(id,definition_id,definition_version,title,owner_id,organization_id,state,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${runColumns}`,[id,def.id,def.version,value.title,actor.subject,actor.organizationId,def.initialState,JSON.stringify(input)])).rows[0];
+    const run=serializeRun(row);
+    await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,to_state,version) VALUES($1,$2,$3,$4,$5,1)',[randomUUID(),id,actor.subject,'create',def.initialState]);
+    await attachFiles(client,id,{...def.startFields,...def.optionalStartFields},input);
+    await client.query('INSERT INTO workflow_starts(organization_id,actor_id,key,fingerprint,run_id,result) VALUES($1,$2,$3,$4,$5,$6)',[actor.organizationId,actor.subject,key,hash,id,JSON.stringify(run)]);
+    return run;
+  }
   return {
     get,listPage,...waitDatabase(pool,get),...lifecycleDatabase({transaction:fn=>transaction(pool,fn),columns:runColumns,serialize:serializeRun,definition}),
+    createWithClient,
     async create(value,actor,key) {
-      return transaction(pool,async client=>{
-        await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))',[JSON.stringify([actor.organizationId,actor.subject,key])]);
-        const replay=(await client.query('SELECT fingerprint,result FROM workflow_starts WHERE organization_id=$1 AND actor_id=$2 AND key=$3',[actor.organizationId,actor.subject,key])).rows[0];
-        const def=replay?await definition(replay.result,client):await registry.get(actor.organizationId,value.definitionId,undefined,client);
-        if(!def)throw new WorkflowError(400,'Phiên bản quy trình không khả dụng.');
-        if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
-        const input=validateInput(def.startFields,value.input,def.optionalStartFields),hash=fingerprint({...value,input});
-        if(replay){if(replay.fingerprint!==hash)throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');return replay.result;}
-        const referenceFields={...def.startFields,...def.optionalStartFields};
-        if(def.assignedReader)delete referenceFields[def.assignedReader.field];
-        await validateReferences(client,referenceFields,input,actor,run=>definition(run,client));
-        await checkAssigned(client,def,input,actor);
-        const id=randomUUID();
-        await client.query('INSERT INTO records(id,title,owner_id,organization_id) VALUES($1,$2,$3,$4)',[id,value.title,actor.subject,actor.organizationId]);
-        const row=(await client.query(`INSERT INTO workflow_runs(id,definition_id,definition_version,title,owner_id,organization_id,state,data) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING ${runColumns}`,[id,def.id,def.version,value.title,actor.subject,actor.organizationId,def.initialState,JSON.stringify(input)])).rows[0];
-        const run=serializeRun(row);
-        await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,to_state,version) VALUES($1,$2,$3,$4,$5,1)',[randomUUID(),id,actor.subject,'create',def.initialState]);
-        await attachFiles(client,id,{...def.startFields,...def.optionalStartFields},input);
-        await client.query('INSERT INTO workflow_starts(organization_id,actor_id,key,fingerprint,run_id,result) VALUES($1,$2,$3,$4,$5,$6)',[actor.organizationId,actor.subject,key,hash,id,JSON.stringify(run)]);
-        return run;
-      });
+      return transaction(pool,client=>createWithClient(client,value,actor,key));
     },
     async transition(id,value,actor,key) {
       return transaction(pool,async client=>{

@@ -29,6 +29,21 @@ test('list and inbox include all tenant publication versions and resolve reader/
   expect(call[1]).toEqual(expect.arrayContaining([['hr-request:1','hr-request:2'],1,2,'draft','review']));
 });
 
+test('internal pinned start uses the supplied client without a nested transaction or pool query',async()=>{
+ const client={query:vi.fn(async(sql:string)=>({rows:sql.startsWith('INSERT INTO workflow_runs')?[{...run,definitionVersion:3}]:[],rowCount:0})),release:vi.fn()};
+ const pool={query:vi.fn(async()=>({rows:[],rowCount:0})),connect:vi.fn()} as unknown as Pool;
+ const get=vi.fn(async()=>({...def,version:3}));
+ const repo=await workflowDatabase(pool,{get,list:async()=>[def]});
+ vi.mocked(pool.query).mockClear();
+ expect(repo.createWithClient).toBeTypeOf('function');
+ const created=await repo.createWithClient!(client as never,{definitionId:def.id,definitionVersion:3,title:run.title,input:run.data},actor,'event-start');
+ expect(created.definitionVersion).toBe(3);
+ expect(get).toHaveBeenCalledWith('org-a',def.id,3,client);
+ expect(pool.connect).not.toHaveBeenCalled();
+ expect(pool.query).not.toHaveBeenCalled();
+ expect(client.query.mock.calls.some(([sql])=>['BEGIN','COMMIT','ROLLBACK'].includes(sql))).toBe(false);
+});
+
 test('batch validates before connecting and rolls back a late collision on its single client',async()=>{
  const {definitionDatabase}=await import('./registry-database.js');
  const query=vi.fn(async(sql:string,values?:unknown[])=>{
