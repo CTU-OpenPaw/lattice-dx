@@ -1,9 +1,13 @@
 import {expect,test,vi} from 'vitest';
 import {workflowDatabase} from './database.js';
+import {availableTransitions} from './policy.js';
 import type {Pool} from 'pg';
 function fixture(options:{receiptFailure?:boolean;directoryDisabled?:boolean}={}){
  const run:any={id:'11111111-1111-4111-8111-111111111111',recordId:'11111111-1111-4111-8111-111111111111',definitionId:'def',definitionVersion:1,title:'T',ownerId:'owner',organizationId:'org',state:'pending',version:2,data:{assigned:'old'},createdAt:'2026-10-14',updatedAt:'2026-10-14'};
- const query=vi.fn(async(sql:string)=>{
+ let receipt:any;
+ const query=vi.fn(async(sql:string,values?:unknown[])=>{
+  if(sql.startsWith('SELECT actor_id,fingerprint,result'))return {rows:receipt?[receipt]:[],rowCount:receipt?1:0};
+  if(sql.startsWith('INSERT INTO workflow_commands')&&!options.receiptFailure)receipt={actor_id:values![2],fingerprint:values![3],result:JSON.parse(values![4] as string)};
   if(sql.startsWith('SELECT id,id AS'))return {rows:[run],rowCount:1};
   if(sql.includes('SELECT * FROM workflow_waits'))return {rows:[{id:'22222222-2222-4222-8222-222222222222',kind:'task',status:'pending',version:2,assignee_id:'old'}],rowCount:1};
   if(sql.startsWith('SELECT * FROM foundation_tasks'))return {rows:[{id:'22222222-2222-4222-8222-222222222222',status:'pending',version:1,assignee_id:'old'}],rowCount:1};
@@ -11,7 +15,7 @@ function fixture(options:{receiptFailure?:boolean;directoryDisabled?:boolean}={}
   if(sql.includes('SELECT 1 FROM directory_people'))return {rows:options.directoryDisabled?[]:[{}],rowCount:options.directoryDisabled?0:1};
   if(sql.startsWith('INSERT INTO workflow_commands')&&options.receiptFailure)throw new Error('receipt failure');
   if(sql.includes('RETURNING id,version'))return {rows:[{id:'22222222-2222-4222-8222-222222222222',version:2}],rowCount:1};
-  if(sql.startsWith('UPDATE workflow_runs'))return {rows:[{...run,version:3,status:'cancelled'}],rowCount:1};
+  if(sql.startsWith('UPDATE workflow_runs'))return {rows:[{...run,version:3,status:sql.includes("status='cancelled'")?'cancelled':'active'}],rowCount:1};
   return {rows:[],rowCount:0};
  });
  const pool={query,connect:async()=>({query,release:vi.fn()})} as unknown as Pool;
@@ -72,4 +76,14 @@ test('repository rejects malformed lifecycle DTOs, keys, UUIDs and principal bou
  }
  const f=fixture(),r=await workflowDatabase(f.pool,f.registry);
  await expect(r.cancel!('not-uuid',{expectedVersion:2,reason:'Stop'},actor,'k')).rejects.toMatchObject({statusCode:400});
+});
+
+test('transfer snapshots preserve pending wait and legacy task projections',async()=>{
+ const f=fixture(),r=await workflowDatabase(f.pool,f.registry);
+ const result=await r.taskTransfer!('11111111-1111-4111-8111-111111111111',{taskId:'22222222-2222-4222-8222-222222222222',expectedVersion:2,assigneeId:'new',reason:'Handoff'},actor,'k');
+ expect(result.waiting).toBe(true);expect(result.taskId).toBe('22222222-2222-4222-8222-222222222222');
+ const definition:any={transitions:[{id:'leave',from:'pending',to:'done',role:'workflow:start',fields:{}}]};
+ expect(availableTransitions(definition,result,actor)).toEqual([]);
+ const replay=await r.taskTransfer!('11111111-1111-4111-8111-111111111111',{taskId:'22222222-2222-4222-8222-222222222222',expectedVersion:2,assigneeId:'new',reason:'Handoff'},actor,'k');
+ expect(replay).toEqual(result);expect(availableTransitions(definition,replay,actor)).toEqual([]);
 });

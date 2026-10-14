@@ -66,6 +66,9 @@ export function lifecycleDatabase(s:Services){
     next=s.serialize((await c.query(`UPDATE workflow_runs SET data=data||$2::jsonb,version=version+1,updated_at=now() WHERE id=$1 RETURNING ${s.columns}`,[id,JSON.stringify(data)])).rows[0]);
     await c.query("UPDATE workflow_waits SET version=$2,assignee_id=CASE WHEN id=$3 THEN $4 ELSE assignee_id END WHERE run_id=$1 AND status='pending'",[id,next.version,v.taskId,v.assigneeId]);
    }
+   next.waiting=operation==='task-transfer'&&waits.length>0;
+   const legacy=(await c.query('SELECT task_id FROM workflow_task_links WHERE run_id=$1',[id])).rows[0];
+   if(legacy)next.taskId=legacy.task_id;
    await c.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,from_state,to_state,version,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)',[randomUUID(),id,actor.subject,operation,run.state,next.state,next.version,JSON.stringify(normalized)]);
    await c.query('INSERT INTO workflow_commands(run_id,key,actor_id,fingerprint,result) VALUES($1,$2,$3,$4,$5)',[id,key,actor.subject,hash,JSON.stringify(next)]);
    return next;
