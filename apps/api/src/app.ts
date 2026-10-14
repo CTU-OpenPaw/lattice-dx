@@ -16,6 +16,7 @@ import { isRecordId,parseRecordCreateInput } from '@dx/contracts';
 import { parsePage } from './pagination.js';
 import { registerEntities, type EntityOptions } from './entities/routes.js';
 import { registerEntityDataTools, type EntityDataToolsOptions } from './entities/data-tools-routes.js';
+import {registerReports,type ReportsOptions} from './entities/reports-routes.js';
 import {registerBlocks} from './blocks/routes.js';
 import {registerOrganization,type OrganizationOptions} from './organization/routes.js';
 import {registerOperations,type OperationsOptions} from './operations/routes.js';
@@ -23,7 +24,7 @@ import {correlationId} from './operations/policy.js';
 import {registerWorkflowEvents,type EventOptions} from './events/routes.js';
 import {registerModules,type ModuleOptions} from './modules/routes.js';
 import {registerAutomations,type AutomationOptions} from './automations/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & AutomationOptions) {
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & ReportsOptions & AutomationOptions) {
   const app = Fastify({ bodyLimit: 16_384,genReqId:request=>correlationId(request.headers['x-request-id']) });
   app.addHook('onSend',async(request,reply)=>{reply.header('X-Request-Id',request.id);});
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
@@ -42,6 +43,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerLogistics(app,options);
   registerEntities(app,options);
   registerEntityDataTools(app,options);
+  registerReports(app,options);
   registerBlocks(app,options);
   app.route({
     method: ['GET', 'POST'], url: '/v1/records',

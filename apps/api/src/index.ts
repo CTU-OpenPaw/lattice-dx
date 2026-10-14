@@ -15,7 +15,7 @@ const identity = process.env.OIDC_ISSUER && process.env.OIDC_JWKS_URL ? {
   key: createRemoteJWKSet(new URL(process.env.OIDC_JWKS_URL)),
 } : undefined;
 const app = createApi({ workerUrl: process.env.WORKER_URL ?? 'http://127.0.0.1:4001', identity, records: database?.repository,foundation:database?.foundation,
-  entities:database?.entities,dataTools:database?.dataTools,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
+  entities:database?.entities,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
   definitionRegistry:database?.definitionRegistry,directory:database?.directory,workflows:database?.workflows,readSharedFile:database?.workflows.readSharedFile,
   scan:process.env.CLAMD_HOST ? content=>scanWithClamd(content,process.env.CLAMD_HOST!,Number(process.env.CLAMD_PORT??3310)):undefined });
 const eventUrl=process.env.WORKFLOW_EVENT_URL,eventToken=process.env.WORKFLOW_EVENT_TOKEN;

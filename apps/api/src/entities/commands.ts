@@ -14,7 +14,7 @@ export async function withEntityTransaction<T>(pool:Pool, work:(client:PoolClien
   } catch(error) { await client.query('ROLLBACK'); throw error; }
   finally { client.release(); }
 }
-export async function runEntityCommandInTransaction<T>(client:PoolClient,scope:Scope,operation:string,key:string,input:unknown,validate:(client:PoolClient)=>Promise<void>,execute:(client:PoolClient)=>Promise<T>,validateReplay?:(client:PoolClient,result:T)=>Promise<void>):Promise<T> {
+export async function runEntityCommandInTransaction<T>(client:PoolClient,scope:Scope,operation:string,key:string,input:unknown,validate:(client:PoolClient)=>Promise<void>,execute:(client:PoolClient)=>Promise<T>,validateReplay?:(client:PoolClient,result:T)=>Promise<void>,authorizeReceipt?:(client:PoolClient,result:T)=>Promise<void>):Promise<T> {
   if(!parseCreateKey(key)) bad('Idempotency-Key is required.');
     const tuple=[scope.organizationId,scope.actorId,operation,key];
     const lock=createHash('sha256').update(canonicalJson(tuple)).digest().readBigInt64BE(0).toString();
@@ -23,6 +23,8 @@ export async function runEntityCommandInTransaction<T>(client:PoolClient,scope:S
     const fingerprint=createHash('sha256').update(canonicalJson(input)).digest('hex');
     const receipt=(await client.query('SELECT fingerprint,result FROM enterprise_commands WHERE organization_id=$1 AND actor_id=$2 AND operation=$3 AND key=$4',tuple)).rows[0];
     if(receipt) {
+      // Reports must establish current dependency authority before revealing a conflict.
+      await authorizeReceipt?.(client,receipt.result as T);
       if(receipt.fingerprint!==fingerprint) throw new EntityError(409,'Idempotency-Key was used with different input.');
       await validateReplay?.(client,receipt.result as T);
       return receipt.result as T;
