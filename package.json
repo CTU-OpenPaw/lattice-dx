@@ -22,6 +22,7 @@
     "test:foundation": "node scripts/smoke-foundation.mjs",
     "test:actions": "node scripts/smoke-actions.mjs",
     "test:create-reliability": "node scripts/smoke-create-reliability.mjs",
+    "test:enterprise-data": "node scripts/smoke-enterprise-data.mjs",
     "workflow:seed-local": "node scripts/seed-workflow-demo.mjs",
     "directory:sync-local": "node scripts/sync-local-directory.mjs",
     "test:logistics": "node scripts/smoke-logistics.mjs",

@@ -55,4 +55,28 @@ routes:
       type: roundrobin
       nodes:
         "api:4000": 1
+  - id: enterprise-data
+    uris: [/v1/entity-schemas, /v1/entity-schemas/*, /v1/entities, /v1/entities/*]
+    methods: [GET, POST, PUT, PATCH, DELETE]
+    plugins:
+      openid-connect:
+        client_id: dx-gateway
+        client_secret: local-gateway-secret
+        discovery: http://keycloak:8080/realms/lattice/.well-known/openid-configuration
+        bearer_only: true
+        use_jwks: true
+        ssl_verify: false
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        rejected_code: 429
+        policy: local
+      request-id:
+        header_name: X-Request-Id
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:4000": 1
 #END

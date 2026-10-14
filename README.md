@@ -27,6 +27,8 @@ Mở rộng engine bằng cấu hình quy trình: [hợp đồng Workflow Studio
 
 [Create reliability](docs/create-reliability.md) bổ sung optional `Idempotency-Key` cho REST/action tạo record/task, với kiểm tra đầu vào thống nhất và kết quả lưu trong cùng giao dịch; thử `pnpm test:create-reliability`. Không-key giữ hành vi cũ, replay trả snapshot lúc tạo và vẫn kiểm tra quyền/tham chiếu hiện tại.
 
+Engine quản lý dữ liệu nghiệp vụ dùng chung theo [backend capabilities](docs/backend-capabilities.md). [Enterprise data](docs/enterprise-data.md) thêm schema typed có phiên bản, CRUD/quan hệ/archive/audit và published schema API để Studio dựng biểu mẫu; smoke `pnpm test:enterprise-data`. Đây là increment dữ liệu, các nhóm quyền/lifecycle/block/module mở rộng trong roadmap chưa được coi là đã triển khai.
+
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 
 Cấu hình này dùng mật khẩu PUBLIC cho môi trường local, được ghi rõ trong hướng dẫn. Không dùng cấu hình này để triển khai Internet. Xem [nguồn và giấy phép](docs/third-party.md).
