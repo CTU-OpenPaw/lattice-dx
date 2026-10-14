@@ -29,12 +29,6 @@ export function compileEntityQuery(input:EntityQuery,schema:SchemaPublication,st
  const fieldType=(key:string):Field=>{if(!Object.hasOwn(schema.fields,key))bad('Unknown query field.');return schema.fields[key];};
  // PostgreSQL can reorder WHERE evaluation: guard casts inside CASE even for
  // unrelated schema rows whose same-named attribute contains arbitrary text.
- const expression=(key:string,field:Field)=>{
-  const text=`(attributes ->> ${key})`;
-  if(field.type==='decimal')return `CASE WHEN jsonb_typeof(attributes -> ${key})='string' AND ${text} ~ '^-?(0|[1-9][0-9]{0,37})([.][0-9]{1,18})?$' AND length(translate(${text},'-.',''))<=38 THEN ${text}::numeric END`;
-  if(field.type==='integer')return `CASE WHEN jsonb_typeof(attributes -> ${key})='number' AND ${text} ~ '^-?(0|[1-9][0-9]{0,15})$' THEN ${text}::numeric END`;
-  return text;
- };
  const comparisons={eq:'=',ne:'<>',gt:'>',gte:'>=',lt:'<',lte:'<='};
  const predicates=query.filters.map(filter=>{
   const field=fieldType(filter.field),key=bind(filter.field),exists=`attributes ? ${key}`;
@@ -43,11 +37,18 @@ export function compileEntityQuery(input:EntityQuery,schema:SchemaPublication,st
   if(['gt','gte','lt','lte'].includes(filter.operator)&&!['integer','decimal','date'].includes(field.type))bad('Field cannot be ordered.');
   validateAttributes({...schema,fields:{[filter.field]:{...field,required:false}}},{[filter.field]:filter.value});
   const value=bind(filter.value);
-  if(filter.operator==='contains')return `(${exists} AND strpos(${expression(key,field)},${value}::text)>0)`;
+  if(filter.operator==='contains')return `(${exists} AND strpos(${typedFieldExpression(key,field)},${value}::text)>0)`;
   const numeric=field.type==='decimal'||field.type==='integer';
-  return `(${exists} AND ${expression(key,field)} ${comparisons[filter.operator]} ${value}::${numeric?'numeric':'text'})`;
+  return `(${exists} AND ${typedFieldExpression(key,field)} ${comparisons[filter.operator]} ${value}::${numeric?'numeric':'text'})`;
  });
  let order='created_at DESC,id DESC';
- if(query.sort){const field=fieldType(query.sort.field),key=bind(query.sort.field),direction=query.sort.direction.toUpperCase();order=`${expression(key,field)} ${direction} NULLS LAST,id ${direction}`;}
+ if(query.sort){const field=fieldType(query.sort.field),key=bind(query.sort.field),direction=query.sort.direction.toUpperCase();order=`${typedFieldExpression(key,field)} ${direction} NULLS LAST,id ${direction}`;}
  return {predicate:predicates.length?predicates.join(' AND '):'TRUE',order,values};
 }
+
+export function typedFieldExpression(key:string,field:Field):string {
+  const text=`(attributes ->> ${key})`;
+  if(field.type==='decimal')return `CASE WHEN jsonb_typeof(attributes -> ${key})='string' AND ${text} ~ '^-?(0|[1-9][0-9]{0,37})([.][0-9]{1,18})?$' AND length(translate(${text},'-.',''))<=38 THEN ${text}::numeric END`;
+  if(field.type==='integer')return `CASE WHEN jsonb_typeof(attributes -> ${key})='number' AND ${text} ~ '^-?(0|[1-9][0-9]{0,15})$' THEN ${text}::numeric END`;
+  return text;
+ }

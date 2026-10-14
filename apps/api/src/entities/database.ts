@@ -2,6 +2,7 @@
 import type { Pool, PoolClient } from 'pg';
 import { accessPredicate, checkAccess, type AccessMode } from './access.js';
 import {compileEntityQuery,parseEntityQuery} from './query.js';
+import {aggregateEntitiesWithClient} from './aggregate-database.js';
 import { createDirectoryDatabase } from '../directory-database.js';
 import {initializeEntityEvents,type EntityEvent} from './events.js';
 import { parseCreateKey } from '../create-command.js';
@@ -118,6 +119,9 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
     },'owner');
   }
   return {
+    async aggregate(scope,input) {
+      return transaction(pool,client=>aggregateEntitiesWithClient(client,scope,input));
+    },
     async events(scope,id,page) {
       validatePage(page);id=uuid(id);
       const visible=await scopedEntity(pool,scope,id);

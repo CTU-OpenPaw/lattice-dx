@@ -19,6 +19,7 @@ export type RevokeShareInput = {expectedVersion:number;kind:Principal['kind'];pr
 export type QueryOperator = 'eq'|'ne'|'gt'|'gte'|'lt'|'lte'|'contains'|'exists';
 export type EntityQuery = {schemaId:string;schemaVersion:number;filters?:{field:string;operator:QueryOperator;value?:string|number|boolean}[];sort?:{field:string;direction:'asc'|'desc'};limit?:number;offset?:number};
 export interface EntityRepository {
+  aggregate?(scope:Scope,input:import('./aggregate-types.js').AggregateQuery):Promise<import('./aggregate-types.js').AggregateResult>;
   events?(scope:Scope,id:string,page:PageQuery):Promise<Page<import('./events.js').EntityEvent>>;
   query?(scope:Scope,input:EntityQuery):Promise<Page<Entity>>;
   share?(scope:Scope,id:string,input:ShareInput,key:string):Promise<Entity>;
