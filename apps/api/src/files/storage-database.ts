@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import type {Pool,PoolClient} from 'pg';
 import type {ObjectStore} from './object-store.js';
+/** Initialized metadata must remain readable even when future offloads are disabled. */
+export async function assertFileStorageReadable(database:Pick<Pool,'query'>,store?:ObjectStore) {
+ if(store)return;
+ const result=await database.query("SELECT 1 FROM foundation_files WHERE storage_provider='filesystem' LIMIT 1");
+ if(result.rows.length)throw new Error('Filesystem storage requires a configured root');
+}
 export async function initializeFileStorage(database:Pick<Pool,'query'>) {
  await database.query(`ALTER TABLE foundation_files
  ADD COLUMN IF NOT EXISTS storage_provider text NOT NULL DEFAULT 'postgres',

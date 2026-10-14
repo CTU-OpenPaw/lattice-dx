@@ -18,6 +18,7 @@ import {eventsDatabase} from './events/database.js';
 import {modulesDatabase} from './modules/database.js';
 import {automationsDatabase} from './automations/database.js';
 import type {ObjectStore} from './files/object-store.js';
+import {assertFileStorageReadable,offloadOneFile} from './files/storage-database.js';
 export async function connectRecords(connectionString: string,options:{store?:ObjectStore}={}) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
@@ -26,6 +27,7 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const organization=await organizationDatabase(pool);
     const definitionRegistry=await definitionDatabase(pool);
     const foundation=await foundationDatabase(pool,options.store,(client,run)=>definitionRegistry.get(run.organizationId,run.definitionId,run.definitionVersion,client));
+    await assertFileStorageReadable(pool,options.store);
     const workflows=await workflowDatabase(pool,definitionRegistry,options.store);
     const events=await eventsDatabase(pool,definitionRegistry,workflows);
     const entities=await entityDatabase(pool);
@@ -34,7 +36,8 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const reports=await reportsDatabase(pool);
     const modules=await modulesDatabase(pool,workflows);
     const taskLifecycle=await taskLifecycleDatabase(pool);
-    return {repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),close:()=>pool.end()};
+    return {repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),
+      offloadFile:async()=>{if(!options.store)throw new Error('File storage is not configured');return offloadOneFile(pool,options.store);},close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }
 export async function recordDatabase(pool:Pool):Promise<RecordRepository> {

@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import {test,expect,vi} from 'vitest';
 import type {PoolClient} from 'pg';
-import {offloadFileWithClient,initializeFileStorage,offloadOneFile} from './storage-database.js';
+import {offloadFileWithClient,initializeFileStorage,offloadOneFile,assertFileStorageReadable} from './storage-database.js';
+
+test('startup refuses filesystem pointers without configured store and permits postgres-only rows',async()=>{
+ const query=vi.fn(async()=>({rows:[{exists:true}]}));
+ await expect(assertFileStorageReadable({query} as never)).rejects.toThrow('Filesystem storage requires a configured root');
+ query.mockResolvedValueOnce({rows:[]});await assertFileStorageReadable({query} as never);
+ query.mockClear();await assertFileStorageReadable({query} as never,{readVerified:vi.fn(),writeVerified:vi.fn()});expect(query).not.toHaveBeenCalled();
+});
 test('switch locks caller row then verifies object before removing database content',async()=>{
  const order:string[]=[];
  const query=vi.fn(async(sql:string)=>{order.push(sql);return sql.startsWith('SELECT')?{rows:[{storage_provider:'postgres',storage_version:1,scan_status:'clean',content:Buffer.from('abc'),size:3}]}:{rowCount:1};});
