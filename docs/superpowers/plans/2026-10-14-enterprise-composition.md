@@ -146,7 +146,7 @@ Parent scripts/docs/APIindex/verification/masterledger, no teammate UI/adapters 
 | --- | --- | --- |
 | 1 | Accepted locally | c351c22; signed HTTP/private PG rollback/5-way dedupe/current ACL replay/106 visible run paging/pin migration/max1. Independent16tests/noP1/P2 |
 | 2–3 | Accepted locally | Journal: a27148b/bfe2b6b; automations: d441995/cb79660/8f33d10. Independent runtime review clear; 190 focused tests; actual PG five-way dispatch/current authority/retry/atomic rollback/cancellation/depth8/max1/worker drain; signed catalog |
-| 4–5 | Planned | Pure expressions +transient private projections |
+| 4–5 | Evaluator accepted; private blocks implementing | 02b56cc; independent evaluator review clear, 15 focused tests/typechecks. Full workspace checkpoint 417 tests/68 files and build/typecheck passed before executor integration |
 | 6 | Planned | Declarative business bindings |
 | 7–8 | Planned | Exact scoped aggregates +revocable snapshots |
 | 9–11 | Planned | Concrete local object provider/search/observable runtime |
