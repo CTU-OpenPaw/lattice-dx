@@ -44,6 +44,8 @@ The contracts above include their exact request/response bodies and roles. REST 
 
 ## Ownership of integration work
 
+Shared seed, exact teammate branch contract review and the cross-actor acceptance checklist: [Team integration readiness](team-integration-readiness.md). `pnpm integration:seed --share` creates a fresh pending asset-review workflow and metadata-only local artifact; `pnpm test:team-integration` exercises a separate fixture. Neither command installs teammate UI/adapters or rewrites directory accounts.
+
 Duy maintains these backend contracts and transaction policies. Hưng connects NocoBase UI/plugin to the documented APIs. Nhi connects n8n, NGSI-LD and agent adapters to ingress/outbox and authorized tools. Adapter setup and the final user-facing applications need their own integration acceptance; backend unit tests do not prove those systems are connected.
 
 The current scope and evidence are maintained in [completion plan](backend-completion-plan.md) and [verification](verification.md). This index describes available integration contracts, not a production certification or an assertion that every feature is merged into main.
