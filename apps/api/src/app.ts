@@ -25,6 +25,7 @@ import {createTelemetry,type StatusClass} from './operations/telemetry.js';
 import {registerWorkflowEvents,type EventOptions} from './events/routes.js';
 import {registerModules,type ModuleOptions} from './modules/routes.js';
 import {registerAutomations,type AutomationOptions} from './automations/routes.js';
+import {registerStudio} from './studio/routes.js';
 export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & ReportsOptions & AutomationOptions) {
   const telemetry=options.telemetry??createTelemetry();
   const app = Fastify({ bodyLimit: 16_384,genReqId:()=>correlationId() });
@@ -51,6 +52,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerWorkflowEvents(app,options);
   registerAutomations(app,options);
   registerModules(app,options);
+  registerStudio(app,options);
   registerLogistics(app,options);
   registerEntities(app,options);
   registerEntityDataTools(app,options);

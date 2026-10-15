@@ -66,10 +66,11 @@ function keys(value: unknown, allowed: string[]): asserts value is Record<string
   }
 }
 
+export const workflowFieldTypes = Object.freeze(['text', 'subject', 'department', 'location', 'file', 'positiveInteger']);
+
 function fields(value: unknown) {
-  const supported = ['text', 'subject', 'department', 'location', 'file', 'positiveInteger'];
   if (!object(value) || Object.keys(value).length > 50
-    || Object.entries(value).some(([key, type]) => !name(key) || typeof type !== 'string' || !supported.includes(type))) {
+    || Object.entries(value).some(([key, type]) => !name(key) || typeof type !== 'string' || !workflowFieldTypes.includes(type))) {
     fail();
   }
 }

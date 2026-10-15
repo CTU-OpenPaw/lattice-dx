@@ -10,7 +10,7 @@ import {parseTimerRetry} from './timer-policy.js';
 import {parseLifecycle} from './lifecycle-database.js';
 import { parseCompletion } from './completion-policy.js';
 import {requireEntityRead} from './entity-context.js';
-import {entityWorkflowBlocks} from './entity-block-catalog.js';
+import {workflowBlockCatalog} from './entity-block-catalog.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository;definitionRegistry?:DefinitionRegistry};
 function idempotencyKey(req:FastifyRequest):string {
   const key=req.headers['idempotency-key'];
@@ -75,13 +75,7 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       if(!repo.retryTimer)throw new WorkflowError(503,'Workflow timers unavailable.');
       return repo.retryTimer(workflowId(req.params.id),workflowId(req.params.timerId),value.expectedVersion,actors.get(req)!,idempotencyKey(req));
     });
-    routes.get('/v1/workflow-blocks',async req=>({items:[
-      {id:'records.create',version:1,title:'Create record',requiredRole:'records:write'},
-      {id:'tasks.create',version:1,title:'Create task',requiredRole:'tasks:assign'},
-      {id:'connectors.dispatch',version:1,title:'Dispatch connector',requiredRole:'workflow:integrate'},
-      {id:'timers.schedule',version:1,title:'Schedule service transition',requiredRole:'workflow:schedule'},
-      ...entityWorkflowBlocks,
-    ].filter(block=>actors.get(req)!.roles.includes(block.requiredRole))}));
+    routes.get('/v1/workflow-blocks',async req=>({items:workflowBlockCatalog.filter(block=>actors.get(req)!.roles.includes(block.requiredRole))}));
     routes.get('/v1/workflow-definitions',async req=>{
       const actor=actors.get(req)!;
       const definitions=await registry.list(actor.organizationId);
