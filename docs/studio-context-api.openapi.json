@@ -633,7 +633,8 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 128
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
             },
             "description": "One header; exact replay returns the accepted result after current authorization. A changed payload under the same actor/organization/operation/key conflicts."
           }
@@ -776,7 +777,8 @@
             "schema": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 128
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._:-]{1,128}$"
             },
             "description": "One header; exact replay returns the accepted result after current authorization. A changed payload under the same actor/organization/operation/key conflicts."
           }
@@ -2214,6 +2216,38 @@
         ],
         "additionalProperties": false
       },
+      "ManifestBinding": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "schemaId": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "definitionId": {
+            "type": "string"
+          },
+          "allowedTransitions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "schemaId",
+          "schemaVersion",
+          "definitionId",
+          "allowedTransitions"
+        ],
+        "additionalProperties": false
+      },
       "Manifest": {
         "type": "object",
         "properties": {
@@ -2276,7 +2310,7 @@
           "bindings": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Binding"
+              "$ref": "#/components/schemas/ManifestBinding"
             }
           }
         },

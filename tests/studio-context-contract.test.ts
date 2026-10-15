@@ -61,3 +61,24 @@ test('public examples contain no executable configuration, credentials or broker
  function walk(value:unknown){if(!value||typeof value!=='object')return;for(const [key,item] of Object.entries(value)){if(key==='example'||key==='examples')examples.push(item);else walk(item);}}
  walk(doc);expect(examples.length).toBeGreaterThan(0);expect(JSON.stringify(examples)).not.toMatch(/password|client_secret|access_token|https?:\/\/|javascript:|\bSELECT\b|\bINSERT\b|broker.*success/i);
 });
+
+test('manifest bindings exclude response-only definition version pins',()=>{
+ const doc=contract();
+ const binding={id:'asset',schemaId:'asset',schemaVersion:1,definitionId:'asset-review',allowedTransitions:['approve']};
+ const input=doc.components.schemas.Manifest.properties.bindings.items;
+ expect(input.$ref).toBe('#/components/schemas/ManifestBinding');
+ expect(accepts(doc,input,binding)).toBe(true);
+ expect(accepts(doc,input,{...binding,definitionVersion:1})).toBe(false);
+ expect(accepts(doc,doc.components.schemas.Binding,{...binding,definitionVersion:1})).toBe(true);
+});
+
+test('documented command key alphabet matches runtime',()=>{
+ const doc=contract();
+ for(const method of ['put','delete']){
+  const header=doc.paths['/v1/entities/{id}/context-links/ngsi-ld'][method].parameters.find((parameter:{name:string})=>parameter.name==='Idempotency-Key');
+  expect(header.schema.pattern).toBe('^[A-Za-z0-9._:-]{1,128}$');
+  const valid=new RegExp(header.schema.pattern);
+  for(const key of ['decision-1','A_z.0:replay','a'.repeat(128)])expect(valid.test(key)).toBe(true);
+  for(const key of ['decision 1','','a'.repeat(129),'decision/1'])expect(valid.test(key)).toBe(false);
+ }
+});
