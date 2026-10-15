@@ -48,6 +48,8 @@
     "test:runtime-operations": "node scripts/smoke-runtime-operations.mjs",
     "test:full-recovery": "node scripts/smoke-full-recovery.mjs",
     "test:enterprise-composition": "node scripts/smoke-enterprise-composition.mjs",
+    "integration:seed": "node scripts/seed-team-integration.mjs",
+    "test:team-integration": "node scripts/smoke-team-integration.mjs",
     "backup:core": "node scripts/backup-core.mjs backup",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "backup:full": "node scripts/full-backup-core.mjs backup",

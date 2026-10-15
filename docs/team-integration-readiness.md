@@ -29,6 +29,8 @@ Không dùng số lượng commit làm thước đo công việc. Hai nhánh tá
 
 Module fixture trong `solutions/integration/asset-review.json` cung cấp schema/version thật và workflow review riêng cho lượt kiểm. Đây là cấu hình để kiểm engine, không thay thế mô hình Asset chung của mọi doanh nghiệp. Khi dùng làm nguồn broker, ghi mapping tường minh `{organizationId,schemaId,schemaVersion,sourceEntityId,businessId,brokerUrn}`; đọc field theo schema đã pin. Không sửa collection NocoBase để giả đồng bộ.
 
+Fixture hiện có assetCode/description để kiểm workflow và quyền; không có OT status. Vì vậy nó chưa phải nguồn status cho receiver. Không biến workflow pending/reviewed thành Asset ready/in_use/repair/retired. Việc xuất status cần một schema/source field được xác nhận cùng observedAt; thiếu field thì không phát trạng thái giả.
+
 Các status/field trong fixture cần được đối chiếu với enum ready/in_use/repair/retired của receiver trước khi phát sang broker. Tên hoặc quan hệ thiếu không được tự tạo ID giả. Tài khoản xem workflow không tự có quyền xem asset liên kết; phải có grant riêng.
 
 ## Hưng — những contract đang khớp
@@ -39,6 +41,22 @@ Các status/field trong fixture cần được đối chiếu với enum ready/i
 - Đã export source `ca5adf0` vào ignored output, build plugin rồi chạy41tests đạt. Lượt đầu thiếu dist do chưa build; sau đúng trình tự build→test đạt. Đây là kiểm plugin/controller, không phải browser end-to-end hay đăng nhập host thật.
 
 Phần cần Hưng nối tiếp: bridge chưa có operation cho `/v1/workflows/:id/entity-context`, `/v1/entities/:id/workflows` hoặc generic entity CRUD/search; chưa có Context Entity block. Inbox/Approval hiện không thay standalone `/v1/tasks` decision hay hoàn thành task wait. UI hiện có thể liệt kê và xử lý workflow mẫu; việc tạo module/entity được công cụ seed thực hiện trước. Không hứa UI đã dựng được mọi schema/ứng dụng.
+
+Đã dùng nguyên `createApprovalController` tại ca5adf0 gọi backend JWT/Gateway thật với một fixture riêng: warehouse approve được, nhận reviewed/version2 đúng contract. Transport thử nối thẳng API, không đi qua NocoBase host/PKCE; đây là bằng chứng controller/API tương thích, chưa là browser acceptance.
+
+## Chạy bộ kiểm thử chung
+
+```powershell
+pnpm local:up
+pnpm integration:seed --share
+pnpm test:team-integration
+```
+
+`integration:seed --share` luôn tạo module/schema/workflow/entity có namespace UUID mới và giữ workflow pending/version1 để Hưng mở UI. Không có `--share` thì warehouse đọc được workflow theo reader role nhưng chưa được đọc asset/context. Artifact nằm trong `output/team-integration/<namespace>.json`, chỉ có ID/URL/subject; không lưu token/password. `test:team-integration` tạo bộ riêng, thực hiện share/revoke rồi approve đến reviewed/version2; không dùng mất fixture pending trước đó.
+
+Mặc định dùng tài khoản demo local alice (owner/designer), warehouse (reviewer) và bob (đơn vị khác). Có thể đặt `TEAM_INTEGRATION_ALICE_USERNAME/PASSWORD`, `TEAM_INTEGRATION_WAREHOUSE_USERNAME/PASSWORD`, `TEAM_INTEGRATION_BOB_USERNAME/PASSWORD`; các account thay thế vẫn phải có tenant/role tương ứng. Chỉ hỗ trợ origin loopback cổng8080/8081, không chuyển credential sang host ngoài. Các mật khẩu mặc định chỉ thuộc realm local được commit sẵn. Đăng ký presence qua workflow-members/me chỉ INSERT ON CONFLICT DO NOTHING trong workflow_members; không đổi directory account, role hoặc department.
+
+Lấy workflowId/title từ artifact để Hưng tìm trong Inbox `/lattice/apps/work`; kết nối business account warehouse qua bridge. NocoBase host account và Keycloak business account là hai phiên riêng. URL entity/context trong artifact là API cần bearer token, không phải UI có sẵn. Bob không có data:read nên entity denial403 chỉ chứng minh thiếu capability; foreign workflow read/transition404 kiểm cách ly tenant ở mức resource.
 
 ## Nhi — điều kiện ghép PR14
 
