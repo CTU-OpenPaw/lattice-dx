@@ -2,6 +2,8 @@ node_modules/
 .next/
 dist/
 coverage/
+/output/
+/tmp/
 .env
 .env.*
 !.env.example

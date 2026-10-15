@@ -34,6 +34,7 @@ services:
     volumes:
       - nocobase-storage:/app/nocobase/storage
       - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
+      - ../../plugins/nocobase/plugin-lattice-foundation:/app/nocobase/node_modules/@latticedx/plugin-lattice-foundation:ro
     ports:
       - "127.0.0.1:13000:80"
     depends_on:

@@ -3,6 +3,8 @@ node_modules
 **/.next
 **/dist
 .git
+output
+tmp
 upstream
 .env
 .env.*

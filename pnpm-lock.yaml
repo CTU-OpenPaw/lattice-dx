@@ -6,6 +6,8 @@ settings:
 
 importers:
 
+  plugins/nocobase/plugin-lattice-foundation: {}
+
   .:
     devDependencies:
       '@types/node':

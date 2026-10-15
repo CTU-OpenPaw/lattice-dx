@@ -4,6 +4,7 @@
   "private": true,
   "license": "Apache-2.0",
   "main": "server.cjs",
+  "scripts": {"build": "node build.mjs"},
   "displayName": "LatticeDX Action Bridge",
   "description": "Server-side PKCE account linking and scoped LatticeDX action proxy."
 }

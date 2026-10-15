@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// Read-only local browser smoke; records and native page schemas are untouched.
+const assert=require('node:assert/strict');const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+(async()=>{const browser=await chromium.launch({headless:true,channel:'msedge'});try{
+  const page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[],workflowFailures=[];page.on('pageerror',e=>errors.push(e.message));page.on('response',response=>{if(response.status()>=400&&response.url().includes('/api/dxActions:workflow'))workflowFailures.push(response.status());});
+  await page.goto('http://localhost:13000/signin?redirect=%2Flattice');await page.locator('input[type=password]').waitFor();await page.locator('input:not([type=password])').first().fill('admin@nocobase.com');await page.locator('input[type=password]').fill('admin123');await page.getByRole('button',{name:/sign in/i}).click();await page.waitForURL('**/lattice');
+  await page.getByRole('heading',{name:'Công việc của tôi',exact:true}).waitFor();await page.getByRole('link',{name:'Mở Logistics',exact:true}).waitFor();
+  await page.keyboard.press('Control+k');await page.getByRole('textbox',{name:'Tìm ứng dụng',exact:true}).fill('Logistics');await page.locator('#lx-search-results').getByRole('link',{name:'Logistics',exact:true}).waitFor();await page.keyboard.press('Escape');assert.equal(await page.locator('#lx-search-results').count(),0);
+  await page.getByRole('button',{name:'Trợ giúp',exact:true}).click();await page.getByRole('dialog').waitFor();await page.keyboard.press('Escape');assert.equal(await page.getByRole('dialog').count(),0);
+  assert.equal(await page.getByRole('button',{name:'Đã hoàn thành',exact:true}).isDisabled(),true);
+  await page.getByRole('button',{name:'Kết nối tài khoản nghiệp vụ',exact:true}).click();await page.waitForURL('http://localhost:8081/**');await page.locator('#username').fill('manager');await page.locator('#password').fill('local-manager-password');await page.locator('#kc-login').click();await page.waitForURL('**/lattice');await page.getByTestId('api-status').filter({hasText:'manager'}).waitFor();
+  await page.getByRole('button',{name:'Có quyền xem',exact:true}).click();await page.getByTestId('lattice-task-inbox').locator('table').waitFor();await page.screenshot({path:'output/workspace-ui-desktop.png',fullPage:true});
+  await page.getByRole('link',{name:'Xem tất cả ứng dụng',exact:true}).click();await page.waitForURL('**/lattice?view=apps');await page.getByRole('heading',{name:'Ứng dụng',exact:true}).waitFor();assert.equal(await page.getByTestId('lattice-task-inbox').count(),0);
+  await page.getByRole('link',{name:'Mở Logistics',exact:true}).click();await page.waitForURL('**/lattice/apps/logistics');await page.locator('[data-block-id="create-order-record"]').waitFor();
+  await page.getByRole('link',{name:'Công việc của tôi',exact:true}).click();await page.waitForURL('**/lattice');await page.setViewportSize({width:390,height:844});
+  await page.getByRole('button',{name:'Mở điều hướng',exact:true}).click();await page.getByRole('link',{name:'Ứng dụng',exact:true}).waitFor();await page.getByRole('button',{name:'Mở điều hướng',exact:true}).click();
+  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth>window.innerWidth+1);assert.equal(overflow,false,'Mobile page must not overflow horizontally; table scrolls inside its container');await page.screenshot({path:'output/workspace-ui-mobile.png',fullPage:true});
+  assert.deepEqual(errors,[]);assert.deepEqual(workflowFailures,[]);console.log(JSON.stringify({result:'PASS',desktop:'1440x1000',mobile:'390x844',applicationSearch:'PASS',helpKeyboard:'PASS',applicationNavigation:'PASS',mobileOverflow:false,unsupportedTabsDisabled:true,pageErrors:0}));
+}finally{await browser.close()}})().catch(error=>{console.error(error.message);process.exitCode=1});

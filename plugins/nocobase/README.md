@@ -1,6 +1,8 @@
 # NocoBase plugins
 
-Vị trí dành cho plugin do nhóm phát triển. Plugin đầu tiên: [Action Bridge](action-bridge/README.md), server-side account linking và proxy action, đã thử với runtime 2.2.20. Chưa có client block nghiệp vụ của nhóm.
+Vị trí dành cho plugin do nhóm phát triển. [Action Bridge](action-bridge/README.md) cung cấp server-side account linking và proxy action, đã thử với runtime 2.2.20; phần đọc dữ liệu/tệp mở rộng được kiểm trên 2.2.22.
+
+[Foundation](plugin-lattice-foundation/README.md) bổ sung bốn collection Department, Employee, Location, Asset, seed hai đơn vị mẫu và Workspace/Form/List dùng chung. Build trước khi chạy Compose; collection nền chưa đồng bộ với API Data. Xem [tiến độ và giới hạn](../../docs/task-progress.md).
 
 Bản nguồn upstream đã clone riêng tại `upstream/nocobase/` để khảo sát. Xem [ghi nhận nguồn và giấy phép](../../docs/nocobase-source-review.md). Toàn bộ nền tảng NocoBase không phải plugin để đặt vào thư mục này.
 

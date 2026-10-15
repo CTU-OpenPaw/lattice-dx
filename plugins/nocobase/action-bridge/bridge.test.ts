@@ -34,6 +34,16 @@ async function linked() {
   await result.bridge.callback({ state, code: 'one-time-code' }, connection.browserId);
   return { ...result, connection, state };
 }
+test('action key is forwarded only as a validated header; legacy calls still work',async()=>{
+  const {bridge,calls,connection}=await linked();
+  const payload={actionId:'records.create',version:1,input:{title:'Hello'},key:'ui-stable'};
+  await bridge.run('noco-1',connection.browserId,payload);
+  expect((calls.at(-1)!.options.headers as Record<string,string>)['idempotency-key']).toBe('ui-stable');
+  expect(JSON.parse(String(calls.at(-1)!.options.body))).toEqual({version:1,input:{title:'Hello'}});
+  const count=calls.length;
+  for(const key of ['', 'bad key', ['a','b'], 'x'.repeat(129)])await expect(bridge.run('noco-1',connection.browserId,{...payload,key})).rejects.toMatchObject({status:400});
+  expect(calls).toHaveLength(count);
+});
 
 test('authorization uses one-use random state and server-held S256 PKCE verifier', async () => {
   const { bridge, calls } = setup();
