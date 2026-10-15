@@ -17,9 +17,10 @@ import {operationsDatabase} from './operations/database.js';
 import {eventsDatabase} from './events/database.js';
 import {modulesDatabase} from './modules/database.js';
 import {automationsDatabase} from './automations/database.js';
+import {contextLinksDatabase} from './context-links/database.js';
 import type {ObjectStore} from './files/object-store.js';
 import {assertFileStorageReadable,offloadOneFile} from './files/storage-database.js';
-export async function connectRecords(connectionString: string,options:{store?:ObjectStore}={}) {
+export async function connectRecords(connectionString: string,options:{store?:ObjectStore;projectionEnabled?:boolean}={}) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
     const repository=await recordDatabase(pool);
@@ -31,12 +32,13 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const workflows=await workflowDatabase(pool,definitionRegistry,options.store);
     const events=await eventsDatabase(pool,definitionRegistry,workflows);
     const entities=await entityDatabase(pool);
+    const contextLinks=await contextLinksDatabase(pool,entities,{projectionEnabled:options.projectionEnabled===true});
     const automations=await automationsDatabase(pool,definitionRegistry,workflows);
     const dataTools=await entityDataToolsDatabase(pool,options.store);
     const reports=await reportsDatabase(pool);
     const modules=await modulesDatabase(pool,workflows);
     const taskLifecycle=await taskLifecycleDatabase(pool);
-    return {repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),
+    return {repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),
       offloadFile:async()=>{if(!options.store)throw new Error('File storage is not configured');return offloadOneFile(pool,options.store);},close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }

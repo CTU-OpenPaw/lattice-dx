@@ -20,7 +20,7 @@ const runtime=await bootstrapRuntime(process.env,{
  createApp:(config,database)=>{
   const identity=config.identity?{issuer:config.identity.issuer,audience:config.identity.audience,key:createRemoteJWKSet(new URL(config.identity.jwksUrl))}:undefined;
   return createApi({workerUrl:config.workerUrl,identity,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
-   entities:database?.entities,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
+   entities:database?.entities,contextLinks:database?.contextLinks,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
    definitionRegistry:database?.definitionRegistry,directory:database?.directory,workflows:database?.workflows,readSharedFile:database?.workflows.readSharedFile,
    scan:config.scanner?content=>scanWithClamd(content,config.scanner!.host,config.scanner!.port):undefined});
  },
