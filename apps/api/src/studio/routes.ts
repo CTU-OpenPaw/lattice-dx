@@ -39,6 +39,12 @@ export function registerStudio(app: FastifyInstance, options: StudioOptions): vo
       }
       return reply.code(safe.statusCode).send({error:{code:safe.code,message:safe.message}});
     });
+    routes.addHook('onRequest', async request => {
+      // Fastify skips GET body parsing, so reject transmitted payload framing early.
+      if (request.method === 'GET' && (request.headers['transfer-encoding'] !== undefined
+        || (request.headers['content-length'] !== undefined && request.headers['content-length'] !== '0')))
+        throw new StudioError(400, 'invalid_request', 'Unexpected request body.');
+    });
     routes.addHook('preHandler', async request => {
       if (!options.identity) throw new StudioError(503, 'identity_unavailable', 'Studio identity is not configured.');
       let identity;
@@ -47,7 +53,6 @@ export function registerStudio(app: FastifyInstance, options: StudioOptions): vo
       if (!identity.organizationId) throw new StudioError(403, 'authority_denied', 'Organization scope required.');
       actors.set(request, {...identity,organizationId:identity.organizationId});
       strictObject(request.query, []);
-      if (request.method === 'GET' && request.body !== undefined) throw new StudioError(400, 'invalid_request', 'Unexpected request body.');
     });
     routes.get('/v1/me/capabilities', async request => {
       const actor = actors.get(request)!;

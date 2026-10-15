@@ -18,14 +18,11 @@ export async function studioCatalog(actor: WorkflowActor, options: StudioOptions
   const blocks = blockCatalog.filter(item => actor.roles.includes(item.requiredRole)).map(item => ({
     ...item, availability: availability(actor, [item.requiredRole], !!options.entities && (item.id !== 'entities.query' || !!options.entities.query)),
   }));
-  const workflowBlocks = workflowDesigner ? workflowBlockCatalog.filter(item => actor.roles.includes(item.requiredRole)).map(item => {
-    const configured = !!options.workflows && (item.id.startsWith('entities.') ? !!options.entities && (item.id !== 'entities.query' || !!options.entities.query)
-      : item.id === 'records.create' ? !!options.records
-      : item.id === 'tasks.create' ? !!(options.foundation && options.directory)
-      : item.id === 'timers.schedule' ? !!options.workflows.tickOne
-      : true);
-    return {...item, availability: availability(actor, [item.requiredRole], configured)};
-  }) : [];
+  // Builtin workflow steps execute through the workflow repository's transaction,
+  // independently of the optional standalone action and entity repositories.
+  const workflowBlocks = workflowDesigner ? workflowBlockCatalog.filter(item => actor.roles.includes(item.requiredRole)).map(item => ({
+    ...item, availability: availability(actor, [item.requiredRole], !!options.workflows),
+  })) : [];
   // Registry definitions contain declarative identifiers. Project only IDs, never runtime configuration.
   const connectors = workflowDesigner && options.workflows && actor.roles.includes('workflow:integrate')
     ? [...new Set(bundlePreview({format:'latticedx.workflow-bundle',formatVersion:1,definitions:await (options.definitionRegistry ?? sourceRegistry).list(actor.organizationId)}).definitions.flatMap(item => item.connectors))]

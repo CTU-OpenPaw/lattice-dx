@@ -128,3 +128,30 @@ it('validates exact dependency path references before reading the module',async(
   for(const url of ['/v1/studio/modules/SAMPLE/versions/1.0.0/dependencies','/v1/studio/modules/sample/versions/01.0.0/dependencies'])expect((await app.inject({url,headers})).statusCode).toBe(400);
   expect(m.get).not.toHaveBeenCalled();
 });
+// The workflow executor uses its own transaction for builtin steps; standalone APIs are optional.
+it('bases builtin workflow step availability on its executor independently of standalone APIs',async()=>{
+  const roles=[...designer,'data:read','data:write','records:write','tasks:assign','workflow:integrate','workflow:schedule'];
+  const app=api({workflows:{} as WorkflowRepository}),headers=await auth(roles);
+  const response=await app.inject({url:'/v1/studio/catalog',headers});
+  expect(response.statusCode).toBe(200);
+  const body=response.json();
+  for(const id of ['entities.create','entities.read','entities.query','entities.project','records.create','tasks.create','connectors.dispatch','timers.schedule'])
+    expect(body.workflow.blocks.find((item:{id:string})=>item.id===id)).toMatchObject({availability:{authorized:true,configured:true,available:true}});
+  for(const descriptor of [...body.actions,...body.blocks])expect(descriptor.availability).toEqual({authorized:true,configured:false,available:false});
+  const unconfigured=await api().inject({url:'/v1/studio/catalog',headers});
+  expect(unconfigured.statusCode).toBe(200);
+  for(const descriptor of unconfigured.json().workflow.blocks)expect(descriptor.availability.configured).toBe(false);
+});
+it('rejects signed GET payload framing without repository reads',async()=>{
+  const m=modules(),app=api({modules:m.repository}),headers=await auth();
+  for(const [,url] of endpoints.filter(([method])=>method==='GET')){
+    for(const framing of [{'content-length':'2'},{'transfer-encoding':'chunked'}]){
+      const response=await app.inject({method:'GET',url,headers:{...headers,...framing,'content-type':'application/json'},payload:'{}'});
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({error:{code:'invalid_request',message:expect.any(String)}});
+    }
+  }
+  expect(m.get).not.toHaveBeenCalled();
+  const empty=await app.inject({url:'/v1/me/capabilities',headers:{...headers,'content-length':'0'}});
+  expect(empty.statusCode).toBe(200);
+});
