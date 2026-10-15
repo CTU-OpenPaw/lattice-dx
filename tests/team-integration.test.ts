@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import {test,expect} from 'vitest';
 import {freshManifest,validateArtifact,localConfig,requestJson} from '../scripts/lib/team-integration.mjs';
 test('fresh fixtures use isolated UUID namespaces and fixed declarative policy',()=>{

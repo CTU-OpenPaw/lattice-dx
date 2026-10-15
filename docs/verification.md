@@ -1,4 +1,13 @@
-# Verification — 2026-10-14
+# Verification — latest 2026-10-15
+
+## Team integration readiness — 15 October
+
+- Baseline main ee10614 (merged PR13), teammate source pins ca5adf0 (Hưng/PR15),86959cf and4ff7901 (Nhi/PR14). UI merge-tree clean; receiver branch has four conflicts, later confirmed GitHub CONFLICTING. No teammate merge, deployment or source edits performed.
+- Final local `pnpm check`: **529 tests /95 files**, workspace typecheck and build passed. Six new fixture/helper tests; no new dependency or lockfile change.
+- `pnpm integration:seed --share` passed through signed local Gateway/Keycloak APIs. A fresh namespace creates an installed/published/enabled module, typed asset, explicit warehouse read grant and linked pending workflow. Artifact contains IDs/URLs/subjects only, retained under ignored output; accounts/roles/directory/volumes are unchanged. workflow-members/me idempotently registers workflow presence only.
+- `pnpm test:team-integration` passed: warehouse can see/act on workflow independently of entity ACL, explicit share permits entity/context, read grant cannot edit, revoke denies context while run remains readable, unauthorized owner approval403, foreign workflow404, exact-key replay and stale-version409. Bob entity403 is capability denial, not proof of entity row-level tenant isolation. Task-list probe covers first100 only; zero waits and task-free manifest establish the workflow/task contract distinction, not a global task inventory.
+- Legacy actual PG/signed regressions `test:module-bindings` and `test:entity-workflow-context` passed. Plugin export ca5adf0 build plus41 Foundation/bridge Node tests passed. Unmodified Hưng Approval controller approved a separate fixture through actual signed backend, reviewed/version2; transport used direct API, so this does not establish NocoBase host PKCE/browser acceptance.
+- Shared pending fixture namespace b7ea6bc31db74c43b6a651e0046159a8 retained for UI inspection; separate smoke/controller fixtures were consumed instead. Broker and n8n live end-to-end acceptance remain with their integration branch. Mapping/runtime conflict resolutions and exact gates are in [team handoff](team-integration-readiness.md).
 
 ## Composition/runtime acceptance — 65d0f48 / fa46d81
 

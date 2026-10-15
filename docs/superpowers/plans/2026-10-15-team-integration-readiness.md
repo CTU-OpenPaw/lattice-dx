@@ -49,7 +49,7 @@ Files: `docs/team-integration-readiness.md`, `docs/backend-api-index.md`, `packa
 
 | Task | Status | Evidence |
 | --- | --- | --- |
-| 1 | In progress | Read-only branch audit; new Nhi notification branch detected |
-| 2 | Planned | Signed shared fixture and acceptance |
-| 3 | Planned | Consolidated handoff |
-| 4 | Planned | Review/CI delivery |
+| 1 | Complete | Exact main/UI/n8n/receiver SHAs recorded;41 UI/bridge tests+build passed, actual Approval controller/API probe passed; receiver4conflicts and concrete mapping/runtime gates documented. No teammate edits/deploy |
+| 2 | Complete | ba4825b;6unit tests/actual signed seed+smoke; independent task review pass. Fixture namespaces isolated, authority/grant/revoke/replay/stale checked; pending shared fixture retained |
+| 3 | Complete | 71b203d; commands, actor/API/UI/adapter boundaries and acceptance checklist documented |
+| 4 | Local checks passed; final review/PR CI in progress | pnpmcheck529tests95files/typecheck/build; shared smoke and module/context realPG regressions passed. Lockfile unchanged, user artifacts preserved |
