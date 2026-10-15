@@ -50,6 +50,15 @@ services:
       CLAMD_HOST: clamav
       WORKFLOW_EVENT_URL: ${WORKFLOW_EVENT_URL:-}
       WORKFLOW_EVENT_TOKEN: ${WORKFLOW_EVENT_TOKEN:-}
+      ENTITY_AUTOMATION_WORKER: ${ENTITY_AUTOMATION_WORKER:-false}
+      WORKFLOW_TIMER_WORKER: ${WORKFLOW_TIMER_WORKER:-false}
+      WORKFLOW_WAIT_TIMEOUT_WORKER: ${WORKFLOW_WAIT_TIMEOUT_WORKER:-false}
+      WORKFLOW_OUTBOX_WORKER: ${WORKFLOW_OUTBOX_WORKER:-false}
+      FILE_STORAGE_PROVIDER: ${FILE_STORAGE_PROVIDER:-postgres}
+      FILE_STORAGE_ROOT: /var/lib/latticedx/objects
+      FILE_STORAGE_WORKER: ${FILE_STORAGE_WORKER:-false}
+    volumes:
+      - engine-objects:/var/lib/latticedx/objects
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,3 +96,4 @@ services:
 volumes:
   postgres-data:
   clamav-signatures:
+  engine-objects:

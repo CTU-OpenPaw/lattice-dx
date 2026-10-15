@@ -94,3 +94,18 @@ export function canonicalJson(input:unknown):string {
   }
   return JSON.stringify(normalize(input));
 }
+
+export function principalKind(value:unknown):'person'|'department' {
+  if(value!=='person'&&value!=='department') bad('Invalid principal kind.');
+  return value;
+}
+export function principalId(value:unknown):string {
+  if(typeof value!=='string'||!value.trim()||value!==value.trim()||value.length>200||/[\u0000-\u001f\u007f]/.test(value)||reserved.has(value)) bad('Invalid principal ID.');
+  return value;
+}
+export function parseShare(value:unknown):import('./types.js').ShareInput {
+  const data=exact(value,['expectedVersion','principal','permission']);
+  const principal=exact(data.principal,['kind','id']);
+  if(data.permission!=='read'&&data.permission!=='edit') bad('Invalid share permission.');
+  return {expectedVersion:version(data.expectedVersion),principal:{kind:principalKind(principal.kind),id:principalId(principal.id)},permission:data.permission};
+}

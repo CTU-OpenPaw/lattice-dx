@@ -16,7 +16,7 @@ function serialize(row: WorkflowDraft): WorkflowDraft {
   };
 }
 
-async function insertDraft(queryable: Pool | PoolClient, definition: DraftDefinition, actor: WorkflowActor): Promise<WorkflowDraft> {
+export async function insertDraft(queryable: Pool | PoolClient, definition: DraftDefinition, actor: WorkflowActor): Promise<WorkflowDraft> {
   const result = await queryable.query(
     `INSERT INTO workflow_definition_drafts(organization_id,id,definition,created_by,updated_by)
      VALUES($1,$2,$3,$4,$4) ON CONFLICT DO NOTHING RETURNING ${columns}`,
@@ -97,8 +97,8 @@ export async function definitionDatabase(pool: Pool): Promise<DefinitionRegistry
       return result.rows[0]?.definition;
     },
 
-    async list(org) {
-      const result = await pool.query(
+    async list(org, client) {
+      const result = await (client ?? pool).query(
         'SELECT definition FROM workflow_definition_versions WHERE organization_id=$1 ORDER BY id,version',
         [org],
       );

@@ -29,7 +29,8 @@ const steps=[
 const departments=await call('/v1/directory/departments?role=department%3Ait&limit=1');
 assert.ok(departments.items.some(d=>d.id==='it'&&d.memberCount===1));
 await call('/v1/directory/departments','GET',undefined,403,'warehouse');
-assert.equal((await call('/v1/workflow-blocks')).items.length,3);
+const catalog=(await call('/v1/workflow-blocks')).items;
+for(const id of ['records.create','tasks.create','connectors.dispatch'])assert.ok(catalog.some(block=>block.id===id));
 assert.ok(!(await call('/v1/workflow-blocks','GET',undefined,200,'sales2')).items.some(b=>b.id==='connectors.dispatch'));
 await publish(definition(id,steps));
 const initial=await create(id),command={action:'dispatch',expectedVersion:1,input:{}},key=randomUUID();

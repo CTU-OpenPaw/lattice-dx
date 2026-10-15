@@ -9,30 +9,33 @@ import { isRecordId,parseTaskCreateInput } from '@dx/contracts';
 import { PageError,parsePage,textFilter,type Page,type PageQuery } from './pagination.js';
 export type TaskQuery=PageQuery & {status?:string;recordId?:string};
 import { requireAssignee, DirectoryError, type DirectoryOptions } from './directory.js';
+import {FileReadError,type FileContent} from './files/content.js';
 export type Scope = {subject:string; organizationId:string};
 export type TaskInput = {title:string;assigneeId:string;organizationId:string;createdBy:string;recordId?:string};
-export type Task = Omit<TaskInput,'recordId'> & {id:string;status:string;version:number;recordId?:string|null;workflowWaitId?:string|null};
+export type Task = Omit<TaskInput,'recordId'> & {id:string;status:string;version:number;recordId?:string|null;workflowWaitId?:string|null;departmentId?:string|null;dueAt?:string|null};
 export type ScanStatus = 'pending'|'clean'|'rejected'|'error';
 export type FileInput = {filename:string;ownerId:string;organizationId:string;content:Buffer;recordId?:string};
 export type FileItem = Omit<FileInput,'content'|'recordId'> & {id:string;size:number;scanStatus:ScanStatus;recordId?:string|null};
 export interface FoundationRepository {
+  readFileMetadata?(id:string,scope:WorkflowActor):Promise<FileItem|undefined>;
+  loadFileContent?(id:string,scope:WorkflowActor):Promise<FileContent|undefined>;
   supportsCreateCommands?:boolean;
   listTasks(scope:Scope):Promise<Task[]>;
   listTasksPage?(scope:Scope,query:TaskQuery):Promise<Page<Task>>;
   readTask?(id:string,scope:Scope):Promise<Task|undefined>;
-  readTaskFile?(id:string,scope:Scope):Promise<(FileItem&{content:Buffer})|undefined>;
+  readTaskFile?(id:string,scope:Scope):Promise<(FileItem&{content?:Buffer})|undefined>;
   createTask(input:TaskInput,key?:string):Promise<Task>;
   decideTask(id:string,scope:Scope,decision:'approve'|'reject',reason:string,version:number):Promise<Task|undefined>;
   createFile(input:FileInput):Promise<FileItem>;
   markFile(id:string,status:ScanStatus):Promise<void>;
-  readFile(id:string,scope:Scope):Promise<(FileItem & {content:Buffer})|undefined>;
+  readFile(id:string,scope:Scope):Promise<(FileItem & {content?:Buffer})|undefined>;
 }
-export type FoundationOptions = DirectoryOptions & {identity?:IdentityConfig; records?:RecordRepository; foundation?:FoundationRepository;readSharedFile?:(id:string,actor:WorkflowActor)=>Promise<(FileItem&{content:Buffer})|undefined>;scan?:(content:Buffer)=>Promise<'clean'|'rejected'>};
+export type FoundationOptions = DirectoryOptions & {identity?:IdentityConfig; records?:RecordRepository; foundation?:FoundationRepository;readSharedFile?:(id:string,actor:WorkflowActor)=>Promise<(FileItem&{content?:Buffer})|undefined>;scan?:(content:Buffer)=>Promise<'clean'|'rejected'>};
 export function registerFoundation(app:FastifyInstance,options:FoundationOptions){
   // This authorization applies before accessing every task/file repository method.
   app.register(async routes=>{
     routes.setErrorHandler((error, _req, reply) => {
-      if (error instanceof RecordLinkError || error instanceof DirectoryError || error instanceof PageError || error instanceof CreateCommandError) return reply.code(error.statusCode).send({error: error.message});
+      if (error instanceof FileReadError || error instanceof RecordLinkError || error instanceof DirectoryError || error instanceof PageError || error instanceof CreateCommandError) return reply.code(error.statusCode).send({error: error.message});
       return reply.send(error);
     });
     routes.addHook('preHandler',async(req,reply)=>{
@@ -90,11 +93,12 @@ export function registerFoundation(app:FastifyInstance,options:FoundationOptions
       return reply.code(201).send({...file,scanStatus:status});
     });
     routes.get<{Params:{id:string}}>('/v1/files/:id',async(req,reply)=>{
-      const file=await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!)??await repo.readTaskFile?.(req.params.id,scopes.get(req)!);
+      const file=repo.readFileMetadata?await repo.readFileMetadata(req.params.id,scopes.get(req)!):await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!)??await repo.readTaskFile?.(req.params.id,scopes.get(req)!);
       if(!file)return reply.code(404).send({error:'Không tìm thấy tệp.'});
-      const {content,...metadata}=file;return metadata;
+      const {content,...metadata}=file as FileItem&{content?:Buffer};return metadata;
     });
     routes.get<{Params:{id:string}}>('/v1/files/:id/content',async(req,reply)=>{
+      if(repo.loadFileContent){const file=await repo.loadFileContent(req.params.id,scopes.get(req)!);if(!file)return reply.code(404).send({error:'Không tìm thấy tệp.'});return reply.type('application/octet-stream').header('Content-Disposition',`attachment; filename*=UTF-8''${encodeURIComponent(file.filename)}`).header('X-Content-Type-Options','nosniff').send(file.content);}
       const file=await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!)??await repo.readTaskFile?.(req.params.id,scopes.get(req)!);
       if(!file)return reply.code(404).send({error:'Không tìm thấy tệp.'});
       if(file.scanStatus!=='clean')return reply.code(409).send({error:'Tệp chưa được phép sử dụng.'});

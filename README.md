@@ -6,7 +6,7 @@ Bộ khung nền tảng chuyển đổi số LatticeDX. Có cổng web, API và 
 
 Yêu cầu Docker Engine với Linux containers và Docker Compose. Từ root repo:
 
-Trên Windows máy Duy, dùng `pnpm local:up` để khởi động Docker có phục hồi lỗi socket rồi chạy core/NocoBase. Dừng/khởi động lại Desktop bằng `pnpm docker:stop` / `pnpm docker:restart`; xem [cách phục hồi Docker](docs/docker-desktop-recovery.md).
+Trên Windows máy Duy, Docker đã nâng lên 4.94.0 và kiểm tra ba lần startup chuẩn sau lỗi socket ở 4.64. Dùng `pnpm local:up` để chạy Docker và core/NocoBase. Dừng/khởi động lại Desktop bằng `pnpm docker:stop` / `pnpm docker:restart`; xem [bản sửa và lịch sử phục hồi Docker](docs/docker-desktop-recovery.md).
 
 ```sh
 pnpm infra:up
@@ -28,6 +28,14 @@ Mở rộng engine bằng cấu hình quy trình: [hợp đồng Workflow Studio
 [Create reliability](docs/create-reliability.md) bổ sung optional `Idempotency-Key` cho REST/action tạo record/task, với kiểm tra đầu vào thống nhất và kết quả lưu trong cùng giao dịch; thử `pnpm test:create-reliability`. Không-key giữ hành vi cũ, replay trả snapshot lúc tạo và vẫn kiểm tra quyền/tham chiếu hiện tại.
 
 Engine quản lý dữ liệu nghiệp vụ dùng chung theo [backend capabilities](docs/backend-capabilities.md). [Enterprise data](docs/enterprise-data.md) thêm schema typed có phiên bản, CRUD/quan hệ/archive/audit và published schema API để Studio dựng biểu mẫu; smoke `pnpm test:enterprise-data`. Đây là increment dữ liệu, các nhóm quyền/lifecycle/block/module mở rộng trong roadmap chưa được coi là đã triển khai.
+
+[Entity sharing](docs/entity-sharing.md) bổ sung quyền read/edit cho người hoặc phòng ban cùng đơn vị, thu hồi quyền và lịch sử rút gọn cho người nhận. Thử bằng `pnpm test:entity-sharing` sau khi đồng bộ local identity/directory và rebuild API.
+
+Theo dõi nền backend ở [kế hoạch hoàn thiện](docs/backend-completion-plan.md). [Task lifecycle](docs/task-lifecycle.md) hỗ trợ hàng đợi phòng ban/claim/chuyển/hủy/deadline; [typed query và blocks](docs/entity-query-blocks.md) dùng chung entity repository; [workflow lifecycle](docs/workflow-lifecycle.md) có compound conditions và cancel/transfer đồng thời. [Organization directory](docs/organization-directory.md) bổ sung metadata phân cấp và snapshot có revision; [inbound events](docs/inbound-events.md) tạo workflow theo subscription pinned. [Enterprise modules](docs/enterprise-modules.md) cài schema/workflow atomically và bật/tắt start mới. Các năng lực có smoke tương ứng trong package scripts; UI và adapter vẫn do Hưng/Nhi nối.
+
+Kiểm vận hành bằng [operations](docs/operations.md), local backup/restore rehearsal theo [recovery](docs/recovery.md). Các mục chưa nghiệm thu trong kế hoạch không được coi đã hoàn thành.
+
+[Workflow timers](docs/workflow-timers.md) thực thi bước đã cấu hình bằng danh tính dịch vụ có quyền hiện tại; [entity data tools](docs/entity-data-tools.md) bổ sung tệp theo quyền thực thể, nhập JSON/CSV theo publication pin, xuất dữ liệu có giới hạn và nâng schema explicit. Thử bằng `pnpm test:workflow-timers` và `pnpm test:entity-data-tools`. Các kết quả kiểm thử và mục chưa chốt được ghi ở [verification](docs/verification.md).
 
 Gateway: http://localhost:8080. Keycloak: http://localhost:8081. API và PostgreSQL trong Compose không mở port ra host. Web hiện tại vẫn là giao diện demo riêng, chưa có login SSO hoặc màn hình hồ sơ; xem [hướng dẫn core](docs/core-local.md) để thử API.
 
@@ -82,10 +90,12 @@ Thêm server độc lập vào `apps/`, thư viện tái sử dụng vào `packa
 - Worker trả kết quả xác định, không phân tích bằng AI, không gọi công cụ nghiệp vụ.
 - API demo gọi agent worker đồng bộ bằng HTTP. Workflow nghiệp vụ có trạng thái bền vững và PostgreSQL outbox với retry riêng; chưa có hàng đợi tác vụ agent.
 - API hồ sơ trong core xác minh JWT và quyền read/write, giới hạn theo chủ sở hữu và claim đơn vị `organization_id` đã ký. Token thiếu đơn vị bị từ chối. Bản ghi cũ chưa có đơn vị không tự được gán quyền. `pnpm dev` không tự nạp cấu hình core và endpoint hồ sơ trả 503 nếu thiếu cấu hình identity/database.
-- Task/decision nền có lưu bền và kiểm tra phiên bản; chưa tự đổi trạng thái hồ sơ mua sắm. Tệp 1 MiB lưu PostgreSQL bytea, quét ClamAV trước khi tải; chưa có object storage hoặc quét lại nền. Đọc [hợp đồng nền](docs/phase-one-handoff.md).
+- Task/decision nền có lưu bền và kiểm tra phiên bản. Tệp 1 MiB mặc định lưu PostgreSQL bytea, quét ClamAV trước khi tải; có filesystem provider với chuyển bytes được kiểm SHA256, quyền tải hiện tại và sao lưu ghép database/object. Chưa có remote object provider hoặc quét lại nền. Đọc [hợp đồng nền](docs/phase-one-handoff.md) và [filesystem storage](docs/filesystem-storage.md).
 - Workflow API chạy cả cấu hình builtin trong source và cấu hình custom publish theo đơn vị; run giữ phiên bản bất biến. Các block có thể giao task theo người/phòng ban hoặc dispatch connector, chờ kết quả và áp dụng điều kiện. API draft/publish và bundle đã có; Studio UI, adapter ngoài và bộ dựng biểu mẫu cần tích hợp tiếp.
 - Endpoint demo agent là kiểm tra kết nối cục bộ; không được công bố qua gateway core và chưa có xác thực.
 - Các thẻ ứng dụng/dữ liệu trên giao diện ghi rõ chưa tích hợp; không phải kiểm tra sức khỏe dịch vụ.
+
+Backend đã bổ sung liên kết thực thể–workflow, journal giao dịch, automation bền vững, phép tính kiểu dữ liệu trong workflow, module binding, aggregate chính xác, snapshot kiểm lại quyền và full-text search. Xem [API index](docs/backend-api-index.md) để Studio/adapters nối đúng contract; `pnpm test:enterprise-composition` kiểm luồng xuyên các năng lực bằng PostgreSQL thật. Worker cần bật rõ bằng env, metrics thuộc process và queue diagnostics thuộc tenant. Những năng lực backend này chưa xác nhận UI, broker, n8n hoặc agent đã tích hợp hoàn chỉnh.
 
 ## Giấy phép
 

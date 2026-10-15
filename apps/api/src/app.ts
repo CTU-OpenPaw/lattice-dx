@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { CreateCommandError,parseCreateKey,requireCreateCapability } from './create-command.js';
 import Fastify from 'fastify';
+import {registerTaskLifecycle,type TaskLifecycleOptions} from './tasks/routes.js';
 import { isDemoResult, parseDemoRequest } from '@dx/contracts';
 import { verifyIdentity, type IdentityConfig } from './identity.js';
 import type { RecordRepository } from './records.js';
@@ -14,17 +15,47 @@ import { registerLogistics } from './logistics.js';
 import { isRecordId,parseRecordCreateInput } from '@dx/contracts';
 import { parsePage } from './pagination.js';
 import { registerEntities, type EntityOptions } from './entities/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions) {
-  const app = Fastify({ bodyLimit: 16_384 });
+import { registerEntityDataTools, type EntityDataToolsOptions } from './entities/data-tools-routes.js';
+import {registerReports,type ReportsOptions} from './entities/reports-routes.js';
+import {registerBlocks} from './blocks/routes.js';
+import {registerOrganization,type OrganizationOptions} from './organization/routes.js';
+import {registerOperations,type OperationsOptions} from './operations/routes.js';
+import {correlationId} from './operations/policy.js';
+import {createTelemetry,type StatusClass} from './operations/telemetry.js';
+import {registerWorkflowEvents,type EventOptions} from './events/routes.js';
+import {registerModules,type ModuleOptions} from './modules/routes.js';
+import {registerAutomations,type AutomationOptions} from './automations/routes.js';
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & ReportsOptions & AutomationOptions) {
+  const telemetry=options.telemetry??createTelemetry();
+  const app = Fastify({ bodyLimit: 16_384,genReqId:()=>correlationId() });
+  const templates=new Set(['/v1/operations/metrics','/v1/operations/queues','/v1/operations/diagnostics']);
+  for(const route of templates)telemetry.registerRoute(route);
+  app.addHook('onRoute',route=>{if(!templates.has(route.url)&&templates.size<128){templates.add(route.url);telemetry.registerRoute(route.url);}});
+  const starts=new WeakMap<object,number>();
+  app.addHook('onRequest',async request=>{starts.set(request,performance.now());});
+  app.addHook('onResponse',async(request,reply)=>{
+   const started=starts.get(request);if(started===undefined)return;starts.delete(request);
+   telemetry.recordHttp(request.routeOptions.url??'unmatched',request.method,`${Math.min(5,Math.max(1,Math.floor(reply.statusCode/100)))}xx` as StatusClass,Math.max(0,performance.now()-started));
+  });
+  app.addHook('onSend',async(request,reply)=>{reply.header('X-Request-Id',request.id);});
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
+  registerOperations(app,{...options,telemetry,coreConfigured:!!(options.records&&options.foundation&&options.entities&&options.workflows),coreCapabilities:{records:!!options.records,foundation:!!options.foundation,entities:!!options.entities,workflows:!!options.workflows}});
   registerFoundation(app,options);
+  registerTaskLifecycle(app,options);
   registerActions(app,options);
   registerDirectory(app,options);
+  registerOrganization(app,options);
   registerWorkflows(app,options);
   registerWorkflowDrafts(app,options);
   registerWorkflowBundles(app,options);
+  registerWorkflowEvents(app,options);
+  registerAutomations(app,options);
+  registerModules(app,options);
   registerLogistics(app,options);
   registerEntities(app,options);
+  registerEntityDataTools(app,options);
+  registerReports(app,options);
+  registerBlocks(app,options);
   app.route({
     method: ['GET', 'POST'], url: '/v1/records',
     handler: async (request, reply) => {

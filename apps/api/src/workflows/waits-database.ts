@@ -17,12 +17,12 @@ function fingerprint(value:WorkflowCompletion) {
 async function lockedWait(client:PoolClient,id:string,organizationId?:string) {
   const reference=(await client.query('SELECT run_id,organization_id FROM workflow_waits WHERE id=$1',[id])).rows[0];
   if(!reference || organizationId !== undefined && reference.organization_id !== organizationId) throw new WorkflowError(404,'Không tìm thấy yêu cầu hoàn thành.');
-  const run=(await client.query('SELECT id,state,version FROM workflow_runs WHERE id=$1 FOR UPDATE',[reference.run_id])).rows[0];
+  const run=(await client.query('SELECT id,state,version,status FROM workflow_runs WHERE id=$1 FOR UPDATE',[reference.run_id])).rows[0];
   const wait=(await client.query('SELECT *,deadline<=clock_timestamp() AS expired FROM workflow_waits WHERE id=$1 FOR UPDATE',[id])).rows[0] as StoredWait;
   return {run,wait};
 }
-async function settle(client:PoolClient,run:{id:string;state:string;version:number},wait:StoredWait,status:WorkflowCompletionReceipt['status'],result:Record<string,string>,actorId:string,key?:string,hash?:string,reason?:string) {
-  if(run.version!==wait.version) throw new WorkflowError(409,'Phiên bản yêu cầu không còn phù hợp.');
+async function settle(client:PoolClient,run:{id:string;state:string;version:number;status?:string},wait:StoredWait,status:WorkflowCompletionReceipt['status'],result:Record<string,string>,actorId:string,key?:string,hash?:string,reason?:string) {
+  if(run.status==='cancelled'||run.version!==wait.version) throw new WorkflowError(409,'Phiên bản yêu cầu không còn phù hợp.');
   const state=status==='succeeded'?wait.config.successState:wait.config.failureState;
   const next=(await client.query('UPDATE workflow_runs SET state=$1,version=version+1,data=data||$2::jsonb,updated_at=now() WHERE id=$3 RETURNING version',[state,JSON.stringify(result),run.id])).rows[0];
   const receipt:WorkflowCompletionReceipt={waitId:wait.id,runId:run.id,status,state,version:next.version};
@@ -59,7 +59,7 @@ export function waitDatabase(pool:Pool,get:(id:string,actor:WorkflowActor)=>Prom
           if(wait.completion_actor!==actor.subject || wait.completion_fingerprint!==hash) throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');
           return wait.receipt!;
         }
-        if(wait.status!=='pending' || wait.expired) throw new WorkflowError(409,'Yêu cầu đã kết thúc hoặc hết hạn.');
+        if(run.status==='cancelled' || wait.status!=='pending' || wait.expired) throw new WorkflowError(409,'Yêu cầu đã kết thúc hoặc hết hạn.');
         return settle(client,run,wait,parsed.status,result,actor.subject,key,hash,parsed.reason);
       });
     },
@@ -68,7 +68,7 @@ export function waitDatabase(pool:Pool,get:(id:string,actor:WorkflowActor)=>Prom
       let count=0;
       for(const candidate of candidates) count+=await transaction(pool,async client=>{
         const {run,wait}=await lockedWait(client,candidate.id);
-        if(wait.status!=='pending' || !wait.expired) return 0;
+        if(run.status==='cancelled' || wait.status!=='pending' || !wait.expired) return 0;
         await settle(client,run,wait,'timed_out',{},'workflow:timeout',undefined,undefined,'Workflow wait timed out.');return 1;
       });
       return count;

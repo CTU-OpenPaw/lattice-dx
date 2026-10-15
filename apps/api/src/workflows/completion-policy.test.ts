@@ -44,7 +44,7 @@ test('waiting runs and false guards hide transitions and reject execution',()=>{
   const actor:WorkflowActor={subject:'a',organizationId:'org',roles:['employee']};
   const run:WorkflowRun={id:'r',recordId:'r',definitionId:definition.id,definitionVersion:1,title:'t',ownerId:'a',organizationId:'org',state:'ready',version:2,data:{count:'3'},createdAt:'',updatedAt:''};
   expect(availableTransitions(definition,run,actor).map(t=>t.id)).toEqual(['finish']);
-  const variants:WorkflowRun[]=[{...run,waiting:true},{...run,data:{count:'3e2'}},{...run,data:{}}];
+  const variants:WorkflowRun[]=[{...run,status:'cancelled'},{...run,waiting:true},{...run,data:{count:'3e2'}},{...run,data:{}}];
   for(const variant of variants) {
     expect(availableTransitions(definition,variant,actor)).toEqual([]);
     expect(()=>planTransition(definition,variant,actor,{action:'finish',expectedVersion:2,input:{}})).toThrow();

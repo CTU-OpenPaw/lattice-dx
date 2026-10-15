@@ -29,6 +29,21 @@ test('list and inbox include all tenant publication versions and resolve reader/
   expect(call[1]).toEqual(expect.arrayContaining([['hr-request:1','hr-request:2'],1,2,'draft','review']));
 });
 
+test('internal pinned start uses the supplied client without a nested transaction or pool query',async()=>{
+ const client={query:vi.fn(async(sql:string)=>({rows:sql.startsWith('INSERT INTO workflow_runs')?[{...run,definitionVersion:3}]:[],rowCount:0})),release:vi.fn()};
+ const pool={query:vi.fn(async()=>({rows:[],rowCount:0})),connect:vi.fn()} as unknown as Pool;
+ const get=vi.fn(async()=>({...def,version:3}));
+ const repo=await workflowDatabase(pool,{get,list:async()=>[def]});
+ vi.mocked(pool.query).mockClear();
+ expect(repo.createWithClient).toBeTypeOf('function');
+ const created=await repo.createWithClient!(client as never,{definitionId:def.id,definitionVersion:3,title:run.title,input:run.data},actor,'event-start');
+ expect(created.definitionVersion).toBe(3);
+ expect(get).toHaveBeenCalledWith('org-a',def.id,3,client);
+ expect(pool.connect).not.toHaveBeenCalled();
+ expect(pool.query).not.toHaveBeenCalled();
+ expect(client.query.mock.calls.some(([sql])=>['BEGIN','COMMIT','ROLLBACK'].includes(sql))).toBe(false);
+});
+
 test('batch validates before connecting and rolls back a late collision on its single client',async()=>{
  const {definitionDatabase}=await import('./registry-database.js');
  const query=vi.fn(async(sql:string,values?:unknown[])=>{
@@ -48,4 +63,24 @@ test('batch validates before connecting and rolls back a late collision on its s
  query.mockClear();
  expect((await registry.createMany([{...draft,id:'b-new'},{...draft,id:'a-new'}],actor)).map(d=>d.id)).toEqual(['b-new','a-new']);
  expect(query.mock.calls.at(-1)?.[0]).toBe('COMMIT');
+});
+
+test('same-client transition keeps current read authorization before replay and refuses public service mode',async()=>{
+ const receipt={...run,version:2,state:'done'};
+ const command={action:'submit',expectedVersion:1,input:{}};
+ const fingerprint=createHash('sha256').update(JSON.stringify(command)).digest('hex');
+ const query=vi.fn(async(sql:string)=>({rows:sql.includes('FROM workflow_runs')?[run]:sql.startsWith('SELECT actor_id')?[{actor_id:actor.subject,fingerprint,result:receipt}]:[],rowCount:0}));
+ const client={query} as never;
+ const pool={query:vi.fn(async()=>({rows:[],rowCount:0})),connect:vi.fn()} as unknown as Pool;
+ let current=def;
+ const get=vi.fn(async()=>current);
+ const repo=await workflowDatabase(pool,{get,list:async()=>[def]});
+ vi.mocked(pool.query).mockClear();
+ expect(await repo.transitionWithClient!(client,run.id,command,actor,'receipt')).toEqual(receipt);
+ expect(get).toHaveBeenCalledWith(actor.organizationId,def.id,def.version,client);
+ expect(pool.query).not.toHaveBeenCalled();expect(pool.connect).not.toHaveBeenCalled();
+ current={...def,transitions:[{...def.transitions[0],execution:'service'}]};
+ await expect(repo.transitionWithClient!(client,run.id,command,actor,'receipt')).rejects.toMatchObject({statusCode:403});
+ current={...def,readerRoles:[]};
+ await expect(repo.transitionWithClient!(client,run.id,command,{...actor,subject:'other'},'receipt')).rejects.toMatchObject({statusCode:404});
 });

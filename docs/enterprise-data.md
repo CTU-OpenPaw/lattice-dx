@@ -51,12 +51,12 @@ Người dùng có data:read gọi `GET /v1/entity-schemas/:id/versions/:version
 
 ## API thực thể
 
-JWT có signed organization và data:read/data:write theo thao tác. Đọc/ghi thực thể chỉ **đúng owner và đơn vị**; chưa có org-wide read, department sharing hay manager bypass. Những năng lực đó thuộc nhóm quyền tiếp theo.
+JWT có signed organization và data:read/data:write theo thao tác. Thực thể mặc định chỉ owner trong đúng đơn vị truy cập được. Owner có data:share có thể cấp quyền read/edit cho người hoặc phòng ban cùng đơn vị; xem [chia sẻ và thu hồi quyền](entity-sharing.md). Không có org-wide read hoặc manager bypass.
 
 | API | Quyền | Body |
 | --- | --- | --- |
 | POST `/v1/entities` | data:write | `{schemaId,title,attributes}` |
-| GET `/v1/entities?schemaId=…&q=…&limit=50&offset=0` | data:read | Active owner-scoped entities, paging/filter trong SQL |
+| GET `/v1/entities?schemaId=…&q=…&limit=50&offset=0` | data:read | Active entities có quyền đọc, paging/filter quyền trong SQL |
 | GET `/v1/entities/:id` | data:read | Detail, gồm archivedAt nếu đã archive |
 | PATCH `/v1/entities/:id` | data:write | `{expectedVersion,title,attributes}` |
 | POST `/v1/entities/:id/archive` | data:write | `{expectedVersion}` |
@@ -65,13 +65,13 @@ JWT có signed organization và data:read/data:write theo thao tác. Đọc/ghi 
 | GET `/v1/entities/:id/relations?limit=50&offset=0` | data:read | `{items,page}` readable relations |
 | GET `/v1/entities/:id/history?limit=50&offset=0` | data:read | `{items,page}` audit |
 
-Các mutation thực thể **bắt buộc Idempotency-Key**, do đây là API mới; không thay optional key của record/task nền cũ. Samekey/same normalized command trả snapshot cũ sau khi kiểm tra quyền sở hữu hiện tại, kể cả nếu entity sau đó đã archive; samekey/differentcommand409. Entity update hoàn toàn thay thế title/attributes, không phải merge từng field; attributes theo schemaVersion của entity, không theo latestschema.
+Các mutation thực thể **bắt buộc Idempotency-Key**, do đây là API mới; không thay optional key của record/task nền cũ. Samekey/same normalized command trả snapshot cũ sau khi kiểm tra quyền hiện tại tương ứng thao tác, kể cả nếu entity sau đó đã archive; samekey/differentcommand409. Entity update hoàn toàn thay thế title/attributes, không phải merge từng field; attributes theo schemaVersion của entity, không theo latestschema.
 
 Optimistic expectedVersion tránh ghi đè thay đổi người khác. Entity/result/audit/receipt được lưu atomic; SQL locks và command scopes tenant/actor ngăn quyết định đồng thời gây lệch dữ liệu. Decimalstrings giữ precision, thứ tự JSON keys không tạo fingerprint khác.
 
 ## Quan hệ và archive
 
-Quan hệ có tên trong schema nguồn và targetSchemaId. Cả hai thực thể phải hiện hữu, đúng owner/đơn vị và target thuộc đúng schema; source phải active. Link mới yêu cầu target active; unlink được phép xóa quan hệ tới target đã archive để không giữ liên kết dở dang. Relation ban đầu many-to-many theo set membership; chưa có cardinality1/uniqueness/reverse auto/graph inference. Engine khóa source/target theo thứ tựUUID thống nhất.
+Quan hệ có tên trong schema nguồn và targetSchemaId. Cả hai thực thể phải hiện hữu trong cùng đơn vị; người gọi cần quyền edit nguồn và read target, target thuộc đúng schema; source phải active. Link mới yêu cầu target active; unlink được phép xóa quan hệ tới target đã archive để không giữ liên kết dở dang. Quan hệ không tự lan truyền quyền truy cập. Relation ban đầu many-to-many theo set membership; chưa có cardinality1/uniqueness/reverse auto/graph inference. Engine khóa source/target theo thứ tựUUID thống nhất.
 
 Link đã tồn tại hoặc unlink link không tồn tại với **key mới và expectedVersion hiện tại** là no-op: source version không tăng và không ghi audit mutation mới. Key vẫn lưu snapshot kết quả để retry. Nếu expectedVersion sai vẫn409.
 

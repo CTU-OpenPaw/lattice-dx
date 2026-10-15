@@ -1,27 +1,43 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createApi } from './app.js';
-import { createRemoteJWKSet } from 'jose';
-import { connectRecords } from './database.js';
-import { scanWithClamd } from './scanner.js';
-import { sendHttpEvent, startOutboxWorker } from './workflows/outbox.js';
-import { startWaitTimeoutWorker } from './workflows/timeouts.js';
-const database = process.env.DATABASE_URL ? await connectRecords(process.env.DATABASE_URL) : undefined;
-const identity = process.env.OIDC_ISSUER && process.env.OIDC_JWKS_URL ? {
-  issuer: process.env.OIDC_ISSUER,
-  audience: process.env.OIDC_AUDIENCE ?? 'dx-api',
-  key: createRemoteJWKSet(new URL(process.env.OIDC_JWKS_URL)),
-} : undefined;
-const app = createApi({ workerUrl: process.env.WORKER_URL ?? 'http://127.0.0.1:4001', identity, records: database?.repository,foundation:database?.foundation,
-  entities:database?.entities,
-  definitionRegistry:database?.definitionRegistry,directory:database?.directory,workflows:database?.workflows,readSharedFile:database?.workflows.readSharedFile,
-  scan:process.env.CLAMD_HOST ? content=>scanWithClamd(content,process.env.CLAMD_HOST!,Number(process.env.CLAMD_PORT??3310)):undefined });
-const eventUrl=process.env.WORKFLOW_EVENT_URL,eventToken=process.env.WORKFLOW_EVENT_TOKEN;
-if(eventUrl&&(!eventToken||!['http:','https:'].includes(new URL(eventUrl).protocol)))throw new Error('Workflow connector URL/token configuration invalid.');
-const outbox=database&&eventUrl&&eventToken?startOutboxWorker(database.jobs,job=>sendHttpEvent(job,eventUrl,eventToken)):undefined;
-const waitTimeouts=database && process.env.WORKFLOW_WAIT_TIMEOUT_WORKER !== 'false' ? startWaitTimeoutWorker(database.workflows) : undefined;
-if (database) app.addHook('onClose', async () => {await outbox?.stop();await waitTimeouts?.stop();await database.close();});
-await app.listen({ host: process.env.API_HOST ?? '127.0.0.1', port: Number(process.env.API_PORT ?? 4000) });
-console.log(`API listening on port ${process.env.API_PORT ?? 4000}`);
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(signal, () => { void app.close().then(() => process.exit(0)); });
+import {createApi} from './app.js';
+import {createRemoteJWKSet} from 'jose';
+import {connectRecords} from './database.js';
+import {scanWithClamd} from './scanner.js';
+import {sendHttpEvent,startOutboxWorker} from './workflows/outbox.js';
+import {startWorkflowTimerWorker} from './workflows/timer-worker.js';
+import {startWaitTimeoutWorker} from './workflows/timeouts.js';
+import {startAutomationWorker} from './automations/worker.js';
+import {createFilesystemStore} from './files/filesystem-store.js';
+import {startFileStorageWorker} from './files/storage-worker.js';
+import {bootstrapRuntime,startConfiguredWorkers} from './operations/runtime-lifecycle.js';
+import {createTelemetry,type WorkerId,type WorkerObserver} from './operations/telemetry.js';
+
+const telemetry=createTelemetry();
+const observer=(worker:WorkerId):WorkerObserver=>(result,duration)=>telemetry.recordWorker(worker,result,duration);
+
+const runtime=await bootstrapRuntime(process.env,{
+ createStore:createFilesystemStore,connect:connectRecords,
+ createApp:(config,database)=>{
+  const identity=config.identity?{issuer:config.identity.issuer,audience:config.identity.audience,key:createRemoteJWKSet(new URL(config.identity.jwksUrl))}:undefined;
+  return createApi({workerUrl:config.workerUrl,identity,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
+   entities:database?.entities,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
+   definitionRegistry:database?.definitionRegistry,directory:database?.directory,workflows:database?.workflows,readSharedFile:database?.workflows.readSharedFile,
+   scan:config.scanner?content=>scanWithClamd(content,config.scanner!.host,config.scanner!.port):undefined});
+ },
+ startWorkers:(config,database,add)=>{
+  if(!database)return;
+  startConfiguredWorkers(config,{
+   automations:()=>startAutomationWorker(database.automations,1000,observer('automations')),timers:()=>startWorkflowTimerWorker(database.workflows,1000,observer('timers')),
+   waitTimeouts:()=>startWaitTimeoutWorker(database.workflows,1000,observer('waitTimeouts')),
+   outbox:()=>startOutboxWorker(database.jobs,job=>sendHttpEvent(job,config.connector!.url,config.connector!.token),1000,observer('outbox')),
+   fileStorage:()=>startFileStorageWorker(()=>database.offloadFile(),1000,undefined,observer('fileStorage')),
+  },add);
+ },
+});
+console.log(`API listening on port ${runtime.config.port}`);
+let signalClose:Promise<void>|undefined;
+for(const signal of ['SIGINT','SIGTERM'] as const){
+ process.on(signal,()=>{
+  signalClose??=runtime.close().then(()=>{process.exitCode=0;},()=>{console.error('Runtime shutdown failed');process.exitCode=1;});
+ });
 }
