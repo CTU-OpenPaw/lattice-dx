@@ -9,6 +9,7 @@ import { definitionDatabase } from './workflows/registry-database.js';
 import { workflowDatabase } from './workflows/database.js';
 import { workflowJobDatabase } from './workflows/job-database.js';
 import { entityDatabase } from './entities/database.js';
+import { ngsiLdDatabase } from './ngsi-ld/database.js';
 export async function connectRecords(connectionString: string) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
@@ -18,7 +19,8 @@ export async function connectRecords(connectionString: string) {
     const definitionRegistry=await definitionDatabase(pool);
     const workflows=await workflowDatabase(pool,definitionRegistry);
     const entities=await entityDatabase(pool);
-    return {repository,foundation,directory,workflows,definitionRegistry,entities,jobs:workflowJobDatabase(pool),close:()=>pool.end()};
+    const ngsiLdContext=await ngsiLdDatabase(pool);
+    return {repository,foundation,directory,workflows,definitionRegistry,entities,ngsiLdContext,jobs:workflowJobDatabase(pool),close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }
 export async function recordDatabase(pool:Pool):Promise<RecordRepository> {
@@ -65,3 +67,4 @@ export async function recordDatabase(pool:Pool):Promise<RecordRepository> {
   };
   return repository;
 }
+

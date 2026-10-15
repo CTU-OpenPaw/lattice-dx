@@ -1,5 +1,13 @@
 # Tích hợp NGSI-LD và n8n
 
+## Mục 5 — Asset subscription receiver
+
+Đã bổ sung receiver backend, lưu bản chiếu Asset.status vào PostgreSQL và script đăng ký/kiểm chứng subscription.
+Xem [hướng dẫn subscription](ngsi-ld-subscription.md) để cấu hình credential riêng và chạy Docker local.
+
+Trạng thái: **đã triển khai code; chưa ghi nhận kiểm chứng broker → gateway → backend → PostgreSQL trên máy local**.
+Không đánh dấu hoàn thành mục 5 trước khi smoke test thực tế pass.
+
 ## Phạm vi
 
 Broker lưu trạng thái và ngữ cảnh dùng chung.
@@ -96,3 +104,4 @@ Không mặc định business ID, ID bản ghi backend và workflow run ID là m
 - Contract hiện là đề xuất tích hợp, chờ nhóm review.
 
 Chi tiết: [Data contract](docs/ngsi-ld-data-contract.md) và [nhật ký tích hợp](docs/integration-ngsi-ld-n8n.md).
+

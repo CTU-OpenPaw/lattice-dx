@@ -14,7 +14,9 @@ import { registerLogistics } from './logistics.js';
 import { isRecordId,parseRecordCreateInput } from '@dx/contracts';
 import { parsePage } from './pagination.js';
 import { registerEntities, type EntityOptions } from './entities/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions) {
+import { registerNgsiLd } from './ngsi-ld/routes.js';
+import type { NgsiLdOptions } from './ngsi-ld/types.js';
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & NgsiLdOptions) {
   const app = Fastify({ bodyLimit: 16_384 });
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
   registerFoundation(app,options);
@@ -25,6 +27,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerWorkflowBundles(app,options);
   registerLogistics(app,options);
   registerEntities(app,options);
+  registerNgsiLd(app,options);
   app.route({
     method: ['GET', 'POST'], url: '/v1/records',
     handler: async (request, reply) => {
@@ -78,3 +81,4 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   });
   return app;
 }
+
