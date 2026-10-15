@@ -13,7 +13,7 @@ docker --context desktop-linux compose -f infra/compose/nocobase.yml start nocob
 pnpm workspace:install
 ```
 
-`start` resumes existing containers; on a fresh checkout use the documented Compose setup first. The installer requires a running NocoBase database, the Docker `desktop-linux` context, and Node dependencies already installed. It builds the two team plugins, writes an exclusive custom-format database dump and SHA-256 metadata in ignored `output/backups`, recreates only the NocoBase service with existing volumes, packs the mounted plugins offline, runs official `pm add`/`pm enable`, then verifies registry entries, versions and HTTP health. Failure to produce a valid backup prevents service recreation. It does not reset databases, volumes, accounts or native page schemas.
+`start` resumes existing containers; on a fresh checkout use the documented Compose setup first. The installer requires a running NocoBase database, the Docker `desktop-linux` context, and Node dependencies already installed. It writes an exclusive custom-format database dump and SHA-256 metadata in ignored `output/backups`, builds the two team plugins, recreates only the NocoBase service with existing volumes, packs the mounted plugins offline, runs official `pm add`/`pm enable`, then verifies registry entries, versions and HTTP health. Failure to produce a valid backup prevents both plugin builds and service recreation. Run installation during a maintenance window: builds update live bind-mounted plugin artifacts. It does not reset databases, volumes, accounts or native page schemas.
 
 Mounting source is insufficient: `pm enable` can exit successfully without a registered package. The registry check prevents reporting that case as successful. The backup covers **only the NocoBase database**; it does not include storage files or engine data, and no restore rehearsal was performed in this checkpoint. It is not a full recovery solution.
 
@@ -30,9 +30,11 @@ Before the later Docker restart, the supported browser tool verified:
 - The application directory exposed purchasing and Logistics. Unsupported report/AI/settings and unimplemented work views remained disabled.
 - Sales created Logistics order `b95726a1-0910-4694-b54a-ac250ea2fe65`, then submitted it at version 2 with linked warehouse task `3729fe1a-3ffb-4781-9123-5c83fc5a44b7`.
 
-Warehouse sign-in was interrupted by an expired callback. On resumption, the browser tool denied access to the existing tab; no workaround was attempted. Consequently **warehouse receive through UI and browser verification after the automated reinstall remain pending**. API acceptance below is separate evidence and does not substitute for that UI check. No mobile, arbitrary Studio construction or full end-to-end broker/agent assertion is made.
+The initial warehouse sign-in was interrupted by an expired callback and a browser-tool access denial. A subsequent fresh connection from Workspace succeeded after reinstall: warehouse opened the submitted order above, entered a receive note, and clicked **Nhận việc kho**. The order reached **received/version 3**, its linked task reached **completed/version 2**, and the create/submit/receive history persisted after a full browser reload and reopening the task. This closes the two previously pending UI checks. No mobile, arbitrary Studio construction or full end-to-end broker/agent assertion is made.
 
-Local screenshots/fixture IDs are retained under ignored `output/workspace-runtime-*`. The rejected-workflow screenshot is `output/workspace-runtime-rejected.png`. Two submitted workflows with prefix `UI Acceptance b6dbdb1a` remain available for manual permission/approval checks. The Logistics order above remains submitted for a warehouse UI check.
+A remaining UI issue is visible for warehouse: the sales-only creation panel shows an authorization error, including a page-level banner, while authorized order/task operations still work. It should eventually be hidden or clearly scoped by capability. No permission was broadened to suppress that message.
+
+Local screenshots/fixture IDs are retained under ignored `output/workspace-runtime-*`. The rejected-workflow screenshot is `output/workspace-runtime-rejected.png`. Two submitted workflows with prefix `UI Acceptance b6dbdb1a` remain available for manual permission/approval checks. The Logistics order above is now received. Screenshots `output/workspace-runtime-received.png` and `output/workspace-runtime-received-detail.png` record the completed task and received order after reload.
 
 ## Verification after reinstall
 
@@ -50,4 +52,6 @@ The Logistics API smoke retained order `a9a803b8-c86e-4a7b-8c19-ff1cc3e46b76` an
 
 ## Remaining work
 
-Finish the pending warehouse browser check and post-install browser reconnect when browser access is available. Keep unimplemented work views disabled until their query contracts are agreed. Nhi's integration branch remains independently owned and is not part of this acceptance. No Notion completion boxes were changed and no release was created.
+The warehouse browser check and post-install reconnect passed on the follow-up. Keep unimplemented work views disabled until their query contracts are agreed. Nhi's integration branch remains independently owned and is not part of this acceptance. No Notion completion boxes were changed and no release was created.
+
+Final installer review found builds ran before backup despite live mounts. Backup and exclusive metadata now precede builds; the regression failed before the fix and passed after it. Independent follow-up review found no remaining P1/P2. Final `pnpm check` remained 536/96 with typecheck/build passing. The live installer evidence above predates this ordering correction; its new ordering was verified by the focused test rather than another runtime recreation.

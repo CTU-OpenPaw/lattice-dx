@@ -57,7 +57,6 @@ export async function installWorkspace({ run = defaultRun, backupDir = resolve(r
     const metadata = JSON.parse(await readFile(resolve(root, source, 'package.json'), 'utf8'));
     if (metadata.name !== pkg.name || !/^\d+\.\d+\.\d+$/.test(metadata.version)) throw new Error('Unexpected source package metadata');
     local.push({ ...pkg, version: metadata.version });
-    await command(process.execPath, [`${source}/${pkg.build}`], 120000);
   }
   const id = randomUUID();
   let dump;
@@ -68,6 +67,10 @@ export async function installWorkspace({ run = defaultRun, backupDir = resolve(r
   const backupPath = resolve(backupDir, `nocobase-before-workspace-${id}.dump`);
   await writeFile(backupPath, dump, { flag: 'wx', mode: 0o600 });
   await writeFile(backupPath + '.json', JSON.stringify({ size: dump.length, sha256: createHash('sha256').update(dump).digest('hex'), scope: 'NocoBase database only', restoreRehearsed: false, createdAt: new Date().toISOString() }, null, 2), { flag: 'wx', mode: 0o600 });
+  // These directories are live bind mounts, so build only after backup succeeds.
+  for (const pkg of local) {
+    await command(process.execPath, [`plugins/nocobase/${pkg.directory}/${pkg.build}`], 120000);
+  }
   await docker(['up', '-d', '--no-deps', '--force-recreate', 'nocobase']);
   const waitHealthy = async () => {
     const deadline = Date.now() + 60000;

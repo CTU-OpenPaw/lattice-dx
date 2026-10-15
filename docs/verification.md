@@ -2,7 +2,7 @@
 
 ## Merged Workspace runtime — 15 October
 
-Foundation 0.11.0 and Action Bridge 0.1.0 installed and verified on NocoBase 2.2.20 with a database-only backup before recreation. `pnpm check`: 536 tests/96 files, typecheck/build passed; 42 plugin Node tests passed. Signed team-integration, actual PKCE bridge and Logistics API acceptance passed. Browser procurement/onboarding approve/reject and no-approval account checks passed before restart; warehouse receive through UI and post-reinstall browser verification remain pending because browser access was denied. See [runtime evidence and startup runbook](workspace-runtime-acceptance.md). Nhi's integration work was not deployed or modified.
+Foundation 0.11.0 and Action Bridge 0.1.0 installed and verified on NocoBase 2.2.20 with a database-only backup before recreation. `pnpm check`: 536 tests/96 files, typecheck/build passed; 42 plugin Node tests passed. Signed team-integration, actual PKCE bridge and Logistics API acceptance passed. Browser procurement/onboarding approve/reject and no-approval account checks passed before restart; the follow-up fresh PKCE connection, warehouse UI receive (order received/v3, linked task completed/v2) and reload persistence passed. The sales-only create panel still displays a warehouse authorization banner; permissions remain unchanged. See [runtime evidence and startup runbook](workspace-runtime-acceptance.md). Nhi's integration work was not deployed or modified.
 
 ## Team integration readiness — 15 October
 

@@ -39,6 +39,7 @@ describe('workspace installer', () => {
     const f = await fixture({ backupFailure: true });
     await expect(f.invoke()).rejects.toThrow('Database backup failed; runtime unchanged');
     expect(f.calls.at(-1)?.args).toContain('pg_dump');
+    expect(f.calls.some(c => c.file !== 'docker')).toBe(false);
   });
   it('requires installed package versions to match source', async () => {
     const f = await fixture({ mismatch: true });
