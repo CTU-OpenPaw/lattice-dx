@@ -20,6 +20,7 @@ async function main() {
     });
   }
   const readPath = `/context?entityId=${encodeURIComponent(entityId)}`;
+  console.log(`Demo Asset for this run: ${entityId}`);
   async function snapshot() {
     const response = await api('GET', readPath);
     assert.equal(response.status, 200, 'Context read-back must return 200');
@@ -27,14 +28,19 @@ async function main() {
   }
   async function waitFor(status, observedAt) {
     const deadline = Date.now() + 20_000;
+    let lastRead = { http: null };
     while (Date.now() < deadline) {
       const response = await api('GET', readPath);
+      lastRead = { http: response.status };
       if (response.status === 200) {
         const value = await response.json();
+        lastRead = { http: response.status, status: value.status, observedAt: value.observedAt };
         if (value.status === status && value.observedAt === observedAt) return value;
       } else assert.equal(response.status, 404, 'Receiver must be configured and reachable');
       await delay(500);
     }
+    console.error('Expected context:', JSON.stringify({ status, observedAt }));
+    console.error('Last context read:', JSON.stringify(lastRead));
     throw new Error('Timed out waiting for actual broker notification. Inspect API logs and subscription notification counters locally; do not share token-bearing subscription responses.');
   }
   await registerSubscription(config);

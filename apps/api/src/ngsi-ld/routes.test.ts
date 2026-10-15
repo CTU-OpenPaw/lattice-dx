@@ -33,7 +33,7 @@ const url = '/v1/integrations/ngsi-ld/notifications';
 test('source credentials and tenant are checked before JSON parsing or storage', async () => {
   const { app, writes } = setup();
   try {
-    for (const h of [{}, { ...headers, 'x-lattice-broker-token': 'wrong' }, { ...headers, 'ngsild-tenant': 'org-b' }]) {
+    for (const h of [{}, { ...headers, 'x-lattice-broker-token': 'wrong' }, { ...headers, 'ngsild-tenant': 'org-b' }, { ...headers, 'ngsild-tenant': 'org-a, org-a' }]) {
       expect((await app.inject({ method: 'POST', url, headers: { ...h, 'content-type': 'application/json' }, payload: 'invalid-json' })).statusCode).toBe(403);
     }
     expect(writes()).toBe(0);

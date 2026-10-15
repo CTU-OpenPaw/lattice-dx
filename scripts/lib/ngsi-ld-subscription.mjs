@@ -28,7 +28,9 @@ export async function registerSubscription(config) {
     watchedAttributes: ['status'],
     notification: { attributes: ['businessId', 'organizationId', 'status'], format: 'normalized', endpoint: {
       uri: config.receiverUrl, accept: 'application/json',
-      receiverInfo: [{ key: 'X-Lattice-Broker-Token', value: config.token }, { key: 'NGSILD-Tenant', value: config.tenant }],
+      // Orion-LD forwards the source tenant automatically. Adding it again here can
+      // produce duplicate headers ("org-a, org-a") rejected by the strict receiver.
+      receiverInfo: [{ key: 'X-Lattice-Broker-Token', value: config.token }],
     } },
     isActive: true, '@context': config.context,
   };

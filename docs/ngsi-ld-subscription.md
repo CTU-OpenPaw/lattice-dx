@@ -21,7 +21,9 @@ Do not mark checklist 5 complete until that script passes.
 - `NGSILD-Tenant` must equal the configured tenant, default `org-a`.
 - `subscriptionId` must equal the explicitly configured subscription ID.
 - Every Asset URN, businessId and organizationId must agree with that tenant.
-- Subscription `receiverInfo` explicitly configures both outgoing HTTP headers.
+- Subscription `receiverInfo` configures only the dedicated token header. Orion-LD forwards
+  `NGSILD-Tenant` from the tenant-scoped broker operation automatically; do not add a second copy
+  in receiverInfo. The API continues to require exactly the configured tenant value.
 - The token authenticates possession of a shared secret, not the broker process itself.
   A claimed subscription ID, IP or JSON field alone is not source authentication.
 - Missing receiver config/storage returns 503; missing/wrong token, header tenant or subscription returns 403.
