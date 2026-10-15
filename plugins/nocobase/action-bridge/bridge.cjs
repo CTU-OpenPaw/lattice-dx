@@ -91,15 +91,19 @@ function createBridge(config, dependencies = {}) {
       await catalogForToken(token.access_token);
       const info = await request(config.userinfoUrl, { headers: { authorization: `Bearer ${token.access_token}` } }, 'Keycloak identity request failed.');
       if (!info || typeof info.sub !== 'string' || !info.sub) throw new BridgeError(502, 'Invalid Keycloak identity.');
+      // Display hints only: catalogForToken above verifies this exact token at the API.
+      // Every subsequent directory request is still authorized by the API.
+      let directoryRead=false,organizationId;
+      try{const claims=JSON.parse(Buffer.from(token.access_token.split('.')[1],'base64url').toString('utf8'));if(claims.sub===info.sub){directoryRead=Array.isArray(claims.realm_access?.roles)&&claims.realm_access.roles.includes('directory:read');if(typeof claims.organization_id==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(claims.organization_id))organizationId=claims.organization_id;}}catch{}
       if (exchange.cancelled) throw new BridgeError(401, 'Authorization connection was cancelled.');
-      store(sessions, browserId, { userId: item.userId, token: token.access_token, identity: { subject: info.sub, username: typeof info.preferred_username === 'string' ? info.preferred_username : info.sub }, expiresAt: now() + Math.min(token.expires_in, 300) * 1000 });
+      store(sessions, browserId, { userId: item.userId, token: token.access_token, capabilities:{directoryRead}, identity: { subject: info.sub, username: typeof info.preferred_username === 'string' ? info.preferred_username : info.sub,...(organizationId?{organizationId}:{}) }, expiresAt: now() + Math.min(token.expires_in, 300) * 1000 });
       return { connected: true };
       } finally { exchanges.delete(browserId); }
     },
     status(userId, browserId) {
       clean();
       const item = sessions.get(browserId);
-      return item?.userId === userId ? { connected: true, identity: item.identity, expiresAt: new Date(item.expiresAt).toISOString() } : { connected: false };
+      return item?.userId === userId ? { connected: true, identity: item.identity,capabilities:item.capabilities, expiresAt: new Date(item.expiresAt).toISOString() } : { connected: false };
     },
     async catalog(userId, browserId) { return catalogForToken(session(userId, browserId).token); },
     async logistics(userId, browserId, input) {
@@ -121,7 +125,7 @@ function createBridge(config, dependencies = {}) {
     },
     async workflow(userId, browserId, input) {
       const item=session(userId,browserId);
-      const operations={definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST',''],waits:['GET',''],executions:['GET',''],completeWait:['POST',''],retrySync:['POST','']};
+      const operations={definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],people:['GET','directory/people'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST',''],waits:['GET',''],executions:['GET',''],completeWait:['POST',''],retrySync:['POST','']};
       if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid workflow operation.');
       const [method,resource]=operations[input.operation];let path=resource;
       if(['detail','history','sync','transition','waits','executions','completeWait','retrySync'].includes(input.operation)){
@@ -131,8 +135,8 @@ function createBridge(config, dependencies = {}) {
       const write=['create','transition','completeWait','retrySync'].includes(input.operation);
       if(write){if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!input.body||typeof input.body!=='object'||Array.isArray(input.body))throw new BridgeError(400,'Workflow command requires body and idempotency key.');}
       else if(input.key!==undefined||input.body!==undefined)throw new BridgeError(400,'Unexpected workflow command payload.');
-      if(input.query!==undefined&&!['list','inbox','waits','executions'].includes(input.operation))throw new BridgeError(400,'Unexpected query.');
-      const query=validatedQuery(input.query,['waits','executions'].includes(input.operation)?['limit','offset']:['limit','offset','q','state','definitionId']);
+      if(input.query!==undefined&&!['list','inbox','waits','executions','people'].includes(input.operation))throw new BridgeError(400,'Unexpected query.');
+      const query=validatedQuery(input.query,input.operation==='people'?['limit','offset','q','role','department']:['waits','executions'].includes(input.operation)?['limit','offset']:['limit','offset','q','state','definitionId']);
       if(query)path+=(path.includes('?')?'&':'?')+query;
       const headers={authorization:`Bearer ${item.token}`,...(method==='POST'?{'content-type':'application/json'}:{}),...(write?{'idempotency-key':input.key}:{})};
       return request(`${config.gatewayUrl}/v1/${path}`,{method,headers,...(method==='POST'?{body:JSON.stringify(write?input.body:{})}:{})},'Workflow request failed; reload or retry only the same command key.',true);

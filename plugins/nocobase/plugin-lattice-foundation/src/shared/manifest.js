@@ -109,8 +109,17 @@ function validateManifest(value, contracts=defaultContracts) {
     if (!collections.has(t.collection) || !label(t.from) || !label(t.to) || typeof t.permission !== 'string' || !roles.test(t.permission)) error(path, 'invalid transition');
     if (t.availability !== 'unavailable' || !label(t.reason)) error(path, 'business transition API is not implemented; reason required');
   });
-  if(value.workspace!==undefined&&keys(value.workspace,['panels','blocks','note','showTransitions'],'workspace')) {
+  if(value.workspace!==undefined&&keys(value.workspace,['panels','blocks','note','showTransitions','home','shortcut'],'workspace')) {
     const layout=value.workspace;
+    if(layout.home!==undefined&&typeof layout.home!=='boolean')error('workspace.home','boolean required');
+    if(layout.shortcut!==undefined&&keys(layout.shortcut,['hidden','description','icon','createBlockId','createLabel'],'workspace.shortcut')){
+      const shortcut=layout.shortcut;
+      if(shortcut.hidden!==undefined&&typeof shortcut.hidden!=='boolean')error('workspace.shortcut.hidden','boolean required');
+      if(shortcut.description!==undefined&&!label(shortcut.description))error('workspace.shortcut.description','plain text required');
+      if(shortcut.icon!==undefined&&!['apps','cart','truck','wallet','inbox'].includes(shortcut.icon))error('workspace.shortcut.icon','registered icon required');
+      if(shortcut.createBlockId!==undefined&&(!Array.isArray(value.blocks)||!value.blocks.some(b=>b?.id===shortcut.createBlockId&&b.type==='form')))error('workspace.shortcut.createBlockId','configured Form block required');
+      if(shortcut.createLabel!==undefined&&!label(shortcut.createLabel))error('workspace.shortcut.createLabel','plain text required');
+    }
     if(layout.note!==undefined&&(typeof layout.note!=='string'||layout.note.length>2000))error('workspace.note','text required, max 2000');
     if(layout.showTransitions!==undefined&&typeof layout.showTransitions!=='boolean')error('workspace.showTransitions','boolean required');
     const panelIds=new Set();

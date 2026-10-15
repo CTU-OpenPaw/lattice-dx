@@ -39,6 +39,12 @@ test('manifest validates workflow block scope and rejects executable/foreign con
   const foreign=structuredClone(manifest);foreign.collections[0].resource='records';assert.ok(validateManifest(foreign).some(e=>e.includes('workflows')));
   const unsafe=structuredClone(manifest);unsafe.blocks[1].actionLabels={approve:{url:'https://other'}};assert.ok(validateManifest(unsafe).length);
 });
+test('Workspace shortcuts reference installed forms, never arbitrary URLs',()=>{
+  const purchasing=structuredClone(require('../src/shared/manifests/purchasing.json'));assert.deepEqual(validateManifest(purchasing),[]);
+  purchasing.workspace.shortcut.url='https://other';assert.ok(validateManifest(purchasing).some(e=>e.includes('unknown property')));delete purchasing.workspace.shortcut.url;
+  purchasing.workspace.shortcut.createBlockId='request-list';assert.ok(validateManifest(purchasing).some(e=>e.includes('Form block')));
+  purchasing.blocks=null;assert.doesNotThrow(()=>validateManifest(purchasing));
+});
 function hooks(){const slots=[];let index=0,queue=[];const same=(a,b)=>a&&b&&a.length===b.length&&a.every((v,i)=>Object.is(v,b[i]));const react={createElement:(type,props,...children)=>({type,props:props||{},children:children.flat()}),useState(value){const i=index++;if(!slots[i])slots[i]={value};return [slots[i].value,next=>slots[i].value=typeof next==='function'?next(slots[i].value):next]},useRef(value){const i=index++;if(!slots[i])slots[i]={current:value};return slots[i]},useMemo(fn,deps){const i=index++;if(!slots[i]||!same(slots[i].deps,deps))slots[i]={value:fn(),deps};return slots[i].value},useEffect(fn,deps){const i=index++;if(!slots[i]||!same(slots[i].deps,deps))queue.push(()=>{slots[i]?.cleanup?.();slots[i]={deps,cleanup:fn()}})}};return {react,render(fn){index=0;const tree=fn();const effects=queue;queue=[];effects.forEach(f=>f());return tree;}};}
 function find(tree,predicate){if(!tree||typeof tree!=='object')return null;if(predicate(tree))return tree;for(const child of tree.children||[]){const result=find(child,predicate);if(result)return result;}return null;}
 test('Inbox forwards server pagination/filter and ignores delayed private rows after disconnect',async()=>{

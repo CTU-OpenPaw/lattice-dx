@@ -131,7 +131,7 @@ function createBlockComponents(client,React,antd) {
     if(block&&expectedType&&block.type!==expectedType)return h('p',{role:'alert'},'Loại block không khớp cấu hình đã chọn.');
     return h('div',null,notice&&h('p',{role:'alert'},notice),!connected&&h('a',{href:'/lattice'},'Mở Workspace để kết nối API'),
       connected&&manifest?.workspace?.panels?.length>0&&h('a',{href:manifest.route},'Mở Workspace để xử lý công việc'),
-      block?h({form:FormBlock,list:ListBlock,'task-inbox':TaskInboxBlock,approval:ApprovalBlock}[block.type],{manifest,block,api,connected,actorId:connection.identity?.subject,refreshKey:refresh,onSaved:()=>setRefresh(n=>n+1)}):h('p',null,'Đang tải hoặc không tìm thấy cấu hình block.'));
+      block?h({form:FormBlock,list:ListBlock,'task-inbox':TaskInboxBlock,approval:ApprovalBlock}[block.type],{manifest,block,api,connected,actorId:connection.identity?.subject,actorName:connection.identity?.username,canReadDirectory:connection.capabilities?.directoryRead===true,refreshKey:refresh,onSaved:()=>setRefresh(n=>n+1)}):h('p',null,'Đang tải hoặc không tìm thấy cấu hình block.'));
   }
   function Initializer() {
     const item=client.useSchemaInitializerItem();

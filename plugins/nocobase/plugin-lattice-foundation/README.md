@@ -25,7 +25,7 @@ Build validates and copies authored CommonJS into dist. The runtime supplies the
 Copy the generated tgz into the container, then install with the official package manager. It extracts into persistent storage/plugins and links the package for Node.js. Inside the container:
 
 ```sh
-yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.10.0.tgz
+yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.11.0.tgz
 yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 yarn nocobase pm list
 yarn nocobase pm disable @latticedx/plugin-lattice-foundation
@@ -53,6 +53,12 @@ The workflow bridge also exposes fixed, session-bound operations `waits`, `execu
 `/lattice/apps/work` demonstrates reusable workflow Inbox and Approval blocks across the caller's permitted workflows. Both are registered as native FlowModels and in the Add block menu. Builders select an installed manifest/block; the Inbox's `approvalBlockId` opens its configured Approval inline. Standalone Approval needs a manifest `runId` or a Workspace selection binding. See [configuration, semantics and test evidence](../../../docs/inbox-approval-blocks.md).
 
 These are workflow work items. Independent foundation tasks and task/connector wait completion are not included. Permissions are enforced by the backend; manifest labels and permission metadata do not grant roles.
+
+## Workspace layout in 0.11.0
+
+The home screen now uses the reviewed sidebar/header/shortcut layout and includes the shared Inbox. `/lattice?view=apps` shows installed applications. `workspace.home` selects the home manifest; optional `workspace.shortcut` supplies `hidden`, plain-text `description`, a registered `icon`, and a Form `createBlockId`/`createLabel`. Arbitrary shortcut URLs are rejected. Ctrl+K searches application names; work-item search stays in Inbox.
+
+Unsupported tabs and modules remain disabled, with no invented counts or deadlines. See [UI checkpoint and API requirements](../../../docs/workspace-ui-checkpoint.md).
 
 ## Terms
 

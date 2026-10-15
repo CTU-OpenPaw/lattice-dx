@@ -3,12 +3,57 @@
   "id": "work",
   "name": "Công việc của tôi",
   "route": "/lattice/apps/work",
-  "permissions": ["workflow:start"],
-  "collections": [{"id":"workflow-runs","source":"lattice-api","resource":"workflows"}],
+  "permissions": [
+    "workflow:start"
+  ],
+  "collections": [
+    {
+      "id": "workflow-runs",
+      "source": "lattice-api",
+      "resource": "workflows"
+    }
+  ],
   "blocks": [
-    {"id":"my-inbox","type":"task-inbox","title":"Công việc của tôi","collection":"workflow-runs","permissions":["workflow:start"],"pageSize":10,"approvalBlockId":"request-approval"},
-    {"id":"request-approval","type":"approval","title":"Chi tiết và xử lý công việc","collection":"workflow-runs","permissions":["workflow:start"],"actionLabels":{"approve":"Duyệt","reject":"Từ chối","submit":"Gửi yêu cầu"},"fieldLabels":{"reason":"Lý do từ chối"}}
+    {
+      "id": "my-inbox",
+      "type": "task-inbox",
+      "title": "Công việc của tôi",
+      "collection": "workflow-runs",
+      "permissions": [
+        "workflow:start"
+      ],
+      "pageSize": 10,
+      "approvalBlockId": "request-approval"
+    },
+    {
+      "id": "request-approval",
+      "type": "approval",
+      "title": "Chi tiết và xử lý công việc",
+      "collection": "workflow-runs",
+      "permissions": [
+        "workflow:start"
+      ],
+      "actionLabels": {
+        "approve": "Duyệt",
+        "reject": "Từ chối",
+        "submit": "Gửi yêu cầu"
+      },
+      "fieldLabels": {
+        "reason": "Lý do từ chối"
+      }
+    }
   ],
   "transitions": [],
-  "workspace":{"blocks":[{"blockId":"my-inbox"}],"showTransitions":false}
+  "workspace": {
+    "blocks": [
+      {
+        "blockId": "my-inbox"
+      }
+    ],
+    "showTransitions": false,
+    "home": true,
+    "shortcut": {
+      "hidden": true
+    }
+  }
 }

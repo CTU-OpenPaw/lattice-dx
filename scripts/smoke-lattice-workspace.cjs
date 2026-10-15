@@ -14,7 +14,7 @@ async function run() {
     await page.locator('input[type=password]').fill('admin123');
     await page.getByRole('button',{name:/sign in/i}).click();
     await page.waitForURL('**/lattice');
-    await page.getByRole('heading',{name:'Lattice Workspace',exact:true}).waitFor();
+    await page.getByRole('heading',{name:'Công việc của tôi',exact:true}).waitFor();
     await page.getByRole('link',{name:'Mở Mua sắm nội bộ',exact:true}).waitFor();
     await page.getByRole('link',{name:'Mở Logistics',exact:true}).click();
     await page.waitForURL('**/lattice/apps/logistics');
@@ -27,7 +27,7 @@ async function run() {
     await page.waitForURL('**/lattice/apps/logistics',{timeout:30000});
     await page.getByTestId('api-status').filter({hasText:'Đã kết nối'}).waitFor();
     await page.getByRole('link',{name:'← Chọn ứng dụng khác'}).click();
-    await page.waitForURL('**/lattice');
+    await page.waitForURL('**/lattice?view=apps');
     await page.getByTestId('api-status').filter({hasText:'Đã kết nối'}).waitFor();
     await page.screenshot({path:'output/lattice-workspace.png',fullPage:true});
     await page.getByRole('button',{name:'Ngắt kết nối API',exact:true}).click();

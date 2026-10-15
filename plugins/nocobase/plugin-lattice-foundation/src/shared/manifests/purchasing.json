@@ -78,6 +78,12 @@
       }
     ],
     "showTransitions": false,
-    "note": "Các form hồ sơ nền bên dưới không thay thế workflow mua sắm ở trên."
+    "note": "Các form hồ sơ nền bên dưới không thay thế workflow mua sắm ở trên.",
+    "shortcut": {
+      "description": "Yêu cầu, phê duyệt và bàn giao",
+      "icon": "cart",
+      "createBlockId": "create-request",
+      "createLabel": "Tạo hồ sơ"
+    }
   }
 }

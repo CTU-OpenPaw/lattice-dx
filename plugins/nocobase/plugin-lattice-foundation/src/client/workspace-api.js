@@ -6,8 +6,9 @@ class WorkspaceApiError extends Error {
 }
 function createWorkspaceApi({apiClient, onExpired = () => {}, notify = () => {}}) {
   const request = async options => {
+    const {quiet=false,...transport}=options;
     const source = options.url.startsWith('dxActions:') ? 'bridge' : 'nocobase';
-    try {return await apiClient.request({timeout: 15000, ...options});}
+    try {return await apiClient.request({timeout: 15000, ...transport});}
     catch (cause) {
       const status = cause.response?.status;
       if (status === 401) onExpired(source);
@@ -16,13 +17,14 @@ function createWorkspaceApi({apiClient, onExpired = () => {}, notify = () => {}}
         : status === 409 ? 'Dữ liệu đã thay đổi. Hãy tải lại trước khi tiếp tục.'
         : status === 404 ? 'Chức năng chưa được cài hoặc không tìm thấy.'
         : 'Không thể liên lạc với dịch vụ. Kiểm tra kết quả trước khi gửi lại.';
-      notify({type:'error', message});
+      if(!quiet)notify({type:'error', message});
       throw new WorkspaceApiError(message, status, source);
     }
   };
   const api = {
     request,
     clearNotice(){notify({type:'success',message:''});},
+    async directoryPeople(){return (await request({url:'dxActions:workflow',method:'post',quiet:true,data:{operation:'people',query:{limit:'100',offset:'0'}}})).data;},
     async user() {return (await request({url:'auth:check',method:'get'})).data.data;},
     async applications() {return (await request({url:'latticeApps:list',method:'get'})).data.data.items;},
     async connection() {return (await request({url:'dxActions:status',method:'get'})).data;},

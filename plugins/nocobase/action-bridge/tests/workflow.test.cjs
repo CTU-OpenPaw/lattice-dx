@@ -17,6 +17,8 @@ test('phase-two wait and sync operations use fixed paths, keys and scoped pagina
     assert.equal(calls.at(-1).url,`http://gateway/v1/workflows/${id}/${operation}?limit=10&offset=0`);
     await assert.rejects(bridge.workflow('noco',start.browserId,{operation,id,query:{state:'draft'}}),{status:400});
   }
+  await bridge.workflow('noco',start.browserId,{operation:'people',query:{limit:'100',offset:'0'}});assert.equal(calls.at(-1).url,'http://gateway/v1/directory/people?limit=100&offset=0');
+  await assert.rejects(bridge.workflow('noco',start.browserId,{operation:'people',query:{organizationId:'other'}}),{status:400});
   for(const [operation,suffix] of [['completeWait',`workflow-waits/${id}/complete`],['retrySync',`workflows/${id}/sync/retry`]]){
     const body=operation==='completeWait'?{status:'succeeded',result:{}}:{};
     await assert.rejects(bridge.workflow('noco',start.browserId,{operation,id,body}),{status:400});

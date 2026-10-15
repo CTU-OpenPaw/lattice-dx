@@ -20,7 +20,7 @@ function createApplicationRuntime(React,blocks) {
         const block=manifest.blocks.find(item=>item.id===binding.blockId);
         if(!block)return h('p',{key:binding.blockId,role:'alert'},'Không tìm thấy cấu hình block.');
         return h({form:blocks.FormBlock,list:blocks.ListBlock,'task-inbox':blocks.TaskInboxBlock,approval:blocks.ApprovalBlock}[block.type],{key:block.id+':'+(connection.identity?.subject||''),manifest,block,api,connected:connection.connected,actorId:connection.identity?.subject,selectedId,refreshKey:refresh,openDisabled:locked,onLocked:setLocked,
-          onSaved:result=>{setRefresh(n=>n+1);open(result,binding);},onOpen:binding.selectFrom?row=>open(row,binding):undefined});
+          canReadDirectory:connection.capabilities?.directoryRead===true,actorName:connection.identity?.username,onSaved:result=>{setRefresh(n=>n+1);open(result,binding);},onOpen:binding.selectFrom?row=>open(row,binding):undefined});
       }),
       layout.note&&h('p',null,layout.note),
       ...(layout.showTransitions===false?[]:manifest.transitions.map(item=>h('p',{key:item.id},'Chuyển trạng thái: Chưa khả dụng. '+item.reason))));

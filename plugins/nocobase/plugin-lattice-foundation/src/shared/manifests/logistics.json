@@ -180,6 +180,12 @@
         "selectFrom": "recordId"
       }
     ],
-    "showTransitions": false
+    "showTransitions": false,
+    "shortcut": {
+      "description": "Tạo đơn và giao việc cho kho",
+      "icon": "truck",
+      "createBlockId": "create-order-record",
+      "createLabel": "Tạo đơn"
+    }
   }
 }
