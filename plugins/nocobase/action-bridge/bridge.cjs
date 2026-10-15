@@ -125,12 +125,12 @@ function createBridge(config, dependencies = {}) {
     },
     async workflow(userId, browserId, input) {
       const item=session(userId,browserId);
-      const operations={definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],people:['GET','directory/people'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST',''],waits:['GET',''],executions:['GET',''],completeWait:['POST',''],retrySync:['POST','']};
+      const operations={definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],people:['GET','directory/people'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST',''],waits:['GET',''],executions:['GET',''],completeWait:['POST',''],retrySync:['POST',''],entityContext:['GET','']};
       if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid workflow operation.');
       const [method,resource]=operations[input.operation];let path=resource;
-      if(['detail','history','sync','transition','waits','executions','completeWait','retrySync'].includes(input.operation)){
+      if(['detail','history','sync','transition','waits','executions','completeWait','retrySync','entityContext'].includes(input.operation)){
         if(typeof input.id!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid workflow ID.');
-        path=input.operation==='completeWait'?`workflow-waits/${input.id}/complete`:`workflows/${input.id}`+({detail:'',history:'/history',sync:'/sync',transition:'/transitions',waits:'/waits',executions:'/executions',retrySync:'/sync/retry'}[input.operation]);
+        path=input.operation==='completeWait'?`workflow-waits/${input.id}/complete`:`workflows/${input.id}`+({detail:'',history:'/history',sync:'/sync',transition:'/transitions',waits:'/waits',executions:'/executions',retrySync:'/sync/retry',entityContext:'/entity-context'}[input.operation]);
       }else if(input.id!==undefined)throw new BridgeError(400,'Unexpected workflow ID.');
       const write=['create','transition','completeWait','retrySync'].includes(input.operation);
       if(write){if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!input.body||typeof input.body!=='object'||Array.isArray(input.body))throw new BridgeError(400,'Workflow command requires body and idempotency key.');}
@@ -140,6 +140,11 @@ function createBridge(config, dependencies = {}) {
       if(query)path+=(path.includes('?')?'&':'?')+query;
       const headers={authorization:`Bearer ${item.token}`,...(method==='POST'?{'content-type':'application/json'}:{}),...(write?{'idempotency-key':input.key}:{})};
       return request(`${config.gatewayUrl}/v1/${path}`,{method,headers,...(method==='POST'?{body:JSON.stringify(write?input.body:{})}:{})},'Workflow request failed; reload or retry only the same command key.',true);
+    },
+    async entity(userId,browserId,input){
+      const item=session(userId,browserId);
+      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id'].includes(k))||input.operation!=='detail'||typeof input.id!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid entity read operation.');
+      return request(`${config.gatewayUrl}/v1/entities/${input.id}`,{method:'GET',headers:{authorization:`Bearer ${item.token}`}},'Entity read failed.',true);
     },
     async list(userId, browserId, resource, query) {
       if (!['records','tasks'].includes(resource)) throw new BridgeError(400, 'Unsupported list resource.');

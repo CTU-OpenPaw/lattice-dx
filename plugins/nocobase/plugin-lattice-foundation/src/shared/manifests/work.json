@@ -42,7 +42,8 @@
         "reason": "Lý do từ chối"
       },
       "attachmentBlockId": "request-files",
-      "timelineBlockId": "request-history"
+      "timelineBlockId": "request-history",
+      "contextBlockId": "request-context"
     },
     {
       "id": "request-files",
@@ -76,6 +77,29 @@
         "accept": "Nghiệm thu",
         "handover": "Bàn giao"
       }
+    },
+    {
+      "id": "request-context",
+      "type": "context-entity",
+      "title": "Dữ liệu liên kết",
+      "collection": "workflow-runs",
+      "permissions": [
+        "data:read"
+      ],
+      "entityFields": [
+        {
+          "name": "assetCode",
+          "title": "Mã tài sản"
+        },
+        {
+          "name": "location",
+          "title": "Vị trí tài sản"
+        },
+        {
+          "name": "status",
+          "title": "Trạng thái tài sản"
+        }
+      ]
     }
   ],
   "transitions": [],

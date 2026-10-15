@@ -47,6 +47,7 @@ function createInboxComponents(React,evidence={}) {
           }),
           h('button',{type:'submit',disabled:locked||!connected},busy?'Đang xử lý…':block.actionLabels?.[action.id]||action.id)))),
       controller.uncertain&&h('div',null,h('p',{role:'alert'},'Kết quả chưa xác định. Không đổi công việc; thử lại sẽ dùng đúng lệnh và khóa cũ.'),h('button',{type:'button',disabled:busy||!connected,onClick:()=>perform(null,true)},'Thử lại lệnh cũ')),
+      run&&evidence.ContextEntityBlock&&manifest?.blocks.find(b=>b.id===block.contextBlockId)&&h(evidence.ContextEntityBlock,{manifest,block:manifest.blocks.find(b=>b.id===block.contextBlockId),api,connected,selectedId:id,run,actorId}),
       run&&evidence.AttachmentBlock&&manifest?.blocks.find(b=>b.id===block.attachmentBlockId)&&h(evidence.AttachmentBlock,{manifest,block:manifest.blocks.find(b=>b.id===block.attachmentBlockId),api,connected,selectedId:id,run,actorId,readOnly:locked||!run.availableTransitions.some(action=>Object.values(action.fields).includes('file')),onUploaded:setUploaded}),
       run&&evidence.ActivityTimelineBlock&&manifest?.blocks.find(b=>b.id===block.timelineBlockId)&&h(evidence.ActivityTimelineBlock,{manifest,block:manifest.blocks.find(b=>b.id===block.timelineBlockId),api,connected,selectedId:id,run,actorId,actorName,canReadDirectory}));
   }

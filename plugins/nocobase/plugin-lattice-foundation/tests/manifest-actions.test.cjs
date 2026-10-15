@@ -110,7 +110,7 @@ test('built browser entrypoints load through AMD without CommonJS require or mis
     if (entry === 'client') assert.equal(typeof scopes.useLatticeFormAction, 'function');
     if (entry === 'client') assert.deepEqual(routes.map(r=>r.path), ['/lattice','/lattice/apps/:applicationId']);
     if (entry === 'client') {
-      assert.deepEqual(Object.keys(models),['LatticeFormBlockModel','LatticeListBlockModel','LatticeTaskInboxBlockModel','LatticeApprovalBlockModel','LatticeAttachmentBlockModel','LatticeActivityTimelineBlockModel']);
+      assert.deepEqual(Object.keys(models),['LatticeFormBlockModel','LatticeListBlockModel','LatticeTaskInboxBlockModel','LatticeApprovalBlockModel','LatticeAttachmentBlockModel','LatticeActivityTimelineBlockModel','LatticeContextEntityBlockModel']);
       const fields=await models.LatticeFormBlockModel.flow.steps.binding.uiSchema({api:{request:async()=>({data:{data:{items:[purchasing,logistics]}}})}});
       assert.equal(fields.binding.enum.length,3);
       let binding;
