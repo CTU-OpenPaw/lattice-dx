@@ -124,7 +124,14 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       await repo.get(id,actor);
       return pageResult(repo.executions?await repo.executions(id,actor,query):[],query);
     });
-    routes.get<{Params:{id:string}}>('/v1/workflows/:id/history',async req=>({items:await repo.history(workflowId(req.params.id),actors.get(req)!)}));
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/history',async req=>{
+      if(Object.keys(req.query).some(k=>!['limit','offset'].includes(k)))throw new WorkflowError(400,'Invalid query.');
+      const id=workflowId(req.params.id),actor=actors.get(req)!;
+      if(!Object.keys(req.query).length)return {items:await repo.history(id,actor)};
+      const query=parsePage(req.query);
+      if(!repo.historyPage)throw new WorkflowError(503,'Workflow history paging unavailable.');
+      return repo.historyPage(id,actor,query);
+    });
     routes.get<{Params:{id:string}}>('/v1/workflows/:id/sync',async req=>({items:await repo.jobs(workflowId(req.params.id),actors.get(req)!)}));
     routes.post<{Params:{id:string}}>('/v1/workflows/:id/sync/retry',async req=>{
       if(req.body!==undefined&&(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||Object.keys(req.body).length))throw new WorkflowError(400,'Retry không nhận cấu hình từ body.');

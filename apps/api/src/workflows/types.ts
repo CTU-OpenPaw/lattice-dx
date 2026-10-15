@@ -31,6 +31,7 @@ export interface WorkflowRepository {
   listPage?(actor:WorkflowActor,inbox:boolean,query:WorkflowQuery):Promise<Page<WorkflowRun>>;
   get(id:string,actor:WorkflowActor):Promise<WorkflowRun>;
   history(id:string,actor:WorkflowActor):Promise<WorkflowAudit[]>;
+  historyPage?(id:string,actor:WorkflowActor,query:PageQuery):Promise<Page<WorkflowAudit>>;
   executions?(id:string,actor:WorkflowActor,query?:PageQuery):Promise<WorkflowActionResult[]>;
   jobs(id:string,actor:WorkflowActor):Promise<SyncJob[]>;
   retryJobs(id:string,actor:WorkflowActor,key:string):Promise<number>;

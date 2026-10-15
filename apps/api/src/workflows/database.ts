@@ -171,7 +171,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         if(transition.task)await checkAssigned(client,def,run.data,actor);
         const next=serializeRun((await client.query(`UPDATE workflow_runs SET state=$1,version=version+1,data=data||$2::jsonb,updated_at=now() WHERE id=$3 RETURNING ${runColumns}`,[transition.to,JSON.stringify(input),id])).rows[0]);
         const eventId=randomUUID();
-        await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,from_state,to_state,version) VALUES($1,$2,$3,$4,$5,$6,$7)',[eventId,id,actor.subject,transition.id,run.state,next.state,next.version]);
+        await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,from_state,to_state,version,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[eventId,id,actor.subject,transition.id,run.state,next.state,next.version,transition.fields.reason==='text'?JSON.stringify({reason:input.reason}):null]);
         await attachFiles(client,id,transition.fields,input);
         if(transition.task==='assign') {
           const assigned=def.assignedReader!;
@@ -234,6 +234,12 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
       await get(id,actor);
       const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,metadata,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version LIMIT 100',[id])).rows;
       return rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()}));
+    },
+    async historyPage(id,actor,query) {
+      if(!Number.isSafeInteger(query.limit)||query.limit<1||query.limit>100||!Number.isSafeInteger(query.offset)||query.offset<0||query.offset>Number.MAX_SAFE_INTEGER-101||query.q!=='')throw new WorkflowError(400,'Invalid page.');
+      await get(id,actor);
+      const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,metadata,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version,id LIMIT $2 OFFSET $3',[id,query.limit+1,query.offset])).rows;
+      return pageResult(rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()})),query);
     },
     async executions(id,actor,query) {
       await get(id,actor);
