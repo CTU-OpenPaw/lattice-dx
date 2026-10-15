@@ -52,4 +52,4 @@ Files: `docs/team-integration-readiness.md`, `docs/backend-api-index.md`, `packa
 | 1 | Complete | Exact main/UI/n8n/receiver SHAs recorded;41 UI/bridge tests+build passed, actual Approval controller/API probe passed; receiver4conflicts and concrete mapping/runtime gates documented. No teammate edits/deploy |
 | 2 | Complete | ba4825b;6unit tests/actual signed seed+smoke; independent task review pass. Fixture namespaces isolated, authority/grant/revoke/replay/stale checked; pending shared fixture retained |
 | 3 | Complete | 71b203d; commands, actor/API/UI/adapter boundaries and acceptance checklist documented |
-| 4 | Local checks passed; final review/PR CI in progress | pnpmcheck529tests95files/typecheck/build; shared smoke and module/context realPG regressions passed. Lockfile unchanged, user artifacts preserved |
+| 4 | Implementation/local acceptance and final review complete; delivery CI tracked on PR | pnpmcheck529tests95files/typecheck/build; shared smoke and module/context realPG regressions passed. Independent finalreview ee10614..e5924c5 PASS/noP1/P2. Lockfile unchanged, user artifacts preserved; no automatic merge |
