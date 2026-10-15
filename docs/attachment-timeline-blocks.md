@@ -1,6 +1,6 @@
 # Attachment and Activity Timeline — phase-two increment
 
-Foundation 0.12.0, 15 October 2026. Hưng's branch: `feat/nocobase-workflow-integration`; review continues in draft PR #15. This increment changes plugin/UI code, not backend policy or Notion checkboxes.
+Foundation 0.12.0, 15 October 2026. Hưng's follow-up branch: `codex/attachment-timeline-blocks`. PR #15 was merged while this increment was being implemented, so this feature is proposed in a separate draft from current main. This increment changes plugin/UI code and adds the plugin test suite to CI, not backend policy or Notion checkboxes.
 
 ## What builders can use
 
@@ -37,6 +37,7 @@ History currently returns at most 100 events. Pagination is over the loaded even
 ## Verification
 
 - 51 Node tests pass across Foundation and bridge. New cases cover resource/definition isolation, file fields and IDs, scan-state gates, byte-size validation, event validation/sorting, reason provenance, revoked-download cache removal, disconnect during local file read, no stale upload, explicit workflow attachment linking delayed-history disposal, and first-render privacy when session/selection changes.
+- After moving the increment onto main `0d97071`, plugin build, the 51 Node tests and API TypeScript checks passed. The broader Windows run passed529/530 tests; the unchanged filesystem symlink fixture failed with Windows `EPERM` creating a symlink. No storage test was disabled or backend code changed. Ubuntu CI runs the full check, followed by the plugin suite.
 - `node scripts/smoke-lattice-evidence.cjs` passes on the real local stack: warehouse upload and safe text preview; byte-identical downloads; receipt selection/receive/accept transitions; live history updates; manager read after linking; and outsider file/history denial.
 - The browser test renders an HTML-like string inside a text preview and checks that it did not execute.
 - The harmless standard antivirus test signature is assembled in memory, uploaded and scanned by the real scanner. The resulting rejected file has disabled preview/download controls, and direct content access returns409.
@@ -47,4 +48,4 @@ Test requests, files and the hidden native page remain local as evidence. Screen
 
 ## Remaining phase-two boundaries
 
-This does not implement Context Entity, UC1 dashboard, full UI package export/import, standalone task history, or real n8n/NGSI-LD synchronization. Historical rejection reasons and complete server-paginated workflow history require the API changes above. Main's newer backend increments are inspected as contracts, not silently merged/deployed in this UI increment.
+This does not implement Context Entity, UC1 dashboard, full UI package export/import, standalone task history, or real n8n/NGSI-LD synchronization. Historical rejection reasons and complete server-paginated workflow history require the API changes above. The follow-up branch contains current main as its base; the local API container remains the previously verified runtime, with no backend upgrade or database reset performed by this UI increment.
