@@ -79,4 +79,100 @@ routes:
       type: roundrobin
       nodes:
         "api:4000": 1
+  - id: studio-capabilities
+    uri: /v1/me/capabilities
+    methods: [GET]
+    plugins:
+      openid-connect:
+        client_id: dx-gateway
+        client_secret: local-gateway-secret
+        discovery: http://keycloak:8080/realms/lattice/.well-known/openid-configuration
+        bearer_only: true
+        use_jwks: true
+        ssl_verify: false
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        rejected_code: 429
+        policy: local
+      request-id:
+        header_name: X-Request-Id
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:4000": 1
+  - id: studio-catalog
+    uri: /v1/studio/catalog
+    methods: [GET]
+    plugins:
+      openid-connect:
+        client_id: dx-gateway
+        client_secret: local-gateway-secret
+        discovery: http://keycloak:8080/realms/lattice/.well-known/openid-configuration
+        bearer_only: true
+        use_jwks: true
+        ssl_verify: false
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        rejected_code: 429
+        policy: local
+      request-id:
+        header_name: X-Request-Id
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:4000": 1
+  - id: studio-preflight
+    uri: /v1/studio/preflight
+    methods: [POST]
+    plugins:
+      openid-connect:
+        client_id: dx-gateway
+        client_secret: local-gateway-secret
+        discovery: http://keycloak:8080/realms/lattice/.well-known/openid-configuration
+        bearer_only: true
+        use_jwks: true
+        ssl_verify: false
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        rejected_code: 429
+        policy: local
+      request-id:
+        header_name: X-Request-Id
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:4000": 1
+  - id: studio-dependencies
+    uri: /v1/studio/modules/*/versions/*/dependencies
+    methods: [GET]
+    plugins:
+      openid-connect:
+        client_id: dx-gateway
+        client_secret: local-gateway-secret
+        discovery: http://keycloak:8080/realms/lattice/.well-known/openid-configuration
+        bearer_only: true
+        use_jwks: true
+        ssl_verify: false
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        rejected_code: 429
+        policy: local
+      request-id:
+        header_name: X-Request-Id
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:4000": 1
 #END

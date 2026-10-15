@@ -20,6 +20,7 @@
     "nocobase:down": "docker compose -f infra/compose/nocobase.yml down",
     "nocobase:logs": "docker compose -f infra/compose/nocobase.yml logs --tail 100",
     "test:nocobase": "node scripts/smoke-nocobase.mjs",
+    "test:studio-context": "node scripts/smoke-studio-context.mjs",
     "test:foundation": "node scripts/smoke-foundation.mjs",
     "test:actions": "node scripts/smoke-actions.mjs",
     "test:create-reliability": "node scripts/smoke-create-reliability.mjs",
