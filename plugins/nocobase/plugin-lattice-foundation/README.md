@@ -25,7 +25,7 @@ Build validates and copies authored CommonJS into dist. The runtime supplies the
 Copy the generated tgz into the container, then install with the official package manager. It extracts into persistent storage/plugins and links the package for Node.js. Inside the container:
 
 ```sh
-yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.11.0.tgz
+yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.12.0.tgz
 yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 yarn nocobase pm list
 yarn nocobase pm disable @latticedx/plugin-lattice-foundation
@@ -59,6 +59,10 @@ These are workflow work items. Independent foundation tasks and task/connector w
 The home screen now uses the reviewed sidebar/header/shortcut layout and includes the shared Inbox. `/lattice?view=apps` shows installed applications. `workspace.home` selects the home manifest; optional `workspace.shortcut` supplies `hidden`, plain-text `description`, a registered `icon`, and a Form `createBlockId`/`createLabel`. Arbitrary shortcut URLs are rejected. Ctrl+K searches application names; work-item search stays in Inbox.
 
 Unsupported tabs and modules remain disabled, with no invented counts or deadlines. See [UI checkpoint and API requirements](../../../docs/workspace-ui-checkpoint.md).
+
+## Attachment and Timeline in 0.12.0
+
+Reusable Attachment and Activity Timeline blocks are available in native Studio and Workspace. The default work manifest embeds both inside Approval. Workflow uploads are linked only by explicit action submission, clean text previews are escaped, downloads recheck authorization, and history displays server events without inventing missing reasons. Native settings can persist a workflow/record context ID. See [configuration, verification and API limitations](../../../docs/attachment-timeline-blocks.md).
 
 ## Terms
 

@@ -43,7 +43,13 @@
       class LatticeApprovalBlockModel extends clientV2.BlockModel {
         renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'approval'});}
       }
-      for(const [Model,type,label] of [[LatticeFormBlockModel,'form','Lattice Form'],[LatticeListBlockModel,'list','Lattice Danh sách'],[LatticeTaskInboxBlockModel,'task-inbox','Lattice Task Inbox'],[LatticeApprovalBlockModel,'approval','Lattice Approval']]){
+      class LatticeAttachmentBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'attachment'});}
+      }
+      class LatticeActivityTimelineBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'activity-timeline'});}
+      }
+      for(const [Model,type,label] of [[LatticeFormBlockModel,'form','Lattice Form'],[LatticeListBlockModel,'list','Lattice Danh sách'],[LatticeTaskInboxBlockModel,'task-inbox','Lattice Task Inbox'],[LatticeApprovalBlockModel,'approval','Lattice Approval'],[LatticeAttachmentBlockModel,'attachment','Lattice Attachment'],[LatticeActivityTimelineBlockModel,'activity-timeline','Lattice Activity Timeline']]){
         Model.define({label});
         Model.registerFlow({key:'latticeBinding',title:'Cấu hình Lattice',on:'beforeRender',steps:{binding:{
           title:'Chọn ứng dụng và block',defaultParams:{binding:''},
@@ -51,12 +57,12 @@
             const response=await ctx.api.request({url:'latticeApps:list',method:'get'});
             const apps=response.data.data.items;
             return {binding:{type:'string',title:'Ứng dụng và block',required:true,'x-decorator':'FormItem','x-component':'Select',enum:
-              apps.flatMap(app=>app.blocks.filter(b=>b.type===type).map(b=>({label:app.name+' — '+b.title,value:app.id+':'+b.id})))}};
+              apps.flatMap(app=>app.blocks.filter(b=>b.type===type).map(b=>({label:app.name+' — '+b.title,value:app.id+':'+b.id})))},...(['attachment','activity-timeline'].includes(type)?{contextId:{type:'string',title:'ID hồ sơ / quy trình (tùy chọn)', 'x-decorator':'FormItem','x-component':'Input'}}:{})};
           },
-          handler(ctx,params){const [manifestId,blockId]=typeof params.binding==='string'?params.binding.split(':'):[];ctx.model.setProps({manifestId,blockId});},
+          handler(ctx,params){const [manifestId,blockId]=typeof params.binding==='string'?params.binding.split(':'):[];ctx.model.setProps({manifestId,blockId,...(['attachment','activity-timeline'].includes(type)?{contextId:params.contextId||''}:{})});},
         }}});
       }
-      this.flowEngine.registerModels({LatticeFormBlockModel,LatticeListBlockModel,LatticeTaskInboxBlockModel,LatticeApprovalBlockModel});
+      this.flowEngine.registerModels({LatticeFormBlockModel,LatticeListBlockModel,LatticeTaskInboxBlockModel,LatticeApprovalBlockModel,LatticeAttachmentBlockModel,LatticeActivityTimelineBlockModel});
       this.app.addComponents({LatticeFormBlock:blocks.FormBlock,LatticeListBlock:blocks.ListBlock,LatticeConfiguredBlock:blocks.ConfiguredBlock,LatticeBlockInitializer:blocks.Initializer});
       const registerBlocks=()=>{
         for (const name of ['page:addBlock','RecordBlockInitializers']) {
@@ -66,6 +72,8 @@
             initializer.add('otherBlocks.latticeList',{type:'item',title:'Lattice Danh sách',Component:blocks.Initializer,blockType:'list'});
             initializer.add('otherBlocks.latticeTaskInbox',{type:'item',title:'Lattice Task Inbox',Component:blocks.Initializer,blockType:'task-inbox'});
             initializer.add('otherBlocks.latticeApproval',{type:'item',title:'Lattice Approval',Component:blocks.Initializer,blockType:'approval'});
+            initializer.add('otherBlocks.latticeAttachment',{type:'item',title:'Lattice Attachment',Component:blocks.Initializer,blockType:'attachment'});
+            initializer.add('otherBlocks.latticeTimeline',{type:'item',title:'Lattice Activity Timeline',Component:blocks.Initializer,blockType:'activity-timeline'});
           }
         }
       };

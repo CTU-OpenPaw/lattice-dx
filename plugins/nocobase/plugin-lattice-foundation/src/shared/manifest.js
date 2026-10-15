@@ -41,17 +41,17 @@ function validateManifest(value, contracts=defaultContracts) {
   if (!Array.isArray(value.blocks) || !value.blocks.length) error('blocks', 'non-empty list required');
   else value.blocks.forEach((b, n) => {
     const path = `blocks[${n}]`;
-    if (!keys(b, ['id', 'type', 'title', 'collection', 'permissions', 'fields', 'submit', 'columns', 'attachments','definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels'], path)) return;
+    if (!keys(b, ['id', 'type', 'title', 'collection', 'permissions', 'fields', 'submit', 'columns', 'attachments','definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels','fileFields','allowUpload','attachmentBlockId','timelineBlockId','recordId'], path)) return;
     if (typeof b.id !== 'string' || !id.test(b.id) || blockIds.has(b.id)) error(`${path}.id`, 'invalid or duplicate');
     blockIds.add(b.id);
     if (!label(b.title)) error(`${path}.title`, 'required');
     permission(b.permissions, `${path}.permissions`);
     const collection = collections.get(b.collection);
     if (!collection) error(`${path}.collection`, 'unknown reference');
-    const workflowBlock=['task-inbox','approval'].includes(b.type);
-    for(const name of ['definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels'])if(name in b&&!workflowBlock)error(path,'workflow options require Inbox/Approval');
+    const workflowBlock=['task-inbox','approval','attachment','activity-timeline'].includes(b.type);
+    for(const name of ['definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels','fileFields','allowUpload','attachmentBlockId','timelineBlockId','recordId'])if(name in b&&!workflowBlock)error(path,'workflow options require a workflow/evidence block');
     if(workflowBlock){
-      if(collection?.source!=='lattice-api'||collection.resource!=='workflows')error(path,'Inbox/Approval requires workflows resource');
+      if(collection?.source!=='lattice-api'||(collection.resource!=='workflows'&&!(b.type==='attachment'&&collection.resource==='records')))error(path,'workflow/evidence block requires workflows resource (or records for Attachment)');
       for(const name of ['fields','submit','columns','attachments'])if(name in b)error(path,'workflow block uses API action schema');
       if(b.definitionId!==undefined&&(typeof b.definitionId!=='string'||! /^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/.test(b.definitionId)))error(path,'invalid workflow definition ID');
       if(b.type==='task-inbox'){
@@ -59,9 +59,15 @@ function validateManifest(value, contracts=defaultContracts) {
         if(b.runId!==undefined)error(path,'Inbox cannot bind fixed run ID');
         if(b.approvalBlockId!==undefined&&(!id.test(b.approvalBlockId)||!value.blocks.some(other=>other?.id===b.approvalBlockId&&other.type==='approval'&&other.definitionId===b.definitionId)))error(path,'approval reference must match definition scope');
       }else{
-        if(b.pageSize!==undefined||b.approvalBlockId!==undefined)error(path,'Approval cannot configure Inbox pagination/link');
+        if(b.pageSize!==undefined&&b.type!=='activity-timeline'||b.approvalBlockId!==undefined)error(path,'only Inbox/Timeline support paging; only Inbox links Approval');
+        if(b.type==='activity-timeline'&&b.pageSize!==undefined&&(!Number.isInteger(b.pageSize)||b.pageSize<1||b.pageSize>100))error(path,'page size must be 1–100');
         if(b.runId!==undefined&&(typeof b.runId!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(b.runId)))error(path,'run ID must be UUID');
       }
+      for(const [name,type] of [['attachmentBlockId','attachment'],['timelineBlockId','activity-timeline']])if(b[name]!==undefined&&(b.type!=='approval'||!value.blocks.some(other=>other?.id===b[name]&&other.type===type&&other.definitionId===b.definitionId&&other.collection===b.collection)))error(path,'evidence reference must match Approval scope');
+      if(b.fileFields!==undefined&&(b.type!=='attachment'||!Array.isArray(b.fileFields)||b.fileFields.length>50||new Set(b.fileFields).size!==b.fileFields.length||b.fileFields.some(name=>typeof name!=='string'||! /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(name)||['constructor','prototype','__proto__'].includes(name))))error(path,'fileFields must declare safe unique workflow field names');
+      if(b.allowUpload!==undefined&&(b.type!=='attachment'||typeof b.allowUpload!=='boolean'))error(path,'allowUpload requires Attachment boolean');
+      if(b.recordId!==undefined&&(b.type!=='attachment'||collection?.resource!=='records'||typeof b.recordId!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(b.recordId)))error(path,'recordId requires record Attachment UUID');
+      if(b.type==='attachment'&&collection?.resource==='records'&&(b.runId!==undefined||b.definitionId!==undefined||b.fileFields!==undefined))error(path,'record Attachment cannot use workflow configuration');
       for(const name of ['actionLabels','fieldLabels','stateLabels'])if(b[name]!==undefined&&(!object(b[name])||Object.entries(b[name]).some(([key,text])=>! /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(key)||['constructor','prototype','__proto__'].includes(key)||!label(text))))error(path,'labels must map safe IDs to plain text');
     } else if (b.type === 'form') {
       if (b.attachments !== undefined && (b.attachments !== true || !contracts.action(b.submit?.actionId)?.attachments)) error(`${path}.attachments`, 'attachments require record/order creation');

@@ -40,6 +40,41 @@
       },
       "fieldLabels": {
         "reason": "Lý do từ chối"
+      },
+      "attachmentBlockId": "request-files",
+      "timelineBlockId": "request-history"
+    },
+    {
+      "id": "request-files",
+      "type": "attachment",
+      "title": "Tệp đính kèm",
+      "collection": "workflow-runs",
+      "permissions": [
+        "files:read"
+      ],
+      "allowUpload": true,
+      "fileFields": [
+        "attachmentId",
+        "receiptAttachmentId"
+      ]
+    },
+    {
+      "id": "request-history",
+      "type": "activity-timeline",
+      "title": "Lịch sử xử lý",
+      "collection": "workflow-runs",
+      "permissions": [
+        "workflow:start"
+      ],
+      "pageSize": 10,
+      "actionLabels": {
+        "create": "Tạo yêu cầu",
+        "submit": "Gửi yêu cầu",
+        "approve": "Duyệt",
+        "reject": "Từ chối",
+        "receive": "Nhận hàng",
+        "accept": "Nghiệm thu",
+        "handover": "Bàn giao"
       }
     }
   ],
