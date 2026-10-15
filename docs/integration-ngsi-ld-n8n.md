@@ -1,4 +1,3 @@
-
 # Tích hợp NGSI-LD và n8n
 
 ## Phạm vi
@@ -55,3 +54,45 @@ Không mặc định business ID, ID bản ghi backend và workflow run ID là m
 - Viết connector tạo/đọc/cập nhật Asset.
 - Tạo webhook n8n có xác thực và kiểm tra payload.
 - Tích hợp subscription với endpoint backend.
+
+## Nhật ký hoàn thiện mục 2 — 15/10/2026
+
+### Bằng chứng đã có
+
+- Ba entity Department, Location, Asset được tạo với HTTP 201.
+- Đọc lại Asset thành công, đúng trạng thái, observedAt và quan hệ.
+
+### Thiết kế bổ sung
+
+- Đặc tả: [NGSI-LD Data Contract](ngsi-ld-data-contract.md).
+- Bổ sung mô hình đề xuất Vehicle, Shipment, Warehouse.
+- Định nghĩa quy tắc ID, quan hệ, dữ liệu thiếu và ranh giới dữ liệu.
+- Phân biệt Order.received với Shipment.delivered.
+- Phân biệt warehouseAssigneeId với Warehouse ID.
+
+### Chưa kiểm chứng
+
+- Chưa tạo và đọc lại fixture logistics trên broker.
+- Chưa kiểm chứng connector thực thi các quy tắc validation,
+  observedAt và chống cập nhật cũ.
+- Chưa xác nhận contract cuối cùng với Duy.
+
+### Kiểm chứng fixture logistics
+
+- Fixture: infra/config/ngsi-ld/seed-logistics.json.
+- Tạo và đọc lại 6 entity logistics thành công.
+- Kiểm tra ID, type, businessId, organizationId và name.
+- Kiểm tra status và observedAt của Vehicle, Warehouse, Shipment.
+- Kiểm tra Warehouse/Vehicle → Location.
+- Kiểm tra Shipment → Vehicle, kho nguồn và kho đích.
+- Dữ liệu là fixture demo, chưa đồng bộ với backend.
+- Contract và nguồn ID thực tế vẫn chờ nhóm review.
+
+### NGSI-LD data model
+
+- Đã định nghĩa Asset, Department, Location, Vehicle, Shipment, Warehouse.
+- Đã lập quy tắc mapping ID nghiệp vụ ↔ URN và ranh giới dữ liệu.
+- Đã kiểm chứng dữ liệu mẫu và quan hệ logistics trên Orion-LD.
+- Contract hiện là đề xuất tích hợp, chờ nhóm review.
+
+Chi tiết: [Data contract](docs/ngsi-ld-data-contract.md) và [nhật ký tích hợp](docs/integration-ngsi-ld-n8n.md).

@@ -14,7 +14,11 @@
       "status": "https://latticedx.example/ns/status",
       "belongsToDepartment": "https://latticedx.example/ns/department",
       "locatedAt": "https://latticedx.example/ns/locatedAt",
-      "sourceEventId": "https://latticedx.example/ns/sourceEventId"
+      "sourceEventId": "https://latticedx.example/ns/sourceEventId",
+      "licensePlate": "https://latticedx.example/ns/licensePlate",
+      "assignedVehicle": "https://latticedx.example/ns/assignedVehicle",
+      "originWarehouse": "https://latticedx.example/ns/originWarehouse",
+      "destinationWarehouse": "https://latticedx.example/ns/destinationWarehouse"
     }
   ]
 }
