@@ -25,7 +25,7 @@ Build validates and copies authored CommonJS into dist. The runtime supplies the
 Copy the generated tgz into the container, then install with the official package manager. It extracts into persistent storage/plugins and links the package for Node.js. Inside the container:
 
 ```sh
-yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.13.0.tgz
+yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.14.0.tgz
 yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 yarn nocobase pm list
 yarn nocobase pm disable @latticedx/plugin-lattice-foundation
@@ -77,3 +77,7 @@ Reusable Attachment and Activity Timeline blocks are available in native Studio 
 ## Context Entity
 
 Foundation 0.13.0 adds the reusable Context Entity block, its Studio model and authorized entity read bridge. See [context-entity-block.md](../../../docs/context-entity-block.md) for manifest mappings, permission checks, verification and the remaining broker integration contract.
+
+## Workflow operation Forms
+
+Foundation 0.14.0 adds the reusable Workflow Form with receiving, acceptance and handover presets. Record and workflow Forms share field rendering; workflow writes keep the existing authorized Approval controller. See [operation Forms](../../../docs/receiving-acceptance-handover-forms.md) for configuration, verification and broker limitations.

@@ -41,15 +41,15 @@ function validateManifest(value, contracts=defaultContracts) {
   if (!Array.isArray(value.blocks) || !value.blocks.length) error('blocks', 'non-empty list required');
   else value.blocks.forEach((b, n) => {
     const path = `blocks[${n}]`;
-    if (!keys(b, ['id', 'type', 'title', 'collection', 'permissions', 'fields', 'submit', 'columns', 'attachments','definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels','fileFields','allowUpload','attachmentBlockId','timelineBlockId','recordId','contextBlockId','entitySchemaId','entityFields'], path)) return;
+    if (!keys(b, ['id', 'type', 'title', 'collection', 'permissions', 'fields', 'submit', 'columns', 'attachments','definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels','fileFields','allowUpload','attachmentBlockId','timelineBlockId','recordId','contextBlockId','entitySchemaId','entityFields','actionId','actionDescriptions'], path)) return;
     if (typeof b.id !== 'string' || !id.test(b.id) || blockIds.has(b.id)) error(`${path}.id`, 'invalid or duplicate');
     blockIds.add(b.id);
     if (!label(b.title)) error(`${path}.title`, 'required');
     permission(b.permissions, `${path}.permissions`);
     const collection = collections.get(b.collection);
     if (!collection) error(`${path}.collection`, 'unknown reference');
-    const workflowBlock=['task-inbox','approval','attachment','activity-timeline','context-entity'].includes(b.type);
-    for(const name of ['definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels','fileFields','allowUpload','attachmentBlockId','timelineBlockId','recordId','contextBlockId','entitySchemaId','entityFields'])if(name in b&&!workflowBlock)error(path,'workflow options require a workflow/evidence block');
+    const workflowBlock=['task-inbox','approval','workflow-form','attachment','activity-timeline','context-entity'].includes(b.type);
+    for(const name of ['definitionId','pageSize','approvalBlockId','runId','actionLabels','fieldLabels','stateLabels','fileFields','allowUpload','attachmentBlockId','timelineBlockId','recordId','contextBlockId','entitySchemaId','entityFields','actionId','actionDescriptions'])if(name in b&&!workflowBlock)error(path,'workflow options require a workflow/evidence block');
     if(workflowBlock){
       if(collection?.source!=='lattice-api'||(collection.resource!=='workflows'&&!(b.type==='attachment'&&collection.resource==='records')))error(path,'workflow/evidence block requires workflows resource (or records for Attachment)');
       for(const name of ['fields','submit','columns','attachments'])if(name in b)error(path,'workflow block uses API action schema');
@@ -63,14 +63,16 @@ function validateManifest(value, contracts=defaultContracts) {
         if(b.type==='activity-timeline'&&b.pageSize!==undefined&&(!Number.isInteger(b.pageSize)||b.pageSize<1||b.pageSize>100))error(path,'page size must be 1–100');
         if(b.runId!==undefined&&(typeof b.runId!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(b.runId)))error(path,'run ID must be UUID');
       }
-      for(const [name,type] of [['attachmentBlockId','attachment'],['timelineBlockId','activity-timeline'],['contextBlockId','context-entity']])if(b[name]!==undefined&&(b.type!=='approval'||!value.blocks.some(other=>other?.id===b[name]&&other.type===type&&other.definitionId===b.definitionId&&other.collection===b.collection)))error(path,'evidence reference must match Approval scope');
+      for(const [name,type] of [['attachmentBlockId','attachment'],['timelineBlockId','activity-timeline'],['contextBlockId','context-entity']])if(b[name]!==undefined&&(!['approval','workflow-form'].includes(b.type)||!value.blocks.some(other=>other?.id===b[name]&&other.type===type&&other.definitionId===b.definitionId&&other.collection===b.collection)))error(path,'evidence reference must match Approval scope');
+      if(b.type==='workflow-form'&&(typeof b.actionId!=='string'||! /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(b.actionId)||['constructor','prototype','__proto__'].includes(b.actionId)))error(path,'workflow form requires safe actionId');
+      if(b.actionId!==undefined&&b.type!=='workflow-form')error(path,'actionId requires workflow form');
       if(b.entitySchemaId!==undefined&&(b.type!=='context-entity'||typeof b.entitySchemaId!=='string'||! /^[a-z][a-z0-9-]{0,79}$/.test(b.entitySchemaId)))error(path,'entitySchemaId requires Context Entity schema slug');
       if(b.entityFields!==undefined&&(b.type!=='context-entity'||!Array.isArray(b.entityFields)||b.entityFields.length>30||new Set(b.entityFields.map(f=>f?.name)).size!==b.entityFields.length||b.entityFields.some(f=>!object(f)||Object.keys(f).some(k=>!['name','title'].includes(k))||typeof f.name!=='string'||! /^[a-zA-Z][a-zA-Z0-9_]{0,79}$/.test(f.name)||['constructor','prototype','__proto__'].includes(f.name)||!label(f.title))))error(path,'entityFields must declare safe unique plain fields');
       if(b.fileFields!==undefined&&(b.type!=='attachment'||!Array.isArray(b.fileFields)||b.fileFields.length>50||new Set(b.fileFields).size!==b.fileFields.length||b.fileFields.some(name=>typeof name!=='string'||! /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(name)||['constructor','prototype','__proto__'].includes(name))))error(path,'fileFields must declare safe unique workflow field names');
       if(b.allowUpload!==undefined&&(b.type!=='attachment'||typeof b.allowUpload!=='boolean'))error(path,'allowUpload requires Attachment boolean');
       if(b.recordId!==undefined&&(b.type!=='attachment'||collection?.resource!=='records'||typeof b.recordId!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(b.recordId)))error(path,'recordId requires record Attachment UUID');
       if(b.type==='attachment'&&collection?.resource==='records'&&(b.runId!==undefined||b.definitionId!==undefined||b.fileFields!==undefined))error(path,'record Attachment cannot use workflow configuration');
-      for(const name of ['actionLabels','fieldLabels','stateLabels'])if(b[name]!==undefined&&(!object(b[name])||Object.entries(b[name]).some(([key,text])=>! /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(key)||['constructor','prototype','__proto__'].includes(key)||!label(text))))error(path,'labels must map safe IDs to plain text');
+      for(const name of ['actionLabels','fieldLabels','stateLabels','actionDescriptions'])if(b[name]!==undefined&&(!object(b[name])||Object.entries(b[name]).some(([key,text])=>! /^[A-Za-z][A-Za-z0-9_-]{0,79}$/.test(key)||['constructor','prototype','__proto__'].includes(key)||!label(text))))error(path,'labels must map safe IDs to plain text');
     } else if (b.type === 'form') {
       if (b.attachments !== undefined && (b.attachments !== true || !contracts.action(b.submit?.actionId)?.attachments)) error(`${path}.attachments`, 'attachments require record/order creation');
       const fields = new Set();

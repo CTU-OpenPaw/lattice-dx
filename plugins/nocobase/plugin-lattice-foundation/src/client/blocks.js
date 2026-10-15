@@ -1,3 +1,4 @@
+const {createFieldRenderer}=require('./schema-fields');
 const {createEntityContextComponent}=require('./entity-context');
 // SPDX-License-Identifier: Apache-2.0
 const {createFormActions} = require('./actions');
@@ -8,6 +9,7 @@ const {createInboxComponents}=require('./inbox-blocks');
 const {createEvidenceComponents}=require('./evidence-blocks');
 function createBlockComponents(client,React,antd) {
   const h=React.createElement;
+  const renderField=createFieldRenderer(React);
   const {AttachmentBlock,ActivityTimelineBlock}=createEvidenceComponents(React);
   const ContextEntityBlock=createEntityContextComponent(React);
   const {TaskInboxBlock,ApprovalBlock}=createInboxComponents(React,{AttachmentBlock,ActivityTimelineBlock,ContextEntityBlock});
@@ -76,13 +78,11 @@ function createBlockComponents(client,React,antd) {
       connected&&!available&&h('p',null,'Action chưa được cấp quyền hoặc đang kiểm tra quyền.'),
       referenceError&&h('p',{role:'alert'},referenceError),
       before&&block.attachments&&h(AttachmentPanel,{api,connected:connected&&available&&!busy&&!controller.uncertain,allowUnbound:true,onUploaded:metadata=>setValues(old=>({...old,[contract.attachments.field]:metadata.id}))}),
-      h('form',{onSubmit:submit,noValidate:true},...block.fields.map(field=>h('label',{key:field.name,style:{display:'block',marginBottom:12}},
-        h('span',null,field.title+(field.required?' *':'')),
-        defaultContracts.reference(field.reference)?.mode==='select'?h('select',{'aria-label':field.title,name:field.name,value:values[field.name]||'',disabled:busy||!connected||!available||controller.uncertain,onChange:e=>setValues(old=>({...old,[field.name]:e.target.value}))},h('option',{value:''},defaultContracts.reference(field.reference).placeholder||'Chọn…'),...(referenceOptions[field.reference]||[]).map(p=>h('option',{key:p[defaultContracts.reference(field.reference).value],value:p[defaultContracts.reference(field.reference).value]},p[defaultContracts.reference(field.reference).label]))):h('input',{name:field.name,type:field.type==='positiveInteger'?'number':'text',value:values[field.name]||'',disabled:busy||!connected||!available||controller.uncertain,
-          'aria-required':field.required,style:{display:'block',width:'100%',padding:8,marginTop:6,boxSizing:'border-box'},
-          list:field.reference?block.id+'-'+field.name:undefined,
-          onChange:event=>setValues(old=>({...old,[field.name]:event.target.value}))}),
-        defaultContracts.reference(field.reference)?.mode==='suggestion'&&h('datalist',{id:block.id+'-'+field.name},...(referenceOptions[field.reference]||[]).map(row=>h('option',{key:row[defaultContracts.reference(field.reference).value],value:row[defaultContracts.reference(field.reference).value]},row[defaultContracts.reference(field.reference).label]))))),
+      h('form',{onSubmit:submit,noValidate:true},...block.fields.map(field=>{
+        const reference=defaultContracts.reference(field.reference),rows=referenceOptions[field.reference]||[];
+        const choices=reference?rows.map(row=>({value:row[reference.value],label:row[reference.label]})):undefined;
+        return renderField({name:field.name,title:field.title,kind:field.type,required:field.required,maxLength:field.maxLength,maximum:contract.fields[field.name]?.maximum,id:block.id+'-'+field.name,value:values[field.name]||'',disabled:busy||!connected||!available||controller.uncertain,options:reference?.mode==='select'?choices:undefined,suggestions:reference?.mode==='suggestion'?choices:undefined,onChange:value=>setValues(old=>({...old,[field.name]:value}))});
+      }),
         h('button',{type:'submit',disabled:busy||!connected||!available||controller.uncertain,style:{padding:'8px 16px'}},busy?'Đang lưu…':'Lưu')),
       controller.uncertain&&h('button',{disabled:busy||!connected,onClick:async()=>{const current=generation.current;setBusy(true);try{const saved=await controller.retry();if(current===generation.current){setResult(saved);setValues({});onSaved?.(saved);}}catch(e){if(current===generation.current)setError(e.message)}finally{if(current===generation.current)setBusy(false)}}},'Thử lại lệnh cũ'),
       error&&h('p',{role:'alert'},error),result&&h('p',{role:'status'},'Đã lưu thành công. ID: '+result.id),
@@ -136,8 +136,9 @@ function createBlockComponents(client,React,antd) {
     if(block&&expectedType&&block.type!==expectedType)return h('p',{role:'alert'},'Loại block không khớp cấu hình đã chọn.');
     return h('div',null,notice&&h('p',{role:'alert'},notice),!connected&&h('a',{href:'/lattice'},'Mở Workspace để kết nối API'),
       connected&&manifest?.workspace?.panels?.length>0&&h('a',{href:manifest.route},'Mở Workspace để xử lý công việc'),
-      block?h({form:FormBlock,list:ListBlock,'task-inbox':TaskInboxBlock,approval:ApprovalBlock,attachment:AttachmentBlock,'activity-timeline':ActivityTimelineBlock,'context-entity':ContextEntityBlock}[block.type],{manifest,block,api,connected,actorId:connection.identity?.subject,actorName:connection.identity?.username,canReadDirectory:connection.capabilities?.directoryRead===true,refreshKey:refresh,onSaved:()=>setRefresh(n=>n+1)}):h('p',null,'Đang tải hoặc không tìm thấy cấu hình block.'));
+      block?h({form:FormBlock,list:ListBlock,'task-inbox':TaskInboxBlock,approval:ApprovalBlock,'workflow-form':WorkflowFormBlock,attachment:AttachmentBlock,'activity-timeline':ActivityTimelineBlock,'context-entity':ContextEntityBlock}[block.type],{manifest,block,api,connected,actorId:connection.identity?.subject,actorName:connection.identity?.username,canReadDirectory:connection.capabilities?.directoryRead===true,refreshKey:refresh,onSaved:()=>setRefresh(n=>n+1)}):h('p',null,'Đang tải hoặc không tìm thấy cấu hình block.'));
   }
+  const WorkflowFormBlock=ApprovalBlock;
   function Initializer() {
     const item=client.useSchemaInitializerItem();
     const {insert}=client.useSchemaInitializer();
@@ -149,7 +150,7 @@ function createBlockComponents(client,React,antd) {
         const options=apps.flatMap(app=>app.blocks.filter(b=>b.type===item.blockType).map(block=>({app,block})));
         if(!options.length)throw new Error('Không có cấu hình block phù hợp.');
         let selected=0;
-        antd.Modal.confirm({title:'Chọn cấu hình '+({form:'Form',list:'Danh sách','task-inbox':'Task Inbox',approval:'Approval',attachment:'Attachment','activity-timeline':'Activity Timeline','context-entity':'Context Entity'}[item.blockType]||item.blockType),
+        antd.Modal.confirm({title:'Chọn cấu hình '+({form:'Form',list:'Danh sách','task-inbox':'Task Inbox',approval:'Approval',attachment:'Attachment','activity-timeline':'Activity Timeline','context-entity':'Context Entity','workflow-form':'Form xử lý quy trình'}[item.blockType]||item.blockType),
           content:h('select',{'aria-label':'Cấu hình block',defaultValue:0,onChange:e=>{selected=Number(e.target.value)}},
             ...options.map((o,i)=>h('option',{key:i,value:i},o.app.name+' — '+o.block.title))),
           onOk:()=>{const {app,block}=options[selected];insert({type:'void','x-decorator':'BlockItem','x-component':'LatticeConfiguredBlock','x-component-props':{manifestId:app.id,blockId:block.id}});},
@@ -157,6 +158,6 @@ function createBlockComponents(client,React,antd) {
       }catch(e){antd.message.error(e.message)}
     }});
   }
-  return {FormBlock,ListBlock,TaskInboxBlock,ApprovalBlock,AttachmentBlock,ActivityTimelineBlock,ContextEntityBlock,ConfiguredBlock,Initializer};
+  return {FormBlock,ListBlock,TaskInboxBlock,ApprovalBlock,WorkflowFormBlock,AttachmentBlock,ActivityTimelineBlock,ContextEntityBlock,ConfiguredBlock,Initializer};
 }
 module.exports={createBlockComponents};

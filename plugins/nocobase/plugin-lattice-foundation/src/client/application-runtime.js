@@ -19,7 +19,7 @@ function createApplicationRuntime(React,blocks) {
       ...bindings.map(binding=>{
         const block=manifest.blocks.find(item=>item.id===binding.blockId);
         if(!block)return h('p',{key:binding.blockId,role:'alert'},'Không tìm thấy cấu hình block.');
-        return h({form:blocks.FormBlock,list:blocks.ListBlock,'task-inbox':blocks.TaskInboxBlock,approval:blocks.ApprovalBlock,attachment:blocks.AttachmentBlock,'activity-timeline':blocks.ActivityTimelineBlock,'context-entity':blocks.ContextEntityBlock}[block.type],{key:block.id+':'+(connection.identity?.subject||''),manifest,block,api,connected:connection.connected,actorId:connection.identity?.subject,selectedId,refreshKey:refresh,openDisabled:locked,onLocked:setLocked,
+        return h({form:blocks.FormBlock,list:blocks.ListBlock,'task-inbox':blocks.TaskInboxBlock,approval:blocks.ApprovalBlock,'workflow-form':blocks.WorkflowFormBlock,attachment:blocks.AttachmentBlock,'activity-timeline':blocks.ActivityTimelineBlock,'context-entity':blocks.ContextEntityBlock}[block.type],{key:block.id+':'+(connection.identity?.subject||''),manifest,block,api,connected:connection.connected,actorId:connection.identity?.subject,selectedId,refreshKey:refresh,openDisabled:locked,onLocked:setLocked,
           canReadDirectory:connection.capabilities?.directoryRead===true,actorName:connection.identity?.username,onSaved:result=>{setRefresh(n=>n+1);open(result,binding);},onOpen:binding.selectFrom?row=>open(row,binding):undefined});
       }),
       layout.note&&h('p',null,layout.note),
