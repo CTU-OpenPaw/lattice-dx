@@ -16,6 +16,7 @@
     "infra:down": "docker compose -f infra/compose/core.yml down",
     "infra:logs": "docker compose -f infra/compose/core.yml logs --tail 100",
     "nocobase:up": "docker compose -f infra/compose/nocobase.yml up -d",
+    "workspace:install": "node scripts/install-workspace.mjs",
     "nocobase:down": "docker compose -f infra/compose/nocobase.yml down",
     "nocobase:logs": "docker compose -f infra/compose/nocobase.yml logs --tail 100",
     "test:nocobase": "node scripts/smoke-nocobase.mjs",
