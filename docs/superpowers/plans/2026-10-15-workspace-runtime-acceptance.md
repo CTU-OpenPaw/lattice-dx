@@ -19,3 +19,5 @@ Use merged Foundation0.11.0 and Action Bridge0.1.0 on the existing pinned NocoBa
 ## Ledger
 
 Initial state: main0d97071; core/Keycloak/NocoBase running; Foundation source merged but package unavailable in current container. No source defect assumed before deployment.
+
+15 October result: original plugins installed using official add/enable; reproducible installer added with six focused tests. Automatic reinstall passed with DB-only backup, registry/version and HTTP verification. `pnpm check` 536/96; plugin Node 42; signed team integration, actual PKCE bridge and Logistics API acceptance passed. Browser procurement/onboarding approvals/rejection/permission denial/reload passed; sales Logistics create/submit passed. Warehouse browser receive and post-reinstall browser reconnect remain pending due to browser-tool access denial, explicitly documented in docs/workspace-runtime-acceptance.md. No asset-review UI claim, full recovery claim, Nhi deployment, release or Notion tick. Remaining checklist items must not be marked complete by inference.

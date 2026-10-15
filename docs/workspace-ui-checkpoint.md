@@ -1,5 +1,7 @@
 # Workspace UI checkpoint — 15 October 2026
 
+Current status: PR #15 has since merged and its packages have been installed locally. See [runtime acceptance](workspace-runtime-acceptance.md) for the latest verification and explicit remaining browser checks. The branch/draft/runtime notes below describe the earlier UI checkpoint.
+
 Foundation 0.11.0 implements the reviewed Workspace layout on Hưng's `feat/nocobase-workflow-integration` branch. Draft review: https://github.com/TrDuy-pan3000/LatticeDX/pull/15. This does not mark phase two complete or merge the branch into main.
 
 ## Current UI

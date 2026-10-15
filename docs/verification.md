@@ -1,5 +1,9 @@
 # Verification — latest 2026-10-15
 
+## Merged Workspace runtime — 15 October
+
+Foundation 0.11.0 and Action Bridge 0.1.0 installed and verified on NocoBase 2.2.20 with a database-only backup before recreation. `pnpm check`: 536 tests/96 files, typecheck/build passed; 42 plugin Node tests passed. Signed team-integration, actual PKCE bridge and Logistics API acceptance passed. Browser procurement/onboarding approve/reject and no-approval account checks passed before restart; warehouse receive through UI and post-reinstall browser verification remain pending because browser access was denied. See [runtime evidence and startup runbook](workspace-runtime-acceptance.md). Nhi's integration work was not deployed or modified.
+
 ## Team integration readiness — 15 October
 
 - Baseline main ee10614 (merged PR13), teammate source pins ca5adf0 (Hưng/PR15),86959cf and4ff7901 (Nhi/PR14). UI merge-tree clean; receiver branch has four conflicts, later confirmed GitHub CONFLICTING. No teammate merge, deployment or source edits performed.
