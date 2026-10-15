@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 const {assertRun,createApprovalController}=require('./approval');
-function createInboxComponents(React) {
+function createInboxComponents(React,evidence={}) {
   const defaults={button:{padding:'8px 12px',margin:'4px 4px 4px 0',border:'1px solid #cad5e2',borderRadius:6,background:'#fff',color:'#172b4d',cursor:'pointer'},input:{padding:8,border:'1px solid #cad5e2',borderRadius:6},select:{padding:8,border:'1px solid #cad5e2',borderRadius:6},textarea:{display:'block',width:'100%',boxSizing:'border-box',padding:8,marginTop:6,border:'1px solid #cad5e2',borderRadius:6},table:{width:'100%',borderCollapse:'collapse',marginTop:12},th:{padding:10,textAlign:'left',background:'#f3f6fa',borderBottom:'1px solid #dce3ed'},td:{padding:10,textAlign:'left',borderBottom:'1px solid #e8edf4',maxWidth:250,overflowWrap:'anywhere'},form:{margin:'8px 0'},nav:{marginTop:12}};
   function h(type,props,...children){const value=props||{};return React.createElement(type,{...value,...(typeof type==='string'&&defaults[type]?{style:{...defaults[type],...(type==='button'&&value['aria-pressed']?{background:'#eaf1ff',borderColor:'#2563eb'}:{}),...(type==='button'&&value.disabled?{cursor:'default',opacity:0.55}:{}),...value.style}}:{})},...children);}
   const style={padding:16,border:'1px solid #dce3ed',borderRadius:8,marginBottom:16};
-  function ApprovalBlock({block,api,connected,selectedId,actorId,onSaved,onLocked}) {
+  function ApprovalBlock({manifest,block,api,connected,selectedId,actorId,actorName,canReadDirectory,onSaved,onLocked}) {
     const id=selectedId||block.runId;
     const [run,setRun]=React.useState(null),[values,setValues]=React.useState({}),[refs,setRefs]=React.useState([]);
     const [loading,setLoading]=React.useState(false),[busy,setBusy]=React.useState(false),[error,setError]=React.useState(''),[notice,setNotice]=React.useState(''),[reload,setReload]=React.useState(0);
     const epoch=React.useRef(0);
+    const [uploaded,setUploaded]=React.useState(null);
+    React.useEffect(()=>setUploaded(null),[id,connected,actorId]);
     const controller=React.useMemo(()=>createApprovalController({api,actorId:connected?(actorId||'session'):null,definitionId:block.definitionId}),[api,id,connected,actorId,block.definitionId]);
     React.useEffect(()=>{const current=++epoch.current;let active=true;setRun(null);setValues({});setError('');setNotice('');setBusy(false);onLocked?.(false);
       if(!id||!connected){setLoading(false);return()=>{active=false;epoch.current++;};}
@@ -41,10 +43,12 @@ function createInboxComponents(React) {
             const label=block.fieldLabels?.[name]||name;const inputProps={'aria-label':label,name,required:true,disabled:locked||!connected,value:values[action.id]?.[name]||'',onChange:e=>setValues(old=>({...old,[action.id]:{...old[action.id],[name]:e.target.value}}))};
             return h('label',{key:name,style:{display:'block',margin:'8px 0'}},label+' * ',
               ['department','location'].includes(kind)?h('select',inputProps,h('option',{value:''},'Chọn…'),...refs.filter(r=>r.kind===kind).map(r=>h('option',{key:r.id,value:r.id},r.name))):kind==='text'?h('textarea',{...inputProps,rows:3}):h('input',{...inputProps,type:kind==='positiveInteger'?'number':'text',...(kind==='positiveInteger'?{min:1,max:1000000,step:1}:{})}),
-              kind==='subject'&&h('small',null,' Dùng định danh tài khoản trong danh bạ.'),kind==='file'&&h('small',null,' Dùng ID tệp đã được quét sạch.'));
+              kind==='subject'&&h('small',null,' Dùng định danh tài khoản trong danh bạ.'),kind==='file'&&h('small',null,' Dùng ID tệp đã được quét sạch.'),kind==='file'&&uploaded&&h('button',{type:'button',disabled:locked||!connected,onClick:()=>setValues(old=>({...old,[action.id]:{...old[action.id],[name]:uploaded.id}}))},'Dùng tệp vừa tải cho '+label));
           }),
           h('button',{type:'submit',disabled:locked||!connected},busy?'Đang xử lý…':block.actionLabels?.[action.id]||action.id)))),
-      controller.uncertain&&h('div',null,h('p',{role:'alert'},'Kết quả chưa xác định. Không đổi công việc; thử lại sẽ dùng đúng lệnh và khóa cũ.'),h('button',{type:'button',disabled:busy||!connected,onClick:()=>perform(null,true)},'Thử lại lệnh cũ')));
+      controller.uncertain&&h('div',null,h('p',{role:'alert'},'Kết quả chưa xác định. Không đổi công việc; thử lại sẽ dùng đúng lệnh và khóa cũ.'),h('button',{type:'button',disabled:busy||!connected,onClick:()=>perform(null,true)},'Thử lại lệnh cũ')),
+      run&&evidence.AttachmentBlock&&manifest?.blocks.find(b=>b.id===block.attachmentBlockId)&&h(evidence.AttachmentBlock,{manifest,block:manifest.blocks.find(b=>b.id===block.attachmentBlockId),api,connected,selectedId:id,run,actorId,readOnly:locked||!run.availableTransitions.some(action=>Object.values(action.fields).includes('file')),onUploaded:setUploaded}),
+      run&&evidence.ActivityTimelineBlock&&manifest?.blocks.find(b=>b.id===block.timelineBlockId)&&h(evidence.ActivityTimelineBlock,{manifest,block:manifest.blocks.find(b=>b.id===block.timelineBlockId),api,connected,selectedId:id,run,actorId,actorName,canReadDirectory}));
   }
   function TaskInboxBlock({manifest,block,api,connected,actorId,actorName,canReadDirectory=false,refreshKey,onOpen,openDisabled=false}) {
     const [items,setItems]=React.useState([]),[page,setPage]=React.useState(0),[next,setNext]=React.useState(false),[q,setQ]=React.useState(''),[search,setSearch]=React.useState(''),[state,setState]=React.useState(''),[mode,setMode]=React.useState('inbox');
@@ -75,7 +79,7 @@ function createInboxComponents(React) {
       loading&&h('p',{role:'status'},'Đang tải công việc…'),error&&h('p',{role:'alert'},error),connected&&!loading&&!error&&!items.length&&h('p',null,'Không có công việc phù hợp.'),
       connected&&!loading&&!error&&h('div',{style:{overflowX:'auto'}},h('table',null,h('thead',null,h('tr',null,...['Công việc','Quy trình','Người liên quan','Trạng thái','Hạn xử lý','Hành động'].map(t=>h('th',{key:t,scope:'col'},t)))),h('tbody',null,...items.map(row=>h('tr',{key:row.id},h('td',null,h('strong',null,row.title),h('small',{style:{display:'block',color:'#627187'}},'#'+row.id.slice(0,8))),h('td',null,definitions.find(d=>d.id===row.definitionId)?.title||row.definitionId),h('td',null,h('small',{style:{display:'block',color:'#627187'}},'Người tạo:'),people.find(p=>p.subject===row.ownerId)?.displayName||(row.ownerId===actorId?actorName:null)||h('span',{title:row.ownerId},'ID '+String(row.ownerId||'').slice(0,8))),h('td',null,h('span',{style:{display:'inline-block',padding:'3px 8px',borderRadius:12,background:row.availableTransitions.length?'#fff0c2':'#edf1f6',whiteSpace:'nowrap'}},block.stateLabels?.[row.state]||row.state)),h('td',{title:'Chưa có thông tin hạn xử lý'},'—'),h('td',null,h('button',{type:'button','aria-label':'Mở '+row.title,disabled,onClick:()=>{setSelected(row.id);onOpen?.(row)}},approval?.actionLabels?.[row.availableTransitions[0]?.id]||'Mở chi tiết'))))))),
       h('nav',{'aria-label':'Phân trang Inbox'},h('button',{disabled:disabled||loading||!connected||page===0,onClick:()=>{setPage(n=>n-1);setSelected(null)}},'Trước'),h('span',null,` Trang ${page+1} `),h('button',{disabled:disabled||loading||!connected||!next,onClick:()=>{setPage(n=>n+1);setSelected(null)}},'Sau')),
-      approval&&selected&&h(ApprovalBlock,{key:selected+':'+(actorId||''),block:approval,api,connected,actorId,selectedId:selected,onLocked:setLocked,onSaved:()=>setReload(n=>n+1)}));
+      approval&&selected&&h(ApprovalBlock,{key:selected+':'+(actorId||''),manifest,block:approval,api,connected,actorId,actorName,canReadDirectory,selectedId:selected,onLocked:setLocked,onSaved:()=>setReload(n=>n+1)}));
   }
   return {TaskInboxBlock,ApprovalBlock};
 }
