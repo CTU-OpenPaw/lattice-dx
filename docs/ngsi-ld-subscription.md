@@ -10,9 +10,26 @@ It does not change orders, workflow state, accounting, Asset ownership, names or
 The existing Asset connector and data contract are unchanged.
 
 Receiver tests use Fastify injection and an in-memory repository. They verify authentication,
-tenant/subscription binding, payload validation, ordering and failure responses. Broker delivery,
-the live gateway and PostgreSQL must still be verified with the smoke script on the local Docker stack.
-Do not mark checklist 5 complete until that script passes.
+tenant/subscription binding, payload validation, ordering and failure responses.
+
+### Target local verification — 16/10/2026
+
+The operator supplied a complete passing output from `smoke-ngsi-ld-subscription.mjs` on the
+target Docker environment at commit `a5ec081`. Checklist 5 is verified for the local Asset.status scope.
+
+- Actual broker delivery: Asset create → gateway → receiver → PostgreSQL read-back passed.
+- Actual broker delivery: status update with newer observedAt applied and read back successfully.
+- Direct receiver checks: missing/wrong token and wrong tenant returned 403.
+- Direct receiver checks: foreign subscription rejected; duplicate/stale observations ignored;
+  conflicting values at the same observedAt returned 409.
+- Direct receiver checks: missing/invalid fields and observedAt rejected; accepted context unchanged.
+- Retained fixture: `urn:ngsi-ld:Asset:org-a:subscription-a1137a4a-c514-4515-bf86-65590b1b1cf1`.
+- No business order or workflow transition changed.
+
+The old subscription retained a duplicate tenant header after PATCH; scoped recreation cleared it.
+The broker delivered an earlier fractional timestamp as a whole-second value. The successful smoke
+therefore uses whole-second fixtures with exact equality. Millisecond fidelity and live concurrent
+delivery remain outside this evidence.
 
 ## Source and tenant binding
 
@@ -149,7 +166,7 @@ Do not publish env files or full subscription JSON containing receiverInfo.
 
 ## Remaining scope
 
-- Actual end-to-end evidence from the target Docker environment.
+- End-to-end millisecond fidelity and live concurrent/batch delivery beyond the current smoke.
 - Vehicle/Shipment/Warehouse schemas and mappings agreed with the backend owner.
 - Projection of additional attributes with independent observedAt rules.
 - Retention/inbox audit and delivery retry/reconciliation strategy.

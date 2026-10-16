@@ -5,8 +5,16 @@
 Đã bổ sung receiver backend, lưu bản chiếu Asset.status vào PostgreSQL và script đăng ký/kiểm chứng subscription.
 Xem [hướng dẫn subscription](ngsi-ld-subscription.md) để cấu hình credential riêng và chạy Docker local.
 
-Trạng thái: **đã triển khai code; chưa ghi nhận kiểm chứng broker → gateway → backend → PostgreSQL trên máy local**.
-Không đánh dấu hoàn thành mục 5 trước khi smoke test thực tế pass.
+Trạng thái: **hoàn thành kiểm chứng mục 5 trong phạm vi Asset.status trên môi trường local — 16/10/2026**.
+
+- Broker tạo Asset → gateway → receiver → PostgreSQL: PASS, đọc lại đúng trạng thái và observedAt.
+- Broker cập nhật status với observedAt mới hơn: PASS.
+- Gọi trực tiếp receiver để kiểm tra: thiếu/sai token và sai tenant trả 403; replay/event cũ bị bỏ qua;
+  cùng timestamp nhưng khác trạng thái trả 409; dữ liệu thiếu/sai bị từ chối và bản chiếu đã lưu không đổi.
+- Asset kiểm chứng: `urn:ngsi-ld:Asset:org-a:subscription-a1137a4a-c514-4515-bf86-65590b1b1cf1`.
+- Đã xử lý header tenant trùng bằng cách tạo lại đúng subscription demo với cấu hình sạch.
+- Smoke dùng mốc giây tròn và so sánh timestamp chính xác; chưa xác nhận bảo toàn mili giây qua broker.
+- Không thay đổi đơn nghiệp vụ hoặc workflow transition. Vehicle/Shipment/Warehouse chưa được kiểm chứng qua receiver này.
 
 ## Phạm vi
 
