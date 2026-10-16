@@ -21,7 +21,7 @@ export async function brokerRequest(config, method, path, body, expected) {
   if (!expected.includes(response.status)) throw new Error(`Broker ${method} ${path.split('?')[0]} returned HTTP ${response.status}.`);
   return response;
 }
-export async function registerSubscription(config) {
+export async function registerSubscription(config, { recreate = false } = {}) {
   const definition = {
     id: config.id, type: 'Subscription',
     entities: [{ type: 'Asset', idPattern: `^urn:ngsi-ld:Asset:${config.tenant}:[A-Za-z0-9_-]{1,128}$` }],
@@ -36,7 +36,13 @@ export async function registerSubscription(config) {
   };
   const path = `/subscriptions/${encodeURIComponent(config.id)}`;
   const existing = await brokerRequest(config, 'GET', path, undefined, [200, 404]);
-  if (existing.status === 200) {
+  if (recreate && existing.status === 200) {
+    // Explicit local repair: PATCH may retain old receiverInfo entries in broker storage/cache.
+    // Delete only this exact tenant-scoped subscription, never entities or other subscriptions.
+    await brokerRequest(config, 'DELETE', path, undefined, [204]);
+    console.log('Removed configured demo subscription; its notification counters will reset.');
+  }
+  if (existing.status === 200 && !recreate) {
     // Update our explicit configured subscription only; preserve unrelated subscriptions.
     const { id, type, ...patch } = definition;
     await brokerRequest(config, 'PATCH', path, patch, [204]);

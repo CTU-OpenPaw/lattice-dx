@@ -100,6 +100,19 @@ Expected: HTTP 201 for a new subscription, HTTP 204 when updating the explicitly
 No other subscription is removed. Definition: Asset in the configured tenant; watches status;
 notification contains businessId, organizationId and status, normalized format.
 
+If API diagnostics show tokenMatches=true, tenantMatches=false and tenantValueCount=2,
+the broker is delivering a duplicate tenant header. An earlier subscription definition may retain
+NGSILD-Tenant in receiverInfo even after PATCH. Explicitly recreate this demo subscription once:
+
+```powershell
+node --env-file=.env.integration .\scripts\register-ngsi-ld-subscription.mjs --recreate
+```
+
+This deletes and creates only the configured subscription in its tenant; notification counters reset
+and there is a short delivery gap. Existing entities, context rows, business data and other subscriptions
+are retained. Run only during local testing. If recreation fails after DELETE, fix the reported error and
+run registration again. Do not weaken backend tenant checks or rotate unrelated credentials.
+
 ### 4. Verify broker delivery and negative cases
 
 ```powershell
