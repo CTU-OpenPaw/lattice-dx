@@ -12,6 +12,20 @@ An isolated PostgreSQL schema and controlled receiver verified retry after HTTP 
 
 These results certify Duy's backend responsibilities. The receiver was a controlled local fixture; actual broker synchronization, Nhi's connector and Hung's complete UI remain shared integration acceptance. Audit HTTP immutability does not protect against database administrator mutation.
 
-## Phase 3
+## Phase 3 — verified 2026-10-16
 
-Incident/agent completion is being verified against `docs/superpowers/plans/2026-10-16-phase23-completion.md`. Phase-3 boxes remain unchecked until the corresponding incident behavior, agent authorization, durable execution and human gate have executable evidence.
+`pnpm test:incident-agent` passed with generated RS256 identities, the real API handlers and production repositories against a guarded disposable PostgreSQL schema. The reference module installs, publishes and enables `incident-response` v1, `incident-asset` and editable `incident-rule` schemas. The fixture creates and edits rules through the existing entity API, checks stale revision rejection and historical source snapshots, and maps canonical notification IDs through authenticated ingress.
+
+The signed lifecycle covers event replay/content conflict and source-role revocation; unknown assignee and wrong handler; assign/accept; deterministic agent enqueue and concurrent claims; current requester/Asset/clean-file authority; lease fencing, bounded retry and absolute timeout; proposal replay/conflict; worker denial at human approval and generic callbacks; human approve/reject/rework, resolution and close. Close updates only approved Asset status while preserving other attributes, with one correlated durable outbox event. A forced late SQL failure rolls back the Asset and case together. Reopening repositories verifies persistence. Paged history returns all 102 fixture jobs without duplication.
+
+`node scripts/smoke-agent-jobs.mjs` separately passed the PostgreSQL regressions for unrelated callback compatibility, wrong-schema rejection and result/claim/context lock delays across expiry. Final signed regressions also deny completed-job worker GET after requester disablement or Asset-share revocation, without exposing proposal content. Valid access resumes after authority restoration.
+
+Full `pnpm check` passed 109 files / 596 tests, typecheck and all builds at f25b0c5. The final ce33d40 read-authorization correction passed 36 affected files / 189 tests, API typecheck and both PostgreSQL suites; independent whole-branch review at ce33d40 has no unresolved findings. The source is in PR #19. [Incident/agent API handoff](incident-agent-runtime.md) contains commands, bodies, roles, errors and integration boundaries.
+
+Fixture identities and the worker are simulated; their generated schemas are removed, so reported fixture IDs are evidence rather than retained demo data. These checks certify Duy's backend responsibilities, including durable jobs and synchronization events. Nhi's actual threshold executor, broker/n8n transport, model inference and Hung's UI remain separate shared integration acceptance. No external delivery or model success is inferred from an outbox acknowledgement.
+
+## Local runtime and checklist
+
+After final review, only the API container was rebuilt from ce33d40 and became healthy. Its protected agent route returned 401 without a token, and the agent persistence tables were present. Fresh `pnpm test:workflows` and `pnpm test:team-integration` passed against that running Gateway/API/PostgreSQL stack. Existing identities, NocoBase containers and volumes were preserved. A database-only backup and the previous API image tag were retained locally before the update; this is not a full disaster-recovery rehearsal.
+
+The existing Notion project page was updated and read back: Duy phase 2 has 6/6 checked items and phase 3 has 7/7. The teammate sections and shared acceptance criteria were preserved. The page includes backend evidence and the remaining real broker/model/UI integration boundary.
