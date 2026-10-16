@@ -133,6 +133,12 @@ The first two checks prove actual broker notification delivery. The later checks
 directly with controlled payloads; they must not be reported as notifications emitted by the broker.
 The script creates and retains a unique demo Asset and updates only its own status.
 
+The target local broker was observed delivering a status timestamp ending in `.000Z` when the
+input had fractional milliseconds (`.428Z`). Smoke fixtures therefore use distinct whole-second
+timestamps and still require exact read-back equality. This checks ordering at second resolution;
+it does not establish end-to-end millisecond preservation. The receiver continues to validate and
+store the observedAt actually delivered; subsecond fidelity needs separate broker investigation.
+
 On failure, stop and inspect the HTTP status and API logs locally:
 
 ```powershell

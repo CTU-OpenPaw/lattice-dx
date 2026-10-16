@@ -9,8 +9,11 @@ async function main() {
   const gateway = (process.env.DX_GATEWAY_URL || 'http://localhost:8080').replace(/\/+$/, '');
   const businessId = `subscription-${randomUUID()}`;
   const entityId = `urn:ngsi-ld:Asset:${config.tenant}:${businessId}`;
-  const firstAt = new Date(Date.now() - 5_000).toISOString();
-  const secondAt = new Date(Date.now() - 2_000).toISOString();
+  // The target broker serialized .428Z as .000Z in the live notification.
+  // Use distinct whole-second fixtures; keep exact read-back assertions rather than adding a tolerance.
+  const baseTime = Math.floor(Date.now() / 1_000) * 1_000;
+  const firstAt = new Date(baseTime - 5_000).toISOString();
+  const secondAt = new Date(baseTime - 2_000).toISOString();
   const headers = { 'X-Lattice-Broker-Token': config.token, 'NGSILD-Tenant': config.tenant };
   async function api(method, path, body, override = headers) {
     return fetch(`${gateway}/v1/integrations/ngsi-ld${path}`, {
