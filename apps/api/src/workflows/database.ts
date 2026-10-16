@@ -1,3 +1,5 @@
+import {createAgentTables} from '../agents/schema.js';
+import {assertIncidentActor,assertIncidentTransition} from '../agents/incident-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 import {readFoundationPathMetadataWithClient} from '../files/content.js';
 import type {ObjectStore} from '../files/object-store.js';
@@ -56,6 +58,7 @@ async function attachFiles(client:PoolClient,runId:string,fields:Record<string,W
 
 export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'|'list'>=sourceRegistry,store?:ObjectStore):Promise<WorkflowRepository> {
   await createWorkflowTables(pool);
+  await createAgentTables(pool);
   await initializeModuleTables(pool);
   async function definition(run:WorkflowRun,client?:PoolClient):Promise<WorkflowDefinition>{const def=await registry.get(run.organizationId,run.definitionId,run.definitionVersion,client);if(!def)throw new WorkflowError(503,'Phiên bản quy trình không khả dụng.');return def;}
   async function taskIds(runs:WorkflowRun[],client:Pool|PoolClient=pool) {
@@ -149,6 +152,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         if(run.status==='cancelled')throw new WorkflowError(409,'Quy trình đã huỷ.');
         const transition=def.transitions.find(t=>t.id===value.action);
         if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
+        await assertIncidentActor(client,run,actor,transition.role);
         authorizeTransition(transition,run,actor,!!internal);
         for(const step of transition.steps??[])authorizeBlock(step,actor);
         const input=validateInput(transition.fields,value.input),hash=fingerprint({...value,input});
@@ -163,6 +167,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         run.waiting=!!(await client.query("SELECT 1 FROM workflow_waits WHERE run_id=$1 AND status='pending'",[id])).rowCount;
         run.waiting=run.waiting || !!(await client.query("SELECT 1 FROM workflow_timers WHERE run_id=$1 AND status='pending' AND ($2::uuid IS NULL OR id<>$2)",[id,internal?.timerId??null])).rowCount;
         planTransition(def,run,actor,{...value,input},!!internal);
+        await assertIncidentTransition(client,run,actor,{...value,input});
         await validateReferences(client,transition.fields,input,actor,run=>definition(run,client));
         for(const step of transition.steps??[])if(step.action==='timers.schedule') {
           const target=def.transitions.find(t=>t.id===step.input.transitionId);

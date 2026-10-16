@@ -1,3 +1,4 @@
+import {agentDatabase} from './agents/database.js';
 // SPDX-License-Identifier: Apache-2.0
 import { Pool } from 'pg';
 import { taskLifecycleDatabase } from './tasks/database.js';
@@ -38,7 +39,7 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const reports=await reportsDatabase(pool);
     const modules=await modulesDatabase(pool,workflows);
     const taskLifecycle=await taskLifecycleDatabase(pool);
-    return {repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),
+    return {agents:agentDatabase(pool,definitionRegistry,options.store),repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),
       offloadFile:async()=>{if(!options.store)throw new Error('File storage is not configured');return offloadOneFile(pool,options.store);},close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }
