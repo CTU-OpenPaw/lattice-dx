@@ -3,7 +3,7 @@ import type {WorkflowActor} from '@dx/contracts';
 import type {Page,PageQuery} from '../pagination.js';
 
 export type InboundEvent={eventId:string;eventType:string;occurredAt:string;data:Record<string,string>};
-export type EventBinding={source:'event';field:string}|{source:'literal';value:string};
+export type EventBinding={source:'event';field:string}|{source:'envelope';field:'eventId'}|{source:'literal';value:string};
 export type SubscriptionInput={id:string;eventType:string;sourceSubject:string;definitionId:string;definitionVersion:number;title:EventBinding;input:Record<string,EventBinding>;enabled:boolean};
 export type SubscriptionUpdate=SubscriptionInput&{expectedRevision:number};
 export type EventSubscription=SubscriptionInput&{revision:number};

@@ -6,6 +6,7 @@ import {verifyIdentity,type IdentityConfig} from '../identity.js';
 import {WorkflowError} from '../workflows/policy.js';
 import {EntityError} from '../entities/policy.js';
 import {FileReadError} from '../files/content.js';
+import {PageError,parsePage} from '../pagination.js';
 import type {AgentRepository} from './database.js';
 import {assertHuman,bad,object,parseProposal,text,worker} from './policy.js';
 export type AgentOptions={
@@ -25,7 +26,7 @@ export function registerAgents(app:FastifyInstance,options:AgentOptions){
   app.register(async routes=>{
     const actors=new WeakMap<object,WorkflowActor>();
     routes.setErrorHandler((e,_r,reply)=>{
-      if(e instanceof CreateCommandError||e instanceof WorkflowError||e instanceof EntityError||e instanceof FileReadError)return reply.code(e.statusCode).send({
+      if(e instanceof CreateCommandError||e instanceof WorkflowError||e instanceof EntityError||e instanceof FileReadError||e instanceof PageError)return reply.code(e.statusCode).send({
         error:e.message
       });
       return reply.code(500).send({error:'Agent operation failed.'});
@@ -63,8 +64,8 @@ export function registerAgents(app:FastifyInstance,options:AgentOptions){
     >('/v1/agent-jobs',async req=>{
       const a=actors.get(req)!;
       assertHuman(a);
-      const q=object(req.query,['runId']);
-      return repo.list(id(q.runId),a);
+      const q=object(req.query,['runId','limit','offset']);
+      return repo.list(id(q.runId),a,parsePage(q));
     });
     routes.get<{
       Params:{

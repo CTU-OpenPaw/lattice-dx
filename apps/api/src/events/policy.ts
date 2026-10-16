@@ -36,6 +36,7 @@ export function parseEvent(value:unknown):InboundEvent|undefined {
 function binding(value:unknown,title=false):value is EventBinding {
  if(!object(value))return false;
  if(value.source==='event')return exact(value,['source','field'])&&field(value.field);
+ if(value.source==='envelope')return exact(value,['source','field'])&&value.field==='eventId';
  return value.source==='literal'&&exact(value,['source','value'])&&bounded(value.value,title?200:2000,!title);
 }
 export function parseSubscription(value:unknown,update:true):SubscriptionUpdate|undefined;
@@ -63,8 +64,12 @@ export function canonicalEvent(value:InboundEvent):string {return canonical(valu
 export function eventStartKey(org:string,source:string,eventId:string,subscriptionId:string,revision:number):string {
  return createHash('sha256').update(JSON.stringify([org,source,eventId,subscriptionId,revision])).digest('hex');
 }
-export function resolveBinding(value:EventBinding,data:Record<string,string>):string {
+export function resolveBinding(value:EventBinding,data:Record<string,string>,envelope?:Pick<InboundEvent,'eventId'>):string {
  if(value.source==='literal')return value.value;
+ if(value.source==='envelope'){
+  if(!envelope)throw new WorkflowError(400,'Event envelope is required.');
+  return envelope.eventId;
+ }
  if(!Object.hasOwn(data,value.field))throw new WorkflowError(400,'Mapped event field is missing.');
  return data[value.field];
 }

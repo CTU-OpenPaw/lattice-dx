@@ -152,7 +152,7 @@ export async function eventsDatabase(pool:Pool,registry:Pick<DefinitionRegistry,
    if(!parsed)throw new WorkflowError(400,'Invalid inbound event.');
    return transaction(pool,async client=>{
     await lock(client,['inbound-event',actor.organizationId,actor.subject,parsed.eventId]);
-    await currentSource(client,actor.organizationId,actor.subject);
+    const source=await currentSource(client,actor.organizationId,actor.subject);
     const fingerprint=hash(canonicalEvent(parsed));
     const replay=(await client.query('SELECT fingerprint,result FROM workflow_inbound_events WHERE organization_id=$1 AND source_subject=$2 AND event_id=$3',[actor.organizationId,actor.subject,parsed.eventId])).rows[0];
     if(replay) {
@@ -163,10 +163,10 @@ export async function eventsDatabase(pool:Pool,registry:Pick<DefinitionRegistry,
     const receipt:EventReceipt={eventId:parsed.eventId,status:'accepted',runs:[]};
     for(const subscription of subscriptions) {
      const definition=await published(client,actor.organizationId,subscription);
-     if(!actor.roles.includes('workflow:start')||!actor.roles.includes(definition.startRole))throw new WorkflowError(403,'Current source JWT lacks workflow start roles.');
-     const title=resolveBinding(subscription.title,parsed.data);
+     if(!['workflow:start',definition.startRole].every(role=>actor.roles.includes(role)&&source.roles.includes(role)))throw new WorkflowError(403,'Current source JWT and directory must grant workflow start roles.');
+     const title=resolveBinding(subscription.title,parsed.data,parsed);
      if(!title.trim()||Array.from(title).length>200)throw new WorkflowError(400,'Mapped workflow title is invalid.');
-     const input=Object.fromEntries(Object.entries(subscription.input).map(([name,binding])=>[name,resolveBinding(binding,parsed.data)]));
+     const input=Object.fromEntries(Object.entries(subscription.input).map(([name,binding])=>[name,resolveBinding(binding,parsed.data,parsed)]));
      if(!workflows.createWithClient)throw new WorkflowError(503,'Transactional workflow start is unavailable.');
      const run=await workflows.createWithClient(client,{definitionId:subscription.definitionId,definitionVersion:subscription.definitionVersion,title,input},actor,eventStartKey(actor.organizationId,actor.subject,parsed.eventId,subscription.id,subscription.revision));
      receipt.runs.push({subscriptionId:subscription.id,runId:run.id});

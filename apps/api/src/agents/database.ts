@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import {createHash,randomUUID} from 'node:crypto';
 import type {Pool,PoolClient} from 'pg';
+import {pageResult,parsePage,type PageQuery} from '../pagination.js';
 import type {WorkflowActor,WorkflowRun} from '@dx/contracts';
 import type {DefinitionRegistry} from '../workflows/registry.js';
 import {canReadRun} from '../workflows/policy.js';
@@ -142,15 +143,13 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
     async get(id:string,a:WorkflowActor){
       return tx(async c=>publicJob((await read(c,id,a)).j));
     },
-    async list(runId:string,a:WorkflowActor){
+    async list(runId:string,a:WorkflowActor,page:PageQuery=parsePage({})){
       return tx(async c=>{
         const actor=await current(c,a,'human');
         const run=(await c.query('SELECT * FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR SHARE',[runId,a.organizationId])).rows[0];
         if(!run)bad(404,'Incident not found.');
         await caseAccess(c,run,actor);
-        return {
-          items:(await c.query('SELECT * FROM agent_jobs WHERE run_id=$1 AND organization_id=$2 ORDER BY created_at DESC LIMIT 100',[runId,a.organizationId])).rows.map(publicJob)
-        };
+        return pageResult((await c.query('SELECT * FROM agent_jobs WHERE run_id=$1 AND organization_id=$2 ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4',[runId,a.organizationId,page.limit+1,page.offset])).rows.map(publicJob),page);
       });
     },
     async claim(id:string,a:WorkflowActor){

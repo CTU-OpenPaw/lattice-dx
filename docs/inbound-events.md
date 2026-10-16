@@ -11,3 +11,5 @@ Kết quả `{eventId,status:"accepted",runs:[{subscriptionId,runId}]}`. Same so
 Nhi giữ eventId ổn định khi adapter retry; không dùng randomID cho mỗi lần gửi cùng sự kiện. Callback task/connector completion vẫn dùng wait API, chưa có event-to-transition correlation tự động. Store nguồn/danh tính dịch vụ phải được quản trị cấp quyền và sync; API này không tạo chúng.
 
 Kiểm chứng `pnpm test:inbound-events`: signed source/role, mismatch/races/dedup, multi-subtransaction rollback, disable/replay, pin1 và max1 newexecution/restart. Malformed400,token401,role/source403,missingresource404,key/revisionconflict409,unconfigured503.
+
+Incident adapter extension: `{source:"envelope",field:"eventId"}` binds only the canonical event envelope ID; `{source:"event",field}` continues to read `data`. No other envelope field is accepted. New matching events require both current source directory and JWT workflow:start/startRole grants. Exact existing receipt replay still checks active source and receiver JWT, then returns the original receipt without starting a new run. See [Incident agent runtime](incident-agent-runtime.md) for rule revision provenance and notification correlation.

@@ -10,9 +10,9 @@ const actor={subject:'source',organizationId:'org-a',roles:['workflow:event:rece
 const event={eventId:'external/1',eventType:'order-created',occurredAt:'2026-10-14T01:02:03Z',data:{note:'hello'}};
 const subscription={id:'sub-one',revision:2,eventType:event.eventType,sourceSubject:'source',definitionId:'event-flow',definitionVersion:3,title:{source:'literal',value:'Order'},input:{note:{source:'event',field:'note'}},enabled:true};
 const def:WorkflowDefinition={id:'event-flow',version:3,title:'Event flow',startRole:'employee',initialState:'draft',startFields:{note:'text'},readerRoles:[],transitions:[]};
-function fixture(options:{inactive?:boolean;receipt?:unknown;subscriptions?:unknown[];failProvenance?:boolean}={}) {
+function fixture(options:{inactive?:boolean;sourceRoles?:string[];receipt?:unknown;subscriptions?:unknown[];failProvenance?:boolean}={}) {
  const query=vi.fn(async(sql:string)=>{
-  if(sql.includes('FROM directory_people'))return {rows:options.inactive?[]:[{subject:'source',roles:['workflow:start','employee']}],rowCount:options.inactive?0:1};
+  if(sql.includes('FROM directory_people'))return {rows:options.inactive?[]:[{subject:'source',roles:options.sourceRoles??['workflow:start','employee']}],rowCount:options.inactive?0:1};
   if(sql.startsWith('SELECT fingerprint,result FROM workflow_inbound_events'))return {rows:options.receipt?[options.receipt]:[],rowCount:options.receipt?1:0};
   if(sql.includes('FROM workflow_event_subscriptions'))return {rows:options.subscriptions??[subscription],rowCount:1};
   if(sql.startsWith('INSERT INTO workflow_event_provenance')&&options.failProvenance)throw new Error('forced provenance failure');
@@ -56,6 +56,12 @@ test('missing mapped field and missing current JWT start role leave no event rec
  const f=fixture();const repo=await eventsDatabase(f.pool,{get:f.get},{createWithClient:f.createWithClient} as never);
  await expect(repo.receive({...event,data:{}},actor)).rejects.toMatchObject({statusCode:400});
  await expect(repo.receive(event,{...actor,roles:['workflow:event:receive']})).rejects.toMatchObject({statusCode:403});
+ expect(f.createWithClient).not.toHaveBeenCalled();
+ expect(f.query.mock.calls.some(([sql])=>sql.startsWith('INSERT INTO workflow_inbound_events'))).toBe(false);
+});
+test('a revoked current directory role denies a new event despite an otherwise valid source JWT',async()=>{
+ const f=fixture({sourceRoles:['workflow:start']});const repo=await eventsDatabase(f.pool,{get:f.get},{createWithClient:f.createWithClient} as never);
+ await expect(repo.receive(event,actor)).rejects.toMatchObject({statusCode:403});
  expect(f.createWithClient).not.toHaveBeenCalled();
  expect(f.query.mock.calls.some(([sql])=>sql.startsWith('INSERT INTO workflow_inbound_events'))).toBe(false);
 });
