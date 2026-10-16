@@ -8,7 +8,7 @@ import {lockContextEntity} from '../workflows/entity-context.js';
 import {loadFileContentWithClient,readFileMetadataWithClient} from '../files/content.js';
 import type {ObjectStore} from '../files/object-store.js';
 import {lockedWait,settle} from '../workflows/waits-database.js';
-import {assertHuman,bad,incidentContract,isWorker,parseProposal,worker,type Proposal} from './policy.js';
+import {assertHuman,assertAssetSchema,bad,incidentContract,isWorker,parseProposal,worker,type Proposal} from './policy.js';
 import {enqueueIncident} from './enqueue.js';
 import type {StoredAgentJob,StoredIncidentRun} from './types.js';
 import type {StoredWait} from '../workflows/waits-database.js';
@@ -63,6 +63,7 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
     await caseAccess(c,run,requester);
     if(run.data.assetEntityId!==j.asset_id||run.data.notificationId!==j.notification_id||(run.data.attachmentId??null)!==j.attachment_id)bad(409,'Incident binding changed.');
     const asset=await lockContextEntity(c,j.asset_id,requester,true);
+    assertAssetSchema(asset);
     if(j.attachment_id){
       if(!requester.roles.includes('files:read')||!(await c.query('SELECT 1 FROM workflow_files WHERE run_id=$1 AND file_id=$2 FOR SHARE',[run.id,j.attachment_id])).rowCount)bad(403,'Requester attachment authority revoked.');
       const file=await readFileMetadataWithClient(c,requester,j.attachment_id,{
@@ -91,6 +92,16 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
   }
   function lease(j:StoredAgentJob,a:WorkflowActor,token:string){
     if(j.status!=='running'||j.worker_id!==a.subject||j.lease_token!==token||!j.lease_live)bad(409,'Stale agent lease.');
+  }
+  // Authority/resource locks and storage reads can outlive a sampled lease.
+  // Re-read the clock only after those operations, while run/wait/job stay locked.
+  async function fresh(c:PoolClient,run:StoredIncidentRun,wait:StoredWait,j:StoredAgentJob,a?:WorkflowActor,token?:string){
+    const clock=(await c.query('SELECT w.deadline<=clock_timestamp() AS expired,j.lease_until>clock_timestamp() AS lease_live,j.deadline>clock_timestamp() AS job_live FROM workflow_waits w JOIN agent_jobs j ON j.id=w.id WHERE w.id=$1',[j.id])).rows[0];
+    wait.expired=clock.expired;
+    j.lease_live=clock.lease_live;
+    active(run,wait,j);
+    if(!clock.job_live)bad(409,'Agent deadline elapsed.');
+    if(a&&token)lease(j,a,token);
   }
   async function read(c:PoolClient,id:string,a:WorkflowActor){
     const state=await locked(c,id,a);
@@ -151,11 +162,14 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
         await current(c,a,'worker');
         active(run,wait,j);
         await bound(c,run,j);
+        await fresh(c,run,wait,j);
         if(j.attempts>=3||!(j.status==='queued'||j.status==='running'&&!j.lease_live))bad(409,'Agent job cannot be claimed.');
         if(j.status==='running')await c.query("UPDATE agent_attempts SET finished_at=now(),outcome='lease_expired' WHERE job_id=$1 AND attempt=$2",[id,j.attempts]);
         const token=randomUUID();
-        const next=(await c.query("UPDATE agent_jobs SET status='running',version=version+1,attempts=attempts+1,worker_id=$2,lease_token=$3,lease_until=LEAST(deadline,clock_timestamp()+interval '60 seconds'),updated_at=now(),error_code=NULL WHERE id=$1 RETURNING *",[id,a.subject,token])).rows[0];
+        const next=(await c.query("UPDATE agent_jobs SET status='running',version=version+1,attempts=attempts+1,worker_id=$2,lease_token=$3,lease_until=LEAST(deadline,clock_timestamp()+interval '60 seconds'),updated_at=now(),error_code=NULL WHERE id=$1 AND deadline>clock_timestamp() AND EXISTS(SELECT 1 FROM workflow_waits w WHERE w.id=$1 AND w.status='pending' AND w.deadline>clock_timestamp()) RETURNING *",[id,a.subject,token])).rows[0];
+        if(!next)bad(409,'Agent claim deadline elapsed.');
         await c.query('INSERT INTO agent_attempts(job_id,attempt,worker_id,lease_token) VALUES($1,$2,$3,$4)',[id,next.attempts,a.subject,token]);
+        await fresh(c,run,wait,next,a,token);
         return {
           ...publicJob(next),leaseToken:token
         };
@@ -187,6 +201,7 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
             id:j.attachment_id,filename:file.filename,contentBase64:file.content.toString('base64')
           };
         }
+        await fresh(c,run,wait,j,a,token);
         return {
           case:{
             id:run.id,title:run.title,state:run.state,notificationId:j.notification_id
@@ -211,11 +226,12 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
           if(j.worker_id!==a.subject||j.lease_token!==token||j.result_hash!==hash)bad(409,'Conflicting agent result.');
           return publicJob(j);
         }
-        active(run,wait,j);
-        lease(j,a,token);
+        await fresh(c,run,wait,j,a,token);
         const proposalId=randomUUID();
-        await c.query("UPDATE agent_jobs SET status='completed',version=version+1,proposal_id=$2,proposal=$3,result_hash=$4,completed_at=now(),updated_at=now() WHERE id=$1",[id,proposalId,JSON.stringify(proposal),hash]);
+        const completed=await c.query("UPDATE agent_jobs SET status='completed',version=version+1,proposal_id=$2,proposal=$3,result_hash=$4,completed_at=now(),updated_at=now() WHERE id=$1 AND status='running' AND worker_id=$5 AND lease_token=$6 AND lease_until>clock_timestamp() AND deadline>clock_timestamp() AND EXISTS(SELECT 1 FROM workflow_waits w WHERE w.id=$1 AND w.status='pending' AND w.deadline>clock_timestamp())",[id,proposalId,JSON.stringify(proposal),hash,a.subject,token]);
+        if(!completed.rowCount)bad(409,'Agent result lease or deadline elapsed.');
         await c.query("UPDATE agent_attempts SET outcome='completed',finished_at=now() WHERE job_id=$1 AND attempt=$2",[id,j.attempts]);
+        await fresh(c,run,wait,j,a,token);
         await settle(c,run,wait,'succeeded',{
           proposalId,agentJobId:id
         },a.subject,`agent:${id}`,hash);
@@ -229,10 +245,10 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
         }
         =await locked(c,id,a);
         await current(c,a,'worker');
-        active(run,wait,j);
-        lease(j,a,token);
+        await fresh(c,run,wait,j,a,token);
         await c.query("UPDATE agent_attempts SET outcome=$3,finished_at=now() WHERE job_id=$1 AND attempt=$2",[id,j.attempts,code]);
-        const next=(await c.query("UPDATE agent_jobs SET status='failed',version=version+1,error_code=$2,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 RETURNING *",[id,code])).rows[0];
+        const next=(await c.query("UPDATE agent_jobs SET status='failed',version=version+1,error_code=$2,lease_token=NULL,lease_until=NULL,updated_at=now() WHERE id=$1 AND lease_until>clock_timestamp() AND deadline>clock_timestamp() AND EXISTS(SELECT 1 FROM workflow_waits w WHERE w.id=$1 AND w.status='pending' AND w.deadline>clock_timestamp()) RETURNING *",[id,code])).rows[0];
+        if(!next)bad(409,'Agent failure lease or deadline elapsed.');
         return publicJob(next);
       });
     },
@@ -255,10 +271,12 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
           if(previous.input.operation!=='retry'||previous.input.id!==id||previous.input.expectedVersion!==expectedVersion)bad(409,'Agent key conflict.');
           return previous.result;
         }
-        active(run,wait,j);
+        await fresh(c,run,wait,j);
         if(j.version!==expectedVersion||j.attempts>=3||!(j.status==='failed'||j.status==='running'&&!j.lease_live))bad(409,'Agent retry unavailable.');
         await c.query("UPDATE agent_attempts SET outcome=coalesce(outcome,'lease_expired'),finished_at=coalesce(finished_at,now()) WHERE job_id=$1 AND attempt=$2",[id,j.attempts]);
-        const result=publicJob((await c.query("UPDATE agent_jobs SET status='queued',version=version+1,lease_token=NULL,lease_until=NULL,worker_id=NULL,updated_at=now() WHERE id=$1 RETURNING *",[id])).rows[0]);
+        const retried=(await c.query("UPDATE agent_jobs SET status='queued',version=version+1,lease_token=NULL,lease_until=NULL,worker_id=NULL,updated_at=now() WHERE id=$1 AND deadline>clock_timestamp() AND EXISTS(SELECT 1 FROM workflow_waits w WHERE w.id=$1 AND w.status='pending' AND w.deadline>clock_timestamp()) RETURNING *",[id])).rows[0];
+        if(!retried)bad(409,'Agent retry deadline elapsed.');
+        const result=publicJob(retried);
         await c.query('INSERT INTO agent_commands(organization_id,actor_id,key,input,result) VALUES($1,$2,$3,$4,$5)',[a.organizationId,a.subject,key,JSON.stringify(command),JSON.stringify(result)]);
         return result;
       });

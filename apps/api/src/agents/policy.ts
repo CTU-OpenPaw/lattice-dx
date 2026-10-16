@@ -50,3 +50,6 @@ export function incidentContract(run:{
     proposalId:'text',agentJobId:'text'
   }).sort());
 }
+
+export const INCIDENT_ASSET_SCHEMA='incident-asset';
+export function assertAssetSchema(asset:{schemaId:string}){if(asset.schemaId!==INCIDENT_ASSET_SCHEMA)bad(409,'Incident requires the incident-asset schema.');}

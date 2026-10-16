@@ -2,7 +2,7 @@ import {isRecordId} from '@dx/contracts';
 // SPDX-License-Identifier: Apache-2.0
 import type {PoolClient} from 'pg';
 import type {WorkflowActor,WorkflowRun,WorkflowWaitConfig} from '@dx/contracts';
-import {assertHuman,bad,incidentContract} from './policy.js';
+import {assertHuman,assertAssetSchema,bad,incidentContract} from './policy.js';
 import {lockContextEntity} from '../workflows/entity-context.js';
 export async function enqueueIncident(client:PoolClient,run:WorkflowRun,actor:WorkflowActor,id:string,config:WorkflowWaitConfig,event:unknown){
   if(run.definitionId!=='incident-response')return;
@@ -17,7 +17,9 @@ export async function enqueueIncident(client:PoolClient,run:WorkflowRun,actor:Wo
   if(current.roles.includes('connector:agent')||current.roles.includes('agent:worker'))bad(403,'Human requester required.');
   if(!isRecordId(run.data.assetEntityId))bad(400,'Incident Asset ID must be UUID.');
   const asset=await lockContextEntity(client,run.data.assetEntityId,actor,true);
-  await client.query(`INSERT INTO agent_jobs(id,organization_id,run_id,requester_id,asset_id,asset_version,notification_id,attachment_id,run_version,deadline)
- SELECT id,organization_id,run_id,$2,$3,$4,$5,$6,version,deadline FROM workflow_waits WHERE id=$1 ON CONFLICT(id) DO NOTHING`,[id,actor.subject,asset.id,asset.version,run.data.notificationId,run.data.attachmentId??null]);
+  assertAssetSchema(asset);
+  const inserted=await client.query(`INSERT INTO agent_jobs(id,organization_id,run_id,requester_id,asset_id,asset_version,notification_id,attachment_id,run_version,deadline)
+ SELECT id,organization_id,run_id,$2,$3,$4,$5,$6,version,deadline FROM workflow_waits WHERE id=$1 AND status='pending' AND version=$7 AND deadline>clock_timestamp() ON CONFLICT(id) DO UPDATE SET id=excluded.id WHERE agent_jobs.deadline>clock_timestamp() RETURNING id`,[id,actor.subject,asset.id,asset.version,run.data.notificationId,run.data.attachmentId??null,run.version]);
+  if(!inserted.rowCount)bad(409,'Incident wait expired while checking authority.');
   // Existing outbox delivers the event ID to the connector. Execution requires a fenced claim.
 }

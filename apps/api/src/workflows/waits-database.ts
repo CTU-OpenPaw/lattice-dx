@@ -17,7 +17,7 @@ function fingerprint(value:WorkflowCompletion) {
 export async function lockedWait(client:PoolClient,id:string,organizationId?:string) {
   const reference=(await client.query('SELECT run_id,organization_id FROM workflow_waits WHERE id=$1',[id])).rows[0];
   if(!reference || organizationId !== undefined && reference.organization_id !== organizationId) throw new WorkflowError(404,'Không tìm thấy yêu cầu hoàn thành.');
-  const run=(await client.query('SELECT id,state,version,status FROM workflow_runs WHERE id=$1 FOR UPDATE',[reference.run_id])).rows[0];
+  const run=(await client.query('SELECT id,state,version,status,definition_id,definition_version FROM workflow_runs WHERE id=$1 FOR UPDATE',[reference.run_id])).rows[0];
   const wait=(await client.query('SELECT *,deadline<=clock_timestamp() AS expired FROM workflow_waits WHERE id=$1 FOR UPDATE',[id])).rows[0] as StoredWait;
   return {run,wait};
 }
@@ -51,7 +51,7 @@ export function waitDatabase(pool:Pool,get:(id:string,actor:WorkflowActor)=>Prom
         } else {
           if(!actor.roles.includes('workflow:callback') || !actor.roles.includes(`connector:${wait.connector_id}`)) throw new WorkflowError(403,'Không có quyền hoàn thành connector.');
           const job=(await client.query('SELECT payload FROM workflow_jobs WHERE id=$1 AND run_id=$2 AND organization_id=$3',[id,run.id,actor.organizationId])).rows[0];
-          if(wait.connector_id==='agent' && job?.payload.operation==='incident.analyze') throw new WorkflowError(403,'Managed incident waits require durable agent completion.');
+          if(run.definition_id==='incident-response' && run.definition_version===1 && wait.connector_id==='agent' && job?.payload.operation==='incident.analyze') throw new WorkflowError(403,'Managed incident waits require durable agent completion.');
           if(!job || job.payload.eventType!=='connector.dispatch' || job.payload.connectorId!==wait.connector_id) throw new WorkflowError(403,'Connector không phù hợp.');
         }
         const parsed=parseCompletion(value);if(!parsed) throw new WorkflowError(400,'Dữ liệu hoàn thành không hợp lệ.');

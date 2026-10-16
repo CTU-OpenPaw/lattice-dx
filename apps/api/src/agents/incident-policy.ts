@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type {PoolClient} from 'pg';
 import type {WorkflowActor,WorkflowRun,TransitionCommand} from '@dx/contracts';
-import {assertHuman,bad,parseProposal} from './policy.js';
+import {assertHuman,assertAssetSchema,bad,parseProposal} from './policy.js';
 import {lockContextEntity} from '../workflows/entity-context.js';
 import {applyEntityUpdateWithClient,scopedEntity} from '../entities/client.js';
 export async function assertIncidentActor(client:PoolClient,run:WorkflowRun,actor:WorkflowActor,requiredRole?:string){
@@ -34,6 +34,7 @@ export async function assertIncidentTransition(client:PoolClient,run:WorkflowRun
     };
     const asset=await scopedEntity(client,scope,job.asset_id,true,'edit');
     if(!asset)bad(404,'Asset unavailable.');
+    assertAssetSchema(asset);
     const proposal=parseProposal(job.proposal);
     await applyEntityUpdateWithClient(client,scope,asset,{
       expectedVersion:job.asset_version,title:asset.title,attributes:{
@@ -43,6 +44,7 @@ export async function assertIncidentTransition(client:PoolClient,run:WorkflowRun
   }
   else{
     const asset=await lockContextEntity(client,job.asset_id,actor,true);
+    assertAssetSchema(asset);
     if(asset.version!==job.asset_version)bad(409,'Incident proposal Asset version is stale.');
     await client.query('INSERT INTO incident_agent_decisions(run_id,job_id,proposal_id,decision,actor_id,run_version,reason) VALUES($1,$2,$3,$4,$5,$6,$7)',[run.id,job.id,job.proposal_id,command.action,actor.subject,run.version,command.input.reviewNote??command.input.reason??'']);
   }
