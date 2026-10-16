@@ -109,6 +109,7 @@ export function agentDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'>,
     const actor=await current(c,a,isWorker(a)?'worker':'human');
     if(isWorker(a)){
       if(state.j.worker_id!==a.subject)bad(403,'Worker job mismatch.');
+      await bound(c,state.run,state.j);
     }
     else await caseAccess(c,state.run,actor);
     return state;

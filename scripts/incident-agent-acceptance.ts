@@ -89,6 +89,11 @@ async function main(){
   const proposal={summary:'Repair after temperature inspection',suggestedStatus:'repair',evidence:['temperature=60 celsius']};
   await call('/v1/agent-jobs/'+job.id+'/result','POST',{leaseToken:claim.leaseToken,proposal},'worker',409);
   const complete=await call('/v1/agent-jobs/'+job.id+'/result','POST',{leaseToken:reclaimed.leaseToken,proposal},'worker');assert.equal(complete.status,'completed');
+  assert.equal((await call('/v1/agent-jobs/'+job.id,'GET',undefined,'worker')).proposalId,complete.proposalId);
+  await pool.query("UPDATE directory_people SET enabled=false WHERE subject='handler'");
+  const revokedRead=await call('/v1/agent-jobs/'+job.id,'GET',undefined,'worker',403);assert.equal(revokedRead.proposal,undefined);
+  await pool.query("UPDATE directory_people SET enabled=true WHERE subject='handler'");
+  assert.equal((await call('/v1/agent-jobs/'+job.id,'GET',undefined,'worker')).proposalId,complete.proposalId);
   assert.deepEqual(await call('/v1/agent-jobs/'+job.id+'/result','POST',{leaseToken:reclaimed.leaseToken,proposal},'worker'),complete);
   await call('/v1/agent-jobs/'+job.id+'/result','POST',{leaseToken:reclaimed.leaseToken,proposal:{...proposal,summary:'conflict'}},'worker',409);
   run=await call('/v1/workflows/'+run.id);assert.equal(run.state,'review_pending');
@@ -123,6 +128,12 @@ async function main(){
   let sr=await call('/v1/workflows/'+stale.run.id);sr=await transition(sr,'approve',{reviewNote:'Approved'});sr=await transition(sr,'record_resolution',{resolutionNote:'Done'},'handler');
   await call('/v1/entities/'+stale.asset.id,'PATCH',{expectedVersion:stale.asset.version,title:stale.asset.title,attributes:{...stale.asset.attributes,serial:'changed-after-approval'}});
   await transition(sr,'close',{closeNote:'Stale'},'manager',409);assert.equal((await call('/v1/workflows/'+sr.id)).state,'resolved');
+  const readAuthority=await fixture();c=await call('/v1/agent-jobs/'+readAuthority.job.id+'/claim','POST',{},'worker');await call('/v1/agent-jobs/'+readAuthority.job.id+'/result','POST',{leaseToken:c.leaseToken,proposal},'worker');
+  assert.equal((await call('/v1/agent-jobs/'+readAuthority.job.id,'GET',undefined,'worker')).proposal.summary,proposal.summary);
+  const deniedAsset=await call('/v1/entities/'+readAuthority.asset.id+'/shares/person/handler','DELETE',{expectedVersion:readAuthority.asset.version});
+  const deniedRead=await call('/v1/agent-jobs/'+readAuthority.job.id,'GET',undefined,'worker',404);assert.equal(deniedRead.proposal,undefined);
+  await call('/v1/entities/'+readAuthority.asset.id+'/shares','POST',{expectedVersion:deniedAsset.version,principal:{kind:'person',id:'handler'},permission:'read'});
+  assert.equal((await call('/v1/agent-jobs/'+readAuthority.job.id,'GET',undefined,'worker')).proposal.summary,proposal.summary);
   const rejected=await fixture();c=await call('/v1/agent-jobs/'+rejected.job.id+'/claim','POST',{},'worker');await call('/v1/agent-jobs/'+rejected.job.id+'/result','POST',{leaseToken:c.leaseToken,proposal},'worker');
   let rr=await call('/v1/workflows/'+rejected.run.id);rr=await transition(rr,'reject',{reason:'Needs another inspection'});rr=await transition(rr,'rework',{reworkNote:'Reinspect'},'handler');
   const fresh=await analyze(rr);assert.notEqual(fresh.job.id,rejected.job.id);assert.equal((await call('/v1/agent-jobs/'+rejected.job.id)).proposal.summary,proposal.summary);

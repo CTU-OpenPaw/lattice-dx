@@ -1,6 +1,6 @@
 # Incident agent integration contract
 
-Duy's backend provides the production workflow, entity, ingress and agent-job API paths below. Hung's model worker and Nhi's notification executor/transport call those APIs. The acceptance uses a **simulated worker**, generated RS256 JWTs and real PostgreSQL. It proves backend behavior; real model inference, broker delivery, UI integration and human notification receipt remain teammate integration.
+Duy's backend provides the production workflow, entity, ingress and agent-job API paths below. Hung's UI and Nhi's model worker, notification executor and transport call those APIs. The acceptance uses a **simulated worker**, generated RS256 JWTs and real PostgreSQL. It proves backend behavior; real model inference, broker delivery, UI integration and human notification receipt remain teammate integration.
 
 Install `solutions/workflows/incident-module.json` through `POST /v1/enterprise-modules/install` with `{ "manifest": <file contents> }`, publish `POST /v1/workflow-drafts/incident-response/publish` with `{ "expectedRevision": 1 }`, then enable `POST /v1/enterprise-modules/incident/versions/1.0.0/enabled` with `{ "expectedRevision": 1, "enabled": true }`. Each mutation requires a fresh `Idempotency-Key`. Installation publishes schemas `incident-asset` and `incident-rule` v1; workflow publication assigns version 1. The module is installable configuration and does not reserve a builtin definition. Module administration requires `workflow:design` and `data:design`; workflow publication requires `workflow:design`.
 
@@ -84,14 +84,14 @@ Analysis dispatches connector `agent`, operation `incident.analyze`. Job ID equa
 | --- | --- | --- |
 | `POST /v1/agent-jobs` | human analysis requester, Idempotency-Key, `{runId,waitId}` | validates deterministic existing enqueue; never creates arbitrary work |
 | `GET /v1/agent-jobs?runId=<uuid>&limit=50&offset=0` | authorized human case reader | `{items,page:{limit,offset,hasMore,nextOffset}}`; stable created_at DESC, id DESC; limit 1–100; no q/arbitrary resource filters |
-| `GET /v1/agent-jobs/:id` | authorized human case reader or exact claimed worker | effective state, attempts/version/proposal; no lease token |
+| `GET /v1/agent-jobs/:id` | authorized human case reader or exact claimed worker with current bound requester/resource authority | effective state, attempts/version/proposal; no lease token; completed worker reads need no new lease |
 | `POST /v1/agent-jobs/:id/claim` | worker, `{}` | one winner; includes `leaseToken` |
 | `GET /v1/agent-jobs/:id/context` | worker, header `X-Agent-Lease: <token>`, no query | bound case, Asset and optional `{id,filename,contentBase64}` explicit clean attachment |
 | `POST /v1/agent-jobs/:id/result` | worker, `{leaseToken,proposal}` | immutable result and atomic workflow settlement |
 | `POST /v1/agent-jobs/:id/fail` | worker, `{leaseToken,code}` | failed attempt; code model_unavailable, invalid_output, tool_denied or worker_error |
 | `POST /v1/agent-jobs/:id/retry` | authorized human, Idempotency-Key, `{expectedVersion}` | requeues same still-live wait/job with version increment |
 
-Hung's result example:
+Nhi's model worker result example:
 
 ```json
 {"leaseToken":"33333333-3333-4333-8333-333333333333","proposal":{"summary":"Repair after inspecting the temperature sensor","suggestedStatus":"repair","evidence":["temperature=60 celsius"]}}
