@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { expect, test } from 'vitest';
+import { expect, test, vi } from 'vitest';
 import { createApi } from '../app.js';
 import { parseNotification, shouldApply } from './policy.js';
 import type { AssetContext, ContextRepository } from './types.js';
@@ -30,6 +30,22 @@ function setup() {
   return { app, contexts, writes: () => writes };
 }
 const url = '/v1/integrations/ngsi-ld/notifications';
+test('rejected notification diagnostics omit credentials and raw payload values', async () => {
+  const log = vi.spyOn(console, 'info').mockImplementation(() => {});
+  const { app } = setup();
+  try {
+    const payload = body();
+    payload.id = 'private-notification-id';
+    payload.data[0].status.observedAt = 'private-invalid-time';
+    expect((await app.inject({ method: 'POST', url, headers, payload })).statusCode).toBe(400);
+    const printed = JSON.stringify(log.mock.calls);
+    expect(printed).toContain('observedAt');
+    for (const secret of [token, payload.id, payload.data[0].status.observedAt, entityId]) expect(printed).not.toContain(secret);
+    const count = log.mock.calls.length;
+    await app.inject({ url: `/v1/integrations/ngsi-ld/context?entityId=${encodeURIComponent(entityId)}`, headers });
+    expect(log.mock.calls.length).toBe(count);
+  } finally { await app.close(); log.mockRestore(); }
+});
 test('source credentials and tenant are checked before JSON parsing or storage', async () => {
   const { app, writes } = setup();
   try {
