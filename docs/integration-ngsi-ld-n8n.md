@@ -18,25 +18,27 @@ không phải Warehouse ID. Không mặc định business ID, backend record ID,
 
 ## 2. Tổng hợp năm nhóm công việc
 
-| Mục | Kết quả hiện tại | Phạm vi/điểm cần bàn giao |
-| --- | --- | --- |
+
+| Mục                                                                      | Kết quả hiện tại                                                                                  | Phạm vi/điểm cần bàn giao                                                              |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | 1. Chạy broker và n8n, khóa phiên bản, credential và hồ sơ nguồn | Runtime đã chạy; ba image integration đã khóa tag và digest; cấu hình secret tách khỏi Git | Cần bổ sung đủ nguồn/license của ba thành phần integration vào hồ sơ third-party |
-| 2. Mô hình dữ liệu, JSON-LD context và mapping ID | Đã định nghĩa sáu loại entity; tạo/đọc fixture cơ bản và logistics thành công | Nguồn ID thực tế, enum và contract cuối cùng vẫn chờ Duy/nhóm xác nhận |
-| 3. Connector Asset và dữ liệu mẫu | Đã viết và kiểm chứng create → get → update → read-back | Chưa thực thi đầy đủ mọi quy tắc trong data contract |
-| 4. Webhook n8n → API logistics | Đã kiểm chứng auth, validation, tạo đơn và retry cùng key; đã export workflow | Token sales còn cập nhật thủ công; mới kiểm chứng test webhook |
-| 5. Broker subscription → backend | Đã kiểm chứng notification thật, đọc lại PostgreSQL và các bài thử lỗi | Receiver hiện xử lý Asset.status; smoke dùng độ phân giải giây |
+| 2. Mô hình dữ liệu, JSON-LD context và mapping ID                    | Đã định nghĩa sáu loại entity; tạo/đọc fixture cơ bản và logistics thành công          | Nguồn ID thực tế, enum và contract cuối cùng vẫn chờ Duy/nhóm xác nhận           |
+| 3. Connector Asset và dữ liệu mẫu                                     | Đã viết và kiểm chứng create → get → update → read-back                                      | Chưa thực thi đầy đủ mọi quy tắc trong data contract                                |
+| 4. Webhook n8n → API logistics                                           | Đã kiểm chứng auth, validation, tạo đơn và retry cùng key; đã export workflow              | Token sales còn cập nhật thủ công; mới kiểm chứng test webhook                      |
+| 5. Broker subscription → backend                                         | Đã kiểm chứng notification thật, đọc lại PostgreSQL và các bài thử lỗi                   | Receiver hiện xử lý Asset.status; smoke dùng độ phân giải giây                     |
 
 ## 3. Mục 1 — Runtime, phiên bản và credential
 
 ### Môi trường
 
-| Thành phần | Phiên bản | Truy cập từ máy host |
-| --- | --- | --- |
-| Orion-LD | 1.10.0 | http://localhost:1026 |
-| MongoDB của broker | 4.4.29 | Chỉ trong mạng Docker |
-| n8n | 2.42.7 | http://localhost:5678 |
-| API gateway | Theo core Compose | http://localhost:8080 |
-| Keycloak | Theo core Compose | http://localhost:8081 |
+
+| Thành phần                       | Phiên bản       | Truy cập từ máy host |
+| ------------------------------------ | ------------------- | ------------------------- |
+| Orion-LD                           | 1.10.0            | http://localhost:1026   |
+| MongoDB của broker                | 4.4.29            | Chỉ trong mạng Docker |
+| n8n                                | 2.42.7            | http://localhost:5678   |
+| API gateway                        | Theo core Compose | http://localhost:8080   |
+| Keycloak                           | Theo core Compose | http://localhost:8081   |
 | PostgreSQL nghiệp vụ/bản chiếu | Theo core Compose | Chỉ trong mạng Docker |
 
 - Integration stack: [infra/compose/integration.yml](../infra/compose/integration.yml).
@@ -76,15 +78,16 @@ Namespace `https://latticedx.example/ns/` là đề xuất của nhóm.
 
 ### Mapping fixture đã thử
 
-| Entity | Organization | Business ID | URN |
-| --- | --- | --- | --- |
-| Department | org-a | it | urn:ngsi-ld:Department:org-a:it |
-| Location | org-a | office-1 | urn:ngsi-ld:Location:org-a:office-1 |
-| Asset | org-a | laptop-001 | urn:ngsi-ld:Asset:org-a:laptop-001 |
-| Vehicle | org-a | truck-001 | urn:ngsi-ld:Vehicle:org-a:truck-001 |
-| Warehouse | org-a | warehouse-001 | urn:ngsi-ld:Warehouse:org-a:warehouse-001 |
-| Warehouse | org-a | warehouse-002 | urn:ngsi-ld:Warehouse:org-a:warehouse-002 |
-| Shipment | org-a | shipment-demo-001 | urn:ngsi-ld:Shipment:org-a:shipment-demo-001 |
+
+| Entity     | Organization | Business ID       | URN                                          |
+| ------------ | -------------- | ------------------- | ---------------------------------------------- |
+| Department | org-a        | it                | urn:ngsi-ld:Department:org-a:it              |
+| Location   | org-a        | office-1          | urn:ngsi-ld:Location:org-a:office-1          |
+| Asset      | org-a        | laptop-001        | urn:ngsi-ld:Asset:org-a:laptop-001           |
+| Vehicle    | org-a        | truck-001         | urn:ngsi-ld:Vehicle:org-a:truck-001          |
+| Warehouse  | org-a        | warehouse-001     | urn:ngsi-ld:Warehouse:org-a:warehouse-001    |
+| Warehouse  | org-a        | warehouse-002     | urn:ngsi-ld:Warehouse:org-a:warehouse-002    |
+| Shipment   | org-a        | shipment-demo-001 | urn:ngsi-ld:Shipment:org-a:shipment-demo-001 |
 
 ### Kết quả kiểm chứng — 15/10/2026
 
@@ -112,12 +115,13 @@ Chỉ ghi “đã thống nhất ID” sau khi nhóm xác nhận trên contract.
 
 ### Bằng chứng — 15/10/2026
 
-| Thao tác | Kết quả |
-| --- | --- |
-| createAsset | HTTP 201 |
-| getAsset | status=ready |
-| updateAsset | HTTP 204 |
-| Read-back | status=in_use, observedAt matched |
+
+| Thao tác   | Kết quả                         |
+| ------------- | ----------------------------------- |
+| createAsset | HTTP 201                          |
+| getAsset    | status=ready                      |
+| updateAsset | HTTP 204                          |
+| Read-back   | status=in_use, observedAt matched |
 
 Asset kiểm chứng: `urn:ngsi-ld:Asset:org-a:connector-b70eda60-3fc4-4dc1-8c5a-6f1d01370b2f`.
 Smoke tạo Asset demo riêng và giữ lại; không sửa fixture `laptop-001`.
@@ -149,14 +153,15 @@ Luồng payload sai:
 
 ### Kết quả — 15/10/2026
 
-| Trường hợp | Kết quả |
-| --- | --- |
-| Payload hợp lệ, giai đoạn chỉ validation | 200 validated_only |
-| quantity=0 | 400 invalid_payload |
-| Thiếu/sai token webhook | 403 |
-| Credential backend không hợp lệ | Chuyển tiếp 401 |
-| Tạo đơn qua toàn bộ workflow | 201, state=draft, organizationId=org-a |
-| Gửi lại cùng key và payload | 201, cùng Order ID, createdAt và version=1 |
+
+| Trường hợp                                 | Kết quả                                    |
+| ----------------------------------------------- | ---------------------------------------------- |
+| Payload hợp lệ, giai đoạn chỉ validation | 200 validated_only                           |
+| quantity=0                                    | 400 invalid_payload                          |
+| Thiếu/sai token webhook                      | 403                                          |
+| Credential backend không hợp lệ            | Chuyển tiếp 401                            |
+| Tạo đơn qua toàn bộ workflow             | 201, state=draft, organizationId=org-a       |
+| Gửi lại cùng key và payload               | 201, cùng Order ID, createdAt và version=1 |
 
 Order kiểm chứng: `e17fd484-e9b3-4a9c-98e3-2192ce2d1f0f`.
 `validated_only` là kết quả giai đoạn trước khi nối API; workflow hiện trả kết quả backend.
@@ -190,15 +195,16 @@ Receiver kiểm tra token broker, tenant header, subscription ID, entity type/UR
 Smoke thành công trên code `a5ec081`, fixture:
 `urn:ngsi-ld:Asset:org-a:subscription-a1137a4a-c514-4515-bf86-65590b1b1cf1`.
 
-| Đường kiểm chứng | Trường hợp | Kết quả |
-| --- | --- | --- |
-| Broker thật → gateway → receiver → PostgreSQL | Tạo Asset | PASS, đọc lại đúng status/observedAt |
-| Broker thật → gateway → receiver → PostgreSQL | Cập nhật status với observedAt mới hơn | PASS |
-| Gọi trực tiếp receiver | Thiếu/sai token hoặc sai tenant | 403 |
-| Gọi trực tiếp receiver | Subscription không được phép | 403 |
-| Gọi trực tiếp receiver | Observation trùng hoặc cũ | Bỏ qua, không ghi đè |
-| Gọi trực tiếp receiver | Cùng observedAt nhưng khác status | 409 |
-| Gọi trực tiếp receiver | Thiếu/sai trường bắt buộc hoặc observedAt | Từ chối; bản chiếu đã nhận không đổi |
+
+| Đường kiểm chứng                             | Trường hợp                                   | Kết quả                                      |
+| --------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------ |
+| Broker thật → gateway → receiver → PostgreSQL | Tạo Asset                                      | PASS, đọc lại đúng status/observedAt      |
+| Broker thật → gateway → receiver → PostgreSQL | Cập nhật status với observedAt mới hơn     | PASS                                           |
+| Gọi trực tiếp receiver                         | Thiếu/sai token hoặc sai tenant               | 403                                            |
+| Gọi trực tiếp receiver                         | Subscription không được phép               | 403                                            |
+| Gọi trực tiếp receiver                         | Observation trùng hoặc cũ                    | Bỏ qua, không ghi đè                       |
+| Gọi trực tiếp receiver                         | Cùng observedAt nhưng khác status            | 409                                            |
+| Gọi trực tiếp receiver                         | Thiếu/sai trường bắt buộc hoặc observedAt | Từ chối; bản chiếu đã nhận không đổi |
 
 Hai hàng đầu chứng minh delivery thật từ broker. Các bài thử lỗi gọi trực tiếp receiver,
 không được mô tả là toàn bộ lỗi đều phát sinh qua broker.
@@ -250,4 +256,3 @@ Không chia sẻ toàn bộ JSON subscription vì receiverInfo chứa credential
 - Mở rộng bản chiếu Vehicle/Shipment/Warehouse theo contract đã thống nhất.
 - Kiểm tra bảo toàn phần mili giây, concurrent/batch delivery, retry/reconciliation và lưu vết notification.
 - Hoàn thiện validation/quan hệ/ordering của Asset connector nếu dùng nó cho dữ liệu vận hành thực tế.
-
