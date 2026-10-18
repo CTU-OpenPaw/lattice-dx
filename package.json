@@ -71,6 +71,7 @@
     "test:scanner-outage": "node scripts/smoke-scanner-outage.mjs",
     "identity:sync-local": "node scripts/sync-local-realm.mjs",
     "test:incident-agent": "node scripts/acceptance-incident-agent-postgres.mjs",
+    "test:ngsi-ld-postgres": "node scripts/acceptance-ngsi-ld-postgres.mjs",
     "test:infra": "node scripts/smoke-core.mjs"
   },
   "devDependencies": { "typescript": "7.0.2", "tsx": "4.23.15", "vitest": "5.0.3", "@types/node": "26.6.4" },

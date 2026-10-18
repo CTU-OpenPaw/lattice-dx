@@ -254,6 +254,19 @@ Không chia sẻ toàn bộ JSON subscription vì receiverInfo chứa credential
 
 ## 9. Việc tiếp theo sau phạm vi local
 
+### Kiểm chứng bản ghép — 18/10/2026
+
+Nhánh subscription đã ghép các thay đổi nhánh nền và backend mới, giữ receiver, context-links,
+identity, agent jobs, worker lifecycle và object storage. `pnpm check` đạt 112 file / 608 test,
+typecheck và build. Chạy lại `pnpm test:ngsi-ld-postgres` để kiểm phần ghép trên một database
+PostgreSQL mới, tự xóa sau khi kiểm: ghi đồng thời lần đầu giữ quan sát mới nhất, conflict cùng
+observedAt, batch ngược thứ tự không deadlock, rollback toàn batch, receiver → projection →
+API context với JWT người dùng, chặn người không được chia sẻ và khác tenant. Bộ kiểm này
+gửi notification mô phỏng qua handler thật; không thay thế smoke delivery Orion thật ở mục 7.
+
+API context người dùng cần `NGSI_LD_CONTEXT_READ=true`; mặc định vẫn tắt. Không đưa token
+broker vào trình duyệt. Bản ghép chưa chứng minh n8n active, token refresh hoặc model inference.
+
 - Chốt nguồn ID, enum, mapping và nguồn cập nhật từng thuộc tính với Duy/nhóm.
 - Bổ sung đầy đủ hồ sơ nguồn/license của integration stack và kiểm tra điều kiện đóng gói/phân phối.
 - Tự động cấp/làm mới token n8n và kiểm chứng production webhook khi kích hoạt.
