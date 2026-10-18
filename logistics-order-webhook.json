@@ -121,7 +121,8 @@
                 "neverError": true,
                 "responseFormat": "json"
               }
-            }
+            },
+            "timeout": 10000
           }
         },
         "type": "n8n-nodes-base.httpRequest",
@@ -137,7 +138,9 @@
             "id": "WGRfBYwN01p6RcRy",
             "name": "LatticeDX Local Sales API"
           }
-        }
+        },
+        "onError": "continueErrorOutput",
+        "retryOnFail": false
       },
       {
         "parameters": {
@@ -155,6 +158,23 @@
         ],
         "id": "0d502a2e-5c85-4171-83d1-64438ec1b0d2",
         "name": "Return Order Result"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "{\"error\":\"upstream_unavailable\",\"message\":\"Order creation could not be confirmed. Check its status before retrying with the same Idempotency-Key.\"}",
+          "options": {
+            "responseCode": 502
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.4,
+        "position": [
+          1280,
+          304
+        ],
+        "id": "4f4531b2-c44f-4b7c-968f-a3ca38df7e97",
+        "name": "Return Integration Failure"
       }
     ],
     "connections": {
@@ -203,6 +223,13 @@
           [
             {
               "node": "Return Order Result",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Return Integration Failure",
               "type": "main",
               "index": 0
             }

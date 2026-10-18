@@ -36,3 +36,20 @@ test('optional suggestion failure does not block an allowed action; required sel
  assert.equal((await loadFormContext(api,block,contract,registry)).available,true);
  assert.equal((await loadFormContext(api,block,{...contract,availabilityReference:'contacts'},registry)).available,false);
 });
+
+test('command form checks backend capability before loading protected references',async()=>{
+ const registry=createContractRegistry();registry.registerReference('contacts',{mode:'select',resource:'contacts'});
+ const block={submit:{actionId:'tickets.create',version:1},fields:[{name:'contact',reference:'contacts',required:true}]};
+ const contract={transport:{kind:'command'},availabilityCapability:'tickets.create'};let reads=0,allowed=false;
+ const api={workflow:async operation=>{assert.equal(operation,'capabilities');return {version:1,capabilities:{'tickets.create':{authorized:allowed,configured:true,available:allowed}}};},list:async()=>{reads++;return [];}};
+ const denied=await loadFormContext(api,block,contract,registry);assert.equal(denied.available,false);assert.equal(denied.error,'');assert.equal(reads,0);
+ allowed=true;assert.equal((await loadFormContext(api,block,contract,registry)).available,true);assert.equal(reads,1);
+ api.workflow=async()=>({version:1,capabilities:{}});
+ await assert.rejects(loadFormContext(api,block,contract,registry));assert.equal(reads,1);
+});
+test('unavailable catalog action does not request form reference data',async()=>{
+ let reads=0;const registry=createContractRegistry();registry.registerReference('contacts',{mode:'select',resource:'contacts'});
+ const api={catalog:async()=>[],list:async()=>{reads++;throw Error('Should not read');}};
+ const result=await loadFormContext(api,{submit:{actionId:'tickets.create',version:1},fields:[{reference:'contacts'}]},{transport:{kind:'catalog'}},registry);
+ assert.equal(result.available,false);assert.equal(result.error,'');assert.equal(reads,0);
+});

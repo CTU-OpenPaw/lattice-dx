@@ -125,7 +125,7 @@ function createBridge(config, dependencies = {}) {
     },
     async workflow(userId, browserId, input) {
       const item=session(userId,browserId);
-      const operations={definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],people:['GET','directory/people'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST',''],waits:['GET',''],executions:['GET',''],completeWait:['POST',''],retrySync:['POST',''],entityContext:['GET','']};
+      const operations={capabilities:['GET','me/capabilities'],definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],people:['GET','directory/people'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST',''],waits:['GET',''],executions:['GET',''],completeWait:['POST',''],retrySync:['POST',''],entityContext:['GET','']};
       if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid workflow operation.');
       const [method,resource]=operations[input.operation];let path=resource;
       if(['detail','history','sync','transition','waits','executions','completeWait','retrySync','entityContext'].includes(input.operation)){

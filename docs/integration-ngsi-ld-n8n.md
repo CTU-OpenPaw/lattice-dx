@@ -174,10 +174,9 @@ Retry đã thử không tạo đơn mới; chưa kết luận cho request đồn
 - Credential trong export chỉ là tham chiếu tên/ID; môi trường khác phải tạo/gán credential riêng.
 - Workflow đang `active: false`; mới kiểm chứng URL `/webhook-test/latticedx/logistics/orders`.
 - Access token sales còn được cập nhật thủ công; chưa có tự động cấp/làm mới token.
-- HTTP Request trong export chưa cấu hình timeout 10 giây; chưa xử lý riêng lỗi kết nối,
-  timeout hoặc phản hồi không phải JSON. `Never Error` chỉ chuyển tiếp HTTP response đã nhận,
-  không bảo đảm mọi lỗi vận chuyển đều tới response node. Các giới hạn này được giữ lại
-  từ báo cáo nhánh nền khi giải quyết conflict ngày 18/10; chưa được coi là đã sửa.
+- Bản sửa 18/10 thêm timeout 10 giây và nhánh trả 502 an toàn cho lỗi kết nối/timeout/JSON.
+  Runtime n8n thật đã kiểm các nhánh lỗi với upstream mô phỏng, cùng phản hồi 201 và 401.
+  Không tự retry POST; xem [bản sửa và cách kiểm lại](runtime-integration-fixes.md).
 - Receiver/subscription ở mục 5 dùng token broker riêng, không dùng token sales hoặc token webhook.
 
 ## 7. Mục 5 — Subscription và receiver Asset.status
@@ -270,7 +269,6 @@ broker vào trình duyệt. Bản ghép chưa chứng minh n8n active, token ref
 - Chốt nguồn ID, enum, mapping và nguồn cập nhật từng thuộc tính với Duy/nhóm.
 - Bổ sung đầy đủ hồ sơ nguồn/license của integration stack và kiểm tra điều kiện đóng gói/phân phối.
 - Tự động cấp/làm mới token n8n và kiểm chứng production webhook khi kích hoạt.
-- Bổ sung timeout và kiểm chứng lỗi kết nối/timeout/phản hồi không phải JSON của n8n.
 - Mở rộng bản chiếu Vehicle/Shipment/Warehouse theo contract đã thống nhất.
 - Kiểm tra bảo toàn phần mili giây, concurrent/batch delivery, retry/reconciliation và lưu vết notification.
 - Hoàn thiện validation/quan hệ/ordering của Asset connector nếu dùng nó cho dữ liệu vận hành thực tế.

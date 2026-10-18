@@ -30,6 +30,7 @@ export function capabilities(actor: WorkflowActor, options: StudioOptions) {
     'entities.design': availability(actor, ['data:design'], !!options.entities),
     'entities.query': availability(actor, ['data:read'], !!options.entities?.query),
     'workflow.start': availability(actor, ['workflow:start'], !!options.workflows),
+    'logistics.create': availability(actor, ['logistics:sales','workflow:start'], !!(options.workflows && options.directory)),
     'workflow.design': availability(actor, ['workflow:design'], !!options.definitionRegistry),
     'modules.preflight': availability(actor, ['workflow:design', 'data:design'], !!options.modules),
     'modules.dependencies': availability(actor, ['workflow:design'], !!options.modules),
