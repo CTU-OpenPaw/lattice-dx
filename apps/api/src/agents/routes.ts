@@ -26,6 +26,9 @@ export function registerAgents(app:FastifyInstance,options:AgentOptions){
   app.register(async routes=>{
     const actors=new WeakMap<object,WorkflowActor>();
     routes.setErrorHandler((e,_r,reply)=>{
+      const code=e&&typeof e==='object'&&'code' in e?e.code:undefined;
+      if(code==='FST_ERR_CTP_BODY_TOO_LARGE')return reply.code(413).send({error:'Agent request body too large.'});
+      if(code==='FST_ERR_CTP_INVALID_JSON_BODY'||code==='FST_ERR_CTP_EMPTY_JSON_BODY')return reply.code(400).send({error:'Invalid agent JSON body.'});
       if(e instanceof CreateCommandError||e instanceof WorkflowError||e instanceof EntityError||e instanceof FileReadError||e instanceof PageError)return reply.code(e.statusCode).send({
         error:e.message
       });
@@ -101,7 +104,7 @@ export function registerAgents(app:FastifyInstance,options:AgentOptions){
         id:string
       }
     }
-    >('/v1/agent-jobs/:id/result',async req=>{
+    >('/v1/agent-jobs/:id/result',{bodyLimit:144*1024},async req=>{
       const a=actors.get(req)!;
       worker(a);
       const b=object(req.body,['leaseToken','proposal']);

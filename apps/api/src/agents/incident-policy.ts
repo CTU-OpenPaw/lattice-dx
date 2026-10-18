@@ -4,7 +4,7 @@ import type {WorkflowActor,WorkflowRun,TransitionCommand} from '@dx/contracts';
 import {assertHuman,assertAssetSchema,bad,parseProposal} from './policy.js';
 import {lockContextEntity} from '../workflows/entity-context.js';
 import {applyEntityUpdateWithClient,scopedEntity} from '../entities/client.js';
-export async function assertIncidentActor(client:PoolClient,run:WorkflowRun,actor:WorkflowActor,requiredRole?:string){
+export async function assertIncidentActor(client:PoolClient,run:Pick<WorkflowRun,'definitionId'>,actor:WorkflowActor,requiredRole?:string|string[]){
   if(run.definitionId!=='incident-response')return;
   assertHuman(actor);
   const p=(await client.query('SELECT roles FROM directory_people WHERE organization_id=$1 AND subject=$2 AND enabled=true FOR SHARE',[actor.organizationId,actor.subject])).rows[0];
@@ -12,7 +12,8 @@ export async function assertIncidentActor(client:PoolClient,run:WorkflowRun,acto
   assertHuman({
     ...actor,roles:p.roles
   });
-  if(requiredRole&&(!actor.roles.includes(requiredRole)||!p.roles.includes(requiredRole)))bad(403,'Current incident transition authority required.');
+  const required=typeof requiredRole==='string'?[requiredRole]:requiredRole??[];
+  if(required.some(role=>!actor.roles.includes(role)||!p.roles.includes(role)))bad(403,'Current incident authority required.');
 }
 /** Called under the workflow run lock after transition/version validation, before any mutation. */
 export async function assertIncidentTransition(client:PoolClient,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand){

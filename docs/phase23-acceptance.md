@@ -29,3 +29,11 @@ Fixture identities and the worker are simulated; their generated schemas are rem
 After final review, only the API container was rebuilt from ce33d40 and became healthy. Its protected agent route returned 401 without a token, and the agent persistence tables were present. Fresh `pnpm test:workflows` and `pnpm test:team-integration` passed against that running Gateway/API/PostgreSQL stack. Existing identities, NocoBase containers and volumes were preserved. A database-only backup and the previous API image tag were retained locally before the update; this is not a full disaster-recovery rehearsal.
 
 The existing Notion project page was updated and read back: Duy phase 2 has 6/6 checked items and phase 3 has 7/7. The teammate sections and shared acceptance criteria were preserved. The page includes backend evidence and the remaining real broker/model/UI integration boundary.
+
+## Review corrections — 18 October 2026
+
+Incident creation and creation replay now require an active directory identity with current start roles, and reject worker roles in either the JWT or directory. Owner cancellation and task transfer use the same incident authority boundary. Generic workflow behavior is unchanged. Signed HTTP acceptance on a disposable PostgreSQL schema passed disabled/revoked creators, mixed worker roles, denied replay/cancellation and restored human cancellation, as well as the existing incident lifecycle.
+
+Agent result requests have a bounded 144 KiB limit covering the proposal validator's maximum JSON-escaped content. Oversized bodies return a sanitized 413; malformed JSON returns 400. The route regression verifies maximal escaped proposals and that rejected input never reaches the repository.
+
+Fresh `pnpm check` passed 110 files / 599 tests, typecheck and all builds. `pnpm test:incident-agent` passed using signed fixture identities, production handlers/repositories and isolated PostgreSQL; model/broker/UI delivery remains outside this backend test. No additional Notion tasks were ticked during this review.

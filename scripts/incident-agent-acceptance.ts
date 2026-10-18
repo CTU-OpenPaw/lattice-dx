@@ -57,6 +57,27 @@ async function main(){
   await call('/v1/entities/'+rule.id,'PATCH',{expectedVersion:firstRule.version,title:rule.title,attributes:firstRule.attributes},'manager',409);
   await call('/v1/entities/'+rule.id,'PATCH',{expectedVersion:rule.version,title:rule.title,attributes:{...rule.attributes,threshold:'41'}},'manager',400);
   const start=(assetId:string,extra={})=>({definitionId:'incident-response',title:'Fixture incident',input:{assetEntityId:assetId,notificationId:randomUUID(),handlerId:'handler',...extra}});
+  // Current directory authority fences starts, replays and owner lifecycle writes.
+  for(const change of ["enabled=false","roles='[]'::jsonb"]){
+   await pool.query('UPDATE directory_people SET '+change+" WHERE subject='manager'");
+   await call('/v1/workflows','POST',start(a.id),'manager',403);
+   await pool.query("UPDATE directory_people SET enabled=true,roles=$1 WHERE subject='manager'",[JSON.stringify(roles.manager)]);
+  }
+  const mixedRoles=[...roles.worker,'workflow:start','incident:create'];
+  tokens.mixed=await new SignJWT({organization_id:'fixture',realm_access:{roles:mixedRoles}}).setSubject('worker').setProtectedHeader({alg:'RS256'}).setIssuer('incident-fixture').setAudience('api').setExpirationTime('1h').sign(keys.privateKey);
+  await pool.query("UPDATE directory_people SET roles=$1 WHERE subject='worker'",[JSON.stringify(mixedRoles)]);
+  await call('/v1/workflows','POST',start(a.id),'mixed',403);
+  await pool.query("UPDATE directory_people SET roles=$1 WHERE subject='worker'",[JSON.stringify(roles.worker)]);
+  const creation=start(a.id),creationKey=randomUUID();
+  const cancellable=await call('/v1/workflows','POST',creation,'manager',201,creationKey);
+  await pool.query("UPDATE directory_people SET enabled=false WHERE subject='manager'");
+  await call('/v1/workflows','POST',creation,'manager',403,creationKey);
+  await call('/v1/workflows/'+cancellable.id+'/cancel','POST',{expectedVersion:cancellable.version,reason:'Fixture cleanup'},'manager',403);
+  await pool.query("UPDATE directory_people SET enabled=true,roles=$1 WHERE subject='manager'",[JSON.stringify([...roles.manager,'agent:worker'])]);
+  await call('/v1/workflows','POST',start(a.id),'manager',403);
+  await call('/v1/workflows/'+cancellable.id+'/cancel','POST',{expectedVersion:cancellable.version,reason:'Fixture cleanup'},'manager',403);
+  await pool.query("UPDATE directory_people SET roles=$1 WHERE subject='manager'",[JSON.stringify(roles.manager)]);
+  await call('/v1/workflows/'+cancellable.id+'/cancel','POST',{expectedVersion:cancellable.version,reason:'Fixture cleanup'});
   await call('/v1/workflows','POST',start(a.id,{handlerId:'unknown'}),'manager',400);
   const subscription={id:'incident-notifications',eventType:'incident-notification',sourceSubject:'source',definitionId:'incident-response',definitionVersion:1,title:{source:'literal',value:'Sensor incident'},input:{assetEntityId:{source:'event',field:'assetEntityId'},handlerId:{source:'event',field:'handlerId'},notificationId:{source:'envelope',field:'eventId'},ruleEntityId:{source:'event',field:'ruleEntityId'},ruleEntityVersion:{source:'event',field:'ruleEntityVersion'}},enabled:true};
   await call('/v1/workflow-event-subscriptions','POST',subscription,'manager',201);

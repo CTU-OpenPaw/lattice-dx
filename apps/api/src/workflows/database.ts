@@ -115,6 +115,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     const def=replay?await definition(replay.result,client):await registry.get(actor.organizationId,value.definitionId,value.definitionVersion,client);
     if(!def)throw new WorkflowError(400,'Phiên bản quy trình không khả dụng.');
     if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
+    await assertIncidentActor(client,{definitionId:def.id},actor,['workflow:start',def.startRole]);
     if(replay){
       await client.query('SELECT id FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR SHARE',[replay.result.id,actor.organizationId]);
       const stored=await readContext(client,replay.result.id,actor.organizationId);
