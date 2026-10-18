@@ -1,3 +1,4 @@
+import {registerAgents,type AgentOptions} from './agents/routes.js';
 // SPDX-License-Identifier: Apache-2.0
 import { CreateCommandError,parseCreateKey,requireCreateCapability } from './create-command.js';
 import Fastify from 'fastify';
@@ -25,7 +26,9 @@ import {createTelemetry,type StatusClass} from './operations/telemetry.js';
 import {registerWorkflowEvents,type EventOptions} from './events/routes.js';
 import {registerModules,type ModuleOptions} from './modules/routes.js';
 import {registerAutomations,type AutomationOptions} from './automations/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & ReportsOptions & AutomationOptions) {
+import {registerStudio} from './studio/routes.js';
+import {registerContextLinks,type ContextLinksOptions} from './context-links/routes.js';
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & ReportsOptions & AutomationOptions & ContextLinksOptions & AgentOptions) {
   const telemetry=options.telemetry??createTelemetry();
   const app = Fastify({ bodyLimit: 16_384,genReqId:()=>correlationId() });
   const templates=new Set(['/v1/operations/metrics','/v1/operations/queues','/v1/operations/diagnostics']);
@@ -46,11 +49,14 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerDirectory(app,options);
   registerOrganization(app,options);
   registerWorkflows(app,options);
+  registerAgents(app,options);
   registerWorkflowDrafts(app,options);
   registerWorkflowBundles(app,options);
   registerWorkflowEvents(app,options);
   registerAutomations(app,options);
   registerModules(app,options);
+  registerStudio(app,options);
+  registerContextLinks(app,options);
   registerLogistics(app,options);
   registerEntities(app,options);
   registerEntityDataTools(app,options);

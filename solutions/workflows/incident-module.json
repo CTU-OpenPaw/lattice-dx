@@ -1,0 +1,353 @@
+{
+  "format": "latticedx.enterprise-module",
+  "formatVersion": 1,
+  "id": "incident",
+  "version": "1.0.0",
+  "title": "Incident response reference module",
+  "schemas": [
+    {
+      "id": "incident-asset",
+      "title": "Incident Asset",
+      "fields": {
+        "status": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "ready",
+            "in_use",
+            "repair",
+            "retired"
+          ]
+        },
+        "serial": {
+          "type": "text",
+          "required": true
+        }
+      },
+      "relations": {}
+    },
+    {
+      "id": "incident-rule",
+      "title": "Incident threshold rule",
+      "fields": {
+        "assetEntityId": {
+          "type": "text",
+          "required": true,
+          "maxLength": 36
+        },
+        "attribute": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "temperature",
+            "humidity",
+            "batteryLevel"
+          ]
+        },
+        "operator": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "gt",
+            "gte",
+            "lt",
+            "lte"
+          ]
+        },
+        "threshold": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "0",
+            "5",
+            "10",
+            "15",
+            "20",
+            "25",
+            "30",
+            "35",
+            "40",
+            "50",
+            "60",
+            "70",
+            "80",
+            "90",
+            "100"
+          ]
+        },
+        "unit": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "celsius",
+            "percent"
+          ]
+        },
+        "maxObservationAgeSeconds": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "30",
+            "60",
+            "120",
+            "300",
+            "600"
+          ]
+        },
+        "cooldownSeconds": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "0",
+            "60",
+            "300",
+            "900",
+            "3600"
+          ]
+        },
+        "severity": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "low",
+            "medium",
+            "high",
+            "critical"
+          ]
+        },
+        "enabled": {
+          "type": "boolean",
+          "required": true
+        },
+        "workflowDefinitionId": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "incident-response"
+          ]
+        },
+        "workflowDefinitionVersion": {
+          "type": "enum",
+          "required": true,
+          "choices": [
+            "1"
+          ]
+        },
+        "handlerId": {
+          "type": "text",
+          "required": true,
+          "maxLength": 100
+        }
+      },
+      "relations": {}
+    }
+  ],
+  "bundle": {
+    "format": "latticedx.workflow-bundle",
+    "formatVersion": 1,
+    "definitions": [
+      {
+        "id": "incident-response",
+        "title": "Incident response",
+        "startRole": "incident:create",
+        "initialState": "open",
+        "startFields": {
+          "assetEntityId": "text",
+          "notificationId": "text",
+          "handlerId": "subject"
+        },
+        "optionalStartFields": {
+          "attachmentId": "file",
+          "ruleEntityId": "text",
+          "ruleEntityVersion": "positiveInteger"
+        },
+        "readerRoles": [
+          "incident:manager"
+        ],
+        "assignedReader": {
+          "field": "handlerId",
+          "role": "incident:handler",
+          "states": [
+            "open",
+            "assigned",
+            "investigating",
+            "analyzing",
+            "review_pending",
+            "approved",
+            "resolved",
+            "closed",
+            "analysis_failed",
+            "rejected"
+          ]
+        },
+        "transitions": [
+          {
+            "id": "assign",
+            "from": "open",
+            "to": "assigned",
+            "role": "incident:manager",
+            "fields": {},
+            "task": "assign"
+          },
+          {
+            "id": "accept",
+            "from": "assigned",
+            "to": "investigating",
+            "role": "incident:handler",
+            "fields": {
+              "receiptNote": "text"
+            },
+            "assigneeField": "handlerId",
+            "task": "complete"
+          },
+          {
+            "id": "request_analysis",
+            "from": "investigating",
+            "to": "analyzing",
+            "role": "incident:handler",
+            "fields": {},
+            "assigneeField": "handlerId",
+            "steps": [
+              {
+                "id": "analyze",
+                "action": "connectors.dispatch",
+                "input": {
+                  "connectorId": {
+                    "source": "literal",
+                    "value": "agent"
+                  },
+                  "operation": {
+                    "source": "literal",
+                    "value": "incident.analyze"
+                  },
+                  "payload": {
+                    "assetEntityId": {
+                      "source": "data",
+                      "field": "assetEntityId"
+                    },
+                    "notificationId": {
+                      "source": "data",
+                      "field": "notificationId"
+                    },
+                    "handlerId": {
+                      "source": "data",
+                      "field": "handlerId"
+                    }
+                  }
+                }
+              }
+            ],
+            "wait": {
+              "stepId": "analyze",
+              "successState": "review_pending",
+              "failureState": "analysis_failed",
+              "resultFields": {
+                "proposalId": "text",
+                "agentJobId": "text"
+              },
+              "timeoutSeconds": 300
+            }
+          },
+          {
+            "id": "retry_analysis",
+            "from": "analysis_failed",
+            "to": "analyzing",
+            "role": "incident:handler",
+            "fields": {},
+            "assigneeField": "handlerId",
+            "steps": [
+              {
+                "id": "analyze",
+                "action": "connectors.dispatch",
+                "input": {
+                  "connectorId": {
+                    "source": "literal",
+                    "value": "agent"
+                  },
+                  "operation": {
+                    "source": "literal",
+                    "value": "incident.analyze"
+                  },
+                  "payload": {
+                    "assetEntityId": {
+                      "source": "data",
+                      "field": "assetEntityId"
+                    },
+                    "notificationId": {
+                      "source": "data",
+                      "field": "notificationId"
+                    },
+                    "handlerId": {
+                      "source": "data",
+                      "field": "handlerId"
+                    }
+                  }
+                }
+              }
+            ],
+            "wait": {
+              "stepId": "analyze",
+              "successState": "review_pending",
+              "failureState": "analysis_failed",
+              "resultFields": {
+                "proposalId": "text",
+                "agentJobId": "text"
+              },
+              "timeoutSeconds": 300
+            }
+          },
+          {
+            "id": "approve",
+            "from": "review_pending",
+            "to": "approved",
+            "role": "incident:manager",
+            "fields": {
+              "reviewNote": "text"
+            }
+          },
+          {
+            "id": "reject",
+            "from": "review_pending",
+            "to": "rejected",
+            "role": "incident:manager",
+            "fields": {
+              "reason": "text"
+            }
+          },
+          {
+            "id": "rework",
+            "from": "rejected",
+            "to": "investigating",
+            "role": "incident:handler",
+            "fields": {
+              "reworkNote": "text"
+            },
+            "assigneeField": "handlerId"
+          },
+          {
+            "id": "record_resolution",
+            "from": "approved",
+            "to": "resolved",
+            "role": "incident:handler",
+            "fields": {
+              "resolutionNote": "text"
+            },
+            "assigneeField": "handlerId"
+          },
+          {
+            "id": "close",
+            "from": "resolved",
+            "to": "closed",
+            "role": "incident:manager",
+            "fields": {
+              "closeNote": "text"
+            },
+            "eventType": "incident.closed"
+          }
+        ]
+      }
+    ]
+  },
+  "blocks": [],
+  "dependencies": []
+}

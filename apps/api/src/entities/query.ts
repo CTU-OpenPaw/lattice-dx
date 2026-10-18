@@ -2,6 +2,7 @@
 import {PageError} from '../pagination.js';
 import {bad,exact,name,slug,version,validateAttributes} from './policy.js';
 import type {EntityQuery,Field,QueryOperator,SchemaPublication} from './types.js';
+export const entityQueryOperators = Object.freeze(['eq','ne','gt','gte','lt','lte','contains','exists']);
 export function parseEntityQuery(input:unknown):EntityQuery & {limit:number;offset:number;filters:NonNullable<EntityQuery['filters']>} {
  const body=exact(input,['schemaId','schemaVersion','filters','sort','limit','offset']);
  if(Buffer.byteLength(JSON.stringify(body),'utf8')>16384) bad('Entity data exceeds 16 KiB.');
@@ -13,7 +14,7 @@ export function parseEntityQuery(input:unknown):EntityQuery & {limit:number;offs
  if(!Array.isArray(raw)||raw.length>10) bad('Invalid filters.');
  const filters=raw.map(value=>{
   const item=exact(value,['field','operator','value']),field=name(item.field);
-  if(typeof item.operator!=='string'||!['eq','ne','gt','gte','lt','lte','contains','exists'].includes(item.operator)) bad('Invalid query operator.');
+  if(typeof item.operator!=='string'||!entityQueryOperators.includes(item.operator)) bad('Invalid query operator.');
   const operator=item.operator as QueryOperator;
   if(operator==='exists' ? Object.hasOwn(item,'value') : !Object.hasOwn(item,'value')) bad('Invalid query value.');
   if(operator!=='exists'&&!['string','number','boolean'].includes(typeof item.value)) bad('Invalid query value.');

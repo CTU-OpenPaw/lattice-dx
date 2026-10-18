@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import {expect,test} from 'vitest';
-import {canonicalEvent,eventStartKey,parseEvent,parseSubscription,requireDesigner,requireReceiver} from './policy.js';
+import {canonicalEvent,eventStartKey,parseEvent,parseSubscription,requireDesigner,requireReceiver,resolveBinding} from './policy.js';
+test('canonical envelope eventId binding cannot read a spoofed data eventId',()=>{
+ const binding={source:'envelope',field:'eventId'} as const;
+ expect(parseSubscription({...subscription,input:{notificationId:binding}})).toBeDefined();
+ expect(resolveBinding(binding as any,{eventId:'spoof'},event)).toBe(event.eventId);
+ expect(parseSubscription({...subscription,input:{notificationId:{source:'envelope',field:'organizationId'}}})).toBeUndefined();
+});
 
 const event={eventId:'opaque/01',eventType:'order-created',occurredAt:'2026-10-14T01:02:03.123Z',data:{z:'two',a:'one'}};
 const subscription={id:'sub-one',eventType:event.eventType,sourceSubject:'source',definitionId:'order-flow',definitionVersion:1,title:{source:'literal',value:'Order'},input:{note:{source:'event',field:'a'}},enabled:true};
