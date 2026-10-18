@@ -12,11 +12,16 @@ async function loadReferenceOptions(api,reference) {
   }
 }
 async function loadFormContext(api,block,contract,contracts) {
+  let allowed=true;
+  if(contract.transport.kind==='catalog')allowed=(await api.catalog()).some(action=>action.id===block.submit.actionId&&action.version===block.submit.version);
+  if(contract.availabilityCapability){
+    const result=await api.workflow('capabilities'),capability=result?.capabilities?.[contract.availabilityCapability];
+    if(result?.version!==1||typeof capability?.available!=='boolean'||typeof capability.authorized!=='boolean'||typeof capability.configured!=='boolean')throw new Error('Không xác nhận được quyền sử dụng form.');
+    allowed=allowed&&capability.authorized&&capability.configured&&capability.available;
+  }
+  if(!allowed)return {options:{},available:false,error:''};
   const names=[...new Set(block.fields.filter(field=>field.reference).map(field=>field.reference))];
-  const [references,allowed]=await Promise.all([
-    Promise.all(names.map(async name=>{try{return {name,rows:await loadReferenceOptions(api,contracts.reference(name))};}catch(error){return {name,error};}})),
-    contract.transport.kind==='catalog'?api.catalog().then(items=>items.some(action=>action.id===block.submit.actionId&&action.version===block.submit.version)):Promise.resolve(true),
-  ]);
+  const references=await Promise.all(names.map(async name=>{try{return {name,rows:await loadReferenceOptions(api,contracts.reference(name))};}catch(error){return {name,error};}}));
   const required=new Set(block.fields.filter(field=>field.required&&contracts.reference(field.reference)?.mode==='select').map(field=>field.reference));
   if(contract.availabilityReference)required.add(contract.availabilityReference);
   return {options:Object.fromEntries(references.filter(item=>!item.error).map(item=>[item.name,item.rows])),available:allowed&&!references.some(item=>item.error&&required.has(item.name)),error:references.filter(item=>item.error).map(item=>item.error.message).join(' ')};

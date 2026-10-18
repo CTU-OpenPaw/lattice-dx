@@ -1,5 +1,5 @@
 {
-  "name": "@latticedx/plugin-lattice-foundation", "version": "0.14.0", "private": true,
+  "name": "@latticedx/plugin-lattice-foundation", "version": "0.14.1", "private": true,
   "license": "Apache-2.0", "type": "commonjs", "main": "dist/server/index.js",
   "displayName": "LatticeDX Foundation", "description": "Department, Employee, Location and Asset registries.",
   "files": ["dist", "server.js", "client.js", "client-v2.js", "README.md", "LICENSE", "scripts/check-runtime.cjs"],

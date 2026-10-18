@@ -32,6 +32,15 @@ const apps: ReturnType<typeof createApi>[]=[];
 function api(options: Partial<Parameters<typeof createApi>[0]>={}) {const app=createApi({workerUrl:'http://localhost:1',identity,...options});apps.push(app);return app;}
 afterEach(async()=>{await Promise.all(apps.splice(0).map(app=>app.close()));vi.unstubAllGlobals();});
 const endpoints=[['GET','/v1/me/capabilities'],['GET','/v1/studio/catalog'],['POST','/v1/studio/preflight'],['GET','/v1/studio/modules/sample/versions/1.0.0/dependencies']] as const;
+it('advertises Logistics creation only for sales with start authority and configured dependencies',async()=>{
+ const app=api({workflows:{} as WorkflowRepository,directory:{} as DirectoryRepository});
+ for(const [roles,allowed] of [[['logistics:warehouse'],false],[['logistics:sales'],false],[['logistics:sales','workflow:start'],true]] as [string[],boolean][]){
+  const response=await app.inject({url:'/v1/me/capabilities',headers:await auth(roles)});
+  expect(response.json().capabilities['logistics.create']).toEqual({authorized:allowed,configured:true,available:allowed});
+ }
+ const unavailable=await api().inject({url:'/v1/me/capabilities',headers:await auth(['logistics:sales','workflow:start'])});
+ expect(unavailable.json().capabilities['logistics.create']).toEqual({authorized:true,configured:false,available:false});
+});
 it('authenticates every Studio route and requires verified tenant scope',async()=>{
   const m=modules(),app=api({modules:m.repository});
   for(const [method,url] of endpoints){
