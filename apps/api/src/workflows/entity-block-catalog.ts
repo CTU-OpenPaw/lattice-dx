@@ -40,3 +40,11 @@ const inputs:Record<WorkflowEntityStep['action']|'data.evaluate'|'data.assert',R
   'entities.unlink':object({id:binding,targetId:binding,name:string,expectedVersion:expected}),
 };
 export const entityWorkflowBlocks=Object.entries(inputs).map(([id,input])=>({id,version:1,title:id,requiredRole:blockRole(id as WorkflowEntityStep['action']),input:{...input,$defs:expressionDefs},output:id==='data.evaluate'?object({evaluatedKeys:{type:'array',items:string}}):id==='data.assert'?object({asserted:{const:true}}):id==='entities.project'?object({...metadata.properties,projectedFields:{type:'array',items:string}}):id==='entities.query'?object({items:{type:'array',maxItems:100,items:metadata},page:object({limit:positive,offset:{const:0},hasMore:{type:'boolean'},nextOffset:{type:['integer','null']}})}):metadata}));
+
+export const workflowBlockCatalog = [
+  {id:'records.create',version:1,title:'Create record',requiredRole:'records:write'},
+  {id:'tasks.create',version:1,title:'Create task',requiredRole:'tasks:assign'},
+  {id:'connectors.dispatch',version:1,title:'Dispatch connector',requiredRole:'workflow:integrate'},
+  {id:'timers.schedule',version:1,title:'Schedule service transition',requiredRole:'workflow:schedule'},
+  ...entityWorkflowBlocks,
+];

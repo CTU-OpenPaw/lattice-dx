@@ -66,10 +66,11 @@ function keys(value: unknown, allowed: string[]): asserts value is Record<string
   }
 }
 
+export const workflowFieldTypes = Object.freeze(['text', 'subject', 'department', 'location', 'file', 'positiveInteger']);
+
 function fields(value: unknown) {
-  const supported = ['text', 'subject', 'department', 'location', 'file', 'positiveInteger'];
   if (!object(value) || Object.keys(value).length > 50
-    || Object.entries(value).some(([key, type]) => !name(key) || typeof type !== 'string' || !supported.includes(type))) {
+    || Object.entries(value).some(([key, type]) => !name(key) || typeof type !== 'string' || !workflowFieldTypes.includes(type))) {
     fail();
   }
 }
@@ -104,7 +105,7 @@ export function validateDefinition(value: unknown): DraftDefinition {
   const states = new Set<string>([value.initialState]);
   const subjects = new Set(Object.entries(required).filter(([, type]) => type === 'subject').map(([key]) => key));
   for (const transition of value.transitions) {
-    keys(transition, ['id', 'from', 'to', 'role', 'ownerOnly', 'fields', 'eventType', 'assigneeField', 'steps', 'condition', 'wait', 'execution']);
+    keys(transition, ['id', 'from', 'to', 'role', 'ownerOnly', 'fields', 'eventType', 'assigneeField', 'steps', 'condition', 'wait', 'execution', 'task']);
     if (!name(transition.id) || ids.has(transition.id) || !name(transition.from) || !name(transition.to)
       || !name(transition.role, true)
       || (transition.execution !== undefined && !['interactive','service'].includes(transition.execution as string))
@@ -113,6 +114,9 @@ export function validateDefinition(value: unknown): DraftDefinition {
       fail();
     }
     fields(transition.fields);
+    if (transition.task !== undefined && (!['assign','complete'].includes(transition.task as string)
+      || !object(value.assignedReader) || transition.wait !== undefined
+      || (transition.task === 'complete' && transition.assigneeField !== value.assignedReader.field))) fail();
     ids.add(transition.id);
     states.add(transition.from);
     states.add(transition.to);

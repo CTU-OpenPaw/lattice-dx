@@ -1,3 +1,5 @@
+import {createAgentTables} from '../agents/schema.js';
+import {assertIncidentActor,assertIncidentTransition} from '../agents/incident-policy.js';
 // SPDX-License-Identifier: Apache-2.0
 import {readFoundationPathMetadataWithClient} from '../files/content.js';
 import type {ObjectStore} from '../files/object-store.js';
@@ -56,6 +58,7 @@ async function attachFiles(client:PoolClient,runId:string,fields:Record<string,W
 
 export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistry,'get'|'list'>=sourceRegistry,store?:ObjectStore):Promise<WorkflowRepository> {
   await createWorkflowTables(pool);
+  await createAgentTables(pool);
   await initializeModuleTables(pool);
   async function definition(run:WorkflowRun,client?:PoolClient):Promise<WorkflowDefinition>{const def=await registry.get(run.organizationId,run.definitionId,run.definitionVersion,client);if(!def)throw new WorkflowError(503,'Phiên bản quy trình không khả dụng.');return def;}
   async function taskIds(runs:WorkflowRun[],client:Pool|PoolClient=pool) {
@@ -112,6 +115,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     const def=replay?await definition(replay.result,client):await registry.get(actor.organizationId,value.definitionId,value.definitionVersion,client);
     if(!def)throw new WorkflowError(400,'Phiên bản quy trình không khả dụng.');
     if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
+    await assertIncidentActor(client,{definitionId:def.id},actor,['workflow:start',def.startRole]);
     if(replay){
       await client.query('SELECT id FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR SHARE',[replay.result.id,actor.organizationId]);
       const stored=await readContext(client,replay.result.id,actor.organizationId);
@@ -149,6 +153,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         if(run.status==='cancelled')throw new WorkflowError(409,'Quy trình đã huỷ.');
         const transition=def.transitions.find(t=>t.id===value.action);
         if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
+        await assertIncidentActor(client,run,actor,transition.role);
         authorizeTransition(transition,run,actor,!!internal);
         for(const step of transition.steps??[])authorizeBlock(step,actor);
         const input=validateInput(transition.fields,value.input),hash=fingerprint({...value,input});
@@ -163,6 +168,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         run.waiting=!!(await client.query("SELECT 1 FROM workflow_waits WHERE run_id=$1 AND status='pending'",[id])).rowCount;
         run.waiting=run.waiting || !!(await client.query("SELECT 1 FROM workflow_timers WHERE run_id=$1 AND status='pending' AND ($2::uuid IS NULL OR id<>$2)",[id,internal?.timerId??null])).rowCount;
         planTransition(def,run,actor,{...value,input},!!internal);
+        await assertIncidentTransition(client,run,actor,{...value,input});
         await validateReferences(client,transition.fields,input,actor,run=>definition(run,client));
         for(const step of transition.steps??[])if(step.action==='timers.schedule') {
           const target=def.transitions.find(t=>t.id===step.input.transitionId);
@@ -171,7 +177,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         if(transition.task)await checkAssigned(client,def,run.data,actor);
         const next=serializeRun((await client.query(`UPDATE workflow_runs SET state=$1,version=version+1,data=data||$2::jsonb,updated_at=now() WHERE id=$3 RETURNING ${runColumns}`,[transition.to,JSON.stringify(input),id])).rows[0]);
         const eventId=randomUUID();
-        await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,from_state,to_state,version) VALUES($1,$2,$3,$4,$5,$6,$7)',[eventId,id,actor.subject,transition.id,run.state,next.state,next.version]);
+        await client.query('INSERT INTO workflow_audit(id,run_id,actor_id,action,from_state,to_state,version,metadata) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',[eventId,id,actor.subject,transition.id,run.state,next.state,next.version,transition.fields.reason==='text'?JSON.stringify({reason:input.reason}):null]);
         await attachFiles(client,id,transition.fields,input);
         if(transition.task==='assign') {
           const assigned=def.assignedReader!;
@@ -234,6 +240,12 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
       await get(id,actor);
       const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,metadata,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version LIMIT 100',[id])).rows;
       return rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()}));
+    },
+    async historyPage(id,actor,query) {
+      if(!Number.isSafeInteger(query.limit)||query.limit<1||query.limit>100||!Number.isSafeInteger(query.offset)||query.offset<0||query.offset>Number.MAX_SAFE_INTEGER-101||query.q!=='')throw new WorkflowError(400,'Invalid page.');
+      await get(id,actor);
+      const rows=(await pool.query('SELECT id,actor_id AS "actorId",action,from_state AS "fromState",to_state AS "toState",version,metadata,occurred_at AS "occurredAt" FROM workflow_audit WHERE run_id=$1 ORDER BY version,id LIMIT $2 OFFSET $3',[id,query.limit+1,query.offset])).rows;
+      return pageResult(rows.map(row=>({...row,occurredAt:new Date(row.occurredAt).toISOString()})),query);
     },
     async executions(id,actor,query) {
       await get(id,actor);

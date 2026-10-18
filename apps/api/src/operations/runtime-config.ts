@@ -2,6 +2,7 @@
 import {isAbsolute,resolve} from 'node:path';
 export interface RuntimeConfig {
  databaseUrl?:string;host:string;port:number;workerUrl:string;
+ ngsiLdContextRead:boolean;
  identity?:{issuer:string;jwksUrl:string;audience:string};scanner?:{host:string;port:number};
  connector?:{url:string;token:string};storage:{provider:'postgres'|'filesystem';root?:string};
  workers:{automations:boolean;timers:boolean;waitTimeouts:boolean;outbox:boolean;fileStorage:boolean};
@@ -32,5 +33,5 @@ export function parseRuntimeConfig(env:NodeJS.ProcessEnv):RuntimeConfig {
  if(workers.outbox&&!connector)invalid('outbox connector prerequisite');
  const scannerPort=port(env.CLAMD_PORT,3310,'CLAMD_PORT');if(env.CLAMD_HOST!==undefined&&!env.CLAMD_HOST.trim())invalid('CLAMD_HOST');
  const host=env.API_HOST??'127.0.0.1';if(!host.trim())invalid('API_HOST');
- return {databaseUrl,host,port:port(env.API_PORT,4000,'API_PORT'),workerUrl:url(env.WORKER_URL??'http://127.0.0.1:4001','WORKER_URL'),identity,scanner:env.CLAMD_HOST?{host:env.CLAMD_HOST,port:scannerPort}:undefined,connector,storage:{provider,root},workers};
+ return {databaseUrl,host,ngsiLdContextRead:flag('NGSI_LD_CONTEXT_READ'),port:port(env.API_PORT,4000,'API_PORT'),workerUrl:url(env.WORKER_URL??'http://127.0.0.1:4001','WORKER_URL'),identity,scanner:env.CLAMD_HOST?{host:env.CLAMD_HOST,port:scannerPort}:undefined,connector,storage:{provider,root},workers};
 }

@@ -44,6 +44,7 @@ export function canUseEvidence(file:{ownerId:string;organizationId:string;scanSt
     &&(file.ownerId===actor.subject||links.some(link=>canReadRun(link.definition,link.run,actor)));
 }
 export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRun,actor:WorkflowActor,service=false){
+  if(run.definitionId==='incident-response' && (actor.roles.includes('connector:agent')||actor.roles.includes('agent:worker')))throw new WorkflowError(403,'Agent workers cannot perform human incident transitions.');
   if(run.binding&&!run.binding.allowedTransitions.includes(transition.id))throw new WorkflowError(403,'Transition is outside the immutable business binding.');
   if(transition.execution==='service'&&!service)throw new WorkflowError(403,'Service transition requires scheduler authority.');
   if(run.organizationId!==actor.organizationId||!actor.roles.includes(transition.role)||(transition.ownerOnly&&actor.subject!==run.ownerId)

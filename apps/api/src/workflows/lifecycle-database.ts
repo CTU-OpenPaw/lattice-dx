@@ -5,6 +5,7 @@ import {isRecordId} from '@dx/contracts';
 import {parseCreateKey,CreateCommandError} from '../create-command.js';
 import type {WorkflowRun,WorkflowActor,WorkflowDefinition,CancelWorkflow,TransferWorkflowTask} from '@dx/contracts';
 import {WorkflowError} from './policy.js';
+import {assertIncidentActor} from '../agents/incident-policy.js';
 export function parseLifecycle(value:unknown,transfer=false):CancelWorkflow|TransferWorkflowTask|undefined {
  if(!value||typeof value!=='object'||Array.isArray(value))return;
  const v=value as Record<string,unknown>,allowed=transfer?['taskId','assigneeId','expectedVersion','reason']:['expectedVersion','reason'];
@@ -25,6 +26,7 @@ export function lifecycleDatabase(s:Services){
    const row=(await c.query(`SELECT ${s.columns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0];
    if(!row||row.ownerId!==actor.subject)throw new WorkflowError(404,'Không tìm thấy quy trình.');
    if(!actor.roles.includes('workflow:start')||operation==='task-transfer'&&!actor.roles.includes('tasks:assign'))throw new WorkflowError(403,'Không có quyền cập nhật quy trình.');
+   await assertIncidentActor(c,row,actor,operation==='task-transfer'?['workflow:start','tasks:assign']:['workflow:start']);
    const parsed=parseLifecycle(value,operation==='task-transfer');
    if(!parsed)throw new WorkflowError(400,'Dữ liệu cập nhật không hợp lệ.');
    value=parsed;
