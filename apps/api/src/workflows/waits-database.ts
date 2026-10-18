@@ -5,7 +5,7 @@ import type { WorkflowActor, WorkflowCompletion, WorkflowCompletionReceipt, Work
 import { WorkflowError } from './policy.js';
 import { completionResult, parseCompletion } from './completion-policy.js';
 import { pageResult, type PageQuery } from '../pagination.js';
-type StoredWait = WorkflowWait & {organization_id:string;assignee_id:string|null;connector_id:string|null;completion_key:string|null;completion_fingerprint:string|null;completion_actor:string|null;receipt:WorkflowCompletionReceipt|null;run_id:string;expired:boolean};
+export type StoredWait = WorkflowWait & {organization_id:string;assignee_id:string|null;connector_id:string|null;completion_key:string|null;completion_fingerprint:string|null;completion_actor:string|null;receipt:WorkflowCompletionReceipt|null;run_id:string;expired:boolean};
 async function transaction<T>(pool:Pool, operation:(client:PoolClient)=>Promise<T>):Promise<T> {
   const client=await pool.connect();
   try { await client.query('BEGIN'); const value=await operation(client); await client.query('COMMIT'); return value; }
@@ -14,15 +14,15 @@ async function transaction<T>(pool:Pool, operation:(client:PoolClient)=>Promise<
 function fingerprint(value:WorkflowCompletion) {
   return createHash('sha256').update(JSON.stringify({status:value.status,result:Object.fromEntries(Object.entries(value.result).sort(([a],[b])=>a.localeCompare(b))),reason:value.reason??null})).digest('hex');
 }
-async function lockedWait(client:PoolClient,id:string,organizationId?:string) {
+export async function lockedWait(client:PoolClient,id:string,organizationId?:string) {
   const reference=(await client.query('SELECT run_id,organization_id FROM workflow_waits WHERE id=$1',[id])).rows[0];
   if(!reference || organizationId !== undefined && reference.organization_id !== organizationId) throw new WorkflowError(404,'Không tìm thấy yêu cầu hoàn thành.');
-  const run=(await client.query('SELECT id,state,version FROM workflow_runs WHERE id=$1 FOR UPDATE',[reference.run_id])).rows[0];
+  const run=(await client.query('SELECT id,state,version,status,definition_id,definition_version FROM workflow_runs WHERE id=$1 FOR UPDATE',[reference.run_id])).rows[0];
   const wait=(await client.query('SELECT *,deadline<=clock_timestamp() AS expired FROM workflow_waits WHERE id=$1 FOR UPDATE',[id])).rows[0] as StoredWait;
   return {run,wait};
 }
-async function settle(client:PoolClient,run:{id:string;state:string;version:number},wait:StoredWait,status:WorkflowCompletionReceipt['status'],result:Record<string,string>,actorId:string,key?:string,hash?:string,reason?:string) {
-  if(run.version!==wait.version) throw new WorkflowError(409,'Phiên bản yêu cầu không còn phù hợp.');
+export async function settle(client:PoolClient,run:{id:string;state:string;version:number;status?:string},wait:StoredWait,status:WorkflowCompletionReceipt['status'],result:Record<string,string>,actorId:string,key?:string,hash?:string,reason?:string) {
+  if(run.status==='cancelled'||run.version!==wait.version) throw new WorkflowError(409,'Phiên bản yêu cầu không còn phù hợp.');
   const state=status==='succeeded'?wait.config.successState:wait.config.failureState;
   const next=(await client.query('UPDATE workflow_runs SET state=$1,version=version+1,data=data||$2::jsonb,updated_at=now() WHERE id=$3 RETURNING version',[state,JSON.stringify(result),run.id])).rows[0];
   const receipt:WorkflowCompletionReceipt={waitId:wait.id,runId:run.id,status,state,version:next.version};
@@ -51,6 +51,7 @@ export function waitDatabase(pool:Pool,get:(id:string,actor:WorkflowActor)=>Prom
         } else {
           if(!actor.roles.includes('workflow:callback') || !actor.roles.includes(`connector:${wait.connector_id}`)) throw new WorkflowError(403,'Không có quyền hoàn thành connector.');
           const job=(await client.query('SELECT payload FROM workflow_jobs WHERE id=$1 AND run_id=$2 AND organization_id=$3',[id,run.id,actor.organizationId])).rows[0];
+          if(run.definition_id==='incident-response' && run.definition_version===1 && wait.connector_id==='agent' && job?.payload.operation==='incident.analyze') throw new WorkflowError(403,'Managed incident waits require durable agent completion.');
           if(!job || job.payload.eventType!=='connector.dispatch' || job.payload.connectorId!==wait.connector_id) throw new WorkflowError(403,'Connector không phù hợp.');
         }
         const parsed=parseCompletion(value);if(!parsed) throw new WorkflowError(400,'Dữ liệu hoàn thành không hợp lệ.');
@@ -59,7 +60,7 @@ export function waitDatabase(pool:Pool,get:(id:string,actor:WorkflowActor)=>Prom
           if(wait.completion_actor!==actor.subject || wait.completion_fingerprint!==hash) throw new WorkflowError(409,'Idempotency-Key đã dùng với dữ liệu khác.');
           return wait.receipt!;
         }
-        if(wait.status!=='pending' || wait.expired) throw new WorkflowError(409,'Yêu cầu đã kết thúc hoặc hết hạn.');
+        if(run.status==='cancelled' || wait.status!=='pending' || wait.expired) throw new WorkflowError(409,'Yêu cầu đã kết thúc hoặc hết hạn.');
         return settle(client,run,wait,parsed.status,result,actor.subject,key,hash,parsed.reason);
       });
     },
@@ -68,7 +69,7 @@ export function waitDatabase(pool:Pool,get:(id:string,actor:WorkflowActor)=>Prom
       let count=0;
       for(const candidate of candidates) count+=await transaction(pool,async client=>{
         const {run,wait}=await lockedWait(client,candidate.id);
-        if(wait.status!=='pending' || !wait.expired) return 0;
+        if(run.status==='cancelled' || wait.status!=='pending' || !wait.expired) return 0;
         await settle(client,run,wait,'timed_out',{},'workflow:timeout',undefined,undefined,'Workflow wait timed out.');return 1;
       });
       return count;

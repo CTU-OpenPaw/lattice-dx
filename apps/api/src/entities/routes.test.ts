@@ -29,9 +29,27 @@ function setup() {
     publishSchema:vi.fn(async()=>({version:1})),
     relations:vi.fn(async()=>({items:[]})),
     history:vi.fn(async()=>({items:[]})),
+    events:vi.fn(async()=>({items:[],page:{limit:2,offset:1,hasMore:false,nextOffset:null}})),
   } as unknown as EntityRepository;
   return {app:createApi({workerUrl:'http://localhost:1',identity,entities}),entities};
 }
+
+test('event journal requires current signed capability and validates pagination before repository access',async()=>{
+ const {app,entities}=setup();
+ const url=`/v1/entities/${id}/events`;
+ try {
+  expect((await app.inject({url})).statusCode).toBe(401);
+  expect((await app.inject({url,headers:{authorization:`Bearer ${await token([])}`}})).statusCode).toBe(403);
+  const authorization=`Bearer ${await token(['data:read'])}`;
+  expect((await app.inject({url:url+'?limit=2&offset=1',headers:{authorization}})).statusCode).toBe(200);
+  expect(entities.events).toHaveBeenCalledWith({actorId:'alice',organizationId:'org-a'},id,{limit:2,offset:1,q:''});
+  vi.mocked(entities.events!).mockClear();
+  for(const suffix of ['?limit=101','?actorSubject=admin','?offset=-1']) expect((await app.inject({url:url+suffix,headers:{authorization}})).statusCode).toBe(400);
+  expect(entities.events).not.toHaveBeenCalled();
+  vi.mocked(entities.events!).mockRejectedValueOnce(new EntityError(404,'Entity or schema not found.'));
+  expect((await app.inject({url,headers:{authorization}})).statusCode).toBe(404);
+ } finally {await app.close();}
+});
 
 test('all entity endpoints require signed capability and signed tenant',async()=>{
   const {app}=setup();
@@ -145,4 +163,30 @@ test('readers fetch pinned published schemas without receiving draft designer au
     for(const value of ['0','-1','1.1','2147483648','abc']) expect((await app.inject({url:`/v1/entity-schemas/invoice/versions/${value}`,headers})).statusCode).toBe(400);
     expect((await app.inject({url:'/v1/entity-schemas/invoice/versions/1',headers:{authorization:`Bearer ${await token(['data:design'])}`}})).statusCode).toBe(403);
   } finally {await app.close();}
+});
+test('sharing routes require data:share and fail safely when old repository has no sharing',async()=>{
+ const {app}=setup();
+ try {
+  for(const method of ['GET','POST','DELETE'] as const){
+   const url=`/v1/entities/${id}/shares${method==='DELETE'?'/person/bob':''}`;
+   expect((await app.inject({method,url,headers:{authorization:`Bearer ${await token(['data:read','data:write'])}`},...(method==='GET'?{}:{payload:method==='POST'?{expectedVersion:1,principal:{kind:'person',id:'bob'},permission:'read'}:{expectedVersion:1}})})).statusCode).toBe(403);
+   expect((await app.inject({method,url,headers:{authorization:`Bearer ${await token(['data:share'])}`,'idempotency-key':'share'},...(method==='GET'?{}:{payload:method==='POST'?{expectedVersion:1,principal:{kind:'person',id:'bob'},permission:'read'}:{expectedVersion:1}})})).statusCode).toBe(503);
+  }
+ }finally{await app.close();}
+});
+
+test('sharing routes forward strict signed scope and typed payload and reject principal overrides',async()=>{
+ const {app,entities}=setup();entities.share=vi.fn(async()=>({id,version:2})) as unknown as EntityRepository['share'];entities.revokeShare=vi.fn(async()=>({id,version:3})) as unknown as EntityRepository['revokeShare'];entities.shares=vi.fn(async()=>({items:[],page:{limit:50,offset:0,hasMore:false,nextOffset:null}}));
+ const headers={authorization:`Bearer ${await token(['data:share'])}`,'idempotency-key':'share-command'};
+ const payload={expectedVersion:1,principal:{kind:'department',id:'sales'},permission:'edit'};
+ try{
+  expect((await app.inject({method:'POST',url:`/v1/entities/${id}/shares`,headers,payload})).statusCode).toBe(200);
+  expect(entities.share).toHaveBeenCalledWith({actorId:'alice',organizationId:'org-a'},id,payload,'share-command');
+  for(const invalid of [{...payload,organizationId:'org-b'},{...payload,principal:{...payload.principal,role:'data:write'}},{...payload,permission:'owner'},{...payload,principal:{kind:'person',id:'constructor'}},{...payload,expectedVersion:'1'}]){
+   expect((await app.inject({method:'POST',url:`/v1/entities/${id}/shares`,headers,payload:invalid})).statusCode).toBe(400);
+  }
+  expect((await app.inject({method:'DELETE',url:`/v1/entities/${id}/shares/person/bob`,headers,payload:{expectedVersion:2}})).statusCode).toBe(200);
+  expect(entities.revokeShare).toHaveBeenCalledWith({actorId:'alice',organizationId:'org-a'},id,{expectedVersion:2,kind:'person',principalId:'bob'},'share-command');
+  expect((await app.inject({url:`/v1/entities/${id}/shares`,headers})).statusCode).toBe(200);
+ }finally{await app.close();}
 });

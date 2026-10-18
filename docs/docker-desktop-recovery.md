@@ -1,5 +1,15 @@
 # Docker Desktop trên Windows — socket startup recovery
 
+## Sửa bằng bản Docker chính thức — 14/10/2026
+
+Máy đã nâng cấp tại chỗ từ **4.64.0.221278** lên **4.94.0.241994**, Engine **29.8.2**. Maintainer Docker thông báo nhóm lỗi này được sửa từ 4.92 trong [issue #625](https://github.com/docker/desktop-feedback/issues/625#issuecomment-5909191315); kênh appcast chính thức cung cấp 4.94.0 tại lúc kiểm tra. Bộ cài lấy từ `desktop.docker.com`, SHA256 `a9814e31049d66156477a86614e83365669677733014ec72f74229623ff3890a`, chữ ký Authenticode Valid của Docker Inc; installer exit0.
+
+Kiểm chứng: ba lần khởi động bằng **Docker Desktop.exe gốc**, gồm hai vòng orderly stop → start, đều Engine ready. Không gọi launcher phục hồi, không đổi tên/xóa socket trong các vòng này. Bốn named volumes và bảy container trước nâng cấp vẫn tồn tại. Startup HKCU Run đã trả về Docker Desktop.exe; installer đã trả shortcut Desktop về chương trình gốc. Không reset, prune, unregister distro hoặc di chuyển data disk. VHDX đang được tham chiếu qua junction tới `E:\Docker\wsl\disk`; đường này được giữ nguyên.
+
+Đây là bản sửa upstream đã được kiểm chứng cho lỗi tái diễn khi restart trên máy hiện tại. Chưa kiểm chứng Windows reboot/logon trong lượt này; không tự reboot máy. Script phục hồi cũ vẫn giữ để tham khảo/khôi phục bản Docker cũ, nhưng đường startup thường ngày không còn phụ thuộc nó. Artifacts/log/settings backup nằm trong `output/docker-upgrade` được ignore.
+
+## Lịch sử phục hồi trên 4.64
+
 Máy Duy: Docker Desktop 4.64.0, Linux engine 29.2.1, Windows 11 build 26200. Log xác nhận lỗi socket reparse point `Docker/run/dockerInference` và từng có `docker-secrets-engine/engine.sock`. Backend chết trước khi engine sẵn sàng. Chưa có bằng chứng lỗi do chuyển ổ data; driver afunix đang running, ổ C/E/D NTFS healthy.
 
 Lỗi tương tự còn được báo tại [Docker issue #625](https://github.com/docker/desktop-feedback/issues/625). Tắt Docker AI hoặc chỉ đổi tên socket một lần không bảo đảm hết tái diễn. Đây là cách phục hồi có kiểm soát, **không phải bản vá cho Docker/Windows**.

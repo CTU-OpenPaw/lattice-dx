@@ -1,5 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import { expect, test } from 'vitest';
+import {customDefinition} from './registry.test.js';
+test('entity bundle rejects source IDs and preview advertises typed roles',async()=>{
+  const {parseBundle,bundlePreview}=await import('./bundles.js');
+  const definition={...customDefinition,transitions:[{...customDefinition.transitions[0],steps:[{id:'create',action:'entities.create',input:{schemaId:'invoice',schemaVersion:1,title:{source:'literal',value:'Invoice'},attributes:{}}}]}]};
+  const bundle={format:'latticedx.workflow-bundle',formatVersion:1,definitions:[definition]};
+  expect(bundlePreview(parseBundle(bundle)).definitions[0]!.requiredRoles).toContain('data:write');
+  const source={...definition,transitions:[{...definition.transitions[0],steps:[{id:'read',action:'entities.read',input:{id:{source:'literal',value:'00000000-0000-4000-8000-000000000001'}}}]}]};
+  expect(()=>parseBundle({...bundle,definitions:[source]})).toThrow();
+});
 import { validateDefinition } from './registry.js';
 import { parseBundle, bundlePreview } from './bundles.js';
 const definition = {id:'portable-request',title:'Request',startRole:'employee',initialState:'draft',startFields:{request:'text'},readerRoles:['manager'],transitions:[{id:'submit',from:'draft',to:'done',role:'employee',fields:{}}]};

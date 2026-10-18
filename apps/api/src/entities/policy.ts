@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Attributes, Field, SchemaDefinition } from './types.js';
+export const entityFieldTypes = Object.freeze(['text','boolean','integer','decimal','date','enum']);
 export class EntityError extends Error {
   constructor(public readonly statusCode:400|404|409|503, message:string) { super(message); }
 }
@@ -46,7 +47,7 @@ export function parseSchema(input:unknown):SchemaDefinition {
   for(const [key,value] of Object.entries(fields)) {
     name(key);
     const field=exact(value,['type','required','maxLength','choices']);
-    if(typeof field.type!=='string'||!['text','boolean','integer','decimal','date','enum'].includes(field.type)) bad('Invalid field type.');
+    if(typeof field.type!=='string'||!entityFieldTypes.includes(field.type)) bad('Invalid field type.');
     if(field.required!==undefined&&typeof field.required!=='boolean') bad();
     if(field.maxLength!==undefined&&(field.type!=='text'||!Number.isSafeInteger(field.maxLength)||Number(field.maxLength)<1||Number(field.maxLength)>4000)) bad();
     if(field.choices!==undefined&&field.type!=='enum') bad();
@@ -93,4 +94,19 @@ export function canonicalJson(input:unknown):string {
     return value;
   }
   return JSON.stringify(normalize(input));
+}
+
+export function principalKind(value:unknown):'person'|'department' {
+  if(value!=='person'&&value!=='department') bad('Invalid principal kind.');
+  return value;
+}
+export function principalId(value:unknown):string {
+  if(typeof value!=='string'||!value.trim()||value!==value.trim()||value.length>200||/[\u0000-\u001f\u007f]/.test(value)||reserved.has(value)) bad('Invalid principal ID.');
+  return value;
+}
+export function parseShare(value:unknown):import('./types.js').ShareInput {
+  const data=exact(value,['expectedVersion','principal','permission']);
+  const principal=exact(data.principal,['kind','id']);
+  if(data.permission!=='read'&&data.permission!=='edit') bad('Invalid share permission.');
+  return {expectedVersion:version(data.expectedVersion),principal:{kind:principalKind(principal.kind),id:principalId(principal.id)},permission:data.permission};
 }

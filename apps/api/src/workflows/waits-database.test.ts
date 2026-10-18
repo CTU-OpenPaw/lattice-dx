@@ -5,7 +5,7 @@ import { waitDatabase } from './waits-database.js';
 const actor={subject:'assigned',organizationId:'org-a',roles:['tasks:decide']};
 function fixture(kind='task') {
   const wait={id:'resource',run_id:'run',organization_id:'org-a',version:2,kind,assignee_id:'assigned',connector_id:'n8n',status:'pending',deadline:'2099-01-01',expired:false,config:{stepId:'step',successState:'ready',failureState:'failed',resultFields:{note:'text'},timeoutSeconds:20}};
-  const run={id:'run',state:'waiting',version:2};
+  const run={id:'run',state:'waiting',version:2,status:'active'};
   const query=vi.fn(async(sql:string,values?:unknown[])=>{
     if(sql.startsWith('SELECT run_id,organization_id')) return {rows:[wait],rowCount:1};
     if(sql.startsWith('SELECT id,state,version')) return {rows:[run],rowCount:1};
@@ -19,7 +19,7 @@ function fixture(kind='task') {
   });
   const client={query,release:vi.fn()};
   const pool={connect:vi.fn(async()=>client),query:vi.fn()} as unknown as Pool;
-  return {repository:waitDatabase(pool,vi.fn()),query,wait,pool};
+  return {repository:waitDatabase(pool,vi.fn()),query,wait,pool,run};
 }
 test('completion locks run before wait, persists minimal receipt and checks authority before replay',async()=>{
   const {repository,query}=fixture();
@@ -67,4 +67,12 @@ test('wait evidence is reader scoped before listing persisted failure details',a
   expect((await repository.listWaits('run',actor,page)).items[0].evidence).toEqual(evidence);
   expect(get).toHaveBeenCalledWith('run',actor);
   expect(query.mock.calls[0]).toBeDefined();
+});
+
+test('cancelled run cannot settle pending wait or timeout even if fixture wait remains pending',async()=>{
+ const f=fixture();f.run.status='cancelled';
+ await expect(f.repository.completeWait('resource',{status:'succeeded',result:{note:'late'}},actor,'late')).rejects.toMatchObject({statusCode:409});
+ f.wait.expired=true;vi.mocked(f.pool.query).mockResolvedValue({rows:[{id:'resource'}]} as never);
+ expect(await f.repository.expireWaits()).toBe(0);
+ expect(f.query.mock.calls.some(([s])=>s.startsWith('UPDATE workflow_runs'))).toBe(false);
 });

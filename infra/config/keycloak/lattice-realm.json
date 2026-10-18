@@ -7,6 +7,11 @@
       { "name": "data:design" },
       { "name": "data:read" },
       { "name": "data:write" },
+      { "name": "data:share" },
+      { "name": "data:automate" },
+      { "name": "directory:manage" },
+      { "name": "platform:operate" },
+      { "name": "workflow:event:receive" },
       {
         "name": "records:read"
       },
@@ -146,6 +151,9 @@
       ],
       "realmRoles": [
         "data:design",
+        "directory:manage",
+        "platform:operate",
+        "workflow:event:receive",
         "data:read",
         "data:write",
         "records:read",
@@ -160,7 +168,9 @@
         "directory:read",
         "logistics:sales",
         "workflow:design",
-        "workflow:integrate"
+        "workflow:integrate",
+        "data:share",
+        "data:automate"
       ],
       "attributes": {
         "organization_id": [
@@ -237,8 +247,11 @@
         "files:write",
         "logistics:warehouse",
         "tasks:read",
+        "tasks:assign",
         "tasks:decide",
-        "records:read"
+        "records:read",
+        "data:read",
+        "data:write"
       ],
       "attributes": {
         "organization_id": [
@@ -406,7 +419,9 @@
         "tasks:read",
         "tasks:assign",
         "files:read",
-        "files:write"
+        "files:write",
+        "data:read",
+        "data:write"
       ],
       "email": "sales2@local.invalid"
     },

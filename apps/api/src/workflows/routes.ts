@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { FastifyInstance, FastifyRequest } from 'fastify';
-import { isRecordId, type WorkflowActor, type WorkflowRun } from '@dx/contracts';
+import { isRecordId, type WorkflowActor, type WorkflowRun, type TransferWorkflowTask } from '@dx/contracts';
 import { verifyIdentity, type IdentityConfig } from '../identity.js';
 import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { availableTransitions, parseCreate, parseCommand, WorkflowError } from './policy.js';
 import type { WorkflowRepository } from './types.js';
 import { PageError,pageResult,parsePage,textFilter } from '../pagination.js';
+import {parseTimerRetry} from './timer-policy.js';
+import {parseLifecycle} from './lifecycle-database.js';
 import { parseCompletion } from './completion-policy.js';
+import {requireEntityRead} from './entity-context.js';
+import {workflowBlockCatalog} from './entity-block-catalog.js';
 export type WorkflowOptions={identity?:IdentityConfig;workflows?:WorkflowRepository;definitionRegistry?:DefinitionRegistry};
 function idempotencyKey(req:FastifyRequest):string {
   const key=req.headers['idempotency-key'];
@@ -44,11 +48,34 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       if(!repo.listWaits)throw new WorkflowError(503,'Workflow waits chưa cấu hình.');
       return repo.listWaits(workflowId(req.params.id),actors.get(req)!,parsePage(req.query));
     });
-    routes.get('/v1/workflow-blocks',async req=>({items:[
-      {id:'records.create',version:1,title:'Create record',requiredRole:'records:write'},
-      {id:'tasks.create',version:1,title:'Create task',requiredRole:'tasks:assign'},
-      {id:'connectors.dispatch',version:1,title:'Dispatch connector',requiredRole:'workflow:integrate'},
-    ].filter(block=>actors.get(req)!.roles.includes(block.requiredRole))}));
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/entity-context',async req=>{
+      const actor=actors.get(req)!;requireEntityRead(actor);
+      if(Object.keys(req.query).length)throw new WorkflowError(400,'Invalid query.');
+      const id=workflowId(req.params.id);
+      if(!repo.entityContext)throw new WorkflowError(503,'Workflow entity context unavailable.');
+      return repo.entityContext(id,actor);
+    });
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/entities/:id/workflows',async req=>{
+      const actor=actors.get(req)!;requireEntityRead(actor);
+      if(Object.keys(req.query).some(k=>!['limit','offset','q'].includes(k)))throw new WorkflowError(400,'Invalid query.');
+      const id=workflowId(req.params.id),page=parsePage(req.query);
+      if(!repo.listEntityWorkflows)throw new WorkflowError(503,'Workflow entity context unavailable.');
+      return repo.listEntityWorkflows(id,actor,page);
+    });
+    routes.get('/v1/workflow-services',async req=>{
+      if(!repo.listServices)throw new WorkflowError(503,'Workflow services unavailable.');
+      return {items:await repo.listServices(actors.get(req)!)};
+    });
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/timers',async req=>{
+      if(!repo.listTimers)throw new WorkflowError(503,'Workflow timers unavailable.');
+      return repo.listTimers(workflowId(req.params.id),actors.get(req)!,parsePage(req.query));
+    });
+    routes.post<{Params:{id:string;timerId:string}}>('/v1/workflows/:id/timers/:timerId/retry',async req=>{
+      const value=parseTimerRetry(req.body);if(!value)throw new WorkflowError(400,'Invalid timer retry.');
+      if(!repo.retryTimer)throw new WorkflowError(503,'Workflow timers unavailable.');
+      return repo.retryTimer(workflowId(req.params.id),workflowId(req.params.timerId),value.expectedVersion,actors.get(req)!,idempotencyKey(req));
+    });
+    routes.get('/v1/workflow-blocks',async req=>({items:workflowBlockCatalog.filter(block=>actors.get(req)!.roles.includes(block.requiredRole))}));
     routes.get('/v1/workflow-definitions',async req=>{
       const actor=actors.get(req)!;
       const definitions=await registry.list(actor.organizationId);
@@ -80,12 +107,31 @@ export function registerWorkflows(app:FastifyInstance,options:WorkflowOptions) {
       const actor=actors.get(req)!;
       return view(await repo.transition(workflowId(req.params.id),input,actor,idempotencyKey(req)),actor);
     });
+    routes.post<{Params:{id:string}}>('/v1/workflows/:id/cancel',async req=>{
+      const value=parseLifecycle(req.body);if(!value)throw new WorkflowError(400,'Dữ liệu huỷ không hợp lệ.');
+      const actor=actors.get(req)!;if(!actor.roles.includes('workflow:start'))throw new WorkflowError(403,'Không có quyền huỷ quy trình.');
+      const key=idempotencyKey(req);if(!repo.cancel)throw new WorkflowError(503,'Workflow lifecycle chưa cấu hình.');
+      return view(await repo.cancel(workflowId(req.params.id),value,actor,key),actor);
+    });
+    routes.post<{Params:{id:string}}>('/v1/workflows/:id/task-transfer',async req=>{
+      const value=parseLifecycle(req.body,true);if(!value)throw new WorkflowError(400,'Dữ liệu chuyển giao không hợp lệ.');
+      const actor=actors.get(req)!;if(!actor.roles.includes('workflow:start')||!actor.roles.includes('tasks:assign'))throw new WorkflowError(403,'Không có quyền chuyển giao việc.');
+      const key=idempotencyKey(req);if(!repo.taskTransfer)throw new WorkflowError(503,'Workflow lifecycle chưa cấu hình.');
+      return view(await repo.taskTransfer(workflowId(req.params.id),value as TransferWorkflowTask,actor,key),actor);
+    });
     routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/executions',async req=>{
       const id=workflowId(req.params.id),actor=actors.get(req)!,query=parsePage(req.query);
       await repo.get(id,actor);
       return pageResult(repo.executions?await repo.executions(id,actor,query):[],query);
     });
-    routes.get<{Params:{id:string}}>('/v1/workflows/:id/history',async req=>({items:await repo.history(workflowId(req.params.id),actors.get(req)!)}));
+    routes.get<{Params:{id:string};Querystring:Record<string,unknown>}>('/v1/workflows/:id/history',async req=>{
+      if(Object.keys(req.query).some(k=>!['limit','offset'].includes(k)))throw new WorkflowError(400,'Invalid query.');
+      const id=workflowId(req.params.id),actor=actors.get(req)!;
+      if(!Object.keys(req.query).length)return {items:await repo.history(id,actor)};
+      const query=parsePage(req.query);
+      if(!repo.historyPage)throw new WorkflowError(503,'Workflow history paging unavailable.');
+      return repo.historyPage(id,actor,query);
+    });
     routes.get<{Params:{id:string}}>('/v1/workflows/:id/sync',async req=>({items:await repo.jobs(workflowId(req.params.id),actors.get(req)!)}));
     routes.post<{Params:{id:string}}>('/v1/workflows/:id/sync/retry',async req=>{
       if(req.body!==undefined&&(!req.body||typeof req.body!=='object'||Array.isArray(req.body)||Object.keys(req.body).length))throw new WorkflowError(400,'Retry không nhận cấu hình từ body.');

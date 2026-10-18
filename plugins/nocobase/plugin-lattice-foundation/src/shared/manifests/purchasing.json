@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "id": "purchasing",
+  "name": "Mua sắm nội bộ",
+  "route": "/lattice/apps/purchasing",
+  "permissions": [
+    "records:read"
+  ],
+  "collections": [
+    {
+      "id": "requests",
+      "source": "lattice-api",
+      "resource": "records"
+    }
+  ],
+  "blocks": [
+    {
+      "id": "create-request",
+      "type": "form",
+      "title": "Tạo hồ sơ yêu cầu mua sắm",
+      "collection": "requests",
+      "permissions": [
+        "records:write"
+      ],
+      "fields": [
+        {
+          "name": "title",
+          "title": "Nội dung yêu cầu",
+          "type": "string",
+          "required": true,
+          "maxLength": 200
+        }
+      ],
+      "submit": {
+        "actionId": "records.create",
+        "version": 1
+      },
+      "attachments": true
+    },
+    {
+      "id": "request-list",
+      "type": "list",
+      "title": "Hồ sơ của tôi",
+      "collection": "requests",
+      "permissions": [
+        "records:read"
+      ],
+      "columns": [
+        "title",
+        "createdAt"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "id": "submit-request",
+      "collection": "requests",
+      "from": "draft",
+      "to": "submitted",
+      "permission": "purchasing:requester",
+      "availability": "unavailable",
+      "reason": "Chưa có API chuyển trạng thái mua sắm; records.create chỉ tạo hồ sơ nền."
+    }
+  ],
+  "workspace": {
+    "panels": [
+      {
+        "id": "workflow",
+        "renderer": "lattice.procurement.workflow"
+      }
+    ],
+    "blocks": [
+      {
+        "blockId": "create-request"
+      },
+      {
+        "blockId": "request-list"
+      }
+    ],
+    "showTransitions": false,
+    "note": "Các form hồ sơ nền bên dưới không thay thế workflow mua sắm ở trên.",
+    "shortcut": {
+      "description": "Yêu cầu, phê duyệt và bàn giao",
+      "icon": "cart",
+      "createBlockId": "create-request",
+      "createLabel": "Tạo hồ sơ"
+    }
+  }
+}

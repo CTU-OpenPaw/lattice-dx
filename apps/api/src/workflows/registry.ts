@@ -5,7 +5,7 @@ import { getDefinition, workflowDefinitions } from '../../../../solutions/workfl
 import type { Page, PageQuery } from '../pagination.js';
 import { validateSteps } from './block-policy.js';
 import { WorkflowError } from './policy.js';
-import { strictNumber } from './completion-policy.js';
+import { validCondition } from './conditions.js';
 
 export type DraftDefinition = Omit<WorkflowDefinition, 'version'>;
 export type WorkflowDraft = {
@@ -20,7 +20,7 @@ export type WorkflowDraft = {
 
 export interface DefinitionRegistry {
   get(organizationId: string, id: string, version?: number, client?: PoolClient): Promise<WorkflowDefinition | undefined>;
-  list(organizationId: string): Promise<WorkflowDefinition[]>;
+  list(organizationId: string, client?: PoolClient): Promise<WorkflowDefinition[]>;
   create(definition: unknown, actor: WorkflowActor): Promise<WorkflowDraft>;
   createMany(definitions: unknown[], actor: WorkflowActor): Promise<WorkflowDraft[]>;
   listDrafts(actor: WorkflowActor, page: PageQuery): Promise<Page<WorkflowDraft>>;
@@ -66,10 +66,11 @@ function keys(value: unknown, allowed: string[]): asserts value is Record<string
   }
 }
 
+export const workflowFieldTypes = Object.freeze(['text', 'subject', 'department', 'location', 'file', 'positiveInteger']);
+
 function fields(value: unknown) {
-  const supported = ['text', 'subject', 'department', 'location', 'file', 'positiveInteger'];
   if (!object(value) || Object.keys(value).length > 50
-    || Object.entries(value).some(([key, type]) => !name(key) || typeof type !== 'string' || !supported.includes(type))) {
+    || Object.entries(value).some(([key, type]) => !name(key) || typeof type !== 'string' || !workflowFieldTypes.includes(type))) {
     fail();
   }
 }
@@ -104,14 +105,18 @@ export function validateDefinition(value: unknown): DraftDefinition {
   const states = new Set<string>([value.initialState]);
   const subjects = new Set(Object.entries(required).filter(([, type]) => type === 'subject').map(([key]) => key));
   for (const transition of value.transitions) {
-    keys(transition, ['id', 'from', 'to', 'role', 'ownerOnly', 'fields', 'eventType', 'assigneeField', 'steps', 'condition', 'wait']);
+    keys(transition, ['id', 'from', 'to', 'role', 'ownerOnly', 'fields', 'eventType', 'assigneeField', 'steps', 'condition', 'wait', 'execution', 'task']);
     if (!name(transition.id) || ids.has(transition.id) || !name(transition.from) || !name(transition.to)
       || !name(transition.role, true)
+      || (transition.execution !== undefined && !['interactive','service'].includes(transition.execution as string))
       || (transition.ownerOnly !== undefined && typeof transition.ownerOnly !== 'boolean')
       || (transition.eventType !== undefined && !name(transition.eventType, true))) {
       fail();
     }
     fields(transition.fields);
+    if (transition.task !== undefined && (!['assign','complete'].includes(transition.task as string)
+      || !object(value.assignedReader) || transition.wait !== undefined
+      || (transition.task === 'complete' && transition.assigneeField !== value.assignedReader.field))) fail();
     ids.add(transition.id);
     states.add(transition.from);
     states.add(transition.to);
@@ -141,16 +146,16 @@ export function validateDefinition(value: unknown): DraftDefinition {
     if (transition.steps !== undefined) {
       validateSteps(transition.steps, dataFields, new Set(Object.keys(transition.fields)));
     }
+    for (const step of (transition.steps ?? [])) if (step.action === 'timers.schedule') {
+      const target=value.transitions.find(t=>t.id===step.input.transitionId);
+      if (transition.wait || transition.task || !target || target.from!==transition.to || target.execution!=='service' || target.ownerOnly || target.assigneeField || Object.keys(target.fields).sort().join(',')!==Object.keys(step.input.input).sort().join(',')) fail();
+    }
     if (transition.wait) {
       const final = Array.isArray(transition.steps) ? transition.steps.at(-1) : undefined;
       if (!final || final.id !== transition.wait.stepId || !['tasks.create','connectors.dispatch'].includes(final.action)) fail();
     }
     if (transition.condition !== undefined) {
-      keys(transition.condition, ['field','operator','value']);
-      const condition = transition.condition;
-      if (!name(condition.field) || !dataFields.has(condition.field) || typeof condition.operator !== 'string' || !['eq','gt','exists'].includes(condition.operator)
-        || (condition.operator === 'exists' ? condition.value !== undefined : typeof condition.value !== 'string' || condition.value.length > 2000)
-        || condition.operator === 'gt' && strictNumber(condition.value) === undefined) fail();
+      if(!validCondition(transition.condition,dataFields)) fail();
     }
   }
 
