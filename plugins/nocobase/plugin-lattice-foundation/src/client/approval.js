@@ -23,7 +23,7 @@ function transitionInput(action,values) {
   }
   return input;
 }
-function createApprovalController({api,actorId,definitionId,newKey}) {
+function createApprovalController({api,actorId,definitionId,actionId:configuredActionId,newKey}) {
   let run=null;
   const transport={workflow:async(operation,payload)=>{
     const result=assertRun(await api.workflow(operation,payload),definitionId);
@@ -35,6 +35,7 @@ function createApprovalController({api,actorId,definitionId,newKey}) {
     load(value){if(commands.busy||commands.uncertain)throw new Error('Hoàn tất lệnh cũ trước khi đổi công việc.');run=assertRun(value,definitionId);},
     async execute(actionId,values){
       if(!run)throw new Error('Mở công việc trước.');
+      if(configuredActionId&&actionId!==configuredActionId)throw new Error('Hành động không thuộc cấu hình form.');
       const action=run.availableTransitions.find(item=>item.id===actionId);
       if(run.waiting||!action)throw new Error('Hành động không được API cho phép.');
       const result=await commands.execute('transition',{action:action.id,expectedVersion:run.version,input:transitionInput(action,values)},run.id);run=result;return result;

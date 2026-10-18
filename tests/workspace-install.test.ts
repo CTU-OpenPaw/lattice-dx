@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { installWorkspace, parsePluginList } from '../scripts/install-workspace.mjs';
 
 const names = ['@latticedx/plugin-action-bridge', '@latticedx/plugin-lattice-foundation'];
-const versions = ['0.1.0', '0.11.0'];
+const versions = await Promise.all(['action-bridge', 'plugin-lattice-foundation'].map(async directory =>
+  JSON.parse(await readFile(new URL(`../plugins/nocobase/${directory}/package.json`, import.meta.url), 'utf8')).version as string));
 async function fixture(options: { dump?: Buffer; backupFailure?: boolean; disabled?: boolean; missing?: boolean; mismatch?: boolean } = {}) {
   const calls: { file: string; args: string[]; options: any }[] = [];
   const backupDir = await mkdtemp(join(tmpdir(), 'workspace-install-'));

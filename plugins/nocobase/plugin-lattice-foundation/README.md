@@ -25,7 +25,7 @@ Build validates and copies authored CommonJS into dist. The runtime supplies the
 Copy the generated tgz into the container, then install with the official package manager. It extracts into persistent storage/plugins and links the package for Node.js. Inside the container:
 
 ```sh
-yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.11.0.tgz
+yarn nocobase pm add /tmp/latticedx-plugin-lattice-foundation-0.14.0.tgz
 yarn nocobase pm enable @latticedx/plugin-lattice-foundation
 yarn nocobase pm list
 yarn nocobase pm disable @latticedx/plugin-lattice-foundation
@@ -60,6 +60,10 @@ The home screen now uses the reviewed sidebar/header/shortcut layout and include
 
 Unsupported tabs and modules remain disabled, with no invented counts or deadlines. See [UI checkpoint and API requirements](../../../docs/workspace-ui-checkpoint.md).
 
+## Attachment and Timeline in 0.12.0
+
+Reusable Attachment and Activity Timeline blocks are available in native Studio and Workspace. The default work manifest embeds both inside Approval. Workflow uploads are linked only by explicit action submission, clean text previews are escaped, downloads recheck authorization, and history displays server events without inventing missing reasons. Native settings can persist a workflow/record context ID. See [configuration, verification and API limitations](../../../docs/attachment-timeline-blocks.md).
+
 ## Terms
 
 - Plugin: code that adds functionality to this NocoBase installation.
@@ -69,3 +73,11 @@ Unsupported tabs and modules remain disabled, with no invented counts or deadlin
 - Seed: code creating repeatable demo records.
 - Build: preparing source as a runtime-installable package.
 - Runtime: the running NocoBase service into which this plugin is installed.
+
+## Context Entity
+
+Foundation 0.13.0 adds the reusable Context Entity block, its Studio model and authorized entity read bridge. See [context-entity-block.md](../../../docs/context-entity-block.md) for manifest mappings, permission checks, verification and the remaining broker integration contract.
+
+## Workflow operation Forms
+
+Foundation 0.14.0 adds the reusable Workflow Form with receiving, acceptance and handover presets. Record and workflow Forms share field rendering; workflow writes keep the existing authorized Approval controller. See [operation Forms](../../../docs/receiving-acceptance-handover-forms.md) for configuration, verification and broker limitations.
