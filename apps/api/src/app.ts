@@ -28,7 +28,9 @@ import {registerModules,type ModuleOptions} from './modules/routes.js';
 import {registerAutomations,type AutomationOptions} from './automations/routes.js';
 import {registerStudio} from './studio/routes.js';
 import {registerContextLinks,type ContextLinksOptions} from './context-links/routes.js';
-export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & ReportsOptions & AutomationOptions & ContextLinksOptions & AgentOptions) {
+import {registerNgsiLd} from './ngsi-ld/routes.js';
+import type {NgsiLdOptions} from './ngsi-ld/types.js';
+export function createApi(options: { workerUrl: string; timeoutMs?: number; identity?: IdentityConfig; records?: RecordRepository } & FoundationOptions & WorkflowOptions & EntityOptions & TaskLifecycleOptions & OrganizationOptions & OperationsOptions & EventOptions & ModuleOptions & EntityDataToolsOptions & ReportsOptions & AutomationOptions & ContextLinksOptions & AgentOptions & NgsiLdOptions) {
   const telemetry=options.telemetry??createTelemetry();
   const app = Fastify({ bodyLimit: 16_384,genReqId:()=>correlationId() });
   const templates=new Set(['/v1/operations/metrics','/v1/operations/queues','/v1/operations/diagnostics']);
@@ -57,6 +59,7 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
   registerModules(app,options);
   registerStudio(app,options);
   registerContextLinks(app,options);
+  registerNgsiLd(app,options);
   registerLogistics(app,options);
   registerEntities(app,options);
   registerEntityDataTools(app,options);

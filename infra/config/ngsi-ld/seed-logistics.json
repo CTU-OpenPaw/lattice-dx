@@ -1,0 +1,274 @@
+[
+    {
+        "id":  "urn:ngsi-ld:Location:org-a:depot-1",
+        "name":  {
+                     "value":  "Demo depot 1",
+                     "type":  "Property"
+                 },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId",
+                             "licensePlate":  "https://latticedx.example/ns/licensePlate",
+                             "assignedVehicle":  "https://latticedx.example/ns/assignedVehicle",
+                             "originWarehouse":  "https://latticedx.example/ns/originWarehouse",
+                             "destinationWarehouse":  "https://latticedx.example/ns/destinationWarehouse"
+                         }
+                     ],
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           },
+        "type":  "Location",
+        "businessId":  {
+                           "value":  "depot-1",
+                           "type":  "Property"
+                       }
+    },
+    {
+        "id":  "urn:ngsi-ld:Location:org-a:depot-2",
+        "name":  {
+                     "value":  "Demo depot 2",
+                     "type":  "Property"
+                 },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId",
+                             "licensePlate":  "https://latticedx.example/ns/licensePlate",
+                             "assignedVehicle":  "https://latticedx.example/ns/assignedVehicle",
+                             "originWarehouse":  "https://latticedx.example/ns/originWarehouse",
+                             "destinationWarehouse":  "https://latticedx.example/ns/destinationWarehouse"
+                         }
+                     ],
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           },
+        "type":  "Location",
+        "businessId":  {
+                           "value":  "depot-2",
+                           "type":  "Property"
+                       }
+    },
+    {
+        "businessId":  {
+                           "value":  "warehouse-001",
+                           "type":  "Property"
+                       },
+        "id":  "urn:ngsi-ld:Warehouse:org-a:warehouse-001",
+        "locatedAt":  {
+                          "object":  "urn:ngsi-ld:Location:org-a:depot-1",
+                          "type":  "Relationship"
+                      },
+        "name":  {
+                     "value":  "Demo warehouse 1",
+                     "type":  "Property"
+                 },
+        "type":  "Warehouse",
+        "status":  {
+                       "observedAt":  "2026-10-15T03:57:00.145Z",
+                       "value":  "active",
+                       "type":  "Property"
+                   },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId",
+                             "licensePlate":  "https://latticedx.example/ns/licensePlate",
+                             "assignedVehicle":  "https://latticedx.example/ns/assignedVehicle",
+                             "originWarehouse":  "https://latticedx.example/ns/originWarehouse",
+                             "destinationWarehouse":  "https://latticedx.example/ns/destinationWarehouse"
+                         }
+                     ],
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           }
+    },
+    {
+        "businessId":  {
+                           "value":  "warehouse-002",
+                           "type":  "Property"
+                       },
+        "id":  "urn:ngsi-ld:Warehouse:org-a:warehouse-002",
+        "locatedAt":  {
+                          "object":  "urn:ngsi-ld:Location:org-a:depot-2",
+                          "type":  "Relationship"
+                      },
+        "name":  {
+                     "value":  "Demo warehouse 2",
+                     "type":  "Property"
+                 },
+        "type":  "Warehouse",
+        "status":  {
+                       "observedAt":  "2026-10-15T03:57:00.145Z",
+                       "value":  "active",
+                       "type":  "Property"
+                   },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId",
+                             "licensePlate":  "https://latticedx.example/ns/licensePlate",
+                             "assignedVehicle":  "https://latticedx.example/ns/assignedVehicle",
+                             "originWarehouse":  "https://latticedx.example/ns/originWarehouse",
+                             "destinationWarehouse":  "https://latticedx.example/ns/destinationWarehouse"
+                         }
+                     ],
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           }
+    },
+    {
+        "businessId":  {
+                           "value":  "truck-001",
+                           "type":  "Property"
+                       },
+        "id":  "urn:ngsi-ld:Vehicle:org-a:truck-001",
+        "locatedAt":  {
+                          "object":  "urn:ngsi-ld:Location:org-a:depot-1",
+                          "type":  "Relationship"
+                      },
+        "name":  {
+                     "value":  "Demo truck 1",
+                     "type":  "Property"
+                 },
+        "type":  "Vehicle",
+        "status":  {
+                       "observedAt":  "2026-10-15T03:57:00.145Z",
+                       "value":  "assigned",
+                       "type":  "Property"
+                   },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId",
+                             "licensePlate":  "https://latticedx.example/ns/licensePlate",
+                             "assignedVehicle":  "https://latticedx.example/ns/assignedVehicle",
+                             "originWarehouse":  "https://latticedx.example/ns/originWarehouse",
+                             "destinationWarehouse":  "https://latticedx.example/ns/destinationWarehouse"
+                         }
+                     ],
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           }
+    },
+    {
+        "businessId":  {
+                           "value":  "shipment-demo-001",
+                           "type":  "Property"
+                       },
+        "id":  "urn:ngsi-ld:Shipment:org-a:shipment-demo-001",
+        "originWarehouse":  {
+                                "object":  "urn:ngsi-ld:Warehouse:org-a:warehouse-001",
+                                "type":  "Relationship"
+                            },
+        "name":  {
+                     "value":  "Demo shipment 1",
+                     "type":  "Property"
+                 },
+        "type":  "Shipment",
+        "assignedVehicle":  {
+                                "object":  "urn:ngsi-ld:Vehicle:org-a:truck-001",
+                                "type":  "Relationship"
+                            },
+        "status":  {
+                       "observedAt":  "2026-10-15T03:57:00.145Z",
+                       "value":  "planned",
+                       "type":  "Property"
+                   },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId",
+                             "licensePlate":  "https://latticedx.example/ns/licensePlate",
+                             "assignedVehicle":  "https://latticedx.example/ns/assignedVehicle",
+                             "originWarehouse":  "https://latticedx.example/ns/originWarehouse",
+                             "destinationWarehouse":  "https://latticedx.example/ns/destinationWarehouse"
+                         }
+                     ],
+        "destinationWarehouse":  {
+                                     "object":  "urn:ngsi-ld:Warehouse:org-a:warehouse-002",
+                                     "type":  "Relationship"
+                                 },
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           }
+    }
+]

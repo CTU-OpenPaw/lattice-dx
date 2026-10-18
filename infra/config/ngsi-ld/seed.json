@@ -1,0 +1,117 @@
+[
+    {
+        "id":  "urn:ngsi-ld:Department:org-a:it",
+        "name":  {
+                     "value":  "IT Department",
+                     "type":  "Property"
+                 },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId"
+                         }
+                     ],
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           },
+        "type":  "Department",
+        "businessId":  {
+                           "value":  "it",
+                           "type":  "Property"
+                       }
+    },
+    {
+        "id":  "urn:ngsi-ld:Location:org-a:office-1",
+        "name":  {
+                     "value":  "Office 1",
+                     "type":  "Property"
+                 },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId"
+                         }
+                     ],
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           },
+        "type":  "Location",
+        "businessId":  {
+                           "value":  "office-1",
+                           "type":  "Property"
+                       }
+    },
+    {
+        "businessId":  {
+                           "value":  "laptop-001",
+                           "type":  "Property"
+                       },
+        "id":  "urn:ngsi-ld:Asset:org-a:laptop-001",
+        "type":  "Asset",
+        "organizationId":  {
+                               "value":  "org-a",
+                               "type":  "Property"
+                           },
+        "@context":  [
+                         "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+                         {
+                             "Asset":  "https://latticedx.example/ns/Asset",
+                             "Department":  "https://latticedx.example/ns/Department",
+                             "Location":  "https://latticedx.example/ns/Location",
+                             "Vehicle":  "https://latticedx.example/ns/Vehicle",
+                             "Shipment":  "https://latticedx.example/ns/Shipment",
+                             "Warehouse":  "https://latticedx.example/ns/Warehouse",
+                             "businessId":  "https://latticedx.example/ns/businessId",
+                             "organizationId":  "https://latticedx.example/ns/organizationId",
+                             "name":  "https://latticedx.example/ns/name",
+                             "status":  "https://latticedx.example/ns/status",
+                             "belongsToDepartment":  "https://latticedx.example/ns/department",
+                             "locatedAt":  "https://latticedx.example/ns/locatedAt",
+                             "sourceEventId":  "https://latticedx.example/ns/sourceEventId"
+                         }
+                     ],
+        "name":  {
+                     "value":  "Demo laptop",
+                     "type":  "Property"
+                 },
+        "locatedAt":  {
+                          "object":  "urn:ngsi-ld:Location:org-a:office-1",
+                          "type":  "Relationship"
+                      },
+        "status":  {
+                       "observedAt":  "2026-10-14T19:38:24.352Z",
+                       "value":  "ready",
+                       "type":  "Property"
+                   },
+        "belongsToDepartment":  {
+                                    "object":  "urn:ngsi-ld:Department:org-a:it",
+                                    "type":  "Relationship"
+                                }
+    }
+]

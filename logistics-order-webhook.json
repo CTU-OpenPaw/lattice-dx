@@ -1,0 +1,234 @@
+[
+  {
+    "updatedAt": "2026-10-15T10:02:07.891Z",
+    "createdAt": "2026-10-15T05:45:42.313Z",
+    "id": "SoRWzfgoduJD8nEa",
+    "name": "LatticeDX - Logistics Order Intake",
+    "description": null,
+    "active": false,
+    "isArchived": false,
+    "nodes": [
+      {
+        "parameters": {
+          "httpMethod": "POST",
+          "path": "latticedx/logistics/orders",
+          "authentication": "headerAuth",
+          "responseMode": "responseNode",
+          "options": {}
+        },
+        "type": "n8n-nodes-base.webhook",
+        "typeVersion": 2.2,
+        "position": [
+          0,
+          0
+        ],
+        "id": "83cef04b-4158-4b48-8d0f-9977bff058d9",
+        "name": "Webhook",
+        "webhookId": "82451225-cf5f-482b-b62b-ba95edfcabf4",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "HdLnJvRsUVPnZKz4",
+            "name": "LatticeDX Logistics Webhook"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "jsCode": "const input = $input.first().json;\nconst body = input.body;\nconst headers = input.headers ?? {};\nconst errors = [];\n\nif (\n  body === null ||\n  typeof body !== \"object\" ||\n  Array.isArray(body)\n) {\n  return [{\n    json: {\n      valid: false,\n      errors: [\"Body must be a JSON object\"],\n    },\n  }];\n}\n\nconst limits = {\n  title: 200,\n  customerName: 2000,\n  deliveryAddress: 2000,\n  sku: 2000,\n};\n\nfor (const [field, maxLength] of Object.entries(limits)) {\n  const value = body[field];\n\n  if (\n    typeof value !== \"string\" ||\n    !value.trim() ||\n    [...value].length > maxLength\n  ) {\n    errors.push(`${field}: required string, maximum ${maxLength} characters`);\n  }\n}\n\nif (\n  !Number.isInteger(body.quantity) ||\n  body.quantity < 1 ||\n  body.quantity > 1000000\n) {\n  errors.push(\"quantity: integer from 1 to 1000000 required\");\n}\n\nif (\n  typeof body.warehouseAssigneeId !== \"string\" ||\n  !body.warehouseAssigneeId.trim() ||\n  body.warehouseAssigneeId.length > 255\n) {\n  errors.push(\"warehouseAssigneeId: non-empty subject required\");\n}\n\nconst key = headers[\"idempotency-key\"];\n\nif (\n  typeof key !== \"string\" ||\n  !/^[A-Za-z0-9._:-]{1,128}$/.test(key)\n) {\n  errors.push(\"Idempotency-Key: invalid or missing\");\n}\n\nconst allowed = new Set([\n  ...Object.keys(limits),\n  \"quantity\",\n  \"warehouseAssigneeId\",\n  \"attachmentId\",\n]);\n\nfor (const field of Object.keys(body)) {\n  if (!allowed.has(field)) {\n    errors.push(`Unsupported field: ${field}`);\n  }\n}\n\nif (\n  body.attachmentId !== undefined &&\n  (\n    typeof body.attachmentId !== \"string\" ||\n    !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i\n      .test(body.attachmentId)\n  )\n) {\n  errors.push(\"attachmentId: UUID required\");\n}\n\nreturn [{\n  json: {\n    valid: errors.length === 0,\n    errors,\n    ...(errors.length === 0\n      ? { payload: body, idempotencyKey: key }\n      : {}),\n  },\n}];"
+        },
+        "type": "n8n-nodes-base.code",
+        "typeVersion": 2,
+        "position": [
+          224,
+          0
+        ],
+        "id": "7ce3818f-d74c-4b88-b8cc-730d8464b4f5",
+        "name": "Validate Logistics Order"
+      },
+      {
+        "parameters": {
+          "conditions": {
+            "options": {
+              "caseSensitive": true,
+              "leftValue": "",
+              "typeValidation": "strict",
+              "version": 3
+            },
+            "conditions": [
+              {
+                "id": "f735cc14-27ab-44f0-a9bd-3425171d1f58",
+                "leftValue": "={{ $json.valid }}",
+                "rightValue": "",
+                "operator": {
+                  "type": "boolean",
+                  "operation": "true",
+                  "singleValue": true
+                }
+              }
+            ],
+            "combinator": "and"
+          },
+          "options": {}
+        },
+        "type": "n8n-nodes-base.if",
+        "typeVersion": 2.3,
+        "position": [
+          448,
+          0
+        ],
+        "id": "bb04753e-ac01-4c86-b1dd-6c504fb62ec6",
+        "name": "If"
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ { status: \"invalid_payload\", errors: $json.errors } }}",
+          "options": {
+            "responseCode": 400
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          672,
+          96
+        ],
+        "id": "1b03cb6d-8837-46ab-b64c-947ddc46db55",
+        "name": "Respond to Webhook"
+      },
+      {
+        "parameters": {
+          "method": "POST",
+          "url": "http://gateway:9080/v1/logistics/orders",
+          "authentication": "genericCredentialType",
+          "genericAuthType": "httpHeaderAuth",
+          "sendHeaders": true,
+          "headerParameters": {
+            "parameters": [
+              {
+                "name": "Idempotency-Key",
+                "value": "={{ $json.idempotencyKey }}"
+              }
+            ]
+          },
+          "sendBody": true,
+          "specifyBody": "json",
+          "jsonBody": "={{ $json.payload }}",
+          "options": {
+            "response": {
+              "response": {
+                "fullResponse": true,
+                "neverError": true,
+                "responseFormat": "json"
+              }
+            }
+          }
+        },
+        "type": "n8n-nodes-base.httpRequest",
+        "typeVersion": 4.5,
+        "position": [
+          608,
+          -160
+        ],
+        "id": "b4015611-0a52-404d-b068-3d8f5e13889b",
+        "name": "Create Logistics Order",
+        "credentials": {
+          "httpHeaderAuth": {
+            "id": "WGRfBYwN01p6RcRy",
+            "name": "LatticeDX Local Sales API"
+          }
+        }
+      },
+      {
+        "parameters": {
+          "respondWith": "json",
+          "responseBody": "={{ $json.body }}",
+          "options": {
+            "responseCode": "={{ $json.statusCode }}"
+          }
+        },
+        "type": "n8n-nodes-base.respondToWebhook",
+        "typeVersion": 1.5,
+        "position": [
+          896,
+          -160
+        ],
+        "id": "0d502a2e-5c85-4171-83d1-64438ec1b0d2",
+        "name": "Return Order Result"
+      }
+    ],
+    "connections": {
+      "Webhook": {
+        "main": [
+          [
+            {
+              "node": "Validate Logistics Order",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Validate Logistics Order": {
+        "main": [
+          [
+            {
+              "node": "If",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "If": {
+        "main": [
+          [
+            {
+              "node": "Create Logistics Order",
+              "type": "main",
+              "index": 0
+            }
+          ],
+          [
+            {
+              "node": "Respond to Webhook",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      },
+      "Create Logistics Order": {
+        "main": [
+          [
+            {
+              "node": "Return Order Result",
+              "type": "main",
+              "index": 0
+            }
+          ]
+        ]
+      }
+    },
+    "settings": {
+      "executionOrder": "v1",
+      "binaryMode": "separate"
+    },
+    "staticData": null,
+    "meta": {
+      "templateCredsSetupCompleted": true
+    },
+    "nodeGroups": [],
+    "pinData": {},
+    "versionId": "198085d7-b078-4a4d-b55a-77a56a3d0714",
+    "activeVersionId": null,
+    "versionCounter": 62,
+    "triggerCount": 0,
+    "sourceWorkflowId": null,
+    "tags": [],
+    "versionMetadata": {
+      "name": null,
+      "description": null
+    }
+  }
+]

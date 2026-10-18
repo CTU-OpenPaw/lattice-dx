@@ -1,0 +1,24 @@
+{
+  "@context": [
+    "https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld",
+    {
+      "Asset": "https://latticedx.example/ns/Asset",
+      "Department": "https://latticedx.example/ns/Department",
+      "Location": "https://latticedx.example/ns/Location",
+      "Vehicle": "https://latticedx.example/ns/Vehicle",
+      "Shipment": "https://latticedx.example/ns/Shipment",
+      "Warehouse": "https://latticedx.example/ns/Warehouse",
+      "businessId": "https://latticedx.example/ns/businessId",
+      "organizationId": "https://latticedx.example/ns/organizationId",
+      "name": "https://latticedx.example/ns/name",
+      "status": "https://latticedx.example/ns/status",
+      "belongsToDepartment": "https://latticedx.example/ns/department",
+      "locatedAt": "https://latticedx.example/ns/locatedAt",
+      "sourceEventId": "https://latticedx.example/ns/sourceEventId",
+      "licensePlate": "https://latticedx.example/ns/licensePlate",
+      "assignedVehicle": "https://latticedx.example/ns/assignedVehicle",
+      "originWarehouse": "https://latticedx.example/ns/originWarehouse",
+      "destinationWarehouse": "https://latticedx.example/ns/destinationWarehouse"
+    }
+  ]
+}

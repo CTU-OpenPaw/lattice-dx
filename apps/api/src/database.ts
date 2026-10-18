@@ -11,6 +11,7 @@ import { definitionDatabase } from './workflows/registry-database.js';
 import { workflowDatabase } from './workflows/database.js';
 import { workflowJobDatabase } from './workflows/job-database.js';
 import { entityDatabase } from './entities/database.js';
+import {ngsiLdDatabase} from './ngsi-ld/database.js';
 import { entityDataToolsDatabase } from './entities/data-tools-database.js';
 import {reportsDatabase} from './entities/reports-database.js';
 import { organizationDatabase } from './organization/database.js';
@@ -33,13 +34,14 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const workflows=await workflowDatabase(pool,definitionRegistry,options.store);
     const events=await eventsDatabase(pool,definitionRegistry,workflows);
     const entities=await entityDatabase(pool);
+    const ngsiLdContext=await ngsiLdDatabase(pool);
     const contextLinks=await contextLinksDatabase(pool,entities,{projectionEnabled:options.projectionEnabled===true});
     const automations=await automationsDatabase(pool,definitionRegistry,workflows);
     const dataTools=await entityDataToolsDatabase(pool,options.store);
     const reports=await reportsDatabase(pool);
     const modules=await modulesDatabase(pool,workflows);
     const taskLifecycle=await taskLifecycleDatabase(pool);
-    return {agents:agentDatabase(pool,definitionRegistry,options.store),repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),
+    return {ngsiLdContext,agents:agentDatabase(pool,definitionRegistry,options.store),repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),
       offloadFile:async()=>{if(!options.store)throw new Error('File storage is not configured');return offloadOneFile(pool,options.store);},close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }
