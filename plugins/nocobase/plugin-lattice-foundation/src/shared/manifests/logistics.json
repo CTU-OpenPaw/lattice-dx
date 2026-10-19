@@ -1,19 +1,191 @@
 {
-  "schemaVersion": 1, "id": "logistics", "name": "Logistics", "route": "/lattice/apps/logistics",
-  "permissions": ["records:read", "tasks:read"],
-  "collections": [{"id": "order-records", "source": "lattice-api", "resource": "records"}, {"id": "warehouse-tasks", "source": "lattice-api", "resource": "tasks"}],
-  "blocks": [
-    {"id": "create-order-record", "type": "form", "title": "Kinh doanh tạo hồ sơ đơn hàng", "collection": "order-records", "permissions": ["records:write"],
-      "fields": [{"name": "title", "title": "Nội dung đơn hàng", "type": "string", "required": true, "maxLength": 200}],
-      "submit": {"actionId": "records.create", "version": 1}, "attachments": true},
-    {"id": "order-list", "type": "list", "title": "Hồ sơ đơn hàng của tôi", "collection": "order-records", "permissions": ["records:read"], "columns": ["id", "title", "createdAt"]},
-    {"id": "assign-warehouse-task", "type": "form", "title": "Giao việc cho kho", "collection": "warehouse-tasks", "permissions": ["tasks:assign"],
-      "fields": [
-        {"name": "title", "title": "Công việc", "type": "string", "required": true, "maxLength": 200},
-        {"name": "assigneeId", "title": "Keycloak subject của người nhận", "type": "string", "required": true, "maxLength": 100},
-        {"name": "recordId", "title": "ID hồ sơ đơn hàng đã tạo", "type": "string", "required": true, "maxLength": 36, "pattern": "uuid", "reference": "records"}
-      ], "submit": {"actionId": "tasks.create", "version": 1}},
-    {"id": "warehouse-inbox", "type": "list", "title": "Kho nhận việc", "collection": "warehouse-tasks", "permissions": ["tasks:read"], "columns": ["title", "status", "version", "recordId"]}
+  "schemaVersion": 1,
+  "id": "logistics",
+  "name": "Logistics",
+  "route": "/lattice/apps/logistics",
+  "permissions": [
+    "logistics:sales",
+    "logistics:warehouse"
   ],
-  "transitions": [{"id": "submit-order", "collection": "order-records", "from": "draft", "to": "submitted", "permission": "logistics:sales", "availability": "unavailable", "reason": "Chưa có API chuyển trạng thái Order; quyết định task không thay đổi trạng thái đơn hàng."}]
+  "collections": [
+    {
+      "id": "order-records",
+      "source": "lattice-api",
+      "resource": "orders"
+    },
+    {
+      "id": "warehouse-tasks",
+      "source": "lattice-api",
+      "resource": "tasks"
+    }
+  ],
+  "blocks": [
+    {
+      "id": "create-order-record",
+      "type": "form",
+      "title": "Tạo đơn Logistics",
+      "collection": "order-records",
+      "permissions": [
+        "logistics:sales"
+      ],
+      "fields": [
+        {
+          "name": "title",
+          "title": "Nội dung đơn",
+          "type": "string",
+          "required": true,
+          "maxLength": 200
+        },
+        {
+          "name": "customerName",
+          "title": "Khách hàng",
+          "type": "string",
+          "required": true,
+          "maxLength": 2000
+        },
+        {
+          "name": "deliveryAddress",
+          "title": "Địa chỉ giao",
+          "type": "string",
+          "required": true,
+          "maxLength": 2000
+        },
+        {
+          "name": "sku",
+          "title": "Mã hàng SKU",
+          "type": "string",
+          "required": true,
+          "maxLength": 2000
+        },
+        {
+          "name": "quantity",
+          "title": "Số lượng",
+          "type": "positiveInteger",
+          "required": true,
+          "maxLength": 7
+        },
+        {
+          "name": "warehouseAssigneeId",
+          "title": "Người kho",
+          "type": "string",
+          "required": true,
+          "maxLength": 100,
+          "reference": "warehousePeople"
+        },
+        {
+          "name": "attachmentId",
+          "title": "ID tệp sạch (tùy chọn)",
+          "type": "string",
+          "required": false,
+          "maxLength": 36,
+          "pattern": "uuid"
+        }
+      ],
+      "submit": {
+        "actionId": "logistics.create",
+        "version": 1
+      },
+      "attachments": true
+    },
+    {
+      "id": "order-list",
+      "type": "list",
+      "title": "Đơn Logistics của tôi",
+      "collection": "order-records",
+      "permissions": [
+        "logistics:sales",
+        "logistics:warehouse"
+      ],
+      "columns": [
+        "title",
+        "customerName",
+        "sku",
+        "quantity",
+        "state"
+      ]
+    },
+    {
+      "id": "warehouse-inbox",
+      "type": "list",
+      "title": "Kho nhận việc",
+      "collection": "warehouse-tasks",
+      "permissions": [
+        "tasks:read"
+      ],
+      "columns": [
+        "title",
+        "status",
+        "version",
+        "recordId"
+      ]
+    },
+    {
+      "id": "assign-warehouse-task",
+      "type": "form",
+      "title": "Giao task nền (legacy)",
+      "collection": "warehouse-tasks",
+      "permissions": [
+        "tasks:assign"
+      ],
+      "fields": [
+        {
+          "name": "title",
+          "title": "Nội dung",
+          "type": "string",
+          "required": true,
+          "maxLength": 200
+        },
+        {
+          "name": "assigneeId",
+          "title": "Subject người nhận",
+          "type": "string",
+          "required": true,
+          "maxLength": 100
+        },
+        {
+          "name": "recordId",
+          "title": "ID hồ sơ",
+          "type": "string",
+          "required": false,
+          "maxLength": 36,
+          "pattern": "uuid",
+          "reference": "records"
+        }
+      ],
+      "submit": {
+        "actionId": "tasks.create",
+        "version": 1
+      }
+    }
+  ],
+  "transitions": [],
+  "workspace": {
+    "panels": [
+      {
+        "id": "detail",
+        "renderer": "lattice.logistics.detail"
+      }
+    ],
+    "blocks": [
+      {
+        "blockId": "create-order-record",
+        "selectFrom": "id"
+      },
+      {
+        "blockId": "order-list",
+        "selectFrom": "id"
+      },
+      {
+        "blockId": "warehouse-inbox",
+        "selectFrom": "recordId"
+      }
+    ],
+    "showTransitions": false,
+    "shortcut": {
+      "description": "Tạo đơn và giao việc cho kho",
+      "icon": "truck",
+      "createBlockId": "create-order-record",
+      "createLabel": "Tạo đơn"
+    }
+  }
 }

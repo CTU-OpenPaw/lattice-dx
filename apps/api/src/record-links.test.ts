@@ -2,6 +2,7 @@
 import { test, expect } from 'vitest';
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from 'jose';
 import { createApi } from './app';
+import { unitDirectory } from './directory-fixture';
 import type { FoundationRepository } from './foundation';
 const { privateKey, publicKey } = await generateKeyPair('RS256');
 const key = createLocalJWKSet({ keys: [{ ...await exportJWK(publicKey), kid: 'links', alg: 'RS256' }] });
@@ -30,7 +31,7 @@ function setup(withRecords = true, lookupFailure = false) {
         ? { id, title: 'Business record', ownerId, organizationId, createdAt: '2026-10-12T00:00:00Z' } : undefined;
     },
   };
-  return { app: createApi({ workerUrl: 'http://localhost:1', identity: { key, issuer: 'https://identity.test', audience: 'dx-api' }, foundation,
+  return { app: createApi({ workerUrl: 'http://localhost:1', identity: { key, issuer: 'https://identity.test', audience: 'dx-api' }, foundation,directory:unitDirectory,
     records: withRecords ? records : undefined, scan: async () => { scans++; return 'clean'; } }), writes, scans: () => scans };
 }
 const paths = ['/v1/tasks', '/v1/actions/tasks.create/run', '/v1/files'];

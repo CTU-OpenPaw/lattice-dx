@@ -5,6 +5,17 @@ const { randomBytes, createHash } = require('node:crypto');
 class BridgeError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
+function validatedQuery(query,allowed) {
+  if(query===undefined)return '';
+  if(!query||typeof query!=='object'||Array.isArray(query)||Object.keys(query).some(k=>!allowed.includes(k)))throw new BridgeError(400,'Invalid list query.');
+  const params=new URLSearchParams();
+  for(const [key,value] of Object.entries(query)){
+    if(typeof value!=='string'||value.length>200||/[\x00-\x1f\x7f]/.test(value))throw new BridgeError(400,'Invalid query value.');
+    if(['limit','offset'].includes(key)&&(!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value))||Number(value)<(key==='limit'?1:0)||Number(value)>(key==='limit'?100:Number.MAX_SAFE_INTEGER-101)))throw new BridgeError(400,'Invalid pagination.');
+    params.set(key,value);
+  }
+  return params.toString();
+}
 function createBridge(config, dependencies = {}) {
   const http = dependencies.fetch || globalThis.fetch;
   const now = dependencies.now || Date.now;
@@ -80,29 +91,75 @@ function createBridge(config, dependencies = {}) {
       await catalogForToken(token.access_token);
       const info = await request(config.userinfoUrl, { headers: { authorization: `Bearer ${token.access_token}` } }, 'Keycloak identity request failed.');
       if (!info || typeof info.sub !== 'string' || !info.sub) throw new BridgeError(502, 'Invalid Keycloak identity.');
+      // Display hints only: catalogForToken above verifies this exact token at the API.
+      // Every subsequent directory request is still authorized by the API.
+      let directoryRead=false,organizationId;
+      try{const claims=JSON.parse(Buffer.from(token.access_token.split('.')[1],'base64url').toString('utf8'));if(claims.sub===info.sub){directoryRead=Array.isArray(claims.realm_access?.roles)&&claims.realm_access.roles.includes('directory:read');if(typeof claims.organization_id==='string'&&/^[A-Za-z0-9_-]{1,80}$/.test(claims.organization_id))organizationId=claims.organization_id;}}catch{}
       if (exchange.cancelled) throw new BridgeError(401, 'Authorization connection was cancelled.');
-      store(sessions, browserId, { userId: item.userId, token: token.access_token, identity: { subject: info.sub, username: typeof info.preferred_username === 'string' ? info.preferred_username : info.sub }, expiresAt: now() + Math.min(token.expires_in, 300) * 1000 });
+      store(sessions, browserId, { userId: item.userId, token: token.access_token, capabilities:{directoryRead}, identity: { subject: info.sub, username: typeof info.preferred_username === 'string' ? info.preferred_username : info.sub,...(organizationId?{organizationId}:{}) }, expiresAt: now() + Math.min(token.expires_in, 300) * 1000 });
       return { connected: true };
       } finally { exchanges.delete(browserId); }
     },
     status(userId, browserId) {
       clean();
       const item = sessions.get(browserId);
-      return item?.userId === userId ? { connected: true, identity: item.identity, expiresAt: new Date(item.expiresAt).toISOString() } : { connected: false };
+      return item?.userId === userId ? { connected: true, identity: item.identity,capabilities:item.capabilities, expiresAt: new Date(item.expiresAt).toISOString() } : { connected: false };
     },
     async catalog(userId, browserId) { return catalogForToken(session(userId, browserId).token); },
-    async list(userId, browserId, resource) {
+    async logistics(userId, browserId, input) {
+      const item=session(userId,browserId);
+      const operations={people:['GET','directory/people'],orders:['GET','logistics/orders'],create:['POST','logistics/orders'],detail:['GET',''],submit:['POST',''],receive:['POST',''],history:['GET',''],task:['GET','']};
+      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid Logistics operation.');
+      const [method,resource]=operations[input.operation];let path=resource;
+      if(['detail','submit','receive','history','task'].includes(input.operation)){
+        if(typeof input.id!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid Logistics ID.');
+        path=input.operation==='history'?`workflows/${input.id}/history`:input.operation==='task'?`tasks/${input.id}`:`logistics/orders/${input.id}`+({detail:'',submit:'/submit',receive:'/receive'}[input.operation]);
+      }else if(input.id!==undefined)throw new BridgeError(400,'Unexpected ID.');
+      const write=['create','submit','receive'].includes(input.operation);
+      if(write){if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!input.body||typeof input.body!=='object'||Array.isArray(input.body))throw new BridgeError(400,'Command requires body and idempotency key.');}
+      else if(input.body!==undefined||input.key!==undefined)throw new BridgeError(400,'Unexpected command payload.');
+      const query=validatedQuery(input.query,input.operation==='people'?['limit','offset','q','role','department']:['limit','offset','q','state']);
+      if(input.query!==undefined&&!['people','orders'].includes(input.operation))throw new BridgeError(400,'Unexpected query.');
+      if(query)path+='?'+query;
+      return request(`${config.gatewayUrl}/v1/${path}`,{method,headers:{authorization:`Bearer ${item.token}`,...(write?{'content-type':'application/json','idempotency-key':input.key}:{})},...(write?{body:JSON.stringify(input.body)}:{})},'Logistics request failed; reload before retrying the same command.',true);
+    },
+    async workflow(userId, browserId, input) {
+      const item=session(userId,browserId);
+      const operations={definitions:['GET','workflow-definitions'],references:['GET','workflow-references'],people:['GET','directory/people'],member:['POST','workflow-members/me'],list:['GET','workflows'],inbox:['GET','workflows?inbox=true'],create:['POST','workflows'],detail:['GET',''],history:['GET',''],sync:['GET',''],transition:['POST',''],waits:['GET',''],executions:['GET',''],completeWait:['POST',''],retrySync:['POST',''],entityContext:['GET','']};
+      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid workflow operation.');
+      const [method,resource]=operations[input.operation];let path=resource;
+      if(['detail','history','sync','transition','waits','executions','completeWait','retrySync','entityContext'].includes(input.operation)){
+        if(typeof input.id!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid workflow ID.');
+        path=input.operation==='completeWait'?`workflow-waits/${input.id}/complete`:`workflows/${input.id}`+({detail:'',history:'/history',sync:'/sync',transition:'/transitions',waits:'/waits',executions:'/executions',retrySync:'/sync/retry',entityContext:'/entity-context'}[input.operation]);
+      }else if(input.id!==undefined)throw new BridgeError(400,'Unexpected workflow ID.');
+      const write=['create','transition','completeWait','retrySync'].includes(input.operation);
+      if(write){if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!input.body||typeof input.body!=='object'||Array.isArray(input.body))throw new BridgeError(400,'Workflow command requires body and idempotency key.');}
+      else if(input.key!==undefined||input.body!==undefined)throw new BridgeError(400,'Unexpected workflow command payload.');
+      if(input.query!==undefined&&!['list','inbox','waits','executions','people'].includes(input.operation))throw new BridgeError(400,'Unexpected query.');
+      const query=validatedQuery(input.query,input.operation==='people'?['limit','offset','q','role','department']:['waits','executions'].includes(input.operation)?['limit','offset']:['limit','offset','q','state','definitionId']);
+      if(query)path+=(path.includes('?')?'&':'?')+query;
+      const headers={authorization:`Bearer ${item.token}`,...(method==='POST'?{'content-type':'application/json'}:{}),...(write?{'idempotency-key':input.key}:{})};
+      return request(`${config.gatewayUrl}/v1/${path}`,{method,headers,...(method==='POST'?{body:JSON.stringify(write?input.body:{})}:{})},'Workflow request failed; reload or retry only the same command key.',true);
+    },
+    async entity(userId,browserId,input){
+      const item=session(userId,browserId);
+      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id'].includes(k))||input.operation!=='detail'||typeof input.id!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid entity read operation.');
+      return request(`${config.gatewayUrl}/v1/entities/${input.id}`,{method:'GET',headers:{authorization:`Bearer ${item.token}`}},'Entity read failed.',true);
+    },
+    async list(userId, browserId, resource, query) {
       if (!['records','tasks'].includes(resource)) throw new BridgeError(400, 'Unsupported list resource.');
       const item = session(userId, browserId);
-      const result = await request(`${config.gatewayUrl}/v1/${resource}`, {headers:{authorization:`Bearer ${item.token}`}}, 'List request failed.', true);
+      const search=validatedQuery(query,resource==='tasks'?['limit','offset','q','status','recordId']:['limit','offset','q']);
+      const result = await request(`${config.gatewayUrl}/v1/${resource}${search?'?'+search:''}`, {headers:{authorization:`Bearer ${item.token}`}}, 'List request failed.', true);
       if (!result || !Array.isArray(result.items) || result.items.length > 100) throw new BridgeError(502, 'Invalid list result.');
-      return {items:result.items};
+      return {items:result.items,...(result.page?{page:result.page}:{})};
     },
     async run(userId, browserId, input) {
       const item = session(userId, browserId);
-      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['actionId', 'version', 'input'].includes(key))
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !['actionId', 'version', 'input', 'key'].includes(key))
         || typeof input.actionId !== 'string' || !/^[a-z][a-z0-9_.-]{0,79}$/.test(input.actionId) || input.version !== 1 || !('input' in input)) throw new BridgeError(400, 'Invalid action request.');
-      const result = await request(`${config.gatewayUrl}/v1/actions/${input.actionId}/run`, { method: 'POST', headers: { authorization: `Bearer ${item.token}`, 'content-type': 'application/json' },
+      if (input.key !== undefined && (typeof input.key !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(input.key))) throw new BridgeError(400, 'Invalid action idempotency key.');
+      const result = await request(`${config.gatewayUrl}/v1/actions/${input.actionId}/run`, { method: 'POST', headers: { authorization: `Bearer ${item.token}`, 'content-type': 'application/json', ...(input.key !== undefined ? {'idempotency-key': input.key} : {}) },
         body: JSON.stringify({ version: input.version, input: input.input }) }, 'Action execution failed; do not automatically retry.', true);
       if (!result || result.actionId !== input.actionId || result.version !== input.version || result.status !== 'succeeded' || !('result' in result)) throw new BridgeError(502, 'Invalid action result.');
       return { actionId: result.actionId, version: result.version, status: result.status, result: result.result };

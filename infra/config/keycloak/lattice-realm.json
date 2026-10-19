@@ -4,6 +4,14 @@
   "sslRequired": "none",
   "roles": {
     "realm": [
+      { "name": "data:design" },
+      { "name": "data:read" },
+      { "name": "data:write" },
+      { "name": "data:share" },
+      { "name": "data:automate" },
+      { "name": "directory:manage" },
+      { "name": "platform:operate" },
+      { "name": "workflow:event:receive" },
       {
         "name": "records:read"
       },
@@ -24,6 +32,57 @@
       },
       {
         "name": "files:write"
+      },
+      {
+        "name": "employee"
+      },
+      {
+        "name": "workflow:start"
+      },
+      {
+        "name": "procurement:manager"
+      },
+      {
+        "name": "workflow:sync"
+      },
+      {
+        "name": "department:warehouse"
+      },
+      {
+        "name": "department:hr"
+      },
+      {
+        "name": "department:it"
+      },
+      {
+        "name": "department:administration"
+      },
+      {
+        "name": "directory:read"
+      },
+      {
+        "name": "logistics:sales"
+      },
+      {
+        "name": "logistics:warehouse"
+      },
+      {
+        "name": "workflow:design"
+      },
+      {
+        "name": "workflow:integrate"
+      },
+      {
+        "name": "workflow:callback"
+      },
+      {
+        "name": "connector:n8n"
+      },
+      {
+        "name": "connector:ngsi-ld"
+      },
+      {
+        "name": "connector:agent"
       }
     ]
   },
@@ -91,13 +150,27 @@
         }
       ],
       "realmRoles": [
+        "data:design",
+        "directory:manage",
+        "platform:operate",
+        "workflow:event:receive",
+        "data:read",
+        "data:write",
         "records:read",
         "records:write",
         "tasks:read",
         "tasks:assign",
         "tasks:decide",
         "files:read",
-        "files:write"
+        "files:write",
+        "employee",
+        "workflow:start",
+        "directory:read",
+        "logistics:sales",
+        "workflow:design",
+        "workflow:integrate",
+        "data:share",
+        "data:automate"
       ],
       "attributes": {
         "organization_id": [
@@ -130,6 +203,353 @@
           "org-b"
         ]
       }
+    },
+    {
+      "username": "manager",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "manager@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-manager-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "procurement:manager",
+        "workflow:sync",
+        "files:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "manager",
+      "lastName": "Demo"
+    },
+    {
+      "username": "warehouse",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "warehouse@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-warehouse-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:warehouse",
+        "files:read",
+        "files:write",
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:assign",
+        "tasks:decide",
+        "records:read",
+        "data:read",
+        "data:write"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "warehouse",
+      "lastName": "Demo"
+    },
+    {
+      "username": "warehouse2",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "warehouse2@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-warehouse2-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:warehouse",
+        "files:read",
+        "files:write",
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:decide",
+        "records:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "warehouse2",
+      "lastName": "Demo"
+    },
+    {
+      "username": "hr-demo",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "hr-demo@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-hr-demo-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:hr",
+        "workflow:start",
+        "files:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "hr-demo",
+      "lastName": "Demo"
+    },
+    {
+      "username": "it-demo",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "it-demo@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-it-demo-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:it",
+        "files:read",
+        "tasks:read",
+        "tasks:decide",
+        "records:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "it-demo",
+      "lastName": "Demo"
+    },
+    {
+      "username": "administration",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "administration@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-administration-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "department:administration",
+        "files:read",
+        "files:write"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "administration",
+      "lastName": "Demo"
+    },
+    {
+      "username": "receiver",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "receiver@example.invalid",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-receiver-password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "employee",
+        "workflow:start",
+        "files:read"
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "firstName": "receiver",
+      "lastName": "Demo"
+    },
+    {
+      "username": "sales2",
+      "firstName": "sales2",
+      "lastName": "Demo",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-sales2-password",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "realmRoles": [
+        "logistics:sales",
+        "workflow:start",
+        "directory:read",
+        "records:read",
+        "records:write",
+        "tasks:read",
+        "tasks:assign",
+        "files:read",
+        "files:write",
+        "data:read",
+        "data:write"
+      ],
+      "email": "sales2@local.invalid"
+    },
+    {
+      "username": "warehouse-b",
+      "firstName": "warehouse-b",
+      "lastName": "Demo",
+      "enabled": true,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-warehouse-b-password",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-b"
+        ]
+      },
+      "realmRoles": [
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:decide",
+        "records:read",
+        "files:read"
+      ],
+      "email": "warehouse-b@local.invalid"
+    },
+    {
+      "username": "disabled-demo",
+      "firstName": "disabled-demo",
+      "lastName": "Demo",
+      "enabled": false,
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "local-disabled-demo-password",
+          "temporary": false
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "realmRoles": [
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:decide",
+        "records:read",
+        "files:read"
+      ],
+      "email": "disabled-demo@local.invalid"
+    },
+    {
+      "credentials": [
+        {
+          "temporary": false,
+          "type": "password",
+          "value": "local-connector-demo-password"
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "lastName": "Demo",
+      "emailVerified": true,
+      "enabled": true,
+      "email": "connector-demo@example.invalid",
+      "firstName": "connector-demo",
+      "username": "connector-demo",
+      "realmRoles": [
+        "workflow:callback",
+        "connector:n8n"
+      ]
+    },
+    {
+      "credentials": [
+        {
+          "temporary": false,
+          "type": "password",
+          "value": "local-connector-b-password"
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-b"
+        ]
+      },
+      "lastName": "Demo",
+      "emailVerified": true,
+      "enabled": true,
+      "email": "connector-b@example.invalid",
+      "firstName": "connector-b",
+      "username": "connector-b",
+      "realmRoles": [
+        "workflow:callback",
+        "connector:n8n"
+      ]
+    },
+    {
+      "credentials": [
+        {
+          "temporary": false,
+          "type": "password",
+          "value": "local-connector-agent-password"
+        }
+      ],
+      "attributes": {
+        "organization_id": [
+          "org-a"
+        ]
+      },
+      "lastName": "Demo",
+      "emailVerified": true,
+      "enabled": true,
+      "email": "connector-agent@example.invalid",
+      "firstName": "connector-agent",
+      "username": "connector-agent",
+      "realmRoles": [
+        "workflow:callback",
+        "connector:agent"
+      ]
     }
   ]
 }

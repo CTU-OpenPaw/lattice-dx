@@ -12,8 +12,8 @@ const assert=require('node:assert/strict');
     await page.waitForURL('**'+target);await page.getByText(/Total \d+ items/).waitFor();
     if(!(await page.getByText('Add block',{exact:true}).isVisible()))await page.getByTitle('UI Editor',{exact:true}).click();
     await page.getByText('Add block',{exact:true}).click();
-    for(const name of ['Lattice Form','Lattice Danh sách'])await page.getByText(name,{exact:true}).waitFor({timeout:5000});
+    for(const name of ['Lattice Form','Lattice Danh sách','Lattice Task Inbox','Lattice Approval','Lattice Attachment','Lattice Activity Timeline','Lattice Context Entity','Lattice Workflow Form'])await page.getByText(name,{exact:true}).waitFor({timeout:5000});
     await page.keyboard.press('Escape');
-    assert.deepEqual(errors,[]);console.log(JSON.stringify({result:'PASS',menu:['Lattice Form','Lattice Danh sách'],noSchemaInsert:true}));
+    assert.deepEqual(errors,[]);console.log(JSON.stringify({result:'PASS',menu:['Lattice Form','Lattice Danh sách','Lattice Task Inbox','Lattice Approval','Lattice Attachment','Lattice Activity Timeline','Lattice Context Entity','Lattice Workflow Form'],noSchemaInsert:true}));
   }finally{await browser.close()}
 })().catch(error=>{console.error(error.message);process.exitCode=1});

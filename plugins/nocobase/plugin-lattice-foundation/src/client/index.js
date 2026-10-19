@@ -11,6 +11,9 @@
   const {createWorkspaceComponent} = require('./workspace');
   const {createWorkspaceApi} = require('./workspace-api');
   const {createBlockComponents} = require('./blocks');
+  const {createApplicationRuntime} = require('./application-runtime');
+  const {registerApplicationViews} = require('../applications/views');
+  const {defaultContracts}=require('../shared/contracts');
   function useLatticeFormAction(manifest, blockId) {
     const apiClient = client.useAPIClient();
     const sharedApi = React.useMemo(() => createWorkspaceApi({apiClient}), [apiClient]);
@@ -34,7 +37,25 @@
       class LatticeListBlockModel extends clientV2.BlockModel {
         renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'list'});}
       }
-      for(const [Model,type,label] of [[LatticeFormBlockModel,'form','Lattice Form'],[LatticeListBlockModel,'list','Lattice Danh sách']]){
+      class LatticeTaskInboxBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'task-inbox'});}
+      }
+      class LatticeApprovalBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'approval'});}
+      }
+      class LatticeAttachmentBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'attachment'});}
+      }
+      class LatticeActivityTimelineBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'activity-timeline'});}
+      }
+      class LatticeContextEntityBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'context-entity'});}
+      }
+      class LatticeWorkflowFormBlockModel extends clientV2.BlockModel {
+        renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'workflow-form'});}
+      }
+      for(const [Model,type,label] of [[LatticeFormBlockModel,'form','Lattice Form'],[LatticeListBlockModel,'list','Lattice Danh sách'],[LatticeTaskInboxBlockModel,'task-inbox','Lattice Task Inbox'],[LatticeApprovalBlockModel,'approval','Lattice Approval'],[LatticeAttachmentBlockModel,'attachment','Lattice Attachment'],[LatticeActivityTimelineBlockModel,'activity-timeline','Lattice Activity Timeline'],[LatticeContextEntityBlockModel,'context-entity','Lattice Context Entity'],[LatticeWorkflowFormBlockModel,'workflow-form','Lattice Workflow Form']]){
         Model.define({label});
         Model.registerFlow({key:'latticeBinding',title:'Cấu hình Lattice',on:'beforeRender',steps:{binding:{
           title:'Chọn ứng dụng và block',defaultParams:{binding:''},
@@ -42,12 +63,12 @@
             const response=await ctx.api.request({url:'latticeApps:list',method:'get'});
             const apps=response.data.data.items;
             return {binding:{type:'string',title:'Ứng dụng và block',required:true,'x-decorator':'FormItem','x-component':'Select',enum:
-              apps.flatMap(app=>app.blocks.filter(b=>b.type===type).map(b=>({label:app.name+' — '+b.title,value:app.id+':'+b.id})))}};
+              apps.flatMap(app=>app.blocks.filter(b=>b.type===type).map(b=>({label:app.name+' — '+b.title,value:app.id+':'+b.id})))},...(['attachment','activity-timeline','context-entity','workflow-form'].includes(type)?{contextId:{type:'string',title:'ID hồ sơ / quy trình (tùy chọn)', 'x-decorator':'FormItem','x-component':'Input'}}:{})};
           },
-          handler(ctx,params){const [manifestId,blockId]=typeof params.binding==='string'?params.binding.split(':'):[];ctx.model.setProps({manifestId,blockId});},
+          handler(ctx,params){const [manifestId,blockId]=typeof params.binding==='string'?params.binding.split(':'):[];ctx.model.setProps({manifestId,blockId,...(['attachment','activity-timeline','context-entity','workflow-form'].includes(type)?{contextId:params.contextId||''}:{})});},
         }}});
       }
-      this.flowEngine.registerModels({LatticeFormBlockModel,LatticeListBlockModel});
+      this.flowEngine.registerModels({LatticeFormBlockModel,LatticeListBlockModel,LatticeTaskInboxBlockModel,LatticeApprovalBlockModel,LatticeAttachmentBlockModel,LatticeActivityTimelineBlockModel,LatticeContextEntityBlockModel,LatticeWorkflowFormBlockModel});
       this.app.addComponents({LatticeFormBlock:blocks.FormBlock,LatticeListBlock:blocks.ListBlock,LatticeConfiguredBlock:blocks.ConfiguredBlock,LatticeBlockInitializer:blocks.Initializer});
       const registerBlocks=()=>{
         for (const name of ['page:addBlock','RecordBlockInitializers']) {
@@ -55,6 +76,12 @@
           if (initializer) {
             initializer.add('otherBlocks.latticeForm',{type:'item',title:'Lattice Form',Component:blocks.Initializer,blockType:'form'});
             initializer.add('otherBlocks.latticeList',{type:'item',title:'Lattice Danh sách',Component:blocks.Initializer,blockType:'list'});
+            initializer.add('otherBlocks.latticeTaskInbox',{type:'item',title:'Lattice Task Inbox',Component:blocks.Initializer,blockType:'task-inbox'});
+            initializer.add('otherBlocks.latticeApproval',{type:'item',title:'Lattice Approval',Component:blocks.Initializer,blockType:'approval'});
+            initializer.add('otherBlocks.latticeAttachment',{type:'item',title:'Lattice Attachment',Component:blocks.Initializer,blockType:'attachment'});
+            initializer.add('otherBlocks.latticeWorkflowForm',{type:'item',title:'Lattice Workflow Form',Component:blocks.Initializer,blockType:'workflow-form'});
+            initializer.add('otherBlocks.latticeContext',{type:'item',title:'Lattice Context Entity',Component:blocks.Initializer,blockType:'context-entity'});
+            initializer.add('otherBlocks.latticeTimeline',{type:'item',title:'Lattice Activity Timeline',Component:blocks.Initializer,blockType:'activity-timeline'});
           }
         }
       };
@@ -63,7 +90,11 @@
         React.useEffect(registerBlocks,[]);
         return React.createElement(client.SchemaComponentOptions,{components:{LatticeFormBlock:blocks.FormBlock,LatticeListBlock:blocks.ListBlock,LatticeConfiguredBlock:blocks.ConfiguredBlock,LatticeBlockInitializer:blocks.Initializer}},props.children);
       });
-      const Workspace = createWorkspaceComponent(client,React,blocks);
+      const runtime=createApplicationRuntime(React,blocks);
+      registerApplicationViews(runtime,React);
+      this.app.latticeRuntime=runtime;
+      this.app.latticeContracts=defaultContracts;
+      const Workspace = createWorkspaceComponent(client,React,runtime);
       this.app.router.add('lattice-workspace',{path:'/lattice',Component:Workspace});
       this.app.router.add('lattice-application',{path:'/lattice/apps/:applicationId',Component:Workspace});
       if (window.location.hostname === '127.0.0.1' && window.location.pathname.startsWith('/lattice')) {

@@ -11,7 +11,8 @@ async function call(path,method='GET',body,auth=alice){
   return fetch(gateway+path,{method,headers:{authorization:`Bearer ${auth}`,'content-type':'application/json'},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(25000)});
 }
 assert.equal((await fetch(gateway+'/v1/tasks')).status,401);
-const created=await call('/v1/tasks','POST',{title:'Smoke approval',assigneeId:subject,organizationId:'org-b'});
+assert.equal((await call('/v1/tasks','POST',{title:'Smoke approval',assigneeId:subject,organizationId:'org-b'})).status,400);
+const created=await call('/v1/tasks','POST',{title:'Smoke approval',assigneeId:subject});
 assert.equal(created.status,201);const task=await created.json();assert.equal(task.organizationId,'org-a');
 const other=await call('/v1/tasks','GET',undefined,bob);assert.equal(other.status,200);assert.ok(!(await other.json()).items.some(x=>x.id===task.id));
 assert.equal((await call(`/v1/tasks/${task.id}/decisions`,'POST',{decision:'approve',expectedVersion:1},bob)).status,409);

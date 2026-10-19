@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
-import {cp, mkdir, readdir, readFile, writeFile} from 'node:fs/promises';
+import {cp, mkdir, readdir, readFile, writeFile, unlink} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
-import {join} from 'node:path';
+import {join,dirname,resolve,relative} from 'node:path';
 import {spawnSync} from 'node:child_process';
 const root = fileURLToPath(new URL('../', import.meta.url));
 async function check(dir) {
@@ -17,36 +17,41 @@ async function check(dir) {
 await check(join(root, 'src'));
 await mkdir(join(root, 'dist'), {recursive: true});
 await cp(join(root, 'src'), join(root, 'dist'), {recursive: true});
-// Bundle our two dependency-free modules into each browser entrypoint.
-// NocoBase/React stay external and are supplied by the host's AMD loader.
-const manifestSource = await readFile(join(root, 'src/shared/manifest.js'), 'utf8');
-const actionSource = await readFile(join(root, 'src/client/actions.js'), 'utf8');
-const workspaceApiSource = await readFile(join(root, 'src/client/workspace-api.js'), 'utf8');
-const workspaceSource = await readFile(join(root, 'src/client/workspace.js'), 'utf8');
-const blocksSource = await readFile(join(root, 'src/client/blocks.js'), 'utf8');
-const listSource = await readFile(join(root, 'src/client/list-data.js'), 'utf8');
-const bundledActions = `const manifestModule = (() => {const module = {exports: {}};\n${manifestSource}\nreturn module.exports;})();
-const actions = (() => {const module = {exports: {}};
-const require = name => {if (name === '../shared/manifest') return manifestModule; throw new Error('Unknown bundled module: ' + name);};
-${actionSource}\nreturn module.exports;})();`;
-for (const target of ['client', 'client-v2']) {
-  const entry = join(root, 'dist', target, 'index.js');
-  const source = await readFile(entry, 'utf8');
-  let bundled = source.replace(/const actions = require\('\.?\.\/client\/actions'\);|const actions = require\('\.\/actions'\);/, () => bundledActions);
-  const apiModule = `const workspaceApiModule = (() => {const module={exports:{}};\n${workspaceApiSource}\nreturn module.exports;})();`;
-  const blocksModule = `const listModule=(()=>{const module={exports:{}};\n${listSource}\nreturn module.exports;})();
-const blocksModule=(()=>{const module={exports:{}};const require=name=>{
-if(name==='./actions')return actions;if(name==='./workspace-api')return workspaceApiModule;if(name==='./list-data')return listModule;throw new Error('Unknown block module: '+name);};
-${blocksSource}\nreturn module.exports;})();`;
-  const workspaceModule = `const {createWorkspaceComponent} = (() => {const module={exports:{}};
-const require = name => {if (name === './workspace-api') return workspaceApiModule; throw new Error('Unknown bundled module: ' + name);};
-${workspaceSource}\nreturn module.exports;})();`;
-  bundled = bundled.replace("const {createWorkspaceComponent} = require('./workspace');", () => apiModule+'\n'+blocksModule+'\n'+workspaceModule);
-  bundled = bundled.replace("const {createBlockComponents} = require('./blocks');", 'const {createBlockComponents} = blocksModule;');
-  bundled = bundled.replace(/const \{createWorkspaceApi\} = require\('(?:\.\/|\.\.\/client\/)workspace-api'\);/g,
-    () => (target === 'client-v2' ? apiModule+'\n' : '')+'const {createWorkspaceApi} = workspaceApiModule;');
-  await writeFile(entry, bundled, 'utf8');
-  const result = spawnSync(process.execPath, ['--check', entry], {stdio: 'inherit'});
-  if (result.status !== 0) throw new Error(`Invalid browser bundle: ${entry}`);
+// Bundle the dependency graph of trusted package modules. Host SDK/React remain
+// external. Adding an application extension does not require a bundler branch.
+await unlink(join(root,'dist/client/logistics.js')).catch(error=>{if(error.code!=='ENOENT')throw error;});
+async function bundle(entrySource,entryPath) {
+  const modules=new Map();
+  function modulePath(from,name) {
+    const path=resolve(dirname(from),name.endsWith('.js')?name:name+'.js');
+    if(relative(join(root,'src'),path).startsWith('..'))throw new Error('Module outside plugin source: '+name);
+    return path;
+  }
+  const moduleId=path=>relative(join(root,'src'),path).replaceAll('\\','/');
+  async function collect(path) {
+    const id=moduleId(path);if(modules.has(id))return;
+    const source=await readFile(path,'utf8');modules.set(id,null);
+    const dependencies={};
+    for(const match of source.matchAll(/require\(['"]([^'"]+)['"]\)/g)) {
+      if(!match[1].startsWith('.'))throw new Error('Unexpected external dependency: '+match[1]);
+      const target=modulePath(path,match[1]);dependencies[match[1]]=moduleId(target);await collect(target);
+    }
+    modules.set(id,`function(module,exports){const require=name=>__load(${JSON.stringify(dependencies)}[name]);\n${source}\n}`);
+  }
+  let entry=entrySource;
+  for(const match of entrySource.matchAll(/require\(['"](\.[^'"]+)['"]\)/g)) {
+    const path=modulePath(entryPath,match[1]);await collect(path);
+    entry=entry.replaceAll(match[0],`__load(${JSON.stringify(moduleId(path))})`);
+  }
+  const loader=`const __modules={${[...modules].map(([id,source])=>JSON.stringify(id)+':'+source).join(',\n')}};
+const __cache=new Map();
+function __load(id){if(!Object.hasOwn(__modules,id))throw new Error('Unknown bundled module: '+id);if(__cache.has(id))return __cache.get(id).exports;const module={exports:{}};__cache.set(id,module);__modules[id](module,module.exports);return module.exports;}\n`;
+  return entry.replace("'use strict';",()=>"'use strict';\n"+loader);
+}
+for(const target of ['client','client-v2']) {
+  const entry=join(root,'dist',target,'index.js');
+  await writeFile(entry,await bundle(await readFile(entry,'utf8'),join(root,'src',target,'index.js')),'utf8');
+  const result=spawnSync(process.execPath,['--check',entry],{stdio:'inherit'});
+  if(result.status!==0)throw new Error('Invalid browser bundle: '+entry);
 }
 console.log('Built @latticedx/plugin-lattice-foundation (server + client entrypoints).');

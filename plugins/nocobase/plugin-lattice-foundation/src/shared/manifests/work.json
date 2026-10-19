@@ -1,0 +1,333 @@
+{
+  "schemaVersion": 1,
+  "id": "work",
+  "name": "Công việc của tôi",
+  "route": "/lattice/apps/work",
+  "permissions": [
+    "workflow:start"
+  ],
+  "collections": [
+    {
+      "id": "workflow-runs",
+      "source": "lattice-api",
+      "resource": "workflows"
+    }
+  ],
+  "blocks": [
+    {
+      "id": "my-inbox",
+      "type": "task-inbox",
+      "title": "Công việc của tôi",
+      "collection": "workflow-runs",
+      "permissions": [
+        "workflow:start"
+      ],
+      "pageSize": 10,
+      "approvalBlockId": "request-approval"
+    },
+    {
+      "id": "request-approval",
+      "type": "approval",
+      "title": "Chi tiết và xử lý công việc",
+      "collection": "workflow-runs",
+      "permissions": [
+        "workflow:start"
+      ],
+      "actionLabels": {
+        "approve": "Duyệt",
+        "reject": "Từ chối",
+        "submit": "Gửi yêu cầu",
+        "receive": "Xác nhận nhận hàng",
+        "accept": "Xác nhận nghiệm thu",
+        "handover": "Xác nhận bàn giao"
+      },
+      "fieldLabels": {
+        "reason": "Lý do xử lý",
+        "receiptAttachmentId": "Biên bản nhận hàng",
+        "acceptanceNote": "Kết quả nghiệm thu",
+        "assetId": "Mã định danh tài sản",
+        "recipientId": "Người nhận",
+        "departmentId": "Đơn vị tiếp nhận",
+        "locationId": "Vị trí bàn giao",
+        "attachmentId": "Biên bản bàn giao"
+      },
+      "attachmentBlockId": "request-files",
+      "timelineBlockId": "request-history",
+      "contextBlockId": "request-context",
+      "actionDescriptions": {
+        "receive": "Kiểm tra hàng và tải biên bản đã quét sạch trước khi xác nhận.",
+        "accept": "Ghi kết quả kiểm tra thực tế trước khi xác nhận nghiệm thu.",
+        "handover": "Kiểm tra định danh tài sản, người nhận, đơn vị, vị trí và biên bản trước khi bàn giao."
+      },
+      "stateLabels": {
+        "draft": "Bản nháp",
+        "submitted": "Chờ duyệt",
+        "approved": "Đã duyệt",
+        "received": "Đã nhận hàng",
+        "accepted": "Đã nghiệm thu",
+        "handed_over": "Đã bàn giao",
+        "rejected": "Đã từ chối"
+      }
+    },
+    {
+      "id": "request-files",
+      "type": "attachment",
+      "title": "Tệp đính kèm",
+      "collection": "workflow-runs",
+      "permissions": [
+        "files:read"
+      ],
+      "allowUpload": true,
+      "fileFields": [
+        "attachmentId",
+        "receiptAttachmentId"
+      ]
+    },
+    {
+      "id": "request-history",
+      "type": "activity-timeline",
+      "title": "Lịch sử xử lý",
+      "collection": "workflow-runs",
+      "permissions": [
+        "workflow:start"
+      ],
+      "pageSize": 10,
+      "actionLabels": {
+        "create": "Tạo yêu cầu",
+        "submit": "Gửi yêu cầu",
+        "approve": "Duyệt",
+        "reject": "Từ chối",
+        "receive": "Nhận hàng",
+        "accept": "Nghiệm thu",
+        "handover": "Bàn giao"
+      }
+    },
+    {
+      "id": "request-context",
+      "type": "context-entity",
+      "title": "Dữ liệu liên kết",
+      "collection": "workflow-runs",
+      "permissions": [
+        "data:read"
+      ],
+      "entityFields": [
+        {
+          "name": "assetCode",
+          "title": "Mã tài sản"
+        },
+        {
+          "name": "location",
+          "title": "Vị trí tài sản"
+        },
+        {
+          "name": "status",
+          "title": "Trạng thái tài sản"
+        }
+      ]
+    },
+    {
+      "id": "operation-files",
+      "type": "attachment",
+      "title": "Biên bản nhận hàng và bàn giao",
+      "collection": "workflow-runs",
+      "permissions": [
+        "files:read"
+      ],
+      "allowUpload": true,
+      "fileFields": [
+        "attachmentId",
+        "receiptAttachmentId"
+      ],
+      "definitionId": "procurement"
+    },
+    {
+      "id": "operation-history",
+      "type": "activity-timeline",
+      "title": "Lịch sử nhận hàng và bàn giao",
+      "collection": "workflow-runs",
+      "permissions": [
+        "workflow:start"
+      ],
+      "pageSize": 10,
+      "actionLabels": {
+        "create": "Tạo yêu cầu",
+        "submit": "Gửi yêu cầu",
+        "approve": "Duyệt",
+        "reject": "Từ chối",
+        "receive": "Nhận hàng",
+        "accept": "Nghiệm thu",
+        "handover": "Bàn giao"
+      },
+      "definitionId": "procurement"
+    },
+    {
+      "id": "operation-context",
+      "type": "context-entity",
+      "title": "Dữ liệu liên kết quy trình mua sắm",
+      "collection": "workflow-runs",
+      "permissions": [
+        "data:read"
+      ],
+      "entityFields": [
+        {
+          "name": "assetCode",
+          "title": "Mã tài sản"
+        },
+        {
+          "name": "location",
+          "title": "Vị trí tài sản"
+        },
+        {
+          "name": "status",
+          "title": "Trạng thái tài sản"
+        }
+      ],
+      "definitionId": "procurement"
+    },
+    {
+      "id": "operation-receive",
+      "type": "workflow-form",
+      "title": "Form nhận hàng",
+      "collection": "workflow-runs",
+      "permissions": [
+        "department:warehouse"
+      ],
+      "definitionId": "procurement",
+      "actionId": "receive",
+      "actionLabels": {
+        "approve": "Duyệt",
+        "reject": "Từ chối",
+        "submit": "Gửi yêu cầu",
+        "receive": "Xác nhận nhận hàng",
+        "accept": "Xác nhận nghiệm thu",
+        "handover": "Xác nhận bàn giao"
+      },
+      "fieldLabels": {
+        "reason": "Lý do xử lý",
+        "receiptAttachmentId": "Biên bản nhận hàng",
+        "acceptanceNote": "Kết quả nghiệm thu",
+        "assetId": "Mã định danh tài sản",
+        "recipientId": "Người nhận",
+        "departmentId": "Đơn vị tiếp nhận",
+        "locationId": "Vị trí bàn giao",
+        "attachmentId": "Biên bản bàn giao"
+      },
+      "stateLabels": {
+        "draft": "Bản nháp",
+        "submitted": "Chờ duyệt",
+        "approved": "Đã duyệt",
+        "received": "Đã nhận hàng",
+        "accepted": "Đã nghiệm thu",
+        "handed_over": "Đã bàn giao",
+        "rejected": "Đã từ chối"
+      },
+      "actionDescriptions": {
+        "receive": "Kiểm tra hàng và tải biên bản đã quét sạch trước khi xác nhận."
+      },
+      "attachmentBlockId": "operation-files",
+      "timelineBlockId": "operation-history",
+      "contextBlockId": "operation-context"
+    },
+    {
+      "id": "operation-accept",
+      "type": "workflow-form",
+      "title": "Form nghiệm thu",
+      "collection": "workflow-runs",
+      "permissions": [
+        "department:warehouse"
+      ],
+      "definitionId": "procurement",
+      "actionId": "accept",
+      "actionLabels": {
+        "approve": "Duyệt",
+        "reject": "Từ chối",
+        "submit": "Gửi yêu cầu",
+        "receive": "Xác nhận nhận hàng",
+        "accept": "Xác nhận nghiệm thu",
+        "handover": "Xác nhận bàn giao"
+      },
+      "fieldLabels": {
+        "reason": "Lý do xử lý",
+        "receiptAttachmentId": "Biên bản nhận hàng",
+        "acceptanceNote": "Kết quả nghiệm thu",
+        "assetId": "Mã định danh tài sản",
+        "recipientId": "Người nhận",
+        "departmentId": "Đơn vị tiếp nhận",
+        "locationId": "Vị trí bàn giao",
+        "attachmentId": "Biên bản bàn giao"
+      },
+      "stateLabels": {
+        "draft": "Bản nháp",
+        "submitted": "Chờ duyệt",
+        "approved": "Đã duyệt",
+        "received": "Đã nhận hàng",
+        "accepted": "Đã nghiệm thu",
+        "handed_over": "Đã bàn giao",
+        "rejected": "Đã từ chối"
+      },
+      "actionDescriptions": {
+        "accept": "Ghi kết quả kiểm tra thực tế trước khi xác nhận nghiệm thu."
+      },
+      "attachmentBlockId": "operation-files",
+      "timelineBlockId": "operation-history",
+      "contextBlockId": "operation-context"
+    },
+    {
+      "id": "operation-handover",
+      "type": "workflow-form",
+      "title": "Form bàn giao",
+      "collection": "workflow-runs",
+      "permissions": [
+        "department:warehouse"
+      ],
+      "definitionId": "procurement",
+      "actionId": "handover",
+      "actionLabels": {
+        "approve": "Duyệt",
+        "reject": "Từ chối",
+        "submit": "Gửi yêu cầu",
+        "receive": "Xác nhận nhận hàng",
+        "accept": "Xác nhận nghiệm thu",
+        "handover": "Xác nhận bàn giao"
+      },
+      "fieldLabels": {
+        "reason": "Lý do xử lý",
+        "receiptAttachmentId": "Biên bản nhận hàng",
+        "acceptanceNote": "Kết quả nghiệm thu",
+        "assetId": "Mã định danh tài sản",
+        "recipientId": "Người nhận",
+        "departmentId": "Đơn vị tiếp nhận",
+        "locationId": "Vị trí bàn giao",
+        "attachmentId": "Biên bản bàn giao"
+      },
+      "stateLabels": {
+        "draft": "Bản nháp",
+        "submitted": "Chờ duyệt",
+        "approved": "Đã duyệt",
+        "received": "Đã nhận hàng",
+        "accepted": "Đã nghiệm thu",
+        "handed_over": "Đã bàn giao",
+        "rejected": "Đã từ chối"
+      },
+      "actionDescriptions": {
+        "handover": "Kiểm tra định danh tài sản, người nhận, đơn vị, vị trí và biên bản trước khi bàn giao."
+      },
+      "attachmentBlockId": "operation-files",
+      "timelineBlockId": "operation-history",
+      "contextBlockId": "operation-context"
+    }
+  ],
+  "transitions": [],
+  "workspace": {
+    "blocks": [
+      {
+        "blockId": "my-inbox"
+      }
+    ],
+    "showTransitions": false,
+    "home": true,
+    "shortcut": {
+      "hidden": true
+    }
+  }
+}

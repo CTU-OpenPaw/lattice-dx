@@ -2,6 +2,7 @@
 import { test, expect } from 'vitest';
 import { generateKeyPair, SignJWT, createLocalJWKSet, exportJWK } from 'jose';
 import { createApi } from './app';
+import { unitDirectory } from './directory-fixture';
 import type { FoundationRepository } from './foundation';
 
 const { privateKey, publicKey } = await generateKeyPair('RS256');
@@ -26,7 +27,7 @@ function setup() {
     records: { async list() { return []; }, async create(title, ownerId, organizationId) {
       const record = { id: 'record-1', title, ownerId, organizationId, createdAt: '2026-10-12T00:00:00Z' };
       writes.push(record); return record;
-    } }, foundation });
+    } }, foundation, directory:unitDirectory });
   return { app, writes };
 }
 
@@ -137,4 +138,16 @@ test.each(['', ' ', 'a'.repeat(101)])('task action rejects invalid assignee %j',
     expect((await app.inject({ method: 'POST', url: '/v1/actions/tasks.create/run', headers: await auth(['tasks:assign']), payload: { version: 1, input: { title: 'Review', assigneeId } } })).statusCode).toBe(400);
     expect(writes).toEqual([]);
   } finally { await app.close(); }
+});
+test('action keyed fixtures fail closed and malformed keys return400 after role authorization',async()=>{
+ const {app,writes}=setup();try{
+ for(const id of ['records.create','tasks.create']) {
+ const input=id==='records.create'?{title:'Hello'}:{title:'Hello',assigneeId:'alice'};
+ const headers=await auth(['records:write','tasks:assign']);
+ expect((await app.inject({method:'POST',url:`/v1/actions/${id}/run`,headers:{...headers,'idempotency-key':'valid'},payload:{version:1,input}})).statusCode).toBe(503);
+ expect((await app.inject({method:'POST',url:`/v1/actions/${id}/run`,headers:{...headers,'idempotency-key':'a,b'},payload:{version:1,input}})).statusCode).toBe(400);
+ expect((await app.inject({method:'POST',url:`/v1/actions/${id}/run`,headers:{...await auth([]),'idempotency-key':'a,b'},payload:{version:1,input}})).statusCode).toBe(403);
+ }
+ expect(writes).toEqual([]);
+ }finally{await app.close();}
 });

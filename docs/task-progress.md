@@ -2,14 +2,22 @@
 
 Cập nhật: 2026-10-13. Phân biệt phần đã code, phần đã kiểm tra trên runtime và phần còn thiếu. Không coi các phép thử local là chứng nhận production.
 
+14/10/2026: sau review của Hưng, Foundation 0.9.0 tách Workspace/application runtime dùng chung khỏi panel mẫu, dùng contract/view/catalog registry. Thêm app thứ ba được kiểm bằng test contract giả; hai workflow thật và native builder hồi quy PASS. Xem [cơ chế mở rộng](workspace-extension-runtime.md). Đây chưa phải App Registry/publish UI hay engine dựng mọi nghiệp vụ bằng zero-code.
+
+Trên nhánh tích hợp feat/nocobase-workflow-integration, PR #5 đã bổ sung source API procurement/onboarding, membership và shared evidence. [Checkpoint tích hợp](workflow-integration-checkpoint.md) ghi mốc chỉ code, trước khi triển khai runtime.
+
+Cập nhật sau phê duyệt deploy: API mới + bridge và UI procurement đã chạy trên runtime cũ với Foundation 0.7.0; luồng browser tạo/gửi/duyệt/nhận/nghiệm thu/bàn giao và shared file PASS. Outbox worker vẫn tắt. Xem [triển khai mua sắm](procurement-workflow-deployment.md); đây không phải nghiệm thu Order/Shipment logistics hoặc onboarding UI.
+
+Cập nhật tiếp: PR #6 (863bf8f) đã được tích hợp local; Foundation 0.8.0 chạy trên NocoBase 2.2.22. Logistics tạo đơn → gửi đơn → đúng người kho nhận việc, directory, tệp chia sẻ và pagination server đã được kiểm trên API/browser. Procurement vẫn PASS. Xem [báo cáo Logistics](logistics-workspace-deployment.md) để phân biệt nhận việc với xử lý tồn kho/vận chuyển thật.
+
 ## Tổng quan sáu bước
 
 | Bước | Trạng thái | Kết quả hiện có |
 | --- | --- | --- |
 | 1. Plugin nền tảng | Đã làm trong phạm vi demo | Package Foundation, build/cài/bật trên NocoBase; collection Department, Employee, Location, Asset; migration và seed hai đơn vị. |
-| 2. Cấu hình ứng dụng và API nghiệp vụ | Hoàn thành một phần | Manifest ứng dụng, route, block, action; lưu record/task qua API và đọc lại database thật. Chuyển trạng thái nghiệp vụ còn chờ API của Duy. |
+| 2. Cấu hình ứng dụng và API nghiệp vụ | Đã có hai luồng trong phạm vi demo | Procurement và Logistics Order tối thiểu nối API thật; chưa có Shipment/inventory và onboarding UI. |
 | 3. Workspace và API client | Đã làm phần chức năng | Chọn ứng dụng, điều hướng, đăng nhập/đăng xuất, kết nối tài khoản nghiệp vụ, loading/lỗi và xử lý phiên. Giao diện hiện là bản cơ bản. |
-| 4. Form/list dùng chung | Đã làm phần chức năng; còn kiểm chứng builder | Form cấu hình, validation, bảng lọc/phân trang, đọc/ghi thật; đăng ký hai block vào menu native builder. |
+| 4. Form/list dùng chung | Đã làm phần chức năng | Form cấu hình, quantity số nguyên, directory selector, bảng lọc/phân trang server; đăng ký và lưu binding Form/List trong native builder. |
 | 5. Mẫu nghiệp vụ hoàn chỉnh và tệp | Đã triển khai phần có API; còn blocker nghiệp vụ | Hai mẫu dùng block chung, upload/scan/download thật và giao việc sang tài khoản kho cùng đơn vị đã PASS; chưa phải quy trình Order/Shipment hoàn chỉnh. |
 | 6. Kiểm tra tích hợp toàn bộ | Đã kiểm phần sẵn sàng; chưa nghiệm thu toàn sản phẩm | Test dự án/plugin, browser, API, scanner và native builder PASS; các workflow/API còn thiếu được đánh dấu chưa kiểm được. |
 
@@ -23,7 +31,9 @@ Cập nhật: 2026-10-13. Phân biệt phần đã code, phần đã kiểm tra 
 
 ### Bước 2
 
-- [ ] Duy cung cấp/chốt API chuyển trạng thái nghiệp vụ, quyền và quy tắc chuyển; tích hợp và kiểm tra end-to-end sau đó.
+- [x] Duy cung cấp API procurement/onboarding qua PR #5; procurement đã nối bridge/UI và kiểm end-to-end.
+- [x] Logistics Order có definition/API/bridge/UI cho draft → submitted → received và linked task completed.
+- [ ] Shipment, tồn kho và xử lý hàng thực tế; onboarding mới có backend, chưa có UI trong phạm vi này.
 - [ ] Phân biệt tạo generic record/task với tạo đơn hàng, vận chuyển và duyệt nghiệp vụ thật. Chưa tuyên bố các workflow đó hoàn tất.
 - Manifest hiện được cấu hình bằng file; chưa có trình sửa manifest tổng quát trên giao diện.
 
@@ -37,17 +47,17 @@ Cập nhật: 2026-10-13. Phân biệt phần đã code, phần đã kiểm tra 
 ### Bước 4
 
 - [x] Thử thêm Form/List, lưu binding và tải lại trên trang native thử riêng; UI và model lưu qua API PASS. Schema trang cũ không đổi.
-- [ ] Khi cần vượt 100 bản ghi, bổ sung phân trang/lọc phía API. Hiện bảng chỉ chia trang/lọc trong tối đa 100 bản ghi API trả về.
+- [x] Form/List dùng phân trang/lọc API; smoke backend kiểm 106 bản ghi qua hai trang. Procurement lọc definitionId trên server.
 - [ ] Bổ sung các kiểu trường và nghiệp vụ cần cho bước 5; không coi các form record/task hiện tại là bộ form tổng quát cho mọi collection.
 
 ### Bước 5
 
-- [ ] Hoàn thiện form mua sắm và đơn hàng logistics theo cấu hình chung.
-- [ ] Hoàn thiện luồng kinh doanh tạo đơn và kho nhận/xử lý công việc với API và quyền thật.
+- [x] Logistics Order dùng Form/List chung; procurement có panel workflow chuyên biệt dùng chung API client/command controller.
+- [x] Kinh doanh tạo/gửi đơn và đúng tài khoản kho nhận việc qua API thật. Chưa thực hiện xuất kho/giao vận.
 - [x] Tích hợp tải tệp và liên kết tệp vào bản ghi qua dịch vụ thật; metadata/download và byte đọc lại PASS.
 - [x] Khởi động ClamAV healthy; tệp thử scan clean; kiểm giới hạn 1 MiB và quyền riêng chủ tệp.
 - [x] Kinh doanh giao task liên kết hồ sơ; tài khoản kho riêng cùng đơn vị đọc task qua UI.
-- [ ] API kiểm assignee thuộc đơn vị; directory, chia sẻ hồ sơ/tệp với kho và phân loại hồ sơ theo ứng dụng còn thiếu. Xem [ghi chú bước 5](lattice-step5.md).
+- [x] PR #6 kiểm assignee active cùng đơn vị, directory snapshot, chia sẻ hồ sơ/tệp theo task và phân loại Logistics Order. Generic records vẫn là hồ sơ nền.
 
 ### Bước 6
 

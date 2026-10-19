@@ -1,0 +1,14 @@
+{
+  "format": "latticedx.enterprise-module", "formatVersion": 1,
+  "id": "team-asset", "version": "1.0.0", "title": "Shared asset review",
+  "schemas": [{"id":"team-asset-data","title":"Asset","fields":{"assetCode":{"type":"text"},"description":{"type":"text"}},"relations":{}}],
+  "bundle": {"format":"latticedx.workflow-bundle","formatVersion":1,"definitions":[{
+    "id":"team-asset-review","title":"Warehouse asset review","startRole":"employee","initialState":"pending","startFields":{},"readerRoles":["logistics:warehouse"],
+    "transitions":[
+      {"id":"approve","from":"pending","to":"reviewed","role":"logistics:warehouse","fields":{"reason":"text"}},
+      {"id":"reopen","from":"reviewed","to":"pending","role":"logistics:warehouse","fields":{"reason":"text"}}
+    ]
+  }]},
+  "blocks":[],"dependencies":[],
+  "bindings":[{"id":"asset-review","schemaId":"team-asset-data","schemaVersion":1,"definitionId":"team-asset-review","allowedTransitions":["approve","reopen"]}]
+}

@@ -2,11 +2,15 @@ node_modules/
 .next/
 dist/
 coverage/
+/output/
+/tmp/
 .env
 .env.*
 !.env.example
 *.tsbuildinfo
 .worktrees/
+output/backups/
+output/reviews/
 upstream/*
 !upstream/nocobase/
 tmp/

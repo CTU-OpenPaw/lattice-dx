@@ -6,8 +6,8 @@ const purchasing=require('../src/shared/manifests/purchasing.json');
 const logistics=require('../src/shared/manifests/logistics.json');
 test('attachments only bind record creation and references cannot select arbitrary API paths',()=>{
   const a=structuredClone(purchasing);a.blocks[0].attachments='yes';assert.ok(validateManifest(a).length);
-  const b=structuredClone(logistics);b.blocks.find(x=>x.id==='assign-warehouse-task').attachments=true;assert.ok(validateManifest(b).length);
-  const c=structuredClone(logistics);c.blocks.find(x=>x.id==='assign-warehouse-task').fields.find(x=>x.name==='recordId').reference='../files';assert.ok(validateManifest(c).length);
+  const b=structuredClone(logistics);b.blocks.find(x=>x.type==='list').attachments=true;assert.ok(validateManifest(b).length);
+  const c=structuredClone(logistics);c.blocks[0].fields.find(x=>x.name==='warehouseAssigneeId').reference='../files';assert.ok(validateManifest(c).length);
 });
 test('file operations use session bridge and a scan-aware timeout; never auto retry',async()=>{
   const calls=[];const api=createWorkspaceApi({apiClient:{request:async options=>{calls.push(options);return {data:{scanStatus:'clean'}}}}});
