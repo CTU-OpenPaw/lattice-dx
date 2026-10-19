@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { mkdir, writeFile } from 'node:fs/promises';
 const root=fileURLToPath(new URL('../',import.meta.url)),base='http://localhost:8080';
 const actors={};
 for(const name of ['alice','bob','manager','warehouse','warehouse2','hr-demo','it-demo','administration','receiver']) {
@@ -47,7 +48,7 @@ run=await transition(run,'warehouse','receive',{receiptAttachmentId:receipt.id})
 assert.equal(await request(`/v1/files/${receipt.id}/content`,'warehouse2'),'Workflow clean evidence');
 await request(`/v1/files/${receipt.id}/content`,'receiver',undefined,404);await request(`/v1/files/${receipt.id}/content`,'bob',undefined,404);
 await request(`/v1/files/${receipt.id}/content`,'it-demo',undefined,404);
-const handover={assetId:'urn:ngsi-ld:Asset:'+randomUUID(),recipientId:actors.receiver.subject,departmentId:'warehouse',locationId:'office-1',attachmentId:receipt.id};
+const handover={assetId:'urn:ngsi-ld:Asset:org-a:'+randomUUID(),recipientId:actors.receiver.subject,departmentId:'warehouse',locationId:'office-1',attachmentId:receipt.id};
 await unchanged(run,'warehouse2','handover',handover,409);
 run=await transition(run,'warehouse','accept',{acceptanceNote:'Checked quantity and condition'});
 for(const patch of [{recipientId:'unregistered-'+randomUUID()},{recipientId:actors.bob.subject},{departmentId:'missing-department'},{locationId:'missing-location'},{attachmentId:foreign.id},{attachmentId:rejected.id}])await unchanged(run,'warehouse2','handover',{...handover,...patch},400);
@@ -58,6 +59,21 @@ const jobs=(await request(`/v1/workflows/${run.id}/sync`,'manager')).items;asser
 const audit=(await history(run)).items;
 const states=['draft','submitted','approved','received','accepted','handed_over'],names=['alice','alice','manager','warehouse','warehouse','warehouse2'];
 assert.equal(audit.length,states.length);for(let i=0;i<audit.length;i++){assert.equal(audit[i].version,i+1);assert.equal(audit[i].actorId,actors[names[i]].subject);assert.equal(audit[i].fromState,i?states[i-1]:null);assert.equal(audit[i].toState,states[i]);assert.ok(!Number.isNaN(Date.parse(audit[i].occurredAt)));}
+// Read only this acceptance's own event. This does not deliver or claim a public job.
+const handoverEvent=JSON.parse(containerEval(`
+import pg from 'pg';
+(async()=>{const pool=new pg.Pool({connectionString:process.env.DATABASE_URL});const client=await pool.connect();try{
+ await client.query('BEGIN READ ONLY');
+ const rows=(await client.query('SELECT payload FROM workflow_jobs WHERE id=$1 AND run_id=$2 AND organization_id=$3',[${JSON.stringify(jobs[0].id)},${JSON.stringify(run.id)},${JSON.stringify(run.organizationId)}])).rows;
+ if(rows.length!==1)throw Error('Expected one handover event');
+ await client.query('COMMIT');process.stdout.write(JSON.stringify(rows[0].payload));
+}catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();await pool.end();}})().catch(()=>{console.error('Own handover event read failed');process.exitCode=1});`));
+assert.deepEqual(handoverEvent,{eventId:jobs[0].id,eventType:'asset.handed_over',organizationId:run.organizationId,runId:run.id,recordId:run.recordId,definitionId:'procurement',version:run.version,occurredAt:run.updatedAt,data:run.data});
+assert.equal(run.state,'handed_over');assert.equal(run.version,6);
+assert.equal(handoverEvent.occurredAt,audit.at(-1).occurredAt);
+for(const [field,value] of Object.entries(handover))assert.equal(handoverEvent.data[field],value);
+assert.equal(handoverEvent.data.receiptAttachmentId,receipt.id);
+assert.equal(handoverEvent.data.acceptanceNote,'Checked quantity and condition');
 for(const path of [`/v1/workflows/${run.id}/history`,`/v1/workflows/${run.id}/history/${audit[0].id}`])for(const method of ['POST','PUT','PATCH','DELETE']) {
   const response=await fetch(base+path,{method,headers:{authorization:`Bearer ${actors.manager.token}`,'content-type':'application/json'},body:JSON.stringify({action:'tampered',toState:'draft'}),signal:AbortSignal.timeout(30000)});
   assert.equal(response.status,404,`${method} history must have no mutation route`);
@@ -138,3 +154,7 @@ failOwnJob();assert.equal((await request(`/v1/workflows/${run.id}/sync/retry`,'m
 ownJob=(await request(`/v1/workflows/${run.id}/sync`,'manager')).items[0];assert.equal(ownJob.status,'failed');assert.equal(ownJob.attempts,5);
 assert.equal((await request(`/v1/workflows/${run.id}/sync/retry`,'manager',{},200,randomUUID())).retried,1);
 console.log(JSON.stringify({result:'REST workflow and durable manual retry acceptance passed; local controlled receiver only',procurementId:run.id,rejectedId:denied.id,onboardingId:onboarding.id,eventId:jobs[0].id}));
+const artifactUrl=new URL(`../output/uc1-handoff/${handoverEvent.eventId}.json`,import.meta.url);
+await mkdir(new URL('./',artifactUrl),{recursive:true});
+await writeFile(artifactUrl,JSON.stringify({format:'latticedx.uc1-handoff',formatVersion:1,evidenceScope:'Actual REST/PostgreSQL producer; isolated queue and controlled receiver; no broker delivery',event:handoverEvent,workflow:{id:run.id,state:run.state,version:run.version},audit: audit.at(-1)},null,2)+'\n',{flag:'wx'});
+console.log(JSON.stringify({result:'Persisted handover event matches API state and audit',artifact:fileURLToPath(artifactUrl)}));
