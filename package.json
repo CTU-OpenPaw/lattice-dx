@@ -25,6 +25,8 @@
     "test:actions": "node scripts/smoke-actions.mjs",
     "test:entity-bridge": "node scripts/smoke-entity-bridge.mjs",
     "test:agent-provider": "node --env-file=.env.agent --import tsx scripts/smoke-agent-provider.mjs",
+    "agent:incident": "node --env-file=.env.agent --import tsx scripts/run-incident-agent.mjs",
+    "test:agent-worker-live": "node --env-file=.env.agent scripts/acceptance-incident-agent-postgres.mjs --live-worker",
     "test:create-reliability": "node scripts/smoke-create-reliability.mjs",
     "test:enterprise-data": "node scripts/smoke-enterprise-data.mjs",
     "test:entity-sharing": "node scripts/smoke-entity-sharing.mjs",
