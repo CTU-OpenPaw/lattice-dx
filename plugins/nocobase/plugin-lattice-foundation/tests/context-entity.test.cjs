@@ -42,3 +42,59 @@ test('late context response cannot reappear after disconnect or selection change
  let finish;const env=hooks(),Component=createEntityContextComponent(env.react),service={...api,entity:()=>new Promise(r=>finish=r)};
  const render=(override={})=>env.render(()=>Component({...props,api:service,...override}));render();await tick();render({connected:false});finish(entity);await tick();assert.equal(JSON.stringify(render({connected:false})).includes('Shared Asset'),false);
 });
+test('Context Entity renders sync pending, failed error banner and runs authorized retry',async()=>{
+ let retriedCalls=[];let syncJobs=[{id:'job-1',status:'pending',attempts:0,lastError:null}];
+ const syncApi={
+  workflow:async(op,arg)=>{
+   if(op==='entityContext')return link;
+   if(op==='sync')return {items:syncJobs};
+   if(op==='retrySync'){
+    retriedCalls.push(arg);syncJobs=[{id:'job-1',status:'pending',attempts:0,lastError:null}];
+    return {retried:1};
+   }
+   return link;
+  },
+  entity:async()=>entity
+ };
+ const env=hooks(),Component=createEntityContextComponent(env.react);
+ const render=(override={})=>env.render(()=>Component({...props,api:syncApi,...override}));
+ render();await tick();let tree=render();
+ assert.ok(JSON.stringify(tree).includes('Đang chờ đồng bộ'));
+
+ syncJobs=[{id:'job-1',status:'failed',attempts:3,lastError:'Broker connection timeout'}];
+ find(tree,n=>n.type==='button'&&n.children?.includes?.('Tải lại dữ liệu liên kết')).props.onClick();
+ render();await tick();tree=render();
+ assert.ok(JSON.stringify(tree).includes('Lỗi đồng bộ'));
+ assert.ok(JSON.stringify(tree).includes('Broker connection timeout'));
+ const retryBtn=find(tree,n=>n.props?.['data-testid']==='lattice-retry-sync-btn');
+ assert.ok(retryBtn,'retry button exists when failed');
+
+ await retryBtn.props.onClick();
+ render();await tick();tree=render();
+ assert.equal(retriedCalls.length,1);assert.equal(retriedCalls[0].id,id);assert.ok(retriedCalls[0].key.length>0);assert.deepEqual(retriedCalls[0].body,{});
+ assert.ok(JSON.stringify(tree).includes('Đã yêu cầu chạy lại đồng bộ'));
+
+ const deniedApi={
+  ...syncApi,
+  workflow:async(op,arg)=>{
+   if(op==='entityContext')return link;
+   if(op==='sync')return {items:[{id:'job-1',status:'failed',attempts:3,lastError:'Failed'}]};
+   if(op==='retrySync')throw {status:403};
+   return link;
+  }
+ };
+ const env2=hooks(),Component2=createEntityContextComponent(env2.react);
+ const render2=()=>env2.render(()=>Component2({...props,api:deniedApi}));
+ render2();await tick();let tree2=render2();
+ const retryBtn2=find(tree2,n=>n.props?.['data-testid']==='lattice-retry-sync-btn');
+ await retryBtn2.props.onClick();
+ render2();await tick();tree2=render2();
+ assert.ok(JSON.stringify(tree2).includes('Không có quyền chạy lại đồng bộ.'));
+
+ syncJobs=[{id:'job-1',status:'succeeded',attempts:1,lastError:null}];
+ const env3=hooks(),Component3=createEntityContextComponent(env3.react);
+ const render3=()=>env3.render(()=>Component3({...props,api:syncApi}));
+ render3();await tick();let tree3=render3();
+ assert.ok(JSON.stringify(tree3).includes('Đã đồng bộ'));
+});
+

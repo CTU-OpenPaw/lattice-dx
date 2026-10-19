@@ -1,0 +1,11 @@
+{
+  "name": "@latticedx/uc1-procurement",
+  "version": "1.0.0",
+  "description": "LatticeDX Use Case 1: Mua sắm & Bàn giao tài sản (Procurement & Asset Handover Package)",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "test": "node index.js"
+  },
+  "license": "Apache-2.0"
+}

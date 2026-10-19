@@ -20,12 +20,20 @@ async function loadEntityContext({api,manifest,block,selectedId,run}){
     if(value!==null&&!['string','number','boolean'].includes(typeof value))throw new Error('Giá trị trường dữ liệu không hợp lệ.');
     return {title:field.title,value};
   });
-  return {context,entity,fields};
+  let sync=null;
+  try {
+    const syncRes=await api.workflow('sync',{id:source.id});
+    if(syncRes&&Array.isArray(syncRes.items))sync=syncRes.items;
+  } catch {
+    sync=null;
+  }
+  return {context,entity,fields,sync,sourceId:source.id};
 }
 function createEntityContextComponent(React){
   const h=React.createElement;
   return function ContextEntityBlock({manifest,block,api,connected,selectedId,run,actorId,refreshKey}){
     const [result,setResult]=React.useState(null),[loading,setLoading]=React.useState(false),[error,setError]=React.useState(''),[reload,setReload]=React.useState(0);
+    const [retryLoading,setRetryLoading]=React.useState(false),[retryError,setRetryError]=React.useState(''),[retryMessage,setRetryMessage]=React.useState('');
     const key=selectedId||block.runId,scope=JSON.stringify([actorId,key,run?.version,block]);
     React.useEffect(()=>{let active=true;setResult(null);setError('');
       if(!connected||!key){setLoading(false);return()=>{active=false};}setLoading(true);
@@ -33,6 +41,20 @@ function createEntityContextComponent(React){
       return()=>{active=false};
     },[api,manifest,block,key,run,connected,actorId,refreshKey,reload]);
     const data=connected&&result?.scope===scope?result.value:null;
+    const handleRetry=async()=>{
+      const targetId=data?.sourceId||key;
+      if(!targetId||retryLoading)return;
+      setRetryLoading(true);setRetryError('');setRetryMessage('');
+      try{
+        const idempotencyKey=(globalThis.crypto?.randomUUID?globalThis.crypto.randomUUID():'retry-'+Date.now());
+        const res=await api.workflow('retrySync',{id:targetId,body:{},key:idempotencyKey});
+        const count=res?.retried??0;
+        setRetryMessage(count>0?`Đã yêu cầu chạy lại đồng bộ (${count} tác vụ).`:'Đã gửi yêu cầu chạy lại đồng bộ.');
+        setReload(n=>n+1);
+      }catch(e){
+        setRetryError([403].includes(e.status||e.response?.status)?'Không có quyền chạy lại đồng bộ.':(e.message||'Chạy lại đồng bộ thất bại.'));
+      }finally{setRetryLoading(false);}
+    };
     return h('section',{'data-testid':'lattice-context-entity','data-block-id':block.id,'aria-label':block.title,style:{padding:16,border:'1px solid #dce3ed',borderRadius:8,marginTop:16,background:'#fff',overflowWrap:'anywhere'}},h('h3',null,block.title),
       !connected&&h('p',null,'Kết nối tài khoản nghiệp vụ để xem dữ liệu liên kết.'),connected&&!key&&h('p',null,'Chọn công việc để xem dữ liệu liên kết.'),
       connected&&key&&h('button',{style:{padding:'7px 12px',border:'1px solid #cdd7e5',borderRadius:6,background:'#fff',color:'#172b4d'},type:'button',disabled:loading,onClick:()=>setReload(n=>n+1)},'Tải lại dữ liệu liên kết'),
@@ -41,7 +63,40 @@ function createEntityContextComponent(React){
         ...[{title:'ID dữ liệu',value:data.entity.id},{title:'Schema',value:data.entity.schemaId},{title:'Phiên bản hiện tại',value:data.entity.version},{title:'Phiên bản khi tạo quy trình',value:data.context.entityVersion},{title:'Trạng thái lưu trữ',value:data.entity.archivedAt?'Đã lưu trữ':'Đang hoạt động'},...data.fields].map((field,i)=>h('div',{key:i},h('dt',{style:{color:'#5e6c84',fontSize:12,marginBottom:5}},field.title),h('dd',{style:{margin:0}},field.value===null?'Chưa có dữ liệu':String(field.value)))),
         h('div',null,h('dt',{style:{color:'#5e6c84',fontSize:12,marginBottom:5}},'Cập nhật dữ liệu lúc'),h('dd',{style:{margin:0}},h('time',{dateTime:data.entity.updatedAt},new Date(data.entity.updatedAt).toLocaleString('vi-VN'))))),
         (data.context.entityVersion!==data.entity.version||data.context.schemaVersion!==data.entity.schemaVersion)&&h('p',{role:'status'},'Dữ liệu hiện tại đã thay đổi từ lúc tạo quy trình. Liên kết gốc được giữ nguyên.'),
-        h('p',null,'Nguồn: dữ liệu nghiệp vụ của LatticeDX. Chưa có trạng thái đồng bộ broker cho liên kết này.')));
+        (()=>{
+          const syncJobs=data.sync||[];
+          const hasFailed=syncJobs.some(j=>j.status==='failed');
+          const hasPending=syncJobs.some(j=>['pending','processing'].includes(j.status));
+          const allSucceeded=syncJobs.length>0&&syncJobs.every(j=>j.status==='succeeded');
+          const failedJob=syncJobs.find(j=>j.status==='failed');
+          return h('div',{'data-testid':'lattice-sync-section',style:{marginTop:16,padding:12,borderRadius:6,border:'1px solid #dce3ed',background:'#f8fafc'}},
+            h('h5',{style:{margin:'0 0 8px 0',fontSize:13,color:'#172b4d'}},'Trạng thái đồng bộ'),
+            hasFailed&&h('div',{role:'alert',style:{color:'#ae2a19',marginBottom:8}},
+              h('span',{style:{display:'inline-block',padding:'2px 8px',borderRadius:4,background:'#ffebe6',color:'#ae2a19',fontWeight:600,fontSize:12,marginRight:8}},'Lỗi đồng bộ'),
+              failedJob?.lastError?`Lỗi: ${failedJob.lastError}`:'Quá trình đồng bộ dữ liệu gặp sự cố.',
+              h('div',{style:{marginTop:8}},
+                h('button',{
+                  type:'button',
+                  'data-testid':'lattice-retry-sync-btn',
+                  disabled:retryLoading||loading,
+                  onClick:handleRetry,
+                  style:{padding:'5px 12px',border:'1px solid #cdd7e5',borderRadius:6,background:'#0052cc',color:'#fff',cursor:'pointer',fontSize:12,fontWeight:500}
+                },retryLoading?'Đang gửi yêu cầu…':'Chạy lại đồng bộ')
+              )
+            ),
+            hasPending&&h('div',{role:'status',style:{color:'#974f0c'}},
+              h('span',{style:{display:'inline-block',padding:'2px 8px',borderRadius:4,background:'#fffae6',color:'#974f0c',fontWeight:600,fontSize:12,marginRight:8}},'Đang chờ đồng bộ'),
+              'Hệ thống đang chờ hoặc đang tiến hành đồng bộ dữ liệu…'
+            ),
+            allSucceeded&&h('div',{role:'status',style:{color:'#216e4e'}},
+              h('span',{style:{display:'inline-block',padding:'2px 8px',borderRadius:4,background:'#e3fcef',color:'#216e4e',fontWeight:600,fontSize:12,marginRight:8}},'Đã đồng bộ'),
+              'Dữ liệu đã được đồng bộ thành công với hệ thống.'
+            ),
+            !hasFailed&&!hasPending&&!allSucceeded&&h('p',{style:{margin:0,color:'#5e6c84',fontSize:12}},'Nguồn: dữ liệu nghiệp vụ của LatticeDX. Chưa có trạng thái đồng bộ broker cho liên kết này.'),
+            retryMessage&&h('p',{role:'status',style:{color:'#006644',marginTop:8,fontSize:12}},retryMessage),
+            retryError&&h('p',{role:'alert',style:{color:'#ae2a19',marginTop:8,fontSize:12}},retryError)
+          );
+        })()));
   };
 }
 module.exports={loadEntityContext,createEntityContextComponent};

@@ -87,7 +87,7 @@ import { drainOne, sendHttpEvent } from './src/workflows/outbox.ts';
   const event=(await control.query('SELECT payload FROM workflow_jobs WHERE id=$1',[${JSON.stringify(jobs[0].id)}])).rows[0].payload;
   assert.equal(event.eventId,${JSON.stringify(jobs[0].id)});
   await control.query('CREATE SCHEMA '+schema);
-  pool=new pg.Pool({connectionString:process.env.DATABASE_URL,max:4,options:'-c search_path='+schema});
+  pool=new pg.Pool({connectionString:process.env.DATABASE_URL,max:4,options:'-c search_path='+schema+',public'});
   await pool.query('CREATE TABLE workflow_jobs (LIKE public.workflow_jobs INCLUDING ALL)');
   const jobs=workflowJobDatabase(pool);
   async function add(payload=event) {const id=randomUUID();await pool.query('INSERT INTO workflow_jobs(id,run_id,organization_id,payload) VALUES($1,$2,$3,$4)',[id,event.runId,event.organizationId,payload]);return id;}
