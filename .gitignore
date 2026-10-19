@@ -9,3 +9,5 @@ coverage/
 .worktrees/
 upstream/*
 !upstream/nocobase/
+tmp/
+output/
