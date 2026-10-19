@@ -31,7 +31,11 @@ function createEvidenceComponents(React){
       const result=fileMetadata(await api.file('upload',{filename:file.name,contentBase64,...(context.resource==='records'?{recordId:context.recordId}:{})}));
       if(current!==epoch.current)return;remember(result);setFile(null);setLookup(result.id);setNotice(context.resource==='workflows'?'Tệp đã tải lên. Chỉ được gắn vào quy trình khi bạn xác nhận bước xử lý.':'Tệp đã tải lên và liên kết với hồ sơ.');if(result.scanStatus==='clean')onUploaded?.(result);
     }
-    async function inspect(current){const id=lookup.trim();const result=fileMetadata(await api.file('metadata',{id}),id);if(current===epoch.current)remember(result);}
+    async function inspect(current){
+      const id=lookup.trim();
+      try{const result=fileMetadata(await api.file('metadata',{id}),id);if(current===epoch.current)remember(result);}
+      catch(e){if(current===epoch.current){setFiles(old=>old.map(value=>value.id===id?{id,unavailable:true}:value));setPreview(null);}throw e;}
+    }
     async function content(item,current,download){
       try{
         const result=fileMetadata(await api.file('content',{id:item.id}),item.id);const bytes=fileBytes(result);if(current!==epoch.current)return;

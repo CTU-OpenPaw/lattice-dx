@@ -15,3 +15,5 @@ upstream/*
 !upstream/nocobase/
 tmp/
 output/
+.env.integration
+

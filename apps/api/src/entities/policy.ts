@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Attributes, Field, SchemaDefinition } from './types.js';
+export const entityFieldTypes = Object.freeze(['text','boolean','integer','decimal','date','enum']);
 export class EntityError extends Error {
   constructor(public readonly statusCode:400|404|409|503, message:string) { super(message); }
 }
@@ -46,7 +47,7 @@ export function parseSchema(input:unknown):SchemaDefinition {
   for(const [key,value] of Object.entries(fields)) {
     name(key);
     const field=exact(value,['type','required','maxLength','choices']);
-    if(typeof field.type!=='string'||!['text','boolean','integer','decimal','date','enum'].includes(field.type)) bad('Invalid field type.');
+    if(typeof field.type!=='string'||!entityFieldTypes.includes(field.type)) bad('Invalid field type.');
     if(field.required!==undefined&&typeof field.required!=='boolean') bad();
     if(field.maxLength!==undefined&&(field.type!=='text'||!Number.isSafeInteger(field.maxLength)||Number(field.maxLength)<1||Number(field.maxLength)>4000)) bad();
     if(field.choices!==undefined&&field.type!=='enum') bad();

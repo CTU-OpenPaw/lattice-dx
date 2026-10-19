@@ -13,7 +13,7 @@ function registerApplicationContracts(registry) {
   registry.registerAction('tasks.create',{version:1,resource:'tasks',role:'tasks:assign',lengthMode:'codepoints',fields:{title,assigneeId:{required:true,maxLength:100},recordId:{maxLength:36,pattern:'uuid',reference:'records'}},transport:{kind:'catalog',idempotent:true}});
   registry.registerAction('logistics.create',{version:1,resource:'orders',role:'logistics:sales',lengthMode:'codepoints',
     fields:{title,customerName:{required:true,maxLength:2000},deliveryAddress:{required:true,maxLength:2000},sku:{required:true,maxLength:2000},quantity:{required:true,maxLength:7,type:'positiveInteger',maximum:1000000},warehouseAssigneeId:{required:true,maxLength:100,reference:'warehousePeople'},attachmentId:{maxLength:36,pattern:'uuid'}},
-    attachments:{phase:'before',field:'attachmentId'},availabilityReference:'warehousePeople',
+    attachments:{phase:'before',field:'attachmentId'},availabilityReference:'warehousePeople',availabilityCapability:'logistics.create',
     transport:{kind:'command',url:'dxActions:logistics',operation:'create',definitionId:'logistics_order'}});
 }
 module.exports={registerApplicationContracts};

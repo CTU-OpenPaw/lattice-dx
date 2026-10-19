@@ -18,9 +18,11 @@ const observer=(worker:WorkerId):WorkerObserver=>(result,duration)=>telemetry.re
 const runtime=await bootstrapRuntime(process.env,{
  createStore:createFilesystemStore,connect:connectRecords,
  createApp:(config,database)=>{
+  const token=process.env.NGSI_LD_NOTIFICATION_TOKEN,tenant=process.env.NGSI_LD_TENANT??'org-a';
+  const ngsiLd=token?{token,tenant,subscriptionId:process.env.NGSI_LD_SUBSCRIPTION_ID||`urn:ngsi-ld:Subscription:latticedx:${tenant}:asset-context-v1`,repository:database?.ngsiLdContext}:undefined;
   const identity=config.identity?{issuer:config.identity.issuer,audience:config.identity.audience,key:createRemoteJWKSet(new URL(config.identity.jwksUrl))}:undefined;
-  return createApi({workerUrl:config.workerUrl,identity,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
-   entities:database?.entities,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
+  return createApi({workerUrl:config.workerUrl,identity,ngsiLd,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
+   agents:database?.agents,entities:database?.entities,contextLinks:database?.contextLinks,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
    definitionRegistry:database?.definitionRegistry,directory:database?.directory,workflows:database?.workflows,readSharedFile:database?.workflows.readSharedFile,
    scan:config.scanner?content=>scanWithClamd(content,config.scanner!.host,config.scanner!.port):undefined});
  },

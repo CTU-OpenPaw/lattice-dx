@@ -20,10 +20,15 @@ interface RegisteredAction {
 }
 class InvalidInput extends Error {}
 
+export const actionDescriptors: readonly ActionDescriptor[] = [
+  { id: 'records.create', version: 1, title: 'Tạo bản ghi', requiredRole: 'records:write', inputSchema: recordCreateSchema },
+  { id: 'tasks.create', version: 1, title: 'Tạo nhiệm vụ', requiredRole: 'tasks:assign', inputSchema: taskCreateSchema },
+];
+
 export function registerActions(app: FastifyInstance, options: Options) {
   const actions: RegisteredAction[] = [
     {
-      descriptor: { id: 'records.create', version: 1, title: 'Tạo bản ghi', requiredRole: 'records:write', inputSchema: recordCreateSchema },
+      descriptor: actionDescriptors[0],
       available: !!options.records,
       async execute(value, scope,key) {
         const input = parseRecordCreateInput(value);
@@ -33,7 +38,7 @@ export function registerActions(app: FastifyInstance, options: Options) {
       },
     },
     {
-      descriptor: { id: 'tasks.create', version: 1, title: 'Tạo nhiệm vụ', requiredRole: 'tasks:assign', inputSchema: taskCreateSchema },
+      descriptor: actionDescriptors[1],
       available: !!options.foundation,
       async execute(value, scope,key) {
         const input = parseTaskCreateInput(value);

@@ -20,6 +20,7 @@
     "nocobase:down": "docker compose -f infra/compose/nocobase.yml down",
     "nocobase:logs": "docker compose -f infra/compose/nocobase.yml logs --tail 100",
     "test:nocobase": "node scripts/smoke-nocobase.mjs",
+    "test:studio-context": "node scripts/smoke-studio-context.mjs",
     "test:foundation": "node scripts/smoke-foundation.mjs",
     "test:actions": "node scripts/smoke-actions.mjs",
     "test:create-reliability": "node scripts/smoke-create-reliability.mjs",
@@ -69,6 +70,8 @@
     "test:nocobase:form": "node scripts/smoke-lattice-form.mjs",
     "test:scanner-outage": "node scripts/smoke-scanner-outage.mjs",
     "identity:sync-local": "node scripts/sync-local-realm.mjs",
+    "test:incident-agent": "node scripts/acceptance-incident-agent-postgres.mjs",
+    "test:ngsi-ld-postgres": "node scripts/acceptance-ngsi-ld-postgres.mjs",
     "test:infra": "node scripts/smoke-core.mjs"
   },
   "devDependencies": { "typescript": "7.0.2", "tsx": "4.23.15", "vitest": "5.0.3", "@types/node": "26.6.4" },

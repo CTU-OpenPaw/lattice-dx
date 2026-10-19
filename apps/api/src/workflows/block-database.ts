@@ -1,3 +1,4 @@
+import {enqueueIncident} from '../agents/enqueue.js';
 // SPDX-License-Identifier: Apache-2.0
 import {createPrivateValues,projectFields,evaluatePrivateExpression} from './private-blocks.js';
 import {validateSteps} from './block-policy.js';
@@ -141,6 +142,7 @@ export async function executeBlocks(client: PoolClient, steps: WorkflowStep[], r
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,now()+$9 * interval '1 second')`,
       [result.id ?? result.eventId,run.id,actor.organizationId,run.version,step.action === 'tasks.create' ? 'task' : 'connector',
         resolved.assigneeId ?? null,resolved.connectorId ?? null,JSON.stringify(wait),wait.timeoutSeconds]);
+      if(step.action==='connectors.dispatch' && resolved.connectorId==='agent' && resolved.operation==='incident.analyze')await enqueueIncident(client,run,actor,String(result.eventId),wait,{eventType:'connector.dispatch',connectorId:resolved.connectorId,operation:resolved.operation});
       run.waiting = true;
     }
   }

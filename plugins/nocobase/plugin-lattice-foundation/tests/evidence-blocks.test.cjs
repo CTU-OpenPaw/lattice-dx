@@ -38,6 +38,22 @@ test('Attachment clears private metadata when a later download is denied',async(
   const props={manifest,block:manifest.blocks.find(b=>b.type==='attachment'),api,connected:true,selectedId:id,run};env.render(()=>AttachmentBlock(props));await tick();let tree=env.render(()=>AttachmentBlock(props));assert.ok(find(tree,n=>n.type==='strong'&&n.children.includes('proof.txt')));
   await find(tree,n=>n.type==='button'&&n.children.includes('Tải xuống')).props.onClick();await tick();tree=env.render(()=>AttachmentBlock(props));assert.equal(find(tree,n=>n.type==='strong'&&n.children.includes('proof.txt')),null);
 });
+
+test('Attachment clears cached metadata and selection when a later metadata lookup is denied',async()=>{
+  let revoked=false;const env=hooks(),{AttachmentBlock}=createEvidenceComponents(env.react);
+  const api={file:async()=>{if(revoked)throw {message:'Access revoked',response:{status:404}};return clean;}};
+  const props={manifest,block:manifest.blocks.find(b=>b.type==='attachment'),api,connected:true,selectedId:id,run,onUploaded:()=>{}};
+  env.render(()=>AttachmentBlock(props));await tick();let tree=env.render(()=>AttachmentBlock(props));
+  assert.ok(find(tree,n=>n.type==='strong'&&n.children.includes('proof.txt')));
+  assert.ok(find(tree,n=>n.type==='button'&&n.children.includes('Chọn tệp này')));
+  find(tree,n=>n.type==='input'&&n.props['aria-label']==='ID tệp đính kèm').props.onChange({target:{value:fileId}});
+  revoked=true;tree=env.render(()=>AttachmentBlock(props));
+  await find(tree,n=>n.type==='button'&&n.children.includes('Kiểm tra tệp đính kèm')).props.onClick();
+  tree=env.render(()=>AttachmentBlock(props));
+  assert.equal(find(tree,n=>n.type==='strong'&&n.children.includes('proof.txt')),null);
+  assert.equal(find(tree,n=>n.type==='button'&&n.children.includes('Chọn tệp này')),null);
+  assert.ok(find(tree,n=>n.props.role==='alert'&&n.children.includes('Access revoked')));
+});
 test('disconnect during local file read prevents upload to a stale workflow',async t=>{
   let reader;class Reader{constructor(){reader=this}readAsDataURL(){}abort(){this.onabort?.();}}
   mockReader(t,Reader);const uploads=[];const api={file:async(operation,payload)=>{uploads.push({operation,payload});return clean;}};

@@ -21,6 +21,7 @@ The engine is the authority for business data, workflows and permissions. Studio
 | Durable designated-service timers | `/v1/workflow-services`, `/v1/workflows/:id/timers` | [Timers](workflow-timers.md) | `pnpm test:workflow-timers` |
 | Organization metadata and directory snapshot | `/v1/organization/*` | [Organization](organization-directory.md) | `pnpm test:organization-operations` |
 | Signed ingress and subscriptions | `/v1/workflow-events`, `/v1/workflow-event-subscriptions` | [Inbound events](inbound-events.md) | `pnpm test:inbound-events` |
+| Incident rules, human resolution and durable agent proposals | `/v1/agent-jobs`, `/v1/workflows`, `/v1/entities?schemaId=incident-rule` | [Incident agent runtime](incident-agent-runtime.md) | `pnpm test:incident-agent` |
 | Portable workflow bundles | `/v1/workflow-bundles/*` | [Bundles](workflow-bundles.md) | `pnpm test:workflow-bundles` |
 | Declarative business bindings | `/v1/enterprise-modules/:id/versions/:version/bindings/:bindingId/start` | [Business bindings](module-business-bindings.md) | `pnpm test:module-bindings` |
 | Versioned enterprise modules | `/v1/enterprise-modules/*` | [Modules](enterprise-modules.md) | `pnpm test:enterprise-modules` |

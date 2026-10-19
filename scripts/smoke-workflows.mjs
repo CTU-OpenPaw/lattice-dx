@@ -47,8 +47,9 @@ run=await transition(run,'warehouse','receive',{receiptAttachmentId:receipt.id})
 assert.equal(await request(`/v1/files/${receipt.id}/content`,'warehouse2'),'Workflow clean evidence');
 await request(`/v1/files/${receipt.id}/content`,'receiver',undefined,404);await request(`/v1/files/${receipt.id}/content`,'bob',undefined,404);
 await request(`/v1/files/${receipt.id}/content`,'it-demo',undefined,404);
-run=await transition(run,'warehouse','accept',{acceptanceNote:'Checked quantity and condition'});
 const handover={assetId:'urn:ngsi-ld:Asset:'+randomUUID(),recipientId:actors.receiver.subject,departmentId:'warehouse',locationId:'office-1',attachmentId:receipt.id};
+await unchanged(run,'warehouse2','handover',handover,409);
+run=await transition(run,'warehouse','accept',{acceptanceNote:'Checked quantity and condition'});
 for(const patch of [{recipientId:'unregistered-'+randomUUID()},{recipientId:actors.bob.subject},{departmentId:'missing-department'},{locationId:'missing-location'},{attachmentId:foreign.id},{attachmentId:rejected.id}])await unchanged(run,'warehouse2','handover',{...handover,...patch},400);
 const handoverKey=randomUUID(),handoverCommand={action:'handover',expectedVersion:run.version,input:handover};
 run=await transition(run,'warehouse2','handover',handover,200,handoverKey);
@@ -57,6 +58,11 @@ const jobs=(await request(`/v1/workflows/${run.id}/sync`,'manager')).items;asser
 const audit=(await history(run)).items;
 const states=['draft','submitted','approved','received','accepted','handed_over'],names=['alice','alice','manager','warehouse','warehouse','warehouse2'];
 assert.equal(audit.length,states.length);for(let i=0;i<audit.length;i++){assert.equal(audit[i].version,i+1);assert.equal(audit[i].actorId,actors[names[i]].subject);assert.equal(audit[i].fromState,i?states[i-1]:null);assert.equal(audit[i].toState,states[i]);assert.ok(!Number.isNaN(Date.parse(audit[i].occurredAt)));}
+for(const path of [`/v1/workflows/${run.id}/history`,`/v1/workflows/${run.id}/history/${audit[0].id}`])for(const method of ['POST','PUT','PATCH','DELETE']) {
+  const response=await fetch(base+path,{method,headers:{authorization:`Bearer ${actors.manager.token}`,'content-type':'application/json'},body:JSON.stringify({action:'tampered',toState:'draft'}),signal:AbortSignal.timeout(30000)});
+  assert.equal(response.status,404,`${method} history must have no mutation route`);
+}
+assert.deepEqual((await history(run)).items,audit);
 let denied=await create('alice');denied=await transition(denied,'alice','submit');denied=await transition(denied,'manager','reject',{reason:'Budget unavailable'});assert.equal(denied.data.reason,'Budget unavailable');assert.equal((await history(denied)).items.at(-1).action,'reject');
 await create('hr-demo','onboarding',{recipientId:actors.bob.subject},randomUUID(),'Foreign recipient',400);
 let onboarding=await create('hr-demo','onboarding',{recipientId:actors.receiver.subject});onboarding=await transition(onboarding,'hr-demo','submit');onboarding=await transition(onboarding,'manager','approve');onboarding=await transition(onboarding,'it-demo','provision',{accountRef:'local-demo-account'});
@@ -89,6 +95,11 @@ import { drainOne, sendHttpEvent } from './src/workflows/outbox.ts';
   await control.query('CREATE SCHEMA '+schema);
   pool=new pg.Pool({connectionString:process.env.DATABASE_URL,max:4,options:'-c search_path='+schema+',public'});
   await pool.query('CREATE TABLE workflow_jobs (LIKE public.workflow_jobs INCLUDING ALL)');
+  // The dispatcher locks active runs before jobs and checks connector waits.
+  // Keep every dependency in the isolated schema; never fall back to public.
+  await pool.query('CREATE TABLE workflow_runs (LIKE public.workflow_runs INCLUDING ALL)');
+  await pool.query('CREATE TABLE workflow_waits (LIKE public.workflow_waits INCLUDING ALL)');
+  await pool.query('INSERT INTO workflow_runs SELECT * FROM public.workflow_runs WHERE id=$1',[event.runId]);
   const jobs=workflowJobDatabase(pool);
   async function add(payload=event) {const id=randomUUID();await pool.query('INSERT INTO workflow_jobs(id,run_id,organization_id,payload) VALUES($1,$2,$3,$4)',[id,event.runId,event.organizationId,payload]);return id;}
   let requests=0;const received=[],seen=new Set();

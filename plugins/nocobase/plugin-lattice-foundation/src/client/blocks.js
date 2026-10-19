@@ -56,12 +56,13 @@ function createBlockComponents(client,React,antd) {
     const generation=React.useRef(0);
     React.useEffect(()=>{generation.current++;setResult(null);setError('');setBusy(false);return()=>{generation.current++};},[connected,manifest.id,block.id]);
     const [referenceOptions,setReferenceOptions]=React.useState({}),[referenceError,setReferenceError]=React.useState('');
+    const [referenceLoading,setReferenceLoading]=React.useState(false);
     React.useEffect(()=>{if(!connected){setResult(null);setValues({});}},[connected]);
     const controller=React.useMemo(()=>createFormActions({apiClient:api,manifest,blockId:block.id}),[api,manifest,block.id]);
     React.useEffect(()=>{
-      let active=true;setAvailable(false);setReferenceOptions({});setReferenceError('');
+      let active=true;setAvailable(false);setReferenceOptions({});setReferenceError('');setReferenceLoading(!!connected);
       if(connected){
-        loadFormContext(api,block,contract,defaultContracts).then(context=>{if(active){setReferenceOptions(context.options);setAvailable(context.available);setReferenceError(context.error);}}).catch(e=>{if(active)setReferenceError(e.message)});
+        loadFormContext(api,block,contract,defaultContracts).then(context=>{if(active){setReferenceOptions(context.options);setAvailable(context.available);setReferenceError(context.error);}}).catch(e=>{if(active)setReferenceError(e.message)}).finally(()=>{if(active)setReferenceLoading(false);});
       }
       return()=>{active=false};
     },[api,connected,block,contract,refreshKey]);
@@ -72,7 +73,7 @@ function createBlockComponents(client,React,antd) {
       catch(e){if(current===generation.current)setError(e.message);}
       finally{if(current===generation.current)setBusy(false);}
     }
-    if(before&&connected&&!available)return h('article',{style,'data-block-id':block.id},h('h3',null,block.title),h('p',null,'Đang kiểm tra quyền và dữ liệu lựa chọn. '+referenceError));
+    if(before&&connected&&!available)return h('article',{style,'data-block-id':block.id},h('h3',null,block.title),h('p',{role:referenceError?'alert':'status'},referenceLoading?'Đang kiểm tra quyền và dữ liệu lựa chọn.':referenceError||'Form không khả dụng với tài khoản hiện tại.'));
     return h('article',{style,'data-block-id':block.id},h('h3',null,block.title),
       !connected&&h('p',null,'Kết nối tài khoản nghiệp vụ để sử dụng form.'),
       connected&&!available&&h('p',null,'Action chưa được cấp quyền hoặc đang kiểm tra quyền.'),
