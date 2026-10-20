@@ -1,0 +1,813 @@
+// SPDX-License-Identifier: Apache-2.0
+function createCaseBoardComponent(React) {
+  const h = React.createElement;
+
+  const stateConfig = {
+    open: { label: 'Mới tiếp nhận', color: '#0958d9', bg: '#e6f4ff', border: '#91caff', column: 'inbox' },
+    assigned: { label: 'Đã giao việc', color: '#1d4ed8', bg: '#eff6ff', border: '#bfdbfe', column: 'inbox' },
+    investigating: { label: 'Đang kiểm tra', color: '#722ed1', bg: '#f9f0ff', border: '#d3adf7', column: 'processing' },
+    analyzing: { label: 'Đang phân tích AI', color: '#13c2c2', bg: '#e6fffb', border: '#87e8de', column: 'processing' },
+    analysis_failed: { label: 'Phân tích lỗi', color: '#cf1322', bg: '#fff1f0', border: '#ffa39e', column: 'processing' },
+    review_pending: { label: 'Chờ duyệt đề xuất', color: '#d46b08', bg: '#fffbe6', border: '#ffe58f', column: 'review' },
+    approved: { label: 'Đề xuất đã duyệt', color: '#389e0d', bg: '#f6ffed', border: '#b7eb8f', column: 'review' },
+    rejected: { label: 'Đề xuất bị từ chối', color: '#cf1322', bg: '#fff1f0', border: '#ffa39e', column: 'review' },
+    resolved: { label: 'Đã khắc phục', color: '#0958d9', bg: '#e6f4ff', border: '#91caff', column: 'done' },
+    closed: { label: 'Đã đóng sự cố', color: '#595959', bg: '#f5f5f5', border: '#d9d9d9', column: 'done' }
+  };
+
+  const severityConfig = {
+    critical: { label: 'Khẩn cấp', color: '#cf1322', bg: '#fff1f0', border: '#ffa39e', badge: '🔴' },
+    high: { label: 'Cao', color: '#d4380d', bg: '#fff2e8', border: '#ffbb96', badge: '🟠' },
+    medium: { label: 'Trung bình', color: '#d46b08', bg: '#fffbe6', border: '#ffe58f', badge: '🟡' },
+    low: { label: 'Thấp', color: '#0958d9', bg: '#e6f4ff', border: '#91caff', badge: '🔵' }
+  };
+
+  const boardColumns = [
+    { id: 'inbox', title: 'Tiếp nhận & Giao việc', states: ['open', 'assigned'], bg: '#f0f5ff', color: '#1d39c4' },
+    { id: 'processing', title: 'Kiểm tra & Phân tích AI', states: ['investigating', 'analyzing', 'analysis_failed'], bg: '#f9f0ff', color: '#531dab' },
+    { id: 'review', title: 'Phê duyệt đề xuất', states: ['review_pending', 'approved', 'rejected'], bg: '#fffbe6', color: '#ad6800' },
+    { id: 'done', title: 'Khắc phục & Đã đóng', states: ['resolved', 'closed'], bg: '#f6ffed', color: '#237804' }
+  ];
+
+  const defaultCreateForm = {
+    title: '',
+    assetEntityId: '',
+    severity: 'high',
+    handlerId: 'handler',
+    description: ''
+  };
+
+  return function CaseBoard({ api, connection, onSelectCase }) {
+    const connected = connection?.connected !== false;
+    const [cases, setCases] = React.useState([]);
+    const [assets, setAssets] = React.useState([]);
+    const [departments, setDepartments] = React.useState([]);
+    const [loading, setLoading] = React.useState(false);
+    const [error, setError] = React.useState('');
+    const [successMessage, setSuccessMessage] = React.useState('');
+
+    const [viewMode, setViewMode] = React.useState('board'); // 'board' | 'list'
+    const [searchQuery, setSearchQuery] = React.useState('');
+    const [filterStatus, setFilterStatus] = React.useState('all');
+    const [filterSeverity, setFilterSeverity] = React.useState('all');
+    const [filterHandler, setFilterHandler] = React.useState('all');
+    const [filterAsset, setFilterAsset] = React.useState('all');
+    const [filterDepartment, setFilterDepartment] = React.useState('all');
+
+    const [selectedCase, setSelectedCase] = React.useState(null);
+    const [isCreating, setIsCreating] = React.useState(false);
+    const [createForm, setCreateForm] = React.useState(defaultCreateForm);
+    const [actionNote, setActionNote] = React.useState('');
+    const [actionBusy, setActionBusy] = React.useState(false);
+
+    const loadData = React.useCallback(async () => {
+      if (!connected) return;
+      setLoading(true);
+      setError('');
+      try {
+        let loadedCases = [];
+        if (api.workflow) {
+          try {
+            const res = await api.workflow('list', {
+              query: { definitionId: 'incident-response', limit: '100', offset: '0' }
+            });
+            if (res && Array.isArray(res.items)) {
+              loadedCases = res.items.map(item => ({
+                id: item.id,
+                title: item.title,
+                status: item.state || 'open',
+                version: item.version || 1,
+                severity: item.data?.severity || 'high',
+                assetEntityId: item.data?.assetEntityId || '',
+                handlerId: item.data?.handlerId || 'Chưa gán',
+                notificationId: item.data?.notificationId || '',
+                createdAt: item.createdAt || new Date().toISOString(),
+                updatedAt: item.updatedAt || new Date().toISOString(),
+                data: item.data || {},
+                availableTransitions: item.availableTransitions || []
+              }));
+            }
+          } catch {
+            // fallback
+          }
+        }
+
+        if (loadedCases.length === 0 && api.request) {
+          try {
+            const localRes = await api.request({ url: 'latticeIncidentCases:list', method: 'get', params: { paginate: false } });
+            if (localRes?.data?.data && Array.isArray(localRes.data.data)) {
+              loadedCases = localRes.data.data.map(c => ({
+                id: c.runId || c.id,
+                title: c.title,
+                status: c.status || 'open',
+                version: 1,
+                severity: c.severity || 'high',
+                assetEntityId: c.assetEntityId,
+                handlerId: c.handlerId,
+                notificationId: c.notificationId,
+                createdAt: c.createdAt,
+                updatedAt: c.updatedAt,
+                proposal: c.proposal,
+                resolutionNote: c.resolutionNote,
+                closeNote: c.closeNote
+              }));
+            }
+          } catch {
+            // ignore
+          }
+        }
+        setCases(loadedCases);
+
+        if (api.entity) {
+          try {
+            const assetRes = await api.entity('list', { query: { limit: '100', offset: '0' } });
+            const assetItems = assetRes?.items || [];
+            setAssets(assetItems);
+          } catch {
+            setAssets([]);
+          }
+        }
+
+        if (api.request) {
+          try {
+            const deptRes = await api.request({ url: 'latticeDepartments:list', method: 'get', params: { paginate: false } });
+            const deptItems = deptRes?.data?.data || [];
+            setDepartments(deptItems);
+          } catch {
+            setDepartments([]);
+          }
+        }
+      } catch (err) {
+        setError(err.message || 'Không thể tải dữ liệu sự cố.');
+      } finally {
+        setLoading(false);
+      }
+    }, [api, connected]);
+
+    React.useEffect(() => {
+      loadData();
+    }, [loadData]);
+
+    const assetMap = React.useMemo(() => {
+      const map = {};
+      for (const a of assets) {
+        map[a.id] = a;
+      }
+      return map;
+    }, [assets]);
+
+    const filteredCases = React.useMemo(() => {
+      return cases.filter(c => {
+        if (filterStatus !== 'all' && c.status !== filterStatus) return false;
+        if (filterSeverity !== 'all' && c.severity !== filterSeverity) return false;
+        if (filterHandler !== 'all' && c.handlerId !== filterHandler) return false;
+        if (filterAsset !== 'all' && c.assetEntityId !== filterAsset) return false;
+        if (filterDepartment !== 'all') {
+          const asset = assetMap[c.assetEntityId];
+          const dept = asset?.attributes?.department || asset?.attributes?.departmentId;
+          if (dept !== filterDepartment) return false;
+        }
+        if (searchQuery.trim()) {
+          const q = searchQuery.toLowerCase();
+          const matchTitle = c.title?.toLowerCase().includes(q);
+          const matchId = String(c.id).toLowerCase().includes(q);
+          const matchAsset = c.assetEntityId?.toLowerCase().includes(q);
+          const matchHandler = c.handlerId?.toLowerCase().includes(q);
+          if (!matchTitle && !matchId && !matchAsset && !matchHandler) return false;
+        }
+        return true;
+      });
+    }, [cases, filterStatus, filterSeverity, filterHandler, filterAsset, filterDepartment, searchQuery, assetMap]);
+
+    const handleCreateCase = async (e) => {
+      e.preventDefault();
+      if (!createForm.title.trim() || !createForm.assetEntityId || !createForm.handlerId) {
+        setError('Vui lòng nhập đầy đủ tiêu đề, chọn tài sản và kỹ thuật viên.');
+        return;
+      }
+      setActionBusy(true);
+      setError('');
+      try {
+        const key = 'case-create-' + Date.now();
+        const notificationId = 'notif-' + Date.now();
+        const body = {
+          definitionId: 'incident-response',
+          title: createForm.title.trim(),
+          input: {
+            assetEntityId: createForm.assetEntityId,
+            handlerId: createForm.handlerId,
+            notificationId,
+            severity: createForm.severity
+          }
+        };
+
+        if (api.workflow) {
+          await api.workflow('create', { key, body });
+        }
+
+        if (api.request) {
+          try {
+            await api.request({
+              url: 'latticeIncidentCases:create',
+              method: 'post',
+              data: {
+                title: createForm.title.trim(),
+                runId: key,
+                assetEntityId: createForm.assetEntityId,
+                notificationId,
+                handlerId: createForm.handlerId,
+                severity: createForm.severity,
+                status: 'open'
+              }
+            });
+          } catch {
+            // ignore
+          }
+        }
+
+        setSuccessMessage('Đã tạo hồ sơ sự cố thành công!');
+        setIsCreating(false);
+        setCreateForm(defaultCreateForm);
+        loadData();
+      } catch (err) {
+        setError(err.message || 'Không thể tạo sự cố.');
+      } finally {
+        setActionBusy(false);
+      }
+    };
+
+    const handleTransition = async (caseItem, action) => {
+      setActionBusy(true);
+      setError('');
+      try {
+        const key = 'act-' + Date.now();
+        const input = {};
+        if (action === 'accept') input.receiptNote = actionNote.trim() || 'Kỹ thuật viên đã tiếp nhận';
+        if (action === 'approve') input.reviewNote = actionNote.trim() || 'Người quản lý duyệt đề xuất';
+        if (action === 'reject') input.reason = actionNote.trim() || 'Từ chối đề xuất xử lý';
+        if (action === 'rework') input.reworkNote = actionNote.trim() || 'Yêu cầu kiểm tra lại';
+        if (action === 'record_resolution') input.resolutionNote = actionNote.trim() || 'Đã khắc phục hoàn tất sự cố';
+        if (action === 'close') input.closeNote = actionNote.trim() || 'Đã đóng sự cố';
+
+        if (api.workflow) {
+          await api.workflow('transition', {
+            id: caseItem.id,
+            key,
+            body: {
+              action,
+              expectedVersion: caseItem.version,
+              input
+            }
+          });
+        }
+
+        setSuccessMessage(`Đã thực hiện thao tác "${action}" thành công.`);
+        setActionNote('');
+        setSelectedCase(null);
+        loadData();
+      } catch (err) {
+        setError(err.status === 403 || err.response?.status === 403
+          ? 'Không có quyền thực hiện thao tác chuyển trạng thái này.'
+          : (err.message || 'Thao tác thất bại.'));
+      } finally {
+        setActionBusy(false);
+      }
+    };
+
+    const renderCard = (c) => {
+      const stateInfo = stateConfig[c.status] || stateConfig.open;
+      const sevInfo = severityConfig[c.severity] || severityConfig.medium;
+      const asset = assetMap[c.assetEntityId];
+      const assetName = asset?.title || (c.assetEntityId ? `Tài sản #${c.assetEntityId.slice(-6)}` : 'Chưa gắn tài sản');
+
+      return h('div', {
+        key: c.id,
+        'data-testid': `lattice-case-card-${c.id}`,
+        onClick: () => {
+          setSelectedCase(c);
+          onSelectCase?.(c);
+        },
+        style: {
+          padding: 12,
+          marginBottom: 10,
+          background: '#ffffff',
+          borderRadius: 6,
+          border: '1px solid #dcdfe6',
+          boxShadow: '0 1px 2px rgba(0,0,0,0.05)',
+          cursor: 'pointer',
+          transition: 'all 0.2s ease'
+        }
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 6 } },
+          h('span', {
+            'data-testid': 'lattice-case-severity',
+            style: {
+              padding: '2px 6px',
+              borderRadius: 4,
+              fontSize: 11,
+              fontWeight: 600,
+              background: sevInfo.bg,
+              color: sevInfo.color,
+              border: `1px solid ${sevInfo.border}`
+            }
+          }, `${sevInfo.badge} ${sevInfo.label}`),
+          h('span', {
+            'data-testid': 'lattice-case-status',
+            style: {
+              padding: '2px 6px',
+              borderRadius: 4,
+              fontSize: 11,
+              fontWeight: 500,
+              background: stateInfo.bg,
+              color: stateInfo.color,
+              border: `1px solid ${stateInfo.border}`
+            }
+          }, stateInfo.label)
+        ),
+        h('h5', { style: { margin: '0 0 6px 0', fontSize: 13, color: '#172b4d', fontWeight: 600, lineHeight: 1.4 } }, c.title),
+        h('div', { style: { fontSize: 11, color: '#5e6c84', marginBottom: 4 } },
+          '📦 ', h('strong', { style: { color: '#0958d9' } }, assetName)
+        ),
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, color: '#7a869a', marginTop: 8 } },
+          h('span', null, '👤 ', c.handlerId || 'Chưa gán'),
+          h('time', null, new Date(c.createdAt).toLocaleDateString('vi-VN'))
+        )
+      );
+    };
+
+    const renderBoardView = () => {
+      return h('div', {
+        'data-testid': 'lattice-case-board-view',
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))',
+          gap: 16,
+          marginTop: 16
+        }
+      },
+        ...boardColumns.map(col => {
+          const colCases = filteredCases.filter(c => col.states.includes(c.status));
+          return h('div', {
+            key: col.id,
+            'data-testid': `lattice-case-column-${col.id}`,
+            style: {
+              background: '#f4f5f7',
+              borderRadius: 8,
+              padding: 12,
+              minHeight: 360,
+              border: '1px solid #dfe1e6'
+            }
+          },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, paddingBottom: 8, borderBottom: '2px solid ' + col.color } },
+              h('h4', { style: { margin: 0, fontSize: 13, fontWeight: 700, color: col.color } }, col.title),
+              h('span', { style: { background: col.color, color: '#fff', borderRadius: 10, padding: '1px 8px', fontSize: 11, fontWeight: 600 } }, colCases.length)
+            ),
+            colCases.length === 0
+              ? h('div', { style: { padding: '24px 8px', textAlign: 'center', color: '#a5b2c6', fontSize: 12, fontStyle: 'italic' } }, 'Không có sự cố')
+              : colCases.map(c => renderCard(c))
+          );
+        })
+      );
+    };
+
+    const renderListView = () => {
+      return h('div', {
+        'data-testid': 'lattice-case-list-view',
+        style: { marginTop: 16, overflowX: 'auto', background: '#fff', borderRadius: 8, border: '1px solid #dce3ed' }
+      },
+        h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 13, textAlign: 'left' } },
+          h('thead', null,
+            h('tr', { style: { background: '#f8fafc', borderBottom: '1px solid #dce3ed', color: '#5e6c84', fontSize: 12 } },
+              h('th', { style: { padding: '10px 14px' } }, 'Tiêu đề sự cố'),
+              h('th', { style: { padding: '10px 14px' } }, 'Mức ưu tiên'),
+              h('th', { style: { padding: '10px 14px' } }, 'Trạng thái'),
+              h('th', { style: { padding: '10px 14px' } }, 'Kỹ thuật viên'),
+              h('th', { style: { padding: '10px 14px' } }, 'Tài sản liên quan'),
+              h('th', { style: { padding: '10px 14px' } }, 'Thời gian tạo'),
+              h('th', { style: { padding: '10px 14px', textAlign: 'right' } }, 'Thao tác')
+            )
+          ),
+          h('tbody', null,
+            filteredCases.length === 0
+              ? h('tr', null, h('td', { colSpan: 7, style: { padding: 24, textAlign: 'center', color: '#5e6c84' } }, 'Không tìm thấy sự cố nào phù hợp.'))
+              : filteredCases.map(c => {
+                const stateInfo = stateConfig[c.status] || stateConfig.open;
+                const sevInfo = severityConfig[c.severity] || severityConfig.medium;
+                const asset = assetMap[c.assetEntityId];
+                const assetName = asset?.title || (c.assetEntityId ? `Tài sản #${c.assetEntityId.slice(-6)}` : '—');
+                return h('tr', {
+                  key: c.id,
+                  'data-testid': `lattice-case-row-${c.id}`,
+                  style: { borderBottom: '1px solid #f0f0f0', cursor: 'pointer' },
+                  onClick: () => setSelectedCase(c)
+                },
+                  h('td', { style: { padding: '12px 14px', fontWeight: 600, color: '#172b4d' } }, c.title),
+                  h('td', { style: { padding: '12px 14px' } },
+                    h('span', { style: { padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 600, background: sevInfo.bg, color: sevInfo.color, border: '1px solid ' + sevInfo.border } },
+                      `${sevInfo.badge} ${sevInfo.label}`
+                    )
+                  ),
+                  h('td', { style: { padding: '12px 14px' } },
+                    h('span', { style: { padding: '2px 8px', borderRadius: 4, fontSize: 11, fontWeight: 500, background: stateInfo.bg, color: stateInfo.color, border: '1px solid ' + stateInfo.border } },
+                      stateInfo.label
+                    )
+                  ),
+                  h('td', { style: { padding: '12px 14px', color: '#42526e' } }, c.handlerId || 'Chưa gán'),
+                  h('td', { style: { padding: '12px 14px', color: '#0958d9' } }, assetName),
+                  h('td', { style: { padding: '12px 14px', color: '#7a869a', fontSize: 12 } }, new Date(c.createdAt).toLocaleString('vi-VN')),
+                  h('td', { style: { padding: '12px 14px', textAlign: 'right' } },
+                    h('button', {
+                      type: 'button',
+                      style: { padding: '4px 10px', fontSize: 12, borderRadius: 4, border: '1px solid #cdd7e5', background: '#fff', color: '#0958d9', cursor: 'pointer' },
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        setSelectedCase(c);
+                      }
+                    }, 'Chi tiết')
+                  )
+                );
+              })
+          )
+        )
+      );
+    };
+
+    return h('div', {
+      'data-testid': 'lattice-case-board-container',
+      style: { padding: 16, background: '#fff', borderRadius: 8, border: '1px solid #dce3ed', marginTop: 16 }
+    },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 12, marginBottom: 16 } },
+        h('div', null,
+          h('h3', { style: { margin: '0 0 4px 0', color: '#172b4d', fontSize: 18, fontWeight: 700 } }, 'Điều phối & Xử lý sự cố (Case Board)'),
+          h('p', { style: { margin: 0, color: '#5e6c84', fontSize: 13 } }, 'Theo dõi sự cố hiện trường từ cảm biến, phân công kỹ thuật viên và điều phối xử lý theo quy trình.')
+        ),
+        h('div', { style: { display: 'flex', gap: 8 } },
+          h('button', {
+            type: 'button',
+            'data-testid': 'lattice-refresh-cases-btn',
+            disabled: loading,
+            onClick: loadData,
+            style: { padding: '6px 12px', borderRadius: 6, border: '1px solid #cdd7e5', background: '#fff', color: '#172b4d', cursor: 'pointer', fontSize: 13 }
+          }, loading ? 'Đang tải…' : '⟳ Làm mới'),
+          h('button', {
+            type: 'button',
+            'data-testid': 'lattice-create-case-btn',
+            onClick: () => setIsCreating(true),
+            style: { padding: '6px 14px', borderRadius: 6, border: 'none', background: '#0052cc', color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: 13 }
+          }, '+ Báo sự cố mới')
+        )
+      ),
+
+      error && h('div', { role: 'alert', style: { padding: 10, background: '#ffebe6', color: '#cf1322', borderRadius: 6, marginBottom: 12, fontSize: 13 } }, error),
+      successMessage && h('div', { role: 'status', style: { padding: 10, background: '#e3fcef', color: '#216e4e', borderRadius: 6, marginBottom: 12, fontSize: 13 } }, successMessage),
+
+      // Toolbar: Search, Filters & View Toggle
+      h('div', {
+        'data-testid': 'lattice-case-toolbar',
+        style: { display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center', background: '#f8fafc', padding: 12, borderRadius: 6, border: '1px solid #e2e8f0' }
+      },
+        h('input', {
+          'data-testid': 'lattice-case-search',
+          placeholder: 'Tìm theo tiêu đề, ID, tài sản…',
+          value: searchQuery,
+          onChange: e => setSearchQuery(e.target.value),
+          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, minWidth: 200 }
+        }),
+        h('select', {
+          'data-testid': 'lattice-filter-status',
+          value: filterStatus,
+          onChange: e => setFilterStatus(e.target.value),
+          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff' }
+        },
+          h('option', { value: 'all' }, 'Trạng thái: Tất cả'),
+          h('option', { value: 'open' }, 'Mới tiếp nhận'),
+          h('option', { value: 'assigned' }, 'Đã giao việc'),
+          h('option', { value: 'investigating' }, 'Đang kiểm tra'),
+          h('option', { value: 'analyzing' }, 'Đang phân tích AI'),
+          h('option', { value: 'review_pending' }, 'Chờ duyệt đề xuất'),
+          h('option', { value: 'approved' }, 'Đã duyệt đề xuất'),
+          h('option', { value: 'resolved' }, 'Đã khắc phục'),
+          h('option', { value: 'closed' }, 'Đã đóng sự cố')
+        ),
+        h('select', {
+          'data-testid': 'lattice-filter-severity',
+          value: filterSeverity,
+          onChange: e => setFilterSeverity(e.target.value),
+          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff' }
+        },
+          h('option', { value: 'all' }, 'Mức ưu tiên: Tất cả'),
+          h('option', { value: 'critical' }, '🔴 Khẩn cấp'),
+          h('option', { value: 'high' }, '🟠 Cao'),
+          h('option', { value: 'medium' }, '🟡 Trung bình'),
+          h('option', { value: 'low' }, '🔵 Thấp')
+        ),
+        h('select', {
+          'data-testid': 'lattice-filter-asset',
+          value: filterAsset,
+          onChange: e => setFilterAsset(e.target.value),
+          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff', maxWidth: 180 }
+        },
+          h('option', { value: 'all' }, 'Tài sản: Tất cả'),
+          ...assets.map(a => h('option', { key: a.id, value: a.id }, a.title || a.id.slice(-8)))
+        ),
+        h('select', {
+          'data-testid': 'lattice-filter-department',
+          value: filterDepartment,
+          onChange: e => setFilterDepartment(e.target.value),
+          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff', maxWidth: 180 }
+        },
+          h('option', { value: 'all' }, 'Đơn vị: Tất cả'),
+          ...departments.map(d => h('option', { key: d.id, value: d.name || d.id }, d.name || d.code || d.id))
+        ),
+        h('div', { style: { marginLeft: 'auto', display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid #cbd5e1' } },
+          h('button', {
+            type: 'button',
+            'data-testid': 'lattice-view-board-btn',
+            onClick: () => setViewMode('board'),
+            style: {
+              padding: '6px 12px',
+              border: 'none',
+              background: viewMode === 'board' ? '#0052cc' : '#fff',
+              color: viewMode === 'board' ? '#fff' : '#172b4d',
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 600
+            }
+          }, '📊 Board'),
+          h('button', {
+            type: 'button',
+            'data-testid': 'lattice-view-list-btn',
+            onClick: () => setViewMode('list'),
+            style: {
+              padding: '6px 12px',
+              border: 'none',
+              background: viewMode === 'list' ? '#0052cc' : '#fff',
+              color: viewMode === 'list' ? '#fff' : '#172b4d',
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 600
+            }
+          }, '📋 Danh sách')
+        )
+      ),
+
+      viewMode === 'board' ? renderBoardView() : renderListView(),
+
+      // Modal / Drawer chi tiết sự cố & thao tác workflow
+      selectedCase && h('div', {
+        'data-testid': 'lattice-case-detail-modal',
+        style: {
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(9, 30, 66, 0.54)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          padding: 16
+        }
+      },
+        h('div', {
+          style: {
+            background: '#fff',
+            borderRadius: 8,
+            width: '100%',
+            maxWidth: 640,
+            maxHeight: '90vh',
+            overflowY: 'auto',
+            padding: 24,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.12)'
+          }
+        },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 } },
+            h('div', null,
+              h('div', { style: { fontSize: 12, color: '#5e6c84', marginBottom: 4 } }, `Mã sự cố: ${selectedCase.id}`),
+              h('h3', { style: { margin: 0, color: '#172b4d', fontSize: 18 } }, selectedCase.title)
+            ),
+            h('button', {
+              type: 'button',
+              onClick: () => setSelectedCase(null),
+              style: { border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer', color: '#5e6c84' }
+            }, '✕')
+          ),
+
+          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16, background: '#f8fafc', padding: 12, borderRadius: 6 } },
+            h('div', null,
+              h('span', { style: { fontSize: 12, color: '#5e6c84', display: 'block' } }, 'Trạng thái hiện tại:'),
+              h('strong', { style: { color: stateConfig[selectedCase.status]?.color || '#172b4d' } }, stateConfig[selectedCase.status]?.label || selectedCase.status)
+            ),
+            h('div', null,
+              h('span', { style: { fontSize: 12, color: '#5e6c84', display: 'block' } }, 'Mức ưu tiên:'),
+              h('strong', { style: { color: severityConfig[selectedCase.severity]?.color || '#172b4d' } }, severityConfig[selectedCase.severity]?.label || selectedCase.severity)
+            ),
+            h('div', null,
+              h('span', { style: { fontSize: 12, color: '#5e6c84', display: 'block' } }, 'Tài sản:'),
+              h('strong', { style: { color: '#0958d9' } }, assetMap[selectedCase.assetEntityId]?.title || selectedCase.assetEntityId)
+            ),
+            h('div', null,
+              h('span', { style: { fontSize: 12, color: '#5e6c84', display: 'block' } }, 'Kỹ thuật viên phụ trách:'),
+              h('strong', null, selectedCase.handlerId || 'Chưa gán')
+            )
+          ),
+
+          selectedCase.proposal && h('div', { style: { marginBottom: 16, padding: 12, background: '#e6f7ff', border: '1px solid #91d5ff', borderRadius: 6 } },
+            h('h5', { style: { margin: '0 0 6px 0', color: '#0050b3' } }, '🤖 Đề xuất xử lý từ AI'),
+            h('p', { style: { margin: 0, fontSize: 13, color: '#172b4d' } }, selectedCase.proposal)
+          ),
+
+          // Actions
+          h('div', { style: { borderTop: '1px solid #e2e8f0', paddingTop: 16, marginTop: 16 } },
+            h('h4', { style: { margin: '0 0 8px 0', fontSize: 14 } }, 'Thao tác quy trình sự cố:'),
+            h('div', { style: { marginBottom: 12 } },
+              h('input', {
+                'data-testid': 'lattice-case-action-note',
+                placeholder: 'Ghi chú xử lý / lý do duyệt / biên bản…',
+                value: actionNote,
+                onChange: e => setActionNote(e.target.value),
+                style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13 }
+              })
+            ),
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+              selectedCase.status === 'open' && h('button', {
+                type: 'button',
+                'data-testid': 'lattice-action-assign',
+                disabled: actionBusy,
+                onClick: () => handleTransition(selectedCase, 'assign'),
+                style: { padding: '6px 14px', background: '#0958d9', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+              }, 'Phân công kỹ thuật viên'),
+
+              selectedCase.status === 'assigned' && h('button', {
+                type: 'button',
+                'data-testid': 'lattice-action-accept',
+                disabled: actionBusy,
+                onClick: () => handleTransition(selectedCase, 'accept'),
+                style: { padding: '6px 14px', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+              }, 'Nhận việc kiểm tra'),
+
+              selectedCase.status === 'investigating' && h('button', {
+                type: 'button',
+                'data-testid': 'lattice-action-analyze',
+                disabled: actionBusy,
+                onClick: () => handleTransition(selectedCase, 'request_analysis'),
+                style: { padding: '6px 14px', background: '#722ed1', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+              }, 'Yêu cầu AI phân tích'),
+
+              selectedCase.status === 'analysis_failed' && h('button', {
+                type: 'button',
+                'data-testid': 'lattice-action-retry-analysis',
+                disabled: actionBusy,
+                onClick: () => handleTransition(selectedCase, 'retry_analysis'),
+                style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+              }, 'Thử lại phân tích'),
+
+              selectedCase.status === 'review_pending' && h('div', { style: { display: 'flex', gap: 8 } },
+                h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-approve',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'approve'),
+                  style: { padding: '6px 14px', background: '#389e0d', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Duyệt đề xuất'),
+                h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-reject',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'reject'),
+                  style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Từ chối đề xuất')
+              ),
+
+              selectedCase.status === 'approved' && h('button', {
+                type: 'button',
+                'data-testid': 'lattice-action-resolve',
+                disabled: actionBusy,
+                onClick: () => handleTransition(selectedCase, 'record_resolution'),
+                style: { padding: '6px 14px', background: '#0958d9', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+              }, 'Ghi nhận khắc phục xong'),
+
+              selectedCase.status === 'resolved' && h('button', {
+                type: 'button',
+                'data-testid': 'lattice-action-close',
+                disabled: actionBusy,
+                onClick: () => handleTransition(selectedCase, 'close'),
+                style: { padding: '6px 14px', background: '#237804', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+              }, 'Đóng sự cố'),
+
+              h('button', {
+                type: 'button',
+                onClick: () => setSelectedCase(null),
+                style: { padding: '6px 14px', background: '#fff', color: '#5e6c84', border: '1px solid #cbd5e1', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginLeft: 'auto' }
+              }, 'Đóng hộp thoại')
+            )
+          )
+        )
+      ),
+
+      // Modal tạo sự cố mới
+      isCreating && h('div', {
+        'data-testid': 'lattice-create-case-modal',
+        style: {
+          position: 'fixed',
+          top: 0, left: 0, right: 0, bottom: 0,
+          background: 'rgba(9, 30, 66, 0.54)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 1000,
+          padding: 16
+        }
+      },
+        h('form', {
+          onSubmit: handleCreateCase,
+          style: {
+            background: '#fff',
+            borderRadius: 8,
+            width: '100%',
+            maxWidth: 520,
+            padding: 24,
+            boxShadow: '0 8px 30px rgba(0,0,0,0.12)'
+          }
+        },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 } },
+            h('h3', { style: { margin: 0, color: '#172b4d', fontSize: 16 } }, 'Tạo mới hồ sơ sự cố thiết bị'),
+            h('button', {
+              type: 'button',
+              onClick: () => setIsCreating(false),
+              style: { border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer', color: '#5e6c84' }
+            }, '✕')
+          ),
+
+          h('div', { style: { marginBottom: 12 } },
+            h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#344563', marginBottom: 4 } }, 'Tiêu đề sự cố *'),
+            h('input', {
+              'data-testid': 'lattice-create-case-title',
+              required: true,
+              value: createForm.title,
+              placeholder: 'Ví dụ: Bơm cấp nước quá nhiệt tại Kho A',
+              onChange: e => setCreateForm(prev => ({ ...prev, title: e.target.value })),
+              style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13 }
+            })
+          ),
+
+          h('div', { style: { marginBottom: 12 } },
+            h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#344563', marginBottom: 4 } }, 'Tài sản xảy ra sự cố *'),
+            h('select', {
+              'data-testid': 'lattice-create-case-asset',
+              required: true,
+              value: createForm.assetEntityId,
+              onChange: e => setCreateForm(prev => ({ ...prev, assetEntityId: e.target.value })),
+              style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff' }
+            },
+              h('option', { value: '' }, '-- Chọn tài sản giám sát --'),
+              ...assets.map(a => h('option', { key: a.id, value: a.id }, `${a.title || a.id.slice(-8)} (${a.schemaId})`))
+            )
+          ),
+
+          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 } },
+            h('div', null,
+              h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#344563', marginBottom: 4 } }, 'Mức ưu tiên *'),
+              h('select', {
+                'data-testid': 'lattice-create-case-severity',
+                value: createForm.severity,
+                onChange: e => setCreateForm(prev => ({ ...prev, severity: e.target.value })),
+                style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff' }
+              },
+                h('option', { value: 'critical' }, '🔴 Khẩn cấp (Critical)'),
+                h('option', { value: 'high' }, '🟠 Cao (High)'),
+                h('option', { value: 'medium' }, '🟡 Trung bình (Medium)'),
+                h('option', { value: 'low' }, '🔵 Thấp (Low)')
+              )
+            ),
+            h('div', null,
+              h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#344563', marginBottom: 4 } }, 'Kỹ thuật viên phụ trách *'),
+              h('input', {
+                'data-testid': 'lattice-create-case-handler',
+                required: true,
+                value: createForm.handlerId,
+                placeholder: 'ID kỹ thuật viên',
+                onChange: e => setCreateForm(prev => ({ ...prev, handlerId: e.target.value })),
+                style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13 }
+              })
+            )
+          ),
+
+          h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8 } },
+            h('button', {
+              type: 'button',
+              onClick: () => setIsCreating(false),
+              style: { padding: '8px 16px', background: '#fff', border: '1px solid #cbd5e1', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+            }, 'Hủy bỏ'),
+            h('button', {
+              type: 'submit',
+              'data-testid': 'lattice-submit-case-btn',
+              disabled: actionBusy,
+              style: { padding: '8px 18px', background: '#0052cc', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 600, cursor: 'pointer', fontSize: 13 }
+            }, actionBusy ? 'Đang tạo…' : 'Tạo sự cố')
+          )
+        )
+      )
+    );
+  };
+}
+
+module.exports = { createCaseBoardComponent };

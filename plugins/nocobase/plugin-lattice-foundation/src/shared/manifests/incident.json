@@ -32,6 +32,10 @@
   "workspace": {
     "panels": [
       {
+        "id": "case-board",
+        "renderer": "lattice.incident.case-board"
+      },
+      {
         "id": "rule-editor",
         "renderer": "lattice.incident.rule-editor"
       }
