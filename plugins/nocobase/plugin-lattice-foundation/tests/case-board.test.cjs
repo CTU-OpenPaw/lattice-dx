@@ -418,3 +418,89 @@ test('CaseBoard filters by severity, status, asset, department and keyword query
   assert.equal(str.includes('Độ ẩm phòng server'), false);
 });
 
+test('CaseBoard renders fallback sample incidents when backend returns empty items', async () => {
+  const env = hooks();
+  const CaseBoard = createCaseBoardComponent(env.react);
+
+  const api = {
+    workflow: async () => ({ items: [] }),
+    entity: async () => ({ items: [] }),
+    request: async () => ({ data: { data: [] } })
+  };
+
+  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  render(); await tick();
+  const tree = render();
+
+  const str = JSON.stringify(tree);
+  assert.ok(str.includes('Cảnh báo nhiệt độ vượt ngưỡng tại Bơm làm mát A1'));
+  assert.ok(str.includes('Độ ẩm không khí tăng cao bất thường tại Kho Lương thực B'));
+  assert.ok(str.includes('Mức pin cảm biến đo rung giảm dưới 15%'));
+  assert.ok(str.includes('Áp suất đường ống cấp nước phân xưởng 2 suy giảm'));
+});
+
+test('CaseBoard supports rework transition for rejected incidents', async () => {
+  const env = hooks();
+  const CaseBoard = createCaseBoardComponent(env.react);
+  let transitionPayload = null;
+
+  const rejectedCase = [
+    {
+      id: 'case-rej-001',
+      title: 'Đề xuất thay dầu bị từ chối',
+      state: 'rejected',
+      version: 2,
+      createdAt: '2026-10-16T09:00:00Z',
+      data: {
+        assetEntityId: 'asset-gen-01',
+        severity: 'high',
+        handlerId: 'bob'
+      }
+    }
+  ];
+
+  const api = {
+    workflow: async (op, arg) => {
+      if (op === 'list') return { items: rejectedCase };
+      if (op === 'transition') {
+        transitionPayload = arg;
+        return { version: 3 };
+      }
+      return { items: [] };
+    },
+    entity: async () => ({ items: sampleAssets }),
+    request: async () => ({ data: { data: sampleDepartments } })
+  };
+
+  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  render(); await tick();
+  let tree = render();
+
+  const card = find(tree, n => n.props?.['data-testid'] === 'lattice-case-card-case-rej-001');
+  assert.ok(card, 'Rejected case card must exist');
+  card.props.onClick();
+
+  render(); await tick();
+  tree = render();
+
+  const modal = find(tree, n => n.props?.['data-testid'] === 'lattice-case-detail-modal');
+  assert.ok(modal, 'Modal must appear');
+
+  const reworkBtn = find(modal, n => n.props?.['data-testid'] === 'lattice-action-rework');
+  assert.ok(reworkBtn, 'Rework button must exist for rejected state');
+
+  const noteInput = find(modal, n => n.props?.['data-testid'] === 'lattice-case-action-note');
+  noteInput.props.onChange({ target: { value: 'Kiểm tra bổ sung độ nhớt và cặn trước khi đề xuất lại' } });
+  render(); await tick();
+  tree = render();
+
+  const modalUpdated = find(tree, n => n.props?.['data-testid'] === 'lattice-case-detail-modal');
+  const reworkBtnUpdated = find(modalUpdated, n => n.props?.['data-testid'] === 'lattice-action-rework');
+  await reworkBtnUpdated.props.onClick();
+
+  assert.ok(transitionPayload, 'Transition API must be called');
+  assert.equal(transitionPayload.id, 'case-rej-001');
+  assert.equal(transitionPayload.body.action, 'rework');
+  assert.equal(transitionPayload.body.input.reworkNote, 'Kiểm tra bổ sung độ nhớt và cặn trước khi đề xuất lại');
+});
+

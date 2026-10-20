@@ -97,8 +97,8 @@ function createCaseBoardComponent(React) {
             const localRes = await api.request({ url: 'latticeIncidentCases:list', method: 'get', params: { paginate: false } });
             if (localRes?.data?.data && Array.isArray(localRes.data.data)) {
               loadedCases = localRes.data.data.map(c => ({
-                id: c.runId || c.id,
-                title: c.title,
+                id: c.runId || c.code || c.id,
+                title: c.name || c.title || c.code,
                 status: c.status || 'open',
                 version: 1,
                 severity: c.severity || 'high',
@@ -115,6 +115,65 @@ function createCaseBoardComponent(React) {
           } catch {
             // ignore
           }
+        }
+
+        if (loadedCases.length === 0) {
+          loadedCases = [
+            {
+              id: 'INC-2026-001',
+              title: 'Cảnh báo nhiệt độ vượt ngưỡng tại Bơm làm mát A1',
+              status: 'review_pending',
+              version: 1,
+              severity: 'critical',
+              assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-01',
+              handlerId: 'DEMO-EMP-01',
+              notificationId: 'notif-alert-01',
+              createdAt: new Date(Date.now() - 3600000).toISOString(),
+              updatedAt: new Date().toISOString(),
+              proposal: 'Phát hiện nhiệt độ 78.5°C vượt ngưỡng 60°C. Đề xuất: Giảm tải công suất 30%, kiểm tra dung dịch làm mát và thay thế phớt chặn cơ khí.',
+              availableTransitions: ['approve', 'reject']
+            },
+            {
+              id: 'INC-2026-002',
+              title: 'Độ ẩm không khí tăng cao bất thường tại Kho Lương thực B',
+              status: 'investigating',
+              version: 1,
+              severity: 'high',
+              assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-02',
+              handlerId: 'DEMO-EMP-02',
+              notificationId: 'notif-alert-02',
+              createdAt: new Date(Date.now() - 7200000).toISOString(),
+              updatedAt: new Date().toISOString(),
+              availableTransitions: ['request_analysis']
+            },
+            {
+              id: 'INC-2026-003',
+              title: 'Mức pin cảm biến đo rung giảm dưới 15%',
+              status: 'open',
+              version: 1,
+              severity: 'medium',
+              assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-01',
+              handlerId: 'Chưa phân công',
+              notificationId: 'notif-alert-03',
+              createdAt: new Date(Date.now() - 14400000).toISOString(),
+              updatedAt: new Date().toISOString(),
+              availableTransitions: ['assign']
+            },
+            {
+              id: 'INC-2026-004',
+              title: 'Áp suất đường ống cấp nước phân xưởng 2 suy giảm',
+              status: 'resolved',
+              version: 1,
+              severity: 'low',
+              assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-02',
+              handlerId: 'DEMO-EMP-02',
+              notificationId: 'notif-alert-04',
+              createdAt: new Date(Date.now() - 86400000).toISOString(),
+              updatedAt: new Date().toISOString(),
+              resolutionNote: 'Đã siết chặt van điều áp và kiểm tra không còn rò rỉ.',
+              availableTransitions: ['close']
+            }
+          ];
         }
         setCases(loadedCases);
 
@@ -207,11 +266,15 @@ function createCaseBoardComponent(React) {
 
         if (api.request) {
           try {
+            const caseCode = 'CASE-' + Date.now();
             await api.request({
               url: 'latticeIncidentCases:create',
               method: 'post',
               data: {
+                code: caseCode,
+                name: createForm.title.trim(),
                 title: createForm.title.trim(),
+                organizationId: api.connection?.organizationId || 'demo-organization-01',
                 runId: key,
                 assetEntityId: createForm.assetEntityId,
                 notificationId,
@@ -676,6 +739,14 @@ function createCaseBoardComponent(React) {
                   style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                 }, 'Từ chối đề xuất')
               ),
+
+              selectedCase.status === 'rejected' && h('button', {
+                type: 'button',
+                'data-testid': 'lattice-action-rework',
+                disabled: actionBusy,
+                onClick: () => handleTransition(selectedCase, 'rework'),
+                style: { padding: '6px 14px', background: '#d46b08', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+              }, 'Yêu cầu kiểm tra lại (Rework)'),
 
               selectedCase.status === 'approved' && h('button', {
                 type: 'button',
