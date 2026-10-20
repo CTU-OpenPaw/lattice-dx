@@ -143,8 +143,36 @@ function createBridge(config, dependencies = {}) {
     },
     async entity(userId,browserId,input){
       const item=session(userId,browserId);
-      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id'].includes(k))||input.operation!=='detail'||typeof input.id!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid entity read operation.');
-      return request(`${config.gatewayUrl}/v1/entities/${input.id}`,{method:'GET',headers:{authorization:`Bearer ${item.token}`}},'Entity read failed.',true);
+      const operations={
+        detail:['GET',''],
+        context:['GET','/context'],
+        history:['GET','/history'],
+        relations:['GET','/relations'],
+        list:['GET',''],
+        create:['POST',''],
+        update:['PATCH',''],
+        archive:['POST','/archive']
+      };
+      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||!Object.hasOwn(operations,input.operation))throw new BridgeError(400,'Invalid entity operation.');
+      const [method,sub]=operations[input.operation];
+      let path='entities';
+      if(['detail','context','history','relations','update','archive'].includes(input.operation)){
+        if(typeof input.id!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid entity ID.');
+        path+=`/${input.id}${sub}`;
+      }else if(input.id!==undefined){
+        throw new BridgeError(400,'Unexpected entity ID.');
+      }
+      const write=['create','update','archive'].includes(input.operation);
+      if(write){
+        if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!input.body||typeof input.body!=='object'||Array.isArray(input.body))throw new BridgeError(400,'Entity mutation requires body and idempotency key.');
+      }else if(input.body!==undefined||input.key!==undefined){
+        throw new BridgeError(400,'Unexpected command payload.');
+      }
+      const query=validatedQuery(input.query,['limit','offset','q','schemaId']);
+      if(input.query!==undefined&&!['list','history','relations'].includes(input.operation))throw new BridgeError(400,'Unexpected query.');
+      if(query)path+=(path.includes('?')?'&':'?')+query;
+      const headers={authorization:`Bearer ${item.token}`,...(write?{'content-type':'application/json','idempotency-key':input.key}:{})};
+      return request(`${config.gatewayUrl}/v1/${path}`,{method,headers,...(write?{body:JSON.stringify(input.body)}:{})},'Entity request failed.',true);
     },
     async list(userId, browserId, resource, query) {
       if (!['records','tasks'].includes(resource)) throw new BridgeError(400, 'Unsupported list resource.');
