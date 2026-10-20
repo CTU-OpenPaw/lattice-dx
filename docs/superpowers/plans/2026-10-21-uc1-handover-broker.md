@@ -11,7 +11,7 @@
 - [x] Export an inactive n8n handover workflow with explicit response/error handling; test its routing and status normalization.
 - [x] Add opt-in runtime configuration and an idempotent local setup path that preserves existing workflows/credentials and data.
 - [x] Run a fresh procurement handover through the real backend, n8n, adapter and broker; verify duplicate/conflict/authorization behavior and restart persistence.
-- [ ] Run relevant/full checks, request independent review, fix findings and create a reviewable PR. Record exact acceptance boundaries, including any UI work that is not independently exercised.
+- [x] Run relevant/full checks, request independent review, fix findings and create PR #28. Record exact acceptance boundaries, including UI work that is not independently exercised.
 
 ## Alternatives considered
 Doing all validation and state management in n8n would duplicate backend authority and complicate transactional replay handling. A new standalone integration service adds a deployment and duplicate database plumbing. The small opt-in adapter reuses existing API and SQL boundaries while leaving n8n's routing role visible.
