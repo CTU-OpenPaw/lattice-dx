@@ -30,7 +30,7 @@ export function createRuntimeDrain(workers:RuntimeWorker[],closeDatabase:()=>Pro
 }
 /** Resource ownership seam: parsing and store validation precede the first connection. */
 export async function bootstrapRuntime<D extends {close():Promise<void>}>(env:NodeJS.ProcessEnv,deps:{
- createStore?:(root:string)=>Promise<ObjectStore>;connect:(url:string,options:{store?:ObjectStore;projectionEnabled?:boolean})=>Promise<D>;
+ createStore?:(root:string)=>Promise<ObjectStore>;connect:(url:string,options:{store?:ObjectStore;projectionEnabled?:boolean;outboxSelection?:{eventType:string;createdAfter:string;organizationId:string}})=>Promise<D>;
  createApp:(config:RuntimeConfig,database:D|undefined)=>RuntimeApp;
  startWorkers?:(config:RuntimeConfig,database:D|undefined,add:(worker:RuntimeWorker)=>void)=>RuntimeWorker[]|void;
 }) {
@@ -46,7 +46,7 @@ export async function bootstrapRuntime<D extends {close():Promise<void>}>(env:No
   return closeFlight??=Promise.resolve().then(async()=>{try{await app?.close();}finally{await drain();}});
  };
  try {
-  database=config.databaseUrl?await deps.connect(config.databaseUrl,{store,...(config.ngsiLdContextRead?{projectionEnabled:true}:{})}):undefined;
+  database=config.databaseUrl?await deps.connect(config.databaseUrl,{store,...(config.ngsiLdContextRead?{projectionEnabled:true}:{}),...(config.connector?.selection?{outboxSelection:config.connector.selection}:{})}):undefined;
   app=deps.createApp(config,database);app.addHook('onClose',drain);
   await app.listen({host:config.host,port:config.port});
   const started=deps.startWorkers?.(config,database,worker=>workers.push(worker));if(started)workers.push(...started);

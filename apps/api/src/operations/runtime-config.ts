@@ -4,7 +4,7 @@ export interface RuntimeConfig {
  databaseUrl?:string;host:string;port:number;workerUrl:string;
  ngsiLdContextRead:boolean;
  identity?:{issuer:string;jwksUrl:string;audience:string};scanner?:{host:string;port:number};
- connector?:{url:string;token:string};storage:{provider:'postgres'|'filesystem';root?:string};
+ connector?:{url:string;token:string;selection?:{eventType:string;createdAfter:string;organizationId:string}};storage:{provider:'postgres'|'filesystem';root?:string};
  workers:{automations:boolean;timers:boolean;waitTimeouts:boolean;outbox:boolean;fileStorage:boolean};
 }
 function invalid(field:string):never {throw new Error(`Invalid runtime configuration: ${field}.`);}
@@ -28,7 +28,14 @@ export function parseRuntimeConfig(env:NodeJS.ProcessEnv):RuntimeConfig {
  if(identity&&!identity.audience.trim())invalid('OIDC_AUDIENCE');
  const eventUrl=env.WORKFLOW_EVENT_URL?.trim()?env.WORKFLOW_EVENT_URL:undefined,eventToken=env.WORKFLOW_EVENT_TOKEN?.trim()?env.WORKFLOW_EVENT_TOKEN:undefined;
  if((eventUrl!==undefined)!==(eventToken!==undefined))invalid('workflow connector pair');
- const connector=eventUrl!==undefined&&eventToken!==undefined?{url:url(eventUrl,'WORKFLOW_EVENT_URL'),token:eventToken}:undefined;
+ const eventType=env.WORKFLOW_OUTBOX_EVENT_TYPE||undefined,createdAfter=env.WORKFLOW_OUTBOX_CREATED_AFTER||undefined;
+ if((eventType!==undefined)!==(createdAfter!==undefined))invalid('outbox scope pair');
+ if(eventType&&(!/^[a-z][a-z0-9_.-]{0,127}$/.test(eventType)||!createdAfter||!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(createdAfter)||!Number.isFinite(Date.parse(createdAfter))||new Date(createdAfter).toISOString()!==createdAfter))invalid('outbox scope');
+ const organizationId=env.WORKFLOW_OUTBOX_ORGANIZATION_ID||undefined;
+ if(!!eventType!==!!organizationId||organizationId&&!/^[A-Za-z0-9_-]{1,128}$/.test(organizationId))invalid('outbox organization scope');
+ const selection=eventType&&createdAfter&&organizationId?{eventType,createdAfter,organizationId}:undefined;
+ if(selection&&!eventUrl)invalid('outbox scope connector prerequisite');
+ const connector=eventUrl!==undefined&&eventToken!==undefined?{url:url(eventUrl,'WORKFLOW_EVENT_URL'),token:eventToken,...(selection?{selection}:{})}:undefined;
  if(connector&&!connector.token.trim())invalid('WORKFLOW_EVENT_TOKEN');
  if(workers.outbox&&!connector)invalid('outbox connector prerequisite');
  const scannerPort=port(env.CLAMD_PORT,3310,'CLAMD_PORT');if(env.CLAMD_HOST!==undefined&&!env.CLAMD_HOST.trim())invalid('CLAMD_HOST');
