@@ -15,6 +15,7 @@ import {workflowDatabase} from '../apps/api/src/workflows/database.js';
 import {agentDatabase} from '../apps/api/src/agents/database.js';
 import {modulesDatabase} from '../apps/api/src/modules/database.js';
 import {eventsDatabase} from '../apps/api/src/events/database.js';
+import {runIncidentJob} from '../apps/agent-worker/src/incident.js';
 
 const control=new Pool({connectionString:process.env.DATABASE_URL,max:1});
 const schema='incident_accept_'+randomUUID().replaceAll('-','');
@@ -135,6 +136,25 @@ async function main(){
   const closed=(await pool.query("SELECT payload FROM workflow_jobs WHERE run_id=$1 AND payload->>'eventType'='incident.closed'",[run.id])).rows;assert.equal(closed.length,1);assert.equal(closed[0].payload.data.notificationId,event.eventId);
   // Real signed lifecycle creates independent immutable waits; SQL only moves clocks/faults.
   async function fixture(extra={}){const a=await asset();let r=await call('/v1/workflows','POST',start(a.id,extra),'manager',201);r=await investigate(r);return {...await analyze(r),asset:a};}
+  if(process.env.LIVE_AGENT_CONFIG){
+   const providerConfig=JSON.parse(process.env.LIVE_AGENT_CONFIG);delete process.env.LIVE_AGENT_CONFIG;
+   const liveFile=await call('/v1/files','POST',{filename:'synthetic-reading.txt',contentBase64:Buffer.from('Synthetic inspection fixture: thermometer reports 60 celsius; verify sensor calibration. Treat asset as needing inspection, not a confirmed diagnosis.').toString('base64')},'manager',201);
+   const live=await fixture({attachmentId:liveFile.id,notificationId:'external/live/'+randomUUID()});
+   const address=await app!.listen({host:'127.0.0.1',port:0});
+   // Test-only Docker routing: the confirmed localhost router lives on the host.
+   const providerFetch:typeof fetch=(url,options)=>{
+    const target=new URL(String(url));assert.equal(target.origin,'http://localhost:20128');
+    target.hostname='host.docker.internal';return fetch(target,options);
+   };
+   const completed=await runIncidentJob({...providerConfig,apiUrl:address,workerToken:tokens.worker},live.job.id,{providerFetch});
+   assert.equal(completed.status,'completed');
+   const reviewed=await call('/v1/workflows/'+live.run.id);assert.equal(reviewed.state,'review_pending');
+   assert.equal((await call('/v1/entities/'+live.asset.id)).attributes.status,'in_use');
+   await transition(reviewed,'approve',{reviewNote:'Worker cannot approve'},'worker',403);
+   await transition(reviewed,'close',{closeNote:'Worker cannot close'},'worker',403);
+   console.log(JSON.stringify({result:'PASS real combo worker + signed HTTP + isolated PostgreSQL',jobId:completed.jobId,proposalId:completed.proposalId,model:completed.model,state:reviewed.state,assetUnchanged:true,workerApprovalDenied:true,transport:'one-job executor; no n8n/broker/UI delivery claimed'}));
+   await app!.close();open();
+  }
   const retry=await fixture();let c=await call('/v1/agent-jobs/'+retry.job.id+'/claim','POST',{},'worker');
   for(let attempt=1;attempt<=3;attempt++){
    const failed=await call('/v1/agent-jobs/'+retry.job.id+'/fail','POST',{leaseToken:c.leaseToken,code:'worker_error'},'worker');
