@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "id": "incident",
+  "name": "Vận hành & Xử lý sự cố",
+  "route": "/lattice/apps/incident",
+  "permissions": [
+    "records:read"
+  ],
+  "collections": [
+    {
+      "id": "cases",
+      "source": "lattice-api",
+      "resource": "records"
+    }
+  ],
+  "blocks": [
+    {
+      "id": "case-list",
+      "type": "list",
+      "title": "Danh sách sự cố thiết bị",
+      "collection": "cases",
+      "permissions": [
+        "records:read"
+      ],
+      "columns": [
+        "title",
+        "createdAt"
+      ]
+    }
+  ],
+  "transitions": [],
+  "workspace": {
+    "panels": [
+      {
+        "id": "rule-editor",
+        "renderer": "lattice.incident.rule-editor"
+      }
+    ],
+    "blocks": [
+      {
+        "blockId": "case-list"
+      }
+    ],
+    "shortcut": {
+      "description": "Giám sát cảm biến, cấu hình ngưỡng và xử lý sự cố thiết bị",
+      "icon": "apps"
+    }
+  }
+}
