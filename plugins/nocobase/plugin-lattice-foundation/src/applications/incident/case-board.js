@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
+const { createAgentRunComponent } = require('./agent-run');
+const { createEvidenceProposalComponent } = require('./evidence-proposal');
+
 function createCaseBoardComponent(React) {
   const h = React.createElement;
+  const AgentRun = createAgentRunComponent(React);
+  const EvidenceProposal = createEvidenceProposalComponent(React);
 
   const stateConfig = {
     open: { label: 'Mới tiếp nhận', color: '#0958d9', bg: '#e6f4ff', border: '#91caff', column: 'inbox' },
@@ -673,10 +678,25 @@ function createCaseBoardComponent(React) {
             )
           ),
 
-          selectedCase.proposal && h('div', { style: { marginBottom: 16, padding: 12, background: '#e6f7ff', border: '1px solid #91d5ff', borderRadius: 6 } },
-            h('h5', { style: { margin: '0 0 6px 0', color: '#0050b3' } }, '🤖 Đề xuất xử lý từ AI'),
-            h('p', { style: { margin: 0, fontSize: 13, color: '#172b4d' } }, selectedCase.proposal)
-          ),
+          // Agent Run Block (when investigating, analyzing, failed, or has job)
+          ['investigating', 'analyzing', 'analysis_failed', 'review_pending', 'approved'].includes(selectedCase.status) && h(AgentRun, {
+            api,
+            connection,
+            caseItem: selectedCase,
+            runId: selectedCase.id,
+            onTransition: () => loadData()
+          }),
+
+          // Evidence & Proposal Block (when in review, approved, rejected, or has proposal)
+          (['review_pending', 'approved', 'rejected', 'resolved', 'closed'].includes(selectedCase.status) || selectedCase.proposal) && h(EvidenceProposal, {
+            api,
+            connection,
+            caseItem: selectedCase,
+            proposal: selectedCase.proposal,
+            onApprove: () => { loadData(); setSelectedCase(null); },
+            onReject: () => { loadData(); setSelectedCase(null); },
+            onRework: () => { loadData(); setSelectedCase(null); }
+          }),
 
           // Actions
           h('div', { style: { borderTop: '1px solid #e2e8f0', paddingTop: 16, marginTop: 16 } },

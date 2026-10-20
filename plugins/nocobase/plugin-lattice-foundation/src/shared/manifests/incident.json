@@ -36,6 +36,14 @@
         "renderer": "lattice.incident.case-board"
       },
       {
+        "id": "agent-run",
+        "renderer": "lattice.incident.agent-run"
+      },
+      {
+        "id": "evidence-proposal",
+        "renderer": "lattice.incident.evidence-proposal"
+      },
+      {
         "id": "rule-editor",
         "renderer": "lattice.incident.rule-editor"
       }
