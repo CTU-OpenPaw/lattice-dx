@@ -166,6 +166,10 @@ Do not publish env files or full subscription JSON containing receiverInfo.
 
 ## Remaining scope
 
+Startup recovery and the Orion-LD 1.10.0 inline-context PATCH workaround are documented
+in [broker recovery](broker-recovery.md). Use the updated registration helper; direct
+inline-context subscription PATCH can reproduce the upstream crash after restart.
+
 - End-to-end millisecond fidelity and live concurrent/batch delivery beyond the current smoke.
 - Vehicle/Shipment/Warehouse schemas and mappings agreed with the backend owner.
 - Projection of additional attributes with independent observedAt rules.
