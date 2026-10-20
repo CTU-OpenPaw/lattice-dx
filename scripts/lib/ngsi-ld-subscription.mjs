@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 import { readFile } from 'node:fs/promises';
+export async function loadBrokerContext() {
+  const configured = JSON.parse((await readFile(new URL('../../infra/config/ngsi-ld/context.jsonld', import.meta.url), 'utf8')).replace(/^\uFEFF/, ''))['@context'];
+  // NGSI-LD already supplies its core context; keep the local mapping explicit.
+  if (!Array.isArray(configured) || configured.length !== 2 || configured[0] !== 'https://uri.etsi.org/ngsi-ld/v1/ngsi-ld-core-context.jsonld' || !configured[1] || typeof configured[1] !== 'object' || Array.isArray(configured[1])) throw new Error('Expected NGSI-LD core context plus one local mapping object.');
+  return configured[1];
+}
 export async function subscriptionConfig() {
   const token = process.env.NGSI_LD_NOTIFICATION_TOKEN;
   const tenant = process.env.NGSI_LD_TENANT || 'org-a';
   const id = process.env.NGSI_LD_SUBSCRIPTION_ID || `urn:ngsi-ld:Subscription:latticedx:${tenant}:asset-context-v1`;
   if (!token || !/^[A-Za-z0-9._~-]{32,256}$/.test(token) || !/^[A-Za-z0-9_-]{1,128}$/.test(tenant) || !/^urn:ngsi-ld:Subscription:[A-Za-z0-9._:-]{1,200}$/.test(id)) throw new Error('Valid notification token, tenant and subscription ID required. Run with --env-file=.env.integration.');
-  const context = JSON.parse((await readFile(new URL('../../infra/config/ngsi-ld/context.jsonld', import.meta.url), 'utf8')).replace(/^\uFEFF/, ''))['@context'];
+  const context = await loadBrokerContext();
   const baseUrl = (process.env.NGSI_LD_URL || 'http://localhost:1026').replace(/\/+$/, '');
   const receiverUrl = process.env.NGSI_LD_NOTIFICATION_URL || 'http://gateway:9080/v1/integrations/ngsi-ld/notifications';
   if (![baseUrl, receiverUrl].every(url => ['http:', 'https:'].includes(new URL(url).protocol))) throw new Error('HTTP(S) URLs required.');
@@ -44,7 +50,13 @@ export async function registerSubscription(config, { recreate = false } = {}) {
   }
   if (existing.status === 200 && !recreate) {
     // Update our explicit configured subscription only; preserve unrelated subscriptions.
+    // Orion-LD 1.10.0 PATCH with inline @context persists url:null and crashes
+    // on restart. Native hosted contexts retain the same mapping and a real URL.
+    const hosted=await brokerRequest(config,'POST','/jsonldContexts',{'@context':config.context},[201]);
+    const location=hosted.headers.get('location');
+    if(!location||!/^https?:\/\//.test(location))throw new Error('Broker returned no hosted context URL.');
     const { id, type, ...patch } = definition;
+    patch['@context']=location;
     await brokerRequest(config, 'PATCH', path, patch, [204]);
     console.log('PASS subscription updated: HTTP 204');
   } else {

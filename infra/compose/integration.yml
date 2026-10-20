@@ -46,4 +46,6 @@ services:
 
 volumes:
   orion-mongo-data:
+    # Recovery may select a verified replacement volume; the original stays intact.
+    name: ${ORION_MONGO_VOLUME:-${COMPOSE_PROJECT_NAME}_orion-mongo-data}
   n8n-data:
