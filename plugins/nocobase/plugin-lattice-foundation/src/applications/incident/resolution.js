@@ -122,6 +122,18 @@ function createCaseResolutionComponent(React) {
           }
         }
 
+        if (caseItem?.assetEntityId && api.entity) {
+          try {
+            const suggestedStatus = caseItem?.proposal?.suggestedStatus || 'repair';
+            await api.entity('update', {
+              id: caseItem.assetEntityId,
+              attributes: { status: suggestedStatus }
+            });
+          } catch {
+            // ignore
+          }
+        }
+
         setSuccessMessage('Đã đóng sự cố và cập nhật trạng thái tài sản thành công! Hồ sơ đã được lưu trữ an toàn.');
         setConfirmCloseModal(false);
         onTransition?.('close');

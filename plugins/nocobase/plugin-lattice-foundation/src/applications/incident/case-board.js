@@ -317,6 +317,13 @@ function createCaseBoardComponent(React) {
       loadData();
     }, [loadData]);
 
+    React.useEffect(() => {
+      if (initialAssetId) {
+        setFilterAsset(initialAssetId);
+        setCreateForm(prev => ({ ...prev, assetEntityId: initialAssetId }));
+      }
+    }, [initialAssetId]);
+
     const assetMap = React.useMemo(() => {
       const map = {};
       for (const a of assets) {
@@ -712,8 +719,10 @@ function createCaseBoardComponent(React) {
           h('option', { value: 'assigned' }, 'Đã giao việc'),
           h('option', { value: 'investigating' }, 'Đang kiểm tra'),
           h('option', { value: 'analyzing' }, 'Đang phân tích AI'),
+          h('option', { value: 'analysis_failed' }, 'Phân tích thất bại'),
           h('option', { value: 'review_pending' }, 'Chờ duyệt đề xuất'),
           h('option', { value: 'approved' }, 'Đã duyệt đề xuất'),
+          h('option', { value: 'rejected' }, 'Đề xuất bị từ chối'),
           h('option', { value: 'resolved' }, 'Đã khắc phục'),
           h('option', { value: 'closed' }, 'Đã đóng sự cố')
         ),
