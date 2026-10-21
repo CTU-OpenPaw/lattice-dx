@@ -43,6 +43,7 @@
       ],
       "attachmentBlockId": "case-files",
       "timelineBlockId": "case-history",
+      "contextBlockId": "case-context",
       "actionLabels": {
         "assign": "Phân công kỹ thuật viên",
         "accept": "Tiếp nhận kiểm tra",
@@ -122,6 +123,17 @@
         "resolved": "Đã khắc phục xong",
         "closed": "Đã đóng sự cố"
       }
+    },
+    {
+      "id": "case-context",
+      "type": "context-entity",
+      "title": "Thông tin tài sản & Lịch sử số đo",
+      "collection": "workflow-runs",
+      "definitionId": "incident-response",
+      "permissions": [
+        "records:read"
+      ],
+      "entitySchemaId": "asset"
     }
   ],
   "transitions": [],
@@ -160,6 +172,9 @@
       },
       {
         "blockId": "case-history"
+      },
+      {
+        "blockId": "case-context"
       }
     ],
     "shortcut": {

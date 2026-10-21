@@ -21,7 +21,7 @@ function createProcurementDashboardComponent(React) {
     rejected: { bg: '#fef2f2', color: '#b91c1c', border: '#fecaca' }
   };
 
-  return function ProcurementDashboard({ api, connection }) {
+  return function ProcurementDashboard({ api, connection, onReportIncident }) {
     const connected = connection?.connected;
     const [runs, setRuns] = React.useState([]);
     const [loading, setLoading] = React.useState(false);
@@ -30,6 +30,57 @@ function createProcurementDashboardComponent(React) {
     const [assetQuery, setAssetQuery] = React.useState('');
     const [selectedAsset, setSelectedAsset] = React.useState(null);
     const [assetLoading, setAssetLoading] = React.useState(false);
+    const [bridgeMessage, setBridgeMessage] = React.useState('');
+    const [bridgeBusy, setBridgeBusy] = React.useState(false);
+
+    const handleBridgeToIncident = async (asset) => {
+      if (!asset || bridgeBusy) return;
+      setBridgeBusy(true);
+      setBridgeMessage('');
+      try {
+        const assetId = asset.id;
+        const assetTitle = asset.title || assetId;
+        if (onReportIncident) {
+          await onReportIncident(asset);
+        } else if (api.workflow) {
+          const key = 'bridge-inc-' + Date.now();
+          await api.workflow('create', {
+            key,
+            body: {
+              definitionId: 'incident-response',
+              title: `[Sự cố] ${assetTitle}`,
+              input: {
+                assetEntityId: assetId,
+                handlerId: 'DEMO-EMP-01',
+                notificationId: 'notif-bridge-' + Date.now(),
+                severity: 'high'
+              }
+            }
+          });
+          if (api.request) {
+            try {
+              await api.request({
+                url: 'latticeIncidentCases:create',
+                method: 'post',
+                data: {
+                  code: 'CASE-BRG-' + Date.now(),
+                  name: `[Sự cố] ${assetTitle}`,
+                  title: `[Sự cố] ${assetTitle}`,
+                  runId: key,
+                  assetEntityId: assetId,
+                  severity: 'high'
+                }
+              });
+            } catch {}
+          }
+        }
+        setBridgeMessage(`Đã chuyển giao tài sản ${assetTitle} sang quy trình xử lý sự cố (UC2) thành công!`);
+      } catch (err) {
+        setBridgeMessage(`Lỗi tạo sự cố: ${err.message || 'Không thể tạo sự cố'}`);
+      } finally {
+        setBridgeBusy(false);
+      }
+    };
 
     const loadData = React.useCallback(async () => {
       if (!connected) return;
@@ -186,6 +237,32 @@ function createProcurementDashboardComponent(React) {
               selectedAsset.attributes?.assetCode && h('div', null, h('span', { style: { color: '#64748b' } }, 'Mã tài sản: '), h('strong', null, selectedAsset.attributes.assetCode)),
               selectedAsset.attributes?.location && h('div', null, h('span', { style: { color: '#64748b' } }, 'Vị trí: '), h('strong', null, selectedAsset.attributes.location)),
               selectedAsset.attributes?.status && h('div', null, h('span', { style: { color: '#64748b' } }, 'Tình trạng: '), h('strong', null, selectedAsset.attributes.status))
+            ),
+            h('div', { style: { marginTop: 14, paddingTop: 12, borderTop: '1px solid #bfdbfe', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
+              h('button', {
+                type: 'button',
+                'data-testid': 'bridge-to-incident-btn',
+                disabled: bridgeBusy,
+                onClick: () => handleBridgeToIncident(selectedAsset),
+                style: {
+                  padding: '7px 16px',
+                  background: '#dc2626',
+                  color: '#fff',
+                  border: 'none',
+                  borderRadius: 6,
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  fontWeight: 600,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6
+                }
+              }, bridgeBusy ? 'Đang xử lý…' : '🚨 Báo sự cố thiết bị (Chuyển sang UC2)'),
+              bridgeMessage && h('span', {
+                'data-testid': 'bridge-status-message',
+                role: 'status',
+                style: { fontSize: 12, color: bridgeMessage.startsWith('Lỗi') ? '#dc2626' : '#15803d', fontWeight: 500 }
+              }, bridgeMessage)
             )
           )
         ),
@@ -226,21 +303,41 @@ function createProcurementDashboardComponent(React) {
                     ),
                     h('td', { style: { padding: '10px 12px' } },
                       row.entityContext?.entityId ?
-                        h('button', {
-                          type: 'button',
-                          'data-testid': 'link-to-asset-' + row.id,
-                          onClick: () => handleViewAsset(row.entityContext.entityId),
-                          style: {
-                            padding: '3px 8px',
-                            background: '#eff6ff',
-                            border: '1px solid #bfdbfe',
-                            borderRadius: 4,
-                            color: '#1d4ed8',
-                            fontSize: 12,
-                            cursor: 'pointer',
-                            textDecoration: 'underline'
-                          }
-                        }, `🔗 Asset: ${row.entityContext.entityId.slice(0, 8)}…`) :
+                        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+                          h('button', {
+                            type: 'button',
+                            'data-testid': 'link-to-asset-' + row.id,
+                            onClick: () => handleViewAsset(row.entityContext.entityId),
+                            style: {
+                              padding: '3px 8px',
+                              background: '#eff6ff',
+                              border: '1px solid #bfdbfe',
+                              borderRadius: 4,
+                              color: '#1d4ed8',
+                              fontSize: 12,
+                              cursor: 'pointer',
+                              textDecoration: 'underline'
+                            }
+                          }, `🔗 Asset: ${row.entityContext.entityId.slice(0, 8)}…`),
+                          (row.state === 'handed_over' || row.state === 'accepted') && h('button', {
+                            type: 'button',
+                            'data-testid': 'row-bridge-incident-' + row.id,
+                            onClick: async () => {
+                              await handleViewAsset(row.entityContext.entityId);
+                              await handleBridgeToIncident({ id: row.entityContext.entityId, title: row.title });
+                            },
+                            style: {
+                              padding: '2px 8px',
+                              background: '#fff1f0',
+                              border: '1px solid #ffa39e',
+                              borderRadius: 4,
+                              color: '#cf1322',
+                              fontSize: 11,
+                              cursor: 'pointer',
+                              fontWeight: 600
+                            }
+                          }, '🚨 Báo sự cố')
+                        ) :
                         (row.data?.assetId ?
                           h('span', { style: { color: '#64748b', fontSize: 12 } }, `📦 ${String(row.data.assetId).slice(0, 16)}…`) :
                           h('span', { style: { color: '#94a3b8', fontSize: 12 } }, 'Chưa liên kết'))

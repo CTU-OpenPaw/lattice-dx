@@ -4,12 +4,14 @@ const { createEvidenceProposalComponent } = require('./evidence-proposal');
 const { createCaseResolutionComponent } = require('./resolution');
 const { createEvidenceComponents } = require('../../client/evidence-blocks');
 const { createInboxComponents } = require('../../client/inbox-blocks');
+const { createEntityContextComponent } = require('../../client/entity-context');
 
 function createCaseBoardComponent(React) {
   const h = React.createElement;
   const AgentRun = createAgentRunComponent(React);
   const EvidenceProposal = createEvidenceProposalComponent(React);
   const CaseResolution = createCaseResolutionComponent(React);
+  const ContextEntityBlock = createEntityContextComponent(React);
   const { AttachmentBlock, ActivityTimelineBlock } = createEvidenceComponents(React);
   const { ApprovalBlock } = createInboxComponents(React, { AttachmentBlock, ActivityTimelineBlock });
 
@@ -19,6 +21,9 @@ function createCaseBoardComponent(React) {
     title: 'Xử lý quy trình sự cố (Approval Engine)',
     collection: 'workflow-runs',
     definitionId: 'incident-response',
+    attachmentBlockId: 'case-files',
+    timelineBlockId: 'case-history',
+    contextBlockId: 'case-context',
     actionLabels: {
       assign: 'Phân công kỹ thuật viên',
       accept: 'Tiếp nhận kiểm tra',
@@ -82,13 +87,22 @@ function createCaseBoardComponent(React) {
     }
   };
 
+  const caseContextBlock = {
+    id: 'case-context',
+    type: 'context-entity',
+    title: 'Thông tin tài sản nghiệp vụ & Lịch sử số đo',
+    collection: 'workflow-runs',
+    definitionId: 'incident-response',
+    entitySchemaId: 'asset'
+  };
+
   const incidentManifest = {
     id: 'incident',
     collections: [
       { id: 'cases', source: 'lattice-api', resource: 'workflows' },
       { id: 'workflow-runs', source: 'lattice-api', resource: 'workflows' }
     ],
-    blocks: [caseApprovalBlock, caseAttachmentBlock, caseTimelineBlock]
+    blocks: [caseApprovalBlock, caseAttachmentBlock, caseTimelineBlock, caseContextBlock]
   };
 
   const stateConfig = {
@@ -126,7 +140,7 @@ function createCaseBoardComponent(React) {
     description: ''
   };
 
-  return function CaseBoard({ api, connection, onSelectCase }) {
+  return function CaseBoard({ api, connection, onSelectCase, initialAssetId }) {
     const connected = connection?.connected !== false;
     const [cases, setCases] = React.useState([]);
     const [assets, setAssets] = React.useState([]);
@@ -140,13 +154,16 @@ function createCaseBoardComponent(React) {
     const [filterStatus, setFilterStatus] = React.useState('all');
     const [filterSeverity, setFilterSeverity] = React.useState('all');
     const [filterHandler, setFilterHandler] = React.useState('all');
-    const [filterAsset, setFilterAsset] = React.useState('all');
+    const [filterAsset, setFilterAsset] = React.useState(initialAssetId || 'all');
     const [filterDepartment, setFilterDepartment] = React.useState('all');
 
     const [selectedCase, setSelectedCase] = React.useState(null);
     const [detailTab, setDetailTab] = React.useState('overview');
     const [isCreating, setIsCreating] = React.useState(false);
-    const [createForm, setCreateForm] = React.useState(defaultCreateForm);
+    const [createForm, setCreateForm] = React.useState({
+      ...defaultCreateForm,
+      assetEntityId: initialAssetId || ''
+    });
     const [actionNote, setActionNote] = React.useState('');
     const [actionBusy, setActionBusy] = React.useState(false);
 
@@ -617,6 +634,61 @@ function createCaseBoardComponent(React) {
       error && h('div', { role: 'alert', style: { padding: 10, background: '#ffebe6', color: '#cf1322', borderRadius: 6, marginBottom: 12, fontSize: 13 } }, error),
       successMessage && h('div', { role: 'status', style: { padding: 10, background: '#e3fcef', color: '#216e4e', borderRadius: 6, marginBottom: 12, fontSize: 13 } }, successMessage),
 
+      // UC1 Bridge Banner
+      h('div', {
+        'data-testid': 'lattice-uc1-bridge-banner',
+        style: {
+          background: '#f0fdf4',
+          border: '1px solid #bbf7d0',
+          borderRadius: 8,
+          padding: '10px 14px',
+          marginBottom: 12,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: 10,
+          fontSize: 13
+        }
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('span', { style: { fontSize: 16 } }, '🔄'),
+          h('span', { style: { color: '#166534', fontWeight: 600 } }, 'Liên kết UC1 (Bàn giao) → UC2 (Sự cố):'),
+          h('span', { style: { color: '#14532d' } }, 'Điều phối xử lý sự cố thiết bị đã nghiệm thu & bàn giao từ luồng Mua sắm.')
+        ),
+        h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+          h('button', {
+            type: 'button',
+            'data-testid': 'filter-uc1-pump-btn',
+            onClick: () => { setFilterAsset('urn:ngsi-ld:Asset:DEMO-ASSET-01'); },
+            style: {
+              padding: '4px 10px',
+              background: filterAsset === 'urn:ngsi-ld:Asset:DEMO-ASSET-01' ? '#16a34a' : '#fff',
+              color: filterAsset === 'urn:ngsi-ld:Asset:DEMO-ASSET-01' ? '#fff' : '#166534',
+              border: '1px solid #86efac',
+              borderRadius: 4,
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 500
+            }
+          }, 'Bơm làm mát A1 (DEMO-ASSET-01)'),
+          h('button', {
+            type: 'button',
+            'data-testid': 'filter-all-assets-btn',
+            onClick: () => { setFilterAsset('all'); },
+            style: {
+              padding: '4px 10px',
+              background: filterAsset === 'all' ? '#16a34a' : '#fff',
+              color: filterAsset === 'all' ? '#fff' : '#166534',
+              border: '1px solid #86efac',
+              borderRadius: 4,
+              cursor: 'pointer',
+              fontSize: 12
+            }
+          }, 'Tất cả tài sản')
+        )
+      ),
+
       // Toolbar: Search, Filters & View Toggle
       h('div', {
         'data-testid': 'lattice-case-toolbar',
@@ -803,7 +875,13 @@ function createCaseBoardComponent(React) {
               'data-testid': 'lattice-modal-tab-approval',
               onClick: () => setDetailTab('approval'),
               style: { padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: detailTab === 'approval' ? '2px solid #0052cc' : '2px solid transparent', color: detailTab === 'approval' ? '#0052cc' : '#5e6c84', fontWeight: detailTab === 'approval' ? 700 : 500, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }
-            }, '⚖️ Luồng Approval')
+            }, '⚖️ Luồng Approval'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'lattice-modal-tab-context',
+              onClick: () => setDetailTab('context'),
+              style: { padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: detailTab === 'context' ? '2px solid #0052cc' : '2px solid transparent', color: detailTab === 'context' ? '#0052cc' : '#5e6c84', fontWeight: detailTab === 'context' ? 700 : 500, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }
+            }, '🏢 Ngữ cảnh Tài sản & Số đo')
           ),
 
           // TAB: OVERVIEW
@@ -979,6 +1057,27 @@ function createCaseBoardComponent(React) {
             actorName: api.connection?.identity?.username || 'User',
             canReadDirectory: true,
             onSaved: () => loadData()
+          })),
+
+          // TAB: CONTEXT ENTITY & TELEMETRY (Reused ContextEntityBlock from UC1)
+          detailTab === 'context' && h('div', {
+            'data-testid': 'lattice-tab-panel-context'
+          }, h(ContextEntityBlock, {
+            manifest: incidentManifest,
+            block: caseContextBlock,
+            api,
+            connected,
+            selectedId: selectedCase.id,
+            run: {
+              ...selectedCase,
+              recordId: selectedCase.recordId || selectedCase.id,
+              entityContext: {
+                entityId: selectedCase.assetEntityId,
+                schemaId: 'asset',
+                entityVersion: 1
+              }
+            },
+            actorId: api.connection?.identity?.subject || 'user'
           }))
         )
       ),
