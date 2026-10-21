@@ -1,11 +1,95 @@
 // SPDX-License-Identifier: Apache-2.0
 const { createAgentRunComponent } = require('./agent-run');
 const { createEvidenceProposalComponent } = require('./evidence-proposal');
+const { createCaseResolutionComponent } = require('./resolution');
+const { createEvidenceComponents } = require('../../client/evidence-blocks');
+const { createInboxComponents } = require('../../client/inbox-blocks');
 
 function createCaseBoardComponent(React) {
   const h = React.createElement;
   const AgentRun = createAgentRunComponent(React);
   const EvidenceProposal = createEvidenceProposalComponent(React);
+  const CaseResolution = createCaseResolutionComponent(React);
+  const { AttachmentBlock, ActivityTimelineBlock } = createEvidenceComponents(React);
+  const { ApprovalBlock } = createInboxComponents(React, { AttachmentBlock, ActivityTimelineBlock });
+
+  const caseApprovalBlock = {
+    id: 'case-approval',
+    type: 'approval',
+    title: 'Xử lý quy trình sự cố (Approval Engine)',
+    collection: 'workflow-runs',
+    definitionId: 'incident-response',
+    actionLabels: {
+      assign: 'Phân công kỹ thuật viên',
+      accept: 'Tiếp nhận kiểm tra',
+      request_analysis: 'Yêu cầu AI phân tích',
+      retry_analysis: 'Thử lại phân tích',
+      approve: 'Duyệt đề xuất xử lý',
+      reject: 'Từ chối đề xuất',
+      rework: 'Yêu cầu kiểm tra lại',
+      record_resolution: 'Ghi nhận khắc phục xong',
+      close: 'Xác nhận đóng sự cố'
+    },
+    fieldLabels: {
+      receiptNote: 'Ghi chú tiếp nhận',
+      reviewNote: 'Ý kiến phê duyệt',
+      reason: 'Lý do từ chối',
+      reworkNote: 'Yêu cầu kiểm tra lại',
+      resolutionNote: 'Biên bản khắc phục',
+      closeNote: 'Ghi chú đóng sự cố'
+    }
+  };
+
+  const caseAttachmentBlock = {
+    id: 'case-files',
+    type: 'attachment',
+    title: 'Biên bản & Tài liệu sự cố',
+    collection: 'workflow-runs',
+    definitionId: 'incident-response',
+    allowUpload: true,
+    fileFields: ['attachmentId']
+  };
+
+  const caseTimelineBlock = {
+    id: 'case-history',
+    type: 'activity-timeline',
+    title: 'Nhật ký & Lịch sử xử lý',
+    collection: 'workflow-runs',
+    definitionId: 'incident-response',
+    pageSize: 10,
+    actionLabels: {
+      assign: 'Phân công',
+      accept: 'Tiếp nhận',
+      request_analysis: 'Yêu cầu AI phân tích',
+      retry_analysis: 'Thử lại phân tích',
+      approve: 'Duyệt đề xuất',
+      reject: 'Từ chối đề xuất',
+      rework: 'Yêu cầu kiểm tra lại',
+      record_resolution: 'Khắc phục xong',
+      close: 'Đóng sự cố'
+    },
+    stateLabels: {
+      open: 'Mới tiếp nhận',
+      assigned: 'Đã giao việc',
+      investigating: 'Đang kiểm tra',
+      analyzing: 'Đang phân tích AI',
+      analysis_failed: 'Phân tích thất bại',
+      review_pending: 'Chờ duyệt đề xuất',
+      approved: 'Đã duyệt đề xuất',
+      rejected: 'Đề xuất bị từ chối',
+      resolved: 'Đã khắc phục xong',
+      closed: 'Đã đóng sự cố'
+    }
+  };
+
+  const incidentManifest = {
+    id: 'incident',
+    collections: [
+      { id: 'cases', source: 'lattice-api', resource: 'workflows' },
+      { id: 'workflow-runs', source: 'lattice-api', resource: 'workflows' }
+    ],
+    blocks: [caseApprovalBlock, caseAttachmentBlock, caseTimelineBlock]
+  };
 
   const stateConfig = {
     open: { label: 'Mới tiếp nhận', color: '#0958d9', bg: '#e6f4ff', border: '#91caff', column: 'inbox' },
@@ -60,6 +144,7 @@ function createCaseBoardComponent(React) {
     const [filterDepartment, setFilterDepartment] = React.useState('all');
 
     const [selectedCase, setSelectedCase] = React.useState(null);
+    const [detailTab, setDetailTab] = React.useState('overview');
     const [isCreating, setIsCreating] = React.useState(false);
     const [createForm, setCreateForm] = React.useState(defaultCreateForm);
     const [actionNote, setActionNote] = React.useState('');
@@ -80,14 +165,17 @@ function createCaseBoardComponent(React) {
               loadedCases = res.items.map(item => ({
                 id: item.id,
                 title: item.title,
-                status: item.state || 'open',
+                status: item.state || item.status || 'open',
                 version: item.version || 1,
-                severity: item.data?.severity || 'high',
-                assetEntityId: item.data?.assetEntityId || '',
-                handlerId: item.data?.handlerId || 'Chưa gán',
-                notificationId: item.data?.notificationId || '',
+                severity: item.severity || item.data?.severity || 'high',
+                assetEntityId: item.assetEntityId || item.data?.assetEntityId || '',
+                handlerId: item.handlerId || item.data?.handlerId || 'Chưa gán',
+                notificationId: item.notificationId || item.data?.notificationId || '',
                 createdAt: item.createdAt || new Date().toISOString(),
                 updatedAt: item.updatedAt || new Date().toISOString(),
+                proposal: item.proposal || item.data?.proposal,
+                resolutionNote: item.resolutionNote || item.data?.resolutionNote || '',
+                closeNote: item.closeNote || item.data?.closeNote || '',
                 data: item.data || {},
                 availableTransitions: item.availableTransitions || []
               }));
@@ -678,17 +766,168 @@ function createCaseBoardComponent(React) {
             )
           ),
 
-          // Agent Run Block (when investigating, analyzing, failed, or has job)
-          ['investigating', 'analyzing', 'analysis_failed', 'review_pending', 'approved'].includes(selectedCase.status) && h(AgentRun, {
+          // Detail Modal Tabs Bar
+          h('div', { style: { display: 'flex', borderBottom: '1px solid #dfe1e6', marginBottom: 16, overflowX: 'auto', gap: 4 } },
+            h('button', {
+              type: 'button',
+              'data-testid': 'lattice-modal-tab-overview',
+              onClick: () => setDetailTab('overview'),
+              style: { padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: detailTab === 'overview' ? '2px solid #0052cc' : '2px solid transparent', color: detailTab === 'overview' ? '#0052cc' : '#5e6c84', fontWeight: detailTab === 'overview' ? 700 : 500, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }
+            }, '📋 Tổng quan'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'lattice-modal-tab-resolution',
+              onClick: () => setDetailTab('resolution'),
+              style: { padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: detailTab === 'resolution' ? '2px solid #0052cc' : '2px solid transparent', color: detailTab === 'resolution' ? '#0052cc' : '#5e6c84', fontWeight: detailTab === 'resolution' ? 700 : 500, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }
+            }, '🛠️ Khắc phục & Đóng case'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'lattice-modal-tab-evidence',
+              onClick: () => setDetailTab('evidence'),
+              style: { padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: detailTab === 'evidence' ? '2px solid #0052cc' : '2px solid transparent', color: detailTab === 'evidence' ? '#0052cc' : '#5e6c84', fontWeight: detailTab === 'evidence' ? 700 : 500, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }
+            }, '📑 Đề xuất AI'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'lattice-modal-tab-attachments',
+              onClick: () => setDetailTab('attachments'),
+              style: { padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: detailTab === 'attachments' ? '2px solid #0052cc' : '2px solid transparent', color: detailTab === 'attachments' ? '#0052cc' : '#5e6c84', fontWeight: detailTab === 'attachments' ? 700 : 500, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }
+            }, '📎 Tệp & Biên bản'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'lattice-modal-tab-timeline',
+              onClick: () => setDetailTab('timeline'),
+              style: { padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: detailTab === 'timeline' ? '2px solid #0052cc' : '2px solid transparent', color: detailTab === 'timeline' ? '#0052cc' : '#5e6c84', fontWeight: detailTab === 'timeline' ? 700 : 500, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }
+            }, '⏱️ Lịch sử xử lý'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'lattice-modal-tab-approval',
+              onClick: () => setDetailTab('approval'),
+              style: { padding: '8px 12px', border: 'none', background: 'transparent', borderBottom: detailTab === 'approval' ? '2px solid #0052cc' : '2px solid transparent', color: detailTab === 'approval' ? '#0052cc' : '#5e6c84', fontWeight: detailTab === 'approval' ? 700 : 500, cursor: 'pointer', fontSize: 13, whiteSpace: 'nowrap' }
+            }, '⚖️ Luồng Approval')
+          ),
+
+          // TAB: OVERVIEW
+          detailTab === 'overview' && h('div', null,
+            // Agent Run Block (when investigating, analyzing, failed, or has job)
+            ['investigating', 'analyzing', 'analysis_failed', 'review_pending', 'approved'].includes(selectedCase.status) && h(AgentRun, {
+              api,
+              connection,
+              caseItem: selectedCase,
+              runId: selectedCase.id,
+              onTransition: () => loadData()
+            }),
+
+            // Actions
+            h('div', { style: { borderTop: '1px solid #e2e8f0', paddingTop: 16, marginTop: 16 } },
+              h('h4', { style: { margin: '0 0 8px 0', fontSize: 14 } }, 'Thao tác nhanh quy trình:'),
+              h('div', { style: { marginBottom: 12 } },
+                h('input', {
+                  'data-testid': 'lattice-case-action-note',
+                  placeholder: 'Ghi chú xử lý / lý do duyệt / biên bản…',
+                  value: actionNote,
+                  onChange: e => setActionNote(e.target.value),
+                  style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13 }
+                })
+              ),
+              h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                selectedCase.status === 'open' && h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-assign',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'assign'),
+                  style: { padding: '6px 14px', background: '#0958d9', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Phân công kỹ thuật viên'),
+
+                selectedCase.status === 'assigned' && h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-accept',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'accept'),
+                  style: { padding: '6px 14px', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Nhận việc kiểm tra'),
+
+                selectedCase.status === 'investigating' && h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-analyze',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'request_analysis'),
+                  style: { padding: '6px 14px', background: '#722ed1', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Yêu cầu AI phân tích'),
+
+                selectedCase.status === 'analysis_failed' && h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-retry-analysis',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'retry_analysis'),
+                  style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Thử lại phân tích'),
+
+                selectedCase.status === 'review_pending' && h('div', { style: { display: 'flex', gap: 8 } },
+                  h('button', {
+                    type: 'button',
+                    'data-testid': 'lattice-action-approve',
+                    disabled: actionBusy,
+                    onClick: () => handleTransition(selectedCase, 'approve'),
+                    style: { padding: '6px 14px', background: '#389e0d', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                  }, 'Duyệt đề xuất'),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': 'lattice-action-reject',
+                    disabled: actionBusy,
+                    onClick: () => handleTransition(selectedCase, 'reject'),
+                    style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                  }, 'Từ chối đề xuất')
+                ),
+
+                selectedCase.status === 'rejected' && h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-rework',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'rework'),
+                  style: { padding: '6px 14px', background: '#d46b08', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Yêu cầu kiểm tra lại (Rework)'),
+
+                selectedCase.status === 'approved' && h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-resolve',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'record_resolution'),
+                  style: { padding: '6px 14px', background: '#0958d9', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Ghi nhận khắc phục xong'),
+
+                selectedCase.status === 'resolved' && h('button', {
+                  type: 'button',
+                  'data-testid': 'lattice-action-close',
+                  disabled: actionBusy,
+                  onClick: () => handleTransition(selectedCase, 'close'),
+                  style: { padding: '6px 14px', background: '#237804', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+                }, 'Đóng sự cố'),
+
+                h('button', {
+                  type: 'button',
+                  onClick: () => setSelectedCase(null),
+                  style: { padding: '6px 14px', background: '#fff', color: '#5e6c84', border: '1px solid #cbd5e1', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginLeft: 'auto' }
+                }, 'Đóng hộp thoại')
+              )
+            )
+          ),
+
+          // TAB: RESOLUTION & CLOSE
+          detailTab === 'resolution' && h('div', {
+            'data-testid': 'lattice-tab-panel-resolution'
+          }, h(CaseResolution, {
             api,
             connection,
             caseItem: selectedCase,
             runId: selectedCase.id,
-            onTransition: () => loadData()
-          }),
+            onTransition: () => loadData(),
+            onReload: () => loadData()
+          })),
 
-          // Evidence & Proposal Block (when in review, approved, rejected, or has proposal)
-          (['review_pending', 'approved', 'rejected', 'resolved', 'closed'].includes(selectedCase.status) || selectedCase.proposal) && h(EvidenceProposal, {
+          // TAB: EVIDENCE & PROPOSAL
+          detailTab === 'evidence' && h('div', {
+            'data-testid': 'lattice-tab-panel-evidence'
+          }, h(EvidenceProposal, {
             api,
             connection,
             caseItem: selectedCase,
@@ -696,101 +935,51 @@ function createCaseBoardComponent(React) {
             onApprove: () => { loadData(); setSelectedCase(null); },
             onReject: () => { loadData(); setSelectedCase(null); },
             onRework: () => { loadData(); setSelectedCase(null); }
-          }),
+          })),
 
-          // Actions
-          h('div', { style: { borderTop: '1px solid #e2e8f0', paddingTop: 16, marginTop: 16 } },
-            h('h4', { style: { margin: '0 0 8px 0', fontSize: 14 } }, 'Thao tác quy trình sự cố:'),
-            h('div', { style: { marginBottom: 12 } },
-              h('input', {
-                'data-testid': 'lattice-case-action-note',
-                placeholder: 'Ghi chú xử lý / lý do duyệt / biên bản…',
-                value: actionNote,
-                onChange: e => setActionNote(e.target.value),
-                style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13 }
-              })
-            ),
-            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-              selectedCase.status === 'open' && h('button', {
-                type: 'button',
-                'data-testid': 'lattice-action-assign',
-                disabled: actionBusy,
-                onClick: () => handleTransition(selectedCase, 'assign'),
-                style: { padding: '6px 14px', background: '#0958d9', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-              }, 'Phân công kỹ thuật viên'),
+          // TAB: ATTACHMENTS (Reused AttachmentBlock)
+          detailTab === 'attachments' && h('div', {
+            'data-testid': 'lattice-tab-panel-attachments'
+          }, h(AttachmentBlock, {
+            manifest: incidentManifest,
+            block: caseAttachmentBlock,
+            api,
+            connected,
+            selectedId: selectedCase.id,
+            run: selectedCase,
+            actorId: api.connection?.identity?.subject || 'user',
+            onUploaded: () => loadData()
+          })),
 
-              selectedCase.status === 'assigned' && h('button', {
-                type: 'button',
-                'data-testid': 'lattice-action-accept',
-                disabled: actionBusy,
-                onClick: () => handleTransition(selectedCase, 'accept'),
-                style: { padding: '6px 14px', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-              }, 'Nhận việc kiểm tra'),
+          // TAB: TIMELINE (Reused ActivityTimelineBlock)
+          detailTab === 'timeline' && h('div', {
+            'data-testid': 'lattice-tab-panel-timeline'
+          }, h(ActivityTimelineBlock, {
+            manifest: incidentManifest,
+            block: caseTimelineBlock,
+            api,
+            connected,
+            selectedId: selectedCase.id,
+            run: selectedCase,
+            actorId: api.connection?.identity?.subject || 'user',
+            actorName: api.connection?.identity?.username || 'User',
+            canReadDirectory: true
+          })),
 
-              selectedCase.status === 'investigating' && h('button', {
-                type: 'button',
-                'data-testid': 'lattice-action-analyze',
-                disabled: actionBusy,
-                onClick: () => handleTransition(selectedCase, 'request_analysis'),
-                style: { padding: '6px 14px', background: '#722ed1', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-              }, 'Yêu cầu AI phân tích'),
-
-              selectedCase.status === 'analysis_failed' && h('button', {
-                type: 'button',
-                'data-testid': 'lattice-action-retry-analysis',
-                disabled: actionBusy,
-                onClick: () => handleTransition(selectedCase, 'retry_analysis'),
-                style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-              }, 'Thử lại phân tích'),
-
-              selectedCase.status === 'review_pending' && h('div', { style: { display: 'flex', gap: 8 } },
-                h('button', {
-                  type: 'button',
-                  'data-testid': 'lattice-action-approve',
-                  disabled: actionBusy,
-                  onClick: () => handleTransition(selectedCase, 'approve'),
-                  style: { padding: '6px 14px', background: '#389e0d', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-                }, 'Duyệt đề xuất'),
-                h('button', {
-                  type: 'button',
-                  'data-testid': 'lattice-action-reject',
-                  disabled: actionBusy,
-                  onClick: () => handleTransition(selectedCase, 'reject'),
-                  style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-                }, 'Từ chối đề xuất')
-              ),
-
-              selectedCase.status === 'rejected' && h('button', {
-                type: 'button',
-                'data-testid': 'lattice-action-rework',
-                disabled: actionBusy,
-                onClick: () => handleTransition(selectedCase, 'rework'),
-                style: { padding: '6px 14px', background: '#d46b08', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-              }, 'Yêu cầu kiểm tra lại (Rework)'),
-
-              selectedCase.status === 'approved' && h('button', {
-                type: 'button',
-                'data-testid': 'lattice-action-resolve',
-                disabled: actionBusy,
-                onClick: () => handleTransition(selectedCase, 'record_resolution'),
-                style: { padding: '6px 14px', background: '#0958d9', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-              }, 'Ghi nhận khắc phục xong'),
-
-              selectedCase.status === 'resolved' && h('button', {
-                type: 'button',
-                'data-testid': 'lattice-action-close',
-                disabled: actionBusy,
-                onClick: () => handleTransition(selectedCase, 'close'),
-                style: { padding: '6px 14px', background: '#237804', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
-              }, 'Đóng sự cố'),
-
-              h('button', {
-                type: 'button',
-                onClick: () => setSelectedCase(null),
-                style: { padding: '6px 14px', background: '#fff', color: '#5e6c84', border: '1px solid #cbd5e1', borderRadius: 6, cursor: 'pointer', fontSize: 13, marginLeft: 'auto' }
-              }, 'Đóng hộp thoại')
-            )
-          )
+          // TAB: APPROVAL (Reused ApprovalBlock)
+          detailTab === 'approval' && h('div', {
+            'data-testid': 'lattice-tab-panel-approval'
+          }, h(ApprovalBlock, {
+            manifest: incidentManifest,
+            block: caseApprovalBlock,
+            api,
+            connected,
+            selectedId: selectedCase.id,
+            actorId: api.connection?.identity?.subject || 'user',
+            actorName: api.connection?.identity?.username || 'User',
+            canReadDirectory: true,
+            onSaved: () => loadData()
+          }))
         )
       ),
 
