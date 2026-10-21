@@ -1,255 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
-const { createWorkspaceApi } = require("./workspace-api");
-const { createWorkflowCommands } = require("./workflow");
 const {
   exampleRecipe,
-  studioCommands,
   fieldValue,
   sameConfiguration,
 } = require("./system-model");
 function createSystemScreens(client, React) {
-  const h = React.createElement,
-    { useState, useEffect, useMemo } = React;
-  const box = {
-    border: "1px solid #d9e2ec",
-    borderRadius: 10,
-    padding: 20,
-    marginBottom: 16,
-    background: "#fff",
-  };
-  const inputStyle = {
-    padding: 8,
-    border: "1px solid #bbc6d1",
-    borderRadius: 5,
-    maxWidth: "100%",
-    width: 300,
-  };
-  const labels = {
-    submit: "Gửi duyệt",
-    approve: "Phê duyệt và giao việc",
-    reject: "Từ chối",
-    complete: "Hoàn thành",
-  };
-  function button(label, fn, disabled = false) {
-    return h(
-      "button",
-      {
-        type: "button",
-        onClick: fn,
-        disabled,
-        style: {
-          padding: "8px 14px",
-          margin: "4px 8px 4px 0",
-          cursor: "pointer",
-        },
-      },
-      label,
-    );
-  }
-  function field(label, value, change, type = "text") {
-    return h(
-      "label",
-      {
-        style: {
-          display: "inline-flex",
-          flexDirection: "column",
-          gap: 5,
-          margin: "6px 16px 10px 0",
-        },
-      },
-      label,
-      h("input", {
-        style: inputStyle,
-        type,
-        value,
-        onChange: (e) => change(e.target.value),
-      }),
-    );
-  }
-  function json(value) {
-    return h(
-      "pre",
-      {
-        style: {
-          whiteSpace: "pre-wrap",
-          overflowWrap: "anywhere",
-          background: "#f4f6f8",
-          padding: 12,
-        },
-      },
-      JSON.stringify(value, null, 2),
-    );
-  }
-  function download(recipe) {
-    const url = URL.createObjectURL(
-      new Blob([JSON.stringify(recipe, null, 2)], { type: "application/json" }),
-    );
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = recipe.id + ".recipe.json";
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  }
-  function useSession() {
-    const apiClient = client.useAPIClient(),
-      [connection, setConnection] = useState(null),
-      [notice, setNotice] = useState(""),
-      [busy, setBusy] = useState(false);
-    const api = useMemo(() => {
-      const result = createWorkspaceApi({
-        apiClient,
-        notify: (n) => setNotice(n.message),
-        onExpired: () => setConnection(null),
-      });
-      result.studio = async (operation, payload = {}) =>
-        (
-          await result.request({
-            url: "dxActions:studio",
-            method: "post",
-            data: { ...payload, operation },
-          })
-        ).data;
-      return result;
-    }, [apiClient]);
-    const act = async (fn) => {
-      setBusy(true);
-      setNotice("");
-      try {
-        return await fn();
-      } catch (error) {
-        setNotice(error.message);
-        return undefined;
-      } finally {
-        setBusy(false);
-      }
-    };
-    useEffect(() => {
-      act(async () => {
-        await api.user();
-        setConnection(await api.connection());
-      });
-    }, [api]);
-    useEffect(() => {
-      if (!connection?.connected) return;
-      const timer = setTimeout(
-        () => setConnection(null),
-        Math.max(0, new Date(connection.expiresAt).getTime() - Date.now()),
-      );
-      return () => clearTimeout(timer);
-    }, [connection]);
-    const commands = useMemo(
-      () => studioCommands(api, connection?.identity?.subject),
-      [api, connection?.identity?.subject],
-    );
-    const workflow = useMemo(
-      () =>
-        createWorkflowCommands({ api, actorId: connection?.identity?.subject }),
-      [api, connection?.identity?.subject],
-    );
-    return {
-      api,
-      connection,
-      notice,
-      busy,
-      act,
-      commands,
-      workflow,
-      report: setNotice,
-    };
-  }
-  function Frame({ session, title, children }) {
-    const { api, connection, notice, busy, act, commands, workflow } = session;
-    return h(
-      "main",
-      {
-        style: {
-          maxWidth: 1200,
-          margin: "24px auto",
-          padding: 24,
-          fontFamily: "system-ui",
-          color: "#172b4d",
-          background: "#f5f7fa",
-          minHeight: "90vh",
-        },
-      },
-      h(
-        "nav",
-        null,
-        h("a", { href: "/lattice" }, "Workspace"),
-        " · ",
-        h("a", { href: "/lattice/studio" }, "Studio"),
-        " · ",
-        h("a", { href: "/lattice/systems" }, "Hệ thống đã xuất bản"),
-      ),
-      h("h1", null, title),
-      h(
-        "section",
-        { style: box },
-        connection?.connected
-          ? h(
-              React.Fragment,
-              null,
-              "Tài khoản: " +
-                connection.identity.username +
-                " · " +
-                connection.identity.organizationId,
-              button(
-                "Đổi tài khoản nghiệp vụ",
-                () =>
-                  act(async () => {
-                    await api.disconnect();
-                    sessionStorage.setItem(
-                      "lattice:return-to",
-                      location.pathname,
-                    );
-                    location.assign(await api.connect());
-                  }),
-                busy,
-              ),
-            )
-          : button(
-              "Kết nối tài khoản nghiệp vụ",
-              () =>
-                act(async () => {
-                  sessionStorage.setItem(
-                    "lattice:return-to",
-                    location.pathname,
-                  );
-                  location.assign(await api.connect());
-                }),
-              busy,
-            ),
-      ),
-      notice &&
-        h(
-          "p",
-          { role: "alert", style: { background: "#fff1df", padding: 14 } },
-          notice,
-        ),
-      (commands.uncertain || workflow.uncertain) &&
-        h(
-          "section",
-          { style: box },
-          "Lệnh trước chưa xác định kết quả. Hãy thử lại cùng lệnh trước khi thao tác tiếp.",
-          button(
-            "Thử lại lệnh cũ",
-            () =>
-              act(async () => {
-                await (commands.uncertain ? commands : workflow).retry();
-                location.reload();
-              }),
-            busy,
-          ),
-        ),
-      connection?.connected
-        ? children
-        : h(
-            "p",
-            null,
-            "Đăng nhập NocoBase tại /signin trước, sau đó kết nối tài khoản nghiệp vụ.",
-          ),
-    );
-  }
+  const { useState, useEffect } = React;
+  const {
+    h,
+    box,
+    inputStyle,
+    labels,
+    button,
+    field,
+    json,
+    download,
+    useSession,
+    Frame,
+  } = require("./system-shell").createSystemShell(client, React);
+  const RuntimeBlocks = require("./runtime-blocks").createRuntimeBlocks(React, {
+    h,
+    box,
+    button,
+    json,
+  });
+  const WorkflowDesigner =
+    require("./workflow-designer").createWorkflowDesigner(React, {
+      h,
+      box,
+      button,
+      field,
+    });
   function Studio() {
     const session = useSession(),
       { api, connection, act, busy, commands } = session;
@@ -502,6 +283,10 @@ function createSystemScreens(client, React) {
                 })),
               recipe.pages.length === 1,
             ),
+            h(WorkflowDesigner, {
+              page,
+              onChange: (next) => pageEdit(index, () => next),
+            }),
           ),
         ),
         button(
@@ -870,8 +655,20 @@ function createSystemScreens(client, React) {
           ),
           definition &&
             h(
-              React.Fragment,
-              null,
+              RuntimeBlocks,
+              {
+                order: page.blocks,
+                selected,
+                history,
+                sync,
+                inbox,
+                setInbox,
+                busy,
+                loadSync: () =>
+                  act(async () =>
+                    setSync(await api.workflow("sync", { id: selected.id })),
+                  ),
+              },
               definition.canStart &&
                 system.enabled &&
                 h(
@@ -923,13 +720,6 @@ function createSystemScreens(client, React) {
                 "section",
                 { style: box },
                 h("h2", null, "Hồ sơ / công việc"),
-                button(
-                  inbox
-                    ? "Xem tất cả hồ sơ được phép đọc"
-                    : "Chỉ xem việc chờ tôi xử lý",
-                  () => setInbox(!inbox),
-                  busy,
-                ),
                 button("Tải lại", () => act(() => loadRuns(offset)), busy),
                 ...runs.items.map((run) =>
                   h(
@@ -991,19 +781,6 @@ function createSystemScreens(client, React) {
                       ),
                     ),
                   ),
-                  button(
-                    "Xem trạng thái đồng bộ",
-                    () =>
-                      act(async () =>
-                        setSync(
-                          await api.workflow("sync", { id: selected.id }),
-                        ),
-                      ),
-                    busy,
-                  ),
-                  sync && json(sync),
-                  h("h3", null, "Lịch sử xử lý"),
-                  history && json(history),
                 ),
             ),
         ),

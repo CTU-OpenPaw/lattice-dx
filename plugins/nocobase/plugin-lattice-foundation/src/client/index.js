@@ -11,6 +11,7 @@
   const {createWorkspaceComponent} = require('./workspace');
   const {createWorkspaceApi} = require('./workspace-api');
   const {createSystemScreens}=require('./system-studio');
+  const {createEnterpriseConsole}=require('./enterprise-console');
   const {createBlockComponents} = require('./blocks');
   const {createApplicationRuntime} = require('./application-runtime');
   const {registerApplicationViews} = require('../applications/views');
@@ -98,6 +99,7 @@
       const Workspace = createWorkspaceComponent(client,React,runtime);
       this.app.router.add('lattice-workspace',{path:'/lattice',Component:Workspace});
       const {Studio,SystemRuntime}=createSystemScreens(client,React);
+      this.app.router.add('lattice-console',{path:'/lattice/console',Component:createEnterpriseConsole(client,React)});
       this.app.router.add('lattice-studio',{path:'/lattice/studio',Component:Studio});
       this.app.router.add('lattice-systems',{path:'/lattice/systems',Component:SystemRuntime});
       this.app.router.add('lattice-system-runtime',{path:'/lattice/systems/:systemId/:version',Component:SystemRuntime});
@@ -109,7 +111,7 @@
       const returnTo = sessionStorage.getItem('lattice:return-to');
       if (returnTo && window.location.pathname.startsWith('/admin')) {
         sessionStorage.removeItem('lattice:return-to');
-        if (returnTo === '/lattice' || /^\/lattice\/apps\/[a-z][a-z0-9-]{0,63}$/.test(returnTo) || /^\/lattice\/(studio|systems)(\/[a-z][a-z0-9-]{0,63}\/(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))?$/.test(returnTo)) window.location.replace(returnTo);
+        const safe=require('./console-model').safeReturnTo(returnTo);if(safe)window.location.replace(safe);
       }
     }
   }

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { WorkflowTransition } from "@dx/contracts";
 import { bundleKeys } from "../workflows/bundles.js";
 import { name, slug, title } from "../entities/policy.js";
 import { semver } from "../modules/policy.js";
@@ -19,6 +20,12 @@ type RecipePage = {
   reviewerRole: string;
   handlerRole: string;
   fields: RecipeField[];
+  blocks?: string[];
+  workflow?: {
+    initialState: string;
+    assignedStates: string[];
+    transitions: WorkflowTransition[];
+  };
 };
 export type SystemRecipe = {
   format: "latticedx.system-recipe";
@@ -62,6 +69,12 @@ export function parseRecipe(value: unknown): SystemRecipe {
       "reviewerRole",
       "handlerRole",
       "fields",
+      ...(raw && typeof raw === "object" && Object.hasOwn(raw, "blocks")
+        ? ["blocks"]
+        : []),
+      ...(raw && typeof raw === "object" && Object.hasOwn(raw, "workflow")
+        ? ["workflow"]
+        : []),
     ]);
     const pageId = slug(raw.id);
     if (
@@ -89,14 +102,32 @@ export function parseRecipe(value: unknown): SystemRecipe {
     });
     if (new Set(fields.map((f) => f.name)).size !== fields.length)
       throw new WorkflowError(400, "Duplicate business field");
-    return {
+    if (Object.hasOwn(raw, "blocks")) {
+      if (
+        !Array.isArray(raw.blocks) ||
+        !raw.blocks.length ||
+        new Set(raw.blocks).size !== raw.blocks.length ||
+        raw.blocks.some(block => typeof block !== "string" ||
+          !["create", "list", "inbox", "detail", "history", "sync"].includes(block))
+      )
+        throw new WorkflowError(400, "Invalid page blocks");
+    }
+    if (Object.hasOwn(raw, "workflow"))
+      bundleKeys(raw.workflow, ["initialState", "assignedStates", "transitions"]);
+    const page: RecipePage = {
       id: pageId,
       title: title(raw.title),
       requesterRole: role(raw.requesterRole),
       reviewerRole: role(raw.reviewerRole),
       handlerRole: role(raw.handlerRole),
       fields,
+      ...(Object.hasOwn(raw, "blocks") ? { blocks: raw.blocks as string[] } : {}),
+      ...(Object.hasOwn(raw, "workflow")
+        ? { workflow: raw.workflow as RecipePage["workflow"] }
+        : {}),
     };
+    if (Object.hasOwn(raw, "workflow")) definitionFor(page, id, semver(value.version));
+    return page;
   });
   if (new Set(pages.map((p) => p.id)).size !== pages.length)
     throw new WorkflowError(400, "Duplicate module page");
@@ -112,61 +143,7 @@ export function parseRecipe(value: unknown): SystemRecipe {
 export function compileSystem(value: unknown): ModuleManifest {
   const recipe = parseRecipe(value);
   const definitions = recipe.pages.map((page) =>
-    validateDefinition({
-      id: slug(
-        `${recipe.id}-${recipe.version.replaceAll(".", "-")}-${page.id}`,
-      ),
-      title: page.title,
-      startRole: page.requesterRole,
-      initialState: "draft",
-      startFields: Object.fromEntries([
-        ...page.fields.filter((f) => f.required).map((f) => [f.name, f.type]),
-        ["handlerId", "subject"],
-      ]),
-      optionalStartFields: Object.fromEntries(
-        page.fields.filter((f) => !f.required).map((f) => [f.name, f.type]),
-      ),
-      readerRoles: [page.reviewerRole],
-      assignedReader: {
-        field: "handlerId",
-        role: page.handlerRole,
-        states: ["approved", "completed"],
-      },
-      transitions: [
-        {
-          id: "submit",
-          from: "draft",
-          to: "submitted",
-          role: page.requesterRole,
-          ownerOnly: true,
-          fields: {},
-        },
-        {
-          id: "approve",
-          from: "submitted",
-          to: "approved",
-          role: page.reviewerRole,
-          fields: {},
-          task: "assign",
-        },
-        {
-          id: "reject",
-          from: "submitted",
-          to: "rejected",
-          role: page.reviewerRole,
-          fields: { reason: "text" },
-        },
-        {
-          id: "complete",
-          from: "approved",
-          to: "completed",
-          role: page.handlerRole,
-          assigneeField: "handlerId",
-          fields: { receiptNote: "text" },
-          task: "complete",
-        },
-      ],
-    }),
+    definitionFor(page, recipe.id, recipe.version),
   );
   return {
     format: "latticedx.enterprise-module",
@@ -188,14 +165,99 @@ export function compileSystem(value: unknown): ModuleManifest {
         id: page.id,
         title: page.title,
         definitionId: definitions[index]!.id,
-        blocks: ["create", "list", "inbox", "detail", "history", "sync"],
-        fieldLabels: {
-          ...Object.fromEntries(page.fields.map((f) => [f.name, f.label])),
-          handlerId: "Nhân viên thực hiện",
-          reason: "Lý do từ chối",
-          receiptNote: "Kết quả thực hiện",
-        },
+        blocks: page.blocks ?? ["create", "list", "inbox", "detail", "history", "sync"],
+        fieldLabels: fieldLabelsFor(page, definitions[index]!),
       })),
     },
   };
+}
+
+function definitionFor(page: RecipePage, systemId: string, systemVersion: string) {
+  const definition = validateDefinition({
+    id: slug(
+      `${systemId}-${systemVersion.replaceAll(".", "-")}-${page.id}`,
+    ),
+    title: page.title,
+    startRole: page.requesterRole,
+    initialState: page.workflow ? page.workflow.initialState : "draft",
+    startFields: Object.fromEntries([
+      ...page.fields.filter((f) => f.required).map((f) => [f.name, f.type]),
+      ["handlerId", "subject"],
+    ]),
+    optionalStartFields: Object.fromEntries(
+      page.fields.filter((f) => !f.required).map((f) => [f.name, f.type]),
+    ),
+    readerRoles: [page.reviewerRole],
+    assignedReader: {
+      field: "handlerId",
+      role: page.handlerRole,
+      states: page.workflow ? page.workflow.assignedStates : ["approved", "completed"],
+    },
+    transitions: page.workflow ? page.workflow.transitions : [
+      {
+        id: "submit",
+        from: "draft",
+        to: "submitted",
+        role: page.requesterRole,
+        ownerOnly: true,
+        fields: {},
+      },
+      {
+        id: "approve",
+        from: "submitted",
+        to: "approved",
+        role: page.reviewerRole,
+        fields: {},
+        task: "assign",
+      },
+      {
+        id: "reject",
+        from: "submitted",
+        to: "rejected",
+        role: page.reviewerRole,
+        fields: { reason: "text" },
+      },
+      {
+        id: "complete",
+        from: "approved",
+        to: "completed",
+        role: page.handlerRole,
+        assigneeField: "handlerId",
+        fields: { receiptNote: "text" },
+        task: "complete",
+      },
+    ],
+  });
+  if (!page.workflow) return definition;
+  return validateDefinition({
+    ...definition,
+    readerRoles: [...new Set([
+      page.reviewerRole,
+      ...definition.transitions
+        .filter(t => !t.ownerOnly && !t.assigneeField && t.execution !== "service")
+        .map(t => t.role),
+    ])],
+  });
+}
+
+function fieldLabelsFor(
+  page: RecipePage,
+  definition: ReturnType<typeof validateDefinition>,
+) {
+  const fields = new Set([
+    ...Object.keys(definition.startFields),
+    ...Object.keys(definition.optionalStartFields ?? {}),
+    ...definition.transitions.flatMap(t => Object.keys(t.fields)),
+  ]);
+  const labels: Record<string, string> = {
+    ...Object.fromEntries(page.fields.map(f => [f.name, f.label])),
+    handlerId: "Nhân viên thực hiện",
+    reason: "Lý do từ chối",
+    receiptNote: "Kết quả thực hiện",
+  };
+  return Object.fromEntries([
+    ...Object.entries(labels).filter(([field]) => fields.has(field)),
+    ...[...fields].filter(field => !Object.hasOwn(labels, field))
+      .map(field => [field, field]),
+  ]);
 }

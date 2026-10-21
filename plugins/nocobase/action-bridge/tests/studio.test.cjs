@@ -13,3 +13,28 @@ test('Studio bridge keeps fixed paths, actor-bound sessions and idempotent write
  await bridge.studio('noco',start.browserId,{operation:'app',id:'company-a',version:'1.0.0'});assert.equal(calls.at(-1).url,'http://gateway/v1/system-apps/company-a/versions/1.0.0');
  bridge.disconnect('noco',start.browserId);
 });
+
+test('enterprise Studio operations use exact fixed paths and reject unneeded parameters',()=>{
+ const {studioRequest}=require('../studio.cjs');
+ class BridgeError extends Error {constructor(status,message){super(message);this.status=status;}}
+ const query=(value,allowed)=>{if(value===undefined)return '';if(Object.keys(value).some(k=>!allowed.includes(k)))throw new BridgeError(400,'query');return new URLSearchParams(value).toString();};
+ const uuid='00000000-0000-4000-8000-000000000001';
+ const cases=[
+  ['catalog','GET','studio/catalog'], ['schemas','GET','entity-schemas'], ['schema','GET','entity-schemas/invoice','invoice'],
+  ['createSchema','POST','entity-schemas'], ['saveSchema','PUT','entity-schemas/invoice','invoice'], ['publishSchema','POST','entity-schemas/invoice/publish','invoice'],
+  ['publishedSchema','GET','entity-schemas/invoice/versions/1','invoice',1], ['departments','GET','organization/departments'],
+  ['createDepartment','POST','organization/departments'], ['updateDepartment','PATCH','organization/departments/purchasing','purchasing'],
+  ['departmentHistory','GET','organization/departments/purchasing/history','purchasing'], ['diagnostics','GET','operations/diagnostics'], ['queues','GET','operations/queues'],
+  ['entityHistory','GET',`entities/${uuid}/history`,uuid], ['shares','GET',`entities/${uuid}/shares`,uuid], ['share','POST',`entities/${uuid}/shares`,uuid],
+ ];
+ const paged=['schemas','departments','departmentHistory','entityHistory','shares'];
+ for(const [operation,method,path,id,version] of cases){
+  const input={operation,...(id===undefined?{}:{id}),...(version===undefined?{}:{version}),...(method==='GET'?{}:{body:{value:1},key:'immutable-1'})};
+  assert.deepEqual(studioRequest(input,BridgeError,query),{method,path,...(method==='GET'?{}:{body:'{"value":1}',key:'immutable-1'})});
+  for(const extra of [{url:'https://bad'},{version:'1.0.0'},...(id===undefined?[{id:'invoice'}]:[{id:'../escape'}]),...(!paged.includes(operation)?[{query:{}}]:[{query:{tenant:'other'}}]),...(method==='GET'?[{body:{}},{key:'bad'}]:[{key:undefined},{body:[]}])])assert.throws(()=>studioRequest({...input,...extra},BridgeError,query),{status:400});
+  if(paged.includes(operation))assert.equal(studioRequest({...input,query:{limit:'10',offset:'0',q:'hello'}},BridgeError,query).path,path+'?limit=10&offset=0&q=hello');
+ }
+ for(const version of [0,-1,1.1,2147483648,'1','01',NaN])assert.throws(()=>studioRequest({operation:'publishedSchema',id:'invoice',version},BridgeError,query),{status:400});
+ assert.throws(()=>studioRequest({operation:'share',id:'invoice',body:{},key:'one'},BridgeError,query),{status:400});
+ assert.throws(()=>studioRequest({operation:'createSchema',body:{large:'x'.repeat(128*1024)},key:'one'},BridgeError,query),{status:413});
+});

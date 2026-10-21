@@ -5,8 +5,10 @@ import type { EntityOptions } from '../entities/routes.js';
 import type { ModuleOptions } from '../modules/routes.js';
 import type { WorkflowOptions } from '../workflows/routes.js';
 import type { ContextLinksOptions } from '../context-links/routes.js';
+import type {OrganizationOptions} from '../organization/routes.js';
+import type {OperationsOptions} from '../operations/routes.js';
 
-export type StudioOptions = FoundationOptions & EntityOptions & ModuleOptions & WorkflowOptions & ContextLinksOptions;
+export type StudioOptions = FoundationOptions & EntityOptions & ModuleOptions & WorkflowOptions & ContextLinksOptions & OrganizationOptions & OperationsOptions;
 export type Availability = { authorized: boolean; configured: boolean; available: boolean };
 export type StudioIssue = { code: string; path: string; message: string };
 export type StudioErrorCode = 'identity_unavailable' | 'invalid_token' | 'authority_denied' | 'invalid_request' | 'runtime_unavailable' | 'not_found' | 'resource_conflict' | 'internal_error';
@@ -23,10 +25,14 @@ export function requireDesigner(actor: WorkflowActor): void {
 }
 export function capabilities(actor: WorkflowActor, options: StudioOptions) {
   return {
+    'organization.read':availability(actor,['directory:read'],!!options.organization),
+    'organization.manage':availability(actor,['directory:manage'],!!options.organization),
+    'operations.read':availability(actor,['platform:operate'],!!options.operations),
     'context.read': availability(actor, ['data:read'], !!(options.entities && options.contextLinks)),
     'context.links.manage': availability(actor, ['data:read','data:design'], !!(options.entities && options.contextLinks)),
     'entities.read': availability(actor, ['data:read'], !!options.entities),
     'entities.write': availability(actor, ['data:write'], !!options.entities),
+    'entities.share':availability(actor,['data:share'],!!options.entities),
     'entities.design': availability(actor, ['data:design'], !!options.entities),
     'entities.query': availability(actor, ['data:read'], !!options.entities?.query),
     'workflow.start': availability(actor, ['workflow:start'], !!options.workflows),
