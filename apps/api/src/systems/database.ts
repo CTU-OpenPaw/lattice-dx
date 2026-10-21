@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type {SchemaDefinition,SchemaPublication} from "../entities/types.js";
 import type { Pool } from "pg";
 import type { WorkflowActor, WorkflowDefinition } from "@dx/contracts";
 import { parseRecipe, type SystemRecipe } from "./policy.js";
@@ -36,8 +37,10 @@ type SystemApp = {
   enabled: boolean;
   presentation: SystemPresentation;
   definitions: RuntimeDefinition[];
+  schemas?:SchemaPublication[];
 };
-type SystemRow = Omit<SystemApp, "definitions"> & {
+type SystemRow = Omit<SystemApp, "definitions"|"schemas"> & {
+  schemas?:SchemaDefinition[];
   definitions: WorkflowDefinition[] | null;
 };
 export interface SystemRepository {
@@ -172,13 +175,13 @@ export async function systemDatabase(pool: Pool): Promise<SystemRepository> {
     async runtime(actor, page, id, version) {
       const rows = (
         await pool.query<SystemRow>(
-          `SELECT m.id,m.version,m.title,m.enabled,m.manifest->'presentation' AS presentation,
+          `SELECT m.id,m.version,m.title,m.enabled,m.manifest->'presentation' AS presentation,m.manifest->'schemas' AS schemas,
     (SELECT jsonb_agg(v.definition ORDER BY w.definition_id) FROM enterprise_module_workflows w JOIN workflow_definition_versions v ON v.organization_id=w.organization_id AND v.id=w.definition_id AND v.version=w.definition_version
      WHERE w.organization_id=m.organization_id AND w.module_id=m.id AND w.module_version=m.version) AS definitions
     FROM enterprise_module_versions m WHERE m.organization_id=$1 AND m.manifest ? 'presentation'
     AND (m.enabled OR EXISTS(SELECT 1 FROM enterprise_module_audit a WHERE a.organization_id=m.organization_id AND a.module_id=m.id AND a.module_version=m.version AND a.enabled))
     AND ($5::text IS NULL OR m.id=$5) AND ($6::text IS NULL OR m.version=$6) AND ($7='' OR strpos(lower(m.title),lower($7))>0)
-    AND EXISTS(SELECT 1 FROM jsonb_array_elements(m.manifest->'bundle'->'definitions') d WHERE d->>'startRole'=ANY($2::text[]) OR (d->'readerRoles') ?| $2::text[] OR d->'assignedReader'->>'role'=ANY($2::text[]))
+    AND ((('data:read'=ANY($2::text[])) AND jsonb_array_length(COALESCE(m.manifest->'presentation'->'entityPages','[]'::jsonb))>0) OR EXISTS(SELECT 1 FROM jsonb_array_elements(m.manifest->'bundle'->'definitions') d WHERE d->>'startRole'=ANY($2::text[]) OR (d->'readerRoles') ?| $2::text[] OR d->'assignedReader'->>'role'=ANY($2::text[])))
     ORDER BY m.id,m.version LIMIT $3 OFFSET $4`,
           [
             actor.organizationId,
@@ -220,10 +223,15 @@ export async function systemDatabase(pool: Pool): Promise<SystemRepository> {
               })),
             }));
           const ids = new Set(definitions.map((d) => d.id));
+          const entityPages=actor.roles.includes('data:read')?(row.presentation.entityPages??[]):[];
+          const schemaIds=new Set(entityPages.map(p=>p.schemaId));
+          const {schemas:rawSchemas,...base}=row;
           return {
-            ...row,
+            ...base,
+            ...(row.presentation.entityPages?{schemas:(rawSchemas??[]).filter(s=>schemaIds.has(s.id)).map(s=>({...s,version:1}))}:{}),
             presentation: {
               ...row.presentation,
+              ...(row.presentation.entityPages?{entityPages}:{}),
               pages: row.presentation.pages.filter(
                 (p: { definitionId: string }) => ids.has(p.definitionId),
               ),

@@ -88,11 +88,9 @@ function enabledSections(capabilities) {
 function consoleTransport(api) {
   const uncertainSchemas = new Set();
   return async (operation, payload = {}) => {
-    if (operation === "entityCreate" || operation === "entityUpdate")
-      return api.entity(
-        operation === "entityCreate" ? "create" : "update",
-        payload,
-      );
+    const entityOperations = { entityCreate: "create", entityUpdate: "update", entityArchive: "archive", entityLink: "link", entityUnlink: "unlink" };
+    if (Object.hasOwn(entityOperations, operation))
+      return api.entity(entityOperations[operation], payload);
     if (operation === "createSchema" && uncertainSchemas.has(payload.key)) {
       let existing;
       try {

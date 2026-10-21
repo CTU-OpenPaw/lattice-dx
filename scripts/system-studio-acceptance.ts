@@ -6,6 +6,7 @@ import { Pool } from "pg";
 import { generateKeyPair, SignJWT } from "jose";
 import { createApi } from "../apps/api/src/app.js";
 import { connectRecords } from "../apps/api/src/database.js";
+import { verifyGeneralBlocks } from "./general-blocks-acceptance.js";
 const control = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 1,
@@ -616,10 +617,13 @@ async function main() {
     "handler",
   );
   assert.equal(customRun.state, "completed");
+  const general = await verifyGeneralBlocks(call);
   await app!.close();
   await database.close();
   database = await connectRecords(url.href);
   open();
+  assert.equal((await call(general.appPath)).presentation.entityPages.length, 3);
+  assert.equal((await call('/v1/entities/'+general.records[0])).attributes.count, 3);
   assert.equal((await call("/v1/system-drafts/" + recipe.id)).revision, 2);
   assert.equal(
     (await call(runPath, "GET", undefined, "handler")).state,

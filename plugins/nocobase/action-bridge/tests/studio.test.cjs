@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 const {test}=require('node:test');const assert=require('node:assert/strict');const {createBridge}=require('../bridge.cjs');
+test('configured entity queries use one fixed path and reject scope injection',()=>{
+ const {studioRequest}=require('../studio.cjs');
+ class BridgeError extends Error {constructor(status,message){super(message);this.status=status;}}
+ const body={schemaId:'contracts',schemaVersion:1,filters:[{field:'status',operator:'eq',value:'active'}],limit:20,offset:0};
+ const parse=input=>studioRequest(input,BridgeError,()=>''),input={operation:'queryEntities',body,key:'read-1'};
+ assert.deepEqual(parse(input),{method:'POST',path:'entities/query',body:JSON.stringify(body),key:'read-1'});
+ for(const extra of [{organizationId:'other'},{schemaVersion:0},{limit:101},{offset:-1},{schemaId:'../escape'}])assert.throws(()=>parse({...input,body:{...body,...extra}}),{status:400});
+});
 test('Studio bridge keeps fixed paths, actor-bound sessions and idempotent write envelopes',async()=>{
  const calls=[];const bridge=createBridge({gatewayUrl:'http://gateway',tokenUrl:'http://identity/token',userinfoUrl:'http://identity/user',authorizationUrl:'http://identity/auth',clientId:'fixture',callbackUrl:'http://localhost/callback'}, {schedule:()=>({unref(){}}),cancelTimer:()=>{},fetch:async(url,options)=>{calls.push({url,options});return Response.json(url.endsWith('/token')?{access_token:'fixture-token',expires_in:300}:url.endsWith('/user')?{sub:'alice'}:{items:[]});}});
  const start=bridge.connect('noco');await bridge.callback({state:new URL(start.authorizationUrl).searchParams.get('state'),code:'fixture'},start.browserId);

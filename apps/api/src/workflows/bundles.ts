@@ -9,10 +9,10 @@ export function bundleKeys(value: unknown, allowed: string[]): asserts value is 
     || Object.keys(value).some(key => !allowed.includes(key))
     || allowed.some(key => !Object.hasOwn(value, key))) throw new WorkflowError(400, 'Workflow bundle không hợp lệ.');
 }
-export function parseBundle(value: unknown): WorkflowBundle {
+export function parseBundle(value: unknown, options: {allowEmpty?:boolean} = {}): WorkflowBundle {
   bundleKeys(value, ['format', 'formatVersion', 'definitions']);
   if (value.format !== 'latticedx.workflow-bundle' || value.formatVersion !== 1
-    || !Array.isArray(value.definitions) || value.definitions.length < 1 || value.definitions.length > 10) throw new WorkflowError(400, 'Workflow bundle không hợp lệ.');
+    || !Array.isArray(value.definitions) || value.definitions.length < (options.allowEmpty?0:1) || value.definitions.length > 10) throw new WorkflowError(400, 'Workflow bundle không hợp lệ.');
   const definitions = value.definitions.map(item => {
     if (Buffer.byteLength(JSON.stringify(item) ?? '', 'utf8') > 12288) throw new WorkflowError(400, 'Workflow definition quá lớn.');
     const definition = validateDefinition(item);

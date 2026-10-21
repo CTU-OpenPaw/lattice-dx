@@ -10,6 +10,21 @@ async function fixture(){
  const start=bridge.connect('noco');await bridge.callback({state:new URL(start.authorizationUrl).searchParams.get('state'),code:'fixture'},start.browserId);
  return {calls,bridge,browserId:start.browserId,deny:value=>{status=value;}};
 }
+
+test('relations use fixed paths, bounded pagination and immutable versioned commands',async()=>{
+ const {bridge,browserId,calls}=await fixture(),targetId='22222222-2222-4222-8222-222222222222';
+ await bridge.entity('noco',browserId,{operation:'relations',id,query:{limit:'20',offset:'0'}});
+ assert.equal(calls.at(-1).url,`http://gateway/v1/entities/${id}/relations?limit=20&offset=0`);
+ const body={expectedVersion:2,name:'department',targetId};
+ await bridge.entity('noco',browserId,{operation:'link',id,body,key:'link-1'});
+ assert.equal(calls.at(-1).options.method,'POST');assert.deepEqual(JSON.parse(calls.at(-1).options.body),body);
+ await bridge.entity('noco',browserId,{operation:'unlink',id,body,key:'unlink-1'});
+ assert.equal(calls.at(-1).url,`http://gateway/v1/entities/${id}/relations/department/${targetId}`);
+ assert.equal(calls.at(-1).options.method,'DELETE');assert.deepEqual(JSON.parse(calls.at(-1).options.body),{expectedVersion:2});
+ const before=calls.length;
+ for(const input of [{operation:'relations',id,query:{schemaId:'assets'}},{operation:'link',id,body:{...body,name:'../escape'},key:'bad'},{operation:'unlink',id,body:{...body,targetId:'../escape'},key:'bad'},{operation:'link',id,body:{...body,actorId:'other'},key:'bad'}])await assert.rejects(bridge.entity('noco',browserId,input),{status:400});
+ assert.equal(calls.length,before);bridge.disconnect('noco',browserId);
+});
 test('entity bridge preserves an explicit schema publication and rejects malformed pins',async()=>{
  const {bridge,browserId,calls}=await fixture(),body={schemaId:'assets',schemaVersion:1,title:'Pinned',attributes:{}};
  await bridge.entity('noco',browserId,{operation:'create',body,key:'pin'});assert.equal(JSON.parse(calls.at(-1).options.body).schemaVersion,1);

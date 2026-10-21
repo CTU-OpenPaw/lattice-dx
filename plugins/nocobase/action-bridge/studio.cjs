@@ -29,6 +29,7 @@ function studioRequest(input, BridgeError, validatedQuery) {
     diagnostics: ["GET", "operations/diagnostics"],
     queues: ["GET", "operations/queues"],
     entityHistory: ["GET", "entities"],
+    queryEntities: ["POST", "entities/query"],
     shares: ["GET", "entities"],
     share: ["POST", "entities"],
     drafts: ["GET", "system-drafts"],
@@ -120,6 +121,15 @@ function studioRequest(input, BridgeError, validatedQuery) {
       bad();
     if (Buffer.byteLength(JSON.stringify(input.body)) > 128 * 1024)
       throw new BridgeError(413, "Studio command too large.");
+    if (operation === "queryEntities") {
+      const body=input.body;
+      if (Object.keys(body).some(k=>!["schemaId","schemaVersion","filters","sort","limit","offset"].includes(k)) ||
+          typeof body.schemaId!=="string" || !/^[a-z][a-z0-9-]{0,63}$/.test(body.schemaId) ||
+          !Number.isInteger(body.schemaVersion) || body.schemaVersion<1 || body.schemaVersion>2147483647 ||
+          (body.limit!==undefined && (!Number.isInteger(body.limit)||body.limit<1||body.limit>100)) ||
+          (body.offset!==undefined && (!Number.isSafeInteger(body.offset)||body.offset<0||body.offset>Number.MAX_SAFE_INTEGER-101)) ||
+          Buffer.byteLength(JSON.stringify(body))>16384) bad();
+    }
   } else if (input.body !== undefined || input.key !== undefined) bad();
   return {
     method,

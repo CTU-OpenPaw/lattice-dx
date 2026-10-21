@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { WorkflowTransition } from "@dx/contracts";
 import { bundleKeys } from "../workflows/bundles.js";
-import { name, slug, title } from "../entities/policy.js";
+import {parseEntityPages,type EntityPage} from "./presentation.js";
+import type {SchemaDefinition} from "../entities/types.js";
+import { name, slug, title,parseSchema } from "../entities/policy.js";
 import { semver } from "../modules/policy.js";
 import type { ModuleManifest } from "../modules/types.js";
 import { validateDefinition } from "../workflows/registry.js";
@@ -34,6 +36,8 @@ export type SystemRecipe = {
   version: string;
   title: string;
   pages: RecipePage[];
+  schemas?:SchemaDefinition[];
+  entityPages?:EntityPage[];
 };
 const role = (value: unknown) => {
   if (typeof value !== "string" || !/^[a-z][a-z0-9:_-]{0,79}$/.test(value))
@@ -48,16 +52,21 @@ export function parseRecipe(value: unknown): SystemRecipe {
     "version",
     "title",
     "pages",
+    ...(value&&typeof value==='object'&&Object.hasOwn(value,'schemas')?['schemas']:[]),
+    ...(value&&typeof value==='object'&&Object.hasOwn(value,'entityPages')?['entityPages']:[]),
   ]);
   if (
     value.format !== "latticedx.system-recipe" ||
     value.formatVersion !== 1 ||
     Buffer.byteLength(JSON.stringify(value)) > 32768 ||
     !Array.isArray(value.pages) ||
-    !value.pages.length ||
+    (!value.pages.length && !(Array.isArray(value.entityPages)&&value.entityPages.length)) ||
     value.pages.length > 5
   )
     throw new WorkflowError(400, "Invalid system recipe");
+  const schemas=Object.hasOwn(value,'schemas')? (()=>{if(!Array.isArray(value.schemas)||value.schemas.length>10)throw new WorkflowError(400,'Invalid schemas');return value.schemas.map(parseSchema);})():undefined;
+  if(schemas&&new Set(schemas.map(s=>s.id)).size!==schemas.length)throw new WorkflowError(400,'Duplicate schemas');
+  const entityPages=Object.hasOwn(value,'entityPages')?parseEntityPages(value.entityPages,schemas??[]):undefined;
   const id = slug(value.id);
   if (id.length > 24)
     throw new WorkflowError(400, "System ID maximum 24 characters");
@@ -129,7 +138,7 @@ export function parseRecipe(value: unknown): SystemRecipe {
     if (Object.hasOwn(raw, "workflow")) definitionFor(page, id, semver(value.version));
     return page;
   });
-  if (new Set(pages.map((p) => p.id)).size !== pages.length)
+  if (new Set([...pages,...(entityPages??[])].map((p) => p.id)).size !== pages.length+(entityPages?.length??0))
     throw new WorkflowError(400, "Duplicate module page");
   return {
     format: "latticedx.system-recipe",
@@ -138,6 +147,8 @@ export function parseRecipe(value: unknown): SystemRecipe {
     version: semver(value.version),
     title: title(value.title),
     pages,
+    ...(schemas?{schemas}:{}),
+    ...(entityPages?{entityPages}:{}),
   };
 }
 export function compileSystem(value: unknown): ModuleManifest {
@@ -151,16 +162,21 @@ export function compileSystem(value: unknown): ModuleManifest {
     id: recipe.id,
     version: recipe.version,
     title: recipe.title,
-    schemas: [],
+    schemas: recipe.schemas??[],
     bundle: {
       format: "latticedx.workflow-bundle",
       formatVersion: 1,
       definitions,
     },
-    blocks: [],
+    blocks: [...new Set((recipe.entityPages??[]).flatMap(page=>[
+      'entities.read',
+      ...(page.blocks.includes('list')?['entities.query']:[]),
+      ...page.actions.map(action=>`entities.${action}`),
+    ]))].sort().map(id=>({id,version:1 as const})),
     dependencies: [],
     presentation: {
       schemaVersion: 1,
+      ...(recipe.entityPages?{entityPages:recipe.entityPages}:{}),
       pages: recipe.pages.map((page, index) => ({
         id: page.id,
         title: page.title,
