@@ -65,6 +65,7 @@
     "test:logistics": "node scripts/smoke-logistics.mjs",
     "test:workflows": "node scripts/smoke-workflows.mjs",
     "test:uc1-database": "node scripts/acceptance-uc1-database.mjs",
+    "test:system-studio": "node scripts/acceptance-system-studio.mjs",
     "test:uc1-auto": "node scripts/smoke-uc1-auto.mjs",
     "test:workflow-studio": "node scripts/smoke-workflow-studio.mjs",
     "test:workflow-blocks": "node scripts/smoke-workflow-blocks.mjs",
