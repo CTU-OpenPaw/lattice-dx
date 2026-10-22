@@ -15,9 +15,17 @@ function fixture(existing?:Record<string,unknown>){
   expect((options.headers as Record<string,string>)['Content-Type']).toBe('application/ld+json');
   expect(body['@context']?.Asset).toBe(ns+'Asset');
   expect(body.status).toMatchObject({type:'Property',value:'in_use'});
-  if(options.method==='POST')expect(body.type).toBe('Asset');
-  const expanded=Object.fromEntries(Object.entries(body).map(([key,value])=>[key.includes(':')||['id','type'].includes(key)?key:ns+(key==='belongsToDepartment'?'department':key),key==='type'&&value==='Asset'?ns+'Asset':value]));
-  asset=options.method==='POST'?expanded:{...asset,...expanded};return new Response(null,{status:options.method==='POST'?201:204});
+  const creating=new URL(url).pathname.endsWith('/entities');
+  if(creating){expect(options.method).toBe('POST');expect(body.type).toBe('Asset');}
+  const expanded=Object.fromEntries(Object.entries(body).filter(([key])=>key!=='@context').map(([key,value])=>[key.includes(':')||['id','type'].includes(key)?key:ns+(key==='belongsToDepartment'?'department':key),key==='type'&&value==='Asset'?ns+'Asset':value]));
+  if(creating){asset=expanded;return new Response(null,{status:201});}
+  if(options.method==='PATCH'){
+   // NGSI-LD update modifies existing attributes only; missing attributes produce partial success.
+   let partial=false;
+   for(const [key,value] of Object.entries(expanded)){if(Object.hasOwn(asset!,key))asset![key]=value;else partial=true;}
+   return new Response(null,{status:partial?207:204});
+  }
+  expect(options.method).toBe('POST');asset={...asset,...expanded};return new Response(null,{status:204});
  });
  return {transport,calls,getAsset:()=>asset};
 }
@@ -28,18 +36,27 @@ test('handover creates a tenant-scoped Asset, maps relationships and confirms re
  expect(f.getAsset()?.[ns+'status']).toMatchObject({value:'in_use',observedAt:'2026-10-20T12:00:00.000Z'});
  await broker(event);expect(f.calls).toHaveLength(1);
 });
-test('handover preserves unrelated attributes and rejects newer or equal-second observations',async()=>{
+test('first handover appends missing attributes to an existing Asset and replay preserves unrelated attributes',async()=>{
  const previous={id:event.data.assetId,type:ns+'Asset',[ns+'organizationId']:{value:'org-a'},[ns+'businessId']:{value:'one'},[ns+'name']:{type:'Property',value:'Existing laptop'},[ns+'status']:{value:'ready',observedAt:'2026-10-20T11:00:00Z'}};
- const f=fixture(previous);await createHandoverBroker({baseUrl:'http://broker:1026',tenant:'org-a',fetchImpl:f.transport})(event);
- expect(f.getAsset()?.[ns+'name']).toEqual(previous[ns+'name']);expect(f.calls[0]?.method).toBe('PATCH');
+ const f=fixture(previous),broker=createHandoverBroker({baseUrl:'http://broker:1026',tenant:'org-a',fetchImpl:f.transport});
+ const result={assetId:event.data.assetId,status:'in_use',sourceEventId:event.eventId};
+ expect(await broker(event)).toEqual(result);
+ expect(f.getAsset()?.[ns+'name']).toEqual(previous[ns+'name']);
+ expect(f.getAsset()?.[ns+'sourceEventId']).toEqual({type:'Property',value:event.eventId});
+ expect(f.getAsset()?.[ns+'department']).toEqual({type:'Relationship',object:'urn:ngsi-ld:Department:org-a:warehouse'});
+ expect(f.getAsset()?.[ns+'locatedAt']).toEqual({type:'Relationship',object:'urn:ngsi-ld:Location:org-a:office-1'});
+ expect(await broker(event)).toEqual(result);expect(f.calls).toHaveLength(1);
+});
+test('handover rejects newer or equal-second observations',async()=>{
+ const previous={id:event.data.assetId,type:ns+'Asset',[ns+'organizationId']:{value:'org-a'},[ns+'businessId']:{value:'one'}};
  for(const observedAt of ['2026-10-20T12:00:00Z','2026-10-20T13:00:00Z']){
   const newer=fixture({...previous,[ns+'status']:{value:'repair',observedAt}});
   await expect(createHandoverBroker({baseUrl:'http://broker:1026',tenant:'org-a',fetchImpl:newer.transport})(event)).rejects.toMatchObject({statusCode:409});expect(newer.calls).toHaveLength(0);
  }
 });
 test('wrong references, partial writes and wrong read-back never acknowledge success',async()=>{
- for(const mode of ['reference','partial','readback']){
-  const f=fixture();const transport=async(url:string,options:RequestInit)=>{
+ for(const existing of [undefined,{id:event.data.assetId,type:ns+'Asset',[ns+'organizationId']:{value:'org-a'},[ns+'businessId']:{value:'one'},[ns+'status']:{value:'ready',observedAt:'2026-10-20T11:00:00Z'}}])for(const mode of ['reference','partial','readback']){
+  const f=fixture(existing);const transport=async(url:string,options:RequestInit)=>{
    if(mode==='reference'&&url.includes('Department'))return new Response(null,{status:404});
    if(mode==='partial'&&options.method==='POST')return new Response(null,{status:207});
    if(mode==='readback'&&options.method==='POST')return new Response(null,{status:201});

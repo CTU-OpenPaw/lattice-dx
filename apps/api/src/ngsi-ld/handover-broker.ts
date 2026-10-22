@@ -44,7 +44,8 @@ export function createHandoverBroker({baseUrl,tenant,fetchImpl=fetch}:{baseUrl:s
    validate(a);if(matches(a))return;
    const observed=attribute(a,'status')?.observedAt;
    if(attribute(a,'sourceEventId')?.value===event.eventId||typeof observed!=='string'||!Number.isFinite(Date.parse(observed))||Date.parse(observed)>=Date.parse(observedAt))throw new HandoverError(409,'broker_observation_conflict');
-   const patched=await request('PATCH','/entities/'+encodeURIComponent(id)+'/attrs',updates);if(patched.status!==204)throw new HandoverError(502,'broker_write_failed');
+   // Append overwrites owned attributes and adds missing ones on an existing Asset.
+   const appended=await request('POST','/entities/'+encodeURIComponent(id)+'/attrs',updates);if(appended.status!==204)throw new HandoverError(502,'broker_write_failed');
   }
   const before=await get(id);
   if(before.status===404){
