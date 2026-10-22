@@ -206,6 +206,10 @@ function createDataScreen(React, { h, box, button, field, json, inputStyle }) {
           field("Tên quan hệ", name, (value) => {
             const entries = [...relations];
             entries[index] = [value, relation];
+            if (new Set(entries.map(([name]) => name)).size !== entries.length) {
+              session.report("Tên quan hệ bị trùng.");
+              return;
+            }
             update("relations", Object.fromEntries(entries));
           }),
           field("Mã cấu trúc đích", relation.targetSchemaId, (value) =>
