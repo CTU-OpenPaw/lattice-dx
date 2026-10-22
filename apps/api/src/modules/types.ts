@@ -3,8 +3,10 @@ import type { WorkflowActor, WorkflowRun, CreateWorkflow } from "@dx/contracts";
 import type { SchemaDefinition } from "../entities/types.js";
 import type { WorkflowBundle } from "../workflows/bundles.js";
 import type { Page, PageQuery } from "../pagination.js";
+import type {SystemPresentation} from '../systems/presentation.js';
 export type BusinessBinding = { id: string; schemaId: string; schemaVersion: number; definitionId: string; allowedTransitions: string[] };
 export type ModuleManifest = {
+  presentation?:SystemPresentation;
   bindings?: BusinessBinding[];
   format: "latticedx.enterprise-module";
   formatVersion: 1;

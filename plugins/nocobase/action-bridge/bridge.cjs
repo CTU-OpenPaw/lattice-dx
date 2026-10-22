@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 'use strict';
 const { randomBytes, createHash } = require('node:crypto');
+const {studioRequest}=require('./studio.cjs');
 
 class BridgeError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -140,6 +141,10 @@ function createBridge(config, dependencies = {}) {
       if(query)path+=(path.includes('?')?'&':'?')+query;
       const headers={authorization:`Bearer ${item.token}`,...(method==='POST'?{'content-type':'application/json'}:{}),...(write?{'idempotency-key':input.key}:{})};
       return request(`${config.gatewayUrl}/v1/${path}`,{method,headers,...(method==='POST'?{body:JSON.stringify(write?input.body:{})}:{})},'Workflow request failed; reload or retry only the same command key.',true);
+    },
+    async studio(userId,browserId,input){
+      const item=session(userId,browserId),command=studioRequest(input,BridgeError,validatedQuery);
+      return request(`${config.gatewayUrl}/v1/${command.path}`,{method:command.method,headers:{authorization:`Bearer ${item.token}`,...(command.body?{'content-type':'application/json','idempotency-key':command.key}:{})},...(command.body?{body:command.body}:{})},'Studio request failed; reload before retrying the same command.',true);
     },
     async entity(userId,browserId,input){
       const item=session(userId,browserId);

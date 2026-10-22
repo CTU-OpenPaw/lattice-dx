@@ -6,6 +6,7 @@ import { bundleKeys, parseBundle } from "../workflows/bundles.js";
 import { findBlock } from "../blocks/registry.js";
 import { WorkflowError } from "../workflows/policy.js";
 import type { ModuleManifest } from "./types.js";
+import {parsePresentation} from '../systems/presentation.js';
 export function semver(value: unknown): string {
   if (
     typeof value !== "string" ||
@@ -46,6 +47,7 @@ export function parseManifest(value: unknown): ModuleManifest {
     "blocks",
     "dependencies",
     ...(value && typeof value === "object" && Object.hasOwn(value,"bindings") ? ["bindings"] : []),
+    ...(value && typeof value === "object" && Object.hasOwn(value,"presentation") ? ["presentation"] : []),
   ]);
   if (
     Buffer.byteLength(canonicalJson(value)) > 128 * 1024 ||
@@ -107,6 +109,7 @@ export function parseManifest(value: unknown): ModuleManifest {
       throw new WorkflowError(400, "Duplicate binding ID or workflow binding.");
   }
   return {
+    ...(Object.hasOwn(value,'presentation')?{presentation:parsePresentation(value.presentation,bundle)}:{}),
     ...(bindings ? {bindings} : {}),
     format: "latticedx.enterprise-module",
     formatVersion: 1,

@@ -1,6 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # All credentials below are PUBLIC LOCAL DEVELOPMENT FIXTURES.
 routes:
+  - id: system-studio
+    uris: [/v1/system-drafts, /v1/system-drafts/*, /v1/system-apps, /v1/system-apps/*, /v1/studio/system-plan]
+    methods: [GET, POST, PUT]
+    plugins:
+      openid-connect:
+        client_id: dx-gateway
+        client_secret: local-gateway-secret
+        discovery: http://keycloak:8080/realms/lattice/.well-known/openid-configuration
+        bearer_only: true
+        use_jwks: true
+        ssl_verify: false
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        rejected_code: 429
+        policy: local
+      request-id:
+        header_name: X-Request-Id
+    upstream:
+      type: roundrobin
+      nodes:
+        "api:4000": 1
   # Broker credential is verified by the API; this route does not use user JWT auth.
   - id: ngsi-ld-notifications
     uris: [/v1/integrations/ngsi-ld/notifications, /v1/integrations/ngsi-ld/context]

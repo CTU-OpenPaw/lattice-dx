@@ -13,6 +13,7 @@ import { workflowJobDatabase } from './workflows/job-database.js';
 import { entityDatabase } from './entities/database.js';
 import {ngsiLdDatabase} from './ngsi-ld/database.js';
 import {handoverDatabase} from './ngsi-ld/handover-database.js';
+import {systemDatabase} from './systems/database.js';
 import { entityDataToolsDatabase } from './entities/data-tools-database.js';
 import {reportsDatabase} from './entities/reports-database.js';
 import { organizationDatabase } from './organization/database.js';
@@ -42,8 +43,9 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const dataTools=await entityDataToolsDatabase(pool,options.store);
     const reports=await reportsDatabase(pool);
     const modules=await modulesDatabase(pool,workflows);
+    const systems=await systemDatabase(pool);
     const taskLifecycle=await taskLifecycleDatabase(pool);
-    return {assetHandover,ngsiLdContext,agents:agentDatabase(pool,definitionRegistry,options.store),repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool,options.outboxSelection),
+    return {systems,assetHandover,ngsiLdContext,agents:agentDatabase(pool,definitionRegistry,options.store),repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool,options.outboxSelection),
       offloadFile:async()=>{if(!options.store)throw new Error('File storage is not configured');return offloadOneFile(pool,options.store);},close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }

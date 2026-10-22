@@ -108,7 +108,7 @@ test('built browser entrypoints load through AMD without CommonJS require or mis
     plugin.app = {addScopes: value => Object.assign(scopes, value),router:{add:(name,route)=>routes.push(route)},addComponents:()=>{},use:()=>{},schemaInitializerManager:{get:()=>({add:()=>{}})}};
     await plugin.load();
     if (entry === 'client') assert.equal(typeof scopes.useLatticeFormAction, 'function');
-    if (entry === 'client') assert.deepEqual(routes.map(r=>r.path), ['/lattice','/lattice/apps/:applicationId']);
+    if (entry === 'client') assert.deepEqual(routes.map(r=>r.path), ['/lattice','/lattice/studio','/lattice/systems','/lattice/systems/:systemId/:version','/lattice/apps/:applicationId']);
     if (entry === 'client') {
       assert.deepEqual(Object.keys(models),['LatticeFormBlockModel','LatticeListBlockModel','LatticeTaskInboxBlockModel','LatticeApprovalBlockModel','LatticeAttachmentBlockModel','LatticeActivityTimelineBlockModel','LatticeContextEntityBlockModel','LatticeWorkflowFormBlockModel']);
       const fields=await models.LatticeFormBlockModel.flow.steps.binding.uiSchema({api:{request:async()=>({data:{data:{items:[purchasing,logistics]}}})}});
