@@ -1,0 +1,29 @@
+{
+  "mappingVersion": "uc1-asset-v1",
+  "organizationId": "org-a",
+  "sourceSystem": "latticedx",
+  "mappings": [
+    {
+      "organizationId": "org-a",
+      "sourceSystem": "latticedx",
+      "sourceEntityType": "Asset",
+      "sourceId": "source-asset-001",
+      "brokerUrn": "urn:ngsi-ld:Asset:org-a:uc1-demo-asset-001",
+      "name": "UC1 demo asset"
+    },
+    {
+      "organizationId": "org-a",
+      "sourceSystem": "latticedx",
+      "sourceEntityType": "Department",
+      "sourceId": "source-department-001",
+      "brokerUrn": "urn:ngsi-ld:Department:org-a:it"
+    },
+    {
+      "organizationId": "org-a",
+      "sourceSystem": "latticedx",
+      "sourceEntityType": "Location",
+      "sourceId": "source-location-001",
+      "brokerUrn": "urn:ngsi-ld:Location:org-a:office-1"
+    }
+  ]
+}

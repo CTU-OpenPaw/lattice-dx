@@ -1,0 +1,267 @@
+{
+    "name":  "LatticeDX - UC1 Procurement Intake",
+    "active":  false,
+    "nodes":  [
+                  {
+                      "parameters":  {
+                                         "httpMethod":  "POST",
+                                         "path":  "latticedx/uc1/orders",
+                                         "authentication":  "headerAuth",
+                                         "responseMode":  "responseNode",
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.webhook",
+                      "typeVersion":  2.2,
+                      "position":  [
+                                       -64,
+                                       -32
+                                   ],
+                      "id":  "4d0f74a4-c67a-4ecf-8d54-2bb616df784e",
+                      "name":  "Webhook",
+                      "webhookId":  "3f087d6e-5e74-4e18-9540-0205449740bb",
+                      "credentials":  {
+                                          "httpHeaderAuth":  {
+                                                                 "name":  "LatticeDX UC1 Intake Webhook"
+                                                             }
+                                      }
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const request = $input.first().json;\nconst body = request.body;\nconst headers = request.headers ?? {};\nconst errors = [];\n\nfunction isObject(value) {\n  return value !== null \u0026\u0026\n    typeof value === \"object\" \u0026\u0026\n    !Array.isArray(value);\n}\n\nif (!isObject(body)) {\n  return [{\n    json: {\n      valid: false,\n      errors: [\"Body must be a JSON object\"],\n    },\n  }];\n}\n\n// Chỉ nhận title và input.\nconst allowedFields = new Set([\"title\", \"input\"]);\n\nif (Object.keys(body).some(field =\u003e !allowedFields.has(field))) {\n  errors.push(\"Only title and input are accepted\");\n}\n\n// Giữ nguyên title, không tự thay đổi nội dung khi retry.\nif (\n  typeof body.title !== \"string\" ||\n  !body.title.trim() ||\n  [...body.title].length \u003e 200\n) {\n  errors.push(\"title: nonblank string, maximum 200 Unicode characters\");\n}\n\n// Procurement v1 chỉ chấp nhận input rỗng.\nif (\n  body.input !== undefined \u0026\u0026\n  (!isObject(body.input) || Object.keys(body.input).length !== 0)\n) {\n  errors.push(\"input: must be an empty JSON object\");\n}\n\nconst keyHeaders = Object.entries(headers).filter(\n  ([name]) =\u003e name.toLowerCase() === \"idempotency-key\"\n);\n\nconst idempotencyKey = keyHeaders[0]?.[1];\n\nif (\n  keyHeaders.length !== 1 ||\n  typeof idempotencyKey !== \"string\" ||\n  !/^[A-Za-z0-9._:-]{1,128}$/.test(idempotencyKey)\n) {\n  errors.push(\"Idempotency-Key: invalid or missing\");\n}\n\nreturn [{\n  json: {\n    valid: errors.length === 0,\n    errors,\n    ...(errors.length === 0\n      ? {\n          idempotencyKey,\n          payload: {\n            definitionId: \"procurement\",\n            title: body.title.trim(),\n            input: {},\n          },\n        }\n      : {}),\n  },\n}];"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       160,
+                                       -32
+                                   ],
+                      "id":  "b4f0aba0-d43e-4a04-8a3e-7e10e5e6ecc1",
+                      "name":  "Validate UC1 Order"
+                  },
+                  {
+                      "parameters":  {
+                                         "conditions":  {
+                                                            "options":  {
+                                                                            "caseSensitive":  true,
+                                                                            "leftValue":  "",
+                                                                            "typeValidation":  "strict",
+                                                                            "version":  3
+                                                                        },
+                                                            "conditions":  [
+                                                                               {
+                                                                                   "id":  "93d581ca-024b-4195-87e4-95523600ad7e",
+                                                                                   "leftValue":  "={{ $json.valid }}",
+                                                                                   "rightValue":  "",
+                                                                                   "operator":  {
+                                                                                                    "type":  "boolean",
+                                                                                                    "operation":  "true",
+                                                                                                    "singleValue":  true
+                                                                                                }
+                                                                               }
+                                                                           ],
+                                                            "combinator":  "and"
+                                                        },
+                                         "options":  {
+
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.if",
+                      "typeVersion":  2.3,
+                      "position":  [
+                                       384,
+                                       -32
+                                   ],
+                      "id":  "9aab9c04-c2f7-4ab3-bead-608f151a2746",
+                      "name":  "If"
+                  },
+                  {
+                      "parameters":  {
+                                         "method":  "POST",
+                                         "url":  "http://gateway:9080/v1/workflows",
+                                         "authentication":  "genericCredentialType",
+                                         "genericAuthType":  "httpHeaderAuth",
+                                         "sendHeaders":  true,
+                                         "headerParameters":  {
+                                                                  "parameters":  [
+                                                                                     {
+                                                                                         "name":  "Idempotency-Key",
+                                                                                         "value":  "={{ $json.idempotencyKey }}"
+                                                                                     }
+                                                                                 ]
+                                                              },
+                                         "sendBody":  true,
+                                         "specifyBody":  "json",
+                                         "jsonBody":  "={{ $json.payload }}",
+                                         "options":  {
+                                                         "response":  {
+                                                                          "response":  {
+                                                                                           "fullResponse":  true,
+                                                                                           "neverError":  true,
+                                                                                           "responseFormat":  "text"
+                                                                                       }
+                                                                      },
+                                                         "timeout":  30000
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.httpRequest",
+                      "typeVersion":  4.5,
+                      "position":  [
+                                       608,
+                                       -128
+                                   ],
+                      "id":  "d241d6c5-8b69-4146-a28f-c87d7d230530",
+                      "name":  "Create UC1 Draft",
+                      "credentials":  {
+                                          "httpHeaderAuth":  {
+                                                                 "name":  "LatticeDX UC1 API"
+                                                             }
+                                      },
+                      "onError":  "continueErrorOutput",
+                      "retryOnFail":  false
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ { status: \"invalid_payload\", errors: $json.errors } }}",
+                                         "options":  {
+                                                         "responseCode":  400
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.5,
+                      "position":  [
+                                       608,
+                                       64
+                                   ],
+                      "id":  "274eaf5c-0d1d-4dff-bd68-7dbe3baffe9c",
+                      "name":  "Return Validation Error"
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={{ $json.body }}",
+                                         "options":  {
+                                                         "responseCode":  "={{ $json.statusCode }}"
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.5,
+                      "position":  [
+                                       1024,
+                                       -144
+                                   ],
+                      "id":  "ca76c362-dbfb-41c1-8491-b1d9a7b2a330",
+                      "name":  "Return Order Result"
+                  },
+                  {
+                      "parameters":  {
+                                         "respondWith":  "json",
+                                         "responseBody":  "={\n  \"status\": \"upstream_unavailable\",\n  \"message\": \"Could not confirm the API result. Retry with the same payload and Idempotency-Key.\"\n}",
+                                         "options":  {
+                                                         "responseCode":  502
+                                                     }
+                                     },
+                      "type":  "n8n-nodes-base.respondToWebhook",
+                      "typeVersion":  1.5,
+                      "position":  [
+                                       848,
+                                       48
+                                   ],
+                      "id":  "1866d473-bf23-4366-bd48-fda434fad63b",
+                      "name":  "Return Integration Failure"
+                  },
+                  {
+                      "parameters":  {
+                                         "jsCode":  "const response = $input.first().json;\nconst status = response.statusCode;\n\nconst unavailable = {\n  statusCode: 502,\n  body: {\n    status: \"upstream_unavailable\",\n    message:\n      \"Could not confirm the API result. Retry with the same payload and Idempotency-Key.\",\n  },\n};\n\nif (!Number.isInteger(status) || status \u003c 200 || status \u003e 599) {\n  return [{ json: unavailable }];\n}\n\ntry {\n  const body = JSON.parse(response.data);\n\n  return [{\n    json: {\n      statusCode: status,\n      body,\n    },\n  }];\n} catch {\n  if (status === 401 || status === 403) {\n    return [{\n      json: {\n        statusCode: status,\n        body: {\n          status: \"upstream_auth_error\",\n          message: \"API authentication or permission check failed.\",\n        },\n      },\n    }];\n  }\n\n  return [{ json: unavailable }];\n}"
+                                     },
+                      "type":  "n8n-nodes-base.code",
+                      "typeVersion":  2,
+                      "position":  [
+                                       832,
+                                       -144
+                                   ],
+                      "id":  "63eebd6a-9fce-49ac-9255-64ae82c5ecf8",
+                      "name":  "Normalize UC1 Response"
+                  }
+              ],
+    "connections":  {
+                        "Webhook":  {
+                                        "main":  [
+                                                     [
+                                                         {
+                                                             "node":  "Validate UC1 Order",
+                                                             "type":  "main",
+                                                             "index":  0
+                                                         }
+                                                     ]
+                                                 ]
+                                    },
+                        "Validate UC1 Order":  {
+                                                   "main":  [
+                                                                [
+                                                                    {
+                                                                        "node":  "If",
+                                                                        "type":  "main",
+                                                                        "index":  0
+                                                                    }
+                                                                ]
+                                                            ]
+                                               },
+                        "If":  {
+                                   "main":  [
+                                                [
+                                                    {
+                                                        "node":  "Create UC1 Draft",
+                                                        "type":  "main",
+                                                        "index":  0
+                                                    }
+                                                ],
+                                                [
+                                                    {
+                                                        "node":  "Return Validation Error",
+                                                        "type":  "main",
+                                                        "index":  0
+                                                    }
+                                                ]
+                                            ]
+                               },
+                        "Create UC1 Draft":  {
+                                                 "main":  [
+                                                              [
+                                                                  {
+                                                                      "node":  "Normalize UC1 Response",
+                                                                      "type":  "main",
+                                                                      "index":  0
+                                                                  }
+                                                              ],
+                                                              [
+                                                                  {
+                                                                      "node":  "Return Integration Failure",
+                                                                      "type":  "main",
+                                                                      "index":  0
+                                                                  }
+                                                              ]
+                                                          ]
+                                             },
+                        "Normalize UC1 Response":  {
+                                                       "main":  [
+                                                                    [
+                                                                        {
+                                                                            "node":  "Return Order Result",
+                                                                            "type":  "main",
+                                                                            "index":  0
+                                                                        }
+                                                                    ]
+                                                                ]
+                                                   }
+                    },
+    "settings":  {
+                     "executionOrder":  "v1",
+                     "binaryMode":  "separate"
+                 },
+    "pinData":  {
+
+                }
+}

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { createAssetConnector } from "./lib/ngsi-ld-client.mjs";
+import { loadBrokerContext } from "./lib/ngsi-ld-subscription.mjs";
 
 const configDir = new URL("../infra/config/ngsi-ld/", import.meta.url);
 
@@ -18,7 +19,7 @@ function statusOf(asset) {
 }
 
 try {
-  const context = (await readJson("context.jsonld"))["@context"];
+  const context = await loadBrokerContext();
   const seed = await readJson("seed.json");
   const template = seed.find((entity) => entity.type === "Asset");
 
