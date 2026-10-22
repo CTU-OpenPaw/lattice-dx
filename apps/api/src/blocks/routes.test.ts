@@ -44,3 +44,10 @@ test('missing query capability returns 503 and repository error statuses remain 
   for(const statusCode of [400,404,409,503] as const){find.mockRejectedValueOnce(new EntityError(statusCode,'domain'));expect((await app.inject({method:'POST',url:'/v1/blocks/entities.read/run',headers,payload:{version:1,input:{id:'12345678-1234-1234-1234-123456789abc'}}})).statusCode).toBe(statusCode);}
  }finally{await app.close();}
 });
+
+test('create block accepts an optional bounded schema publication pin without changing legacy inputs',async()=>{
+ const {findBlock,runBlock}=await import('./registry.js');const create=vi.fn(async()=>({id:'entity'}));const repository={create} as unknown as EntityRepository;const scope={actorId:'alice',organizationId:'org-a'};
+ const input={schemaId:'invoice',schemaVersion:1,title:'A',attributes:{}};
+ await expect(runBlock(findBlock('entities.create')!,repository,scope,input,'pin-key')).resolves.toEqual({id:'entity'});expect(create).toHaveBeenCalledWith(scope,input,'pin-key');
+ for(const schemaVersion of [0,2.5,2147483648,'1'])await expect(runBlock(findBlock('entities.create')!,repository,scope,{...input,schemaVersion},'pin-key')).rejects.toThrow();
+});

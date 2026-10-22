@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const {attributesFromForm,workflowForPage,moveItem,enabledSections}=require('../src/client/console-model');
+test('generic entity mutations all use the existing entity command transport',async()=>{
+ const {consoleTransport}=require('../src/client/console-model'),calls=[],payload={id:'record',body:{expectedVersion:2},key:'same'};
+ const send=consoleTransport({entity:async(operation,input)=>{calls.push([operation,input]);return input;},studio:async()=>{throw Error('wrong channel');}});
+ for(const [name,operation] of [['entityArchive','archive'],['entityLink','link'],['entityUnlink','unlink']]){await send(name,payload);assert.deepEqual(calls.at(-1),[operation,payload]);}
+});
 test('typed forms preserve booleans/decimals and reject empty required or unsafe numeric values',()=>{
  const fields={name:{type:'text',required:true},count:{type:'integer'},active:{type:'boolean'},cost:{type:'decimal'},kind:{type:'enum',choices:['a','b']}};
  assert.deepEqual(attributesFromForm(fields,{name:'A',count:'3',active:false,cost:'12.30',kind:'a'}),{name:'A',count:3,active:false,cost:'12.30',kind:'a'});

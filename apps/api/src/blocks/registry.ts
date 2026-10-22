@@ -16,7 +16,7 @@ const pageSchema=shape({items:{type:'array',items:entitySchema,maxItems:100},pag
 const filterSchema={oneOf:[shape({field:fieldName,operator:{const:'exists'}}),shape({field:fieldName,operator:{enum:['eq','ne','gt','gte','lt','lte','contains']},value:scalar})]};
 const querySchema=shape({schemaId,schemaVersion:{type:'integer',minimum:1,maximum:2147483647},filters:{type:'array',maxItems:10,items:filterSchema},sort:shape({field:fieldName,direction:{enum:['asc','desc']}}),limit:{type:'integer',minimum:1,maximum:100,default:50},offset:{type:'integer',minimum:0,maximum:Number.MAX_SAFE_INTEGER-101,default:0}},['schemaId','schemaVersion']);
 const inputs={
- create:shape({schemaId,title:entityTitle,attributes}),read:shape({id}),query:querySchema,
+ create:shape({schemaId,schemaVersion:{type:'integer',minimum:1,maximum:2147483647},title:entityTitle,attributes},['schemaId','title','attributes']),read:shape({id}),query:querySchema,
  update:shape({id,expectedVersion:positive,title:entityTitle,attributes}),archive:shape({id,expectedVersion:positive}),
  link:shape({id,expectedVersion:positive,name:fieldName,targetId:id}),unlink:shape({id,expectedVersion:positive,name:fieldName,targetId:id}),
 };
@@ -28,7 +28,7 @@ export async function runBlock(block:BlockDescriptor,repository:EntityRepository
  switch(block.id){
  case 'entities.query':{const parsed=parseEntityQuery(input);if(!repository.query)throw new EntityError(503,'Entity query is unavailable.');return repository.query(scope,parsed);}
  case 'entities.read':{const data=exact(input,['id']);return repository.find(scope,uuid(data.id));}
- case 'entities.create':{const data=exact(input,['schemaId','title','attributes']);return repository.create(scope,{schemaId:slug(data.schemaId),title:title(data.title),attributes:object(data.attributes) as Attributes},key!);}
+ case 'entities.create':{const data=exact(input,['schemaId','schemaVersion','title','attributes']);const schemaVersion=data.schemaVersion===undefined?undefined:version(data.schemaVersion);if(schemaVersion!==undefined&&schemaVersion>2147483647)bad('Invalid schema version.');return repository.create(scope,{schemaId:slug(data.schemaId),...(schemaVersion===undefined?{}:{schemaVersion}),title:title(data.title),attributes:object(data.attributes) as Attributes},key!);}
  case 'entities.update':{const data=exact(input,['id','expectedVersion','title','attributes']);return repository.update(scope,uuid(data.id),{expectedVersion:version(data.expectedVersion),title:title(data.title),attributes:object(data.attributes) as Attributes},key!);}
  case 'entities.archive':{const data=exact(input,['id','expectedVersion']);return repository.archive(scope,uuid(data.id),version(data.expectedVersion),key!);}
  case 'entities.link':case 'entities.unlink':{const data=exact(input,['id','expectedVersion','name','targetId']);const parsed={expectedVersion:version(data.expectedVersion),name:name(data.name),targetId:uuid(data.targetId)};return repository[block.id==='entities.link'?'link':'unlink'](scope,uuid(data.id),parsed,key!);}

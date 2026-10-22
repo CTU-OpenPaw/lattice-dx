@@ -85,7 +85,9 @@ export function parseManifest(value: unknown): ModuleManifest {
     dependencies.some((d) => d.id === id)
   )
     throw new WorkflowError(400, "Duplicate resource or self dependency.");
-  const bundle = parseBundle(value.bundle);
+  const bundle = parseBundle(value.bundle,{allowEmpty:true});
+  const presentation=Object.hasOwn(value,'presentation')?parsePresentation(value.presentation,bundle,schemas):undefined;
+  if(!bundle.definitions.length&&!presentation?.entityPages?.length)throw new WorkflowError(400,"Empty module requires entity pages.");
   let bindings: ModuleManifest["bindings"];
   if (Object.hasOwn(value, "bindings")) {
     if (!Array.isArray(value.bindings) || value.bindings.length > 10)
@@ -109,7 +111,7 @@ export function parseManifest(value: unknown): ModuleManifest {
       throw new WorkflowError(400, "Duplicate binding ID or workflow binding.");
   }
   return {
-    ...(Object.hasOwn(value,'presentation')?{presentation:parsePresentation(value.presentation,bundle)}:{}),
+    ...(presentation?{presentation}:{}),
     ...(bindings ? {bindings} : {}),
     format: "latticedx.enterprise-module",
     formatVersion: 1,

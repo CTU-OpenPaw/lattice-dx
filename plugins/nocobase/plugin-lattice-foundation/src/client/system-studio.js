@@ -31,6 +31,21 @@ function createSystemScreens(client, React) {
       button,
       field,
     });
+  const EntityPageDesigner =
+    require("./entity-page-designer").createEntityPageDesigner(React, {
+      h,
+      box,
+      button,
+      field,
+    });
+  const EntityPage = require("./entity-page").createEntityPage(React, {
+    h,
+    box,
+    inputStyle,
+    button,
+    field,
+    json,
+  });
   function Studio() {
     const session = useSession(),
       { api, connection, act, busy, commands } = session;
@@ -112,7 +127,9 @@ function createSystemScreens(client, React) {
       setModule(
         await api.studio("module", { id: recipe.id, version: recipe.version }),
       );
-      session.report("Đã publish các quy trình. Có thể bật hệ thống.");
+      session.report(
+        "Các lược đồ đã xuất bản khi cài gói; các quy trình đã publish. Có thể bật hệ thống.",
+      );
     }
     return h(
       Frame,
@@ -281,7 +298,7 @@ function createSystemScreens(client, React) {
                   ...r,
                   pages: r.pages.filter((_, i) => i !== index),
                 })),
-              recipe.pages.length === 1,
+              recipe.pages.length === 1 && !recipe.entityPages?.length,
             ),
             h(WorkflowDesigner, {
               page,
@@ -304,6 +321,10 @@ function createSystemScreens(client, React) {
             })),
           recipe.pages.length >= 5,
         ),
+        h(EntityPageDesigner, {
+          recipe,
+          onChange: (next) => edit(() => next),
+        }),
         h("hr"),
         button("Lưu bản nháp", () => act(save)),
         button("Kiểm tra cấu hình / tải trạng thái triển khai", () =>
@@ -326,7 +347,7 @@ function createSystemScreens(client, React) {
           h(
             "p",
             null,
-            "Thứ tự: cài gói ở trạng thái tắt → publish quy trình → bật sử dụng. Tải trạng thái lại nếu một bước bị gián đoạn. Cài lại gói có cùng nội dung là an toàn; thay đổi nội dung đã cài cần phiên bản mới.",
+            "Thứ tự: cài gói và xuất bản lược đồ ở trạng thái tắt → publish quy trình (nếu có) → bật sử dụng. Tải trạng thái lại nếu một bước bị gián đoạn. Cài lại gói có cùng nội dung là an toàn; thay đổi nội dung đã cài cần phiên bản mới. Lược đồ của gói mới cần mã mới.",
           ),
           button(
             "Cài gói cấu hình",
@@ -342,11 +363,12 @@ function createSystemScreens(client, React) {
               plan.preview.conflicts.length > 0 ||
               plan.preview.dependencyErrors.length > 0,
           ),
-          button(
-            "Publish các quy trình",
-            () => act(publish),
-            blocked || !module,
-          ),
+          plan.manifest.bundle.definitions.length > 0 &&
+            button(
+              "Publish các quy trình",
+              () => act(publish),
+              blocked || !module,
+            ),
           module &&
             button(
               module.enabled ? "Tạm dừng tạo yêu cầu mới" : "Bật sử dụng",
@@ -408,7 +430,7 @@ function createSystemScreens(client, React) {
         h(
           "p",
           null,
-          "Nhập gói recipe đã xuất. Đổi mã hệ thống để tạo hệ thống độc lập; đổi phiên bản để phát triển bản mới. Gói không chứa tài khoản, mật khẩu hoặc dữ liệu hồ sơ.",
+          "Nhập gói recipe đã xuất. Đổi mã hệ thống và mã lược đồ để tạo hệ thống độc lập; đổi phiên bản và dùng mã lược đồ mới để phát triển bản mới. Gói không chứa tài khoản, mật khẩu hoặc dữ liệu hồ sơ.",
         ),
         h("textarea", {
           value: importText,
@@ -471,7 +493,14 @@ function createSystemScreens(client, React) {
     const parts = location.pathname.split("/"),
       id = parts[3],
       version = parts[4],
-      page = system?.presentation.pages.find((p) => p.id === selectedPage),
+      pages = system
+        ? [
+            ...system.presentation.pages,
+            ...(system.presentation.entityPages || []),
+          ]
+        : [],
+      page = pages.find((p) => p.id === selectedPage),
+      dataPage = page?.schemaId ? page : null,
       definition = system?.definitions.find((d) => d.id === page?.definitionId);
     const blocked = busy || workflow.uncertain;
     async function loadCatalog(next = 0) {
@@ -511,11 +540,15 @@ function createSystemScreens(client, React) {
     useEffect(() => {
       if (connection?.connected)
         act(async () => {
-          await api.workflow("member");
           if (id) {
             const result = await api.studio("app", { id, version });
+            if (result.definitions.length) await api.workflow("member");
             setSystem(result);
-            setSelectedPage(result.presentation.pages[0]?.id || "");
+            setSelectedPage(
+              result.presentation.pages[0]?.id ||
+                result.presentation.entityPages?.[0]?.id ||
+                "",
+            );
           } else await loadCatalog();
         });
     }, [connection?.connected, id, version]);
@@ -644,7 +677,7 @@ function createSystemScreens(client, React) {
             h(
               "nav",
               null,
-              ...system.presentation.pages.map((p) =>
+              ...pages.map((p) =>
                 button(
                   p.title,
                   () => setSelectedPage(p.id),
@@ -653,6 +686,14 @@ function createSystemScreens(client, React) {
               ),
             ),
           ),
+          dataPage &&
+            h(EntityPage, {
+              key: dataPage.id,
+              session,
+              page: dataPage,
+              schemas: system.schemas || [],
+              enabled: system.enabled,
+            }),
           definition &&
             h(
               RuntimeBlocks,
