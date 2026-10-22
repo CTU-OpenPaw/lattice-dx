@@ -9,6 +9,49 @@ export class BrokerError extends Error {
   }
 }
 
+export function normalizeBrokerEntity(entity) {
+  if (
+    entity === null ||
+    typeof entity !== "object" ||
+    Array.isArray(entity)
+  ) {
+    throw new Error("Broker entity must be a JSON object");
+  }
+
+  const ns = "https://latticedx.example/ns/";
+  const attributes = new Map([
+    [ns + "businessId", "businessId"],
+    [ns + "organizationId", "organizationId"],
+    [ns + "name", "name"],
+    [ns + "status", "status"],
+    [ns + "department", "belongsToDepartment"],
+    [ns + "locatedAt", "locatedAt"],
+    [ns + "sourceEventId", "sourceEventId"],
+  ]);
+
+  const types = new Map([
+    [ns + "Asset", "Asset"],
+    [ns + "Department", "Department"],
+    [ns + "Location", "Location"],
+  ]);
+
+  const normalized = {};
+
+  for (const [key, value] of Object.entries(entity)) {
+    const target = attributes.get(key) ?? key;
+
+    if (Object.prototype.hasOwnProperty.call(normalized, target)) {
+      throw new Error(`Ambiguous broker attribute: ${target}`);
+    }
+
+    normalized[target] = value;
+  }
+
+  normalized.type = types.get(entity.type) ?? entity.type;
+
+  return normalized;
+}
+
 export function createAssetConnector({
   baseUrl = "http://localhost:1026",
   tenant = "org-a",
@@ -64,10 +107,41 @@ export function createAssetConnector({
       throw new BrokerError(response.status, data);
     }
 
-    return { status: response.status, data };
+    return {
+      status: response.status,
+      data: method === "GET" ? normalizeBrokerEntity(data) : data,
+    };
   }
 
   return {
+    async getEntity(id) {
+      if (typeof id !== "string") {
+        throw new Error("Entity ID must be a string");
+      }
+
+      const parts = id.split(":");
+
+      if (
+        parts.length !== 5 ||
+        parts[0] !== "urn" ||
+        parts[1] !== "ngsi-ld" ||
+        !["Asset", "Department", "Location"].includes(parts[2]) ||
+        parts[3] !== tenant ||
+        !/^[A-Za-z0-9_-]{1,128}$/.test(parts[4])
+      ) {
+        throw new Error("Invalid entity ID or tenant");
+      }
+
+      const result = await request(
+        "GET",
+        `/entities/${encodeURIComponent(id)}`,
+        undefined,
+        200,
+      );
+
+      return result.data;
+    },
+
     async createAsset(entity) {
       validateId(entity.id);
 

@@ -3,6 +3,10 @@ import Fastify from 'fastify';
 import { Pool } from 'pg';
 import { timingSafeEqual } from 'node:crypto';
 import type { WorkflowEvent } from '@dx/contracts';
+import {
+  enqueueAssetJob,
+  loadBrokerMapping,
+} from '../uc1-integration/enqueue.js';
 
 const databaseUrl = process.env.DATABASE_URL;
 const token = process.env.UC1_SAMPLE_TOKEN;
@@ -10,6 +14,15 @@ const tenant = process.env.UC1_SAMPLE_TENANT ?? 'org-a';
 
 if (!databaseUrl || !token?.trim()) {
   throw new Error('DATABASE_URL and UC1_SAMPLE_TOKEN are required');
+}
+
+const mappingPath = process.env.UC1_BROKER_MAPPING_FILE;
+const brokerMapping = mappingPath
+  ? loadBrokerMapping(mappingPath)
+  : undefined;
+
+if (brokerMapping && brokerMapping.organizationId !== tenant) {
+  throw new Error('Broker mapping organization must match the sample tenant');
 }
 
 const pool = new Pool({
@@ -201,6 +214,10 @@ app.post('/sample/handovers', async (request, reply) => {
        ) VALUES ($1,$2,$3,$4)`,
       [event.organizationId, event.eventId, outcome, httpStatus],
     );
+
+    if (outcome !== 'conflict' && brokerMapping) {
+  await enqueueAssetJob(client, event, brokerMapping);
+    }
 
     await client.query('COMMIT');
 

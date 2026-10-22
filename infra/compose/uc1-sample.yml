@@ -15,6 +15,9 @@ services:
       DATABASE_URL: postgres://lattice:local-demo-password@postgres:5432/lattice
       UC1_SAMPLE_TOKEN: ${UC1_SAMPLE_TOKEN:?Set UC1_SAMPLE_TOKEN in .env.integration}
       UC1_SAMPLE_TENANT: ${UC1_SAMPLE_TENANT:-org-a}
+      UC1_BROKER_MAPPING_FILE: /app/infra/config/uc1/asset-mapping.local.json
+    volumes:
+      - ../config/uc1/asset-mapping.local.json:/app/infra/config/uc1/asset-mapping.local.json:ro
     ports:
       - "127.0.0.1:4100:4100"
     depends_on:
@@ -29,3 +32,23 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+  uc1-broker-worker:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    init: true
+    command:
+      - pnpm
+      - --filter
+      - "@dx/api"
+      - exec
+      - tsx
+      - src/uc1-integration/worker-main.ts
+    environment:
+      DATABASE_URL: postgres://lattice:local-demo-password@postgres:5432/lattice
+      UC1_SAMPLE_TENANT: ${UC1_SAMPLE_TENANT:-org-a}
+      NGSI_LD_URL: http://orion-ld:1026
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 45s
