@@ -78,45 +78,45 @@ Bằng chứng: TC-I04/I05/I06, PostgreSQL acceptance; khi mô phỏng timeout g
 
 ### Task 3 — Đồng bộ bàn giao ra hệ thống mẫu
 
-- [ ]  Review workflow `uc1-handover.json`, durable inbox và sample endpoint.
-- [ ]  Event hợp lệ được lưu trước khi trả 202; đọc được pending/processing/succeeded/failed.
-- [ ]  Kiểm tra log attempt và lastError đã lọc secret.
-- [ ]  Tái hiện lỗi downstream, backoff có giới hạn và failed sau tối đa 5 attempt.
-- [ ]  Retry thủ công giữ eventId/payload; retry cùng decision key không reset ngân sách nhiều lần.
-- [ ]  Sample sink nhận payload gốc đúng một logical record cho eventId.
-- [ ]  Ghi bằng chứng và commit thay đổi phát sinh.
+- [X]  Review workflow `uc1-handover.json`, durable inbox và sample endpoint.
+- [X]  Event hợp lệ được lưu trước khi trả 202; đọc được pending/processing/succeeded/failed.
+- [X]  Kiểm tra log attempt và lastError đã lọc secret.
+- [X]  Tái hiện lỗi downstream, backoff có giới hạn và failed sau tối đa 5 attempt.
+- [X]  Retry thủ công giữ eventId/payload; retry cùng decision key không reset ngân sách nhiều lần.
+- [X]  Sample sink nhận payload gốc đúng một logical record cho eventId.
+- [X]  Ghi bằng chứng và commit thay đổi phát sinh.
 
 202 xác nhận nhận bền vững, không xác nhận hai đích đã đồng bộ. Code hiện ghi broker rồi gọi sample; nghiệm thu live task này phụ thuộc broker của task 5. Khi broker còn lỗi chỉ ghi kết quả unit/SQL, để checklist live mở.
 
 ### Task 4 — Mapping bàn giao → Asset
 
 - [ ]  Chốt với Duy ý nghĩa business assetId, departmentId và locationId trong envelope.
-- [ ]  Kiểm tra business ID/full URN đều dẫn đến đúng một URN, không ghép URN hai lần.
-- [ ]  Kiểm tenant, type, businessId của Department và Location đích.
-- [ ]  Chỉ map ngữ cảnh cần dùng; không đẩy dữ liệu kế toán/giao dịch lên broker.
-- [ ]  Giữ occurredAt gốc trong inbox; ghi rõ observedAt broker dùng độ phân giải giây.
-- [ ]  Ghi bằng chứng và commit thay đổi phát sinh.
+- [X]  Kiểm tra business ID/full URN đều dẫn đến đúng một URN, không ghép URN hai lần.
+- [X]  Kiểm tenant, type, businessId của Department và Location đích.
+- [X]  Chỉ map ngữ cảnh cần dùng; không đẩy dữ liệu kế toán/giao dịch lên broker.
+- [X]  Giữ occurredAt gốc trong inbox; ghi rõ observedAt broker dùng độ phân giải giây.
+- [X]  Ghi bằng chứng và commit thay đổi phát sinh.
 
 ### Task 5 — Job bàn giao → connector broker, upsert/retry
 
-- [ ]  Khôi phục Orion-LD và kiểm /version; xác nhận Department/Location fixture đúng tenant.
-- [ ]  Chạy controlled handover smoke, phân biệt với event thật từ backend outbox.
-- [ ]  Kiểm create, update, create race, timeout sau ghi, replay và sample-failure retry.
-- [ ]  Kiểm event cũ/equal-time conflict không ghi đè trạng thái mới.
-- [ ]  Cùng event chạy lại: không tăng số Asset cho cùng URN.
+- [X]  Khôi phục Orion-LD và kiểm /version; xác nhận Department/Location fixture đúng tenant.
+- [X]  Chạy controlled handover smoke, phân biệt với event thật từ backend outbox.
+- [X]  Kiểm create, update, create race, timeout sau ghi, replay và sample-failure retry.
+- [X]  Kiểm event cũ/equal-time conflict không ghi đè trạng thái mới.
+- [X]  Cùng event chạy lại: không tăng số Asset cho cùng URN.
 - [ ]  Thống nhất routing outbox chung với Duy trước khi bật worker backend.
-- [ ]  Thực hiện bàn giao thật qua UI/API; theo dõi backend job → n8n → inbox → broker/sample.
-- [ ]  Restart broker nguyên volume, đọc lại Asset, replay vẫn đúng một Asset.
-- [ ]  Ghi bằng chứng và commit sửa lỗi/regression nếu có.
+- [X]  Thực hiện bàn giao thật qua UI/API; theo dõi backend job → n8n → inbox → broker/sample.
+- [X]  Restart broker nguyên volume, đọc lại Asset, replay vẫn đúng một Asset.
+- [X]  Ghi bằng chứng và commit sửa lỗi/regression nếu có.
 
 ### Task 6 — Dữ liệu nguồn, thời điểm và trace
 
-- [ ]  Đối chiếu sourceSystem/sourceRecordId → intake receipt → backend runId.
-- [ ]  Đối chiếu eventId/runId/version/occurredAt → assetURN → sample receipt.
-- [ ]  Có receivedAt/updatedAt, trạng thái và attempt history để điều tra lỗi.
-- [ ]  Retry/restart không mất payload nguồn và không thay danh tính Asset.
-- [ ]  Kiểm quyền đọc trace; source token không có quyền operator/retry.
-- [ ]  Lưu bằng chứng đã lọc secret và cập nhật hướng dẫn người dùng/dev.
+- [X]  Đối chiếu sourceSystem/sourceRecordId → intake receipt → backend runId.
+- [X]  Đối chiếu eventId/runId/version/occurredAt → assetURN → sample receipt.
+- [X]  Có receivedAt/updatedAt, trạng thái và attempt history để điều tra lỗi.
+- [X]  Retry/restart không mất payload nguồn và không thay danh tính Asset.
+- [X]  Kiểm quyền đọc trace; source token không có quyền operator/retry.
+- [X]  Lưu bằng chứng đã lọc secret và cập nhật hướng dẫn người dùng/dev.
 
 ## 4. Nhật ký bằng chứng
 
