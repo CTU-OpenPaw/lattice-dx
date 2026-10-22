@@ -2,6 +2,7 @@
 export * from './actions';
 export * from './workflows';
 export * from './expressions';
+export * from './workspace';
 export interface DemoRequest { message: string }
 export interface DemoResult { mode: 'demo'; summary: string }
 
