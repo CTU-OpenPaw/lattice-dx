@@ -164,10 +164,11 @@ function createBridge(config, dependencies = {}) {
       if(query)path+='?'+query;
       if(write){
         if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!object(input.body))invalid();
-        const allowed={create:['schemaId','title','attributes'],update:['expectedVersion','title','attributes'],archive:['expectedVersion']}[operation];
+        const allowed={create:['schemaId','schemaVersion','title','attributes'],update:['expectedVersion','title','attributes'],archive:['expectedVersion']}[operation];
         if(Object.keys(input.body).some(k=>!allowed.includes(k)))invalid();
         if(operation!=='archive'&&(typeof input.body.title!=='string'||!input.body.title.trim()||Array.from(input.body.title.trim()).length>200||!object(input.body.attributes)))invalid();
         if(operation==='create'&&(typeof input.body.schemaId!=='string'||!/^[a-z][a-z0-9-]{0,63}$/.test(input.body.schemaId)))invalid();
+        if(operation==='create'&&input.body.schemaVersion!==undefined&&(!Number.isInteger(input.body.schemaVersion)||input.body.schemaVersion<1||input.body.schemaVersion>2147483647))invalid();
         if(operation!=='create'&&(!Number.isSafeInteger(input.body.expectedVersion)||input.body.expectedVersion<1))invalid();
         if(Buffer.byteLength(JSON.stringify(input.body),'utf8')>65536)throw new BridgeError(413,'Entity command too large.');
       }else if(input.body!==undefined||input.key!==undefined)invalid();

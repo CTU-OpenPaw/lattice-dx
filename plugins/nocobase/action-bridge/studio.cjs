@@ -15,6 +15,22 @@ function studioRequest(input, BridgeError, validatedQuery) {
   )
     bad();
   const operations = {
+    catalog: ["GET", "studio/catalog"],
+    schemas: ["GET", "entity-schemas"],
+    schema: ["GET", "entity-schemas"],
+    createSchema: ["POST", "entity-schemas"],
+    saveSchema: ["PUT", "entity-schemas"],
+    publishSchema: ["POST", "entity-schemas"],
+    publishedSchema: ["GET", "entity-schemas"],
+    departments: ["GET", "organization/departments"],
+    createDepartment: ["POST", "organization/departments"],
+    updateDepartment: ["PATCH", "organization/departments"],
+    departmentHistory: ["GET", "organization/departments"],
+    diagnostics: ["GET", "operations/diagnostics"],
+    queues: ["GET", "operations/queues"],
+    entityHistory: ["GET", "entities"],
+    shares: ["GET", "entities"],
+    share: ["POST", "entities"],
     drafts: ["GET", "system-drafts"],
     draft: ["GET", "system-drafts"],
     save: ["POST", "system-drafts"],
@@ -37,6 +53,15 @@ function studioRequest(input, BridgeError, validatedQuery) {
   const { operation, id, version } = input;
   const needsId =
     [
+      "schema",
+      "saveSchema",
+      "publishSchema",
+      "publishedSchema",
+      "updateDepartment",
+      "departmentHistory",
+      "entityHistory",
+      "shares",
+      "share",
       "draft",
       "module",
       "audit",
@@ -47,7 +72,10 @@ function studioRequest(input, BridgeError, validatedQuery) {
     ].includes(operation) ||
     (operation === "save" && id !== undefined);
   if (needsId) {
-    if (typeof id !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(id)) bad();
+    const idPattern = ["entityHistory", "shares", "share"].includes(operation)
+      ? /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      : /^[a-z][a-z0-9-]{0,63}$/;
+    if (typeof id !== "string" || !idPattern.test(id)) bad();
     path += "/" + id;
   } else if (id !== undefined) bad();
   if (["module", "audit", "enable", "app"].includes(operation)) {
@@ -57,14 +85,25 @@ function studioRequest(input, BridgeError, validatedQuery) {
     )
       bad();
     path += "/versions/" + version;
+  } else if (operation === "publishedSchema") {
+    if (
+      typeof version !== "number" || !Number.isInteger(version) ||
+      version < 1 || version > 2147483647
+    ) bad();
+    path += "/versions/" + version;
   } else if (version !== undefined) bad();
   if (operation === "save" && id !== undefined) method = "PUT";
   if (operation === "audit") path += "/audit";
   if (operation === "enable") path += "/enabled";
-  if (operation === "publish") path += "/publish";
+  if (["publish", "publishSchema"].includes(operation)) path += "/publish";
+  if (["departmentHistory", "entityHistory"].includes(operation)) path += "/history";
+  if (["shares", "share"].includes(operation)) path += "/shares";
   if (
     input.query !== undefined &&
-    !["drafts", "apps", "audit"].includes(operation)
+    ![
+      "drafts", "apps", "audit", "schemas", "departments",
+      "departmentHistory", "entityHistory", "shares",
+    ].includes(operation)
   )
     bad();
   const query = validatedQuery(input.query, ["limit", "offset", "q"]);

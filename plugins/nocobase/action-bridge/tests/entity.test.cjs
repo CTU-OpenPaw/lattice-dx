@@ -10,6 +10,12 @@ async function fixture(){
  const start=bridge.connect('noco');await bridge.callback({state:new URL(start.authorizationUrl).searchParams.get('state'),code:'fixture'},start.browserId);
  return {calls,bridge,browserId:start.browserId,deny:value=>{status=value;}};
 }
+test('entity bridge preserves an explicit schema publication and rejects malformed pins',async()=>{
+ const {bridge,browserId,calls}=await fixture(),body={schemaId:'assets',schemaVersion:1,title:'Pinned',attributes:{}};
+ await bridge.entity('noco',browserId,{operation:'create',body,key:'pin'});assert.equal(JSON.parse(calls.at(-1).options.body).schemaVersion,1);
+ const count=calls.length;for(const schemaVersion of [0,-1,'1',1.1,2147483648])await assert.rejects(bridge.entity('noco',browserId,{operation:'create',body:{...body,schemaVersion},key:'bad'}),{status:400});assert.equal(calls.length,count);
+ bridge.disconnect('noco',browserId);
+});
 test('entity commands use fixed paths, backend envelopes and the same supplied key on replay',async()=>{
  const {bridge,browserId,calls}=await fixture();
  await bridge.entity('noco',browserId,{operation:'list',query:{schemaId:'incident-rule',limit:'50',offset:'0'}});

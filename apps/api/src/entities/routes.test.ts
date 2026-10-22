@@ -60,6 +60,16 @@ test('all entity endpoints require signed capability and signed tenant',async()=
     expect((await app.inject({url:'/v1/entity-schemas',headers:{authorization:`Bearer ${await token(['data:read'])}`}})).statusCode).toBe(403);
   } finally {await app.close();}
 });
+test('creation accepts an explicit published schema version without accepting authority fields',async()=>{
+ const {app,entities}=setup();const headers={authorization:'Bearer '+await token(['data:write']),'idempotency-key':'pinned-create'};
+ try{
+  const payload={schemaId:'invoice',schemaVersion:1,title:'Pinned',attributes:{}};
+  expect((await app.inject({method:'POST',url:'/v1/entities',headers,payload})).statusCode).toBe(201);
+  expect(entities.create).toHaveBeenCalledWith({actorId:'alice',organizationId:'org-a'},payload,'pinned-create');
+  expect((await app.inject({method:'POST',url:'/v1/entities',headers,payload:{...payload,schemaVersion:0}})).statusCode).toBe(400);
+  expect((await app.inject({method:'POST',url:'/v1/entities',headers,payload:{...payload,organizationId:'other'}})).statusCode).toBe(400);
+ }finally{await app.close();}
+});
 
 test('domain errors map to their status and malformed or repeated command headers reject before storage',async()=>{
   const {app,entities}=setup();

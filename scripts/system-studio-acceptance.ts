@@ -22,10 +22,19 @@ async function main() {
   database = await connectRecords(url.href);
   pool = new Pool({ connectionString: url.href });
   const roles = {
-    designer: ["workflow:design", "data:design"],
+    designer: [
+      "workflow:design",
+      "data:design",
+      "data:read",
+      "data:write",
+      "data:share",
+      "directory:read",
+      "directory:manage",
+    ],
     employee: ["workflow:start", "employee", "directory:read"],
     manager: ["procurement:manager"],
-    handler: ["logistics:warehouse"],
+    handler: ["logistics:warehouse", "data:read"],
+    finance: ["finance:manager"],
     wrong: ["logistics:warehouse"],
     irrelevant: ["unrelated"],
   };
@@ -71,6 +80,8 @@ async function main() {
       definitionRegistry,
       foundation,
       directory,
+      organization,
+      entities,
     } = database!;
     app = createApi({
       workerUrl: "http://unused.invalid",
@@ -82,6 +93,8 @@ async function main() {
       definitionRegistry,
       foundation,
       directory,
+      organization,
+      entities,
     });
   }
   open();
@@ -387,6 +400,222 @@ async function main() {
     "designer",
     201,
   );
+  const department = await call(
+    "/v1/organization/departments",
+    "POST",
+    { id: "finance", name: "Finance", parentId: null, managerId: "finance" },
+    "designer",
+    201,
+  );
+  assert.equal(department.version, 1);
+  await call(
+    "/v1/organization/departments",
+    "POST",
+    { id: "blocked", name: "Blocked", parentId: null, managerId: null },
+    "employee",
+    403,
+  );
+  const schema = {
+    id: "company-assets",
+    title: "Assets",
+    fields: {
+      serial: { type: "text", required: true },
+      count: { type: "integer" },
+      active: { type: "boolean" },
+    },
+    relations: {},
+  };
+  await call("/v1/entity-schemas", "POST", schema, "designer", 201);
+  await call("/v1/entity-schemas/company-assets/publish", "POST", {
+    expectedRevision: 1,
+  });
+  let asset = await call(
+    "/v1/entities",
+    "POST",
+    {
+      schemaId: schema.id,
+      title: "Warehouse scanner",
+      attributes: { serial: "ABC", count: 2, active: false },
+    },
+    "designer",
+    201,
+  );
+  await call("/v1/entity-schemas/company-assets", "PUT", {
+    expectedRevision: 1,
+    title: schema.title,
+    fields: { ...schema.fields, newField: { type: "text", required: true } },
+    relations: {},
+  });
+  await call("/v1/entity-schemas/company-assets/publish", "POST", {
+    expectedRevision: 2,
+  });
+  const pinnedAsset = await call(
+    "/v1/entities",
+    "POST",
+    {
+      schemaId: schema.id,
+      schemaVersion: 1,
+      title: "Version one form",
+      attributes: { serial: "PINNED" },
+    },
+    "designer",
+    201,
+  );
+  assert.equal(pinnedAsset.schemaVersion, 1);
+  await call(
+    "/v1/entities",
+    "POST",
+    {
+      schemaId: schema.id,
+      title: "Latest requires newField",
+      attributes: { serial: "LATEST" },
+    },
+    "designer",
+    400,
+  );
+  await call("/v1/entities/" + asset.id, "GET", undefined, "handler", 404);
+  asset = await call("/v1/entities/" + asset.id + "/shares", "POST", {
+    expectedVersion: asset.version,
+    principal: { kind: "person", id: "handler" },
+    permission: "read",
+  });
+  assert.equal(
+    (await call("/v1/entities/" + asset.id, "GET", undefined, "handler"))
+      .attributes.active,
+    false,
+  );
+  await call("/v1/entities/" + asset.id, "GET", undefined, "foreign", 404);
+  const customRecipe = {
+    ...recipe,
+    id: "custom-review",
+    pages: [
+      {
+        ...recipe.pages[0],
+        blocks: ["list", "create", "detail", "history"],
+        workflow: {
+          initialState: "draft",
+          assignedStates: ["approved", "completed"],
+          transitions: [
+            {
+              id: "submit",
+              from: "draft",
+              to: "submitted",
+              role: "employee",
+              ownerOnly: true,
+              fields: {},
+            },
+            {
+              id: "review",
+              from: "submitted",
+              to: "finance-pending",
+              role: "procurement:manager",
+              fields: {},
+            },
+            {
+              id: "finance-approve",
+              from: "finance-pending",
+              to: "approved",
+              role: "finance:manager",
+              fields: { financeNote: "text" },
+              task: "assign",
+            },
+            {
+              id: "complete",
+              from: "approved",
+              to: "completed",
+              role: "logistics:warehouse",
+              assigneeField: "handlerId",
+              fields: { receiptNote: "text" },
+              task: "complete",
+            },
+          ],
+        },
+      },
+    ],
+  };
+  const customPlan = await call("/v1/studio/system-plan", "POST", {
+    recipe: customRecipe,
+  });
+  const customModule = await call(
+      "/v1/enterprise-modules/install",
+      "POST",
+      { manifest: customPlan.manifest },
+      "designer",
+      201,
+    ),
+    customId = customPlan.manifest.bundle.definitions[0].id;
+  await call("/v1/workflow-drafts/" + customId + "/publish", "POST", {
+    expectedRevision: 1,
+  });
+  await call(
+    "/v1/enterprise-modules/custom-review/versions/1.0.0/enabled",
+    "POST",
+    { expectedRevision: customModule.revision, enabled: true },
+  );
+  const financeApp = await call(
+    "/v1/system-apps/custom-review/versions/1.0.0",
+    "GET",
+    undefined,
+    "finance",
+  );
+  assert.deepEqual(financeApp.presentation.pages[0].blocks, [
+    "list",
+    "create",
+    "detail",
+    "history",
+  ]);
+  let customRun = await call(
+      "/v1/workflows",
+      "POST",
+      { ...creation, definitionId: customId },
+      "employee",
+      201,
+    ),
+    customPath = "/v1/workflows/" + customRun.id;
+  customRun = await call(
+    customPath + "/transitions",
+    "POST",
+    { action: "submit", expectedVersion: customRun.version, input: {} },
+    "employee",
+  );
+  customRun = await call(
+    customPath + "/transitions",
+    "POST",
+    { action: "review", expectedVersion: customRun.version, input: {} },
+    "manager",
+  );
+  await call(
+    customPath + "/transitions",
+    "POST",
+    {
+      action: "finance-approve",
+      expectedVersion: customRun.version,
+      input: { financeNote: "wrong actor" },
+    },
+    "manager",
+    403,
+  );
+  customRun = await call(
+    customPath + "/transitions",
+    "POST",
+    {
+      action: "finance-approve",
+      expectedVersion: customRun.version,
+      input: { financeNote: "Budget checked" },
+    },
+    "finance",
+  );
+  customRun = await call(
+    customPath + "/transitions",
+    "POST",
+    {
+      action: "complete",
+      expectedVersion: customRun.version,
+      input: { receiptNote: "Delivered" },
+    },
+    "handler",
+  );
+  assert.equal(customRun.state, "completed");
   await app!.close();
   await database.close();
   database = await connectRecords(url.href);
