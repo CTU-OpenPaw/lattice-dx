@@ -11,6 +11,7 @@ import {createFilesystemStore} from './files/filesystem-store.js';
 import {startFileStorageWorker} from './files/storage-worker.js';
 import {bootstrapRuntime,startConfiguredWorkers} from './operations/runtime-lifecycle.js';
 import {createTelemetry,type WorkerId,type WorkerObserver} from './operations/telemetry.js';
+import {createHandoverBroker} from './ngsi-ld/handover-broker.js';
 
 const telemetry=createTelemetry();
 const observer=(worker:WorkerId):WorkerObserver=>(result,duration)=>telemetry.recordWorker(worker,result,duration);
@@ -21,7 +22,11 @@ const runtime=await bootstrapRuntime(process.env,{
   const token=process.env.NGSI_LD_NOTIFICATION_TOKEN,tenant=process.env.NGSI_LD_TENANT??'org-a';
   const ngsiLd=token?{token,tenant,subscriptionId:process.env.NGSI_LD_SUBSCRIPTION_ID||`urn:ngsi-ld:Subscription:latticedx:${tenant}:asset-context-v1`,repository:database?.ngsiLdContext}:undefined;
   const identity=config.identity?{issuer:config.identity.issuer,audience:config.identity.audience,key:createRemoteJWKSet(new URL(config.identity.jwksUrl))}:undefined;
-  return createApi({workerUrl:config.workerUrl,identity,ngsiLd,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
+  const handoverToken=process.env.ASSET_HANDOVER_TOKEN;
+  const broker=handoverToken?createHandoverBroker({baseUrl:process.env.ASSET_HANDOVER_BROKER_URL||'http://orion-ld:1026',tenant}):undefined;
+  if(handoverToken&&!database)throw Error('Asset handover requires PostgreSQL');
+  const assetHandover=handoverToken?{token:handoverToken,tenant,deliver:(event:Parameters<NonNullable<typeof database>['assetHandover']>[0])=>database!.assetHandover(event,broker!)}:undefined;
+  return createApi({workerUrl:config.workerUrl,identity,ngsiLd,assetHandover,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
    agents:database?.agents,entities:database?.entities,contextLinks:database?.contextLinks,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
    definitionRegistry:database?.definitionRegistry,directory:database?.directory,workflows:database?.workflows,readSharedFile:database?.workflows.readSharedFile,
    scan:config.scanner?content=>scanWithClamd(content,config.scanner!.host,config.scanner!.port):undefined});

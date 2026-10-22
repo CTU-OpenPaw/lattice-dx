@@ -1,0 +1,35 @@
+{
+  "name": "LatticeDX - UC1 Asset Handover",
+  "active": false,
+  "nodes": [
+    {
+      "id": "uc1-handover-webhook", "name": "Receive Handover", "type": "n8n-nodes-base.webhook", "typeVersion": 2.1, "position": [0, 0], "webhookId": "latticedx-uc1-handover",
+      "parameters": {"httpMethod": "POST", "path": "latticedx/uc1/handovers", "authentication": "headerAuth", "responseMode": "responseNode", "options": {}},
+      "credentials": {"httpHeaderAuth": {"name": "LatticeDX UC1 Handover Webhook"}}
+    },
+    {
+      "id": "uc1-handover-adapter", "name": "Synchronize Asset", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.5, "position": [260, 0], "onError": "continueErrorOutput", "retryOnFail": false,
+      "parameters": {
+        "method": "POST", "url": "http://api:4000/v1/integrations/asset-handovers", "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true, "headerParameters": {"parameters": [{"name": "Idempotency-Key", "value": "={{ $json.headers['idempotency-key'] || '' }}"}]},
+        "sendBody": true, "specifyBody": "json", "jsonBody": "={{ $json.body }}",
+        "options": {"timeout": 8000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"fullResponse": true, "neverError": true, "responseFormat": "json"}}}
+      },
+      "credentials": {"httpHeaderAuth": {"name": "LatticeDX UC1 Handover Adapter"}}
+    },
+    {
+      "id": "uc1-handover-response", "name": "Return Synchronization Result", "type": "n8n-nodes-base.respondToWebhook", "typeVersion": 1.5, "position": [520, -80],
+      "parameters": {"respondWith": "json", "responseBody": "={{ $json.body }}", "options": {"responseCode": "={{ $json.statusCode }}"}}
+    },
+    {
+      "id": "uc1-handover-failure", "name": "Return Delivery Failure", "type": "n8n-nodes-base.respondToWebhook", "typeVersion": 1.5, "position": [520, 100],
+      "parameters": {"respondWith": "json", "responseBody": "{\"error\":\"handover_adapter_unavailable\"}", "options": {"responseCode": 502}}
+    }
+  ],
+  "connections": {
+    "Receive Handover": {"main": [[{"node": "Synchronize Asset", "type": "main", "index": 0}]]},
+    "Synchronize Asset": {"main": [[{"node": "Return Synchronization Result", "type": "main", "index": 0}], [{"node": "Return Delivery Failure", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1", "saveDataSuccessExecution": "none", "saveDataErrorExecution": "none", "saveManualExecutions": false, "executionTimeout": 15},
+  "pinData": {}
+}

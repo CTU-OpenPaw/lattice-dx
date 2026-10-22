@@ -3,6 +3,12 @@ import {parseRuntimeConfig} from './runtime-config.js';
 
 const flags=['ENTITY_AUTOMATION_WORKER','WORKFLOW_TIMER_WORKER','WORKFLOW_WAIT_TIMEOUT_WORKER','WORKFLOW_OUTBOX_WORKER','FILE_STORAGE_WORKER'] as const;
 const enabled={DATABASE_URL:'postgres://localhost/test',FILE_STORAGE_PROVIDER:'filesystem',FILE_STORAGE_ROOT:process.cwd(),WORKFLOW_EVENT_URL:'https://example.com/events',WORKFLOW_EVENT_TOKEN:'secret'};
+test('outbox routing scope requires both event type and an exact UTC cutoff',()=>{
+ const scope={WORKFLOW_OUTBOX_EVENT_TYPE:'asset.handed_over',WORKFLOW_OUTBOX_CREATED_AFTER:'2026-10-21T00:00:00.000Z',WORKFLOW_OUTBOX_ORGANIZATION_ID:'org-a'};
+ expect(parseRuntimeConfig({...enabled,...scope}).connector?.selection).toEqual({eventType:scope.WORKFLOW_OUTBOX_EVENT_TYPE,createdAfter:scope.WORKFLOW_OUTBOX_CREATED_AFTER,organizationId:'org-a'});
+ for(const patch of [{WORKFLOW_OUTBOX_EVENT_TYPE:'asset.handed_over'},{WORKFLOW_OUTBOX_CREATED_AFTER:scope.WORKFLOW_OUTBOX_CREATED_AFTER},{...scope,WORKFLOW_OUTBOX_CREATED_AFTER:'bad'},{...scope,WORKFLOW_OUTBOX_EVENT_TYPE:'bad sql;'}])expect(()=>parseRuntimeConfig({...enabled,...patch})).toThrow();
+ expect(parseRuntimeConfig({...enabled,WORKFLOW_OUTBOX_EVENT_TYPE:'',WORKFLOW_OUTBOX_CREATED_AFTER:''}).connector?.selection).toBeUndefined();
+});
 test('all workers require explicit true',()=>{
  expect(Object.values(parseRuntimeConfig({}).workers)).toEqual([false,false,false,false,false]);
  for(const flag of flags){expect(Object.values(parseRuntimeConfig({...enabled,[flag]:'false'}).workers).every(v=>!v)).toBe(true);expect(Object.values(parseRuntimeConfig({...enabled,[flag]:'true'}).workers).filter(Boolean)).toHaveLength(1);}
