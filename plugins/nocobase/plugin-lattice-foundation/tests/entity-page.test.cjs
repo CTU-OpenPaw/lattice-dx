@@ -63,5 +63,3 @@ for(const action of ['link','unlink'])test('accepted '+action+' retains its new 
  await assert.rejects(find(tree,n=>n.type==='button'&&n.children.includes(action==='link'?'Thêm liên kết':'Gỡ liên kết')).props.onClick(),/Relations unavailable/);
  tree=f.render();await assert.rejects(find(tree,n=>n.type==='button'&&n.children.includes('Lưu thay đổi')).props.onClick(),/Relations unavailable/);assert.equal(f.writes[1].payload.body.expectedVersion,9);
 });
-
-
