@@ -6,7 +6,6 @@ COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
 COPY packages/contracts ./packages/contracts
 COPY apps/api ./apps/api
 COPY solutions/workflows ./solutions/workflows
-COPY solutions/workflows ./solutions/workflows
 COPY scripts/lib/ngsi-ld-client.mjs ./scripts/lib/ngsi-ld-client.mjs
 COPY infra/config/ngsi-ld/context.jsonld ./infra/config/ngsi-ld/context.jsonld
 RUN pnpm install --frozen-lockfile --filter @dx/api...

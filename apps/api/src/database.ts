@@ -12,6 +12,8 @@ import { workflowDatabase } from './workflows/database.js';
 import { workflowJobDatabase } from './workflows/job-database.js';
 import { entityDatabase } from './entities/database.js';
 import {ngsiLdDatabase} from './ngsi-ld/database.js';
+import {handoverDatabase} from './ngsi-ld/handover-database.js';
+import {systemDatabase} from './systems/database.js';
 import { entityDataToolsDatabase } from './entities/data-tools-database.js';
 import {reportsDatabase} from './entities/reports-database.js';
 import { organizationDatabase } from './organization/database.js';
@@ -22,7 +24,7 @@ import {automationsDatabase} from './automations/database.js';
 import {contextLinksDatabase} from './context-links/database.js';
 import type {ObjectStore} from './files/object-store.js';
 import {assertFileStorageReadable,offloadOneFile} from './files/storage-database.js';
-export async function connectRecords(connectionString: string,options:{store?:ObjectStore;projectionEnabled?:boolean}={}) {
+export async function connectRecords(connectionString: string,options:{store?:ObjectStore;projectionEnabled?:boolean;outboxSelection?:{eventType:string;createdAfter:string;organizationId:string}}={}) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
     const repository=await recordDatabase(pool);
@@ -35,13 +37,15 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const events=await eventsDatabase(pool,definitionRegistry,workflows);
     const entities=await entityDatabase(pool);
     const ngsiLdContext=await ngsiLdDatabase(pool);
+    const assetHandover=await handoverDatabase(pool);
     const contextLinks=await contextLinksDatabase(pool,entities,{projectionEnabled:options.projectionEnabled===true});
     const automations=await automationsDatabase(pool,definitionRegistry,workflows);
     const dataTools=await entityDataToolsDatabase(pool,options.store);
     const reports=await reportsDatabase(pool);
     const modules=await modulesDatabase(pool,workflows);
+    const systems=await systemDatabase(pool);
     const taskLifecycle=await taskLifecycleDatabase(pool);
-    return {ngsiLdContext,agents:agentDatabase(pool,definitionRegistry,options.store),repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool),
+    return {systems,assetHandover,ngsiLdContext,agents:agentDatabase(pool,definitionRegistry,options.store),repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool,options.outboxSelection),
       offloadFile:async()=>{if(!options.store)throw new Error('File storage is not configured');return offloadOneFile(pool,options.store);},close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }

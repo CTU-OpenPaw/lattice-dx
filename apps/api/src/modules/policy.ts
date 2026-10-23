@@ -6,6 +6,7 @@ import { bundleKeys, parseBundle } from "../workflows/bundles.js";
 import { findBlock } from "../blocks/registry.js";
 import { WorkflowError } from "../workflows/policy.js";
 import type { ModuleManifest } from "./types.js";
+import {parsePresentation} from '../systems/presentation.js';
 export function semver(value: unknown): string {
   if (
     typeof value !== "string" ||
@@ -46,6 +47,7 @@ export function parseManifest(value: unknown): ModuleManifest {
     "blocks",
     "dependencies",
     ...(value && typeof value === "object" && Object.hasOwn(value,"bindings") ? ["bindings"] : []),
+    ...(value && typeof value === "object" && Object.hasOwn(value,"presentation") ? ["presentation"] : []),
   ]);
   if (
     Buffer.byteLength(canonicalJson(value)) > 128 * 1024 ||
@@ -83,7 +85,9 @@ export function parseManifest(value: unknown): ModuleManifest {
     dependencies.some((d) => d.id === id)
   )
     throw new WorkflowError(400, "Duplicate resource or self dependency.");
-  const bundle = parseBundle(value.bundle);
+  const bundle = parseBundle(value.bundle,{allowEmpty:true});
+  const presentation=Object.hasOwn(value,'presentation')?parsePresentation(value.presentation,bundle,schemas):undefined;
+  if(!bundle.definitions.length&&!presentation?.entityPages?.length)throw new WorkflowError(400,"Empty module requires entity pages.");
   let bindings: ModuleManifest["bindings"];
   if (Object.hasOwn(value, "bindings")) {
     if (!Array.isArray(value.bindings) || value.bindings.length > 10)
@@ -107,6 +111,7 @@ export function parseManifest(value: unknown): ModuleManifest {
       throw new WorkflowError(400, "Duplicate binding ID or workflow binding.");
   }
   return {
+    ...(presentation?{presentation}:{}),
     ...(bindings ? {bindings} : {}),
     format: "latticedx.enterprise-module",
     formatVersion: 1,

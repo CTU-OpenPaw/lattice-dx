@@ -134,7 +134,7 @@ Bàn giao/hoàn thành lưu run, audit, liên kết tệp, kết quả idempoten
 }
 ```
 
-Đặt `WORKFLOW_EVENT_URL` và `WORKFLOW_EVENT_TOKEN` trong môi trường Compose, recreate API để bật worker. URL phải truy cập được từ container, chẳng hạn endpoint n8n trong mạng chung hoặc `host.docker.internal` nếu receiver chạy trên host. Đây là cấu hình server cố định, không nhận URL từ trình duyệt. Không cấu hình URL thì job giữ pending; URL có mà token thiếu làm startup báo lỗi.
+Đặt `WORKFLOW_EVENT_URL`, `WORKFLOW_EVENT_TOKEN` và `WORKFLOW_OUTBOX_WORKER=true` trong môi trường Compose, recreate API để bật worker sau khi receiver và backlog đã được rà soát. Chỉ đặt URL/token không tự bật worker. URL phải truy cập được từ container, chẳng hạn endpoint n8n trong mạng chung hoặc `host.docker.internal` nếu receiver chạy trên host. Đây là cấu hình server cố định, không nhận URL từ trình duyệt. Worker tắt thì job giữ pending; cặp URL/token thiếu một giá trị làm startup báo lỗi. Xem [bàn giao producer UC1](uc1-backend-handoff.md) để xuất payload thật và phân biệt acknowledge với broker đã đồng bộ.
 
 Worker POST JSON, `Authorization: Bearer <configured-token>`, `Idempotency-Key: <eventId>`, timeout 10 giây, không theo redirect. Receiver cần xác minh token, lưu event bền vững trước khi trả 2xx, khử lặp theo eventId và ánh xạ entity NGSI-LD theo organization/assetId. HTTP 2xx chỉ xác nhận receiver đã nhận; không chứng minh broker đã đồng bộ nếu receiver còn xử lý bất đồng bộ.
 

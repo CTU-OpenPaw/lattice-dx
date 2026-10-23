@@ -210,7 +210,7 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
       input={...input,title:title(input.title)};
       let schema:SchemaPublication;
       return runEntityCommand(pool,scope,'entity.create',key,input,async client=>{
-        schema=await publication(client,scope,input.schemaId);
+        schema=await publication(client,scope,input.schemaId,input.schemaVersion);
       },async client=>{
         return createEntityAtPublication(client,scope,{...input,schemaVersion:schema.version});
       },async(client,accepted)=>{

@@ -65,8 +65,10 @@ export function registerEntities(app:FastifyInstance,options:EntityOptions) {
     return repository.publishSchema(scope,slug(params(request).id),version(body.expectedRevision));
   });
   route('POST','/v1/entities','data:write',async(request,repository,scope)=>{
-    const body=exact(request.body,['schemaId','title','attributes']);
-    return repository.create(scope,{schemaId:slug(body.schemaId),title:title(body.title),attributes:attributes(body.attributes)},commandKey(request));
+    const body=exact(request.body,['schemaId','schemaVersion','title','attributes']);
+    const schemaVersion=body.schemaVersion===undefined?undefined:version(body.schemaVersion);
+    if(schemaVersion!==undefined&&schemaVersion>2147483647)bad('Invalid schema version.');
+    return repository.create(scope,{schemaId:slug(body.schemaId),...(schemaVersion===undefined?{}:{schemaVersion}),title:title(body.title),attributes:attributes(body.attributes)},commandKey(request));
   },201);
   route('GET','/v1/entities','data:read',async(request,repository,scope)=>repository.list(scope,page(request,true)));
   route('POST','/v1/entities/aggregate','data:read',aggregateRoute);

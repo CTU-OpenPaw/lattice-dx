@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 'use strict';
 const { randomBytes, createHash } = require('node:crypto');
+const {studioRequest}=require('./studio.cjs');
 
 class BridgeError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -141,10 +142,41 @@ function createBridge(config, dependencies = {}) {
       const headers={authorization:`Bearer ${item.token}`,...(method==='POST'?{'content-type':'application/json'}:{}),...(write?{'idempotency-key':input.key}:{})};
       return request(`${config.gatewayUrl}/v1/${path}`,{method,headers,...(method==='POST'?{body:JSON.stringify(write?input.body:{})}:{})},'Workflow request failed; reload or retry only the same command key.',true);
     },
+    async studio(userId,browserId,input){
+      const item=session(userId,browserId),command=studioRequest(input,BridgeError,validatedQuery);
+      return request(`${config.gatewayUrl}/v1/${command.path}`,{method:command.method,headers:{authorization:`Bearer ${item.token}`,...(command.body?{'content-type':'application/json','idempotency-key':command.key}:{})},...(command.body?{body:command.body}:{})},'Studio request failed; reload before retrying the same command.',true);
+    },
     async entity(userId,browserId,input){
       const item=session(userId,browserId);
-      if(!input||typeof input!=='object'||Array.isArray(input)||Object.keys(input).some(k=>!['operation','id'].includes(k))||input.operation!=='detail'||typeof input.id!=='string'||! /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))throw new BridgeError(400,'Invalid entity read operation.');
-      return request(`${config.gatewayUrl}/v1/entities/${input.id}`,{method:'GET',headers:{authorization:`Bearer ${item.token}`}},'Entity read failed.',true);
+      const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
+      const invalid=()=>{throw new BridgeError(400,'Invalid entity operation.');};
+      const operations={list:'GET',detail:'GET',create:'POST',update:'PATCH',archive:'POST',relations:'GET',link:'POST',unlink:'DELETE'};
+      if(!object(input)||Object.keys(input).some(k=>!['operation','id','body','key','query'].includes(k))||typeof input.operation!=='string'||!Object.hasOwn(operations,input.operation))invalid();
+      const {operation}=input,write=['create','update','archive','link','unlink'].includes(operation);
+      let path='entities';
+      if(['detail','update','archive','relations','link','unlink'].includes(operation)){
+        if(typeof input.id!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id))invalid();
+        path+='/'+input.id+(operation==='archive'?'/archive':['relations','link','unlink'].includes(operation)?'/relations':'');
+      }else if(input.id!==undefined)invalid();
+      if(!['list','relations'].includes(operation)&&input.query!==undefined)invalid();
+      const query=validatedQuery(input.query,operation==='relations'?['limit','offset']:['schemaId','limit','offset','q']);
+      if(input.query?.schemaId!==undefined&&!/^[a-z][a-z0-9-]{0,63}$/.test(input.query.schemaId))invalid();
+      if(query)path+='?'+query;
+      if(write){
+        if(typeof input.key!=='string'||!/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)||!object(input.body))invalid();
+        const allowed={create:['schemaId','schemaVersion','title','attributes'],update:['expectedVersion','title','attributes'],archive:['expectedVersion'],link:['expectedVersion','name','targetId'],unlink:['expectedVersion','name','targetId']}[operation];
+        if(Object.keys(input.body).some(k=>!allowed.includes(k)))invalid();
+        if(['create','update'].includes(operation)&&(typeof input.body.title!=='string'||!input.body.title.trim()||Array.from(input.body.title.trim()).length>200||!object(input.body.attributes)))invalid();
+        if(operation==='create'&&(typeof input.body.schemaId!=='string'||!/^[a-z][a-z0-9-]{0,63}$/.test(input.body.schemaId)))invalid();
+        if(operation==='create'&&input.body.schemaVersion!==undefined&&(!Number.isInteger(input.body.schemaVersion)||input.body.schemaVersion<1||input.body.schemaVersion>2147483647))invalid();
+        if(operation!=='create'&&(!Number.isSafeInteger(input.body.expectedVersion)||input.body.expectedVersion<1))invalid();
+        if(['link','unlink'].includes(operation)){
+          if(typeof input.body.name!=='string'||!/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(input.body.name)||typeof input.body.targetId!=='string'||!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.body.targetId))invalid();
+          if(operation==='unlink')path+='/'+input.body.name+'/'+input.body.targetId;
+        }
+        if(Buffer.byteLength(JSON.stringify(input.body),'utf8')>65536)throw new BridgeError(413,'Entity command too large.');
+      }else if(input.body!==undefined||input.key!==undefined)invalid();
+      return request(`${config.gatewayUrl}/v1/${path}`,{method:operations[operation],headers:{authorization:`Bearer ${item.token}`,...(write?{'content-type':'application/json','idempotency-key':input.key}:{})},...(write?{body:JSON.stringify(operation==='unlink'?{expectedVersion:input.body.expectedVersion}:input.body)}:{})},'Entity request failed; reload before retrying the same command key.',true);
     },
     async list(userId, browserId, resource, query) {
       if (!['records','tasks'].includes(resource)) throw new BridgeError(400, 'Unsupported list resource.');

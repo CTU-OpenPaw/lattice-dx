@@ -1,267 +1,35 @@
 {
-    "name":  "LatticeDX - UC1 Handover Sync",
-    "active":  false,
-    "nodes":  [
-                  {
-                      "parameters":  {
-                                         "httpMethod":  "POST",
-                                         "path":  "latticedx/uc1/handovers",
-                                         "authentication":  "headerAuth",
-                                         "responseMode":  "responseNode",
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.webhook",
-                      "typeVersion":  2.2,
-                      "position":  [
-                                       -1616,
-                                       -144
-                                   ],
-                      "id":  "8afd794b-bbd2-4162-becd-10aabbb523fa",
-                      "name":  "Webhook",
-                      "webhookId":  "4b9350f3-98ad-415e-b097-ef5dd90b62b2",
-                      "credentials":  {
-                                          "httpHeaderAuth":  {
-                                                                 "name":  "LatticeDX UC1 Handover Webhook"
-                                                             }
-                                      }
-                  },
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const { body, headers = {} } = $input.first().json;\nconst errors = [];\n\nconst isObject = value =\u003e\n  value !== null \u0026\u0026\n  typeof value === \"object\" \u0026\u0026\n  !Array.isArray(value);\n\nconst boundedText = (value, max = 255) =\u003e\n  typeof value === \"string\" \u0026\u0026\n  value.trim().length \u003e 0 \u0026\u0026\n  value.length \u003c= max \u0026\u0026\n  !/[\\u0000-\\u001f\\u007f]/.test(value);\n\nif (!isObject(body)) {\n  return [{\n    json: {\n      valid: false,\n      errors: [\"Body must be a JSON object\"],\n    },\n  }];\n}\n\n// Validate the event envelope without changing source values.\nfor (const field of [\n  \"eventId\",\n  \"organizationId\",\n  \"runId\",\n  \"recordId\",\n]) {\n  if (!boundedText(body[field])) {\n    errors.push(`${field}: nonblank string, maximum 255 characters`);\n  }\n}\n\nif (body.eventType !== \"asset.handed_over\") {\n  errors.push(\"eventType: must be asset.handed_over\");\n}\n\nif (body.definitionId !== \"procurement\") {\n  errors.push(\"definitionId: must be procurement\");\n}\n\nif (!Number.isSafeInteger(body.version) || body.version \u003c 1) {\n  errors.push(\"version: positive safe integer required\");\n}\n\n// Require a valid UTC timestamp, including valid calendar components.\nconst timestamp = body.occurredAt;\nconst timestampShape =\n  typeof timestamp === \"string\" \u0026\u0026\n  /^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?Z$/.test(timestamp);\n\nconst parsedTime = timestampShape ? Date.parse(timestamp) : NaN;\n\nif (\n  !Number.isFinite(parsedTime) ||\n  new Date(parsedTime).toISOString().slice(0, 19) !== timestamp.slice(0, 19)\n) {\n  errors.push(\"occurredAt: valid UTC ISO 8601 timestamp required\");\n}\n\n// WorkflowEvent.data is Record\u003cstring, string\u003e.\nif (!isObject(body.data)) {\n  errors.push(\"data: JSON object required\");\n} else if (Object.values(body.data).some(value =\u003e typeof value !== \"string\")) {\n  errors.push(\"data: all values must be strings\");\n}\n\n// Required fields from the procurement v1 handover transition.\nif (isObject(body.data)) {\n  const requiredFields = [\n    \"assetId\",\n    \"recipientId\",\n    \"departmentId\",\n    \"locationId\",\n    \"attachmentId\",\n  ];\n\n  for (const field of requiredFields) {\n    const value = body.data[field];\n\n    if (\n      typeof value !== \"string\" ||\n      !value.trim() ||\n      /[\\u0000-\\u001f\\u007f]/.test(value)\n    ) {\n      errors.push(\n        `data.${field}: nonblank string without control characters required`\n      );\n    }\n  }\n}\n\nconst keyEntries = Object.entries(headers).filter(\n  ([name]) =\u003e name.toLowerCase() === \"idempotency-key\"\n);\nconst key = keyEntries[0]?.[1];\n\nif (\n  keyEntries.length !== 1 ||\n  typeof key !== \"string\" ||\n  !/^[A-Za-z0-9._:-]{1,128}$/.test(key)\n) {\n  errors.push(\"Idempotency-Key: invalid or missing\");\n} else if (key !== body.eventId) {\n  errors.push(\"Idempotency-Key: must equal eventId\");\n}\n\nreturn [{\n  json: {\n    valid: errors.length === 0,\n    errors,\n    ...(errors.length === 0\n      ? { payload: body, idempotencyKey: key }\n      : {}),\n  },\n}];"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       -1424,
-                                       -144
-                                   ],
-                      "id":  "9d3de965-1baa-4cb9-9c54-8c90b1f924b1",
-                      "name":  "Validate Handover Event"
-                  },
-                  {
-                      "parameters":  {
-                                         "conditions":  {
-                                                            "options":  {
-                                                                            "caseSensitive":  true,
-                                                                            "leftValue":  "",
-                                                                            "typeValidation":  "strict",
-                                                                            "version":  3
-                                                                        },
-                                                            "conditions":  [
-                                                                               {
-                                                                                   "id":  "f6b4e821-467a-4447-aef3-0f51cea2a35f",
-                                                                                   "leftValue":  "={{ $json.valid }}",
-                                                                                   "rightValue":  "",
-                                                                                   "operator":  {
-                                                                                                    "type":  "boolean",
-                                                                                                    "operation":  "true",
-                                                                                                    "singleValue":  true
-                                                                                                }
-                                                                               }
-                                                                           ],
-                                                            "combinator":  "and"
-                                                        },
-                                         "options":  {
-
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.if",
-                      "typeVersion":  2.3,
-                      "position":  [
-                                       -1200,
-                                       -144
-                                   ],
-                      "id":  "e4a7fd1e-2559-40ca-aea9-a78b671a8bd6",
-                      "name":  "Is Valid Handover Event"
-                  },
-                  {
-                      "parameters":  {
-                                         "respondWith":  "json",
-                                         "responseBody":  "={{ { status: \"invalid_payload\", errors: $json.errors } }}",
-                                         "options":  {
-                                                         "responseCode":  400
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.respondToWebhook",
-                      "typeVersion":  1.5,
-                      "position":  [
-                                       -976,
-                                       -48
-                                   ],
-                      "id":  "956ff50f-003e-4050-af9e-0bcf1ef9220d",
-                      "name":  "Return Invalid Handover"
-                  },
-                  {
-                      "parameters":  {
-                                         "method":  "POST",
-                                         "url":  "http://uc1-sample:4100/sample/handovers",
-                                         "authentication":  "genericCredentialType",
-                                         "genericAuthType":  "httpHeaderAuth",
-                                         "sendHeaders":  true,
-                                         "headerParameters":  {
-                                                                  "parameters":  [
-                                                                                     {
-                                                                                         "name":  "Idempotency-Key",
-                                                                                         "value":  "={{ $json.idempotencyKey }}"
-                                                                                     }
-                                                                                 ]
-                                                              },
-                                         "sendBody":  true,
-                                         "specifyBody":  "json",
-                                         "jsonBody":  "={{ $json.payload }}",
-                                         "options":  {
-                                                         "response":  {
-                                                                          "response":  {
-                                                                                           "fullResponse":  true,
-                                                                                           "neverError":  true,
-                                                                                           "responseFormat":  "text"
-                                                                                       }
-                                                                      },
-                                                         "timeout":  5000
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.httpRequest",
-                      "typeVersion":  4.5,
-                      "position":  [
-                                       -976,
-                                       -224
-                                   ],
-                      "id":  "f134cab4-c1e0-4aef-a32a-709aef036183",
-                      "name":  "Send Handover to Sample",
-                      "credentials":  {
-                                          "httpHeaderAuth":  {
-                                                                 "name":  "LatticeDX UC1 Sample API"
-                                                             }
-                                      },
-                      "onError":  "continueErrorOutput",
-                      "retryOnFail":  false
-                  },
-                  {
-                      "parameters":  {
-                                         "jsCode":  "const response = $input.first().json;\n\nconst unavailable = {\n  statusCode: 502,\n  body: {\n    status: \"sample_unavailable\",\n    message:\n      \"Could not confirm delivery. Retry with the same eventId, payload and Idempotency-Key.\",\n  },\n};\n\nconst statusCode = response.statusCode;\n\nif (\n  !Number.isInteger(statusCode) ||\n  statusCode \u003c 200 ||\n  statusCode \u003e 599\n) {\n  return [{ json: unavailable }];\n}\n\ntry {\n  const body = JSON.parse(response.data);\n\n  if (body === null || typeof body !== \"object\" || Array.isArray(body)) {\n    return [{ json: unavailable }];\n  }\n\n  return [{ json: { statusCode, body } }];\n} catch {\n  if (statusCode === 401 || statusCode === 403) {\n    return [{\n      json: {\n        statusCode,\n        body: {\n          status: \"sample_auth_error\",\n          message: \"Sample system authentication failed.\",\n        },\n      },\n    }];\n  }\n\n  return [{ json: unavailable }];\n}"
-                                     },
-                      "type":  "n8n-nodes-base.code",
-                      "typeVersion":  2,
-                      "position":  [
-                                       -752,
-                                       -320
-                                   ],
-                      "id":  "f065c21b-9ac4-4e3e-9324-516a61ce703b",
-                      "name":  "Normalize Sample Response"
-                  },
-                  {
-                      "parameters":  {
-                                         "respondWith":  "json",
-                                         "responseBody":  "={{ $json.body }}",
-                                         "options":  {
-                                                         "responseCode":  "={{ $json.statusCode }}"
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.respondToWebhook",
-                      "typeVersion":  1.5,
-                      "position":  [
-                                       -528,
-                                       -320
-                                   ],
-                      "id":  "d8fdaaaf-7573-427a-ae0e-8ee303b36316",
-                      "name":  "Return Handover Result"
-                  },
-                  {
-                      "parameters":  {
-                                         "respondWith":  "json",
-                                         "responseBody":  "={\n  \"status\": \"sample_unavailable\",\n  \"message\": \"Could not confirm delivery. Retry with the same eventId, payload and Idempotency-Key.\"\n}",
-                                         "options":  {
-                                                         "responseCode":  502
-                                                     }
-                                     },
-                      "type":  "n8n-nodes-base.respondToWebhook",
-                      "typeVersion":  1.5,
-                      "position":  [
-                                       -752,
-                                       -128
-                                   ],
-                      "id":  "fbc18b16-46b6-45d1-81cc-cd254be8debd",
-                      "name":  "Return Sample Unavailable"
-                  }
-              ],
-    "connections":  {
-                        "Webhook":  {
-                                        "main":  [
-                                                     [
-                                                         {
-                                                             "node":  "Validate Handover Event",
-                                                             "type":  "main",
-                                                             "index":  0
-                                                         }
-                                                     ]
-                                                 ]
-                                    },
-                        "Validate Handover Event":  {
-                                                        "main":  [
-                                                                     [
-                                                                         {
-                                                                             "node":  "Is Valid Handover Event",
-                                                                             "type":  "main",
-                                                                             "index":  0
-                                                                         }
-                                                                     ]
-                                                                 ]
-                                                    },
-                        "Is Valid Handover Event":  {
-                                                        "main":  [
-                                                                     [
-                                                                         {
-                                                                             "node":  "Send Handover to Sample",
-                                                                             "type":  "main",
-                                                                             "index":  0
-                                                                         }
-                                                                     ],
-                                                                     [
-                                                                         {
-                                                                             "node":  "Return Invalid Handover",
-                                                                             "type":  "main",
-                                                                             "index":  0
-                                                                         }
-                                                                     ]
-                                                                 ]
-                                                    },
-                        "Send Handover to Sample":  {
-                                                        "main":  [
-                                                                     [
-                                                                         {
-                                                                             "node":  "Normalize Sample Response",
-                                                                             "type":  "main",
-                                                                             "index":  0
-                                                                         }
-                                                                     ],
-                                                                     [
-                                                                         {
-                                                                             "node":  "Return Sample Unavailable",
-                                                                             "type":  "main",
-                                                                             "index":  0
-                                                                         }
-                                                                     ]
-                                                                 ]
-                                                    },
-                        "Normalize Sample Response":  {
-                                                          "main":  [
-                                                                       [
-                                                                           {
-                                                                               "node":  "Return Handover Result",
-                                                                               "type":  "main",
-                                                                               "index":  0
-                                                                           }
-                                                                       ]
-                                                                   ]
-                                                      }
-                    },
-    "settings":  {
-                     "executionOrder":  "v1",
-                     "binaryMode":  "separate"
-                 },
-    "pinData":  {
-
-                }
+  "name": "LatticeDX - UC1 Asset Handover",
+  "active": false,
+  "nodes": [
+    {
+      "id": "uc1-handover-webhook", "name": "Receive Handover", "type": "n8n-nodes-base.webhook", "typeVersion": 2.1, "position": [0, 0], "webhookId": "latticedx-uc1-handover",
+      "parameters": {"httpMethod": "POST", "path": "latticedx/uc1/handovers", "authentication": "headerAuth", "responseMode": "responseNode", "options": {}},
+      "credentials": {"httpHeaderAuth": {"name": "LatticeDX UC1 Handover Webhook"}}
+    },
+    {
+      "id": "uc1-handover-adapter", "name": "Synchronize Asset", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.5, "position": [260, 0], "onError": "continueErrorOutput", "retryOnFail": false,
+      "parameters": {
+        "method": "POST", "url": "http://api:4000/v1/integrations/asset-handovers", "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true, "headerParameters": {"parameters": [{"name": "Idempotency-Key", "value": "={{ $json.headers['idempotency-key'] || '' }}"}]},
+        "sendBody": true, "specifyBody": "json", "jsonBody": "={{ $json.body }}",
+        "options": {"timeout": 8000, "redirect": {"redirect": {"followRedirects": false}}, "response": {"response": {"fullResponse": true, "neverError": true, "responseFormat": "json"}}}
+      },
+      "credentials": {"httpHeaderAuth": {"name": "LatticeDX UC1 Handover Adapter"}}
+    },
+    {
+      "id": "uc1-handover-response", "name": "Return Synchronization Result", "type": "n8n-nodes-base.respondToWebhook", "typeVersion": 1.5, "position": [520, -80],
+      "parameters": {"respondWith": "json", "responseBody": "={{ $json.body }}", "options": {"responseCode": "={{ $json.statusCode }}"}}
+    },
+    {
+      "id": "uc1-handover-failure", "name": "Return Delivery Failure", "type": "n8n-nodes-base.respondToWebhook", "typeVersion": 1.5, "position": [520, 100],
+      "parameters": {"respondWith": "json", "responseBody": "{\"error\":\"handover_adapter_unavailable\"}", "options": {"responseCode": 502}}
+    }
+  ],
+  "connections": {
+    "Receive Handover": {"main": [[{"node": "Synchronize Asset", "type": "main", "index": 0}]]},
+    "Synchronize Asset": {"main": [[{"node": "Return Synchronization Result", "type": "main", "index": 0}], [{"node": "Return Delivery Failure", "type": "main", "index": 0}]]}
+  },
+  "settings": {"executionOrder": "v1", "saveDataSuccessExecution": "none", "saveDataErrorExecution": "none", "saveManualExecutions": false, "executionTimeout": 15},
+  "pinData": {}
 }

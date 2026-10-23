@@ -1,6 +1,11 @@
 import {expect,test,vi} from 'vitest';
 import {bootstrapRuntime,createRuntimeDrain,startConfiguredWorkers} from './runtime-lifecycle.js';
 import {parseRuntimeConfig} from './runtime-config.js';
+test('validated outbox selection reaches the database connection before workers start',async()=>{
+ const connect=vi.fn(async()=>({close:async()=>{}})),selection={eventType:'asset.handed_over',createdAfter:'2026-10-21T00:00:00.000Z',organizationId:'org-a'};
+ const runtime=await bootstrapRuntime({DATABASE_URL:'postgres://localhost/test',WORKFLOW_EVENT_URL:'http://n8n/events',WORKFLOW_EVENT_TOKEN:'fixture',WORKFLOW_OUTBOX_EVENT_TYPE:selection.eventType,WORKFLOW_OUTBOX_CREATED_AFTER:selection.createdAfter,WORKFLOW_OUTBOX_ORGANIZATION_ID:selection.organizationId},{connect,createApp:()=>({addHook(){},listen:async()=>{},close:async()=>{}})});
+ expect(connect).toHaveBeenCalledWith('postgres://localhost/test',{store:undefined,outboxSelection:selection});await runtime.close();
+});
 
 test('host activates only explicitly enabled worker factories',()=>{
  const factories={automations:vi.fn(),timers:vi.fn(),waitTimeouts:vi.fn(),outbox:vi.fn(),fileStorage:vi.fn()},add=vi.fn();

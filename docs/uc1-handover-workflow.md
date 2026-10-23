@@ -11,11 +11,11 @@ It does not yet map events to NGSI-LD Assets or update the broker.
 
 ## Files
 
-- Workflow: `infra/config/n8n/uc1-handover.json`
+- Workflow: `infra/config/n8n/uc1-handover-sample.json`
 - Sample server: `apps/api/src/uc1-sample/server.ts`
 - Database schema: `infra/config/uc1/sample-system.sql`
 - Compose overlay: `infra/compose/uc1-sample.yml`
-- Workflow tests: `tests/uc1-handover-workflow.test.ts`
+- Workflow tests: `tests/uc1-handover-sample-workflow.test.ts`
 
 ## Local setup
 
@@ -57,7 +57,7 @@ The workflow calls `http://uc1-sample:4100/sample/handovers`.
 
 ## n8n configuration
 
-Import `infra/config/n8n/uc1-handover.json`.
+Import `infra/config/n8n/uc1-handover-sample.json`.
 
 Configure two separate Header Auth credentials:
 
@@ -74,10 +74,10 @@ pinned execution data. Select local credentials after importing.
 
 Use the test URL while the editor is listening:
 
-`POST http://localhost:5678/webhook-test/latticedx/uc1/handovers`
+`POST http://localhost:5678/webhook-test/latticedx/uc1/sample/handovers`
 
 Re-arm the test listener before each request. For a published workflow,
-use `/webhook/latticedx/uc1/handovers`.
+use `/webhook/latticedx/uc1/sample/handovers`.
 
 ## Event contract
 
@@ -178,7 +178,7 @@ docker run --rm `
     node:24.15.0-alpine `
     node node_modules/vitest/vitest.mjs run `
     tests/uc1-intake-workflow.test.ts `
-    tests/uc1-handover-workflow.test.ts
+    tests/uc1-handover-sample-workflow.test.ts
 ```
 
 ## Remaining verification and integration

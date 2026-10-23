@@ -16,7 +16,7 @@ class ActionBridgePlugin extends Plugin {
     const bridge = createBridge({ callbackUrl, gatewayUrl, clientId: 'dx-nocobase',
       authorizationUrl: `${publicIssuer}/protocol/openid-connect/auth`, tokenUrl: `${internalIssuer}/protocol/openid-connect/token`, userinfoUrl: `${internalIssuer}/protocol/openid-connect/userinfo` });
     const cookies = { httpOnly: true, sameSite: 'lax', secure: callback.protocol === 'https:', signed: false, path: '/api', overwrite: true };
-    const methods = { connect: 'POST', callback: 'GET', status: 'GET', catalog: 'GET', list: 'GET', run: 'POST', files: 'POST', workflow: 'POST', entity: 'POST', logistics: 'POST', disconnect: 'POST' };
+    const methods = { connect: 'POST', callback: 'GET', status: 'GET', catalog: 'GET', list: 'GET', run: 'POST', files: 'POST', workflow: 'POST', studio: 'POST', entity: 'POST', logistics: 'POST', disconnect: 'POST' };
     const actions = {};
     for (const [name, method] of Object.entries(methods)) {
       actions[name] = async (ctx, next) => {
@@ -43,6 +43,7 @@ class ActionBridgePlugin extends Plugin {
             else if (name === 'run') ctx.body = await bridge.run(userId, browserId, ctx.request.body);
             else if (name === 'files') ctx.body = await bridge.files(userId, browserId, ctx.request.body);
             else if (name === 'workflow') ctx.body = await bridge.workflow(userId, browserId, ctx.request.body);
+            else if (name === 'studio') ctx.body = await bridge.studio(userId,browserId,ctx.request.body);
             else if (name === 'entity') ctx.body = await bridge.entity(userId, browserId, ctx.request.body);
             else if (name === 'logistics') ctx.body = await bridge.logistics(userId, browserId, ctx.request.body);
             else {
@@ -60,7 +61,7 @@ class ActionBridgePlugin extends Plugin {
     }
     this.app.resourceManager.define({ name: 'dxActions', actions });
     this.app.acl.allow('dxActions', 'callback', 'public');
-    for (const name of ['connect', 'status', 'catalog', 'list', 'run', 'files', 'workflow', 'entity', 'logistics', 'disconnect']) this.app.acl.allow('dxActions', name, 'loggedIn');
+    for (const name of ['connect', 'status', 'catalog', 'list', 'run', 'files', 'workflow', 'studio', 'entity', 'logistics', 'disconnect']) this.app.acl.allow('dxActions', name, 'loggedIn');
   }
 }
 module.exports = ActionBridgePlugin;
