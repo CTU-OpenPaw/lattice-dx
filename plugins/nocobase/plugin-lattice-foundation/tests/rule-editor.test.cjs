@@ -198,6 +198,20 @@ test('RuleEditor renders rule list with status, conditions and severity tags', a
   assert.ok(content.includes('Đã tắt'));
   assert.ok(fixture.calls.some(call => call.url === 'http://gateway/v1/entities?schemaId=incident-rule&limit=100&offset=0'));
   assert.ok(fixture.calls.some(call => call.url === 'http://gateway/v1/entities?schemaId=incident-asset&limit=100&offset=0'));
+
+  const connection = { ...fixture.connection };
+  const renderWithScope = () => env.render(() => RuleEditor({ api, connection }));
+  find(tree, node => node.props?.['data-testid'] === 'open-create-rule-btn').props.onClick();
+  tree = renderWithScope();
+  const threshold = find(tree, node => node.props?.['data-testid'] === 'rule-threshold-input');
+  assert.deepEqual(threshold.children.map(option => option.props.value), ['0', '5', '10', '15', '20', '25', '30', '35', '40', '50', '60', '70', '80', '90', '100']);
+
+  // During the render before the new account's effect runs, old records are hidden.
+  connection.identity = { subject: 'bob', organizationId: 'org-2' };
+  tree = renderWithScope();
+  assert.equal(JSON.stringify(tree).includes(sampleRules[0].title), false);
+  await tick();
+  renderWithScope();
   fixture.close();
 });
 

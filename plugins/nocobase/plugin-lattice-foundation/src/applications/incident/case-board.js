@@ -150,6 +150,10 @@ function createCaseBoardComponent(React) {
     const [cases, setCases] = React.useState([]);
     const [assets, setAssets] = React.useState([]);
     const [departments, setDepartments] = React.useState([]);
+    const [dataScope, setDataScope] = React.useState(scope);
+    const visibleCases = dataScope === scope ? cases : [];
+    const visibleAssets = dataScope === scope ? assets : [];
+    const visibleDepartments = dataScope === scope ? departments : [];
     const [loading, setLoading] = React.useState(false);
     const [error, setError] = React.useState('');
     const [successMessage, setSuccessMessage] = React.useState('');
@@ -185,6 +189,7 @@ function createCaseBoardComponent(React) {
           setCases([]);
           setAssets([]);
           setDepartments([]);
+          setDataScope(requestScope);
           setLoading(false);
         }
         return;
@@ -196,7 +201,8 @@ function createCaseBoardComponent(React) {
         const res = await api.workflow('list', {
           query: { definitionId: 'incident-response', limit: '100', offset: '0' }
         });
-        const loadedCases = Array.isArray(res?.items) ? res.items.map(item => ({
+        if (!Array.isArray(res?.items)) throw new Error('Dữ liệu danh sách workflow sự cố không hợp lệ.');
+        const loadedCases = res.items.map(item => ({
           id: item.id,
           title: item.title,
           status: item.state || item.status || 'open',
@@ -207,12 +213,11 @@ function createCaseBoardComponent(React) {
           notificationId: item.notificationId || item.data?.notificationId || '',
           createdAt: item.createdAt || new Date().toISOString(),
           updatedAt: item.updatedAt || new Date().toISOString(),
-          proposal: item.proposal || item.data?.proposal,
           resolutionNote: item.resolutionNote || item.data?.resolutionNote || '',
           closeNote: item.closeNote || item.data?.closeNote || '',
           data: item.data || {},
           availableTransitions: item.availableTransitions || []
-        })) : [];
+        }));
         if (!current()) return;
         setCases(loadedCases);
       } catch (err) {
@@ -242,7 +247,10 @@ function createCaseBoardComponent(React) {
           setDepartments([]);
         }
       }
-      if (current()) setLoading(false);
+      if (current()) {
+        setDataScope(requestScope);
+        setLoading(false);
+      }
     }, [api, connected, scope]);
 
     React.useEffect(() => {
@@ -256,6 +264,7 @@ function createCaseBoardComponent(React) {
       setSuccessMessage('');
       setActionBusy(false);
       setActionNote('');
+      setDataScope(null);
       if (connected) loadData();
       else setLoading(false);
       return () => { loadEpoch.current++; };
@@ -270,14 +279,14 @@ function createCaseBoardComponent(React) {
 
     const assetMap = React.useMemo(() => {
       const map = {};
-      for (const a of assets) {
+      for (const a of visibleAssets) {
         map[a.id] = a;
       }
       return map;
-    }, [assets]);
+    }, [visibleAssets]);
 
     const filteredCases = React.useMemo(() => {
-      return cases.filter(c => {
+      return visibleCases.filter(c => {
         if (filterStatus !== 'all' && c.status !== filterStatus) return false;
         if (filterSeverity !== 'all' && c.severity !== filterSeverity) return false;
         if (filterHandler !== 'all' && c.handlerId !== filterHandler) return false;
@@ -297,7 +306,7 @@ function createCaseBoardComponent(React) {
         }
         return true;
       });
-    }, [cases, filterStatus, filterSeverity, filterHandler, filterAsset, filterDepartment, searchQuery, assetMap]);
+    }, [visibleCases, filterStatus, filterSeverity, filterHandler, filterAsset, filterDepartment, searchQuery, assetMap]);
 
     const handleCreateCase = e => {
       e.preventDefault();
@@ -667,7 +676,7 @@ function createCaseBoardComponent(React) {
           style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff', maxWidth: 180 }
         },
           h('option', { value: 'all' }, 'Tài sản: Tất cả'),
-          ...assets.map(a => h('option', { key: a.id, value: a.id }, a.title || a.id.slice(-8)))
+          ...visibleAssets.map(a => h('option', { key: a.id, value: a.id }, a.title || a.id.slice(-8)))
         ),
         h('select', {
           'data-testid': 'lattice-filter-department',
@@ -676,7 +685,7 @@ function createCaseBoardComponent(React) {
           style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff', maxWidth: 180 }
         },
           h('option', { value: 'all' }, 'Đơn vị: Tất cả'),
-          ...departments.map(d => h('option', { key: d.id, value: d.name || d.id }, d.name || d.code || d.id))
+          ...visibleDepartments.map(d => h('option', { key: d.id, value: d.name || d.id }, d.name || d.code || d.id))
         ),
         h('div', { style: { marginLeft: 'auto', display: 'flex', borderRadius: 6, overflow: 'hidden', border: '1px solid #cbd5e1' } },
           h('button', {
@@ -713,7 +722,7 @@ function createCaseBoardComponent(React) {
       viewMode === 'board' ? renderBoardView() : renderListView(),
 
       // Modal / Drawer chi tiết sự cố & thao tác workflow
-      selectedCase && h('div', {
+      selectedCase && dataScope === scope && h('div', {
         'data-testid': 'lattice-case-detail-modal',
         style: {
           position: 'fixed',
@@ -940,7 +949,6 @@ function createCaseBoardComponent(React) {
             api,
             connection,
             caseItem: selectedCase,
-            proposal: selectedCase.proposal,
             onApprove: () => { loadData(); setSelectedCase(null); },
             onReject: () => { loadData(); setSelectedCase(null); },
             onRework: () => { loadData(); setSelectedCase(null); }
@@ -956,7 +964,7 @@ function createCaseBoardComponent(React) {
             connected,
             selectedId: selectedCase.id,
             run: selectedCase,
-            actorId: api.connection?.identity?.subject || 'user',
+            actorId,
             onUploaded: () => loadData()
           })),
 
@@ -970,7 +978,7 @@ function createCaseBoardComponent(React) {
             connected,
             selectedId: selectedCase.id,
             run: selectedCase,
-            actorId: api.connection?.identity?.subject || 'user',
+            actorId,
             actorName: api.connection?.identity?.username || 'User',
             canReadDirectory: true
           })),
@@ -984,7 +992,7 @@ function createCaseBoardComponent(React) {
             api,
             connected,
             selectedId: selectedCase.id,
-            actorId: api.connection?.identity?.subject || 'user',
+            actorId,
             actorName: api.connection?.identity?.username || 'User',
             canReadDirectory: true,
             onSaved: () => loadData()
@@ -1008,7 +1016,7 @@ function createCaseBoardComponent(React) {
                 entityVersion: 1
               }
             },
-            actorId: api.connection?.identity?.subject || 'user'
+            actorId
           }))
         )
       ),
@@ -1074,7 +1082,7 @@ function createCaseBoardComponent(React) {
               style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff' }
             },
               h('option', { value: '' }, '-- Chọn tài sản giám sát --'),
-              ...assets.map(a => h('option', { key: a.id, value: a.id }, `${a.title || a.id.slice(-8)} (${a.schemaId})`))
+              ...visibleAssets.map(a => h('option', { key: a.id, value: a.id }, `${a.title || a.id.slice(-8)} (${a.schemaId})`))
             )
           ),
 

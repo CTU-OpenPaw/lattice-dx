@@ -24,6 +24,9 @@ function createRuleEditorComponent(React) {
     lte: '≤'
   };
 
+  // Keep this form aligned with solutions/workflows/incident-module.json.
+  const thresholdChoices = ['0', '5', '10', '15', '20', '25', '30', '35', '40', '50', '60', '70', '80', '90', '100'];
+
   const severityColors = {
 
     low: { bg: '#e6f4ff', color: '#0958d9', border: '#91caff', label: 'Thấp' },
@@ -56,6 +59,9 @@ function createRuleEditorComponent(React) {
     const loadEpoch = React.useRef(0);
     const [rules, setRules] = React.useState([]);
     const [assets, setAssets] = React.useState([]);
+    const [dataScope, setDataScope] = React.useState(scope);
+    const visibleRules = dataScope === scope ? rules : [];
+    const visibleAssets = dataScope === scope ? assets : [];
     const [loading, setLoading] = React.useState(false);
     const [error, setError] = React.useState('');
     const [successMessage, setSuccessMessage] = React.useState('');
@@ -80,6 +86,7 @@ function createRuleEditorComponent(React) {
         if (current()) {
           setRules([]);
           setAssets([]);
+          setDataScope(requestScope);
           setLoading(false);
         }
         return;
@@ -89,8 +96,9 @@ function createRuleEditorComponent(React) {
       try {
         if (!api?.entity) throw new Error('Không có dịch vụ thực thể để tải luật cảnh báo.');
         const res = await api.entity('list', { query: { schemaId: 'incident-rule', limit: '100', offset: '0' } });
+        if (!Array.isArray(res?.items)) throw new Error('Dữ liệu danh sách luật cảnh báo không hợp lệ.');
         if (!current()) return;
-        setRules(res?.items || []);
+        setRules(res.items);
       } catch (err) {
         if (!current()) return;
         setRules([]);
@@ -105,7 +113,10 @@ function createRuleEditorComponent(React) {
         if (!current()) return;
         setAssets([]);
       } finally {
-        if (current()) setLoading(false);
+        if (current()) {
+          setDataScope(requestScope);
+          setLoading(false);
+        }
       }
     }, [api, connected, scope]);
 
@@ -118,6 +129,9 @@ function createRuleEditorComponent(React) {
       setFormError('');
       setSuccessMessage('');
       setSubmitting(false);
+      setIsCreating(false);
+      setForm(defaultForm);
+      setDataScope(null);
       if (connected) loadData();
       else setLoading(false);
       return () => { loadEpoch.current++; };
@@ -300,6 +314,7 @@ function createRuleEditorComponent(React) {
             {
               type: 'button',
               'data-testid': 'open-create-rule-btn',
+              disabled: !entityCommands || entityCommands.uncertain,
               onClick: () => {
                 setIsCreating(!isCreating);
                 setFormError('');
@@ -392,7 +407,7 @@ function createRuleEditorComponent(React) {
               'div',
               null,
               h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#42526e', marginBottom: 4 } }, 'Tài sản giám sát (Asset ID) *'),
-              assets.length > 0
+              visibleAssets.length > 0
                 ? h(
                     'select',
                     {
@@ -405,7 +420,7 @@ function createRuleEditorComponent(React) {
                       style: { width: '100%', padding: '7px 10px', borderRadius: 4, border: '1px solid #c1c7d0', fontSize: 13, boxSizing: 'border-box' }
                     },
                     h('option', { value: '' }, '-- Chọn tài sản --'),
-                    assets.map(a => h('option', { key: a.id, value: a.id }, `${a.attributes?.assetCode || a.id} (${a.attributes?.title || a.attributes?.name || 'Tài sản'})`))
+                    visibleAssets.map(a => h('option', { key: a.id, value: a.id }, `${a.attributes?.assetCode || a.id} (${a.attributes?.title || a.attributes?.name || 'Tài sản'})`))
                   )
                 : h('input', {
                     'data-testid': 'rule-asset-input',
@@ -458,8 +473,7 @@ function createRuleEditorComponent(React) {
               'div',
               null,
               h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#42526e', marginBottom: 4 } }, `Ngưỡng kích hoạt (${form.unit}) *`),
-              h('input', {
-                type: 'number',
+              h('select', {
                 'data-testid': 'rule-threshold-input',
                 value: form.threshold,
                 onChange: e => {
@@ -467,7 +481,7 @@ function createRuleEditorComponent(React) {
                   setForm(prev => ({ ...prev, threshold: val }));
                 },
                 style: { width: '100%', padding: '7px 10px', borderRadius: 4, border: '1px solid #c1c7d0', fontSize: 13, boxSizing: 'border-box' }
-              })
+              }, thresholdChoices.map(value => h('option', { key: value, value }, value)))
             ),
             // Severity
             h(
@@ -582,7 +596,7 @@ function createRuleEditorComponent(React) {
               {
                 type: 'submit',
                 'data-testid': 'save-rule-btn',
-                disabled: submitting,
+                disabled: submitting || !entityCommands || entityCommands.uncertain,
                 style: {
                   padding: '8px 18px',
                   background: '#0052cc',
@@ -618,7 +632,7 @@ function createRuleEditorComponent(React) {
         ),
 
       // Rules Table
-      rules.length === 0 && !loading
+      visibleRules.length === 0 && !loading
         ? h(
             'div',
             {
@@ -662,7 +676,7 @@ function createRuleEditorComponent(React) {
               h(
                 'tbody',
                 null,
-                rules.map((rule, idx) => {
+                visibleRules.map((rule, idx) => {
                   const attrs = rule.attributes || rule;
                   const severityStyle = severityColors[attrs.severity] || severityColors.medium;
                   return h(
@@ -717,6 +731,7 @@ function createRuleEditorComponent(React) {
                         {
                           type: 'button',
                           'data-testid': `toggle-rule-btn-${rule.id || idx}`,
+                          disabled: !entityCommands || entityCommands.uncertain,
                           onClick: () => handleToggleRule(rule),
                           style: {
                             padding: '3px 8px',
@@ -741,6 +756,7 @@ function createRuleEditorComponent(React) {
                         {
                           type: 'button',
                           'data-testid': `archive-rule-btn-${rule.id || idx}`,
+                          disabled: !entityCommands || entityCommands.uncertain,
                           onClick: () => handleArchiveRule(rule),
                           style: {
                             padding: '3px 8px',

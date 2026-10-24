@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+const { createWorkflowCommands } = require('../../client/workflow');
+
 function createAgentRunComponent(React) {
   const h = React.createElement;
 
@@ -10,198 +12,209 @@ function createAgentRunComponent(React) {
     timed_out: 'Tác vụ phân tích đã vượt quá thời gian tối đa quy định (300 giây).'
   };
 
-  const sampleFallbackJob = {
-    id: 'job-demo-001',
-    runId: 'run-demo-001',
-    status: 'completed',
-    attempts: 1,
-    deadline: new Date(Date.now() + 180000).toISOString(),
-    proposalId: 'prop-demo-001',
-    proposal: {
-      summary: 'Phát hiện nhiệt độ bơm làm mát tăng đột biến lên 78.5°C (vượt ngưỡng 60°C). Nguyên nhân có thể do kẹt van tuần hoàn dung dịch giải nhiệt hoặc mòn cánh quạt làm mát.',
-      suggestedStatus: 'repair',
-      evidence: [
-        'observed telemetry: temperature=78.5 celsius at pump sensor #1',
-        'rule threshold: gt 60 celsius (RULE-TEMP-01)',
-        'max observation age: 300 seconds (observed within 42 seconds)',
-        'context URN: urn:ngsi-ld:Asset:DEMO-ASSET-01'
-      ]
-    },
-    createdAt: new Date(Date.now() - 120000).toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-
   return function AgentRun({ api, connection, caseItem, runId, onJobUpdate, onTransition }) {
-    const connected = connection?.connected !== false;
+    const connected = connection?.connected === true;
+    const actorId = connection?.identity?.subject;
+    const organizationId = connection?.identity?.organizationId;
     const currentRunId = runId || caseItem?.id || caseItem?.runId;
+    const runData = caseItem?.data || {};
+    const agentJobId = runData.agentJobId;
+    const expectedProposalId = runData.proposalId;
+    const expectedAssetId = runData.assetEntityId || caseItem?.assetEntityId;
+    const expectedNotificationId = runData.notificationId || caseItem?.notificationId;
+    const scope = React.useMemo(() => ({ api, connected, actorId, organizationId, currentRunId, agentJobId, expectedProposalId, expectedAssetId, expectedNotificationId }),
+      [api, connected, actorId, organizationId, currentRunId, agentJobId, expectedProposalId, expectedAssetId, expectedNotificationId]);
+    const scopeRef = React.useRef(scope);
+    scopeRef.current = scope;
+    const loadEpoch = React.useRef(0);
+    const workflowCommands = React.useMemo(() => api?.workflow && connected && actorId
+      ? createWorkflowCommands({ api, actorId })
+      : null, [api, connected, actorId, organizationId, currentRunId]);
+    const agentCommands = React.useMemo(() => api?.agent && connected && actorId
+      ? createWorkflowCommands({ api, actorId, channel: 'agent' })
+      : null, [api, connected, actorId, organizationId, currentRunId, agentJobId]);
 
-    const [job, setJob] = React.useState(null);
+    const [jobData, setJobData] = React.useState(null);
+    const [jobScope, setJobScope] = React.useState(null);
+    const job = jobScope === scope ? jobData : null;
     const [loading, setLoading] = React.useState(false);
     const [actionBusy, setActionBusy] = React.useState(false);
     const [error, setError] = React.useState('');
     const [successMessage, setSuccessMessage] = React.useState('');
+    const [retryCommand, setRetryCommand] = React.useState(null);
+    const [startRequested, setStartRequested] = React.useState(false);
 
     const loadJob = React.useCallback(async () => {
-      if (!connected || !currentRunId) return;
+      const requestScope = scope;
+      const request = ++loadEpoch.current;
+      const current = () => scopeRef.current === requestScope && loadEpoch.current === request;
+      setJobData(null);
+      setJobScope(null);
       setLoading(true);
       setError('');
+      if (!connected || !currentRunId) {
+        if (current()) {
+          setError('Kết nối tài khoản nghiệp vụ để tải tác vụ AI.');
+          setLoading(false);
+        }
+        return;
+      }
+      if (!agentJobId) {
+        if (current()) {
+          setJobScope(requestScope);
+          setError('Chưa có tác vụ AI được liên kết với hồ sơ sự cố này.');
+          setLoading(false);
+        }
+        return;
+      }
+      if (!api?.agent || !expectedAssetId || !expectedNotificationId) {
+        if (current()) {
+          setJobScope(requestScope);
+          setError('Không đủ ngữ cảnh hoặc dịch vụ để đọc tác vụ AI đã liên kết.');
+          setLoading(false);
+        }
+        return;
+      }
       try {
-        let loadedJob = null;
-        if (api.agent) {
-          try {
-            const res = await api.agent('list', { query: { runId: currentRunId, limit: '5' } });
-            if (res?.items && res.items.length > 0) {
-              loadedJob = res.items[0];
-            }
-          } catch {
-            // fallback
-          }
+        const loadedJob = await api.agent('detail', { id: agentJobId });
+        if (!current()) return;
+        const matchesRun = loadedJob?.id === agentJobId
+          && loadedJob?.runId === currentRunId
+          && loadedJob?.assetId === expectedAssetId
+          && loadedJob?.notificationId === expectedNotificationId;
+        if (!matchesRun) throw new Error('Tác vụ AI không khớp với hồ sơ sự cố, tài sản hoặc notification đã liên kết.');
+        if (loadedJob.status === 'completed' && (!expectedProposalId || loadedJob.proposalId !== expectedProposalId
+          || !loadedJob.proposal || typeof loadedJob.proposal.summary !== 'string' || !Array.isArray(loadedJob.proposal.evidence))) {
+          throw new Error('Kết quả phân tích không khớp với mã đề xuất được lưu trong hồ sơ sự cố.');
         }
-
-        if (!loadedJob && api.workflow) {
-          try {
-            const waits = await api.workflow('waits', { id: currentRunId });
-            const wait = waits?.items?.find(w => w.stepId === 'analyze');
-            if (wait) {
-              loadedJob = {
-                id: wait.id,
-                runId: currentRunId,
-                status: wait.status === 'pending' ? 'running' : wait.status,
-                deadline: wait.deadline,
-                attempts: 1
-              };
-            }
-          } catch {
-            // fallback
-          }
-        }
-
-        if (!loadedJob) {
-          if (caseItem?.status === 'analyzing') {
-            loadedJob = {
-              id: 'job-live-' + currentRunId,
-              runId: currentRunId,
-              status: 'running',
-              attempts: 1,
-              deadline: new Date(Date.now() + 240000).toISOString()
-            };
-          } else if (caseItem?.status === 'analysis_failed') {
-            loadedJob = {
-              id: 'job-live-' + currentRunId,
-              runId: currentRunId,
-              status: 'failed',
-              errorCode: 'model_unavailable',
-              attempts: 1
-            };
-          } else if (['review_pending', 'approved', 'resolved', 'closed'].includes(caseItem?.status)) {
-            loadedJob = {
-              ...sampleFallbackJob,
-              runId: currentRunId,
-              proposal: caseItem.proposal ? {
-                summary: typeof caseItem.proposal === 'string' ? caseItem.proposal : caseItem.proposal.summary,
-                suggestedStatus: caseItem.proposal.suggestedStatus || 'repair',
-                evidence: caseItem.proposal.evidence || sampleFallbackJob.proposal.evidence
-              } : sampleFallbackJob.proposal
-            };
-          }
-        }
-
-        setJob(loadedJob);
-        if (loadedJob) onJobUpdate?.(loadedJob);
+        setJobData(loadedJob);
+        setJobScope(requestScope);
+        setError(loadedJob.status === 'completed' ? '' : 'Chưa có kết quả phân tích hoàn tất.');
+        onJobUpdate?.(loadedJob);
       } catch (err) {
+        if (!current()) return;
+        setJobData(null);
+        setJobScope(requestScope);
         setError(err.message || 'Không thể tải thông tin tác vụ AI.');
       } finally {
-        setLoading(false);
+        if (current()) setLoading(false);
       }
-    }, [api, connected, currentRunId, caseItem, onJobUpdate]);
+    }, [api, connected, currentRunId, agentJobId, expectedProposalId, expectedAssetId, expectedNotificationId, scope, onJobUpdate]);
 
     React.useEffect(() => {
+      loadEpoch.current++;
+      setJobData(null);
+      setJobScope(null);
+      setRetryCommand(null);
+      setStartRequested(false);
+      setActionBusy(false);
+      setSuccessMessage('');
       loadJob();
-    }, [loadJob]);
+      return () => { loadEpoch.current++; };
+    }, [loadJob, scope]);
+
+    React.useEffect(() => {
+      if (caseItem?.status !== 'investigating') setStartRequested(false);
+    }, [caseItem?.status, scope]);
 
     // Handle Start Analysis
     const handleStartAnalysis = async () => {
-      if (!caseItem?.id) return;
+      const commandScope = scope;
+      if (!caseItem?.id || !workflowCommands || scopeRef.current !== commandScope) {
+        setError('Chưa kết nối tài khoản hoặc dịch vụ workflow.');
+        return;
+      }
       setActionBusy(true);
       setError('');
       try {
-        const key = 'act-analyze-' + Date.now();
-        if (api.workflow) {
-          await api.workflow('transition', {
-            id: caseItem.id,
-            key,
-            body: {
-              action: 'request_analysis',
-              expectedVersion: caseItem.version || 1,
-              input: {}
-            }
-          });
-        }
+        await workflowCommands.execute('transition', { action: 'request_analysis', expectedVersion: caseItem.version, input: {} }, caseItem.id);
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
         setSuccessMessage('Đã gửi yêu cầu phân tích sự cố tới AI Agent.');
-        setJob({
-          id: 'job-started-' + Date.now(),
-          runId: caseItem.id,
-          status: 'running',
-          attempts: 1,
-          deadline: new Date(Date.now() + 300000).toISOString()
-        });
+        setStartRequested(true);
         onTransition?.('request_analysis');
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(workflowCommands.uncertain ? { type: 'start' } : null);
         setError(err.status === 403 || err.response?.status === 403
           ? 'Chỉ Kỹ thuật viên phụ trách mới có quyền yêu cầu phân tích sự cố.'
           : (err.message || 'Không thể bắt đầu phân tích.'));
       } finally {
-        setActionBusy(false);
+        if (scopeRef.current === commandScope) setActionBusy(false);
       }
     };
 
     // Handle Retry Analysis
     const handleRetry = async () => {
-      if (!caseItem?.id) return;
+      const commandScope = scope;
+      if (!job?.id || !agentCommands || scopeRef.current !== commandScope) {
+        setError('Chưa có tác vụ AI hợp lệ để thử lại.');
+        return;
+      }
       setActionBusy(true);
       setError('');
       try {
-        const key = 'retry-analyze-' + Date.now();
-        let retried = false;
-        if (job?.id && api.agent) {
-          try {
-            await api.agent('retry', {
-              id: job.id,
-              key,
-              body: { expectedVersion: job.version || 1 }
-            });
-            retried = true;
-          } catch {
-            // fallback to workflow transition
-          }
-        }
-
-        if (!retried && api.workflow) {
-          await api.workflow('transition', {
-            id: caseItem.id,
-            key,
-            body: {
-              action: 'retry_analysis',
-              expectedVersion: caseItem.version || 1,
-              input: {}
-            }
-          });
-        }
-
+        const retried = await agentCommands.execute('retry', { expectedVersion: job.version }, job.id);
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
         setSuccessMessage('Đã gửi yêu cầu thử lại phân tích sự cố.');
-        setJob(prev => prev ? { ...prev, status: 'running', attempts: (prev.attempts || 1) + 1, errorCode: null } : null);
+        if (retried?.id === agentJobId && retried?.runId === currentRunId && retried?.assetId === expectedAssetId && retried?.notificationId === expectedNotificationId) {
+          setJobData(retried);
+          setJobScope(commandScope);
+        } else {
+          setJobData(null);
+          setJobScope(null);
+        }
         onTransition?.('retry_analysis');
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(agentCommands.uncertain ? { type: 'retry' } : null);
         setError(err.status === 403 || err.response?.status === 403
           ? 'Không có quyền thử lại phân tích sự cố.'
           : (err.message || 'Thử lại phân tích thất bại.'));
       } finally {
-        setActionBusy(false);
+        if (scopeRef.current === commandScope) setActionBusy(false);
+      }
+    };
+
+    const retryPendingCommand = async () => {
+      const commandScope = scope;
+      if (!retryCommand || scopeRef.current !== commandScope) return;
+      const helper = retryCommand.type === 'start' ? workflowCommands : agentCommands;
+      if (!helper) return;
+      setActionBusy(true);
+      setError('');
+      try {
+        const result = await helper.retry();
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        if (retryCommand.type === 'start') {
+          setStartRequested(true);
+          setSuccessMessage('Đã gửi yêu cầu phân tích sự cố tới AI Agent.');
+          onTransition?.('request_analysis');
+        } else {
+          if (result?.id === agentJobId && result?.runId === currentRunId && result?.assetId === expectedAssetId && result?.notificationId === expectedNotificationId) {
+            setJobData(result);
+            setJobScope(commandScope);
+          }
+          setSuccessMessage('Đã gửi yêu cầu thử lại phân tích sự cố.');
+          onTransition?.('retry_analysis');
+        }
+      } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        const helper = retryCommand.type === 'start' ? workflowCommands : agentCommands;
+        setRetryCommand(helper?.uncertain ? retryCommand : null);
+        setError(err.status === 403 || err.response?.status === 403
+          ? 'Không có quyền thực hiện lại lệnh phân tích sự cố.'
+          : (err.message || 'Thử lại lệnh phân tích thất bại.'));
+      } finally {
+        if (scopeRef.current === commandScope) setActionBusy(false);
       }
     };
 
     const getStatusBadge = (status) => {
       switch (status) {
+        case 'queued':
         case 'pending':
           return { label: 'Chờ Worker nhận việc', bg: '#fffbe6', color: '#d46b08', border: '#ffe58f', icon: '⏳' };
         case 'running':
@@ -261,6 +274,13 @@ function createAgentRunComponent(React) {
 
       error && h('div', { role: 'alert', 'data-testid': 'lattice-agent-error-banner', style: { padding: '8px 12px', background: '#fff1f0', color: '#cf1322', border: '1px solid #ffa39e', borderRadius: 6, fontSize: 13, marginBottom: 12 } }, error),
       successMessage && h('div', { role: 'status', style: { padding: '8px 12px', background: '#f6ffed', color: '#389e0d', border: '1px solid #b7eb8f', borderRadius: 6, fontSize: 13, marginBottom: 12 } }, successMessage),
+      retryCommand && (retryCommand.type === 'start' ? workflowCommands?.uncertain : agentCommands?.uncertain) && h('button', {
+        type: 'button',
+        'data-testid': 'lattice-agent-retry-command-btn',
+        disabled: actionBusy || !connected,
+        onClick: retryPendingCommand,
+        style: { marginBottom: 12, padding: '7px 12px', background: '#fff7e6', color: '#ad6800', border: '1px solid #ffd591', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+      }, actionBusy ? 'Đang thử lại…' : 'Thử lại lệnh cũ'),
 
       // Diagnostic Error View when failed
       (jobStatus === 'failed' || jobStatus === 'analysis_failed' || job?.errorCode) && h('div', {
@@ -322,10 +342,10 @@ function createAgentRunComponent(React) {
 
       // Action buttons
       h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', marginTop: 12 } },
-        (!job || jobStatus === 'none' || caseItem?.status === 'investigating') && h('button', {
+        (caseItem?.status === 'investigating' && !job && !startRequested) && h('button', {
           type: 'button',
           'data-testid': 'lattice-agent-start-btn',
-          disabled: actionBusy,
+          disabled: actionBusy || !workflowCommands || workflowCommands.uncertain,
           onClick: handleStartAnalysis,
           style: {
             padding: '7px 16px',
@@ -339,10 +359,10 @@ function createAgentRunComponent(React) {
           }
         }, actionBusy ? 'Đang kích hoạt…' : '🚀 Kích hoạt phân tích AI'),
 
-        (jobStatus === 'failed' || jobStatus === 'analysis_failed' || caseItem?.status === 'analysis_failed') && h('button', {
+        (jobStatus === 'failed' || jobStatus === 'timed_out') && h('button', {
           type: 'button',
           'data-testid': 'lattice-agent-retry-btn',
-          disabled: actionBusy,
+          disabled: actionBusy || !agentCommands || agentCommands.uncertain,
           onClick: handleRetry,
           style: {
             padding: '7px 16px',

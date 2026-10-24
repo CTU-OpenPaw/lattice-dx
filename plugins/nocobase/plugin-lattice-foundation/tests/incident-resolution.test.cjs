@@ -1,8 +1,52 @@
 // SPDX-License-Identifier: Apache-2.0
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { createBridge } = require('../../action-bridge/bridge.cjs');
 const { createCaseResolutionComponent } = require('../src/applications/incident/resolution');
 const { createCaseBoardComponent } = require('../src/applications/incident/case-board');
+
+async function workflowFixture({ statuses = [] } = {}) {
+  const calls = [];
+  const pendingStatuses = [...statuses];
+  const bridge = createBridge({
+    gatewayUrl: 'http://gateway',
+    tokenUrl: 'http://identity/token',
+    userinfoUrl: 'http://identity/user',
+    authorizationUrl: 'http://identity/auth',
+    clientId: 'fixture',
+    callbackUrl: 'http://localhost/callback'
+  }, {
+    schedule: () => ({ unref() {} }),
+    cancelTimer: () => {},
+    fetch: async (url, options = {}) => {
+      calls.push({ url, options });
+      if (url.endsWith('/token')) return Response.json({ access_token: 'fixture-token', expires_in: 300 });
+      if (url.endsWith('/v1/actions')) return Response.json({ items: [] });
+      if (url.endsWith('/user')) return Response.json({ sub: 'alice', organization_id: 'org-1' });
+      if (url.startsWith('http://gateway/v1/workflows/') && url.endsWith('/transitions')) {
+        const status = pendingStatuses.shift() || 200;
+        return Response.json(status >= 400 ? { error: 'Workflow transition failed' } : { version: 5 }, { status });
+      }
+      return Response.json({});
+    }
+  });
+  const start = bridge.connect('noco');
+  await bridge.callback({ state: new URL(start.authorizationUrl).searchParams.get('state'), code: 'fixture' }, start.browserId);
+  const requestCalls = [];
+  const entityCalls = [];
+  return {
+    api: {
+      workflow: (operation, args = {}) => bridge.workflow('noco', start.browserId, { operation, ...args }),
+      request: async request => { requestCalls.push(request); return { data: {} }; },
+      entity: async (operation, args) => { entityCalls.push({ operation, args }); return {}; }
+    },
+    calls,
+    requestCalls,
+    entityCalls,
+    connection: { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } },
+    close: () => bridge.disconnect('noco', start.browserId)
+  };
+}
 
 function hooks() {
   const slots = [];
@@ -68,28 +112,17 @@ const tick = () => new Promise(setImmediate);
 test('CaseResolution renders form and submits record_resolution for approved case', async () => {
   const env = hooks();
   const CaseResolution = createCaseResolutionComponent(env.react);
-  let resolutionPayload = null;
+  const fixture = await workflowFixture();
 
   const caseItem = {
-    id: 'case-approved-001',
+    id: '11111111-1111-4111-8111-111111111111',
     status: 'approved',
     version: 3,
     title: 'Bơm quá nhiệt',
     handlerId: 'bob'
   };
 
-  const api = {
-    workflow: async (op, arg) => {
-      if (op === 'transition') {
-        resolutionPayload = arg;
-        return { version: 4 };
-      }
-      return {};
-    },
-    request: async () => ({ data: {} })
-  };
-
-  const render = () => env.render(() => CaseResolution({ api, connection: { connected: true }, caseItem, runId: caseItem.id }));
+  const render = () => env.render(() => CaseResolution({ api: fixture.api, connection: fixture.connection, caseItem, runId: caseItem.id }));
   render(); await tick();
   let tree = render();
 
@@ -112,37 +145,33 @@ test('CaseResolution renders form and submits record_resolution for approved cas
   render(); await tick();
   tree = render();
 
-  assert.ok(resolutionPayload, 'Workflow transition record_resolution must be triggered');
-  assert.equal(resolutionPayload.id, 'case-approved-001');
-  assert.equal(resolutionPayload.body.action, 'record_resolution');
-  assert.equal(resolutionPayload.body.input.resolutionNote, 'Đã thay thế phớt làm mát và bơm dung dịch mới');
+  const transition = fixture.calls.find(call => call.url === `http://gateway/v1/workflows/${caseItem.id}/transitions`);
+  assert.ok(transition, 'Workflow transition record_resolution must be triggered through the real bridge');
+  assert.deepEqual(JSON.parse(transition.options.body), {
+    action: 'record_resolution',
+    expectedVersion: 3,
+    input: { resolutionNote: 'Đã thay thế phớt làm mát và bơm dung dịch mới' }
+  });
+  assert.ok(transition.options.headers['idempotency-key']);
+  assert.equal(fixture.requestCalls.length, 0, 'NocoBase is not a second case store');
+  assert.equal(fixture.entityCalls.length, 0);
+  fixture.close();
 });
 
 test('CaseResolution renders close section with modal confirmation and submits close for resolved case', async () => {
   const env = hooks();
   const CaseResolution = createCaseResolutionComponent(env.react);
-  let closePayload = null;
+  const fixture = await workflowFixture();
 
   const caseItem = {
-    id: 'case-resolved-002',
+    id: '22222222-2222-4222-8222-222222222222',
     status: 'resolved',
     version: 4,
     title: 'Bơm quá nhiệt',
-    resolutionNote: 'Đã thay linh kiện hoàn tất'
+    resolutionNote: 'Đã thay linh kiện hoàn tất',
+    assetEntityId: '33333333-3333-4333-8333-333333333333'
   };
-
-  const api = {
-    workflow: async (op, arg) => {
-      if (op === 'transition') {
-        closePayload = arg;
-        return { version: 5 };
-      }
-      return {};
-    },
-    request: async () => ({ data: {} })
-  };
-
-  const render = () => env.render(() => CaseResolution({ api, connection: { connected: true }, caseItem, runId: caseItem.id }));
+  const render = () => env.render(() => CaseResolution({ api: fixture.api, connection: fixture.connection, caseItem, runId: caseItem.id }));
   render(); await tick();
   let tree = render();
 
@@ -177,10 +206,59 @@ test('CaseResolution renders close section with modal confirmation and submits c
   render(); await tick();
   tree = render();
 
-  assert.ok(closePayload, 'Workflow transition close must be triggered');
-  assert.equal(closePayload.id, 'case-resolved-002');
-  assert.equal(closePayload.body.action, 'close');
-  assert.equal(closePayload.body.input.closeNote, 'Đã nghiệm thu thiết bị hoạt động ổn định. Đóng hồ sơ.');
+  const transition = fixture.calls.find(call => call.url === `http://gateway/v1/workflows/${caseItem.id}/transitions`);
+  assert.ok(transition, 'Workflow transition close must be triggered through the real bridge');
+  assert.deepEqual(JSON.parse(transition.options.body), {
+    action: 'close',
+    expectedVersion: 4,
+    input: { closeNote: 'Đã nghiệm thu thiết bị hoạt động ổn định. Đóng hồ sơ.' }
+  });
+  assert.ok(transition.options.headers['idempotency-key']);
+  assert.equal(fixture.requestCalls.length, 0, 'Workflow owns the case update');
+  assert.equal(fixture.entityCalls.length, 0, 'Workflow applies asset status atomically');
+  fixture.close();
+});
+
+test('CaseResolution retries an uncertain close with the same key and body', async () => {
+  const env = hooks();
+  const CaseResolution = createCaseResolutionComponent(env.react);
+  const fixture = await workflowFixture({ statuses: [503, 200] });
+  const caseItem = {
+    id: '66666666-6666-4666-8666-666666666666',
+    status: 'resolved',
+    version: 9,
+    title: 'Bơm quá nhiệt',
+    resolutionNote: 'Đã sửa xong',
+    assetEntityId: '33333333-3333-4333-8333-333333333333'
+  };
+  const render = () => env.render(() => CaseResolution({ api: fixture.api, connection: fixture.connection, caseItem, runId: caseItem.id }));
+
+  render(); await tick();
+  let tree = render();
+  const closeInput = find(tree, node => node.props?.['data-testid'] === 'lattice-close-note-input');
+  closeInput.props.onChange({ target: { value: 'Đã nghiệm thu, đóng hồ sơ.' } });
+  render(); await tick();
+  tree = render();
+  find(tree, node => node.props?.['data-testid'] === 'lattice-open-close-modal-btn').props.onClick();
+  render(); await tick();
+  tree = render();
+  await find(tree, node => node.props?.['data-testid'] === 'lattice-confirm-close-btn').props.onClick();
+
+  tree = render();
+  const retry = find(tree, node => node.props?.['data-testid'] === 'lattice-resolution-retry-command-btn');
+  assert.ok(retry, 'An uncertain close must offer an explicit retry');
+  await retry.props.onClick();
+
+  const transitions = fixture.calls.filter(call => call.url === `http://gateway/v1/workflows/${caseItem.id}/transitions`);
+  assert.equal(transitions.length, 2);
+  assert.equal(transitions[0].options.headers['idempotency-key'], transitions[1].options.headers['idempotency-key']);
+  assert.equal(transitions[0].options.body, transitions[1].options.body);
+  assert.deepEqual(JSON.parse(transitions[0].options.body), {
+    action: 'close',
+    expectedVersion: 9,
+    input: { closeNote: 'Đã nghiệm thu, đóng hồ sơ.' }
+  });
+  fixture.close();
 });
 
 test('CaseBoard detail modal renders and switches between reused blocks: Resolution, Evidence, Attachments, Timeline, Approval', async () => {
@@ -260,7 +338,8 @@ test('CaseBoard detail modal renders and switches between reused blocks: Resolut
   assert.ok(eviPanel, 'Evidence tab panel must be rendered');
   const eviNode = find(eviPanel, n => typeof n.type === 'function' && n.type.name === 'EvidenceProposal');
   assert.ok(eviNode, 'EvidenceProposal component must be instantiated inside evidence tab');
-  assert.equal(eviNode.props.proposal.suggestedStatus, 'repair');
+  assert.equal(eviNode.props.caseItem.proposal, undefined, 'EvidenceProposal must not receive a local proposal fallback');
+  assert.equal(eviNode.props.caseItem.data.attachmentId, '22222222-3333-4444-5555-666666666666', 'Workflow run data remains intact');
 
   // 3. Switch to Attachments tab (reused AttachmentBlock)
   const attTabBtn = find(tree, n => n.props?.['data-testid'] === 'lattice-modal-tab-attachments');

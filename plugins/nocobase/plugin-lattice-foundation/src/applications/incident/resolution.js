@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+const { createWorkflowCommands } = require('../../client/workflow');
+
 function createCaseResolutionComponent(React) {
   const h = React.createElement;
 
@@ -10,8 +12,16 @@ function createCaseResolutionComponent(React) {
     onTransition,
     onReload
   }) {
-    const connected = connection?.connected !== false;
+    const connected = connection?.connected === true;
+    const actorId = connection?.identity?.subject;
+    const organizationId = connection?.identity?.organizationId;
     const currentId = runId || caseItem?.id || caseItem?.runId;
+    const scope = React.useMemo(() => ({ api, connected, actorId, organizationId, currentId }), [api, connected, actorId, organizationId, currentId]);
+    const scopeRef = React.useRef(scope);
+    scopeRef.current = scope;
+    const workflowCommands = React.useMemo(() => api?.workflow && connected && actorId
+      ? createWorkflowCommands({ api, actorId })
+      : null, [api, connected, actorId, organizationId, currentId]);
     const status = caseItem?.status || 'approved';
 
     const [resolutionNote, setResolutionNote] = React.useState(caseItem?.resolutionNote || '');
@@ -26,6 +36,62 @@ function createCaseResolutionComponent(React) {
     const [busy, setBusy] = React.useState(false);
     const [error, setError] = React.useState('');
     const [successMessage, setSuccessMessage] = React.useState('');
+    const [retryCommand, setRetryCommand] = React.useState(null);
+
+    React.useEffect(() => {
+      setResolutionNote(caseItem?.resolutionNote || '');
+      setCloseNote(caseItem?.closeNote || '');
+      setConfirmCloseModal(false);
+      setBusy(false);
+      setError('');
+      setSuccessMessage('');
+      setRetryCommand(null);
+    }, [scope]);
+
+    const finishTransition = (type, note) => {
+      if (type === 'record_resolution') {
+        setSuccessMessage('Đã ghi nhận kết quả khắc phục sự cố thành công! Hồ sơ chuyển sang trạng thái chờ Quản lý nghiệm thu và đóng.');
+        onTransition?.('record_resolution');
+        onReload?.();
+      } else {
+        setSuccessMessage('Đã đóng sự cố thành công. Trạng thái tài sản được xử lý nguyên tử bởi workflow.');
+        setConfirmCloseModal(false);
+        onTransition?.('close');
+        onReload?.();
+      }
+    };
+
+    const sendTransition = async (type, note) => {
+      const commandScope = scope;
+      if (!currentId || !workflowCommands || scopeRef.current !== commandScope) {
+        setError('Chưa kết nối tài khoản hoặc dịch vụ workflow.');
+        return;
+      }
+      if (!Number.isSafeInteger(caseItem?.version) || caseItem.version < 1) {
+        setError('Không có phiên bản hồ sơ hợp lệ để cập nhật.');
+        return;
+      }
+      setBusy(true);
+      setError('');
+      try {
+        const action = type === 'record_resolution' ? 'record_resolution' : 'close';
+        const input = type === 'record_resolution' ? { resolutionNote: note } : { closeNote: note };
+        await workflowCommands.execute('transition', { action, expectedVersion: caseItem.version, input }, currentId);
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        finishTransition(type, note);
+      } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(workflowCommands.uncertain ? { type, note } : null);
+        setError(err.status === 403 || err.response?.status === 403
+          ? type === 'record_resolution'
+            ? 'Chỉ Kỹ thuật viên phụ trách (incident:handler) mới có thẩm quyền ghi nhận kết quả khắc phục.'
+            : 'Chỉ Quản lý (incident:manager) mới có thẩm quyền phê duyệt đóng sự cố.'
+          : (err.message || 'Không thể cập nhật trạng thái sự cố.'));
+      } finally {
+        if (scopeRef.current === commandScope) setBusy(false);
+      }
+    };
 
     // Handle Record Resolution (for Handler when status === 'approved')
     const handleRecordResolution = async (e) => {
@@ -35,50 +101,7 @@ function createCaseResolutionComponent(React) {
         setError('Vui lòng nhập chi tiết biên bản khắc phục sự cố.');
         return;
       }
-      setBusy(true);
-      setError('');
-      try {
-        const key = 'res-' + Date.now();
-        const note = resolutionNote.trim();
-
-        if (api.workflow) {
-          await api.workflow('transition', {
-            id: currentId,
-            key,
-            body: {
-              action: 'record_resolution',
-              expectedVersion: caseItem?.version || 1,
-              input: { resolutionNote: note }
-            }
-          });
-        }
-
-        if (api.request) {
-          try {
-            await api.request({
-              url: 'latticeIncidentCases:update',
-              method: 'post',
-              params: { filterByTk: caseItem?.runId || caseItem?.code || currentId },
-              data: {
-                status: 'resolved',
-                resolutionNote: note
-              }
-            });
-          } catch {
-            // ignore
-          }
-        }
-
-        setSuccessMessage('Đã ghi nhận kết quả khắc phục sự cố thành công! Hồ sơ chuyển sang trạng thái chờ Quản lý nghiệm thu và đóng.');
-        onTransition?.('record_resolution');
-        onReload?.();
-      } catch (err) {
-        setError(err.status === 403 || err.response?.status === 403
-          ? 'Chỉ Kỹ thuật viên phụ trách (incident:handler) mới có thẩm quyền ghi nhận kết quả khắc phục.'
-          : (err.message || 'Không thể ghi nhận khắc phục sự cố.'));
-      } finally {
-        setBusy(false);
-      }
+      await sendTransition('record_resolution', resolutionNote.trim());
     };
 
     // Handle Close Case (for Manager when status === 'resolved')
@@ -88,62 +111,28 @@ function createCaseResolutionComponent(React) {
         setError('Vui lòng nhập nhận xét nghiệm thu và ghi chú đóng sự cố.');
         return;
       }
+      await sendTransition('close', closeNote.trim());
+    };
+
+    const retryWorkflowCommand = async () => {
+      const commandScope = scope;
+      if (!retryCommand || !workflowCommands || scopeRef.current !== commandScope) return;
+      const pending = retryCommand;
       setBusy(true);
       setError('');
       try {
-        const key = 'close-' + Date.now();
-        const note = closeNote.trim();
-
-        if (api.workflow) {
-          await api.workflow('transition', {
-            id: currentId,
-            key,
-            body: {
-              action: 'close',
-              expectedVersion: caseItem?.version || 1,
-              input: { closeNote: note }
-            }
-          });
-        }
-
-        if (api.request) {
-          try {
-            await api.request({
-              url: 'latticeIncidentCases:update',
-              method: 'post',
-              params: { filterByTk: caseItem?.runId || caseItem?.code || currentId },
-              data: {
-                status: 'closed',
-                closeNote: note
-              }
-            });
-          } catch {
-            // ignore
-          }
-        }
-
-        if (caseItem?.assetEntityId && api.entity) {
-          try {
-            const suggestedStatus = caseItem?.proposal?.suggestedStatus || 'repair';
-            await api.entity('update', {
-              id: caseItem.assetEntityId,
-              attributes: { status: suggestedStatus }
-            });
-          } catch {
-            // ignore
-          }
-        }
-
-        setSuccessMessage('Đã đóng sự cố và cập nhật trạng thái tài sản thành công! Hồ sơ đã được lưu trữ an toàn.');
-        setConfirmCloseModal(false);
-        onTransition?.('close');
-        onReload?.();
+        await workflowCommands.retry();
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        finishTransition(pending.type, pending.note);
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(workflowCommands.uncertain ? pending : null);
         setError(err.status === 403 || err.response?.status === 403
-          ? 'Chỉ Quản lý (incident:manager) mới có thẩm quyền phê duyệt đóng sự cố.'
-          : (err.message || 'Không thể đóng sự cố.'));
+          ? 'Bạn không có quyền thực hiện thao tác workflow này.'
+          : (err.message || 'Thử lại workflow thất bại.'));
       } finally {
-        setBusy(false);
+        if (scopeRef.current === commandScope) setBusy(false);
       }
     };
 
@@ -182,6 +171,13 @@ function createCaseResolutionComponent(React) {
 
       error && h('div', { role: 'alert', 'data-testid': 'lattice-resolution-error', style: { padding: '8px 12px', background: '#fff1f0', color: '#cf1322', border: '1px solid #ffa39e', borderRadius: 6, fontSize: 13, marginBottom: 14 } }, error),
       successMessage && h('div', { role: 'status', style: { padding: '8px 12px', background: '#f6ffed', color: '#389e0d', border: '1px solid #b7eb8f', borderRadius: 6, fontSize: 13, marginBottom: 14 } }, successMessage),
+      retryCommand && workflowCommands?.uncertain && h('button', {
+        type: 'button',
+        'data-testid': 'lattice-resolution-retry-command-btn',
+        disabled: busy || !connected,
+        onClick: retryWorkflowCommand,
+        style: { marginBottom: 14, padding: '7px 12px', background: '#fff7e6', color: '#ad6800', border: '1px solid #ffd591', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+      }, busy ? 'Đang thử lại…' : 'Thử lại thao tác'),
 
       // 1. SECTION: FORM KẾT QUẢ KHẮC PHỤC (RECORD RESOLUTION)
       (status === 'approved' || status === 'resolved' || status === 'closed') && h('div', {
@@ -257,7 +253,7 @@ function createCaseResolutionComponent(React) {
           h('button', {
             type: 'submit',
             'data-testid': 'lattice-submit-resolution-btn',
-            disabled: busy,
+            disabled: busy || !workflowCommands || workflowCommands.uncertain,
             style: {
               padding: '8px 18px',
               borderRadius: 6,
@@ -313,7 +309,7 @@ function createCaseResolutionComponent(React) {
           h('button', {
             type: 'button',
             'data-testid': 'lattice-open-close-modal-btn',
-            disabled: busy,
+            disabled: busy || !workflowCommands || workflowCommands.uncertain,
             onClick: () => {
               if (!closeNote.trim()) {
                 setError('Vui lòng nhập ghi chú nghiệm thu đóng sự cố.');
@@ -387,7 +383,7 @@ function createCaseResolutionComponent(React) {
             h('button', {
               type: 'button',
               'data-testid': 'lattice-confirm-close-btn',
-              disabled: busy,
+              disabled: busy || !workflowCommands || workflowCommands.uncertain,
               onClick: handleCloseCase,
               style: { padding: '8px 18px', borderRadius: 6, border: 'none', background: '#cf1322', color: '#fff', fontWeight: 600, fontSize: 13, cursor: 'pointer' }
             }, busy ? 'Đang đóng…' : 'Đồng ý đóng sự cố')

@@ -1,171 +1,200 @@
 // SPDX-License-Identifier: Apache-2.0
+const { createWorkflowCommands } = require('../../client/workflow');
+
+function validProposal(value) {
+  return value && typeof value === 'object'
+    && typeof value.summary === 'string' && value.summary.trim().length > 0
+    && ['ready', 'in_use', 'repair', 'retired'].includes(value.suggestedStatus)
+    && Array.isArray(value.evidence) && value.evidence.length <= 20
+    && value.evidence.every(item => typeof item === 'string' && item.trim().length > 0);
+}
+
 function createEvidenceProposalComponent(React) {
   const h = React.createElement;
 
   const statusMap = {
     repair: { label: 'Yêu cầu sửa chữa (Repair)', color: '#d4380d', bg: '#fff2e8', border: '#ffbb96', icon: '🛠️' },
-    replace: { label: 'Yêu cầu thay thế linh kiện (Replace)', color: '#cf1322', bg: '#fff1f0', border: '#ffa39e', icon: '🔄' },
     ready: { label: 'Sẵn sàng hoạt động (Ready)', color: '#389e0d', bg: '#f6ffed', border: '#b7eb8f', icon: '✅' },
     in_use: { label: 'Tiếp tục vận hành (In Use)', color: '#0958d9', bg: '#e6f4ff', border: '#91caff', icon: '⚡' },
     retired: { label: 'Thanh lý / Ngừng sử dụng (Retired)', color: '#595959', bg: '#f5f5f5', border: '#d9d9d9', icon: '⛔' }
-  };
-
-  const defaultSampleProposal = {
-    proposalId: 'prop-incident-001',
-    summary: 'Phát hiện nhiệt độ vận hành 78.5°C vượt ngưỡng an toàn 60.0°C tại cụm Bơm làm mát A1. Áp suất dầu bôi trơn có xu hướng giảm nhẹ 12%. Kết luận sơ bộ: Bơm bị quá nhiệt do nghẽn màng lọc tuần hoàn và suy giảm lưu lượng môi chất.',
-    suggestedStatus: 'repair',
-    confidence: '94%',
-    evidence: [
-      'Nhiệt độ đo được: 78.5°C (vượt ngưỡng cảnh báo 60.0°C, sai lệch +18.5°C)',
-      'Thời điểm đo (observedAt): 2026-10-16T08:14:22Z (độ trễ quan trắc: 28 giây)',
-      'Mã luật kích hoạt: RULE-PUMP-OVERHEAT (Ngưỡng cảnh báo: gt 60 celsius)',
-      'Tài sản giám sát: urn:ngsi-ld:Asset:DEMO-ASSET-01 (Máy phát Cummins P1)',
-      'Đơn vị quản lý: Phòng Vận hành (Kho Tổng)',
-      'Bản ghi toàn vẹn: SHA256 proposal hash đã được ký duyệt qua Agent worker'
-    ],
-    recommendedActions: [
-      'Giảm tải công suất vận hành máy phát điện xuống dưới 50% ngay lập tức.',
-      'Kỹ thuật viên hiện trường cô lập van cấp số 2 và kiểm tra nhiệt độ vỏ bơm bằng súng hồng ngoại.',
-      'Vệ sinh lưới lọc tuần hoàn dung dịch giải nhiệt và bổ sung dung dịch làm mát tiêu chuẩn.',
-      'Chạy thử không tải trong 15 phút, theo dõi số đo trên telemetry chart trước khi đưa về trạng thái in_use.'
-    ]
   };
 
   return function EvidenceProposal({
     api,
     connection,
     caseItem,
-    proposal,
     onApprove,
     onReject,
     onRework
   }) {
-    const connected = connection?.connected !== false;
+    const connected = connection?.connected === true;
+    const actorId = connection?.identity?.subject;
+    const organizationId = connection?.identity?.organizationId;
+    const runId = caseItem?.id || caseItem?.runId;
+    const agentJobId = caseItem?.data?.agentJobId;
+    const expectedProposalId = caseItem?.data?.proposalId;
+    const expectedAssetId = caseItem?.data?.assetEntityId || caseItem?.assetEntityId;
+    const expectedNotificationId = caseItem?.data?.notificationId || caseItem?.notificationId;
+    const scope = React.useMemo(() => ({ api, connected, actorId, organizationId, runId, agentJobId, expectedProposalId, expectedAssetId, expectedNotificationId }),
+      [api, connected, actorId, organizationId, runId, agentJobId, expectedProposalId, expectedAssetId, expectedNotificationId]);
+    const scopeRef = React.useRef(scope);
+    scopeRef.current = scope;
+    const loadEpoch = React.useRef(0);
+    const workflowCommands = React.useMemo(() => api?.workflow && connected && actorId
+      ? createWorkflowCommands({ api, actorId })
+      : null, [api, connected, actorId, organizationId, runId, agentJobId, expectedProposalId]);
     const [activeTab, setActiveTab] = React.useState('proposal'); // 'proposal' | 'evidence' | 'review'
     const [actionNote, setActionNote] = React.useState('');
     const [actionBusy, setActionBusy] = React.useState(false);
     const [error, setError] = React.useState('');
     const [successMessage, setSuccessMessage] = React.useState('');
-
-    // Determine current proposal data
-    const proposalData = React.useMemo(() => {
-      if (proposal && typeof proposal === 'object') {
-        return {
-          ...defaultSampleProposal,
-          ...proposal,
-          evidence: Array.isArray(proposal.evidence) ? proposal.evidence : defaultSampleProposal.evidence
-        };
-      }
-      if (caseItem?.proposal) {
-        if (typeof caseItem.proposal === 'string') {
-          return {
-            ...defaultSampleProposal,
-            summary: caseItem.proposal
-          };
-        }
-        return {
-          ...defaultSampleProposal,
-          ...caseItem.proposal,
-          evidence: Array.isArray(caseItem.proposal.evidence) ? caseItem.proposal.evidence : defaultSampleProposal.evidence
-        };
-      }
-      return defaultSampleProposal;
-    }, [proposal, caseItem]);
-
-    const suggested = statusMap[proposalData.suggestedStatus] || statusMap.repair;
+    const [job, setJob] = React.useState(null);
+    const [jobScope, setJobScope] = React.useState(null);
+    const [loading, setLoading] = React.useState(false);
+    const [retryCommand, setRetryCommand] = React.useState(null);
+    const visibleJob = jobScope === scope ? job : null;
+    const proposalReady = visibleJob?.status === 'completed' && validProposal(visibleJob.proposal);
+    const proposalData = proposalReady ? visibleJob.proposal : null;
+    const suggested = proposalData ? statusMap[proposalData.suggestedStatus] : null;
     const caseStatus = caseItem?.status || 'review_pending';
 
-    const handleApprove = async () => {
-      if (!caseItem?.id) return;
-      setActionBusy(true);
+    const loadJob = React.useCallback(async () => {
+      const requestScope = scope;
+      const request = ++loadEpoch.current;
+      const current = () => scopeRef.current === requestScope && loadEpoch.current === request;
+      setJob(null);
+      setJobScope(null);
       setError('');
-      try {
-        const reviewNote = actionNote.trim() || 'Người quản lý duyệt đề xuất xử lý của AI';
-        if (api.workflow) {
-          const key = 'appr-' + Date.now();
-          await api.workflow('transition', {
-            id: caseItem.id,
-            key,
-            body: {
-              action: 'approve',
-              expectedVersion: caseItem.version || 1,
-              input: { reviewNote }
-            }
-          });
+      if (!connected) {
+        if (current()) {
+          setError('Kết nối tài khoản nghiệp vụ để tải kết quả phân tích.');
+          setLoading(false);
         }
-        setSuccessMessage('Đã phê duyệt đề xuất thành công. Quy trình chuyển sang bước khắc phục.');
-        setActionNote('');
-        onApprove?.(reviewNote);
-      } catch (err) {
-        setError(err.status === 403 || err.response?.status === 403
-          ? 'Chỉ Quản lý (incident:manager) mới có thẩm quyền phê duyệt đề xuất sự cố.'
-          : (err.message || 'Phê duyệt thất bại.'));
-      } finally {
-        setActionBusy(false);
+        return;
       }
-    };
+      if (!agentJobId || !expectedProposalId || !expectedAssetId || !expectedNotificationId) {
+        if (current()) {
+          setJobScope(requestScope);
+          setError('Chưa có kết quả phân tích được liên kết với hồ sơ sự cố này.');
+          setLoading(false);
+        }
+        return;
+      }
+      if (!api?.agent) {
+        if (current()) {
+          setJobScope(requestScope);
+          setError('Không có dịch vụ agent để đọc kết quả phân tích.');
+          setLoading(false);
+        }
+        return;
+      }
+      setLoading(true);
+      try {
+        const loadedJob = await api.agent('detail', { id: agentJobId });
+        if (!current()) return;
+        if (loadedJob?.id !== agentJobId || loadedJob?.runId !== runId || loadedJob?.assetId !== expectedAssetId
+          || loadedJob?.notificationId !== expectedNotificationId || loadedJob?.proposalId !== expectedProposalId) {
+          throw new Error('Kết quả phân tích không khớp với hồ sơ sự cố, tài sản hoặc notification đã liên kết.');
+        }
+        setJob(loadedJob);
+        setJobScope(requestScope);
+        if (loadedJob.status !== 'completed' || !validProposal(loadedJob.proposal)) {
+          setError('Chưa có kết quả phân tích hoàn tất để phê duyệt.');
+        }
+      } catch (err) {
+        if (!current()) return;
+        setJob(null);
+        setJobScope(requestScope);
+        setError(err.message || 'Không thể tải thông tin tác vụ AI.');
+      } finally {
+        if (current()) setLoading(false);
+      }
+    }, [api, connected, scope, agentJobId, expectedProposalId, expectedAssetId, expectedNotificationId, runId]);
 
-    const handleReject = async () => {
-      if (!caseItem?.id) return;
-      if (!actionNote.trim()) {
-        setError('Vui lòng nhập lý do từ chối đề xuất xử lý.');
+    React.useEffect(() => {
+      loadEpoch.current++;
+      setJob(null);
+      setJobScope(null);
+      setRetryCommand(null);
+      setActionBusy(false);
+      setActionNote('');
+      setSuccessMessage('');
+      loadJob();
+      return () => { loadEpoch.current++; };
+    }, [loadJob, scope]);
+
+    const performTransition = async (action, input, successText, callback) => {
+      const commandScope = scope;
+      if (!caseItem?.id || !workflowCommands || scopeRef.current !== commandScope) {
+        setError('Chưa kết nối tài khoản hoặc dịch vụ quy trình.');
+        return;
+      }
+      if (['approve', 'reject'].includes(action) && !proposalReady) {
+        setError('Chưa có kết quả phân tích hợp lệ để duyệt hoặc từ chối.');
         return;
       }
       setActionBusy(true);
       setError('');
       try {
-        const reason = actionNote.trim();
-        if (api.workflow) {
-          const key = 'rej-' + Date.now();
-          await api.workflow('transition', {
-            id: caseItem.id,
-            key,
-            body: {
-              action: 'reject',
-              expectedVersion: caseItem.version || 1,
-              input: { reason }
-            }
-          });
-        }
-        setSuccessMessage('Đã từ chối đề xuất xử lý.');
+        await workflowCommands.execute('transition', { action, expectedVersion: caseItem.version, input }, caseItem.id);
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        setSuccessMessage(successText);
         setActionNote('');
-        onReject?.(reason);
+        callback?.();
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(workflowCommands.uncertain ? { action, input, successText } : null);
         setError(err.status === 403 || err.response?.status === 403
-          ? 'Chỉ Quản lý (incident:manager) mới có thẩm quyền từ chối đề xuất sự cố.'
-          : (err.message || 'Từ chối đề xuất thất bại.'));
+          ? 'Bạn không có quyền thực hiện thao tác workflow này.'
+          : (err.message || 'Thao tác workflow thất bại.'));
       } finally {
-        setActionBusy(false);
+        if (scopeRef.current === commandScope) setActionBusy(false);
       }
     };
 
+    const handleApprove = async () => {
+      const reviewNote = actionNote.trim() || 'Người quản lý duyệt đề xuất xử lý của AI';
+      await performTransition('approve', { reviewNote }, 'Đã phê duyệt đề xuất thành công. Quy trình chuyển sang bước khắc phục.', () => onApprove?.(reviewNote));
+    };
+
+    const handleReject = async () => {
+      if (!actionNote.trim()) {
+        setError('Vui lòng nhập lý do từ chối đề xuất xử lý.');
+        return;
+      }
+      const reason = actionNote.trim();
+      await performTransition('reject', { reason }, 'Đã từ chối đề xuất xử lý.', () => onReject?.(reason));
+    };
+
     const handleRework = async () => {
-      if (!caseItem?.id) return;
+      const reworkNote = actionNote.trim() || 'Yêu cầu kiểm tra lại hiện trường';
+      await performTransition('rework', { reworkNote }, 'Đã chuyển yêu cầu kiểm tra lại (Rework) cho kỹ thuật viên.', () => onRework?.(reworkNote));
+    };
+
+    const retryWorkflowCommand = async () => {
+      const commandScope = scope;
+      if (!retryCommand || !workflowCommands || scopeRef.current !== commandScope) return;
+      const pending = retryCommand;
       setActionBusy(true);
       setError('');
       try {
-        const reworkNote = actionNote.trim() || 'Yêu cầu kiểm tra lại hiện trường';
-        if (api.workflow) {
-          const key = 'rew-' + Date.now();
-          await api.workflow('transition', {
-            id: caseItem.id,
-            key,
-            body: {
-              action: 'rework',
-              expectedVersion: caseItem.version || 1,
-              input: { reworkNote }
-            }
-          });
-        }
-        setSuccessMessage('Đã chuyển yêu cầu kiểm tra lại (Rework) cho kỹ thuật viên.');
+        await workflowCommands.retry();
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        setSuccessMessage(pending.successText);
         setActionNote('');
-        onRework?.(reworkNote);
+        if (pending.action === 'approve') onApprove?.(pending.input.reviewNote);
+        if (pending.action === 'reject') onReject?.(pending.input.reason);
+        if (pending.action === 'rework') onRework?.(pending.input.reworkNote);
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(workflowCommands.uncertain ? pending : null);
         setError(err.status === 403 || err.response?.status === 403
-          ? 'Không có quyền yêu cầu kiểm tra lại.'
-          : (err.message || 'Thao tác thất bại.'));
+          ? 'Bạn không có quyền thực hiện thao tác workflow này.'
+          : (err.message || 'Thử lại workflow thất bại.'));
       } finally {
-        setActionBusy(false);
+        if (scopeRef.current === commandScope) setActionBusy(false);
       }
     };
 
@@ -194,17 +223,31 @@ function createEvidenceProposalComponent(React) {
           style: {
             padding: '4px 10px',
             borderRadius: 6,
-            background: suggested.bg,
-            color: suggested.color,
-            border: `1px solid ${suggested.border}`,
+            background: suggested?.bg || '#f5f5f5',
+            color: suggested?.color || '#595959',
+            border: `1px solid ${suggested?.border || '#d9d9d9'}`,
             fontSize: 12,
             fontWeight: 700
           }
-        }, `${suggested.icon} ${suggested.label}`)
+        }, suggested ? `${suggested.icon} ${suggested.label}` : 'Chưa có kết quả phân tích'),
+        h('button', {
+          type: 'button',
+          'data-testid': 'lattice-proposal-refresh-btn',
+          disabled: loading || !connected,
+          onClick: loadJob,
+          style: { padding: '4px 8px', borderRadius: 4, border: '1px solid #cbd5e1', background: '#fff', fontSize: 12, cursor: 'pointer' }
+        }, loading ? 'Đang tải…' : 'Tải kết quả')
       ),
 
       error && h('div', { role: 'alert', 'data-testid': 'lattice-proposal-error', style: { padding: '8px 12px', background: '#fff1f0', color: '#cf1322', border: '1px solid #ffa39e', borderRadius: 6, fontSize: 13, marginBottom: 12 } }, error),
       successMessage && h('div', { role: 'status', style: { padding: '8px 12px', background: '#f6ffed', color: '#389e0d', border: '1px solid #b7eb8f', borderRadius: 6, fontSize: 13, marginBottom: 12 } }, successMessage),
+      retryCommand && workflowCommands?.uncertain && h('button', {
+        type: 'button',
+        'data-testid': 'lattice-proposal-retry-command-btn',
+        disabled: actionBusy || !connected,
+        onClick: retryWorkflowCommand,
+        style: { marginBottom: 12, padding: '7px 12px', background: '#fff7e6', color: '#ad6800', border: '1px solid #ffd591', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+      }, actionBusy ? 'Đang thử lại…' : 'Thử lại thao tác'),
 
       // Navigation Tabs
       h('div', { style: { display: 'flex', borderBottom: '1px solid #dfe1e6', marginBottom: 16 } },
@@ -237,7 +280,7 @@ function createEvidenceProposalComponent(React) {
             cursor: 'pointer',
             fontSize: 13
           }
-        }, `🔍 Bằng chứng trích dẫn (${proposalData.evidence.length})`),
+        }, `🔍 Bằng chứng trích dẫn (${proposalData?.evidence.length || 0})`),
         h('button', {
           type: 'button',
           'data-testid': 'lattice-tab-review-btn',
@@ -257,23 +300,16 @@ function createEvidenceProposalComponent(React) {
 
       // TAB 1: Proposal Content
       activeTab === 'proposal' && h('div', { 'data-testid': 'lattice-proposal-content-view' },
-        h('div', { style: { padding: 14, background: '#f8fafc', borderRadius: 6, border: '1px solid #e2e8f0', marginBottom: 14 } },
+        proposalData ? h('div', { style: { padding: 14, background: '#f8fafc', borderRadius: 6, border: '1px solid #e2e8f0', marginBottom: 14 } },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 6 } },
             h('span', { style: { fontSize: 12, fontWeight: 700, color: '#0958d9' } }, '📋 TỔNG KẾT NGUYÊN NHÂN & PHƯƠNG ÁN XỬ LÝ:'),
-            h('span', { style: { fontSize: 11, color: '#389e0d', fontWeight: 600 } }, `Độ tin cậy: ${proposalData.confidence || '94%'}`)
+            h('span', { style: { fontSize: 11, color: '#5e6c84' } }, `Mã đề xuất: ${visibleJob.proposalId}`)
           ),
           h('p', {
             'data-testid': 'lattice-proposal-summary-text',
             style: { margin: 0, fontSize: 13, lineHeight: 1.6, color: '#172b4d' }
           }, proposalData.summary)
-        ),
-
-        proposalData.recommendedActions && proposalData.recommendedActions.length > 0 && h('div', { style: { marginTop: 12 } },
-          h('h5', { style: { margin: '0 0 8px 0', fontSize: 13, color: '#172b4d', fontWeight: 600 } }, 'Kế hoạch hành động đề xuất cho Kỹ thuật viên:'),
-          h('ul', { style: { margin: 0, paddingLeft: 20, fontSize: 13, color: '#344563', lineHeight: 1.6 } },
-            ...proposalData.recommendedActions.map((act, i) => h('li', { key: i, style: { marginBottom: 4 } }, act))
-          )
-        )
+        ) : h('div', { role: 'status', 'data-testid': 'lattice-proposal-no-result', style: { padding: 14, background: '#f8fafc', borderRadius: 6, border: '1px solid #e2e8f0', color: '#5e6c84', fontSize: 13 } }, loading ? 'Đang tải kết quả phân tích…' : 'Chưa có kết quả phân tích hoàn tất được liên kết với hồ sơ này.')
       ),
 
       // TAB 2: Evidence Ledger
@@ -282,7 +318,7 @@ function createEvidenceProposalComponent(React) {
           'Bằng chứng xác thực nguồn dữ liệu vi phạm ngưỡng (Data Provenance & Citations):'
         ),
         h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
-          ...proposalData.evidence.map((item, idx) => h('div', {
+          ...(proposalData?.evidence || []).map((item, idx) => h('div', {
             key: idx,
             'data-testid': `lattice-evidence-item-${idx}`,
             style: {
@@ -315,7 +351,8 @@ function createEvidenceProposalComponent(React) {
               : caseStatus === 'approved' ? '✅ Đề xuất đã được duyệt'
               : caseStatus === 'rejected' ? '❌ Đề xuất đã bị từ chối'
               : `Trạng thái hồ sơ: ${caseStatus}`
-          )
+          ),
+          !proposalReady && h('p', { role: 'alert', style: { margin: '10px 0 0 0', color: '#cf1322', fontSize: 13 } }, 'Chưa có kết quả phân tích hợp lệ. Phê duyệt và từ chối đang bị khóa.')
         ),
 
         (caseStatus === 'review_pending' || caseStatus === 'rejected') && h('div', null,
@@ -335,7 +372,7 @@ function createEvidenceProposalComponent(React) {
             h('button', {
               type: 'button',
               'data-testid': 'lattice-proposal-approve-btn',
-              disabled: actionBusy,
+              disabled: actionBusy || !proposalReady || !workflowCommands || workflowCommands.uncertain,
               onClick: handleApprove,
               style: {
                 padding: '8px 18px',
@@ -351,7 +388,7 @@ function createEvidenceProposalComponent(React) {
             h('button', {
               type: 'button',
               'data-testid': 'lattice-proposal-reject-btn',
-              disabled: actionBusy,
+              disabled: actionBusy || !proposalReady || !workflowCommands || workflowCommands.uncertain,
               onClick: handleReject,
               style: {
                 padding: '8px 18px',
@@ -370,7 +407,7 @@ function createEvidenceProposalComponent(React) {
             h('button', {
               type: 'button',
               'data-testid': 'lattice-proposal-rework-btn',
-              disabled: actionBusy,
+              disabled: actionBusy || !workflowCommands || workflowCommands.uncertain,
               onClick: handleRework,
               style: {
                 padding: '8px 18px',
@@ -386,7 +423,7 @@ function createEvidenceProposalComponent(React) {
           )
         ),
 
-        caseStatus === 'approved' && h('div', {
+        caseStatus === 'approved' && proposalReady && h('div', {
           style: { padding: 12, background: '#f6ffed', color: '#237804', border: '1px solid #b7eb8f', borderRadius: 6, fontSize: 13 }
         }, 'Đề xuất đã được duyệt thành công. Kỹ thuật viên phụ trách có thể thực hiện khắc phục sự cố tại hiện trường.')
       )

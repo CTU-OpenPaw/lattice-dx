@@ -1,8 +1,41 @@
 // SPDX-License-Identifier: Apache-2.0
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { createBridge } = require('../../action-bridge/bridge.cjs');
 const { createAgentRunComponent } = require('../src/applications/incident/agent-run');
 const { createEvidenceProposalComponent } = require('../src/applications/incident/evidence-proposal');
+
+const runId = '11111111-1111-4111-8111-111111111111';
+const jobId = '22222222-2222-4222-8222-222222222222';
+const proposalId = '33333333-3333-4333-8333-333333333333';
+const assetId = '44444444-4444-4444-8444-444444444444';
+const notificationId = 'notification-incident-001';
+const proposal = {
+  summary: 'Nhiệt độ vượt ngưỡng; đề xuất sửa bơm và kiểm tra van tuần hoàn.',
+  suggestedStatus: 'repair',
+  evidence: ['temperature=78.5 celsius', 'threshold=60 celsius']
+};
+const caseItem = (status = 'review_pending', data = {}) => ({
+  id: runId,
+  title: 'Bơm làm mát quá nhiệt',
+  status,
+  version: 4,
+  assetEntityId: assetId,
+  notificationId,
+  data: { assetEntityId: assetId, notificationId, agentJobId: jobId, proposalId, ...data }
+});
+const completedJob = overrides => ({
+  id: jobId,
+  runId,
+  assetId,
+  notificationId,
+  status: 'completed',
+  version: 3,
+  attempts: 1,
+  proposalId,
+  proposal,
+  ...overrides
+});
 
 function hooks() {
   const slots = [];
@@ -47,7 +80,7 @@ function hooks() {
       const tree = fn();
       const effects = queue;
       queue = [];
-      effects.forEach(f => f());
+      effects.forEach(effect => effect());
       return tree;
     }
   };
@@ -57,243 +90,282 @@ function find(tree, predicate) {
   if (!tree || typeof tree !== 'object') return null;
   if (predicate(tree)) return tree;
   for (const child of tree.children || []) {
-    const res = find(child, predicate);
-    if (res) return res;
+    const result = find(child, predicate);
+    if (result) return result;
   }
   return null;
 }
 
 const tick = () => new Promise(setImmediate);
 
-test('AgentRun renders with status badge, process stepper, and starts analysis', async () => {
+async function bridgeFixture({ job = completedJob(), jobReadStatuses = [], agentWriteStatuses = [], workflowStatuses = [] } = {}) {
+  const calls = [];
+  const readStatuses = [...jobReadStatuses];
+  const writeStatuses = [...agentWriteStatuses];
+  const transitionStatuses = [...workflowStatuses];
+  const bridge = createBridge({
+    gatewayUrl: 'http://gateway',
+    tokenUrl: 'http://identity/token',
+    userinfoUrl: 'http://identity/user',
+    authorizationUrl: 'http://identity/auth',
+    clientId: 'fixture',
+    callbackUrl: 'http://localhost/callback'
+  }, {
+    schedule: () => ({ unref() {} }),
+    cancelTimer: () => {},
+    fetch: async (url, options = {}) => {
+      calls.push({ url, options });
+      if (url.endsWith('/token')) return Response.json({ access_token: 'fixture-token', expires_in: 300 });
+      if (url.endsWith('/user')) return Response.json({ sub: 'alice', organization_id: 'org-1' });
+      if (url === `http://gateway/v1/agent-jobs/${jobId}`) {
+        const status = readStatuses.shift() || 200;
+        return Response.json(status >= 400 ? { error: 'Agent read denied' } : job, { status });
+      }
+      if (url === `http://gateway/v1/agent-jobs/${jobId}/retry`) {
+        const status = writeStatuses.shift() || 200;
+        return Response.json(status >= 400 ? { error: 'Agent retry failed' } : { ...job, status: 'queued', version: job.version + 1 }, { status });
+      }
+      if (url === `http://gateway/v1/workflows/${runId}/transitions`) {
+        const status = transitionStatuses.shift() || 200;
+        return Response.json(status >= 400 ? { error: 'Workflow transition failed' } : { id: runId, version: 5 }, { status });
+      }
+      return Response.json({ items: [] });
+    }
+  });
+  const start = bridge.connect('noco');
+  await bridge.callback({ state: new URL(start.authorizationUrl).searchParams.get('state'), code: 'fixture' }, start.browserId);
+  return {
+    api: {
+      agent: (operation, args = {}) => bridge.agent('noco', start.browserId, { operation, ...args }),
+      workflow: (operation, args = {}) => bridge.workflow('noco', start.browserId, { operation, ...args })
+    },
+    calls,
+    connection: { connected: true, identity: { subject: 'alice', organizationId: 'org-1', username: 'Alice' } },
+    close: () => bridge.disconnect('noco', start.browserId)
+  };
+}
+
+function renderEvidence(env, props) {
+  const EvidenceProposal = createEvidenceProposalComponent(env.react);
+  const render = () => env.render(() => EvidenceProposal(props));
+  return { render };
+}
+
+async function openReview(render) {
+  let tree = render();
+  const review = find(tree, node => node.props?.['data-testid'] === 'lattice-tab-review-btn');
+  assert.ok(review, 'Review tab must exist');
+  review.props.onClick();
+  await tick();
+  tree = render();
+  return tree;
+}
+
+test('EvidenceProposal loads the immutable proposal from the workflow-linked completed agent job', async () => {
+  const fixture = await bridgeFixture();
+  const env = hooks();
+  const { render } = renderEvidence(env, { api: fixture.api, connection: fixture.connection, caseItem: caseItem() });
+
+  render(); await tick();
+  let tree = render();
+  let content = JSON.stringify(tree);
+  assert.ok(content.includes(proposal.summary));
+  assert.ok(content.includes(proposalId));
+  assert.equal(content.includes('94%'), false);
+  assert.equal(content.includes('RULE-PUMP-OVERHEAT'), false);
+  assert.ok(fixture.calls.some(call => call.url === `http://gateway/v1/agent-jobs/${jobId}`));
+
+  find(tree, node => node.props?.['data-testid'] === 'lattice-tab-evidence-btn').props.onClick();
+  tree = render();
+  assert.ok(JSON.stringify(tree).includes('temperature=78.5 celsius'));
+
+  tree = await openReview(render);
+  const approve = find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-approve-btn');
+  assert.ok(approve);
+  assert.equal(approve.props.disabled, false);
+  await approve.props.onClick();
+  const transition = fixture.calls.find(call => call.url === `http://gateway/v1/workflows/${runId}/transitions`);
+  assert.ok(transition, 'Approval must go through the workflow transition endpoint');
+  assert.deepEqual(JSON.parse(transition.options.body), {
+    action: 'approve',
+    expectedVersion: 4,
+    input: { reviewNote: 'Người quản lý duyệt đề xuất xử lý của AI' }
+  });
+  assert.ok(transition.options.headers['idempotency-key']);
+  fixture.close();
+});
+
+test('EvidenceProposal shows no result and disables approve or reject when the workflow has no linked job', async () => {
+  const fixture = await bridgeFixture();
+  const env = hooks();
+  const linkedRun = caseItem('review_pending', { agentJobId: undefined, proposalId: undefined });
+  const { render } = renderEvidence(env, { api: fixture.api, connection: fixture.connection, caseItem: linkedRun });
+
+  render(); await tick();
+  let tree = render();
+  assert.equal(JSON.stringify(tree).includes(proposal.summary), false);
+  assert.ok(JSON.stringify(tree).includes('Chưa có kết quả phân tích'));
+  tree = await openReview(render);
+  assert.equal(find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-approve-btn').props.disabled, true);
+  assert.equal(find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-reject-btn').props.disabled, true);
+  assert.equal(fixture.calls.some(call => call.url.includes('/v1/agent-jobs/')), false);
+  fixture.close();
+});
+
+test('EvidenceProposal rejects an agent result linked to a different run, proposal, asset or notification', async () => {
+  const mismatches = [
+    ['run', { runId: '55555555-5555-4555-8555-555555555555' }],
+    ['proposal', { proposalId: '66666666-6666-4666-8666-666666666666' }],
+    ['asset', { assetId: '77777777-7777-4777-8777-777777777777' }],
+    ['notification', { notificationId: 'notification-other' }]
+  ];
+  for (const [scope, overrides] of mismatches) {
+    const fixture = await bridgeFixture({ job: completedJob(overrides) });
+    const env = hooks();
+    const { render } = renderEvidence(env, { api: fixture.api, connection: fixture.connection, caseItem: caseItem() });
+
+    render(); await tick();
+    let tree = render();
+    assert.equal(JSON.stringify(tree).includes(proposal.summary), false, `${scope} mismatch must not show proposal`);
+    assert.ok(JSON.stringify(tree).includes('không khớp với hồ sơ sự cố'), `${scope} mismatch must be explained`);
+    tree = await openReview(render);
+    assert.equal(find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-approve-btn').props.disabled, true);
+    assert.equal(find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-reject-btn').props.disabled, true);
+    fixture.close();
+  }
+});
+
+test('EvidenceProposal keeps review disabled when the linked job has no completed proposal', async () => {
+  const fixture = await bridgeFixture({ job: completedJob({ status: 'queued', proposal: null }) });
+  const env = hooks();
+  const { render } = renderEvidence(env, { api: fixture.api, connection: fixture.connection, caseItem: caseItem() });
+
+  render(); await tick();
+  let tree = render();
+  assert.equal(JSON.stringify(tree).includes(proposal.summary), false);
+  assert.ok(JSON.stringify(tree).includes('Chưa có kết quả phân tích hoàn tất'));
+  tree = await openReview(render);
+  assert.equal(find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-approve-btn').props.disabled, true);
+  assert.equal(find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-reject-btn').props.disabled, true);
+  fixture.close();
+});
+
+test('EvidenceProposal reports denied job detail and leaves review actions disabled', async () => {
+  const fixture = await bridgeFixture({ jobReadStatuses: [403] });
+  const env = hooks();
+  const { render } = renderEvidence(env, { api: fixture.api, connection: fixture.connection, caseItem: caseItem() });
+
+  render(); await tick();
+  let tree = render();
+  assert.equal(JSON.stringify(tree).includes(proposal.summary), false);
+  assert.ok(find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-error'));
+  tree = await openReview(render);
+  assert.equal(find(tree, node => node.props?.['data-testid'] === 'lattice-proposal-approve-btn').props.disabled, true);
+  fixture.close();
+});
+
+test('EvidenceProposal hides a late job result after actor scope changes', async () => {
+  const resolvers = [];
+  const env = hooks();
+  const connection = { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } };
+  const api = {
+    agent: () => new Promise(resolve => { resolvers.push(resolve); }),
+    workflow: async () => ({ id: runId })
+  };
+  const { render } = renderEvidence(env, { api, connection, caseItem: caseItem() });
+
+  render(); await tick();
+  connection.identity = { subject: 'bob', organizationId: 'org-2' };
+  let tree = render();
+  assert.equal(JSON.stringify(tree).includes(proposal.summary), false);
+  assert.equal(resolvers.length, 2, 'New scope starts a fresh detail read');
+  resolvers[0](completedJob());
+  await tick();
+  tree = render();
+  assert.equal(JSON.stringify(tree).includes(proposal.summary), false);
+});
+
+test('AgentRun starts analysis with a real transition and no generated job receipt', async () => {
+  const fixture = await bridgeFixture({ workflowStatuses: [200] });
   const env = hooks();
   const AgentRun = createAgentRunComponent(env.react);
-  let workflowPayload = null;
+  const run = caseItem('investigating', { agentJobId: undefined, proposalId: undefined });
+  const render = () => env.render(() => AgentRun({ api: fixture.api, connection: fixture.connection, caseItem: run, runId: run.id }));
 
-  const caseItem = {
-    id: 'case-run-001',
-    status: 'investigating',
-    version: 1,
-    assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-01'
-  };
-
-  const api = {
-    agent: async (op) => {
-      if (op === 'list') return { items: [] };
-      return null;
-    },
-    workflow: async (op, arg) => {
-      if (op === 'transition') {
-        workflowPayload = arg;
-        return { version: 2 };
-      }
-      return { items: [] };
-    }
-  };
-
-  const render = () => env.render(() => AgentRun({ api, connection: { connected: true }, caseItem, runId: caseItem.id }));
   render(); await tick();
   let tree = render();
-
-  const str = JSON.stringify(tree);
-  assert.ok(str.includes('Tác vụ AI Agent'));
-  assert.ok(str.includes('1. Đọc số đo cảm biến'));
-  assert.ok(str.includes('2. Đối chiếu luật cảnh báo'));
-  assert.ok(str.includes('3. Tổng hợp đề xuất'));
-
-  const startBtn = find(tree, n => n.props?.['data-testid'] === 'lattice-agent-start-btn');
-  assert.ok(startBtn, 'Start analysis button must exist in investigating status');
-
-  await startBtn.props.onClick();
-  render(); await tick();
+  const start = find(tree, node => node.props?.['data-testid'] === 'lattice-agent-start-btn');
+  assert.ok(start);
+  await start.props.onClick();
   tree = render();
 
-  assert.ok(workflowPayload, 'Transition API must be called');
-  assert.equal(workflowPayload.id, 'case-run-001');
-  assert.equal(workflowPayload.body.action, 'request_analysis');
+  const transition = fixture.calls.find(call => call.url === `http://gateway/v1/workflows/${runId}/transitions`);
+  assert.ok(transition);
+  assert.deepEqual(JSON.parse(transition.options.body), { action: 'request_analysis', expectedVersion: 4, input: {} });
+  assert.equal(JSON.stringify(tree).includes('job-started-'), false);
+  fixture.close();
 });
 
-test('AgentRun displays diagnostic error box on failure and supports retry', async () => {
+test('AgentRun does not carry an uncertain command from one run into another run', async () => {
+  const calls = [];
+  const api = {
+    agent: async () => { throw new Error('No job should be read for an unlinked run'); },
+    workflow: async (operation, args) => {
+      calls.push({ operation, args });
+      if (calls.length === 1) throw { status: 503, message: 'Uncertain workflow response' };
+      return { id: args.id, version: 5 };
+    }
+  };
+  const connection = { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } };
   const env = hooks();
   const AgentRun = createAgentRunComponent(env.react);
-  let retryPayload = null;
+  const runA = caseItem('investigating', { agentJobId: undefined, proposalId: undefined });
+  const runB = { ...caseItem('investigating', { agentJobId: undefined, proposalId: undefined }), id: '55555555-5555-4555-8555-555555555555' };
+  let selectedRun = runA;
+  const render = () => env.render(() => AgentRun({ api, connection, caseItem: selectedRun, runId: selectedRun.id }));
 
-  const failedJob = {
-    id: '11111111-2222-3333-4444-555555555555',
-    runId: 'case-fail-002',
-    status: 'failed',
-    errorCode: 'model_unavailable',
-    attempts: 2,
-    version: 2
-  };
-
-  const caseItem = {
-    id: 'case-fail-002',
-    status: 'analysis_failed',
-    version: 2
-  };
-
-  const api = {
-    agent: async (op, arg) => {
-      if (op === 'list') return { items: [failedJob] };
-      if (op === 'retry') {
-        retryPayload = arg;
-        return { version: 3 };
-      }
-      return null;
-    },
-    workflow: async () => ({ items: [] })
-  };
-
-  const render = () => env.render(() => AgentRun({ api, connection: { connected: true }, caseItem, runId: caseItem.id }));
   render(); await tick();
   let tree = render();
+  await find(tree, node => node.props?.['data-testid'] === 'lattice-agent-start-btn').props.onClick();
+  tree = render();
+  assert.ok(find(tree, node => node.props?.['data-testid'] === 'lattice-agent-retry-command-btn'));
 
-  const str = JSON.stringify(tree);
-  assert.ok(str.includes('Phân tích thất bại'));
-  assert.ok(str.includes('Dịch vụ mô hình AI (Model Runtime) tạm thời không phản hồi'));
-
-  const retryBtn = find(tree, n => n.props?.['data-testid'] === 'lattice-agent-retry-btn');
-  assert.ok(retryBtn, 'Retry button must exist for failed analysis');
-
-  await retryBtn.props.onClick();
+  selectedRun = runB;
   render(); await tick();
   tree = render();
+  const startB = find(tree, node => node.props?.['data-testid'] === 'lattice-agent-start-btn');
+  assert.ok(startB, 'The second run must be able to start independently');
+  await startB.props.onClick();
 
-  assert.ok(retryPayload, 'Agent retry API must be called');
-  assert.equal(retryPayload.id, '11111111-2222-3333-4444-555555555555');
-  assert.equal(retryPayload.body.expectedVersion, 2);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].args.id, runA.id);
+  assert.equal(calls[1].args.id, runB.id);
+  assert.notEqual(calls[0].args.key, calls[1].args.key);
+  assert.deepEqual(calls[0].args.body, calls[1].args.body);
 });
 
-test('EvidenceProposal renders proposal, evidence citations, and supports manager approve/reject', async () => {
+test('AgentRun retries an uncertain agent command with the same key and body', async () => {
+  const failed = completedJob({ status: 'failed', version: 2, proposalId: null, proposal: null, errorCode: 'model_unavailable' });
+  const fixture = await bridgeFixture({ job: failed, agentWriteStatuses: [503, 200] });
   const env = hooks();
-  const EvidenceProposal = createEvidenceProposalComponent(env.react);
-  let approvePayload = null;
-  let rejectPayload = null;
+  const AgentRun = createAgentRunComponent(env.react);
+  const run = caseItem('analysis_failed');
+  const render = () => env.render(() => AgentRun({ api: fixture.api, connection: fixture.connection, caseItem: run, runId: run.id }));
 
-  const sampleProposal = {
-    proposalId: 'prop-test-100',
-    summary: 'Phát hiện nhiệt độ 78.5°C vượt ngưỡng 60.0°C. Đề xuất sửa chữa bơm và thay dung dịch.',
-    suggestedStatus: 'repair',
-    confidence: '95%',
-    evidence: [
-      'Nhiệt độ đo được: 78.5°C tại PUMP-01',
-      'Luật vi phạm: RULE-TEMP-01 (ngưỡng gt 60 celsius)',
-      'Tài sản: urn:ngsi-ld:Asset:PUMP-01'
-    ]
-  };
-
-  const caseItem = {
-    id: 'case-prop-001',
-    status: 'review_pending',
-    version: 1,
-    proposal: sampleProposal
-  };
-
-  const api = {
-    workflow: async (op, arg) => {
-      if (op === 'transition') {
-        if (arg.body.action === 'approve') approvePayload = arg;
-        if (arg.body.action === 'reject') rejectPayload = arg;
-        return { version: 2 };
-      }
-      return {};
-    }
-  };
-
-  const render = () => env.render(() => EvidenceProposal({ api, connection: { connected: true }, caseItem, proposal: sampleProposal }));
   render(); await tick();
   let tree = render();
-
-  // Tab 1: Proposal Content
-  let str = JSON.stringify(tree);
-  assert.ok(str.includes('Yêu cầu sửa chữa (Repair)'));
-  assert.ok(str.includes('Phát hiện nhiệt độ 78.5°C vượt ngưỡng 60.0°C'));
-
-  // Switch to Tab 2: Evidence Ledger
-  const evidenceTabBtn = find(tree, n => n.props?.['data-testid'] === 'lattice-tab-evidence-btn');
-  assert.ok(evidenceTabBtn, 'Evidence tab button must exist');
-  evidenceTabBtn.props.onClick();
-
-  render(); await tick();
+  const retry = find(tree, node => node.props?.['data-testid'] === 'lattice-agent-retry-btn');
+  assert.ok(retry);
+  await retry.props.onClick();
   tree = render();
-  str = JSON.stringify(tree);
-  assert.ok(str.includes('[E1]'));
-  assert.ok(str.includes('Nhiệt độ đo được: 78.5°C'));
-  assert.ok(str.includes('RULE-TEMP-01'));
+  const retryPending = find(tree, node => node.props?.['data-testid'] === 'lattice-agent-retry-command-btn');
+  assert.ok(retryPending, 'Uncertain retry must remain available');
+  await retryPending.props.onClick();
 
-  // Switch to Tab 3: Review Panel
-  const reviewTabBtn = find(tree, n => n.props?.['data-testid'] === 'lattice-tab-review-btn');
-  assert.ok(reviewTabBtn, 'Review tab button must exist');
-  reviewTabBtn.props.onClick();
-
-  render(); await tick();
-  tree = render();
-
-  const noteInput = find(tree, n => n.props?.['data-testid'] === 'lattice-review-note-input');
-  assert.ok(noteInput, 'Note input must exist');
-  noteInput.props.onChange({ target: { value: 'Quản lý duyệt: Cần dừng máy ngay để thay van' } });
-
-  render(); await tick();
-  tree = render();
-
-  const approveBtn = find(tree, n => n.props?.['data-testid'] === 'lattice-proposal-approve-btn');
-  assert.ok(approveBtn, 'Approve button must exist');
-  await approveBtn.props.onClick();
-
-  render(); await tick();
-  tree = render();
-
-  assert.ok(approvePayload, 'Approve transition payload must be sent');
-  assert.equal(approvePayload.id, 'case-prop-001');
-  assert.equal(approvePayload.body.action, 'approve');
-  assert.equal(approvePayload.body.input.reviewNote, 'Quản lý duyệt: Cần dừng máy ngay để thay van');
-});
-
-test('EvidenceProposal supports rejection and rework workflow', async () => {
-  const env = hooks();
-  const EvidenceProposal = createEvidenceProposalComponent(env.react);
-  let reworkPayload = null;
-
-  const caseItemRejected = {
-    id: 'case-prop-002',
-    status: 'rejected',
-    version: 2
-  };
-
-  const api = {
-    workflow: async (op, arg) => {
-      if (op === 'transition' && arg.body.action === 'rework') {
-        reworkPayload = arg;
-        return { version: 3 };
-      }
-      return {};
-    }
-  };
-
-  const render = () => env.render(() => EvidenceProposal({ api, connection: { connected: true }, caseItem: caseItemRejected }));
-  render(); await tick();
-  let tree = render();
-
-  // Switch to Review Tab
-  const reviewTabBtn = find(tree, n => n.props?.['data-testid'] === 'lattice-tab-review-btn');
-  reviewTabBtn.props.onClick();
-
-  render(); await tick();
-  tree = render();
-
-  const noteInput = find(tree, n => n.props?.['data-testid'] === 'lattice-review-note-input');
-  noteInput.props.onChange({ target: { value: 'Kỹ thuật viên yêu cầu đo lại rung động trước khi kết luận' } });
-
-  render(); await tick();
-  tree = render();
-
-  const reworkBtn = find(tree, n => n.props?.['data-testid'] === 'lattice-proposal-rework-btn');
-  assert.ok(reworkBtn, 'Rework button must exist in rejected status');
-  await reworkBtn.props.onClick();
-
-  assert.ok(reworkPayload, 'Rework transition payload must be sent');
-  assert.equal(reworkPayload.id, 'case-prop-002');
-  assert.equal(reworkPayload.body.action, 'rework');
-  assert.equal(reworkPayload.body.input.reworkNote, 'Kỹ thuật viên yêu cầu đo lại rung động trước khi kết luận');
+  const writes = fixture.calls.filter(call => call.url === `http://gateway/v1/agent-jobs/${jobId}/retry`);
+  assert.equal(writes.length, 2);
+  assert.equal(writes[0].options.headers['idempotency-key'], writes[1].options.headers['idempotency-key']);
+  assert.equal(writes[0].options.body, writes[1].options.body);
+  assert.deepEqual(JSON.parse(writes[0].options.body), { expectedVersion: 2 });
+  fixture.close();
 });
