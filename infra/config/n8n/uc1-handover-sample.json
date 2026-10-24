@@ -1,11 +1,11 @@
 {
-    "name":  "LatticeDX - UC1 Handover Sync",
+    "name":  "LatticeDX - UC1 Handover Sample Sync",
     "active":  false,
     "nodes":  [
                   {
                       "parameters":  {
                                          "httpMethod":  "POST",
-                                         "path":  "latticedx/uc1/handovers",
+                                         "path":  "latticedx/uc1/sample/handovers",
                                          "authentication":  "headerAuth",
                                          "responseMode":  "responseNode",
                                          "options":  {
@@ -20,7 +20,7 @@
                                    ],
                       "id":  "8afd794b-bbd2-4162-becd-10aabbb523fa",
                       "name":  "Webhook",
-                      "webhookId":  "4b9350f3-98ad-415e-b097-ef5dd90b62b2",
+                      "webhookId":  "latticedx-uc1-handover-sample",
                       "credentials":  {
                                           "httpHeaderAuth":  {
                                                                  "name":  "LatticeDX UC1 Handover Webhook"
