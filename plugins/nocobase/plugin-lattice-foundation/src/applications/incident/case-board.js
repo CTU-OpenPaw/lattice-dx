@@ -5,6 +5,7 @@ const { createCaseResolutionComponent } = require('./resolution');
 const { createEvidenceComponents } = require('../../client/evidence-blocks');
 const { createInboxComponents } = require('../../client/inbox-blocks');
 const { createEntityContextComponent } = require('../../client/entity-context');
+const { createWorkflowCommands } = require('../../client/workflow');
 
 function createCaseBoardComponent(React) {
   const h = React.createElement;
@@ -135,13 +136,17 @@ function createCaseBoardComponent(React) {
   const defaultCreateForm = {
     title: '',
     assetEntityId: '',
-    severity: 'high',
-    handlerId: 'handler',
-    description: ''
+    handlerId: 'handler'
   };
 
   return function CaseBoard({ api, connection, onSelectCase, initialAssetId }) {
-    const connected = connection?.connected !== false;
+    const connected = connection?.connected === true;
+    const actorId = connection?.identity?.subject;
+    const organizationId = connection?.identity?.organizationId;
+    const scope = React.useMemo(() => ({ api, connected, actorId, organizationId }), [api, connected, actorId, organizationId]);
+    const scopeRef = React.useRef(scope);
+    scopeRef.current = scope;
+    const loadEpoch = React.useRef(0);
     const [cases, setCases] = React.useState([]);
     const [assets, setAssets] = React.useState([]);
     const [departments, setDepartments] = React.useState([]);
@@ -166,156 +171,95 @@ function createCaseBoardComponent(React) {
     });
     const [actionNote, setActionNote] = React.useState('');
     const [actionBusy, setActionBusy] = React.useState(false);
+    const [retryWorkflowCommand, setRetryWorkflowCommand] = React.useState(null);
+    const workflowCommands = React.useMemo(() => api?.workflow && connected && actorId
+      ? createWorkflowCommands({ api, actorId })
+      : null, [api, connected, actorId, organizationId]);
 
     const loadData = React.useCallback(async () => {
-      if (!connected) return;
+      const requestScope = scope;
+      const request = ++loadEpoch.current;
+      const current = () => scopeRef.current === requestScope && loadEpoch.current === request;
+      if (!connected) {
+        if (current()) {
+          setCases([]);
+          setAssets([]);
+          setDepartments([]);
+          setLoading(false);
+        }
+        return;
+      }
       setLoading(true);
       setError('');
       try {
-        let loadedCases = [];
-        if (api.workflow) {
-          try {
-            const res = await api.workflow('list', {
-              query: { definitionId: 'incident-response', limit: '100', offset: '0' }
-            });
-            if (res && Array.isArray(res.items)) {
-              loadedCases = res.items.map(item => ({
-                id: item.id,
-                title: item.title,
-                status: item.state || item.status || 'open',
-                version: item.version || 1,
-                severity: item.severity || item.data?.severity || 'high',
-                assetEntityId: item.assetEntityId || item.data?.assetEntityId || '',
-                handlerId: item.handlerId || item.data?.handlerId || 'Chưa gán',
-                notificationId: item.notificationId || item.data?.notificationId || '',
-                createdAt: item.createdAt || new Date().toISOString(),
-                updatedAt: item.updatedAt || new Date().toISOString(),
-                proposal: item.proposal || item.data?.proposal,
-                resolutionNote: item.resolutionNote || item.data?.resolutionNote || '',
-                closeNote: item.closeNote || item.data?.closeNote || '',
-                data: item.data || {},
-                availableTransitions: item.availableTransitions || []
-              }));
-            }
-          } catch {
-            // fallback
-          }
-        }
-
-        if (loadedCases.length === 0 && api.request) {
-          try {
-            const localRes = await api.request({ url: 'latticeIncidentCases:list', method: 'get', params: { paginate: false } });
-            if (localRes?.data?.data && Array.isArray(localRes.data.data)) {
-              loadedCases = localRes.data.data.map(c => ({
-                id: c.runId || c.code || c.id,
-                title: c.name || c.title || c.code,
-                status: c.status || 'open',
-                version: 1,
-                severity: c.severity || 'high',
-                assetEntityId: c.assetEntityId,
-                handlerId: c.handlerId,
-                notificationId: c.notificationId,
-                createdAt: c.createdAt,
-                updatedAt: c.updatedAt,
-                proposal: c.proposal,
-                resolutionNote: c.resolutionNote,
-                closeNote: c.closeNote
-              }));
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        if (loadedCases.length === 0) {
-          loadedCases = [
-            {
-              id: 'INC-2026-001',
-              title: 'Cảnh báo nhiệt độ vượt ngưỡng tại Bơm làm mát A1',
-              status: 'review_pending',
-              version: 1,
-              severity: 'critical',
-              assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-01',
-              handlerId: 'DEMO-EMP-01',
-              notificationId: 'notif-alert-01',
-              createdAt: new Date(Date.now() - 3600000).toISOString(),
-              updatedAt: new Date().toISOString(),
-              proposal: 'Phát hiện nhiệt độ 78.5°C vượt ngưỡng 60°C. Đề xuất: Giảm tải công suất 30%, kiểm tra dung dịch làm mát và thay thế phớt chặn cơ khí.',
-              availableTransitions: ['approve', 'reject']
-            },
-            {
-              id: 'INC-2026-002',
-              title: 'Độ ẩm không khí tăng cao bất thường tại Kho Lương thực B',
-              status: 'investigating',
-              version: 1,
-              severity: 'high',
-              assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-02',
-              handlerId: 'DEMO-EMP-02',
-              notificationId: 'notif-alert-02',
-              createdAt: new Date(Date.now() - 7200000).toISOString(),
-              updatedAt: new Date().toISOString(),
-              availableTransitions: ['request_analysis']
-            },
-            {
-              id: 'INC-2026-003',
-              title: 'Mức pin cảm biến đo rung giảm dưới 15%',
-              status: 'open',
-              version: 1,
-              severity: 'medium',
-              assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-01',
-              handlerId: 'Chưa phân công',
-              notificationId: 'notif-alert-03',
-              createdAt: new Date(Date.now() - 14400000).toISOString(),
-              updatedAt: new Date().toISOString(),
-              availableTransitions: ['assign']
-            },
-            {
-              id: 'INC-2026-004',
-              title: 'Áp suất đường ống cấp nước phân xưởng 2 suy giảm',
-              status: 'resolved',
-              version: 1,
-              severity: 'low',
-              assetEntityId: 'urn:ngsi-ld:Asset:DEMO-ASSET-02',
-              handlerId: 'DEMO-EMP-02',
-              notificationId: 'notif-alert-04',
-              createdAt: new Date(Date.now() - 86400000).toISOString(),
-              updatedAt: new Date().toISOString(),
-              resolutionNote: 'Đã siết chặt van điều áp và kiểm tra không còn rò rỉ.',
-              availableTransitions: ['close']
-            }
-          ];
-        }
+        if (!api?.workflow) throw new Error('Không có dịch vụ quy trình để tải sự cố.');
+        const res = await api.workflow('list', {
+          query: { definitionId: 'incident-response', limit: '100', offset: '0' }
+        });
+        const loadedCases = Array.isArray(res?.items) ? res.items.map(item => ({
+          id: item.id,
+          title: item.title,
+          status: item.state || item.status || 'open',
+          version: item.version || 1,
+          severity: item.severity || item.data?.severity || 'high',
+          assetEntityId: item.assetEntityId || item.data?.assetEntityId || '',
+          handlerId: item.handlerId || item.data?.handlerId || 'Chưa gán',
+          notificationId: item.notificationId || item.data?.notificationId || '',
+          createdAt: item.createdAt || new Date().toISOString(),
+          updatedAt: item.updatedAt || new Date().toISOString(),
+          proposal: item.proposal || item.data?.proposal,
+          resolutionNote: item.resolutionNote || item.data?.resolutionNote || '',
+          closeNote: item.closeNote || item.data?.closeNote || '',
+          data: item.data || {},
+          availableTransitions: item.availableTransitions || []
+        })) : [];
+        if (!current()) return;
         setCases(loadedCases);
-
-        if (api.entity) {
-          try {
-            const assetRes = await api.entity('list', { query: { limit: '100', offset: '0' } });
-            const assetItems = assetRes?.items || [];
-            setAssets(assetItems);
-          } catch {
-            setAssets([]);
-          }
-        }
-
-        if (api.request) {
-          try {
-            const deptRes = await api.request({ url: 'latticeDepartments:list', method: 'get', params: { paginate: false } });
-            const deptItems = deptRes?.data?.data || [];
-            setDepartments(deptItems);
-          } catch {
-            setDepartments([]);
-          }
-        }
       } catch (err) {
+        if (!current()) return;
+        setCases([]);
         setError(err.message || 'Không thể tải dữ liệu sự cố.');
-      } finally {
-        setLoading(false);
       }
-    }, [api, connected]);
+
+      if (api?.entity) {
+        try {
+          const assetRes = await api.entity('list', { query: { schemaId: 'incident-asset', limit: '100', offset: '0' } });
+          if (!current()) return;
+          setAssets(assetRes?.items || []);
+        } catch {
+          if (!current()) return;
+          setAssets([]);
+        }
+      }
+
+      if (api?.request) {
+        try {
+          const deptRes = await api.request({ url: 'latticeDepartments:list', method: 'get', params: { paginate: false } });
+          if (!current()) return;
+          setDepartments(deptRes?.data?.data || []);
+        } catch {
+          if (!current()) return;
+          setDepartments([]);
+        }
+      }
+      if (current()) setLoading(false);
+    }, [api, connected, scope]);
 
     React.useEffect(() => {
-      loadData();
-    }, [loadData]);
+      loadEpoch.current++;
+      setCases([]);
+      setAssets([]);
+      setDepartments([]);
+      setSelectedCase(null);
+      setRetryWorkflowCommand(null);
+      setError('');
+      setSuccessMessage('');
+      setActionBusy(false);
+      setActionNote('');
+      if (connected) loadData();
+      else setLoading(false);
+      return () => { loadEpoch.current++; };
+    }, [loadData, scope, connected]);
 
     React.useEffect(() => {
       if (initialAssetId) {
@@ -355,72 +299,18 @@ function createCaseBoardComponent(React) {
       });
     }, [cases, filterStatus, filterSeverity, filterHandler, filterAsset, filterDepartment, searchQuery, assetMap]);
 
-    const handleCreateCase = async (e) => {
+    const handleCreateCase = e => {
       e.preventDefault();
-      if (!createForm.title.trim() || !createForm.assetEntityId || !createForm.handlerId) {
-        setError('Vui lòng nhập đầy đủ tiêu đề, chọn tài sản và kỹ thuật viên.');
-        return;
-      }
-      setActionBusy(true);
-      setError('');
-      try {
-        const key = 'case-create-' + Date.now();
-        const notificationId = 'notif-' + Date.now();
-        const body = {
-          definitionId: 'incident-response',
-          title: createForm.title.trim(),
-          input: {
-            assetEntityId: createForm.assetEntityId,
-            handlerId: createForm.handlerId,
-            notificationId,
-            severity: createForm.severity
-          }
-        };
-
-        if (api.workflow) {
-          await api.workflow('create', { key, body });
-        }
-
-        if (api.request) {
-          try {
-            const caseCode = 'CASE-' + Date.now();
-            await api.request({
-              url: 'latticeIncidentCases:create',
-              method: 'post',
-              data: {
-                code: caseCode,
-                name: createForm.title.trim(),
-                title: createForm.title.trim(),
-                organizationId: api.connection?.organizationId || 'demo-organization-01',
-                runId: key,
-                assetEntityId: createForm.assetEntityId,
-                notificationId,
-                handlerId: createForm.handlerId,
-                severity: createForm.severity,
-                status: 'open'
-              }
-            });
-          } catch {
-            // ignore
-          }
-        }
-
-        setSuccessMessage('Đã tạo hồ sơ sự cố thành công!');
-        setIsCreating(false);
-        setCreateForm(defaultCreateForm);
-        loadData();
-      } catch (err) {
-        setError(err.message || 'Không thể tạo sự cố.');
-      } finally {
-        setActionBusy(false);
-      }
+      setError('Chưa thể tạo sự cố thủ công vì chưa có nguồn notification hợp lệ. Sự cố cần được khởi tạo từ notification đã xác thực.');
     };
 
+    const workflowCommandBlocked = actionBusy || !connected || !workflowCommands || workflowCommands.uncertain;
+
     const handleTransition = async (caseItem, action) => {
+      const commandScope = scope;
       setActionBusy(true);
       setError('');
       try {
-        const key = 'act-' + Date.now();
         const input = {};
         if (action === 'accept') input.receiptNote = actionNote.trim() || 'Kỹ thuật viên đã tiếp nhận';
         if (action === 'approve') input.reviewNote = actionNote.trim() || 'Người quản lý duyệt đề xuất';
@@ -429,28 +319,53 @@ function createCaseBoardComponent(React) {
         if (action === 'record_resolution') input.resolutionNote = actionNote.trim() || 'Đã khắc phục hoàn tất sự cố';
         if (action === 'close') input.closeNote = actionNote.trim() || 'Đã đóng sự cố';
 
-        if (api.workflow) {
-          await api.workflow('transition', {
-            id: caseItem.id,
-            key,
-            body: {
-              action,
-              expectedVersion: caseItem.version,
-              input
-            }
-          });
-        }
+        if (!workflowCommands) throw new Error('Chưa kết nối dịch vụ quy trình.');
+        if (scopeRef.current !== commandScope) return;
+        await workflowCommands.execute('transition', {
+          action,
+          expectedVersion: caseItem.version,
+          input
+        }, caseItem.id);
 
+        if (scopeRef.current !== commandScope) return;
+        setRetryWorkflowCommand(null);
         setSuccessMessage(`Đã thực hiện thao tác "${action}" thành công.`);
         setActionNote('');
         setSelectedCase(null);
-        loadData();
+        await loadData();
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryWorkflowCommand(workflowCommands?.uncertain ? { caseItem, action } : null);
         setError(err.status === 403 || err.response?.status === 403
           ? 'Không có quyền thực hiện thao tác chuyển trạng thái này.'
           : (err.message || 'Thao tác thất bại.'));
       } finally {
-        setActionBusy(false);
+        if (scopeRef.current === commandScope) setActionBusy(false);
+      }
+    };
+
+    const retryWorkflowTransition = async () => {
+      const commandScope = scope;
+      if (!retryWorkflowCommand || !workflowCommands || scopeRef.current !== commandScope) return;
+      const pending = retryWorkflowCommand;
+      setActionBusy(true);
+      setError('');
+      try {
+        await workflowCommands.retry();
+        if (scopeRef.current !== commandScope) return;
+        setRetryWorkflowCommand(null);
+        setSuccessMessage(`Đã thực hiện thao tác "${pending.action}" thành công.`);
+        setActionNote('');
+        setSelectedCase(null);
+        await loadData();
+      } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryWorkflowCommand(workflowCommands.uncertain ? pending : null);
+        setError(err.status === 403 || err.response?.status === 403
+          ? 'Không có quyền thực hiện thao tác chuyển trạng thái này.'
+          : (err.message || 'Thử lại thao tác thất bại.'));
+      } finally {
+        if (scopeRef.current === commandScope) setActionBusy(false);
       }
     };
 
@@ -638,8 +553,15 @@ function createCaseBoardComponent(React) {
         )
       ),
 
-      error && h('div', { role: 'alert', style: { padding: 10, background: '#ffebe6', color: '#cf1322', borderRadius: 6, marginBottom: 12, fontSize: 13 } }, error),
+      error && h('div', { role: 'alert', 'data-testid': 'lattice-case-board-error', style: { padding: 10, background: '#ffebe6', color: '#cf1322', borderRadius: 6, marginBottom: 12, fontSize: 13 } }, error),
       successMessage && h('div', { role: 'status', style: { padding: 10, background: '#e3fcef', color: '#216e4e', borderRadius: 6, marginBottom: 12, fontSize: 13 } }, successMessage),
+      retryWorkflowCommand && workflowCommands?.uncertain && h('button', {
+        type: 'button',
+        'data-testid': 'lattice-retry-workflow-command-btn',
+        disabled: actionBusy || !connected,
+        onClick: retryWorkflowTransition,
+        style: { marginBottom: 12, padding: '7px 12px', background: '#fff7e6', color: '#ad6800', border: '1px solid #ffd591', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+      }, actionBusy ? 'Đang thử lại…' : 'Thử lại thao tác'),
 
       // UC1 Bridge Banner
       h('div', {
@@ -920,7 +842,7 @@ function createCaseBoardComponent(React) {
                 selectedCase.status === 'open' && h('button', {
                   type: 'button',
                   'data-testid': 'lattice-action-assign',
-                  disabled: actionBusy,
+                  disabled: workflowCommandBlocked,
                   onClick: () => handleTransition(selectedCase, 'assign'),
                   style: { padding: '6px 14px', background: '#0958d9', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                 }, 'Phân công kỹ thuật viên'),
@@ -928,7 +850,7 @@ function createCaseBoardComponent(React) {
                 selectedCase.status === 'assigned' && h('button', {
                   type: 'button',
                   'data-testid': 'lattice-action-accept',
-                  disabled: actionBusy,
+                  disabled: workflowCommandBlocked,
                   onClick: () => handleTransition(selectedCase, 'accept'),
                   style: { padding: '6px 14px', background: '#1d4ed8', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                 }, 'Nhận việc kiểm tra'),
@@ -936,7 +858,7 @@ function createCaseBoardComponent(React) {
                 selectedCase.status === 'investigating' && h('button', {
                   type: 'button',
                   'data-testid': 'lattice-action-analyze',
-                  disabled: actionBusy,
+                  disabled: workflowCommandBlocked,
                   onClick: () => handleTransition(selectedCase, 'request_analysis'),
                   style: { padding: '6px 14px', background: '#722ed1', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                 }, 'Yêu cầu AI phân tích'),
@@ -944,7 +866,7 @@ function createCaseBoardComponent(React) {
                 selectedCase.status === 'analysis_failed' && h('button', {
                   type: 'button',
                   'data-testid': 'lattice-action-retry-analysis',
-                  disabled: actionBusy,
+                  disabled: workflowCommandBlocked,
                   onClick: () => handleTransition(selectedCase, 'retry_analysis'),
                   style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                 }, 'Thử lại phân tích'),
@@ -953,14 +875,14 @@ function createCaseBoardComponent(React) {
                   h('button', {
                     type: 'button',
                     'data-testid': 'lattice-action-approve',
-                    disabled: actionBusy,
+                    disabled: workflowCommandBlocked,
                     onClick: () => handleTransition(selectedCase, 'approve'),
                     style: { padding: '6px 14px', background: '#389e0d', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                   }, 'Duyệt đề xuất'),
                   h('button', {
                     type: 'button',
                     'data-testid': 'lattice-action-reject',
-                    disabled: actionBusy,
+                    disabled: workflowCommandBlocked,
                     onClick: () => handleTransition(selectedCase, 'reject'),
                     style: { padding: '6px 14px', background: '#cf1322', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                   }, 'Từ chối đề xuất')
@@ -969,7 +891,7 @@ function createCaseBoardComponent(React) {
                 selectedCase.status === 'rejected' && h('button', {
                   type: 'button',
                   'data-testid': 'lattice-action-rework',
-                  disabled: actionBusy,
+                  disabled: workflowCommandBlocked,
                   onClick: () => handleTransition(selectedCase, 'rework'),
                   style: { padding: '6px 14px', background: '#d46b08', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                 }, 'Yêu cầu kiểm tra lại (Rework)'),
@@ -977,7 +899,7 @@ function createCaseBoardComponent(React) {
                 selectedCase.status === 'approved' && h('button', {
                   type: 'button',
                   'data-testid': 'lattice-action-resolve',
-                  disabled: actionBusy,
+                  disabled: workflowCommandBlocked,
                   onClick: () => handleTransition(selectedCase, 'record_resolution'),
                   style: { padding: '6px 14px', background: '#0958d9', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                 }, 'Ghi nhận khắc phục xong'),
@@ -985,7 +907,7 @@ function createCaseBoardComponent(React) {
                 selectedCase.status === 'resolved' && h('button', {
                   type: 'button',
                   'data-testid': 'lattice-action-close',
-                  disabled: actionBusy,
+                  disabled: workflowCommandBlocked,
                   onClick: () => handleTransition(selectedCase, 'close'),
                   style: { padding: '6px 14px', background: '#237804', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
                 }, 'Đóng sự cố'),
@@ -1082,7 +1004,7 @@ function createCaseBoardComponent(React) {
               recordId: selectedCase.recordId || selectedCase.id,
               entityContext: {
                 entityId: selectedCase.assetEntityId,
-                schemaId: 'asset',
+                schemaId: 'incident-asset',
                 entityVersion: 1
               }
             },
@@ -1124,6 +1046,11 @@ function createCaseBoardComponent(React) {
               style: { border: 'none', background: 'transparent', fontSize: 18, cursor: 'pointer', color: '#5e6c84' }
             }, '✕')
           ),
+          h('div', {
+            role: 'status',
+            'data-testid': 'case-create-notification-required',
+            style: { padding: 12, marginBottom: 16, background: '#fff7e6', color: '#ad6800', border: '1px solid #ffd591', borderRadius: 6, fontSize: 13 }
+          }, 'Chưa thể tạo sự cố thủ công vì chưa có nguồn notification hợp lệ. Sự cố cần được khởi tạo từ notification đã xác thực.'),
 
           h('div', { style: { marginBottom: 12 } },
             h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#344563', marginBottom: 4 } }, 'Tiêu đề sự cố *'),
@@ -1151,21 +1078,7 @@ function createCaseBoardComponent(React) {
             )
           ),
 
-          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 16 } },
-            h('div', null,
-              h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#344563', marginBottom: 4 } }, 'Mức ưu tiên *'),
-              h('select', {
-                'data-testid': 'lattice-create-case-severity',
-                value: createForm.severity,
-                onChange: e => setCreateForm(prev => ({ ...prev, severity: e.target.value })),
-                style: { width: '100%', padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 13, background: '#fff' }
-              },
-                h('option', { value: 'critical' }, '🔴 Khẩn cấp (Critical)'),
-                h('option', { value: 'high' }, '🟠 Cao (High)'),
-                h('option', { value: 'medium' }, '🟡 Trung bình (Medium)'),
-                h('option', { value: 'low' }, '🔵 Thấp (Low)')
-              )
-            ),
+          h('div', { style: { marginBottom: 16 } },
             h('div', null,
               h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#344563', marginBottom: 4 } }, 'Kỹ thuật viên phụ trách *'),
               h('input', {
@@ -1188,9 +1101,9 @@ function createCaseBoardComponent(React) {
             h('button', {
               type: 'submit',
               'data-testid': 'lattice-submit-case-btn',
-              disabled: actionBusy,
+              disabled: true,
               style: { padding: '8px 18px', background: '#0052cc', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 600, cursor: 'pointer', fontSize: 13 }
-            }, actionBusy ? 'Đang tạo…' : 'Tạo sự cố')
+            }, 'Chưa khả dụng')
           )
         )
       )

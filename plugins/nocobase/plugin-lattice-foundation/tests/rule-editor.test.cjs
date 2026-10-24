@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { createBridge } = require('../../action-bridge/bridge.cjs');
 const { createRuleEditorComponent } = require('../src/applications/incident/rule-editor');
 
 const sampleRules = [
   {
-    id: 'rule-temp-01',
+    id: '11111111-1111-4111-8111-111111111111',
+    schemaId: 'incident-rule',
+    schemaVersion: 1,
+    title: 'Cảnh báo nhiệt độ máy phát P-01',
+    version: 4,
     attributes: {
-      code: 'RULE-TMP-01',
-      name: 'Cảnh báo nhiệt độ máy phát P-01',
-      assetEntityId: 'asset-generator-01',
+      assetEntityId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
       attribute: 'temperature',
       operator: 'gt',
       threshold: '65',
@@ -24,11 +27,13 @@ const sampleRules = [
     }
   },
   {
-    id: 'rule-humidity-02',
+    id: '22222222-2222-4222-8222-222222222222',
+    schemaId: 'incident-rule',
+    schemaVersion: 1,
+    title: 'Độ ẩm phòng server vượt ngưỡng',
+    version: 2,
     attributes: {
-      code: 'RULE-HUM-02',
-      name: 'Độ ẩm phòng server vượt ngưỡng',
-      assetEntityId: 'asset-server-rack',
+      assetEntityId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
       attribute: 'humidity',
       operator: 'gt',
       threshold: '80',
@@ -45,8 +50,8 @@ const sampleRules = [
 ];
 
 const sampleAssets = [
-  { id: 'asset-generator-01', attributes: { assetCode: 'ASSET-GEN-01', name: 'Máy phát điện Cummins' } },
-  { id: 'asset-server-rack', attributes: { assetCode: 'ASSET-SRV-02', name: 'Tủ Server Trung tâm' } }
+  { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', schemaId: 'incident-asset', schemaVersion: 1, version: 1, title: 'Máy phát điện Cummins', attributes: { status: 'ready', serial: 'GEN-01' } },
+  { id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', schemaId: 'incident-asset', schemaVersion: 1, version: 1, title: 'Tủ Server Trung tâm', attributes: { status: 'ready', serial: 'SRV-02' } }
 ];
 
 function hooks() {
@@ -121,18 +126,58 @@ function findAll(tree, predicate) {
 
 const tick = () => new Promise(setImmediate);
 
-test('RuleEditor renders rule list with status, conditions and severity tags', async () => {
-  const api = {
-    entity: async (op, params) => {
-      if (op === 'list' && params?.schemaId === 'incident-rule') return { items: sampleRules };
-      if (op === 'list' && params?.schemaId === 'asset') return { items: sampleAssets };
-      return { items: [] };
+async function bridgeFixture({ entityRows = {}, writeStatuses = [], entityListStatuses = [] } = {}) {
+  const calls = [];
+  const statuses = [...writeStatuses];
+  const listStatuses = [...entityListStatuses];
+  const bridge = createBridge({
+    gatewayUrl: 'http://gateway',
+    tokenUrl: 'http://identity/token',
+    userinfoUrl: 'http://identity/user',
+    authorizationUrl: 'http://identity/auth',
+    clientId: 'fixture',
+    callbackUrl: 'http://localhost/callback'
+  }, {
+    schedule: () => ({ unref() {} }),
+    cancelTimer: () => {},
+    fetch: async (url, options = {}) => {
+      calls.push({ url, options });
+      if (url.endsWith('/token')) return Response.json({ access_token: 'fixture-token', expires_in: 300 });
+      if (url.endsWith('/user')) return Response.json({ sub: 'alice' });
+      if (url.endsWith('/actions')) return Response.json({ items: [] });
+      if (url.includes('/v1/entities?')) {
+        const status = listStatuses.shift() || 200;
+        const schemaId = new URL(url).searchParams.get('schemaId');
+        return Response.json(status >= 400 ? { error: 'Fixture entity list failed' } : { items: entityRows[schemaId] || [] }, { status });
+      }
+      const status = statuses.shift() || 200;
+      return Response.json(status >= 400 ? { error: 'Fixture write failed' } : { id: sampleRules[0].id }, { status });
     }
+  });
+  const start = bridge.connect('noco');
+  await bridge.callback({ state: new URL(start.authorizationUrl).searchParams.get('state'), code: 'fixture' }, start.browserId);
+  const api = {
+    entity: (operation, params = {}) => bridge.entity('noco', start.browserId, { operation, ...params })
   };
+  return {
+    api,
+    calls,
+    connection: { connected: true, identity: { subject: 'alice', username: 'Alice' } },
+    close: () => bridge.disconnect('noco', start.browserId)
+  };
+}
+
+function entityWrites(fixture, method) {
+  return fixture.calls.filter(call => call.options.method === method && call.url.includes('/v1/entities'));
+}
+
+test('RuleEditor renders rule list with status, conditions and severity tags', async () => {
+  const fixture = await bridgeFixture({ entityRows: { 'incident-rule': sampleRules, 'incident-asset': sampleAssets } });
+  const { api } = fixture;
 
   const env = hooks();
   const RuleEditor = createRuleEditorComponent(env.react);
-  const render = (override = {}) => env.render(() => RuleEditor({ api, connection: { connected: true }, ...override }));
+  const render = (override = {}) => env.render(() => RuleEditor({ api, connection: fixture.connection, ...override }));
 
   let tree = render();
   await tick();
@@ -151,24 +196,32 @@ test('RuleEditor renders rule list with status, conditions and severity tags', a
   assert.ok(content.includes('humidity > 80 percent'));
   assert.ok(content.includes('Đang bật'));
   assert.ok(content.includes('Đã tắt'));
+  assert.ok(fixture.calls.some(call => call.url === 'http://gateway/v1/entities?schemaId=incident-rule&limit=100&offset=0'));
+  assert.ok(fixture.calls.some(call => call.url === 'http://gateway/v1/entities?schemaId=incident-asset&limit=100&offset=0'));
+  fixture.close();
+});
+
+test('RuleEditor reports a failed entity list instead of presenting it as an empty successful read', async () => {
+  const fixture = await bridgeFixture({ entityListStatuses: [503] });
+  const env = hooks();
+  const RuleEditor = createRuleEditorComponent(env.react);
+  const render = () => env.render(() => RuleEditor({ api: fixture.api, connection: fixture.connection }));
+
+  render(); await tick();
+  const tree = render();
+
+  assert.ok(find(tree, node => node.props?.['data-testid'] === 'rule-editor-error'));
+  assert.equal(findAll(tree, node => typeof node.props?.['data-testid'] === 'string' && node.props['data-testid'].startsWith('rule-row-')).length, 0);
+  fixture.close();
 });
 
 test('RuleEditor validates required fields before creating a rule', async () => {
-  let createdPayload = null;
-  const api = {
-    entity: async (op, params) => {
-      if (op === 'list') return { items: [] };
-      if (op === 'create') {
-        createdPayload = params.body;
-        return { id: 'new-rule-id', attributes: params.body };
-      }
-      return { items: [] };
-    }
-  };
+  const fixture = await bridgeFixture({ entityRows: { 'incident-rule': [], 'incident-asset': [] } });
+  const { api } = fixture;
 
   const env = hooks();
   const RuleEditor = createRuleEditorComponent(env.react);
-  const render = () => env.render(() => RuleEditor({ api, connection: { connected: true } }));
+  const render = () => env.render(() => RuleEditor({ api, connection: fixture.connection }));
 
   let tree = render();
   await tick();
@@ -186,12 +239,10 @@ test('RuleEditor validates required fields before creating a rule', async () => 
   await form.props.onSubmit();
   tree = render();
 
-  assert.ok(JSON.stringify(tree).includes('Vui lòng nhập mã luật cảnh báo.'));
-  assert.equal(createdPayload, null, 'Must not call API when fields are empty');
+  assert.ok(JSON.stringify(tree).includes('Vui lòng nhập tên luật cảnh báo.'));
+  assert.equal(entityWrites(fixture, 'POST').length, 0, 'Must not call API when fields are empty');
 
-  // Fill code and name
-  const codeInput = find(tree, n => n.props?.['data-testid'] === 'rule-code-input');
-  codeInput.props.onChange({ target: { value: 'RULE-BAT-03' } });
+  // The entity schema stores the rule name in the entity title, not code/name attributes.
   const nameInput = find(tree, n => n.props?.['data-testid'] === 'rule-name-input');
   nameInput.props.onChange({ target: { value: 'Cảnh báo pin yếu xe nâng' } });
   tree = render();
@@ -202,7 +253,7 @@ test('RuleEditor validates required fields before creating a rule', async () => 
 
   // Fill asset and change attribute to batteryLevel
   const assetInput = find(tree, n => n.props?.['data-testid'] === 'rule-asset-input');
-  assetInput.props.onChange({ target: { value: 'asset-forklift-01' } });
+  assetInput.props.onChange({ target: { value: sampleAssets[0].id } });
 
   const attrSelect = find(tree, n => n.props?.['data-testid'] === 'rule-attribute-select');
   attrSelect.props.onChange({ target: { value: 'batteryLevel' } });
@@ -220,67 +271,100 @@ test('RuleEditor validates required fields before creating a rule', async () => 
 
 
 
-  assert.ok(createdPayload !== null, 'Rule should be submitted');
-  assert.equal(createdPayload.code, 'RULE-BAT-03');
-  assert.equal(createdPayload.name, 'Cảnh báo pin yếu xe nâng');
-  assert.equal(createdPayload.assetEntityId, 'asset-forklift-01');
-  assert.equal(createdPayload.attribute, 'batteryLevel');
-  assert.equal(createdPayload.operator, 'lt');
-  assert.equal(createdPayload.threshold, '15');
-  assert.equal(createdPayload.unit, 'percent');
-  assert.equal(createdPayload.workflowDefinitionId, 'incident-response');
-  assert.equal(createdPayload.enabled, true);
+  const [createCall] = entityWrites(fixture, 'POST');
+  assert.ok(createCall, 'Rule should be submitted through the entity bridge');
+  const createdPayload = JSON.parse(createCall.options.body);
+  assert.deepEqual(createdPayload, {
+    schemaId: 'incident-rule',
+    title: 'Cảnh báo pin yếu xe nâng',
+    attributes: {
+      assetEntityId: sampleAssets[0].id,
+      attribute: 'batteryLevel',
+      operator: 'lt',
+      threshold: '15',
+      unit: 'percent',
+      severity: 'high',
+      cooldownSeconds: '300',
+      maxObservationAgeSeconds: '300',
+      workflowDefinitionId: 'incident-response',
+      workflowDefinitionVersion: '1',
+      handlerId: 'alice',
+      enabled: true
+    }
+  });
+  assert.ok(createCall.options.headers['idempotency-key']);
+  assert.equal(Object.hasOwn(createdPayload.attributes, 'code'), false);
+  assert.equal(Object.hasOwn(createdPayload.attributes, 'name'), false);
 
   const successNode = find(tree, n => n.props?.['data-testid'] === 'rule-editor-success');
   assert.ok(successNode, 'Success alert should be displayed');
   assert.ok(successNode.children[0].includes('Cảnh báo pin yếu xe nâng'));
+  fixture.close();
+});
 
+test('RuleEditor does not report a successful create when the actor identity is missing', async () => {
+  const fixture = await bridgeFixture({ entityRows: { 'incident-rule': [], 'incident-asset': [] } });
+  const env = hooks();
+  const RuleEditor = createRuleEditorComponent(env.react);
+  const render = () => env.render(() => RuleEditor({ api: fixture.api, connection: { connected: true, identity: {} } }));
 
+  render(); await tick();
+  let tree = render();
+  find(tree, node => node.props?.['data-testid'] === 'open-create-rule-btn').props.onClick();
+  tree = render();
+  find(tree, node => node.props?.['data-testid'] === 'rule-name-input').props.onChange({ target: { value: 'Identity required' } });
+  find(tree, node => node.props?.['data-testid'] === 'rule-asset-input').props.onChange({ target: { value: sampleAssets[0].id } });
+  tree = render();
+
+  await find(tree, node => node.props?.['data-testid'] === 'create-rule-form').props.onSubmit();
+  tree = render();
+
+  assert.equal(entityWrites(fixture, 'POST').length, 0);
+  assert.equal(find(tree, node => node.props?.['data-testid'] === 'rule-editor-success'), null);
+  assert.ok(JSON.stringify(tree).includes('Chưa kết nối'));
+  fixture.close();
 });
 
 test('RuleEditor toggles rule enable/disable and handles 403 permission error', async () => {
-  let updatedRule = null;
-  const api = {
-    entity: async (op, params) => {
-      if (op === 'list') return { items: [sampleRules[0]] };
-      if (op === 'update') {
-        updatedRule = params.body;
-        return { id: params.id, attributes: params.body };
-      }
-      return { items: [] };
-    }
-  };
+  const fixture = await bridgeFixture({ entityRows: { 'incident-rule': [sampleRules[0]], 'incident-asset': sampleAssets } });
+  const { api } = fixture;
 
   const env = hooks();
   const RuleEditor = createRuleEditorComponent(env.react);
-  const render = () => env.render(() => RuleEditor({ api, connection: { connected: true } }));
+  const render = () => env.render(() => RuleEditor({ api, connection: fixture.connection }));
 
   let tree = render();
   await tick();
   tree = render();
 
-  const toggleBtn = find(tree, n => n.props?.['data-testid'] === 'toggle-rule-btn-rule-temp-01');
+  const toggleBtn = find(tree, n => n.props?.['data-testid'] === `toggle-rule-btn-${sampleRules[0].id}`);
   assert.ok(toggleBtn);
   assert.equal(toggleBtn.children[0], 'Đang bật');
 
   await toggleBtn.props.onClick();
   tree = render();
 
-  assert.ok(updatedRule !== null);
-  assert.equal(updatedRule.enabled, false);
+  const [updateCall] = entityWrites(fixture, 'PATCH');
+  assert.ok(updateCall, 'Update must pass through the entity bridge');
+  assert.equal(updateCall.url, `http://gateway/v1/entities/${sampleRules[0].id}`);
+  assert.deepEqual(JSON.parse(updateCall.options.body), {
+    expectedVersion: sampleRules[0].version,
+    title: sampleRules[0].title,
+    attributes: { ...sampleRules[0].attributes, enabled: false }
+  });
+  assert.ok(updateCall.options.headers['idempotency-key']);
+  fixture.close();
 
   // Test 403 authority denied on create
-  const deniedApi = {
-    entity: async (op) => {
-      if (op === 'list') return { items: [] };
-      if (op === 'create') throw { status: 403, code: 'authority_denied' };
-      return { items: [] };
-    }
-  };
+  const deniedFixture = await bridgeFixture({
+    entityRows: { 'incident-rule': [], 'incident-asset': [] },
+    writeStatuses: [403]
+  });
+  const deniedApi = deniedFixture.api;
 
   const env2 = hooks();
   const RuleEditor2 = createRuleEditorComponent(env2.react);
-  const render2 = () => env2.render(() => RuleEditor2({ api: deniedApi, connection: { connected: true } }));
+  const render2 = () => env2.render(() => RuleEditor2({ api: deniedApi, connection: deniedFixture.connection }));
 
   let tree2 = render2();
   await tick();
@@ -289,7 +373,6 @@ test('RuleEditor toggles rule enable/disable and handles 403 permission error', 
   find(tree2, n => n.props?.['data-testid'] === 'open-create-rule-btn').props.onClick();
   tree2 = render2();
 
-  find(tree2, n => n.props?.['data-testid'] === 'rule-code-input').props.onChange({ target: { value: 'TEST' } });
   find(tree2, n => n.props?.['data-testid'] === 'rule-name-input').props.onChange({ target: { value: 'Test' } });
   find(tree2, n => n.props?.['data-testid'] === 'rule-asset-input').props.onChange({ target: { value: 'asset-1' } });
   tree2 = render2();
@@ -299,4 +382,56 @@ test('RuleEditor toggles rule enable/disable and handles 403 permission error', 
   tree2 = render2();
 
   assert.ok(JSON.stringify(tree2).includes('Bạn không có quyền cấu hình luật cảnh báo sự cố.'));
+  deniedFixture.close();
+});
+
+test('RuleEditor archives a rule with its current version', async () => {
+  const fixture = await bridgeFixture({ entityRows: { 'incident-rule': [sampleRules[0]], 'incident-asset': sampleAssets } });
+  const env = hooks();
+  const RuleEditor = createRuleEditorComponent(env.react);
+  const render = () => env.render(() => RuleEditor({ api: fixture.api, connection: fixture.connection }));
+
+  render(); await tick();
+  let tree = render();
+  const archive = find(tree, n => n.props?.['data-testid'] === `archive-rule-btn-${sampleRules[0].id}`);
+  assert.ok(archive, 'Rule action should be archive');
+  await archive.props.onClick();
+
+  const [archiveCall] = entityWrites(fixture, 'POST');
+  assert.ok(archiveCall, 'Archive must pass through the real entity validator');
+  assert.equal(archiveCall.url, `http://gateway/v1/entities/${sampleRules[0].id}/archive`);
+  assert.deepEqual(JSON.parse(archiveCall.options.body), { expectedVersion: sampleRules[0].version });
+  assert.ok(archiveCall.options.headers['idempotency-key']);
+  fixture.close();
+});
+
+test('RuleEditor retries an uncertain create with the same key and frozen body', async () => {
+  const fixture = await bridgeFixture({
+    entityRows: { 'incident-rule': [], 'incident-asset': [] },
+    writeStatuses: [503, 201]
+  });
+  const env = hooks();
+  const RuleEditor = createRuleEditorComponent(env.react);
+  const render = () => env.render(() => RuleEditor({ api: fixture.api, connection: fixture.connection }));
+
+  render(); await tick();
+  let tree = render();
+  find(tree, n => n.props?.['data-testid'] === 'open-create-rule-btn').props.onClick();
+  tree = render();
+  find(tree, n => n.props?.['data-testid'] === 'rule-name-input').props.onChange({ target: { value: 'Retry rule' } });
+  find(tree, n => n.props?.['data-testid'] === 'rule-asset-input').props.onChange({ target: { value: sampleAssets[0].id } });
+  tree = render();
+  await find(tree, n => n.props?.['data-testid'] === 'create-rule-form').props.onSubmit();
+  tree = render();
+
+  const retry = find(tree, n => n.props?.['data-testid'] === 'retry-rule-command-btn');
+  assert.ok(retry, 'Uncertain write should offer a retry');
+  await retry.props.onClick();
+  await tick();
+
+  const creates = entityWrites(fixture, 'POST').filter(call => call.url === 'http://gateway/v1/entities');
+  assert.equal(creates.length, 2);
+  assert.equal(creates[0].options.headers['idempotency-key'], creates[1].options.headers['idempotency-key']);
+  assert.equal(creates[0].options.body, creates[1].options.body);
+  fixture.close();
 });

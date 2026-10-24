@@ -198,7 +198,9 @@ test('CaseBoard renders UC1 bridge banner, initializes with asset filter, and in
       evidence: ['Độ rung: 4.8 mm/s', 'Nhiệt độ: 78.5°C vượt ngưỡng 60°C']
     },
     data: {
-      attachmentId: '22222222-3333-4444-5555-666666666666'
+      attachmentId: '22222222-3333-4444-5555-666666666666',
+      agentJobId: '33333333-4444-4555-8666-777777777777',
+      proposalId: 'proposal-uc2-001'
     }
   };
 
@@ -209,14 +211,14 @@ test('CaseBoard renders UC1 bridge banner, initializes with asset filter, and in
       if (op === 'history') return { items: [] };
       return {};
     },
-    entity: async () => ({ items: [{ id: 'urn:ngsi-ld:Asset:DEMO-ASSET-01', title: 'Bơm làm mát A1', schemaId: 'asset' }] }),
+    entity: async () => ({ items: [{ id: 'urn:ngsi-ld:Asset:DEMO-ASSET-01', title: 'Bơm làm mát A1', schemaId: 'incident-asset' }] }),
     request: async () => ({ data: { data: [] } })
   };
 
   // Instantiate with initialAssetId from UC1
   const render = () => env.render(() => CaseBoard({
     api,
-    connection: { connected: true },
+    connection: { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } },
     initialAssetId: 'urn:ngsi-ld:Asset:DEMO-ASSET-01'
   }));
 
@@ -239,6 +241,9 @@ test('CaseBoard renders UC1 bridge banner, initializes with asset filter, and in
 
   const modal = find(tree, n => n.props?.['data-testid'] === 'lattice-case-detail-modal');
   assert.ok(modal, 'Modal must appear');
+  const agentRun = find(modal, n => n.props?.runId === sampleCase.id && n.props?.caseItem);
+  assert.equal(agentRun.props.caseItem.data.agentJobId, sampleCase.data.agentJobId);
+  assert.equal(agentRun.props.caseItem.data.proposalId, sampleCase.data.proposalId);
 
   // Verify all 7 tabs exist
   assert.ok(find(modal, n => n.props?.['data-testid'] === 'lattice-modal-tab-overview'));

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { createBridge } = require('../../action-bridge/bridge.cjs');
 const { createCaseBoardComponent } = require('../src/applications/incident/case-board');
 
 const sampleCases = [
@@ -144,6 +145,54 @@ function findAll(tree, predicate) {
 
 const tick = () => new Promise(setImmediate);
 
+async function bridgeFixture({ workflowRuns = [], assets = sampleAssets, workflowStatuses = [], workflowListStatuses = [] } = {}) {
+  const calls = [];
+  const requestCalls = [];
+  const statuses = [...workflowStatuses];
+  const listStatuses = [...workflowListStatuses];
+  const bridge = createBridge({
+    gatewayUrl: 'http://gateway',
+    tokenUrl: 'http://identity/token',
+    userinfoUrl: 'http://identity/user',
+    authorizationUrl: 'http://identity/auth',
+    clientId: 'fixture',
+    callbackUrl: 'http://localhost/callback'
+  }, {
+    schedule: () => ({ unref() {} }),
+    cancelTimer: () => {},
+    fetch: async (url, options = {}) => {
+      calls.push({ url, options });
+      if (url.endsWith('/token')) return Response.json({ access_token: 'fixture-token', expires_in: 300 });
+      if (url.endsWith('/user')) return Response.json({ sub: 'alice' });
+      if (url.endsWith('/actions')) return Response.json({ items: [] });
+      if (url.startsWith('http://gateway/v1/workflows?')) {
+        const status = listStatuses.shift() || 200;
+        return Response.json(status >= 400 ? { error: 'Fixture workflow list failed' } : { items: workflowRuns }, { status });
+      }
+      if (url.startsWith('http://gateway/v1/entities?')) return Response.json({ items: assets });
+      const status = url.includes('/transitions') ? (statuses.shift() || 200) : 200;
+      return Response.json(status >= 400 ? { error: 'Fixture workflow failed' } : { id: workflowRuns[0]?.id, version: 3 }, { status });
+    }
+  });
+  const start = bridge.connect('noco');
+  await bridge.callback({ state: new URL(start.authorizationUrl).searchParams.get('state'), code: 'fixture' }, start.browserId);
+  const api = {
+    workflow: (operation, params = {}) => bridge.workflow('noco', start.browserId, { operation, ...params }),
+    entity: (operation, params = {}) => bridge.entity('noco', start.browserId, { operation, ...params }),
+    request: async request => {
+      requestCalls.push(request);
+      return { data: { data: [] } };
+    }
+  };
+  return {
+    api,
+    calls,
+    requestCalls,
+    connection: { connected: true, identity: { subject: 'alice', username: 'Alice' } },
+    close: () => bridge.disconnect('noco', start.browserId)
+  };
+}
+
 test('CaseBoard renders in Kanban board view with 4 process columns and case cards', async () => {
   const env = hooks();
   const CaseBoard = createCaseBoardComponent(env.react);
@@ -162,7 +211,7 @@ test('CaseBoard renders in Kanban board view with 4 process columns and case car
     }
   };
 
-  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } } }));
   render(); await tick();
   const tree = render();
 
@@ -197,7 +246,7 @@ test('CaseBoard switches between Board view and List view', async () => {
     request: async () => ({ data: { data: sampleDepartments } })
   };
 
-  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } } }));
   render(); await tick();
   let tree = render();
 
@@ -242,7 +291,7 @@ test('CaseBoard opens detail modal and triggers workflow transition', async () =
     request: async () => ({ data: { data: sampleDepartments } })
   };
 
-  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } } }));
   render(); await tick();
   let tree = render();
 
@@ -282,28 +331,12 @@ test('CaseBoard opens detail modal and triggers workflow transition', async () =
   assert.equal(transitionPayload.body.input.receiptNote, 'Kỹ thuật viên đã đến phòng server');
 });
 
-test('CaseBoard creates new incident and handles 403 permission error', async () => {
+test('CaseBoard blocks manual case creation until it has a real notification source', async () => {
+  const fixture = await bridgeFixture({ workflowRuns: [] });
   const env = hooks();
   const CaseBoard = createCaseBoardComponent(env.react);
-  let createPayload = null;
 
-  const api = {
-    workflow: async (op, arg) => {
-      if (op === 'list') return { items: sampleCases };
-      if (op === 'create') {
-        createPayload = arg;
-        return { id: 'case-new-999' };
-      }
-      if (op === 'transition') {
-        throw { status: 403, message: 'Forbidden' };
-      }
-      return { items: [] };
-    },
-    entity: async () => ({ items: sampleAssets }),
-    request: async () => ({ data: { data: sampleDepartments } })
-  };
-
-  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  const render = () => env.render(() => CaseBoard({ api: fixture.api, connection: fixture.connection }));
   render(); await tick();
   let tree = render();
 
@@ -316,30 +349,15 @@ test('CaseBoard creates new incident and handles 403 permission error', async ()
 
   const modal = find(tree, n => n.props?.['data-testid'] === 'lattice-create-case-modal');
   assert.ok(modal, 'Create case modal must appear');
-
-  // Fill in form
-  const titleInput = find(modal, n => n.props?.['data-testid'] === 'lattice-create-case-title');
-  const assetSelect = find(modal, n => n.props?.['data-testid'] === 'lattice-create-case-asset');
-  const handlerSelect = find(modal, n => n.props?.['data-testid'] === 'lattice-create-case-handler');
-
-  titleInput.props.onChange({ target: { value: 'Sự cố tụt áp máy nén khí' } });
-  assetSelect.props.onChange({ target: { value: 'asset-gen-01' } });
-  handlerSelect.props.onChange({ target: { value: 'alice' } });
-
-  render(); await tick();
-  tree = render();
-
-  const modalUpdated = find(tree, n => n.props?.['data-testid'] === 'lattice-create-case-modal');
-  const form = find(modalUpdated, n => n.type === 'form');
+  assert.ok(find(modal, n => n.props?.['data-testid'] === 'case-create-notification-required'));
+  assert.equal(find(modal, n => n.props?.['data-testid'] === 'lattice-create-case-severity'), null);
+  const form = find(modal, n => n.type === 'form');
   await form.props.onSubmit({ preventDefault: () => {} });
 
-  render(); await tick();
-  tree = render();
-
-  assert.ok(createPayload, 'Create workflow payload should be submitted');
-  assert.equal(createPayload.body.title, 'Sự cố tụt áp máy nén khí');
-  assert.equal(createPayload.body.input.assetEntityId, 'asset-gen-01');
-  assert.equal(createPayload.body.input.handlerId, 'alice');
+  const creates = fixture.calls.filter(call => call.options.method === 'POST' && call.url === 'http://gateway/v1/workflows');
+  assert.equal(creates.length, 0, 'No workflow may be created with a generated notification ID');
+  assert.equal(fixture.requestCalls.some(call => call.url === 'latticeIncidentCases:create'), false, 'NocoBase is not a second case store');
+  fixture.close();
 });
 
 test('CaseBoard filters by severity, status, asset, department and keyword query', async () => {
@@ -355,7 +373,7 @@ test('CaseBoard filters by severity, status, asset, department and keyword query
     request: async () => ({ data: { data: sampleDepartments } })
   };
 
-  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } } }));
   render(); await tick();
   let tree = render();
 
@@ -418,25 +436,39 @@ test('CaseBoard filters by severity, status, asset, department and keyword query
   assert.equal(str.includes('Độ ẩm phòng server'), false);
 });
 
-test('CaseBoard renders fallback sample incidents when backend returns empty items', async () => {
+test('CaseBoard does not show local or sample incidents when the live workflow list is empty', async () => {
+  const fixture = await bridgeFixture({ workflowRuns: [], assets: [] });
   const env = hooks();
   const CaseBoard = createCaseBoardComponent(env.react);
 
-  const api = {
-    workflow: async () => ({ items: [] }),
-    entity: async () => ({ items: [] }),
-    request: async () => ({ data: { data: [] } })
-  };
-
-  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  const render = () => env.render(() => CaseBoard({ api: fixture.api, connection: fixture.connection }));
   render(); await tick();
   const tree = render();
 
   const str = JSON.stringify(tree);
-  assert.ok(str.includes('Cảnh báo nhiệt độ vượt ngưỡng tại Bơm làm mát A1'));
-  assert.ok(str.includes('Độ ẩm không khí tăng cao bất thường tại Kho Lương thực B'));
-  assert.ok(str.includes('Mức pin cảm biến đo rung giảm dưới 15%'));
-  assert.ok(str.includes('Áp suất đường ống cấp nước phân xưởng 2 suy giảm'));
+  assert.equal(str.includes('Cảnh báo nhiệt độ vượt ngưỡng tại Bơm làm mát A1'), false);
+  assert.equal(str.includes('Độ ẩm không khí tăng cao bất thường tại Kho Lương thực B'), false);
+  assert.equal(str.includes('Mức pin cảm biến đo rung giảm dưới 15%'), false);
+  assert.equal(str.includes('Áp suất đường ống cấp nước phân xưởng 2 suy giảm'), false);
+  assert.equal(fixture.requestCalls.some(call => call.url === 'latticeIncidentCases:list'), false);
+  assert.ok(fixture.calls.some(call => call.url.startsWith('http://gateway/v1/workflows?definitionId=incident-response')));
+  fixture.close();
+});
+
+test('CaseBoard does not replace a failed live workflow read with sample incidents', async () => {
+  const fixture = await bridgeFixture({ workflowRuns: [], workflowListStatuses: [503] });
+  const env = hooks();
+  const CaseBoard = createCaseBoardComponent(env.react);
+  const render = () => env.render(() => CaseBoard({ api: fixture.api, connection: fixture.connection }));
+
+  render(); await tick();
+  const tree = render();
+  const str = JSON.stringify(tree);
+
+  assert.equal(str.includes('Cảnh báo nhiệt độ vượt ngưỡng tại Bơm làm mát A1'), false);
+  assert.equal(fixture.requestCalls.some(call => call.url === 'latticeIncidentCases:list'), false);
+  assert.ok(find(tree, n => n.props?.['data-testid'] === 'lattice-case-board-error'));
+  fixture.close();
 });
 
 test('CaseBoard supports rework transition for rejected incidents', async () => {
@@ -472,7 +504,7 @@ test('CaseBoard supports rework transition for rejected incidents', async () => 
     request: async () => ({ data: { data: sampleDepartments } })
   };
 
-  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true } }));
+  const render = () => env.render(() => CaseBoard({ api, connection: { connected: true, identity: { subject: 'alice', organizationId: 'org-1' } } }));
   render(); await tick();
   let tree = render();
 
@@ -502,5 +534,50 @@ test('CaseBoard supports rework transition for rejected incidents', async () => 
   assert.equal(transitionPayload.id, 'case-rej-001');
   assert.equal(transitionPayload.body.action, 'rework');
   assert.equal(transitionPayload.body.input.reworkNote, 'Kiểm tra bổ sung độ nhớt và cặn trước khi đề xuất lại');
+});
+
+test('CaseBoard retries an uncertain transition with the same key and body through the real bridge', async () => {
+  const runId = '33333333-3333-4333-8333-333333333333';
+  const run = {
+    id: runId,
+    title: 'Đề xuất thay dầu bị từ chối',
+    state: 'rejected',
+    version: 2,
+    createdAt: '2026-10-16T09:00:00Z',
+    data: { assetEntityId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', handlerId: 'bob', notificationId: 'notification-001' }
+  };
+  const fixture = await bridgeFixture({ workflowRuns: [run], workflowStatuses: [503, 200] });
+  const env = hooks();
+  const CaseBoard = createCaseBoardComponent(env.react);
+  const render = () => env.render(() => CaseBoard({ api: fixture.api, connection: fixture.connection }));
+
+  render(); await tick();
+  let tree = render();
+  const card = find(tree, n => n.props?.['data-testid'] === `lattice-case-card-${runId}`);
+  assert.ok(card);
+  card.props.onClick();
+  render(); await tick();
+  tree = render();
+
+  const note = find(tree, n => n.props?.['data-testid'] === 'lattice-case-action-note');
+  note.props.onChange({ target: { value: 'Kiểm tra lại' } });
+  tree = render();
+  await find(tree, n => n.props?.['data-testid'] === 'lattice-action-rework').props.onClick();
+  tree = render();
+
+  const retry = find(tree, n => n.props?.['data-testid'] === 'lattice-retry-workflow-command-btn');
+  assert.ok(retry, 'Uncertain transition should offer retry');
+  await retry.props.onClick();
+
+  const transitions = fixture.calls.filter(call => call.url === `http://gateway/v1/workflows/${runId}/transitions`);
+  assert.equal(transitions.length, 2);
+  assert.equal(transitions[0].options.headers['idempotency-key'], transitions[1].options.headers['idempotency-key']);
+  assert.equal(transitions[0].options.body, transitions[1].options.body);
+  assert.deepEqual(JSON.parse(transitions[0].options.body), {
+    action: 'rework',
+    expectedVersion: 2,
+    input: { reworkNote: 'Kiểm tra lại' }
+  });
+  fixture.close();
 });
 

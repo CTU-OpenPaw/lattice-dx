@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+const { createWorkflowCommands } = require('../../client/workflow');
+
 function createRuleEditorComponent(React) {
   const h = React.createElement;
 
@@ -31,7 +33,6 @@ function createRuleEditorComponent(React) {
   };
 
   const defaultForm = {
-    code: '',
     name: '',
     assetEntityId: '',
     attribute: 'temperature',
@@ -46,7 +47,13 @@ function createRuleEditorComponent(React) {
   };
 
   return function RuleEditor({ api, connection }) {
-    const connected = connection?.connected !== false;
+    const connected = connection?.connected === true;
+    const actorId = connection?.identity?.subject;
+    const organizationId = connection?.identity?.organizationId;
+    const scope = React.useMemo(() => ({ api, connected, actorId, organizationId }), [api, connected, actorId, organizationId]);
+    const scopeRef = React.useRef(scope);
+    scopeRef.current = scope;
+    const loadEpoch = React.useRef(0);
     const [rules, setRules] = React.useState([]);
     const [assets, setAssets] = React.useState([]);
     const [loading, setLoading] = React.useState(false);
@@ -56,41 +63,65 @@ function createRuleEditorComponent(React) {
     const [form, setForm] = React.useState(defaultForm);
     const [formError, setFormError] = React.useState('');
     const [submitting, setSubmitting] = React.useState(false);
+    const [retryCommand, setRetryCommand] = React.useState(null);
+    const entityCommands = React.useMemo(() => api?.entity && connected && actorId
+      ? createWorkflowCommands({
+          api,
+          actorId,
+          channel: 'entity'
+        })
+      : null, [api, connected, actorId, organizationId]);
 
     const loadData = React.useCallback(async () => {
-      if (!connected || !api) return;
+      const requestScope = scope;
+      const request = ++loadEpoch.current;
+      const current = () => scopeRef.current === requestScope && loadEpoch.current === request;
+      if (!connected) {
+        if (current()) {
+          setRules([]);
+          setAssets([]);
+          setLoading(false);
+        }
+        return;
+      }
       setLoading(true);
       setError('');
       try {
-        let loadedRules = [];
-        if (api.entity) {
-          try {
-            const res = await api.entity('list', { schemaId: 'incident-rule', limit: '100', offset: '0' });
-            loadedRules = res?.items || [];
-          } catch {
-            // If entity schema list is not present, fallback to empty or custom endpoint
-          }
-        }
-        setRules(loadedRules);
-
-        let loadedAssets = [];
-        if (api.entity) {
-          try {
-            const assetRes = await api.entity('list', { schemaId: 'asset', limit: '100', offset: '0' });
-            loadedAssets = assetRes?.items || [];
-          } catch {}
-        }
-        setAssets(loadedAssets);
+        if (!api?.entity) throw new Error('Không có dịch vụ thực thể để tải luật cảnh báo.');
+        const res = await api.entity('list', { query: { schemaId: 'incident-rule', limit: '100', offset: '0' } });
+        if (!current()) return;
+        setRules(res?.items || []);
       } catch (err) {
+        if (!current()) return;
+        setRules([]);
         setError(err.message || 'Không thể tải danh sách luật cảnh báo.');
-      } finally {
-        setLoading(false);
       }
-    }, [api, connected]);
+
+      try {
+        const assetRes = await api.entity('list', { query: { schemaId: 'incident-asset', limit: '100', offset: '0' } });
+        if (!current()) return;
+        setAssets(assetRes?.items || []);
+      } catch {
+        if (!current()) return;
+        setAssets([]);
+      } finally {
+        if (current()) setLoading(false);
+      }
+    }, [api, connected, scope]);
 
     React.useEffect(() => {
-      loadData();
-    }, [loadData]);
+      loadEpoch.current++;
+      setRules([]);
+      setAssets([]);
+      setRetryCommand(null);
+      setError('');
+      setFormError('');
+      setSuccessMessage('');
+      setSubmitting(false);
+      if (connected) loadData();
+      else setLoading(false);
+      return () => { loadEpoch.current++; };
+    }, [loadData, scope, connected]);
 
     const handleAttributeChange = e => {
       const attr = e.target.value;
@@ -101,13 +132,10 @@ function createRuleEditorComponent(React) {
 
     const handleSaveRule = async e => {
       e?.preventDefault?.();
+      const commandScope = scope;
       setFormError('');
       setSuccessMessage('');
 
-      if (!form.code.trim()) {
-        setFormError('Vui lòng nhập mã luật cảnh báo.');
-        return;
-      }
       if (!form.name.trim()) {
         setFormError('Vui lòng nhập tên luật cảnh báo.');
         return;
@@ -123,9 +151,9 @@ function createRuleEditorComponent(React) {
 
       setSubmitting(true);
       try {
-        const payload = {
-          code: form.code.trim(),
-          name: form.name.trim(),
+        if (scopeRef.current !== commandScope || !entityCommands) throw new Error('Chưa kết nối tài khoản hoặc dịch vụ thực thể.');
+        const title = form.name.trim();
+        const attributes = {
           assetEntityId: form.assetEntityId.trim(),
           attribute: form.attribute,
           operator: form.operator,
@@ -140,66 +168,96 @@ function createRuleEditorComponent(React) {
           enabled: form.enabled
         };
 
-        let created;
-        if (api?.entity) {
-          created = await api.entity('create', {
-            schemaId: 'incident-rule',
-            body: payload,
-            key: 'rule-create-' + Date.now()
-          });
-        }
-
-        const newRule = created || { id: 'rule-' + Date.now(), attributes: payload };
-        setRules(prev => [newRule, ...prev]);
-        setSuccessMessage(`Đã tạo luật cảnh báo "${payload.name}" thành công.`);
+        await entityCommands.execute('create', {
+          schemaId: 'incident-rule',
+          title,
+          attributes
+        });
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        setSuccessMessage(`Đã tạo luật cảnh báo "${title}" thành công.`);
         setIsCreating(false);
         setForm(defaultForm);
+        await loadData();
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(entityCommands?.uncertain ? { type: 'create', title: form.name.trim() } : null);
         if (err?.status === 403 || err?.code === 'authority_denied') {
           setFormError('Bạn không có quyền cấu hình luật cảnh báo sự cố.');
         } else {
           setFormError(err.message || 'Lỗi khi lưu luật cảnh báo.');
         }
       } finally {
-        setSubmitting(false);
+        if (scopeRef.current === commandScope) setSubmitting(false);
       }
     };
 
-    const handleToggleRule = async (rule, index) => {
+    const handleToggleRule = async rule => {
+      const commandScope = scope;
       const currentAttrs = rule.attributes || rule;
       const updatedEnabled = !currentAttrs.enabled;
       try {
-        if (api?.entity && rule.id) {
-          await api.entity('update', {
-            id: rule.id,
-            body: { ...currentAttrs, enabled: updatedEnabled },
-            key: 'rule-toggle-' + Date.now()
-          });
-        }
-        setRules(prev => {
-          const clone = [...prev];
-          const target = clone[index];
-          if (target.attributes) {
-            target.attributes = { ...target.attributes, enabled: updatedEnabled };
-          } else {
-            clone[index] = { ...target, enabled: updatedEnabled };
-          }
-          return clone;
-        });
+        if (scopeRef.current !== commandScope || !entityCommands || !rule.id) throw new Error('Không tìm thấy luật cảnh báo hoặc tài khoản để cập nhật.');
+        await entityCommands.execute('update', {
+          expectedVersion: rule.version,
+          title: rule.title,
+          attributes: { ...currentAttrs, enabled: updatedEnabled }
+        }, rule.id);
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        await loadData();
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(entityCommands?.uncertain ? { type: 'update' } : null);
         setError(err.message || 'Không thể thay đổi trạng thái kích hoạt.');
       }
     };
 
-    const handleDeleteRule = async (ruleId, index) => {
+    const handleArchiveRule = async rule => {
+      const commandScope = scope;
       try {
-        if (api?.entity && ruleId) {
-          await api.entity('delete', { id: ruleId, key: 'rule-del-' + Date.now() });
-        }
-        setRules(prev => prev.filter((_, i) => i !== index));
-        setSuccessMessage('Đã xóa luật cảnh báo.');
+        if (scopeRef.current !== commandScope || !entityCommands || !rule.id) throw new Error('Không tìm thấy luật cảnh báo hoặc tài khoản để lưu trữ.');
+        await entityCommands.execute('archive', { expectedVersion: rule.version }, rule.id);
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        setSuccessMessage('Đã lưu trữ luật cảnh báo.');
+        await loadData();
       } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(entityCommands?.uncertain ? { type: 'archive' } : null);
         setError(err.message || 'Không thể xóa luật cảnh báo.');
+      }
+    };
+
+    const retryEntityCommand = async () => {
+      const commandScope = scope;
+      if (!retryCommand || !entityCommands || scopeRef.current !== commandScope) return;
+      const pending = retryCommand;
+      setError('');
+      setFormError('');
+      setSubmitting(true);
+      try {
+        await entityCommands.retry();
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(null);
+        if (pending.type === 'create') {
+          setSuccessMessage(`Đã tạo luật cảnh báo "${pending.title}" thành công.`);
+          setIsCreating(false);
+          setForm(defaultForm);
+        } else if (pending.type === 'archive') {
+          setSuccessMessage('Đã lưu trữ luật cảnh báo.');
+        }
+        await loadData();
+      } catch (err) {
+        if (scopeRef.current !== commandScope) return;
+        setRetryCommand(entityCommands.uncertain ? pending : null);
+        if (err?.status === 403 || err?.code === 'authority_denied') {
+          setError('Bạn không có quyền cấu hình luật cảnh báo sự cố.');
+        } else {
+          setError(err.message || 'Không thể thử lại lệnh cấu hình luật cảnh báo.');
+        }
+      } finally {
+        if (scopeRef.current === commandScope) setSubmitting(false);
       }
     };
 
@@ -284,6 +342,13 @@ function createRuleEditorComponent(React) {
       // Messages
       error && h('div', { role: 'alert', 'data-testid': 'rule-editor-error', style: { padding: '10px 14px', background: '#ffebe6', color: '#bf2600', borderRadius: 6, marginBottom: 16, fontSize: 13 } }, error),
       successMessage && h('div', { role: 'status', 'data-testid': 'rule-editor-success', style: { padding: '10px 14px', background: '#e3fcef', color: '#006644', borderRadius: 6, marginBottom: 16, fontSize: 13 } }, successMessage),
+      retryCommand && entityCommands?.uncertain && h('button', {
+        type: 'button',
+        'data-testid': 'retry-rule-command-btn',
+        disabled: submitting,
+        onClick: retryEntityCommand,
+        style: { marginBottom: 16, padding: '7px 12px', background: '#fff7e6', color: '#ad6800', border: '1px solid #ffd591', borderRadius: 6, cursor: 'pointer', fontSize: 13 }
+      }, submitting ? 'Đang thử lại…' : 'Thử lại lệnh cấu hình'),
 
       // Create / Edit Form
       isCreating &&
@@ -306,22 +371,6 @@ function createRuleEditorComponent(React) {
           h(
             'div',
             { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 14 } },
-            // Rule Code
-            h(
-              'div',
-              null,
-              h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, color: '#42526e', marginBottom: 4 } }, 'Mã luật *'),
-              h('input', {
-                'data-testid': 'rule-code-input',
-                value: form.code,
-                placeholder: 'Ví dụ: RULE-TEMP-01',
-                onChange: e => {
-                  const val = e.target.value;
-                  setForm(prev => ({ ...prev, code: val }));
-                },
-                style: { width: '100%', padding: '7px 10px', borderRadius: 4, border: '1px solid #c1c7d0', fontSize: 13, boxSizing: 'border-box' }
-              })
-            ),
             // Rule Name
             h(
               'div',
@@ -601,7 +650,7 @@ function createRuleEditorComponent(React) {
                 h(
                   'tr',
                   { style: { background: '#f4f5f7', color: '#5e6c84', textAlign: 'left', borderBottom: '1px solid #dfe1e6' } },
-                  h('th', { style: { padding: '10px 12px' } }, 'Mã / Tên luật'),
+                  h('th', { style: { padding: '10px 12px' } }, 'Tên luật'),
                   h('th', { style: { padding: '10px 12px' } }, 'Tài sản'),
                   h('th', { style: { padding: '10px 12px' } }, 'Điều kiện kích hoạt'),
                   h('th', { style: { padding: '10px 12px' } }, 'Mức độ'),
@@ -626,8 +675,8 @@ function createRuleEditorComponent(React) {
                     h(
                       'td',
                       { style: { padding: '10px 12px' } },
-                      h('div', { style: { fontWeight: 600, color: '#172b4d' } }, attrs.name || 'Chưa đặt tên'),
-                      h('div', { style: { fontSize: 11, color: '#6b778c' } }, attrs.code || rule.id)
+                      h('div', { style: { fontWeight: 600, color: '#172b4d' } }, rule.title || 'Chưa đặt tên'),
+                      h('div', { style: { fontSize: 11, color: '#6b778c' } }, rule.id)
                     ),
                     h('td', { style: { padding: '10px 12px', color: '#172b4d' } }, attrs.assetEntityId || '—'),
                     h(
@@ -668,7 +717,7 @@ function createRuleEditorComponent(React) {
                         {
                           type: 'button',
                           'data-testid': `toggle-rule-btn-${rule.id || idx}`,
-                          onClick: () => handleToggleRule(rule, idx),
+                          onClick: () => handleToggleRule(rule),
                           style: {
                             padding: '3px 8px',
                             borderRadius: 4,
@@ -691,8 +740,8 @@ function createRuleEditorComponent(React) {
                         'button',
                         {
                           type: 'button',
-                          'data-testid': `delete-rule-btn-${rule.id || idx}`,
-                          onClick: () => handleDeleteRule(rule.id, idx),
+                          'data-testid': `archive-rule-btn-${rule.id || idx}`,
+                          onClick: () => handleArchiveRule(rule),
                           style: {
                             padding: '3px 8px',
                             background: 'transparent',
@@ -703,7 +752,7 @@ function createRuleEditorComponent(React) {
                             cursor: 'pointer'
                           }
                         },
-                        'Xóa'
+                        'Lưu trữ'
                       )
                     )
                   );
