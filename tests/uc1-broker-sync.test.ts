@@ -103,8 +103,14 @@ function setup() {
 
       const stored = structuredClone(entity);
       if (truncateTimestamp) {
-        stored.status.observedAt =
-          stored.status.observedAt.slice(0, 19) + 'Z';
+        for (const name of [
+          'status',
+          'belongsToDepartment',
+          'locatedAt',
+        ] as const) {
+          const attribute = stored[name] as { observedAt: string };
+          attribute.observedAt = attribute.observedAt.slice(0, 19) + 'Z';
+        }
       }
       entities.set(entity.id, stored);
 
@@ -253,14 +259,100 @@ test('existing Asset with mismatched identity is rejected', async () => {
   expect(f.counts()).toEqual({ creates: 0, updates: 0 });
 });
 
-test('timestamp truncation is detected during read-back', async () => {
+test('missing relation timestamps fall back to the stored status timestamp', async () => {
   const f = setup();
-  f.truncateNextCreate();
+  const older = projection('handover-old', '2026-10-22T09:00:00Z');
+  await syncAssetProjection(f.broker, older);
+
+  const stored = f.entities.get(older.entity.id)!;
+  delete (stored.belongsToDepartment as { observedAt?: string }).observedAt;
+  delete (stored.locatedAt as { observedAt?: string }).observedAt;
+
+  const next = projection('handover-next', '2026-10-22T10:00:00Z');
+  expect(await syncAssetProjection(f.broker, next)).toBe('updated');
+  expect(f.counts()).toEqual({ creates: 1, updates: 1 });
+  expect(f.entities.get(next.entity.id)?.status).toEqual(next.entity.status);
+  expect(f.entities.get(next.entity.id)?.belongsToDepartment)
+    .toEqual(next.entity.belongsToDepartment);
+});
+
+test('present invalid relation timestamps remain invalid', async () => {
+  const f = setup();
+  const existing = projection('handover-old', '2026-10-22T09:00:00Z');
+  await syncAssetProjection(f.broker, existing);
+  (f.entities.get(existing.entity.id)!.belongsToDepartment as { observedAt: string })
+    .observedAt = 'not-a-timestamp';
 
   await expect(syncAssetProjection(
     f.broker,
-    projection('handover-001', '2026-10-22T10:00:00.123Z'),
-  )).rejects.toMatchObject({ code: 'READBACK_MISMATCH' });
+    projection('handover-next', '2026-10-22T10:00:00Z'),
+  )).rejects.toMatchObject({ code: 'INVALID_OBSERVATION' });
+  expect(f.counts()).toEqual({ creates: 1, updates: 0 });
+});
+
+test('present newer relation timestamps still make the event stale', async () => {
+  const f = setup();
+  const existing = projection('handover-old', '2026-10-22T09:00:00Z');
+  await syncAssetProjection(f.broker, existing);
+  (f.entities.get(existing.entity.id)!.locatedAt as { observedAt: string })
+    .observedAt = '2026-10-22T11:00:00Z';
+
+  expect(await syncAssetProjection(
+    f.broker,
+    projection('handover-next', '2026-10-22T10:00:00Z'),
+  )).toBe('stale');
+  expect(f.counts()).toEqual({ creates: 1, updates: 0 });
+});
+
+test('different event IDs at the same observed time are conflicts', async () => {
+  const f = setup();
+  const first = projection('handover-first');
+  await syncAssetProjection(f.broker, first);
+
+  await expect(syncAssetProjection(
+    f.broker,
+    projection('handover-second'),
+  )).rejects.toMatchObject({ code: 'OBSERVATION_CONFLICT' });
+  expect(f.entities.get(first.entity.id)?.sourceEventId)
+    .toEqual(first.entity.sourceEventId);
+  expect(f.counts()).toEqual({ creates: 1, updates: 0 });
+});
+
+test('normalizes broker timestamps to seconds and conflicts on same-second changes', async () => {
+  const f = setup();
+  const original = projection(
+    'handover-first',
+    '2026-10-22T10:00:00.123456789Z',
+  );
+  f.truncateNextCreate();
+
+  expect(await syncAssetProjection(f.broker, original)).toBe('created');
+
+  const stored = f.entities.get(original.entity.id)!;
+  for (const name of [
+    'status',
+    'belongsToDepartment',
+    'locatedAt',
+  ] as const) {
+    expect((stored[name] as { observedAt: string }).observedAt)
+      .toBe('2026-10-22T10:00:00Z');
+  }
+  expect(original.entity.status.observedAt)
+    .toBe('2026-10-22T10:00:00.123456789Z');
+
+  const conflict = projection(
+    'handover-second',
+    '2026-10-22T10:00:00.987654321Z',
+  );
+  conflict.attributes.status.value = 'repair';
+  conflict.entity.status.value = 'repair';
+
+  await expect(syncAssetProjection(f.broker, conflict))
+    .rejects.toMatchObject({ code: 'OBSERVATION_CONFLICT' });
+  expect(f.entities.get(original.entity.id)?.status.value).toBe('in_use');
+  expect(conflict.entity.status.observedAt)
+    .toBe('2026-10-22T10:00:00.987654321Z');
+  expect(f.counts()).toEqual({ creates: 1, updates: 0 });
 });
 
 test('timestamp comparison preserves nanoseconds', () => {
