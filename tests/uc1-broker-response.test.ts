@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-import { expect, test } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import {
+  createAssetConnector,
   normalizeBrokerEntity,
 } from '../scripts/lib/ngsi-ld-client.mjs';
 
 const ns = 'https://latticedx.example/ns/';
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 test('normalizes expanded Department response without changing identity', () => {
   const result = normalizeBrokerEntity({
@@ -60,4 +65,30 @@ test('rejects conflicting compact and expanded attribute names', () => {
 test('does not reinterpret another namespace as a trusted entity type', () => {
   const type = 'https://other.example/Department';
   expect(normalizeBrokerEntity({ type }).type).toBe(type);
+});
+
+test('updates use POST attrs so missing attributes are added without replacing unrelated ones', async () => {
+  const id = 'urn:ngsi-ld:Asset:org-a:demo';
+  const context = { Asset: ns + 'Asset', status: ns + 'status' };
+  const attributes = {
+    status: { type: 'Property', value: 'in_use', observedAt: '2026-10-22T10:00:00Z' },
+    sourceEventId: { type: 'Property', value: 'handover-002' },
+  };
+  const transport = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+  vi.stubGlobal('fetch', transport);
+  const connector = createAssetConnector({
+    baseUrl: 'http://broker.test',
+    tenant: 'org-a',
+    context,
+  });
+
+  await connector.updateAsset(id, attributes);
+
+  const [url, options] = transport.mock.calls[0]!;
+  expect(url).toBe(
+    `http://broker.test/ngsi-ld/v1/entities/${encodeURIComponent(id)}/attrs`,
+  );
+  expect(options.method).toBe('POST');
+  expect(options.headers['Content-Type']).toBe('application/ld+json');
+  expect(JSON.parse(options.body)).toEqual({ ...attributes, '@context': context });
 });

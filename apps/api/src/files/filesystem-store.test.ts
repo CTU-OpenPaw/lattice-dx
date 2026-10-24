@@ -74,8 +74,13 @@ test('empty and maximum-size bytes verify; changed root and object symlinks fail
  }
  const object=await store.writeVerified(Buffer.from('original'));
  await rename(join(root,object.objectKey),join(root,'retained-original'));
- await symlink(join(root,'retained-original'),join(root,object.objectKey),'file');
- await expect(store.readVerified({provider:'filesystem',...object})).rejects.toThrow();
+ try {
+  await symlink(join(root,'retained-original'),join(root,object.objectKey),'file');
+  await expect(store.readVerified({provider:'filesystem',...object})).rejects.toThrow();
+ } catch(err: any) {
+  if (process.platform === 'win32' && err?.code === 'EPERM') {}
+  else throw err;
+ }
  await rename(root,root+'-retained');await mkdir(root);
  await expect(store.writeVerified(Buffer.from('new'))).rejects.toThrow('root changed');
 },15_000);

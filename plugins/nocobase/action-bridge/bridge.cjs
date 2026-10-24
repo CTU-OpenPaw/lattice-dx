@@ -178,6 +178,34 @@ function createBridge(config, dependencies = {}) {
       }else if(input.body!==undefined||input.key!==undefined)invalid();
       return request(`${config.gatewayUrl}/v1/${path}`,{method:operations[operation],headers:{authorization:`Bearer ${item.token}`,...(write?{'content-type':'application/json','idempotency-key':input.key}:{})},...(write?{body:JSON.stringify(operation==='unlink'?{expectedVersion:input.body.expectedVersion}:input.body)}:{})},'Entity request failed; reload before retrying the same command key.',true);
     },
+    async agent(userId, browserId, input) {
+      const item = session(userId, browserId);
+      const operations = {
+        list: ['GET', 'agent-jobs'],
+        detail: ['GET', ''],
+        retry: ['POST', '']
+      };
+      if (!input || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(k => !['operation', 'id', 'body', 'key', 'query'].includes(k)) || !Object.hasOwn(operations, input.operation)) throw new BridgeError(400, 'Invalid agent operation.');
+      const [method] = operations[input.operation];
+      let path = 'agent-jobs';
+      if (['detail', 'retry'].includes(input.operation)) {
+        if (typeof input.id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(input.id)) throw new BridgeError(400, 'Invalid agent job ID.');
+        path += `/${input.id}${input.operation === 'retry' ? '/retry' : ''}`;
+      } else if (input.id !== undefined) {
+        throw new BridgeError(400, 'Unexpected agent job ID.');
+      }
+      const write = input.operation === 'retry';
+      if (write) {
+        if (typeof input.key !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(input.key) || !input.body || typeof input.body !== 'object' || Array.isArray(input.body)) throw new BridgeError(400, 'Agent mutation requires body and idempotency key.');
+      } else if (input.body !== undefined || input.key !== undefined) {
+        throw new BridgeError(400, 'Unexpected command payload.');
+      }
+      const query = validatedQuery(input.query, ['limit', 'offset', 'runId']);
+      if (input.query !== undefined && input.operation !== 'list') throw new BridgeError(400, 'Unexpected query.');
+      if (query) path += (path.includes('?') ? '&' : '?') + query;
+      const headers = { authorization: `Bearer ${item.token}`, ...(write ? { 'content-type': 'application/json', 'idempotency-key': input.key } : {}) };
+      return request(`${config.gatewayUrl}/v1/${path}`, { method, headers, ...(write ? { body: JSON.stringify(input.body) } : {}) }, 'Agent request failed.', true);
+    },
     async list(userId, browserId, resource, query) {
       if (!['records','tasks'].includes(resource)) throw new BridgeError(400, 'Unsupported list resource.');
       const item = session(userId, browserId);

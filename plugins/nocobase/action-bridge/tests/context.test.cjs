@@ -9,6 +9,11 @@ test('Context bridge only forwards fixed authorized read paths and preserves den
  await assert.rejects(bridge.entity('other',start.browserId,{operation:'detail',id}),{status:401});assert.equal(calls.length,count);
  await bridge.workflow('noco',start.browserId,{operation:'entityContext',id});assert.equal(calls.at(-1).url,`http://gateway/v1/workflows/${id}/entity-context`);
  await bridge.entity('noco',start.browserId,{operation:'detail',id});assert.equal(calls.at(-1).url,`http://gateway/v1/entities/${id}`);assert.equal(calls.at(-1).options.method,'GET');assert.equal(calls.at(-1).options.headers.authorization,'Bearer fixture-token');
+ const beforeUnsupportedEntityReads=calls.length;
+ await assert.rejects(bridge.entity('noco',start.browserId,{operation:'context',id}),{status:400});
+ await assert.rejects(bridge.entity('noco',start.browserId,{operation:'history',id,query:{limit:'10',offset:'0'}}),{status:400});
+ assert.equal(calls.length,beforeUnsupportedEntityReads,'Unsupported entity routes must fail before dispatch');
+ await bridge.entity('noco',start.browserId,{operation:'relations',id,query:{limit:'5',offset:'0'}});assert.equal(calls.at(-1).url,`http://gateway/v1/entities/${id}/relations?limit=5&offset=0`);assert.equal(calls.at(-1).options.method,'GET');
  await assert.rejects(bridge.workflow('noco',start.browserId,{operation:'entityContext',id,query:{tenant:'other'}}),{status:400});
  deny=true;await assert.rejects(bridge.entity('noco',start.browserId,{operation:'detail',id}),{status:404});bridge.disconnect('noco',start.browserId);
 });

@@ -1,0 +1,185 @@
+{
+  "schemaVersion": 1,
+  "id": "incident",
+  "name": "Vận hành & Xử lý sự cố",
+  "route": "/lattice/apps/incident",
+  "permissions": [
+    "records:read"
+  ],
+  "collections": [
+    {
+      "id": "cases",
+      "source": "lattice-api",
+      "resource": "records"
+    },
+    {
+      "id": "workflow-runs",
+      "source": "lattice-api",
+      "resource": "workflows"
+    }
+  ],
+  "blocks": [
+    {
+      "id": "case-list",
+      "type": "list",
+      "title": "Danh sách sự cố thiết bị",
+      "collection": "cases",
+      "permissions": [
+        "records:read"
+      ],
+      "columns": [
+        "title",
+        "createdAt"
+      ]
+    },
+    {
+      "id": "case-approval",
+      "type": "approval",
+      "title": "Quy trình phê duyệt sự cố",
+      "collection": "workflow-runs",
+      "definitionId": "incident-response",
+      "permissions": [
+        "records:read"
+      ],
+      "attachmentBlockId": "case-files",
+      "timelineBlockId": "case-history",
+      "contextBlockId": "case-context",
+      "actionLabels": {
+        "assign": "Phân công kỹ thuật viên",
+        "accept": "Tiếp nhận kiểm tra",
+        "request_analysis": "Yêu cầu AI phân tích",
+        "retry_analysis": "Thử lại phân tích",
+        "approve": "Duyệt đề xuất xử lý",
+        "reject": "Từ chối đề xuất",
+        "rework": "Yêu cầu kiểm tra lại",
+        "record_resolution": "Ghi nhận khắc phục xong",
+        "close": "Xác nhận đóng sự cố"
+      },
+      "fieldLabels": {
+        "receiptNote": "Ghi chú tiếp nhận",
+        "reviewNote": "Ý kiến phê duyệt",
+        "reason": "Lý do từ chối",
+        "reworkNote": "Yêu cầu kiểm tra lại",
+        "resolutionNote": "Biên bản khắc phục",
+        "closeNote": "Ghi chú đóng sự cố"
+      },
+      "stateLabels": {
+        "open": "Mới tiếp nhận",
+        "assigned": "Đã giao việc",
+        "investigating": "Đang kiểm tra",
+        "analyzing": "Đang phân tích AI",
+        "analysis_failed": "Phân tích thất bại",
+        "review_pending": "Chờ duyệt đề xuất",
+        "approved": "Đã duyệt đề xuất",
+        "rejected": "Đề xuất bị từ chối",
+        "resolved": "Đã khắc phục xong",
+        "closed": "Đã đóng sự cố"
+      }
+    },
+    {
+      "id": "case-files",
+      "type": "attachment",
+      "title": "Biên bản & Tài liệu sự cố",
+      "collection": "workflow-runs",
+      "definitionId": "incident-response",
+      "permissions": [
+        "records:read"
+      ],
+      "allowUpload": true,
+      "fileFields": [
+        "attachmentId"
+      ]
+    },
+    {
+      "id": "case-history",
+      "type": "activity-timeline",
+      "title": "Nhật ký & Lịch sử xử lý",
+      "collection": "workflow-runs",
+      "definitionId": "incident-response",
+      "permissions": [
+        "records:read"
+      ],
+      "pageSize": 10,
+      "actionLabels": {
+        "assign": "Phân công",
+        "accept": "Tiếp nhận",
+        "request_analysis": "Yêu cầu AI phân tích",
+        "retry_analysis": "Thử lại phân tích",
+        "approve": "Duyệt đề xuất",
+        "reject": "Từ chối đề xuất",
+        "rework": "Yêu cầu kiểm tra lại",
+        "record_resolution": "Khắc phục xong",
+        "close": "Đóng sự cố"
+      },
+      "stateLabels": {
+        "open": "Mới tiếp nhận",
+        "assigned": "Đã giao việc",
+        "investigating": "Đang kiểm tra",
+        "analyzing": "Đang phân tích AI",
+        "analysis_failed": "Phân tích thất bại",
+        "review_pending": "Chờ duyệt đề xuất",
+        "approved": "Đã duyệt đề xuất",
+        "rejected": "Đề xuất bị từ chối",
+        "resolved": "Đã khắc phục xong",
+        "closed": "Đã đóng sự cố"
+      }
+    },
+    {
+      "id": "case-context",
+      "type": "context-entity",
+      "title": "Thông tin tài sản & Lịch sử số đo",
+      "collection": "workflow-runs",
+      "definitionId": "incident-response",
+      "permissions": [
+        "records:read"
+      ],
+      "entitySchemaId": "asset"
+    }
+  ],
+  "transitions": [],
+  "workspace": {
+    "panels": [
+      {
+        "id": "case-board",
+        "renderer": "lattice.incident.case-board"
+      },
+      {
+        "id": "case-resolution",
+        "renderer": "lattice.incident.resolution"
+      },
+      {
+        "id": "agent-run",
+        "renderer": "lattice.incident.agent-run"
+      },
+      {
+        "id": "evidence-proposal",
+        "renderer": "lattice.incident.evidence-proposal"
+      },
+      {
+        "id": "rule-editor",
+        "renderer": "lattice.incident.rule-editor"
+      }
+    ],
+    "blocks": [
+      {
+        "blockId": "case-list"
+      },
+      {
+        "blockId": "case-approval"
+      },
+      {
+        "blockId": "case-files"
+      },
+      {
+        "blockId": "case-history"
+      },
+      {
+        "blockId": "case-context"
+      }
+    ],
+    "shortcut": {
+      "description": "Giám sát cảm biến, cấu hình ngưỡng và xử lý sự cố thiết bị",
+      "icon": "apps"
+    }
+  }
+}

@@ -2,5 +2,7 @@ packages:
   - apps/*
   - packages/*
   - plugins/nocobase/*
+allowBuilds:
+  esbuild: set this to true or false
 onlyBuiltDependencies:
   - esbuild

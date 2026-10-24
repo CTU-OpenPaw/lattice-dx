@@ -193,7 +193,7 @@ export function createAssetConnector({
       }
 
       return request(
-        "PATCH",
+        "POST",
         `/entities/${encodeURIComponent(id)}/attrs`,
         { ...attributes, "@context": context },
         204,
