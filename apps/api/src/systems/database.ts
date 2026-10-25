@@ -13,6 +13,39 @@ export type SystemDraft = {
   revision: number;
   recipe: SystemRecipe;
 };
+export type AdminSystemItem = {
+  id: string;
+  version: string;
+  title: string;
+  enabled: boolean;
+  policyStatus: string;
+  policyRevision: number;
+  publishedWorkflowsCount: number;
+  totalWorkflowsCount: number;
+  schemasCount: number;
+};
+export type AdminSystemDefinition = {
+  id: string;
+  title?: string;
+  published: boolean;
+  definitionVersion?: number;
+  startRole?: string;
+  readerRoles?: string[];
+  assignedReader?: { field: string; role: string; states: string[] };
+  transitions?: Array<{ id?: string; from?: string; to?: string; role?: string }>;
+};
+export type AdminSystemDetail = {
+  id: string;
+  version: string;
+  title: string;
+  enabled: boolean;
+  policyStatus: string;
+  policyRevision: number;
+  presentation: SystemPresentation;
+  schemas: SchemaPublication[];
+  definitions: AdminSystemDefinition[];
+  permittedBusinessRoles: string[];
+};
 type RuntimeDefinition = Pick<
   WorkflowDefinition,
   | "id"
@@ -58,6 +91,8 @@ export interface SystemRepository {
     id?: string,
     version?: string,
   ): Promise<Page<SystemApp>>;
+  adminList(actor: WorkflowActor, page: PageQuery): Promise<Page<AdminSystemItem>>;
+  adminGet(id: string, version: string, actor: WorkflowActor): Promise<AdminSystemDetail>;
 }
 export async function systemDatabase(pool: Pool): Promise<SystemRepository> {
   await pool.query(`CREATE TABLE IF NOT EXISTS studio_system_drafts(
@@ -279,6 +314,218 @@ export async function systemDatabase(pool: Pool): Promise<SystemRepository> {
         }),
         page,
       );
+    },
+    async adminList(actor, page) {
+      requireModuleAdmin(actor);
+      const rows = (
+        await pool.query<{
+          id: string;
+          version: string;
+          title: string;
+          enabled: boolean;
+          policy_status: string;
+          policy_revision: number;
+          schemas_count: number;
+          total_workflows_count: number;
+          published_workflows_count: number;
+        }>(
+          `SELECT
+            m.id, m.version, m.title, m.enabled,
+            COALESCE(pol.status, 'legacy') AS policy_status,
+            COALESCE(pol.revision, 0) AS policy_revision,
+            jsonb_array_length(COALESCE(m.manifest->'schemas', '[]'::jsonb)) AS schemas_count,
+            GREATEST(
+              jsonb_array_length(COALESCE(m.manifest->'bundle'->'definitions', '[]'::jsonb)),
+              (
+                SELECT count(*)::int
+                FROM enterprise_module_workflows w
+                WHERE w.organization_id = m.organization_id AND w.module_id = m.id AND w.module_version = m.version
+              )
+            ) AS total_workflows_count,
+            (
+              SELECT count(*)::int
+              FROM enterprise_module_workflows w
+              JOIN workflow_definition_versions v ON v.organization_id = w.organization_id AND v.id = w.definition_id AND v.version = w.definition_version
+              WHERE w.organization_id = m.organization_id AND w.module_id = m.id AND w.module_version = m.version
+            ) AS published_workflows_count
+          FROM enterprise_module_versions m
+          LEFT JOIN studio_system_policies pol ON pol.organization_id = m.organization_id AND pol.system_id = m.id AND pol.system_version = m.version
+          WHERE m.organization_id = $1 AND m.manifest ? 'presentation'
+            AND ($2 = '' OR strpos(lower(m.title), lower($2)) > 0)
+          ORDER BY m.id, m.version
+          LIMIT $3 OFFSET $4`,
+          [actor.organizationId, page.q, page.limit + 1, page.offset],
+        )
+      ).rows;
+      return pageResult(
+        rows.map((r) => ({
+          id: r.id,
+          version: r.version,
+          title: r.title,
+          enabled: r.enabled,
+          policyStatus: r.policy_status,
+          policyRevision: r.policy_revision,
+          schemasCount: r.schemas_count,
+          totalWorkflowsCount: r.total_workflows_count,
+          publishedWorkflowsCount: r.published_workflows_count,
+        })),
+        page,
+      );
+    },
+    async adminGet(id, version, actor) {
+      requireModuleAdmin(actor);
+      const row = (
+        await pool.query<{
+          id: string;
+          version: string;
+          title: string;
+          enabled: boolean;
+          policy_status: string;
+          policy_revision: number;
+          presentation: SystemPresentation;
+          schemas: SchemaDefinition[];
+          declared_definitions: WorkflowDefinition[];
+          published_workflows: Array<{
+            definition_id: string;
+            definition_version: number;
+            definition: WorkflowDefinition;
+          }> | null;
+        }>(
+          `SELECT
+            m.id, m.version, m.title, m.enabled,
+            COALESCE(pol.status, 'legacy') AS policy_status,
+            COALESCE(pol.revision, 0) AS policy_revision,
+            m.manifest->'presentation' AS presentation,
+            m.manifest->'schemas' AS schemas,
+            m.manifest->'bundle'->'definitions' AS declared_definitions,
+            (
+              SELECT jsonb_agg(
+                jsonb_build_object(
+                  'definition_id', w.definition_id,
+                  'definition_version', w.definition_version,
+                  'definition', v.definition
+                ) ORDER BY w.definition_id
+              )
+              FROM enterprise_module_workflows w
+              JOIN workflow_definition_versions v ON v.organization_id = w.organization_id AND v.id = w.definition_id AND v.version = w.definition_version
+              WHERE w.organization_id = m.organization_id AND w.module_id = m.id AND w.module_version = m.version
+            ) AS published_workflows
+          FROM enterprise_module_versions m
+          LEFT JOIN studio_system_policies pol ON pol.organization_id = m.organization_id AND pol.system_id = m.id AND pol.system_version = m.version
+          WHERE m.organization_id = $1 AND m.manifest ? 'presentation'
+            AND m.id = $2 AND m.version = $3`,
+          [actor.organizationId, id, version],
+        )
+      ).rows[0];
+      if (!row) throw new WorkflowError(404, "Installed system not found");
+
+      const pubMap = new Map<string, { definition_version: number; definition: WorkflowDefinition }>();
+      (row.published_workflows ?? []).forEach((pw) => {
+        pubMap.set(pw.definition_id, pw);
+      });
+
+      const RESERVED = new Set([
+        'workflow:design',
+        'data:design',
+        'workflow:start',
+        'data:read',
+        'data:write',
+        'data:share',
+        'directory:read',
+        'directory:manage',
+        'platform:operate',
+        'tasks:read',
+        'tasks:assign',
+        'records:write',
+      ]);
+
+      const permittedRoles = new Set<string>();
+      const definitionsMap = new Map<string, AdminSystemDefinition>();
+
+      const addRolesFromDef = (d: WorkflowDefinition) => {
+        if (d.startRole && !RESERVED.has(d.startRole) && !d.startRole.startsWith('platform:') && d.startRole !== 'admin') {
+          permittedRoles.add(d.startRole);
+        }
+        (d.readerRoles ?? []).forEach((r) => {
+          if (r && !RESERVED.has(r) && !r.startsWith('platform:') && r !== 'admin') {
+            permittedRoles.add(r);
+          }
+        });
+        if (d.assignedReader?.role && !RESERVED.has(d.assignedReader.role) && !d.assignedReader.role.startsWith('platform:') && d.assignedReader.role !== 'admin') {
+          permittedRoles.add(d.assignedReader.role);
+        }
+        (d.transitions ?? []).forEach((t: any) => {
+          if (t.role && !t.execution && !RESERVED.has(t.role) && !t.role.startsWith('platform:') && t.role !== 'admin') {
+            permittedRoles.add(t.role);
+          }
+        });
+      };
+
+      (row.declared_definitions ?? []).forEach((declared) => {
+        const published = pubMap.get(declared.id);
+        if (published) {
+          const d = published.definition;
+          addRolesFromDef(d);
+          definitionsMap.set(declared.id, {
+            id: d.id,
+            title: d.title,
+            published: true,
+            definitionVersion: published.definition_version,
+            startRole: d.startRole,
+            readerRoles: d.readerRoles,
+            assignedReader: d.assignedReader,
+            transitions: d.transitions?.map((t: any) => ({
+              id: t.id,
+              from: t.from,
+              to: t.to,
+              role: t.role,
+            })),
+          });
+        } else {
+          definitionsMap.set(declared.id, {
+            id: declared.id,
+            title: declared.title,
+            published: false,
+          });
+        }
+      });
+
+      (row.published_workflows ?? []).forEach((pw) => {
+        if (!definitionsMap.has(pw.definition_id)) {
+          const d = pw.definition;
+          addRolesFromDef(d);
+          definitionsMap.set(pw.definition_id, {
+            id: d.id,
+            title: d.title,
+            published: true,
+            definitionVersion: pw.definition_version,
+            startRole: d.startRole,
+            readerRoles: d.readerRoles,
+            assignedReader: d.assignedReader,
+            transitions: d.transitions?.map((t: any) => ({
+              id: t.id,
+              from: t.from,
+              to: t.to,
+              role: t.role,
+            })),
+          });
+        }
+      });
+
+      const definitions = Array.from(definitionsMap.values());
+
+      return {
+        id: row.id,
+        version: row.version,
+        title: row.title,
+        enabled: row.enabled,
+        policyStatus: row.policy_status,
+        policyRevision: row.policy_revision,
+        presentation: row.presentation,
+        schemas: (row.schemas ?? []).map((s) => ({ ...s, version: 1 })),
+        definitions,
+        permittedBusinessRoles: Array.from(permittedRoles).sort(),
+      };
     },
   };
 }

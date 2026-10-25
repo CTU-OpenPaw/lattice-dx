@@ -10,6 +10,8 @@ Let `base = /v1/systems/:id/versions/:version`:
 
 | Method | Route | Studio operation | Payload |
 |---|---|---|---|
+| GET | `/v1/systems` | `adminSystems` | query: limit, offset, q |
+| GET | `base` | `adminSystem` | no body |
 | GET | `base/members` | `members` | query: limit, offset, q |
 | POST | `base/members` | `grantMember` | body: principalType, principalId, roles |
 | PUT | `base/members/:principalType/:principalId` | `updateMember` | body: expectedRevision, roles |
@@ -17,6 +19,8 @@ Let `base = /v1/systems/:id/versions/:version`:
 | GET | `base/members/history` | `memberHistory` | bridge query: limit, offset |
 | GET | `base/policy` | `policy` | no body |
 | POST | `base/policy/activate` | `activatePolicy` | body: expectedRevision |
+
+For module administrators (`workflow:design` and `data:design`), `GET /v1/systems` (`adminSystems`) and `GET /v1/systems/:id/versions/:version` (`adminSystem`) provide installed system discovery and inspection from scratch. Unlike the employee runtime route (`/v1/system-apps`, which returns 404 for callers lacking business membership in managed systems), the admin endpoints list installed systems regardless of business membership, report readiness, and return `permittedBusinessRoles` derived strictly from published workflow definitions. Non-module-admin callers receive 403.
 
 The backend additionally accepts principal filters on membership history/list according to route validation. The bridge exposes the narrower query set above. Page envelopes are `{items, page:{limit,offset,hasMore,nextOffset}}`; maximum limit is 100.
 

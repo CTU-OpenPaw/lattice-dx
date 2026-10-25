@@ -15,6 +15,7 @@ import {workflowDatabase} from '../apps/api/src/workflows/database.js';
 import {agentDatabase} from '../apps/api/src/agents/database.js';
 import {modulesDatabase} from '../apps/api/src/modules/database.js';
 import {eventsDatabase} from '../apps/api/src/events/database.js';
+import {initializeSystemAccessTables} from '../apps/api/src/systems/access-database.js';
 import {runIncidentJob} from '../apps/agent-worker/src/incident.js';
 
 const control=new Pool({connectionString:process.env.DATABASE_URL,max:1});
@@ -26,6 +27,7 @@ async function main(){
   assert.match(schema,/^incident_accept_[a-f0-9]{32}$/);
   await control.query('CREATE SCHEMA '+schema);
   pool=new Pool({connectionString:process.env.DATABASE_URL,options:'-c search_path='+schema,max:1});
+  await initializeSystemAccessTables(pool);
   const records=await recordDatabase(pool),directory=await createDirectoryDatabase(pool),foundation=await foundationDatabase(pool),entities=await entityDatabase(pool);
   let registry=await definitionDatabase(pool),workflows=await workflowDatabase(pool,registry);
   let agents=agentDatabase(pool,registry),modules=await modulesDatabase(pool,workflows),events=await eventsDatabase(pool,registry,workflows);

@@ -637,8 +637,8 @@ function createSystemScreens(client, React) {
       version = parts[4],
       pages = system
         ? [
-            ...system.presentation.pages,
-            ...(system.presentation.entityPages || []),
+            ...(system.presentation?.pages || []),
+            ...(system.presentation?.entityPages || []),
           ]
         : [],
       page = pages.find((p) => p.id === selectedPage),

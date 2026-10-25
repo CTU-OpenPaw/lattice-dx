@@ -287,7 +287,7 @@ function createOrganizationScreen(React, shell) {
                 ),
               ),
               h("td", null, person.departmentId || "—"),
-              h("td", null, person.roles.join(", ")),
+              h("td", null, (person.roles || []).join(", ")),
               h(
                 "td",
                 null,

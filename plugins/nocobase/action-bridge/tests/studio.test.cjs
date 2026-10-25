@@ -92,6 +92,16 @@ test('system membership and policy bridge operations use strict versioned paths 
    studioRequest({operation:'myAccess',id:'procurement',version:'1.0.0'},BridgeError,query),
    {method:'GET',path:'system-apps/procurement/versions/1.0.0/access/me'}
  );
+ // admin systems list
+ assert.deepEqual(
+   studioRequest({operation:'adminSystems',query:{limit:'20',offset:'0'}},BridgeError,query),
+   {method:'GET',path:'systems?limit=20&offset=0'}
+ );
+ // admin system detail
+ assert.deepEqual(
+   studioRequest({operation:'adminSystem',id:'procurement',version:'1.0.0'},BridgeError,query),
+   {method:'GET',path:'systems/procurement/versions/1.0.0'}
+ );
 
  // Rejections: missing id or version
  assert.throws(()=>studioRequest({operation:'policy',id:'procurement'},BridgeError,query),{status:400});

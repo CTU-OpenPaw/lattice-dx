@@ -152,6 +152,139 @@ describe('Production Wiring & Endpoint Routing', () => {
     }
   });
 
+  it('proves dedicated module-admin system discovery/detail allows admin inspection without business role/membership while employee app returns 404', async () => {
+    const adminList = vi.fn(async () => pageResult([
+      {
+        id: 'company-ops',
+        version: '1.0.0',
+        title: 'Điều hành công ty',
+        enabled: false,
+        policyStatus: 'enforced',
+        policyRevision: 1,
+        publishedWorkflowsCount: 1,
+        totalWorkflowsCount: 1,
+        schemasCount: 2,
+      },
+      {
+        id: 'draft-sys',
+        version: '1.0.0',
+        title: 'Draft System',
+        enabled: false,
+        policyStatus: 'legacy',
+        policyRevision: 0,
+        publishedWorkflowsCount: 0,
+        totalWorkflowsCount: 1,
+        schemasCount: 0,
+      },
+    ], { limit: 20, offset: 0, q: '' }));
+
+    const adminGet = vi.fn(async (id: string, version: string) => ({
+      id,
+      version,
+      title: 'Điều hành công ty',
+      enabled: false,
+      policyStatus: 'enforced',
+      policyRevision: 1,
+      presentation: { schemaVersion: 1, pages: [] },
+      schemas: [],
+      definitions: [
+        {
+          id: 'cross-requests',
+          title: 'Yêu cầu liên phòng ban',
+          published: true,
+          definitionVersion: 1,
+          startRole: 'employee',
+          readerRoles: ['manager'],
+          assignedReader: { field: 'handlerId', role: 'operator', states: ['approved'] },
+        },
+        {
+          id: 'draft-flow',
+          title: 'Quy trình thử nghiệm',
+          published: false,
+        }
+      ],
+      permittedBusinessRoles: ['employee', 'manager', 'operator'],
+    }));
+
+    const runtime = vi.fn(async () => pageResult([], { limit: 20, offset: 0, q: '' }));
+
+    const systems = {
+      save: vi.fn(),
+      list: vi.fn(async () => pageResult([], { limit: 20, offset: 0, q: '' })),
+      get: vi.fn(),
+      runtime: runtime as any,
+      adminList: adminList as any,
+      adminGet: adminGet as any,
+    };
+
+    const app = createApi({
+      workerUrl: 'http://worker',
+      identity,
+      systems: systems as any,
+    });
+
+    try {
+      // 1. Employee without module-admin roles cannot access admin discovery -> 403
+      const empHeaders = await auth(['employee'], 'emp-1');
+      const empList = await app.inject({
+        method: 'GET',
+        url: '/v1/systems',
+        headers: empHeaders,
+      });
+      expect(empList.statusCode).toBe(403);
+
+      const empDetail = await app.inject({
+        method: 'GET',
+        url: '/v1/systems/company-ops/versions/1.0.0',
+        headers: empHeaders,
+      });
+      expect(empDetail.statusCode).toBe(403);
+
+      // 2. Pure module admin (workflow:design + data:design) with NO business roles or membership:
+      // Can discover installed systems via GET /v1/systems -> 200
+      const adminHeaders = await auth(['workflow:design', 'data:design'], 'admin-pure');
+      const adminListRes = await app.inject({
+        method: 'GET',
+        url: '/v1/systems',
+        headers: adminHeaders,
+      });
+      expect(adminListRes.statusCode).toBe(200);
+      expect(adminListRes.json().items).toHaveLength(2);
+      expect(adminListRes.json().items[0].id).toBe('company-ops');
+      expect(adminListRes.json().items[1]).toMatchObject({
+        id: 'draft-sys',
+        publishedWorkflowsCount: 0,
+        totalWorkflowsCount: 1,
+      });
+
+      // Can get system detail via GET /v1/systems/:id/versions/:version -> 200
+      const adminGetRes = await app.inject({
+        method: 'GET',
+        url: '/v1/systems/company-ops/versions/1.0.0',
+        headers: adminHeaders,
+      });
+      expect(adminGetRes.statusCode).toBe(200);
+      const detail = adminGetRes.json();
+      expect(detail.id).toBe('company-ops');
+      expect(detail.version).toBe('1.0.0');
+      expect(detail.permittedBusinessRoles).toEqual(['employee', 'manager', 'operator']);
+      expect(detail.definitions).toHaveLength(2);
+      expect(detail.definitions[0].published).toBe(true);
+      expect(detail.definitions[1].published).toBe(false);
+
+      // 3. But on employee runtime route (/v1/system-apps/:id/versions/:version), pure admin gets 404 because they have no business membership
+      const empRuntimeRes = await app.inject({
+        method: 'GET',
+        url: '/v1/system-apps/company-ops/versions/1.0.0',
+        headers: adminHeaders,
+      });
+      expect(empRuntimeRes.statusCode).toBe(404);
+      expect(empRuntimeRes.json().error).toMatch(/Published system unavailable|not_found/);
+    } finally {
+      await app.close();
+    }
+  });
+
   it('rejects missing Idempotency-Key on mutating grant/update/revoke commands', async () => {
     const systemAccess: Partial<SystemAccessRepository> = {
       grant: vi.fn(),

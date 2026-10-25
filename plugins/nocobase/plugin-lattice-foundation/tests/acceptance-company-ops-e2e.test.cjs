@@ -6,6 +6,9 @@ const { companyOperationsRecipe, validateRecipe } = require("../src/client/syste
 const { createWorkspaceComponent } = require("../src/client/workspace");
 const { createSystemScreens } = require("../src/client/system-studio");
 const { createMemberPermissions } = require("../src/client/member-permissions");
+const { studioRequest, BridgeError } = require("../../action-bridge/studio.cjs");
+
+const queryValidator = (q) => (q ? new URLSearchParams(Object.entries(q)).toString() : "");
 
 globalThis.setInterval = () => ({ unref: () => {} });
 globalThis.clearInterval = () => {};
@@ -16,20 +19,19 @@ globalThis.setTimeout = (fn, ms, ...args) => {
   return t;
 };
 
-// ---------------- E2E SIMULATION HARNESS ----------------
+// ---------------- SIMULATION HARNESS WITH REAL BRIDGE VALIDATION (NOT BROWSER E2E) ----------------
 
 function createEnterpriseE2EEnvironment() {
   const recipe = companyOperationsRecipe();
   const diagnostics = validateRecipe(recipe);
 
-  // State store representing backend services (simulating Duy's action-bridge & backend)
+  // State store representing backend services
   const systemStore = {
     installedApp: {
-      id: recipe.id,
-      version: recipe.version,
-      title: recipe.title,
+      id: "company-ops",
+      version: "1.0.0",
+      title: "Điều hành công ty",
       enabled: true,
-      description: recipe.description,
       presentation: {
         pages: recipe.pages.map((p) => ({
           ...p,
@@ -46,7 +48,6 @@ function createEnterpriseE2EEnvironment() {
       definitions: [
         {
           id: "cross-requests",
-          canStart: true,
           startRole: "employee",
           readerRoles: ["manager", "operator"],
           assignedReader: { role: "operator" },
@@ -55,6 +56,12 @@ function createEnterpriseE2EEnvironment() {
         },
       ],
       schemas: recipe.schemas,
+    },
+    policy: {
+      systemId: "company-ops",
+      version: "1.0.0",
+      status: "legacy",
+      revision: 0,
     },
     members: [],
     workflows: [],
@@ -69,14 +76,6 @@ function createEnterpriseE2EEnvironment() {
       { id: "dep_it", name: "Phòng Kỹ thuật & Vận hành" },
     ],
     auditLogs: [],
-  };
-
-  let currentActor = {
-    username: "admin",
-    subject: "usr_admin",
-    organizationId: "org_default",
-    roles: ["admin"],
-    canManageOrg: true,
   };
 
   function createClientForActor(actor) {
@@ -152,10 +151,13 @@ function createEnterpriseE2EEnvironment() {
                   username: actor.username,
                   organizationId: actor.organizationId,
                   subject: actor.subject,
+                  roles: actor.roles,
                 },
                 expiresAt: new Date(Date.now() + 3600000).toISOString(),
                 capabilities: {
                   "entities.read": { available: true },
+                  "workflow.design": { available: actor.canManageOrg },
+                  "data.design": { available: actor.canManageOrg },
                   "organization.manage": { available: actor.canManageOrg },
                   directoryRead: true,
                 },
@@ -164,14 +166,16 @@ function createEnterpriseE2EEnvironment() {
           }
           if (opts.url === "dxActions:studio") {
             const op = opts.data?.operation;
-            if (op === "apps") {
+            // Real bridge request validation
+            studioRequest(opts.data, BridgeError, queryValidator);
+
+            if (op === "apps" || op === "adminSystems") {
               return { data: { items: [systemStore.installedApp], page: { hasMore: false } } };
             }
-            if (op === "app") {
-              if (opts.data?.id !== systemStore.installedApp.id) {
+            if (op === "app" || op === "adminSystem") {
+              if (opts.data?.id !== systemStore.installedApp.id || opts.data?.version !== systemStore.installedApp.version) {
                 throw new Error("Hệ thống không tồn tại.");
               }
-              // Clone definition with dynamic canStart based on actor role
               const isEmployee = actor.roles.includes("employee") || actor.roles.includes("admin");
               const appCopy = JSON.parse(JSON.stringify(systemStore.installedApp));
               appCopy.definitions[0].canStart = isEmployee;
@@ -180,9 +184,92 @@ function createEnterpriseE2EEnvironment() {
             if (op === "departments") {
               return { data: { items: systemStore.departments, page: { hasMore: false } } };
             }
-            if (op === "systemMembers") {
-              const matched = systemStore.members.filter((m) => m.systemId === opts.data?.id);
+            if (op === "members") {
+              const matched = systemStore.members.filter((m) => m.systemId === opts.data.id && m.systemVersion === opts.data.version);
               return { data: { items: matched, page: { hasMore: false } } };
+            }
+            if (op === "policy") {
+              return { data: systemStore.policy };
+            }
+            if (op === "activatePolicy") {
+              if (systemStore.policy.revision !== opts.data.body?.expectedRevision) {
+                const err = new Error("Xung đột revision chính sách (CAS conflict).");
+                err.status = 409;
+                throw err;
+              }
+              systemStore.policy.status = "enforced";
+              systemStore.policy.revision += 1;
+              return { data: systemStore.policy };
+            }
+            if (op === "grantMember") {
+              const { principalType, principalId, roles } = opts.data.body;
+              let existing = systemStore.members.find(
+                (m) => m.principalType === principalType && m.principalId === principalId,
+              );
+              if (existing) {
+                existing.roles = roles;
+                existing.status = "active";
+                existing.revision += 1;
+              } else {
+                systemStore.members.push({
+                  systemId: opts.data.id,
+                  systemVersion: opts.data.version,
+                  principalType,
+                  principalId,
+                  roles,
+                  status: "active",
+                  revision: 1,
+                  grantedAt: new Date().toISOString(),
+                });
+              }
+              return { data: { success: true } };
+            }
+            if (op === "updateMember") {
+              const { principalType, principalId } = opts.data;
+              const { expectedRevision, roles } = opts.data.body;
+              const member = systemStore.members.find(
+                (m) => m.principalType === principalType && m.principalId === principalId,
+              );
+              if (!member || member.revision !== expectedRevision) {
+                const err = new Error("Xung đột revision thành viên (CAS conflict).");
+                err.status = 409;
+                throw err;
+              }
+              member.roles = roles;
+              member.revision += 1;
+              return { data: { success: true } };
+            }
+            if (op === "revokeMember") {
+              const { principalType, principalId } = opts.data;
+              const { expectedRevision } = opts.data.body;
+              const member = systemStore.members.find(
+                (m) => m.principalType === principalType && m.principalId === principalId,
+              );
+              if (!member || member.revision !== expectedRevision) {
+                const err = new Error("Xung đột revision thành viên (CAS conflict).");
+                err.status = 409;
+                throw err;
+              }
+              member.status = "revoked";
+              member.revision += 1;
+              return { data: { success: true } };
+            }
+            if (op === "myAccess") {
+              const activeGrant = systemStore.members.find(
+                (m) => m.principalType === "person" && m.principalId === actor.subject && m.status === "active",
+              );
+              const hasAccess = Boolean(activeGrant || systemStore.policy.status === "legacy");
+              const effectiveRoles = activeGrant ? activeGrant.roles : (systemStore.policy.status === "legacy" ? actor.roles : []);
+              return {
+                data: {
+                  systemId: opts.data.id,
+                  version: opts.data.version,
+                  hasAccess,
+                  effectiveRoles,
+                  sources: activeGrant ? [{ source: "person", principalId: actor.subject, roles: activeGrant.roles }] : [],
+                  enforcementStatus: systemStore.policy.status,
+                },
+              };
             }
           }
           if (opts.url === "dxActions:workflow") {
@@ -192,6 +279,8 @@ function createEnterpriseE2EEnvironment() {
                 data: {
                   capabilities: {
                     "entities.read": { available: true },
+                    "workflow.design": { available: actor.canManageOrg },
+                    "data.design": { available: actor.canManageOrg },
                     directoryRead: true,
                   },
                 },
@@ -222,7 +311,6 @@ function createEnterpriseE2EEnvironment() {
               const isInbox = op === "inbox";
               let items = systemStore.workflows;
               if (isInbox) {
-                // Filter by role / assignment
                 if (actor.roles.includes("manager")) {
                   items = items.filter((w) => w.state === "submitted");
                 } else if (actor.roles.includes("operator")) {
@@ -237,7 +325,6 @@ function createEnterpriseE2EEnvironment() {
               const run = systemStore.workflows.find((w) => w.id === opts.data.id);
               if (!run) throw new Error("Hồ sơ không tồn tại.");
 
-              // Determine available transitions according to actor role and state
               const availableTransitions = [];
               if (run.state === "draft" && (actor.roles.includes("employee") || run.creator === actor.subject)) {
                 availableTransitions.push({ id: "submit", fields: {} });
@@ -276,18 +363,6 @@ function createEnterpriseE2EEnvironment() {
               return { data: run };
             }
           }
-          if (opts.url === "dxActions:run") {
-            const op = opts.data?.operation;
-            if (op === "grantSystemMember") {
-              systemStore.members.push({
-                subject: opts.data.body.subject,
-                systemId: opts.data.body.systemId,
-                roles: opts.data.body.roles,
-                grantedAt: new Date().toISOString(),
-              });
-              return { data: { success: true } };
-            }
-          }
           return { data: {} };
         },
         auth: { signOut: async () => {} },
@@ -296,6 +371,84 @@ function createEnterpriseE2EEnvironment() {
 
     const runtimeMock = {
       Application: () => ({ type: "div", props: { "data-testid": "runtime-app" }, children: [] }),
+    };
+
+    const shell = {
+      h,
+      box: { border: "1px solid" },
+      button: (label, onClick, disabled) => ({
+        type: "button",
+        props: { onClick, disabled },
+        children: [label],
+      }),
+      field: (label, value, onChange) => ({
+        type: "div",
+        props: { "data-field": label },
+        children: [
+          { type: "label", props: {}, children: [label] },
+          {
+            type: "input",
+            props: { value, onChange: (e) => onChange(e.target.value) },
+          },
+        ],
+      }),
+      json: (value) => ({ type: "pre", props: {}, children: [JSON.stringify(value)] }),
+    };
+
+    const MemberPermissions = createMemberPermissions(React, shell);
+
+    const session = {
+      connection: {
+        connected: true,
+        identity: {
+          username: actor.username,
+          subject: actor.subject,
+          organizationId: actor.organizationId,
+          roles: actor.roles,
+        },
+      },
+      capabilities: {
+        "entities.read": { available: true },
+        "workflow.design": { available: actor.canManageOrg },
+        "data.design": { available: actor.canManageOrg },
+        directoryRead: true,
+      },
+      busy: false,
+      commands: {
+        uncertain: false,
+        execute: async (op, payload) => {
+          const res = await clientMock.useAPIClient().request({
+            url: "dxActions:studio",
+            method: "post",
+            data: { operation: op, ...payload, key: "cmd-" + Math.random().toString(36).slice(2) },
+          });
+          return res.data;
+        },
+      },
+      report: () => {},
+      act: (fn) => {
+        const promise = Promise.resolve().then(fn);
+        pending.push(promise);
+        return promise;
+      },
+      api: {
+        studio: async (op, payload = {}) => {
+          const res = await clientMock.useAPIClient().request({
+            url: "dxActions:studio",
+            method: "post",
+            data: { operation: op, ...payload },
+          });
+          return res.data;
+        },
+        workflow: async (op, payload = {}) => {
+          const res = await clientMock.useAPIClient().request({
+            url: "dxActions:workflow",
+            method: "post",
+            data: { operation: op, ...payload },
+          });
+          return res.data;
+        },
+      },
     };
 
     const Workspace = createWorkspaceComponent(clientMock, React, runtimeMock);
@@ -310,6 +463,17 @@ function createEnterpriseE2EEnvironment() {
         if (found) return found;
       }
       return tree.children?.map((c) => find(c, predicate)).find(Boolean);
+    }
+
+    function findAll(tree, predicate, acc = []) {
+      if (!tree || typeof tree !== "object") return acc;
+      if (predicate(tree)) acc.push(tree);
+      if (typeof tree.type === "function") {
+        const rendered = tree.type(tree.props);
+        findAll(rendered, predicate, acc);
+      }
+      tree.children?.forEach((c) => findAll(c, predicate, acc));
+      return acc;
     }
 
     async function flushEffects() {
@@ -356,6 +520,7 @@ function createEnterpriseE2EEnvironment() {
 
     return {
       find,
+      findAll,
       flushEffects,
       renderWorkspace,
       renderSystemRuntime,
@@ -363,6 +528,21 @@ function createEnterpriseE2EEnvironment() {
         index = 0;
         return SystemRuntime();
       },
+      async renderMemberPermissions(systemId = "company-ops", systemVersion = "1.0.0") {
+        index = 0;
+        let tree = MemberPermissions({ session, systemId, systemVersion });
+        for (let i = 0; i < 4; i++) {
+          await flushEffects();
+          index = 0;
+          tree = MemberPermissions({ session, systemId, systemVersion });
+        }
+        return tree;
+      },
+      reRenderCurrentPermissions(systemId = "company-ops", systemVersion = "1.0.0") {
+        index = 0;
+        return MemberPermissions({ session, systemId, systemVersion });
+      },
+      api: session.api,
     };
   }
 
@@ -374,9 +554,9 @@ function createEnterpriseE2EEnvironment() {
   };
 }
 
-// ---------------- ACCEPTANCE TEST SUITE ----------------
+// ---------------- SIMULATION TEST SUITES (REAL BRIDGE VALIDATION, NOT BROWSER E2E) ----------------
 
-test("NGHIỆM THU BƯỚC 1: Studio tạo hệ thống 'Điều hành công ty' tự động hoàn toàn và validation đạt 100%", () => {
+test("MÔ PHỎNG HARNESS (simulation harness with real bridge validation) - BƯỚC 1: Studio tạo hệ thống 'Điều hành công ty' tự động và validation đạt chuẩn", () => {
   const env = createEnterpriseE2EEnvironment();
 
   // Kiểm tra metadata
@@ -394,37 +574,84 @@ test("NGHIỆM THU BƯỚC 1: Studio tạo hệ thống 'Điều hành công ty'
   assert.equal(env.diagnostics.issues.length, 0, "Cấu hình hệ thống phải đạt chuẩn 0 lỗi");
 });
 
-test("NGHIỆM THU BƯỚC 2: Phân quyền thành viên theo hệ thống qua API, không can thiệp DB thủ công", () => {
+test("MÔ PHỎNG HARNESS (simulation harness with real bridge validation) - BƯỚC 2: Phân quyền thành viên qua UI/API chuẩn bridge (grantMember), kích hoạt chính sách CAS", async () => {
   const env = createEnterpriseE2EEnvironment();
+  const adminActor = {
+    username: "admin",
+    subject: "usr_admin",
+    organizationId: "org_default",
+    roles: ["workflow:design", "data:design"],
+    canManageOrg: true,
+  };
+  const adminClient = env.createClientForActor(adminActor);
+  let adminPermTree = await adminClient.renderMemberPermissions("company-ops", "1.0.0");
 
-  // Admin cấp quyền cho 3 nhân sự: Alice (employee), Bob (manager), Duy (operator)
-  env.systemStore.members.push({
-    subject: "usr_alice",
-    systemId: "company-ops",
-    roles: ["employee"],
-    grantedAt: new Date().toISOString(),
-  });
-  env.systemStore.members.push({
-    subject: "usr_bob",
-    systemId: "company-ops",
-    roles: ["manager"],
-    grantedAt: new Date().toISOString(),
-  });
-  env.systemStore.members.push({
-    subject: "usr_duy",
-    systemId: "company-ops",
-    roles: ["operator"],
-    grantedAt: new Date().toISOString(),
-  });
+  // Admin cấp quyền cho Alice: usr_alice -> employee
+  const pSelectAlice = adminClient.find(adminPermTree, (n) => n.type === "select" && n.children?.some((c) => c.props?.value === "usr_alice"));
+  assert.ok(pSelectAlice, "Admin phải thấy dropdown chọn nhân sự");
+  pSelectAlice.props.onChange({ target: { value: "usr_alice" } });
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+
+  const cbAlice = adminClient.findAll(adminPermTree, (n) => n.type === "input" && n.props?.type === "checkbox");
+  assert.ok(cbAlice.length >= 3, "Phải có checkboxes cho các vai trò hệ thống");
+  cbAlice[0].props.onChange({ target: { checked: true } });
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+
+  const grantBtnAlice = adminClient.find(adminPermTree, (n) => n.type === "button" && n.children?.[0] === "Cấp quyền truy cập");
+  assert.ok(grantBtnAlice, "Nút cấp quyền truy cập phải hiển thị");
+  await grantBtnAlice.props.onClick();
+  await adminClient.flushEffects();
+
+  // Admin cấp quyền cho Bob: usr_bob -> manager
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+  const pSelectBob = adminClient.find(adminPermTree, (n) => n.type === "select" && n.children?.some((c) => c.props?.value === "usr_bob"));
+  pSelectBob.props.onChange({ target: { value: "usr_bob" } });
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+  const cbBob = adminClient.findAll(adminPermTree, (n) => n.type === "input" && n.props?.type === "checkbox");
+  cbBob[1].props.onChange({ target: { checked: true } });
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+  const grantBtnBob = adminClient.find(adminPermTree, (n) => n.type === "button" && n.children?.[0] === "Cấp quyền truy cập");
+  await grantBtnBob.props.onClick();
+  await adminClient.flushEffects();
+
+  // Admin cấp quyền cho Duy: usr_duy -> operator
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+  const pSelectDuy = adminClient.find(adminPermTree, (n) => n.type === "select" && n.children?.some((c) => c.props?.value === "usr_duy"));
+  pSelectDuy.props.onChange({ target: { value: "usr_duy" } });
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+  const cbDuy = adminClient.findAll(adminPermTree, (n) => n.type === "input" && n.props?.type === "checkbox");
+  cbDuy[2].props.onChange({ target: { checked: true } });
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+  const grantBtnDuy = adminClient.find(adminPermTree, (n) => n.type === "button" && n.children?.[0] === "Cấp quyền truy cập");
+  await grantBtnDuy.props.onClick();
+  await adminClient.flushEffects();
 
   assert.equal(env.systemStore.members.length, 3);
-  assert.ok(env.systemStore.members.some((m) => m.subject === "usr_alice" && m.roles.includes("employee")));
-  assert.ok(env.systemStore.members.some((m) => m.subject === "usr_bob" && m.roles.includes("manager")));
-  assert.ok(env.systemStore.members.some((m) => m.subject === "usr_duy" && m.roles.includes("operator")));
+  assert.ok(env.systemStore.members.some((m) => m.principalId === "usr_alice" && m.roles.includes("employee") && m.status === "active"));
+  assert.ok(env.systemStore.members.some((m) => m.principalId === "usr_bob" && m.roles.includes("manager") && m.status === "active"));
+  assert.ok(env.systemStore.members.some((m) => m.principalId === "usr_duy" && m.roles.includes("operator") && m.status === "active"));
+
+  // Admin kích hoạt chính sách phân quyền (activatePolicy)
+  adminPermTree = adminClient.reRenderCurrentPermissions("company-ops", "1.0.0");
+  const activatePolicyBtn = adminClient.find(adminPermTree, (n) => n.type === "button" && n.children?.[0] === "Kích hoạt thực thi chính sách");
+  assert.ok(activatePolicyBtn, "Nút kích hoạt thực thi chính sách phải hiển thị cho Admin");
+  await activatePolicyBtn.props.onClick();
+  await adminClient.flushEffects();
+
+  assert.equal(env.systemStore.policy.status, "enforced", "Chính sách phân quyền phải chuyển sang enforced");
+  assert.equal(env.systemStore.policy.revision, 1, "Revision chính sách phải tăng lên 1");
 });
 
-test("NGHIỆM THU BƯỚC 3, 4, 5: Kịch bản liên phòng ban End-to-End (Alice tạo -> Bob duyệt -> Duy hoàn thành) không can thiệp code/DB", async () => {
+test("MÔ PHỎNG HARNESS (simulation harness with real bridge validation) - BƯỚC 3, 4, 5: Kịch bản liên phòng ban (Alice tạo -> Bob duyệt -> Duy hoàn thành)", async () => {
   const env = createEnterpriseE2EEnvironment();
+  // Ensure members exist with active policy
+  env.systemStore.policy.status = "enforced";
+  env.systemStore.policy.revision = 1;
+  env.systemStore.members.push(
+    { systemId: "company-ops", systemVersion: "1.0.0", principalType: "person", principalId: "usr_alice", roles: ["employee"], status: "active", revision: 1 },
+    { systemId: "company-ops", systemVersion: "1.0.0", principalType: "person", principalId: "usr_bob", roles: ["manager"], status: "active", revision: 1 },
+    { systemId: "company-ops", systemVersion: "1.0.0", principalType: "person", principalId: "usr_duy", roles: ["operator"], status: "active", revision: 1 },
+  );
 
   // 1. ALICE (Nhân viên - vai trò employee) đăng nhập vào Workspace
   const aliceActor = {
@@ -454,7 +681,7 @@ test("NGHIỆM THU BƯỚC 3, 4, 5: Kịch bản liên phòng ban End-to-End (Al
   );
   assert.ok(startLegend, "Alice (employee) phải thấy form tạo yêu cầu mới");
 
-  // Alice tạo yêu cầu đề xuất máy chủ mới, chỉ định Duy phụ trách
+  // Form có trường nhập tiêu đề
   const titleField = aliceClient.find(aliceRuntimeTree, (n) => n.props?.["data-field"] === "Tiêu đề yêu cầu" || n.type === "input");
   assert.ok(titleField, "Form phải có trường nhập tiêu đề");
 
@@ -612,8 +839,55 @@ test("NGHIỆM THU BƯỚC 3, 4, 5: Kịch bản liên phòng ban End-to-End (Al
   assert.equal(completedRun.state, "completed", "Hồ sơ phải được hoàn thành trọn vẹn (state = completed)");
 
   // 4. KIỂM TRA TÍNH TOÀN VẸN CỦA QUY TRÌNH:
-  // - 0 can thiệp DB trực tiếp
-  // - 0 lệnh curl API thủ công
-  // - 0 dòng code cần sửa đổi trong suốt chu trình từ tạo -> duyệt -> thực hiện
   assert.equal(env.systemStore.auditLogs.length, 4, "Audit logs phải ghi lại đúng 4 bước: create, submit, approve, complete");
+});
+
+test("MÔ PHỎNG HARNESS (simulation harness with real bridge validation) - BƯỚC 6: Thu hồi quyền thành viên (revokeMember) kiểm tra CAS revision và từ chối truy cập", async () => {
+  const env = createEnterpriseE2EEnvironment();
+  // Setup Alice active with enforced policy
+  env.systemStore.policy.status = "enforced";
+  env.systemStore.policy.revision = 1;
+  env.systemStore.members.push({
+    systemId: "company-ops",
+    systemVersion: "1.0.0",
+    principalType: "person",
+    principalId: "usr_alice",
+    roles: ["employee"],
+    status: "active",
+    revision: 1,
+  });
+
+  const adminActor = {
+    username: "admin",
+    subject: "usr_admin",
+    organizationId: "org_default",
+    roles: ["workflow:design", "data:design"],
+    canManageOrg: true,
+  };
+  const adminClient = env.createClientForActor(adminActor);
+  let adminPermTree = await adminClient.renderMemberPermissions("company-ops", "1.0.0");
+
+  // Admin thu hồi quyền Alice qua MemberPermissions UI
+  const revokeAliceBtn = adminClient.find(adminPermTree, (n) => n.type === "button" && n.children?.[0] === "Thu hồi");
+  assert.ok(revokeAliceBtn, "Phải có nút thu hồi quyền thành viên");
+  await revokeAliceBtn.props.onClick();
+  await adminClient.flushEffects();
+
+  const aliceGrant = env.systemStore.members.find((m) => m.principalId === "usr_alice");
+  assert.equal(aliceGrant.status, "revoked", "Trạng thái phân quyền của Alice phải chuyển thành revoked");
+  assert.equal(aliceGrant.revision, 2, "Revision của grant phải tăng lên 2 sau khi thu hồi");
+
+  // Alice kiểm tra quyền hiệu lực qua myAccess
+  const aliceActor = {
+    username: "alice",
+    subject: "usr_alice",
+    organizationId: "org_default",
+    roles: ["employee"],
+    canManageOrg: false,
+  };
+  const aliceClient = env.createClientForActor(aliceActor);
+  const myAccess = await aliceClient.api.studio("myAccess", { id: "company-ops", version: "1.0.0" });
+  assert.equal(myAccess.hasAccess, false, "Alice không còn quyền truy cập sau khi bị thu hồi");
+  assert.deepEqual(myAccess.effectiveRoles, [], "Alice không còn vai trò quy trình");
+  assert.deepEqual(myAccess.sources, [], "Sources của Alice phải trống");
 });
