@@ -137,13 +137,15 @@ function createSystemShell(client, React) {
       });
     }, [api]);
     useEffect(() => {
-      if (!connection?.connected) return;
+      if (!connection?.connected || !connection?.expiresAt) return;
+      const expiry = new Date(connection.expiresAt).getTime();
+      if (Number.isNaN(expiry)) return;
       const timer = setTimeout(
         () => {
           setConnection(null);
           setCapabilities({});
         },
-        Math.max(0, new Date(connection.expiresAt).getTime() - Date.now()),
+        Math.max(0, expiry - Date.now()),
       );
       return () => clearTimeout(timer);
     }, [connection]);
