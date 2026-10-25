@@ -211,6 +211,7 @@ export async function entityDatabase(pool:Pool):Promise<EntityRepository> {
       let schema:SchemaPublication;
       return runEntityCommand(pool,scope,'entity.create',key,input,async client=>{
         schema=await publication(client,scope,input.schemaId,input.schemaVersion);
+        await checkAccess(client,scope,{organizationId:scope.organizationId,ownerId:scope.actorId,schemaId:input.schemaId},'owner');
       },async client=>{
         return createEntityAtPublication(client,scope,{...input,schemaVersion:schema.version});
       },async(client,accepted)=>{

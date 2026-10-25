@@ -174,15 +174,50 @@ export async function systemDatabase(pool: Pool): Promise<SystemRepository> {
     },
     async runtime(actor, page, id, version) {
       const rows = (
-        await pool.query<SystemRow>(
-          `SELECT m.id,m.version,m.title,m.enabled,m.manifest->'presentation' AS presentation,m.manifest->'schemas' AS schemas,
-    (SELECT jsonb_agg(v.definition ORDER BY w.definition_id) FROM enterprise_module_workflows w JOIN workflow_definition_versions v ON v.organization_id=w.organization_id AND v.id=w.definition_id AND v.version=w.definition_version
-     WHERE w.organization_id=m.organization_id AND w.module_id=m.id AND w.module_version=m.version) AS definitions
-    FROM enterprise_module_versions m WHERE m.organization_id=$1 AND m.manifest ? 'presentation'
-    AND (m.enabled OR EXISTS(SELECT 1 FROM enterprise_module_audit a WHERE a.organization_id=m.organization_id AND a.module_id=m.id AND a.module_version=m.version AND a.enabled))
-    AND ($5::text IS NULL OR m.id=$5) AND ($6::text IS NULL OR m.version=$6) AND ($7='' OR strpos(lower(m.title),lower($7))>0)
-    AND ((('data:read'=ANY($2::text[])) AND jsonb_array_length(COALESCE(m.manifest->'presentation'->'entityPages','[]'::jsonb))>0) OR EXISTS(SELECT 1 FROM jsonb_array_elements(m.manifest->'bundle'->'definitions') d WHERE d->>'startRole'=ANY($2::text[]) OR (d->'readerRoles') ?| $2::text[] OR d->'assignedReader'->>'role'=ANY($2::text[])))
-    ORDER BY m.id,m.version LIMIT $3 OFFSET $4`,
+        await pool.query<SystemRow & { enforcement_status?: string; effective_roles?: string[]; member_access?: boolean }>(
+          `WITH policies AS (
+             SELECT system_id, system_version, status FROM studio_system_policies WHERE organization_id = $1
+           ),
+           caller_person AS (
+             SELECT subject, department_id, enabled FROM directory_people WHERE organization_id = $1 AND subject = $8
+           ),
+           caller_grants AS (
+             SELECT g.system_id, g.system_version, g.roles
+             FROM studio_system_grants g
+             JOIN caller_person c ON c.enabled = true AND (
+               (g.principal_type = 'person' AND g.principal_id = c.subject)
+               OR (g.principal_type = 'department' AND c.department_id IS NOT NULL AND g.principal_id = c.department_id)
+             )
+             WHERE g.organization_id = $1 AND g.status = 'active'
+           ),
+           member_effective AS (
+             SELECT
+               system_id,
+               system_version,
+               jsonb_agg(roles) AS grant_roles
+             FROM caller_grants
+             GROUP BY system_id, system_version
+           )
+           SELECT m.id,m.version,m.title,m.enabled,m.manifest->'presentation' AS presentation,m.manifest->'schemas' AS schemas,
+     pol.status AS enforcement_status,
+     CASE WHEN pol.status = 'enforced' THEN
+       (SELECT array_agg(DISTINCT r) FROM caller_grants cg, jsonb_array_elements_text(cg.roles) r WHERE cg.system_id = m.id AND cg.system_version = m.version)
+     ELSE NULL END AS effective_roles,
+     CASE WHEN pol.status = 'enforced' THEN
+       EXISTS(SELECT 1 FROM caller_grants cg WHERE cg.system_id = m.id AND cg.system_version = m.version)
+     ELSE true END AS member_access,
+     (SELECT jsonb_agg(v.definition ORDER BY w.definition_id) FROM enterprise_module_workflows w JOIN workflow_definition_versions v ON v.organization_id=w.organization_id AND v.id=w.definition_id AND v.version=w.definition_version
+      WHERE w.organization_id=m.organization_id AND w.module_id=m.id AND w.module_version=m.version) AS definitions
+     FROM enterprise_module_versions m
+     LEFT JOIN policies pol ON pol.system_id = m.id AND pol.system_version = m.version
+     WHERE m.organization_id=$1 AND m.manifest ? 'presentation'
+     AND (m.enabled OR EXISTS(SELECT 1 FROM enterprise_module_audit a WHERE a.organization_id=m.organization_id AND a.module_id=m.id AND a.module_version=m.version AND a.enabled))
+     AND ($5::text IS NULL OR m.id=$5) AND ($6::text IS NULL OR m.version=$6) AND ($7='' OR strpos(lower(m.title),lower($7))>0)
+     AND (
+       pol.status = 'enforced' AND EXISTS(SELECT 1 FROM caller_grants cg WHERE cg.system_id = m.id AND cg.system_version = m.version)
+       OR (pol.status IS NULL OR pol.status = 'legacy') AND ((('data:read'=ANY($2::text[])) AND jsonb_array_length(COALESCE(m.manifest->'presentation'->'entityPages','[]'::jsonb))>0) OR EXISTS(SELECT 1 FROM jsonb_array_elements(m.manifest->'bundle'->'definitions') d WHERE d->>'startRole'=ANY($2::text[]) OR (d->'readerRoles') ?| $2::text[] OR d->'assignedReader'->>'role'=ANY($2::text[])))
+     )
+     ORDER BY m.id,m.version LIMIT $3 OFFSET $4`,
           [
             actor.organizationId,
             actor.roles,
@@ -191,15 +226,18 @@ export async function systemDatabase(pool: Pool): Promise<SystemRepository> {
             id ?? null,
             version ?? null,
             page.q,
+            actor.subject,
           ],
         )
       ).rows;
-      const visible = (d: WorkflowDefinition) =>
-        actor.roles.includes(d.startRole) ||
-        d.readerRoles.some((r) => actor.roles.includes(r)) ||
-        (!!d.assignedReader && actor.roles.includes(d.assignedReader.role));
       return pageResult(
         rows.map((row) => {
+          const isEnforced = row.enforcement_status === 'enforced';
+          const scopedRoles = isEnforced ? (row.effective_roles ?? []) : actor.roles;
+          const visible = (d: WorkflowDefinition) =>
+            scopedRoles.includes(d.startRole) ||
+            d.readerRoles.some((r) => scopedRoles.includes(r)) ||
+            (!!d.assignedReader && scopedRoles.includes(d.assignedReader.role));
           const definitions = (row.definitions ?? [])
             .filter(visible)
             .map((d: WorkflowDefinition) => ({
@@ -208,7 +246,7 @@ export async function systemDatabase(pool: Pool): Promise<SystemRepository> {
               title: d.title,
               canStart:
                 actor.roles.includes("workflow:start") &&
-                actor.roles.includes(d.startRole),
+                scopedRoles.includes(d.startRole),
               startRole: d.startRole,
               startFields: d.startFields,
               optionalStartFields: d.optionalStartFields,
@@ -232,7 +270,7 @@ export async function systemDatabase(pool: Pool): Promise<SystemRepository> {
             presentation: {
               ...row.presentation,
               ...(row.presentation.entityPages?{entityPages}:{}),
-              pages: row.presentation.pages.filter(
+              pages: (row.presentation.pages ?? []).filter(
                 (p: { definitionId: string }) => ids.has(p.definitionId),
               ),
             },

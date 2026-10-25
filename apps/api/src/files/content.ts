@@ -6,6 +6,7 @@ import type {FileItem} from '../foundation.js';
 import {getDefinition,workflowDefinitions} from '../../../../solutions/workflows/definitions.js';
 import {canReadRun,WorkflowError} from '../workflows/policy.js';
 import {checkAccess} from '../entities/access.js';
+import {resolveRunEffectiveRoles} from '../workflows/run-authority.js';
 import {EntityError} from '../entities/policy.js';
 import type {ObjectStore} from './object-store.js';
 export type FileAccessContext={kind:'foundation'}|{kind:'entityAttachment';entityId:string};
@@ -15,21 +16,30 @@ export type FileContent={filename:string;content:Buffer};
 export class FileReadError extends Error {constructor(public readonly statusCode:409|503,message:string){super(message);}}
 const metadata='id,filename,owner_id AS "ownerId",organization_id AS "organizationId",record_id AS "recordId",size,scan_status AS "scanStatus"';
 async function foundationAuthority(client:PoolClient,actor:FileReadActor,id:string,path:'all'|'owner'|'task'|'workflow'='all',resolveDefinition?:FileDefinitionResolver):Promise<boolean>{
- // Lock authority before the file: owner itself is immutable, while links and current tasks/runs can change.
- const owner=(await client.query('SELECT id,owner_id FROM foundation_files WHERE id=$1 AND organization_id=$2 AND owner_id=$3',[id,actor.organizationId,actor.subject])).rows[0];
- if(owner&&path!=='task'&&path!=='workflow')return true;
- if(path==='owner')return false;
  const tables=(await client.query('SELECT to_regclass($1) AS runs,to_regclass($2) AS files',['workflow_runs','workflow_files'])).rows[0];
  const hasRuns=!!tables?.runs;
  const hasFiles=!!tables?.files;
- const runs=hasRuns&&hasFiles&&path!=='task'?(await client.query(`SELECT r.id,r.owner_id AS "ownerId",r.organization_id AS "organizationId",r.definition_id AS "definitionId",r.definition_version AS "definitionVersion",r.state,r.data FROM workflow_runs r JOIN workflow_files wf ON wf.run_id=r.id WHERE wf.file_id=$1 AND r.organization_id=$2 ORDER BY r.id FOR SHARE OF r,wf`,[id,actor.organizationId])).rows as WorkflowRun[]:[];
+ const runs=hasRuns&&hasFiles&&path!=='task'?(await client.query(`SELECT r.id,r.owner_id AS "ownerId",r.organization_id AS "organizationId",r.definition_id AS "definitionId",r.definition_version AS "definitionVersion",r.state,r.data,r.binding FROM workflow_runs r JOIN workflow_files wf ON wf.run_id=r.id WHERE wf.file_id=$1 AND r.organization_id=$2 ORDER BY r.id FOR SHARE OF r,wf`,[id,actor.organizationId])).rows as WorkflowRun[]:[];
+
+ let hasManagedRuns=false;
  for(const run of runs){
   const builtin=workflowDefinitions.some(d=>d.id===run.definitionId);
   const definition=resolveDefinition?await resolveDefinition(client,run):builtin?getDefinition(run.definitionId,run.definitionVersion):(await client.query('SELECT definition FROM workflow_definition_versions WHERE organization_id=$1 AND id=$2 AND version=$3',[actor.organizationId,run.definitionId,run.definitionVersion])).rows[0]?.definition;
   if(!definition)throw new WorkflowError(503,'Phiên bản quy trình không khả dụng.');
-  if(canReadRun(definition,run,actor))return true;
+  const {isManaged,effectiveRoles}=await resolveRunEffectiveRoles(client,actor.organizationId,actor.subject,run);
+  if(isManaged)hasManagedRuns=true;
+  if(isManaged&&(!effectiveRoles||effectiveRoles.length===0))continue;
+  const rolesForRead=isManaged?effectiveRoles!:actor.roles;
+  if(canReadRun(definition,run,actor,rolesForRead))return true;
  }
+
  if(path==='workflow')return false;
+
+ // Standalone or unmanaged file owner access
+ const owner=(await client.query('SELECT id,owner_id FROM foundation_files WHERE id=$1 AND organization_id=$2 AND owner_id=$3',[id,actor.organizationId,actor.subject])).rows[0];
+ if(owner&&path!=='task'&&!hasManagedRuns)return true;
+ if(path==='owner')return false;
+
  const workflowGuard=hasRuns?'NOT EXISTS(SELECT 1 FROM workflow_runs w WHERE w.id=r.id)':'TRUE';
  const task=(await client.query(`SELECT r.id,t.id AS task_id FROM records r JOIN foundation_tasks t ON t.record_id=r.id JOIN foundation_files f ON f.record_id=r.id WHERE f.id=$1 AND f.organization_id=$2 AND r.organization_id=$2 AND f.owner_id=r.owner_id AND ${workflowGuard} AND t.organization_id=$2 AND t.assignee_id=$3 AND t.created_by=r.owner_id AND t.status<>'cancelled' ORDER BY t.id FOR SHARE OF r,t`,[id,actor.organizationId,actor.subject])).rows[0];
  return !!task;
@@ -39,7 +49,7 @@ async function authorized(client:PoolClient,actor:FileReadActor,id:string,contex
  if(context.kind==='foundation')return foundationAuthority(client,actor,id,'all',resolveDefinition);
  if(context.kind!=='entityAttachment'||!isRecordId(context.entityId)||!actor.roles.includes('files:read')||!actor.roles.includes('data:read'))return false;
  const scope={actorId:actor.subject,organizationId:actor.organizationId};
- const found=(await client.query('SELECT id,owner_id AS "ownerId",organization_id AS "organizationId",archived_at AS "archivedAt" FROM enterprise_entities WHERE id=$1 AND organization_id=$2 FOR SHARE',[context.entityId,actor.organizationId])).rows[0];
+ const found=(await client.query('SELECT id,owner_id AS "ownerId",organization_id AS "organizationId",schema_id AS "schemaId",archived_at AS "archivedAt" FROM enterprise_entities WHERE id=$1 AND organization_id=$2 FOR SHARE',[context.entityId,actor.organizationId])).rows[0];
  if(!found)return false;
  try{await checkAccess(client,scope,found,'read');}catch(error){if(error instanceof EntityError&&error.statusCode===404)return false;throw error;}
  if(found.archivedAt&&found.ownerId!==actor.subject)return false;
