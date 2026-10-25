@@ -11,6 +11,7 @@ const control = new Pool({
   connectionString: process.env.DATABASE_URL,
   max: 1,
 });
+control.on("error", () => {});
 const databaseName = "studio_accept_" + randomUUID().replaceAll("-", "");
 let database: Awaited<ReturnType<typeof connectRecords>> | undefined,
   pool: Pool | undefined,
@@ -22,6 +23,7 @@ async function main() {
   url.pathname = "/" + databaseName;
   database = await connectRecords(url.href);
   pool = new Pool({ connectionString: url.href });
+  pool.on("error", () => {});
   const roles = {
     designer: [
       "workflow:design",

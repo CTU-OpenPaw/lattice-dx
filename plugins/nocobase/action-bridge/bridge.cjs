@@ -144,7 +144,7 @@ function createBridge(config, dependencies = {}) {
     },
     async studio(userId,browserId,input){
       const item=session(userId,browserId),command=studioRequest(input,BridgeError,validatedQuery);
-      return request(`${config.gatewayUrl}/v1/${command.path}`,{method:command.method,headers:{authorization:`Bearer ${item.token}`,...(command.body?{'content-type':'application/json','idempotency-key':command.key}:{})},...(command.body?{body:command.body}:{})},'Studio request failed; reload before retrying the same command.',true);
+      return request(`${config.gatewayUrl}/v1/${command.path}`,{method:command.method,headers:{authorization:`Bearer ${item.token}`,...(command.key?{'idempotency-key':command.key}:{}),...(command.body?{'content-type':'application/json'}:{})},...(command.body?{body:command.body}:{})},'Studio request failed; reload before retrying the same command.',true);
     },
     async entity(userId,browserId,input){
       const item=session(userId,browserId);

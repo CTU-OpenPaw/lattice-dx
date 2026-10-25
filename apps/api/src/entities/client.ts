@@ -51,6 +51,7 @@ export async function updateRow(db:Queryable,scope:Scope,before:Entity,operation
 
 export async function createEntityAtPublication(client:EntityClient,scope:Scope,input:EntityCreate & {schemaVersion:number}):Promise<Entity> {
   const schema=await publication(client,scope,input.schemaId,version(input.schemaVersion));
+  await checkAccess(client,scope,{organizationId:scope.organizationId,ownerId:scope.actorId,schemaId:input.schemaId},'owner');
   const normalized={...input,title:title(input.title),attributes:validateAttributes(schema,input.attributes)};
   const row=(await client.query(`INSERT INTO enterprise_entities(id,organization_id,owner_id,schema_id,schema_version,title,attributes) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb) RETURNING ${entityColumns}`,
     [randomUUID(),scope.organizationId,scope.actorId,input.schemaId,schema.version,normalized.title,JSON.stringify(normalized.attributes)])).rows[0];

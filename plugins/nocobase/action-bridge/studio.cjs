@@ -10,7 +10,16 @@ function studioRequest(input, BridgeError, validatedQuery) {
     Array.isArray(input) ||
     Object.keys(input).some(
       (k) =>
-        !["operation", "id", "version", "body", "key", "query"].includes(k),
+        ![
+          "operation",
+          "id",
+          "version",
+          "principalType",
+          "principalId",
+          "body",
+          "key",
+          "query",
+        ].includes(k),
     )
   )
     bad();
@@ -44,6 +53,14 @@ function studioRequest(input, BridgeError, validatedQuery) {
     publish: ["POST", "workflow-drafts"],
     apps: ["GET", "system-apps"],
     app: ["GET", "system-apps"],
+    policy: ["GET", "systems"],
+    activatePolicy: ["POST", "systems"],
+    members: ["GET", "systems"],
+    grantMember: ["POST", "systems"],
+    updateMember: ["PUT", "systems"],
+    revokeMember: ["DELETE", "systems"],
+    memberHistory: ["GET", "systems"],
+    myAccess: ["GET", "system-apps"],
   };
   if (
     typeof input.operation !== "string" ||
@@ -70,6 +87,14 @@ function studioRequest(input, BridgeError, validatedQuery) {
       "draftDefinition",
       "publish",
       "app",
+      "policy",
+      "activatePolicy",
+      "members",
+      "grantMember",
+      "updateMember",
+      "revokeMember",
+      "memberHistory",
+      "myAccess",
     ].includes(operation) ||
     (operation === "save" && id !== undefined);
   if (needsId) {
@@ -79,7 +104,21 @@ function studioRequest(input, BridgeError, validatedQuery) {
     if (typeof id !== "string" || !idPattern.test(id)) bad();
     path += "/" + id;
   } else if (id !== undefined) bad();
-  if (["module", "audit", "enable", "app"].includes(operation)) {
+  const systemVersionOps = [
+    "module",
+    "audit",
+    "enable",
+    "app",
+    "policy",
+    "activatePolicy",
+    "members",
+    "grantMember",
+    "updateMember",
+    "revokeMember",
+    "memberHistory",
+    "myAccess",
+  ];
+  if (systemVersionOps.includes(operation)) {
     if (
       typeof version !== "string" ||
       !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)
@@ -88,53 +127,125 @@ function studioRequest(input, BridgeError, validatedQuery) {
     path += "/versions/" + version;
   } else if (operation === "publishedSchema") {
     if (
-      typeof version !== "number" || !Number.isInteger(version) ||
-      version < 1 || version > 2147483647
-    ) bad();
+      typeof version !== "number" ||
+      !Number.isInteger(version) ||
+      version < 1 ||
+      version > 2147483647
+    )
+      bad();
     path += "/versions/" + version;
   } else if (version !== undefined) bad();
   if (operation === "save" && id !== undefined) method = "PUT";
   if (operation === "audit") path += "/audit";
   if (operation === "enable") path += "/enabled";
   if (["publish", "publishSchema"].includes(operation)) path += "/publish";
-  if (["departmentHistory", "entityHistory"].includes(operation)) path += "/history";
+  if (["departmentHistory", "entityHistory"].includes(operation))
+    path += "/history";
   if (["shares", "share"].includes(operation)) path += "/shares";
+  if (operation === "policy") path += "/policy";
+  if (operation === "activatePolicy") path += "/policy/activate";
+  if (operation === "members" || operation === "grantMember") path += "/members";
+  if (operation === "memberHistory") path += "/members/history";
+  if (operation === "myAccess") path += "/access/me";
+  if (["updateMember", "revokeMember"].includes(operation)) {
+    const { principalType, principalId } = input;
+    if (
+      typeof principalType !== "string" ||
+      !["person", "department"].includes(principalType) ||
+      typeof principalId !== "string" ||
+      (principalType === "department" && !/^[a-z][a-z0-9-]{0,63}$/.test(principalId)) ||
+      (principalType === "person" && !/^[a-z0-9._:-]{1,128}$/i.test(principalId))
+    )
+      bad();
+    path += "/members/" + principalType + "/" + encodeURIComponent(principalId);
+  } else if (input.principalType !== undefined || input.principalId !== undefined) {
+    bad();
+  }
   if (
     input.query !== undefined &&
     ![
-      "drafts", "apps", "audit", "schemas", "departments",
-      "departmentHistory", "entityHistory", "shares",
+      "drafts",
+      "apps",
+      "audit",
+      "schemas",
+      "departments",
+      "departmentHistory",
+      "entityHistory",
+      "shares",
+      "members",
+      "memberHistory",
     ].includes(operation)
   )
     bad();
-  const query = validatedQuery(input.query, ["limit", "offset", "q"]);
+  const query = validatedQuery(
+    input.query,
+    operation === "memberHistory" ? ["limit", "offset"] : ["limit", "offset", "q"],
+  );
   if (query) path += "?" + query;
   const write = method !== "GET";
   if (write) {
     if (
-      !input.body ||
-      typeof input.body !== "object" ||
-      Array.isArray(input.body) ||
       typeof input.key !== "string" ||
       !/^[A-Za-z0-9._:-]{1,128}$/.test(input.key)
     )
       bad();
-    if (Buffer.byteLength(JSON.stringify(input.body)) > 128 * 1024)
-      throw new BridgeError(413, "Studio command too large.");
-    if (operation === "queryEntities") {
-      const body=input.body;
-      if (Object.keys(body).some(k=>!["schemaId","schemaVersion","filters","sort","limit","offset"].includes(k)) ||
-          typeof body.schemaId!=="string" || !/^[a-z][a-z0-9-]{0,63}$/.test(body.schemaId) ||
-          !Number.isInteger(body.schemaVersion) || body.schemaVersion<1 || body.schemaVersion>2147483647 ||
-          (body.limit!==undefined && (!Number.isInteger(body.limit)||body.limit<1||body.limit>100)) ||
-          (body.offset!==undefined && (!Number.isSafeInteger(body.offset)||body.offset<0||body.offset>Number.MAX_SAFE_INTEGER-101)) ||
-          Buffer.byteLength(JSON.stringify(body))>16384) bad();
+    if (["activatePolicy", "revokeMember"].includes(operation)) {
+      if (
+        input.body !== undefined &&
+        (typeof input.body !== "object" || Array.isArray(input.body))
+      )
+        bad();
+    } else {
+      if (
+        !input.body ||
+        typeof input.body !== "object" ||
+        Array.isArray(input.body)
+      )
+        bad();
+      if (Buffer.byteLength(JSON.stringify(input.body)) > 128 * 1024)
+        throw new BridgeError(413, "Studio command too large.");
+      if (operation === "queryEntities") {
+        const body = input.body;
+        if (
+          Object.keys(body).some(
+            (k) =>
+              ![
+                "schemaId",
+                "schemaVersion",
+                "filters",
+                "sort",
+                "limit",
+                "offset",
+              ].includes(k),
+          ) ||
+          typeof body.schemaId !== "string" ||
+          !/^[a-z][a-z0-9-]{0,63}$/.test(body.schemaId) ||
+          !Number.isInteger(body.schemaVersion) ||
+          body.schemaVersion < 1 ||
+          body.schemaVersion > 2147483647 ||
+          (body.limit !== undefined &&
+            (!Number.isInteger(body.limit) ||
+              body.limit < 1 ||
+              body.limit > 100)) ||
+          (body.offset !== undefined &&
+            (!Number.isSafeInteger(body.offset) ||
+              body.offset < 0 ||
+              body.offset > Number.MAX_SAFE_INTEGER - 101)) ||
+          Buffer.byteLength(JSON.stringify(body)) > 16384
+        )
+          bad();
+      }
     }
   } else if (input.body !== undefined || input.key !== undefined) bad();
   return {
     method,
     path,
-    ...(write ? { body: JSON.stringify(input.body), key: input.key } : {}),
+    ...(write
+      ? {
+          ...(input.body ? { body: JSON.stringify(input.body) } : {}),
+          key: input.key,
+        }
+      : {}),
   };
 }
 module.exports = { studioRequest };
