@@ -109,7 +109,7 @@ import { drainOne, sendHttpEvent } from './src/workflows/outbox.ts';
   const event=(await control.query('SELECT payload FROM workflow_jobs WHERE id=$1',[${JSON.stringify(jobs[0].id)}])).rows[0].payload;
   assert.equal(event.eventId,${JSON.stringify(jobs[0].id)});
   await control.query('CREATE SCHEMA '+schema);
-  pool=new pg.Pool({connectionString:process.env.DATABASE_URL,max:4,options:'-c search_path='+schema});
+  pool=new pg.Pool({connectionString:process.env.DATABASE_URL,max:4,options:'-c search_path='+schema+',public'});
   await pool.query('CREATE TABLE workflow_jobs (LIKE public.workflow_jobs INCLUDING ALL)');
   // The dispatcher locks active runs before jobs and checks connector waits.
   // Keep every dependency in the isolated schema; never fall back to public.

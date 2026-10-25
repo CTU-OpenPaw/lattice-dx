@@ -11,11 +11,22 @@ import { parsePage, PageError } from "../pagination.js";
 import { parseCreateKey, CreateCommandError } from "../create-command.js";
 import { compileSystem } from "./policy.js";
 import type { SystemRepository } from "./database.js";
+import type {
+  PrincipalType,
+  SystemAccessRepository,
+  SystemGrantInput,
+  SystemGrantRevokeInput,
+  SystemGrantUpdateInput,
+  SystemPolicyActivateInput,
+} from "./access-types.js";
+
 export type SystemOptions = {
   identity?: IdentityConfig;
   systems?: SystemRepository;
   modules?: ModuleRepository;
+  systemAccess?: SystemAccessRepository;
 };
+
 export function registerSystems(app: FastifyInstance, options: SystemOptions) {
   app.register(async (routes) => {
     const actors = new WeakMap<object, WorkflowActor>();
@@ -46,9 +57,19 @@ export function registerSystems(app: FastifyInstance, options: SystemOptions) {
       actors.set(request, { ...actor, organizationId: actor.organizationId });
       if (!request.url.startsWith("/v1/system-apps"))
         requireModuleAdmin(actors.get(request)!);
+      const isMembersHistory = request.url.includes("/members/history");
+      const isMembersList = request.url.includes("/members") && !isMembersHistory;
+      const isAccessMe = request.url.includes("/access/me");
+      const allowedQuery = isMembersHistory
+        ? ["limit", "offset", "q", "principalType", "principalId"]
+        : isMembersList
+          ? ["limit", "offset", "q", "principalType"]
+          : isAccessMe
+            ? []
+            : ["limit", "offset", "q"];
       if (
         Object.keys(request.query as object).some(
-          (k) => !["limit", "offset", "q"].includes(k),
+          (k) => !allowedQuery.includes(k),
         )
       )
         throw new WorkflowError(400, "Unexpected system query");
@@ -123,6 +144,27 @@ export function registerSystems(app: FastifyInstance, options: SystemOptions) {
         };
       },
     );
+    routes.get<{ Querystring: Record<string, unknown> }>(
+      "/v1/systems",
+      async (request) => {
+        requireModuleAdmin(actors.get(request)!);
+        return options.systems!.adminList(
+          actors.get(request)!,
+          parsePage(request.query as Record<string, unknown>),
+        );
+      },
+    );
+    routes.get<{ Params: { id: string; version: string } }>(
+      "/v1/systems/:id/versions/:version",
+      async (request) => {
+        requireModuleAdmin(actors.get(request)!);
+        return options.systems!.adminGet(
+          slug(request.params.id),
+          semver(request.params.version),
+          actors.get(request)!,
+        );
+      },
+    );
     routes.get("/v1/system-apps", async (request) =>
       options.systems!.runtime(
         actors.get(request)!,
@@ -142,6 +184,177 @@ export function registerSystems(app: FastifyInstance, options: SystemOptions) {
           throw new WorkflowError(404, "Published system unavailable");
         return result.items[0];
       },
+    );
+
+    routes.get<{ Params: { id: string; version: string } }>(
+      "/v1/system-apps/:id/versions/:version/access/me",
+      async (request) => {
+        if (!options.systemAccess)
+          throw new WorkflowError(503, "System access service unavailable");
+        return options.systemAccess.effectiveAccess(
+          slug(request.params.id),
+          semver(request.params.version),
+          actors.get(request)!,
+        );
+      },
+    );
+
+    routes.get<{
+      Params: { id: string; version: string };
+      Querystring: Record<string, unknown>;
+    }>("/v1/systems/:id/versions/:version/members", async (request) => {
+      if (!options.systemAccess)
+        throw new WorkflowError(503, "System access service unavailable");
+      const principalType = request.query.principalType as PrincipalType | undefined;
+      return options.systemAccess.list(
+        slug(request.params.id),
+        semver(request.params.version),
+        actors.get(request)!,
+        parsePage(request.query as Record<string, unknown>),
+        principalType,
+      );
+    });
+
+    routes.post<{ Params: { id: string; version: string } }>(
+      "/v1/systems/:id/versions/:version/members",
+      { bodyLimit: 16384 },
+      async (request, reply) => {
+        if (!options.systemAccess)
+          throw new WorkflowError(503, "System access service unavailable");
+        bundleKeys(request.body, ["principalType", "principalId", "roles"]);
+        const key = parseCreateKey(
+          request.headers["idempotency-key"],
+          request.raw.rawHeaders,
+        );
+        if (!key) throw new WorkflowError(400, "Idempotency-Key required");
+        const body = request.body as unknown as SystemGrantInput;
+        const result = await options.systemAccess.grant(
+          slug(request.params.id),
+          semver(request.params.version),
+          body,
+          actors.get(request)!,
+          key,
+        );
+        return reply.code(201).send(result);
+      },
+    );
+
+    routes.put<{
+      Params: {
+        id: string;
+        version: string;
+        principalType: PrincipalType;
+        principalId: string;
+      };
+    }>(
+      "/v1/systems/:id/versions/:version/members/:principalType/:principalId",
+      { bodyLimit: 16384 },
+      async (request) => {
+        if (!options.systemAccess)
+          throw new WorkflowError(503, "System access service unavailable");
+        bundleKeys(request.body, ["expectedRevision", "roles"]);
+        const key = parseCreateKey(
+          request.headers["idempotency-key"],
+          request.raw.rawHeaders,
+        );
+        if (!key) throw new WorkflowError(400, "Idempotency-Key required");
+        return options.systemAccess.update(
+          slug(request.params.id),
+          semver(request.params.version),
+          request.params.principalType,
+          request.params.principalId,
+          request.body as unknown as SystemGrantUpdateInput,
+          actors.get(request)!,
+          key,
+        );
+      },
+    );
+
+    routes.delete<{
+      Params: {
+        id: string;
+        version: string;
+        principalType: PrincipalType;
+        principalId: string;
+      };
+    }>(
+      "/v1/systems/:id/versions/:version/members/:principalType/:principalId",
+      { bodyLimit: 16384 },
+      async (request) => {
+        if (!options.systemAccess)
+          throw new WorkflowError(503, "System access service unavailable");
+        bundleKeys(request.body, ["expectedRevision"]);
+        const key = parseCreateKey(
+          request.headers["idempotency-key"],
+          request.raw.rawHeaders,
+        );
+        if (!key) throw new WorkflowError(400, "Idempotency-Key required");
+        return options.systemAccess.revoke(
+          slug(request.params.id),
+          semver(request.params.version),
+          request.params.principalType,
+          request.params.principalId,
+          request.body as unknown as SystemGrantRevokeInput,
+          actors.get(request)!,
+          key,
+        );
+      },
+    );
+
+    routes.get<{
+      Params: { id: string; version: string };
+      Querystring: Record<string, unknown>;
+    }>("/v1/systems/:id/versions/:version/members/history", async (request) => {
+      if (!options.systemAccess)
+        throw new WorkflowError(503, "System access service unavailable");
+      const principalType = request.query.principalType as PrincipalType | undefined;
+      const principalId = typeof request.query.principalId === "string" ? request.query.principalId : undefined;
+      return options.systemAccess.history(
+        slug(request.params.id),
+        semver(request.params.version),
+        actors.get(request)!,
+        parsePage(request.query as Record<string, unknown>),
+        principalType,
+        principalId,
+      );
+    });
+
+    routes.get<{
+      Params: { id: string; version: string };
+    }>("/v1/systems/:id/versions/:version/policy", async (request) => {
+      if (!options.systemAccess)
+        throw new WorkflowError(503, "System access service unavailable");
+      return options.systemAccess.getPolicy(
+        slug(request.params.id),
+        semver(request.params.version),
+        actors.get(request)!
+      );
+    });
+
+    routes.post<{
+      Params: { id: string; version: string };
+      Body: { expectedRevision: number };
+    }>(
+      "/v1/systems/:id/versions/:version/policy/activate",
+      { bodyLimit: 16384 },
+      async (request) => {
+        if (!options.systemAccess)
+          throw new WorkflowError(503, "System access service unavailable");
+        bundleKeys(request.body, ["expectedRevision"]);
+        const key = parseCreateKey(
+          request.headers["idempotency-key"],
+          request.raw.rawHeaders
+        );
+        if (!key) throw new WorkflowError(400, "Idempotency-Key required");
+        const body = request.body as unknown as SystemPolicyActivateInput;
+        return options.systemAccess.activatePolicy(
+          slug(request.params.id),
+          semver(request.params.version),
+          body,
+          actors.get(request)!,
+          key
+        );
+      }
     );
   });
 }

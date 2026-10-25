@@ -11,7 +11,11 @@ function createRuntimeBlocks(React, { h, box, button, json }) {
     busy,
     loadSync,
   }) {
-    const [create, list, detail] = children;
+    const [create, list, detail] = Array.isArray(children)
+      ? children
+      : children
+        ? [children]
+        : [];
     const blocks = {
       create,
       list,

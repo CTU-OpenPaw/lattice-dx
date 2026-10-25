@@ -34,29 +34,39 @@ export function validateInput(fields:Record<string,WorkflowField>,value:Record<s
   }
   return result;
 }
-export function canReadRun(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor):boolean {
-  const assigned=def.assignedReader;
-  return run.organizationId===actor.organizationId&&(run.ownerId===actor.subject||def.readerRoles.some(r=>actor.roles.includes(r))
-    ||!!assigned&&assigned.states.includes(run.state)&&actor.roles.includes(assigned.role)&&run.data[assigned.field]===actor.subject);
+export function canReadRun(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,effectiveRoles?:string[]):boolean {
+  if (run.organizationId !== actor.organizationId) return false;
+  const roles = effectiveRoles ?? actor.roles;
+  const assigned = def.assignedReader;
+  return (
+    run.ownerId === actor.subject ||
+    def.readerRoles.some(r => roles.includes(r)) ||
+    (!!assigned && assigned.states.includes(run.state) && roles.includes(assigned.role) && run.data[assigned.field] === actor.subject)
+  );
 }
 export function canUseEvidence(file:{ownerId:string;organizationId:string;scanStatus:string},actor:WorkflowActor,links:{definition:WorkflowDefinition;run:WorkflowRun}[]):boolean {
   return file.organizationId===actor.organizationId&&file.scanStatus==='clean'
     &&(file.ownerId===actor.subject||links.some(link=>canReadRun(link.definition,link.run,actor)));
 }
-export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRun,actor:WorkflowActor,service=false){
+export function authorizeTransition(transition:WorkflowTransition,run:WorkflowRun,actor:WorkflowActor,service=false,effectiveRoles?:string[]){
   if(run.definitionId==='incident-response' && (actor.roles.includes('connector:agent')||actor.roles.includes('agent:worker')))throw new WorkflowError(403,'Agent workers cannot perform human incident transitions.');
   if(run.binding&&!run.binding.allowedTransitions.includes(transition.id))throw new WorkflowError(403,'Transition is outside the immutable business binding.');
   if(transition.execution==='service'&&!service)throw new WorkflowError(403,'Service transition requires scheduler authority.');
-  if(run.organizationId!==actor.organizationId||!actor.roles.includes(transition.role)||(transition.ownerOnly&&actor.subject!==run.ownerId)
-    ||transition.assigneeField&&run.data[transition.assigneeField]!==actor.subject)throw new WorkflowError(403,'Không có quyền thực hiện bước.');
+  if (run.organizationId !== actor.organizationId) throw new WorkflowError(403, 'Không có quyền thực hiện bước.');
+
+  const roles = transition.execution === 'service' ? actor.roles : (effectiveRoles ?? actor.roles);
+  if (!roles.includes(transition.role)) throw new WorkflowError(403, 'Không có quyền thực hiện bước.');
+  if (transition.ownerOnly && actor.subject !== run.ownerId) throw new WorkflowError(403, 'Không có quyền thực hiện bước.');
+  if (transition.assigneeField && run.data[transition.assigneeField] !== actor.subject) throw new WorkflowError(403, 'Không có quyền thực hiện bước.');
 }
-export function availableTransitions(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor){
-  return def.transitions.filter(t=>(!run.binding||run.binding.allowedTransitions.includes(t.id))&&t.execution!=='service'&&run.status!=='cancelled'&&!run.waiting&&conditionMatches(t.condition,run.data)&&t.from===run.state&&actor.roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
+export function availableTransitions(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,effectiveRoles?:string[]){
+  const roles = effectiveRoles ?? actor.roles;
+  return def.transitions.filter(t=>(!run.binding||run.binding.allowedTransitions.includes(t.id))&&t.execution!=='service'&&run.status!=='cancelled'&&!run.waiting&&conditionMatches(t.condition,run.data)&&t.from===run.state&&roles.includes(t.role)&&(!t.ownerOnly||actor.subject===run.ownerId)&&(!t.assigneeField||run.data[t.assigneeField]===actor.subject)&&actor.organizationId===run.organizationId);
 }
-export function planTransition(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand,service=false){
+export function planTransition(def:WorkflowDefinition,run:WorkflowRun,actor:WorkflowActor,command:TransitionCommand,service=false,effectiveRoles?:string[]){
   const transition=def.transitions.find(t=>t.id===command.action);
   if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
-  authorizeTransition(transition,run,actor,service);
+  authorizeTransition(transition,run,actor,service,effectiveRoles);
   if(run.status==='cancelled'||run.waiting||!conditionMatches(transition.condition,run.data)||run.state!==transition.from||run.version!==command.expectedVersion)throw new WorkflowError(409,'Trạng thái hoặc phiên bản không phù hợp.');
   return {transition,input:validateInput(transition.fields,command.input)};
 }

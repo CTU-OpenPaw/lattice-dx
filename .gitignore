@@ -13,4 +13,7 @@ output/backups/
 output/reviews/
 upstream/*
 !upstream/nocobase/
+tmp/
+output/
 .env.integration
+

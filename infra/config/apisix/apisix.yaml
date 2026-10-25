@@ -2,8 +2,8 @@
 # All credentials below are PUBLIC LOCAL DEVELOPMENT FIXTURES.
 routes:
   - id: system-studio
-    uris: [/v1/system-drafts, /v1/system-drafts/*, /v1/system-apps, /v1/system-apps/*, /v1/studio/system-plan]
-    methods: [GET, POST, PUT]
+    uris: [/v1/system-drafts, /v1/system-drafts/*, /v1/system-apps, /v1/system-apps/*, /v1/studio/system-plan, /v1/systems, /v1/systems/*]
+    methods: [GET, POST, PUT, DELETE]
     plugins:
       openid-connect:
         client_id: dx-gateway

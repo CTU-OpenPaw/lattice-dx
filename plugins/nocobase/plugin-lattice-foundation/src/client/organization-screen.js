@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
-function createOrganizationScreen(React, { h, box, button, field, json }) {
+const { createMemberPermissions } = require("./member-permissions");
+
+function createOrganizationScreen(React, shell) {
+  const { h, box, button, field, json } = shell;
   const { useState, useEffect } = React;
+  const MemberPermissions = createMemberPermissions(React, shell);
+
   return function Organization({ session }) {
     const { api, capabilities, commands, act, busy } = session,
+      [tab, setTab] = useState("structure"),
       [departments, setDepartments] = useState(null),
       [people, setPeople] = useState(null),
       [offset, setOffset] = useState(0),
@@ -56,23 +62,50 @@ function createOrganizationScreen(React, { h, box, button, field, json }) {
     return h(
       "section",
       { style: box },
-      h("h2", null, "Phòng ban và danh bạ doanh nghiệp"),
       h(
-        "p",
-        null,
-        "Cơ cấu thuộc engine. Tài khoản và vai trò đăng nhập do Keycloak quản lý; trang này không tự cấp quyền SSO.",
+        "nav",
+        {
+          style: {
+            display: "flex",
+            gap: 8,
+            marginBottom: 16,
+            borderBottom: "1px solid #e2e8f0",
+            paddingBottom: 8,
+          },
+        },
+        button(
+          "Cơ cấu phòng ban & Danh bạ",
+          () => setTab("structure"),
+          tab === "structure",
+        ),
+        button(
+          "Phân quyền theo hệ thống",
+          () => setTab("permissions"),
+          tab === "permissions",
+        ),
       ),
-      field("Tìm phòng ban / nhân viên", search, setSearch),
-      button(
-        "Tìm / tải lại",
-        () =>
-          act(async () => {
-            await load();
-            await loadPeople();
-          }),
-        busy,
-      ),
-      h("h3", null, "Cơ cấu phòng ban"),
+      tab === "permissions"
+        ? h(MemberPermissions, { session })
+        : h(
+            React.Fragment,
+            null,
+            h("h2", null, "Phòng ban và danh bạ doanh nghiệp"),
+            h(
+              "p",
+              null,
+              "Cơ cấu thuộc engine. Tài khoản và vai trò đăng nhập do Keycloak quản lý; trang này không tự cấp quyền SSO.",
+            ),
+            field("Tìm phòng ban / nhân viên", search, setSearch),
+            button(
+              "Tìm / tải lại",
+              () =>
+                act(async () => {
+                  await load();
+                  await loadPeople();
+                }),
+              busy,
+            ),
+            h("h3", null, "Cơ cấu phòng ban"),
       h(
         "table",
         null,
@@ -254,7 +287,7 @@ function createOrganizationScreen(React, { h, box, button, field, json }) {
                 ),
               ),
               h("td", null, person.departmentId || "—"),
-              h("td", null, person.roles.join(", ")),
+              h("td", null, (person.roles || []).join(", ")),
               h(
                 "td",
                 null,
@@ -279,7 +312,8 @@ function createOrganizationScreen(React, { h, box, button, field, json }) {
         () => act(() => loadPeople(people.page.nextOffset)),
         busy || !people?.page?.hasMore,
       ),
-    );
-  };
+    ),
+  );
+};
 }
 module.exports = { createOrganizationScreen };

@@ -67,6 +67,33 @@ export function observationTime(value: unknown): bigint {
     BigInt((match[2] ?? '').padEnd(9, '0'));
 }
 
+function brokerObservationTime(value: unknown): string {
+  observationTime(value);
+  return `${(value as string).slice(0, 19)}Z`;
+}
+
+function normalizeBrokerProjection(projection: Projection): Projection {
+  const normalize = <T extends { observedAt: string }>(attribute: T): T => ({
+    ...attribute,
+    observedAt: brokerObservationTime(attribute.observedAt),
+  });
+
+  const attributes = {
+    ...projection.attributes,
+    status: normalize(projection.attributes.status),
+    belongsToDepartment: normalize(projection.attributes.belongsToDepartment),
+    locatedAt: normalize(projection.attributes.locatedAt),
+  };
+
+  return {
+    attributes,
+    entity: {
+      ...projection.entity,
+      ...attributes,
+    },
+  };
+}
+
 function assertIdentity(entity: Entity, expected: Projection['entity']) {
   if (
     entity.id !== expected.id ||
@@ -80,6 +107,7 @@ function assertIdentity(entity: Entity, expected: Projection['entity']) {
 
 function sameState(current: Entity, projection: Projection): boolean {
   const expected = projection.attributes;
+  const statusTime = observationTime(object(current.status)?.observedAt);
 
   for (const name of ['status', 'belongsToDepartment', 'locatedAt'] as const) {
     const actual = object(current[name]);
@@ -92,15 +120,17 @@ function sameState(current: Entity, projection: Projection): boolean {
       return false;
     }
 
-    if (
-      observationTime(actual.observedAt) !==
-      observationTime(wanted.observedAt)
-    ) {
+    const actualTime = actual.observedAt === undefined && name !== 'status'
+      ? statusTime
+      : observationTime(actual.observedAt);
+    if (actualTime !== observationTime(wanted.observedAt)) {
       return false;
     }
   }
 
-  return true;
+  const actualSourceEventId = object(current.sourceEventId);
+  return actualSourceEventId?.type === expected.sourceEventId.type &&
+    actualSourceEventId.value === expected.sourceEventId.value;
 }
 
 async function assertTarget(
@@ -131,7 +161,10 @@ export async function syncAssetProjection(
   broker: BrokerPort,
   projection: Projection,
 ): Promise<'created' | 'updated' | 'duplicate' | 'stale'> {
-  const expected = projection.entity;
+  // Keep the source projection untouched in the durable job and normalize only
+  // the broker-facing copy to Orion-LD's second-level observedAt precision.
+  const brokerProjection = normalizeBrokerProjection(projection);
+  const expected = brokerProjection.entity;
   const organizationId = expected.organizationId.value;
 
   let current: Entity | undefined;
@@ -145,15 +178,22 @@ export async function syncAssetProjection(
     assertIdentity(current, expected);
 
     const incomingTime = observationTime(expected.status.observedAt);
+    const statusTime = observationTime(object(current.status)?.observedAt);
     const existingTimes = [
-      'status', 'belongsToDepartment', 'locatedAt',
-    ].map((name) => observationTime(object(current![name])?.observedAt));
+      statusTime,
+      ...['belongsToDepartment', 'locatedAt'].map((name) => {
+        const observedAt = object(current![name])?.observedAt;
+        return observedAt === undefined
+          ? statusTime
+          : observationTime(observedAt);
+      }),
+    ];
 
     // An event older than any projected attribute must not overwrite it.
     if (existingTimes.some((time) => time > incomingTime)) return 'stale';
 
     if (existingTimes.some((time) => time === incomingTime)) {
-      if (sameState(current, projection)) return 'duplicate';
+      if (sameState(current, brokerProjection)) return 'duplicate';
 
       fail(
         'OBSERVATION_CONFLICT',
@@ -176,7 +216,7 @@ export async function syncAssetProjection(
   );
 
   if (current) {
-    await broker.updateAsset(expected.id, projection.attributes);
+    await broker.updateAsset(expected.id, brokerProjection.attributes);
   } else {
     // A 409 or uncertain transport result is handled by a subsequent job retry.
     // The next attempt reads the same URN before deciding whether to write.
@@ -187,7 +227,7 @@ export async function syncAssetProjection(
   assertIdentity(readBack, expected);
 
   if (
-    !sameState(readBack, projection) ||
+    !sameState(readBack, brokerProjection) ||
     property(readBack, 'sourceEventId') !== expected.sourceEventId.value
   ) {
     fail('READBACK_MISMATCH', 'Broker did not preserve the expected projection');

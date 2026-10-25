@@ -65,6 +65,10 @@
   "workspace": {
     "panels": [
       {
+        "id": "dashboard",
+        "renderer": "lattice.procurement.dashboard"
+      },
+      {
         "id": "workflow",
         "renderer": "lattice.procurement.workflow"
       }
