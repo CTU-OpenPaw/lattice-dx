@@ -606,10 +606,16 @@ function createSystemScreens(client, React) {
     const session = useSession(),
       { api, act, busy, connection, workflow } = session;
     const [catalog, setCatalog] = useState({ items: [] }),
+      [catalogLoading, setCatalogLoading] = useState(false),
+      [catalogError, setCatalogError] = useState(""),
       [catalogOffset, setCatalogOffset] = useState(0),
       [system, setSystem] = useState(null),
+      [systemLoading, setSystemLoading] = useState(false),
+      [systemError, setSystemError] = useState(""),
       [selectedPage, setSelectedPage] = useState(""),
       [runs, setRuns] = useState({ items: [] }),
+      [runsLoading, setRunsLoading] = useState(false),
+      [runsError, setRunsError] = useState(""),
       [offset, setOffset] = useState(0),
       [inbox, setInbox] = useState(false),
       [selected, setSelected] = useState(null),
@@ -620,7 +626,13 @@ function createSystemScreens(client, React) {
       [people, setPeople] = useState({ items: [] }),
       [peopleOffset, setPeopleOffset] = useState(0),
       [peopleSearch, setPeopleSearch] = useState("");
-    const parts = location.pathname.split("/"),
+    const loc =
+      typeof window !== "undefined"
+        ? window.location
+        : typeof location !== "undefined"
+          ? location
+          : { pathname: "", search: "" };
+    const parts = loc.pathname.split("/"),
       id = parts[3],
       version = parts[4],
       pages = system
@@ -634,25 +646,41 @@ function createSystemScreens(client, React) {
       definition = system?.definitions.find((d) => d.id === page?.definitionId);
     const blocked = busy || workflow.uncertain;
     async function loadCatalog(next = 0) {
-      setCatalog(
-        await api.studio("apps", {
+      setCatalogLoading(true);
+      setCatalogError("");
+      try {
+        const res = await api.studio("apps", {
           query: { limit: "20", offset: String(next) },
-        }),
-      );
-      setCatalogOffset(next);
+        });
+        setCatalog(res || { items: [] });
+        setCatalogOffset(next);
+      } catch (err) {
+        setCatalogError(err.message || "Không thể tải danh sách hệ thống.");
+        setCatalog({ items: [] });
+      } finally {
+        setCatalogLoading(false);
+      }
     }
     async function loadRuns(next = 0) {
       if (!definition) return;
-      setRuns(
-        await api.workflow(inbox ? "inbox" : "list", {
+      setRunsLoading(true);
+      setRunsError("");
+      try {
+        const res = await api.workflow(inbox ? "inbox" : "list", {
           query: {
             limit: "20",
             offset: String(next),
             definitionId: definition.id,
           },
-        }),
-      );
-      setOffset(next);
+        });
+        setRuns(res || { items: [] });
+        setOffset(next);
+      } catch (err) {
+        setRunsError(err.message || "Không thể tải danh sách hồ sơ.");
+        setRuns({ items: [] });
+      } finally {
+        setRunsLoading(false);
+      }
     }
     async function loadPeople(next = 0) {
       setPeople(
@@ -671,14 +699,26 @@ function createSystemScreens(client, React) {
       if (connection?.connected)
         act(async () => {
           if (id) {
-            const result = await api.studio("app", { id, version });
-            if (result.definitions.length) await api.workflow("member");
-            setSystem(result);
-            setSelectedPage(
-              result.presentation.pages[0]?.id ||
-                result.presentation.entityPages?.[0]?.id ||
-                "",
-            );
+            setSystemLoading(true);
+            setSystemError("");
+            try {
+              const result = await api.studio("app", { id, version });
+              if (result.definitions?.length) await api.workflow("member");
+              setSystem(result);
+              setSelectedPage(
+                result.presentation?.pages?.[0]?.id ||
+                  result.presentation?.entityPages?.[0]?.id ||
+                  "",
+              );
+            } catch (err) {
+              setSystemError(
+                err.message ||
+                  "Tài khoản chưa được phân quyền hoặc hệ thống không tồn tại.",
+              );
+              setSystem(null);
+            } finally {
+              setSystemLoading(false);
+            }
           } else await loadCatalog();
         });
     }, [connection?.connected, id, version]);
@@ -760,36 +800,80 @@ function createSystemScreens(client, React) {
         h(
           "section",
           { style: box },
-          ...catalog.items.map((item) =>
+          h("h2", null, "Danh mục hệ thống doanh nghiệp"),
+          catalogLoading &&
+            h("p", { role: "status" }, "⏳ Đang tải danh sách hệ thống…"),
+          catalogError &&
             h(
               "p",
-              { key: item.id + item.version },
+              { role: "alert", style: { color: "#dc2626" } },
+              catalogError,
+            ),
+          !catalogLoading &&
+            !catalogError &&
+            catalog.items.map((item) =>
               h(
-                "a",
-                { href: "/lattice/systems/" + item.id + "/" + item.version },
-                item.title +
-                  " · " +
-                  item.version +
-                  (item.enabled ? "" : " · Đã tạm dừng tạo mới"),
+                "p",
+                { key: item.id + item.version },
+                h(
+                  "a",
+                  { href: "/lattice/systems/" + item.id + "/" + item.version },
+                  item.title +
+                    " · " +
+                    item.version +
+                    (item.enabled ? " · (Đang hoạt động)" : " · (Đã tạm dừng tạo mới)"),
+                ),
               ),
             ),
-          ),
-          !catalog.items.length &&
+          !catalogLoading &&
+            !catalogError &&
+            !catalog.items.length &&
             h(
               "p",
-              null,
+              { style: { color: "#64748b", fontStyle: "italic" } },
               "Chưa có hệ thống đã xuất bản phù hợp với vai trò của bạn.",
             ),
           button(
             "Trang trước",
             () => act(() => loadCatalog(Math.max(0, catalogOffset - 20))),
-            busy || catalogOffset === 0,
+            busy || catalogLoading || catalogOffset === 0,
           ),
           button(
             "Trang sau",
-            () => act(() => loadCatalog(catalog.page.nextOffset)),
-            busy || !catalog.page?.hasMore,
+            () => act(() => loadCatalog(catalog.page?.nextOffset)),
+            busy || catalogLoading || !catalog.page?.hasMore,
           ),
+        ),
+      id &&
+        !connection?.connected &&
+        h(
+          "p",
+          { role: "alert" },
+          "Vui lòng kết nối tài khoản nghiệp vụ để sử dụng hệ thống.",
+        ),
+      id &&
+        systemLoading &&
+        h(
+          "p",
+          { role: "status" },
+          "⏳ Đang tải thông tin hệ thống và kiểm tra quyền…",
+        ),
+      id &&
+        systemError &&
+        h(
+          "div",
+          {
+            role: "alert",
+            style: {
+              background: "#fee2e2",
+              color: "#991b1b",
+              padding: "12px 16px",
+              borderRadius: 6,
+              marginBottom: 16,
+            },
+          },
+          h("strong", null, "Không thể truy cập hệ thống: "),
+          systemError,
         ),
       system &&
         h(
@@ -798,24 +882,52 @@ function createSystemScreens(client, React) {
           h(
             "section",
             { style: box },
+            h("h2", { style: { margin: "0 0 8px 0" } }, system.title),
             "Phiên bản " +
               system.version +
-              " · " +
-              (system.enabled
-                ? "Đang sử dụng"
-                : "Đã tạm dừng tạo mới; hồ sơ cũ vẫn xử lý được"),
+              " · ",
             h(
-              "nav",
-              null,
-              ...pages.map((p) =>
-                button(
-                  p.title,
-                  () => setSelectedPage(p.id),
-                  busy || p.id === selectedPage,
+              "span",
+              {
+                style: {
+                  background: system.enabled ? "#dcfce7" : "#fef3c7",
+                  color: system.enabled ? "#15803d" : "#b45309",
+                  padding: "2px 8px",
+                  borderRadius: 4,
+                  fontWeight: 600,
+                },
+              },
+              system.enabled
+                ? "Đang sử dụng"
+                : "Đã tạm dừng tạo mới; hồ sơ cũ vẫn xử lý được",
+            ),
+            pages.length > 0 &&
+              h(
+                "nav",
+                { style: { marginTop: 12 } },
+                ...pages.map((p) =>
+                  button(
+                    p.title,
+                    () => setSelectedPage(p.id),
+                    busy || p.id === selectedPage,
+                  ),
                 ),
               ),
-            ),
+            !pages.length &&
+              h(
+                "p",
+                { style: { color: "#64748b", marginTop: 8 } },
+                "Hệ thống chưa cấu hình module / trang giao diện nào.",
+              ),
           ),
+          page &&
+            !dataPage &&
+            !definition &&
+            h(
+              "p",
+              { role: "alert" },
+              "Trang được chọn chưa được cấu hình module dữ liệu hoặc quy trình hợp lệ.",
+            ),
           dataPage &&
             h(EntityPage, {
               key: dataPage.id,
@@ -849,7 +961,7 @@ function createSystemScreens(client, React) {
                   field("Tiêu đề yêu cầu", title, setTitle),
                   inputs(definition.startFields),
                   inputs(definition.optionalStartFields || {}),
-                  !connection.capabilities?.directoryRead &&
+                  !connection?.capabilities?.directoryRead &&
                     h(
                       "p",
                       null,
@@ -891,19 +1003,62 @@ function createSystemScreens(client, React) {
                 "section",
                 { style: box },
                 h("h2", null, "Hồ sơ / công việc"),
-                button("Tải lại", () => act(() => loadRuns(offset)), busy),
-                ...runs.items.map((run) =>
-                  h(
-                    "p",
-                    { key: run.id },
-                    button(
-                      run.title + " · " + run.state,
-                      () => act(() => open(run)),
-                      busy,
-                    ),
+                h(
+                  "div",
+                  { style: { display: "flex", gap: 8, marginBottom: 12 } },
+                  button(
+                    "Việc cần xử lý của tôi",
+                    () => setInbox(true),
+                    inbox,
+                  ),
+                  button(
+                    "Tất cả hồ sơ",
+                    () => setInbox(false),
+                    !inbox,
                   ),
                 ),
-                !runs.items.length && h("p", null, "Không có hồ sơ phù hợp."),
+                button(
+                  "Tải lại danh sách",
+                  () => act(() => loadRuns(offset)),
+                  busy || runsLoading,
+                ),
+                runsLoading &&
+                  h("p", { role: "status" }, "⏳ Đang tải danh sách hồ sơ…"),
+                runsError &&
+                  h(
+                    "p",
+                    { role: "alert", style: { color: "#dc2626" } },
+                    runsError,
+                  ),
+                !runsLoading &&
+                  !runsError &&
+                  runs.items.map((run) =>
+                    h(
+                      "p",
+                      { key: run.id },
+                      button(
+                        run.title + " · " + (labels[run.state] || run.state),
+                        () => act(() => open(run)),
+                        busy,
+                      ),
+                    ),
+                  ),
+                !runsLoading &&
+                  !runsError &&
+                  !runs.items.length &&
+                  h(
+                    "p",
+                    {
+                      style: {
+                        color: "#64748b",
+                        fontStyle: "italic",
+                        padding: "10px 0",
+                      },
+                    },
+                    inbox
+                      ? "Bạn không có công việc nào cần xử lý trong hộp việc."
+                      : "Chưa có hồ sơ nào được tạo trong module này.",
+                  ),
                 button(
                   "Trang trước",
                   () => act(() => loadRuns(Math.max(0, offset - 20))),
@@ -911,7 +1066,7 @@ function createSystemScreens(client, React) {
                 ),
                 button(
                   "Trang sau",
-                  () => act(() => loadRuns(runs.page.nextOffset)),
+                  () => act(() => loadRuns(runs.page?.nextOffset)),
                   busy || !runs.page?.hasMore,
                 ),
               ),
@@ -923,13 +1078,79 @@ function createSystemScreens(client, React) {
                   h(
                     "p",
                     null,
-                    "Trạng thái: " +
-                      selected.state +
-                      " · phiên bản " +
-                      selected.version,
+                    "Trạng thái: ",
+                    h(
+                      "span",
+                      {
+                        style: {
+                          background: "#e0e7ff",
+                          color: "#3730a3",
+                          padding: "2px 8px",
+                          borderRadius: 4,
+                          fontWeight: 600,
+                        },
+                      },
+                      labels[selected.state] || selected.state,
+                    ),
+                    " · phiên bản " + selected.version,
                   ),
-                  json(selected.data),
-                  ...selected.availableTransitions.map((transition) =>
+                  h(
+                    "small",
+                    {
+                      style: {
+                        display: "block",
+                        color: "#64748b",
+                        marginBottom: 12,
+                      },
+                    },
+                    "Mã hồ sơ: " + selected.id,
+                  ),
+                  h(
+                    "dl",
+                    {
+                      style: {
+                        background: "#f8fafc",
+                        padding: 12,
+                        borderRadius: 6,
+                        border: "1px solid #e2e8f0",
+                        display: "grid",
+                        gridTemplateColumns: "auto 1fr",
+                        gap: "8px 16px",
+                      },
+                    },
+                    ...Object.entries(selected.data || {}).flatMap(
+                      ([key, val]) => [
+                        h(
+                          "dt",
+                          {
+                            key: "k-" + key,
+                            style: { fontWeight: 600, color: "#475569" },
+                          },
+                          page.fieldLabels?.[key] || key,
+                        ),
+                        h(
+                          "dd",
+                          { key: "v-" + key, style: { margin: 0 } },
+                          String(val),
+                        ),
+                      ],
+                    ),
+                  ),
+                  !selected.availableTransitions?.length &&
+                    h(
+                      "p",
+                      {
+                        style: {
+                          color: "#64748b",
+                          background: "#f1f5f9",
+                          padding: "8px 12px",
+                          borderRadius: 4,
+                          marginTop: 12,
+                        },
+                      },
+                      "Không có hành động chuyển bước nào khả dụng cho vai trò của bạn ở trạng thái hiện tại.",
+                    ),
+                  ...(selected.availableTransitions || []).map((transition) =>
                     h(
                       "fieldset",
                       { key: transition.id, disabled: blocked, style: box },
