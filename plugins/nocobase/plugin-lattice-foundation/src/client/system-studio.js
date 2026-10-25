@@ -643,7 +643,7 @@ function createSystemScreens(client, React) {
         : [],
       page = pages.find((p) => p.id === selectedPage),
       dataPage = page?.schemaId ? page : null,
-      definition = system?.definitions.find((d) => d.id === page?.definitionId);
+      definition = system?.definitions?.find((d) => d.id === page?.definitionId);
     const blocked = busy || workflow.uncertain;
     async function loadCatalog(next = 0) {
       setCatalogLoading(true);
@@ -840,8 +840,8 @@ function createSystemScreens(client, React) {
           ),
           button(
             "Trang sau",
-            () => act(() => loadCatalog(catalog.page?.nextOffset)),
-            busy || catalogLoading || !catalog.page?.hasMore,
+            () => act(() => loadCatalog(catalog?.page?.nextOffset)),
+            busy || catalogLoading || !catalog?.page?.hasMore,
           ),
         ),
       id &&
@@ -980,8 +980,8 @@ function createSystemScreens(client, React) {
                   ),
                   button(
                     "Nhân viên sau",
-                    () => act(() => loadPeople(people.page.nextOffset)),
-                    !people.page?.hasMore,
+                    () => act(() => loadPeople(people?.page?.nextOffset)),
+                    !people?.page?.hasMore,
                   ),
                   button("Tạo bản nháp yêu cầu", () =>
                     act(async () => {
@@ -1032,7 +1032,7 @@ function createSystemScreens(client, React) {
                   ),
                 !runsLoading &&
                   !runsError &&
-                  runs.items.map((run) =>
+                  (runs?.items || []).map((run) =>
                     h(
                       "p",
                       { key: run.id },
@@ -1045,7 +1045,7 @@ function createSystemScreens(client, React) {
                   ),
                 !runsLoading &&
                   !runsError &&
-                  !runs.items.length &&
+                  !(runs?.items || []).length &&
                   h(
                     "p",
                     {
@@ -1066,8 +1066,8 @@ function createSystemScreens(client, React) {
                 ),
                 button(
                   "Trang sau",
-                  () => act(() => loadRuns(runs.page?.nextOffset)),
-                  busy || !runs.page?.hasMore,
+                  () => act(() => loadRuns(runs?.page?.nextOffset)),
+                  busy || !runs?.page?.hasMore,
                 ),
               ),
               selected &&
