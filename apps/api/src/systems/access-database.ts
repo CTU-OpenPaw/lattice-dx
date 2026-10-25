@@ -144,6 +144,26 @@ export async function initializeSystemAccessTables(pool: Queryable): Promise<voi
     result jsonb NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY(organization_id, actor_id, key)
+  );
+  CREATE TABLE IF NOT EXISTS studio_system_policies(
+    organization_id text NOT NULL,
+    system_id text NOT NULL,
+    system_version text NOT NULL,
+    status text NOT NULL DEFAULT 'enforced' CHECK(status IN ('legacy', 'enforced')),
+    revision integer NOT NULL DEFAULT 1,
+    activated_by text NOT NULL,
+    activated_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY(organization_id, system_id, system_version)
+  );
+  CREATE TABLE IF NOT EXISTS studio_system_policy_audit(
+    audit_id uuid PRIMARY KEY,
+    organization_id text NOT NULL,
+    system_id text NOT NULL,
+    system_version text NOT NULL,
+    status text NOT NULL,
+    revision integer NOT NULL,
+    actor_id text NOT NULL,
+    occurred_at timestamptz NOT NULL DEFAULT now()
   );`);
 }
 
@@ -723,6 +743,14 @@ export async function systemAccessDatabase(pool: Pool): Promise<SystemAccessRepo
         )
       ).rows[0];
 
+      const policyRow = (
+        await pool.query<{ status: 'legacy' | 'enforced' }>(
+          'SELECT status FROM studio_system_policies WHERE organization_id = $1 AND system_id = $2 AND system_version = $3',
+          [actor.organizationId, id, ver]
+        )
+      ).rows[0];
+      const enforcementStatus = policyRow ? policyRow.status : 'not_enforced';
+
       if (!result || !result.enabled) {
         return {
           systemId: id,
@@ -730,7 +758,7 @@ export async function systemAccessDatabase(pool: Pool): Promise<SystemAccessRepo
           hasAccess: false,
           effectiveRoles: [],
           sources: [],
-          enforcementStatus: 'not_enforced',
+          enforcementStatus,
         };
       }
 
@@ -746,7 +774,166 @@ export async function systemAccessDatabase(pool: Pool): Promise<SystemAccessRepo
         hasAccess: sources.length > 0,
         effectiveRoles: [...roleSet].sort(),
         sources,
-        enforcementStatus: 'not_enforced',
+        enforcementStatus,
+      };
+    },
+
+    async activatePolicy(systemId, version, input, actor, key) {
+      const id = slug(systemId);
+      const ver = semver(version);
+      requireModuleAdmin(actor);
+      if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0) {
+        throw new WorkflowError(400, 'Invalid expected revision.');
+      }
+
+      return command(
+        actor,
+        id,
+        ver,
+        'person',
+        'policy',
+        'update',
+        { action: 'activate_policy', expectedRevision: input.expectedRevision },
+        key,
+        async client => {
+          await validateModuleInstalled(client, actor.organizationId, id, ver);
+
+          // Preflight: module workflows must be published
+          const mappings = (
+            await client.query(
+              `SELECT w.definition_id AS "definitionId", w.definition_version AS "definitionVersion", v.definition
+               FROM enterprise_module_workflows w
+               LEFT JOIN workflow_definition_versions v
+                 ON v.organization_id = w.organization_id
+                 AND v.id = w.definition_id
+                 AND v.version = w.definition_version
+               WHERE w.organization_id = $1 AND w.module_id = $2 AND w.module_version = $3`,
+              [actor.organizationId, id, ver]
+            )
+          ).rows;
+
+          if (mappings.length > 0 && mappings.some(m => !m.definitionVersion || !m.definition)) {
+            throw new WorkflowError(409, 'Cannot activate policy: module workflow definitions are not published yet.');
+          }
+
+          // Preflight: validate real directory readiness (at least one eligible enabled member in directory_people)
+          const eligibleMember = (
+            await client.query(
+              `SELECT 1 FROM studio_system_grants g
+               WHERE g.organization_id = $1 AND g.system_id = $2 AND g.system_version = $3 AND g.status = 'active'
+                 AND EXISTS (
+                   SELECT 1 FROM directory_people p
+                   WHERE p.organization_id = g.organization_id
+                     AND p.enabled = true
+                     AND (
+                       (g.principal_type = 'person' AND p.subject = g.principal_id)
+                       OR (g.principal_type = 'department' AND p.department_id IS NOT NULL AND p.department_id = g.principal_id)
+                     )
+                 )
+               LIMIT 1`,
+              [actor.organizationId, id, ver]
+            )
+          ).rows[0];
+
+          if (!eligibleMember) {
+            throw new WorkflowError(409, 'Cannot activate policy: at least one active member grant is required.');
+          }
+
+          const existing = (
+            await client.query<{ status: string; revision: number; activated_by: string; activated_at: Date }>(
+              'SELECT status, revision, activated_by, activated_at FROM studio_system_policies WHERE organization_id = $1 AND system_id = $2 AND system_version = $3 FOR UPDATE',
+              [actor.organizationId, id, ver]
+            )
+          ).rows[0];
+
+          const currentRevision = existing ? existing.revision : 0;
+          if (input.expectedRevision !== currentRevision) {
+            throw new WorkflowError(409, 'Policy revision conflict; reload before activating.');
+          }
+
+          // Idempotent: avoid re-incrementing revision or duplicate audit row when policy is already enforced and unchanged
+          if (existing && existing.status === 'enforced') {
+            return {
+              systemId: id,
+              systemVersion: ver,
+              status: 'enforced',
+              revision: existing.revision,
+              activatedBy: existing.activated_by,
+              activatedAt: new Date(existing.activated_at).toISOString(),
+            };
+          }
+
+          const revision = existing ? existing.revision + 1 : 1;
+          if (existing) {
+            await client.query(
+              `UPDATE studio_system_policies SET status = 'enforced', revision = $1, activated_by = $2, activated_at = now()
+               WHERE organization_id = $3 AND system_id = $4 AND system_version = $5`,
+              [revision, actor.subject, actor.organizationId, id, ver]
+            );
+          } else {
+            await client.query(
+              `INSERT INTO studio_system_policies(organization_id, system_id, system_version, status, revision, activated_by)
+               VALUES($1, $2, $3, 'enforced', 1, $4)`,
+              [actor.organizationId, id, ver, actor.subject]
+            );
+          }
+
+          const auditId = randomUUID();
+          await client.query(
+            `INSERT INTO studio_system_policy_audit(audit_id, organization_id, system_id, system_version, status, revision, actor_id)
+             VALUES($1, $2, $3, $4, 'enforced', $5, $6)`,
+            [auditId, actor.organizationId, id, ver, revision, actor.subject]
+          );
+
+          return {
+            systemId: id,
+            systemVersion: ver,
+            status: 'enforced',
+            revision,
+            activatedBy: actor.subject,
+            activatedAt: new Date().toISOString(),
+          };
+        }
+      );
+    },
+
+    async getPolicy(systemId, version, actor) {
+      const id = slug(systemId);
+      const ver = semver(version);
+      await validateModuleInstalled(pool, actor.organizationId, id, ver);
+
+      const row = (
+        await pool.query<{
+          system_id: string;
+          system_version: string;
+          status: 'legacy' | 'enforced';
+          revision: number;
+          activated_by: string;
+          activated_at: Date;
+        }>(
+          `SELECT system_id, system_version, status, revision, activated_by, activated_at
+           FROM studio_system_policies
+           WHERE organization_id = $1 AND system_id = $2 AND system_version = $3`,
+          [actor.organizationId, id, ver]
+        )
+      ).rows[0];
+
+      if (!row) {
+        return {
+          systemId: id,
+          systemVersion: ver,
+          status: 'legacy',
+          revision: 0,
+        };
+      }
+
+      return {
+        systemId: row.system_id,
+        systemVersion: row.system_version,
+        status: row.status,
+        revision: row.revision,
+        activatedBy: row.activated_by,
+        activatedAt: new Date(row.activated_at).toISOString(),
       };
     },
   };

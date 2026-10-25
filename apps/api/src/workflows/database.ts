@@ -8,6 +8,7 @@ import type { Pool, PoolClient } from 'pg';
 import { isRecordId, type CreateWorkflow, type TransitionCommand, type WorkflowActor, type WorkflowDefinition, type WorkflowField, type WorkflowRun, type WorkflowEvent } from '@dx/contracts';
 import { sourceRegistry,type DefinitionRegistry } from './registry.js';
 import { authorizeTransition, parseEntityContext, canReadRun, canUseEvidence, planTransition, validateInput, WorkflowError } from './policy.js';
+import { resolveRunEffectiveRoles, authorizeRunAccess } from './run-authority.js';
 import { timerDatabase,resolveServiceActor } from './timer-database.js';
 import { executeBlocks } from './block-database.js';
 import { authorizeBlock } from './block-policy.js';
@@ -76,18 +77,71 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     const found=await client.query('SELECT 1 FROM directory_people WHERE subject=$1 AND organization_id=$2 AND enabled=true AND roles @> $3::jsonb FOR SHARE',[data[field],actor.organizationId,JSON.stringify([role])]);
     if(!found.rowCount)throw new WorkflowError(400,'Người được giao không tồn tại, đã tắt hoặc không có vai trò phù hợp trong đơn vị.');
   }
+  async function resolveEffectiveRolesByDefinition(
+    db: { query: (sql: string, values?: unknown[]) => Promise<{ rows: any[] }> },
+    actor: WorkflowActor
+  ) {
+    const polRes = await db.query(
+      "SELECT system_id, system_version FROM studio_system_policies WHERE organization_id = $1 AND status = 'enforced'",
+      [actor.organizationId]
+    );
+    const enforcedPoliciesRows = (polRes?.rows ?? []).filter(r => r && r.system_id) as Array<{ system_id: string; system_version: string }>;
+    const enforcedPolicies = new Set(enforcedPoliciesRows.map(p => `${p.system_id}:${p.system_version}`));
+
+    const grantRes = await db.query(
+      `SELECT g.system_id, g.system_version, g.roles
+       FROM studio_system_grants g
+       JOIN studio_system_policies p ON p.organization_id = g.organization_id AND p.system_id = g.system_id AND p.system_version = g.system_version
+       JOIN directory_people dp ON dp.organization_id = g.organization_id AND dp.subject = $1 AND dp.enabled = true
+       WHERE g.organization_id = $2 AND p.status = 'enforced' AND g.status = 'active'
+       AND (
+         (g.principal_type = 'person' AND g.principal_id = dp.subject)
+         OR (g.principal_type = 'department' AND dp.department_id IS NOT NULL AND g.principal_id = dp.department_id)
+       )`,
+      [actor.subject, actor.organizationId]
+    );
+    const enforcedGrants = (grantRes?.rows ?? []).filter(r => r && r.system_id) as Array<{ system_id: string; system_version: string; roles: string[] }>;
+
+    const modRes = await db.query(
+      'SELECT definition_id, module_id, module_version FROM enterprise_module_workflows WHERE organization_id = $1',
+      [actor.organizationId]
+    );
+    const workflowModuleMap = (modRes?.rows ?? []).filter(r => r && r.definition_id) as Array<{ definition_id: string; module_id: string; module_version: string }>;
+
+    const enforcedRolesMap = new Map<string, Set<string>>();
+    for (const g of enforcedGrants) {
+      const k = `${g.system_id}:${g.system_version}`;
+      if (!enforcedRolesMap.has(k)) enforcedRolesMap.set(k, new Set());
+      for (const r of g.roles) enforcedRolesMap.get(k)!.add(r);
+    }
+
+    return (d: WorkflowDefinition): string[] | null => {
+      const mod = workflowModuleMap.find(m => m.definition_id === d.id);
+      const modKey = mod ? `${mod.module_id}:${mod.module_version}` : undefined;
+      const isEnforced = modKey ? enforcedPolicies.has(modKey) : false;
+      if (!isEnforced) return actor.roles;
+      if (!modKey) return null;
+      const roles = enforcedRolesMap.get(modKey);
+      return roles && roles.size > 0 ? Array.from(roles) : null;
+    };
+  }
+
   async function listPage(actor:WorkflowActor,inbox:boolean,query:PageQuery&{state?:string;definitionId?:string}) {
     const workflowDefinitions=await registry.list(actor.organizationId);
     const values:unknown[]=[actor.organizationId,actor.subject];
     const bind=(value:unknown)=>{values.push(value);return '$'+values.length;};
-    const where=['organization_id=$1',workflowReadPredicate(workflowDefinitions,actor,bind)];
+    const getEffectiveRolesForDef = await resolveEffectiveRolesByDefinition(pool, actor);
+    const where=['organization_id=$1',workflowReadPredicate(workflowDefinitions,actor,bind,'','$2',getEffectiveRolesForDef)];
     if(inbox){
       where.push("status='active'");
       const choices:string[]=[];
-      for(const d of workflowDefinitions)for(const t of d.transitions)if(t.execution!=='service'&&actor.roles.includes(t.role)) {
-        let guard='';
-        if(t.condition) guard=` AND ${compileCondition(t.condition,bind)}`;
-        choices.push(`((binding IS NULL OR binding->'allowedTransitions' ? ${bind(t.id)}) AND definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''}${guard})`);
+      for(const d of workflowDefinitions) {
+        const effectiveRoles = getEffectiveRolesForDef(d) ?? [];
+        for(const t of d.transitions)if(t.execution!=='service'&&effectiveRoles.includes(t.role)) {
+          let guard='';
+          if(t.condition) guard=` AND ${compileCondition(t.condition,bind)}`;
+          choices.push(`((binding IS NULL OR binding->'allowedTransitions' ? ${bind(t.id)}) AND definition_id=${bind(d.id)} AND definition_version=${bind(d.version)} AND state=${bind(t.from)}${t.ownerOnly?' AND owner_id=$2':''}${t.assigneeField?` AND data->>${bind(t.assigneeField)}=$2`:''}${guard})`);
+        }
       }
       where.push("NOT EXISTS(SELECT 1 FROM workflow_waits w WHERE w.run_id=workflow_runs.id AND w.status='pending')");
       where.push("NOT EXISTS(SELECT 1 FROM workflow_timers t WHERE t.run_id=workflow_runs.id AND t.status='pending')");
@@ -103,7 +157,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     const result=await pool.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2`,[id,actor.organizationId]);
     if(!result.rows[0]) throw new WorkflowError(404,'Không tìm thấy quy trình.');
     const run=serializeRun(result.rows[0]);
-    if(!canReadRun(await definition(run),run,actor)) throw new WorkflowError(404,'Không tìm thấy quy trình.');
+    await authorizeRunAccess(pool,run,actor,definition);
     return (await taskIds([run]))[0];
   }
   async function createWithClient(client:PoolClient,value:CreateWorkflow & {definitionVersion?:number},actor:WorkflowActor,key:string):Promise<WorkflowRun> {
@@ -114,7 +168,52 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     const replay=(await client.query('SELECT fingerprint,result FROM workflow_starts WHERE organization_id=$1 AND actor_id=$2 AND key=$3',[actor.organizationId,actor.subject,key])).rows[0];
     const def=replay?await definition(replay.result,client):await registry.get(actor.organizationId,value.definitionId,value.definitionVersion,client);
     if(!def)throw new WorkflowError(400,'Phiên bản quy trình không khả dụng.');
-    if(!actor.roles.includes('workflow:start')||!actor.roles.includes(def.startRole))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
+    // Check system policy enforcement
+    const systemOwnership = (
+      await client.query<{
+        module_id: string;
+        module_version: string;
+        policy_status: 'legacy' | 'enforced' | null;
+      }>(
+        `SELECT w.module_id, w.module_version, p.status AS policy_status
+         FROM enterprise_module_workflows w
+         LEFT JOIN studio_system_policies p
+           ON p.organization_id = w.organization_id
+           AND p.system_id = w.module_id
+           AND p.system_version = w.module_version
+         WHERE w.organization_id = $1 AND w.definition_id = $2`,
+        [actor.organizationId, def.id]
+      )
+    ).rows[0];
+
+    let effectiveRolesForStart: string[] | undefined;
+    if (systemOwnership && systemOwnership.policy_status === 'enforced') {
+      const grantRows = (
+        await client.query<{ roles: string[] }>(
+          `SELECT g.roles FROM studio_system_grants g
+           JOIN directory_people p ON p.organization_id = g.organization_id AND p.subject = $1 AND p.enabled = true
+           WHERE g.organization_id = $2 AND g.system_id = $3 AND g.system_version = $4 AND g.status = 'active'
+           AND (
+             (g.principal_type = 'person' AND g.principal_id = p.subject)
+             OR (g.principal_type = 'department' AND p.department_id IS NOT NULL AND g.principal_id = p.department_id)
+           )`,
+          [actor.subject, actor.organizationId, systemOwnership.module_id, systemOwnership.module_version]
+        )
+      ).rows;
+      if (!grantRows.length) {
+        throw new WorkflowError(403, 'System membership required to start workflow in managed system.');
+      }
+      const roleSet = new Set<string>();
+      for (const gr of grantRows) {
+        for (const r of gr.roles) roleSet.add(r);
+      }
+      effectiveRolesForStart = [...roleSet];
+      if (!effectiveRolesForStart.includes(def.startRole)) {
+        throw new WorkflowError(403, 'Role required to start workflow is missing from system membership.');
+      }
+    }
+
+    if(!actor.roles.includes('workflow:start')||!(effectiveRolesForStart ? effectiveRolesForStart.includes(def.startRole) : actor.roles.includes(def.startRole)))throw new WorkflowError(403,'Không có quyền tạo quy trình.');
     await assertIncidentActor(client,{definitionId:def.id},actor,['workflow:start',def.startRole]);
     if(replay){
       await client.query('SELECT id FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR SHARE',[replay.result.id,actor.organizationId]);
@@ -149,12 +248,57 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         const row=(await client.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0];
         if(!row)throw new WorkflowError(404,'Không tìm thấy quy trình.');
         const run=serializeRun(row),def=await definition(run,client);
-        if(!canReadRun(def,run,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
+        // Check governing system policy for run
+        const runOwnership = run.binding?.moduleId ? {
+          module_id: run.binding.moduleId,
+          module_version: run.binding.moduleVersion,
+        } : (
+          await client.query<{ module_id: string; module_version: string }>(
+            'SELECT module_id, module_version FROM enterprise_module_workflows WHERE organization_id = $1 AND definition_id = $2',
+            [actor.organizationId, run.definitionId]
+          )
+        ).rows[0];
+
+        let effectiveRolesForTransition: string[] | undefined;
+        if (runOwnership && !internal) {
+          const pol = (
+            await client.query<{ status: string }>(
+              'SELECT status FROM studio_system_policies WHERE organization_id = $1 AND system_id = $2 AND system_version = $3',
+              [actor.organizationId, runOwnership.module_id, runOwnership.module_version]
+            )
+          ).rows[0];
+
+          if (pol && pol.status === 'enforced') {
+            const grants = (
+              await client.query<{ roles: string[] }>(
+                `SELECT g.roles FROM studio_system_grants g
+                 JOIN directory_people p ON p.organization_id = g.organization_id AND p.subject = $1 AND p.enabled = true
+                 WHERE g.organization_id = $2 AND g.system_id = $3 AND g.system_version = $4 AND g.status = 'active'
+                 AND (
+                   (g.principal_type = 'person' AND g.principal_id = p.subject)
+                   OR (g.principal_type = 'department' AND p.department_id IS NOT NULL AND g.principal_id = p.department_id)
+                 )`,
+                [actor.subject, actor.organizationId, runOwnership.module_id, runOwnership.module_version]
+              )
+            ).rows;
+
+            if (!grants.length) {
+              throw new WorkflowError(403, 'System membership required for managed workflow run transition.');
+            }
+            const rSet = new Set<string>();
+            for (const gr of grants) {
+              for (const r of gr.roles) rSet.add(r);
+            }
+            effectiveRolesForTransition = [...rSet];
+          }
+        }
+
+        if(!canReadRun(def,run,actor,effectiveRolesForTransition))throw new WorkflowError(404,'Không tìm thấy quy trình.');
         if(run.status==='cancelled')throw new WorkflowError(409,'Quy trình đã huỷ.');
         const transition=def.transitions.find(t=>t.id===value.action);
         if(!transition)throw new WorkflowError(400,'Bước không tồn tại.');
         await assertIncidentActor(client,run,actor,transition.role);
-        authorizeTransition(transition,run,actor,!!internal);
+        authorizeTransition(transition,run,actor,!!internal,effectiveRolesForTransition);
         for(const step of transition.steps??[])authorizeBlock(step,actor);
         const input=validateInput(transition.fields,value.input),hash=fingerprint({...value,input});
         const replay=(await client.query('SELECT actor_id,fingerprint,result FROM workflow_commands WHERE run_id=$1 AND key=$2',[id,key])).rows[0];
@@ -167,7 +311,7 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         }
         run.waiting=!!(await client.query("SELECT 1 FROM workflow_waits WHERE run_id=$1 AND status='pending'",[id])).rowCount;
         run.waiting=run.waiting || !!(await client.query("SELECT 1 FROM workflow_timers WHERE run_id=$1 AND status='pending' AND ($2::uuid IS NULL OR id<>$2)",[id,internal?.timerId??null])).rowCount;
-        planTransition(def,run,actor,{...value,input},!!internal);
+        planTransition(def,run,actor,{...value,input},!!internal,effectiveRolesForTransition);
         await assertIncidentTransition(client,run,actor,{...value,input});
         await validateReferences(client,transition.fields,input,actor,run=>definition(run,client));
         for(const step of transition.steps??[])if(step.action==='timers.schedule') {
@@ -208,7 +352,8 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
       if(!isRecordId(id))throw new WorkflowError(400,'Invalid workflow ID.');
       return transaction(pool,async client=>{
         const row=(await client.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR SHARE`,[id,actor.organizationId])).rows[0];
-        if(!row||!canReadRun(await definition(row,client),row,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
+        if(!row)throw new WorkflowError(404,'Không tìm thấy quy trình.');
+        await authorizeRunAccess(client,serializeRun(row),actor,r=>definition(r,client));
         const context=await readContext(client,id,actor.organizationId);
         if(!context)throw new WorkflowError(404,'Workflow entity context not found.');
         return {context,current:await lockContextEntity(client,context.entityId,actor)};
@@ -223,7 +368,8 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
         const definitions=await registry.list(actor.organizationId,client);
         const values:unknown[]=[actor.organizationId,actor.subject,id];
         const bind=(value:unknown)=>{values.push(value);return '$'+values.length;};
-        const where=['r.organization_id=$1','c.organization_id=$1','c.entity_id=$3',workflowReadPredicate(definitions,actor,bind,'r')];
+        const getEffectiveRolesForDef = await resolveEffectiveRolesByDefinition(client, actor);
+        const where=['r.organization_id=$1','c.organization_id=$1','c.entity_id=$3',workflowReadPredicate(definitions,actor,bind,'r','$2',getEffectiveRolesForDef)];
         if(query.q)where.push(`strpos(lower(r.title),lower(${bind(query.q)}))>0`);
         const rows=(await client.query(`SELECT ${runColumns.split(',').map(c=>'r.'+c).join(',')} FROM workflow_runs r JOIN workflow_entity_contexts c ON c.run_id=r.id WHERE ${where.join(' AND ')} ORDER BY r.updated_at DESC,r.id DESC LIMIT ${bind(query.limit+1)} OFFSET ${bind(query.offset)}`,values)).rows.map(serializeRun);
         return pageResult(await taskIds(rows,client),query);
@@ -256,7 +402,8 @@ export async function workflowDatabase(pool:Pool,registry:Pick<DefinitionRegistr
     async retryJobs(id,actor,key) {
       return transaction(pool,async client=>{
         const row=(await client.query(`SELECT ${runColumns} FROM workflow_runs WHERE id=$1 AND organization_id=$2 FOR UPDATE`,[id,actor.organizationId])).rows[0];
-        if(!row||!canReadRun(await definition(row,client),row,actor))throw new WorkflowError(404,'Không tìm thấy quy trình.');
+        if(!row)throw new WorkflowError(404,'Không tìm thấy quy trình.');
+        await authorizeRunAccess(client,serializeRun(row),actor,r=>definition(r,client));
         if(!actor.roles.includes('workflow:sync'))throw new WorkflowError(403,'Không có quyền chạy lại đồng bộ.');
         if(row.status==='cancelled')throw new WorkflowError(409,'Quy trình đã huỷ.');
         const hash=fingerprint({action:'sync.retry',expectedVersion:0,input:{}});

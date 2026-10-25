@@ -17,6 +17,7 @@ import type {
   SystemGrantInput,
   SystemGrantRevokeInput,
   SystemGrantUpdateInput,
+  SystemPolicyActivateInput,
 } from "./access-types.js";
 
 export type SystemOptions = {
@@ -296,5 +297,43 @@ export function registerSystems(app: FastifyInstance, options: SystemOptions) {
         principalId,
       );
     });
+
+    routes.get<{
+      Params: { id: string; version: string };
+    }>("/v1/systems/:id/versions/:version/policy", async (request) => {
+      if (!options.systemAccess)
+        throw new WorkflowError(503, "System access service unavailable");
+      return options.systemAccess.getPolicy(
+        slug(request.params.id),
+        semver(request.params.version),
+        actors.get(request)!
+      );
+    });
+
+    routes.post<{
+      Params: { id: string; version: string };
+      Body: { expectedRevision: number };
+    }>(
+      "/v1/systems/:id/versions/:version/policy/activate",
+      { bodyLimit: 16384 },
+      async (request) => {
+        if (!options.systemAccess)
+          throw new WorkflowError(503, "System access service unavailable");
+        bundleKeys(request.body, ["expectedRevision"]);
+        const key = parseCreateKey(
+          request.headers["idempotency-key"],
+          request.raw.rawHeaders
+        );
+        if (!key) throw new WorkflowError(400, "Idempotency-Key required");
+        const body = request.body as unknown as SystemPolicyActivateInput;
+        return options.systemAccess.activatePolicy(
+          slug(request.params.id),
+          semver(request.params.version),
+          body,
+          actors.get(request)!,
+          key
+        );
+      }
+    );
   });
 }

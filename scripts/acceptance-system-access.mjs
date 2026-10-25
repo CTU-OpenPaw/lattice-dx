@@ -10,7 +10,7 @@ const bundle = esbuild.buildSync({
   bundle: true,
   platform: 'node',
   format: 'cjs',
-  external: ['pg'],
+  external: ['pg', 'fastify', 'jose'],
   write: false,
   logLevel: 'silent',
 }).outputFiles[0].contents;

@@ -212,6 +212,8 @@ describe('Database Repository Logic & Invariants', () => {
       ['org-a:company-ops:1.0.0', [{ definitionId: 'ops-req', definitionVersion: 1, definition: declaredPublishedWorkflow }]],
       ['org-a:company-ops:2.0.0', [{ definitionId: 'ops-req', definitionVersion: 1, definition: declaredPublishedWorkflow }]],
     ]);
+    const policies = new Map<string, any>();
+    const policyAudit: any[] = [];
 
     const client = {
       query: vi.fn(async (sql: string, params: any[] = []) => {
@@ -219,6 +221,58 @@ describe('Database Repository Logic & Invariants', () => {
           return { rows: [] };
         }
         if (sql.includes('pg_advisory_xact_lock')) {
+          return { rows: [] };
+        }
+        if (sql.includes('count(*)::text AS count FROM studio_system_grants')) {
+          const org = params[0];
+          const sysId = params[1];
+          const ver = params[2];
+          let cnt = 0;
+          for (const [k, v] of grants.entries()) {
+            if (k.startsWith(`${org}:${sysId}:${ver}:`) && v.status === 'active') cnt++;
+          }
+          return { rows: [{ count: cnt.toString() }] };
+        }
+        if (sql.includes('FROM studio_system_policies')) {
+          const key = `${params[0]}:${params[1]}:${params[2]}`;
+          const pol = policies.get(key);
+          return { rows: pol ? [pol] : [] };
+        }
+        if (sql.includes('INSERT INTO studio_system_policies')) {
+          const key = `${params[0]}:${params[1]}:${params[2]}`;
+          const row = {
+            system_id: params[1],
+            system_version: params[2],
+            status: 'enforced',
+            revision: 1,
+            activated_by: params[3],
+            activated_at: new Date(),
+          };
+          policies.set(key, row);
+          return { rows: [row] };
+        }
+        if (sql.includes('UPDATE studio_system_policies SET')) {
+          const key = `${params[2]}:${params[3]}:${params[4]}`;
+          const existing = policies.get(key);
+          if (existing) {
+            existing.status = 'enforced';
+            existing.revision = params[0];
+            existing.activated_by = params[1];
+            existing.activated_at = new Date();
+          }
+          return { rows: existing ? [existing] : [] };
+        }
+        if (sql.includes('INSERT INTO studio_system_policy_audit')) {
+          policyAudit.push({
+            audit_id: params[0],
+            organization_id: params[1],
+            system_id: params[2],
+            system_version: params[3],
+            status: params[4],
+            revision: params[5],
+            actor_id: params[6],
+            occurred_at: new Date(),
+          });
           return { rows: [] };
         }
         if (sql.includes('SELECT 1 FROM enterprise_module_versions')) {
@@ -384,7 +438,7 @@ describe('Database Repository Logic & Invariants', () => {
       connect: vi.fn(async () => client),
     };
 
-    return { pool, client, grants, audit, commands, people, depts, modules, moduleWorkflows };
+    return { pool, client, grants, audit, commands, people, depts, modules, moduleWorkflows, policies, policyAudit };
   }
 
   const actor = {
@@ -652,5 +706,138 @@ describe('Database Repository Logic & Invariants', () => {
     expect(disabledAccess.hasAccess).toBe(false);
     expect(disabledAccess.effectiveRoles).toEqual([]);
     expect(disabledAccess.sources).toEqual([]);
+  });
+
+  describe('Phase 1B: Policy Activation, Role Isolation & Immediate Denial', () => {
+    it('manages policy lifecycle with preflight verification and idempotency', async () => {
+      const { pool, grants } = createMockDb();
+      const repo = await systemAccessDatabase(pool as any);
+
+      // 1. Initial state is legacy
+      const initialPolicy = await repo.getPolicy('company-ops', '1.0.0', actor);
+      expect(initialPolicy.status).toBe('legacy');
+      expect(initialPolicy.revision).toBe(0);
+
+      // 2. Preflight: fails if no active grants exist
+      await expect(
+        repo.activatePolicy('company-ops', '1.0.0', { expectedRevision: 0 }, actor, 'act-key-1')
+      ).rejects.toThrow('Cannot activate policy: at least one active member grant is required.');
+
+      // Seed an active grant
+      await repo.grant(
+        'company-ops',
+        '1.0.0',
+        { principalType: 'person', principalId: 'active-emp', roles: ['employee'] },
+        actor,
+        'grant-for-act'
+      );
+
+      // 3. Activation succeeds
+      const activated = await repo.activatePolicy('company-ops', '1.0.0', { expectedRevision: 0 }, actor, 'act-key-1');
+      expect(activated.status).toBe('enforced');
+      expect(activated.revision).toBe(1);
+      expect(activated.activatedBy).toBe('admin');
+
+      // 4. Idempotent replay with same key
+      const replay = await repo.activatePolicy('company-ops', '1.0.0', { expectedRevision: 0 }, actor, 'act-key-1');
+      expect(replay.status).toBe('enforced');
+      expect(replay.revision).toBe(1);
+
+      // 5. Subsequent read returns enforced policy
+      const pol = await repo.getPolicy('company-ops', '1.0.0', actor);
+      expect(pol.status).toBe('enforced');
+      expect(pol.revision).toBe(1);
+
+      // 6. Effective access now reports enforced status
+      const access = await repo.effectiveAccess('company-ops', '1.0.0', {
+        subject: 'active-emp',
+        organizationId: 'org-a',
+        roles: ['workflow:start'],
+      });
+      expect(access.enforcementStatus).toBe('enforced');
+    });
+
+    it('isolates role scopes between systems A and B with identical role names', async () => {
+      const { pool, modules, moduleWorkflows } = createMockDb();
+      const repo = await systemAccessDatabase(pool as any);
+
+      // Register system B in same organization
+      modules.set('org-a:system-b:1.0.0', { id: 'system-b', version: '1.0.0', manifest: declaredManifest });
+      moduleWorkflows.set('org-a:system-b:1.0.0', [
+        { definitionId: 'b-req', definitionVersion: 1, definition: declaredPublishedWorkflow },
+      ]);
+
+      // Grant 'employee' in company-ops (System A) ONLY
+      await repo.grant(
+        'company-ops',
+        '1.0.0',
+        { principalType: 'person', principalId: 'active-emp', roles: ['employee'] },
+        actor,
+        'grant-sys-a'
+      );
+
+      const empActor = { subject: 'active-emp', organizationId: 'org-a', roles: ['workflow:start'] };
+
+      // System A access has role 'employee'
+      const accessA = await repo.effectiveAccess('company-ops', '1.0.0', empActor);
+      expect(accessA.hasAccess).toBe(true);
+      expect(accessA.effectiveRoles).toEqual(['employee']);
+
+      // System B access has ZERO roles and hasAccess = false (no cross-system leakage!)
+      const accessB = await repo.effectiveAccess('system-b', '1.0.0', empActor);
+      expect(accessB.hasAccess).toBe(false);
+      expect(accessB.effectiveRoles).toEqual([]);
+    });
+
+    it('immediately denies access on revocation without waiting for JWT expiration', async () => {
+      const { pool } = createMockDb();
+      const repo = await systemAccessDatabase(pool as any);
+
+      // Grant role
+      await repo.grant(
+        'company-ops',
+        '1.0.0',
+        { principalType: 'person', principalId: 'active-emp', roles: ['employee'] },
+        actor,
+        'grant-rev-test'
+      );
+
+      const empActor = { subject: 'active-emp', organizationId: 'org-a', roles: ['workflow:start'] };
+      const before = await repo.effectiveAccess('company-ops', '1.0.0', empActor);
+      expect(before.hasAccess).toBe(true);
+      expect(before.effectiveRoles).toEqual(['employee']);
+
+      // Revoke grant
+      await repo.revoke('company-ops', '1.0.0', 'person', 'active-emp', { expectedRevision: 1 }, actor, 'revoke-test-key');
+
+      // Immediate denial even with the same JWT claims
+      const after = await repo.effectiveAccess('company-ops', '1.0.0', empActor);
+      expect(after.hasAccess).toBe(false);
+      expect(after.effectiveRoles).toEqual([]);
+      expect(after.sources).toEqual([]);
+    });
+
+    it('supports entity-only membership with empty roles', async () => {
+      const { pool } = createMockDb();
+      const repo = await systemAccessDatabase(pool as any);
+
+      // Grant entity-only membership (roles: [])
+      await repo.grant(
+        'company-ops',
+        '1.0.0',
+        { principalType: 'person', principalId: 'active-emp', roles: [] },
+        actor,
+        'grant-entity-only'
+      );
+
+      const empActor = { subject: 'active-emp', organizationId: 'org-a', roles: ['data:read'] };
+      const access = await repo.effectiveAccess('company-ops', '1.0.0', empActor);
+
+      // Has active membership for entity access, but zero workflow business roles
+      expect(access.hasAccess).toBe(true);
+      expect(access.effectiveRoles).toEqual([]);
+      expect(access.sources).toHaveLength(1);
+      expect(access.sources[0].roles).toEqual([]);
+    });
   });
 });

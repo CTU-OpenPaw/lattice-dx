@@ -46,3 +46,59 @@ test('enterprise Studio operations use exact fixed paths and reject unneeded par
  assert.throws(()=>studioRequest({operation:'share',id:'invoice',body:{},key:'one'},BridgeError,query),{status:400});
  assert.throws(()=>studioRequest({operation:'createSchema',body:{large:'x'.repeat(128*1024)},key:'one'},BridgeError,query),{status:413});
 });
+
+test('system membership and policy bridge operations use strict versioned paths and idempotency envelopes',()=>{
+ const {studioRequest}=require('../studio.cjs');
+ class BridgeError extends Error {constructor(status,message){super(message);this.status=status;}}
+ const query=(value,allowed)=>{if(value===undefined)return '';if(Object.keys(value).some(k=>!allowed.includes(k)))throw new BridgeError(400,'query');return new URLSearchParams(value).toString();};
+
+ // policy read
+ assert.deepEqual(
+   studioRequest({operation:'policy',id:'procurement',version:'1.0.0'},BridgeError,query),
+   {method:'GET',path:'systems/procurement/versions/1.0.0/policy'}
+ );
+ // policy activate
+ assert.deepEqual(
+   studioRequest({operation:'activatePolicy',id:'procurement',version:'1.0.0',body:{expectedRevision:0},key:'act-1'},BridgeError,query),
+   {method:'POST',path:'systems/procurement/versions/1.0.0/policy/activate',body:'{"expectedRevision":0}',key:'act-1'}
+ );
+ // members list
+ assert.deepEqual(
+   studioRequest({operation:'members',id:'procurement',version:'1.0.0',query:{limit:'20',offset:'0'}},BridgeError,query),
+   {method:'GET',path:'systems/procurement/versions/1.0.0/members?limit=20&offset=0'}
+ );
+ // grant member
+ assert.deepEqual(
+   studioRequest({operation:'grantMember',id:'procurement',version:'1.0.0',body:{principalType:'person',principalId:'alice',roles:['buyer']},key:'grant-1'},BridgeError,query),
+   {method:'POST',path:'systems/procurement/versions/1.0.0/members',body:'{"principalType":"person","principalId":"alice","roles":["buyer"]}',key:'grant-1'}
+ );
+ // update member
+ assert.deepEqual(
+   studioRequest({operation:'updateMember',id:'procurement',version:'1.0.0',principalType:'person',principalId:'alice',body:{roles:['approver'],expectedRevision:1},key:'up-1'},BridgeError,query),
+   {method:'PUT',path:'systems/procurement/versions/1.0.0/members/person/alice',body:'{"roles":["approver"],"expectedRevision":1}',key:'up-1'}
+ );
+ // revoke member
+ assert.deepEqual(
+   studioRequest({operation:'revokeMember',id:'procurement',version:'1.0.0',principalType:'department',principalId:'eng',key:'rev-1'},BridgeError,query),
+   {method:'DELETE',path:'systems/procurement/versions/1.0.0/members/department/eng',key:'rev-1'}
+ );
+ // member history
+ assert.deepEqual(
+   studioRequest({operation:'memberHistory',id:'procurement',version:'1.0.0',query:{limit:'10',offset:'0'}},BridgeError,query),
+   {method:'GET',path:'systems/procurement/versions/1.0.0/members/history?limit=10&offset=0'}
+ );
+ // my access
+ assert.deepEqual(
+   studioRequest({operation:'myAccess',id:'procurement',version:'1.0.0'},BridgeError,query),
+   {method:'GET',path:'system-apps/procurement/versions/1.0.0/access/me'}
+ );
+
+ // Rejections: missing id or version
+ assert.throws(()=>studioRequest({operation:'policy',id:'procurement'},BridgeError,query),{status:400});
+ assert.throws(()=>studioRequest({operation:'policy',version:'1.0.0'},BridgeError,query),{status:400});
+ // Invalid principalType
+ assert.throws(()=>studioRequest({operation:'updateMember',id:'procurement',version:'1.0.0',principalType:'invalid',principalId:'x',body:{},key:'k'},BridgeError,query),{status:400});
+ // Missing key on writes
+ assert.throws(()=>studioRequest({operation:'activatePolicy',id:'procurement',version:'1.0.0'},BridgeError,query),{status:400});
+ assert.throws(()=>studioRequest({operation:'grantMember',id:'procurement',version:'1.0.0',body:{roles:[]}},BridgeError,query),{status:400});
+});
