@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 const {
+  blankRecipe,
+  companyOperationsRecipe,
   exampleRecipe,
+  validateRecipe,
   fieldValue,
   sameConfiguration,
 } = require("./system-model");
@@ -57,6 +60,7 @@ function createSystemScreens(client, React) {
       [module, setModule] = useState(null),
       [audit, setAudit] = useState(null),
       [importText, setImportText] = useState("");
+    const validation = validateRecipe(recipe);
     const blocked = busy || commands.uncertain;
     async function loadDrafts(next = 0) {
       const result = await api.studio("drafts", {
@@ -93,6 +97,14 @@ function createSystemScreens(client, React) {
       await loadDrafts(offset);
     }
     async function check() {
+      const v = validateRecipe(recipe);
+      if (!v.valid) {
+        throw Error(
+          "Cấu hình chưa hợp lệ: " +
+            v.issues[0] +
+            " (Xem chi tiết bảng Kiểm tra cấu hình).",
+        );
+      }
       setModule(null);
       const result = await api.studio("plan", {
         body: { recipe },
@@ -139,12 +151,35 @@ function createSystemScreens(client, React) {
         { style: box },
         h("h2", null, "1. Chọn bản nháp hoặc bắt đầu mới"),
         button(
+          "Tạo hệ thống trống",
+          () => {
+            setRecipe(blankRecipe());
+            setDraft(null);
+            setPlan(null);
+            setModule(null);
+            setAudit(null);
+          },
+          blocked,
+        ),
+        button(
           "Mẫu mới",
           () => {
             setRecipe(exampleRecipe());
             setDraft(null);
             setPlan(null);
             setModule(null);
+            setAudit(null);
+          },
+          blocked,
+        ),
+        button(
+          "Mẫu điều hành công ty",
+          () => {
+            setRecipe(companyOperationsRecipe());
+            setDraft(null);
+            setPlan(null);
+            setModule(null);
+            setAudit(null);
           },
           blocked,
         ),
@@ -211,6 +246,34 @@ function createSystemScreens(client, React) {
             ),
             field("Vai trò người thực hiện", page.handlerRole, (v) =>
               pageEdit(index, (p) => ({ ...p, handlerRole: v })),
+            ),
+            button(
+              "Đưa module lên",
+              () =>
+                edit((r) => {
+                  const pages = [...r.pages];
+                  if (index > 0) {
+                    const temp = pages[index - 1];
+                    pages[index - 1] = pages[index];
+                    pages[index] = temp;
+                  }
+                  return { ...r, pages };
+                }),
+              index === 0,
+            ),
+            button(
+              "Đưa module xuống",
+              () =>
+                edit((r) => {
+                  const pages = [...r.pages];
+                  if (index < pages.length - 1) {
+                    const temp = pages[index + 1];
+                    pages[index + 1] = pages[index];
+                    pages[index] = temp;
+                  }
+                  return { ...r, pages };
+                }),
+              index === recipe.pages.length - 1,
             ),
             ...page.fields.map((item, j) =>
               h(
@@ -309,22 +372,89 @@ function createSystemScreens(client, React) {
         button(
           "Thêm module",
           () =>
-            edit((r) => ({
-              ...r,
-              pages: [
-                ...r.pages,
-                {
-                  ...exampleRecipe().pages[0],
-                  id: "module-" + (r.pages.length + 1),
-                },
-              ],
-            })),
+            edit((r) => {
+              let num = r.pages.length + 1;
+              while (r.pages.some((p) => p.id === "module-" + num)) num++;
+              return {
+                ...r,
+                pages: [
+                  ...r.pages,
+                  {
+                    id: "module-" + num,
+                    title: "Module " + num,
+                    requesterRole: "employee",
+                    reviewerRole: "manager",
+                    handlerRole: "operator",
+                    blocks: ["create", "list", "inbox", "detail", "history"],
+                    fields: [
+                      {
+                        name: "title",
+                        label: "Tiêu đề",
+                        type: "text",
+                        required: true,
+                      },
+                    ],
+                  },
+                ],
+              };
+            }),
           recipe.pages.length >= 5,
         ),
         h(EntityPageDesigner, {
           recipe,
           onChange: (next) => edit(() => next),
         }),
+        h(
+          "div",
+          {
+            style: {
+              ...box,
+              borderLeft: validation.valid
+                ? "4px solid #10b981"
+                : "4px solid #f59e0b",
+              background: validation.valid ? "#f0fdf4" : "#fffbeb",
+              padding: "12px 16px",
+              marginTop: "16px",
+            },
+          },
+          h(
+            "h3",
+            { style: { marginTop: 0 } },
+            "Kiểm tra cấu hình (Diagnostics)",
+          ),
+          validation.valid
+            ? h(
+                "p",
+                { style: { color: "#065f46", fontWeight: "bold" } },
+                "✔ Cấu hình hợp lệ: " +
+                  recipe.id +
+                  " v" +
+                  recipe.version +
+                  " (" +
+                  recipe.pages.length +
+                  " module quy trình, " +
+                  (recipe.entityPages?.length || 0) +
+                  " trang dữ liệu). Sẵn sàng xuất bản.",
+              )
+            : h(
+                "div",
+                null,
+                h(
+                  "p",
+                  { style: { color: "#b45309", fontWeight: "bold" } },
+                  "⚠ Các bước còn thiếu hoặc lỗi cần hoàn thiện trước khi xuất bản (" +
+                    validation.issues.length +
+                    " mục):",
+                ),
+                h(
+                  "ul",
+                  { style: { color: "#991b1b", paddingLeft: "20px" } },
+                  ...validation.issues.map((issue, idx) =>
+                    h("li", { key: idx }, issue),
+                  ),
+                ),
+              ),
+        ),
         h("hr"),
         button("Lưu bản nháp", () => act(save)),
         button("Kiểm tra cấu hình / tải trạng thái triển khai", () =>
