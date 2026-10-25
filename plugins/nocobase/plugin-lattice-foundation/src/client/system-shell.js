@@ -172,6 +172,347 @@ function createSystemShell(client, React) {
   }
   function Frame({ session, title, children }) {
     const { api, connection, notice, busy, act, commands, workflow } = session;
+    const currentPath =
+      typeof location !== "undefined"
+        ? location.pathname + location.search
+        : "";
+    const signinHref = "/signin?redirect=" + encodeURIComponent(currentPath);
+
+    const navBar = h(
+      "nav",
+      {
+        style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          padding: "12px 0 18px 0",
+          borderBottom: "1px solid #e2e8f0",
+          marginBottom: 24,
+          fontSize: 14,
+        },
+      },
+      h(
+        "a",
+        {
+          href: "/lattice/console",
+          style: { color: "#1e293b", fontWeight: 700, textDecoration: "none" },
+        },
+        "LatticeDX · Điều hành",
+      ),
+      h("span", { style: { color: "#cbd5e1" } }, "/"),
+      h(
+        "a",
+        {
+          href: "/lattice",
+          style: { color: "#64748b", textDecoration: "none" },
+        },
+        "Workspace",
+      ),
+      h("span", { style: { color: "#cbd5e1" } }, "·"),
+      h(
+        "a",
+        {
+          href: "/lattice/studio",
+          style: { color: "#2563eb", fontWeight: 600, textDecoration: "none" },
+        },
+        "Studio",
+      ),
+      h("span", { style: { color: "#cbd5e1" } }, "·"),
+      h(
+        "a",
+        {
+          href: "/lattice/systems",
+          style: { color: "#64748b", textDecoration: "none" },
+        },
+        "Hệ thống đã xuất bản",
+      ),
+    );
+
+    if (!connection?.connected) {
+      return h(
+        "main",
+        {
+          className: "dx-console",
+          style: {
+            maxWidth: 1200,
+            margin: "0 auto",
+            padding: "16px 24px",
+            fontFamily:
+              '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+            color: "#0f172a",
+            minHeight: "90vh",
+          },
+        },
+        h(
+          "style",
+          null,
+          `.dx-console button{font-family:inherit;cursor:pointer}.dx-console button:disabled{opacity:.5;cursor:not-allowed}`,
+        ),
+        navBar,
+        notice &&
+          h(
+            "p",
+            {
+              role: "alert",
+              style: {
+                background: "#fff1df",
+                border: "1px solid #fed7aa",
+                padding: 12,
+                borderRadius: 8,
+                margin: "0 auto 20px auto",
+                maxWidth: 520,
+              },
+            },
+            notice,
+          ),
+        h(
+          "div",
+          {
+            style: {
+              maxWidth: 520,
+              margin: "32px auto",
+              background: "#ffffff",
+              border: "1px solid #e2e8f0",
+              borderRadius: 12,
+              padding: "32px 32px 28px 32px",
+              boxShadow:
+                "0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03)",
+            },
+          },
+          h(
+            "div",
+            {
+              style: {
+                display: "inline-block",
+                background: "#eff6ff",
+                border: "1px solid #dbeafe",
+                color: "#1d4ed8",
+                padding: "3px 10px",
+                borderRadius: 6,
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: "0.5px",
+                textTransform: "uppercase",
+                marginBottom: 12,
+              },
+            },
+            "LatticeDX Studio · Xác thực",
+          ),
+          h(
+            "h1",
+            {
+              style: {
+                fontSize: 22,
+                fontWeight: 700,
+                margin: "0 0 8px 0",
+                color: "#0f172a",
+                letterSpacing: "-0.5px",
+              },
+            },
+            title,
+          ),
+          h(
+            "p",
+            {
+              style: {
+                fontSize: 13,
+                color: "#64748b",
+                margin: "0 0 24px 0",
+                lineHeight: 1.5,
+              },
+            },
+            "Khu vực thiết kế hệ thống và cấu hình lược đồ doanh nghiệp. Vui lòng hoàn tất 2 bước xác thực bên dưới để mở khóa bảng điều khiển.",
+          ),
+          // Step 1
+          h(
+            "div",
+            {
+              style: {
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+                borderRadius: 8,
+                padding: "16px",
+                marginBottom: 12,
+              },
+            },
+            h(
+              "div",
+              {
+                style: {
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: "#1e293b",
+                  marginBottom: 4,
+                },
+              },
+              "1. Nền tảng NocoBase",
+            ),
+            h(
+              "div",
+              { style: { fontSize: 12, color: "#64748b", marginBottom: 10 } },
+              "Đăng nhập tài khoản quản trị để tải khung giao diện plugin",
+            ),
+            h(
+              "a",
+              {
+                href: signinHref,
+                style: {
+                  display: "inline-block",
+                  padding: "7px 16px",
+                  background: "#ffffff",
+                  border: "1px solid #cbd5e1",
+                  borderRadius: 6,
+                  color: "#1e293b",
+                  textDecoration: "none",
+                  fontWeight: 600,
+                  fontSize: 13,
+                },
+              },
+              "Đăng nhập NocoBase →",
+            ),
+          ),
+          // Step 2
+          h(
+            "div",
+            {
+              style: {
+                background: "#f8fafc",
+                border: "1px solid #e2e8f0",
+                borderRadius: 8,
+                padding: "16px",
+                marginBottom: 20,
+              },
+            },
+            h(
+              "div",
+              {
+                style: {
+                  fontSize: 13,
+                  fontWeight: 600,
+                  color: "#1e293b",
+                  marginBottom: 4,
+                },
+              },
+              "2. Tài khoản nghiệp vụ doanh nghiệp",
+            ),
+            h(
+              "div",
+              { style: { fontSize: 12, color: "#64748b", marginBottom: 10 } },
+              "Xác thực danh tính quản trị qua cổng Keycloak SSO để cấp quyền thiết kế",
+            ),
+            h(
+              "button",
+              {
+                onClick: () =>
+                  act(async () => {
+                    sessionStorage.setItem("lattice:return-to", currentPath);
+                    location.assign(await api.connect());
+                  }),
+                disabled: busy,
+                style: {
+                  padding: "9px 20px",
+                  background: "#1b365d",
+                  border: "none",
+                  borderRadius: 6,
+                  color: "#ffffff",
+                  fontWeight: 600,
+                  fontSize: 13,
+                },
+              },
+              busy ? "Đang kết nối…" : "Kết nối tài khoản nghiệp vụ (SSO)",
+            ),
+          ),
+          // Fixture credentials helper
+          h(
+            "div",
+            {
+              style: {
+                background: "#f1f5f9",
+                borderRadius: 8,
+                padding: "12px 14px",
+                fontSize: 12,
+                color: "#475569",
+                lineHeight: 1.6,
+              },
+            },
+            h(
+              "div",
+              { style: { fontWeight: 600, color: "#334155", marginBottom: 2 } },
+              "Tài khoản kiểm thử nhanh (Fixture):",
+            ),
+            h(
+              "div",
+              null,
+              "• NocoBase: ",
+              h(
+                "code",
+                {
+                  style: {
+                    background: "#e2e8f0",
+                    padding: "1px 4px",
+                    borderRadius: 4,
+                  },
+                },
+                "admin@nocobase.com",
+              ),
+              " / ",
+              h(
+                "code",
+                {
+                  style: {
+                    background: "#e2e8f0",
+                    padding: "1px 4px",
+                    borderRadius: 4,
+                  },
+                },
+                "admin123",
+              ),
+            ),
+            h(
+              "div",
+              null,
+              "• Keycloak Admin: ",
+              h(
+                "code",
+                {
+                  style: {
+                    background: "#e2e8f0",
+                    padding: "1px 4px",
+                    borderRadius: 4,
+                  },
+                },
+                "alice",
+              ),
+              " / ",
+              h(
+                "code",
+                {
+                  style: {
+                    background: "#e2e8f0",
+                    padding: "1px 4px",
+                    borderRadius: 4,
+                  },
+                },
+                "local-alice-password",
+              ),
+            ),
+          ),
+          h(
+            "p",
+            {
+              style: {
+                fontSize: 11,
+                color: "#94a3b8",
+                textAlign: "center",
+                margin: "20px 0 0 0",
+              },
+            },
+            "Được bảo vệ bởi kiến trúc phân quyền bảo mật LatticeDX Zero Trust",
+          ),
+        ),
+      );
+    }
+
     return h(
       "main",
       {
@@ -191,54 +532,29 @@ function createSystemShell(client, React) {
         null,
         `.dx-console button{border:1px solid #cad6e2;background:white;color:#1b365d;border-radius:7px;font-weight:500}.dx-console button:hover:not(:disabled){background:#eaf2ff;border-color:#81a8de}.dx-console button:disabled{opacity:.45;cursor:default}.dx-console input,.dx-console select,.dx-console textarea{font:inherit}.dx-console h1{font-size:28px;letter-spacing:-.7px}.dx-console h2{font-size:19px}.dx-console nav a{display:inline-block;padding:8px 12px;border-radius:6px;text-decoration:none}.dx-console nav a:hover{background:#e8f0ff}.dx-console table{width:100%;border-collapse:collapse}.dx-console th,.dx-console td{padding:10px;text-align:left;border-bottom:1px solid #e3e9ef;vertical-align:top}.dx-console fieldset{min-width:0}`,
       ),
-      h(
-        "nav",
-        null,
-        h("a", { href: "/lattice/console" }, "LatticeDX · Điều hành"),
-        h("a", { href: "/lattice" }, "Workspace"),
-        " · ",
-        h("a", { href: "/lattice/studio" }, "Studio"),
-        " · ",
-        h("a", { href: "/lattice/systems" }, "Hệ thống đã xuất bản"),
-      ),
+      navBar,
       h("h1", null, title),
       h(
         "section",
         { style: box },
-        connection?.connected
-          ? h(
-              React.Fragment,
-              null,
-              "Tài khoản: " +
-                connection.identity.username +
-                " · " +
-                connection.identity.organizationId,
-              button(
-                "Đổi tài khoản nghiệp vụ",
-                () =>
-                  act(async () => {
-                    await api.disconnect();
-                    sessionStorage.setItem(
-                      "lattice:return-to",
-                      location.pathname + location.search,
-                    );
-                    location.assign(await api.connect());
-                  }),
-                busy,
-              ),
-            )
-          : button(
-              "Kết nối tài khoản nghiệp vụ",
-              () =>
-                act(async () => {
-                  sessionStorage.setItem(
-                    "lattice:return-to",
-                    location.pathname + location.search,
-                  );
-                  location.assign(await api.connect());
-                }),
-              busy,
-            ),
+        h(
+          React.Fragment,
+          null,
+          "Tài khoản: " +
+            connection.identity.username +
+            " · " +
+            connection.identity.organizationId,
+          button(
+            "Đổi tài khoản nghiệp vụ",
+            () =>
+              act(async () => {
+                await api.disconnect();
+                sessionStorage.setItem("lattice:return-to", currentPath);
+                location.assign(await api.connect());
+              }),
+            busy,
+          ),
+        ),
       ),
       notice &&
         h(
@@ -261,13 +577,7 @@ function createSystemShell(client, React) {
             busy,
           ),
         ),
-      connection?.connected
-        ? children
-        : h(
-            "p",
-            null,
-            "Đăng nhập NocoBase tại /signin trước, sau đó kết nối tài khoản nghiệp vụ.",
-          ),
+      children,
     );
   }
 
