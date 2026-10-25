@@ -32,14 +32,14 @@ Suggested repository destination:
 ## Evidence log
 
 
-| Task                                | Commit | Automated verification | Live verification | Status  |
-| ------------------------------------- | -------- | ------------------------ | ------------------- | --------- |
-| 1. Simulator                        | —     | Not run                | Not run           | Pending |
-| 2. Adapter                          | —     | Not run                | Not run           | Pending |
-| 3. Rule executor                    | —     | Not run                | Not run           | Pending |
-| 4. Case integration                 | —     | Not run                | Not run           | Pending |
-| 5. History and replay               | —     | Not run                | Not run           | Pending |
-| 6. Agent and evidence               | —     | Not run                | Not run           | Pending |
-| 7. Failure and authorization checks | —     | Not run                | Not run           | Pending |
+| Task                                | Commit  | Automated verification | Live verification | Status  |
+| ------------------------------------- | --------- | ------------------------ | ------------------- | --------- |
+| 1. Simulator                        | Checked | Checked                | Not run           | Pending |
+| 2. Adapter                          | Checked | Checked                | Not run           | Pending |
+| 3. Rule executor                    | —      | Not run                | Not run           | Pending |
+| 4. Case integration                 | —      | Not run                | Not run           | Pending |
+| 5. History and replay               | —      | Not run                | Not run           | Pending |
+| 6. Agent and evidence               | —      | Not run                | Not run           | Pending |
+| 7. Failure and authorization checks | —      | Not run                | Not run           | Pending |
 
 `Task 1: 22 automated tests passed; CLI produced five simulated readings; no broker delivery tested.`
