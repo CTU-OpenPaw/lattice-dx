@@ -478,6 +478,54 @@ async function main() {
   const scopedMgrToken = await sign('emp-scoped-mgr', ['workflow:start', 'data:write', 'data:read', 'files:read']);
 
   // 15. System discovery / detail HTTP
+  // Dedicated module-admin catalog endpoints: GET /v1/systems & GET /v1/systems/:id/versions/:version
+  // Seed an installed system with an unpublished mapped definition (definition_version = NULL) to verify 0 published / 1 total
+  await pool.query(
+    'INSERT INTO enterprise_module_versions(organization_id, id, version, title, hash, manifest, enabled, created_by) VALUES($1, $2, $3, $4, $5, $6, true, $7)',
+    [
+      org,
+      'draft-sys',
+      '1.0.0',
+      'Draft System',
+      'hash-draft',
+      JSON.stringify({
+        id: 'draft-sys',
+        version: '1.0.0',
+        title: 'Draft System',
+        schemas: [],
+        presentation: { entityPages: [] },
+      }),
+      'admin-usr',
+    ]
+  );
+  await pool.query(
+    'INSERT INTO enterprise_module_workflows(organization_id, module_id, module_version, definition_id, definition_version) VALUES($1, $2, $3, $4, NULL)',
+    [org, 'draft-sys', '1.0.0', 'wf-unpub']
+  );
+
+  const pureAdminToken = await sign('pure-admin', ['workflow:design', 'data:design']);
+  const adminSysList = await httpCall('/v1/systems', 'GET', undefined, pureAdminToken, 200);
+  assert.ok(adminSysList.items.some((s: any) => s.id === systemId && s.version === version));
+
+  const draftSysItem = adminSysList.items.find((s: any) => s.id === 'draft-sys' && s.version === '1.0.0');
+  assert.ok(draftSysItem, 'Draft system must appear in admin systems catalog');
+  assert.equal(draftSysItem.totalWorkflowsCount, 1, 'Draft system total workflows must be 1');
+  assert.equal(draftSysItem.publishedWorkflowsCount, 0, 'Unpublished mapped definition must result in 0 published (0 published / 1 total)');
+
+  const adminSysDetail = await httpCall(`/v1/systems/${systemId}/versions/${version}`, 'GET', undefined, pureAdminToken, 200);
+  assert.equal(adminSysDetail.id, systemId);
+  assert.equal(adminSysDetail.version, version);
+  assert.ok(adminSysDetail.permittedBusinessRoles.includes('employee'));
+  assert.ok(adminSysDetail.permittedBusinessRoles.includes('procurement:manager'));
+
+  // Pure admin has no business membership or roles -> employee runtime route returns 404
+  await httpCall(`/v1/system-apps/${systemId}/versions/${version}`, 'GET', undefined, pureAdminToken, 404);
+
+  // Non-module-admin employee receives 403 on admin catalog routes
+  await httpCall('/v1/systems', 'GET', undefined, aliceToken, 403);
+  await httpCall(`/v1/systems/${systemId}/versions/${version}`, 'GET', undefined, aliceToken, 403);
+
+  // Member Alice accesses employee runtime route -> 200
   const sysDetail = await httpCall(`/v1/system-apps/${systemId}/versions/${version}`, 'GET', undefined, aliceToken, 200);
   assert.equal(sysDetail.id, systemId);
   assert.equal(sysDetail.version, version);

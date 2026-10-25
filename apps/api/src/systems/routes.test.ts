@@ -52,6 +52,10 @@ test("Studio draft/compile writes require both designer roles and reject scope i
       runtime: vi.fn(async () =>
         pageResult([], { limit: 20, offset: 0, q: "" }),
       ),
+      adminList: vi.fn(async () =>
+        pageResult([], { limit: 20, offset: 0, q: "" }),
+      ),
+      adminGet: vi.fn(),
     };
   const app = createApi({ workerUrl: "http://worker", identity, systems });
   try {

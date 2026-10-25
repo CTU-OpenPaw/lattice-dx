@@ -144,6 +144,27 @@ export function registerSystems(app: FastifyInstance, options: SystemOptions) {
         };
       },
     );
+    routes.get<{ Querystring: Record<string, unknown> }>(
+      "/v1/systems",
+      async (request) => {
+        requireModuleAdmin(actors.get(request)!);
+        return options.systems!.adminList(
+          actors.get(request)!,
+          parsePage(request.query as Record<string, unknown>),
+        );
+      },
+    );
+    routes.get<{ Params: { id: string; version: string } }>(
+      "/v1/systems/:id/versions/:version",
+      async (request) => {
+        requireModuleAdmin(actors.get(request)!);
+        return options.systems!.adminGet(
+          slug(request.params.id),
+          semver(request.params.version),
+          actors.get(request)!,
+        );
+      },
+    );
     routes.get("/v1/system-apps", async (request) =>
       options.systems!.runtime(
         actors.get(request)!,

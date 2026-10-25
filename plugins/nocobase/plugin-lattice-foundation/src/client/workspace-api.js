@@ -29,6 +29,9 @@ function createWorkspaceApi({apiClient, onExpired = () => {}, notify = () => {}}
     async applications() {return (await request({url:'latticeApps:list',method:'get'})).data.data.items;},
     async connection() {return (await request({url:'dxActions:status',method:'get'})).data;},
     async catalog() {return (await request({url:'dxActions:catalog',method:'get'})).data.items;},
+    async studio(operation, payload = {}) {
+      return (await request({url:'dxActions:studio',method:'post',data:{...payload,operation}})).data;
+    },
     async systems(query = {limit: '50', offset: '0'}) {
       try {
         const response = await request({url:'dxActions:studio',method:'post',quiet:true,data:{operation:'apps',query}});
