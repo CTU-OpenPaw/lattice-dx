@@ -14,7 +14,10 @@ async function run() {
     const before = {};
     for (const schema of Object.values(schemas)) {
       before[schema.name] = await db.getRepository(schema.name).count();
-      assert.ok(before[schema.name] >= 2);
+      // Only these four registries are populated by FoundationSeed. New
+      // document/incident collections can be empty on a clean installation.
+      const seeded = ['latticeDepartments', 'latticeEmployees', 'latticeLocations', 'latticeAssets'];
+      assert.ok(before[schema.name] >= (seeded.includes(schema.name) ? 2 : 0));
     }
     const migration = new SeedMigration({db});
     assert.equal(migration.on, 'afterSync');

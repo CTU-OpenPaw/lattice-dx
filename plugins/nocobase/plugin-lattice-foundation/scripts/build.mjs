@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import {cp, mkdir, readdir, readFile, writeFile, unlink} from 'node:fs/promises';
+import {existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {join,dirname,resolve,relative} from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {externalVersionSource} from '../../../../scripts/lib/nocobase-externals.mjs';
 const root = fileURLToPath(new URL('../', import.meta.url));
 async function check(dir) {
   for (const item of await readdir(dir, {withFileTypes: true})) {
@@ -16,14 +18,24 @@ async function check(dir) {
 }
 await check(join(root, 'src'));
 await mkdir(join(root, 'dist'), {recursive: true});
+await writeFile(join(root,'dist/externalVersion.js'),externalVersionSource(['@nocobase/server','@nocobase/database','@nocobase/client','@nocobase/client-v2','@nocobase/plugin-workflow','react','antd']));
 await cp(join(root, 'src'), join(root, 'dist'), {recursive: true});
+// cp does not remove retired modules from an earlier local build. Prevent
+// auto-discovery from loading the old command journal/migrations again.
+for(const path of ['server/native-documents.js','server/collections/command-receipts.js','server/migrations/20261104000200-native-role-fields.js','server/migrations/20261104000300-native-role-fields-projection.js','server/migrations/20261104000400-native-role-fields.js','server/migrations/20261104000500-native-dispatcher-submit.js']) {
+  await unlink(join(root,'dist',path)).catch(error=>{if(error.code!=='ENOENT')throw error;});
+}
 // Bundle the dependency graph of trusted package modules. Host SDK/React remain
 // external. Adding an application extension does not require a bundler branch.
 await unlink(join(root,'dist/client/logistics.js')).catch(error=>{if(error.code!=='ENOENT')throw error;});
 async function bundle(entrySource,entryPath) {
   const modules=new Map();
   function modulePath(from,name) {
-    const path=resolve(dirname(from),name.endsWith('.js')?name:name+'.js');
+    let path=resolve(dirname(from),name.endsWith('.js')?name:name+'.js');
+    if(!existsSync(path)){
+      const dirIndex=resolve(dirname(from),name,'index.js');
+      if(existsSync(dirIndex))path=dirIndex;
+    }
     if(relative(join(root,'src'),path).startsWith('..'))throw new Error('Module outside plugin source: '+name);
     return path;
   }

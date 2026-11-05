@@ -4,12 +4,14 @@ import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const compose = ['--context', 'desktop-linux', 'compose', '-f', 'infra/compose/nocobase.yml'];
 const packages = [
   { directory: 'action-bridge', name: '@latticedx/plugin-action-bridge', build: 'build.mjs' },
   { directory: 'plugin-lattice-foundation', name: '@latticedx/plugin-lattice-foundation', build: 'scripts/build.mjs' },
+  { directory: 'plugin-enterprise-auth', name: '@latticedx/plugin-enterprise-auth', build: 'build.mjs', restoreDependencies: true },
 ];
 
 export function defaultRun(file, args, { timeout }) {
@@ -69,6 +71,11 @@ export async function installWorkspace({ run = defaultRun, backupDir = resolve(r
   await writeFile(backupPath + '.json', JSON.stringify({ size: dump.length, sha256: createHash('sha256').update(dump).digest('hex'), scope: 'NocoBase database only', restoreRehearsed: false, createdAt: new Date().toISOString() }, null, 2), { flag: 'wx', mode: 0o600 });
   // These directories are live bind mounts, so build only after backup succeeds.
   for (const pkg of local) {
+    if (pkg.restoreDependencies) {
+      const npmCli = [resolve(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), resolve(dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js'), '/usr/share/nodejs/npm/bin/npm-cli.js'].find(existsSync);
+      if (!npmCli) throw new Error('Node.js npm CLI is required to restore locked plugin dependencies; runtime unchanged.');
+      await command(process.execPath, [npmCli, 'ci', '--prefix', `plugins/nocobase/${pkg.directory}`, '--ignore-scripts', '--no-audit', '--no-fund'], 120000);
+    }
     await command(process.execPath, [`plugins/nocobase/${pkg.directory}/${pkg.build}`], 120000);
   }
   await docker(['up', '-d', '--no-deps', '--force-recreate', 'nocobase']);
