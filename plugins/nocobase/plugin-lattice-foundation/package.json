@@ -1,8 +1,8 @@
 {
-  "name": "@latticedx/plugin-lattice-foundation", "version": "0.17.0", "private": true,
+  "name": "@latticedx/plugin-lattice-foundation", "version": "0.24.0", "private": true,
   "license": "Apache-2.0", "type": "commonjs", "main": "dist/server/index.js",
   "displayName": "LatticeDX Foundation", "description": "Department, Employee, Location and Asset registries.",
   "files": ["dist", "server.js", "client.js", "client-v2.js", "README.md", "LICENSE", "scripts/check-runtime.cjs"],
   "scripts": {"build": "node scripts/build.mjs", "test": "node --test tests/*.test.cjs"},
-  "nocobase": {"supportedRuntime": "2.2.x", "testedRuntime": "2.2.22", "sdkProvidedByHost": true}
+  "nocobase": {"supportedVersions":["2.2.x"],"supportedRuntime": "2.2.x", "testedRuntime": "2.2.38", "sdkProvidedByHost": true}
 }

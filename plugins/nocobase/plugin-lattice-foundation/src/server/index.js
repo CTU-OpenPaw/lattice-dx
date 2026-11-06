@@ -4,8 +4,19 @@ const { seedFoundation } = require('./seed');
 const {createApplicationCatalog}=require('../shared/application-catalog');
 const {registerSampleApplications}=require('../applications/catalog');
 const {defaultContracts}=require('../shared/contracts');
+const {registerNativeResource}=require('./native-resource');
+const schemas=require('./schema');
+const {createNativeScopeMiddleware}=require('./native-scope');
+const {registerNativeIdentityHooks}=require('./native-identity-hooks');
+const {registerContextHooks}=require('./native-context');
+const {registerContextResource}=require('./native-context-delivery');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
+    registerNativeResource(this.app);
+    registerNativeIdentityHooks(this.db);
+    registerContextHooks(this.db);
+    registerContextResource(this.app);
+    this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
     registerSampleApplications(catalog);
     this.app.latticeApplications=catalog;

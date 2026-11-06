@@ -15,7 +15,7 @@ services:
       timeout: 5s
       retries: 20
   nocobase:
-    image: nocobase/nocobase:2.2.20@sha256:4d57058347c9862dc10b0fd9d0163a8d88918ba14a1c591a61cb76bb60a0cff3
+    image: nocobase/nocobase:2.2.38@sha256:90028473fe54b1fd1929b1ab0669a12e48a9a8f100d41662c98bc3c618225f4e
     init: true
     environment:
       APP_KEY: local-nocobase-app-key-public-fixture
@@ -31,10 +31,17 @@ services:
       DX_BRIDGE_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
       DX_BRIDGE_GATEWAY_URL: http://gateway:9080
       DX_BRIDGE_CALLBACK_URL: http://localhost:13000/api/dxActions:callback
+      DX_NATIVE_AUTH_ISSUER: http://localhost:8081/realms/lattice
+      DX_NATIVE_AUTH_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
+      DX_NATIVE_AUTH_ORIGIN: http://localhost:13000
+      DX_NATIVE_AUTH_CLIENT_ID: dx-native
+      DX_NATIVE_CONTEXT_BROKER_URL: http://orion-ld:1026
+      DX_NATIVE_CONTEXT_AUTO_SYNC: "true"
     volumes:
       - nocobase-storage:/app/nocobase/storage
       - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
       - ../../plugins/nocobase/plugin-lattice-foundation:/app/nocobase/node_modules/@latticedx/plugin-lattice-foundation:ro
+      - ../../plugins/nocobase/plugin-enterprise-auth:/app/nocobase/node_modules/@latticedx/plugin-enterprise-auth:ro
     ports:
       - "127.0.0.1:13000:80"
     depends_on:

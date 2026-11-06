@@ -1,0 +1,44 @@
+# SPDX-License-Identifier: Apache-2.0
+# Isolated upgrade rehearsal: no production volumes and no public listener.
+name: lattice-native-rehearsal
+services:
+  nocobase-db:
+    image: postgres:16.13-alpine
+    environment:
+      POSTGRES_DB: nocobase
+      POSTGRES_USER: nocobase
+      POSTGRES_PASSWORD: local-nocobase-password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nocobase -d nocobase"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  nocobase:
+    image: nocobase/nocobase:2.2.38@sha256:90028473fe54b1fd1929b1ab0669a12e48a9a8f100d41662c98bc3c618225f4e
+    init: true
+    environment:
+      APP_KEY: local-nocobase-app-key-public-fixture
+      ENCRYPTION_FIELD_KEY: local-nocobase-encryption-public-fixture
+      DB_DIALECT: postgres
+      DB_HOST: nocobase-db
+      DB_PORT: 5432
+      DB_DATABASE: nocobase
+      DB_USER: nocobase
+      DB_PASSWORD: local-nocobase-password
+      DX_BRIDGE_ISSUER: http://localhost:8081/realms/lattice
+      DX_BRIDGE_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
+      DX_BRIDGE_GATEWAY_URL: http://gateway:9080
+      DX_BRIDGE_CALLBACK_URL: http://localhost:13001/api/dxActions:callback
+      DX_NATIVE_AUTH_ISSUER: http://localhost:8081/realms/lattice
+      DX_NATIVE_AUTH_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
+      DX_NATIVE_AUTH_ORIGIN: http://localhost:13001
+      DX_NATIVE_AUTH_CLIENT_ID: dx-native-rehearsal
+    volumes:
+      - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
+      - ../../plugins/nocobase/plugin-lattice-foundation:/app/nocobase/node_modules/@latticedx/plugin-lattice-foundation:ro
+      - ../../plugins/nocobase/plugin-enterprise-auth:/app/nocobase/node_modules/@latticedx/plugin-enterprise-auth:ro
+    ports:
+      - "127.0.0.1:13001:80"
+    depends_on:
+      nocobase-db:
+        condition: service_healthy
