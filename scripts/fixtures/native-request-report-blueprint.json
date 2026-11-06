@@ -1,0 +1,38 @@
+{
+  "version": "1",
+  "mode": "create",
+  "navigation": {
+    "item": { "title": "Thống kê yêu cầu", "icon": "BarChartOutlined" }
+  },
+  "page": { "title": "Thống kê yêu cầu", "displayTitle": true, "enableTabs": false },
+  "tabs": [
+    {
+      "title": "Tổng quan",
+      "blocks": [
+        {
+          "key": "requests-by-status",
+          "type": "chart",
+          "title": "Số yêu cầu theo trạng thái",
+          "chart": "requests-by-status"
+        }
+      ]
+    }
+  ],
+  "assets": {
+    "charts": {
+      "requests-by-status": {
+        "query": {
+          "mode": "builder",
+          "resource": { "dataSourceKey": "main", "collectionName": "latticeRequests" },
+          "measures": [{ "field": "code", "aggregation": "count", "alias": "recordCount" }],
+          "dimensions": [{ "field": "status" }]
+        },
+        "visual": {
+          "mode": "basic",
+          "type": "bar",
+          "mappings": { "x": "status", "y": "recordCount" }
+        }
+      }
+    }
+  }
+}

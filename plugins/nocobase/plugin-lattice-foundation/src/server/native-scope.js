@@ -62,6 +62,15 @@ function createNativeScopeMiddleware(db, definitions) {
   const write = new Set(['create','update','destroy']);
   return async function nativeScope(ctx,next) {
     const {resourceName,actionName,params} = ctx.action;
+    // The host chart action reads the repository directly. Keep its ACL and
+    // add the same organization restriction as the collection actions.
+    if (resourceName === 'charts' && actionName === 'queryData' &&
+        schemas.has(params.values?.collection) && ctx.state.currentRole !== 'root') {
+      if (params.values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
+      const actor = await resolveNativeActor(db, ctx.state.currentUser);
+      params.values = scopeNativeRead(params.values, actor);
+      return next();
+    }
     const collectionName = resourceName?.split('.')[0];
     if (!schemas.has(collectionName)) return next();
     const proceed = ['latticeAssets', 'latticeEmployees', 'latticeDepartments'].includes(resourceName) && write.has(actionName)
