@@ -30,6 +30,33 @@ const mine=(actor,workflow)=>ok('workflowManualTasks:listMine?'+filter({workflow
 const submit=(actor,task,form,action,values={})=>call('workflowManualTasks:submit?filterByTk='+task.id,{token:actor.token,method:'POST',values:{result:{[form]:values,_:action}}});
 try {
   const employee=await actor('ldx_employee'),peer=await actor('ldx_employee'),manager=await actor('ldx_manager'),warehouse=await actor('ldx_warehouse'),director=await actor('ldx_director'),foreign=await actor('ldx_warehouse','foreign_'+suffix);
+  const chartFixtures=[];
+  for(const [organizationId,requesterId] of [[org,employee.employee.id],[org,peer.employee.id],['foreign_'+suffix,foreign.employee.id]]) {
+    chartFixtures.push(await create('latticeRequests',{organizationId,requesterId,code:randomUUID(),name:'Chart scope acceptance'}));
+  }
+  const chartQuery={
+    mode:'builder',variableResolution:'legacy-schema',dataSource:'main',collection:'latticeRequests',
+    dimensions:[{field:'code'}],filter:{code:{$in:chartFixtures.map(row=>row.code)}},
+    uid:'request-scope-'+suffix,cache:{enabled:true,ttl:30},
+  };
+  async function chartCodes(token,query=chartQuery){
+    const rows=await ok('charts:queryData',{token,method:'POST',values:query});
+    return rows.map(row=>row.code).sort();
+  }
+  assert.deepEqual(await chartCodes(root),chartFixtures.map(row=>row.code).sort());
+  assert.deepEqual(await chartCodes(manager.token),chartFixtures.slice(0,2).map(row=>row.code).sort());
+  assert.deepEqual(await chartCodes(employee.token),[chartFixtures[0].code]);
+  assert.deepEqual(await chartCodes(manager.token,{...chartQuery,filter:{organizationId:'foreign_'+suffix}}),[]);
+  const countByStatus={
+    ...chartQuery,dimensions:[{field:'status'}],measures:[{field:'code',aggregation:'count',alias:'recordCount'}],
+  };
+  for(const [token,recordCount] of [[root,3],[manager.token,2],[employee.token,1]]){
+    const rows=await ok('charts:queryData',{token,method:'POST',values:countByStatus});
+    assert.deepEqual(rows.map(row=>({status:row.status,recordCount:Number(row.recordCount)})),[{status:'draft',recordCount}]);
+  }
+  const sqlChart=await call('charts:queryData',{token:manager.token,method:'POST',values:{...chartQuery,mode:'sql'}});
+  assert.equal(sqlChart.status,403);
+  checks.push('native_charts_preserve_organization_record_acl_and_cache_scope');
   for(const collection of ['latticeRequests','latticeOrders']) {
     const workflow=await configureNativeProcess((path,options)=>ok(path,{...options,token:root}),{collection,organizationId:org,reviewerEmployeeId:manager.employee.id,assigneeEmployeeId:warehouse.employee.id});
     workflows.push(workflow);
