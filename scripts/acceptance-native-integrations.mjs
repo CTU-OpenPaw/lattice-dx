@@ -2,7 +2,9 @@
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {mkdir,writeFile} from 'node:fs/promises';
-const base='http://localhost:13000/api/',suffix=randomUUID().replaceAll('-','').slice(0,12),org='ingress_'+suffix,fixtures=[],flows=[],checks=[],brokerFixtures=[];
+const origin=new URL(process.env.NOCOBASE_URL??'http://localhost:13000');
+assert(['localhost','127.0.0.1'].includes(origin.hostname),'Local acceptance only');
+const base=new URL('/api/',origin).href,suffix=randomUUID().replaceAll('-','').slice(0,12),org='ingress_'+suffix,fixtures=[],flows=[],checks=[],brokerFixtures=[];
 async function call(path,{method='GET',token,values}={}){
  const r=await fetch(base+path,{method,headers:{'content-type':'application/json',...(token?{authorization:'Bearer '+token}:{})},...(values?{body:JSON.stringify(values)}:{}),signal:AbortSignal.timeout(15000)});
  const raw=await r.text();let b;try{b=JSON.parse(raw);}catch{b={};}return {status:r.status,data:b.data,error:b.errors?.[0]?.message};
