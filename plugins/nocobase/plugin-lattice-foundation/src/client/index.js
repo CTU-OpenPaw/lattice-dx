@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
-    define('@latticedx/plugin-lattice-foundation', ['@nocobase/client', 'react', 'antd', '@nocobase/client-v2'], factory);
+    define('@latticedx/plugin-lattice-foundation', ['@nocobase/client', 'react', 'antd', '@nocobase/client-v2', 'react-router-dom', '@nocobase/flow-engine'], factory);
   } else if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('@nocobase/client'), require('react'), require('antd'), require('@nocobase/client-v2'));
+    module.exports = factory(require('@nocobase/client'), require('react'), require('antd'), require('@nocobase/client-v2'), require('react-router-dom'), require('@nocobase/flow-engine'));
   }
-})(function (client, React, antd, clientV2) {
+})(function (client, React, antd, clientV2, router, flow) {
   'use strict';
   const actions = require('./actions');
   const {createWorkspaceComponent} = require('./workspace');
@@ -16,6 +16,7 @@
   const {createApplicationRuntime} = require('./application-runtime');
   const {registerApplicationViews} = require('../applications/views');
   const {defaultContracts}=require('../shared/contracts');
+  const {createNativeBuilderNavigation}=require('./native-builder-navigation');
   function useLatticeFormAction(manifest, blockId) {
     const apiClient = client.useAPIClient();
     const sharedApi = React.useMemo(() => createWorkspaceApi({apiClient}), [apiClient]);
@@ -31,6 +32,8 @@
   }
   class LatticeFoundationClient extends client.Plugin {
     async load() {
+      const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow});
+      if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
       this.app.addScopes({useLatticeFormAction});
       const blocks=createBlockComponents(client,React,antd);
       class LatticeFormBlockModel extends clientV2.BlockModel {

@@ -93,7 +93,7 @@ test('built browser entrypoints load through AMD without CommonJS require or mis
     let module;
     const define = (name, deps, factory) => {
       assert.equal(name, '@latticedx/plugin-lattice-foundation' + (entry === 'client-v2' ? '/client-v2' : ''));
-      assert.deepEqual(Array.from(deps), entry==='client'?['@nocobase/client', 'react','antd','@nocobase/client-v2']:['@nocobase/client', 'react']);
+      assert.deepEqual(Array.from(deps), entry==='client'?['@nocobase/client', 'react','antd','@nocobase/client-v2','react-router-dom','@nocobase/flow-engine']:['@nocobase/client', 'react']);
       module = factory({Plugin: class {}}, {}, {}, {BlockModel:class {static define(metadata){this.metadata=metadata} static registerFlow(flow){this.flow=flow}}});
     };
     define.amd = {};
