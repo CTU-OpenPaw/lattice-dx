@@ -31,7 +31,7 @@ Tên đường dẫn đề xuất. Có thể dùng route NocoBase hoặc route g
 
 Tệp là tùy chọn. Với hồ sơ có tệp, nhân viên **Lưu nháp → Đính kèm → Gửi**. Quản lý nhận việc sau khi hồ sơ được gửi. Hồ sơ không có tệp tiếp tục dùng nút **Tạo và gửi**. Cả hai đường đi qua cùng quy tắc gửi và chống tạo task trùng. Sau khi gửi, hồ sơ chỉ còn thao tác đọc tệp trong phạm vi được cấp quyền.
 
-Workflow hiện kích hoạt khi tạo bản ghi. Bản thử cần tách thời điểm lưu nháp khỏi thời điểm kích hoạt duyệt cho luồng có tệp. Duy review cách kích hoạt trên chuyển trạng thái và cách giữ luồng **Tạo và gửi** hiện có. Trước khi tích hợp, xác nhận một bản nháp chưa sinh task quản lý và một lần gửi chỉ sinh một task, kể cả khi gửi lại.
+Workflow hiện kích hoạt khi tạo bản ghi. Bản thử cần tách thời điểm lưu nháp khỏi thời điểm kích hoạt duyệt cho luồng có tệp. Bộ kiểm thử giả định lưu nháp qua `latticeRequests:create` và gửi qua `POST /v1/native/requests/{requestId}/submit` với `Idempotency-Key`. Duy review cách kích hoạt trên chuyển trạng thái và cách giữ luồng **Tạo và gửi** hiện có. Trước khi tích hợp, xác nhận một bản nháp chưa sinh task quản lý và một lần gửi chỉ sinh một task, kể cả khi gửi lại.
 
 ## Điều kiện nghiệm thu
 
@@ -45,5 +45,9 @@ Workflow hiện kích hoạt khi tạo bản ghi. Bản thử cần tách thời
 Đã kiểm tra hồ sơ `STUDIO-FIELD-01` đang chờ duyệt. Người tạo và quản lý đọc được hồ sơ. Tài khoản kho chưa được giao việc không thấy bản ghi qua API. Kết quả này kiểm chứng dữ liệu và quyền hồ sơ để dựng ca thử, phần tệp cần chạy lại khi có endpoint.
 
 Tạo một bản nháp mới với cùng ba tài khoản trong [hướng dẫn lab](native-ui-lab-guide.md), rồi gắn tệp văn bản `request-proof.txt` chứa dòng `native request attachment proof`. Kiểm tra quản lý chưa nhận task khi hồ sơ còn nháp. Gửi hồ sơ, xác nhận quản lý nhận đúng một task và tải được đúng bytes khi quét sạch. Dùng cùng cặp ID gọi trực tiếp bằng tài khoản kho và xác nhận bị từ chối. Giữ dữ liệu thử tách khỏi hồ sơ có sẵn.
+
+Chạy `node scripts/acceptance-native-request-attachments.mjs` để kiểm tra quyền hồ sơ và khả năng gọi API tệp. Chế độ mặc định chỉ đọc. Nó cần manifest lab `output/native-platform/ui-lab.json` và hồ sơ đang chờ duyệt `STUDIO-FIELD-01`. Có thể đặt `DX_ATTACHMENT_FIXTURE_CODE` để dùng mã khác, `NOCOBASE_URL` cho NocoBase và `DX_REQUEST_ATTACHMENTS_URL` cho gateway. Hai địa chỉ phải trỏ về localhost.
+
+Thêm `--run` sau khi API danh sách trả mảng JSON, trực tiếp hoặc trong trường `data`. Bộ kiểm thử tạo hồ sơ riêng với tiền tố `STUDIO-ATTACH-`, thử đính kèm và gửi lại, kiểm số task của đúng hồ sơ, so sánh bytes và kiểm thu hồi quyền bằng tài khoản thử tạm. Hồ sơ và tệp thử được giữ trên lab để đối chiếu. Nếu API danh sách chưa sẵn sàng, `--run` trả mã thoát `2` trước khi ghi dữ liệu.
 
 Nguồn đối chiếu trong repo gồm [upload và quét tệp](../apps/api/src/foundation.ts), [kiểm quyền khi tải](../apps/api/src/files/content.ts) và [contract tệp theo entity](entity-data-tools.md).
