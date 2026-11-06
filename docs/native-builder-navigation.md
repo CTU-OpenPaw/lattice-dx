@@ -25,16 +25,23 @@ Mã nguồn upstream đã đối chiếu ở tag `v2.2.20`: [AdminLayout](https:
 
 ## Kiểm chứng và giới hạn
 
-Foundation + Action Bridge đạt **191/191** kiểm tra, bao gồm 12 kiểm tra điều hướng: cây/quyền/đường dẫn, header hai mode, route builder, SPA links, native Outlet, giữ shell cho nhân viên, SDK thiếu, lỗi cập nhật và đăng ký từ bundle AMD.
+Ngày 06/11/2026, bản ghép với PR #38 tại `7ed4028` chạy trên NocoBase 2.2.38 và Foundation 0.24.0. `pnpm check` đạt 806 tests và build. Các bộ test plugin đạt 235/235, sáu ca identity/ACL và 22 ca workflow Request/Order qua API đạt.
 
-Chưa nghiệm thu hiển thị và thao tác thật trên trình duyệt vì quyền công cụ truy cập localhost bị chặn. Chưa chấp nhận hoàn thành nhiệm vụ giai đoạn 4 từ kết quả unit/contract. Chưa có panel block phải hoặc mapping ứng dụng nghiệp vụ → native page.
+Trên trình duyệt, builder chuyển giữa Config và Build UI, mở Native UI Lab từ cây trang và thêm block Markdown bằng UI Editor. Block còn sau khi tải lại và hiển thị khi đăng nhập nhân viên. Nhân viên gửi `STUDIO-1106-01`, quản lý duyệt qua Workflow To-do và người thực hiện hoàn thành. Bảng hiện `completed` sau khi tải lại.
 
-Các bước nghiệm thu thực tế còn lại:
+Phạm vi nghiệm thu là một trang Classic và ba vai trò nghiệp vụ trên môi trường thử. Các trang nghiệp vụ còn lại, Modern page, đăng nhập Keycloak trong bản ghép và ma trận vai trò đầy đủ cần kiểm tra riêng.
 
-1. Builder mở Config: không còn dãy nhóm trang/Add menu item trên header; sidebar và trang cấu hình native hoạt động.
-2. Chọn Build UI: chuyển SPA sang trang bắt đầu/trang vừa chọn, có cây bên trái. Chọn Classic/Modern page, kiểm tra back/forward và deep link.
-3. Bật/tắt UI Editor, thêm Table qua Add block native, cấu hình và reload để kiểm tra lưu đúng trang. Kiểm tra tab, popup/chi tiết và màn hình hẹp.
-4. Đổi role: nhân viên không có công cụ builder, truy cập trực tiếp và thao tác bị cấm vẫn bị host/server chặn.
+## Tái tạo trang thử
+
+Trên môi trường local riêng, build và bật Foundation, rồi chạy `yarn nocobase upgrade` trong container NocoBase thử để áp dụng migration. Lần cài mới đã trả `403` khi nhân viên tạo yêu cầu vì chưa có preset `ldx_employee`. Chạy upgrade bổ sung preset và luồng API đạt sau đó.
+
+```powershell
+$env:NOCOBASE_URL = 'http://localhost:13001'
+$env:NOCOBASE_DB_CONTAINER = 'lattice-native-studio-nocobase-db-1'
+node scripts/setup-native-ui-lab.mjs
+```
+
+Script dùng fixture `scripts/fixtures/native-ui-page.json` và tạo workflow, tài khoản thử và ID trang mới. Trên bản đã thử, schema UID là `nativeuilab8b72b41e93`, tab UID là `nlab432fb4862904`, route ID là `396209459691520`. Bản ghi IDs nằm trong `output/native-platform/ui-lab.json`. Schema sau khi thêm block đã lưu cục bộ tại `output/native-platform/studio-request-schema.json`. Để lặp lại thao tác chỉnh sửa, mở trang từ Build UI và dùng **UI Editor → Add block → Markdown**. Cách đăng nhập và tạo yêu cầu dùng hướng dẫn Native UI Lab đi kèm.
 
 ## Nạp bundle trong môi trường local
 

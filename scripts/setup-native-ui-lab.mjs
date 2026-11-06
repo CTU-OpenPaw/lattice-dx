@@ -7,7 +7,14 @@ import {spawnSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {configureNativeProcess} from './configure-native-process.mjs';
 import {instantiateNativePage} from './lib/native-ui-fixture.mjs';
-const base='http://localhost:13000/api/',org='native-ui-lab';
+const host = new URL(process.env.NOCOBASE_URL ?? 'http://localhost:13000');
+assert.ok(['localhost', '127.0.0.1'].includes(host.hostname) && host.protocol === 'http:', 'Local lab only');
+const dbContainer = process.env.NOCOBASE_DB_CONTAINER ?? 'lattice-dx-nocobase-db-1';
+if (host.port !== '13000') {
+  assert.ok(process.env.NOCOBASE_DB_CONTAINER && dbContainer !== 'lattice-dx-nocobase-db-1', 'Set the isolated lab DB container explicitly');
+}
+const base = new URL('/api/', host).href;
+const org = 'native-ui-lab';
 const manifestPath='output/native-platform/ui-lab.json';
 async function api(path,{token,method='GET',values}={}){
   const r=await fetch(base+path,{method,headers:{'content-type':'application/json',...(token?{authorization:'Bearer '+token}:{})},...(values?{body:JSON.stringify(values)}:{}),signal:AbortSignal.timeout(15000)});
@@ -16,13 +23,13 @@ async function api(path,{token,method='GET',values}={}){
 const token=(await api('auth:signIn',{method:'POST',values:{email:'admin@nocobase.com',password:'admin123'}})).token;
 const root=(path,options)=>api(path,{...options,token});
 let manifest;try{manifest=JSON.parse(await readFile(manifestPath,'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
-if(manifest){assert.equal(manifest.organizationId,org);assert.ok(manifest.path&&manifest.workflow&&manifest.accounts.length===3,'Incomplete lab manifest; inspect recorded IDs before resuming');console.log(JSON.stringify({result:'EXISTS',path:manifest.path,accounts:manifest.accounts.map(a=>a.username)}));}
+if(manifest){assert.equal(manifest.organizationId,org);assert.equal(manifest.origin??'http://localhost:13000',host.origin,'Lab manifest belongs to a different runtime');assert.ok(manifest.path&&manifest.workflow&&manifest.accounts.length===3,'Incomplete lab manifest; inspect recorded IDs before resuming');console.log(JSON.stringify({result:'EXISTS',path:manifest.path,accounts:manifest.accounts.map(a=>a.username)}));}
 else{
-  const dump=spawnSync('docker',['exec','lattice-dx-nocobase-db-1','pg_dump','--format=custom','-U','nocobase','-d','nocobase'],{encoding:null,maxBuffer:256*1024*1024,windowsHide:true});
+  const dump=spawnSync('docker',['exec',dbContainer,'pg_dump','--format=custom','-U','nocobase','-d','nocobase'],{encoding:null,maxBuffer:256*1024*1024,windowsHide:true});
   assert.equal(dump.status,0,'DB backup required');assert.equal(dump.stdout.subarray(0,5).toString(),'PGDMP');
   await mkdir('output/backups',{recursive:true});await mkdir('output/native-platform',{recursive:true});
   const backupPath=`output/backups/native-ui-${randomUUID()}.dump`;await writeFile(backupPath,dump.stdout,{flag:'wx'});
-  manifest={organizationId:org,accounts:[],backupPath};
+  manifest={organizationId:org,origin:host.origin,accounts:[],backupPath};
   // Save partial manifest after every mutation so failures remain inspectable.
   const save=()=>writeFile(manifestPath,JSON.stringify(manifest,null,2));await save();
   const department=await root('latticeDepartments:create',{method:'POST',values:{code:'NATIVE-UI-LAB',name:'Native UI Lab',organizationId:org}});manifest.departmentId=department.id;await save();
