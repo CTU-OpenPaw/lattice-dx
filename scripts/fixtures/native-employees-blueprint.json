@@ -1,0 +1,124 @@
+{
+  "version": "1",
+  "mode": "create",
+  "navigation": {
+    "group": {
+      "title": "Danh mục nội bộ",
+      "icon": "AppstoreOutlined"
+    },
+    "item": {
+      "title": "Nhân viên",
+      "icon": "TeamOutlined"
+    }
+  },
+  "page": {
+    "title": "Nhân viên",
+    "displayTitle": true,
+    "enableTabs": false
+  },
+  "tabs": [
+    {
+      "title": "Danh sách",
+      "blocks": [
+        {
+          "key": "employees",
+          "type": "table",
+          "title": "Danh sách nhân viên",
+          "collection": "latticeEmployees",
+          "settings": {
+            "pageSize": 10
+          },
+          "fields": [
+            "name",
+            "code",
+            "organizationId"
+          ],
+          "actions": [
+            "filter",
+            "refresh",
+            {
+              "type": "addNew",
+              "title": "Thêm nhân viên",
+              "popup": {
+                "title": "Thêm nhân viên",
+                "blocks": [
+                  {
+                    "type": "createForm",
+                    "collection": "latticeEmployees",
+                    "fields": [
+                      "code",
+                      "name",
+                      "organizationId",
+                      {
+                        "field": "department",
+                        "fieldType": "select",
+                        "titleField": "name",
+                        "label": "Phòng ban"
+                      }
+                    ],
+                    "actions": [
+                      "submit"
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "recordActions": [
+            {
+              "type": "view",
+              "title": "Chi tiết",
+              "popup": {
+                "title": "Chi tiết nhân viên",
+                "blocks": [
+                  {
+                    "type": "details",
+                    "resource": {
+                      "binding": "currentRecord",
+                      "dataSourceKey": "main",
+                      "collectionName": "latticeEmployees"
+                    },
+                    "fields": [
+                      "name",
+                      "code",
+                      "organizationId"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "type": "edit",
+              "title": "Sửa nhân viên",
+              "popup": {
+                "title": "Sửa nhân viên nhân viên",
+                "blocks": [
+                  {
+                    "type": "editForm",
+                    "resource": {
+                      "binding": "currentRecord",
+                      "dataSourceKey": "main",
+                      "collectionName": "latticeEmployees"
+                    },
+                    "fields": [
+                      "name",
+                      {
+                        "field": "department",
+                        "fieldType": "select",
+                        "titleField": "name",
+                        "label": "Phòng ban"
+                      }
+                    ],
+                    "actions": [
+                      "submit"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
