@@ -27,8 +27,27 @@ try {
   const deptA=await create('latticeDepartments',{code:'DA_'+suffix,name:'Acceptance A',organizationId:orgA});
   const deptB=await create('latticeDepartments',{code:'DB_'+suffix,name:'Acceptance B',organizationId:orgB});
   const employee=await create('latticeEmployees',{code:'EA_'+suffix,name:'Acceptance employee',organizationId:orgA,departmentId:deptA.id,userId:user.id,active:true});
+  const foreignEmployee=await create('latticeEmployees',{code:'EB_'+suffix,name:'Acceptance foreign employee',organizationId:orgB,departmentId:deptB.id});
   const assetA=await create('latticeAssets',{code:'AA_'+suffix,name:'Acceptance asset A',organizationId:orgA,departmentId:deptA.id});
   const assetB=await create('latticeAssets',{code:'AB_'+suffix,name:'Acceptance asset B',organizationId:orgB,departmentId:deptB.id});
+  const invalidReferences=[
+    {departmentId:deptB.id},{department:{id:deptB.id}},
+    {custodianId:foreignEmployee.id},{custodian:{id:foreignEmployee.id}},
+  ];
+  for(const [index,reference] of invalidReferences.entries()){
+    const deniedCreate=await call('latticeAssets:create',{token,method:'POST',values:{code:`BAD_${suffix}_${index}`,name:'Invalid assignment',organizationId:orgA,...reference}});
+    if(deniedCreate.body.data?.id)fixtures.push({resource:'latticeAssets',id:deniedCreate.body.data.id});
+    assert.equal(deniedCreate.status,409);
+    const deniedUpdate=await call('latticeAssets:update?filterByTk='+assetA.id,{token,method:'POST',values:reference});
+    assert.equal(deniedUpdate.status,409);
+  }
+  const unchanged=await success('latticeAssets:get?filterByTk='+assetA.id,{token});
+  assert.equal(String(unchanged.departmentId),String(deptA.id));
+  assert.equal(unchanged.custodianId,null);
+  await success('latticeAssets:update?filterByTk='+assetA.id,{token,method:'POST',values:{custodian:{id:employee.id}}});
+  const assigned=await success('latticeAssets:get?filterByTk='+assetA.id,{token});
+  assert.equal(String(assigned.custodianId),String(employee.id));
+  checks.push('root_asset_assignment_stays_in_organization');
   const session=await success('auth:signIn',{method:'POST',values:{email:`${suffix}@example.invalid`,password}});
   const actorToken=session.token;
   const ctx=await success('latticeNative:context',{token:actorToken});
