@@ -55,6 +55,14 @@ Chạy migration Foundation, đặt `DX_NATIVE_CLAMD_HOST` thành tên máy Clam
 
 Chạy `node scripts/acceptance-native-request-attachment-api.mjs` trên lab. Script tạo tài khoản, workflow và hồ sơ thử. Nó xác nhận ClamAV chặn tệp mẫu, tệp sạch tải đúng nội dung, hai lần upload cùng khóa chỉ lưu một bản, hai lần gửi đồng thời chỉ tạo một task và đường tải trực tiếp chặn truy cập sai phạm vi. Script dọn dữ liệu thử khi kết thúc.
 
+## Form thử trên NocoBase
+
+Trang Modern **Yêu cầu có đính kèm** dùng JS Block để gọi API NocoBase theo phiên người dùng hiện tại. Trang chỉ mở form cho tài khoản thuộc tổ chức thử. Tài khoản quản lý và kho thấy các hồ sơ được ACL cấp quyền. [API xác thực trong JS Block](https://docs.nocobase.com/runjs/context/request)
+
+Tạo tài khoản nhân viên, quản lý và kho thuộc tổ chức thử. Dùng `node scripts/configure-native-process.mjs --collection=latticeRequests --organization=native-attachment-submit-lab --reviewer=EMPLOYEE_ID --assignee=EMPLOYEE_ID --start-on-submit=true` với `NOCOBASE_URL=http://localhost:13001`, rồi bật workflow mới trong NocoBase. Hai ID trên là ID hồ sơ nhân viên của quản lý và kho. Đặt `NOCOBASE_TOKEN` bằng token root và chạy `node scripts/setup-native-request-attachments-page.mjs` một lần. Nếu cần nạp lại mã cho block hiện có, truyền UID của block qua `DX_ATTACHMENT_FORM_BLOCK_UID`.
+
+Trên trình duyệt, nhân viên đã lưu nháp, đính kèm `request-proof.txt` và gửi duyệt. Một hồ sơ khác được gửi ngay bằng **Tạo và gửi**. Mỗi hồ sơ có một task duyệt. Quản lý mở trang, yêu cầu tải tệp và nhận đúng bytes của tệp thử. Tài khoản ngoài tổ chức thử nhận thông báo giới hạn truy cập. Việc tích hợp kho tệp chung và nghiệm thu trên môi trường chung vẫn cần review.
+
 ### Ca thử đầu tiên trên lab 13001
 
 Đã kiểm tra hồ sơ `STUDIO-FIELD-01` đang chờ duyệt. Người tạo và quản lý đọc được hồ sơ. Tài khoản kho chưa được giao việc không thấy bản ghi qua API. Kết quả này kiểm chứng dữ liệu và quyền hồ sơ để dựng ca thử, phần tệp cần chạy lại khi có endpoint.
