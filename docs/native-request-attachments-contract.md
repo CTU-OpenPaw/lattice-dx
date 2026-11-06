@@ -1,6 +1,6 @@
 # Contract đề xuất cho tệp đính kèm của Yêu cầu native
 
-Trạng thái: bản nháp để Duy review. Các endpoint dưới đây là đề xuất, chưa được triển khai.
+Trạng thái: contract tích hợp kho tệp dùng chung đang được review. Các endpoint `/v1/native/...` dưới đây vẫn là đề xuất; bản thử API NocoBase chạy trong cùng tiến trình được mô tả riêng ở mục **Bản thử API trên lab**.
 
 ## Phần dùng lại
 
@@ -12,7 +12,9 @@ Trạng thái: bản nháp để Duy review. Các endpoint dưới đây là đ�
 
 - `requestId` là ID của `main/latticeRequests`, truyền dưới dạng chuỗi số nguyên dương. `fileId` là UUID do dịch vụ tệp cấp. Bản ghi liên kết lưu ngữ cảnh native, request ID, file ID và tổ chức đã xác minh. Tạo lại cùng yêu cầu với cùng khóa idempotency trả kết quả cũ. Cùng khóa với payload khác trả `409`.
 - NocoBase xác thực phiên, xác định membership đang hoạt động và kiểm tra quyền trên chính yêu cầu. Dịch vụ tệp nhận danh tính đã xác minh và ngữ cảnh hồ sơ qua kết nối máy chủ với máy chủ. Tổ chức, vai trò và chủ sở hữu do máy chủ xác định. Cơ chế xác thực giữa hai máy chủ là điểm Duy cần chốt.
+- Khi nối kho tệp dùng chung, dịch vụ tệp phải xác thực adapter NocoBase bằng credential máy chủ riêng và ràng buộc ngữ cảnh với tổ chức, request ID, thao tác và file ID. Không tin danh tính do trình duyệt tự khai báo. Chưa triển khai ranh giới này trong bản thử cùng tiến trình.
 - Thêm tệp cần quyền sửa yêu cầu và trạng thái cho phép chỉnh. Danh sách và tải cần quyền đọc yêu cầu hiện tại. Kiểm cả quan hệ giữa tệp và yêu cầu, tổ chức và trạng thái quét khi tải. Tệp native chỉ được tải qua ngữ cảnh hồ sơ đã liên kết. Đường tải độc lập theo chủ tệp và URL kho trực tiếp đều phải từ chối tệp native.
+- Với kho đối tượng có thể thay đổi nội dung, kết quả quét phải gắn với file ID và digest/version của chính bytes đã quét; tải phải kiểm lại nội dung đó. Bản thử PostgreSQL lưu chính Buffer được ClamAV chấp nhận vào bảng riêng, không có API thay thế bytes tại cùng file ID.
 
 ## API dành cho giao diện
 
@@ -54,6 +56,10 @@ Chạy migration Foundation, đặt `DX_NATIVE_CLAMD_HOST` thành tên máy Clam
 | Gửi | `POST /api/latticeRequestAttachments:submit?requestId={id}` |
 
 Chạy `node scripts/acceptance-native-request-attachment-api.mjs` trên lab. Script tạo tài khoản, workflow và hồ sơ thử. Nó xác nhận ClamAV chặn tệp mẫu, tệp sạch tải đúng nội dung, hai lần upload cùng khóa chỉ lưu một bản, hai lần gửi đồng thời chỉ tạo một task và đường tải trực tiếp chặn truy cập sai phạm vi. Script dọn dữ liệu thử khi kết thúc.
+
+Chống trùng gửi lại và gửi đồng thời dựa trên khóa bản ghi và chuyển trạng thái nguyên tử `draft → submitted`, không phụ thuộc khóa gửi lại của trình duyệt. Đây chưa phải bảo đảm phục hồi sau sự cố: workflow async native kích hoạt sau commit; tiến trình dừng giữa commit trạng thái và tạo execution có thể để hồ sơ đã gửi chưa có task. Trước triển khai chính thức cần kiểm chứng phục hồi native hoặc cơ chế tạo execution bền vững; không tự kích hoạt workflow lần nữa khi retry.
+
+Nghiệm thu bản thử chưa bao gồm khôi phục sau crash, lỗi kho tệp dùng chung và vòng đời tệp mồ côi. Không bật đồng thời workflow kích hoạt khi tạo và workflow kích hoạt khi gửi cho cùng tổ chức. Chỉ tổ chức thử được cấu hình mới được dùng thao tác gửi này; chưa thay thế đường gửi chung trên môi trường chính.
 
 ## Form thử trên NocoBase
 
