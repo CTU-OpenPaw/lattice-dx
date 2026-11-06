@@ -41,17 +41,18 @@ async function updateScopedDocument(db,ctx,actor) {
     ctx.status=200;
   });
 }
-async function writeAsset(ctx, next) {
+const directoryReferenceErrors = new Map([
+  ['lattice_assets_department_org', 'Phòng ban phải thuộc cùng tổ chức với tài sản.'],
+  ['lattice_assets_custodian_org', 'Người phụ trách phải thuộc cùng tổ chức với tài sản.'],
+  ['lattice_employees_department_org', 'Phòng ban phải thuộc cùng tổ chức với nhân viên.'],
+]);
+
+async function writeDirectoryRecord(ctx, next) {
   try {
     return await next();
   } catch (error) {
-    const constraint = error.original?.constraint;
-    if (constraint === 'lattice_assets_department_org') {
-      ctx.throw(409, 'Phòng ban phải thuộc cùng tổ chức với tài sản.');
-    }
-    if (constraint === 'lattice_assets_custodian_org') {
-      ctx.throw(409, 'Người phụ trách phải thuộc cùng tổ chức với tài sản.');
-    }
+    const message = directoryReferenceErrors.get(error.original?.constraint);
+    if (message) ctx.throw(409, message);
     throw error;
   }
 }
@@ -63,8 +64,8 @@ function createNativeScopeMiddleware(db, definitions) {
     const {resourceName,actionName,params} = ctx.action;
     const collectionName = resourceName?.split('.')[0];
     if (!schemas.has(collectionName)) return next();
-    const proceed = resourceName === 'latticeAssets' && write.has(actionName)
-      ? () => writeAsset(ctx, next)
+    const proceed = ['latticeAssets', 'latticeEmployees', 'latticeDepartments'].includes(resourceName) && write.has(actionName)
+      ? () => writeDirectoryRecord(ctx, next)
       : next;
     // Root is the verified host configuration role, not a body/header flag.
     if (ctx.state.currentRole === 'root') return proceed();

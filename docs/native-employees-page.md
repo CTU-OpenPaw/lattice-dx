@@ -2,11 +2,11 @@
 
 Trang Modern **Danh mục nội bộ → Nhân viên** dùng bảng, chi tiết và form native trên collection `latticeEmployees`. Bảng lọc theo tên, mã và tổ chức, với 10 dòng mỗi trang. Quản trị viên root nhập mã, tên, tổ chức và phòng ban khi tạo. Form sửa cho phép đổi tên và phòng ban.
 
-Role `ldx_employee` chỉ đọc bản ghi trong tổ chức của mình. Bảng và chi tiết dùng các trường đơn giản để giữ nguyên cơ chế chặn truy vấn mở rộng quan hệ của Foundation. Form chọn phòng ban dành cho root trên lab. Bộ chọn của root có thể liệt kê phòng ban từ nhiều tổ chức, vì vậy chỉ chọn phòng ban cùng tổ chức với nhân viên khi thử.
+Role `ldx_employee` chỉ đọc bản ghi trong tổ chức của mình. Bảng và chi tiết dùng các trường đơn giản để giữ nguyên cơ chế chặn truy vấn mở rộng quan hệ của Foundation. Form chọn phòng ban dành cho root trên lab. Bộ chọn có thể liệt kê phòng ban từ nhiều tổ chức. Sau khi áp dụng migration, máy chủ trả HTTP `409` nếu phòng ban được chọn thuộc tổ chức khác và giữ nguyên bản ghi cũ khi lưu thất bại.
 
 ## Tái tạo trên lab
 
-Chạy từ repo với NocoBase 2.2.38, Foundation 0.24.0 và preset quyền đã được migration. Đặt `NOCOBASE_TOKEN` bằng token root của lab. Chạy blueprint một lần trên mỗi lab. NocoBase cấp ID mới cho trang và tab.
+Chạy từ repo với NocoBase 2.2.38, PostgreSQL và bản Foundation đã build từ nhánh này. Chạy `yarn nocobase upgrade` trong container lab để áp dụng preset quyền và các migration ràng buộc tổ chức. Với dữ liệu cũ, kiểm tra các liên kết sai tổ chức hoặc thiếu phòng ban trước khi upgrade vì migration sẽ dừng nếu gặp dữ liệu vi phạm. Đặt `NOCOBASE_TOKEN` bằng token root của lab. Chạy blueprint một lần trên mỗi lab. NocoBase cấp ID mới cho trang và tab.
 
 ```powershell
 $labApi = 'http://localhost:13001/api/'
@@ -44,5 +44,7 @@ $page.target.pageSchemaUid
 
 - Quản trị viên tạo `STUDIO-EMP-01`, chọn **Native UI Lab**, rồi đổi sang **Phòng ban kiểm thử đã cập nhật** trên desktop. Form mở lại sau khi tải trang hiển thị phòng ban mới. API xác nhận `departmentId` đổi từ `5` sang `6`.
 - Người dùng cuối mở được trang `g3ot2b4wr3c`, thấy bốn bản ghi thuộc `native-ui-lab` và chỉ có thao tác **Chi tiết** trên từng dòng. API trả HTTP `403` khi tài khoản này thử tạo, sửa hoặc truy vấn mở rộng quan hệ.
-- Ở khung hẹp, lần thử đổi phòng ban vẫn giữ giá trị cũ. Kết quả đổi phòng ban đã được xác nhận trên desktop.
+- Kiểm lại ở khung hẹp 440 px, đổi về **Native UI Lab**, lưu và mở lại. Form hiển thị đúng giá trị mới và API xác nhận `departmentId = 5`.
+- Form desktop báo lỗi khi chọn phòng ban khác tổ chức. Bài kiểm tra `scripts/acceptance-native-foundation.mjs` xác nhận tạo và sửa đều bị chặn với cả khóa ngoại trực tiếp lẫn đối tượng quan hệ.
+- Kiểm tra hồi quy cả ba trang Phòng ban, Nhân viên và Tài sản bằng tài khoản người dùng cuối. Mở chi tiết được trong tổ chức, truy vấn theo ID ngoài tổ chức không trả dữ liệu và thao tác sửa trả `403`. Bằng chứng ở `output/native-platform/studio-directory-recheck.json`.
 - Bằng chứng cục bộ nằm trong `output/native-platform/studio-employees-check.json` và `output/native-platform/studio-employees.jpg`.

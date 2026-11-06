@@ -28,6 +28,16 @@ try {
   const deptB=await create('latticeDepartments',{code:'DB_'+suffix,name:'Acceptance B',organizationId:orgB});
   const employee=await create('latticeEmployees',{code:'EA_'+suffix,name:'Acceptance employee',organizationId:orgA,departmentId:deptA.id,userId:user.id,active:true});
   const foreignEmployee=await create('latticeEmployees',{code:'EB_'+suffix,name:'Acceptance foreign employee',organizationId:orgB,departmentId:deptB.id});
+  for(const [index,reference] of [{departmentId:deptB.id},{department:{id:deptB.id}}].entries()){
+    const deniedCreate=await call('latticeEmployees:create',{token,method:'POST',values:{code:`BAD_EMP_${suffix}_${index}`,name:'Invalid department',organizationId:orgA,...reference}});
+    if(deniedCreate.body.data?.id)fixtures.push({resource:'latticeEmployees',id:deniedCreate.body.data.id});
+    assert.equal(deniedCreate.status,409);
+    const deniedUpdate=await call('latticeEmployees:update?filterByTk='+employee.id,{token,method:'POST',values:reference});
+    assert.equal(deniedUpdate.status,409);
+  }
+  const unchangedEmployee=await success('latticeEmployees:get?filterByTk='+employee.id,{token});
+  assert.equal(String(unchangedEmployee.departmentId),String(deptA.id));
+  checks.push('root_employee_department_stays_in_organization');
   const assetA=await create('latticeAssets',{code:'AA_'+suffix,name:'Acceptance asset A',organizationId:orgA,departmentId:deptA.id});
   const assetB=await create('latticeAssets',{code:'AB_'+suffix,name:'Acceptance asset B',organizationId:orgB,departmentId:deptB.id});
   const invalidReferences=[
