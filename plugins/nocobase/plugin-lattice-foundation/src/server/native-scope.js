@@ -41,6 +41,21 @@ async function updateScopedDocument(db,ctx,actor) {
     ctx.status=200;
   });
 }
+const directoryReferenceErrors = new Map([
+  ['lattice_assets_department_org', 'Phòng ban phải thuộc cùng tổ chức với tài sản.'],
+  ['lattice_assets_custodian_org', 'Người phụ trách phải thuộc cùng tổ chức với tài sản.'],
+  ['lattice_employees_department_org', 'Phòng ban phải thuộc cùng tổ chức với nhân viên.'],
+]);
+
+async function writeDirectoryRecord(ctx, next) {
+  try {
+    return await next();
+  } catch (error) {
+    const message = directoryReferenceErrors.get(error.original?.constraint);
+    if (message) ctx.throw(409, message);
+    throw error;
+  }
+}
 function createNativeScopeMiddleware(db, definitions) {
   const schemas = new Map(Object.values(definitions).map(schema=>[schema.name,schema]));
   const read = new Set(['list','get','count']);
@@ -49,8 +64,11 @@ function createNativeScopeMiddleware(db, definitions) {
     const {resourceName,actionName,params} = ctx.action;
     const collectionName = resourceName?.split('.')[0];
     if (!schemas.has(collectionName)) return next();
+    const proceed = ['latticeAssets', 'latticeEmployees', 'latticeDepartments'].includes(resourceName) && write.has(actionName)
+      ? () => writeDirectoryRecord(ctx, next)
+      : next;
     // Root is the verified host configuration role, not a body/header flag.
-    if (ctx.state.currentRole === 'root') return next();
+    if (ctx.state.currentRole === 'root') return proceed();
     const actor = await resolveNativeActor(db,ctx.state.currentUser);
     if (resourceName !== collectionName) throw failure('NATIVE_ASSOCIATION_ACTION_UNSUPPORTED');
     if (!read.has(actionName) && !write.has(actionName)) throw failure('NATIVE_ACTION_UNSUPPORTED');
@@ -86,7 +104,7 @@ function createNativeScopeMiddleware(db, definitions) {
     }
     ctx.state.latticeNativeActor=actor;
     if(document&&actionName==='update')return updateScopedDocument(db,ctx,actor);
-    return next();
+    return proceed();
   };
 }
 module.exports = {resolveNativeActor, scopeNativeRead, scopeNativeValues,createNativeScopeMiddleware,updateScopedDocument};

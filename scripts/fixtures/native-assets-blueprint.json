@@ -1,0 +1,142 @@
+{
+  "version": "1",
+  "mode": "create",
+  "navigation": {
+    "group": {
+      "title": "Danh mục nội bộ",
+      "icon": "AppstoreOutlined"
+    },
+    "item": {
+      "title": "Tài sản",
+      "icon": "DatabaseOutlined"
+    }
+  },
+  "page": {
+    "title": "Tài sản",
+    "displayTitle": true,
+    "enableTabs": false
+  },
+  "tabs": [
+    {
+      "title": "Danh sách",
+      "blocks": [
+        {
+          "key": "assets",
+          "type": "table",
+          "title": "Danh sách tài sản",
+          "collection": "latticeAssets",
+          "settings": {
+            "pageSize": 10
+          },
+          "fields": [
+            "name",
+            "code",
+            "kind",
+            "status",
+            "organizationId"
+          ],
+          "actions": [
+            "filter",
+            "refresh",
+            {
+              "type": "addNew",
+              "title": "Thêm tài sản",
+              "popup": {
+                "title": "Thêm tài sản",
+                "blocks": [
+                  {
+                    "type": "createForm",
+                    "collection": "latticeAssets",
+                    "fields": [
+                      "code",
+                      "name",
+                      "organizationId",
+                      "kind",
+                      {
+                        "field": "department",
+                        "fieldType": "select",
+                        "titleField": "name",
+                        "label": "Phòng ban"
+                      },
+                      {
+                        "field": "custodian",
+                        "fieldType": "select",
+                        "titleField": "name",
+                        "label": "Người phụ trách"
+                      }
+                    ],
+                    "actions": [
+                      "submit"
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "recordActions": [
+            {
+              "type": "view",
+              "title": "Chi tiết",
+              "popup": {
+                "title": "Chi tiết tài sản",
+                "blocks": [
+                  {
+                    "type": "details",
+                    "resource": {
+                      "binding": "currentRecord",
+                      "dataSourceKey": "main",
+                      "collectionName": "latticeAssets"
+                    },
+                    "fields": [
+                      "name",
+                      "code",
+                      "kind",
+                      "status",
+                      "organizationId"
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "type": "edit",
+              "title": "Sửa tài sản",
+              "popup": {
+                "title": "Sửa tài sản tài sản",
+                "blocks": [
+                  {
+                    "type": "editForm",
+                    "resource": {
+                      "binding": "currentRecord",
+                      "dataSourceKey": "main",
+                      "collectionName": "latticeAssets"
+                    },
+                    "fields": [
+                      "name",
+                      "kind",
+                      {
+                        "field": "department",
+                        "fieldType": "select",
+                        "titleField": "name",
+                        "label": "Phòng ban"
+                      },
+                      {
+                        "field": "custodian",
+                        "fieldType": "select",
+                        "titleField": "name",
+                        "label": "Người phụ trách"
+                      }
+                    ],
+                    "actions": [
+                      "submit"
+                    ]
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
