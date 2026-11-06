@@ -40,6 +40,21 @@ Workflow hiện kích hoạt khi tạo bản ghi. Bản thử cần tách thời
 3. Tệp đang chờ quét, bị từ chối hoặc gặp lỗi scanner không trả bytes. Thu hồi quyền sau khi mở chi tiết phải chặn lần tải tiếp theo.
 4. Kiểm tra URL kho, endpoint tải độc lập, retry cùng khóa, hai thao tác đồng thời, lỗi giữa upload và gắn liên kết. Thử trên form native và bằng HTTP trực tiếp.
 
+## Bản thử API trên lab
+
+Bản thử chạy trong plugin NocoBase. Nó dùng ClamAV hiện có và lưu bytes đã quét sạch trong bảng PostgreSQL riêng. Bảng này không đăng ký làm collection công khai. Đường tải đọc quyền của hồ sơ qua ACL NocoBase trong mỗi lần gọi. Việc dùng chung kho tệp với dịch vụ gateway vẫn là phần cần chốt khi tích hợp.
+
+Chạy migration Foundation, đặt `DX_NATIVE_CLAMD_HOST` thành tên máy ClamAV có thể truy cập từ container NocoBase qua cổng `3310`. Đặt `DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION=native-attachment-submit-lab` để mở thao tác gửi cho đúng tổ chức thử. Dùng workflow `startOnSubmit: true` trong tổ chức thử. Workflow theo dõi trạng thái chuyển sang `submitted`. Giữ một workflow duyệt đang bật cho tổ chức thử.
+
+| Thao tác | API NocoBase của bản thử |
+| --- | --- |
+| Danh sách | `GET /api/latticeRequestAttachments:list?requestId={id}` |
+| Đính kèm | `POST /api/latticeRequestAttachments:upload?requestId={id}` với payload và khóa như ở trên |
+| Tải nội dung | `GET /api/latticeRequestAttachments:download?requestId={id}&fileId={uuid}` |
+| Gửi | `POST /api/latticeRequestAttachments:submit?requestId={id}` |
+
+Chạy `node scripts/acceptance-native-request-attachment-api.mjs` trên lab. Script tạo tài khoản, workflow và hồ sơ thử. Nó xác nhận ClamAV chặn tệp mẫu, tệp sạch tải đúng nội dung, hai lần upload cùng khóa chỉ lưu một bản, hai lần gửi đồng thời chỉ tạo một task và đường tải trực tiếp chặn truy cập sai phạm vi. Script dọn dữ liệu thử khi kết thúc.
+
 ### Ca thử đầu tiên trên lab 13001
 
 Đã kiểm tra hồ sơ `STUDIO-FIELD-01` đang chờ duyệt. Người tạo và quản lý đọc được hồ sơ. Tài khoản kho chưa được giao việc không thấy bản ghi qua API. Kết quả này kiểm chứng dữ liệu và quyền hồ sơ để dựng ca thử, phần tệp cần chạy lại khi có endpoint.
