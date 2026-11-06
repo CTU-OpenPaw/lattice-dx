@@ -43,6 +43,18 @@ node scripts/setup-native-ui-lab.mjs
 
 Script dùng fixture `scripts/fixtures/native-ui-page.json` và tạo workflow, tài khoản thử và ID trang mới. Trên bản đã thử, schema UID là `nativeuilab8b72b41e93`, tab UID là `nlab432fb4862904`, route ID là `396209459691520`. Bản ghi IDs nằm trong `output/native-platform/ui-lab.json`. Schema sau khi thêm block đã lưu cục bộ tại `output/native-platform/studio-request-schema.json`. Để lặp lại thao tác chỉnh sửa, mở trang từ Build UI và dùng **UI Editor → Add block → Markdown**. Cách đăng nhập và tạo yêu cầu dùng hướng dẫn Native UI Lab đi kèm.
 
+## Nghiệm thu thay đổi cấu hình và quyền
+
+Trên cùng lab ở cổng `13001`, thêm trường văn bản tùy chọn `studioLabNote` vào `latticeRequests`. Thêm trường vào bảng bằng **Configure columns** và vào popup **Tạo và gửi** bằng **Configure fields**. Đổi nhãn của trường trong metadata collection từ **Ghi chú tiếp nhận** thành **Ghi chú kiểm thử**. Bảng và form dùng nhãn mới sau khi tải lại.
+
+Trong quyền dữ liệu của `ldx_employee` đối với `latticeRequests`, cho phép trường mới ở **View** và **Create**, bỏ trường này khỏi **Update**, giữ các phạm vi hồ sơ hiện có. Thêm hành động **Filter** cho bảng bằng **Configure actions**. Các thay đổi schema và quyền dùng tài nguyên native của NocoBase.
+
+- Nhân viên thấy trường và nhãn mới. Nhập `Đã lưu từ form nhân viên` khi gửi `STUDIO-FIELD-01` và đọc lại đúng giá trị sau reload.
+- Lọc **Trạng thái** chứa `draft` ẩn hồ sơ đã hoàn thành `STUDIO-1106-01`. Chọn **Reset** đưa hồ sơ trở lại bảng.
+- Nhân viên mở trực tiếp `/admin/lattice-builder` thấy thông báo không có quyền. API trả `403` khi tài khoản đó thử sửa hồ sơ đã hoàn thành và giá trị lưu giữ nguyên.
+
+Schema UID và route ID vẫn là các ID của trang thử ở trên. Bản xuất schema sau kiểm tra nằm ở `output/native-platform/studio-checkpoint4-schema.json`. Kết quả xác minh quyền và hồ sơ nằm ở `output/native-platform/studio-checkpoint4.json`. Khi tái tạo trên lab khác, dùng fixture ban đầu rồi áp dụng lại các bước cấu hình trên vì ID trang và ID bản ghi được cấp lại.
+
 ## Nạp bundle trong môi trường local
 
 Build thay đổi bundle trong mount `node_modules`; bản cũ trong `storage/plugins` không tự chứng minh là file đang được phục vụ. Phải kiểm tra resolver/asset thực tế. Asset NocoBase có cache một năm, còn URL bundle có hash được lưu trong tiến trình server. Sau build có thể cần restart riêng NocoBase để công bố hash mới, rồi tải lại trang. Không cài lại plugin, seed hay migration chỉ để cập nhật client shell. Sao lưu bundle cũ trước khi build/nạp.
