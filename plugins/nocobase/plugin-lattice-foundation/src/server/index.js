@@ -10,12 +10,14 @@ const {createNativeScopeMiddleware}=require('./native-scope');
 const {registerNativeIdentityHooks}=require('./native-identity-hooks');
 const {registerContextHooks}=require('./native-context');
 const {registerContextResource}=require('./native-context-delivery');
+const {registerNativeIntegrations}=require('./native-integrations');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
     registerNativeResource(this.app);
     registerNativeIdentityHooks(this.db);
     registerContextHooks(this.db);
     registerContextResource(this.app);
+    registerNativeIntegrations(this.app);
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
     registerSampleApplications(catalog);
