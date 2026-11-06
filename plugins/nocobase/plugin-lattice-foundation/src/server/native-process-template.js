@@ -17,7 +17,7 @@ function manualInterface(name,title,actions,collection) {
 
 // Bootstrap data for the host designer. These are native node configurations,
 // not an executor, state machine or task store. The administrator can edit them.
-function documentProcessTemplate({collection,organizationId,reviewerEmployeeId,assigneeEmployeeId}) {
+function documentProcessTemplate({collection,organizationId,reviewerEmployeeId,assigneeEmployeeId,startOnSubmit=false}) {
   if(!['latticeRequests','latticeOrders'].includes(collection)||!/^[-a-zA-Z0-9_]{1,80}$/.test(organizationId??'')||![reviewerEmployeeId,assigneeEmployeeId].every(id=>/^[1-9]\d*$/.test(String(id))))throw new Error('Invalid native process template configuration');
   const nodes=[];
   const context=field=>'{{$context.data.'+field+'}}';
@@ -34,7 +34,7 @@ function documentProcessTemplate({collection,organizationId,reviewerEmployeeId,a
   query('requester',context('requesterId'));
   query('reviewer',reviewerEmployeeId,{'user.roles.name':{$in:['ldx_manager','ldx_admin']}});
   condition('separation',result('reviewer','userId'),result('requester','userId'),'notEqual');
-  update('submitted',{status:'submitted'},'draft');
+  if (!startOnSubmit) update('submitted',{status:'submitted'},'draft');
   manual('review','Duyệt yêu cầu',result('reviewer','userId'),[['approve','Duyệt',{decision:'approved'}],['reject','Từ chối',{decision:'rejected'}]]);
   query('reviewerCurrent',reviewerEmployeeId,{userId:result('reviewer','userId'),'user.roles.name':{$in:['ldx_manager','ldx_admin']}});
   update('decision',{status:result('review','review.decision')},'submitted');
@@ -45,6 +45,9 @@ function documentProcessTemplate({collection,organizationId,reviewerEmployeeId,a
   query('assigneeCurrent',assigneeEmployeeId,{userId:result('assignee','userId')});
   update('completed',{status:'completed'},'assigned');
   nodes.push({key:'rejected',type:'end',title:'Kết thúc nhánh từ chối',config:{endStatus:1},upstreamKey:'approved',branchIndex:0});
-  return {workflow:{title:'Lattice native — '+collection+' — '+organizationId,type:'collection',enabled:false,sync:false,config:{collection,mode:1,condition:{organizationId}}},nodes};
+  const trigger = startOnSubmit
+    ? {mode:2,changed:['status'],condition:{organizationId,status:'submitted'}}
+    : {mode:1,condition:{organizationId}};
+  return {workflow:{title:'Lattice native — '+collection+' — '+organizationId,type:'collection',enabled:false,sync:false,config:{collection,...trigger}},nodes};
 }
 module.exports={documentProcessTemplate};

@@ -1,6 +1,6 @@
 # Contract đề xuất cho tệp đính kèm của Yêu cầu native
 
-Trạng thái: bản nháp để Duy review. Các endpoint dưới đây là đề xuất, chưa được triển khai.
+Trạng thái: contract tích hợp kho tệp dùng chung đang được review. Các endpoint `/v1/native/...` dưới đây vẫn là đề xuất; bản thử API NocoBase chạy trong cùng tiến trình được mô tả riêng ở mục **Bản thử API trên lab**.
 
 ## Phần dùng lại
 
@@ -12,7 +12,9 @@ Trạng thái: bản nháp để Duy review. Các endpoint dưới đây là đ�
 
 - `requestId` là ID của `main/latticeRequests`, truyền dưới dạng chuỗi số nguyên dương. `fileId` là UUID do dịch vụ tệp cấp. Bản ghi liên kết lưu ngữ cảnh native, request ID, file ID và tổ chức đã xác minh. Tạo lại cùng yêu cầu với cùng khóa idempotency trả kết quả cũ. Cùng khóa với payload khác trả `409`.
 - NocoBase xác thực phiên, xác định membership đang hoạt động và kiểm tra quyền trên chính yêu cầu. Dịch vụ tệp nhận danh tính đã xác minh và ngữ cảnh hồ sơ qua kết nối máy chủ với máy chủ. Tổ chức, vai trò và chủ sở hữu do máy chủ xác định. Cơ chế xác thực giữa hai máy chủ là điểm Duy cần chốt.
+- Khi nối kho tệp dùng chung, dịch vụ tệp phải xác thực adapter NocoBase bằng credential máy chủ riêng và ràng buộc ngữ cảnh với tổ chức, request ID, thao tác và file ID. Không tin danh tính do trình duyệt tự khai báo. Chưa triển khai ranh giới này trong bản thử cùng tiến trình.
 - Thêm tệp cần quyền sửa yêu cầu và trạng thái cho phép chỉnh. Danh sách và tải cần quyền đọc yêu cầu hiện tại. Kiểm cả quan hệ giữa tệp và yêu cầu, tổ chức và trạng thái quét khi tải. Tệp native chỉ được tải qua ngữ cảnh hồ sơ đã liên kết. Đường tải độc lập theo chủ tệp và URL kho trực tiếp đều phải từ chối tệp native.
+- Với kho đối tượng có thể thay đổi nội dung, kết quả quét phải gắn với file ID và digest/version của chính bytes đã quét; tải phải kiểm lại nội dung đó. Bản thử PostgreSQL lưu chính Buffer được ClamAV chấp nhận vào bảng riêng, không có API thay thế bytes tại cùng file ID.
 
 ## API dành cho giao diện
 
@@ -39,6 +41,33 @@ Workflow hiện kích hoạt khi tạo bản ghi. Bản thử cần tách thời
 2. Tài khoản kho không liên quan và tài khoản tổ chức khác bị chặn khi gọi trực tiếp. Đổi sang cặp request ID và file ID không liên kết cũng bị chặn.
 3. Tệp đang chờ quét, bị từ chối hoặc gặp lỗi scanner không trả bytes. Thu hồi quyền sau khi mở chi tiết phải chặn lần tải tiếp theo.
 4. Kiểm tra URL kho, endpoint tải độc lập, retry cùng khóa, hai thao tác đồng thời, lỗi giữa upload và gắn liên kết. Thử trên form native và bằng HTTP trực tiếp.
+
+## Bản thử API trên lab
+
+Bản thử chạy trong plugin NocoBase. Nó dùng ClamAV hiện có và lưu bytes đã quét sạch trong bảng PostgreSQL riêng. Bảng này không đăng ký làm collection công khai. Đường tải đọc quyền của hồ sơ qua ACL NocoBase trong mỗi lần gọi. Việc dùng chung kho tệp với dịch vụ gateway vẫn là phần cần chốt khi tích hợp.
+
+Chạy migration Foundation, đặt `DX_NATIVE_CLAMD_HOST` thành tên máy ClamAV có thể truy cập từ container NocoBase qua cổng `3310`. Đặt `DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION=native-attachment-submit-lab` để mở thao tác gửi cho đúng tổ chức thử. Dùng workflow `startOnSubmit: true` trong tổ chức thử. Workflow theo dõi trạng thái chuyển sang `submitted`. Giữ một workflow duyệt đang bật cho tổ chức thử.
+
+| Thao tác | API NocoBase của bản thử |
+| --- | --- |
+| Danh sách | `GET /api/latticeRequestAttachments:list?requestId={id}` |
+| Đính kèm | `POST /api/latticeRequestAttachments:upload?requestId={id}` với payload và khóa như ở trên |
+| Tải nội dung | `GET /api/latticeRequestAttachments:download?requestId={id}&fileId={uuid}` |
+| Gửi | `POST /api/latticeRequestAttachments:submit?requestId={id}` |
+
+Chạy `node scripts/acceptance-native-request-attachment-api.mjs` trên lab. Script tạo tài khoản, workflow và hồ sơ thử. Nó xác nhận ClamAV chặn tệp mẫu, tệp sạch tải đúng nội dung, hai lần upload cùng khóa chỉ lưu một bản, hai lần gửi đồng thời chỉ tạo một task và đường tải trực tiếp chặn truy cập sai phạm vi. Script dọn dữ liệu thử khi kết thúc.
+
+Chống trùng gửi lại và gửi đồng thời dựa trên khóa bản ghi và chuyển trạng thái nguyên tử `draft → submitted`, không phụ thuộc khóa gửi lại của trình duyệt. Đây chưa phải bảo đảm phục hồi sau sự cố: workflow async native kích hoạt sau commit; tiến trình dừng giữa commit trạng thái và tạo execution có thể để hồ sơ đã gửi chưa có task. Trước triển khai chính thức cần kiểm chứng phục hồi native hoặc cơ chế tạo execution bền vững; không tự kích hoạt workflow lần nữa khi retry.
+
+Nghiệm thu bản thử chưa bao gồm khôi phục sau crash, lỗi kho tệp dùng chung và vòng đời tệp mồ côi. Không bật đồng thời workflow kích hoạt khi tạo và workflow kích hoạt khi gửi cho cùng tổ chức. Chỉ tổ chức thử được cấu hình mới được dùng thao tác gửi này; chưa thay thế đường gửi chung trên môi trường chính.
+
+## Form thử trên NocoBase
+
+Trang Modern **Yêu cầu có đính kèm** dùng JS Block để gọi API NocoBase theo phiên người dùng hiện tại. Trang chỉ mở form cho tài khoản thuộc tổ chức thử. Tài khoản quản lý và kho thấy các hồ sơ được ACL cấp quyền. [API xác thực trong JS Block](https://docs.nocobase.com/runjs/context/request)
+
+Tạo tài khoản nhân viên, quản lý và kho thuộc tổ chức thử. Dùng `node scripts/configure-native-process.mjs --collection=latticeRequests --organization=native-attachment-submit-lab --reviewer=EMPLOYEE_ID --assignee=EMPLOYEE_ID --start-on-submit=true` với `NOCOBASE_URL=http://localhost:13001`, rồi bật workflow mới trong NocoBase. Hai ID trên là ID hồ sơ nhân viên của quản lý và kho. Đặt `NOCOBASE_TOKEN` bằng token root và chạy `node scripts/setup-native-request-attachments-page.mjs` một lần. Nếu cần nạp lại mã cho block hiện có, truyền UID của block qua `DX_ATTACHMENT_FORM_BLOCK_UID`.
+
+Trên trình duyệt, nhân viên đã lưu nháp, đính kèm `request-proof.txt` và gửi duyệt. Một hồ sơ khác được gửi ngay bằng **Tạo và gửi**. Mỗi hồ sơ có một task duyệt. Quản lý mở trang, yêu cầu tải tệp và nhận đúng bytes của tệp thử. Tài khoản ngoài tổ chức thử nhận thông báo giới hạn truy cập. Việc tích hợp kho tệp chung và nghiệm thu trên môi trường chung vẫn cần review.
 
 ### Ca thử đầu tiên trên lab 13001
 

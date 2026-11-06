@@ -26,7 +26,7 @@ export async function configureNativeProcess(api,config) {
 
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const args=Object.fromEntries(process.argv.slice(2).map(arg=>arg.replace(/^--/,'').split('=')));
-  const config={collection:args.collection,organizationId:args.organization,reviewerEmployeeId:args.reviewer,assigneeEmployeeId:args.assignee};
+  const config={collection:args.collection,organizationId:args.organization,reviewerEmployeeId:args.reviewer,assigneeEmployeeId:args.assignee,startOnSubmit:args['start-on-submit']==='true'};
   documentProcessTemplate(config);
   const base=new URL(process.env.NOCOBASE_URL??'http://localhost:13000');
   if(!['localhost','127.0.0.1'].includes(base.hostname))throw Error('Local configuration only');
