@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { parseSensorAssetUrn } from './asset-identity.js';
 
 export type MeasurementQuality = 'good' | 'missing' | 'invalid';
 
@@ -65,13 +66,11 @@ export function parseSensorReading(
     return reject('Invalid sensor event ID.');
   }
 
-  const prefix = `urn:ngsi-ld:Asset:${tenant}:`;
+  let assetUrn: string;
 
-  if (
-    typeof input.assetUrn !== 'string' ||
-    !input.assetUrn.startsWith(prefix) ||
-    !/^[A-Za-z0-9_-]{1,128}$/.test(input.assetUrn.slice(prefix.length))
-  ) {
+  try {
+    assetUrn = parseSensorAssetUrn(input.assetUrn, tenant).urn;
+  } catch {
     return reject('Asset URN must belong to the configured tenant.');
   }
 
@@ -144,7 +143,7 @@ export function parseSensorReading(
 
   return {
     eventId: input.eventId,
-    assetUrn: input.assetUrn,
+    assetUrn,
     attribute,
     unit: expectedUnit,
     observedAt,
