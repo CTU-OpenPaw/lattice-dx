@@ -29,3 +29,18 @@ Nếu lab đã có workflow duyệt khác cho cùng tổ chức, tắt workflow 
 Kiểm thử `apps/api/src/files/native-request-storage.test.ts` kiểm tra chữ ký bị sửa, hết hạn, phát lại, phạm vi tải, lỗi quét và xung đột khóa upload. Đã kiểm tra trực tiếp API nội bộ và xác nhận các trường hợp thiếu chữ ký, sửa nội dung, hết hạn và phát lại trả `401`. Đường đọc tệp cũ cũng đã từ chối tệp native khi dùng đúng owner.
 
 Lab dùng container API `lattice-native-storage-rehearsal-api`, database `native_file_rehearsal` và volume filesystem riêng. Môi trường nhóm cần review, áp dụng cấu hình và chạy lại ca nghiệm thu trước khi tick checklist.
+
+## Ghép trên môi trường nhóm
+
+Overlay `infra/compose/native-files.yml` nối API và NocoBase qua mạng Compose hiện có. Chọn thư mục checkout chứa bản ghép đã được review. Trước khi cập nhật runtime hoặc migration, sao lưu database NocoBase, database core và volume object store đang dùng bằng quy trình backup của nhóm.
+
+Tạo tệp môi trường riêng ngoài Git, đặt `DX_NATIVE_FILES_INSTANCE` thành tên bản NocoBase, `DX_NATIVE_FILES_SECRET` bằng khóa 32 byte ngẫu nhiên dạng hex, và `DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION` bằng tổ chức riêng cho ca nghiệm thu. Chỉ có một workflow `startOnSubmit` đang bật trong tổ chức đó.
+
+```powershell
+docker compose --env-file PATH_TO_ENV -f infra/compose/core.yml -f infra/compose/nocobase.yml -f infra/compose/native-files.yml config --quiet
+docker compose --env-file PATH_TO_ENV -f infra/compose/core.yml -f infra/compose/nocobase.yml -f infra/compose/native-files.yml up -d --build api nocobase
+```
+
+Build và cài Foundation theo hướng dẫn runtime trước khi mở form. Kiểm tra phiên bản host, migration và plugin registry. Bản thử đã dùng NocoBase 2.2.38. Cổng local 13000 của máy Hưng tại thời điểm đối chiếu vẫn chạy 2.2.20 và nhánh cũ.
+
+Nghiệm thu trên đúng URL nhóm đang dùng. Nhân viên tạo nháp, đính kèm, gửi. Quản lý nhận một task và tải tệp sạch. Kiểm tra hồ sơ không tệp bằng **Tạo và gửi**, người không liên quan, người thuộc tổ chức khác và tài khoản vừa mất quyền. Đối chiếu tệp cũ và tệp mới, số task, bản ghi `foundation_files` và provider thực tế. Ghi URL, SHA của bản ghép, phiên bản runtime, kết quả và người review trước khi tick.

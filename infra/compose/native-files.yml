@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0
+# Opt-in overlay for core.yml + nocobase.yml.
+services:
+  api:
+    environment:
+      DX_NATIVE_FILES_INSTANCE: ${DX_NATIVE_FILES_INSTANCE:?Set the native instance name}
+      DX_NATIVE_FILES_SECRET: ${DX_NATIVE_FILES_SECRET:?Set the shared native file service secret}
+  nocobase:
+    environment:
+      DX_NATIVE_FILES_URL: http://api:4000
+      DX_NATIVE_FILES_INSTANCE: ${DX_NATIVE_FILES_INSTANCE:?Set the native instance name}
+      DX_NATIVE_FILES_SECRET: ${DX_NATIVE_FILES_SECRET:?Set the shared native file service secret}
+      DX_NATIVE_CLAMD_HOST: clamav
+      DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION: ${DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION:?Set the dedicated attachment acceptance organization}
