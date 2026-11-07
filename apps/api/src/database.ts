@@ -25,6 +25,7 @@ import {automationsDatabase} from './automations/database.js';
 import {contextLinksDatabase} from './context-links/database.js';
 import type {ObjectStore} from './files/object-store.js';
 import {assertFileStorageReadable,offloadOneFile} from './files/storage-database.js';
+import {nativeRequestStorage} from './files/native-request-storage.js';
 export async function connectRecords(connectionString: string,options:{store?:ObjectStore;projectionEnabled?:boolean;outboxSelection?:{eventType:string;createdAfter:string;organizationId:string}}={}) {
   const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
   try {
@@ -48,6 +49,7 @@ export async function connectRecords(connectionString: string,options:{store?:Ob
     const systemAccess=await systemAccessDatabase(pool);
     const taskLifecycle=await taskLifecycleDatabase(pool);
     return {systems,systemAccess,assetHandover,ngsiLdContext,agents:agentDatabase(pool,definitionRegistry,options.store),repository,foundation,directory,organization,workflows,events,automations,modules,taskLifecycle,definitionRegistry,entities,contextLinks,dataTools,reports,operations:operationsDatabase(pool),jobs:workflowJobDatabase(pool,options.outboxSelection),
+      nativeRequestStorage:nativeRequestStorage(pool,options.store),
       offloadFile:async()=>{if(!options.store)throw new Error('File storage is not configured');return offloadOneFile(pool,options.store);},close:()=>pool.end()};
   } catch(error){await pool.end();throw error;}
 }

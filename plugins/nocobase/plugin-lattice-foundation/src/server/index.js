@@ -6,6 +6,7 @@ const {registerSampleApplications}=require('../applications/catalog');
 const {defaultContracts}=require('../shared/contracts');
 const {registerNativeResource}=require('./native-resource');
 const {registerNativeRequestAttachments}=require('./native-request-attachments');
+const {createNativeSharedFiles}=require('./native-shared-files');
 const schemas=require('./schema');
 const {createNativeScopeMiddleware}=require('./native-scope');
 const {registerNativeIdentityHooks}=require('./native-identity-hooks');
@@ -15,8 +16,11 @@ const {registerNativeIntegrations}=require('./native-integrations');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
     registerNativeResource(this.app);
-    if (process.env.DX_NATIVE_CLAMD_HOST) {
-      registerNativeRequestAttachments(this.app, process.env.DX_NATIVE_CLAMD_HOST, process.env.DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION);
+    const sharedFiles = createNativeSharedFiles({
+      url: process.env.DX_NATIVE_FILES_URL, secret: process.env.DX_NATIVE_FILES_SECRET, instance: process.env.DX_NATIVE_FILES_INSTANCE,
+    });
+    if (process.env.DX_NATIVE_CLAMD_HOST || sharedFiles) {
+      registerNativeRequestAttachments(this.app, process.env.DX_NATIVE_CLAMD_HOST, process.env.DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION, sharedFiles);
     }
     registerNativeIdentityHooks(this.db);
     registerContextHooks(this.db);

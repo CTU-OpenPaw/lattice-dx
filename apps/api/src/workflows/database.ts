@@ -44,7 +44,7 @@ export async function validateReferences(client:PoolClient,fields:Record<string,
     if(kind==='subject') found=!!(await client.query('SELECT 1 FROM workflow_members WHERE organization_id=$1 AND subject=$2',[actor.organizationId,input[name]])).rowCount;
     if(kind==='department'||kind==='location') found=!!(await client.query('SELECT 1 FROM workflow_references WHERE organization_id=$1 AND kind=$2 AND id=$3',[actor.organizationId,kind,input[name]])).rowCount;
     if(kind==='file') {
-      const file=(await client.query('SELECT owner_id AS "ownerId",organization_id AS "organizationId",scan_status AS "scanStatus" FROM foundation_files WHERE id=$1 AND organization_id=$2',[input[name],actor.organizationId])).rows[0];
+      const file=(await client.query('SELECT owner_id AS "ownerId",organization_id AS "organizationId",scan_status AS "scanStatus" FROM foundation_files WHERE id=$1 AND organization_id=$2 AND native_request_id IS NULL',[input[name],actor.organizationId])).rows[0];
       const linkedRuns=(await client.query(`SELECT ${runColumns.split(',').map(c=>'r.'+c).join(',')} FROM workflow_runs r JOIN workflow_files wf ON wf.run_id=r.id WHERE wf.file_id=$1 AND r.organization_id=$2`,[input[name],actor.organizationId])).rows;
       found=!!file&&canUseEvidence(file,actor,await Promise.all(linkedRuns.map(async run=>({definition:await definition(run),run}))));
     }
