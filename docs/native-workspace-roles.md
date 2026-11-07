@@ -10,7 +10,7 @@ Workspace của người dùng cuối nằm tại `/admin/lattice-workspace`. Bu
 - Header giữ `PinnedPluginList` của host, bao gồm menu tài khoản/đăng xuất và các chức năng plugin đã bật. Các module tùy chọn hiển thị theo cấu hình host.
 - Sidebar thu gọn trên màn hình nhỏ. Khi mở trang nghiệp vụ, nội dung vẫn do native renderer xử lý, gồm cấu hình field, validation, data scope, action và API của trang đó.
 
-Không thêm logic Logistics hay tên collection nghiệp vụ vào shell. Không dùng manifest hoặc API tác vụ của Workspace `/lattice` cũ. Không cấp quyền mới cho role và không thay workflow.
+Không thêm logic Logistics hay tên collection nghiệp vụ vào shell. Không dùng manifest hoặc API tác vụ của Workspace `/lattice` cũ. Mã shell không cấp quyền mới cho role và không thay workflow.
 
 ## Cài đặt và tái tạo
 
@@ -40,7 +40,33 @@ Ngày 07/11/2026, môi trường tách biệt tại `localhost:13001`, NocoBase 
 - Đăng xuất trả về Sign in. Root đăng nhập vẫn thấy Config / Build UI và cây trang native.
 - Build client/server thành công; 224 Foundation tests đạt, gồm hồi quy quyền hiển thị trang và tuyến popup task.
 
- Đây là bằng chứng local, chưa thay thế nghiệm thu đủ bảy vai trò trên môi trường nhóm và review PR. Không tự đánh dấu hoàn tất toàn bộ Giai đoạn 4.
+### Đối chiếu đủ bảy vai trò
+
+`scripts/acceptance-native-workspace-roles.mjs` tạo fixture có backup trong runtime local tách biệt. Script không sửa user có sẵn, quyền resource hay workflow; chỉ thêm tài khoản thử và cấp đúng một trang thử cho bảy role có sẵn. Trang thứ hai được giữ ngoài quyền để kiểm tra truy cập URL trực tiếp. Fixture được giữ lại cho browser acceptance, không tự xóa dữ liệu sau mỗi lần chạy.
+
+```powershell
+$env:NOCOBASE_URL='http://localhost:13001'
+$env:NOCOBASE_DB_CONTAINER='lattice-native-studio-nocobase-db-1'
+node scripts/acceptance-native-workspace-roles.mjs
+```
+
+Manifest lưu trong `output/native-platform/workspace-roles-lab.json`; kết quả HTTP trong `output/native-platform/workspace-roles-acceptance.json`. Đây là output local được ignore, không chứa bearer token. Tài khoản thử có dạng `native.workspace.<role>@example.invalid`, mật khẩu fixture `NativeLab-2026!`; chỉ dùng trên môi trường thử localhost.
+
+| Vai trò | Số hồ sơ nhìn thấy trong fixture | Quyền cập nhật qua API |
+| --- | ---: | --- |
+| Nhân viên | 2 | Nháp do mình tạo |
+| Quản lý | 8 | Nháp do mình tạo |
+| Kho | 1 | Nháp do mình tạo |
+| Điều phối | 8 | Nháp do mình tạo |
+| Tài xế | 2 | Nháp do mình tạo |
+| Giám đốc | 8 | Chỉ đọc |
+| Admin nghiệp vụ | 8 | Nháp do mình tạo |
+
+Cả bảy vai trò đều đạt các kiểm tra HTTP thật: ánh xạ đúng tổ chức; danh sách khớp chính xác phạm vi requester/assignee hoặc toàn tổ chức; không đọc được hồ sơ tổ chức khác; không sửa hồ sơ đã giao việc; không ghi thẳng trạng thái hoặc đổi tổ chức; không xóa hồ sơ hoặc sửa ánh xạ nhân viên. Giám đốc bị chặn cả create/update. Các con số trong bảng là dữ liệu kiểm thử, không phải số liệu của doanh nghiệp.
+
+Đã đăng nhập và đối chiếu browser riêng cho bốn vai trò bổ sung: điều phối, tài xế, giám đốc và admin nghiệp vụ. Trang bảng native hiển thị đúng 8/2/8/8 hồ sơ tương ứng; không hiển thị `WS-FOREIGN`. Giám đốc không có action tạo; ba vai trò còn lại có action tạo theo quyền native. Cả bốn giữ shell Workspace, không có Config / Build UI và đều nhận trang 404 khi mở UID trang chưa được cấp quyền. Ảnh lưu ở `output/native-platform/workspace-role-<role>.jpg`.
+
+`pnpm check` và 240 kiểm tra hợp đồng Foundation + Action Bridge đạt. Các kiểm tra trên là bằng chứng local; vẫn cần review PR và nghiệm thu trên môi trường nhóm. Không tự đánh dấu hoàn tất toàn bộ Giai đoạn 4. Luồng tác vụ thật trước đó được kiểm chứng bằng quản lý/kho; không suy diễn thành đã chạy workflow của mọi vai trò.
 
 ## Giới hạn hiện tại
 
