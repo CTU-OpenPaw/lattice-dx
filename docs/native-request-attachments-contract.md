@@ -44,7 +44,7 @@ Workflow hiện kích hoạt khi tạo bản ghi. Bản thử cần tách thời
 
 ## Bản thử API trên lab
 
-Bản thử chạy trong plugin NocoBase. Nó dùng ClamAV hiện có và lưu bytes đã quét sạch trong bảng PostgreSQL riêng. Bảng này không đăng ký làm collection công khai. Đường tải đọc quyền của hồ sơ qua ACL NocoBase trong mỗi lần gọi. Việc dùng chung kho tệp với dịch vụ gateway vẫn là phần cần chốt khi tích hợp.
+Bản thử chạy trong plugin NocoBase. Chế độ cục bộ dùng ClamAV và bảng PostgreSQL riêng. Khi cấu hình dịch vụ chung được bật, tệp mới đi qua API nội bộ có chữ ký và được lưu trong kho tệp của dịch vụ API. Đường tải đọc quyền của hồ sơ qua ACL NocoBase trong mỗi lần gọi. [Cấu hình và kết quả kiểm thử kho chung](native-shared-file-storage.md)
 
 Chạy migration Foundation, đặt `DX_NATIVE_CLAMD_HOST` thành tên máy ClamAV có thể truy cập từ container NocoBase qua cổng `3310`. Đặt `DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION=native-attachment-submit-lab` để mở thao tác gửi cho đúng tổ chức thử. Dùng workflow `startOnSubmit: true` trong tổ chức thử. Workflow theo dõi trạng thái chuyển sang `submitted`. Giữ một workflow duyệt đang bật cho tổ chức thử.
 
