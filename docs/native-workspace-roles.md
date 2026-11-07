@@ -80,6 +80,19 @@ Kiểm chứng browser trên runtime thật: tìm kiếm không kết quả → 
 
 250 kiểm tra hợp đồng Foundation + Action Bridge đạt sau lượt UX và đồng bộ main (gồm các ca đối soát upload đã được review trong #46). Bốn kiểm tra mới dùng request service được kiểm soát để xác nhận chặn đọc trùng, xử lý lỗi/401, khôi phục sau retry và không biến lỗi task thành trạng thái rỗng. Đây là kiểm tra tích hợp component bằng adapter, không phải bằng chứng đã ngắt mạng hoặc làm hết hạn phiên thật trên browser. Lần tải đầu của danh sách trang được kiểm tra lại vì provider của host ghi log rồi bỏ qua lỗi khởi tạo.
 
+### Review vòng đời layout trong PR #47
+
+Review nội bộ ngày 07/11/2026 tìm được hai thiếu sót và đã bổ sung ca hồi quy tái hiện trước khi sửa:
+
+- Đổi từ builder sang nhân viên sau khi lệnh bật designer đã hoàn tất không đưa flow settings về tắt. Shell hiện luôn đồng bộ trạng thái này và chỉ bật khi role có `allowConfigUI`, đang thiết kế, ngoài Config và ngoài bố cục mobile. Hàng đợi enable/disable vẫn được giữ để lệnh cũ không thắng trạng thái mới.
+- Nhánh nhân viên trước đó bỏ qua đồng bộ menu model và theo dõi breakpoint của native layout. Hiện cả builder và nhân viên đều đồng bộ cây trang được cấp quyền và `isMobileLayout`; menu hiển thị vẫn do shell tương ứng quyết định.
+
+Hai ca adapter từng thất bại trên code cũ, đạt sau sửa; tổng Foundation + Action Bridge hiện là 252 ca đạt. Không thay quyền API hay workflow và không coi trạng thái designer còn bật là bằng chứng đã vượt ACL backend.
+
+Browser smoke bổ sung trên fixture `flowPage` native: builder khởi tạo và lưu nội dung Markdown bằng designer; reload builder rồi đăng nhập nhân viên vẫn đọc đúng nội dung đã lưu, không có Add block/flow settings; chuyển màn hình desktop/390px vẫn hiển thị được. Chỉ có bản ghi desktop route chưa phải là bằng chứng đã có cấu hình Page/Grid được lưu. Fixture và ảnh nằm trong output local (`workspace-modern-review.json`, `workspace-review-modern-employee.jpg`), không đưa vào Git.
+
+Đây là review và kiểm chứng local của nhánh, không phải review độc lập/approval thay cho thành viên khác trên GitHub, và không tự nghiệm thu toàn bộ Giai đoạn 4.
+
 ## Giới hạn hiện tại
 
 Danh sách công việc giữ nội dung/tên trạng thái của plugin workflow native theo ngôn ngữ host. Lối tắt chỉ mở trang; nút tạo nhanh theo từng sản phẩm cần cấu hình action rõ ràng, chưa suy đoán từ tên trang. Không có tab “Tôi đã tạo” hoặc “Đang thực hiện” chung vì cần hợp đồng dữ liệu phân loại xuyên workflow. Không hiển thị các màn hình giả lập cho tính năng chưa có.

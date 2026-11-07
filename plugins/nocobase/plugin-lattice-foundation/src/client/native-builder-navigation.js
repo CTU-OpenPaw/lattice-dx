@@ -83,15 +83,15 @@ function createNativeBuilderNavigation(client, React, antd, app, {clientV2, rout
       if (allowConfigUI && !configMode) lastPage.current = pathname;
     }, [allowConfigUI, configMode, pathname]);
     React.useEffect(() => {
-      if (!allowConfigUI) return;
+      // Native page/popup models need these routes even when our employee
+      // shell replaces the host menu. The input remains the accessible tree.
       model.syncMenuRoutes(allAccessRoutes);
-    }, [allowConfigUI, allAccessRoutes, model]);
+    }, [allAccessRoutes, model]);
     React.useEffect(() => {
-      if (!allowConfigUI) {desiredSettings.current = false; return;}
       const media = window.matchMedia('(max-width: 767px)');
       const apply = () => {
         model.setIsMobileLayout(media.matches);
-        desiredSettings.current = !!designable && !configMode && !media.matches;
+        desiredSettings.current = !!allowConfigUI && !!designable && !configMode && !media.matches;
         // Serialize async host enable/disable so an older route cannot win a race.
         syncing.current = syncing.current.catch(() => {}).then(async () => {
           const enabled = desiredSettings.current;
