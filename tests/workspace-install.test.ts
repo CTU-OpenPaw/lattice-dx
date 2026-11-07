@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installWorkspace, parsePluginList } from '../scripts/install-workspace.mjs';
 
-const names = ['@latticedx/plugin-action-bridge', '@latticedx/plugin-lattice-foundation'];
-const versions = await Promise.all(['action-bridge', 'plugin-lattice-foundation'].map(async directory =>
+const names = ['@latticedx/plugin-action-bridge', '@latticedx/plugin-lattice-foundation', '@latticedx/plugin-enterprise-auth'];
+const versions = await Promise.all(['action-bridge', 'plugin-lattice-foundation', 'plugin-enterprise-auth'].map(async directory =>
   JSON.parse(await readFile(new URL(`../plugins/nocobase/${directory}/package.json`, import.meta.url), 'utf8')).version as string));
 async function fixture(options: { dump?: Buffer; backupFailure?: boolean; disabled?: boolean; missing?: boolean; mismatch?: boolean } = {}) {
   const calls: { file: string; args: string[]; options: any }[] = [];
@@ -64,12 +64,15 @@ describe('workspace installer', () => {
     }
     expect(f.calls.find(c => c.args.includes('up'))?.args.slice(-5)).toEqual(['up', '-d', '--no-deps', '--force-recreate', 'nocobase']);
     const packs = f.calls.filter(c => c.args.includes('pack'));
-    expect(packs).toHaveLength(2);
+    const restore = f.calls.find(c => c.args.includes('ci'));
+    expect(restore?.args).toEqual(expect.arrayContaining(['--prefix', 'plugins/nocobase/plugin-enterprise-auth', '--ignore-scripts']));
+    expect(f.calls.indexOf(restore!)).toBeLessThan(f.calls.findIndex(c => c.args.includes('up')));
+    expect(packs).toHaveLength(3);
     for (const pack of packs) {
       expect(pack.args).toEqual(expect.arrayContaining(['--offline', '--ignore-scripts', '--pack-destination']));
       expect(pack.options.timeout).toBe(30000);
     }
-    expect(f.calls.filter(c => c.args.includes('add'))).toHaveLength(2);
+    expect(f.calls.filter(c => c.args.includes('add'))).toHaveLength(3);
   });
   it('rejects unbounded or malformed plugin JSON', () => {
     expect(() => parsePluginList('SECRET []')).toThrow();

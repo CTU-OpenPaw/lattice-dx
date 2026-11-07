@@ -1,0 +1,697 @@
+{
+  "type": "void",
+  "x-component": "Page",
+  "properties": {
+    "nativeuilabeb8c2601e3tab": {
+      "type": "void",
+      "x-component": "Grid",
+      "x-initializer": "page:addBlock",
+      "properties": {
+        "4wjavvwyl1t": {
+          "_isJSONSchemaObject": true,
+          "version": "2.0",
+          "type": "void",
+          "x-component": "Grid.Row",
+          "x-app-version": "2.2.20",
+          "properties": {
+            "u7guc0jjf7r": {
+              "_isJSONSchemaObject": true,
+              "version": "2.0",
+              "type": "void",
+              "x-component": "Grid.Col",
+              "x-app-version": "2.2.20",
+              "properties": {
+                "8huudcs7725": {
+                  "_isJSONSchemaObject": true,
+                  "version": "2.0",
+                  "type": "void",
+                  "x-decorator": "TableBlockProvider",
+                  "x-acl-action": "latticeRequests:list",
+                  "x-use-decorator-props": "useTableBlockDecoratorProps",
+                  "x-decorator-props": {
+                    "collection": "latticeRequests",
+                    "dataSource": "main",
+                    "action": "list",
+                    "params": {
+                      "pageSize": 20
+                    },
+                    "showIndex": true,
+                    "dragSort": false
+                  },
+                  "x-toolbar": "BlockSchemaToolbar",
+                  "x-settings": "blockSettings:table",
+                  "x-component": "CardItem",
+                  "x-filter-targets": [],
+                  "x-app-version": "2.2.20",
+                  "properties": {
+                    "actions": {
+                      "_isJSONSchemaObject": true,
+                      "version": "2.0",
+                      "type": "void",
+                      "x-initializer": "table:configureActions",
+                      "x-component": "ActionBar",
+                      "x-component-props": {
+                        "style": {
+                          "marginBottom": "var(--nb-spacing)"
+                        }
+                      },
+                      "x-app-version": "2.2.20",
+                      "properties": {
+                        "vxwg9trer9e": {
+                          "x-uid": "4g3k835r8k6",
+                          "_isJSONSchemaObject": true,
+                          "version": "2.0",
+                          "type": "void",
+                          "x-action": "create",
+                          "x-acl-action": "create",
+                          "title": "Tạo và gửi",
+                          "x-toolbar": "ActionSchemaToolbar",
+                          "x-settings": "actionSettings:addNew",
+                          "x-component": "Action",
+                          "x-decorator": "ACLActionProvider",
+                          "x-component-props": {
+                            "openMode": "drawer",
+                            "type": "primary",
+                            "component": "CreateRecordAction",
+                            "icon": "PlusOutlined"
+                          },
+                          "x-action-context": {
+                            "dataSource": "main",
+                            "collection": "latticeRequests"
+                          },
+                          "x-align": "right",
+                          "x-acl-action-props": {
+                            "skipScopeCheck": true
+                          },
+                          "x-app-version": "2.2.20",
+                          "properties": {
+                            "drawer": {
+                              "_isJSONSchemaObject": true,
+                              "version": "2.0",
+                              "type": "void",
+                              "title": "{{ t(\"Add record\") }}",
+                              "x-component": "Action.Container",
+                              "x-component-props": {
+                                "className": "nb-action-popup"
+                              },
+                              "x-app-version": "2.2.20",
+                              "properties": {
+                                "tabs": {
+                                  "_isJSONSchemaObject": true,
+                                  "version": "2.0",
+                                  "type": "void",
+                                  "x-component": "Tabs",
+                                  "x-component-props": {},
+                                  "x-initializer": "popup:addTab",
+                                  "x-initializer-props": {
+                                    "gridInitializer": "popup:addNew:addBlock"
+                                  },
+                                  "x-app-version": "2.2.20",
+                                  "properties": {
+                                    "tab1": {
+                                      "_isJSONSchemaObject": true,
+                                      "version": "2.0",
+                                      "type": "void",
+                                      "title": "{{t(\"Add new\")}}",
+                                      "x-component": "Tabs.TabPane",
+                                      "x-designer": "Tabs.Designer",
+                                      "x-component-props": {},
+                                      "x-app-version": "2.2.20",
+                                      "properties": {
+                                        "grid": {
+                                          "_isJSONSchemaObject": true,
+                                          "version": "2.0",
+                                          "type": "void",
+                                          "x-component": "Grid",
+                                          "x-initializer": "popup:addNew:addBlock",
+                                          "x-app-version": "2.2.20",
+                                          "properties": {
+                                            "lxf6hjop6tn": {
+                                              "_isJSONSchemaObject": true,
+                                              "version": "2.0",
+                                              "type": "void",
+                                              "x-component": "Grid.Row",
+                                              "x-app-version": "2.2.20",
+                                              "properties": {
+                                                "6dfgvlp9n9y": {
+                                                  "_isJSONSchemaObject": true,
+                                                  "version": "2.0",
+                                                  "type": "void",
+                                                  "x-component": "Grid.Col",
+                                                  "x-app-version": "2.2.20",
+                                                  "properties": {
+                                                    "7vop6ho844m": {
+                                                      "_isJSONSchemaObject": true,
+                                                      "version": "2.0",
+                                                      "type": "void",
+                                                      "x-acl-action-props": {
+                                                        "skipScopeCheck": true
+                                                      },
+                                                      "x-acl-action": "latticeRequests:create",
+                                                      "x-decorator": "FormBlockProvider",
+                                                      "x-use-decorator-props": "useCreateFormBlockDecoratorProps",
+                                                      "x-decorator-props": {
+                                                        "dataSource": "main",
+                                                        "collection": "latticeRequests"
+                                                      },
+                                                      "x-toolbar": "BlockSchemaToolbar",
+                                                      "x-settings": "blockSettings:createForm",
+                                                      "x-component": "CardItem",
+                                                      "x-app-version": "2.2.20",
+                                                      "properties": {
+                                                        "6c62vzmr90m": {
+                                                          "_isJSONSchemaObject": true,
+                                                          "version": "2.0",
+                                                          "type": "void",
+                                                          "x-component": "FormV2",
+                                                          "x-use-component-props": "useCreateFormBlockProps",
+                                                          "x-app-version": "2.2.20",
+                                                          "properties": {
+                                                            "grid": {
+                                                              "_isJSONSchemaObject": true,
+                                                              "version": "2.0",
+                                                              "type": "void",
+                                                              "x-component": "Grid",
+                                                              "x-initializer": "form:configureFields",
+                                                              "x-app-version": "2.2.20",
+                                                              "properties": {
+                                                                "gn5a3hptsdk": {
+                                                                  "_isJSONSchemaObject": true,
+                                                                  "version": "2.0",
+                                                                  "type": "void",
+                                                                  "x-component": "Grid.Row",
+                                                                  "x-app-version": "2.2.20",
+                                                                  "properties": {
+                                                                    "xa2eme3gdco": {
+                                                                      "_isJSONSchemaObject": true,
+                                                                      "version": "2.0",
+                                                                      "type": "void",
+                                                                      "x-component": "Grid.Col",
+                                                                      "x-app-version": "2.2.20",
+                                                                      "properties": {
+                                                                        "code": {
+                                                                          "_isJSONSchemaObject": true,
+                                                                          "version": "2.0",
+                                                                          "type": "string",
+                                                                          "x-toolbar": "FormItemSchemaToolbar",
+                                                                          "x-settings": "fieldSettings:FormItem",
+                                                                          "x-component": "CollectionField",
+                                                                          "x-decorator": "FormItem",
+                                                                          "x-collection-field": "latticeRequests.code",
+                                                                          "x-component-props": {},
+                                                                          "x-app-version": "2.2.20",
+                                                                          "x-uid": "ahmh9z9kz5x",
+                                                                          "x-async": false,
+                                                                          "x-index": 1
+                                                                        }
+                                                                      },
+                                                                      "x-uid": "al51lmv679s",
+                                                                      "x-async": false,
+                                                                      "x-index": 1
+                                                                    }
+                                                                  },
+                                                                  "x-uid": "2ytf1czj5lk",
+                                                                  "x-async": false,
+                                                                  "x-index": 1
+                                                                },
+                                                                "gh6hfxof5hd": {
+                                                                  "_isJSONSchemaObject": true,
+                                                                  "version": "2.0",
+                                                                  "type": "void",
+                                                                  "x-component": "Grid.Row",
+                                                                  "x-app-version": "2.2.20",
+                                                                  "properties": {
+                                                                    "1rvhs9qb8ky": {
+                                                                      "_isJSONSchemaObject": true,
+                                                                      "version": "2.0",
+                                                                      "type": "void",
+                                                                      "x-component": "Grid.Col",
+                                                                      "x-app-version": "2.2.20",
+                                                                      "properties": {
+                                                                        "name": {
+                                                                          "_isJSONSchemaObject": true,
+                                                                          "version": "2.0",
+                                                                          "type": "string",
+                                                                          "x-toolbar": "FormItemSchemaToolbar",
+                                                                          "x-settings": "fieldSettings:FormItem",
+                                                                          "x-component": "CollectionField",
+                                                                          "x-decorator": "FormItem",
+                                                                          "x-collection-field": "latticeRequests.name",
+                                                                          "x-component-props": {},
+                                                                          "x-app-version": "2.2.20",
+                                                                          "x-uid": "txadzp8zlyb",
+                                                                          "x-async": false,
+                                                                          "x-index": 1
+                                                                        }
+                                                                      },
+                                                                      "x-uid": "k61eg8hdcsg",
+                                                                      "x-async": false,
+                                                                      "x-index": 1
+                                                                    }
+                                                                  },
+                                                                  "x-uid": "ja38i49khaq",
+                                                                  "x-async": false,
+                                                                  "x-index": 2
+                                                                },
+                                                                "c0kbhcxdil1": {
+                                                                  "_isJSONSchemaObject": true,
+                                                                  "version": "2.0",
+                                                                  "type": "void",
+                                                                  "x-component": "Grid.Row",
+                                                                  "x-app-version": "2.2.20",
+                                                                  "properties": {
+                                                                    "2e2wx506wbz": {
+                                                                      "_isJSONSchemaObject": true,
+                                                                      "version": "2.0",
+                                                                      "type": "void",
+                                                                      "x-component": "Grid.Col",
+                                                                      "x-app-version": "2.2.20",
+                                                                      "properties": {
+                                                                        "description": {
+                                                                          "_isJSONSchemaObject": true,
+                                                                          "version": "2.0",
+                                                                          "type": "string",
+                                                                          "x-toolbar": "FormItemSchemaToolbar",
+                                                                          "x-settings": "fieldSettings:FormItem",
+                                                                          "x-component": "CollectionField",
+                                                                          "x-decorator": "FormItem",
+                                                                          "x-collection-field": "latticeRequests.description",
+                                                                          "x-component-props": {},
+                                                                          "x-app-version": "2.2.20",
+                                                                          "x-uid": "c4ox4x9qe5x",
+                                                                          "x-async": false,
+                                                                          "x-index": 1
+                                                                        }
+                                                                      },
+                                                                      "x-uid": "2gqehu939qx",
+                                                                      "x-async": false,
+                                                                      "x-index": 1
+                                                                    }
+                                                                  },
+                                                                  "x-uid": "53cqpjb6j6v",
+                                                                  "x-async": false,
+                                                                  "x-index": 3
+                                                                },
+                                                                "2d9f7eo1v9v": {
+                                                                  "_isJSONSchemaObject": true,
+                                                                  "version": "2.0",
+                                                                  "type": "void",
+                                                                  "x-component": "Grid.Row",
+                                                                  "x-app-version": "2.2.20",
+                                                                  "properties": {
+                                                                    "otuv4lu2yvv": {
+                                                                      "_isJSONSchemaObject": true,
+                                                                      "version": "2.0",
+                                                                      "type": "void",
+                                                                      "x-component": "Grid.Col",
+                                                                      "x-app-version": "2.2.20",
+                                                                      "properties": {
+                                                                        "category": {
+                                                                          "_isJSONSchemaObject": true,
+                                                                          "version": "2.0",
+                                                                          "type": "string",
+                                                                          "x-toolbar": "FormItemSchemaToolbar",
+                                                                          "x-settings": "fieldSettings:FormItem",
+                                                                          "x-component": "CollectionField",
+                                                                          "x-decorator": "FormItem",
+                                                                          "x-collection-field": "latticeRequests.category",
+                                                                          "x-component-props": {},
+                                                                          "x-app-version": "2.2.20",
+                                                                          "x-uid": "tbrlxql5mjz",
+                                                                          "x-async": false,
+                                                                          "x-index": 1
+                                                                        }
+                                                                      },
+                                                                      "x-uid": "49bap1oxpa3",
+                                                                      "x-async": false,
+                                                                      "x-index": 1
+                                                                    }
+                                                                  },
+                                                                  "x-uid": "zb4mslqofr6",
+                                                                  "x-async": false,
+                                                                  "x-index": 4
+                                                                }
+                                                              },
+                                                              "x-uid": "2k8x4vje086",
+                                                              "x-async": false,
+                                                              "x-index": 1
+                                                            },
+                                                            "tbobelwlxnc": {
+                                                              "_isJSONSchemaObject": true,
+                                                              "version": "2.0",
+                                                              "type": "void",
+                                                              "x-initializer": "createForm:configureActions",
+                                                              "x-component": "ActionBar",
+                                                              "x-component-props": {
+                                                                "layout": "one-column"
+                                                              },
+                                                              "x-app-version": "2.2.20",
+                                                              "properties": {
+                                                                "93lir8liv55": {
+                                                                  "_isJSONSchemaObject": true,
+                                                                  "version": "2.0",
+                                                                  "title": "{{ t(\"Submit\") }}",
+                                                                  "x-action": "submit",
+                                                                  "x-component": "Action",
+                                                                  "x-use-component-props": "useCreateActionProps",
+                                                                  "x-toolbar": "ActionSchemaToolbar",
+                                                                  "x-settings": "actionSettings:createSubmit",
+                                                                  "x-component-props": {
+                                                                    "type": "primary",
+                                                                    "htmlType": "submit"
+                                                                  },
+                                                                  "x-action-settings": {},
+                                                                  "type": "void",
+                                                                  "x-app-version": "2.2.20",
+                                                                  "x-uid": "fawjmifsrq3",
+                                                                  "x-async": false,
+                                                                  "x-index": 1
+                                                                }
+                                                              },
+                                                              "x-uid": "2q95xptv61r",
+                                                              "x-async": false,
+                                                              "x-index": 2
+                                                            }
+                                                          },
+                                                          "x-uid": "zll4q7wthyj",
+                                                          "x-async": false,
+                                                          "x-index": 1
+                                                        }
+                                                      },
+                                                      "x-uid": "p81ibnpr998",
+                                                      "x-async": false,
+                                                      "x-index": 1
+                                                    }
+                                                  },
+                                                  "x-uid": "yex6zmuml65",
+                                                  "x-async": false,
+                                                  "x-index": 1
+                                                }
+                                              },
+                                              "x-uid": "hppecjeverf",
+                                              "x-async": false,
+                                              "x-index": 1
+                                            }
+                                          },
+                                          "x-uid": "3pkjzedypzq",
+                                          "x-async": false,
+                                          "x-index": 1
+                                        }
+                                      },
+                                      "x-uid": "l2ezf9iqn1m",
+                                      "x-async": false,
+                                      "x-index": 1
+                                    }
+                                  },
+                                  "x-uid": "9rd8jn27vpf",
+                                  "x-async": false,
+                                  "x-index": 1
+                                }
+                              },
+                              "x-uid": "5gd9mw1a9k3",
+                              "x-async": false,
+                              "x-index": 1
+                            }
+                          },
+                          "x-async": false,
+                          "x-index": 1
+                        }
+                      },
+                      "x-uid": "qqkkyv0lbnu",
+                      "x-async": false,
+                      "x-index": 1
+                    },
+                    "1nwh95h4v21": {
+                      "_isJSONSchemaObject": true,
+                      "version": "2.0",
+                      "type": "array",
+                      "x-initializer": "table:configureColumns",
+                      "x-component": "TableV2",
+                      "x-use-component-props": "useTableBlockProps",
+                      "x-component-props": {
+                        "rowKey": "id",
+                        "rowSelection": {
+                          "type": "checkbox"
+                        }
+                      },
+                      "x-app-version": "2.2.20",
+                      "properties": {
+                        "actions": {
+                          "x-uid": "8cizp0rwvzr",
+                          "_isJSONSchemaObject": true,
+                          "version": "2.0",
+                          "type": "void",
+                          "title": "{{ t(\"Actions\") }}",
+                          "x-action-column": "actions",
+                          "x-decorator": "TableV2.Column.ActionBar",
+                          "x-component": "TableV2.Column",
+                          "x-toolbar": "TableColumnSchemaToolbar",
+                          "x-initializer": "table:configureItemActions",
+                          "x-settings": "fieldSettings:TableColumn",
+                          "x-toolbar-props": {
+                            "initializer": "table:configureItemActions"
+                          },
+                          "x-app-version": "2.2.20",
+                          "x-hidden": true,
+                          "properties": {
+                            "sqzehmtg7dm": {
+                              "_isJSONSchemaObject": true,
+                              "version": "2.0",
+                              "type": "void",
+                              "x-decorator": "DndContext",
+                              "x-component": "Space",
+                              "x-component-props": {
+                                "split": "|"
+                              },
+                              "x-app-version": "2.2.20",
+                              "x-uid": "o61hvzwq3io",
+                              "x-async": false,
+                              "x-index": 1
+                            }
+                          },
+                          "x-async": false,
+                          "x-index": 1
+                        },
+                        "4xdwoc2xppd": {
+                          "_isJSONSchemaObject": true,
+                          "version": "2.0",
+                          "type": "void",
+                          "x-decorator": "TableV2.Column.Decorator",
+                          "x-toolbar": "TableColumnSchemaToolbar",
+                          "x-settings": "fieldSettings:TableColumn",
+                          "x-component": "TableV2.Column",
+                          "x-app-version": "2.2.20",
+                          "properties": {
+                            "code": {
+                              "_isJSONSchemaObject": true,
+                              "version": "2.0",
+                              "x-collection-field": "latticeRequests.code",
+                              "x-component": "CollectionField",
+                              "x-component-props": {
+                                "ellipsis": true
+                              },
+                              "x-read-pretty": true,
+                              "x-decorator": null,
+                              "x-decorator-props": {
+                                "labelStyle": {
+                                  "display": "none"
+                                }
+                              },
+                              "x-app-version": "2.2.20",
+                              "x-uid": "ij0z8a6f6nv",
+                              "x-async": false,
+                              "x-index": 1
+                            }
+                          },
+                          "x-uid": "ft4a0f77znq",
+                          "x-async": false,
+                          "x-index": 2
+                        },
+                        "zyt5np64ne7": {
+                          "_isJSONSchemaObject": true,
+                          "version": "2.0",
+                          "type": "void",
+                          "x-decorator": "TableV2.Column.Decorator",
+                          "x-toolbar": "TableColumnSchemaToolbar",
+                          "x-settings": "fieldSettings:TableColumn",
+                          "x-component": "TableV2.Column",
+                          "x-app-version": "2.2.20",
+                          "properties": {
+                            "name": {
+                              "_isJSONSchemaObject": true,
+                              "version": "2.0",
+                              "x-collection-field": "latticeRequests.name",
+                              "x-component": "CollectionField",
+                              "x-component-props": {
+                                "ellipsis": true
+                              },
+                              "x-read-pretty": true,
+                              "x-decorator": null,
+                              "x-decorator-props": {
+                                "labelStyle": {
+                                  "display": "none"
+                                }
+                              },
+                              "x-app-version": "2.2.20",
+                              "x-uid": "dmrze7ubfcn",
+                              "x-async": false,
+                              "x-index": 1
+                            }
+                          },
+                          "x-uid": "74q7tv7jud5",
+                          "x-async": false,
+                          "x-index": 3
+                        },
+                        "478r7ms8bf2": {
+                          "_isJSONSchemaObject": true,
+                          "version": "2.0",
+                          "type": "void",
+                          "x-decorator": "TableV2.Column.Decorator",
+                          "x-toolbar": "TableColumnSchemaToolbar",
+                          "x-settings": "fieldSettings:TableColumn",
+                          "x-component": "TableV2.Column",
+                          "x-app-version": "2.2.20",
+                          "properties": {
+                            "description": {
+                              "_isJSONSchemaObject": true,
+                              "version": "2.0",
+                              "x-collection-field": "latticeRequests.description",
+                              "x-component": "CollectionField",
+                              "x-component-props": {
+                                "ellipsis": true
+                              },
+                              "x-read-pretty": true,
+                              "x-decorator": null,
+                              "x-decorator-props": {
+                                "labelStyle": {
+                                  "display": "none"
+                                }
+                              },
+                              "x-app-version": "2.2.20",
+                              "x-uid": "sgjolz9y44v",
+                              "x-async": false,
+                              "x-index": 1
+                            }
+                          },
+                          "x-uid": "hn30ymai6bb",
+                          "x-async": false,
+                          "x-index": 4
+                        },
+                        "hhv14qdizdr": {
+                          "_isJSONSchemaObject": true,
+                          "version": "2.0",
+                          "type": "void",
+                          "x-decorator": "TableV2.Column.Decorator",
+                          "x-toolbar": "TableColumnSchemaToolbar",
+                          "x-settings": "fieldSettings:TableColumn",
+                          "x-component": "TableV2.Column",
+                          "x-app-version": "2.2.20",
+                          "properties": {
+                            "status": {
+                              "_isJSONSchemaObject": true,
+                              "version": "2.0",
+                              "x-collection-field": "latticeRequests.status",
+                              "x-component": "CollectionField",
+                              "x-component-props": {
+                                "ellipsis": true
+                              },
+                              "x-read-pretty": true,
+                              "x-decorator": null,
+                              "x-decorator-props": {
+                                "labelStyle": {
+                                  "display": "none"
+                                }
+                              },
+                              "x-app-version": "2.2.20",
+                              "x-uid": "6i9tvdat3af",
+                              "x-async": false,
+                              "x-index": 1
+                            }
+                          },
+                          "x-uid": "gxc81bxc6kw",
+                          "x-async": false,
+                          "x-index": 5
+                        }
+                      },
+                      "x-uid": "61xcujpx2u3",
+                      "x-async": false,
+                      "x-index": 2
+                    }
+                  },
+                  "x-uid": "o4dz29yyco6",
+                  "x-async": false,
+                  "x-index": 1
+                }
+              },
+              "x-uid": "pzxvk10qdsv",
+              "x-async": false,
+              "x-index": 1
+            }
+          },
+          "x-uid": "gjbhh9e4b9n",
+          "x-async": false,
+          "x-index": 1
+        },
+        "7qwgnty945q": {
+          "_isJSONSchemaObject": true,
+          "version": "2.0",
+          "type": "void",
+          "x-component": "Grid.Row",
+          "x-app-version": "2.2.20",
+          "properties": {
+            "se6n46z1mrk": {
+              "_isJSONSchemaObject": true,
+              "version": "2.0",
+              "type": "void",
+              "x-component": "Grid.Col",
+              "x-app-version": "2.2.20",
+              "properties": {
+                "qnr7k3uvm9j": {
+                  "x-uid": "r9z5qrn2ko1",
+                  "_isJSONSchemaObject": true,
+                  "version": "2.0",
+                  "type": "void",
+                  "x-decorator": "WorkflowTodo.Decorator",
+                  "x-decorator-props": {},
+                  "x-component": "CardItem",
+                  "x-toolbar": "BlockSchemaToolbar",
+                  "x-settings": "blockSettings:table",
+                  "x-app-version": "2.2.20",
+                  "x-component-props": {
+                    "title": "Công việc của tôi"
+                  },
+                  "properties": {
+                    "todos": {
+                      "_isJSONSchemaObject": true,
+                      "version": "2.0",
+                      "type": "void",
+                      "x-component": "WorkflowTodo",
+                      "x-app-version": "2.2.20",
+                      "x-uid": "l63ukaogymw",
+                      "x-async": false,
+                      "x-index": 1
+                    }
+                  },
+                  "x-async": false,
+                  "x-index": 1
+                }
+              },
+              "x-uid": "qvkxsr4qrga",
+              "x-async": false,
+              "x-index": 1
+            }
+          },
+          "x-uid": "ssrsf0ftz5y",
+          "x-async": false,
+          "x-index": 2
+        }
+      },
+      "x-uid": "nativeuilabeb8c2601e3tab",
+      "x-async": false,
+      "x-index": 1
+    }
+  },
+  "name": "x8mx2uzm9b0",
+  "x-uid": "nativeuilabeb8c2601e3",
+  "x-async": false
+}

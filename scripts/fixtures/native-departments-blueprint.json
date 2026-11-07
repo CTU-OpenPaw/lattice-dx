@@ -1,0 +1,60 @@
+{
+  "version": "1",
+  "mode": "create",
+  "navigation": {
+    "group": { "title": "Danh mục nội bộ", "icon": "AppstoreOutlined" },
+    "item": { "title": "Phòng ban", "icon": "ApartmentOutlined" }
+  },
+  "page": { "title": "Phòng ban", "displayTitle": true, "enableTabs": false },
+  "tabs": [
+    {
+      "title": "Danh sách",
+      "blocks": [
+        {
+          "key": "departments",
+          "type": "table",
+          "title": "Danh sách phòng ban",
+          "collection": "latticeDepartments",
+          "settings": { "pageSize": 10 },
+          "fields": ["name", "code", "organizationId"],
+          "actions": [
+            "filter",
+            "refresh",
+            {
+              "type": "addNew",
+              "title": "Thêm phòng ban",
+              "popup": {
+                "title": "Thêm phòng ban",
+                "blocks": [
+                  { "type": "createForm", "collection": "latticeDepartments", "fields": ["code", "name", "organizationId"], "actions": ["submit"] }
+                ]
+              }
+            }
+          ],
+          "recordActions": [
+            {
+              "type": "view",
+              "title": "Chi tiết",
+              "popup": {
+                "title": "Chi tiết phòng ban",
+                "blocks": [
+                  { "type": "details", "resource": { "binding": "currentRecord", "dataSourceKey": "main", "collectionName": "latticeDepartments" }, "fields": ["name", "code", "organizationId"] }
+                ]
+              }
+            },
+            {
+              "type": "edit",
+              "title": "Sửa tên",
+              "popup": {
+                "title": "Sửa tên phòng ban",
+                "blocks": [
+                  { "type": "editForm", "resource": { "binding": "currentRecord", "dataSourceKey": "main", "collectionName": "latticeDepartments" }, "fields": ["name"], "actions": ["submit"] }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

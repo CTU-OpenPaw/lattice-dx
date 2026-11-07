@@ -4,8 +4,25 @@ const { seedFoundation } = require('./seed');
 const {createApplicationCatalog}=require('../shared/application-catalog');
 const {registerSampleApplications}=require('../applications/catalog');
 const {defaultContracts}=require('../shared/contracts');
+const {registerNativeResource}=require('./native-resource');
+const {registerNativeRequestAttachments}=require('./native-request-attachments');
+const schemas=require('./schema');
+const {createNativeScopeMiddleware}=require('./native-scope');
+const {registerNativeIdentityHooks}=require('./native-identity-hooks');
+const {registerContextHooks}=require('./native-context');
+const {registerContextResource}=require('./native-context-delivery');
+const {registerNativeIntegrations}=require('./native-integrations');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
+    registerNativeResource(this.app);
+    if (process.env.DX_NATIVE_CLAMD_HOST) {
+      registerNativeRequestAttachments(this.app, process.env.DX_NATIVE_CLAMD_HOST, process.env.DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION);
+    }
+    registerNativeIdentityHooks(this.db);
+    registerContextHooks(this.db);
+    registerContextResource(this.app);
+    registerNativeIntegrations(this.app);
+    this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
     registerSampleApplications(catalog);
     this.app.latticeApplications=catalog;

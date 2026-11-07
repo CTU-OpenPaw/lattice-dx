@@ -4,15 +4,30 @@ const text = (name, title, extra = {}) => ({name, type: 'string', interface: 'in
 const relation = (name, target, foreignKey) => ({name, type: 'belongsTo', target, foreignKey});
 const many = (name, target, foreignKey) => ({name, type: 'hasMany', target, foreignKey});
 const base = (name, title, fields) => ({name, title, titleField: 'name', origin: '@latticedx/plugin-lattice-foundation',
-  createdAt: true, updatedAt: true, fields: [
+  uiManageable: true, createdAt: true, updatedAt: true, fields: [
     text('code', 'Mã', {allowNull: false, unique: true}), text('name', 'Tên', {allowNull: false}),
     text('organizationId', 'Mã tổ chức', {allowNull: false}),
     {name: 'active', type: 'boolean', defaultValue: true}, ...fields]});
+const documentFields = () => [
+  text('description','Nội dung'),text('category','Loại yêu cầu'),
+  text('status','Trạng thái',{defaultValue:'draft',allowNull:false}),
+  {name:'version',type:'integer',defaultValue:1,allowNull:false},
+  text('decisionReason','Lý do quyết định'),
+  relation('requester','latticeEmployees','requesterId'),
+  relation('assignee','latticeEmployees','assigneeId'),
+  relation('department','latticeDepartments','departmentId'),
+];
 module.exports = {
+  requests:base('latticeRequests','Yêu cầu nghiệp vụ',documentFields()),
+  orders:base('latticeOrders','Đơn hàng',[
+    ...documentFields(),text('customer','Khách hàng'),text('origin','Điểm đi'),text('destination','Điểm đến'),
+    {name:'quantity',type:'double',interface:'number',uiSchema:{title:'Số lượng','x-component':'InputNumber'}},
+  ]),
   departments: base('latticeDepartments', 'Đơn vị / phòng ban', [
     many('employees', 'latticeEmployees', 'departmentId'), many('locations', 'latticeLocations', 'departmentId'),
     many('assets', 'latticeAssets', 'departmentId')]),
   employees: base('latticeEmployees', 'Nhân viên', [text('email', 'Email'), text('identitySubject', 'Identity subject'),
+    {name: 'userId', type: 'bigInt', unique: true, allowNull: true}, relation('user', 'users', 'userId'),
     relation('department', 'latticeDepartments', 'departmentId'), many('assets', 'latticeAssets', 'custodianId')]),
   locations: base('latticeLocations', 'Địa điểm', [text('kind', 'Loại địa điểm'), text('address', 'Địa chỉ'),
     relation('department', 'latticeDepartments', 'departmentId'), many('assets', 'latticeAssets', 'locationId')]),
