@@ -4,6 +4,7 @@
 const { randomUUID } = require('node:crypto');
 const { createConnection } = require('node:net');
 const { resolveNativeActor, scopeNativeRead } = require('./native-scope');
+const { createSharedUploadReceipts } = require('./native-shared-upload');
 
 const resource = 'latticeRequestAttachments';
 const requestCollection = 'latticeRequests';
@@ -58,6 +59,7 @@ function uploadInput(ctx) {
 function registerNativeRequestAttachments(app, scannerHost, submitOrganization, sharedFiles) {
   const { db } = app;
   const query = async (sql, bind, transaction) => (await db.sequelize.query(sql, { bind, transaction }))[0];
+  const uploads = createSharedUploadReceipts(query);
   async function useShared({ id, actor, transaction }) {
     if (!sharedFiles) return false;
     const rows = await query('SELECT 1 FROM lattice_native_request_attachments WHERE request_id=$1 AND organization_id=$2 LIMIT 1',
@@ -124,13 +126,16 @@ function registerNativeRequestAttachments(app, scannerHost, submitOrganization, 
         if (file.filename !== input.filename || !content.equals(input.content)) ctx.throw(409, 'Khóa gửi lại đã dùng cho tệp khác.');
         return file;
       }
-      const { previous, shared } = await withRequest(ctx, 'POST', 'update', async scope => {
-        if (await useShared(scope)) return { shared: await sharedFiles(ctx, 'upload', scope, {
-          filename: input.filename, key: input.key, contentBase64: input.content.toString('base64'),
-        }) };
+      const { previous, sharedInput } = await withRequest(ctx, 'POST', 'update', async scope => {
+        if (await useShared(scope)) return { sharedInput: await uploads.prepare(ctx, scope, input) };
         return { previous: await existing(scope) };
-      });
-      if (shared) {
+      }, true);
+      if (sharedInput) {
+        const shared = await withRequest(ctx, 'POST', 'update', scope => uploads.execute(ctx, scope, sharedInput,
+          canonical => sharedFiles(ctx, 'upload', scope, {
+            filename: canonical.filename, key: canonical.key, contentBase64: canonical.content.toString('base64'),
+          })), true);
+        if (shared.error) ctx.throw(shared.error.status, shared.error.message);
         ctx.status = shared.status;
         ctx.body = shared.data;
         await next();
@@ -186,6 +191,7 @@ function registerNativeRequestAttachments(app, scannerHost, submitOrganization, 
         if (['submitted', 'approved', 'rejected', 'assigned', 'completed'].includes(status)) return { id, status };
         if (status !== 'draft') ctx.throw(409, 'Không thể gửi ở trạng thái hiện tại.');
         await checkRequestPermission(ctx, id, actor, transaction, 'update');
+        await uploads.assertSettled(ctx, { id, actor, transaction });
         await db.getRepository(requestCollection).update({
           filterByTk: id, values: { status: 'submitted' }, individualHooks: true, transaction, context: ctx,
         });
