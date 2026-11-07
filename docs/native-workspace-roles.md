@@ -78,7 +78,7 @@ Cả bảy vai trò đều đạt các kiểm tra HTTP thật: ánh xạ đúng 
 
 Kiểm chứng browser trên runtime thật: tìm kiếm không kết quả → Xóa tìm kiếm → khôi phục danh sách; cập nhật danh mục thành công; màn hình 320px không tràn ngang, tìm kiếm vẫn dùng được, Escape/backdrop đóng menu; mở công việc đã xử lý vẫn hiện đúng popup native với nút duyệt bị khóa, đóng popup giữ tab Đã xử lý. Không thay đổi trạng thái hồ sơ trong lượt rà UX này.
 
-244 kiểm tra hợp đồng Foundation + Action Bridge đạt sau lượt UX. Bốn kiểm tra mới dùng request service được kiểm soát để xác nhận chặn đọc trùng, xử lý lỗi/401, khôi phục sau retry và không biến lỗi task thành trạng thái rỗng. Đây là kiểm tra tích hợp component bằng adapter, không phải bằng chứng đã ngắt mạng hoặc làm hết hạn phiên thật trên browser. Lần tải đầu của danh sách trang được kiểm tra lại vì provider của host ghi log rồi bỏ qua lỗi khởi tạo.
+250 kiểm tra hợp đồng Foundation + Action Bridge đạt sau lượt UX và đồng bộ main (gồm các ca đối soát upload đã được review trong #46). Bốn kiểm tra mới dùng request service được kiểm soát để xác nhận chặn đọc trùng, xử lý lỗi/401, khôi phục sau retry và không biến lỗi task thành trạng thái rỗng. Đây là kiểm tra tích hợp component bằng adapter, không phải bằng chứng đã ngắt mạng hoặc làm hết hạn phiên thật trên browser. Lần tải đầu của danh sách trang được kiểm tra lại vì provider của host ghi log rồi bỏ qua lỗi khởi tạo.
 
 ## Giới hạn hiện tại
 

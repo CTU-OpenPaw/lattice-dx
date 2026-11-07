@@ -84,7 +84,12 @@ function createNativeWorkspace(client, React, antd, app, router) {
       .ldx-native-page {padding:16px}
       .ldx-native-catalog-search {flex-basis:100%}
     }
-    @media(max-width:479px) {.ldx-native-label {display:none}}
+    @media(max-width:479px) {
+      .ldx-native-label {display:none}
+      .ldx-native-header {padding:0 8px;gap:4px}
+      .ldx-native-brand {font-size:15px}
+      .ldx-native-toggle {width:32px;min-width:32px;padding:0;flex-shrink:0}
+    }
   `;
 
   function Failure({error, retry, busy}) {
