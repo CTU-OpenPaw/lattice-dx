@@ -68,6 +68,18 @@ Cả bảy vai trò đều đạt các kiểm tra HTTP thật: ánh xạ đúng 
 
 `pnpm check` và 240 kiểm tra hợp đồng Foundation + Action Bridge đạt. Các kiểm tra trên là bằng chứng local; vẫn cần review PR và nghiệm thu trên môi trường nhóm. Không tự đánh dấu hoàn tất toàn bộ Giai đoạn 4. Luồng tác vụ thật trước đó được kiểm chứng bằng quản lý/kho; không suy diễn thành đã chạy workflow của mọi vai trò.
 
+### Trạng thái UX và khả năng khôi phục
+
+- Danh sách trang được xác nhận khi mở Workspace, có trạng thái đang tải và thời điểm cập nhật thật. Trong lúc tải hoặc khi tải lỗi, không hiển thị lối tắt cũ như kết quả hiện hành. Không tự thử lại thao tác ghi.
+- Phân biệt không có trang được cấp quyền, tìm kiếm không có kết quả, lỗi đọc dữ liệu và phiên hết hạn. Lỗi có nút Thử lại; HTTP 401 đưa về đăng nhập native. Nội dung lỗi kỹ thuật không được đưa ra giao diện.
+- Tìm kiếm nằm ngay trong danh mục, dùng được trên điện thoại, có nút Xóa tìm kiếm. Xóa tìm kiếm tại Báo cáo vẫn ở danh mục Báo cáo. Số kết quả và trạng thái tải/cập nhật được thông báo qua vùng `status`.
+- Công việc dùng nguyên request service, bộ lọc, danh sách và popup native. Wrapper chỉ bổ sung trạng thái tải, lỗi đọc có thể thử lại và thông báo rỗng tiếng Việt. Không hiển thị “không có công việc” khi request còn đang tải hoặc đã lỗi. Thông báo thao tác ghi vẫn do native xử lý.
+- Menu điện thoại có thể đóng bằng Escape, nút chuyển trạng thái hoặc bấm nền ngoài; Escape trả focus về nút mở menu. Ô tìm kiếm và icon header có màu rõ trên nền sáng, link có dấu focus bàn phím.
+
+Kiểm chứng browser trên runtime thật: tìm kiếm không kết quả → Xóa tìm kiếm → khôi phục danh sách; cập nhật danh mục thành công; màn hình 320px không tràn ngang, tìm kiếm vẫn dùng được, Escape/backdrop đóng menu; mở công việc đã xử lý vẫn hiện đúng popup native với nút duyệt bị khóa, đóng popup giữ tab Đã xử lý. Không thay đổi trạng thái hồ sơ trong lượt rà UX này.
+
+244 kiểm tra hợp đồng Foundation + Action Bridge đạt sau lượt UX. Bốn kiểm tra mới dùng request service được kiểm soát để xác nhận chặn đọc trùng, xử lý lỗi/401, khôi phục sau retry và không biến lỗi task thành trạng thái rỗng. Đây là kiểm tra tích hợp component bằng adapter, không phải bằng chứng đã ngắt mạng hoặc làm hết hạn phiên thật trên browser. Lần tải đầu của danh sách trang được kiểm tra lại vì provider của host ghi log rồi bỏ qua lỗi khởi tạo.
+
 ## Giới hạn hiện tại
 
 Danh sách công việc giữ nội dung/tên trạng thái của plugin workflow native theo ngôn ngữ host. Lối tắt chỉ mở trang; nút tạo nhanh theo từng sản phẩm cần cấu hình action rõ ràng, chưa suy đoán từ tên trang. Không có tab “Tôi đã tạo” hoặc “Đang thực hiện” chung vì cần hợp đồng dữ liệu phân loại xuyên workflow. Không hiển thị các màn hình giả lập cho tính năng chưa có.
