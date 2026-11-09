@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installWorkspace, parsePluginList } from '../scripts/install-workspace.mjs';
@@ -78,6 +78,30 @@ describe('workspace installer', () => {
     expect(() => parsePluginList('SECRET []')).toThrow();
     expect(() => parsePluginList('--- BEGIN_PLUGIN_LIST_JSON ---\n{}\n--- END_PLUGIN_LIST_JSON ---')).toThrow();
     expect(() => parsePluginList('--- BEGIN_PLUGIN_LIST_JSON ---\ninvalid\n--- END_PLUGIN_LIST_JSON ---')).toThrow();
+  });
+  it('uses exported metadata, build cwd and explicit Compose target without leaking to the main project',async()=>{
+    const sourceRoot=await mkdtemp(join(tmpdir(),'workspace-source-'));
+    const backupDir=await mkdtemp(join(tmpdir(),'workspace-target-backup-'));
+    const directories=['action-bridge','plugin-lattice-foundation','plugin-enterprise-auth'];
+    for(let i=0;i<directories.length;i++){
+      const path=join(sourceRoot,'plugins/nocobase',directories[i]);await mkdir(path,{recursive:true});
+      await writeFile(join(path,'package.json'),JSON.stringify({name:names[i],version:'9.8.7'}));
+    }
+    const composeArgs=['--context','desktop-linux','compose','-p','lattice-native-clean-aaaaaaaaaaaa','-f','infra/compose/native-rehearsal.yml'];
+    const calls:any[]=[];
+    const run=async(file:string,args:string[],options:any)=>{
+      calls.push({file,args,options});
+      if(args.includes('pg_dump'))return Buffer.from('PGDMP-valid-fixture');
+      if(args.at(-1)==='list')return '--- BEGIN_PLUGIN_LIST_JSON ---\n'+JSON.stringify(names.map(packageName=>({packageName,enabled:true})))+'\n--- END_PLUGIN_LIST_JSON ---';
+      if(args.some(arg=>arg.includes('WORKSPACE_PACKAGE_METADATA')))return JSON.stringify(names.map(name=>({name,version:'9.8.7'})));
+      return '';
+    };
+    const result=await installWorkspace({sourceRoot,backupDir,composeArgs,run,health:async()=>true});
+    expect(Object.values(result.versions)).toEqual(['9.8.7','9.8.7','9.8.7']);
+    for(const call of calls){
+      expect(call.options.cwd).toBe(sourceRoot);
+      if(call.file==='docker')expect(call.args.slice(0,composeArgs.length)).toEqual(composeArgs);
+    }
   });
 });
 
