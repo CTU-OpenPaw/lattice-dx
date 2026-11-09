@@ -52,3 +52,14 @@ Lượt browser cần thực hiện riêng:
 4. Người nhận ghi SHA, URL, IDs và kết quả. Import/HTTP đạt không thay browser acceptance, không tự tick toàn bộ task hay Giai đoạn 4.
 
 Không đưa `native-ui-config-*` lên production. Role thử là bản sao có phạm vi cố định cho bài chứng minh cấu hình, không thay ma trận bảy vai trò Workspace hoặc contract người duyệt của Nhi.
+
+## Kết quả kiểm chứng 09/11/2026
+
+- Source installer `3fcb120`, NocoBase 2.2.38; lab sạch được xác nhận 0 bảng trước bootstrap và áp dụng đủ 10 migration Foundation.
+- Tái tạo thành công khi field chưa tồn tại; chạy setup lần hai giữ nguyên page/user/role. Snapshot mọi role được phục hồi sau hook tạo field; fingerprint bảy preset trước/sau khớp.
+- Cả 8 nhóm HTTP acceptance đạt trên lab sạch và lab đã có field. Ghi chú tạo/đọc được, cập nhật ghi chú bị whitelist bỏ qua; filter và phạm vi hồ sơ đạt.
+- `pnpm check`: typecheck/build đạt, 829 test đạt. Hợp đồng plugin: 252 test đạt.
+- Lượt thử đầu đã phát hiện hook tự mở rộng whitelist; installer đã sửa và kiểm lại bằng một lab trắng khác. Lab thử lỗi được dừng, không dùng làm bằng chứng đạt.
+- Chưa có browser acceptance hoặc nghiệm thu trên môi trường nhóm. Kết quả này xác nhận gói tái tạo cấu hình và API, chưa đủ tick hoàn tất task 4.
+
+Report, manifest và backup nằm trong `output/` bị Git bỏ qua. Người nhận cần chạy lại quy trình trên lab của mình và bổ sung bằng chứng trình duyệt.
