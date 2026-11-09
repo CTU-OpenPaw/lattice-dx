@@ -59,25 +59,30 @@ test('Config selects only an allowed settings leaf, never a denied or external s
   assert.equal(firstSettingsPath([{path: 'https://example.com'}, {isAllow: false, children: [{path: '/admin/settings/no'}]}]), null);
 });
 
-function harness({allow = true, pathname = '/admin/demo', refresh = async () => {}} = {}) {
+function harness({allow = true, pathname = '/admin/demo', refresh = async () => {}, designable = false, runEffects = false} = {}) {
   let cursor = 0;
   const state = [], registered = [];
+  let effects = [], cleanups = [];
   let nativeRenders = 0;
   const React = {
     createElement: (type, props, ...children) => ({type, props: props || {}, children}),
     useState(initial) {const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], value => {state[index] = value;}];},
-    useRef: initial => ({current: initial}), useEffect: () => {},
+    useRef(initial) {const index=cursor++; return state[index] || (state[index]={current:initial});},
+    useEffect(effect) {if (runEffects) effects.push(effect);},
   };
   class NativeModel {
     render() {nativeRenders++; return 'native runtime shell';}
+    syncMenuRoutes(routes) {this.syncedRoutes=routes;}
+    setIsMobileLayout(value) {this.isMobileLayout=value;}
   }
   const client = {
     AdminProvider: 'AdminProvider', PinnedPluginList: 'NativeTools',
     useAllAccessDesktopRoutes: () => ({allAccessRoutes: [{type: 'flowPage', schemaUid: 'demo', title: 'Trang demo'}], refresh}),
-    useUIConfigurationPermissions: () => ({allowConfigUI: allow}), useDesignable: () => ({designable: false}),
+    useUIConfigurationPermissions: () => ({allowConfigUI: allow}), useDesignable: () => ({designable}),
   };
   const app = {
-    flowEngine: {getModelClass: () => NativeModel},
+    flowEngine: {getModelClass: () => NativeModel,
+      flowSettings: {enabled:false, async enable() {this.enabled=true;}, async disable() {this.enabled=false;}}},
     router: {add: (name, route) => registered.push({name, ...route})},
     pluginSettingsManager: {getList: () => [{path: '/admin/settings/users'}], get: () => null},
   };
@@ -89,7 +94,13 @@ function harness({allow = true, pathname = '/admin/demo', refresh = async () => 
   const root = Layout({});
   const provider = model.render();
   const shell = provider.children[0];
-  return {root, provider, registered, get nativeRenders() {return nativeRenders;}, render() {cursor = 0; return shell.type(shell.props);}};
+  return {root, provider, registered, model, flowSettings:app.flowEngine.flowSettings,
+    setAllow(value) {allow=value;}, get nativeRenders() {return nativeRenders;}, render() {
+      cursor = 0;const ui=shell.type(shell.props);
+      cleanups.forEach(cleanup=>cleanup());
+      cleanups=effects.map(effect=>effect()).filter(value=>typeof value==='function');effects=[];
+      return ui;
+    }};
 }
 
 function find(node, predicate) {
@@ -138,6 +149,32 @@ test('employees keep the native runtime shell and cannot use the builder landing
 
 test('unsupported SDK does not register routes or replace the native layout', () => {
   assert.equal(createNativeBuilderNavigation({}, {}, {}, {}), null);
+});
+
+test('switching from builder to employee disables design mode even after enable has settled', async t => {
+  const previous=global.window;
+  global.window={matchMedia:()=>({matches:false,addEventListener() {},removeEventListener() {}})};
+  t.after(()=>{global.window=previous;});
+  const setup=harness({allow:true,designable:true,runEffects:true});
+  setup.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(setup.flowSettings.enabled,true);
+  setup.setAllow(false);setup.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(setup.flowSettings.enabled,false);
+});
+
+test('employee native model keeps accessible menu routes and reacts to mobile layout changes', async t => {
+  const previous=global.window, listeners=new Set();
+  const media={matches:false,addEventListener(event,listener) {listeners.add(listener);},removeEventListener(event,listener) {listeners.delete(listener);}};
+  global.window={matchMedia:()=>media};
+  t.after(()=>{global.window=previous;});
+  const setup=harness({allow:false,runEffects:true});
+  setup.render();await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(setup.model.syncedRoutes?.[0]?.schemaUid,'demo');
+  assert.equal(setup.model.isMobileLayout,false);
+  media.matches=true;listeners.forEach(listener=>listener());
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(setup.model.isMobileLayout,true);
+  assert.equal(setup.flowSettings.enabled,false);
 });
 
 test('failed refresh hides stale page links and recovers on retry', async () => {

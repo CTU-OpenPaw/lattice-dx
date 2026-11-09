@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 'use strict';
+const {createNativeWorkspace}=require('./native-workspace');
 
 // Input must be the host's accessible route tree, never the legacy app catalog.
 function pageTree(routes, query = '') {
@@ -54,6 +55,7 @@ function createNativeBuilderNavigation(client, React, antd, app, {clientV2, rout
   const NativeModel = app.flowEngine.getModelClass('AdminLayoutModel');
   if (!NativeModel || typeof NativeModel.prototype.render !== 'function') return null;
   const h = React.createElement;
+  const workspace = createNativeWorkspace(client, React, antd, app, router);
 
   function BuilderLanding() {
     const {allowConfigUI} = client.useUIConfigurationPermissions();
@@ -81,15 +83,15 @@ function createNativeBuilderNavigation(client, React, antd, app, {clientV2, rout
       if (allowConfigUI && !configMode) lastPage.current = pathname;
     }, [allowConfigUI, configMode, pathname]);
     React.useEffect(() => {
-      if (!allowConfigUI) return;
+      // Native page/popup models need these routes even when our employee
+      // shell replaces the host menu. The input remains the accessible tree.
       model.syncMenuRoutes(allAccessRoutes);
-    }, [allowConfigUI, allAccessRoutes, model]);
+    }, [allAccessRoutes, model]);
     React.useEffect(() => {
-      if (!allowConfigUI) {desiredSettings.current = false; return;}
       const media = window.matchMedia('(max-width: 767px)');
       const apply = () => {
         model.setIsMobileLayout(media.matches);
-        desiredSettings.current = !!designable && !configMode && !media.matches;
+        desiredSettings.current = !!allowConfigUI && !!designable && !configMode && !media.matches;
         // Serialize async host enable/disable so an older route cannot win a race.
         syncing.current = syncing.current.catch(() => {}).then(async () => {
           const enabled = desiredSettings.current;
@@ -106,8 +108,8 @@ function createNativeBuilderNavigation(client, React, antd, app, {clientV2, rout
       return () => {desiredSettings.current = false; media.removeEventListener('change', apply);};
     }, [allowConfigUI, designable, configMode, model]);
 
-    // Runtime employees retain the host shell and host permission checks.
-    if (!allowConfigUI) return NativeModel.prototype.render.call(model);
+    // Runtime employees use Workspace while retaining native pages and permission checks.
+    if (!allowConfigUI) return workspace ? h(workspace.Shell, {model}) : NativeModel.prototype.render.call(model);
     const settingsPath = firstSettingsPath(app.pluginSettingsManager?.getList(true));
     const settingsPages = app.pluginSettingsManager?.get('routes.desktop', true);
     const tree = pageTree(allAccessRoutes, query);
