@@ -36,6 +36,8 @@ Chạy lại setup trên cùng manifest phải giữ nguyên page/user/role. N�
 
 Field có sẵn chỉ được dùng khi type/interface/title/component tương thích. Bài thử chấp nhận field hợp lệ đã tồn tại; không đổi nhãn của một field khác để ép khớp. Đây không phải công cụ rollback hoặc reconcile mọi thay đổi schema.
 
+NocoBase 2.2.38 tự thêm field mới vào whitelist của các action hiện có. Installer chụp quyền của **mọi role** trước khi tạo field, rồi bỏ đúng phần quyền được hook native tự thêm; giữ nguyên action, scope và các field cũ. Nếu phát hiện thay đổi khác, installer dừng. Chỉ chạy trên lab tách biệt, không có người dùng đồng thời: tạo field và khôi phục whitelist qua HTTP không phải một transaction nguyên tử. Snapshot trong manifest hỗ trợ chạy tiếp nếu bị ngắt giữa hai bước.
+
 ## Kiểm chứng và phân biệt phạm vi
 
 HTTP acceptance kiểm: mapping tổ chức; field/nhãn và hai binding bảng/form; Filter.Action được lưu; tạo/đọc đúng field; sửa tên được nhưng payload cập nhật ghi chú không thay giá trị do whitelist native; ẩn hồ sơ khác trong cùng tổ chức và tổ chức khác; chặn sửa status/org; bảy preset không đổi. HTTP update có thể trả 200 khi field ngoài whitelist bị bỏ qua — cần đọc lại giá trị, không mặc định mọi trường hợp phải trả 403.

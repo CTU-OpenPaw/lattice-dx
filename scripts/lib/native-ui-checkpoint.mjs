@@ -66,6 +66,23 @@ export function resourceProjection(resources){
     actions:(resource.actions??[]).map(action=>({name:action.name,fields:[...(action.fields??[])].sort(),scope:action.scope?.scope??{}}))
       .sort((a,b)=>a.name.localeCompare(b.name))})).sort((a,b)=>a.name.localeCompare(b.name));
 }
+export function fieldGrantRepairs(before,after,field){
+  assert.equal(after.length,before.length,'Resource grants changed during field creation');
+  const repairs=[];
+  for(const prior of before){
+    const current=after.find(item=>String(item.id)===String(prior.id));assert.ok(current,'Resource grant disappeared');
+    const normalized=structuredClone(current);
+    for(const action of normalized.actions??[]){
+      const old=prior.actions.find(item=>String(item.id)===String(action.id));assert.ok(old,'Action grant changed');
+      if(!old.fields.includes(field)&&action.fields.includes(field)){
+        action.fields=action.fields.filter(name=>name!==field);
+        repairs.push({resourceId:prior.id,actionId:action.id,fields:old.fields});
+      }
+    }
+    assert.equal(canonical(resourceProjection([normalized])),canonical(resourceProjection([prior])),'Unexpected ACL change; refusing to overwrite');
+  }
+  return repairs;
+}
 export function assertPolicyCompatible(actual,expected){
   assert.equal(actual.usingActionsConfig,true);
   assert.equal(actual.actions?.length,expected.actions.length,'Unexpected role actions');

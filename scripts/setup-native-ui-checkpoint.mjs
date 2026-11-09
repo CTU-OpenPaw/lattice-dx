@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {randomUUID,createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
-import {checkpointSchema,checkpointPolicy,assertFieldCompatible,assertPolicyCompatible,nodes,canonical,resourceProjection,assertCheckpointTarget} from './lib/native-ui-checkpoint.mjs';
+import {checkpointSchema,checkpointPolicy,assertFieldCompatible,assertPolicyCompatible,nodes,canonical,resourceProjection,assertCheckpointTarget,fieldGrantRepairs} from './lib/native-ui-checkpoint.mjs';
 import {instantiateNativePage} from './lib/native-ui-fixture.mjs';
 
 const host=new URL(process.env.NOCOBASE_URL??'http://localhost:13004');
@@ -58,8 +58,30 @@ try{
       schemaUid,path:'/admin/'+schemaUid,tabUid:page.tabUid,schema:page.schema};await save();
   }
   if(!manifest.presetDigests){manifest.presetDigests=await presetDigests();await save();}
+  if(!manifest.fieldGrantSnapshot||manifest.fieldGrantsRestored)assert.deepEqual(await presetDigests(),manifest.presetDigests,'Existing preset grants changed; inspect rather than overwrite');
+  if(!fields.length){
+    // Native fields.afterCreate adds the field to existing action whitelists.
+    // Snapshot every role before creating it; remove only that automatic addition.
+    const existingRoles=await api('roles:list?paginate=false');
+    manifest.fieldGrantSnapshot=[];
+    for(const role of existingRoles)manifest.fieldGrantSnapshot.push({role:role.name,resources:await api('roles/'+role.name+'/resources:list?paginate=false&appends[]=actions&appends[]=actions.scope')});
+    await save();
+    await api('collections/'+bundle.collection+'/fields:create',bundle.field);manifest.fieldCreated=true;await save();
+  }
+  if(manifest.fieldGrantSnapshot&&!manifest.fieldGrantsRestored){
+    for(const snapshot of manifest.fieldGrantSnapshot){
+      const current=await api('roles/'+snapshot.role+'/resources:list?paginate=false&appends[]=actions&appends[]=actions.scope');
+      const repairs=fieldGrantRepairs(snapshot.resources,current,bundle.field.name);
+      for(const resourceId of new Set(repairs.map(repair=>repair.resourceId))){
+        const prior=snapshot.resources.find(resource=>resource.id===resourceId);
+        await api('roles/'+snapshot.role+'/resources:update?filterByTk='+resourceId,{actions:prior.actions.map(action=>({id:action.id,name:action.name,fields:action.fields,scopeId:action.scopeId}))});
+      }
+      const restored=await api('roles/'+snapshot.role+'/resources:list?paginate=false&appends[]=actions&appends[]=actions.scope');
+      assert.equal(canonical(resourceProjection(restored)),canonical(resourceProjection(snapshot.resources)),'Existing role grants were not preserved');
+    }
+    manifest.fieldGrantsRestored=true;await save();
+  }
   assert.deepEqual(await presetDigests(),manifest.presetDigests,'Existing preset grants changed; inspect rather than overwrite');
-  if(!fields.length){await api('collections/'+bundle.collection+'/fields:create',bundle.field);manifest.fieldCreated=true;await save();}
   const roles=await api('roles:list?'+filter({name:manifest.role}));
   if(!roles.length){
     assert.notEqual(manifest.roleCreated,true,'Fixture role was removed; inspect rather than recreating revoked access');
