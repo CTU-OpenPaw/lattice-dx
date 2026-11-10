@@ -1,27 +1,26 @@
-# Ranh giới kiến trúc
+# Kiến trúc LatticeDX
 
-Thiết kế đích và đối chiếu đề thi nằm trong [DX-OS tối thiểu](dx-os-minimum-design.md). Nội dung dưới đây mô tả bộ khung đang chạy; các dịch vụ trong thiết kế đích chưa được tích hợp.
+Luồng nghiệp vụ native chạy trên NocoBase. Quản trị viên cấu hình collections, trang, biểu mẫu, quyền và workflow trong cùng môi trường. Workspace hiển thị các trang người dùng được cấp quyền và mở hộp công việc của NocoBase.
 
-Luồng hiện có: trình duyệt → Next.js route `/api/agent/demo` → API `/v1/agent/demo` → worker `/run`.
+## Ranh giới thực thi
 
-Web gọi backend từ server, tránh phải cấu hình CORS giữa trình duyệt và các dịch vụ. Các địa chỉ API/worker được cấu hình bằng biến môi trường. Request được kiểm tra tại từng ranh giới. Timeout API → worker là 5 giây, web → API là 6 giây.
+| Thành phần | Trách nhiệm |
+| --- | --- |
+| NocoBase và PostgreSQL native | Lưu cấu hình trang, collections, ACL, hồ sơ và lịch sử workflow. Thực thi CRUD, kiểm quyền theo vai trò/trường/phạm vi dữ liệu, chạy workflow và manual task. |
+| Foundation | Cài mô hình nghiệp vụ, migration và guard về thành viên, tổ chức và tham chiếu. Cung cấp API nhận sự kiện, đồng bộ ngữ cảnh và lưu đề xuất có bằng chứng. |
+| Enterprise Login và Keycloak | Đăng nhập doanh nghiệp khi cấu hình provider. ACL nghiệp vụ vẫn được kiểm tra trên phiên native. |
+| Core API và kho tệp chung | Xử lý lưu/quét tệp khi bật overlay tệp. NocoBase kiểm quyền hồ sơ trước khi gọi API nội bộ. PostgreSQL core và kho tệp có phạm vi backup riêng. |
+| Orion-LD và n8n | Orion-LD phục vụ ngữ cảnh Asset. n8n kết nối hệ thống qua webhook/API. Quy trình phê duyệt native do NocoBase thực thi. |
+| API, Action Bridge và `/lattice` legacy | Duy trì luồng và dữ liệu cũ trong giai đoạn chuyển đổi. Kiểm tra caller, dữ liệu và luồng tương đương trước khi chuyển điểm ghi. |
 
-## Đơn vị mở rộng
+Với luồng yêu cầu nội bộ, nhân viên gửi hồ sơ qua biểu mẫu native. API kiểm quyền và phạm vi tổ chức, sau đó workflow native tạo công việc cho quản lý. Quản lý xử lý công việc qua hộp việc native. Cấu hình workflow, hồ sơ và lịch sử xử lý được lưu trong PostgreSQL của NocoBase.
 
-- `apps/`: chương trình có entrypoint, lệnh chạy và vòng đời riêng.
-- `packages/`: thư viện được import; không chạy thành dịch vụ.
-- `plugins/`: phần mở rộng tuân theo SDK/vòng đời của nền tảng chủ.
-- `infra/`: cấu hình công nghệ upstream; không chứa bản sao source của upstream.
-- `solutions/`: mô hình dữ liệu, workflow và cấu hình một ứng dụng nghiệp vụ.
+Với tích hợp sự kiện, connector ghi vào inbox qua API có quyền. Workflow native có thể nhận sự kiện từ inbox. Agent có thể đọc dữ liệu theo quyền hiện hành và gửi đề xuất kèm bằng chứng để người có quyền xử lý. Việc ghép nguồn sự kiện, workflow và model thật cần nghiệm thu theo từng kịch bản.
 
-Mỗi app/package mới phải có manifest và tài liệu chạy. App chỉ dùng public exports của package. Mã phụ thuộc một nền tảng cụ thể được giữ trong module/plugin của nền tảng đó.
+## Bàn giao và nghiệm thu
 
-Không tạo `core`, `sdk`, `ui` hoặc microservice rỗng. Khi xuất hiện logic quản lý ứng dụng dùng chung, tạo `packages/core`; khi có người dùng SDK thực tế, tách SDK từ phần kết nối đang chạy.
-
-## Agent
-
-`apps/agent-worker/src/app.ts` hiện cung cấp endpoint demo. Khi có bài toán cụ thể, thêm định nghĩa agent, tools và jobs tại worker. Tools phải thực thi quyền tại điểm gọi dịch vụ. Worker không được truy cập trực tiếp bảng nghiệp vụ của nền tảng khác.
-
-## Quyết định còn mở
-
-Nền low-code và giấy phép phiên bản; mô hình định danh/SSO; broker NGSI-LD; lưu trữ tác vụ; provider AI; bài toán nghiệp vụ. Không coi bộ khung hiện tại là sản phẩm đáp ứng toàn bộ đề thi.
+- [Cài sạch và thử native](native-clean-install.md) dựng môi trường riêng từ source đã commit. Lượt ghép PR #45, #47 và #48 ngày 09/11/2026 đã xác nhận cài ba plugin, chạy mười migration, 31 kiểm API nền/workflow và phạm vi quyền HTTP của bảy vai trò.
+- [Workspace theo vai trò](native-workspace-roles.md) mô tả đường vào `/admin/lattice-workspace`, dữ liệu thử và kiểm tra trên trình duyệt.
+- [Khôi phục database native](native-database-recovery.md), [kho tệp chung](native-shared-file-storage.md) và [khôi phục store legacy](recovery.md) ghi rõ phạm vi từng bộ dữ liệu.
+- [Ingress và proposal tools](native-integration-tools.md) mô tả hợp đồng cho workflow, n8n và agent. Nghiệm thu bản bàn giao cần chạy lại browser, đăng nhập doanh nghiệp, kho tệp và luồng broker/n8n/model trên cùng bản ghép.
+- [Nguồn và giấy phép](third-party.md) phân biệt mã nhóm, image dịch vụ và source upstream tham chiếu. [Thiết kế DX-OS](dx-os-minimum-design.md) ghi lại mục tiêu ban đầu của dự án.

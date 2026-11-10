@@ -35,7 +35,7 @@ Mở `pageUrl` do lệnh trả về. Root fixture của host: `admin@nocobase.co
 
 Mật khẩu fixture nghiệp vụ: `NativeLab-2026!`. Chỉ dùng localhost, không phải cấu hình production. Đăng xuất giữa các vai trò. Dùng form **Tạo và gửi**, quản lý vào Workflow To-do để duyệt, người thực hiện hoàn thành. Người nhận nằm trong cấu hình workflow mẫu, không phải cơ chế điều phối logistics hoàn chỉnh.
 
-Đây là kiểm API và tạo cấu hình UI bền vững; cần nghiệm thu browser riêng, không suy diễn thành đã test mọi block/role. Workspace mới của Hưng chỉ xuất hiện khi nhánh/PR tương ứng đã được tích hợp vào source chạy.
+Với source chứa PR #47, mở `/admin/lattice-workspace` trên cùng cổng để vào Workspace. [Hướng dẫn Workspace theo vai trò](native-workspace-roles.md) có các bước kiểm menu, trang được cấp quyền và hộp công việc. Lệnh cài sạch kiểm API và lưu cấu hình UI mẫu. Dùng trình duyệt để nghiệm thu từng thao tác.
 
 ## Kiến trúc và phạm vi bàn giao
 
