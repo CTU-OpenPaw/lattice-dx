@@ -46,7 +46,7 @@ function firstSettingsPath(items) {
 
 const BUILDER_PATH = '/admin/lattice-builder';
 
-function createNativeBuilderNavigation(client, React, antd, app, {clientV2, router, flow} = {}) {
+function createNativeBuilderNavigation(client, React, antd, app, {clientV2, router, flow, BrandLogo} = {}) {
   // Only replace the registered shell when all required public SDKs exist.
   if (!clientV2 || !router || !flow || !app.flowEngine ||
       ![client.useAllAccessDesktopRoutes, client.useUIConfigurationPermissions,
@@ -134,7 +134,9 @@ function createNativeBuilderNavigation(client, React, antd, app, {clientV2, rout
       : h('span', {'aria-disabled': true, style: {opacity: 0.5}}, title);
     return h('div', {style: {height: '100dvh', display: 'flex', flexDirection: 'column', '--nb-header-height': '56px'}},
       h('header', {style: {height: 56, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 24, padding: '0 20px', background: '#001529', color: '#fff'}},
-        h('strong', {style: {fontSize: 22}}, 'LatticeDX'),
+        h('div', {style: {display: 'flex', alignItems: 'center', gap: 10}},
+          BrandLogo ? h(BrandLogo, {size: 32}) : null,
+          h('strong', {style: {fontSize: 22}}, 'LatticeDX')),
         h('nav', {'aria-label': 'Chế độ Studio', style: {display: 'flex', alignItems: 'center', gap: 8}},
           modeLink('Config', settingsPath, configMode), modeLink('Build UI', lastPage.current, !configMode)),
         h('div', {style: {marginLeft: 'auto'}}, client.PinnedPluginList ? h(client.PinnedPluginList) : null)),
