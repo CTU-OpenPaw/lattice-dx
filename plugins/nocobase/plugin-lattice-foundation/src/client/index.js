@@ -17,6 +17,7 @@
   const {registerApplicationViews} = require('../applications/views');
   const {defaultContracts}=require('../shared/contracts');
   const {createNativeBuilderNavigation}=require('./native-builder-navigation');
+  const {createBrandLogo, registerSignInLogo}=require('./native-branding');
   function useLatticeFormAction(manifest, blockId) {
     const apiClient = client.useAPIClient();
     const sharedApi = React.useMemo(() => createWorkspaceApi({apiClient}), [apiClient]);
@@ -32,7 +33,9 @@
   }
   class LatticeFoundationClient extends client.Plugin {
     async load() {
-      const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow});
+      const BrandLogo=createBrandLogo(client,React);
+      registerSignInLogo(this.app,React,BrandLogo);
+      const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo});
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
       this.app.addScopes({useLatticeFormAction});
       const blocks=createBlockComponents(client,React,antd);
