@@ -21,6 +21,7 @@ Với tích hợp sự kiện, connector ghi vào inbox qua API có quyền. Wor
 
 - [Cài sạch và thử native](native-clean-install.md) dựng môi trường riêng từ source đã commit. Lượt ghép PR #45, #47 và #48 ngày 09/11/2026 đã xác nhận cài ba plugin, chạy mười migration, 31 kiểm API nền/workflow và phạm vi quyền HTTP của bảy vai trò.
 - [Workspace theo vai trò](native-workspace-roles.md) mô tả đường vào `/admin/lattice-workspace`, dữ liệu thử và kiểm tra trên trình duyệt.
+- Trên môi trường nhóm, commit `bd75225` của PR #51 đã qua luồng nhân viên tạo yêu cầu, quản lý duyệt và kho hoàn thành. Hồ sơ `PR51-TEAM-20261112-01` vẫn ở `completed` sau khi tải lại và công việc của kho xuất hiện trong **Đã xử lý**. Bản ghép vào `main` là `991de11`. [CI sau merge](https://github.com/CTU-OpenPaw/lattice-dx/actions/runs/43437463966)
 - [Khôi phục database native](native-database-recovery.md), [kho tệp chung](native-shared-file-storage.md) và [khôi phục store legacy](recovery.md) ghi rõ phạm vi từng bộ dữ liệu.
 - [Ingress và proposal tools](native-integration-tools.md) mô tả hợp đồng cho workflow, n8n và agent. Nghiệm thu bản bàn giao cần chạy lại browser, đăng nhập doanh nghiệp, kho tệp và luồng broker/n8n/model trên cùng bản ghép.
 - [Nguồn và giấy phép](third-party.md) phân biệt mã nhóm, image dịch vụ và source upstream tham chiếu. [Thiết kế DX-OS](dx-os-minimum-design.md) ghi lại mục tiêu ban đầu của dự án.

@@ -31,4 +31,12 @@ Build từ nguồn của mã nhóm được mô tả ở README; source/build up
 
 Ba package khai báo Apache-2.0 cho mã nhóm và có file `LICENSE` riêng. Build và cài plugin trên host NocoBase sử dụng SDK do host cung cấp. Giữ thông báo bản quyền và giấy phép của dependency được đóng gói cùng plugin theo phạm vi áp dụng của chúng.
 
+Enterprise Login đóng gói các dependency dưới đây. Phiên bản và giấy phép được ghi trong [lockfile của plugin](../plugins/nocobase/plugin-enterprise-auth/package-lock.json). Các bản đã cài trong lab mang theo `LICENSE.md` riêng.
+
+| Dependency đóng gói | Phiên bản | Giấy phép |
+| --- | --- | --- |
+| `openid-client` | `6.8.9` | MIT |
+| `jose` | `6.2.15` | MIT |
+| `oauth4webapi` | `3.8.8` | MIT |
+
 Submodule `upstream/nocobase` khóa commit `5b47bec116c52239348c09d360e4bd2649c99efc` để khảo sát. Đối chiếu điều khoản và header của checkout này trong [ghi nhận source upstream](nocobase-source-review.md). Hồ sơ phân phối cần kiểm riêng nội dung image 2.2.38, dependency gián tiếp và các notices tương ứng. Inventory hiện tại ghi nhận nguồn và phạm vi đóng góp, chưa đủ để kết luận giấy phép cho toàn bộ bản phân phối.
