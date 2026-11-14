@@ -49,6 +49,22 @@ Context chỉ trả name/status khi native field đó được xem, cùng teleme
 
 ## 3. Lưu đề xuất có bằng chứng
 
+### Nối inbox UC2 với n8n
+
+Import `infra/config/n8n/uc2-observation-review.json` vào n8n 2.42.7 đã thiết lập tài khoản quản trị. Chỉnh URL của NocoBase và 9Router theo mạng triển khai, sau đó gắn ba credential Header Auth theo tên trong workflow:
+
+| Credential | Header | Giá trị |
+| --- | --- | --- |
+| LatticeDX UC2 Webhook | `X-Lattice-UC2-Key` | Khóa webhook riêng của lab |
+| LatticeDX UC2 Native Agent | `Authorization` | Bearer của tài khoản nghiệp vụ cùng tổ chức có quyền đọc Asset và `lattice.integrations.propose` |
+| LatticeDX UC2 Model | `Authorization` | Bearer của 9Router, workflow gọi `combo` |
+
+Publish workflow n8n. Đặt `NOCOBASE_URL`, `NOCOBASE_TOKEN`, `UC2_SENSOR_TENANT`, `UC2_N8N_WEBHOOK_URL` và `UC2_N8N_WEBHOOK_KEY`, rồi chạy `node scripts/configure-uc2-inbox-workflow.mjs` trên lab riêng. URL phải truy cập được từ container NocoBase. Chỉ chạy installer một lần cho mỗi lượt setup. Kiểm tra rồi bật workflow inbox và workflow xem xét đề xuất bên dưới. Khóa webhook nằm trong cấu hình node HTTP của NocoBase, vì vậy giới hạn quyền xem/chỉnh workflow và loại khóa khi xuất cấu hình.
+
+Workflow chỉ chuyển observation mới thuộc tổ chức đã cấu hình và có `late=false`. n8n đọc Asset qua API có quyền, gọi model và lưu đề xuất với fingerprint. Mỗi inbox ID tạo một khóa đề xuất ổn định. Khi thử lại node gửi HTTP, model có thể được gọi lại. Nếu nội dung model khác sau khi lượt trước đã ghi thành công, API có thể trả `409` và cần kiểm biên nhận hiện có. Task native ghi nhận việc đã xem đề xuất.
+
+Nghiệm thu local đã chạy từ `receive` tới task qua NocoBase `13003` và n8n `2.42.7`, với endpoint model mẫu. Gửi lặp cùng sự kiện tạo một đề xuất và một task. Người gửi đề xuất bị chặn khi xử lý task của quản lý. Lượt kiểm model `combo` thật cần 9Router đang chạy.
+
 Lab có thể dựng task xem xét cho đề xuất về Asset bằng lệnh sau. Chọn ID Employee của quản lý cùng tổ chức. Installer tạo workflow ở trạng thái tắt để quản trị viên kiểm tra cấu hình trước khi bật.
 
 ```powershell
