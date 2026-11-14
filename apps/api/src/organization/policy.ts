@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import type { DepartmentCreate, DepartmentUpdate, OrganizationActor, SnapshotInput } from './types.js';
 import { parseCreateKey } from '../create-command.js';
 export class OrganizationError extends Error {

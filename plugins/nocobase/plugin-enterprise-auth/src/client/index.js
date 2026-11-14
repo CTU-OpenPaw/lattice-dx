@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 (function(factory){
   if(typeof define==='function'&&define.amd)define('@latticedx/plugin-enterprise-auth',['@nocobase/client','react','antd','@nocobase/plugin-auth'],factory);
   else if(typeof module==='object'&&module.exports)module.exports=factory(require('@nocobase/client'),require('react'),require('antd'),require('@nocobase/plugin-auth/client'));

@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {expect,test} from 'vitest';
 import {externalId,parseMutation,revision} from './policy.js';
 test('mapping identifiers are exact bounded tenant Asset URNs and revision zero is creation',()=>{

@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Planning/fixture contract only. These are not deployed business API models.
 type Entity = { id: string; organizationId: string };
 export type LogisticsFixture = {

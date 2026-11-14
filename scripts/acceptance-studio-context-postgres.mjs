@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Explicit opt-in acceptance: all fixture writes occur in a newly created, disposable database.
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';

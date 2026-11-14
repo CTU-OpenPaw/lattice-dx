@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { WorkflowError } from './policy.js';
 export function expressionFailure(): never { throw new WorkflowError(400,'Biểu thức không hợp lệ.'); }
 export interface Decimal { coefficient:bigint;scale:number }

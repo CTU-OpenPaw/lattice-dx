@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import type { WorkflowCompletion, WorkflowCondition, WorkflowWaitConfig } from '@dx/contracts';
 import { validateInput } from './policy.js';
 export {numericPattern,strictNumber,conditionMatches} from './conditions.js';

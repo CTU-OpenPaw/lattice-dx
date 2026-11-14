@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {expect,test,vi} from 'vitest';
 import {checkLocal} from '../scripts/check-local.mjs';
 const answer=(url:string)=>url.endsWith('/ready')?{status:'ready',service:'api'}:url.includes('openid-configuration')?{issuer:'http://localhost:8081/realms/lattice'}:url.endsWith('/version')?{'orionld version':'1.10.0'}:url.endsWith('/models')?{data:[{id:'combo'}]}:url.endsWith('getLang')?{data:{lang:'en-US',resources:{translation:'a'.repeat(570000)}}}:{status:'ok'};

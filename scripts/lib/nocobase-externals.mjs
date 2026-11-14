@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Verified against the official 2.2.38 image SDK and plugin-auth's emitted
 // dist/externalVersion.js. These are build target versions, never a runtime
 // lookup that would make the checker pass against an arbitrary host.

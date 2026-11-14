@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const {envelope,proposalInput,fingerprint,receiptKey}=require('../src/server/native-integration-policy');
 const now=Date.parse('2026-11-06T01:00:00Z');

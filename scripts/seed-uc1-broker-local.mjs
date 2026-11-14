@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Explicit local fixture setup only; production receiver never invents references.
 const ns='https://latticedx.example/ns/';
 for(const [type,businessId,name] of [['Department','warehouse','Demo Warehouse'],['Location','office-1','Demo Office 1']]){

@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {randomUUID} from 'node:crypto';
 export class OperationsError extends Error {constructor(public statusCode:400|503,message:string){super(message);}}
 export function correlationId(_value?:unknown):string{

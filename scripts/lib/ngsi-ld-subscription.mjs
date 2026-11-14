@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { readFile } from 'node:fs/promises';
 export async function loadBrokerContext() {
   const configured = JSON.parse((await readFile(new URL('../../infra/config/ngsi-ld/context.jsonld', import.meta.url), 'utf8')).replace(/^\uFEFF/, ''))['@context'];

@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 export function snapshotPerson(user,roles,adminDepartment=false){
   const organizationId=user.attributes?.organization_id?.[0];
   if(typeof user.id!=='string'||!user.id||typeof organizationId!=='string'||! /^[a-zA-Z0-9_-]{1,80}$/.test(organizationId))return undefined;

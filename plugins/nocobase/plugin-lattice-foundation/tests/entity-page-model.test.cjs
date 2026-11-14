@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const model=require('../src/client/entity-page-model');
 const schema={id:'assets',version:1,fields:{name:{type:'text',required:true},count:{type:'integer'},hidden:{type:'text'},active:{type:'boolean'}},relations:{location:{targetSchemaId:'places'}}};

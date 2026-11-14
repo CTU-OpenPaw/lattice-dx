@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {randomBytes} from 'node:crypto';
 // Rebind IDs in a schema exported from the native designer. Rendering and all
 // actions stay with the host; no page renderer or event handlers live here.

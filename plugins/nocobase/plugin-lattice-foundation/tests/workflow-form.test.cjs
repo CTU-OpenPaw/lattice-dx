@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {test}=require('node:test');const assert=require('node:assert/strict');
 const {createApprovalController}=require('../src/client/approval');const {createFieldRenderer,workflowFieldErrors}=require('../src/client/schema-fields');
 const {createInboxComponents}=require('../src/client/inbox-blocks');const {validateManifest}=require('../src/shared/manifest');const manifest=require('../src/shared/manifests/work.json');

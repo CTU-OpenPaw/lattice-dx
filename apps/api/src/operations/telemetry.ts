@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 export const WORKERS=['outbox','timers','waitTimeouts','automations','fileStorage'] as const;
 export type WorkerId=typeof WORKERS[number];
 export type WorkerResult='success'|'failure'|'idle';

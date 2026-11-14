@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {expect,test} from 'vitest';
 import {parseReportInput} from './reports-policy.js';
 const query={schemaId:'invoice',schemaVersion:1,metrics:[{name:'rows',operation:'count'}]};

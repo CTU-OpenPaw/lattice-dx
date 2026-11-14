@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const { attributesFromForm } = require("./console-model");
 const { sameConfiguration } = require("./system-model");
 function createDataScreen(React, { h, box, button, field, json, inputStyle }) {

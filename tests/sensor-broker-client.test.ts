@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { expect, test, vi } from 'vitest';
 import { createSensorBrokerClient } from '../apps/api/src/sensors/broker-client';
 import { buildSensorProjection } from '../apps/api/src/sensors/projection';

@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const text = (name, title, extra = {}) => ({name, type: 'string', interface: 'input',
   uiSchema: {type: 'string', title, 'x-component': 'Input'}, ...extra});
 const relation = (name, target, foreignKey) => ({name, type: 'belongsTo', target, foreignKey});

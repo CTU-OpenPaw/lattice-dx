@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {cp, mkdir,writeFile} from 'node:fs/promises';
 import {externalVersionSource} from '../../../scripts/lib/nocobase-externals.mjs';
 const root = new URL('./', import.meta.url);

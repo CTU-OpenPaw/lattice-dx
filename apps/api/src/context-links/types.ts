@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import type {Scope} from '../entities/types.js';
 import type {PageQuery,Page} from '../pagination.js';
 export type ContextMapping={provider:'ngsi-ld';entityId:string;externalId:string|null;revision:number;updatedAt:string};

@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import type { WorkflowActor, WorkflowBinding, WorkflowRun, WorkflowStep, WorkflowTypedBinding, WorkflowEntityVersion, WorkflowBlockResult } from '@dx/contracts';
 import {name as entityName,slug,version,validateAttributes,EntityError} from '../entities/policy.js';
 import { WorkflowError } from './policy.js';

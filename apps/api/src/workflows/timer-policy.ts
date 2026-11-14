@@ -1,4 +1,10 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { WorkflowError } from './policy.js';
 export class TimerError extends WorkflowError {
   constructor(public readonly code:string,status:400|403|404|409|503=409) {super(status,code);}
