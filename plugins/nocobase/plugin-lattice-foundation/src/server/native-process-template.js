@@ -7,15 +7,15 @@
  */
 'use strict';
 
-function manualInterface(name,title,actions,collection) {
+function manualInterface(name,title,actions,collection,fields=['code','name','description','category'],detailTitle='Thông tin yêu cầu') {
   const buttons=Object.fromEntries(actions.map(action=>[action.key,{type:'void',title:action.title,'x-component':'Action','x-decorator':'ManualActionStatusProvider','x-decorator-props':{value:action.status},'x-component-props':{type:action.key==='reject'?'default':'primary',useAction:'{{ useSubmit }}'},'x-designer':'ManualActionDesigner','x-action-settings':{assignedValues:{values:action.values}}}]));
   const actionBar={type:'void','x-decorator':'ActionBarProvider','x-component':'ActionBar','x-component-props':{layout:'one-column'},'x-initializer':'workflowManual:form:configureActions',properties:buttons};
   const form={type:'void','x-component':'FormV2','x-use-component-props':'useFormBlockProps',properties:{actions:actionBar}};
   const formBlock={type:'void','x-decorator':'CustomFormBlockProvider','x-decorator-props':{collection:{name,fields:[]}},'x-component':'CardItem','x-component-props':{title},'x-designer':'SimpleDesigner','x-designer-props':{type:'customForm'},properties:{[name]:form}};
   const column={type:'void','x-component':'Grid.Col',properties:{formBlock}};
   const row={type:'void','x-component':'Grid.Row',properties:{column}};
-  const detailFields=Object.fromEntries(['code','name','description','category'].map(field=>[field,{type:'string','x-component':'CollectionField','x-decorator':'FormItem','x-collection-field':collection+'.'+field,'x-read-pretty':true}]));
-  const details={type:'void','x-decorator':'DetailsBlockProvider','x-decorator-props':{collection,dataPath:'$context.data'},'x-component':'CardItem','x-component-props':{title:'Thông tin yêu cầu'},'x-settings':'blockSettings:singleDataDetails',properties:{form:{type:'void','x-component':'FormV2','x-use-component-props':'useDetailsBlockProps','x-read-pretty':true,properties:detailFields}}};
+  const detailFields=Object.fromEntries(fields.map(field=>[field,{type:'string','x-component':'CollectionField','x-decorator':'FormItem','x-collection-field':collection+'.'+field,'x-read-pretty':true}]));
+  const details={type:'void','x-decorator':'DetailsBlockProvider','x-decorator-props':{collection,dataPath:'$context.data'},'x-component':'CardItem','x-component-props':{title:detailTitle},'x-settings':'blockSettings:singleDataDetails',properties:{form:{type:'void','x-component':'FormV2','x-use-component-props':'useDetailsBlockProps','x-read-pretty':true,properties:detailFields}}};
   const detailRow={type:'void','x-component':'Grid.Row',properties:{column:{type:'void','x-component':'Grid.Col',properties:{details}}}};
   const grid={type:'void','x-component':'Grid','x-initializer':'workflowManual:popup:configureUserInterface:addBlock',properties:{detailRow,row}};
   return {tab1:{type:'void',title,'x-component':'Tabs.TabPane','x-designer':'Tabs.Designer',properties:{grid}}};
@@ -56,4 +56,18 @@ function documentProcessTemplate({collection,organizationId,reviewerEmployeeId,a
     : {mode:1,condition:{organizationId}};
   return {workflow:{title:'Lattice native — '+collection+' — '+organizationId,type:'collection',enabled:false,sync:false,config:{collection,...trigger}},nodes};
 }
-module.exports={documentProcessTemplate};
+function proposalReviewTemplate({organizationId,reviewerEmployeeId}) {
+  if(!/^[-a-zA-Z0-9_]{1,80}$/.test(organizationId??'')||! /^[1-9]\d*$/.test(String(reviewerEmployeeId)))throw new Error('Invalid native review configuration');
+  const collection='latticeAgentProposals';
+  const reviewer={id:reviewerEmployeeId,organizationId,active:true,userId:{$ne:null},'user.roles.name':{$in:['ldx_manager','ldx_admin']}};
+  const userId='{{$jobsMapByNodeKey.reviewer.userId}}';
+  const actions=[{key:'reviewed',title:'Xác nhận đã xem',status:1,values:{decision:'reviewed'}}];
+  return {workflow:{title:'UC2 — Xem xét đề xuất — '+organizationId,type:'collection',enabled:false,sync:false,config:{collection,mode:1,condition:{organizationId,targetCollection:'latticeAssets',state:'proposed'}}},nodes:[
+    {key:'reviewer',type:'query',title:'Kiểm tra người duyệt',config:{collection:'latticeEmployees',multiple:false,failOnEmpty:true,params:{filter:reviewer}}},
+    {key:'separation',type:'condition',title:'Tách người gửi và người duyệt',upstreamKey:'reviewer',config:{rejectOnFalse:true,calculation:{calculator:'notEqual',operands:[userId,'{{$context.data.sourceUserId}}']}}},
+    {key:'review',type:'manual',title:'Xem xét đề xuất UC2',upstreamKey:'separation',config:{mode:0,assignees:[userId],forms:{review:{type:'custom',actions}},schema:manualInterface('review','Xem xét đề xuất UC2',actions,collection,['targetRecordId'],'Đề xuất UC2')}},
+    {key:'reviewerCurrent',type:'query',title:'Kiểm tra lại người duyệt',upstreamKey:'review',config:{collection:'latticeEmployees',multiple:false,failOnEmpty:true,params:{filter:{...reviewer,userId}}}},
+  ]};
+}
+
+module.exports={documentProcessTemplate,proposalReviewTemplate};

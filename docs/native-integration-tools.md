@@ -49,6 +49,16 @@ Context chỉ trả name/status khi native field đó được xem, cùng teleme
 
 ## 3. Lưu đề xuất có bằng chứng
 
+Lab có thể dựng task xem xét cho đề xuất về Asset bằng lệnh sau. Chọn ID Employee của quản lý cùng tổ chức. Installer tạo workflow ở trạng thái tắt để quản trị viên kiểm tra cấu hình trước khi bật.
+
+```powershell
+$env:NOCOBASE_URL='http://localhost:13003'
+node scripts/configure-native-process.mjs --collection=latticeAgentProposals --organization=ORG --reviewer=EMPLOYEE_ID
+node scripts/acceptance-native-proposal-review.mjs
+```
+
+Task hiển thị mã bản ghi đích và ghi nhận **Xác nhận đã xem** vào lịch sử workflow. Nội dung và bằng chứng của đề xuất đọc qua tool `proposals` theo quyền hiện tại. Phê duyệt nghiệp vụ và thực thi thay đổi cần workflow riêng có bước kiểm lại bằng chứng.
+
 `POST latticeIntegrations:propose`:
 
 ```json
