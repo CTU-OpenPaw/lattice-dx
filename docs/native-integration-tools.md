@@ -59,11 +59,21 @@ Import `infra/config/n8n/uc2-observation-review.json` vào n8n 2.42.7 đã thi�
 | LatticeDX UC2 Native Agent | `Authorization` | Bearer của tài khoản nghiệp vụ cùng tổ chức có quyền đọc Asset và `lattice.integrations.propose` |
 | LatticeDX UC2 Model | `Authorization` | Bearer của 9Router, workflow gọi `combo` |
 
+Khi nâng cấp lab đã chạy phiên bản trước, cập nhật plugin NocoBase có action `proposalReceipt` trước khi publish lại workflow n8n. Đồng bộ timeout của node HTTP NocoBase thành `135000` ms.
+
 Publish workflow n8n. Đặt `NOCOBASE_URL`, `NOCOBASE_TOKEN`, `UC2_SENSOR_TENANT`, `UC2_N8N_WEBHOOK_URL` và `UC2_N8N_WEBHOOK_KEY`, rồi chạy `node scripts/configure-uc2-inbox-workflow.mjs` trên lab riêng. URL phải truy cập được từ container NocoBase. Chỉ chạy installer một lần cho mỗi lượt setup. Kiểm tra rồi bật workflow inbox và workflow xem xét đề xuất bên dưới. Khóa webhook nằm trong cấu hình node HTTP của NocoBase, vì vậy giới hạn quyền xem/chỉnh workflow và loại khóa khi xuất cấu hình.
 
-Workflow chỉ chuyển observation mới thuộc tổ chức đã cấu hình và có `late=false`. n8n đọc Asset qua API có quyền, gọi model và lưu đề xuất với fingerprint. Mỗi inbox ID tạo một khóa đề xuất ổn định. Khi thử lại node gửi HTTP, model có thể được gọi lại. Nếu nội dung model khác sau khi lượt trước đã ghi thành công, API có thể trả `409` và cần kiểm biên nhận hiện có. Task native ghi nhận việc đã xem đề xuất.
+Workflow chỉ chuyển observation mới thuộc tổ chức đã cấu hình và có `late=false`. Mỗi inbox ID tạo một khóa đề xuất ổn định. Trước khi gọi model, n8n kiểm biên nhận qua `POST latticeIntegrations:proposalReceipt` với `collection`, `recordId` và `eventId`. API yêu cầu quyền tạo đề xuất và quyền đọc bản ghi đích. Nó chỉ trả `{found:false}` hoặc `{found:true,id}` cho đề xuất do chính tài khoản đó đã ghi cho bản ghi đích.
 
-Nghiệm thu local đã chạy từ `receive` tới task qua NocoBase `13003`, n8n `2.42.7` và 9Router với model `combo` thật. Gửi lặp cùng sự kiện chỉ gọi model một lần trong lượt thử, tạo một đề xuất và một task. Người gửi đề xuất bị chặn khi xử lý task của quản lý. Node model yêu cầu JSON với `stream:false`. Timeout của trigger bao gồm thời gian gọi model và hai lượt gọi API native.
+Khi webhook hoặc model gián đoạn, lấy ID từ inbox của lượt NocoBase bị lỗi. Sau khi dịch vụ phục hồi, dùng lại tổ chức, phiên quản trị lab và khóa webhook. Đặt `UC2_N8N_WEBHOOK_URL` thành URL webhook mà máy chạy lệnh truy cập được rồi chạy:
+
+```powershell
+node scripts/configure-uc2-inbox-workflow.mjs --replay=INBOX_ID
+```
+
+Lệnh đọc bản ghi inbox đã lưu, kiểm tra tổ chức, loại sự kiện và cờ `late`, rồi gửi lại đúng webhook. Kết quả có `inboxId`, `proposalId` và `duplicate`. Nếu đề xuất đã có, n8n trả biên nhận ngay. Nếu hai lượt chạy đồng thời cùng đi qua bước kiểm biên nhận, PostgreSQL vẫn chỉ ghi một đề xuất. Lượt nhận `409` có thể chạy lại lệnh sau khi lượt còn lại kết thúc.
+
+Nghiệm thu local đã chạy từ `receive` tới task qua NocoBase `13003`, n8n `2.42.7` và 9Router với model `combo` thật. Gửi lặp cùng sự kiện chỉ gọi model một lần trong lượt thử, tạo một đề xuất và một task. Người gửi đề xuất bị chặn khi xử lý task của quản lý. Node model yêu cầu JSON với `stream:false`. Timeout của trigger bao gồm thời gian gọi model và các lượt gọi API native.
 
 Lab có thể dựng task xem xét cho đề xuất về Asset bằng lệnh sau. Chọn ID Employee của quản lý cùng tổ chức. Installer tạo workflow ở trạng thái tắt để quản trị viên kiểm tra cấu hình trước khi bật.
 

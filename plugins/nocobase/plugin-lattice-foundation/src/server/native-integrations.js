@@ -80,6 +80,21 @@ function createIntegrationActions(){return {
   ctx.body={collection:visible.collection,recordId:visible.recordId,record:visible.record,fingerprint:visible.fingerprint};
  },
  context:async ctx=>{if(ctx.method!=='POST')ctx.throw(405);ctx.body=await readContext(ctx,ctx.action.params.values);},
+ proposalReceipt:async ctx=>{
+  if(ctx.method!=='POST')ctx.throw(405);
+  const input=ctx.action.params.values;
+  strict(input,['collection','recordId','eventId']);
+  const visible=await readNativeRecord(ctx,{collection:input.collection,recordId:input.recordId});
+  const {actor}=visible;
+  const filter={
+   receiptKey:receiptKey(actor.organizationId,actor.userId,input.eventId),
+   sourceEmployeeId:actor.employeeId,
+   targetCollection:visible.collection,
+   targetRecordId:visible.recordId,
+  };
+  const row=await ctx.app.db.getRepository('latticeAgentProposals').findOne({filter,fields:['id']});
+  ctx.body=row?{found:true,id:row.id}:{found:false};
+ },
  propose:async ctx=>{
   if(ctx.method!=='POST')ctx.throw(405);
   const input=proposalInput(ctx.action.params.values),visible=await readNativeRecord(ctx,{collection:input.collection,recordId:input.recordId});
@@ -111,7 +126,7 @@ function createIntegrationActions(){return {
 };}
 function registerNativeIntegrations(app){
  app.resourceManager.define({name:'latticeIntegrations',actions:createIntegrationActions()});
- app.acl.registerSnippet({name:PROPOSE_SNIPPET,actions:['latticeIntegrations:propose']});
+ app.acl.registerSnippet({name:PROPOSE_SNIPPET,actions:['latticeIntegrations:propose','latticeIntegrations:proposalReceipt']});
  app.acl.allow('latticeIntegrations',['receive','record','context','proposals'],'loggedIn');
  app.resourceManager.use(async(ctx,next)=>{
   if(JOURNALS.includes(ctx.action.resourceName?.split('.')[0])&&ctx.state.currentRole!=='root')throw failure('INTEGRATION_JOURNAL_PRIVATE',403);

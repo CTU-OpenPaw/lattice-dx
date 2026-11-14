@@ -26,13 +26,79 @@
       }
     },
     {
-      "id": "uc2-1",
-      "name": "Read Asset",
+      "id": "uc2-4",
+      "name": "Find Proposal Receipt",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
         250,
         0
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://nocobase/api/latticeIntegrations:proposalReceipt",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ ({collection: 'latticeAssets', recordId: $json.body.assetId, eventId: 'uc2-inbox-'+$json.body.inboxId}) }}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "LatticeDX UC2 Native Agent"
+        }
+      }
+    },
+    {
+      "id": "uc2-5",
+      "name": "Already Saved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        500,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "uc2-receipt-found",
+              "leftValue": "={{ $json.data.found }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "uc2-1",
+      "name": "Read Asset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        750,
+        125
       ],
       "parameters": {
         "method": "POST",
@@ -63,8 +129,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        500,
-        0
+        1000,
+        125
       ],
       "parameters": {
         "method": "POST",
@@ -95,8 +161,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        750,
-        0
+        1250,
+        125
       ],
       "parameters": {
         "method": "POST",
@@ -125,6 +191,29 @@
   "connections": {
     "Receive Observation": {
       "main": [
+        [
+          {
+            "node": "Find Proposal Receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Proposal Receipt": {
+      "main": [
+        [
+          {
+            "node": "Already Saved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Saved?": {
+      "main": [
+        [],
         [
           {
             "node": "Read Asset",
