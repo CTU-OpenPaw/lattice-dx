@@ -15,7 +15,7 @@ import {checkAccess} from '../entities/access.js';
 import {resolveRunEffectiveRoles} from '../workflows/run-authority.js';
 import {EntityError} from '../entities/policy.js';
 import type {ObjectStore} from './object-store.js';
-export type FileAccessContext={kind:'foundation'}|{kind:'entityAttachment';entityId:string};
+export type FileAccessContext={kind:'foundation'}|{kind:'entityAttachment';entityId:string}|{kind:'nativeRequest';requestId:string;instance:string};
 export type FileReadActor={subject:string;organizationId:string;roles:string[]};
 export type FileDefinitionResolver=(client:PoolClient,run:WorkflowRun)=>Promise<WorkflowDefinition|undefined>;
 export type FileContent={filename:string;content:Buffer};
@@ -42,7 +42,7 @@ async function foundationAuthority(client:PoolClient,actor:FileReadActor,id:stri
  if(path==='workflow')return false;
 
  // Standalone or unmanaged file owner access
- const owner=(await client.query('SELECT id,owner_id FROM foundation_files WHERE id=$1 AND organization_id=$2 AND owner_id=$3',[id,actor.organizationId,actor.subject])).rows[0];
+ const owner=(await client.query('SELECT id,owner_id FROM foundation_files WHERE id=$1 AND organization_id=$2 AND owner_id=$3 AND native_request_id IS NULL',[id,actor.organizationId,actor.subject])).rows[0];
  if(owner&&path!=='task'&&!hasManagedRuns)return true;
  if(path==='owner')return false;
 
@@ -62,8 +62,12 @@ async function authorized(client:PoolClient,actor:FileReadActor,id:string,contex
  return !!(await client.query('SELECT file_id FROM enterprise_entity_attachments WHERE entity_id=$1 AND file_id=$2 AND organization_id=$3 FOR SHARE',[context.entityId,id,actor.organizationId])).rows[0];
 }
 async function lockedMetadata(client:PoolClient,actor:FileReadActor,id:string,context:FileAccessContext,resolveDefinition?:FileDefinitionResolver){
+ if(context.kind==='nativeRequest'){
+  return (await client.query(`SELECT ${metadata} FROM foundation_files WHERE id=$1 AND organization_id=$2 AND native_request_id=$3 AND native_instance=$4 FOR SHARE`,
+    [id,actor.organizationId,context.requestId,context.instance])).rows[0] as FileItem|undefined;
+ }
  if(!await authorized(client,actor,id,context,resolveDefinition))return;
- return (await client.query(`SELECT ${metadata} FROM foundation_files WHERE id=$1 AND organization_id=$2 FOR SHARE`,[id,actor.organizationId])).rows[0] as FileItem|undefined;
+ return (await client.query(`SELECT ${metadata} FROM foundation_files WHERE id=$1 AND organization_id=$2 AND native_request_id IS NULL FOR SHARE`,[id,actor.organizationId])).rows[0] as FileItem|undefined;
 }
 export async function readFileMetadataWithClient(client:PoolClient,actor:FileReadActor,fileId:string,context:FileAccessContext,resolveDefinition?:FileDefinitionResolver):Promise<FileItem|undefined>{return lockedMetadata(client,actor,fileId,context,resolveDefinition);}
 export async function loadFileContentWithClient(client:PoolClient,actor:FileReadActor,fileId:string,context:FileAccessContext,store:ObjectStore|undefined,resolveDefinition?:FileDefinitionResolver):Promise<FileContent|undefined>{
@@ -86,5 +90,5 @@ export async function loadFileContentWithClient(client:PoolClient,actor:FileRead
 // Narrow legacy repository contexts retain their original authority boundaries.
 export async function readFoundationPathMetadataWithClient(client:PoolClient,actor:FileReadActor,id:string,path:'owner'|'task'|'workflow',resolveDefinition?:FileDefinitionResolver):Promise<FileItem|undefined>{
  if(!isRecordId(id)||!await foundationAuthority(client,actor,id,path,resolveDefinition))return;
- return (await client.query(`SELECT ${metadata} FROM foundation_files WHERE id=$1 AND organization_id=$2 FOR SHARE`,[id,actor.organizationId])).rows[0];
+ return (await client.query(`SELECT ${metadata} FROM foundation_files WHERE id=$1 AND organization_id=$2 AND native_request_id IS NULL FOR SHARE`,[id,actor.organizationId])).rows[0];
 }

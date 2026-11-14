@@ -18,6 +18,7 @@ import {startFileStorageWorker} from './files/storage-worker.js';
 import {bootstrapRuntime,startConfiguredWorkers} from './operations/runtime-lifecycle.js';
 import {createTelemetry,type WorkerId,type WorkerObserver} from './operations/telemetry.js';
 import {createHandoverBroker} from './ngsi-ld/handover-broker.js';
+import {registerNativeRequestStorage} from './files/native-request-storage.js';
 
 const telemetry=createTelemetry();
 const observer=(worker:WorkerId):WorkerObserver=>(result,duration)=>telemetry.recordWorker(worker,result,duration);
@@ -32,10 +33,18 @@ const runtime=await bootstrapRuntime(process.env,{
   const broker=handoverToken?createHandoverBroker({baseUrl:process.env.ASSET_HANDOVER_BROKER_URL||'http://orion-ld:1026',tenant}):undefined;
   if(handoverToken&&!database)throw Error('Asset handover requires PostgreSQL');
   const assetHandover=handoverToken?{token:handoverToken,tenant,deliver:(event:Parameters<NonNullable<typeof database>['assetHandover']>[0])=>database!.assetHandover(event,broker!)}:undefined;
-  return createApi({workerUrl:config.workerUrl,identity,ngsiLd,assetHandover,systems:database?.systems,systemAccess:database?.systemAccess,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
+  const scan = config.scanner ? (content:Buffer)=>scanWithClamd(content,config.scanner!.host,config.scanner!.port) : undefined;
+  const app = createApi({workerUrl:config.workerUrl,identity,ngsiLd,assetHandover,systems:database?.systems,systemAccess:database?.systemAccess,telemetry,runtimeWorkers:config.workers,records:database?.repository,foundation:database?.foundation,
    agents:database?.agents,entities:database?.entities,contextLinks:database?.contextLinks,dataTools:database?.dataTools,reports:database?.reports,automations:database?.automations,modules:database?.modules,taskLifecycle:database?.taskLifecycle,organization:database?.organization,operations:database?.operations,events:database?.events,
    definitionRegistry:database?.definitionRegistry,directory:database?.directory,workflows:database?.workflows,readSharedFile:database?.workflows.readSharedFile,
-   scan:config.scanner?content=>scanWithClamd(content,config.scanner!.host,config.scanner!.port):undefined});
+   scan});
+  const secret = process.env.DX_NATIVE_FILES_SECRET;
+  const instance = process.env.DX_NATIVE_FILES_INSTANCE;
+  if (secret || instance) {
+   if (!secret || !instance || !database || !scan) throw Error('Native file service requires a paired instance, PostgreSQL and scanner');
+   registerNativeRequestStorage(app,{secret,instance,repository:database.nativeRequestStorage,scan});
+  }
+  return app;
  },
  startWorkers:(config,database,add)=>{
   if(!database)return;

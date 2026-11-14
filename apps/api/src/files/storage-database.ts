@@ -18,7 +18,18 @@ export async function initializeFileStorage(database:Pick<Pool,'query'>) {
  ADD COLUMN IF NOT EXISTS storage_provider text NOT NULL DEFAULT 'postgres',
  ADD COLUMN IF NOT EXISTS object_key uuid,
  ADD COLUMN IF NOT EXISTS content_sha256 text,
+ ADD COLUMN IF NOT EXISTS native_request_id text,
+ ADD COLUMN IF NOT EXISTS native_instance text,
+ ADD COLUMN IF NOT EXISTS native_upload_key uuid,
+ ADD COLUMN IF NOT EXISTS native_content_digest text,
  ADD COLUMN IF NOT EXISTS storage_version integer NOT NULL DEFAULT 1`);
+ await database.query(`CREATE UNIQUE INDEX IF NOT EXISTS foundation_files_native_upload
+   ON foundation_files(native_instance,organization_id,native_request_id,owner_id,native_upload_key)
+   WHERE native_request_id IS NOT NULL`);
+ await database.query(`CREATE TABLE IF NOT EXISTS native_file_request_nonces (
+   nonce uuid PRIMARY KEY, expires_at timestamptz NOT NULL
+ );
+ CREATE INDEX IF NOT EXISTS native_file_request_expiration ON native_file_request_nonces(expires_at)`);
  await database.query('ALTER TABLE foundation_files ALTER COLUMN content DROP NOT NULL');
  const invalid=await database.query(`SELECT id FROM foundation_files WHERE NOT (
  storage_version > 0 AND size BETWEEN 0 AND 1048576 AND (

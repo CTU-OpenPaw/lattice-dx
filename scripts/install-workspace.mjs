@@ -20,9 +20,9 @@ const packages = [
   { directory: 'plugin-enterprise-auth', name: '@latticedx/plugin-enterprise-auth', build: 'build.mjs', restoreDependencies: true },
 ];
 
-export function defaultRun(file, args, { timeout }) {
+export function defaultRun(file, args, { timeout, cwd = root, env = process.env }) {
   return new Promise((accept, reject) => {
-    const child = spawn(file, args, { cwd: root, shell: false, windowsHide: true, timeout, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(file, args, { cwd, env, shell: false, windowsHide: true, timeout, stdio: ['ignore', 'pipe', 'pipe'] });
     const chunks = [];
     let size = 0;
     child.stdout.on('data', chunk => {
@@ -52,17 +52,17 @@ async function publicHealth() {
   catch { return false; }
 }
 
-export async function installWorkspace({ run = defaultRun, backupDir = resolve(root, 'output/backups'), health = publicHealth } = {}) {
+export async function installWorkspace({ run = defaultRun, backupDir = resolve(root, 'output/backups'), health = publicHealth, sourceRoot = root, composeArgs = compose } = {}) {
   const command = async (file, args, timeout) => {
-    try { return await run(file, args, { timeout, shell: false }); }
+    try { return await run(file, args, { timeout, shell: false, cwd: sourceRoot }); }
     catch { throw new Error('Workspace command failed; command output withheld'); }
   };
-  const docker = (args, timeout = 120000) => command('docker', [...compose, ...args], timeout);
+  const docker = (args, timeout = 120000) => command('docker', [...composeArgs, ...args], timeout);
   const exec = (args, timeout = 120000) => docker(['exec', '-T', 'nocobase', ...args], timeout);
   const local = [];
   for (const pkg of packages) {
     const source = `plugins/nocobase/${pkg.directory}`;
-    const metadata = JSON.parse(await readFile(resolve(root, source, 'package.json'), 'utf8'));
+    const metadata = JSON.parse(await readFile(resolve(sourceRoot, source, 'package.json'), 'utf8'));
     if (metadata.name !== pkg.name || !/^\d+\.\d+\.\d+$/.test(metadata.version)) throw new Error('Unexpected source package metadata');
     local.push({ ...pkg, version: metadata.version });
   }

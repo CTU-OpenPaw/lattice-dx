@@ -10,6 +10,7 @@
 const { randomUUID } = require('node:crypto');
 const { createConnection } = require('node:net');
 const { resolveNativeActor, scopeNativeRead } = require('./native-scope');
+const { createSharedUploadReceipts } = require('./native-shared-upload');
 
 const resource = 'latticeRequestAttachments';
 const requestCollection = 'latticeRequests';
@@ -61,9 +62,16 @@ function uploadInput(ctx) {
   return { filename: filename.trim(), content, key };
 }
 
-function registerNativeRequestAttachments(app, scannerHost, submitOrganization) {
+function registerNativeRequestAttachments(app, scannerHost, submitOrganization, sharedFiles) {
   const { db } = app;
   const query = async (sql, bind, transaction) => (await db.sequelize.query(sql, { bind, transaction }))[0];
+  const uploads = createSharedUploadReceipts(query);
+  async function useShared({ id, actor, transaction }) {
+    if (!sharedFiles) return false;
+    const rows = await query('SELECT 1 FROM lattice_native_request_attachments WHERE request_id=$1 AND organization_id=$2 LIMIT 1',
+      [id, actor.organizationId], transaction);
+    return !rows.length;
+  }
 
   async function checkRequestPermission(ctx, id, actor, transaction, action) {
     const acl = ctx.dataSource.acl;
@@ -103,10 +111,13 @@ function registerNativeRequestAttachments(app, scannerHost, submitOrganization) 
       const offset = ctx.query.offset ?? '0';
       if (typeof limit !== 'string' || !/^[1-9]\d?$/.test(limit) || Number(limit) > 50 ||
           typeof offset !== 'string' || !/^\d{1,6}$/.test(offset)) ctx.throw(400, 'Phân trang không hợp lệ.');
-      ctx.body = await withRequest(ctx, 'GET', 'view', ({ id, actor, transaction }) =>
-        query(`SELECT ${metadata} FROM lattice_native_request_attachments
+      ctx.body = await withRequest(ctx, 'GET', 'view', async scope => {
+        const { id, actor, transaction } = scope;
+        if (await useShared(scope)) return (await sharedFiles(ctx, 'list', scope, { limit: Number(limit), offset: Number(offset) })).data;
+        return query(`SELECT ${metadata} FROM lattice_native_request_attachments
           WHERE request_id = $1 AND organization_id = $2 ORDER BY id LIMIT $3 OFFSET $4`,
-        [id, actor.organizationId, Number(limit), Number(offset)], transaction));
+        [id, actor.organizationId, Number(limit), Number(offset)], transaction);
+      });
       ctx.set('Cache-Control', 'private, no-store');
       await next();
     },
@@ -121,12 +132,27 @@ function registerNativeRequestAttachments(app, scannerHost, submitOrganization) 
         if (file.filename !== input.filename || !content.equals(input.content)) ctx.throw(409, 'Khóa gửi lại đã dùng cho tệp khác.');
         return file;
       }
-      const previous = await withRequest(ctx, 'POST', 'update', existing);
+      const { previous, sharedInput } = await withRequest(ctx, 'POST', 'update', async scope => {
+        if (await useShared(scope)) return { sharedInput: await uploads.prepare(ctx, scope, input) };
+        return { previous: await existing(scope) };
+      }, true);
+      if (sharedInput) {
+        const shared = await withRequest(ctx, 'POST', 'update', scope => uploads.execute(ctx, scope, sharedInput,
+          canonical => sharedFiles(ctx, 'upload', scope, {
+            filename: canonical.filename, key: canonical.key, contentBase64: canonical.content.toString('base64'),
+          })), true);
+        if (shared.error) ctx.throw(shared.error.status, shared.error.message);
+        ctx.status = shared.status;
+        ctx.body = shared.data;
+        await next();
+        return;
+      }
       if (previous) {
         ctx.body = previous;
         await next();
         return;
       }
+      if (!scannerHost) ctx.throw(503, 'Bộ quét tệp chưa sẵn sàng.');
       const clean = await scanWithClamd(input.content, scannerHost).catch(() => ctx.throw(503, 'Bộ quét tệp chưa sẵn sàng.'));
       if (!clean) ctx.throw(409, 'Tệp bị bộ quét từ chối.');
       ctx.body = await withRequest(ctx, 'POST', 'update', async scope => {
@@ -145,14 +171,19 @@ function registerNativeRequestAttachments(app, scannerHost, submitOrganization) 
     async download(ctx, next) {
       const fileId = ctx.query.fileId;
       if (typeof fileId !== 'string' || !uuid.test(fileId)) ctx.throw(400, 'Mã tệp không hợp lệ.');
-      const [file] = await withRequest(ctx, 'GET', 'view', ({ id, actor, transaction }) =>
-        query(`SELECT filename, content FROM lattice_native_request_attachments
+      const file = await withRequest(ctx, 'GET', 'view', async scope => {
+        const { id, actor, transaction } = scope;
+        if (await useShared(scope)) return sharedFiles(ctx, 'download', scope, { fileId });
+        const [local] = await query(`SELECT filename, content FROM lattice_native_request_attachments
           WHERE request_id = $1 AND organization_id = $2 AND id = $3`,
-        [id, actor.organizationId, fileId], transaction));
+        [id, actor.organizationId, fileId], transaction);
+        return local;
+      });
       if (!file) ctx.throw(404, 'Không tìm thấy tệp.');
       ctx.set('Cache-Control', 'private, no-store');
       ctx.set('X-Content-Type-Options', 'nosniff');
-      ctx.attachment(file.filename);
+      if (file.disposition) ctx.set('Content-Disposition', file.disposition);
+      else ctx.attachment(file.filename);
       ctx.type = 'application/octet-stream';
       ctx.body = file.content;
       await next();
@@ -166,6 +197,7 @@ function registerNativeRequestAttachments(app, scannerHost, submitOrganization) 
         if (['submitted', 'approved', 'rejected', 'assigned', 'completed'].includes(status)) return { id, status };
         if (status !== 'draft') ctx.throw(409, 'Không thể gửi ở trạng thái hiện tại.');
         await checkRequestPermission(ctx, id, actor, transaction, 'update');
+        await uploads.assertSettled(ctx, { id, actor, transaction });
         await db.getRepository(requestCollection).update({
           filterByTk: id, values: { status: 'submitted' }, individualHooks: true, transaction, context: ctx,
         });

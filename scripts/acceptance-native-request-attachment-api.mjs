@@ -7,6 +7,7 @@
  */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { configureNativeProcess } from './configure-native-process.mjs';
 
@@ -16,6 +17,40 @@ const suffix = randomUUID();
 const organizationId = process.env.DX_NATIVE_ATTACHMENT_SUBMIT_ORGANIZATION ?? 'native-attachment-submit-lab';
 const fixtures = [];
 let workflow;
+
+async function withBlockedSharedInsert(work) {
+  const container = process.env.DX_NATIVE_UPLOAD_TEST_DATABASE_CONTAINER;
+  assert(/^lattice-native-[a-z0-9-]+-postgres-1$/.test(container ?? ''), 'Use an explicit isolated native test PostgreSQL container');
+  const lock = spawn('docker', ['exec', '-i', container, 'psql', '-X', '-v', 'ON_ERROR_STOP=1', '-U', 'lattice', '-d', 'lattice', '-At'],
+    { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+  let output = '';
+  let failure;
+  const closed = new Promise(resolve => lock.once('close', resolve));
+  lock.on('error', error => { failure = error; });
+  lock.stdin.on('error', error => { failure = error; });
+  lock.stdout.on('data', chunk => { output += chunk.toString(); });
+  lock.stderr.on('data', () => {});
+  const watchdog = setTimeout(() => lock.kill(), 55000);
+  let released = false;
+  const release = async () => {
+    if (released) return;
+    released = true;
+    if (lock.exitCode === null && !lock.killed) lock.stdin.end('COMMIT;\n');
+    await closed;
+  };
+  try {
+    lock.stdin.write("BEGIN;\nLOCK TABLE foundation_files IN SHARE MODE;\nSELECT 'LOCKED';\n");
+    const deadline = Date.now() + 5000;
+    while (!output.includes('LOCKED')) {
+      if (failure || lock.exitCode !== null || Date.now() > deadline) throw Error('Could not acquire isolated shared-file fixture lock');
+      await delay(50);
+    }
+    return await work(release);
+  } finally {
+    await release();
+    clearTimeout(watchdog);
+  }
+}
 
 async function call(path, actor, { values, key, method = values === undefined ? 'GET' : 'POST' } = {}) {
   return fetch(new URL('/api/' + path, origin), {
@@ -113,7 +148,47 @@ try {
   assert.equal((await call(download, foreignManager)).status, 404);
   await data('latticeEmployees:update?filterByTk=' + manager.profileId, root, { values: { active: false } });
   assert.equal((await call(download, manager)).status, 403);
-  console.log(JSON.stringify({ result: 'PASS', checks: ['scan_and_download_bytes', 'concurrent_retry', 'rejected_file_not_listed', 'one_review_task', 'wrong_request_denied', 'unrelated_and_foreign_users_denied', 'revocation_denied'] }));
+  const checks = ['scan_and_download_bytes', 'concurrent_retry', 'rejected_file_not_listed', 'one_review_task', 'wrong_request_denied', 'unrelated_and_foreign_users_denied', 'revocation_denied'];
+  if (process.argv.includes('--shared-upload-recovery')) {
+    const recoveryPath = action => path(action, other.id);
+    const pending = { values: { filename: 'late-proof.txt', contentBase64: Buffer.from('native timeout recovery proof\n').toString('base64') }, key: randomUUID() };
+    await withBlockedSharedInsert(async release => {
+      assert.equal((await call(recoveryPath('upload'), requester, pending)).status, 503);
+      assert.equal((await call(recoveryPath('submit'), requester, { values: {} })).status, 409, 'Timed-out upload allowed submit');
+      assert.equal((await call(recoveryPath('upload'), requester, { ...pending, values: { ...pending.values, filename: 'changed.txt' } })).status, 409);
+      await data('latticeEmployees:update?filterByTk=' + requester.profileId, root, { values: { active: false } });
+      assert.equal((await call(recoveryPath('upload'), requester, pending)).status, 403);
+      await data('latticeEmployees:update?filterByTk=' + requester.profileId, root, { values: { active: true } });
+      await release();
+    });
+    const deadline = Date.now() + 15000;
+    let lateFiles;
+    while (Date.now() < deadline) {
+      lateFiles = await data(recoveryPath('list'), requester);
+      if (lateFiles.length) break;
+      await delay(100);
+    }
+    assert.equal(lateFiles.length, 1);
+    assert.equal((await call(recoveryPath('submit'), requester, { values: {} })).status, 409, 'Late shared commit bypassed reconciliation');
+    const replay = await data(recoveryPath('upload'), requester, { ...pending, key: randomUUID() });
+    assert.equal(replay.fileId, lateFiles[0].fileId, 'Reload retry created a new shared file');
+    assert.equal((await data(recoveryPath('list'), requester)).length, 1);
+    await data('latticeEmployees:update?filterByTk=' + manager.profileId, root, { values: { active: true } });
+    const recovered = await Promise.all([call(recoveryPath('submit'), requester, { values: {} }), call(recoveryPath('submit'), requester, { values: {} })]);
+    assert.deepEqual(recovered.map(response => response.status), [200, 200]);
+    const tasksDeadline = Date.now() + 20000;
+    while ((await reviewTasks()).length < 2 && Date.now() < tasksDeadline) await delay(100);
+    const recoveredTasks = await reviewTasks();
+    assert.equal(recoveredTasks.length, 2, 'Recovered request created duplicate review tasks');
+    let matched = 0;
+    for (const task of recoveredTasks) {
+      const execution = await data('executions:get?filterByTk=' + task.executionId, root);
+      if (String(execution.context.data.id) === String(other.id)) matched++;
+    }
+    assert.equal(matched, 1);
+    checks.push('timeout_blocks_submit_before_and_after_late_commit', 'changed_payload_and_revoked_actor_cannot_reconcile', 'reload_retry_reuses_canonical_key_and_file', 'recovered_concurrent_submit_creates_one_task');
+  }
+  console.log(JSON.stringify({ result: 'PASS', checks }));
 } finally {
   if (workflow) {
     await data('workflows:update?filterByTk=' + workflow.workflowId, root, { values: { enabled: false } });

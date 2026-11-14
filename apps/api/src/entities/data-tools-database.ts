@@ -20,7 +20,7 @@ import type {ObjectStore} from '../files/object-store.js';
 type FileRow={fileId:string;filename:string;size:number;scanStatus:string;ownerId:string;organizationId:string;recordId:string|null;content?:Buffer};
 const fileColumns='id AS "fileId",filename,size,scan_status AS "scanStatus",owner_id AS "ownerId",organization_id AS "organizationId",record_id AS "recordId"';
 async function lockFile(client:PoolClient,scope:Scope,id:string,bytes=false):Promise<FileRow> {
- const row=(await client.query(`SELECT ${fileColumns}${bytes?',content':''} FROM foundation_files WHERE id=$1 AND organization_id=$2 FOR SHARE`,[id,scope.organizationId])).rows[0] as FileRow|undefined;
+ const row=(await client.query(`SELECT ${fileColumns}${bytes?',content':''} FROM foundation_files WHERE id=$1 AND organization_id=$2 AND native_request_id IS NULL FOR SHARE`,[id,scope.organizationId])).rows[0] as FileRow|undefined;
  if(!row||row.organizationId!==scope.organizationId)throw missing();
  return row;
 }
