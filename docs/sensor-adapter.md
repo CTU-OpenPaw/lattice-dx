@@ -75,6 +75,26 @@ observations. Arbitrary millisecond precision on Orion-LD 1.10.0 is not certifie
 
 ## Local commands
 
+The existing `--once` worker projects legacy Asset URNs to Orion-LD. Use
+`--once --native` to deliver native Asset URNs to the NocoBase inbox. Both modes
+use the same PostgreSQL delivery table and claim disjoint sets of readings.
+For native mode, set `DATABASE_URL`, `UC2_SENSOR_TENANT`, `UC2_NATIVE_URL`,
+`UC2_NATIVE_SOURCE_SYSTEM` and `UC2_NATIVE_TOKEN`. The token belongs to a
+dedicated connector user mapped to an active Employee in that tenant. Keep the
+token in the deployment secret store. Fixture ingestion uses source
+`latticedx-simulator`.
+
+```powershell
+pnpm exec tsx scripts/run-sensor-worker.ts --once --native
+```
+
+Native delivery completes after an accepted receipt, including a duplicate
+receipt. Retrying uses the original stored payload and event ID. Transport
+failures, rate limits and server errors remain pending until the attempt limit.
+Authorization failures require operator intervention. An individual reading is
+routed by its Asset URN. The inbox workflow owns any subsequent case creation
+or broker update.
+
 Fixture ingestion, using Node.js 24:
 
 ```powershell
