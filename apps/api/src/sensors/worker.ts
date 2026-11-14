@@ -10,8 +10,11 @@ import type { Pool } from 'pg';
 import { createSensorBrokerClient, SensorBrokerError } from './broker-client.js';
 import { syncSensorReading, SensorSyncError } from './broker-sync.js';
 import { SensorInputError } from './policy.js';
+import { NativeSensorDeliveryError, type createNativeSensorClient } from './native-client.js';
+import { NativeSensorEnvelopeError } from './native-envelope.js';
 
 type Broker = ReturnType<typeof createSensorBrokerClient>;
+type Destination = Broker | { native: ReturnType<typeof createNativeSensorClient>; sourceSystem: string };
 
 export type SensorDeliveryResult = {
   outcome:
@@ -41,6 +44,12 @@ function failure(error: unknown): {
 } {
   if (error instanceof SensorInputError) {
     return { code: 'INVALID_STORED_READING', permanent: true };
+  }
+  if (error instanceof NativeSensorDeliveryError) {
+    return { code: error.code, permanent: !error.retryable };
+  }
+  if (error instanceof NativeSensorEnvelopeError) {
+    return { code: error.code, permanent: true };
   }
 
   if (error instanceof SensorSyncError) {
@@ -76,7 +85,7 @@ function failure(error: unknown): {
  */
 export async function runSensorDelivery(
   pool: Pool,
-  broker: Broker,
+  destination: Destination,
   tenant: string,
 ): Promise<SensorDeliveryResult> {
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(tenant)) {
@@ -84,6 +93,8 @@ export async function runSensorDelivery(
   }
 
   const client = await pool.connect();
+  const native = 'native' in destination ? destination : null;
+  const nativePrefix = `urn:ngsi-ld:Asset:${tenant}:native:`;
 
   try {
     await client.query('BEGIN');
@@ -101,10 +112,12 @@ export async function runSensorDelivery(
        WHERE r.organization_id = $1
          AND d.status = 'pending'
          AND d.attempts < 5
+         AND (starts_with(r.asset_urn, $2) = $3)
+         AND ($4::text IS NULL OR r.source_system = $4)
        ORDER BY d.created_at, d.reading_id
        LIMIT 1
        FOR UPDATE OF d SKIP LOCKED`,
-      [tenant],
+      [tenant, nativePrefix, native !== null, native?.sourceSystem ?? null],
     );
 
     const job = selected.rows[0];
@@ -141,11 +154,9 @@ export async function runSensorDelivery(
     let errorCode: string | null = null;
 
     try {
-      const synced = await syncSensorReading(
-        broker,
-        job.source_payload,
-        tenant,
-      );
+      const synced = 'native' in destination
+        ? (await destination.native.deliver(job.source_payload)).status
+        : await syncSensorReading(destination, job.source_payload, tenant);
 
       // Both an update and an already matching broker value are successful.
       status =
