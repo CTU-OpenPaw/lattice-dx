@@ -12,7 +12,7 @@ export function uc2InboxWorkflow({ organizationId, webhookUrl, webhookKey }) {
     request: {
       key: 'sendToN8n', type: 'request', title: 'Gửi observation đến n8n',
       config: {
-        url: url.href, method: 'POST', timeout: 45000, contentType: 'application/json',
+        url: url.href, method: 'POST', timeout: 120000, contentType: 'application/json',
         headers: [{ name: 'X-Lattice-UC2-Key', value: webhookKey }],
         data: JSON.stringify({ inboxId: '{{$context.data.id}}', assetId: '{{$context.data.data.assetId}}', attribute: '{{$context.data.data.attribute}}', value: '{{$context.data.data.value}}', unit: '{{$context.data.data.unit}}', observedAt: '{{$context.data.observedAt}}' }),
       },

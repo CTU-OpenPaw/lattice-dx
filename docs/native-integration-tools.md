@@ -63,7 +63,7 @@ Publish workflow n8n. Đặt `NOCOBASE_URL`, `NOCOBASE_TOKEN`, `UC2_SENSOR_TENAN
 
 Workflow chỉ chuyển observation mới thuộc tổ chức đã cấu hình và có `late=false`. n8n đọc Asset qua API có quyền, gọi model và lưu đề xuất với fingerprint. Mỗi inbox ID tạo một khóa đề xuất ổn định. Khi thử lại node gửi HTTP, model có thể được gọi lại. Nếu nội dung model khác sau khi lượt trước đã ghi thành công, API có thể trả `409` và cần kiểm biên nhận hiện có. Task native ghi nhận việc đã xem đề xuất.
 
-Nghiệm thu local đã chạy từ `receive` tới task qua NocoBase `13003` và n8n `2.42.7`, với endpoint model mẫu. Gửi lặp cùng sự kiện tạo một đề xuất và một task. Người gửi đề xuất bị chặn khi xử lý task của quản lý. Lượt kiểm model `combo` thật cần 9Router đang chạy.
+Nghiệm thu local đã chạy từ `receive` tới task qua NocoBase `13003`, n8n `2.42.7` và 9Router với model `combo` thật. Gửi lặp cùng sự kiện chỉ gọi model một lần trong lượt thử, tạo một đề xuất và một task. Người gửi đề xuất bị chặn khi xử lý task của quản lý. Node model yêu cầu JSON với `stream:false`. Timeout của trigger bao gồm thời gian gọi model và hai lượt gọi API native.
 
 Lab có thể dựng task xem xét cho đề xuất về Asset bằng lệnh sau. Chọn ID Employee của quản lý cùng tổ chức. Installer tạo workflow ở trạng thái tắt để quản trị viên kiểm tra cấu hình trước khi bật.
 
