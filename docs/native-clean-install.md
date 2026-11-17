@@ -47,6 +47,8 @@ node scripts/setup-native-workspace-demo.mjs "<reportPath>"
 
 Script tạo nhóm **Yêu cầu nội bộ**, form native **Tạo yêu cầu** và nút tạo nhanh, rồi cấp quyền mở trang demo cho ba vai trò mẫu. Có thể chạy lại trên cùng lab để bổ sung quyền còn thiếu. Nếu tên nhóm đã được dùng bởi một cấu hình khác, script dừng và giữ nguyên cấu hình đó.
 
+Nếu lần cấu hình bị gián đoạn, giữ file `report.json.workspace-demo` bên cạnh báo cáo và chạy lại cùng lệnh. File này giúp script nhận diện nhóm demo đã tạo dở.
+
 1. Trên cổng do báo cáo trả về, đăng nhập bằng tài khoản nhân viên mẫu và mở `/admin/lattice-workspace?view=apps`. Kiểm tra danh mục và mở trang mẫu được cấp quyền. Nếu chạy demo nút tạo nhanh của PR #51, builder cần cấu hình nút trên chính lab này tại `/admin/lattice-builder`: chọn ứng dụng, trang có form tạo tương ứng và tên kỹ thuật của collection. Tải lại Build UI để xác nhận cấu hình đã lưu.
 2. Dùng tài khoản nhân viên gửi một yêu cầu có mã riêng. Dùng tài khoản quản lý mở **Công việc của tôi → Cần xử lý**, đối chiếu mã và duyệt. Dùng tài khoản người thực hiện mở việc tiếp theo của cùng hồ sơ và bấm **Hoàn thành**.
 3. Đối chiếu trạng thái hồ sơ `completed` và công việc của người thực hiện trong tab **Đã xử lý**. Ghi SHA nguồn trong báo cáo cài đặt cùng mã hồ sơ để nhóm xác định chính xác bản đã nghiệm thu.
