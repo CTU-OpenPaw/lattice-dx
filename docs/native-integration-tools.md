@@ -109,6 +109,44 @@ Response `{id,duplicate,state:"proposed",requiresHumanApproval:true}`. Collectio
 
 Response items/page/pageSize/total; pageSize tối đa 100. Kiểm lại quyền record/field trước đọc. Fingerprint khác hoặc context đã đổi/không truy cập được thì item có `stale=true`, không trả recommendation/evidence cũ. Điều này bảo vệ proposal được tạo khi người gọi còn thấy nhiều field hơn hiện tại.
 
+## Chuyển cảnh báo rule thành sự cố native
+
+Áp dụng `infra/config/uc2/sensor-rule-runtime.sql` trên PostgreSQL của bộ rule. Dùng Asset URN dạng `urn:ngsi-ld:Asset:ORG:native:ID` và đặt `handlerId` của rule bằng ID Employee native cùng tổ chức. Sau khi bộ đánh giá ghi cảnh báo vào hàng đợi, chạy worker với `DATABASE_URL`, `UC2_SENSOR_TENANT`, `UC2_NATIVE_URL` và `UC2_NATIVE_TOKEN` của connector:
+
+```powershell
+node --import tsx scripts/run-native-sensor-alert.ts
+```
+
+Worker xử lý một cảnh báo mỗi lượt. Endpoint native xác minh Asset, người xử lý và tổ chức, rồi tái sử dụng cùng case nếu connector gửi lại cùng cảnh báo. Nếu cùng mã cảnh báo có nội dung khác, API trả 409.
+
+Cài workflow ở trạng thái tắt, kiểm tra rồi bật từ NocoBase. Dùng cùng ID người xử lý trong rule và workflow:
+
+```powershell
+node scripts/configure-native-process.mjs --collection=latticeIncidentCases --organization=ORG --reviewer=MANAGER_EMPLOYEE_ID --assignee=HANDLER_EMPLOYEE_ID
+```
+
+Trong Workspace → Công việc của tôi, quản lý mở **Duyệt sự cố**, kỹ thuật viên mở **Ghi kết quả xử lý**, rồi quản lý mở **Đóng sự cố**. Từ chối kết thúc case ở trạng thái `rejected`. Workflow kiểm lại người được giao trước khi ghi trạng thái.
+
+Để n8n lưu đề xuất vào đúng case, cập nhật và publish workflow n8n ở trên rồi chạy installer với `--case`. Cấp cho tài khoản agent quyền đọc trường cần thiết của `latticeIncidentCases` và snippet `lattice.integrations.propose` trong cùng tổ chức. Không cấp quyền ghi case. Workflow chỉ gửi ID của case mới có mã `UC2-`. n8n kiểm biên nhận với khóa `uc2-case-ID` trước khi gọi model. Dùng tool `proposals` với collection `latticeIncidentCases` và ID case để đọc nội dung và nguồn theo quyền hiện tại. Đường observation trên Asset vẫn dùng installer mặc định.
+
+Workflow duyệt mới có mục **Đề xuất AI và bằng chứng**. Cấp quyền đọc case cho quản lý theo cùng tập trường bằng chứng mà agent sử dụng. API kiểm fingerprint theo góc nhìn hiện tại. Nếu dữ liệu hoặc quyền trên trường đã đổi, cửa sổ chỉ hiển thị cảnh báo bằng chứng cũ. Với workflow đã cài trước bản này, cập nhật schema của node duyệt hoặc cài workflow mới ở trạng thái tắt và chuyển sang bản mới sau khi xử lý các task đang mở.
+
+Trong NocoBase → Roles & Permissions, bật quyền **View** của collection `latticeIncidentCases` cho vai trò agent và vai trò quản lý dùng để duyệt. Tập trường đã nghiệm thu trên lab gồm `id`, `name`, `severity`, `status`, `assetId`. Gán agent cho một tài khoản nghiệp vụ riêng cùng tổ chức. Kiểm tra lại bằng phiên đăng nhập thực tế của quản lý để xác nhận quyền đọc và fingerprint.
+
+### Nối subscription Orion-LD với bộ rule
+
+Chạy `node --import tsx scripts/run-sensor-rule-subscription.ts` với `DATABASE_URL`, `UC2_SENSOR_TENANT`, `UC2_SENSOR_SOURCE` và `UC2_RULE_FILE` trỏ đến JSON cấu hình tin cậy chứa `{ruleEntity, mapping}`. Mapping dùng cùng Asset native như rule. Listener mặc định bind `127.0.0.1:15454`. Đặt `UC2_SENSOR_NOTIFICATION_HOST` và `UC2_SENSOR_NOTIFICATION_PORT` theo mạng nội bộ của broker.
+
+Tạo subscription Orion-LD trong đúng tenant. Dùng ID trong `NGSI_LD_SUBSCRIPTION_ID`, bộ lọc đúng Asset URN và thuộc tính rule, dạng notification `normalized`, URI `/uc2/sensor-notifications` và header `X-Lattice-Broker-Token` từ secret `NGSI_LD_NOTIFICATION_TOKEN`. Property cần giữ `observedAt`, `unitCode` và metadata nguồn từ sensor projection. Listener đưa số đo vào bộ đánh giá, ghi alert vào hàng đợi PostgreSQL.
+
+Để tự chuyển alert sang NocoBase, giữ listener và worker chạy cùng lúc. Dùng lệnh dưới đây với môi trường worker đã cấu hình ở trên:
+
+```powershell
+node --import tsx scripts/run-native-sensor-alert.ts --watch
+```
+
+Worker kiểm tra queue mỗi 2 giây khi rảnh. Có thể đặt `UC2_SENSOR_ALERT_POLL_MS` trong khoảng 500–60.000 ms. Khi dừng, worker chờ lượt đang xử lý hoàn tất. Đặt chế độ khởi động lại tại trình quản lý tiến trình nếu chạy lâu dài.
+
 ## Mã lỗi chính
 
 | Status | Ý nghĩa |

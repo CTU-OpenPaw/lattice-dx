@@ -9,6 +9,7 @@ import {
   SENSOR_NAMESPACE as ns,
   type SensorProjection,
 } from './projection.js';
+import { parseSensorAssetUrn } from './asset-identity.js';
 
 type ReadyProjection = Extract<SensorProjection, { kind: 'ready' }>;
 type Entity = Record<string, unknown>;
@@ -55,13 +56,9 @@ export function createSensorBrokerClient(
   }
 
   function validateId(id: string) {
-    const prefix = `urn:ngsi-ld:Asset:${options.tenant}:`;
-
-    if (
-      typeof id !== 'string' ||
-      !id.startsWith(prefix) ||
-      !/^[A-Za-z0-9_-]{1,128}$/.test(id.slice(prefix.length))
-    ) {
+    try {
+      parseSensorAssetUrn(id, options.tenant);
+    } catch {
       throw new SensorBrokerError('ASSET_ID_INVALID');
     }
   }

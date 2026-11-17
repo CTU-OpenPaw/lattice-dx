@@ -6,10 +6,13 @@ if (origin.protocol !== 'http:' || !['localhost', '127.0.0.1'].includes(origin.h
     Number(origin.port) < 13001 || Number(origin.port) > 13999) throw new Error('Use an isolated local native lab');
 const token = process.env.NOCOBASE_TOKEN;
 if (!token) throw new Error('Set the lab administrator session in NOCOBASE_TOKEN');
+const argument = process.argv[2];
+if (process.argv.length > 3) throw new Error('Pass at most one option');
 const { request, ...template } = uc2InboxWorkflow({
   organizationId: process.env.UC2_SENSOR_TENANT,
   webhookUrl: process.env.UC2_N8N_WEBHOOK_URL,
   webhookKey: process.env.UC2_N8N_WEBHOOK_KEY,
+  target: argument === '--case' ? 'case' : 'observation',
 });
 
 async function replayObservation(replay) {
@@ -54,5 +57,5 @@ async function installWorkflow() {
   console.log(JSON.stringify({ workflowId: workflow.id, enabled: false }));
 }
 
-if (process.argv[2]) await replayObservation(process.argv[2]);
+if (argument && argument !== '--case') await replayObservation(argument);
 else await installWorkflow();

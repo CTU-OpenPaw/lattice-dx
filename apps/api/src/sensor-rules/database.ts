@@ -8,6 +8,7 @@
 import type { Pool } from 'pg';
 import { isRecordId } from '@dx/contracts';
 import { parseSensorReading } from '../sensors/policy.js';
+import { parseSensorAssetUrn } from '../sensors/asset-identity.js';
 import { parseSensorRule } from './policy.js';
 import {
   evaluateSensorRule,
@@ -88,21 +89,16 @@ export function createSensorRuleRepository(
         throw new Error('Sensor source does not match configured scope.');
       }
 
-      const prefix = `urn:ngsi-ld:Asset:${organizationId}:`;
       const { mapping } = input;
 
       if (
         !isRecordId(mapping.assetEntityId) ||
         mapping.assetEntityId !== rule.assetEntityId ||
-        typeof mapping.assetUrn !== 'string' ||
-        !mapping.assetUrn.startsWith(prefix) ||
-        !/^[A-Za-z0-9_-]{1,128}$/.test(
-          mapping.assetUrn.slice(prefix.length),
-        ) ||
         mapping.assetUrn !== reading.assetUrn
       ) {
         throw new Error('Invalid tenant-scoped Asset mapping.');
       }
+      parseSensorAssetUrn(mapping.assetUrn, organizationId);
 
       const sourcePayload = JSON.stringify(input.sourcePayload);
       const client = await pool.connect();

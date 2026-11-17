@@ -93,6 +93,7 @@ function createNativeScopeMiddleware(db, definitions) {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
     if (write.has(actionName) && collectionName === 'latticeEmployees') throw failure('NATIVE_IDENTITY_ADMIN_REQUIRED');
+    if (write.has(actionName) && collectionName === 'latticeIncidentCases') throw failure('NATIVE_INCIDENT_WORKFLOW_REQUIRED');
     params.filter = scopeNativeRead(params,actor).filter;
     const document=['latticeRequests','latticeOrders'].includes(collectionName);
     if(document) {
