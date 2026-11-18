@@ -1,0 +1,70 @@
+# @file LatticeDX — Open Digital Enterprise Platform
+# @author CTU-OpenPaw
+# @license Apache-2.0
+# @see https://github.com/CTU-OpenPaw/lattice-dx
+# SPDX-License-Identifier: Apache-2.0
+name: Báo lỗi / Bug Report
+description: Báo cáo lỗi trong mã nguồn, plugin NocoBase, Docker Compose hoặc tài liệu build / Report a reproducible defect.
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cảm ơn bạn đã đóng góp cho **LatticeDX**. Vui lòng kiểm tra kỹ để chắc chắn không đính kèm `.env`, token, mật khẩu thật hoặc dữ liệu cá nhân.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Thành phần liên quan / Affected Component
+      options:
+        - "plugins/nocobase (Foundation / Enterprise Auth / Action Bridge)"
+        - "apps/api (Headless Core API & Workflows)"
+        - "apps/web (Next.js Web)"
+        - "apps/agent-worker (AI Advisory Worker)"
+        - "infra/compose (Docker Compose & Local Stack)"
+        - "scripts / docs / PoF Compliance"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Môi trường / Environment
+      description: Hệ điều hành, Node.js (`node -v`), pnpm (`pnpm -v`), Docker Compose (`docker compose version`), và commit SHA (`git rev-parse --short HEAD`).
+      placeholder: "Windows 11 / Ubuntu 24.04 | Node 24.15.0 | pnpm 10.23.0 | Docker Compose v5.5.1 | commit ..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Các bước tái hiện / Steps to Reproduce
+      description: Liệt kê chính xác lệnh hoặc thao tác đã chạy để tái hiện lỗi.
+      placeholder: |
+        1. Chạy `pnpm install --frozen-lockfile`
+        2. Chạy `...`
+        3. Lỗi xảy ra tại ...
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Kết quả thực tế vs Mong đợi / Actual vs Expected Behavior
+      description: Mô tả rõ đầu ra thực tế và hành vi kỳ vọng theo tài liệu.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Nhật ký / Logs (ĐÃ LỌC SECRET)
+      description: Chỉ dán phần log lỗi đã loại bỏ toàn bộ token, password, chuỗi kết nối hoặc PII.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Xác nhận trước khi gửi / Pre-Submit Checklist
+      options:
+        - label: Tôi xác nhận báo cáo không chứa secret, token, `.env` hoặc dữ liệu cá nhân.
+          required: true
+        - label: Tôi đã tìm các issue hiện có trên `CTU-OpenPaw/lattice-dx` để tránh trùng lặp.
+          required: true

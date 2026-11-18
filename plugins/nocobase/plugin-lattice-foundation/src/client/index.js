@@ -7,11 +7,13 @@
  */
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
-    define('@latticedx/plugin-lattice-foundation', ['@nocobase/client', 'react', 'antd', '@nocobase/client-v2', 'react-router-dom', '@nocobase/flow-engine'], factory);
+    define('@latticedx/plugin-lattice-foundation', ['@nocobase/client', 'react', 'antd', '@nocobase/client-v2', 'react-router-dom', '@nocobase/flow-engine', '@ant-design/icons'], factory);
   } else if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('@nocobase/client'), require('react'), require('antd'), require('@nocobase/client-v2'), require('react-router-dom'), require('@nocobase/flow-engine'));
+    let icons;
+    try { icons = require('@ant-design/icons'); } catch { icons = undefined; }
+    module.exports = factory(require('@nocobase/client'), require('react'), require('antd'), require('@nocobase/client-v2'), require('react-router-dom'), require('@nocobase/flow-engine'), icons);
   }
-})(function (client, React, antd, clientV2, router, flow) {
+})(function (client, React, antd, clientV2, router, flow, icons) {
   'use strict';
   const actions = require('./actions');
   const {createWorkspaceComponent} = require('./workspace');
@@ -23,6 +25,7 @@
   const {registerApplicationViews} = require('../applications/views');
   const {defaultContracts}=require('../shared/contracts');
   const {createNativeBuilderNavigation}=require('./native-builder-navigation');
+  const {createNativePortalManager}=require('./native-portal-manager');
   const {createIncidentEvidence}=require('./native-incident-evidence');
   const {createBrandLogo, registerSignInLogo}=require('./native-branding');
   function useLatticeFormAction(manifest, blockId) {
@@ -42,7 +45,8 @@
     async load() {
       const BrandLogo=createBrandLogo(client,React);
       registerSignInLogo(this.app,React,BrandLogo);
-      const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo});
+      const portalManager=createNativePortalManager(client,React,antd,this.app,router,icons);
+      const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo,portalManager});
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
       this.app.addScopes({useLatticeFormAction});
       const blocks=createBlockComponents(client,React,antd);

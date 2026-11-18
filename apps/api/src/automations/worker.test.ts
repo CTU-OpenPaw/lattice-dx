@@ -1,3 +1,10 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {expect,test,vi} from 'vitest';
 import {parseAutomationWorkerEnabled,startAutomationWorker} from './worker.js';
 test('automation worker is explicit opt in and rejects invalid config',()=>{

@@ -2,7 +2,7 @@
 
 LatticeDX là nền tảng dựng và vận hành ứng dụng nghiệp vụ. Luồng native dùng NocoBase cho collections, trình dựng trang, phân quyền và workflow. Các plugin LatticeDX bổ sung mô hình nghiệp vụ, ràng buộc dữ liệu, đăng nhập doanh nghiệp và các điểm kết nối với dịch vụ ngoài.
 
-Để thử luồng native từ một database mới, chạy `pnpm native:clean` theo [hướng dẫn cài và nghiệm thu](docs/native-clean-install.md). Xem [kiến trúc hiện tại](docs/architecture.md) để biết các luồng đã kiểm chứng và phần cần ghép tiếp. Phần hướng dẫn core bên dưới phục vụ API và các luồng legacy.
+Để build trực tiếp từ mã nguồn hoặc kiểm toán hồ sơ nguồn mở OLP PMNM 2026 (VFOSSA), xem [hướng dẫn build từ mã nguồn](docs/build-from-source.md), [báo cáo tuân thủ PoF](docs/oss-pof-compliance.md), [`NOTICE`](NOTICE), [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CHANGELOG.md`](CHANGELOG.md) và [`SECURITY.md`](SECURITY.md). Để thử luồng native từ một database mới, chạy `pnpm native:clean` theo [hướng dẫn cài và nghiệm thu](docs/native-clean-install.md). Xem [kiến trúc hiện tại](docs/architecture.md) để biết các luồng đã kiểm chứng và phần cần ghép tiếp. Phần hướng dẫn core bên dưới phục vụ API và các luồng legacy.
 
 ## Chạy core bằng Docker
 
@@ -65,9 +65,11 @@ Mở http://127.0.0.1:3000 và gửi yêu cầu demo. API chạy ở cổng 4000
 pnpm typecheck
 pnpm test
 pnpm build
+pnpm pof:check
+pnpm release:tarball
 ```
 
-`pnpm build` tạo bản build Next.js và biên dịch TypeScript backend. Chạy bản web đã build bằng `pnpm --filter @dx/web start`; hai backend chạy bằng `pnpm --filter @dx/api start` và `pnpm --filter @dx/agent-worker start` (thực thi source TypeScript bằng tsx). Chưa đóng gói backend để triển khai production.
+`pnpm build` tạo bản build Next.js và biên dịch TypeScript backend; xem đầy đủ quy trình biên dịch từ mã nguồn hoặc gói `.tar.gz` tại [build from source](docs/build-from-source.md). `pnpm pof:check` tự động kiểm tra tuân thủ PoF (SPDX headers, tài liệu quản trị, cô lập plugin NocoBase, digest `@sha256:` Compose, không secret) và `pnpm release:tarball` đóng gói `output/release/latticedx-<version>-src.tar.gz` kèm checksum `.sha256`. Chạy bản web đã build bằng `pnpm --filter @dx/web start`; hai backend chạy bằng `pnpm --filter @dx/api start` và `pnpm --filter @dx/agent-worker start` (thực thi source TypeScript bằng tsx). Chưa đóng gói backend để triển khai production.
 
 Các biến môi trường có giá trị mặc định được mô tả ở `.env.example`. File này là tài liệu; lệnh root không tự nạp `.env`. Với PowerShell, đặt biến trước khi chạy, ví dụ `$env:WORKER_PORT='4101'; $env:WORKER_URL='http://127.0.0.1:4101'`.
 
@@ -99,6 +101,6 @@ Thêm server độc lập vào `apps/`, thư viện tái sử dụng vào `packa
 
 Backend đã bổ sung liên kết thực thể–workflow, journal giao dịch, automation bền vững, phép tính kiểu dữ liệu trong workflow, module binding, aggregate chính xác, snapshot kiểm lại quyền và full-text search. Xem [API index](docs/backend-api-index.md) để Studio/adapters nối đúng contract; `pnpm test:enterprise-composition` kiểm luồng xuyên các năng lực bằng PostgreSQL thật. Worker cần bật rõ bằng env, metrics thuộc process và queue diagnostics thuộc tenant. Những năng lực backend này chưa xác nhận UI, broker, n8n hoặc agent đã tích hợp hoàn chỉnh.
 
-## Giấy phép
+## Giấy phép & Kiểm toán PoF
 
-Mã gốc của nhóm dùng Apache-2.0 theo `LICENSE` và các file giấy phép trong từng plugin. Dependency, source tham chiếu trong submodule và image NocoBase 2.2.38 giữ giấy phép và thông báo upstream tương ứng. Xem [kiểm kê nguồn và giấy phép](docs/third-party.md).
+Mã gốc của nhóm dùng Apache-2.0 theo [`LICENSE`](LICENSE), thông báo phân tách phạm vi tại [`NOTICE`](NOTICE) và các file giấy phép trong từng plugin. Dependency, source tham chiếu trong submodule và image NocoBase 2.2.38 giữ giấy phép và thông báo upstream tương ứng. Xem [kiểm kê nguồn và giấy phép](docs/third-party.md), [kiểm kê dependency npm](docs/dependency-inventory.md) và [hồ sơ tuân thủ PoF OLP 2026](docs/oss-pof-compliance.md).

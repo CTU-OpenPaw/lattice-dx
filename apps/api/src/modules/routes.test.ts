@@ -1,3 +1,10 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { it, expect, vi } from "vitest";
 import { generateKeyPair, exportJWK, createLocalJWKSet, SignJWT } from "jose";
 import { createApi } from "../app.js";

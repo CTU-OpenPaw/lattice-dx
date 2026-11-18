@@ -1,3 +1,10 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {it,expect} from 'vitest';
 import {assertIncidentTransition} from './incident-policy.js';
 it('denies authoritative worker directory roles even with a human JWT role',async()=>{
