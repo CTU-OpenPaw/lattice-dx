@@ -242,22 +242,38 @@ test('built AMD entry registers the replacement layout, portal manager, and buil
   });
   class NativeModel { render() { return null; } }
   class BlockModel { static define() {} static registerFlow() {} }
+  class SettingsTopbarModel {}
+  class UserCenterAction {}
   const client = { Plugin: class {}, AdminProvider() {}, useAllAccessDesktopRoutes() {}, useUIConfigurationPermissions() {}, useDesignable() {} };
-  const routes = [], components = {}, settings = [];
+  const routes = [], components = {}, settings = [], usedProviders = [], createdModels = [], registeredModels = {};
+  const secObj = { title: 'Security' };
   const app = {
-    flowEngine: { getModelClass: name => name === 'AdminLayoutModel' ? NativeModel : undefined, registerModels() {} },
-    pluginSettingsManager: { add: (name, cfg) => settings.push(name) },
+    flowEngine: {
+      getModelClass: name => (name === 'AdminLayoutModel' ? NativeModel : name === 'PluginSettingsTopbarActionModel' ? SettingsTopbarModel : undefined),
+      getModel: uid => (createdModels.includes(uid) ? { uid } : undefined),
+      createModel: cfg => { createdModels.push(cfg.uid); return cfg; },
+      registerModels: map => Object.assign(registeredModels, map),
+    },
+    layoutManager: { listLayouts: () => [{ uid: 'ldx-portal-hr', routeName: 'p_hr', routePath: '/p/hr', layoutModelClass: 'AdminLayoutModel' }] },
+    pluginSettingsManager: { add: (name, cfg) => settings.push(name), get: name => (name === 'security' ? secObj : null) },
     router: { add: (name, route) => routes.push({ name, ...route }) },
-    addComponents: value => Object.assign(components, value), addScopes() {}, use() {},
+    addComponents: value => Object.assign(components, value), addScopes() {},
+    use: prov => usedProviders.push(prov),
     schemaInitializerManager: { get: () => ({ add() {} }) },
   };
-  const v2 = { BlockModel, getAdminLayoutModel() {} };
+  const V2ACLProvider = () => null;
+  const v2 = { BlockModel, getAdminLayoutModel() {}, ACLRolesCheckProvider: V2ACLProvider, UserCenterActionItemModel: UserCenterAction };
   const mod = factory(client, { createElement() {} }, {}, v2, { Link() {}, Outlet() {}, useLocation() {} }, { FlowModelRenderer: { $$typeof: Symbol.for('react.memo') } });
   const plugin = new mod.default();
-  plugin.app = app; plugin.flowEngine = { registerModels() {} };
+  plugin.app = app; plugin.flowEngine = app.flowEngine;
   await plugin.load();
   assert.equal(typeof components.AdminLayout, 'function');
   assert.equal(typeof app.apps.loadAppList, 'function');
   assert.ok(settings.includes('multi-portal'));
   assert.ok(routes.some(route => route.name === 'admin.lattice-builder' && route.path === '/admin/lattice-builder'));
+  assert.ok(usedProviders.includes(V2ACLProvider));
+  assert.equal(SettingsTopbarModel.prototype.aclSnippet, 'pm');
+  assert.equal(secObj.aclSnippet, 'pm.security');
+  assert.equal(registeredModels.LatticeSignOutUserCenterItemModel?.itemId, 'lattice-sign-out');
+  assert.ok(createdModels.includes('ldx-portal-hr'));
 });

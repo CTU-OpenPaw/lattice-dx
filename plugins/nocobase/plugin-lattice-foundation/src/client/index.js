@@ -49,6 +49,25 @@
       await portalManager?.preloadPortals?.();
       const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo,portalManager});
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
+      if (typeof clientV2?.ACLRolesCheckProvider === 'function' && typeof this.app.use === 'function') {
+        this.app.use(clientV2.ACLRolesCheckProvider);
+      }
+      const SettingsTopbar = this.app.flowEngine?.getModelClass?.('PluginSettingsTopbarActionModel');
+      if (SettingsTopbar?.prototype && !SettingsTopbar.prototype.aclSnippet) SettingsTopbar.prototype.aclSnippet = 'pm';
+      const secSetting = this.app.pluginSettingsManager?.get?.('security');
+      if (secSetting && !secSetting.aclSnippet) secSetting.aclSnippet = 'pm.security';
+      if (typeof clientV2?.UserCenterActionItemModel === 'function' && typeof this.app.flowEngine?.registerModels === 'function') {
+        class LatticeSignOutUserCenterItemModel extends clientV2.UserCenterActionItemModel {
+          constructor(...args) { super(...args); this.label = 'Sign out'; this.section = 'danger'; this.sort = 100; this.danger = true; }
+          async onClick() {
+            await this.context?.app?.apiClient?.auth?.signOut?.();
+            if (typeof window !== 'undefined' && window.location) window.location.assign(this.context?.app?.getRouteUrl?.('/signin') || '/signin');
+          }
+        }
+        LatticeSignOutUserCenterItemModel.itemId = 'lattice-sign-out';
+        this.app.flowEngine.registerModels({ LatticeSignOutUserCenterItemModel });
+      }
+      portalManager?.ensureLayoutModelsReady?.();
       this.app.addScopes({useLatticeFormAction});
       const blocks=createBlockComponents(client,React,antd);
       this.app.addComponents({LatticeIncidentEvidence:createIncidentEvidence(client,React,antd)});

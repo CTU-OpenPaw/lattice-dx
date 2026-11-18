@@ -123,8 +123,17 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     if (!Array.isArray(items)) return;
     portalsRef.current = items;
     ensureDynamicLayoutsRegistered(app, items);
+    ensureLayoutModelsReady();
     listeners.forEach(fn => { try { fn(); } catch {} });
   };
+  function ensureLayoutModelsReady() {
+    if (typeof app?.flowEngine?.createModel !== 'function' || typeof app?.flowEngine?.getModel !== 'function') return;
+    for (const layout of app?.layoutManager?.listLayouts?.() || []) {
+      if (layout?.uid && layout.uid !== 'admin-layout-model' && layout.layoutModelClass === 'AdminLayoutModel' && !app.flowEngine.getModel(layout.uid)) {
+        try { app.flowEngine.createModel({ uid: layout.uid, use: 'AdminLayoutModel', props: { layout } }); } catch {}
+      }
+    }
+  }
   async function preloadPortals() {
     if (typeof app?.apiClient?.request !== 'function') return [];
     try {
@@ -263,7 +272,7 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
   return {
     MultiPortalSettingsPage, PortalBar, TopbarPortalSwitcher, hasTopbarSwitcher, preloadPortals,
     navigateToPortal, requestBuilderMode, consumeBuilderIntent, setPortals: syncPortals,
-    setPermissions: allow => { portalsRef.allowConfigUI = Boolean(allow); },
+    ensureLayoutModelsReady, setPermissions: allow => { portalsRef.allowConfigUI = Boolean(allow); },
     ensureDynamicLayoutsRegistered: items => ensureDynamicLayoutsRegistered(app, items),
     getPortals: () => portalsRef.current,
   };
