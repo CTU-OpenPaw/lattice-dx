@@ -128,3 +128,80 @@ test('MultiPortalSettingsPage renders portal grid, Clause 5.2 footer, and Portal
   dropdown.props.menu.items[0].onClick();
   assert.equal(navigated.at(-1), '/admin');
 });
+
+test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-created portals, and TopbarActionModel excludes admin portal for employees', async t => {
+  const previousWindow = global.window;
+  const assigned = [];
+  const store = new Map();
+  global.window = {
+    location: { assign: url => assigned.push(url), replace: url => assigned.push('replace:' + url) },
+    localStorage: { setItem: (k, v) => store.set(k, v), removeItem: k => store.delete(k) },
+  };
+  t.after(() => { global.window = previousWindow; });
+
+  const React = createReactMock();
+  const layouts = new Map([['admin', true]]);
+  const registeredModels = {};
+  const requests = [], navigated = [], settings = [];
+  const antd = Object.fromEntries(['Modal', 'Input', 'Select', 'Switch', 'Alert', 'Button', 'Space', 'Tag', 'Dropdown', 'Popconfirm'].map(n => [n, n]));
+  const portalRows = [
+    { uid: 'admin-layout-model', title: 'Desktop layout', routeName: 'admin', routePath: '/admin', enabled: true },
+    { uid: 'ldx-portal-hr', title: 'HR Portal', routeName: 'p_hr', routePath: '/p/hr', firstPagePath: '/p/hr/home', enabled: true },
+  ];
+  class AdminBase {}
+  class TopbarBase {}
+  const app = {
+    layoutManager: { hasLayout: name => layouts.has(name), registerLayout: cfg => layouts.set(cfg.routeName, cfg) },
+    pluginSettingsManager: { add: (name, cfg) => settings.push({ name, ...cfg }) },
+    flowEngine: {
+      getModelClass: name => (name === 'TopbarActionModel' ? TopbarBase : AdminBase),
+      registerModels: map => Object.assign(registeredModels, map),
+      flowSettings: { enabled: false, async enable() { this.enabled = true; }, async disable() { this.enabled = false; } },
+    },
+    apiClient: {
+      request: async req => {
+        requests.push(req);
+        if (req.url === 'uiLayouts:listEnabled') return { data: { data: portalRows } };
+        if (req.url === 'latticePortals:list') return { data: { data: portalRows } };
+        if (req.url === 'roles:list') return { data: { data: [] } };
+        return { data: { data: [] } };
+      },
+    },
+  };
+  const client = { useAPIClient: () => app.apiClient, useUIConfigurationPermissions: () => ({ allowConfigUI: false }) };
+  const router = { Link: 'Link', useNavigate: () => to => navigated.push(to), useLocation: () => ({ pathname: '/p/hr/home' }) };
+  const manager = createNativePortalManager(client, React, antd, app, router, null, { clientV2: { TopbarActionModel: TopbarBase, AdminLayoutModel: AdminBase } });
+
+  const loaded = await manager.preloadPortals();
+  assert.equal(loaded.length, 2);
+  assert.ok(requests.some(r => r.url === 'uiLayouts:listEnabled' && r.skipNotify === true));
+  assert.equal(layouts.get('p_hr').routePath, '/p/hr');
+  assert.deepEqual(manager.getPortals(), []);
+
+  manager.navigateToPortal('/p/hr/home', to => navigated.push(to));
+  assert.equal(navigated.at(-1), '/p/hr/home');
+  manager.navigateToPortal('/p/new-portal/home', to => navigated.push(to));
+  assert.equal(assigned.at(-1), '/p/new-portal/home');
+
+  assert.equal(manager.hasTopbarSwitcher, true);
+  const topbarModel = new registeredModels.PortalSwitcherTopbarActionModel();
+  assert.equal(topbarModel.sort, -50);
+  assert.equal(topbarModel.actionId, 'portal-switcher');
+  const employeeBar = manager.PortalBar({ portals: portalRows, pathname: '/p/hr/home', allowConfigUI: false, onSwitch: to => navigated.push(to) });
+  const employeeDrop = find(employeeBar, n => n.type === 'Dropdown');
+  assert.equal(employeeDrop.props.menu.items.some(i => i.key.endsWith(':/admin')), false);
+
+  const Page = settings[0].Component;
+  React.reset();
+  Page();
+  React.flush();
+  await new Promise(r => setImmediate(r));
+  React.reset();
+  const ui = Page();
+  const hrCard = find(ui, n => n.type === 'article' && find(n, c => c.type === 'strong' && c.children[0] === 'HR Portal'));
+  const builderBtn = find(hrCard, n => n.type === 'Button' && n.children[0] === 'Mở Builder');
+  builderBtn.props.onClick();
+  assert.equal(app.flowEngine.flowSettings.enabled, true);
+  assert.equal(store.get('NOCOBASE_V2_FLOW_SETTINGS_ENABLED'), '1');
+  assert.equal(navigated.at(-1), '/p/hr/home');
+});

@@ -128,44 +128,50 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
   function BuilderShell({ model }) {
     const { allowConfigUI } = client.useUIConfigurationPermissions();
     const { allAccessRoutes } = client.useAllAccessDesktopRoutes();
-    const { designable } = client.useDesignable();
+    const { designable, setDesignable } = (typeof client.useDesignable === 'function' ? client.useDesignable() : null) || {};
     const { pathname } = router.useLocation();
     const api = useApi();
     const navigate = useNav();
     const [portals, setPortals] = React.useState([]);
-    const desiredSettings = React.useRef(false);
+    const desiredSettings = React.useRef('keep');
     const syncing = React.useRef(Promise.resolve());
     const configMode = /^\/admin\/settings(?:\/|$)/.test(pathname);
     const workspaceMode = pathname === WORKSPACE_PATH || pathname.startsWith(WORKSPACE_PATH + '/popups/');
+    const isAdminRoot = pathname === '/admin' || pathname === '/admin/';
 
     React.useEffect(() => {
       if (!model.layout?.uid && Array.isArray(allAccessRoutes)) model.syncMenuRoutes?.(allAccessRoutes);
     }, [allAccessRoutes, model]);
 
     React.useEffect(() => {
+      let active = true;
       const media = typeof window !== 'undefined' && typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 767px)') : null;
       const apply = () => {
+        if (!active) return;
         const isMobile = Boolean(media?.matches);
         model.setIsMobileLayout?.(isMobile);
-        desiredSettings.current = Boolean(allowConfigUI && designable && !configMode && !workspaceMode && !isMobile);
+        const forceDisable = !allowConfigUI || configMode || workspaceMode || isMobile;
+        const wantBuilder = !forceDisable && Boolean(portalManager?.consumeBuilderIntent?.());
+        if (wantBuilder) setDesignable?.(true);
+        desiredSettings.current = forceDisable ? 'disable' : (designable || wantBuilder ? 'enable' : 'keep');
         syncing.current = syncing.current.catch(() => {}).then(async () => {
-          const enabled = desiredSettings.current;
-          if (enabled) await app.flowEngine.flowSettings?.enable?.();
-          else await app.flowEngine.flowSettings?.disable?.();
-          if (enabled !== desiredSettings.current) {
-            if (desiredSettings.current) await app.flowEngine.flowSettings?.enable?.();
-            else await app.flowEngine.flowSettings?.disable?.();
+          if (!active) return;
+          const mode = desiredSettings.current;
+          if (mode === 'enable') await app.flowEngine.flowSettings?.enable?.();
+          else if (mode === 'disable') await app.flowEngine.flowSettings?.disable?.();
+          if (active && desiredSettings.current !== mode) {
+            if (desiredSettings.current === 'enable') await app.flowEngine.flowSettings?.enable?.();
+            else if (desiredSettings.current === 'disable') await app.flowEngine.flowSettings?.disable?.();
           }
         }).catch(() => {});
       };
       apply();
       media?.addEventListener?.('change', apply);
-      return () => { desiredSettings.current = false; media?.removeEventListener?.('change', apply); };
+      return () => { active = false; media?.removeEventListener?.('change', apply); };
     }, [allowConfigUI, designable, configMode, workspaceMode, model]);
 
     React.useEffect(() => {
       portalManager?.setPermissions?.(Boolean(allowConfigUI));
-      const isAdminRoot = pathname === '/admin' || pathname === '/admin/';
       if (!api || typeof api.request !== 'function') {
         if (!allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
         return;
@@ -178,26 +184,37 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
         portalManager?.setPortals?.(items);
         portalManager?.ensureDynamicLayoutsRegistered?.(items);
         if (!allowConfigUI && isAdminRoot && navigate) {
-          const target = items.find(p => p.isDefault) || items[0];
+          const custom = items.filter(p => p && p.enabled !== false && p.uid !== 'admin-layout-model');
+          const target = custom.find(p => p.isDefault) || custom[0] || items[0];
           const dest = target?.firstPagePath || target?.routePath || WORKSPACE_PATH;
-          if (dest !== pathname) navigate(dest, { replace: true });
+          if (dest !== pathname) {
+            if (portalManager?.navigateToPortal) portalManager.navigateToPortal(dest, navigate, { replace: true });
+            else navigate(dest, { replace: true });
+          }
         }
       }).catch(() => {
         if (active && !allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
       });
       return () => { active = false; };
-    }, [api, allowConfigUI, pathname, navigate]);
+    }, [api, allowConfigUI, isAdminRoot, pathname, navigate]);
+
+    if (!allowConfigUI && isAdminRoot) {
+      return h('div', {
+        className: 'ldx-portal-redirecting', role: 'status',
+        style: { padding: 48, textAlign: 'center', color: '#64748b', fontSize: 14 },
+      }, 'Đang chuyển đến Cổng làm việc...');
+    }
 
     const nativeShell = NativeModel.prototype.render.call(model);
-    const switcher = portalManager?.PortalBar
+    const switcher = !portalManager?.hasTopbarSwitcher && !configMode && portalManager?.PortalBar
       ? h(portalManager.PortalBar, { portals, currentLayoutUid: model?.layout?.uid, pathname, allowConfigUI, onSwitch: dest => navigate?.(dest) })
       : null;
-    const attribution = h('footer', {
+    const attribution = configMode ? null : h('footer', {
       className: 'ldx-clause52-attribution', 'aria-label': 'NocoBase attribution',
       style: {
-        position: 'fixed', right: 14, bottom: 8, zIndex: 900, pointerEvents: 'auto',
-        fontSize: 11, color: '#64748b', background: 'rgba(255,255,255,0.9)',
-        border: '1px solid #e2e8f0', borderRadius: 6, padding: '2px 8px',
+        position: 'fixed', left: '50%', transform: 'translateX(-50%)', bottom: 6, zIndex: 900, pointerEvents: 'auto',
+        fontSize: 11, color: '#64748b', background: 'rgba(255,255,255,0.92)',
+        border: '1px solid #e2e8f0', borderRadius: 6, padding: '2px 10px',
       },
     }, 'Powered by ', h('a', {
       href: 'https://www.nocobase.com', target: '_blank', rel: 'noreferrer',

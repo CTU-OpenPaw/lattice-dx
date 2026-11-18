@@ -8,84 +8,9 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { COLLECTION_FIELD_GROUPS, PORTALS } from './lib/multi-portal-demo-catalog.mjs';
 
-const pageSpec = (groupTitle, groupIcon, title, icon, key, type, collection, fields) => ({
-  groupTitle,
-  groupIcon,
-  title,
-  icon,
-  block: {
-    key,
-    type,
-    title,
-    collection,
-    fields,
-    ...(type === 'table'
-      ? { settings: { pageSize: 10 }, actions: ['filter', 'refresh'] }
-      : { actions: ['submit'] }),
-  },
-});
-
-export const PORTALS = Object.freeze([
-  {
-    slug: 'procurement',
-    title: 'Mua sắm & Tài sản',
-    icon: 'ShoppingOutlined',
-    color: '#1677FF',
-    description: 'Cổng yêu cầu mua sắm và quản lý sổ cái tài sản doanh nghiệp',
-    isDefault: true,
-    sort: 10,
-    roles: ['ldx_employee', 'ldx_manager', 'ldx_director', 'ldx_admin'],
-    pages: [
-      pageSpec('Yêu cầu mua sắm', 'ShoppingCartOutlined', 'Tạo yêu cầu mới', 'FormOutlined', 'procurement-request-create', 'createForm', 'latticeRequests', ['code', 'name', 'category', 'description']),
-      pageSpec('Yêu cầu mua sắm', 'ShoppingCartOutlined', 'Danh sách Yêu cầu', 'UnorderedListOutlined', 'procurement-request-list', 'table', 'latticeRequests', ['code', 'name', 'category', 'status', 'description']),
-      pageSpec('Quản lý Tài sản', 'DatabaseOutlined', 'Sổ cái Tài sản', 'AppstoreOutlined', 'procurement-asset-ledger', 'table', 'latticeAssets', ['code', 'name', 'kind', 'status']),
-    ],
-  },
-  {
-    slug: 'incidents',
-    title: 'Vận hành & Sự cố IoT',
-    icon: 'AlertOutlined',
-    color: '#FA8C16',
-    description: 'Giám sát hàng đợi sự cố thiết bị và luật cảnh báo cảm biến NGSI-LD',
-    isDefault: false,
-    sort: 20,
-    roles: ['ldx_manager', 'ldx_dispatcher', 'ldx_warehouse', 'ldx_director', 'ldx_admin'],
-    pages: [
-      pageSpec('Giám sát Sự cố', 'AlertOutlined', 'Hàng đợi Sự cố IoT', 'ExceptionOutlined', 'incidents-queue', 'table', 'latticeIncidentCases', ['code', 'name', 'assetEntityId', 'severity', 'status']),
-      pageSpec('Giám sát Sự cố', 'AlertOutlined', 'Luật Cảm biến NGSI-LD', 'ControlOutlined', 'incidents-rules', 'table', 'latticeIncidentRules', ['code', 'name', 'assetEntityId', 'attribute', 'operator', 'threshold', 'unit', 'severity']),
-    ],
-  },
-  {
-    slug: 'logistics',
-    title: 'Logistics Chuỗi lạnh',
-    icon: 'CarOutlined',
-    color: '#10B981',
-    description: 'Điều phối đơn vận chuyển và quản lý hệ thống kho lạnh, điểm giao',
-    isDefault: false,
-    sort: 30,
-    roles: ['ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_manager', 'ldx_admin'],
-    pages: [
-      pageSpec('Điều phối Vận chuyển', 'CarOutlined', 'Danh sách Đơn hàng', 'OrderedListOutlined', 'logistics-orders-list', 'table', 'latticeOrders', ['code', 'name', 'customer', 'origin', 'destination', 'quantity', 'status']),
-      pageSpec('Điều phối Vận chuyển', 'CarOutlined', 'Tạo đơn vận chuyển', 'PlusCircleOutlined', 'logistics-order-create', 'createForm', 'latticeOrders', ['code', 'name', 'customer', 'origin', 'destination', 'quantity', 'description']),
-      pageSpec('Kho lạnh & Điểm giao', 'EnvironmentOutlined', 'Địa điểm & Kho bãi', 'BankOutlined', 'logistics-locations', 'table', 'latticeLocations', ['code', 'name', 'kind', 'address']),
-    ],
-  },
-  {
-    slug: 'services',
-    title: 'Dịch vụ Nội bộ & Danh bạ',
-    icon: 'TeamOutlined',
-    color: '#6366F1',
-    description: 'Tra cứu danh bạ nhân viên và cơ cấu phòng ban nội bộ',
-    isDefault: false,
-    sort: 40,
-    roles: ['ldx_employee', 'ldx_manager', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_director', 'ldx_admin'],
-    pages: [
-      pageSpec('Tổ chức & Nhân sự', 'TeamOutlined', 'Danh bạ Nhân viên', 'UserOutlined', 'services-employees', 'table', 'latticeEmployees', ['code', 'name', 'email']),
-      pageSpec('Tổ chức & Nhân sự', 'TeamOutlined', 'Cơ cấu Phòng ban', 'ApartmentOutlined', 'services-departments', 'table', 'latticeDepartments', ['code', 'name']),
-    ],
-  },
-]);
+export { COLLECTION_FIELD_GROUPS, PORTALS };
 
 export function assertSafeLabOrigin(origin) {
   if (typeof origin !== 'string' || !/^http:\/\/(?:localhost|127\.0\.0\.1):13\d{3}\/?$/.test(origin)) {
@@ -202,6 +127,7 @@ export async function provisionMultiPortalDemo(api, origin, { fixturesOnly = fal
     let portalCreated = 0;
     for (const page of pages) {
       if (hasPortalPage(layoutRoutes, byId, page)) continue;
+      const fieldGroups = COLLECTION_FIELD_GROUPS[page.block.collection];
       await api('flowSurfaces:applyBlueprint', {
         method: 'POST',
         values: {
@@ -214,6 +140,7 @@ export async function provisionMultiPortalDemo(api, origin, { fixturesOnly = fal
           },
           page: { title: page.title, displayTitle: true, enableTabs: false },
           tabs: [{ title: page.title, blocks: [page.block] }],
+          ...(fieldGroups ? { defaults: { collections: { [page.block.collection]: { fieldGroups } } } } : {}),
         },
       });
       portalCreated += 1;
@@ -259,7 +186,8 @@ export async function createRootApiClient(origin, fetchImpl = fetch) {
     try { payload = text ? JSON.parse(text) : {}; }
     catch { payload = { errors: [{ message: 'Non-JSON response' }] }; }
     if (!response.ok) {
-      const reason = payload?.errors?.[0]?.code ?? payload?.errors?.[0]?.message ?? `HTTP ${response.status}`;
+      const firstErr = payload?.errors?.[0];
+      const reason = [firstErr?.code, firstErr?.message].filter(Boolean).join(': ') || `HTTP ${response.status}`;
       throw new Error(`${path.split('?')[0]} HTTP ${response.status}: ${reason}`);
     }
     return payload.data !== undefined ? payload.data : payload;

@@ -21,7 +21,7 @@ const FALLBACK_LDX_ROLES = [
 
 function createMultiPortalSettingsPage(client, React, antd, app, router, helpers) {
   const h = React.createElement;
-  const { renderTile, toPortalSlug, syncPortals } = helpers;
+  const { renderTile, toPortalSlug, syncPortals, navigateToPortal, requestBuilderMode } = helpers;
   const { PortalFormModal, BlueprintModal } = createPortalModals(React, antd, { toPortalSlug });
   const useApi = typeof client.useAPIClient === 'function' ? client.useAPIClient : () => null;
   const useNav = typeof router?.useNavigate === 'function' ? router.useNavigate : () => null;
@@ -68,8 +68,11 @@ function createMultiPortalSettingsPage(client, React, antd, app, router, helpers
     React.useEffect(() => { loadAll(); }, []);
 
     function openBuilder(portal) {
-      try { window?.localStorage?.setItem('NOCOBASE_V2_FLOW_SETTINGS_ENABLED', '1'); } catch {}
-      if (navigate) navigate(portal.routePath);
+      requestBuilderMode?.(true);
+      try { app?.flowEngine?.flowSettings?.enable?.(); } catch {}
+      const target = portal.firstPagePath || portal.routePath;
+      if (navigateToPortal) navigateToPortal(target, navigate);
+      else if (navigate) navigate(target);
     }
 
     async function savePortal(payload) {
@@ -134,7 +137,13 @@ function createMultiPortalSettingsPage(client, React, antd, app, router, helpers
       return { items };
     }
 
-    const enterPortal = portal => (navigate ? navigate(portal.firstPagePath || portal.routePath) : undefined);
+    function enterPortal(portal) {
+      requestBuilderMode?.(false);
+      try { app?.flowEngine?.flowSettings?.disable?.(); } catch {}
+      const target = portal.firstPagePath || portal.routePath;
+      if (navigateToPortal) navigateToPortal(target, navigate);
+      else if (navigate) navigate(target);
+    }
 
     return h('div', { style: { padding: 24, maxWidth: 1320, margin: '0 auto' } },
       h('header', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 20 } },

@@ -132,7 +132,7 @@ function find(node, predicate) {
   return node.children?.flat(Infinity).map(child => find(child, predicate)).find(Boolean) || null;
 }
 
-test('delegates AdminLayoutModel to NativeModel.prototype.render, registers AdminLayoutModel, and renders Clause 5.2 link', () => {
+test('delegates AdminLayoutModel to NativeModel.prototype.render, registers AdminLayoutModel, and centers Clause 5.2 link outside settings', () => {
   const setup = harness();
   assert.equal(setup.root.type, 'FlowModelRenderer');
   assert.equal(setup.provider.type, 'AdminProvider');
@@ -143,17 +143,30 @@ test('delegates AdminLayoutModel to NativeModel.prototype.render, registers Admi
   assert.equal(setup.nativeRenders, 1);
   const link = find(ui, n => n.type === 'a' && n.props.href === 'https://www.nocobase.com');
   assert.equal(link.children[0], 'NocoBase');
+  const footer = find(ui, n => n.props?.className === 'ldx-clause52-attribution');
+  assert.equal(footer.props.style.left, '50%');
   assert.ok(find(ui, n => n.props?.className === 'nb-portal-switcher'));
+
+  const settingsSetup = harness({ pathname: '/admin/settings/multi-portal' });
+  const settingsUi = settingsSetup.render();
+  assert.equal(find(settingsUi, n => n.props?.className === 'ldx-clause52-attribution'), null);
 });
 
-test('employees use native runtime shell, cannot use builder landing, and redirect from /admin to default portal', async () => {
+test('employees wait on /admin redirect without premature native render, then use native runtime shell inside portal', async () => {
   const portals = [{ uid: 'ldx-portal-hr', title: 'HR', routeName: 'p_hr', routePath: '/p/hr', firstPagePath: '/p/hr/leave', isDefault: true, enabled: true }];
   const setup = harness({ allow: false, pathname: '/admin', runEffects: true, portals });
-  const ui = setup.render();
-  assert.equal(ui.children[0], 'native runtime shell');
+  const waitingUi = setup.render();
+  assert.equal(waitingUi.props.className, 'ldx-portal-redirecting');
+  assert.equal(setup.nativeRenders, 0);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(setup.layouts.get('p_hr').layoutModelClass, 'AdminLayoutModel');
   assert.deepEqual(setup.navigations.at(-1), { to: '/p/hr/leave', opts: { replace: true } });
+
+  const portalSetup = harness({ allow: false, pathname: '/p/hr/leave', layoutUid: 'ldx-portal-hr' });
+  const portalUi = portalSetup.render();
+  assert.equal(portalUi.children[0], 'native runtime shell');
+  assert.equal(portalSetup.nativeRenders, 1);
+
   const builderRoute = setup.registered.find(r => r.name === 'admin.lattice-builder');
   const landing = builderRoute.Component();
   assert.ok(find(landing, n => n.type === 'h1' && n.children[0] === 'Không có quyền truy cập'));

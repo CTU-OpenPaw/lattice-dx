@@ -59,7 +59,7 @@ function ensureDynamicLayoutsRegistered(app, portals) {
 function buildPortalAppList(portals, { allowConfigUI = false, React, icons } = {}) {
   const tile = (color, icon, title) => (React ? renderPortalTile(React, icons, color, icon, 28, title) : icon);
   const items = (Array.isArray(portals) ? portals : [])
-    .filter(p => p && p.enabled !== false)
+    .filter(p => p && p.enabled !== false && (allowConfigUI || p.uid !== 'admin-layout-model'))
     .map(p => ({
       title: p.title,
       url: p.firstPagePath || p.routePath,
@@ -110,73 +110,141 @@ function registerPortalSwitcherPlugin(client, React, antd, app, portalsRef, { ic
   return loadAppList;
 }
 
-function createNativePortalManager(client, React, antd, app, router, icons) {
+function createNativePortalManager(client, React, antd, app, router, icons, { clientV2 } = {}) {
   if (!React?.createElement || !app) return null;
   const h = React.createElement;
   const portalsRef = { current: [], allowConfigUI: false };
+  const startupRouteNames = new Set();
+  const listeners = new Set();
+  const builderIntentRef = { current: false };
+  let preloaded = false;
   const renderTile = (color, iconName, size, label) => renderPortalTile(React, icons, color, iconName, size, label);
   const syncPortals = items => {
     if (!Array.isArray(items)) return;
     portalsRef.current = items;
     ensureDynamicLayoutsRegistered(app, items);
+    listeners.forEach(fn => { try { fn(); } catch {} });
   };
+  async function preloadPortals() {
+    if (typeof app?.apiClient?.request !== 'function') return [];
+    try {
+      const res = await app.apiClient.request({ url: 'uiLayouts:listEnabled', method: 'get', skipNotify: true });
+      const rows = Array.isArray(res?.data?.data) ? res.data.data : [];
+      ensureDynamicLayoutsRegistered(app, rows);
+      preloaded = true;
+      for (const r of rows) {
+        if (r && r.enabled !== false && r.routeName && r.uid !== 'admin-layout-model' && r.uid !== 'mobile-layout-model') {
+          startupRouteNames.add(r.routeName);
+        }
+      }
+      return rows;
+    } catch { return []; }
+  }
+  function navigateToPortal(dest, navigate, opts) {
+    const m = /^\/p\/([^/?#]+)/.exec(String(dest || ''));
+    if (m) {
+      const portal = portalsRef.current.find(p => p.routePath === '/p/' + m[1]);
+      const routeName = portal?.routeName || ('p_' + m[1].replace(/-/g, '_'));
+      if ((preloaded || startupRouteNames.size > 0) && !startupRouteNames.has(routeName) && typeof window !== 'undefined' && window.location) {
+        if (opts?.replace && typeof window.location.replace === 'function') window.location.replace(dest);
+        else window.location.assign?.(dest);
+        return;
+      }
+    }
+    navigate?.(dest, opts);
+  }
+  function requestBuilderMode(flag) {
+    builderIntentRef.current = Boolean(flag);
+    try {
+      if (flag) window?.localStorage?.setItem('NOCOBASE_V2_FLOW_SETTINGS_ENABLED', '1');
+      else window?.localStorage?.removeItem('NOCOBASE_V2_FLOW_SETTINGS_ENABLED');
+    } catch {}
+  }
+  function consumeBuilderIntent() {
+    const val = builderIntentRef.current;
+    builderIntentRef.current = false;
+    return val;
+  }
 
   registerPortalSwitcherPlugin(client, React, antd, app, portalsRef, { icons });
-
   const MultiPortalSettingsPage = createMultiPortalSettingsPage(client, React, antd, app, router, {
-    renderTile, toPortalSlug, syncPortals,
+    renderTile, toPortalSlug, syncPortals, navigateToPortal, requestBuilderMode,
   });
-
   if (app.pluginSettingsManager && typeof app.pluginSettingsManager.add === 'function') {
     app.pluginSettingsManager.add('multi-portal', {
-      title: 'Multi-Portal',
-      icon: 'AppstoreOutlined',
-      Component: MultiPortalSettingsPage,
-      aclSnippet: 'pm',
+      title: 'Multi-Portal', icon: 'AppstoreOutlined', Component: MultiPortalSettingsPage, aclSnippet: 'pm',
     });
   }
 
-  function PortalBar({ portals, currentLayoutUid, pathname, allowConfigUI, onSwitch }) {
+  function PortalBar({ portals, currentLayoutUid, pathname = '', allowConfigUI, onSwitch, variant = 'topbar' }) {
     const rawList = Array.isArray(portals) && portals.length ? portals : portalsRef.current;
-    const list = (Array.isArray(rawList) ? rawList : []).filter(p => p && p.enabled !== false);
-    const active = list.find(p => p.uid === currentLayoutUid)
+    const list = (Array.isArray(rawList) ? rawList : [])
+      .filter(p => p && p.enabled !== false && (allowConfigUI || p.uid !== 'admin-layout-model'));
+    let activeBadge = list.find(p => p.uid === currentLayoutUid)
       || list.find(p => p.routePath && (pathname === p.routePath || pathname.startsWith(p.routePath + '/')))
       || list[0];
+    if (pathname === '/admin/lattice-workspace' || pathname.startsWith('/admin/lattice-workspace/')) {
+      activeBadge = { title: 'Công việc của tôi', color: '#0f766e', icon: 'CheckSquareOutlined' };
+    } else if (/^\/admin\/settings(?:\/|$)/.test(pathname)) {
+      activeBadge = { title: 'Multi-Portal', color: '#4f46e5', icon: 'SettingOutlined' };
+    }
     const items = buildPortalAppList(list, { allowConfigUI, React, icons });
     if (!items.length) return null;
-
-    const pillStyle = {
-      position: 'fixed', left: 12, bottom: 10, zIndex: 900, pointerEvents: 'auto',
-      display: 'inline-flex', alignItems: 'center', gap: 8, padding: '4px 10px',
-      borderRadius: 8, background: '#ffffff', border: '1px solid #cbd5e1',
-      boxShadow: '0 2px 8px rgba(15, 23, 42, 0.1)', color: '#0f172a',
-      fontSize: 12, fontWeight: 600, cursor: 'pointer', maxWidth: 184,
-    };
-
-    const label = active ? active.title : 'Chuyển Portal';
+    const isTopbar = variant === 'topbar';
+    const pillStyle = isTopbar
+      ? { display: 'inline-flex', alignItems: 'center', gap: 8, height: 30, padding: '0 10px', marginRight: 4, borderRadius: 6, background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.24)', color: '#ffffff', fontSize: 12, fontWeight: 600, cursor: 'pointer', maxWidth: 220 }
+      : { position: 'fixed', left: 12, bottom: 10, zIndex: 900, pointerEvents: 'auto', display: 'inline-flex', alignItems: 'center', gap: 8, padding: '4px 10px', borderRadius: 8, background: '#ffffff', border: '1px solid #cbd5e1', boxShadow: '0 2px 8px rgba(15, 23, 42, 0.1)', color: '#0f172a', fontSize: 12, fontWeight: 600, cursor: 'pointer', maxWidth: 200 };
+    const label = activeBadge ? activeBadge.title : 'Chuyển Portal';
     const menuItems = items.map((item, idx) => ({
       key: `${idx}:${item.url}`,
-      label: h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 8 } },
-        item.icon, h('span', null, item.title)),
-      onClick: () => onSwitch?.(item.url),
+      label: h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 8 } }, item.icon, h('span', null, item.title)),
+      onClick: () => (onSwitch ? onSwitch(item.url) : navigateToPortal(item.url, null)),
     }));
-
-    if (antd?.Dropdown) {
-      return h('div', { className: 'nb-portal-switcher', 'aria-label': 'Chuyển Portal' },
-        h(antd.Dropdown, { menu: { items: menuItems }, placement: 'topLeft', trigger: ['click'] },
-          h('button', { type: 'button', style: pillStyle, title: label },
-            renderTile(active?.color || '#1677ff', active?.icon || 'AppstoreOutlined', 20, label),
-            h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
-            h('span', { style: { opacity: 0.6, fontSize: 10 } }, '▲'))));
-    }
+    const triggerBtn = h('button', {
+      type: 'button', 'data-testid': 'portal-switcher-button', style: pillStyle, title: label, onClick: e => e?.stopPropagation?.(),
+    }, renderTile(activeBadge?.color || '#1677ff', activeBadge?.icon || 'AppstoreOutlined', 20, label),
+      h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
+      h('span', { style: { opacity: 0.7, fontSize: 10 } }, isTopbar ? '▾' : '▲'));
     return h('div', { className: 'nb-portal-switcher', 'aria-label': 'Chuyển Portal' },
-      h('button', { type: 'button', style: pillStyle, onClick: () => onSwitch?.(items[0].url) }, label));
+      antd?.Dropdown ? h(antd.Dropdown, { menu: { items: menuItems }, placement: isTopbar ? 'bottomRight' : 'topLeft', trigger: ['click'] }, triggerBtn) : triggerBtn);
+  }
+
+  function TopbarPortalSwitcher({ model }) {
+    const loc = typeof router?.useLocation === 'function' ? router.useLocation() : null;
+    const navigate = typeof router?.useNavigate === 'function' ? router.useNavigate() : null;
+    const perms = typeof client?.useUIConfigurationPermissions === 'function' ? client.useUIConfigurationPermissions() : null;
+    const api = typeof client?.useAPIClient === 'function' ? client.useAPIClient() : null;
+    const allow = Boolean(perms?.allowConfigUI);
+    const [, bump] = React.useState(0);
+    React.useEffect(() => {
+      const fn = () => bump(n => n + 1);
+      listeners.add(fn);
+      if (!portalsRef.current.length && typeof api?.request === 'function') {
+        api.request({ url: 'latticePortals:listAccessible', method: 'get' }).then(res => syncPortals(res?.data?.data || [])).catch(() => {});
+      }
+      return () => { listeners.delete(fn); };
+    }, [api]);
+    return h(PortalBar, {
+      portals: portalsRef.current, currentLayoutUid: model?.parent?.layout?.uid, pathname: loc?.pathname || '',
+      allowConfigUI: allow, variant: 'topbar', onSwitch: dest => navigateToPortal(dest, navigate),
+    });
+  }
+
+  let hasTopbarSwitcher = false;
+  const TopbarBase = clientV2?.TopbarActionModel || app?.flowEngine?.getModelClass?.('TopbarActionModel');
+  const AdminBase = clientV2?.AdminLayoutModel || app?.flowEngine?.getModelClass?.('AdminLayoutModel');
+  if (typeof TopbarBase === 'function' && TopbarBase !== AdminBase && typeof app?.flowEngine?.registerModels === 'function') {
+    class PortalSwitcherTopbarActionModel extends TopbarBase {
+      constructor(...args) { super(...args); this.sort = -50; this.actionId = 'portal-switcher'; this.testId = 'portal-switcher-button'; }
+      render() { return h(TopbarPortalSwitcher, { model: this }); }
+    }
+    app.flowEngine.registerModels({ PortalSwitcherTopbarActionModel });
+    hasTopbarSwitcher = true;
   }
 
   return {
-    MultiPortalSettingsPage,
-    PortalBar,
-    setPortals: syncPortals,
+    MultiPortalSettingsPage, PortalBar, TopbarPortalSwitcher, hasTopbarSwitcher, preloadPortals,
+    navigateToPortal, requestBuilderMode, consumeBuilderIntent, setPortals: syncPortals,
     setPermissions: allow => { portalsRef.allowConfigUI = Boolean(allow); },
     ensureDynamicLayoutsRegistered: items => ensureDynamicLayoutsRegistered(app, items),
     getPortals: () => portalsRef.current,

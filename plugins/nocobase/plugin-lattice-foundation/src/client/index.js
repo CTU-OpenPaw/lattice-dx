@@ -45,7 +45,8 @@
     async load() {
       const BrandLogo=createBrandLogo(client,React);
       registerSignInLogo(this.app,React,BrandLogo);
-      const portalManager=createNativePortalManager(client,React,antd,this.app,router,icons);
+      const portalManager=createNativePortalManager(client,React,antd,this.app,router,icons,{clientV2});
+      await portalManager?.preloadPortals?.();
       const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo,portalManager});
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
       this.app.addScopes({useLatticeFormAction});
