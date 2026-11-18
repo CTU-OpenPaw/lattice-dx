@@ -84,6 +84,7 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
   class NativeModel {
     constructor() { if (layoutUid) this.layout = { uid: layoutUid }; }
     render() { nativeRenders++; return 'native runtime shell'; }
+    addSubModel(subKey, opts) { return { subKey, ...opts }; }
     syncMenuRoutes(routes) { this.syncedRoutes = routes; }
     setIsMobileLayout(value) { this.isMobileLayout = value; }
   }
@@ -91,6 +92,9 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
     render() { v2Renders++; return 'v2 portal shell'; }
     syncMenuRoutes(routes) { this.v2SyncedRoutes = routes; }
     toProLayoutRoute() { return { path: '/', children: ['v2-item'] }; }
+  }
+  class V2MenuItem {
+    addSubModel(subKey, opts) { return { subKey, ...opts }; }
   }
   const client = {
     AdminProvider: 'AdminProvider', PinnedPluginList: 'NativeTools', SchemaComponent: 'Schema', PagePopups: 'Popups',
@@ -113,7 +117,7 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
   const antd = Object.fromEntries(['Input', 'Button', 'Alert', 'Select', 'Space', 'Card', 'Dropdown'].map(k => [k, k]));
   const portalManager = createNativePortalManager(client, React, antd, app, router);
   let model;
-  const clientV2 = { AdminLayoutModel: V2AdminModel, getAdminLayoutModel(engine, options) { model = new options.use(); return model; } };
+  const clientV2 = { AdminLayoutModel: V2AdminModel, AdminLayoutMenuItemModel: V2MenuItem, getAdminLayoutModel(engine, options) { model = new options.use(); return model; } };
   const Layout = createNativeBuilderNavigation(client, React, antd, app, { clientV2, router, flow: { FlowModelRenderer: 'FlowModelRenderer' }, portalManager });
   const root = Layout({});
   const gate = model.render();
@@ -184,6 +188,10 @@ test('employees wait on /admin redirect without mounting AdminProvider, then use
   portalSetup.model.syncMenuRoutes(['r1']);
   assert.deepEqual(portalSetup.model.v2SyncedRoutes, ['r1']);
   assert.deepEqual(portalSetup.model.toProLayoutRoute(), { path: '/', children: ['v2-item'] });
+  assert.equal(typeof portalSetup.registeredModels.LatticePortalMenuItemModel, 'function');
+  assert.equal(portalSetup.model.addSubModel('menuItems', { use: 'AdminLayoutMenuItemModel', uid: 'm1' }).use, 'LatticePortalMenuItemModel');
+  const adminSetup = harness({ allow: true, pathname: '/admin/demo' });
+  assert.equal(adminSetup.model.addSubModel('menuItems', { use: 'AdminLayoutMenuItemModel', uid: 'm0' }).use, 'AdminLayoutMenuItemModel');
 
   const builderRoute = setup.registered.find(r => r.name === 'admin.lattice-builder');
   const landing = builderRoute.Component();

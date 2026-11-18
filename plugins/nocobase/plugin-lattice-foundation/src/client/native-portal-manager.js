@@ -195,8 +195,11 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     if (!items.length) return null;
     const isTopbar = variant === 'topbar';
     const pillStyle = isTopbar
-      ? { display: 'inline-flex', alignItems: 'center', gap: 8, height: 30, padding: '0 10px', marginRight: 4, borderRadius: 6, background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.24)', color: '#ffffff', fontSize: 12, fontWeight: 600, cursor: 'pointer', maxWidth: 220 }
+      ? { display: 'inline-flex', alignItems: 'center', gap: 8, height: 30, lineHeight: 1.2, verticalAlign: 'middle', padding: '0 10px', borderRadius: 6, background: 'rgba(255,255,255,0.12)', border: '1px solid rgba(255,255,255,0.24)', color: '#ffffff', fontSize: 12, fontWeight: 600, cursor: 'pointer', maxWidth: 220 }
       : { position: 'fixed', left: 12, bottom: 10, zIndex: 900, pointerEvents: 'auto', display: 'inline-flex', alignItems: 'center', gap: 8, padding: '4px 10px', borderRadius: 8, background: '#ffffff', border: '1px solid #cbd5e1', boxShadow: '0 2px 8px rgba(15, 23, 42, 0.1)', color: '#0f172a', fontSize: 12, fontWeight: 600, cursor: 'pointer', maxWidth: 200 };
+    const wrapStyle = isTopbar
+      ? { display: 'inline-flex', alignItems: 'center', height: 46, verticalAlign: 'middle', lineHeight: 1.2, marginRight: 6 }
+      : undefined;
     const label = activeBadge ? activeBadge.title : 'Chuyển Portal';
     const menuItems = items.map((item, idx) => ({
       key: `${idx}:${item.url}`,
@@ -208,7 +211,7 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     }, renderTile(activeBadge?.color || '#1677ff', activeBadge?.icon || 'AppstoreOutlined', 20, label),
       h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, label),
       h('span', { style: { opacity: 0.7, fontSize: 10 } }, isTopbar ? '▾' : '▲'));
-    return h('div', { className: 'nb-portal-switcher', 'aria-label': 'Chuyển Portal' },
+    return h('span', { className: 'nb-portal-switcher', 'aria-label': 'Chuyển Portal', style: wrapStyle },
       antd?.Dropdown ? h(antd.Dropdown, { menu: { items: menuItems }, placement: isTopbar ? 'bottomRight' : 'topLeft', trigger: ['click'] }, triggerBtn) : triggerBtn);
   }
 
@@ -243,6 +246,10 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     }
     app.flowEngine.registerModels({ PortalSwitcherTopbarActionModel });
     hasTopbarSwitcher = true;
+  }
+  const existingSwitcherPanel = app?.flowEngine?.getModelClass?.('AppSwitcherActionPanelModel');
+  if (typeof clientV2?.AppSwitcherActionPanelModel === 'function' && typeof app?.flowEngine?.registerModels === 'function' && (!existingSwitcherPanel || existingSwitcherPanel === AdminBase)) {
+    app.flowEngine.registerModels({ AppSwitcherActionPanelModel: clientV2.AppSwitcherActionPanelModel });
   }
   if (client?.PinnedPluginListProvider && typeof app?.use === 'function') {
     app.use(client.PinnedPluginListProvider, {

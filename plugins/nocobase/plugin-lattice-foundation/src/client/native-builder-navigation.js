@@ -62,6 +62,10 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
   const NativeModel = app.flowEngine.getModelClass('AdminLayoutModel');
   if (!NativeModel || typeof NativeModel.prototype?.render !== 'function') return null;
   const V2Model = clientV2?.AdminLayoutModel;
+  const V2MenuItem = clientV2?.AdminLayoutMenuItemModel;
+  const hasPortalMenuItem = typeof V2MenuItem === 'function';
+  const rewriteMenuSubModel = (subKey, opts) => (hasPortalMenuItem && subKey === 'menuItems' && opts?.use === 'AdminLayoutMenuItemModel'
+    ? { ...opts, use: 'LatticePortalMenuItemModel' } : opts);
   const isPortalModel = inst => Boolean(typeof V2Model?.prototype?.render === 'function' && inst?.layout?.uid && inst.layout.uid !== 'admin-layout-model');
 
   const h = React.createElement;
@@ -261,26 +265,33 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
   }
 
   class BuilderLayoutModel extends NativeModel {
+    addSubModel(subKey, opts) {
+      const nextOpts = isPortalModel(this) ? rewriteMenuSubModel(subKey, opts) : opts;
+      return typeof super.addSubModel === 'function' ? super.addSubModel(subKey, nextOpts) : nextOpts;
+    }
     syncMenuRoutes(routes) {
       return isPortalModel(this) && typeof V2Model.prototype.syncMenuRoutes === 'function'
-        ? V2Model.prototype.syncMenuRoutes.call(this, routes)
-        : (typeof super.syncMenuRoutes === 'function' ? super.syncMenuRoutes(routes) : undefined);
+        ? V2Model.prototype.syncMenuRoutes.call(this, routes) : (typeof super.syncMenuRoutes === 'function' ? super.syncMenuRoutes(routes) : undefined);
     }
     toProLayoutRoute(opts) {
       return isPortalModel(this) && typeof V2Model.prototype.toProLayoutRoute === 'function'
-        ? V2Model.prototype.toProLayoutRoute.call(this, opts)
-        : (typeof super.toProLayoutRoute === 'function' ? super.toProLayoutRoute(opts) : { path: '/', children: [] });
+        ? V2Model.prototype.toProLayoutRoute.call(this, opts) : (typeof super.toProLayoutRoute === 'function' ? super.toProLayoutRoute(opts) : { path: '/', children: [] });
     }
     render() { return h(PortalAdminProvider, null, h(BuilderShell, { model: this })); }
   }
   if (typeof app.flowEngine.registerModels === 'function') {
-    app.flowEngine.registerModels({ AdminLayoutModel: BuilderLayoutModel });
+    const models = { AdminLayoutModel: BuilderLayoutModel };
+    if (hasPortalMenuItem) {
+      models.LatticePortalMenuItemModel = class LatticePortalMenuItemModel extends V2MenuItem {
+        addSubModel(subKey, opts) { return super.addSubModel(subKey, rewriteMenuSubModel(subKey, opts)); }
+      };
+    }
+    app.flowEngine.registerModels(models);
   }
-  function BuilderAdminLayout(props) {
+  return function BuilderAdminLayout(props) {
     const model = clientV2.getAdminLayoutModel(app.flowEngine, { create: true, props, use: BuilderLayoutModel });
     return h(flow.FlowModelRenderer, { model });
-  }
-  return BuilderAdminLayout;
+  };
 }
 
 module.exports = { pageTree, hostPath, firstSettingsPath, createNativeBuilderNavigation, BUILDER_PATH };

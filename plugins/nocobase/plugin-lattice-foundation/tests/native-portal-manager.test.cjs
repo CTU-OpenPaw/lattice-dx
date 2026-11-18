@@ -176,7 +176,11 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
     useUIConfigurationPermissions: () => ({ allowConfigUI: false }),
   };
   const router = { Link: 'Link', useNavigate: () => to => navigated.push(to), useLocation: () => ({ pathname: '/p/hr/home' }) };
-  const manager = createNativePortalManager(client, React, antd, app, router, null, { clientV2: { TopbarActionModel: TopbarBase, AdminLayoutModel: AdminBase } });
+  class AppSwitcherPanel {}
+  const manager = createNativePortalManager(client, React, antd, app, router, null, {
+    clientV2: { TopbarActionModel: TopbarBase, AdminLayoutModel: AdminBase, AppSwitcherActionPanelModel: AppSwitcherPanel },
+  });
+  assert.equal(registeredModels.AppSwitcherActionPanelModel, AppSwitcherPanel);
 
   const loaded = await manager.preloadPortals();
   assert.equal(loaded.length, 2);
@@ -194,6 +198,9 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
   assert.equal(topbarModel.sort, -50);
   assert.equal(topbarModel.actionId, 'portal-switcher');
   const employeeBar = manager.PortalBar({ portals: portalRows, pathname: '/p/hr/home', allowConfigUI: false, onSwitch: to => navigated.push(to) });
+  assert.equal(employeeBar.type, 'span');
+  assert.equal(employeeBar.props.style.height, 46);
+  assert.equal(employeeBar.props.style.display, 'inline-flex');
   const employeeDrop = find(employeeBar, n => n.type === 'Dropdown');
   assert.equal(employeeDrop.props.menu.items.some(i => i.key.endsWith(':/admin')), false);
 
