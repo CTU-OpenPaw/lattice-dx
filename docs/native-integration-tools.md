@@ -131,7 +131,7 @@ Trong Workspace → Công việc của tôi, quản lý mở **Duyệt sự cố
 
 Workflow duyệt mới có mục **Đề xuất AI và bằng chứng**. Cấp quyền đọc case cho quản lý theo cùng tập trường bằng chứng mà agent sử dụng. API kiểm fingerprint theo góc nhìn hiện tại. Nếu dữ liệu hoặc quyền trên trường đã đổi, cửa sổ chỉ hiển thị cảnh báo bằng chứng cũ. Với workflow đã cài trước bản này, cập nhật schema của node duyệt hoặc cài workflow mới ở trạng thái tắt và chuyển sang bản mới sau khi xử lý các task đang mở.
 
-Trong NocoBase → Roles & Permissions, bật quyền **View** của collection `latticeIncidentCases` cho vai trò agent và vai trò quản lý dùng để duyệt. Tập trường đã nghiệm thu trên lab gồm `id`, `name`, `severity`, `status`, `assetId`. Gán agent cho một tài khoản nghiệp vụ riêng cùng tổ chức. Kiểm tra lại bằng phiên đăng nhập thực tế của quản lý để xác nhận quyền đọc và fingerprint.
+Trong NocoBase → Roles & Permissions, cấp quyền **View** của collection `latticeIncidentCases` cho vai trò agent theo đúng tập trường mà người duyệt đọc được. Quyền đọc mặc định của portal Sự cố dùng `id`, `code`, `name`, `severity`, `status`, `assetId` và `assetEntityId`. Migration chỉ thêm quyền đọc cho các vai trò có portal Sự cố nếu resource grant tương ứng còn thiếu. Nếu lab đã cấu hình quyền riêng, đối chiếu tập trường thực tế của hai vai trò. Gán agent cho một tài khoản nghiệp vụ riêng cùng tổ chức và kiểm tra bằng phiên của quản lý.
 
 ### Nối subscription Orion-LD với bộ rule
 

@@ -44,3 +44,24 @@ test('unused legacy grant cutover leaves other native role settings intact',asyn
   const report=await migrateUnusedLegacyRoles(db);assert.deepEqual(report.migrated,[preset.name]);assert.equal(created.length,6);assert.equal(legacy.allowNewAiEmployee,true);
   assert.ok(!created.some(resource=>resource.name==='latticeDocuments'));
 });
+test('incident portal grants only missing, read-only resources to supported roles',async()=>{
+  const {installIncidentPortalReadGrants}=require('../src/server/native-roles');
+  const roles=['ldx_manager','ldx_warehouse','ldx_employee','ldx_director'];
+  const resources=[{name:'latticeIncidentCases',roleName:'ldx_manager',dataSourceKey:'main',actions:[{name:'view',fields:['id']}]}];
+  const db={
+    sequelize:{transaction:callback=>callback({})},
+    getRepository(name){
+      if(name==='roles')return {findOne:async({filter})=>roles.includes(filter.name)?{name:filter.name}:null};
+      return {
+        findOne:async({filter})=>resources.find(row=>Object.entries(filter).every(([key,value])=>row[key]===value)),
+        create:async({values})=>resources.push(values),
+      };
+    },
+  };
+  await installIncidentPortalReadGrants(db);
+  await installIncidentPortalReadGrants(db);
+  assert.equal(resources.length,6);
+  assert.deepEqual(resources[0].actions,[{name:'view',fields:['id']}]);
+  assert.ok(resources.every(row=>row.roleName!=='ldx_employee'));
+  for(const row of resources.slice(1))assert.deepEqual(row.actions.map(action=>action.name),['view']);
+});

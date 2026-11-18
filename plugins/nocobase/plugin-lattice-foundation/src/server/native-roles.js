@@ -66,4 +66,25 @@ async function migrateUnusedLegacyRoles(db) {
   });
   return report;
 }
-module.exports={rolePresets,installRolePresets,migrateUnusedLegacyRoles,isLegacyPreset};
+async function installIncidentPortalReadGrants(db) {
+  const fields = {
+    latticeIncidentCases: ['id', 'code', 'name', 'severity', 'status', 'assetId', 'assetEntityId'],
+    latticeIncidentRules: ['id', 'code', 'name', 'assetEntityId', 'attribute', 'operator', 'threshold', 'unit', 'severity'],
+  };
+  const roles = db.getRepository('roles');
+  const resources = db.getRepository('dataSourcesRolesResources');
+  await db.sequelize.transaction(async transaction => {
+    for (const roleName of ['ldx_manager', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_director', 'ldx_admin']) {
+      if (!await roles.findOne({filter:{name:roleName},transaction})) continue;
+      for (const [name, allowedFields] of Object.entries(fields)) {
+        const filter = {name, roleName, dataSourceKey:'main'};
+        if (await resources.findOne({filter,transaction})) continue;
+        await resources.create({
+          values: {...filter, usingActionsConfig:true, actions:[{name:'view', fields:allowedFields}]},
+          transaction,
+        });
+      }
+    }
+  });
+}
+module.exports={rolePresets,installRolePresets,migrateUnusedLegacyRoles,isLegacyPreset,installIncidentPortalReadGrants};

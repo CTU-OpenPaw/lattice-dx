@@ -1,8 +1,8 @@
 # Changelog
 
-Tài liệu ghi nhận lịch sử phát triển theo mốc thời gian thực tế của **LatticeDX** (`0.1.0`, Apache-2.0) phục vụ kỳ thi OLP PMNM 2026 (VFOSSA).
+Tài liệu ghi nhận lịch sử phát triển của **LatticeDX** (Apache-2.0), phục vụ kỳ thi OLP PMNM 2026 (VFOSSA).
 
-## [0.1.0] — 2026-10-06 đến 2026-11-18
+## [Unreleased] — chuẩn bị v0.1.0
 
 ### 2026-11-18 — Native Multi-Portal UI & OLP PMNM 2026 (VFOSSA) PoF Compliance
 - Bổ sung giao diện Multi-Portal Apache-2.0 trên `AdminLayoutModel` / `uiLayouts` trong `@latticedx/plugin-lattice-foundation`, giữ nguyên thông tin bản quyền NocoBase Clause 5.2 (`Powered by NocoBase`, `v2.2.38`, `License settings`).
@@ -11,6 +11,7 @@ Tài liệu ghi nhận lịch sử phát triển theo mốc thời gian thực t
 - Khóa toàn bộ container image còn thiếu digest `@sha256:` trong `infra/compose/core.yml`, `infra/compose/nocobase.yml` và `infra/compose/native-rehearsal.yml`.
 - Thêm biểu mẫu GitHub Issue (`.github/ISSUE_TEMPLATE/config.yml`, `bug_report.yml`, `feature_request.yml`), cập nhật `CONTRIBUTING.md`, `SECURITY.md`, `README.md`, `docs/nocobase-source-review.md`, `docs/third-party.md` và làm mới kiểm kê `docs/dependency-inventory.md` (`123` nhóm package).
 - Tạo `docs/build-from-source.md`, `docs/oss-pof-compliance.md`, `scripts/verify-pof-readiness.mjs` (`pnpm pof:check`) và `scripts/build-oss-release-tarball.mjs` (`pnpm release:tarball`) kèm kiểm thử đơn vị `scripts/tests/oss-pof-audit.test.mjs`.
+- Thêm migration cấp quyền xem các trường cần thiết cho cổng Sự cố và giữ cấu hình quyền đã tồn tại. Nghiệm thu lab từ Orion-LD qua n8n và `combo` đến duyệt, ghi kết quả và đóng case trên giao diện.
 
 ### 2026-11-17 — Luồng UC2 End-to-End (Orion-LD → n8n → AI Advisory → Human Review)
 - Hoàn thiện luồng xử lý cảnh báo sự cố từ NGSI-LD Orion-LD qua n8n tới dịch vụ `combo` AI advisory và hàng đợi duyệt thủ công có kiểm tra thẩm quyền (`8c8cc27`, `PR #56`).
