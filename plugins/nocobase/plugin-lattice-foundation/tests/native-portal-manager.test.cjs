@@ -142,6 +142,7 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
   const React = createReactMock();
   const layouts = new Map([['admin', true]]);
   const registeredModels = {};
+  const usedProviders = [];
   const requests = [], navigated = [], settings = [];
   const antd = Object.fromEntries(['Modal', 'Input', 'Select', 'Switch', 'Alert', 'Button', 'Space', 'Tag', 'Dropdown', 'Popconfirm'].map(n => [n, n]));
   const portalRows = [
@@ -153,6 +154,7 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
   const app = {
     layoutManager: { hasLayout: name => layouts.has(name), registerLayout: cfg => layouts.set(cfg.routeName, cfg) },
     pluginSettingsManager: { add: (name, cfg) => settings.push({ name, ...cfg }) },
+    use: (prov, cfg) => usedProviders.push({ prov, cfg }),
     flowEngine: {
       getModelClass: name => (name === 'TopbarActionModel' ? TopbarBase : AdminBase),
       registerModels: map => Object.assign(registeredModels, map),
@@ -168,7 +170,11 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
       },
     },
   };
-  const client = { useAPIClient: () => app.apiClient, useUIConfigurationPermissions: () => ({ allowConfigUI: false }) };
+  const client = {
+    PinnedPluginListProvider: 'PinnedPluginListProvider',
+    useAPIClient: () => app.apiClient,
+    useUIConfigurationPermissions: () => ({ allowConfigUI: false }),
+  };
   const router = { Link: 'Link', useNavigate: () => to => navigated.push(to), useLocation: () => ({ pathname: '/p/hr/home' }) };
   const manager = createNativePortalManager(client, React, antd, app, router, null, { clientV2: { TopbarActionModel: TopbarBase, AdminLayoutModel: AdminBase } });
 
@@ -204,4 +210,7 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
   assert.equal(app.flowEngine.flowSettings.enabled, true);
   assert.equal(store.get('NOCOBASE_V2_FLOW_SETTINGS_ENABLED'), '1');
   assert.equal(navigated.at(-1), '/p/hr/home');
+  assert.ok(usedProviders.some(u => u.prov === 'PinnedPluginListProvider' && u.cfg?.items?.ldxPortalSwitcher?.order === -50 && u.cfg?.items?.ldxPortalSwitcher?.snippet === '*'));
+  manager.requestBuilderMode(false);
+  assert.equal(store.get('NOCOBASE_V2_FLOW_SETTINGS_ENABLED'), '0');
 });

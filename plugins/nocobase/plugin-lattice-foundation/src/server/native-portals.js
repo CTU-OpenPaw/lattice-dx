@@ -75,7 +75,11 @@ function registerNativePortals(app, injectedDb) {
       ctx.body = sortPortals(data.layouts.map(layout => {
         const routes = data.routesByPortal.get(layout.uid) || [];
         const meta = metaMap[layout.uid];
-        return buildPortalDto(layout, meta, routes, grantedLdxRoles(data.routeIdsByPortal.get(layout.uid), data.rolesByRoute, meta?.roles));
+        const { firstPagePath } = inspectPortalRoutes(routes, layout.routePath, null);
+        return {
+          ...buildPortalDto(layout, meta, routes, grantedLdxRoles(data.routeIdsByPortal.get(layout.uid), data.rolesByRoute, meta?.roles)),
+          firstPagePath,
+        };
       }));
       if (next) await next();
     },

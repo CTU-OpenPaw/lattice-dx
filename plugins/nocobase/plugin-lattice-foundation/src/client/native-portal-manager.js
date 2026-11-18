@@ -154,10 +154,13 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     navigate?.(dest, opts);
   }
   function requestBuilderMode(flag) {
-    builderIntentRef.current = Boolean(flag);
+    const enabled = Boolean(flag);
+    builderIntentRef.current = enabled;
     try {
-      if (flag) window?.localStorage?.setItem('NOCOBASE_V2_FLOW_SETTINGS_ENABLED', '1');
-      else window?.localStorage?.removeItem('NOCOBASE_V2_FLOW_SETTINGS_ENABLED');
+      window?.localStorage?.setItem('NOCOBASE_V2_FLOW_SETTINGS_ENABLED', enabled ? '1' : '0');
+      if (typeof CustomEvent === 'function' && typeof window?.dispatchEvent === 'function') {
+        window.dispatchEvent(new CustomEvent('nocobase:v2:flow-settings-preference-change', { detail: { enabled } }));
+      }
     } catch {}
   }
   function consumeBuilderIntent() {
@@ -239,6 +242,14 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
       render() { return h(TopbarPortalSwitcher, { model: this }); }
     }
     app.flowEngine.registerModels({ PortalSwitcherTopbarActionModel });
+    hasTopbarSwitcher = true;
+  }
+  if (client?.PinnedPluginListProvider && typeof app?.use === 'function') {
+    app.use(client.PinnedPluginListProvider, {
+      items: {
+        ldxPortalSwitcher: { order: -50, component: TopbarPortalSwitcher, pin: true, snippet: '*' },
+      },
+    });
     hasTopbarSwitcher = true;
   }
 

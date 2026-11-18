@@ -61,12 +61,25 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
       !client.AdminProvider || !flow.FlowModelRenderer || !router.Link || !router.Outlet) return null;
   const NativeModel = app.flowEngine.getModelClass('AdminLayoutModel');
   if (!NativeModel || typeof NativeModel.prototype?.render !== 'function') return null;
+  const V2Model = clientV2?.AdminLayoutModel;
+  const isPortalModel = inst => Boolean(typeof V2Model?.prototype?.render === 'function' && inst?.layout?.uid && inst.layout.uid !== 'admin-layout-model');
 
   const h = React.createElement;
   const Fragment = React.Fragment || 'div';
   const workspace = createNativeWorkspace(client, React, antd, app, router);
   const useApi = typeof client.useAPIClient === 'function' ? client.useAPIClient : () => null;
   const useNav = typeof router.useNavigate === 'function' ? router.useNavigate : () => null;
+  const landingPath = items => {
+    const custom = (Array.isArray(items) ? items : []).filter(p => p && p.enabled !== false && p.uid !== 'admin-layout-model');
+    const target = custom.find(p => p.isDefault) || custom[0] || items?.[0];
+    return target?.firstPagePath || target?.routePath || WORKSPACE_PATH;
+  };
+  const goPortal = (dest, navigate, opts) => (portalManager?.navigateToPortal
+    ? portalManager.navigateToPortal(dest, navigate, opts) : navigate?.(dest, opts));
+  const redirectNotice = () => h('div', {
+    className: 'ldx-portal-redirecting', role: 'status',
+    style: { padding: 48, textAlign: 'center', color: '#64748b', fontSize: 14 },
+  }, 'Đang chuyển đến Cổng làm việc...');
 
   function QuickCreateSettings({ route, refresh }) {
     const api = useApi();
@@ -150,6 +163,7 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
         if (!active) return;
         const isMobile = Boolean(media?.matches);
         model.setIsMobileLayout?.(isMobile);
+        if (!allowConfigUI) portalManager?.requestBuilderMode?.(false);
         const forceDisable = !allowConfigUI || configMode || workspaceMode || isMobile;
         const wantBuilder = !forceDisable && Boolean(portalManager?.consumeBuilderIntent?.());
         if (wantBuilder) setDesignable?.(true);
@@ -157,12 +171,10 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
         syncing.current = syncing.current.catch(() => {}).then(async () => {
           if (!active) return;
           const mode = desiredSettings.current;
-          if (mode === 'enable') await app.flowEngine.flowSettings?.enable?.();
-          else if (mode === 'disable') await app.flowEngine.flowSettings?.disable?.();
-          if (active && desiredSettings.current !== mode) {
-            if (desiredSettings.current === 'enable') await app.flowEngine.flowSettings?.enable?.();
-            else if (desiredSettings.current === 'disable') await app.flowEngine.flowSettings?.disable?.();
-          }
+          const applyFlow = m => (m === 'enable' ? app.flowEngine.flowSettings?.enable?.()
+            : m === 'disable' ? app.flowEngine.flowSettings?.disable?.() : null);
+          await applyFlow(mode);
+          if (active && desiredSettings.current !== mode) await applyFlow(desiredSettings.current);
         }).catch(() => {});
       };
       apply();
@@ -184,13 +196,8 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
         portalManager?.setPortals?.(items);
         portalManager?.ensureDynamicLayoutsRegistered?.(items);
         if (!allowConfigUI && isAdminRoot && navigate) {
-          const custom = items.filter(p => p && p.enabled !== false && p.uid !== 'admin-layout-model');
-          const target = custom.find(p => p.isDefault) || custom[0] || items[0];
-          const dest = target?.firstPagePath || target?.routePath || WORKSPACE_PATH;
-          if (dest !== pathname) {
-            if (portalManager?.navigateToPortal) portalManager.navigateToPortal(dest, navigate, { replace: true });
-            else navigate(dest, { replace: true });
-          }
+          const dest = landingPath(items);
+          if (dest !== pathname) goPortal(dest, navigate, { replace: true });
         }
       }).catch(() => {
         if (active && !allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
@@ -198,14 +205,10 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
       return () => { active = false; };
     }, [api, allowConfigUI, isAdminRoot, pathname, navigate]);
 
-    if (!allowConfigUI && isAdminRoot) {
-      return h('div', {
-        className: 'ldx-portal-redirecting', role: 'status',
-        style: { padding: 48, textAlign: 'center', color: '#64748b', fontSize: 14 },
-      }, 'Đang chuyển đến Cổng làm việc...');
-    }
+    if (!allowConfigUI && isAdminRoot) return redirectNotice();
 
-    const nativeShell = NativeModel.prototype.render.call(model);
+    const ShellModel = isPortalModel(model) ? V2Model : NativeModel;
+    const nativeShell = ShellModel.prototype.render.call(model);
     const switcher = !portalManager?.hasTopbarSwitcher && !configMode && portalManager?.PortalBar
       ? h(portalManager.PortalBar, { portals, currentLayoutUid: model?.layout?.uid, pathname, allowConfigUI, onSwitch: dest => navigate?.(dest) })
       : null;
@@ -223,8 +226,52 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
     return h(Fragment, null, nativeShell, switcher, attribution);
   }
 
+  function PortalAdminProvider({ children }) {
+    const { pathname } = router.useLocation();
+    const isAdminRoot = pathname === '/admin' || pathname === '/admin/';
+    const syncAllow = Boolean(client.useUIConfigurationPermissions()?.allowConfigUI);
+    const api = useApi();
+    const navigate = useNav();
+    const [verified, setVerified] = React.useState(false);
+
+    React.useEffect(() => {
+      if (!isAdminRoot) { setVerified(false); return; }
+      if (!api || typeof api.request !== 'function') {
+        if (!syncAllow && navigate) navigate(WORKSPACE_PATH, { replace: true });
+        else setVerified(true);
+        return;
+      }
+      let active = true;
+      Promise.all([
+        api.request({ url: 'roles:check', method: 'get' }).catch(() => null),
+        api.request({ url: 'latticePortals:listAccessible', method: 'get' }).catch(() => null),
+      ]).then(([roleRes, portalRes]) => {
+        if (!active) return;
+        const rData = roleRes?.data?.data;
+        const hasRoleCheck = rData && !Array.isArray(rData) && (typeof rData.allowAll === 'boolean' || Array.isArray(rData.snippets));
+        const isBuilder = hasRoleCheck ? Boolean(rData.allowAll || rData.snippets?.includes('ui.*')) : syncAllow;
+        const items = Array.isArray(portalRes?.data?.data) ? portalRes.data.data : [];
+        portalManager?.setPermissions?.(isBuilder); portalManager?.setPortals?.(items); portalManager?.ensureDynamicLayoutsRegistered?.(items);
+        if (!isBuilder && navigate) { goPortal(landingPath(items), navigate, { replace: true }); return; }
+        setVerified(true);
+      });
+      return () => { active = false; };
+    }, [isAdminRoot, syncAllow, api, navigate]);
+    return isAdminRoot && !verified ? redirectNotice() : h(client.AdminProvider, null, children);
+  }
+
   class BuilderLayoutModel extends NativeModel {
-    render() { return h(client.AdminProvider, null, h(BuilderShell, { model: this })); }
+    syncMenuRoutes(routes) {
+      return isPortalModel(this) && typeof V2Model.prototype.syncMenuRoutes === 'function'
+        ? V2Model.prototype.syncMenuRoutes.call(this, routes)
+        : (typeof super.syncMenuRoutes === 'function' ? super.syncMenuRoutes(routes) : undefined);
+    }
+    toProLayoutRoute(opts) {
+      return isPortalModel(this) && typeof V2Model.prototype.toProLayoutRoute === 'function'
+        ? V2Model.prototype.toProLayoutRoute.call(this, opts)
+        : (typeof super.toProLayoutRoute === 'function' ? super.toProLayoutRoute(opts) : { path: '/', children: [] });
+    }
+    render() { return h(PortalAdminProvider, null, h(BuilderShell, { model: this })); }
   }
   if (typeof app.flowEngine.registerModels === 'function') {
     app.flowEngine.registerModels({ AdminLayoutModel: BuilderLayoutModel });

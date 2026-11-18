@@ -67,12 +67,16 @@ test('Config selects only an allowed settings leaf, never a denied or external s
 });
 
 function harness({ allow = true, pathname = '/admin/demo', designable = false, runEffects = false, portals = [], layoutUid } = {}) {
-  let cursor = 0, nativeRenders = 0;
+  let cursor = 0, nativeRenders = 0, v2Renders = 0, lastGate = null;
   const state = [], registered = [], navigations = [], layouts = new Map(), registeredModels = {};
   let effects = [], cleanups = [];
   const React = {
     Fragment: 'Fragment',
-    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    createElement: (type, props, ...children) => ({
+      type,
+      props: children.length ? { ...(props || {}), children: children.length === 1 ? children[0] : children } : (props || {}),
+      children,
+    }),
     useState(initial) { const i = cursor++; if (!(i in state)) state[i] = initial; return [state[i], v => { state[i] = v; }]; },
     useRef(initial) { const i = cursor++; return state[i] || (state[i] = { current: initial }); },
     useEffect(effect) { if (runEffects) effects.push(effect); },
@@ -82,6 +86,11 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
     render() { nativeRenders++; return 'native runtime shell'; }
     syncMenuRoutes(routes) { this.syncedRoutes = routes; }
     setIsMobileLayout(value) { this.isMobileLayout = value; }
+  }
+  class V2AdminModel {
+    render() { v2Renders++; return 'v2 portal shell'; }
+    syncMenuRoutes(routes) { this.v2SyncedRoutes = routes; }
+    toProLayoutRoute() { return { path: '/', children: ['v2-item'] }; }
   }
   const client = {
     AdminProvider: 'AdminProvider', PinnedPluginList: 'NativeTools', SchemaComponent: 'Schema', PagePopups: 'Popups',
@@ -104,19 +113,22 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
   const antd = Object.fromEntries(['Input', 'Button', 'Alert', 'Select', 'Space', 'Card', 'Dropdown'].map(k => [k, k]));
   const portalManager = createNativePortalManager(client, React, antd, app, router);
   let model;
-  const clientV2 = { getAdminLayoutModel(engine, options) { model = new options.use(); return model; } };
+  const clientV2 = { AdminLayoutModel: V2AdminModel, getAdminLayoutModel(engine, options) { model = new options.use(); return model; } };
   const Layout = createNativeBuilderNavigation(client, React, antd, app, { clientV2, router, flow: { FlowModelRenderer: 'FlowModelRenderer' }, portalManager });
   const root = Layout({});
-  const provider = model.render();
-  const shell = provider.children[0];
+  const gate = model.render();
   return {
-    root, provider, registered, model, registeredModels, layouts, navigations,
+    root, gate, registered, model, registeredModels, layouts, navigations,
     flowSettings: app.flowEngine.flowSettings,
     setAllow(v) { allow = v; },
+    get lastGate() { return lastGate; },
     get nativeRenders() { return nativeRenders; },
+    get v2Renders() { return v2Renders; },
     render() {
       cursor = 0;
-      const ui = shell.type(shell.props);
+      lastGate = gate.type(gate.props);
+      const shell = lastGate?.type === 'AdminProvider' ? lastGate.children[0] : null;
+      const ui = shell ? shell.type(shell.props) : lastGate;
       cleanups.forEach(c => c());
       cleanups = effects.map(e => e()).filter(v => typeof v === 'function');
       effects = [];
@@ -135,9 +147,9 @@ function find(node, predicate) {
 test('delegates AdminLayoutModel to NativeModel.prototype.render, registers AdminLayoutModel, and centers Clause 5.2 link outside settings', () => {
   const setup = harness();
   assert.equal(setup.root.type, 'FlowModelRenderer');
-  assert.equal(setup.provider.type, 'AdminProvider');
   assert.equal(typeof setup.registeredModels.AdminLayoutModel, 'function');
   const ui = setup.render();
+  assert.equal(setup.lastGate.type, 'AdminProvider');
   assert.equal(ui.type, 'Fragment');
   assert.equal(ui.children[0], 'native runtime shell');
   assert.equal(setup.nativeRenders, 1);
@@ -152,11 +164,12 @@ test('delegates AdminLayoutModel to NativeModel.prototype.render, registers Admi
   assert.equal(find(settingsUi, n => n.props?.className === 'ldx-clause52-attribution'), null);
 });
 
-test('employees wait on /admin redirect without premature native render, then use native runtime shell inside portal', async () => {
+test('employees wait on /admin redirect without mounting AdminProvider, then use V2AdminModel inside portal', async () => {
   const portals = [{ uid: 'ldx-portal-hr', title: 'HR', routeName: 'p_hr', routePath: '/p/hr', firstPagePath: '/p/hr/leave', isDefault: true, enabled: true }];
   const setup = harness({ allow: false, pathname: '/admin', runEffects: true, portals });
   const waitingUi = setup.render();
   assert.equal(waitingUi.props.className, 'ldx-portal-redirecting');
+  assert.notEqual(setup.lastGate.type, 'AdminProvider');
   assert.equal(setup.nativeRenders, 0);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(setup.layouts.get('p_hr').layoutModelClass, 'AdminLayoutModel');
@@ -164,8 +177,13 @@ test('employees wait on /admin redirect without premature native render, then us
 
   const portalSetup = harness({ allow: false, pathname: '/p/hr/leave', layoutUid: 'ldx-portal-hr' });
   const portalUi = portalSetup.render();
-  assert.equal(portalUi.children[0], 'native runtime shell');
-  assert.equal(portalSetup.nativeRenders, 1);
+  assert.equal(portalSetup.lastGate.type, 'AdminProvider');
+  assert.equal(portalUi.children[0], 'v2 portal shell');
+  assert.equal(portalSetup.v2Renders, 1);
+  assert.equal(portalSetup.nativeRenders, 0);
+  portalSetup.model.syncMenuRoutes(['r1']);
+  assert.deepEqual(portalSetup.model.v2SyncedRoutes, ['r1']);
+  assert.deepEqual(portalSetup.model.toProLayoutRoute(), { path: '/', children: ['v2-item'] });
 
   const builderRoute = setup.registered.find(r => r.name === 'admin.lattice-builder');
   const landing = builderRoute.Component();

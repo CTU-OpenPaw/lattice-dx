@@ -204,6 +204,11 @@ test('listAccessible filters portals by role routes, excludes hidden pages, and 
   await actions.listAccessible(adminCtx);
   assert.deepEqual(adminCtx.body.map(p => p.uid), ['admin-layout-model', 'ldx-portal-fin', 'ldx-portal-hr']);
   assert.equal(adminCtx.body[0].firstPagePath, '/admin/admin_1');
+
+  const listCtx = makeCtx({ roles: ['root'] });
+  await actions.list(listCtx);
+  assert.equal(listCtx.body.find(p => p.uid === 'ldx-portal-hr').firstPagePath, '/p/hr/hr_leave');
+  assert.equal(listCtx.body.find(p => p.uid === 'admin-layout-model').firstPagePath, '/admin/admin_1');
 });
 
 test('destroy protects built-ins and exportBlueprint outputs deterministic Apache-2.0 JSON', async () => {
