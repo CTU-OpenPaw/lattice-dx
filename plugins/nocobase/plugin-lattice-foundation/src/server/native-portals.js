@@ -29,7 +29,7 @@ async function isPortalAdmin(ctx, db) {
   });
 }
 
-async function syncPortalRoles(db, uid, requestedRoles, transaction) {
+async function syncPortalRoles(db, uid, requestedRoles, transaction, metaMap = {}) {
   const allRoles = await (getRepo(db, 'roles')?.find({ transaction }) || []);
   const validLdx = new Set(allRoles.map(r => val(r, 'name')).filter(n => typeof n === 'string' && n.startsWith('ldx_')));
   const checked = [...new Set(requestedRoles.filter(r => typeof r === 'string' && validLdx.has(r)))].sort();
@@ -50,7 +50,32 @@ async function syncPortalRoles(db, uid, requestedRoles, transaction) {
   }
   const unchecked = [...validLdx].filter(name => !checked.includes(name));
   if (unchecked.length) {
-    await grantsRepo.destroy({ filter: { desktopRouteId: { $in: routeIds }, roleName: { $in: unchecked } }, transaction });
+    const allRouteLinks = await linksRepo.find({ filter: { desktopRouteId: { $in: routeIds } }, transaction }) || [];
+    const otherLayoutsByRoute = new Map();
+    for (const link of allRouteLinks) {
+      const rid = val(link, 'desktopRouteId');
+      const layoutUid = val(link, 'uiLayoutUid');
+      if (rid == null || !layoutUid || layoutUid === uid) continue;
+      if (!otherLayoutsByRoute.has(String(rid))) otherLayoutsByRoute.set(String(rid), new Set());
+      otherLayoutsByRoute.get(String(rid)).add(layoutUid);
+    }
+    const protectedByOtherPortal = (rid, roleName) => {
+      const others = otherLayoutsByRoute.get(String(rid));
+      if (!others) return false;
+      if (others.has('admin-layout-model')) return true;
+      for (const otherUid of others) {
+        if (Array.isArray(metaMap?.[otherUid]?.roles) && metaMap[otherUid].roles.includes(roleName)) return true;
+      }
+      return false;
+    };
+    for (const desktopRouteId of routeIds) {
+      const revokable = unchecked.filter(roleName =>
+        have.has(`${desktopRouteId}:${roleName}`) && !protectedByOtherPortal(desktopRouteId, roleName),
+      );
+      if (revokable.length) {
+        await grantsRepo.destroy({ filter: { desktopRouteId, roleName: { $in: revokable } }, transaction });
+      }
+    }
   }
   return checked;
 }
@@ -95,12 +120,15 @@ function registerNativePortals(app, injectedDb) {
       const portals = [];
       for (const layout of data.layouts) {
         if (layout.enabled === false) continue;
+        if (!admin && layout.uid === 'admin-layout-model') continue;
         if (!includeMobile && (layout.uid === 'mobile-layout-model' || layout.layoutType === 'mobile')) continue;
         const routes = data.routesByPortal.get(layout.uid) || [];
         const { firstPagePath, accessiblePageCount } = inspectPortalRoutes(routes, layout.routePath, accessibleIds);
         if (!admin && accessiblePageCount < 1) continue;
         const meta = metaMap[layout.uid];
-        portals.push({ ...buildPortalDto(layout, meta, routes, meta?.roles || []), firstPagePath });
+        const dto = buildPortalDto(layout, meta, routes, admin ? (meta?.roles || []) : []);
+        if (!admin) dto.routeCount = accessiblePageCount;
+        portals.push({ ...dto, firstPagePath });
       }
       ctx.body = sortPortals(portals);
       if (next) await next();
@@ -110,10 +138,13 @@ function registerNativePortals(app, injectedDb) {
       await requireAdmin(ctx);
       const rawVals = ctx.action?.params?.values ?? ctx.request?.body ?? {};
       const input = normalizePortalInput(rawVals, (s, m) => fail(ctx, s, m));
+      const isCreate = !String(rawVals?.uid || '').trim();
       ctx.body = await runTx(async transaction => {
         const repo = getRepo(db, 'uiLayouts');
-        const existing = repo ? await repo.findOne({ filter: { uid: input.uid }, transaction }) : null;
+        if (!repo) fail(ctx, 503, 'uiLayouts repository unavailable.');
+        const existing = await repo.findOne({ filter: { uid: input.uid }, transaction });
         if (input.isBuiltin && !existing) fail(ctx, 404, 'Built-in portal not found.');
+        if (isCreate && existing) fail(ctx, 409, 'Portal with this slug already exists.');
         const routeName = val(existing, 'routeName') || (input.uid === 'admin-layout-model' ? 'admin' : 'p_' + input.slug.replace(/-/g, '_'));
         const routePath = val(existing, 'routePath') || (input.uid === 'admin-layout-model' ? '/admin' : '/p/' + input.slug);
         let layoutType = val(existing, 'layoutType') || input.layoutType;
@@ -134,8 +165,9 @@ function registerNativePortals(app, injectedDb) {
           enabled = input.enabled;
           await repo.create({ values: { uid: input.uid, title: input.title, layoutType, routeName, routePath, authCheck: true, enabled }, transaction });
         }
-        const prevMeta = (await metaStore.read(transaction))[input.uid] || {};
-        const roles = input.roles !== null ? await syncPortalRoles(db, input.uid, input.roles, transaction) : (prevMeta.roles || []);
+        const metaMap = await metaStore.read(transaction);
+        const prevMeta = metaMap[input.uid] || {};
+        const roles = input.roles !== null ? await syncPortalRoles(db, input.uid, input.roles, transaction, metaMap) : (prevMeta.roles || []);
         const meta = {
           icon: rawVals.icon !== undefined ? input.icon : (prevMeta.icon || 'AppstoreOutlined'),
           color: rawVals.color !== undefined ? input.color : (prevMeta.color || '#1677ff'),
@@ -158,7 +190,8 @@ function registerNativePortals(app, injectedDb) {
       if (BUILTIN_UIDS.has(uid)) fail(ctx, 400, 'Cannot delete built-in portal.');
       ctx.body = await runTx(async transaction => {
         const repo = getRepo(db, 'uiLayouts');
-        const existing = repo ? await repo.findOne({ filter: { uid }, transaction }) : null;
+        if (!repo) fail(ctx, 503, 'uiLayouts repository unavailable.');
+        const existing = await repo.findOne({ filter: { uid }, transaction });
         if (!existing) fail(ctx, 404, 'Portal not found.');
         await getRepo(db, 'desktopRoutesUiLayouts')?.destroy?.({ filter: { uiLayoutUid: uid }, transaction });
         await repo.destroy({ filter: { uid }, transaction });

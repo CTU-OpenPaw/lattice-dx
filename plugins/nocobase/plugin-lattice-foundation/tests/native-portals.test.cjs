@@ -32,6 +32,7 @@ function createMockDb(seed = {}) {
 
   function match(row, filter = {}) {
     return Object.entries(filter).every(([k, v]) => {
+      if (k === '$or' && Array.isArray(v)) return v.some(sub => match(row, sub));
       if (v && typeof v === 'object' && '$in' in v) return v.$in.includes(row[k]);
       if (v && typeof v === 'object' && '$startsWith' in v) return String(row[k] || '').startsWith(v.$startsWith);
       return row[k] === v;
@@ -169,7 +170,7 @@ test('save synchronizes rolesDesktopRoutes only within target portal and preserv
   assert.ok(tables.rolesDesktopRoutes.some(g => g.desktopRouteId === 20 && g.roleName === 'custom_non_ldx'));
 });
 
-test('listAccessible filters portals by role routes, excludes hidden pages, and computes firstPagePath', async () => {
+test('listAccessible filters portals by role routes, excludes admin/unauthorized-ancestor routes, and hides admin roles from employees', async () => {
   const { actions } = setupServer({
     uiLayouts: [
       { uid: 'admin-layout-model', title: 'Admin', layoutType: 'desktop', routeName: 'admin', routePath: '/admin', enabled: true },
@@ -183,6 +184,8 @@ test('listAccessible filters portals by role routes, excludes hidden pages, and 
       { id: 3, type: 'group', title: 'HR Group', sort: 2 },
       { id: 4, parentId: 3, type: 'flowPage', schemaUid: 'hr_leave', title: 'Leave', sort: 1 },
       { id: 5, type: 'page', schemaUid: 'fin_hidden', title: 'Fin Hidden', hideInMenu: true, sort: 1 },
+      { id: 6, type: 'group', title: 'Fin Locked Group', sort: 1 },
+      { id: 7, parentId: 6, type: 'flowPage', schemaUid: 'fin_orphan', title: 'Orphan Child', sort: 1 },
     ],
     desktopRoutesUiLayouts: [
       { desktopRouteId: 1, uiLayoutUid: 'admin-layout-model' },
@@ -190,15 +193,21 @@ test('listAccessible filters portals by role routes, excludes hidden pages, and 
       { desktopRouteId: 4, uiLayoutUid: 'ldx-portal-hr' },
       { desktopRouteId: 3, uiLayoutUid: 'ldx-portal-hr' },
       { desktopRouteId: 5, uiLayoutUid: 'ldx-portal-fin' },
+      { desktopRouteId: 6, uiLayoutUid: 'ldx-portal-fin' },
+      { desktopRouteId: 7, uiLayoutUid: 'ldx-portal-fin' },
     ],
     rolesDesktopRoutes: [
+      { desktopRouteId: 1, roleName: 'ldx_employee' },
+      { desktopRouteId: 3, roleName: 'ldx_employee' },
       { desktopRouteId: 4, roleName: 'ldx_employee' },
       { desktopRouteId: 5, roleName: 'ldx_employee' },
+      { desktopRouteId: 7, roleName: 'ldx_employee' },
     ],
   });
   const empCtx = makeCtx({ roles: ['ldx_employee'] });
   await actions.listAccessible(empCtx);
-  assert.deepEqual(empCtx.body.map(p => [p.uid, p.firstPagePath]), [['ldx-portal-hr', '/p/hr/hr_leave']]);
+  assert.deepEqual(empCtx.body.map(p => [p.uid, p.firstPagePath, p.routeCount]), [['ldx-portal-hr', '/p/hr/hr_leave', 1]]);
+  assert.deepEqual(empCtx.body[0].roles, []);
 
   const adminCtx = makeCtx({ roles: ['root'] });
   await actions.listAccessible(adminCtx);
@@ -209,6 +218,56 @@ test('listAccessible filters portals by role routes, excludes hidden pages, and 
   await actions.list(listCtx);
   assert.equal(listCtx.body.find(p => p.uid === 'ldx-portal-hr').firstPagePath, '/p/hr/hr_leave');
   assert.equal(listCtx.body.find(p => p.uid === 'admin-layout-model').firstPagePath, '/admin/admin_1');
+});
+
+test('save rejects duplicate slug on create without clobbering existing portal or ACLs, and preserves shared-route grants', async () => {
+  const { actions, tables } = setupServer({
+    uiLayouts: [
+      { uid: 'admin-layout-model', title: 'Admin', layoutType: 'desktop', routeName: 'admin', routePath: '/admin', enabled: true },
+      { uid: 'ldx-portal-hr', title: 'Cổng Nhân sự', layoutType: 'desktop', routeName: 'p_hr', routePath: '/p/hr', enabled: true },
+      { uid: 'ldx-portal-ops', title: 'Cổng Vận hành', layoutType: 'desktop', routeName: 'p_ops', routePath: '/p/ops', enabled: true },
+    ],
+    desktopRoutes: [
+      { id: 10, type: 'flowPage', schemaUid: 'shared_page', title: 'Shared Page' },
+      { id: 11, type: 'flowPage', schemaUid: 'hr_only', title: 'HR Only' },
+    ],
+    desktopRoutesUiLayouts: [
+      { desktopRouteId: 10, uiLayoutUid: 'ldx-portal-hr' },
+      { desktopRouteId: 11, uiLayoutUid: 'ldx-portal-hr' },
+      { desktopRouteId: 10, uiLayoutUid: 'ldx-portal-ops' },
+    ],
+    rolesDesktopRoutes: [
+      { desktopRouteId: 10, roleName: 'ldx_manager' },
+      { desktopRouteId: 11, roleName: 'ldx_manager' },
+    ],
+    applicationPlugins: [
+      { packageName: '@latticedx/plugin-lattice-foundation', options: { portals: { 'ldx-portal-hr': { roles: ['ldx_manager'] }, 'ldx-portal-ops': { roles: ['ldx_manager'] } } } },
+    ],
+  });
+  await assert.rejects(
+    actions.save(makeCtx({ method: 'POST', values: { slug: 'hr', title: 'Hijack HR', roles: [] } })),
+    { status: 409 },
+  );
+  assert.equal(tables.uiLayouts.find(l => l.uid === 'ldx-portal-hr').title, 'Cổng Nhân sự');
+  assert.ok(tables.rolesDesktopRoutes.some(g => g.desktopRouteId === 11 && g.roleName === 'ldx_manager'));
+
+  await actions.save(makeCtx({ method: 'POST', values: { uid: 'ldx-portal-hr', slug: 'hr', title: 'Cổng Nhân sự', roles: [] } }));
+  assert.ok(tables.rolesDesktopRoutes.some(g => g.desktopRouteId === 10 && g.roleName === 'ldx_manager'));
+  assert.ok(!tables.rolesDesktopRoutes.some(g => g.desktopRouteId === 11 && g.roleName === 'ldx_manager'));
+});
+
+test('createPortalMetaStore rejects rollback memory poisoning when repository update fails', async () => {
+  const { createPortalMetaStore } = require('../src/server/native-portal-helpers');
+  const row = { packageName: '@latticedx/plugin-lattice-foundation', options: { portals: { 'ldx-portal-hr': { title: 'Original' } } } };
+  const failDb = {
+    getRepository: name => (name !== 'applicationPlugins' ? null : {
+      findOne: async () => row,
+      update: async () => { throw new Error('Simulated DB error'); },
+    }),
+  };
+  const store = createPortalMetaStore(failDb);
+  await assert.rejects(store.write('ldx-portal-new', { title: 'Poison' }, {}), /Simulated DB error/);
+  assert.deepEqual(await store.read(), { 'ldx-portal-hr': { title: 'Original' } });
 });
 
 test('destroy protects built-ins and exportBlueprint outputs deterministic Apache-2.0 JSON', async () => {

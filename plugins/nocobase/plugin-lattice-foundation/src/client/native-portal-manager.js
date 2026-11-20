@@ -86,12 +86,14 @@ function buildPortalAppList(portals, { allowConfigUI = false, React, icons } = {
 function registerPortalSwitcherPlugin(client, React, antd, app, portalsRef, { icons } = {}) {
   const prevLoadAppList = app?.apps?.loadAppList;
   const loadAppList = async () => {
+    const currentRole = app?.apiClient?.auth?.role ?? '';
     let portals = portalsRef.current;
-    if ((!portals || !portals.length) && typeof app?.apiClient?.request === 'function') {
+    if ((!portals || !portals.length || portalsRef.role !== currentRole) && typeof app?.apiClient?.request === 'function') {
       try {
         const res = await app.apiClient.request({ url: 'latticePortals:listAccessible', method: 'get' });
         portals = Array.isArray(res?.data?.data) ? res.data.data : [];
         portalsRef.current = portals;
+        portalsRef.role = currentRole;
         ensureDynamicLayoutsRegistered(app, portals);
       } catch { portals = []; }
     }
@@ -113,7 +115,7 @@ function registerPortalSwitcherPlugin(client, React, antd, app, portalsRef, { ic
 function createNativePortalManager(client, React, antd, app, router, icons, { clientV2 } = {}) {
   if (!React?.createElement || !app) return null;
   const h = React.createElement;
-  const portalsRef = { current: [], allowConfigUI: false };
+  const portalsRef = { current: [], allowConfigUI: false, role: null };
   const startupRouteNames = new Set();
   const listeners = new Set();
   const builderIntentRef = { current: false };
@@ -122,9 +124,19 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
   const syncPortals = items => {
     if (!Array.isArray(items)) return;
     portalsRef.current = items;
+    portalsRef.role = app?.apiClient?.auth?.role ?? '';
     ensureDynamicLayoutsRegistered(app, items);
     ensureLayoutModelsReady();
     listeners.forEach(fn => { try { fn(); } catch {} });
+  };
+  const upsertPortal = saved => {
+    if (!saved || !saved.uid) return;
+    const prev = portalsRef.current.map(p => (saved.isDefault && p.uid !== saved.uid ? { ...p, isDefault: false } : p));
+    const idx = prev.findIndex(p => p.uid === saved.uid);
+    const merged = idx >= 0
+      ? prev.map((p, i) => (i === idx ? { ...p, ...saved, firstPagePath: saved.firstPagePath ?? p.firstPagePath } : p))
+      : [...prev, saved];
+    syncPortals(merged);
   };
   function ensureLayoutModelsReady() {
     if (typeof app?.flowEngine?.createModel !== 'function' || typeof app?.flowEngine?.getModel !== 'function') return;
@@ -151,14 +163,16 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
   }
   function navigateToPortal(dest, navigate, opts) {
     const m = /^\/p\/([^/?#]+)/.exec(String(dest || ''));
-    if (m) {
+    const fullUrl = app?.getRouteUrl?.(dest) || dest;
+    const hotPortal = Boolean(m && (preloaded || startupRouteNames.size > 0) && (() => {
       const portal = portalsRef.current.find(p => p.routePath === '/p/' + m[1]);
       const routeName = portal?.routeName || ('p_' + m[1].replace(/-/g, '_'));
-      if ((preloaded || startupRouteNames.size > 0) && !startupRouteNames.has(routeName) && typeof window !== 'undefined' && window.location) {
-        if (opts?.replace && typeof window.location.replace === 'function') window.location.replace(dest);
-        else window.location.assign?.(dest);
-        return;
-      }
+      return !startupRouteNames.has(routeName);
+    })());
+    if ((hotPortal || typeof navigate !== 'function') && typeof window !== 'undefined' && window.location) {
+      if (opts?.replace && typeof window.location.replace === 'function') window.location.replace(fullUrl);
+      else window.location.assign?.(fullUrl);
+      return;
     }
     navigate?.(dest, opts);
   }
@@ -180,7 +194,7 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
 
   registerPortalSwitcherPlugin(client, React, antd, app, portalsRef, { icons });
   const MultiPortalSettingsPage = createMultiPortalSettingsPage(client, React, antd, app, router, {
-    renderTile, toPortalSlug, syncPortals, navigateToPortal, requestBuilderMode,
+    renderTile, toPortalSlug, syncPortals, upsertPortal, navigateToPortal, requestBuilderMode,
   });
   if (app.pluginSettingsManager && typeof app.pluginSettingsManager.add === 'function') {
     app.pluginSettingsManager.add('multi-portal', {
@@ -197,8 +211,10 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
       || list[0];
     if (pathname === '/admin/lattice-workspace' || pathname.startsWith('/admin/lattice-workspace/')) {
       activeBadge = { title: 'Công việc của tôi', color: '#0f766e', icon: 'CheckSquareOutlined' };
-    } else if (/^\/admin\/settings(?:\/|$)/.test(pathname)) {
+    } else if (/^\/admin\/settings\/multi-portal(?:\/|$)/.test(pathname)) {
       activeBadge = { title: 'Multi-Portal', color: '#4f46e5', icon: 'SettingOutlined' };
+    } else if (/^\/admin\/settings(?:\/|$)/.test(pathname)) {
+      activeBadge = { title: 'Cài đặt hệ thống', color: '#475569', icon: 'SettingOutlined' };
     }
     const items = buildPortalAppList(list, { allowConfigUI, React, icons });
     if (!items.length) return null;
@@ -230,15 +246,16 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     const perms = typeof client?.useUIConfigurationPermissions === 'function' ? client.useUIConfigurationPermissions() : null;
     const api = typeof client?.useAPIClient === 'function' ? client.useAPIClient() : null;
     const allow = Boolean(perms?.allowConfigUI);
+    const currentRole = api?.auth?.role ?? '';
     const [, bump] = React.useState(0);
     React.useEffect(() => {
       const fn = () => bump(n => n + 1);
       listeners.add(fn);
-      if (!portalsRef.current.length && typeof api?.request === 'function') {
+      if ((!portalsRef.current.length || portalsRef.role !== currentRole) && typeof api?.request === 'function') {
         api.request({ url: 'latticePortals:listAccessible', method: 'get' }).then(res => syncPortals(res?.data?.data || [])).catch(() => {});
       }
       return () => { listeners.delete(fn); };
-    }, [api]);
+    }, [api, currentRole]);
     return h(PortalBar, {
       portals: portalsRef.current, currentLayoutUid: model?.parent?.layout?.uid, pathname: loc?.pathname || '',
       allowConfigUI: allow, variant: 'topbar', onSwitch: dest => navigateToPortal(dest, navigate),
@@ -271,7 +288,7 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
 
   return {
     MultiPortalSettingsPage, PortalBar, TopbarPortalSwitcher, hasTopbarSwitcher, preloadPortals,
-    navigateToPortal, requestBuilderMode, consumeBuilderIntent, setPortals: syncPortals,
+    navigateToPortal, requestBuilderMode, consumeBuilderIntent, setPortals: syncPortals, upsertPortal,
     ensureLayoutModelsReady, setPermissions: allow => { portalsRef.allowConfigUI = Boolean(allow); },
     ensureDynamicLayoutsRegistered: items => ensureDynamicLayoutsRegistered(app, items),
     getPortals: () => portalsRef.current,

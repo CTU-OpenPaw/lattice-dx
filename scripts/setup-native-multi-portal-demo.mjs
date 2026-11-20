@@ -174,6 +174,7 @@ export async function createRootApiClient(origin, fetchImpl = fetch) {
   async function api(path, { method = 'GET', values } = {}) {
     const response = await fetchImpl(new URL('/api/' + path, safeOrigin), {
       method,
+      redirect: 'error',
       headers: {
         'content-type': 'application/json',
         ...(token ? { authorization: `Bearer ${token}`, 'X-Role': 'root' } : {}),

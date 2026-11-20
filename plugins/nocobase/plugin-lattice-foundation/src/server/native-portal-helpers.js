@@ -11,9 +11,10 @@ const BUILTIN_UIDS = new Set(['admin-layout-model', 'mobile-layout-model']);
 const RESERVED_SLUGS = new Set([
   'admin', 'settings', 'signin', 'signup', 'p', 'v', 'api', 'static', 'storage', 'files', 'lattice',
 ]);
-const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,36}$/;
+const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,35}[a-z0-9])$/;
 const SCHEMA_UID_RE = /^[a-zA-Z0-9_-]+$/;
 const PLUGIN_NAME = '@latticedx/plugin-lattice-foundation';
+const PORTAL_META_LOCK_ID = 741209551;
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 const toPlain = row => (row ? (typeof row.toJSON === 'function' ? row.toJSON() : { ...row }) : null);
@@ -44,7 +45,7 @@ function normalizePortalInput(values, fail) {
     slug = typeof values.slug === 'string'
       ? values.slug.trim().toLowerCase()
       : (reqUid.startsWith('ldx-portal-') ? reqUid.slice(11) : '');
-    if (!SLUG_RE.test(slug)) fail(400, 'Portal slug must match /^[a-z0-9][a-z0-9-]{1,36}$/.');
+    if (!SLUG_RE.test(slug)) fail(400, 'Portal slug must match /^[a-z0-9](?:[a-z0-9-]{0,35}[a-z0-9])$/.');
     if (RESERVED_SLUGS.has(slug)) fail(400, 'Portal slug is reserved.');
     uid = 'ldx-portal-' + slug;
     if (reqUid && reqUid !== uid) fail(400, 'Portal uid does not match slug.');
@@ -93,12 +94,11 @@ function inspectPortalRoutes(routes, routePath, accessibleIds) {
   function visit(nodes) {
     for (const node of nodes) {
       if (!node || node.hidden || node.hideInMenu) continue;
+      if (accessibleIds && (node.id == null || !accessibleIds.has(String(node.id)))) continue;
       const children = node.id != null ? (childrenMap.get(String(node.id)) || []) : [];
       if (['page', 'flowPage'].includes(node.type) && typeof node.schemaUid === 'string' && SCHEMA_UID_RE.test(node.schemaUid)) {
-        if (!accessibleIds || accessibleIds.has(String(node.id))) {
-          accessiblePageCount += 1;
-          if (!firstPagePath && base) firstPagePath = `${base}/${node.schemaUid}`;
-        }
+        accessiblePageCount += 1;
+        if (!firstPagePath && base) firstPagePath = `${base}/${node.schemaUid}`;
       }
       if (children.length) visit(children);
     }
@@ -130,24 +130,29 @@ function sortPortals(items) {
 
 function createPortalMetaStore(db) {
   let memory = {};
+  const pluginFilter = { $or: [{ packageName: PLUGIN_NAME }, { name: PLUGIN_NAME }] };
   async function read(transaction) {
     const repo = getRepo(db, 'applicationPlugins');
-    const row = repo ? await repo.findOne({ filter: { name: PLUGIN_NAME }, transaction }) : null;
+    const row = repo ? await repo.findOne({ filter: pluginFilter, transaction }) : null;
     const portals = val(row, 'options')?.portals;
     return portals && typeof portals === 'object' ? { ...portals } : { ...memory };
   }
   async function write(uid, nextEntry, transaction) {
+    if (transaction && db?.sequelize?.getDialect?.() === 'postgres' && typeof db.sequelize.query === 'function') {
+      await db.sequelize.query('SELECT pg_advisory_xact_lock($1)', { bind: [PORTAL_META_LOCK_ID], transaction });
+    }
     const repo = getRepo(db, 'applicationPlugins');
-    const row = repo ? await repo.findOne({ filter: { name: PLUGIN_NAME }, transaction }) : null;
+    const row = repo ? await repo.findOne({ filter: pluginFilter, transaction }) : null;
     const portals = { ...(val(row, 'options')?.portals || memory) };
     if (nextEntry === null) delete portals[uid];
     else {
       if (nextEntry.isDefault) for (const k of Object.keys(portals)) portals[k] = { ...portals[k], isDefault: false };
       portals[uid] = nextEntry;
     }
-    memory = portals;
     if (row && repo) {
-      await repo.update({ filter: { name: PLUGIN_NAME }, values: { options: { ...(val(row, 'options') || {}), portals } }, transaction });
+      await repo.update({ filter: pluginFilter, values: { options: { ...(val(row, 'options') || {}), portals } }, transaction });
+    } else {
+      memory = portals;
     }
     return portals;
   }

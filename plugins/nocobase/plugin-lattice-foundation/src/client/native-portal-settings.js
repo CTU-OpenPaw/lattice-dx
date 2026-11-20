@@ -21,7 +21,7 @@ const FALLBACK_LDX_ROLES = [
 
 function createMultiPortalSettingsPage(client, React, antd, app, router, helpers) {
   const h = React.createElement;
-  const { renderTile, toPortalSlug, syncPortals, navigateToPortal, requestBuilderMode } = helpers;
+  const { renderTile, toPortalSlug, syncPortals, upsertPortal, navigateToPortal, requestBuilderMode } = helpers;
   const { PortalFormModal, BlueprintModal } = createPortalModals(React, antd, { toPortalSlug });
   const useApi = typeof client.useAPIClient === 'function' ? client.useAPIClient : () => null;
   const useNav = typeof router?.useNavigate === 'function' ? router.useNavigate : () => null;
@@ -82,7 +82,10 @@ function createMultiPortalSettingsPage(client, React, antd, app, router, helpers
       try {
         const res = await api.request({ url: 'latticePortals:save', method: 'post', data: payload });
         const saved = res?.data?.data;
-        if (saved) syncPortals([saved]);
+        if (saved) {
+          if (upsertPortal) upsertPortal(saved);
+          else syncPortals([saved]);
+        }
         setModalState({ open: false, editing: null });
         await loadAll();
       } catch (err) {
@@ -168,7 +171,11 @@ function createMultiPortalSettingsPage(client, React, antd, app, router, helpers
               portal.isDefault ? h(antd.Tag, { color: 'green' }, 'Mặc định') : null,
               portal.layoutType === 'mobile' ? h(antd.Tag, { color: 'blue' }, 'Mobile') : null),
             router?.Link
-              ? h(router.Link, { to: portal.routePath, style: { fontFamily: 'monospace', fontSize: 12, color: '#1677ff' } }, portal.routePath)
+              ? h(router.Link, {
+                  to: portal.routePath,
+                  style: { fontFamily: 'monospace', fontSize: 12, color: '#1677ff' },
+                  onClick: e => { e?.preventDefault?.(); enterPortal(portal); },
+                }, portal.routePath)
               : h('code', { style: { fontSize: 12 } }, portal.routePath)),
           h(antd.Switch, {
             checked: portal.enabled !== false,

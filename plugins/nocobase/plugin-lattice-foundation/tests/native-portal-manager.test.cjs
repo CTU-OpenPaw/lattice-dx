@@ -221,3 +221,49 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
   manager.requestBuilderMode(false);
   assert.equal(store.get('NOCOBASE_V2_FLOW_SETTINGS_ENABLED'), '0');
 });
+
+test('savePortal preserves existing portals via upsertPortal, navigateToPortal applies basename, and PortalBar separates settings labels', async t => {
+  const previousWindow = global.window;
+  const assigned = [];
+  global.window = {
+    location: { assign: url => assigned.push(url), replace: url => assigned.push('replace:' + url) },
+  };
+  t.after(() => { global.window = previousWindow; });
+
+  const React = createReactMock();
+  let role = 'ldx_employee';
+  const portalRows = [
+    { uid: 'admin-layout-model', title: 'Studio', routeName: 'admin', routePath: '/admin', enabled: true },
+    { uid: 'ldx-portal-hr', title: 'HR', routeName: 'p_hr', routePath: '/p/hr', firstPagePath: '/p/hr/home', enabled: true },
+    { uid: 'ldx-portal-ops', title: 'Ops', routeName: 'p_ops', routePath: '/p/ops', firstPagePath: '/p/ops/home', enabled: true },
+  ];
+  const settings = [];
+  const antd = Object.fromEntries(['Modal', 'Input', 'Select', 'Switch', 'Alert', 'Button', 'Space', 'Tag', 'Dropdown', 'Popconfirm'].map(n => [n, n]));
+  const app = {
+    getRouteUrl: path => '/sub' + path,
+    layoutManager: { hasLayout: () => false, registerLayout() {}, listLayouts: () => [] },
+    pluginSettingsManager: { add: (name, cfg) => settings.push({ name, ...cfg }) },
+    apiClient: {
+      auth: { get role() { return role; } },
+      request: async req => {
+        if (req.url === 'latticePortals:save') {
+          return { data: { data: { uid: 'ldx-portal-new', slug: 'new', title: 'New', routeName: 'p_new', routePath: '/p/new', enabled: true } } };
+        }
+        return { data: { data: req.url === 'roles:list' ? [] : portalRows } };
+      },
+    },
+  };
+  const manager = createNativePortalManager({ useAPIClient: () => app.apiClient }, React, antd, app, { Link: 'Link', useNavigate: () => null });
+  manager.setPortals(portalRows);
+  manager.upsertPortal({ uid: 'ldx-portal-hr', title: 'HR Updated', isDefault: true, enabled: true });
+  assert.equal(manager.getPortals().length, 3);
+  assert.equal(manager.getPortals().find(p => p.uid === 'ldx-portal-hr').firstPagePath, '/p/hr/home');
+
+  manager.navigateToPortal('/p/new/home', null);
+  assert.equal(assigned.at(-1), '/sub/p/new/home');
+
+  const multiBar = manager.PortalBar({ portals: portalRows, pathname: '/admin/settings/multi-portal', allowConfigUI: true });
+  const usersBar = manager.PortalBar({ portals: portalRows, pathname: '/admin/settings/users', allowConfigUI: true });
+  assert.ok(find(multiBar, n => n.children?.[0] === 'Multi-Portal'));
+  assert.ok(find(usersBar, n => n.children?.[0] === 'Cài đặt hệ thống'));
+});

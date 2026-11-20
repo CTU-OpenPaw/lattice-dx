@@ -8,11 +8,11 @@
 'use strict';
 
 const PORTAL_ICONS = [
-  'AppstoreOutlined', 'TeamOutlined', 'ShoppingCartOutlined',
-  'SafetyCertificateOutlined', 'DatabaseOutlined', 'ToolOutlined',
-  'DashboardOutlined', 'MobileOutlined',
+  'AppstoreOutlined', 'TeamOutlined', 'ShoppingCartOutlined', 'ShoppingOutlined',
+  'SafetyCertificateOutlined', 'DatabaseOutlined', 'ToolOutlined', 'AlertOutlined',
+  'CarOutlined', 'DashboardOutlined', 'MobileOutlined',
 ];
-const PORTAL_COLORS = ['#1677ff', '#0f766e', '#7c3aed', '#d97706', '#dc2626', '#2563eb', '#059669'];
+const PORTAL_COLORS = ['#1677ff', '#0f766e', '#7c3aed', '#d97706', '#dc2626', '#2563eb', '#059669', '#fa8c16', '#10b981', '#6366f1'];
 
 function createPortalModals(React, antd, { toPortalSlug }) {
   const h = React.createElement;
@@ -90,7 +90,7 @@ function createPortalModals(React, antd, { toPortalSlug }) {
           key: hex, type: 'button', 'aria-label': hex, onClick: () => setColor(hex),
           style: {
             width: 22, height: 22, borderRadius: 6, background: hex, cursor: 'pointer',
-            border: color === hex ? '2px solid #0f172a' : '2px solid transparent',
+            border: String(color || '').toLowerCase() === hex.toLowerCase() ? '2px solid #0f172a' : '2px solid transparent',
           },
         }))))),
     field('Mô tả', h(antd.Input, {
@@ -110,12 +110,15 @@ function createPortalModals(React, antd, { toPortalSlug }) {
 
   function BlueprintModal({ blueprint, onClose }) {
     const [copied, setCopied] = React.useState(false);
+    const timerRef = React.useRef ? React.useRef(null) : { current: null };
+    React.useEffect(() => () => { if (timerRef.current) clearTimeout(timerRef.current); }, []);
     const json = blueprint ? JSON.stringify(blueprint, null, 2) : '';
     async function copyJson() {
       try {
         await navigator?.clipboard?.writeText(json);
         setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(() => setCopied(false), 2000);
       } catch {}
     }
     return h(antd.Modal, {

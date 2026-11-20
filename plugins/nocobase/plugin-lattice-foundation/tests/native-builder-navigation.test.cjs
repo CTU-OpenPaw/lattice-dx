@@ -66,7 +66,7 @@ test('Config selects only an allowed settings leaf, never a denied or external s
   assert.equal(firstSettingsPath([{ path: 'https://example.com' }, { isAllow: false, children: [{ path: '/admin/settings/no' }] }]), null);
 });
 
-function harness({ allow = true, pathname = '/admin/demo', designable = false, runEffects = false, portals = [], layoutUid } = {}) {
+function harness({ allow = true, pathname = '/admin/demo', designable = false, runEffects = false, portals = [], layoutUid, roleCheck } = {}) {
   let cursor = 0, nativeRenders = 0, v2Renders = 0, lastGate = null;
   const state = [], registered = [], navigations = [], layouts = new Map(), registeredModels = {};
   let effects = [], cleanups = [];
@@ -101,7 +101,10 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
     useAllAccessDesktopRoutes: () => ({ allAccessRoutes: [{ type: 'flowPage', schemaUid: 'demo', title: 'Trang demo' }], refresh: async () => {} }),
     useUIConfigurationPermissions: () => ({ allowConfigUI: allow }),
     useDesignable: () => ({ designable }),
-    useAPIClient: () => ({ auth: { role: allow ? 'root' : 'ldx_employee' }, request: async () => ({ data: { data: portals } }) }),
+    useAPIClient: () => ({
+      auth: { role: allow ? 'root' : 'ldx_employee' },
+      request: async req => (req?.url === 'roles:check' && roleCheck ? roleCheck() : { data: { data: portals } }),
+    }),
   };
   const app = {
     flowEngine: {
@@ -276,4 +279,57 @@ test('built AMD entry registers the replacement layout, portal manager, and buil
   assert.equal(secObj.aclSnippet, 'pm.security');
   assert.equal(registeredModels.LatticeSignOutUserCenterItemModel?.itemId, 'lattice-sign-out');
   assert.ok(createdModels.includes('ldx-portal-hr'));
+
+  // Host with built-in SignOutItemModel must not register duplicate sign-out item
+  const hostModels = {};
+  const hostApp = {
+    ...app,
+    flowEngine: {
+      ...app.flowEngine,
+      getModelClass: name => (name === 'SignOutItemModel' ? class {} : app.flowEngine.getModelClass(name)),
+      registerModels: map => Object.assign(hostModels, map),
+    },
+  };
+  const hostPlugin = new mod.default();
+  hostPlugin.app = hostApp; hostPlugin.flowEngine = hostApp.flowEngine;
+  await hostPlugin.load();
+  assert.equal(hostModels.LatticeSignOutUserCenterItemModel, undefined);
+});
+
+test('employees without custom portals fall back to Workspace without looping, and 401 roles:check mounts AdminProvider for /signin redirect', async () => {
+  const empNoPortal = harness({
+    allow: false, pathname: '/admin', runEffects: true,
+    portals: [{ uid: 'admin-layout-model', title: 'Admin', routePath: '/admin', enabled: true }],
+  });
+  empNoPortal.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(empNoPortal.navigations.at(-1), { to: '/admin/lattice-workspace', opts: { replace: true } });
+
+  const unauthSetup = harness({
+    allow: false, pathname: '/admin', runEffects: true, portals: [],
+    roleCheck: async () => { throw Object.assign(new Error('Unauthorized'), { status: 401 }); },
+  });
+  unauthSetup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  unauthSetup.render();
+  assert.equal(unauthSetup.lastGate.type, 'AdminProvider');
+});
+
+test('PortalAdminProvider aligns with allowConfigure/pm snippets and respects !ui.* negations', async () => {
+  const pmBuilder = harness({
+    allow: false, pathname: '/admin', runEffects: true,
+    roleCheck: async () => ({ data: { data: { allowConfigure: true, snippets: ['pm'] } } }),
+  });
+  pmBuilder.render();
+  await new Promise(resolve => setImmediate(resolve));
+  pmBuilder.render();
+  assert.equal(pmBuilder.lastGate.type, 'AdminProvider');
+
+  const negatedUi = harness({
+    allow: false, pathname: '/admin', runEffects: true, portals: [],
+    roleCheck: async () => ({ data: { data: { allowAll: false, snippets: ['ui.*', '!ui.*'] } } }),
+  });
+  negatedUi.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(negatedUi.navigations.at(-1), { to: '/admin/lattice-workspace', opts: { replace: true } });
 });

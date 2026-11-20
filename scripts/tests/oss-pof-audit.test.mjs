@@ -137,4 +137,28 @@ test('runPofAudit in a non-git directory detects missing SPDX, .env secrets, and
   assert.equal(byId['spdx-headers'].passed, false);
   assert.equal(byId['no-secrets'].passed, false);
   assert.equal(byId['upstream-clean'].passed, false);
+
+  const nmDir = createCompliantFixtureFiles();
+  t.after(() => rmSync(nmDir, { recursive: true, force: true }));
+  mkdirSync(join(nmDir, 'upstream/node_modules/pkg'), { recursive: true });
+  writeFileSync(join(nmDir, 'upstream/node_modules/pkg/index.js'), 'export {};\n', 'utf8');
+  const nmReport = runPofAudit({ rootDir: nmDir });
+  assert.equal(nmReport.result, 'FAIL');
+  assert.equal(nmReport.checks.find(c => c.id === 'upstream-clean').passed, false);
+});
+
+test('planTarball rejects unsafe git refs and buildOssReleaseTarball leaves no corrupt file on failure', t => {
+  const dir = createCompliantFixtureRepo();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.throws(() => planTarball({ rootDir: dir, ref: '--exec=evil' }), /Invalid git ref/);
+
+  // Create a commit containing a forbidden .env file and ensure buildOssReleaseTarball fails cleanly without leaving tarball or .tmp
+  writeFileSync(join(dir, '.env'), 'SECRET=1\n', 'utf8');
+  execFileSync('git', ['add', '-A'], { cwd: dir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'add forbidden env'], { cwd: dir, stdio: 'ignore' });
+  const plan = planTarball({ rootDir: dir });
+  assert.throws(() => buildOssReleaseTarball({ rootDir: dir }), /forbidden paths/);
+  assert.equal(readFileSync(join(dir, 'package.json')).length > 0, true);
+  assert.throws(() => readFileSync(plan.tarballPath), /ENOENT/);
+  assert.throws(() => readFileSync(`${plan.tarballPath}.tmp`), /ENOENT/);
 });

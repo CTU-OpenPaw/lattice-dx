@@ -32,6 +32,6 @@ pnpm install --frozen-lockfile
 ## 4. Checklist bắt buộc trước khi gửi PR
 1. Chạy `pnpm check` (`typecheck`, `vitest`, `build`) — tất cả phải đạt.
 2. Chạy `pnpm pof:check` để xác minh SPDX headers, cấu trúc giấy phép/NOTICE, cô lập plugin và khóa digest `@sha256:` của Compose.
-3. Nếu sửa plugin NocoBase, chạy `node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs`.
+3. Nếu sửa plugin NocoBase hoặc scripts PoF/demo, chạy `node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs plugins/nocobase/plugin-enterprise-auth/tests/*.test.cjs scripts/tests/*.test.mjs`.
 4. Nếu sửa `infra/compose/*.yml`, kiểm tra lại mọi image mới đều pin `@sha256:` và xác thực bằng `docker compose -f <file> config --quiet` cùng `pnpm test:infra` khi Docker sẵn sàng.
 5. Tự rà soát `git diff` để bảo đảm không còn `TODO` chưa giải quyết, log debug hoặc thông tin nhạy cảm.

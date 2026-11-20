@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -37,7 +37,7 @@ const PRIMARY_GOVERNANCE_DOCS = [
   'docs/dependency-inventory.md',
   'docs/nocobase-source-review.md',
 ];
-const SECRET_TOKEN_RE = /(?:^|[^A-Za-z0-9_-])(sk-(?:proj-|live-|test-)?[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,})/;
+const SECRET_TOKEN_RE = /(?:^|[^A-Za-z0-9_-])(sk-(?:proj-|live-|test-)?[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,})|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/;
 const IMAGE_PIN_RE = /^\s*image:\s*([^\s#]+@sha256:[a-f0-9]{64})(?:\s*(?:#.*)?)?$/;
 const NOCOBASE_ATTRIBUTION_RE = /(?:https?:\/\/(?:www\.)?nocobase\.com|Powered by NocoBase)/i;
 
@@ -45,12 +45,19 @@ function runGit(rootDir, args) {
   return execFileSync('git', args, { cwd: rootDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
+function canonicalPath(p) {
+  let normalized;
+  try { normalized = realpathSync(p); }
+  catch { normalized = resolve(p); }
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
 function isGitWorkTree(rootDir) {
   try {
     const inside = runGit(rootDir, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
     if (!inside) return false;
     const toplevel = runGit(rootDir, ['rev-parse', '--show-toplevel']).trim();
-    return resolve(toplevel) === resolve(rootDir);
+    return canonicalPath(toplevel) === canonicalPath(rootDir);
   } catch {
     return false;
   }
@@ -164,7 +171,7 @@ function checkComposeDigests(rootDir) {
 function checkUpstreamClean(rootDir, trackedFiles, { isGit = true } = {}) {
   if (!isGit) {
     const bundledUpstream = trackedFiles.filter(
-      f => /^upstream\/nocobase\/.+/.test(f) || /^upstream\/.*(^|\/)node_modules(\/|$)/.test(f),
+      f => /^upstream\/nocobase\/.+/.test(f) || (f.startsWith('upstream/') && /(^|\/)node_modules(\/|$)/.test(f)),
     );
     return {
       id: 'upstream-clean',
@@ -193,7 +200,9 @@ function checkNoSecrets(rootDir, trackedFiles, repoFiles) {
     if (rel.startsWith('upstream/')) continue;
     const full = join(rootDir, rel);
     if (!existsSync(full) || statSync(full).isDirectory()) continue;
-    const match = readFileSync(full, 'utf8').match(SECRET_TOKEN_RE);
+    const text = readFileSync(full, 'utf8');
+    if (text.includes('\0')) continue;
+    const match = text.match(SECRET_TOKEN_RE);
     if (match) issues.push(`Potential secret token in ${rel}`);
   }
   return { id: 'no-secrets', passed: issues.length === 0, details: issues.length ? issues.join('; ') : 'No tracked .env/*.pem/*.key files or secret tokens found' };

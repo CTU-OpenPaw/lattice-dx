@@ -7,7 +7,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -22,7 +22,8 @@ const FORBIDDEN_ENTRY_PATTERNS = [
   /(^|\/)node_modules(\/|$)/,
   /(^|\/)output(\/|$)/,
   /(^|\/)\.git(\/|$)/,
-  /(^|\/)\.env($|\.(?!example$))/,
+  /(^|\/)\.env($|\.(?!example$))/i,
+  /\.(pem|key)$/i,
   /^upstream\/nocobase\/.+/,
 ];
 
@@ -37,6 +38,9 @@ export function planTarball({
   if (!resolvedVersion || !/^[0-9A-Za-z._-]+$/.test(resolvedVersion)) {
     throw new Error('Invalid release version');
   }
+  if (typeof ref !== 'string' || !ref.trim() || ref.trim().startsWith('-')) {
+    throw new Error('Invalid git ref');
+  }
   const target = outPath
     ? resolve(rootDir, outPath)
     : resolve(rootDir, `output/release/latticedx-${resolvedVersion}-src.tar.gz`);
@@ -46,7 +50,7 @@ export function planTarball({
   return {
     rootDir,
     version: resolvedVersion,
-    ref,
+    ref: ref.trim(),
     prefix: `latticedx-${resolvedVersion}/`,
     tarballPath: target,
     sha256Path: `${target}.sha256`,
@@ -73,23 +77,37 @@ export function assertTarballEntries(entries, { prefix = '' } = {}) {
 export function buildOssReleaseTarball(options = {}) {
   const plan = planTarball(options);
   mkdirSync(dirname(plan.tarballPath), { recursive: true });
-  execFileSync(
+  const resolvedSha = execFileSync(
     'git',
-    ['archive', '--format=tar.gz', `--prefix=${plan.prefix}`, '-o', plan.tarballPath, plan.ref],
-    { cwd: plan.rootDir, stdio: ['ignore', 'pipe', 'pipe'] },
-  );
-  const listing = execFileSync('tar', ['-tzf', plan.tarballPath], {
-    cwd: plan.rootDir,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  const entries = assertTarballEntries(listing.split(/\r?\n/), { prefix: plan.prefix });
+    ['rev-parse', '--verify', '--end-of-options', `${plan.ref}^{commit}`],
+    { cwd: plan.rootDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  ).trim();
+  const tmpTarball = `${plan.tarballPath}.tmp`;
+  let entries;
+  try {
+    execFileSync(
+      'git',
+      ['archive', '--format=tar.gz', `--prefix=${plan.prefix}`, '-o', tmpTarball, resolvedSha],
+      { cwd: plan.rootDir, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    const listing = execFileSync('tar', ['-tzf', tmpTarball], {
+      cwd: plan.rootDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    entries = assertTarballEntries(listing.split(/\r?\n/), { prefix: plan.prefix });
+    renameSync(tmpTarball, plan.tarballPath);
+  } catch (error) {
+    try { unlinkSync(tmpTarball); } catch {}
+    throw error;
+  }
   const digest = createHash('sha256').update(readFileSync(plan.tarballPath)).digest('hex');
   writeFileSync(plan.sha256Path, `${digest}  ${basename(plan.tarballPath)}\n`, 'utf8');
   return {
     result: 'PASS',
     version: plan.version,
     ref: plan.ref,
+    resolvedSha,
     tarballPath: plan.tarballPath,
     sha256Path: plan.sha256Path,
     sha256: digest,

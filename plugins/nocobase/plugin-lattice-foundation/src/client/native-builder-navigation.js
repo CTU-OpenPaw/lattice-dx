@@ -75,7 +75,7 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
   const useNav = typeof router.useNavigate === 'function' ? router.useNavigate : () => null;
   const landingPath = items => {
     const custom = (Array.isArray(items) ? items : []).filter(p => p && p.enabled !== false && p.uid !== 'admin-layout-model');
-    const target = custom.find(p => p.isDefault) || custom[0] || items?.[0];
+    const target = custom.find(p => p.isDefault) || custom[0];
     return target?.firstPagePath || target?.routePath || WORKSPACE_PATH;
   };
   const goPortal = (dest, navigate, opts) => (portalManager?.navigateToPortal
@@ -207,14 +207,14 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
         if (active && !allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
       });
       return () => { active = false; };
-    }, [api, allowConfigUI, isAdminRoot, pathname, navigate]);
+    }, [api, api?.auth?.role, allowConfigUI, isAdminRoot, pathname, navigate]);
 
     if (!allowConfigUI && isAdminRoot) return redirectNotice();
 
     const ShellModel = isPortalModel(model) ? V2Model : NativeModel;
     const nativeShell = ShellModel.prototype.render.call(model);
     const switcher = !portalManager?.hasTopbarSwitcher && !configMode && portalManager?.PortalBar
-      ? h(portalManager.PortalBar, { portals, currentLayoutUid: model?.layout?.uid, pathname, allowConfigUI, onSwitch: dest => navigate?.(dest) })
+      ? h(portalManager.PortalBar, { portals, currentLayoutUid: model?.layout?.uid, pathname, allowConfigUI, onSwitch: dest => goPortal(dest, navigate) })
       : null;
     const attribution = configMode ? null : h('footer', {
       className: 'ldx-clause52-attribution', 'aria-label': 'NocoBase attribution',
@@ -246,14 +246,22 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
         return;
       }
       let active = true;
+      let unauthorized = false;
       Promise.all([
-        api.request({ url: 'roles:check', method: 'get' }).catch(() => null),
+        api.request({ url: 'roles:check', method: 'get' }).catch(err => {
+          if (err?.response?.status === 401 || err?.status === 401) unauthorized = true;
+          return null;
+        }),
         api.request({ url: 'latticePortals:listAccessible', method: 'get' }).catch(() => null),
       ]).then(([roleRes, portalRes]) => {
         if (!active) return;
+        if (unauthorized) { setVerified(true); return; }
         const rData = roleRes?.data?.data;
-        const hasRoleCheck = rData && !Array.isArray(rData) && (typeof rData.allowAll === 'boolean' || Array.isArray(rData.snippets));
-        const isBuilder = hasRoleCheck ? Boolean(rData.allowAll || rData.snippets?.includes('ui.*')) : syncAllow;
+        const snippets = Array.isArray(rData?.snippets) ? rData.snippets : [];
+        const hasRoleCheck = rData && !Array.isArray(rData) &&
+          (typeof rData.allowAll === 'boolean' || typeof rData.allowConfigure === 'boolean' || Array.isArray(rData.snippets));
+        const hasBuilderSnippet = (!snippets.includes('!ui.*') && snippets.includes('ui.*')) || snippets.includes('pm') || snippets.includes('pm.*');
+        const isBuilder = hasRoleCheck ? Boolean(rData.allowAll || rData.allowConfigure || hasBuilderSnippet) : syncAllow;
         const items = Array.isArray(portalRes?.data?.data) ? portalRes.data.data : [];
         portalManager?.setPermissions?.(isBuilder); portalManager?.setPortals?.(items); portalManager?.ensureDynamicLayoutsRegistered?.(items);
         if (!isBuilder && navigate) { goPortal(landingPath(items), navigate, { replace: true }); return; }

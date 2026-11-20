@@ -56,12 +56,16 @@
       if (SettingsTopbar?.prototype && !SettingsTopbar.prototype.aclSnippet) SettingsTopbar.prototype.aclSnippet = 'pm';
       const secSetting = this.app.pluginSettingsManager?.get?.('security');
       if (secSetting && !secSetting.aclSnippet) secSetting.aclSnippet = 'pm.security';
-      if (typeof clientV2?.UserCenterActionItemModel === 'function' && typeof this.app.flowEngine?.registerModels === 'function') {
+      if (typeof clientV2?.UserCenterActionItemModel === 'function' && typeof this.app.flowEngine?.registerModels === 'function' && !this.app.flowEngine.getModelClass?.('SignOutItemModel')) {
         class LatticeSignOutUserCenterItemModel extends clientV2.UserCenterActionItemModel {
           constructor(...args) { super(...args); this.label = 'Sign out'; this.section = 'danger'; this.sort = 100; this.danger = true; }
           async onClick() {
-            await this.context?.app?.apiClient?.auth?.signOut?.();
-            if (typeof window !== 'undefined' && window.location) window.location.assign(this.context?.app?.getRouteUrl?.('/signin') || '/signin');
+            let redirectUrl = this.context?.app?.getRouteUrl?.('/signin') || '/signin';
+            try {
+              const res = await this.context?.app?.apiClient?.auth?.signOut?.();
+              redirectUrl = res?.data?.data?.redirectUrl || redirectUrl;
+            } catch {}
+            if (typeof window !== 'undefined' && window.location) window.location.assign(redirectUrl);
           }
         }
         LatticeSignOutUserCenterItemModel.itemId = 'lattice-sign-out';
