@@ -16,6 +16,7 @@ import {
   PORTALS,
   assertSafeLabOrigin,
   createRootApiClient,
+  ensureLogisticsDemoCrew,
   provisionMultiPortalDemo,
   resolveCliTarget,
 } from '../setup-native-multi-portal-demo.mjs';
@@ -186,4 +187,39 @@ test('createRootApiClient signs in as admin and attaches Bearer token with X-Rol
   assert.equal(seen[1].href, 'http://localhost:13013/api/systemSettings:get?filterByTk=1');
   assert.equal(seen[1].headers.authorization, 'Bearer jwt-root-1');
   assert.equal(seen[1].headers['X-Role'], 'root');
+});
+
+test('ensureLogisticsDemoCrew idempotently seeds dispatcher and driver in native-ui-lab', async () => {
+  const users = [];
+  const employees = [];
+  let seq = 10;
+  const api = async (path, { method = 'GET', values } = {}) => {
+    if (path.startsWith('latticeDepartments:list')) return [{ id: 1, code: 'NATIVE-UI-LAB', organizationId: 'native-ui-lab' }];
+    if (path.startsWith('users:list')) {
+      const q = JSON.parse(decodeURIComponent(path.split('filter=')[1]));
+      return users.filter((u) => u.username === q.username);
+    }
+    if (path === 'users:create' && method === 'POST') {
+      const u = { id: ++seq, ...values };
+      users.push(u);
+      return u;
+    }
+    if (path.startsWith('latticeEmployees:list')) {
+      const q = JSON.parse(decodeURIComponent(path.split('filter=')[1]));
+      return employees.filter((e) => e.code === q.code && e.organizationId === q.organizationId);
+    }
+    if (path === 'latticeEmployees:create' && method === 'POST') {
+      const e = { id: ++seq, ...values };
+      employees.push(e);
+      return e;
+    }
+    throw new Error(`Unexpected API: ${method} ${path}`);
+  };
+  const first = await ensureLogisticsDemoCrew(api);
+  assert.equal(first.createdUsers, 2);
+  assert.equal(first.createdEmployees, 2);
+  assert.deepEqual(employees.map((e) => e.code), ['NATIVE-UI-DISPATCHER', 'NATIVE-UI-DRIVER']);
+  const rerun = await ensureLogisticsDemoCrew(api);
+  assert.equal(rerun.createdUsers, 0);
+  assert.equal(rerun.createdEmployees, 0);
 });

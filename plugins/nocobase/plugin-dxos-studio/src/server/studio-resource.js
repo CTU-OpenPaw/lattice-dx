@@ -71,6 +71,10 @@ function createDefaultApplyBlueprint(ctx) {
       throw: (s, m) => { throw fail('BLUEPRINT_ERROR', s, m); },
     };
     await handler(subCtx, async () => {});
+    if ((subCtx.status && subCtx.status >= 400) || (Array.isArray(subCtx.body?.errors) && subCtx.body.errors.length)) {
+      const msg = subCtx.body?.errors?.[0]?.message || `flowSurfaces:applyBlueprint failed (${subCtx.status || 400})`;
+      throw fail('BLUEPRINT_ERROR', subCtx.status || 400, msg);
+    }
     return subCtx.body?.data || subCtx.body || {};
   };
 }
@@ -128,8 +132,12 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
           roles,
         };
       });
-      const organizations = [...new Set(items.map((i) => i.organizationId).filter(Boolean))].sort();
-      ctx.body = { items, organizations };
+      const counts = {};
+      for (const item of items) {
+        if (item.organizationId) counts[item.organizationId] = (counts[item.organizationId] || 0) + 1;
+      }
+      const organizations = Object.keys(counts).sort((a, b) => (counts[b] - counts[a]) || a.localeCompare(b));
+      ctx.body = { items, organizations, organizationCounts: counts };
       return next();
     },
 
@@ -259,4 +267,4 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
   };
 }
 
-module.exports = { DXOS_PLUGINS_CATALOG, isStudioAdmin, createDxosStudioActions };
+module.exports = { DXOS_PLUGINS_CATALOG, isStudioAdmin, createDefaultApplyBlueprint, createDxosStudioActions };

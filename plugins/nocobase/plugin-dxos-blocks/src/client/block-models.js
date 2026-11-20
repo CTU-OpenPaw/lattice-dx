@@ -14,13 +14,49 @@ const {
   parseKpiMetrics,
   fetchWorkflowTasks,
   fetchParaVault,
+  fetchParaSummary,
 } = require('./blocks-helpers');
 
-function readModelConfig(model, defaults) {
+const modelListeners = new WeakMap();
+
+function subscribeModelConfig(model, listener) {
+  if (!model || typeof model !== 'object') return () => {};
+  let set = modelListeners.get(model);
+  if (!set) {
+    set = new Set();
+    modelListeners.set(model, set);
+  }
+  set.add(listener);
+  return () => { set.delete(listener); };
+}
+
+function notifyModelListeners(model) {
+  const set = model && modelListeners.get(model);
+  if (!set) return;
+  for (const fn of [...set]) {
+    try { fn(); } catch {}
+  }
+}
+
+function extractLiveConfig(model) {
   const stepCfg = model?.getStepParams?.('dxosBlockSettings', 'config')
     || model?.stepParams?.dxosBlockSettings?.config
     || {};
-  return { ...defaults, ...stepCfg, ...(model?.props || {}) };
+  const rawProps = model?.props || {};
+  return { ...rawProps, ...stepCfg };
+}
+
+function readModelConfig(model, defaults, liveConfig) {
+  const stepCfg = model?.getStepParams?.('dxosBlockSettings', 'config')
+    || model?.stepParams?.dxosBlockSettings?.config
+    || {};
+  return { ...defaults, ...(model?.props || {}), ...stepCfg, ...(liveConfig || {}) };
+}
+
+function useBlockConfig(React, model, defaults, liveConfig) {
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => subscribeModelConfig(model, () => setTick((t) => t + 1)), [model]);
+  return readModelConfig(model, defaults, liveConfig);
 }
 
 function go(app, path) {
@@ -52,15 +88,15 @@ function createBlockRenderers(client, React, antd, app) {
     ? client.useUIConfigurationPermissions
     : () => ({ allowAll: false, actions: {} });
 
-  function DxosPortalHeroView({ model }) {
+  function DxosPortalHeroView({ model, liveConfig }) {
     const perms = usePerms();
-    const cfg = readModelConfig(model, {
+    const cfg = useBlockConfig(React, model, {
       title: 'Không gian Điều hành Doanh nghiệp DX-OS',
       subtitle: 'Hợp nhất con người, quy trình Poka-yoke, dữ liệu thời gian thực và trí tuệ nhân tạo trên nền mở NocoBase.',
       badge: 'DX-OS H-P-D-I',
       accentColor: '#1677ff',
       actionsJson: DEFAULT_HERO_ACTIONS,
-    });
+    }, liveConfig);
     const actions = filterHeroActions(cfg.actionsJson, perms);
     const accent = /^#[0-9a-fA-F]{3,8}$/.test(String(cfg.accentColor || '')) ? cfg.accentColor : '#1677ff';
     return h('section', {
@@ -96,13 +132,13 @@ function createBlockRenderers(client, React, antd, app) {
     );
   }
 
-  function DxosKpiMetricView({ model }) {
+  function DxosKpiMetricView({ model, liveConfig }) {
     const api = useApi();
-    const cfg = readModelConfig(model, {
+    const cfg = useBlockConfig(React, model, {
       title: 'Chỉ số vận hành thời gian thực [D]',
       columns: 4,
       metricsJson: DEFAULT_KPI_METRICS,
-    });
+    }, liveConfig);
     const metrics = React.useMemo(() => parseKpiMetrics(cfg.metricsJson), [cfg.metricsJson]);
     const [counts, setCounts] = React.useState({});
     const [loading, setLoading] = React.useState(true);
@@ -156,14 +192,14 @@ function createBlockRenderers(client, React, antd, app) {
     );
   }
 
-  function DxosContextTelemetryView({ model }) {
+  function DxosContextTelemetryView({ model, liveConfig }) {
     const api = useApi();
-    const cfg = readModelConfig(model, {
+    const cfg = useBlockConfig(React, model, {
       title: 'Ngữ cảnh NGSI-LD & Cảm biến [D]',
       assetEntityId: '',
       warningThreshold: '80',
       showSyncStatus: true,
-    });
+    }, liveConfig);
     const [state, setState] = React.useState({ loading: true, data: null, error: '' });
 
     const load = React.useCallback(async () => {
@@ -219,15 +255,15 @@ function createBlockRenderers(client, React, antd, app) {
     );
   }
 
-  function DxosAiProposalView({ model }) {
+  function DxosAiProposalView({ model, liveConfig }) {
     const api = useApi();
-    const cfg = readModelConfig(model, {
+    const cfg = useBlockConfig(React, model, {
       title: 'Đề xuất AI & Bằng chứng nguồn [I]',
       targetCollection: 'latticeIncidentCases',
       state: 'all',
       pageSize: 5,
       showEvidence: true,
-    });
+    }, liveConfig);
     const [state, setState] = React.useState({ loading: true, items: [], error: '' });
 
     React.useEffect(() => {
@@ -277,13 +313,13 @@ function createBlockRenderers(client, React, antd, app) {
     );
   }
 
-  function DxosWorkflowTasksView({ model }) {
+  function DxosWorkflowTasksView({ model, liveConfig }) {
     const api = useApi();
-    const cfg = readModelConfig(model, {
+    const cfg = useBlockConfig(React, model, {
       title: 'Hộp việc Quy trình Poka-yoke [P]',
       statusFilter: 'pending',
       pageSize: 6,
-    });
+    }, liveConfig);
     const [state, setState] = React.useState({ loading: true, items: [], error: '' });
 
     React.useEffect(() => {
@@ -321,17 +357,20 @@ function createBlockRenderers(client, React, antd, app) {
     );
   }
 
-  function DxosParaVaultView({ model }) {
+  function DxosParaVaultView({ model, liveConfig }) {
     const api = useApi();
-    const cfg = readModelConfig(model, {
+    const cfg = useBlockConfig(React, model, {
       title: 'Kho tri thức P.A.R.A. [H]',
       paraSpace: 'all',
       pageSize: 6,
       enableQuickCreate: true,
-    });
+      defaultOrganizationId: '',
+    }, liveConfig);
     const [space, setSpace] = React.useState(cfg.paraSpace || 'all');
     const [search, setSearch] = React.useState('');
     const [state, setState] = React.useState({ loading: true, items: [], pluginDisabled: false, error: '' });
+    const [orgInfo, setOrgInfo] = React.useState({ loaded: false, organizationId: null, organizations: [] });
+    const [selectedOrg, setSelectedOrg] = React.useState(cfg.defaultOrganizationId || '');
     const [creating, setCreating] = React.useState(false);
     const [draftTitle, setDraftTitle] = React.useState('');
     const [draftCode, setDraftCode] = React.useState('');
@@ -339,15 +378,26 @@ function createBlockRenderers(client, React, antd, app) {
     const load = React.useCallback(async () => {
       setState((prev) => ({ ...prev, loading: true, error: '' }));
       try {
-        const res = await fetchParaVault(api, { paraSpace: space, search, pageSize: cfg.pageSize });
+        const [res, summary] = await Promise.all([
+          fetchParaVault(api, { paraSpace: space, search, pageSize: cfg.pageSize }),
+          fetchParaSummary(api),
+        ]);
         setState({ loading: false, items: res.items, pluginDisabled: res.pluginDisabled, error: '' });
+        setOrgInfo({ loaded: true, organizationId: summary.organizationId, organizations: summary.organizations || [] });
+        if (summary.organizationId == null) {
+          const fallback = cfg.defaultOrganizationId || summary.organizations?.[0] || 'native-ui-lab';
+          setSelectedOrg((prev) => (prev && (summary.organizations || []).includes(prev) ? prev : fallback));
+        }
       } catch {
         setState({ loading: false, items: [], pluginDisabled: false, error: 'Không tải được tài liệu P.A.R.A.' });
       }
-    }, [api, space, search, cfg.pageSize]);
+    }, [api, space, search, cfg.pageSize, cfg.defaultOrganizationId]);
 
     React.useEffect(() => { setSpace(cfg.paraSpace || 'all'); }, [cfg.paraSpace]);
     React.useEffect(() => { load(); }, [load]);
+
+    const isRootAdmin = orgInfo.loaded && orgInfo.organizationId === null;
+    const orgChoices = orgInfo.organizations.length ? orgInfo.organizations : ['native-ui-lab'];
 
     async function handleQuickCreate(e) {
       e.preventDefault();
@@ -355,16 +405,17 @@ function createBlockRenderers(client, React, antd, app) {
       setCreating(true);
       try {
         const code = (draftCode.trim() || `PARA-${Date.now().toString(36).toUpperCase()}`);
-        await api.request({
-          url: 'latticeParaDocuments:create',
-          method: 'post',
-          data: { code, title: draftTitle.trim(), paraSpace: space === 'all' ? 'projects' : space, status: 'active' },
-        });
+        const data = { code, title: draftTitle.trim(), paraSpace: space === 'all' ? 'projects' : space, status: 'active' };
+        if (isRootAdmin) {
+          data.organizationId = String(selectedOrg || cfg.defaultOrganizationId || orgChoices[0] || 'native-ui-lab').trim();
+        }
+        await api.request({ url: 'latticeParaDocuments:create', method: 'post', data });
         setDraftTitle('');
         setDraftCode('');
         await load();
-      } catch {
-        setState((prev) => ({ ...prev, error: 'Không tạo được tài liệu (kiểm tra quyền / mã trùng).' }));
+      } catch (err) {
+        const msg = err?.response?.data?.errors?.[0]?.message;
+        setState((prev) => ({ ...prev, error: msg ? `Không tạo được tài liệu: ${msg}` : 'Không tạo được tài liệu (kiểm tra quyền / mã trùng).' }));
       } finally {
         setCreating(false);
       }
@@ -397,6 +448,12 @@ function createBlockRenderers(client, React, antd, app) {
         }, label)),
       ),
       cfg.enableQuickCreate !== false ? h('form', { onSubmit: handleQuickCreate, style: { display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' } },
+        isRootAdmin ? h('select', {
+          value: selectedOrg || orgChoices[0],
+          onChange: (e) => setSelectedOrg(e.target.value),
+          'aria-label': 'Tổ chức',
+          style: { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+        }, orgChoices.map((oid) => h('option', { key: oid, value: oid }, oid))) : null,
         h('input', { value: draftCode, placeholder: 'Mã (tùy chọn)', onChange: (e) => setDraftCode(e.target.value), style: { width: 120, padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
         h('input', { value: draftTitle, placeholder: 'Tiêu đề tài liệu P.A.R.A. mới…', onChange: (e) => setDraftTitle(e.target.value), style: { flex: 1, minWidth: 180, padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
         h('button', { type: 'submit', disabled: creating || !draftTitle.trim(), style: { padding: '4px 12px', borderRadius: 6, border: 'none', background: '#0f766e', color: '#fff', fontSize: 12, cursor: 'pointer' } }, creating ? 'Đang lưu…' : '+ Thêm tài liệu'),
@@ -437,22 +494,22 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   const views = createBlockRenderers(client, React, antd, app);
 
   class DxosPortalHeroBlockModel extends BaseBlockModel {
-    renderComponent() { return h(views.DxosPortalHeroView, { model: this }); }
+    renderComponent() { return h(views.DxosPortalHeroView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
   class DxosKpiMetricBlockModel extends BaseBlockModel {
-    renderComponent() { return h(views.DxosKpiMetricView, { model: this }); }
+    renderComponent() { return h(views.DxosKpiMetricView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
   class DxosContextTelemetryBlockModel extends BaseBlockModel {
-    renderComponent() { return h(views.DxosContextTelemetryView, { model: this }); }
+    renderComponent() { return h(views.DxosContextTelemetryView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
   class DxosAiProposalBlockModel extends BaseBlockModel {
-    renderComponent() { return h(views.DxosAiProposalView, { model: this }); }
+    renderComponent() { return h(views.DxosAiProposalView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
   class DxosWorkflowTasksBlockModel extends BaseBlockModel {
-    renderComponent() { return h(views.DxosWorkflowTasksView, { model: this }); }
+    renderComponent() { return h(views.DxosWorkflowTasksView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
   class DxosParaVaultBlockModel extends BaseBlockModel {
-    renderComponent() { return h(views.DxosParaVaultView, { model: this }); }
+    renderComponent() { return h(views.DxosParaVaultView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
 
   const specs = [
@@ -535,7 +592,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
     [
       DxosParaVaultBlockModel,
       'DX-OS P.A.R.A. Knowledge Vault',
-      { title: 'Kho tri thức P.A.R.A. [H]', paraSpace: 'all', pageSize: 6, enableQuickCreate: true },
+      { title: 'Kho tri thức P.A.R.A. [H]', paraSpace: 'all', pageSize: 6, enableQuickCreate: true, defaultOrganizationId: '' },
       {
         title: { type: 'string', title: 'Tiêu đề', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         paraSpace: {
@@ -550,6 +607,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
         },
         pageSize: { type: 'number', title: 'Số tài liệu hiển thị', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
         enableQuickCreate: { type: 'boolean', title: 'Cho phép tạo nhanh trên block', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
+        defaultOrganizationId: { type: 'string', title: 'Mã tổ chức mặc định (Admin)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
       },
     ],
   ];
@@ -568,6 +626,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           uiSchema,
           handler(ctx, params) {
             ctx.model.setProps(params || {});
+            notifyModelListeners(ctx.model);
           },
         },
       },
@@ -579,4 +638,4 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   return models;
 }
 
-module.exports = { registerDxosBlockModels };
+module.exports = { registerDxosBlockModels, readModelConfig };

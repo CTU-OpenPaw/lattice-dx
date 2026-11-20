@@ -130,6 +130,20 @@ async function fetchParaVault(api, { paraSpace = 'all', search = '', pageSize = 
   }
 }
 
+async function fetchParaSummary(api) {
+  if (!api?.request) return { organizationId: null, organizations: [] };
+  try {
+    const res = await api.request({ url: 'latticePara:summary', method: 'get' });
+    const data = res?.data?.data || res?.data || {};
+    return {
+      organizationId: data.organizationId ?? null,
+      organizations: Array.isArray(data.organizations) ? data.organizations : [],
+    };
+  } catch {
+    return { organizationId: null, organizations: [] };
+  }
+}
+
 module.exports = {
   isSafeAppPath,
   safeJsonParse,
@@ -137,4 +151,5 @@ module.exports = {
   parseKpiMetrics,
   fetchWorkflowTasks,
   fetchParaVault,
+  fetchParaSummary,
 };

@@ -25,12 +25,14 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const [templates, setTemplates] = React.useState([]);
     const [employees, setEmployees] = React.useState([]);
     const [organizations, setOrganizations] = React.useState([]);
+    const [organizationCounts, setOrganizationCounts] = React.useState({});
     const [readiness, setReadiness] = React.useState(null);
     const [selectedTemplate, setSelectedTemplate] = React.useState('logistics-5step');
     const [selectedOrg, setSelectedOrg] = React.useState('');
     const [bindings, setBindings] = React.useState({});
     const [enableOnCreate, setEnableOnCreate] = React.useState(true);
     const [busyAction, setBusyAction] = React.useState(false);
+    const [forbidden, setForbidden] = React.useState(false);
     const [feedback, setFeedback] = React.useState(null);
 
     const loadAll = React.useCallback(async () => {
@@ -45,14 +47,21 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         const tList = tmplRes?.data?.data?.items || [];
         const eData = empRes?.data?.data || {};
         const rData = readyRes?.data?.data || null;
+        setForbidden(false);
         setTemplates(tList);
         setEmployees(Array.isArray(eData.items) ? eData.items : []);
         const orgs = Array.isArray(eData.organizations) ? eData.organizations : [];
         setOrganizations(orgs);
+        setOrganizationCounts(eData.organizationCounts || {});
         if (!selectedOrg && orgs.length) setSelectedOrg(orgs[0]);
         setReadiness(rData);
-      } catch {
-        setFeedback({ type: 'error', text: 'Không tải được dữ liệu DX-OS Studio. Kiểm tra quyền quản trị.' });
+      } catch (err) {
+        const status = Number(err?.response?.status ?? err?.status);
+        if (status === 403 || status === 401) {
+          setForbidden(true);
+        } else {
+          setFeedback({ type: 'error', text: 'Không tải được dữ liệu DX-OS Studio. Kiểm tra quyền quản trị.' });
+        }
       } finally {
         setLoading(false);
       }
@@ -64,7 +73,8 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const orgEmployees = employees.filter((e) => !selectedOrg || e.organizationId === selectedOrg);
 
     React.useEffect(() => {
-      if (!activeTemplate || !orgEmployees.length) return;
+      if (!activeTemplate) return;
+      if (!orgEmployees.length) { setBindings({}); return; }
       const next = {};
       const used = new Set();
       for (const req of activeTemplate.requiredBindings || []) {
@@ -75,7 +85,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           used.add(String(match.id));
         }
       }
-      setBindings((prev) => ({ ...next, ...prev }));
+      setBindings(next);
     }, [activeTemplate?.key, selectedOrg, orgEmployees.length]);
 
     async function handleInstallWorkflow(e) {
@@ -138,7 +148,18 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       color: active ? '#ffffff' : '#1e293b',
     });
 
-    return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: 24, maxWidth: 1120, margin: '0 auto', display: 'grid', gap: 16 } },
+    if (forbidden) {
+      return h('div', { 'data-testid': 'dxos-studio-forbidden', style: { padding: 24, maxWidth: 720, margin: '24px auto', borderRadius: 12, border: '1px solid #fecaca', background: '#fef2f2', color: '#991b1b' } },
+        h('h2', { style: { margin: '0 0 8px', fontSize: 18 } }, '403 — Chỉ Quản trị viên mới truy cập được DX-OS Control Studio'),
+        h('p', { style: { margin: '0 0 12px', fontSize: 13 } }, 'Tài khoản hiện tại không có quyền quản trị cấu hình plugin/workflow. Vui lòng quay lại cổng làm việc của bạn.'),
+        h('button', { type: 'button', onClick: () => openRoute('/admin/lattice-workspace'), style: btnStyle(true) }, 'Về Không gian việc của tôi'),
+      );
+    }
+
+    const requiredCount = activeTemplate?.requiredBindings?.length || 0;
+    const missingCrew = Boolean(activeTemplate && selectedOrg && orgEmployees.length < requiredCount);
+
+    return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: '24px 24px 64px', maxWidth: 1120, margin: '0 auto', display: 'grid', gap: 16 } },
       h('div', null,
         h('h1', { style: { margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: '#0f172a' } }, 'DX-OS Control Studio — Xây dựng Hệ thống từ NocoBase'),
         h('p', { style: { margin: 0, color: '#475569', fontSize: 13 } }, 'Cài mẫu quy trình Poka-yoke, dựng cổng đa-block kết hợp Block tùy biến, quản lý hệ sinh thái 6 plugin Open-Core và kiểm tra PoF.'),
@@ -175,8 +196,15 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
             value: selectedOrg,
             onChange: (e) => { setSelectedOrg(e.target.value); setBindings({}); },
             style: { width: '100%', padding: 8, borderRadius: 6, border: '1px solid #cbd5e1' },
-          }, organizations.map((o) => h('option', { key: o, value: o }, o))),
+          }, organizations.map((o) => h('option', { key: o, value: o }, `${o} (${organizationCounts[o] ?? employees.filter((e) => e.organizationId === o).length} nhân sự)`))),
         ),
+        missingCrew ? h('div', {
+          role: 'alert',
+          style: { padding: 10, borderRadius: 8, background: '#fff7ed', border: '1px solid #fed7aa', color: '#9a3412', fontSize: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 },
+        },
+          h('span', null, `Tổ chức "${selectedOrg}" mới có ${orgEmployees.length} nhân sự; mẫu Poka-yoke này yêu cầu tối thiểu ${requiredCount} nhân sự khác nhau cho các vai trò phân tách.`),
+          h('button', { type: 'button', onClick: () => openRoute('/p/services'), style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #9a3412', background: '#fff', color: '#9a3412', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' } }, 'Mở Danh bạ Nhân viên'),
+        ) : null,
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12 } },
           (activeTemplate?.requiredBindings || []).map((req) => h('div', { key: req.field },
             h('label', { style: { display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 4 } }, req.label),

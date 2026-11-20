@@ -96,7 +96,7 @@ test('registerDxosBlockModels registers all 6 configurable BlockModel subclasses
 });
 
 test('DX-OS workflow tasks & P.A.R.A. helpers use listMine and degrade cleanly on 404', async () => {
-  const { fetchWorkflowTasks, fetchParaVault } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+  const { fetchWorkflowTasks, fetchParaVault, fetchParaSummary } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
 
   const calledUrls = [];
   const api = {
@@ -110,6 +110,9 @@ test('DX-OS workflow tasks & P.A.R.A. helpers use listMine and degrade cleanly o
         err.response = { status: 404 };
         throw err;
       }
+      if (req.url === 'latticePara:summary') {
+        return { data: { data: { organizationId: null, organizations: ['native-ui-lab', 'demo-organization-01'] } } };
+      }
       throw new Error('Unexpected URL: ' + req.url);
     },
   };
@@ -122,4 +125,47 @@ test('DX-OS workflow tasks & P.A.R.A. helpers use listMine and degrade cleanly o
   const paraRes = await fetchParaVault(api, { paraSpace: 'projects', pageSize: 6 });
   assert.equal(paraRes.pluginDisabled, true);
   assert.deepEqual(paraRes.items, []);
+
+  assert.equal(typeof fetchParaSummary, 'function');
+  const sumRes = await fetchParaSummary(api);
+  assert.deepEqual(sumRes.organizations, ['native-ui-lab', 'demo-organization-01']);
+});
+
+test('dxosBlockSettings stepParams take precedence over stale props and renderComponent passes fresh liveConfig', () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const registered = {};
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: false }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels(m) { Object.assign(registered, m); } },
+    {},
+  );
+
+  const Hero = models.DxosPortalHeroBlockModel;
+  const hero = new Hero({
+    props: { title: 'Stale Prop Title' },
+    stepParams: { dxosBlockSettings: { config: { title: 'Live Step Title', badge: 'LIVE' } } },
+  });
+  const el = hero.renderComponent();
+  assert.equal(el.props.liveConfig?.title, 'Live Step Title');
+  assert.equal(el.props.liveConfig?.badge, 'LIVE');
+
+  const { readModelConfig } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  assert.equal(typeof readModelConfig, 'function');
+  const merged = readModelConfig(hero, { title: 'Default' }, el.props.liveConfig);
+  assert.equal(merged.title, 'Live Step Title');
 });

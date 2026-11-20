@@ -158,14 +158,30 @@ test('dxosStudio actions enforce admin gate, idempotent installWorkflow, safe co
         };
       }
       if (name === 'flowModels') {
+        const gridState = {
+          rows: { row1: [['seed_1']] },
+          sizes: { row1: [24] },
+          rowOrder: ['row1'],
+        };
         return {
-          findModelByParentId: async (uid) => ({ uid: `grid:${uid}` }),
+          _gridState: gridState,
+          findModelByParentId: async (uid) => ({
+            uid: `grid:${uid}`,
+            props: structuredClone(gridState),
+            stepParams: { gridSettings: { grid: structuredClone(gridState) } },
+          }),
           findOne: async ({ filter }) => flowModels.find((m) => m.uid === filter?.uid) || null,
           upsertModel: async (m) => {
             const idx = flowModels.findIndex((x) => x.uid === m.uid);
             if (idx >= 0) flowModels[idx] = m;
             else flowModels.push(m);
             return m.uid;
+          },
+          updateSingleNode: async (node) => {
+            if (node.props?.rows) gridState.rows = node.props.rows;
+            if (node.props?.sizes) gridState.sizes = node.props.sizes;
+            if (node.props?.rowOrder) gridState.rowOrder = node.props.rowOrder;
+            return true;
           },
         };
       }
@@ -179,14 +195,20 @@ test('dxosStudio actions enforce admin gate, idempotent installWorkflow, safe co
     },
   };
 
+  const blueprintCalls = [];
   const applyBlueprint = async (doc) => {
+    blueprintCalls.push(doc);
+    assert.ok(Array.isArray(doc.tabs?.[0]?.blocks) && doc.tabs[0].blocks.length >= 1, 'applyBlueprint requires non-empty blocks array');
     const pageUid = `page_${++routeSeq}`;
     const tabUid = `tab_${++routeSeq}`;
-    const grp = { id: ++routeSeq, type: 'group', title: doc.navigation.group.title, uiLayoutUid: doc.navigation.layoutUid };
-    const pg = { id: ++routeSeq, parentId: grp.id, type: 'flowPage', title: doc.navigation.item.title, schemaUid: pageUid, uiLayoutUid: doc.navigation.layoutUid };
-    const tb = { id: ++routeSeq, parentId: pg.id, type: 'tabs', title: doc.tabs[0].title, schemaUid: tabUid, uiLayoutUid: doc.navigation.layoutUid };
+    const grpId = ++routeSeq;
+    const pgId = ++routeSeq;
+    const grp = { id: grpId, type: 'group', title: doc.navigation.group.title, uiLayoutUid: doc.navigation.layoutUid };
+    // Simulate BIGINT string vs number id/parentId mismatch across Postgres/Sequelize
+    const pg = { id: String(pgId), parentId: grpId, type: 'flowPage', title: doc.navigation.item.title, schemaUid: pageUid, uiLayoutUid: doc.navigation.layoutUid };
+    const tb = { id: ++routeSeq, parentId: Number(pgId), type: 'tabs', title: doc.tabs[0].title, schemaUid: tabUid, uiLayoutUid: doc.navigation.layoutUid };
     desktopRoutes.push(grp, pg, tb);
-    return { target: { pageSchemaUid: pageUid, tabSchemaUid: tabUid } };
+    return { target: { pageSchemaUid: pageUid } };
   };
 
   const actions = createDxosStudioActions(db, { applyBlueprint });
@@ -252,4 +274,117 @@ test('dxosStudio actions enforce admin gate, idempotent installWorkflow, safe co
   await actions.readiness(readyCtx, async () => {});
   assert.equal(readyCtx.body.paraDocumentCount, 0);
   assert.equal(readyCtx.body.plugins.length, 6);
+
+  // listEmployees sorts organizations by headcount DESC and includes organizationCounts
+  const multiOrgDb = {
+    getRepository(name) {
+      if (name !== 'latticeEmployees') return null;
+      return {
+        find: async () => [
+          { id: 1, userId: 11, code: 'A1', name: 'One', organizationId: 'alpha-small', user: { roles: [] } },
+          { id: 2, userId: 12, code: 'Z1', name: 'Two', organizationId: 'zeta-large', user: { roles: [] } },
+          { id: 3, userId: 13, code: 'Z2', name: 'Three', organizationId: 'zeta-large', user: { roles: [] } },
+          { id: 4, userId: 14, code: 'Z3', name: 'Four', organizationId: 'zeta-large', user: { roles: [] } },
+        ],
+      };
+    },
+  };
+  const multiActions = createDxosStudioActions(multiOrgDb);
+  const empCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+  await multiActions.listEmployees(empCtx, async () => {});
+  assert.deepEqual(empCtx.body.organizations, ['zeta-large', 'alpha-small']);
+  assert.deepEqual(empCtx.body.organizationCounts, { 'zeta-large': 3, 'alpha-small': 1 });
+});
+
+test('composePortals attaches blocks, orders grid rows above seed row, and createDefaultApplyBlueprint rejects 4xx bodies', async () => {
+  const { createDxosStudioActions, createDefaultApplyBlueprint } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
+
+  const flowModels = [];
+  const desktopRoutes = [];
+  const updatedGrids = [];
+  let seq = 100;
+
+  const db = {
+    sequelize: { transaction: async (fn) => fn({}) },
+    hasCollection: () => true,
+    getRepository(name) {
+      if (name === 'applicationPlugins') {
+        return {
+          find: async () => [
+            { packageName: '@latticedx/plugin-lattice-foundation', enabled: true, options: { portals: {} } },
+            { packageName: '@latticedx/plugin-dxos-blocks', enabled: true },
+          ],
+        };
+      }
+      if (name === 'desktopRoutes') return { find: async () => desktopRoutes };
+      if (name === 'flowModels') {
+        return {
+          findModelByParentId: async (uid) => ({
+            uid: `grid:${uid}`,
+            props: { rows: { row1: [['seed_block']] }, sizes: { row1: [24] }, rowOrder: ['row1'] },
+            stepParams: { gridSettings: { grid: { rows: { row1: [['seed_block']] }, sizes: { row1: [24] }, rowOrder: ['row1'] } } },
+          }),
+          findOne: async ({ filter }) => flowModels.find((m) => m.uid === filter?.uid) || null,
+          upsertModel: async (m) => {
+            flowModels.push(m);
+            return m.uid;
+          },
+          updateSingleNode: async (node) => {
+            updatedGrids.push(node);
+            return true;
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const applyBlueprint = async (doc) => {
+    assert.ok(Array.isArray(doc.tabs?.[0]?.blocks) && doc.tabs[0].blocks.length >= 1);
+    const col = doc.tabs[0].blocks[0].collection;
+    if (['latticeIncidentCases', 'latticeOrders', 'latticeServiceTickets', 'latticeParaDocuments'].includes(col)) {
+      assert.ok(Array.isArray(doc.defaults?.collections?.[col]?.fieldGroups), `Expected fieldGroups for ${col}`);
+    }
+    const gid = ++seq;
+    const pid = ++seq;
+    const pageUid = `page_${pid}`;
+    const tabUid = `tab_${pid}`;
+    desktopRoutes.push(
+      { id: gid, parentId: null, type: 'group', title: doc.navigation.group.title, uiLayoutUid: doc.navigation.layoutUid },
+      { id: String(pid), parentId: gid, type: 'flowPage', title: doc.navigation.item.title, schemaUid: pageUid, uiLayoutUid: doc.navigation.layoutUid },
+      { id: ++seq, parentId: Number(pid), type: 'tabs', title: doc.tabs[0].title, schemaUid: tabUid, uiLayoutUid: doc.navigation.layoutUid },
+    );
+    return { target: { pageSchemaUid: pageUid } };
+  };
+
+  const actions = createDxosStudioActions(db, { applyBlueprint });
+  const ctx = { method: 'POST', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+  await actions.composePortals(ctx, async () => {});
+  assert.equal(ctx.body.dxosBlocksAttached, true);
+  assert.equal(ctx.body.createdPages, 6);
+  assert.equal(ctx.body.attachedBlocks, 12);
+  assert.equal(updatedGrids.length, 4);
+  const firstGrid = updatedGrids[0];
+  assert.equal(firstGrid.props.rowOrder[0], 'dxos_row_0');
+  assert.equal(firstGrid.props.rowOrder.at(-1), 'row1');
+  assert.deepEqual(firstGrid.stepParams.gridSettings.grid.rowOrder, firstGrid.props.rowOrder);
+
+  // Host applyBlueprint error propagation test
+  assert.equal(typeof createDefaultApplyBlueprint, 'function');
+  const failingBp = createDefaultApplyBlueprint({
+    app: {
+      resourceManager: {
+        getResource: (resName) => (resName === 'flowSurfaces' ? {
+          actions: {
+            applyBlueprint: async (subCtx) => {
+              subCtx.status = 400;
+              subCtx.body = { errors: [{ message: 'flowSurfaces applyBlueprint tabs[0].blocks must be a non-empty array' }] };
+            },
+          },
+        } : null),
+      },
+    },
+    state: { currentUser: { id: 1 }, currentRole: 'root', currentRoles: ['root'] },
+  });
+  await assert.rejects(() => failingBp({ version: '1' }), (err) => err.code === 'BLUEPRINT_ERROR' && err.status === 400);
 });

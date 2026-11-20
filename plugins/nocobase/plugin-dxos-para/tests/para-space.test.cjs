@@ -188,7 +188,21 @@ test('latticePara:summary returns per-space org-scoped counts and root preview',
   const db = {
     getRepository(name) {
       if (name === 'latticeEmployees') {
-        return { find: async ({ filter }) => (Number(filter?.userId) === 10 ? [{ id: 1, userId: 10, organizationId: 'org-a', active: true }] : []) };
+        return {
+          find: async ({ filter } = {}) => {
+            if (filter?.userId != null) {
+              return Number(filter.userId) === 10 ? [{ id: 1, userId: 10, organizationId: 'org-a', active: true }] : [];
+            }
+            return [
+              { id: 1, organizationId: 'org-a', active: true },
+              { id: 2, organizationId: 'org-b', active: true },
+              { id: 3, organizationId: 'org-b', active: true },
+            ];
+          },
+        };
+      }
+      if (name === 'latticeDepartments') {
+        return { find: async () => [{ id: 1, organizationId: 'org-c', active: true }] };
       }
       if (name === 'latticeParaDocuments') {
         return {
@@ -204,14 +218,16 @@ test('latticePara:summary returns per-space org-scoped counts and root preview',
   const ctxUser = { method: 'GET', state: { currentRole: 'ldx_employee', currentUser: { id: 10 } }, action: { params: {} }, throw(s, m) { throw Object.assign(new Error(m), { status: s }); } };
   await actions.summary(ctxUser, async () => {});
   assert.equal(ctxUser.body.organizationId, 'org-a');
+  assert.deepEqual(ctxUser.body.organizations, ['org-a']);
   assert.deepEqual(ctxUser.body.spaces, { projects: 2, areas: 1, resources: 0, archives: 0 });
   assert.equal(ctxUser.body.total, 3);
 
-  // Root without employee row gets preview across orgs
+  // Root without employee row gets preview across orgs with orgs sorted by headcount DESC
   const ctxRoot = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} }, throw(s, m) { throw Object.assign(new Error(m), { status: s }); } };
   await actions.summary(ctxRoot, async () => {});
   assert.equal(ctxRoot.body.total, 4);
   assert.equal(ctxRoot.body.spaces.archives, 1);
+  assert.deepEqual(ctxRoot.body.organizations, ['org-b', 'org-a', 'org-c']);
 
   // Unmapped business user gets 403
   await assert.rejects(

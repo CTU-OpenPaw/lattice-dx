@@ -10,6 +10,27 @@
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
+const COLLECTION_FIELD_GROUPS = {
+  latticeIncidentCases: [
+    { title: 'Định danh & Tài sản', fields: ['code', 'name', 'organizationId', 'assetEntityId', 'runId', 'notificationId'] },
+    { title: 'Phân công & Trạng thái', fields: ['handlerId', 'severity', 'status'] },
+    { title: 'Đề xuất AI & Khắc phục', fields: ['proposal', 'resolutionNote', 'closeNote'] },
+  ],
+  latticeOrders: [
+    { title: 'Thông tin Đơn vận chuyển', fields: ['code', 'name', 'organizationId', 'category', 'customer', 'quantity'] },
+    { title: 'Tuyến vận chuyển & Mô tả', fields: ['origin', 'destination', 'description'] },
+    { title: 'Trạng thái & Phê duyệt', fields: ['status', 'version', 'decisionReason'] },
+  ],
+  latticeServiceTickets: [
+    { title: 'Thông tin Phiếu dịch vụ', fields: ['code', 'name', 'organizationId', 'serviceType', 'priority', 'description'] },
+    { title: 'Trạng thái & Kết quả', fields: ['status', 'version', 'resolutionNote', 'decisionReason'] },
+  ],
+  latticeParaDocuments: [
+    { title: 'Định danh & Phân vùng P.A.R.A.', fields: ['code', 'title', 'organizationId', 'paraSpace', 'tags', 'status'] },
+    { title: 'Nội dung & Liên kết', fields: ['summary', 'contentMarkdown', 'attachmentUrl', 'relatedCollection', 'relatedRecordId'] },
+  ],
+};
+
 const OVERVIEW_SPECS = [
   {
     slug: 'procurement',
@@ -17,6 +38,15 @@ const OVERVIEW_SPECS = [
     groupTitle: 'Yêu cầu mua sắm',
     groupIcon: 'ShoppingCartOutlined',
     icon: 'DashboardOutlined',
+    seedBlock: {
+      key: 'procurement-overview-requests',
+      type: 'table',
+      title: 'Yêu cầu mua sắm gần đây',
+      collection: 'latticeRequests',
+      fields: ['code', 'name', 'category', 'status'],
+      settings: { pageSize: 5 },
+      actions: ['filter', 'refresh'],
+    },
     blocks: [
       {
         uidSuffix: 'hero',
@@ -58,6 +88,15 @@ const OVERVIEW_SPECS = [
     groupTitle: 'Giám sát Sự cố',
     groupIcon: 'AlertOutlined',
     icon: 'RadarChartOutlined',
+    seedBlock: {
+      key: 'incidents-overview-cases',
+      type: 'table',
+      title: 'Hàng đợi Sự cố IoT',
+      collection: 'latticeIncidentCases',
+      fields: ['code', 'name', 'assetEntityId', 'severity', 'status'],
+      settings: { pageSize: 5 },
+      actions: ['filter', 'refresh'],
+    },
     blocks: [
       {
         uidSuffix: 'hero',
@@ -88,6 +127,15 @@ const OVERVIEW_SPECS = [
     groupTitle: 'Điều phối Vận chuyển',
     groupIcon: 'CarOutlined',
     icon: 'FundProjectionScreenOutlined',
+    seedBlock: {
+      key: 'logistics-overview-orders',
+      type: 'table',
+      title: 'Đơn vận chuyển chuỗi lạnh',
+      collection: 'latticeOrders',
+      fields: ['code', 'name', 'customer', 'origin', 'destination', 'status'],
+      settings: { pageSize: 5 },
+      actions: ['filter', 'refresh'],
+    },
     blocks: [
       {
         uidSuffix: 'hero',
@@ -127,6 +175,15 @@ const OVERVIEW_SPECS = [
     groupTitle: 'Tổ chức & Nhân sự',
     groupIcon: 'TeamOutlined',
     icon: 'AppstoreOutlined',
+    seedBlock: {
+      key: 'services-overview-tickets',
+      type: 'table',
+      title: 'Phiếu Dịch vụ Nội bộ',
+      collection: 'latticeServiceTickets',
+      fields: ['code', 'name', 'serviceType', 'priority', 'status'],
+      settings: { pageSize: 5 },
+      actions: ['filter', 'refresh'],
+    },
     blocks: [
       {
         uidSuffix: 'hero',
@@ -198,6 +255,24 @@ function findExistingPage(routes, layoutUid, groupTitle, pageTitle) {
   }) || null;
 }
 
+function mergeGridLayout(base, uids) {
+  const existingRows = { ...(base?.rows || {}) };
+  const existingSizes = { ...(base?.sizes || {}) };
+  const existingOrder = Array.isArray(base?.rowOrder) ? [...base.rowOrder] : Object.keys(existingRows);
+  const placedUids = new Set(Object.values(existingRows).flat(2));
+  const prependedOrder = [];
+  uids.forEach((uid, idx) => {
+    if (placedUids.has(uid)) return;
+    const rowKey = `dxos_row_${idx}`;
+    if (!existingRows[rowKey]) {
+      existingRows[rowKey] = [[uid]];
+      existingSizes[rowKey] = [24];
+    }
+    if (!existingOrder.includes(rowKey)) prependedOrder.push(rowKey);
+  });
+  return { rows: existingRows, sizes: existingSizes, rowOrder: [...prependedOrder, ...existingOrder] };
+}
+
 async function attachDxosBlocksToTab(db, tabSchemaUid, slug, blocks) {
   const flowModelsRepo = db.getRepository('flowModels');
   if (!flowModelsRepo || typeof flowModelsRepo.upsertModel !== 'function') return 0;
@@ -207,8 +282,10 @@ async function attachDxosBlocksToTab(db, tabSchemaUid, slug, blocks) {
   const gridUid = grid?.uid;
   if (!gridUid) return 0;
   let attached = 0;
+  const allUids = [];
   for (const block of blocks) {
     const uid = `dxos-ov-${slug}-${block.uidSuffix}`;
+    allUids.push(uid);
     const existing = typeof flowModelsRepo.findOne === 'function'
       ? await flowModelsRepo.findOne({ filter: { uid } })
       : null;
@@ -224,7 +301,37 @@ async function attachDxosBlocksToTab(db, tabSchemaUid, slug, blocks) {
     });
     attached += 1;
   }
+  if (attached > 0 && typeof flowModelsRepo.updateSingleNode === 'function') {
+    const nextPropsLayout = mergeGridLayout(grid.props, allUids);
+    const nextStepLayout = mergeGridLayout(grid.stepParams?.gridSettings?.grid || grid.props, allUids);
+    await flowModelsRepo.updateSingleNode({
+      uid: gridUid,
+      props: { ...(grid.props || {}), ...nextPropsLayout },
+      stepParams: {
+        ...(grid.stepParams || {}),
+        gridSettings: {
+          ...(grid.stepParams?.gridSettings || {}),
+          grid: nextStepLayout,
+        },
+      },
+    });
+  }
   return attached;
+}
+
+function resolveOverviewSeedBlock(db, ov) {
+  if (typeof db.hasCollection !== 'function' || db.hasCollection(ov.seedBlock.collection)) {
+    return ov.seedBlock;
+  }
+  return {
+    key: `${ov.slug}-overview-requests`,
+    type: 'table',
+    title: 'Yêu cầu gần đây',
+    collection: 'latticeRequests',
+    fields: ['code', 'name', 'status'],
+    settings: { pageSize: 5 },
+    actions: ['filter', 'refresh'],
+  };
 }
 
 async function composePortals(db, { applyBlueprint }) {
@@ -251,12 +358,14 @@ async function composePortals(db, { applyBlueprint }) {
     if (typeof db.hasCollection === 'function' && !db.hasCollection(page.collection)) continue;
     const layoutUid = `ldx-portal-${page.slug}`;
     if (findExistingPage(routes, layoutUid, page.groupTitle, page.title)) continue;
+    const fieldGroups = COLLECTION_FIELD_GROUPS[page.collection];
     await applyBlueprint({
       version: '1',
       mode: 'create',
       navigation: { layoutUid, group: { title: page.groupTitle, icon: page.groupIcon }, item: { title: page.title, icon: page.icon } },
       page: { title: page.title, displayTitle: true, enableTabs: false },
       tabs: [{ title: page.title, blocks: [{ key: `${page.slug}-${page.collection}`, type: page.type, title: page.title, collection: page.collection, fields: page.fields, settings: { pageSize: 10 }, actions: ['filter', 'refresh'] }] }],
+      ...(fieldGroups ? { defaults: { collections: { [page.collection]: { fieldGroups } } } } : {}),
     });
     createdPages += 1;
     routes = routesRepo ? await routesRepo.find({ appends: ['uiLayouts'] }) : routes;
@@ -267,12 +376,15 @@ async function composePortals(db, { applyBlueprint }) {
     let pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title);
     let tabSchemaUid = null;
     if (!pageRoute) {
+      const seedBlock = resolveOverviewSeedBlock(db, ov);
+      const fieldGroups = COLLECTION_FIELD_GROUPS[seedBlock.collection];
       const res = await applyBlueprint({
         version: '1',
         mode: 'create',
         navigation: { layoutUid, group: { title: ov.groupTitle, icon: ov.groupIcon }, item: { title: ov.title, icon: ov.icon } },
         page: { title: ov.title, displayTitle: true, enableTabs: false },
-        tabs: [{ title: ov.title, blocks: [] }],
+        tabs: [{ title: ov.title, blocks: [seedBlock] }],
+        ...(fieldGroups ? { defaults: { collections: { [seedBlock.collection]: { fieldGroups } } } } : {}),
       });
       createdPages += 1;
       tabSchemaUid = res?.target?.tabSchemaUid || null;
@@ -280,8 +392,8 @@ async function composePortals(db, { applyBlueprint }) {
       if (!tabSchemaUid) pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title);
     }
     if (!tabSchemaUid && pageRoute) {
-      const pid = val(pageRoute, 'id');
-      const tabRoute = routes.find((r) => val(r, 'parentId') === pid && val(r, 'type') === 'tabs');
+      const pid = String(val(pageRoute, 'id'));
+      const tabRoute = routes.find((r) => String(val(r, 'parentId')) === pid && val(r, 'type') === 'tabs');
       tabSchemaUid = tabRoute ? val(tabRoute, 'schemaUid') : null;
     }
     if (dxosBlocksEnabled && tabSchemaUid) {

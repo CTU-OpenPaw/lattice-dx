@@ -19,14 +19,30 @@ function createParaActions(db) {
       if (ctx.method !== 'GET') ctx.throw(405);
       const isRoot = ctx.state?.currentRole === 'root';
       let organizationId = null;
+      let organizations = [];
       if (isRoot) {
         const requested = ctx.action?.params?.organizationId;
         if (typeof requested === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(requested.trim())) {
           organizationId = requested.trim();
         }
+        const counts = new Map();
+        const empRepo = db.getRepository('latticeEmployees');
+        const empRows = empRepo ? await empRepo.find({ filter: { active: true }, fields: ['organizationId'], limit: 500 }) : [];
+        for (const r of Array.isArray(empRows) ? empRows : []) {
+          const oid = val(r, 'organizationId');
+          if (oid) counts.set(oid, (counts.get(oid) || 0) + 1);
+        }
+        const deptRepo = db.getRepository('latticeDepartments');
+        const deptRows = deptRepo ? await deptRepo.find({ filter: { active: true }, fields: ['organizationId'], limit: 200 }) : [];
+        for (const r of Array.isArray(deptRows) ? deptRows : []) {
+          const oid = val(r, 'organizationId');
+          if (oid && !counts.has(oid)) counts.set(oid, 0);
+        }
+        organizations = [...counts.keys()].sort((a, b) => (counts.get(b) - counts.get(a)) || a.localeCompare(b));
       } else {
         const actor = await resolveParaActor(db, ctx.state?.currentUser);
         organizationId = actor.organizationId;
+        organizations = [actor.organizationId];
       }
 
       const repo = db.getRepository('latticeParaDocuments');
@@ -39,7 +55,7 @@ function createParaActions(db) {
         if (Object.hasOwn(spaces, space)) spaces[space] += 1;
       }
       const total = Object.values(spaces).reduce((acc, n) => acc + n, 0);
-      ctx.body = { organizationId, spaces, total };
+      ctx.body = { organizationId, organizations, spaces, total };
       await next();
     },
   };
