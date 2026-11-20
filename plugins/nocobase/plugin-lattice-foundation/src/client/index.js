@@ -23,6 +23,7 @@
   const {registerApplicationViews} = require('../applications/views');
   const {defaultContracts}=require('../shared/contracts');
   const {createNativeBuilderNavigation}=require('./native-builder-navigation');
+  const {createIncidentEvidence}=require('./native-incident-evidence');
   const {createBrandLogo, registerSignInLogo}=require('./native-branding');
   function useLatticeFormAction(manifest, blockId) {
     const apiClient = client.useAPIClient();
@@ -45,6 +46,7 @@
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
       this.app.addScopes({useLatticeFormAction});
       const blocks=createBlockComponents(client,React,antd);
+      this.app.addComponents({LatticeIncidentEvidence:createIncidentEvidence(client,React,antd)});
       class LatticeFormBlockModel extends clientV2.BlockModel {
         renderComponent(){return React.createElement(blocks.ConfiguredBlock,{...this.props,expectedType:'form'});}
       }
