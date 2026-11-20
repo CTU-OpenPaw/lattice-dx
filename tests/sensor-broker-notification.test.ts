@@ -34,4 +34,13 @@ describe('native sensor rule notification', () => {
     expect(() => sensorReadingsFromNotification({ ...notification, subscriptionId: 'another-subscription' }, options)).toThrow();
     expect(() => sensorReadingsFromNotification({ ...notification, data: [{ ...measurement, id: 'foreign' }] }, options)).toThrow();
   });
+  it('rejects impossible calendar dates and timezone-less observedAt values', () => {
+    for (const badTime of ['2026-02-31T00:00:00Z', '2026-10-19T10:00:00', '2026-10-19T10:00:00+07:00']) {
+      const badMeasurement = {
+        ...measurement,
+        [projection.attribute]: { ...projection.property, observedAt: badTime },
+      };
+      expect(() => sensorReadingsFromNotification({ ...notification, data: [badMeasurement] }, options)).toThrow();
+    }
+  });
 });

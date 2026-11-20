@@ -9,6 +9,24 @@ function object(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
+const CANONICAL_OBSERVED_AT_RE = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?Z$/;
+
+function parseCanonicalObservedAt(raw: string): string {
+  const match = CANONICAL_OBSERVED_AT_RE.exec(raw);
+  if (!match) throw new Error('Invalid sensor observedAt timestamp');
+  const parsed = new Date(raw);
+  if (!Number.isFinite(parsed.getTime()) ||
+      parsed.getUTCFullYear() !== Number(match[1]) ||
+      parsed.getUTCMonth() + 1 !== Number(match[2]) ||
+      parsed.getUTCDate() !== Number(match[3]) ||
+      parsed.getUTCHours() !== Number(match[4]) ||
+      parsed.getUTCMinutes() !== Number(match[5]) ||
+      parsed.getUTCSeconds() !== Number(match[6])) {
+    throw new Error('Invalid sensor observedAt calendar date');
+  }
+  return parsed.toISOString();
+}
+
 export function sensorReadingsFromNotification(
   input: unknown,
   options: { tenant: string; subscriptionId: string; mapping: RuleAssetMapping; rule: SensorRule },
@@ -30,7 +48,7 @@ export function sensorReadingsFromNotification(
     }
     const reading = {
       schemaVersion: 1, assetUrn: entity.id, attribute, unit, value: measurement.value,
-      observedAt: new Date(measurement.observedAt).toISOString(), eventId: metadata('sourceEventId'),
+      observedAt: parseCanonicalObservedAt(measurement.observedAt), eventId: metadata('sourceEventId'),
       source: { system: metadata('sourceSystem'), deviceId: metadata('sourceDeviceId') },
       simulated: metadata('simulated'),
     };
