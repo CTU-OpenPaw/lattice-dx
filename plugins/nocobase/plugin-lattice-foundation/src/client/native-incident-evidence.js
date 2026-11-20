@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 function formatEvidenceSource(source) {
   if (!source || typeof source !== 'object') return 'Bằng chứng không xác định';
   if (source.kind === 'native-record') return 'Bản ghi sự cố #' + String(source.recordId ?? '') + ' · ' + String(source.fingerprint ?? '');

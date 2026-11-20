@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 export function uc2InboxWorkflow({ organizationId, webhookUrl, webhookKey, target = 'observation' }) {
   if (typeof organizationId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(organizationId)) throw new Error('Invalid organization');
   const url = new URL(webhookUrl);

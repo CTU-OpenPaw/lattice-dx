@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -25,7 +26,7 @@ function createCompliantFixtureFiles() {
   };
   write('package.json', JSON.stringify({ name: 'fixture-dx', version: '0.1.0', license: 'Apache-2.0' }));
   for (const rel of [
-    'LICENSE', 'NOTICE', 'README.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md',
+    'LICENSE', 'NOTICE', 'COPYRIGHT.txt', 'README.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md',
     'docs/build-from-source.md', 'docs/oss-pof-compliance.md', 'docs/third-party.md',
     '.github/ISSUE_TEMPLATE/bug_report.yml',
   ]) {
@@ -42,6 +43,7 @@ function createCompliantFixtureFiles() {
     JSON.stringify({ name: '@latticedx/plugin-lattice-foundation', license: 'Apache-2.0', nocobase: { sdkProvidedByHost: true } }),
   );
   write('plugins/nocobase/plugin-lattice-foundation/LICENSE', 'Apache-2.0\n');
+  write('plugins/nocobase/plugin-lattice-foundation/README.md', '# Plugin Lattice Foundation\n');
   write(
     'plugins/nocobase/plugin-lattice-foundation/src/client/index.js',
     `${SPDX_COMMENT}export const attribution = 'https://www.nocobase.com';\n`,
@@ -84,6 +86,26 @@ test('runPofAudit detects missing SPDX headers, unpinned Compose images, and mis
   assert.match(byId['plugin-isolation'].details, /Clause 5\.2/);
 });
 
+test('runPofAudit requires root COPYRIGHT.txt and per-plugin README.md', t => {
+  const dirNoCopy = createCompliantFixtureRepo();
+  t.after(() => rmSync(dirNoCopy, { recursive: true, force: true }));
+  rmSync(join(dirNoCopy, 'COPYRIGHT.txt'));
+  const reportCopy = runPofAudit({ rootDir: dirNoCopy });
+  assert.equal(reportCopy.result, 'FAIL');
+  const copyCheck = reportCopy.checks.find(c => c.id === 'governance-files');
+  assert.equal(copyCheck?.passed, false);
+  assert.match(copyCheck?.details ?? '', /COPYRIGHT\.txt/);
+
+  const dirNoReadme = createCompliantFixtureRepo();
+  t.after(() => rmSync(dirNoReadme, { recursive: true, force: true }));
+  rmSync(join(dirNoReadme, 'plugins/nocobase/plugin-lattice-foundation/README.md'));
+  const reportReadme = runPofAudit({ rootDir: dirNoReadme });
+  assert.equal(reportReadme.result, 'FAIL');
+  const pluginCheck = reportReadme.checks.find(c => c.id === 'plugin-isolation');
+  assert.equal(pluginCheck?.passed, false);
+  assert.match(pluginCheck?.details ?? '', /README\.md/);
+});
+
 test('planTarball rejects non-.tar.gz archive extensions such as .zip', t => {
   const dir = createCompliantFixtureRepo();
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -93,9 +115,13 @@ test('planTarball rejects non-.tar.gz archive extensions such as .zip', t => {
   assert.equal(plan.sha256Path, `${plan.tarballPath}.sha256`);
 });
 
-test('assertTarballEntries rejects node_modules, .env, .git, and bundled upstream files', () => {
-  const base = ['latticedx-0.1.0/LICENSE', 'latticedx-0.1.0/NOTICE', 'latticedx-0.1.0/README.md', 'latticedx-0.1.0/CHANGELOG.md', 'latticedx-0.1.0/docs/build-from-source.md'];
+test('assertTarballEntries rejects node_modules, .env, .git, missing COPYRIGHT.txt, and bundled upstream files', () => {
+  const base = ['latticedx-0.1.0/LICENSE', 'latticedx-0.1.0/NOTICE', 'latticedx-0.1.0/COPYRIGHT.txt', 'latticedx-0.1.0/README.md', 'latticedx-0.1.0/CHANGELOG.md', 'latticedx-0.1.0/docs/build-from-source.md'];
   assert.doesNotThrow(() => assertTarballEntries([...base, 'latticedx-0.1.0/upstream/nocobase/'], { prefix: 'latticedx-0.1.0/' }));
+  assert.throws(
+    () => assertTarballEntries(base.filter(e => !e.endsWith('/COPYRIGHT.txt')), { prefix: 'latticedx-0.1.0/' }),
+    /COPYRIGHT\.txt/,
+  );
   for (const forbidden of [
     'latticedx-0.1.0/node_modules/pkg/index.js',
     'latticedx-0.1.0/.env',

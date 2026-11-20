@@ -28,8 +28,11 @@ Dependencies npm khóa bằng `pnpm-lock.yaml`; container images trong `infra/co
 | `@latticedx/plugin-lattice-foundation` | `0.25.1` | Collections nghiệp vụ, migration, guard, Multi-Portal UI và tích hợp native. |
 | `@latticedx/plugin-enterprise-auth` | `0.1.0` | Cầu nối đăng nhập doanh nghiệp qua Keycloak (OIDC + PKCE). |
 | `@latticedx/plugin-action-bridge` | `0.4.1` | Kết nối giao diện và action proxy với API LatticeDX. |
+| `@latticedx/plugin-dxos-para` | `0.1.0` | Không gian tri thức P.A.R.A. (`latticeParaDocuments`), ACL 7 vai trò, org-scope và `latticePara:summary`. |
+| `@latticedx/plugin-dxos-blocks` | `0.1.0` | 6 Native v2 `BlockModel` tùy biến trong UI Editor và 2 API scoped (`dxosBlocks:proposals`, `contextTelemetry`). |
+| `@latticedx/plugin-dxos-studio` | `0.1.0` | Màn hình `/admin/settings/dxos-studio`, 4 mẫu quy trình Poka-yoke, `composePortals` và `latticeServiceTickets`. |
 
-Ba package khai báo `Apache-2.0` cho mã nhóm, có file `LICENSE` riêng và dùng SDK từ host (`sdkProvidedByHost: true`). Giữ thông báo bản quyền và giấy phép của dependency được đóng gói cùng plugin theo phạm vi áp dụng của chúng.
+Sáu package khai báo `Apache-2.0` cho mã nhóm, có file `LICENSE` + `README.md` riêng và dùng SDK từ host (`sdkProvidedByHost: true`). Giữ thông báo bản quyền và giấy phép của dependency được đóng gói cùng plugin theo phạm vi áp dụng của chúng; xem tổng hợp tại [`COPYRIGHT.txt`](../COPYRIGHT.txt).
 
 Enterprise Login đóng gói các dependency dưới đây. Phiên bản và giấy phép được ghi trong [lockfile của plugin](../plugins/nocobase/plugin-enterprise-auth/package-lock.json). Các bản đã cài mang theo `LICENSE.md` riêng.
 

@@ -26,7 +26,7 @@ cd latticedx-0.1.0
 git clone https://github.com/CTU-OpenPaw/lattice-dx.git
 cd lattice-dx
 ```
-> Submodule `upstream/nocobase` (commit `5b47bec116c52239348c09d360e4bd2649c99efc`) chỉ dùng để khảo sát mã nguồn tham chiếu (`git submodule update --init --recursive`) và **không cần thiết** để build LatticeDX hoặc ba plugin.
+> Submodule `upstream/nocobase` (commit `5b47bec116c52239348c09d360e4bd2649c99efc`) chỉ dùng để khảo sát mã nguồn tham chiếu (`git submodule update --init --recursive`) và **không cần thiết** để build LatticeDX hoặc 6 plugin NocoBase.
 
 ## 3. Cấu hình biến môi trường trước khi build
 
@@ -52,32 +52,36 @@ Lệnh `pnpm check` thực thi tuần tự ba bước kiểm chứng từ nguồ
 2. `pnpm test`: Chạy bộ kiểm thử Vitest (`tests/**/*.test.ts`, `apps/*/src/**/*.test.ts`, `packages/*/src/**/*.test.ts`, `plugins/nocobase/*/*.test.ts`, loại trừ `upstream/**`).
 3. `pnpm build`: Biên dịch ứng dụng Next.js (`@dx/web`) và mã TypeScript của `@dx/contracts`, `@dx/api`, `@dx/agent-worker`.
 
-## 5. Build & Kiểm thử ba Plugin NocoBase của nhóm
+## 5. Build & Kiểm thử sáu Plugin NocoBase của nhóm
 
-Ba plugin Apache-2.0 (`@latticedx/plugin-action-bridge`, `@latticedx/plugin-lattice-foundation`, `@latticedx/plugin-enterprise-auth`) khai báo `"sdkProvidedByHost": true` và không sao chép mã nguồn NocoBase vào kho build:
+Sáu plugin Apache-2.0 (`@latticedx/plugin-action-bridge`, `@latticedx/plugin-lattice-foundation`, `@latticedx/plugin-enterprise-auth`, `@latticedx/plugin-dxos-para`, `@latticedx/plugin-dxos-blocks`, `@latticedx/plugin-dxos-studio`) khai báo `"sdkProvidedByHost": true` và không sao chép mã nguồn NocoBase vào kho build:
 
 ```sh
 # 1. Cài phụ thuộc khóa lockfile của plugin-enterprise-auth (tắt lifecycle scripts)
 npm ci --prefix plugins/nocobase/plugin-enterprise-auth --ignore-scripts --no-audit --no-fund
 
-# 2. Build lần lượt 3 plugin
+# 2. Build lần lượt 6 plugin
 node plugins/nocobase/action-bridge/build.mjs
 node plugins/nocobase/plugin-lattice-foundation/scripts/build.mjs
 node plugins/nocobase/plugin-enterprise-auth/build.mjs
+node plugins/nocobase/plugin-dxos-para/build.mjs
+node plugins/nocobase/plugin-dxos-blocks/build.mjs
+node plugins/nocobase/plugin-dxos-studio/build.mjs
 
-# 3. Chạy kiểm thử đơn vị của plugin
-node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs plugins/nocobase/plugin-enterprise-auth/tests/*.test.cjs
+# 3. Chạy kiểm thử đơn vị của 6 plugin + scripts PoF/demo
+node --test plugins/nocobase/action-bridge/tests/*.test.cjs plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/plugin-enterprise-auth/tests/*.test.cjs plugins/nocobase/plugin-dxos-para/tests/*.test.cjs plugins/nocobase/plugin-dxos-blocks/tests/*.test.cjs plugins/nocobase/plugin-dxos-studio/tests/*.test.cjs scripts/tests/*.test.mjs
 ```
 
 ## 6. Kiểm toán PoF & Đóng gói `.tar.gz` phát hành nguồn
 
 ```sh
+node scripts/source-headers.mjs --check
 pnpm pof:check
 node --test scripts/tests/oss-pof-audit.test.mjs
 pnpm release:tarball
 ```
 
-- `pnpm pof:check` chạy được cả trên bản checkout Git lẫn trong thư mục giải nén từ gói `.tar.gz` (không cần `.git/`), để tự động kiểm tra SPDX headers, tài liệu quản trị, `NOTICE`, cô lập plugin NocoBase, digest `@sha256:` trong Compose, trạng thái `upstream/` và không lộ secret.
+- `pnpm pof:check` chạy được cả trên bản checkout Git lẫn trong thư mục giải nén từ gói `.tar.gz` (không cần `.git/`), để tự động kiểm tra SPDX headers, tài liệu quản trị (`COPYRIGHT.txt`, `NOTICE`, `LICENSE`, `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`), cô lập 6 plugin NocoBase (kèm `LICENSE` + `README.md` riêng), digest `@sha256:` trong Compose, trạng thái `upstream/` và không lộ secret.
 - `pnpm release:tarball` tạo gói phát hành `output/release/latticedx-<version>-src.tar.gz` kèm `latticedx-<version>-src.tar.gz.sha256` từ `HEAD` đã commit trên checkout Git (không bao gồm `node_modules/`, `output/`, `.env`, `.git/` hay source `upstream/nocobase/`).
 
 ## 7. Phân tách mã nguồn tự build vs Dịch vụ OCI bên ngoài
@@ -85,5 +89,5 @@ pnpm release:tarball
 | Phạm vi | Cách build / vận hành | Tài liệu chi tiết |
 | --- | --- | --- |
 | **Mã nguồn LatticeDX** (`apps/`, `packages/`, `plugins/nocobase/`, `solutions/`, `scripts/`) | Biên dịch trực tiếp từ mã nguồn bằng Node 24 + pnpm 10.23.0 | Mục 4–5 ở trên |
-| **Khởi tạo môi trường Native sạch từ source commit** | Xuất `HEAD`, dựng DB trắng 0 bảng, cài và nghiệm thu 3 plugin | [native-clean-install.md](native-clean-install.md) |
-| **Dịch vụ hạ tầng OCI bên ngoài** (`PostgreSQL`, `Keycloak`, `APISIX`, `ClamAV`, `NocoBase 2.2.38`, `Orion-LD`, `MongoDB`, `n8n`) | Kéo container image khóa digest `@sha256:` qua `infra/compose/*.yml`; tương tác qua SQL/HTTP/TCP | [third-party.md](third-party.md), [`NOTICE`](../NOTICE) |
+| **Khởi tạo môi trường Native sạch từ source commit** | Xuất `HEAD`, dựng DB trắng 0 bảng, cài và nghiệm thu 6 plugin | [native-clean-install.md](native-clean-install.md) · [DEMO_PACK.md](DEMO_PACK.md) |
+| **Dịch vụ hạ tầng OCI bên ngoài** (`PostgreSQL`, `Keycloak`, `APISIX`, `ClamAV`, `NocoBase 2.2.38`, `Orion-LD`, `MongoDB`, `n8n`) | Kéo container image khóa digest `@sha256:` qua `infra/compose/*.yml`; tương tác qua SQL/HTTP/TCP | [third-party.md](third-party.md), [`COPYRIGHT.txt`](../COPYRIGHT.txt), [`NOTICE`](../NOTICE) |

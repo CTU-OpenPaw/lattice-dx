@@ -38,10 +38,13 @@ packages and plugins carry AGPL-3.0 / NocoBase Commercial License headers
 (see docs/nocobase-source-review.md).
 
 First-party NocoBase plugins (@latticedx/plugin-lattice-foundation,
-@latticedx/plugin-enterprise-auth, @latticedx/plugin-action-bridge) declare
-"nocobase": { "sdkProvidedByHost": true }, invoke host APIs only at runtime,
-do not redistribute upstream implementation code, and preserve Clause 5.2
-UI attribution ("Powered by NocoBase", version "v2.2.38", "License settings").
+@latticedx/plugin-enterprise-auth, @latticedx/plugin-action-bridge,
+@latticedx/plugin-dxos-para, @latticedx/plugin-dxos-blocks, and
+@latticedx/plugin-dxos-studio) declare "nocobase": { "sdkProvidedByHost": true },
+invoke host APIs only at runtime, do not redistribute upstream implementation
+code, and preserve Clause 5.2 UI attribution ("Powered by NocoBase", version
+"v2.2.38", "License settings"). See root COPYRIGHT.txt for the full copyright
+and dependency summary.
 
 ================================================================================
 3. Standalone Containerized Infrastructure Services (Network Boundary Only)

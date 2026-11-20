@@ -4,6 +4,14 @@ Tài liệu ghi nhận lịch sử phát triển của **LatticeDX** (Apache-2.0
 
 ## [Unreleased] — chuẩn bị v0.1.0
 
+### 2026-11-20 — LatticeDX Open-Core 6-Plugin Suite & NukeViet-Grade PoF
+- Mở rộng nền tảng thành hệ sinh thái **6 plugin NocoBase Apache-2.0** (`"sdkProvidedByHost": true`), bổ sung 3 plugin mới:
+  - `@latticedx/plugin-dxos-para` (`0.1.0`): không gian tri thức P.A.R.A. (`latticeParaDocuments`, `uiManageable: true`, 7 vai trò `ldx_*`, tách phạm vi `organizationId`, `latticePara:summary`).
+  - `@latticedx/plugin-dxos-blocks` (`0.1.0`): 6 Native v2 `BlockModel` tùy biến trực tiếp qua NocoBase UI Editor (`dxosBlockSettings`) và 2 API scoped (`dxosBlocks:proposals`, `dxosBlocks:contextTelemetry`).
+  - `@latticedx/plugin-dxos-studio` (`0.1.0`): màn hình `/admin/settings/dxos-studio` cài 1-nhấp 4 quy trình Poka-yoke (gồm `logistics-5step` và `internal-service`), dựng trang tổng quan đa-block (`composePortals`), theo dõi 6 plugin và collection `latticeServiceTickets`.
+- Tích hợp cả 6 plugin vào `infra/compose/{nocobase,native-rehearsal}.yml`, `scripts/install-workspace.mjs`, `scripts/native-clean-install.mjs`, `scripts/setup-native-multi-portal-demo.mjs` và `.github/workflows/ci.yml`.
+- Bổ sung [`COPYRIGHT.txt`](COPYRIGHT.txt) theo chuẩn NukeViet-style PoF, kịch bản trình diễn [docs/DEMO_PACK.md](docs/DEMO_PACK.md), chuẩn hóa header `@copyright (C) 2026 CTU-OpenPaw` + `SPDX-License-Identifier: Apache-2.0` qua `scripts/source-headers.mjs`, làm sạch `README.md`, và nâng cấp `pnpm pof:check` kiểm tra bắt buộc `COPYRIGHT.txt` và `README.md` cho mọi plugin.
+
 ### 2026-11-18 — Native Multi-Portal UI & OLP PMNM 2026 (VFOSSA) PoF Compliance
 - Bổ sung giao diện Multi-Portal Apache-2.0 trên `AdminLayoutModel` / `uiLayouts` trong `@latticedx/plugin-lattice-foundation`, giữ nguyên thông tin bản quyền NocoBase Clause 5.2 (`Powered by NocoBase`, `v2.2.38`, `License settings`).
 - Tạo `NOTICE` theo Apache-2.0 §4(d) phân tách rạch ròi mã gốc Apache-2.0, submodule/container NocoBase, dịch vụ container độc lập (`PostgreSQL`, `Keycloak`, `APISIX`, `FIWARE Orion-LD`, `MongoDB`, `n8n`, `ClamAV`) và dependency MIT đóng gói.

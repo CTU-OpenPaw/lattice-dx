@@ -1,0 +1,58 @@
+================================================================================
+LatticeDX — Open Digital Enterprise Platform (DX-OS Open-Core)
+Copyright (C) 2026 CTU-OpenPaw (https://github.com/CTU-OpenPaw/lattice-dx)
+All original first-party source code is licensed under Apache License 2.0.
+================================================================================
+
+LatticeDX ("DX-OS Open-Core") is an open-source digital enterprise platform
+developed by CTU-OpenPaw for OLP PMNM 2026 (VFOSSA). Original first-party code
+under apps/, packages/, plugins/nocobase/, scripts/, infra/, solutions/, and
+tests/ is distributed under the Apache License, Version 2.0 (see LICENSE and
+NOTICE).
+
+Upstream NocoBase source code referenced in submodule upstream/nocobase is NOT
+modified, bundled into pnpm workspace builds, or redistributed inside release
+tarballs. First-party plugins declare "nocobase": { "sdkProvidedByHost": true },
+invoke host SDK APIs at runtime, and preserve NocoBase Clause 5.2 attribution
+("Powered by NocoBase", "v2.2.38", "License settings").
+
+================================================================================
+First-Party LatticeDX NocoBase Plugins (Apache-2.0, sdkProvidedByHost: true)
+================================================================================
+Name                                | Version | License    | Purpose | Path
+------------------------------------|---------|------------|---------|------------------------------------------------
+@latticedx/plugin-action-bridge     | 0.4.1   | Apache-2.0 | Legacy bridge and action proxy contracts | plugins/nocobase/action-bridge
+@latticedx/plugin-lattice-foundation| 0.25.1  | Apache-2.0 | Core ERP collections, 7 roles, Multi-Portal UI | plugins/nocobase/plugin-lattice-foundation
+@latticedx/plugin-enterprise-auth   | 0.1.0   | Apache-2.0 | Keycloak OIDC + PKCE enterprise authentication | plugins/nocobase/plugin-enterprise-auth
+@latticedx/plugin-dxos-para         | 0.1.0   | Apache-2.0 | [H] P.A.R.A. knowledge space (latticeParaDocuments) | plugins/nocobase/plugin-dxos-para
+@latticedx/plugin-dxos-blocks       | 0.1.0   | Apache-2.0 | [H][P][D][I] 6 configurable Native v2 BlockModels | plugins/nocobase/plugin-dxos-blocks
+@latticedx/plugin-dxos-studio       | 0.1.0   | Apache-2.0 | [P][H][D] DX-OS Admin Studio, 4 Poka-yoke workflows, Service Tickets | plugins/nocobase/plugin-dxos-studio
+
+================================================================================
+Third-Party Dependencies, Host Runtime & External OCI Services
+================================================================================
+Full license notices remain with their respective upstream projects (see also
+LICENSE, NOTICE, docs/third-party.md, and docs/dependency-inventory.md):
+
+Name                       | Version  | License                 | Description | Url
+---------------------------|----------|-------------------------|-------------|---------------------------------------------
+NocoBase Host Runtime      | 2.2.38   | NocoBase License (2026-02-24; Apache-2.0 + Clauses 4.2, 5.1-5.4) | Low-code/No-code runtime container & host SDK | https://github.com/nocobase/nocobase
+Next.js                    | 16.3.8   | MIT                     | Web application framework for apps/web | https://github.com/vercel/next.js
+React / React DOM          | 19.3.0   | MIT                     | UI library for @dx/web (host runtime uses React 18) | https://github.com/facebook/react
+Fastify                    | 5.12.5   | MIT                     | Backend HTTP API framework for apps/api | https://github.com/fastify/fastify
+jose                       | 6.2.12   | MIT                     | JWT/JWS/JWK utilities for @dx/api | https://github.com/panva/jose
+node-postgres (pg)         | 8.23.1   | MIT                     | PostgreSQL client for @dx/api | https://github.com/brianc/node-postgres
+openid-client              | 6.8.9    | MIT                     | Bundled OIDC client in plugin-enterprise-auth | https://github.com/panva/openid-client
+jose (plugin-auth)         | 6.2.15   | MIT                     | Bundled JOSE helper in plugin-enterprise-auth | https://github.com/panva/jose
+oauth4webapi               | 3.8.8    | MIT                     | Bundled OAuth/OIDC core in plugin-enterprise-auth | https://github.com/panva/oauth4webapi
+TypeScript                 | 7.0.2    | Apache-2.0              | Static type checker and compiler | https://github.com/microsoft/TypeScript
+Vitest                     | 5.0.3    | MIT                     | Workspace unit & integration test runner | https://github.com/vitest-dev/vitest
+tsx                        | 4.23.15  | MIT                     | TypeScript runner for Node backend services | https://github.com/privatenumber/tsx
+esbuild                    | 0.28.2   | MIT                     | Plugin & runtime bundler | https://github.com/evanw/esbuild
+PostgreSQL                 | 16.13    | PostgreSQL License      | Relational database OCI container | https://www.postgresql.org/about/licence/
+Keycloak                   | 26.8.0   | Apache-2.0              | Identity & Access Management OCI container | https://github.com/keycloak/keycloak
+Apache APISIX              | 3.19.0   | Apache-2.0              | API Gateway OCI container | https://github.com/apache/apisix
+FIWARE Orion-LD            | 1.10.0   | AGPL-3.0                | NGSI-LD Context Broker OCI container (HTTP) | https://github.com/FIWARE/context.Orion-LD
+MongoDB                    | 4.4.29   | SSPL-1.0                | Backing DB container for FIWARE Orion-LD | https://github.com/mongodb/mongo
+n8n                        | 2.42.7   | Sustainable Use License | Standalone workflow automation container | https://github.com/n8n-io/n8n
+ClamAV                     | 1.4.3    | GPL-2.0                 | Standalone antivirus scanner daemon (TCP) | https://github.com/Cisco-Talos/clamav

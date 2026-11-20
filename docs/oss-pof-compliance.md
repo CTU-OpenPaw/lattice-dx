@@ -5,11 +5,11 @@ Sáu mục dưới đây theo bảng PoF (50 điểm) của [thể lệ VFOSSA](
 | Tiêu chí | Bằng chứng cần đối chiếu trên bản nộp |
 | --- | --- |
 | 1. Kho mã công khai (5) | Mở repo, source, lịch sử commit và trang release bằng phiên không đăng nhập. |
-| 2. Giấy phép OSI-approved (10) | Có toàn văn [LICENSE](../LICENSE), header SPDX của mã nhóm và [NOTICE](../NOTICE). Kiểm tra các license đi kèm, phạm vi sử dụng và điều khoản của NocoBase theo [hồ sơ nguồn](nocobase-source-review.md). |
+| 2. Giấy phép OSI-approved (10) | Có toàn văn [LICENSE](../LICENSE), [`COPYRIGHT.txt`](../COPYRIGHT.txt), header `@copyright` + SPDX Apache-2.0 của mã nhóm và [NOTICE](../NOTICE). Kiểm tra các license đi kèm, phạm vi sử dụng và điều khoản của NocoBase theo [hồ sơ nguồn](nocobase-source-review.md). |
 | 3. Phát hành (5) | Tạo GitHub Release cho tag phiên bản trên commit đã nghiệm thu trước hạn nộp. Đính kèm gói nguồn `.tar.gz` và checksum. |
-| 4. Build từ source (10) | Làm theo [hướng dẫn build](build-from-source.md) từ gói đã giải nén trên môi trường sạch. Kiểm tra cấu hình trước build, công cụ build, cài đặt và chạy từ thư mục triển khai, sau đó chạy các luồng nghiệm thu. |
-| 5. Thư viện và gói đi kèm (10) | Đối chiếu [kiểm kê phụ thuộc](dependency-inventory.md), lockfile, Compose và [thông tin bên thứ ba](third-party.md) với nội dung gói nguồn. Kiểm tra license, notice, các dependency do hệ thống cung cấp và nguồn upstream được lấy riêng. |
-| 6. Tài liệu và giao tiếp (10) | [README](../README.md), [CHANGELOG](../CHANGELOG.md), hướng dẫn cài/vận hành, [CONTRIBUTING](../CONTRIBUTING.md) và issue tracker có ghi nhận lỗi hoặc đầu việc thực tế. |
+| 4. Build từ source (10) | Làm theo [hướng dẫn build](build-from-source.md) từ gói đã giải nén trên môi trường sạch và kịch bản [DEMO_PACK.md](DEMO_PACK.md). Kiểm tra cấu hình trước build, công cụ build, cài đặt 6 plugin từ thư mục triển khai và chạy các luồng nghiệm thu. |
+| 5. Thư viện và gói đi kèm (10) | Đối chiếu [`COPYRIGHT.txt`](../COPYRIGHT.txt), [kiểm kê phụ thuộc](dependency-inventory.md), lockfile, Compose và [thông tin bên thứ ba](third-party.md) với nội dung gói nguồn. Kiểm tra `LICENSE` + `README.md` của từng plugin, dependency do hệ thống cung cấp và nguồn upstream được lấy riêng. |
+| 6. Tài liệu và giao tiếp (10) | [README](../README.md), [CHANGELOG](../CHANGELOG.md), [DEMO_PACK](DEMO_PACK.md), hướng dẫn cài/vận hành, [CONTRIBUTING](../CONTRIBUTING.md) và issue tracker có ghi nhận lỗi hoặc đầu việc thực tế. |
 
 ## Trước khi phát hành v0.1.0
 

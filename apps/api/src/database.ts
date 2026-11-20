@@ -1,5 +1,12 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {agentDatabase} from './agents/database.js';
-// SPDX-License-Identifier: Apache-2.0
 import { Pool } from 'pg';
 import { taskLifecycleDatabase } from './tasks/database.js';
 import { initializeCreateCommands, runCreateCommand } from './create-command.js';

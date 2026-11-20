@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -16,6 +17,7 @@ const ARCHIVE_SKIP_DIRS = new Set(['.git', 'node_modules', 'output', '.next', 'd
 const REQUIRED_GOVERNANCE = [
   'LICENSE',
   'NOTICE',
+  'COPYRIGHT.txt',
   'README.md',
   'CHANGELOG.md',
   'CONTRIBUTING.md',
@@ -27,6 +29,7 @@ const REQUIRED_GOVERNANCE = [
 ];
 const PRIMARY_GOVERNANCE_DOCS = [
   'README.md',
+  'COPYRIGHT.txt',
   'CONTRIBUTING.md',
   'CHANGELOG.md',
   'SECURITY.md',
@@ -144,12 +147,16 @@ function checkPluginIsolation(rootDir) {
     if (!existsSync(licenseFile) || readFileSync(licenseFile, 'utf8').trim().length === 0) {
       issues.push(`plugins/nocobase/${entry.name}/LICENSE missing or empty`);
     }
+    const readmeFile = join(dir, 'README.md');
+    if (!existsSync(readmeFile) || readFileSync(readmeFile, 'utf8').trim().length === 0) {
+      issues.push(`plugins/nocobase/${entry.name}/README.md missing or empty`);
+    }
   }
   const clientDir = join(pluginsRoot, 'plugin-lattice-foundation/src/client');
   const clientFiles = listFilesRecursive(clientDir);
   const hasAttribution = clientFiles.some(file => NOCOBASE_ATTRIBUTION_RE.test(readFileSync(file, 'utf8')));
   if (!hasAttribution) issues.push('Missing NocoBase Clause 5.2 attribution (nocobase.com / Powered by NocoBase) in plugins/nocobase/plugin-lattice-foundation/src/client/');
-  return { id: 'plugin-isolation', passed: issues.length === 0, details: issues.length ? issues.join('; ') : 'All NocoBase plugins declare Apache-2.0, sdkProvidedByHost: true, LICENSE, and Clause 5.2 attribution' };
+  return { id: 'plugin-isolation', passed: issues.length === 0, details: issues.length ? issues.join('; ') : 'All NocoBase plugins declare Apache-2.0, sdkProvidedByHost: true, LICENSE, README.md, and Clause 5.2 attribution' };
 }
 
 function checkComposeDigests(rootDir) {

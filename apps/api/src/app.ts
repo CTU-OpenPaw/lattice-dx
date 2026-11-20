@@ -1,5 +1,12 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {registerAgents,type AgentOptions} from './agents/routes.js';
-// SPDX-License-Identifier: Apache-2.0
 import { CreateCommandError,parseCreateKey,requireCreateCapability } from './create-command.js';
 import Fastify from 'fastify';
 import {registerTaskLifecycle,type TaskLifecycleOptions} from './tasks/routes.js';
