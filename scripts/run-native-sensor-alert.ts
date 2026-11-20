@@ -8,6 +8,13 @@ import { runNativeAlertLoop } from './lib/native-alert-loop.mjs';
 const require = createRequire(new URL('../apps/api/package.json', import.meta.url));
 const { Pool } = require('pg');
 
+function formatWorkerError(error: unknown): string {
+  const err = error as { code?: unknown; name?: unknown; message?: unknown } | null;
+  const code = typeof err?.code === 'string' ? err.code : (typeof err?.name === 'string' ? err.name : 'Error');
+  const msg = String(err?.message || '').replace(/\b(postgres(?:ql)?|https?):\/\/\S+/gi, '[redacted]').slice(0, 160);
+  return `(${code}): ${msg}`;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const watch = args.length === 1 && args[0] === '--watch';
@@ -23,13 +30,21 @@ async function main() {
   const origin = new URL(UC2_NATIVE_URL);
   if (!['http:', 'https:'].includes(origin.protocol) || origin.username || origin.password ||
       origin.pathname !== '/' || origin.search || origin.hash) throw new Error('Invalid native origin');
-  const pool = new Pool({ connectionString: DATABASE_URL, max: 1, connectionTimeoutMillis: 5000 });
+  const pool = new Pool({ connectionString: DATABASE_URL, max: 1, connectionTimeoutMillis: 5000, query_timeout: 20000 });
+  pool.on('error', (error: { code?: string; message?: string }) => {
+    console.error('Native alert pool error:', error?.code || error?.message || 'unknown');
+  });
   try {
     const worker = createSensorAlertWorker({
       queue: createSensorAlertQueue(pool, { organizationId: UC2_SENSOR_TENANT }),
       transport: {
         async deliver({ alert, idempotencyKey, signal }) {
-          const identity = parseSensorAssetUrn(alert.assetUrn, UC2_SENSOR_TENANT);
+          let identity;
+          try {
+            identity = parseSensorAssetUrn(alert.assetUrn, UC2_SENSOR_TENANT);
+          } catch {
+            throw new AlertDeliveryError('ALERT_NATIVE_ASSET_REQUIRED', false);
+          }
           if (identity.kind !== 'native') throw new AlertDeliveryError('ALERT_NATIVE_ASSET_REQUIRED', false);
           const { handlerId, severity } = alert.ruleSnapshot;
           if (typeof handlerId !== 'string' || !/^[1-9]\d{0,18}$/.test(handlerId) ||
@@ -43,8 +58,10 @@ async function main() {
             await response.body?.cancel();
             throw new AlertDeliveryError('ALERT_NATIVE_HTTP_' + response.status, response.status === 429 || response.status >= 500);
           }
-          const { data } = await response.json();
-          if (!/^[1-9]\d{0,18}$/.test(String(data?.id)) || typeof data.duplicate !== 'boolean') {
+          let body: { data?: { id?: unknown; duplicate?: unknown } } | null = null;
+          try { body = await response.json(); } catch { body = null; }
+          const data = body?.data;
+          if (!/^[1-9]\d{0,18}$/.test(String(data?.id)) || typeof data?.duplicate !== 'boolean') {
             throw new AlertDeliveryError('ALERT_NATIVE_INVALID_RECEIPT', true);
           }
           return { targetRecordId: String(data.id), receipt: { duplicate: data.duplicate } };
@@ -52,7 +69,9 @@ async function main() {
       },
     });
     if (!watch) {
-      console.log(JSON.stringify(await worker.runOnce()));
+      const result = await worker.runOnce();
+      console.log(JSON.stringify(result));
+      if (result.outcome === 'failed' || result.outcome === 'retry') process.exitCode = 1;
       return;
     }
     const stop = new AbortController();
@@ -62,8 +81,11 @@ async function main() {
     try {
       await runNativeAlertLoop({
         runOnce: () => worker.runOnce(),
-        onResult: result => {
+        onResult: (result: { outcome: string }) => {
           if (result.outcome !== 'idle') console.log(JSON.stringify(result));
+        },
+        onError: (error: unknown) => {
+          console.error(`Native alert loop iteration failed ${formatWorkerError(error)}`);
         },
         intervalMs, signal: stop.signal,
       });
@@ -76,7 +98,7 @@ async function main() {
   }
 }
 
-main().catch(() => {
-  console.error('Native alert worker could not run. Check configuration and database availability.');
+main().catch((error: unknown) => {
+  console.error(`Native alert worker could not run ${formatWorkerError(error)}`);
   process.exitCode = 1;
 });

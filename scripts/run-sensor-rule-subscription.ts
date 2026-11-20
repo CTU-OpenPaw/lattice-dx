@@ -18,49 +18,78 @@ if (!DATABASE_URL || !UC2_SENSOR_TENANT || !UC2_RULE_FILE || !UC2_SENSOR_SOURCE 
 }
 const { ruleEntity, mapping } = JSON.parse(await readFile(UC2_RULE_FILE, 'utf8'));
 const rule = parseSensorRule(ruleEntity);
-if (mapping?.assetEntityId !== rule.assetEntityId || parseSensorAssetUrn(mapping.assetUrn, UC2_SENSOR_TENANT).kind !== 'native') {
-  throw new Error('Invalid rule Asset mapping');
+if (String(mapping?.assetEntityId ?? '').toLowerCase() !== rule.assetEntityId ||
+    parseSensorAssetUrn(mapping.assetUrn, UC2_SENSOR_TENANT).kind !== 'native' ||
+    !/^[1-9]\d{0,18}$/.test(String(rule.handlerId ?? ''))) {
+  throw new Error('Invalid rule Asset mapping or handlerId');
 }
 const port = Number(process.env.UC2_SENSOR_NOTIFICATION_PORT ?? '15454');
 const host = process.env.UC2_SENSOR_NOTIFICATION_HOST ?? '127.0.0.1';
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid sensor listener port');
-const database = new Pool({ connectionString: DATABASE_URL, max: 4, connectionTimeoutMillis: 5000 });
+const database = new Pool({ connectionString: DATABASE_URL, max: 4, connectionTimeoutMillis: 5000, query_timeout: 20000 });
+database.on('error', (error: { code?: string; message?: string }) => {
+  console.error('Sensor listener pool error:', error?.code || error?.message || 'unknown');
+});
 const repo = createSensorRuleRepository(database, { organizationId: UC2_SENSOR_TENANT, sourceSystem: UC2_SENSOR_SOURCE });
 const expectedToken = Buffer.from(NGSI_LD_NOTIFICATION_TOKEN!);
-const server = createServer({ requestTimeout: 10000 }, async (req, res) => {
-  if (!['/uc2/sensor-notifications', '/uc2/sensor-notifications/'].includes(req.url?.split('?')[0] ?? '') ||
-      req.method !== 'POST') { res.writeHead(404).end(); return; }
-  const supplied = Buffer.from(String(req.headers['x-lattice-broker-token'] ?? ''));
-  if (supplied.length !== expectedToken.length || !timingSafeEqual(supplied, expectedToken) ||
-      req.headers['ngsild-tenant'] !== UC2_SENSOR_TENANT) { res.writeHead(403).end(); return; }
-  const chunks: Buffer[] = [];
-  let size = 0;
-  let readings;
-  try {
-    for await (const chunk of req) {
-      size += chunk.length;
-      if (size > 65536) { res.writeHead(413).end(); return; }
-      chunks.push(chunk);
-    }
-    const notification = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-    readings = sensorReadingsFromNotification(notification, {
-      tenant: UC2_SENSOR_TENANT, subscriptionId: NGSI_LD_SUBSCRIPTION_ID!, mapping, rule,
-    });
-    if (readings.some(reading => reading.source.system !== UC2_SENSOR_SOURCE)) throw new Error('Unexpected source');
-  } catch {
-    res.writeHead(400).end(); return;
+function safeReply(res: import('node:http').ServerResponse, status: number, headers?: Record<string, string>) {
+  if (!res.headersSent && !res.destroyed) {
+    res.writeHead(status, headers).end();
   }
+}
+const server = createServer({ requestTimeout: 10000 }, async (req, res) => {
   try {
-    for (const sourcePayload of readings) {
-      const result = await repo.evaluate({ ruleEntity, mapping, sourcePayload });
-      console.log(JSON.stringify({ outcome: result.outcome, duplicate: result.duplicate, alertId: result.alertId }));
+    if (!['/uc2/sensor-notifications', '/uc2/sensor-notifications/'].includes(req.url?.split('?')[0] ?? '') ||
+        req.method !== 'POST') { safeReply(res, 404); return; }
+    const supplied = Buffer.from(String(req.headers['x-lattice-broker-token'] ?? ''));
+    if (supplied.length !== expectedToken.length || !timingSafeEqual(supplied, expectedToken) ||
+        req.headers['ngsild-tenant'] !== UC2_SENSOR_TENANT) { safeReply(res, 403); return; }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let readings;
+    try {
+      for await (const chunk of req) {
+        size += chunk.length;
+        if (size > 65536) {
+          safeReply(res, 413, { Connection: 'close' });
+          req.destroy();
+          return;
+        }
+        chunks.push(chunk);
+      }
+      const notification = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      readings = sensorReadingsFromNotification(notification, {
+        tenant: UC2_SENSOR_TENANT, subscriptionId: NGSI_LD_SUBSCRIPTION_ID!, mapping, rule,
+      });
+      if (readings.some(reading => reading.source.system !== UC2_SENSOR_SOURCE)) throw new Error('Unexpected source');
+    } catch {
+      safeReply(res, 400); return;
     }
-    res.writeHead(204).end();
+    try {
+      for (const sourcePayload of readings) {
+        const result = await repo.evaluate({ ruleEntity, mapping, sourcePayload });
+        console.log(JSON.stringify({ outcome: result.outcome, duplicate: result.duplicate, alertId: result.alertId }));
+      }
+      safeReply(res, 204);
+    } catch (error) {
+      safeReply(res, error instanceof SensorRuleConflictError ? 409 : 503);
+    }
   } catch (error) {
-    res.writeHead(error instanceof SensorRuleConflictError ? 409 : 503).end();
+    console.error('Unhandled sensor listener request error:', (error as Error)?.message || 'unknown');
+    safeReply(res, 500, { Connection: 'close' });
   }
 });
+server.on('error', error => {
+  console.error('Sensor listener server error:', (error as { code?: string; message?: string })?.code || (error as Error)?.message || 'unknown');
+  process.exitCode = 1;
+});
 server.listen(port, host, () => console.log('UC2 sensor notification listener ready'));
+let shuttingDown = false;
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(signal, () => server.close(() => { void database.end(); }));
+  process.once(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    server.closeIdleConnections?.();
+    server.close(() => { void database.end().catch(() => {}); });
+  });
 }

@@ -10,7 +10,7 @@
 function manualInterface(name,title,actions,collection,fields=['code','name','description','category'],detailTitle='Thông tin yêu cầu',note) {
   const buttons=Object.fromEntries(actions.map(action=>[action.key,{type:'void',title:action.title,'x-component':'Action','x-decorator':'ManualActionStatusProvider','x-decorator-props':{value:action.status},'x-component-props':{type:action.key==='reject'?'default':'primary',useAction:'{{ useSubmit }}'},'x-designer':'ManualActionDesigner','x-action-settings':{assignedValues:{values:action.values}}}]));
   const actionBar={type:'void','x-decorator':'ActionBarProvider','x-component':'ActionBar','x-component-props':{layout:'one-column'},'x-initializer':'workflowManual:form:configureActions',properties:buttons};
-  const properties=note?{[note.key]:{type:'string',title:note.title,required:true,'x-decorator':'FormItem','x-component':'Input.TextArea','x-component-props':{maxLength:1000}},actions:actionBar}:{actions:actionBar};
+  const properties=note?{[note.key]:{type:'string',title:note.title,required:true,'x-decorator':'FormItem','x-component':'Input.TextArea','x-component-props':{maxLength:255}},actions:actionBar}:{actions:actionBar};
   const form={type:'void','x-component':'FormV2','x-use-component-props':'useFormBlockProps',properties};
   const formBlock={type:'void','x-decorator':'CustomFormBlockProvider','x-decorator-props':{collection:{name,fields:[]}},'x-component':'CardItem','x-component-props':{title},'x-designer':'SimpleDesigner','x-designer-props':{type:'customForm'},properties:{[name]:form}};
   const column={type:'void','x-component':'Grid.Col',properties:{formBlock}};
@@ -82,8 +82,9 @@ function incidentProcessTemplate({organizationId,reviewerEmployeeId,assigneeEmpl
   const employee=(key,id,extra)=>node(key,'query','Kiểm tra người được giao',{collection:'latticeEmployees',multiple:false,failOnEmpty:true,params:{filter:{id,organizationId,active:true,userId:{$ne:null},...extra}}});
   const managerRole={'user.roles.name':{$in:['ldx_manager','ldx_admin']}};
   const condition=(key,left,right,calculator='equal',rejectOnFalse=true)=>node(key,'condition','Kiểm tra '+key,{rejectOnFalse,calculation:{calculator,operands:[left,right]}});
+  const present=(key,operand)=>node(key,'condition','Kiểm tra '+key,{rejectOnFalse:true,calculation:{group:{type:'and',calculations:[{calculator:'notEqual',operands:[operand,null]},{calculator:'notEqual',operands:[operand,'']}]}}});
   const update=(key,status,values)=>node(key,'update','Cập nhật sự cố',{collection,params:{individualHooks:true,filter:{id:'{{$context.data.id}}',organizationId,status,handlerId},values}});
-  const manual=(key,title,user,actions,note)=>node(key,'manual',title,{mode:0,assignees:[user],forms:{[key]:{type:'custom',actions}},schema:manualInterface(key,title,actions,collection,['code','name','status','resolutionNote'],'Thông tin sự cố',note)});
+  const manual=(key,title,user,actions,note)=>node(key,'manual',title,{mode:0,assignees:[user],forms:{[key]:{type:'custom',actions}},schema:manualInterface(key,title,actions,collection,['code','name','severity','status','resolutionNote'],'Thông tin sự cố',note)});
   const reviewer=state('reviewer','userId'),handler=state('handler','userId');
   employee('reviewer',reviewerId,managerRole);
   employee('handler',handlerId);
@@ -96,18 +97,19 @@ function incidentProcessTemplate({organizationId,reviewerEmployeeId,assigneeEmpl
   manual('resolution','Ghi kết quả xử lý',handler,[{key:'resolve',title:'Ghi kết quả',status:1,values:{}}],{key:'note',title:'Kết quả xử lý'});
   employee('handlerCurrent',handlerId,{userId:handler});
   const resolution=state('resolution','resolution.note');
-  condition('resolutionPresent',resolution,'','notEqual');
+  present('resolutionPresent',resolution);
   update('markResolved','approved',{status:'resolved',resolutionNote:resolution});
   employee('reviewerBeforeClose',reviewerId,{...managerRole,userId:reviewer});
   manual('close','Đóng sự cố',reviewer,[{key:'close',title:'Đóng sự cố',status:1,values:{}}],{key:'note',title:'Ghi chú đóng sự cố'});
   employee('reviewerAtClose',reviewerId,{...managerRole,userId:reviewer});
   const close=state('close','close.note');
-  condition('closeNotePresent',close,'','notEqual');
+  present('closeNotePresent',close);
   update('markClosed','resolved',{status:'closed',closeNote:close});
   condition('rejected',state('review','review.decision'),'rejected');
   nodes.at(-1).upstreamKey='approved';
   nodes.at(-1).branchIndex=0;
   update('markRejected','open',{status:'rejected'});
+  node('endRejected','end','Kết thúc nhánh từ chối',{endStatus:1});
   return {workflow:{title:'UC2 — Xử lý sự cố — '+organizationId,type:'collection',enabled:false,sync:false,config:{collection,mode:1,condition:{organizationId,handlerId,status:'open'}}},nodes};
 }
 
