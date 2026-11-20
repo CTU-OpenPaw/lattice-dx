@@ -7,11 +7,13 @@
  */
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
-    define('@latticedx/plugin-lattice-foundation', ['@nocobase/client', 'react', 'antd', '@nocobase/client-v2', 'react-router-dom', '@nocobase/flow-engine'], factory);
+    define('@latticedx/plugin-lattice-foundation', ['@nocobase/client', 'react', 'antd', '@nocobase/client-v2', 'react-router-dom', '@nocobase/flow-engine', '@ant-design/icons'], factory);
   } else if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('@nocobase/client'), require('react'), require('antd'), require('@nocobase/client-v2'), require('react-router-dom'), require('@nocobase/flow-engine'));
+    let icons;
+    try { icons = require('@ant-design/icons'); } catch { icons = undefined; }
+    module.exports = factory(require('@nocobase/client'), require('react'), require('antd'), require('@nocobase/client-v2'), require('react-router-dom'), require('@nocobase/flow-engine'), icons);
   }
-})(function (client, React, antd, clientV2, router, flow) {
+})(function (client, React, antd, clientV2, router, flow, icons) {
   'use strict';
   const actions = require('./actions');
   const {createWorkspaceComponent} = require('./workspace');
@@ -23,6 +25,7 @@
   const {registerApplicationViews} = require('../applications/views');
   const {defaultContracts}=require('../shared/contracts');
   const {createNativeBuilderNavigation}=require('./native-builder-navigation');
+  const {createNativePortalManager}=require('./native-portal-manager');
   const {createIncidentEvidence}=require('./native-incident-evidence');
   const {createBrandLogo, registerSignInLogo}=require('./native-branding');
   function useLatticeFormAction(manifest, blockId) {
@@ -42,8 +45,33 @@
     async load() {
       const BrandLogo=createBrandLogo(client,React);
       registerSignInLogo(this.app,React,BrandLogo);
-      const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo});
+      const portalManager=createNativePortalManager(client,React,antd,this.app,router,icons,{clientV2});
+      await portalManager?.preloadPortals?.();
+      const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo,portalManager});
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
+      if (typeof clientV2?.ACLRolesCheckProvider === 'function' && typeof this.app.use === 'function') {
+        this.app.use(clientV2.ACLRolesCheckProvider);
+      }
+      const SettingsTopbar = this.app.flowEngine?.getModelClass?.('PluginSettingsTopbarActionModel');
+      if (SettingsTopbar?.prototype && !SettingsTopbar.prototype.aclSnippet) SettingsTopbar.prototype.aclSnippet = 'pm';
+      const secSetting = this.app.pluginSettingsManager?.get?.('security');
+      if (secSetting && !secSetting.aclSnippet) secSetting.aclSnippet = 'pm.security';
+      if (typeof clientV2?.UserCenterActionItemModel === 'function' && typeof this.app.flowEngine?.registerModels === 'function' && !this.app.flowEngine.getModelClass?.('SignOutItemModel')) {
+        class LatticeSignOutUserCenterItemModel extends clientV2.UserCenterActionItemModel {
+          constructor(...args) { super(...args); this.label = 'Sign out'; this.section = 'danger'; this.sort = 100; this.danger = true; }
+          async onClick() {
+            let redirectUrl = this.context?.app?.getRouteUrl?.('/signin') || '/signin';
+            try {
+              const res = await this.context?.app?.apiClient?.auth?.signOut?.();
+              redirectUrl = res?.data?.data?.redirectUrl || redirectUrl;
+            } catch {}
+            if (typeof window !== 'undefined' && window.location) window.location.assign(redirectUrl);
+          }
+        }
+        LatticeSignOutUserCenterItemModel.itemId = 'lattice-sign-out';
+        this.app.flowEngine.registerModels({ LatticeSignOutUserCenterItemModel });
+      }
+      portalManager?.ensureLayoutModelsReady?.();
       this.app.addScopes({useLatticeFormAction});
       const blocks=createBlockComponents(client,React,antd);
       this.app.addComponents({LatticeIncidentEvidence:createIncidentEvidence(client,React,antd)});

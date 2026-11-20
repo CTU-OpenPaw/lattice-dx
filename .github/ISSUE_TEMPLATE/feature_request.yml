@@ -1,0 +1,44 @@
+# @file LatticeDX — Open Digital Enterprise Platform
+# @author CTU-OpenPaw
+# @license Apache-2.0
+# @see https://github.com/CTU-OpenPaw/lattice-dx
+# SPDX-License-Identifier: Apache-2.0
+name: Đề xuất tính năng / Feature Request
+description: Đề xuất năng lực DX-OS mới, cải tiến kiến trúc hoặc tài liệu / Propose a new DX-OS capability or improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Bài toán doanh nghiệp / Enterprise Problem
+      description: Mô tả nhu cầu nghiệp vụ hoặc điểm nghẽn hiện tại khi triển khai DX-OS.
+    validations:
+      required: true
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Tầng DX-OS liên quan / Affected DX-OS Layer
+      options:
+        - "Tầng 1 — Core Identity, RBAC & Foundation Data (Keycloak / PostgreSQL / Foundation)"
+        - "Tầng 2 — Configurable Workflow, Approval & Storage (Workflow / ClamAV / Files)"
+        - "Tầng 3 — Context Broker & External Automation (NGSI-LD Orion-LD / n8n)"
+        - "Tầng 4 — AI Advisory Worker & Human-in-the-Loop Review"
+        - "Native Multi-Portal UI / Developer Experience / OSS Governance"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Đề xuất giải pháp & Tiêu chí nghiệm thu / Proposed Solution & Acceptance Criteria
+      description: Mô tả ranh giới dịch vụ, contract API/UI dự kiến và cách kiểm chứng tự động (`pnpm check`, smoke tests).
+    validations:
+      required: true
+  - type: textarea
+    id: licensing
+    attributes:
+      label: Ảnh hưởng giấy phép hoặc dependency / License & Dependency Impact
+      description: Ghi rõ nếu đề xuất thêm npm package hoặc container image mới (cần tương thích Apache-2.0 / OSI và khóa phiên bản/digest).
+      placeholder: "Không thêm dependency mới / Hoặc: thêm package X (MIT)"
+    validations:
+      required: false

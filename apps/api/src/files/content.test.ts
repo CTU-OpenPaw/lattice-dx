@@ -1,3 +1,10 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {describe,it,expect,vi} from 'vitest';
 import {loadFileContentWithClient,readFileMetadataWithClient} from './content.js';
 const id='11111111-1111-4111-8111-111111111111';

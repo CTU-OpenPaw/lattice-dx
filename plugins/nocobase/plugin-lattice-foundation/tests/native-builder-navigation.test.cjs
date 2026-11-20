@@ -5,43 +5,44 @@
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
-const {test} = require('node:test');
+const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const {pageTree, hostPath, firstSettingsPath, createNativeBuilderNavigation} = require('../src/client/native-builder-navigation');
-const {readFileSync} = require('node:fs');
-const {runInNewContext} = require('node:vm');
+const { pageTree, hostPath, firstSettingsPath, createNativeBuilderNavigation } = require('../src/client/native-builder-navigation');
+const { createNativePortalManager } = require('../src/client/native-portal-manager');
+const { readFileSync } = require('node:fs');
+const { runInNewContext } = require('node:vm');
 
 test('projects host accessible groups/pages without catalog or external link destinations', () => {
-  const routes = [{type: 'group', id: 8, title: 'Nhân sự', children: [
-    {type: 'page', schemaUid: 'employees-v1', title: 'Nhân viên', sort: 2},
-    {type: 'flowPage', schemaUid: 'departments_v2', title: 'Đơn vị', sort: 1},
-    {type: 'link', title: 'External', options: {href: 'https://example.com'}},
-    {type: 'tabs', schemaUid: 'tab', title: 'Tab'},
-  ]}];
+  const routes = [{ type: 'group', id: 8, title: 'Nhân sự', children: [
+    { type: 'page', schemaUid: 'employees-v1', title: 'Nhân viên', sort: 2 },
+    { type: 'flowPage', schemaUid: 'departments_v2', title: 'Đơn vị', sort: 1 },
+    { type: 'link', title: 'External', options: { href: 'https://example.com' } },
+    { type: 'tabs', schemaUid: 'tab', title: 'Tab' },
+  ] }];
   const snapshot = JSON.stringify(routes);
-  assert.deepEqual(pageTree(routes), [{key: 'group:8', title: 'Nhân sự', children: [
-    {key: 'page:departments_v2', title: 'Đơn vị', path: '/admin/departments_v2'},
-    {key: 'page:employees-v1', title: 'Nhân viên', path: '/admin/employees-v1'},
-  ]}]);
+  assert.deepEqual(pageTree(routes), [{ key: 'group:8', title: 'Nhân sự', children: [
+    { key: 'page:departments_v2', title: 'Đơn vị', path: '/admin/departments_v2' },
+    { key: 'page:employees-v1', title: 'Nhân viên', path: '/admin/employees-v1' },
+  ] }]);
   assert.equal(JSON.stringify(routes), snapshot);
 });
 
 test('hidden parents, hidden pages, empty groups and malformed UIDs are excluded', () => {
-  const page = {type: 'flowPage', schemaUid: 'valid', title: 'Trang'};
+  const page = { type: 'flowPage', schemaUid: 'valid', title: 'Trang' };
   assert.deepEqual(pageTree([
-    {...page, hidden: true}, {...page, hideInMenu: true},
-    {type: 'group', id: 1, hidden: true, children: [page]},
-    {type: 'group', id: 2, children: []},
-    ...['../settings', '', 'https://other', null, '..', 'a/b', 'x?y'].map(schemaUid => ({...page, schemaUid})),
+    { ...page, hidden: true }, { ...page, hideInMenu: true },
+    { type: 'group', id: 1, hidden: true, children: [page] },
+    { type: 'group', id: 2, children: [] },
+    ...['../settings', '', 'https://other', null, '..', 'a/b', 'x?y'].map(schemaUid => ({ ...page, schemaUid })),
   ]), []);
   assert.deepEqual(pageTree(null), []);
 });
 
 test('search retains ancestor hierarchy and matches a group without flattening its pages', () => {
-  const routes = [{type: 'group', id: 1, title: 'Nhân sự', children: [
-    {type: 'page', schemaUid: 'a', title: 'Nhân viên'},
-    {type: 'page', schemaUid: 'b', title: 'Đơn vị'},
-  ]}];
+  const routes = [{ type: 'group', id: 1, title: 'Nhân sự', children: [
+    { type: 'page', schemaUid: 'a', title: 'Nhân viên' },
+    { type: 'page', schemaUid: 'b', title: 'Đơn vị' },
+  ] }];
   assert.deepEqual(pageTree(routes, 'ĐƠN VỊ')[0].children.map(x => x.key), ['page:b']);
   assert.equal(pageTree(routes, 'Nhân sự')[0].children.length, 2);
   assert.deepEqual(pageTree(routes, 'không tồn tại'), []);
@@ -59,97 +60,144 @@ test('native links respect host basename and reject non-native or unsafe destina
 
 test('Config selects only an allowed settings leaf, never a denied or external setting', () => {
   assert.equal(firstSettingsPath([
-    {isAllow: false, path: '/admin/settings/secrets'},
-    {children: [{isAllow: false, path: '/admin/settings/no'}, {isAllow: true, path: '/admin/settings/users'}]},
+    { isAllow: false, path: '/admin/settings/secrets' },
+    { children: [{ isAllow: false, path: '/admin/settings/no' }, { isAllow: true, path: '/admin/settings/users' }] },
   ]), '/admin/settings/users');
-  assert.equal(firstSettingsPath([{path: 'https://example.com'}, {isAllow: false, children: [{path: '/admin/settings/no'}]}]), null);
+  assert.equal(firstSettingsPath([{ path: 'https://example.com' }, { isAllow: false, children: [{ path: '/admin/settings/no' }] }]), null);
 });
 
-function harness({allow = true, pathname = '/admin/demo', refresh = async () => {}, designable = false, runEffects = false} = {}) {
-  let cursor = 0;
-  const state = [], registered = [];
+function harness({ allow = true, pathname = '/admin/demo', designable = false, runEffects = false, portals = [], layoutUid, roleCheck } = {}) {
+  let cursor = 0, nativeRenders = 0, v2Renders = 0, lastGate = null;
+  const state = [], registered = [], navigations = [], layouts = new Map(), registeredModels = {};
   let effects = [], cleanups = [];
-  let nativeRenders = 0;
   const React = {
-    createElement: (type, props, ...children) => ({type, props: props || {}, children}),
-    useState(initial) {const index = cursor++; if (!(index in state)) state[index] = initial; return [state[index], value => {state[index] = value;}];},
-    useRef(initial) {const index=cursor++; return state[index] || (state[index]={current:initial});},
-    useEffect(effect) {if (runEffects) effects.push(effect);},
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({
+      type,
+      props: children.length ? { ...(props || {}), children: children.length === 1 ? children[0] : children } : (props || {}),
+      children,
+    }),
+    useState(initial) { const i = cursor++; if (!(i in state)) state[i] = initial; return [state[i], v => { state[i] = v; }]; },
+    useRef(initial) { const i = cursor++; return state[i] || (state[i] = { current: initial }); },
+    useEffect(effect) { if (runEffects) effects.push(effect); },
   };
   class NativeModel {
-    render() {nativeRenders++; return 'native runtime shell';}
-    syncMenuRoutes(routes) {this.syncedRoutes=routes;}
-    setIsMobileLayout(value) {this.isMobileLayout=value;}
+    constructor() { if (layoutUid) this.layout = { uid: layoutUid }; }
+    render() { nativeRenders++; return 'native runtime shell'; }
+    addSubModel(subKey, opts) { return { subKey, ...opts }; }
+    syncMenuRoutes(routes) { this.syncedRoutes = routes; }
+    setIsMobileLayout(value) { this.isMobileLayout = value; }
+  }
+  class V2AdminModel {
+    render() { v2Renders++; return 'v2 portal shell'; }
+    syncMenuRoutes(routes) { this.v2SyncedRoutes = routes; }
+    toProLayoutRoute() { return { path: '/', children: ['v2-item'] }; }
+  }
+  class V2MenuItem {
+    addSubModel(subKey, opts) { return { subKey, ...opts }; }
   }
   const client = {
-    AdminProvider: 'AdminProvider', PinnedPluginList: 'NativeTools',
-    useAllAccessDesktopRoutes: () => ({allAccessRoutes: [{type: 'flowPage', schemaUid: 'demo', title: 'Trang demo'}], refresh}),
-    useUIConfigurationPermissions: () => ({allowConfigUI: allow}), useDesignable: () => ({designable}),
+    AdminProvider: 'AdminProvider', PinnedPluginList: 'NativeTools', SchemaComponent: 'Schema', PagePopups: 'Popups',
+    useAllAccessDesktopRoutes: () => ({ allAccessRoutes: [{ type: 'flowPage', schemaUid: 'demo', title: 'Trang demo' }], refresh: async () => {} }),
+    useUIConfigurationPermissions: () => ({ allowConfigUI: allow }),
+    useDesignable: () => ({ designable }),
+    useAPIClient: () => ({
+      auth: { role: allow ? 'root' : 'ldx_employee' },
+      request: async req => (req?.url === 'roles:check' && roleCheck ? roleCheck() : { data: { data: portals } }),
+    }),
   };
   const app = {
-    flowEngine: {getModelClass: () => NativeModel,
-      flowSettings: {enabled:false, async enable() {this.enabled=true;}, async disable() {this.enabled=false;}}},
-    router: {add: (name, route) => registered.push({name, ...route})},
-    pluginSettingsManager: {getList: () => [{path: '/admin/settings/users'}], get: () => null},
+    flowEngine: {
+      getModelClass: () => NativeModel,
+      registerModels: map => Object.assign(registeredModels, map),
+      flowSettings: { enabled: false, async enable() { this.enabled = true; }, async disable() { this.enabled = false; } },
+    },
+    layoutManager: { hasLayout: name => layouts.has(name), registerLayout: cfg => layouts.set(cfg.routeName, cfg) },
+    pluginSettingsManager: { add() {} },
+    router: { add: (name, route) => registered.push({ name, ...route }) },
   };
+  const router = { Link: 'Link', Outlet: 'Outlet', useLocation: () => ({ pathname, search: '' }), useNavigate: () => (to, opts) => navigations.push({ to, opts }) };
+  const antd = Object.fromEntries(['Input', 'Button', 'Alert', 'Select', 'Space', 'Card', 'Dropdown'].map(k => [k, k]));
+  const portalManager = createNativePortalManager(client, React, antd, app, router);
   let model;
-  const clientV2 = {getAdminLayoutModel(engine, options) {model = new options.use(); return model;}};
-  const router = {Link: 'Link', Outlet: 'Outlet', useLocation: () => ({pathname})};
-  const Layout = createNativeBuilderNavigation(client, React, {Input: 'Input', Button: 'Button', Alert: 'Alert'}, app,
-    {clientV2, router, flow: {FlowModelRenderer: 'FlowModelRenderer'}});
+  const clientV2 = { AdminLayoutModel: V2AdminModel, AdminLayoutMenuItemModel: V2MenuItem, getAdminLayoutModel(engine, options) { model = new options.use(); return model; } };
+  const Layout = createNativeBuilderNavigation(client, React, antd, app, { clientV2, router, flow: { FlowModelRenderer: 'FlowModelRenderer' }, portalManager });
   const root = Layout({});
-  const provider = model.render();
-  const shell = provider.children[0];
-  return {root, provider, registered, model, flowSettings:app.flowEngine.flowSettings,
-    setAllow(value) {allow=value;}, get nativeRenders() {return nativeRenders;}, render() {
-      cursor = 0;const ui=shell.type(shell.props);
-      cleanups.forEach(cleanup=>cleanup());
-      cleanups=effects.map(effect=>effect()).filter(value=>typeof value==='function');effects=[];
+  const gate = model.render();
+  return {
+    root, gate, registered, model, registeredModels, layouts, navigations,
+    flowSettings: app.flowEngine.flowSettings,
+    setAllow(v) { allow = v; },
+    get lastGate() { return lastGate; },
+    get nativeRenders() { return nativeRenders; },
+    get v2Renders() { return v2Renders; },
+    render() {
+      cursor = 0;
+      lastGate = gate.type(gate.props);
+      const shell = lastGate?.type === 'AdminProvider' ? lastGate.children[0] : null;
+      const ui = shell ? shell.type(shell.props) : lastGate;
+      cleanups.forEach(c => c());
+      cleanups = effects.map(e => e()).filter(v => typeof v === 'function');
+      effects = [];
       return ui;
-    }};
+    },
+  };
 }
 
 function find(node, predicate) {
   if (!node || typeof node !== 'object') return null;
   if (predicate(node)) return node;
+  if (typeof node.type === 'function') return find(node.type(node.props), predicate);
   return node.children?.flat(Infinity).map(child => find(child, predicate)).find(Boolean) || null;
 }
 
-test('replaces the shell through native model lifecycle and has two header mode links, no drawer', () => {
+test('delegates AdminLayoutModel to NativeModel.prototype.render, registers AdminLayoutModel, and centers Clause 5.2 link outside settings', () => {
   const setup = harness();
   assert.equal(setup.root.type, 'FlowModelRenderer');
-  assert.equal(setup.provider.type, 'AdminProvider');
+  assert.equal(typeof setup.registeredModels.AdminLayoutModel, 'function');
   const ui = setup.render();
-  const header = find(ui, n => n.type === 'header');
-  assert.equal(find(header, n => n.type === 'Link' && n.children[0] === 'Config').props.to, '/admin/settings/users');
-  assert.equal(find(header, n => n.type === 'Link' && n.children[0] === 'Build UI').props.to, '/admin/lattice-builder');
-  assert.equal(find(ui, n => n.type === 'Drawer'), null);
-  assert.ok(find(ui, n => n.type === 'NativeTools'));
-});
-
-test('Build UI is a registered page; sidebar links use the host SPA router and main keeps its Outlet', () => {
-  const setup = harness();
-  assert.equal(setup.registered[0].name, 'admin.lattice-builder');
-  assert.equal(setup.registered[0].path, '/admin/lattice-builder');
-  const ui = setup.render();
-  const sidebar = find(ui, n => n.type === 'aside');
-  assert.equal(find(sidebar, n => n.type === 'Link' && n.children[0] === 'Trang demo').props.to, '/admin/demo');
-  assert.ok(find(ui, n => n.type === 'Outlet'));
-  assert.equal(find(ui, n => n.type === 'a'), null);
-});
-
-test('Config keeps native settings content without a duplicate page-tree sidebar', () => {
-  const ui = harness({pathname: '/admin/settings/users'}).render();
-  assert.equal(find(ui, n => n.type === 'aside'), null);
-  assert.ok(find(ui, n => n.type === 'Outlet'));
-  assert.equal(find(ui, n => n.type === 'Link' && n.children[0] === 'Config').props['aria-current'], 'page');
-});
-
-test('employees keep the native runtime shell and cannot use the builder landing page', () => {
-  const setup = harness({allow: false});
-  assert.equal(setup.render(), 'native runtime shell');
+  assert.equal(setup.lastGate.type, 'AdminProvider');
+  assert.equal(ui.type, 'Fragment');
+  assert.equal(ui.children[0], 'native runtime shell');
   assert.equal(setup.nativeRenders, 1);
-  const landing = setup.registered[0].Component();
+  const link = find(ui, n => n.type === 'a' && n.props.href === 'https://www.nocobase.com');
+  assert.equal(link.children[0], 'NocoBase');
+  const footer = find(ui, n => n.props?.className === 'ldx-clause52-attribution');
+  assert.equal(footer.props.style.left, '50%');
+  assert.ok(find(ui, n => n.props?.className === 'nb-portal-switcher'));
+
+  const settingsSetup = harness({ pathname: '/admin/settings/multi-portal' });
+  const settingsUi = settingsSetup.render();
+  assert.equal(find(settingsUi, n => n.props?.className === 'ldx-clause52-attribution'), null);
+});
+
+test('employees wait on /admin redirect without mounting AdminProvider, then use V2AdminModel inside portal', async () => {
+  const portals = [{ uid: 'ldx-portal-hr', title: 'HR', routeName: 'p_hr', routePath: '/p/hr', firstPagePath: '/p/hr/leave', isDefault: true, enabled: true }];
+  const setup = harness({ allow: false, pathname: '/admin', runEffects: true, portals });
+  const waitingUi = setup.render();
+  assert.equal(waitingUi.props.className, 'ldx-portal-redirecting');
+  assert.notEqual(setup.lastGate.type, 'AdminProvider');
+  assert.equal(setup.nativeRenders, 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(setup.layouts.get('p_hr').layoutModelClass, 'AdminLayoutModel');
+  assert.deepEqual(setup.navigations.at(-1), { to: '/p/hr/leave', opts: { replace: true } });
+
+  const portalSetup = harness({ allow: false, pathname: '/p/hr/leave', layoutUid: 'ldx-portal-hr' });
+  const portalUi = portalSetup.render();
+  assert.equal(portalSetup.lastGate.type, 'AdminProvider');
+  assert.equal(portalUi.children[0], 'v2 portal shell');
+  assert.equal(portalSetup.v2Renders, 1);
+  assert.equal(portalSetup.nativeRenders, 0);
+  portalSetup.model.syncMenuRoutes(['r1']);
+  assert.deepEqual(portalSetup.model.v2SyncedRoutes, ['r1']);
+  assert.deepEqual(portalSetup.model.toProLayoutRoute(), { path: '/', children: ['v2-item'] });
+  assert.equal(typeof portalSetup.registeredModels.LatticePortalMenuItemModel, 'function');
+  assert.equal(portalSetup.model.addSubModel('menuItems', { use: 'AdminLayoutMenuItemModel', uid: 'm1' }).use, 'LatticePortalMenuItemModel');
+  const adminSetup = harness({ allow: true, pathname: '/admin/demo' });
+  assert.equal(adminSetup.model.addSubModel('menuItems', { use: 'AdminLayoutMenuItemModel', uid: 'm0' }).use, 'AdminLayoutMenuItemModel');
+
+  const builderRoute = setup.registered.find(r => r.name === 'admin.lattice-builder');
+  const landing = builderRoute.Component();
   assert.ok(find(landing, n => n.type === 'h1' && n.children[0] === 'Không có quyền truy cập'));
 });
 
@@ -158,64 +206,130 @@ test('unsupported SDK does not register routes or replace the native layout', ()
 });
 
 test('switching from builder to employee disables design mode even after enable has settled', async t => {
-  const previous=global.window;
-  global.window={matchMedia:()=>({matches:false,addEventListener() {},removeEventListener() {}})};
-  t.after(()=>{global.window=previous;});
-  const setup=harness({allow:true,designable:true,runEffects:true});
-  setup.render();await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(setup.flowSettings.enabled,true);
-  setup.setAllow(false);setup.render();await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(setup.flowSettings.enabled,false);
+  const previous = global.window;
+  global.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
+  t.after(() => { global.window = previous; });
+  const setup = harness({ allow: true, designable: true, runEffects: true });
+  setup.render(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(setup.flowSettings.enabled, true);
+  setup.setAllow(false); setup.render(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(setup.flowSettings.enabled, false);
 });
 
-test('employee native model keeps accessible menu routes and reacts to mobile layout changes', async t => {
-  const previous=global.window, listeners=new Set();
-  const media={matches:false,addEventListener(event,listener) {listeners.add(listener);},removeEventListener(event,listener) {listeners.delete(listener);}};
-  global.window={matchMedia:()=>media};
-  t.after(()=>{global.window=previous;});
-  const setup=harness({allow:false,runEffects:true});
-  setup.render();await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(setup.model.syncedRoutes?.[0]?.schemaUid,'demo');
-  assert.equal(setup.model.isMobileLayout,false);
-  media.matches=true;listeners.forEach(listener=>listener());
-  await new Promise(resolve=>setImmediate(resolve));
-  assert.equal(setup.model.isMobileLayout,true);
-  assert.equal(setup.flowSettings.enabled,false);
+test('native model syncs menu routes when layout uid is absent, preserves portal routes when uid exists, and reacts to mobile changes', async t => {
+  const previous = global.window, listeners = new Set();
+  const media = { matches: false, addEventListener(e, l) { listeners.add(l); }, removeEventListener(e, l) { listeners.delete(l); } };
+  global.window = { matchMedia: () => media };
+  t.after(() => { global.window = previous; });
+
+  const setup = harness({ allow: false, runEffects: true });
+  setup.render(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(setup.model.syncedRoutes?.[0]?.schemaUid, 'demo');
+  assert.equal(setup.model.isMobileLayout, false);
+  media.matches = true; listeners.forEach(l => l());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(setup.model.isMobileLayout, true);
+  assert.equal(setup.flowSettings.enabled, false);
+
+  const portalSetup = harness({ allow: false, runEffects: true, layoutUid: 'ldx-portal-hr' });
+  portalSetup.render(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(portalSetup.model.syncedRoutes, undefined);
 });
 
-test('failed refresh hides stale page links and recovers on retry', async () => {
-  let attempts = 0;
-  const setup = harness({refresh: async () => {if (++attempts === 1) throw new Error('403');}});
-  await find(setup.render(), n => n.type === 'Button').props.onClick();
-  const failed = setup.render();
-  assert.ok(find(failed, n => n.type === 'Alert'));
-  assert.equal(find(failed, n => n.type === 'Link' && n.children[0] === 'Trang demo'), null);
-  await find(failed, n => n.type === 'Button').props.onClick();
-  assert.ok(find(setup.render(), n => n.type === 'Link' && n.children[0] === 'Trang demo'));
-});
-
-test('built AMD entry registers the replacement layout and builder route when host SDK is available', async () => {
+test('built AMD entry registers the replacement layout, portal manager, and builder route when host SDK is available', async () => {
   let factory;
-  const define = (name, deps, value) => {factory = value;};
+  const define = (name, deps, value) => { factory = value; };
   define.amd = {};
   runInNewContext(readFileSync(require.resolve('../dist/client/index.js'), 'utf8'), {
-    define, window: {location: {hostname: 'localhost', pathname: '/admin'}}, sessionStorage: {getItem: () => null},
+    define, window: { location: { hostname: 'localhost', pathname: '/admin' } }, sessionStorage: { getItem: () => null },
   });
-  class NativeModel {render() {return null;}}
-  class BlockModel {static define() {} static registerFlow() {}}
-  const client = {Plugin: class {}, AdminProvider() {}, useAllAccessDesktopRoutes() {}, useUIConfigurationPermissions() {}, useDesignable() {}};
-  const routes = [], components = {};
+  class NativeModel { render() { return null; } }
+  class BlockModel { static define() {} static registerFlow() {} }
+  class SettingsTopbarModel {}
+  class UserCenterAction {}
+  const client = { Plugin: class {}, AdminProvider() {}, useAllAccessDesktopRoutes() {}, useUIConfigurationPermissions() {}, useDesignable() {} };
+  const routes = [], components = {}, settings = [], usedProviders = [], createdModels = [], registeredModels = {};
+  const secObj = { title: 'Security' };
   const app = {
-    flowEngine: {getModelClass: name => name === 'AdminLayoutModel' ? NativeModel : undefined},
-    router: {add: (name, route) => routes.push({name, ...route})},
-    addComponents: value => Object.assign(components, value), addScopes() {}, use() {},
-    schemaInitializerManager: {get: () => ({add() {}})},
+    flowEngine: {
+      getModelClass: name => (name === 'AdminLayoutModel' ? NativeModel : name === 'PluginSettingsTopbarActionModel' ? SettingsTopbarModel : undefined),
+      getModel: uid => (createdModels.includes(uid) ? { uid } : undefined),
+      createModel: cfg => { createdModels.push(cfg.uid); return cfg; },
+      registerModels: map => Object.assign(registeredModels, map),
+    },
+    layoutManager: { listLayouts: () => [{ uid: 'ldx-portal-hr', routeName: 'p_hr', routePath: '/p/hr', layoutModelClass: 'AdminLayoutModel' }] },
+    pluginSettingsManager: { add: (name, cfg) => settings.push(name), get: name => (name === 'security' ? secObj : null) },
+    router: { add: (name, route) => routes.push({ name, ...route }) },
+    addComponents: value => Object.assign(components, value), addScopes() {},
+    use: prov => usedProviders.push(prov),
+    schemaInitializerManager: { get: () => ({ add() {} }) },
   };
-  const v2 = {BlockModel, getAdminLayoutModel() {}};
-  const mod = factory(client, {}, {}, v2, {Link() {}, Outlet() {}, useLocation() {}}, {FlowModelRenderer: {$$typeof: Symbol.for('react.memo')}});
+  const V2ACLProvider = () => null;
+  const v2 = { BlockModel, getAdminLayoutModel() {}, ACLRolesCheckProvider: V2ACLProvider, UserCenterActionItemModel: UserCenterAction };
+  const mod = factory(client, { createElement() {} }, {}, v2, { Link() {}, Outlet() {}, useLocation() {} }, { FlowModelRenderer: { $$typeof: Symbol.for('react.memo') } });
   const plugin = new mod.default();
-  plugin.app = app; plugin.flowEngine = {registerModels() {}};
+  plugin.app = app; plugin.flowEngine = app.flowEngine;
   await plugin.load();
   assert.equal(typeof components.AdminLayout, 'function');
+  assert.equal(typeof app.apps.loadAppList, 'function');
+  assert.ok(settings.includes('multi-portal'));
   assert.ok(routes.some(route => route.name === 'admin.lattice-builder' && route.path === '/admin/lattice-builder'));
+  assert.ok(usedProviders.includes(V2ACLProvider));
+  assert.equal(SettingsTopbarModel.prototype.aclSnippet, 'pm');
+  assert.equal(secObj.aclSnippet, 'pm.security');
+  assert.equal(registeredModels.LatticeSignOutUserCenterItemModel?.itemId, 'lattice-sign-out');
+  assert.ok(createdModels.includes('ldx-portal-hr'));
+
+  // Host with built-in SignOutItemModel must not register duplicate sign-out item
+  const hostModels = {};
+  const hostApp = {
+    ...app,
+    flowEngine: {
+      ...app.flowEngine,
+      getModelClass: name => (name === 'SignOutItemModel' ? class {} : app.flowEngine.getModelClass(name)),
+      registerModels: map => Object.assign(hostModels, map),
+    },
+  };
+  const hostPlugin = new mod.default();
+  hostPlugin.app = hostApp; hostPlugin.flowEngine = hostApp.flowEngine;
+  await hostPlugin.load();
+  assert.equal(hostModels.LatticeSignOutUserCenterItemModel, undefined);
+});
+
+test('employees without custom portals fall back to Workspace without looping, and 401 roles:check mounts AdminProvider for /signin redirect', async () => {
+  const empNoPortal = harness({
+    allow: false, pathname: '/admin', runEffects: true,
+    portals: [{ uid: 'admin-layout-model', title: 'Admin', routePath: '/admin', enabled: true }],
+  });
+  empNoPortal.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(empNoPortal.navigations.at(-1), { to: '/admin/lattice-workspace', opts: { replace: true } });
+
+  const unauthSetup = harness({
+    allow: false, pathname: '/admin', runEffects: true, portals: [],
+    roleCheck: async () => { throw Object.assign(new Error('Unauthorized'), { status: 401 }); },
+  });
+  unauthSetup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  unauthSetup.render();
+  assert.equal(unauthSetup.lastGate.type, 'AdminProvider');
+});
+
+test('PortalAdminProvider aligns with allowConfigure/pm snippets and respects !ui.* negations', async () => {
+  const pmBuilder = harness({
+    allow: false, pathname: '/admin', runEffects: true,
+    roleCheck: async () => ({ data: { data: { allowConfigure: true, snippets: ['pm'] } } }),
+  });
+  pmBuilder.render();
+  await new Promise(resolve => setImmediate(resolve));
+  pmBuilder.render();
+  assert.equal(pmBuilder.lastGate.type, 'AdminProvider');
+
+  const negatedUi = harness({
+    allow: false, pathname: '/admin', runEffects: true, portals: [],
+    roleCheck: async () => ({ data: { data: { allowAll: false, snippets: ['ui.*', '!ui.*'] } } }),
+  });
+  negatedUi.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(negatedUi.navigations.at(-1), { to: '/admin/lattice-workspace', opts: { replace: true } });
 });
