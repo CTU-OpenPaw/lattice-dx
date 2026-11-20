@@ -213,6 +213,8 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
       activeBadge = { title: 'Công việc của tôi', color: '#0f766e', icon: 'CheckSquareOutlined' };
     } else if (/^\/admin\/settings\/multi-portal(?:\/|$)/.test(pathname)) {
       activeBadge = { title: 'Multi-Portal', color: '#4f46e5', icon: 'SettingOutlined' };
+    } else if (/^\/admin\/settings\/dxos-studio(?:\/|$)/.test(pathname)) {
+      activeBadge = { title: 'DX-OS Studio', color: '#0f766e', icon: 'ControlOutlined' };
     } else if (/^\/admin\/settings(?:\/|$)/.test(pathname)) {
       activeBadge = { title: 'Cài đặt hệ thống', color: '#475569', icon: 'SettingOutlined' };
     }

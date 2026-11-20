@@ -46,6 +46,9 @@ services:
       - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
       - ../../plugins/nocobase/plugin-lattice-foundation:/app/nocobase/node_modules/@latticedx/plugin-lattice-foundation:ro
       - ../../plugins/nocobase/plugin-enterprise-auth:/app/nocobase/node_modules/@latticedx/plugin-enterprise-auth:ro
+      - ../../plugins/nocobase/plugin-dxos-para:/app/nocobase/node_modules/@latticedx/plugin-dxos-para:ro
+      - ../../plugins/nocobase/plugin-dxos-blocks:/app/nocobase/node_modules/@latticedx/plugin-dxos-blocks:ro
+      - ../../plugins/nocobase/plugin-dxos-studio:/app/nocobase/node_modules/@latticedx/plugin-dxos-studio:ro
     ports:
       - "127.0.0.1:13000:80"
     depends_on:

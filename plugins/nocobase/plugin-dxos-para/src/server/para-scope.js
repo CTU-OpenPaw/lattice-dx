@@ -39,6 +39,12 @@ function createParaScopeMiddleware(db) {
 
   return async function paraScopeMiddleware(ctx, next) {
     const { resourceName, actionName, params } = ctx.action || {};
+    if (resourceName === 'charts' && actionName === 'queryData' && params?.values?.collection === 'latticeParaDocuments' && ctx.state?.currentRole !== 'root') {
+      if (params.values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
+      const actor = await resolveParaActor(db, ctx.state?.currentUser);
+      params.values = { ...params.values, filter: { $and: [{ organizationId: actor.organizationId }, params.values.filter ?? {}] } };
+      return next();
+    }
     const collectionName = resourceName?.split('.')[0];
     if (collectionName !== 'latticeParaDocuments') return next();
     if (ctx.state?.currentRole === 'root') return next();

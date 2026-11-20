@@ -131,6 +131,14 @@ test('para-scope enforces strict organization isolation, actor mapping, and safe
   let rootRan = false;
   await mw({ state: { currentRole: 'root', currentUser: { id: 1 } }, action: { resourceName: 'latticeParaDocuments', actionName: 'list', params: {} } }, async () => { rootRan = true; });
   assert.equal(rootRan, true);
+
+  // charts:queryData on latticeParaDocuments enforces organization scope
+  const chartCtx = {
+    state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+    action: { resourceName: 'charts', actionName: 'queryData', params: { values: { mode: 'builder', collection: 'latticeParaDocuments', filter: { paraSpace: 'projects' } } } },
+  };
+  await mw(chartCtx, async () => {});
+  assert.deepEqual(chartCtx.action.params.values.filter, { $and: [{ organizationId: 'org-a' }, { paraSpace: 'projects' }] });
 });
 
 test('installParaRoleGrants configures 7 ldx_* roles idempotently', async () => {

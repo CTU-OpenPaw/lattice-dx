@@ -20,9 +20,13 @@ import {
 } from '../setup-native-multi-portal-demo.mjs';
 
 const require = createRequire(import.meta.url);
-const schemas = require('../../plugins/nocobase/plugin-lattice-foundation/src/server/schema.js');
+const schemas = {
+  ...require('../../plugins/nocobase/plugin-lattice-foundation/src/server/schema.js'),
+  ...require('../../plugins/nocobase/plugin-dxos-para/src/server/schema.js'),
+  ...require('../../plugins/nocobase/plugin-dxos-studio/src/server/service-schema.js'),
+};
 
-function createMockNocoBase({ failOnBlueprintCall = null, seedForeignRoute = false } = {}) {
+function createMockNocoBase({ failOnBlueprintCall = null, seedForeignRoute = false, studioDisabled = false } = {}) {
   let nextRouteId = 100;
   let blueprintCalls = 0;
   const settings = { id: 1, title: 'NocoBase', options: { brand: 'NocoBase', keepMe: true } };
@@ -74,6 +78,12 @@ function createMockNocoBase({ failOnBlueprintCall = null, seedForeignRoute = fal
       routes.push(page, tab);
       return { target: { pageSchemaUid: `page_${page.id}` }, surface: { tree: { props: { routeId: page.id } } } };
     }
+    if (path === 'dxosStudio:composePortals' && method === 'POST') {
+      if (studioDisabled) {
+        throw new Error('dxosStudio:composePortals HTTP 404: Action not found');
+      }
+      return { createdPages: 4, attachedBlocks: 12, dxosBlocksAttached: true };
+    }
     throw new Error(`Unexpected API call: ${method} ${path}`);
   }
 
@@ -82,7 +92,7 @@ function createMockNocoBase({ failOnBlueprintCall = null, seedForeignRoute = fal
 
 test('first run creates 4 portals + 10 pages scoped to layoutUid, preserves Clause 5.2, and syncs roles', async () => {
   const mock = createMockNocoBase({ seedForeignRoute: true });
-  const schemaByName = new Map(Object.values(schemas).map((s) => [s.name, new Set(['code', 'name', 'organizationId', 'active', ...s.fields.map((f) => f.name)])]));
+  const schemaByName = new Map(Object.values(schemas).filter((s) => s && Array.isArray(s.fields)).map((s) => [s.name, new Set(['code', 'name', 'organizationId', 'active', ...s.fields.map((f) => f.name)])]));
   for (const portal of PORTALS) {
     for (const page of portal.pages) {
       const fields = schemaByName.get(page.block.collection);
@@ -95,13 +105,14 @@ test('first run creates 4 portals + 10 pages scoped to layoutUid, preserves Clau
   assert.equal(summary.result, 'PASS');
   assert.equal(summary.origin, 'http://localhost:13013');
   assert.equal(summary.settingsUrl, 'http://localhost:13013/admin/settings/multi-portal');
-  assert.equal(summary.createdPages, 10);
+  assert.equal(summary.createdPages, 12);
+  assert.equal(summary.composedOverview?.attachedBlocks, 12);
   assert.deepEqual(summary.portals.map((p) => p.layoutUid), ['ldx-portal-procurement', 'ldx-portal-incidents', 'ldx-portal-logistics', 'ldx-portal-services']);
   assert.equal(mock.settings.title, 'LatticeDX');
   assert.deepEqual(mock.settings.options, { brand: 'NocoBase', keepMe: true });
 
   const blueprints = mock.events.filter((e) => e.path === 'flowSurfaces:applyBlueprint');
-  assert.equal(blueprints.length, 10);
+  assert.equal(blueprints.length, 12);
   for (const portal of PORTALS) {
     const uid = `ldx-portal-${portal.slug}`;
     const portalRouteIds = mock.routes.filter((r) => r.id >= 100 && (r.uiLayouts?.[0]?.uid === uid || mock.routes.some((p) => p.id === r.parentId && (p.uiLayouts?.[0]?.uid === uid || mock.routes.some((g) => g.id === p.parentId && g.uiLayouts?.[0]?.uid === uid))))).map((r) => r.id);
@@ -121,10 +132,10 @@ test('partial failure recovers without duplicate groups or pages and subsequent 
   assert.equal(mock.routes.filter((r) => r.id >= 100 && r.type === 'flowPage').length, 6);
 
   const recovery = await provisionMultiPortalDemo(mock.api, 'http://127.0.0.1:13013');
-  assert.equal(recovery.createdPages, 4);
-  assert.deepEqual(recovery.portals.map((p) => p.createdPages), [0, 0, 2, 2]);
-  assert.equal(mock.routes.filter((r) => r.id >= 100 && r.type === 'group').length, 6);
-  assert.equal(mock.routes.filter((r) => r.id >= 100 && r.type === 'flowPage').length, 10);
+  assert.equal(recovery.createdPages, 6);
+  assert.deepEqual(recovery.portals.map((p) => p.createdPages), [0, 0, 2, 4]);
+  assert.equal(mock.routes.filter((r) => r.id >= 100 && r.type === 'group').length, 8);
+  assert.equal(mock.routes.filter((r) => r.id >= 100 && r.type === 'flowPage').length, 12);
 
   const beforeRerunEvents = mock.events.length;
   const rerun = await provisionMultiPortalDemo(mock.api, 'http://127.0.0.1:13013');
@@ -132,7 +143,7 @@ test('partial failure recovers without duplicate groups or pages and subsequent 
   const rerunEvents = mock.events.slice(beforeRerunEvents);
   assert.equal(rerunEvents.filter((e) => e.path === 'flowSurfaces:applyBlueprint').length, 0);
   assert.equal(rerunEvents.filter((e) => e.path === 'systemSettings:update').length, 0);
-  assert.equal(mock.routes.filter((r) => r.id >= 100 && r.type === 'flowPage').length, 10);
+  assert.equal(mock.routes.filter((r) => r.id >= 100 && r.type === 'flowPage').length, 12);
 });
 
 test('port guard rejects port 13000 and external origins; CLI report validator and fixturesOnly work', async () => {
@@ -155,9 +166,10 @@ test('port guard rejects port 13000 and external origins; CLI report validator a
     await rm(dir, { recursive: true, force: true });
   }
 
-  const mock = createMockNocoBase();
-  await provisionMultiPortalDemo(mock.api, 'http://localhost:13015', { fixturesOnly: true });
+  const mock = createMockNocoBase({ studioDisabled: true });
+  const fixturesRes = await provisionMultiPortalDemo(mock.api, 'http://localhost:13015', { fixturesOnly: true });
   assert.equal(mock.settings.title, 'NocoBase');
+  assert.equal(fixturesRes.composedOverview, null);
 });
 
 test('createRootApiClient signs in as admin and attaches Bearer token with X-Role root', async () => {

@@ -159,11 +159,19 @@ export async function provisionMultiPortalDemo(api, origin, { fixturesOnly = fal
     });
   }
 
+  let composedOverview = null;
+  try {
+    composedOverview = await api('dxosStudio:composePortals', { method: 'POST', values: {} });
+  } catch (err) {
+    if (!/\bHTTP (?:404|501)\b/.test(String(err?.message || ''))) throw err;
+  }
+
   return {
     result: 'PASS',
     origin: safeOrigin,
     settingsUrl: `${safeOrigin}/admin/settings/multi-portal`,
     createdPages,
+    composedOverview,
     portals,
   };
 }

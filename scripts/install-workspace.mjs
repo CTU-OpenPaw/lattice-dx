@@ -18,6 +18,9 @@ const packages = [
   { directory: 'action-bridge', name: '@latticedx/plugin-action-bridge', build: 'build.mjs' },
   { directory: 'plugin-lattice-foundation', name: '@latticedx/plugin-lattice-foundation', build: 'scripts/build.mjs' },
   { directory: 'plugin-enterprise-auth', name: '@latticedx/plugin-enterprise-auth', build: 'build.mjs', restoreDependencies: true },
+  { directory: 'plugin-dxos-para', name: '@latticedx/plugin-dxos-para', build: 'build.mjs' },
+  { directory: 'plugin-dxos-blocks', name: '@latticedx/plugin-dxos-blocks', build: 'build.mjs' },
+  { directory: 'plugin-dxos-studio', name: '@latticedx/plugin-dxos-studio', build: 'build.mjs' },
 ];
 
 export function defaultRun(file, args, { timeout, cwd = root, env = process.env }) {

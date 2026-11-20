@@ -66,6 +66,26 @@ export const COLLECTION_FIELD_GROUPS = Object.freeze({
       fields: ['status', 'version', 'decisionReason'],
     },
   ],
+  latticeServiceTickets: [
+    {
+      title: 'Thông tin Phiếu dịch vụ',
+      fields: ['code', 'name', 'organizationId', 'serviceType', 'priority', 'description'],
+    },
+    {
+      title: 'Trạng thái & Kết quả',
+      fields: ['status', 'version', 'resolutionNote', 'decisionReason'],
+    },
+  ],
+  latticeParaDocuments: [
+    {
+      title: 'Định danh & Phân vùng P.A.R.A.',
+      fields: ['code', 'title', 'organizationId', 'paraSpace', 'tags', 'status'],
+    },
+    {
+      title: 'Nội dung & Liên kết',
+      fields: ['summary', 'contentMarkdown', 'attachmentUrl', 'relatedCollection', 'relatedRecordId'],
+    },
+  ],
 });
 
 export const PORTALS = Object.freeze([
@@ -118,13 +138,15 @@ export const PORTALS = Object.freeze([
     title: 'Dịch vụ Nội bộ & Danh bạ',
     icon: 'TeamOutlined',
     color: '#6366F1',
-    description: 'Tra cứu danh bạ nhân viên và cơ cấu phòng ban nội bộ',
+    description: 'Tra cứu danh bạ, phiếu dịch vụ nội bộ và kho tri thức P.A.R.A.',
     isDefault: false,
     sort: 40,
     roles: ['ldx_employee', 'ldx_manager', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_director', 'ldx_admin'],
     pages: [
       pageSpec('Tổ chức & Nhân sự', 'TeamOutlined', 'Danh bạ Nhân viên', 'UserOutlined', 'services-employees', 'table', 'latticeEmployees', ['code', 'name', 'email']),
       pageSpec('Tổ chức & Nhân sự', 'TeamOutlined', 'Cơ cấu Phòng ban', 'ApartmentOutlined', 'services-departments', 'table', 'latticeDepartments', ['code', 'name']),
+      pageSpec('Dịch vụ Nội bộ', 'SolutionOutlined', 'Phiếu Dịch vụ Nội bộ', 'FileDoneOutlined', 'services-tickets', 'table', 'latticeServiceTickets', ['code', 'name', 'serviceType', 'priority', 'status']),
+      pageSpec('Kho tri thức P.A.R.A.', 'FolderOpenOutlined', 'Tài liệu P.A.R.A.', 'BookOutlined', 'services-para-docs', 'table', 'latticeParaDocuments', ['code', 'title', 'paraSpace', 'tags', 'status']),
     ],
   },
 ]);
