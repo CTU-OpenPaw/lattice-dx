@@ -77,8 +77,8 @@ node --test scripts/tests/oss-pof-audit.test.mjs
 pnpm release:tarball
 ```
 
-- `pnpm pof:check` kiểm tra tự động SPDX headers, tài liệu quản trị, `NOTICE`, ranh giới plugin NocoBase, digest `@sha256:` trong Compose, trạng thái `upstream/` và không có secret theo dõi trong Git.
-- `pnpm release:tarball` tạo gói phát hành `output/release/latticedx-<version>-src.tar.gz` kèm `latticedx-<version>-src.tar.gz.sha256` từ `HEAD` đã commit (không bao gồm `node_modules/`, `output/`, `.env`, `.git/` hay source `upstream/nocobase/`).
+- `pnpm pof:check` chạy được cả trên bản checkout Git lẫn trong thư mục giải nén từ gói `.tar.gz` (không cần `.git/`), để tự động kiểm tra SPDX headers, tài liệu quản trị, `NOTICE`, cô lập plugin NocoBase, digest `@sha256:` trong Compose, trạng thái `upstream/` và không lộ secret.
+- `pnpm release:tarball` tạo gói phát hành `output/release/latticedx-<version>-src.tar.gz` kèm `latticedx-<version>-src.tar.gz.sha256` từ `HEAD` đã commit trên checkout Git (không bao gồm `node_modules/`, `output/`, `.env`, `.git/` hay source `upstream/nocobase/`).
 
 ## 7. Phân tách mã nguồn tự build vs Dịch vụ OCI bên ngoài
 

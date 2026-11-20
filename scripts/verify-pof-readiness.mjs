@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 
 const CODE_EXT_RE = /\.(ts|tsx|js|jsx|cjs|mjs)$/;
 const IGNORED_GENERATED = new Set(['apps/web/next-env.d.ts']);
+const ARCHIVE_SKIP_DIRS = new Set(['.git', 'node_modules', 'output', '.next', 'dist', '.turbo', 'coverage']);
 const REQUIRED_GOVERNANCE = [
   'LICENSE',
   'NOTICE',
@@ -42,6 +43,35 @@ const NOCOBASE_ATTRIBUTION_RE = /(?:https?:\/\/(?:www\.)?nocobase\.com|Powered b
 
 function runGit(rootDir, args) {
   return execFileSync('git', args, { cwd: rootDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function isGitWorkTree(rootDir) {
+  try {
+    const inside = runGit(rootDir, ['rev-parse', '--is-inside-work-tree']).trim() === 'true';
+    if (!inside) return false;
+    const toplevel = runGit(rootDir, ['rev-parse', '--show-toplevel']).trim();
+    return resolve(toplevel) === resolve(rootDir);
+  } catch {
+    return false;
+  }
+}
+
+function walkFilesRelative(rootDir, currentDir = rootDir, relPrefix = '') {
+  if (!existsSync(currentDir)) return [];
+  const results = [];
+  for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+    const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+    const full = join(currentDir, entry.name);
+    if (entry.isDirectory()) {
+      const insideUpstream = rel === 'upstream' || rel.startsWith('upstream/');
+      if (!insideUpstream && ARCHIVE_SKIP_DIRS.has(entry.name)) continue;
+      if (insideUpstream && entry.name === '.git') continue;
+      results.push(...walkFilesRelative(rootDir, full, rel));
+    } else {
+      results.push(rel);
+    }
+  }
+  return results;
 }
 
 function listLines(output) {
@@ -131,7 +161,19 @@ function checkComposeDigests(rootDir) {
   return { id: 'compose-digests', passed: unpinned.length === 0, details: unpinned.length ? `Unpinned image(s): ${unpinned.join('; ')}` : 'All infra/compose/*.yml images are pinned with @sha256 digests' };
 }
 
-function checkUpstreamClean(rootDir, trackedFiles) {
+function checkUpstreamClean(rootDir, trackedFiles, { isGit = true } = {}) {
+  if (!isGit) {
+    const bundledUpstream = trackedFiles.filter(
+      f => /^upstream\/nocobase\/.+/.test(f) || /^upstream\/.*(^|\/)node_modules(\/|$)/.test(f),
+    );
+    return {
+      id: 'upstream-clean',
+      passed: bundledUpstream.length === 0,
+      details: bundledUpstream.length
+        ? `Bundled upstream source or node_modules found: ${bundledUpstream.slice(0, 5).join(', ')}`
+        : 'No bundled upstream/nocobase source files or upstream node_modules found (archive mode)',
+    };
+  }
   const issues = [];
   const dirtyUpstream = listLines(runGit(rootDir, ['status', '--porcelain', '--', 'upstream']));
   if (dirtyUpstream.length) issues.push(`Dirty upstream entries: ${dirtyUpstream.join(', ')}`);
@@ -158,14 +200,19 @@ function checkNoSecrets(rootDir, trackedFiles, repoFiles) {
 }
 
 export function runPofAudit({ rootDir = resolve(fileURLToPath(import.meta.url), '../..') } = {}) {
-  const trackedFiles = listLines(runGit(rootDir, ['ls-files']));
-  const repoFiles = listLines(runGit(rootDir, ['ls-files', '--cached', '--others', '--exclude-standard']));
+  const isGit = isGitWorkTree(rootDir);
+  const trackedFiles = isGit
+    ? listLines(runGit(rootDir, ['ls-files']))
+    : walkFilesRelative(rootDir);
+  const repoFiles = isGit
+    ? listLines(runGit(rootDir, ['ls-files', '--cached', '--others', '--exclude-standard']))
+    : trackedFiles;
   const checks = [
     checkSpdxHeaders(rootDir, repoFiles),
     checkGovernanceFiles(rootDir),
     checkPluginIsolation(rootDir),
     checkComposeDigests(rootDir),
-    checkUpstreamClean(rootDir, trackedFiles),
+    checkUpstreamClean(rootDir, trackedFiles, { isGit }),
     checkNoSecrets(rootDir, trackedFiles, repoFiles),
   ];
   return { result: checks.every(c => c.passed) ? 'PASS' : 'FAIL', checks };

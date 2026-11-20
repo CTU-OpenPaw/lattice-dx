@@ -21,5 +21,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      - name: Verify NocoBase plugin contracts
-        run: node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs
+      - name: Verify OSS PoF readiness
+        run: pnpm pof:check
+      - name: Verify NocoBase plugin contracts and script tests
+        run: node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs plugins/nocobase/plugin-enterprise-auth/tests/*.test.cjs scripts/tests/*.test.mjs

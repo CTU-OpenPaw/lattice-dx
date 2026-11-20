@@ -16,7 +16,7 @@ import { assertTarballEntries, buildOssReleaseTarball, planTarball } from '../bu
 
 const SPDX_COMMENT = '// SPDX-License-Identifier: Apache-2.0\n';
 
-function createCompliantFixtureRepo() {
+function createCompliantFixtureFiles() {
   const dir = mkdtempSync(join(tmpdir(), 'pof-audit-fixture-'));
   const write = (rel, content) => {
     const full = join(dir, rel);
@@ -46,6 +46,11 @@ function createCompliantFixtureRepo() {
     'plugins/nocobase/plugin-lattice-foundation/src/client/index.js',
     `${SPDX_COMMENT}export const attribution = 'https://www.nocobase.com';\n`,
   );
+  return dir;
+}
+
+function createCompliantFixtureRepo() {
+  const dir = createCompliantFixtureFiles();
   execFileSync('git', ['init'], { cwd: dir, stdio: 'ignore' });
   execFileSync('git', ['config', 'user.email', 'ci@example.invalid'], { cwd: dir, stdio: 'ignore' });
   execFileSync('git', ['config', 'user.name', 'Fixture'], { cwd: dir, stdio: 'ignore' });
@@ -108,4 +113,28 @@ test('buildOssReleaseTarball generates verified .tar.gz and .sha256 sidecar from
   assert.equal(result.result, 'PASS');
   assert.match(result.sha256, /^[a-f0-9]{64}$/);
   assert.equal(readFileSync(result.sha256Path, 'utf8').trim(), `${result.sha256}  latticedx-0.1.0-src.tar.gz`);
+});
+
+test('runPofAudit passes in an extracted release directory without .git', t => {
+  const dir = createCompliantFixtureFiles();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'upstream/nocobase'), { recursive: true });
+  const report = runPofAudit({ rootDir: dir });
+  assert.equal(report.result, 'PASS', JSON.stringify(report.checks));
+  assert.ok(report.checks.every(check => check.passed), JSON.stringify(report.checks));
+});
+
+test('runPofAudit in a non-git directory detects missing SPDX, .env secrets, and bundled upstream files', t => {
+  const dir = createCompliantFixtureFiles();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  mkdirSync(join(dir, 'upstream/nocobase'), { recursive: true });
+  writeFileSync(join(dir, 'apps/api/src/missing.ts'), 'export const bad = 1;\n', 'utf8');
+  writeFileSync(join(dir, '.env'), 'SECRET=1\n', 'utf8');
+  writeFileSync(join(dir, 'upstream/nocobase/package.json'), '{}', 'utf8');
+  const report = runPofAudit({ rootDir: dir });
+  assert.equal(report.result, 'FAIL');
+  const byId = Object.fromEntries(report.checks.map(c => [c.id, c]));
+  assert.equal(byId['spdx-headers'].passed, false);
+  assert.equal(byId['no-secrets'].passed, false);
+  assert.equal(byId['upstream-clean'].passed, false);
 });
