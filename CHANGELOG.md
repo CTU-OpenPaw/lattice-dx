@@ -4,6 +4,10 @@ Tài liệu ghi nhận lịch sử phát triển của **LatticeDX** (Apache-2.0
 
 ## [Unreleased] — chuẩn bị v0.1.0
 
+### 2026-11-21 — Báo cáo Kỹ thuật, Hướng dẫn Vận hành & Script AI Agent Phòng ban
+- Bổ sung [docs/system-report-and-guide.md](docs/system-report-and-guide.md): báo cáo kỹ thuật tổng thể kiến trúc 6 plugin Apache-2.0, tùy biến nghiệp vụ doanh nghiệp Việt (Data Sources, RBAC theo cột, Keycloak SSO, Multi-Portal, DX-OS Studio, AI Agent thực thi CSDL, IT/OT Orion-LD + n8n) và hướng dẫn cài đặt/khắc phục sự cố chi tiết từng bước.
+- Bổ sung `scripts/setup-department-ai-agent.mjs` (và kiểm thử `scripts/tests/department-ai-agent.test.mjs`) tự động hóa idempotent việc tạo AI Workflow `Tạo Phiếu Bảo trì Kho lạnh` (`type: "ai-employee"`, `sync: true`), kết nối gateway OpenAI-compatible cục bộ qua biến môi trường (`AGENT_API_KEY`) và gắn workflow tool ở chế độ `Allow` cho trợ lý `kho-lanh-ops`.
+
 ### 2026-11-20 — LatticeDX Open-Core 6-Plugin Suite & NukeViet-Grade PoF
 - Mở rộng nền tảng thành hệ sinh thái **6 plugin NocoBase Apache-2.0** (`"sdkProvidedByHost": true`), bổ sung 3 plugin mới:
   - `@latticedx/plugin-dxos-para` (`0.1.0`): không gian tri thức P.A.R.A. (`latticeParaDocuments`, `uiManageable: true`, 7 vai trò `ldx_*`, tách phạm vi `organizationId`, `latticePara:summary`).
