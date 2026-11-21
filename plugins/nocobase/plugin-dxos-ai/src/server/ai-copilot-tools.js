@@ -90,7 +90,7 @@ async function performScopedRecordWrite(db, actor, collection, operation, { reco
         ...safeValues,
         organizationId: actor.organizationId,
         ...(collection === 'latticeParaDocuments'
-          ? { ...(actor.employeeId ? { ownerId: actor.employeeId } : {}), status: safeValues.status || 'published' }
+          ? { ...(actor.employeeId ? { ownerId: actor.employeeId } : {}), status: safeValues.status || 'active' }
           : { ...(actor.employeeId ? { requesterId: actor.employeeId } : {}), status: 'draft', version: 1 }),
       },
     });
@@ -342,7 +342,7 @@ function createCopilotTools(deps) {
         if (args.followUpTicket) {
           const primaryCitation = created.primary?.record ? `[${created.primary.collection}:${created.primary.record.code || created.primary.record.id}#${created.primary.record.id}]` : '';
           const ticketValues = {
-            serviceType: 'maintenance',
+            serviceType: 'facilities',
             priority: 'high',
             ...args.followUpTicket,
             ...(primaryCitation ? { description: `${args.followUpTicket.description || ''} | Liên kết: ${primaryCitation}`.trim() } : {}),
@@ -353,7 +353,7 @@ function createCopilotTools(deps) {
           const noteValues = {
             paraSpace: 'projects',
             ...args.paraHandoverNote,
-            ...(created.primary?.record ? { relatedCollection: created.primary.collection, relatedRecordId: created.primary.record.id } : {}),
+            ...(created.primary?.record ? { relatedCollection: created.primary.collection, relatedRecordId: String(created.primary.record.id) } : {}),
           };
           created.paraHandoverNote = (await performScopedRecordWrite(db, actor, 'latticeParaDocuments', 'create', { values: noteValues }, deps)).record;
         }

@@ -217,7 +217,7 @@ test('dxos_orchestrate_enterprise_case performs cross-module radar, correlateCas
     followUpTicket: {
       code: 'SRV-COLD-002',
       name: 'Bảo trì máy nén Kho lạnh A1',
-      serviceType: 'maintenance',
+      serviceType: 'facilities',
       priority: 'high',
       description: 'Theo SOP-COLD-01 xử lý vượt ngưỡng -10C',
     },
@@ -232,7 +232,9 @@ test('dxos_orchestrate_enterprise_case performs cross-module radar, correlateCas
   assert.equal(res.created.primary.record.code, 'QA-COLD-002');
   assert.equal(res.created.followUpTicket.code, 'SRV-COLD-002');
   assert.equal(res.created.paraHandoverNote.code, 'PARA-HO-002');
+  assert.equal(res.created.paraHandoverNote.status, 'active');
   assert.equal(res.created.paraHandoverNote.relatedCollection, 'latticeCustomColdAudits');
+  assert.equal(typeof res.created.paraHandoverNote.relatedRecordId, 'string');
 
   const radar = await orch.invoke(mgrCtx, { mode: 'radar' });
   assert.equal(radar.modules.latticeCustomColdAudits.total >= 1, true);

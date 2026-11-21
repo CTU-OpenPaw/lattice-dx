@@ -68,3 +68,19 @@ Thực thi `pnpm acceptance:logistics-rbac -- --origin=http://localhost:13014` n
   - **Logistics 5 bước (`workflowId: 398786389671936`):** Đơn `ORD-E2E-QBC6G7` hoàn thành tới `status: "completed"` (`assigneeId: 35`, `decisionReason: "Đã giao nguyên seal E2E OK"`).
   - **Dịch vụ Nội bộ (`workflowId: 398784396328960`):** Phiếu `SRV-E2E-QBC6G7` hoàn thành tới `status: "completed"` (`resolutionNote: "Hoàn tất cấp quyền VPN E2E OK"`).
   - **RBAC âm tính:** Toàn bộ **7/7 kiểm tra HTTP `403`** đạt (`employee_denied_dxosStudio_readiness`, `employee_denied_dxosStudio_composePortals`, `employee_denied_dxosStudio_installWorkflow`, `employee_denied_foreign_org_serviceTicket`, `employee_denied_foreign_org_paraDoc`, `employee_denied_spoof_approved_request`, `employee_cannot_submit_manager_manual_task`).
+
+---
+
+## 5. Nâng cấp v2 — Admin System Builder & 2 Đại Use Cases Live (`@latticedx/plugin-dxos-ai` v2)
+
+Mở rộng `@latticedx/plugin-dxos-ai` từ 8 tool lên **11 Unified Tools** (7 Admin Builder + 4 Operational/Copilot) tương thích Zod v4 / Gemini / OpenAI (`propertyNames`-free, typed arrays, JSON coercion), kết nối `local-9router` (`http://host.docker.internal:20128/v1`, model `ag/gemini-3.8-flash`):
+
+- **7 Admin Builder Tools (`root`/`admin` only):**
+  - `dxos_inspect_architecture`, `dxos_compose_page_blocks` (`listBlocks`, `composePageBlueprint`, `updateBlock`, `reorderBlocks`, `removeBlock`), `dxos_manage_portal_and_acl` (`grant`, `revoke`), `dxos_extend_collection_schema` (`createCollection`, `addFields`, `inspectCollection`), `dxos_manage_rbac_permissions` (`inspectRole`, `ensureCustomRole`, `grantResource`, `lockFields`, `revokeResource`), `dxos_deploy_workflow`, `dxos_configure_workflow` (`inspectWorkflow`, `updateNodeConfig`, `addNode`, `buildCustomWorkflow`, `toggleWorkflow`).
+- **4 Operational & Cross-Dept Copilot Tools:**
+  - `dxos_search_enterprise_context` (tự động dò cả `latticeCustom*`), `dxos_execute_record_action` (kiểm soát RBAC từng trường), `dxos_my_tasks_copilot`, `dxos_orchestrate_enterprise_case` (`radar`, `correlateCase`, `executeCoordinatedResponse`).
+- **Nghiệm thu Live E2E v2 (`pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014`):**
+  - Đạt **19/19 kiểm tra (`result: "PASS"`)**, bổ sung `adminMcpToolsListed11`, `adminMcpRbacInspectAndRootBlocked`, `adminMcpWorkflowInspectOk`, `employeeCrossDeptRadarOk`.
+- **Kiểm chứng Trực quan 2 Đại Use Cases trên `http://localhost:13014` (Full HD 1920x1080 · 30 fps · `190.0s`):**
+  1. **Use Case 1 — Admin System Builder + Live `dxos-architect`:** Tạo bảng tùy biến `latticeCustomColdAudits`, dựng portal `/p/cold-qa` (`Hero` + `KPI` + `NativeTable` + `CreateForm`), trò chuyện live với `@dxos-architect` (`ag/gemini-3.8-flash`) gọi `dxos_inspect_architecture`, cập nhật trực tiếp Hero Block (`#1677ff` → `#0d9488`, `(v2 · Live Edited)`), khóa trường `auditVerdict` cho `ldx_employee`, mở quyền cho `ldx_manager`, dựng & bật workflow `Quy trình Kiểm định Kho lạnh Tự động` (`workflowId: 398974587568128`, tinh chỉnh node điều kiện `> -16°C`).
+  2. **Use Case 2 — Nhân viên Cross-Dept Copilot & Thực thi RBAC Cấp trường:** Nhân viên (`ldx_employee`) vào `/p/cold-qa`, bấm `Allow use` chạy `dxos_orchestrate_enterprise_case`, điều phối tạo đồng bộ **3 phân hệ** `QA-COLD-001` (`latticeCustomColdAudits`) + `SRV-COLD-001` (`latticeServiceTickets`, `serviceType: "facilities"`) + `PARA-HO-001` (`latticeParaDocuments`, `status: "active"`), KPI tăng thực tế `0→1` / `0→1` / `4→5`; nhân viên cố ghi trường khóa `auditVerdict` bị chặn `RBAC_FIELD_LOCKED` (`status: "denied"`), Quản lý (`ldx_manager`) phê duyệt `CANH_BAO_BAO_TRI` hiển thị live trên bảng và toàn bộ vết được ghi rõ trong Tab 4 `Nhật ký Kiểm toán`.
