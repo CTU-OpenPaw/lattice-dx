@@ -15,6 +15,10 @@ const {
   fetchWorkflowTasks,
   fetchParaVault,
   fetchParaSummary,
+  inferPortalSlugFromLocation,
+  fetchPortalCopilot,
+  triggerDxosCopilot,
+  createCopilotStripElement,
 } = require('./blocks-helpers');
 
 const modelListeners = new WeakMap();
@@ -89,6 +93,7 @@ function createBlockRenderers(client, React, antd, app) {
     : () => ({ allowAll: false, actions: {} });
 
   function DxosPortalHeroView({ model, liveConfig }) {
+    const api = useApi();
     const perms = usePerms();
     const cfg = useBlockConfig(React, model, {
       title: 'Không gian Điều hành Doanh nghiệp DX-OS',
@@ -98,6 +103,18 @@ function createBlockRenderers(client, React, antd, app) {
       actionsJson: DEFAULT_HERO_ACTIONS,
     }, liveConfig);
     const actions = filterHeroActions(cfg.actionsJson, perms);
+    const [copilotEmployees, setCopilotEmployees] = React.useState([]);
+    const portalSlug = typeof window !== 'undefined' && window.location ? inferPortalSlugFromLocation(window.location.pathname) : '';
+
+    React.useEffect(() => {
+      if (!api?.request) return;
+      let active = true;
+      fetchPortalCopilot(api, { portalSlug }).then((res) => {
+        if (active && !res.pluginDisabled) setCopilotEmployees(res.employees || []);
+      });
+      return () => { active = false; };
+    }, [api, portalSlug]);
+
     const accent = /^#[0-9a-fA-F]{3,8}$/.test(String(cfg.accentColor || '')) ? cfg.accentColor : '#1677ff';
     return h('section', {
       'data-testid': 'dxos-portal-hero-block',
@@ -129,6 +146,15 @@ function createBlockRenderers(client, React, antd, app) {
           },
         }, btn.label)),
       ) : null,
+      createCopilotStripElement(React, {
+        employees: copilotEmployees,
+        onRunPrompt: (emp, qp) => triggerDxosCopilot(app, {
+          aiEmployee: emp.username,
+          prompt: qp.prompt,
+          blockTitle: String(cfg.title || ''),
+          portalSlug,
+        }),
+      }),
     );
   }
 

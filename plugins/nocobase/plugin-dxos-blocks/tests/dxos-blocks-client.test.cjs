@@ -169,3 +169,81 @@ test('dxosBlockSettings stepParams take precedence over stale props and renderCo
   const merged = readModelConfig(hero, { title: 'Default' }, el.props.liveConfig);
   assert.equal(merged.title, 'Live Step Title');
 });
+
+test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when plugin-dxos-ai disabled, and triggers flowEngine AI task', async () => {
+  const {
+    inferPortalSlugFromLocation,
+    fetchPortalCopilot,
+    triggerDxosCopilot,
+    createCopilotStripElement,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  assert.equal(inferPortalSlugFromLocation('/p/logistics'), 'logistics');
+  assert.equal(inferPortalSlugFromLocation('/p/procurement/overview'), 'procurement');
+  assert.equal(inferPortalSlugFromLocation('/admin/dxos-studio'), 'admin-studio');
+  assert.equal(inferPortalSlugFromLocation(''), '');
+
+  // Graceful silent degradation when plugin-dxos-ai is disabled (404/403)
+  const disabledApi = {
+    request: async () => { throw Object.assign(new Error('Not found'), { response: { status: 404 } }); },
+  };
+  const offRes = await fetchPortalCopilot(disabledApi, { portalSlug: 'logistics' });
+  assert.equal(offRes.pluginDisabled, true);
+  assert.deepEqual(offRes.employees, []);
+  assert.equal(createCopilotStripElement(React, { employees: [], loading: false }), null);
+
+  // Enabled response returns scoped AI employees + quickPrompts
+  const activeApi = {
+    request: async ({ url, params }) => {
+      assert.equal(url, 'dxosAi:portalCopilot');
+      assert.equal(params.portalSlug, 'logistics');
+      return {
+        data: {
+          data: {
+            employees: [
+              {
+                username: 'dxos-logistics',
+                nickname: 'Điều phối viên Chuỗi lạnh AI',
+                quickPrompts: [{ label: 'Việc giao nhận chờ tôi', prompt: 'Kiểm tra công việc logistics chờ xử lý.' }],
+              },
+            ],
+          },
+        },
+      };
+    },
+  };
+  const onRes = await fetchPortalCopilot(activeApi, { portalSlug: 'logistics' });
+  assert.equal(onRes.pluginDisabled, false);
+  assert.equal(onRes.employees.length, 1);
+
+  const triggeredCalls = [];
+  const mockApp = {
+    flowEngine: {
+      context: {
+        ai: {
+          async triggerTask(payload) { triggeredCalls.push(payload); },
+        },
+      },
+    },
+  };
+  const triggerOut = await triggerDxosCopilot(mockApp, {
+    aiEmployee: 'dxos-logistics',
+    prompt: 'Kiểm tra công việc logistics chờ xử lý.',
+    blockTitle: 'Hộp việc Logistics',
+    portalSlug: 'logistics',
+  });
+  assert.equal(triggerOut.triggered, true);
+  assert.equal(triggeredCalls.length, 1);
+  assert.equal(triggeredCalls[0].aiEmployee, 'dxos-logistics');
+  assert.equal(triggeredCalls[0].open, true);
+  assert.ok(triggeredCalls[0].tasks[0].text.includes('Hộp việc Logistics'));
+
+  const noAiOut = await triggerDxosCopilot({}, { aiEmployee: 'dxos-logistics', prompt: 'Test' });
+  assert.equal(noAiOut.triggered, false);
+
+  const stripEl = createCopilotStripElement(React, {
+    employees: onRes.employees,
+    onRunPrompt: () => {},
+  });
+  assert.ok(stripEl && stripEl.props['data-testid'] === 'dxos-block-copilot-strip');
+});

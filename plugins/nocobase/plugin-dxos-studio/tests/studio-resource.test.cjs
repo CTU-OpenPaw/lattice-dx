@@ -269,11 +269,14 @@ test('dxosStudio actions enforce admin gate, idempotent installWorkflow, safe co
   assert.equal(desktopRoutes.length, countBefore);
   assert.equal(composeCtx.body.createdPages, 0);
 
-  // readiness degrades gracefully when latticeParaDocuments is absent
+  // readiness degrades gracefully when latticeParaDocuments / latticeAiProfiles are absent
   const readyCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
   await actions.readiness(readyCtx, async () => {});
   assert.equal(readyCtx.body.paraDocumentCount, 0);
-  assert.equal(readyCtx.body.plugins.length, 6);
+  assert.equal(readyCtx.body.aiProfileCount, 0);
+  assert.equal(readyCtx.body.aiAuditCount, 0);
+  assert.equal(readyCtx.body.plugins.length, 7);
+  assert.ok(readyCtx.body.plugins.some((p) => p.packageName === '@latticedx/plugin-dxos-ai'));
 
   // listEmployees sorts organizations by headcount DESC and includes organizationCounts
   const multiOrgDb = {

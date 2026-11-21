@@ -144,6 +144,87 @@ async function fetchParaSummary(api) {
   }
 }
 
+function inferPortalSlugFromLocation(pathname) {
+  const clean = String(pathname || '').split('?')[0].split('#')[0].trim().toLowerCase();
+  if (!clean) return '';
+  const portalMatch = clean.match(/\/p\/([a-z0-9_-]+)/);
+  if (portalMatch && portalMatch[1]) return portalMatch[1];
+  if (clean.includes('/admin/dxos-studio') || clean.includes('/admin/settings/dxos-')) return 'admin-studio';
+  return '';
+}
+
+async function fetchPortalCopilot(api, { portalSlug = '' } = {}) {
+  if (!api?.request) return { pluginDisabled: true, employees: [] };
+  try {
+    const res = await api.request({
+      url: 'dxosAi:portalCopilot',
+      method: 'get',
+      params: portalSlug ? { portalSlug } : {},
+    });
+    const data = res?.data?.data || res?.data || {};
+    return {
+      pluginDisabled: false,
+      employees: Array.isArray(data.employees) ? data.employees : [],
+    };
+  } catch {
+    return { pluginDisabled: true, employees: [] };
+  }
+}
+
+async function triggerDxosCopilot(appOrFlowEngine, { aiEmployee, prompt, blockTitle = '', portalSlug = '' } = {}) {
+  const aiCtx = appOrFlowEngine?.flowEngine?.context?.ai || appOrFlowEngine?.context?.ai;
+  if (!aiCtx || typeof aiCtx.triggerTask !== 'function' || !aiEmployee || !prompt) {
+    return { triggered: false, reason: 'ai_unavailable' };
+  }
+  const prefix = [blockTitle ? `Ngữ cảnh block: ${blockTitle}` : '', portalSlug ? `Portal: /p/${portalSlug}` : '']
+    .filter(Boolean)
+    .join(' · ');
+  await aiCtx.triggerTask({
+    aiEmployee,
+    tasks: [{ type: 'text', text: prefix ? `[${prefix}]\n${prompt}` : String(prompt) }],
+    open: true,
+  });
+  return { triggered: true, aiEmployee };
+}
+
+function createCopilotStripElement(React, { employees = [], onRunPrompt } = {}) {
+  if (!React?.createElement || !Array.isArray(employees) || !employees.length) return null;
+  const h = React.createElement;
+  const chips = [];
+  for (const emp of employees) {
+    const prompts = Array.isArray(emp.quickPrompts) && emp.quickPrompts.length
+      ? emp.quickPrompts
+      : [{ label: `Hỏi ${emp.nickname || emp.username}`, prompt: `Hỗ trợ tôi tại không gian làm việc hiện tại.` }];
+    for (let idx = 0; idx < prompts.length; idx += 1) {
+      const qp = prompts[idx];
+      chips.push(h('button', {
+        key: `${emp.username}:${idx}`,
+        type: 'button',
+        title: `${emp.nickname || emp.username}: ${qp.prompt}`,
+        onClick: () => typeof onRunPrompt === 'function' && onRunPrompt(emp, qp),
+        style: {
+          padding: '4px 10px',
+          borderRadius: 999,
+          border: '1px solid #bae6fd',
+          background: '#f0f9ff',
+          color: '#0369a1',
+          fontSize: 12,
+          fontWeight: 600,
+          cursor: 'pointer',
+        },
+      }, `AI · ${qp.label}`));
+    }
+  }
+  if (!chips.length) return null;
+  return h('div', {
+    'data-testid': 'dxos-block-copilot-strip',
+    style: { marginTop: 12, paddingTop: 10, borderTop: '1px dashed #cbd5e1', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
+  },
+    h('span', { style: { fontSize: 11, fontWeight: 700, color: '#0369a1' } }, 'Trợ lý AI ngữ cảnh:'),
+    ...chips,
+  );
+}
+
 module.exports = {
   isSafeAppPath,
   safeJsonParse,
@@ -152,4 +233,8 @@ module.exports = {
   fetchWorkflowTasks,
   fetchParaVault,
   fetchParaSummary,
+  inferPortalSlugFromLocation,
+  fetchPortalCopilot,
+  triggerDxosCopilot,
+  createCopilotStripElement,
 };

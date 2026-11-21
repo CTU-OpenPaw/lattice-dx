@@ -62,11 +62,24 @@ function failTool(code, status, message) {
   return Object.assign(new Error(message || code), { code, status });
 }
 
-async function isStudioAdmin(ctx, db) {
-  if (!ctx?.state?.currentUser && !ctx?.auth?.user) return false;
-  const roleNames = Array.isArray(ctx.state?.currentRoles) && ctx.state.currentRoles.length
+async function resolveCallerRoleNames(ctx, db, userId) {
+  const raw = Array.isArray(ctx?.state?.currentRoles) && ctx.state.currentRoles.length
     ? ctx.state.currentRoles
-    : ctx.state?.currentRole ? [ctx.state.currentRole] : [];
+    : ctx?.state?.currentRole ? [ctx.state.currentRole] : [];
+  const direct = raw.map((r) => String(r || '').trim()).filter(Boolean);
+  if (direct.length) return [...new Set(direct)];
+  if (!userId) return [];
+  const rolesUsersRepo = db?.getRepository?.('rolesUsers');
+  if (!rolesUsersRepo || typeof rolesUsersRepo.find !== 'function') return [];
+  const rows = (await rolesUsersRepo.find({ filter: { userId } })) || [];
+  return [...new Set(rows.map((r) => val(r, 'roleName')).filter(Boolean))];
+}
+
+async function isStudioAdmin(ctx, db) {
+  const user = ctx?.state?.currentUser || ctx?.auth?.user;
+  const userId = val(user, 'id');
+  if (!user) return false;
+  const roleNames = await resolveCallerRoleNames(ctx, db, userId);
   if (roleNames.includes('root') || roleNames.includes('admin')) return true;
   const rolesRepo = db?.getRepository?.('roles');
   if (!rolesRepo || !roleNames.length) return false;
@@ -83,9 +96,7 @@ async function resolveActorScope(ctx, db) {
   const userId = val(user, 'id');
   if (!userId) throw failTool('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập để thực thi công cụ.');
   const targetDb = db || ctx.db;
-  const roleNames = Array.isArray(ctx.state?.currentRoles) && ctx.state.currentRoles.length
-    ? ctx.state.currentRoles
-    : ctx.state?.currentRole ? [ctx.state.currentRole] : [];
+  const roleNames = await resolveCallerRoleNames(ctx, targetDb, userId);
   const isAdmin = await isStudioAdmin(ctx, targetDb);
   const empRepo = targetDb?.getRepository?.('latticeEmployees');
   let employee = null;
@@ -607,6 +618,7 @@ module.exports = {
   SYSTEM_PROTECTED_COLLECTIONS,
   val,
   failTool,
+  resolveCallerRoleNames,
   isStudioAdmin,
   resolveActorScope,
   createAuditedTool,

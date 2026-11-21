@@ -18,6 +18,7 @@ const DXOS_PLUGINS_CATALOG = [
   { packageName: '@latticedx/plugin-dxos-para', title: 'P.A.R.A. Knowledge Vault', spaces: ['[H]'] },
   { packageName: '@latticedx/plugin-dxos-blocks', title: 'DX-OS Configurable Native Blocks', spaces: ['[H]', '[P]', '[D]', '[I]'] },
   { packageName: '@latticedx/plugin-dxos-studio', title: 'DX-OS Admin Control Studio', spaces: ['[P]', '[H]', '[D]'] },
+  { packageName: '@latticedx/plugin-dxos-ai', title: 'AI Workforce & 2-Way Enterprise MCP', spaces: ['[I]', '[P]', '[D]', '[H]'] },
 ];
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
@@ -259,6 +260,8 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
         workflowCount: await safeCount('workflows', { current: true }),
         paraDocumentCount: await safeCount('latticeParaDocuments', {}),
         serviceTicketCount: await safeCount('latticeServiceTickets', {}),
+        aiProfileCount: await safeCount('latticeAiProfiles', { enabled: true }),
+        aiAuditCount: await safeCount('latticeAiAuditLogs', {}),
         clause52Attribution: 'Powered by NocoBase (v2.2.38 preserved)',
         plugins: buildPluginStatusList(pluginRows),
       };

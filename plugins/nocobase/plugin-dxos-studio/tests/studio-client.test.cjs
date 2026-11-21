@@ -47,4 +47,7 @@ test('plugin-dxos-studio registers /admin/settings/dxos-studio with aclSnippet p
 
   const tree = Page();
   assert.equal(tree.props['data-testid'], 'dxos-studio-settings-page');
+  const dump = JSON.stringify(tree);
+  assert.ok(dump.includes('7 Plugin'), 'Studio UI should present the 7 Apache-2.0 Open-Core plugins catalog');
+  assert.ok(dump.includes('AI Workforce'), 'Studio UI should expose link/reference to AI Workforce Center');
 });

@@ -137,7 +137,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const tabItems = [
       ['workflows', '1. Quy trình Poka-yoke'],
       ['portals', '2. Dựng cổng đa-block'],
-      ['plugins', '3. Hệ sinh thái 6 Plugin'],
+      ['plugins', '3. Hệ sinh thái 7 Plugin'],
       ['pof', '4. Sẵn sàng PoF & Hệ thống'],
     ];
 
@@ -160,9 +160,12 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const missingCrew = Boolean(activeTemplate && selectedOrg && orgEmployees.length < requiredCount);
 
     return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: '24px 24px 64px', maxWidth: 1120, margin: '0 auto', display: 'grid', gap: 16 } },
-      h('div', null,
-        h('h1', { style: { margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: '#0f172a' } }, 'DX-OS Control Studio — Xây dựng Hệ thống từ NocoBase'),
-        h('p', { style: { margin: 0, color: '#475569', fontSize: 13 } }, 'Cài mẫu quy trình Poka-yoke, dựng cổng đa-block kết hợp Block tùy biến, quản lý hệ sinh thái 6 plugin Open-Core và kiểm tra PoF.'),
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, alignItems: 'center' } },
+        h('div', null,
+          h('h1', { style: { margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: '#0f172a' } }, 'DX-OS Control Studio — Xây dựng Hệ thống từ NocoBase'),
+          h('p', { style: { margin: 0, color: '#475569', fontSize: 13 } }, 'Cài mẫu quy trình Poka-yoke, dựng cổng đa-block kết hợp Block tùy biến, quản lý hệ sinh thái 7 plugin Open-Core và kiểm tra PoF.'),
+        ),
+        h('button', { type: 'button', onClick: () => openRoute('/admin/settings/dxos-ai'), style: btnStyle(true) }, 'Mở AI Workforce & 6-Plane Center'),
       ),
       h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
         tabItems.map(([k, label]) => h('button', { key: k, type: 'button', onClick: () => setTab(k), style: btnStyle(tab === k) }, label)),
@@ -241,9 +244,12 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       ) : null,
 
       tab === 'plugins' ? h('div', { style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
-        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
-          h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hệ sinh thái 6 Plugin Apache-2.0 Open-Core'),
-          h('button', { type: 'button', onClick: () => openRoute('/admin/pm/list'), style: btnStyle(false) }, 'Mở Plugin Manager (bật/tắt live)'),
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hệ sinh thái 7 Plugin Apache-2.0 Open-Core'),
+          h('div', { style: { display: 'flex', gap: 8 } },
+            h('button', { type: 'button', onClick: () => openRoute('/admin/settings/dxos-ai'), style: btnStyle(true) }, 'Mở AI Workforce & 6-Plane Center'),
+            h('button', { type: 'button', onClick: () => openRoute('/admin/pm/list'), style: btnStyle(false) }, 'Mở Plugin Manager (bật/tắt live)'),
+          ),
         ),
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 } },
           (readiness?.plugins || []).map((p) => h('div', { key: p.packageName, style: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc' } },
