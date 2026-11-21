@@ -73,8 +73,8 @@ export function fieldGrantRepairs(before,after,field){
     const current=after.find(item=>String(item.id)===String(prior.id));assert.ok(current,'Resource grant disappeared');
     const normalized=structuredClone(current);
     for(const action of normalized.actions??[]){
-      const old=prior.actions.find(item=>String(item.id)===String(action.id));assert.ok(old,'Action grant changed');
-      if(!old.fields.includes(field)&&action.fields.includes(field)){
+      const old=prior.actions?.find(item=>String(item.id)===String(action.id));assert.ok(old,'Action grant changed');
+      if(!(old.fields??[]).includes(field)&&(action.fields??[]).includes(field)){
         action.fields=action.fields.filter(name=>name!==field);
         repairs.push({resourceId:prior.id,actionId:action.id,fields:old.fields});
       }

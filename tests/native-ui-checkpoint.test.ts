@@ -7,7 +7,11 @@ const template=JSON.parse(await readFile(new URL('../scripts/fixtures/native-ui-
 const bundle=JSON.parse(await readFile(new URL('../scripts/fixtures/native-ui-checkpoint.json',import.meta.url),'utf8'));
 describe('portable native configuration checkpoint',()=>{
   it('removes only native automatic field grants and rejects unrelated ACL drift',()=>{
-    const before=[{id:1,name:'latticeRequests',usingActionsConfig:true,actions:[{id:2,name:'update',fields:['name'],scope:{scope:{status:'draft'}}}]}];
+    const before=[{id:1,name:'latticeRequests',usingActionsConfig:true,actions:[
+      {id:2,name:'update',fields:['name'],scope:{scope:{status:'draft'}}},
+      {id:3,name:'destroy',fields:null},
+      {id:4,name:'custom'},
+    ]}];
     const after=structuredClone(before);after[0].actions[0].fields.push('studioLabNote');
     expect(fieldGrantRepairs(before,after,'studioLabNote')).toEqual([{resourceId:1,actionId:2,fields:['name']}]);
     expect(fieldGrantRepairs(before,before,'studioLabNote')).toEqual([]);

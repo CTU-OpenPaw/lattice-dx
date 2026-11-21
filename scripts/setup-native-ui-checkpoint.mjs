@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {randomUUID,createHash} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
+import {dirname} from 'node:path';
 import {checkpointSchema,checkpointPolicy,assertFieldCompatible,assertPolicyCompatible,nodes,canonical,resourceProjection,assertCheckpointTarget,fieldGrantRepairs} from './lib/native-ui-checkpoint.mjs';
 import {instantiateNativePage} from './lib/native-ui-fixture.mjs';
 
@@ -49,7 +50,7 @@ try{
   if(!manifest){
     const backup=docker(['exec',dbContainer,'pg_dump','-Fc','-U','nocobase','-d','nocobase'],null);
     assert.equal(backup.subarray(0,5).toString(),'PGDMP','Backup required before setup');
-    await mkdir('output/backups',{recursive:true});await mkdir('output/native-platform',{recursive:true});
+    await mkdir('output/backups',{recursive:true});await mkdir(dirname(manifestPath),{recursive:true});
     const id=randomUUID().replaceAll('-','').slice(0,12),schemaUid='config'+id;
     const backupPath='output/backups/native-ui-config-'+id+'.dump';await writeFile(backupPath,backup,{flag:'wx'});
     const page=instantiateNativePage(configured,schemaUid);
@@ -103,6 +104,8 @@ try{
     manifest.userId=user.id;await save();
   }
   if(!manifest.employeeId){
+    const existing=await api('latticeEmployees:list?'+filter({code:manifest.organizationId,organizationId:manifest.organizationId}));
+    assert.equal(existing.length,0,'Fixture employee exists without a manifest ID; inspect before retrying');
     const employee=await api('latticeEmployees:create',{code:manifest.organizationId,name:'Nhân viên thử cấu hình',organizationId:manifest.organizationId,userId:manifest.userId,active:true});
     manifest.employeeId=employee.id;await save();
   }
@@ -119,9 +122,13 @@ try{
     manifest.schemaInserted=true;await save();
   }
   if(!manifest.routeId){
+    const existing=await api('desktopRoutes:list?'+filter({schemaUid:manifest.schemaUid}));
+    assert.equal(existing.length,0,'Fixture page exists without a manifest ID; inspect before retrying');
     const route=await api('desktopRoutes:create',{title:'Kiểm thử chỉnh cấu hình',type:'page',schemaUid:manifest.schemaUid,enableTabs:false});manifest.routeId=route.id;await save();
   }
   if(!manifest.tabRouteId){
+    const existing=await api('desktopRoutes:list?'+filter({schemaUid:manifest.tabUid}));
+    assert.equal(existing.length,0,'Fixture tab exists without a manifest ID; inspect before retrying');
     const tab=await api('desktopRoutes:create',{parentId:manifest.routeId,type:'tabs',schemaUid:manifest.tabUid,tabSchemaName:manifest.tabUid+'name',hidden:true});manifest.tabRouteId=tab.id;await save();
   }
   const granted=await api('roles/'+manifest.role+'/desktopRoutes:list?paginate=false');
