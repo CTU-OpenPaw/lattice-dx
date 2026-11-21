@@ -17,6 +17,7 @@ const {
   resolveCallerRoleNames,
   isStudioAdmin,
   resolveActorScope,
+  safeGetResource,
   invokeResourceAction,
   createAuditedTool,
   SYSTEM_PROTECTED_COLLECTIONS,
@@ -290,7 +291,7 @@ function makeBuilderHarness() {
 
   const tools = createBuilderTools({
     val, failTool, resolveCallerRoleNames, isStudioAdmin, resolveActorScope,
-    invokeResourceAction, createAuditedTool, SYSTEM_PROTECTED_COLLECTIONS,
+    safeGetResource, invokeResourceAction, createAuditedTool, SYSTEM_PROTECTED_COLLECTIONS,
     CUSTOM_COLLECTION_RE, FIELD_NAME_RE, SLUG_RE, ALLOWED_BLOCK_MODELS,
   });
   const byName = new Map(tools.map((t) => [t.definition.name, t]));
@@ -420,4 +421,30 @@ test('dxos_configure_workflow and dxos_deploy_workflow inspect, edit nodes, auto
   const toggled = await wfTool.invoke(ctx, { operation: 'toggleWorkflow', workflowId: 50, enabled: true });
   assert.equal(toggled.enabled, true);
   assert.equal(db.workflowUpdateCalls.length >= 1, true);
+});
+
+test('workflow & portal tools survive NocoBase Resourcer.getResource throwing "resource does not exist"', async () => {
+  const { db, ctx, byName } = makeBuilderHarness();
+  const throwingRm = {
+    isDefined: (n) => n === 'flowSurfaces',
+    getResource: (n) => {
+      if (n !== 'flowSurfaces') throw new Error(`${n} resource does not exist`);
+      return ctx.app.resourceManager.getResource(n);
+    },
+  };
+  const strictCtx = { ...ctx, app: { ...ctx.app, resourceManager: throwingRm } };
+  const built = await byName.get('dxos_configure_workflow').invoke(strictCtx, {
+    operation: 'buildCustomWorkflow',
+    title: 'WF With Strict Resourcer',
+    collectionName: 'latticeCustomColdAudits',
+    enabled: true,
+  });
+  assert.equal(built.created, true);
+  assert.equal(built.enabled, true);
+  const portalRes = await byName.get('dxos_manage_portal_and_acl').invoke(strictCtx, {
+    slug: 'cold-qa-fallback',
+    title: 'Fallback Portal',
+    roleNames: ['ldx_employee'],
+  });
+  assert.equal(portalRes.applied, true);
 });

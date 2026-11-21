@@ -124,20 +124,42 @@ async function resolveActorScope(ctx, db) {
   };
 }
 
+function safeGetResource(ctx, resourceName) {
+  const rms = [ctx?.app?.resourceManager, ctx?.app?.mainDataSource?.resourceManager, ctx?.app?.resourcer];
+  for (const rm of rms) {
+    if (!rm) continue;
+    try {
+      if (typeof rm.isDefined === 'function' && !rm.isDefined(resourceName)) continue;
+      const res = rm.getResource?.(resourceName);
+      if (res) return res;
+    } catch {}
+  }
+  return null;
+}
+
 async function invokeResourceAction(ctx, resourceName, actionName, { filterByTk, values } = {}) {
-  const resource = ctx?.app?.resourceManager?.getResource?.(resourceName);
+  const resource = safeGetResource(ctx, resourceName);
   const handler = resource?.actions?.get?.(actionName)?.handler || resource?.actions?.[actionName];
   if (typeof handler !== 'function') {
     throw failTool('HOST_ACTION_UNAVAILABLE', 503, `Dịch vụ ${resourceName}:${actionName} chưa sẵn sàng.`);
   }
+  const params = { resourceName, actionName, ...(filterByTk != null ? { filterByTk } : {}), ...(values ? { values } : {}) };
   const subCtx = {
     app: ctx.app,
     db: ctx.db,
+    dataSource: ctx.dataSource || ctx.app?.mainDataSource,
     state: { ...ctx.state },
     auth: ctx.auth,
     getCurrentLocale: ctx.getCurrentLocale?.bind(ctx),
     i18n: ctx.i18n,
-    action: { actionName, resourceName, params: { ...(filterByTk != null ? { filterByTk } : {}), ...(values ? { values } : {}) } },
+    action: {
+      actionName,
+      resourceName,
+      params,
+      mergeParams: (patch) => {
+        if (patch && typeof patch === 'object') Object.assign(params, patch);
+      },
+    },
     request: { headers: {} },
     body: null,
     throw: (s, m) => { throw failTool('HOST_ACTION_ERROR', s, m); },
@@ -220,6 +242,7 @@ function createDxosTools() {
     resolveCallerRoleNames,
     isStudioAdmin,
     resolveActorScope,
+    safeGetResource,
     invokeResourceAction,
     createAuditedTool,
     WRITABLE_BUSINESS_COLLECTIONS,
@@ -273,6 +296,7 @@ module.exports = {
   resolveCallerRoleNames,
   isStudioAdmin,
   resolveActorScope,
+  safeGetResource,
   invokeResourceAction,
   createAuditedTool,
   createDxosTools,

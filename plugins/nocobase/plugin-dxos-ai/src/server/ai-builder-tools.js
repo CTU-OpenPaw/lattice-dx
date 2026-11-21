@@ -291,9 +291,10 @@ async function resolveOrgCrewBindings(db, organizationId, val) {
 
 function createBuilderTools(deps) {
   const {
-    val, failTool, invokeResourceAction, createAuditedTool,
+    val, failTool, safeGetResource, invokeResourceAction, createAuditedTool,
     SYSTEM_PROTECTED_COLLECTIONS, CUSTOM_COLLECTION_RE, FIELD_NAME_RE, SLUG_RE, ALLOWED_BLOCK_MODELS,
   } = deps;
+  const hasRes = (ctx, name) => (typeof safeGetResource === 'function' ? safeGetResource(ctx, name) : null);
 
   return [
     createAuditedTool({
@@ -605,7 +606,7 @@ function createBuilderTools(deps) {
           return { applied: true, operation: 'revoke', layoutUid, path: `/p/${args.slug}`, revokedRoles: safeRoles, routeCount: portalRouteIds.length };
         }
 
-        const latticePortalsRes = ctx?.app?.resourceManager?.getResource?.('latticePortals');
+        const latticePortalsRes = hasRes(ctx, 'latticePortals');
         if (latticePortalsRes) {
           let existingRoles = [];
           if (rolesRoutesRepo && portalRouteIds.length) {
@@ -697,6 +698,11 @@ function createBuilderTools(deps) {
         if (!colsRepo) throw failTool('SCHEMA_REPO_UNAVAILABLE', 503, 'Repository collections chưa sẵn sàng.');
 
         if (args.operation === 'createCollection') {
+          const existing = await colsRepo.findOne({ filter: { name: args.collectionName }, appends: ['fields'] });
+          if (existing) {
+            if (typeof existing.load === 'function') await existing.load({ resetFields: true });
+            return { created: false, alreadyExists: true, collectionName: args.collectionName };
+          }
           const created = await colsRepo.create({
             values: {
               name: args.collectionName,
@@ -961,7 +967,7 @@ function createBuilderTools(deps) {
           });
           return { deployed: true, workflowId: val(created, 'id'), title: val(created, 'title'), templateKey: 'ai-incident-triage' };
         }
-        const studioRes = ctx?.app?.resourceManager?.getResource?.('dxosStudio');
+        const studioRes = hasRes(ctx, 'dxosStudio');
         if (studioRes) {
           return invokeResourceAction(ctx, 'dxosStudio', 'installWorkflow', {
             values: { templateKey: args.templateKey, organizationId, ...crewBindings, enabled: args.enabled !== false },
@@ -1071,7 +1077,7 @@ function createBuilderTools(deps) {
           if (!args.workflowId) throw failTool('WORKFLOW_ID_REQUIRED', 400, 'Cần workflowId để bật/tắt workflow.');
           const enabled = args.enabled !== false;
           if (args.dryRun) return { dryRun: true, workflowId: args.workflowId, enabled };
-          if (ctx?.app?.resourceManager?.getResource?.('workflows')) {
+          if (hasRes(ctx, 'workflows')) {
             await invokeResourceAction(ctx, 'workflows', 'update', { filterByTk: args.workflowId, values: { enabled } });
           } else {
             const wf = await wfRepo.findOne({ filterByTk: args.workflowId });
@@ -1086,6 +1092,14 @@ function createBuilderTools(deps) {
           throw failTool('COLLECTION_FORBIDDEN_FOR_WORKFLOW', 403, `Collection "${args.collectionName}" không hợp lệ hoặc bị bảo vệ.`);
         }
         const title = args.title || `Quy trình ${args.collectionName}`;
+        const existingWf = await wfRepo.findOne({ filter: { title, current: true, 'options.dxosOrganizationId': actor.organizationId } });
+        if (existingWf) {
+          const wfId = val(existingWf, 'id');
+          if (args.enabled !== undefined && Boolean(val(existingWf, 'enabled')) !== Boolean(args.enabled)) {
+            await existingWf.update({ enabled: Boolean(args.enabled) });
+          }
+          return { applied: true, created: false, alreadyExists: true, workflowId: wfId, title, enabled: Boolean(args.enabled ?? val(existingWf, 'enabled')), designerUrl: `/admin/settings/workflow/workflows/${wfId}` };
+        }
         const triggerMode = [1, 2, 3].includes(Number(args.triggerMode)) ? Number(args.triggerMode) : 1;
         const condField = args.conditionField || 'status';
         const condGt = args.conditionGt !== undefined ? args.conditionGt : -15;
@@ -1150,7 +1164,7 @@ function createBuilderTools(deps) {
           return { workflowId, title: val(wf, 'title'), key: val(wf, 'key'), nodeCount: 3 };
         });
 
-        if (ctx?.app?.resourceManager?.getResource?.('workflows') && enabled) {
+        if (hasRes(ctx, 'workflows') && enabled) {
           try {
             await invokeResourceAction(ctx, 'workflows', 'update', { filterByTk: created.workflowId, values: { enabled: true } });
           } catch {}
