@@ -55,6 +55,8 @@ Trong quyền dữ liệu của `ldx_employee` đối với `latticeRequests`, c
 
 Schema UID và route ID vẫn là các ID của trang thử ở trên. Bản xuất schema sau kiểm tra nằm ở `output/native-platform/studio-checkpoint4-schema.json`. Kết quả xác minh quyền và hồ sơ nằm ở `output/native-platform/studio-checkpoint4.json`. Khi tái tạo trên lab khác, dùng fixture ban đầu rồi áp dụng lại các bước cấu hình trên vì ID trang và ID bản ghi được cấp lại.
 
+Đã bổ sung [gói tái tạo checkpoint](native-ui-checkpoint-package.md) để mang theo field, nhãn, cột/form/filter và policy thử có kiểm tra. Gói dùng role/tổ chức/page riêng và UID mới, không ghi đè preset hoặc trang thử cũ. Vẫn cần nghiệm thu browser riêng sau import.
+
 ## Nạp bundle trong môi trường local
 
 Build thay đổi bundle trong mount `node_modules`; bản cũ trong `storage/plugins` không tự chứng minh là file đang được phục vụ. Phải kiểm tra resolver/asset thực tế. Asset NocoBase có cache một năm, còn URL bundle có hash được lưu trong tiến trình server. Sau build có thể cần restart riêng NocoBase để công bố hash mới, rồi tải lại trang. Không cài lại plugin, seed hay migration chỉ để cập nhật client shell. Sao lưu bundle cũ trước khi build/nạp.
