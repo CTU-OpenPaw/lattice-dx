@@ -147,3 +147,55 @@ test('MCP gateway enforces Bearer auth, hides Admin tools from non-admins, execu
   const rootList = await callMcp('/api/dxos-mcp', { jsonrpc: '2.0', id: 6, method: 'tools/list' }, { token: 'root-token' });
   assert.equal(rootList.ctx.body.result.tools.some((t) => t.name === 'dxos_compose_page_blocks'), true);
 });
+
+test('default host auth populates ctx.db and ctx.getBearerToken before dataSource middleware', async () => {
+  const db = makeItOtMockDb();
+  const baseFindRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'rolesUsers') {
+      return {
+        find: async ({ filter }) => (Number(filter?.userId) === 9 ? [{ roleName: 'ldx_employee' }] : []),
+      };
+    }
+    return baseFindRepo(name);
+  };
+  let seenDb = false;
+  let seenToken = null;
+  let seenAction = false;
+  let seenAcl = false;
+  const mockApp = {
+    authManager: {
+      middleware: () => async (ctx, next) => {
+        seenDb = Boolean(ctx.db);
+        const { resourceName, actionName } = ctx.action;
+        seenAction = Boolean(resourceName && actionName);
+        seenAcl = Boolean(ctx.dataSource?.acl);
+        seenToken = typeof ctx.getBearerToken === 'function' ? ctx.getBearerToken() : null;
+        if (seenDb && seenAction && seenAcl && seenToken === 'valid-jwt') {
+          ctx.state.currentUser = { id: 9, username: 'emp9' };
+        }
+        await next();
+      },
+    },
+  };
+  const mw = createMcpGatewayMiddleware({
+    app: mockApp,
+    db,
+    tools: createDxosTools(),
+    itOtTools: [],
+  });
+  const ctx = {
+    path: '/api/dxos-mcp',
+    method: 'POST',
+    headers: { authorization: 'Bearer valid-jwt' },
+    request: { body: { jsonrpc: '2.0', id: 1, method: 'tools/list' } },
+    set() {},
+  };
+  await mw(ctx, async () => {});
+  assert.equal(seenDb, true);
+  assert.equal(seenAction, true);
+  assert.equal(seenAcl, true);
+  assert.equal(seenToken, 'valid-jwt');
+  assert.equal(ctx.status, 200);
+  assert.ok(ctx.body.result.tools.some((t) => t.name === 'dxos_search_enterprise_context'));
+});

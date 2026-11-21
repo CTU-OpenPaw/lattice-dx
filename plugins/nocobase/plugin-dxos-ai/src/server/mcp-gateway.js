@@ -29,21 +29,38 @@ function extractBearerToken(ctx) {
 
 async function defaultResolveHostAuth(app, db, ctx, token) {
   if (!token) return null;
-  if (ctx.state?.currentUser?.id) return { currentUser: ctx.state.currentUser, currentRoles: ctx.state.currentRoles || [] };
-  if (app?.authManager && typeof app.authManager.middleware === 'function') {
+  if (!ctx.db && db) ctx.db = db;
+  if (!ctx.app && app) ctx.app = app;
+  if (!ctx.state) ctx.state = {};
+  if (!ctx.action) ctx.action = { resourceName: 'dxosMcp', actionName: 'rpc', params: {} };
+  if (!ctx.dataSource) {
+    ctx.dataSource = app?.mainDataSource || {
+      acl: app?.acl || { allowManager: { isPublic: async () => false } },
+    };
+  }
+  if (!ctx.query) ctx.query = {};
+  if (typeof ctx.getBearerToken !== 'function') ctx.getBearerToken = () => token;
+  if (typeof ctx.get !== 'function') {
+    ctx.get = (header) => {
+      const k = String(header || '').toLowerCase();
+      return String(ctx.headers?.[k] || ctx.request?.headers?.[k] || '');
+    };
+  }
+  if (!ctx.state?.currentUser?.id && app?.authManager && typeof app.authManager.middleware === 'function') {
     await app.authManager.middleware()(ctx, async () => {});
   }
   const user = ctx.state?.currentUser || ctx.auth?.user;
-  if (!user?.id) return null;
+  const userId = user && (typeof user.get === 'function' ? user.get('id') : user.id);
+  if (!userId) return null;
   const rolesRepo = db?.getRepository?.('rolesUsers');
-  let roleNames = [];
-  if (rolesRepo) {
-    const rows = (await rolesRepo.find({ filter: { userId: user.id } })) || [];
+  let roleNames = Array.isArray(ctx.state?.currentRoles) ? [...ctx.state.currentRoles] : [];
+  if (!roleNames.length && rolesRepo) {
+    const rows = (await rolesRepo.find({ filter: { userId } })) || [];
     roleNames = rows.map((r) => (typeof r.get === 'function' ? r.get('roleName') : r.roleName)).filter(Boolean);
   }
   const requestedRole = String(ctx.headers?.['x-role'] || ctx.request?.headers?.['x-role'] || '').trim();
   const effectiveRoles = requestedRole && roleNames.includes(requestedRole) ? [requestedRole, ...roleNames.filter((r) => r !== requestedRole)] : roleNames;
-  return { currentUser: user, currentRoles: effectiveRoles };
+  return { currentUser: { ...user, id: userId }, currentRoles: effectiveRoles };
 }
 
 function sendUnauthorized(ctx, message = 'Authentication required') {
@@ -74,7 +91,8 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
     let authState = null;
     try {
       authState = authResolver ? await authResolver(token, ctx) : await defaultResolveHostAuth(app, activeDb, ctx, token);
-    } catch {
+    } catch (err) {
+      app?.log?.warn?.('[dxos-mcp] host auth resolution failed', { error: err?.message, status: err?.status });
       authState = null;
     }
 
@@ -178,11 +196,12 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
         return;
       }
       try {
-        const toolCtx = { ...ctx, app: app || ctx.app, db: activeDb };
+        ctx.app = app || ctx.app;
+        ctx.db = activeDb;
         if (tool.definition.name === 'dxos_my_tasks_copilot' && ctx.state.currentRoles) {
-          await resolveActorScope(toolCtx, activeDb);
+          await resolveActorScope(ctx, activeDb);
         }
-        const out = await tool.invoke(toolCtx, req.params?.arguments || {});
+        const out = await tool.invoke(ctx, req.params?.arguments || {});
         ctx.status = 200;
         ctx.body = { jsonrpc: '2.0', id: reqId, result: { content: [{ type: 'text', text: JSON.stringify(out) }], isError: false } };
         return;

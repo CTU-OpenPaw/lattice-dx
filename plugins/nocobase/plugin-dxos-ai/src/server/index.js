@@ -22,7 +22,7 @@ class DxosAiPlugin extends Plugin {
       app: this.app,
       db: this.db,
       tools: createDxosTools(),
-      itOtTools: createItOtMcpTools({ db: this.db }),
+      itOtTools: createItOtMcpTools(this.db),
     });
     if (typeof this.app?.use === 'function') {
       this.app.use(mcpMiddleware, { tag: 'dxosMcpGateway', before: 'dataSource', after: 'dataWrapping' });

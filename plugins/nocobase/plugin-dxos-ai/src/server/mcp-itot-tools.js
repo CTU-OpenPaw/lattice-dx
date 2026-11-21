@@ -8,6 +8,7 @@
  */
 'use strict';
 
+const { existsSync } = require('node:fs');
 const { createAuditedTool, resolveActorScope, failTool, val } = require('./ai-tools-core');
 const { validateMcpServerUrl } = require('./ai-schemas');
 
@@ -40,11 +41,12 @@ async function probeService(url, fetchImpl) {
 }
 
 function resolveServiceUrls(env = process.env) {
+  const defaultHost = existsSync('/.dockerenv') ? 'http://host.docker.internal' : 'http://127.0.0.1';
   return {
-    orionUrl: String(env.ORION_LD_URL || 'http://127.0.0.1:1026').replace(/\/+$/, ''),
-    n8nUrl: String(env.N8N_URL || 'http://127.0.0.1:5678').replace(/\/+$/, ''),
-    n8nWebhookBase: String(env.N8N_WEBHOOK_BASE_URL || 'http://127.0.0.1:5678/webhook').replace(/\/+$/, ''),
-    keycloakUrl: String(env.KEYCLOAK_URL || 'http://127.0.0.1:8081').replace(/\/+$/, ''),
+    orionUrl: String(env.ORION_LD_URL || `${defaultHost}:1026`).replace(/\/+$/, ''),
+    n8nUrl: String(env.N8N_URL || `${defaultHost}:5678`).replace(/\/+$/, ''),
+    n8nWebhookBase: String(env.N8N_WEBHOOK_BASE_URL || `${defaultHost}:5678/webhook`).replace(/\/+$/, ''),
+    keycloakUrl: String(env.KEYCLOAK_URL || `${defaultHost}:8081`).replace(/\/+$/, ''),
   };
 }
 

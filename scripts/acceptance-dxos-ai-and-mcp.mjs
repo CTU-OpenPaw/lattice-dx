@@ -126,7 +126,7 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
       method: 'tools/call',
       params: {
         name: 'dxos_compose_page_blocks',
-        arguments: { portalSlug: 'services', blockModel: 'DxosAiProposalBlockModel', dryRun: true },
+        arguments: { portalSlug: 'services', blockUse: 'DxosAiProposalBlockModel', title: 'Đề xuất AI Dịch vụ E2E', dryRun: true },
       },
     });
     assert.equal(dryRunCall.json?.result?.isError, false);
@@ -166,7 +166,7 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
       jsonrpc: '2.0',
       id: 11,
       method: 'tools/call',
-      params: { name: 'get_live_ngsi_telemetry', arguments: { limit: 3 } },
+      params: { name: 'get_live_ngsi_telemetry', arguments: {} },
     });
     assert.equal(itOtTelem.json?.result?.isError, false);
     checks.itOtMcpTelemetrySafe = true;
