@@ -11,6 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 **LatticeDX** là nền tảng hệ điều hành doanh nghiệp số nguồn mở (**DX-OS Open-Core**, phát hành theo giấy phép **Apache-2.0**) do **CTU-OpenPaw** phát triển cho kỳ thi **OLP PMNM 2026 (VFOSSA)**. Nền tảng hợp nhất **Con người (`[H]`) – Quy trình (`[P]`) – Dữ liệu (`[D]`) – Trí tuệ (`[I]`)** trên nền tảng cấu hình trực tiếp trong **NocoBase `2.2.38`**, kết hợp bộ **6 plugin Apache-2.0** cài đặt và bật/tắt linh hoạt ngay trong giao diện quản trị NocoBase.
 
 > - **Báo cáo kỹ thuật & Hướng dẫn vận hành chi tiết (kiến trúc, RBAC, Multi-Portal, AI Agent phòng ban thực thi CSDL, IT/OT & PoF):** [docs/system-report-and-guide.md](docs/system-report-and-guide.md)
+> - **Nghiệm thu Logistics 5 bước, Multi-Domain, RBAC âm tính & Sao lưu/Phục hồi Toàn Stack:** [docs/logistics-and-rbac-acceptance.md](docs/logistics-and-rbac-acceptance.md) · [docs/stack-backup-and-recovery.md](docs/stack-backup-and-recovery.md)
 > - Hướng dẫn trình diễn trực tiếp 15 phút (Admin Studio, Add block, P.A.R.A., PoF): [docs/DEMO_PACK.md](docs/DEMO_PACK.md)
 > - Hồ sơ bản quyền & dependency chuẩn hóa: [`COPYRIGHT.txt`](COPYRIGHT.txt) · [`NOTICE`](NOTICE) · [`LICENSE`](LICENSE)
 > - Build từ mã nguồn & PoF OLP PMNM 2026: [docs/build-from-source.md](docs/build-from-source.md) · [docs/oss-pof-compliance.md](docs/oss-pof-compliance.md)
@@ -70,6 +71,10 @@ node scripts/setup-native-multi-portal-demo.mjs "<path-to-report.json>"
 node scripts/setup-native-workspace-demo.mjs "<path-to-report.json>"
 # (Tùy chọn) Nạp AI workflow "Tạo Phiếu Bảo trì Kho lạnh" & trợ lý phòng ban kho-lanh-ops
 node scripts/setup-department-ai-agent.mjs "<path-to-report.json>"
+# Nghiệm thu E2E Logistics 5 bước, Domain 2 & RBAC âm tính + sao lưu/diễn tập phục hồi toàn stack
+pnpm acceptance:logistics-rbac -- "<path-to-report.json>"
+pnpm backup:stack
+pnpm backup:rehearse-stack -- "output/backups/stack/<bundle-id>"
 ```
 
 Sau khi nạp demo, đăng nhập quản trị tại `http://localhost:13014` (`admin@nocobase.com` / `admin123`), mở **`/admin/settings/dxos-studio`** để cài quy trình Poka-yoke, dựng cổng đa-block, hoặc bật UI Editor trên `/p/services` để thêm & tùy biến block DX-OS trực tiếp.

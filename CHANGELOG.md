@@ -4,7 +4,9 @@ Tài liệu ghi nhận lịch sử phát triển của **LatticeDX** (Apache-2.0
 
 ## [Unreleased] — chuẩn bị v0.1.0
 
-### 2026-11-21 — Báo cáo Kỹ thuật, Hướng dẫn Vận hành & Script AI Agent Phòng ban
+### 2026-11-21 — Nghiệm thu Logistics 5 Bước, Multi-Domain, RBAC & Sao lưu Phục hồi Toàn Stack
+- Hoàn thiện công cụ sao lưu & diễn tập phục hồi toàn stack an toàn ngoài PostgreSQL (`scripts/stack-recovery.mjs`, `scripts/tests/stack-recovery.test.mjs` — `6/6` đạt) bao phủ 5 thành phần (`nocobase-db`, `uploads`, `keycloak`, `orion-mongo`, `n8n`), lệnh `pnpm backup:stack` / `pnpm backup:rehearse-stack` và hướng dẫn vận hành tại [docs/stack-backup-and-recovery.md](docs/stack-backup-and-recovery.md). Đã chạy sao lưu & diễn tập cô lập live đạt `fullStackVerified: true`, `skippedComponents: []` (`119` bảng NocoBase, `3` uploads entries, `101` bảng Keycloak realm `lattice`, `13.944` bytes Orion MongoDB, `4` workflows n8n) mà không chạm dữ liệu chạy thật.
+- Hoàn thiện kịch bản nghiệm thu E2E quy trình Logistics 5 bước (`logistics-5step`), domain thứ 2 (`internal-service` — `latticeServiceTickets`) và `7` kiểm tra RBAC/đa-tổ-chức âm tính (`HTTP 403`) tại `scripts/acceptance-logistics-and-rbac.mjs`, `scripts/tests/acceptance-logistics-rbac.test.mjs` (`5/5` đạt), lệnh `pnpm acceptance:logistics-rbac` và báo cáo nghiệm thu tại [docs/logistics-and-rbac-acceptance.md](docs/logistics-and-rbac-acceptance.md).
 - Bổ sung [docs/system-report-and-guide.md](docs/system-report-and-guide.md): báo cáo kỹ thuật tổng thể kiến trúc 6 plugin Apache-2.0, tùy biến nghiệp vụ doanh nghiệp Việt (Data Sources, RBAC theo cột, Keycloak SSO, Multi-Portal, DX-OS Studio, AI Agent thực thi CSDL, IT/OT Orion-LD + n8n) và hướng dẫn cài đặt/khắc phục sự cố chi tiết từng bước.
 - Bổ sung `scripts/setup-department-ai-agent.mjs` (và kiểm thử `scripts/tests/department-ai-agent.test.mjs`) tự động hóa idempotent việc tạo AI Workflow `Tạo Phiếu Bảo trì Kho lạnh` (`type: "ai-employee"`, `sync: true`), kết nối gateway OpenAI-compatible cục bộ qua biến môi trường (`AGENT_API_KEY`) và gắn workflow tool ở chế độ `Allow` cho trợ lý `kho-lanh-ops`.
 

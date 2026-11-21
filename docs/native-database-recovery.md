@@ -26,7 +26,7 @@ Artifact và báo cáo nằm trong `output/backups/native`, đã được git ig
 
 - `scope: nocobase-database-only`, `fullRecoverability: false`, `objectsVerified: false`, `applicationHealthVerified: false`.
 - Tệp của bản thử `lattice_native_request_attachments` nằm dưới dạng `bytea` trong database được giữ và đối chiếu cùng snapshot. `nativeAttachmentBytesVerified` chỉ là `true` khi snapshot có bảng này và có tệp; không thay kiểm tra tải tệp qua API/ACL.
-- Không bao gồm uploads ngoài DB, S3/MinIO, key mã hóa, plugin/source/build, database ngoài NocoBase, Keycloak, broker, n8n hoặc store legacy. Tham khảo [phục hồi store legacy](recovery.md) để giữ đúng phạm vi từng công cụ.
+- Không bao gồm uploads ngoài DB, S3/MinIO, key mã hóa, plugin/source/build, database ngoài NocoBase, Keycloak, broker, n8n hoặc store legacy. Để sao lưu và diễn tập khôi phục mở rộng cho **uploads, Keycloak, Orion-LD/MongoDB và n8n**, dùng `pnpm backup:stack` / `pnpm backup:rehearse-stack` theo [tài liệu sao lưu toàn stack](stack-backup-and-recovery.md); tham khảo [phục hồi store legacy](recovery.md) cho core store.
 - Thử restore dữ liệu không chứng minh app đã lên health, luồng browser hay provider hoạt động. Không tự cutover, reset dữ liệu nguồn hoặc chạy lại event/outbox trong app thử.
 - Native backup/export của host có thể dùng riêng theo edition/plugin đang bật. Công cụ này dành cho snapshot PostgreSQL gồm cả bảng riêng của extension; không giả định export cấu hình host bao gồm các bảng đó.
 

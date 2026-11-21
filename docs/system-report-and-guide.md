@@ -167,10 +167,8 @@ node scripts/setup-department-ai-agent.mjs --origin=http://localhost:13014 --wor
 
 ### 6. Kiểm toán PoF & Đóng gói Phát hành
 
-```sh
-pnpm pof:check
-pnpm release:tarball --ref=v0.1.0
-```
+- Kiểm toán PoF & Đóng gói: `pnpm pof:check` · `pnpm release:tarball --ref=v0.1.0`
+- Sao lưu & Diễn tập khôi phục toàn stack (`nocobase-db`, `uploads`, `keycloak`, `orion-mongo`, `n8n` — [docs/stack-backup-and-recovery.md](stack-backup-and-recovery.md)): `pnpm backup:stack` · `pnpm backup:rehearse-stack -- "output/backups/stack/stack-<id>"`
 
 Giải nén `output/release/latticedx-0.1.0-src.tar.gz` vào thư mục tạm ngoài Git để kiểm chứng lại `pnpm install --frozen-lockfile && pnpm pof:check && pnpm check && node --test plugins/nocobase/*/tests/*.test.cjs scripts/tests/*.test.mjs`.
 
