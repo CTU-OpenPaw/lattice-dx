@@ -35,7 +35,29 @@ Mở `pageUrl` do lệnh trả về. Root fixture của host: `admin@nocobase.co
 
 Mật khẩu fixture nghiệp vụ: `NativeLab-2026!`. Chỉ dùng localhost, không phải cấu hình production. Đăng xuất giữa các vai trò. Dùng form **Tạo và gửi**, quản lý vào Workflow To-do để duyệt, người thực hiện hoàn thành. Người nhận nằm trong cấu hình workflow mẫu, không phải cơ chế điều phối logistics hoàn chỉnh.
 
-Đây là kiểm API và tạo cấu hình UI bền vững; cần nghiệm thu browser riêng, không suy diễn thành đã test mọi block/role. Workspace mới của Hưng chỉ xuất hiện khi nhánh/PR tương ứng đã được tích hợp vào source chạy.
+Với source chứa PR #47, mở `/admin/lattice-workspace` trên cùng cổng để vào Workspace. [Hướng dẫn Workspace theo vai trò](native-workspace-roles.md) có các bước kiểm menu, trang được cấp quyền và hộp công việc. Lệnh cài sạch kiểm API và lưu cấu hình UI mẫu. Dùng trình duyệt để nghiệm thu từng thao tác.
+
+### Kiểm tra demo Workspace sau khi cài mới
+
+Từ checkout chứa script cấu hình demo, chạy lệnh dưới đây với đường dẫn `reportPath` do `pnpm native:clean` trả về:
+
+```powershell
+node scripts/setup-native-workspace-demo.mjs "<reportPath>"
+```
+
+Script tạo nhóm **Yêu cầu nội bộ**, form native **Tạo yêu cầu** và nút tạo nhanh, rồi cấp quyền mở trang demo cho ba vai trò mẫu. Có thể chạy lại trên cùng lab để bổ sung quyền còn thiếu. Nếu tên nhóm đã được dùng bởi một cấu hình khác, script dừng và giữ nguyên cấu hình đó.
+
+Nếu lần cấu hình bị gián đoạn, giữ file `report.json.workspace-demo` bên cạnh báo cáo và chạy lại cùng lệnh. File này giúp script nhận diện nhóm demo đã tạo dở.
+
+Lưu báo cáo trên hệ thống tệp hỗ trợ hard link, ví dụ NTFS trên Windows. Nếu một file `.workspace-demo` có sẵn bị hỏng, script sẽ báo lỗi và giữ file để đối chiếu với nhóm demo đã tạo.
+
+Chạy một lượt cấu hình tại một thời điểm trên mỗi lab. Cách ghi UUID bảo vệ file định danh khi nhiều tiến trình cùng ghi, còn các thao tác tạo nhóm và trang trên NocoBase vẫn cần chạy tuần tự. Việc ghi file này xử lý trường hợp tiến trình bị dừng, chưa được kiểm chứng khi máy mất điện.
+
+1. Trên cổng do báo cáo trả về, đăng nhập bằng tài khoản nhân viên mẫu và mở `/admin/lattice-workspace?view=apps`. Kiểm tra danh mục và mở trang mẫu được cấp quyền. Nếu chạy demo nút tạo nhanh của PR #51, builder cần cấu hình nút trên chính lab này tại `/admin/lattice-builder`: chọn ứng dụng, trang có form tạo tương ứng và tên kỹ thuật của collection. Tải lại Build UI để xác nhận cấu hình đã lưu.
+2. Dùng tài khoản nhân viên gửi một yêu cầu có mã riêng. Dùng tài khoản quản lý mở **Công việc của tôi → Cần xử lý**, đối chiếu mã và duyệt. Dùng tài khoản người thực hiện mở việc tiếp theo của cùng hồ sơ và bấm **Hoàn thành**.
+3. Đối chiếu trạng thái hồ sơ `completed` và công việc của người thực hiện trong tab **Đã xử lý**. Ghi SHA nguồn trong báo cáo cài đặt cùng mã hồ sơ để nhóm xác định chính xác bản đã nghiệm thu.
+
+Lab cài mới có volume riêng. Cấu hình nút tạo nhanh từng lưu trên lab `13001` không được mang sang lab mới.
 
 ## Kiến trúc và phạm vi bàn giao
 

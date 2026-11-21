@@ -18,4 +18,4 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
       - name: Verify NocoBase plugin contracts
-        run: node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs
+        run: node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs scripts/tests/native-workspace-demo.test.mjs

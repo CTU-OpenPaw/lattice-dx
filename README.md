@@ -1,6 +1,8 @@
 # LatticeDX · PMNM 2026
 
-Bộ khung nền tảng chuyển đổi số LatticeDX. Có cổng web, API và agent worker độc lập; core local gồm Keycloak, APISIX, PostgreSQL và ClamAV. Có runtime NocoBase, action catalog/runtime, plugin server kết nối Keycloak bằng PKCE, API task/quyết định và lưu/quét tệp nhỏ. Backend workflow dùng chung đã chạy được mua sắm–bàn giao và tiếp nhận nhân viên liên phòng ban, có lịch sử và outbox retry. UI workflow, NGSI-LD và mô hình AI còn chờ tích hợp.
+LatticeDX là nền tảng dựng và vận hành ứng dụng nghiệp vụ. Luồng native dùng NocoBase cho collections, trình dựng trang, phân quyền và workflow. Các plugin LatticeDX bổ sung mô hình nghiệp vụ, ràng buộc dữ liệu, đăng nhập doanh nghiệp và các điểm kết nối với dịch vụ ngoài.
+
+Để thử luồng native từ một database mới, chạy `pnpm native:clean` theo [hướng dẫn cài và nghiệm thu](docs/native-clean-install.md). Xem [kiến trúc hiện tại](docs/architecture.md) để biết các luồng đã kiểm chứng và phần cần ghép tiếp. Phần hướng dẫn core bên dưới phục vụ API và các luồng legacy.
 
 ## Chạy core bằng Docker
 
@@ -46,11 +48,11 @@ Cấu hình này dùng mật khẩu PUBLIC cho môi trường local, được gh
 Yêu cầu Node.js 24 và pnpm 10.23.0. Clone kèm bản nguồn NocoBase:
 
 ```sh
-git clone --recurse-submodules https://github.com/TrDuy-pan3000/LatticeDX.git
-cd LatticeDX
+git clone https://github.com/CTU-OpenPaw/lattice-dx.git
+cd lattice-dx
 ```
 
-Nếu đã clone repo trước đó, chạy `git submodule update --init --recursive` để tải NocoBase tại commit được khóa. Submodule dùng để khảo sát nguồn; `pnpm dev` chưa khởi động NocoBase. Chạy runtime riêng bằng `pnpm nocobase:up`, mở http://localhost:13000. Đọc [hợp đồng nền và bàn giao giai đoạn 1](docs/phase-one-handoff.md); SSO NocoBase chưa tích hợp.
+Khi cần khảo sát source upstream, chạy `git submodule update --init --recursive` để tải commit NocoBase đã khóa. `pnpm dev` khởi động web, API và worker. Để chạy riêng NocoBase tại cổng 13000, dùng `pnpm nocobase:up`. Để thử native với ba plugin đã cài và dữ liệu mẫu, dùng đường cài sạch ở đầu tài liệu.
 
 ```sh
 pnpm install --frozen-lockfile
@@ -99,4 +101,4 @@ Backend đã bổ sung liên kết thực thể–workflow, journal giao dịch,
 
 ## Giấy phép
 
-Mã gốc của nhóm trong repo này dùng Apache-2.0; xem `LICENSE`. Dependency giữ giấy phép riêng. Phiên bản khóa trong `pnpm-lock.yaml`; chưa kiểm toán giấy phép toàn bộ dependency. NocoBase source giữ nguyên trong submodule `upstream/nocobase/`; runtime 2.2.20 chạy riêng và có plugin server nhóm. Checkout có điều khoản bổ sung và thông báo giấy phép khác nhau; chưa xác nhận đủ điều kiện dự thi. Plugin dùng SDK upstream không tự giải quyết nghĩa vụ phân phối của SDK/host. Xem [ghi nhận nguồn và giấy phép](docs/nocobase-source-review.md).
+Mã gốc của nhóm dùng Apache-2.0 theo `LICENSE` và các file giấy phép trong từng plugin. Dependency, source tham chiếu trong submodule và image NocoBase 2.2.38 giữ giấy phép và thông báo upstream tương ứng. Xem [kiểm kê nguồn và giấy phép](docs/third-party.md).

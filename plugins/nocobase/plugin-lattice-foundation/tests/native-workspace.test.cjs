@@ -17,7 +17,7 @@ test('native workspace lists only host-provided visible pages and safe native pa
   assert.deepEqual(workspacePages(undefined),[]);
 });
 
-function workspaceHarness({search='?view=apps', refresh=async()=>{}, service={}}={}) {
+function workspaceHarness({search='?view=apps', refresh=async()=>{}, service={}, allAccessRoutes, permissions}={}) {
   let cursor=0;
   const state=[], effects=[], routes=new Map(), navigations=[];
   const React={Fragment:'Fragment', createElement:(type,props,...children)=>({type,props:props||{},children}),
@@ -34,9 +34,10 @@ function workspaceHarness({search='?view=apps', refresh=async()=>{}, service={}}
       }
     },
   };
-  const client={SchemaComponent:'NativeSchema', PagePopups:'NativePopups', useAPIClient:()=>({auth:{role:'ldx_employee'}}),
+  const api={auth:{role:'ldx_employee'},request:async()=>({data:{data:permissions}})};
+  const client={SchemaComponent:'NativeSchema', PagePopups:'NativePopups', useAPIClient:()=>api,
     useListBlockContext:()=>({service}),
-    useAllAccessDesktopRoutes:()=>({refresh,allAccessRoutes:[{type:'flowPage',schemaUid:'demo',title:'Trang demo'}]}),
+    useAllAccessDesktopRoutes:()=>({refresh,allAccessRoutes:allAccessRoutes ?? [{type:'flowPage',schemaUid:'demo',title:'Trang demo'}]}),
   };
   const router={Link:'Link',Outlet:'Outlet',useLocation:()=>({pathname:WORKSPACE_PATH,search}),
     useNavigate:()=>path=>navigations.push(path)};
@@ -48,6 +49,25 @@ function workspaceHarness({search='?view=apps', refresh=async()=>{}, service={}}
     return ui;
   }};
 }
+
+test('an application exposes a configured create link only with route and collection permission', async () => {
+  const form={type:'flowPage',schemaUid:'request_form',title:'Form yêu cầu'};
+  const group={id:17,type:'group',title:'Yêu cầu nội bộ',options:{workspace:{quickCreate:{
+    pageUid:form.schemaUid,collection:'requests',label:'Tạo yêu cầu',
+  }}},children:[{type:'page',schemaUid:'list',title:'Danh sách'},form]};
+  const readOnly={actions:{'requests:view':{}}};
+  const writer={actions:{...readOnly.actions,'requests:create':{}}};
+  for (const [route,permissions,expected] of [
+    [group,writer,true], [group,readOnly,false], [{...group,children:group.children.slice(0,1)},writer,false],
+  ]) {
+    const setup=workspaceHarness({allAccessRoutes:[route],permissions});
+    setup.render();
+    await Promise.resolve();
+    const ui=setup.render();
+    assert.ok(find(ui,node=>node.type==='Link'&&node.props.to===WORKSPACE_PATH+'?view=apps&app=17'));
+    assert.equal(Boolean(find(ui,node=>node.type==='Link'&&node.props.to==='/admin/request_form')),expected);
+  }
+});
 
 function find(node,predicate) {
   if (!node || typeof node!=='object') return null;
