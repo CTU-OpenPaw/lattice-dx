@@ -149,12 +149,60 @@ test('schema-helper builds pure-JS JSON Schema and validates args cleanly', () =
   assert.equal(helper.validate({ code: 'SRV-1', priority: 'urgent' }).ok, false);
 });
 
-test('non-admin is strictly blocked from all 5 Admin Builder tools and foreign org data', async () => {
+test('schema-helper coerces stringified object/array JSON and builds propertyNames-free schemas', () => {
+  const { buildZodSchema } = require('../src/server/schema-helper');
+  const helper = defineToolSchema({
+    description: 'Coerce & Gemini-safe test',
+    properties: {
+      tags: { type: 'array', items: { type: 'string' } },
+      itemsWithoutExplicitItems: { type: 'array' },
+      payload: { type: 'object', required: true },
+    },
+  });
+  assert.deepEqual(helper.jsonSchema.properties.itemsWithoutExplicitItems.items, { type: 'string' });
+  const coerced = helper.validate({ tags: '["a","b"]', payload: '{"code":"QA-1"}' });
+  assert.equal(coerced.ok, true);
+  assert.deepEqual(coerced.value.tags, ['a', 'b']);
+  assert.deepEqual(coerced.value.payload, { code: 'QA-1' });
+  assert.equal(helper.validate({ payload: 'not-json' }).ok, false);
+
+  // Verify buildZodSchema uses passthrough object (not record) and typed array items even without host zod
+  const recordedCalls = [];
+  const fakeZod = {
+    string: () => ({ describe: () => ({ optional: () => 'z:string:opt' }), optional: () => 'z:string:opt' }),
+    boolean: () => ({ describe: () => ({ optional: () => 'z:bool' }), optional: () => 'z:bool' }),
+    number: () => ({ describe: () => ({ optional: () => 'z:num' }), optional: () => 'z:num' }),
+    array: (itemType) => {
+      recordedCalls.push(['array', itemType]);
+      return { describe: () => ({ optional: () => 'z:array' }), optional: () => 'z:array' };
+    },
+    object: (shape) => ({
+      passthrough: () => {
+        recordedCalls.push(['object.passthrough']);
+        return { describe: () => ({ optional: () => 'z:obj' }), optional: () => 'z:obj' };
+      },
+      describe: () => 'z:root',
+    }),
+    record: () => { throw new Error('z.record emits propertyNames and must not be used'); },
+    enum: () => ({ optional: () => 'z:enum' }),
+    any: () => 'z:any',
+  };
+  buildZodSchema({
+    properties: {
+      roles: { type: 'array', items: { type: 'string' } },
+      nodes: { type: 'array', items: { type: 'object' } },
+      values: { type: 'object', required: true },
+    },
+  }, fakeZod);
+  assert.equal(recordedCalls.some((c) => c[0] === 'object.passthrough'), true);
+});
+
+test('non-admin is strictly blocked from all 7 Admin Builder tools and foreign org data', async () => {
   const db = makeMockDb();
   const tools = createDxosTools();
   const byName = new Map(tools.map((t) => [t.definition.name, t]));
-  assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 5);
-  assert.equal(OPERATIONAL_TOOL_NAMES.length, 3);
+  assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 7);
+  assert.equal(OPERATIONAL_TOOL_NAMES.length, 4);
 
   const empCtx = makeCtx(db, { userId: 9, roles: ['ldx_employee'] });
   const scope = await resolveActorScope(empCtx, db);
@@ -162,9 +210,9 @@ test('non-admin is strictly blocked from all 5 Admin Builder tools and foreign o
   assert.equal(scope.isAdmin, false);
 
   for (const adminTool of ADMIN_BUILDER_TOOL_NAMES) {
-    await assert.rejects(() => byName.get(adminTool).invoke(empCtx, { portalSlug: 'services', blockUse: 'DxosAiProposalBlockModel', slug: 'new', title: 'New', operation: 'createCollection', collectionName: 'latticeCustomX', templateKey: 'internal-service' }), (err) => err.status === 403);
+    await assert.rejects(() => byName.get(adminTool).invoke(empCtx, { portalSlug: 'services', blockUse: 'DxosAiProposalBlockModel', slug: 'new', title: 'New', operation: 'createCollection', roleName: 'ldx_employee', collectionName: 'latticeCustomX', templateKey: 'internal-service' }), (err) => err.status === 403);
   }
-  assert.equal(db.auditLogs.filter((l) => l.status === 'denied').length, 5);
+  assert.equal(db.auditLogs.filter((l) => l.status === 'denied').length, 7);
 
   const searchRes = await byName.get('dxos_search_enterprise_context').invoke(empCtx, { query: 'Đơn' });
   assert.equal(searchRes.items.some((i) => i.code === 'ORD-01'), true);

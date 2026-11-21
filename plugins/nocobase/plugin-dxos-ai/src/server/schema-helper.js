@@ -27,7 +27,8 @@ function buildJsonSchema(spec = {}) {
     if (prop.description) entry.description = prop.description;
     if (Array.isArray(prop.enum)) entry.enum = [...prop.enum];
     if (prop.maxLength != null) entry.maxLength = prop.maxLength;
-    if (prop.items) entry.items = prop.items;
+    if (entry.type === 'array') entry.items = prop.items || { type: 'string' };
+    else if (prop.items) entry.items = prop.items;
     properties[key] = entry;
     if (prop.required) required.push(key);
   }
@@ -40,8 +41,14 @@ function buildJsonSchema(spec = {}) {
   };
 }
 
-function buildZodSchema(spec = {}) {
-  const z = loadZod();
+function makeZodPassthroughObject(z) {
+  if (typeof z.looseObject === 'function') return z.looseObject({});
+  const base = z.object({});
+  return typeof base?.passthrough === 'function' ? base.passthrough() : base;
+}
+
+function buildZodSchema(spec = {}, injectedZod = null) {
+  const z = injectedZod || loadZod();
   if (!z) return null;
   const shape = {};
   for (const [key, prop] of Object.entries(spec.properties || {})) {
@@ -53,9 +60,17 @@ function buildZodSchema(spec = {}) {
     } else if (prop.type === 'number' || prop.type === 'integer') {
       field = z.number();
     } else if (prop.type === 'array') {
-      field = z.array(z.any());
+      const itemType = prop.items?.type;
+      const itemSchema = itemType === 'number' || itemType === 'integer'
+        ? z.number()
+        : itemType === 'object'
+          ? makeZodPassthroughObject(z)
+          : itemType === 'boolean'
+            ? z.boolean()
+            : z.string();
+      field = z.array(itemSchema);
     } else if (prop.type === 'object') {
-      field = z.record(z.any());
+      field = makeZodPassthroughObject(z);
     } else {
       field = z.string();
     }
@@ -65,6 +80,20 @@ function buildZodSchema(spec = {}) {
   }
   const obj = z.object(shape);
   return spec.description ? obj.describe(spec.description) : obj;
+}
+
+function coerceStructuredValue(val, expectedType) {
+  if ((expectedType === 'object' || expectedType === 'array') && typeof val === 'string') {
+    const trimmed = val.trim();
+    if ((expectedType === 'object' && trimmed.startsWith('{')) || (expectedType === 'array' && trimmed.startsWith('['))) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return val;
+      }
+    }
+  }
+  return val;
 }
 
 function checkType(val, expected) {
@@ -83,22 +112,27 @@ function defineToolSchema(spec = {}) {
   const props = spec.properties || {};
 
   function validate(rawArgs) {
-    const input = rawArgs === undefined ? {} : rawArgs;
+    let input = rawArgs === undefined ? {} : rawArgs;
+    if (typeof input === 'string' && input.trim().startsWith('{')) {
+      try { input = JSON.parse(input); } catch {}
+    }
     if (!input || typeof input !== 'object' || Array.isArray(input)) {
       return { ok: false, error: 'Arguments must be a JSON object' };
     }
     const clean = {};
     for (const [key, def] of Object.entries(props)) {
-      const val = input[key];
-      if (val === undefined) {
+      const expectedType = def.type || 'string';
+      const rawVal = input[key];
+      if (rawVal === undefined) {
         if (def.required) return { ok: false, error: `Missing required argument "${key}"` };
         if (def.default !== undefined) clean[key] = def.default;
         continue;
       }
-      if (!checkType(val, def.type || 'string')) {
-        return { ok: false, error: `Argument "${key}" must be of type ${def.type || 'string'}` };
+      const val = coerceStructuredValue(rawVal, expectedType);
+      if (!checkType(val, expectedType)) {
+        return { ok: false, error: `Argument "${key}" must be of type ${expectedType}` };
       }
-      if (def.type === 'string' && def.maxLength != null && val.length > def.maxLength) {
+      if (expectedType === 'string' && def.maxLength != null && val.length > def.maxLength) {
         return { ok: false, error: `Argument "${key}" exceeds maxLength ${def.maxLength}` };
       }
       if (Array.isArray(def.enum) && !def.enum.includes(val)) {
@@ -123,4 +157,4 @@ function defineToolSchema(spec = {}) {
   return { jsonSchema, zodSchema, validate };
 }
 
-module.exports = { defineToolSchema, loadZod };
+module.exports = { defineToolSchema, loadZod, buildJsonSchema, buildZodSchema };

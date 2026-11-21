@@ -1,0 +1,242 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const {
+  val,
+  failTool,
+  resolveCallerRoleNames,
+  isStudioAdmin,
+  resolveActorScope,
+  invokeResourceAction,
+  createAuditedTool,
+  WRITABLE_BUSINESS_COLLECTIONS,
+  PROTECTED_SERVER_FIELDS,
+  SEARCHABLE_COLLECTIONS,
+  CUSTOM_COLLECTION_RE,
+} = require('../src/server/ai-tools-core');
+const { createCopilotTools } = require('../src/server/ai-copilot-tools');
+
+function makeCopilotHarness() {
+  const coldAudits = [];
+  const tickets = [];
+  const paraDocs = [
+    { id: 5, code: 'SOP-COLD-01', title: 'SOP Kiểm định Kho lạnh dưới -15C', organizationId: 'org-a', paraSpace: 'resources', summary: 'Lập phiếu bảo trì khi nhiệt độ > -15C' },
+  ];
+  const incidents = [
+    { id: 41, code: 'INC-COLD-09', name: 'Cảnh báo nhiệt độ Zone-A vượt ngưỡng', organizationId: 'org-a', status: 'open', severity: 'critical', assetEntityId: 'urn:ngsi-ld:ColdStorage:A1' },
+  ];
+  const orders = [
+    { id: 1, code: 'ORD-COLD-01', name: 'Đơn lạnh Vaccine CT', organizationId: 'org-a', status: 'submitted', requesterId: 13 },
+    { id: 2, code: 'ORD-OTHER', name: 'Đơn ngoài đơn vị', organizationId: 'org-b', status: 'draft', requesterId: 99 },
+  ];
+  const collections = [
+    { name: 'latticeCustomColdAudits', title: 'Kiểm định Kho lạnh' },
+  ];
+  const dataSourcesRolesResources = [
+    {
+      roleName: 'ldx_employee',
+      name: 'latticeCustomColdAudits',
+      dataSourceKey: 'main',
+      usingActionsConfig: true,
+      actions: [
+        { name: 'view', fields: ['id', 'code', 'name', 'batchCode', 'temperatureC', 'auditVerdict', 'status'] },
+        { name: 'create', fields: ['code', 'name', 'batchCode', 'warehouseZone', 'temperatureC', 'inspectorNotes'] },
+      ],
+    },
+    {
+      roleName: 'ldx_manager',
+      name: 'latticeCustomColdAudits',
+      dataSourceKey: 'main',
+      usingActionsConfig: true,
+      actions: [
+        { name: 'view', fields: ['id', 'code', 'name', 'batchCode', 'temperatureC', 'auditVerdict', 'status'] },
+        { name: 'create', fields: ['code', 'name', 'batchCode', 'warehouseZone', 'temperatureC', 'auditVerdict', 'inspectorNotes'] },
+        { name: 'update', fields: ['code', 'name', 'batchCode', 'warehouseZone', 'temperatureC', 'auditVerdict', 'inspectorNotes'] },
+      ],
+    },
+  ];
+  const tasks = [
+    { id: 301, userId: 10, status: 0, node: { title: 'Duyệt phiếu Kiểm định Kho lạnh', key: 'review' }, execution: { context: { data: { code: 'QA-COLD-001', requesterId: 13 } } } },
+  ];
+  const auditLogs = [];
+
+  const matchFilter = (row, filter = {}) => Object.entries(filter).every(([k, v]) => {
+    if (k === '$or' && Array.isArray(v)) return v.some((sub) => matchFilter(row, sub));
+    if (v && typeof v === 'object' && '$in' in v) return v.$in.includes(row[k]);
+    return row[k] === v;
+  });
+
+  const store = {
+    latticeEmployees: [
+      { id: 13, userId: 9, code: 'EMP-9', organizationId: 'org-a', active: true },
+      { id: 14, userId: 10, code: 'MGR-10', organizationId: 'org-a', active: true },
+    ],
+    latticeOrders: orders,
+    latticeRequests: [{ id: 11, code: 'REQ-01', name: 'Mua cảm biến', organizationId: 'org-a', status: 'submitted' }],
+    latticeServiceTickets: tickets,
+    latticeIncidentCases: incidents,
+    latticeAssets: [{ id: 21, code: 'COLD-ROOM-A1', name: 'Kho lạnh A1', organizationId: 'org-a', status: 'warning' }],
+    latticeParaDocuments: paraDocs,
+    latticeCustomColdAudits: coldAudits,
+    collections,
+    dataSourcesRolesResources,
+    workflowManualTasks: tasks,
+    latticeAiAuditLogs: auditLogs,
+  };
+
+  let nextId = 500;
+  const wrap = (row) => ({
+    ...row,
+    get: (k) => row[k],
+    toJSON: () => ({ ...row }),
+    update: async (u) => Object.assign(row, u),
+  });
+
+  const db = {
+    store,
+    hasCollection: (n) => Object.prototype.hasOwnProperty.call(store, n),
+    sequelize: { transaction: async (fn) => fn({}) },
+    getRepository(name) {
+      const arr = store[name];
+      if (!arr) return null;
+      return {
+        find: async ({ filter = {}, limit = 50 } = {}) => arr.filter((r) => matchFilter(r, filter)).slice(0, limit).map(wrap),
+        findOne: async ({ filter = {}, filterByTk } = {}) => {
+          const hit = filterByTk != null ? arr.find((r) => String(r.id ?? r.uid ?? r.name) === String(filterByTk)) : arr.find((r) => matchFilter(r, filter));
+          return hit ? wrap(hit) : null;
+        },
+        count: async ({ filter = {} } = {}) => arr.filter((r) => matchFilter(r, filter)).length,
+        create: async ({ values }) => {
+          const item = { id: ++nextId, ...values };
+          arr.push(item);
+          return wrap(item);
+        },
+      };
+    },
+  };
+
+  const makeCtx = (userId, username, roles) => ({
+    db,
+    state: { currentUser: { id: userId, username }, currentRoles: roles, currentRole: roles[0] },
+    app: { resourceManager: { getResource: () => null } },
+  });
+
+  const tools = createCopilotTools({
+    val, failTool, resolveCallerRoleNames, isStudioAdmin, resolveActorScope,
+    invokeResourceAction, createAuditedTool, WRITABLE_BUSINESS_COLLECTIONS,
+    PROTECTED_SERVER_FIELDS, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE,
+  });
+  const byName = new Map(tools.map((t) => [t.definition.name, t]));
+  return {
+    db,
+    byName,
+    empCtx: makeCtx(9, 'emp9', ['ldx_employee']),
+    mgrCtx: makeCtx(10, 'mgr10', ['ldx_manager']),
+    adminCtx: makeCtx(1, 'admin', ['root']),
+  };
+}
+
+test('dynamic latticeCustom* collections are searchable and enforce field-level RBAC on writes', async () => {
+  const { db, byName, empCtx, mgrCtx } = makeCopilotHarness();
+  const execTool = byName.get('dxos_execute_record_action');
+  const searchTool = byName.get('dxos_search_enterprise_context');
+
+  // Employee tries writing locked field auditVerdict -> 403 RBAC_FIELD_LOCKED
+  await assert.rejects(() => execTool.invoke(empCtx, {
+    collection: 'latticeCustomColdAudits',
+    operation: 'create',
+    values: { code: 'QA-BAD', name: 'Check', auditVerdict: 'PASS_OVERRIDE' },
+  }), (err) => err.status === 403 && err.code === 'RBAC_FIELD_LOCKED');
+
+  // Employee writes only unlocked fields -> allowed & searchable dynamically
+  const created = await execTool.invoke(empCtx, {
+    collection: 'latticeCustomColdAudits',
+    operation: 'create',
+    values: { code: 'QA-COLD-001', name: 'Kiểm định Kho A1', batchCode: 'LOT-01', warehouseZone: 'Zone-A', temperatureC: -11 },
+  });
+  assert.equal(created.record.organizationId, 'org-a');
+  assert.equal(created.record.status, 'draft');
+
+  // Employee tries update when only view/create granted -> 403 RBAC_ACTION_DENIED
+  await assert.rejects(() => execTool.invoke(empCtx, {
+    collection: 'latticeCustomColdAudits',
+    operation: 'update',
+    recordId: created.record.id,
+    values: { inspectorNotes: 'Hack' },
+  }), (err) => err.status === 403 && err.code === 'RBAC_ACTION_DENIED');
+
+  // Manager CAN update auditVerdict
+  const updated = await execTool.invoke(mgrCtx, {
+    collection: 'latticeCustomColdAudits',
+    operation: 'update',
+    recordId: created.record.id,
+    values: { auditVerdict: 'CANH_BAO_NHIET_DO', inspectorNotes: 'Cần bảo trì máy nén' },
+  });
+  assert.equal(updated.updatedFields.includes('auditVerdict'), true);
+  assert.equal(db.store.latticeCustomColdAudits[0].auditVerdict, 'CANH_BAO_NHIET_DO');
+
+  // Search discovers dynamic latticeCustomColdAudits record with citation
+  const found = await searchTool.invoke(empCtx, { query: 'QA-COLD-001' });
+  assert.equal(found.items.some((i) => i.collection === 'latticeCustomColdAudits' && i.code === 'QA-COLD-001'), true);
+});
+
+test('dxos_orchestrate_enterprise_case performs cross-module radar, correlateCase, and coordinated response with RBAC guard', async () => {
+  const { db, byName, empCtx, mgrCtx } = makeCopilotHarness();
+  const orch = byName.get('dxos_orchestrate_enterprise_case');
+
+  const correlated = await orch.invoke(empCtx, { mode: 'correlateCase', query: 'Kho lạnh' });
+  assert.equal(correlated.sops.some((s) => s.code === 'SOP-COLD-01'), true);
+  assert.equal(correlated.incidents.some((i) => i.code === 'INC-COLD-09'), true);
+
+  // Blocked if employee sneaks locked field into primaryRecord
+  await assert.rejects(() => orch.invoke(empCtx, {
+    mode: 'executeCoordinatedResponse',
+    primaryRecord: {
+      collection: 'latticeCustomColdAudits',
+      values: { code: 'QA-SNEAK', name: 'Bypass test', auditVerdict: 'PASS' },
+    },
+  }), (err) => err.status === 403 && err.code === 'RBAC_FIELD_LOCKED');
+
+  // Coordinated multi-record response: custom audit + service ticket + PARA handover note
+  const res = await orch.invoke(empCtx, {
+    mode: 'executeCoordinatedResponse',
+    primaryRecord: {
+      collection: 'latticeCustomColdAudits',
+      values: { code: 'QA-COLD-002', name: 'Kiểm định Kho A1 ca tối', batchCode: 'LOT-02', temperatureC: -10 },
+    },
+    followUpTicket: {
+      code: 'SRV-COLD-002',
+      name: 'Bảo trì máy nén Kho lạnh A1',
+      serviceType: 'maintenance',
+      priority: 'high',
+      description: 'Theo SOP-COLD-01 xử lý vượt ngưỡng -10C',
+    },
+    paraHandoverNote: {
+      code: 'PARA-HO-002',
+      title: 'Biên bản bàn giao ca lạnh A1',
+      paraSpace: 'projects',
+      summary: 'Đã lập QA-COLD-002 & SRV-COLD-002 chờ Quản lý duyệt.',
+    },
+  });
+  assert.equal(res.executed, true);
+  assert.equal(res.created.primary.record.code, 'QA-COLD-002');
+  assert.equal(res.created.followUpTicket.code, 'SRV-COLD-002');
+  assert.equal(res.created.paraHandoverNote.code, 'PARA-HO-002');
+  assert.equal(res.created.paraHandoverNote.relatedCollection, 'latticeCustomColdAudits');
+
+  const radar = await orch.invoke(mgrCtx, { mode: 'radar' });
+  assert.equal(radar.modules.latticeCustomColdAudits.total >= 1, true);
+  assert.equal(radar.modules.latticeServiceTickets.total >= 1, true);
+  assert.equal(radar.pendingManualTasks, 1);
+  assert.equal(db.store.latticeOrders.every((o) => o.organizationId !== 'org-b' || radar.organizationId === 'org-a'), true);
+});

@@ -13,10 +13,13 @@ const DEFAULT_TOOL_NAMES = [
   'dxos_compose_page_blocks',
   'dxos_manage_portal_and_acl',
   'dxos_extend_collection_schema',
+  'dxos_manage_rbac_permissions',
   'dxos_deploy_workflow',
+  'dxos_configure_workflow',
   'dxos_search_enterprise_context',
   'dxos_execute_record_action',
   'dxos_my_tasks_copilot',
+  'dxos_orchestrate_enterprise_case',
 ];
 
 const DEFAULT_ROLE_OPTIONS = [
@@ -117,7 +120,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const [profiles, setProfiles] = React.useState([]);
     const [catalog, setCatalog] = React.useState({
       availableTools: DEFAULT_TOOL_NAMES,
-      adminBuilderTools: DEFAULT_TOOL_NAMES.slice(0, 5),
+      adminBuilderTools: DEFAULT_TOOL_NAMES.slice(0, 7),
       roleOptions: DEFAULT_ROLE_OPTIONS,
     });
     const [topology, setTopology] = React.useState(null);

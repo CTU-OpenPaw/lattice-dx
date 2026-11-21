@@ -60,21 +60,32 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
             { name: 'dxos_compose_page_blocks' },
             { name: 'dxos_manage_portal_and_acl' },
             { name: 'dxos_extend_collection_schema' },
+            { name: 'dxos_manage_rbac_permissions' },
             { name: 'dxos_deploy_workflow' },
+            { name: 'dxos_configure_workflow' },
             { name: 'dxos_search_enterprise_context' },
             { name: 'dxos_execute_record_action' },
             { name: 'dxos_my_tasks_copilot' },
+            { name: 'dxos_orchestrate_enterprise_case' },
           ]
-          : [{ name: 'dxos_search_enterprise_context' }, { name: 'dxos_execute_record_action' }, { name: 'dxos_my_tasks_copilot' }];
+          : [
+            { name: 'dxos_search_enterprise_context' },
+            { name: 'dxos_execute_record_action' },
+            { name: 'dxos_my_tasks_copilot' },
+            { name: 'dxos_orchestrate_enterprise_case' },
+          ];
         return { status: 200, json: { result: { tools } } };
       }
       if (rpcBody.method === 'tools/call') {
         if (role !== 'root' && rpcBody.params?.name === 'dxos_compose_page_blocks') {
           return { status: 200, json: { error: { code: -32003, message: 'Forbidden' } } };
         }
+        if (rpcBody.params?.name === 'dxos_manage_rbac_permissions' && rpcBody.params?.arguments?.roleName === 'root') {
+          return { status: 200, json: { error: { code: -32003, message: 'Forbidden role target' } } };
+        }
         return {
           status: 200,
-          json: { result: { isError: false, content: [{ type: 'text', text: JSON.stringify({ dryRun: true, planes: 6 }) }] } },
+          json: { result: { isError: false, content: [{ type: 'text', text: JSON.stringify({ dryRun: true, planes: 6, activeWorkflows: [{ id: 1 }] }) }] } },
         };
       }
       if (rpcBody.method === 'resources/read') {

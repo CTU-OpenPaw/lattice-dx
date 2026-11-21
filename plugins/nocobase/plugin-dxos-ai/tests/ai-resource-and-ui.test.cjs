@@ -218,7 +218,7 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   await actions.listProfiles(listCtx, async () => {});
   assert.equal(listCtx.body.profiles.length, 7);
   assert.ok(Array.isArray(listCtx.body.catalog.availableTools));
-  assert.equal(listCtx.body.catalog.availableTools.length, 8);
+  assert.equal(listCtx.body.catalog.availableTools.length, 11);
 
   const auditCtx = adminCtx({});
   await actions.auditLogs(auditCtx, async () => {});
@@ -320,7 +320,7 @@ test('createDxosAiStudioPage renders 4-tab studio UI & helper utilities, and plu
     assert.ok(registered.middlewares.includes('dxosMcpGateway'));
     assert.ok(registered.snippets.includes('pm.dxosAi'));
     assert.ok(registered.allowed.includes('dxosAi:portalCopilot:loggedIn'));
-    assert.equal(registered.tools.length, 8);
+    assert.equal(registered.tools.length, 11);
 
     const ClientPluginMod = require(path.join(PLUGIN_ROOT, 'src/client/index.js'));
     const clientInst = new ClientPluginMod.default({

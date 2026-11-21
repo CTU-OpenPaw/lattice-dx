@@ -18,7 +18,15 @@ const ADMIN_TOOLS = [
   'dxos_compose_page_blocks',
   'dxos_manage_portal_and_acl',
   'dxos_extend_collection_schema',
+  'dxos_manage_rbac_permissions',
   'dxos_deploy_workflow',
+  'dxos_configure_workflow',
+];
+const OPERATIONAL_TOOLS = [
+  'dxos_search_enterprise_context',
+  'dxos_execute_record_action',
+  'dxos_my_tasks_copilot',
+  'dxos_orchestrate_enterprise_case',
 ];
 
 export function parseAiMcpAcceptanceArgs(argv) {
@@ -47,9 +55,12 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     employeeTopology403: false,
     employeePortalCopilotScoped: false,
     adminMcpInitialize: false,
-    adminMcpToolsListed8: false,
+    adminMcpToolsListed11: false,
     adminMcpInspectOk: false,
     adminMcpDryRunCompose: false,
+    adminMcpRbacInspectAndRootBlocked: false,
+    adminMcpWorkflowInspectOk: false,
+    employeeCrossDeptRadarOk: false,
     adminMcpTopologyResource6Planes: false,
     itOtMcp4Tools: false,
     itOtMcpHealthOk: false,
@@ -106,10 +117,10 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
 
     const adminTools = await rpcRequest('root', '/api/dxos-mcp', { jsonrpc: '2.0', id: 5, method: 'tools/list', params: {} });
     const adminToolNames = (adminTools.json?.result?.tools || []).map((t) => t.name);
-    for (const tool of [...ADMIN_TOOLS, 'dxos_search_enterprise_context', 'dxos_execute_record_action', 'dxos_my_tasks_copilot']) {
+    for (const tool of [...ADMIN_TOOLS, ...OPERATIONAL_TOOLS]) {
       assert.ok(adminToolNames.includes(tool), `Admin MCP missing tool ${tool}`);
     }
-    checks.adminMcpToolsListed8 = true;
+    checks.adminMcpToolsListed11 = true;
 
     const inspectCall = await rpcRequest('root', '/api/dxos-mcp', {
       jsonrpc: '2.0',
@@ -118,6 +129,7 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
       params: { name: 'dxos_inspect_architecture', arguments: {} },
     });
     assert.equal(inspectCall.json?.result?.isError, false);
+    const inspectedJson = JSON.parse(inspectCall.json?.result?.content?.[0]?.text || '{}');
     checks.adminMcpInspectOk = true;
 
     const dryRunCall = await rpcRequest('root', '/api/dxos-mcp', {
@@ -133,6 +145,44 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     const dryRunParsed = JSON.parse(dryRunCall.json?.result?.content?.[0]?.text || '{}');
     assert.equal(dryRunParsed.dryRun, true);
     checks.adminMcpDryRunCompose = true;
+
+    const rbacInspect = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 17,
+      method: 'tools/call',
+      params: { name: 'dxos_manage_rbac_permissions', arguments: { operation: 'inspectRole', roleName: 'ldx_employee' } },
+    });
+    assert.equal(rbacInspect.json?.result?.isError, false);
+    const rbacRootDeny = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 18,
+      method: 'tools/call',
+      params: { name: 'dxos_manage_rbac_permissions', arguments: { operation: 'grantResource', roleName: 'root', collectionName: 'latticeOrders', actions: ['view'] } },
+    });
+    assert.equal(rbacRootDeny.json?.error?.code, -32003);
+    checks.adminMcpRbacInspectAndRootBlocked = true;
+
+    const firstWfId = inspectedJson.activeWorkflows?.[0]?.id;
+    const wfInspect = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 19,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_configure_workflow',
+        arguments: firstWfId ? { operation: 'inspectWorkflow', workflowId: firstWfId } : { operation: 'inspectWorkflow', titleQuery: 'Logistics' },
+      },
+    });
+    assert.equal(wfInspect.json?.result?.isError, false);
+    checks.adminMcpWorkflowInspectOk = true;
+
+    const empRadar = await rpcRequest('employee', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'tools/call',
+      params: { name: 'dxos_orchestrate_enterprise_case', arguments: { mode: 'radar' } },
+    });
+    assert.equal(empRadar.json?.result?.isError, false);
+    checks.employeeCrossDeptRadarOk = true;
 
     const topoRes = await rpcRequest('root', '/api/dxos-mcp', {
       jsonrpc: '2.0',
