@@ -46,11 +46,40 @@ export function parseDxosAiSetupArgs(argv) {
   return { reportPath, origin, defaultOrigin };
 }
 
-export async function setupDxosAiWorkforce(api, { defaultOrigin = 'http://127.0.0.1' } = {}) {
+export async function setupDxosAiWorkforce(api, { defaultOrigin = 'http://127.0.0.1', env = process.env } = {}) {
   const bootstrap = await api('dxosAi:bootstrapDefaults', {
     method: 'POST',
     values: { defaultOrigin },
   });
+  let llm = bootstrap?.llm || { skipped: true, configured: false };
+  const apiKey = String(env?.AGENT_API_KEY || env?.NINE_ROUTER_API_KEY || '').trim();
+  const baseURL = String(env?.AGENT_BASE_URL || 'http://host.docker.internal:20128/v1').trim();
+  if (apiKey) {
+    const existingList = await api('llmServices:list?pageSize=50').catch(() => []);
+    const items = Array.isArray(existingList) ? existingList : existingList?.rows || [];
+    const existed = items.find((s) => s.name === 'local-9router');
+    const llmValues = {
+      name: 'local-9router',
+      title: 'Local 9router (OpenAI-compatible)',
+      provider: 'openai-completions',
+      enabled: true,
+      options: { baseURL, apiKey },
+      enabledModels: {
+        mode: 'custom',
+        models: [
+          { label: 'ag/gemini-3.8-flash (9router)', value: 'ag/gemini-3.8-flash' },
+          { label: 'combo (9router auto-route)', value: 'combo' },
+        ],
+      },
+    };
+    if (existed) {
+      await api('llmServices:update?filterByTk=local-9router', { method: 'POST', values: llmValues });
+    } else {
+      await api('llmServices:create', { method: 'POST', values: llmValues });
+    }
+    llm = { configured: true, skipped: false, serviceName: 'local-9router', baseURL };
+  }
+
   const listed = await api('dxosAi:listProfiles');
   const profiles = Array.isArray(listed?.profiles) ? listed.profiles : [];
   assert.ok(profiles.length >= 5, `Expected >= 5 bootstrapped AI profiles, got ${profiles.length}`);
@@ -74,7 +103,7 @@ export async function setupDxosAiWorkforce(api, { defaultOrigin = 'http://127.0.
     bootstrappedCount: Number(bootstrap?.bootstrappedCount ?? profiles.length),
     activeProfileCount: profiles.length,
     profiles: profiles.map((p) => p.username),
-    llm: bootstrap?.llm || { skipped: true },
+    llm,
     itOtMcpSynced,
   };
 }

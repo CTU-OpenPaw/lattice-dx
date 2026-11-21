@@ -47,7 +47,7 @@ function createEmptyProfileDraft() {
     departmentScope: 'general',
     organizationId: 'native-ui-lab',
     llmService: 'local-9router',
-    modelName: 'combo',
+    modelName: 'ag/gemini-3.8-flash',
     enabled: true,
     isAdminBuilder: false,
     allowSubAgentDispatch: false,
@@ -347,7 +347,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'LLM Service / Model',
               h('input', { value: `${draft.llmService}:${draft.modelName}`, onChange: (e) => {
                 const [llmService, modelName] = String(e.target.value || '').split(':');
-                setDraft({ ...draft, llmService: llmService || 'local-9router', modelName: modelName || 'combo' });
+                setDraft({ ...draft, llmService: llmService || 'local-9router', modelName: modelName || 'ag/gemini-3.8-flash' });
               }, style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
           ),
           h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'SOP & System Prompt',

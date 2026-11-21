@@ -56,3 +56,37 @@ test('setupDxosAiWorkforce bootstraps starter blueprints and verifies profiles &
   assert.equal(out.itOtMcpSynced, true);
   assert.equal(calls[0].opts.values.defaultOrigin, 'http://127.0.0.1');
 });
+
+test('setupDxosAiWorkforce upserts local-9router on host llmServices when AGENT_API_KEY env is supplied', async () => {
+  const writes = [];
+  const fakeApi = async (path, opts = {}) => {
+    writes.push({ path, opts });
+    if (path === 'dxosAi:bootstrapDefaults') {
+      return { bootstrappedCount: 5, llm: { skipped: true, configured: false } };
+    }
+    if (path === 'dxosAi:listProfiles') {
+      return {
+        profiles: [
+          { username: 'dxos-coordinator', mcpServers: [{ name: 'dxos-it-ot-mcp' }] },
+          { username: 'dxos-architect', isAdminBuilder: true, allowedRoles: ['root', 'admin'] },
+          { username: 'dxos-ops' },
+          { username: 'dxos-logistics' },
+          { username: 'dxos-workspace' },
+        ],
+      };
+    }
+    if (path.startsWith('aiMcpClients:list')) return [{ name: 'dxos-it-ot-mcp', transport: 'http', useUserContext: true }];
+    if (path.startsWith('llmServices:list')) return [];
+    if (path === 'llmServices:create') return { name: 'local-9router' };
+    throw new Error(`Unexpected path: ${path}`);
+  };
+  const out = await setupDxosAiWorkforce(fakeApi, {
+    defaultOrigin: 'http://127.0.0.1',
+    env: { AGENT_API_KEY: 'test-only-placeholder-key', AGENT_BASE_URL: 'http://host.docker.internal:20128/v1' },
+  });
+  assert.equal(out.llm.configured, true);
+  assert.equal(out.llm.skipped, false);
+  const createCall = writes.find((w) => w.path === 'llmServices:create');
+  assert.ok(createCall);
+  assert.equal(createCall.opts.values.enabledModels.models[0].value, 'ag/gemini-3.8-flash');
+});

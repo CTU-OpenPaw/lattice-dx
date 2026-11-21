@@ -43,7 +43,7 @@ function serializeProfile(row) {
     greeting: val(row, 'greeting') || '',
     systemPrompt: val(row, 'systemPrompt') || '',
     llmService: val(row, 'llmService') || 'local-9router',
-    modelName: val(row, 'modelName') || 'combo',
+    modelName: val(row, 'modelName') || 'ag/gemini-3.8-flash',
     enabled: val(row, 'enabled') !== false,
     isAdminBuilder: Boolean(val(row, 'isAdminBuilder')),
     allowSubAgentDispatch: Boolean(val(row, 'allowSubAgentDispatch')),
@@ -84,7 +84,7 @@ function buildCatalogMeta() {
     operationalTools: [...OPERATIONAL_TOOL_NAMES],
     roleOptions: [...DEFAULT_ADMIN_ROLES, ...ALL_LDX_ROLES],
     defaultLlmService: 'local-9router',
-    defaultModelName: 'combo',
+    defaultModelName: 'ag/gemini-3.8-flash',
   };
 }
 
@@ -114,8 +114,8 @@ async function ensureLocalLlmServiceRecord(db, env = process.env) {
     enabledModels: {
       mode: 'custom',
       models: [
-        { label: 'combo (9router auto-route)', value: 'combo' },
         { label: 'ag/gemini-3.8-flash (9router)', value: 'ag/gemini-3.8-flash' },
+        { label: 'combo (9router auto-route)', value: 'combo' },
       ],
     },
     enabled: true,

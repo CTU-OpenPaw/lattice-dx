@@ -117,7 +117,7 @@ async function syncProfileToNocobaseAi(db, profileInput, { adminToolNames = [], 
     deprecated: false,
     modelSettings: {
       enabled: true,
-      models: [{ llmService: profile.llmService || 'local-9router', model: profile.modelName || 'combo' }],
+      models: [{ llmService: profile.llmService || 'local-9router', model: profile.modelName || 'ag/gemini-3.8-flash' }],
     },
     skillSettings: {
       skillsVersion: 2,
