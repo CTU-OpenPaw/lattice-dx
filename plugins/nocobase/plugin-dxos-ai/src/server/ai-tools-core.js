@@ -12,10 +12,15 @@ const { defineToolSchema } = require('./schema-helper');
 const { recordAiAuditLog } = require('./ai-schemas');
 const { createBuilderTools } = require('./ai-builder-tools');
 const { createCopilotTools } = require('./ai-copilot-tools');
+const { createSurfaceAndCreativeTools } = require('./ai-surface-creative-tools');
 
 const ADMIN_BUILDER_TOOL_NAMES = [
   'dxos_inspect_architecture',
+  'dxos_recommend_page_blueprint',
+  'dxos_design_creative_block',
   'dxos_compose_page_blocks',
+  'dxos_snapshot_or_rollback_page',
+  'dxos_provision_role_workspace',
   'dxos_manage_portal_and_acl',
   'dxos_extend_collection_schema',
   'dxos_manage_rbac_permissions',
@@ -45,7 +50,7 @@ const PROTECTED_SERVER_FIELDS = new Set([
 const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
-  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles',
+  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeUiSnapshots',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
 ]);
@@ -56,7 +61,9 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 const ALLOWED_BLOCK_MODELS = [
   'DxosPortalHeroBlockModel', 'DxosKpiMetricBlockModel', 'DxosContextTelemetryBlockModel',
   'DxosAiProposalBlockModel', 'DxosWorkflowTasksBlockModel', 'DxosParaVaultBlockModel',
+  'DxosCreativeStudioBlockModel',
   'NativeTableBlock', 'NativeFormBlock', 'NativeDetailsBlock',
+  'table', 'createForm', 'editForm', 'details', 'filterForm', 'kanban', 'chart', 'calendar', 'list', 'gridCard', 'markdown', 'actionPanel',
 ];
 const SEARCHABLE_COLLECTIONS = [
   'latticeOrders', 'latticeRequests', 'latticeServiceTickets',
@@ -245,6 +252,7 @@ function createDxosTools() {
     safeGetResource,
     invokeResourceAction,
     createAuditedTool,
+    ADMIN_BUILDER_TOOL_NAMES,
     WRITABLE_BUSINESS_COLLECTIONS,
     PROTECTED_SERVER_FIELDS,
     SYSTEM_PROTECTED_COLLECTIONS,
@@ -256,6 +264,7 @@ function createDxosTools() {
   };
   return [
     ...createBuilderTools(shared),
+    ...createSurfaceAndCreativeTools(shared),
     ...createCopilotTools(shared),
   ];
 }

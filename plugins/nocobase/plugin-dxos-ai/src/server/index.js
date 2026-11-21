@@ -55,6 +55,7 @@ class DxosAiPlugin extends Plugin {
       actions: ['dxosAi:*'],
     });
     this.app.acl.allow('dxosAi', 'portalCopilot', 'loggedIn');
+    this.app.acl.allow('dxosAi', 'pageSurfaceState', 'loggedIn');
   }
 }
 

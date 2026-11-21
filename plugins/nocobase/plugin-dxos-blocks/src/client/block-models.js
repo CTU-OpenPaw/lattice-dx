@@ -20,8 +20,17 @@ const {
   triggerDxosCopilot,
   createCopilotStripElement,
 } = require('./blocks-helpers');
+const { createCreativeStudioView, DEFAULT_CREATIVE_BLUEPRINT } = require('./creative-studio-block');
+const {
+  fetchPageSurfaceState,
+  fetchInspectPageBlocks,
+  requestPageRollback,
+  formatTargetBlockPrompt,
+  createAdminArchitectBarElement,
+} = require('./canvas-architect-bridge');
 
 const modelListeners = new WeakMap();
+const activeModels = new Set();
 
 function subscribeModelConfig(model, listener) {
   if (!model || typeof model !== 'object') return () => {};
@@ -31,7 +40,11 @@ function subscribeModelConfig(model, listener) {
     modelListeners.set(model, set);
   }
   set.add(listener);
-  return () => { set.delete(listener); };
+  activeModels.add(model);
+  return () => {
+    set.delete(listener);
+    if (!set.size) activeModels.delete(model);
+  };
 }
 
 function notifyModelListeners(model) {
@@ -104,7 +117,12 @@ function createBlockRenderers(client, React, antd, app) {
     }, liveConfig);
     const actions = filterHeroActions(cfg.actionsJson, perms);
     const [copilotEmployees, setCopilotEmployees] = React.useState([]);
+    const [picking, setPicking] = React.useState(false);
+    const [inspectedBlocks, setInspectedBlocks] = React.useState([]);
+    const [rollingBack, setRollingBack] = React.useState(false);
+    const [syncMessage, setSyncMessage] = React.useState('');
     const portalSlug = typeof window !== 'undefined' && window.location ? inferPortalSlugFromLocation(window.location.pathname) : '';
+    const isAdmin = Boolean(perms?.allowAll || perms?.allowConfigUI || copilotEmployees.some((e) => e.username === 'dxos-architect'));
 
     React.useEffect(() => {
       if (!api?.request) return;
@@ -114,6 +132,80 @@ function createBlockRenderers(client, React, antd, app) {
       });
       return () => { active = false; };
     }, [api, portalSlug]);
+
+    // Live Canvas Sync: detect surface revisions from AI chat/MCP tools & refresh mounted blocks or grid layout
+    React.useEffect(() => {
+      if (!api?.request || !portalSlug || typeof setInterval !== 'function') return;
+      let cancelled = false;
+      let baseRev = null;
+      let baseSignature = null;
+      const poll = async () => {
+        const st = await fetchPageSurfaceState(api, { portalSlug });
+        if (cancelled || !st || typeof st.revision !== 'number') return;
+        const sig = `${st.blockCount ?? 0}:${st.layoutSignature || ''}`;
+        if (baseRev === null) {
+          baseRev = st.revision;
+          baseSignature = sig;
+          return;
+        }
+        if (st.revision > baseRev) {
+          baseRev = st.revision;
+          setSyncMessage(st.message || 'AI Architect vừa cập nhật giao diện trực tiếp');
+          if (isAdmin) {
+            const inspected = await fetchInspectPageBlocks(api, { portalSlug });
+            for (const m of activeModels) {
+              const matched = inspected.blocks.find((b) => m?.uid && b.uid === m.uid);
+              if (matched?.props && typeof m.setProps === 'function') {
+                m.setProps(matched.props);
+                notifyModelListeners(m);
+              }
+            }
+          }
+          if (sig !== baseSignature && typeof window !== 'undefined' && window.location?.reload) {
+            baseSignature = sig;
+            setTimeout(() => { if (!cancelled) window.location.reload(); }, 650);
+          }
+        }
+      };
+      poll();
+      const timer = setInterval(poll, 2600);
+      return () => { cancelled = true; clearInterval(timer); };
+    }, [api, portalSlug, isAdmin]);
+
+    const handleTogglePicker = async () => {
+      const next = !picking;
+      setPicking(next);
+      if (next && api?.request && portalSlug) {
+        const res = await fetchInspectPageBlocks(api, { portalSlug });
+        setInspectedBlocks(res.blocks || []);
+      }
+    };
+
+    const handlePickBlock = async (blk) => {
+      setPicking(false);
+      await triggerDxosCopilot(app, {
+        aiEmployee: 'dxos-architect',
+        prompt: formatTargetBlockPrompt(blk, portalSlug),
+        blockTitle: blk.title || blk.use,
+        portalSlug,
+      });
+    };
+
+    const handleRollback = async () => {
+      if (!api?.request || !portalSlug || rollingBack) return;
+      setRollingBack(true);
+      try {
+        const res = await requestPageRollback(api, { portalSlug });
+        setSyncMessage(res?.rolledBack ? 'Đã hoàn tác bố cục trang về snapshot trước đó!' : 'Không có snapshot để hoàn tác.');
+        if (res?.rolledBack && typeof window !== 'undefined' && window.location?.reload) {
+          setTimeout(() => window.location.reload(), 450);
+        }
+      } catch {
+        setSyncMessage('Không thể hoàn tác trang lúc này.');
+      } finally {
+        setRollingBack(false);
+      }
+    };
 
     const accent = /^#[0-9a-fA-F]{3,8}$/.test(String(cfg.accentColor || '')) ? cfg.accentColor : '#1677ff';
     return h('section', {
@@ -154,6 +246,16 @@ function createBlockRenderers(client, React, antd, app) {
           blockTitle: String(cfg.title || ''),
           portalSlug,
         }),
+      }),
+      createAdminArchitectBarElement(React, {
+        isAdmin,
+        picking,
+        rollingBack,
+        syncMessage,
+        inspectedBlocks,
+        onTogglePicker: handleTogglePicker,
+        onPickBlock: handlePickBlock,
+        onRollback: handleRollback,
       }),
     );
   }
@@ -509,6 +611,7 @@ function createBlockRenderers(client, React, antd, app) {
     DxosAiProposalView,
     DxosWorkflowTasksView,
     DxosParaVaultView,
+    DxosCreativeStudioView: createCreativeStudioView(client, React, antd, app, { subscribeModelConfig }),
   };
 }
 
@@ -536,6 +639,9 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   }
   class DxosParaVaultBlockModel extends BaseBlockModel {
     renderComponent() { return h(views.DxosParaVaultView, { model: this, liveConfig: extractLiveConfig(this) }); }
+  }
+  class DxosCreativeStudioBlockModel extends BaseBlockModel {
+    renderComponent() { return h(views.DxosCreativeStudioView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
 
   const specs = [
@@ -634,6 +740,15 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
         pageSize: { type: 'number', title: 'Số tài liệu hiển thị', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
         enableQuickCreate: { type: 'boolean', title: 'Cho phép tạo nhanh trên block', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
         defaultOrganizationId: { type: 'string', title: 'Mã tổ chức mặc định (Admin)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+      },
+    ],
+    [
+      DxosCreativeStudioBlockModel,
+      'DX-OS Creative Studio Micro-App [AI]',
+      { title: 'Buồng Điều hành Thông minh [AI Studio]', blueprintJson: DEFAULT_CREATIVE_BLUEPRINT },
+      {
+        title: { type: 'string', title: 'Tiêu đề Block', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        blueprintJson: { type: 'string', title: 'Cấu hình DSL Sáng tạo (JSON)', 'x-decorator': 'FormItem', 'x-component': 'Input.TextArea' },
       },
     ],
   ];

@@ -200,7 +200,7 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   const sneakyRoles = db.stores.rolesAiEmployees.filter((r) => r.aiEmployee === 'sneaky-builder').map((r) => r.roleName);
   assert.deepEqual(sneakyRoles.sort(), ['admin', 'root']);
 
-  // 6. portalCopilot for ldx_employee on portal 'services' includes hr-ops-ai, NEVER exposes dxos-architect or sneaky-builder
+  // 6. portalCopilot for ldx_employee on portal 'services' includes hr-ops-ai, NEVER exposes dxos-architect or sneaky-builder, while root CAN access dxos-architect on any portal
   const portalEmpCtx = {
     state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: [] },
     action: { params: { portalSlug: 'services' } },
@@ -213,12 +213,19 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   assert.ok(!visibleUsernames.includes('dxos-architect'));
   assert.ok(!visibleUsernames.includes('sneaky-builder'));
 
+  const portalAdminCtx = {
+    state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
+    action: { params: { portalSlug: 'services' } },
+  };
+  await actions.portalCopilot(portalAdminCtx, async () => {});
+  assert.ok(portalAdminCtx.body.employees.some((e) => e.username === 'dxos-architect'));
+
   // 7. listProfiles, auditLogs, enterpriseTopology, and deleteProfile
   const listCtx = adminCtx({});
   await actions.listProfiles(listCtx, async () => {});
   assert.equal(listCtx.body.profiles.length, 7);
   assert.ok(Array.isArray(listCtx.body.catalog.availableTools));
-  assert.equal(listCtx.body.catalog.availableTools.length, 11);
+  assert.equal(listCtx.body.catalog.availableTools.length, 15);
 
   const auditCtx = adminCtx({});
   await actions.auditLogs(auditCtx, async () => {});
@@ -320,7 +327,8 @@ test('createDxosAiStudioPage renders 4-tab studio UI & helper utilities, and plu
     assert.ok(registered.middlewares.includes('dxosMcpGateway'));
     assert.ok(registered.snippets.includes('pm.dxosAi'));
     assert.ok(registered.allowed.includes('dxosAi:portalCopilot:loggedIn'));
-    assert.equal(registered.tools.length, 11);
+    assert.ok(registered.allowed.includes('dxosAi:pageSurfaceState:loggedIn'));
+    assert.equal(registered.tools.length, 15);
 
     const ClientPluginMod = require(path.join(PLUGIN_ROOT, 'src/client/index.js'));
     const clientInst = new ClientPluginMod.default({

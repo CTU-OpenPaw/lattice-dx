@@ -28,6 +28,14 @@ const {
   isStudioAdmin,
 } = require('./ai-tools-core');
 const { buildEnterpriseTopology } = require('./mcp-itot-tools');
+const {
+  resolvePageGrid,
+  extractGridBlockUids,
+  hydrateFlowModel,
+  readFlowModelMeta,
+  restorePageSnapshot,
+  getSurfaceRevisionState,
+} = require('./ai-surface-creative-tools');
 
 function serializeProfile(row) {
   if (!row) return null;
@@ -352,6 +360,69 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
     async enterpriseTopology(ctx, next) {
       const targetDb = await requireAdmin(ctx);
       ctx.body = await buildEnterpriseTopology(targetDb, env, fetchImpl);
+      if (typeof next === 'function') await next();
+    },
+
+    async pageSurfaceState(ctx, next) {
+      const targetDb = resolveDb(ctx);
+      const user = ctx?.state?.currentUser || ctx?.auth?.user;
+      if (!val(user, 'id')) throw failTool('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập.');
+      const payload = readActionPayload(ctx);
+      const portalSlug = String(ctx?.action?.params?.portalSlug || payload.portalSlug || '').trim().toLowerCase();
+      const pageTitle = String(ctx?.action?.params?.pageTitle || payload.pageTitle || '').trim();
+      ctx.body = portalSlug
+        ? await getSurfaceRevisionState(targetDb, portalSlug, pageTitle, val)
+        : { revision: 1, blockCount: 0, layoutSignature: '' };
+      if (typeof next === 'function') await next();
+    },
+
+    async inspectPageBlocks(ctx, next) {
+      const targetDb = await requireAdmin(ctx);
+      const payload = readActionPayload(ctx);
+      const portalSlug = String(ctx?.action?.params?.portalSlug || payload.portalSlug || '').trim().toLowerCase();
+      const pageTitle = String(ctx?.action?.params?.pageTitle || payload.pageTitle || '').trim();
+      const resolved = portalSlug ? await resolvePageGrid(targetDb, portalSlug, pageTitle, val) : {};
+      if (!resolved.grid) {
+        ctx.body = { portalSlug, pageTitle: val(resolved.pageRoute, 'title') || null, blocks: [] };
+        if (typeof next === 'function') await next();
+        return;
+      }
+      const { ordered, layout } = extractGridBlockUids(resolved.grid);
+      const subMap = new Map((Array.isArray(resolved.grid?.subModels?.items) ? resolved.grid.subModels.items : []).map((m) => [m.uid, m]));
+      const blocks = [];
+      for (const uid of ordered) {
+        const model = await hydrateFlowModel(resolved.flowModelsRepo, uid, subMap);
+        blocks.push(readFlowModelMeta(model, uid));
+      }
+      ctx.body = {
+        portalSlug,
+        pageTitle: val(resolved.pageRoute, 'title') || null,
+        gridUid: resolved.grid.uid,
+        rows: layout.rows || {},
+        sizes: layout.sizes || {},
+        blocks,
+      };
+      if (typeof next === 'function') await next();
+    },
+
+    async rollbackPageSnapshot(ctx, next) {
+      const targetDb = await requireAdmin(ctx);
+      const actorUser = ctx?.state?.currentUser || ctx?.auth?.user;
+      const payload = readActionPayload(ctx);
+      const portalSlug = String(payload.portalSlug || ctx?.action?.params?.portalSlug || '').trim().toLowerCase();
+      const pageTitle = String(payload.pageTitle || ctx?.action?.params?.pageTitle || '').trim();
+      const snapshotUid = String(payload.snapshotUid || '').trim();
+      const res = await restorePageSnapshot(targetDb, { portalSlug, pageTitle, snapshotUid }, val);
+      await recordAiAuditLog(targetDb, {
+        actorUserId: val(actorUser, 'id') ?? null,
+        actorUsername: val(actorUser, 'username') || null,
+        channel: 'studio-sync',
+        toolName: 'dxosAi:rollbackPageSnapshot',
+        argsSummary: { portalSlug, pageTitle, snapshotUid: snapshotUid || 'latest' },
+        status: res?.rolledBack ? 'allowed' : 'error',
+        resultSummary: JSON.stringify(res).slice(0, 600),
+      });
+      ctx.body = res;
       if (typeof next === 'function') await next();
     },
   };

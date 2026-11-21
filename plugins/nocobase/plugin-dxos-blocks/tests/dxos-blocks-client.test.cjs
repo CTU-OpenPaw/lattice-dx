@@ -79,6 +79,7 @@ test('registerDxosBlockModels registers all 6 configurable BlockModel subclasses
     'DxosAiProposalBlockModel',
     'DxosWorkflowTasksBlockModel',
     'DxosParaVaultBlockModel',
+    'DxosCreativeStudioBlockModel',
   ];
   assert.deepEqual(Object.keys(models).sort(), expectedNames.slice().sort());
   assert.deepEqual(Object.keys(registered).sort(), expectedNames.slice().sort());

@@ -57,7 +57,11 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
         const tools = role === 'root'
           ? [
             { name: 'dxos_inspect_architecture' },
+            { name: 'dxos_recommend_page_blueprint' },
+            { name: 'dxos_design_creative_block' },
             { name: 'dxos_compose_page_blocks' },
+            { name: 'dxos_snapshot_or_rollback_page' },
+            { name: 'dxos_provision_role_workspace' },
             { name: 'dxos_manage_portal_and_acl' },
             { name: 'dxos_extend_collection_schema' },
             { name: 'dxos_manage_rbac_permissions' },
@@ -80,7 +84,7 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
         if (role !== 'root' && rpcBody.params?.name === 'dxos_compose_page_blocks') {
           return { status: 200, json: { error: { code: -32003, message: 'Forbidden' } } };
         }
-        if (rpcBody.params?.name === 'dxos_manage_rbac_permissions' && rpcBody.params?.arguments?.roleName === 'root') {
+        if ((rpcBody.params?.name === 'dxos_manage_rbac_permissions' || rpcBody.params?.name === 'dxos_provision_role_workspace') && rpcBody.params?.arguments?.roleName === 'root') {
           return { status: 200, json: { error: { code: -32003, message: 'Forbidden role target' } } };
         }
         return {
@@ -126,6 +130,9 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
   assert.equal(report.checks.unauthenticatedMcp401, true);
   assert.equal(report.checks.employeeBuilderToolsHidden, true);
   assert.equal(report.checks.employeeBuilderCallDenied, true);
+  assert.equal(report.checks.adminMcpToolsListed15, true);
+  assert.equal(report.checks.adminCreativeBlockDryRunOk, true);
+  assert.equal(report.checks.adminProvisionRoleWorkspaceDryRunOk, true);
   assert.equal(report.checks.adminMcpDryRunCompose, true);
   assert.equal(report.checks.itOtMcpHealthOk, true);
   assert.equal(report.checks.customAiLifecycleCleanedUp, true);

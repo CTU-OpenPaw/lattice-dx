@@ -197,11 +197,11 @@ test('schema-helper coerces stringified object/array JSON and builds propertyNam
   assert.equal(recordedCalls.some((c) => c[0] === 'object.passthrough'), true);
 });
 
-test('non-admin is strictly blocked from all 7 Admin Builder tools and foreign org data', async () => {
+test('non-admin is strictly blocked from all 11 Admin Builder tools and foreign org data', async () => {
   const db = makeMockDb();
   const tools = createDxosTools();
   const byName = new Map(tools.map((t) => [t.definition.name, t]));
-  assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 7);
+  assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
   assert.equal(OPERATIONAL_TOOL_NAMES.length, 4);
 
   const empCtx = makeCtx(db, { userId: 9, roles: ['ldx_employee'] });
@@ -210,9 +210,9 @@ test('non-admin is strictly blocked from all 7 Admin Builder tools and foreign o
   assert.equal(scope.isAdmin, false);
 
   for (const adminTool of ADMIN_BUILDER_TOOL_NAMES) {
-    await assert.rejects(() => byName.get(adminTool).invoke(empCtx, { portalSlug: 'services', blockUse: 'DxosAiProposalBlockModel', slug: 'new', title: 'New', operation: 'createCollection', roleName: 'ldx_employee', collectionName: 'latticeCustomX', templateKey: 'internal-service' }), (err) => err.status === 403);
+    await assert.rejects(() => byName.get(adminTool).invoke(empCtx, { portalSlug: 'services', blockUse: 'DxosAiProposalBlockModel', slug: 'new', title: 'New', operation: 'createCollection', roleName: 'ldx_employee', roleTitle: 'Test', pageTitle: 'Page', collectionName: 'latticeCustomX', templateKey: 'internal-service', action: 'listSnapshots' }), (err) => err.status === 403);
   }
-  assert.equal(db.auditLogs.filter((l) => l.status === 'denied').length, 7);
+  assert.equal(db.auditLogs.filter((l) => l.status === 'denied').length, 11);
 
   const searchRes = await byName.get('dxos_search_enterprise_context').invoke(empCtx, { query: 'Đơn' });
   assert.equal(searchRes.items.some((i) => i.code === 'ORD-01'), true);

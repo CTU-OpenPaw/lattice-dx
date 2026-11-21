@@ -10,7 +10,11 @@
 
 const DEFAULT_TOOL_NAMES = [
   'dxos_inspect_architecture',
+  'dxos_recommend_page_blueprint',
+  'dxos_design_creative_block',
   'dxos_compose_page_blocks',
+  'dxos_snapshot_or_rollback_page',
+  'dxos_provision_role_workspace',
   'dxos_manage_portal_and_acl',
   'dxos_extend_collection_schema',
   'dxos_manage_rbac_permissions',

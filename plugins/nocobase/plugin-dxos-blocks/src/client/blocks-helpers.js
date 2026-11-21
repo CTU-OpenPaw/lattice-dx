@@ -226,6 +226,7 @@ function createCopilotStripElement(React, { employees = [], onRunPrompt } = {}) 
 }
 
 module.exports = {
+  SAFE_COLLECTION_RE,
   isSafeAppPath,
   safeJsonParse,
   filterHeroActions,

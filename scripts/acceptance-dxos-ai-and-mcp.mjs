@@ -15,7 +15,11 @@ import { assertSafeLabOrigin } from './setup-native-multi-portal-demo.mjs';
 const DEMO_PASS = process.env.NATIVE_DEMO_PASSWORD ?? 'NativeLab-2026!';
 const ADMIN_TOOLS = [
   'dxos_inspect_architecture',
+  'dxos_recommend_page_blueprint',
+  'dxos_design_creative_block',
   'dxos_compose_page_blocks',
+  'dxos_snapshot_or_rollback_page',
+  'dxos_provision_role_workspace',
   'dxos_manage_portal_and_acl',
   'dxos_extend_collection_schema',
   'dxos_manage_rbac_permissions',
@@ -55,11 +59,15 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     employeeTopology403: false,
     employeePortalCopilotScoped: false,
     adminMcpInitialize: false,
-    adminMcpToolsListed11: false,
+    adminMcpToolsListed15: false,
     adminMcpInspectOk: false,
     adminMcpDryRunCompose: false,
     adminMcpRbacInspectAndRootBlocked: false,
     adminMcpWorkflowInspectOk: false,
+    adminRecommendBlueprintOk: false,
+    adminCreativeBlockDryRunOk: false,
+    adminSnapshotListOk: false,
+    adminProvisionRoleWorkspaceDryRunOk: false,
     employeeCrossDeptRadarOk: false,
     adminMcpTopologyResource6Planes: false,
     itOtMcp4Tools: false,
@@ -120,7 +128,7 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     for (const tool of [...ADMIN_TOOLS, ...OPERATIONAL_TOOLS]) {
       assert.ok(adminToolNames.includes(tool), `Admin MCP missing tool ${tool}`);
     }
-    checks.adminMcpToolsListed11 = true;
+    checks.adminMcpToolsListed15 = true;
 
     const inspectCall = await rpcRequest('root', '/api/dxos-mcp', {
       jsonrpc: '2.0',
@@ -174,6 +182,59 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     });
     assert.equal(wfInspect.json?.result?.isError, false);
     checks.adminMcpWorkflowInspectOk = true;
+
+    const recBlueprintCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'tools/call',
+      params: { name: 'dxos_recommend_page_blueprint', arguments: { collectionName: 'latticeOrders', portalSlug: 'logistics', targetRole: 'ldx_manager' } },
+    });
+    assert.equal(recBlueprintCall.json?.result?.isError, false);
+    checks.adminRecommendBlueprintOk = true;
+
+    const creativeDryCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 22,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_design_creative_block',
+        arguments: { portalSlug: 'services', dryRun: true, blueprint: { title: 'Test Creative', theme: 'industrial-cockpit', widgets: [] } },
+      },
+    });
+    assert.equal(creativeDryCall.json?.result?.isError, false);
+    const creativeDryJson = JSON.parse(creativeDryCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(creativeDryJson.dryRun, true);
+    checks.adminCreativeBlockDryRunOk = true;
+
+    const snapListCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 23,
+      method: 'tools/call',
+      params: { name: 'dxos_snapshot_or_rollback_page', arguments: { action: 'listSnapshots', portalSlug: 'services' } },
+    });
+    assert.equal(snapListCall.json?.result?.isError, false);
+    checks.adminSnapshotListOk = true;
+
+    const provDryCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 24,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_provision_role_workspace',
+        arguments: { roleName: 'ldx_qa_e2e', portalSlug: 'services', pageTitle: 'E2E QA', collectionName: 'latticeServiceTickets', dryRun: true },
+      },
+    });
+    assert.equal(provDryCall.json?.result?.isError, false);
+    const provDryJson = JSON.parse(provDryCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(provDryJson.dryRun, true);
+    const provRootDeny = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 25,
+      method: 'tools/call',
+      params: { name: 'dxos_provision_role_workspace', arguments: { roleName: 'root', portalSlug: 'services', pageTitle: 'Illegal', collectionName: 'latticeServiceTickets' } },
+    });
+    assert.equal(provRootDeny.json?.error?.code, -32003);
+    checks.adminProvisionRoleWorkspaceDryRunOk = true;
 
     const empRadar = await rpcRequest('employee', '/api/dxos-mcp', {
       jsonrpc: '2.0',

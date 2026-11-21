@@ -8,8 +8,26 @@
  */
 'use strict';
 
-const LDX_ROLE_RE = /^ldx_[a-z][a-z0-9_]{1,40}$/;
-const IMMUTABLE_WRITE_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'organizationId', 'identitySubject', 'userId']);
+const {
+  LDX_ROLE_RE,
+  NATIVE_SURFACE_ACTIONS,
+  collectPortalRouteSet,
+  resolvePortalRoutes,
+  extractGridBlockUids,
+  computeLayoutSignature,
+  normalizeGridState,
+  computeMultiColumnGrid,
+  resolvePageGrid,
+  hydrateFlowModel,
+  readFlowModelMeta,
+  updateGridLayout,
+  placeBesideOrInsertBlock,
+  propagatePortalRolesToRoutes,
+  buildRbacActionsSpec,
+  capturePageSnapshot,
+  bumpSurfaceRevision,
+} = require('./ai-surface-creative-tools');
+
 const ALLOWED_WORKFLOW_NODE_TYPES = ['condition', 'manual', 'update', 'create', 'query', 'calculation', 'output', 'parallel', 'delay'];
 const FIELD_INTERFACE_MAP = {
   text: { interface: 'textarea', uiType: 'string' },
@@ -21,190 +39,11 @@ const FIELD_INTERFACE_MAP = {
   string: { interface: 'input', uiType: 'string' },
 };
 
-async function collectPortalRouteSet(db, portalSlug) {
-  const layoutUid = `ldx-portal-${portalSlug}`;
-  const routesRepo = db?.getRepository?.('desktopRoutes');
-  const linksRepo = db?.getRepository?.('desktopRoutesUiLayouts');
-  let routes = [];
-  if (routesRepo) {
-    try {
-      routes = (await routesRepo.find({ appends: ['uiLayouts'], limit: 400 })) || [];
-    } catch {
-      routes = (await routesRepo.find({ limit: 400 })) || [];
-    }
-  }
-  const links = linksRepo ? ((await linksRepo.find({ filter: { uiLayoutUid: layoutUid }, limit: 400 })) || []) : [];
-  return { layoutUid, routes, links };
-}
-
-function resolvePortalRoutes(routes, links, layoutUid, val) {
-  const directIds = new Set(links.filter((l) => val(l, 'uiLayoutUid') === layoutUid).map((l) => String(val(l, 'desktopRouteId'))));
-  const inPortal = [];
-  const inPortalIds = new Set();
-
-  for (const r of routes) {
-    const rid = String(val(r, 'id'));
-    const layouts = val(r, 'uiLayouts');
-    const matchesDirect = val(r, 'uiLayoutUid') === layoutUid
-      || val(r, 'layoutUid') === layoutUid
-      || directIds.has(rid)
-      || (Array.isArray(layouts) && layouts.some((l) => val(l, 'uid') === layoutUid));
-    if (matchesDirect) {
-      inPortal.push(r);
-      inPortalIds.add(rid);
-    }
-  }
-
-  let grew = true;
-  while (grew) {
-    grew = false;
-    for (const r of routes) {
-      const rid = String(val(r, 'id'));
-      const pid = val(r, 'parentId');
-      if (!inPortalIds.has(rid) && pid != null && inPortalIds.has(String(pid))) {
-        inPortal.push(r);
-        inPortalIds.add(rid);
-        grew = true;
-      }
-    }
-  }
-  return inPortal;
-}
-
-function findPortalTargetPage(portalRoutes, routes, pageTitle, val) {
-  const pages = portalRoutes.filter((r) => ['flowPage', 'page'].includes(val(r, 'type')));
-  if (pageTitle) {
-    const q = String(pageTitle).trim().toLowerCase();
-    const matched = pages.find((p) => String(val(p, 'title') || '').toLowerCase().includes(q));
-    if (matched) return matched;
-  }
-  const overview = pages.find((p) => String(val(p, 'title') || '').toLowerCase().includes('tổng quan')) || pages[0];
-  if (overview) return overview;
-  // Support compact nested children tree used by light mocks
-  for (const r of portalRoutes) {
-    const children = val(r, 'children');
-    if (Array.isArray(children)) {
-      const childPage = children.find((c) => ['flowPage', 'page'].includes(val(c, 'type')));
-      if (childPage) return childPage;
-    }
-  }
-  return routes.find((r) => ['flowPage', 'page'].includes(val(r, 'type')) && portalRoutes.some((p) => String(val(p, 'id')) === String(val(r, 'parentId')))) || null;
-}
-
-function extractGridBlockUids(grid) {
-  const layout = grid?.stepParams?.gridSettings?.grid || grid?.props || {};
-  const rowOrder = Array.isArray(layout.rowOrder) ? layout.rowOrder : Object.keys(layout.rows || {});
-  const ordered = [];
-  const seen = new Set();
-  for (const rowKey of rowOrder) {
-    const cols = layout.rows?.[rowKey];
-    if (!Array.isArray(cols)) continue;
-    for (const col of cols) {
-      for (const uid of Array.isArray(col) ? col : []) {
-        if (uid && !seen.has(uid)) {
-          seen.add(uid);
-          ordered.push(uid);
-        }
-      }
-    }
-  }
-  for (const item of Array.isArray(grid?.subModels?.items) ? grid.subModels.items : []) {
-    if (item?.uid && !seen.has(item.uid)) {
-      seen.add(item.uid);
-      ordered.push(item.uid);
-    }
-  }
-  return { ordered, layout };
-}
-
-function normalizeGridState(grid, blockUids) {
-  const rows = {};
-  const sizes = {};
-  const rowOrder = [];
-  blockUids.forEach((uid, idx) => {
-    const key = `dxos_row_${idx}`;
-    rows[key] = [[uid]];
-    sizes[key] = [24];
-    rowOrder.push(key);
-  });
-  return { rows, sizes, rowOrder };
-}
-
-async function resolvePageGrid(db, portalSlug, pageTitle, val) {
-  const flowModelsRepo = db?.getRepository?.('flowModels');
-  const { layoutUid, routes, links } = await collectPortalRouteSet(db, portalSlug);
-  const portalRoutes = resolvePortalRoutes(routes, links, layoutUid, val);
-  const pageRoute = findPortalTargetPage(portalRoutes, routes, pageTitle, val);
-  if (!flowModelsRepo || !pageRoute) return { layoutUid, portalRoutes, pageRoute, tabRoute: null, tabSchemaUid: null, grid: null };
-  const pageId = String(val(pageRoute, 'id'));
-  const tabRoute = routes.find((r) => String(val(r, 'parentId')) === pageId && val(r, 'type') === 'tabs') || null;
-  const tabSchemaUid = val(tabRoute, 'schemaUid') || val(pageRoute, 'schemaUid') || val(pageRoute, 'pageUid') || null;
-  const grid = tabSchemaUid && typeof flowModelsRepo.findModelByParentId === 'function'
-    ? await flowModelsRepo.findModelByParentId(tabSchemaUid, { subKey: 'grid' })
-    : null;
-  return { flowModelsRepo, layoutUid, portalRoutes, pageRoute, tabRoute, tabSchemaUid, grid };
-}
-
-async function hydrateFlowModel(flowModelsRepo, uid, subItemsMap) {
-  if (typeof flowModelsRepo?.findModelById === 'function') {
-    const m = await flowModelsRepo.findModelById(uid);
-    if (m) return m;
-  }
-  if (typeof flowModelsRepo?.findOne === 'function') {
-    const row = await flowModelsRepo.findOne({ filter: { uid } });
-    if (row) return row;
-  }
-  return subItemsMap.get(uid) || null;
-}
-
-function readFlowModelMeta(model, uid) {
-  const opts = model?.options && typeof model.options === 'object' ? model.options : {};
-  const props = model?.props || opts.props || {};
-  const stepParams = model?.stepParams || opts.stepParams || {};
-  return {
-    uid: model?.uid || uid,
-    use: model?.use || opts.use || 'UnknownModel',
-    title: props?.title || stepParams?.dxosBlockSettings?.config?.title || null,
-    props,
-    stepParams,
-  };
-}
-
-async function updateGridLayout(flowModelsRepo, grid, nextLayout) {
-  if (!grid?.uid || typeof flowModelsRepo?.updateSingleNode !== 'function') return;
-  await flowModelsRepo.updateSingleNode({
-    uid: grid.uid,
-    props: { ...(grid.props || {}), ...nextLayout },
-    stepParams: {
-      ...(grid.stepParams || {}),
-      gridSettings: { ...(grid.stepParams?.gridSettings || {}), grid: nextLayout },
-    },
-  });
-}
-
-async function propagatePortalRolesToRoutes(db, layoutUid, routeIds, explicitRoles, val) {
-  const rolesRoutesRepo = db?.getRepository?.('rolesDesktopRoutes');
-  const linksRepo = db?.getRepository?.('desktopRoutesUiLayouts');
-  if (!rolesRoutesRepo || !routeIds.length) return [];
-
-  let targetRoles = Array.isArray(explicitRoles) ? explicitRoles.filter((r) => LDX_ROLE_RE.test(r)) : [];
-  if (!targetRoles.length && linksRepo) {
-    const existingLinks = (await linksRepo.find({ filter: { uiLayoutUid: layoutUid }, limit: 400 })) || [];
-    const existingRouteIds = existingLinks.map((l) => val(l, 'desktopRouteId')).filter((id) => id != null);
-    if (existingRouteIds.length) {
-      const existingGrants = (await rolesRoutesRepo.find({ filter: { desktopRouteId: { $in: existingRouteIds } }, limit: 400 })) || [];
-      targetRoles = [...new Set(existingGrants.map((g) => val(g, 'roleName')).filter((r) => LDX_ROLE_RE.test(r)))];
-    }
-  }
-  for (const desktopRouteId of routeIds) {
-    for (const roleName of targetRoles) {
-      if (!(await rolesRoutesRepo.findOne({ filter: { roleName, desktopRouteId } }))) {
-        await rolesRoutesRepo.create({ values: { roleName, desktopRouteId } });
-      }
-    }
-  }
-  return targetRoles;
-}
+const NATIVE_BLOCK_ALIASES = {
+  NativeTableBlock: 'table',
+  NativeFormBlock: 'createForm',
+  NativeDetailsBlock: 'details',
+};
 
 function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE) {
   const fname = String(rawField?.name || '').trim();
@@ -225,45 +64,6 @@ function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE) {
       ...(ftype === 'select' && enumValues.length ? { enum: enumValues.map((v) => ({ value: v, label: v })) } : {}),
     },
   };
-}
-
-function buildRbacActionsSpec({ actions, readableFields, writableFields, lockedFields, scopeMode, collectionName, db }) {
-  const lockSet = new Set(lockedFields || []);
-  const viewFields = Array.isArray(readableFields) && readableFields.length ? [...new Set(readableFields)] : undefined;
-  const rawWrite = Array.isArray(writableFields) && writableFields.length ? writableFields : viewFields || [];
-  const safeWriteFields = rawWrite.filter((f) => !IMMUTABLE_WRITE_FIELDS.has(f) && !lockSet.has(f));
-
-  const currentUserExpr = '{{ ctx.state.currentUser.id }}';
-  const col = db?.getCollection?.(collectionName);
-  const hasRequesterAssoc = ['latticeRequests', 'latticeOrders', 'latticeServiceTickets'].includes(collectionName)
-    || Boolean(col?.hasField?.('requester'));
-
-  const buildScope = (mode) => {
-    if (!mode || mode === 'all_in_org') return undefined;
-    if (mode === 'own_draft' && hasRequesterAssoc) {
-      return { name: `Lattice — Nháp của tôi (${collectionName})`, resourceName: collectionName, dataSourceKey: 'main', scope: { 'requester.userId': currentUserExpr, status: 'draft' } };
-    }
-    if (hasRequesterAssoc) {
-      return { name: `Lattice — Hồ sơ liên quan (${collectionName})`, resourceName: collectionName, dataSourceKey: 'main', scope: { $or: [{ 'requester.userId': currentUserExpr }, { 'assignee.userId': currentUserExpr }] } };
-    }
-    return { name: `Lattice — Bản ghi của tôi (${collectionName})`, resourceName: collectionName, dataSourceKey: 'main', scope: { createdById: currentUserExpr } };
-  };
-
-  const out = [];
-  for (const act of actions) {
-    if (act === 'view') {
-      out.push({ name: 'view', ...(viewFields ? { fields: viewFields } : {}), ...(scopeMode === 'own' ? { scope: buildScope('own') } : {}) });
-    } else if (act === 'create') {
-      out.push({ name: 'create', ...(safeWriteFields.length ? { fields: safeWriteFields } : {}) });
-    } else if (act === 'update') {
-      const sc = buildScope(scopeMode);
-      out.push({ name: 'update', ...(safeWriteFields.length ? { fields: safeWriteFields } : {}), ...(sc ? { scope: sc } : {}) });
-    } else if (act === 'destroy' || act === 'export') {
-      const sc = act === 'destroy' ? buildScope(scopeMode) : undefined;
-      out.push({ name: act, ...(sc ? { scope: sc } : {}) });
-    }
-  }
-  return out;
 }
 
 async function resolveOrgCrewBindings(db, organizationId, val) {
@@ -353,30 +153,35 @@ function createBuilderTools(deps) {
       name: 'dxos_compose_page_blocks',
       adminOnly: true,
       defaultPermission: 'ASK',
-      introduction: { title: 'Dựng & Chỉnh Block DX-OS', about: 'Inspect, dựng trang đa block, chỉnh sửa props, sắp xếp lại và gỡ block trên Portal.' },
-      description: 'Inspect, build multi-block portal pages, add/update props, reorder, or remove blocks on LatticeDX portals (Admin only; supports dryRun preview).',
+      introduction: { title: 'Dựng & Chỉnh Sâu Block DX-OS + Native', about: 'Inspect, dựng trang đa block, chèn block chuẩn/DX-OS vào trang đang mở, chia lưới nhiều cột, cấu hình cột/nút/luật liên kết và gỡ block.' },
+      description: 'Inspect, build multi-block portal pages, add inline DX-OS or native flowSurfaces blocks onto existing page grids, set multi-column grid layouts, configure deep block fields/actions/rules, reorder, or remove blocks (Admin only; supports dryRun).',
       schema: {
-        description: 'Full lifecycle page & block builder command.',
+        description: 'Full lifecycle page & block builder command (v3 with deep flowSurfaces + multi-column grid).',
         properties: {
-          action: { type: 'string', default: 'addBlock', enum: ['addBlock', 'listBlocks', 'composePageBlueprint', 'updateBlock', 'reorderBlocks', 'removeBlock'] },
+          action: { type: 'string', default: 'addBlock', enum: ['addBlock', 'listBlocks', 'composePageBlueprint', 'updateBlock', 'reorderBlocks', 'setGridLayout', 'configureNativeBlock', 'removeBlock'] },
           portalSlug: { type: 'string', required: true, maxLength: 40, description: 'Target portal slug (e.g., services, cold-qa).' },
           pageTitle: { type: 'string', maxLength: 100, description: 'Optional page title filter when inspecting or editing blocks.' },
           groupTitle: { type: 'string', maxLength: 80, description: 'Menu group title for composePageBlueprint.' },
-          blockUid: { type: 'string', maxLength: 80, description: 'Target block UID for updateBlock or removeBlock.' },
-          blockUse: { type: 'string', enum: ALLOWED_BLOCK_MODELS, description: 'Block model class for addBlock.' },
+          blockUid: { type: 'string', maxLength: 80, description: 'Target block UID for updateBlock, configureNativeBlock, or removeBlock.' },
+          blockUse: { type: 'string', enum: ALLOWED_BLOCK_MODELS, description: 'Block model class or formal flowSurfaces block key (table, kanban, chart, filterForm, etc.) for addBlock.' },
           title: { type: 'string', maxLength: 100, description: 'Block or page title.' },
-          collection: { type: 'string', maxLength: 60, description: 'Collection name for native table/form blocks.' },
+          collection: { type: 'string', maxLength: 60, description: 'Collection name for native table/form/kanban/chart blocks.' },
+          fields: { type: 'array', items: { type: 'string' }, description: 'Field names for inline addBlock.' },
           tableFields: { type: 'array', items: { type: 'string' }, description: 'Field names for NativeTableBlock in composePageBlueprint.' },
           includeCreateForm: { type: 'boolean', default: false, description: 'Include Native createForm block in composePageBlueprint.' },
           dxosBlocks: { type: 'array', items: { type: 'object' }, description: 'Array of { blockUse, title, config } DX-OS blocks to attach in composePageBlueprint.' },
           orderedBlockUids: { type: 'array', items: { type: 'string' }, description: 'Ordered array of block UIDs for reorderBlocks.' },
+          placeBesideBlockUid: { type: 'string', maxLength: 80, description: 'Optional existing block UID to share a [12, 12] 2-column row on addBlock.' },
+          rowsLayout: { type: 'array', items: { type: 'object' }, description: 'Multi-column row layout array for setGridLayout.' },
+          surfaceAction: { type: 'string', enum: NATIVE_SURFACE_ACTIONS, description: 'Deep flowSurfaces action for configureNativeBlock.' },
+          surfacePayload: { type: 'object', description: 'Payload for flowSurfaces action on configureNativeBlock.' },
           config: { type: 'object', description: 'Object overriding block config props.' },
           configJson: { type: 'string', maxLength: 4000, description: 'Optional JSON string overriding block config props.' },
           roleNames: { type: 'array', items: { type: 'string' }, description: 'Optional ldx_* roles to grant onto created page routes.' },
           dryRun: { type: 'boolean', default: false },
         },
       },
-      async run(ctx, db, _actor, args) {
+      async run(ctx, db, actor, args) {
         if (!SLUG_RE.test(args.portalSlug)) throw failTool('PORTAL_SLUG_INVALID', 400, 'Slug portal không hợp lệ.');
         const action = args.action || 'addBlock';
         let parsedConfig = args.config && typeof args.config === 'object' ? { ...args.config } : {};
@@ -400,6 +205,8 @@ function createBuilderTools(deps) {
             pageTitle: val(pageRoute, 'title') || null,
             tabSchemaUid,
             gridUid: grid.uid,
+            rows: layout.rows || {},
+            sizes: layout.sizes || {},
             rowOrder: layout.rowOrder || [],
             blocks,
           };
@@ -415,6 +222,7 @@ function createBuilderTools(deps) {
           if (args.dryRun) {
             return { dryRun: true, action, blockUid: args.blockUid, use: meta.use, beforeProps: meta.props, afterProps: nextConfig };
           }
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, note: `Before updateBlock ${args.blockUid}`, createdByUsername: actor.username }, val);
           if (typeof flowModelsRepo.updateSingleNode === 'function') {
             await flowModelsRepo.updateSingleNode({
               uid: args.blockUid,
@@ -424,11 +232,50 @@ function createBuilderTools(deps) {
           } else if (typeof flowModelsRepo.upsertModel === 'function') {
             await flowModelsRepo.upsertModel({ ...model, props: nextConfig });
           }
+          bumpSurfaceRevision(args.portalSlug, { pageTitle: args.pageTitle, lastMutatedUid: args.blockUid, message: `AI đã cập nhật block ${meta.title || args.blockUid}` });
           return { applied: true, updated: true, blockUid: args.blockUid, afterProps: nextConfig };
         }
 
+        if (action === 'setGridLayout') {
+          const { flowModelsRepo, pageRoute, grid } = await resolvePageGrid(db, args.portalSlug, args.pageTitle, val);
+          if (!grid || !flowModelsRepo) throw failTool('PAGE_GRID_NOT_FOUND', 404, `Không tìm thấy grid trên portal "${args.portalSlug}".`);
+          const nextLayout = computeMultiColumnGrid(args.rowsLayout, failTool);
+          if (args.dryRun) return { dryRun: true, action, portalSlug: args.portalSlug, nextLayout };
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(pageRoute, 'title') || args.pageTitle, note: 'Before setGridLayout', createdByUsername: actor.username }, val);
+          if (hasRes(ctx, 'flowSurfaces')) {
+            try {
+              await invokeResourceAction(ctx, 'flowSurfaces', 'setLayout', { values: { target: { uid: grid.uid }, ...nextLayout } });
+            } catch {
+              await updateGridLayout(flowModelsRepo, grid, nextLayout);
+            }
+          } else {
+            await updateGridLayout(flowModelsRepo, grid, nextLayout);
+          }
+          bumpSurfaceRevision(args.portalSlug, {
+            pageTitle: val(pageRoute, 'title') || args.pageTitle,
+            layoutSignature: computeLayoutSignature({ props: nextLayout }),
+            message: 'AI đã sắp xếp lại bố cục đa cột trên trang',
+          });
+          return { applied: true, action, portalSlug: args.portalSlug, layout: nextLayout };
+        }
+
+        if (action === 'configureNativeBlock') {
+          if (!args.blockUid) throw failTool('BLOCK_UID_REQUIRED', 400, 'Cần blockUid để cấu hình block.');
+          if (!args.surfaceAction || !NATIVE_SURFACE_ACTIONS.includes(args.surfaceAction)) {
+            throw failTool('SURFACE_ACTION_INVALID', 400, `Cần surfaceAction hợp lệ trong: ${NATIVE_SURFACE_ACTIONS.join(', ')}.`);
+          }
+          const payload = args.surfacePayload && typeof args.surfacePayload === 'object' ? args.surfacePayload : {};
+          if (args.dryRun) return { dryRun: true, action, blockUid: args.blockUid, surfaceAction: args.surfaceAction, surfacePayload: payload };
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, note: `Before ${args.surfaceAction} on ${args.blockUid}`, createdByUsername: actor.username }, val);
+          const result = await invokeResourceAction(ctx, 'flowSurfaces', args.surfaceAction, {
+            values: { target: { uid: args.blockUid }, ...payload },
+          });
+          bumpSurfaceRevision(args.portalSlug, { pageTitle: args.pageTitle, lastMutatedUid: args.blockUid, message: `AI đã cấu hình sâu block (${args.surfaceAction})` });
+          return { applied: true, action, blockUid: args.blockUid, surfaceAction: args.surfaceAction, result };
+        }
+
         if (action === 'reorderBlocks' || action === 'removeBlock') {
-          const { flowModelsRepo, grid } = await resolvePageGrid(db, args.portalSlug, args.pageTitle, val);
+          const { flowModelsRepo, pageRoute, grid } = await resolvePageGrid(db, args.portalSlug, args.pageTitle, val);
           if (!grid || !flowModelsRepo) throw failTool('PAGE_GRID_NOT_FOUND', 404, `Không tìm thấy grid trên portal "${args.portalSlug}".`);
           const { ordered } = extractGridBlockUids(grid);
           let nextOrder;
@@ -440,12 +287,22 @@ function createBuilderTools(deps) {
             nextOrder = ordered.filter((u) => u !== args.blockUid);
           }
           if (args.dryRun) return { dryRun: true, action, portalSlug: args.portalSlug, beforeOrder: ordered, afterOrder: nextOrder };
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(pageRoute, 'title') || args.pageTitle, note: `Before ${action}`, createdByUsername: actor.username }, val);
           const nextLayout = normalizeGridState(grid, nextOrder);
           await updateGridLayout(flowModelsRepo, grid, nextLayout);
           if (action === 'removeBlock') {
-            if (typeof flowModelsRepo.remove === 'function') await flowModelsRepo.remove(args.blockUid);
-            else if (typeof flowModelsRepo.destroy === 'function') await flowModelsRepo.destroy({ filter: { uid: args.blockUid } });
+            if (hasRes(ctx, 'flowSurfaces')) {
+              try { await invokeResourceAction(ctx, 'flowSurfaces', 'removeNode', { values: { target: { uid: args.blockUid } } }); }
+              catch {
+                if (typeof flowModelsRepo.remove === 'function') await flowModelsRepo.remove(args.blockUid);
+              }
+            } else if (typeof flowModelsRepo.remove === 'function') {
+              await flowModelsRepo.remove(args.blockUid);
+            } else if (typeof flowModelsRepo.destroy === 'function') {
+              await flowModelsRepo.destroy({ filter: { uid: args.blockUid } });
+            }
           }
+          bumpSurfaceRevision(args.portalSlug, { pageTitle: val(pageRoute, 'title') || args.pageTitle, blockCount: nextOrder.length, message: action === 'removeBlock' ? `AI đã gỡ block ${args.blockUid}` : 'AI đã sắp xếp lại thứ tự block' });
           return { applied: true, ...(action === 'reorderBlocks' ? { reordered: true } : { removed: true, blockUid: args.blockUid }), order: nextOrder };
         }
 
@@ -519,6 +376,7 @@ function createBuilderTools(deps) {
             }
             await updateGridLayout(flowModelsRepo, grid, normalizeGridState(grid, [...prepended, ...existingOrder]));
           }
+          bumpSurfaceRevision(args.portalSlug, { pageTitle: title, message: `AI đã dựng trang đa block "${title}"` });
           return {
             applied: true,
             action,
@@ -530,38 +388,62 @@ function createBuilderTools(deps) {
           };
         }
 
-        // Default addBlock (v1 backward compatible)
+        // Default addBlock: inline onto EXISTING page grid for both DX-OS and NocoBase formal blocks
         if (!args.blockUse) throw failTool('BLOCK_USE_REQUIRED', 400, 'Cần blockUse để gắn block mới.');
         const title = args.title || args.blockUse;
         const collection = args.collection || 'latticeServiceTickets';
+        const nativeType = NATIVE_BLOCK_ALIASES[args.blockUse] || args.blockUse;
+        const resolved = await resolvePageGrid(db, args.portalSlug, args.pageTitle, val);
+        const inlineFields = Array.isArray(args.fields) && args.fields.length ? args.fields : (Array.isArray(args.tableFields) && args.tableFields.length ? args.tableFields : ['code', 'name', 'status']);
         const blueprint = {
           version: '1',
           mode: 'create',
           navigation: { layoutUid: `ldx-portal-${args.portalSlug}`, group: { title: 'AI Mở rộng', icon: 'AppstoreAddOutlined' }, item: { title, icon: 'RobotOutlined' } },
           page: { title, displayTitle: true, enableTabs: false },
-          tabs: [{ title, blocks: [{ key: `ai-${args.portalSlug}-${Date.now().toString(36)}`, type: args.blockUse === 'NativeFormBlock' ? 'createForm' : args.blockUse === 'NativeDetailsBlock' ? 'details' : 'table', title, collection, fields: ['code', 'name', 'status'] }] }],
+          tabs: [{ title, blocks: [{ key: `ai-${args.portalSlug}-${Date.now().toString(36)}`, type: nativeType.startsWith('Dxos') ? 'table' : nativeType, title, collection, fields: inlineFields }] }],
         };
         if (args.dryRun) {
-          return { dryRun: true, portalSlug: args.portalSlug, blockUse: args.blockUse, title, previewBlueprint: blueprint };
+          return { dryRun: true, portalSlug: args.portalSlug, blockUse: args.blockUse, nativeType, title, targetGridUid: resolved.grid?.uid || null, previewBlueprint: blueprint };
         }
-        const resolved = await resolvePageGrid(db, args.portalSlug, args.pageTitle, val);
-        if (args.blockUse.startsWith('Dxos') && resolved.grid?.uid && resolved.flowModelsRepo?.upsertModel) {
-          const blockUid = `dxos-ai-${args.portalSlug}-${Date.now().toString(36)}`;
-          const cfg = { title, ...parsedConfig };
-          await resolved.flowModelsRepo.upsertModel({
-            uid: blockUid,
-            use: args.blockUse,
-            parentId: resolved.grid.uid,
-            subKey: 'items',
-            subType: 'array',
-            props: cfg,
-            stepParams: { dxosBlockSettings: { config: cfg } },
-          });
-          const nextOrder = [blockUid, ...extractGridBlockUids(resolved.grid).ordered.filter((u) => u !== blockUid)];
-          await updateGridLayout(resolved.flowModelsRepo, resolved.grid, normalizeGridState(resolved.grid, nextOrder));
-          return { dryRun: false, applied: true, mode: 'flowModel', portalSlug: args.portalSlug, blockUid, blockUse: args.blockUse };
+        if (resolved.grid?.uid) {
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, note: `Before addBlock ${args.blockUse}`, createdByUsername: actor.username }, val);
+          if (args.blockUse.startsWith('Dxos') && resolved.flowModelsRepo?.upsertModel) {
+            const blockUid = `dxos-ai-${args.portalSlug}-${Date.now().toString(36)}`;
+            const cfg = { title, ...parsedConfig };
+            await resolved.flowModelsRepo.upsertModel({
+              uid: blockUid,
+              use: args.blockUse,
+              parentId: resolved.grid.uid,
+              subKey: 'items',
+              subType: 'array',
+              props: cfg,
+              stepParams: { dxosBlockSettings: { config: cfg } },
+            });
+            const placed = await placeBesideOrInsertBlock(resolved.flowModelsRepo, resolved.grid, blockUid, args.placeBesideBlockUid, failTool);
+            bumpSurfaceRevision(args.portalSlug, { pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, lastMutatedUid: blockUid, message: `AI đã gắn block "${title}"` });
+            return { dryRun: false, applied: true, mode: 'flowModel', portalSlug: args.portalSlug, blockUid, blockUse: args.blockUse, sideBySideWith: placed.sideBySideWith };
+          }
+          if (hasRes(ctx, 'flowSurfaces')) {
+            const needsResource = ['table', 'createForm', 'editForm', 'details', 'filterForm', 'kanban', 'chart', 'calendar', 'list', 'gridCard'].includes(nativeType);
+            const fsPayload = {
+              target: { uid: resolved.grid.uid },
+              type: nativeType,
+              title,
+              ...(needsResource ? { resource: { binding: 'currentCollection', dataSourceKey: 'main', collectionName: collection }, fields: inlineFields } : {}),
+              ...(Object.keys(parsedConfig).length ? { settings: parsedConfig } : {}),
+            };
+            const fsRes = await invokeResourceAction(ctx, 'flowSurfaces', 'addBlock', { values: fsPayload });
+            const newUid = fsRes?.uid || fsRes?.data?.uid || null;
+            if (newUid && args.placeBesideBlockUid) {
+              const refreshed = await resolvePageGrid(db, args.portalSlug, args.pageTitle, val);
+              if (refreshed.grid) await placeBesideOrInsertBlock(resolved.flowModelsRepo, refreshed.grid, newUid, args.placeBesideBlockUid, failTool);
+            }
+            bumpSurfaceRevision(args.portalSlug, { pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, lastMutatedUid: newUid, message: `AI đã gắn block chuẩn "${title}" (${nativeType})` });
+            return { dryRun: false, applied: true, mode: 'flowSurfaces:addBlock', portalSlug: args.portalSlug, blockUid: newUid, blockUse: nativeType, result: fsRes };
+          }
         }
         const bpResult = await invokeResourceAction(ctx, 'flowSurfaces', 'applyBlueprint', { values: blueprint });
+        bumpSurfaceRevision(args.portalSlug, { pageTitle: title, message: `AI đã tạo trang block "${title}"` });
         return { dryRun: false, applied: true, mode: 'applyBlueprint', portalSlug: args.portalSlug, blockUse: args.blockUse, result: bpResult };
       },
     }),
