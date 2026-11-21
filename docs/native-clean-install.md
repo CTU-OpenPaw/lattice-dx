@@ -49,6 +49,10 @@ Script tạo nhóm **Yêu cầu nội bộ**, form native **Tạo yêu cầu** v
 
 Nếu lần cấu hình bị gián đoạn, giữ file `report.json.workspace-demo` bên cạnh báo cáo và chạy lại cùng lệnh. File này giúp script nhận diện nhóm demo đã tạo dở.
 
+Lưu báo cáo trên hệ thống tệp hỗ trợ hard link, ví dụ NTFS trên Windows. Nếu một file `.workspace-demo` có sẵn bị hỏng, script sẽ báo lỗi và giữ file để đối chiếu với nhóm demo đã tạo.
+
+Chạy một lượt cấu hình tại một thời điểm trên mỗi lab. Cách ghi UUID bảo vệ file định danh khi nhiều tiến trình cùng ghi, còn các thao tác tạo nhóm và trang trên NocoBase vẫn cần chạy tuần tự. Việc ghi file này xử lý trường hợp tiến trình bị dừng, chưa được kiểm chứng khi máy mất điện.
+
 1. Trên cổng do báo cáo trả về, đăng nhập bằng tài khoản nhân viên mẫu và mở `/admin/lattice-workspace?view=apps`. Kiểm tra danh mục và mở trang mẫu được cấp quyền. Nếu chạy demo nút tạo nhanh của PR #51, builder cần cấu hình nút trên chính lab này tại `/admin/lattice-builder`: chọn ứng dụng, trang có form tạo tương ứng và tên kỹ thuật của collection. Tải lại Build UI để xác nhận cấu hình đã lưu.
 2. Dùng tài khoản nhân viên gửi một yêu cầu có mã riêng. Dùng tài khoản quản lý mở **Công việc của tôi → Cần xử lý**, đối chiếu mã và duyệt. Dùng tài khoản người thực hiện mở việc tiếp theo của cùng hồ sơ và bấm **Hoàn thành**.
 3. Đối chiếu trạng thái hồ sơ `completed` và công việc của người thực hiện trong tab **Đã xử lý**. Ghi SHA nguồn trong báo cáo cài đặt cùng mã hồ sơ để nhóm xác định chính xác bản đã nghiệm thu.
