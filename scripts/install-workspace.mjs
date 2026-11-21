@@ -22,6 +22,7 @@ const packages = [
   { directory: 'plugin-dxos-para', name: '@latticedx/plugin-dxos-para', build: 'build.mjs' },
   { directory: 'plugin-dxos-blocks', name: '@latticedx/plugin-dxos-blocks', build: 'build.mjs' },
   { directory: 'plugin-dxos-studio', name: '@latticedx/plugin-dxos-studio', build: 'build.mjs' },
+  { directory: 'plugin-dxos-ai', name: '@latticedx/plugin-dxos-ai', build: 'build.mjs' },
 ];
 
 export function defaultRun(file, args, { timeout, cwd = root, env = process.env }) {

@@ -16,9 +16,9 @@ Tài liệu này tổng hợp kiến trúc kỹ thuật, phạm vi tùy biến c
 
 ### 1. Định vị Kiến trúc Open-Core & Phạm vi Tùy biến Doanh nghiệp Việt
 
-**LatticeDX DX-OS** sử dụng **NocoBase `2.2.38`** làm **công cụ lõi nguồn mở** cung cấp runtime host, giao diện dựng trang, trình quản lý dữ liệu và bộ công cụ workflow; toàn bộ cấu trúc nghiệp vụ doanh nghiệp Việt, 6 plugin mở rộng, giao thức đa cổng, hệ thống phân quyền RBAC chi tiết, chuẩn hóa tri thức P.A.R.A., các block tùy biến và tác vụ AI do nhóm **CTU-OpenPaw** thiết kế và phát triển dưới giấy phép **Apache-2.0**.
+**LatticeDX DX-OS** là **Hệ điều hành Doanh nghiệp Số 6 Phân hệ**, trong đó **NocoBase `2.2.38`** đóng vai trò **Plane #6 (`appDataSubstrate`)** cung cấp runtime host, giao diện dựng trang, trình quản lý dữ liệu và bộ công cụ workflow bên dưới lớp điều phối chung; toàn bộ cấu trúc nghiệp vụ doanh nghiệp Việt, 7 plugin mở rộng, giao thức đa cổng, hệ thống phân quyền RBAC chi tiết, chuẩn hóa tri thức P.A.R.A., các block tùy biến, lực lượng nhân sự AI cấu hình động và cổng Streamable HTTP MCP 2 chiều do nhóm **CTU-OpenPaw** thiết kế và phát triển dưới giấy phép **Apache-2.0**.
 
-- **Cô lập mã nguồn sạch (Plugin-first, Zero Upstream Patch):** Không chỉnh sửa hay phân phối lại mã nguồn NocoBase trong `upstream/nocobase/`. Cả 6 plugin trong `plugins/nocobase/*` đều khai báo `"license": "Apache-2.0"`, `"nocobase": { "sdkProvidedByHost": true }`, kèm `LICENSE` và `README.md` riêng.
+- **Cô lập mã nguồn sạch (Plugin-first, Zero Upstream Patch):** Không chỉnh sửa hay phân phối lại mã nguồn NocoBase trong `upstream/nocobase/`. Cả 7 plugin trong `plugins/nocobase/*` đều khai báo `"license": "Apache-2.0"`, `"nocobase": { "sdkProvidedByHost": true }`, kèm `LICENSE` và `README.md` riêng.
 - **Minh bạch Điều 5.2 NocoBase:** Bảo toàn toàn bộ nhận diện `Powered by NocoBase`, phiên bản `v2.2.38` tại chân trang vận hành/portal và `License settings`.
 - **Hợp nhất 4 trụ cột DX-OS (`[H] – [P] – [D] – [I]`):**
   - **`[H]` Con người & Không gian làm việc:** 7 vai trò nghiệp vụ `ldx_*`, danh bạ nhân sự/đơn vị, kho tri thức P.A.R.A., đăng nhập tập trung Keycloak OIDC + PKCE.
@@ -28,7 +28,7 @@ Tài liệu này tổng hợp kiến trúc kỹ thuật, phạm vi tùy biến c
 
 ---
 
-### 2. Kiến trúc 6 Plugin Apache-2.0 (`@latticedx/*`) & Thành phần Hạ tầng
+### 2. Kiến trúc 7 Plugin Apache-2.0 (`@latticedx/*`) & Hệ điều hành 6 Phân hệ
 
 | Thành phần / Package | Phiên bản | Giấy phép | Phạm vi trách nhiệm đã hoàn thiện |
 | --- | :---: | :---: | --- |
@@ -36,8 +36,9 @@ Tài liệu này tổng hợp kiến trúc kỹ thuật, phạm vi tùy biến c
 | `@latticedx/plugin-lattice-foundation` | `0.25.1` | `Apache-2.0` | Collections lõi (`latticeDepartments`, `latticeEmployees`, `latticeLocations`, `latticeAssets`, `latticeRequests`, `latticeOrders`, `latticeIncidentCases`, `latticeIncidentRules`, `latticeAgentProposals`, `latticePortals`), 7 vai trò `ldx_*`, Multi-Portal Manager (`/admin/settings/multi-portal`), portal động `/p/<slug>`, NGSI-LD Outbox & UC2 `agent-run`. |
 | `@latticedx/plugin-enterprise-auth` | `0.1.0` | `Apache-2.0` | Đăng nhập doanh nghiệp Keycloak OIDC + PKCE S256 (`/admin/settings/auth/authenticators`), ánh xạ tài khoản rõ ràng tại `/admin/settings/auth/enterprise-mappings`, không tự tạo tài khoản/cấp quyền khi login. |
 | `@latticedx/plugin-dxos-para` | `0.1.0` | `Apache-2.0` | Không gian tri thức **P.A.R.A.** trên `latticeParaDocuments` (`uiManageable: true`), cô lập `organizationId`/`ownerId`, ACL 7 vai trò và API `GET /api/latticePara:summary`. |
-| `@latticedx/plugin-dxos-blocks` | `0.1.0` | `Apache-2.0` | 6 Native v2 `BlockModel` đăng ký thẳng vào nút **`Add block`** của UI Editor (`dxosBlockSettings`) + 2 API scoped (`dxosBlocks:proposals`, `dxosBlocks:contextTelemetry`). |
-| `@latticedx/plugin-dxos-studio` | `0.1.0` | `Apache-2.0` | Màn hình **`/admin/settings/dxos-studio`**: cài 1-nhấp 4 workflow Poka-yoke (`procurement`, `logistics-5step`, `incident-uc2`, `internal-service`), dựng trang tổng quan đa-block idempotent (`dxosStudio:composePortals`), giám sát 6 plugin, collection `latticeServiceTickets` (`uiManageable: true`). |
+| `@latticedx/plugin-dxos-blocks` | `0.1.0` | `Apache-2.0` | 6 Native v2 `BlockModel` đăng ký thẳng vào nút **`Add block`** của UI Editor (`dxosBlockSettings`), **Dynamic Copilot Strip** theo role & portal + 2 API scoped (`dxosBlocks:proposals`, `dxosBlocks:contextTelemetry`). |
+| `@latticedx/plugin-dxos-studio` | `0.1.0` | `Apache-2.0` | Màn hình **`/admin/settings/dxos-studio`**: cài 1-nhấp 4 workflow Poka-yoke (`procurement`, `logistics-5step`, `incident-uc2`, `internal-service`), dựng trang tổng quan đa-block idempotent (`dxosStudio:composePortals`), giám sát 7 plugin, collection `latticeServiceTickets` (`uiManageable: true`). |
+| `@latticedx/plugin-dxos-ai` | `0.1.0` | `Apache-2.0` | Màn hình **`/admin/settings/dxos-ai`**: 4 tab (Bản đồ 6 Phân hệ Enterprise OS, Nhân sự AI động `latticeAiProfiles` đồng bộ 2 chiều, Cổng Streamable HTTP MCP 2 chiều `/api/dxos-mcp` & `/api/dxos-mcp/it-ot`, Nhật ký Kiểm toán `latticeAiAuditLogs`) + **8 Unified Tools** (5 Admin Builder khóa root/admin + 3 Operational/Workflow Copilot). |
 | Dịch vụ đồng hành & OCI Compose | — | Đa dạng (`NOTICE`) | `apps/api` (Fastify), `apps/agent-worker`, `apps/web` (Next.js), `@dx/contracts`, `PostgreSQL 16.13`, `Keycloak 26.8.0`, `APISIX 3.19.0`, `FIWARE Orion-LD 1.10.0` + `MongoDB 4.4.29`, `n8n 2.42.7`, `ClamAV 1.4.3` (mọi image trong `infra/compose/*.yml` đều khóa digest `@sha256:`). |
 
 ---
@@ -76,20 +77,21 @@ Toàn bộ các kiểm tra tự động sau được thực thi trực tiếp tr
 - **Docker Desktop / Docker Compose v2+** (Linux containers / context `desktop-linux` trên Windows)
 - *(Tùy chọn cho AI Agent & IT/OT)*: Local LLM gateway tương thích OpenAI (ví dụ `9router` chạy tại cổng `20128`), FIWARE Orion-LD (`1026`), n8n (`5678`) theo cấu hình Compose của repo.
 
-### 2. Cài đặt Mã nguồn, Build 6 Plugin & Chạy Kiểm thử Offline
+### 2. Cài đặt Mã nguồn, Build 7 Plugin & Chạy Kiểm thử Offline
 
 ```sh
 git clone https://github.com/CTU-OpenPaw/lattice-dx.git
 cd lattice-dx
 pnpm install --frozen-lockfile
 
-# Build toàn bộ 6 plugin NocoBase Apache-2.0
+# Build toàn bộ 7 plugin NocoBase Apache-2.0
 node plugins/nocobase/action-bridge/build.mjs
 node plugins/nocobase/plugin-lattice-foundation/scripts/build.mjs
 node plugins/nocobase/plugin-enterprise-auth/build.mjs
 node plugins/nocobase/plugin-dxos-para/build.mjs
 node plugins/nocobase/plugin-dxos-blocks/build.mjs
 node plugins/nocobase/plugin-dxos-studio/build.mjs
+node plugins/nocobase/plugin-dxos-ai/build.mjs
 
 # Chạy bộ kiểm thử đơn vị plugin + script + monorepo + kiểm toán PoF
 node --test plugins/nocobase/*/tests/*.test.cjs scripts/tests/*.test.mjs
@@ -120,8 +122,8 @@ node scripts/setup-native-workspace-demo.mjs "output/native-clean/<id>/report.js
 
 ### 4. Hướng dẫn Cấu hình & Tùy biến Nghiệp vụ trên Giao diện
 
-1. **Kiểm tra 6 Plugin & Cấu hình Hệ thống:**
-   - Truy cập `/admin/settings/plugin-manager`, gõ `latticedx` để kiểm tra đủ 6 module Apache-2.0.
+1. **Kiểm tra 7 Plugin & Cấu hình Hệ thống:**
+   - Truy cập `/admin/settings/plugin-manager`, gõ `latticedx` để kiểm tra đủ 7 module Apache-2.0, và truy cập `/admin/settings/dxos-ai` để điều phối 6 phân hệ & lực lượng nhân sự AI động.
    - Mở `/admin/settings/system-settings` để xem/chỉnh tiêu đề hệ thống và ngôn ngữ (`Tiếng Việt (vi-VN)` / `English (en-US)`). Chân trang vận hành tại `/admin/lattice-workspace` và `/p/*` luôn giữ attribution `Powered by NocoBase`.
 2. **Tạo Cột Động & Thiết lập RBAC theo Cột / Keycloak SSO:**
    - **Thêm trường dữ liệu động:** Vào `Data sources -> Main -> latticeRequests -> Configure fields -> + Add field -> Single line text` (ví dụ nhãn `Ghi chú phê duyệt`, mã `approvalNote`, `Submit`).

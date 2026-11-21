@@ -38,6 +38,7 @@ services:
       DX_NATIVE_AUTH_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
       DX_NATIVE_AUTH_ORIGIN: http://localhost:13001
       DX_NATIVE_AUTH_CLIENT_ID: dx-native-rehearsal
+      NOCOBASE_INTERNAL_URL: http://127.0.0.1
     volumes:
       - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
       - ../../plugins/nocobase/plugin-lattice-foundation:/app/nocobase/node_modules/@latticedx/plugin-lattice-foundation:ro
@@ -45,6 +46,7 @@ services:
       - ../../plugins/nocobase/plugin-dxos-para:/app/nocobase/node_modules/@latticedx/plugin-dxos-para:ro
       - ../../plugins/nocobase/plugin-dxos-blocks:/app/nocobase/node_modules/@latticedx/plugin-dxos-blocks:ro
       - ../../plugins/nocobase/plugin-dxos-studio:/app/nocobase/node_modules/@latticedx/plugin-dxos-studio:ro
+      - ../../plugins/nocobase/plugin-dxos-ai:/app/nocobase/node_modules/@latticedx/plugin-dxos-ai:ro
     ports:
       - "127.0.0.1:13001:80"
     depends_on:

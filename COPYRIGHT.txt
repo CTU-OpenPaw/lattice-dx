@@ -25,8 +25,9 @@ Name                                | Version | License    | Purpose | Path
 @latticedx/plugin-lattice-foundation| 0.25.1  | Apache-2.0 | Core ERP collections, 7 roles, Multi-Portal UI | plugins/nocobase/plugin-lattice-foundation
 @latticedx/plugin-enterprise-auth   | 0.1.0   | Apache-2.0 | Keycloak OIDC + PKCE enterprise authentication | plugins/nocobase/plugin-enterprise-auth
 @latticedx/plugin-dxos-para         | 0.1.0   | Apache-2.0 | [H] P.A.R.A. knowledge space (latticeParaDocuments) | plugins/nocobase/plugin-dxos-para
-@latticedx/plugin-dxos-blocks       | 0.1.0   | Apache-2.0 | [H][P][D][I] 6 configurable Native v2 BlockModels | plugins/nocobase/plugin-dxos-blocks
+@latticedx/plugin-dxos-blocks       | 0.1.0   | Apache-2.0 | [H][P][D][I] 6 configurable Native v2 BlockModels + Dynamic Copilot | plugins/nocobase/plugin-dxos-blocks
 @latticedx/plugin-dxos-studio       | 0.1.0   | Apache-2.0 | [P][H][D] DX-OS Admin Studio, 4 Poka-yoke workflows, Service Tickets | plugins/nocobase/plugin-dxos-studio
+@latticedx/plugin-dxos-ai           | 0.1.0   | Apache-2.0 | [I][P][D][H] Admin-configurable AI Workforce, Admin Builder, 6-Plane Topology, 2-Way MCP | plugins/nocobase/plugin-dxos-ai
 
 ================================================================================
 Third-Party Dependencies, Host Runtime & External OCI Services

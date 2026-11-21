@@ -12,18 +12,19 @@ Tài liệu này hướng dẫn Giám khảo / Quản trị viên tự kiểm ch
 
 ---
 
-## Phút 0–3: Cài sạch hoàn toàn & Kiến trúc 6 Plugin Open-Core
+## Phút 0–3: Cài sạch hoàn toàn & Kiến trúc 7 Plugin Open-Core (6 Phân hệ DX-OS)
 
-1. Bảo đảm Docker Desktop đã khởi động, sau đó dựng một môi trường NocoBase trắng (0 bảng ban đầu) cùng toàn bộ **6 plugin Apache-2.0**:
+1. Bảo đảm Docker Desktop đã khởi động, sau đó dựng một môi trường NocoBase trắng (0 bảng ban đầu) cùng toàn bộ **7 plugin Apache-2.0**:
    ```sh
    pnpm native:clean --port=13014
    ```
-2. Nạp 4 Cổng nghiệp vụ đa vai trò (Mua sắm, Sự cố IoT, Logistics, Dịch vụ Nội bộ & P.A.R.A.), trang Tổng quan Đa-Block và dữ liệu mẫu ban đầu:
+2. Nạp 4 Cổng nghiệp vụ đa vai trò (Mua sắm, Sự cố IoT, Logistics, Dịch vụ Nội bộ & P.A.R.A.), trang Tổng quan Đa-Block, dữ liệu mẫu và bộ 5 Starter AI Workforce + 2-Way IT/OT MCP:
    ```sh
    node scripts/setup-native-multi-portal-demo.mjs "<path-to-report.json>"
    node scripts/setup-native-workspace-demo.mjs "<path-to-report.json>"
+   pnpm setup:dxos-ai -- --origin=http://localhost:13014
    ```
-3. Mở trình duyệt tại `http://localhost:13014`, đăng nhập quản trị (`admin@nocobase.com` / `admin123`) và truy cập `/admin/pm/list` để kiểm tra đủ 6 plugin `@latticedx/*` đang bật (`@latticedx/plugin-action-bridge`, `@latticedx/plugin-lattice-foundation`, `@latticedx/plugin-enterprise-auth`, `@latticedx/plugin-dxos-para`, `@latticedx/plugin-dxos-blocks`, `@latticedx/plugin-dxos-studio`).
+3. Mở trình duyệt tại `http://localhost:13014`, đăng nhập quản trị (`admin@nocobase.com` / `admin123`) và truy cập `/admin/pm/list` để kiểm tra đủ 7 plugin `@latticedx/*` đang bật (`@latticedx/plugin-action-bridge`, `@latticedx/plugin-lattice-foundation`, `@latticedx/plugin-enterprise-auth`, `@latticedx/plugin-dxos-para`, `@latticedx/plugin-dxos-blocks`, `@latticedx/plugin-dxos-studio`, `@latticedx/plugin-dxos-ai`).
 4. Kiểm tra chân trang giữ nguyên nhận diện **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.38`, `License settings`).
 
 ---
@@ -37,8 +38,9 @@ Tài liệu này hướng dẫn Giám khảo / Quản trị viên tự kiểm ch
    - Bấm lại lần nữa để kiểm chứng tính idempotent (`Quy trình "..." đã tồn tại`), rồi bấm **`Mở Workflow Designer`** để xem đồ thị node nối tiếp `upstreamNode -> downstreamId` trong trình thiết kế Workflow native của NocoBase.
 3. Tại tab **`2. Dựng cổng đa-block`**:
    - Bấm **`Dựng Cổng Đa-Block ngay`** để bảo đảm 4 cổng (`/p/procurement`, `/p/incidents`, `/p/logistics`, `/p/services`) đều có trang Tổng quan kết hợp các Block tùy biến mà không ghi đè trang đã chỉnh tay.
-4. Tại tab **`3. Hệ sinh thái 6 Plugin`** và **`4. Sẵn sàng PoF & Hệ thống`**:
-   - Quan sát trạng thái 6 plugin, chỉ số thực tế (`Portals đang quản lý`, `Workflow native`, `Tài liệu P.A.R.A.`, `Phiếu dịch vụ nội bộ`) và đường dẫn tới Plugin Manager (`/admin/pm/list`).
+4. Tại tab **`3. Hệ sinh thái 7 Plugin`** và **`4. Sẵn sàng PoF & Hệ thống`**:
+   - Quan sát trạng thái 7 plugin, chỉ số thực tế (`Portals đang quản lý`, `Workflow native`, `Tài liệu P.A.R.A.`, `Phiếu dịch vụ nội bộ`, `AI Workforce`, `Audit logs`) và đường dẫn tới **`/admin/settings/dxos-ai`** (**AI Workforce & 6-Plane Center**) hoặc Plugin Manager (`/admin/pm/list`).
+5. Mở **`/admin/settings/dxos-ai`**: kiểm tra **Bản đồ 6 Phân hệ Enterprise OS** (Keycloak SSO, Orion-LD Digital Twin, n8n Bus, Portals + P.A.R.A., AI Workforce + `/api/dxos-mcp`, NocoBase `2.2.38` Plane #6), thử tạo/nhân bản 1 AI Employee động và bật chip **Trợ lý AI ngữ cảnh** ngay trên `/p/services`.
 
 ---
 

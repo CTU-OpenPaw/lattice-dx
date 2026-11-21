@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installWorkspace, parsePluginList } from '../scripts/install-workspace.mjs';
 
-const directories = ['action-bridge', 'plugin-lattice-foundation', 'plugin-enterprise-auth', 'plugin-dxos-para', 'plugin-dxos-blocks', 'plugin-dxos-studio'];
+const directories = ['action-bridge', 'plugin-lattice-foundation', 'plugin-enterprise-auth', 'plugin-dxos-para', 'plugin-dxos-blocks', 'plugin-dxos-studio', 'plugin-dxos-ai'];
 const names = [
   '@latticedx/plugin-action-bridge',
   '@latticedx/plugin-lattice-foundation',
@@ -20,6 +20,7 @@ const names = [
   '@latticedx/plugin-dxos-para',
   '@latticedx/plugin-dxos-blocks',
   '@latticedx/plugin-dxos-studio',
+  '@latticedx/plugin-dxos-ai',
 ];
 const versions = await Promise.all(directories.map(async directory =>
   JSON.parse(await readFile(new URL(`../plugins/nocobase/${directory}/package.json`, import.meta.url), 'utf8')).version as string));
@@ -83,12 +84,12 @@ describe('workspace installer', () => {
     const restore = f.calls.find(c => c.args.includes('ci'));
     expect(restore?.args).toEqual(expect.arrayContaining(['--prefix', 'plugins/nocobase/plugin-enterprise-auth', '--ignore-scripts']));
     expect(f.calls.indexOf(restore!)).toBeLessThan(f.calls.findIndex(c => c.args.includes('up')));
-    expect(packs).toHaveLength(6);
+    expect(packs).toHaveLength(7);
     for (const pack of packs) {
       expect(pack.args).toEqual(expect.arrayContaining(['--offline', '--ignore-scripts', '--pack-destination']));
       expect(pack.options.timeout).toBe(30000);
     }
-    expect(f.calls.filter(c => c.args.includes('add'))).toHaveLength(6);
+    expect(f.calls.filter(c => c.args.includes('add'))).toHaveLength(7);
   });
   it('rejects unbounded or malformed plugin JSON', () => {
     expect(() => parsePluginList('SECRET []')).toThrow();
@@ -112,7 +113,7 @@ describe('workspace installer', () => {
       return '';
     };
     const result=await installWorkspace({sourceRoot,backupDir,composeArgs,run,health:async()=>true});
-    expect(Object.values(result.versions)).toEqual(['9.8.7','9.8.7','9.8.7','9.8.7','9.8.7','9.8.7']);
+    expect(Object.values(result.versions)).toEqual(['9.8.7','9.8.7','9.8.7','9.8.7','9.8.7','9.8.7','9.8.7']);
     for(const call of calls){
       expect(call.options.cwd).toBe(sourceRoot);
       if(call.file==='docker')expect(call.args.slice(0,composeArgs.length)).toEqual(composeArgs);

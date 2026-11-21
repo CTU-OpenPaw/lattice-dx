@@ -86,6 +86,7 @@ export async function nativeCleanInstall({run=defaultRun,port=13004,onProgress=(
       { directory: 'plugin-lattice-foundation', pkg: '@latticedx/plugin-lattice-foundation' },
       { directory: 'plugin-dxos-para', pkg: '@latticedx/plugin-dxos-para' },
       { directory: 'plugin-dxos-studio', pkg: '@latticedx/plugin-dxos-studio' },
+      { directory: 'plugin-dxos-ai', pkg: '@latticedx/plugin-dxos-ai' },
     ];
     const expected = [];
     for (const item of migrationPlugins) {
@@ -109,7 +110,7 @@ export async function nativeCleanInstall({run=defaultRun,port=13004,onProgress=(
     report.pageUrl = plan.origin + ui.path;
     report.fixtureAccounts = ui.accounts.map(({ email, role }) => ({ email, role }));
     report.packages = [];
-    for (const directory of ['action-bridge', 'plugin-lattice-foundation', 'plugin-enterprise-auth', 'plugin-dxos-para', 'plugin-dxos-blocks', 'plugin-dxos-studio']) {
+    for (const directory of ['action-bridge', 'plugin-lattice-foundation', 'plugin-enterprise-auth', 'plugin-dxos-para', 'plugin-dxos-blocks', 'plugin-dxos-studio', 'plugin-dxos-ai']) {
       const metadata = JSON.parse(await readFile(join(plan.sourceRoot, 'plugins/nocobase', directory, 'package.json'), 'utf8'));
       report.packages.push({ name: metadata.name, version: metadata.version, license: metadata.license });
     }

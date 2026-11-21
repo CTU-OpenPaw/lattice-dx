@@ -25,4 +25,4 @@ jobs:
       - name: Verify OSS PoF readiness
         run: pnpm pof:check
       - name: Verify NocoBase plugin contracts and script tests
-        run: node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs plugins/nocobase/plugin-enterprise-auth/tests/*.test.cjs plugins/nocobase/plugin-dxos-para/tests/*.test.cjs plugins/nocobase/plugin-dxos-blocks/tests/*.test.cjs plugins/nocobase/plugin-dxos-studio/tests/*.test.cjs scripts/tests/*.test.mjs
+        run: node --test plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/action-bridge/tests/*.test.cjs plugins/nocobase/plugin-enterprise-auth/tests/*.test.cjs plugins/nocobase/plugin-dxos-para/tests/*.test.cjs plugins/nocobase/plugin-dxos-blocks/tests/*.test.cjs plugins/nocobase/plugin-dxos-studio/tests/*.test.cjs plugins/nocobase/plugin-dxos-ai/tests/*.test.cjs scripts/tests/*.test.mjs

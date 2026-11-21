@@ -42,6 +42,7 @@ services:
       DX_NATIVE_AUTH_CLIENT_ID: dx-native
       DX_NATIVE_CONTEXT_BROKER_URL: http://orion-ld:1026
       DX_NATIVE_CONTEXT_AUTO_SYNC: "true"
+      NOCOBASE_INTERNAL_URL: http://127.0.0.1
     volumes:
       - nocobase-storage:/app/nocobase/storage
       - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
@@ -50,6 +51,7 @@ services:
       - ../../plugins/nocobase/plugin-dxos-para:/app/nocobase/node_modules/@latticedx/plugin-dxos-para:ro
       - ../../plugins/nocobase/plugin-dxos-blocks:/app/nocobase/node_modules/@latticedx/plugin-dxos-blocks:ro
       - ../../plugins/nocobase/plugin-dxos-studio:/app/nocobase/node_modules/@latticedx/plugin-dxos-studio:ro
+      - ../../plugins/nocobase/plugin-dxos-ai:/app/nocobase/node_modules/@latticedx/plugin-dxos-ai:ro
     ports:
       - "127.0.0.1:13000:80"
     depends_on:

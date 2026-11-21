@@ -65,6 +65,8 @@
     "backup:rehearse-stack": "node scripts/stack-recovery.mjs rehearse",
     "test:native-recovery": "node scripts/acceptance-native-recovery.mjs",
     "acceptance:logistics-rbac": "node scripts/acceptance-logistics-and-rbac.mjs",
+    "setup:dxos-ai": "node scripts/setup-dxos-ai-workforce.mjs",
+    "acceptance:dxos-ai-mcp": "node scripts/acceptance-dxos-ai-and-mcp.mjs",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "backup:full": "node scripts/full-backup-core.mjs backup",
     "backup:rehearse-full": "node scripts/full-backup-core.mjs rehearse",

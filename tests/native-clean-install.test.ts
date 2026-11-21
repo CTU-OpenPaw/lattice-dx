@@ -13,12 +13,13 @@ import {cleanInstallPlan,assertUnusedCleanProject,assertEmptyNativeDatabase,nati
 
 async function orchestratorFixture(count='0'){
   const calls:{file:string,args:string[],options:any}[]=[];
-  const directories=['action-bridge','plugin-lattice-foundation','plugin-enterprise-auth','plugin-dxos-para','plugin-dxos-blocks','plugin-dxos-studio'];
-  const names=['@latticedx/plugin-action-bridge','@latticedx/plugin-lattice-foundation','@latticedx/plugin-enterprise-auth','@latticedx/plugin-dxos-para','@latticedx/plugin-dxos-blocks','@latticedx/plugin-dxos-studio'];
+  const directories=['action-bridge','plugin-lattice-foundation','plugin-enterprise-auth','plugin-dxos-para','plugin-dxos-blocks','plugin-dxos-studio','plugin-dxos-ai'];
+  const names=['@latticedx/plugin-action-bridge','@latticedx/plugin-lattice-foundation','@latticedx/plugin-enterprise-auth','@latticedx/plugin-dxos-para','@latticedx/plugin-dxos-blocks','@latticedx/plugin-dxos-studio','@latticedx/plugin-dxos-ai'];
   const migrations=[
     { pkg:'@latticedx/plugin-lattice-foundation', dir:'plugin-lattice-foundation', name:'20261107000100-shared-upload-receipts/@latticedx/plugin-lattice-foundation' },
     { pkg:'@latticedx/plugin-dxos-para', dir:'plugin-dxos-para', name:'20261120000100-dxos-para-init/@latticedx/plugin-dxos-para' },
     { pkg:'@latticedx/plugin-dxos-studio', dir:'plugin-dxos-studio', name:'20261120000200-dxos-service-tickets/@latticedx/plugin-dxos-studio' },
+    { pkg:'@latticedx/plugin-dxos-ai', dir:'plugin-dxos-ai', name:'20261121000100-dxos-ai-workforce/@latticedx/plugin-dxos-ai' },
   ];
   const run=async(file:string,args:string[],options:any)=>{
     calls.push({file,args,options});
@@ -85,7 +86,7 @@ describe('clean native installation boundaries',()=>{
     try{
       const result=await nativeCleanInstall({run:f.run});
       expect(result.complete).toBe(true);expect(result.fullSystemAcceptance).toBe(false);
-      expect(result.packages).toHaveLength(6);
+      expect(result.packages).toHaveLength(7);
       for(const call of f.calls.filter(call=>call.file==='docker'))expect(call.args.slice(0,2)).toEqual(['--context','desktop-linux']);
       const setup=f.calls.find(call=>call.args[0]==='scripts/setup-native-ui-lab.mjs')!;
       expect(setup.options.env.DOCKER_CONTEXT).toBe('desktop-linux');
