@@ -85,6 +85,17 @@ function buildProfileDraftFromStarter(profile = {}) {
   };
 }
 
+function parseModelSelection(rawValue) {
+  const str = String(rawValue || '');
+  const idx = str.indexOf(':');
+  if (idx < 0) {
+    return { llmService: str.trim() || 'local-9router', modelName: 'ag/gemini-3.8-flash' };
+  }
+  const llmService = str.slice(0, idx).trim() || 'local-9router';
+  const modelName = str.slice(idx + 1).trim() || 'ag/gemini-3.8-flash';
+  return { llmService, modelName };
+}
+
 function toggleArrayItem(arr, item) {
   const list = Array.isArray(arr) ? arr : [];
   return list.includes(item) ? list.filter((x) => x !== item) : [...list, item];
@@ -117,14 +128,17 @@ function createDxosAiStudioPage(client, React, _antd, app) {
 
   return function DxosAiStudioPage() {
     const api = useApi();
+    const uiPerms = typeof client?.useUIConfigurationPermissions === 'function' ? client.useUIConfigurationPermissions() : null;
+    const clientDenied = Boolean(uiPerms && uiPerms.allowAll === false && uiPerms.allowConfigUI === false);
     const [tab, setTab] = React.useState('topology');
-    const [loading, setLoading] = React.useState(true);
+    const [loading, setLoading] = React.useState(!clientDenied);
+    const [forbidden, setForbidden] = React.useState(clientDenied);
     const [busy, setBusy] = React.useState(false);
     const [notice, setNotice] = React.useState(null);
     const [profiles, setProfiles] = React.useState([]);
     const [catalog, setCatalog] = React.useState({
       availableTools: DEFAULT_TOOL_NAMES,
-      adminBuilderTools: DEFAULT_TOOL_NAMES.slice(0, 7),
+      adminBuilderTools: DEFAULT_TOOL_NAMES.slice(0, 11),
       roleOptions: DEFAULT_ROLE_OPTIONS,
     });
     const [topology, setTopology] = React.useState(null);
@@ -147,22 +161,23 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     };
 
     const loadAll = React.useCallback(async () => {
-      if (!api?.request) {
+      if (clientDenied || !api?.request) {
         setLoading(false);
         return;
       }
       setLoading(true);
       try {
-        const [pRes, tRes, aRes] = await Promise.allSettled([
-          api.request({ url: 'dxosAi:listProfiles', method: 'get' }),
+        // Probe single admin endpoint first so non-admins do not fire multiple parallel 403 errors
+        const pRes = await api.request({ url: 'dxosAi:listProfiles', method: 'get', skipNotify: true });
+        setForbidden(false);
+        const pData = pRes?.data?.data || pRes?.data || {};
+        if (Array.isArray(pData.profiles)) setProfiles(pData.profiles);
+        if (pData.catalog) setCatalog(pData.catalog);
+
+        const [tRes, aRes] = await Promise.allSettled([
           api.request({ url: 'dxosAi:enterpriseTopology', method: 'get' }),
           api.request({ url: 'dxosAi:auditLogs', method: 'get', params: { pageSize: 40 } }),
         ]);
-        if (pRes.status === 'fulfilled') {
-          const data = pRes.value?.data?.data || pRes.value?.data || {};
-          if (Array.isArray(data.profiles)) setProfiles(data.profiles);
-          if (data.catalog) setCatalog(data.catalog);
-        }
         if (tRes.status === 'fulfilled') {
           setTopology(tRes.value?.data?.data || tRes.value?.data || null);
         }
@@ -171,11 +186,16 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           setAuditItems(Array.isArray(data.items) ? data.items : []);
         }
       } catch (err) {
-        setNotice({ type: 'error', text: err?.message || 'Không tải được dữ liệu DX-OS AI Studio.' });
+        const status = Number(err?.response?.status ?? err?.status);
+        if (status === 403 || status === 401) {
+          setForbidden(true);
+        } else {
+          setNotice({ type: 'error', text: err?.message || 'Không tải được dữ liệu DX-OS AI Studio.' });
+        }
       } finally {
         setLoading(false);
       }
-    }, [api]);
+    }, [api, clientDenied]);
 
     React.useEffect(() => {
       loadAll();
@@ -255,6 +275,16 @@ function createDxosAiStudioPage(client, React, _antd, app) {
 
     const availableTools = Array.isArray(catalog?.availableTools) ? catalog.availableTools : DEFAULT_TOOL_NAMES;
     const roleOptions = Array.isArray(catalog?.roleOptions) ? catalog.roleOptions : DEFAULT_ROLE_OPTIONS;
+
+    if (forbidden) {
+      return h('div', {
+        'data-testid': 'dxos-ai-studio-forbidden',
+        style: { padding: 24, maxWidth: 720, margin: '24px auto', borderRadius: 12, border: '1px solid #fecaca', background: '#fef2f2', color: '#991b1b' },
+      },
+        h('h2', { style: { margin: '0 0 8px', fontSize: 18 } }, '403 — Chỉ Quản trị viên mới truy cập được DX-OS AI Studio'),
+        h('p', { style: { margin: 0, fontSize: 13 } }, 'Tài khoản hiện tại không có quyền quản trị nhân sự AI và cổng Enterprise MCP.'),
+      );
+    }
 
     return h('div', {
       'data-testid': 'dxos-ai-studio-page',
@@ -350,8 +380,8 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               h('input', { value: draft.position, onChange: (e) => setDraft({ ...draft, position: e.target.value }), style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
             h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'LLM Service / Model',
               h('input', { value: `${draft.llmService}:${draft.modelName}`, onChange: (e) => {
-                const [llmService, modelName] = String(e.target.value || '').split(':');
-                setDraft({ ...draft, llmService: llmService || 'local-9router', modelName: modelName || 'ag/gemini-3.8-flash' });
+                const { llmService, modelName } = parseModelSelection(e.target.value);
+                setDraft({ ...draft, llmService, modelName });
               }, style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
           ),
           h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'SOP & System Prompt',
@@ -445,4 +475,5 @@ module.exports = {
   buildProfileDraftFromStarter,
   createEmptyProfileDraft,
   parseToolModeMap,
+  parseModelSelection,
 };

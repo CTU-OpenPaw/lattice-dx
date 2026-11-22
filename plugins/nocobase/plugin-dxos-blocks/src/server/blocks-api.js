@@ -95,6 +95,21 @@ async function resolveCallerContext(db, ctx, { collection, action = 'view' }) {
   return { isRoot: false, actor };
 }
 
+const OWN_SCOPED_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
+const ORG_WIDE_PROPOSAL_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_dispatcher']);
+
+function isRecordOwnedByActor(row, actor) {
+  const empId = actor?.employeeId;
+  const userId = actor?.userId;
+  return [
+    [val(row, 'requesterId'), empId],
+    [val(row, 'assigneeId'), empId],
+    [val(row, 'driverId'), empId],
+    [val(row, 'ownerId'), empId],
+    [val(row, 'createdById'), userId],
+  ].some(([a, b]) => a != null && b != null && Number(a) === Number(b));
+}
+
 function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT_BROKER_URL, fetchImpl = fetch } = {}) {
   const brokerOrigin = normalizeBrokerOrigin(brokerUrl);
 
@@ -108,6 +123,8 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       }
 
       const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection: targetCollection, action: 'view' });
+      const activeRole = String(ctx.state?.currentRole || '').trim();
+      const enforceOwnScope = !isRoot && OWN_SCOPED_COLLECTIONS.has(targetCollection) && !ORG_WIDE_PROPOSAL_ROLES.has(activeRole);
 
       const state = String(input.state || 'all').trim();
       if (!PROPOSAL_STATES.has(state)) throw fail('DXOS_INVALID_PROPOSAL_STATE', 400);
@@ -121,6 +138,9 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
             filter: { id: targetRecordId, organizationId: actor.organizationId },
           });
           if (!targetRow) throw fail('DXOS_RECORD_NOT_FOUND', 404);
+          if (enforceOwnScope && !isRecordOwnedByActor(targetRow, actor)) {
+            throw fail('DXOS_ACL_DENIED', 403);
+          }
         }
       }
 
@@ -144,8 +164,25 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         ...(targetRecordId !== undefined ? { targetRecordId } : {}),
         ...(state !== 'all' ? { state } : {}),
       };
-      const rows = await repo.find({ filter, limit: pageSize, sort: ['-id'] });
-      const total = typeof repo.count === 'function' ? await repo.count({ filter }) : rows.length;
+      let rows = await repo.find({ filter, limit: enforceOwnScope ? 100 : pageSize, sort: ['-id'] });
+      rows = Array.isArray(rows) ? rows : [];
+      let total = typeof repo.count === 'function' && !enforceOwnScope ? await repo.count({ filter }) : rows.length;
+      if (enforceOwnScope && rows.length) {
+        const recordIds = [...new Set(rows.map((r) => val(r, 'targetRecordId')).filter((id) => id != null))];
+        const targetRepo = db.getRepository(targetCollection);
+        if (!targetRepo || !recordIds.length) {
+          rows = [];
+        } else {
+          const ownedRows = (await targetRepo.find({
+            filter: { id: { $in: recordIds }, organizationId: actor.organizationId },
+            limit: recordIds.length,
+          })) || [];
+          const ownedIds = new Set(ownedRows.filter((r) => isRecordOwnedByActor(r, actor)).map((r) => String(val(r, 'id'))));
+          rows = rows.filter((r) => ownedIds.has(String(val(r, 'targetRecordId'))));
+        }
+        total = rows.length;
+        rows = rows.slice(0, pageSize);
+      }
       ctx.body = {
         items: (Array.isArray(rows) ? rows : []).map((row) => ({
           id: val(row, 'id'),
@@ -223,6 +260,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
       const outboxRepo = db.getRepository('latticeContextOutbox');
       const syncSummary = { pending: 0, retry: 0, delivered: 0, failed: 0, lastDeliveredAt: null };
+      let lastDeliveredTs = -Infinity;
       const targetOrg = asset?.organizationId || requestedOrg;
       if (outboxRepo && (targetOrg || isRoot)) {
         const outboxFilter = {
@@ -234,7 +272,9 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
           const st = val(row, 'state');
           if (Object.hasOwn(syncSummary, st)) syncSummary[st] += 1;
           const del = val(row, 'deliveredAt');
-          if (del && (!syncSummary.lastDeliveredAt || String(del) > String(syncSummary.lastDeliveredAt))) {
+          const ts = del ? Date.parse(String(del)) : NaN;
+          if (del && ((Number.isFinite(ts) && ts > lastDeliveredTs) || (!Number.isFinite(lastDeliveredTs) && !syncSummary.lastDeliveredAt))) {
+            if (Number.isFinite(ts)) lastDeliveredTs = ts;
             syncSummary.lastDeliveredAt = del;
           }
         }

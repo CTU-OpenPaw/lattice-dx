@@ -110,60 +110,6 @@ function createBlockRenderers(client, React, antd, app) {
       actionsJson: DEFAULT_HERO_ACTIONS,
     }, liveConfig);
     const actions = filterHeroActions(cfg.actionsJson, perms);
-    const portalSlug = typeof window !== 'undefined' && window.location ? inferPortalSlugFromLocation(window.location.pathname) : '';
-    const isAdmin = Boolean(perms?.allowAll || perms?.allowConfigUI);
-
-    // Silent Live Canvas Sync: detect surface revisions from AI chat/MCP tools & refresh mounted blocks or grid layout
-    React.useEffect(() => {
-      if (!api?.request || !portalSlug || typeof setInterval !== 'function') return;
-      let cancelled = false;
-      let baseRev = null;
-      let baseSignature = null;
-      let pendingGridReload = false;
-      const poll = async () => {
-        const drawerOpen = typeof document !== 'undefined' && Boolean(
-          document.querySelector('.ant-drawer-open, [role="dialog"] .ant-sender-input'),
-        );
-        if (pendingGridReload && !drawerOpen && typeof window !== 'undefined' && window.location?.reload) {
-          pendingGridReload = false;
-          window.location.reload();
-          return;
-        }
-        const st = await fetchPageSurfaceState(api, { portalSlug });
-        if (cancelled || !st || typeof st.revision !== 'number') return;
-        const sig = `${st.blockCount ?? 0}:${st.layoutSignature || ''}`;
-        if (baseRev === null) {
-          baseRev = st.revision;
-          baseSignature = sig;
-          return;
-        }
-        if (st.revision > baseRev) {
-          baseRev = st.revision;
-          if (isAdmin) {
-            const inspected = await fetchInspectPageBlocks(api, { portalSlug });
-            for (const m of activeModels) {
-              const matched = inspected.blocks.find((b) => m?.uid && b.uid === m.uid);
-              if (matched?.props && typeof m.setProps === 'function') {
-                m.setProps(matched.props);
-                notifyModelListeners(m);
-              }
-            }
-          }
-          if (sig !== baseSignature) {
-            baseSignature = sig;
-            if (drawerOpen) {
-              pendingGridReload = true;
-            } else if (typeof window !== 'undefined' && window.location?.reload) {
-              setTimeout(() => { if (!cancelled) window.location.reload(); }, 650);
-            }
-          }
-        }
-      };
-      poll();
-      const timer = setInterval(poll, 2600);
-      return () => { cancelled = true; clearInterval(timer); };
-    }, [api, portalSlug, isAdmin]);
-
     const accent = /^#[0-9a-fA-F]{3,8}$/.test(String(cfg.accentColor || '')) ? cfg.accentColor : '#1677ff';
     return h('section', {
       'data-testid': 'dxos-portal-hero-block',

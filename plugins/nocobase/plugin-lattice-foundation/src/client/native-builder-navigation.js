@@ -150,7 +150,8 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
     const { pathname } = router.useLocation();
     const api = useApi();
     const navigate = useNav();
-    const [portals, setPortals] = React.useState([]);
+    const [portals, setPortals] = React.useState(null);
+    const portalList = Array.isArray(portals) ? portals : [];
     const desiredSettings = React.useRef('keep');
     const syncing = React.useRef(Promise.resolve());
     const configMode = /^\/admin\/settings(?:\/|$)/.test(pathname);
@@ -190,6 +191,7 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
     React.useEffect(() => {
       portalManager?.setPermissions?.(Boolean(allowConfigUI));
       if (!api || typeof api.request !== 'function') {
+        setPortals([]);
         if (!allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
         return;
       }
@@ -205,7 +207,9 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
           if (dest !== pathname) goPortal(dest, navigate, { replace: true });
         }
       }).catch(() => {
-        if (active && !allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
+        if (!active) return;
+        setPortals([]);
+        if (!allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
       });
       return () => { active = false; };
     }, [api, api?.auth?.role, allowConfigUI, isAdminRoot, pathname, navigate]);
@@ -213,9 +217,43 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
     if (!allowConfigUI && isAdminRoot) return redirectNotice();
 
     const ShellModel = isPortalModel(model) ? V2Model : NativeModel;
-    const nativeShell = ShellModel.prototype.render.call(model);
+    const portalMatch = /^\/p\/([^/?#]+)/.exec(pathname);
+    const activeAccessiblePortal = portalMatch ? portalList.find(p => p.routePath === '/p/' + portalMatch[1] && p.firstPagePath) : null;
+    const isEmptyEmployeePortal = Boolean(portals !== null && !allowConfigUI && portalMatch && !activeAccessiblePortal);
+    const emptyPortalCard = isEmptyEmployeePortal ? h('div', {
+      'data-testid': 'ldx-empty-portal-fallback',
+      style: {
+        maxWidth: 680, margin: '48px auto', padding: 28, borderRadius: 12,
+        background: '#ffffff', border: '1px solid #e2e8f0', boxShadow: '0 4px 16px rgba(15,23,42,0.06)',
+        display: 'grid', gap: 12,
+      },
+    },
+      h('h2', { style: { margin: 0, fontSize: 18, color: '#0f172a' } }, 'Không gian này hiện chưa có trang làm việc cho vai trò của bạn'),
+      h('p', { style: { margin: 0, fontSize: 13, color: '#475569' } },
+        'Các phân hệ nghiệp vụ được hiển thị theo quyền hạn của tài khoản hiện tại. Vui lòng chọn cổng làm việc được cấp quyền bên dưới.'),
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 } },
+        portalList.filter(p => p?.firstPagePath).map(p => h('button', {
+          key: p.uid || p.routePath,
+          type: 'button',
+          onClick: () => goPortal(p.firstPagePath, navigate),
+          style: {
+            padding: '7px 14px', borderRadius: 8, border: '1px solid #1677ff',
+            background: '#eff6ff', color: '#1d4ed8', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+          },
+        }, p.title || p.routePath)),
+        h('button', {
+          type: 'button',
+          onClick: () => goPortal(WORKSPACE_PATH, navigate),
+          style: {
+            padding: '7px 14px', borderRadius: 8, border: '1px solid #cbd5e1',
+            background: '#ffffff', color: '#334155', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+          },
+        }, 'Về Không gian việc của tôi'),
+      ),
+    ) : null;
+    const nativeShell = emptyPortalCard || ShellModel.prototype.render.call(model);
     const switcher = !portalManager?.hasTopbarSwitcher && !configMode && portalManager?.PortalBar
-      ? h(portalManager.PortalBar, { portals, currentLayoutUid: model?.layout?.uid, pathname, allowConfigUI, onSwitch: dest => goPortal(dest, navigate) })
+      ? h(portalManager.PortalBar, { portals: portalList, currentLayoutUid: model?.layout?.uid, pathname, allowConfigUI, onSwitch: dest => goPortal(dest, navigate) })
       : null;
     const attribution = configMode ? null : h('footer', {
       className: 'ldx-clause52-attribution', 'aria-label': 'NocoBase attribution',

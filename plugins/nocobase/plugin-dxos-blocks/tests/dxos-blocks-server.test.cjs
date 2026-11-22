@@ -195,3 +195,69 @@ test('dxosBlocks:contextTelemetry enforces org boundary, sanitizes outbox, and d
   assert.equal(liveCtx.body.brokerStatus, 'online');
   assert.equal(liveCtx.body.telemetry.temperature.value, -18.4);
 });
+
+test('dxosBlocks:proposals enforces caller ownScope for non-managers and contextTelemetry compares deliveredAt via Date.parse', async () => {
+  const { createDxosBlocksActions } = require(path.join(PLUGIN_ROOT, 'src/server/blocks-api.js'));
+  const db = makeDb({
+    employees: [
+      { id: 10, userId: 201, organizationId: 'org-a', active: true },
+      { id: 11, userId: 202, organizationId: 'org-a', active: true },
+    ],
+    orders: [
+      { id: 30, code: 'ORD-OWN', organizationId: 'org-a', requesterId: 10 },
+      { id: 31, code: 'ORD-PEER', organizationId: 'org-a', requesterId: 11 },
+    ],
+    proposals: [
+      { id: 501, targetCollection: 'latticeOrders', targetRecordId: 30, organizationId: 'org-a', state: 'proposed', recommendation: 'My order' },
+      { id: 502, targetCollection: 'latticeOrders', targetRecordId: 31, organizationId: 'org-a', state: 'proposed', recommendation: 'Peer order' },
+    ],
+    assets: [{ id: 4, code: 'COLD-01', name: 'Kho lạnh 01', organizationId: 'org-a', status: 'active' }],
+    outbox: [
+      { id: 1, organizationId: 'org-a', collectionName: 'latticeAssets', recordId: 4, state: 'delivered', deliveredAt: '2026-11-20T16:00:00+07:00' }, // 09:00Z
+      { id: 2, organizationId: 'org-a', collectionName: 'latticeAssets', recordId: 4, state: 'delivered', deliveredAt: '2026-11-20T10:00:00Z' }, // 10:00Z (chronologically newer!)
+    ],
+  });
+
+  // Add latticeOrders repo to makeDb-backed mock
+  const origGetRepo = db.getRepository.bind(db);
+  const orderRows = [{ id: 30, organizationId: 'org-a', requesterId: 10 }, { id: 31, organizationId: 'org-a', requesterId: 11 }];
+  db.getRepository = (n) => (n === 'latticeOrders'
+    ? {
+      find: async ({ filter = {} } = {}) => orderRows.filter((r) => !filter.id || (Array.isArray(filter.id?.$in) ? filter.id.$in.includes(r.id) : r.id === filter.id)),
+      findOne: async ({ filter = {} } = {}) => orderRows.find((r) => (!filter.id || Number(r.id) === Number(filter.id)) && (!filter.organizationId || r.organizationId === filter.organizationId)) || null,
+    }
+    : origGetRepo(n));
+
+  const actions = createDxosBlocksActions(db, { brokerUrl: '', fetchImpl: async () => { throw new Error('offline'); } });
+
+  // Non-manager employee sees only proposals targeting own record (id 501 -> targetRecordId 30), NOT peer order (502 -> 31)
+  const empCtx = {
+    method: 'POST',
+    state: { currentRole: 'ldx_employee', currentUser: { id: 201 } },
+    can: () => ({}),
+    action: { params: { values: { targetCollection: 'latticeOrders', state: 'all' } } },
+  };
+  await actions.proposals(empCtx, async () => {});
+  assert.deepEqual(empCtx.body.items.map((i) => i.id), [501]);
+
+  // Passing peer's targetRecordId directly as ldx_employee denied 403
+  await assert.rejects(
+    () => actions.proposals({
+      method: 'POST',
+      state: { currentRole: 'ldx_employee', currentUser: { id: 201 } },
+      can: () => ({}),
+      action: { params: { values: { targetCollection: 'latticeOrders', targetRecordId: 31 } } },
+    }, async () => {}),
+    (err) => err.status === 403,
+  );
+
+  // contextTelemetry sorts deliveredAt numerically (10:00Z > 09:00Z / 16:00+07:00)
+  const telCtx = {
+    method: 'GET',
+    state: { currentRole: 'ldx_manager', currentUser: { id: 201 } },
+    can: () => ({}),
+    action: { params: { assetId: 4 } },
+  };
+  await actions.contextTelemetry(telCtx, async () => {});
+  assert.equal(telCtx.body.syncSummary.lastDeliveredAt, '2026-11-20T10:00:00Z');
+});

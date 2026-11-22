@@ -210,6 +210,23 @@ function navigateApp(app, path) {
   else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(path) || path);
 }
 
+function normalizeTelemetryRows(payload) {
+  if (!payload || typeof payload !== 'object') return [];
+  if (Array.isArray(payload.sensors)) return payload.sensors;
+  if (payload.telemetry && typeof payload.telemetry === 'object' && !Array.isArray(payload.telemetry)) {
+    const flat = {
+      ...(payload.asset && typeof payload.asset === 'object' ? payload.asset : {}),
+      brokerStatus: payload.brokerStatus || 'unknown',
+    };
+    for (const [k, rawVal] of Object.entries(payload.telemetry)) {
+      flat[k] = rawVal && typeof rawVal === 'object' && Object.hasOwn(rawVal, 'value') ? rawVal.value : rawVal;
+    }
+    return [flat];
+  }
+  if (payload.latest) return [payload.latest];
+  return payload.asset ? [{ ...payload.asset, brokerStatus: payload.brokerStatus || 'unknown' }] : [];
+}
+
 function createCreativeStudioView(client, React, _antd, app, { subscribeModelConfig } = {}) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
@@ -234,8 +251,8 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
         try {
           if (q.kind === 'telemetry') {
             const res = await api.request({ url: 'dxosBlocks:contextTelemetry', method: 'post', data: {} });
-            const telemetry = res?.data?.data || res?.data || {};
-            results[q.id] = Array.isArray(telemetry.sensors) ? telemetry.sensors : (telemetry.latest ? [telemetry.latest] : []);
+            const payload = res?.data?.data || res?.data || {};
+            results[q.id] = normalizeTelemetryRows(payload);
           } else if (q.kind === 'tasks') {
             const res = await api.request({ url: 'workflowManualTasks:listMine', method: 'get', params: { pageSize: q.limit, sort: ['-id'] } });
             results[q.id] = Array.isArray(res?.data?.data) ? res.data.data : [];
@@ -290,9 +307,11 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
         const valNum = resolveWidgetValue(w, queryState.results);
         const min = Number.isFinite(Number(w.min)) ? Number(w.min) : 0;
         const max = Number.isFinite(Number(w.max)) && Number(w.max) > min ? Number(w.max) : Math.max(min + 1, 100);
-        const pct = valNum == null ? 0 : Math.max(0, Math.min(100, Math.round(((Number(valNum) - min) / (max - min)) * 100)));
-        const isCritical = w.criticalThreshold !== undefined && Number(valNum) >= Number(w.criticalThreshold);
-        const isWarn = !isCritical && w.warningThreshold !== undefined && Number(valNum) >= Number(w.warningThreshold);
+        const numericVal = valNum === null || valNum === undefined || valNum === '' ? NaN : Number(valNum);
+        const hasNumeric = Number.isFinite(numericVal);
+        const pct = hasNumeric ? Math.max(0, Math.min(100, Math.round(((numericVal - min) / (max - min)) * 100))) : 0;
+        const isCritical = hasNumeric && w.criticalThreshold !== undefined && numericVal >= Number(w.criticalThreshold);
+        const isWarn = hasNumeric && !isCritical && w.warningThreshold !== undefined && numericVal >= Number(w.warningThreshold);
         const barColor = isCritical ? '#ef4444' : isWarn ? '#f59e0b' : palette.accent;
         return h('div', { key: idx, style: cardStyle },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 12, color: palette.mutedColor, marginBottom: 6 } },
@@ -300,7 +319,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
             isCritical || isWarn ? h('span', { style: { fontWeight: 700, color: barColor } }, isCritical ? 'NGUY CẤP' : 'CẢNH BÁO') : null,
           ),
           h('div', { style: { fontSize: 26, fontWeight: 800, color: barColor, marginBottom: 8 } },
-            valNum === null || valNum === undefined ? '—' : `${typeof valNum === 'number' ? Number(valNum.toFixed(1)) : valNum}${w.unit ? ` ${w.unit}` : ''}`),
+            valNum === null || valNum === undefined ? '—' : `${hasNumeric ? Number(numericVal.toFixed(1)) : String(valNum)}${w.unit ? ` ${w.unit}` : ''}`),
           h('div', { style: { height: 8, borderRadius: 999, background: '#33415533', overflow: 'hidden' } },
             h('div', { style: { width: `${pct}%`, height: '100%', background: barColor, borderRadius: 999 } })),
         );
@@ -413,6 +432,7 @@ module.exports = {
   CREATIVE_THEMES,
   DEFAULT_CREATIVE_BLUEPRINT,
   parseCreativeBlueprint,
+  normalizeTelemetryRows,
   evaluateQueryStats,
   evaluateRuleCondition,
   createCreativeStudioView,

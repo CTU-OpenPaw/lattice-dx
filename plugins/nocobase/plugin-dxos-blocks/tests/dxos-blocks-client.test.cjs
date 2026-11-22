@@ -291,3 +291,41 @@ test('DxosPortalHeroView renders clean page header with zero inline AI strips or
   assert.equal(testIds.includes('dxos-picker-toggle-btn'), false);
   assert.equal(testIds.includes('dxos-rollback-page-btn'), false);
 });
+
+test('DxosPortalHeroBlockModel does not register a redundant 2600ms pageSurfaceState polling loop', () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const intervals = [];
+  const effects = [];
+  const origSetInterval = global.setInterval;
+  const origWindow = global.window;
+  global.setInterval = (fn, ms) => { intervals.push(ms); return 999; };
+  global.window = { location: { pathname: '/p/services', reload: () => {} } };
+  const ReactWithEffects = {
+    ...React,
+    useEffect: (fn) => { effects.push(fn); },
+  };
+  class MockBlockModel {
+    constructor(opts = {}) { this.props = opts.props || {}; this.stepParams = opts.stepParams || {}; }
+    getStepParams() { return {}; }
+    static define() {}
+    static registerFlow() {}
+  }
+  try {
+    const models = registerDxosBlockModels(
+      { useAPIClient: () => ({ request: async () => ({ data: { data: { revision: 1 } } }) }), useUIConfigurationPermissions: () => ({ allowAll: false }) },
+      ReactWithEffects,
+      {},
+      { BlockModel: MockBlockModel },
+      { registerModels() {} },
+      {},
+    );
+    const hero = new models.DxosPortalHeroBlockModel({ props: { title: 'Test' } });
+    const el = hero.renderComponent();
+    el.type(el.props);
+    for (const fx of effects) fx();
+    assert.equal(intervals.includes(2600), false, 'Duplicate 2600ms polling loop must be removed from block-models.js');
+  } finally {
+    global.setInterval = origSetInterval;
+    global.window = origWindow;
+  }
+});

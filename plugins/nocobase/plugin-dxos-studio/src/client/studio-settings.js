@@ -39,10 +39,10 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       if (!api?.request) { setLoading(false); return; }
       setLoading(true);
       try {
-        const [tmplRes, empRes, readyRes] = await Promise.all([
-          api.request({ url: 'dxosStudio:listTemplates', method: 'get' }),
-          api.request({ url: 'dxosStudio:listEmployees', method: 'get' }),
-          api.request({ url: 'dxosStudio:readiness', method: 'get' }),
+        const tmplRes = await api.request({ url: 'dxosStudio:listTemplates', method: 'get', skipNotify: true });
+        const [empRes, readyRes] = await Promise.all([
+          api.request({ url: 'dxosStudio:listEmployees', method: 'get', skipNotify: true }),
+          api.request({ url: 'dxosStudio:readiness', method: 'get', skipNotify: true }),
         ]);
         const tList = tmplRes?.data?.data?.items || [];
         const eData = empRes?.data?.data || {};

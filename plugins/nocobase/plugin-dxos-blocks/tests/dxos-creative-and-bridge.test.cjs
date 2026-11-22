@@ -232,3 +232,42 @@ test('canvas-architect-bridge restricts Admin bar to admins, formats target bloc
   assert.equal((await requestPageRollback(mockApi, { portalSlug: 'cold-qa' })).rolledBack, true);
   assert.equal(calls.length, 3);
 });
+
+test('creative-studio-block normalizes dxosBlocks:contextTelemetry payload and prevents NaN% width on non-numeric values', async () => {
+  const {
+    createCreativeStudioView,
+    normalizeTelemetryRows,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/creative-studio-block.js'));
+
+  assert.equal(typeof normalizeTelemetryRows, 'function');
+  const normalized = normalizeTelemetryRows({
+    asset: { id: 4, code: 'COLD-01', name: 'Kho lạnh A1' },
+    brokerStatus: 'online',
+    telemetry: {
+      temperature: { type: 'Property', value: -18.6, unitCode: 'CEL' },
+      humidity: { type: 'Property', value: 72 },
+    },
+  });
+  assert.equal(normalized.length, 1);
+  assert.equal(normalized[0].temperature, -18.6);
+  assert.equal(normalized[0].humidity, 72);
+  assert.equal(normalized[0].code, 'COLD-01');
+  assert.equal(normalized[0].brokerStatus, 'online');
+
+  const React = makeReactHarness();
+  const View = createCreativeStudioView({ useAPIClient: () => null }, React, {}, {});
+  const tree = View({
+    model: {
+      props: {
+        title: 'NaN Guard Test',
+        theme: 'industrial-cockpit',
+        columns: 2,
+        queries: [],
+        widgets: [
+          { type: 'gauge', title: 'Invalid metric', staticValue: 'N/A', min: 0, max: 100 },
+        ],
+      },
+    },
+  });
+  assert.equal(JSON.stringify(tree).includes('NaN%'), false);
+});
