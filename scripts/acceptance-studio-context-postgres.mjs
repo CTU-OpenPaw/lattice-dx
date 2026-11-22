@@ -9,6 +9,7 @@
 // Explicit opt-in acceptance: all fixture writes occur in a newly created, disposable database.
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 
 const source=String.raw`
 import assert from 'node:assert/strict';
@@ -102,7 +103,7 @@ try {
 `;
 
 try {
- const output=execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','node','--import','tsx','--input-type=module'],{cwd:fileURLToPath(new URL('../',import.meta.url)),input:source,encoding:'utf8',stdio:['pipe','pipe','pipe'],timeout:120000});
+ const output=execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','node','--import','tsx','--input-type=module'],{cwd:fileURLToPath(new URL('../',import.meta.url)),input:source,encoding:'utf8',stdio:['pipe','pipe','pipe'],timeout:120000});
  console.log(output.trim());
 } catch {
  // Raw driver/CLI output can contain a connection URL or serialized private row.

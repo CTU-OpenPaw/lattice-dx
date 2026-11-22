@@ -11,6 +11,7 @@ import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installWorkspace, parsePluginList } from '../scripts/install-workspace.mjs';
+import { dockerContextArgs } from '../scripts/lib/docker-context.mjs';
 
 const directories = ['action-bridge', 'plugin-lattice-foundation', 'plugin-enterprise-auth', 'plugin-dxos-para', 'plugin-dxos-blocks', 'plugin-dxos-studio', 'plugin-dxos-ai'];
 const names = [
@@ -72,12 +73,13 @@ describe('workspace installer', () => {
     expect(metadata).toMatchObject({ restoreRehearsed: false, size: 19 });
     expect(metadata.sha256).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(result)).not.toContain('SECRET');
+    const expectedPrefix = [...dockerContextArgs(), 'compose', '-f', 'infra/compose/nocobase.yml'];
     for (const c of f.calls) {
       expect(c.options.timeout).toBeGreaterThan(0);
       expect(c.options.shell).not.toBe(true);
       expect(c.args).not.toEqual(expect.arrayContaining(['down']));
       expect(c.args.join(' ')).not.toMatch(/--volumes|--remove-orphans|\brm\b|password/i);
-      if (c.file === 'docker') expect(c.args.slice(0, 5)).toEqual(['--context', 'desktop-linux', 'compose', '-f', 'infra/compose/nocobase.yml']);
+      if (c.file === 'docker') expect(c.args.slice(0, expectedPrefix.length)).toEqual(expectedPrefix);
     }
     expect(f.calls.find(c => c.args.includes('up'))?.args.slice(-5)).toEqual(['up', '-d', '--no-deps', '--force-recreate', 'nocobase']);
     const packs = f.calls.filter(c => c.args.includes('pack'));

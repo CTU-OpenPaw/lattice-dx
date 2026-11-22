@@ -12,10 +12,11 @@ import {mkdirSync,writeFileSync,readFileSync} from 'node:fs';
 import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {assertBackupPath,assertRegularBackup,assertRestoreTarget,verifyBackup,runRestoreFixture} from './lib/backup-policy.mjs';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 const backupRoot=join(root,'output','backups');
-const dockerPrefix=['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','postgres'];
+const dockerPrefix=[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','postgres'];
 export function postgres(args,input){
  return execFileSync('docker',[...dockerPrefix,...args],{cwd:root,input,timeout:120000,maxBuffer:256*1024*1024,stdio:['pipe','pipe','pipe']});
 }

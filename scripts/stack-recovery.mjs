@@ -25,6 +25,7 @@ import {
   maxBackupBytes,
   runRestoreFixture,
 } from './lib/backup-policy.mjs';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 import { backupNative, rehearseNative } from './native-database-recovery.mjs';
 
 const REPO_ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -66,7 +67,7 @@ function assertContainerName(value, label) {
 function dockerExec(container, args, input) {
   assertContainerName(container, 'docker container');
   try {
-    return execFileSync('docker', ['--context', 'desktop-linux', 'exec', '-i', container, ...args], {
+    return execFileSync('docker', [...dockerContextArgs(), 'exec', '-i', container, ...args], {
       cwd: REPO_ROOT,
       input,
       timeout: 180000,

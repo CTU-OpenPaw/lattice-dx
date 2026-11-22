@@ -11,12 +11,13 @@ import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve,dirname,basename} from 'node:path';
 import {createRequire} from 'node:module';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const require=createRequire(import.meta.url),esbuild=createRequire(require.resolve('tsx/package.json'))('esbuild');
 const directory=mkdtempSync(join(tmpdir(),'ngsi-acceptance-'));
 try{
  const bundle=join(directory,'fixture.cjs');
  esbuild.buildSync({entryPoints:['scripts/ngsi-ld-integration-acceptance.ts'],bundle:true,platform:'node',format:'cjs',external:['pg','fastify','jose'],outfile:bundle,logLevel:'silent'});
- console.log(execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','node'],{input:readFileSync(bundle),encoding:'utf8',timeout:120000,maxBuffer:4*1024*1024}).trim());
+ console.log(execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','node'],{input:readFileSync(bundle),encoding:'utf8',timeout:120000,maxBuffer:4*1024*1024}).trim());
 }finally{
  const target=resolve(directory);if(dirname(target)!==resolve(tmpdir())||!basename(target).startsWith('ngsi-acceptance-'))throw Error('Unsafe temporary bundle directory');
  rmSync(target,{recursive:true,force:true});

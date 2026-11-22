@@ -12,6 +12,7 @@ import {mkdirSync,writeFileSync,readFileSync,lstatSync,realpathSync} from 'node:
 import {resolve,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {assertBackupPath,assertRegularBackup,assertRestoreTarget,verifyBackup,runRestoreFixture,maxBackupBytes} from './lib/backup-policy.mjs';
+import {dockerContextArgs} from './lib/docker-context.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 const backupRoot=join(root,'output/backups/native');
@@ -47,7 +48,7 @@ export function compareNativeInventory(expected,actual){
 export function nativePostgres(args,input){
   const container=process.env.NATIVE_DATABASE_CONTAINER??'lattice-dx-nocobase-db-1';
   if(!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,100}$/.test(container))throw Error('Invalid database container');
-  try{return execFileSync('docker',['--context','desktop-linux','exec','-i',container,...args],
+  try{return execFileSync('docker',[...dockerContextArgs(),'exec','-i',container,...args],
     {cwd:root,input,timeout:120000,maxBuffer:maxBackupBytes,windowsHide:true,stdio:['pipe','pipe','pipe']});}
   catch{throw Error('Native database command failed; command output withheld');}
 }

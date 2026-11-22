@@ -13,8 +13,9 @@ import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {parseEnv} from 'node:util';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url)),actors={};
-const docker=['--context','desktop-linux','compose','-f',resolve(root,'infra/compose/core.yml'),'exec','-T','-w','/app/apps/api','api','node'];
+const docker=[...dockerContextArgs(), 'compose','-f',resolve(root,'infra/compose/core.yml'),'exec','-T','-w','/app/apps/api','api','node'];
 function sqlRead(query,params=[]){
  const source=`const {Pool}=require('pg');const p=new Pool({connectionString:process.env.DATABASE_URL});p.query(${JSON.stringify(query)},${JSON.stringify(params)}).then(r=>process.stdout.write(JSON.stringify(r.rows))).catch(()=>{process.exitCode=1}).finally(()=>p.end());`;
  return JSON.parse(execFileSync('docker',docker,{cwd:root,input:source,windowsHide:true,stdio:['pipe','pipe','pipe'],encoding:'utf8',timeout:15000,maxBuffer:4*1024*1024}));

@@ -11,6 +11,7 @@ import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve,dirname,basename} from 'node:path';
 import {createRequire} from 'node:module';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const require=createRequire(import.meta.url),esbuild=createRequire(require.resolve('tsx/package.json'))('esbuild');
 const directory=mkdtempSync(join(tmpdir(),'incident-acceptance-'));
 try{
@@ -21,7 +22,7 @@ try{
  // Credentials travel over stdin only, never CLI arguments, logs, or container files.
  const prefix=live?`process.env.LIVE_AGENT_CONFIG=${JSON.stringify(JSON.stringify({baseUrl:process.env.AGENT_BASE_URL,apiKey:process.env.AGENT_API_KEY,model:'combo'}))};\n`:'';
  try{
-  const result=execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','node'],{input:Buffer.concat([Buffer.from(prefix),readFileSync(bundle)]),encoding:'utf8',timeout:120000,maxBuffer:4*1024*1024,stdio:['pipe','pipe','pipe']});
+  const result=execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','node'],{input:Buffer.concat([Buffer.from(prefix),readFileSync(bundle)]),encoding:'utf8',timeout:120000,maxBuffer:4*1024*1024,stdio:['pipe','pipe','pipe']});
   console.log(result.trim());
  }catch(error){if(live)throw Error('Live worker acceptance failed; credentials and raw subprocess output suppressed');throw error;}
 }finally{

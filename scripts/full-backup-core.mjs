@@ -14,6 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {backup,postgres,sql} from './backup-core.mjs';
 import {assertRestoreTarget,verifyBackup,runRestoreFixture} from './lib/backup-policy.mjs';
 import {validateObjectInventory,validateFullManifest,verifyObjectBytes,compareObjectInventories,maxObjectManifestBytes} from './lib/object-backup-policy.mjs';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url)),backupRoot=join(root,'output','backups');
 const normalize=value=>process.platform==='win32'?value.toLowerCase():value;
 function artifactDirectory(value){
@@ -43,7 +44,7 @@ function restoredInventory(target){
  if(Buffer.byteLength(value)>maxObjectManifestBytes)throw new Error('Object inventory exceeds bound.');return validateObjectInventory(JSON.parse(value));
 }
 function apiSource(source,input){
- return execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{cwd:root,input,timeout:30000,maxBuffer:2*1024*1024,stdio:['pipe','pipe','pipe']});
+ return execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{cwd:root,input,timeout:30000,maxBuffer:2*1024*1024,stdio:['pipe','pipe','pipe']});
 }
 function readCurrentObject(entry){
  const source=`import {createFilesystemStore} from './src/files/filesystem-store.ts';(async()=>{if(!process.env.FILE_STORAGE_ROOT)throw new Error('Object store is not configured');const store=await createFilesystemStore(process.env.FILE_STORAGE_ROOT);process.stdout.write(await store.readVerified(${JSON.stringify({provider:'filesystem',objectKey:entry.objectKey,size:entry.size,sha256:entry.sha256})}));})().catch(()=>{console.error('Object source unavailable');process.exitCode=1;});`;

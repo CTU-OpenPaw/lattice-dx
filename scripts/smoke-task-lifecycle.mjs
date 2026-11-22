@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 const actors={};
@@ -130,5 +131,5 @@ import {taskLifecycleDatabase} from './src/tasks/database.ts';
  }finally{await pool?.end();if(!/^task_smoke_[a-f0-9]{32}$/.test(schema))throw new Error('Unsafe schema');await control.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await control.end();}
 })().catch(error=>{console.error(error);process.exitCode=1;});
 `;
-console.log(execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',sqlSource],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim());
+console.log(execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',sqlSource],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim());
 console.log(JSON.stringify({result:'Task lifecycle HTTP passed',taskId:task.id,recordId:record.id}));
