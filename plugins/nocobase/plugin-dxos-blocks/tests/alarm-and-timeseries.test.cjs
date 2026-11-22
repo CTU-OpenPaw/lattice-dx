@@ -989,11 +989,12 @@ test('dxosBlocks:telemetryIngest fails closed 401 when unauthenticated/unset tok
     getRepository(name) {
       if (name === 'latticeTelemetryPoints') {
         const now = Date.now();
+        const bucketBase = Math.floor((now - 15 * 60_000) / 3600_000) * 3600_000;
         return {
           find: async () => [
             { id: 1, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -18, unit: 'CEL', observedAt: new Date(now - 5 * 3600_000).toISOString() },
-            { id: 2, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -14, unit: 'CEL', observedAt: new Date(now - 10 * 60_000).toISOString() },
-            { id: 3, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -12, unit: 'CEL', observedAt: new Date(now - 5 * 60_000).toISOString() },
+            { id: 2, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -14, unit: 'CEL', observedAt: new Date(bucketBase + 10 * 60_000).toISOString() },
+            { id: 3, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -12, unit: 'CEL', observedAt: new Date(bucketBase + 12 * 60_000).toISOString() },
           ],
         };
       }

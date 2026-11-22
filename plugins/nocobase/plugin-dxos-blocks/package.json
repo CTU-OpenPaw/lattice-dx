@@ -1,6 +1,6 @@
 {
   "name": "@latticedx/plugin-dxos-blocks",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "commonjs",
@@ -14,7 +14,7 @@
   },
   "nocobase": {
     "supportedVersions": ["2.2.x"],
-    "testedRuntime": "2.2.38",
+    "testedRuntime": "2.2.50",
     "sdkProvidedByHost": true
   }
 }

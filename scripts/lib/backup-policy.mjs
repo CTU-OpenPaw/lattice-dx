@@ -10,12 +10,13 @@ import { createHash } from 'node:crypto';
 import { resolve, relative, basename, isAbsolute, dirname } from 'node:path';
 import {
   closeSync,
+  constants,
+  fstatSync,
   lstatSync,
   openSync,
   readSync,
   realpathSync,
   rmSync,
-  statSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 
@@ -118,8 +119,13 @@ export function runRestoreFixture(database, create, work, drop) {
 }
 
 export function readFileHead(filePath, length = 16) {
-  const fd = openSync(filePath, 'r');
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+  const fd = openSync(filePath, flags);
   try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new Error('Refusing to read header of non-regular file');
+    }
     const buf = Buffer.alloc(length);
     const bytesRead = readSync(fd, buf, 0, length, 0);
     return buf.subarray(0, bytesRead);
@@ -129,16 +135,17 @@ export function readFileHead(filePath, length = 16) {
 }
 
 export function sha256File(filePath, { maxBytes = resolveMaxStreamingBackupBytes() } = {}) {
-  const st = lstatSync(filePath);
-  if (!st.isFile() || st.isSymbolicLink() || st.size > maxBytes) {
-    throw new Error('Streaming artifact failed file or size check');
-  }
-  const hash = createHash('sha256');
-  const chunkSize = 1024 * 1024;
-  const buf = Buffer.allocUnsafe(chunkSize);
-  let total = 0;
-  const fd = openSync(filePath, 'r');
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+  const fd = openSync(filePath, flags);
   try {
+    const st = fstatSync(fd);
+    if (!st.isFile() || st.size > maxBytes) {
+      throw new Error('Streaming artifact failed file or size check');
+    }
+    const hash = createHash('sha256');
+    const chunkSize = 1024 * 1024;
+    const buf = Buffer.allocUnsafe(chunkSize);
+    let total = 0;
     let n;
     while ((n = readSync(fd, buf, 0, chunkSize, null)) > 0) {
       total += n;
@@ -147,10 +154,10 @@ export function sha256File(filePath, { maxBytes = resolveMaxStreamingBackupBytes
       }
       hash.update(n === chunkSize ? buf : buf.subarray(0, n));
     }
+    return { sha256: hash.digest('hex'), bytes: total };
   } finally {
     closeSync(fd);
   }
-  return { sha256: hash.digest('hex'), bytes: total };
 }
 
 export function streamDockerToFile(
@@ -174,12 +181,16 @@ export function streamDockerToFile(
     rmSync(outputPath, { force: true });
     throw new Error('Docker streaming export failed; output withheld');
   }
-  const st = statSync(outputPath);
-  if (st.size < 1 || st.size > maxBytes) {
+  try {
+    const digest = sha256File(outputPath, { maxBytes });
+    if (digest.bytes < 1) {
+      throw new Error('Exported artifact is empty or exceeds streaming byte limit');
+    }
+    return digest;
+  } catch (error) {
     rmSync(outputPath, { force: true });
-    throw new Error('Exported artifact is empty or exceeds streaming byte limit');
+    throw error;
   }
-  return sha256File(outputPath, { maxBytes });
 }
 
 export function streamFileToDocker(
@@ -187,13 +198,14 @@ export function streamFileToDocker(
   dockerCliArgs,
   { cwd = process.cwd(), timeoutMs = 300000 } = {},
 ) {
-  const st = lstatSync(inputPath);
-  if (!st.isFile() || st.isSymbolicLink()) {
-    throw new Error('Refusing to stream non-regular file or symlink into Docker');
-  }
-  const fd = openSync(inputPath, 'r');
+  const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
+  const fd = openSync(inputPath, flags);
   let res;
   try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new Error('Refusing to stream non-regular file or symlink into Docker');
+    }
     res = spawnSync('docker', dockerCliArgs, {
       cwd,
       timeout: timeoutMs,

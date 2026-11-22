@@ -100,6 +100,7 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ../config/postgres/init-prod.sh:/docker-entrypoint-initdb.d/001-init-prod.sh:ro
       - ../config/postgres/pitr.conf:/etc/postgresql/pitr.conf:ro
+      - ../config/postgres/pitr-archive.sh:/etc/postgresql/pitr-archive.sh:ro
     networks:
       - data
     mem_limit: 1536m
@@ -141,6 +142,7 @@ services:
       - nocobase-db-data:/var/lib/postgresql/data
       - ../config/postgres/init-pgvector.sql:/docker-entrypoint-initdb.d/001-pgvector.sql:ro
       - ../config/postgres/pitr.conf:/etc/postgresql/pitr.conf:ro
+      - ../config/postgres/pitr-archive.sh:/etc/postgresql/pitr-archive.sh:ro
     networks:
       - data
     mem_limit: 2048m
@@ -283,26 +285,25 @@ services:
       retries: 30
       start_period: 120s
 
-  api:
+  file-scanner:
     <<: *hardened
     build:
       context: ../..
-      dockerfile: apps/api/Dockerfile
+      dockerfile: apps/file-scanner/Dockerfile
     read_only: true
     tmpfs:
       - /tmp
     environment:
-      API_HOST: 0.0.0.0
-      DATABASE_URL: postgres://lattice_app:${LATTICE_DB_PASSWORD:?Set LATTICE_DB_PASSWORD}@postgres:5432/lattice
-      DATABASE_POOL_MAX: "20"
-      OIDC_ISSUER: https://${KEYCLOAK_DOMAIN:?Set KEYCLOAK_DOMAIN}/realms/lattice
-      OIDC_JWKS_URL: http://keycloak:8080/realms/lattice/protocol/openid-connect/certs
-      OIDC_AUDIENCE: dx-api
+      FILE_SCANNER_HOST: 0.0.0.0
+      FILE_SCANNER_PORT: "4010"
       CLAMD_HOST: clamav
       DX_NATIVE_FILES_INSTANCE: ${DX_NATIVE_FILES_INSTANCE:?Set DX_NATIVE_FILES_INSTANCE}
       DX_NATIVE_FILES_SECRET: ${DX_NATIVE_FILES_SECRET:?Set DX_NATIVE_FILES_SECRET}
-      FILE_STORAGE_PROVIDER: ${FILE_STORAGE_PROVIDER:-filesystem}
+      FILE_STORAGE_PROVIDER: ${FILE_STORAGE_PROVIDER:-s3}
       FILE_STORAGE_ROOT: /var/lib/latticedx/objects
+      S3_ENDPOINT: http://rustfs:9000
+      S3_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:?Set RUSTFS_ACCESS_KEY}
+      S3_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:?Set RUSTFS_SECRET_KEY}
     volumes:
       - engine-objects:/var/lib/latticedx/objects
     networks:
@@ -310,35 +311,14 @@ services:
       - data
       - scanner
     depends_on:
-      postgres:
-        condition: service_healthy
       clamav:
         condition: service_healthy
-    mem_limit: 768m
-    cpus: "1.0"
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
-
-  agent-worker:
-    <<: *hardened
-    build:
-      context: ../..
-      dockerfile: apps/agent-worker/Dockerfile
-    read_only: true
-    tmpfs:
-      - /tmp
-    environment:
-      WORKER_HOST: 0.0.0.0
-      WORKER_PORT: "4001"
-    networks:
-      - app
-    mem_limit: 512m
+      rustfs:
+        condition: service_healthy
+    mem_limit: 256m
     cpus: "0.5"
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 20
@@ -358,8 +338,6 @@ services:
       - edge
       - app
     depends_on:
-      api:
-        condition: service_healthy
       keycloak:
         condition: service_healthy
       redis:
@@ -494,9 +472,12 @@ services:
       DX_NATIVE_AUTH_CLIENT_ID: dx-native
       DX_NATIVE_CONTEXT_BROKER_URL: http://orion-ld:1026
       DX_NATIVE_CONTEXT_AUTO_SYNC: "true"
-      DX_NATIVE_FILES_URL: http://api:4000
+      DX_NATIVE_FILES_URL: http://file-scanner:4010
       DX_NATIVE_FILES_INSTANCE: ${DX_NATIVE_FILES_INSTANCE:?Set DX_NATIVE_FILES_INSTANCE}
       DX_NATIVE_FILES_SECRET: ${DX_NATIVE_FILES_SECRET:?Set DX_NATIVE_FILES_SECRET}
+      DX_METRICS_TOKEN: ${DX_METRICS_TOKEN:?Set DX_METRICS_TOKEN}
+      DX_PG_RLS_SESSION: ${DX_PG_RLS_SESSION:-true}
+      DXOS_GOTENBERG_URL: ${DXOS_GOTENBERG_URL:-}
       S3_ENDPOINT: http://rustfs:9000
       S3_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:?Set RUSTFS_ACCESS_KEY}
       S3_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:?Set RUSTFS_SECRET_KEY}
@@ -521,7 +502,7 @@ services:
         condition: service_healthy
       keycloak:
         condition: service_healthy
-      api:
+      file-scanner:
         condition: service_healthy
     mem_limit: 2048m
     cpus: "2.0"
@@ -531,6 +512,77 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
+
+  otel-collector:
+    <<: *hardened
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector-contrib:0.123.0@sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2
+    read_only: true
+    tmpfs:
+      - /tmp
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ../config/otel/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      - app
+      - data
+    mem_limit: 512m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otelcol-contrib/config.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    <<: *hardened
+    profiles: ["observability"]
+    image: prom/prometheus:v3.3.0@sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1
+    read_only: true
+    tmpfs:
+      - /tmp:uid=65534,gid=65534,mode=0700,noexec,nosuid,size=16m
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        printf '%s' "$$DX_METRICS_TOKEN" > /tmp/dx_metrics_token
+        exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d
+    environment:
+      DX_METRICS_TOKEN: ${DX_METRICS_TOKEN:?Set DX_METRICS_TOKEN}
+    volumes:
+      - ../config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - app
+      - data
+    mem_limit: 512m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  gotenberg:
+    <<: *hardened
+    profiles: ["pdf"]
+    image: gotenberg/gotenberg:8.20.1@sha256:cda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,noexec,nosuid,size=256m
+      - /home/gotenberg:uid=1001,gid=1001,mode=0700,noexec,nosuid,size=256m
+    command: ["gotenberg", "--chromium-disable-javascript=true"]
+    networks:
+      - app
+    mem_limit: 768m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
 volumes:
   caddy-data:
@@ -544,3 +596,4 @@ volumes:
   engine-objects:
   orion-mongo-data:
   n8n-data:
+  prometheus-data:

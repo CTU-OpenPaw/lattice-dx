@@ -623,6 +623,13 @@ function createBuilderTools(deps) {
               // Non-fatal in mock test harnesses without physical SQL tables
             }
           }
+          if (typeof db?.attachLatticeRlsPolicy === 'function' && CUSTOM_COLLECTION_RE.test(args.collectionName)) {
+            try {
+              await db.attachLatticeRlsPolicy(args.collectionName);
+            } catch {
+              // Non-fatal in mock test harnesses without physical SQL tables
+            }
+          }
           return { created: true, collectionName: args.collectionName, fieldCount: normalizedFields.length, fields: normalizedFields.map((f) => f.name), indexes: createdIndexes };
         }
 
@@ -637,6 +644,17 @@ function createBuilderTools(deps) {
         const colInst = db.getCollection?.(args.collectionName);
         if (colInst && typeof colInst.sync === 'function') await colInst.sync({ force: false, alter: { drop: false } });
         else if (typeof db.sync === 'function') await db.sync();
+        if (
+          typeof db?.attachLatticeRlsPolicy === 'function' &&
+          CUSTOM_COLLECTION_RE.test(args.collectionName) &&
+          normalizedFields.some((f) => f.name === 'organizationId')
+        ) {
+          try {
+            await db.attachLatticeRlsPolicy(args.collectionName);
+          } catch {
+            // Non-fatal in mock test harnesses without physical SQL tables
+          }
+        }
         return { updated: true, collectionName: args.collectionName, addedFields: normalizedFields.map((f) => f.name) };
       },
     }),

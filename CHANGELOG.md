@@ -2,6 +2,25 @@
 
 Tài liệu ghi nhận lịch sử phát triển của **LatticeDX** (Apache-2.0), phục vụ kỳ thi OLP PMNM 2026 (VFOSSA).
 
+## [0.3.0] — 2026-11-22 — Nền tảng Doanh nghiệp Toàn diện, AI HITL, RAG Ngữ nghĩa & IIoT Chuẩn OSI
+
+- **Gói 1 — Hoàn thiện UX/UI Wave 5, Xuất PDF Unicode, Hạn mức AI Bền vững & Đồng bộ SSO 2 Chiều:**
+  - Nối hoàn chỉnh khung trao đổi **Record Chatter** (`chatter-panel.js`) với `@mention` nội bộ tổ chức và luồng vòng đời chứng từ bất biến (`Submit` / `Cancel` / `Amend` / `Lineage`) trên cổng nghiệp vụ.
+  - Mở rộng `dxosBlocks:exportReport` (`governed-export.js`) xuất PDF hỗ trợ đầy đủ Unicode tiếng Việt, vẫn giữ kiểm soát RBAC theo cột (`403 EXPORT_FIELDS_FORBIDDEN`) và chống công thức độc hại.
+  - Lưu bền vững hạn mức sử dụng AI theo ngày/tổ chức/người dùng trong PostgreSQL (`latticeAiQuotaUsage`, migration `20261123000100-ai-quota-buckets.js`) kèm giao diện quản trị trên `/admin/settings/dxos-ai`.
+  - Gia cố đồng bộ vai trò & nhóm 2 chiều Keycloak OIDC + PKCE trong `@latticedx/plugin-enterprise-auth` với cơ chế từ chối leo thang đặc quyền (`policy.js`).
+- **Gói 2 — Trung tâm Thông báo Chuông, SLA Engine, GitOps Bundle Đầy đủ & Cổng Di động `/mobile`:**
+  - Bổ sung bảng `latticeNotifications` và thành phần chuông thông báo thời gian thực (`notification-bell.js`) đẩy sự kiện qua SSE `PubSubManager`.
+  - Triển khai **SLA Engine** (`sla-engine.js`, bảng `latticeSlaPolicies`, migration `20261123000200-notifications-and-sla.js`) cảnh báo/leo thang tự động (`latticeSla:summary`, `policies`, `savePolicy`, `evaluateNow`) và ghi vết `sla_escalation` vào chatter.
+  - Nâng cấp **GitOps Solution Bundle** (`solution-bundle.js`) hỗ trợ áp dụng đầy đủ (`apply`), kiểm tra diff có cấu trúc và rollback an toàn; bổ sung cổng di động tối ưu thao tác trường (`/mobile`, `composeMobilePortal`).
+- **Gói 3 — Semantic Neural RAG, Trích xuất PDF/DOCX, Hàng chờ Duyệt AI HITL & IIoT Chuẩn OSI:**
+  - Bổ sung phân mảnh tài liệu & nhúng vector ngữ nghĩa (`latticeParaChunks`, `document-extractor.js` cho PDF/DOCX, migration `20261123000300-para-chunks-and-semantic-vector.js`) kết hợp `tsvector` + RRF + `pgvector` HNSW và lập chỉ mục lại `POST /api/latticePara:reindex`.
+  - Triển khai **Hàng chờ Phê duyệt Con người (AI HITL)** (`latticeAiApprovalQueue`, `ai-hitl.js`, migration `20261123000400-ai-hitl-approvals.js`) cho `dxos_execute_record_action` ở chế độ `ASK` / `requireApproval: true`, kèm API `dxosAi:listApprovals`, `approveAction`, `rejectAction`.
+  - Dựng hạ tầng IIoT thuần OSI (`infra/compose/iiot.yml`): **Eclipse Mosquitto 2.0.21 (`EPL-2.0`)**, **Node-RED 4.0.9 (`Apache-2.0`)** chuẩn hóa payload, **TimescaleDB OSS 2.19.3 (`Apache-2.0`)** và chuỗi thời gian `latticeTelemetryPoints` (`dxosBlocks:telemetryIngest`, `telemetrySeries`, `alarmIngest`/`Ack`/`Clear`, migration `20261123000500-dxos-telemetry-timeseries.js`).
+- **Gói 4 — Bảo mật Sidecar `file-scanner`, Zero `pnpm audit`, PostgreSQL RLS, OTel/Prometheus & PoF `v0.3.0`:**
+  - Tách dịch vụ quét tệp nhẹ **`apps/file-scanner`** kết nối ClamAV & RustFS S3; duy trì kiểm toán phụ thuộc sạch (`pnpm audit` không lỗ hổng tồn đọng), tăng cường cô lập dữ liệu cấp hàng PostgreSQL (RLS) và điểm đo quan sát OpenTelemetry / Prometheus (`/api/dxos:metrics`).
+  - Nâng cấp runtime NocoBase lên **`2.2.50`** (`nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777`), đồng bộ phiên bản workspace `0.3.0` (`@latticedx/plugin-lattice-foundation` `0.27.0`), ghi rõ **Cam kết Thuần khiết Giấy phép OSS** (loại bỏ BSL-1.1 như ThingsBoard/EMQX), và bổ sung seeder idempotent `scripts/seed-v030-demo-showcase.mjs`.
+
 ## [0.2.0] - 2026-11-22 — Nâng cấp Kiến trúc Single-Engine & Gia cố Cấp Doanh nghiệp (Waves 1–5)
 
 - **Wave 1 (An ninh, Cô lập Multi-Tenant, SSRF & Split-Brain):** Vá fail-closed phân quyền RBAC trên các plugin DX-OS & MCP, chặn leo thang vai trò và IDOR cross-tenant, bổ sung kiểm soát SSRF & live telemetry guard, thống nhất kiến trúc Single-Engine trên NocoBase + 7 plugin Apache-2.0.

@@ -1017,3 +1017,22 @@ test('Fix Round 1 (Important): workflow DAG cycle/dangling validation, scopeId s
     (err) => err.status === 400 && err.code === 'INVALID_SOLUTION_BUNDLE',
   );
 });
+
+test('applyCustomCollectionsSection invokes db.attachLatticeRlsPolicy after collection sync', async () => {
+  const { importSolutionBundle } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { db } = makeSolutionBundleDbHarness();
+  const rlsAttached = [];
+  db.attachLatticeRlsPolicy = async (tableName, transaction) => {
+    rlsAttached.push({ tableName, hasTx: Boolean(transaction) });
+  };
+  const bundle = {
+    metadata: { schemaVersion: 'latticedx.solution-bundle/v2', organizationId: 'org-a' },
+    customCollections: [
+      { name: 'latticeCustomColdChainLog', title: 'Nhật ký kho lạnh', fields: [{ name: 'batchCode', type: 'string' }] },
+    ],
+  };
+  const res = await importSolutionBundle(db, bundle, { dryRun: false, organizationId: 'org-a' });
+  assert.equal(res.dryRun, false);
+  assert.equal(res.applied.customCollectionsUpserted, 1);
+  assert.deepEqual(rlsAttached, [{ tableName: 'latticeCustomColdChainLog', hasTx: true }]);
+});

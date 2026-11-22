@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { installRlsTransactionBridge, setTransactionRlsOrg, withTenantRlsContext } = require('./pg-rls');
+
 function failure(code, status = 403, message = code) {
   return Object.assign(new Error(message), {code, status});
 }
@@ -110,15 +112,38 @@ function scopeNativeValues(values, actor) {
   if (values.organizationId !== undefined && values.organizationId !== actor.organizationId) throw failure('NATIVE_ORGANIZATION_MISMATCH');
   return {...values,organizationId:actor.organizationId};
 }
-async function updateScopedDocument(db,ctx,actor) {
-  const params=ctx.action.params,id=params.filterByTk;
-  if(!/^[1-9]\d*$/.test(String(id)))throw failure('NATIVE_DOCUMENT_ID_REQUIRED',400);
+async function recordChatterSafe(db, ctx, actor, id, beforeSnapshot, updatedSnapshot) {
+  if (!beforeSnapshot || !updatedSnapshot) return;
+  try {
+    const { recordFieldDiffChatter } = require('./record-chatter');
+    await recordFieldDiffChatter(db, {
+      organizationId: actor.organizationId,
+      targetCollection: ctx.action.resourceName,
+      targetRecordId: Number(id),
+      before: beforeSnapshot,
+      after: updatedSnapshot,
+      actor: {
+        ...actor,
+        username: value(ctx.state?.currentUser, 'username') || (actor.employeeId ? `employee-${actor.employeeId}` : 'operator'),
+      },
+    });
+  } catch {}
+}
+
+async function updateScopedDocument(db, ctx, actor, options = {}) {
+  const params = ctx.action.params, id = params.filterByTk;
+  if (!/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_DOCUMENT_ID_REQUIRED', 400);
   const expectedVersion = ctx.state?.latticeExpectedVersion ?? extractExpectedVersion(ctx, params);
   let beforeSnapshot = null;
   let updatedSnapshot = null;
-  await db.sequelize.transaction(async transaction=>{
-    const row=await db.getModel(ctx.action.resourceName).findOne({where:{id,organizationId:actor.organizationId},transaction,lock:transaction.LOCK.UPDATE});
-    if(!row)throw failure('NATIVE_DOCUMENT_NOT_FOUND',404);
+
+  const applyInTx = async (transaction) => {
+    const row = await db.getModel(ctx.action.resourceName).findOne({
+      where: { id, organizationId: actor.organizationId },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+    if (!row) throw failure('NATIVE_DOCUMENT_NOT_FOUND', 404);
     const currentStatus = String(value(row, 'status') || 'draft').toLowerCase();
     if (IMMUTABLE_VOUCHER_STATUSES.has(currentStatus)) {
       throw failure('VOUCHER_IMMUTABLE', 409, 'Chứng từ đã trình duyệt, hoàn tất hoặc đã hủy là bất biến. Vui lòng Hủy (Cancel) và Lập bản điều chỉnh (Amend).');
@@ -133,28 +158,37 @@ async function updateScopedDocument(db,ctx,actor) {
       ? [...params.whitelist, 'version']
       : params.whitelist;
     // Keep the post-ACL filter and field guards; repository hooks still run.
-    ctx.body=await db.getRepository(ctx.action.resourceName).update({filterByTk:id,filter:params.filter,values:nextValues,whitelist:nextWhitelist,blacklist:params.blacklist,transaction,context:ctx});
-    if(Array.isArray(ctx.body)&&!ctx.body.length)throw failure('NATIVE_DOCUMENT_UPDATE_DENIED',403);
+    ctx.body = await db.getRepository(ctx.action.resourceName).update({
+      filterByTk: id,
+      filter: params.filter,
+      values: nextValues,
+      whitelist: nextWhitelist,
+      blacklist: params.blacklist,
+      transaction,
+      context: ctx,
+    });
+    if (Array.isArray(ctx.body) && !ctx.body.length) throw failure('NATIVE_DOCUMENT_UPDATE_DENIED', 403);
     const updatedRow = Array.isArray(ctx.body) ? ctx.body[0] : ctx.body;
     updatedSnapshot = typeof updatedRow?.toJSON === 'function' ? updatedRow.toJSON() : { ...beforeSnapshot, ...nextValues };
-    ctx.status=200;
-  });
-  if (beforeSnapshot && updatedSnapshot) {
-    try {
-      const { recordFieldDiffChatter } = require('./record-chatter');
-      await recordFieldDiffChatter(db, {
-        organizationId: actor.organizationId,
-        targetCollection: ctx.action.resourceName,
-        targetRecordId: Number(id),
-        before: beforeSnapshot,
-        after: updatedSnapshot,
-        actor: {
-          ...actor,
-          username: value(ctx.state?.currentUser, 'username') || (actor.employeeId ? `employee-${actor.employeeId}` : 'operator'),
-        },
-      });
-    } catch {}
+    ctx.status = 200;
+  };
+
+  if (options.transaction) {
+    await applyInTx(options.transaction);
+  } else {
+    await db.sequelize.transaction(async (transaction) => {
+      if (process.env.DX_PG_RLS_SESSION === 'true') {
+        await setTransactionRlsOrg(db, actor.organizationId, transaction);
+      }
+      await applyInTx(transaction);
+    });
   }
+
+  if (options.deferChatter) {
+    return () => recordChatterSafe(db, ctx, actor, id, beforeSnapshot, updatedSnapshot);
+  }
+  await recordChatterSafe(db, ctx, actor, id, beforeSnapshot, updatedSnapshot);
+  return undefined;
 }
 const directoryReferenceErrors = new Map([
   ['lattice_assets_department_org', 'Phòng ban phải thuộc cùng tổ chức với tài sản.'],
@@ -172,6 +206,7 @@ async function writeDirectoryRecord(ctx, next) {
   }
 }
 function createNativeScopeMiddleware(db, definitions) {
+  installRlsTransactionBridge(db);
   const schemas = new Map(Object.values(definitions).map(schema=>[schema.name,schema]));
   const read = new Set(['list','get','count']);
   const write = new Set(['create','update','destroy']);
@@ -191,7 +226,15 @@ function createNativeScopeMiddleware(db, definitions) {
       assertSafeSort(values.sort);
       if (isScopedCollection(col)) {
         const actor = await resolveNativeActor(db, ctx.state.currentUser);
+        ctx.state = ctx.state || {};
+        ctx.state.latticeRlsOrg = actor.organizationId;
         params.values = scopeNativeRead(values, actor);
+        if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function') {
+          return withTenantRlsContext(db, actor.organizationId, (transaction) => {
+            ctx.state.latticeRlsTransaction = transaction;
+            return next();
+          });
+        }
       } else {
         if (values.pageSize != null) values.pageSize = clampPageLimit(values.pageSize);
         if (values.limit != null) values.limit = clampPageLimit(values.limit);
@@ -225,42 +268,68 @@ function createNativeScopeMiddleware(db, definitions) {
     if(document) {
       if(actionName==='destroy')throw failure('NATIVE_DOCUMENT_DELETE_UNSUPPORTED');
     }
+    let expectedVersion = null;
     if (actionName === 'create' || actionName === 'update') {
-      const expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
+      expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
+      ctx.state = ctx.state || {};
       ctx.state.latticeExpectedVersion = expectedVersion;
-      params.values = scopeNativeValues(params.values,actor);
-      if (actionName === 'update' && collectionName === 'latticeAssets' && params.filterByTk != null) {
-        const assetRepo = db.getRepository?.('latticeAssets');
-        if (assetRepo?.findOne) {
-          const current = await assetRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId } });
-          if (!current) throw failure('NATIVE_DOCUMENT_NOT_FOUND', 404);
-          const currentVersion = Number(value(current, 'version')) || 1;
-          if (expectedVersion !== null && currentVersion !== expectedVersion) {
-            throw failure('VERSION_CONFLICT', 409, 'Bản ghi đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
-          }
-          params.values = { ...params.values, version: currentVersion + 1 };
+      params.values = scopeNativeValues(params.values, actor);
+      if (document) {
+        if (['status','version','requesterId','assigneeId','decisionReason','submittedAt','submittedBy','cancelledAt','cancelledBy','cancelReason','amendedFromId','amendmentNo'].some(field => Object.hasOwn(params.values, field))) {
+          throw failure('NATIVE_DOCUMENT_PROTECTED_FIELD');
         }
-      }
-      if(document) {
-        if(['status','version','requesterId','assigneeId','decisionReason','submittedAt','submittedBy','cancelledAt','cancelledBy','cancelReason','amendedFromId','amendmentNo'].some(field=>Object.hasOwn(params.values,field)))throw failure('NATIVE_DOCUMENT_PROTECTED_FIELD');
-        if(actionName==='create') {
-          if(typeof params.values.name!=='string'||!params.values.name.trim()||params.values.name.length>200)throw failure('NATIVE_DOCUMENT_NAME_REQUIRED',400);
-          params.values={...params.values,name:params.values.name.trim(),status:'draft',version:1,requesterId:actor.employeeId};
-          if(params.values.departmentId==null&&actor.departmentId!=null)params.values.departmentId=actor.departmentId;
+        if (actionName === 'create') {
+          if (typeof params.values.name !== 'string' || !params.values.name.trim() || params.values.name.length > 200) throw failure('NATIVE_DOCUMENT_NAME_REQUIRED', 400);
+          params.values = { ...params.values, name: params.values.name.trim(), status: 'draft', version: 1, requesterId: actor.employeeId };
+          if (params.values.departmentId == null && actor.departmentId != null) params.values.departmentId = actor.departmentId;
         }
-      }
-      for (const field of schemas.get(collectionName)?.fields || []) {
-        if (field.type !== 'belongsTo' || !schemas.has(field.target)) continue;
-        const id=params.values[field.foreignKey];
-        if (id == null) continue;
-        if (!/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_REFERENCE_INVALID',400);
-        const reference=await db.getRepository(field.target).findOne({filter:{id,organizationId:actor.organizationId,active:true}});
-        if (!reference) throw failure('NATIVE_REFERENCE_UNAVAILABLE');
       }
     }
-    ctx.state.latticeNativeActor=actor;
-    if(document&&actionName==='update')return updateScopedDocument(db,ctx,actor);
-    return proceed();
+
+    const executeScoped = async (transaction) => {
+      if (actionName === 'create' || actionName === 'update') {
+        const txOpt = transaction ? { transaction } : {};
+        if (actionName === 'update' && collectionName === 'latticeAssets' && params.filterByTk != null) {
+          const assetRepo = db.getRepository?.('latticeAssets');
+          if (assetRepo?.findOne) {
+            const current = await assetRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId }, ...txOpt });
+            if (!current) throw failure('NATIVE_DOCUMENT_NOT_FOUND', 404);
+            const currentVersion = Number(value(current, 'version')) || 1;
+            if (expectedVersion !== null && currentVersion !== expectedVersion) {
+              throw failure('VERSION_CONFLICT', 409, 'Bản ghi đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
+            }
+            params.values = { ...params.values, version: currentVersion + 1 };
+          }
+        }
+        for (const field of schemas.get(collectionName)?.fields || []) {
+          if (field.type !== 'belongsTo' || !schemas.has(field.target)) continue;
+          const id = params.values[field.foreignKey];
+          if (id == null) continue;
+          if (!/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_REFERENCE_INVALID', 400);
+          const reference = await db.getRepository(field.target).findOne({ filter: { id, organizationId: actor.organizationId, active: true }, ...txOpt });
+          if (!reference) throw failure('NATIVE_REFERENCE_UNAVAILABLE');
+        }
+      }
+      ctx.state = ctx.state || {};
+      ctx.state.latticeNativeActor = actor;
+      ctx.state.latticeRlsOrg = actor.organizationId;
+      if (transaction) ctx.state.latticeRlsTransaction = transaction;
+      if (document && actionName === 'update') {
+        return updateScopedDocument(db, ctx, actor, transaction ? { transaction, deferChatter: true } : {});
+      }
+      return proceed();
+    };
+
+    if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function') {
+      const result = await withTenantRlsContext(db, actor.organizationId, (transaction) => executeScoped(transaction));
+      if (typeof result === 'function') {
+        try {
+          await withTenantRlsContext(db, actor.organizationId, () => result());
+        } catch {}
+      }
+      return result;
+    }
+    return executeScoped(null);
   };
 }
 module.exports = {resolveNativeActor, scopeNativeRead, scopeNativeValues,createNativeScopeMiddleware,updateScopedDocument,extractExpectedVersion};

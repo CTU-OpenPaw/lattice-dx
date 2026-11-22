@@ -154,3 +154,26 @@ test('migration 20261123000200 creates and drops latticeNotifications, latticeSl
   assert.match(migSrc, /CREATE INDEX IF NOT EXISTS idx_lattice_tickets_org_amended ON "latticeServiceTickets" \("organizationId", "amendedFromId"\)/);
   assert.match(migSrc, /DROP INDEX IF EXISTS idx_lattice_tickets_org_amended/);
 });
+
+test('migration 20261123000600 attaches and drops permissive PostgreSQL RLS policies for TENANT_RLS_TABLES and latticeCustom*', () => {
+  const rlsMigSrc = readFileSync(
+    join(REPO_ROOT, 'plugins/nocobase/plugin-lattice-foundation/src/server/migrations/20261123000600-postgresql-rls-policies.js'),
+    'utf8',
+  );
+  assert.match(rlsMigSrc, /on\s*=\s*'afterSync'/);
+  assert.match(rlsMigSrc, /getDialect\s*\(\s*\)\s*!==\s*'postgres'/);
+  assert.match(rlsMigSrc, /discoverTenantRlsTables/);
+  assert.match(rlsMigSrc, /attachRlsPolicyToTable/);
+  assert.match(rlsMigSrc, /detachRlsPolicyFromTable/);
+
+  const pgRlsSrc = readFileSync(
+    join(REPO_ROOT, 'plugins/nocobase/plugin-lattice-foundation/src/server/pg-rls.js'),
+    'utf8',
+  );
+  assert.match(pgRlsSrc, /information_schema\.columns/);
+  assert.match(pgRlsSrc, /ENABLE ROW LEVEL SECURITY/);
+  assert.match(pgRlsSrc, /DISABLE ROW LEVEL SECURITY/);
+  assert.match(pgRlsSrc, /DROP POLICY IF EXISTS/);
+  assert.match(pgRlsSrc, /CREATE POLICY/);
+  assert.match(pgRlsSrc, /AS PERMISSIVE FOR ALL TO PUBLIC/);
+});

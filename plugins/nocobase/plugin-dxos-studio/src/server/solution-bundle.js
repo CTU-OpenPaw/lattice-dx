@@ -1064,6 +1064,13 @@ async function applyCustomCollectionsSection(db, collectionsList, targetOrg, tra
     if (colInst && typeof colInst.sync === 'function') {
       await colInst.sync({ force: false, alter: { drop: false }, ...txOpts });
     }
+    if (typeof db?.attachLatticeRlsPolicy === 'function' && /^latticeCustom[A-Za-z0-9_]*$/.test(cname)) {
+      try {
+        await db.attachLatticeRlsPolicy(cname, transaction);
+      } catch {
+        // Non-fatal in mock test harnesses without physical SQL tables
+      }
+    }
     customCollectionsUpserted += 1;
   }
   return customCollectionsUpserted;

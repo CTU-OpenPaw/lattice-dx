@@ -35,3 +35,12 @@
   import security_headers
   reverse_proxy keycloak:8080
 }
+
+http://:2020 {
+  handle /metrics {
+    metrics
+  }
+  handle {
+    respond 404
+  }
+}

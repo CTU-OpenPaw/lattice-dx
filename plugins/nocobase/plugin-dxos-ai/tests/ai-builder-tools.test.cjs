@@ -541,6 +541,8 @@ test('DxosRecordWorkbenchBlockModel is allowed and createCollection ensures orga
   assert.equal(wbPreview.blockUse, 'DxosRecordWorkbenchBlockModel');
 
   const sqlQueries = [];
+  const rlsAttached = [];
+  db.attachLatticeRlsPolicy = async (tableName) => { rlsAttached.push(tableName); };
   db.sequelize = {
     transaction: async (fn) => fn({}),
     query: async (sql) => { sqlQueries.push(sql); return [[], 0]; },
@@ -553,6 +555,7 @@ test('DxosRecordWorkbenchBlockModel is allowed and createCollection ensures orga
     dryRun: false,
   });
   assert.equal(created.created, true);
+  assert.deepEqual(rlsAttached, ['latticeCustomColdAudits']);
   assert.equal(
     sqlQueries.some((q) => /CREATE INDEX IF NOT EXISTS "idx_latticecustomcoldaudits_org"\s+ON\s+"latticeCustomColdAudits"\s*\("organizationId"\)/i.test(q)),
     true,
@@ -561,6 +564,16 @@ test('DxosRecordWorkbenchBlockModel is allowed and createCollection ensures orga
     sqlQueries.some((q) => /CREATE INDEX IF NOT EXISTS "idx_latticecustomcoldaudits_org_status"\s+ON\s+"latticeCustomColdAudits"\s*\("organizationId",\s*"status"\)/i.test(q)),
     true,
   );
+
+  // addFields attaching organizationId on custom collection also triggers attachLatticeRlsPolicy
+  const addedOrgField = await byName.get('dxos_extend_collection_schema').invoke(ctx, {
+    operation: 'addFields',
+    collectionName: 'latticeCustomColdAudits',
+    fields: [{ name: 'organizationId', type: 'string', title: 'Tổ chức' }],
+    dryRun: false,
+  });
+  assert.equal(addedOrgField.updated, true);
+  assert.deepEqual(rlsAttached, ['latticeCustomColdAudits', 'latticeCustomColdAudits']);
 
   // Very long collectionName truncates/hashes index name <= 63 chars for PostgreSQL NAMEDATALEN
   const longQueries = [];

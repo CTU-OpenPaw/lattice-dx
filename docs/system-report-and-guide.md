@@ -6,9 +6,9 @@
 @see https://github.com/CTU-OpenPaw/lattice-dx
 SPDX-License-Identifier: Apache-2.0
 -->
-# Báo cáo Kỹ thuật & Hướng dẫn Vận hành Chi tiết — LatticeDX DX-OS
+# Báo cáo Kỹ thuật & Hướng dẫn Vận hành Chi tiết — LatticeDX DX-OS (`v0.3.0`)
 
-Tài liệu này tổng hợp kiến trúc kỹ thuật, phạm vi tùy biến chuyên sâu cho doanh nghiệp Việt Nam, hiện trạng kiểm thử/tuân thủ nguồn mở (**OLP PMNM 2026 — VFOSSA**) và hướng dẫn từng bước từ cài đặt trắng đến vận hành đa cổng, Workflow Poka-yoke, AI Agent phòng ban thực thi trực tiếp vào CSDL và tích hợp IT/OT (FIWARE Orion-LD + n8n).
+Tài liệu này tổng hợp kiến trúc kỹ thuật, phạm vi tùy biến chuyên sâu cho doanh nghiệp Việt Nam, hiện trạng kiểm thử/tuân thủ nguồn mở (**OLP PMNM 2026 — VFOSSA**) và hướng dẫn từng bước từ cài đặt trắng đến vận hành đa cổng + `/mobile`, Workflow Poka-yoke, Record Chatter + Chứng từ bất biến, SLA Engine + Chuông Thông báo SSE, Semantic Neural RAG, AI HITL Approval Queue, AI Agent phòng ban thực thi trực tiếp vào CSDL và tích hợp IT/OT / IIoT chuẩn OSI (Mosquitto + Node-RED + TimescaleDB OSS + FIWARE Orion-LD + n8n).
 
 ---
 
@@ -16,10 +16,10 @@ Tài liệu này tổng hợp kiến trúc kỹ thuật, phạm vi tùy biến c
 
 ### 1. Định vị Kiến trúc Open-Core & Phạm vi Tùy biến Doanh nghiệp Việt
 
-**LatticeDX DX-OS** là **Hệ điều hành Doanh nghiệp Số 6 Phân hệ**, trong đó **NocoBase `2.2.38`** đóng vai trò **Plane #6 (`appDataSubstrate`)** cung cấp runtime host, giao diện dựng trang, trình quản lý dữ liệu và bộ công cụ workflow bên dưới lớp điều phối chung; toàn bộ cấu trúc nghiệp vụ doanh nghiệp Việt, 7 plugin mở rộng, giao thức đa cổng, hệ thống phân quyền RBAC chi tiết, chuẩn hóa tri thức P.A.R.A., các block tùy biến, lực lượng nhân sự AI cấu hình động và cổng Streamable HTTP MCP 2 chiều do nhóm **CTU-OpenPaw** thiết kế và phát triển dưới giấy phép **Apache-2.0**.
+**LatticeDX DX-OS (`v0.3.0`)** là **Hệ điều hành Doanh nghiệp Số 6 Phân hệ**, trong đó **NocoBase `2.2.50`** đóng vai trò **Plane #6 (`appDataSubstrate`)** cung cấp runtime host, giao diện dựng trang, trình quản lý dữ liệu và bộ công cụ workflow bên dưới lớp điều phối chung; toàn bộ cấu trúc nghiệp vụ doanh nghiệp Việt, 7 plugin mở rộng, giao thức đa cổng & `/mobile`, hệ thống phân quyền RBAC chi tiết, chuẩn hóa tri thức P.A.R.A. Semantic RAG, các block tùy biến, lực lượng nhân sự AI có hàng chờ duyệt HITL và cổng Streamable HTTP MCP 2 chiều do nhóm **CTU-OpenPaw** thiết kế và phát triển dưới giấy phép **Apache-2.0**.
 
-- **Cô lập mã nguồn sạch (Plugin-first, Zero Upstream Patch):** Không chỉnh sửa hay phân phối lại mã nguồn NocoBase trong `upstream/nocobase/`. Cả 7 plugin trong `plugins/nocobase/*` đều khai báo `"license": "Apache-2.0"`, `"nocobase": { "sdkProvidedByHost": true }`, kèm `LICENSE` và `README.md` riêng.
-- **Minh bạch Điều 5.2 NocoBase:** Bảo toàn toàn bộ nhận diện `Powered by NocoBase`, phiên bản `v2.2.38` tại chân trang vận hành/portal và `License settings`.
+- **Cô lập mã nguồn sạch (Plugin-first, Zero Upstream Patch):** Không chỉnh sửa hay phân phối lại mã nguồn NocoBase trong `upstream/nocobase/`. Cả 7 plugin trong `plugins/nocobase/*` đều khai báo `"license": "Apache-2.0"`, `"testedRuntime": "2.2.50"`, `"nocobase": { "sdkProvidedByHost": true }`, kèm `LICENSE` và `README.md` riêng.
+- **Minh bạch Điều 5.2 NocoBase:** Bảo toàn toàn bộ nhận diện `Powered by NocoBase`, phiên bản `v2.2.50`, liên kết `https://www.nocobase.com` tại chân trang vận hành/portal và `License settings`.
 - **Hợp nhất 4 trụ cột DX-OS (`[H] – [P] – [D] – [I]`):**
   - **`[H]` Con người & Không gian làm việc:** 7 vai trò nghiệp vụ `ldx_*`, danh bạ nhân sự/đơn vị, kho tri thức P.A.R.A., đăng nhập tập trung Keycloak OIDC + PKCE.
   - **`[P]` Quy trình chống sai sót (Poka-yoke):** Tách người gửi – người duyệt, hộp việc `workflowManualTasks:listMine`, đồ thị Logistics 5 bước liên phòng ban, quy trình Phiếu Dịch vụ Nội bộ.
@@ -32,14 +32,14 @@ Tài liệu này tổng hợp kiến trúc kỹ thuật, phạm vi tùy biến c
 
 | Thành phần / Package | Phiên bản | Giấy phép | Phạm vi trách nhiệm đã hoàn thiện |
 | --- | :---: | :---: | --- |
-| `@latticedx/plugin-action-bridge` | `0.4.1` | `Apache-2.0` | Cầu nối hành động server-side, proxy thực thi có khóa idempotency, kiểm tra quyền theo session, bridge `entityContext` & `detail`. |
-| `@latticedx/plugin-lattice-foundation` | `0.25.1` | `Apache-2.0` | Collections lõi (`latticeDepartments`, `latticeEmployees`, `latticeLocations`, `latticeAssets`, `latticeRequests`, `latticeOrders`, `latticeIncidentCases`, `latticeIncidentRules`, `latticeAgentProposals`, `latticePortals`), 7 vai trò `ldx_*`, Multi-Portal Manager (`/admin/settings/multi-portal`), portal động `/p/<slug>`, NGSI-LD Outbox & UC2 `agent-run`. |
-| `@latticedx/plugin-enterprise-auth` | `0.1.0` | `Apache-2.0` | Đăng nhập doanh nghiệp Keycloak OIDC + PKCE S256 (`/admin/settings/auth/authenticators`), ánh xạ tài khoản rõ ràng tại `/admin/settings/auth/enterprise-mappings`, không tự tạo tài khoản/cấp quyền khi login. |
-| `@latticedx/plugin-dxos-para` | `0.1.0` | `Apache-2.0` | Không gian tri thức **P.A.R.A.** trên `latticeParaDocuments` (`uiManageable: true`), cô lập `organizationId`/`ownerId`, ACL 7 vai trò và API `GET /api/latticePara:summary`. |
-| `@latticedx/plugin-dxos-blocks` | `0.1.0` | `Apache-2.0` | 6 Native v2 `BlockModel` đăng ký thẳng vào nút **`Add block`** của UI Editor (`dxosBlockSettings`), **Dynamic Copilot Strip** theo role & portal + 2 API scoped (`dxosBlocks:proposals`, `dxosBlocks:contextTelemetry`). |
-| `@latticedx/plugin-dxos-studio` | `0.1.0` | `Apache-2.0` | Màn hình **`/admin/settings/dxos-studio`**: cài 1-nhấp 4 workflow Poka-yoke (`procurement`, `logistics-5step`, `incident-uc2`, `internal-service`), dựng trang tổng quan đa-block idempotent (`dxosStudio:composePortals`), giám sát 7 plugin, collection `latticeServiceTickets` (`uiManageable: true`). |
-| `@latticedx/plugin-dxos-ai` | `0.1.0` | `Apache-2.0` | Màn hình **`/admin/settings/dxos-ai`**: 4 tab (Bản đồ 6 Phân hệ Enterprise OS, Nhân sự AI động `latticeAiProfiles` đồng bộ 2 chiều, Cổng Streamable HTTP MCP 2 chiều `/api/dxos-mcp` & `/api/dxos-mcp/it-ot`, Nhật ký Kiểm toán `latticeAiAuditLogs`) + **8 Unified Tools** (5 Admin Builder khóa root/admin + 3 Operational/Workflow Copilot). |
-| Dịch vụ đồng hành & OCI Compose | — | Đa dạng (`NOTICE`) | `apps/api` (Fastify), `apps/agent-worker`, `apps/web` (Next.js), `@dx/contracts`, `PostgreSQL 16.13`, `Keycloak 26.8.0`, `APISIX 3.19.0`, `FIWARE Orion-LD 1.10.0` + `MongoDB 4.4.29`, `n8n 2.42.7`, `ClamAV 1.4.3` (mọi image trong `infra/compose/*.yml` đều khóa digest `@sha256:`). |
+| `@latticedx/plugin-action-bridge` | `0.3.0` | `Apache-2.0` | Cầu nối hành động server-side, proxy thực thi có khóa idempotency, kiểm tra quyền theo session, bridge `entityContext` & `detail`. |
+| `@latticedx/plugin-lattice-foundation` | `0.27.0` | `Apache-2.0` | Collections lõi, 7 vai trò `ldx_*`, Multi-Portal Manager (`/admin/settings/multi-portal`), portal động `/p/<slug>`, **Record Chatter (`latticeRecordChatter`)**, **Chứng từ bất biến (`Submit`/`Cancel`/`Amend`)**, **Chuông thông báo SSE (`latticeNotifications`) & SLA Engine (`latticeSlaPolicies`)**, NGSI-LD Outbox `SKIP LOCKED`. |
+| `@latticedx/plugin-enterprise-auth` | `0.3.0` | `Apache-2.0` | Đăng nhập doanh nghiệp Keycloak OIDC + PKCE S256, Redis session cache, Backchannel Logout, ánh xạ tài khoản & **đồng bộ vai trò/nhóm 2 chiều chống leo thang quyền**. |
+| `@latticedx/plugin-dxos-para` | `0.3.0` | `Apache-2.0` | Không gian tri thức **P.A.R.A.** trên `latticeParaDocuments` (`uiManageable: true`), cô lập `organizationId`/`ownerId`, ACL 7 vai trò, **trích xuất PDF/DOCX (`latticeParaChunks`) & Semantic Neural + Hybrid RAG (`latticePara:hybridSearch`, `reindex`)**. |
+| `@latticedx/plugin-dxos-blocks` | `0.3.0` | `Apache-2.0` | 7 Native v2 `BlockModel` đăng ký vào **`Add block`** (`dxosBlockSettings`), **biểu đồ SVG `timeseries-line` + IIoT `telemetryIngest` + `alarmIngest/Ack/Clear`**, **xuất báo cáo RBAC CSV/XLSX/PDF Unicode**, **Chatter & Voucher UI**, **Command Palette `Ctrl+K`** và Dynamic Copilot Strip. |
+| `@latticedx/plugin-dxos-studio` | `0.3.0` | `Apache-2.0` | Màn hình **`/admin/settings/dxos-studio`**: cài 1-nhấp 4 workflow Poka-yoke, dựng cổng đa-block + **cổng di động `/mobile`**, giám sát 7 plugin, Outbox/DLQ replay (**Tab 5**), **GitOps Solution Bundle JSON export/diff/import/apply/rollback (`Tab 6`)** và `latticeServiceTickets`. |
+| `@latticedx/plugin-dxos-ai` | `0.3.0` | `Apache-2.0` | Màn hình **`/admin/settings/dxos-ai`**: Bản đồ 6 Phân hệ, Nhân sự AI động (`latticeAiProfiles`), **Hàng chờ Phê duyệt AI HITL (`latticeAiApprovalQueue`)**, **Hạn mức AI bền vững PostgreSQL (`latticeAiQuotaUsage`)**, Cổng MCP 2 chiều `/api/dxos-mcp` & `/api/dxos-mcp/it-ot`, Nhật ký Kiểm toán & **15 Unified Tools**. |
+| Dịch vụ đồng hành & OCI Compose | — | Đa dạng (`NOTICE`, thuần OSI cho IIoT) | `apps/api` (Fastify), `apps/agent-worker`, `apps/file-scanner` (ClamAV/RustFS), `@dx/contracts`, `PostgreSQL 16.16`, `pgvector 0.8.1`, `Redis 7.4`, `RustFS 1.0.6`, `Keycloak 26.8.2`, `APISIX 3.19.0`, `FIWARE Orion-LD 1.12.0` + `MongoDB 8.0`, `n8n 2.48.1`, `ClamAV 1.5.5`, và stack IIoT thuần OSI `Eclipse Mosquitto 2.0.21` (`EPL-2.0`) + `Node-RED 4.0.9` (`Apache-2.0`) + `TimescaleDB OSS 2.19.3` (`Apache-2.0`). |
 
 ---
 
@@ -100,17 +100,20 @@ pnpm pof:check
 node scripts/source-headers.mjs --check
 ```
 
-### 3. Dựng Runtime NocoBase `2.2.38` Sạch Từ 0 Bảng & Nạp Dữ liệu Demo
+### 3. Dựng Runtime NocoBase `2.2.50` Sạch Từ 0 Bảng & Nạp Dữ liệu Demo
 
 ```sh
 # 1. Tạo dự án container sạch từ git HEAD (cổng 13004..13999, ví dụ 13014)
 pnpm native:clean --port=13014
 
-# 2. Nạp 4 Cổng nghiệp vụ + dữ liệu mẫu + DX-OS đa-block
+# 2. Nạp 4 Cổng nghiệp vụ + dữ liệu mẫu + DX-OS đa-block + cổng /mobile
 node scripts/setup-native-multi-portal-demo.mjs "output/native-clean/<id>/report.json"
 
 # 3. Nạp Workspace Yêu cầu nội bộ & nút Tạo nhanh
 node scripts/setup-native-workspace-demo.mjs "output/native-clean/<id>/report.json"
+
+# 4. Nạp bộ trình diễn v0.3.0 idempotent (Chứng từ Submit/Cancel/Amend, Chatter, SLA, Telemetry 24h, RAG Reindex & HITL; cung cấp NOCOBASE_TOKEN hoặc NOCOBASE_ADMIN_PASSWORD / --admin-password)
+NOCOBASE_ADMIN_PASSWORD="<admin-password>" node scripts/seed-v030-demo-showcase.mjs --origin=http://localhost:13014
 ```
 
 > **Tài khoản thử nghiệm cục bộ (`localhost`):**
@@ -135,7 +138,7 @@ node scripts/setup-native-workspace-demo.mjs "output/native-clean/<id>/report.js
      - Tab `1. Quy trình Poka-yoke`: chọn tổ chức `native-ui-lab`, nhấn **`Cài đặt quy trình vào NocoBase`** cho `Mua sắm`, `Điều phối Logistics 5 bước`, `Sự cố IoT`, hoặc `Dịch vụ Nội bộ`, sau đó bấm **`Mở Workflow Designer`** để tùy biến nút đồ thị.
      - Tab `2. Dựng cổng đa-block`: bấm **`Dựng Cổng Đa-Block ngay`** để bổ sung an toàn các trang/block còn thiếu.
 4. **UI Editor Trực quan (`Add block`) & Theme Editor:**
-   - Mở `/p/services` (hoặc cổng bất kỳ), bật nút **`UI Editor`**, bấm **`Add block`** để chọn 1 trong **6 block DX-OS** (`DX-OS Portal Hero & Quick Actions`, `DX-OS KPI Metric Grid`, `DX-OS NGSI-LD Context & Telemetry`, `DX-OS AI Proposal & Evidence`, `DX-OS Workflow & My Tasks`, `DX-OS P.A.R.A. Knowledge Vault`).
+   - Mở `/p/services` (hoặc cổng bất kỳ), bật nút **`UI Editor`**, bấm **`Add block`** để chọn 1 trong **7 block DX-OS** (`DX-OS Portal Hero & Quick Actions`, `DX-OS KPI Metric Grid`, `DX-OS NGSI-LD Context & Telemetry`, `DX-OS AI Proposal & Evidence`, `DX-OS Workflow & My Tasks`, `DX-OS P.A.R.A. Knowledge Vault`, `DX-OS Chatter, Chứng từ & Xuất báo cáo`).
    - Nhấn menu bánh răng trên block chọn **`Cấu hình nội dung`** để đổi tiêu đề, mã màu Hex hoặc JSON KPI; tắt UI Editor và tải lại trang (`F5`) để xác nhận lưu bền trong PostgreSQL. Vào `/admin/settings/theme-editor` để đổi giao diện Sáng/Tối/Compact.
 
 ### 5. Thiết lập AI Agent Phòng ban Thực thi Trực tiếp (`Tạo Phiếu Bảo trì Kho lạnh`)
@@ -169,10 +172,10 @@ node scripts/setup-department-ai-agent.mjs --origin=http://localhost:13014 --wor
 
 ### 6. Kiểm toán PoF & Đóng gói Phát hành
 
-- Kiểm toán PoF & Đóng gói: `pnpm pof:check` · `pnpm release:tarball --ref=v0.1.0`
+- Kiểm toán PoF & Đóng gói: `pnpm pof:check` · `pnpm release:tarball --ref=v0.3.0`
 - Sao lưu & Diễn tập khôi phục toàn stack (`nocobase-db`, `uploads`, `keycloak`, `orion-mongo`, `n8n` — [docs/stack-backup-and-recovery.md](stack-backup-and-recovery.md)): `pnpm backup:stack` · `pnpm backup:rehearse-stack -- "output/backups/stack/stack-<id>"`
 
-Giải nén `output/release/latticedx-0.1.0-src.tar.gz` vào thư mục tạm ngoài Git để kiểm chứng lại `pnpm install --frozen-lockfile && pnpm pof:check && pnpm check && node --test plugins/nocobase/*/tests/*.test.cjs scripts/tests/*.test.mjs`.
+Giải nén `output/release/latticedx-0.3.0-src.tar.gz` vào thư mục tạm ngoài Git để kiểm chứng lại `pnpm install --frozen-lockfile && pnpm pof:check && pnpm check && node --test plugins/nocobase/*/tests/*.test.cjs scripts/tests/*.test.mjs`.
 
 ---
 
