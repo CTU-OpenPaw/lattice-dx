@@ -15,11 +15,12 @@ const {
   inferPortalSlugFromLocation,
   triggerDxosCopilot,
 } = require('./blocks-helpers');
+const { createRecordChatterView } = require('./chatter-panel');
 
 const VALID_QUERY_KINDS = new Set(['collection', 'telemetry', 'tasks', 'timeseries']);
 const VALID_WIDGET_TYPES = new Set([
   'gauge', 'thermometer', 'timeseries-line', 'stage-pipeline', 'distribution-bars',
-  'rule-callout', 'status-matrix', 'quick-actions',
+  'rule-callout', 'status-matrix', 'quick-actions', 'export-bar', 'chatter',
 ]);
 
 const CREATIVE_THEMES = {
@@ -239,6 +240,7 @@ function normalizeTelemetryRows(payload) {
 function createCreativeStudioView(client, React, _antd, app, { subscribeModelConfig } = {}) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+  const RecordChatterView = createRecordChatterView(client, React, app);
 
   return function DxosCreativeStudioView({ model, liveConfig }) {
     const api = useApi();
@@ -466,6 +468,38 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
               h('div', { style: { height: 6, borderRadius: 999, background: '#94a3b830' } },
                 h('div', { style: { width: `${Math.round((Number(g.count || 0) / maxCnt) * 100)}%`, height: '100%', background: palette.accent, borderRadius: 999 } })),
             ))),
+        );
+      }
+      if (w.type === 'chatter') {
+        return h('div', { key: idx, style: { ...cardStyle, gridColumn: '1 / -1' } },
+          h(RecordChatterView, { targetCollection: w.collection, targetRecordId: w.recordId, showExport: Boolean(w.showExport), exportFields: w.fields }),
+        );
+      }
+      if (w.type === 'export-bar') {
+        const exportFormats = Array.isArray(w.formats) && w.formats.length ? w.formats : ['csv', 'xlsx', 'pdf'];
+        return h('div', { key: idx, style: cardStyle },
+          h('div', { style: { fontSize: 12, color: palette.mutedColor, marginBottom: 8, fontWeight: 600 } }, w.title),
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
+            exportFormats.map((fmt) => h('button', {
+              key: fmt,
+              type: 'button',
+              onClick: async () => {
+                if (!api?.request || !w.collection) return;
+                try {
+                  setActionNote(`Đang xuất ${String(fmt).toUpperCase()}…`);
+                  const res = await api.request({
+                    url: 'dxosBlocks:exportReport',
+                    method: 'post',
+                    data: { collection: w.collection, format: fmt, ...(Array.isArray(w.fields) ? { fields: w.fields } : {}) },
+                  });
+                  const meta = res?.data?.data || res?.data || {};
+                  setActionNote(`Đã xuất ${meta.filename || fmt} (${meta.rowCount ?? 0} dòng).`);
+                } catch (err) {
+                  setActionNote(err?.response?.data?.errors?.[0]?.message || 'Không xuất được báo cáo.');
+                }
+              },
+              style: { padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1px solid ${palette.accent}`, background: 'transparent', color: palette.accent },
+            }, `Xuất ${String(fmt).toUpperCase()}`))),
         );
       }
       if (w.type === 'status-matrix') {

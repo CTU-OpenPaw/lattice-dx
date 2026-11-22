@@ -20,12 +20,24 @@
 })(function (client, React, antd, clientV2) {
   'use strict';
   const { registerDxosBlockModels } = require('./block-models');
+  const { createCommandPaletteProvider } = require('./command-palette');
+  const { createRecordChatterView } = require('./chatter-panel');
 
   class DxosBlocksClientPlugin extends client.Plugin {
     async load() {
       registerDxosBlockModels(client, React, antd, clientV2, this.flowEngine || this.app?.flowEngine, this.app);
+      const CommandPaletteProvider = createCommandPaletteProvider(client, React, antd, this.app);
+      if (this.app?.use && CommandPaletteProvider) {
+        this.app.use(CommandPaletteProvider);
+      }
     }
   }
 
-  return { __esModule: true, default: DxosBlocksClientPlugin, registerDxosBlockModels };
+  return {
+    __esModule: true,
+    default: DxosBlocksClientPlugin,
+    registerDxosBlockModels,
+    createCommandPaletteProvider,
+    createRecordChatterView,
+  };
 });
