@@ -41,6 +41,7 @@ async function resolveNativeActor(db, user, options = {}) {
   return {userId:String(id),employeeId:value(employee,'id'),organizationId,departmentId:value(employee,'departmentId')};
 }
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
+const IMMUTABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'completed', 'cancelled']);
 const SENSITIVE_FILTER_KEY_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt/i;
 const SENSITIVE_CHART_COLLECTIONS = new Set([
   'users', 'roles', 'dataSourcesRoles', 'dataSourcesRolesResources',
@@ -118,6 +119,10 @@ async function updateScopedDocument(db,ctx,actor) {
   await db.sequelize.transaction(async transaction=>{
     const row=await db.getModel(ctx.action.resourceName).findOne({where:{id,organizationId:actor.organizationId},transaction,lock:transaction.LOCK.UPDATE});
     if(!row)throw failure('NATIVE_DOCUMENT_NOT_FOUND',404);
+    const currentStatus = String(value(row, 'status') || 'draft').toLowerCase();
+    if (IMMUTABLE_VOUCHER_STATUSES.has(currentStatus)) {
+      throw failure('VOUCHER_IMMUTABLE', 409, 'Chứng từ đã trình duyệt, hoàn tất hoặc đã hủy là bất biến. Vui lòng Hủy (Cancel) và Lập bản điều chỉnh (Amend).');
+    }
     beforeSnapshot = typeof row.toJSON === 'function' ? row.toJSON() : { ...row };
     const currentVersion = Number(value(row, 'version')) || 1;
     if (expectedVersion !== null && currentVersion !== expectedVersion) {
@@ -237,7 +242,7 @@ function createNativeScopeMiddleware(db, definitions) {
         }
       }
       if(document) {
-        if(['status','version','requesterId','assigneeId','decisionReason'].some(field=>Object.hasOwn(params.values,field)))throw failure('NATIVE_DOCUMENT_PROTECTED_FIELD');
+        if(['status','version','requesterId','assigneeId','decisionReason','submittedAt','submittedBy','cancelledAt','cancelledBy','cancelReason','amendedFromId','amendmentNo'].some(field=>Object.hasOwn(params.values,field)))throw failure('NATIVE_DOCUMENT_PROTECTED_FIELD');
         if(actionName==='create') {
           if(typeof params.values.name!=='string'||!params.values.name.trim()||params.values.name.length>200)throw failure('NATIVE_DOCUMENT_NAME_REQUIRED',400);
           params.values={...params.values,name:params.values.name.trim(),status:'draft',version:1,requesterId:actor.employeeId};

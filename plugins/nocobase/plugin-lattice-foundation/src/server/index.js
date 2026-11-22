@@ -22,6 +22,7 @@ const {registerContextResource}=require('./native-context-delivery');
 const {registerNativeIntegrations}=require('./native-integrations');
 const {registerNativePortals}=require('./native-portals');
 const {registerChatterResource}=require('./record-chatter');
+const {registerVoucherLifecycleResource}=require('./voucher-lifecycle');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
     registerNativeResource(this.app);
@@ -37,6 +38,7 @@ class LatticeFoundationPlugin extends Plugin {
     registerNativeIntegrations(this.app);
     registerNativePortals(this.app, this.db);
     registerChatterResource(this.app);
+    registerVoucherLifecycleResource(this.app);
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
     registerSampleApplications(catalog);

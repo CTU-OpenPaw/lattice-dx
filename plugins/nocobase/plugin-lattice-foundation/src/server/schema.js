@@ -35,6 +35,13 @@ const documentFields = () => [
   text('status','Trạng thái',{defaultValue:'draft',allowNull:false}),
   {name:'version',type:'integer',defaultValue:1,allowNull:false},
   text('decisionReason','Lý do quyết định'),
+  {name:'submittedAt',type:'date'},
+  text('submittedBy','Người trình duyệt'),
+  {name:'cancelledAt',type:'date'},
+  text('cancelledBy','Người hủy chứng từ'),
+  text('cancelReason','Lý do hủy chứng từ'),
+  {name:'amendedFromId',type:'bigInt'},
+  {name:'amendmentNo',type:'integer',defaultValue:0,allowNull:false},
   relation('requester','latticeEmployees','requesterId'),
   relation('assignee','latticeEmployees','assigneeId'),
   relation('department','latticeDepartments','departmentId'),
@@ -44,6 +51,7 @@ const documentIndexes = (shortPrefix) => [
   {name: `idx_lattice_${shortPrefix}_org_requester_status`, fields: ['organizationId', 'requesterId', 'status']},
   {name: `idx_lattice_${shortPrefix}_org_assignee_status`, fields: ['organizationId', 'assigneeId', 'status']},
   {name: `idx_lattice_${shortPrefix}_org_department`, fields: ['organizationId', 'departmentId']},
+  {name: `idx_lattice_${shortPrefix}_org_amended`, fields: ['organizationId', 'amendedFromId']},
 ];
 module.exports = {
   requests: base('latticeRequests', 'Yêu cầu nghiệp vụ', 'requests', documentFields(), documentIndexes('requests')),
