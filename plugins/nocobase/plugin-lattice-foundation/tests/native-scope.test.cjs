@@ -193,3 +193,102 @@ test('updateScopedDocument enforces optimistic version locking and increments ve
   };
   await assert.rejects(api.updateScopedDocument(db, badCtx, actor), { status: 400, code: 'INVALID_EXPECTED_VERSION' });
 });
+
+test('resource guard rewrites self requester.userId dataScope filters on documents and keeps relation oracle blocks', async () => {
+  const employee = { id: 1, userId: 12, departmentId: 3, organizationId: 'org-a', active: true };
+  const guard = api.createNativeScopeMiddleware(db([employee]), {
+    orders: { name: 'latticeOrders', fields: [] },
+    requests: { name: 'latticeRequests', fields: [] },
+    assets: { name: 'latticeAssets', fields: [] },
+  });
+  const makeCtx = (resourceName, actionName, params = {}) => ({
+    state: { currentUser: { id: 12 }, currentRole: 'ldx_employee' },
+    action: { resourceName, actionName, params },
+  });
+
+  // 1. Numeric $eq inside $and on latticeOrders + original input untouched
+  const rawOrderFilter = { $and: [{ 'requester.userId': { $eq: 12 } }] };
+  const rawSnapshot = structuredClone(rawOrderFilter);
+  const orderCtx = makeCtx('latticeOrders', 'list', { filter: rawOrderFilter });
+  let ran = false;
+  await guard(orderCtx, async () => { ran = true; });
+  assert.equal(ran, true);
+  assert.deepEqual(rawOrderFilter, rawSnapshot);
+  assert.deepEqual(orderCtx.action.params.filter, {
+    $and: [{ organizationId: 'org-a' }, { $and: [{ requesterId: { $eq: 1 } }] }],
+  });
+
+  // 2. String $eq + sibling filter on latticeRequests
+  const reqCtx = makeCtx('latticeRequests', 'list', {
+    filter: { $and: [{ 'requester.userId': { $eq: '12' } }, { status: 'draft' }] },
+  });
+  await guard(reqCtx, async () => {});
+  assert.deepEqual(reqCtx.action.params.filter, {
+    $and: [{ organizationId: 'org-a' }, { $and: [{ requesterId: { $eq: 1 } }, { status: 'draft' }] }],
+  });
+
+  // 3. Scalar shorthand { 'requester.userId': 12 }
+  const scalarCtx = makeCtx('latticeOrders', 'list', { filter: { 'requester.userId': 12 } });
+  await guard(scalarCtx, async () => {});
+  assert.deepEqual(scalarCtx.action.params.filter, {
+    $and: [{ organizationId: 'org-a' }, { requesterId: { $eq: 1 } }],
+  });
+
+  // 4. Conflicting requesterId alongside requester.userId preserves both via $and
+  const conflictCtx = makeCtx('latticeOrders', 'list', {
+    filter: { requesterId: 99, 'requester.userId': { $eq: 12 } },
+  });
+  await guard(conflictCtx, async () => {});
+  assert.deepEqual(conflictCtx.action.params.filter, {
+    $and: [{ organizationId: 'org-a' }, { requesterId: 99, $and: [{ requesterId: { $eq: 1 } }] }],
+  });
+
+  // 5. JSON-stringified filter
+  const jsonCtx = makeCtx('latticeOrders', 'list', {
+    filter: '{"$and":[{"requester.userId":{"$eq":12}}]}',
+  });
+  await guard(jsonCtx, async () => {});
+  assert.deepEqual(jsonCtx.action.params.filter, {
+    $and: [{ organizationId: 'org-a' }, { $and: [{ requesterId: { $eq: 1 } }] }],
+  });
+
+  // 6. charts:queryData on latticeOrders with self requester.userId filter
+  const chartCtx = makeCtx('charts', 'queryData', {
+    values: { mode: 'builder', collection: 'latticeOrders', filter: { $and: [{ 'requester.userId': { $eq: 12 } }] } },
+  });
+  await guard(chartCtx, async () => {});
+  assert.deepEqual(chartCtx.action.params.values.filter, {
+    $and: [{ organizationId: 'org-a' }, { $and: [{ requesterId: { $eq: 1 } }] }],
+  });
+
+  // 7. Abuse / blind oracle attempts still reject with NATIVE_RELATION_EXPANSION_UNSUPPORTED
+  for (const badFilter of [
+    { 'requester.userId': { $eq: 99 } },
+    { 'requester.userId': 99 },
+    { 'requester.userId': { $ne: 12 } },
+    { 'requester.userId': { $gt: 1 } },
+    { 'requester.userId': { $eq: 12, $ne: 99 } },
+    { 'requester.identitySubject': 'sub-x' },
+  ]) {
+    await assert.rejects(
+      guard(makeCtx('latticeOrders', 'list', { filter: badFilter }), async () => {}),
+      { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+    );
+  }
+  await assert.rejects(
+    guard(makeCtx('latticeAssets', 'list', { filter: { 'requester.userId': { $eq: 12 } } }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+  await assert.rejects(
+    guard(makeCtx('charts', 'queryData', {
+      values: { mode: 'builder', collection: 'latticeOrders', filter: { 'requester.userId': { $eq: 99 } } },
+    }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+  await assert.rejects(
+    guard(makeCtx('charts', 'queryData', {
+      values: { mode: 'builder', collection: 'latticeAssets', filter: { 'requester.userId': { $eq: 12 } } },
+    }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+});

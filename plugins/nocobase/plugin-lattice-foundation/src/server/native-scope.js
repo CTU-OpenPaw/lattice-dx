@@ -66,35 +66,75 @@ function assertSafeSort(sort) {
     }
   }
 }
-function assertSafeFilter(node, depth = 0) {
-  if (node == null) return;
+function isSelfUserIdEquality(entry, actorUserId) {
+  if (actorUserId == null) return false;
+  const expected = String(actorUserId);
+  if (typeof entry === 'string' || typeof entry === 'number') {
+    return String(entry) === expected;
+  }
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  const keys = Object.keys(entry);
+  if (keys.length !== 1 || !Object.hasOwn(entry, '$eq')) return false;
+  const val = entry.$eq;
+  return (typeof val === 'string' || typeof val === 'number') && String(val) === expected;
+}
+function sanitizeSafeFilter(node, options = {}, depth = 0) {
+  if (node == null) return node;
   if (depth > 20) throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
   let target = node;
   if (typeof target === 'string') {
     const trimmed = target.trim();
-    if (!trimmed) return;
+    if (!trimmed) return node;
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
       try { target = JSON.parse(trimmed); } catch { throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED'); }
     } else {
-      return;
+      return node;
     }
   }
   if (Array.isArray(target)) {
-    for (const item of target) assertSafeFilter(item, depth + 1);
-    return;
+    return target.map((item) => sanitizeSafeFilter(item, options, depth + 1));
   }
-  if (typeof target !== 'object') return;
+  if (typeof target !== 'object') return target;
+  const out = {};
+  let hasSelfRequesterRewrite = false;
   for (const [key, entry] of Object.entries(target)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+    }
     if (key === '$where' || key === '$raw' || key === '$sql') {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
     if (!key.startsWith('$')) {
+      if (
+        key === 'requester.userId'
+        && options.allowSelfRequesterUserId
+        && options.actor?.userId != null
+        && options.actor?.employeeId != null
+        && isSelfUserIdEquality(entry, options.actor.userId)
+      ) {
+        hasSelfRequesterRewrite = true;
+        continue;
+      }
       if (key.includes('.') || SENSITIVE_FILTER_KEY_RE.test(key)) {
         throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
       }
     }
-    assertSafeFilter(entry, depth + 1);
+    out[key] = sanitizeSafeFilter(entry, options, depth + 1);
   }
+  if (hasSelfRequesterRewrite) {
+    const selfFilter = { $eq: options.actor.employeeId };
+    if (!Object.hasOwn(out, 'requesterId')) {
+      out.requesterId = selfFilter;
+    } else {
+      if (out.$and !== undefined && !Array.isArray(out.$and)) {
+        throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+      }
+      out.$and = Array.isArray(out.$and)
+        ? [...out.$and, { requesterId: selfFilter }]
+        : [{ requesterId: selfFilter }];
+    }
+  }
+  return out;
 }
 function scopeNativeRead(params, actor) {
   if (!actor?.organizationId) throw failure('NATIVE_MEMBERSHIP_REQUIRED');
@@ -222,13 +262,16 @@ function createNativeScopeMiddleware(db, definitions) {
       if (!col || SENSITIVE_CHART_COLLECTIONS.has(col) || (!isScopedCollection(col) && !col.startsWith('lattice') && col !== 'workflowManualTasks')) {
         throw failure('NATIVE_CHART_COLLECTION_FORBIDDEN');
       }
-      assertSafeFilter(values.filter);
-      assertSafeSort(values.sort);
       if (isScopedCollection(col)) {
         const actor = await resolveNativeActor(db, ctx.state.currentUser);
+        const allowSelfRequesterUserId = ['latticeRequests', 'latticeOrders'].includes(col);
+        const nextValues = values.filter !== undefined
+          ? { ...values, filter: sanitizeSafeFilter(values.filter, { allowSelfRequesterUserId, actor }) }
+          : values;
+        assertSafeSort(values.sort);
         ctx.state = ctx.state || {};
         ctx.state.latticeRlsOrg = actor.organizationId;
-        params.values = scopeNativeRead(values, actor);
+        params.values = scopeNativeRead(nextValues, actor);
         if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function') {
           return withTenantRlsContext(db, actor.organizationId, (transaction) => {
             ctx.state.latticeRlsTransaction = transaction;
@@ -236,6 +279,8 @@ function createNativeScopeMiddleware(db, definitions) {
           });
         }
       } else {
+        if (values.filter !== undefined) values.filter = sanitizeSafeFilter(values.filter);
+        assertSafeSort(values.sort);
         if (values.pageSize != null) values.pageSize = clampPageLimit(values.pageSize);
         if (values.limit != null) values.limit = clampPageLimit(values.limit);
       }
@@ -256,7 +301,10 @@ function createNativeScopeMiddleware(db, definitions) {
     if (params.targetCollection || (expanded && (!Array.isArray(expanded) || expanded.length)) || fields.some(field=>typeof field !== 'string' || field.includes('.'))) {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
-    assertSafeFilter(params.filter);
+    const document=['latticeRequests','latticeOrders'].includes(collectionName);
+    if (params.filter !== undefined) {
+      params.filter = sanitizeSafeFilter(params.filter, { allowSelfRequesterUserId: document, actor });
+    }
     assertSafeSort(params.sort);
     if (write.has(actionName) && collectionName === 'latticeEmployees') throw failure('NATIVE_IDENTITY_ADMIN_REQUIRED');
     if (write.has(actionName) && collectionName === 'latticeIncidentCases') throw failure('NATIVE_INCIDENT_WORKFLOW_REQUIRED');
@@ -264,7 +312,6 @@ function createNativeScopeMiddleware(db, definitions) {
     params.filter = scopedRead.filter;
     if (scopedRead.pageSize != null) params.pageSize = scopedRead.pageSize;
     if (scopedRead.limit != null) params.limit = scopedRead.limit;
-    const document=['latticeRequests','latticeOrders'].includes(collectionName);
     if(document) {
       if(actionName==='destroy')throw failure('NATIVE_DOCUMENT_DELETE_UNSUPPORTED');
     }
