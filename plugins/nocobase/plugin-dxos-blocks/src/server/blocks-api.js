@@ -8,6 +8,13 @@
  */
 'use strict';
 
+const {
+  ingestOrDeduplicateAlarm,
+  acknowledgeAlarm,
+  clearAlarm,
+  queryTelemetryTimeSeries,
+} = require('./alarm-engine');
+
 const ALLOWED_PROPOSAL_COLLECTIONS = new Set([
   'latticeAssets',
   'latticeRequests',
@@ -57,12 +64,10 @@ async function resolveNativeEmployee(db, user) {
   return { userId: String(id), employeeId: val(emp, 'id'), organizationId };
 }
 
-async function hasViewPermission(db, ctx, collection) {
+async function hasViewPermission(db, ctx, collection, action = 'view') {
+  const candidates = action === 'view' ? ['view', 'list'] : [action];
   if (typeof ctx.can === 'function') {
-    if (ctx.can({ resource: collection, action: 'view' }) || ctx.can({ resource: collection, action: 'list' })) {
-      return true;
-    }
-    return false;
+    return candidates.some((act) => ctx.can({ resource: collection, action: act }));
   }
   const roleName = ctx.state?.currentRole;
   if (!roleName) return false;
@@ -74,10 +79,10 @@ async function hasViewPermission(db, ctx, collection) {
   if (res) {
     if (val(res, 'usingActionsConfig') === false) return true;
     const actions = val(res, 'actions') || [];
-    return actions.some((a) => ['view', 'list'].includes(a?.name || a));
+    return actions.some((a) => candidates.includes(a?.name || a));
   }
   const strategyActions = val(role, 'strategy')?.actions || [];
-  return Array.isArray(strategyActions) && strategyActions.some((a) => a === 'view' || a === '*:*');
+  return Array.isArray(strategyActions) && strategyActions.some((a) => candidates.includes(a) || a === '*:*');
 }
 
 async function resolveCallerContext(db, ctx, { collection, action = 'view' }) {
@@ -89,7 +94,7 @@ async function resolveCallerContext(db, ctx, { collection, action = 'view' }) {
     return { isRoot: true, actor: null };
   }
   const actor = await resolveNativeEmployee(db, ctx.state.currentUser);
-  if (!(await hasViewPermission(db, ctx, collection))) {
+  if (!(await hasViewPermission(db, ctx, collection, action))) {
     throw fail('DXOS_ACL_DENIED', 403);
   }
   return { isRoot: false, actor };
@@ -309,6 +314,103 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       }
 
       ctx.body = { asset, brokerStatus, telemetry, syncSummary, preview: isRoot };
+      return next();
+    },
+
+    telemetrySeries: async (ctx, next) => {
+      if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection: 'latticeAssets', action: 'view' });
+
+      let lookupId;
+      let requestedOrg = isRoot ? null : actor.organizationId;
+      let assetEntityId = typeof input.assetEntityId === 'string' ? input.assetEntityId.trim() : '';
+      if (assetEntityId) {
+        const m = URN_RE.exec(assetEntityId);
+        if (m) {
+          if (!isRoot && m[1] !== actor.organizationId) throw fail('DXOS_CROSS_ORG_FORBIDDEN', 403);
+          requestedOrg = m[1];
+          lookupId = Number(m[2]);
+        }
+      } else if (input.assetId != null && input.assetId !== '') {
+        if (!/^[1-9]\d{0,18}$/.test(String(input.assetId))) throw fail('DXOS_INVALID_ASSET_ID', 400);
+        lookupId = Number(input.assetId);
+      }
+
+      if (!assetEntityId && lookupId != null) {
+        const asset = await db.getRepository('latticeAssets')?.findOne({
+          filter: { id: lookupId, ...(requestedOrg ? { organizationId: requestedOrg } : {}) },
+        });
+        if (!asset) throw fail('DXOS_ASSET_NOT_FOUND', 404);
+        requestedOrg = val(asset, 'organizationId');
+        assetEntityId = `urn:ngsi-ld:Asset:${requestedOrg}:native:${val(asset, 'id')}`;
+      }
+
+      const series = await queryTelemetryTimeSeries(db, {
+        organizationId: requestedOrg,
+        assetEntityId,
+        attribute: typeof input.attribute === 'string' ? input.attribute.trim() : '',
+        limit: Number(input.limit) || 50,
+      });
+      ctx.body = { ...series, preview: isRoot };
+      return next();
+    },
+
+    alarmIngest: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection: 'latticeIncidentCases', action: 'create' });
+      const orgId = isRoot
+        ? (typeof input.organizationId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(input.organizationId.trim()) ? input.organizationId.trim() : 'native-ui-lab')
+        : actor.organizationId;
+
+      let assetEntityId = typeof input.assetEntityId === 'string' ? input.assetEntityId.trim() : '';
+      const assetId = input.assetId != null && /^[1-9]\d{0,18}$/.test(String(input.assetId)) ? Number(input.assetId) : null;
+      if (!assetEntityId && assetId != null) {
+        assetEntityId = `urn:ngsi-ld:Asset:${orgId}:native:${assetId}`;
+      }
+      ctx.body = await ingestOrDeduplicateAlarm(db, {
+        organizationId: orgId,
+        assetId,
+        assetEntityId,
+        ruleCode: String(input.ruleCode || 'IOT-RULE').trim(),
+        attribute: String(input.attribute || 'temperature').trim(),
+        severity: String(input.severity || 'medium').trim(),
+        summary: String(input.summary || '').trim(),
+        handlerId: actor?.employeeId ? String(actor.employeeId) : String(input.handlerId || 'root'),
+      });
+      return next();
+    },
+
+    alarmAck: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection: 'latticeIncidentCases', action: 'update' });
+      const id = Number(input.id);
+      if (!Number.isInteger(id) || id <= 0) throw fail('ALARM_ID_REQUIRED', 400, 'Cần mã id cảnh báo hợp lệ.');
+      const actorName = val(ctx.state?.currentUser, 'username') || (actor ? `user-${actor.userId}` : 'root');
+      ctx.body = await acknowledgeAlarm(db, {
+        id,
+        organizationId: isRoot ? null : actor.organizationId,
+        actorName,
+        note: String(input.note || '').trim(),
+      });
+      return next();
+    },
+
+    alarmClear: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection: 'latticeIncidentCases', action: 'update' });
+      const id = Number(input.id);
+      if (!Number.isInteger(id) || id <= 0) throw fail('ALARM_ID_REQUIRED', 400, 'Cần mã id cảnh báo hợp lệ.');
+      const actorName = val(ctx.state?.currentUser, 'username') || (actor ? `user-${actor.userId}` : 'root');
+      ctx.body = await clearAlarm(db, {
+        id,
+        organizationId: isRoot ? null : actor.organizationId,
+        actorName,
+        closeNote: String(input.closeNote || input.note || '').trim(),
+      });
       return next();
     },
   };

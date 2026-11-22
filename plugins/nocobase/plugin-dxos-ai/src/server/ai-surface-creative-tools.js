@@ -15,9 +15,9 @@ const { publishSurfaceUpdate } = require('./surface-events');
 const LDX_ROLE_RE = /^ldx_[a-z][a-z0-9_]{1,40}$/;
 const IMMUTABLE_WRITE_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'organizationId', 'identitySubject', 'userId']);
 const VALID_CREATIVE_THEMES = new Set(['industrial-cockpit', 'emerald-ops', 'amber-alert', 'royal-indigo', 'clean-light']);
-const VALID_QUERY_KINDS = new Set(['collection', 'telemetry', 'tasks']);
+const VALID_QUERY_KINDS = new Set(['collection', 'telemetry', 'tasks', 'timeseries']);
 const VALID_WIDGET_TYPES = new Set([
-  'gauge', 'thermometer', 'stage-pipeline', 'distribution-bars',
+  'gauge', 'thermometer', 'timeseries-line', 'stage-pipeline', 'distribution-bars',
   'rule-callout', 'status-matrix', 'quick-actions',
 ]);
 const SAFE_COL_RE = /^[a-zA-Z0-9_]{1,64}$/;
@@ -433,7 +433,16 @@ function sanitizeCreativeBlueprintPayload(raw = {}) {
     const collection = String(q.collection || '').trim();
     if (kind === 'collection' && !SAFE_COL_RE.test(collection)) continue;
     const filter = q.filter && typeof q.filter === 'object' && !Array.isArray(q.filter) ? q.filter : {};
-    queries.push({ id, kind, collection, filter, limit: Math.max(1, Math.min(50, Number(q.limit) || 20)) });
+    queries.push({
+      id,
+      kind,
+      collection,
+      filter,
+      limit: Math.max(1, Math.min(kind === 'timeseries' ? 200 : 50, Number(q.limit) || 20)),
+      ...(q.assetEntityId ? { assetEntityId: String(q.assetEntityId).trim().slice(0, 120) } : {}),
+      ...(q.assetId != null ? { assetId: q.assetId } : {}),
+      ...(q.attribute ? { attribute: String(q.attribute).trim().slice(0, 60) } : {}),
+    });
     if (queries.length >= 6) break;
   }
 

@@ -16,9 +16,9 @@ const {
   triggerDxosCopilot,
 } = require('./blocks-helpers');
 
-const VALID_QUERY_KINDS = new Set(['collection', 'telemetry', 'tasks']);
+const VALID_QUERY_KINDS = new Set(['collection', 'telemetry', 'tasks', 'timeseries']);
 const VALID_WIDGET_TYPES = new Set([
-  'gauge', 'thermometer', 'stage-pipeline', 'distribution-bars',
+  'gauge', 'thermometer', 'timeseries-line', 'stage-pipeline', 'distribution-bars',
   'rule-callout', 'status-matrix', 'quick-actions',
 ]);
 
@@ -133,8 +133,17 @@ function parseCreativeBlueprint(raw) {
     const collection = String(q.collection || '').trim();
     if (kind === 'collection' && !SAFE_COLLECTION_RE.test(collection)) continue;
     const filter = q.filter && typeof q.filter === 'object' && !Array.isArray(q.filter) ? q.filter : {};
-    const limit = Math.max(1, Math.min(50, Number(q.limit) || 20));
-    queries.push({ id, kind, collection, filter, limit });
+    const limit = Math.max(1, Math.min(kind === 'timeseries' ? 200 : 50, Number(q.limit) || 20));
+    queries.push({
+      id,
+      kind,
+      collection,
+      filter,
+      limit,
+      ...(q.assetEntityId ? { assetEntityId: String(q.assetEntityId).trim().slice(0, 120) } : {}),
+      ...(q.assetId != null ? { assetId: q.assetId } : {}),
+      ...(q.attribute ? { attribute: String(q.attribute).trim().slice(0, 60) } : {}),
+    });
     if (queries.length >= 6) break;
   }
 
@@ -249,7 +258,19 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
       const results = {};
       await Promise.all(bp.queries.map(async (q) => {
         try {
-          if (q.kind === 'telemetry') {
+          if (q.kind === 'timeseries') {
+            const res = await api.request({
+              url: 'dxosBlocks:telemetrySeries',
+              method: 'post',
+              data: {
+                ...(q.assetEntityId ? { assetEntityId: q.assetEntityId } : {}),
+                ...(q.assetId != null ? { assetId: q.assetId } : {}),
+                ...(q.attribute ? { attribute: q.attribute } : {}),
+                limit: q.limit,
+              },
+            });
+            results[q.id] = res?.data?.data || res?.data || { points: [], stats: {}, activeAlarms: [] };
+          } else if (q.kind === 'telemetry') {
             const res = await api.request({ url: 'dxosBlocks:contextTelemetry', method: 'post', data: {} });
             const payload = res?.data?.data || res?.data || {};
             results[q.id] = normalizeTelemetryRows(payload);
@@ -316,6 +337,72 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
         border: `1px solid ${palette.cardBorder}`,
         color: palette.titleColor,
       };
+      const handleAlarmTransition = async (alarmId, op) => {
+        if (!api?.request || !alarmId) return;
+        try {
+          setActionNote(op === 'ack' ? 'Đang xác nhận cảnh báo…' : 'Đang đóng cảnh báo…');
+          await api.request({ url: op === 'ack' ? 'dxosBlocks:alarmAck' : 'dxosBlocks:alarmClear', method: 'post', data: { id: alarmId } });
+          setActionNote(op === 'ack' ? `Đã xác nhận (Ack) cảnh báo #${alarmId}.` : `Đã đóng (Clear) cảnh báo #${alarmId}.`);
+          runQueries();
+        } catch (err) {
+          setActionNote(err?.response?.data?.errors?.[0]?.message || 'Không cập nhật được trạng thái cảnh báo.');
+        }
+      };
+
+      if (w.type === 'timeseries-line') {
+        const series = queryState.results[w.queryId];
+        const rawPoints = Array.isArray(series?.points) ? series.points : Array.isArray(series) ? series : [];
+        const vals = rawPoints.map((p) => Number(p?.value ?? p?.[w.field || 'value'])).filter((n) => Number.isFinite(n));
+        const warnT = w.warningThreshold !== undefined ? Number(w.warningThreshold) : null;
+        const critT = w.criticalThreshold !== undefined ? Number(w.criticalThreshold) : null;
+        const allVals = [...vals, ...(Number.isFinite(warnT) ? [warnT] : []), ...(Number.isFinite(critT) ? [critT] : [])];
+        const minV = allVals.length ? Math.min(...allVals) : 0;
+        const maxV = allVals.length && Math.max(...allVals) > minV ? Math.max(...allVals) : minV + 1;
+        const svgW = 360;
+        const svgH = 110;
+        const pad = 10;
+        const yFor = (v) => {
+          const ratio = (v - minV) / (maxV - minV);
+          return Number((svgH - pad - ratio * (svgH - pad * 2)).toFixed(1));
+        };
+        const coords = vals.map((v, i) => {
+          const x = vals.length <= 1 ? svgW / 2 : Number((pad + (i / (vals.length - 1)) * (svgW - pad * 2)).toFixed(1));
+          return `${x},${yFor(v)}`;
+        });
+        const stats = series?.stats || (vals.length ? { min: Math.min(...vals), max: Math.max(...vals), avg: Number((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1)), latest: vals[vals.length - 1] } : {});
+        const activeAlarms = Array.isArray(series?.activeAlarms) ? series.activeAlarms : [];
+        const unitLabel = w.unit ? ` ${w.unit}` : '';
+        return h('div', { key: idx, 'data-testid': 'dxos-timeseries-line-widget', style: { ...cardStyle, gridColumn: '1 / -1' } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 } },
+            h('span', { style: { fontSize: 12, color: palette.mutedColor, fontWeight: 700 } }, w.title),
+            h('div', { style: { display: 'flex', gap: 10, fontSize: 11, color: palette.mutedColor } },
+              stats.latest != null ? h('span', { style: { fontWeight: 800, color: palette.titleColor } }, `Mới nhất: ${stats.latest}${unitLabel}`) : null,
+              stats.min != null ? h('span', null, `Min: ${stats.min}${unitLabel}`) : null,
+              stats.max != null ? h('span', null, `Max: ${stats.max}${unitLabel}`) : null,
+            ),
+          ),
+          vals.length
+            ? h('svg', { viewBox: `0 0 ${svgW} ${svgH}`, style: { width: '100%', height: 110, display: 'block' } },
+              Number.isFinite(warnT) ? h('line', { x1: pad, x2: svgW - pad, y1: yFor(warnT), y2: yFor(warnT), stroke: '#f59e0b', strokeDasharray: '4 4', strokeWidth: 1.2 }) : null,
+              Number.isFinite(critT) ? h('line', { x1: pad, x2: svgW - pad, y1: yFor(critT), y2: yFor(critT), stroke: '#ef4444', strokeDasharray: '4 4', strokeWidth: 1.4 }) : null,
+              vals.length >= 2
+                ? h('polyline', { fill: 'none', stroke: palette.accent, strokeWidth: 2.4, points: coords.join(' ') })
+                : h('circle', { cx: svgW / 2, cy: yFor(vals[0]), r: 4, fill: palette.accent }),
+            )
+            : h('div', { style: { fontSize: 12, color: palette.mutedColor, padding: '16px 0' } }, 'Chưa có chuỗi điểm đo thời gian.'),
+          activeAlarms.length
+            ? h('div', { style: { marginTop: 8, display: 'grid', gap: 6 } },
+              activeAlarms.slice(0, 3).map((alm) => h('div', { key: alm.id, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, background: '#ef444418', border: '1px solid #ef444444', fontSize: 11 } },
+                h('span', null, `[${alm.severity}] ${alm.code} (${alm.status}, lặp ${alm.occurrenceCount || 1}x)`),
+                h('div', { style: { display: 'flex', gap: 6 } },
+                  alm.status === 'open' ? h('button', { type: 'button', onClick: () => handleAlarmTransition(alm.id, 'ack'), style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #f59e0b', background: 'transparent', color: '#f59e0b', cursor: 'pointer', fontWeight: 700 } }, 'Xác nhận (Ack)') : null,
+                  h('button', { type: 'button', onClick: () => handleAlarmTransition(alm.id, 'clear'), style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #10b981', background: 'transparent', color: '#10b981', cursor: 'pointer', fontWeight: 700 } }, 'Đóng (Clear)'),
+                ),
+              )),
+            )
+            : null,
+        );
+      }
       if (w.type === 'thermometer' || w.type === 'gauge') {
         const valNum = resolveWidgetValue(w, queryState.results);
         const min = Number.isFinite(Number(w.min)) ? Number(w.min) : 0;
