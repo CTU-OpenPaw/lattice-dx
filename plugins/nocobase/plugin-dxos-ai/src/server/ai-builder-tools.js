@@ -699,7 +699,12 @@ function createBuilderTools(deps) {
               for (const sr of srcRes) {
                 const cname = val(sr, 'name');
                 if (cname && !(await resourcesRepo.findOne({ filter: { roleName: args.roleName, dataSourceKey: 'main', name: cname } }))) {
-                  const clonedActions = (val(sr, 'actions') || []).map((a) => ({ name: val(a, 'name'), ...(val(a, 'fields') ? { fields: [...val(a, 'fields')] } : {}) }));
+                  const clonedActions = (val(sr, 'actions') || []).map((a) => ({
+                    name: val(a, 'name'),
+                    ...(val(a, 'fields') ? { fields: [...val(a, 'fields')] } : {}),
+                    ...(val(a, 'scope') ? { scope: val(a, 'scope') } : {}),
+                    ...(val(a, 'scopeId') != null ? { scopeId: val(a, 'scopeId') } : {}),
+                  }));
                   await resourcesRepo.create({ values: { roleName: args.roleName, dataSourceKey: 'main', name: cname, usingActionsConfig: true, actions: clonedActions } });
                 }
               }
@@ -734,15 +739,22 @@ function createBuilderTools(deps) {
             name: val(a, 'name'),
             ...(val(a, 'fields') ? { fields: [...val(a, 'fields')] } : {}),
             ...(val(a, 'scope') ? { scope: val(a, 'scope') } : {}),
+            ...(val(a, 'scopeId') != null ? { scopeId: val(a, 'scopeId') } : {}),
           })).filter((a) => !toRevoke.has(a.name));
+          let savedModel = existing;
           if (typeof resourcesRepo.update === 'function') {
-            await resourcesRepo.update({
+            const updated = await resourcesRepo.update({
               filter: { roleName: args.roleName, dataSourceKey: 'main', name: args.collectionName },
               values: { usingActionsConfig: true, actions: remainingActions },
               updateAssociationValues: ['actions'],
             });
+            savedModel = (Array.isArray(updated) ? updated[0] : updated) || existing;
           } else {
             await existing.update({ actions: remainingActions });
+          }
+          if (typeof savedModel?.writeToACL === 'function') {
+            const dsAcl = ctx?.app?.dataSourceManager?.dataSources?.get?.('main')?.acl || ctx?.app?.acl;
+            if (dsAcl) await savedModel.writeToACL({ acl: dsAcl });
           }
           return { applied: true, revoked: true, revokedActions: [...toRevoke], remainingActions: remainingActions.map((a) => a.name) };
         }
@@ -756,16 +768,29 @@ function createBuilderTools(deps) {
             const origFields = Array.isArray(val(a, 'fields')) ? [...val(a, 'fields')] : null;
             const shouldFilter = ['create', 'update'].includes(actName) || (args.hideLockedFromView && actName === 'view');
             const filtered = origFields && shouldFilter ? origFields.filter((f) => !locks.has(f)) : origFields;
-            return { name: actName, ...(filtered ? { fields: filtered } : {}) };
+            const scope = val(a, 'scope');
+            const scopeId = val(a, 'scopeId');
+            return {
+              name: actName,
+              ...(filtered ? { fields: filtered } : {}),
+              ...(scope ? { scope } : {}),
+              ...(scopeId != null ? { scopeId } : {}),
+            };
           });
+          let savedModel = existing;
           if (typeof resourcesRepo.update === 'function') {
-            await resourcesRepo.update({
+            const updated = await resourcesRepo.update({
               filter: { roleName: args.roleName, dataSourceKey: 'main', name: args.collectionName },
               values: { usingActionsConfig: true, actions: nextActions },
               updateAssociationValues: ['actions'],
             });
+            savedModel = (Array.isArray(updated) ? updated[0] : updated) || existing;
           } else {
             await existing.update({ actions: nextActions });
+          }
+          if (typeof savedModel?.writeToACL === 'function') {
+            const dsAcl = ctx?.app?.dataSourceManager?.dataSources?.get?.('main')?.acl || ctx?.app?.acl;
+            if (dsAcl) await savedModel.writeToACL({ acl: dsAcl });
           }
           return { applied: true, locked: true, roleName: args.roleName, collectionName: args.collectionName, lockedFields: [...locks] };
         }
@@ -938,6 +963,8 @@ function createBuilderTools(deps) {
           if (!args.workflowId || !args.nodeType) throw failTool('WORKFLOW_NODE_ARGS_REQUIRED', 400, 'Cần workflowId và nodeType.');
           const key = args.nodeKey || `dxos_${args.nodeType}_${Date.now().toString(36)}`;
           if (args.dryRun) return { dryRun: true, workflowId: args.workflowId, nodeType: args.nodeType, key, upstreamNodeId: args.upstreamNodeId || null };
+          const up = args.upstreamNodeId ? await nodeRepo.findOne({ filterByTk: args.upstreamNodeId }) : null;
+          const prevDownstreamId = up ? val(up, 'downstreamId') ?? null : null;
           const created = await nodeRepo.create({
             values: {
               workflowId: args.workflowId,
@@ -945,14 +972,21 @@ function createBuilderTools(deps) {
               title: args.title || `Bước ${args.nodeType}`,
               type: args.nodeType,
               ...(args.upstreamNodeId ? { upstreamId: args.upstreamNodeId } : {}),
+              ...(prevDownstreamId != null ? { downstreamId: prevDownstreamId } : {}),
               config: args.config || {},
             },
           });
-          if (args.upstreamNodeId) {
-            const up = await nodeRepo.findOne({ filterByTk: args.upstreamNodeId });
-            if (up && typeof up.update === 'function') await up.update({ downstreamId: val(created, 'id') });
+          const createdId = val(created, 'id');
+          if (up && typeof up.update === 'function') {
+            await up.update({ downstreamId: createdId });
           }
-          return { applied: true, added: true, node: { id: val(created, 'id'), key, title: val(created, 'title'), type: val(created, 'type') } };
+          if (prevDownstreamId != null) {
+            const down = await nodeRepo.findOne({ filterByTk: prevDownstreamId });
+            if (down && typeof down.update === 'function') {
+              await down.update({ upstreamId: createdId });
+            }
+          }
+          return { applied: true, added: true, node: { id: createdId, key, title: val(created, 'title'), type: val(created, 'type') } };
         }
 
         if (args.operation === 'toggleWorkflow') {
@@ -1003,7 +1037,7 @@ function createBuilderTools(deps) {
           type: 'collection',
           enabled,
           current: true,
-          config: { collection: args.collectionName, mode: triggerMode, condition: { $and: [] } },
+          config: { collection: args.collectionName, mode: triggerMode, condition: { $and: [{ organizationId: actor.organizationId }] } },
           options: { dxosOrganizationId: actor.organizationId, dxosCustomCollection: args.collectionName },
         };
         const created = await db.sequelize.transaction(async (transaction) => {
@@ -1038,7 +1072,7 @@ function createBuilderTools(deps) {
               title: 'Cập nhật trạng thái đã kiểm định',
               type: 'update',
               upstreamId: val(reviewNode, 'id'),
-              config: { collection: args.collectionName, params: { filter: { id: '{{$context.data.id}}' }, values: { status: 'reviewed' } } },
+              config: { collection: args.collectionName, params: { filter: { id: '{{$context.data.id}}', organizationId: actor.organizationId }, values: { status: 'reviewed' } } },
             },
             transaction,
           });

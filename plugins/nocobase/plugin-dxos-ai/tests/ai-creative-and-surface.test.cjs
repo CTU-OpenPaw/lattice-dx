@@ -549,3 +549,11 @@ test('dxos_provision_role_workspace handles roles_title_key collisions and norma
   const createdStaffRole = db.store.roles.find((r) => r.name === 'ldx_staff_qa');
   assert.equal(createdStaffRole.title, 'Nhân sự Hệ thống (ldx_staff_qa)');
 });
+
+test('surfaceRevisionStore bounds memory cache size under high portal cardinality', () => {
+  const { bumpSurfaceRevision, surfaceRevisionStore } = require('../src/server/ai-surface-creative-tools');
+  for (let i = 0; i < 620; i += 1) {
+    bumpSurfaceRevision(`portal-${i}`, { blockCount: 1, layoutSignature: `sig-${i}` });
+  }
+  assert.ok(surfaceRevisionStore.size <= 500, `Expected surfaceRevisionStore bounded <= 500, got ${surfaceRevisionStore.size}`);
+});

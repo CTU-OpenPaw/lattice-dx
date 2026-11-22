@@ -448,3 +448,79 @@ test('workflow & portal tools survive NocoBase Resourcer.getResource throwing "r
   });
   assert.equal(portalRes.applied, true);
 });
+
+test('lockFields preserves scope/scopeId + writeToACL, addNode splices safely, and buildCustomWorkflow scopes organizationId', async () => {
+  const { db, ctx, byName } = makeBuilderHarness();
+  const rbacTool = byName.get('dxos_manage_rbac_permissions');
+  const wfTool = byName.get('dxos_configure_workflow');
+
+  let writeToAclCalled = 0;
+  db.store.dataSourcesRolesResources.push({
+    roleName: 'ldx_employee',
+    name: 'latticeOrders',
+    dataSourceKey: 'main',
+    usingActionsConfig: true,
+    actions: [
+      { name: 'view', fields: ['id', 'code', 'status'], scopeId: 42, scope: { own: true } },
+      { name: 'update', fields: ['code', 'auditVerdict'], scopeId: 43, scope: { ownDraft: true } },
+    ],
+  });
+  const baseGetRepo = db.getRepository.bind(db);
+  db.getRepository = (n) => {
+    const repo = baseGetRepo(n);
+    if (n !== 'dataSourcesRolesResources') return repo;
+    return {
+      ...repo,
+      update: async ({ filter, values }) => {
+        const hit = db.store.dataSourcesRolesResources.find((r) => r.roleName === filter.roleName && r.name === filter.name);
+        Object.assign(hit, values);
+        hit.writeToACL = async () => { writeToAclCalled += 1; };
+        return [hit];
+      },
+    };
+  };
+
+  await rbacTool.invoke(ctx, {
+    operation: 'lockFields',
+    roleName: 'ldx_employee',
+    collectionName: 'latticeOrders',
+    lockedFields: ['auditVerdict'],
+  });
+  const updatedRes = db.store.dataSourcesRolesResources.find((r) => r.roleName === 'ldx_employee' && r.name === 'latticeOrders');
+  const viewAct = updatedRes.actions.find((a) => a.name === 'view');
+  const updAct = updatedRes.actions.find((a) => a.name === 'update');
+  assert.equal(viewAct.scopeId, 42);
+  assert.deepEqual(viewAct.scope, { own: true });
+  assert.equal(updAct.scopeId, 43);
+  assert.deepEqual(updAct.scope, { ownDraft: true });
+  assert.equal(writeToAclCalled, 1);
+
+  // addNode between node 501 (downstreamId: 502) and 502 splices instead of orphaning 502
+  const spliced = await wfTool.invoke(ctx, {
+    operation: 'addNode',
+    workflowId: 50,
+    upstreamNodeId: 501,
+    nodeType: 'calculation',
+    title: 'Bước trung gian',
+    config: {},
+  });
+  const node501 = db.store.flow_nodes.find((n) => n.id === 501);
+  const node502 = db.store.flow_nodes.find((n) => n.id === 502);
+  const midNode = db.store.flow_nodes.find((n) => n.id === spliced.node.id);
+  assert.equal(node501.downstreamId, midNode.id);
+  assert.equal(midNode.upstreamId, 501);
+  assert.equal(midNode.downstreamId, 502);
+  assert.equal(node502.upstreamId, midNode.id);
+
+  // buildCustomWorkflow scopes trigger condition & update node by actor.organizationId
+  const customWf = await wfTool.invoke(ctx, {
+    operation: 'buildCustomWorkflow',
+    title: 'Multi-tenant Scoped WF',
+    collectionName: 'latticeCustomColdAudits',
+    enabled: false,
+  });
+  const createdWf = db.store.workflows.find((w) => w.id === customWf.workflowId);
+  assert.deepEqual(createdWf.config.condition, { $and: [{ organizationId: 'native-ui-lab' }] });
+  const markNode = db.store.flow_nodes.find((n) => n.workflowId === customWf.workflowId && n.key === 'markReviewed');
+  assert.equal(markNode.config.params.filter.organizationId, 'native-ui-lab');
+});

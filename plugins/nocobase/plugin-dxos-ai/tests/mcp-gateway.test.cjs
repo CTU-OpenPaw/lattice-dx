@@ -18,13 +18,21 @@ const { createDxosTools, ADMIN_BUILDER_TOOL_NAMES } = require('../src/server/ai-
 function makeItOtMockDb() {
   const wrap = (row) => ({ ...row, get: (k) => row[k], toJSON: () => row });
   const auditLogs = [];
-  const outbox = [{ id: 1, entityType: 'Asset', entityId: 'AST-01', organizationId: 'org-a', status: 'pending' }];
+  const outbox = [{ id: 1, eventId: 'evt-1', entityId: 'AST-01', organizationId: 'org-a', collectionName: 'latticeAssets', recordId: 1, state: 'pending', attempts: 0, payload: {} }];
   const store = {
     latticeEmployees: [
       { id: 13, userId: 9, organizationId: 'org-a', active: true },
       { id: 14, userId: 10, organizationId: 'org-a', active: true },
+      { id: 15, userId: 11, organizationId: 'org-a', active: true },
     ],
-    roles: [{ name: 'root', allowConfigure: true }, { name: 'ldx_employee', allowConfigure: false }, { name: 'ldx_manager', allowConfigure: false }],
+    roles: [{ name: 'root', allowConfigure: true }, { name: 'ldx_employee', allowConfigure: false }, { name: 'ldx_manager', allowConfigure: false }, { name: 'ldx_driver', allowConfigure: false }],
+    dataSourcesRolesResources: [
+      { roleName: 'ldx_employee', name: 'latticeAssets', dataSourceKey: 'main', actions: [{ name: 'view' }] },
+      { roleName: 'ldx_employee', name: 'latticeIncidentCases', dataSourceKey: 'main', actions: [{ name: 'view' }] },
+      { roleName: 'ldx_employee', name: 'latticeAgentProposals', dataSourceKey: 'main', actions: [{ name: 'view' }] },
+      { roleName: 'ldx_employee', name: 'latticeParaDocuments', dataSourceKey: 'main', actions: [{ name: 'view' }] },
+      { roleName: 'ldx_driver', name: 'latticeAssets', dataSourceKey: 'main', actions: [{ name: 'view' }] },
+    ],
     latticeAssets: [{ id: 1, code: 'AST-01', name: 'Kho lạnh 01', organizationId: 'org-a', entityId: 'urn:ngsi-ld:Asset:org-a:AST-01' }],
     latticeIncidentCases: [{ id: 2, code: 'INC-01', name: 'Quá nhiệt dàn ngưng', organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:AST-01', severity: 'high', status: 'open' }],
     latticeAgentProposals: [{ id: 3, code: 'PROP-01', organizationId: 'org-a', state: 'proposed', targetCollection: 'latticeIncidentCases' }],
@@ -198,4 +206,74 @@ test('default host auth populates ctx.db and ctx.getBearerToken before dataSourc
   assert.equal(seenToken, 'valid-jwt');
   assert.equal(ctx.status, 200);
   assert.ok(ctx.body.result.tools.some((t) => t.name === 'dxos_search_enterprise_context'));
+});
+
+test('v0.2.0 MCP/IT-OT hardening: Orion-LD ?local=true, outbox state/schema, redirect error, admin gate on health & resources/read, active X-Role', async () => {
+  const db = makeItOtMockDb();
+  const seenFetches = [];
+  const captureFetch = async (url, init = {}) => {
+    seenFetches.push({ url: String(url), init });
+    return {
+      ok: true,
+      status: 200,
+      json: async () => (String(url).includes('entities') ? [{ id: 'urn:ngsi-ld:Asset:org-a:AST-01', type: 'Asset' }] : { version: '1.12.0' }),
+    };
+  };
+  const tools = createItOtMcpTools(db, { ORION_LD_URL: 'http://127.0.0.1:1026', N8N_URL: 'http://127.0.0.1:5678' }, captureFetch);
+  const byName = new Map(tools.map((t) => [t.definition.name, t]));
+
+  // 1. Orion-LD uses ?local=true&limit=50 & redirect: 'error'
+  const tel = await byName.get('get_live_ngsi_telemetry').invoke({ state: { currentUser: { id: 9 }, currentRoles: ['ldx_employee'] }, db }, {});
+  assert.equal(tel.degraded, false);
+  assert.equal(tel.pendingOutboxCount, 1);
+  assert.equal(seenFetches[0].url.includes('/ngsi-ld/v1/entities?local=true'), true);
+  assert.equal(seenFetches[0].init.redirect, 'error');
+
+  // 2. requeue_outbox writes state + required NOT NULL columns matching context-outbox schema
+  const mgrCtx = { state: { currentUser: { id: 10, username: 'mgr10' }, currentRoles: ['ldx_manager'] }, db };
+  await byName.get('dispatch_itot_webhook_or_sync').invoke(mgrCtx, { mode: 'requeue_outbox', entityId: 'urn:ngsi-ld:Asset:org-a:AST-01', reason: 'Sync after alarm' });
+  const addedOutbox = db.outbox.at(-1);
+  assert.equal(addedOutbox.state, 'pending');
+  assert.equal(typeof addedOutbox.eventId, 'string');
+  assert.equal(addedOutbox.collectionName, 'latticeAssets');
+  assert.notEqual(addedOutbox.recordId, undefined);
+  assert.equal(addedOutbox.attempts, 0);
+
+  // 3. get_stack_connector_health is adminOnly & get_sensor_and_incident_timeline denies unpermitted role (ldx_driver)
+  assert.equal(byName.get('get_stack_connector_health').adminOnly, true);
+  await assert.rejects(
+    () => byName.get('get_sensor_and_incident_timeline').invoke({ state: { currentUser: { id: 11 }, currentRoles: ['ldx_driver'] }, db }, {}),
+    (err) => err.status === 403,
+  );
+
+  // 4. Gateway blocks resources/read for non-admin & enforces X-Role downgrade
+  const baseFindRepo = db.getRepository.bind(db);
+  db.getRepository = (n) => (n === 'rolesUsers'
+    ? { find: async ({ filter }) => (Number(filter?.userId) === 1 ? [{ roleName: 'root' }, { roleName: 'ldx_employee' }] : []) }
+    : baseFindRepo(n));
+  const mw = createMcpGatewayMiddleware({
+    app: {
+      authManager: {
+        middleware: () => async (ctx, next) => {
+          ctx.state.currentUser = { id: 1, username: 'dual-user' };
+          await next();
+        },
+      },
+    },
+    db,
+    tools: createDxosTools(),
+    itOtTools: tools,
+  });
+
+  // Switch active role down to ldx_employee via X-Role header -> hides admin tools & denies resources/read
+  const switchedCtx = {
+    path: '/api/dxos-mcp',
+    method: 'POST',
+    headers: { authorization: 'Bearer tok', 'x-role': 'ldx_employee' },
+    request: { body: { jsonrpc: '2.0', id: 77, method: 'resources/read', params: { uri: 'dxos://topology/planes' } }, headers: { 'x-role': 'ldx_employee' } },
+    set() {},
+  };
+  await mw(switchedCtx, async () => {});
+  assert.equal(switchedCtx.body.error.code, -32003);
+  assert.deepEqual(switchedCtx.state.currentRoles, ['ldx_employee']);
 });

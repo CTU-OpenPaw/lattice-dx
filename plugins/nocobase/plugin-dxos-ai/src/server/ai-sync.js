@@ -32,7 +32,12 @@ function enforceProfileRoleLock(profile = {}, adminToolNames = []) {
 
 function resolveLoopbackOrigin(rawOrigin) {
   try {
-    return new URL(rawOrigin || process.env.NOCOBASE_INTERNAL_URL || 'http://127.0.0.1:13000').origin;
+    const parsed = new URL(rawOrigin || process.env.NOCOBASE_INTERNAL_URL || 'http://127.0.0.1:13000');
+    const host = parsed.hostname.toLowerCase();
+    if (['127.0.0.1', 'localhost', '::1', '[::1]', 'host.docker.internal', 'nocobase'].includes(host)) {
+      return parsed.origin;
+    }
+    return 'http://127.0.0.1:13000';
   } catch {
     return 'http://127.0.0.1:13000';
   }
@@ -165,8 +170,8 @@ async function installAiRoleGrants(db) {
             usingActionsConfig: true,
             actions: [
               { name: 'view', fields },
-              { name: 'create', fields: fields.filter((f) => f !== 'id' && f !== 'createdAt' && f !== 'updatedAt') },
-              { name: 'update', fields: fields.filter((f) => f !== 'id' && f !== 'createdAt' && f !== 'updatedAt') },
+              { name: 'create', fields: fields.filter((f) => !['id', 'createdAt', 'updatedAt', 'isAdminBuilder', 'allowedRoles'].includes(f)) },
+              { name: 'update', fields: fields.filter((f) => !['id', 'createdAt', 'updatedAt', 'isAdminBuilder', 'allowedRoles'].includes(f)) },
               { name: 'destroy' },
             ],
           },

@@ -181,3 +181,15 @@ test('sanitizeAuditSummary redacts sensitive keys and syncProfileToNocobaseAi up
   const grants = await installAiRoleGrants(fakeDb);
   assert.equal(Array.isArray(grants.granted), true);
 });
+
+test('validateMcpServerUrl blocks IPv6-mapped SSRF & arbitrary internal HTTP hosts, and redactAuditText strips bearer/jwt/sk secrets', () => {
+  const { redactAuditText } = require('../src/server/ai-schemas');
+  assert.throws(() => validateMcpServerUrl('http://[::ffff:169.254.169.254]/latest'), /SSRF|https|blocked/i);
+  assert.throws(() => validateMcpServerUrl('http://10.0.0.5:8080/mcp'), /SSRF|https|blocked/i);
+  assert.throws(() => validateMcpServerUrl('http://internal-postgres:5432/mcp'), /https/i);
+  assert.equal(validateMcpServerUrl('http://orion-ld:1026/version'), 'http://orion-ld:1026/version');
+
+  const cleaned = redactAuditText('Failed calling Bearer eyJhbGciOiJIUzI1NiJ9.eyJ1IjoxfQ.abc with sk-secretKey99');
+  assert.equal(cleaned.includes('eyJhbGciOiJIUzI1NiJ9'), false);
+  assert.equal(cleaned.includes('sk-secretKey99'), false);
+});

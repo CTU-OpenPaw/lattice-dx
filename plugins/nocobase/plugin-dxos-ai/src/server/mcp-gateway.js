@@ -59,7 +59,7 @@ async function defaultResolveHostAuth(app, db, ctx, token) {
     roleNames = rows.map((r) => (typeof r.get === 'function' ? r.get('roleName') : r.roleName)).filter(Boolean);
   }
   const requestedRole = String(ctx.headers?.['x-role'] || ctx.request?.headers?.['x-role'] || '').trim();
-  const effectiveRoles = requestedRole && roleNames.includes(requestedRole) ? [requestedRole, ...roleNames.filter((r) => r !== requestedRole)] : roleNames;
+  const effectiveRoles = requestedRole && roleNames.includes(requestedRole) ? [requestedRole] : roleNames;
   return { currentUser: { ...user, id: userId }, currentRoles: effectiveRoles };
 }
 
@@ -166,15 +166,23 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
       return;
     }
     if (rpcMethod === 'resources/list') {
-      const resources = mode === 'itot'
-        ? [{ uri: 'dxos://itot/health', name: 'LatticeDX IT/OT Connector Health', mimeType: 'application/json' }]
-        : [{ uri: 'dxos://topology/planes', name: 'LatticeDX 6-Plane Enterprise OS Topology', mimeType: 'application/json' }];
+      const resources = !isAdmin
+        ? []
+        : mode === 'itot'
+          ? [{ uri: 'dxos://itot/health', name: 'LatticeDX IT/OT Connector Health', mimeType: 'application/json' }]
+          : [{ uri: 'dxos://topology/planes', name: 'LatticeDX 6-Plane Enterprise OS Topology', mimeType: 'application/json' }];
       ctx.status = 200;
       ctx.body = { jsonrpc: '2.0', id: reqId, result: { resources } };
       return;
     }
     if (rpcMethod === 'resources/read') {
       const uri = String(req.params?.uri || '');
+      if (!isAdmin) {
+        await recordAiAuditLog(activeDb, { actorUserId: authState.currentUser.id, actorUsername: authState.currentUser.username, channel, toolName: `mcp:resource:${uri}`, argsSummary: { uri }, status: 'denied', errorCode: 'MCP_RESOURCE_FORBIDDEN', resultSummary: 'Only administrators may inspect infrastructure topology resources' });
+        ctx.status = 200;
+        ctx.body = { jsonrpc: '2.0', id: reqId, error: { code: -32003, message: 'Administrator access required for infrastructure resources.' } };
+        return;
+      }
       if (uri === 'dxos://topology/planes' || uri === 'dxos://itot/health') {
         const topology = await buildEnterpriseTopology(activeDb, env, fetchImpl);
         const data = uri === 'dxos://itot/health' ? topology.planes.filter((p) => ['itOtDigitalTwin', 'integrationEventBus'].includes(p.key)) : topology;

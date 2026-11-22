@@ -9,7 +9,7 @@
 'use strict';
 
 const { defineToolSchema } = require('./schema-helper');
-const { recordAiAuditLog } = require('./ai-schemas');
+const { recordAiAuditLog, redactAuditText } = require('./ai-schemas');
 const { createBuilderTools } = require('./ai-builder-tools');
 const { createCopilotTools } = require('./ai-copilot-tools');
 const { createSurfaceAndCreativeTools } = require('./ai-surface-creative-tools');
@@ -77,16 +77,32 @@ function failTool(code, status, message) {
 }
 
 async function resolveCallerRoleNames(ctx, db, userId) {
-  const raw = Array.isArray(ctx?.state?.currentRoles) && ctx.state.currentRoles.length
-    ? ctx.state.currentRoles
-    : ctx?.state?.currentRole ? [ctx.state.currentRole] : [];
-  const direct = raw.map((r) => String(r || '').trim()).filter(Boolean);
-  if (direct.length) return [...new Set(direct)];
-  if (!userId) return [];
-  const rolesUsersRepo = db?.getRepository?.('rolesUsers');
-  if (!rolesUsersRepo || typeof rolesUsersRepo.find !== 'function') return [];
-  const rows = (await rolesUsersRepo.find({ filter: { userId } })) || [];
-  return [...new Set(rows.map((r) => val(r, 'roleName')).filter(Boolean))];
+  const headerRole = String(ctx?.headers?.['x-role'] || ctx?.request?.headers?.['x-role'] || '').trim();
+  const stateRole = String(ctx?.state?.currentRole || '').trim();
+  const stateRoles = Array.isArray(ctx?.state?.currentRoles)
+    ? [...new Set(ctx.state.currentRoles.map((r) => String(r || '').trim()).filter(Boolean))]
+    : [];
+
+  let dbRoles = [];
+  if (userId) {
+    const rolesUsersRepo = db?.getRepository?.('rolesUsers');
+    if (rolesUsersRepo && typeof rolesUsersRepo.find === 'function') {
+      const rows = (await rolesUsersRepo.find({ filter: { userId } })) || [];
+      dbRoles = [...new Set(rows.map((r) => val(r, 'roleName')).filter(Boolean))];
+    }
+  }
+
+  const knownRoles = stateRoles.length ? stateRoles : dbRoles;
+  const activeRole = headerRole || stateRole;
+  if (activeRole) {
+    if (knownRoles.length) {
+      if (knownRoles.includes(activeRole)) return [activeRole];
+      return knownRoles;
+    }
+    if (!headerRole) return [activeRole];
+  }
+  if (knownRoles.length) return knownRoles;
+  return stateRole ? [stateRole] : [];
 }
 
 async function isStudioAdmin(ctx, db) {
@@ -219,7 +235,7 @@ function createAuditedTool(spec) {
           argsSummary: checked.value,
           status: result?.degraded ? 'degraded' : 'allowed',
           durationMs: Date.now() - started,
-          resultSummary: JSON.stringify(result).slice(0, 600),
+          resultSummary: redactAuditText(JSON.stringify(result).slice(0, 600)),
         });
         return result;
       } catch (err) {
@@ -234,7 +250,7 @@ function createAuditedTool(spec) {
           status: err?.status === 403 || err?.status === 401 ? 'denied' : 'error',
           durationMs: Date.now() - started,
           errorCode: err?.code || 'TOOL_ERROR',
-          resultSummary: err?.message || 'Tool execution failed',
+          resultSummary: redactAuditText(err?.message || 'Tool execution failed'),
         });
         throw err;
       }
@@ -249,6 +265,8 @@ function createDxosTools() {
     resolveCallerRoleNames,
     isStudioAdmin,
     resolveActorScope,
+    resolveReadablePolicies,
+    isRowVisibleToActor,
     safeGetResource,
     invokeResourceAction,
     createAuditedTool,
@@ -267,6 +285,52 @@ function createDxosTools() {
     ...createSurfaceAndCreativeTools(shared),
     ...createCopilotTools(shared),
   ];
+}
+
+const OWN_SCOPED_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
+const ORG_WIDE_READ_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_dispatcher']);
+
+async function resolveReadablePolicies(db, actor, collections) {
+  const uniqueCols = [...new Set((collections || []).filter(Boolean))];
+  if (actor?.isAdmin) return { allowedCollections: uniqueCols, ownOnlySet: new Set() };
+  const resourcesRepo = db?.getRepository?.('dataSourcesRolesResources');
+  if (!resourcesRepo || !uniqueCols.length) return { allowedCollections: [], ownOnlySet: new Set() };
+  const rows = (await resourcesRepo.find({ filter: { name: { $in: uniqueCols }, dataSourceKey: 'main' }, appends: ['actions'], limit: 250 })) || [];
+  const roleSet = new Set(actor?.roleNames || []);
+  const hasOrgWideRole = (actor?.roleNames || []).some((r) => ORG_WIDE_READ_ROLES.has(r));
+  const allowedCollections = [];
+  const ownOnlySet = new Set();
+
+  for (const col of uniqueCols) {
+    const colRows = rows.filter((r) => val(r, 'name') === col && roleSet.has(val(r, 'roleName')));
+    const viewActions = [];
+    for (const r of colRows) {
+      for (const act of val(r, 'actions') || []) {
+        if (['view', 'list', 'get'].includes(val(act, 'name'))) viewActions.push(act);
+      }
+    }
+    if (!viewActions.length) continue;
+    allowedCollections.push(col);
+    const allHaveScope = viewActions.every((a) => Boolean(val(a, 'scope') || val(a, 'scopeId') != null));
+    if (allHaveScope || (OWN_SCOPED_COLLECTIONS.has(col) && !hasOrgWideRole)) {
+      ownOnlySet.add(col);
+    }
+  }
+  return { allowedCollections, ownOnlySet };
+}
+
+function isRowVisibleToActor(row, actor, isOwnOnly) {
+  if (!isOwnOnly || actor?.isAdmin) return true;
+  const empId = actor?.employeeId;
+  const userId = actor?.userId;
+  const checks = [
+    [val(row, 'requesterId'), empId],
+    [val(row, 'assigneeId'), empId],
+    [val(row, 'driverId'), empId],
+    [val(row, 'ownerId'), empId],
+    [val(row, 'createdById'), userId],
+  ];
+  return checks.some(([rowVal, actorVal]) => rowVal != null && actorVal != null && Number(rowVal) === Number(actorVal));
 }
 
 function registerDxosToolsWithHost(appOrPlugin) {
@@ -305,6 +369,8 @@ module.exports = {
   resolveCallerRoleNames,
   isStudioAdmin,
   resolveActorScope,
+  resolveReadablePolicies,
+  isRowVisibleToActor,
   safeGetResource,
   invokeResourceAction,
   createAuditedTool,

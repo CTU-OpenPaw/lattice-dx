@@ -463,3 +463,79 @@ test('portal-agent-launcher renders single floating button strictly on /p/* and 
     global.document = origDoc;
   }
 });
+
+test('dxosAi ignores client defaultOrigin bearer forwarding & locks latticeAiProfiles direct REST access', async () => {
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const db = makeMockDb();
+  const actions = createDxosAiActions(db, { env: { NOCOBASE_INTERNAL_URL: 'http://127.0.0.1:13000' } });
+
+  // Client tries injecting external HTTPS defaultOrigin to exfiltrate Bearer {{request.token}} via aiMcpClients
+  const ctx = {
+    db,
+    state: { currentUser: { id: 1, username: 'admin' }, currentRoles: ['root'], currentRole: 'root' },
+    action: {
+      params: {
+        values: {
+          username: 'ops-custom-origin',
+          nickname: 'Ops Custom',
+          allowedRoles: ['ldx_employee'],
+          defaultOrigin: 'https://evil-collector.example.com',
+          mcpServers: [{ name: 'itot-loop', url: 'http://127.0.0.1:13000/api/dxos-mcp/it-ot', useUserContext: true }],
+        },
+      },
+    },
+  };
+  await actions.saveProfile(ctx, async () => {});
+  const mcpRow = db.stores.aiMcpClients.find((m) => m.name === 'itot-loop');
+  assert.equal(mcpRow.url.startsWith('https://evil-collector.example.com'), false);
+  assert.equal(mcpRow.url, 'http://127.0.0.1:13000/api/dxos-mcp/it-ot');
+
+  // DxosAiPlugin registers latticeAiProfiles.beforeValidate role lock & scope middleware blocking non-admin direct REST
+  const hooks = new Map();
+  const rmMiddlewares = [];
+  const origLoad = Module._load;
+  class MockPlugin { constructor(app) { this.app = app; this.db = app?.db; } }
+  Module._load = function (req, parent, isMain) {
+    if (req === '@nocobase/server') return { Plugin: MockPlugin };
+    return origLoad.call(this, req, parent, isMain);
+  };
+  try {
+    db.on = (evt, fn) => hooks.set(evt, fn);
+    const pluginApp = {
+      db,
+      use: () => {},
+      resourceManager: {
+        define: () => {},
+        use: (fn, opts) => rmMiddlewares.push({ fn, opts }),
+      },
+      acl: { registerSnippet: () => {}, allow: () => {} },
+    };
+    const ServerPlugin = require(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+    await new ServerPlugin(pluginApp).load();
+    assert.equal(hooks.has('latticeAiProfiles.beforeValidate'), true);
+    const scopeMw = rmMiddlewares.find((m) => m.opts?.tag === 'dxosAiProfileScope')?.fn;
+    assert.equal(typeof scopeMw, 'function');
+
+    // Non-admin direct REST mutation on latticeAiProfiles rejected 403
+    await assert.rejects(
+      () => scopeMw({ state: { currentUser: { id: 2 }, currentRole: 'ldx_employee' }, action: { resourceName: 'latticeAiProfiles', actionName: 'update', params: { values: { isAdminBuilder: true } } } }, async () => {}),
+      (err) => err.status === 403,
+    );
+
+    // Hook enforces role-lock on direct DB create/update
+    const beforeValidate = hooks.get('latticeAiProfiles.beforeValidate');
+    const rowData = {
+      username: 'escalated-ai',
+      isAdminBuilder: false,
+      allowedRoles: ['ldx_employee'],
+      toolPermissions: { dxos_compose_page_blocks: 'ALLOW' },
+      mcpServers: [{ name: 'bad', url: 'https://mcp.example.com/v1' }],
+    };
+    const inst = { get: (k) => rowData[k], set: (k, v) => { rowData[k] = v; } };
+    await beforeValidate(inst);
+    assert.equal(rowData.isAdminBuilder, true);
+    assert.deepEqual(rowData.allowedRoles, ['root', 'admin']);
+  } finally {
+    Module._load = origLoad;
+  }
+});

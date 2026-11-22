@@ -40,6 +40,7 @@ function makeMockDb({
   const wrap = (row) => ({ ...row, get: (k) => row[k], toJSON: () => row, update: async (u) => Object.assign(row, u) });
   const matchFilter = (row, filter = {}) => Object.entries(filter).every(([k, v]) => {
     if (k === '$or' && Array.isArray(v)) return v.some((sub) => matchFilter(row, sub));
+    if (v && typeof v === 'object' && '$in' in v) return v.$in.includes(row[k]);
     if (v && typeof v === 'object' && '$includes' in v) return String(row[k] || '').toLowerCase().includes(String(v.$includes).toLowerCase());
     return row[k] === v;
   });
@@ -67,6 +68,32 @@ function makeMockDb({
         rolesDesktopRoutes: roleRoutes,
         latticeAiAuditLogs: auditLogs,
         roles: [{ name: 'root', allowConfigure: true }, { name: 'ldx_employee', allowConfigure: false, snippets: [] }, { name: 'ldx_manager', allowConfigure: false, snippets: [] }],
+        dataSourcesRolesResources: [
+          {
+            roleName: 'ldx_employee',
+            name: 'latticeOrders',
+            dataSourceKey: 'main',
+            usingActionsConfig: true,
+            actions: [{ name: 'view', fields: ['id', 'code', 'name', 'status', 'requesterId'], scope: { own: true } }],
+          },
+          {
+            roleName: 'ldx_employee',
+            name: 'latticeParaDocuments',
+            dataSourceKey: 'main',
+            usingActionsConfig: true,
+            actions: [{ name: 'view', fields: ['id', 'code', 'title', 'paraSpace'] }],
+          },
+          {
+            roleName: 'ldx_employee',
+            name: 'latticeServiceTickets',
+            dataSourceKey: 'main',
+            usingActionsConfig: true,
+            actions: [
+              { name: 'view', fields: ['id', 'code', 'name', 'status', 'requesterId'], scope: { own: true } },
+              { name: 'create', fields: ['code', 'name', 'serviceType', 'priority', 'description'] },
+            ],
+          },
+        ],
         latticeRequests: [],
         latticeIncidentCases: [],
         latticeAssets: [],
@@ -265,4 +292,96 @@ test('Admin Builder tools support dryRun preview, attach blocks, manage portals,
   const customPreview = await byName.get('dxos_extend_collection_schema').invoke(adminCtx, { operation: 'createCollection', collectionName: 'latticeCustomAssetsQa', title: 'Kiểm định QA', fields: [{ name: 'batchCode', type: 'string', title: 'Mã lô' }], dryRun: false });
   assert.equal(customPreview.created, true);
   assert.equal(db.createdCollections[0].fields.some((f) => f.name === 'organizationId'), true);
+});
+
+test('v0.2.0 security: X-Role active precedence, fail-closed write RBAC, draft ownership update guard, structural self-approval guard, and audit redaction', async () => {
+  const { resolveCallerRoleNames } = require('../src/server/ai-tools-core');
+  const db = makeMockDb();
+  const byName = new Map(createDxosTools().map((t) => [t.definition.name, t]));
+
+  // 1. Active X-Role / currentRole drops elevated root when caller switches down to ldx_employee
+  const switchedCtx = makeCtx(db, { userId: 9, roles: ['ldx_employee'] });
+  switchedCtx.state.currentRoles = ['root', 'ldx_employee'];
+  switchedCtx.state.currentRole = 'ldx_employee';
+  switchedCtx.headers = { 'x-role': 'ldx_employee' };
+  const resolvedRoles = await resolveCallerRoleNames(switchedCtx, db, 9);
+  assert.deepEqual(resolvedRoles, ['ldx_employee']);
+  await assert.rejects(() => byName.get('dxos_inspect_architecture').invoke(switchedCtx, {}), (err) => err.status === 403);
+
+  // 2. Fail-closed write when dataSourcesRolesResources has no policy for collection
+  const empCtx = makeCtx(db, { userId: 9, roles: ['ldx_employee'] });
+  await assert.rejects(() => byName.get('dxos_execute_record_action').invoke(empCtx, {
+    collection: 'latticeRequests',
+    operation: 'create',
+    values: { code: 'REQ-FAIL', name: 'No policy grant' },
+  }), (err) => err.status === 403);
+
+  // 3. Employee cannot update approved or foreign records via dxos_execute_record_action
+  db.getRepository('latticeRequests');
+  const bareDb = makeMockDb({
+    orders: [
+      { id: 10, code: 'ORD-APPROVED', name: 'Approved', organizationId: 'org-a', status: 'approved', requesterId: 13 },
+      { id: 11, code: 'ORD-PEER', name: 'Peer draft', organizationId: 'org-a', status: 'draft', requesterId: 999 },
+    ],
+  });
+  const baseGetRepo = bareDb.getRepository.bind(bareDb);
+  const policies = [
+    { roleName: 'ldx_employee', name: 'latticeOrders', dataSourceKey: 'main', actions: [{ name: 'view', fields: ['id', 'code', 'name', 'status', 'requesterId'] }, { name: 'update', fields: ['name'] }] },
+  ];
+  bareDb.getRepository = (n) => (n === 'dataSourcesRolesResources'
+    ? { find: async ({ filter = {} } = {}) => policies.filter((p) => !filter.name || p.name === filter.name).map((p) => ({ ...p, get: (k) => p[k] })) }
+    : baseGetRepo(n));
+  const restrictedEmpCtx = makeCtx(bareDb, { userId: 9, roles: ['ldx_employee'] });
+  await assert.rejects(() => byName.get('dxos_execute_record_action').invoke(restrictedEmpCtx, {
+    collection: 'latticeOrders',
+    operation: 'update',
+    recordId: 10,
+    values: { name: 'Tamper approved' },
+  }), (err) => err.status === 403);
+  await assert.rejects(() => byName.get('dxos_execute_record_action').invoke(restrictedEmpCtx, {
+    collection: 'latticeOrders',
+    operation: 'update',
+    recordId: 11,
+    values: { name: 'Tamper peer' },
+  }), (err) => err.status === 403);
+
+  // 4. Structural self-approval guard ignores disguised non-approval nodeTitle
+  const disguisedTasksDb = makeMockDb({
+    tasks: [
+      { id: 401, userId: 9, status: 0, node: { title: 'Chốt hoàn tất bước 2', key: 'stage2', type: 'manual' }, execution: { context: { data: { code: 'ORD-SELF-2', requesterId: 13 } } } },
+    ],
+  });
+  const empDisguisedCtx = makeCtx(disguisedTasksDb, { userId: 9, roles: ['ldx_employee'] });
+  await assert.rejects(
+    () => byName.get('dxos_my_tasks_copilot').invoke(empDisguisedCtx, { action: 'submit', taskId: 401, formKey: 'review', decision: 'approve' }),
+    (err) => err.status === 403 && err.code === 'SELF_APPROVAL_FORBIDDEN',
+  );
+
+  // 5. Audit error/resultSummary redacts Bearer/JWT/sk- tokens
+  const fakeSecretErrCtx = makeCtx(db, {
+    userId: 9,
+    roles: ['ldx_employee'],
+  });
+  await assert.rejects(
+    () => byName.get('dxos_execute_record_action').invoke(fakeSecretErrCtx, {
+      collection: 'latticeOrders',
+      operation: 'create',
+      values: { authorization: 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig', note: 'sk-testsecret999' },
+    }),
+    () => true,
+  );
+  // Explicit audit log check with createAuditedTool redaction
+  const { createAuditedTool } = require('../src/server/ai-tools-core');
+  const leakTool = createAuditedTool({
+    name: 'dxos_test_leak_redact',
+    description: 'test',
+    schema: { properties: {} },
+    async run() {
+      return { note: 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJhIjoxfQ.sig123 and sk-live123456' };
+    },
+  });
+  await leakTool.invoke(empCtx, {});
+  const lastLog = db.auditLogs.at(-1);
+  assert.equal(lastLog.resultSummary.includes('eyJhbGciOi'), false);
+  assert.equal(lastLog.resultSummary.includes('sk-live123456'), false);
 });

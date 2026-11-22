@@ -17,6 +17,8 @@ const {
   resolveCallerRoleNames,
   isStudioAdmin,
   resolveActorScope,
+  resolveReadablePolicies,
+  isRowVisibleToActor,
   invokeResourceAction,
   createAuditedTool,
   WRITABLE_BUSINESS_COLLECTIONS,
@@ -64,6 +66,29 @@ function makeCopilotHarness() {
         { name: 'update', fields: ['code', 'name', 'batchCode', 'warehouseZone', 'temperatureC', 'auditVerdict', 'inspectorNotes'] },
       ],
     },
+    ...['latticeServiceTickets', 'latticeParaDocuments', 'latticeAssets', 'latticeIncidentCases', 'latticeRequests', 'latticeOrders'].flatMap((col) => ([
+      {
+        roleName: 'ldx_employee',
+        name: col,
+        dataSourceKey: 'main',
+        usingActionsConfig: true,
+        actions: [
+          { name: 'view', fields: ['id', 'code', 'name', 'title', 'summary', 'status', 'severity', 'assetEntityId', 'requesterId', 'ownerId'], ...(col === 'latticeOrders' || col === 'latticeRequests' ? { scope: { own: true } } : {}) },
+          ...(['latticeServiceTickets', 'latticeParaDocuments'].includes(col) ? [{ name: 'create', fields: ['code', 'name', 'title', 'summary', 'serviceType', 'priority', 'description', 'paraSpace', 'relatedCollection', 'relatedRecordId'] }] : []),
+        ],
+      },
+      {
+        roleName: 'ldx_manager',
+        name: col,
+        dataSourceKey: 'main',
+        usingActionsConfig: true,
+        actions: [
+          { name: 'view', fields: ['id', 'code', 'name', 'title', 'summary', 'status', 'severity', 'assetEntityId'] },
+          { name: 'create', fields: ['code', 'name', 'title', 'summary', 'serviceType', 'priority', 'description', 'paraSpace', 'relatedCollection', 'relatedRecordId'] },
+          { name: 'update', fields: ['name', 'title', 'summary', 'status'] },
+        ],
+      },
+    ])),
   ];
   const tasks = [
     { id: 301, userId: 10, status: 0, node: { title: 'Duyệt phiếu Kiểm định Kho lạnh', key: 'review' }, execution: { context: { data: { code: 'QA-COLD-001', requesterId: 13 } } } },
@@ -133,6 +158,7 @@ function makeCopilotHarness() {
 
   const tools = createCopilotTools({
     val, failTool, resolveCallerRoleNames, isStudioAdmin, resolveActorScope,
+    resolveReadablePolicies, isRowVisibleToActor,
     invokeResourceAction, createAuditedTool, WRITABLE_BUSINESS_COLLECTIONS,
     PROTECTED_SERVER_FIELDS, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE,
   });
@@ -241,4 +267,33 @@ test('dxos_orchestrate_enterprise_case performs cross-module radar, correlateCas
   assert.equal(radar.modules.latticeServiceTickets.total >= 1, true);
   assert.equal(radar.pendingManualTasks, 1);
   assert.equal(db.store.latticeOrders.every((o) => o.organizationId !== 'org-b' || radar.organizationId === 'org-a'), true);
+});
+
+test('fail-closed read & write RBAC blocks unpermitted collections and row-scopes employee reads', async () => {
+  const { db, byName } = makeCopilotHarness();
+  db.store.latticeOrders.push({ id: 3, code: 'ORD-PEER-SAMEORG', name: 'Đơn đồng nghiệp cùng công ty', organizationId: 'org-a', status: 'submitted', requesterId: 14 });
+  db.store.latticeEmployees.push({ id: 15, userId: 11, code: 'DRV-11', organizationId: 'org-a', active: true });
+  const driverCtx = {
+    db,
+    state: { currentUser: { id: 11, username: 'drv11' }, currentRoles: ['ldx_driver'], currentRole: 'ldx_driver' },
+    app: { resourceManager: { getResource: () => null } },
+  };
+  const empCtx = {
+    db,
+    state: { currentUser: { id: 9, username: 'emp9' }, currentRoles: ['ldx_employee'], currentRole: 'ldx_employee' },
+    app: { resourceManager: { getResource: () => null } },
+  };
+
+  // ldx_driver has ZERO grants on latticeIncidentCases or latticeServiceTickets -> search & write denied/empty
+  const drvSearch = await byName.get('dxos_search_enterprise_context').invoke(driverCtx, { query: '' });
+  assert.equal(drvSearch.items.some((i) => i.collection === 'latticeIncidentCases'), false);
+  await assert.rejects(
+    () => byName.get('dxos_execute_record_action').invoke(driverCtx, { collection: 'latticeServiceTickets', operation: 'create', values: { code: 'T1', name: 'Hack' } }),
+    (err) => err.status === 403,
+  );
+
+  // ldx_employee with own-scope on latticeOrders sees ORD-COLD-01 (requesterId=13) but NOT peer's ORD-PEER-SAMEORG (requesterId=14)
+  const empOrders = await byName.get('dxos_search_enterprise_context').invoke(empCtx, { collections: ['latticeOrders'], query: '' });
+  assert.equal(empOrders.items.some((i) => i.code === 'ORD-COLD-01'), true);
+  assert.equal(empOrders.items.some((i) => i.code === 'ORD-PEER-SAMEORG'), false);
 });

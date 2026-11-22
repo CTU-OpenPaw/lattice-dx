@@ -25,8 +25,27 @@ const NATIVE_SURFACE_ACTIONS = [
   'updateSettings', 'setFieldLinkageRules', 'setFieldValueRules',
 ];
 
+const MAX_SURFACE_CACHE_ENTRIES = 500;
+const SURFACE_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
 const surfaceRevisionStore = new Map();
 const syncedSnapshotDbs = new WeakSet();
+
+function setSurfaceRevisionEntry(key, value) {
+  const now = Date.now();
+  const tagged = { ...value, _cachedAtMs: now };
+  if (surfaceRevisionStore.has(key)) surfaceRevisionStore.delete(key);
+  surfaceRevisionStore.set(key, tagged);
+  for (const [k, entry] of surfaceRevisionStore.entries()) {
+    if (now - Number(entry?._cachedAtMs || 0) > SURFACE_CACHE_TTL_MS) {
+      surfaceRevisionStore.delete(k);
+    }
+  }
+  while (surfaceRevisionStore.size > MAX_SURFACE_CACHE_ENTRIES) {
+    const oldestKey = surfaceRevisionStore.keys().next().value;
+    if (oldestKey === undefined) break;
+    surfaceRevisionStore.delete(oldestKey);
+  }
+}
 
 function isSafeLocalPath(rawPath) {
   if (typeof rawPath !== 'string') return false;
@@ -56,7 +75,7 @@ function bumpSurfaceRevision(portalSlug, { pageTitle = '', blockCount, layoutSig
       message,
       updatedAt: new Date().toISOString(),
     };
-    surfaceRevisionStore.set(key, nextState);
+    setSurfaceRevisionEntry(key, nextState);
   }
   return nextState;
 }
@@ -540,7 +559,7 @@ async function getSurfaceRevisionState(db, portalSlug, pageTitle, val) {
   const liveCount = grid ? extractGridBlockUids(grid).ordered.length : (stored?.blockCount ?? 0);
   if (!stored) {
     const initial = { portalSlug, pageTitle: pageTitle || null, revision: 1, blockCount: liveCount, layoutSignature: liveSig, lastMutatedUid: null, message: '' };
-    surfaceRevisionStore.set(key, initial);
+    setSurfaceRevisionEntry(key, initial);
     return initial;
   }
   return { ...stored, blockCount: liveCount, layoutSignature: liveSig || stored.layoutSignature };
@@ -1236,6 +1255,7 @@ module.exports = {
   ensureUiSnapshotsReady,
   capturePageSnapshot,
   restorePageSnapshot,
+  surfaceRevisionStore,
   bumpSurfaceRevision,
   getSurfaceRevisionState,
   buildRecommendedBlueprintFromFields,

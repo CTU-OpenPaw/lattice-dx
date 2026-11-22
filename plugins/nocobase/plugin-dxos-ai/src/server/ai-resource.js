@@ -210,7 +210,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const targetDb = await requireAdmin(ctx);
       const actorUser = ctx?.state?.currentUser || ctx?.auth?.user;
       const payload = readActionPayload(ctx);
-      const defaultOrigin = payload.defaultOrigin || env?.NOCOBASE_INTERNAL_URL;
+      const defaultOrigin = env?.NOCOBASE_INTERNAL_URL;
       ctx.body = await upsertAndSyncProfile(targetDb, payload, { actorUser, defaultOrigin });
       if (typeof next === 'function') await next();
     },
@@ -254,8 +254,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
     async bootstrapDefaults(ctx, next) {
       const targetDb = await requireAdmin(ctx);
       const actorUser = ctx?.state?.currentUser || ctx?.auth?.user;
-      const payload = readActionPayload(ctx);
-      const defaultOrigin = payload.defaultOrigin || env?.NOCOBASE_INTERNAL_URL;
+      const defaultOrigin = env?.NOCOBASE_INTERNAL_URL;
 
       const profiles = [];
       for (const bp of STARTER_AI_BLUEPRINTS) {

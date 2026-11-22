@@ -10,10 +10,11 @@
 
 const USERNAME_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const ORG_RE = /^[-a-zA-Z0-9_]{1,80}$/;
-const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|cookie|credential/i;
+const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|cookie|credential|jwt|bearer|privatekey|private_key|sessionid|session_id|passphrase|access_key|client_secret/i;
 const VALID_MODES = new Set(['ALLOW', 'ASK', 'OFF']);
-const LOOPBACK_OR_INTERNAL_HOST_RE = /^(localhost|127\.0\.0\.1|\[::1\]|::1|host\.docker\.internal|[a-z0-9-]+)$/i;
-const SSRF_BLOCKED_HOST_RE = /^(0\.0\.0\.0|\[::\]|169\.254\.\d+\.\d+|metadata\.google\.internal)$/i;
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1', 'host.docker.internal']);
+const STACK_HTTP_HOSTS = new Set(['orion-ld', 'n8n', 'keycloak', 'nocobase', 'lattice-dx-orion-ld', 'lattice-dx-n8n', 'lattice-dx-keycloak']);
+const SSRF_BLOCKED_HOST_RE = /^(0\.0\.0\.0|\[?::\]?|\[?::ffff:.*|169\.254\.\d+\.\d+|fe80:.*|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|127\.0\.0\.0|metadata\.google\.internal|metadata\.azure\.com)$/i;
 
 const STARTER_AI_BLUEPRINTS = [
   {
@@ -297,13 +298,31 @@ function validateMcpServerUrl(rawUrl) {
     throw failSchema('MCP_URL_CREDENTIALS_FORBIDDEN', 'Credentials inside MCP URL are forbidden');
   }
   const host = parsed.hostname.toLowerCase();
-  if (SSRF_BLOCKED_HOST_RE.test(host)) {
-    throw failSchema('MCP_URL_SSRF_BLOCKED', 'Unsafe SSRF metadata or wildcard host blocked');
+  const bareHost = host.replace(/^\[|\]$/g, '');
+  if (SSRF_BLOCKED_HOST_RE.test(host) || SSRF_BLOCKED_HOST_RE.test(bareHost)) {
+    throw failSchema('MCP_URL_SSRF_BLOCKED', 'Unsafe SSRF metadata, private, or wildcard host blocked');
   }
-  if (parsed.protocol === 'http:' && !LOOPBACK_OR_INTERNAL_HOST_RE.test(host)) {
-    throw failSchema('MCP_URL_HTTPS_REQUIRED', 'External HTTP MCP endpoints must use https://');
+  const extraAllowlist = new Set(
+    String(process.env.DXOS_MCP_INTERNAL_HTTP_ALLOWLIST || '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  const isAllowedHttpHost = LOOPBACK_HOSTS.has(host) || STACK_HTTP_HOSTS.has(bareHost) || extraAllowlist.has(bareHost);
+  if (parsed.protocol === 'http:' && !isAllowedHttpHost) {
+    throw failSchema('MCP_URL_HTTPS_REQUIRED', 'External HTTP MCP endpoints must use https:// (or be an allowlisted stack host)');
   }
   return parsed.toString();
+}
+
+function redactAuditText(rawText) {
+  let text = String(rawText ?? '');
+  if (!text) return text;
+  text = text.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]');
+  text = text.replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]');
+  text = text.replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]');
+  text = text.replace(/([a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)\s*[:=]\s*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]');
+  return text;
 }
 
 function sanitizeAuditSummary(value, depth = 0) {
@@ -414,7 +433,7 @@ async function recordAiAuditLog(db, entry = {}) {
         status: String(entry.status || 'allowed').slice(0, 32),
         durationMs: Math.max(0, Number(entry.durationMs) || 0),
         errorCode: entry.errorCode ? String(entry.errorCode).slice(0, 80) : null,
-        resultSummary: entry.resultSummary ? String(entry.resultSummary).slice(0, 1000) : null,
+        resultSummary: entry.resultSummary ? redactAuditText(String(entry.resultSummary)).slice(0, 1000) : null,
       },
     });
   } catch {
@@ -428,6 +447,7 @@ module.exports = {
   aiAuditLogs,
   uiSnapshots,
   validateMcpServerUrl,
+  redactAuditText,
   sanitizeAuditSummary,
   validateAiProfilePayload,
   recordAiAuditLog,

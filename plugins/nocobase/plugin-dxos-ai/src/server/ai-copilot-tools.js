@@ -30,14 +30,14 @@ async function enforceCallerRbacOnWrite(db, actor, collection, operation, safeVa
   if (!WRITABLE_BUSINESS_COLLECTIONS.has(collection) && !isCustom) {
     throw failTool('COLLECTION_WRITE_FORBIDDEN', 403, `Không được phép ghi vào collection "${collection}".`);
   }
-  if (actor.isAdmin) return;
+  if (actor.isAdmin) return { matchedActions: [] };
 
   const resourcesRepo = db?.getRepository?.('dataSourcesRolesResources');
-  if (!resourcesRepo) return;
+  if (!resourcesRepo) {
+    throw failTool('RBAC_POLICY_MISSING', 403, `Chưa có kho cấu hình phân quyền RBAC để kiểm tra ghi vào "${collection}".`);
+  }
 
   const colPolicies = (await resourcesRepo.find({ filter: { name: collection, dataSourceKey: 'main' }, appends: ['actions'], limit: 50 })) || [];
-  if (!colPolicies.length) return;
-
   const roleSet = new Set(actor.roleNames || []);
   const callerPolicies = colPolicies.filter((p) => roleSet.has(val(p, 'roleName')));
   if (!callerPolicies.length) {
@@ -45,6 +45,7 @@ async function enforceCallerRbacOnWrite(db, actor, collection, operation, safeVa
   }
 
   let hasActionGrant = false;
+  const matchedActions = [];
   const allowedFields = new Set();
   let unrestrictedFields = false;
   for (const policy of callerPolicies) {
@@ -52,6 +53,7 @@ async function enforceCallerRbacOnWrite(db, actor, collection, operation, safeVa
     const matched = actions.find((a) => val(a, 'name') === operation);
     if (!matched) continue;
     hasActionGrant = true;
+    matchedActions.push(matched);
     const fields = val(matched, 'fields');
     if (Array.isArray(fields) && fields.length) {
       for (const f of fields) allowedFields.add(f);
@@ -68,10 +70,11 @@ async function enforceCallerRbacOnWrite(db, actor, collection, operation, safeVa
       throw failTool('RBAC_FIELD_LOCKED', 403, `Trường bị khóa theo phân quyền RBAC trên "${collection}": ${locked.join(', ')}.`);
     }
   }
+  return { matchedActions };
 }
 
-async function performScopedRecordWrite(db, actor, collection, operation, { recordId, values }, deps) {
-  const { failTool, val, PROTECTED_SERVER_FIELDS } = deps;
+async function performScopedRecordWrite(db, actor, collection, operation, { recordId, values }, deps, ctx) {
+  const { failTool, val, PROTECTED_SERVER_FIELDS, CUSTOM_COLLECTION_RE } = deps;
   const repo = db?.getRepository?.(collection);
   if (!repo) throw failTool('COLLECTION_NOT_FOUND', 404, `Collection "${collection}" chưa sẵn sàng.`);
 
@@ -93,6 +96,7 @@ async function performScopedRecordWrite(db, actor, collection, operation, { reco
           ? { ...(actor.employeeId ? { ownerId: actor.employeeId } : {}), status: safeValues.status || 'active' }
           : { ...(actor.employeeId ? { requesterId: actor.employeeId } : {}), status: 'draft', version: 1 }),
       },
+      context: ctx,
     });
     const plain = typeof created?.toJSON === 'function' ? created.toJSON() : created;
     return { operation: 'create', collection, record: plain };
@@ -103,7 +107,27 @@ async function performScopedRecordWrite(db, actor, collection, operation, { reco
   if (!existing || val(existing, 'organizationId') !== actor.organizationId) {
     throw failTool('RECORD_NOT_FOUND_OR_FORBIDDEN', 403, 'Không tìm thấy bản ghi trong phạm vi tổ chức của bạn.');
   }
-  await existing.update(safeValues);
+  if (!actor.isAdmin) {
+    const isManagerOrAdmin = (actor.roleNames || []).some((r) => r === 'ldx_admin' || r === 'ldx_manager');
+    if (!isManagerOrAdmin) {
+      if (collection === 'latticeParaDocuments') {
+        const ownerId = val(existing, 'ownerId');
+        if (!actor.employeeId || (ownerId != null && Number(ownerId) !== Number(actor.employeeId))) {
+          throw failTool('RECORD_UPDATE_FORBIDDEN', 403, 'Chỉ người sở hữu hoặc quản lý mới được sửa tài liệu P.A.R.A. này.');
+        }
+      } else if (['latticeRequests', 'latticeOrders', 'latticeServiceTickets'].includes(collection) || CUSTOM_COLLECTION_RE.test(collection)) {
+        const ownerField = val(existing, 'requesterId') ?? val(existing, 'ownerId');
+        const createdBy = val(existing, 'createdById');
+        const ownsRow = (ownerField != null && actor.employeeId != null && Number(ownerField) === Number(actor.employeeId))
+          || (createdBy != null && actor.userId != null && Number(createdBy) === Number(actor.userId));
+        const currentStatus = String(val(existing, 'status') || 'draft').toLowerCase();
+        if (!ownsRow || currentStatus !== 'draft') {
+          throw failTool('RECORD_UPDATE_FORBIDDEN', 403, 'Chỉ được cập nhật bản ghi nháp (draft) do chính bạn khởi tạo.');
+        }
+      }
+    }
+  }
+  await existing.update(safeValues, { context: ctx });
   return { operation: 'update', collection, recordId, updatedFields: Object.keys(safeValues) };
 }
 
@@ -119,6 +143,7 @@ function summarizeModuleRows(rows, val) {
 function createCopilotTools(deps) {
   const {
     val, failTool, invokeResourceAction, createAuditedTool,
+    resolveReadablePolicies, isRowVisibleToActor,
     WRITABLE_BUSINESS_COLLECTIONS, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE,
   } = deps;
 
@@ -138,7 +163,8 @@ function createCopilotTools(deps) {
         },
       },
       async run(_ctx, db, actor, args) {
-        const targets = await resolveSearchableTargets(db, args.collections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val);
+        const candidates = await resolveSearchableTargets(db, args.collections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val);
+        const { allowedCollections: targets, ownOnlySet } = await resolveReadablePolicies(db, actor, candidates);
         const limit = Math.max(1, Math.min(30, Number(args.limit) || 8));
         const items = [];
         const q = String(args.query || '').trim().toLowerCase();
@@ -146,7 +172,9 @@ function createCopilotTools(deps) {
           const repo = db?.getRepository?.(colName);
           if (!repo) continue;
           const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: 25, sort: ['-id'] })) || [];
+          const isOwnOnly = ownOnlySet.has(colName);
           for (const row of rows) {
+            if (!isRowVisibleToActor(row, actor, isOwnOnly)) continue;
             const label = String(val(row, 'name') || val(row, 'title') || val(row, 'code') || '');
             const code = String(val(row, 'code') || val(row, 'id') || '');
             const hay = `${label} ${code} ${val(row, 'summary') || ''} ${val(row, 'batchCode') || ''}`.toLowerCase();
@@ -182,8 +210,8 @@ function createCopilotTools(deps) {
           values: { type: 'object', required: true },
         },
       },
-      async run(_ctx, db, actor, args) {
-        return performScopedRecordWrite(db, actor, args.collection, args.operation, { recordId: args.recordId, values: args.values }, deps);
+      async run(ctx, db, actor, args) {
+        return performScopedRecordWrite(db, actor, args.collection, args.operation, { recordId: args.recordId, values: args.values }, deps, ctx);
       },
     }),
 
@@ -228,8 +256,12 @@ function createCopilotTools(deps) {
           throw failTool('TASK_ALREADY_RESOLVED', 409, 'Công việc này đã được xử lý trước đó.');
         }
         const ctxData = val(task, 'execution')?.context?.data || {};
-        const nodeTitle = String(val(val(task, 'node'), 'title') || '').toLowerCase();
-        if (actor.employeeId && Number(ctxData.requesterId) === Number(actor.employeeId) && /duyệt|approve|review/i.test(nodeTitle)) {
+        const isRequesterOwner = (actor.employeeId != null && ctxData.requesterId != null && Number(ctxData.requesterId) === Number(actor.employeeId))
+          || (actor.userId != null && (
+            (ctxData.createdById != null && Number(ctxData.createdById) === Number(actor.userId))
+            || (ctxData.requesterUserId != null && Number(ctxData.requesterUserId) === Number(actor.userId))
+          ));
+        if (isRequesterOwner) {
           throw failTool('SELF_APPROVAL_FORBIDDEN', 403, 'Không được phép tự phê duyệt hồ sơ do chính mình khởi tạo.');
         }
         const formKey = args.formKey || 'review';
@@ -256,8 +288,10 @@ function createCopilotTools(deps) {
           dryRun: { type: 'boolean', default: false },
         },
       },
-      async run(_ctx, db, actor, args) {
-        const targets = await resolveSearchableTargets(db, null, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val);
+      async run(ctx, db, actor, args) {
+        const candidates = await resolveSearchableTargets(db, null, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val);
+        const { allowedCollections: targets, ownOnlySet } = await resolveReadablePolicies(db, actor, candidates);
+        const allowedSet = new Set(targets);
 
         if (args.mode === 'radar') {
           const modules = {};
@@ -265,7 +299,9 @@ function createCopilotTools(deps) {
             const repo = db?.getRepository?.(colName);
             if (!repo) continue;
             const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: 100 })) || [];
-            modules[colName] = summarizeModuleRows(rows, val);
+            const isOwnOnly = ownOnlySet.has(colName);
+            const visibleRows = isOwnOnly ? rows.filter((r) => isRowVisibleToActor(r, actor, true)) : rows;
+            modules[colName] = summarizeModuleRows(visibleRows, val);
           }
           const taskRepo = db?.getRepository?.('workflowManualTasks');
           const pendingTasks = taskRepo ? ((await taskRepo.find({ filter: { userId: actor.userId, status: 0 }, limit: 50 })) || []) : [];
@@ -290,10 +326,12 @@ function createCopilotTools(deps) {
             return extraTokens.some((tok) => tok && hay.includes(tok));
           };
           const pick = async (col, extraTokens = []) => {
+            if (!allowedSet.has(col)) return [];
             const repo = db?.getRepository?.(col);
             if (!repo) return [];
             const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: 25, sort: ['-id'] })) || [];
-            return rows.filter((r) => matchRow(r, extraTokens)).slice(0, 5).map((r) => ({
+            const isOwnOnly = ownOnlySet.has(col);
+            return rows.filter((r) => isRowVisibleToActor(r, actor, isOwnOnly) && matchRow(r, extraTokens)).slice(0, 5).map((r) => ({
               id: val(r, 'id'),
               code: val(r, 'code') || String(val(r, 'id')),
               title: val(r, 'name') || val(r, 'title') || val(r, 'code'),
@@ -337,6 +375,7 @@ function createCopilotTools(deps) {
             'create',
             { values: args.primaryRecord.values || {} },
             deps,
+            ctx,
           );
         }
         if (args.followUpTicket) {
@@ -347,7 +386,7 @@ function createCopilotTools(deps) {
             ...args.followUpTicket,
             ...(primaryCitation ? { description: `${args.followUpTicket.description || ''} | Liên kết: ${primaryCitation}`.trim() } : {}),
           };
-          created.followUpTicket = (await performScopedRecordWrite(db, actor, 'latticeServiceTickets', 'create', { values: ticketValues }, deps)).record;
+          created.followUpTicket = (await performScopedRecordWrite(db, actor, 'latticeServiceTickets', 'create', { values: ticketValues }, deps, ctx)).record;
         }
         if (args.paraHandoverNote) {
           const noteValues = {
@@ -355,7 +394,7 @@ function createCopilotTools(deps) {
             ...args.paraHandoverNote,
             ...(created.primary?.record ? { relatedCollection: created.primary.collection, relatedRecordId: String(created.primary.record.id) } : {}),
           };
-          created.paraHandoverNote = (await performScopedRecordWrite(db, actor, 'latticeParaDocuments', 'create', { values: noteValues }, deps)).record;
+          created.paraHandoverNote = (await performScopedRecordWrite(db, actor, 'latticeParaDocuments', 'create', { values: noteValues }, deps, ctx)).record;
         }
         return { executed: true, mode: 'executeCoordinatedResponse', organizationId: actor.organizationId, created };
       },

@@ -9,7 +9,7 @@
 'use strict';
 
 const { existsSync } = require('node:fs');
-const { createAuditedTool, resolveActorScope, failTool, val } = require('./ai-tools-core');
+const { createAuditedTool, resolveReadablePolicies, failTool, val } = require('./ai-tools-core');
 const { validateMcpServerUrl } = require('./ai-schemas');
 
 const DEFAULT_TIMEOUT_MS = 5000;
@@ -33,7 +33,7 @@ async function probeService(url, fetchImpl) {
   if (typeof fn !== 'function') return { reachable: false, status: 0, reason: 'fetch unavailable' };
   try {
     validateMcpServerUrl(url);
-    const res = await fn(url, { method: 'GET', signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
+    const res = await fn(url, { method: 'GET', redirect: 'error', signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
     return { reachable: Boolean(res?.ok), status: Number(res?.status || 0), reason: res?.ok ? 'ok' : `HTTP ${res?.status}` };
   } catch (err) {
     return { reachable: false, status: 0, reason: err?.message || 'unreachable' };
@@ -71,13 +71,13 @@ function createItOtMcpTools(dbArg, env = process.env, fetchImpl = globalThis.fet
         const outboxRepo = activeDb?.getRepository?.('latticeContextOutbox');
         const cachedAssets = assetsRepo ? (await assetsRepo.find({ filter: { organizationId: actor.organizationId }, limit: 30 })) || [] : [];
         const assetIds = new Set(cachedAssets.map((a) => val(a, 'entityId')).filter(Boolean));
-        const pendingOutboxCount = outboxRepo ? await safeCount(activeDb, 'latticeContextOutbox', { organizationId: actor.organizationId, status: 'pending' }) : 0;
+        const pendingOutboxCount = outboxRepo ? await safeCount(activeDb, 'latticeContextOutbox', { organizationId: actor.organizationId, state: 'pending' }) : 0;
 
         try {
           validateMcpServerUrl(urls.orionUrl);
           const headers = { Accept: 'application/ld+json, application/json' };
           if (env.NGSILD_TENANT) headers['NGSILD-Tenant'] = String(env.NGSILD_TENANT);
-          const res = await fetchImpl(`${urls.orionUrl}/ngsi-ld/v1/entities?limit=50`, { headers, signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
+          const res = await fetchImpl(`${urls.orionUrl}/ngsi-ld/v1/entities?local=true&limit=50`, { headers, redirect: 'error', signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
           if (!res?.ok) throw new Error(`Orion-LD HTTP ${res?.status}`);
           const entities = await res.json();
           const orgMarker = `:${actor.organizationId}:`;
@@ -125,9 +125,13 @@ function createItOtMcpTools(dbArg, env = process.env, fetchImpl = globalThis.fet
       async run(ctx, db, actor, args) {
         const activeDb = db || dbArg;
         ctx.state = { ...ctx.state, dxosAuditChannel: ctx.state?.dxosAuditChannel || 'mcp-itot' };
+        const { allowedCollections } = await resolveReadablePolicies(activeDb, actor, ['latticeIncidentCases', 'latticeAgentProposals']);
+        if (!allowedCollections.length) {
+          throw failTool('RBAC_READ_DENIED', 403, 'Vai trò hiện tại không có quyền xem sự cố IoT hoặc đề xuất AI.');
+        }
         const limit = Math.max(1, Math.min(25, Number(args.limit) || 10));
-        const casesRepo = activeDb?.getRepository?.('latticeIncidentCases');
-        const propRepo = activeDb?.getRepository?.('latticeAgentProposals');
+        const casesRepo = allowedCollections.includes('latticeIncidentCases') ? activeDb?.getRepository?.('latticeIncidentCases') : null;
+        const propRepo = allowedCollections.includes('latticeAgentProposals') ? activeDb?.getRepository?.('latticeAgentProposals') : null;
         const filter = { organizationId: actor.organizationId, ...(args.assetEntityId ? { assetEntityId: args.assetEntityId } : {}) };
         const cases = casesRepo ? (await casesRepo.find({ filter, limit, sort: ['-id'] })) || [] : [];
         const proposals = propRepo ? (await propRepo.find({ filter: { organizationId: actor.organizationId }, limit, sort: ['-id'] })) || [] : [];
@@ -141,7 +145,7 @@ function createItOtMcpTools(dbArg, env = process.env, fetchImpl = globalThis.fet
 
     createAuditedTool({
       name: 'get_stack_connector_health',
-      adminOnly: false,
+      adminOnly: true,
       defaultPermission: 'ALLOW',
       introduction: { title: 'Kiểm tra Sức khỏe Kết nối Stack', about: 'Kiểm tra live Orion-LD, n8n, Keycloak và database doanh nghiệp.' },
       description: 'Check live health of LatticeDX enterprise connectors (FIWARE Orion-LD, n8n, Keycloak, and NocoBase DB) with 5s timeouts.',
@@ -196,11 +200,14 @@ function createItOtMcpTools(dbArg, env = process.env, fetchImpl = globalThis.fet
           if (!outboxRepo) return { queued: false, reason: 'latticeContextOutbox unavailable' };
           const row = await outboxRepo.create({
             values: {
+              eventId: key,
               organizationId: actor.organizationId,
-              entityType: 'Asset',
               entityId: args.entityId || `urn:ngsi-ld:Asset:${actor.organizationId}:sync`,
-              status: 'pending',
-              payload: { reason: args.reason, idempotencyKey: key, requestedBy: actor.username },
+              collectionName: 'latticeAssets',
+              recordId: 0,
+              state: 'pending',
+              attempts: 0,
+              payload: { entityType: 'Asset', reason: args.reason, idempotencyKey: key, requestedBy: actor.username },
             },
           });
           return { queued: true, mode: 'requeue_outbox', id: val(row, 'id'), idempotencyKey: key };
@@ -213,6 +220,7 @@ function createItOtMcpTools(dbArg, env = process.env, fetchImpl = globalThis.fet
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
             body: JSON.stringify({ organizationId: actor.organizationId, entityId: args.entityId || null, reason: args.reason, actor: actor.username }),
+            redirect: 'error',
             signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
           });
           return { degraded: !res?.ok, service: 'n8n', status: Number(res?.status || 0), webhookSlug: slug, idempotencyKey: key };
@@ -232,7 +240,7 @@ async function buildEnterpriseTopology(db, env = process.env, fetchImpl = global
     probeService(`${urls.keycloakUrl}/realms/lattice`, fetchImpl),
     safeCount(db, 'roles', {}),
     safeCount(db, 'latticeAssets', {}),
-    safeCount(db, 'latticeContextOutbox', { status: 'pending' }),
+    safeCount(db, 'latticeContextOutbox', { state: 'pending' }),
     safeCount(db, 'workflows', { current: true }),
     safeCount(db, 'uiLayouts', {}),
     safeCount(db, 'latticeParaDocuments', {}),
