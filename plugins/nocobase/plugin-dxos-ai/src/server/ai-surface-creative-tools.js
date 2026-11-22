@@ -10,6 +10,7 @@
 
 const { validateAiProfilePayload, recordAiAuditLog } = require('./ai-schemas');
 const { enforceProfileRoleLock, syncProfileToNocobaseAi } = require('./ai-sync');
+const { publishSurfaceUpdate } = require('./surface-events');
 
 const LDX_ROLE_RE = /^ldx_[a-z][a-z0-9_]{1,40}$/;
 const IMMUTABLE_WRITE_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'organizationId', 'identitySubject', 'userId']);
@@ -77,6 +78,7 @@ function bumpSurfaceRevision(portalSlug, { pageTitle = '', blockCount, layoutSig
     };
     setSurfaceRevisionEntry(key, nextState);
   }
+  if (nextState) publishSurfaceUpdate(portalSlug, nextState);
   return nextState;
 }
 

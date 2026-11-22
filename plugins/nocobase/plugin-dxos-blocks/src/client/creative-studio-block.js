@@ -273,6 +273,19 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
 
     React.useEffect(() => { runQueries(); }, [runQueries]);
 
+    React.useEffect(() => {
+      if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined;
+      const onSurfaceUpdate = (ev) => {
+        const detailSlug = String(ev?.detail?.portalSlug || '').trim().toLowerCase();
+        const curSlug = window.location ? inferPortalSlugFromLocation(window.location.pathname) : '';
+        if (!detailSlug || !curSlug || detailSlug === curSlug) {
+          runQueries();
+        }
+      };
+      window.addEventListener('latticedx:surface-updated', onSurfaceUpdate);
+      return () => window.removeEventListener?.('latticedx:surface-updated', onSurfaceUpdate);
+    }, [runQueries]);
+
     const handleAction = async (btn) => {
       if (btn.kind === 'navigate') {
         navigateApp(app, btn.targetPath);

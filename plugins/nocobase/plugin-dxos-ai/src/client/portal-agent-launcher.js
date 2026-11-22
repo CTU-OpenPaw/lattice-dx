@@ -123,6 +123,27 @@ function createPortalAgentEmblem(h) {
   );
 }
 
+function parseSseChunk(chunk) {
+  const normalized = String(chunk || '').replace(/\r\n/g, '\n');
+  const blocks = normalized.split('\n\n');
+  const rest = blocks.pop() ?? '';
+  const frames = [];
+  for (const block of blocks) {
+    if (!block.trim() || block.startsWith(':')) continue;
+    let eventName = 'message';
+    const dataLines = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim() || 'message';
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if (!dataLines.length) continue;
+    let data = {};
+    try { data = JSON.parse(dataLines.join('\n')); } catch { data = { raw: dataLines.join('\n') }; }
+    frames.push({ event: eventName, data });
+  }
+  return { frames, rest };
+}
+
 function createPortalAgentLauncher(client, React, _antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
@@ -133,6 +154,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
     const [employees, setEmployees] = React.useState([]);
     const [isAdmin, setIsAdmin] = React.useState(false);
     const [dialogOpen, setDialogOpen] = React.useState(() => isNativeAiChatOpen());
+    const [pendingUpdate, setPendingUpdate] = React.useState(null);
 
     React.useEffect(() => {
       if (typeof window === 'undefined') return undefined;
@@ -144,11 +166,15 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       };
       const unsubRouter = typeof app?.router?.subscribe === 'function' ? app.router.subscribe(syncPath) : null;
       window.addEventListener?.('popstate', syncPath);
-      const timer = typeof setInterval === 'function' ? setInterval(syncPath, 450) : null;
+      let observer = null;
+      if (typeof MutationObserver === 'function' && typeof document !== 'undefined' && document.body) {
+        observer = new MutationObserver(syncPath);
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'open'] });
+      }
       return () => {
         if (typeof unsubRouter === 'function') unsubRouter();
         window.removeEventListener?.('popstate', syncPath);
-        if (timer) clearInterval(timer);
+        observer?.disconnect?.();
       };
     }, []);
 
@@ -179,49 +205,99 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       return () => { cancelled = true; };
     }, [api, portalSlug]);
 
-    // Silent Live Canvas Sync on /p/*: reload cleanly when layout mutates via chat (deferred while chat dialog is open)
+    // Realtime SSE Canvas Sync on /p/*: zero polling loops, zero destructive reloads
     React.useEffect(() => {
-      if (!api?.request || !portalSlug || typeof setInterval !== 'function') return undefined;
+      if (!portalSlug || typeof fetch !== 'function' || typeof window === 'undefined') return undefined;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return undefined;
       let cancelled = false;
+      let controller = null;
+      let reconnectTimer = null;
+      let attempt = 0;
       let baseRev = null;
       let baseSignature = null;
-      let pendingReload = false;
-      const poll = async () => {
-        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-        const chatOpenNow = isNativeAiChatOpen();
-        const busyEditingNow = chatOpenNow || isUserEditingForm();
-        if (pendingReload && !busyEditingNow && typeof window !== 'undefined' && window.location?.reload) {
-          pendingReload = false;
-          window.location.reload();
+
+      const handleFrame = (eventName, ev) => {
+        if (!ev || typeof ev !== 'object' || typeof ev.revision !== 'number') return;
+        const sig = `${ev.blockCount ?? 0}:${ev.layoutSignature || ''}`;
+        if (eventName === 'snapshot' || baseRev === null) {
+          baseRev = ev.revision;
+          baseSignature = sig;
           return;
         }
-        try {
-          const res = await api.request({ url: 'dxosAi:pageSurfaceState', method: 'get', params: { portalSlug } });
-          const st = res?.data?.data || res?.data || null;
-          if (cancelled || !st || typeof st.revision !== 'number') return;
-          const sig = `${st.blockCount ?? 0}:${st.layoutSignature || ''}`;
-          if (baseRev === null) {
-            baseRev = st.revision;
+        if (ev.revision > baseRev) {
+          baseRev = ev.revision;
+          if (typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+            window.dispatchEvent(new CustomEvent('latticedx:surface-updated', { detail: ev }));
+          }
+          if (sig !== baseSignature) {
             baseSignature = sig;
-            return;
+            setPendingUpdate({
+              revision: ev.revision,
+              message: String(ev.message || 'Bố cục trang vừa được AI Architect cập nhật.'),
+            });
           }
-          if (st.revision > baseRev) {
-            baseRev = st.revision;
-            if (sig !== baseSignature) {
-              baseSignature = sig;
-              if (busyEditingNow) pendingReload = true;
-              else if (typeof window !== 'undefined' && window.location?.reload) {
-                setTimeout(() => { if (!cancelled && !isUserEditingForm() && !isNativeAiChatOpen()) window.location.reload(); else if (!cancelled) pendingReload = true; }, 650);
-              }
-            }
-          }
-        } catch {
-          // Silent fallback when endpoint unavailable
         }
       };
-      poll();
-      const timer = setInterval(poll, 2600);
-      return () => { cancelled = true; clearInterval(timer); };
+
+      const connectSurfaceEvents = async () => {
+        if (cancelled) return;
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+        controller = typeof AbortController === 'function' ? new AbortController() : null;
+        try {
+          const token = api?.auth?.getToken?.()
+            || (typeof localStorage !== 'undefined' ? localStorage.getItem('NOCOBASE_TOKEN') : '');
+          const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
+          const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
+          const url = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
+          const headers = { Accept: 'text/event-stream' };
+          if (token) headers.Authorization = `Bearer ${token}`;
+          const res = await fetch(url, {
+            method: 'GET',
+            headers,
+            credentials: 'same-origin',
+            ...(controller ? { signal: controller.signal } : {}),
+          });
+          if (!res?.ok || !res.body?.getReader) throw new Error('SSE_UNAVAILABLE');
+          attempt = 0;
+          const reader = res.body.getReader();
+          const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
+          let buffer = '';
+          while (!cancelled) {
+            const part = await reader.read();
+            if (part.done) break;
+            const text = decoder ? decoder.decode(part.value, { stream: true }) : String(part.value || '');
+            buffer += text;
+            const parsed = parseSseChunk(buffer);
+            buffer = parsed.rest;
+            for (const f of parsed.frames) handleFrame(f.event, f.data);
+          }
+        } catch {
+          // Graceful reconnect unless aborted cleanly
+        }
+        if (!cancelled && (typeof document === 'undefined' || document.visibilityState !== 'hidden')) {
+          const delay = Math.min(15000, 1500 * (2 ** Math.min(4, attempt++)));
+          reconnectTimer = setTimeout(connectSurfaceEvents, delay);
+        }
+      };
+
+      const onVisibilityChange = () => {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          controller?.abort?.();
+          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+        } else if (!cancelled && !reconnectTimer) {
+          attempt = 0;
+          connectSurfaceEvents();
+        }
+      };
+
+      document?.addEventListener?.('visibilitychange', onVisibilityChange);
+      connectSurfaceEvents();
+      return () => {
+        cancelled = true;
+        document?.removeEventListener?.('visibilitychange', onVisibilityChange);
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        controller?.abort?.();
+      };
     }, [api, portalSlug]);
 
     const defaultEmployee = pickDefaultPortalEmployee(employees, isAdmin);
@@ -236,12 +312,49 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       });
     };
 
+    const bannerNode = pendingUpdate ? h('div', {
+      'data-testid': 'dxos-surface-update-banner',
+      role: 'status',
+      style: {
+        position: 'fixed',
+        bottom: 20,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 1060,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        padding: '10px 16px',
+        borderRadius: 12,
+        background: '#0f172a',
+        color: '#f8fafc',
+        boxShadow: '0 10px 25px rgba(15, 23, 42, 0.28)',
+        fontSize: 13,
+      },
+    },
+      h('span', null, pendingUpdate.message),
+      h('button', {
+        type: 'button',
+        onClick: () => {
+          setPendingUpdate(null);
+          if (typeof window !== 'undefined' && window.location?.reload) window.location.reload();
+        },
+        style: { padding: '5px 10px', borderRadius: 8, border: 'none', background: '#4f46e5', color: '#ffffff', fontWeight: 700, cursor: 'pointer' },
+      }, 'Cập nhật bố cục'),
+      h('button', {
+        type: 'button',
+        onClick: () => setPendingUpdate(null),
+        style: { padding: '5px 8px', borderRadius: 8, border: '1px solid #475569', background: 'transparent', color: '#cbd5e1', cursor: 'pointer' },
+      }, 'Để sau'),
+    ) : null;
+
     if (!showFloatButton) {
-      return h(React.Fragment, null, children);
+      return h(React.Fragment, null, children, bannerNode);
     }
 
     return h(React.Fragment, null,
       children,
+      bannerNode,
       h('style', null, '.dxos-portal-ai-float-btn:hover{transform:translateX(-8px)!important;opacity:1!important;}'),
       h('div', {
         role: 'button',
@@ -286,5 +399,6 @@ module.exports = {
   pickDefaultPortalEmployee,
   buildHiddenPageSystemContext,
   openNativePortalChat,
+  parseSseChunk,
   createPortalAgentLauncher,
 };

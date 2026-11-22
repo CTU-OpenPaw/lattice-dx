@@ -15,6 +15,7 @@ const { enforceProfileRoleLock } = require('./ai-sync');
 const { createItOtMcpTools } = require('./mcp-itot-tools');
 const { createMcpGatewayMiddleware } = require('./mcp-gateway');
 const { createDxosAiActions } = require('./ai-resource');
+const { attachAppPubSub } = require('./surface-events');
 
 class DxosAiPlugin extends Plugin {
   async load() {
@@ -86,6 +87,7 @@ class DxosAiPlugin extends Plugin {
       }, { tag: 'dxosAiProfileScope', after: 'acl' });
     }
 
+    attachAppPubSub(this.app);
     this.app.resourceManager.define({
       name: 'dxosAi',
       actions: createDxosAiActions(this.db),
@@ -96,6 +98,7 @@ class DxosAiPlugin extends Plugin {
     });
     this.app.acl.allow('dxosAi', 'portalCopilot', 'loggedIn');
     this.app.acl.allow('dxosAi', 'pageSurfaceState', 'loggedIn');
+    this.app.acl.allow('dxosAi', 'surfaceEvents', 'loggedIn');
   }
 }
 

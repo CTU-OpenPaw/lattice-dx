@@ -563,19 +563,19 @@ test('portal-agent-launcher sanitizes DOM title injection, pauses polling when h
     const hiddenCtx = buildHiddenPageSystemContext({ portalSlug: 'services', pageTitle: sanitizedTitle, pathname: '/p/services' });
     assert.ok(hiddenCtx.includes('dữ liệu giao diện'));
 
-    // 2. Hidden tab skips pageSurfaceState polling
+    // 2. Hidden tab skips SSE connectSurfaceEvents and uses ZERO setInterval loops
     const requestedUrls = [];
     const scheduledFns = [];
     global.window = { location: { pathname: '/p/services', reload: () => {} }, addEventListener() {}, removeEventListener() {} };
-    global.document = { visibilityState: 'hidden', title: 'Services', querySelector: () => null, activeElement: null };
+    global.document = { visibilityState: 'hidden', title: 'Services', querySelector: () => null, activeElement: null, addEventListener() {}, removeEventListener() {} };
     global.setInterval = (fn, ms) => { scheduledFns.push({ fn, ms }); return scheduledFns.length; };
     const effects = [];
-    const states = ['/p/services', [], false, false];
+    const states = ['/p/services', [], false, false, null];
     let sIdx = 0;
     const FakeReact = {
       Fragment: 'Fragment',
       createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
-      useState: () => [states[sIdx++], () => {}],
+      useState: (init) => [sIdx < states.length ? states[sIdx++] : (typeof init === 'function' ? init() : init), () => {}],
       useEffect: (fn) => { effects.push(fn); },
     };
     const Launcher = createPortalAgentLauncher(
@@ -587,6 +587,7 @@ test('portal-agent-launcher sanitizes DOM title injection, pauses polling when h
     Launcher({ children: 'ok' });
     for (const fx of effects) fx();
     await new Promise((r) => setTimeout(r, 10));
+    assert.equal(scheduledFns.length, 0, 'portal-agent-launcher must not register setInterval polling loops');
     assert.equal(requestedUrls.filter((u) => u === 'dxosAi:pageSurfaceState').length, 0);
 
     // 3. Multi-colon model string preserved intact
@@ -617,5 +618,44 @@ test('portal-agent-launcher sanitizes DOM title injection, pauses polling when h
     global.window = origWin;
     global.document = origDoc;
     global.setInterval = origSetInterval;
+  }
+});
+
+test('portal-agent-launcher parses SSE frames, emits non-destructive update banner, and never forces window.location.reload', async () => {
+  const { parseSseChunk, createPortalAgentLauncher } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+  assert.equal(typeof parseSseChunk, 'function');
+  const parsed = parseSseChunk('event: update\ndata: {"portalSlug":"services","revision":3,"layoutSignature":"a,b","message":"Đã thêm khối"}\n\n');
+  assert.equal(parsed.frames.length, 1);
+  assert.equal(parsed.frames[0].event, 'update');
+  assert.equal(parsed.frames[0].data.revision, 3);
+
+  const origWin = global.window;
+  const origDoc = global.document;
+  try {
+    let reloaded = false;
+    global.window = {
+      location: { pathname: '/p/services', reload: () => { reloaded = true; } },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent() {},
+    };
+    global.document = { visibilityState: 'visible', title: 'Services', querySelector: () => null, activeElement: null };
+    const states = ['/p/services', [{ username: 'dxos-coordinator', nickname: 'DX-OS' }], false, false, { message: 'Bố cục mới từ AI', revision: 4 }];
+    let sIdx = 0;
+    const ReactMock = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState: () => [states[sIdx++], () => {}],
+      useEffect: () => {},
+    };
+    const Launcher = createPortalAgentLauncher({ useAPIClient: () => ({}) }, ReactMock, {}, {});
+    const tree = Launcher({ children: 'body' });
+    const dump = JSON.stringify(tree);
+    assert.ok(dump.includes('dxos-surface-update-banner'));
+    assert.ok(dump.includes('Bố cục mới từ AI'));
+    assert.equal(reloaded, false);
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
   }
 });

@@ -36,6 +36,7 @@ const {
   restorePageSnapshot,
   getSurfaceRevisionState,
 } = require('./ai-surface-creative-tools');
+const { createSurfaceEventsHandler } = require('./surface-events');
 
 function serializeProfile(row) {
   if (!row) return null;
@@ -374,6 +375,10 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         : { revision: 1, blockCount: 0, layoutSignature: '' };
       if (typeof next === 'function') await next();
     },
+
+    surfaceEvents: createSurfaceEventsHandler({
+      getInitialState: (ctx, portalSlug, pageTitle) => getSurfaceRevisionState(resolveDb(ctx), portalSlug, pageTitle, val),
+    }),
 
     async inspectPageBlocks(ctx, next) {
       const targetDb = await requireAdmin(ctx);
