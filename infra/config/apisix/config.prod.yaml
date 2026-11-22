@@ -1,0 +1,20 @@
+# @file LatticeDX — Open Digital Enterprise Platform
+# @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
+# @license Apache-2.0
+# @see https://github.com/CTU-OpenPaw/lattice-dx
+# SPDX-License-Identifier: Apache-2.0
+apisix:
+  node_listen: 9080
+  enable_server_tokens: false
+deployment:
+  role: data_plane
+  role_data_plane:
+    config_provider: yaml
+plugins:
+  - openid-connect
+  - limit-count
+  - request-id
+  - response-rewrite
+  - proxy-rewrite
+  - cors

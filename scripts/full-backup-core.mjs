@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -13,6 +14,7 @@ import {fileURLToPath} from 'node:url';
 import {backup,postgres,sql} from './backup-core.mjs';
 import {assertRestoreTarget,verifyBackup,runRestoreFixture} from './lib/backup-policy.mjs';
 import {validateObjectInventory,validateFullManifest,verifyObjectBytes,compareObjectInventories,maxObjectManifestBytes} from './lib/object-backup-policy.mjs';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url)),backupRoot=join(root,'output','backups');
 const normalize=value=>process.platform==='win32'?value.toLowerCase():value;
 function artifactDirectory(value){
@@ -41,28 +43,35 @@ function restoredInventory(target){
  ) SELECT coalesce(jsonb_agg(jsonb_build_object('fileId',id::text,'objectKey',object_key::text,'size',size,'sha256',content_sha256) ORDER BY id),'[]'::jsonb) FROM bounded`);
  if(Buffer.byteLength(value)>maxObjectManifestBytes)throw new Error('Object inventory exceeds bound.');return validateObjectInventory(JSON.parse(value));
 }
-function apiSource(source,input){
- return execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{cwd:root,input,timeout:30000,maxBuffer:2*1024*1024,stdio:['pipe','pipe','pipe']});
+function apiSource(source,input,arg){
+ const args=[...dockerContextArgs(),'compose','-f','infra/compose/core.yml','exec','-T'];
+ let env;
+ if(arg!==undefined){
+  args.push('-e','DX_RESTORE_ARG_JSON');
+  env={...process.env,DX_RESTORE_ARG_JSON:JSON.stringify(arg)};
+ }
+ args.push('-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source);
+ return execFileSync('docker',args,{cwd:root,input,...(env?{env}:{}),timeout:30000,maxBuffer:2*1024*1024,stdio:['pipe','pipe','pipe']});
 }
 function readCurrentObject(entry){
- const source=`import {createFilesystemStore} from './src/files/filesystem-store.ts';(async()=>{if(!process.env.FILE_STORAGE_ROOT)throw new Error('Object store is not configured');const store=await createFilesystemStore(process.env.FILE_STORAGE_ROOT);process.stdout.write(await store.readVerified(${JSON.stringify({provider:'filesystem',objectKey:entry.objectKey,size:entry.size,sha256:entry.sha256})}));})().catch(()=>{console.error('Object source unavailable');process.exitCode=1;});`;
- const bytes=apiSource(source);verifyObjectBytes(bytes,entry);return bytes;
+ const source="import {createFilesystemStore} from './src/files/filesystem-store.ts';(async()=>{if(!process.env.FILE_STORAGE_ROOT)throw new Error('Object store is not configured');const arg=JSON.parse(process.env.DX_RESTORE_ARG_JSON||'{}');const store=await createFilesystemStore(process.env.FILE_STORAGE_ROOT);process.stdout.write(await store.readVerified(arg));})().catch(()=>{console.error('Object source unavailable');process.exitCode=1;});";
+ const bytes=apiSource(source,undefined,{provider:'filesystem',objectKey:entry.objectKey,size:entry.size,sha256:entry.sha256});verifyObjectBytes(bytes,entry);return bytes;
 }
 function restoreObjectRoot(path,inventory){
- const source=`import {mkdtemp} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';(async()=>{process.stdout.write(await mkdtemp(join(tmpdir(),'latticedx-restore-')));})().catch(()=>{process.exitCode=1;});`;
+ const source="import {mkdtemp} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';(async()=>{process.stdout.write(await mkdtemp(join(tmpdir(),'latticedx-restore-')));})().catch(()=>{process.exitCode=1;});";
  const objectRoot=apiSource(source).toString('utf8');
  if(!/^\/tmp\/latticedx-restore-[A-Za-z0-9_-]+$/.test(objectRoot))throw new Error('Invalid isolated object restore root.');
  for(const entry of inventory){
   const bytes=boundedRead(join(path,'objects',entry.objectKey),1048576);verifyObjectBytes(bytes,entry);
-  const copy=`import {open} from 'node:fs/promises';import {join} from 'node:path';import {createFilesystemStore} from './src/files/filesystem-store.ts';(async()=>{const chunks=[];let size=0;for await(const chunk of process.stdin){size+=chunk.length;if(size>1048576)throw new Error('Object too large');chunks.push(chunk);}const bytes=Buffer.concat(chunks),file=await open(join(${JSON.stringify(objectRoot)},${JSON.stringify(entry.objectKey)}),'wx',0o600);try{await file.writeFile(bytes);await file.sync();}finally{await file.close();}const store=await createFilesystemStore(${JSON.stringify(objectRoot)});await store.readVerified(${JSON.stringify({provider:'filesystem',objectKey:entry.objectKey,size:entry.size,sha256:entry.sha256})});})().catch(()=>{console.error('Restored object verification failed');process.exitCode=1;});`;
-  apiSource(copy,bytes);
+  const copy="import {open} from 'node:fs/promises';import {join} from 'node:path';import {createFilesystemStore} from './src/files/filesystem-store.ts';(async()=>{const arg=JSON.parse(process.env.DX_RESTORE_ARG_JSON||'{}');const chunks=[];let size=0;for await(const chunk of process.stdin){size+=chunk.length;if(size>1048576)throw new Error('Object too large');chunks.push(chunk);}const bytes=Buffer.concat(chunks),file=await open(join(arg.objectRoot,arg.objectKey),'wx',0o600);try{await file.writeFile(bytes);await file.sync();}finally{await file.close();}const store=await createFilesystemStore(arg.objectRoot);await store.readVerified({provider:'filesystem',objectKey:arg.objectKey,size:arg.size,sha256:arg.sha256});})().catch(()=>{console.error('Restored object verification failed');process.exitCode=1;});";
+  apiSource(copy,bytes,{objectRoot,objectKey:entry.objectKey,size:entry.size,sha256:entry.sha256});
  }
  return objectRoot;
 }
 function verifyRestoredDownload(database,objectRoot,inventory){
  if(!inventory.length)return false;
- const source=`import pg from 'pg';import {createFilesystemStore} from './src/files/filesystem-store.ts';import {loadFileContentWithClient} from './src/files/content.ts';import {createHash} from 'node:crypto';(async()=>{const url=new URL(process.env.DATABASE_URL);url.pathname='/'+${JSON.stringify(database)};const pool=new pg.Pool({connectionString:url.toString(),max:1});try{const client=await pool.connect();try{await client.query('BEGIN');const row=(await client.query("SELECT id,owner_id,organization_id FROM foundation_files WHERE storage_provider='filesystem' AND scan_status='clean' ORDER BY id LIMIT 1")).rows[0];if(!row)throw new Error('No clean restored download fixture');const store=await createFilesystemStore(${JSON.stringify(objectRoot)});const file=await loadFileContentWithClient(client,{subject:row.owner_id,organizationId:row.organization_id,roles:['files:read','data:read']},row.id,{kind:'foundation'},store);if(!file)throw new Error('Restored download denied');await client.query('COMMIT');process.stdout.write(JSON.stringify({fileId:row.id,sha256:createHash('sha256').update(file.content).digest('hex'),size:file.content.length}));}catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}}finally{await pool.end();}})().catch(()=>{console.error('Restored application download failed');process.exitCode=1;});`;
- const result=JSON.parse(apiSource(source).toString('utf8')),expected=inventory.find(entry=>entry.fileId===result.fileId);
+ const source="import pg from 'pg';import {createFilesystemStore} from './src/files/filesystem-store.ts';import {loadFileContentWithClient} from './src/files/content.ts';import {createHash} from 'node:crypto';(async()=>{const arg=JSON.parse(process.env.DX_RESTORE_ARG_JSON||'{}');const url=new URL(process.env.DATABASE_URL);url.pathname='/'+arg.database;const pool=new pg.Pool({connectionString:url.toString(),max:1});try{const client=await pool.connect();try{await client.query('BEGIN');const row=(await client.query(\"SELECT id,owner_id,organization_id FROM foundation_files WHERE storage_provider='filesystem' AND scan_status='clean' ORDER BY id LIMIT 1\")).rows[0];if(!row)throw new Error('No clean restored download fixture');const store=await createFilesystemStore(arg.objectRoot);const file=await loadFileContentWithClient(client,{subject:row.owner_id,organizationId:row.organization_id,roles:['files:read','data:read']},row.id,{kind:'foundation'},store);if(!file)throw new Error('Restored download denied');await client.query('COMMIT');process.stdout.write(JSON.stringify({fileId:row.id,sha256:createHash('sha256').update(file.content).digest('hex'),size:file.content.length}));}catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}}finally{await pool.end();}})().catch(()=>{console.error('Restored application download failed');process.exitCode=1;});";
+ const result=JSON.parse(apiSource(source,undefined,{database,objectRoot}).toString('utf8')),expected=inventory.find(entry=>entry.fileId===result.fileId);
  if(!expected||expected.sha256!==result.sha256||expected.size!==result.size)throw new Error('Restored application bytes differ.');return true;
 }
 export function backupFull(options={}){

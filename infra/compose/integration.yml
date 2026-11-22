@@ -1,52 +1,91 @@
 # @file LatticeDX — Open Digital Enterprise Platform
 # @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
 # @license Apache-2.0
 # @see https://github.com/CTU-OpenPaw/lattice-dx
 # SPDX-License-Identifier: Apache-2.0
 name: lattice-dx
 
+x-local-defaults: &local_defaults
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   orion-mongo:
+    <<: *local_defaults
     # Service orion-mongo
-    image: mongo:4.4.29@sha256:52c42cbab240b3c5b1748582cc13ef46d521ddacae002bbbda645cebed270ec0
+    image: mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01
+    command: ["mongod", "--auth"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${ORION_MONGO_USER:-orion}
+      MONGO_INITDB_ROOT_PASSWORD: ${ORION_MONGO_PASSWORD:-local-orion-mongo-password}
     restart: unless-stopped
     volumes:
       - orion-mongo-data:/data/db
+    mem_limit: 512m
     healthcheck:
-      test:
-        - CMD
-        - mongo
-        - --quiet
-        - --eval
-        - "quit(db.adminCommand('ping').ok ? 0 : 1)"
+      test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"quit(db.adminCommand('ping').ok ? 0 : 1)\""]
       interval: 5s
       timeout: 5s
       retries: 20
 
   orion-ld:
+    <<: *local_defaults
     # Service orion-ld
-    image: fiware/orion-ld:1.10.0@sha256:3c490a746f6596e24875b046719b97fa5ede39cbb364e3c93d144de2f00898dc
-    command: ["-dbhost", "orion-mongo", "-logLevel", "INFO"]
+    image: fiware/orion-ld:1.12.0@sha256:f562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b
+    command:
+      - -mongocOnly
+      - -dbhost
+      - orion-mongo
+      - -dbuser
+      - ${ORION_MONGO_USER:-orion}
+      - -dbpwd
+      - ${ORION_MONGO_PASSWORD:-local-orion-mongo-password}
+      - -dbAuthDb
+      - admin
+      - -dbAuthMech
+      - SCRAM-SHA-256
+      - -logLevel
+      - INFO
     restart: unless-stopped
     ports:
       - "127.0.0.1:1026:1026"
     depends_on:
       orion-mongo:
         condition: service_healthy
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:1026/version || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
   n8n:
+    <<: *local_defaults
     # Service n8n
-    image: n8nio/n8n:2.42.7@sha256:906dd7fb0a2f23869001d1767168359489c518ff34d4f67427abf2dc59e868fe
+    image: n8nio/n8n:2.48.1@sha256:5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f
     restart: unless-stopped
     environment:
       TZ: Asia/Ho_Chi_Minh
       GENERIC_TIMEZONE: Asia/Ho_Chi_Minh
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY}
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_RUNNERS_ENABLED: "true"
     ports:
       - "127.0.0.1:5678:5678"
     volumes:
       - n8n-data:/home/node/.n8n
+    mem_limit: 768m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
 volumes:
   orion-mongo-data:

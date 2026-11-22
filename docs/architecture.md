@@ -7,7 +7,8 @@ Luồng nghiệp vụ native chạy trên NocoBase. Quản trị viên cấu hì
 | Thành phần | Trách nhiệm |
 | --- | --- |
 | NocoBase và PostgreSQL native | Lưu cấu hình trang, collections, ACL, hồ sơ và lịch sử workflow. Thực thi CRUD, kiểm quyền theo vai trò/trường/phạm vi dữ liệu, chạy workflow và manual task. |
-| Foundation | Cài mô hình nghiệp vụ, migration và guard về thành viên, tổ chức và tham chiếu. Cung cấp API nhận sự kiện, đồng bộ ngữ cảnh và lưu đề xuất có bằng chứng. |
+| Foundation (`plugin-lattice-foundation`) | Cài mô hình nghiệp vụ, migration, guard thành viên/tổ chức, Multi-Portal UI (`/p/*`, `/admin/settings/multi-portal`), nhận sự kiện, đồng bộ ngữ cảnh và lưu đề xuất AI có bằng chứng. |
+| DX-OS P.A.R.A., Blocks, Studio & AI (`plugin-dxos-para`, `plugin-dxos-blocks`, `plugin-dxos-studio`, `plugin-dxos-ai`) | Quản lý không gian tri thức P.A.R.A. (`latticeParaDocuments`), 7 BlockModel v2 tùy biến qua `Add block` (gồm Zero-eval `DxosCreativeStudioBlockModel`), `/admin/settings/dxos-studio` (4 quy trình Poka-yoke + `latticeServiceTickets`), `/admin/settings/dxos-ai` (**15 Unified Tools**, nút Agent nổi duy nhất `PortalAgentLauncher` trên `/p/*` mở khung chat gốc NocoBase kèm ngữ cảnh ngầm & tiếng Việt tự nhiên, Time-Machine `latticeUiSnapshots`, và MCP 2 chiều `/api/dxos-mcp`, `/api/dxos-mcp/it-ot`). |
 | Enterprise Login và Keycloak | Đăng nhập doanh nghiệp khi cấu hình provider. ACL nghiệp vụ vẫn được kiểm tra trên phiên native. |
 | Core API và kho tệp chung | Xử lý lưu/quét tệp khi bật overlay tệp. NocoBase kiểm quyền hồ sơ trước khi gọi API nội bộ. PostgreSQL core và kho tệp có phạm vi backup riêng. |
 | Orion-LD và n8n | Orion-LD phục vụ ngữ cảnh Asset. n8n kết nối hệ thống qua webhook/API. Quy trình phê duyệt native do NocoBase thực thi. |

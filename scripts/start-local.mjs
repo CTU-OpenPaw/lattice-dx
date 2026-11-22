@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -9,11 +10,12 @@ import {existsSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {defaultRun} from './install-workspace.mjs';
+import {dockerContextArgs} from './lib/docker-context.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
-export async function startLocal({integration=false,hasIntegrationEnv=existsSync(resolve(root,'.env.integration')),platform=process.platform,run=defaultRun}={}){
+export async function startLocal({integration=false,hasIntegrationEnv=existsSync(resolve(root,'.env.integration')),platform=process.platform,env=process.env,run=defaultRun}={}){
  if(integration&&!hasIntegrationEnv)throw Error('Create ignored .env.integration before starting integration services; no services changed.');
- const context=platform==='win32'?['--context','desktop-linux']:[];
+ const context=dockerContextArgs({platform,env});
  const compose=[...context,'compose',...(hasIntegrationEnv?['--env-file',resolve(root,'.env.integration')]:[])];
  const files=['core','nocobase',...(integration?['integration']:[])];
  async function command(file,args,stage,timeout=60000){

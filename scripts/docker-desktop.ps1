@@ -1,10 +1,14 @@
-# @file LatticeDX — Open Digital Enterprise Platform
+﻿# @file LatticeDX — Open Digital Enterprise Platform
 # @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
 # @license Apache-2.0
 # @see https://github.com/CTU-OpenPaw/lattice-dx
 # SPDX-License-Identifier: Apache-2.0
 [CmdletBinding()]
-param([ValidateSet('Start','Stop','Restart')][string]$Mode='Start')
+param(
+  [ValidateSet('Start','Stop','Restart')][string]$Mode='Start',
+  [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$')][string]$Context=$(if ($env:DOCKER_CONTEXT) { $env:DOCKER_CONTEXT } else { 'desktop-linux' })
+)
 $ErrorActionPreference='Stop'
 $desktopExe=Join-Path $env:ProgramFiles 'Docker/Docker/Docker Desktop.exe'
 $dockerInstall=[IO.Path]::GetFullPath((Split-Path $desktopExe -Parent))+[IO.Path]::DirectorySeparatorChar
@@ -34,7 +38,7 @@ function Repair-KnownSocketFailure {
   # Only exact runtime directories, only after the recognized socket crash, never data disks/volumes.
   $tail=if(Test-Path -LiteralPath $logFile){(Get-Content -LiteralPath $logFile -Tail 120) -join "`n"}else{''}
   if($tail -notmatch '(dockerInference|engine\.sock|sailor-ingest\.sock).*(The file cannot be accessed by the system|filename, directory name, or volume label syntax)'){return $false}
-  $health=Invoke-Docker '--context desktop-linux info --format {{.ServerVersion}}' 5
+  $health=Invoke-Docker "--context $Context info --format {{.ServerVersion}}" 5
   if($health.Code -eq 0){throw 'Refusing socket repair while Docker engine is available.'}
   # Startup has crashed: stop only verified Docker installation processes, not WSL or other apps.
   Get-DesktopProcesses | Stop-Process -Force
@@ -63,7 +67,7 @@ function Repair-KnownSocketFailure {
   return $true
 }
 if($Mode -in @('Stop','Restart')){Stop-Desktop;if($Mode -eq 'Stop'){Write-Host 'Docker Desktop stopped cleanly.';exit 0}}
-$health=Invoke-Docker '--context desktop-linux info --format {{.ServerVersion}}' 5
+$health=Invoke-Docker "--context $Context info --format {{.ServerVersion}}" 5
 if($health.Code -eq 0){Write-Host "Docker ready: $($health.Text)";exit 0}
 if(!(Test-Path -LiteralPath $desktopExe)){throw 'Docker Desktop installation not found.'}
 for($attempt=0;$attempt -lt 2;$attempt++){
@@ -73,7 +77,7 @@ for($attempt=0;$attempt -lt 2;$attempt++){
   Start-Process -FilePath $desktopExe -WindowStyle Hidden
   $deadline=(Get-Date).AddSeconds(100)
   do {
-    $health=Invoke-Docker '--context desktop-linux info --format {{.ServerVersion}}' 5
+    $health=Invoke-Docker "--context $Context info --format {{.ServerVersion}}" 5
     if($health.Code -eq 0){Write-Host "Docker ready: $($health.Text)";exit 0}
     Start-Sleep -Seconds 2
     $tail=if(Test-Path -LiteralPath $logFile){(Get-Content -LiteralPath $logFile -Tail 20) -join "`n"}else{''}

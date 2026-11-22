@@ -1,34 +1,51 @@
 # @file LatticeDX — Open Digital Enterprise Platform
 # @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
 # @license Apache-2.0
 # @see https://github.com/CTU-OpenPaw/lattice-dx
 # SPDX-License-Identifier: Apache-2.0
 # Isolated upgrade rehearsal: no production volumes and no public listener.
 name: lattice-native-rehearsal
+
+x-local-defaults: &local_defaults
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   nocobase-db:
-    image: postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    <<: *local_defaults
+    image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
     environment:
       POSTGRES_DB: nocobase
       POSTGRES_USER: nocobase
-      POSTGRES_PASSWORD: local-nocobase-password
+      POSTGRES_PASSWORD: ${NOCOBASE_DB_PASSWORD:-local-nocobase-password}
+    volumes:
+      - ../../infra/config/postgres/init-pgvector.sql:/docker-entrypoint-initdb.d/001-pgvector.sql:ro
+    mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nocobase -d nocobase"]
       interval: 3s
       timeout: 3s
       retries: 20
+
   nocobase:
-    image: nocobase/nocobase:2.2.38@sha256:90028473fe54b1fd1929b1ab0669a12e48a9a8f100d41662c98bc3c618225f4e
+    <<: *local_defaults
+    image: nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777
     init: true
     environment:
-      APP_KEY: local-nocobase-app-key-public-fixture
-      ENCRYPTION_FIELD_KEY: local-nocobase-encryption-public-fixture
+      APP_KEY: ${NOCOBASE_APP_KEY:-local-nocobase-app-key-public-fixture}
+      ENCRYPTION_FIELD_KEY: ${NOCOBASE_ENCRYPTION_FIELD_KEY:-local-nocobase-encryption-public-fixture}
       DB_DIALECT: postgres
       DB_HOST: nocobase-db
       DB_PORT: 5432
       DB_DATABASE: nocobase
       DB_USER: nocobase
-      DB_PASSWORD: local-nocobase-password
+      DB_PASSWORD: ${NOCOBASE_DB_PASSWORD:-local-nocobase-password}
       DX_BRIDGE_ISSUER: http://localhost:8081/realms/lattice
       DX_BRIDGE_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
       DX_BRIDGE_GATEWAY_URL: http://gateway:9080
@@ -37,12 +54,18 @@ services:
       DX_NATIVE_AUTH_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
       DX_NATIVE_AUTH_ORIGIN: http://localhost:13001
       DX_NATIVE_AUTH_CLIENT_ID: dx-native-rehearsal
+      NOCOBASE_INTERNAL_URL: http://127.0.0.1
     volumes:
       - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
       - ../../plugins/nocobase/plugin-lattice-foundation:/app/nocobase/node_modules/@latticedx/plugin-lattice-foundation:ro
       - ../../plugins/nocobase/plugin-enterprise-auth:/app/nocobase/node_modules/@latticedx/plugin-enterprise-auth:ro
+      - ../../plugins/nocobase/plugin-dxos-para:/app/nocobase/node_modules/@latticedx/plugin-dxos-para:ro
+      - ../../plugins/nocobase/plugin-dxos-blocks:/app/nocobase/node_modules/@latticedx/plugin-dxos-blocks:ro
+      - ../../plugins/nocobase/plugin-dxos-studio:/app/nocobase/node_modules/@latticedx/plugin-dxos-studio:ro
+      - ../../plugins/nocobase/plugin-dxos-ai:/app/nocobase/node_modules/@latticedx/plugin-dxos-ai:ro
     ports:
       - "127.0.0.1:13001:80"
     depends_on:
       nocobase-db:
         condition: service_healthy
+    mem_limit: 1536m

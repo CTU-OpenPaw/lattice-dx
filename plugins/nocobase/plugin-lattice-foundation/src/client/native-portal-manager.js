@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -213,6 +214,8 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
       activeBadge = { title: 'Công việc của tôi', color: '#0f766e', icon: 'CheckSquareOutlined' };
     } else if (/^\/admin\/settings\/multi-portal(?:\/|$)/.test(pathname)) {
       activeBadge = { title: 'Multi-Portal', color: '#4f46e5', icon: 'SettingOutlined' };
+    } else if (/^\/admin\/settings\/dxos-studio(?:\/|$)/.test(pathname)) {
+      activeBadge = { title: 'DX-OS Studio', color: '#0f766e', icon: 'ControlOutlined' };
     } else if (/^\/admin\/settings(?:\/|$)/.test(pathname)) {
       activeBadge = { title: 'Cài đặt hệ thống', color: '#475569', icon: 'SettingOutlined' };
     }
@@ -295,6 +298,19 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
   };
 }
 
+function resolveLegacyMobileRedirect(win, app) {
+  if (!win || win.__nocobase_app_client_entry_mode__ !== 'legacy-default') return null;
+  if (app?.layoutManager?.hasLayout?.('mobile')) return null;
+  const pathname = String(win.location?.pathname || '');
+  if (pathname !== '/mobile' && !pathname.startsWith('/mobile/')) return null;
+  if (pathname.includes('..') || pathname.includes('\\')) return null;
+  const rawPrefix = String(win.__nocobase_modern_client_prefix__ || 'v').replace(/^\/+|\/+$/g, '');
+  const prefix = /^[a-zA-Z0-9_-]{1,32}$/.test(rawPrefix) ? rawPrefix : 'v';
+  const search = typeof win.location?.search === 'string' ? win.location.search : '';
+  const hash = typeof win.location?.hash === 'string' ? win.location.hash : '';
+  return `/${prefix}${pathname}${search}${hash}`;
+}
+
 module.exports = {
   toPortalSlug,
   renderPortalTile,
@@ -302,4 +318,5 @@ module.exports = {
   buildPortalAppList,
   registerPortalSwitcherPlugin,
   createNativePortalManager,
+  resolveLegacyMobileRedirect,
 };

@@ -1,30 +1,46 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {describe,it,expect,vi} from 'vitest';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {cleanInstallPlan,assertUnusedCleanProject,assertEmptyNativeDatabase,nativeCleanInstall} from '../scripts/native-clean-install.mjs';
+import {dockerContextArgs,resolveDockerContext} from '../scripts/lib/docker-context.mjs';
 
 async function orchestratorFixture(count='0'){
   const calls:{file:string,args:string[],options:any}[]=[];
-  const names=['@latticedx/plugin-action-bridge','@latticedx/plugin-lattice-foundation','@latticedx/plugin-enterprise-auth'];
-  const migration='20261107000100-shared-upload-receipts/@latticedx/plugin-lattice-foundation';
+  const directories=['action-bridge','plugin-lattice-foundation','plugin-enterprise-auth','plugin-dxos-para','plugin-dxos-blocks','plugin-dxos-studio','plugin-dxos-ai'];
+  const names=['@latticedx/plugin-action-bridge','@latticedx/plugin-lattice-foundation','@latticedx/plugin-enterprise-auth','@latticedx/plugin-dxos-para','@latticedx/plugin-dxos-blocks','@latticedx/plugin-dxos-studio','@latticedx/plugin-dxos-ai'];
+  const migrations=[
+    { pkg:'@latticedx/plugin-lattice-foundation', dir:'plugin-lattice-foundation', name:'20261107000100-shared-upload-receipts/@latticedx/plugin-lattice-foundation' },
+    { pkg:'@latticedx/plugin-dxos-para', dir:'plugin-dxos-para', name:'20261120000100-dxos-para-init/@latticedx/plugin-dxos-para' },
+    { pkg:'@latticedx/plugin-dxos-studio', dir:'plugin-dxos-studio', name:'20261120000200-dxos-service-tickets/@latticedx/plugin-dxos-studio' },
+    { pkg:'@latticedx/plugin-dxos-ai', dir:'plugin-dxos-ai', name:'20261121000100-dxos-ai-workforce/@latticedx/plugin-dxos-ai' },
+  ];
   const run=async(file:string,args:string[],options:any)=>{
     calls.push({file,args,options});
     if(file==='git'&&args[0]==='rev-parse')return 'a'.repeat(40);
     if(file==='tar'){
       const target=args.at(-1)!;
       for(let i=0;i<names.length;i++){
-        const directory=join(target,'plugins/nocobase',['action-bridge','plugin-lattice-foundation','plugin-enterprise-auth'][i]);
+        const directory=join(target,'plugins/nocobase',directories[i]);
         await mkdir(directory,{recursive:true});await writeFile(join(directory,'package.json'),JSON.stringify({name:names[i],version:'1.2.3',license:'Apache-2.0'}));
       }
-      const directory=join(target,'plugins/nocobase/plugin-lattice-foundation/src/server/migrations');
-      await mkdir(directory,{recursive:true});await writeFile(join(directory,migration.split('/')[0]+'.js'),'');
+      for(const m of migrations){
+        const directory=join(target,'plugins/nocobase',m.dir,'src/server/migrations');
+        await mkdir(directory,{recursive:true});await writeFile(join(directory,m.name.split('/')[0]+'.js'),'');
+      }
     }
-    if(args.includes('psql'))return args.at(-1)?.includes('pg_tables')?count:JSON.stringify([migration]);
+    if(args.includes('psql'))return args.at(-1)?.includes('pg_tables')?count:JSON.stringify(migrations.map(m=>m.name));
     if(args.includes('pg_dump'))return Buffer.from('PGDMP-test-fixture');
     if(args.at(-1)==='list')return '--- BEGIN_PLUGIN_LIST_JSON ---\n'+JSON.stringify(names.map(packageName=>({packageName,enabled:true})))+'\n--- END_PLUGIN_LIST_JSON ---';
     if(args.some(arg=>arg.includes('WORKSPACE_PACKAGE_METADATA')))return JSON.stringify(names.map(name=>({name,version:'1.2.3'})));
-    if(args.some(arg=>arg.includes("require('@nocobase/server/package.json')")))return '2.2.38';
+    if(args.some(arg=>arg.includes("require('@nocobase/server/package.json')")))return '2.2.50';
     if(file===process.execPath&&args[0]?.includes('acceptance-native-'))return JSON.stringify({result:'PASS',checks:['test-fixture']});
     if(file===process.execPath&&args[0]==='scripts/setup-native-ui-lab.mjs'){
       const directory=join(options.cwd,'output/native-platform');await mkdir(directory,{recursive:true});
@@ -64,20 +80,27 @@ describe('clean native installation boundaries',()=>{
     expect(f.calls.some(call=>call.args.includes('up')&&call.args.at(-1)==='nocobase')).toBe(false);
     expect(f.calls.some(call=>call.args.includes('pg_dump'))).toBe(false);
   });
-  it('keeps preflight, install and child fixtures on desktop-linux despite another inherited context',async()=>{
+  it('propagates DOCKER_CONTEXT overrides and cross-platform defaults to compose and child fixtures',async()=>{
     const f=await orchestratorFixture();
-    vi.stubEnv('DOCKER_CONTEXT','different-daemon');
+    vi.stubEnv('DOCKER_CONTEXT','custom-daemon');
     vi.spyOn(globalThis,'fetch').mockResolvedValue({ok:true} as Response);
     try{
       const result=await nativeCleanInstall({run:f.run});
       expect(result.complete).toBe(true);expect(result.fullSystemAcceptance).toBe(false);
-      for(const call of f.calls.filter(call=>call.file==='docker'))expect(call.args.slice(0,2)).toEqual(['--context','desktop-linux']);
+      expect(result.packages).toHaveLength(7);
+      for(const call of f.calls.filter(call=>call.file==='docker'))expect(call.args.slice(0,2)).toEqual(['--context','custom-daemon']);
       const setup=f.calls.find(call=>call.args[0]==='scripts/setup-native-ui-lab.mjs')!;
-      expect(setup.options.env.DOCKER_CONTEXT).toBe('desktop-linux');
+      expect(setup.options.env.DOCKER_CONTEXT).toBe('custom-daemon');
       expect(setup.options.cwd).toBe(result.sourceRoot);
       const proof=f.calls.findIndex(call=>call.args.includes('psql')&&call.args.at(-1)?.includes('pg_tables'));
       const boot=f.calls.findIndex(call=>call.args.includes('up')&&call.args.at(-1)==='nocobase');
       expect(proof).toBeGreaterThan(-1);expect(boot).toBeGreaterThan(proof);
+
+      const expectedArgs = dockerContextArgs({ platform: process.platform, env: {} });
+      const expectedCtx = resolveDockerContext({ platform: process.platform, env: {} });
+      vi.stubEnv('DOCKER_CONTEXT', expectedCtx ?? 'none');
+      const plan = cleanInstallPlan('b'.repeat(12), 13004);
+      expect(plan.composeArgs.slice(0, expectedArgs.length)).toEqual(expectedArgs);
     }finally{vi.restoreAllMocks();vi.unstubAllEnvs();}
   });
 });

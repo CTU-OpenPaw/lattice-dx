@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -332,4 +333,22 @@ test('PortalAdminProvider aligns with allowConfigure/pm snippets and respects !u
   negatedUi.render();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(negatedUi.navigations.at(-1), { to: '/admin/lattice-workspace', opts: { replace: true } });
+});
+
+test('non-admin visiting a /p/* portal with zero accessible pages renders friendly Vietnamese empty-portal card instead of English UI Editor prompt', async () => {
+  const empEmptyPortal = harness({
+    allow: false,
+    pathname: '/p/logistics',
+    layoutUid: 'ldx-portal-logistics',
+    runEffects: true,
+    portals: [
+      { uid: 'ldx-portal-services', title: 'Cổng Dịch vụ', routePath: '/p/services', firstPagePath: '/p/services/home', enabled: true },
+    ],
+  });
+  empEmptyPortal.render();
+  await new Promise(resolve => setImmediate(resolve));
+  const out = empEmptyPortal.render();
+  const dump = JSON.stringify(out);
+  assert.ok(dump.includes('ldx-empty-portal-fallback'), `Expected Vietnamese empty portal fallback, got ${dump}`);
+  assert.ok(dump.includes('/p/services'));
 });

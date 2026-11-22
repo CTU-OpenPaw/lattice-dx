@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -11,6 +12,7 @@ import {parseEnv} from 'node:util';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {resolve} from 'node:path';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url)),envPath=resolve(root,'.env.integration');
 const workflowId='LatticeUC1AssetHandover';
 async function main(){
@@ -35,7 +37,7 @@ async function main(){
  await writeFile(envPath,text,{mode:0o600});
  console.log('Handover credentials retained/configured in ignored .env.integration; no secret printed.'+(process.argv.includes('--enable-auto')?'':' Global outbox settings unchanged.'));
  if(!process.argv.includes('--install-n8n'))return;
- const compose=['--context','desktop-linux','compose','--env-file',envPath,'-f',resolve(root,'infra/compose/integration.yml')];
+ const compose=[...dockerContextArgs(), 'compose','--env-file',envPath,'-f',resolve(root,'infra/compose/integration.yml')];
  function run(args,input){return execFileSync('docker',[...compose,...args],{cwd:root,input,windowsHide:true,stdio:['pipe','pipe','pipe'],timeout:120000,maxBuffer:4*1024*1024});}
  const list=String(run(['exec','-T','n8n','n8n','list:workflow']));
  const existing=list.split(/\r?\n/).find(line=>line.startsWith(workflowId+'|'));

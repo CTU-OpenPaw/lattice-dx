@@ -1,6 +1,13 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {defaultContracts}=require('../shared/contracts');
 const {attachApplicationApi}=require('../applications/api');
-// SPDX-License-Identifier: Apache-2.0
 class WorkspaceApiError extends Error {
   constructor(message, status, source) {super(message); this.status = status; this.source = source; this.response = {status};}
 }

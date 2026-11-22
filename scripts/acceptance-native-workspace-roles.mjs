@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Persistent fixtures for manual browser acceptance; restricted to the isolated
 // local runtime. Existing users, role resource permissions and workflows are untouched.
 import assert from 'node:assert/strict';

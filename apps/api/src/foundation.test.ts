@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -55,14 +56,15 @@ test('task assignment requires a specific role and signed organization scope', a
   }finally{await app.close();}
 });
 
-test.each(['rejected','error'] as const)('files cannot be downloaded after scan %s',async(status)=>{
-  const {app}=configured(async()=>{if(status==='error')throw new Error('offline');return 'rejected';});
+test.each(['rejected','error'] as const)('files are scanned before persisting and never stored on %s',async(status)=>{
+  const {app,writes}=configured(async()=>{if(status==='error')throw new Error('offline');return 'rejected';});
   try{
     const h=await headers(['files:write','files:read']);
     const upload=await app.inject({method:'POST',url:'/v1/files',headers:h,payload:{filename:'a.txt',contentBase64:'YQ=='}});
-    expect(upload.statusCode).toBe(201);expect(upload.json().scanStatus).toBe(status);
+    expect(upload.statusCode).toBe(status==='rejected'?409:503);
+    expect(writes()).toBe(0);
     expect(upload.json()).not.toHaveProperty('content');
-    expect((await app.inject({url:'/v1/files/file-1/content',headers:h})).statusCode).toBe(409);
+    expect((await app.inject({url:'/v1/files/file-1/content',headers:h})).statusCode).toBe(404);
   }finally{await app.close();}
 });
 test('clean file is downloadable only in its signed owner/organization scope',async()=>{

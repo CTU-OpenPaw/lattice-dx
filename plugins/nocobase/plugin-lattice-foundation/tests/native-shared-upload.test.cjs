@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const {createSharedUploadReceipts}=require('../src/server/native-shared-upload');
@@ -60,4 +67,43 @@ test('concurrent preparations cannot clear an earlier uncertain remote writer on
   await receipts.execute(ctx,scope,input,async()=>ctx.throw(503,'timeout'));
   await receipts.execute(ctx,scope,input,async()=>ctx.throw(409,'rejected on retry'));
   await assert.rejects(receipts.assertSettled(ctx,scope),{status:409});
+});
+
+test('beginExecute and finalizeExecute release transaction lock before remote upload call',async()=>{
+  const {receipts,scope,input,ctx}=fixture();
+  await receipts.prepare(ctx,scope,input);
+  const prep=await receipts.beginExecute(ctx,scope,input);
+  assert.equal(prep.phase,'execute');
+  const finalized=await receipts.finalizeExecute(ctx,scope,prep.canonical,{status:201,data:{fileId:'unlocked-file'}},null);
+  assert.equal(finalized.status,201);
+  assert.equal(finalized.data.fileId,'unlocked-file');
+  await receipts.assertSettled(ctx,scope);
+});
+test('stale pending receipt older than TTL is marked failed cleanly during prepare recovery',async()=>{
+  const rows=[];
+  const staleDate=new Date(Date.now()-10*60*1000).toISOString();
+  rows.push({request_id:'10',organization_id:'org-a',uploader_id:'5',upload_key:'00000000-0000-4000-8000-000000000000',filename:'old.txt',content_digest:'abc',state:'pending',attempts:1,created_at:staleDate,updated_at:staleDate});
+  const query=async(sql,bind)=>{
+    if(sql.includes('updated_at')&&sql.startsWith('UPDATE')){
+      let count=0;
+      for(const r of rows){
+        if(r.request_id===bind[0]&&r.organization_id===bind[1]&&r.state==='pending'){
+          r.state='failed';r.error='STALE_UPLOAD_EXPIRED';count+=1;
+        }
+      }
+      return [{length:count}];
+    }
+    if(sql.startsWith('INSERT')){const [id,org,user,key,filename,digest]=bind;rows.push({request_id:id,organization_id:org,uploader_id:user,upload_key:key,filename,content_digest:digest,state:'pending',attempts:1});return [rows.at(-1)];}
+    if(sql.startsWith('SELECT'))return rows.filter(row=>row.request_id===bind[0]&&row.organization_id===bind[1]&&(sql.includes(' OR ')?((row.uploader_id===bind[2]&&row.upload_key===bind[3])||row.state==='pending'):(row.uploader_id===bind[2]&&row.upload_key===bind[3])));
+    if(sql.startsWith('UPDATE')){const row=rows.find(row=>row.request_id===bind[0]&&row.organization_id===bind[1]&&row.upload_key===bind[2]);if(sql.includes('attempts + 1'))row.attempts++;else{row.state=bind[3];row.result=JSON.parse(bind[4]);}return [row];}
+    return [];
+  };
+  const {createSharedUploadReceipts}=require('../src/server/native-shared-upload');
+  const receipts=createSharedUploadReceipts(query);
+  const ctx={throw(status,message){throw Object.assign(Error(message),{status});}};
+  const scope={id:'10',actor:{organizationId:'org-a',userId:'5'},transaction:{}};
+  const input={key:'11111111-1111-4111-8111-111111111111',filename:'fresh.txt',content:Buffer.from('fresh')};
+  const prepared=await receipts.prepare(ctx,scope,input,{stalePendingMs:60000});
+  assert.equal(prepared.key,input.key);
+  assert.equal(rows[0].state,'failed');
 });

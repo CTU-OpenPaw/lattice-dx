@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, lstatSync } from 'node:fs';
 import { extname, basename, resolve } from 'node:path';
@@ -10,6 +17,8 @@ const codeExtensions = new Set([
 ]);
 const excluded = /(^|\/)(upstream|vendor|node_modules|dist|build|coverage|output|\.next|\.git)(\/|$)/;
 
+const COPYRIGHT_VALUE = '(C) 2026 CTU-OpenPaw';
+
 export function addSourceHeader(source, path) {
   const bom = source.startsWith('\uFEFF') ? '\uFEFF' : '';
   let body = source.slice(bom.length);
@@ -20,22 +29,46 @@ export function addSourceHeader(source, path) {
     shebang = body.slice(0, end + 1);
     body = body.slice(end + 1);
   }
-  if (/^\s*\/\*\*[\s\S]*?@file\s+LatticeDX\b/.test(body)) {
-    return { status: 'present', source };
+  const nl = source.includes('\r\n') ? '\r\n' : '\n';
+
+  const blockMatch = body.match(/^([ \t]*\/\*\*?[\s\S]*?\*\/)/);
+  if (blockMatch && /@file\s+LatticeDX\b/.test(blockMatch[1])) {
+    if (blockMatch[1].includes(`@copyright ${COPYRIGHT_VALUE}`)) {
+      return { status: 'present', source };
+    }
+    const updatedBlock = blockMatch[1].replace(
+      /([ \t]*\*[ \t]*@author[^\r\n]*)(\r?\n)/,
+      `$1$2 * @copyright ${COPYRIGHT_VALUE}$2`,
+    );
+    if (updatedBlock !== blockMatch[1]) {
+      return { status: 'change', source: bom + shebang + updatedBlock + body.slice(blockMatch[0].length) };
+    }
   }
-  if (/^(?:#|--) @file LatticeDX\b/.test(body)) {
-    return { status: 'present', source };
+
+  const lineMatch = body.match(/^((?:(?:#|--)[^\r\n]*(?:\r?\n|$))+)/);
+  if (lineMatch && /^(?:#|--) @file LatticeDX\b/.test(lineMatch[1])) {
+    if (lineMatch[1].includes(`@copyright ${COPYRIGHT_VALUE}`)) {
+      return { status: 'present', source };
+    }
+    const prefix = lineMatch[1].startsWith('--') ? '-- ' : '# ';
+    const updatedLines = lineMatch[1].replace(
+      /((?:#|--)[ \t]*@author[^\r\n]*)(\r?\n)/,
+      `$1$2${prefix}@copyright ${COPYRIGHT_VALUE}$2`,
+    );
+    if (updatedLines !== lineMatch[1]) {
+      return { status: 'change', source: bom + shebang + updatedLines + body.slice(lineMatch[0].length) };
+    }
   }
 
   // Only expand an existing explicit license marker. Do not infer ownership.
-  const marker = /^(?:\/\/|#|--) SPDX-License-Identifier: Apache-2\.0[ \t]*(?:\r?\n|$)/;
+  const marker = /^(?:(?:\/\/|#|--)[ \t]*SPDX-License-Identifier: Apache-2\.0[ \t]*|\/\*[ \t]*SPDX-License-Identifier: Apache-2\.0[ \t]*\*\/[ \t]*)(?:\r?\n|$)/;
   const found = body.match(marker);
   if (!found) return { status: 'review', source };
 
-  const nl = source.includes('\r\n') ? '\r\n' : '\n';
   const fields = [
     '@file LatticeDX — Open Digital Enterprise Platform',
     '@author CTU-OpenPaw',
+    `@copyright ${COPYRIGHT_VALUE}`,
     '@license Apache-2.0',
     '@see https://github.com/CTU-OpenPaw/lattice-dx',
     'SPDX-License-Identifier: Apache-2.0',
@@ -46,6 +79,8 @@ export function addSourceHeader(source, path) {
     header = fields.map(line => `-- ${line}`).join(nl);
   } else if (['.yaml', '.yml', '.ps1', '.sh'].includes(extension) || basename(path) === 'Dockerfile') {
     header = fields.map(line => `# ${line}`).join(nl);
+  } else if (extension === '.css') {
+    header = ['/*', ...fields.map(line => ` * ${line}`), ' */'].join(nl);
   } else {
     header = ['/**', ...fields.map(line => ` * ${line}`), ' */'].join(nl);
   }

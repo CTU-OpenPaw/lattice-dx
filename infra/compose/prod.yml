@@ -1,0 +1,599 @@
+# @file LatticeDX — Open Digital Enterprise Platform
+# @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
+# @license Apache-2.0
+# @see https://github.com/CTU-OpenPaw/lattice-dx
+# SPDX-License-Identifier: Apache-2.0
+name: lattice-dx-prod
+
+x-hardened: &hardened
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+networks:
+  edge:
+    driver: bridge
+  app:
+    driver: bridge
+    internal: true
+  data:
+    driver: bridge
+    internal: true
+  scanner:
+    driver: bridge
+    internal: true
+
+services:
+  caddy:
+    <<: *hardened
+    image: caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      LATTICE_DOMAIN: ${LATTICE_DOMAIN:?Set LATTICE_DOMAIN}
+      KEYCLOAK_DOMAIN: ${KEYCLOAK_DOMAIN:?Set KEYCLOAK_DOMAIN}
+    volumes:
+      - ../config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+      - app
+    depends_on:
+      nocobase:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+      keycloak:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:2019/metrics || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    <<: *hardened
+    image: postgres:16.16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=${PG_ARCHIVE_COMMAND:-/bin/true}
+      - -c
+      - archive_timeout=300
+      - -c
+      - max_wal_senders=4
+      - -c
+      - wal_compression=on
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_USER: ${POSTGRES_SUPERUSER:?Set POSTGRES_SUPERUSER}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?Set POSTGRES_SUPERUSER_PASSWORD}
+      LATTICE_DB_PASSWORD: ${LATTICE_DB_PASSWORD:?Set LATTICE_DB_PASSWORD}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set KEYCLOAK_DB_PASSWORD}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD:?Set N8N_DB_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ../config/postgres/init-prod.sh:/docker-entrypoint-initdb.d/001-init-prod.sh:ro
+      - ../config/postgres/pitr.conf:/etc/postgresql/pitr.conf:ro
+      - ../config/postgres/pitr-archive.sh:/etc/postgresql/pitr-archive.sh:ro
+    networks:
+      - data
+    mem_limit: 1536m
+    cpus: "1.5"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nocobase-db:
+    <<: *hardened
+    image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=${PG_ARCHIVE_COMMAND:-/bin/true}
+      - -c
+      - archive_timeout=300
+      - -c
+      - max_wal_senders=4
+      - -c
+      - wal_compression=on
+    environment:
+      POSTGRES_DB: nocobase
+      POSTGRES_USER: ${NOCOBASE_DB_USER:?Set NOCOBASE_DB_USER}
+      POSTGRES_PASSWORD: ${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}
+    volumes:
+      - nocobase-db-data:/var/lib/postgresql/data
+      - ../config/postgres/init-pgvector.sql:/docker-entrypoint-initdb.d/001-pgvector.sql:ro
+      - ../config/postgres/pitr.conf:/etc/postgresql/pitr.conf:ro
+      - ../config/postgres/pitr-archive.sh:/etc/postgresql/pitr-archive.sh:ro
+    networks:
+      - data
+    mem_limit: 2048m
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d nocobase"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    <<: *hardened
+    image: redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+    cap_add:
+      - SETUID
+      - SETGID
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      - app
+      - data
+    mem_limit: 640m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rustfs:
+    <<: *hardened
+    image: rustfs/rustfs:1.0.6@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY:?Set RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY:?Set RUSTFS_SECRET_KEY}
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ADDRESS: ":9000"
+    volumes:
+      - rustfs-data:/data
+    networks:
+      - data
+    mem_limit: 1024m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  keycloak:
+    <<: *hardened
+    image: quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
+    command: ["start", "--proxy-headers=xforwarded", "--http-enabled=true"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak_app
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set KEYCLOAK_DB_PASSWORD}
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:?Set KEYCLOAK_ADMIN_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD}
+      KC_HOSTNAME: https://${KEYCLOAK_DOMAIN:?Set KEYCLOAK_DOMAIN}
+      KC_HOSTNAME_STRICT: "true"
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    networks:
+      - edge
+      - app
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 1536m
+    cpus: "1.5"
+    healthcheck:
+      test: ["CMD-SHELL", "/bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/9000 && printf \"GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3 && while IFS= read -r l <&3; do case \"$$l\" in *200*|*UP*) exit 0;; esac; done; exit 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  keycloak-config-cli:
+    <<: *hardened
+    restart: "no"
+    profiles: ["iam-sync"]
+    image: adorsys/keycloak-config-cli:6.5.1-26@sha256:1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_USER: ${KEYCLOAK_ADMIN_USER:?Set KEYCLOAK_ADMIN_USER}
+      KEYCLOAK_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD}
+      KEYCLOAK_AVAILABILITYCHECK_ENABLED: "true"
+      IMPORT_FILES_LOCATIONS: /config/lattice-realm.prod.json
+      IMPORT_VARS_SUBSTITUTION_ENABLED: "true"
+      APISIX_OIDC_CLIENT_SECRET: ${APISIX_OIDC_CLIENT_SECRET:?Set APISIX_OIDC_CLIENT_SECRET}
+      LATTICE_DOMAIN: ${LATTICE_DOMAIN:?Set LATTICE_DOMAIN}
+    volumes:
+      - ../config/keycloak/lattice-realm.prod.json:/config/lattice-realm.prod.json:ro
+    networks:
+      - app
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+
+  clamav:
+    <<: *hardened
+    image: clamav/clamav:1.5.5@sha256:12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+    tmpfs:
+      - /tmp
+      - /run/clamav
+    volumes:
+      - clamav-signatures:/var/lib/clamav
+    networks:
+      - scanner
+    mem_limit: 2048m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "clamdcheck.sh"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+  file-scanner:
+    <<: *hardened
+    build:
+      context: ../..
+      dockerfile: apps/file-scanner/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      FILE_SCANNER_HOST: 0.0.0.0
+      FILE_SCANNER_PORT: "4010"
+      CLAMD_HOST: clamav
+      DX_NATIVE_FILES_INSTANCE: ${DX_NATIVE_FILES_INSTANCE:?Set DX_NATIVE_FILES_INSTANCE}
+      DX_NATIVE_FILES_SECRET: ${DX_NATIVE_FILES_SECRET:?Set DX_NATIVE_FILES_SECRET}
+      FILE_STORAGE_PROVIDER: ${FILE_STORAGE_PROVIDER:-s3}
+      FILE_STORAGE_ROOT: /var/lib/latticedx/objects
+      S3_ENDPOINT: http://rustfs:9000
+      S3_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:?Set RUSTFS_ACCESS_KEY}
+      S3_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:?Set RUSTFS_SECRET_KEY}
+    volumes:
+      - engine-objects:/var/lib/latticedx/objects
+    networks:
+      - app
+      - data
+      - scanner
+    depends_on:
+      clamav:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    mem_limit: 256m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4010/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  gateway:
+    <<: *hardened
+    image: apache/apisix:3.19.0-debian@sha256:9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141
+    environment:
+      APISIX_OIDC_CLIENT_SECRET: ${APISIX_OIDC_CLIENT_SECRET:?Set APISIX_OIDC_CLIENT_SECRET}
+      APISIX_OIDC_DISCOVERY: https://${KEYCLOAK_DOMAIN:?Set KEYCLOAK_DOMAIN}/realms/lattice/.well-known/openid-configuration
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+      LATTICE_ALLOWED_ORIGIN: ${LATTICE_ALLOWED_ORIGIN:?Set LATTICE_ALLOWED_ORIGIN}
+    volumes:
+      - ../config/apisix/config.prod.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ../config/apisix/apisix.prod.yaml:/usr/local/apisix/conf/apisix.yaml:ro
+    networks:
+      - edge
+      - app
+    depends_on:
+      keycloak:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  orion-mongo:
+    <<: *hardened
+    image: mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - FOWNER
+    command: ["mongod", "--auth"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${ORION_MONGO_USER:?Set ORION_MONGO_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${ORION_MONGO_PASSWORD:?Set ORION_MONGO_PASSWORD}
+    volumes:
+      - orion-mongo-data:/data/db
+    networks:
+      - data
+    mem_limit: 1024m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet -u \"$$MONGO_INITDB_ROOT_USERNAME\" -p \"$$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --eval \"quit(db.adminCommand('ping').ok ? 0 : 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  orion-ld:
+    <<: *hardened
+    image: fiware/orion-ld:1.12.0@sha256:f562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b
+    command:
+      - -mongocOnly
+      - -dbhost
+      - orion-mongo
+      - -dbuser
+      - ${ORION_MONGO_USER:?Set ORION_MONGO_USER}
+      - -dbpwd
+      - ${ORION_MONGO_PASSWORD:?Set ORION_MONGO_PASSWORD}
+      - -dbAuthDb
+      - admin
+      - -dbAuthMech
+      - SCRAM-SHA-256
+      - -logLevel
+      - INFO
+    networks:
+      - app
+      - data
+    depends_on:
+      orion-mongo:
+        condition: service_healthy
+    mem_limit: 768m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:1026/version || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  n8n:
+    <<: *hardened
+    image: n8nio/n8n:2.48.1@sha256:5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      GENERIC_TIMEZONE: Asia/Ho_Chi_Minh
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: n8n_app
+      DB_POSTGRESDB_PASSWORD: ${N8N_DB_PASSWORD:?Set N8N_DB_PASSWORD}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?Set N8N_ENCRYPTION_KEY}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_SECURE_COOKIE: "true"
+    volumes:
+      - n8n-data:/home/node/.n8n
+    networks:
+      - app
+      - data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 1024m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:5678/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  nocobase:
+    <<: *hardened
+    image: nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777
+    init: true
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    environment:
+      APP_KEY: ${NOCOBASE_APP_KEY:?Set NOCOBASE_APP_KEY}
+      ENCRYPTION_FIELD_KEY: ${NOCOBASE_ENCRYPTION_FIELD_KEY:?Set NOCOBASE_ENCRYPTION_FIELD_KEY}
+      DB_DIALECT: postgres
+      DB_HOST: nocobase-db
+      DB_PORT: "5432"
+      DB_DATABASE: nocobase
+      DB_USER: ${NOCOBASE_DB_USER:?Set NOCOBASE_DB_USER}
+      DB_PASSWORD: ${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}
+      TZ: Asia/Ho_Chi_Minh
+      PUBSUB_ADAPTER: redis
+      PUBSUB_ADAPTER_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/1
+      CACHE_DEFAULT_STORE: redis
+      CACHE_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/0
+      DX_NATIVE_AUTH_SESSION_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/2
+      DX_NATIVE_AUTH_ISSUER: https://${KEYCLOAK_DOMAIN:?Set KEYCLOAK_DOMAIN}/realms/lattice
+      DX_NATIVE_AUTH_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
+      DX_NATIVE_AUTH_ORIGIN: https://${LATTICE_DOMAIN:?Set LATTICE_DOMAIN}
+      DX_NATIVE_AUTH_CLIENT_ID: dx-native
+      DX_NATIVE_CONTEXT_BROKER_URL: http://orion-ld:1026
+      DX_NATIVE_CONTEXT_AUTO_SYNC: "true"
+      DX_NATIVE_FILES_URL: http://file-scanner:4010
+      DX_NATIVE_FILES_INSTANCE: ${DX_NATIVE_FILES_INSTANCE:?Set DX_NATIVE_FILES_INSTANCE}
+      DX_NATIVE_FILES_SECRET: ${DX_NATIVE_FILES_SECRET:?Set DX_NATIVE_FILES_SECRET}
+      DX_METRICS_TOKEN: ${DX_METRICS_TOKEN:?Set DX_METRICS_TOKEN}
+      DX_PG_RLS_SESSION: ${DX_PG_RLS_SESSION:-true}
+      DXOS_GOTENBERG_URL: ${DXOS_GOTENBERG_URL:-}
+      S3_ENDPOINT: http://rustfs:9000
+      S3_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:?Set RUSTFS_ACCESS_KEY}
+      S3_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:?Set RUSTFS_SECRET_KEY}
+      NOCOBASE_INTERNAL_URL: http://127.0.0.1
+    volumes:
+      - nocobase-storage:/app/nocobase/storage
+      - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
+      - ../../plugins/nocobase/plugin-lattice-foundation:/app/nocobase/node_modules/@latticedx/plugin-lattice-foundation:ro
+      - ../../plugins/nocobase/plugin-enterprise-auth:/app/nocobase/node_modules/@latticedx/plugin-enterprise-auth:ro
+      - ../../plugins/nocobase/plugin-dxos-para:/app/nocobase/node_modules/@latticedx/plugin-dxos-para:ro
+      - ../../plugins/nocobase/plugin-dxos-blocks:/app/nocobase/node_modules/@latticedx/plugin-dxos-blocks:ro
+      - ../../plugins/nocobase/plugin-dxos-studio:/app/nocobase/node_modules/@latticedx/plugin-dxos-studio:ro
+      - ../../plugins/nocobase/plugin-dxos-ai:/app/nocobase/node_modules/@latticedx/plugin-dxos-ai:ro
+    networks:
+      - edge
+      - app
+      - data
+    depends_on:
+      nocobase-db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      file-scanner:
+        condition: service_healthy
+    mem_limit: 2048m
+    cpus: "2.0"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1/api/app:getLang').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+
+  otel-collector:
+    <<: *hardened
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector-contrib:0.123.0@sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2
+    read_only: true
+    tmpfs:
+      - /tmp
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ../config/otel/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    networks:
+      - app
+      - data
+    mem_limit: 512m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "validate", "--config=/etc/otelcol-contrib/config.yaml"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    <<: *hardened
+    profiles: ["observability"]
+    image: prom/prometheus:v3.3.0@sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1
+    read_only: true
+    tmpfs:
+      - /tmp:uid=65534,gid=65534,mode=0700,noexec,nosuid,size=16m
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        umask 077
+        printf '%s' "$$DX_METRICS_TOKEN" > /tmp/dx_metrics_token
+        exec /bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus --storage.tsdb.retention.time=15d
+    environment:
+      DX_METRICS_TOKEN: ${DX_METRICS_TOKEN:?Set DX_METRICS_TOKEN}
+    volumes:
+      - ../config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - app
+      - data
+    mem_limit: 512m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://127.0.0.1:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  gotenberg:
+    <<: *hardened
+    profiles: ["pdf"]
+    image: gotenberg/gotenberg:8.20.1@sha256:cda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,noexec,nosuid,size=256m
+      - /home/gotenberg:uid=1001,gid=1001,mode=0700,noexec,nosuid,size=256m
+    command: ["gotenberg", "--chromium-disable-javascript=true"]
+    networks:
+      - app
+    mem_limit: 768m
+    cpus: "1.0"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  caddy-data:
+  caddy-config:
+  postgres-data:
+  nocobase-db-data:
+  nocobase-storage:
+  redis-data:
+  rustfs-data:
+  clamav-signatures:
+  engine-objects:
+  orion-mongo-data:
+  n8n-data:
+  prometheus-data:

@@ -1,11 +1,11 @@
 {
   "name": "@latticedx/plugin-action-bridge",
-  "version": "0.4.1",
+  "version": "0.3.0",
   "private": true,
   "license": "Apache-2.0",
   "main": "server.cjs",
   "scripts": {"build": "node build.mjs"},
   "displayName": "LatticeDX Action Bridge",
   "description": "Server-side PKCE account linking and scoped LatticeDX action proxy.",
-  "nocobase": {"supportedVersions": ["2.2.x"], "testedRuntime": "2.2.38", "sdkProvidedByHost": true}
+  "nocobase": {"supportedVersions": ["2.2.x"], "testedRuntime": "2.2.50", "sdkProvidedByHost": true}
 }

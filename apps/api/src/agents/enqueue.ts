@@ -1,5 +1,12 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {isRecordId} from '@dx/contracts';
-// SPDX-License-Identifier: Apache-2.0
 import type {PoolClient} from 'pg';
 import type {WorkflowActor,WorkflowRun,WorkflowWaitConfig} from '@dx/contracts';
 import {assertHuman,assertAssetSchema,bad,incidentContract} from './policy.js';

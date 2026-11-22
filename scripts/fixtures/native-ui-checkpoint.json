@@ -1,0 +1,85 @@
+{
+  "format": "latticedx.native-ui-checkpoint",
+  "version": 1,
+  "collection": "latticeRequests",
+  "field": {
+    "name": "studioLabNote",
+    "type": "string",
+    "interface": "input",
+    "uiSchema": {
+      "title": "Ghi chú kiểm thử",
+      "x-component": "Input"
+    }
+  },
+  "fragments": {
+    "formRow": {
+      "type": "void",
+      "x-component": "Grid.Row",
+      "properties": {
+        "ftu6j6wcmwl": {
+          "type": "void",
+          "x-component": "Grid.Col",
+          "properties": {
+            "studioLabNote": {
+              "type": "string",
+              "x-toolbar": "FormItemSchemaToolbar",
+              "x-settings": "fieldSettings:FormItem",
+              "x-component": "CollectionField",
+              "x-decorator": "FormItem",
+              "x-collection-field": "latticeRequests.studioLabNote",
+              "x-component-props": {},
+              "x-uid": "checkpoint1",
+              "x-index": 1
+            }
+          },
+          "x-uid": "checkpoint2",
+          "x-index": 1
+        }
+      },
+      "x-uid": "checkpoint3",
+      "x-index": 5
+    },
+    "tableColumn": {
+      "type": "void",
+      "x-decorator": "TableV2.Column.Decorator",
+      "x-toolbar": "TableColumnSchemaToolbar",
+      "x-settings": "fieldSettings:TableColumn",
+      "x-component": "TableV2.Column",
+      "properties": {
+        "studioLabNote": {
+          "x-collection-field": "latticeRequests.studioLabNote",
+          "x-component": "CollectionField",
+          "x-component-props": {
+            "ellipsis": true
+          },
+          "x-read-pretty": true,
+          "x-decorator": null,
+          "x-decorator-props": {
+            "labelStyle": {
+              "display": "none"
+            }
+          },
+          "x-uid": "checkpoint4",
+          "x-index": 1
+        }
+      },
+      "x-uid": "checkpoint5",
+      "x-index": 6
+    },
+    "filterAction": {
+      "type": "void",
+      "title": "{{ t(\"Filter\") }}",
+      "x-action": "filter",
+      "x-toolbar": "ActionSchemaToolbar",
+      "x-settings": "actionSettings:filter",
+      "x-component": "Filter.Action",
+      "x-use-component-props": "useFilterActionProps",
+      "x-component-props": {
+        "icon": "FilterOutlined"
+      },
+      "x-align": "left",
+      "x-uid": "checkpoint6",
+      "x-index": 2
+    }
+  }
+}

@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -27,4 +28,13 @@ test('native tool responses reject oversized/malformed JSON and sanitize unavail
  await assert.rejects(()=>boundedJson(new Response('x'.repeat(100)),10),/TOO_LARGE/);
  await assert.rejects(()=>boundedJson(new Response('Not JSON')),/RESPONSE_INVALID/);
  await assert.rejects(()=>readNativeRecord(ctx(),{collection:'latticeOrders',recordId:12},{fetchImpl:async()=>{throw Error('internal private detail');}}),/NATIVE_API_UNAVAILABLE/);
+});
+
+test('reader resolves NOCOBASE_INTERNAL_URL when configured for loopback/container and blocks external SSRF hosts',async()=>{
+ const {resolveInternalBaseUrl}=require('../src/server/native-integration-reader');
+ assert.equal(resolveInternalBaseUrl({}),'http://127.0.0.1');
+ assert.equal(resolveInternalBaseUrl({NOCOBASE_INTERNAL_URL:'http://127.0.0.1:13000/'}),'http://127.0.0.1:13000');
+ assert.equal(resolveInternalBaseUrl({NOCOBASE_INTERNAL_URL:'http://nocobase:13000'}),'http://nocobase:13000');
+ assert.throws(()=>resolveInternalBaseUrl({NOCOBASE_INTERNAL_URL:'http://169.254.169.254'}),/INTERNAL_URL_INVALID/);
+ assert.throws(()=>resolveInternalBaseUrl({NOCOBASE_INTERNAL_URL:'https://evil.example.com'}),/INTERNAL_URL_INVALID/);
 });

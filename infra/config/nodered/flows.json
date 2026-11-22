@@ -1,0 +1,105 @@
+[
+  {
+    "id": "latticedx-iiot-tab",
+    "type": "tab",
+    "label": "LatticeDX IIoT Telemetry Ingest",
+    "disabled": false,
+    "info": "SPDX-License-Identifier: Apache-2.0 — Subscribes to latticedx/+/+/telemetry on Mosquitto, validates & sanitizes payload, and forwards to NocoBase dxosBlocks:telemetryIngest."
+  },
+  {
+    "id": "latticedx-mqtt-broker",
+    "type": "mqtt-broker",
+    "name": "LatticeDX Mosquitto",
+    "broker": "mosquitto",
+    "port": "1883",
+    "clientid": "nodered-latticedx-edge",
+    "autoConnect": true,
+    "usetls": false,
+    "protocolVersion": "4",
+    "keepalive": "60",
+    "cleansession": true,
+    "autoUnsubscribe": true
+  },
+  {
+    "id": "latticedx-mqtt-in",
+    "type": "mqtt in",
+    "z": "latticedx-iiot-tab",
+    "name": "MQTT Telemetry In",
+    "topic": "latticedx/+/+/telemetry",
+    "qos": "1",
+    "datatype": "auto-detect",
+    "broker": "latticedx-mqtt-broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 170,
+    "y": 140,
+    "wires": [
+      [
+        "latticedx-sanitizer-fn"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-sanitizer-fn",
+    "type": "function",
+    "z": "latticedx-iiot-tab",
+    "name": "Sanitize & Sign IIoT Telemetry",
+    "func": "const rawTopic = String(msg.topic || '');\nconst parts = rawTopic.split('/');\nif (parts.length !== 4 || parts[0] !== 'latticedx' || parts[3] !== 'telemetry') {\n  node.warn('Ignored invalid IIoT telemetry topic: ' + rawTopic);\n  return null;\n}\nconst orgId = parts[1].trim();\nconst topicAsset = parts[2].trim();\nif (!/^[a-zA-Z0-9_-]{1,80}$/.test(orgId)) {\n  node.warn('Rejected invalid organizationId in topic: ' + orgId);\n  return null;\n}\nlet data = msg.payload;\nif (typeof data === 'string') {\n  try {\n    data = JSON.parse(data);\n  } catch (err) {\n    node.warn('Invalid JSON telemetry payload: ' + err.message);\n    return null;\n  }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) {\n  node.warn('Telemetry payload must be a JSON object');\n  return null;\n}\nconst rawValue = data.numericValue !== undefined ? data.numericValue : data.value;\nif (rawValue === null || rawValue === undefined || (typeof rawValue === 'string' && rawValue.trim() === '') || typeof rawValue === 'boolean' || typeof rawValue === 'object') {\n  node.warn('Missing or non-numeric telemetry value');\n  return null;\n}\nconst numericValue = Number(rawValue);\nif (!Number.isFinite(numericValue)) {\n  node.warn('Non-finite telemetry numericValue');\n  return null;\n}\nconst edgeToken = String(env.get('DX_IIOT_INGEST_TOKEN') || '').trim();\nif (edgeToken.length < 16) {\n  node.error('DX_IIOT_INGEST_TOKEN missing or shorter than 16 chars; refusing telemetry dispatch');\n  return null;\n}\nconst metricName = String(data.metricName || data.attribute || 'temperature').trim();\nif (!/^[a-zA-Z0-9_.-]{1,128}$/.test(metricName)) {\n  node.warn('Invalid metricName: ' + metricName);\n  return null;\n}\nconst assetId = data.assetId != null && /^[1-9]\\d{0,18}$/.test(String(data.assetId)) ? Number(data.assetId) : undefined;\nconst assetEntityId = String(data.assetEntityId || (/^[1-9]\\d{0,18}$/.test(topicAsset) ? 'urn:ngsi-ld:Asset:' + orgId + ':native:' + topicAsset : topicAsset)).trim().slice(0, 255);\nif (!assetEntityId) {\n  node.warn('Missing assetEntityId');\n  return null;\n}\nlet observedAt;\nif (data.observedAt != null && data.observedAt !== '') {\n  const dt = new Date(String(data.observedAt));\n  if (!Number.isFinite(dt.getTime())) {\n    node.warn('Invalid observedAt timestamp');\n    return null;\n  }\n  observedAt = dt.toISOString();\n} else {\n  observedAt = new Date().toISOString();\n}\nmsg.url = String(env.get('DX_IIOT_INGEST_URL') || 'http://nocobase/api/dxosBlocks:telemetryIngest').trim();\nmsg.headers = {\n  'Content-Type': 'application/json',\n  'X-Lattice-Edge-Token': edgeToken\n};\nmsg.payload = {\n  organizationId: orgId,\n  ...(assetId !== undefined ? { assetId } : {}),\n  assetEntityId,\n  metricName,\n  numericValue,\n  unit: String(data.unit || 'CEL').trim().slice(0, 64) || 'CEL',\n  quality: String(data.quality || 'good').trim().slice(0, 64) || 'good',\n  sourceProtocol: 'mqtt',\n  observedAt\n};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 5,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 430,
+    "y": 140,
+    "wires": [
+      [
+        "latticedx-http-ingest"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-http-ingest",
+    "type": "http request",
+    "z": "latticedx-iiot-tab",
+    "name": "POST dxosBlocks:telemetryIngest",
+    "method": "POST",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 720,
+    "y": 140,
+    "wires": [
+      [
+        "latticedx-ingest-debug"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-ingest-debug",
+    "type": "debug",
+    "z": "latticedx-iiot-tab",
+    "name": "Ingest Status",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "statusCode",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 960,
+    "y": 140,
+    "wires": []
+  }
+]

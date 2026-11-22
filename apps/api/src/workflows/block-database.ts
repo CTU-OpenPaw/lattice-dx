@@ -1,5 +1,12 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {enqueueIncident} from '../agents/enqueue.js';
-// SPDX-License-Identifier: Apache-2.0
 import {createPrivateValues,projectFields,evaluatePrivateExpression} from './private-blocks.js';
 import {validateSteps} from './block-policy.js';
 import { randomUUID } from 'node:crypto';

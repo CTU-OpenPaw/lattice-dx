@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -71,13 +72,19 @@ export function waitDatabase(pool:Pool,get:(id:string,actor:WorkflowActor)=>Prom
       });
     },
     async expireWaits() {
-      const candidates=(await pool.query("SELECT id FROM workflow_waits WHERE status='pending' AND deadline<=now() ORDER BY deadline LIMIT 100")).rows;
+      const candidates=(await pool.query("SELECT id FROM workflow_waits WHERE status='pending' AND deadline<=now() ORDER BY deadline LIMIT 100 FOR UPDATE SKIP LOCKED")).rows;
       let count=0;
-      for(const candidate of candidates) count+=await transaction(pool,async client=>{
-        const {run,wait}=await lockedWait(client,candidate.id);
-        if(run.status==='cancelled' || wait.status!=='pending' || !wait.expired) return 0;
-        await settle(client,run,wait,'timed_out',{},'workflow:timeout',undefined,undefined,'Workflow wait timed out.');return 1;
-      });
+      for(const candidate of candidates) {
+        try {
+          count+=await transaction(pool,async client=>{
+            const {run,wait}=await lockedWait(client,candidate.id);
+            if(run.status==='cancelled' || wait.status!=='pending' || !wait.expired) return 0;
+            await settle(client,run,wait,'timed_out',{},'workflow:timeout',undefined,undefined,'Workflow wait timed out.');return 1;
+          });
+        } catch (error) {
+          console.error('[workflow-waits] expire failed for wait', candidate.id, error instanceof Error ? error.message : String(error));
+        }
+      }
       return count;
     },
   };

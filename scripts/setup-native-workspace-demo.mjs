@@ -1,9 +1,54 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
-import {readFile, writeFile} from 'node:fs/promises';
+import {link, open, readFile, unlink} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+async function readSetupId(path) {
+  const id = await readFile(path, 'utf8');
+  assert(UUID_PATTERN.test(id), 'Invalid demo setup identifier');
+  return id;
+}
+
+export async function readOrCreateSetupId(path) {
+  try {
+    return await readSetupId(path);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  const id = randomUUID();
+  const temporaryPath = path + '.' + randomUUID() + '.tmp';
+  const file = await open(temporaryPath, 'wx');
+  try {
+    try {
+      await file.writeFile(id, 'utf8');
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    // Publish the complete file without replacing an ID from another writer.
+    try {
+      await link(temporaryPath, path);
+      return id;
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      return await readSetupId(path);
+    }
+  } finally {
+    await unlink(temporaryPath).catch(() => {});
+  }
+}
 
 async function main() {
   const [reportPath] = process.argv.slice(2);
@@ -28,14 +73,7 @@ async function main() {
   }
 
   token = (await api('auth:signIn', {email:'admin@nocobase.com', password:'admin123'})).token;
-  const result = await setupWorkspaceDemo(api, report, async () => {
-    const path = reportPath + '.workspace-demo';
-    try { await writeFile(path, randomUUID(), {flag:'wx'}); }
-    catch (error) { if (error.code !== 'EEXIST') throw error; }
-    const id = await readFile(path, 'utf8');
-    assert(/^[0-9a-f-]{36}$/.test(id), 'Invalid demo setup identifier');
-    return id;
-  });
+  const result = await setupWorkspaceDemo(api, report, () => readOrCreateSetupId(reportPath + '.workspace-demo'));
   console.log(JSON.stringify(result));
 }
 

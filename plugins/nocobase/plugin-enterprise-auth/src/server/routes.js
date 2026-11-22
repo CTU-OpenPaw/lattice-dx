@@ -1,12 +1,13 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
 const {randomBytes}=require('node:crypto');
-const {denied,deploymentConfig,safeReturnTo,consumeBound,resolveMappedUser}=require('./policy');
+const {denied,deploymentConfig,safeReturnTo,consumeBound,resolveMappedUser,parseGroupRoleMap,syncMappedUserRoles}=require('./policy');
 const {createOidc}=require('./oidc');
 const TYPE='lattice-keycloak',COOKIE='ldx_enterprise_binding';
 const random=()=>randomBytes(32).toString('base64url');
@@ -38,7 +39,12 @@ function createActions(app,cache,verifiedIdentity){
         const flow=await consumeBound(cache,app.lockManager,'state',ctx.query.state,binding);
         await authenticator(flow.authenticator);
         const claims=await oidc().finish(config().callback+'?'+new URLSearchParams(ctx.query),flow);
-        await resolveMappedUser(app.db,flow.authenticator,claims.sub,claims.iss);
+        const mappedUser=await resolveMappedUser(app.db,flow.authenticator,claims.sub,claims.iss);
+        const groupMap=parseGroupRoleMap(process.env);
+        if(Object.keys(groupMap).length&&Array.isArray(claims.groups)){
+          const uid=typeof mappedUser?.get==='function'?mappedUser.get('id'):mappedUser?.id;
+          await syncMappedUserRoles(app.db,uid,claims.groups,groupMap);
+        }
         const ticket=random();
         await cache.set('ticket:'+ticket,{authenticator:flow.authenticator,subject:claims.sub,issuer:claims.iss,returnTo:flow.returnTo,binding,expiresAt:Date.now()+60000},60000);
         ctx.redirect(config().origin+'/enterprise-login?ticket='+ticket);
@@ -77,6 +83,64 @@ function createActions(app,cache,verifiedIdentity){
         }else await repo.create({values:{authenticator:name,uuid:subject,userId,meta:{issuer:config().issuer}},context:ctx});
         ctx.body={linked:true};
       },10000);
+    },
+    listMappings:async ctx=>{
+      root(ctx);protect(ctx);if(ctx.method!=='GET')ctx.throw(405);
+      const authRows=(await app.db.getRepository('authenticators').find({filter:{authType:TYPE}}))||[];
+      const authNames=authRows.map(a=>typeof a.get==='function'?a.get('name'):a.name).filter(Boolean);
+      const rows=authNames.length?(await app.db.getRepository('usersAuthenticators').find({filter:{authenticator:{$in:authNames}},sort:['-id']}))||[]:[];
+      ctx.body={
+        items:rows.map(r=>({
+          id:typeof r.get==='function'?r.get('id'):r.id,
+          authenticator:typeof r.get==='function'?r.get('authenticator'):r.authenticator,
+          subject:typeof r.get==='function'?r.get('uuid'):r.uuid,
+          userId:typeof r.get==='function'?r.get('userId'):r.userId,
+          issuer:(typeof r.get==='function'?r.get('meta'):r.meta)?.issuer||null,
+          createdAt:typeof r.get==='function'?r.get('createdAt'):r.createdAt,
+        })),
+      };
+    },
+    unlink:async ctx=>{
+      root(ctx);protect(ctx);if(ctx.method!=='POST')ctx.throw(405);
+      const {authenticator:name,subject,userId}=ctx.action.params.values||{};
+      await authenticator(name);
+      if(typeof subject!=='string'||!subject.trim()||!/^\d+$/.test(String(userId)))ctx.throw(400,'Subject and native user ID are required.');
+      await app.lockManager.runExclusive('enterprise-link:'+name,async()=>{
+        const repo=app.db.getRepository('usersAuthenticators');
+        const existing=await repo.findOne({filter:{authenticator:name,uuid:subject.trim(),userId:Number(userId)}});
+        if(!existing)ctx.throw(404,'Identity mapping not found.');
+        await repo.destroy({filter:{authenticator:name,uuid:subject.trim(),userId:Number(userId)}});
+        await cache.set('revoked:'+String(userId),Date.now(),86400000);
+        ctx.body={unlinked:true};
+      },10000);
+    },
+    backchannelLogout:async ctx=>{
+      protect(ctx);if(ctx.method!=='POST')ctx.throw(405);
+      const rawToken=ctx.request?.body?.logout_token||ctx.action?.params?.values?.logout_token;
+      if(typeof rawToken!=='string'||!rawToken.trim())ctx.throw(400,'logout_token is required.');
+      let claims;
+      try{claims=await oidc().verifyLogoutToken(rawToken.trim());}
+      catch(err){ctx.throw(Number(err?.status)===403?400:(Number(err?.status)||400),'Invalid logout_token.');}
+      const repo=app.db.getRepository('usersAuthenticators');
+      let affectedUsers=0;
+      if(claims.sub){
+        const links=(await repo.find({filter:{uuid:claims.sub}}))||[];
+        const seenUsers=new Set();
+        for(const link of links){
+          const meta=typeof link.get==='function'?link.get('meta'):link.meta;
+          if(claims.iss&&meta?.issuer&&meta.issuer!==claims.iss)continue;
+          const uid=typeof link.get==='function'?link.get('userId'):link.userId;
+          if(uid&&!seenUsers.has(String(uid))){
+            seenUsers.add(String(uid));
+            await cache.set('revoked:'+String(uid),Date.now(),86400000);
+            affectedUsers+=1;
+          }
+        }
+      }
+      if(claims.sid){
+        await cache.set('revoked_sid:'+String(claims.sid),Date.now(),86400000);
+      }
+      ctx.body={revoked:true,affectedUsers};
     },
   };
 }

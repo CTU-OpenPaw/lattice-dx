@@ -1,11 +1,13 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
 import {execFileSync} from 'node:child_process';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const source = `
 import assert from 'node:assert/strict';import {randomUUID} from 'node:crypto';import pg from 'pg';import {recordDatabase} from './src/database.ts';import {foundationDatabase} from './src/foundation-database.ts';import {createDirectoryDatabase} from './src/directory-database.ts';import {definitionDatabase} from './src/workflows/registry-database.ts';import {workflowDatabase} from './src/workflows/database.ts';import {eventsDatabase} from './src/events/database.ts';import {organizationDatabase} from './src/organization/database.ts';
 (async()=>{const control=new pg.Pool({connectionString:process.env.DATABASE_URL}),schema='completion_review_'+randomUUID().replaceAll('-','');let pool;
@@ -23,4 +25,4 @@ const results=await Promise.allSettled([receive,snapshot]);const summary=results
 console.log('Directory concurrency passed: inbound source and different assignee complete while snapshot waits before locking person rows.');
 }finally{await pool?.end();assert.match(schema,/^completion_review_[a-f0-9]{32}$/);await control.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await control.end();}})().catch(e=>{console.error(e);process.exitCode=1;});
 `;
-console.log(execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{encoding:'utf8',timeout:90000}).trim());
+console.log(execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{encoding:'utf8',timeout:90000}).trim());

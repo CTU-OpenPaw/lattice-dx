@@ -1,5 +1,12 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {createFieldRenderer,workflowFieldErrors}=require('./schema-fields');
-// SPDX-License-Identifier: Apache-2.0
 const {assertRun,createApprovalController}=require('./approval');
 function createInboxComponents(React,evidence={}) {
   const renderField=createFieldRenderer(React);

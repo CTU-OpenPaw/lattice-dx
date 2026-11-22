@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -21,6 +22,12 @@ class EmployeeOrganization extends Migration {
             REFERENCES "latticeDepartments" ("id", "organizationId");
         END IF;
       END $$;
+    `);
+  }
+
+  async down() {
+    await this.context.db.sequelize.query(`
+      ALTER TABLE "latticeEmployees" DROP CONSTRAINT IF EXISTS lattice_employees_department_org;
     `);
   }
 }

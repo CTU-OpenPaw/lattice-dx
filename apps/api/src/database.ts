@@ -1,5 +1,12 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {agentDatabase} from './agents/database.js';
-// SPDX-License-Identifier: Apache-2.0
 import { Pool } from 'pg';
 import { taskLifecycleDatabase } from './tasks/database.js';
 import { initializeCreateCommands, runCreateCommand } from './create-command.js';
@@ -27,7 +34,11 @@ import type {ObjectStore} from './files/object-store.js';
 import {assertFileStorageReadable,offloadOneFile} from './files/storage-database.js';
 import {nativeRequestStorage} from './files/native-request-storage.js';
 export async function connectRecords(connectionString: string,options:{store?:ObjectStore;projectionEnabled?:boolean;outboxSelection?:{eventType:string;createdAfter:string;organizationId:string}}={}) {
-  const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
+  const poolMax = Math.max(5, Math.min(100, Number(process.env.DATABASE_POOL_MAX) || 20));
+  const pool = new Pool({ connectionString, max: poolMax, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
+  pool.on('error', (err) => {
+    console.error('[db-pool] idle client error:', err instanceof Error ? err.message : String(err));
+  });
   try {
     const repository=await recordDatabase(pool);
     const directory=await createDirectoryDatabase(pool);

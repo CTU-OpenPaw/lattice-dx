@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -81,4 +82,24 @@ test('cancelled run cannot settle pending wait or timeout even if fixture wait r
  f.wait.expired=true;vi.mocked(f.pool.query).mockResolvedValue({rows:[{id:'resource'}]} as never);
  expect(await f.repository.expireWaits()).toBe(0);
  expect(f.query.mock.calls.some(([s])=>s.startsWith('UPDATE workflow_runs'))).toBe(false);
+});
+
+test('expireWaits uses SKIP LOCKED and isolates poison-pill failures per row', async () => {
+  const { repository, wait, pool, query } = fixture();
+  wait.expired = true;
+  let calls = 0;
+  const origQuery = query.getMockImplementation()!;
+  query.mockImplementation(async (sql: string, values?: unknown[]) => {
+    if (sql.startsWith('SELECT run_id,organization_id')) {
+      calls += 1;
+      if (calls === 1) throw new Error('poison-pill constraint failure');
+    }
+    return origQuery(sql, values);
+  });
+  vi.mocked(pool.query).mockResolvedValue({ rows: [{ id: 'poison' }, { id: 'resource' }], rowCount: 2, command: 'SELECT', oid: 0, fields: [] } as never);
+  const expiredCount = await repository.expireWaits();
+  expect(expiredCount).toBe(1);
+  expect(wait.status).toBe('timed_out');
+  const poolSql = vi.mocked(pool.query).mock.calls.map(([s]) => String(s));
+  expect(poolSql.some((s) => s.includes('FOR UPDATE SKIP LOCKED'))).toBe(true);
 });

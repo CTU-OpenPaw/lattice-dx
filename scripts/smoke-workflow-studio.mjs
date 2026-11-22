@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -9,6 +10,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url));
 const base='http://localhost:8080',actors={};
 for(const username of ['alice','bob','warehouse','it-demo']) {
@@ -124,6 +126,6 @@ import {workflowDatabase} from './src/workflows/database.ts';
  }
 })().catch(e=>{console.error(e);process.exitCode=1;});
 `;
-console.log(execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',sqlSource],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim());
+console.log(execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',sqlSource],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim());
 console.log('Workflow Studio smoke passed: configuration API, permission checks, reserved IDs, graph validation, optimistic conflict, serialized publication, tenant isolation, pinned runtime, v1 replay after v2, dynamic inbox and outbox.');
 console.log(JSON.stringify({definitionId:id,runV1:original.id,runV2:latest.id,note:'Retained local demo configuration and instances'}));

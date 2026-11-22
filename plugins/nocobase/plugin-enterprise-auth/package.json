@@ -1,6 +1,6 @@
 {
   "name": "@latticedx/plugin-enterprise-auth",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "commonjs",
@@ -11,5 +11,5 @@
   "scripts": {"build": "node build.mjs", "test": "node --test tests/*.test.cjs"},
   "dependencies": {"openid-client": "6.8.9"},
   "bundleDependencies": ["openid-client"],
-  "nocobase": {"supportedVersions": ["2.2.x"], "testedRuntime": "2.2.38", "sdkProvidedByHost": true}
+  "nocobase": {"supportedVersions": ["2.2.x"], "testedRuntime": "2.2.50", "sdkProvidedByHost": true}
 }

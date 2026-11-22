@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -15,6 +16,13 @@ function boundedJson(value:unknown) {
   if(Buffer.byteLength(JSON.stringify(value),'utf8')>16384) bad('Entity data exceeds 16 KiB.');
 }
 const reserved = new Set(['__proto__','prototype','constructor','id','schemaId','schemaVersion','ownerId','organizationId','version','archivedAt','createdAt','updatedAt','audit']);
+export function assertSafePropKey(key:string):string {
+  if(key==='__proto__'||key==='constructor'||key==='prototype') bad('Invalid property key.');
+  return key;
+}
+function setSafeProp<T>(target:Record<string,T>, key:string, value:T):void {
+  Object.defineProperty(target, assertSafePropKey(key), { value, enumerable:true, configurable:true, writable:true });
+}
 export function object(value:unknown): Record<string,unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) || ![Object.prototype,null].includes(Object.getPrototypeOf(value))) bad();
   return value as Record<string,unknown>;
@@ -58,13 +66,13 @@ export function parseSchema(input:unknown):SchemaDefinition {
     if(field.maxLength!==undefined&&(field.type!=='text'||!Number.isSafeInteger(field.maxLength)||Number(field.maxLength)<1||Number(field.maxLength)>4000)) bad();
     if(field.choices!==undefined&&field.type!=='enum') bad();
     if(field.type==='enum'&&(!Array.isArray(field.choices)||field.choices.length<1||field.choices.length>100||field.choices.some(x=>typeof x!=='string'||!x.trim()||Array.from(x).length>200)||new Set(field.choices).size!==field.choices.length)) bad('Invalid enum choices.');
-    parsed[key]={...field} as Field;
+    setSafeProp(parsed,key,{...field} as Field);
   }
   const declared:SchemaDefinition['relations']={};
   for(const [key,value] of Object.entries(relations)) {
     name(key);
     const relation=exact(value,['targetSchemaId']);
-    declared[key]={targetSchemaId:slug(relation.targetSchemaId)};
+    setSafeProp(declared,key,{targetSchemaId:slug(relation.targetSchemaId)});
   }
   return {id:slug(data.id),title:title(data.title),fields:parsed,relations:declared};
 }

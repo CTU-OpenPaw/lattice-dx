@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -196,6 +197,9 @@ function createNativeWorkspace(client, React, antd, app, router) {
     const [permissionResult, setPermissionResult] = React.useState(null);
     const request = React.useRef({ busy: false, mounted: true });
     React.useEffect(() => { request.current.mounted = true; return () => { request.current.mounted = false; }; }, []);
+    React.useEffect(() => {
+      if (typeof document !== 'undefined') document.title = 'Không gian Làm việc — LatticeDX';
+    }, []);
     React.useEffect(() => { setTerm(params.get('q') || ''); }, [search]);
     const applications = workspaceApplications(allAccessRoutes);
     const selectedApp = applications.find(item => item.id === appId);

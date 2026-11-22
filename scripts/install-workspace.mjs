@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -11,13 +12,17 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const compose = ['--context', 'desktop-linux', 'compose', '-f', 'infra/compose/nocobase.yml'];
 const packages = [
   { directory: 'action-bridge', name: '@latticedx/plugin-action-bridge', build: 'build.mjs' },
   { directory: 'plugin-lattice-foundation', name: '@latticedx/plugin-lattice-foundation', build: 'scripts/build.mjs' },
   { directory: 'plugin-enterprise-auth', name: '@latticedx/plugin-enterprise-auth', build: 'build.mjs', restoreDependencies: true },
+  { directory: 'plugin-dxos-para', name: '@latticedx/plugin-dxos-para', build: 'build.mjs' },
+  { directory: 'plugin-dxos-blocks', name: '@latticedx/plugin-dxos-blocks', build: 'build.mjs' },
+  { directory: 'plugin-dxos-studio', name: '@latticedx/plugin-dxos-studio', build: 'build.mjs' },
+  { directory: 'plugin-dxos-ai', name: '@latticedx/plugin-dxos-ai', build: 'build.mjs' },
 ];
 
 export function defaultRun(file, args, { timeout, cwd = root, env = process.env }) {
@@ -52,7 +57,7 @@ async function publicHealth() {
   catch { return false; }
 }
 
-export async function installWorkspace({ run = defaultRun, backupDir = resolve(root, 'output/backups'), health = publicHealth, sourceRoot = root, composeArgs = compose } = {}) {
+export async function installWorkspace({ run = defaultRun, backupDir = resolve(root, 'output/backups'), health = publicHealth, sourceRoot = root, composeArgs = [...dockerContextArgs(), 'compose', '-f', 'infra/compose/nocobase.yml'] } = {}) {
   const command = async (file, args, timeout) => {
     try { return await run(file, args, { timeout, shell: false, cwd: sourceRoot }); }
     catch { throw new Error('Workspace command failed; command output withheld'); }

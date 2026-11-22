@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -173,11 +174,19 @@ export async function provisionMultiPortalDemo(api, origin, { fixturesOnly = fal
     });
   }
 
+  let composedOverview = null;
+  try {
+    composedOverview = await api('dxosStudio:composePortals', { method: 'POST', values: {} });
+  } catch (err) {
+    if (!/\bHTTP (?:404|501)\b/.test(String(err?.message || ''))) throw err;
+  }
+
   return {
     result: 'PASS',
     origin: safeOrigin,
     settingsUrl: `${safeOrigin}/admin/settings/multi-portal`,
     createdPages,
+    composedOverview,
     portals,
   };
 }
@@ -219,12 +228,48 @@ export async function createRootApiClient(origin, fetchImpl = fetch) {
   return api;
 }
 
+export async function ensureLogisticsDemoCrew(api) {
+  const depts = await api('latticeDepartments:list?filter=' + encodeURIComponent(JSON.stringify({ code: 'NATIVE-UI-LAB', organizationId: 'native-ui-lab' })));
+  const dept = Array.isArray(depts) ? depts[0] : depts?.rows?.[0];
+  if (!dept?.id) return { skipped: true, createdUsers: 0, createdEmployees: 0 };
+
+  let createdUsers = 0;
+  let createdEmployees = 0;
+  const specs = [
+    ['native.lab.dispatcher', 'ldx_dispatcher', 'NATIVE-UI-DISPATCHER', 'Điều phối thử native'],
+    ['native.lab.driver', 'ldx_driver', 'NATIVE-UI-DRIVER', 'Tài xế thử native'],
+  ];
+  for (const [username, role, code, name] of specs) {
+    const email = `${username}@example.invalid`;
+    const foundUsers = await api('users:list?filter=' + encodeURIComponent(JSON.stringify({ username })));
+    let user = Array.isArray(foundUsers) ? foundUsers[0] : foundUsers?.rows?.[0];
+    if (!user) {
+      user = await api('users:create', {
+        method: 'POST',
+        values: { username, email, nickname: name, password: process.env.NATIVE_DEMO_PASSWORD ?? 'NativeLab-2026!', roles: [role] },
+      });
+      createdUsers += 1;
+    }
+    const foundEmps = await api('latticeEmployees:list?filter=' + encodeURIComponent(JSON.stringify({ code, organizationId: 'native-ui-lab' })));
+    const emp = Array.isArray(foundEmps) ? foundEmps[0] : foundEmps?.rows?.[0];
+    if (!emp && user?.id) {
+      await api('latticeEmployees:create', {
+        method: 'POST',
+        values: { code, name, organizationId: 'native-ui-lab', departmentId: dept.id, userId: user.id, active: true },
+      });
+      createdEmployees += 1;
+    }
+  }
+  return { skipped: false, createdUsers, createdEmployees };
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   resolveCliTarget(process.argv.slice(2))
     .then(async ({ origin, fixturesOnly }) => {
       const api = await createRootApiClient(origin);
       const summary = await provisionMultiPortalDemo(api, origin, { fixturesOnly });
-      console.log(JSON.stringify(summary));
+      const crew = await ensureLogisticsDemoCrew(api);
+      console.log(JSON.stringify({ ...summary, crew }));
     })
     .catch((error) => {
       console.error(JSON.stringify({ result: 'FAIL', error: error.message }));

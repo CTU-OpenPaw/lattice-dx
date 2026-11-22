@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -34,8 +35,10 @@ for(const path of ['server/native-documents.js','server/collections/command-rece
 // Bundle the dependency graph of trusted package modules. Host SDK/React remain
 // external. Adding an application extension does not require a bundler branch.
 await unlink(join(root,'dist/client/logistics.js')).catch(error=>{if(error.code!=='ENOENT')throw error;});
+const SAFE_MODULE_ID_RE = /^[A-Za-z0-9_./-]+$/;
 async function bundle(entrySource,entryPath) {
   const modules=new Map();
+  const depsMap={};
   function modulePath(from,name) {
     let path=resolve(dirname(from),name.endsWith('.js')?name:name+'.js');
     if(!existsSync(path)){
@@ -48,22 +51,27 @@ async function bundle(entrySource,entryPath) {
   const moduleId=path=>relative(join(root,'src'),path).replaceAll('\\','/');
   async function collect(path) {
     const id=moduleId(path);if(modules.has(id))return;
+    if(!SAFE_MODULE_ID_RE.test(id))throw new Error('Invalid bundled module id: '+id);
     const source=await readFile(path,'utf8');modules.set(id,null);
     const dependencies={};
     for(const match of source.matchAll(/require\(['"]([^'"]+)['"]\)/g)) {
       if(!match[1].startsWith('.'))throw new Error('Unexpected external dependency: '+match[1]);
       const target=modulePath(path,match[1]);dependencies[match[1]]=moduleId(target);await collect(target);
     }
-    modules.set(id,`function(module,exports){const require=name=>__load(${JSON.stringify(dependencies)}[name]);\n${source}\n}`);
+    depsMap[id]=dependencies;
+    modules.set(id,'function(module,exports,__id){const require=name=>__load(__deps[__id][name]);\n'+source+'\n}');
   }
   let entry=entrySource;
   for(const match of entrySource.matchAll(/require\(['"](\.[^'"]+)['"]\)/g)) {
     const path=modulePath(entryPath,match[1]);await collect(path);
-    entry=entry.replaceAll(match[0],`__load(${JSON.stringify(moduleId(path))})`);
+    const targetId=moduleId(path);
+    entry=entry.replaceAll(match[0],"__load('"+targetId+"')");
   }
-  const loader=`const __modules={${[...modules].map(([id,source])=>JSON.stringify(id)+':'+source).join(',\n')}};
+  const depsHeader='const __deps = '+JSON.stringify(depsMap)+';\n';
+  const moduleEntries=[...modules].map(([id,source])=>`'${id}':${source}`).join(',\n');
+  const loader=depsHeader+`const __modules={${moduleEntries}};
 const __cache=new Map();
-function __load(id){if(!Object.hasOwn(__modules,id))throw new Error('Unknown bundled module: '+id);if(__cache.has(id))return __cache.get(id).exports;const module={exports:{}};__cache.set(id,module);__modules[id](module,module.exports);return module.exports;}\n`;
+function __load(id){if(!Object.hasOwn(__modules,id))throw new Error('Unknown bundled module: '+id);if(__cache.has(id))return __cache.get(id).exports;const module={exports:{}};__cache.set(id,module);__modules[id](module,module.exports,id);return module.exports;}\n`;
   return entry.replace("'use strict';",()=>"'use strict';\n"+loader);
 }
 for(const target of ['client','client-v2']) {

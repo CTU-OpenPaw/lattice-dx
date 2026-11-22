@@ -1,6 +1,7 @@
 /**
  * @file LatticeDX — Open Digital Enterprise Platform
  * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
  * @license Apache-2.0
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
@@ -14,6 +15,7 @@ const {
   ensureDynamicLayoutsRegistered,
   buildPortalAppList,
   createNativePortalManager,
+  resolveLegacyMobileRedirect,
 } = require('../src/client/native-portal-manager');
 
 function createReactMock() {
@@ -266,4 +268,62 @@ test('savePortal preserves existing portals via upsertPortal, navigateToPortal a
   const usersBar = manager.PortalBar({ portals: portalRows, pathname: '/admin/settings/users', allowConfigUI: true });
   assert.ok(find(multiBar, n => n.children?.[0] === 'Multi-Portal'));
   assert.ok(find(usersBar, n => n.children?.[0] === 'Cài đặt hệ thống'));
+});
+
+test('resolveLegacyMobileRedirect bridges /mobile* to /{prefix}/mobile* only in legacy-default mode without native mobile layout', () => {
+  assert.equal(
+    resolveLegacyMobileRedirect({
+      __nocobase_app_client_entry_mode__: 'legacy-default',
+      location: { pathname: '/mobile', search: '', hash: '' },
+    }, { layoutManager: { hasLayout: () => false } }),
+    '/v/mobile',
+  );
+  assert.equal(
+    resolveLegacyMobileRedirect({
+      __nocobase_app_client_entry_mode__: 'legacy-default',
+      location: { pathname: '/mobile/w6golht1d9g', search: '?tab=1', hash: '#top' },
+    }, { layoutManager: { hasLayout: () => false } }),
+    '/v/mobile/w6golht1d9g?tab=1#top',
+  );
+  assert.equal(
+    resolveLegacyMobileRedirect({
+      __nocobase_app_client_entry_mode__: 'legacy-default',
+      __nocobase_modern_client_prefix__: 'modern',
+      location: { pathname: '/mobile', search: '', hash: '' },
+    }, {}),
+    '/modern/mobile',
+  );
+  assert.equal(
+    resolveLegacyMobileRedirect({
+      __nocobase_app_client_entry_mode__: 'legacy-default',
+      __nocobase_modern_client_prefix__: '//evil.com',
+      location: { pathname: '/mobile', search: '', hash: '' },
+    }, {}),
+    '/v/mobile',
+  );
+  assert.equal(
+    resolveLegacyMobileRedirect({
+      __nocobase_app_client_entry_mode__: 'legacy-default',
+      location: { pathname: '/mobile', search: '', hash: '' },
+    }, { layoutManager: { hasLayout: name => name === 'mobile' } }),
+    null,
+  );
+  for (const mode of ['modern', undefined]) {
+    assert.equal(
+      resolveLegacyMobileRedirect({
+        __nocobase_app_client_entry_mode__: mode,
+        location: { pathname: '/mobile', search: '', hash: '' },
+      }, {}),
+      null,
+    );
+  }
+  for (const p of ['/admin', '/p/services', '/mobile-web', '/mobile/../evil', '/v/mobile']) {
+    assert.equal(
+      resolveLegacyMobileRedirect({
+        __nocobase_app_client_entry_mode__: 'legacy-default',
+        location: { pathname: p, search: '', hash: '' },
+      }, {}),
+      null,
+    );
+  }
 });
