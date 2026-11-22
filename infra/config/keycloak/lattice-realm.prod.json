@@ -141,7 +141,7 @@
       "webOrigins": ["https://$(env:LATTICE_DOMAIN)"],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "backchannel.logout.url": "https://$(env:LATTICE_DOMAIN)/api/dxAuth:backchannelLogout",
+        "backchannel.logout.url": "https://$(env:LATTICE_DOMAIN)/api/enterpriseAuth:backchannelLogout",
         "backchannel.logout.session.required": "true"
       },
       "protocolMappers": [
