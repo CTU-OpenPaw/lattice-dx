@@ -442,3 +442,55 @@ test('service-scope enforces optimistic version locking on latticeServiceTickets
   assert.equal(okCtx.action.params.values.version, 5);
   assert.equal(okCtx.action.params.values.expectedVersion, undefined);
 });
+
+test('dxosStudio actions expose admin-gated outboxDlqList and outboxDlqReplay', async () => {
+  const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
+  const rows = [
+    { id: 1, eventId: 'evt-dlq-1', entityId: 'urn:asset:1', organizationId: 'org-a', collectionName: 'latticeAssets', recordId: 11, state: 'failed', attempts: 5, errorCode: 'BROKER_HTTP_500', nextAttemptAt: null, lockedAt: null, updatedAt: '2026-11-22T00:00:00Z', update: async function (v) { Object.assign(this, v); } },
+    { id: 2, eventId: 'evt-ok-2', entityId: 'urn:asset:2', organizationId: 'org-a', collectionName: 'latticeAssets', recordId: 12, state: 'delivered', attempts: 1, errorCode: null, update: async function (v) { Object.assign(this, v); } },
+  ];
+  const db = {
+    getRepository(name) {
+      if (name === 'roles') {
+        return {
+          find: async ({ filter } = {}) => {
+            const names = filter?.name?.$in;
+            return [{ name: 'ldx_admin', allowConfigure: true }].filter((r) => !names || names.includes(r.name));
+          },
+        };
+      }
+      if (name === 'latticeContextOutbox') {
+        return {
+          findAndCount: async ({ filter }) => {
+            const matched = rows.filter((r) => (!filter?.state || r.state === filter.state) && (!filter?.organizationId || r.organizationId === filter.organizationId));
+            return [matched, matched.length];
+          },
+          find: async ({ filter }) => rows.filter((r) => (!filter?.state || r.state === filter.state) && (!filter?.eventId?.$in || filter.eventId.$in.includes(r.eventId))),
+        };
+      }
+      return null;
+    },
+    getModel(name) {
+      if (name === 'latticeContextOutbox') {
+        return {
+          findAll: async ({ where }) => rows.filter((r) => r.state === where.state && (!where.eventId || where.eventId.includes(r.eventId))),
+        };
+      }
+      return null;
+    },
+  };
+  const actions = createDxosStudioActions(db);
+  await assert.rejects(() => actions.outboxDlqList({ state: { currentUser: { id: 2 }, currentRoles: ['ldx_employee'] }, action: { params: {} } }, async () => {}), { status: 403 });
+
+  const listCtx = { state: { currentUser: { id: 1 }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions.outboxDlqList(listCtx, async () => {});
+  assert.equal(listCtx.body.items.length, 1);
+  assert.equal(listCtx.body.items[0].eventId, 'evt-dlq-1');
+  assert.equal(listCtx.body.summary.failed, 1);
+
+  const replayCtx = { state: { currentUser: { id: 1 }, currentRoles: ['root'] }, action: { params: { values: { eventIds: ['evt-dlq-1'] } } } };
+  await actions.outboxDlqReplay(replayCtx, async () => {});
+  assert.equal(replayCtx.body.replayedCount, 1);
+  assert.equal(rows[0].state, 'pending');
+  assert.equal(rows[0].attempts, 0);
+});

@@ -51,3 +51,34 @@ test('plugin-dxos-studio registers /admin/settings/dxos-studio with aclSnippet p
   assert.ok(dump.includes('7 Plugin'), 'Studio UI should present the 7 Apache-2.0 Open-Core plugins catalog');
   assert.ok(dump.includes('AI Workforce'), 'Studio UI should expose link/reference to AI Workforce Center');
 });
+
+test('plugin-dxos-studio renders Tab 5 Outbox & DLQ panel cleanly', async () => {
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  let activeTab = 'outbox';
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const val = typeof init === 'function' ? init() : init;
+      if (val === 'workflows') return [activeTab, () => {}];
+      if (val === false && arguments.length === 0) return [val, () => {}];
+      return [val, () => {}];
+    },
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useCallback: (fn) => fn,
+  };
+  let requestedUrls = [];
+  const mockClient = {
+    useAPIClient: () => ({
+      request: async (req) => {
+        requestedUrls.push(req.url);
+        return { data: { data: {} } };
+      },
+    }),
+  };
+  const Page = createDxosStudioSettingsPage(mockClient, React, {}, {});
+  const tree = Page();
+  const dump = JSON.stringify(tree);
+  assert.ok(dump.includes('Outbox') && dump.includes('DLQ'), 'Studio UI should present Tab 5 Outbox & DLQ');
+});

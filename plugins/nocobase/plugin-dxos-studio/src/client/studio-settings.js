@@ -34,6 +34,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const [busyAction, setBusyAction] = React.useState(false);
     const [forbidden, setForbidden] = React.useState(false);
     const [feedback, setFeedback] = React.useState(null);
+    const [outboxData, setOutboxData] = React.useState({ items: [], total: 0, summary: { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 } });
 
     const loadAll = React.useCallback(async () => {
       if (!api?.request) { setLoading(false); return; }
@@ -68,6 +69,42 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     }, [api, selectedOrg]);
 
     React.useEffect(() => { loadAll(); }, [loadAll]);
+
+    const loadOutbox = React.useCallback(async () => {
+      if (!api?.request) return;
+      try {
+        const res = await api.request({ url: 'dxosStudio:outboxDlqList', method: 'get', skipNotify: true });
+        const d = res?.data?.data || res?.data || {};
+        setOutboxData({
+          items: Array.isArray(d.items) ? d.items : [],
+          total: Number(d.total || 0),
+          summary: d.summary || { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 },
+        });
+      } catch {
+        // Keep last state cleanly
+      }
+    }, [api]);
+
+    React.useEffect(() => {
+      if (tab === 'outbox') loadOutbox();
+    }, [tab, loadOutbox]);
+
+    async function handleReplayDlq(eventIds) {
+      if (!api?.request || busyAction) return;
+      setBusyAction(true);
+      setFeedback(null);
+      try {
+        const payload = Array.isArray(eventIds) && eventIds.length ? { eventIds } : {};
+        const res = await api.request({ url: 'dxosStudio:outboxDlqReplay', method: 'post', data: payload });
+        const d = res?.data?.data || res?.data || {};
+        setFeedback({ type: 'success', text: `Đã đưa ${d.replayedCount || 0} bản ghi Outbox DLQ trở lại hàng đợi xử lý.` });
+        await loadOutbox();
+      } catch (err) {
+        setFeedback({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || 'Không phát lại được hàng đợi DLQ.' });
+      } finally {
+        setBusyAction(false);
+      }
+    }
 
     const activeTemplate = templates.find((t) => t.key === selectedTemplate) || templates[0];
     const orgEmployees = employees.filter((e) => !selectedOrg || e.organizationId === selectedOrg);
@@ -139,6 +176,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       ['portals', '2. Dựng cổng đa-block'],
       ['plugins', '3. Hệ sinh thái 7 Plugin'],
       ['pof', '4. Sẵn sàng PoF & Hệ thống'],
+      ['outbox', '5. Hàng đợi Outbox & DLQ'],
     ];
 
     const btnStyle = (active) => ({
@@ -277,6 +315,39 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           )),
         ),
         h('div', { style: { fontSize: 13, color: '#334155' } }, `Nhận diện Điều 5.2 NocoBase: ${readiness?.clause52Attribution || 'Powered by NocoBase'}`),
+      ) : null,
+
+      tab === 'outbox' ? h('div', { 'data-testid': 'dxos-studio-outbox-dlq-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hàng đợi Outbox & Dead-Letter Queue (DLQ)'),
+          h('div', { style: { display: 'flex', gap: 8 } },
+            h('button', { type: 'button', onClick: () => loadOutbox(), style: btnStyle(false) }, 'Làm mới DLQ'),
+            h('button', { type: 'button', disabled: busyAction || !(outboxData.items || []).length, onClick: () => handleReplayDlq(), style: btnStyle(true) }, 'Phát lại toàn bộ DLQ'),
+          ),
+        ),
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8 } },
+          [
+            ['Thất bại (DLQ)', outboxData?.summary?.failed ?? 0, '#dc2626'],
+            ['Đang thử lại', outboxData?.summary?.retry ?? 0, '#d97706'],
+            ['Chờ gửi', outboxData?.summary?.pending ?? 0, '#2563eb'],
+            ['Đang khóa gửi', outboxData?.summary?.processing ?? 0, '#7c3aed'],
+            ['Đã đồng bộ', outboxData?.summary?.delivered ?? 0, '#16a34a'],
+          ].map(([label, valNum, color]) => h('div', { key: label, style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0' } },
+            h('div', { style: { fontSize: 11, color: '#64748b' } }, label),
+            h('div', { style: { fontSize: 20, fontWeight: 700, color } }, valNum),
+          )),
+        ),
+        !(outboxData.items || []).length
+          ? h('div', { style: { padding: 12, borderRadius: 8, background: '#f8fafc', fontSize: 13, color: '#475569' } }, 'Không có sự kiện lỗi (DLQ) tồn đọng. Hệ thống Outbox non-blocking hoạt động bình thường.')
+          : h('div', { style: { display: 'grid', gap: 8 } },
+            outboxData.items.map((item) => h('div', { key: item.eventId || item.id, style: { padding: 10, borderRadius: 8, border: '1px solid #fecaca', background: '#fef2f2', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              h('div', { style: { fontSize: 12 } },
+                h('div', { style: { fontWeight: 700, color: '#0f172a' } }, `${item.collectionName || 'entity'}#${item.recordId || ''} · ${item.eventId}`),
+                h('div', { style: { color: '#991b1b' } }, `Tổ chức: ${item.organizationId} · Số lần thử: ${item.attempts} · Mã lỗi: ${item.errorCode || 'UNKNOWN'}`),
+              ),
+              h('button', { type: 'button', disabled: busyAction, onClick: () => handleReplayDlq([item.eventId]), style: btnStyle(false) }, 'Phát lại'),
+            )),
+          ),
       ) : null,
     );
   };

@@ -134,14 +134,34 @@ function registerNativeRequestAttachments(app, scannerHost, submitOrganization, 
         return file;
       }
       const { previous, sharedInput } = await withRequest(ctx, 'POST', 'update', async scope => {
-        if (await useShared(scope)) return { sharedInput: await uploads.prepare(ctx, scope, input) };
+        if (await useShared(scope)) {
+          return { sharedInput: await uploads.prepare(ctx, scope, input, { stalePendingMs: Number(process.env.DX_UPLOAD_STALE_PENDING_MS) || 300000 }) };
+        }
         return { previous: await existing(scope) };
       }, true);
       if (sharedInput) {
-        const shared = await withRequest(ctx, 'POST', 'update', scope => uploads.execute(ctx, scope, sharedInput,
-          canonical => sharedFiles(ctx, 'upload', scope, {
-            filename: canonical.filename, key: canonical.key, contentBase64: canonical.content.toString('base64'),
-          })), true);
+        const prep = await withRequest(ctx, 'POST', 'update', async scope => {
+          const began = await uploads.beginExecute(ctx, scope, sharedInput);
+          return { ...began, callScope: { id: scope.id, actor: scope.actor } };
+        }, true);
+        let shared;
+        if (prep.phase === 'done') {
+          shared = prep.response;
+        } else {
+          let uploadRes, uploadErr = null;
+          try {
+            uploadRes = await sharedFiles(ctx, 'upload', prep.callScope, {
+              filename: prep.canonical.filename,
+              key: prep.canonical.key,
+              contentBase64: prep.canonical.content.toString('base64'),
+            });
+          } catch (error) {
+            uploadErr = error;
+          }
+          shared = await withRequest(ctx, 'POST', 'update', scope => uploads.finalizeExecute(
+            ctx, scope, prep.canonical, uploadRes, uploadErr, prep.attempts,
+          ), true);
+        }
         if (shared.error) ctx.throw(shared.error.status, shared.error.message);
         ctx.status = shared.status;
         ctx.body = shared.data;

@@ -70,5 +70,9 @@ function registerContextHooks(db){
   });
  }
 }
-function retryDelay(attempt){return Math.min(300000,1000*2**Math.min(20,Math.max(0,attempt-1)));}
+function retryDelay(attempt,{jitterRatio=0}={}){
+ const base=Math.min(300000,1000*2**Math.min(20,Math.max(0,attempt-1)));
+ const jitter=jitterRatio>0?Math.floor(Math.random()*Math.min(5000,base*jitterRatio)):0;
+ return Math.min(300000,base+jitter);
+}
 module.exports={TYPES,CONTEXT,entityUrn,projectContext,enqueueContext,registerContextHooks,retryDelay};

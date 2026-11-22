@@ -32,28 +32,96 @@ async function deliverSnapshot(base,event,fetchImpl=fetch){
   await r.body?.cancel();if(![204,404].includes(r.status))throw brokerError('BROKER_HTTP_'+r.status);
  }
 }
-async function dispatchOne(db,base,{fetchImpl=fetch,eventId}={}){
- if(!base)return {state:'disabled'};
+const DEFAULT_BATCH_SIZE=10;
+const DEFAULT_MAX_ATTEMPTS=Math.max(1,Number(process.env.DX_OUTBOX_MAX_ATTEMPTS)||5);
+const DEFAULT_STALE_LOCK_MS=Math.max(10000,Number(process.env.DX_OUTBOX_STALE_LOCK_MS)||120000);
+
+async function claimOutboxBatch(db,{batchSize=DEFAULT_BATCH_SIZE,eventId,staleLockMs=DEFAULT_STALE_LOCK_MS,reclaimStale=true}={}){
+ const size=Math.max(1,Math.min(100,Number(batchSize)||DEFAULT_BATCH_SIZE));
  return db.sequelize.transaction(async transaction=>{
   const model=db.getModel('latticeContextOutbox');
   const table=db.sequelize.getQueryInterface().queryGenerator.quoteTable(model.getTableName());
-  // Older undelivered events (including rows locked by another sender) block
-  // their entity. Other entities may progress via SKIP LOCKED.
-  const [rows]=await db.sequelize.query(`SELECT o.id FROM ${table} o WHERE o.state IN ('pending','retry') ${eventId?'AND o."eventId"=:eventId':''} AND (o."nextAttemptAt" IS NULL OR o."nextAttemptAt" <= NOW()) AND NOT EXISTS (SELECT 1 FROM ${table} older WHERE older."entityId"=o."entityId" AND older.id<o.id AND older.state<>'delivered') ORDER BY o.id LIMIT 1 FOR UPDATE OF o SKIP LOCKED`,{transaction,replacements:eventId?{eventId}:undefined});
-  if(!rows.length)return {state:'idle'};
-  const row=await model.findByPk(rows[0].id,{transaction});
-  const event=row.toJSON(),attempts=event.attempts+1;
-  try{
-   await deliverSnapshot(base,event,fetchImpl);
-   await row.update({state:'delivered',attempts,deliveredAt:new Date(),nextAttemptAt:null,errorCode:null},{transaction});
-   return {state:'delivered',eventId:event.eventId,entityId:event.entityId};
-  }catch(error){
-   const errorCode=/^BROKER_HTTP_\d{3}$/.test(error.deliveryCode??'')?error.deliveryCode:'BROKER_UNAVAILABLE';
-   const state=attempts>=8?'failed':'retry';
-   await row.update({state,attempts,errorCode,nextAttemptAt:state==='failed'?null:new Date(Date.now()+retryDelay(attempts))},{transaction});
-   return {state,eventId:event.eventId,errorCode};
+  if(reclaimStale&&staleLockMs>0){
+   try{
+    const cutoff=new Date(Date.now()-staleLockMs);
+    await db.sequelize.query(
+     `UPDATE ${table} SET state='retry',"lockedAt"=NULL,"nextAttemptAt"=NOW() WHERE state='processing' AND "lockedAt" IS NOT NULL AND "lockedAt"<:cutoff`,
+     {transaction,replacements:{cutoff}},
+    );
+   }catch{}
   }
+  // Failed (dead-lettered) rows do NOT block newer events for the same entityId;
+  // only in-flight states ('pending','retry','processing') serialize per entity.
+  const [rows]=await db.sequelize.query(
+   `SELECT o.id FROM ${table} o WHERE o.state IN ('pending','retry') ${eventId?'AND o."eventId"=:eventId':''} AND (o."nextAttemptAt" IS NULL OR o."nextAttemptAt" <= NOW()) AND NOT EXISTS (SELECT 1 FROM ${table} older WHERE older."entityId"=o."entityId" AND older.id<o.id AND older.state IN ('pending','retry','processing')) ORDER BY o.id LIMIT :batchSize FOR UPDATE OF o SKIP LOCKED`,
+   {transaction,replacements:{...(eventId?{eventId}:{}),batchSize:size}},
+  );
+  if(!rows.length)return [];
+  const claimed=[];
+  for(const ref of rows){
+   const row=await model.findByPk(ref.id,{transaction});
+   if(!row)continue;
+   const event=typeof row.toJSON==='function'?row.toJSON():{...row};
+   await row.update({state:'processing',lockedAt:new Date()},{transaction});
+   claimed.push({id:ref.id,row,event});
+  }
+  return claimed;
  });
+}
+
+async function dispatchBatch(db,base,{fetchImpl=fetch,eventId,batchSize=DEFAULT_BATCH_SIZE,maxAttempts=DEFAULT_MAX_ATTEMPTS,staleLockMs=DEFAULT_STALE_LOCK_MS}={}){
+ if(!base)return [{state:'disabled'}];
+ const claimed=await claimOutboxBatch(db,{batchSize,eventId,staleLockMs});
+ if(!claimed.length)return [];
+ const deliveries=await Promise.all(claimed.map(async item=>{
+  try{
+   await deliverSnapshot(base,item.event,fetchImpl);
+   return {item,ok:true};
+  }catch(error){
+   const errorCode=/^BROKER_HTTP_\d{3}$/.test(error?.deliveryCode??'')?error.deliveryCode:'BROKER_UNAVAILABLE';
+   return {item,ok:false,errorCode};
+  }
+ }));
+ return db.sequelize.transaction(async transaction=>{
+  const model=db.getModel('latticeContextOutbox');
+  const out=[];
+  for(const res of deliveries){
+   const {event}=res.item;
+   const row=(await model.findByPk(res.item.id,{transaction}))||res.item.row;
+   const attempts=(Number(event.attempts)||0)+1;
+   if(res.ok){
+    await row.update({state:'delivered',attempts,deliveredAt:new Date(),nextAttemptAt:null,lockedAt:null,errorCode:null},{transaction});
+    out.push({state:'delivered',eventId:event.eventId,entityId:event.entityId});
+   }else{
+    const state=attempts>=maxAttempts?'failed':'retry';
+    await row.update({state,attempts,errorCode:res.errorCode,lockedAt:null,nextAttemptAt:state==='failed'?null:new Date(Date.now()+retryDelay(attempts,{jitterRatio:0.25}))},{transaction});
+    out.push({state,eventId:event.eventId,errorCode:res.errorCode});
+   }
+  }
+  return out;
+ });
+}
+
+async function dispatchOne(db,base,{fetchImpl=fetch,eventId,maxAttempts=DEFAULT_MAX_ATTEMPTS}={}){
+ if(!base)return {state:'disabled'};
+ const results=await dispatchBatch(db,base,{fetchImpl,eventId,batchSize:1,maxAttempts});
+ return results[0]||{state:'idle'};
+}
+
+async function replayDeadLetters(db,{organizationId,eventIds,limit=100}={}){
+ const model=db.getModel?.('latticeContextOutbox');
+ if(!model)return {replayedCount:0,eventIds:[]};
+ const where={state:'failed'};
+ if(organizationId)where.organizationId=String(organizationId);
+ if(Array.isArray(eventIds)&&eventIds.length)where.eventId=eventIds.map(String);
+ const rows=(await model.findAll({where,limit:Math.max(1,Math.min(500,Number(limit)||100))}))||[];
+ const replayedIds=[];
+ for(const row of rows){
+  const eid=typeof row.get==='function'?row.get('eventId'):row.eventId;
+  await row.update({state:'pending',attempts:0,errorCode:null,nextAttemptAt:null,lockedAt:null});
+  if(eid)replayedIds.push(eid);
+ }
+ return {replayedCount:replayedIds.length,eventIds:replayedIds};
 }
 function registerContextResource(app){
  const root=ctx=>{if(ctx.state.currentRole!=='root'||!ctx.state.currentUser)ctx.throw(403,'Native context operations require root.');};
@@ -90,8 +158,8 @@ function registerContextResource(app){
  if(process.env.DX_NATIVE_CONTEXT_AUTO_SYNC==='true'){
   const base=brokerConfig(process.env);if(!base)throw Error('Automatic native context delivery requires a broker URL');
   app.cronJobManager.addJob({cronTime:'*/10 * * * * *',onTick:async()=>{
-   try{await dispatchOne(app.db,base);}catch{app.logger.error('Native context delivery transaction failed; event remains queued.');}
+   try{await dispatchBatch(app.db,base,{batchSize:DEFAULT_BATCH_SIZE});}catch{app.logger.error('Native context delivery transaction failed; event remains queued.');}
   }});
  }
 }
-module.exports={brokerConfig,deliverSnapshot,dispatchOne,registerContextResource};
+module.exports={brokerConfig,deliverSnapshot,claimOutboxBatch,dispatchBatch,dispatchOne,replayDeadLetters,registerContextResource};

@@ -267,6 +267,99 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       };
       return next();
     },
+
+    outboxDlqList: async (ctx, next) => {
+      if ((ctx.method || 'GET') !== 'GET') throw fail('METHOD_NOT_ALLOWED', 405);
+      await requireAdmin(ctx);
+      const params = readParams(ctx);
+      const stateFilter = params.state ? String(params.state).trim() : 'failed';
+      const orgFilter = params.organizationId ? String(params.organizationId).trim() : '';
+      const page = Math.max(1, Number(params.page) || 1);
+      const pageSize = Math.max(1, Math.min(100, Number(params.pageSize) || 50));
+      const repo = db.getRepository?.('latticeContextOutbox');
+      if (!repo) {
+        ctx.body = { items: [], total: 0, summary: { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 } };
+        return next();
+      }
+      const filter = { state: stateFilter, ...(orgFilter ? { organizationId: orgFilter } : {}) };
+      let rows = [];
+      let total = 0;
+      if (typeof repo.findAndCount === 'function') {
+        const res = await repo.findAndCount({ filter, sort: ['-id'], offset: (page - 1) * pageSize, limit: pageSize });
+        rows = Array.isArray(res?.[0]) ? res[0] : [];
+        total = Number(res?.[1] ?? rows.length);
+      } else if (typeof repo.find === 'function') {
+        rows = (await repo.find({ filter, sort: ['-id'], offset: (page - 1) * pageSize, limit: pageSize })) || [];
+        total = typeof repo.count === 'function' ? await repo.count({ filter }) : rows.length;
+      }
+      const summary = { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 };
+      if (typeof repo.count === 'function') {
+        for (const s of Object.keys(summary)) {
+          summary[s] = await repo.count({ filter: { state: s, ...(orgFilter ? { organizationId: orgFilter } : {}) } });
+        }
+      } else if (typeof repo.find === 'function') {
+        const all = (await repo.find({ filter: orgFilter ? { organizationId: orgFilter } : {}, limit: 1000 })) || [];
+        for (const r of all) {
+          const st = val(r, 'state');
+          if (Object.prototype.hasOwnProperty.call(summary, st)) summary[st] += 1;
+        }
+      }
+      ctx.body = {
+        items: rows.map((r) => ({
+          id: val(r, 'id'),
+          eventId: val(r, 'eventId'),
+          entityId: val(r, 'entityId'),
+          organizationId: val(r, 'organizationId'),
+          collectionName: val(r, 'collectionName'),
+          recordId: val(r, 'recordId'),
+          state: val(r, 'state'),
+          attempts: val(r, 'attempts'),
+          errorCode: val(r, 'errorCode'),
+          nextAttemptAt: val(r, 'nextAttemptAt'),
+          lockedAt: val(r, 'lockedAt'),
+          updatedAt: val(r, 'updatedAt'),
+        })),
+        total,
+        page,
+        pageSize,
+        summary,
+      };
+      return next();
+    },
+
+    outboxDlqReplay: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      await requireAdmin(ctx);
+      const params = readParams(ctx);
+      const orgFilter = params.organizationId ? String(params.organizationId).trim() : '';
+      const rawIds = Array.isArray(params.eventIds) ? params.eventIds : params.eventId ? [params.eventId] : [];
+      const eventIds = rawIds.map((x) => String(x || '').trim()).filter(Boolean);
+      const limit = Math.max(1, Math.min(500, Number(params.limit) || 100));
+      const model = db.getModel?.('latticeContextOutbox');
+      const repo = db.getRepository?.('latticeContextOutbox');
+      const where = { state: 'failed' };
+      if (orgFilter) where.organizationId = orgFilter;
+      if (eventIds.length) where.eventId = eventIds;
+      let rows = [];
+      if (model && typeof model.findAll === 'function') {
+        rows = (await model.findAll({ where, limit })) || [];
+      } else if (repo && typeof repo.find === 'function') {
+        const filter = { state: 'failed', ...(orgFilter ? { organizationId: orgFilter } : {}), ...(eventIds.length ? { eventId: { $in: eventIds } } : {}) };
+        rows = (await repo.find({ filter, limit })) || [];
+      }
+      const replayedIds = [];
+      for (const row of rows) {
+        const eid = val(row, 'eventId');
+        if (typeof row.update === 'function') {
+          await row.update({ state: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, lockedAt: null });
+        } else if (repo && typeof repo.update === 'function' && eid) {
+          await repo.update({ filter: { eventId: eid }, values: { state: 'pending', attempts: 0, errorCode: null, nextAttemptAt: null, lockedAt: null } });
+        }
+        if (eid) replayedIds.push(eid);
+      }
+      ctx.body = { replayedCount: replayedIds.length, eventIds: replayedIds };
+      return next();
+    },
   };
 }
 
