@@ -274,3 +274,40 @@ test('migration 20261122000700 adds alarm deduplication columns reversibly', () 
   assert.match(src, /\bdown\s*\(/);
   assert.match(src, /idx_lattice_incident_cases_dedup/);
 });
+
+test('clearAlarm supplies default audit closeNote, clamps to 255 chars, and satisfies validateIncidentNotes', async () => {
+  const {
+    ingestOrDeduplicateAlarm,
+    clearAlarm,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'));
+  const { validateIncidentNotes } = require(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/native-identity-hooks.js'));
+  const { db } = makeAlarmAndTsHarness();
+
+  const a1 = await ingestOrDeduplicateAlarm(db, {
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    ruleCode: 'EMPTY-NOTE-CHECK',
+    attribute: 'temperature',
+  });
+  const clearedDefault = await clearAlarm(db, { id: a1.id, organizationId: 'org-a', actorName: 'op1' });
+  assert.equal(clearedDefault.status, 'closed');
+  assert.ok(clearedDefault.closeNote && clearedDefault.closeNote.includes('op1'));
+  assert.ok(clearedDefault.closeNote.length <= 255);
+  assert.doesNotThrow(() => validateIncidentNotes(clearedDefault));
+
+  const a2 = await ingestOrDeduplicateAlarm(db, {
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    ruleCode: 'LONG-NOTE-CHECK',
+    attribute: 'temperature',
+  });
+  const clearedLong = await clearAlarm(db, {
+    id: a2.id,
+    organizationId: 'org-a',
+    actorName: 'op1',
+    closeNote: 'x'.repeat(400),
+  });
+  assert.equal(clearedLong.status, 'closed');
+  assert.equal(clearedLong.closeNote.length, 255);
+  assert.doesNotThrow(() => validateIncidentNotes(clearedLong));
+});

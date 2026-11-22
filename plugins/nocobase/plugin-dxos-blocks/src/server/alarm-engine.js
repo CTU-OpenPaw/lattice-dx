@@ -149,7 +149,7 @@ async function acknowledgeAlarm(db, { id, organizationId = null, actorName = 'op
     status: 'acknowledged',
     acknowledgedAt: val(row, 'acknowledgedAt') || now,
     acknowledgedBy: String(actorName || 'operator').slice(0, 120),
-    ...(note ? { resolutionNote: String(note).slice(0, 500) } : {}),
+    ...(note ? { resolutionNote: String(note).slice(0, 255) } : {}),
   };
   await updateIncidentRow(repo, row, patch);
   return serializeAlarm(row);
@@ -167,11 +167,14 @@ async function clearAlarm(db, { id, organizationId = null, actorName = 'operator
     throw failAlarm('ALARM_ALREADY_CLEARED', 409, 'Cảnh báo đã được đóng trước đó.');
   }
   const now = new Date();
+  const safeActor = String(actorName || 'operator').trim() || 'operator';
+  const trimmedNote = String(closeNote || '').trim();
+  const resolvedCloseNote = (trimmedNote || `Đã đóng cảnh báo bởi ${safeActor}`).slice(0, 255);
   const patch = {
     status: 'closed',
     clearedAt: now,
-    clearedBy: String(actorName || 'operator').slice(0, 120),
-    ...(closeNote ? { closeNote: String(closeNote).slice(0, 500) } : {}),
+    clearedBy: safeActor.slice(0, 120),
+    closeNote: resolvedCloseNote,
   };
   await updateIncidentRow(repo, row, patch);
   return serializeAlarm(row);

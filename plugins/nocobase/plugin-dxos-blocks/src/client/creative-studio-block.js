@@ -341,7 +341,11 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
         if (!api?.request || !alarmId) return;
         try {
           setActionNote(op === 'ack' ? 'Đang xác nhận cảnh báo…' : 'Đang đóng cảnh báo…');
-          await api.request({ url: op === 'ack' ? 'dxosBlocks:alarmAck' : 'dxosBlocks:alarmClear', method: 'post', data: { id: alarmId } });
+          await api.request({
+            url: op === 'ack' ? 'dxosBlocks:alarmAck' : 'dxosBlocks:alarmClear',
+            method: 'post',
+            data: { id: alarmId, ...(op === 'clear' ? { closeNote: 'Đã đóng cảnh báo từ bảng điều khiển telemetry' } : {}) },
+          });
           setActionNote(op === 'ack' ? `Đã xác nhận (Ack) cảnh báo #${alarmId}.` : `Đã đóng (Clear) cảnh báo #${alarmId}.`);
           runQueries();
         } catch (err) {

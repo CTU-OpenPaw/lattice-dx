@@ -38,22 +38,24 @@ const DEFAULT_STALE_LOCK_MS=Math.max(10000,Number(process.env.DX_OUTBOX_STALE_LO
 
 async function claimOutboxBatch(db,{batchSize=DEFAULT_BATCH_SIZE,eventId,staleLockMs=DEFAULT_STALE_LOCK_MS,reclaimStale=true}={}){
  const size=Math.max(1,Math.min(100,Number(batchSize)||DEFAULT_BATCH_SIZE));
+ const model=db.getModel('latticeContextOutbox');
+ const table=db.sequelize.getQueryInterface().queryGenerator.quoteTable(model.getTableName());
+ // Run stale-lock reclaim outside the claim transaction so a non-fatal reclaim error
+ // never poisons the Postgres transaction with 25P02 aborted state.
+ if(reclaimStale&&staleLockMs>0){
+  try{
+   const cutoff=new Date(Date.now()-staleLockMs);
+   await db.sequelize.query(
+    `UPDATE ${table} SET state='retry',"lockedAt"=NULL,"nextAttemptAt"=NOW() WHERE state='processing' AND "lockedAt" IS NOT NULL AND "lockedAt" < :cutoff`,
+    {replacements:{cutoff}},
+   );
+  }catch{}
+ }
  return db.sequelize.transaction(async transaction=>{
-  const model=db.getModel('latticeContextOutbox');
-  const table=db.sequelize.getQueryInterface().queryGenerator.quoteTable(model.getTableName());
-  if(reclaimStale&&staleLockMs>0){
-   try{
-    const cutoff=new Date(Date.now()-staleLockMs);
-    await db.sequelize.query(
-     `UPDATE ${table} SET state='retry',"lockedAt"=NULL,"nextAttemptAt"=NOW() WHERE state='processing' AND "lockedAt" IS NOT NULL AND "lockedAt"<:cutoff`,
-     {transaction,replacements:{cutoff}},
-    );
-   }catch{}
-  }
   // Failed (dead-lettered) rows do NOT block newer events for the same entityId;
   // only in-flight states ('pending','retry','processing') serialize per entity.
   const [rows]=await db.sequelize.query(
-   `SELECT o.id FROM ${table} o WHERE o.state IN ('pending','retry') ${eventId?'AND o."eventId"=:eventId':''} AND (o."nextAttemptAt" IS NULL OR o."nextAttemptAt" <= NOW()) AND NOT EXISTS (SELECT 1 FROM ${table} older WHERE older."entityId"=o."entityId" AND older.id<o.id AND older.state IN ('pending','retry','processing')) ORDER BY o.id LIMIT :batchSize FOR UPDATE OF o SKIP LOCKED`,
+   `SELECT o.id FROM ${table} o WHERE o.state IN ('pending','retry') ${eventId?'AND o."eventId" = :eventId':''} AND (o."nextAttemptAt" IS NULL OR o."nextAttemptAt" <= NOW()) AND NOT EXISTS (SELECT 1 FROM ${table} older WHERE older."entityId"=o."entityId" AND older.id<o.id AND older.state IN ('pending','retry','processing')) ORDER BY o.id LIMIT :batchSize FOR UPDATE OF o SKIP LOCKED`,
    {transaction,replacements:{...(eventId?{eventId}:{}),batchSize:size}},
   );
   if(!rows.length)return [];
@@ -157,9 +159,12 @@ function registerContextResource(app){
  app.acl.allow('latticeContextSync',['dispatch','status','retry'],'loggedIn');
  if(process.env.DX_NATIVE_CONTEXT_AUTO_SYNC==='true'){
   const base=brokerConfig(process.env);if(!base)throw Error('Automatic native context delivery requires a broker URL');
-  app.cronJobManager.addJob({cronTime:'*/10 * * * * *',onTick:async()=>{
-   try{await dispatchBatch(app.db,base,{batchSize:DEFAULT_BATCH_SIZE});}catch{app.logger.error('Native context delivery transaction failed; event remains queued.');}
-  }});
+  if(!app._latticeContextAutoSyncRegistered){
+   app._latticeContextAutoSyncRegistered=true;
+   app.cronJobManager.addJob({cronTime:'*/10 * * * * *',onTick:async()=>{
+    try{await dispatchBatch(app.db,base,{batchSize:DEFAULT_BATCH_SIZE});}catch(err){app.logger.error('Native context delivery transaction failed; event remains queued.',{error:err?.message||String(err)});}
+   }});
+  }
  }
 }
 module.exports={brokerConfig,deliverSnapshot,claimOutboxBatch,dispatchBatch,dispatchOne,replayDeadLetters,registerContextResource};

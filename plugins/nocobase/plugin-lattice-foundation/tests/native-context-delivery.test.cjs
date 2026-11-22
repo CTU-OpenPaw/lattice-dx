@@ -108,3 +108,52 @@ test('all sync management routes require verified native root role',async()=>{
  for(const fn of Object.values(actions))await assert.rejects(()=>fn(ctx),/denied/);
  await assert.rejects(()=>guard({...ctx,action:{resourceName:'latticeContextOutbox'}},()=>assert.fail()),/denied/);
 });
+test('claimOutboxBatch separates stale reclaim from claim transaction with spaces around :cutoff and registerContextResource is idempotent',async()=>{
+ const {claimOutboxBatch}=require('../src/server/native-context-delivery');
+ const queries=[];
+ let inTx=false;
+ const row={toJSON:()=>({...event,eventId:'evt-reclaim',attempts:0}),update:async()=>{}};
+ const db={
+  getModel:()=>({getTableName:()=>({tableName:'latticeContextOutbox'}),findByPk:async()=>row}),
+  sequelize:{
+   getQueryInterface:()=>({queryGenerator:{quoteTable:()=>'"latticeContextOutbox"'}}),
+   transaction:async fn=>{inTx=true;try{return await fn({id:'tx-reclaim'});}finally{inTx=false;}},
+   query:async(sql,opts={})=>{
+    queries.push({sql,inTx,hasTransaction:Boolean(opts.transaction)});
+    if(sql.startsWith('UPDATE ')){
+     assert.match(sql,/"lockedAt" < :cutoff/);
+     assert.equal(inTx,false);
+     assert.equal(Boolean(opts.transaction),false);
+     throw new Error('simulated transient reclaim failure');
+    }
+    return [[{id:7}]];
+   },
+  },
+ };
+ const claimed=await claimOutboxBatch(db,{batchSize:5});
+ assert.equal(claimed.length,1);
+ assert.equal(queries.length,2);
+ assert.match(queries[1].sql,/FOR UPDATE OF o SKIP LOCKED/);
+ assert.equal(queries[1].inTx,true);
+
+ const prevAuto=process.env.DX_NATIVE_CONTEXT_AUTO_SYNC;
+ const prevBroker=process.env.DX_NATIVE_CONTEXT_BROKER_URL;
+ try{
+  process.env.DX_NATIVE_CONTEXT_AUTO_SYNC='true';
+  process.env.DX_NATIVE_CONTEXT_BROKER_URL='http://orion-ld:1026';
+  const jobs=[];
+  const app={
+   resourceManager:{define:()=>{},use:()=>{}},
+   acl:{allow:()=>{}},
+   cronJobManager:{addJob:job=>jobs.push(job)},
+   logger:{error:()=>{}},
+   db,
+  };
+  registerContextResource(app);
+  registerContextResource(app);
+  assert.equal(jobs.length,1);
+ }finally{
+  if(prevAuto===undefined)delete process.env.DX_NATIVE_CONTEXT_AUTO_SYNC;else process.env.DX_NATIVE_CONTEXT_AUTO_SYNC=prevAuto;
+  if(prevBroker===undefined)delete process.env.DX_NATIVE_CONTEXT_BROKER_URL;else process.env.DX_NATIVE_CONTEXT_BROKER_URL=prevBroker;
+ }
+});
