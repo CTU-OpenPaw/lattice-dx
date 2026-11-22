@@ -2,7 +2,20 @@
 
 Tài liệu ghi nhận lịch sử phát triển của **LatticeDX** (Apache-2.0), phục vụ kỳ thi OLP PMNM 2026 (VFOSSA).
 
-## [Unreleased] — chuẩn bị v0.1.0
+## [0.2.0] - 2026-11-22 — Nâng cấp Kiến trúc Single-Engine & Gia cố Cấp Doanh nghiệp (Waves 1–5)
+
+- **Wave 1 (An ninh, Cô lập Multi-Tenant, SSRF & Split-Brain):** Vá fail-closed phân quyền RBAC trên các plugin DX-OS & MCP, chặn leo thang vai trò và IDOR cross-tenant, bổ sung kiểm soát SSRF & live telemetry guard, thống nhất kiến trúc Single-Engine trên NocoBase + 7 plugin Apache-2.0.
+- **Wave 2 (Zero-Trust Prod Compose, Stack Upgrades, DR Thực thụ & DevSecOps CI):** Xây dựng cấu hình `infra/compose/prod.yml` zero-trust (`pgvector/pgvector:0.8.1-pg16`, Redis, Keycloak, Orion-LD, n8n, ClamAV), nâng cấp chuỗi kiểm thử DR cô lập toàn stack (`--ephemeral`) và quy trình CI/CD bảo mật (`actionlint`/SPDX/PoF/dep audit).
+- **Wave 3 (Hiệu năng CSDL, Outbox `SKIP LOCKED`, Realtime SSE & Enterprise Auth):** Bổ sung composite indexes & ràng buộc `(organizationId, code)` trên 10 bảng nghiệp vụ, khóa lạc quan theo cột `version` (`409 VERSION_CONFLICT`), migration `up()`/`down()` đảo ngược đầy đủ, hàng đợi Outbox non-blocking 3 pha với `SKIP LOCKED` + bảng điều khiển DLQ replay (`Tab 5`), đẩy cập nhật trang thời gian thực qua `PubSubManager` + Fetch SSE không polling, cùng xác thực Redis session, backchannel logout và đồng bộ nhóm Keycloak (chống leo thang đặc quyền) trong `@latticedx/plugin-enterprise-auth`.
+- **Wave 4 (Hybrid RAG, AI Governance, Eval Tiếng Việt 100% & IoT Time-Series):** Triển khai tìm kiếm lai `tsvector` + RRF + `pgvector` HNSW có lọc ACL (`latticePara:hybridSearch`, trích dẫn P.A.R.A.), quản trị hạn mức token/chi phí AI theo ngày (`429 AI_QUOTA_EXCEEDED`, `dxosAi:quotaSummary`) và bộ che dữ liệu nhạy cảm PII Việt Nam, bộ định tuyến & đánh giá tiếng Việt tự nhiên đạt `46/46 (100%)`, widget biểu đồ chuỗi thời gian SVG thuần (`timeseries-line`) kèm khử trùng lặp cảnh báo và vòng đời `Ack` / `Clear`.
+- **Wave 5 (ERP Vouchers, Record Chatter, Báo cáo RBAC, GitOps Bundle & Command Palette `Cmd+K`):**
+  - **Record Chatter (`latticeChatter`):** Thảo luận `@mention` giới hạn nghiêm ngặt trong nội bộ tổ chức và tự động ghi vết diff từng trường hợp lệ khi cập nhật chứng từ (`latticeRecordChatter`, migration `20261122000900`).
+  - **Chứng từ Bất biến (`Submit` / `Cancel` / `Amend`):** Khóa sửa trực tiếp (`409 VOUCHER_IMMUTABLE`) sau khi trình duyệt/hoàn tất/hủy, hỗ trợ Hủy có lý do bắt buộc, Lập bản điều chỉnh `-AMD1`, `-AMD2`... và truy vết phả hệ `lineage` (migration `20261122001000`).
+  - **Xuất Báo cáo Kiểm soát RBAC theo Cột (`dxosBlocks:exportReport`):** Xuất CSV (UTF-8 BOM), XLSX OOXML thuần không dependency và PDF multi-page, tự động loại bỏ cột ngoài quyền/nhạy cảm (`403 EXPORT_FIELDS_FORBIDDEN`) và chống công thức độc hại CSV/Excel injection.
+  - **GitOps Solution Bundle (`dxosStudio:solutionBundleExport/Diff/Import` + Tab 6):** Đóng gói Roles (`ldx_*`), Portals, Workflows, AI Profiles và Custom Collections dạng JSON có băm SHA-256, tách bỏ toàn bộ secret, diff có cấu trúc và mặc định `dryRun: true`.
+  - **Command Palette (`Ctrl+K` / `Cmd+K`):** Tìm kiếm nhanh đa cổng và tri thức P.A.R.A. không hiển thị nút nổi thừa trên màn hình.
+
+## [0.1.0] - 2026-11-22 (Pre-release Base)
 
 ### 2026-11-22 — Nâng cấp v2 → v3 → v3.1: Deep Admin Architect (15 Tools), Creative Studio Block, 1 Nút Agent Nổi Duy Nhất & Ngôn ngữ Tự nhiên 100%
 - **v2 (Admin System Builder & Cross-Dept Copilot — 11 Unified Tools):** Nâng cấp schema tương thích Zod v4/Gemini/OpenAI, bổ sung vòng đời block đầy đủ (`dxos_compose_page_blocks`), phân quyền RBAC chi tiết tới từng trường/tạo vai trò mới `ldx_*` (`dxos_manage_rbac_permissions`), tự cấu hình workflow (`dxos_configure_workflow` / `dxos_deploy_workflow`), tra cứu động mọi collection `latticeCustom*` có kiểm soát `lockedFields` và điều phối liên phòng ban (`dxos_orchestrate_enterprise_case`).
