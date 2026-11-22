@@ -172,7 +172,7 @@ function deploymentConfig(env){
   return {issuer:issuer.href.replace(/\/$/,''),origin:origin.origin,clientId:env.DX_NATIVE_AUTH_CLIENT_ID,internal:internal?.origin,callback:origin.origin+'/api/enterpriseAuth:callback',insecure:issuer.protocol==='http:'};
 }
 function safeReturnTo(value){
-  if(typeof value!=='string'||!/^\/(?:admin|p|mobile)(?:[/?]|$)/.test(value)||/[\\\x00-\x20%]/.test(value)||value.includes('..'))return '/admin';
+  if(typeof value!=='string'||!/^\/(?:admin|p|mobile|v\/mobile)(?:[/?]|$)/.test(value)||/[\\\x00-\x20%]/.test(value)||value.includes('..'))return '/admin';
   return value;
 }
 function sameBinding(a,b){return typeof a==='string'&&typeof b==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));}

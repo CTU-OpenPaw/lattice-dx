@@ -8,9 +8,9 @@
  */
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
-    define('@latticedx/plugin-lattice-foundation/client-v2', ['@nocobase/client', 'react'], factory);
+    define('@latticedx/plugin-lattice-foundation/client-v2', ['@nocobase/client-v2', 'react'], factory);
   } else if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('@nocobase/client'), require('react'));
+    module.exports = factory(require('@nocobase/client-v2'), require('react'));
   }
 })(function (client, React) {
   'use strict';

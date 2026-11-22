@@ -79,7 +79,7 @@ await mkdir(join(root, 'dist'), { recursive: true });
 await cp(join(root, 'src'), join(root, 'dist'), { recursive: true });
 await writeFile(
   join(root, 'dist/externalVersion.js'),
-  externalVersionSource(['@nocobase/server', '@nocobase/database', '@nocobase/client', 'react', 'antd']),
+  externalVersionSource(['@nocobase/server', '@nocobase/database', '@nocobase/client', '@nocobase/client-v2', 'react', 'antd']),
   'utf8',
 );
 

@@ -192,7 +192,7 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
         return;
       }
       if (uri === 'dxos://topology/planes' || uri === 'dxos://itot/health') {
-        const topology = await buildEnterpriseTopology(activeDb, env, fetchImpl);
+        const topology = await buildEnterpriseTopology(activeDb, env, fetchImpl, app || ctx?.app);
         const data = uri === 'dxos://itot/health' ? topology.planes.filter((p) => ['itOtDigitalTwin', 'integrationEventBus'].includes(p.key)) : topology;
         ctx.status = 200;
         ctx.body = { jsonrpc: '2.0', id: reqId, result: { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(data) }] } };

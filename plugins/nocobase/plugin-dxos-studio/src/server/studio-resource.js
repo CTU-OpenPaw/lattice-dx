@@ -30,6 +30,41 @@ const DXOS_PLUGINS_CATALOG = [
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
+function cleanVersionString(value) {
+  if (typeof value !== 'string') return '';
+  const cleaned = value.trim().replace(/^v/i, '');
+  if (!cleaned || /^\[object\b/i.test(cleaned)) return '';
+  return cleaned;
+}
+
+async function readVersionCandidate(candidate) {
+  if (candidate == null) return '';
+  if (typeof candidate === 'string') return cleanVersionString(candidate);
+  if (typeof candidate === 'object') {
+    if (typeof candidate.get === 'function') {
+      try {
+        const resolved = cleanVersionString(await candidate.get());
+        if (resolved) return resolved;
+      } catch {}
+    }
+    for (const key of ['version', 'current', 'value']) {
+      const resolved = cleanVersionString(candidate[key]);
+      if (resolved) return resolved;
+    }
+  }
+  return '';
+}
+
+async function resolveHostVersion(env, ...candidates) {
+  const envVer = cleanVersionString(env?.NOCOBASE_VERSION);
+  if (envVer) return envVer;
+  for (const candidate of candidates) {
+    const resolved = await readVersionCandidate(candidate);
+    if (resolved) return resolved;
+  }
+  return '2.2.50';
+}
+
 function fail(code, status = 403, message = code) {
   return Object.assign(new Error(message), { code, status });
 }
@@ -270,7 +305,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       const pluginRows = (await db.getRepository('applicationPlugins')?.find({})) || [];
       const portalRows = (await db.getRepository('uiLayouts')?.find({})) || [];
       const customPortals = portalRows.filter((p) => String(val(p, 'uid') || '').startsWith('ldx-portal-'));
-      const hostVersion = String(process.env.NOCOBASE_VERSION || db?.app?.version || ctx?.app?.version || '2.2.50').trim().replace(/^v/i, '') || '2.2.50';
+      const hostVersion = await resolveHostVersion(process.env, db?.app?.version, ctx?.app?.version);
       ctx.body = {
         portalCount: customPortals.length,
         workflowCount: await safeCount('workflows', { current: true }),

@@ -762,6 +762,27 @@ test('readiness resolves host NocoBase version dynamically from NOCOBASE_VERSION
     const envCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
     await createDxosStudioActions(baseDb('2.2.61')).readiness(envCtx, async () => {});
     assert.equal(envCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.88 preserved)');
+
+    // ApplicationVersion object with async .get() and sync .get()
+    delete process.env.NOCOBASE_VERSION;
+    const asyncVerObjCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb({ get: async () => 'v2.2.38' })).readiness(asyncVerObjCtx, async () => {});
+    assert.equal(asyncVerObjCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.38 preserved)');
+
+    const syncVerObjCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb({ get: () => '2.2.39' })).readiness(syncVerObjCtx, async () => {});
+    assert.equal(syncVerObjCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.39 preserved)');
+
+    // Empty object never produces [object Object]
+    const emptyObjCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb({})).readiness(emptyObjCtx, async () => {});
+    assert.equal(emptyObjCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.50 preserved)');
+
+    // Whitespace-only NOCOBASE_VERSION falls back cleanly to db.app.version
+    process.env.NOCOBASE_VERSION = '   ';
+    const wsEnvCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb({ get: async () => '2.2.38' })).readiness(wsEnvCtx, async () => {});
+    assert.equal(wsEnvCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.38 preserved)');
   } finally {
     if (origEnv === undefined) delete process.env.NOCOBASE_VERSION;
     else process.env.NOCOBASE_VERSION = origEnv;

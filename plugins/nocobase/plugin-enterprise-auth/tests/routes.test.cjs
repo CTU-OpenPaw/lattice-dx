@@ -208,8 +208,8 @@ test('callback synchronizes safe ldx_* roles from Keycloak groups claim when DX_
   }
 });
 
-test('start -> callback -> finish preserves /p/* and /mobile/* portal returnTo targets',async()=>{
-  for(const target of ['/p/procurement?tab=orders','/mobile/inbox']){
+test('start -> callback -> finish preserves /p/*, /mobile/*, and /v/mobile/* portal returnTo targets',async()=>{
+  for(const target of ['/p/procurement?tab=orders','/mobile/inbox','/v/mobile/inbox']){
     const f=fixture(),start=f.ctx();start.query={authenticator:'native-keycloak',returnTo:target};
     await f.actions.start(start);
     const state=new URL(start.location).searchParams.get('state'),callback=f.ctx();callback.query={state,code:'code'};

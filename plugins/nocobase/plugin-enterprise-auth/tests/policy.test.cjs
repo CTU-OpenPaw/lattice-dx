@@ -117,11 +117,11 @@ test('parseGroupRoleMap and syncMappedUserRoles assign safe ldx_* roles idempote
   assert.deepEqual(created[0],{userId:12,roleName:'ldx_warehouse'});
 });
 
-test('safeReturnTo allows /p and /mobile portal routes while blocking traversal and protocol-relative targets',()=>{
-  for(const ok of ['/admin','/admin/test?tab=a','/p','/p/procurement','/p/procurement/orders?tab=pending','/p?view=1','/mobile','/mobile/tasks?filter=mine']){
+test('safeReturnTo allows /p, /mobile, and /v/mobile portal routes while blocking traversal and protocol-relative targets',()=>{
+  for(const ok of ['/admin','/admin/test?tab=a','/p','/p/procurement','/p/procurement/orders?tab=pending','/p?view=1','/mobile','/mobile/tasks?filter=mine','/v/mobile','/v/mobile/w6golht1d9g?tab=1']){
     assert.equal(safeReturnTo(ok),ok);
   }
-  for(const bad of ['/p/../evil','/mobile/../../etc/passwd','/admin/..','/portal','/mobile-web','/p\\evil','/p/%2e%2e','/p/foo\nbar','//evil.test','https://evil.test']){
+  for(const bad of ['/p/../evil','/mobile/../../etc/passwd','/v/mobile/../evil','/admin/..','/portal','/mobile-web','/v/mobile-web','/v/admin','/p\\evil','/p/%2e%2e','/p/foo\nbar','//evil.test','https://evil.test']){
     assert.equal(safeReturnTo(bad),'/admin');
   }
 });

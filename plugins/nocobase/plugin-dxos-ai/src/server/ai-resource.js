@@ -448,7 +448,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
 
     async enterpriseTopology(ctx, next) {
       const targetDb = await requireAdmin(ctx);
-      ctx.body = await buildEnterpriseTopology(targetDb, env, fetchImpl);
+      ctx.body = await buildEnterpriseTopology(targetDb, env, fetchImpl, ctx?.app);
       if (typeof next === 'function') await next();
     },
 

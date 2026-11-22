@@ -298,6 +298,7 @@ test('createDxosAiStudioPage renders 4-tab studio UI & helper utilities, and plu
         useAPIClient: () => ({ request: async () => ({ data: { data: {} } }) }),
       };
     }
+    if (request === '@nocobase/client-v2') return { Plugin: MockPlugin };
     if (request === 'react') return React;
     if (request === 'antd') return {};
     return origLoad.call(this, request, parent, isMain);
@@ -711,6 +712,41 @@ test('dxosAi:quotaSummary persists across restarts, aggregates >200 audit logs, 
   assert.equal(topoCtx.body.positioningStatement.includes('2.2.50'), true);
   assert.equal(topoCtx.body.positioningStatement.includes('2.2.38'), false);
   resetQuotaBuckets();
+});
+
+test('buildEnterpriseTopology resolves ApplicationVersion object cleanly and ignores whitespace env', async () => {
+  const { buildEnterpriseTopology } = require(path.join(PLUGIN_ROOT, 'src/server/mcp-itot-tools.js'));
+  const stubFetch = async () => ({ ok: true, status: 200, json: async () => ({ version: '1.8' }) });
+
+  const asyncRes = await buildEnterpriseTopology(
+    { app: { version: { get: async () => 'v2.2.38' } }, hasCollection: () => false, getRepository: () => null },
+    { NOCOBASE_VERSION: '  ' },
+    stubFetch,
+  );
+  assert.equal(asyncRes.nocobaseVersion, '2.2.38');
+  assert.equal(asyncRes.positioningStatement.includes('2.2.38'), true);
+  assert.equal(asyncRes.positioningStatement.includes('[object Object]'), false);
+
+  const fallbackRes = await buildEnterpriseTopology(
+    { app: { version: {} }, hasCollection: () => false, getRepository: () => null },
+    {},
+    stubFetch,
+  );
+  assert.equal(fallbackRes.nocobaseVersion, '2.2.50');
+  assert.equal(fallbackRes.positioningStatement.includes('[object Object]'), false);
+
+  // When db has no .app reference (real NocoBase Database instance), ctx.app supplies ApplicationVersion
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const actionDb = makeMockDb();
+  const actions = createDxosAiActions(actionDb, { env: {}, fetchImpl: stubFetch });
+  const ctxWithApp = {
+    app: { version: { get: async () => 'v2.2.38' } },
+    state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
+    action: { params: {} },
+  };
+  await actions.enterpriseTopology(ctxWithApp, async () => {});
+  assert.equal(ctxWithApp.body.nocobaseVersion, '2.2.38');
+  assert.equal(ctxWithApp.body.positioningStatement.includes('2.2.38'), true);
 });
 
 test('ai-studio-page renders Tab 5 Quota, readable metric chips, model presets, padded save button, wrapped Tab 4 audit badges, and crypto suffix', async () => {

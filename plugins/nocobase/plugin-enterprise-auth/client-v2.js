@@ -6,4 +6,4 @@
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
-module.exports=require('./dist/client');
+module.exports=require('./dist/client-v2/index.js');
