@@ -51,4 +51,6 @@ test('codeql.yml runs CodeQL javascript-typescript analysis with required securi
   assert.match(codeql, /github\/codeql-action\/init@v3/);
   assert.match(codeql, /javascript-typescript/);
   assert.match(codeql, /github\/codeql-action\/analyze@v3/);
+  assert.match(codeql, /upload:\s*\$\{\{/);
+  assert.match(codeql, /actions\/upload-artifact@v4/);
 });
