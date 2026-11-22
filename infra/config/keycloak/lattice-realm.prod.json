@@ -1,0 +1,200 @@
+{
+  "realm": "lattice",
+  "enabled": true,
+  "sslRequired": "external",
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "maxFailureWaitSeconds": 900,
+  "minimumQuickLoginWaitSeconds": 60,
+  "waitIncrementSeconds": 60,
+  "quickLoginCheckMilliSeconds": 1000,
+  "maxDeltaTimeSeconds": 43200,
+  "failureFactor": 5,
+  "passwordPolicy": "length(12) and upperCase(1) and lowerCase(1) and digits(1) and specialChars(1) and notUsername and passwordHistory(5)",
+  "eventsEnabled": true,
+  "eventsExpiration": 7776000,
+  "adminEventsEnabled": true,
+  "adminEventsDetailsEnabled": true,
+  "requiredActions": [
+    {
+      "alias": "CONFIGURE_TOTP",
+      "name": "Configure OTP",
+      "providerId": "CONFIGURE_TOTP",
+      "enabled": true,
+      "defaultAction": true,
+      "priority": 10
+    }
+  ],
+  "roles": {
+    "realm": [
+      { "name": "data:design" },
+      { "name": "data:read" },
+      { "name": "data:write" },
+      { "name": "data:share" },
+      { "name": "data:automate" },
+      { "name": "directory:manage" },
+      { "name": "platform:operate" },
+      { "name": "workflow:event:receive" },
+      { "name": "records:read" },
+      { "name": "records:write" },
+      { "name": "tasks:read" },
+      { "name": "tasks:assign" },
+      { "name": "tasks:decide" },
+      { "name": "files:read" },
+      { "name": "files:write" },
+      { "name": "employee" },
+      { "name": "workflow:start" },
+      { "name": "procurement:manager" },
+      { "name": "workflow:sync" },
+      { "name": "department:warehouse" },
+      { "name": "department:hr" },
+      { "name": "department:it" },
+      { "name": "department:administration" },
+      { "name": "directory:read" },
+      { "name": "logistics:sales" },
+      { "name": "logistics:warehouse" },
+      { "name": "workflow:design" },
+      { "name": "workflow:integrate" },
+      { "name": "workflow:callback" },
+      { "name": "connector:n8n" },
+      { "name": "connector:ngsi-ld" },
+      { "name": "connector:agent" }
+    ]
+  },
+  "groups": [
+    {
+      "name": "lattice-admins",
+      "path": "/lattice-admins",
+      "realmRoles": [
+        "data:design",
+        "directory:manage",
+        "platform:operate",
+        "workflow:design",
+        "workflow:integrate",
+        "records:read",
+        "records:write",
+        "files:read",
+        "files:write"
+      ]
+    },
+    {
+      "name": "lattice-managers",
+      "path": "/lattice-managers",
+      "realmRoles": [
+        "procurement:manager",
+        "workflow:sync",
+        "tasks:read",
+        "tasks:assign",
+        "tasks:decide",
+        "records:read",
+        "files:read",
+        "files:write"
+      ]
+    },
+    {
+      "name": "lattice-employees",
+      "path": "/lattice-employees",
+      "realmRoles": [
+        "employee",
+        "workflow:start",
+        "records:read",
+        "records:write",
+        "files:read",
+        "files:write"
+      ]
+    },
+    {
+      "name": "lattice-warehouse",
+      "path": "/lattice-warehouse",
+      "realmRoles": [
+        "department:warehouse",
+        "logistics:warehouse",
+        "tasks:read",
+        "tasks:decide",
+        "records:read",
+        "files:read",
+        "files:write"
+      ]
+    },
+    {
+      "name": "lattice-technicians",
+      "path": "/lattice-technicians",
+      "realmRoles": [
+        "department:it",
+        "tasks:read",
+        "tasks:decide",
+        "records:read",
+        "files:read"
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "dx-native",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "implicitFlowEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": ["https://$(env:LATTICE_DOMAIN)/*"],
+      "webOrigins": ["https://$(env:LATTICE_DOMAIN)"],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "backchannel.logout.url": "https://$(env:LATTICE_DOMAIN)/api/dxAuth:backchannelLogout",
+        "backchannel.logout.session.required": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.client.audience": "dx-api",
+            "access.token.claim": "true",
+            "id.token.claim": "false"
+          }
+        },
+        {
+          "name": "organization",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "organization_id",
+            "claim.name": "organization_id",
+            "jsonType.label": "String",
+            "access.token.claim": "true",
+            "id.token.claim": "true"
+          }
+        },
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "false",
+            "access.token.claim": "true",
+            "id.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "dx-api",
+      "enabled": true,
+      "bearerOnly": true,
+      "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect"
+    },
+    {
+      "clientId": "dx-gateway",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "$(env:APISIX_OIDC_CLIENT_SECRET)",
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "protocol": "openid-connect"
+    }
+  ]
+}

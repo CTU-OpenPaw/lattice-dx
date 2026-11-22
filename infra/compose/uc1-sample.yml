@@ -6,6 +6,13 @@
 # SPDX-License-Identifier: Apache-2.0
 services:
   uc1-sample:
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
@@ -17,7 +24,7 @@ services:
       - tsx
       - src/uc1-sample/server.ts
     environment:
-      DATABASE_URL: postgres://lattice:local-demo-password@postgres:5432/lattice
+      DATABASE_URL: postgres://lattice:${POSTGRES_PASSWORD:-local-demo-password}@postgres:5432/lattice
       UC1_SAMPLE_TOKEN: ${UC1_SAMPLE_TOKEN:?Set UC1_SAMPLE_TOKEN in .env.integration}
       UC1_SAMPLE_TENANT: ${UC1_SAMPLE_TENANT:-org-a}
       UC1_BROKER_MAPPING_FILE: /app/infra/config/uc1/asset-mapping.local.json
@@ -28,6 +35,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 384m
     healthcheck:
       test:
         - CMD
@@ -37,7 +45,15 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
   uc1-broker-worker:
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     build:
       context: ../..
       dockerfile: apps/api/Dockerfile
@@ -50,10 +66,11 @@ services:
       - tsx
       - src/uc1-integration/worker-main.ts
     environment:
-      DATABASE_URL: postgres://lattice:local-demo-password@postgres:5432/lattice
+      DATABASE_URL: postgres://lattice:${POSTGRES_PASSWORD:-local-demo-password}@postgres:5432/lattice
       UC1_SAMPLE_TENANT: ${UC1_SAMPLE_TENANT:-org-a}
       NGSI_LD_URL: http://orion-ld:1026
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 384m
     stop_grace_period: 45s

@@ -5,33 +5,67 @@
 # @see https://github.com/CTU-OpenPaw/lattice-dx
 # SPDX-License-Identifier: Apache-2.0
 name: lattice-dx
+
+x-local-defaults: &local_defaults
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
   nocobase-db:
-    image: postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50
+    <<: *local_defaults
+    image: pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337
     environment:
       POSTGRES_DB: nocobase
       POSTGRES_USER: nocobase
-      POSTGRES_PASSWORD: local-nocobase-password
+      POSTGRES_PASSWORD: ${NOCOBASE_DB_PASSWORD:-local-nocobase-password}
     volumes:
       - nocobase-db-data:/var/lib/postgresql/data
+      - ../config/postgres/init-pgvector.sql:/docker-entrypoint-initdb.d/001-pgvector.sql:ro
+    mem_limit: 768m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nocobase -d nocobase"]
       interval: 5s
       timeout: 5s
       retries: 20
+
+  redis:
+    <<: *local_defaults
+    image: redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:-local-redis-password}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-local-redis-password}
+    volumes:
+      - redis-data:/data
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   nocobase:
-    image: nocobase/nocobase:2.2.38@sha256:90028473fe54b1fd1929b1ab0669a12e48a9a8f100d41662c98bc3c618225f4e
+    <<: *local_defaults
+    image: nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777
     init: true
     environment:
-      APP_KEY: local-nocobase-app-key-public-fixture
-      ENCRYPTION_FIELD_KEY: local-nocobase-encryption-public-fixture
+      APP_KEY: ${NOCOBASE_APP_KEY:-local-nocobase-app-key-public-fixture}
+      ENCRYPTION_FIELD_KEY: ${NOCOBASE_ENCRYPTION_FIELD_KEY:-local-nocobase-encryption-public-fixture}
       DB_DIALECT: postgres
       DB_HOST: nocobase-db
       DB_PORT: 5432
       DB_DATABASE: nocobase
       DB_USER: nocobase
-      DB_PASSWORD: local-nocobase-password
+      DB_PASSWORD: ${NOCOBASE_DB_PASSWORD:-local-nocobase-password}
       TZ: Asia/Ho_Chi_Minh
+      PUBSUB_ADAPTER: redis
+      PUBSUB_ADAPTER_REDIS_URL: redis://:${REDIS_PASSWORD:-local-redis-password}@redis:6379/1
+      CACHE_DEFAULT_STORE: redis
+      CACHE_REDIS_URL: redis://:${REDIS_PASSWORD:-local-redis-password}@redis:6379/0
       DX_BRIDGE_ISSUER: http://localhost:8081/realms/lattice
       DX_BRIDGE_INTERNAL_ISSUER: http://keycloak:8080/realms/lattice
       DX_BRIDGE_GATEWAY_URL: http://gateway:9080
@@ -57,12 +91,17 @@ services:
     depends_on:
       nocobase-db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 1536m
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1/api/app:getLang').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 60s
+
 volumes:
   nocobase-db-data:
   nocobase-storage:
+  redis-data:
