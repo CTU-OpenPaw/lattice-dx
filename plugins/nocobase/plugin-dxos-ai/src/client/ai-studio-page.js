@@ -222,7 +222,15 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const [customModelText, setCustomModelText] = React.useState(
       () => `${createEmptyProfileDraft().llmService}:${createEmptyProfileDraft().modelName}`,
     );
+    const [approvals, setApprovals] = React.useState([]);
+    const [approvalsLoading, setApprovalsLoading] = React.useState(false);
+    const [approvalStatusFilter, setApprovalStatusFilter] = React.useState('pending');
+    const [approvalNotes, setApprovalNotes] = React.useState({});
+    const [approvalBusyId, setApprovalBusyId] = React.useState(null);
     const quotaReqSeqRef = typeof React.useRef === 'function'
+      ? React.useRef(0)
+      : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: 0 }), []) : { current: 0 });
+    const hitlReqSeqRef = typeof React.useRef === 'function'
       ? React.useRef(0)
       : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: 0 }), []) : { current: 0 });
 
@@ -313,6 +321,29 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       }
     };
 
+    const loadApprovals = React.useCallback(async (statusFilter = approvalStatusFilter) => {
+      if (clientDenied || !api?.request) return;
+      const reqSeq = ++hitlReqSeqRef.current;
+      setApprovalsLoading(true);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:listApprovals',
+          method: 'get',
+          params: { status: statusFilter || 'pending', limit: 50 },
+        });
+        if (reqSeq !== hitlReqSeqRef.current) return;
+        const data = res?.data?.data || res?.data || {};
+        setApprovals(Array.isArray(data.items) ? data.items : []);
+      } catch (err) {
+        if (reqSeq !== hitlReqSeqRef.current) return;
+        setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được hàng chờ phê duyệt AI.' });
+      } finally {
+        if (reqSeq === hitlReqSeqRef.current) {
+          setApprovalsLoading(false);
+        }
+      }
+    }, [api, clientDenied, approvalStatusFilter]);
+
     React.useEffect(() => {
       loadAll();
     }, [loadAll]);
@@ -321,8 +352,46 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       if (tab === 'quota' && !clientDenied && !forbidden) {
         loadQuota(quotaOrg);
       }
+      if (tab === 'hitl' && !clientDenied && !forbidden) {
+        loadApprovals(approvalStatusFilter);
+      }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [tab, quotaOrg, clientDenied, forbidden]);
+    }, [tab, quotaOrg, approvalStatusFilter, clientDenied, forbidden]);
+
+    const handleDecideApproval = async (item, decision) => {
+      if (!api?.request || !item?.id) return;
+      const approvalId = item.id;
+      const note = String(approvalNotes[approvalId] || '').trim();
+      if (decision === 'reject' && note.length < 3) {
+        setNotice({ type: 'error', text: 'Vui lòng nhập lý do từ chối tối thiểu 3 ký tự.' });
+        return;
+      }
+      setApprovalBusyId(approvalId);
+      setNotice(null);
+      try {
+        await api.request({
+          url: decision === 'approve' ? 'dxosAi:approveAction' : 'dxosAi:rejectAction',
+          method: 'post',
+          data: { approvalId, note },
+        });
+        setApprovalNotes((prev) => {
+          const next = { ...prev };
+          delete next[approvalId];
+          return next;
+        });
+        setNotice({
+          type: 'ok',
+          text: decision === 'approve'
+            ? `Đã phê duyệt & thực thi yêu cầu AI #${approvalId}.`
+            : `Đã từ chối yêu cầu AI #${approvalId}.`,
+        });
+        await loadApprovals(approvalStatusFilter);
+      } catch (err) {
+        setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Xử lý phê duyệt AI thất bại.' });
+      } finally {
+        setApprovalBusyId(null);
+      }
+    };
 
     const handleBootstrap = async () => {
       if (!api?.request) return;
@@ -401,6 +470,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       ['mcp', '3. Cổng Enterprise MCP 2 Chiều'],
       ['audit', '4. Nhật ký Kiểm toán'],
       ['quota', '5. Hạn mức & Chi phí AI'],
+      ['hitl', '6. Duyệt AI (HITL)'],
     ];
 
     const availableTools = Array.isArray(catalog?.availableTools) ? catalog.availableTools : DEFAULT_TOOL_NAMES;
@@ -440,9 +510,12 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             type: 'button',
             onClick: async () => {
               await loadAll();
-              await loadQuota(quotaOrg);
+              if (!clientDenied && !forbidden) {
+                await loadQuota(quotaOrg);
+                if (tab === 'hitl') await loadApprovals(approvalStatusFilter);
+              }
             },
-            disabled: loading || busy || quotaLoading,
+            disabled: loading || busy || quotaLoading || approvalsLoading,
             style: btnStyle(false),
           }, 'Làm mới'),
         ),
@@ -457,14 +530,14 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         },
       }, notice.text) : null,
 
-      h('div', { role: 'tablist', style: { display: 'flex', gap: 8, borderBottom: '1px solid #e2e8f0', paddingBottom: 10, flexWrap: 'wrap' } },
+      h('div', { role: 'tablist', style: { display: 'flex', gap: 8, borderBottom: '1px solid #e2e8f0', paddingBottom: 10, overflowX: 'auto' } },
         tabItems.map(([key, label]) => h('button', {
           key,
           type: 'button',
           role: 'tab',
           'aria-selected': tab === key,
           onClick: () => setTab(key),
-          style: btnStyle(tab === key),
+          style: { ...btnStyle(tab === key), whiteSpace: 'nowrap', flexShrink: 0 },
         }, label)),
       ),
 
@@ -753,6 +826,116 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               `Tổng PII đã che: ${allTimeTotals.piiRedactedCount || 0}`),
           ),
         ),
+      ) : null,
+
+      tab === 'hitl' ? h('div', {
+        'data-testid': 'dxos-ai-hitl-tab',
+        style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 14 },
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
+          h('div', null,
+            h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '6. Hàng chờ Phê duyệt Tác vụ AI (Human-in-the-Loop)'),
+            h('div', { style: { fontSize: 12, color: '#64748b' } },
+              `Hiển thị ${approvals.length} yêu cầu (${approvalStatusFilter})${approvalsLoading ? ' · Đang tải…' : ''}`),
+          ),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            h('select', {
+              'data-testid': 'dxos-hitl-status-filter',
+              value: approvalStatusFilter,
+              onChange: (e) => setApprovalStatusFilter(e.target.value),
+              style: { padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+            },
+              h('option', { value: 'pending' }, 'Chờ duyệt (pending)'),
+              h('option', { value: 'executed' }, 'Đã thực thi (executed)'),
+              h('option', { value: 'rejected' }, 'Đã từ chối (rejected)'),
+              h('option', { value: 'expired' }, 'Hết hạn (expired)'),
+              h('option', { value: 'all' }, 'Tất cả trạng thái'),
+            ),
+            h('button', {
+              type: 'button',
+              onClick: () => loadApprovals(approvalStatusFilter),
+              disabled: approvalsLoading,
+              style: btnStyle(false),
+            }, 'Tải lại hàng chờ'),
+          ),
+        ),
+        !approvals.length
+          ? h('div', { style: { padding: 20, textAlign: 'center', borderRadius: 10, border: '1px dashed #cbd5e1', color: '#64748b', fontSize: 13 } },
+            'Không có yêu cầu AI nào trong hàng chờ phê duyệt.')
+          : h('div', { style: { display: 'grid', gap: 12 } },
+            approvals.map((item) => {
+              const risk = String(item.riskLevel || 'medium').toLowerCase();
+              const riskBg = risk === 'critical' || risk === 'high' ? '#fee2e2' : risk === 'low' ? '#dcfce7' : '#fef3c7';
+              const riskFg = risk === 'critical' || risk === 'high' ? '#991b1b' : risk === 'low' ? '#166534' : '#92400e';
+              const statusBg = item.status === 'executed' ? '#dcfce7' : item.status === 'pending' ? '#e0f2fe' : '#fee2e2';
+              const statusFg = item.status === 'executed' ? '#166534' : item.status === 'pending' ? '#075985' : '#991b1b';
+              const changes = Array.isArray(item.diffPreview?.changes) ? item.diffPreview.changes : [];
+              const rowBusy = approvalBusyId === item.id;
+              return h('div', {
+                key: item.id,
+                'data-testid': `dxos-hitl-card-${item.id}`,
+                style: { padding: 14, borderRadius: 10, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 10 },
+              },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+                  h('div', { style: { fontSize: 14, color: '#0f172a' } },
+                    h('strong', null, `#${item.id} · ${item.targetCollection}`),
+                    ` (${item.operation}${item.targetRecordId != null ? ` #${item.targetRecordId}` : ''}) · `,
+                    h('code', null, item.toolName),
+                  ),
+                  h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+                    h('span', { style: badgeStyle(riskBg, riskFg) }, `Rủi ro: ${risk}`),
+                    h('span', { style: badgeStyle(statusBg, statusFg) }, item.status),
+                  ),
+                ),
+                h('div', { style: { fontSize: 12, color: '#475569' } },
+                  `Người yêu cầu: ${item.requesterUsername || `#${item.requesterUserId}`} · AI: ${item.aiEmployee || '—'} · Tổ chức: ${item.organizationId}`),
+                h('div', {
+                  'data-testid': `dxos-hitl-diff-${item.id}`,
+                  style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff', fontSize: 12, display: 'grid', gap: 4 },
+                },
+                  h('strong', { style: { fontSize: 11, color: '#334155', textTransform: 'uppercase' } }, 'Xem trước thay đổi (diffPreview)'),
+                  changes.length
+                    ? changes.map((ch) => h('div', {
+                      key: ch.field,
+                      style: { display: 'flex', flexWrap: 'wrap', gap: 6, fontFamily: 'monospace', fontSize: 11, color: '#0f172a' },
+                    },
+                      h('strong', null, `${ch.field}:`),
+                      h('span', { style: { color: '#b91c1c' } }, JSON.stringify(ch.before)),
+                      h('span', null, '→'),
+                      h('span', { style: { color: '#15803d' } }, JSON.stringify(ch.after)),
+                    ))
+                    : h('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 11 } },
+                      JSON.stringify(item.diffPreview || item.proposedArgs || {}, null, 2)),
+                ),
+                item.status === 'pending'
+                  ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
+                    h('input', {
+                      'data-testid': `dxos-hitl-note-${item.id}`,
+                      value: approvalNotes[item.id] || '',
+                      onChange: (e) => setApprovalNotes((prev) => ({ ...prev, [item.id]: e.target.value })),
+                      placeholder: 'Ghi chú phê duyệt hoặc lý do từ chối (>= 3 ký tự)...',
+                      style: { flex: '1 1 260px', padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+                    }),
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `dxos-hitl-approve-${item.id}`,
+                      onClick: () => handleDecideApproval(item, 'approve'),
+                      disabled: rowBusy,
+                      style: btnStyle(true, false),
+                    }, rowBusy ? 'Đang xử lý…' : 'Phê duyệt & Thực thi'),
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `dxos-hitl-reject-${item.id}`,
+                      onClick: () => handleDecideApproval(item, 'reject'),
+                      disabled: rowBusy,
+                      style: btnStyle(false, true),
+                    }, 'Từ chối'),
+                  )
+                  : h('div', { style: { fontSize: 12, color: '#475569' } },
+                    `Người xử lý: ${item.decidedByUsername || '—'}${item.decisionNote ? ` · Ghi chú: ${item.decisionNote}` : ''}`),
+              );
+            }),
+          ),
       ) : null,
     );
   };

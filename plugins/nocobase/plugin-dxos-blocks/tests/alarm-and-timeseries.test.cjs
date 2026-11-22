@@ -493,3 +493,931 @@ test('high/critical alarms emit org-scoped, 30m-deduped latticeNotifications and
   assert.equal(safeAlarm.severity, 'critical');
   assert.equal(safeAlarm.deduplicated, false);
 });
+
+test('evaluateRuleCondition handles gt/gte/lt/lte/eq operators and rejects non-finite or unknown inputs', () => {
+  const { evaluateRuleCondition } = require(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'));
+  assert.equal(typeof evaluateRuleCondition, 'function');
+
+  assert.equal(evaluateRuleCondition('gt', -11.5, -15), true);
+  assert.equal(evaluateRuleCondition('>', -15, -15), false);
+  assert.equal(evaluateRuleCondition('gte', -15, -15), true);
+  assert.equal(evaluateRuleCondition('>=', -15.1, -15), false);
+  assert.equal(evaluateRuleCondition('lt', 12, '15'), true);
+  assert.equal(evaluateRuleCondition('<', 15, 15), false);
+  assert.equal(evaluateRuleCondition('lte', 15, 15), true);
+  assert.equal(evaluateRuleCondition('<=', 15.01, 15), false);
+  assert.equal(evaluateRuleCondition('eq', 42, '42'), true);
+  assert.equal(evaluateRuleCondition('==', 0, 0), true);
+
+  assert.equal(evaluateRuleCondition('gt', NaN, 10), false);
+  assert.equal(evaluateRuleCondition('gt', 10, Infinity), false);
+  assert.equal(evaluateRuleCondition('gt', null, 10), false);
+  assert.equal(evaluateRuleCondition('gt', '', 10), false);
+  assert.equal(evaluateRuleCondition('unknown_op', 20, 10), false);
+});
+
+test('ingestTelemetryPoint persists latticeTelemetryPoints, evaluates active latticeIncidentRules, and deduplicates triggered alarms', async () => {
+  const { ingestTelemetryPoint } = require(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'));
+  assert.equal(typeof ingestTelemetryPoint, 'function');
+
+  let pointSeq = 1;
+  let incidentSeq = 300;
+  const telemetryPoints = [];
+  const incidents = [];
+  const rules = [
+    {
+      id: 1,
+      code: 'COLD-TEMP-HIGH',
+      name: 'Nhiệt độ kho lạnh vượt -15°C',
+      organizationId: 'org-a',
+      assetId: 12,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+      attribute: 'temperature',
+      operator: 'gt',
+      threshold: '-15',
+      unit: 'CEL',
+      severity: 'high',
+      handlerId: '5',
+      active: true,
+    },
+    {
+      id: 2,
+      code: 'INACTIVE-RULE',
+      name: 'Luật đã tắt',
+      organizationId: 'org-a',
+      assetId: 12,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+      attribute: 'temperature',
+      operator: 'gt',
+      threshold: '-30',
+      unit: 'CEL',
+      severity: 'critical',
+      handlerId: '5',
+      active: false,
+    },
+    {
+      id: 3,
+      code: 'ORG-B-RULE',
+      name: 'Luật org B',
+      organizationId: 'org-b',
+      assetId: 12,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+      attribute: 'temperature',
+      operator: 'gt',
+      threshold: '-30',
+      unit: 'CEL',
+      severity: 'critical',
+      handlerId: '8',
+      active: true,
+    },
+  ];
+
+  const matchFilter = (row, filter = {}) => Object.entries(filter).every(([k, cond]) => {
+    if (cond && typeof cond === 'object' && Array.isArray(cond.$in)) return cond.$in.includes(row[k]);
+    return row[k] === cond;
+  });
+
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeTelemetryPoints') {
+        return {
+          create: async ({ values }) => {
+            const row = { id: pointSeq++, createdAt: new Date(), ...values };
+            telemetryPoints.push(row);
+            return row;
+          },
+          find: async ({ filter = {} } = {}) => telemetryPoints.filter((r) => matchFilter(r, filter)),
+        };
+      }
+      if (name === 'latticeIncidentRules') {
+        return {
+          find: async ({ filter = {} } = {}) => rules.filter((r) => matchFilter(r, filter)),
+        };
+      }
+      if (name === 'latticeIncidentCases') {
+        return {
+          find: async ({ filter = {} } = {}) => incidents.filter((r) => matchFilter(r, filter)),
+          create: async ({ values }) => {
+            const row = { id: ++incidentSeq, ...values, update: async (patch) => Object.assign(row, patch) };
+            incidents.push(row);
+            return row;
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  // Safe value (-18.5 <= -15): persists point, triggers 0 alarms
+  const okRes = await ingestTelemetryPoint(db, {
+    organizationId: 'org-a',
+    assetId: 12,
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    metricName: 'temperature',
+    numericValue: -18.5,
+    unit: 'CEL',
+    quality: 'good',
+    sourceProtocol: 'mqtt',
+    observedAt: '2026-11-22T10:00:00Z',
+  });
+  assert.equal(okRes.point.numericValue, -18.5);
+  assert.equal(okRes.point.sourceProtocol, 'mqtt');
+  assert.equal(okRes.triggeredAlarms.length, 0);
+  assert.equal(telemetryPoints.length, 1);
+
+  // Breach (-11.5 > -15): triggers 1 alarm (only active org-a rule!)
+  const breach1 = await ingestTelemetryPoint(db, {
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    metricName: 'temperature',
+    numericValue: -11.5,
+    unit: 'CEL',
+    sourceProtocol: 'mqtt',
+  });
+  assert.equal(breach1.point.assetId, 12);
+  assert.equal(breach1.triggeredAlarms.length, 1);
+  assert.equal(breach1.triggeredAlarms[0].deduplicated, false);
+  assert.equal(breach1.triggeredAlarms[0].severity, 'high');
+  assert.equal(incidents.length, 1);
+
+  // Repeated breach deduplicates into existing active incident
+  const breach2 = await ingestTelemetryPoint(db, {
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    metricName: 'temperature',
+    numericValue: -9.8,
+  });
+  assert.equal(breach2.triggeredAlarms.length, 1);
+  assert.equal(breach2.triggeredAlarms[0].deduplicated, true);
+  assert.equal(breach2.triggeredAlarms[0].occurrenceCount, 2);
+  assert.equal(incidents.length, 1);
+
+  // Rejects non-finite/boolean numericValue and cross-org URN mismatch
+  await assert.rejects(
+    () => ingestTelemetryPoint(db, {
+      organizationId: 'org-a',
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+      numericValue: true,
+    }),
+    (err) => err.status === 400,
+  );
+  await assert.rejects(
+    () => ingestTelemetryPoint(db, {
+      organizationId: 'org-a',
+      assetEntityId: 'urn:ngsi-ld:Asset:org-b:native:99',
+      numericValue: -10,
+    }),
+    (err) => err.status === 403,
+  );
+});
+
+test('queryTelemetryTimeSeries filters windowHours and aggregates bucketMinutes chronologically from latticeTelemetryPoints', async () => {
+  const { queryTelemetryTimeSeries } = require(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'));
+
+  const nowMs = Date.parse('2026-11-22T12:00:00Z');
+  const rows = [
+    // Outside 6h window (10h old)
+    { id: 1, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -25.0, unit: 'CEL', observedAt: '2026-11-22T02:00:00Z' },
+    // Bucket 10:00Z -> avg(-18, -16) = -17
+    { id: 2, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -18.0, unit: 'CEL', observedAt: '2026-11-22T10:15:00Z' },
+    { id: 3, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -16.0, unit: 'CEL', observedAt: '2026-11-22T10:45:00Z' },
+    // Bucket 11:00Z -> avg(-12, -10, -14) = -12
+    { id: 4, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -12.0, unit: 'CEL', observedAt: '2026-11-22T11:05:00Z' },
+    { id: 5, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -10.0, unit: 'CEL', observedAt: '2026-11-22T11:30:00Z' },
+    { id: 6, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -14.0, unit: 'CEL', observedAt: '2026-11-22T11:50:00Z' },
+    // Different metric and foreign org must be excluded
+    { id: 7, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'humidity', numericValue: 85, unit: 'PCT', observedAt: '2026-11-22T11:40:00Z' },
+    { id: 8, organizationId: 'org-b', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: 99, unit: 'CEL', observedAt: '2026-11-22T11:40:00Z' },
+  ];
+
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeTelemetryPoints') {
+        return { find: async () => rows };
+      }
+      return null;
+    },
+  };
+
+  const bucketed = await queryTelemetryTimeSeries(db, {
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    attribute: 'temperature',
+    windowHours: 6,
+    bucketMinutes: 60,
+    limit: 50,
+    now: nowMs,
+  });
+
+  assert.equal(bucketed.points.length, 2);
+  assert.deepEqual(bucketed.points[0], {
+    timestamp: '2026-11-22T10:00:00.000Z',
+    value: -17,
+    min: -18,
+    max: -16,
+    count: 2,
+    unit: 'CEL',
+  });
+  assert.deepEqual(bucketed.points[1], {
+    timestamp: '2026-11-22T11:00:00.000Z',
+    value: -12,
+    min: -14,
+    max: -10,
+    count: 3,
+    unit: 'CEL',
+  });
+  assert.equal(bucketed.stats.count, 2);
+  assert.equal(bucketed.stats.latest, -12);
+});
+
+function loadWithNocobaseStubs(filePath, stubs = {}) {
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (Object.hasOwn(stubs, request)) return stubs[request];
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    delete require.cache[require.resolve(filePath)];
+    return require(filePath);
+  } finally {
+    Module._load = origLoad;
+  }
+}
+
+test('dxosBlocks:telemetryIngest fails closed 401 when unauthenticated/unset token and authorizes valid edge token or ACL user', async () => {
+  const { createDxosBlocksActions } = require(path.join(PLUGIN_ROOT, 'src/server/blocks-api.js'));
+  const DxosBlocksServerPlugin = loadWithNocobaseStubs(
+    path.join(PLUGIN_ROOT, 'src/server/index.js'),
+    {
+      '@nocobase/server': {
+        Plugin: class {
+          constructor(opts = {}) {
+            this.db = opts.db;
+            this.app = opts.app;
+          }
+        },
+      },
+    },
+  );
+
+  const storedPoints = [];
+  const storedAlarms = [];
+  const employees = [{ id: 5, userId: 50, organizationId: 'org-a', active: true }];
+  const rules = [{
+    id: 1,
+    code: 'TEMP-CRIT',
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    attribute: 'temperature',
+    operator: 'gte',
+    threshold: '-12',
+    unit: 'CEL',
+    severity: 'critical',
+    handlerId: '5',
+    active: true,
+  }];
+  let allowIncidentCreate = false;
+  let allowAssetUpdate = false;
+
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+      if (name === 'roles') return { findOne: async () => ({ name: 'ldx_operator', allowAll: false, strategy: { actions: [] } }) };
+      if (name === 'dataSourcesRolesResources') {
+        return {
+          findOne: async ({ filter }) => {
+            if (filter?.name === 'latticeIncidentCases') {
+              return { usingActionsConfig: true, actions: allowIncidentCreate ? [{ name: 'create' }] : [{ name: 'view' }] };
+            }
+            if (filter?.name === 'latticeAssets') {
+              return { usingActionsConfig: true, actions: allowAssetUpdate ? [{ name: 'update' }] : [{ name: 'view' }] };
+            }
+            return { usingActionsConfig: true, actions: [] };
+          },
+        };
+      }
+      if (name === 'latticeTelemetryPoints') {
+        return { create: async ({ values }) => { const row = { id: storedPoints.length + 1, ...values }; storedPoints.push(row); return row; } };
+      }
+      if (name === 'latticeIncidentRules') {
+        return { find: async ({ filter }) => rules.filter((r) => r.organizationId === filter.organizationId && r.assetEntityId === filter.assetEntityId && r.attribute === filter.attribute) };
+      }
+      if (name === 'latticeIncidentCases') {
+        return {
+          find: async () => storedAlarms.filter((a) => ['open', 'acknowledged'].includes(a.status)),
+          create: async ({ values }) => { const row = { id: 900 + storedAlarms.length + 1, ...values }; storedAlarms.push(row); return row; },
+        };
+      }
+      return null;
+    },
+  };
+
+  const actions = createDxosBlocksActions(db, {});
+  assert.equal(typeof actions.telemetryIngest, 'function');
+
+  const prevToken = process.env.DX_IIOT_INGEST_TOKEN;
+  try {
+    // 1. Unauthenticated request ALWAYS fails 401 when DX_IIOT_INGEST_TOKEN is unset
+    delete process.env.DX_IIOT_INGEST_TOKEN;
+    await assert.rejects(
+      () => actions.telemetryIngest({
+        method: 'POST',
+        headers: {},
+        state: {},
+        action: { params: { values: { organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -10 } } },
+      }, async () => {}),
+      (err) => err.status === 401,
+    );
+
+    // 2. Short token (< 16 chars) fails closed with 401 even if header matches
+    process.env.DX_IIOT_INGEST_TOKEN = 'too-short-123';
+    await assert.rejects(
+      () => actions.telemetryIngest({
+        method: 'POST',
+        headers: { 'X-Lattice-Edge-Token': 'too-short-123' },
+        state: {},
+        action: { params: { values: { organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -10 } } },
+      }, async () => {}),
+      (err) => err.status === 401,
+    );
+
+    // 3. Valid >=16 char token: mismatched/different-length header fails 401
+    process.env.DX_IIOT_INGEST_TOKEN = 'edge-secret-token-2026-0123456789';
+    await assert.rejects(
+      () => actions.telemetryIngest({
+        method: 'POST',
+        headers: { 'x-lattice-edge-token': 'wrong-len' },
+        state: {},
+        action: { params: { values: { organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', numericValue: -10 } } },
+      }, async () => {}),
+      (err) => err.status === 401,
+    );
+
+    // 4. Valid edge token without explicit organizationId fails 400
+    await assert.rejects(
+      () => actions.telemetryIngest({
+        method: 'POST',
+        headers: { 'X-Lattice-Edge-Token': 'edge-secret-token-2026-0123456789' },
+        state: {},
+        action: { params: { values: { assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', numericValue: -10 } } },
+      }, async () => {}),
+      (err) => err.status === 400,
+    );
+
+    // 5. Valid edge token + explicit organizationId succeeds and triggers rule alarm
+    const edgeCtx = {
+      method: 'POST',
+      headers: { 'X-Lattice-Edge-Token': 'edge-secret-token-2026-0123456789' },
+      state: {},
+      action: {
+        params: {
+          values: {
+            organizationId: 'org-a',
+            assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+            metricName: 'temperature',
+            numericValue: -11.2,
+            unit: 'CEL',
+            sourceProtocol: 'mqtt',
+          },
+        },
+      },
+    };
+    await actions.telemetryIngest(edgeCtx, async () => {});
+    assert.equal(edgeCtx.body.point.numericValue, -11.2);
+    assert.equal(edgeCtx.body.triggeredAlarms.length, 1);
+    assert.equal(edgeCtx.body.triggeredAlarms[0].severity, 'critical');
+
+    // 6. Logged-in user without latticeIncidentCases:create OR latticeAssets:update denied 403
+    await assert.rejects(
+      () => actions.telemetryIngest({
+        method: 'POST',
+        headers: {},
+        state: { currentUser: { id: 50 }, currentRole: 'ldx_operator' },
+        action: { params: { values: { assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', numericValue: -18 } } },
+      }, async () => {}),
+      (err) => err.status === 403,
+    );
+
+    // 7. Logged-in user with latticeAssets:update succeeds, scoped strictly to actor.organizationId
+    allowAssetUpdate = true;
+    const userCtx = {
+      method: 'POST',
+      headers: {},
+      state: { currentUser: { id: 50 }, currentRole: 'ldx_operator' },
+      action: { params: { values: { assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -19.0 } } },
+    };
+    await actions.telemetryIngest(userCtx, async () => {});
+    assert.equal(userCtx.body.point.organizationId, 'org-a');
+    assert.equal(userCtx.body.triggeredAlarms.length, 0);
+
+    // Cross-org override by logged-in user blocked 403
+    await assert.rejects(
+      () => actions.telemetryIngest({
+        method: 'POST',
+        headers: {},
+        state: { currentUser: { id: 50 }, currentRole: 'ldx_operator' },
+        action: { params: { values: { organizationId: 'org-b', assetEntityId: 'urn:ngsi-ld:Asset:org-b:native:99', numericValue: -18 } } },
+      }, async () => {}),
+      (err) => err.status === 403,
+    );
+
+    // Logged-in user with latticeIncidentCases:create (without latticeAssets:update) also succeeds
+    allowAssetUpdate = false;
+    allowIncidentCreate = true;
+    const creatorCtx = {
+      method: 'POST',
+      headers: {},
+      state: { currentUser: { id: 50 }, currentRole: 'ldx_operator' },
+      action: { params: { values: { assetId: 12, metricName: 'temperature', numericValue: -16.5 } } },
+    };
+    await actions.telemetryIngest(creatorCtx, async () => {});
+    assert.equal(creatorCtx.body.point.assetEntityId, 'urn:ngsi-ld:Asset:org-a:native:12');
+
+    // Non-POST method rejected 405
+    await assert.rejects(
+      () => actions.telemetryIngest({
+        method: 'GET',
+        headers: { 'X-Lattice-Edge-Token': 'edge-secret-token-2026-0123456789' },
+        state: {},
+        action: { params: { organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', numericValue: -10 } },
+      }, async () => {}),
+      (err) => err.status === 405,
+    );
+  } finally {
+    if (prevToken === undefined) delete process.env.DX_IIOT_INGEST_TOKEN;
+    else process.env.DX_IIOT_INGEST_TOKEN = prevToken;
+  }
+
+  // Verify plugin load() registers dxosBlocks:telemetryIngest on public ACL (with handler-level fail-closed auth)
+  // and blocks non-root direct CRUD / charts:queryData on latticeTelemetryPoints
+  const aclCalls = [];
+  const middlewares = [];
+  let definedResource = null;
+  const plugin = new DxosBlocksServerPlugin({
+    db,
+    app: {
+      resourceManager: {
+        define: (def) => { definedResource = def; },
+        use: (fn) => { middlewares.push(fn); },
+      },
+      acl: {
+        allow: (...args) => aclCalls.push(args),
+      },
+    },
+  });
+  await plugin.load();
+  assert.equal(definedResource.name, 'dxosBlocks');
+  assert.equal(typeof definedResource.actions.telemetryIngest, 'function');
+  assert.ok(aclCalls.some(([res, act, scope]) => res === 'dxosBlocks' && (act === 'telemetryIngest' || (Array.isArray(act) && act.includes('telemetryIngest'))) && scope === 'public'));
+  assert.ok(middlewares.length >= 1, 'Plugin should register direct telemetry CRUD guard middleware');
+  const guardMw = middlewares[0];
+  await assert.rejects(
+    () => guardMw({ state: { currentRole: 'ldx_manager' }, action: { resourceName: 'latticeTelemetryPoints', actionName: 'list' } }, async () => {}),
+    (err) => err.status === 403,
+  );
+  await assert.rejects(
+    () => guardMw({ state: { currentRole: 'ldx_manager' }, action: { resourceName: 'charts', actionName: 'queryData', params: { values: { collection: 'latticeTelemetryPoints' } } } }, async () => {}),
+    (err) => err.status === 403,
+  );
+  let rootPassed = false;
+  await guardMw({ state: { currentRole: 'root' }, action: { resourceName: 'latticeTelemetryPoints', actionName: 'list' } }, async () => { rootPassed = true; });
+  assert.equal(rootPassed, true);
+
+  // Verify blocks-api telemetrySeries forwards windowHours and bucketMinutes
+  const tsDb = {
+    getRepository(name) {
+      if (name === 'latticeTelemetryPoints') {
+        const now = Date.now();
+        return {
+          find: async () => [
+            { id: 1, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -18, unit: 'CEL', observedAt: new Date(now - 5 * 3600_000).toISOString() },
+            { id: 2, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -14, unit: 'CEL', observedAt: new Date(now - 10 * 60_000).toISOString() },
+            { id: 3, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', metricName: 'temperature', numericValue: -12, unit: 'CEL', observedAt: new Date(now - 5 * 60_000).toISOString() },
+          ],
+        };
+      }
+      return db.getRepository(name);
+    },
+  };
+  const tsActions = createDxosBlocksActions(tsDb, {});
+  const tsSeriesCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 50 }, currentRole: 'ldx_operator' },
+    can: () => ({}),
+    action: { params: { values: { assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12', attribute: 'temperature', windowHours: 2, bucketMinutes: 60 } } },
+  };
+  await tsActions.telemetrySeries(tsSeriesCtx, async () => {});
+  assert.equal(tsSeriesCtx.body.points.length, 1);
+  assert.equal(tsSeriesCtx.body.points[0].count, 2);
+  assert.equal(tsSeriesCtx.body.points[0].value, -13);
+});
+
+test('telemetry-points collection, migration 20261123000500, and OSI-clean IIoT compose/config meet security & TimescaleDB guardrails', async () => {
+  const collectionPath = path.join(PLUGIN_ROOT, 'src/server/collections/telemetry-points.js');
+  const collectionSrc = readFileSync(collectionPath, 'utf8');
+  assert.match(collectionSrc, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(collectionSrc, /latticeTelemetryPoints/);
+  assert.match(collectionSrc, /idx_lattice_telemetry_org_entity_metric_obs/);
+
+  const colDef = loadWithNocobaseStubs(collectionPath, {
+    '@nocobase/database': { defineCollection: (def) => def },
+  });
+  assert.equal(colDef.name, 'latticeTelemetryPoints');
+  assert.deepEqual(colDef.migrationRules, ['schema-only']);
+  for (const fieldName of ['organizationId', 'assetId', 'assetEntityId', 'metricName', 'numericValue', 'unit', 'quality', 'sourceProtocol', 'observedAt']) {
+    assert.ok(colDef.fields.some((f) => f.name === fieldName), `Missing field ${fieldName}`);
+  }
+  assert.equal(colDef.indexes[0].name, 'idx_lattice_telemetry_org_entity_metric_obs');
+  assert.ok(colDef.indexes[0].name.length <= 55);
+
+  const migPath = path.join(PLUGIN_ROOT, 'src/server/migrations/20261123000500-dxos-telemetry-timeseries.js');
+  const migSrc = readFileSync(migPath, 'utf8');
+  assert.match(migSrc, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(migSrc, /CREATE TABLE IF NOT EXISTS "latticeTelemetryPoints"/);
+  assert.match(migSrc, /idx_lattice_telemetry_org_entity_metric_obs/);
+  assert.match(migSrc, /pg_available_extensions/);
+  assert.match(migSrc, /pg_extension/);
+  assert.match(migSrc, /create_hypertable/);
+  assert.match(migSrc, /DROP TABLE IF EXISTS "latticeTelemetryPoints"/);
+
+  // Execute migration up()/down() cleanly against plain Postgres and TimescaleDB mocks
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === '@nocobase/server') {
+      return { Migration: class { constructor(ctx) { this.context = ctx; } } };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  let MigrationCls;
+  try {
+    delete require.cache[require.resolve(migPath)];
+    MigrationCls = require(migPath);
+  } finally {
+    Module._load = origLoad;
+  }
+
+  const plainQueries = [];
+  const plainMig = new MigrationCls({
+    db: {
+      sequelize: {
+        transaction: async (fn) => fn({ id: 'tx-plain' }),
+        query: async (sql) => {
+          plainQueries.push(sql);
+          return [[]];
+        },
+      },
+    },
+  });
+  await plainMig.up();
+  assert.equal(plainQueries.some((q) => q.includes('create_hypertable')), false, 'Plain Postgres must NOT invoke create_hypertable');
+  await plainMig.down();
+  assert.ok(plainQueries.some((q) => q.includes('DROP TABLE IF EXISTS "latticeTelemetryPoints"')));
+
+  const tsQueries = [];
+  const tsMig = new MigrationCls({
+    db: {
+      sequelize: {
+        transaction: async (fn) => fn({ id: 'tx-ts' }),
+        query: async (sql) => {
+          tsQueries.push(sql);
+          if (sql.includes('pg_extension') || sql.includes('pg_available_extensions')) return [[{ exists: 1 }]];
+          return [[]];
+        },
+      },
+    },
+  });
+  await tsMig.up();
+  assert.ok(
+    tsQueries.some((q) => q.includes('pg_constraint') && q.includes('pg_attribute') && q.includes('ADD PRIMARY KEY (id, "observedAt")')),
+    'TimescaleDB migration must upgrade single-column PK to composite (id, "observedAt")',
+  );
+  assert.ok(
+    tsQueries.some((q) => q.includes("create_hypertable('\"latticeTelemetryPoints\"', 'observedAt', if_not_exists => TRUE, migrate_data => TRUE)")),
+    'TimescaleDB migration must invoke create_hypertable with if_not_exists => TRUE, migrate_data => TRUE',
+  );
+
+  // Verify IIoT compose and configs
+  const repoRoot = path.resolve(PLUGIN_ROOT, '../../..');
+  const iiotYml = readFileSync(path.join(repoRoot, 'infra/compose/iiot.yml'), 'utf8');
+  assert.match(iiotYml, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(iiotYml, /eclipse-mosquitto:2\.0\.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353/);
+  assert.match(iiotYml, /nodered\/node-red:4\.0\.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5/);
+  assert.match(iiotYml, /timescale\/timescaledb:2\.19\.3-pg16-oss@sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72/);
+  assert.doesNotMatch(iiotYml, /thingsboard|emqx|:latest\b/i);
+  assert.match(iiotYml, /no-new-privileges:true/);
+  assert.match(iiotYml, /cap_drop:\s*\r?\n\s*-\s*ALL/);
+  assert.match(iiotYml, /mem_limit:/);
+  assert.match(iiotYml, /healthcheck:/);
+  assert.match(iiotYml, /iiot-net:\s*\r?\n[\s\S]*?internal:\s*true/);
+  // Mosquitto must remain internal on iiot-net (expose 1883, no host ports binding)
+  const mosquittoBlock = iiotYml.match(/^\s{2}mosquitto:\r?\n([\s\S]*?)(?=^\s{2}[a-z0-9_-]+:|\z)/m)?.[1] || '';
+  assert.doesNotMatch(mosquittoBlock, /^\s+ports:/m, 'mosquitto must not bind host ports on an internal network');
+  assert.match(mosquittoBlock, /^\s+expose:\s*\r?\n\s*-\s*["']?1883["']?/m);
+
+  const mosq = readFileSync(path.join(repoRoot, 'infra/config/mosquitto/mosquitto.conf'), 'utf8');
+  assert.match(mosq, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(mosq, /listener\s+1883/);
+  assert.match(mosq, /persistence\s+true/);
+
+  const flowsRaw = readFileSync(path.join(repoRoot, 'infra/config/nodered/flows.json'), 'utf8');
+  const flows = JSON.parse(flowsRaw);
+  assert.ok(Array.isArray(flows) && flows.length >= 4);
+  assert.ok(flows.some((n) => n.type === 'mqtt in' && n.topic === 'latticedx/+/+/telemetry'));
+  const sanitizerNode = flows.find((n) => n.type === 'function');
+  assert.ok(sanitizerNode && String(sanitizerNode.func || '').includes('X-Lattice-Edge-Token'));
+  assert.ok(String(sanitizerNode.func || '').includes("env.get('DX_IIOT_INGEST_URL') || 'http://nocobase/api/dxosBlocks:telemetryIngest'"));
+  assert.ok(String(sanitizerNode.func || '').includes('rawValue.trim()'));
+  const httpNode = flows.find((n) => n.type === 'http request');
+  assert.ok(httpNode, 'Missing Node-RED http request node');
+  assert.equal(httpNode.url, '', 'http request node url must be empty so Node-RED honors dynamic msg.url');
+});
+
+test('Fix Round 1: queryTelemetryTimeSeries returns latest N of 250 points and aggregates full window when bucketMinutes > 0', async () => {
+  const { queryTelemetryTimeSeries } = require(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'));
+
+  const baseMs = Date.parse('2026-11-22T00:00:00Z');
+  const nowMs = baseMs + 250 * 60_000; // 250 minutes later (~4.16h)
+  const allPoints = Array.from({ length: 250 }, (_, idx) => ({
+    id: idx + 1,
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    metricName: 'temperature',
+    numericValue: idx, // 0..249
+    unit: 'CEL',
+    observedAt: new Date(baseMs + idx * 60_000).toISOString(),
+  }));
+
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeTelemetryPoints') {
+        return {
+          find: async ({ sort = [], limit = 100, offset = 0 } = {}) => {
+            let out = allPoints.slice();
+            if (Array.isArray(sort) && sort.includes('-observedAt')) {
+              out.sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt) || b.id - a.id);
+            }
+            return out.slice(offset, offset + limit);
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  // Raw query with limit: 50 MUST return the latest 50 points (values 200..249), sorted ascending
+  const latest50 = await queryTelemetryTimeSeries(db, {
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    attribute: 'temperature',
+    windowHours: 24,
+    limit: 50,
+    now: nowMs,
+  });
+  assert.equal(latest50.points.length, 50);
+  assert.equal(latest50.points[0].value, 200);
+  assert.equal(latest50.points[49].value, 249);
+  assert.equal(latest50.stats.latest, 249);
+
+  // Mock with small page cap (100) still aggregates all 250 points across 5 hourly buckets via pagination
+  const pagedDb = {
+    getRepository(name) {
+      if (name === 'latticeTelemetryPoints') {
+        return {
+          find: async ({ sort = [], limit = 100, offset = 0 } = {}) => {
+            let out = allPoints.slice();
+            if (Array.isArray(sort) && sort.includes('-observedAt')) {
+              out.sort((a, b) => Date.parse(b.observedAt) - Date.parse(a.observedAt) || b.id - a.id);
+            }
+            return out.slice(offset, offset + Math.min(limit, 100));
+          },
+        };
+      }
+      return null;
+    },
+  };
+  const bucketed = await queryTelemetryTimeSeries(pagedDb, {
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    attribute: 'temperature',
+    windowHours: 24,
+    bucketMinutes: 60,
+    limit: 50,
+    now: nowMs,
+  });
+  assert.equal(bucketed.points.length, 5);
+  assert.equal(bucketed.points.reduce((s, b) => s + b.count, 0), 250);
+});
+
+test('Fix Round 1: ingestTelemetryPoint scans past >200 rules, enforces cross-tenant assetId 404 before insert, and blocks bad org/window inputs', async () => {
+  const { ingestTelemetryPoint } = require(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'));
+  const { createDxosBlocksActions } = require(path.join(PLUGIN_ROOT, 'src/server/blocks-api.js'));
+
+  const assets = [
+    { id: 12, organizationId: 'org-a', code: 'COLD-A1' },
+    { id: 99, organizationId: 'org-b', code: 'COLD-B1' },
+  ];
+  const insertedPoints = [];
+  const incidents = [];
+  const manyRules = [
+    ...Array.from({ length: 220 }, (_, i) => ({
+      id: i + 1,
+      code: `OTHER-${i + 1}`,
+      name: `Unrelated rule ${i + 1}`,
+      organizationId: 'org-a',
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:999',
+      attribute: 'humidity',
+      operator: 'gt',
+      threshold: '99',
+      severity: 'low',
+      handlerId: '5',
+      active: true,
+    })),
+    {
+      id: 221,
+      code: 'RULE-221',
+      name: 'Rule past 200 threshold',
+      organizationId: 'org-a',
+      assetId: 12,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+      attribute: 'temperature',
+      operator: 'gt',
+      threshold: '-15',
+      severity: 'critical',
+      handlerId: '5',
+      active: true,
+    },
+  ];
+
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeAssets') {
+        return {
+          findOne: async ({ filter = {} } = {}) => assets.find((a) => (!filter.id || Number(a.id) === Number(filter.id)) && (!filter.organizationId || a.organizationId === filter.organizationId)) || null,
+        };
+      }
+      if (name === 'latticeTelemetryPoints') {
+        return {
+          create: async ({ values }) => {
+            const row = { id: insertedPoints.length + 1, ...values };
+            insertedPoints.push(row);
+            return row;
+          },
+          find: async () => insertedPoints,
+        };
+      }
+      if (name === 'latticeIncidentRules') {
+        return {
+          find: async ({ limit = 200, offset = 0 } = {}) => manyRules.slice(offset, offset + limit),
+        };
+      }
+      if (name === 'latticeIncidentCases') {
+        return {
+          find: async () => incidents,
+          create: async ({ values }) => {
+            const row = { id: 700 + incidents.length + 1, ...values };
+            incidents.push(row);
+            return row;
+          },
+        };
+      }
+      if (name === 'latticeEmployees') {
+        return { find: async () => [{ id: 5, userId: 50, organizationId: 'org-a', active: true }] };
+      }
+      if (name === 'roles') {
+        return { findOne: async () => ({ name: 'ldx_manager', allowAll: false, strategy: { actions: [] } }) };
+      }
+      if (name === 'dataSourcesRolesResources') {
+        return { findOne: async () => ({ usingActionsConfig: true, actions: [{ name: 'view' }, { name: 'create' }] }) };
+      }
+      return null;
+    },
+  };
+
+  // 1. Cross-tenant assetId (asset 99 belongs to org-b) MUST throw 404 TELEMETRY_ASSET_NOT_FOUND before inserting
+  await assert.rejects(
+    () => ingestTelemetryPoint(db, {
+      organizationId: 'org-a',
+      assetId: 99,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:99',
+      metricName: 'temperature',
+      numericValue: -10,
+    }),
+    (err) => err.status === 404 && err.code === 'TELEMETRY_ASSET_NOT_FOUND',
+  );
+  assert.equal(insertedPoints.length, 0, 'Must not insert telemetry point when assetId does not belong to org');
+
+  // 2. Non-existent assetId throws 404 TELEMETRY_ASSET_NOT_FOUND before inserting
+  await assert.rejects(
+    () => ingestTelemetryPoint(db, {
+      organizationId: 'org-a',
+      assetId: 5555,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:5555',
+      metricName: 'temperature',
+      numericValue: -10,
+    }),
+    (err) => err.status === 404 && err.code === 'TELEMETRY_ASSET_NOT_FOUND',
+  );
+  assert.equal(insertedPoints.length, 0);
+
+  // 3. Matching rule at position 221 (>200 unrelated rules) MUST still trigger alarm
+  const ok = await ingestTelemetryPoint(db, {
+    organizationId: 'org-a',
+    assetId: 12,
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    metricName: 'temperature',
+    numericValue: -11.0,
+  });
+  assert.equal(insertedPoints.length, 1);
+  assert.equal(ok.triggeredAlarms.length, 1);
+  assert.equal(ok.triggeredAlarms[0].severity, 'critical');
+
+  // 4. Edge-token telemetryIngest rejects invalid organizationId format and telemetrySeries rejects NaN/negative windowHours & bucketMinutes
+  const actions = createDxosBlocksActions(db, { ingestToken: 'edge-secret-token-2026-0123456789' });
+  await assert.rejects(
+    () => actions.telemetryIngest({
+      method: 'POST',
+      headers: { 'X-Lattice-Edge-Token': 'edge-secret-token-2026-0123456789' },
+      state: {},
+      action: { params: { values: { organizationId: 'org-a;drop', assetId: 12, numericValue: -10 } } },
+    }, async () => {}),
+    (err) => err.status === 400 && err.code === 'TELEMETRY_ORG_REQUIRED',
+  );
+
+  for (const badParams of [
+    { assetId: 12, windowHours: -1 },
+    { assetId: 12, windowHours: 'not-a-number' },
+    { assetId: 12, windowHours: '   ' },
+    { assetId: 12, bucketMinutes: -5 },
+    { assetId: 12, bucketMinutes: 'NaN' },
+    { assetId: 12, bucketMinutes: '   ' },
+  ]) {
+    await assert.rejects(
+      () => actions.telemetrySeries({
+        method: 'POST',
+        state: { currentUser: { id: 50 }, currentRole: 'ldx_manager' },
+        action: { params: { values: badParams } },
+      }, async () => {}),
+      (err) => err.status === 400,
+    );
+  }
+
+  // 5. Fix Round 2: whitespace-only numericValue and contradictory assetId vs assetEntityId URN fail closed 400
+  const { evaluateRuleCondition } = require(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'));
+  assert.equal(evaluateRuleCondition('lt', '   ', 10), false);
+  await assert.rejects(
+    () => ingestTelemetryPoint(db, {
+      organizationId: 'org-a',
+      assetId: 12,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+      numericValue: '   ',
+    }),
+    (err) => err.status === 400 && err.code === 'TELEMETRY_VALUE_INVALID',
+  );
+  await assert.rejects(
+    () => ingestTelemetryPoint(db, {
+      organizationId: 'org-a',
+      assetId: 12,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:99',
+      numericValue: -10,
+    }),
+    (err) => err.status === 400 && err.code === 'TELEMETRY_ASSET_MISMATCH',
+  );
+});
+
+test('Fix Round 2: Node-RED sanitizer function routes to http://nocobase/api/dxosBlocks:telemetryIngest and drops whitespace values', () => {
+  const repoRoot = path.resolve(PLUGIN_ROOT, '../../..');
+  const flows = JSON.parse(readFileSync(path.join(repoRoot, 'infra/config/nodered/flows.json'), 'utf8'));
+  const sanitizer = flows.find((n) => n.id === 'latticedx-sanitizer-fn');
+  const httpNode = flows.find((n) => n.id === 'latticedx-http-ingest');
+  assert.equal(httpNode.url, '');
+
+  const fn = new Function('msg', 'node', 'env', sanitizer.func);
+  const warnings = [];
+  const errors = [];
+  const fakeNode = { warn: (m) => warnings.push(m), error: (m) => errors.push(m) };
+  const fakeEnv = new Map([['DX_IIOT_INGEST_TOKEN', 'edge-secret-token-2026-0123456789']]);
+
+  // Whitespace-only value must be dropped (never coerced to 0)
+  const dropped = fn(
+    { topic: 'latticedx/org-a/12/telemetry', payload: { numericValue: '   ' } },
+    fakeNode,
+    { get: (k) => fakeEnv.get(k) },
+  );
+  assert.equal(dropped, null);
+  assert.ok(warnings.length > 0);
+
+  // Valid MQTT telemetry uses internal docker URL http://nocobase/api/dxosBlocks:telemetryIngest
+  const out = fn(
+    { topic: 'latticedx/org-a/12/telemetry', payload: JSON.stringify({ metricName: 'temperature', value: -14.5, unit: 'CEL' }) },
+    fakeNode,
+    { get: (k) => fakeEnv.get(k) },
+  );
+  assert.equal(out.url, 'http://nocobase/api/dxosBlocks:telemetryIngest');
+  assert.equal(out.headers['X-Lattice-Edge-Token'], 'edge-secret-token-2026-0123456789');
+  assert.equal(out.payload.organizationId, 'org-a');
+  assert.equal(out.payload.assetEntityId, 'urn:ngsi-ld:Asset:org-a:native:12');
+  assert.equal(out.payload.numericValue, -14.5);
+  assert.equal(errors.length, 0);
+});

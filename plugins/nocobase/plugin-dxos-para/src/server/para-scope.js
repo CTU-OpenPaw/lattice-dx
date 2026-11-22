@@ -107,17 +107,26 @@ function createParaScopeMiddleware(db) {
 
   return async function paraScopeMiddleware(ctx, next) {
     const { resourceName, actionName, params } = ctx.action || {};
-    if (resourceName === 'charts' && actionName === 'queryData' && params?.values?.collection === 'latticeParaDocuments' && ctx.state?.currentRole !== 'root') {
-      if (params.values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
-      assertSafeFilter(params.values.filter);
-      assertSafeSort(params.values.sort);
-      const actor = await resolveParaActor(db, ctx.state?.currentUser);
-      params.values = { ...params.values, filter: { $and: [{ organizationId: actor.organizationId }, params.values.filter ?? {}] } };
-      if (params.values.pageSize != null) params.values.pageSize = clampPageLimit(params.values.pageSize);
-      if (params.values.limit != null) params.values.limit = clampPageLimit(params.values.limit);
-      return next();
+    if (resourceName === 'charts' && actionName === 'queryData' && ctx.state?.currentRole !== 'root') {
+      if (params?.values?.collection === 'latticeParaChunks') {
+        throw failure('PARA_CHUNKS_READ_ONLY', 403);
+      }
+      if (params?.values?.collection === 'latticeParaDocuments') {
+        if (params.values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
+        assertSafeFilter(params.values.filter);
+        assertSafeSort(params.values.sort);
+        const actor = await resolveParaActor(db, ctx.state?.currentUser);
+        params.values = { ...params.values, filter: { $and: [{ organizationId: actor.organizationId }, params.values.filter ?? {}] } };
+        if (params.values.pageSize != null) params.values.pageSize = clampPageLimit(params.values.pageSize);
+        if (params.values.limit != null) params.values.limit = clampPageLimit(params.values.limit);
+        return next();
+      }
     }
     const collectionName = resourceName?.split('.')[0];
+    if (collectionName === 'latticeParaChunks') {
+      if (ctx.state?.currentRole === 'root') return next();
+      throw failure('PARA_CHUNKS_READ_ONLY', 403);
+    }
     if (collectionName !== 'latticeParaDocuments') return next();
     if (ctx.state?.currentRole === 'root') return next();
 

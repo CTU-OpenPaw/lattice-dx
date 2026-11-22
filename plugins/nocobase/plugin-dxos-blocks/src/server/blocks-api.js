@@ -8,7 +8,9 @@
  */
 'use strict';
 
+const { timingSafeEqual } = require('node:crypto');
 const {
+  ingestTelemetryPoint,
   ingestOrDeduplicateAlarm,
   acknowledgeAlarm,
   clearAlarm,
@@ -24,7 +26,9 @@ const ALLOWED_PROPOSAL_COLLECTIONS = new Set([
   'latticeServiceTickets',
 ]);
 const PROPOSAL_STATES = new Set(['all', 'proposed', 'reviewed']);
+const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
+const MIN_EDGE_TOKEN_LENGTH = 16;
 
 function fail(code, status = 403, message = code) {
   return Object.assign(new Error(message), { code, status });
@@ -36,6 +40,81 @@ function readParams(ctx) {
   const p = ctx.action?.params || {};
   const v = p.values && typeof p.values === 'object' && !Array.isArray(p.values) ? p.values : {};
   return { ...p, ...v };
+}
+
+function parseOptionalNumber(raw, code, { min = 0 } = {}) {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw === 'boolean' || typeof raw === 'object') throw fail(code, 400);
+  if (typeof raw === 'string' && raw.trim() === '') throw fail(code, 400);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < min) throw fail(code, 400);
+  return parsed;
+}
+
+function readHeader(ctx, name) {
+  if (typeof ctx?.get === 'function') {
+    const v = ctx.get(name);
+    if (typeof v === 'string' && v) return v;
+  }
+  const lower = String(name || '').toLowerCase();
+  for (const hdrs of [ctx?.headers, ctx?.request?.headers]) {
+    if (!hdrs || typeof hdrs !== 'object') continue;
+    for (const [k, v] of Object.entries(hdrs)) {
+      if (k.toLowerCase() === lower && typeof v === 'string' && v) return v;
+    }
+  }
+  return '';
+}
+
+async function resolveTelemetryIngestAuth(db, ctx, input = {}, { ingestToken } = {}) {
+  const providedToken = readHeader(ctx, 'X-Lattice-Edge-Token').trim();
+  const rawEnvToken = ingestToken !== undefined ? ingestToken : process.env.DX_IIOT_INGEST_TOKEN;
+  const expectedToken = typeof rawEnvToken === 'string' ? rawEnvToken.trim() : '';
+
+  let auth;
+  if (providedToken) {
+    if (expectedToken.length < MIN_EDGE_TOKEN_LENGTH) {
+      throw fail('TELEMETRY_EDGE_AUTH_INVALID', 401, 'Token IIoT edge chưa được cấu hình hợp lệ.');
+    }
+    const expectedBuf = Buffer.from(expectedToken, 'utf8');
+    const providedBuf = Buffer.from(providedToken, 'utf8');
+    if (expectedBuf.length !== providedBuf.length || !timingSafeEqual(expectedBuf, providedBuf)) {
+      throw fail('TELEMETRY_EDGE_AUTH_INVALID', 401, 'Token IIoT edge không khớp.');
+    }
+    const orgId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
+    if (!ORG_ID_RE.test(orgId)) {
+      throw fail('TELEMETRY_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho điểm đo IIoT.');
+    }
+    auth = { mode: 'edge-token', organizationId: orgId, isRoot: false, actor: null };
+  } else if (!ctx.state?.currentUser?.id && ctx.state?.currentRole !== 'root') {
+    throw fail('NATIVE_LOGIN_REQUIRED', 401);
+  } else if (ctx.state?.currentRole === 'root') {
+    if (!ctx.state?.currentUser) throw fail('NATIVE_LOGIN_REQUIRED', 401);
+    const orgId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
+    if (!ORG_ID_RE.test(orgId)) {
+      throw fail('TELEMETRY_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho điểm đo IIoT.');
+    }
+    auth = { mode: 'root', organizationId: orgId, isRoot: true, actor: null };
+  } else {
+    const actor = await resolveNativeEmployee(db, ctx.state.currentUser);
+    const [canCreateIncident, canUpdateAsset] = await Promise.all([
+      hasViewPermission(db, ctx, 'latticeIncidentCases', 'create'),
+      hasViewPermission(db, ctx, 'latticeAssets', 'update'),
+    ]);
+    if (!canCreateIncident && !canUpdateAsset) {
+      throw fail('DXOS_ACL_DENIED', 403);
+    }
+    if (input.organizationId !== undefined && input.organizationId !== null && String(input.organizationId).trim() !== '' && String(input.organizationId).trim() !== actor.organizationId) {
+      throw fail('DXOS_CROSS_ORG_FORBIDDEN', 403);
+    }
+    auth = { mode: 'user', organizationId: actor.organizationId, isRoot: false, actor };
+  }
+
+  const entityUrn = typeof input.assetEntityId === 'string' ? URN_RE.exec(input.assetEntityId.trim()) : null;
+  if (entityUrn && entityUrn[1] !== auth.organizationId) {
+    throw fail('DXOS_CROSS_ORG_FORBIDDEN', 403);
+  }
+  return auth;
 }
 
 function normalizeBrokerOrigin(raw) {
@@ -162,7 +241,7 @@ function buildOwnerFilterClauses(db, collection, actor) {
   return clauses;
 }
 
-function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT_BROKER_URL, fetchImpl = fetch } = {}) {
+function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT_BROKER_URL, fetchImpl = fetch, ingestToken } = {}) {
   const brokerOrigin = normalizeBrokerOrigin(brokerUrl);
 
   return {
@@ -392,14 +471,52 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         requestedOrg = val(asset, 'organizationId');
         assetEntityId = `urn:ngsi-ld:Asset:${requestedOrg}:native:${val(asset, 'id')}`;
       }
+      if (isRoot && !requestedOrg && typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim())) {
+        requestedOrg = input.organizationId.trim();
+      }
+
+      const windowHours = parseOptionalNumber(input.windowHours, 'DXOS_INVALID_WINDOW_HOURS', { min: 0 });
+      const bucketMinutes = parseOptionalNumber(input.bucketMinutes, 'DXOS_INVALID_BUCKET_MINUTES', { min: 0 });
+      const limit = parseOptionalNumber(input.limit, 'DXOS_INVALID_LIMIT', { min: 1 });
 
       const series = await queryTelemetryTimeSeries(db, {
         organizationId: requestedOrg,
         assetEntityId,
         attribute: typeof input.attribute === 'string' ? input.attribute.trim() : '',
-        limit: Number(input.limit) || 50,
+        ...(windowHours !== undefined ? { windowHours } : {}),
+        ...(bucketMinutes !== undefined ? { bucketMinutes } : {}),
+        limit: limit ?? 100,
       });
       ctx.body = { ...series, preview: isRoot };
+      return next();
+    },
+
+    telemetryIngest: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const auth = await resolveTelemetryIngestAuth(db, ctx, input, { ingestToken });
+
+      let assetId = null;
+      if (input.assetId !== undefined && input.assetId !== null && input.assetId !== '') {
+        if (!/^[1-9]\d{0,18}$/.test(String(input.assetId))) throw fail('DXOS_INVALID_ASSET_ID', 400);
+        assetId = Number(input.assetId);
+      }
+      let assetEntityId = typeof input.assetEntityId === 'string' ? input.assetEntityId.trim() : '';
+      if (!assetEntityId && assetId != null) {
+        assetEntityId = `urn:ngsi-ld:Asset:${auth.organizationId}:native:${assetId}`;
+      }
+
+      ctx.body = await ingestTelemetryPoint(db, {
+        organizationId: auth.organizationId,
+        assetId,
+        assetEntityId,
+        metricName: input.metricName !== undefined ? input.metricName : input.attribute,
+        numericValue: input.numericValue !== undefined ? input.numericValue : input.value,
+        unit: input.unit,
+        quality: input.quality,
+        sourceProtocol: input.sourceProtocol,
+        observedAt: input.observedAt,
+      });
       return next();
     },
 
@@ -600,4 +717,5 @@ module.exports = {
   ALLOWED_PROPOSAL_COLLECTIONS,
   createDxosBlocksActions,
   resolveCallerContext,
+  resolveTelemetryIngestAuth,
 };

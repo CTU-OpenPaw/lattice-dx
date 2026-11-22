@@ -338,7 +338,7 @@ async function loadSameDayAuditFallbackRows(db, org, day) {
          FROM "latticeAiAuditLogs"
          WHERE "organizationId" = :organizationId
            AND status IN ('allowed', 'degraded')
-           AND COALESCE(channel, '') <> 'studio-sync'
+           AND COALESCE(channel, '') NOT IN ('studio-sync', 'hitl-approval')
            AND ("actorUserId" IS NOT NULL OR "actorUsername" IS NOT NULL)
            AND "createdAt" >= :dayStart
            AND "createdAt" < :dayEnd
@@ -358,7 +358,7 @@ async function loadSameDayAuditFallbackRows(db, org, day) {
     const status = String(readVal(row, 'status') || '').toLowerCase();
     if (status !== 'allowed' && status !== 'degraded') continue;
     const channel = String(readVal(row, 'channel') || '').toLowerCase();
-    if (channel === 'studio-sync') continue;
+    if (channel === 'studio-sync' || channel === 'hitl-approval') continue;
     const actorKey = readVal(row, 'actorUserId') ?? readVal(row, 'actorUsername');
     if (actorKey == null || actorKey === '') continue;
     const created = readVal(row, 'createdAt');

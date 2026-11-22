@@ -26,7 +26,15 @@ const {
   failTool,
   resolveCallerRoleNames,
   isStudioAdmin,
+  resolveActorScope,
+  createDxosTools,
 } = require('./ai-tools-core');
+const {
+  isRootActor,
+  isHitlApprover,
+  listApprovals,
+  decideApproval,
+} = require('./ai-hitl');
 const { buildEnterpriseTopology } = require('./mcp-itot-tools');
 const {
   resolvePageGrid,
@@ -241,6 +249,24 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       throw failTool('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới có quyền truy cập DX-OS AI Studio.');
     }
     return targetDb;
+  }
+
+  async function runHitlDecision(ctx, decision, buildExecutor) {
+    if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+      throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+    }
+    const targetDb = resolveDb(ctx);
+    const actor = await resolveActorScope(ctx, targetDb);
+    const payload = readActionPayload(ctx);
+    const approvalId = payload.approvalId ?? payload.id ?? ctx?.action?.params?.approvalId ?? ctx?.action?.params?.filterByTk;
+    const note = payload.note ?? payload.decisionNote ?? payload.reason ?? '';
+    return decideApproval(targetDb, {
+      actor,
+      approvalId,
+      decision,
+      note,
+      ...(typeof buildExecutor === 'function' ? { executeApprovedWrite: buildExecutor(targetDb, actor) } : {}),
+    });
   }
 
   return {
@@ -490,6 +516,99 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         resultSummary: JSON.stringify(res).slice(0, 600),
       });
       ctx.body = res;
+      if (typeof next === 'function') await next();
+    },
+
+    async listApprovals(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'GET') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức GET.');
+      }
+      const targetDb = resolveDb(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      const status = ctx?.action?.params?.status ?? payload.status ?? 'pending';
+      const limit = ctx?.action?.params?.limit ?? payload.limit ?? 50;
+      const organizationId = ctx?.action?.params?.organizationId ?? payload.organizationId ?? null;
+      const items = await listApprovals(targetDb, { actor, status, limit, organizationId });
+      ctx.body = {
+        items,
+        total: items.length,
+        isApprover: isHitlApprover(actor),
+        organizationId: actor.organizationId,
+      };
+      if (typeof next === 'function') await next();
+    },
+
+    async approveAction(ctx, next) {
+      ctx.body = await runHitlDecision(ctx, 'approve', (targetDb, actor) => async (row) => {
+        if (row.toolName !== 'dxos_execute_record_action') {
+          throw failTool('HITL_UNSUPPORTED_TOOL', 400, `Công cụ "${row.toolName}" chưa hỗ trợ thực thi qua hàng chờ HITL.`);
+        }
+        if (!isRootActor(actor) && row.organizationId !== actor.organizationId) {
+          throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép thực thi yêu cầu HITL của tổ chức khác.');
+        }
+        const rawArgs = row.proposedArgs && typeof row.proposedArgs === 'object' && !Array.isArray(row.proposedArgs)
+          ? row.proposedArgs
+          : null;
+        if (!rawArgs) {
+          throw failTool('HITL_ARGS_MISMATCH', 409, 'Dữ liệu proposedArgs của yêu cầu phê duyệt không hợp lệ.');
+        }
+        const argsCol = String(rawArgs.collection || '').trim();
+        const argsOp = String(rawArgs.operation || '').trim();
+        const argsRecId = rawArgs.recordId != null && String(rawArgs.recordId).trim() !== '' ? Number(rawArgs.recordId) : null;
+        const rowRecId = row.targetRecordId != null ? Number(row.targetRecordId) : null;
+        if (
+          argsCol !== String(row.targetCollection || '').trim()
+          || argsOp !== String(row.operation || '').trim()
+          || argsRecId !== rowRecId
+        ) {
+          throw failTool('HITL_ARGS_MISMATCH', 409, 'Dữ liệu proposedArgs không khớp với thông tin hàng chờ phê duyệt.');
+        }
+        const execTool = createDxosTools().find((t) => t.definition.name === 'dxos_execute_record_action');
+        if (!execTool) {
+          throw failTool('HITL_TOOL_UNAVAILABLE', 503, 'Công cụ dxos_execute_record_action chưa sẵn sàng.');
+        }
+        let requesterEmployeeId = null;
+        if (row.requesterUserId != null && row.organizationId) {
+          const empRepo = targetDb?.getRepository?.('latticeEmployees');
+          if (empRepo && typeof empRepo.find === 'function') {
+            const empRows = (await empRepo.find({
+              filter: { userId: Number(row.requesterUserId), organizationId: row.organizationId, active: true },
+              limit: 5,
+            })) || [];
+            const matchedEmp = empRows.find(
+              (e) => Number(val(e, 'userId')) === Number(row.requesterUserId)
+                && val(e, 'organizationId') === row.organizationId
+                && val(e, 'active') !== false,
+            );
+            if (matchedEmp && val(matchedEmp, 'id') != null) {
+              requesterEmployeeId = Number(val(matchedEmp, 'id'));
+            }
+          }
+        }
+        const execCtx = {
+          app: ctx.app,
+          db: targetDb,
+          dataSource: ctx.dataSource || ctx.app?.mainDataSource,
+          auth: ctx.auth,
+          headers: ctx.headers,
+          request: ctx.request,
+          state: {
+            ...(ctx.state || {}),
+            dxosApprovedQueueId: row.id,
+            dxosAuditChannel: 'hitl-approval',
+            dxosAiUsername: row.aiEmployee || null,
+            dxosRequesterEmployeeId: requesterEmployeeId,
+            ...(isRootActor(actor) && row.organizationId ? { dxosTargetOrganizationId: row.organizationId, defaultOrgId: row.organizationId } : {}),
+          },
+        };
+        return execTool.invoke(execCtx, { ...rawArgs, requireApproval: false });
+      });
+      if (typeof next === 'function') await next();
+    },
+
+    async rejectAction(ctx, next) {
+      ctx.body = await runHitlDecision(ctx, 'reject');
       if (typeof next === 'function') await next();
     },
   };

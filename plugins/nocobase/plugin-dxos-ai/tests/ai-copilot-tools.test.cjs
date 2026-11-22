@@ -117,6 +117,10 @@ function makeCopilotHarness() {
     dataSourcesRolesResources,
     workflowManualTasks: tasks,
     latticeAiAuditLogs: auditLogs,
+    latticeAiProfiles: [
+      { id: 1, username: 'dxos-direct-allow', enabled: true, toolPermissions: { dxos_execute_record_action: 'ALLOW' } },
+    ],
+    latticeAiApprovalQueue: [],
   };
 
   let nextId = 500;
@@ -152,7 +156,7 @@ function makeCopilotHarness() {
 
   const makeCtx = (userId, username, roles) => ({
     db,
-    state: { currentUser: { id: userId, username }, currentRoles: roles, currentRole: roles[0] },
+    state: { currentUser: { id: userId, username }, currentRoles: roles, currentRole: roles[0], dxosAiUsername: 'dxos-direct-allow' },
     app: { resourceManager: { getResource: () => null } },
   });
 
@@ -329,4 +333,82 @@ test('dxos_search_enterprise_context ranks diacritic-stripped Vietnamese queries
   assert.equal(res.items[0].paraCitation, '[latticeParaDocuments:SOP-POWER-01#99 · resources]');
   assert.ok(res.items[0].score > 0);
   assert.equal(res.items.some((it) => it.code === 'SOP-FOREIGN-99'), false);
+});
+
+test('dxos_search_enterprise_context bridges latticeParaChunks with section citations, org isolation, and PARA view RBAC', async () => {
+  const { db, byName } = makeCopilotHarness();
+  db.store.latticeParaChunks = [
+    {
+      id: 701,
+      documentId: 5,
+      organizationId: 'org-a',
+      code: 'SOP-COLD-01',
+      title: 'SOP Kiểm định Kho lạnh dưới -15C',
+      paraSpace: 'resources',
+      chunkIndex: 2,
+      sectionTitle: 'Quy trình ứng phó mất điện máy nén',
+      pageNumber: 3,
+      content: 'Khi áp suất máy nén sụt giảm dưới ngưỡng an toàn, bật máy phát dự phòng trong 120 giây.',
+      active: true,
+    },
+    {
+      id: 702,
+      documentId: 999,
+      organizationId: 'org-b',
+      code: 'SOP-ORG-B',
+      title: 'Tài liệu Org B',
+      paraSpace: 'resources',
+      chunkIndex: 0,
+      sectionTitle: 'Bí mật tổ chức B',
+      pageNumber: 1,
+      content: 'Áp suất máy nén tổ chức B không được phép rò rỉ.',
+      active: true,
+    },
+  ];
+
+  const empCtx = {
+    db,
+    state: { currentUser: { id: 9, username: 'emp9' }, currentRoles: ['ldx_employee'], currentRole: 'ldx_employee' },
+    app: { resourceManager: { getResource: () => null } },
+  };
+  const found = await byName.get('dxos_search_enterprise_context').invoke(empCtx, { query: 'ap suat may nen du phong' });
+  const chunkHit = found.items.find((it) => it.collection === 'latticeParaChunks');
+  assert.ok(chunkHit, 'Expected latticeParaChunks match in search results');
+  assert.equal(chunkHit.sectionTitle, 'Quy trình ứng phó mất điện máy nén');
+  assert.equal(chunkHit.chunkIndex, 2);
+  assert.equal(chunkHit.pageNumber, 3);
+  assert.ok(chunkHit.citation.includes('SOP-COLD-01'));
+  assert.ok(chunkHit.citation.includes('Quy trình ứng phó mất điện máy nén'));
+  assert.equal(found.items.some((it) => it.code === 'SOP-ORG-B'), false);
+
+  // Driver has NO view grant on latticeParaDocuments -> chunks must NOT be exposed either
+  db.store.latticeEmployees.push({ id: 15, userId: 11, code: 'DRV-11', organizationId: 'org-a', active: true });
+  const driverCtx = {
+    db,
+    state: { currentUser: { id: 11, username: 'drv11' }, currentRoles: ['ldx_driver'], currentRole: 'ldx_driver' },
+    app: { resourceManager: { getResource: () => null } },
+  };
+  const drvRes = await byName.get('dxos_search_enterprise_context').invoke(driverCtx, { query: 'ap suat may nen' });
+  assert.equal(drvRes.items.some((it) => it.collection === 'latticeParaChunks'), false);
+
+  // Own-scoped reader on latticeParaDocuments only sees chunks belonging to their own documents
+  const ownPolicyIdx = db.store.dataSourcesRolesResources.findIndex((p) => p.roleName === 'ldx_employee' && p.name === 'latticeParaDocuments');
+  db.store.dataSourcesRolesResources[ownPolicyIdx] = {
+    roleName: 'ldx_employee',
+    name: 'latticeParaDocuments',
+    dataSourceKey: 'main',
+    usingActionsConfig: true,
+    actions: [{ name: 'view', fields: ['id', 'code', 'title', 'paraSpace', 'ownerId'], scope: { own: true } }],
+  };
+  db.store.latticeParaDocuments.push(
+    { id: 50, code: 'SOP-OWN-50', title: 'Tài liệu riêng emp9', organizationId: 'org-a', paraSpace: 'projects', ownerId: 13 },
+    { id: 51, code: 'SOP-PEER-51', title: 'Tài liệu riêng mgr10', organizationId: 'org-a', paraSpace: 'projects', ownerId: 14 },
+  );
+  db.store.latticeParaChunks.push(
+    { id: 703, documentId: 50, organizationId: 'org-a', code: 'SOP-OWN-50', title: 'Tài liệu riêng emp9', paraSpace: 'projects', chunkIndex: 0, sectionTitle: 'Mục riêng emp9', pageNumber: 1, content: 'Quy trình nội bộ emp9 máy nén lạnh', active: true },
+    { id: 704, documentId: 51, organizationId: 'org-a', code: 'SOP-PEER-51', title: 'Tài liệu riêng mgr10', paraSpace: 'projects', chunkIndex: 0, sectionTitle: 'Mục riêng mgr10', pageNumber: 1, content: 'Quy trình bí mật mgr10 máy nén lạnh', active: true },
+  );
+  const ownRes = await byName.get('dxos_search_enterprise_context').invoke(empCtx, { query: 'may nen lanh' });
+  assert.equal(ownRes.items.some((it) => it.collection === 'latticeParaChunks' && it.code === 'SOP-OWN-50'), true);
+  assert.equal(ownRes.items.some((it) => it.collection === 'latticeParaChunks' && it.code === 'SOP-PEER-51'), false);
 });

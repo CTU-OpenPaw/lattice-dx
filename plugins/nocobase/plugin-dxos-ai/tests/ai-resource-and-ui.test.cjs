@@ -1014,3 +1014,139 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
   modelInput = findAll(tree2, (n) => n.type === 'input' && n.props?.['data-testid'] === 'dxos-model-custom-input')[0];
   assert.equal(modelInput.props.value, 'openai:gpt-4o');
 });
+
+test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk badge, reason validation, and approve/reject actions', async () => {
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+
+  const findAll = (node, pred, acc = []) => {
+    if (!node || typeof node !== 'object') return acc;
+    if (pred(node)) acc.push(node);
+    const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    for (const k of kids) findAll(k, pred, acc);
+    return acc;
+  };
+
+  const stateSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let stateIdx = 0;
+  let effectIdx = 0;
+  let memoIdx = 0;
+  const apiCalls = [];
+  const pendingItems = [
+    {
+      id: 401,
+      organizationId: 'org-a',
+      requesterUserId: 9,
+      requesterUsername: 'emp9',
+      aiEmployee: 'dxos-ops',
+      toolName: 'dxos_execute_record_action',
+      targetCollection: 'latticeServiceTickets',
+      targetRecordId: 10,
+      operation: 'update',
+      riskLevel: 'high',
+      status: 'pending',
+      diffPreview: {
+        before: { priority: 'low' },
+        after: { priority: 'critical' },
+        changes: [{ field: 'priority', before: 'low', after: 'critical' }],
+      },
+    },
+    {
+      id: 402,
+      organizationId: 'org-a',
+      requesterUserId: 9,
+      requesterUsername: 'emp9',
+      aiEmployee: 'dxos-ops',
+      toolName: 'dxos_execute_record_action',
+      targetCollection: 'latticeOrders',
+      operation: 'create',
+      riskLevel: 'medium',
+      status: 'pending',
+      diffPreview: {
+        before: null,
+        after: { code: 'ORD-99' },
+        changes: [{ field: 'code', before: null, after: 'ORD-99' }],
+      },
+    },
+  ];
+  const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, idx) => d !== prev[idx]);
+  const api = {
+    request: async (req) => {
+      apiCalls.push(req);
+      if (req.url === 'dxosAi:listApprovals') return { data: { data: { items: pendingItems } } };
+      if (req.url === 'dxosAi:approveAction') return { data: { data: { id: req.data.approvalId, status: 'executed' } } };
+      if (req.url === 'dxosAi:rejectAction') return { data: { data: { id: req.data.approvalId, status: 'rejected' } } };
+      return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+    },
+  };
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const i = stateIdx++;
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+      return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+    },
+    useRef: (init) => ({ current: init }),
+    useEffect: (fn, deps) => {
+      const i = effectIdx++;
+      effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+    },
+    useMemo: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps };
+      return memoSlots[i].value;
+    },
+    useCallback: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps };
+      return memoSlots[i].value;
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, {});
+  const render = () => {
+    stateIdx = 0;
+    effectIdx = 0;
+    memoIdx = 0;
+    const tree = Page();
+    for (const eff of effectSlots) {
+      if (eff.changed) { eff.changed = false; eff.fn(); }
+    }
+    return tree;
+  };
+
+  let tree = render();
+  const hitlTabBtn = findAll(tree, (n) => n.type === 'button' && n.children?.includes('6. Duyệt AI (HITL)'))[0];
+  assert.ok(hitlTabBtn, 'Tab 6 Duyệt AI (HITL) button must exist');
+  hitlTabBtn.props.onClick();
+  tree = render();
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render();
+
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:listApprovals'), true);
+  const dump = JSON.stringify(tree);
+  assert.equal(dump.includes('latticeServiceTickets'), true);
+  assert.equal(dump.includes('critical'), true);
+  assert.equal(dump.includes('high'), true);
+
+  // Reject without >= 3 chars note shows validation notice without calling rejectAction
+  const rejectBtn402 = findAll(tree, (n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-hitl-reject-402')[0];
+  assert.ok(rejectBtn402);
+  await rejectBtn402.props.onClick();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:rejectAction'), false);
+
+  // Type reason >= 3 chars and reject 402
+  const noteInput402 = findAll(tree, (n) => n.type === 'input' && n.props?.['data-testid'] === 'dxos-hitl-note-402')[0];
+  noteInput402.props.onChange({ target: { value: 'Sai thông số' } });
+  tree = render();
+  const rejectBtn402Ready = findAll(tree, (n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-hitl-reject-402')[0];
+  await rejectBtn402Ready.props.onClick();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:rejectAction' && c.data?.approvalId === 402 && c.data?.note === 'Sai thông số'), true);
+
+  // Approve 401
+  const approveBtn401 = findAll(tree, (n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-hitl-approve-401')[0];
+  assert.ok(approveBtn401);
+  await approveBtn401.props.onClick();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:approveAction' && c.data?.approvalId === 401), true);
+});

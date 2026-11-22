@@ -100,7 +100,8 @@ function makeMockDb({
         workflows: [{ id: 91, title: 'Logistics 5 bước', current: true, enabled: true }],
         flow_nodes: [],
         latticePortals: [],
-        latticeAiProfiles: [],
+        latticeAiProfiles: [{ id: 1, username: 'dxos-direct-allow', enabled: true, toolPermissions: { dxos_execute_record_action: 'ALLOW' } }],
+        latticeAiApprovalQueue: [],
       };
       const arr = storeMap[name];
       if (!arr) return null;
@@ -122,9 +123,9 @@ function makeMockDb({
   return db;
 }
 
-function makeCtx(db, { userId = 9, username = 'emp9', roles = ['ldx_employee'], applyBlueprint, onTaskSubmit } = {}) {
+function makeCtx(db, { userId = 9, username = 'emp9', roles = ['ldx_employee'], applyBlueprint, onTaskSubmit, dxosAiUsername = 'dxos-direct-allow' } = {}) {
   return {
-    state: { currentUser: { id: userId, username }, currentRoles: roles, currentRole: roles[0] },
+    state: { currentUser: { id: userId, username }, currentRoles: roles, currentRole: roles[0], ...(dxosAiUsername ? { dxosAiUsername } : {}) },
     db,
     app: {
       resourceManager: {

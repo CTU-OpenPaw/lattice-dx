@@ -8,7 +8,13 @@
  */
 'use strict';
 
-const { rankHybridRecords } = require('./ai-hybrid-search');
+const { rankHybridRecords, buildParaChunkPoolEntries } = require('./ai-hybrid-search');
+const {
+  resolveEffectiveToolMode,
+  buildDiffPreview,
+  computeRiskLevel,
+  enqueueAiApproval,
+} = require('./ai-hitl');
 
 async function resolveSearchableTargets(db, requestedCollections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val) {
   const dynamicCustom = [];
@@ -75,7 +81,7 @@ async function enforceCallerRbacOnWrite(db, actor, collection, operation, safeVa
   return { matchedActions };
 }
 
-async function performScopedRecordWrite(db, actor, collection, operation, { recordId, values }, deps, ctx) {
+async function preflightScopedRecordWrite(db, actor, collection, operation, { recordId, values }, deps) {
   const { failTool, val, PROTECTED_SERVER_FIELDS, CUSTOM_COLLECTION_RE } = deps;
   const repo = db?.getRepository?.(collection);
   if (!repo) throw failTool('COLLECTION_NOT_FOUND', 404, `Collection "${collection}" chưa sẵn sàng.`);
@@ -90,18 +96,7 @@ async function performScopedRecordWrite(db, actor, collection, operation, { reco
     if (!actor.isAdmin && !actor.employeeId) {
       throw failTool('EMPLOYEE_BINDING_REQUIRED', 403, 'Cần hồ sơ latticeEmployees để tạo bản ghi nghiệp vụ.');
     }
-    const created = await repo.create({
-      values: {
-        ...safeValues,
-        organizationId: actor.organizationId,
-        ...(collection === 'latticeParaDocuments'
-          ? { ...(actor.employeeId ? { ownerId: actor.employeeId } : {}), status: safeValues.status || 'active' }
-          : { ...(actor.employeeId ? { requesterId: actor.employeeId } : {}), status: 'draft', version: 1 }),
-      },
-      context: ctx,
-    });
-    const plain = typeof created?.toJSON === 'function' ? created.toJSON() : created;
-    return { operation: 'create', collection, record: plain };
+    return { repo, safeValues, existing: null };
   }
 
   if (recordId == null) throw failTool('RECORD_ID_REQUIRED', 400, 'Cần recordId để cập nhật.');
@@ -110,7 +105,7 @@ async function performScopedRecordWrite(db, actor, collection, operation, { reco
     throw failTool('RECORD_NOT_FOUND_OR_FORBIDDEN', 403, 'Không tìm thấy bản ghi trong phạm vi tổ chức của bạn.');
   }
   if (!actor.isAdmin) {
-    const isManagerOrAdmin = (actor.roleNames || []).some((r) => r === 'ldx_admin' || r === 'ldx_manager');
+    const isManagerOrAdmin = (actor.roleNames || []).some((r) => r === 'ldx_admin' || r === 'ldx_director' || r === 'ldx_manager');
     if (!isManagerOrAdmin) {
       if (collection === 'latticeParaDocuments') {
         const ownerId = val(existing, 'ownerId');
@@ -129,8 +124,34 @@ async function performScopedRecordWrite(db, actor, collection, operation, { reco
       }
     }
   }
+  return { repo, safeValues, existing };
+}
+
+async function commitScopedRecordWrite({ repo, safeValues, existing }, actor, collection, operation, recordId, ctx) {
+  if (operation === 'create') {
+    const effectiveEmployeeId = (ctx?.state?.dxosApprovedQueueId && ctx?.state?.dxosRequesterEmployeeId != null)
+      ? ctx.state.dxosRequesterEmployeeId
+      : actor.employeeId;
+    const created = await repo.create({
+      values: {
+        ...safeValues,
+        organizationId: actor.organizationId,
+        ...(collection === 'latticeParaDocuments'
+          ? { ...(effectiveEmployeeId ? { ownerId: effectiveEmployeeId } : {}), status: safeValues.status || 'active' }
+          : { ...(effectiveEmployeeId ? { requesterId: effectiveEmployeeId } : {}), status: 'draft', version: 1 }),
+      },
+      context: ctx,
+    });
+    const plain = typeof created?.toJSON === 'function' ? created.toJSON() : created;
+    return { operation: 'create', collection, record: plain };
+  }
   await existing.update(safeValues, { context: ctx });
   return { operation: 'update', collection, recordId, updatedFields: Object.keys(safeValues) };
+}
+
+async function performScopedRecordWrite(db, actor, collection, operation, { recordId, values }, deps, ctx) {
+  const preflight = await preflightScopedRecordWrite(db, actor, collection, operation, { recordId, values }, deps);
+  return commitScopedRecordWrite(preflight, actor, collection, operation, recordId, ctx);
 }
 
 function summarizeModuleRows(rows, val) {
@@ -166,18 +187,36 @@ function createCopilotTools(deps) {
       },
       async run(_ctx, db, actor, args) {
         const candidates = await resolveSearchableTargets(db, args.collections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val);
-        const { allowedCollections: targets, ownOnlySet } = await resolveReadablePolicies(db, actor, candidates);
+        const requestedParaChunks = Array.isArray(args.collections) && args.collections.includes('latticeParaChunks');
+        const policyProbeCols = requestedParaChunks && !candidates.includes('latticeParaDocuments')
+          ? [...candidates, 'latticeParaDocuments']
+          : candidates;
+        const { allowedCollections: rawTargets, ownOnlySet } = await resolveReadablePolicies(db, actor, policyProbeCols);
+        const canSearchParaChunks = rawTargets.includes('latticeParaDocuments');
+        const targets = requestedParaChunks && !candidates.includes('latticeParaDocuments')
+          ? rawTargets.filter((c) => c !== 'latticeParaDocuments')
+          : rawTargets;
         const limit = Math.max(1, Math.min(30, Number(args.limit) || 8));
         const q = String(args.query || '').trim();
         const pool = [];
-        for (const colName of targets) {
+        const visibleParaDocMap = new Map();
+        const docScanCols = canSearchParaChunks && !targets.includes('latticeParaDocuments')
+          ? [...targets, 'latticeParaDocuments']
+          : targets;
+        for (const colName of docScanCols) {
           const repo = db?.getRepository?.(colName);
           if (!repo) continue;
-          const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: q ? 60 : 25, sort: ['-id'] })) || [];
+          const scanLimit = colName === 'latticeParaDocuments' ? 200 : (q ? 60 : 25);
+          const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: scanLimit, sort: ['-id'] })) || [];
           const isOwnOnly = ownOnlySet.has(colName);
+          const emitDocItems = targets.includes(colName);
           for (const row of rows) {
             if (!isRowVisibleToActor(row, actor, isOwnOnly)) continue;
             const id = val(row, 'id');
+            if (colName === 'latticeParaDocuments' && id != null) {
+              visibleParaDocMap.set(String(id), row);
+            }
+            if (!emitDocItems) continue;
             const label = String(val(row, 'name') || val(row, 'title') || val(row, 'code') || '');
             const code = String(val(row, 'code') || id || '');
             const summary = String(val(row, 'summary') || val(row, 'description') || val(row, 'contentMarkdown') || '');
@@ -201,10 +240,32 @@ function createCopilotTools(deps) {
             });
           }
         }
+        let chunkSearched = false;
+        if (canSearchParaChunks) {
+          const chunkRepo = db?.getRepository?.('latticeParaChunks');
+          if (chunkRepo && typeof chunkRepo.find === 'function') {
+            const chunkRows = (await chunkRepo.find({
+              filter: { organizationId: actor.organizationId },
+              limit: q ? 120 : 40,
+              sort: ['-id'],
+            })) || [];
+            const chunkPool = buildParaChunkPoolEntries(chunkRows, {
+              organizationId: actor.organizationId,
+              visibleDocMap: visibleParaDocMap,
+              ownOnly: ownOnlySet.has('latticeParaDocuments'),
+              val,
+            });
+            pool.push(...chunkPool);
+            chunkSearched = true;
+          }
+        }
+        const searchedCollections = chunkSearched && !targets.includes('latticeParaChunks')
+          ? [...targets, 'latticeParaChunks']
+          : targets;
         const items = rankHybridRecords(q, pool, { limit });
         return {
           organizationId: actor.organizationId,
-          searchedCollections: targets,
+          searchedCollections,
           ...(q ? { engine: 'hybrid-rrf' } : {}),
           count: items.length,
           items,
@@ -225,10 +286,70 @@ function createCopilotTools(deps) {
           operation: { type: 'string', required: true, enum: ['create', 'update'] },
           recordId: { type: 'integer' },
           values: { type: 'object', required: true },
+          requireApproval: { type: 'boolean', default: false },
         },
       },
       async run(ctx, db, actor, args) {
-        return performScopedRecordWrite(db, actor, args.collection, args.operation, { recordId: args.recordId, values: args.values }, deps, ctx);
+        const preflight = await preflightScopedRecordWrite(
+          db,
+          actor,
+          args.collection,
+          args.operation,
+          { recordId: args.recordId, values: args.values },
+          deps,
+        );
+        const { safeValues, existing } = preflight;
+        const aiEmployee = ctx?.state?.dxosAiUsername || null;
+        const approvedQueueId = ctx?.state?.dxosApprovedQueueId || null;
+        if (!approvedQueueId) {
+          const effectiveMode = await resolveEffectiveToolMode(db, {
+            aiEmployee,
+            toolName: 'dxos_execute_record_action',
+            defaultPermission: 'ASK',
+          });
+          if (effectiveMode === 'OFF') {
+            throw failTool('TOOL_PERMISSION_OFF', 403, 'Công cụ dxos_execute_record_action đang tắt trên hồ sơ AI này.');
+          }
+          if (args.requireApproval === true || effectiveMode === 'ASK') {
+            const diffPreview = buildDiffPreview({
+              collection: args.collection,
+              operation: args.operation,
+              recordId: args.recordId ?? null,
+              existing,
+              values: safeValues,
+            });
+            const riskLevel = computeRiskLevel({
+              operation: args.operation,
+              values: safeValues,
+              requireApproval: args.requireApproval === true,
+              existing,
+            });
+            const queued = await enqueueAiApproval(db, {
+              actor,
+              aiEmployee,
+              toolName: 'dxos_execute_record_action',
+              targetCollection: args.collection,
+              targetRecordId: args.recordId ?? null,
+              operation: args.operation,
+              proposedArgs: {
+                collection: args.collection,
+                operation: args.operation,
+                ...(args.recordId != null ? { recordId: args.recordId } : {}),
+                values: safeValues,
+              },
+              diffPreview,
+              riskLevel,
+            });
+            return {
+              status: 'pending_approval',
+              approvalId: queued.id,
+              message: 'Yêu cầu đã vào hàng chờ phê duyệt con người (HITL).',
+              diffPreview: queued.diffPreview,
+            };
+          }
+        }
+
+        return commitScopedRecordWrite(preflight, actor, args.collection, args.operation, args.recordId, ctx);
       },
     }),
 

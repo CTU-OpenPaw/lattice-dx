@@ -322,6 +322,39 @@ const aiQuotaUsage = {
   ],
 };
 
+const aiApprovalQueue = {
+  name: 'latticeAiApprovalQueue',
+  title: 'Hàng chờ Phê duyệt Tác vụ AI (HITL)',
+  titleField: 'toolName',
+  origin: '@latticedx/plugin-dxos-ai',
+  uiManageable: false,
+  createdAt: true,
+  updatedAt: true,
+  fields: [
+    { name: 'organizationId', type: 'string', allowNull: false, defaultValue: 'native-ui-lab' },
+    { name: 'requesterUserId', type: 'bigInt', allowNull: false },
+    { name: 'requesterUsername', type: 'string' },
+    { name: 'aiEmployee', type: 'string' },
+    { name: 'toolName', type: 'string', allowNull: false },
+    { name: 'targetCollection', type: 'string', allowNull: false },
+    { name: 'targetRecordId', type: 'bigInt' },
+    { name: 'operation', type: 'string', defaultValue: 'update' },
+    { name: 'proposedArgs', type: 'jsonb', defaultValue: {} },
+    { name: 'diffPreview', type: 'jsonb', defaultValue: {} },
+    { name: 'riskLevel', type: 'string', defaultValue: 'medium' },
+    { name: 'status', type: 'string', defaultValue: 'pending' },
+    { name: 'decidedByUserId', type: 'bigInt' },
+    { name: 'decidedByUsername', type: 'string' },
+    { name: 'decisionNote', type: 'string' },
+    { name: 'decidedAt', type: 'date' },
+    { name: 'executionResult', type: 'jsonb' },
+    { name: 'expiresAt', type: 'date' },
+  ],
+  indexes: [
+    { name: 'idx_lattice_ai_hitl_org_status_created', fields: ['organizationId', 'status', 'createdAt'] },
+  ],
+};
+
 function failSchema(code, message, status = 400) {
   return Object.assign(new Error(message || code), { code, status });
 }
@@ -499,6 +532,7 @@ module.exports = {
   aiAuditLogs,
   uiSnapshots,
   aiQuotaUsage,
+  aiApprovalQueue,
   validateMcpServerUrl,
   redactAuditText,
   sanitizeAuditSummary,

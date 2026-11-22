@@ -59,7 +59,7 @@ const PROTECTED_SERVER_FIELDS = new Set([
 const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
-  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeUiSnapshots',
+  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue', 'latticeUiSnapshots',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
 ]);
@@ -137,6 +137,7 @@ async function resolveActorScope(ctx, db) {
   const targetDb = db || ctx.db;
   const roleNames = await resolveCallerRoleNames(ctx, targetDb, userId);
   const isAdmin = await isStudioAdmin(ctx, targetDb);
+  const isRoot = roleNames.includes('root');
   const empRepo = targetDb?.getRepository?.('latticeEmployees');
   let employee = null;
   if (empRepo) {
@@ -146,13 +147,22 @@ async function resolveActorScope(ctx, db) {
   if (!isAdmin && (!employee || !val(employee, 'organizationId'))) {
     throw failTool('ORG_MEMBERSHIP_REQUIRED', 403, 'Tài khoản chưa gắn nhân sự đang hoạt động trong tổ chức.');
   }
+  const targetOrgOverride = isRoot && ctx?.state?.dxosTargetOrganizationId
+    ? String(ctx.state.dxosTargetOrganizationId).trim()
+    : '';
+  const empOrg = val(employee, 'organizationId') || '';
+  const organizationId = targetOrgOverride || empOrg || String(ctx?.state?.defaultOrgId || 'native-ui-lab');
+  const employeeId = (targetOrgOverride && empOrg && empOrg !== targetOrgOverride)
+    ? null
+    : (val(employee, 'id') || null);
   return {
     userId,
     username: val(user, 'username') || val(user, 'nickname') || `user-${userId}`,
     roleNames,
     isAdmin,
-    employeeId: val(employee, 'id') || null,
-    organizationId: val(employee, 'organizationId') || String(ctx?.state?.defaultOrgId || 'native-ui-lab'),
+    isRoot,
+    employeeId,
+    organizationId,
   };
 }
 
@@ -232,18 +242,25 @@ function createAuditedTool(spec) {
         if (spec.adminOnly && !actor.isAdmin) {
           throw failTool('DXOS_ADMIN_REQUIRED', 403, `Công cụ "${spec.name}" chỉ dành cho Quản trị viên.`);
         }
-        await hydrateQuotaBucketFromDb(db, actor.organizationId);
-        checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
+        const isHitlApprovedReplay = Boolean(ctx?.state?.dxosApprovedQueueId);
+        if (!isHitlApprovedReplay) {
+          await hydrateQuotaBucketFromDb(db, actor.organizationId);
+          checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
+        }
         const checked = schemaHelper.validate(rawArgs);
         if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
         const result = await spec.run(ctx, db, actor, checked.value);
         const completionTokens = estimateTokens(result);
         const modelName = ctx?.state?.dxosModelName || ctx?.state?.modelName || '';
-        const estimatedCostUsd = estimateCostUsd(promptTokens, completionTokens, modelName, process.env);
+        const estimatedCostUsd = isHitlApprovedReplay
+          ? 0
+          : estimateCostUsd(promptTokens, completionTokens, modelName, process.env);
         const redactedArgs = redactPiiDeep(checked.value);
         const redactedRes = redactPiiText(redactAuditText(JSON.stringify(result).slice(0, 600)));
         const piiRedactedCount = redactedArgs.count + redactedRes.count;
-        await recordQuotaUsagePersistent(db, actor, { promptTokens, completionTokens, costUsd: estimatedCostUsd, piiRedactedCount });
+        if (!isHitlApprovedReplay) {
+          await recordQuotaUsagePersistent(db, actor, { promptTokens, completionTokens, costUsd: estimatedCostUsd, piiRedactedCount });
+        }
         await recordAiAuditLog(db, {
           actorUserId: actor.userId,
           actorUsername: actor.username,
