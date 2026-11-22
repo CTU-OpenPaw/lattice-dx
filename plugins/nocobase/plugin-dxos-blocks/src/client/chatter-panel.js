@@ -47,6 +47,7 @@ const ENTRY_TYPE_LABELS = {
   comment: 'Bình luận',
   field_diff: 'Thay đổi trường',
   lifecycle: 'Vòng đời chứng từ',
+  sla_escalation: 'Cảnh báo SLA',
 };
 
 function createRecordChatterView(client, React, app) {
@@ -56,10 +57,14 @@ function createRecordChatterView(client, React, app) {
   return function LatticeRecordChatterView({ targetCollection, targetRecordId, showExport = false, exportFields = null }) {
     const api = useApi();
     const [items, setItems] = React.useState([]);
+    const [typeFilter, setTypeFilter] = React.useState('all');
     const [draftBody, setDraftBody] = React.useState('');
     const [statusNote, setStatusNote] = React.useState('');
 
     const validTarget = SAFE_COLLECTION_RE.test(String(targetCollection || '')) && Number(targetRecordId) > 0;
+    const visibleItems = typeFilter === 'all'
+      ? items
+      : items.filter((entry) => String(entry?.entryType || 'comment') === typeFilter);
 
     const loadEntries = React.useCallback(async () => {
       if (!api?.request || !validTarget) return;
@@ -119,40 +124,56 @@ function createRecordChatterView(client, React, app) {
 
     return h('div', {
       'data-testid': 'dxos-record-chatter',
-      style: { padding: 14, borderRadius: 10, border: '1px solid #cbd5e1', background: '#ffffff', display: 'grid', gap: 10, color: '#0f172a' },
+      style: { padding: 14, borderRadius: 10, border: '1px solid #cbd5e1', background: '#ffffff', display: 'grid', gap: 10, color: '#0f172a', minWidth: 0, maxWidth: '100%' },
     },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-        h('div', { style: { fontWeight: 700, fontSize: 13 } }, `Nhật ký Chatter & Thay đổi (${targetCollection || 'record'}${targetRecordId ? `#${targetRecordId}` : ''})`),
-        showExport ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-          ['csv', 'xlsx', 'pdf'].map((fmt) => h('button', {
+        h('div', { style: { fontWeight: 700, fontSize: 13, minWidth: 0, wordBreak: 'break-word' } }, `Nhật ký Chatter & Thay đổi (${targetCollection || 'record'}${targetRecordId ? `#${targetRecordId}` : ''})`),
+        h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
+          h('select', {
+            'aria-label': 'Lọc nhật ký Chatter',
+            value: typeFilter,
+            onChange: (e) => setTypeFilter(e.target.value),
+            style: { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff', color: '#0f172a', fontSize: 11 },
+          },
+            h('option', { value: 'all' }, 'Lọc: Tất cả'),
+            h('option', { value: 'comment' }, 'Bình luận'),
+            h('option', { value: 'field_diff' }, 'Thay đổi trường'),
+            h('option', { value: 'lifecycle' }, 'Vòng đời chứng từ'),
+          ),
+          validTarget ? h('button', {
+            type: 'button',
+            onClick: () => loadEntries(),
+            style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff', color: '#0f172a', fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' },
+          }, 'Làm mới') : null,
+          showExport ? ['csv', 'xlsx', 'pdf'].map((fmt) => h('button', {
             key: fmt,
             type: 'button',
             onClick: () => handleExport(fmt),
-            style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #94a3b8', background: '#f8fafc', fontSize: 11, fontWeight: 700, cursor: 'pointer' },
-          }, fmt.toUpperCase())),
-        ) : null,
+            style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #94a3b8', background: '#f8fafc', fontSize: 11, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' },
+          }, fmt.toUpperCase())) : null,
+        ),
       ),
-      validTarget ? h('form', { onSubmit: handlePost, style: { display: 'flex', gap: 8, alignItems: 'center' } },
+      validTarget ? h('form', { onSubmit: handlePost, style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
         h('input', {
           type: 'text',
           value: draftBody,
           onChange: (e) => setDraftBody(e.target.value),
           placeholder: 'Nhắn trao đổi, dùng @mã-nhân-viên để gắn thẻ…',
-          style: { flex: 1, padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
+          style: { flex: '1 1 180px', minWidth: 0, maxWidth: '100%', padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
         }),
         h('button', {
           type: 'submit',
-          style: { padding: '6px 12px', borderRadius: 6, border: 'none', background: '#2563eb', color: '#ffffff', fontSize: 12, fontWeight: 700, cursor: 'pointer' },
+          style: { padding: '6px 12px', borderRadius: 6, border: 'none', background: '#2563eb', color: '#ffffff', fontSize: 12, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 },
         }, 'Gửi'),
       ) : null,
       statusNote ? h('div', { style: { fontSize: 11, color: '#2563eb' } }, statusNote) : null,
-      !items.length
+      !visibleItems.length
         ? h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Chưa có ghi nhận Chatter nào.')
-        : h('div', { style: { display: 'grid', gap: 8 } }, items.map((entry, idx) => h('div', {
+        : h('div', { style: { display: 'grid', gap: 8 } }, visibleItems.map((entry, idx) => h('div', {
             key: entry.id || idx,
-            style: { padding: 8, borderRadius: 8, background: '#f8fafc', border: '1px solid #e2e8f0', fontSize: 12, display: 'grid', gap: 4 },
+            style: { padding: 8, borderRadius: 8, background: '#f8fafc', border: '1px solid #e2e8f0', fontSize: 12, display: 'grid', gap: 4, minWidth: 0 },
           },
-            h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#475569' } },
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 4, fontSize: 11, color: '#475569' } },
               h('strong', null, `${entry.authorName || 'system'} · ${ENTRY_TYPE_LABELS[entry.entryType] || entry.entryType || 'Ghi chú'}`),
               h('span', null, String(entry.createdAt || '')),
             ),
@@ -293,7 +314,8 @@ function createVoucherLifecycleBar(client, React, app) {
       }
       setBusy(true);
       try {
-        setStatusNote(`Đang thực hiện ${action}…`);
+        const actionLabel = action === 'submit' ? 'trình duyệt' : action === 'cancel' ? 'hủy chứng từ' : 'lập bản điều chỉnh';
+        setStatusNote(`Đang ${actionLabel}…`);
         const payload = {
           collection: targetCollection,
           id: recId,
@@ -336,6 +358,8 @@ function createVoucherLifecycleBar(client, React, app) {
       fontWeight: 700,
       cursor: enabled && !busy ? 'pointer' : 'not-allowed',
       whiteSpace: 'nowrap',
+      minWidth: 0,
+      textAlign: 'center',
     });
 
     return h('div', {
@@ -348,11 +372,13 @@ function createVoucherLifecycleBar(client, React, app) {
         display: 'grid',
         gap: 8,
         color: '#0f172a',
+        minWidth: 0,
+        maxWidth: '100%',
       },
     },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-        h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 } },
-          h('strong', { style: { fontSize: 12 } }, `Vòng đời chứng từ (${targetCollection} #${targetRecordId})`),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, minWidth: 0 } },
+          h('strong', { style: { fontSize: 12, minWidth: 0 } }, `Vòng đời chứng từ (${targetCollection} #${targetRecordId})`),
           h('span', {
             'data-testid': 'dxos-voucher-status-badge',
             style: {
@@ -375,39 +401,49 @@ function createVoucherLifecycleBar(client, React, app) {
           : 'Chứng từ gốc'),
       ),
       info.lineage.length > 1 ? h('div', { style: { fontSize: 11, color: '#475569', display: 'flex', flexWrap: 'wrap', gap: 4 } },
-        'Chuỗi chứng từ: ',
+        'Chuỗi phiên bản: ',
         info.lineage.map((it) => `${it.code || `#${it.id}`} [${it.status || '?'}]`).join(' → '),
       ) : null,
-      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
         h('input', {
           'data-testid': 'dxos-voucher-reason-input',
           type: 'text',
           value: reasonText,
           onChange: (e) => setReasonText(e.target.value),
           placeholder: 'Lý do hủy / ghi chú điều chỉnh (3-255 ký tự)…',
-          style: { flex: '1 1 180px', minWidth: 0, padding: '5px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
+          style: { flex: '1 1 200px', minWidth: 0, maxWidth: '100%', padding: '5px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
         }),
-        h('button', {
-          type: 'button',
-          'data-testid': 'dxos-voucher-submit-btn',
-          disabled: busy || !canSubmit,
-          onClick: () => runAction('submit'),
-          style: btnStyle(canSubmit, '#2563eb'),
-        }, 'Trình duyệt'),
-        h('button', {
-          type: 'button',
-          'data-testid': 'dxos-voucher-cancel-btn',
-          disabled: busy || !canCancel,
-          onClick: () => runAction('cancel'),
-          style: btnStyle(canCancel, '#dc2626'),
-        }, 'Hủy chứng từ'),
-        h('button', {
-          type: 'button',
-          'data-testid': 'dxos-voucher-amend-btn',
-          disabled: busy || !canAmend,
-          onClick: () => runAction('amend'),
-          style: btnStyle(canAmend, '#0f766e'),
-        }, 'Điều chỉnh (Amend)'),
+        h('div', {
+          style: {
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))',
+            gap: 6,
+            flex: '1 1 280px',
+            minWidth: 0,
+          },
+        },
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-voucher-submit-btn',
+            disabled: busy || !canSubmit,
+            onClick: () => runAction('submit'),
+            style: btnStyle(canSubmit, '#2563eb'),
+          }, 'Trình duyệt'),
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-voucher-cancel-btn',
+            disabled: busy || !canCancel,
+            onClick: () => runAction('cancel'),
+            style: btnStyle(canCancel, '#dc2626'),
+          }, 'Hủy chứng từ'),
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-voucher-amend-btn',
+            disabled: busy || !canAmend,
+            onClick: () => runAction('amend'),
+            style: btnStyle(canAmend, '#0f766e'),
+          }, 'Lập bản điều chỉnh'),
+        ),
       ),
       statusNote ? h('div', { style: { fontSize: 11, color: '#1d4ed8' } }, statusNote) : null,
     );

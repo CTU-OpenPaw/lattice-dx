@@ -16,9 +16,17 @@ const path = require('node:path');
 function makeVoucherDbHarness() {
   let seq = 10;
   let chatterSeq = 0;
+  let notifSeq = 0;
   const employees = [
     { id: 3, userId: 30, organizationId: 'org-a', active: true, code: 'EMP-A', name: 'A' },
+    { id: 4, userId: 40, organizationId: 'org-a', active: true, code: 'MGR-A', name: 'Manager A' },
     { id: 8, userId: 80, organizationId: 'org-b', active: true, code: 'EMP-B', name: 'B' },
+    { id: 9, userId: 90, organizationId: 'org-b', active: true, code: 'MGR-B', name: 'Manager B' },
+  ];
+  const rolesUsers = [
+    { userId: 30, roleName: 'ldx_employee' },
+    { userId: 40, roleName: 'ldx_manager' },
+    { userId: 90, roleName: 'ldx_manager' },
   ];
   const orders = [
     {
@@ -50,7 +58,24 @@ function makeVoucherDbHarness() {
       amendedFromId: null,
     },
   ];
+  const serviceTickets = [
+    {
+      id: 21,
+      organizationId: 'org-a',
+      code: 'SRV-021',
+      name: 'Cấp lại VPN',
+      serviceType: 'it_support',
+      priority: 'high',
+      description: 'Nhân viên mới cần VPN',
+      requesterId: 3,
+      status: 'draft',
+      version: 1,
+      amendmentNo: 0,
+      amendedFromId: null,
+    },
+  ];
   const chatter = [];
+  const notifications = [];
 
   const match = (row, filter = {}) => Object.entries(filter).every(([k, cond]) => {
     if (k === '$and' && Array.isArray(cond)) return cond.every((sub) => match(row, sub));
@@ -65,14 +90,21 @@ function makeVoucherDbHarness() {
     update: async (patch) => Object.assign(row, patch),
   } : null);
 
+  const voucherData = {
+    latticeOrders: orders,
+    latticeRequests: orders,
+    latticeServiceTickets: serviceTickets,
+  };
+
   const db = {
     sequelize: {
       transaction: async (fn) => fn({ LOCK: { UPDATE: 'UPDATE' }, id: 'tx-v' }),
     },
     getModel(name) {
-      if (name === 'latticeOrders' || name === 'latticeRequests') {
+      if (name in voucherData) {
+        const list = voucherData[name];
         return {
-          findOne: async ({ where }) => orders.find((r) => match(r, where)) || null,
+          findOne: async ({ where }) => list.find((r) => match(r, where)) || null,
         };
       }
       return null;
@@ -81,25 +113,32 @@ function makeVoucherDbHarness() {
       if (name === 'latticeEmployees') {
         return {
           find: async ({ filter }) => employees.filter((e) => match(e, filter)),
+          findOne: async ({ filter }) => wrap(employees.find((e) => match(e, filter))),
         };
       }
-      if (name === 'latticeOrders' || name === 'latticeRequests') {
+      if (name === 'rolesUsers') {
+        return {
+          find: async ({ filter }) => rolesUsers.filter((ru) => match(ru, filter)),
+        };
+      }
+      if (name in voucherData) {
+        const list = voucherData[name];
         return {
           findOne: async ({ filter, filterByTk }) => {
-            if (filterByTk != null && !filter) return wrap(orders.find((r) => Number(r.id) === Number(filterByTk)));
-            return wrap(orders.find((r) => match(r, filter)));
+            if (filterByTk != null && !filter) return wrap(list.find((r) => Number(r.id) === Number(filterByTk)));
+            return wrap(list.find((r) => match(r, filter)));
           },
-          find: async ({ filter }) => orders.filter((r) => match(r, filter)).map(wrap),
+          find: async ({ filter }) => list.filter((r) => match(r, filter)).map(wrap),
           create: async ({ values }) => {
-            if (orders.some((o) => o.organizationId === values.organizationId && o.code === values.code)) {
+            if (list.some((o) => o.organizationId === values.organizationId && o.code === values.code)) {
               throw new Error(`Duplicate org+code ${values.code}`);
             }
             const created = { id: ++seq, createdAt: new Date().toISOString(), ...values };
-            orders.push(created);
+            list.push(created);
             return wrap(created);
           },
           update: async ({ filterByTk, filter, values }) => {
-            const target = orders.find((r) => (filterByTk != null ? Number(r.id) === Number(filterByTk) : true) && (!filter || match(r, filter)));
+            const target = list.find((r) => (filterByTk != null ? Number(r.id) === Number(filterByTk) : true) && (!filter || match(r, filter)));
             if (!target) return [];
             Object.assign(target, values);
             return [wrap(target)];
@@ -115,10 +154,20 @@ function makeVoucherDbHarness() {
           },
         };
       }
+      if (name === 'latticeNotifications') {
+        return {
+          find: async ({ filter, limit = 50 }) => notifications.filter((n) => match(n, filter)).slice(0, limit),
+          create: async ({ values }) => {
+            const n = { id: ++notifSeq, createdAt: new Date().toISOString(), ...values };
+            notifications.push(n);
+            return n;
+          },
+        };
+      }
       return null;
     },
   };
-  return { db, orders, chatter };
+  return { db, orders, serviceTickets, chatter, notifications };
 }
 
 test('buildAmendedCode replaces existing -AMD suffix cleanly and increments revision cleanly', () => {
@@ -238,4 +287,58 @@ test('migration 20261122001000 adds and drops voucher lifecycle columns and shor
   assert.match(migSrc, /idx_lattice_requests_org_amended/);
   assert.match(migSrc, /idx_lattice_orders_org_amended/);
   assert.match(migSrc, /\bdown\s*\(/);
+});
+
+test('latticeServiceTickets supports full voucher submit/cancel/amend/lineage and dispatches role/requester notifications', async () => {
+  const { VOUCHER_COLLECTIONS, registerVoucherLifecycleResource } = require('../src/server/voucher-lifecycle');
+  assert.equal(VOUCHER_COLLECTIONS.has('latticeServiceTickets'), true);
+  assert.equal(VOUCHER_COLLECTIONS.has('latticeRequests'), true);
+  assert.equal(VOUCHER_COLLECTIONS.has('latticeOrders'), true);
+
+  const { db, serviceTickets, notifications } = makeVoucherDbHarness();
+  let actions;
+  registerVoucherLifecycleResource({
+    db,
+    resourceManager: { define: (def) => { actions = def.actions; } },
+    acl: { allow: () => {} },
+  });
+
+  const empA = (params, method = 'POST') => ({
+    method,
+    state: { currentUser: { id: 30, username: 'emp-a' }, currentRole: 'ldx_employee' },
+    action: { resourceName: 'latticeVoucher', params },
+    throw(status, message) { throw Object.assign(new Error(message || String(status)), { status }); },
+  });
+  const mgrA = (params, method = 'POST') => ({
+    method,
+    state: { currentUser: { id: 40, username: 'mgr-a' }, currentRole: 'ldx_manager' },
+    action: { resourceName: 'latticeVoucher', params },
+    throw(status, message) { throw Object.assign(new Error(message || String(status)), { status }); },
+  });
+
+  // Submit service ticket notifies org managers (userId 40) with category 'voucher'
+  const subCtx = empA({ values: { collection: 'latticeServiceTickets', id: 21, expectedVersion: 1 } });
+  await actions.submit(subCtx, async () => {});
+  assert.equal(subCtx.body.status, 'submitted');
+  assert.ok(notifications.some((n) => n.category === 'voucher' && n.recipientUserId === 40 && n.targetCollection === 'latticeServiceTickets' && n.targetRecordId === 21));
+
+  // Manager cancels service ticket -> notifies requester (userId 30) with category 'voucher'
+  const canCtx = mgrA({ values: { collection: 'latticeServiceTickets', id: 21, cancelReason: 'Thiếu thông tin phòng ban', expectedVersion: 2 } });
+  await actions.cancel(canCtx, async () => {});
+  assert.equal(canCtx.body.status, 'cancelled');
+  assert.ok(notifications.some((n) => n.category === 'voucher' && n.recipientUserId === 30 && n.targetRecordId === 21));
+
+  // Amend service ticket -> creates SRV-021-AMD1 & notifies requester
+  const amdCtx = mgrA({ values: { collection: 'latticeServiceTickets', id: 21, patch: { priority: 'medium' } } });
+  await actions.amend(amdCtx, async () => {});
+  assert.equal(amdCtx.body.code, 'SRV-021-AMD1');
+  assert.equal(amdCtx.body.priority, 'medium');
+  assert.equal(amdCtx.body.amendedFromId, 21);
+  assert.ok(notifications.some((n) => n.category === 'voucher' && n.recipientUserId === 30 && n.targetRecordId === amdCtx.body.id));
+
+  // Lineage returns root -> AMD1
+  const linCtx = empA({ collection: 'latticeServiceTickets', id: amdCtx.body.id }, 'GET');
+  await actions.lineage(linCtx, async () => {});
+  assert.deepEqual(linCtx.body.items.map((x) => x.code), ['SRV-021', 'SRV-021-AMD1']);
+  assert.equal(serviceTickets.length, 2);
 });

@@ -29,6 +29,7 @@
   const {createNativePortalManager}=require('./native-portal-manager');
   const {createIncidentEvidence}=require('./native-incident-evidence');
   const {createBrandLogo, registerSignInLogo}=require('./native-branding');
+  const {createNotificationBellProvider}=require('./notification-bell');
   function useLatticeFormAction(manifest, blockId) {
     const apiClient = client.useAPIClient();
     const sharedApi = React.useMemo(() => createWorkspaceApi({apiClient}), [apiClient]);
@@ -50,6 +51,10 @@
       await portalManager?.preloadPortals?.();
       const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo,portalManager});
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
+      const NotificationBellProvider=createNotificationBellProvider(client,React,antd,this.app);
+      if (NotificationBellProvider && typeof this.app.use === 'function') {
+        this.app.use(NotificationBellProvider);
+      }
       if (typeof clientV2?.ACLRolesCheckProvider === 'function' && typeof this.app.use === 'function') {
         this.app.use(clientV2.ACLRolesCheckProvider);
       }

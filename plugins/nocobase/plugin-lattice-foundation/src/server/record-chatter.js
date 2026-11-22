@@ -9,6 +9,7 @@
 'use strict';
 
 const { resolveNativeActor } = require('./native-scope');
+const { dispatchNotification, resolveNotificationTargetPath } = require('./notification-center');
 
 const ALLOWED_CHATTER_COLLECTIONS = new Set([
   'latticeRequests',
@@ -79,8 +80,11 @@ async function resolveOrganizationMentions(db, organizationId, tokens) {
     const hit = candidates.find((c) => tokenSet.has(c));
     if (hit && employeeId != null && !seenIds.has(String(employeeId))) {
       seenIds.add(String(employeeId));
+      const rawUserId = val(emp, 'userId');
+      const userId = rawUserId != null && /^[1-9]\d*$/.test(String(rawUserId)) ? Number(rawUserId) : null;
       matched.push({
         employeeId: Number(employeeId),
+        userId,
         code,
         name,
         handle: hit,
@@ -283,6 +287,27 @@ function registerChatterResource(app) {
           authorEmployeeId: actor.employeeId ? Number(actor.employeeId) : null,
           authorName: actor.username || 'operator',
         });
+        const chatterId = val(created, 'id');
+        const targetPath = resolveNotificationTargetPath(targetCollection);
+        for (const mention of mentions) {
+          if (mention.userId == null) continue;
+          if (actor.userId && Number(mention.userId) === Number(actor.userId)) continue;
+          try {
+            await dispatchNotification(db, {
+              organizationId: actor.organizationId,
+              recipientUserId: mention.userId,
+              recipientEmployeeId: mention.employeeId,
+              category: 'mention',
+              severity: 'info',
+              title: `${actor.username || 'Đồng nghiệp'} đã nhắc đến bạn`,
+              body: body.slice(0, 300),
+              targetCollection,
+              targetRecordId: recordId,
+              targetPath,
+              ...(chatterId != null ? { dedupKey: `mention:${targetCollection}:${recordId}:${chatterId}` } : {}),
+            });
+          } catch {}
+        }
         try {
           await app.pubSubManager?.publish?.('lattice:surface', {
             kind: 'chatter',

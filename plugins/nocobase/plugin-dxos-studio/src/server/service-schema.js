@@ -63,6 +63,13 @@ const serviceTickets = {
     { name: 'resolutionNote', type: 'string', interface: 'textarea', uiSchema: { type: 'string', title: 'Kết quả xử lý', 'x-component': 'Input.TextArea' } },
     { name: 'decisionReason', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Ghi chú duyệt', 'x-component': 'Input' } },
     { name: 'version', type: 'integer', defaultValue: 1, allowNull: false },
+    { name: 'submittedAt', type: 'date' },
+    { name: 'submittedBy', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Người trình duyệt', 'x-component': 'Input' } },
+    { name: 'cancelledAt', type: 'date' },
+    { name: 'cancelledBy', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Người hủy chứng từ', 'x-component': 'Input' } },
+    { name: 'cancelReason', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Lý do hủy chứng từ', 'x-component': 'Input' } },
+    { name: 'amendedFromId', type: 'bigInt' },
+    { name: 'amendmentNo', type: 'integer', defaultValue: 0, allowNull: false },
     { name: 'active', type: 'boolean', defaultValue: true },
     { name: 'requester', type: 'belongsTo', target: 'latticeEmployees', foreignKey: 'requesterId' },
     { name: 'assignee', type: 'belongsTo', target: 'latticeEmployees', foreignKey: 'assigneeId' },
@@ -74,6 +81,7 @@ const serviceTickets = {
     { name: 'idx_lattice_service_tickets_org_requester_status', fields: ['organizationId', 'requesterId', 'status'] },
     { name: 'idx_lattice_service_tickets_org_assignee', fields: ['organizationId', 'assigneeId'] },
     { name: 'idx_lattice_service_tickets_org_department', fields: ['organizationId', 'departmentId'] },
+    { name: 'idx_lattice_tickets_org_amended', fields: ['organizationId', 'amendedFromId'] },
   ],
 };
 

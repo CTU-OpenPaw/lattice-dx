@@ -449,6 +449,89 @@ test('service-scope enforces optimistic version locking on latticeServiceTickets
   assert.equal(okCtx.action.params.values.expectedVersion, undefined);
 });
 
+test('service-schema declares voucher lifecycle fields & index, and service-scope enforces voucher immutability and protected fields', async () => {
+  const { serviceTickets } = require(path.join(PLUGIN_ROOT, 'src/server/service-schema.js'));
+  const { createServiceScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/service-scope.js'));
+
+  const fieldMap = new Map(serviceTickets.fields.map((f) => [f.name, f]));
+  for (const name of ['submittedAt', 'submittedBy', 'cancelledAt', 'cancelledBy', 'cancelReason', 'amendedFromId', 'amendmentNo']) {
+    assert.ok(fieldMap.has(name), `serviceTickets missing voucher field ${name}`);
+  }
+  assert.equal(fieldMap.get('submittedAt').type, 'date');
+  assert.equal(fieldMap.get('cancelledAt').type, 'date');
+  assert.equal(fieldMap.get('amendedFromId').type, 'bigInt');
+  assert.equal(fieldMap.get('amendmentNo').type, 'integer');
+  assert.equal(fieldMap.get('amendmentNo').defaultValue, 0);
+  assert.equal(fieldMap.get('amendmentNo').allowNull, false);
+
+  const amendedIdx = serviceTickets.indexes.find((idx) => idx.name === 'idx_lattice_tickets_org_amended');
+  assert.ok(amendedIdx, 'serviceTickets missing idx_lattice_tickets_org_amended index');
+  assert.deepEqual(amendedIdx.fields, ['organizationId', 'amendedFromId']);
+  assert.ok(amendedIdx.name.length <= 63);
+
+  const employees = [{ id: 8, userId: 80, organizationId: 'org-a', departmentId: 2, active: true }];
+  let currentTicket = { id: 25, organizationId: 'org-a', requesterId: 8, status: 'draft', version: 2 };
+  const db = {
+    getRepository: (name) => {
+      if (name === 'latticeEmployees') return { find: async () => employees };
+      if (name === 'latticeServiceTickets') return { findOne: async () => currentTicket };
+      return null;
+    },
+  };
+  const mw = createServiceScopeMiddleware(db);
+
+  // Draft update still succeeds (even without expectedVersion)
+  const draftCtx = {
+    state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+    action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 25, values: { name: 'Edited draft' } } },
+  };
+  await mw(draftCtx, async () => {});
+  assert.equal(draftCtx.action.params.values.name, 'Edited draft');
+  assert.equal(draftCtx.action.params.values.version, 3);
+
+  // Immutable voucher statuses block :update with 409 VOUCHER_IMMUTABLE even when expectedVersion is omitted
+  for (const immutableStatus of ['submitted', 'approved', 'completed', 'cancelled']) {
+    currentTicket = { id: 25, organizationId: 'org-a', requesterId: 8, status: immutableStatus, version: 2 };
+    await assert.rejects(
+      () => mw({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 25, values: { name: 'Tamper' } } },
+      }, async () => {}),
+      (err) => err.status === 409 && err.code === 'VOUCHER_IMMUTABLE',
+      `Expected 409 VOUCHER_IMMUTABLE for status ${immutableStatus}`,
+    );
+  }
+
+  // Protected voucher metadata fields cannot be spoofed via direct :create or :update
+  currentTicket = { id: 25, organizationId: 'org-a', requesterId: 8, status: 'draft', version: 2 };
+  for (const [field, val] of [
+    ['submittedAt', '2026-11-23T00:00:00Z'],
+    ['submittedBy', 'spoof-user'],
+    ['cancelledAt', '2026-11-23T00:00:00Z'],
+    ['cancelledBy', 'spoof-user'],
+    ['cancelReason', 'spoof'],
+    ['amendedFromId', 1],
+    ['amendmentNo', 3],
+  ]) {
+    await assert.rejects(
+      () => mw({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: { resourceName: 'latticeServiceTickets', actionName: 'create', params: { values: { code: 'X-1', name: 'Y', [field]: val } } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_DOCUMENT_PROTECTED_FIELD',
+      `Expected :create to reject protected voucher field ${field}`,
+    );
+    await assert.rejects(
+      () => mw({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 25, values: { [field]: val } } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_DOCUMENT_PROTECTED_FIELD',
+      `Expected :update to reject protected voucher field ${field}`,
+    );
+  }
+});
+
 test('dxosStudio actions expose admin-gated outboxDlqList and outboxDlqReplay', async () => {
   const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
   const rows = [

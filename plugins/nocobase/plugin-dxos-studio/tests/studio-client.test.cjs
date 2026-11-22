@@ -194,3 +194,136 @@ test('plugin-dxos-studio renders accessible single-row tablist/tabs and muted gr
     assert.equal(disabledBtn.props.style.cursor, 'not-allowed');
   }
 });
+
+test('plugin-dxos-studio Tab 6 renders download .json, rollback button, and per-section counts safely in Node', async () => {
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  const calls = [];
+  const stateValues = {
+    bundleText: '{"metadata":{"schemaVersion":"latticedx.solution-bundle/v2"}}',
+    bundleInfo: {
+      sha256: 'abcdef1234567890',
+      diff: {
+        summary: { added: 2, changed: 1, unchanged: 4, removed: 0 },
+        sections: {
+          roles: { added: ['ldx_qa'], changed: [], unchanged: ['ldx_employee'], removed: ['ldx_legacy'] },
+          portals: { added: ['ldx-portal-qa'], changed: [], unchanged: [], removed: [] },
+          workflows: { added: [], changed: ['wf-1'], unchanged: [], removed: [] },
+          customCollections: { added: [], changed: [], unchanged: ['latticeCustomA'], removed: [] },
+          aiProfiles: { added: [], changed: [], unchanged: ['dxos-ops'], removed: [] },
+        },
+        roleResources: { added: ['ldx_qa::main::latticeRequests'], changed: [], unchanged: [], removed: [] },
+      },
+      applied: {
+        rolesUpserted: 2,
+        roleResourcesUpserted: 3,
+        portalsUpserted: 1,
+        workflowsUpserted: 1,
+        nodesUpserted: 2,
+        customCollectionsUpserted: 1,
+        aiProfilesUpserted: 1,
+      },
+    },
+  };
+
+  let emptyCount = 0;
+  let nullCount = 0;
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const val = typeof init === 'function' ? init() : init;
+      if (val === 'workflows') return ['gitops', () => {}];
+      if (val === '') {
+        emptyCount += 1;
+        if (emptyCount === 2) return [stateValues.bundleText, (v) => { stateValues.bundleText = v; }];
+      }
+      if (val === null) {
+        nullCount += 1;
+        if (nullCount === 3) return [stateValues.bundleInfo, (v) => { stateValues.bundleInfo = typeof v === 'function' ? v(stateValues.bundleInfo) : v; }];
+      }
+      return [val, () => {}];
+    },
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useCallback: (fn) => fn,
+  };
+  const mockClient = {
+    useAPIClient: () => ({
+      request: async (req) => {
+        calls.push(req);
+        return {
+          data: {
+            data: {
+              rolledBack: true,
+              snapshotUid: 'gitops-test-01',
+              restored: {
+                rolesUpserted: 2,
+                roleResourcesUpserted: 1,
+                portalsUpserted: 1,
+                workflowsUpserted: 1,
+                nodesUpserted: 1,
+                customCollectionsUpserted: 1,
+                aiProfilesUpserted: 1,
+              },
+            },
+          },
+        };
+      },
+    }),
+  };
+
+  const Page = createDxosStudioSettingsPage(mockClient, React, {}, {});
+  const tree = Page();
+  const dump = JSON.stringify(tree);
+
+  const downloadBtn = collectNodes(tree, (n) => n.type === 'button' && textOf(n).includes('Tải tệp .json'))[0];
+  const rollbackBtn = collectNodes(tree, (n) => n.type === 'button' && textOf(n).includes('Hoàn tác Import gần nhất'))[0];
+  assert.ok(downloadBtn, 'Tab 6 should render "Tải tệp .json" button');
+  assert.ok(rollbackBtn, 'Tab 6 should render "Hoàn tác Import gần nhất" button');
+  assert.equal(downloadBtn.props.disabled, false);
+
+  // Per-section counts displayed for all 6 sections including removed count
+  for (const sectionKey of ['roles', 'roleResources', 'portals', 'workflows', 'customCollections', 'aiProfiles']) {
+    assert.ok(dump.includes(sectionKey), `Tab 6 should display per-section count for ${sectionKey}`);
+  }
+  assert.ok(dump.includes('-1'), 'Tab 6 diffSummary should display removed count when removed has items');
+
+  // Safe no-op in Node without window/Blob/document, and invokes Blob+<a download> with URL.revokeObjectURL in finally
+  downloadBtn.props.onClick();
+  const origBlob = globalThis.Blob;
+  const origUrl = globalThis.URL;
+  const origDoc = globalThis.document;
+  let downloadedName = '';
+  let clicked = false;
+  const revokedUrls = [];
+  try {
+    globalThis.Blob = class FakeBlob { constructor(parts, opts) { this.parts = parts; this.opts = opts; } };
+    globalThis.URL = {
+      createObjectURL: () => 'blob:mock-1',
+      revokeObjectURL: (u) => { revokedUrls.push(u); },
+    };
+    globalThis.document = {
+      createElement: () => ({ click: () => { clicked = true; }, set download(v) { downloadedName = v; }, get download() { return downloadedName; } }),
+      body: { appendChild: () => {}, removeChild: () => {} },
+    };
+    downloadBtn.props.onClick();
+    assert.equal(clicked, true);
+    assert.equal(downloadedName, 'latticedx-solution-bundle.json');
+    assert.deepEqual(revokedUrls, ['blob:mock-1']);
+
+    // Ensure finally still revokes object URL if click throws
+    globalThis.document.createElement = () => ({ click: () => { throw new Error('boom'); } });
+    assert.throws(() => downloadBtn.props.onClick(), /boom/);
+    assert.deepEqual(revokedUrls, ['blob:mock-1', 'blob:mock-1']);
+  } finally {
+    if (origBlob === undefined) delete globalThis.Blob; else globalThis.Blob = origBlob;
+    globalThis.URL = origUrl;
+    if (origDoc === undefined) delete globalThis.document; else globalThis.document = origDoc;
+  }
+
+  // Clicking rollback calls dxosStudio:solutionBundleRollback and clears stale dry-run diff
+  await rollbackBtn.props.onClick();
+  assert.ok(calls.some((c) => c.url === 'dxosStudio:solutionBundleRollback' && c.method === 'post'));
+  assert.equal(stateValues.bundleInfo.diff, null);
+  assert.equal(stateValues.bundleInfo.applied.roleResourcesUpserted, 1);
+});

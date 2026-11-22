@@ -194,11 +194,11 @@ function createBlockRenderers(client, React, antd, app) {
 
     const cols = Math.max(1, Math.min(4, Number(cfg.columns) || 4));
     return h('div', { 'data-testid': 'dxos-kpi-metric-block' },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
-        h('strong', { style: { fontSize: 15, color: '#0f172a' } }, String(cfg.title || 'KPI DX-OS')),
-        h('button', { type: 'button', onClick: loadCounts, disabled: loading, style: { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '2px 10px', cursor: 'pointer', fontSize: 12 } }, loading ? 'Đang tải…' : 'Làm mới'),
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 } },
+        h('strong', { style: { fontSize: 15, color: '#0f172a', minWidth: 0 } }, String(cfg.title || 'KPI DX-OS')),
+        h('button', { type: 'button', onClick: loadCounts, disabled: loading, style: { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '2px 10px', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' } }, loading ? 'Đang tải…' : 'Làm mới'),
       ),
-      h('div', { style: { display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: 12 } },
+      h('div', { style: { display: 'grid', gridTemplateColumns: cols <= 1 ? 'minmax(0, 1fr)' : 'repeat(auto-fit, minmax(135px, 1fr))', gap: 12 } },
         metrics.map((m, idx) => {
           const entry = counts[idx] || {};
           return h('div', {
@@ -247,7 +247,7 @@ function createBlockRenderers(client, React, antd, app) {
 
     const data = state.data;
     return h('div', { 'data-testid': 'dxos-context-telemetry-block' },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
         h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'NGSI-LD Context')),
         data?.brokerStatus ? h('span', {
           style: {
@@ -314,7 +314,7 @@ function createBlockRenderers(client, React, antd, app) {
     }, [api, cfg.targetCollection, cfg.state, cfg.pageSize]);
 
     return h('div', { 'data-testid': 'dxos-ai-proposal-block' },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
         h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'Đề xuất AI')),
         h('span', { style: { fontSize: 11, color: '#64748b' } }, `${cfg.targetCollection} · ${state.items.length} mục`),
       ),
@@ -357,12 +357,12 @@ function createBlockRenderers(client, React, antd, app) {
     }, [api, cfg.statusFilter, cfg.pageSize]);
 
     return h('div', { 'data-testid': 'dxos-workflow-tasks-block' },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
         h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'Công việc của tôi')),
         h('button', {
           type: 'button',
           onClick: () => go(app, '/admin/lattice-workspace'),
-          style: { border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff', padding: '2px 10px', cursor: 'pointer', fontSize: 12 },
+          style: { border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff', padding: '2px 10px', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' },
         }, 'Mở tất cả'),
       ),
       state.error ? h('div', { style: { fontSize: 13, color: '#b45309' } }, state.error) : null,
@@ -371,7 +371,7 @@ function createBlockRenderers(client, React, antd, app) {
         : h('div', { style: { display: 'grid', gap: 6 } },
           state.items.map((task) => h('div', {
             key: task.id,
-            style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff' },
+            style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 6, padding: '8px 10px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff' },
           },
             h('div', null,
               h('div', { style: { fontSize: 13, fontWeight: 600, color: '#0f172a' } }, task.node?.title || `Tác vụ #${task.id}`),
@@ -459,7 +459,7 @@ function createBlockRenderers(client, React, antd, app) {
         h('input', {
           type: 'search', value: search, placeholder: 'Tìm tài liệu...',
           onChange: (e) => setSearch(e.target.value),
-          style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
+          style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, maxWidth: '100%', minWidth: 0 },
         }),
       ),
       h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 } },
@@ -480,8 +480,8 @@ function createBlockRenderers(client, React, antd, app) {
           'aria-label': 'Tổ chức',
           style: { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         }, orgChoices.map((oid) => h('option', { key: oid, value: oid }, oid))) : null,
-        h('input', { value: draftCode, placeholder: 'Mã (tùy chọn)', onChange: (e) => setDraftCode(e.target.value), style: { width: 120, padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
-        h('input', { value: draftTitle, placeholder: 'Tiêu đề tài liệu P.A.R.A. mới…', onChange: (e) => setDraftTitle(e.target.value), style: { flex: 1, minWidth: 180, padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
+        h('input', { value: draftCode, placeholder: 'Mã (tùy chọn)', onChange: (e) => setDraftCode(e.target.value), style: { flex: '0 1 120px', minWidth: 0, maxWidth: '100%', padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
+        h('input', { value: draftTitle, placeholder: 'Tiêu đề tài liệu P.A.R.A. mới…', onChange: (e) => setDraftTitle(e.target.value), style: { flex: '1 1 150px', minWidth: 0, maxWidth: '100%', padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
         h('button', { type: 'submit', disabled: creating || !draftTitle.trim(), style: { padding: '4px 12px', borderRadius: 6, border: 'none', background: '#0f766e', color: '#fff', fontSize: 12, cursor: 'pointer' } }, creating ? 'Đang lưu…' : '+ Thêm tài liệu'),
       ) : null,
       state.error ? h('div', { style: { fontSize: 12, color: '#b45309', marginBottom: 6 } }, state.error) : null,
@@ -597,7 +597,7 @@ function createBlockRenderers(client, React, antd, app) {
       },
     },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-        h('strong', { style: { fontSize: 15, color: '#0f172a' } }, String(cfg.title || 'Trao đổi Chatter, Chứng từ & Xuất báo cáo')),
+        h('strong', { style: { fontSize: 15, color: '#0f172a', minWidth: 0, wordBreak: 'break-word' } }, String(cfg.title || 'Trao đổi Chatter, Chứng từ & Xuất báo cáo')),
         cfg.showExport !== false ? h('div', {
           'data-testid': 'dxos-workbench-export-bar',
           style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
@@ -622,18 +622,25 @@ function createBlockRenderers(client, React, antd, app) {
         ) : null,
       ),
       exportStatus ? h('div', { style: { fontSize: 11, color: '#2563eb' } }, exportStatus) : null,
-      showControls ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
+      showControls ? h('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))',
+          gap: 8,
+          alignItems: 'center',
+        },
+      },
         h('select', {
-          'aria-label': 'Chọn phân hệ nghiệp vụ',
+          'aria-label': 'Lọc phân hệ nghiệp vụ',
           value: activeCollection,
           onChange: (e) => { setSelectedCollection(e.target.value); setRecordIdInput(''); },
-          style: { flex: '1 1 170px', minWidth: 0, maxWidth: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+          style: { minWidth: 0, width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         }, WORKBENCH_COLLECTION_ENUM.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label))),
         recentRecords.length ? h('select', {
           'aria-label': 'Chọn bản ghi',
           value: recordIdInput,
           onChange: (e) => setRecordIdInput(e.target.value),
-          style: { flex: '1 1 180px', minWidth: 0, maxWidth: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+          style: { minWidth: 0, width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         },
           h('option', { value: '' }, '-- Chọn bản ghi gần đây --'),
           recentRecords.map((rec) => h('option', { key: rec.id, value: String(rec.id) }, `${rec.code || `#${rec.id}`} — ${rec.name || rec.title || ''}`)),
@@ -644,8 +651,23 @@ function createBlockRenderers(client, React, antd, app) {
           value: recordIdInput,
           onChange: (e) => setRecordIdInput(e.target.value),
           placeholder: 'Nhập ID bản ghi…',
-          style: { width: 130, maxWidth: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
+          style: { minWidth: 0, width: '100%', boxSizing: 'border-box', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
         }),
+        h('button', {
+          type: 'button',
+          onClick: () => loadRecentRecords(),
+          style: {
+            padding: '5px 10px',
+            borderRadius: 6,
+            border: '1px solid #cbd5e1',
+            background: '#f8fafc',
+            color: '#0f172a',
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          },
+        }, 'Làm mới'),
       ) : null,
       cfg.showVoucherActions !== false ? h(VoucherLifecycleBar, {
         targetCollection: activeCollection,

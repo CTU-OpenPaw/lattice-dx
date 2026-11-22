@@ -702,3 +702,124 @@ test('dxosBlocks:globalSearch finds own older records past 200 colleague rows an
   await actions.globalSearch(mgrCtx, async () => {});
   assert.deepEqual(mgrCtx.body.items.map((i) => i.code), ['REQ-OLD-245']);
 });
+
+test('DxosRecordWorkbenchBlockModel, RecordChatterView, and VoucherLifecycleBar wrap cleanly on 390px mobile and use consistent Vietnamese labels', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { createRecordChatterView, createVoucherLifecycleBar } = require(path.join(PLUGIN_ROOT, 'src/client/chatter-panel.js'));
+
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useCallback: (fn) => fn,
+  };
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const resolveTree = (node) => {
+    if (!node || typeof node !== 'object') return node;
+    if (typeof node.type === 'function') return resolveTree(node.type(node.props));
+    return {
+      ...node,
+      children: Array.isArray(node.children) ? node.children.flat(Infinity).map(resolveTree) : node.children,
+    };
+  };
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: false }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    {},
+  );
+  const workbenchInst = new models.DxosRecordWorkbenchBlockModel({
+    props: { collection: 'latticeRequests', recordId: '7', showExport: true, showVoucherActions: true, showChatter: true },
+  });
+  const workbenchEl = workbenchInst.renderComponent();
+  const workbenchDump = JSON.stringify(resolveTree(workbenchEl.type(workbenchEl.props)));
+
+  assert.ok(workbenchDump.includes('"flexWrap":"wrap"'));
+  assert.ok(workbenchDump.includes('repeat(auto-fit, minmax(135px, 1fr))'));
+  for (const label of ['Lọc', 'Làm mới', 'Trình duyệt', 'Hủy chứng từ', 'Lập bản điều chỉnh']) {
+    assert.ok(workbenchDump.includes(label), `Missing Vietnamese label: ${label}`);
+  }
+
+  // Verify VoucherLifecycleBar shows 'Chuỗi phiên bản' when lineage > 1 and uses 'Lập bản điều chỉnh'
+  const voucherReact = {
+    ...React,
+    useState: (init) => {
+      const v = typeof init === 'function' ? init() : init;
+      if (v && typeof v === 'object' && Array.isArray(v.lineage)) {
+        return [{
+          status: 'cancelled',
+          version: 2,
+          amendmentNo: 1,
+          amendedFromId: 3,
+          lineage: [
+            { id: 3, code: 'REQ-3', status: 'cancelled' },
+            { id: 7, code: 'REQ-7', status: 'draft' },
+          ],
+        }, () => {}];
+      }
+      return [v, () => {}];
+    },
+  };
+  const Bar = createVoucherLifecycleBar({ useAPIClient: () => null }, voucherReact, {});
+  const barDump = JSON.stringify(Bar({ targetCollection: 'latticeRequests', targetRecordId: 7 }));
+  assert.ok(barDump.includes('Chuỗi phiên bản'));
+  assert.ok(barDump.includes('Lập bản điều chỉnh'));
+  assert.ok(barDump.includes('repeat(auto-fit, minmax(135px, 1fr))'));
+
+  // Verify RecordChatterView filter ('Lọc') and refresh ('Làm mới') and mobile form flexWrap
+  const chatterCalls = [];
+  const chatterReact = {
+    ...React,
+    useState: (init) => {
+      const v = typeof init === 'function' ? init() : init;
+      if (Array.isArray(v)) {
+        return [[
+          { id: 1, entryType: 'comment', authorName: 'an', body: 'Bình luận test', createdAt: '2026-11-22T07:00:00Z' },
+          { id: 2, entryType: 'field_diff', authorName: 'an', body: 'Đổi trường', diffJson: [{ field: 'status', before: 'draft', after: 'submitted' }], createdAt: '2026-11-22T07:05:00Z' },
+        ], () => {}];
+      }
+      if (v === 'all') return ['field_diff', () => {}];
+      return [v, () => {}];
+    },
+  };
+  const Chatter = createRecordChatterView({
+    useAPIClient: () => ({
+      request: async (req) => {
+        chatterCalls.push(req);
+        return { data: { data: { items: [] } } };
+      },
+    }),
+  }, chatterReact, {});
+  const chatterTree = Chatter({ targetCollection: 'latticeRequests', targetRecordId: 7 });
+  const chatterDump = JSON.stringify(chatterTree);
+  assert.ok(chatterDump.includes('Lọc'));
+  assert.ok(chatterDump.includes('Làm mới'));
+  assert.equal(chatterDump.includes('Bình luận test'), false, 'entryType filter should filter out comments when set to field_diff');
+  assert.ok(chatterDump.includes('Đổi trường'));
+  const collect = (n, out = []) => {
+    if (!n || typeof n !== 'object') return out;
+    out.push(n);
+    if (Array.isArray(n.children)) n.children.flat(Infinity).forEach((c) => collect(c, out));
+    return out;
+  };
+  const refreshBtn = collect(chatterTree).find((n) => n.type === 'button' && JSON.stringify(n.children).includes('Làm mới'));
+  assert.ok(refreshBtn);
+  await refreshBtn.props.onClick();
+  assert.ok(chatterCalls.some((c) => c.url === 'latticeChatter:list'));
+});

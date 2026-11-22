@@ -317,3 +317,179 @@ test('alarm-engine uses crypto.randomBytes instead of Math.random for alarm code
   assert.equal(src.includes('Math.random'), false);
   assert.ok(src.includes('randomBytes'));
 });
+
+test('high/critical alarms emit org-scoped, 30m-deduped latticeNotifications and tolerate missing/failing notifications repo', async () => {
+  const {
+    computeAlarmFingerprint,
+    ingestOrDeduplicateAlarm,
+    notifyOrgOperatorsOnAlarm,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'));
+
+  assert.equal(typeof notifyOrgOperatorsOnAlarm, 'function');
+
+  // Ensure zero cross-plugin filesystem require in alarm-engine.js
+  const engineSrc = readFileSync(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'), 'utf8');
+  assert.equal(/require\([^)]*plugin-lattice-foundation/.test(engineSrc), false);
+  assert.equal(/require\(['"]\.\.\//.test(engineSrc), false);
+
+  let incidentSeq = 200;
+  let notifSeq = 1;
+  const incidents = [];
+  const notifications = [];
+  const employees = [
+    { id: 11, userId: 101, organizationId: 'org-a', active: true },
+    { id: 12, userId: 102, organizationId: 'org-a', active: true },
+    { id: 13, userId: 103, organizationId: 'org-a', active: false },
+    { id: 21, userId: 201, organizationId: 'org-b', active: true },
+  ];
+
+  const matchFilter = (row, filter = {}) => Object.entries(filter).every(([k, cond]) => {
+    if (cond && typeof cond === 'object' && !Array.isArray(cond)) {
+      if (Array.isArray(cond.$in)) return cond.$in.includes(row[k]);
+      if (cond.$gt !== undefined) {
+        const rowTs = row[k] instanceof Date ? row[k].getTime() : Date.parse(String(row[k]));
+        const cmpTs = cond.$gt instanceof Date ? cond.$gt.getTime() : Date.parse(String(cond.$gt));
+        return Number.isFinite(rowTs) && Number.isFinite(cmpTs) ? rowTs > cmpTs : row[k] > cond.$gt;
+      }
+    }
+    return row[k] === cond;
+  });
+
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return { find: async ({ filter = {} } = {}) => employees.filter((e) => matchFilter(e, filter)) };
+      }
+      if (name === 'latticeIncidentCases') {
+        return {
+          find: async ({ filter = {} } = {}) => incidents.filter((r) => matchFilter(r, filter)),
+          findOne: async ({ filter = {}, filterByTk } = {}) => {
+            if (filterByTk != null) return incidents.find((r) => Number(r.id) === Number(filterByTk)) || null;
+            return incidents.find((r) => matchFilter(r, filter)) || null;
+          },
+          create: async ({ values }) => {
+            const row = { id: ++incidentSeq, ...values, update: async (patch) => Object.assign(row, patch) };
+            incidents.push(row);
+            return row;
+          },
+        };
+      }
+      if (name === 'latticeNotifications') {
+        return {
+          find: async ({ filter = {} } = {}) => notifications.filter((r) => matchFilter(r, filter)),
+          create: async ({ values }) => {
+            const row = { id: notifSeq++, createdAt: new Date(), ...values };
+            notifications.push(row);
+            return row;
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  // 1. Medium severity must NOT emit notifications
+  const medAlarm = await ingestOrDeduplicateAlarm(db, {
+    organizationId: 'org-a',
+    assetId: 12,
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    ruleCode: 'TEMP-DRIFT',
+    attribute: 'temperature',
+    severity: 'medium',
+    summary: 'Nhiệt độ tăng nhẹ',
+  });
+  assert.equal(notifications.length, 0);
+
+  // 2. Escalation from medium -> high MUST emit notifications ONLY to active org-a operators
+  const escAlarm = await ingestOrDeduplicateAlarm(db, {
+    organizationId: 'org-a',
+    assetId: 12,
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    ruleCode: 'TEMP-DRIFT',
+    attribute: 'temperature',
+    severity: 'high',
+    summary: 'Nhiệt độ vượt ngưỡng cao',
+  });
+  assert.equal(escAlarm.id, medAlarm.id);
+  assert.equal(escAlarm.severity, 'high');
+  assert.equal(notifications.length, 2);
+
+  const expectedFp = computeAlarmFingerprint({
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    ruleCode: 'TEMP-DRIFT',
+    attribute: 'temperature',
+  });
+  assert.deepEqual(notifications.map((n) => n.recipientUserId).sort(), [101, 102]);
+  assert.deepEqual(notifications.map((n) => n.recipientEmployeeId).sort(), [11, 12]);
+  for (const n of notifications) {
+    assert.equal(n.organizationId, 'org-a');
+    assert.equal(n.category, 'alarm');
+    assert.equal(n.severity, 'high');
+    assert.ok(n.title && n.title.length > 0);
+    assert.ok(n.body && n.body.length > 0);
+    assert.equal(n.targetCollection, 'latticeIncidentCases');
+    assert.equal(n.targetRecordId, escAlarm.id);
+    assert.equal(n.targetPath, '/p/incidents');
+    assert.equal(n.dedupKey, `alarm:${expectedFp}`);
+  }
+
+  // 3. Escalation to critical within 30m MUST deduplicate per (organizationId, recipientUserId, dedupKey)
+  await ingestOrDeduplicateAlarm(db, {
+    organizationId: 'org-a',
+    assetId: 12,
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    ruleCode: 'TEMP-DRIFT',
+    attribute: 'temperature',
+    severity: 'critical',
+    summary: 'Nhiệt độ quá giới hạn',
+  });
+  assert.equal(notifications.length, 2);
+
+  // 4. After 30m window expires, notifyOrgOperatorsOnAlarm emits fresh rows
+  for (const n of notifications) {
+    n.createdAt = new Date(Date.now() - 31 * 60 * 1000);
+  }
+  await notifyOrgOperatorsOnAlarm(db, incidents[0]);
+  assert.equal(notifications.length, 4);
+
+  // 5. New critical alarm for org-b notifies ONLY org-b active operators
+  const orgBAlarm = await ingestOrDeduplicateAlarm(db, {
+    organizationId: 'org-b',
+    assetId: 99,
+    assetEntityId: 'urn:ngsi-ld:Asset:org-b:native:99',
+    ruleCode: 'POWER-LOSS',
+    attribute: 'voltage',
+    severity: 'critical',
+    summary: 'Mất nguồn kho B',
+  });
+  const orgBNotifs = notifications.filter((n) => n.organizationId === 'org-b');
+  assert.equal(orgBNotifs.length, 1);
+  assert.equal(orgBNotifs[0].recipientUserId, 201);
+  assert.equal(orgBNotifs[0].targetRecordId, orgBAlarm.id);
+  assert.equal(orgBNotifs[0].severity, 'critical');
+
+  // 6. Non-fatal when latticeNotifications repo throws (e.g. table does not exist yet)
+  const failingDb = {
+    getRepository(name) {
+      if (name === 'latticeNotifications') {
+        return {
+          find: async () => { throw new Error('relation "latticeNotifications" does not exist'); },
+          create: async () => { throw new Error('relation "latticeNotifications" does not exist'); },
+        };
+      }
+      return db.getRepository(name);
+    },
+  };
+  const safeAlarm = await ingestOrDeduplicateAlarm(failingDb, {
+    organizationId: 'org-a',
+    assetId: 12,
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    ruleCode: 'DOOR-OPEN',
+    attribute: 'doorState',
+    severity: 'critical',
+    summary: 'Cửa kho mở quá lâu',
+  });
+  assert.equal(safeAlarm.severity, 'critical');
+  assert.equal(safeAlarm.deduplicated, false);
+});

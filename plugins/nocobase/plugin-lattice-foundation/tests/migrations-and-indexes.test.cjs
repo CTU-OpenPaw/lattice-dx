@@ -46,7 +46,7 @@ test('all plugin migrations have unique timestamps and implement both up() and d
       assert.match(content, /\bdown\s*\(/, `Migration missing reversible down(): ${dir.name}/${file}`);
     }
   }
-  assert.ok(totalMigrations >= 19, `Expected >= 19 plugin migrations (15 existing + 4 Wave 3), found ${totalMigrations}`);
+  assert.ok(totalMigrations >= 27, `Expected >= 27 plugin migrations (26 existing + T2.1 notifications/sla), found ${totalMigrations}`);
 });
 
 test('tenant-scoped collections replace global code unique with composite (organizationId, code) and declare >=45 composite indexes', () => {
@@ -115,4 +115,42 @@ test('tenant-scoped collections replace global code unique with composite (organ
     assert.ok(chatterSrc.includes(idxName), `record-chatter.js missing explicit index name ${idxName}`);
     assert.ok(idxName.length <= 55);
   }
+
+  const notifSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-lattice-foundation/src/server/collections/notifications.js'), 'utf8');
+  for (const idxName of ['idx_lattice_notif_org_user_read', 'idx_lattice_notif_org_dedup']) {
+    assert.ok(notifSrc.includes(idxName), `notifications.js missing explicit index name ${idxName}`);
+    assert.match(idxName, /^u?idx_lattice_[a-z0-9_]+$/);
+    assert.ok(idxName.length <= 55);
+    assert.equal(seenIndexNames.has(idxName), false);
+    seenIndexNames.add(idxName);
+  }
+
+  const slaSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-lattice-foundation/src/server/collections/sla-policies.js'), 'utf8');
+  for (const idxName of ['uidx_lattice_sla_org_col_prio']) {
+    assert.ok(slaSrc.includes(idxName), `sla-policies.js missing explicit index name ${idxName}`);
+    assert.match(idxName, /^u?idx_lattice_[a-z0-9_]+$/);
+    assert.ok(idxName.length <= 55);
+    assert.equal(seenIndexNames.has(idxName), false);
+    seenIndexNames.add(idxName);
+  }
+});
+
+test('migration 20261123000200 creates and drops latticeNotifications, latticeSlaPolicies, and latticeServiceTickets voucher columns reversibly', () => {
+  const migSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-lattice-foundation/src/server/migrations/20261123000200-notifications-and-sla.js'), 'utf8');
+  assert.match(migSrc, /CREATE TABLE IF NOT EXISTS "latticeNotifications"/);
+  assert.match(migSrc, /CREATE TABLE IF NOT EXISTS "latticeSlaPolicies"/);
+  assert.match(migSrc, /idx_lattice_notif_org_user_read/);
+  assert.match(migSrc, /idx_lattice_notif_org_dedup/);
+  assert.match(migSrc, /uidx_lattice_sla_org_col_prio/);
+  assert.match(migSrc, /DROP TABLE IF EXISTS "latticeSlaPolicies"/);
+  assert.match(migSrc, /DROP TABLE IF EXISTS "latticeNotifications"/);
+
+  // Idempotent voucher lifecycle columns & index for latticeServiceTickets on Postgres
+  assert.match(migSrc, /to_regclass\('"latticeServiceTickets"'\)\s+IS NOT NULL/);
+  for (const col of ['submittedAt', 'submittedBy', 'cancelledAt', 'cancelledBy', 'cancelReason', 'amendedFromId', 'amendmentNo']) {
+    assert.match(migSrc, new RegExp(`ALTER TABLE "latticeServiceTickets" ADD COLUMN IF NOT EXISTS "${col}"`));
+    assert.match(migSrc, new RegExp(`ALTER TABLE IF EXISTS "latticeServiceTickets" DROP COLUMN IF EXISTS "${col}"`));
+  }
+  assert.match(migSrc, /CREATE INDEX IF NOT EXISTS idx_lattice_tickets_org_amended ON "latticeServiceTickets" \("organizationId", "amendedFromId"\)/);
+  assert.match(migSrc, /DROP INDEX IF EXISTS idx_lattice_tickets_org_amended/);
 });

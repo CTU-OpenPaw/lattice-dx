@@ -10,8 +10,9 @@
 
 const { resolveNativeActor } = require('./native-scope');
 const { recordChatterEntry } = require('./record-chatter');
+const { dispatchNotification, dispatchRoleNotifications, resolveNotificationTargetPath } = require('./notification-center');
 
-const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders']);
+const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
 const IMMUTABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'completed', 'cancelled']);
 const CANCELLABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'in_progress']);
 const PROTECTED_VOUCHER_FIELDS = new Set([
@@ -57,7 +58,7 @@ function buildAmendedCode(originalCode, amendmentNo) {
 
 function assertValidVoucherTarget(collection, id) {
   if (!VOUCHER_COLLECTIONS.has(collection)) {
-    throw failVoucher('VOUCHER_COLLECTION_INVALID', 400, 'Chỉ hỗ trợ chứng từ latticeRequests và latticeOrders.');
+    throw failVoucher('VOUCHER_COLLECTION_INVALID', 400, 'Chỉ hỗ trợ chứng từ latticeRequests, latticeOrders và latticeServiceTickets.');
   }
   const numId = Number(id);
   if (!Number.isInteger(numId) || numId <= 0) {
@@ -146,6 +147,36 @@ async function safeLogLifecycle(db, { organizationId, collection, recordId, body
   } catch {}
 }
 
+async function safeNotifyRequester(db, { organizationId, collection, recordId, requesterId, title, body, severity = 'info', dedupKey }) {
+  if (requesterId == null) return;
+  try {
+    const empRepo = db?.getRepository?.('latticeEmployees');
+    if (!empRepo) return;
+    let emp = null;
+    if (typeof empRepo.findOne === 'function') {
+      emp = await empRepo.findOne({ filter: { id: Number(requesterId), organizationId, active: true } });
+    } else if (typeof empRepo.find === 'function') {
+      const list = (await empRepo.find({ filter: { id: Number(requesterId), organizationId, active: true }, limit: 1 })) || [];
+      emp = list[0] || null;
+    }
+    const uid = val(emp, 'userId');
+    if (uid == null || !/^[1-9]\d*$/.test(String(uid))) return;
+    await dispatchNotification(db, {
+      organizationId,
+      recipientUserId: Number(uid),
+      recipientEmployeeId: Number(requesterId),
+      category: 'voucher',
+      severity,
+      title,
+      body,
+      targetCollection: collection,
+      targetRecordId: recordId,
+      targetPath: resolveNotificationTargetPath(collection),
+      dedupKey,
+    });
+  } catch {}
+}
+
 async function submitVoucher(db, { collection, id, organizationId, actor, expectedVersion = null }) {
   const recordId = assertValidVoucherTarget(collection, id);
   const expVer = parseOptionalVersion(expectedVersion);
@@ -175,6 +206,20 @@ async function submitVoucher(db, { collection, id, organizationId, actor, expect
     body: `Trình duyệt chứng từ ${updated.code || recordId} (draft -> submitted)`,
     actor,
   });
+  try {
+    await dispatchRoleNotifications(db, {
+      organizationId,
+      roleNames: ['ldx_manager', 'ldx_admin'],
+      category: 'voucher',
+      severity: 'info',
+      title: `Chứng từ ${updated.code || recordId} chờ duyệt`,
+      body: `${actor?.username || 'Nhân viên'} đã trình duyệt ${collection} ${updated.code || `#${recordId}`}.`,
+      targetCollection: collection,
+      targetRecordId: recordId,
+      targetPath: resolveNotificationTargetPath(collection),
+      dedupKey: `voucher:${collection}:${recordId}:submit:v${updated.version || 1}`,
+    });
+  } catch {}
   return updated;
 }
 
@@ -211,6 +256,16 @@ async function cancelVoucher(db, { collection, id, organizationId, actor, cancel
     recordId,
     body: `Hủy chứng từ ${updated.code || recordId}: ${reason}`,
     actor,
+  });
+  await safeNotifyRequester(db, {
+    organizationId,
+    collection,
+    recordId,
+    requesterId: updated.requesterId,
+    severity: 'warning',
+    title: `Chứng từ ${updated.code || recordId} đã hủy`,
+    body: `Lý do hủy: ${reason}`,
+    dedupKey: `voucher:${collection}:${recordId}:cancel:v${updated.version || 1}`,
   });
   return updated;
 }
@@ -271,6 +326,16 @@ async function amendVoucher(db, { collection, id, organizationId, actor, patch =
     recordId: created.amended.id,
     body: `Khởi tạo bản điều chỉnh #${created.amended.amendmentNo} từ ${created.source.code} (ID ${recordId})`,
     actor,
+  });
+  await safeNotifyRequester(db, {
+    organizationId,
+    collection,
+    recordId: created.amended.id,
+    requesterId: created.source.requesterId ?? created.amended.requesterId,
+    severity: 'info',
+    title: `Đã lập bản điều chỉnh ${created.amended.code}`,
+    body: `Khởi tạo lần #${created.amended.amendmentNo} từ chứng từ ${created.source.code || `#${recordId}`}.`,
+    dedupKey: `voucher:${collection}:${created.amended.id}:amend`,
   });
   return created.amended;
 }

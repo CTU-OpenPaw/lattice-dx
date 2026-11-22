@@ -13,8 +13,9 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const path = require('node:path');
 
-function makeChatterDbHarness() {
+function makeChatterDbHarness({ withNotifications = true } = {}) {
   let seq = 0;
+  let notifSeq = 0;
   const employees = [
     { id: 10, userId: 101, organizationId: 'org-a', active: true, code: 'EMP-A1', name: 'Nguyen An', email: 'an@orga.example' },
     { id: 11, userId: 102, organizationId: 'org-a', active: true, code: 'EMP-A2', name: 'Tran Binh', email: 'binh@orga.example' },
@@ -26,6 +27,7 @@ function makeChatterDbHarness() {
     { id: 9, organizationId: 'org-b', code: 'REQ-B9', name: 'Mua xe', status: 'draft', description: 'Org B secret', version: 1 },
   ];
   const chatter = [];
+  const notifications = [];
   const match = (row, filter = {}) => Object.entries(filter).every(([k, cond]) => {
     if (k === '$and' && Array.isArray(cond)) return cond.every((sub) => match(row, sub));
     if (cond && typeof cond === 'object' && Array.isArray(cond.$in)) return cond.$in.includes(row[k]);
@@ -75,13 +77,23 @@ function makeChatterDbHarness() {
           },
         };
       }
+      if (name === 'latticeNotifications' && withNotifications) {
+        return {
+          find: async ({ filter, limit = 50 }) => notifications.filter((n) => match(n, filter)).slice(0, limit),
+          create: async ({ values }) => {
+            const row = { id: ++notifSeq, createdAt: new Date().toISOString(), ...values };
+            notifications.push(row);
+            return row;
+          },
+        };
+      }
       return null;
     },
   };
-  return { db, chatter, requests };
+  return { db, chatter, requests, notifications };
 }
 
-test('extractMentionTokens parses clean handles and resolveOrganizationMentions isolates same-org active employees', async () => {
+test('extractMentionTokens parses clean handles and resolveOrganizationMentions isolates same-org active employees with userId', async () => {
   const { extractMentionTokens, resolveOrganizationMentions } = require('../src/server/record-chatter');
   const tokens = extractMentionTokens('Xin @EMP-A2 và @an xem giúp (không tính mail@foreign.com, giữ @emp-a2 và @EMP-B1)');
   assert.deepEqual(tokens, ['emp-a2', 'an', 'emp-b1']);
@@ -90,6 +102,7 @@ test('extractMentionTokens parses clean handles and resolveOrganizationMentions 
   const resolved = await resolveOrganizationMentions(db, 'org-a', tokens);
   assert.equal(resolved.length, 2);
   assert.deepEqual(resolved.map((m) => m.code).sort(), ['EMP-A1', 'EMP-A2']);
+  assert.deepEqual(resolved.map((m) => m.userId).sort((a, b) => a - b), [101, 102]);
   assert.equal(resolved.some((m) => m.code === 'EMP-B1' || m.code === 'EMP-INACTIVE'), false);
 });
 
@@ -142,12 +155,41 @@ test('latticeChatter actions enforce collection allowlist, body bounds, and cros
     (err) => err.status === 404,
   );
 
-  // Same-org comment succeeds & only resolves same-org @mention
+  // Same-org comment succeeds & only resolves same-org @mention and dispatches mention notification
+  const { db: dbWithNotif, notifications } = makeChatterDbHarness({ withNotifications: true });
+  let notifActions;
+  registerChatterResource({
+    db: dbWithNotif,
+    resourceManager: { define: (def) => { notifActions = def.actions; } },
+    acl: { allow: () => {} },
+  });
   const okPost = empCtx({ values: { targetCollection: 'latticeRequests', targetRecordId: 5, body: 'Nhờ @EMP-A2 và @EMP-B1 kiểm tra nhé' } });
   await actions.post(okPost, async () => {});
   assert.equal(okPost.body.entryType, 'comment');
   assert.equal(okPost.body.organizationId, 'org-a');
   assert.deepEqual(okPost.body.mentionsJson.map((m) => m.code), ['EMP-A2']);
+  assert.equal(okPost.body.mentionsJson[0].userId, 102);
+
+  await notifActions.post(empCtx({ values: { targetCollection: 'latticeRequests', targetRecordId: 5, body: 'Ping @EMP-A2 kiểm tra' } }), async () => {});
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].organizationId, 'org-a');
+  assert.equal(notifications[0].recipientUserId, 102);
+  assert.equal(notifications[0].category, 'mention');
+  assert.equal(notifications[0].targetCollection, 'latticeRequests');
+  assert.equal(notifications[0].targetRecordId, 5);
+  assert.ok(notifications[0].targetPath);
+
+  // Non-fatal when latticeNotifications repo is absent in older mocks
+  const { db: dbNoNotif } = makeChatterDbHarness({ withNotifications: false });
+  let oldActions;
+  registerChatterResource({
+    db: dbNoNotif,
+    resourceManager: { define: (def) => { oldActions = def.actions; } },
+    acl: { allow: () => {} },
+  });
+  const fallbackPost = empCtx({ values: { targetCollection: 'latticeRequests', targetRecordId: 5, body: 'Test @EMP-A2 no notif repo' } });
+  await oldActions.post(fallbackPost, async () => {});
+  assert.equal(fallbackPost.body.entryType, 'comment');
 
   const okList = empCtx({ targetCollection: 'latticeRequests', targetRecordId: 5 }, 'GET');
   await actions.list(okList, async () => {});
