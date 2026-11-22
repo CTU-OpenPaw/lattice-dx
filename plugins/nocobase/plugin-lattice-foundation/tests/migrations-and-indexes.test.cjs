@@ -109,4 +109,10 @@ test('tenant-scoped collections replace global code unique with composite (organ
     assert.ok(outboxSrc.includes(idxName), `context-outbox.js missing explicit index name ${idxName}`);
     assert.ok(idxName.length <= 55);
   }
+
+  const chatterSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-lattice-foundation/src/server/collections/record-chatter.js'), 'utf8');
+  for (const idxName of ['idx_lattice_chatter_org_target', 'idx_lattice_chatter_org_type', 'idx_lattice_chatter_org_author']) {
+    assert.ok(chatterSrc.includes(idxName), `record-chatter.js missing explicit index name ${idxName}`);
+    assert.ok(idxName.length <= 55);
+  }
 });

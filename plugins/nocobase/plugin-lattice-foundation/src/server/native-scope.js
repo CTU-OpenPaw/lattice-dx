@@ -113,9 +113,12 @@ async function updateScopedDocument(db,ctx,actor) {
   const params=ctx.action.params,id=params.filterByTk;
   if(!/^[1-9]\d*$/.test(String(id)))throw failure('NATIVE_DOCUMENT_ID_REQUIRED',400);
   const expectedVersion = ctx.state?.latticeExpectedVersion ?? extractExpectedVersion(ctx, params);
+  let beforeSnapshot = null;
+  let updatedSnapshot = null;
   await db.sequelize.transaction(async transaction=>{
     const row=await db.getModel(ctx.action.resourceName).findOne({where:{id,organizationId:actor.organizationId},transaction,lock:transaction.LOCK.UPDATE});
     if(!row)throw failure('NATIVE_DOCUMENT_NOT_FOUND',404);
+    beforeSnapshot = typeof row.toJSON === 'function' ? row.toJSON() : { ...row };
     const currentVersion = Number(value(row, 'version')) || 1;
     if (expectedVersion !== null && currentVersion !== expectedVersion) {
       throw failure('VERSION_CONFLICT', 409, 'Bản ghi đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
@@ -127,8 +130,26 @@ async function updateScopedDocument(db,ctx,actor) {
     // Keep the post-ACL filter and field guards; repository hooks still run.
     ctx.body=await db.getRepository(ctx.action.resourceName).update({filterByTk:id,filter:params.filter,values:nextValues,whitelist:nextWhitelist,blacklist:params.blacklist,transaction,context:ctx});
     if(Array.isArray(ctx.body)&&!ctx.body.length)throw failure('NATIVE_DOCUMENT_UPDATE_DENIED',403);
+    const updatedRow = Array.isArray(ctx.body) ? ctx.body[0] : ctx.body;
+    updatedSnapshot = typeof updatedRow?.toJSON === 'function' ? updatedRow.toJSON() : { ...beforeSnapshot, ...nextValues };
     ctx.status=200;
   });
+  if (beforeSnapshot && updatedSnapshot) {
+    try {
+      const { recordFieldDiffChatter } = require('./record-chatter');
+      await recordFieldDiffChatter(db, {
+        organizationId: actor.organizationId,
+        targetCollection: ctx.action.resourceName,
+        targetRecordId: Number(id),
+        before: beforeSnapshot,
+        after: updatedSnapshot,
+        actor: {
+          ...actor,
+          username: value(ctx.state?.currentUser, 'username') || (actor.employeeId ? `employee-${actor.employeeId}` : 'operator'),
+        },
+      });
+    } catch {}
+  }
 }
 const directoryReferenceErrors = new Map([
   ['lattice_assets_department_org', 'Phòng ban phải thuộc cùng tổ chức với tài sản.'],
