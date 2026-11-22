@@ -476,9 +476,17 @@ async function restorePageSnapshot(db, { portalSlug, pageTitle = '', snapshotUid
   await ensureUiSnapshotsReady(db);
   const snapRepo = db?.getRepository?.('latticeUiSnapshots');
   if (!snapRepo) return { rolledBack: false, reason: 'latticeUiSnapshots repository unavailable' };
-  const targetSnap = snapshotUid
-    ? await snapRepo.findOne({ filter: { snapshotUid } })
-    : (await snapRepo.find({ filter: { portalSlug }, sort: ['-id'], limit: 1 }))?.[0] || null;
+  let targetSnap = null;
+  if (snapshotUid) {
+    targetSnap = await snapRepo.findOne({ filter: { snapshotUid } });
+  } else {
+    if (pageTitle) {
+      targetSnap = (await snapRepo.find({ filter: { portalSlug, pageTitle }, sort: ['-id'], limit: 1 }))?.[0] || null;
+    }
+    if (!targetSnap) {
+      targetSnap = (await snapRepo.find({ filter: { portalSlug }, sort: ['-id'], limit: 1 }))?.[0] || null;
+    }
+  }
   if (!targetSnap) return { rolledBack: false, reason: `Không tìm thấy snapshot cho portal "${portalSlug}".` };
 
   const snapPageTitle = pageTitle || val(targetSnap, 'pageTitle') || '';
@@ -822,28 +830,48 @@ function createSurfaceAndCreativeTools(deps) {
           ctx?.app?.dataSourceManager?.dataSources?.get?.('main')?.acl?.getRole?.(args.roleName)?.writeToACL?.({ resourceName: args.collectionName, usingActionsConfig: true, actions: actionsSpec });
         }
 
-        // 2. Grant Portal visibility + compose new Page + attach Creative Block + propagate role
+        // 2. Grant Portal visibility + compose new Page (idempotent) + attach Creative Block + propagate role
+        const layoutUid = `ldx-portal-${args.portalSlug}`;
+        const portalSet = await collectPortalRouteSet(db, args.portalSlug);
+        const existingPortalRoutes = resolvePortalRoutes(portalSet.routes, portalSet.links, layoutUid, val);
+        const existingRouteIds = existingPortalRoutes.map((r) => val(r, 'id')).filter((id) => id != null);
+
         if (hasRes(ctx, 'latticePortals')) {
           const portalsRepo = db?.getRepository?.('uiLayouts');
-          const curPortal = portalsRepo ? await portalsRepo.findOne({ filter: { uid: `ldx-portal-${args.portalSlug}` } }) : null;
+          const curPortal = portalsRepo ? await portalsRepo.findOne({ filter: { uid: layoutUid } }) : null;
+          const rolesRoutesRepo = db?.getRepository?.('rolesDesktopRoutes');
+          let existingRoles = [];
+          if (rolesRoutesRepo && existingRouteIds.length) {
+            const grants = (await rolesRoutesRepo.find({ filter: { desktopRouteId: { $in: existingRouteIds } }, limit: 400 })) || [];
+            existingRoles = grants.map((g) => val(g, 'roleName')).filter((r) => LDX_ROLE_RE.test(r));
+          }
+          const mergedRoles = [...new Set([...existingRoles, args.roleName])];
           await invokeResourceAction(ctx, 'latticePortals', 'save', {
             values: {
+              ...(curPortal ? { uid: layoutUid } : {}),
               slug: args.portalSlug,
               title: val(curPortal, 'title') || `Portal ${args.portalSlug}`,
-              addRoles: [args.roleName],
+              layoutType: 'desktop',
+              enabled: true,
+              roles: mergedRoles,
             },
           });
         }
+        await propagatePortalRolesToRoutes(db, layoutUid, existingRouteIds, [args.roleName], val);
 
+        const targetPageTitleNorm = String(args.pageTitle || '').trim().toLowerCase();
+        const existingExactPage = existingPortalRoutes.some(
+          (r) => ['flowPage', 'page'].includes(val(r, 'type')) && String(val(r, 'title') || '').trim().toLowerCase() === targetPageTitleNorm,
+        );
         const tableFields = (fieldNames.length ? fieldNames : ['code', 'name', 'status']).slice(0, 7);
         const bp = {
           version: '1',
           mode: 'create',
-          navigation: { layoutUid: `ldx-portal-${args.portalSlug}`, group: { title: args.roleTitle || args.pageTitle, icon: 'SafetyCertificateOutlined' }, item: { title: args.pageTitle, icon: 'DashboardOutlined' } },
+          navigation: { layoutUid, group: { title: args.roleTitle || args.pageTitle, icon: 'SafetyCertificateOutlined' }, item: { title: args.pageTitle, icon: 'DashboardOutlined' } },
           page: { title: args.pageTitle, displayTitle: true, enableTabs: false },
           tabs: [{ title: args.pageTitle, blocks: [{ key: `role-tbl-${Date.now().toString(36)}`, type: 'table', title: `Dữ liệu · ${args.pageTitle}`, collection: args.collectionName, fields: tableFields, actions: ['filter', 'refresh'] }] }],
         };
-        if (hasRes(ctx, 'flowSurfaces')) {
+        if (hasRes(ctx, 'flowSurfaces') && !existingExactPage) {
           await invokeResourceAction(ctx, 'flowSurfaces', 'applyBlueprint', { values: bp });
         }
 

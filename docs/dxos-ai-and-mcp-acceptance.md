@@ -84,3 +84,23 @@ Mở rộng `@latticedx/plugin-dxos-ai` từ 8 tool lên **11 Unified Tools** (7
 - **Kiểm chứng Trực quan 2 Đại Use Cases trên `http://localhost:13014` (Full HD 1920x1080 · 30 fps · `190.0s`):**
   1. **Use Case 1 — Admin System Builder + Live `dxos-architect`:** Tạo bảng tùy biến `latticeCustomColdAudits`, dựng portal `/p/cold-qa` (`Hero` + `KPI` + `NativeTable` + `CreateForm`), trò chuyện live với `@dxos-architect` (`ag/gemini-3.8-flash`) gọi `dxos_inspect_architecture`, cập nhật trực tiếp Hero Block (`#1677ff` → `#0d9488`, `(v2 · Live Edited)`), khóa trường `auditVerdict` cho `ldx_employee`, mở quyền cho `ldx_manager`, dựng & bật workflow `Quy trình Kiểm định Kho lạnh Tự động` (`workflowId: 398974587568128`, tinh chỉnh node điều kiện `> -16°C`).
   2. **Use Case 2 — Nhân viên Cross-Dept Copilot & Thực thi RBAC Cấp trường:** Nhân viên (`ldx_employee`) vào `/p/cold-qa`, bấm `Allow use` chạy `dxos_orchestrate_enterprise_case`, điều phối tạo đồng bộ **3 phân hệ** `QA-COLD-001` (`latticeCustomColdAudits`) + `SRV-COLD-001` (`latticeServiceTickets`, `serviceType: "facilities"`) + `PARA-HO-001` (`latticeParaDocuments`, `status: "active"`), KPI tăng thực tế `0→1` / `0→1` / `4→5`; nhân viên cố ghi trường khóa `auditVerdict` bị chặn `RBAC_FIELD_LOCKED` (`status: "denied"`), Quản lý (`ldx_manager`) phê duyệt `CANH_BAO_BAO_TRI` hiển thị live trên bảng và toàn bộ vết được ghi rõ trong Tab 4 `Nhật ký Kiểm toán`.
+
+---
+
+## 6. Nâng cấp v3 — Creative Studio Block, Deep FlowSurfaces Architect & Live Visual Picker
+
+Nâng cấp kiến trúc DX-OS AI + Blocks theo **Phương án C (v3)** để `@dxos-architect` có thể tương tác, đề xuất, chỉnh sửa sâu giao diện NocoBase lẫn tự sáng tạo block mới trong khuôn khổ an toàn ngay trên trang đang mở:
+
+- **15 Unified Tools (11 Admin Builder + 4 Operational/Copilot):**
+  - Bổ sung 4 công cụ Kiến trúc sư v3 (chỉ `root`/`admin`): `dxos_recommend_page_blueprint`, `dxos_design_creative_block`, `dxos_snapshot_or_rollback_page` (sao lưu/hoàn tác bằng bảng `latticeUiSnapshots`), `dxos_provision_role_workspace` (1 lệnh tạo vai trò `ldx_*` + RBAC cấp trường + cập nhật Portal ACL + trang mới + `DxosCreativeStudioBlockModel` + trợ lý AI riêng không có quyền Admin).
+  - Mở rộng `dxos_compose_page_blocks` hỗ trợ chèn inline `addBlock` (cả block chuẩn NocoBase thông qua `flowSurfaces:addBlock` lẫn 7 DX-OS BlockModel), chia lưới đa cột `setGridLayout` (vd: `[12, 12]`), cấu hình sâu `configureNativeBlock` (trường, nút hành động, rule liên kết), tự chụp snapshot trước biến đổi và phát xung `bumpSurfaceRevision`.
+- **`DxosCreativeStudioBlockModel` (`@latticedx/plugin-dxos-blocks` v3):**
+  - Bộ khung **Zero-eval Creative DSL** an toàn (không `eval`, không HTML thô, lọc đường dẫn `isSafeAppPath`, giới hạn tối đa 6 query & 12 widget) hỗ trợ **5 theme tương phản cao** (`industrial-cockpit`, `emerald-ops`, `amber-alert`, `royal-indigo`, `clean-light`) và **7 widget composable** (`gauge`, `thermometer`, `stage-pipeline`, `distribution-bars`, `rule-callout`, `status-matrix`, `quick-actions`) lấy dữ liệu trực tiếp qua API chuẩn NocoBase theo đúng RBAC người xem.
+- **Visual Block Picker, Live Canvas Sync & Time-Machine Rollback:**
+  - `DxosPortalHeroBlockModel` gắn thanh `Studio Kiến trúc Sống` (chỉ Admin thấy) gồm `🎯 Chọn Block sửa với AI` (`dxosAi:inspectPageBlocks` trả `gridRows` tránh xung đột `responseTemplate` của NocoBase, click chip mở thẳng `@dxos-architect` kèm `Block UID` ngữ cảnh), `⏪ Hoàn tác trang` (`dxosAi:rollbackPageSnapshot` lọc theo `portalSlug` + `pageTitle`), và vòng đồng bộ `dxosAi:pageSurfaceState` tự hoãn reload khi hộp thoại AI (`[role="dialog"] .ant-sender-input`) đang mở.
+- **Nghiệm thu Live E2E & Video Chứng minh 5 Cảnh trên `http://localhost:13014` (`1920x1080` · `30 fps` · `110.4s`):**
+  1. Bấm `🎯 Chọn Block sửa với AI` chọn chip KPI trên `/p/cold-qa`, `@dxos-architect` (`9router` `ag/gemini-3.8-flash`) chạy `dxos_recommend_page_blueprint`.
+  2. Chat với `@dxos-architect` chạy `dxos_design_creative_block` sáng tạo block `Buồng Nhiệt độ Kho lạnh [AI Sáng tạo]` (`industrial-cockpit`, `-11.4 °C`, `CẢNH BÁO ĐỎ`) xếp 2 cột `[12, 12]` ngay cạnh khối KPI và tự hiện banner Live Sync.
+  3. 1 câu lệnh `dxos_provision_role_workspace` tạo `ldx_cold_inspector` + trang mới `Trạm Thanh tra Nhiệt độ` (theme `amber-alert`) + `@dxos-cold-inspector` (non-Admin).
+  4. Bấm `⏪ Hoàn tác trang` khôi phục sạch bố cục 1 cột từ `latticeUiSnapshots`.
+  5. AI Studio v3 hiển thị `@dxos-cold-inspector` trong `Nhân sự AI (6)` cùng toàn bộ vết kiểm toán `allowed` tại Tab 4 `Nhật ký Kiểm toán`.

@@ -211,13 +211,24 @@ test('canvas-architect-bridge restricts Admin bar to admins, formats target bloc
     async request(req) {
       calls.push(req);
       if (req.url === 'dxosAi:pageSurfaceState') return { data: { data: { revision: 4, blockCount: 5, lastMutatedUid: 'blk-x' } } };
-      if (req.url === 'dxosAi:inspectPageBlocks') return { data: { data: { blocks: [{ uid: 'blk-1', use: 'DxosKpiMetricBlockModel', props: { title: 'Updated' } }] } } };
+      if (req.url === 'dxosAi:inspectPageBlocks') {
+        return { data: { data: { gridRows: { dxos_row_0: [['blk-1']] }, blocks: [{ uid: 'blk-1', use: 'DxosKpiMetricBlockModel', props: { title: 'Updated' } }] } } };
+      }
       if (req.url === 'dxosAi:rollbackPageSnapshot') return { data: { data: { rolledBack: true, restoredCount: 4 } } };
       throw new Error(`Unexpected: ${req.url}`);
     },
   };
   assert.equal((await fetchPageSurfaceState(mockApi, { portalSlug: 'cold-qa' })).revision, 4);
-  assert.equal((await fetchInspectPageBlocks(mockApi, { portalSlug: 'cold-qa' })).blocks.length, 1);
+  const directInspect = await fetchInspectPageBlocks(mockApi, { portalSlug: 'cold-qa' });
+  assert.equal(directInspect.blocks.length, 1);
+  assert.ok(Boolean(directInspect.gridRows));
+  const wrappedInspect = await fetchInspectPageBlocks({
+    async request() {
+      return { data: { data: { dxos_row_0: [['blk-2']] }, meta: { blocks: [{ uid: 'blk-2', use: 'DxosPortalHeroBlockModel' }] } } };
+    },
+  }, { portalSlug: 'cold-qa' });
+  assert.equal(wrappedInspect.blocks[0].uid, 'blk-2');
+  assert.ok(Boolean(wrappedInspect.gridRows));
   assert.equal((await requestPageRollback(mockApi, { portalSlug: 'cold-qa' })).rolledBack, true);
   assert.equal(calls.length, 3);
 });

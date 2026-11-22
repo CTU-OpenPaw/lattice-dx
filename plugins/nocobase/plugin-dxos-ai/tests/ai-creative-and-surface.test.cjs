@@ -242,12 +242,34 @@ function makeV3Harness() {
       (n) => [n, { handler: flowSurfaceAction(n) }],
     ),
   );
+  const portalSaveCalls = [];
+  db.portalSaveCalls = portalSaveCalls;
+  const portalActions = new Map([
+    [
+      'save',
+      {
+        handler: async (ctx) => {
+          const vals = ctx.action?.params?.values || {};
+          const slugUid = `ldx-portal-${vals.slug}`;
+          const exists = uiLayouts.some((l) => l.uid === slugUid || l.routePath === `/p/${vals.slug}`);
+          if (exists && !vals.uid) {
+            throw new Error('Portal with this slug already exists.');
+          }
+          portalSaveCalls.push(vals);
+          if (!exists) {
+            uiLayouts.push({ uid: vals.uid || slugUid, title: vals.title, layoutType: vals.layoutType || 'desktop', routePath: `/p/${vals.slug}` });
+          }
+          ctx.body = { data: { uid: vals.uid || slugUid, slug: vals.slug, roles: vals.roles || [] } };
+        },
+      },
+    ],
+  ]);
 
   const app = {
     db,
     resourceManager: {
-      isDefined: (n) => n === 'flowSurfaces',
-      getResource: (n) => (n === 'flowSurfaces' ? { actions: fsActions } : null),
+      isDefined: (n) => n === 'flowSurfaces' || n === 'latticePortals',
+      getResource: (n) => (n === 'flowSurfaces' ? { actions: fsActions } : n === 'latticePortals' ? { actions: portalActions } : null),
     },
     acl: { getRole: () => null },
     dataSourceManager: { dataSources: new Map() },
@@ -360,6 +382,12 @@ test('dxos_design_creative_block & dxos_compose_page_blocks v3 attach inline nat
   await actions.pageSurfaceState(stateCtx, async () => {});
   assert.ok(stateCtx.body.revision >= 1);
 
+  const inspectCtx = { app: adminCtx.app, db, state: { ...adminCtx.state }, action: { params: { portalSlug: 'cold-qa' } } };
+  await actions.inspectPageBlocks(inspectCtx, async () => {});
+  assert.ok(Array.isArray(inspectCtx.body.blocks) && inspectCtx.body.blocks.length >= 2);
+  assert.ok(Boolean(inspectCtx.body.gridRows));
+  assert.equal('rows' in inspectCtx.body, false);
+
   await assert.rejects(
     () => actions.inspectPageBlocks({ db, state: { ...empCtx.state }, action: { params: { portalSlug: 'cold-qa' } } }, async () => {}),
     (err) => err.status === 403 && err.code === 'DXOS_ADMIN_REQUIRED',
@@ -396,6 +424,9 @@ test('dxos_provision_role_workspace builds new ldx_* role + RBAC + page + creati
 
   assert.equal(res.provisioned, true);
   assert.equal(res.roleName, 'ldx_cold_inspector');
+  assert.ok(db.portalSaveCalls.length >= 1);
+  assert.equal(db.portalSaveCalls[0].uid, 'ldx-portal-cold-qa');
+  assert.ok(db.portalSaveCalls[0].roles.includes('ldx_cold_inspector'));
   assert.ok(db.store.roles.some((r) => r.name === 'ldx_cold_inspector'));
   assert.ok(db.store.dataSourcesRolesResources.some((r) => r.roleName === 'ldx_cold_inspector' && r.name === 'latticeCustomColdAudits'));
   const aiProf = db.store.latticeAiProfiles.find((p) => p.username === 'dxos-cold-inspector');

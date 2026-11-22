@@ -398,7 +398,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         portalSlug,
         pageTitle: val(resolved.pageRoute, 'title') || null,
         gridUid: resolved.grid.uid,
-        rows: layout.rows || {},
+        gridRows: layout.rows || {},
         sizes: layout.sizes || {},
         blocks,
       };

@@ -139,7 +139,16 @@ function createBlockRenderers(client, React, antd, app) {
       let cancelled = false;
       let baseRev = null;
       let baseSignature = null;
+      let pendingGridReload = false;
       const poll = async () => {
+        const drawerOpen = typeof document !== 'undefined' && Boolean(
+          document.querySelector('.ant-drawer-open, [role="dialog"] .ant-sender-input'),
+        );
+        if (pendingGridReload && !drawerOpen && typeof window !== 'undefined' && window.location?.reload) {
+          pendingGridReload = false;
+          window.location.reload();
+          return;
+        }
         const st = await fetchPageSurfaceState(api, { portalSlug });
         if (cancelled || !st || typeof st.revision !== 'number') return;
         const sig = `${st.blockCount ?? 0}:${st.layoutSignature || ''}`;
@@ -161,9 +170,13 @@ function createBlockRenderers(client, React, antd, app) {
               }
             }
           }
-          if (sig !== baseSignature && typeof window !== 'undefined' && window.location?.reload) {
+          if (sig !== baseSignature) {
             baseSignature = sig;
-            setTimeout(() => { if (!cancelled) window.location.reload(); }, 650);
+            if (drawerOpen) {
+              pendingGridReload = true;
+            } else if (typeof window !== 'undefined' && window.location?.reload) {
+              setTimeout(() => { if (!cancelled) window.location.reload(); }, 650);
+            }
           }
         }
       };

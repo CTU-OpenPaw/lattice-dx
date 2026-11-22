@@ -30,7 +30,10 @@ async function fetchInspectPageBlocks(api, { portalSlug = '', pageTitle = '' } =
       method: 'get',
       params: { portalSlug, ...(pageTitle ? { pageTitle } : {}) },
     });
-    const data = res?.data?.data || res?.data || {};
+    const raw = res?.data || {};
+    const data = raw?.data && !Array.isArray(raw.data?.blocks) && Array.isArray(raw?.meta?.blocks)
+      ? { ...raw.meta, gridRows: raw.data }
+      : (raw?.data || raw);
     return { ...data, blocks: Array.isArray(data.blocks) ? data.blocks : [] };
   } catch {
     return { blocks: [] };
