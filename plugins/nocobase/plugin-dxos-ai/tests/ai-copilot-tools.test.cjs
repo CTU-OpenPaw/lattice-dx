@@ -297,3 +297,36 @@ test('fail-closed read & write RBAC blocks unpermitted collections and row-scope
   assert.equal(empOrders.items.some((i) => i.code === 'ORD-COLD-01'), true);
   assert.equal(empOrders.items.some((i) => i.code === 'ORD-PEER-SAMEORG'), false);
 });
+
+test('dxos_search_enterprise_context ranks diacritic-stripped Vietnamese queries via hybrid RRF with P.A.R.A. citations', async () => {
+  const { db, byName } = makeCopilotHarness();
+  db.store.latticeParaDocuments.push({
+    id: 99,
+    code: 'SOP-POWER-01',
+    title: 'Hướng dẫn xử lý mất điện kho lạnh',
+    organizationId: 'org-a',
+    paraSpace: 'resources',
+    summary: 'Khởi động máy phát điện trong 5 phút để giữ -18 độ C',
+  });
+  db.store.latticeParaDocuments.push({
+    id: 100,
+    code: 'SOP-FOREIGN-99',
+    title: 'Mất điện kho lạnh org B',
+    organizationId: 'org-b',
+    paraSpace: 'resources',
+    summary: 'Bị chặn khác tổ chức',
+  });
+
+  const empCtx = {
+    db,
+    state: { currentUser: { id: 9, username: 'emp9' }, currentRoles: ['ldx_employee'], currentRole: 'ldx_employee' },
+    app: { resourceManager: { getResource: () => null } },
+  };
+  const res = await byName.get('dxos_search_enterprise_context').invoke(empCtx, { query: 'mat dien kho lanh' });
+  assert.ok(res.count >= 1);
+  assert.equal(res.items[0].code, 'SOP-POWER-01');
+  assert.equal(res.items[0].citation, '[latticeParaDocuments:SOP-POWER-01#99]');
+  assert.equal(res.items[0].paraCitation, '[latticeParaDocuments:SOP-POWER-01#99 · resources]');
+  assert.ok(res.items[0].score > 0);
+  assert.equal(res.items.some((it) => it.code === 'SOP-FOREIGN-99'), false);
+});

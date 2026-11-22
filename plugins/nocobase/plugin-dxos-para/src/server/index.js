@@ -21,7 +21,7 @@ class DxosParaPlugin extends Plugin {
       name: 'latticePara',
       actions: createParaActions(this.db),
     });
-    this.app.acl.allow('latticePara', 'summary', 'loggedIn');
+    this.app.acl.allow('latticePara', ['summary', 'hybridSearch'], 'loggedIn');
   }
 }
 

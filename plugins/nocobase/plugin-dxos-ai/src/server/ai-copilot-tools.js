@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { rankHybridRecords } = require('./ai-hybrid-search');
+
 async function resolveSearchableTargets(db, requestedCollections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val) {
   const dynamicCustom = [];
   const colsRepo = db?.getRepository?.('collections');
@@ -166,32 +168,47 @@ function createCopilotTools(deps) {
         const candidates = await resolveSearchableTargets(db, args.collections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val);
         const { allowedCollections: targets, ownOnlySet } = await resolveReadablePolicies(db, actor, candidates);
         const limit = Math.max(1, Math.min(30, Number(args.limit) || 8));
-        const items = [];
-        const q = String(args.query || '').trim().toLowerCase();
+        const q = String(args.query || '').trim();
+        const pool = [];
         for (const colName of targets) {
           const repo = db?.getRepository?.(colName);
           if (!repo) continue;
-          const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: 25, sort: ['-id'] })) || [];
+          const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: q ? 60 : 25, sort: ['-id'] })) || [];
           const isOwnOnly = ownOnlySet.has(colName);
           for (const row of rows) {
             if (!isRowVisibleToActor(row, actor, isOwnOnly)) continue;
+            const id = val(row, 'id');
             const label = String(val(row, 'name') || val(row, 'title') || val(row, 'code') || '');
-            const code = String(val(row, 'code') || val(row, 'id') || '');
-            const hay = `${label} ${code} ${val(row, 'summary') || ''} ${val(row, 'batchCode') || ''}`.toLowerCase();
-            if (q && !hay.includes(q)) continue;
-            items.push({
+            const code = String(val(row, 'code') || id || '');
+            const summary = String(val(row, 'summary') || val(row, 'description') || val(row, 'contentMarkdown') || '');
+            const paraSpace = val(row, 'paraSpace') || null;
+            const item = {
               collection: colName,
-              id: val(row, 'id'),
+              id,
               code,
               title: label,
-              status: val(row, 'status') || val(row, 'paraSpace') || null,
-              citation: `[${colName}:${code}#${val(row, 'id')}]`,
+              status: val(row, 'status') || paraSpace || null,
+              ...(paraSpace ? { paraSpace, paraCitation: `[${colName}:${code}#${id} · ${paraSpace}]` } : {}),
+              citation: `[${colName}:${code}#${id}]`,
+            };
+            const rawSummary = [label, summary, val(row, 'tags') || '', val(row, 'batchCode') || ''].filter(Boolean).join(' · ');
+            pool.push({
+              item,
+              titleText: `${code} ${label}`,
+              hayText: `${label} ${code} ${summary} ${val(row, 'tags') || ''} ${val(row, 'batchCode') || ''} ${val(row, 'searchText') || ''}`,
+              rawSummary,
+              embedding: val(row, 'embeddingJson'),
             });
-            if (items.length >= limit) break;
           }
-          if (items.length >= limit) break;
         }
-        return { organizationId: actor.organizationId, searchedCollections: targets, count: items.length, items };
+        const items = rankHybridRecords(q, pool, { limit });
+        return {
+          organizationId: actor.organizationId,
+          searchedCollections: targets,
+          ...(q ? { engine: 'hybrid-rrf' } : {}),
+          count: items.length,
+          items,
+        };
       },
     }),
 

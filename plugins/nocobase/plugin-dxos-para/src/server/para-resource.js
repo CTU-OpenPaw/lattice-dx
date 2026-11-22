@@ -10,6 +10,7 @@
 
 const { PARA_SPACES } = require('./schema');
 const { resolveParaActor } = require('./para-scope');
+const { executeHybridSearch } = require('./para-hybrid-search');
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -66,6 +67,49 @@ function createParaActions(db) {
       const total = Object.values(spaces).reduce((acc, n) => acc + n, 0);
       ctx.body = { organizationId, organizations, spaces, total };
       await next();
+    },
+
+    hybridSearch: async (ctx, next) => {
+      if (!['GET', 'POST'].includes(ctx.method || 'GET')) ctx.throw(405);
+      const isRoot = ctx.state?.currentRole === 'root';
+      const p = ctx.action?.params || {};
+      const v = p.values && typeof p.values === 'object' && !Array.isArray(p.values) ? p.values : {};
+      const params = { ...p, ...v };
+
+      let organizationId = null;
+      if (isRoot) {
+        if (!val(ctx.state?.currentUser, 'id')) ctx.throw(401, 'Yêu cầu đăng nhập.');
+        const reqOrg = params.organizationId;
+        if (typeof reqOrg === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(reqOrg.trim())) {
+          organizationId = reqOrg.trim();
+        }
+      } else {
+        const actor = await resolveParaActor(db, ctx.state?.currentUser);
+        organizationId = actor.organizationId;
+      }
+
+      const rawSpace = params.paraSpace ? String(params.paraSpace).trim() : null;
+      if (rawSpace && !PARA_SPACES.includes(rawSpace)) {
+        ctx.throw(400, 'Phân vùng P.A.R.A. không hợp lệ.');
+      }
+      const query = String(params.query || '').trim().slice(0, 200);
+      const limit = Math.max(1, Math.min(30, Number(params.limit) || 10));
+
+      const items = await executeHybridSearch(db, {
+        organizationId,
+        query,
+        paraSpace: rawSpace,
+        limit,
+      });
+      ctx.body = {
+        organizationId,
+        engine: 'hybrid-rrf',
+        query,
+        paraSpace: rawSpace,
+        count: items.length,
+        items,
+      };
+      if (typeof next === 'function') await next();
     },
   };
 }

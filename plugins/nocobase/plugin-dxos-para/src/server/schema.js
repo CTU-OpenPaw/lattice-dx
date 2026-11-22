@@ -8,6 +8,7 @@
  */
 'use strict';
 
+const { normalizeSearchText, computeDeterministicEmbedding } = require('./para-hybrid-search');
 const PARA_SPACES = ['projects', 'areas', 'resources', 'archives'];
 const PARA_STATUSES = ['draft', 'active', 'archived'];
 
@@ -66,6 +67,8 @@ const paraDocuments = {
     { name: 'relatedRecordId', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'ID bản ghi liên quan', 'x-component': 'Input' } },
     { name: 'active', type: 'boolean', defaultValue: true },
     { name: 'version', type: 'integer', defaultValue: 1, allowNull: false },
+    { name: 'searchText', type: 'text' },
+    { name: 'embeddingJson', type: 'jsonb', defaultValue: [] },
     { name: 'department', type: 'belongsTo', target: 'latticeDepartments', foreignKey: 'departmentId' },
     { name: 'owner', type: 'belongsTo', target: 'latticeEmployees', foreignKey: 'ownerId' },
   ],
@@ -135,6 +138,19 @@ function validateParaDocument(model, options = {}) {
     const trimmedUrl = attachmentUrl.trim();
     if (!isSafeAttachmentUrl(trimmedUrl)) throw failValidation('PARA_ATTACHMENT_URL_INVALID', 'Liên kết đính kèm không hợp lệ.');
     setAttr(model, 'attachmentUrl', trimmedUrl, options);
+  }
+
+  const combinedSearch = [
+    getAttr(model, 'code'),
+    getAttr(model, 'title'),
+    getAttr(model, 'summary'),
+    getAttr(model, 'tags'),
+    getAttr(model, 'contentMarkdown'),
+  ].filter(Boolean).join(' ');
+  const normalizedSearch = normalizeSearchText(combinedSearch);
+  if (normalizedSearch) {
+    setAttr(model, 'searchText', normalizedSearch, options);
+    setAttr(model, 'embeddingJson', computeDeterministicEmbedding(normalizedSearch), options);
   }
 }
 
