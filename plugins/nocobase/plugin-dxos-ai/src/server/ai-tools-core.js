@@ -10,6 +10,14 @@
 
 const { defineToolSchema } = require('./schema-helper');
 const { recordAiAuditLog, redactAuditText } = require('./ai-schemas');
+const {
+  redactPiiText,
+  redactPiiDeep,
+  estimateTokens,
+  estimateCostUsd,
+  checkAndConsumeAiQuota,
+  recordQuotaUsage,
+} = require('./ai-governance');
 const { createBuilderTools } = require('./ai-builder-tools');
 const { createCopilotTools } = require('./ai-copilot-tools');
 const { createSurfaceAndCreativeTools } = require('./ai-surface-creative-tools');
@@ -217,14 +225,22 @@ function createAuditedTool(spec) {
       const channel = ctx?.state?.dxosAuditChannel || 'ai-tool';
       const aiEmployee = ctx?.state?.dxosAiUsername || null;
       let actor = null;
+      const promptTokens = estimateTokens(rawArgs);
       try {
         actor = await resolveActorScope(ctx, db);
         if (spec.adminOnly && !actor.isAdmin) {
           throw failTool('DXOS_ADMIN_REQUIRED', 403, `Công cụ "${spec.name}" chỉ dành cho Quản trị viên.`);
         }
+        checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
         const checked = schemaHelper.validate(rawArgs);
         if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
         const result = await spec.run(ctx, db, actor, checked.value);
+        const completionTokens = estimateTokens(result);
+        const estimatedCostUsd = estimateCostUsd(promptTokens, completionTokens, '', process.env);
+        const redactedArgs = redactPiiDeep(checked.value);
+        const redactedRes = redactPiiText(redactAuditText(JSON.stringify(result).slice(0, 600)));
+        const piiRedactedCount = redactedArgs.count + redactedRes.count;
+        recordQuotaUsage(actor, { promptTokens, completionTokens, costUsd: estimatedCostUsd, piiRedactedCount });
         await recordAiAuditLog(db, {
           actorUserId: actor.userId,
           actorUsername: actor.username,
@@ -232,13 +248,19 @@ function createAuditedTool(spec) {
           channel,
           aiEmployee,
           toolName: spec.name,
-          argsSummary: checked.value,
+          argsSummary: redactedArgs.value,
           status: result?.degraded ? 'degraded' : 'allowed',
           durationMs: Date.now() - started,
-          resultSummary: redactAuditText(JSON.stringify(result).slice(0, 600)),
+          promptTokens,
+          completionTokens,
+          estimatedCostUsd,
+          piiRedactedCount,
+          resultSummary: redactedRes.text,
         });
         return result;
       } catch (err) {
+        const redactedArgs = redactPiiDeep(rawArgs);
+        const redactedErr = redactPiiText(redactAuditText(err?.message || 'Tool execution failed'));
         await recordAiAuditLog(db, {
           actorUserId: actor?.userId ?? ctx?.state?.currentUser?.id ?? null,
           actorUsername: actor?.username ?? ctx?.state?.currentUser?.username ?? null,
@@ -246,11 +268,15 @@ function createAuditedTool(spec) {
           channel,
           aiEmployee,
           toolName: spec.name,
-          argsSummary: rawArgs,
-          status: err?.status === 403 || err?.status === 401 ? 'denied' : 'error',
+          argsSummary: redactedArgs.value,
+          status: err?.status === 403 || err?.status === 401 || err?.status === 429 ? 'denied' : 'error',
           durationMs: Date.now() - started,
+          promptTokens,
+          completionTokens: 0,
+          estimatedCostUsd: estimateCostUsd(promptTokens, 0, '', process.env),
+          piiRedactedCount: redactedArgs.count + redactedErr.count,
           errorCode: err?.code || 'TOOL_ERROR',
-          resultSummary: redactAuditText(err?.message || 'Tool execution failed'),
+          resultSummary: redactedErr.text,
         });
         throw err;
       }

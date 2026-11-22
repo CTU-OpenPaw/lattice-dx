@@ -37,6 +37,7 @@ const {
   getSurfaceRevisionState,
 } = require('./ai-surface-creative-tools');
 const { createSurfaceEventsHandler } = require('./surface-events');
+const { getQuotaSummary } = require('./ai-governance');
 
 function serializeProfile(row) {
   if (!row) return null;
@@ -79,6 +80,10 @@ function serializeAuditLog(row) {
     argsSummary: val(row, 'argsSummary') || {},
     status: val(row, 'status'),
     durationMs: Number(val(row, 'durationMs')) || 0,
+    promptTokens: Number(val(row, 'promptTokens')) || 0,
+    completionTokens: Number(val(row, 'completionTokens')) || 0,
+    estimatedCostUsd: Number(val(row, 'estimatedCostUsd')) || 0,
+    piiRedactedCount: Number(val(row, 'piiRedactedCount')) || 0,
     errorCode: val(row, 'errorCode') || null,
     resultSummary: val(row, 'resultSummary') || null,
     createdAt: val(row, 'createdAt') || null,
@@ -354,6 +359,28 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const repo = targetDb?.getRepository?.('latticeAiAuditLogs');
       const rows = repo ? (await repo.find({ filter, sort: ['-id'], limit })) || [] : [];
       ctx.body = { items: rows.map(serializeAuditLog) };
+      if (typeof next === 'function') await next();
+    },
+
+    async quotaSummary(ctx, next) {
+      const targetDb = await requireAdmin(ctx);
+      const params = readActionPayload(ctx);
+      const requestedOrg = String(ctx?.action?.params?.organizationId || params.organizationId || 'native-ui-lab').trim();
+      const summary = getQuotaSummary(requestedOrg, env);
+      const repo = targetDb?.getRepository?.('latticeAiAuditLogs');
+      let auditTotals = { records: 0, promptTokens: 0, completionTokens: 0, estimatedCostUsd: 0, piiRedactedCount: 0 };
+      if (repo) {
+        const rows = (await repo.find({ filter: { organizationId: summary.organizationId }, sort: ['-id'], limit: 200 })) || [];
+        for (const r of rows) {
+          auditTotals.records += 1;
+          auditTotals.promptTokens += Number(val(r, 'promptTokens')) || 0;
+          auditTotals.completionTokens += Number(val(r, 'completionTokens')) || 0;
+          auditTotals.estimatedCostUsd += Number(val(r, 'estimatedCostUsd')) || 0;
+          auditTotals.piiRedactedCount += Number(val(r, 'piiRedactedCount')) || 0;
+        }
+        auditTotals.estimatedCostUsd = Number(auditTotals.estimatedCostUsd.toFixed(6));
+      }
+      ctx.body = { ...summary, auditTotals };
       if (typeof next === 'function') await next();
     },
 

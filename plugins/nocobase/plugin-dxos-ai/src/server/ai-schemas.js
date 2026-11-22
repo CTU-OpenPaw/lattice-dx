@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { redactPiiText, redactPiiDeep } = require('./ai-governance');
+
 const USERNAME_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const ORG_RE = /^[-a-zA-Z0-9_]{1,80}$/;
 const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|cookie|credential|jwt|bearer|privatekey|private_key|sessionid|session_id|passphrase|access_key|client_secret/i;
@@ -256,6 +258,10 @@ const aiAuditLogs = {
     { name: 'argsSummary', type: 'jsonb', defaultValue: {} },
     { name: 'status', type: 'string', allowNull: false },
     { name: 'durationMs', type: 'integer', defaultValue: 0 },
+    { name: 'promptTokens', type: 'integer', defaultValue: 0 },
+    { name: 'completionTokens', type: 'integer', defaultValue: 0 },
+    { name: 'estimatedCostUsd', type: 'double', defaultValue: 0 },
+    { name: 'piiRedactedCount', type: 'integer', defaultValue: 0 },
     { name: 'errorCode', type: 'string' },
     { name: 'resultSummary', type: 'text' },
   ],
@@ -433,6 +439,11 @@ function validateAiProfilePayload(input = {}, { adminToolNames = [] } = {}) {
 async function recordAiAuditLog(db, entry = {}) {
   const repo = db?.getRepository?.('latticeAiAuditLogs');
   if (!repo || typeof repo.create !== 'function') return null;
+  const sanitizedArgs = redactPiiDeep(sanitizeAuditSummary(entry.argsSummary || {}));
+  const redactedResult = entry.resultSummary ? redactPiiText(redactAuditText(String(entry.resultSummary))) : { text: null, count: 0 };
+  const piiCount = entry.piiRedactedCount != null
+    ? Math.max(0, Number(entry.piiRedactedCount) || 0)
+    : (sanitizedArgs.count + redactedResult.count);
   try {
     return await repo.create({
       values: {
@@ -442,11 +453,15 @@ async function recordAiAuditLog(db, entry = {}) {
         channel: String(entry.channel || 'ai-tool').slice(0, 40),
         aiEmployee: entry.aiEmployee ? String(entry.aiEmployee).slice(0, 80) : null,
         toolName: String(entry.toolName || 'unknown').slice(0, 120),
-        argsSummary: sanitizeAuditSummary(entry.argsSummary || {}),
+        argsSummary: sanitizedArgs.value,
         status: String(entry.status || 'allowed').slice(0, 32),
         durationMs: Math.max(0, Number(entry.durationMs) || 0),
+        promptTokens: Math.max(0, Number(entry.promptTokens) || 0),
+        completionTokens: Math.max(0, Number(entry.completionTokens) || 0),
+        estimatedCostUsd: Math.max(0, Number(entry.estimatedCostUsd) || 0),
+        piiRedactedCount: piiCount,
         errorCode: entry.errorCode ? String(entry.errorCode).slice(0, 80) : null,
-        resultSummary: entry.resultSummary ? redactAuditText(String(entry.resultSummary)).slice(0, 1000) : null,
+        resultSummary: redactedResult.text ? redactedResult.text.slice(0, 1000) : null,
       },
     });
   } catch {
