@@ -14,16 +14,21 @@ const COLLECTION_FIELD_GROUPS = {
   latticeIncidentCases: [
     { title: 'Định danh & Tài sản', fields: ['code', 'name', 'organizationId', 'assetEntityId', 'runId', 'notificationId'] },
     { title: 'Phân công & Trạng thái', fields: ['handlerId', 'severity', 'status'] },
+    { title: 'Giám sát & Xác nhận cảnh báo', fields: ['fingerprint', 'acknowledgedBy', 'clearedBy'] },
     { title: 'Đề xuất AI & Khắc phục', fields: ['proposal', 'resolutionNote', 'closeNote'] },
+  ],
+  latticeRequests: [
+    { title: 'Thông tin Yêu cầu', fields: ['code', 'name', 'organizationId', 'category', 'description'] },
+    { title: 'Trạng thái & Vòng đời chứng từ', fields: ['status', 'version', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'] },
   ],
   latticeOrders: [
     { title: 'Thông tin Đơn vận chuyển', fields: ['code', 'name', 'organizationId', 'category', 'customer', 'quantity'] },
     { title: 'Tuyến vận chuyển & Mô tả', fields: ['origin', 'destination', 'description'] },
-    { title: 'Trạng thái & Phê duyệt', fields: ['status', 'version', 'decisionReason'] },
+    { title: 'Trạng thái & Vòng đời chứng từ', fields: ['status', 'version', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'] },
   ],
   latticeServiceTickets: [
     { title: 'Thông tin Phiếu dịch vụ', fields: ['code', 'name', 'organizationId', 'serviceType', 'priority', 'description'] },
-    { title: 'Trạng thái & Kết quả', fields: ['status', 'version', 'resolutionNote', 'decisionReason'] },
+    { title: 'Trạng thái & Vòng đời chứng từ', fields: ['status', 'version', 'resolutionNote', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'] },
   ],
   latticeParaDocuments: [
     { title: 'Định danh & Phân vùng P.A.R.A.', fields: ['code', 'title', 'organizationId', 'paraSpace', 'tags', 'status'] },
@@ -628,4 +633,4 @@ async function composePortals(db, { applyBlueprint }) {
   return { createdPages, mobilePagesCreated: mobileRes.mobilePagesCreated, attachedBlocks, dxosBlocksAttached: dxosBlocksEnabled };
 }
 
-module.exports = { OVERVIEW_SPECS, EXTRA_DATA_PAGES, MOBILE_PORTAL_PAGES, composeMobilePortal, composePortals };
+module.exports = { COLLECTION_FIELD_GROUPS, OVERVIEW_SPECS, EXTRA_DATA_PAGES, MOBILE_PORTAL_PAGES, composeMobilePortal, composePortals };

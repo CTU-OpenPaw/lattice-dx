@@ -767,3 +767,24 @@ test('readiness resolves host NocoBase version dynamically from NOCOBASE_VERSION
     else process.env.NOCOBASE_VERSION = origEnv;
   }
 });
+
+test('portal-composer COLLECTION_FIELD_GROUPS covers every interface field in domain schemas', () => {
+  const { COLLECTION_FIELD_GROUPS } = require(path.join(PLUGIN_ROOT, 'src/server/portal-composer.js'));
+  const foundationSchemas = require(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/schema.js'));
+  const paraSchemas = require(path.resolve(PLUGIN_ROOT, '../plugin-dxos-para/src/server/schema.js'));
+  const serviceSchemas = require(path.join(PLUGIN_ROOT, 'src/server/service-schema.js'));
+  const allSchemas = Object.values({ ...foundationSchemas, ...paraSchemas, ...serviceSchemas });
+
+  for (const colName of ['latticeIncidentCases', 'latticeRequests', 'latticeOrders', 'latticeServiceTickets', 'latticeParaDocuments']) {
+    const schema = allSchemas.find((s) => s?.name === colName);
+    assert.ok(schema, `Missing schema for ${colName}`);
+    const groups = COLLECTION_FIELD_GROUPS[colName];
+    assert.ok(Array.isArray(groups) && groups.length > 0, `Missing COLLECTION_FIELD_GROUPS for ${colName}`);
+    const covered = new Set(groups.flatMap((g) => g.fields));
+    const missing = (schema.fields || [])
+      .filter((f) => Boolean(f.interface))
+      .map((f) => f.name)
+      .filter((name) => !covered.has(name));
+    assert.deepEqual(missing, [], `COLLECTION_FIELD_GROUPS[${colName}] missing interface fields: ${missing.join(', ')}`);
+  }
+});

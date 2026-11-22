@@ -35,6 +35,10 @@ export const COLLECTION_FIELD_GROUPS = Object.freeze({
       fields: ['handlerId', 'severity', 'status'],
     },
     {
+      title: 'Giám sát & Xác nhận cảnh báo',
+      fields: ['fingerprint', 'acknowledgedBy', 'clearedBy'],
+    },
+    {
       title: 'Đề xuất AI & Khắc phục',
       fields: ['proposal', 'resolutionNote', 'closeNote'],
     },
@@ -53,6 +57,16 @@ export const COLLECTION_FIELD_GROUPS = Object.freeze({
       fields: ['maxObservationAgeSeconds', 'cooldownSeconds', 'workflowDefinitionId', 'workflowDefinitionVersion'],
     },
   ],
+  latticeRequests: [
+    {
+      title: 'Thông tin Yêu cầu',
+      fields: ['code', 'name', 'organizationId', 'category', 'description'],
+    },
+    {
+      title: 'Trạng thái & Vòng đời chứng từ',
+      fields: ['status', 'version', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'],
+    },
+  ],
   latticeOrders: [
     {
       title: 'Thông tin Đơn vận chuyển',
@@ -63,8 +77,8 @@ export const COLLECTION_FIELD_GROUPS = Object.freeze({
       fields: ['origin', 'destination', 'description'],
     },
     {
-      title: 'Trạng thái & Phê duyệt',
-      fields: ['status', 'version', 'decisionReason'],
+      title: 'Trạng thái & Vòng đời chứng từ',
+      fields: ['status', 'version', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'],
     },
   ],
   latticeServiceTickets: [
@@ -73,8 +87,8 @@ export const COLLECTION_FIELD_GROUPS = Object.freeze({
       fields: ['code', 'name', 'organizationId', 'serviceType', 'priority', 'description'],
     },
     {
-      title: 'Trạng thái & Kết quả',
-      fields: ['status', 'version', 'resolutionNote', 'decisionReason'],
+      title: 'Trạng thái & Vòng đời chứng từ',
+      fields: ['status', 'version', 'resolutionNote', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'],
     },
   ],
   latticeParaDocuments: [
