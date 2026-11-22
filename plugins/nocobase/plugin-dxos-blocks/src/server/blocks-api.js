@@ -66,10 +66,76 @@ function readHeader(ctx, name) {
   return '';
 }
 
+async function resolvePublicRouteJwtUser(db, ctx) {
+  let user = null;
+  if (typeof ctx?.auth?.check === 'function') {
+    try {
+      const checked = await ctx.auth.check();
+      user = checked || ctx.auth?.user || ctx.state?.currentUser || null;
+    } catch {
+      throw fail('NATIVE_LOGIN_REQUIRED', 401);
+    }
+  } else if (typeof ctx?.app?.authManager?.get === 'function') {
+    const authenticatorName =
+      readHeader(ctx, 'X-Authenticator').trim() ||
+      String(ctx.app.authManager.defaultAuthenticator || 'basic');
+    try {
+      const authenticator = await ctx.app.authManager.get(authenticatorName, ctx);
+      if (authenticator && typeof authenticator.check === 'function') {
+        user = (await authenticator.check(ctx)) || null;
+      }
+    } catch {
+      throw fail('NATIVE_LOGIN_REQUIRED', 401);
+    }
+  }
+  if (!val(user, 'id')) {
+    throw fail('NATIVE_LOGIN_REQUIRED', 401);
+  }
+  ctx.auth = ctx.auth || {};
+  ctx.auth.user = user;
+  ctx.state = ctx.state || {};
+  ctx.state.currentUser = user;
+
+  const userId = val(user, 'id');
+  const verifiedRoles = [];
+  let defaultRole = '';
+  const rolesUsersRepo = db?.getRepository?.('rolesUsers');
+  if (rolesUsersRepo && typeof rolesUsersRepo.find === 'function') {
+    const rows = (await rolesUsersRepo.find({ filter: { userId }, limit: 50 })) || [];
+    for (const row of rows) {
+      const roleName = String(val(row, 'roleName') || '').trim();
+      if (!roleName) continue;
+      if (!verifiedRoles.includes(roleName)) verifiedRoles.push(roleName);
+      if (val(row, 'default') === true && !defaultRole) defaultRole = roleName;
+    }
+  } else if (typeof user?.getRoles === 'function') {
+    const roles = (await user.getRoles()) || [];
+    for (const row of roles) {
+      const roleName = String(val(row, 'name') || val(row, 'roleName') || '').trim();
+      if (!roleName) continue;
+      if (!verifiedRoles.includes(roleName)) verifiedRoles.push(roleName);
+      if (val(row, 'RolesUsers')?.default === true && !defaultRole) defaultRole = roleName;
+    }
+  }
+
+  const requestedRole = readHeader(ctx, 'X-Role').trim();
+  const resolvedRole =
+    requestedRole && verifiedRoles.includes(requestedRole)
+      ? requestedRole
+      : defaultRole || verifiedRoles[0] || '';
+  ctx.state.currentRole = resolvedRole;
+  return resolvedRole;
+}
+
 async function resolveTelemetryIngestAuth(db, ctx, input = {}, { ingestToken } = {}) {
   const providedToken = readHeader(ctx, 'X-Lattice-Edge-Token').trim();
   const rawEnvToken = ingestToken !== undefined ? ingestToken : process.env.DX_IIOT_INGEST_TOKEN;
   const expectedToken = typeof rawEnvToken === 'string' ? rawEnvToken.trim() : '';
+  const hadPreResolvedUser = Boolean(ctx.state?.currentUser?.id);
+
+  if (!providedToken && !hadPreResolvedUser) {
+    await resolvePublicRouteJwtUser(db, ctx);
+  }
 
   let auth;
   if (providedToken) {
@@ -97,9 +163,10 @@ async function resolveTelemetryIngestAuth(db, ctx, input = {}, { ingestToken } =
     auth = { mode: 'root', organizationId: orgId, isRoot: true, actor: null };
   } else {
     const actor = await resolveNativeEmployee(db, ctx.state.currentUser);
+    const aclCtx = hadPreResolvedUser ? ctx : { ...ctx, can: undefined };
     const [canCreateIncident, canUpdateAsset] = await Promise.all([
-      hasViewPermission(db, ctx, 'latticeIncidentCases', 'create'),
-      hasViewPermission(db, ctx, 'latticeAssets', 'update'),
+      hasViewPermission(db, aclCtx, 'latticeIncidentCases', 'create'),
+      hasViewPermission(db, aclCtx, 'latticeAssets', 'update'),
     ]);
     if (!canCreateIncident && !canUpdateAsset) {
       throw fail('DXOS_ACL_DENIED', 403);

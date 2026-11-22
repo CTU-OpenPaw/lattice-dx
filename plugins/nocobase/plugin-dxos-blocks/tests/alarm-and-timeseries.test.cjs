@@ -1422,3 +1422,108 @@ test('Fix Round 2: Node-RED sanitizer function routes to http://nocobase/api/dxo
   assert.equal(out.payload.numericValue, -14.5);
   assert.equal(errors.length, 0);
 });
+
+test('dxosBlocks:telemetryIngest resolves Bearer JWT and verified DB roles when ACL skipCheck leaves currentUser undefined', async () => {
+  const { createDxosBlocksActions } = require(path.join(PLUGIN_ROOT, 'src/server/blocks-api.js'));
+  const telemetryRows = [];
+  const rolesUsersRows = [
+    { userId: 1, roleName: 'root', default: true },
+    { userId: 2, roleName: 'ldx_employee', default: true },
+    { userId: 3, roleName: 'ldx_operator', default: true },
+  ];
+  const employeesRows = [
+    { id: 20, userId: 2, active: true, organizationId: 'org-a' },
+    { id: 30, userId: 3, active: true, organizationId: 'org-a' },
+  ];
+  const rolesRows = [
+    { name: 'root', allowAll: true },
+    { name: 'ldx_employee', allowAll: false },
+    { name: 'ldx_operator', allowAll: false },
+  ];
+  const roleResources = [
+    { roleName: 'ldx_operator', name: 'latticeIncidentCases', dataSourceKey: 'main', usingActionsConfig: true, actions: [{ name: 'create' }] },
+  ];
+
+  const db = {
+    getRepository(name) {
+      if (name === 'rolesUsers') return { find: async ({ filter } = {}) => rolesUsersRows.filter((r) => r.userId === filter?.userId) };
+      if (name === 'latticeEmployees') return { find: async ({ filter } = {}) => employeesRows.filter((r) => r.userId === filter?.userId) };
+      if (name === 'roles') return { findOne: async ({ filter } = {}) => rolesRows.find((r) => r.name === filter?.name) || null };
+      if (name === 'dataSourcesRolesResources') {
+        return {
+          findOne: async ({ filter } = {}) =>
+            roleResources.find((r) => r.roleName === filter?.roleName && r.name === filter?.name) || null,
+        };
+      }
+      if (name === 'latticeIncidentRules') return { find: async () => [] };
+      if (name === 'latticeAssets') return { findOne: async () => ({ id: 12, organizationId: 'org-a', code: 'CH-01', name: 'Chiller' }) };
+      if (name === 'latticeTelemetryPoints') {
+        return {
+          find: async () => [],
+          create: async ({ values }) => {
+            const row = { id: telemetryRows.length + 1, ...values };
+            telemetryRows.push(row);
+            return row;
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const actions = createDxosBlocksActions(db, { ingestToken: '' });
+  const baseValues = { assetId: 12, metricName: 'temperature', numericValue: -17.2, unit: 'CEL' };
+
+  // 1. Admin JWT on skipCheck() public route succeeds with verified root role
+  const rootCtx = {
+    method: 'POST',
+    headers: { authorization: 'Bearer admin-jwt', 'x-role': 'root' },
+    state: { currentUser: undefined, currentRole: undefined },
+    auth: { skipCheck: async () => true, check: async () => ({ id: 1 }) },
+    can: () => false,
+    action: { params: { values: { organizationId: 'org-a', ...baseValues } } },
+  };
+  await actions.telemetryIngest(rootCtx, async () => {});
+  assert.equal(telemetryRows.length, 1);
+  assert.equal(rootCtx.body.point.organizationId, 'org-a');
+
+  // 2. Employee spoofing X-Role: root is demoted to verified ldx_employee role and rejected 403
+  const spoofCtx = {
+    method: 'POST',
+    headers: { authorization: 'Bearer emp-jwt', 'x-role': 'root' },
+    state: { currentUser: undefined, currentRole: 'root' },
+    auth: { skipCheck: async () => true, check: async () => ({ id: 2 }) },
+    can: () => true,
+    action: { params: { values: { organizationId: 'org-a', ...baseValues } } },
+  };
+  await assert.rejects(
+    () => actions.telemetryIngest(spoofCtx, async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_ACL_DENIED',
+  );
+  assert.equal(spoofCtx.state.currentRole, 'ldx_employee');
+
+  // 3. Operator JWT bypasses anonymous-bound ctx.can and succeeds via verified DB ACL
+  const opCtx = {
+    method: 'POST',
+    headers: { authorization: 'Bearer op-jwt' },
+    state: { currentUser: undefined, currentRole: undefined },
+    auth: { skipCheck: async () => true, check: async () => ({ id: 3 }) },
+    can: () => false,
+    action: { params: { values: { ...baseValues } } },
+  };
+  await actions.telemetryIngest(opCtx, async () => {});
+  assert.equal(telemetryRows.length, 2);
+
+  // 4. Throwing / missing JWT returns 401 NATIVE_LOGIN_REQUIRED
+  const unauthCtx = {
+    method: 'POST',
+    headers: {},
+    state: {},
+    auth: { skipCheck: async () => true, check: async () => { throw new Error('invalid token'); } },
+    action: { params: { values: { organizationId: 'org-a', ...baseValues } } },
+  };
+  await assert.rejects(
+    () => actions.telemetryIngest(unauthCtx, async () => {}),
+    (err) => err.status === 401 && err.code === 'NATIVE_LOGIN_REQUIRED',
+  );
+});
