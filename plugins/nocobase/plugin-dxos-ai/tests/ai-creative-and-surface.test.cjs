@@ -557,3 +557,29 @@ test('surfaceRevisionStore bounds memory cache size under high portal cardinalit
   }
   assert.ok(surfaceRevisionStore.size <= 500, `Expected surfaceRevisionStore bounded <= 500, got ${surfaceRevisionStore.size}`);
 });
+
+test('creative DSL supports chatter, export-bar, and voucher-actions widgets and snapshots use crypto randomness', () => {
+  const { readFileSync } = require('node:fs');
+  const path = require('node:path');
+  const { sanitizeCreativeBlueprintPayload, VALID_WIDGET_TYPES } = require('../src/server/ai-surface-creative-tools');
+
+  for (const wt of ['chatter', 'export-bar', 'voucher-actions']) {
+    assert.equal(VALID_WIDGET_TYPES.has(wt), true, `Expected ${wt} in VALID_WIDGET_TYPES`);
+  }
+
+  const sanitized = sanitizeCreativeBlueprintPayload({
+    title: 'Wave 5 Workbench',
+    theme: 'clean-light',
+    queries: [{ id: 'q1', collection: 'latticeOrders', limit: 10 }],
+    widgets: [
+      { type: 'chatter', title: 'Trao đổi Chatter', collection: 'latticeOrders', recordId: 5 },
+      { type: 'export-bar', title: 'Xuất dữ liệu', collection: 'latticeOrders', formats: ['csv', 'xlsx', 'pdf'] },
+      { type: 'voucher-actions', title: 'Vòng đời chứng từ', collection: 'latticeOrders', recordId: 5 },
+    ],
+  });
+  assert.equal(sanitized.widgets.length, 3);
+  assert.deepEqual(sanitized.widgets.map((w) => w.type), ['chatter', 'export-bar', 'voucher-actions']);
+
+  const src = readFileSync(path.join(__dirname, '../src/server/ai-surface-creative-tools.js'), 'utf8');
+  assert.equal(src.includes('Math.random'), false);
+});

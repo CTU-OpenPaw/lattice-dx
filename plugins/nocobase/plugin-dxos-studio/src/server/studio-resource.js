@@ -10,7 +10,13 @@
 
 const { listWorkflowTemplates, buildWorkflowTemplate } = require('./workflow-templates');
 const { composePortals } = require('./portal-composer');
-const { exportSolutionBundle, diffSolutionBundle, importSolutionBundle, validateSolutionBundle } = require('./solution-bundle');
+const {
+  exportSolutionBundle,
+  diffSolutionBundle,
+  importSolutionBundle,
+  validateSolutionBundle,
+  rollbackLastSolutionBundle,
+} = require('./solution-bundle');
 
 const DXOS_PLUGINS_CATALOG = [
   { packageName: '@latticedx/plugin-action-bridge', title: 'Action Bridge', spaces: ['[P]', '[H]'] },
@@ -23,6 +29,41 @@ const DXOS_PLUGINS_CATALOG = [
 ];
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
+
+function cleanVersionString(value) {
+  if (typeof value !== 'string') return '';
+  const cleaned = value.trim().replace(/^v/i, '');
+  if (!cleaned || /^\[object\b/i.test(cleaned)) return '';
+  return cleaned;
+}
+
+async function readVersionCandidate(candidate) {
+  if (candidate == null) return '';
+  if (typeof candidate === 'string') return cleanVersionString(candidate);
+  if (typeof candidate === 'object') {
+    if (typeof candidate.get === 'function') {
+      try {
+        const resolved = cleanVersionString(await candidate.get());
+        if (resolved) return resolved;
+      } catch {}
+    }
+    for (const key of ['version', 'current', 'value']) {
+      const resolved = cleanVersionString(candidate[key]);
+      if (resolved) return resolved;
+    }
+  }
+  return '';
+}
+
+async function resolveHostVersion(env, ...candidates) {
+  const envVer = cleanVersionString(env?.NOCOBASE_VERSION);
+  if (envVer) return envVer;
+  for (const candidate of candidates) {
+    const resolved = await readVersionCandidate(candidate);
+    if (resolved) return resolved;
+  }
+  return '2.2.50';
+}
 
 function fail(code, status = 403, message = code) {
   return Object.assign(new Error(message), { code, status });
@@ -104,6 +145,14 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
   async function requireAdmin(ctx) {
     if (!ctx?.state?.currentUser) throw fail('NATIVE_LOGIN_REQUIRED', 401);
     if (!(await isStudioAdmin(ctx, db))) throw fail('DXOS_ADMIN_REQUIRED', 403, 'Chỉ quản trị viên mới truy cập được DX-OS Studio.');
+  }
+
+  function parseIncomingBundle(raw) {
+    try {
+      return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    } catch {
+      throw fail('INVALID_SOLUTION_BUNDLE', 400, 'Invalid Solution Bundle JSON');
+    }
   }
 
   return {
@@ -256,6 +305,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       const pluginRows = (await db.getRepository('applicationPlugins')?.find({})) || [];
       const portalRows = (await db.getRepository('uiLayouts')?.find({})) || [];
       const customPortals = portalRows.filter((p) => String(val(p, 'uid') || '').startsWith('ldx-portal-'));
+      const hostVersion = await resolveHostVersion(process.env, db?.app?.version, ctx?.app?.version);
       ctx.body = {
         portalCount: customPortals.length,
         workflowCount: await safeCount('workflows', { current: true }),
@@ -263,7 +313,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
         serviceTicketCount: await safeCount('latticeServiceTickets', {}),
         aiProfileCount: await safeCount('latticeAiProfiles', { enabled: true }),
         aiAuditCount: await safeCount('latticeAiAuditLogs', {}),
-        clause52Attribution: 'Powered by NocoBase (v2.2.38 preserved)',
+        clause52Attribution: `Powered by NocoBase (v${hostVersion} preserved)`,
         plugins: buildPluginStatusList(pluginRows),
       };
       return next();
@@ -367,7 +417,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       await requireAdmin(ctx);
       const params = readParams(ctx);
       const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
-      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.2.0' });
+      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.3.0' });
       return next();
     },
 
@@ -375,7 +425,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
-      const incoming = typeof params.bundle === 'string' ? JSON.parse(params.bundle) : params.bundle;
+      const incoming = parseIncomingBundle(params.bundle);
       const validation = validateSolutionBundle(incoming);
       if (!validation.valid) throw fail('INVALID_SOLUTION_BUNDLE', 400, validation.errors.join('; '));
       const organizationId = params.organizationId ? String(params.organizationId).trim() : (incoming.metadata?.organizationId !== 'all' ? incoming.metadata?.organizationId : null);
@@ -388,10 +438,23 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
-      const incoming = typeof params.bundle === 'string' ? JSON.parse(params.bundle) : params.bundle;
+      const incoming = parseIncomingBundle(params.bundle);
       const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
       const dryRun = params.dryRun === false ? false : true;
-      ctx.body = await importSolutionBundle(db, incoming, { dryRun, organizationId });
+      const enableWorkflows = typeof params.enableWorkflows === 'string'
+        ? params.enableWorkflows === 'true'
+        : Boolean(params.enableWorkflows);
+      ctx.body = await importSolutionBundle(db, incoming, { dryRun, organizationId, enableWorkflows });
+      return next();
+    },
+
+    solutionBundleRollback: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      await requireAdmin(ctx);
+      const params = readParams(ctx);
+      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
+      const snapshotUid = params.snapshotUid ? String(params.snapshotUid).trim() : '';
+      ctx.body = await rollbackLastSolutionBundle(db, { organizationId, snapshotUid });
       return next();
     },
   };

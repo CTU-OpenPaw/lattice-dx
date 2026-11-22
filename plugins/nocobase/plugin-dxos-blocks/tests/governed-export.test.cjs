@@ -206,3 +206,192 @@ test('dxosBlocks:exportReport enforces column-level RBAC, denies all-forbidden r
     (err) => err.status === 403 || err.status === 400,
   );
 });
+
+test('buildXlsxBuffer generates styled xl/styles.xml, navy header fill, grid borders, column widths, and frozen header row', () => {
+  const { buildXlsxBuffer } = require('../src/server/governed-export');
+  const buf = buildXlsxBuffer(
+    ['code', 'name', 'amount'],
+    [{ code: 'REQ-01', name: 'Kho lạnh Vaccine Trung tâm 01', amount: 42 }],
+    { sheetName: 'latticeRequests' },
+  );
+  const zipMap = extractStoreZipEntries(buf);
+  assert.ok(zipMap.has('xl/styles.xml'), 'XLSX must include xl/styles.xml');
+  const contentTypes = zipMap.get('[Content_Types].xml').toString('utf8');
+  assert.ok(contentTypes.includes('/xl/styles.xml'));
+  assert.ok(contentTypes.includes('spreadsheetml.styles+xml'));
+  const wbRels = zipMap.get('xl/_rels/workbook.xml.rels').toString('utf8');
+  assert.ok(wbRels.includes('styles.xml'));
+
+  const stylesXml = zipMap.get('xl/styles.xml').toString('utf8');
+  assert.ok(stylesXml.includes('1E3A5F') || stylesXml.includes('1e3a5f'), 'Navy header fill expected');
+  assert.ok(stylesXml.includes('<borders'), 'Grid borders expected');
+
+  const sheetXml = zipMap.get('xl/worksheets/sheet1.xml').toString('utf8');
+  assert.ok(sheetXml.includes('<sheetViews>'));
+  assert.ok(sheetXml.includes('ySplit="1"'));
+  assert.ok(sheetXml.includes('state="frozen"'));
+  assert.ok(sheetXml.includes('<cols>'));
+  assert.ok(sheetXml.includes('s="1"'), 'Header cells should reference style s="1"');
+});
+
+test('Vietnamese Unicode TTF PDF embeds CIDFontType2 + ToUnicode CMap and falls back cleanly when font/Gotenberg unavailable', async () => {
+  const {
+    findUnicodeFontPath,
+    buildUnicodePdfBuffer,
+    renderGotenbergPdf,
+    executeGovernedExport,
+  } = require('../src/server/governed-export');
+
+  assert.equal(typeof findUnicodeFontPath, 'function');
+  assert.equal(typeof buildUnicodePdfBuffer, 'function');
+  assert.equal(typeof renderGotenbergPdf, 'function');
+
+  const fontPath = findUnicodeFontPath();
+  assert.ok(fontPath, 'Expected a system TrueType font to exist for test verification');
+
+  const { db } = makeExportHarness();
+  const viRows = [{
+    id: 1,
+    organizationId: 'org-a',
+    code: 'VN-01',
+    name: 'Kho lạnh ă â đ ê ô ơ ư ế ồ ậ',
+    status: 'approved',
+  }];
+  const viDb = {
+    getRepository(name) {
+      if (name === 'latticeRequests') {
+        return { find: async () => viRows };
+      }
+      return db.getRepository(name);
+    },
+  };
+  const ctx = {
+    state: { currentUser: { id: 101, username: 'alice' }, currentRole: 'ldx_employee' },
+  };
+  const actor = { userId: '101', employeeId: 10, organizationId: 'org-a' };
+
+  const prevGotenberg = process.env.DXOS_GOTENBERG_URL;
+  delete process.env.DXOS_GOTENBERG_URL;
+  try {
+    const res = await executeGovernedExport(
+      viDb,
+      ctx,
+      { collection: 'latticeRequests', format: 'pdf', fields: ['code', 'name', 'status'] },
+      { isRoot: false, actor },
+    );
+    assert.equal(res.pdfUnicodeMode, 'truetype-cid');
+    const pdfRaw = res.buffer.toString('latin1');
+    assert.ok(pdfRaw.startsWith('%PDF-1.4'));
+    assert.ok(pdfRaw.includes('/Subtype /Type0'));
+    assert.ok(pdfRaw.includes('/Encoding /Identity-H'));
+    assert.ok(pdfRaw.includes('/Subtype /CIDFontType2'));
+    assert.ok(pdfRaw.includes('/FontFile2'));
+    assert.ok(pdfRaw.includes('/ToUnicode'));
+    assert.ok(pdfRaw.includes('beginbfchar'));
+    assert.ok(pdfRaw.includes('endbfchar'));
+    // Verify UTF-16 code points for ă (0103), đ (0111), ế (1EBF), ồ (1ED3), ậ (1EAD) appear in ToUnicode CMap
+    const upper = pdfRaw.toUpperCase();
+    for (const hex of ['0103', '0111', '1EBF', '1ED3', '1EAD']) {
+      assert.ok(upper.includes(`<${hex}>`), `ToUnicode CMap must preserve UTF-16 <${hex}>`);
+    }
+
+    // ASCII fallback when TTF disabled/missing
+    const asciiRes = await executeGovernedExport(
+      viDb,
+      ctx,
+      { collection: 'latticeRequests', format: 'pdf', fields: ['code', 'name', 'status'] },
+      { isRoot: false, actor, fontPath: null },
+    );
+    assert.equal(asciiRes.pdfUnicodeMode, 'ascii-fallback');
+    assert.ok(asciiRes.buffer.toString('latin1').includes('/BaseFont /Helvetica'));
+
+    // Gotenberg credential URL rejected + valid URL used + failure falls back to truetype-cid
+    let fetchCalls = 0;
+    process.env.DXOS_GOTENBERG_URL = 'http://user:secret@gotenberg.local:3000';
+    const credFallback = await executeGovernedExport(
+      viDb,
+      ctx,
+      { collection: 'latticeRequests', format: 'pdf', fields: ['code', 'name'] },
+      {
+        isRoot: false,
+        actor,
+        fetchImpl: async () => { fetchCalls += 1; throw new Error('Should not call fetch for credential URL'); },
+      },
+    );
+    assert.equal(fetchCalls, 0);
+    assert.equal(credFallback.pdfUnicodeMode, 'truetype-cid');
+
+    process.env.DXOS_GOTENBERG_URL = 'http://gotenberg.local:3000/base/?token=ignore#frag';
+    const gotenbergOk = await executeGovernedExport(
+      viDb,
+      ctx,
+      { collection: 'latticeRequests', format: 'pdf', fields: ['code', 'name'] },
+      {
+        isRoot: false,
+        actor,
+        fetchImpl: async (url, init) => {
+          fetchCalls += 1;
+          assert.equal(url, 'http://gotenberg.local:3000/base/forms/chromium/convert/html');
+          assert.equal(init.method, 'POST');
+          return new Response(Buffer.from('%PDF-1.4\n%Gotenberg\n%%EOF\n', 'latin1'), { status: 200 });
+        },
+      },
+    );
+    assert.equal(fetchCalls, 1);
+    assert.equal(gotenbergOk.pdfUnicodeMode, 'gotenberg');
+    assert.ok(gotenbergOk.buffer.toString('latin1').includes('%Gotenberg'));
+
+    const gotenbergFailFallback = await executeGovernedExport(
+      viDb,
+      ctx,
+      { collection: 'latticeRequests', format: 'pdf', fields: ['code', 'name'] },
+      {
+        isRoot: false,
+        actor,
+        fetchImpl: async () => new Response('boom', { status: 503 }),
+      },
+    );
+    assert.equal(gotenbergFailFallback.pdfUnicodeMode, 'truetype-cid');
+  } finally {
+    if (prevGotenberg === undefined) delete process.env.DXOS_GOTENBERG_URL;
+    else process.env.DXOS_GOTENBERG_URL = prevGotenberg;
+  }
+});
+
+test('executeGovernedExport paginates in 1000-row batches up to 10000 rows', async () => {
+  const { executeGovernedExport } = require('../src/server/governed-export');
+  const { db } = makeExportHarness();
+  const totalRows = Array.from({ length: 2500 }, (_, i) => ({
+    id: i + 1,
+    organizationId: 'org-a',
+    code: `REQ-${i + 1}`,
+    name: `Mục ${i + 1}`,
+    status: 'draft',
+  }));
+  const findCalls = [];
+  const paginatedDb = {
+    getRepository(name) {
+      if (name === 'latticeRequests') {
+        return {
+          find: async ({ limit, offset = 0 }) => {
+            findCalls.push({ limit, offset });
+            return totalRows.slice(offset, offset + limit);
+          },
+        };
+      }
+      return db.getRepository(name);
+    },
+  };
+  const res = await executeGovernedExport(
+    paginatedDb,
+    { state: { currentUser: { id: 101, username: 'alice' }, currentRole: 'ldx_employee' } },
+    { collection: 'latticeRequests', format: 'csv', fields: ['code', 'name'], limit: 2500 },
+    { isRoot: false, actor: { userId: '101', employeeId: 10, organizationId: 'org-a' } },
+  );
+  assert.equal(res.rowCount, 2500);
+  assert.deepEqual(findCalls, [
+    { limit: 1000, offset: 0 },
+    { limit: 1000, offset: 1000 },
+    { limit: 500, offset: 2000 },
+  ]);
+});

@@ -84,10 +84,77 @@ function cosineSimilarity(a, b) {
   return denom > 0 ? dot / denom : 0;
 }
 
-function buildSnippet(text, maxLen = 160) {
+function buildSnippet(text, queryOrMaxLen = 160, maybeMaxLen = 160) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
   if (!clean) return '';
-  return clean.length <= maxLen ? clean : `${clean.slice(0, maxLen).trim()}…`;
+  const hasQuery = typeof queryOrMaxLen === 'string';
+  const maxLen = hasQuery ? maybeMaxLen : (Number(queryOrMaxLen) || 160);
+  if (clean.length <= maxLen) return clean;
+  if (hasQuery && queryOrMaxLen.trim()) {
+    const tokens = tokenizeVietnamese(queryOrMaxLen);
+    const norm = normalizeSearchText(clean);
+    let hitIdx = -1;
+    for (const tok of tokens) {
+      const idx = norm.indexOf(tok);
+      if (idx >= 0) {
+        hitIdx = idx;
+        break;
+      }
+    }
+    if (hitIdx > 40) {
+      const start = Math.max(0, hitIdx - 40);
+      return `${start > 0 ? '…' : ''}${clean.slice(start, start + maxLen).trim()}${start + maxLen < clean.length ? '…' : ''}`;
+    }
+  }
+  return `${clean.slice(0, maxLen).trim()}…`;
+}
+
+function buildParaChunkPoolEntries(chunks = [], { organizationId, visibleDocMap = new Map(), ownOnly = false, val } = {}) {
+  const read = typeof val === 'function' ? val : (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
+  const entries = [];
+  for (const chunk of Array.isArray(chunks) ? chunks : []) {
+    if (!chunk || read(chunk, 'organizationId') !== organizationId) continue;
+    if (read(chunk, 'active') === false) continue;
+
+    const docId = read(chunk, 'documentId');
+    const parentDoc = docId != null ? (visibleDocMap.get(String(docId)) || null) : null;
+    if (ownOnly && !parentDoc) continue;
+
+    const chunkId = read(chunk, 'id');
+    const code = String(read(chunk, 'code') || (parentDoc ? read(parentDoc, 'code') : '') || docId || chunkId || '');
+    const docTitle = String(read(chunk, 'title') || (parentDoc ? read(parentDoc, 'title') : '') || code);
+    const sectionTitle = String(read(chunk, 'sectionTitle') || '').trim();
+    const chunkIndex = read(chunk, 'chunkIndex') != null ? Number(read(chunk, 'chunkIndex')) : 0;
+    const pageNumber = read(chunk, 'pageNumber') != null ? Number(read(chunk, 'pageNumber')) : 1;
+    const paraSpace = String(read(chunk, 'paraSpace') || (parentDoc ? read(parentDoc, 'paraSpace') : '') || 'resources');
+    const content = String(read(chunk, 'content') || '').trim();
+    if (!content) continue;
+
+    const targetDocId = docId != null ? docId : chunkId;
+    const sectionTag = sectionTitle ? `${sectionTitle} · đoạn #${chunkIndex + 1}` : `đoạn #${chunkIndex + 1}`;
+    const item = {
+      collection: 'latticeParaChunks',
+      id: chunkId,
+      documentId: docId ?? null,
+      code,
+      title: sectionTitle ? `${docTitle} — ${sectionTitle}` : docTitle,
+      sectionTitle: sectionTitle || null,
+      chunkIndex,
+      pageNumber,
+      status: (parentDoc ? read(parentDoc, 'status') : null) || paraSpace,
+      paraSpace,
+      paraCitation: `[latticeParaDocuments:${code}#${targetDocId} · ${paraSpace} · ${sectionTag}]`,
+      citation: `[latticeParaDocuments:${code}#${targetDocId} · ${sectionTag}]`,
+    };
+    entries.push({
+      item,
+      titleText: `${code} ${docTitle} ${sectionTitle}`.trim(),
+      hayText: `${docTitle} ${sectionTitle} ${code} ${content}`.trim(),
+      rawSummary: content,
+      embedding: read(chunk, 'embeddingJson'),
+    });
+  }
+  return entries;
 }
 
 function rankHybridRecords(query, candidates = [], { limit = 8, k = 60 } = {}) {
@@ -137,7 +204,7 @@ function rankHybridRecords(query, candidates = [], { limit = 8, k = 60 } = {}) {
     return {
       ...e.cand.item,
       score,
-      snippet: buildSnippet(e.cand.rawSummary),
+      snippet: buildSnippet(e.cand.rawSummary, query),
     };
   });
 
@@ -148,4 +215,5 @@ function rankHybridRecords(query, candidates = [], { limit = 8, k = 60 } = {}) {
 module.exports = {
   normalizeSearchText,
   rankHybridRecords,
+  buildParaChunkPoolEntries,
 };

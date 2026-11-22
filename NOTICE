@@ -27,9 +27,9 @@ LatticeDX neither copies nor modifies NocoBase upstream source code.
   Repository: https://github.com/nocobase/nocobase.git
   Pinned commit: 5b47bec116c52239348c09d360e4bd2649c99efc
   Excluded from source release tarballs (git archive) and pnpm workspace builds.
-- Container image: nocobase/nocobase:2.2.38
-  Digest: sha256:90028473fe54b1fd1929b1ab0669a12e48a9a8f100d41662c98bc3c618225f4e
-  Referenced in: infra/compose/nocobase.yml, infra/compose/native-rehearsal.yml
+- Container image: nocobase/nocobase:2.2.50
+  Digest: sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777
+  Referenced in: infra/compose/nocobase.yml, infra/compose/native-rehearsal.yml, infra/compose/prod.yml
 
 Upstream License Scope:
 NocoBase is governed by the NocoBase License Agreement (updated 2026-02-24:
@@ -43,7 +43,7 @@ First-party NocoBase plugins (@latticedx/plugin-lattice-foundation,
 @latticedx/plugin-dxos-studio, and @latticedx/plugin-dxos-ai) declare
 "nocobase": { "sdkProvidedByHost": true }, invoke host APIs only at runtime, do not redistribute upstream implementation
 code, and preserve Clause 5.2 UI attribution ("Powered by NocoBase", version
-"v2.2.38", "License settings"). See root COPYRIGHT.txt for the full copyright
+"v2.2.50", "License settings"). See root COPYRIGHT.txt for the full copyright
 and dependency summary.
 
 ================================================================================
@@ -51,23 +51,37 @@ and dependency summary.
 ================================================================================
 The following third-party services run as separate OCI containers configured in
 infra/compose/*.yml and interact with LatticeDX strictly over network protocols
-(SQL, HTTP/REST, OIDC, NGSI-LD, clamd TCP). None of these services are copied,
+(SQL, HTTP/REST, OIDC, NGSI-LD, MQTT, clamd TCP). None of these services are copied,
 statically linked, or relicensed as Apache-2.0 by LatticeDX:
 
-- PostgreSQL 16.13 (postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50)
+- PostgreSQL 16.16 (postgres:16.16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d)
   License: PostgreSQL License (https://www.postgresql.org/about/licence/)
-- Keycloak 26.8.0 (quay.io/keycloak/keycloak:26.8.0@sha256:27b3230fbabb8c9ff3c66c864cf09dcd8a41aca82e5100679d109ef0eeb05741)
+- pgvector 0.8.1 on PostgreSQL 16 (pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337)
+  License: PostgreSQL License (https://github.com/pgvector/pgvector)
+- Redis 7.4 (redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe)
+  License: Dual License (RSALv2 / SSPLv1) — optional session/cache container
+- RustFS 1.0.6 (rustfs/rustfs:1.0.6@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a)
+  License: Apache License, Version 2.0 (https://github.com/rustfs/rustfs)
+- Caddy 2.10 (caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d)
+  License: Apache License, Version 2.0 (https://github.com/caddyserver/caddy)
+- Keycloak 26.8.2 (quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3)
   License: Apache License, Version 2.0 (https://github.com/keycloak/keycloak)
 - Apache APISIX 3.19.0 (apache/apisix:3.19.0-debian@sha256:9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141)
   License: Apache License, Version 2.0 (https://github.com/apache/apisix)
-- FIWARE Orion-LD 1.10.0 (fiware/orion-ld:1.10.0@sha256:3c490a746f6596e24875b046719b97fa5ede39cbb364e3c93d144de2f00898dc)
+- FIWARE Orion-LD 1.12.0 (fiware/orion-ld:1.12.0@sha256:f562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b)
   License: GNU Affero General Public License v3.0 (AGPL-3.0, https://github.com/FIWARE/context.Orion-LD)
-- MongoDB 4.4.29 (mongo:4.4.29@sha256:52c42cbab240b3c5b1748582cc13ef46d521ddacae002bbbda645cebed270ec0)
+- MongoDB 8.0 (mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01)
   License: Server Side Public License v1 (SSPL-1.0) — standalone Orion-LD store
-- n8n 2.42.7 (n8nio/n8n:2.42.7@sha256:906dd7fb0a2f23869001d1767168359489c518ff34d4f67427abf2dc59e868fe)
+- n8n 2.48.1 (n8nio/n8n:2.48.1@sha256:5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f)
   License: Sustainable Use License (non-OSI standalone workflow automation container)
-- ClamAV 1.4.3 (clamav/clamav:1.4.3@sha256:75fb5fd95fcbe1d7e6d240c369c1572b686ee2c95949d1042b5148de8eddebb4)
+- ClamAV 1.5.5 (clamav/clamav:1.5.5@sha256:12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8)
   License: GNU General Public License v2.0 (GPL-2.0, https://github.com/Cisco-Talos/clamav) — standalone TCP clamd scanner
+- Eclipse Mosquitto 2.0.21 (eclipse-mosquitto:2.0.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353)
+  License: Eclipse Public License 2.0 (EPL-2.0) — OSI-clean IIoT MQTT broker (infra/compose/iiot.yml)
+- Node-RED 4.0.9 (nodered/node-red:4.0.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5)
+  License: Apache License, Version 2.0 — OSI-clean IIoT edge normalizer (infra/compose/iiot.yml)
+- TimescaleDB OSS 2.19.3 (timescale/timescaledb:2.19.3-pg16-oss@sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72)
+  License: Apache License, Version 2.0 (OSS build only, excluding TSL) — OSI-clean IIoT time-series store (infra/compose/iiot.yml)
 
 ================================================================================
 4. Bundled Third-Party npm Dependencies in @latticedx/plugin-enterprise-auth

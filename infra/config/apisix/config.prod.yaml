@@ -16,4 +16,5 @@ plugins:
   - limit-count
   - request-id
   - response-rewrite
+  - proxy-rewrite
   - cors

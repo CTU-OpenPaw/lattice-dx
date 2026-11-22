@@ -80,6 +80,38 @@ const paraDocuments = {
   ],
 };
 
+const paraChunks = {
+  name: 'latticeParaChunks',
+  title: 'Phân đoạn tri thức P.A.R.A.',
+  titleField: 'sectionTitle',
+  origin: '@latticedx/plugin-dxos-para',
+  uiManageable: false,
+  createdAt: true,
+  updatedAt: true,
+  fields: [
+    { name: 'documentId', type: 'bigInt', allowNull: false },
+    { name: 'organizationId', type: 'string', allowNull: false },
+    { name: 'code', type: 'string' },
+    { name: 'title', type: 'string' },
+    { name: 'paraSpace', type: 'string', defaultValue: 'resources' },
+    { name: 'sourceType', type: 'string', defaultValue: 'document' },
+    { name: 'chunkIndex', type: 'integer', defaultValue: 0 },
+    { name: 'sectionTitle', type: 'string' },
+    { name: 'pageNumber', type: 'integer', defaultValue: 1 },
+    { name: 'content', type: 'text', allowNull: false },
+    { name: 'tokenCount', type: 'integer', defaultValue: 0 },
+    { name: 'embeddingModel', type: 'string', defaultValue: 'hash-256' },
+    { name: 'embeddingEngine', type: 'string', defaultValue: 'deterministic-fallback' },
+    { name: 'embeddingDim', type: 'integer', defaultValue: 256 },
+    { name: 'embeddingJson', type: 'jsonb', defaultValue: [] },
+    { name: 'active', type: 'boolean', defaultValue: true },
+  ],
+  indexes: [
+    { name: 'idx_lattice_para_chunks_org_doc', fields: ['organizationId', 'documentId'] },
+    { name: 'idx_lattice_para_chunks_org_space', fields: ['organizationId', 'paraSpace', 'active'] },
+  ],
+};
+
 function failValidation(code, message) {
   return Object.assign(new Error(message || code), { code, status: 400 });
 }
@@ -158,6 +190,7 @@ module.exports = {
   PARA_SPACES,
   PARA_STATUSES,
   paraDocuments,
+  paraChunks,
   isSafeAttachmentUrl,
   validateParaDocument,
 };

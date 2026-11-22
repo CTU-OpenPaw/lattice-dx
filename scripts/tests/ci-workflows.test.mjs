@@ -15,14 +15,15 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
 
-test('ci.yml includes check, dependency-audit, compose-validate (all 7 stacks), and trivy-scan jobs with least-privilege permissions', () => {
+test('ci.yml includes check, dependency-audit (moderate+), compose-validate (all 8 stacks + prod profiles), and trivy-scan jobs with least-privilege permissions', () => {
   const ci = read('.github/workflows/ci.yml');
   assert.match(ci, /SPDX-License-Identifier:\s*Apache-2\.0/);
   assert.match(ci, /permissions:\s*\r?\n\s*contents:\s*read/);
   for (const job of ['check:', 'dependency-audit:', 'compose-validate:', 'trivy-scan:']) {
     assert.ok(ci.includes(job), `ci.yml missing job ${job}`);
   }
-  assert.match(ci, /pnpm audit --prod --audit-level=high/);
+  assert.match(ci, /pnpm audit --prod --audit-level=moderate/);
+  assert.doesNotMatch(ci, /--audit-level=high/);
   assert.match(ci, /node scripts\/source-headers\.mjs --check/);
   assert.match(ci, /tests\/nocobase-externals\.test\.mjs/);
   assert.match(ci, /aquasecurity\/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25/);
@@ -35,11 +36,12 @@ test('ci.yml includes check, dependency-audit, compose-validate (all 7 stacks), 
     'infra/compose/integration.yml',
     'infra/compose/native-files.yml',
     'infra/compose/uc1-sample.yml',
+    'infra/compose/iiot.yml',
     'infra/compose/prod.yml',
   ]) {
     assert.ok(ci.includes(composeFile), `compose-validate missing ${composeFile}`);
   }
-  assert.match(ci, /--env-file\s+infra\/compose\/prod\.env\.example/);
+  assert.match(ci, /--env-file\s+infra\/compose\/prod\.env\.example\s+-f\s+infra\/compose\/prod\.yml\s+--profile\s+observability\s+--profile\s+pdf\s+config\s+--quiet/);
 });
 
 test('codeql.yml runs CodeQL javascript-typescript analysis with required security-events permissions', () => {

@@ -9,7 +9,10 @@
 'use strict';
 
 const EMBEDDING_DIM = 256;
+const NEURAL_TIMEOUT_MS = 4500;
+const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small';
 const STOP_WORDS = new Set(['va', 'cua', 'cho', 'trong', 'voi', 'cac', 'nhung', 'mot', 'tai', 've', 'la', 'co', 'khong', 'duoc', 'bi']);
+const BLOCKED_EMBEDDING_HOST_RE = /^(0\.0\.0\.0|\[?::\]?|\[?::ffff:(?:a9fe:|169\.254\.|64[4-7][0-9a-f]:|0:0).*|169\.254\.\d+\.\d+|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|fe[89ab][0-9a-f]:.*|fd00:ec2::254|metadata|metadata\.google\.internal|metadata\.azure\.com)$/i;
 
 const readField = (row, key, fallback) => {
   if (!row) return fallback;
@@ -77,6 +80,97 @@ function computeDeterministicEmbedding(text, dim = EMBEDDING_DIM) {
   return vec;
 }
 
+function resolveEmbeddingEndpoint(env = process.env) {
+  const direct = String(env?.DXOS_EMBEDDING_URL || '').trim();
+  const base = String(env?.AGENT_BASE_URL || '').trim();
+  let candidate = direct;
+  if (!candidate && base) {
+    const cleanBase = base.replace(/\/+$/, '');
+    candidate = cleanBase.endsWith('/embeddings') ? cleanBase : `${cleanBase}/embeddings`;
+  }
+  if (!candidate) return null;
+
+  let parsed;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  if (parsed.username || parsed.password) return null;
+  const host = parsed.hostname.toLowerCase();
+  const bareHost = host.replace(/^\[|\]$/g, '');
+  if (!bareHost || BLOCKED_EMBEDDING_HOST_RE.test(host) || BLOCKED_EMBEDDING_HOST_RE.test(bareHost)) {
+    return null;
+  }
+
+  return {
+    url: parsed.toString(),
+    model: String(env?.DXOS_EMBEDDING_MODEL || DEFAULT_EMBEDDING_MODEL).trim() || DEFAULT_EMBEDDING_MODEL,
+    apiKey: String(env?.DXOS_EMBEDDING_API_KEY || env?.AGENT_API_KEY || env?.NINE_ROUTER_API_KEY || '').trim(),
+  };
+}
+
+function deterministicFallbackResult(text) {
+  return {
+    vector: computeDeterministicEmbedding(text),
+    dim: EMBEDDING_DIM,
+    model: 'fnv1a-256',
+    engine: 'deterministic-fallback',
+  };
+}
+
+async function computeNeuralEmbedding(text, { env = process.env, fetchImpl = globalThis.fetch } = {}) {
+  const cleanText = String(text || '').trim();
+  if (!cleanText) return deterministicFallbackResult('');
+
+  const endpoint = resolveEmbeddingEndpoint(env);
+  if (!endpoint || typeof fetchImpl !== 'function') {
+    return deterministicFallbackResult(cleanText);
+  }
+
+  try {
+    const headers = { 'content-type': 'application/json' };
+    if (endpoint.apiKey) headers.authorization = `Bearer ${endpoint.apiKey}`;
+    const res = await fetchImpl(endpoint.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: endpoint.model,
+        input: cleanText.slice(0, 8000),
+      }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(NEURAL_TIMEOUT_MS),
+    });
+    if (!res || !res.ok) return deterministicFallbackResult(cleanText);
+
+    const payload = await res.json();
+    const rawVec = payload?.data?.[0]?.embedding || payload?.embedding || payload?.vector;
+    if (!Array.isArray(rawVec) || rawVec.length < 8 || rawVec.length > 8192) {
+      return deterministicFallbackResult(cleanText);
+    }
+
+    const vector = new Array(rawVec.length);
+    let magSq = 0;
+    for (let i = 0; i < rawVec.length; i += 1) {
+      const n = Number(rawVec[i]);
+      if (!Number.isFinite(n)) return deterministicFallbackResult(cleanText);
+      vector[i] = n;
+      magSq += n * n;
+    }
+    if (magSq <= 0) return deterministicFallbackResult(cleanText);
+
+    return {
+      vector,
+      dim: vector.length,
+      model: String(payload?.model || endpoint.model),
+      engine: 'neural',
+    };
+  } catch {
+    return deterministicFallbackResult(cleanText);
+  }
+}
+
 function cosineSimilarity(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || !a.length) return 0;
   let dot = 0;
@@ -138,63 +232,41 @@ function lexicalOverlapScore(queryNorm, queryTokens, hayNorm, titleNorm) {
   return score;
 }
 
-function rankHybridDocuments(query, docs = [], { limit = 10, k = 60 } = {}) {
-  const list = Array.isArray(docs) ? docs : [];
-  const cap = Math.max(1, Math.min(30, Number(limit) || 10));
-  const queryNorm = normalizeSearchText(query);
-  const queryTokens = tokenizeVietnamese(query);
-  const queryVec = computeDeterministicEmbedding(queryNorm);
-
-  const enriched = list.map((doc) => {
-    const id = readField(doc, 'id', null);
-    const code = String(readField(doc, 'code', '') || id || '');
-    const title = String(readField(doc, 'title', '') || readField(doc, 'name', '') || code);
-    const summary = String(readField(doc, 'summary', '') || '');
-    const contentMarkdown = String(readField(doc, 'contentMarkdown', '') || '');
-    const paraSpace = String(readField(doc, 'paraSpace', 'resources') || 'resources');
-    const organizationId = readField(doc, 'organizationId', null);
-    const precomputedNorm = readField(doc, 'searchText', '');
-    const hayNorm = precomputedNorm ? normalizeSearchText(precomputedNorm) : extractDocumentSearchText(doc);
-    const titleNorm = normalizeSearchText(`${code} ${title}`);
-    const lex = lexicalOverlapScore(queryNorm, queryTokens, hayNorm, titleNorm);
-    const docVec = Array.isArray(readField(doc, 'embeddingJson', null)) && readField(doc, 'embeddingJson', []).length === EMBEDDING_DIM
-      ? readField(doc, 'embeddingJson', [])
-      : computeDeterministicEmbedding(hayNorm);
-    const pgBoost = Number(readField(doc, '_pgTsRank', 0)) || 0;
-    const sem = queryNorm ? cosineSimilarity(queryVec, docVec) : 0;
-    const combinedRawText = [summary, contentMarkdown, title].filter(Boolean).join(' · ');
-    return {
-      doc,
-      id,
-      code,
-      title,
-      summary,
-      paraSpace,
-      organizationId,
-      lex: lex + pgBoost * 5,
-      sem,
-      snippet: buildSnippet(combinedRawText, query),
-      citation: `[latticeParaDocuments:${code}#${id} · ${paraSpace}]`,
-    };
-  });
-
+function scoreRrfEntries(entries, queryNorm, cap, k = 60) {
   if (!queryNorm) {
-    return enriched.slice(0, cap).map((e, idx) => ({
-      id: e.id,
-      code: e.code,
-      title: e.title,
-      summary: e.summary,
-      paraSpace: e.paraSpace,
-      organizationId: e.organizationId,
-      score: Number((1 / (idx + 1)).toFixed(4)),
-      lexicalScore: 0,
-      semanticScore: 0,
-      snippet: e.snippet,
-      citation: e.citation,
-    }));
+    const seen = new Set();
+    const out = [];
+    for (const e of entries) {
+      const docKey = String(e.id);
+      if (seen.has(docKey)) continue;
+      seen.add(docKey);
+      out.push({
+        id: e.id,
+        code: e.code,
+        title: e.title,
+        summary: e.summary,
+        paraSpace: e.paraSpace,
+        organizationId: e.organizationId,
+        ...(e.isChunk ? {
+          chunkId: e.chunkId,
+          documentId: e.id,
+          sectionTitle: e.sectionTitle,
+          pageNumber: e.pageNumber,
+          chunkIndex: e.chunkIndex,
+        } : {}),
+        embeddingEngine: e.embeddingEngine,
+        score: Number((1 / (out.length + 1)).toFixed(4)),
+        lexicalScore: 0,
+        semanticScore: 0,
+        snippet: e.snippet,
+        citation: e.citation,
+      });
+      if (out.length >= cap) break;
+    }
+    return out;
   }
 
-  const filtered = enriched.filter((e) => e.lex > 0 || e.sem >= 0.18);
+  const filtered = entries.filter((e) => e.lex > 0 || e.sem >= 0.18);
   const byLex = [...filtered].sort((a, b) => b.lex - a.lex);
   const bySem = [...filtered].sort((a, b) => b.sem - a.sem);
   const lexRank = new Map(byLex.map((e, i) => [e, e.lex > 0 ? i + 1 : filtered.length + 50]));
@@ -212,37 +284,277 @@ function rankHybridDocuments(query, docs = [], { limit = 10, k = 60 } = {}) {
       summary: e.summary,
       paraSpace: e.paraSpace,
       organizationId: e.organizationId,
+      ...(e.isChunk ? {
+        chunkId: e.chunkId,
+        documentId: e.id,
+        sectionTitle: e.sectionTitle,
+        pageNumber: e.pageNumber,
+        chunkIndex: e.chunkIndex,
+      } : {}),
+      embeddingEngine: e.embeddingEngine,
       score,
       lexicalScore: Number(e.lex.toFixed(4)),
       semanticScore: Number(e.sem.toFixed(4)),
       snippet: e.snippet,
       citation: e.citation,
+      _isChunk: e.isChunk,
     };
   });
 
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, cap);
+  scored.sort((a, b) => (b.score - a.score) || ((b._isChunk ? 1 : 0) - (a._isChunk ? 1 : 0)));
+  const deduped = [];
+  const seenDocs = new Set();
+  for (const item of scored) {
+    const docKey = String(item.id);
+    if (seenDocs.has(docKey)) continue;
+    seenDocs.add(docKey);
+    const { _isChunk, ...cleanItem } = item;
+    deduped.push(cleanItem);
+    if (deduped.length >= cap) break;
+  }
+  return deduped;
 }
 
-async function executeHybridSearch(db, { organizationId = null, query = '', paraSpace = null, limit = 10 } = {}) {
-  const repo = db?.getRepository?.('latticeParaDocuments');
-  if (!repo) return [];
-  const filter = {
+function buildDocCandidate(doc, query, queryNorm, queryTokens, queryVec) {
+  const id = readField(doc, 'id', null);
+  const code = String(readField(doc, 'code', '') || id || '');
+  const title = String(readField(doc, 'title', '') || readField(doc, 'name', '') || code);
+  const summary = String(readField(doc, 'summary', '') || '');
+  const contentMarkdown = String(readField(doc, 'contentMarkdown', '') || '');
+  const paraSpace = String(readField(doc, 'paraSpace', 'resources') || 'resources');
+  const organizationId = readField(doc, 'organizationId', null);
+  const precomputedNorm = readField(doc, 'searchText', '');
+  const hayNorm = precomputedNorm ? normalizeSearchText(precomputedNorm) : extractDocumentSearchText(doc);
+  const titleNorm = normalizeSearchText(`${code} ${title}`);
+  const lex = lexicalOverlapScore(queryNorm, queryTokens, hayNorm, titleNorm);
+  const storedVec = readField(doc, 'embeddingJson', null);
+  const docVec = Array.isArray(storedVec) && storedVec.length === EMBEDDING_DIM
+    ? storedVec
+    : computeDeterministicEmbedding(hayNorm);
+  const pgBoost = Number(readField(doc, '_pgTsRank', 0)) || 0;
+  const sem = queryNorm ? cosineSimilarity(queryVec, docVec) : 0;
+  const combinedRawText = [summary, contentMarkdown, title].filter(Boolean).join(' · ');
+  return {
+    isChunk: false,
+    id,
+    code,
+    title,
+    summary,
+    paraSpace,
+    organizationId,
+    embeddingEngine: 'deterministic-fallback',
+    lex: lex + pgBoost * 5,
+    sem,
+    snippet: buildSnippet(combinedRawText, query),
+    citation: `[latticeParaDocuments:${code}#${id} · ${paraSpace}]`,
+  };
+}
+
+function buildChunkCandidate(chunk, docById, query, queryNorm, queryTokens, queryEmb, detQueryVec) {
+  const chunkId = readField(chunk, 'id', null);
+  const documentId = readField(chunk, 'documentId', null);
+  const parentDoc = docById.get(String(documentId)) || null;
+  const code = String(readField(chunk, 'code', '') || readField(parentDoc, 'code', '') || documentId || '');
+  const title = String(readField(chunk, 'title', '') || readField(parentDoc, 'title', '') || code);
+  const summary = String(readField(parentDoc, 'summary', '') || '');
+  const paraSpace = String(readField(chunk, 'paraSpace', '') || readField(parentDoc, 'paraSpace', 'resources') || 'resources');
+  const organizationId = readField(chunk, 'organizationId', null);
+  const chunkIndex = Math.max(0, Number(readField(chunk, 'chunkIndex', 0)) || 0);
+  const sectionTitle = String(readField(chunk, 'sectionTitle', '') || '');
+  const pageNumber = Math.max(1, Number(readField(chunk, 'pageNumber', 1)) || 1);
+  const content = String(readField(chunk, 'content', '') || '');
+  const hayNorm = normalizeSearchText([code, title, sectionTitle, content].filter(Boolean).join(' '));
+  const titleNorm = normalizeSearchText(`${code} ${title} ${sectionTitle}`);
+  const lex = lexicalOverlapScore(queryNorm, queryTokens, hayNorm, titleNorm);
+  const pgTsRank = Number(readField(chunk, '_pgTsRank', readField(chunk, 'pgTsRank', 0))) || 0;
+  const pgVectorSimRaw = readField(chunk, '_pgVectorSim', readField(chunk, 'pgVectorSim', null));
+  const hasPgVectorSim = pgVectorSimRaw != null && Number.isFinite(Number(pgVectorSimRaw));
+  const storedVec = readField(chunk, 'embeddingJson', null);
+
+  let sem = 0;
+  let embeddingEngine = 'deterministic-fallback';
+  if (queryNorm) {
+    if (hasPgVectorSim && queryEmb.engine === 'neural') {
+      sem = Number(pgVectorSimRaw);
+      embeddingEngine = 'neural';
+    } else if (queryEmb.engine === 'neural' && Array.isArray(storedVec) && storedVec.length === queryEmb.dim) {
+      sem = cosineSimilarity(queryEmb.vector, storedVec);
+      embeddingEngine = 'neural';
+    } else {
+      const detChunkVec = Array.isArray(storedVec) && storedVec.length === EMBEDDING_DIM
+        ? storedVec
+        : computeDeterministicEmbedding(hayNorm);
+      sem = cosineSimilarity(detQueryVec, detChunkVec);
+      embeddingEngine = 'deterministic-fallback';
+    }
+  }
+
+  return {
+    isChunk: true,
+    chunkId,
+    id: documentId,
+    code,
+    title,
+    summary,
+    paraSpace,
+    organizationId,
+    sectionTitle,
+    pageNumber,
+    chunkIndex,
+    embeddingEngine,
+    lex: lex + pgTsRank * 5,
+    sem,
+    snippet: buildSnippet(content || [summary, title].filter(Boolean).join(' · '), query),
+    citation: `[latticeParaDocuments:${code}#${documentId} · đoạn #${chunkIndex + 1}]`,
+  };
+}
+
+function rankHybridDocuments(query, docs = [], { limit = 10, k = 60 } = {}) {
+  const list = Array.isArray(docs) ? docs : [];
+  const cap = Math.max(1, Math.min(30, Number(limit) || 10));
+  const queryNorm = normalizeSearchText(query);
+  const queryTokens = tokenizeVietnamese(query);
+  const queryVec = computeDeterministicEmbedding(queryNorm);
+  const enriched = list.map((doc) => buildDocCandidate(doc, query, queryNorm, queryTokens, queryVec));
+  return scoreRrfEntries(enriched, queryNorm, cap, k);
+}
+
+async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, queryRaw, queryEmb }) {
+  const chunkRepo = db?.getRepository?.('latticeParaChunks');
+  const byKey = new Map();
+  const keyFor = (row) => {
+    const rid = readField(row, 'id', null);
+    if (rid != null) return `id:${rid}`;
+    return `doc:${readField(row, 'documentId', '')}:${readField(row, 'chunkIndex', 0)}`;
+  };
+  const mergeRow = (row) => {
+    const rowOrg = readField(row, 'organizationId', null);
+    const rowSpace = readField(row, 'paraSpace', null);
+    if (organizationId && rowOrg !== organizationId) return;
+    if (paraSpace && rowSpace !== paraSpace) return;
+    if (readField(row, 'active', true) === false) return;
+    const key = keyFor(row);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, { ...(typeof row?.toJSON === 'function' ? row.toJSON() : row) });
+      return;
+    }
+    const tsRank = Number(readField(row, '_pgTsRank', readField(row, 'pgTsRank', 0))) || 0;
+    const vecSim = readField(row, '_pgVectorSim', readField(row, 'pgVectorSim', null));
+    if (tsRank > 0) existing._pgTsRank = Math.max(existing._pgTsRank || 0, tsRank);
+    if (vecSim != null && Number.isFinite(Number(vecSim))) existing._pgVectorSim = Number(vecSim);
+  };
+
+  if (db?.sequelize?.query && queryNorm) {
+    if (queryEmb.engine === 'neural' && queryEmb.dim === 1536 && queryEmb.vector.every(Number.isFinite)) {
+      try {
+        const vecLiteral = `[${queryEmb.vector.map((n) => Number(n)).join(',')}]`;
+        const [vecRows] = await db.sequelize.query(
+          `SELECT id, "documentId", "organizationId", code, title, "paraSpace",
+                  "chunkIndex", "sectionTitle", "pageNumber", content, "tokenCount",
+                  "embeddingModel", "embeddingEngine", "embeddingDim", "embeddingJson",
+                  1 - (embedding <=> CAST(:vec AS vector)) AS "pgVectorSim"
+           FROM "latticeParaChunks"
+           WHERE active = true
+             AND embedding IS NOT NULL
+             AND (:org::text IS NULL OR "organizationId" = :org)
+             AND (:paraSpace::text IS NULL OR "paraSpace" = :paraSpace)
+           ORDER BY embedding <=> CAST(:vec AS vector) ASC
+           LIMIT 200`,
+          { replacements: { vec: vecLiteral, org: organizationId || null, paraSpace: paraSpace || null } },
+        );
+        if (Array.isArray(vecRows)) {
+          for (const r of vecRows) mergeRow(r);
+        }
+      } catch {
+        // Plain Postgres without pgvector or unit mock: ignore cleanly
+      }
+    }
+
+    try {
+      const qRaw = String(queryRaw || queryNorm || '').trim().toLowerCase();
+      const [tsRows] = await db.sequelize.query(
+        `SELECT id, "documentId", "organizationId", code, title, "paraSpace",
+                "chunkIndex", "sectionTitle", "pageNumber", content, "tokenCount",
+                "embeddingModel", "embeddingEngine", "embeddingDim", "embeddingJson",
+                (ts_rank_cd("searchVector", plainto_tsquery('simple', :qNorm)) + ts_rank_cd("searchVector", plainto_tsquery('simple', :qRaw))) AS "pgTsRank"
+         FROM "latticeParaChunks"
+         WHERE active = true
+           AND (:org::text IS NULL OR "organizationId" = :org)
+           AND (:paraSpace::text IS NULL OR "paraSpace" = :paraSpace)
+           AND ("searchVector" @@ plainto_tsquery('simple', :qNorm) OR "searchVector" @@ plainto_tsquery('simple', :qRaw))
+         ORDER BY "pgTsRank" DESC
+         LIMIT 200`,
+        { replacements: { qNorm: queryNorm, qRaw, org: organizationId || null, paraSpace: paraSpace || null } },
+      );
+      if (Array.isArray(tsRows)) {
+        for (const r of tsRows) mergeRow(r);
+      }
+    } catch {
+      // Fallback transparently when running on mocks or pre-migration DB
+    }
+  }
+
+  if (chunkRepo && typeof chunkRepo.find === 'function') {
+    const chunkFilter = {
+      active: true,
+      ...(organizationId ? { organizationId } : {}),
+      ...(paraSpace ? { paraSpace } : {}),
+    };
+    const ormRows = (await chunkRepo.find({ filter: chunkFilter, limit: 500, sort: ['documentId', 'chunkIndex'] })) || [];
+    for (const r of ormRows) mergeRow(r);
+  }
+
+  return [...byKey.values()];
+}
+
+async function executeHybridSearch(db, {
+  organizationId = null,
+  query = '',
+  paraSpace = null,
+  limit = 10,
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  const docRepo = db?.getRepository?.('latticeParaDocuments');
+  const chunkRepo = db?.getRepository?.('latticeParaChunks');
+  if (!docRepo && !chunkRepo) return [];
+
+  const cap = Math.max(1, Math.min(30, Number(limit) || 10));
+  const queryRaw = String(query || '').trim().toLowerCase();
+  const queryNorm = normalizeSearchText(query);
+  const queryTokens = tokenizeVietnamese(query);
+  const queryEmb = queryNorm
+    ? await computeNeuralEmbedding(query, { env, fetchImpl })
+    : deterministicFallbackResult('');
+  const detQueryVec = queryEmb.engine === 'deterministic-fallback' && queryEmb.dim === EMBEDDING_DIM
+    ? queryEmb.vector
+    : computeDeterministicEmbedding(queryNorm);
+
+  const chunkRows = await fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, queryRaw, queryEmb });
+  const docFilter = {
     active: true,
     ...(organizationId ? { organizationId } : {}),
     ...(paraSpace ? { paraSpace } : {}),
   };
-  const rows = (await repo.find({ filter, limit: 200, sort: ['-id'] })) || [];
-  if (db?.sequelize?.query && normalizeSearchText(query) && rows.length) {
+  const rawDocRows = docRepo && typeof docRepo.find === 'function'
+    ? ((await docRepo.find({ filter: docFilter, limit: 500, sort: ['-id'] })) || [])
+    : [];
+  const docRows = rawDocRows.filter((d) => (
+    (!organizationId || readField(d, 'organizationId', null) === organizationId)
+    && (!paraSpace || readField(d, 'paraSpace', null) === paraSpace)
+    && readField(d, 'active', true) !== false
+  ));
+
+  if (db?.sequelize?.query && queryNorm && docRows.length) {
     try {
-      const qNorm = normalizeSearchText(query);
       const [tsRows] = await db.sequelize.query(
         'SELECT id, ts_rank_cd("searchVector", plainto_tsquery(\'simple\', :q)) AS rank FROM "latticeParaDocuments" WHERE active = true AND (:org::text IS NULL OR "organizationId" = :org) AND "searchVector" @@ plainto_tsquery(\'simple\', :q) LIMIT 100',
-        { replacements: { q: qNorm, org: organizationId || null } },
+        { replacements: { q: queryNorm, org: organizationId || null } },
       );
       if (Array.isArray(tsRows) && tsRows.length) {
         const boostMap = new Map(tsRows.map((r) => [String(r.id), Number(r.rank) || 0]));
-        for (const r of rows) {
+        for (const r of docRows) {
           const rid = String(readField(r, 'id', ''));
           if (boostMap.has(rid)) r._pgTsRank = boostMap.get(rid);
         }
@@ -251,15 +563,39 @@ async function executeHybridSearch(db, { organizationId = null, query = '', para
       // Fall back transparently to JS RRF when running on unit mocks or pre-migration DB
     }
   }
-  return rankHybridDocuments(query, rows, { limit });
+
+  const docById = new Map();
+  for (const d of docRows) {
+    const did = readField(d, 'id', null);
+    if (did != null) docById.set(String(did), d);
+  }
+
+  const chunkedDocIds = new Set();
+  const candidates = [];
+  for (const chunk of chunkRows) {
+    const did = readField(chunk, 'documentId', null);
+    if (did != null) chunkedDocIds.add(String(did));
+    candidates.push(buildChunkCandidate(chunk, docById, query, queryNorm, queryTokens, queryEmb, detQueryVec));
+  }
+
+  for (const doc of docRows) {
+    const did = readField(doc, 'id', null);
+    if (did != null && chunkedDocIds.has(String(did))) continue;
+    candidates.push(buildDocCandidate(doc, query, queryNorm, queryTokens, detQueryVec));
+  }
+
+  return scoreRrfEntries(candidates, queryNorm, cap);
 }
 
 module.exports = {
   EMBEDDING_DIM,
+  NEURAL_TIMEOUT_MS,
   stripVietnameseDiacritics,
   normalizeSearchText,
   tokenizeVietnamese,
   computeDeterministicEmbedding,
+  resolveEmbeddingEndpoint,
+  computeNeuralEmbedding,
   cosineSimilarity,
   buildSnippet,
   extractDocumentSearchText,

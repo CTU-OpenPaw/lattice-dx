@@ -298,6 +298,63 @@ const uiSnapshots = {
   ],
 };
 
+const aiQuotaUsage = {
+  name: 'latticeAiQuotaUsage',
+  title: 'Hạn mức & Chi phí AI theo Ngày',
+  titleField: 'dayKey',
+  origin: '@latticedx/plugin-dxos-ai',
+  uiManageable: false,
+  createdAt: true,
+  updatedAt: true,
+  fields: [
+    { name: 'organizationId', type: 'string', allowNull: false, defaultValue: 'native-ui-lab' },
+    { name: 'dayKey', type: 'string', allowNull: false },
+    { name: 'userId', type: 'string', allowNull: false },
+    { name: 'calls', type: 'integer', defaultValue: 0, allowNull: false },
+    { name: 'promptTokens', type: 'bigInt', defaultValue: 0, allowNull: false },
+    { name: 'completionTokens', type: 'bigInt', defaultValue: 0, allowNull: false },
+    { name: 'costUsd', type: 'double', defaultValue: 0, allowNull: false },
+    { name: 'piiRedacted', type: 'integer', defaultValue: 0, allowNull: false },
+  ],
+  indexes: [
+    { name: 'uidx_lattice_ai_quota_org_day_user', fields: ['organizationId', 'dayKey', 'userId'], unique: true },
+    { name: 'idx_lattice_ai_quota_org_day', fields: ['organizationId', 'dayKey'] },
+  ],
+};
+
+const aiApprovalQueue = {
+  name: 'latticeAiApprovalQueue',
+  title: 'Hàng chờ Phê duyệt Tác vụ AI (HITL)',
+  titleField: 'toolName',
+  origin: '@latticedx/plugin-dxos-ai',
+  uiManageable: false,
+  createdAt: true,
+  updatedAt: true,
+  fields: [
+    { name: 'organizationId', type: 'string', allowNull: false, defaultValue: 'native-ui-lab' },
+    { name: 'requesterUserId', type: 'bigInt', allowNull: false },
+    { name: 'requesterUsername', type: 'string' },
+    { name: 'aiEmployee', type: 'string' },
+    { name: 'toolName', type: 'string', allowNull: false },
+    { name: 'targetCollection', type: 'string', allowNull: false },
+    { name: 'targetRecordId', type: 'bigInt' },
+    { name: 'operation', type: 'string', defaultValue: 'update' },
+    { name: 'proposedArgs', type: 'jsonb', defaultValue: {} },
+    { name: 'diffPreview', type: 'jsonb', defaultValue: {} },
+    { name: 'riskLevel', type: 'string', defaultValue: 'medium' },
+    { name: 'status', type: 'string', defaultValue: 'pending' },
+    { name: 'decidedByUserId', type: 'bigInt' },
+    { name: 'decidedByUsername', type: 'string' },
+    { name: 'decisionNote', type: 'string' },
+    { name: 'decidedAt', type: 'date' },
+    { name: 'executionResult', type: 'jsonb' },
+    { name: 'expiresAt', type: 'date' },
+  ],
+  indexes: [
+    { name: 'idx_lattice_ai_hitl_org_status_created', fields: ['organizationId', 'status', 'createdAt'] },
+  ],
+};
+
 function failSchema(code, message, status = 400) {
   return Object.assign(new Error(message || code), { code, status });
 }
@@ -474,6 +531,8 @@ module.exports = {
   aiProfiles,
   aiAuditLogs,
   uiSnapshots,
+  aiQuotaUsage,
+  aiApprovalQueue,
   validateMcpServerUrl,
   redactAuditText,
   sanitizeAuditSummary,

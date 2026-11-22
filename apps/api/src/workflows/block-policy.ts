@@ -7,11 +7,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import type { WorkflowActor, WorkflowBinding, WorkflowRun, WorkflowStep, WorkflowTypedBinding, WorkflowEntityVersion, WorkflowBlockResult } from '@dx/contracts';
-import {name as entityName,slug,version,validateAttributes,EntityError} from '../entities/policy.js';
+import {assertSafePropKey,name as entityName,slug,version,validateAttributes,EntityError} from '../entities/policy.js';
 import { WorkflowError } from './policy.js';
 import {validateExpression} from './expression-policy.js';
 import {evaluatePrivateExpression,type PrivateValues} from './private-blocks.js';
 const unsafe = new Set(['__proto__', 'prototype', 'constructor']);
+function setStepFieldSet(target: Record<string, Set<string>>, key: unknown, value: Set<string>): void {
+  if (typeof key !== 'string') fail();
+  Object.defineProperty(target, assertSafePropKey(key), { value, enumerable: true, configurable: true, writable: true });
+}
 export function safeBlockName(value: unknown, role = false): value is string {
   return typeof value === 'string' && value.length <= 80 && !unsafe.has(value)
     && (role ? /^[a-zA-Z][a-zA-Z0-9_.:-]*$/ : /^[a-zA-Z][a-zA-Z0-9_-]*$/).test(value);
@@ -90,7 +94,7 @@ function validateStepConfiguration(value: unknown, dataFields: Set<string>, inpu
       if(!['entities.create','entities.query'].includes(step.action))binding(item.id);
       if(['entities.update','entities.archive','entities.link','entities.unlink'].includes(step.action))expected(item.expectedVersion);
       if(['entities.link','entities.unlink'].includes(step.action)){entityName(item.name);binding(item.targetId);}
-      if(step.action==='entities.project'){if(!Array.isArray(item.fields)||item.fields.length<1||item.fields.length>20||new Set(item.fields).size!==item.fields.length)fail();for(const field of item.fields)entityName(field);projection[step.id]=new Set(item.fields as string[]);}
+      if(step.action==='entities.project'){if(!Array.isArray(item.fields)||item.fields.length<1||item.fields.length>20||new Set(item.fields).size!==item.fields.length)fail();for(const field of item.fields)entityName(field);setStepFieldSet(projection,step.id,new Set(item.fields as string[]));}
       if(step.action==='entities.query'){
         if(item.limit!==undefined&&(!Number.isSafeInteger(item.limit)||Number(item.limit)<1||Number(item.limit)>100))fail();
         if(item.filters!==undefined){if(!Array.isArray(item.filters)||item.filters.length>10)fail();for(const filter of item.filters){keys(filter,['field','operator','value']);entityName(filter.field);if(!['eq','ne','gt','gte','lt','lte','contains','exists'].includes(filter.operator as string))fail();if(filter.operator==='exists'){if(Object.hasOwn(filter,'value'))fail();}else typed(filter.value);}}
@@ -99,7 +103,7 @@ function validateStepConfiguration(value: unknown, dataFields: Set<string>, inpu
       if(step.assignment!==undefined)fail();
       keys(step.input,step.action==='data.evaluate'?['values']:['condition']);
       if(step.action==='data.assert')expression(step.input.condition);
-      else {const values=step.input.values;if(!object(values)||Object.keys(values).length<1||Object.keys(values).length>20)fail();for(const [name,value] of Object.entries(values)){if(!safeBlockName(name))fail();expression(value);}evaluation[step.id]=new Set(Object.keys(values));}
+      else {const values=step.input.values;if(!object(values)||Object.keys(values).length<1||Object.keys(values).length>20)fail();for(const [name,value] of Object.entries(values)){if(!safeBlockName(name))fail();expression(value);}setStepFieldSet(evaluation,step.id,new Set(Object.keys(values)));}
     } else if (step.action === 'records.create') {
       if (step.assignment !== undefined) fail();
       keys(step.input, ['title']);

@@ -225,6 +225,77 @@ function createCopilotStripElement(React, { employees = [], onRunPrompt } = {}) 
   );
 }
 
+function triggerBase64Download(contentBase64, mimeType, filename) {
+  if (
+    typeof document === 'undefined'
+    || typeof document.createElement !== 'function'
+    || typeof Blob === 'undefined'
+    || typeof URL === 'undefined'
+    || typeof URL.createObjectURL !== 'function'
+    || typeof atob !== 'function'
+  ) {
+    return { downloaded: false, reason: 'browser_unavailable' };
+  }
+  const cleanB64 = String(contentBase64 || '').replace(/\s+/g, '');
+  if (!cleanB64) {
+    return { downloaded: false, reason: 'empty_content' };
+  }
+  const safeFilename = String(filename || 'export').replace(/[\\/:*?"<>|\r\n\0]/g, '_') || 'export';
+  const binary = atob(cleanB64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: mimeType || 'application/octet-stream' });
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  try {
+    anchor.href = objectUrl;
+    anchor.download = safeFilename;
+    if (anchor.style) anchor.style.display = 'none';
+    if (document.body && typeof document.body.appendChild === 'function') {
+      document.body.appendChild(anchor);
+    }
+    if (typeof anchor.click === 'function') {
+      anchor.click();
+    }
+  } finally {
+    if (document.body && typeof document.body.removeChild === 'function') {
+      try { document.body.removeChild(anchor); } catch {}
+    }
+    if (typeof URL.revokeObjectURL === 'function') {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+  return { downloaded: true, filename: safeFilename };
+}
+
+async function requestAndDownloadExport(api, { collection, format = 'csv', fields = null, filter = null } = {}) {
+  if (!api?.request || !SAFE_COLLECTION_RE.test(String(collection || ''))) {
+    return { ok: false, meta: null, download: { downloaded: false, reason: 'invalid_request' } };
+  }
+  const res = await api.request({
+    url: 'dxosBlocks:exportReport',
+    method: 'post',
+    data: {
+      collection,
+      format,
+      ...(Array.isArray(fields) && fields.length ? { fields } : {}),
+      ...(filter && typeof filter === 'object' ? { filter } : {}),
+    },
+  });
+  const meta = res?.data?.data || res?.data || {};
+  let download = { downloaded: false, reason: 'no_content' };
+  if (meta.contentBase64) {
+    download = triggerBase64Download(
+      meta.contentBase64,
+      meta.mimeType,
+      meta.filename || `${collection}.${format}`,
+    );
+  }
+  return { ok: true, meta, download };
+}
+
 module.exports = {
   SAFE_COLLECTION_RE,
   isSafeAppPath,
@@ -238,4 +309,6 @@ module.exports = {
   fetchPortalCopilot,
   triggerDxosCopilot,
   createCopilotStripElement,
+  triggerBase64Download,
+  requestAndDownloadExport,
 };

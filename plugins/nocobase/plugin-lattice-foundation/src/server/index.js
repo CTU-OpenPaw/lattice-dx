@@ -23,8 +23,18 @@ const {registerNativeIntegrations}=require('./native-integrations');
 const {registerNativePortals}=require('./native-portals');
 const {registerChatterResource}=require('./record-chatter');
 const {registerVoucherLifecycleResource}=require('./voucher-lifecycle');
+const {registerNotificationCenter}=require('./notification-center');
+const {registerSlaEngine}=require('./sla-engine');
+const {registerObservability}=require('./observability');
+const {attachRlsPolicyToTable}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
+    this.db.attachLatticeRlsPolicy = (tableName, txOrOpts) => {
+      const opts = txOrOpts && typeof txOrOpts === 'object' && ('transaction' in txOrOpts || 'schema' in txOrOpts || 'policyName' in txOrOpts)
+        ? txOrOpts
+        : (txOrOpts ? { transaction: txOrOpts } : {});
+      return attachRlsPolicyToTable(this.db, tableName, opts);
+    };
     registerNativeResource(this.app);
     const sharedFiles = createNativeSharedFiles({
       url: process.env.DX_NATIVE_FILES_URL, secret: process.env.DX_NATIVE_FILES_SECRET, instance: process.env.DX_NATIVE_FILES_INSTANCE,
@@ -39,6 +49,9 @@ class LatticeFoundationPlugin extends Plugin {
     registerNativePortals(this.app, this.db);
     registerChatterResource(this.app);
     registerVoucherLifecycleResource(this.app);
+    registerNotificationCenter(this.app);
+    registerSlaEngine(this.app);
+    registerObservability(this.app);
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
     registerSampleApplications(catalog);

@@ -85,6 +85,19 @@ class DxosAiPlugin extends Plugin {
         }
         return next();
       }, { tag: 'dxosAiProfileScope', after: 'acl' });
+
+      this.app.resourceManager.use(async (ctx, next) => {
+        if (ctx.state?.currentRole === 'root') return next();
+        const fullResource = String(ctx.action?.resourceName || '');
+        const baseResource = fullResource.split('.')[0];
+        if (
+          baseResource === 'latticeAiApprovalQueue'
+          || (fullResource === 'charts' && ctx.action?.actionName === 'queryData' && ctx.action?.params?.values?.collection === 'latticeAiApprovalQueue')
+        ) {
+          throw failTool('DXOS_HITL_DIRECT_CRUD_FORBIDDEN', 403, 'Vui lòng sử dụng API phê duyệt HITL chuyên dụng (dxosAi:listApprovals / approveAction / rejectAction).');
+        }
+        return next();
+      }, { tag: 'dxosAiHitlScope', after: 'acl' });
     }
 
     attachAppPubSub(this.app);
@@ -99,6 +112,9 @@ class DxosAiPlugin extends Plugin {
     this.app.acl.allow('dxosAi', 'portalCopilot', 'loggedIn');
     this.app.acl.allow('dxosAi', 'pageSurfaceState', 'loggedIn');
     this.app.acl.allow('dxosAi', 'surfaceEvents', 'loggedIn');
+    this.app.acl.allow('dxosAi', 'listApprovals', 'loggedIn');
+    this.app.acl.allow('dxosAi', 'approveAction', 'loggedIn');
+    this.app.acl.allow('dxosAi', 'rejectAction', 'loggedIn');
   }
 }
 

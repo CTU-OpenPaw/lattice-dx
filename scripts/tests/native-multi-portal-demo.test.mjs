@@ -13,6 +13,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  COLLECTION_FIELD_GROUPS,
   PORTALS,
   assertSafeLabOrigin,
   createRootApiClient,
@@ -222,4 +223,18 @@ test('ensureLogisticsDemoCrew idempotently seeds dispatcher and driver in native
   const rerun = await ensureLogisticsDemoCrew(api);
   assert.equal(rerun.createdUsers, 0);
   assert.equal(rerun.createdEmployees, 0);
+});
+
+test('multi-portal COLLECTION_FIELD_GROUPS covers every interface field across domain schemas', () => {
+  const allSchemas = Object.values(schemas);
+  for (const [colName, groups] of Object.entries(COLLECTION_FIELD_GROUPS)) {
+    const schema = allSchemas.find((s) => s?.name === colName);
+    assert.ok(schema, `Missing schema for ${colName}`);
+    const covered = new Set(groups.flatMap((g) => g.fields));
+    const missing = (schema.fields || [])
+      .filter((f) => Boolean(f.interface))
+      .map((f) => f.name)
+      .filter((name) => !covered.has(name));
+    assert.deepEqual(missing, [], `COLLECTION_FIELD_GROUPS[${colName}] missing interface fields: ${missing.join(', ')}`);
+  }
 });

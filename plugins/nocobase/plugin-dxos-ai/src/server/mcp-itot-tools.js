@@ -16,6 +16,41 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const DISPATCH_ALLOWED_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_manager', 'ldx_dispatcher']);
 const WEBHOOK_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,60}$/;
 
+function cleanVersionString(value) {
+  if (typeof value !== 'string') return '';
+  const cleaned = value.trim().replace(/^v/i, '');
+  if (!cleaned || /^\[object\b/i.test(cleaned)) return '';
+  return cleaned;
+}
+
+async function readVersionCandidate(candidate) {
+  if (candidate == null) return '';
+  if (typeof candidate === 'string') return cleanVersionString(candidate);
+  if (typeof candidate === 'object') {
+    if (typeof candidate.get === 'function') {
+      try {
+        const resolved = cleanVersionString(await candidate.get());
+        if (resolved) return resolved;
+      } catch {}
+    }
+    for (const key of ['version', 'current', 'value']) {
+      const resolved = cleanVersionString(candidate[key]);
+      if (resolved) return resolved;
+    }
+  }
+  return '';
+}
+
+async function resolveHostVersion(env, ...candidates) {
+  const envVer = cleanVersionString(env?.NOCOBASE_VERSION);
+  if (envVer) return envVer;
+  for (const candidate of candidates) {
+    const resolved = await readVersionCandidate(candidate);
+    if (resolved) return resolved;
+  }
+  return '2.2.50';
+}
+
 async function safeCount(db, name, filter = {}) {
   if (!db?.getRepository) return 0;
   if (typeof db.hasCollection === 'function' && !db.hasCollection(name)) return 0;
@@ -232,8 +267,9 @@ function createItOtMcpTools(dbArg, env = process.env, fetchImpl = globalThis.fet
   ];
 }
 
-async function buildEnterpriseTopology(db, env = process.env, fetchImpl = globalThis.fetch) {
+async function buildEnterpriseTopology(db, env = process.env, fetchImpl = globalThis.fetch, app = null) {
   const urls = resolveServiceUrls(env);
+  const nocobaseVersion = await resolveHostVersion(env, db?.app?.version, app?.version);
   const [orion, n8n, keycloak, rolesCount, assetsCount, outboxPending, workflowsCount, portalsCount, paraCount, profilesCount, auditCount, collectionsCount] = await Promise.all([
     probeService(`${urls.orionUrl}/version`, fetchImpl),
     probeService(`${urls.n8nUrl}/healthz`, fetchImpl),
@@ -251,8 +287,9 @@ async function buildEnterpriseTopology(db, env = process.env, fetchImpl = global
 
   return {
     platform: 'LatticeDX Enterprise Digital OS (DX-OS)',
+    nocobaseVersion,
     generatedAt: new Date().toISOString(),
-    positioningStatement: 'NocoBase 2.2.38 đóng vai trò phân hệ dữ liệu & metadata ứng dụng (Plane #6) bên dưới kiến trúc điều phối 6 phân hệ của LatticeDX.',
+    positioningStatement: `NocoBase ${nocobaseVersion} đóng vai trò phân hệ dữ liệu & metadata ứng dụng (Plane #6) bên dưới kiến trúc điều phối 6 phân hệ của LatticeDX.`,
     clause52Preserved: true,
     planes: [
       {
@@ -302,10 +339,10 @@ async function buildEnterpriseTopology(db, env = process.env, fetchImpl = global
       {
         key: 'appDataSubstrate',
         order: 6,
-        name: 'NocoBase 2.2.38 Application Data & UI Substrate',
+        name: `NocoBase ${nocobaseVersion} Application Data & UI Substrate`,
         technologies: ['Collections & Schema Engine', 'FlowEngine Native UI', 'Plugin Manager (7 Apache-2.0 Plugins)'],
         healthy: Boolean(db),
-        clause52Attribution: 'Powered by NocoBase (v2.2.38 preserved)',
+        clause52Attribution: `Powered by NocoBase (v${nocobaseVersion} preserved)`,
         metrics: { collectionsCount },
       },
     ],

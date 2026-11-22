@@ -47,10 +47,16 @@ export async function createFilesystemStore(root:string,testing?:{objectKey?:()=
  async function checkRoot(){const next=await validateRoot(root);if(initial.dev!==next.dev||initial.ino!==next.ino)throw new Error('Storage root changed');}
  async function readVerified(pointer:Extract<StoragePointer,{provider:'filesystem'}>) {
   if(!keyPattern.test(pointer.objectKey)||!Number.isInteger(pointer.size)||pointer.size<0||pointer.size>MAX_FILE_BYTES||!/^[a-f0-9]{64}$/.test(pointer.sha256))throw new Error('Invalid storage pointer');
-  await checkRoot();const path=join(root,pointer.objectKey);const before=await lstat(path);
-  if(!before.isFile()||before.isSymbolicLink()||normalized(await realpath(path))!==normalized(path))throw new Error('Unsafe object');
+  await checkRoot();const path=join(root,pointer.objectKey);
   const handle=await open(path,constants.O_RDONLY|(constants.O_NOFOLLOW??0));
-  try {same(before,await handle.stat());const bytes=await readHandle(handle,pointer.size,pointer.sha256);same(before,await lstat(path));if(normalized(await realpath(path))!==normalized(path))throw new Error('Object resolution changed');await checkRoot();return bytes;}
+  try {
+   const opened=await handle.stat();
+   if(!opened.isFile()||opened.isSymbolicLink()||normalized(await realpath(path))!==normalized(path))throw new Error('Unsafe object');
+   const bytes=await readHandle(handle,pointer.size,pointer.sha256);
+   same(opened,await handle.stat());same(opened,await lstat(path));
+   if(normalized(await realpath(path))!==normalized(path))throw new Error('Object resolution changed');
+   await checkRoot();return bytes;
+  }
   finally {await handle.close();}
  }
  return {readVerified,async writeVerified(content){

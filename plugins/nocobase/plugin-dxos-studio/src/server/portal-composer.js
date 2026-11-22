@@ -14,16 +14,21 @@ const COLLECTION_FIELD_GROUPS = {
   latticeIncidentCases: [
     { title: 'Định danh & Tài sản', fields: ['code', 'name', 'organizationId', 'assetEntityId', 'runId', 'notificationId'] },
     { title: 'Phân công & Trạng thái', fields: ['handlerId', 'severity', 'status'] },
+    { title: 'Giám sát & Xác nhận cảnh báo', fields: ['fingerprint', 'acknowledgedBy', 'clearedBy'] },
     { title: 'Đề xuất AI & Khắc phục', fields: ['proposal', 'resolutionNote', 'closeNote'] },
+  ],
+  latticeRequests: [
+    { title: 'Thông tin Yêu cầu', fields: ['code', 'name', 'organizationId', 'category', 'description'] },
+    { title: 'Trạng thái & Vòng đời chứng từ', fields: ['status', 'version', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'] },
   ],
   latticeOrders: [
     { title: 'Thông tin Đơn vận chuyển', fields: ['code', 'name', 'organizationId', 'category', 'customer', 'quantity'] },
     { title: 'Tuyến vận chuyển & Mô tả', fields: ['origin', 'destination', 'description'] },
-    { title: 'Trạng thái & Phê duyệt', fields: ['status', 'version', 'decisionReason'] },
+    { title: 'Trạng thái & Vòng đời chứng từ', fields: ['status', 'version', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'] },
   ],
   latticeServiceTickets: [
     { title: 'Thông tin Phiếu dịch vụ', fields: ['code', 'name', 'organizationId', 'serviceType', 'priority', 'description'] },
-    { title: 'Trạng thái & Kết quả', fields: ['status', 'version', 'resolutionNote', 'decisionReason'] },
+    { title: 'Trạng thái & Vòng đời chứng từ', fields: ['status', 'version', 'resolutionNote', 'decisionReason', 'submittedBy', 'cancelledBy', 'cancelReason'] },
   ],
   latticeParaDocuments: [
     { title: 'Định danh & Phân vùng P.A.R.A.', fields: ['code', 'title', 'organizationId', 'paraSpace', 'tags', 'status'] },
@@ -79,6 +84,11 @@ const OVERVIEW_SPECS = [
         uidSuffix: 'tasks',
         use: 'DxosWorkflowTasksBlockModel',
         config: { title: 'Hộp việc Quy trình của tôi [P]', statusFilter: 'pending', pageSize: 5 },
+      },
+      {
+        uidSuffix: 'workbench',
+        use: 'DxosRecordWorkbenchBlockModel',
+        config: { title: 'Chứng từ, Chatter & Xuất báo cáo Mua sắm [W]', collection: 'latticeRequests', showExport: true, showVoucherActions: true, showChatter: true },
       },
     ],
   },
@@ -167,6 +177,11 @@ const OVERVIEW_SPECS = [
         use: 'DxosWorkflowTasksBlockModel',
         config: { title: 'Công việc Logistics cần xử lý [P]', statusFilter: 'pending', pageSize: 6 },
       },
+      {
+        uidSuffix: 'workbench',
+        use: 'DxosRecordWorkbenchBlockModel',
+        config: { title: 'Chứng từ, Chatter & Xuất báo cáo Logistics [W]', collection: 'latticeOrders', showExport: true, showVoucherActions: true, showChatter: true },
+      },
     ],
   },
   {
@@ -206,6 +221,11 @@ const OVERVIEW_SPECS = [
         use: 'DxosWorkflowTasksBlockModel',
         config: { title: 'Phiếu Dịch vụ & Duyệt của tôi [P]', statusFilter: 'pending', pageSize: 5 },
       },
+      {
+        uidSuffix: 'workbench',
+        use: 'DxosRecordWorkbenchBlockModel',
+        config: { title: 'Chứng từ, Chatter & Xuất báo cáo Dịch vụ [W]', collection: 'latticeServiceTickets', showExport: true, showVoucherActions: true, showChatter: true },
+      },
     ],
   },
 ];
@@ -233,26 +253,228 @@ const EXTRA_DATA_PAGES = [
   },
 ];
 
-function findExistingPage(routes, layoutUid, groupTitle, pageTitle) {
-  const inLayout = routes.filter((r) => {
-    if (!r) return false;
+const MOBILE_LAYOUT_UID = 'mobile-layout-model';
+const DEFAULT_MOBILE_OPERATIONAL_ROLES = [
+  'ldx_employee',
+  'ldx_manager',
+  'ldx_warehouse',
+  'ldx_dispatcher',
+  'ldx_driver',
+  'ldx_director',
+];
+const EXCLUDED_MOBILE_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_sysadmin', 'ldx_connector']);
+
+const MOBILE_PORTAL_PAGES = [
+  {
+    key: 'mobile-approvals',
+    groupTitle: 'Vận hành Di động',
+    groupIcon: 'MobileOutlined',
+    title: 'Việc cần duyệt',
+    icon: 'CheckCircleOutlined',
+    collection: 'latticeRequests',
+    type: 'table',
+    fields: ['code', 'name', 'category', 'status'],
+  },
+  {
+    key: 'mobile-logistics-orders',
+    groupTitle: 'Vận hành Di động',
+    groupIcon: 'MobileOutlined',
+    title: 'Đơn Logistics',
+    icon: 'CarOutlined',
+    collection: 'latticeOrders',
+    type: 'table',
+    fields: ['code', 'name', 'customer', 'origin', 'destination', 'status'],
+  },
+  {
+    key: 'mobile-cold-incidents',
+    groupTitle: 'Vận hành Di động',
+    groupIcon: 'MobileOutlined',
+    title: 'Sự cố Kho lạnh',
+    icon: 'AlertOutlined',
+    collection: 'latticeIncidentCases',
+    type: 'table',
+    fields: ['code', 'name', 'assetEntityId', 'severity', 'status'],
+  },
+  {
+    key: 'mobile-service-tickets',
+    groupTitle: 'Vận hành Di động',
+    groupIcon: 'MobileOutlined',
+    title: 'Phiếu Dịch vụ',
+    icon: 'FileDoneOutlined',
+    collection: 'latticeServiceTickets',
+    type: 'table',
+    fields: ['code', 'name', 'serviceType', 'priority', 'status'],
+  },
+];
+
+function collectLayoutRoutes(routes, layoutUid, linkedRouteIds = new Set()) {
+  const inLayout = [];
+  const inLayoutIds = new Set();
+  const byId = new Map();
+  for (const r of Array.isArray(routes) ? routes : []) {
+    if (!r) continue;
+    const rid = val(r, 'id');
+    if (rid != null) byId.set(String(rid), r);
     const direct = val(r, 'uiLayoutUid') === layoutUid || val(r, 'layoutUid') === layoutUid;
-    if (direct) return true;
+    const linked = rid != null && linkedRouteIds.has(String(rid));
     const layouts = val(r, 'uiLayouts');
-    return Array.isArray(layouts) && layouts.some((l) => val(l, 'uid') === layoutUid);
-  });
-  const byId = new Map(routes.map((r) => [String(val(r, 'id')), r]));
-  for (const r of routes) {
-    const pid = val(r, 'parentId');
-    if (pid != null && inLayout.some((x) => String(val(x, 'id')) === String(pid)) && !inLayout.includes(r)) {
+    const inLayoutsArr = Array.isArray(layouts) && layouts.some((l) => val(l, 'uid') === layoutUid);
+    if (direct || linked || inLayoutsArr) {
       inLayout.push(r);
+      if (rid != null) inLayoutIds.add(String(rid));
     }
   }
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const r of Array.isArray(routes) ? routes : []) {
+      if (!r) continue;
+      const rid = val(r, 'id');
+      const pid = val(r, 'parentId');
+      if (rid != null && !inLayoutIds.has(String(rid)) && pid != null && inLayoutIds.has(String(pid))) {
+        inLayout.push(r);
+        inLayoutIds.add(String(rid));
+        expanded = true;
+      }
+    }
+  }
+  return { inLayout, byId };
+}
+
+function findExistingPage(routes, layoutUid, groupTitle, pageTitle, linkedRouteIds) {
+  const { inLayout, byId } = collectLayoutRoutes(routes, layoutUid, linkedRouteIds);
   return inLayout.find((r) => {
     if (!['page', 'flowPage'].includes(val(r, 'type')) || val(r, 'title') !== pageTitle) return false;
+    if (!groupTitle) return true;
     const parent = val(r, 'parentId') != null ? byId.get(String(val(r, 'parentId'))) : null;
     return parent && val(parent, 'type') === 'group' && val(parent, 'title') === groupTitle;
   }) || null;
+}
+
+async function grantRolesToRoutes(db, routeIds, roleNames) {
+  const grantsRepo = db.getRepository?.('rolesDesktopRoutes');
+  const cleanRouteIds = [...new Set((routeIds || []).filter((id) => id != null))];
+  const cleanRoles = [...new Set((roleNames || []).filter((r) => typeof r === 'string' && r.startsWith('ldx_')))];
+  if (!grantsRepo || !cleanRouteIds.length || !cleanRoles.length) return 0;
+
+  let have = new Set();
+  if (typeof grantsRepo.find === 'function') {
+    const existing = (await grantsRepo.find({ filter: { desktopRouteId: { $in: cleanRouteIds }, roleName: { $in: cleanRoles } } })) || [];
+    have = new Set(existing.map((g) => `${String(val(g, 'desktopRouteId'))}:${val(g, 'roleName')}`));
+  }
+
+  let created = 0;
+  for (const desktopRouteId of cleanRouteIds) {
+    for (const roleName of cleanRoles) {
+      const key = `${String(desktopRouteId)}:${roleName}`;
+      if (have.has(key)) continue;
+      if (typeof grantsRepo.find !== 'function' && typeof grantsRepo.findOne === 'function') {
+        const exists = await grantsRepo.findOne({ filter: { desktopRouteId, roleName } });
+        if (exists) {
+          have.add(key);
+          continue;
+        }
+      }
+      await grantsRepo.create({ values: { desktopRouteId, roleName } });
+      have.add(key);
+      created += 1;
+    }
+  }
+  return created;
+}
+
+async function resolveMobileOperationalRoles(db) {
+  const rolesRepo = db.getRepository?.('roles');
+  if (!rolesRepo || typeof rolesRepo.find !== 'function') {
+    return [...DEFAULT_MOBILE_OPERATIONAL_ROLES];
+  }
+  let rows = (await rolesRepo.find({})) || [];
+  if (!rows.length) {
+    rows = (await rolesRepo.find({ filter: { name: { $in: DEFAULT_MOBILE_OPERATIONAL_ROLES } } })) || [];
+  }
+  return [...new Set(
+    rows
+      .map((r) => ({ name: val(r, 'name'), allowConfigure: val(r, 'allowConfigure'), snippets: val(r, 'snippets') }))
+      .filter((r) => typeof r.name === 'string'
+        && /^ldx_[a-z0-9_]+$/.test(r.name)
+        && !EXCLUDED_MOBILE_ROLES.has(r.name)
+        && r.allowConfigure !== true
+        && !(Array.isArray(r.snippets) && (r.snippets.includes('pm') || r.snippets.includes('pm.*'))))
+      .map((r) => r.name),
+  )];
+}
+
+function buildTablePageBlueprint(layoutUid, page, blockKey) {
+  const fieldGroups = COLLECTION_FIELD_GROUPS[page.collection];
+  return {
+    version: '1',
+    mode: 'create',
+    navigation: {
+      layoutUid,
+      group: { title: page.groupTitle, icon: page.groupIcon },
+      item: { title: page.title, icon: page.icon },
+    },
+    page: { title: page.title, displayTitle: true, enableTabs: false },
+    tabs: [{
+      title: page.title,
+      blocks: [{
+        key: blockKey,
+        type: page.type,
+        title: page.title,
+        collection: page.collection,
+        fields: page.fields,
+        settings: { pageSize: 10 },
+        actions: ['filter', 'refresh'],
+      }],
+    }],
+    ...(fieldGroups ? { defaults: { collections: { [page.collection]: { fieldGroups } } } } : {}),
+  };
+}
+
+async function composeMobilePortal(db, { applyBlueprint }) {
+  if (typeof applyBlueprint !== 'function') {
+    throw Object.assign(new Error('flowSurfaces:applyBlueprint is unavailable'), { status: 503 });
+  }
+  const routesRepo = db.getRepository?.('desktopRoutes');
+  const linksRepo = db.getRepository?.('desktopRoutesUiLayouts');
+
+  const loadMobileState = async () => {
+    const routes = routesRepo ? ((await routesRepo.find({ appends: ['uiLayouts'] })) || []) : [];
+    const links = linksRepo ? ((await linksRepo.find({ filter: { uiLayoutUid: MOBILE_LAYOUT_UID } })) || []) : [];
+    const rawLinkedIds = links.map((l) => val(l, 'desktopRouteId')).filter((id) => id != null);
+    const linkedIds = new Set(rawLinkedIds.map(String));
+    const { inLayout } = collectLayoutRoutes(routes, MOBILE_LAYOUT_UID, linkedIds);
+    return { routes, rawLinkedIds, linkedIds, inLayout };
+  };
+
+  let state = await loadMobileState();
+  let mobilePagesCreated = 0;
+
+  for (const page of MOBILE_PORTAL_PAGES) {
+    if (typeof db.hasCollection === 'function' && !db.hasCollection(page.collection)) continue;
+    const alreadyExists = Boolean(findExistingPage(state.routes, MOBILE_LAYOUT_UID, page.groupTitle, page.title, state.linkedIds))
+      || state.inLayout.some((r) => ['page', 'flowPage'].includes(val(r, 'type')) && val(r, 'title') === page.title);
+    if (alreadyExists) continue;
+
+    await applyBlueprint(buildTablePageBlueprint(MOBILE_LAYOUT_UID, page, page.key));
+    mobilePagesCreated += 1;
+    state = await loadMobileState();
+  }
+
+  const seenIds = new Set();
+  const routeIds = [];
+  for (const id of [...state.inLayout.map((r) => val(r, 'id')), ...state.rawLinkedIds]) {
+    if (id == null) continue;
+    const key = String(id);
+    if (!seenIds.has(key)) {
+      seenIds.add(key);
+      routeIds.push(id);
+    }
+  }
+  const operationalRoles = await resolveMobileOperationalRoles(db);
+  const grantsCreated = await grantRolesToRoutes(db, routeIds, operationalRoles);
+
+  return { mobilePagesCreated, grantsCreated };
 }
 
 function mergeGridLayout(base, uids) {
@@ -358,15 +580,7 @@ async function composePortals(db, { applyBlueprint }) {
     if (typeof db.hasCollection === 'function' && !db.hasCollection(page.collection)) continue;
     const layoutUid = `ldx-portal-${page.slug}`;
     if (findExistingPage(routes, layoutUid, page.groupTitle, page.title)) continue;
-    const fieldGroups = COLLECTION_FIELD_GROUPS[page.collection];
-    await applyBlueprint({
-      version: '1',
-      mode: 'create',
-      navigation: { layoutUid, group: { title: page.groupTitle, icon: page.groupIcon }, item: { title: page.title, icon: page.icon } },
-      page: { title: page.title, displayTitle: true, enableTabs: false },
-      tabs: [{ title: page.title, blocks: [{ key: `${page.slug}-${page.collection}`, type: page.type, title: page.title, collection: page.collection, fields: page.fields, settings: { pageSize: 10 }, actions: ['filter', 'refresh'] }] }],
-      ...(fieldGroups ? { defaults: { collections: { [page.collection]: { fieldGroups } } } } : {}),
-    });
+    await applyBlueprint(buildTablePageBlueprint(layoutUid, page, `${page.slug}-${page.collection}`));
     createdPages += 1;
     routes = routesRepo ? await routesRepo.find({ appends: ['uiLayouts'] }) : routes;
   }
@@ -403,28 +617,20 @@ async function composePortals(db, { applyBlueprint }) {
 
   // Ensure newly created overview/domain pages are granted to the portal's existing roles (additive only).
   const linksRepo = db.getRepository('desktopRoutesUiLayouts');
-  const grantsRepo = db.getRepository('rolesDesktopRoutes');
-  if (linksRepo && grantsRepo) {
+  if (linksRepo) {
     for (const ov of OVERVIEW_SPECS) {
       const uid = `ldx-portal-${ov.slug}`;
       const configuredRoles = Array.isArray(portalMeta[uid]?.roles) ? portalMeta[uid].roles.filter((r) => typeof r === 'string' && r.startsWith('ldx_')) : [];
       if (!configuredRoles.length) continue;
       const links = (await linksRepo.find({ filter: { uiLayoutUid: uid } })) || [];
       const routeIds = [...new Set(links.map((l) => val(l, 'desktopRouteId')).filter((id) => id != null))];
-      if (!routeIds.length) continue;
-      const existing = (await grantsRepo.find({ filter: { desktopRouteId: { $in: routeIds }, roleName: { $in: configuredRoles } } })) || [];
-      const have = new Set(existing.map((g) => `${val(g, 'desktopRouteId')}:${val(g, 'roleName')}`));
-      for (const desktopRouteId of routeIds) {
-        for (const roleName of configuredRoles) {
-          if (!have.has(`${desktopRouteId}:${roleName}`)) {
-            await grantsRepo.create({ values: { desktopRouteId, roleName } });
-          }
-        }
-      }
+      await grantRolesToRoutes(db, routeIds, configuredRoles);
     }
   }
 
-  return { createdPages, attachedBlocks, dxosBlocksAttached: dxosBlocksEnabled };
+  const mobileRes = await composeMobilePortal(db, { applyBlueprint });
+
+  return { createdPages, mobilePagesCreated: mobileRes.mobilePagesCreated, attachedBlocks, dxosBlocksAttached: dxosBlocksEnabled };
 }
 
-module.exports = { OVERVIEW_SPECS, EXTRA_DATA_PAGES, composePortals };
+module.exports = { COLLECTION_FIELD_GROUPS, OVERVIEW_SPECS, EXTRA_DATA_PAGES, MOBILE_PORTAL_PAGES, composeMobilePortal, composePortals };

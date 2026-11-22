@@ -26,8 +26,11 @@ async function checkDir(dir) {
   }
 }
 
+const SAFE_MODULE_ID_RE = /^[A-Za-z0-9_./-]+$/;
+
 async function bundleEntry(entrySource, entryPath) {
   const modules = new Map();
+  const depsMap = {};
   function resolveModulePath(from, spec) {
     let candidate = resolve(dirname(from), spec.endsWith('.js') ? spec : `${spec}.js`);
     if (!existsSync(candidate)) {
@@ -43,6 +46,7 @@ async function bundleEntry(entrySource, entryPath) {
   async function collect(modPath) {
     const id = moduleId(modPath);
     if (modules.has(id)) return;
+    if (!SAFE_MODULE_ID_RE.test(id)) throw new Error(`Invalid bundled module id: ${id}`);
     const source = await readFile(modPath, 'utf8');
     modules.set(id, null);
     const deps = {};
@@ -52,17 +56,21 @@ async function bundleEntry(entrySource, entryPath) {
       deps[match[1]] = moduleId(target);
       await collect(target);
     }
-    modules.set(id, `function(module,exports){const require=name=>__load(${JSON.stringify(deps)}[name]);\n${source}\n}`);
+    depsMap[id] = deps;
+    modules.set(id, 'function(module,exports,__id){const require=name=>__load(__deps[__id][name]);\n' + source + '\n}');
   }
   let output = entrySource;
   for (const match of entrySource.matchAll(/require\(['"](\.[^'"]+)['"]\)/g)) {
     const target = resolveModulePath(entryPath, match[1]);
     await collect(target);
-    output = output.replaceAll(match[0], `__load(${JSON.stringify(moduleId(target))})`);
+    const targetId = moduleId(target);
+    output = output.replaceAll(match[0], `__load('${targetId}')`);
   }
-  const loader = `const __modules={${[...modules].map(([id, src]) => `${JSON.stringify(id)}:${src}`).join(',\n')}};
+  const depsHeader = 'const __deps = ' + JSON.stringify(depsMap) + ';\n';
+  const moduleEntries = [...modules].map(([id, src]) => `'${id}':${src}`).join(',\n');
+  const loader = `${depsHeader}const __modules={${moduleEntries}};
 const __cache=new Map();
-function __load(id){if(!Object.hasOwn(__modules,id))throw new Error('Unknown bundled module: '+id);if(__cache.has(id))return __cache.get(id).exports;const module={exports:{}};__cache.set(id,module);__modules[id](module,module.exports);return module.exports;}\n`;
+function __load(id){if(!Object.hasOwn(__modules,id))throw new Error('Unknown bundled module: '+id);if(__cache.has(id))return __cache.get(id).exports;const module={exports:{}};__cache.set(id,module);__modules[id](module,module.exports,id);return module.exports;}\n`;
   return output.replace("'use strict';", () => `'use strict';\n${loader}`);
 }
 
@@ -71,7 +79,7 @@ await mkdir(join(root, 'dist'), { recursive: true });
 await cp(join(root, 'src'), join(root, 'dist'), { recursive: true });
 await writeFile(
   join(root, 'dist/externalVersion.js'),
-  externalVersionSource(['@nocobase/server', '@nocobase/database', '@nocobase/client', 'react', 'antd']),
+  externalVersionSource(['@nocobase/server', '@nocobase/database', '@nocobase/client', '@nocobase/client-v2', 'react', 'antd']),
   'utf8',
 );
 

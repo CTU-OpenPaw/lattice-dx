@@ -14,6 +14,14 @@ const { recordAiAuditLog } = require('./ai-schemas');
 
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-03-26', '2024-11-05'];
 
+function resolveGatewayVersion() {
+  try {
+    return String(require('../../package.json')?.version || '0.2.0');
+  } catch {
+    return '0.2.0';
+  }
+}
+
 function extractBearerToken(ctx) {
   const auth = ctx.headers?.authorization || ctx.headers?.Authorization || ctx.request?.headers?.authorization || ctx.request?.headers?.Authorization;
   if (typeof auth === 'string') {
@@ -148,7 +156,7 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
           capabilities: { tools: { listChanged: false }, resources: { subscribe: false } },
           serverInfo: {
             name: mode === 'itot' ? 'latticedx-itot-mcp' : 'latticedx-enterprise-mcp',
-            version: '0.1.0',
+            version: resolveGatewayVersion(),
           },
         },
       };
@@ -184,7 +192,7 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
         return;
       }
       if (uri === 'dxos://topology/planes' || uri === 'dxos://itot/health') {
-        const topology = await buildEnterpriseTopology(activeDb, env, fetchImpl);
+        const topology = await buildEnterpriseTopology(activeDb, env, fetchImpl, app || ctx?.app);
         const data = uri === 'dxos://itot/health' ? topology.planes.filter((p) => ['itOtDigitalTwin', 'integrationEventBus'].includes(p.key)) : topology;
         ctx.status = 200;
         ctx.body = { jsonrpc: '2.0', id: reqId, result: { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(data) }] } };

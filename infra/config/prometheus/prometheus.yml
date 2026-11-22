@@ -1,0 +1,43 @@
+# @file LatticeDX — Open Digital Enterprise Platform
+# @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
+# @license Apache-2.0
+# @see https://github.com/CTU-OpenPaw/lattice-dx
+# SPDX-License-Identifier: Apache-2.0
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: nocobase
+    metrics_path: /api/dxos:metrics
+    scheme: http
+    # Token file is written at container startup from DX_METRICS_TOKEN env var; never hardcode secrets.
+    authorization:
+      type: Bearer
+      credentials_file: /tmp/dx_metrics_token
+    static_configs:
+      - targets:
+          - nocobase:80
+
+  - job_name: caddy
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets:
+          - caddy:2020
+
+  - job_name: keycloak
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets:
+          - keycloak:9000
+
+  - job_name: otel-collector
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets:
+          - otel-collector:8889

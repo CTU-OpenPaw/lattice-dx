@@ -524,3 +524,72 @@ test('lockFields preserves scope/scopeId + writeToACL, addNode splices safely, a
   const markNode = db.store.flow_nodes.find((n) => n.workflowId === customWf.workflowId && n.key === 'markReviewed');
   assert.equal(markNode.config.params.filter.organizationId, 'native-ui-lab');
 });
+
+test('DxosRecordWorkbenchBlockModel is allowed and createCollection ensures organizationId & status indexes', async () => {
+  assert.equal(ALLOWED_BLOCK_MODELS.includes('DxosRecordWorkbenchBlockModel'), true);
+  const { db, ctx, byName } = makeBuilderHarness();
+
+  const wbPreview = await byName.get('dxos_compose_page_blocks').invoke(ctx, {
+    action: 'addBlock',
+    portalSlug: 'services',
+    blockUse: 'DxosRecordWorkbenchBlockModel',
+    title: 'Bàn làm việc Chứng từ',
+    config: { collection: 'latticeServiceTickets', showExport: true, showVoucherActions: true, showChatter: true },
+    dryRun: true,
+  });
+  assert.equal(wbPreview.dryRun, true);
+  assert.equal(wbPreview.blockUse, 'DxosRecordWorkbenchBlockModel');
+
+  const sqlQueries = [];
+  const rlsAttached = [];
+  db.attachLatticeRlsPolicy = async (tableName) => { rlsAttached.push(tableName); };
+  db.sequelize = {
+    transaction: async (fn) => fn({}),
+    query: async (sql) => { sqlQueries.push(sql); return [[], 0]; },
+  };
+  const created = await byName.get('dxos_extend_collection_schema').invoke(ctx, {
+    operation: 'createCollection',
+    collectionName: 'latticeCustomColdAudits',
+    title: 'Kiểm định Chuỗi lạnh',
+    fields: [{ name: 'temperatureC', type: 'float', title: 'Nhiệt độ' }],
+    dryRun: false,
+  });
+  assert.equal(created.created, true);
+  assert.deepEqual(rlsAttached, ['latticeCustomColdAudits']);
+  assert.equal(
+    sqlQueries.some((q) => /CREATE INDEX IF NOT EXISTS "idx_latticecustomcoldaudits_org"\s+ON\s+"latticeCustomColdAudits"\s*\("organizationId"\)/i.test(q)),
+    true,
+  );
+  assert.equal(
+    sqlQueries.some((q) => /CREATE INDEX IF NOT EXISTS "idx_latticecustomcoldaudits_org_status"\s+ON\s+"latticeCustomColdAudits"\s*\("organizationId",\s*"status"\)/i.test(q)),
+    true,
+  );
+
+  // addFields attaching organizationId on custom collection also triggers attachLatticeRlsPolicy
+  const addedOrgField = await byName.get('dxos_extend_collection_schema').invoke(ctx, {
+    operation: 'addFields',
+    collectionName: 'latticeCustomColdAudits',
+    fields: [{ name: 'organizationId', type: 'string', title: 'Tổ chức' }],
+    dryRun: false,
+  });
+  assert.equal(addedOrgField.updated, true);
+  assert.deepEqual(rlsAttached, ['latticeCustomColdAudits', 'latticeCustomColdAudits']);
+
+  // Very long collectionName truncates/hashes index name <= 63 chars for PostgreSQL NAMEDATALEN
+  const longQueries = [];
+  db.sequelize.query = async (sql) => { longQueries.push(sql); return [[], 0]; };
+  const longCol = 'latticeCustomVeryLongEnterpriseCollectionNameAlpha12';
+  await byName.get('dxos_extend_collection_schema').invoke(ctx, {
+    operation: 'createCollection',
+    collectionName: longCol,
+    title: 'Long Name Collection',
+    fields: [{ name: 'note', type: 'string', title: 'Ghi chú' }],
+    dryRun: false,
+  });
+  const indexSqls = longQueries.filter((q) => /CREATE INDEX/i.test(q));
+  assert.equal(indexSqls.length, 2);
+  for (const q of indexSqls) {
+    const m = q.match(/CREATE INDEX IF NOT EXISTS "([^"]+)"/);
+    assert.ok(m && m[1].length <= 63, `Expected index name <= 63 chars, got ${m?.[1]?.length}: ${m?.[1]}`);
+  }
+});

@@ -32,6 +32,22 @@ function extractExpectedVersion(ctx, params) {
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
+const IMMUTABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'completed', 'cancelled']);
+const PROTECTED_DOCUMENT_FIELDS = new Set([
+  'status',
+  'version',
+  'requesterId',
+  'assigneeId',
+  'resolutionNote',
+  'decisionReason',
+  'submittedAt',
+  'submittedBy',
+  'cancelledAt',
+  'cancelledBy',
+  'cancelReason',
+  'amendedFromId',
+  'amendmentNo',
+]);
 const SENSITIVE_FILTER_KEY_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt/i;
 
 function clampPageLimit(limit) {
@@ -134,11 +150,22 @@ function createServiceScopeMiddleware(db) {
     if (actionName === 'create' || actionName === 'update') {
       const expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
       let bumpedVersion = null;
-      if (actionName === 'update' && params?.filterByTk != null) {
+      if (actionName === 'update') {
+        if (params?.filterByTk == null || !/^[1-9]\d*$/.test(String(params.filterByTk))) {
+          throw failure('SERVICE_TICKET_ID_REQUIRED', 400, 'Cần mã id phiếu dịch vụ hợp lệ.');
+        }
         const ticketRepo = db.getRepository?.('latticeServiceTickets');
         if (ticketRepo?.findOne) {
           const existing = await ticketRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId } });
           if (!existing) throw failure('SERVICE_TICKET_NOT_FOUND', 404);
+          const currentStatus = String(val(existing, 'status') || '').trim().toLowerCase();
+          if (IMMUTABLE_VOUCHER_STATUSES.has(currentStatus)) {
+            throw failure(
+              'VOUCHER_IMMUTABLE',
+              409,
+              'Chứng từ đã trình duyệt, hoàn tất hoặc đã hủy là bất biến. Vui lòng Hủy (Cancel) và Lập bản điều chỉnh (Amend).',
+            );
+          }
           const currentVersion = Number(val(existing, 'version')) || 1;
           if (expectedVersion !== null && currentVersion !== expectedVersion) {
             throw failure('VERSION_CONFLICT', 409, 'Phiếu dịch vụ đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
@@ -152,7 +179,7 @@ function createServiceScopeMiddleware(db) {
         if (['id', 'userId', 'identitySubject'].includes(k) || (v !== null && typeof v === 'object')) {
           throw failure('NATIVE_PROTECTED_FIELD');
         }
-        if (['status', 'version', 'requesterId', 'assigneeId', 'resolutionNote', 'decisionReason'].includes(k)) {
+        if (PROTECTED_DOCUMENT_FIELDS.has(k)) {
           throw failure('NATIVE_DOCUMENT_PROTECTED_FIELD');
         }
       }

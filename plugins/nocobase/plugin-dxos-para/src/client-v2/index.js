@@ -8,9 +8,9 @@
  */
 (function (factory) {
   if (typeof define === 'function' && define.amd) {
-    define('@latticedx/plugin-dxos-para/client-v2', ['@nocobase/client'], factory);
+    define('@latticedx/plugin-dxos-para/client-v2', ['@nocobase/client-v2'], factory);
   } else if (typeof module === 'object' && module.exports) {
-    module.exports = factory(require('@nocobase/client'));
+    module.exports = factory(require('@nocobase/client-v2'));
   }
 })(function (client) {
   'use strict';

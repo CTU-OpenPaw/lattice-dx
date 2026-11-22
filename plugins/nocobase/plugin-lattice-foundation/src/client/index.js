@@ -26,9 +26,10 @@
   const {registerApplicationViews} = require('../applications/views');
   const {defaultContracts}=require('../shared/contracts');
   const {createNativeBuilderNavigation}=require('./native-builder-navigation');
-  const {createNativePortalManager}=require('./native-portal-manager');
+  const {createNativePortalManager, resolveLegacyMobileRedirect}=require('./native-portal-manager');
   const {createIncidentEvidence}=require('./native-incident-evidence');
   const {createBrandLogo, registerSignInLogo}=require('./native-branding');
+  const {createNotificationBellProvider}=require('./notification-bell');
   function useLatticeFormAction(manifest, blockId) {
     const apiClient = client.useAPIClient();
     const sharedApi = React.useMemo(() => createWorkspaceApi({apiClient}), [apiClient]);
@@ -44,12 +45,21 @@
   }
   class LatticeFoundationClient extends client.Plugin {
     async load() {
+      const mobileV2Dest = resolveLegacyMobileRedirect(typeof window !== 'undefined' ? window : null, this.app);
+      if (mobileV2Dest && typeof window?.location?.replace === 'function') {
+        window.location.replace(mobileV2Dest);
+        return;
+      }
       const BrandLogo=createBrandLogo(client,React);
       registerSignInLogo(this.app,React,BrandLogo);
       const portalManager=createNativePortalManager(client,React,antd,this.app,router,icons,{clientV2});
       await portalManager?.preloadPortals?.();
       const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo,portalManager});
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
+      const NotificationBellProvider=createNotificationBellProvider(client,React,antd,this.app);
+      if (NotificationBellProvider && typeof this.app.use === 'function') {
+        this.app.use(NotificationBellProvider);
+      }
       if (typeof clientV2?.ACLRolesCheckProvider === 'function' && typeof this.app.use === 'function') {
         this.app.use(clientV2.ACLRolesCheckProvider);
       }
@@ -147,6 +157,17 @@
       this.app.router.add('lattice-systems',{path:'/lattice/systems',Component:SystemRuntime});
       this.app.router.add('lattice-system-runtime',{path:'/lattice/systems/:systemId/:version',Component:SystemRuntime});
       this.app.router.add('lattice-application',{path:'/lattice/apps/:applicationId',Component:Workspace});
+      if (typeof window !== 'undefined' && window.__nocobase_app_client_entry_mode__ === 'legacy-default' && !this.app.layoutManager?.hasLayout?.('mobile') && typeof this.app.router?.add === 'function') {
+        const MobileV2Redirect = () => {
+          React.useEffect(() => {
+            const dest = resolveLegacyMobileRedirect(window, this.app);
+            if (dest && typeof window?.location?.replace === 'function') window.location.replace(dest);
+          }, []);
+          return React.createElement('div', { role: 'status', style: { padding: 32, textAlign: 'center', color: '#64748b' } }, 'Đang chuyển đến Cổng Di động...');
+        };
+        this.app.router.add('lattice-mobile-v2', { path: '/mobile', Component: MobileV2Redirect });
+        this.app.router.add('lattice-mobile-v2-sub', { path: '/mobile/*', Component: MobileV2Redirect });
+      }
       if (window.location.hostname === '127.0.0.1' && window.location.pathname.startsWith('/lattice')) {
         const canonical = new URL(window.location.href);canonical.hostname='localhost';
         window.location.replace(canonical.href);return;

@@ -9,6 +9,7 @@
 'use strict';
 
 const {
+  SAFE_COLLECTION_RE,
   isSafeAppPath,
   filterHeroActions,
   parseKpiMetrics,
@@ -16,8 +17,10 @@ const {
   fetchParaVault,
   fetchParaSummary,
   inferPortalSlugFromLocation,
+  requestAndDownloadExport,
 } = require('./blocks-helpers');
 const { createCreativeStudioView, DEFAULT_CREATIVE_BLUEPRINT } = require('./creative-studio-block');
+const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
 const {
   fetchPageSurfaceState,
   fetchInspectPageBlocks,
@@ -80,6 +83,15 @@ function go(app, path) {
   }
 }
 
+const WORKBENCH_COLLECTION_ENUM = [
+  { label: 'Yêu cầu mua sắm (latticeRequests)', value: 'latticeRequests' },
+  { label: 'Đơn Logistics (latticeOrders)', value: 'latticeOrders' },
+  { label: 'Phiếu dịch vụ nội bộ (latticeServiceTickets)', value: 'latticeServiceTickets' },
+  { label: 'Tài sản (latticeAssets)', value: 'latticeAssets' },
+  { label: 'Sự cố IoT (latticeIncidentCases)', value: 'latticeIncidentCases' },
+  { label: 'Tài liệu P.A.R.A. (latticeParaDocuments)', value: 'latticeParaDocuments' },
+];
+
 const DEFAULT_HERO_ACTIONS = JSON.stringify([
   { label: 'Mở Không gian việc', path: '/admin/lattice-workspace' },
   { label: 'Kho tri thức P.A.R.A.', path: '/p/services' },
@@ -98,6 +110,8 @@ function createBlockRenderers(client, React, antd, app) {
   const usePerms = typeof client?.useUIConfigurationPermissions === 'function'
     ? client.useUIConfigurationPermissions
     : () => ({ allowAll: false, actions: {} });
+  const RecordChatterView = createRecordChatterView(client, React, app);
+  const VoucherLifecycleBar = createVoucherLifecycleBar(client, React, app);
 
   function DxosPortalHeroView({ model, liveConfig }) {
     const api = useApi();
@@ -180,11 +194,11 @@ function createBlockRenderers(client, React, antd, app) {
 
     const cols = Math.max(1, Math.min(4, Number(cfg.columns) || 4));
     return h('div', { 'data-testid': 'dxos-kpi-metric-block' },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
-        h('strong', { style: { fontSize: 15, color: '#0f172a' } }, String(cfg.title || 'KPI DX-OS')),
-        h('button', { type: 'button', onClick: loadCounts, disabled: loading, style: { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '2px 10px', cursor: 'pointer', fontSize: 12 } }, loading ? 'Đang tải…' : 'Làm mới'),
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 } },
+        h('strong', { style: { fontSize: 15, color: '#0f172a', minWidth: 0 } }, String(cfg.title || 'KPI DX-OS')),
+        h('button', { type: 'button', onClick: loadCounts, disabled: loading, style: { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '2px 10px', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' } }, loading ? 'Đang tải…' : 'Làm mới'),
       ),
-      h('div', { style: { display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`, gap: 12 } },
+      h('div', { style: { display: 'grid', gridTemplateColumns: cols <= 1 ? 'minmax(0, 1fr)' : 'repeat(auto-fit, minmax(135px, 1fr))', gap: 12 } },
         metrics.map((m, idx) => {
           const entry = counts[idx] || {};
           return h('div', {
@@ -233,7 +247,7 @@ function createBlockRenderers(client, React, antd, app) {
 
     const data = state.data;
     return h('div', { 'data-testid': 'dxos-context-telemetry-block' },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
         h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'NGSI-LD Context')),
         data?.brokerStatus ? h('span', {
           style: {
@@ -300,7 +314,7 @@ function createBlockRenderers(client, React, antd, app) {
     }, [api, cfg.targetCollection, cfg.state, cfg.pageSize]);
 
     return h('div', { 'data-testid': 'dxos-ai-proposal-block' },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
         h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'Đề xuất AI')),
         h('span', { style: { fontSize: 11, color: '#64748b' } }, `${cfg.targetCollection} · ${state.items.length} mục`),
       ),
@@ -343,12 +357,12 @@ function createBlockRenderers(client, React, antd, app) {
     }, [api, cfg.statusFilter, cfg.pageSize]);
 
     return h('div', { 'data-testid': 'dxos-workflow-tasks-block' },
-      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 } },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
         h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'Công việc của tôi')),
         h('button', {
           type: 'button',
           onClick: () => go(app, '/admin/lattice-workspace'),
-          style: { border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff', padding: '2px 10px', cursor: 'pointer', fontSize: 12 },
+          style: { border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff', padding: '2px 10px', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' },
         }, 'Mở tất cả'),
       ),
       state.error ? h('div', { style: { fontSize: 13, color: '#b45309' } }, state.error) : null,
@@ -357,7 +371,7 @@ function createBlockRenderers(client, React, antd, app) {
         : h('div', { style: { display: 'grid', gap: 6 } },
           state.items.map((task) => h('div', {
             key: task.id,
-            style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff' },
+            style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 6, padding: '8px 10px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff' },
           },
             h('div', null,
               h('div', { style: { fontSize: 13, fontWeight: 600, color: '#0f172a' } }, task.node?.title || `Tác vụ #${task.id}`),
@@ -445,7 +459,7 @@ function createBlockRenderers(client, React, antd, app) {
         h('input', {
           type: 'search', value: search, placeholder: 'Tìm tài liệu...',
           onChange: (e) => setSearch(e.target.value),
-          style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
+          style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, maxWidth: '100%', minWidth: 0 },
         }),
       ),
       h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 } },
@@ -466,8 +480,8 @@ function createBlockRenderers(client, React, antd, app) {
           'aria-label': 'Tổ chức',
           style: { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         }, orgChoices.map((oid) => h('option', { key: oid, value: oid }, oid))) : null,
-        h('input', { value: draftCode, placeholder: 'Mã (tùy chọn)', onChange: (e) => setDraftCode(e.target.value), style: { width: 120, padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
-        h('input', { value: draftTitle, placeholder: 'Tiêu đề tài liệu P.A.R.A. mới…', onChange: (e) => setDraftTitle(e.target.value), style: { flex: 1, minWidth: 180, padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
+        h('input', { value: draftCode, placeholder: 'Mã (tùy chọn)', onChange: (e) => setDraftCode(e.target.value), style: { flex: '0 1 120px', minWidth: 0, maxWidth: '100%', padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
+        h('input', { value: draftTitle, placeholder: 'Tiêu đề tài liệu P.A.R.A. mới…', onChange: (e) => setDraftTitle(e.target.value), style: { flex: '1 1 150px', minWidth: 0, maxWidth: '100%', padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
         h('button', { type: 'submit', disabled: creating || !draftTitle.trim(), style: { padding: '4px 12px', borderRadius: 6, border: 'none', background: '#0f766e', color: '#fff', fontSize: 12, cursor: 'pointer' } }, creating ? 'Đang lưu…' : '+ Thêm tài liệu'),
       ) : null,
       state.error ? h('div', { style: { fontSize: 12, color: '#b45309', marginBottom: 6 } }, state.error) : null,
@@ -488,6 +502,191 @@ function createBlockRenderers(client, React, antd, app) {
     );
   }
 
+  function DxosRecordWorkbenchView({ model, liveConfig }) {
+    const api = useApi();
+    const cfg = useBlockConfig(React, model, {
+      title: 'Trao đổi Chatter, Chứng từ & Xuất báo cáo',
+      collection: 'latticeRequests',
+      recordId: '',
+      showExport: true,
+      showVoucherActions: true,
+      showChatter: true,
+    }, liveConfig);
+
+    const safeCfgCollection = SAFE_COLLECTION_RE.test(String(cfg.collection || ''))
+      ? String(cfg.collection)
+      : 'latticeRequests';
+    const [selectedCollection, setSelectedCollection] = React.useState(safeCfgCollection);
+    const [recordIdInput, setRecordIdInput] = React.useState(String(cfg.recordId ?? '').trim());
+    const [recentRecords, setRecentRecords] = React.useState([]);
+    const [exportStatus, setExportStatus] = React.useState('');
+    const [exportBusy, setExportBusy] = React.useState(false);
+
+    React.useEffect(() => {
+      setSelectedCollection(safeCfgCollection);
+    }, [safeCfgCollection]);
+
+    React.useEffect(() => {
+      setRecordIdInput(String(cfg.recordId ?? '').trim());
+    }, [cfg.recordId]);
+
+    const activeCollection = SAFE_COLLECTION_RE.test(String(selectedCollection || ''))
+      ? String(selectedCollection)
+      : 'latticeRequests';
+    const activeRecordId = Number(recordIdInput) > 0 ? Math.floor(Number(recordIdInput)) : 0;
+
+    const loadRecentRecords = React.useCallback(async (isCancelled = () => false) => {
+      if (!api?.request || !SAFE_COLLECTION_RE.test(activeCollection)) {
+        if (!isCancelled()) setRecentRecords([]);
+        return;
+      }
+      try {
+        const res = await api.request({
+          url: `${activeCollection}:list`,
+          method: 'get',
+          params: { pageSize: 20, sort: ['-id'] },
+          skipNotify: true,
+        });
+        if (isCancelled()) return;
+        const rows = Array.isArray(res?.data?.data) ? res.data.data : [];
+        setRecentRecords(rows);
+      } catch {
+        if (!isCancelled()) setRecentRecords([]);
+      }
+    }, [api, activeCollection]);
+
+    React.useEffect(() => {
+      let cancelled = false;
+      loadRecentRecords(() => cancelled);
+      return () => { cancelled = true; };
+    }, [loadRecentRecords]);
+
+    const handleWorkbenchExport = async (format) => {
+      if (!api?.request || exportBusy || !SAFE_COLLECTION_RE.test(activeCollection)) return;
+      setExportBusy(true);
+      try {
+        setExportStatus(`Đang xuất ${format.toUpperCase()}…`);
+        const { meta, download } = await requestAndDownloadExport(api, {
+          collection: activeCollection,
+          format,
+          filter: activeRecordId > 0 ? { id: activeRecordId } : null,
+        });
+        const dlNote = download?.downloaded ? ' · Đã tải xuống' : '';
+        setExportStatus(`Đã xuất ${meta.filename || format.toUpperCase()} (${meta.rowCount ?? 0} dòng)${dlNote}.`);
+      } catch (err) {
+        setExportStatus(err?.response?.data?.errors?.[0]?.message || 'Không xuất được báo cáo.');
+      } finally {
+        setExportBusy(false);
+      }
+    };
+
+    const showControls = cfg.showVoucherActions !== false || cfg.showChatter !== false;
+
+    return h('section', {
+      'data-testid': 'dxos-record-workbench-block',
+      style: {
+        padding: 16,
+        borderRadius: 12,
+        border: '1px solid #cbd5e1',
+        background: '#ffffff',
+        display: 'grid',
+        gap: 12,
+        color: '#0f172a',
+        minWidth: 0,
+        maxWidth: '100%',
+      },
+    },
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+        h('strong', { style: { fontSize: 15, color: '#0f172a', minWidth: 0, wordBreak: 'break-word' } }, String(cfg.title || 'Trao đổi Chatter, Chứng từ & Xuất báo cáo')),
+        cfg.showExport !== false ? h('div', {
+          'data-testid': 'dxos-workbench-export-bar',
+          style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
+        },
+          ['csv', 'xlsx', 'pdf'].map((fmt) => h('button', {
+            key: fmt,
+            type: 'button',
+            disabled: exportBusy,
+            onClick: () => handleWorkbenchExport(fmt),
+            style: {
+              padding: '5px 10px',
+              borderRadius: 6,
+              border: '1px solid #94a3b8',
+              background: '#f8fafc',
+              color: '#0f172a',
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: exportBusy ? 'wait' : 'pointer',
+              whiteSpace: 'nowrap',
+            },
+          }, `Xuất ${fmt.toUpperCase()}`)),
+        ) : null,
+      ),
+      exportStatus ? h('div', { style: { fontSize: 11, color: '#2563eb' } }, exportStatus) : null,
+      showControls ? h('div', {
+        style: {
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fit, minmax(135px, 1fr))',
+          gap: 8,
+          alignItems: 'center',
+        },
+      },
+        h('select', {
+          'aria-label': 'Lọc phân hệ nghiệp vụ',
+          value: activeCollection,
+          onChange: (e) => { setSelectedCollection(e.target.value); setRecordIdInput(''); },
+          style: { minWidth: 0, width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+        }, WORKBENCH_COLLECTION_ENUM.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label))),
+        recentRecords.length ? h('select', {
+          'aria-label': 'Chọn bản ghi',
+          value: recordIdInput,
+          onChange: (e) => setRecordIdInput(e.target.value),
+          style: { minWidth: 0, width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+        },
+          h('option', { value: '' }, '-- Chọn bản ghi gần đây --'),
+          recentRecords.map((rec) => h('option', { key: rec.id, value: String(rec.id) }, `${rec.code || `#${rec.id}`} — ${rec.name || rec.title || ''}`)),
+        ) : null,
+        h('input', {
+          type: 'text',
+          'aria-label': 'ID bản ghi',
+          value: recordIdInput,
+          onChange: (e) => setRecordIdInput(e.target.value),
+          placeholder: 'Nhập ID bản ghi…',
+          style: { minWidth: 0, width: '100%', boxSizing: 'border-box', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
+        }),
+        h('button', {
+          type: 'button',
+          onClick: () => loadRecentRecords(),
+          style: {
+            padding: '5px 10px',
+            borderRadius: 6,
+            border: '1px solid #cbd5e1',
+            background: '#f8fafc',
+            color: '#0f172a',
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+          },
+        }, 'Làm mới'),
+      ) : null,
+      cfg.showVoucherActions !== false ? h(VoucherLifecycleBar, {
+        targetCollection: activeCollection,
+        targetRecordId: activeRecordId,
+        onUpdated: (updated) => {
+          if (updated?.id && Number(updated.id) !== activeRecordId) {
+            setRecordIdInput(String(updated.id));
+          }
+          loadRecentRecords();
+        },
+      }) : null,
+      cfg.showChatter !== false ? h(RecordChatterView, {
+        targetCollection: activeCollection,
+        targetRecordId: activeRecordId,
+        showExport: false,
+      }) : null,
+    );
+  }
+
   return {
     DxosPortalHeroView,
     DxosKpiMetricView,
@@ -496,6 +695,7 @@ function createBlockRenderers(client, React, antd, app) {
     DxosWorkflowTasksView,
     DxosParaVaultView,
     DxosCreativeStudioView: createCreativeStudioView(client, React, antd, app, { subscribeModelConfig }),
+    DxosRecordWorkbenchView,
   };
 }
 
@@ -526,6 +726,9 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   }
   class DxosCreativeStudioBlockModel extends BaseBlockModel {
     renderComponent() { return h(views.DxosCreativeStudioView, { model: this, liveConfig: extractLiveConfig(this) }); }
+  }
+  class DxosRecordWorkbenchBlockModel extends BaseBlockModel {
+    renderComponent() { return h(views.DxosRecordWorkbenchView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
 
   const specs = [
@@ -633,6 +836,32 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       {
         title: { type: 'string', title: 'Tiêu đề Block', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         blueprintJson: { type: 'string', title: 'Cấu hình DSL Sáng tạo (JSON)', 'x-decorator': 'FormItem', 'x-component': 'Input.TextArea' },
+      },
+    ],
+    [
+      DxosRecordWorkbenchBlockModel,
+      'DX-OS Chatter, Chứng từ & Xuất báo cáo',
+      {
+        title: 'Trao đổi Chatter, Chứng từ & Xuất báo cáo',
+        collection: 'latticeRequests',
+        recordId: '',
+        showExport: true,
+        showVoucherActions: true,
+        showChatter: true,
+      },
+      {
+        title: { type: 'string', title: 'Tiêu đề Block', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        collection: {
+          type: 'string',
+          title: 'Collection nghiệp vụ',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: WORKBENCH_COLLECTION_ENUM,
+        },
+        recordId: { type: 'string', title: 'ID bản ghi (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        showExport: { type: 'boolean', title: 'Hiển thị thanh Xuất báo cáo', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
+        showVoucherActions: { type: 'boolean', title: 'Hiển thị nút Vòng đời chứng từ', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
+        showChatter: { type: 'boolean', title: 'Hiển thị Nhật ký Chatter', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
       },
     ],
   ];

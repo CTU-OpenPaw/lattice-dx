@@ -116,3 +116,126 @@ test('parseGroupRoleMap and syncMappedUserRoles assign safe ldx_* roles idempote
   assert.equal(created.length,1);
   assert.deepEqual(created[0],{userId:12,roleName:'ldx_warehouse'});
 });
+
+test('safeReturnTo allows /p, /mobile, and /v/mobile portal routes while blocking traversal and protocol-relative targets',()=>{
+  for(const ok of ['/admin','/admin/test?tab=a','/p','/p/procurement','/p/procurement/orders?tab=pending','/p?view=1','/mobile','/mobile/tasks?filter=mine','/v/mobile','/v/mobile/w6golht1d9g?tab=1']){
+    assert.equal(safeReturnTo(ok),ok);
+  }
+  for(const bad of ['/p/../evil','/mobile/../../etc/passwd','/v/mobile/../evil','/admin/..','/portal','/mobile-web','/v/mobile-web','/v/admin','/p\\evil','/p/%2e%2e','/p/foo\nbar','//evil.test','https://evil.test']){
+    assert.equal(safeReturnTo(bad),'/admin');
+  }
+});
+
+test('syncMappedUserRoles reconciles removed Keycloak groups without touching unmanaged or privileged roles',async()=>{
+  const {syncMappedUserRoles}=require('../src/server/policy');
+  const groupRoleMap={
+    '/lattice-managers':'ldx_manager',
+    '/lattice-warehouse':'ldx_warehouse',
+    '/lattice-finance':'ldx_finance',
+    '/admin-backdoor':'ldx_admin',
+  };
+  let rows=[
+    {userId:12,roleName:'ldx_manager'},
+    {userId:12,roleName:'ldx_warehouse'},
+    {userId:12,roleName:'ldx_manual_custom'},
+    {userId:12,roleName:'root'},
+    {userId:12,roleName:'admin'},
+    {userId:12,roleName:'ldx_admin'},
+  ];
+  const destroyed=[];
+  const db={
+    getRepository:(name)=>{
+      if(name==='roles'){
+        return {find:async({filter})=>[
+          {name:'ldx_manager',allowConfigure:false,snippets:[]},
+          {name:'ldx_warehouse',allowConfigure:false,snippets:[]},
+          {name:'ldx_finance',allowConfigure:false,snippets:[]},
+          {name:'ldx_admin',allowConfigure:true,snippets:['pm']},
+        ].filter(r=>!filter?.name?.$in||filter.name.$in.includes(r.name))};
+      }
+      if(name==='rolesUsers'){
+        return {
+          find:async()=>rows,
+          create:async({values})=>{rows.push(values);return values;},
+          destroy:async({filter})=>{
+            destroyed.push(filter);
+            const names=Array.isArray(filter.roleName?.$in)?filter.roleName.$in:Array.isArray(filter.roleName)?filter.roleName:[filter.roleName];
+            rows=rows.filter(r=>!(r.userId===filter.userId&&names.includes(r.roleName)));
+            return names.length;
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const res1=await syncMappedUserRoles(db,12,['/lattice-finance'],groupRoleMap);
+  assert.deepEqual(res1.added,['ldx_finance']);
+  assert.deepEqual(res1.removed,['ldx_manager','ldx_warehouse']);
+  assert.deepEqual(res1.skippedPrivileged,[]);
+  assert.deepEqual(destroyed,[{userId:12,roleName:{$in:['ldx_manager','ldx_warehouse']}}]);
+  assert.deepEqual(rows.map(r=>r.roleName),['ldx_manual_custom','root','admin','ldx_admin','ldx_finance']);
+
+  const resNoReconcile=await syncMappedUserRoles(db,12,['/lattice-manager-none'],groupRoleMap,{reconcile:false});
+  assert.deepEqual(resNoReconcile.added,[]);
+  assert.deepEqual(resNoReconcile.removed,[]);
+  assert.equal(destroyed.length,1);
+  assert.ok(rows.some(r=>r.roleName==='ldx_finance'));
+
+  const resEmpty=await syncMappedUserRoles(db,12,[],groupRoleMap);
+  assert.deepEqual(resEmpty.added,[]);
+  assert.deepEqual(resEmpty.removed,['ldx_finance']);
+  assert.deepEqual(rows.map(r=>r.roleName),['ldx_manual_custom','root','admin','ldx_admin']);
+});
+
+test('syncMappedUserRoles neither adds nor revokes privileged ldx_* roles listed in groupRoleMap',async()=>{
+  const {syncMappedUserRoles}=require('../src/server/policy');
+  const groupRoleMap={
+    '/ops':'ldx_ops',
+    '/ops-pm':'ldx_ops_pm',
+    '/warehouse':'ldx_warehouse',
+  };
+  let rows=[
+    {userId:12,roleName:'ldx_ops'},
+    {userId:12,roleName:'ldx_ops_pm'},
+    {userId:12,roleName:'ldx_warehouse'},
+  ];
+  const destroyed=[];
+  const db={
+    getRepository:(name)=>{
+      if(name==='roles'){
+        return {find:async({filter})=>[
+          {name:'ldx_ops',allowConfigure:true,snippets:[]},
+          {name:'ldx_ops_pm',allowConfigure:false,snippets:['pm.*']},
+          {name:'ldx_warehouse',allowConfigure:false,snippets:[]},
+        ].filter(r=>!filter?.name?.$in||filter.name.$in.includes(r.name))};
+      }
+      if(name==='rolesUsers'){
+        return {
+          find:async()=>rows,
+          create:async({values})=>{rows.push(values);return values;},
+          destroy:async({filter})=>{
+            destroyed.push(filter);
+            const names=Array.isArray(filter.roleName?.$in)?filter.roleName.$in:[];
+            rows=rows.filter(r=>!(r.userId===filter.userId&&names.includes(r.roleName)));
+            return names.length;
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const res1=await syncMappedUserRoles(db,12,['/ops'],groupRoleMap);
+  assert.deepEqual(res1.added,[]);
+  assert.deepEqual(res1.skippedPrivileged,['ldx_ops']);
+  assert.deepEqual(res1.removed,['ldx_warehouse']);
+  assert.deepEqual(destroyed,[{userId:12,roleName:{$in:['ldx_warehouse']}}]);
+  assert.deepEqual(rows.map(r=>r.roleName),['ldx_ops','ldx_ops_pm']);
+
+  const res2=await syncMappedUserRoles(db,12,[],groupRoleMap);
+  assert.deepEqual(res2.added,[]);
+  assert.deepEqual(res2.removed,[]);
+  assert.equal(destroyed.length,1);
+  assert.deepEqual(rows.map(r=>r.roleName),['ldx_ops','ldx_ops_pm']);
+});

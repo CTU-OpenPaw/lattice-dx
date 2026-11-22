@@ -11,11 +11,9 @@
 const { isSafeAppPath } = require('./blocks-helpers');
 
 const DEFAULT_COMMAND_ITEMS = [
-  { id: 'portal-work', label: 'Không gian Làm việc (Work Portal)', keywords: 'cong viec work portal', path: '/p/work', category: 'Cổng tác nghiệp' },
+  { id: 'portal-workspace', label: 'Không gian Làm việc', keywords: 'cong viec work workspace khong gian lam viec', path: '/admin/lattice-workspace', category: 'Cổng tác nghiệp' },
   { id: 'portal-procurement', label: 'Cổng Mua sắm (Procurement)', keywords: 'mua sam procurement yeu cau don hang', path: '/p/procurement', category: 'Cổng tác nghiệp' },
-  { id: 'portal-logistics', label: 'Cổng Logistics & Kho vận', keywords: 'logistics van chuyen don hang', path: '/p/logistics', category: 'Cổng tác nghiệp' },
-  { id: 'portal-incidents', label: 'Cổng Giám sát Sự cố IT/OT', keywords: 'su co canh bao kho lanh iot telemetry', path: '/p/incidents', category: 'Cổng tác nghiệp' },
-  { id: 'portal-services', label: 'Cổng Dịch vụ Nội bộ & P.A.R.A.', keywords: 'dich vu noi bo para tai lieu knowledge', path: '/p/internal-service', category: 'Cổng tác nghiệp' },
+  { id: 'portal-services', label: 'Cổng Dịch vụ Nội bộ & P.A.R.A.', keywords: 'dich vu noi bo para tai lieu knowledge services', path: '/p/services', category: 'Cổng tác nghiệp' },
   { id: 'admin-studio', label: 'DX-OS Control Studio (Workflows · Outbox · GitOps)', keywords: 'studio workflow outbox dlq gitops bundle', path: '/admin/settings/dxos-studio', category: 'Quản trị', adminOnly: true },
   { id: 'admin-ai', label: 'AI Workforce & Quota Center', keywords: 'ai agent mcp quota audit', path: '/admin/settings/dxos-ai', category: 'Quản trị', adminOnly: true },
 ];
@@ -54,6 +52,82 @@ function detectIsAdmin(client, app) {
   }
 }
 
+function buildDynamicCommandItems(portals, { isAdmin = false } = {}) {
+  const out = [];
+  const seenPaths = new Set();
+  const pushUnique = (item) => {
+    if (!item || !isSafeAppPath(item.path) || seenPaths.has(item.path)) return;
+    if (item.adminOnly && !isAdmin) return;
+    seenPaths.add(item.path);
+    out.push(item);
+  };
+
+  for (const p of Array.isArray(portals) ? portals : []) {
+    if (!p || typeof p !== 'object' || p.enabled === false) continue;
+    if (p.uid === 'mobile-layout-model' || p.layoutType === 'mobile') continue;
+    if (p.uid === 'admin-layout-model' && !isAdmin) continue;
+    const targetPath = isSafeAppPath(p.firstPagePath)
+      ? p.firstPagePath
+      : (isSafeAppPath(p.routePath) ? p.routePath : '');
+    if (!targetPath) continue;
+    pushUnique({
+      id: `portal-${p.slug || p.uid || targetPath}`,
+      label: p.title || p.slug || targetPath,
+      keywords: [p.slug, p.routePath, p.description, p.uid].filter(Boolean).join(' '),
+      path: targetPath,
+      category: 'Cổng tác nghiệp',
+    });
+  }
+
+  pushUnique(DEFAULT_COMMAND_ITEMS[0]);
+  if (isAdmin) {
+    for (const item of DEFAULT_COMMAND_ITEMS) {
+      if (item.adminOnly) pushUnique(item);
+    }
+  }
+  return out;
+}
+
+function mergeSearchHits(paraDocs = [], globalItems = []) {
+  const out = [];
+  const seenKeys = new Set();
+
+  for (const doc of Array.isArray(paraDocs) ? paraDocs : []) {
+    if (!doc || typeof doc !== 'object') continue;
+    const key = doc.id != null ? `latticeParaDocuments:${doc.id}` : `para-label:${doc.title || doc.code}`;
+    if (seenKeys.has(key)) continue;
+    const targetPath = doc.id != null ? `/p/services?paraDocId=${encodeURIComponent(String(doc.id))}` : '/p/services';
+    if (!isSafeAppPath(targetPath)) continue;
+    seenKeys.add(key);
+    out.push({
+      id: `para-${doc.id ?? out.length}`,
+      label: doc.title || doc.code || `P.A.R.A #${doc.id}`,
+      path: targetPath,
+      category: `P.A.R.A (${doc.paraSpace || 'docs'})`,
+    });
+  }
+
+  for (const item of Array.isArray(globalItems) ? globalItems : []) {
+    if (!item || typeof item !== 'object' || !isSafeAppPath(item.path)) continue;
+    const key = item.collection && item.id != null ? `${item.collection}:${item.id}` : `${item.path}:${item.title || item.code}`;
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    const title = String(item.title || '').trim();
+    const code = String(item.code || '').trim();
+    const label = code && title && !title.includes(code)
+      ? `${code} — ${title}`
+      : (title || code || `${item.collection || 'record'} #${item.id ?? ''}`);
+    out.push({
+      id: `rec-${key}`,
+      label,
+      path: item.path,
+      category: item.category || item.collection || 'Bản ghi',
+    });
+  }
+
+  return out;
+}
+
 function createCommandPaletteProvider(client, React, _antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
@@ -62,13 +136,14 @@ function createCommandPaletteProvider(client, React, _antd, app) {
     const api = useApi();
     const [open, setOpen] = React.useState(false);
     const [query, setQuery] = React.useState('');
+    const [portalItems, setPortalItems] = React.useState(null);
     const [searchHits, setSearchHits] = React.useState([]);
     const [activeIndex, setActiveIndex] = React.useState(0);
 
     const isAdmin = detectIsAdmin(client, app);
     const localMatches = React.useMemo(
-      () => filterCommands(DEFAULT_COMMAND_ITEMS, query, { isAdmin }),
-      [query, isAdmin],
+      () => filterCommands(portalItems || DEFAULT_COMMAND_ITEMS, query, { isAdmin }),
+      [portalItems, query, isAdmin],
     );
 
     const navigateTo = React.useCallback((targetPath) => {
@@ -99,11 +174,32 @@ function createCommandPaletteProvider(client, React, _antd, app) {
     }, [open]);
 
     React.useEffect(() => {
+      if (!open || !api?.request) return undefined;
+      let cancelled = false;
+      api.request({
+        url: 'latticePortals:listAccessible',
+        method: 'get',
+        skipNotify: true,
+      }).then((res) => {
+        if (cancelled) return;
+        const raw = res?.data?.data ?? res?.data;
+        if (Array.isArray(raw)) {
+          setPortalItems(buildDynamicCommandItems(raw, { isAdmin }));
+        } else {
+          setPortalItems(null);
+        }
+      }).catch(() => {
+        if (!cancelled) setPortalItems(null);
+      });
+      return () => { cancelled = true; };
+    }, [open, api, isAdmin]);
+
+    React.useEffect(() => {
       if (!open || !api?.request) {
         setSearchHits([]);
         return undefined;
       }
-      const trimmed = String(query || '').trim();
+      const trimmed = String(query || '').trim().slice(0, 120);
       if (trimmed.length < 2) {
         setSearchHits([]);
         return undefined;
@@ -112,21 +208,28 @@ function createCommandPaletteProvider(client, React, _antd, app) {
       const timer = typeof setTimeout === 'function'
         ? setTimeout(async () => {
             try {
-              const res = await api.request({
-                url: 'latticePara:hybridSearch',
-                method: 'get',
-                params: { query: trimmed, limit: 5 },
-                skipNotify: true,
-              });
-              const items = res?.data?.data?.items || res?.data?.items || [];
-              if (!cancelled && Array.isArray(items)) {
-                setSearchHits(items.map((doc) => ({
-                  id: `para-${doc.id}`,
-                  label: doc.title || doc.code || `P.A.R.A #${doc.id}`,
-                  path: '/p/internal-service',
-                  category: `P.A.R.A (${doc.paraSpace || 'docs'})`,
-                })));
-              }
+              const [paraRes, globalRes] = await Promise.allSettled([
+                api.request({
+                  url: 'latticePara:hybridSearch',
+                  method: 'get',
+                  params: { query: trimmed, limit: 5 },
+                  skipNotify: true,
+                }),
+                api.request({
+                  url: 'dxosBlocks:globalSearch',
+                  method: 'get',
+                  params: { query: trimmed, limit: 6 },
+                  skipNotify: true,
+                }),
+              ]);
+              if (cancelled) return;
+              const paraItems = paraRes.status === 'fulfilled'
+                ? (paraRes.value?.data?.data?.items || paraRes.value?.data?.items || [])
+                : [];
+              const globalItems = globalRes.status === 'fulfilled'
+                ? (globalRes.value?.data?.data?.items || globalRes.value?.data?.items || [])
+                : [];
+              setSearchHits(mergeSearchHits(paraItems, globalItems));
             } catch {
               if (!cancelled) setSearchHits([]);
             }
@@ -190,7 +293,7 @@ function createCommandPaletteProvider(client, React, _antd, app) {
                 value: query,
                 onChange: (e) => { setQuery(e.target.value); setActiveIndex(0); },
                 onKeyDown: onInputKeyDown,
-                placeholder: 'Tìm nhanh trang, quy trình hoặc tài liệu P.A.R.A. (Esc để đóng)…',
+                placeholder: 'Tìm nhanh trang, chứng từ, tài sản hoặc P.A.R.A. (Esc để đóng)…',
                 style: { width: '100%', border: 'none', outline: 'none', fontSize: 14, color: '#0f172a' },
               }),
             ),
@@ -209,13 +312,14 @@ function createCommandPaletteProvider(client, React, _antd, app) {
                       display: 'flex',
                       justifyContent: 'space-between',
                       alignItems: 'center',
+                      gap: 8,
                       background: idx === activeIndex ? '#eff6ff' : 'transparent',
                       color: idx === activeIndex ? '#1d4ed8' : '#0f172a',
                       fontSize: 13,
                     },
                   },
-                    h('span', { style: { fontWeight: 600 } }, item.label),
-                    h('span', { style: { fontSize: 11, color: '#64748b' } }, item.category || item.path),
+                    h('span', { style: { fontWeight: 600, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' } }, item.label),
+                    h('span', { style: { fontSize: 11, color: '#64748b', whiteSpace: 'nowrap', flexShrink: 0 } }, item.category || item.path),
                   )),
             ),
           ),
@@ -231,5 +335,7 @@ module.exports = {
   DEFAULT_COMMAND_ITEMS,
   foldVi,
   filterCommands,
+  buildDynamicCommandItems,
+  mergeSearchHits,
   createCommandPaletteProvider,
 };

@@ -365,8 +365,14 @@ test('composePortals attaches blocks, orders grid rows above seed row, and creat
   await actions.composePortals(ctx, async () => {});
   assert.equal(ctx.body.dxosBlocksAttached, true);
   assert.equal(ctx.body.createdPages, 6);
-  assert.equal(ctx.body.attachedBlocks, 12);
+  assert.equal(ctx.body.mobilePagesCreated, 4);
+  assert.equal(ctx.body.attachedBlocks, 15);
   assert.equal(updatedGrids.length, 4);
+  for (const slug of ['procurement', 'logistics', 'services']) {
+    const wbModel = flowModels.find((m) => m.uid === `dxos-ov-${slug}-workbench`);
+    assert.ok(wbModel, `Expected flowModel dxos-ov-${slug}-workbench`);
+    assert.equal(wbModel.use, 'DxosRecordWorkbenchBlockModel');
+  }
   const firstGrid = updatedGrids[0];
   assert.equal(firstGrid.props.rowOrder[0], 'dxos_row_0');
   assert.equal(firstGrid.props.rowOrder.at(-1), 'row1');
@@ -443,6 +449,89 @@ test('service-scope enforces optimistic version locking on latticeServiceTickets
   assert.equal(okCtx.action.params.values.expectedVersion, undefined);
 });
 
+test('service-schema declares voucher lifecycle fields & index, and service-scope enforces voucher immutability and protected fields', async () => {
+  const { serviceTickets } = require(path.join(PLUGIN_ROOT, 'src/server/service-schema.js'));
+  const { createServiceScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/service-scope.js'));
+
+  const fieldMap = new Map(serviceTickets.fields.map((f) => [f.name, f]));
+  for (const name of ['submittedAt', 'submittedBy', 'cancelledAt', 'cancelledBy', 'cancelReason', 'amendedFromId', 'amendmentNo']) {
+    assert.ok(fieldMap.has(name), `serviceTickets missing voucher field ${name}`);
+  }
+  assert.equal(fieldMap.get('submittedAt').type, 'date');
+  assert.equal(fieldMap.get('cancelledAt').type, 'date');
+  assert.equal(fieldMap.get('amendedFromId').type, 'bigInt');
+  assert.equal(fieldMap.get('amendmentNo').type, 'integer');
+  assert.equal(fieldMap.get('amendmentNo').defaultValue, 0);
+  assert.equal(fieldMap.get('amendmentNo').allowNull, false);
+
+  const amendedIdx = serviceTickets.indexes.find((idx) => idx.name === 'idx_lattice_tickets_org_amended');
+  assert.ok(amendedIdx, 'serviceTickets missing idx_lattice_tickets_org_amended index');
+  assert.deepEqual(amendedIdx.fields, ['organizationId', 'amendedFromId']);
+  assert.ok(amendedIdx.name.length <= 63);
+
+  const employees = [{ id: 8, userId: 80, organizationId: 'org-a', departmentId: 2, active: true }];
+  let currentTicket = { id: 25, organizationId: 'org-a', requesterId: 8, status: 'draft', version: 2 };
+  const db = {
+    getRepository: (name) => {
+      if (name === 'latticeEmployees') return { find: async () => employees };
+      if (name === 'latticeServiceTickets') return { findOne: async () => currentTicket };
+      return null;
+    },
+  };
+  const mw = createServiceScopeMiddleware(db);
+
+  // Draft update still succeeds (even without expectedVersion)
+  const draftCtx = {
+    state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+    action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 25, values: { name: 'Edited draft' } } },
+  };
+  await mw(draftCtx, async () => {});
+  assert.equal(draftCtx.action.params.values.name, 'Edited draft');
+  assert.equal(draftCtx.action.params.values.version, 3);
+
+  // Immutable voucher statuses block :update with 409 VOUCHER_IMMUTABLE even when expectedVersion is omitted
+  for (const immutableStatus of ['submitted', 'approved', 'completed', 'cancelled']) {
+    currentTicket = { id: 25, organizationId: 'org-a', requesterId: 8, status: immutableStatus, version: 2 };
+    await assert.rejects(
+      () => mw({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 25, values: { name: 'Tamper' } } },
+      }, async () => {}),
+      (err) => err.status === 409 && err.code === 'VOUCHER_IMMUTABLE',
+      `Expected 409 VOUCHER_IMMUTABLE for status ${immutableStatus}`,
+    );
+  }
+
+  // Protected voucher metadata fields cannot be spoofed via direct :create or :update
+  currentTicket = { id: 25, organizationId: 'org-a', requesterId: 8, status: 'draft', version: 2 };
+  for (const [field, val] of [
+    ['submittedAt', '2026-11-23T00:00:00Z'],
+    ['submittedBy', 'spoof-user'],
+    ['cancelledAt', '2026-11-23T00:00:00Z'],
+    ['cancelledBy', 'spoof-user'],
+    ['cancelReason', 'spoof'],
+    ['amendedFromId', 1],
+    ['amendmentNo', 3],
+  ]) {
+    await assert.rejects(
+      () => mw({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: { resourceName: 'latticeServiceTickets', actionName: 'create', params: { values: { code: 'X-1', name: 'Y', [field]: val } } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_DOCUMENT_PROTECTED_FIELD',
+      `Expected :create to reject protected voucher field ${field}`,
+    );
+    await assert.rejects(
+      () => mw({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 25, values: { [field]: val } } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_DOCUMENT_PROTECTED_FIELD',
+      `Expected :update to reject protected voucher field ${field}`,
+    );
+  }
+});
+
 test('dxosStudio actions expose admin-gated outboxDlqList and outboxDlqReplay', async () => {
   const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
   const rows = [
@@ -493,4 +582,230 @@ test('dxosStudio actions expose admin-gated outboxDlqList and outboxDlqReplay', 
   assert.equal(replayCtx.body.replayedCount, 1);
   assert.equal(rows[0].state, 'pending');
   assert.equal(rows[0].attempts, 0);
+});
+
+test('OVERVIEW_SPECS wires DxosRecordWorkbenchBlockModel into procurement, logistics, and services portals', () => {
+  const { OVERVIEW_SPECS } = require(path.join(PLUGIN_ROOT, 'src/server/portal-composer.js'));
+  const expected = {
+    procurement: {
+      title: 'Chứng từ, Chatter & Xuất báo cáo Mua sắm [W]',
+      collection: 'latticeRequests',
+      showExport: true,
+      showVoucherActions: true,
+      showChatter: true,
+    },
+    logistics: {
+      title: 'Chứng từ, Chatter & Xuất báo cáo Logistics [W]',
+      collection: 'latticeOrders',
+      showExport: true,
+      showVoucherActions: true,
+      showChatter: true,
+    },
+    services: {
+      title: 'Chứng từ, Chatter & Xuất báo cáo Dịch vụ [W]',
+      collection: 'latticeServiceTickets',
+      showExport: true,
+      showVoucherActions: true,
+      showChatter: true,
+    },
+  };
+  for (const [slug, cfg] of Object.entries(expected)) {
+    const spec = OVERVIEW_SPECS.find((s) => s.slug === slug);
+    assert.ok(spec, `Expected OVERVIEW_SPECS entry for ${slug}`);
+    const wb = spec.blocks.find((b) => b.uidSuffix === 'workbench');
+    assert.ok(wb, `Expected workbench block in ${slug}`);
+    assert.equal(wb.use, 'DxosRecordWorkbenchBlockModel');
+    assert.deepEqual(wb.config, cfg);
+  }
+});
+
+test('composeMobilePortal idempotently composes 4 mobile pages and grants non-admin ldx_* operational roles while preserving existing grants', async () => {
+  const { MOBILE_PORTAL_PAGES, composeMobilePortal, composePortals } = require(path.join(PLUGIN_ROOT, 'src/server/portal-composer.js'));
+  assert.equal(typeof composeMobilePortal, 'function');
+  assert.deepEqual(
+    MOBILE_PORTAL_PAGES.map((p) => p.title),
+    ['Việc cần duyệt', 'Đơn Logistics', 'Sự cố Kho lạnh', 'Phiếu Dịch vụ'],
+  );
+
+  let seq = 500;
+  const desktopRoutes = [
+    { id: 900, parentId: null, type: 'group', title: 'Vận hành Di động', uiLayoutUid: 'mobile-layout-model' },
+    { id: 901, parentId: 900, type: 'flowPage', title: 'Việc cần duyệt', schemaUid: 'existing_mobile_pg', uiLayoutUid: 'mobile-layout-model' },
+  ];
+  const desktopRoutesUiLayouts = [
+    { desktopRouteId: 900, uiLayoutUid: 'mobile-layout-model' },
+    { desktopRouteId: 901, uiLayoutUid: 'mobile-layout-model' },
+  ];
+  const rolesDesktopRoutes = [
+    { desktopRouteId: 901, roleName: 'ldx_employee' },
+    { desktopRouteId: 901, roleName: 'custom_mobile_role' },
+  ];
+  const blueprintCalls = [];
+
+  const db = {
+    hasCollection: () => true,
+    getRepository(name) {
+      if (name === 'desktopRoutes') return { find: async () => desktopRoutes };
+      if (name === 'desktopRoutesUiLayouts') {
+        return {
+          find: async ({ filter } = {}) => desktopRoutesUiLayouts.filter((l) => !filter?.uiLayoutUid || l.uiLayoutUid === filter.uiLayoutUid),
+        };
+      }
+      if (name === 'rolesDesktopRoutes') {
+        return {
+          find: async ({ filter } = {}) => rolesDesktopRoutes.filter((g) => {
+            if (filter?.desktopRouteId?.$in && !filter.desktopRouteId.$in.includes(g.desktopRouteId)) return false;
+            if (filter?.roleName?.$in && !filter.roleName.$in.includes(g.roleName)) return false;
+            return true;
+          }),
+          create: async ({ values }) => {
+            rolesDesktopRoutes.push({ ...values });
+            return values;
+          },
+          destroy: async () => {
+            throw new Error('Must preserve existing grants without destroy');
+          },
+        };
+      }
+      if (name === 'roles') {
+        return {
+          find: async () => [
+            { name: 'root', allowConfigure: true, snippets: ['pm'] },
+            { name: 'admin', allowConfigure: true, snippets: ['pm'] },
+            { name: 'ldx_admin', allowConfigure: false, snippets: [] },
+            { name: 'ldx_sysadmin', allowConfigure: true, snippets: ['pm'] },
+            { name: 'ldx_connector', allowConfigure: false, snippets: [] },
+            { name: 'ldx_employee', allowConfigure: false, snippets: [] },
+            { name: 'ldx_manager', allowConfigure: false, snippets: [] },
+            { name: 'ldx_warehouse', allowConfigure: false, snippets: [] },
+            { name: 'ldx_dispatcher', allowConfigure: false, snippets: [] },
+            { name: 'ldx_driver', allowConfigure: false, snippets: [] },
+            { name: 'ldx_director', allowConfigure: false, snippets: [] },
+          ],
+        };
+      }
+      if (name === 'applicationPlugins') return { find: async () => [] };
+      if (name === 'flowModels') return null;
+      return null;
+    },
+  };
+
+  const applyBlueprint = async (doc) => {
+    blueprintCalls.push(doc);
+    const gid = ++seq;
+    const pid = ++seq;
+    const tid = ++seq;
+    desktopRoutes.push(
+      { id: gid, parentId: null, type: 'group', title: doc.navigation.group.title, uiLayoutUid: doc.navigation.layoutUid },
+      { id: pid, parentId: gid, type: 'flowPage', title: doc.navigation.item.title, schemaUid: `pg_${pid}`, uiLayoutUid: doc.navigation.layoutUid },
+      { id: tid, parentId: pid, type: 'tabs', title: doc.tabs[0].title, schemaUid: `tb_${tid}`, uiLayoutUid: doc.navigation.layoutUid },
+    );
+    desktopRoutesUiLayouts.push(
+      { desktopRouteId: gid, uiLayoutUid: doc.navigation.layoutUid },
+      { desktopRouteId: pid, uiLayoutUid: doc.navigation.layoutUid },
+      { desktopRouteId: tid, uiLayoutUid: doc.navigation.layoutUid },
+    );
+    return { target: { pageSchemaUid: `pg_${pid}` } };
+  };
+
+  // Pre-existing 'Việc cần duyệt' is skipped -> only 3 mobile pages created on first run
+  const first = await composeMobilePortal(db, { applyBlueprint });
+  assert.equal(first.mobilePagesCreated, 3);
+  assert.equal(blueprintCalls.filter((d) => d.navigation.layoutUid === 'mobile-layout-model').length, 3);
+  assert.ok(blueprintCalls.every((d) => d.navigation.layoutUid === 'mobile-layout-model'));
+
+  // Preserved custom grant and non-duplicated existing ldx_employee grant on route 901
+  assert.ok(rolesDesktopRoutes.some((g) => g.desktopRouteId === 901 && g.roleName === 'custom_mobile_role'));
+  assert.equal(rolesDesktopRoutes.filter((g) => g.desktopRouteId === 901 && g.roleName === 'ldx_employee').length, 1);
+
+  // Operational non-admin ldx_* roles granted, admin/connector roles excluded
+  const grantedRoles = new Set(rolesDesktopRoutes.map((g) => g.roleName));
+  for (const opRole of ['ldx_employee', 'ldx_manager', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_director']) {
+    assert.ok(grantedRoles.has(opRole), `Expected mobile route grant for ${opRole}`);
+  }
+  for (const deniedRole of ['root', 'admin', 'ldx_admin', 'ldx_sysadmin', 'ldx_connector']) {
+    assert.equal(grantedRoles.has(deniedRole), false, `Did not expect mobile route grant for ${deniedRole}`);
+  }
+
+  // Re-running composeMobilePortal and composePortals is strictly idempotent for mobile routes & grants
+  const grantCountBefore = rolesDesktopRoutes.length;
+  const routeCountBefore = desktopRoutes.length;
+  const second = await composeMobilePortal(db, { applyBlueprint });
+  assert.equal(second.mobilePagesCreated, 0);
+  assert.equal(rolesDesktopRoutes.length, grantCountBefore);
+  assert.equal(desktopRoutes.length, routeCountBefore);
+
+  const portalRes = await composePortals(db, { applyBlueprint });
+  assert.equal(portalRes.mobilePagesCreated, 0);
+});
+
+test('readiness resolves host NocoBase version dynamically from NOCOBASE_VERSION or db.app.version with 2.2.50 fallback', async () => {
+  const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
+  const baseDb = (appVersion) => ({
+    ...(appVersion ? { app: { version: appVersion } } : {}),
+    hasCollection: () => false,
+    getRepository: () => ({ find: async () => [] }),
+  });
+  const origEnv = process.env.NOCOBASE_VERSION;
+  try {
+    delete process.env.NOCOBASE_VERSION;
+
+    const fallbackCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb()).readiness(fallbackCtx, async () => {});
+    assert.equal(fallbackCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.50 preserved)');
+
+    const appVerCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb('2.2.61')).readiness(appVerCtx, async () => {});
+    assert.equal(appVerCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.61 preserved)');
+
+    process.env.NOCOBASE_VERSION = '2.2.88';
+    const envCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb('2.2.61')).readiness(envCtx, async () => {});
+    assert.equal(envCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.88 preserved)');
+
+    // ApplicationVersion object with async .get() and sync .get()
+    delete process.env.NOCOBASE_VERSION;
+    const asyncVerObjCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb({ get: async () => 'v2.2.38' })).readiness(asyncVerObjCtx, async () => {});
+    assert.equal(asyncVerObjCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.38 preserved)');
+
+    const syncVerObjCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb({ get: () => '2.2.39' })).readiness(syncVerObjCtx, async () => {});
+    assert.equal(syncVerObjCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.39 preserved)');
+
+    // Empty object never produces [object Object]
+    const emptyObjCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb({})).readiness(emptyObjCtx, async () => {});
+    assert.equal(emptyObjCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.50 preserved)');
+
+    // Whitespace-only NOCOBASE_VERSION falls back cleanly to db.app.version
+    process.env.NOCOBASE_VERSION = '   ';
+    const wsEnvCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} } };
+    await createDxosStudioActions(baseDb({ get: async () => '2.2.38' })).readiness(wsEnvCtx, async () => {});
+    assert.equal(wsEnvCtx.body.clause52Attribution, 'Powered by NocoBase (v2.2.38 preserved)');
+  } finally {
+    if (origEnv === undefined) delete process.env.NOCOBASE_VERSION;
+    else process.env.NOCOBASE_VERSION = origEnv;
+  }
+});
+
+test('portal-composer COLLECTION_FIELD_GROUPS covers every interface field in domain schemas', () => {
+  const { COLLECTION_FIELD_GROUPS } = require(path.join(PLUGIN_ROOT, 'src/server/portal-composer.js'));
+  const foundationSchemas = require(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/schema.js'));
+  const paraSchemas = require(path.resolve(PLUGIN_ROOT, '../plugin-dxos-para/src/server/schema.js'));
+  const serviceSchemas = require(path.join(PLUGIN_ROOT, 'src/server/service-schema.js'));
+  const allSchemas = Object.values({ ...foundationSchemas, ...paraSchemas, ...serviceSchemas });
+
+  for (const colName of ['latticeIncidentCases', 'latticeRequests', 'latticeOrders', 'latticeServiceTickets', 'latticeParaDocuments']) {
+    const schema = allSchemas.find((s) => s?.name === colName);
+    assert.ok(schema, `Missing schema for ${colName}`);
+    const groups = COLLECTION_FIELD_GROUPS[colName];
+    assert.ok(Array.isArray(groups) && groups.length > 0, `Missing COLLECTION_FIELD_GROUPS for ${colName}`);
+    const covered = new Set(groups.flatMap((g) => g.fields));
+    const missing = (schema.fields || [])
+      .filter((f) => Boolean(f.interface))
+      .map((f) => f.name)
+      .filter((name) => !covered.has(name));
+    assert.deepEqual(missing, [], `COLLECTION_FIELD_GROUPS[${colName}] missing interface fields: ${missing.join(', ')}`);
+  }
 });

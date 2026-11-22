@@ -8,6 +8,7 @@
  */
 'use strict';
 
+const { randomBytes } = require('node:crypto');
 const { validateAiProfilePayload, recordAiAuditLog } = require('./ai-schemas');
 const { enforceProfileRoleLock, syncProfileToNocobaseAi } = require('./ai-sync');
 const { publishSurfaceUpdate } = require('./surface-events');
@@ -18,7 +19,7 @@ const VALID_CREATIVE_THEMES = new Set(['industrial-cockpit', 'emerald-ops', 'amb
 const VALID_QUERY_KINDS = new Set(['collection', 'telemetry', 'tasks', 'timeseries']);
 const VALID_WIDGET_TYPES = new Set([
   'gauge', 'thermometer', 'timeseries-line', 'stage-pipeline', 'distribution-bars',
-  'rule-callout', 'status-matrix', 'quick-actions',
+  'rule-callout', 'status-matrix', 'quick-actions', 'chatter', 'export-bar', 'voucher-actions',
 ]);
 const SAFE_COL_RE = /^[a-zA-Z0-9_]{1,64}$/;
 const NATIVE_SURFACE_ACTIONS = [
@@ -457,6 +458,12 @@ function sanitizeCreativeBlueprintPayload(raw = {}) {
         if (b.kind === 'createRecord') return SAFE_COL_RE.test(String(b.collection || ''));
         return true;
       }).slice(0, 6);
+    } else if (w.type === 'chatter' || w.type === 'export-bar' || w.type === 'voucher-actions') {
+      if (w.collection && SAFE_COL_RE.test(String(w.collection).trim())) {
+        item.collection = String(w.collection).trim();
+      } else {
+        delete item.collection;
+      }
     }
     widgets.push(item);
     if (widgets.length >= 12) break;
@@ -485,7 +492,7 @@ async function capturePageSnapshot(db, { portalSlug, pageTitle = '', note = '', 
     const meta = readFlowModelMeta(model, uid);
     blocks.push({ uid: meta.uid, use: meta.use, props: meta.props, stepParams: meta.stepParams });
   }
-  const snapshotUid = `snap-${portalSlug}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const snapshotUid = `snap-${portalSlug}-${Date.now().toString(36)}-${randomBytes(2).toString('hex')}`;
   const values = {
     snapshotUid,
     portalSlug,
@@ -1241,6 +1248,7 @@ module.exports = {
   LDX_ROLE_RE,
   IMMUTABLE_WRITE_FIELDS,
   NATIVE_SURFACE_ACTIONS,
+  VALID_WIDGET_TYPES,
   stripVietnameseDiacritics,
   slugifyVietnameseToLdxRole,
   normalizeAiUsername,
