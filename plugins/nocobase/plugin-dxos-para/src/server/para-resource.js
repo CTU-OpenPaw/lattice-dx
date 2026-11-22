@@ -47,12 +47,21 @@ function createParaActions(db) {
 
       const repo = db.getRepository('latticeParaDocuments');
       const filter = { active: true, ...(organizationId ? { organizationId } : {}) };
-      const rows = repo ? await repo.find({ filter, fields: ['id', 'paraSpace', 'active', 'organizationId'] }) : [];
       const spaces = Object.fromEntries(PARA_SPACES.map((space) => [space, 0]));
-      for (const row of Array.isArray(rows) ? rows : []) {
-        if (val(row, 'active') === false) continue;
-        const space = val(row, 'paraSpace') || 'projects';
-        if (Object.hasOwn(spaces, space)) spaces[space] += 1;
+      if (repo && typeof repo.count === 'function') {
+        const counts = await Promise.all(
+          PARA_SPACES.map((space) => repo.count({ filter: { ...filter, paraSpace: space } })),
+        );
+        PARA_SPACES.forEach((space, idx) => {
+          spaces[space] = Number(counts[idx]) || 0;
+        });
+      } else {
+        const rows = repo ? await repo.find({ filter, fields: ['id', 'paraSpace', 'active', 'organizationId'] }) : [];
+        for (const row of Array.isArray(rows) ? rows : []) {
+          if (val(row, 'active') === false) continue;
+          const space = val(row, 'paraSpace') || 'projects';
+          if (Object.hasOwn(spaces, space)) spaces[space] += 1;
+        }
       }
       const total = Object.values(spaces).reduce((acc, n) => acc + n, 0);
       ctx.body = { organizationId, organizations, spaces, total };

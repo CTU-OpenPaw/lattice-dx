@@ -235,3 +235,83 @@ test('latticePara:summary returns per-space org-scoped counts and root preview',
     (err) => err.status === 403,
   );
 });
+
+test('para-scope blocks dotted filters, oversized pageSize, and non-owner edits; summary prefers count()', async () => {
+  const { createParaScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/para-scope.js'));
+  const { createParaActions } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+
+  const employees = [
+    { id: 11, userId: 101, organizationId: 'org-a', departmentId: 3, active: true },
+    { id: 12, userId: 102, organizationId: 'org-a', departmentId: 3, active: true },
+  ];
+  const docs = [{ id: 50, organizationId: 'org-a', ownerId: 11, paraSpace: 'projects', active: true }];
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+      }
+      if (name === 'latticeParaDocuments') {
+        return { findOne: async ({ filter }) => docs.find((d) => Number(d.id) === Number(filter?.id) && d.organizationId === filter?.organizationId) || null };
+      }
+      return null;
+    },
+  };
+  const mw = createParaScopeMiddleware(db);
+
+  // Dotted filter rejected
+  await assert.rejects(
+    () => mw({ state: { currentRole: 'ldx_employee', currentUser: { id: 101 } }, action: { resourceName: 'latticeParaDocuments', actionName: 'list', params: { filter: { 'owner.user.password': { $ne: null } } } } }, async () => {}),
+    (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+  );
+
+  // Oversized pageSize clamped
+  const listCtx = { state: { currentRole: 'ldx_employee', currentUser: { id: 101 } }, action: { resourceName: 'latticeParaDocuments', actionName: 'list', params: { pageSize: 99999 } } };
+  await mw(listCtx, async () => {});
+  assert.equal(listCtx.action.params.pageSize, 200);
+
+  // Non-owner employee cannot update another employee's P.A.R.A. document
+  await assert.rejects(
+    () => mw({ state: { currentRole: 'ldx_employee', currentUser: { id: 102 } }, action: { resourceName: 'latticeParaDocuments', actionName: 'update', params: { filterByTk: 50, values: { title: 'Hijack' } } } }, async () => {}),
+    (err) => err.status === 403 && err.code === 'PARA_OWNER_REQUIRED',
+  );
+
+  // Non-owner employee destroy also blocked
+  await assert.rejects(
+    () => mw({ state: { currentRole: 'ldx_employee', currentUser: { id: 102 } }, action: { resourceName: 'latticeParaDocuments', actionName: 'destroy', params: { filterByTk: 50 } } }, async () => {}),
+    (err) => err.status === 403 && err.code === 'PARA_OWNER_REQUIRED',
+  );
+
+  // Owner or manager CAN update
+  const ownerCtx = { state: { currentRole: 'ldx_employee', currentUser: { id: 101 } }, action: { resourceName: 'latticeParaDocuments', actionName: 'update', params: { filterByTk: 50, values: { title: 'Mine' } } } };
+  await mw(ownerCtx, async () => {});
+  assert.equal(ownerCtx.action.params.values.title, 'Mine');
+
+  const mgrCtx = { state: { currentRole: 'ldx_manager', currentUser: { id: 102 } }, action: { resourceName: 'latticeParaDocuments', actionName: 'update', params: { filterByTk: 50, values: { title: 'Mgr' } } } };
+  await mw(mgrCtx, async () => {});
+  assert.equal(mgrCtx.action.params.values.title, 'Mgr');
+
+  // summary() uses repo.count() without loading rows via find()
+  let findCalled = false;
+  let countCalls = 0;
+  const countDb = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') return { find: async () => [employees[0]] };
+      if (name === 'latticeParaDocuments') {
+        return {
+          find: async () => { findCalled = true; return []; },
+          count: async ({ filter }) => {
+            countCalls += 1;
+            return docs.filter((d) => d.organizationId === filter.organizationId && d.paraSpace === filter.paraSpace && d.active).length;
+          },
+        };
+      }
+      return null;
+    },
+  };
+  const sumCtx = { method: 'GET', state: { currentRole: 'ldx_employee', currentUser: { id: 101 } }, action: { params: {} }, throw(s, m) { throw Object.assign(new Error(m), { status: s }); } };
+  await createParaActions(countDb).summary(sumCtx, async () => {});
+  assert.equal(findCalled, false);
+  assert.equal(countCalls, 4);
+  assert.equal(sumCtx.body.spaces.projects, 1);
+  assert.equal(sumCtx.body.total, 1);
+});

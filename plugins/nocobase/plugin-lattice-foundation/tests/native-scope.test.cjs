@@ -85,3 +85,65 @@ test('document edits preserve native ACL filters and lock the row through mutati
   found=false;saved=false;await assert.rejects(api.updateScopedDocument(db,ctx,actor),{status:404});assert.equal(saved,false);
   ctx.action.params.filterByTk=undefined;await assert.rejects(api.updateScopedDocument(db,ctx,actor),{status:400});
 });
+
+test('resource guard scopes dynamic latticeCustom* collections and rejects blind dotted/sensitive filters, SQL charts, and oversized pageSize', async () => {
+  const employee = { id: 1, userId: 12, organizationId: 'org-a', departmentId: 3, active: true };
+  const guard = api.createNativeScopeMiddleware(db([employee]), { assets: { name: 'latticeAssets', fields: [] } });
+  const ctx = (resourceName, actionName, params = {}, currentRole = 'ldx_employee') => ({
+    state: { currentUser: { id: 12 }, currentRole },
+    action: { resourceName, actionName, params },
+  });
+
+  // Dynamic latticeCustom* collection list/create/update enforced by organizationId
+  const customList = ctx('latticeCustomColdAudits', 'list', { filter: { organizationId: 'org-b' }, pageSize: 99999 });
+  await guard(customList, async () => {});
+  assert.deepEqual(customList.action.params.filter, { $and: [{ organizationId: 'org-a' }, { organizationId: 'org-b' }] });
+  assert.equal(customList.action.params.pageSize, 200);
+
+  const customCreate = ctx('latticeCustomColdAudits', 'create', { values: { code: 'CA-1' } });
+  await guard(customCreate, async () => {});
+  assert.equal(customCreate.action.params.values.organizationId, 'org-a');
+
+  await assert.rejects(
+    guard(ctx('latticeCustomColdAudits', 'create', { values: { organizationId: 'org-b', code: 'CA-2' } }), async () => {}),
+    { code: 'NATIVE_ORGANIZATION_MISMATCH' },
+  );
+
+  // Blind filter oracle via dotted traversal or sensitive keys rejected recursively
+  for (const badFilter of [
+    { 'user.password': { $startsWith: '$2b$' } },
+    { $or: [{ 'requester.identitySubject': 'sub-x' }] },
+    { $and: [{ status: 'draft' }, { 'department.organizationId': 'org-b' }] },
+    { identitySubject: 'sub-x' },
+    { $where: '1=1' },
+  ]) {
+    await assert.rejects(
+      guard(ctx('latticeAssets', 'list', { filter: badFilter }), async () => {}),
+      { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+    );
+  }
+
+  // Dotted sort rejected
+  await assert.rejects(
+    guard(ctx('latticeAssets', 'list', { sort: ['-user.email'] }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+
+  // charts:queryData rejects SQL mode, private collections, and dotted filters; scopes latticeCustom*
+  await assert.rejects(
+    guard(ctx('charts', 'queryData', { values: { mode: 'sql', sql: 'SELECT * FROM users' } }), async () => {}),
+    { code: 'NATIVE_CHART_MODE_UNSUPPORTED' },
+  );
+  await assert.rejects(
+    guard(ctx('charts', 'queryData', { values: { mode: 'builder', collection: 'users' } }), async () => {}),
+    { code: 'NATIVE_CHART_COLLECTION_FORBIDDEN' },
+  );
+  await assert.rejects(
+    guard(ctx('charts', 'queryData', { values: { mode: 'builder', collection: 'latticeAssets', filter: { 'user.password': { $ne: null } } } }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+  const customChart = ctx('charts', 'queryData', { values: { mode: 'builder', collection: 'latticeCustomColdAudits', filter: {}, pageSize: 5000 } });
+  await guard(customChart, async () => {});
+  assert.deepEqual(customChart.action.params.values.filter, { $and: [{ organizationId: 'org-a' }, {}] });
+  assert.equal(customChart.action.params.values.pageSize, 200);
+});

@@ -14,6 +14,56 @@ function failure(code, status = 403) {
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
+const SENSITIVE_FILTER_KEY_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt/i;
+const MANAGER_OR_ADMIN_ROLES = new Set(['root', 'ldx_admin', 'ldx_manager']);
+
+function clampPageLimit(limit) {
+  const n = Number(limit);
+  if (!Number.isFinite(n) || n < 1) return 20;
+  return Math.min(200, Math.floor(n));
+}
+
+function assertSafeSort(sort) {
+  if (sort == null) return;
+  const items = Array.isArray(sort) ? sort : String(sort).split(',');
+  for (const item of items) {
+    const clean = String(item || '').trim().replace(/^-/, '');
+    if (!clean) continue;
+    if (clean.includes('.') || SENSITIVE_FILTER_KEY_RE.test(clean)) {
+      throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+    }
+  }
+}
+
+function assertSafeFilter(node, depth = 0) {
+  if (node == null) return;
+  if (depth > 20) throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+  let target = node;
+  if (typeof target === 'string') {
+    const trimmed = target.trim();
+    if (!trimmed) return;
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      try { target = JSON.parse(trimmed); } catch { throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED'); }
+    } else {
+      return;
+    }
+  }
+  if (Array.isArray(target)) {
+    for (const item of target) assertSafeFilter(item, depth + 1);
+    return;
+  }
+  if (typeof target !== 'object') return;
+  for (const [key, entry] of Object.entries(target)) {
+    if (key === '$where' || key === '$raw' || key === '$sql') {
+      throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+    }
+    if (!key.startsWith('$') && (key.includes('.') || SENSITIVE_FILTER_KEY_RE.test(key))) {
+      throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+    }
+    assertSafeFilter(entry, depth + 1);
+  }
+}
+
 async function resolveParaActor(db, user, options = {}) {
   const id = val(user, 'id');
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_LOGIN_REQUIRED', 401);
@@ -41,8 +91,12 @@ function createParaScopeMiddleware(db) {
     const { resourceName, actionName, params } = ctx.action || {};
     if (resourceName === 'charts' && actionName === 'queryData' && params?.values?.collection === 'latticeParaDocuments' && ctx.state?.currentRole !== 'root') {
       if (params.values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
+      assertSafeFilter(params.values.filter);
+      assertSafeSort(params.values.sort);
       const actor = await resolveParaActor(db, ctx.state?.currentUser);
       params.values = { ...params.values, filter: { $and: [{ organizationId: actor.organizationId }, params.values.filter ?? {}] } };
+      if (params.values.pageSize != null) params.values.pageSize = clampPageLimit(params.values.pageSize);
+      if (params.values.limit != null) params.values.limit = clampPageLimit(params.values.limit);
       return next();
     }
     const collectionName = resourceName?.split('.')[0];
@@ -57,8 +111,28 @@ function createParaScopeMiddleware(db) {
     if (params?.targetCollection || (params?.appends && (!Array.isArray(params.appends) || params.appends.length)) || fields.some((f) => typeof f !== 'string' || f.includes('.'))) {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
+    assertSafeFilter(params?.filter);
+    assertSafeSort(params?.sort);
 
-    params.filter = { $and: [{ organizationId: actor.organizationId }, params?.filter ?? {}] };
+    const activeRole = ctx.state?.currentRole || '';
+    const isOwnerOnlyRole = !MANAGER_OR_ADMIN_ROLES.has(activeRole);
+    const scopeFilters = [{ organizationId: actor.organizationId }];
+    if ((actionName === 'update' || actionName === 'destroy') && isOwnerOnlyRole) {
+      scopeFilters.push({ ownerId: actor.employeeId });
+      if (params?.filterByTk != null) {
+        const docRepo = db.getRepository('latticeParaDocuments');
+        if (docRepo?.findOne) {
+          const existing = await docRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId } });
+          if (!existing) throw failure('PARA_DOCUMENT_NOT_FOUND', 404);
+          if (Number(val(existing, 'ownerId')) !== Number(actor.employeeId)) {
+            throw failure('PARA_OWNER_REQUIRED', 403);
+          }
+        }
+      }
+    }
+    params.filter = { $and: [...scopeFilters, params?.filter ?? {}] };
+    if (params?.pageSize != null) params.pageSize = clampPageLimit(params.pageSize);
+    if (params?.limit != null) params.limit = clampPageLimit(params.limit);
 
     if (actionName === 'create' || actionName === 'update') {
       const values = params?.values;

@@ -391,3 +391,24 @@ test('composePortals attaches blocks, orders grid rows above seed row, and creat
   });
   await assert.rejects(() => failingBp({ version: '1' }), (err) => err.code === 'BLUEPRINT_ERROR' && err.status === 400);
 });
+
+test('service-scope rejects dotted filters, SQL charts, and clamps oversized pageSize', async () => {
+  const { createServiceScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/service-scope.js'));
+  const employees = [{ id: 8, userId: 80, organizationId: 'org-a', departmentId: 2, active: true }];
+  const db = {
+    getRepository: (name) => (name === 'latticeEmployees' ? { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) } : null),
+  };
+  const mw = createServiceScopeMiddleware(db);
+
+  await assert.rejects(
+    () => mw({ state: { currentRole: 'ldx_employee', currentUser: { id: 80 } }, action: { resourceName: 'latticeServiceTickets', actionName: 'list', params: { filter: { $or: [{ 'requester.identitySubject': 'x' }] } } } }, async () => {}),
+    (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+  );
+  await assert.rejects(
+    () => mw({ state: { currentRole: 'ldx_employee', currentUser: { id: 80 } }, action: { resourceName: 'charts', actionName: 'queryData', params: { values: { mode: 'sql', collection: 'latticeServiceTickets' } } } }, async () => {}),
+    (err) => err.status === 403 && err.code === 'NATIVE_CHART_MODE_UNSUPPORTED',
+  );
+  const listCtx = { state: { currentRole: 'ldx_employee', currentUser: { id: 80 } }, action: { resourceName: 'latticeServiceTickets', actionName: 'list', params: { pageSize: 99999 } } };
+  await mw(listCtx, async () => {});
+  assert.equal(listCtx.action.params.pageSize, 200);
+});
