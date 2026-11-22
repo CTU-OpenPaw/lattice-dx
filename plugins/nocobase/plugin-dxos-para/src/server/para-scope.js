@@ -8,8 +8,26 @@
  */
 'use strict';
 
-function failure(code, status = 403) {
-  return Object.assign(new Error(code), { code, status });
+function failure(code, status = 403, message = code) {
+  return Object.assign(new Error(message), { code, status });
+}
+
+function extractExpectedVersion(ctx, params) {
+  let raw;
+  if (params?.values && typeof params.values === 'object' && !Array.isArray(params.values) && Object.hasOwn(params.values, 'expectedVersion')) {
+    raw = params.values.expectedVersion;
+    delete params.values.expectedVersion;
+  } else {
+    const ifMatch = typeof ctx?.get === 'function' ? (ctx.get('If-Match') || ctx.get('X-Expected-Version')) : '';
+    if (ifMatch) raw = String(ifMatch).replace(/^W\//i, '').replace(/^"+|"+$/g, '').trim();
+    else if (ctx?.query?.expectedVersion !== undefined) raw = ctx.query.expectedVersion;
+  }
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const trimmed = String(raw).trim();
+  if (!/^[1-9]\d{0,9}$/.test(trimmed)) {
+    throw failure('INVALID_EXPECTED_VERSION', 400, 'Phiên bản expectedVersion không hợp lệ.');
+  }
+  return Number(trimmed);
 }
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
@@ -116,17 +134,26 @@ function createParaScopeMiddleware(db) {
 
     const activeRole = ctx.state?.currentRole || '';
     const isOwnerOnlyRole = !MANAGER_OR_ADMIN_ROLES.has(activeRole);
+    const expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
+    let bumpedVersion = null;
     const scopeFilters = [{ organizationId: actor.organizationId }];
     if ((actionName === 'update' || actionName === 'destroy') && isOwnerOnlyRole) {
       scopeFilters.push({ ownerId: actor.employeeId });
-      if (params?.filterByTk != null) {
-        const docRepo = db.getRepository('latticeParaDocuments');
-        if (docRepo?.findOne) {
-          const existing = await docRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId } });
-          if (!existing) throw failure('PARA_DOCUMENT_NOT_FOUND', 404);
-          if (Number(val(existing, 'ownerId')) !== Number(actor.employeeId)) {
-            throw failure('PARA_OWNER_REQUIRED', 403);
+    }
+    if ((actionName === 'update' || actionName === 'destroy') && params?.filterByTk != null) {
+      const docRepo = db.getRepository('latticeParaDocuments');
+      if (docRepo?.findOne) {
+        const existing = await docRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId } });
+        if (!existing) throw failure('PARA_DOCUMENT_NOT_FOUND', 404);
+        if (isOwnerOnlyRole && Number(val(existing, 'ownerId')) !== Number(actor.employeeId)) {
+          throw failure('PARA_OWNER_REQUIRED', 403);
+        }
+        if (actionName === 'update') {
+          const currentVersion = Number(val(existing, 'version')) || 1;
+          if (expectedVersion !== null && currentVersion !== expectedVersion) {
+            throw failure('VERSION_CONFLICT', 409, 'Tài liệu P.A.R.A. đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
           }
+          bumpedVersion = currentVersion + 1;
         }
       }
     }
@@ -146,6 +173,12 @@ function createParaScopeMiddleware(db) {
         throw failure('NATIVE_ORGANIZATION_MISMATCH');
       }
       const nextValues = { ...values, organizationId: actor.organizationId };
+      if (actionName === 'update' && bumpedVersion !== null) {
+        nextValues.version = bumpedVersion;
+        if (Array.isArray(params.whitelist) && !params.whitelist.includes('version')) {
+          params.whitelist = [...params.whitelist, 'version'];
+        }
+      }
       if (actionName === 'create') {
         nextValues.ownerId = actor.employeeId;
         if (nextValues.departmentId == null && actor.departmentId != null) {

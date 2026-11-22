@@ -8,8 +8,26 @@
  */
 'use strict';
 
-function failure(code, status = 403) {
-  return Object.assign(new Error(code), { code, status });
+function failure(code, status = 403, message = code) {
+  return Object.assign(new Error(message), { code, status });
+}
+
+function extractExpectedVersion(ctx, params) {
+  let raw;
+  if (params?.values && typeof params.values === 'object' && !Array.isArray(params.values) && Object.hasOwn(params.values, 'expectedVersion')) {
+    raw = params.values.expectedVersion;
+    delete params.values.expectedVersion;
+  } else {
+    const ifMatch = typeof ctx?.get === 'function' ? (ctx.get('If-Match') || ctx.get('X-Expected-Version')) : '';
+    if (ifMatch) raw = String(ifMatch).replace(/^W\//i, '').replace(/^"+|"+$/g, '').trim();
+    else if (ctx?.query?.expectedVersion !== undefined) raw = ctx.query.expectedVersion;
+  }
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const trimmed = String(raw).trim();
+  if (!/^[1-9]\d{0,9}$/.test(trimmed)) {
+    throw failure('INVALID_EXPECTED_VERSION', 400, 'Phiên bản expectedVersion không hợp lệ.');
+  }
+  return Number(trimmed);
 }
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
@@ -114,6 +132,20 @@ function createServiceScopeMiddleware(db) {
     if (params?.pageSize != null) params.pageSize = clampPageLimit(params.pageSize);
     if (params?.limit != null) params.limit = clampPageLimit(params.limit);
     if (actionName === 'create' || actionName === 'update') {
+      const expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
+      let bumpedVersion = null;
+      if (actionName === 'update' && params?.filterByTk != null) {
+        const ticketRepo = db.getRepository?.('latticeServiceTickets');
+        if (ticketRepo?.findOne) {
+          const existing = await ticketRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId } });
+          if (!existing) throw failure('SERVICE_TICKET_NOT_FOUND', 404);
+          const currentVersion = Number(val(existing, 'version')) || 1;
+          if (expectedVersion !== null && currentVersion !== expectedVersion) {
+            throw failure('VERSION_CONFLICT', 409, 'Phiếu dịch vụ đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
+          }
+          bumpedVersion = currentVersion + 1;
+        }
+      }
       const values = params?.values;
       if (!values || typeof values !== 'object' || Array.isArray(values)) throw failure('NATIVE_VALUES_INVALID', 400);
       for (const [k, v] of Object.entries(values)) {
@@ -128,6 +160,12 @@ function createServiceScopeMiddleware(db) {
         throw failure('NATIVE_ORGANIZATION_MISMATCH');
       }
       const nextValues = { ...values, organizationId: actor.organizationId };
+      if (actionName === 'update' && bumpedVersion !== null) {
+        nextValues.version = bumpedVersion;
+        if (Array.isArray(params.whitelist) && !params.whitelist.includes('version')) {
+          params.whitelist = [...params.whitelist, 'version'];
+        }
+      }
       if (actionName === 'create') {
         if (typeof values.name !== 'string' || !values.name.trim() || values.name.length > 200) {
           throw failure('NATIVE_DOCUMENT_NAME_REQUIRED', 400);

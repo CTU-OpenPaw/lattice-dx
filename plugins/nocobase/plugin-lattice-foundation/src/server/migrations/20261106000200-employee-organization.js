@@ -24,6 +24,12 @@ class EmployeeOrganization extends Migration {
       END $$;
     `);
   }
+
+  async down() {
+    await this.context.db.sequelize.query(`
+      ALTER TABLE "latticeEmployees" DROP CONSTRAINT IF EXISTS lattice_employees_department_org;
+    `);
+  }
 }
 
 module.exports = EmployeeOrganization;

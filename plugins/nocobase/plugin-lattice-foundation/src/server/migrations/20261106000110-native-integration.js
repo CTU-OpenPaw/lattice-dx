@@ -12,5 +12,10 @@ const {installConnectorRole}=require('../native-integrations');
 class NativeIntegration extends Migration{
  on='afterSync';
  async up(){await exposeNativeCollections(this.context.db,require('../integration-schema'));await installConnectorRole(this.context.db);}
+ async down(){
+  const db=this.context.db;
+  await db.getRepository?.('roles')?.destroy({filter:{name:'ldx_connector'}});
+  await db.getRepository?.('collections')?.destroy({filter:{name:{$in:['latticeIntegrationInbox','latticeAgentProposals']}}});
+ }
 }
 module.exports=NativeIntegration;module.exports.default=NativeIntegration;

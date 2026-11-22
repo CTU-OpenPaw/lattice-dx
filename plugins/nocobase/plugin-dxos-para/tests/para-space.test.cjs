@@ -315,3 +315,35 @@ test('para-scope blocks dotted filters, oversized pageSize, and non-owner edits;
   assert.equal(sumCtx.body.spaces.projects, 1);
   assert.equal(sumCtx.body.total, 1);
 });
+
+test('para-scope enforces optimistic version locking on updates', async () => {
+  const { createParaScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/para-scope.js'));
+  const employees = [{ id: 11, userId: 101, organizationId: 'org-a', departmentId: 3, active: true }];
+  const docs = [{ id: 50, organizationId: 'org-a', ownerId: 11, version: 3, paraSpace: 'projects', active: true }];
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') return { find: async () => employees };
+      if (name === 'latticeParaDocuments') return { findOne: async () => docs[0] };
+      return null;
+    },
+  };
+  const mw = createParaScopeMiddleware(db);
+
+  // Stale expectedVersion fails 409 VERSION_CONFLICT
+  await assert.rejects(
+    () => mw({
+      state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+      action: { resourceName: 'latticeParaDocuments', actionName: 'update', params: { filterByTk: 50, values: { title: 'Stale', expectedVersion: 2 } } },
+    }, async () => {}),
+    (err) => err.status === 409 && err.code === 'VERSION_CONFLICT',
+  );
+
+  // Matching expectedVersion succeeds and increments version to 4
+  const okCtx = {
+    state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+    action: { resourceName: 'latticeParaDocuments', actionName: 'update', params: { filterByTk: 50, values: { title: 'Fresh', expectedVersion: 3 } } },
+  };
+  await mw(okCtx, async () => {});
+  assert.equal(okCtx.action.params.values.version, 4);
+  assert.equal(okCtx.action.params.values.expectedVersion, undefined);
+});

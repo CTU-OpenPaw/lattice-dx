@@ -14,6 +14,17 @@ class IncidentPortalReadGrants extends Migration {
   async up() {
     await installIncidentPortalReadGrants(this.context.db);
   }
+  async down() {
+    const resources = this.context.db.getRepository?.('rolesResources');
+    if (resources) {
+      await resources.destroy({
+        filter: {
+          name: { $in: ['latticeIncidentRules', 'latticeIncidentCases'] },
+          roleName: { $in: ['ldx_employee', 'ldx_manager', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_director', 'ldx_admin'] },
+        },
+      });
+    }
+  }
 }
 
 module.exports = IncidentPortalReadGrants;

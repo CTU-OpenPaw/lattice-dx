@@ -26,6 +26,14 @@ class DxosAiWorkforceInit extends Migration {
     }
     await installAiRoleGrants(db);
   }
+
+  async down() {
+    const db = this.context.db;
+    await db.getRepository?.('rolesResources')?.destroy({ filter: { name: 'dxosAi' } });
+    await db.getRepository?.('collections')?.destroy({
+      filter: { name: { $in: ['latticeAiProfiles', 'latticeAiAuditLogs'] } },
+    });
+  }
 }
 
 module.exports = DxosAiWorkforceInit;

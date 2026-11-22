@@ -8,8 +8,25 @@
  */
 'use strict';
 
-function failure(code, status = 403) {
-  return Object.assign(new Error(code), {code, status});
+function failure(code, status = 403, message = code) {
+  return Object.assign(new Error(message), {code, status});
+}
+function extractExpectedVersion(ctx, params) {
+  let raw;
+  if (params?.values && typeof params.values === 'object' && !Array.isArray(params.values) && Object.hasOwn(params.values, 'expectedVersion')) {
+    raw = params.values.expectedVersion;
+    delete params.values.expectedVersion;
+  } else {
+    const ifMatch = typeof ctx?.get === 'function' ? (ctx.get('If-Match') || ctx.get('X-Expected-Version')) : '';
+    if (ifMatch) raw = String(ifMatch).replace(/^W\//i, '').replace(/^"+|"+$/g, '').trim();
+    else if (ctx?.query?.expectedVersion !== undefined) raw = ctx.query.expectedVersion;
+  }
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const trimmed = String(raw).trim();
+  if (!/^[1-9]\d{0,9}$/.test(trimmed)) {
+    throw failure('INVALID_EXPECTED_VERSION', 400, 'Phiên bản expectedVersion không hợp lệ.');
+  }
+  return Number(trimmed);
 }
 const value = (row, key) => typeof row?.get === 'function' ? row.get(key) : row?.[key];
 async function resolveNativeActor(db, user, options = {}) {
@@ -95,11 +112,20 @@ function scopeNativeValues(values, actor) {
 async function updateScopedDocument(db,ctx,actor) {
   const params=ctx.action.params,id=params.filterByTk;
   if(!/^[1-9]\d*$/.test(String(id)))throw failure('NATIVE_DOCUMENT_ID_REQUIRED',400);
+  const expectedVersion = ctx.state?.latticeExpectedVersion ?? extractExpectedVersion(ctx, params);
   await db.sequelize.transaction(async transaction=>{
     const row=await db.getModel(ctx.action.resourceName).findOne({where:{id,organizationId:actor.organizationId},transaction,lock:transaction.LOCK.UPDATE});
     if(!row)throw failure('NATIVE_DOCUMENT_NOT_FOUND',404);
+    const currentVersion = Number(value(row, 'version')) || 1;
+    if (expectedVersion !== null && currentVersion !== expectedVersion) {
+      throw failure('VERSION_CONFLICT', 409, 'Bản ghi đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
+    }
+    const nextValues = { ...(params.values || {}), version: currentVersion + 1 };
+    const nextWhitelist = Array.isArray(params.whitelist) && !params.whitelist.includes('version')
+      ? [...params.whitelist, 'version']
+      : params.whitelist;
     // Keep the post-ACL filter and field guards; repository hooks still run.
-    ctx.body=await db.getRepository(ctx.action.resourceName).update({filterByTk:id,filter:params.filter,values:params.values,whitelist:params.whitelist,blacklist:params.blacklist,transaction,context:ctx});
+    ctx.body=await db.getRepository(ctx.action.resourceName).update({filterByTk:id,filter:params.filter,values:nextValues,whitelist:nextWhitelist,blacklist:params.blacklist,transaction,context:ctx});
     if(Array.isArray(ctx.body)&&!ctx.body.length)throw failure('NATIVE_DOCUMENT_UPDATE_DENIED',403);
     ctx.status=200;
   });
@@ -174,7 +200,21 @@ function createNativeScopeMiddleware(db, definitions) {
       if(actionName==='destroy')throw failure('NATIVE_DOCUMENT_DELETE_UNSUPPORTED');
     }
     if (actionName === 'create' || actionName === 'update') {
+      const expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
+      ctx.state.latticeExpectedVersion = expectedVersion;
       params.values = scopeNativeValues(params.values,actor);
+      if (actionName === 'update' && collectionName === 'latticeAssets' && params.filterByTk != null) {
+        const assetRepo = db.getRepository?.('latticeAssets');
+        if (assetRepo?.findOne) {
+          const current = await assetRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId } });
+          if (!current) throw failure('NATIVE_DOCUMENT_NOT_FOUND', 404);
+          const currentVersion = Number(value(current, 'version')) || 1;
+          if (expectedVersion !== null && currentVersion !== expectedVersion) {
+            throw failure('VERSION_CONFLICT', 409, 'Bản ghi đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
+          }
+          params.values = { ...params.values, version: currentVersion + 1 };
+        }
+      }
       if(document) {
         if(['status','version','requesterId','assigneeId','decisionReason'].some(field=>Object.hasOwn(params.values,field)))throw failure('NATIVE_DOCUMENT_PROTECTED_FIELD');
         if(actionName==='create') {
@@ -197,4 +237,4 @@ function createNativeScopeMiddleware(db, definitions) {
     return proceed();
   };
 }
-module.exports = {resolveNativeActor, scopeNativeRead, scopeNativeValues,createNativeScopeMiddleware,updateScopedDocument};
+module.exports = {resolveNativeActor, scopeNativeRead, scopeNativeValues,createNativeScopeMiddleware,updateScopedDocument,extractExpectedVersion};

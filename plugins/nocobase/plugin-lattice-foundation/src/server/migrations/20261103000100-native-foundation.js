@@ -14,6 +14,12 @@ class NativeFoundation extends Migration {
   async up() {
     await exposeNativeCollections(this.context.db, schemas);
   }
+  async down() {
+    const collections = this.context.db.getRepository?.('collections');
+    if (collections) {
+      await collections.destroy({ filter: { name: { $in: Object.values(schemas).map((s) => s.name) } } });
+    }
+  }
 }
 module.exports = NativeFoundation;
 module.exports.default = NativeFoundation;

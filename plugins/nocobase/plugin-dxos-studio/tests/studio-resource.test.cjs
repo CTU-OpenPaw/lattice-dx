@@ -412,3 +412,33 @@ test('service-scope rejects dotted filters, SQL charts, and clamps oversized pag
   await mw(listCtx, async () => {});
   assert.equal(listCtx.action.params.pageSize, 200);
 });
+
+test('service-scope enforces optimistic version locking on latticeServiceTickets updates', async () => {
+  const { createServiceScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/service-scope.js'));
+  const employees = [{ id: 8, userId: 80, organizationId: 'org-a', departmentId: 2, active: true }];
+  const ticket = { id: 19, organizationId: 'org-a', requesterId: 8, version: 4 };
+  const db = {
+    getRepository: (name) => {
+      if (name === 'latticeEmployees') return { find: async () => employees };
+      if (name === 'latticeServiceTickets') return { findOne: async () => ticket };
+      return null;
+    },
+  };
+  const mw = createServiceScopeMiddleware(db);
+
+  await assert.rejects(
+    () => mw({
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 19, values: { name: 'Stale', expectedVersion: 2 } } },
+    }, async () => {}),
+    (err) => err.status === 409 && err.code === 'VERSION_CONFLICT',
+  );
+
+  const okCtx = {
+    state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+    action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 19, values: { name: 'Updated', expectedVersion: 4 } } },
+  };
+  await mw(okCtx, async () => {});
+  assert.equal(okCtx.action.params.values.version, 5);
+  assert.equal(okCtx.action.params.values.expectedVersion, undefined);
+});

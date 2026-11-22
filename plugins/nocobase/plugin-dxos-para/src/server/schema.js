@@ -20,7 +20,7 @@ const paraDocuments = {
   createdAt: true,
   updatedAt: true,
   fields: [
-    { name: 'code', type: 'string', interface: 'input', allowNull: false, unique: true, uiSchema: { type: 'string', title: 'Mã tài liệu', 'x-component': 'Input' } },
+    { name: 'code', type: 'string', interface: 'input', allowNull: false, uiSchema: { type: 'string', title: 'Mã tài liệu', 'x-component': 'Input' } },
     { name: 'title', type: 'string', interface: 'input', allowNull: false, uiSchema: { type: 'string', title: 'Tiêu đề', 'x-component': 'Input' } },
     { name: 'organizationId', type: 'string', interface: 'input', allowNull: false, uiSchema: { type: 'string', title: 'Mã tổ chức', 'x-component': 'Input' } },
     {
@@ -65,8 +65,15 @@ const paraDocuments = {
     { name: 'relatedCollection', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Bảng liên quan', 'x-component': 'Input' } },
     { name: 'relatedRecordId', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'ID bản ghi liên quan', 'x-component': 'Input' } },
     { name: 'active', type: 'boolean', defaultValue: true },
+    { name: 'version', type: 'integer', defaultValue: 1, allowNull: false },
     { name: 'department', type: 'belongsTo', target: 'latticeDepartments', foreignKey: 'departmentId' },
     { name: 'owner', type: 'belongsTo', target: 'latticeEmployees', foreignKey: 'ownerId' },
+  ],
+  indexes: [
+    { fields: ['organizationId', 'code'], unique: true },
+    { fields: ['organizationId', 'paraSpace', 'status'] },
+    { fields: ['organizationId', 'ownerId', 'active'] },
+    { fields: ['organizationId', 'departmentId'] },
   ],
 };
 

@@ -19,8 +19,9 @@ module.exports=require('@nocobase/database').defineCollection({
   {name:'state',type:'string',allowNull:false,defaultValue:'pending'},
   {name:'attempts',type:'integer',allowNull:false,defaultValue:0},
   {name:'nextAttemptAt',type:'date'},
+  {name:'lockedAt',type:'date'},
   {name:'deliveredAt',type:'date'},
   {name:'errorCode',type:'string'},
  ],
- indexes:[{fields:['entityId','id']},{fields:['state','nextAttemptAt','id']}],
+ indexes:[{fields:['entityId','id']},{fields:['state','nextAttemptAt','id']},{fields:['organizationId','state','createdAt']}],
 });

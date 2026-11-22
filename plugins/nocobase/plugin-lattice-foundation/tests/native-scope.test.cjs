@@ -147,3 +147,49 @@ test('resource guard scopes dynamic latticeCustom* collections and rejects blind
   assert.deepEqual(customChart.action.params.values.filter, { $and: [{ organizationId: 'org-a' }, {}] });
   assert.equal(customChart.action.params.values.pageSize, 200);
 });
+
+test('updateScopedDocument enforces optimistic version locking and increments version cleanly', async () => {
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  const actor = { organizationId: 'org-a', employeeId: 3 };
+  let currentRow = { id: 5, organizationId: 'org-a', version: 2 };
+  let capturedValues = null;
+  const db = {
+    sequelize: { transaction: (cb) => cb(transaction) },
+    getModel: () => ({ findOne: async () => currentRow }),
+    getRepository: () => ({
+      update: async (opts) => {
+        capturedValues = opts.values;
+        return [{ id: 5, version: opts.values.version }];
+      },
+    }),
+  };
+
+  // Matching expectedVersion succeeds and increments version 2 -> 3
+  const okCtx = {
+    action: { resourceName: 'latticeRequests', params: { filterByTk: 5, values: { name: 'Updated', expectedVersion: 2 } } },
+  };
+  await api.updateScopedDocument(db, okCtx, actor);
+  assert.equal(capturedValues.version, 3);
+  assert.equal(capturedValues.expectedVersion, undefined);
+
+  // Stale expectedVersion throws 409 VERSION_CONFLICT without writing
+  capturedValues = null;
+  const staleCtx = {
+    action: { resourceName: 'latticeRequests', params: { filterByTk: 5, values: { name: 'Stale', expectedVersion: 1 } } },
+  };
+  await assert.rejects(api.updateScopedDocument(db, staleCtx, actor), { status: 409, code: 'VERSION_CONFLICT' });
+  assert.equal(capturedValues, null);
+
+  // If-Match header also supported; non-numeric fails 400 INVALID_EXPECTED_VERSION
+  const hdrOkCtx = {
+    get: (h) => (h === 'If-Match' ? 'W/"2"' : ''),
+    action: { resourceName: 'latticeOrders', params: { filterByTk: 5, values: { name: 'Header OK' } } },
+  };
+  await api.updateScopedDocument(db, hdrOkCtx, actor);
+  assert.equal(capturedValues.version, 3);
+
+  const badCtx = {
+    action: { resourceName: 'latticeRequests', params: { filterByTk: 5, values: { name: 'Bad', expectedVersion: 'oops' } } },
+  };
+  await assert.rejects(api.updateScopedDocument(db, badCtx, actor), { status: 400, code: 'INVALID_EXPECTED_VERSION' });
+});

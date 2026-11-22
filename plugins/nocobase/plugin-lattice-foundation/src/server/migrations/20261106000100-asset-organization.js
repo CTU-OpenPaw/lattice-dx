@@ -38,6 +38,18 @@ class AssetOrganization extends Migration {
       `, { transaction });
     });
   }
+
+  async down() {
+    const { sequelize } = this.context.db;
+    await sequelize.transaction(async transaction => {
+      await sequelize.query(`
+        ALTER TABLE "latticeAssets" DROP CONSTRAINT IF EXISTS lattice_assets_department_org;
+        ALTER TABLE "latticeAssets" DROP CONSTRAINT IF EXISTS lattice_assets_custodian_org;
+        DROP INDEX IF EXISTS lattice_departments_id_org;
+        DROP INDEX IF EXISTS lattice_employees_id_org;
+      `, { transaction });
+    });
+  }
 }
 
 module.exports = AssetOrganization;

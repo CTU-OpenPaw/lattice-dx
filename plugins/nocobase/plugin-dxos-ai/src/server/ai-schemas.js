@@ -233,6 +233,9 @@ const aiProfiles = {
     { name: 'quickPrompts', type: 'jsonb', defaultValue: [] },
     { name: 'version', type: 'integer', defaultValue: 1, allowNull: false },
   ],
+  indexes: [
+    { fields: ['organizationId', 'enabled'] },
+  ],
 };
 
 const aiAuditLogs = {
@@ -256,6 +259,12 @@ const aiAuditLogs = {
     { name: 'errorCode', type: 'string' },
     { name: 'resultSummary', type: 'text' },
   ],
+  indexes: [
+    { fields: ['organizationId', 'createdAt'] },
+    { fields: ['aiEmployee', 'status', 'createdAt'] },
+    { fields: ['actorUserId', 'createdAt'] },
+    { fields: ['toolName', 'createdAt'] },
+  ],
 };
 
 const uiSnapshots = {
@@ -276,6 +285,10 @@ const uiSnapshots = {
     { name: 'createdByUsername', type: 'string', interface: 'input' },
     { name: 'layoutState', type: 'jsonb', defaultValue: {} },
     { name: 'blocks', type: 'jsonb', defaultValue: [] },
+  ],
+  indexes: [
+    { fields: ['portalSlug', 'pageTitle', 'createdAt'] },
+    { fields: ['gridUid', 'createdAt'] },
   ],
 };
 

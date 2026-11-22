@@ -20,7 +20,7 @@ const serviceTickets = {
   createdAt: true,
   updatedAt: true,
   fields: [
-    { name: 'code', type: 'string', interface: 'input', allowNull: false, unique: true, uiSchema: { type: 'string', title: 'Mã phiếu', 'x-component': 'Input' } },
+    { name: 'code', type: 'string', interface: 'input', allowNull: false, uiSchema: { type: 'string', title: 'Mã phiếu', 'x-component': 'Input' } },
     { name: 'name', type: 'string', interface: 'input', allowNull: false, uiSchema: { type: 'string', title: 'Tiêu đề phiếu', 'x-component': 'Input' } },
     { name: 'organizationId', type: 'string', interface: 'input', allowNull: false, uiSchema: { type: 'string', title: 'Mã tổ chức', 'x-component': 'Input' } },
     {
@@ -67,6 +67,13 @@ const serviceTickets = {
     { name: 'requester', type: 'belongsTo', target: 'latticeEmployees', foreignKey: 'requesterId' },
     { name: 'assignee', type: 'belongsTo', target: 'latticeEmployees', foreignKey: 'assigneeId' },
     { name: 'department', type: 'belongsTo', target: 'latticeDepartments', foreignKey: 'departmentId' },
+  ],
+  indexes: [
+    { fields: ['organizationId', 'code'], unique: true },
+    { fields: ['organizationId', 'status', 'priority'] },
+    { fields: ['organizationId', 'requesterId', 'status'] },
+    { fields: ['organizationId', 'assigneeId'] },
+    { fields: ['organizationId', 'departmentId'] },
   ],
 };
 

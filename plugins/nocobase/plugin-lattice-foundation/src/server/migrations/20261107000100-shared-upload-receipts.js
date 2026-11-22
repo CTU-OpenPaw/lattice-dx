@@ -25,6 +25,9 @@ class SharedUploadReceipts extends Migration{
     ); CREATE UNIQUE INDEX IF NOT EXISTS lattice_native_one_pending_upload
       ON lattice_native_request_uploads(request_id,organization_id) WHERE state='pending';`);
   }
+  async down(){
+    await this.context.db.sequelize.query(`DROP TABLE IF EXISTS lattice_native_request_uploads;`);
+  }
 }
 module.exports=SharedUploadReceipts;
 module.exports.default=SharedUploadReceipts;

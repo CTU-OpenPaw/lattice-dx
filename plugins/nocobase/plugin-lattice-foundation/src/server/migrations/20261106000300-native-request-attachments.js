@@ -27,6 +27,12 @@ class NativeRequestAttachments extends Migration {
         ON lattice_native_request_attachments (request_id, organization_id, id);
     `);
   }
+
+  async down() {
+    await this.context.db.sequelize.query(`
+      DROP TABLE IF EXISTS lattice_native_request_attachments;
+    `);
+  }
 }
 
 module.exports = NativeRequestAttachments;

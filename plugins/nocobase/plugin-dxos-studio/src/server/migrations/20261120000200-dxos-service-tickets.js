@@ -24,6 +24,17 @@ class DxosServiceTicketsInit extends Migration {
     }
     await installServiceRoleGrants(db);
   }
+
+  async down() {
+    const db = this.context.db;
+    await db.getRepository?.('rolesResources')?.destroy({
+      filter: {
+        name: 'latticeServiceTickets',
+        roleName: { $in: ['ldx_employee', 'ldx_manager', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_director', 'ldx_admin'] },
+      },
+    });
+    await db.getRepository?.('collections')?.destroy({ filter: { name: 'latticeServiceTickets' } });
+  }
 }
 
 module.exports = DxosServiceTicketsInit;

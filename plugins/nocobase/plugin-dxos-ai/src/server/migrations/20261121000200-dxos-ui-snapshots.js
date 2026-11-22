@@ -22,6 +22,13 @@ class DxosUiSnapshotsInit extends Migration {
       }
     }
   }
+
+  async down() {
+    const collections = this.context.db.getRepository?.('collections');
+    if (collections) {
+      await collections.destroy({ filter: { name: 'latticeUiSnapshots' } });
+    }
+  }
 }
 
 module.exports = DxosUiSnapshotsInit;
