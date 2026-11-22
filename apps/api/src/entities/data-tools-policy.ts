@@ -68,11 +68,12 @@ export function exportContent(schema:SchemaPublication,rows:ImportRow[],output:'
  else{
   const fields=Object.keys(schema.fields);
   const text=(value:string)=>/^[\s\u0000-\u001f\u007f]*[=+\-@]/.test(value)?`'${value}`:value;
-  const cells=rows.map(row=>[text(row.title),...fields.map(field=>{
+  const cells=rows.map(row=>[csvCell(text(row.title)),...fields.map(field=>{
    const value=row.attributes[field];if(value===undefined)return '';
-   return ['text','enum'].includes(schema.fields[field].type)?text(String(value)):String(value);
-  })].map(csvCell).join(','));
-  content=[['title',...fields].map(csvCell).join(','),...cells].join('\r\n')+'\r\n';
+   const isText=['text','enum'].includes(schema.fields[field].type);
+   return isText?csvCell(text(String(value))):csvCell(String(value),{preserveNumeric:true});
+  })].join(','));
+  content=[['title',...fields].map(h=>csvCell(h)).join(','),...cells].join('\r\n')+'\r\n';
  }
  if(Buffer.byteLength(content,'utf8')>2*1024*1024)throw new EntityError(409,'Export exceeds 2 MiB; narrow query.');
  return content;

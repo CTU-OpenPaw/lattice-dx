@@ -26,4 +26,8 @@ export function parseCsv(content:string):string[][] {
  if(!rows.length)bad('CSV header is required.');
  return rows;
 }
-export function csvCell(value:string):string{return /[",\r\n]/.test(value)?`"${value.replaceAll('"','""')}"`:value;}
+export function csvCell(value:string,options?:{preserveNumeric?:boolean}):string{
+ const preserve=Boolean(options?.preserveNumeric)&&/^-\d+(?:\.\d+)?$/.test(value);
+ const safe=!preserve&&/^[=+\-@\t\r]/.test(value)?`'${value}`:value;
+ return /[",\r\n]/.test(safe)?`"${safe.replaceAll('"','""')}"`:safe;
+}

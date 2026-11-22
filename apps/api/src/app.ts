@@ -51,7 +51,23 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
    const started=starts.get(request);if(started===undefined)return;starts.delete(request);
    telemetry.recordHttp(request.routeOptions.url??'unmatched',request.method,`${Math.min(5,Math.max(1,Math.floor(reply.statusCode/100)))}xx` as StatusClass,Math.max(0,performance.now()-started));
   });
-  app.addHook('onSend',async(request,reply)=>{reply.header('X-Request-Id',request.id);});
+  app.addHook('onSend', async (request, reply) => {
+    reply.header('X-Request-Id', request.id);
+    reply.header('X-Content-Type-Options', 'nosniff');
+    reply.header('X-Frame-Options', 'DENY');
+    reply.header('Referrer-Policy', 'no-referrer');
+    reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  });
+  app.setErrorHandler((error, _request, reply) => {
+    const status = typeof error === 'object' && error && 'statusCode' in error && typeof error.statusCode === 'number'
+      ? error.statusCode
+      : 500;
+    if (status >= 400 && status < 500) {
+      const msg = error instanceof Error ? error.message : 'Yêu cầu không hợp lệ.';
+      return reply.code(status).send({ error: msg });
+    }
+    return reply.code(500).send({ error: 'Lỗi hệ thống nội bộ.' });
+  });
   app.get('/health', async () => ({ status: 'ok', service: 'api' }));
   registerOperations(app,{...options,telemetry,coreConfigured:!!(options.records&&options.foundation&&options.entities&&options.workflows),coreCapabilities:{records:!!options.records,foundation:!!options.foundation,entities:!!options.entities,workflows:!!options.workflows}});
   registerFoundation(app,options);
@@ -112,6 +128,11 @@ export function createApi(options: { workerUrl: string; timeoutMs?: number; iden
     return record??reply.code(404).send({error:'Không tìm thấy bản ghi.'});
   });
   app.post('/v1/agent/demo', async (request, reply) => {
+    if (!options.identity) return reply.code(503).send({ error: 'Identity service chưa được cấu hình.' });
+    let identity: Awaited<ReturnType<typeof verifyIdentity>>;
+    try { identity = await verifyIdentity(request.headers.authorization, options.identity); }
+    catch { return reply.code(401).send({ error: 'Token không hợp lệ.' }); }
+    if (!identity.organizationId) return reply.code(403).send({ error: 'Token thiếu phạm vi đơn vị.' });
     const input = parseDemoRequest(request.body);
     if (!input) return reply.code(400).send({ error: 'Nhập yêu cầu từ 1 đến 2000 ký tự.' });
     try {

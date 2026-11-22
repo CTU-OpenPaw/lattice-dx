@@ -20,7 +20,6 @@ body:
       options:
         - "plugins/nocobase (Foundation / Enterprise Auth / Action Bridge)"
         - "apps/api (Headless Core API & Workflows)"
-        - "apps/web (Next.js Web)"
         - "apps/agent-worker (AI Advisory Worker)"
         - "infra/compose (Docker Compose & Local Stack)"
         - "scripts / docs / PoF Compliance"

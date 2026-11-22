@@ -174,9 +174,6 @@ export const INITIAL_ACTION_REQUIRED_TASKS: TaskItem[] = [
 
 export const MAX_FILE_SIZE_BYTES = 1048576; // 1 MiB strict limit
 
-export const EICAR_STANDARD_TEST_STRING =
-  'X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*';
-
 export type FileScanStatus = 'pending' | 'scanning' | 'clean' | 'rejected' | 'error';
 
 export interface AttachmentItem {

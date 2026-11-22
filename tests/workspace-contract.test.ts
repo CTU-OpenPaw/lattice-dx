@@ -12,7 +12,6 @@ import {
   INITIAL_DEMO_SHORTCUTS,
   MOCK_WAREHOUSE_STAFF,
   MAX_FILE_SIZE_BYTES,
-  EICAR_STANDARD_TEST_STRING,
   validateOrderCreateInput,
   getScanStatusBadge,
   validateTaskDecisionInput,
@@ -198,10 +197,6 @@ describe('Task H04: Order Creation & ClamAV Attachment Validation', () => {
     expect(validateTaskDecisionInput('receive_work', { receiptNote: 'Đã nhận bàn giao lúc 14h' }).isValid).toBe(true);
 
     expect(validateTaskDecisionInput('approve', {}).isValid).toBe(true);
-  });
-
-  it('includes standard EICAR test string for safe validation testing', () => {
-    expect(EICAR_STANDARD_TEST_STRING).toContain('EICAR-STANDARD-ANTIVIRUS-TEST-FILE');
   });
 });
 

@@ -34,7 +34,11 @@ import type {ObjectStore} from './files/object-store.js';
 import {assertFileStorageReadable,offloadOneFile} from './files/storage-database.js';
 import {nativeRequestStorage} from './files/native-request-storage.js';
 export async function connectRecords(connectionString: string,options:{store?:ObjectStore;projectionEnabled?:boolean;outboxSelection?:{eventType:string;createdAfter:string;organizationId:string}}={}) {
-  const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 5000 });
+  const poolMax = Math.max(5, Math.min(100, Number(process.env.DATABASE_POOL_MAX) || 20));
+  const pool = new Pool({ connectionString, max: poolMax, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
+  pool.on('error', (err) => {
+    console.error('[db-pool] idle client error:', err instanceof Error ? err.message : String(err));
+  });
   try {
     const repository=await recordDatabase(pool);
     const directory=await createDirectoryDatabase(pool);

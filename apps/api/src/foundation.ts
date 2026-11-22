@@ -93,11 +93,13 @@ export function registerFoundation(app:FastifyInstance,options:FoundationOptions
       if(content.toString('base64')!==contentBase64)return reply.code(400).send({error:'Base64 không hợp lệ.'});
       const scope=scopes.get(req)!;
       const recordId=await resolveRecordLink(req.body?.recordId,scope,options.records);
-      const file=await repo.createFile({filename:filename.trim(),ownerId:scope.subject,organizationId:scope.organizationId,content,...(recordId?{recordId}:{})});
       let status:ScanStatus='error';
       try{if(options.scan)status=await options.scan(content);}catch{ /* Scanner errors never grant download access. */ }
-      await repo.markFile(file.id,status);
-      return reply.code(201).send({...file,scanStatus:status});
+      if(status==='rejected')return reply.code(409).send({error:'Tệp bị từ chối bởi bộ quét mã độc.'});
+      if(status!=='clean')return reply.code(503).send({error:'Dịch vụ quét mã độc tạm thời không khả dụng.'});
+      const file=await repo.createFile({filename:filename.trim(),ownerId:scope.subject,organizationId:scope.organizationId,content,...(recordId?{recordId}:{})});
+      await repo.markFile(file.id,'clean');
+      return reply.code(201).send({...file,scanStatus:'clean'});
     });
     routes.get<{Params:{id:string}}>('/v1/files/:id',async(req,reply)=>{
       const file=repo.readFileMetadata?await repo.readFileMetadata(req.params.id,scopes.get(req)!):await repo.readFile(req.params.id,scopes.get(req)!)??await options.readSharedFile?.(req.params.id,scopes.get(req)!)??await repo.readTaskFile?.(req.params.id,scopes.get(req)!);

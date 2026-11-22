@@ -38,8 +38,6 @@ LICENSE, NOTICE, docs/third-party.md, and docs/dependency-inventory.md):
 Name                       | Version  | License                 | Description | Url
 ---------------------------|----------|-------------------------|-------------|---------------------------------------------
 NocoBase Host Runtime      | 2.2.38   | NocoBase License (2026-02-24; Apache-2.0 + Clauses 4.2, 5.1-5.4) | Low-code/No-code runtime container & host SDK | https://github.com/nocobase/nocobase
-Next.js                    | 16.3.8   | MIT                     | Web application framework for apps/web | https://github.com/vercel/next.js
-React / React DOM          | 19.3.0   | MIT                     | UI library for @dx/web (host runtime uses React 18) | https://github.com/facebook/react
 Fastify                    | 5.12.5   | MIT                     | Backend HTTP API framework for apps/api | https://github.com/fastify/fastify
 jose                       | 6.2.12   | MIT                     | JWT/JWS/JWK utilities for @dx/api | https://github.com/panva/jose
 node-postgres (pg)         | 8.23.1   | MIT                     | PostgreSQL client for @dx/api | https://github.com/brianc/node-postgres

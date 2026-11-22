@@ -89,7 +89,7 @@ Sau khi nạp demo, đăng nhập quản trị tại `http://localhost:13014` (`
 | Thư mục / Tệp | Trách nhiệm |
 | --- | --- |
 | `plugins/nocobase/*` | 7 plugin NocoBase độc lập (`Apache-2.0`, `sdkProvidedByHost: true`) và bộ kiểm thử `node --test`. |
-| `apps/api`, `apps/agent-worker`, `apps/web` | Fastify API tích hợp, worker xử lý đề xuất AI/IoT và giao diện Next.js companion (`@dx/*`). |
+| `apps/api`, `apps/agent-worker` | Fastify API tích hợp & quét tệp sidecar và worker xử lý đề xuất AI/IoT (`@dx/*`). |
 | `packages/contracts` | Hợp đồng schema và kiểm tra kiểu dùng chung (`@dx/contracts`). |
 | `infra/compose/*.yml` | Cấu hình Docker Compose khóa digest `@sha256:` cho core stack, NocoBase runtime và clean rehearsal. |
 | `scripts/` | Công cụ cài đặt workspace, clean-install, seed Multi-Portal/Workspace, kiểm toán PoF (`verify-pof-readiness.mjs`) và đóng gói nguồn (`build-oss-release-tarball.mjs`). |
