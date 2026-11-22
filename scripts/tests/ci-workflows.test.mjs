@@ -25,7 +25,7 @@ test('ci.yml includes check, dependency-audit, compose-validate (all 7 stacks), 
   assert.match(ci, /pnpm audit --prod --audit-level=high/);
   assert.match(ci, /node scripts\/source-headers\.mjs --check/);
   assert.match(ci, /tests\/nocobase-externals\.test\.mjs/);
-  assert.match(ci, /aquasecurity\/trivy-action@0\.30\.0/);
+  assert.match(ci, /aquasecurity\/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25/);
   assert.match(ci, /ignore-unfixed:\s*true/);
   assert.match(ci, /exit-code:\s*'1'/);
   for (const composeFile of [
