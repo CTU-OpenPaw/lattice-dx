@@ -236,7 +236,7 @@ const aiProfiles = {
     { name: 'version', type: 'integer', defaultValue: 1, allowNull: false },
   ],
   indexes: [
-    { fields: ['organizationId', 'enabled'] },
+    { name: 'idx_lattice_ai_profiles_org_enabled', fields: ['organizationId', 'enabled'] },
   ],
 };
 
@@ -266,10 +266,10 @@ const aiAuditLogs = {
     { name: 'resultSummary', type: 'text' },
   ],
   indexes: [
-    { fields: ['organizationId', 'createdAt'] },
-    { fields: ['aiEmployee', 'status', 'createdAt'] },
-    { fields: ['actorUserId', 'createdAt'] },
-    { fields: ['toolName', 'createdAt'] },
+    { name: 'idx_lattice_ai_audit_org_created', fields: ['organizationId', 'createdAt'] },
+    { name: 'idx_lattice_ai_audit_emp_status_created', fields: ['aiEmployee', 'status', 'createdAt'] },
+    { name: 'idx_lattice_ai_audit_actor_created', fields: ['actorUserId', 'createdAt'] },
+    { name: 'idx_lattice_ai_audit_tool_created', fields: ['toolName', 'createdAt'] },
   ],
 };
 
@@ -293,8 +293,8 @@ const uiSnapshots = {
     { name: 'blocks', type: 'jsonb', defaultValue: [] },
   ],
   indexes: [
-    { fields: ['portalSlug', 'pageTitle', 'createdAt'] },
-    { fields: ['gridUid', 'createdAt'] },
+    { name: 'idx_lattice_ui_snapshots_portal_page_created', fields: ['portalSlug', 'pageTitle', 'createdAt'] },
+    { name: 'idx_lattice_ui_snapshots_grid_created', fields: ['gridUid', 'createdAt'] },
   ],
 };
 

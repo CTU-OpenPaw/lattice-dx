@@ -10,7 +10,7 @@ const text = (name, title, extra = {}) => ({name, type: 'string', interface: 'in
   uiSchema: {type: 'string', title, 'x-component': 'Input'}, ...extra});
 const relation = (name, target, foreignKey) => ({name, type: 'belongsTo', target, foreignKey});
 const many = (name, target, foreignKey) => ({name, type: 'hasMany', target, foreignKey});
-const base = (name, title, fields, indexes = []) => ({
+const base = (name, title, shortPrefix, fields, indexes = []) => ({
   name,
   title,
   titleField: 'name',
@@ -26,7 +26,7 @@ const base = (name, title, fields, indexes = []) => ({
     ...fields,
   ],
   indexes: [
-    {fields: ['organizationId', 'code'], unique: true},
+    {name: `uidx_lattice_${shortPrefix}_org_code`, fields: ['organizationId', 'code'], unique: true},
     ...indexes,
   ],
 });
@@ -39,50 +39,50 @@ const documentFields = () => [
   relation('assignee','latticeEmployees','assigneeId'),
   relation('department','latticeDepartments','departmentId'),
 ];
-const documentIndexes = [
-  {fields: ['organizationId', 'status', 'createdAt']},
-  {fields: ['organizationId', 'requesterId', 'status']},
-  {fields: ['organizationId', 'assigneeId', 'status']},
-  {fields: ['organizationId', 'departmentId']},
+const documentIndexes = (shortPrefix) => [
+  {name: `idx_lattice_${shortPrefix}_org_status_created`, fields: ['organizationId', 'status', 'createdAt']},
+  {name: `idx_lattice_${shortPrefix}_org_requester_status`, fields: ['organizationId', 'requesterId', 'status']},
+  {name: `idx_lattice_${shortPrefix}_org_assignee_status`, fields: ['organizationId', 'assigneeId', 'status']},
+  {name: `idx_lattice_${shortPrefix}_org_department`, fields: ['organizationId', 'departmentId']},
 ];
 module.exports = {
-  requests: base('latticeRequests', 'Yêu cầu nghiệp vụ', documentFields(), documentIndexes),
-  orders: base('latticeOrders', 'Đơn hàng', [
+  requests: base('latticeRequests', 'Yêu cầu nghiệp vụ', 'requests', documentFields(), documentIndexes('requests')),
+  orders: base('latticeOrders', 'Đơn hàng', 'orders', [
     ...documentFields(), text('customer', 'Khách hàng'), text('origin', 'Điểm đi'), text('destination', 'Điểm đến'),
     {name: 'quantity', type: 'double', interface: 'number', uiSchema: {title: 'Số lượng', 'x-component': 'InputNumber'}},
-  ], documentIndexes),
-  departments: base('latticeDepartments', 'Đơn vị / phòng ban', [
+  ], documentIndexes('orders')),
+  departments: base('latticeDepartments', 'Đơn vị / phòng ban', 'departments', [
     many('employees', 'latticeEmployees', 'departmentId'), many('locations', 'latticeLocations', 'departmentId'),
     many('assets', 'latticeAssets', 'departmentId'),
   ], [
-    {fields: ['organizationId', 'active']},
-    {fields: ['organizationId', 'name']},
+    {name: 'idx_lattice_departments_org_active', fields: ['organizationId', 'active']},
+    {name: 'idx_lattice_departments_org_name', fields: ['organizationId', 'name']},
   ]),
-  employees: base('latticeEmployees', 'Nhân viên', [text('email', 'Email'), text('identitySubject', 'Identity subject'),
+  employees: base('latticeEmployees', 'Nhân viên', 'employees', [text('email', 'Email'), text('identitySubject', 'Identity subject'),
     {name: 'userId', type: 'bigInt', unique: true, allowNull: true}, relation('user', 'users', 'userId'),
     relation('department', 'latticeDepartments', 'departmentId'), many('assets', 'latticeAssets', 'custodianId'),
   ], [
-    {fields: ['organizationId', 'active']},
-    {fields: ['organizationId', 'departmentId', 'active']},
-    {fields: ['userId']},
+    {name: 'idx_lattice_employees_org_active', fields: ['organizationId', 'active']},
+    {name: 'idx_lattice_employees_org_dept_active', fields: ['organizationId', 'departmentId', 'active']},
+    {name: 'idx_lattice_employees_user_id', fields: ['userId']},
   ]),
-  locations: base('latticeLocations', 'Địa điểm', [text('kind', 'Loại địa điểm'), text('address', 'Địa chỉ'),
+  locations: base('latticeLocations', 'Địa điểm', 'locations', [text('kind', 'Loại địa điểm'), text('address', 'Địa chỉ'),
     relation('department', 'latticeDepartments', 'departmentId'), many('assets', 'latticeAssets', 'locationId'),
   ], [
-    {fields: ['organizationId', 'departmentId', 'active']},
-    {fields: ['organizationId', 'kind']},
+    {name: 'idx_lattice_locations_org_dept_active', fields: ['organizationId', 'departmentId', 'active']},
+    {name: 'idx_lattice_locations_org_kind', fields: ['organizationId', 'kind']},
   ]),
-  assets: base('latticeAssets', 'Tài sản', [text('kind', 'Loại tài sản'), text('status', 'Trạng thái', {defaultValue: 'available'}),
+  assets: base('latticeAssets', 'Tài sản', 'assets', [text('kind', 'Loại tài sản'), text('status', 'Trạng thái', {defaultValue: 'available'}),
     {name: 'version', type: 'integer', defaultValue: 1, allowNull: false},
     relation('department', 'latticeDepartments', 'departmentId'), relation('location', 'latticeLocations', 'locationId'),
     relation('custodian', 'latticeEmployees', 'custodianId'),
   ], [
-    {fields: ['organizationId', 'departmentId', 'status']},
-    {fields: ['organizationId', 'locationId']},
-    {fields: ['organizationId', 'custodianId']},
-    {fields: ['organizationId', 'active']},
+    {name: 'idx_lattice_assets_org_dept_status', fields: ['organizationId', 'departmentId', 'status']},
+    {name: 'idx_lattice_assets_org_location', fields: ['organizationId', 'locationId']},
+    {name: 'idx_lattice_assets_org_custodian', fields: ['organizationId', 'custodianId']},
+    {name: 'idx_lattice_assets_org_active', fields: ['organizationId', 'active']},
   ]),
-  incidentRules: base('latticeIncidentRules', 'Luật cảnh báo sự cố', [
+  incidentRules: base('latticeIncidentRules', 'Luật cảnh báo sự cố', 'incident_rules', [
     text('assetEntityId', 'Mã tài sản', {allowNull: false}),
     text('attribute', 'Thuộc tính giám sát', {allowNull: false}),
     text('operator', 'Toán tử so sánh', {allowNull: false}),
@@ -96,11 +96,11 @@ module.exports = {
     text('handlerId', 'Kỹ thuật viên phụ trách', {allowNull: false}),
     relation('asset', 'latticeAssets', 'assetId'),
   ], [
-    {fields: ['organizationId', 'assetEntityId', 'active']},
-    {fields: ['organizationId', 'assetId']},
-    {fields: ['organizationId', 'handlerId']},
+    {name: 'idx_lattice_incident_rules_org_asset_active', fields: ['organizationId', 'assetEntityId', 'active']},
+    {name: 'idx_lattice_incident_rules_org_asset_id', fields: ['organizationId', 'assetId']},
+    {name: 'idx_lattice_incident_rules_org_handler', fields: ['organizationId', 'handlerId']},
   ]),
-  incidentCases: base('latticeIncidentCases', 'Sự cố thiết bị', [
+  incidentCases: base('latticeIncidentCases', 'Sự cố thiết bị', 'incident_cases', [
     text('runId', 'Mã lượt quy trình', {allowNull: false}),
     text('assetEntityId', 'Mã tài sản', {allowNull: false}),
     text('notificationId', 'Mã thông báo cảnh báo'),
@@ -120,11 +120,11 @@ module.exports = {
     text('clearedBy', 'Người đóng cảnh báo (Clear)'),
     relation('asset', 'latticeAssets', 'assetId'),
   ], [
-    {fields: ['organizationId', 'status', 'severity']},
-    {fields: ['organizationId', 'assetEntityId', 'status']},
-    {fields: ['organizationId', 'assetEntityId', 'fingerprint', 'status']},
-    {fields: ['organizationId', 'runId']},
-    {fields: ['organizationId', 'handlerId']},
-    {fields: ['organizationId', 'assetId']},
+    {name: 'idx_lattice_incident_cases_org_status_sev', fields: ['organizationId', 'status', 'severity']},
+    {name: 'idx_lattice_incident_cases_org_asset_status', fields: ['organizationId', 'assetEntityId', 'status']},
+    {name: 'idx_lattice_incident_cases_dedup', fields: ['organizationId', 'assetEntityId', 'fingerprint', 'status']},
+    {name: 'idx_lattice_incident_cases_org_run', fields: ['organizationId', 'runId']},
+    {name: 'idx_lattice_incident_cases_org_handler', fields: ['organizationId', 'handlerId']},
+    {name: 'idx_lattice_incident_cases_org_asset_id', fields: ['organizationId', 'assetId']},
   ]),
 };

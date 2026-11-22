@@ -69,11 +69,11 @@ const serviceTickets = {
     { name: 'department', type: 'belongsTo', target: 'latticeDepartments', foreignKey: 'departmentId' },
   ],
   indexes: [
-    { fields: ['organizationId', 'code'], unique: true },
-    { fields: ['organizationId', 'status', 'priority'] },
-    { fields: ['organizationId', 'requesterId', 'status'] },
-    { fields: ['organizationId', 'assigneeId'] },
-    { fields: ['organizationId', 'departmentId'] },
+    { name: 'uidx_lattice_service_tickets_org_code', fields: ['organizationId', 'code'], unique: true },
+    { name: 'idx_lattice_service_tickets_org_status_priority', fields: ['organizationId', 'status', 'priority'] },
+    { name: 'idx_lattice_service_tickets_org_requester_status', fields: ['organizationId', 'requesterId', 'status'] },
+    { name: 'idx_lattice_service_tickets_org_assignee', fields: ['organizationId', 'assigneeId'] },
+    { name: 'idx_lattice_service_tickets_org_department', fields: ['organizationId', 'departmentId'] },
   ],
 };
 

@@ -92,4 +92,21 @@ test('tenant-scoped collections replace global code unique with composite (organ
   ];
   const totalIndexes = allSchemas.reduce((sum, s) => sum + (Array.isArray(s.indexes) ? s.indexes.length : 0), 0);
   assert.ok(totalIndexes >= 42, `Expected >=42 declared indexes across schemas (plus context-outbox & uploads = >=45), got ${totalIndexes}`);
+
+  const seenIndexNames = new Set();
+  for (const schema of allSchemas) {
+    for (const idx of schema.indexes || []) {
+      assert.equal(typeof idx.name, 'string', `${schema.name} index [${idx.fields.join(',')}] missing explicit short name`);
+      assert.match(idx.name, /^u?idx_lattice_[a-z0-9_]+$/, `Index ${idx.name} must use canonical u?idx_lattice_* naming`);
+      assert.ok(idx.name.length <= 55, `Index name ${idx.name} (${idx.name.length} chars) risks Postgres 63-byte truncation`);
+      assert.equal(seenIndexNames.has(idx.name), false, `Duplicate explicit index name: ${idx.name}`);
+      seenIndexNames.add(idx.name);
+    }
+  }
+
+  const outboxSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-lattice-foundation/src/server/collections/context-outbox.js'), 'utf8');
+  for (const idxName of ['idx_lattice_outbox_entity_id', 'idx_lattice_outbox_state_next_id', 'idx_lattice_outbox_org_state_created']) {
+    assert.ok(outboxSrc.includes(idxName), `context-outbox.js missing explicit index name ${idxName}`);
+    assert.ok(idxName.length <= 55);
+  }
 });

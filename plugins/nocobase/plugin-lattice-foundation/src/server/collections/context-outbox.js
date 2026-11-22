@@ -23,5 +23,9 @@ module.exports=require('@nocobase/database').defineCollection({
   {name:'deliveredAt',type:'date'},
   {name:'errorCode',type:'string'},
  ],
- indexes:[{fields:['entityId','id']},{fields:['state','nextAttemptAt','id']},{fields:['organizationId','state','createdAt']}],
+ indexes:[
+  {name:'idx_lattice_outbox_entity_id',fields:['entityId','id']},
+  {name:'idx_lattice_outbox_state_next_id',fields:['state','nextAttemptAt','id']},
+  {name:'idx_lattice_outbox_org_state_created',fields:['organizationId','state','createdAt']},
+ ],
 });

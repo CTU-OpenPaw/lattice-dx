@@ -73,10 +73,10 @@ const paraDocuments = {
     { name: 'owner', type: 'belongsTo', target: 'latticeEmployees', foreignKey: 'ownerId' },
   ],
   indexes: [
-    { fields: ['organizationId', 'code'], unique: true },
-    { fields: ['organizationId', 'paraSpace', 'status'] },
-    { fields: ['organizationId', 'ownerId', 'active'] },
-    { fields: ['organizationId', 'departmentId'] },
+    { name: 'uidx_lattice_para_org_code', fields: ['organizationId', 'code'], unique: true },
+    { name: 'idx_lattice_para_org_space_status', fields: ['organizationId', 'paraSpace', 'status'] },
+    { name: 'idx_lattice_para_org_owner_active', fields: ['organizationId', 'ownerId', 'active'] },
+    { name: 'idx_lattice_para_org_department', fields: ['organizationId', 'departmentId'] },
   ],
 };
 

@@ -14,14 +14,14 @@ module.exports={
  inbox:base('latticeIntegrationInbox','Lattice — Sự kiện tích hợp',[
   field('kind','string',{allowNull:false}),field('observedAt','date',{allowNull:false}),field('late','boolean',{defaultValue:false}),field('data','json',{allowNull:false}),
  ],[
-  {fields:['organizationId','observedAt']},
-  {fields:['organizationId','kind','observedAt']},
+  {name:'idx_lattice_inbox_org_observed',fields:['organizationId','observedAt']},
+  {name:'idx_lattice_inbox_org_kind_observed',fields:['organizationId','kind','observedAt']},
  ]),
  proposals:base('latticeAgentProposals','Lattice — Đề xuất có bằng chứng',[
   field('targetCollection','string',{allowNull:false}),field('targetRecordId','bigInt',{allowNull:false}),field('recordFingerprint','string',{allowNull:false}),
   field('recommendation','text',{allowNull:false}),field('evidence','json',{allowNull:false}),field('state','string',{defaultValue:'proposed',allowNull:false}),
  ],[
-  {fields:['organizationId','state','createdAt']},
-  {fields:['organizationId','targetCollection','targetRecordId']},
+  {name:'idx_lattice_proposals_org_state_created',fields:['organizationId','state','createdAt']},
+  {name:'idx_lattice_proposals_org_target',fields:['organizationId','targetCollection','targetRecordId']},
  ]),
 };
