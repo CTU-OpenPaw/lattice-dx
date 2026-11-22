@@ -14,6 +14,7 @@ const {
   clearAlarm,
   queryTelemetryTimeSeries,
 } = require('./alarm-engine');
+const { executeGovernedExport } = require('./governed-export');
 
 const ALLOWED_PROPOSAL_COLLECTIONS = new Set([
   'latticeAssets',
@@ -411,6 +412,31 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         actorName,
         closeNote: String(input.closeNote || input.note || '').trim(),
       });
+      return next();
+    },
+
+    exportReport: async (ctx, next) => {
+      if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const collection = String(input.collection || '').trim();
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'view' });
+      const result = await executeGovernedExport(db, ctx, input, { isRoot, actor });
+      const isDownload = input.download === true || input.download === '1' || input.download === 'true';
+      if (typeof ctx.set === 'function') {
+        ctx.set('X-Lattice-Export-Columns', result.columns.join(','));
+        ctx.set('X-Lattice-Export-Omitted', result.omittedColumns.join(','));
+        ctx.set('X-Lattice-Export-Sha256', result.sha256);
+      }
+      if (isDownload) {
+        if (typeof ctx.set === 'function') {
+          ctx.set('Content-Type', result.mimeType);
+          ctx.set('Content-Disposition', `attachment; filename="${result.filename}"`);
+        }
+        ctx.body = result.buffer;
+        return next();
+      }
+      const { buffer, ...meta } = result;
+      ctx.body = { ...meta, contentBase64: buffer.toString('base64') };
       return next();
     },
   };

@@ -17,7 +17,7 @@ class DxosBlocksServerPlugin extends Plugin {
       name: 'dxosBlocks',
       actions: createDxosBlocksActions(this.db),
     });
-    this.app.acl.allow('dxosBlocks', ['proposals', 'contextTelemetry', 'telemetrySeries', 'alarmIngest', 'alarmAck', 'alarmClear'], 'loggedIn');
+    this.app.acl.allow('dxosBlocks', ['proposals', 'contextTelemetry', 'telemetrySeries', 'alarmIngest', 'alarmAck', 'alarmClear', 'exportReport'], 'loggedIn');
   }
 }
 
