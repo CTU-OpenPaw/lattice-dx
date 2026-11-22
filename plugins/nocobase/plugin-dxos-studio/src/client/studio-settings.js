@@ -35,6 +35,8 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const [forbidden, setForbidden] = React.useState(false);
     const [feedback, setFeedback] = React.useState(null);
     const [outboxData, setOutboxData] = React.useState({ items: [], total: 0, summary: { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 } });
+    const [bundleText, setBundleText] = React.useState('');
+    const [bundleInfo, setBundleInfo] = React.useState(null);
 
     const loadAll = React.useCallback(async () => {
       if (!api?.request) { setLoading(false); return; }
@@ -171,12 +173,52 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       }
     }
 
+    async function handleExportBundle() {
+      if (!api?.request || busyAction) return;
+      setBusyAction(true);
+      setFeedback(null);
+      try {
+        const res = await api.request({ url: 'dxosStudio:solutionBundleExport', method: 'get', params: selectedOrg ? { organizationId: selectedOrg } : {} });
+        const b = res?.data?.data || res?.data || {};
+        setBundleText(JSON.stringify(b, null, 2));
+        setBundleInfo({ sha256: b?.metadata?.contentSha256 || '', exportedAt: b?.metadata?.exportedAt || '' });
+        setFeedback({ type: 'success', text: `Đã xuất Solution Bundle v1 (${(b?.metadata?.contentSha256 || '').slice(0, 12)}…).` });
+      } catch (err) {
+        setFeedback({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || 'Không xuất được Solution Bundle.' });
+      } finally {
+        setBusyAction(false);
+      }
+    }
+
+    async function handleImportBundle(dryRun) {
+      if (!api?.request || busyAction) return;
+      setBusyAction(true);
+      setFeedback(null);
+      try {
+        const parsed = JSON.parse(bundleText || '{}');
+        const res = await api.request({ url: 'dxosStudio:solutionBundleImport', method: 'post', data: { bundle: parsed, dryRun, organizationId: selectedOrg || undefined } });
+        const d = res?.data?.data || res?.data || {};
+        setBundleInfo((prev) => ({ ...(prev || {}), diff: d.diff || null }));
+        setFeedback({
+          type: 'success',
+          text: d.dryRun
+            ? `Dry-Run hợp lệ (+${d.diff?.summary?.added || 0} thêm, ~${d.diff?.summary?.changed || 0} đổi).`
+            : `Đã áp dụng Bundle: ${d.applied?.rolesUpserted || 0} roles, ${d.applied?.aiProfilesUpserted || 0} AI profiles.`,
+        });
+      } catch (err) {
+        setFeedback({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Lỗi Solution Bundle JSON.' });
+      } finally {
+        setBusyAction(false);
+      }
+    }
+
     const tabItems = [
       ['workflows', '1. Quy trình Poka-yoke'],
       ['portals', '2. Dựng cổng đa-block'],
       ['plugins', '3. Hệ sinh thái 7 Plugin'],
       ['pof', '4. Sẵn sàng PoF & Hệ thống'],
       ['outbox', '5. Hàng đợi Outbox & DLQ'],
+      ['gitops', '6. GitOps Bundle'],
     ];
 
     const btnStyle = (active) => ({
@@ -348,6 +390,25 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
               h('button', { type: 'button', disabled: busyAction, onClick: () => handleReplayDlq([item.eventId]), style: btnStyle(false) }, 'Phát lại'),
             )),
           ),
+      ) : null,
+
+      tab === 'gitops' ? h('div', { 'data-testid': 'dxos-studio-gitops-bundle-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          h('h3', { style: { margin: 0, fontSize: 16 } }, 'GitOps Solution Bundle (Schema · RBAC · Portals · Workflows · AI)'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h('button', { type: 'button', disabled: busyAction, onClick: handleExportBundle, style: btnStyle(true) }, 'Xuất Bundle JSON'),
+            h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: () => handleImportBundle(true), style: btnStyle(false) }, 'Kiểm tra Diff (Dry-Run)'),
+            h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: () => handleImportBundle(false), style: btnStyle(false) }, 'Áp dụng Bundle'),
+          ),
+        ),
+        bundleInfo?.sha256 ? h('div', { style: { fontSize: 12, color: '#475569' } }, `SHA-256: ${bundleInfo.sha256}`) : null,
+        h('textarea', {
+          value: bundleText,
+          onChange: (e) => setBundleText(e.target.value),
+          placeholder: 'Dán hoặc xuất JSON latticedx.solution-bundle/v1 tại đây…',
+          rows: 10,
+          style: { width: '100%', padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12 },
+        }),
       ) : null,
     );
   };

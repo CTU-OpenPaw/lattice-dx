@@ -82,3 +82,26 @@ test('plugin-dxos-studio renders Tab 5 Outbox & DLQ panel cleanly', async () => 
   const dump = JSON.stringify(tree);
   assert.ok(dump.includes('Outbox') && dump.includes('DLQ'), 'Studio UI should present Tab 5 Outbox & DLQ');
 });
+
+test('plugin-dxos-studio renders Tab 6 GitOps Solution Bundle panel cleanly', async () => {
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const val = typeof init === 'function' ? init() : init;
+      if (val === 'workflows') return ['gitops', () => {}];
+      return [val, () => {}];
+    },
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useCallback: (fn) => fn,
+  };
+  const mockClient = {
+    useAPIClient: () => ({ request: async () => ({ data: { data: {} } }) }),
+  };
+  const Page = createDxosStudioSettingsPage(mockClient, React, {}, {});
+  const tree = Page();
+  const dump = JSON.stringify(tree);
+  assert.ok(dump.includes('dxos-studio-gitops-bundle-panel'), 'Studio UI should present Tab 6 GitOps Bundle panel');
+});

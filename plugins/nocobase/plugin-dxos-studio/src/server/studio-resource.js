@@ -10,6 +10,7 @@
 
 const { listWorkflowTemplates, buildWorkflowTemplate } = require('./workflow-templates');
 const { composePortals } = require('./portal-composer');
+const { exportSolutionBundle, diffSolutionBundle, importSolutionBundle, validateSolutionBundle } = require('./solution-bundle');
 
 const DXOS_PLUGINS_CATALOG = [
   { packageName: '@latticedx/plugin-action-bridge', title: 'Action Bridge', spaces: ['[P]', '[H]'] },
@@ -358,6 +359,39 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
         if (eid) replayedIds.push(eid);
       }
       ctx.body = { replayedCount: replayedIds.length, eventIds: replayedIds };
+      return next();
+    },
+
+    solutionBundleExport: async (ctx, next) => {
+      if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
+      await requireAdmin(ctx);
+      const params = readParams(ctx);
+      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
+      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.2.0' });
+      return next();
+    },
+
+    solutionBundleDiff: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      await requireAdmin(ctx);
+      const params = readParams(ctx);
+      const incoming = typeof params.bundle === 'string' ? JSON.parse(params.bundle) : params.bundle;
+      const validation = validateSolutionBundle(incoming);
+      if (!validation.valid) throw fail('INVALID_SOLUTION_BUNDLE', 400, validation.errors.join('; '));
+      const organizationId = params.organizationId ? String(params.organizationId).trim() : (incoming.metadata?.organizationId !== 'all' ? incoming.metadata?.organizationId : null);
+      const current = await exportSolutionBundle(db, { organizationId });
+      ctx.body = diffSolutionBundle(current, incoming);
+      return next();
+    },
+
+    solutionBundleImport: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      await requireAdmin(ctx);
+      const params = readParams(ctx);
+      const incoming = typeof params.bundle === 'string' ? JSON.parse(params.bundle) : params.bundle;
+      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
+      const dryRun = params.dryRun === false ? false : true;
+      ctx.body = await importSolutionBundle(db, incoming, { dryRun, organizationId });
       return next();
     },
   };
