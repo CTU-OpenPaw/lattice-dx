@@ -1,19 +1,23 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { expect, test } from 'vitest';
 import type { Pool } from 'pg';
 import { organizationDatabase } from './database.js';
 const actor={
   subject:'alice',organizationId:'org',roles:['directory:manage']
 };
-test('foreign parent is hidden with 404 rather than accepted in tenant hierarchy',async()=>{
+test('foreign parent returns uniform 400 without querying other organizations',async()=>{
+  const queries:string[]=[];
   const client={
     async query(sql:string){
-      return {
-        rows:sql.includes('organization_id<>$1')?[{
-          id:'foreign'
-        }
-        ]:[]
-      };
+      queries.push(sql);
+      return { rows:[] };
     },release(){
     }
   };
@@ -30,8 +34,9 @@ test('foreign parent is hidden with 404 rather than accepted in tenant hierarchy
   await expect(repo.createDepartment(actor,{
     id:'child',name:'Child',parentId:'foreign',managerId:null
   },'foreign')).rejects.toMatchObject({
-    statusCode:404
+    statusCode:400
   });
+  expect(queries.some(s=>s.includes('organization_id<>$1'))).toBe(false);
 });
 test('snapshot locks organization before directory writes and commits receipt audit and revision on same client',async()=>{
   const statements:string[]=[];
@@ -68,7 +73,8 @@ test('snapshot locks organization before directory writes and commits receipt au
   });
   expect(statements.indexOf('BEGIN')).toBeLessThan(statements.findIndex(s=>s.includes('pg_advisory_xact_lock')));
   expect(statements.findIndex(s=>s.includes('pg_advisory_xact_lock'))).toBeLessThan(statements.findIndex(s=>s.includes('UPDATE directory_people')));
-  const directoryGate=statements.indexOf('LOCK TABLE directory_people IN EXCLUSIVE MODE');
+  const directoryGate=statements.findIndex(s=>s.includes('pg_advisory_xact_lock')&&s.includes('directory_people:'));
+  expect(statements.some(s=>s.includes('LOCK TABLE directory_people'))).toBe(false);
   expect(directoryGate).toBeGreaterThan(statements.indexOf('BEGIN'));
   expect(directoryGate).toBeLessThan(statements.findIndex(s=>s.includes('SELECT revision')));
   expect(statements.some(s=>s.includes('INSERT INTO organization_snapshot_audit'))).toBe(true);

@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 export type PageQuery = {limit:number;offset:number;q:string};
 export type Page<T> = {items:T[];page:{limit:number;offset:number;hasMore:boolean;nextOffset:number|null}};
 export class PageError extends Error { readonly statusCode=400; }

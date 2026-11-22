@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { timingSafeEqual, createHash } from 'node:crypto';
 import { NotificationError, type Notification, type AssetContext, type AssetObservation } from './types.js';
 const component = /^[A-Za-z0-9_-]{1,128}$/;

@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const { Migration } = require('@nocobase/server');
 
 class NativeRequestAttachments extends Migration {
@@ -18,6 +25,12 @@ class NativeRequestAttachments extends Migration {
       );
       CREATE INDEX IF NOT EXISTS lattice_native_request_attachments_scope
         ON lattice_native_request_attachments (request_id, organization_id, id);
+    `);
+  }
+
+  async down() {
+    await this.context.db.sequelize.query(`
+      DROP TABLE IF EXISTS lattice_native_request_attachments;
     `);
   }
 }

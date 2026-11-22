@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {pathToFileURL} from 'node:url';
 import {freshManifest,localConfig,loginActors,api,validateArtifact,writeArtifact} from './lib/team-integration.mjs';
 export async function seedTeamIntegration({shared=false,config=localConfig(),actors}={}){

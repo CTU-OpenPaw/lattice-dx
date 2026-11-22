@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {test}=require('node:test');const assert=require('node:assert/strict');
 test('server identity is applied in host validation hooks after user-field ACL sanitization',()=>{
   const {applyNativeIdentity}=require('../src/server/native-identity-hooks');

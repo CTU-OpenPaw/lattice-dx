@@ -1,0 +1,37 @@
+# @file LatticeDX — Open Digital Enterprise Platform
+# @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
+# @license Apache-2.0
+# @see https://github.com/CTU-OpenPaw/lattice-dx
+# SPDX-License-Identifier: Apache-2.0
+
+(security_headers) {
+  header {
+    Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+    X-Content-Type-Options "nosniff"
+    X-Frame-Options "SAMEORIGIN"
+    Referrer-Policy "strict-origin-when-cross-origin"
+    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    -Server
+  }
+}
+
+{$LATTICE_DOMAIN} {
+  import security_headers
+  encode gzip zstd
+
+  handle /v1/* {
+    reverse_proxy gateway:9080
+  }
+
+  handle {
+    reverse_proxy nocobase:80 {
+      flush_interval -1
+    }
+  }
+}
+
+{$KEYCLOAK_DOMAIN} {
+  import security_headers
+  reverse_proxy keycloak:8080
+}

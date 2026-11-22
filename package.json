@@ -1,9 +1,9 @@
 {
-  "name": "lattice-dx", "version": "0.1.0", "private": true, "license": "Apache-2.0",
+  "name": "lattice-dx", "version": "0.2.0", "private": true, "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@10.23.0", "engines": { "node": ">=24 <25" },
   "scripts": {
-    "dev": "pnpm --parallel --filter @dx/web --filter @dx/api --filter @dx/agent-worker dev",
+    "dev": "pnpm --parallel --filter @dx/api --filter @dx/agent-worker dev",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck && tsc -p solutions/logistics/tsconfig.json",
     "test": "vitest run --maxWorkers=4",
@@ -61,7 +61,12 @@
     "backup:core": "node scripts/backup-core.mjs backup",
     "backup:native": "node scripts/native-database-recovery.mjs backup",
     "backup:rehearse-native": "node scripts/native-database-recovery.mjs rehearse",
+    "backup:stack": "node scripts/stack-recovery.mjs backup",
+    "backup:rehearse-stack": "node scripts/stack-recovery.mjs rehearse",
     "test:native-recovery": "node scripts/acceptance-native-recovery.mjs",
+    "acceptance:logistics-rbac": "node scripts/acceptance-logistics-and-rbac.mjs",
+    "setup:dxos-ai": "node scripts/setup-dxos-ai-workforce.mjs",
+    "acceptance:dxos-ai-mcp": "node scripts/acceptance-dxos-ai-and-mcp.mjs",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "backup:full": "node scripts/full-backup-core.mjs backup",
     "backup:rehearse-full": "node scripts/full-backup-core.mjs rehearse",
@@ -84,7 +89,9 @@
     "identity:sync-local": "node scripts/sync-local-realm.mjs",
     "test:incident-agent": "node scripts/acceptance-incident-agent-postgres.mjs",
     "test:ngsi-ld-postgres": "node scripts/acceptance-ngsi-ld-postgres.mjs",
-    "test:infra": "node scripts/smoke-core.mjs"
+    "test:infra": "node scripts/smoke-core.mjs",
+    "pof:check": "node scripts/verify-pof-readiness.mjs",
+    "release:tarball": "node scripts/build-oss-release-tarball.mjs"
   },
   "devDependencies": { "typescript": "7.0.2", "tsx": "4.23.15", "vitest": "5.0.3", "@types/node": "26.6.4" },
   "pnpm": { "onlyBuiltDependencies": ["esbuild"] }

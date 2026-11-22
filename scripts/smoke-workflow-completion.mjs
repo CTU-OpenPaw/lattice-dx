@@ -1,8 +1,16 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url)),base='http://localhost:8080',actors={};
 for(const username of ['alice','warehouse','it-demo','connector-demo','connector-b','connector-agent']){
  const r=await fetch('http://localhost:8081/realms/lattice/protocol/openid-connect/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'password',client_id:'dx-local',username,password:`local-${username}-password`}),signal:AbortSignal.timeout(15000)});
@@ -37,7 +45,7 @@ const waits=await call(`/v1/workflows/${run.id}/waits`);assert.equal(waits.items
 const taskWait=waits.items[0];
 const task=await call(`/v1/tasks/${taskWait.id}`,'GET',undefined,200,'it-demo');assert.equal(task.workflowWaitId,taskWait.id);
 // Restart the API process while a business wait is pending; its durable resource/config must survive.
-execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','restart','api'],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:30000});
+execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','restart','api'],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:30000});
 for(let i=0;i<20;i++){
  try{const health=await fetch(base+'/health',{signal:AbortSignal.timeout(2000)});if(health.ok)break;}catch{}
  await new Promise(resolve=>setTimeout(resolve,250));
@@ -157,4 +165,4 @@ import {workflowDatabase} from './src/workflows/database.ts';
  }
 })().catch(e=>{console.error(e);process.exitCode=1;});
 `;
-console.log(execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',sqlSource],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim());
+console.log(execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',sqlSource],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim());

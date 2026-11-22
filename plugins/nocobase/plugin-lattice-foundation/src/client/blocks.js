@@ -1,6 +1,13 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {createFieldRenderer}=require('./schema-fields');
 const {createEntityContextComponent}=require('./entity-context');
-// SPDX-License-Identifier: Apache-2.0
 const {createFormActions} = require('./actions');
 const {createWorkspaceApi} = require('./workspace-api');
 const {defaultContracts}=require('../shared/contracts');

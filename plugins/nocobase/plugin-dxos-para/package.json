@@ -1,0 +1,20 @@
+{
+  "name": "@latticedx/plugin-dxos-para",
+  "version": "0.2.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "main": "dist/server/index.js",
+  "displayName": "LatticeDX DX-OS P.A.R.A. Space",
+  "description": "P.A.R.A. knowledge and document workspace collection ([H] Human Space) with strict organization isolation and NocoBase ACL grants.",
+  "files": ["dist", "server.js", "client.js", "client-v2.js", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "nocobase": {
+    "supportedVersions": ["2.2.x"],
+    "testedRuntime": "2.2.38",
+    "sdkProvidedByHost": true
+  }
+}

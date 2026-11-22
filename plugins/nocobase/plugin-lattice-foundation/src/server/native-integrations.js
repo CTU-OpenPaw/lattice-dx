@@ -1,7 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {resolveNativeActor}=require('./native-scope');
 const {readNativeRecord,boundedJson}=require('./native-integration-reader');
-const {failure,strict,envelope,recordInput,proposalInput,receiptKey,fingerprint}=require('./native-integration-policy');
+const {failure,strict,identifier,envelope,recordInput,proposalInput,receiptKey,fingerprint}=require('./native-integration-policy');
 const {brokerConfig}=require('./native-context-delivery');
 const {entityUrn}=require('./native-context');
 const JOURNALS=['latticeIntegrationInbox','latticeAgentProposals'];
@@ -56,6 +63,36 @@ async function readContext(ctx,input){
  return {collection:target.collection,recordId:target.recordId,context,fingerprint:fingerprint(context)};
 }
 function createIntegrationActions(){return {
+ receiveAlert:async ctx=>{
+  if(ctx.method!=='POST')ctx.throw(405);
+  if(ctx.state.currentRole!=='ldx_connector')throw failure('INTEGRATION_CONNECTOR_ROLE_REQUIRED',403);
+  const input=ctx.action.params.values;
+  strict(input,['eventId','assetId','handlerId','severity']);
+  const assetId=identifier(input.assetId),handlerId=identifier(input.handlerId);
+  if(!['low','medium','high','critical'].includes(input.severity))throw failure('INTEGRATION_INVALID_SEVERITY');
+  const {actor}=await readNativeRecord(ctx,{collection:'latticeAssets',recordId:assetId});
+  const code='UC2-'+receiptKey(actor.organizationId,actor.userId,input.eventId);
+  ctx.body=await ctx.app.db.sequelize.transaction(async transaction=>{
+   const db=ctx.app.db;
+   await db.sequelize.query('SELECT pg_advisory_xact_lock(hashtextextended(:code,0))',{replacements:{code},transaction});
+   const current=await resolveNativeActor(db,ctx.state.currentUser,{transaction});
+   if(current.organizationId!==actor.organizationId||String(current.employeeId)!==String(actor.employeeId))throw failure('INTEGRATION_MEMBERSHIP_CHANGED',403);
+   const cases=db.getRepository('latticeIncidentCases');
+   const existing=await cases.findOne({filter:{code,organizationId:actor.organizationId},transaction});
+   const assetEntityId=entityUrn('Asset',actor.organizationId,assetId);
+   if(existing){
+    if(existing.assetEntityId!==assetEntityId||existing.handlerId!==handlerId||existing.severity!==input.severity)throw failure('INTEGRATION_EVENT_CONFLICT',409);
+    return {id:existing.id,duplicate:true};
+   }
+   const handler=await db.getRepository('latticeEmployees').findOne({filter:{id:handlerId,organizationId:actor.organizationId,active:true,userId:{$ne:null}},transaction});
+   if(!handler)throw failure('INTEGRATION_HANDLER_UNAVAILABLE',403);
+   const row=await cases.create({values:{
+    code,name:'Cảnh báo thiết bị '+assetId,organizationId:actor.organizationId,runId:code,
+    assetId,assetEntityId,handlerId,notificationId:input.eventId,severity:input.severity,status:'open',
+   },transaction,context:ctx});
+   return {id:row.id,duplicate:false};
+  });
+ },
  receive:async ctx=>{
   if(ctx.method!=='POST')ctx.throw(405);
   if(ctx.state.currentRole!=='ldx_connector')throw failure('INTEGRATION_CONNECTOR_ROLE_REQUIRED',403);
@@ -74,6 +111,21 @@ function createIntegrationActions(){return {
   ctx.body={collection:visible.collection,recordId:visible.recordId,record:visible.record,fingerprint:visible.fingerprint};
  },
  context:async ctx=>{if(ctx.method!=='POST')ctx.throw(405);ctx.body=await readContext(ctx,ctx.action.params.values);},
+ proposalReceipt:async ctx=>{
+  if(ctx.method!=='POST')ctx.throw(405);
+  const input=ctx.action.params.values;
+  strict(input,['collection','recordId','eventId']);
+  const visible=await readNativeRecord(ctx,{collection:input.collection,recordId:input.recordId});
+  const {actor}=visible;
+  const filter={
+   receiptKey:receiptKey(actor.organizationId,actor.userId,input.eventId),
+   sourceEmployeeId:actor.employeeId,
+   targetCollection:visible.collection,
+   targetRecordId:visible.recordId,
+  };
+  const row=await ctx.app.db.getRepository('latticeAgentProposals').findOne({filter,fields:['id']});
+  ctx.body=row?{found:true,id:row.id}:{found:false};
+ },
  propose:async ctx=>{
   if(ctx.method!=='POST')ctx.throw(405);
   const input=proposalInput(ctx.action.params.values),visible=await readNativeRecord(ctx,{collection:input.collection,recordId:input.recordId});
@@ -105,8 +157,8 @@ function createIntegrationActions(){return {
 };}
 function registerNativeIntegrations(app){
  app.resourceManager.define({name:'latticeIntegrations',actions:createIntegrationActions()});
- app.acl.registerSnippet({name:PROPOSE_SNIPPET,actions:['latticeIntegrations:propose']});
- app.acl.allow('latticeIntegrations',['receive','record','context','proposals'],'loggedIn');
+ app.acl.registerSnippet({name:PROPOSE_SNIPPET,actions:['latticeIntegrations:propose','latticeIntegrations:proposalReceipt']});
+ app.acl.allow('latticeIntegrations',['receive','receiveAlert','record','context','proposals'],'loggedIn');
  app.resourceManager.use(async(ctx,next)=>{
   if(JOURNALS.includes(ctx.action.resourceName?.split('.')[0])&&ctx.state.currentRole!=='root')throw failure('INTEGRATION_JOURNAL_PRIVATE',403);
   return next();

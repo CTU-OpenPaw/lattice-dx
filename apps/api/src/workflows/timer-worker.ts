@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import type {WorkflowRepository} from './types.js';
 import {observedTick,type WorkerObserver} from '../operations/telemetry.js';
 /** Explicit startup belongs to the host; ticks never overlap and shutdown drains. */

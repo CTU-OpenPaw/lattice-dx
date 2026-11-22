@@ -1,8 +1,16 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url));
 const source=`
 import assert from 'node:assert/strict';
@@ -68,7 +76,7 @@ import {workflowDatabase} from './src/workflows/database.ts';
  }finally{await pool?.end();if(!/^private_blocks_smoke_[a-f0-9]{32}$/.test(schema))throw new Error('Unsafe fixture');await control.query('DROP SCHEMA IF EXISTS '+schema+' CASCADE');await control.end();}
 })().catch(error=>{console.error(error);process.exitCode=1;});
 `;
-console.log(execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim());
+console.log(execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim());
 const login=await fetch('http://localhost:8081/realms/lattice/protocol/openid-connect/token',{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'password',client_id:'dx-local',username:'alice',password:'local-alice-password'}),signal:AbortSignal.timeout(15000)});assert.equal(login.status,200);
 const token=(await login.json()).access_token;
 const catalog=await fetch('http://localhost:8080/v1/workflow-blocks',{headers:{authorization:'Bearer '+token},signal:AbortSignal.timeout(15000)});assert.equal(catalog.status,200);const blocks=JSON.stringify(await catalog.json());for(const action of ['entities.project','data.evaluate','data.assert'])assert.ok(blocks.includes(action));

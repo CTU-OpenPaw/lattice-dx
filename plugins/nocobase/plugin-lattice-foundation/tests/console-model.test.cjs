@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {test}=require('node:test'),assert=require('node:assert/strict');
 const {attributesFromForm,workflowForPage,moveItem,enabledSections}=require('../src/client/console-model');
 test('generic entity mutations all use the existing entity command transport',async()=>{

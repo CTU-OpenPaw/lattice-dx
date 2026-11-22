@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import type { Page, PageQuery } from '../pagination.js';
 import type { Attributes, Entity, EntityQuery, Scope } from './types.js';
 export type Attachment = {fileId:string;filename:string;size:number;scanStatus:string;createdBy:string;createdAt:string};

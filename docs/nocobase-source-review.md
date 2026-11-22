@@ -4,6 +4,8 @@ Ngày kiểm tra: 2026-10-06.
 
 Cập nhật runtime 2026-10-11: thêm `infra/compose/nocobase.yml` chạy image chính thức 2.2.20 với digest khóa. Version server trong container xác nhận 2.2.20; smoke API/frontend đạt. Submodule vẫn giữ nguyên commit, không cài dependency/sửa source. Runtime là dịch vụ riêng, chưa SSO Keycloak hoặc plugin của nhóm. Các nhận xét giấy phép dưới đây vẫn là giới hạn cần xử lý, không được coi là chứng nhận tuân thủ dự thi.
 
+Cập nhật runtime 2026-11-20: cả `infra/compose/nocobase.yml` và `infra/compose/native-rehearsal.yml` đều khóa digest cố định tại `nocobase/nocobase:2.2.38@sha256:90028473fe54b1fd1929b1ab0669a12e48a9a8f100d41662c98bc3c618225f4e`, chạy cùng `postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50`. Sáu plugin của nhóm (`@latticedx/plugin-lattice-foundation`, `@latticedx/plugin-enterprise-auth`, `@latticedx/plugin-action-bridge`, `@latticedx/plugin-dxos-para`, `@latticedx/plugin-dxos-blocks`, `@latticedx/plugin-dxos-studio`) đều khai báo `"license": "Apache-2.0"` và `"sdkProvidedByHost": true`, gọi host SDK qua runtime mount read-only, không chỉnh sửa mã nguồn upstream và giữ nguyên thông báo bản quyền giao diện theo Điều 5.2 (`Powered by NocoBase`, phiên bản `v2.2.38`, `License settings` dẫn tới `nocobase.com`). Submodule `upstream/nocobase` không được đóng gói vào gói phát hành nguồn (`pnpm release:tarball`).
+
 - Nguồn: https://github.com/nocobase/nocobase.git
 - Commit: `5b47bec116c52239348c09d360e4bd2649c99efc` trên nhánh `main` tại thời điểm clone.
 - Bản nguồn: `upstream/nocobase/`, được đăng ký làm Git submodule của dự án chính và khóa tại commit trên.
@@ -12,7 +14,7 @@ Cập nhật runtime 2026-10-11: thêm `infra/compose/nocobase.yml` chạy image
 
 ## Phân biệt vị trí
 
-`upstream/nocobase/` là toàn bộ nền tảng lấy từ upstream để đọc và khảo sát. `plugins/nocobase/` dành cho plugin nhóm viết theo SDK của NocoBase. Cấu hình chạy dịch vụ sẽ đặt trong `infra/` khi tích hợp.
+`upstream/nocobase/` là toàn bộ nền tảng lấy từ upstream để đọc và khảo sát. `plugins/nocobase/` dành cho plugin nhóm viết theo SDK của NocoBase. Cấu hình chạy dịch vụ đặt trong `infra/compose/nocobase.yml` và `infra/compose/native-rehearsal.yml`.
 
 ## Kết quả kiểm tra giấy phép ban đầu
 
@@ -26,4 +28,4 @@ Nguồn đối chiếu:
 - https://vfossa.vn/tin-tuc/the-le-olp-phan-mem-nguon-mo-nam-2026-760.html
 - https://opensource.org/osd
 
-Giữ nguyên LICENSE, header bản quyền và lịch sử upstream. Giấy phép Apache-2.0 của mã nhóm không thay thế giấy phép upstream. Submodule giúp tải đúng bản nguồn cùng dự án; chưa đưa checkout vào workspace pnpm, build hoặc runtime. Cách tổ chức bằng submodule không tự giải quyết nghĩa vụ cấp phép hay xác nhận đủ điều kiện dự thi.
+Giữ nguyên LICENSE, header bản quyền và lịch sử upstream. Giấy phép Apache-2.0 của mã nhóm không thay thế giấy phép upstream. Submodule giúp tải đúng bản nguồn cùng dự án; chưa đưa checkout vào workspace pnpm, build hoặc runtime. Cách tổ chức bằng submodule tách biệt rõ ranh giới giữa mã Apache-2.0 của nhóm (đóng gói qua `pnpm release:tarball`) và host runtime NocoBase 2.2.38.

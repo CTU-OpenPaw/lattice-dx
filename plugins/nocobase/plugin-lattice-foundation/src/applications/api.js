@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Convenience adapters for installed application services, outside Workspace core.
 function attachApplicationApi(api) {
   api.logistics=async(operation,payload={})=>(await api.request({url:'dxActions:logistics',method:'post',data:{...payload,operation}})).data;

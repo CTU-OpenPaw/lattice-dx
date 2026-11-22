@@ -1,3 +1,11 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {it,expect} from 'vitest';
 import {parseManifest} from './policy.js';
 const definition={id:'flow',title:'Flow',startRole:'employee',initialState:'draft',startFields:{},readerRoles:[],transitions:[{id:'go',from:'draft',to:'done',role:'employee',fields:{}}]};

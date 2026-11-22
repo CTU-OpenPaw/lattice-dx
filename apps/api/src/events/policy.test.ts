@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {expect,test} from 'vitest';
 import {canonicalEvent,eventStartKey,parseEvent,parseSubscription,requireDesigner,requireReceiver,resolveBinding} from './policy.js';
 test('canonical envelope eventId binding cannot read a spoofed data eventId',()=>{

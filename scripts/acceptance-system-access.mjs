@@ -1,6 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 
 const require = createRequire(import.meta.url);
 const esbuild = createRequire(require.resolve('tsx/package.json'))('esbuild');
@@ -19,9 +27,7 @@ try {
   const result = execFileSync(
     'docker',
     [
-      '--context',
-      'desktop-linux',
-      'compose',
+      ...dockerContextArgs(), 'compose',
       '-f',
       'infra/compose/core.yml',
       'exec',

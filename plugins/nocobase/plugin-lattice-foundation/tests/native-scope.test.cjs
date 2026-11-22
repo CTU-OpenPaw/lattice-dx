@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 let api;
@@ -77,4 +84,112 @@ test('document edits preserve native ACL filters and lock the row through mutati
   await api.updateScopedDocument(db,ctx,actor);assert.equal(saved,true);assert.equal(ctx.status,200);
   found=false;saved=false;await assert.rejects(api.updateScopedDocument(db,ctx,actor),{status:404});assert.equal(saved,false);
   ctx.action.params.filterByTk=undefined;await assert.rejects(api.updateScopedDocument(db,ctx,actor),{status:400});
+});
+
+test('resource guard scopes dynamic latticeCustom* collections and rejects blind dotted/sensitive filters, SQL charts, and oversized pageSize', async () => {
+  const employee = { id: 1, userId: 12, organizationId: 'org-a', departmentId: 3, active: true };
+  const guard = api.createNativeScopeMiddleware(db([employee]), { assets: { name: 'latticeAssets', fields: [] } });
+  const ctx = (resourceName, actionName, params = {}, currentRole = 'ldx_employee') => ({
+    state: { currentUser: { id: 12 }, currentRole },
+    action: { resourceName, actionName, params },
+  });
+
+  // Dynamic latticeCustom* collection list/create/update enforced by organizationId
+  const customList = ctx('latticeCustomColdAudits', 'list', { filter: { organizationId: 'org-b' }, pageSize: 99999 });
+  await guard(customList, async () => {});
+  assert.deepEqual(customList.action.params.filter, { $and: [{ organizationId: 'org-a' }, { organizationId: 'org-b' }] });
+  assert.equal(customList.action.params.pageSize, 200);
+
+  const customCreate = ctx('latticeCustomColdAudits', 'create', { values: { code: 'CA-1' } });
+  await guard(customCreate, async () => {});
+  assert.equal(customCreate.action.params.values.organizationId, 'org-a');
+
+  await assert.rejects(
+    guard(ctx('latticeCustomColdAudits', 'create', { values: { organizationId: 'org-b', code: 'CA-2' } }), async () => {}),
+    { code: 'NATIVE_ORGANIZATION_MISMATCH' },
+  );
+
+  // Blind filter oracle via dotted traversal or sensitive keys rejected recursively
+  for (const badFilter of [
+    { 'user.password': { $startsWith: '$2b$' } },
+    { $or: [{ 'requester.identitySubject': 'sub-x' }] },
+    { $and: [{ status: 'draft' }, { 'department.organizationId': 'org-b' }] },
+    { identitySubject: 'sub-x' },
+    { $where: '1=1' },
+  ]) {
+    await assert.rejects(
+      guard(ctx('latticeAssets', 'list', { filter: badFilter }), async () => {}),
+      { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+    );
+  }
+
+  // Dotted sort rejected
+  await assert.rejects(
+    guard(ctx('latticeAssets', 'list', { sort: ['-user.email'] }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+
+  // charts:queryData rejects SQL mode, private collections, and dotted filters; scopes latticeCustom*
+  await assert.rejects(
+    guard(ctx('charts', 'queryData', { values: { mode: 'sql', sql: 'SELECT * FROM users' } }), async () => {}),
+    { code: 'NATIVE_CHART_MODE_UNSUPPORTED' },
+  );
+  await assert.rejects(
+    guard(ctx('charts', 'queryData', { values: { mode: 'builder', collection: 'users' } }), async () => {}),
+    { code: 'NATIVE_CHART_COLLECTION_FORBIDDEN' },
+  );
+  await assert.rejects(
+    guard(ctx('charts', 'queryData', { values: { mode: 'builder', collection: 'latticeAssets', filter: { 'user.password': { $ne: null } } } }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+  const customChart = ctx('charts', 'queryData', { values: { mode: 'builder', collection: 'latticeCustomColdAudits', filter: {}, pageSize: 5000 } });
+  await guard(customChart, async () => {});
+  assert.deepEqual(customChart.action.params.values.filter, { $and: [{ organizationId: 'org-a' }, {}] });
+  assert.equal(customChart.action.params.values.pageSize, 200);
+});
+
+test('updateScopedDocument enforces optimistic version locking and increments version cleanly', async () => {
+  const transaction = { LOCK: { UPDATE: 'UPDATE' } };
+  const actor = { organizationId: 'org-a', employeeId: 3 };
+  let currentRow = { id: 5, organizationId: 'org-a', version: 2 };
+  let capturedValues = null;
+  const db = {
+    sequelize: { transaction: (cb) => cb(transaction) },
+    getModel: () => ({ findOne: async () => currentRow }),
+    getRepository: () => ({
+      update: async (opts) => {
+        capturedValues = opts.values;
+        return [{ id: 5, version: opts.values.version }];
+      },
+    }),
+  };
+
+  // Matching expectedVersion succeeds and increments version 2 -> 3
+  const okCtx = {
+    action: { resourceName: 'latticeRequests', params: { filterByTk: 5, values: { name: 'Updated', expectedVersion: 2 } } },
+  };
+  await api.updateScopedDocument(db, okCtx, actor);
+  assert.equal(capturedValues.version, 3);
+  assert.equal(capturedValues.expectedVersion, undefined);
+
+  // Stale expectedVersion throws 409 VERSION_CONFLICT without writing
+  capturedValues = null;
+  const staleCtx = {
+    action: { resourceName: 'latticeRequests', params: { filterByTk: 5, values: { name: 'Stale', expectedVersion: 1 } } },
+  };
+  await assert.rejects(api.updateScopedDocument(db, staleCtx, actor), { status: 409, code: 'VERSION_CONFLICT' });
+  assert.equal(capturedValues, null);
+
+  // If-Match header also supported; non-numeric fails 400 INVALID_EXPECTED_VERSION
+  const hdrOkCtx = {
+    get: (h) => (h === 'If-Match' ? 'W/"2"' : ''),
+    action: { resourceName: 'latticeOrders', params: { filterByTk: 5, values: { name: 'Header OK' } } },
+  };
+  await api.updateScopedDocument(db, hdrOkCtx, actor);
+  assert.equal(capturedValues.version, 3);
+
+  const badCtx = {
+    action: { resourceName: 'latticeRequests', params: { filterByTk: 5, values: { name: 'Bad', expectedVersion: 'oops' } } },
+  };
+  await assert.rejects(api.updateScopedDocument(db, badCtx, actor), { status: 400, code: 'INVALID_EXPECTED_VERSION' });
 });

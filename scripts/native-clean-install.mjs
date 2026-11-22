@@ -1,10 +1,19 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {randomUUID} from 'node:crypto';
 import {mkdir,readFile,writeFile,readdir,realpath} from 'node:fs/promises';
 import {resolve,join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 import {defaultRun,installWorkspace} from './install-workspace.mjs';
+import {dockerContextArgs,resolveDockerContext} from './lib/docker-context.mjs';
+import {resolveNocoBaseVersion} from './lib/nocobase-externals.mjs';
 
 const root=fileURLToPath(new URL('../',import.meta.url));
 export function cleanInstallPlan(id,port=13004){
@@ -12,7 +21,7 @@ export function cleanInstallPlan(id,port=13004){
   const project='lattice-native-clean-'+id,directory=resolve(root,'output/native-clean',id),sourceRoot=join(directory,'source');
   const origin='http://localhost:'+port,overlayPath=join(directory,'overlay.yml');
   const overlay=`# Local disposable native lab; never production credentials.\nservices:\n  nocobase-db:\n    volumes:\n      - clean-db:/var/lib/postgresql/data\n  nocobase:\n    ports: !override\n      - "127.0.0.1:${port}:80"\n    environment:\n      DX_BRIDGE_CALLBACK_URL: ${origin}/api/dxActions:callback\n      DX_NATIVE_AUTH_ORIGIN: ${origin}\n      DX_NATIVE_CONTEXT_AUTO_SYNC: "false"\n    volumes:\n      - clean-storage:/app/nocobase/storage\nvolumes:\n  clean-db:\n  clean-storage:\n`;
-  const composeArgs=['--context','desktop-linux','compose','-p',project,'-f','infra/compose/native-rehearsal.yml','-f',overlayPath];
+  const composeArgs=[...dockerContextArgs(),'compose','-p',project,'-f','infra/compose/native-rehearsal.yml','-f',overlayPath];
   return {project,directory,sourceRoot,origin,overlayPath,overlay,composeArgs};
 }
 export function assertUnusedCleanProject(resources){
@@ -39,7 +48,7 @@ export async function nativeCleanInstall({run=defaultRun,port=13004,onProgress=(
     try{return await run(file,args,{cwd,timeout,env,shell:false});}
     catch{throw Error('Clean-install command failed; output withheld');}
   };
-  const docker=args=>command('docker',['--context','desktop-linux',...args]);
+  const docker=args=>command('docker',[...dockerContextArgs(),...args]);
   const compose=(args,timeout=120000)=>command('docker',[...plan.composeArgs,...args],{cwd:plan.sourceRoot,timeout});
   const sql=statement=>compose(['exec','-T','nocobase-db','psql','-X','-v','ON_ERROR_STOP=1','-U','nocobase','-d','nocobase','-At','-c',statement]);
   const save=async phase=>{report.phase=phase;await writeFile(join(plan.directory,'report.json'),JSON.stringify(report,null,2)+'\n',{mode:0o600});onProgress({phase,project:plan.project,origin:plan.origin});};
@@ -73,29 +82,43 @@ export async function nativeCleanInstall({run=defaultRun,port=13004,onProgress=(
     report.versions=installed.versions;
     report.backupPath=installed.backupPath;
     await compose(['exec','-T','nocobase','yarn','nocobase','upgrade']);
+    const expectedVersion=resolveNocoBaseVersion();
     report.runtimeVersion=String(await compose(['exec','-T','nocobase','node','-e',"console.log(require('@nocobase/server/package.json').version)"])).trim();
-    if(report.runtimeVersion!=='2.2.38')throw Error('Unexpected native runtime version');
-    const migrationsDirectory=join(plan.sourceRoot,'plugins/nocobase/plugin-lattice-foundation/src/server/migrations');
-    const expected=(await readdir(migrationsDirectory)).filter(name=>/^\d{14}-[a-z0-9-]+\.js$/.test(name)).map(name=>name.slice(0,-3)+'/@latticedx/plugin-lattice-foundation');
-    const applied=JSON.parse(String(await sql("SELECT coalesce(json_agg(name),'[]'::json) FROM migrations WHERE name LIKE '%/@latticedx/plugin-lattice-foundation'")));
-    if(!expected.length||expected.some(name=>!applied.includes(name)))throw Error('Native source migrations are not all applied');
-    report.migrations=expected;
-    await save('plugins-and-migrations-installed');
-    const env={...process.env,DOCKER_CONTEXT:'desktop-linux',NOCOBASE_URL:plan.origin,NOCOBASE_DB_CONTAINER:plan.project+'-nocobase-db-1'};
-    report.acceptance=[];
-    for(const script of ['acceptance-native-foundation.mjs','acceptance-native-documents.mjs']){
-      const result=jsonOutput(await command(process.execPath,['scripts/'+script],{cwd:plan.sourceRoot,env}));
-      if(result.result!=='PASS')throw Error('Native acceptance did not pass');
-      report.acceptance.push({script,...result});
+    if(report.runtimeVersion!==expectedVersion)throw Error('Unexpected native runtime version: '+report.runtimeVersion+' (expected '+expectedVersion+')');
+    const migrationPlugins = [
+      { directory: 'plugin-lattice-foundation', pkg: '@latticedx/plugin-lattice-foundation' },
+      { directory: 'plugin-dxos-para', pkg: '@latticedx/plugin-dxos-para' },
+      { directory: 'plugin-dxos-studio', pkg: '@latticedx/plugin-dxos-studio' },
+      { directory: 'plugin-dxos-ai', pkg: '@latticedx/plugin-dxos-ai' },
+    ];
+    const expected = [];
+    for (const item of migrationPlugins) {
+      const migrationsDirectory = join(plan.sourceRoot, 'plugins/nocobase', item.directory, 'src/server/migrations');
+      const names = (await readdir(migrationsDirectory)).filter(name => /^\d{14}-[a-z0-9-]+\.js$/.test(name)).map(name => `${name.slice(0, -3)}/${item.pkg}`);
+      expected.push(...names);
     }
-    await command(process.execPath,['scripts/setup-native-ui-lab.mjs'],{cwd:plan.sourceRoot,env});
-    const ui=JSON.parse(await readFile(join(plan.sourceRoot,'output/native-platform/ui-lab.json'),'utf8'));
-    report.pageUrl=plan.origin+ui.path;
-    report.fixtureAccounts=ui.accounts.map(({email,role})=>({email,role}));
-    report.packages=[];
-    for(const directory of ['action-bridge','plugin-lattice-foundation','plugin-enterprise-auth']){
-      const metadata=JSON.parse(await readFile(join(plan.sourceRoot,'plugins/nocobase',directory,'package.json'),'utf8'));
-      report.packages.push({name:metadata.name,version:metadata.version,license:metadata.license});
+    const applied = JSON.parse(String(await sql("SELECT coalesce(json_agg(name),'[]'::json) FROM migrations WHERE name LIKE '%/@latticedx/%'")));
+    if (!expected.length || expected.some(name => !applied.includes(name))) throw Error('Native source migrations are not all applied');
+    report.migrations = expected;
+    await save('plugins-and-migrations-installed');
+    const dockerCtx = resolveDockerContext();
+    const env = { ...process.env, NOCOBASE_URL: plan.origin, NOCOBASE_DB_CONTAINER: plan.project + '-nocobase-db-1' };
+    if (dockerCtx) env.DOCKER_CONTEXT = dockerCtx;
+    else delete env.DOCKER_CONTEXT;
+    report.acceptance = [];
+    for (const script of ['acceptance-native-foundation.mjs', 'acceptance-native-documents.mjs']) {
+      const result = jsonOutput(await command(process.execPath, ['scripts/' + script], { cwd: plan.sourceRoot, env }));
+      if (result.result !== 'PASS') throw Error('Native acceptance did not pass');
+      report.acceptance.push({ script, ...result });
+    }
+    await command(process.execPath, ['scripts/setup-native-ui-lab.mjs'], { cwd: plan.sourceRoot, env });
+    const ui = JSON.parse(await readFile(join(plan.sourceRoot, 'output/native-platform/ui-lab.json'), 'utf8'));
+    report.pageUrl = plan.origin + ui.path;
+    report.fixtureAccounts = ui.accounts.map(({ email, role }) => ({ email, role }));
+    report.packages = [];
+    for (const directory of ['action-bridge', 'plugin-lattice-foundation', 'plugin-enterprise-auth', 'plugin-dxos-para', 'plugin-dxos-blocks', 'plugin-dxos-studio', 'plugin-dxos-ai']) {
+      const metadata = JSON.parse(await readFile(join(plan.sourceRoot, 'plugins/nocobase', directory, 'package.json'), 'utf8'));
+      report.packages.push({ name: metadata.name, version: metadata.version, license: metadata.license });
     }
     report.limits=['Native API acceptance and persisted UI fixture, not browser E2E.',
       'Keycloak, model, broker, n8n, shared files and legacy stores not accepted by this run.',

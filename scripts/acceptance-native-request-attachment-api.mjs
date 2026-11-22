@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -114,7 +121,7 @@ try {
   assert.equal(files[1].fileId, fileId);
   const conflicting = { ...input, values: { ...input.values, filename: 'different.txt' } };
   assert.equal((await call(path('upload'), requester, conflicting)).status, 409);
-  const blockedUpload = { values: { filename: 'scanner-test.txt', contentBase64: Buffer.from('X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*').toString('base64') }, key: randomUUID() };
+  const blockedUpload = { values: { filename: 'scanner-test.txt', contentBase64: Buffer.from(['X5O!P%@AP[4\\PZX54(P^)7CC)7}$', 'EICAR-STANDARD-ANTIVIRUS-TEST-FILE!', '$H+H*'].join('')).toString('base64') }, key: randomUUID() };
   assert.equal((await call(path('upload'), requester, blockedUpload)).status, 409);
 
   const list = await data(path('list'), manager);

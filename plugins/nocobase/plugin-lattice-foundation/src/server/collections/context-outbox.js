@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Private integration journal, deliberately absent from Collection Manager/UI roles.
 module.exports=require('@nocobase/database').defineCollection({
  name:'latticeContextOutbox',migrationRules:['schema-only'],createdAt:true,updatedAt:true,
@@ -12,8 +19,13 @@ module.exports=require('@nocobase/database').defineCollection({
   {name:'state',type:'string',allowNull:false,defaultValue:'pending'},
   {name:'attempts',type:'integer',allowNull:false,defaultValue:0},
   {name:'nextAttemptAt',type:'date'},
+  {name:'lockedAt',type:'date'},
   {name:'deliveredAt',type:'date'},
   {name:'errorCode',type:'string'},
  ],
- indexes:[{fields:['entityId','id']},{fields:['state','nextAttemptAt','id']}],
+ indexes:[
+  {name:'idx_lattice_outbox_entity_id',fields:['entityId','id']},
+  {name:'idx_lattice_outbox_state_next_id',fields:['state','nextAttemptAt','id']},
+  {name:'idx_lattice_outbox_org_state_created',fields:['organizationId','state','createdAt']},
+ ],
 });

@@ -1,0 +1,11 @@
+# @file LatticeDX — Open Digital Enterprise Platform
+# @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
+# @license Apache-2.0
+# @see https://github.com/CTU-OpenPaw/lattice-dx
+# SPDX-License-Identifier: Apache-2.0
+blank_issues_enabled: false
+contact_links:
+  - name: Báo cáo lỗ hổng bảo mật / Security Vulnerability Report
+    url: https://github.com/CTU-OpenPaw/lattice-dx/security/advisories/new
+    about: Không mở issue công khai cho lỗ hổng bảo mật, token hoặc credential. Hãy gửi qua GitHub Security Advisories.

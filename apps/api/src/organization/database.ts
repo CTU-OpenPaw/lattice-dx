@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { createHash } from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
 import { pageResult } from '../pagination.js';
@@ -49,8 +56,7 @@ export async function organizationDatabase(pool:Pool):Promise<OrganizationReposi
     const rows=(await client.query('SELECT id,parent_id AS "parentId" FROM organization_departments WHERE organization_id=$1',[org])).rows;
     const graph=new Map<string,string|null>(rows.map(r=>[r.id,r.parentId]));
     if (input.parentId&&!graph.has(input.parentId)){
-      const foreign=(await client.query('SELECT id FROM organization_departments WHERE organization_id<>$1 AND id=$2 LIMIT 1',[org,input.parentId])).rows.length;
-      throw new OrganizationError(foreign?404:400,'Parent department does not exist.');
+      throw new OrganizationError(400,'Parent department does not exist.');
     }
     graph.set(id,input.parentId);
     for (const start of graph.keys()){
@@ -117,7 +123,7 @@ export async function organizationDatabase(pool:Pool):Promise<OrganizationReposi
         // Acquire the directory gate before any person row. Existing transactions
         // may hold source/service and recipient rows in different orders.
         // Plain reads remain available; snapshots wait for locking consumers.
-        await client.query('LOCK TABLE directory_people IN EXCLUSIVE MODE');
+        await client.query("SELECT pg_advisory_xact_lock(hashtext('directory_people:' || $1))",[actor.organizationId]);
         await client.query('INSERT INTO organization_directory_state(organization_id) VALUES($1) ON CONFLICT DO NOTHING',[actor.organizationId]);
         const current=(await client.query('SELECT revision FROM organization_directory_state WHERE organization_id=$1 FOR UPDATE',[actor.organizationId])).rows[0];
         if (current.revision!==input.expectedRevision)throw new OrganizationError(409,'Directory revision conflict.');

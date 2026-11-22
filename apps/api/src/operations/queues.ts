@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import type {PoolClient} from 'pg';
 export interface QueueItem {queue:'outbox'|'timers'|'waitTimeouts'|'automations';status:string;count:string;oldestPendingAt:string|null}
 // Server-owned table names and status mappings only; no client identifiers enter SQL.

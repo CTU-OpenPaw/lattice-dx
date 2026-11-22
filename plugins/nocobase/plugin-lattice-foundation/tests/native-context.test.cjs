@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const {test}=require('node:test');const assert=require('node:assert/strict');
 const {projectContext,entityUrn,enqueueContext,registerContextHooks,retryDelay}=require('../src/server/native-context');
 const row={id:12,organizationId:'org-a',name:'Scanner',status:'available',active:true,departmentId:3,locationId:4,updatedAt:'2026-11-05T01:00:00.000Z',email:'never-share',identitySubject:'secret',description:'private'};

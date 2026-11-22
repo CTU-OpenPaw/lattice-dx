@@ -1,8 +1,16 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url));
 const base='http://localhost:8080',actors={};
 for(const username of ['alice','sales2','warehouse','warehouse2','warehouse-b']) {
@@ -15,7 +23,7 @@ async function call(path,actor='alice',method='GET',body,expected=200,key=random
   assert.equal(r.status,expected,`${actor} ${method} ${path}: ${r.status}`);
   return path.endsWith('/content')?r.text():r.json();
 }
-function sql(query){return execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','postgres','psql','-U','lattice','-d','lattice','-v','ON_ERROR_STOP=1','-t','-A'],{cwd:root,input:query,encoding:'utf8',stdio:['pipe','pipe','pipe']}).trim();}
+function sql(query){return execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','postgres','psql','-U','lattice','-d','lattice','-v','ON_ERROR_STOP=1','-t','-A'],{cwd:root,input:query,encoding:'utf8',stdio:['pipe','pipe','pipe']}).trim();}
 const literal=value=>"'"+String(value).replace(/'/g,"''")+"'";
 const directory=await call('/v1/directory/people?role=logistics%3Awarehouse&department=warehouse&limit=1');
 assert.equal(directory.items.length,1);assert.equal(directory.page.hasMore,true);

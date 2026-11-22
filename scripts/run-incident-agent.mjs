@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {runIncidentJob,IncidentWorkerError} from '../apps/agent-worker/src/incident.ts';
 try{
  if(process.argv.length!==3)throw new IncidentWorkerError('usage: pnpm agent:incident <job-uuid>');

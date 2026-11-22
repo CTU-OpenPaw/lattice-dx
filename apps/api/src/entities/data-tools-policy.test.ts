@@ -1,6 +1,14 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import { expect, test } from 'vitest';
 import { prepareImport, exportContent, parseImportInput } from './data-tools-policy.js';
+import { csvCell } from './data-tools-csv.js';
 import type { SchemaPublication } from './types.js';
 const schema:SchemaPublication={id:'invoice',version:1,title:'Invoice',fields:{label:{type:'text'},count:{type:'integer'},enabled:{type:'boolean'},amount:{type:'decimal'},day:{type:'date'},state:{type:'enum',choices:['A','B']}},relations:{}};
 const input=(content:string,format:'csv'|'json'='csv')=>({schemaId:'invoice',schemaVersion:1,format,content});
@@ -27,4 +35,13 @@ test('content and rows are bounded and strict payload rejects identity overrides
 test('CSV export protects formula text including whitespace, preserves negative numerics and JSON exactness',()=>{
  const rows=[{title:' =SUM(1)',attributes:{label:'@evil',count:-2,amount:'-0.0100'}}];
  expect(exportContent(schema,rows,'csv')).toContain("' =SUM(1)");expect(exportContent(schema,rows,'csv')).toContain("'@evil,-2,,-0.0100");expect(JSON.parse(exportContent(schema,rows,'json'))).toEqual(rows);
+});
+
+test('csvCell neutralizes leading formula trigger characters', () => {
+ expect(csvCell('=CMD()')).toBe("'=CMD()");
+ expect(csvCell('+1+1')).toBe("'+1+1");
+ expect(csvCell('-1')).toBe("'-1");
+ expect(csvCell('@SUM(A1)')).toBe("'@SUM(A1)");
+ expect(csvCell('\t1')).toBe("'\t1");
+ expect(csvCell('\r1')).toBe("\"'\\r1\"".replace('\\r', '\r'));
 });

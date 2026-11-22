@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {PageError} from '../pagination.js';
 import {bad,exact,name,slug,version,validateAttributes} from './policy.js';
 import type {EntityQuery,Field,QueryOperator,SchemaPublication} from './types.js';

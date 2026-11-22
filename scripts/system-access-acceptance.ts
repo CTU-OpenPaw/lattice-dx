@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Real PostgreSQL acceptance for systemAccessDatabase & Fastify HTTP runtime enforcement in isolated disposable database.
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';

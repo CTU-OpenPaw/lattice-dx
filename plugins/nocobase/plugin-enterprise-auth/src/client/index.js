@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 (function(factory){
   if(typeof define==='function'&&define.amd)define('@latticedx/plugin-enterprise-auth',['@nocobase/client','react','antd','@nocobase/plugin-auth'],factory);
   else if(typeof module==='object'&&module.exports)module.exports=factory(require('@nocobase/client'),require('react'),require('antd'),require('@nocobase/plugin-auth/client'));
@@ -41,10 +48,37 @@
     return h(antd.Alert,{type:'info',showIcon:true,message:'Kết nối Keycloak native',description:'Issuer, Client ID và callback do cấu hình triển khai quản lý. Liên kết subject với tài khoản có sẵn tại Enterprise identity mappings. Không tự tạo người dùng hoặc cấp quyền khi đăng nhập.'});
   }
   function MappingSettings(){
-    const api=client.useAPIClient(),[form]=antd.Form.useForm(),[configuration,setConfiguration]=React.useState(),[status,setStatus]=React.useState();
-    React.useEffect(()=>{api.request({url:'enterpriseAuth:configuration',skipNotify:true}).then(r=>setConfiguration(r.data.data)).catch(()=>setStatus({type:'error',message:'Chỉ quản trị viên root được cấu hình. Kiểm tra cấu hình triển khai.'}));},[api]);
+    const api=client.useAPIClient(),[form]=antd.Form.useForm(),[configuration,setConfiguration]=React.useState(),[mappings,setMappings]=React.useState([]),[status,setStatus]=React.useState();
+    const loadMappings=React.useCallback(()=>api.request({url:'enterpriseAuth:listMappings',skipNotify:true}).then(r=>setMappings(r.data.data?.items||[])).catch(()=>{}),[api]);
+    React.useEffect(()=>{
+      api.request({url:'enterpriseAuth:configuration',skipNotify:true}).then(r=>setConfiguration(r.data.data)).catch(()=>setStatus({type:'error',message:'Chỉ quản trị viên root được cấu hình. Kiểm tra cấu hình triển khai.'}));
+      loadMappings();
+    },[api,loadMappings]);
+    const handleUnlink=async(row)=>{
+      try{
+        await api.request({url:'enterpriseAuth:unlink',method:'post',data:{authenticator:row.authenticator,subject:row.subject,userId:row.userId},skipNotify:true});
+        setStatus({type:'success',message:`Đã gỡ liên kết ${row.subject} khỏi user #${row.userId} và thu hồi phiên hiện tại.`});
+        await loadMappings();
+      }catch{
+        setStatus({type:'error',message:'Không thể gỡ liên kết tài khoản.'});
+      }
+    };
     const info=configuration?h(antd.Descriptions,{column:1,items:Object.entries(configuration).map(([key,value])=>({key,label:key,children:value}))}):null;
-    return h(antd.Space,{direction:'vertical',style:{padding:24,maxWidth:760,width:'100%'}},h(antd.Typography.Title,{level:4},'Enterprise identity mappings'),h(AdminSettings),info,status?h(antd.Alert,status):null,h(antd.Form,{form,layout:'vertical',onFinish:async values=>{try{await api.request({url:'enterpriseAuth:link',method:'post',data:values,skipNotify:true});setStatus({type:'success',message:'Đã liên kết tài khoản. Quyền và đơn vị giữ theo NocoBase.'});}catch{setStatus({type:'error',message:'Không thể liên kết. Kiểm tra subject, user ID, nhân viên đang hoạt động hoặc mapping đã tồn tại.'});}}},...[
+    const mappingTable=h(antd.Table,{
+      rowKey:r=>`${r.authenticator}:${r.subject}:${r.userId}`,
+      size:'small',
+      pagination:false,
+      dataSource:mappings,
+      locale:{emptyText:'Chưa có liên kết danh tính doanh nghiệp nào.'},
+      columns:[
+        {title:'Authenticator',dataIndex:'authenticator'},
+        {title:'Subject (Keycloak)',dataIndex:'subject'},
+        {title:'User ID',dataIndex:'userId'},
+        {title:'Issuer',dataIndex:'issuer'},
+        {title:'Thao tác',key:'action',render:(_v,row)=>h(antd.Button,{danger:true,size:'small',onClick:()=>handleUnlink(row)},'Gỡ liên kết')},
+      ],
+    });
+    return h(antd.Space,{direction:'vertical',style:{padding:24,maxWidth:880,width:'100%'}},h(antd.Typography.Title,{level:4},'Enterprise identity mappings'),h(AdminSettings),info,status?h(antd.Alert,status):null,mappingTable,h(antd.Form,{form,layout:'vertical',onFinish:async values=>{try{await api.request({url:'enterpriseAuth:link',method:'post',data:values,skipNotify:true});setStatus({type:'success',message:'Đã liên kết tài khoản. Quyền và đơn vị giữ theo NocoBase.'});await loadMappings();}catch{setStatus({type:'error',message:'Không thể liên kết. Kiểm tra subject, user ID, nhân viên đang hoạt động hoặc mapping đã tồn tại.'});}}},...[
       ['authenticator','Tên authenticator','native-keycloak'],['subject','Keycloak user ID (subject)','UUID người dùng Keycloak'],['userId','NocoBase user ID','ID tài khoản đã có nhân viên']
     ].map(([name,label,placeholder])=>h(antd.Form.Item,{key:name,name,label,rules:[{required:true}]},h(antd.Input,{placeholder}))),h(antd.Button,{type:'primary',htmlType:'submit'},'Liên kết tài khoản')));
   }

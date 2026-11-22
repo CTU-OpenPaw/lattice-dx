@@ -1,0 +1,86 @@
+LatticeDX — Open Digital Enterprise Platform
+Copyright 2026 CTU-OpenPaw
+
+This product includes software developed by CTU-OpenPaw
+(https://github.com/CTU-OpenPaw/lattice-dx).
+
+================================================================================
+1. First-Party Source Code (Apache-2.0)
+================================================================================
+All original first-party source code authored by CTU-OpenPaw under:
+  - apps/
+  - packages/
+  - plugins/nocobase/
+  - scripts/
+  - infra/
+  - solutions/
+  - tests/
+  - .github/
+is licensed under the Apache License, Version 2.0 (see root LICENSE and the
+per-plugin LICENSE files under plugins/nocobase/*/).
+
+================================================================================
+2. Upstream Reference Submodule & Host Container Runtime (NocoBase)
+================================================================================
+LatticeDX neither copies nor modifies NocoBase upstream source code.
+- Git submodule: upstream/nocobase
+  Repository: https://github.com/nocobase/nocobase.git
+  Pinned commit: 5b47bec116c52239348c09d360e4bd2649c99efc
+  Excluded from source release tarballs (git archive) and pnpm workspace builds.
+- Container image: nocobase/nocobase:2.2.38
+  Digest: sha256:90028473fe54b1fd1929b1ab0669a12e48a9a8f100d41662c98bc3c618225f4e
+  Referenced in: infra/compose/nocobase.yml, infra/compose/native-rehearsal.yml
+
+Upstream License Scope:
+NocoBase is governed by the NocoBase License Agreement (updated 2026-02-24:
+Apache-2.0 with supplementary Clauses 4.2 and 5.1–5.4); certain upstream core
+packages and plugins carry AGPL-3.0 / NocoBase Commercial License headers
+(see docs/nocobase-source-review.md).
+
+First-party NocoBase plugins (@latticedx/plugin-lattice-foundation,
+@latticedx/plugin-enterprise-auth, @latticedx/plugin-action-bridge,
+@latticedx/plugin-dxos-para, @latticedx/plugin-dxos-blocks,
+@latticedx/plugin-dxos-studio, and @latticedx/plugin-dxos-ai) declare
+"nocobase": { "sdkProvidedByHost": true }, invoke host APIs only at runtime, do not redistribute upstream implementation
+code, and preserve Clause 5.2 UI attribution ("Powered by NocoBase", version
+"v2.2.38", "License settings"). See root COPYRIGHT.txt for the full copyright
+and dependency summary.
+
+================================================================================
+3. Standalone Containerized Infrastructure Services (Network Boundary Only)
+================================================================================
+The following third-party services run as separate OCI containers configured in
+infra/compose/*.yml and interact with LatticeDX strictly over network protocols
+(SQL, HTTP/REST, OIDC, NGSI-LD, clamd TCP). None of these services are copied,
+statically linked, or relicensed as Apache-2.0 by LatticeDX:
+
+- PostgreSQL 16.13 (postgres:16.13-alpine@sha256:4e6e670bb069649261c9c18031f0aded7bb249a5b6664ddec29c013a89310d50)
+  License: PostgreSQL License (https://www.postgresql.org/about/licence/)
+- Keycloak 26.8.0 (quay.io/keycloak/keycloak:26.8.0@sha256:27b3230fbabb8c9ff3c66c864cf09dcd8a41aca82e5100679d109ef0eeb05741)
+  License: Apache License, Version 2.0 (https://github.com/keycloak/keycloak)
+- Apache APISIX 3.19.0 (apache/apisix:3.19.0-debian@sha256:9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141)
+  License: Apache License, Version 2.0 (https://github.com/apache/apisix)
+- FIWARE Orion-LD 1.10.0 (fiware/orion-ld:1.10.0@sha256:3c490a746f6596e24875b046719b97fa5ede39cbb364e3c93d144de2f00898dc)
+  License: GNU Affero General Public License v3.0 (AGPL-3.0, https://github.com/FIWARE/context.Orion-LD)
+- MongoDB 4.4.29 (mongo:4.4.29@sha256:52c42cbab240b3c5b1748582cc13ef46d521ddacae002bbbda645cebed270ec0)
+  License: Server Side Public License v1 (SSPL-1.0) — standalone Orion-LD store
+- n8n 2.42.7 (n8nio/n8n:2.42.7@sha256:906dd7fb0a2f23869001d1767168359489c518ff34d4f67427abf2dc59e868fe)
+  License: Sustainable Use License (non-OSI standalone workflow automation container)
+- ClamAV 1.4.3 (clamav/clamav:1.4.3@sha256:75fb5fd95fcbe1d7e6d240c369c1572b686ee2c95949d1042b5148de8eddebb4)
+  License: GNU General Public License v2.0 (GPL-2.0, https://github.com/Cisco-Talos/clamav) — standalone TCP clamd scanner
+
+================================================================================
+4. Bundled Third-Party npm Dependencies in @latticedx/plugin-enterprise-auth
+================================================================================
+Locked via plugins/nocobase/plugin-enterprise-auth/package-lock.json and
+packaged with their respective LICENSE.md files in node_modules:
+- openid-client@6.8.9 — MIT License (Filip Skokan)
+- jose@6.2.15 — MIT License (Filip Skokan)
+- oauth4webapi@3.8.8 — MIT License (Filip Skokan)
+
+================================================================================
+5. Workspace npm Dependencies
+================================================================================
+Third-party npm packages installed via pnpm-lock.yaml retain their original
+licenses and copyright notices (see docs/dependency-inventory.md and
+docs/third-party.md for the full license inventory).

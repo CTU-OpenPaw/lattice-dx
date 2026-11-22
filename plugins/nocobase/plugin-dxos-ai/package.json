@@ -1,0 +1,20 @@
+{
+  "name": "@latticedx/plugin-dxos-ai",
+  "version": "0.2.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "commonjs",
+  "main": "dist/server/index.js",
+  "displayName": "LatticeDX AI Workforce & Enterprise MCP Gateway",
+  "description": "Admin-configurable AI Employee workforce, NocoBase Admin Builder tools, cross-department workflow copilot, 6-plane Enterprise OS topology, and two-way Streamable HTTP MCP gateway.",
+  "files": ["dist", "server.js", "client.js", "client-v2.js", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "nocobase": {
+    "supportedVersions": ["2.2.x"],
+    "testedRuntime": "2.2.38",
+    "sdkProvidedByHost": true
+  }
+}

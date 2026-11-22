@@ -1,9 +1,17 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mkdir, writeFile } from 'node:fs/promises';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url)),base='http://localhost:8080';
 const actors={};
 for(const name of ['alice','bob','manager','warehouse','warehouse2','hr-demo','it-demo','administration','receiver']) {
@@ -89,7 +97,7 @@ assert.equal((await request(`/v1/workflows/${onboarding.id}/sync`,'manager')).it
 // Exercise production SQL/worker code in an isolated schema, so retained pending
 // demo jobs are never claimed, delayed, or otherwise touched by acceptance.
 function containerEval(source) {
-  return execFileSync('docker',['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim();
+  return execFileSync('docker',[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api','pnpm','exec','tsx','--eval',source],{cwd:root,encoding:'utf8',stdio:['ignore','pipe','pipe'],timeout:90000}).trim();
 }
 const workerSource=`
 import assert from 'node:assert/strict';

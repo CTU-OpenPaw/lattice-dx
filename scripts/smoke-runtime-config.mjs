@@ -1,9 +1,17 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
+import { dockerContextArgs } from './lib/docker-context.mjs';
 const root=fileURLToPath(new URL('../',import.meta.url));
-const prefix=['--context','desktop-linux','compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api'];
+const prefix=[...dockerContextArgs(), 'compose','-f','infra/compose/core.yml','exec','-T','-w','/app/apps/api','api'];
 for(const [key,value] of [['ENTITY_AUTOMATION_WORKER','invalid'],['API_PORT','0'],['WORKFLOW_OUTBOX_WORKER','true']]){
  let failure;
  try{execFileSync('docker',[...prefix,'env','DATABASE_URL=postgres://not-real.invalid/unreachable','FILE_STORAGE_ROOT=/unavailable-fixture',key+'='+value,'pnpm','exec','tsx','src/index.ts'],{cwd:root,encoding:'utf8',timeout:15000,stdio:['ignore','pipe','pipe']});}

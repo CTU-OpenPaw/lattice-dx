@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import type { Scope } from './foundation.js';
 export interface DirectoryPerson { subject:string; organizationId:string; displayName:string; departmentId?:string; roles:string[] }
 export interface DirectoryDepartment { id:string; name:string; memberCount:number }

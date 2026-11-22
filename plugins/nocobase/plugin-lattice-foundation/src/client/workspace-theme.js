@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const paths={search:'m21 21-4.4-4.4 M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0',inbox:'M9 4h6v4H9z M9 6H6a2 2 0 0 0-2 2v12h16V8a2 2 0 0 0-2-2h-3',apps:'M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z',report:'M4 3v18h17 M8 15l4-5 4 3 5-7',bot:'M5 8h14v12H5z M9 13h.01 M15 13h.01 M12 8V3 M9 17h6',help:'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20 M9 9a3 3 0 0 1 6 0c0 2-3 2-3 5 M12 18h.01',settings:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8 M10 2h4l1 3 3 1 3 3-2 3 1 4-3 3-4-1-3 2-3-3 1-4-2-3 3-3z',bell:'M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9 M10 21h4',arrow:'M4 12h16 M14 6l6 6-6 6',plus:'M12 4v16 M4 12h16',menu:'M4 6h16 M4 12h16 M4 18h16',cart:'M2 3h3l3 12h11l3-9H6 M9 21h.01 M18 21h.01',truck:'M2 5h12v12H2z M14 9h5l3 4v4h-8 M7 17a2 2 0 1 0 0 .01 M18 17a2 2 0 1 0 0 .01',wallet:'M3 6h18v14H3z M3 6V3h15v3 M16 11h5v5h-5z'};
 function createIcon(React){return function Icon({name,size=20}){return React.createElement('svg',{width:size,height:size,viewBox:'0 0 24 24',fill:'none',stroke:'currentColor',strokeWidth:1.7,strokeLinecap:'round',strokeLinejoin:'round','aria-hidden':true},React.createElement('path',{d:paths[name]||paths.apps}));};}
 const css=`

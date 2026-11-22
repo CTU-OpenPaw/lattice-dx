@@ -1,6 +1,13 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 import {createAgentTables} from '../agents/schema.js';
 import {assertIncidentActor,assertIncidentTransition} from '../agents/incident-policy.js';
-// SPDX-License-Identifier: Apache-2.0
 import {readFoundationPathMetadataWithClient} from '../files/content.js';
 import type {ObjectStore} from '../files/object-store.js';
 import { createHash, randomUUID } from 'node:crypto';

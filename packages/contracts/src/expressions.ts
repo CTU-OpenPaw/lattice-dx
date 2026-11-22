@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 export type ScalarType = 'text'|'integer'|'decimal'|'boolean'|'date'|'enum'|'null';
 export type TypedScalar = {type:'text'|'decimal'|'date'|'enum';value:string}|{type:'integer';value:number}|{type:'boolean';value:boolean}|{type:'null';value:null};
 export type Expression =

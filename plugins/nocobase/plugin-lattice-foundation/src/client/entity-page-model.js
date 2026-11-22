@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const { attributesFromForm } = require('./console-model');
 function entityPageSchema(page, schemas) {
   const schema = schemas.find(item => item.id === page.schemaId && (item.version || 1) === page.schemaVersion);

@@ -1,4 +1,11 @@
-// SPDX-License-Identifier: Apache-2.0
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
 const units = [
   {code: 'DEMO-UNIT-01', organizationId: 'demo-organization-01', name: 'Đơn vị mẫu 1', suffix: '01'},
   {code: 'DEMO-UNIT-02', organizationId: 'demo-organization-02', name: 'Đơn vị mẫu 2', suffix: '02'},
