@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const pageSpec = (groupTitle, groupIcon, title, icon, key, type, collection, fields) => ({
+const pageSpec = (groupTitle, groupIcon, title, icon, key, type, collection, fields, settings = {}) => ({
   groupTitle,
   groupIcon,
   title,
@@ -19,7 +19,7 @@ const pageSpec = (groupTitle, groupIcon, title, icon, key, type, collection, fie
     collection,
     fields,
     ...(type === 'table'
-      ? { settings: { pageSize: 10 }, actions: ['filter', 'refresh'] }
+      ? { settings: { pageSize: 10, ...settings }, actions: ['filter', 'refresh'] }
       : { actions: ['submit'] }),
   },
 });
@@ -162,6 +162,29 @@ export const PORTALS = Object.freeze([
       pageSpec('Tổ chức & Nhân sự', 'TeamOutlined', 'Cơ cấu Phòng ban', 'ApartmentOutlined', 'services-departments', 'table', 'latticeDepartments', ['code', 'name']),
       pageSpec('Dịch vụ Nội bộ', 'SolutionOutlined', 'Phiếu Dịch vụ Nội bộ', 'FileDoneOutlined', 'services-tickets', 'table', 'latticeServiceTickets', ['code', 'name', 'serviceType', 'priority', 'status']),
       pageSpec('Kho tri thức P.A.R.A.', 'FolderOpenOutlined', 'Tài liệu P.A.R.A.', 'BookOutlined', 'services-para-docs', 'table', 'latticeParaDocuments', ['code', 'title', 'paraSpace', 'tags', 'status']),
+    ],
+  },
+  {
+    slug: 'logistics-employee',
+    title: 'Logistics · Đơn của tôi',
+    icon: 'CarOutlined',
+    color: '#10B981',
+    description: 'Tạo đơn vận chuyển và theo dõi các đơn do mình tạo',
+    isDefault: false,
+    sort: 35,
+    roles: ['ldx_employee'],
+    pages: [
+      pageSpec('Đơn vận chuyển', 'CarOutlined', 'Đơn của tôi', 'OrderedListOutlined',
+        'employee-logistics-orders', 'table', 'latticeOrders',
+        ['code', 'name', 'customer', 'origin', 'destination', 'quantity', 'status'], {
+          dataScope: {
+            logic: '$and',
+            items: [{ path: 'requester.userId', operator: '$eq', value: '{{ ctx.user.id }}' }],
+          },
+        }),
+      pageSpec('Đơn vận chuyển', 'CarOutlined', 'Tạo đơn', 'PlusCircleOutlined',
+        'employee-logistics-create', 'createForm', 'latticeOrders',
+        ['code', 'name', 'customer', 'origin', 'destination', 'quantity', 'description']),
     ],
   },
 ]);

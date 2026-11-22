@@ -108,10 +108,24 @@ async function ensureSystemBranding(api) {
   return true;
 }
 
+async function ensurePortalSwitcherModel(api) {
+  // NocoBase looks up one shared switcher UID, even on a custom portal.
+  // Create it during setup so visitors only need read access.
+  const parentId = 'admin-layout-model';
+  const uid = `${parentId}-app-switcher-actions`;
+  const existing = await api(`flowModels:findOne?uid=${uid}`);
+  if (existing?.uid) return;
+  await api('flowModels:save', {
+    method: 'POST',
+    values: { uid, use: 'AppSwitcherActionPanelModel', parentId, subKey: 'appSwitcher', subType: 'object' },
+  });
+}
+
 export async function provisionMultiPortalDemo(api, origin, { fixturesOnly = false } = {}) {
   const safeOrigin = assertSafeLabOrigin(origin);
   if (typeof api !== 'function') throw new Error('API client function is required');
   if (!fixturesOnly) await ensureSystemBranding(api);
+  await ensurePortalSwitcherModel(api);
 
   const portals = [];
   let createdPages = 0;
