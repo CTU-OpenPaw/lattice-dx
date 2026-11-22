@@ -16,7 +16,8 @@ const {
   estimateTokens,
   estimateCostUsd,
   checkAndConsumeAiQuota,
-  recordQuotaUsage,
+  hydrateQuotaBucketFromDb,
+  recordQuotaUsagePersistent,
 } = require('./ai-governance');
 const { createBuilderTools } = require('./ai-builder-tools');
 const { createCopilotTools } = require('./ai-copilot-tools');
@@ -58,7 +59,7 @@ const PROTECTED_SERVER_FIELDS = new Set([
 const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
-  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeUiSnapshots',
+  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeUiSnapshots',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
 ]);
@@ -69,7 +70,7 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 const ALLOWED_BLOCK_MODELS = [
   'DxosPortalHeroBlockModel', 'DxosKpiMetricBlockModel', 'DxosContextTelemetryBlockModel',
   'DxosAiProposalBlockModel', 'DxosWorkflowTasksBlockModel', 'DxosParaVaultBlockModel',
-  'DxosCreativeStudioBlockModel',
+  'DxosCreativeStudioBlockModel', 'DxosRecordWorkbenchBlockModel',
   'NativeTableBlock', 'NativeFormBlock', 'NativeDetailsBlock',
   'table', 'createForm', 'editForm', 'details', 'filterForm', 'kanban', 'chart', 'calendar', 'list', 'gridCard', 'markdown', 'actionPanel',
 ];
@@ -231,16 +232,18 @@ function createAuditedTool(spec) {
         if (spec.adminOnly && !actor.isAdmin) {
           throw failTool('DXOS_ADMIN_REQUIRED', 403, `Công cụ "${spec.name}" chỉ dành cho Quản trị viên.`);
         }
+        await hydrateQuotaBucketFromDb(db, actor.organizationId);
         checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
         const checked = schemaHelper.validate(rawArgs);
         if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
         const result = await spec.run(ctx, db, actor, checked.value);
         const completionTokens = estimateTokens(result);
-        const estimatedCostUsd = estimateCostUsd(promptTokens, completionTokens, '', process.env);
+        const modelName = ctx?.state?.dxosModelName || ctx?.state?.modelName || '';
+        const estimatedCostUsd = estimateCostUsd(promptTokens, completionTokens, modelName, process.env);
         const redactedArgs = redactPiiDeep(checked.value);
         const redactedRes = redactPiiText(redactAuditText(JSON.stringify(result).slice(0, 600)));
         const piiRedactedCount = redactedArgs.count + redactedRes.count;
-        recordQuotaUsage(actor, { promptTokens, completionTokens, costUsd: estimatedCostUsd, piiRedactedCount });
+        await recordQuotaUsagePersistent(db, actor, { promptTokens, completionTokens, costUsd: estimatedCostUsd, piiRedactedCount });
         await recordAiAuditLog(db, {
           actorUserId: actor.userId,
           actorUsername: actor.username,

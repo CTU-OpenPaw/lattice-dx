@@ -311,3 +311,9 @@ test('clearAlarm supplies default audit closeNote, clamps to 255 chars, and sati
   assert.equal(clearedLong.closeNote.length, 255);
   assert.doesNotThrow(() => validateIncidentNotes(clearedLong));
 });
+
+test('alarm-engine uses crypto.randomBytes instead of Math.random for alarm codes', () => {
+  const src = readFileSync(path.join(PLUGIN_ROOT, 'src/server/alarm-engine.js'), 'utf8');
+  assert.equal(src.includes('Math.random'), false);
+  assert.ok(src.includes('randomBytes'));
+});

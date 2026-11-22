@@ -276,4 +276,16 @@ test('v0.2.0 MCP/IT-OT hardening: Orion-LD ?local=true, outbox state/schema, red
   await mw(switchedCtx, async () => {});
   assert.equal(switchedCtx.body.error.code, -32003);
   assert.deepEqual(switchedCtx.state.currentRoles, ['ldx_employee']);
+
+  // initialize serverInfo.version reads package.json version dynamically
+  const pkgVersion = require('../package.json').version;
+  const initCtx = {
+    path: '/api/dxos-mcp',
+    method: 'POST',
+    headers: { authorization: 'Bearer tok' },
+    request: { body: { jsonrpc: '2.0', id: 78, method: 'initialize', params: { protocolVersion: '2025-03-26' } } },
+    set() {},
+  };
+  await mw(initCtx, async () => {});
+  assert.equal(initCtx.body.result.serverInfo.version, pkgVersion);
 });

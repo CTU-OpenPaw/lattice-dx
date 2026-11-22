@@ -14,13 +14,14 @@ const {
   safeJsonParse,
   inferPortalSlugFromLocation,
   triggerDxosCopilot,
+  requestAndDownloadExport,
 } = require('./blocks-helpers');
-const { createRecordChatterView } = require('./chatter-panel');
+const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
 
 const VALID_QUERY_KINDS = new Set(['collection', 'telemetry', 'tasks', 'timeseries']);
 const VALID_WIDGET_TYPES = new Set([
   'gauge', 'thermometer', 'timeseries-line', 'stage-pipeline', 'distribution-bars',
-  'rule-callout', 'status-matrix', 'quick-actions', 'export-bar', 'chatter',
+  'rule-callout', 'status-matrix', 'quick-actions', 'export-bar', 'chatter', 'voucher-actions',
 ]);
 
 const CREATIVE_THEMES = {
@@ -241,6 +242,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
   const RecordChatterView = createRecordChatterView(client, React, app);
+  const VoucherLifecycleBar = createVoucherLifecycleBar(client, React, app);
 
   return function DxosCreativeStudioView({ model, liveConfig }) {
     const api = useApi();
@@ -475,6 +477,17 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
           h(RecordChatterView, { targetCollection: w.collection, targetRecordId: w.recordId, showExport: Boolean(w.showExport), exportFields: w.fields }),
         );
       }
+      if (w.type === 'voucher-actions') {
+        return h('div', { key: idx, style: { ...cardStyle, gridColumn: '1 / -1' } },
+          w.title ? h('div', { style: { fontSize: 12, color: palette.mutedColor, marginBottom: 8, fontWeight: 600 } }, w.title) : null,
+          h(VoucherLifecycleBar, {
+            targetCollection: w.collection,
+            targetRecordId: w.recordId,
+            recordStatus: w.status || '',
+            onUpdated: () => runQueries(),
+          }),
+        );
+      }
       if (w.type === 'export-bar') {
         const exportFormats = Array.isArray(w.formats) && w.formats.length ? w.formats : ['csv', 'xlsx', 'pdf'];
         return h('div', { key: idx, style: cardStyle },
@@ -487,13 +500,13 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
                 if (!api?.request || !w.collection) return;
                 try {
                   setActionNote(`Đang xuất ${String(fmt).toUpperCase()}…`);
-                  const res = await api.request({
-                    url: 'dxosBlocks:exportReport',
-                    method: 'post',
-                    data: { collection: w.collection, format: fmt, ...(Array.isArray(w.fields) ? { fields: w.fields } : {}) },
+                  const { meta, download } = await requestAndDownloadExport(api, {
+                    collection: w.collection,
+                    format: fmt,
+                    fields: w.fields,
                   });
-                  const meta = res?.data?.data || res?.data || {};
-                  setActionNote(`Đã xuất ${meta.filename || fmt} (${meta.rowCount ?? 0} dòng).`);
+                  const dlNote = download?.downloaded ? ' · Đã tải xuống' : '';
+                  setActionNote(`Đã xuất ${meta.filename || fmt} (${meta.rowCount ?? 0} dòng)${dlNote}.`);
                 } catch (err) {
                   setActionNote(err?.response?.data?.errors?.[0]?.message || 'Không xuất được báo cáo.');
                 }
@@ -567,6 +580,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
 }
 
 module.exports = {
+  VALID_WIDGET_TYPES,
   CREATIVE_THEMES,
   DEFAULT_CREATIVE_BLUEPRINT,
   parseCreativeBlueprint,

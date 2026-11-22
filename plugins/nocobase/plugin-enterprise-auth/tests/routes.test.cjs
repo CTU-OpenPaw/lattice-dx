@@ -207,3 +207,67 @@ test('callback synchronizes safe ldx_* roles from Keycloak groups claim when DX_
     else process.env.DX_NATIVE_AUTH_GROUP_ROLE_MAP=prevMap;
   }
 });
+
+test('start -> callback -> finish preserves /p/* and /mobile/* portal returnTo targets',async()=>{
+  for(const target of ['/p/procurement?tab=orders','/mobile/inbox']){
+    const f=fixture(),start=f.ctx();start.query={authenticator:'native-keycloak',returnTo:target};
+    await f.actions.start(start);
+    const state=new URL(start.location).searchParams.get('state'),callback=f.ctx();callback.query={state,code:'code'};
+    await f.actions.callback(callback);
+    const ticket=new URL(callback.location).searchParams.get('ticket'),finish=f.ctx();finish.method='POST';finish.action.params.values={ticket};
+    await f.actions.finish(finish);
+    assert.equal(finish.body.returnTo,target);
+  }
+});
+
+test('callback reconciles and removes managed ldx_* roles when Keycloak user has empty groups claim',async()=>{
+  const prevMap=process.env.DX_NATIVE_AUTH_GROUP_ROLE_MAP;
+  process.env.DX_NATIVE_AUTH_GROUP_ROLE_MAP=JSON.stringify({'/lattice-warehouse':'ldx_warehouse','/lattice-managers':'ldx_manager'});
+  try{
+    let roleRows=[
+      {userId:12,roleName:'ldx_warehouse'},
+      {userId:12,roleName:'ldx_manual_extra'},
+      {userId:12,roleName:'root'},
+    ];
+    const destroyedFilters=[];
+    const items=new Map();
+    const cache={get:async k=>items.get(k),set:async(k,v)=>items.set(k,v),del:async k=>items.delete(k)};
+    const mappings=[{userId:12,meta:{issuer:'http://localhost:8081/realms/lattice'}}];
+    const app={
+      db:{
+        getRepository:name=>{
+          if(name==='authenticators')return {findOne:async()=>({name:'native-keycloak'})};
+          if(name==='usersAuthenticators')return {find:async()=>mappings};
+          if(name==='users')return {find:async()=>[{id:12}]};
+          if(name==='latticeEmployees')return {find:async()=>[{id:8,userId:12,active:true,organizationId:'org-a'}]};
+          if(name==='roles')return {find:async()=>[]};
+          if(name==='rolesUsers')return {
+            find:async()=>roleRows,
+            create:async({values})=>{roleRows.push(values);return values;},
+            destroy:async({filter})=>{
+              destroyedFilters.push(filter);
+              const names=Array.isArray(filter.roleName?.$in)?filter.roleName.$in:[];
+              roleRows=roleRows.filter(r=>!(r.userId===filter.userId&&names.includes(r.roleName)));
+              return names.length;
+            },
+          };
+          return {find:async()=>[]};
+        },
+      },
+      lockManager:{runExclusive:async(k,fn)=>fn()},
+      authManager:{get:async()=>({signIn:async()=>({token:'t'})})},
+    };
+    const {createActions}=load('routes.js',{'./oidc':{createOidc:()=>({start:async(s)=>({url:'http://localhost:8081/auth?state='+s,verifier:'v'}),finish:async()=>({sub:'sub-1',iss:'http://localhost:8081/realms/lattice',groups:[]})})}});
+    const actions=createActions(app,cache,Symbol('v')),cookies=new Map();
+    const ctx=()=>({method:'GET',query:{},action:{params:{values:{}}},state:{currentUser:{id:1},currentRole:'root'},set:()=>{},get:()=>null,is:()=>true,cookies:{get:k=>cookies.get(k),set:(k,v)=>cookies.set(k,v)},redirect(v){this.location=v;},throw(s,m){throw Object.assign(Error(m),{status:s});}});
+    const s=ctx();s.query={authenticator:'native-keycloak'};await actions.start(s);
+    const state=new URL(s.location).searchParams.get('state');
+    const cb=ctx();cb.query={state,code:'ok'};await actions.callback(cb);
+    assert.match(cb.location,/\/enterprise-login\?ticket=/);
+    assert.deepEqual(destroyedFilters,[{userId:12,roleName:{$in:['ldx_warehouse']}}]);
+    assert.deepEqual(roleRows.map(r=>r.roleName),['ldx_manual_extra','root']);
+  }finally{
+    if(prevMap===undefined)delete process.env.DX_NATIVE_AUTH_GROUP_ROLE_MAP;
+    else process.env.DX_NATIVE_AUTH_GROUP_ROLE_MAP=prevMap;
+  }
+});

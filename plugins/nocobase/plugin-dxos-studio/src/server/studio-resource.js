@@ -256,6 +256,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       const pluginRows = (await db.getRepository('applicationPlugins')?.find({})) || [];
       const portalRows = (await db.getRepository('uiLayouts')?.find({})) || [];
       const customPortals = portalRows.filter((p) => String(val(p, 'uid') || '').startsWith('ldx-portal-'));
+      const hostVersion = String(process.env.NOCOBASE_VERSION || db?.app?.version || ctx?.app?.version || '2.2.50').trim().replace(/^v/i, '') || '2.2.50';
       ctx.body = {
         portalCount: customPortals.length,
         workflowCount: await safeCount('workflows', { current: true }),
@@ -263,7 +264,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
         serviceTicketCount: await safeCount('latticeServiceTickets', {}),
         aiProfileCount: await safeCount('latticeAiProfiles', { enabled: true }),
         aiAuditCount: await safeCount('latticeAiAuditLogs', {}),
-        clause52Attribution: 'Powered by NocoBase (v2.2.38 preserved)',
+        clause52Attribution: `Powered by NocoBase (v${hostVersion} preserved)`,
         plugins: buildPluginStatusList(pluginRows),
       };
       return next();

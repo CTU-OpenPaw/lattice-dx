@@ -298,6 +298,30 @@ const uiSnapshots = {
   ],
 };
 
+const aiQuotaUsage = {
+  name: 'latticeAiQuotaUsage',
+  title: 'Hạn mức & Chi phí AI theo Ngày',
+  titleField: 'dayKey',
+  origin: '@latticedx/plugin-dxos-ai',
+  uiManageable: false,
+  createdAt: true,
+  updatedAt: true,
+  fields: [
+    { name: 'organizationId', type: 'string', allowNull: false, defaultValue: 'native-ui-lab' },
+    { name: 'dayKey', type: 'string', allowNull: false },
+    { name: 'userId', type: 'string', allowNull: false },
+    { name: 'calls', type: 'integer', defaultValue: 0, allowNull: false },
+    { name: 'promptTokens', type: 'bigInt', defaultValue: 0, allowNull: false },
+    { name: 'completionTokens', type: 'bigInt', defaultValue: 0, allowNull: false },
+    { name: 'costUsd', type: 'double', defaultValue: 0, allowNull: false },
+    { name: 'piiRedacted', type: 'integer', defaultValue: 0, allowNull: false },
+  ],
+  indexes: [
+    { name: 'uidx_lattice_ai_quota_org_day_user', fields: ['organizationId', 'dayKey', 'userId'], unique: true },
+    { name: 'idx_lattice_ai_quota_org_day', fields: ['organizationId', 'dayKey'] },
+  ],
+};
+
 function failSchema(code, message, status = 400) {
   return Object.assign(new Error(message || code), { code, status });
 }
@@ -474,6 +498,7 @@ module.exports = {
   aiProfiles,
   aiAuditLogs,
   uiSnapshots,
+  aiQuotaUsage,
   validateMcpServerUrl,
   redactAuditText,
   sanitizeAuditSummary,

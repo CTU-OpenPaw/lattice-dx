@@ -104,6 +104,24 @@ async function resolveCallerContext(db, ctx, { collection, action = 'view' }) {
 const OWN_SCOPED_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
 const ORG_WIDE_PROPOSAL_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_dispatcher']);
 
+const GLOBAL_SEARCH_SPECS = [
+  { collection: 'latticeRequests', category: 'Yêu cầu mua sắm', path: '/p/procurement' },
+  { collection: 'latticeOrders', category: 'Đơn Logistics', path: '/p/logistics' },
+  { collection: 'latticeAssets', category: 'Tài sản', path: '/p/procurement' },
+  { collection: 'latticeIncidentCases', category: 'Sự cố IoT', path: '/p/incidents' },
+  { collection: 'latticeServiceTickets', category: 'Dịch vụ nội bộ', path: '/p/services' },
+  { collection: 'latticeParaDocuments', category: 'Tài liệu P.A.R.A.', path: '/p/services' },
+];
+
+function foldSearchVi(text) {
+  return String(text || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'd')
+    .toLowerCase()
+    .trim();
+}
+
 function isRecordOwnedByActor(row, actor) {
   const empId = actor?.employeeId;
   const userId = actor?.userId;
@@ -114,6 +132,34 @@ function isRecordOwnedByActor(row, actor) {
     [val(row, 'ownerId'), empId],
     [val(row, 'createdById'), userId],
   ].some(([a, b]) => a != null && b != null && Number(a) === Number(b));
+}
+
+function buildOwnerFilterClauses(db, collection, actor) {
+  const empId = actor?.employeeId;
+  const userId = actor?.userId;
+  const candidates = [
+    ['requesterId', empId],
+    ['assigneeId', empId],
+    ['driverId', empId],
+    ['ownerId', empId],
+    ['createdById', userId],
+  ];
+  const col = db?.getCollection?.(collection);
+  const rawAttrs = db?.getModel?.(collection)?.rawAttributes;
+  const hasField = (name) => {
+    if (col?.fields && typeof col.fields.has === 'function') return col.fields.has(name);
+    if (col && typeof col.getField === 'function') return Boolean(col.getField(name));
+    if (rawAttrs && typeof rawAttrs === 'object') return Object.hasOwn(rawAttrs, name);
+    return ['requesterId', 'assigneeId'].includes(name);
+  };
+  const clauses = [];
+  for (const [field, valId] of candidates) {
+    if (valId != null && String(valId).trim() !== '' && hasField(field)) {
+      const numVal = Number(valId);
+      clauses.push({ [field]: Number.isFinite(numVal) ? numVal : valId });
+    }
+  }
+  return clauses;
 }
 
 function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT_BROKER_URL, fetchImpl = fetch } = {}) {
@@ -420,7 +466,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const input = readParams(ctx);
       const collection = String(input.collection || '').trim();
       const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'view' });
-      const result = await executeGovernedExport(db, ctx, input, { isRoot, actor });
+      const result = await executeGovernedExport(db, ctx, input, { isRoot, actor, fetchImpl });
       const isDownload = input.download === true || input.download === '1' || input.download === 'true';
       if (typeof ctx.set === 'function') {
         ctx.set('X-Lattice-Export-Columns', result.columns.join(','));
@@ -437,6 +483,114 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       }
       const { buffer, ...meta } = result;
       ctx.body = { ...meta, contentBase64: buffer.toString('base64') };
+      return next();
+    },
+
+    globalSearch: async (ctx, next) => {
+      if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
+      if (!ctx.state?.currentUser?.id && ctx.state?.currentRole !== 'root') {
+        throw fail('NATIVE_LOGIN_REQUIRED', 401);
+      }
+      const isRoot = ctx.state?.currentRole === 'root';
+      if (isRoot && !ctx.state?.currentUser) throw fail('NATIVE_LOGIN_REQUIRED', 401);
+      const actor = isRoot ? null : await resolveNativeEmployee(db, ctx.state.currentUser);
+
+      const input = readParams(ctx);
+      const rawQuery = typeof input.query === 'string' ? input.query.trim() : '';
+      if (rawQuery.length < 1 || rawQuery.length > 120) {
+        throw fail('DXOS_SEARCH_QUERY_INVALID', 400, 'Từ khóa tìm kiếm phải từ 1 đến 120 ký tự.');
+      }
+      const needle = foldSearchVi(rawQuery);
+      const tokens = needle.split(/\s+/).filter(Boolean);
+      if (!tokens.length) {
+        throw fail('DXOS_SEARCH_QUERY_INVALID', 400, 'Từ khóa tìm kiếm không hợp lệ.');
+      }
+      const limit = Math.max(1, Math.min(20, Math.floor(Number(input.limit) || 10)));
+
+      let organizationId = isRoot ? null : actor.organizationId;
+      if (isRoot && typeof input.organizationId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(input.organizationId.trim())) {
+        organizationId = input.organizationId.trim();
+      }
+      const activeRole = String(ctx.state?.currentRole || '').trim();
+
+      const BATCH_SIZE = 200;
+      const MAX_SCAN = 2000;
+      const buckets = [];
+      for (const spec of GLOBAL_SEARCH_SPECS) {
+        if (!isRoot && !(await hasViewPermission(db, ctx, spec.collection, 'view'))) continue;
+        const repo = db?.getRepository?.(spec.collection);
+        if (!repo) continue;
+        const enforceOwnScope = !isRoot && OWN_SCOPED_COLLECTIONS.has(spec.collection) && !ORG_WIDE_PROPOSAL_ROLES.has(activeRole);
+        const ownerClauses = enforceOwnScope ? buildOwnerFilterClauses(db, spec.collection, actor) : [];
+        let filter = organizationId ? { organizationId } : {};
+        if (ownerClauses.length) {
+          filter = organizationId
+            ? { $and: [{ organizationId }, { $or: ownerClauses }] }
+            : { $or: ownerClauses };
+        }
+
+        const matched = [];
+        const seenIds = new Set();
+        for (let offset = 0; offset < MAX_SCAN && matched.length < limit; offset += BATCH_SIZE) {
+          const rows = (await repo.find({
+            filter,
+            limit: BATCH_SIZE,
+            offset,
+            sort: ['-id'],
+          })) || [];
+          if (!Array.isArray(rows) || !rows.length) break;
+
+          let unseenCount = 0;
+          for (const row of rows) {
+            const id = val(row, 'id');
+            const idKey = id != null ? String(id) : null;
+            if (idKey !== null) {
+              if (seenIds.has(idKey)) continue;
+              seenIds.add(idKey);
+            }
+            unseenCount += 1;
+
+            if (organizationId && val(row, 'organizationId') !== organizationId) continue;
+            if (enforceOwnScope && !isRecordOwnedByActor(row, actor)) continue;
+            const code = String(val(row, 'code') || '').trim();
+            const title = String(val(row, 'title') || val(row, 'name') || code || '').trim();
+            const desc = String(val(row, 'description') || val(row, 'summary') || '').trim();
+            const hay = foldSearchVi(`${code} ${title} ${desc}`);
+            if (!tokens.every((t) => hay.includes(t))) continue;
+            matched.push({
+              collection: spec.collection,
+              id,
+              code,
+              title: title || `#${id}`,
+              status: String(val(row, 'status') || ''),
+              category: spec.category,
+              path: spec.collection === 'latticeParaDocuments' && id != null
+                ? `/p/services?paraDocId=${encodeURIComponent(String(id))}`
+                : spec.path,
+            });
+            if (matched.length >= limit) break;
+          }
+          if (rows.length < BATCH_SIZE || unseenCount === 0) break;
+        }
+        if (matched.length) buckets.push(matched);
+      }
+
+      const items = [];
+      let round = 0;
+      while (items.length < limit) {
+        let added = false;
+        for (const bucket of buckets) {
+          if (round < bucket.length) {
+            items.push(bucket[round]);
+            added = true;
+            if (items.length >= limit) break;
+          }
+        }
+        if (!added) break;
+        round += 1;
+      }
+
+      ctx.body = { query: rawQuery, count: items.length, items };
       return next();
     },
   };

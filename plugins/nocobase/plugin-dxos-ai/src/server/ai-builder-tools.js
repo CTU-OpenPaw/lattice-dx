@@ -8,6 +8,7 @@
  */
 'use strict';
 
+const { createHash } = require('node:crypto');
 const {
   LDX_ROLE_RE,
   NATIVE_SURFACE_ACTIONS,
@@ -44,6 +45,14 @@ const NATIVE_BLOCK_ALIASES = {
   NativeFormBlock: 'createForm',
   NativeDetailsBlock: 'details',
 };
+
+function buildSafePgIndexName(colLower, suffix) {
+  const raw = `idx_${colLower}_${suffix}`;
+  if (raw.length <= 63) return raw;
+  const hash = createHash('sha256').update(raw).digest('hex').slice(0, 8);
+  const maxBase = Math.max(8, 63 - 4 - suffix.length - 1 - 8 - 1);
+  return `idx_${colLower.slice(0, maxBase)}_${hash}_${suffix}`;
+}
 
 function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE) {
   const fname = String(rawField?.name || '').trim();
@@ -600,7 +609,21 @@ function createBuilderTools(deps) {
           const colInst = db.getCollection?.(args.collectionName);
           if (colInst && typeof colInst.sync === 'function') await colInst.sync({ force: false, alter: { drop: false } });
           else if (typeof db.sync === 'function') await db.sync();
-          return { created: true, collectionName: args.collectionName, fieldCount: normalizedFields.length, fields: normalizedFields.map((f) => f.name) };
+          const createdIndexes = [];
+          if (typeof db?.sequelize?.query === 'function' && CUSTOM_COLLECTION_RE.test(args.collectionName)) {
+            const colLower = args.collectionName.toLowerCase();
+            const idxOrg = buildSafePgIndexName(colLower, 'org');
+            const idxOrgStatus = buildSafePgIndexName(colLower, 'org_status');
+            try {
+              await db.sequelize.query(`CREATE INDEX IF NOT EXISTS "${idxOrg}" ON "${args.collectionName}" ("organizationId");`);
+              createdIndexes.push(idxOrg);
+              await db.sequelize.query(`CREATE INDEX IF NOT EXISTS "${idxOrgStatus}" ON "${args.collectionName}" ("organizationId", "status");`);
+              createdIndexes.push(idxOrgStatus);
+            } catch {
+              // Non-fatal in mock test harnesses without physical SQL tables
+            }
+          }
+          return { created: true, collectionName: args.collectionName, fieldCount: normalizedFields.length, fields: normalizedFields.map((f) => f.name), indexes: createdIndexes };
         }
 
         const fieldsRepo = db.getRepository('fields');

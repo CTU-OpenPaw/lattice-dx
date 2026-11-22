@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { createHash } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 
 const ACTIVE_ALARM_STATUSES = new Set(['open', 'acknowledged']);
 const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
@@ -109,7 +109,7 @@ async function ingestOrDeduplicateAlarm(db, {
   }
 
   const tsSlug = Date.now().toString(36).toUpperCase();
-  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+  const rand = randomBytes(3).toString('hex').toUpperCase();
   const code = `ALM-${tsSlug}-${rand}`;
   const created = await repo.create({
     values: {

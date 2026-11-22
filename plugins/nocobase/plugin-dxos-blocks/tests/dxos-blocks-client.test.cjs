@@ -52,7 +52,7 @@ test('dxos-blocks helpers reject unsafe URLs, enforce ACL button filtering, and 
   assert.equal(metrics[1].targetPath, null);
 });
 
-test('registerDxosBlockModels registers all 6 configurable BlockModel subclasses with flowEngine settings flows', () => {
+test('registerDxosBlockModels registers all 8 configurable BlockModel subclasses with flowEngine settings flows', () => {
   const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
 
   class MockBlockModel {
@@ -80,6 +80,7 @@ test('registerDxosBlockModels registers all 6 configurable BlockModel subclasses
     'DxosWorkflowTasksBlockModel',
     'DxosParaVaultBlockModel',
     'DxosCreativeStudioBlockModel',
+    'DxosRecordWorkbenchBlockModel',
   ];
   assert.deepEqual(Object.keys(models).sort(), expectedNames.slice().sort());
   assert.deepEqual(Object.keys(registered).sort(), expectedNames.slice().sort());
@@ -328,4 +329,64 @@ test('DxosPortalHeroBlockModel does not register a redundant 2600ms pageSurfaceS
     global.setInterval = origSetInterval;
     global.window = origWindow;
   }
+});
+
+test('DxosRecordWorkbenchBlockModel exposes uiSchema and renders Export Bar, VoucherLifecycleBar, and RecordChatterView', () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: false }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    {},
+  );
+
+  const Workbench = models.DxosRecordWorkbenchBlockModel;
+  assert.ok(Workbench, 'DxosRecordWorkbenchBlockModel must be registered');
+  assert.equal(Workbench.meta.label, 'DX-OS Chatter, Chứng từ & Xuất báo cáo');
+  const flow = Workbench.flows.find((f) => f.key === 'dxosBlockSettings');
+  const cfgStep = flow.steps.config;
+  assert.deepEqual(cfgStep.defaultParams, {
+    title: 'Trao đổi Chatter, Chứng từ & Xuất báo cáo',
+    collection: 'latticeRequests',
+    recordId: '',
+    showExport: true,
+    showVoucherActions: true,
+    showChatter: true,
+  });
+  for (const field of ['collection', 'recordId', 'showExport', 'showVoucherActions', 'showChatter']) {
+    assert.ok(cfgStep.uiSchema[field], `uiSchema missing ${field}`);
+  }
+
+  const inst = new Workbench({
+    props: { collection: 'latticeOrders', recordId: '12', showExport: true, showVoucherActions: true, showChatter: true },
+  });
+  const el = inst.renderComponent();
+  const tree = el.type(el.props);
+  const resolveTree = (node) => {
+    if (!node || typeof node !== 'object') return node;
+    if (typeof node.type === 'function') return resolveTree(node.type(node.props));
+    return {
+      ...node,
+      children: Array.isArray(node.children) ? node.children.flat(Infinity).map(resolveTree) : node.children,
+    };
+  };
+  const dump = JSON.stringify(resolveTree(tree));
+  assert.ok(dump.includes('dxos-record-workbench-block'));
+  assert.ok(dump.includes('CSV') && dump.includes('XLSX') && dump.includes('PDF'));
+  assert.ok(dump.includes('dxos-voucher-lifecycle-bar'));
+  assert.ok(dump.includes('dxos-record-chatter'));
 });

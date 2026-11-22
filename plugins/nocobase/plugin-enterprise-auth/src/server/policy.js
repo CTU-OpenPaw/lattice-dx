@@ -64,9 +64,19 @@ function readAttr(row,key){
   return typeof row?.get==='function'?row.get(key):row?.[key];
 }
 
-async function syncMappedUserRoles(db,userId,groups,groupRoleMap){
-  const added=[],skippedPrivileged=[];
-  if(!db||!userId||!Array.isArray(groups)||!groups.length||!groupRoleMap||typeof groupRoleMap!=='object')return {added,skippedPrivileged};
+function isPrivilegedRole(r){
+  const name=readAttr(r,'name');
+  const allowConfig=readAttr(r,'allowConfigure')===true;
+  const snippets=Array.isArray(readAttr(r,'snippets'))?readAttr(r,'snippets'):[];
+  const hasPm=snippets.some(s=>s==='pm'||s==='pm.*'||String(s).startsWith('pm.'));
+  return name==='ldx_admin'||allowConfig||hasPm;
+}
+
+async function syncMappedUserRoles(db,userId,groups,groupRoleMap,options={}){
+  const reconcile=options?.reconcile!==false;
+  const added=[],removed=[],skippedPrivileged=[];
+  if(!db||!userId||!Array.isArray(groups)||!groupRoleMap||typeof groupRoleMap!=='object')return {added,removed,skippedPrivileged};
+  const managedRoles=new Set(Object.values(groupRoleMap).filter(r=>SAFE_LDX_ROLE_RE.test(r)&&r!=='ldx_admin'));
   const requested=new Set();
   for(const g of groups){
     const k=String(g||'').trim();
@@ -75,32 +85,45 @@ async function syncMappedUserRoles(db,userId,groups,groupRoleMap){
     if(!SAFE_LDX_ROLE_RE.test(mapped)){skippedPrivileged.push(mapped);continue;}
     requested.add(mapped);
   }
-  if(!requested.size)return {added,skippedPrivileged};
   const rolesRepo=db.getRepository?.('roles');
   const ruRepo=db.getRepository?.('rolesUsers');
-  if(!rolesRepo||!ruRepo)return {added,skippedPrivileged};
-  const roleRows=(await rolesRepo.find({filter:{name:{$in:[...requested]}}}))||[];
+  if(!rolesRepo||!ruRepo)return {added,removed,skippedPrivileged};
   const safeRoles=new Set();
-  for(const r of roleRows){
-    const name=readAttr(r,'name');
-    const allowConfig=readAttr(r,'allowConfigure')===true;
-    const snippets=Array.isArray(readAttr(r,'snippets'))?readAttr(r,'snippets'):[];
-    const hasPm=snippets.some(s=>s==='pm'||s==='pm.*'||String(s).startsWith('pm.'));
-    if(name==='ldx_admin'||allowConfig||hasPm){
-      skippedPrivileged.push(name);
-      continue;
+  if(requested.size>0){
+    const roleRows=(await rolesRepo.find({filter:{name:{$in:[...requested]}}}))||[];
+    for(const r of roleRows){
+      const name=readAttr(r,'name');
+      if(isPrivilegedRole(r)){
+        skippedPrivileged.push(name);
+        continue;
+      }
+      safeRoles.add(name);
     }
-    safeRoles.add(name);
   }
-  if(!safeRoles.size)return {added,skippedPrivileged};
+  if(!safeRoles.size&&(!reconcile||!managedRoles.size))return {added,removed,skippedPrivileged};
   const existing=(await ruRepo.find({filter:{userId}}))||[];
-  const existingSet=new Set(existing.map(r=>readAttr(r,'roleName')));
+  const existingSet=new Set(existing.map(r=>readAttr(r,'roleName')).filter(Boolean));
   for(const roleName of safeRoles){
     if(existingSet.has(roleName))continue;
     await ruRepo.create({values:{userId,roleName}});
     added.push(roleName);
   }
-  return {added,skippedPrivileged};
+  if(reconcile&&managedRoles.size>0){
+    const toRemove=[];
+    for(const roleName of existingSet){
+      if(managedRoles.has(roleName)&&!safeRoles.has(roleName))toRemove.push(roleName);
+    }
+    if(toRemove.length>0&&typeof ruRepo.destroy==='function'){
+      const removeRoleRows=(await rolesRepo.find({filter:{name:{$in:toRemove}}}))||[];
+      const privilegedToKeep=new Set(removeRoleRows.filter(isPrivilegedRole).map(r=>readAttr(r,'name')).filter(Boolean));
+      const safeToRemove=toRemove.filter(name=>!privilegedToKeep.has(name));
+      if(safeToRemove.length>0){
+        await ruRepo.destroy({filter:{userId,roleName:{$in:safeToRemove}}});
+        removed.push(...safeToRemove);
+      }
+    }
+  }
+  return {added,removed,skippedPrivileged};
 }
 
 function decodeJwtPayloadUnsafe(ctx){
@@ -149,7 +172,7 @@ function deploymentConfig(env){
   return {issuer:issuer.href.replace(/\/$/,''),origin:origin.origin,clientId:env.DX_NATIVE_AUTH_CLIENT_ID,internal:internal?.origin,callback:origin.origin+'/api/enterpriseAuth:callback',insecure:issuer.protocol==='http:'};
 }
 function safeReturnTo(value){
-  if(typeof value!=='string'||!/^\/admin(?:[/?]|$)/.test(value)||/[\\\x00-\x20%]/.test(value))return '/admin';
+  if(typeof value!=='string'||!/^\/(?:admin|p|mobile)(?:[/?]|$)/.test(value)||/[\\\x00-\x20%]/.test(value)||value.includes('..'))return '/admin';
   return value;
 }
 function sameBinding(a,b){return typeof a==='string'&&typeof b==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));}

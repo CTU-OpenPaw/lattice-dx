@@ -221,11 +221,31 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       ['gitops', '6. GitOps Bundle'],
     ];
 
-    const btnStyle = (active) => ({
-      padding: '8px 14px', borderRadius: 8, cursor: 'pointer', fontSize: 13, fontWeight: 600,
-      border: active ? '1px solid #1677ff' : '1px solid #cbd5e1',
-      background: active ? '#1677ff' : '#ffffff',
-      color: active ? '#ffffff' : '#1e293b',
+    const btnStyle = (primary = false, danger = false, disabled = false) => ({
+      padding: '8px 14px',
+      borderRadius: 8,
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      fontSize: 13,
+      fontWeight: 600,
+      border: disabled
+        ? '1px solid #cbd5e1'
+        : danger
+          ? '1px solid #dc2626'
+          : primary
+            ? '1px solid #1677ff'
+            : '1px solid #cbd5e1',
+      background: disabled
+        ? '#e2e8f0'
+        : danger
+          ? '#dc2626'
+          : primary
+            ? '#1677ff'
+            : '#ffffff',
+      color: disabled
+        ? '#94a3b8'
+        : (primary || danger)
+          ? '#ffffff'
+          : '#1e293b',
     });
 
     if (forbidden) {
@@ -247,8 +267,15 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         ),
         h('button', { type: 'button', onClick: () => openRoute('/admin/settings/dxos-ai'), style: btnStyle(true) }, 'Mở AI Workforce & 6-Plane Center'),
       ),
-      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
-        tabItems.map(([k, label]) => h('button', { key: k, type: 'button', onClick: () => setTab(k), style: btnStyle(tab === k) }, label)),
+      h('div', { role: 'tablist', style: { display: 'flex', flexWrap: 'nowrap', gap: 6, overflowX: 'auto', paddingBottom: 4 } },
+        tabItems.map(([k, label]) => h('button', {
+          key: k,
+          type: 'button',
+          role: 'tab',
+          'aria-selected': tab === k,
+          onClick: () => setTab(k),
+          style: { ...btnStyle(tab === k), padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 },
+        }, label)),
       ),
       feedback ? h('div', {
         role: 'status',
@@ -306,7 +333,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           'Tự động kích hoạt quy trình ngay sau khi cài',
         ),
         h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
-          h('button', { type: 'submit', disabled: busyAction || loading || !selectedOrg, style: btnStyle(true) }, busyAction ? 'Đang cài đặt…' : 'Cài đặt quy trình vào NocoBase'),
+          h('button', { type: 'submit', disabled: busyAction || loading || !selectedOrg, style: btnStyle(true, false, busyAction || loading || !selectedOrg) }, busyAction ? 'Đang cài đặt…' : 'Cài đặt quy trình vào NocoBase'),
           h('button', { type: 'button', onClick: () => openRoute('/admin/settings/workflow'), style: btnStyle(false) }, 'Mở danh sách Workflow native'),
         ),
       ) : null,
@@ -315,7 +342,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         h('h3', { style: { margin: 0, fontSize: 16 } }, 'Dựng & Nâng cấp 4 Cổng Đa-Block'),
         h('p', { style: { margin: 0, fontSize: 13, color: '#475569' } }, 'Tự động tạo trang Dịch vụ Nội bộ & Tài liệu P.A.R.A., kèm 4 trang Tổng quan kết hợp Hero + KPI + Việc của tôi + NGSI-LD + Đề xuất AI + Kho P.A.R.A. mà không ghi đè trang bạn đã tự thiết kế.'),
         h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
-          h('button', { type: 'button', onClick: handleComposePortals, disabled: busyAction, style: btnStyle(true) }, busyAction ? 'Đang xử lý…' : 'Dựng Cổng Đa-Block ngay'),
+          h('button', { type: 'button', onClick: handleComposePortals, disabled: busyAction, style: btnStyle(true, false, busyAction) }, busyAction ? 'Đang xử lý…' : 'Dựng Cổng Đa-Block ngay'),
           h('button', { type: 'button', onClick: () => openRoute('/admin/settings/multi-portal'), style: btnStyle(false) }, 'Quản lý Multi-Portal'),
           h('button', { type: 'button', onClick: () => openRoute('/p/procurement'), style: btnStyle(false) }, 'Mở Cổng Mua sắm'),
           h('button', { type: 'button', onClick: () => openRoute('/p/logistics'), style: btnStyle(false) }, 'Mở Cổng Logistics'),
@@ -364,7 +391,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hàng đợi Outbox & Dead-Letter Queue (DLQ)'),
           h('div', { style: { display: 'flex', gap: 8 } },
             h('button', { type: 'button', onClick: () => loadOutbox(), style: btnStyle(false) }, 'Làm mới DLQ'),
-            h('button', { type: 'button', disabled: busyAction || !(outboxData.items || []).length, onClick: () => handleReplayDlq(), style: btnStyle(true) }, 'Phát lại toàn bộ DLQ'),
+            h('button', { type: 'button', disabled: busyAction || !(outboxData.items || []).length, onClick: () => handleReplayDlq(), style: btnStyle(true, false, busyAction || !(outboxData.items || []).length) }, 'Phát lại toàn bộ DLQ'),
           ),
         ),
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8 } },
@@ -387,7 +414,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
                 h('div', { style: { fontWeight: 700, color: '#0f172a' } }, `${item.collectionName || 'entity'}#${item.recordId || ''} · ${item.eventId}`),
                 h('div', { style: { color: '#991b1b' } }, `Tổ chức: ${item.organizationId} · Số lần thử: ${item.attempts} · Mã lỗi: ${item.errorCode || 'UNKNOWN'}`),
               ),
-              h('button', { type: 'button', disabled: busyAction, onClick: () => handleReplayDlq([item.eventId]), style: btnStyle(false) }, 'Phát lại'),
+              h('button', { type: 'button', disabled: busyAction, onClick: () => handleReplayDlq([item.eventId]), style: btnStyle(false, false, busyAction) }, 'Phát lại'),
             )),
           ),
       ) : null,
@@ -396,9 +423,9 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
           h('h3', { style: { margin: 0, fontSize: 16 } }, 'GitOps Solution Bundle (Schema · RBAC · Portals · Workflows · AI)'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-            h('button', { type: 'button', disabled: busyAction, onClick: handleExportBundle, style: btnStyle(true) }, 'Xuất Bundle JSON'),
-            h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: () => handleImportBundle(true), style: btnStyle(false) }, 'Kiểm tra Diff (Dry-Run)'),
-            h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: () => handleImportBundle(false), style: btnStyle(false) }, 'Áp dụng Bundle'),
+            h('button', { type: 'button', disabled: busyAction, onClick: handleExportBundle, style: btnStyle(true, false, busyAction) }, 'Xuất Bundle JSON'),
+            h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: () => handleImportBundle(true), style: btnStyle(false, false, busyAction || !bundleText.trim()) }, 'Kiểm tra Diff (Dry-Run)'),
+            h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: () => handleImportBundle(false), style: btnStyle(false, false, busyAction || !bundleText.trim()) }, 'Áp dụng Bundle'),
           ),
         ),
         bundleInfo?.sha256 ? h('div', { style: { fontSize: 12, color: '#475569' } }, `SHA-256: ${bundleInfo.sha256}`) : null,

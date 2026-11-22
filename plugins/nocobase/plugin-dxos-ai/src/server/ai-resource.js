@@ -37,7 +37,7 @@ const {
   getSurfaceRevisionState,
 } = require('./ai-surface-creative-tools');
 const { createSurfaceEventsHandler } = require('./surface-events');
-const { getQuotaSummary } = require('./ai-governance');
+const { getQuotaSummaryPersistent } = require('./ai-governance');
 
 function serializeProfile(row) {
   if (!row) return null;
@@ -186,6 +186,49 @@ async function upsertAndSyncProfile(db, input, { actorUser, defaultOrigin, audit
   }
 
   return { profile: normalized, sync };
+}
+
+async function computeAllTimeAuditTotals(targetDb, organizationId) {
+  const empty = { records: 0, promptTokens: 0, completionTokens: 0, estimatedCostUsd: 0, piiRedactedCount: 0 };
+  if (typeof targetDb?.sequelize?.query === 'function') {
+    try {
+      const [rows] = await targetDb.sequelize.query(
+        `SELECT COUNT(*)::int AS records,
+                COALESCE(SUM("promptTokens"), 0)::bigint AS "promptTokens",
+                COALESCE(SUM("completionTokens"), 0)::bigint AS "completionTokens",
+                COALESCE(SUM("estimatedCostUsd"), 0)::double precision AS "estimatedCostUsd",
+                COALESCE(SUM("piiRedactedCount"), 0)::int AS "piiRedactedCount"
+         FROM "latticeAiAuditLogs"
+         WHERE "organizationId" = :organizationId;`,
+        { replacements: { organizationId } },
+      );
+      if (Array.isArray(rows) && rows[0]) {
+        const r = rows[0];
+        return {
+          records: Number(r.records) || 0,
+          promptTokens: Number(r.promptTokens) || 0,
+          completionTokens: Number(r.completionTokens) || 0,
+          estimatedCostUsd: Number((Number(r.estimatedCostUsd) || 0).toFixed(6)),
+          piiRedactedCount: Number(r.piiRedactedCount) || 0,
+        };
+      }
+    } catch {
+      // Fallback to repository scan in mock harnesses
+    }
+  }
+  const repo = targetDb?.getRepository?.('latticeAiAuditLogs');
+  if (!repo || typeof repo.find !== 'function') return empty;
+  const rows = (await repo.find({ filter: { organizationId }, sort: ['-id'], limit: 5000 })) || [];
+  const totals = { ...empty };
+  for (const r of rows) {
+    totals.records += 1;
+    totals.promptTokens += Number(val(r, 'promptTokens')) || 0;
+    totals.completionTokens += Number(val(r, 'completionTokens')) || 0;
+    totals.estimatedCostUsd += Number(val(r, 'estimatedCostUsd')) || 0;
+    totals.piiRedactedCount += Number(val(r, 'piiRedactedCount')) || 0;
+  }
+  totals.estimatedCostUsd = Number(totals.estimatedCostUsd.toFixed(6));
+  return totals;
 }
 
 function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
@@ -366,21 +409,14 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const targetDb = await requireAdmin(ctx);
       const params = readActionPayload(ctx);
       const requestedOrg = String(ctx?.action?.params?.organizationId || params.organizationId || 'native-ui-lab').trim();
-      const summary = getQuotaSummary(requestedOrg, env);
-      const repo = targetDb?.getRepository?.('latticeAiAuditLogs');
-      let auditTotals = { records: 0, promptTokens: 0, completionTokens: 0, estimatedCostUsd: 0, piiRedactedCount: 0 };
-      if (repo) {
-        const rows = (await repo.find({ filter: { organizationId: summary.organizationId }, sort: ['-id'], limit: 200 })) || [];
-        for (const r of rows) {
-          auditTotals.records += 1;
-          auditTotals.promptTokens += Number(val(r, 'promptTokens')) || 0;
-          auditTotals.completionTokens += Number(val(r, 'completionTokens')) || 0;
-          auditTotals.estimatedCostUsd += Number(val(r, 'estimatedCostUsd')) || 0;
-          auditTotals.piiRedactedCount += Number(val(r, 'piiRedactedCount')) || 0;
-        }
-        auditTotals.estimatedCostUsd = Number(auditTotals.estimatedCostUsd.toFixed(6));
-      }
-      ctx.body = { ...summary, auditTotals };
+      const summary = await getQuotaSummaryPersistent(targetDb, requestedOrg, env);
+      const auditTotals = await computeAllTimeAuditTotals(targetDb, summary.organizationId);
+      ctx.body = {
+        ...summary,
+        dayUsage: summary.usage,
+        allTimeTotals: auditTotals,
+        auditTotals,
+      };
       if (typeof next === 'function') await next();
     },
 

@@ -234,6 +234,7 @@ function createItOtMcpTools(dbArg, env = process.env, fetchImpl = globalThis.fet
 
 async function buildEnterpriseTopology(db, env = process.env, fetchImpl = globalThis.fetch) {
   const urls = resolveServiceUrls(env);
+  const nocobaseVersion = String(env?.NOCOBASE_VERSION || db?.app?.version || '2.2.50').trim().replace(/^v/i, '') || '2.2.50';
   const [orion, n8n, keycloak, rolesCount, assetsCount, outboxPending, workflowsCount, portalsCount, paraCount, profilesCount, auditCount, collectionsCount] = await Promise.all([
     probeService(`${urls.orionUrl}/version`, fetchImpl),
     probeService(`${urls.n8nUrl}/healthz`, fetchImpl),
@@ -251,8 +252,9 @@ async function buildEnterpriseTopology(db, env = process.env, fetchImpl = global
 
   return {
     platform: 'LatticeDX Enterprise Digital OS (DX-OS)',
+    nocobaseVersion,
     generatedAt: new Date().toISOString(),
-    positioningStatement: 'NocoBase 2.2.38 đóng vai trò phân hệ dữ liệu & metadata ứng dụng (Plane #6) bên dưới kiến trúc điều phối 6 phân hệ của LatticeDX.',
+    positioningStatement: `NocoBase ${nocobaseVersion} đóng vai trò phân hệ dữ liệu & metadata ứng dụng (Plane #6) bên dưới kiến trúc điều phối 6 phân hệ của LatticeDX.`,
     clause52Preserved: true,
     planes: [
       {
@@ -302,10 +304,10 @@ async function buildEnterpriseTopology(db, env = process.env, fetchImpl = global
       {
         key: 'appDataSubstrate',
         order: 6,
-        name: 'NocoBase 2.2.38 Application Data & UI Substrate',
+        name: `NocoBase ${nocobaseVersion} Application Data & UI Substrate`,
         technologies: ['Collections & Schema Engine', 'FlowEngine Native UI', 'Plugin Manager (7 Apache-2.0 Plugins)'],
         healthy: Boolean(db),
-        clause52Attribution: 'Powered by NocoBase (v2.2.38 preserved)',
+        clause52Attribution: `Powered by NocoBase (v${nocobaseVersion} preserved)`,
         metrics: { collectionsCount },
       },
     ],
