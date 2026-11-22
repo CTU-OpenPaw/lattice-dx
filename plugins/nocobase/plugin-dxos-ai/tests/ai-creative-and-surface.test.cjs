@@ -106,12 +106,18 @@ function makeV3Harness() {
     return row[k] === cond;
   });
 
-  const wrap = (arr, row, extra = {}) => ({
+  const wrap = (arr, row, extra = {}, repoName = '') => ({
     ...row,
     ...extra,
     get: (k) => (k === 'fields' && row.fields ? row.fields : row[k]),
     toJSON: () => ({ ...row }),
-    update: async (u) => { Object.assign(row, u); return wrap(arr, row, extra); },
+    update: async (u) => {
+      if (repoName === 'roles' && u.title && arr.some((r) => r !== row && r.title === u.title)) {
+        throw new Error('Validation error');
+      }
+      Object.assign(row, u);
+      return wrap(arr, row, extra, repoName);
+    },
   });
 
   const db = {
@@ -130,7 +136,7 @@ function makeV3Harness() {
         find: async ({ filter = {}, sort, limit = 200 } = {}) => {
           let rows = arr.filter((r) => matchFilter(r, filter));
           if (Array.isArray(sort) && sort.includes('-id')) rows = [...rows].sort((a, b) => Number(b.id || 0) - Number(a.id || 0));
-          return rows.slice(0, limit).map((r) => wrap(arr, r));
+          return rows.slice(0, limit).map((r) => wrap(arr, r, {}, name));
         },
         findOne: async ({ filter = {}, filterByTk } = {}) => {
           const hit = filterByTk != null
@@ -138,20 +144,25 @@ function makeV3Harness() {
             : arr.find((r) => matchFilter(r, filter));
           if (!hit) return null;
           return name === 'collections'
-            ? wrap(arr, hit, { getFields: async () => hit.fields || [] })
-            : wrap(arr, hit);
+            ? wrap(arr, hit, { getFields: async () => hit.fields || [] }, name)
+            : wrap(arr, hit, {}, name);
         },
         count: async ({ filter = {} } = {}) => arr.filter((r) => matchFilter(r, filter)).length,
         create: async ({ values = {} } = {}) => {
+          if (name === 'roles') {
+            if (arr.some((r) => r.name === values.name || (values.title && r.title === values.title))) {
+              throw new Error('Validation error');
+            }
+          }
           const id = values.id ?? ++seq;
           const row = { id, ...values };
           arr.push(row);
-          return wrap(arr, row);
+          return wrap(arr, row, {}, name);
         },
         update: async ({ filter = {}, filterByTk, values = {} } = {}) => {
           const hits = arr.filter((r) => (filterByTk != null ? String(r.id ?? r.uid ?? r.name ?? r.username) === String(filterByTk) : matchFilter(r, filter)));
           for (const h of hits) Object.assign(h, values);
-          return hits.map((h) => wrap(arr, h));
+          return hits.map((h) => wrap(arr, h, {}, name));
         },
         destroy: async ({ filter = {} } = {}) => {
           let removed = 0;
@@ -433,4 +444,108 @@ test('dxos_provision_role_workspace builds new ldx_* role + RBAC + page + creati
   assert.ok(aiProf);
   assert.equal(aiProf.isAdminBuilder, false);
   assert.deepEqual(aiProf.allowedRoles, ['ldx_cold_inspector']);
+});
+
+test('v3.1 natural Vietnamese helpers resolve collection, block hints, field titles, role slugs, and synthesize blueprints without jargon', async () => {
+  const {
+    stripVietnameseDiacritics,
+    slugifyVietnameseToLdxRole,
+  } = require('../src/server/ai-surface-creative-tools');
+
+  assert.equal(stripVietnameseDiacritics('Độ ẩm & Thanh tra Chuỗi lạnh'), 'Do am & Thanh tra Chuoi lanh');
+  assert.equal(slugifyVietnameseToLdxRole('Thanh tra Chuỗi lạnh'), 'ldx_thanh_tra_chuoi_lanh');
+
+  const { db, byName, adminCtx } = makeV3Harness();
+  // Add a TableBlockModel on cold-qa grid so portal primary collection can be inferred without collectionName
+  db.store.flowModels.push({
+    uid: 'tbl-cold',
+    use: 'TableBlockModel',
+    parentId: 'grid-cold-qa',
+    props: {},
+    stepParams: { resourceSettings: { init: { collectionName: 'latticeCustomColdAudits' } } },
+  });
+  const grid = db.store.flowModels.find((m) => m.uid === 'grid-cold-qa');
+  grid.props.rows.dxos_row_2 = [['tbl-cold']];
+  grid.props.sizes.dxos_row_2 = [24];
+  grid.props.rowOrder.push('dxos_row_2');
+
+  // 1. dxos_recommend_page_blueprint infers collectionName automatically & contains NO askAi quick button
+  const recTool = byName.get('dxos_recommend_page_blueprint');
+  const rec = await recTool.invoke(adminCtx, { portalSlug: 'cold-qa' });
+  assert.equal(rec.collectionName, 'latticeCustomColdAudits');
+  assert.ok(rec.recommendedCreativeBlock?.blueprint?.widgets?.some((w) => w.type === 'thermometer'));
+  const qaBtns = rec.recommendedCreativeBlock.blueprint.widgets.find((w) => w.type === 'quick-actions')?.buttons || [];
+  assert.equal(qaBtns.some((b) => b.kind === 'askAi'), false);
+
+  // 2. dxos_design_creative_block resolves placeBesideTitle='Chỉ số' & synthesizes widgets from natural goal
+  const creativeTool = byName.get('dxos_design_creative_block');
+  const designed = await creativeTool.invoke(adminCtx, {
+    portalSlug: 'cold-qa',
+    placeBesideTitle: 'Chỉ số',
+    title: 'Buồng Nhiệt độ Kho lạnh',
+    theme: 'industrial-cockpit',
+    goal: 'Theo dõi nhiệt độ và cảnh báo đỏ nếu cao hơn âm 15 độ C, tiến trình 4 bước thẩm định và nút mở kho tài liệu',
+  });
+  assert.equal(designed.applied, true);
+  assert.equal(designed.sideBySideWith, 'kpi-cold');
+  assert.ok(designed.blueprint.widgets.some((w) => w.type === 'thermometer'));
+  const callout = designed.blueprint.widgets.find((w) => w.type === 'rule-callout');
+  assert.ok(callout);
+  assert.equal(callout.threshold, -15);
+  assert.equal(callout.operator, 'gt');
+
+  // 3. dxos_provision_role_workspace accepts roleTitle + Vietnamese locked field label without roleName/collectionName/aiUsername
+  const provisionTool = byName.get('dxos_provision_role_workspace');
+  const prov = await provisionTool.invoke(adminCtx, {
+    roleTitle: 'Thanh tra Chuỗi lạnh',
+    portalSlug: 'cold-qa',
+    pageTitle: 'Trạm Thanh tra Nhiệt độ',
+    lockedFields: ['Kết luận kiểm định'],
+    creativeTheme: 'amber-alert',
+  });
+  assert.equal(prov.provisioned, true);
+  assert.equal(prov.roleName, 'ldx_thanh_tra_chuoi_lanh');
+  assert.equal(prov.collectionName, 'latticeCustomColdAudits');
+  assert.deepEqual(prov.lockedFields, ['auditVerdict']);
+  const resRbac = db.store.dataSourcesRolesResources.find((r) => r.roleName === 'ldx_thanh_tra_chuoi_lanh');
+  const createAct = resRbac.actions.find((a) => a.name === 'create');
+  assert.equal(createAct.fields.includes('auditVerdict'), false);
+  const newAi = db.store.latticeAiProfiles.find((p) => p.username === prov.aiEmployee);
+  assert.ok(newAi && newAi.isAdminBuilder === false);
+});
+
+test('dxos_provision_role_workspace handles roles_title_key collisions and normalizes aiUsername underscores', async () => {
+  const { db, byName, adminCtx } = makeV3Harness();
+  const provision = byName.get('dxos_provision_role_workspace');
+
+  // Seed existing ldx_* role owning Vietnamese title 'Thanh tra Chuỗi lạnh' and a system role owning 'Nhân sự Hệ thống'
+  db.store.roles.push(
+    { name: 'ldx_cold_inspector', title: 'Thanh tra Chuỗi lạnh', allowConfigure: false },
+    { name: 'staff_sys', title: 'Nhân sự Hệ thống', allowConfigure: false },
+  );
+
+  // 1. Reuses existing ldx_* role instead of crashing on roles_title_key, and normalizes aiUsername underscores
+  const resReuse = await provision.invoke(adminCtx, {
+    roleName: 'ldx_cold_qa_team',
+    roleTitle: 'Thanh tra Chuỗi lạnh',
+    portalSlug: 'cold-qa',
+    pageTitle: 'Trạm Thanh tra Nhiệt độ',
+    lockedFields: ['Kết luận kiểm định'],
+    aiUsername: 'ai_cold_qa_team',
+  });
+  assert.equal(resReuse.provisioned, true);
+  assert.equal(resReuse.roleName, 'ldx_cold_inspector');
+  assert.equal(resReuse.aiEmployee, 'ai-cold-qa-team');
+
+  // 2. Disambiguates roleTitle when collided with a non-ldx_* role
+  const resDisambig = await provision.invoke(adminCtx, {
+    roleName: 'ldx_staff_qa',
+    roleTitle: 'Nhân sự Hệ thống',
+    portalSlug: 'cold-qa',
+    pageTitle: 'Trang Nhân sự QA',
+  });
+  assert.equal(resDisambig.provisioned, true);
+  assert.equal(resDisambig.roleName, 'ldx_staff_qa');
+  const createdStaffRole = db.store.roles.find((r) => r.name === 'ldx_staff_qa');
+  assert.equal(createdStaffRole.title, 'Nhân sự Hệ thống (ldx_staff_qa)');
 });

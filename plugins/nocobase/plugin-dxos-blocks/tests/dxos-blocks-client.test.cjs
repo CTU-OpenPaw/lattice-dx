@@ -248,3 +248,46 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
   });
   assert.ok(stripEl && stripEl.props['data-testid'] === 'dxos-block-copilot-strip');
 });
+
+test('DxosPortalHeroView renders clean page header with zero inline AI strips or bars even for admins', () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true, allowConfigUI: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    {},
+  );
+  const hero = new models.DxosPortalHeroBlockModel({
+    props: { title: 'Kho lạnh QA', badge: 'DX-OS' },
+  });
+  const wrapperEl = hero.renderComponent();
+  const tree = wrapperEl.type(wrapperEl.props);
+
+  const testIds = [];
+  const walk = (n) => {
+    if (!n || typeof n !== 'object') return;
+    if (n.props?.['data-testid']) testIds.push(n.props['data-testid']);
+    if (Array.isArray(n.children)) n.children.flat(Infinity).forEach(walk);
+  };
+  walk(tree);
+
+  assert.ok(testIds.includes('dxos-portal-hero-block'));
+  assert.equal(testIds.includes('dxos-block-copilot-strip'), false);
+  assert.equal(testIds.includes('dxos-admin-architect-bar'), false);
+  assert.equal(testIds.includes('dxos-picker-toggle-btn'), false);
+  assert.equal(testIds.includes('dxos-rollback-page-btn'), false);
+});

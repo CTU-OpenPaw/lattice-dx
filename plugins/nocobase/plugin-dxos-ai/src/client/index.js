@@ -15,6 +15,7 @@
 })(function (client, React, antd) {
   'use strict';
   const { createDxosAiStudioPage } = require('./ai-studio-page');
+  const { createPortalAgentLauncher } = require('./portal-agent-launcher');
 
   class DxosAiClientPlugin extends client.Plugin {
     async load() {
@@ -26,6 +27,10 @@
           Component: Page,
           aclSnippet: 'pm',
         });
+      }
+      const PortalAgentLauncher = createPortalAgentLauncher(client, React, antd, this.app);
+      if (typeof this.app?.use === 'function' && PortalAgentLauncher) {
+        this.app.use(PortalAgentLauncher);
       }
     }
   }

@@ -104,3 +104,23 @@ Nâng cấp kiến trúc DX-OS AI + Blocks theo **Phương án C (v3)** để `@
   3. 1 câu lệnh `dxos_provision_role_workspace` tạo `ldx_cold_inspector` + trang mới `Trạm Thanh tra Nhiệt độ` (theme `amber-alert`) + `@dxos-cold-inspector` (non-Admin).
   4. Bấm `⏪ Hoàn tác trang` khôi phục sạch bố cục 1 cột từ `latticeUiSnapshots`.
   5. AI Studio v3 hiển thị `@dxos-cold-inspector` trong `Nhân sự AI (6)` cùng toàn bộ vết kiểm toán `allowed` tại Tab 4 `Nhật ký Kiểm toán`.
+
+---
+
+## 7. Nâng cấp v3.1 — Một Nút Agent Nổi Duy Nhất & Giao tiếp Ngôn ngữ Tự nhiên 100%
+
+Khắc phục phản hồi trải nghiệm UI v3: loại bỏ toàn bộ thanh công cụ / nút AI inline khỏi mặt trang nghiệp vụ, chỉ giữ **duy nhất 1 nút Agent nổi chuẩn NocoBase** trên toàn hệ thống và hỗ trợ điều khiển Kiến trúc sư AI **100% bằng tiếng Việt đời thường**.
+
+- **Loại bỏ nút & strip AI trên nội dung Portal (`@latticedx/plugin-dxos-blocks`):**
+  - Gỡ hoàn toàn `Trợ lý AI ngữ cảnh` strip (`dxos-block-copilot-strip`), thanh `Studio Kiến trúc Sống` (`dxos-admin-architect-bar`, picker/hoàn tác inline) khỏi `DxosPortalHeroView` và loại bỏ quick-action `askAi` khỏi `DxosCreativeStudioBlockModel`.
+- **Duy nhất 1 nút Agent nổi toàn ứng dụng (`PortalAgentLauncher` trong `@latticedx/plugin-dxos-ai`):**
+  - `@nocobase/plugin-ai` ẩn nút nổi gốc ngoài `/admin/*`; `PortalAgentLauncher` (`app.use(...)`) chỉ hiển thị `[data-testid="dxos-portal-ai-float-btn"]` (`aria-label="Open AI chat"`, góc dưới phải chuẩn NocoBase) trên đường dẫn `/p/*` và tự ẩn trên `/admin/*`, khi khung chat gốc đang mở hoặc khi user chưa có nhân sự AI được phép.
+  - Bấm nút mở thẳng khung chat gốc `@nocobase/plugin-ai` qua `triggerTask({ autoSend: false, message: { system } })` với ô nhập rỗng, focus sạch và ngữ cảnh ngầm `[Ngữ cảnh trang hiện tại: portalSlug, pageTitle, path]`, kèm vòng đồng bộ `dxosAi:pageSurfaceState` tự hoãn reload khi hộp thoại chat còn mở.
+- **Tầng suy luận Ngôn ngữ Tự nhiên trên Server (`ai-surface-creative-tools.js` + `@dxos-architect`):**
+  - Bổ sung `inferPortalPrimaryCollection`, `resolveBlockUidByHint` (tìm theo tên/gợi ý tiếng Việt như *"Chỉ số"*), `resolveFieldNamesByNaturalLabels` (ánh xạ nhãn tiếng Việt có dấu sang tên cột kỹ thuật, ví dụ *"Kết luận kiểm định"* → `auditVerdict`), `synthesizeNaturalCreativeBlueprint` (tự sinh đồng hồ/nhiệt kế/cảnh báo ngưỡng âm từ mô tả tự nhiên), `slugifyVietnameseToLdxRole`, `normalizeAiUsername` và tự xử lý tái sử dụng/phân tách trùng `roles_title_key` (`Validation error`).
+- **Kiểm chứng Live E2E & Video Full HD (`LatticeDX-AI-v3-1-Natural-Single-Agent-1080p.mp4` · `1920x1080` · `30 fps` · `125.1s`):**
+  1. Mặt trang `/p/cold-qa` sạch `0` nút phụ, đúng `1` nút Agent nổi -> mở khung chat gốc NocoBase hỏi gợi ý khối bằng tiếng Việt thường (`dxos_recommend_page_blueprint`).
+  2. Nhập câu tiếng Việt tự nhiên yêu cầu khối theo dõi nhiệt độ nền tối đặt ngang cạnh phần chỉ số, cảnh báo đỏ > âm 15°C -> AI gọi `dxos_design_creative_block` (`placeBesideTitle: "Chỉ số"`) tạo `Buồng Điều hành latticeCustomColdAudits` xếp 2 cột `[12, 12]`.
+  3. Nhập 1 câu tiếng Việt tạo vai trò `Thanh tra Chuỗi lạnh` (`ldx_thanh_tra_chuoi_lanh`), khóa cột `Kết luận kiểm định`, tạo trang `Trạm Thanh tra Nhiệt độ` (theme `amber-alert`) và trợ lý AI riêng `@dxos-thanh-tra-chuoi-lanh` (`isAdminBuilder: false`).
+  4. Nhập câu tiếng Việt yêu cầu hoàn tác trang `Bảng Kiểm định Kho lạnh` về bố cục 1 cột -> AI tự tìm snapshot trong `latticeUiSnapshots` và khôi phục sạch.
+  5. Kiểm chứng AI Studio (`/admin/settings/dxos-ai`) giữ đúng 1 nút Agent gốc của NocoBase, hiển thị nhân sự mới trong Tab 2 và toàn bộ vết `allowed` trong Tab 4 `Nhật ký Kiểm toán`.

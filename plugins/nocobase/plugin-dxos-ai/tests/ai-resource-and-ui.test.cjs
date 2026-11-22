@@ -331,17 +331,135 @@ test('createDxosAiStudioPage renders 4-tab studio UI & helper utilities, and plu
     assert.equal(registered.tools.length, 15);
 
     const ClientPluginMod = require(path.join(PLUGIN_ROOT, 'src/client/index.js'));
+    const clientUsedProviders = [];
     const clientInst = new ClientPluginMod.default({
       pluginSettingsManager: { add: (key, opts) => registered.settingsPages.push({ key, opts }) },
+      use: (provider) => clientUsedProviders.push(provider),
     });
     await clientInst.load();
     assert.equal(registered.settingsPages[0].key, 'dxos-ai');
     assert.equal(registered.settingsPages[0].opts.aclSnippet, 'pm');
+    assert.equal(clientUsedProviders.length, 1);
 
     const ClientV2Mod = require(path.join(PLUGIN_ROOT, 'src/client-v2/index.js'));
     const v2Inst = new ClientV2Mod.default({});
     await v2Inst.load();
   } finally {
     Module._load = origLoad;
+  }
+});
+
+test('portal-agent-launcher renders single floating button strictly on /p/* and opens native chat with hidden context', async () => {
+  const {
+    inferPortalSlug,
+    pickDefaultPortalEmployee,
+    buildHiddenPageSystemContext,
+    openNativePortalChat,
+    createPortalAgentLauncher,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+
+  assert.equal(inferPortalSlug('/p/cold-qa'), 'cold-qa');
+  assert.equal(inferPortalSlug('/p/cold-qa/1y7k8uyiari'), 'cold-qa');
+  assert.equal(inferPortalSlug('/admin/settings/dxos-ai'), '');
+  assert.equal(inferPortalSlug(''), '');
+
+  const adminPick = pickDefaultPortalEmployee([
+    { username: 'dxos-coordinator', nickname: 'Điều phối viên' },
+    { username: 'dxos-architect', nickname: 'Kiến trúc sư' },
+  ], true);
+  assert.equal(adminPick.username, 'dxos-architect');
+
+  const empPick = pickDefaultPortalEmployee([
+    { username: 'dxos-ops', nickname: 'Ops AI' },
+  ], false);
+  assert.equal(empPick.username, 'dxos-ops');
+
+  const sysMsg = buildHiddenPageSystemContext({ portalSlug: 'cold-qa', pageTitle: 'Bảng Kiểm định Kho lạnh', pathname: '/p/cold-qa' });
+  assert.ok(sysMsg.includes('cold-qa'));
+  assert.ok(sysMsg.includes('Bảng Kiểm định Kho lạnh'));
+
+  const triggered = [];
+  const mockApp = {
+    flowEngine: { context: { ai: { async triggerTask(payload) { triggered.push(payload); } } } },
+  };
+  const opened = await openNativePortalChat(mockApp, {
+    employee: adminPick,
+    portalSlug: 'cold-qa',
+    pageTitle: 'Bảng Kiểm định Kho lạnh',
+    pathname: '/p/cold-qa',
+  });
+  assert.equal(opened.opened, true);
+  assert.equal(triggered.length, 1);
+  assert.equal(triggered[0].aiEmployee, 'dxos-architect');
+  assert.equal(triggered[0].open, true);
+  assert.equal(triggered[0].auto, true);
+  assert.equal(triggered[0].tasks.length, 1);
+  assert.equal(triggered[0].tasks[0].autoSend, false);
+  assert.equal(triggered[0].tasks[0].message.user, undefined);
+  assert.ok(String(triggered[0].tasks[0].message.system || '').includes('cold-qa'));
+
+  const findBtn = (node) => {
+    if (!node || typeof node !== 'object') return null;
+    if (node.props?.['data-testid'] === 'dxos-portal-ai-float-btn') return node;
+    const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    for (const k of kids) {
+      const hit = findBtn(k);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  // Renders NO extra button when pathname is /admin/* (NocoBase native button already owns /admin)
+  const makeProvider = (pathname, initialState) => {
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState: (init) => [initialState !== undefined ? initialState : (typeof init === 'function' ? init() : init), () => {}],
+      useEffect: () => {},
+    };
+    const origWin = global.window;
+    const origDoc = global.document;
+    global.window = { location: { pathname } };
+    global.document = { title: 'Bảng Kiểm định Kho lạnh', querySelector: () => null };
+    try {
+      const Provider = createPortalAgentLauncher(
+        { useAPIClient: () => null },
+        React,
+        {},
+        mockApp,
+      );
+      return Provider({ children: 'child' });
+    } finally {
+      global.window = origWin;
+      global.document = origDoc;
+    }
+  };
+
+  // On /admin/* -> never renders duplicate floating button even with active employees
+  const adminTree = makeProvider('/admin/settings/dxos-ai', undefined);
+  assert.equal(findBtn(adminTree), null);
+
+  // On /p/cold-qa -> renders single Open AI chat floating button when state holds active employees
+  let stateIdx = 0;
+  const values = ['/p/cold-qa', [{ username: 'dxos-architect', nickname: 'Kiến trúc sư' }], true, false];
+  const ReactPortal = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: () => [values[stateIdx++], () => {}],
+    useEffect: () => {},
+  };
+  const origWin = global.window;
+  const origDoc = global.document;
+  global.window = { location: { pathname: '/p/cold-qa' } };
+  global.document = { title: 'Bảng Kiểm định Kho lạnh', querySelector: () => null };
+  try {
+    const Provider = createPortalAgentLauncher({ useAPIClient: () => null }, ReactPortal, {}, mockApp);
+    const portalTree = Provider({ children: 'portal-body' });
+    const btn = findBtn(portalTree);
+    assert.ok(btn, 'Expected single floating AI chat button on /p/cold-qa');
+    assert.equal(btn.props['aria-label'], 'Open AI chat');
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
   }
 });
