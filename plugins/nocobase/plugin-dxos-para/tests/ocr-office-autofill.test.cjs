@@ -25,7 +25,7 @@ function buildZipBuffer(entries, { useDataDescriptor = false } = {}) {
     const rawBuf = Buffer.isBuffer(entry.data) ? entry.data : Buffer.from(String(entry.data), 'utf8');
     const method = entry.method ?? 8;
     const compressed = method === 8 ? zlib.deflateRawSync(rawBuf) : rawBuf;
-    const flags = useDataDescriptor ? 0x08 : 0x00;
+    const flags = (entry.flags ?? 0) | (useDataDescriptor ? 0x08 : 0x00);
     const reportedCompSize = useDataDescriptor ? 0 : compressed.length;
     const reportedUncompSize = useDataDescriptor ? 0 : (entry.fakeUncompressedSize ?? rawBuf.length);
 
@@ -863,5 +863,383 @@ test('extractWithMultimodalOcr handles CSV, PPTX, DOCX, scanned PDF metadata, se
       throw(s, m) { throw Object.assign(new Error(m), { status: s }); },
     }, async () => {}),
     (err) => err.status === 403 && err.code === 'NATIVE_ORGANIZATION_MISMATCH',
+  );
+});
+
+test('C1 & I3: linear-time ReDoS defenses, self-closing XML tags, and DrawingML breaks/tabs', () => {
+  const {
+    extractXlsxText,
+    extractPptxText,
+    extractStructuredFormFields,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/document-extractor.js'));
+  const { buildSafeTextPreview } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+
+  // C1.1: Overlapping whitespace/delimiter inputs complete in linear time (< 500ms)
+  const tTab0 = Date.now();
+  const tabRes = extractStructuredFormFields(`Customer${'\t'.repeat(2000)}`, { targetCollection: 'latticeOrders' });
+  const dtTab = Date.now() - tTab0;
+  assert.ok(dtTab < 500, `Expected tab stress < 500ms, took ${dtTab}ms`);
+  assert.equal(tabRes.fields.customer, undefined);
+
+  const tQty0 = Date.now();
+  const qtyRes = extractStructuredFormFields(`SKU-1 Qty${' '.repeat(30000)}X`, { targetCollection: 'latticeOrders' });
+  const dtQty = Date.now() - tQty0;
+  assert.ok(dtQty < 500, `Expected Qty space stress < 500ms, took ${dtQty}ms`);
+  assert.equal(qtyRes.lineItems[0].sku, 'SKU-1');
+
+  const tMkt0 = Date.now();
+  const mktRes = extractStructuredFormFields(`MKT${' '.repeat(30000)}X`, { targetCollection: 'latticeOrders' });
+  const dtMkt = Date.now() - tMkt0;
+  assert.ok(dtMkt < 500, `Expected MKT space stress < 500ms, took ${dtMkt}ms`);
+  assert.equal(mktRes.fields.mktCelsius, undefined);
+
+  // C1.2 + M6: buildSafeTextPreview runs in linear time and redacts sk- secret tokens
+  const tPrev0 = Date.now();
+  const longPreview = buildSafeTextPreview('a'.repeat(80000));
+  const dtPrev = Date.now() - tPrev0;
+  assert.ok(dtPrev < 500, `Expected buildSafeTextPreview('a'.repeat(80000)) < 500ms, took ${dtPrev}ms`);
+  assert.equal(longPreview.length, 500);
+
+  const redacted = buildSafeTextPreview('Bearer tok_abcdef123456 api_key=mysecret123 sk-projSecret999999 token: "quoted_secret"');
+  assert.ok(!redacted.includes('tok_abcdef123456'));
+  assert.ok(!redacted.includes('mysecret123'));
+  assert.ok(!redacted.includes('sk-projSecret999999'));
+  assert.ok(!redacted.includes('quoted_secret'));
+  assert.match(redacted, /\[REDACTED_KEY\]/);
+
+  // C1.3: Unclosed <row> and <a:t> archives complete in linear time (< 500ms)
+  const unclosedXlsx = buildZipBuffer([
+    { name: 'xl/workbook.xml', data: '<workbook/>' },
+    { name: 'xl/worksheets/sheet1.xml', data: '<row>'.repeat(50000) },
+  ]);
+  const tRow0 = Date.now();
+  const unclosedXlsxRes = extractXlsxText(unclosedXlsx);
+  const dtRow = Date.now() - tRow0;
+  assert.ok(dtRow < 500, `Expected <row>.repeat(50000) < 500ms, took ${dtRow}ms`);
+  assert.equal(unclosedXlsxRes.sheets[0].text, '');
+
+  const unclosedPptx = buildZipBuffer([
+    { name: 'ppt/presentation.xml', data: '<p:presentation/>' },
+    { name: 'ppt/slides/slide1.xml', data: '<a:t>'.repeat(50000) },
+  ]);
+  const tAt0 = Date.now();
+  const unclosedPptxRes = extractPptxText(unclosedPptx);
+  const dtAt = Date.now() - tAt0;
+  assert.ok(dtAt < 500, `Expected <a:t>.repeat(50000) < 500ms, took ${dtAt}ms`);
+  assert.equal(unclosedPptxRes.slides[0].text, '');
+
+  // I3: Self-closing <t/> / <a:t/> tags do not swallow subsequent elements and <a:br/>/<a:tab/> are preserved
+  const selfClosingXlsx = buildZipBuffer([
+    { name: 'xl/workbook.xml', data: '<workbook><sheets><sheet name="S1" sheetId="1"/></sheets></workbook>' },
+    { name: 'xl/sharedStrings.xml', data: '<sst><si><r><t/><t>Hello</t></r></si></sst>' },
+    { name: 'xl/worksheets/sheet1.xml', data: '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1"/><c r="C1" t="inlineStr"><is><t/><t>Hello</t></is></c></row></sheetData></worksheet>' },
+  ]);
+  const xlsxSelfRes = extractXlsxText(selfClosingXlsx);
+  assert.equal(xlsxSelfRes.sheets[0].text, 'Hello\t\tHello');
+
+  const selfClosingPptx = buildZipBuffer([
+    { name: 'ppt/presentation.xml', data: '<p:presentation/>' },
+    {
+      name: 'ppt/slides/slide1.xml',
+      data: '<p:sld><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t/><a:t>Line1</a:t><a:br/><a:t>Line2</a:t><a:tab/><a:t>Col2</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
+    },
+  ]);
+  const pptxSelfRes = extractPptxText(selfClosingPptx);
+  assert.equal(pptxSelfRes.slides[0].text, 'Line1\nLine2\tCol2');
+
+  const bareRunsPptx = buildZipBuffer([
+    { name: 'ppt/presentation.xml', data: '<p:presentation/>' },
+    {
+      name: 'ppt/slides/slide1.xml',
+      data: '<p:sld><a:t/><a:t>Line1</a:t><a:br/><a:t>Line2</a:t><a:tab/><a:t>Col2</a:t></p:sld>',
+    },
+  ]);
+  const bareRunsRes = extractPptxText(bareRunsPptx);
+  assert.equal(bareRunsRes.slides[0].text, 'Line1\nLine2\tCol2');
+});
+
+test('I1: role verification blocks unverified X-Role: root and documentId requires latticeParaDocuments:view', async () => {
+  const { createParaActions } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return {
+          find: async ({ filter }) => {
+            if (Number(filter?.userId) === 300) return [{ id: 30, userId: 300, organizationId: 'org-a', active: true }];
+            if (Number(filter?.userId) === 150) return [{ id: 15, userId: 150, organizationId: 'org-a', active: true }];
+            return [];
+          },
+        };
+      }
+      if (name === 'rolesUsers') {
+        return {
+          find: async ({ filter }) => {
+            // User 300 has NO DB roles; user 150 has only ldx_dispatcher
+            if (Number(filter?.userId) === 150) return [{ userId: 150, roleName: 'ldx_dispatcher' }];
+            return [];
+          },
+        };
+      }
+      if (name === 'roles') {
+        return {
+          findOne: async ({ filter }) => {
+            if (filter?.name === 'ldx_configurator') {
+              return { name: 'ldx_configurator', allowAll: false, allowConfigure: true, strategy: { actions: [] } };
+            }
+            return { name: filter?.name, allowAll: false, strategy: { actions: [] } };
+          },
+        };
+      }
+      if (name === 'dataSourcesRolesResources') {
+        return {
+          findOne: async ({ filter }) => {
+            if (filter?.roleName === 'ldx_dispatcher' && filter?.name === 'latticeOrders') {
+              return { name: 'latticeOrders', roleName: 'ldx_dispatcher', usingActionsConfig: true, actions: [{ name: 'view' }] };
+            }
+            return null;
+          },
+        };
+      }
+      if (name === 'latticeParaDocuments') {
+        return {
+          findOne: async () => ({
+            id: 1,
+            code: 'DOC-A-1',
+            title: 'Protected PARA Doc',
+            organizationId: 'org-a',
+            contentMarkdown: 'Mã đơn: ORD-999',
+            active: true,
+          }),
+        };
+      }
+      return null;
+    },
+  };
+
+  const actions = createParaActions(db);
+  const mkCtx = (user, role, values, extra = {}) => ({
+    method: 'POST',
+    state: { currentUser: user, currentRole: role },
+    action: { params: { values } },
+    ...extra,
+    throw(s, m) { throw Object.assign(new Error(m), { status: s }); },
+  });
+
+  // User with rolesUsers=[] + X-Role: root cannot escalate (even if ctx.can returns true)
+  await assert.rejects(
+    () => actions.extractFormFields(mkCtx({ id: 300 }, 'root', { documentId: 1 }, { can: () => true }), async () => {}),
+    (err) => err.status === 403 && err.code === 'PARA_ACL_FORBIDDEN',
+  );
+
+  // User with ldx_dispatcher (only latticeOrders:view, no latticeParaDocuments:view) is denied 403 when passing documentId
+  await assert.rejects(
+    () => actions.extractFormFields(
+      mkCtx({ id: 150 }, 'ldx_dispatcher', { documentId: 1, targetCollection: 'latticeOrders' }),
+      async () => {},
+    ),
+    (err) => err.status === 403 && err.code === 'PARA_ACL_FORBIDDEN',
+  );
+
+  // allowConfigure alone does not bypass collection ACL
+  const cfgDb = {
+    getRepository(name) {
+      if (name === 'rolesUsers') return { find: async () => [{ userId: 300, roleName: 'ldx_configurator' }] };
+      return db.getRepository(name);
+    },
+  };
+  await assert.rejects(
+    () => createParaActions(cfgDb).extractFormFields(
+      mkCtx({ id: 300 }, 'ldx_configurator', { documentId: 1, targetCollection: 'latticeOrders' }),
+      async () => {},
+    ),
+    (err) => err.status === 403 && err.code === 'PARA_ACL_FORBIDDEN',
+  );
+});
+
+test('I2 & M1-M6: SSRF trailing-dot/0.1.2.3, secondary XML XXE, encrypted ZIP, base64 ~1.7MiB, CSV/XML MIME, PNG budget break, and Windows basename', async () => {
+  const {
+    validateOcrEndpoint,
+    extractWithMultimodalOcr,
+    extractTextFromBuffer,
+    extractXlsxText,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/document-extractor.js'));
+  const { createParaActions } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+
+  // I2: Trailing dots, 0.0.0.0/8, multicast, .internal/.local blocked; trusted host allowed; !res.ok cancels body
+  const ssrfBlocked = [
+    'https://metadata.google.internal./computeMetadata/v1',
+    'https://metadata./',
+    'https://0.1.2.3/',
+    'https://224.0.0.1/ocr',
+    'https://[ff02::1]/ocr',
+    'https://ocr-service.internal/',
+    'https://printer.local./',
+  ];
+  for (const url of ssrfBlocked) {
+    assert.throws(
+      () => validateOcrEndpoint(url, {}),
+      (err) => err.status === 400 && err.code === 'OCR_ENDPOINT_SSRF_BLOCKED',
+      `Expected SSRF block for ${url}`,
+    );
+  }
+  assert.equal(validateOcrEndpoint('http://host.docker.internal:8080/ocr', {}), 'http://host.docker.internal:8080/ocr');
+  assert.equal(
+    validateOcrEndpoint('http://custom-ocr.internal:8080/ocr', { DX_OCR_TRUSTED_HOSTS: 'custom-ocr.internal' }),
+    'http://custom-ocr.internal:8080/ocr',
+  );
+
+  let bodyCancelled = false;
+  await extractWithMultimodalOcr({
+    buffer: buildPngWithTextChunk('caption', 'ORD-CANCEL-1'),
+    filename: 'scan.png',
+    mimeType: 'image/png',
+    env: { DX_OCR_ENDPOINT: 'http://127.0.0.1:8090/ocr' },
+    fetchImpl: async () => ({
+      ok: false,
+      status: 502,
+      body: { cancel: async () => { bodyCancelled = true; } },
+    }),
+  });
+  assert.equal(bodyCancelled, true, 'callRemoteOcrEndpoint must cancel response body on !res.ok');
+
+  // M1: Secondary XML entry xl/styles.xml with <!DOCTYPE rejects 400 OFFICE_XML_ENTITY_FORBIDDEN
+  const secondaryXxeXlsx = buildZipBuffer([
+    { name: 'xl/workbook.xml', data: '<workbook><sheets><sheet name="S1" sheetId="1"/></sheets></workbook>' },
+    { name: 'xl/styles.xml', data: '<!DOCTYPE styleSheet [<!ENTITY leak "x">]><styleSheet/>' },
+    { name: 'xl/worksheets/sheet1.xml', data: '<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>ok</t></is></c></row></sheetData></worksheet>' },
+  ]);
+  assert.throws(
+    () => extractXlsxText(secondaryXxeXlsx),
+    (err) => err.status === 400 && err.code === 'OFFICE_XML_ENTITY_FORBIDDEN',
+  );
+
+  // M4: Encrypted ZIP entries (flags & 0x01) reject 400 OFFICE_ENCRYPTED_ARCHIVE for both store and deflate
+  for (const method of [0, 8]) {
+    const encryptedXlsx = buildZipBuffer([
+      { name: 'xl/workbook.xml', data: '<workbook/>', method, flags: 0x01 },
+      { name: 'xl/worksheets/sheet1.xml', data: '<worksheet><sheetData/></worksheet>', method, flags: 0x01 },
+    ]);
+    assert.throws(
+      () => extractXlsxText(encryptedXlsx),
+      (err) => err.status === 400 && err.code === 'OFFICE_ENCRYPTED_ARCHIVE',
+    );
+  }
+
+  // M3: CSV/XML MIME types accepted when filename matches .csv/.xml
+  for (const mimeType of ['application/csv', 'application/vnd.ms-excel', 'application/octet-stream']) {
+    const csvRes = extractTextFromBuffer(Buffer.from('code,customer\nORD-1,ACME', 'utf8'), {
+      filename: 'orders.csv',
+      mimeType,
+    });
+    assert.equal(csvRes.format, 'csv');
+    assert.match(csvRes.text, /ORD-1,ACME/);
+  }
+  const xmlRes = extractTextFromBuffer(Buffer.from('<order><code>ORD-XML-1</code></order>', 'utf8'), {
+    filename: 'order.xml',
+    mimeType: 'application/xml',
+  });
+  assert.match(xmlRes.text, /ORD-XML-1/);
+
+  // M5: PNG compressed iTXt loop stops when maxInflatedBytes (10 MiB) is exhausted
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const makeChunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length, 0);
+    return Buffer.concat([len, Buffer.from(type, 'ascii'), data, Buffer.alloc(4)]);
+  };
+  const makeCompressedITxt = (text) => Buffer.concat([
+    Buffer.from('k\0', 'utf8'),
+    Buffer.from([1, 0]),
+    Buffer.from('vi\0\0', 'utf8'),
+    zlib.deflateSync(Buffer.from(text, 'utf8')),
+  ]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0);
+  ihdr.writeUInt32BE(1, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 2;
+  const fiveMbA = `ORD-PNG-BUDGET\n${'A'.repeat(5 * 1024 * 1024 - 15)}`;
+  const fiveMbB = 'B'.repeat(5 * 1024 * 1024);
+  const budgetPng = Buffer.concat([
+    sig,
+    makeChunk('IHDR', ihdr),
+    makeChunk('iTXt', makeCompressedITxt(fiveMbA)),
+    makeChunk('iTXt', makeCompressedITxt(fiveMbB)),
+    makeChunk('iTXt', makeCompressedITxt('Customer: SHOULD_NOT_INFLATE')),
+    makeChunk('IEND', Buffer.alloc(0)),
+  ]);
+  const pngBudgetRes = await extractWithMultimodalOcr({
+    buffer: budgetPng,
+    filename: 'budget.png',
+    mimeType: 'image/png',
+    env: {},
+  });
+  assert.equal(pngBudgetRes.fields.code, 'ORD-PNG-BUDGET');
+  assert.equal(pngBudgetRes.fields.customer, undefined);
+
+  // M2 & M6: ~1.7 MiB binary upload (~2.27 MiB base64) succeeds, >2 MiB fails 400 ATTACHMENT_TOO_LARGE, and Windows path normalizes basename
+  const largeNotes = 'X'.repeat(1750 * 1024);
+  const largeXlsx = buildZipBuffer([
+    { name: 'xl/workbook.xml', data: '<workbook><sheets><sheet name="S1" sheetId="1"/></sheets></workbook>', method: 0 },
+    { name: 'xl/worksheets/sheet1.xml', data: `<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Mã đơn: ORD-BIG-17M</t></is></c><c r="B1" t="inlineStr"><is><t>${largeNotes}</t></is></c></row></sheetData></worksheet>`, method: 0 },
+  ]);
+  assert.ok(largeXlsx.length > 1.6 * 1024 * 1024 && largeXlsx.length < 2 * 1024 * 1024);
+  const largeB64 = largeXlsx.toString('base64');
+  assert.ok(largeB64.length > 2 * 1024 * 1024, 'Base64 string exceeds 2 MiB while decoded binary is ~1.7 MiB');
+
+  const permDb = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') return { find: async () => [{ id: 10, userId: 100, organizationId: 'org-a', active: true }] };
+      if (name === 'rolesUsers') return { find: async () => [{ userId: 100, roleName: 'ldx_employee' }] };
+      if (name === 'roles') return { findOne: async () => ({ name: 'ldx_employee', allowAll: false, strategy: { actions: [] } }) };
+      if (name === 'dataSourcesRolesResources') {
+        return {
+          findOne: async ({ filter }) => (
+            filter?.name === 'latticeParaDocuments'
+              ? { name: 'latticeParaDocuments', roleName: 'ldx_employee', usingActionsConfig: true, actions: [{ name: 'view' }] }
+              : null
+          ),
+        };
+      }
+      return null;
+    },
+  };
+  const permActions = createParaActions(permDb);
+  const bigCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 100 }, currentRole: 'ldx_employee' },
+    action: {
+      params: {
+        values: {
+          filename: 'C:\\Users\\alice\\fakepath\\don-hang-lon.xlsx',
+          contentBase64: largeB64,
+          targetCollection: 'latticeOrders',
+        },
+      },
+    },
+    throw(s, m) { throw Object.assign(new Error(m), { status: s }); },
+  };
+  await permActions.extractFormFields(bigCtx, async () => {});
+  assert.equal(bigCtx.body.filename, 'don-hang-lon.xlsx');
+  assert.equal(bigCtx.body.suggestedValues.code, 'ORD-BIG-17M');
+
+  // Genuine > 2 MiB binary rejected 400 ATTACHMENT_TOO_LARGE
+  await assert.rejects(
+    () => permActions.extractFormFields({
+      method: 'POST',
+      state: { currentUser: { id: 100 }, currentRole: 'ldx_employee' },
+      action: {
+        params: {
+          values: {
+            filename: 'too-big.xlsx',
+            contentBase64: Buffer.alloc(2 * 1024 * 1024 + 64, 0x41).toString('base64'),
+            targetCollection: 'latticeOrders',
+          },
+        },
+      },
+      throw(s, m) { throw Object.assign(new Error(m), { status: s }); },
+    }, async () => {}),
+    (err) => err.status === 400 && err.code === 'ATTACHMENT_TOO_LARGE',
   );
 });

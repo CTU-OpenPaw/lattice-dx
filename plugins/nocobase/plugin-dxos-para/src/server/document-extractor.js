@@ -43,7 +43,13 @@ const TRUSTED_OCR_HTTP_HOSTS = new Set([
   'ninerouter',
   '9router',
 ]);
-const BLOCKED_OCR_HOST_RE = /^(0\.0\.0\.0|\[?::\]?|\[?::ffff:.*|::169\.254\..*|(?:[0-9a-f]{1,4}:){2,}ffff:.*|169\.254\.\d+\.\d+|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|127\.(?!0\.0\.1$)\d+\.\d+\.\d+|fe[89ab][0-9a-f]?:.*|f[cd][0-9a-f]{2}:.*|metadata|metadata\.google\.internal|metadata\.azure\.com|instance-data)$/i;
+const BLOCKED_OCR_HOST_RE = /^(0\.\d+\.\d+\.\d+|(?:22[4-9]|2[3-5]\d)\.\d+\.\d+\.\d+|\[?::\]?|\[?::ffff:.*|::169\.254\..*|(?:[0-9a-f]{1,4}:){2,}ffff:.*|169\.254\.\d+\.\d+|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|127\.(?!0\.0\.1$)\d+\.\d+\.\d+|fe[89ab][0-9a-f]?:.*|f[cd][0-9a-f]{0,2}:.*|ff[0-9a-f]{0,2}:.*|metadata|metadata\.google\.internal|metadata\.azure\.com|instance-data)$/i;
+
+function safeBasename(rawName, fallback = '') {
+  const normalized = String(rawName || fallback || '').trim().replace(/\\/g, '/');
+  if (!normalized) return '';
+  return path.posix.basename(normalized).slice(0, 255);
+}
 
 function failExtract(code, status = 400, message = code) {
   return Object.assign(new Error(message || code), { code, status });
@@ -108,6 +114,14 @@ function decodeOfficeXmlBuffer(xmlBuf) {
   return xmlBuf.toString('utf8');
 }
 
+/**
+ * Parse ZIP Central Directory entries without inflating payload data.
+ *
+ * @param {Buffer|Uint8Array} buffer - Raw ZIP archive buffer.
+ * @param {object} [options]
+ * @param {number} [options.maxEntries=10000] - Safety upper bound on archive entry count.
+ * @returns {Array<{name: string, flags: number, method: number, compressedSize: number, uncompressedSize: number, localHeaderOffset: number}>}
+ */
 function listZipEntriesInCentralDirectory(buffer, { maxEntries = MAX_ZIP_ENTRIES } = {}) {
   const buf = toBuffer(buffer);
   if (buf.length < 22) return [];
@@ -145,6 +159,7 @@ function listZipEntriesInCentralDirectory(buffer, { maxEntries = MAX_ZIP_ENTRIES
     if (cursor + 46 > cdEnd || buf.readUInt32LE(cursor) !== ZIP_CD_SIG) {
       throw failExtract('OFFICE_CORRUPT_ARCHIVE', 400, 'Cấu trúc Central Directory của tệp nén bị hỏng.');
     }
+    const flags = buf.readUInt16LE(cursor + 8);
     const method = buf.readUInt16LE(cursor + 10);
     const compressedSize = buf.readUInt32LE(cursor + 20);
     const uncompressedSize = buf.readUInt32LE(cursor + 24);
@@ -159,7 +174,7 @@ function listZipEntriesInCentralDirectory(buffer, { maxEntries = MAX_ZIP_ENTRIES
 
     const name = normalizeEntryPath(buf.toString('utf8', cursor + 46, cursor + 46 + nameLen));
     assertSafeEntryPath(name);
-    entries.push({ name, method, compressedSize, uncompressedSize, localHeaderOffset });
+    entries.push({ name, flags, method, compressedSize, uncompressedSize, localHeaderOffset });
     cursor = headerEnd;
   }
 
@@ -190,7 +205,7 @@ function listZipEntriesInLocalHeaders(buffer, { maxEntries = MAX_ZIP_ENTRIES } =
     if (hasDeferredSize) break;
 
     assertSafeEntryPath(name);
-    entries.push({ name, method, compressedSize, uncompressedSize, localHeaderOffset: cursor });
+    entries.push({ name, flags, method, compressedSize, uncompressedSize, localHeaderOffset: cursor });
 
     let next = dataStart + compressedSize;
     if ((flags & 0x08) !== 0 && next + 12 <= buf.length) {
@@ -221,6 +236,14 @@ function findZipEntryInLocalHeaders(buf, targetPath) {
   return entries.length ? findEntryByPath(entries, targetPath) : null;
 }
 
+function assertArchiveNotEncrypted(entries) {
+  for (const entry of entries) {
+    if (((Number(entry.flags) || 0) & 0x01) !== 0) {
+      throw failExtract('OFFICE_ENCRYPTED_ARCHIVE', 400, 'Tệp Office đã được mã hóa/bảo vệ bằng mật khẩu nên không thể trích xuất.');
+    }
+  }
+}
+
 function inflateZipEntry(buf, entry, budget = { maxInflatedBytes: MAX_INFLATED_BYTES, totalInflatedBytes: 0 }) {
   const maxBytes = Number(budget.maxInflatedBytes) > 0 ? Number(budget.maxInflatedBytes) : MAX_INFLATED_BYTES;
   const remaining = maxBytes - (Number(budget.totalInflatedBytes) || 0);
@@ -231,6 +254,10 @@ function inflateZipEntry(buf, entry, budget = { maxInflatedBytes: MAX_INFLATED_B
   const localOff = entry.localHeaderOffset;
   if (localOff < 0 || localOff + 30 > buf.length || buf.readUInt32LE(localOff) !== ZIP_LOCAL_SIG) {
     throw failExtract('OFFICE_CORRUPT_ARCHIVE', 400, `Header cục bộ của ${entry.name} bị hỏng.`);
+  }
+  const localFlags = buf.readUInt16LE(localOff + 6);
+  if (((Number(entry.flags) || 0) & 0x01) !== 0 || (localFlags & 0x01) !== 0) {
+    throw failExtract('OFFICE_ENCRYPTED_ARCHIVE', 400, 'Tệp Office đã được mã hóa/bảo vệ bằng mật khẩu nên không thể trích xuất.');
   }
   const localNameLen = buf.readUInt16LE(localOff + 26);
   const localExtraLen = buf.readUInt16LE(localOff + 28);
@@ -274,6 +301,23 @@ function readOfficeXmlEntry(buf, entry, budget) {
   return rawXml;
 }
 
+function scanAndCacheArchiveXml(buf, entries, budget) {
+  const xmlCache = new Map();
+  for (const entry of entries) {
+    if (!/\.(?:xml|rels)$/i.test(entry.name)) continue;
+    const rawXml = readOfficeXmlEntry(buf, entry, budget);
+    xmlCache.set(entry.name.toLowerCase(), rawXml);
+  }
+  return xmlCache;
+}
+
+function getCachedOfficeXml(buf, entry, budget, xmlCache) {
+  if (!entry) return '';
+  const key = entry.name.toLowerCase();
+  if (xmlCache && xmlCache.has(key)) return xmlCache.get(key);
+  return readOfficeXmlEntry(buf, entry, budget);
+}
+
 function listArchiveEntries(buf, { maxEntries = MAX_ZIP_ENTRIES } = {}) {
   const cdEntries = listZipEntriesInCentralDirectory(buf, { maxEntries });
   if (cdEntries.length) return cdEntries;
@@ -283,6 +327,219 @@ function listArchiveEntries(buf, { maxEntries = MAX_ZIP_ENTRIES } = {}) {
   return [];
 }
 
+function findNextOpenTag(xml, lowerXml, openPrefix, fromIdx) {
+  let pos = fromIdx;
+  while (pos < lowerXml.length) {
+    const start = lowerXml.indexOf(openPrefix, pos);
+    if (start < 0) return null;
+    const afterName = start + openPrefix.length;
+    if (afterName >= lowerXml.length) return null;
+    const ch = lowerXml[afterName];
+    const isBoundary = ch === '>' || ch === '/' || ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n';
+    if (!isBoundary) {
+      pos = afterName;
+      continue;
+    }
+    const openEnd = xml.indexOf('>', afterName);
+    if (openEnd < 0) return null;
+    if (ch === '/' && openEnd !== afterName + 1) {
+      pos = afterName + 1;
+      continue;
+    }
+    const selfClosing = openEnd > afterName && xml[openEnd - 1] === '/';
+    const attrsEnd = selfClosing ? openEnd - 1 : openEnd;
+    return {
+      start,
+      openEnd: openEnd + 1,
+      attrs: xml.slice(afterName, attrsEnd),
+      selfClosing,
+    };
+  }
+  return null;
+}
+
+function findClosingTag(lowerXml, lowerTag, fromIdx) {
+  const prefix = `</${lowerTag}`;
+  let searchPos = fromIdx;
+  while (searchPos < lowerXml.length) {
+    const idx = lowerXml.indexOf(prefix, searchPos);
+    if (idx < 0) return null;
+    const afterNameIdx = idx + prefix.length;
+    if (afterNameIdx >= lowerXml.length) return null;
+    const boundary = lowerXml[afterNameIdx];
+    if (boundary === '>') {
+      return { start: idx, end: afterNameIdx + 1 };
+    }
+    if (boundary === ' ' || boundary === '\t' || boundary === '\r' || boundary === '\n') {
+      const closeGt = lowerXml.indexOf('>', afterNameIdx);
+      if (closeGt < 0) return null;
+      return { start: idx, end: closeGt + 1 };
+    }
+    searchPos = afterNameIdx;
+  }
+  return null;
+}
+
+function forEachXmlElement(xmlText, tagName, onElement) {
+  const xml = String(xmlText || '');
+  if (!xml) return;
+  const lowerXml = xml.toLowerCase();
+  const lowerTag = String(tagName || '').toLowerCase();
+  const openPrefix = `<${lowerTag}`;
+  let cursor = 0;
+
+  while (cursor < xml.length) {
+    const open = findNextOpenTag(xml, lowerXml, openPrefix, cursor);
+    if (!open) break;
+    if (open.selfClosing) {
+      onElement({ attrs: open.attrs, body: '', selfClosing: true, start: open.start, end: open.openEnd });
+      cursor = open.openEnd;
+      continue;
+    }
+    const close = findClosingTag(lowerXml, lowerTag, open.openEnd);
+    if (!close) break;
+    onElement({
+      attrs: open.attrs,
+      body: xml.slice(open.openEnd, close.start),
+      selfClosing: false,
+      start: open.start,
+      end: close.end,
+    });
+    cursor = close.end;
+  }
+}
+
+function findFirstXmlElement(xmlText, tagName) {
+  const xml = String(xmlText || '');
+  if (!xml) return null;
+  const lowerXml = xml.toLowerCase();
+  const lowerTag = String(tagName || '').toLowerCase();
+  const openPrefix = `<${lowerTag}`;
+  const open = findNextOpenTag(xml, lowerXml, openPrefix, 0);
+  if (!open) return null;
+  if (open.selfClosing) {
+    return { attrs: open.attrs, body: '', selfClosing: true, start: open.start, end: open.openEnd };
+  }
+  const close = findClosingTag(lowerXml, lowerTag, open.openEnd);
+  if (!close) return null;
+  return {
+    attrs: open.attrs,
+    body: xml.slice(open.openEnd, close.start),
+    selfClosing: false,
+    start: open.start,
+    end: close.end,
+  };
+}
+
+function forEachXmlTag(xmlText, tagName, onTag) {
+  const xml = String(xmlText || '');
+  if (!xml) return;
+  const lowerXml = xml.toLowerCase();
+  const lowerTag = String(tagName || '').toLowerCase();
+  const openPrefix = `<${lowerTag}`;
+  let cursor = 0;
+  while (cursor < xml.length) {
+    const open = findNextOpenTag(xml, lowerXml, openPrefix, cursor);
+    if (!open) break;
+    onTag({ attrs: open.attrs, selfClosing: open.selfClosing });
+    cursor = open.openEnd;
+  }
+}
+
+function stripXmlElements(xmlText, tagName) {
+  const xml = String(xmlText || '');
+  if (!xml) return '';
+  const lowerXml = xml.toLowerCase();
+  const lowerTag = String(tagName || '').toLowerCase();
+  const openPrefix = `<${lowerTag}`;
+  const out = [];
+  let cursor = 0;
+  while (cursor < xml.length) {
+    const open = findNextOpenTag(xml, lowerXml, openPrefix, cursor);
+    if (!open) {
+      out.push(xml.slice(cursor));
+      break;
+    }
+    out.push(xml.slice(cursor, open.start));
+    if (open.selfClosing) {
+      cursor = open.openEnd;
+      continue;
+    }
+    const close = findClosingTag(lowerXml, lowerTag, open.openEnd);
+    if (!close) {
+      out.push(xml.slice(open.start));
+      break;
+    }
+    cursor = close.end;
+  }
+  return out.join('');
+}
+
+function stripXmlTags(xmlText, replacement = '') {
+  const xml = String(xmlText || '');
+  if (!xml) return '';
+  const out = [];
+  let cursor = 0;
+  while (cursor < xml.length) {
+    const lt = xml.indexOf('<', cursor);
+    if (lt < 0) {
+      out.push(xml.slice(cursor));
+      break;
+    }
+    if (lt > cursor) out.push(xml.slice(cursor, lt));
+    const gt = xml.indexOf('>', lt + 1);
+    if (gt < 0) {
+      out.push(xml.slice(lt));
+      break;
+    }
+    if (replacement) out.push(replacement);
+    cursor = gt + 1;
+  }
+  return out.join('');
+}
+
+function extractWordMlText(rawXml) {
+  const xml = String(rawXml || '');
+  const out = [];
+  let cursor = 0;
+  while (cursor < xml.length) {
+    const lt = xml.indexOf('<', cursor);
+    if (lt < 0) {
+      out.push(xml.slice(cursor));
+      break;
+    }
+    if (lt > cursor) out.push(xml.slice(cursor, lt));
+    const gt = xml.indexOf('>', lt + 1);
+    if (gt < 0) break;
+    const lowerTag = xml.slice(lt + 1, gt).trim().toLowerCase();
+    if (lowerTag.startsWith('/w:p') && (lowerTag.length === 4 || /\s/.test(lowerTag[4]))) {
+      out.push('\n');
+    } else if (lowerTag.startsWith('/w:tr') && (lowerTag.length === 5 || /\s/.test(lowerTag[5]))) {
+      out.push('\n');
+    } else if (lowerTag.startsWith('/w:tc') && (lowerTag.length === 5 || /\s/.test(lowerTag[5]))) {
+      out.push('\t');
+    } else if (/^w:br(?:\s|\/|$)/.test(lowerTag)) {
+      out.push(/w:type[ \t]*=[ \t]*["']page["']/.test(lowerTag) ? '\f' : '\n');
+    } else if (/^w:lastrenderedpagebreak(?:\s|\/|$)/.test(lowerTag)) {
+      out.push('\f');
+    } else if (/^w:cr(?:\s|\/|$)/.test(lowerTag)) {
+      out.push('\n');
+    } else if (/^w:tab(?:\s|\/|$)/.test(lowerTag)) {
+      out.push(' ');
+    }
+    cursor = gt + 1;
+  }
+  return out.join('');
+}
+
+/**
+ * Extract plain text from a `.docx` WordprocessingML ZIP buffer.
+ *
+ * @param {Buffer|Uint8Array} buffer - Raw `.docx` binary buffer.
+ * @param {object} [options]
+ * @param {number} [options.maxInflatedBytes=10485760] - Cumulative XML inflation budget.
+ * @returns {string} Extracted document text with page breaks normalized to `\f`.
+ */
 function extractDocxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) {
   const buf = toBuffer(buffer);
   if (buf.length < 30 || (buf.readUInt32LE(0) !== ZIP_LOCAL_SIG && findZipEntryInCentralDirectory(buf, 'word/document.xml') == null)) {
@@ -290,28 +547,17 @@ function extractDocxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {})
   }
 
   const entries = listArchiveEntries(buf);
+  assertArchiveNotEncrypted(entries);
   const entry = findEntryByPath(entries, 'word/document.xml');
   if (!entry) {
     throw failExtract('DOCX_MISSING_DOCUMENT_XML', 400, 'Tệp DOCX không chứa thành phần word/document.xml.');
   }
 
   const budget = { maxInflatedBytes, totalInflatedBytes: 0 };
-  for (const manifestPath of ['[Content_Types].xml', '_rels/.rels']) {
-    const manifestEntry = findEntryByPath(entries, manifestPath);
-    if (manifestEntry) readOfficeXmlEntry(buf, manifestEntry, budget);
-  }
-  const rawXml = readOfficeXmlEntry(buf, entry, budget);
-  const withBreaks = rawXml
-    .replace(/<w:br\b[^>]*w:type="page"[^>]*\/?>/gi, '\f')
-    .replace(/<w:lastRenderedPageBreak\b[^>]*\/?>/gi, '\f')
-    .replace(/<\/w:p>/gi, '\n')
-    .replace(/<\/w:tr>/gi, '\n')
-    .replace(/<\/w:tc>/gi, '\t')
-    .replace(/<w:(?:br|cr)\b[^>]*\/?>/gi, '\n')
-    .replace(/<w:tab\b[^>]*\/?>/gi, ' ');
-
-  const stripped = withBreaks.replace(/<[^>]+>/g, '');
-  const decoded = decodeXmlEntities(stripped);
+  const xmlCache = scanAndCacheArchiveXml(buf, entries, budget);
+  const rawXml = getCachedOfficeXml(buf, entry, budget, xmlCache);
+  const withBreaks = extractWordMlText(rawXml);
+  const decoded = decodeXmlEntities(withBreaks);
   return decoded
     .replace(/\r\n/g, '\n')
     .replace(/[ \t]+\n/g, '\n')
@@ -322,7 +568,7 @@ function extractDocxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {})
 }
 
 function getXmlAttr(attrText, attrName) {
-  const re = new RegExp(`(?:^|\\s)${attrName}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i');
+  const re = new RegExp(`(?:^|[ \\t\\r\\n])${attrName}[ \\t\\r\\n]*=[ \\t\\r\\n]*(?:"([^"]*)"|'([^']*)')`, 'i');
   const m = String(attrText || '').match(re);
   return m ? decodeXmlEntities(m[1] ?? m[2] ?? '') : '';
 }
@@ -341,102 +587,85 @@ function colLettersToIndex(letters) {
 
 function parseSharedStringsXml(xmlText) {
   const strings = [];
-  const siRe = /<si\b[^>]*>([\s\S]*?)<\/si>|<si\b[^>]*\/>/gi;
-  let m;
-  while ((m = siRe.exec(xmlText)) !== null) {
-    const inner = m[1] || '';
-    if (!inner) {
+  forEachXmlElement(xmlText, 'si', ({ body, selfClosing }) => {
+    if (selfClosing || !body) {
       strings.push('');
-      continue;
+      return;
     }
-    const cleanSi = inner.replace(/<rPh\b[^>]*>[\s\S]*?<\/rPh>/gi, '');
-    const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/gi;
-    let tm;
+    const cleanSi = stripXmlElements(body, 'rPh');
     let combined = '';
-    while ((tm = tRe.exec(cleanSi)) !== null) {
-      combined += decodeXmlEntities(tm[1]);
-    }
+    forEachXmlElement(cleanSi, 't', ({ body: tBody, selfClosing: tSelf }) => {
+      if (!tSelf && tBody) {
+        combined += decodeXmlEntities(tBody);
+      }
+    });
     strings.push(combined);
-  }
+  });
   return strings;
 }
 
 function parseWorkbookSheetMetadata(workbookXml, relsXml) {
   const rIdToTarget = new Map();
   if (relsXml) {
-    const relRe = /<Relationship\b([^>]*?)\/?>/gi;
-    let rm;
-    while ((rm = relRe.exec(relsXml)) !== null) {
-      const attrs = rm[1];
+    forEachXmlTag(relsXml, 'Relationship', ({ attrs }) => {
       const id = getXmlAttr(attrs, 'Id');
       const target = normalizeEntryPath(getXmlAttr(attrs, 'Target'));
       if (id && target) {
         const normalizedTarget = target.startsWith('xl/') ? target : normalizeEntryPath(`xl/${target.replace(/^\.\//, '')}`);
         rIdToTarget.set(id, normalizedTarget.toLowerCase());
       }
-    }
+    });
   }
 
   const byTarget = new Map();
   const orderedNames = [];
   if (workbookXml) {
-    const sheetRe = /<sheet\b([^>]*?)\/?>/gi;
-    let sm;
-    while ((sm = sheetRe.exec(workbookXml)) !== null) {
-      const attrs = sm[1];
+    forEachXmlTag(workbookXml, 'sheet', ({ attrs }) => {
       const name = getXmlAttr(attrs, 'name').trim();
       const rId = getXmlAttr(attrs, 'r:id') || getXmlAttr(attrs, 'id');
       orderedNames.push(name);
       if (rId && rIdToTarget.has(rId) && name) {
         byTarget.set(rIdToTarget.get(rId), name);
       }
-    }
+    });
   }
   return { byTarget, orderedNames };
 }
 
 function parseWorksheetXml(sheetXml, sharedStrings) {
   const lines = [];
-  const rowRe = /<row\b[^>]*>([\s\S]*?)<\/row>/gi;
-  let rm;
-  while ((rm = rowRe.exec(sheetXml)) !== null) {
-    const rowBody = rm[1];
+  forEachXmlElement(sheetXml, 'row', ({ body: rowBody, selfClosing: rowSelf }) => {
+    if (rowSelf || !rowBody) return;
     const rowCells = [];
-    const cellRe = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/gi;
-    let cm;
-    while ((cm = cellRe.exec(rowBody)) !== null) {
-      const attrs = cm[1] || '';
-      const body = cm[2] || '';
+    forEachXmlElement(rowBody, 'c', ({ attrs, body }) => {
       const cellRef = getXmlAttr(attrs, 'r');
       const cellType = getXmlAttr(attrs, 't').toLowerCase() || 'n';
 
       let value = '';
       if (cellType === 's') {
-        const vMatch = body.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i);
-        if (vMatch) {
-          const idx = Number.parseInt(vMatch[1].trim(), 10);
+        const vElem = findFirstXmlElement(body, 'v');
+        if (vElem && !vElem.selfClosing) {
+          const idx = Number.parseInt(vElem.body.trim(), 10);
           value = Number.isInteger(idx) && idx >= 0 && idx < sharedStrings.length ? sharedStrings[idx] : '';
         }
       } else if (cellType === 'inlinestr') {
-        const isMatch = body.match(/<is\b[^>]*>([\s\S]*?)<\/is>/i);
-        const isBody = isMatch ? isMatch[1] : body;
-        const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/gi;
-        let tm;
+        const isElem = findFirstXmlElement(body, 'is');
+        const isBody = isElem ? isElem.body : body;
         let parts = '';
-        while ((tm = tRe.exec(isBody)) !== null) {
-          parts += decodeXmlEntities(tm[1]);
-        }
-        value = parts || decodeXmlEntities(isBody.replace(/<[^>]+>/g, ''));
+        forEachXmlElement(isBody, 't', ({ body: tBody, selfClosing: tSelf }) => {
+          if (!tSelf && tBody) parts += decodeXmlEntities(tBody);
+        });
+        value = parts || decodeXmlEntities(stripXmlTags(isBody, ''));
       } else if (cellType === 'b') {
-        const vMatch = body.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i);
-        if (vMatch) {
-          const rawBool = vMatch[1].trim().toLowerCase();
+        const vElem = findFirstXmlElement(body, 'v');
+        if (vElem && !vElem.selfClosing) {
+          const rawBool = vElem.body.trim().toLowerCase();
           value = rawBool === '1' || rawBool === 'true' ? 'TRUE' : 'FALSE';
         }
       } else {
-        const vMatch = body.match(/<v\b[^>]*>([\s\S]*?)<\/v>/i);
-        if (vMatch) {
-          value = decodeXmlEntities(vMatch[1]);
+        const vElem = findFirstXmlElement(body, 'v');
+        if (vElem && !vElem.selfClosing) {
+          value = decodeXmlEntities(vElem.body);
         }
       }
 
@@ -454,7 +683,7 @@ function parseWorksheetXml(sheetXml, sharedStrings) {
         }
       }
       rowCells.push(cleanValue);
-    }
+    });
 
     while (rowCells.length && rowCells[rowCells.length - 1] === '') {
       rowCells.pop();
@@ -462,33 +691,25 @@ function parseWorksheetXml(sheetXml, sharedStrings) {
     if (rowCells.some(Boolean)) {
       lines.push(rowCells.join('\t'));
     }
-  }
+  });
   return lines;
 }
 
+/**
+ * Extract structured sheet text from an `.xlsx` SpreadsheetML ZIP buffer.
+ *
+ * @param {Buffer|Uint8Array} buffer - Raw `.xlsx` binary buffer.
+ * @param {object} [options]
+ * @param {number} [options.maxInflatedBytes=10485760] - Cumulative XML inflation budget.
+ * @returns {{text: string, format: 'xlsx', pageCount: number, sheets: Array<{name: string, path: string, rowCount: number, text: string}>}}
+ */
 function extractXlsxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) {
   const buf = toBuffer(buffer);
   const entries = listArchiveEntries(buf);
   if (!entries.length) {
     throw failExtract('XLSX_INVALID_ARCHIVE', 400, 'Tệp XLSX không đúng định dạng nén ZIP hợp lệ.');
   }
-
-  const budget = { maxInflatedBytes, totalInflatedBytes: 0 };
-  for (const manifestPath of ['[Content_Types].xml', '_rels/.rels']) {
-    const manifestEntry = findEntryByPath(entries, manifestPath);
-    if (manifestEntry) readOfficeXmlEntry(buf, manifestEntry, budget);
-  }
-
-  const workbookEntry = findEntryByPath(entries, 'xl/workbook.xml');
-  const workbookXml = workbookEntry ? readOfficeXmlEntry(buf, workbookEntry, budget) : '';
-  const relsEntry = findEntryByPath(entries, 'xl/_rels/workbook.xml.rels');
-  const relsXml = relsEntry ? readOfficeXmlEntry(buf, relsEntry, budget) : '';
-  const sheetMeta = parseWorkbookSheetMetadata(workbookXml, relsXml);
-
-  const sharedStringsEntry = findEntryByPath(entries, 'xl/sharedStrings.xml');
-  const sharedStrings = sharedStringsEntry
-    ? parseSharedStringsXml(readOfficeXmlEntry(buf, sharedStringsEntry, budget))
-    : [];
+  assertArchiveNotEncrypted(entries);
 
   const worksheetEntries = entries
     .filter((e) => /^xl\/worksheets\/[^/]+\.xml$/i.test(e.name))
@@ -505,10 +726,24 @@ function extractXlsxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {})
     throw failExtract('XLSX_MISSING_WORKSHEETS', 400, 'Tệp XLSX không chứa trang tính (xl/worksheets/sheet*.xml).');
   }
 
+  const budget = { maxInflatedBytes, totalInflatedBytes: 0 };
+  const xmlCache = scanAndCacheArchiveXml(buf, entries, budget);
+
+  const workbookEntry = findEntryByPath(entries, 'xl/workbook.xml');
+  const workbookXml = getCachedOfficeXml(buf, workbookEntry, budget, xmlCache);
+  const relsEntry = findEntryByPath(entries, 'xl/_rels/workbook.xml.rels');
+  const relsXml = getCachedOfficeXml(buf, relsEntry, budget, xmlCache);
+  const sheetMeta = parseWorkbookSheetMetadata(workbookXml, relsXml);
+
+  const sharedStringsEntry = findEntryByPath(entries, 'xl/sharedStrings.xml');
+  const sharedStrings = sharedStringsEntry
+    ? parseSharedStringsXml(getCachedOfficeXml(buf, sharedStringsEntry, budget, xmlCache))
+    : [];
+
   const sheets = [];
   const sheetTexts = [];
   worksheetEntries.forEach((wsEntry, idx) => {
-    const wsXml = readOfficeXmlEntry(buf, wsEntry, budget);
+    const wsXml = getCachedOfficeXml(buf, wsEntry, budget, xmlCache);
     const numMatch = wsEntry.name.match(/sheet(\d+)\.xml$/i);
     const ordinalIdx = numMatch ? Number(numMatch[1]) - 1 : idx;
     const sheetName = sheetMeta.byTarget.get(wsEntry.name.toLowerCase())
@@ -535,48 +770,93 @@ function extractXlsxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {})
   };
 }
 
+function matchDrawingMlTag(xml, lower, idx, tagName) {
+  const prefix = `<${tagName}`;
+  if (!lower.startsWith(prefix, idx)) return null;
+  const afterName = idx + prefix.length;
+  const ch = lower[afterName];
+  const isBoundary = ch === '>' || ch === '/' || ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n';
+  if (!isBoundary) return null;
+  const openEnd = xml.indexOf('>', afterName);
+  if (openEnd < 0) return { eof: true };
+  if (ch === '/' && openEnd !== afterName + 1) return null;
+  const selfClosing = openEnd > afterName && xml[openEnd - 1] === '/';
+  return { tagName, openEnd: openEnd + 1, selfClosing };
+}
+
+function extractDrawingMlRunsText(fragment) {
+  const xml = String(fragment || '');
+  if (!xml) return '';
+  const lower = xml.toLowerCase();
+  const tokens = [];
+  let cursor = 0;
+
+  while (cursor < xml.length) {
+    const idx = lower.indexOf('<a:', cursor);
+    if (idx < 0) break;
+
+    const tag = matchDrawingMlTag(xml, lower, idx, 'a:tab')
+      || matchDrawingMlTag(xml, lower, idx, 'a:br')
+      || matchDrawingMlTag(xml, lower, idx, 'a:t');
+
+    if (!tag) {
+      cursor = idx + 3;
+      continue;
+    }
+    if (tag.eof) break;
+
+    if (tag.tagName === 'a:t') {
+      if (tag.selfClosing) {
+        cursor = tag.openEnd;
+        continue;
+      }
+      const close = findClosingTag(lower, 'a:t', tag.openEnd);
+      if (!close) break;
+      tokens.push(decodeXmlEntities(xml.slice(tag.openEnd, close.start)));
+      cursor = close.end;
+    } else {
+      tokens.push(tag.tagName === 'a:br' ? '\n' : '\t');
+      if (tag.selfClosing) {
+        cursor = tag.openEnd;
+      } else {
+        const close = findClosingTag(lower, tag.tagName, tag.openEnd);
+        cursor = close ? close.end : tag.openEnd;
+      }
+    }
+  }
+
+  return tokens.join('').replace(/ {2,}/g, ' ').trim();
+}
+
 function parseDrawingMlParagraphs(xmlText) {
   const paragraphs = [];
-  const pRe = /<a:p\b[^>]*>([\s\S]*?)<\/a:p>/gi;
-  let pm;
-  while ((pm = pRe.exec(xmlText)) !== null) {
-    const pBody = pm[1]
-      .replace(/<a:br\b[^>]*\/?>/gi, '\n')
-      .replace(/<a:tab\b[^>]*\/?>/gi, '\t');
-    const tokens = [];
-    const tRe = /<a:t\b[^>]*>([\s\S]*?)<\/a:t>/gi;
-    let tm;
-    while ((tm = tRe.exec(pBody)) !== null) {
-      tokens.push(decodeXmlEntities(tm[1]));
-    }
-    const line = tokens.join('').replace(/[ \t]+/g, ' ').trim();
+  forEachXmlElement(xmlText, 'a:p', ({ body, selfClosing }) => {
+    if (selfClosing || !body) return;
+    const line = extractDrawingMlRunsText(body);
     if (line) paragraphs.push(line);
-  }
+  });
   if (!paragraphs.length) {
-    const fallbackTokens = [];
-    const tRe = /<a:t\b[^>]*>([\s\S]*?)<\/a:t>/gi;
-    let tm;
-    while ((tm = tRe.exec(xmlText)) !== null) {
-      const val = decodeXmlEntities(tm[1]).trim();
-      if (val) fallbackTokens.push(val);
-    }
-    if (fallbackTokens.length) paragraphs.push(fallbackTokens.join(' '));
+    const fallback = extractDrawingMlRunsText(xmlText);
+    if (fallback) paragraphs.push(fallback);
   }
   return paragraphs.join('\n').trim();
 }
 
+/**
+ * Extract slide and speaker-note text from a `.pptx` PresentationML ZIP buffer.
+ *
+ * @param {Buffer|Uint8Array} buffer - Raw `.pptx` binary buffer.
+ * @param {object} [options]
+ * @param {number} [options.maxInflatedBytes=10485760] - Cumulative XML inflation budget.
+ * @returns {{text: string, format: 'pptx', pageCount: number, slides: Array<{slideNumber: number, path: string, text: string, notesText: string}>}}
+ */
 function extractPptxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) {
   const buf = toBuffer(buffer);
   const entries = listArchiveEntries(buf);
   if (!entries.length) {
     throw failExtract('PPTX_INVALID_ARCHIVE', 400, 'Tệp PPTX không đúng định dạng nén ZIP hợp lệ.');
   }
-
-  const budget = { maxInflatedBytes, totalInflatedBytes: 0 };
-  for (const manifestPath of ['[Content_Types].xml', '_rels/.rels', 'ppt/presentation.xml']) {
-    const entry = findEntryByPath(entries, manifestPath);
-    if (entry) readOfficeXmlEntry(buf, entry, budget);
-  }
+  assertArchiveNotEncrypted(entries);
 
   const slideEntries = entries
     .filter((e) => /^ppt\/slides\/slide(\d+)\.xml$/i.test(e.name))
@@ -589,6 +869,9 @@ function extractPptxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {})
   if (!slideEntries.length) {
     throw failExtract('PPTX_MISSING_SLIDES', 400, 'Tệp PPTX không chứa slide (ppt/slides/slide*.xml).');
   }
+
+  const budget = { maxInflatedBytes, totalInflatedBytes: 0 };
+  const xmlCache = scanAndCacheArchiveXml(buf, entries, budget);
 
   const notesByNum = new Map();
   const notesEntries = entries
@@ -607,17 +890,21 @@ function extractPptxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {})
   const slideSections = [];
   for (const sEntry of slideEntries) {
     const slideNum = Number(sEntry.name.match(/slide(\d+)\.xml$/i)[1]);
-    const slideXml = readOfficeXmlEntry(buf, sEntry, budget);
+    const slideXml = getCachedOfficeXml(buf, sEntry, budget, xmlCache);
     const bodyText = parseDrawingMlParagraphs(slideXml);
 
     let notesEntry = null;
     const relsEntry = findEntryByPath(entries, `ppt/slides/_rels/slide${slideNum}.xml.rels`);
     if (relsEntry) {
-      const relsXml = readOfficeXmlEntry(buf, relsEntry, budget);
-      const targetMatch = relsXml.match(/Target\s*=\s*["']([^"']*notesSlides\/notesSlide(\d+)\.xml)["']/i);
-      if (targetMatch) {
-        notesEntry = findEntryByPath(entries, `ppt/notesSlides/notesSlide${targetMatch[2]}.xml`);
-      }
+      const relsXml = getCachedOfficeXml(buf, relsEntry, budget, xmlCache);
+      forEachXmlTag(relsXml, 'Relationship', ({ attrs }) => {
+        if (notesEntry) return;
+        const target = normalizeEntryPath(getXmlAttr(attrs, 'Target'));
+        const m = target.match(/notesSlides\/notesSlide(\d+)\.xml$/i);
+        if (m) {
+          notesEntry = findEntryByPath(entries, `ppt/notesSlides/notesSlide${m[1]}.xml`);
+        }
+      });
     }
     if (!notesEntry && notesByNum.has(slideNum)) {
       notesEntry = notesByNum.get(slideNum);
@@ -625,7 +912,7 @@ function extractPptxText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {})
 
     let notesText = '';
     if (notesEntry) {
-      notesText = parseDrawingMlParagraphs(readOfficeXmlEntry(buf, notesEntry, budget));
+      notesText = parseDrawingMlParagraphs(getCachedOfficeXml(buf, notesEntry, budget, xmlCache));
     }
 
     const parts = [`# Slide ${slideNum}`];
@@ -946,6 +1233,14 @@ function mapPdfPageContents(rawLatin1) {
   };
 }
 
+/**
+ * Extract plain text and page count from a PDF buffer without executing scripts.
+ *
+ * @param {Buffer|Uint8Array} buffer - Raw PDF binary buffer.
+ * @param {object} [options]
+ * @param {number} [options.maxInflatedBytes=10485760] - Cumulative FlateDecode stream budget.
+ * @returns {{text: string, pageCount: number, corruptStreams: number}}
+ */
 function extractPdfText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) {
   const buf = toBuffer(buffer);
   const head = buf.subarray(0, Math.min(buf.length, 1024)).toString('latin1');
@@ -1078,6 +1373,15 @@ function extractPdfText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) 
   };
 }
 
+/**
+ * Dispatch a document buffer to the appropriate extractor (PDF, DOCX, XLSX, PPTX, or UTF-8 text/CSV/JSON/XML).
+ *
+ * @param {Buffer|Uint8Array} buffer - Raw uploaded file buffer.
+ * @param {object} [options]
+ * @param {string} [options.filename=''] - Original filename hint.
+ * @param {string} [options.mimeType=''] - MIME content type hint.
+ * @returns {{text: string, format: string, pageCount: number, sheets?: Array, slides?: Array}}
+ */
 function extractTextFromBuffer(buffer, { filename = '', mimeType = '' } = {}) {
   const buf = toBuffer(buffer);
   if (buf.length === 0) {
@@ -1085,12 +1389,12 @@ function extractTextFromBuffer(buffer, { filename = '', mimeType = '' } = {}) {
   }
 
   const lowerName = String(filename || '').trim().toLowerCase();
-  const lowerMime = String(mimeType || '').trim().toLowerCase();
+  const baseMime = String(mimeType || '').trim().toLowerCase().split(';')[0].trim();
   const head = buf.subarray(0, Math.min(buf.length, 64));
   const headLatin = head.toString('latin1');
 
   const looksPdf = lowerName.endsWith('.pdf')
-    || lowerMime === 'application/pdf'
+    || baseMime === 'application/pdf'
     || headLatin.startsWith('%PDF-');
   if (looksPdf) {
     const pdfRes = extractPdfText(buf);
@@ -1102,11 +1406,11 @@ function extractTextFromBuffer(buffer, { filename = '', mimeType = '' } = {}) {
   }
 
   const isXlsxHint = lowerName.endsWith('.xlsx')
-    || lowerMime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    || baseMime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   const isPptxHint = lowerName.endsWith('.pptx')
-    || lowerMime === 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    || baseMime === 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
   const isDocxHint = lowerName.endsWith('.docx')
-    || lowerMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    || baseMime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 
   if (isXlsxHint) return extractXlsxText(buf);
   if (isPptxHint) return extractPptxText(buf);
@@ -1119,6 +1423,7 @@ function extractTextFromBuffer(buffer, { filename = '', mimeType = '' } = {}) {
   const looksZip = buf.length >= 4 && buf.readUInt32LE(0) === ZIP_LOCAL_SIG;
   if (looksZip) {
     const entries = listArchiveEntries(buf);
+    assertArchiveNotEncrypted(entries);
     if (entries.some((e) => e.name.toLowerCase() === 'xl/workbook.xml' || /^xl\/worksheets\/[^/]+\.xml$/i.test(e.name))) {
       return extractXlsxText(buf);
     }
@@ -1132,19 +1437,32 @@ function extractTextFromBuffer(buffer, { filename = '', mimeType = '' } = {}) {
     }
   }
 
+  const isCsvExt = lowerName.endsWith('.csv');
+  const isXmlExt = lowerName.endsWith('.xml');
   const allowedTextExt = !lowerName || /\.(txt|md|markdown|json|csv|log|yml|yaml|xml|html?)$/.test(lowerName);
-  const allowedTextMime = !lowerMime || lowerMime.startsWith('text/') || lowerMime === 'application/json';
+  const allowedTextMime = !baseMime
+    || baseMime.startsWith('text/')
+    || baseMime === 'application/json'
+    || (isCsvExt && (
+      baseMime === 'application/csv'
+      || baseMime === 'application/vnd.ms-excel'
+      || baseMime === 'application/octet-stream'
+    ))
+    || (isXmlExt && (
+      baseMime === 'application/xml'
+      || baseMime === 'application/octet-stream'
+    ));
   if (!allowedTextExt || !allowedTextMime || buf.includes(0)) {
     throw failExtract('UNSUPPORTED_ATTACHMENT_FORMAT', 400, 'Định dạng tệp đính kèm chưa được hỗ trợ (hỗ trợ PDF, DOCX, XLSX, PPTX, CSV, Markdown, TXT, JSON).');
   }
 
   const rawText = buf.toString('utf8').replace(/\r\n/g, '\n').trim();
   let format = 'text';
-  if (lowerName.endsWith('.md') || lowerName.endsWith('.markdown') || lowerMime === 'text/markdown') {
+  if (lowerName.endsWith('.md') || lowerName.endsWith('.markdown') || baseMime === 'text/markdown') {
     format = 'markdown';
-  } else if (lowerName.endsWith('.json') || lowerMime === 'application/json') {
+  } else if (lowerName.endsWith('.json') || baseMime === 'application/json') {
     format = 'json';
-  } else if (lowerName.endsWith('.csv') || lowerMime === 'text/csv') {
+  } else if (isCsvExt || baseMime === 'text/csv' || baseMime === 'application/csv') {
     format = 'csv';
   }
   return {
@@ -1196,6 +1514,16 @@ function splitLongBlock(text, chunkSize, overlap) {
   return pieces;
 }
 
+/**
+ * Split extracted document text into overlapping page/heading-aware chunks for indexing.
+ *
+ * @param {string} text - Normalized document text (using `\f` for page breaks).
+ * @param {object} [options]
+ * @param {number} [options.chunkSize=800] - Maximum character length per chunk.
+ * @param {number} [options.overlap=120] - Target character overlap between adjacent chunks.
+ * @param {string} [options.title=''] - Default section title when no heading is present.
+ * @returns {Array<{chunkIndex: number, sectionTitle: string, pageNumber: number, content: string, tokenCount: number}>}
+ */
 function chunkDocumentText(text, { chunkSize = 800, overlap = 120, title = '' } = {}) {
   const raw = String(text || '');
   if (!raw.trim()) return [];
@@ -1367,7 +1695,7 @@ function parsePositiveNumber(raw) {
 }
 
 function extractLabeledValue(lines, labelPattern, warnings, maxLen = MAX_EXTRACTED_FIELD_LEN) {
-  const re = new RegExp(`(?:^|[\\t|;])\\s*(?:${labelPattern})\\s*(?::|=|\\t|\\|)+\\s*([^\\r\\n\\t|]+)`, 'i');
+  const re = new RegExp(`(?:^|[;\\t|] *)(?:${labelPattern}) *(?:[:=][\\t| ]*|[\\t|][\\t| ]*)([^\\r\\n\\t| ][^\\r\\n\\t|]*)`, 'i');
   for (const line of lines) {
     const m = line.match(re);
     if (m && m[1]) {
@@ -1380,7 +1708,7 @@ function extractLabeledValue(lines, labelPattern, warnings, maxLen = MAX_EXTRACT
 
 function extractTemperatureMetadata(text, warnings) {
   const out = {};
-  const labelMatch = text.match(/(?:^|[\n\t|])\s*(?:Nhiệt độ(?:\s*yêu cầu|\s*bảo quản)?|Temperature(?:\s*Range|\s*Bounds)?|Temp)\s*(?::|=|\t|\|)+\s*([^\r\n\t|]+)/i);
+  const labelMatch = text.match(/(?:^|[\n\t|] *)(?:Nhiệt[ \t]*độ(?:[ \t]*yêu[ \t]*cầu|[ \t]*bảo[ \t]*quản)?|Temperature(?:[ \t]*Range|[ \t]*Bounds)?|Temp) *(?:[:=][\t| ]*|[\t|][\t| ]*)([^\r\n\t| ][^\r\n\t|]*)/i);
   if (labelMatch && labelMatch[1]) {
     const cleaned = sanitizeExtractedString(labelMatch[1], {
       maxLen: 80,
@@ -1390,7 +1718,7 @@ function extractTemperatureMetadata(text, warnings) {
     if (cleaned) out.temperatureRequirement = cleaned;
   }
 
-  const rangeRe = /(?<![\d/-])([+-]?\d+(?:\.\d+)?)\s*(?:\.\.|~|đến|to|-)\s*([+-]?\d+(?:\.\d+)?)\s*°?\s*C\b/i;
+  const rangeRe = /(?<![\d/-])([+-]?\d+(?:\.\d+)?)[ \t]*(?:\.\.|~|đến|to|-)[ \t]*([+-]?\d+(?:\.\d+)?)(?:[ \t]*°?[ \t]*C\b|\b)/i;
   const rangeSource = out.temperatureRequirement || text;
   const rm = rangeSource.match(rangeRe) || text.match(rangeRe);
   if (rm) {
@@ -1405,7 +1733,7 @@ function extractTemperatureMetadata(text, warnings) {
     }
   }
 
-  const mktMatch = text.match(/\bMKT\b\s*(?::|=|\t|\|| )*([+-]?\d+(?:\.\d+)?)\s*°?\s*C?\b/i);
+  const mktMatch = text.match(/\bMKT\b[ :=|\t]+([+-]?\d+(?:\.\d+)?)(?:[ \t]*°?[ \t]*C\b|\b)/i);
   if (mktMatch) {
     const mkt = Number(mktMatch[1]);
     if (Number.isFinite(mkt) && mkt >= -100 && mkt <= 100) {
@@ -1419,10 +1747,10 @@ function extractTemperatureMetadata(text, warnings) {
 function parseLineItemsFromText(lines, warnings) {
   const items = [];
   const seenKey = new Set();
-  const unitRe = /(\d+(?:[.,]\d+)?)\s*(hộp|thùng|lọ|chai|kiện|pallet|kg|lít|ml|pcs|box(?:es)?|units?|vials?)\b/i;
-  const labeledQtyRe = /(?:SL|Số\s*lượng|Qty|Quantity)\s*(?::|=|\t|\|| )+\s*(\d+(?:[.,]\d+)?)/i;
+  const unitRe = /(\d+(?:[.,]\d+)?)[ \t]*(hộp|thùng|lọ|chai|kiện|pallet|kg|lít|ml|pcs|box(?:es)?|units?|vials?)\b/i;
+  const labeledQtyRe = /(?:SL|Số[ \t]*lượng|Qty|Quantity)[ :=|\t]+(\d+(?:[.,]\d+)?)/i;
   const skuTokenRe = /\b(SKU[-_][A-Z0-9][A-Z0-9_-]{0,40})\b/i;
-  const labeledSkuRe = /(?:Mã\s*(?:hàng|SKU)|SKU)\s*(?::|=|\t|\|)+\s*([A-Za-z0-9][A-Za-z0-9_.-]{1,40})/i;
+  const labeledSkuRe = /(?:Mã[ \t]*(?:hàng|SKU)|SKU) *(?:[:=][\t| ]*|[\t|][\t| ]*)([A-Za-z0-9][A-Za-z0-9_.-]{1,40})/i;
 
   for (const rawLine of lines) {
     if (items.length >= 100) break;
@@ -1664,6 +1992,15 @@ function expandCsvStructuredLines(lines, isCsvFormat) {
   return expanded;
 }
 
+/**
+ * Deterministically parse bilingual (VI/EN) form fields, cold-chain bounds, and line items from extracted text.
+ *
+ * @param {string} text - Raw or OCR-extracted document text.
+ * @param {object} [options]
+ * @param {string} [options.targetCollection='latticeOrders'] - Target collection allowlist entry.
+ * @param {object|null} [options.ocrMetadata=null] - Format and OCR engine metadata.
+ * @returns {{targetCollection: string, fields: Record<string, any>, lineItems: Array<Record<string, any>>, confidence: number, warnings: string[]}}
+ */
 function extractStructuredFormFields(text, { targetCollection = 'latticeOrders', ocrMetadata = null } = {}) {
   const safeTarget = String(targetCollection || 'latticeOrders').trim();
   if (!ALLOWED_FORM_COLLECTIONS.has(safeTarget)) {
@@ -1818,6 +2155,13 @@ function extractStructuredFormFields(text, { targetCollection = 'latticeOrders',
   };
 }
 
+/**
+ * Validate a remote OCR endpoint URL against SSRF, credential-embedding, and HTTPS policies.
+ *
+ * @param {string} rawUrl - Configured `DX_OCR_ENDPOINT` URL.
+ * @param {Record<string, string|undefined>} [env=process.env] - Environment containing optional `DX_OCR_TRUSTED_HOSTS`.
+ * @returns {string} Canonicalized safe endpoint URL.
+ */
 function validateOcrEndpoint(rawUrl, env = process.env) {
   const raw = String(rawUrl || '');
   if (/[\r\n\0]/.test(raw)) {
@@ -1837,15 +2181,20 @@ function validateOcrEndpoint(rawUrl, env = process.env) {
     throw failExtract('OCR_ENDPOINT_CREDENTIALS_FORBIDDEN', 400, 'Không được phép nhúng thông tin xác thực trong DX_OCR_ENDPOINT.');
   }
   const host = parsed.hostname.toLowerCase();
-  const bareHost = host.replace(/^\[|\]$/g, '');
-  if (!bareHost || BLOCKED_OCR_HOST_RE.test(host) || BLOCKED_OCR_HOST_RE.test(bareHost)) {
-    throw failExtract('OCR_ENDPOINT_SSRF_BLOCKED', 400, 'Từ chối DX_OCR_ENDPOINT do thuộc vùng metadata/nội bộ không tin cậy (SSRF guard).');
-  }
+  const bareHost = host.replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   const extraTrusted = String(env?.DX_OCR_TRUSTED_HOSTS || '')
     .split(',')
-    .map((s) => s.trim().toLowerCase())
+    .map((s) => s.trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, ''))
     .filter(Boolean);
   const isTrustedInternal = TRUSTED_OCR_HTTP_HOSTS.has(bareHost) || extraTrusted.includes(bareHost);
+  const isBlockedInternalSuffix = !isTrustedInternal && (
+    bareHost.endsWith('.internal')
+    || bareHost.endsWith('.local')
+    || bareHost.endsWith('.localhost')
+  );
+  if (!bareHost || BLOCKED_OCR_HOST_RE.test(host) || BLOCKED_OCR_HOST_RE.test(bareHost) || isBlockedInternalSuffix) {
+    throw failExtract('OCR_ENDPOINT_SSRF_BLOCKED', 400, 'Từ chối DX_OCR_ENDPOINT do thuộc vùng metadata/nội bộ không tin cậy (SSRF guard).');
+  }
   if (parsed.protocol === 'http:' && !isTrustedInternal) {
     throw failExtract('OCR_ENDPOINT_HTTPS_REQUIRED', 400, 'DX_OCR_ENDPOINT bên ngoài bắt buộc dùng HTTPS hoặc host Docker/localhost tin cậy.');
   }
@@ -1885,14 +2234,17 @@ function extractOfflinePngText(buf, maxInflatedBytes = MAX_INFLATED_BYTES) {
       const decoded = valBuf.toString('utf8').trim();
       if (decoded) texts.push(decoded);
     } else if (type === 'zTXt') {
+      if (totalInflated >= maxInflatedBytes) break;
       const nul = payload.indexOf(0);
       if (nul >= 0 && nul + 2 < payload.length) {
         try {
-          const remaining = Math.max(1, maxInflatedBytes - totalInflated);
+          const remaining = maxInflatedBytes - totalInflated;
+          if (remaining <= 0) break;
           const inf = zlib.inflateSync(payload.subarray(nul + 2), { maxOutputLength: remaining });
           totalInflated += inf.length;
           const decoded = inf.toString('utf8').trim();
           if (decoded) texts.push(decoded);
+          if (totalInflated >= maxInflatedBytes) break;
         } catch {
           // Skip corrupt PNG zTXt chunk
         }
@@ -1905,12 +2257,14 @@ function extractOfflinePngText(buf, maxInflatedBytes = MAX_INFLATED_BYTES) {
         const nul3 = nul2 >= 0 ? payload.indexOf(0, nul2 + 1) : -1;
         const textSlice = nul3 >= 0 ? payload.subarray(nul3 + 1) : payload.subarray(nul1 + 3);
         if (compFlag === 1) {
+          const remaining = maxInflatedBytes - totalInflated;
+          if (remaining <= 0) break;
           try {
-            const remaining = Math.max(1, maxInflatedBytes - totalInflated);
             const inf = zlib.inflateSync(textSlice, { maxOutputLength: remaining });
             totalInflated += inf.length;
             const decoded = inf.toString('utf8').trim();
             if (decoded) texts.push(decoded);
+            if (totalInflated >= maxInflatedBytes) break;
           } catch {
             // Skip corrupt PNG iTXt chunk
           }
@@ -1948,7 +2302,7 @@ function extractOfflineJpegText(buf) {
     } else if (marker === 0xe1) {
       const asStr = payload.toString('utf8');
       if (asStr.includes('xmpmeta') || asStr.includes('dc:description')) {
-        const stripped = decodeXmlEntities(asStr.replace(/<[^>]+>/g, '\n')).trim();
+        const stripped = decodeXmlEntities(stripXmlTags(asStr, '\n')).trim();
         if (stripped) texts.push(stripped);
       }
     }
@@ -2022,7 +2376,7 @@ async function callRemoteOcrEndpoint({
     method: 'POST',
     headers,
     body: JSON.stringify({
-      filename: path.basename(String(filename || 'document')).slice(0, 255),
+      filename: safeBasename(filename, 'document'),
       mimeType,
       contentBase64: buf.toString('base64'),
       targetCollection,
@@ -2033,9 +2387,13 @@ async function callRemoteOcrEndpoint({
   });
 
   if (res && (res.redirected === true || (Number(res.status) >= 300 && Number(res.status) < 400))) {
+    try { await res?.body?.cancel?.(); } catch {}
     throw failExtract('OCR_REDIRECT_FORBIDDEN', 400, 'Dịch vụ OCR chuyển hướng không hợp lệ.');
   }
-  if (!res || !res.ok) return null;
+  if (!res || !res.ok) {
+    try { await res?.body?.cancel?.(); } catch {}
+    return null;
+  }
 
   const payload = await res.json();
   const pageTexts = Array.isArray(payload?.pages)
@@ -2059,6 +2417,49 @@ async function callRemoteOcrEndpoint({
   };
 }
 
+async function tryRemoteOcrFallback({
+  validatedEndpoint,
+  buf,
+  filename,
+  mimeType,
+  targetCollection,
+  env,
+  fetchImpl,
+  warnings,
+}) {
+  if (!validatedEndpoint || typeof fetchImpl !== 'function') return null;
+  try {
+    const remote = await callRemoteOcrEndpoint({
+      endpointUrl: validatedEndpoint,
+      buf,
+      filename,
+      mimeType,
+      targetCollection,
+      env,
+      fetchImpl,
+    });
+    if (remote) return remote;
+    warnings.push('REMOTE_OCR_UNAVAILABLE_FALLBACK');
+    return null;
+  } catch (err) {
+    if (err?.code === 'OCR_REDIRECT_FORBIDDEN') throw err;
+    warnings.push('REMOTE_OCR_UNAVAILABLE_FALLBACK');
+    return null;
+  }
+}
+
+/**
+ * Extract document/image text (via remote OCR when configured or offline deterministic parser) and map structured form fields.
+ *
+ * @param {object} options
+ * @param {Buffer|Uint8Array} options.buffer - Uploaded document or image buffer.
+ * @param {string} [options.filename=''] - Uploaded filename.
+ * @param {string} [options.mimeType=''] - Uploaded MIME type.
+ * @param {string} [options.targetCollection='latticeOrders'] - Target collection allowlist entry.
+ * @param {Record<string, string|undefined>} [options.env=process.env] - Environment containing optional OCR config.
+ * @param {Function} [options.fetchImpl=globalThis.fetch] - Fetch implementation for remote OCR.
+ * @returns {Promise<{text: string, format: string, pageCount: number, ocrEngine: string, targetCollection: string, fields: Record<string, any>, suggestedValues: Record<string, any>, lineItems: Array<Record<string, any>>, confidence: number, warnings: string[]}>}
+ */
 async function extractWithMultimodalOcr({
   buffer,
   filename = '',
@@ -2095,27 +2496,21 @@ async function extractWithMultimodalOcr({
     format = 'pdf';
     pageCount = pdfRes.pageCount;
     text = pdfRes.text;
-    if (!text && validatedEndpoint && typeof fetchImpl === 'function') {
-      try {
-        const remote = await callRemoteOcrEndpoint({
-          endpointUrl: validatedEndpoint,
-          buf,
-          filename,
-          mimeType: 'application/pdf',
-          targetCollection,
-          env,
-          fetchImpl,
-        });
-        if (remote) {
-          text = remote.text;
-          pageCount = Math.max(pageCount, remote.pageCount);
-          ocrEngine = 'remote-ocr';
-        } else {
-          extraWarnings.push('REMOTE_OCR_UNAVAILABLE_FALLBACK');
-        }
-      } catch (err) {
-        if (err?.code === 'OCR_REDIRECT_FORBIDDEN') throw err;
-        extraWarnings.push('REMOTE_OCR_UNAVAILABLE_FALLBACK');
+    if (!text) {
+      const remote = await tryRemoteOcrFallback({
+        validatedEndpoint,
+        buf,
+        filename,
+        mimeType: 'application/pdf',
+        targetCollection,
+        env,
+        fetchImpl,
+        warnings: extraWarnings,
+      });
+      if (remote) {
+        text = remote.text;
+        pageCount = Math.max(pageCount, remote.pageCount);
+        ocrEngine = 'remote-ocr';
       }
     }
     if (!text) {
@@ -2123,28 +2518,20 @@ async function extractWithMultimodalOcr({
     }
   } else {
     format = detected.format;
-    if (validatedEndpoint && typeof fetchImpl === 'function') {
-      try {
-        const remote = await callRemoteOcrEndpoint({
-          endpointUrl: validatedEndpoint,
-          buf,
-          filename,
-          mimeType: detected.mimeType,
-          targetCollection,
-          env,
-          fetchImpl,
-        });
-        if (remote) {
-          text = remote.text;
-          pageCount = remote.pageCount;
-          ocrEngine = 'remote-ocr';
-        } else {
-          extraWarnings.push('REMOTE_OCR_UNAVAILABLE_FALLBACK');
-        }
-      } catch (err) {
-        if (err?.code === 'OCR_REDIRECT_FORBIDDEN') throw err;
-        extraWarnings.push('REMOTE_OCR_UNAVAILABLE_FALLBACK');
-      }
+    const remote = await tryRemoteOcrFallback({
+      validatedEndpoint,
+      buf,
+      filename,
+      mimeType: detected.mimeType,
+      targetCollection,
+      env,
+      fetchImpl,
+      warnings: extraWarnings,
+    });
+    if (remote) {
+      text = remote.text;
+      pageCount = remote.pageCount;
+      ocrEngine = 'remote-ocr';
     }
     if (!text && ocrEngine !== 'remote-ocr') {
       if (format === 'png') text = extractOfflinePngText(buf);

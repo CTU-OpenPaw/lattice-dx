@@ -40,25 +40,118 @@ function failAction(code, status, message) {
   return Object.assign(new Error(message || code), { code, status });
 }
 
-function buildSafeTextPreview(text, maxLen = 500) {
-  return String(text || '')
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]')
-    .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]')
-    .replace(/([a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key)\s*[:=]\s*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]')
-    .trim()
-    .slice(0, maxLen);
+function safeBasename(rawName, fallback = '') {
+  const normalized = String(rawName || fallback || '').trim().replace(/\\/g, '/');
+  if (!normalized) return '';
+  return path.posix.basename(normalized).slice(0, 255);
 }
 
-async function hasFormExtractionAcl(db, ctx, roles, targetCollection) {
+/**
+ * Decode and validate a base64 upload payload (supporting optional `data:...;base64,` URI prefix)
+ * within the configured binary byte limit.
+ *
+ * @param {string} rawBase64Input - Raw base64 or data-URI string.
+ * @param {object} [options]
+ * @param {number} [options.maxBytes=2097152] - Maximum decoded binary size in bytes.
+ * @returns {Buffer} Decoded non-empty binary buffer.
+ */
+function decodeBase64Payload(rawBase64Input, { maxBytes = MAX_UPLOAD_BYTES } = {}) {
+  if (typeof rawBase64Input !== 'string' || !rawBase64Input.trim()) {
+    throw failAction('ATTACHMENT_CONTENT_REQUIRED', 400, 'Cần cung cấp nội dung contentBase64.');
+  }
+  const maxBase64Chars = Math.ceil(maxBytes / 3) * 4;
+  if (rawBase64Input.length > maxBase64Chars + 131072) {
+    throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm base64 vượt quá giới hạn 2MB.');
+  }
+
+  let strippedPrefix = rawBase64Input.trim();
+  if (strippedPrefix.slice(0, 5).toLowerCase() === 'data:') {
+    const markerIdx = strippedPrefix.indexOf(';base64,');
+    if (markerIdx > 0 && markerIdx < 256) {
+      const header = strippedPrefix.slice(5, markerIdx);
+      if (/^[a-z0-9/+.-]+(?:;[a-z0-9=_-]+)*$/i.test(header)) {
+        strippedPrefix = strippedPrefix.slice(markerIdx + 8);
+      }
+    }
+  }
+
+  const cleanBase64 = strippedPrefix.replace(/\s+/g, '');
+  if (cleanBase64.length > maxBase64Chars) {
+    throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm base64 vượt quá giới hạn 2MB.');
+  }
+  if (!cleanBase64 || !/^[A-Za-z0-9+/=]+$/.test(cleanBase64)) {
+    throw failAction('ATTACHMENT_BASE64_INVALID', 400, 'Dữ liệu contentBase64 không hợp lệ.');
+  }
+  const buffer = Buffer.from(cleanBase64, 'base64');
+  if (buffer.length === 0) {
+    throw failAction('ATTACHMENT_BASE64_INVALID', 400, 'Dữ liệu contentBase64 không hợp lệ.');
+  }
+  if (buffer.length > maxBytes) {
+    throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm vượt quá giới hạn 2MB.');
+  }
+  return buffer;
+}
+
+async function findScopedParaDocument(db, documentId, organizationId = null) {
+  const docRepo = db?.getRepository?.('latticeParaDocuments');
+  if (!docRepo) return null;
+  const docFilter = { id: Number(documentId), ...(organizationId ? { organizationId } : {}) };
+  const doc = typeof docRepo.findOne === 'function'
+    ? await docRepo.findOne({ filter: docFilter })
+    : ((await docRepo.find({ filter: docFilter, limit: 1 })) || [])[0] || null;
+  if (!doc) return null;
+  if (organizationId && val(doc, 'organizationId') !== organizationId) return null;
+  return doc;
+}
+
+/**
+ * Build a bounded, control-char-stripped, secret-redacted text preview in linear time.
+ *
+ * @param {string} text - Raw extracted text.
+ * @param {number} [maxLen=500] - Maximum output character length.
+ * @returns {string} Redacted preview string.
+ */
+function buildSafeTextPreview(text, maxLen = 500) {
+  const safeMaxLen = Math.max(1, Number(maxLen) || 500);
+  const bounded = String(text || '').slice(0, Math.max(safeMaxLen * 4, 2000));
+  return bounded
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]')
+    .replace(/(Bearer[ \t]+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]')
+    .replace(/(\b[a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)[ \t]*[:=][ \t]*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]')
+    .trim()
+    .slice(0, safeMaxLen);
+}
+
+/**
+ * Verify caller read/view ACL permissions for form-field extraction.
+ * When `hasDocumentId` is true, `view`/`list` privilege specifically on `latticeParaDocuments` is required.
+ *
+ * @param {object} db - Database handle providing `getRepository`.
+ * @param {object} ctx - NocoBase request context.
+ * @param {string[]} roles - Verified caller role names.
+ * @param {string} targetCollection - Allowlisted form target collection.
+ * @param {object} [options]
+ * @param {boolean} [options.hasDocumentId=false] - Whether an existing `documentId` is accessed.
+ * @returns {Promise<boolean>}
+ */
+async function hasFormExtractionAcl(db, ctx, roles, targetCollection, { hasDocumentId = false } = {}) {
   if (roles.includes('root')) return true;
   if (!roles.length) return false;
 
-  const collectionsToCheck = ['latticeParaDocuments', targetCollection];
-  const viewActions = ['view', 'list', 'create'];
-  if (typeof ctx?.can === 'function') {
+  const collectionsToCheck = hasDocumentId ? ['latticeParaDocuments'] : ['latticeParaDocuments', targetCollection];
+  const viewActions = ['view', 'list'];
+  const stateRole = String(ctx?.state?.currentRole || '').trim();
+  const stateRoles = Array.isArray(ctx?.state?.currentRoles)
+    ? ctx.state.currentRoles.map((r) => String(r || '').trim()).filter(Boolean)
+    : [];
+  const canTrustCtxCan = typeof ctx?.can === 'function'
+    && (!stateRole || roles.includes(stateRole))
+    && (!stateRoles.length || stateRoles.every((r) => roles.includes(r)));
+  if (canTrustCtxCan) {
     return collectionsToCheck.some((col) => (
-      ['view', 'list'].some((act) => Boolean(ctx.can({ resource: col, action: act })))
+      viewActions.some((act) => Boolean(ctx.can({ resource: col, action: act })))
     ));
   }
 
@@ -70,7 +163,7 @@ async function hasFormExtractionAcl(db, ctx, roles, targetCollection) {
 
   for (const roleName of roles) {
     const role = rolesRepo?.findOne ? await rolesRepo.findOne({ filter: { name: roleName } }) : null;
-    if (val(role, 'allowAll') === true || val(role, 'allowConfigure') === true) return true;
+    if (val(role, 'allowAll') === true) return true;
     if (resRepo?.findOne) {
       for (const col of collectionsToCheck) {
         const res = await resRepo.findOne({ filter: { roleName, name: col, dataSourceKey: 'main' } });
@@ -82,33 +175,53 @@ async function hasFormExtractionAcl(db, ctx, roles, targetCollection) {
       }
     }
     const strategyActions = val(role, 'strategy')?.actions || [];
-    if (Array.isArray(strategyActions) && strategyActions.some((a) => ['view', 'list', '*:*', '*'].includes(a))) {
+    if (Array.isArray(strategyActions) && strategyActions.some((a) => viewActions.includes(a?.name || a) || a === '*:*' || a === '*')) {
       return true;
     }
   }
   return false;
 }
 
+/**
+ * Resolve verified caller roles from `rolesUsers` when the repository is present,
+ * never trusting unverified `X-Role` / `state.currentRole` claims when DB roles are empty or mismatched.
+ *
+ * @param {object} ctx - NocoBase request context.
+ * @param {object} db - Database handle providing `getRepository`.
+ * @returns {Promise<string[]>}
+ */
 async function resolveCallerRoles(ctx, db) {
   const stateRole = String(ctx?.state?.currentRole || '').trim();
   const stateRoles = Array.isArray(ctx?.state?.currentRoles)
     ? [...new Set(ctx.state.currentRoles.map((r) => String(r || '').trim()).filter(Boolean))]
     : [];
   const userId = val(ctx?.state?.currentUser, 'id');
-  let dbRoles = [];
-  if (userId != null && typeof db?.getRepository === 'function') {
-    const rolesUsersRepo = db.getRepository('rolesUsers');
-    if (rolesUsersRepo && typeof rolesUsersRepo.find === 'function') {
-      const rows = (await rolesUsersRepo.find({ filter: { userId } })) || [];
-      dbRoles = [...new Set(rows.map((r) => String(val(r, 'roleName') || '').trim()).filter(Boolean))];
+  const rolesUsersRepo = typeof db?.getRepository === 'function' ? db.getRepository('rolesUsers') : null;
+  const hasRolesUsersRepo = Boolean(rolesUsersRepo && typeof rolesUsersRepo.find === 'function');
+
+  if (hasRolesUsersRepo) {
+    if (userId == null) return [];
+    const rows = (await rolesUsersRepo.find({ filter: { userId } })) || [];
+    const dbRoles = [...new Set(
+      rows
+        .filter((r) => val(r, 'userId') == null || Number(val(r, 'userId')) === Number(userId))
+        .map((r) => String(val(r, 'roleName') || '').trim())
+        .filter(Boolean),
+    )];
+    if (!dbRoles.length) return [];
+    const knownRoles = stateRoles.length ? stateRoles.filter((r) => dbRoles.includes(r)) : dbRoles;
+    if (!knownRoles.length) return [];
+    if (stateRole) {
+      return knownRoles.includes(stateRole) ? [stateRole] : [];
     }
-  }
-  const knownRoles = stateRoles.length ? stateRoles : dbRoles;
-  if (stateRole) {
-    if (!knownRoles.length || knownRoles.includes(stateRole)) return [stateRole];
     return knownRoles;
   }
-  return knownRoles;
+
+  if (stateRole) {
+    if (!stateRoles.length || stateRoles.includes(stateRole)) return [stateRole];
+    return stateRoles;
+  }
+  return stateRoles;
 }
 
 function readParams(ctx) {
@@ -128,6 +241,20 @@ async function withOptionalTransaction(db, fn) {
   return fn(undefined);
 }
 
+/**
+ * Synchronize chunked text and embeddings into `latticeParaChunks` for a P.A.R.A. document.
+ *
+ * @param {object} db - Database handle providing `getRepository` and optional `sequelize`.
+ * @param {object} docRow - Source `latticeParaDocuments` record or plain object.
+ * @param {object} [options]
+ * @param {Record<string, string|undefined>} [options.env=process.env] - Environment config for embedding endpoint.
+ * @param {Function} [options.fetchImpl=globalThis.fetch] - Fetch implementation for neural embeddings.
+ * @param {string} [options.attachmentText=''] - Extracted attachment text to index alongside document text.
+ * @param {string} [options.attachmentFilename=''] - Attachment filename label.
+ * @param {number} [options.chunkSize=800] - Maximum characters per chunk.
+ * @param {number} [options.overlap=120] - Target character overlap between chunks.
+ * @returns {Promise<{documentId: number|string|undefined, organizationId: string|undefined, chunksCreated: number, neuralChunks: number, fallbackChunks: number, embeddingEngine: string, skipped?: boolean, deactivated?: boolean}>}
+ */
 async function syncDocumentChunks(db, docRow, {
   env = process.env,
   fetchImpl = globalThis.fetch,
@@ -266,6 +393,15 @@ async function syncDocumentChunks(db, docRow, {
   };
 }
 
+/**
+ * Create NocoBase resource action handlers for `latticePara` (`summary`, `hybridSearch`, `reindex`, `extractAttachment`, `extractFormFields`).
+ *
+ * @param {object} db - NocoBase database instance.
+ * @param {object} [options]
+ * @param {Record<string, string|undefined>} [options.env=process.env] - Environment config for OCR/embedding services.
+ * @param {Function} [options.fetchImpl=globalThis.fetch] - Fetch implementation for remote OCR/embeddings.
+ * @returns {Record<string, Function>} Resource action map.
+ */
 function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch } = {}) {
   return {
     summary: async (ctx, next) => {
@@ -407,10 +543,7 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         if (!/^[1-9]\d*$/.test(docIdStr)) {
           throw failAction('PARA_DOCUMENT_ID_INVALID', 400, 'Mã documentId không hợp lệ.');
         }
-        const docFilter = { id: Number(docIdStr), ...(organizationId ? { organizationId } : {}) };
-        const found = typeof docRepo.findOne === 'function'
-          ? await docRepo.findOne({ filter: docFilter })
-          : ((await docRepo.find({ filter: docFilter, limit: 1 })) || [])[0];
+        const found = await findScopedParaDocument(db, docIdStr, organizationId);
         if (!found) throw failAction('PARA_DOCUMENT_NOT_FOUND', 404, 'Không tìm thấy tài liệu P.A.R.A.');
         docs = [found];
       } else {
@@ -462,30 +595,8 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
       }
       const documentId = Number(String(rawDocId).trim());
 
-      const rawBase64Input = params.contentBase64;
-      if (typeof rawBase64Input !== 'string' || !rawBase64Input.trim()) {
-        throw failAction('ATTACHMENT_CONTENT_REQUIRED', 400, 'Cần cung cấp nội dung contentBase64.');
-      }
-      if (rawBase64Input.length > MAX_UPLOAD_BYTES) {
-        throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm base64 vượt quá giới hạn 2MB.');
-      }
-      const strippedPrefix = rawBase64Input.trim().replace(/^data:[a-z0-9/+.-]+;base64,/i, '');
-      const cleanBase64 = strippedPrefix.replace(/\s+/g, '');
-      if (!cleanBase64 || !/^[A-Za-z0-9+/=]+$/.test(cleanBase64)) {
-        throw failAction('ATTACHMENT_BASE64_INVALID', 400, 'Dữ liệu contentBase64 không hợp lệ.');
-      }
-      const buffer = Buffer.from(cleanBase64, 'base64');
-      if (buffer.length === 0 || buffer.length > MAX_UPLOAD_BYTES) {
-        throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm vượt quá giới hạn 2MB.');
-      }
-
-      const docRepo = db?.getRepository?.('latticeParaDocuments');
-      const docFilter = { id: documentId, ...(actor ? { organizationId: actor.organizationId } : {}) };
-      const doc = docRepo
-        ? (typeof docRepo.findOne === 'function'
-          ? await docRepo.findOne({ filter: docFilter })
-          : ((await docRepo.find({ filter: docFilter, limit: 1 })) || [])[0])
-        : null;
+      const buffer = decodeBase64Payload(params.contentBase64, { maxBytes: MAX_UPLOAD_BYTES });
+      const doc = await findScopedParaDocument(db, documentId, actor ? actor.organizationId : null);
       if (!doc) {
         throw failAction('PARA_DOCUMENT_NOT_FOUND', 404, 'Không tìm thấy tài liệu P.A.R.A. trong phạm vi tổ chức của bạn.');
       }
@@ -501,7 +612,7 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         }
       }
 
-      const filename = path.basename(String(params.filename || '').trim()).slice(0, 255);
+      const filename = safeBasename(params.filename);
       const mimeType = String(params.mimeType || '').trim().slice(0, 120);
       const extracted = extractTextFromBuffer(buffer, { filename, mimeType });
       if (!extracted.text || !extracted.text.trim()) {
@@ -560,25 +671,20 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         throw failAction('INVALID_TARGET_COLLECTION', 400, 'Bảng đích auto-fill không hợp lệ.');
       }
 
-      const permitted = await hasFormExtractionAcl(db, ctx, roles, targetCollection);
+      const hasDocumentId = params.documentId != null && String(params.documentId).trim() !== '';
+      const permitted = await hasFormExtractionAcl(db, ctx, roles, targetCollection, { hasDocumentId });
       if (!permitted) {
         throw failAction('PARA_ACL_FORBIDDEN', 403, 'Không có quyền xem tài liệu P.A.R.A. hoặc bảng đích để trích xuất biểu mẫu.');
       }
 
       let doc = null;
-      if (params.documentId != null && String(params.documentId).trim() !== '') {
+      if (hasDocumentId) {
         const docIdStr = String(params.documentId).trim();
         if (!/^[1-9]\d*$/.test(docIdStr)) {
           throw failAction('PARA_DOCUMENT_ID_INVALID', 400, 'Mã documentId không hợp lệ.');
         }
-        const docRepo = db?.getRepository?.('latticeParaDocuments');
-        const docFilter = { id: Number(docIdStr), ...(actor ? { organizationId: actor.organizationId } : {}) };
-        doc = docRepo
-          ? (typeof docRepo.findOne === 'function'
-            ? await docRepo.findOne({ filter: docFilter })
-            : ((await docRepo.find({ filter: docFilter, limit: 1 })) || [])[0])
-          : null;
-        if (!doc || (actor && val(doc, 'organizationId') !== actor.organizationId)) {
+        doc = await findScopedParaDocument(db, docIdStr, actor ? actor.organizationId : null);
+        if (!doc) {
           throw failAction('PARA_DOCUMENT_NOT_FOUND', 404, 'Không tìm thấy tài liệu P.A.R.A. trong phạm vi tổ chức của bạn.');
         }
       }
@@ -588,27 +694,12 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         throw failAction('FORM_EXTRACT_INPUT_REQUIRED', 400, 'Cần cung cấp contentBase64 hoặc documentId hợp lệ.');
       }
 
-      const filename = path.basename(String(params.filename || val(doc, 'code') || '').trim()).slice(0, 255);
+      const filename = safeBasename(params.filename || val(doc, 'code') || '');
       const mimeType = String(params.mimeType || '').trim().slice(0, 120);
 
       let extractionResult;
       if (hasBase64) {
-        const rawBase64Input = params.contentBase64;
-        if (rawBase64Input.length > MAX_UPLOAD_BYTES) {
-          throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm base64 vượt quá giới hạn 2MB.');
-        }
-        const strippedPrefix = rawBase64Input
-          .trim()
-          .replace(/^data:[a-z0-9/+.-]+(?:;[a-z0-9=_-]+)*;base64,/i, '');
-        const cleanBase64 = strippedPrefix.replace(/\s+/g, '');
-        if (!cleanBase64 || !/^[A-Za-z0-9+/=]+$/.test(cleanBase64)) {
-          throw failAction('ATTACHMENT_BASE64_INVALID', 400, 'Dữ liệu contentBase64 không hợp lệ.');
-        }
-        const buffer = Buffer.from(cleanBase64, 'base64');
-        if (buffer.length === 0 || buffer.length > MAX_UPLOAD_BYTES) {
-          throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm vượt quá giới hạn 2MB.');
-        }
-
+        const buffer = decodeBase64Payload(params.contentBase64, { maxBytes: MAX_UPLOAD_BYTES });
         extractionResult = await extractWithMultimodalOcr({
           buffer,
           filename,
@@ -631,7 +722,7 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         if (chunkRepo && typeof chunkRepo.find === 'function') {
           const attRows = (await chunkRepo.find({
             filter: { documentId: docId, organizationId: docOrg, sourceType: 'attachment', active: true },
-            limit: 100,
+            limit: 500,
             sort: ['chunkIndex'],
           })) || [];
           for (const row of attRows) {
@@ -676,4 +767,11 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
   };
 }
 
-module.exports = { createParaActions, syncDocumentChunks };
+module.exports = {
+  createParaActions,
+  syncDocumentChunks,
+  buildSafeTextPreview,
+  decodeBase64Payload,
+  resolveCallerRoles,
+  hasFormExtractionAcl,
+};
