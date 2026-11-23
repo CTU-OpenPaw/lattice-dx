@@ -9,6 +9,7 @@
 'use strict';
 
 const { createHash, randomBytes } = require('node:crypto');
+const { emitDomainEventSafely } = require('./domain-events');
 
 const ACTIVE_ALARM_STATUSES = new Set(['open', 'acknowledged']);
 const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
@@ -184,6 +185,10 @@ async function ingestOrDeduplicateAlarm(db, {
   severity = 'medium',
   summary = '',
   handlerId = 'unassigned',
+  metricName = null,
+  numericValue = null,
+  app = null,
+  publishDomainEvent = null,
 } = {}) {
   if (!organizationId || !assetEntityId) {
     throw failAlarm('ALARM_IDENTITY_REQUIRED', 400, 'Cần organizationId và assetEntityId để ghi nhận cảnh báo.');
@@ -203,11 +208,14 @@ async function ingestOrDeduplicateAlarm(db, {
     limit: 1,
   })) || [];
   const active = Array.isArray(candidates) ? candidates.find((c) => ACTIVE_ALARM_STATUSES.has(val(c, 'status'))) : null;
+  const resolvedMetric = String(metricName || attribute || 'temperature').trim();
+  const parsedEventNumeric = parseFiniteNumber(numericValue);
 
   if (active) {
     const prevCount = Math.max(1, Number(val(active, 'occurrenceCount')) || 1);
     const prevSev = String(val(active, 'severity') || 'medium');
     const nextSev = (SEVERITY_RANK[severity] || 2) > (SEVERITY_RANK[prevSev] || 2) ? severity : prevSev;
+    const escalated = (SEVERITY_RANK[nextSev] || 0) > (SEVERITY_RANK[prevSev] || 0);
     const patch = {
       occurrenceCount: prevCount + 1,
       lastSeenAt: now,
@@ -215,8 +223,34 @@ async function ingestOrDeduplicateAlarm(db, {
       ...(summary ? { proposal: String(summary).slice(0, 500) } : {}),
     };
     await updateIncidentRow(repo, active, patch);
-    if ((SEVERITY_RANK[nextSev] || 0) > (SEVERITY_RANK[prevSev] || 0) && ALARM_NOTIF_SEVERITIES.has(nextSev)) {
+    if (escalated && ALARM_NOTIF_SEVERITIES.has(nextSev)) {
       await notifyOrgOperatorsOnAlarm(db, active);
+    }
+    if (escalated) {
+      await emitDomainEventSafely(
+        db,
+        {
+          organizationId,
+          eventType: 'alarm.triggered',
+          source: '/dxos/alarm-engine',
+          subject: assetEntityId,
+          data: {
+            organizationId,
+            alarmId: val(active, 'id') ?? null,
+            alarmCode: val(active, 'code') || null,
+            ruleCode,
+            severity: nextSev,
+            assetId: val(active, 'assetId') ?? assetId ?? null,
+            assetEntityId,
+            metricName: resolvedMetric,
+            numericValue: parsedEventNumeric,
+            escalated: true,
+            deduplicated: true,
+            summary: summary || val(active, 'name') || '',
+          },
+        },
+        { app, publishDomainEvent },
+      );
     }
     return serializeAlarm(active, { deduplicated: true });
   }
@@ -247,6 +281,30 @@ async function ingestOrDeduplicateAlarm(db, {
   if (ALARM_NOTIF_SEVERITIES.has(normalizedSeverity)) {
     await notifyOrgOperatorsOnAlarm(db, created);
   }
+  await emitDomainEventSafely(
+    db,
+    {
+      organizationId,
+      eventType: 'alarm.triggered',
+      source: '/dxos/alarm-engine',
+      subject: assetEntityId,
+      data: {
+        organizationId,
+        alarmId: val(created, 'id') ?? null,
+        alarmCode: val(created, 'code') || code,
+        ruleCode,
+        severity: normalizedSeverity,
+        assetId: val(created, 'assetId') ?? assetId ?? null,
+        assetEntityId,
+        metricName: resolvedMetric,
+        numericValue: parsedEventNumeric,
+        escalated: false,
+        deduplicated: false,
+        summary: summary || val(created, 'name') || '',
+      },
+    },
+    { app, publishDomainEvent },
+  );
   return serializeAlarm(created, { deduplicated: false });
 }
 
@@ -362,6 +420,8 @@ async function ingestTelemetryPoint(db, {
   sourceProtocol = 'http',
   observedAt = null,
   bypassQuarantine = false,
+  app = null,
+  publishDomainEvent = null,
 } = {}) {
   const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
   if (!ORG_ID_RE.test(orgId)) {
@@ -554,6 +614,10 @@ async function ingestTelemetryPoint(db, {
           severity: ruleSev,
           summary,
           handlerId,
+          metricName: metric,
+          numericValue: parsedValue,
+          app,
+          publishDomainEvent,
         });
         triggeredAlarms.push(alarm);
       }

@@ -198,8 +198,8 @@ test('DxosWebGisBlockView loads assets/locations/incidents/twinShadow, degrades 
         return {
           data: {
             data: [
-              { id: 12, code: 'COLD-CT-01', name: 'Kho lạnh Cần Thơ 01', kind: 'cold_room', status: 'active', locationId: 1 },
-              { id: 15, code: 'COLD-HN-02', name: 'Kho lạnh Hà Nội 02', kind: 'cold_room', status: 'active', locationId: 2 },
+              { id: 12, code: 'COLD-CT-01', name: 'Kho lạnh Cần Thơ 01', kind: 'cold_room', status: 'active', locationId: 1, organizationId: 'org-a' },
+              { id: 15, code: 'COLD-HN-02', name: 'Kho lạnh Hà Nội 02', kind: 'cold_room', status: 'active', locationId: 2, organizationId: 'org-a' },
             ],
           },
         };
@@ -250,7 +250,7 @@ test('DxosWebGisBlockView loads assets/locations/incidents/twinShadow, degrades 
   assert.ok(calls.some((c) => c.url === 'latticeAssets:list' && c.skipNotify === true));
   assert.ok(calls.some((c) => c.url === 'latticeLocations:list' && c.skipNotify === true));
   assert.ok(calls.some((c) => c.url === 'latticeIncidentCases:list' && c.skipNotify === true));
-  assert.ok(calls.some((c) => c.url === 'dxosBlocks:twinShadow' && c.skipNotify === true));
+  assert.ok(calls.some((c) => c.url === 'dxosBlocks:twinShadow' && c.skipNotify === true && c.data?.organizationId === 'org-a'));
 
   const pins = collectNodes(tree).filter((n) => n.props?.['data-testid'] === 'dxos-webgis-pin');
   assert.ok(pins.length >= 2);
@@ -953,5 +953,79 @@ test('createVoucherLifecycleBar enforces canPrintOrder strictly, protects PKI ve
     global.document = origDoc;
     global.window = origWin;
   }
+  pkiHooks.unmount();
+});
+
+test('UI background 400/403 fixes: webgis-block passes/skips organizationId on twinShadow and chatter-panel passes organizationId on dxosLedger:entries', async () => {
+  const { createWebGisBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+  const { createVoucherLifecycleBar } = require(path.join(PLUGIN_ROOT, 'src/client/chatter-panel.js'));
+
+  // 1. webgis-block skips dxosBlocks:twinShadow when neither defaultOrganizationId nor asset.organizationId exists
+  const skipHooks = createMiniHooks();
+  const skipCalls = [];
+  const skipApi = {
+    async request(req) {
+      skipCalls.push(req);
+      if (req.url === 'latticeAssets:list') {
+        return {
+          data: {
+            data: [
+              { id: 101, code: 'NO-ORG', name: 'Asset Missing Org', kind: 'cold_room', status: 'active' },
+              { id: 102, code: 'WITH-ORG', name: 'Asset With Org', kind: 'cold_room', status: 'active', organizationId: 'org-asset' },
+            ],
+          },
+        };
+      }
+      if (req.url === 'dxosBlocks:twinShadow') {
+        return { data: { data: { shadow: { assetId: req.data?.assetId, commandStatus: 'synced', desiredJson: {}, reportedJson: {} } } } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  const WebGisView = createWebGisBlockView({ useAPIClient: () => skipApi }, skipHooks.React, {}, {});
+  skipHooks.render(WebGisView, { model: { props: { showTwinOverlay: true } } });
+  await new Promise((r) => setTimeout(r, 20));
+  const twinCalls = skipCalls.filter((c) => c.url === 'dxosBlocks:twinShadow');
+  assert.equal(twinCalls.length, 1, 'Must skip twinShadow for asset without organizationId');
+  assert.equal(twinCalls[0].data.assetId, 102);
+  assert.equal(twinCalls[0].data.organizationId, 'org-asset');
+  skipHooks.unmount();
+
+  // 2. chatter-panel VoucherLifecycleBar passes organizationId on dxosLedger:entries & dxosLedger:verify from props/record/context
+  const pkiHooks = createMiniHooks();
+  const pkiCalls = [];
+  const pkiApi = {
+    async request(req) {
+      pkiCalls.push(req);
+      if (req.url === 'latticeVoucher:lineage') {
+        return { data: { data: { items: [{ id: 55, code: 'ORD-55', status: 'approved', organizationId: 'org-ctx' }] } } };
+      }
+      if (req.url === 'dxosLedger:entries') {
+        return { data: { data: { total: 1, items: [{ seq: 9, keyId: 'ed25519-k9', entryHash: 'abcdef123456' }] } } };
+      }
+      if (req.url === 'dxosLedger:verify') {
+        return { data: { data: { valid: true, checkedCount: 9 } } };
+      }
+      return { data: { data: {} } };
+    },
+  };
+  const Bar = createVoucherLifecycleBar(
+    { useAPIClient: () => pkiApi, useRecord: () => ({ id: 55, organizationId: 'org-ctx' }) },
+    pkiHooks.React,
+    {},
+  );
+  let barTree = pkiHooks.render(Bar, { targetCollection: 'latticeOrders', targetRecordId: 55 });
+  await new Promise((r) => setTimeout(r, 20));
+  barTree = pkiHooks.render(Bar, { targetCollection: 'latticeOrders', targetRecordId: 55 });
+  const entriesCall = pkiCalls.find((c) => c.url === 'dxosLedger:entries');
+  assert.ok(entriesCall);
+  assert.equal(entriesCall.params.organizationId, 'org-ctx');
+  assert.equal(entriesCall.params.targetCollection, 'latticeOrders');
+  assert.equal(entriesCall.params.targetRecordId, '55');
+
+  await findByTestId(barTree, 'dxos-workbench-pki-verify-btn').props.onClick();
+  const verifyCall = pkiCalls.find((c) => c.url === 'dxosLedger:verify');
+  assert.ok(verifyCall);
+  assert.equal(verifyCall.params.organizationId, 'org-ctx');
   pkiHooks.unmount();
 });

@@ -10,6 +10,7 @@
 
 const { createHash, randomBytes } = require('node:crypto');
 const path = require('node:path');
+const { emitDomainEventSafely } = require('./domain-events');
 
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
@@ -667,6 +668,25 @@ async function requestDesiredSetpoint(db, opts = {}) {
   });
 
   if (txResult.gatedByHitl) {
+    await emitDomainEventSafely(
+      db,
+      {
+        organizationId,
+        eventType: 'twin.approval_required',
+        source: '/dxos/digital-twin',
+        subject: assetEntityId,
+        data: {
+          organizationId,
+          assetId,
+          assetEntityId,
+          approvalId: txResult.approvalId,
+          deltaTempC: txResult.deltaTempC,
+          desiredPatch,
+          commandStatus: txResult.shadow?.commandStatus || 'pending_hitl',
+        },
+      },
+      opts,
+    );
     return txResult;
   }
 
@@ -704,6 +724,27 @@ async function requestDesiredSetpoint(db, opts = {}) {
       }
     }
   }
+
+  await emitDomainEventSafely(
+    db,
+    {
+      organizationId,
+      eventType: 'twin.command_dispatched',
+      source: '/dxos/digital-twin',
+      subject: assetEntityId,
+      data: {
+        organizationId,
+        assetId,
+        assetEntityId,
+        commandId: txResult.commandId,
+        desiredPatch,
+        desired: txResult.nextDesired,
+        downlinkDispatched,
+        commandStatus: txResult.shadow?.commandStatus || 'dispatched',
+      },
+    },
+    opts,
+  );
 
   return {
     gatedByHitl: false,
@@ -768,7 +809,7 @@ async function ackCommandFromEdge(db, opts = {}) {
   const now = new Date();
   const actorName = String(opts.actorName || 'edge-gateway').slice(0, 120);
 
-  return runInTwinTx(db, organizationId, async (transaction) => {
+  const ackedShadow = await runInTwinTx(db, organizationId, async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
     const shadowRow = await findShadowRow(shadowRepo, organizationId, assetEntityId, transaction);
 
@@ -851,6 +892,29 @@ async function ackCommandFromEdge(db, opts = {}) {
 
     return serializeShadow(updated);
   });
+
+  await emitDomainEventSafely(
+    db,
+    {
+      organizationId,
+      eventType: 'twin.command_acked',
+      source: '/dxos/digital-twin',
+      subject: assetEntityId,
+      data: {
+        organizationId,
+        assetId,
+        assetEntityId,
+        commandId: cleanCommandId,
+        ackStatus,
+        commandStatus: ackedShadow.commandStatus,
+        reportedPatch,
+        delta: ackedShadow.lastDeltaJson,
+      },
+    },
+    opts,
+  );
+
+  return ackedShadow;
 }
 
 module.exports = {

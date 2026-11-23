@@ -347,11 +347,13 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       if (cfg.showTwinOverlay !== false && Array.isArray(assets) && assets.length) {
         await Promise.all(assets.slice(0, 6).map(async (asset) => {
           if (isStale() || asset?.id == null) return;
+          const twinOrg = String(orgParams.organizationId || asset?.organizationId || '').trim();
+          if (!twinOrg) return;
           try {
             const res = await api.request({
               url: 'dxosBlocks:twinShadow',
               method: 'post',
-              data: { assetId: asset.id, ...orgParams },
+              data: { assetId: asset.id, organizationId: twinOrg },
               skipNotify: true,
             });
             const payload = res?.data?.data || res?.data || {};

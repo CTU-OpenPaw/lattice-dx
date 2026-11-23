@@ -616,6 +616,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         quality: input.quality,
         sourceProtocol: input.sourceProtocol,
         observedAt: input.observedAt,
+        app: ctx?.app,
       });
       return next();
     },
@@ -642,6 +643,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         severity: String(input.severity || 'medium').trim(),
         summary: String(input.summary || '').trim(),
         handlerId: actor?.employeeId ? String(actor.employeeId) : String(input.handlerId || 'root'),
+        app: ctx?.app,
       });
       return next();
     },
@@ -846,6 +848,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         ...(downlinkUrl !== undefined ? { downlinkUrl } : {}),
         fetchImpl,
         ingestToken,
+        app: ctx?.app,
       });
       return next();
     },
@@ -865,6 +868,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         reportedPatch: input.reportedPatch ?? input.reported,
         ackStatus: input.ackStatus,
         actorName,
+        app: ctx?.app,
       });
       return next();
     },

@@ -583,6 +583,7 @@ function createBlockRenderers(client, React, antd, app) {
     };
 
     const showControls = cfg.showVoucherActions !== false || cfg.showChatter !== false;
+    const activeRecord = recentRecords.find((r) => Number(r?.id) === activeRecordId) || null;
 
     return h('section', {
       'data-testid': 'dxos-record-workbench-block',
@@ -674,6 +675,8 @@ function createBlockRenderers(client, React, antd, app) {
       cfg.showVoucherActions !== false ? h(VoucherLifecycleBar, {
         targetCollection: activeCollection,
         targetRecordId: activeRecordId,
+        organizationId: activeRecord?.organizationId || cfg.organizationId || cfg.defaultOrganizationId || '',
+        record: activeRecord,
         showPkiBadge: cfg.showPkiBadge !== false,
         showLineage: cfg.showLineage !== false,
         showPrintVoucher: cfg.showPrintVoucher !== false,

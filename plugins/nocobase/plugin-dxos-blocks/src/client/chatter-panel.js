@@ -197,6 +197,7 @@ function createRecordChatterView(client, React, app) {
 function createVoucherLifecycleBar(client, React, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+  const useRecord = typeof client?.useRecord === 'function' ? client.useRecord : () => null;
 
   return function LatticeVoucherLifecycleBar({
     targetCollection,
@@ -205,6 +206,8 @@ function createVoucherLifecycleBar(client, React, app) {
     recordVersion = null,
     amendmentNo = 0,
     amendedFromId = null,
+    organizationId = '',
+    record = null,
     showPkiBadge = true,
     showLineage = true,
     showPrintVoucher = true,
@@ -212,12 +215,15 @@ function createVoucherLifecycleBar(client, React, app) {
     onUpdated,
   }) {
     const api = useApi();
+    const ctxRecord = useRecord();
+    const propOrg = String(organizationId || record?.organizationId || ctxRecord?.organizationId || '').trim();
     const validTarget = VOUCHER_COLLECTIONS.has(String(targetCollection || '')) && Number(targetRecordId) > 0;
     const [info, setInfo] = React.useState({
       status: String(recordStatus || ''),
       version: recordVersion ?? null,
       amendmentNo: Number(amendmentNo) || 0,
       amendedFromId: amendedFromId ?? null,
+      organizationId: propOrg,
       lineage: [],
     });
     const [reasonText, setReasonText] = React.useState('');
@@ -300,6 +306,7 @@ function createVoucherLifecycleBar(client, React, app) {
         version: recordVersion ?? null,
         amendmentNo: Number(amendmentNo) || 0,
         amendedFromId: amendedFromId ?? null,
+        organizationId: propOrg,
         lineage: [],
       });
       setReasonText('');
@@ -330,6 +337,8 @@ function createVoucherLifecycleBar(client, React, app) {
       }));
     }, [recordStatus, recordVersion, amendmentNo, amendedFromId]);
 
+    const recordOrg = String(propOrg || info.organizationId || '').trim();
+
     const loadPkiEntries = React.useCallback(async (isCancelled = () => false) => {
       if (!api?.request || !validTarget || showPkiBadge === false) return;
       const reqKey = currentTargetKey;
@@ -345,7 +354,12 @@ function createVoucherLifecycleBar(client, React, app) {
         const res = await api.request({
           url: 'dxosLedger:entries',
           method: 'get',
-          params: { targetCollection, targetRecordId: recId, pageSize: 5 },
+          params: {
+            targetCollection,
+            targetRecordId: recId,
+            pageSize: 5,
+            ...(recordOrg ? { organizationId: recordOrg } : {}),
+          },
           skipNotify: true,
         });
         if (isStale()) return;
@@ -371,7 +385,7 @@ function createVoucherLifecycleBar(client, React, app) {
           });
         }
       }
-    }, [api, targetCollection, targetRecordId, validTarget, showPkiBadge, currentTargetKey, reqTracker]);
+    }, [api, targetCollection, targetRecordId, validTarget, showPkiBadge, currentTargetKey, reqTracker, recordOrg]);
 
     const loadVoucherState = React.useCallback(async (isCancelled = () => false) => {
       if (!api?.request || !validTarget) return;
@@ -387,11 +401,13 @@ function createVoucherLifecycleBar(client, React, app) {
         const payload = res?.data?.data || res?.data || {};
         const items = Array.isArray(payload.items) ? payload.items : [];
         const current = items.find((it) => Number(it?.id) === recId);
+        const resolvedOrg = String(current?.organizationId || items[0]?.organizationId || propOrg || '').trim();
         setInfo({
           status: current?.status != null ? String(current.status) : String(recordStatus || ''),
           version: current?.version ?? null,
           amendmentNo: Number(current?.amendmentNo) || 0,
           amendedFromId: current?.amendedFromId ?? null,
+          organizationId: resolvedOrg,
           lineage: items,
         });
         return;
@@ -414,11 +430,12 @@ function createVoucherLifecycleBar(client, React, app) {
             version: rec.version ?? null,
             amendmentNo: Number(rec.amendmentNo) || 0,
             amendedFromId: rec.amendedFromId ?? null,
+            organizationId: String(rec.organizationId || propOrg || '').trim(),
             lineage: [],
           });
         }
       } catch {}
-    }, [api, targetCollection, targetRecordId, validTarget, recordStatus]);
+    }, [api, targetCollection, targetRecordId, validTarget, recordStatus, propOrg]);
 
     React.useEffect(() => {
       let cancelled = false;
@@ -437,7 +454,12 @@ function createVoucherLifecycleBar(client, React, app) {
       const isStale = () => reqTracker.unmounted || reqTracker.pkiVerifySeq !== myVerifySeq;
       setPkiState((prev) => ({ ...prev, targetKey: reqKey, loading: true, error: null }));
       try {
-        const res = await api.request({ url: 'dxosLedger:verify', method: 'get', skipNotify: true });
+        const res = await api.request({
+          url: 'dxosLedger:verify',
+          method: 'get',
+          ...(recordOrg ? { params: { organizationId: recordOrg } } : {}),
+          skipNotify: true,
+        });
         if (isStale()) return;
         reqTracker.pkiVerifying = false;
         const payload = res?.data?.data || res?.data || {};

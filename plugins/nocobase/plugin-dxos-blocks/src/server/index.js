@@ -10,6 +10,7 @@
 
 const { Plugin } = require('@nocobase/server');
 const { createDxosBlocksActions } = require('./blocks-api');
+const { createDxosBrokerActions } = require('./broker-control');
 
 class DxosBlocksServerPlugin extends Plugin {
   async load() {
@@ -30,9 +31,32 @@ class DxosBlocksServerPlugin extends Plugin {
         if (resName === 'latticeTwinShadows') {
           throw Object.assign(new Error('Vui lòng sử dụng dxosBlocks:twinShadow, dxosBlocks:twinSetDesired và dxosBlocks:twinAckCommand.'), { code: 'TWIN_DIRECT_CRUD_FORBIDDEN', status: 403 });
         }
+        if (resName === 'charts' && actionName === 'queryData' && (ctx.action?.params?.values?.collection === 'latticeIotDevices' || ctx.action?.params?.values?.collection === 'latticeBrokerSubscriptions')) {
+          throw Object.assign(new Error('Vui lòng sử dụng dxosBroker để truy vấn thiết bị IoT và subscription broker.'), { code: 'BROKER_DIRECT_CRUD_FORBIDDEN', status: 403 });
+        }
+        if (resName === 'latticeIotDevices' || resName === 'latticeBrokerSubscriptions') {
+          throw Object.assign(new Error('Vui lòng sử dụng các endpoint dxosBroker để quản lý thiết bị IoT và subscription Orion-LD.'), { code: 'BROKER_DIRECT_CRUD_FORBIDDEN', status: 403 });
+        }
         return next();
       }, { tag: 'dxosTelemetryDirectGuard', after: 'acl', before: 'latticeNativeScope' });
     }
+    this.app.resourceManager.define({
+      name: 'dxosBroker',
+      actions: createDxosBrokerActions(this.db),
+    });
+    this.app.acl.allow('dxosBroker', [
+      'listDevices',
+      'provisionDevice',
+      'revokeDevice',
+      'orionEntities',
+      'orionListSubscriptions',
+      'orionCreateSubscription',
+      'orionToggleSubscription',
+      'orionDeleteSubscription',
+    ], 'loggedIn');
+    // Handler-level fail-closed auth verifies either valid X-Lattice-Edge-Token (timingSafeEqual) or logged-in ACL user.
+    this.app.acl.allow('dxosBroker', ['deviceStatusIngest', 'orionNotify'], 'public');
+
     this.app.resourceManager.define({
       name: 'dxosBlocks',
       actions: createDxosBlocksActions(this.db),
