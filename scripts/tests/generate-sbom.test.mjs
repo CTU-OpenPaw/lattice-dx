@@ -129,8 +129,9 @@ test('generateSbom produces deterministic CycloneDX 1.5 BOM covering workspace p
   assert.equal(postgresImg?.licenses?.[0]?.license?.id, 'PostgreSQL');
   const mosquittoImg = ociImages.find((c) => c.name.startsWith('eclipse-mosquitto:'));
   assert.equal(mosquittoImg?.licenses?.[0]?.expression, 'EPL-2.0 OR BSD-3-Clause');
-  const redisImg = ociImages.find((c) => c.name.startsWith('redis:'));
-  assert.equal(redisImg?.licenses?.[0]?.expression, 'LicenseRef-RSALv2 OR SSPL-1.0');
+  const valkeyImg = ociImages.find((c) => c.name.startsWith('valkey/valkey:'));
+  assert.equal(valkeyImg?.licenses?.[0]?.license?.id, 'BSD-3-Clause');
+  assert.equal(resolveOciImageLicense('valkey/valkey', '8.1-alpine')?.value, 'BSD-3-Clause');
   const n8nImg = ociImages.find((c) => c.name.startsWith('n8nio/n8n:'));
   assert.equal(n8nImg?.licenses?.[0]?.license?.name, 'Sustainable Use License');
 });

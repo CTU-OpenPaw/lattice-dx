@@ -1,7 +1,7 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:f9163849-7064-405c-8cf0-02b914f1bb74",
+  "serialNumber": "urn:uuid:a90938f2-ee58-44a0-8455-53d75fa2b3ec",
   "version": 1,
   "metadata": {
     "tools": {
@@ -5758,7 +5758,7 @@
         },
         {
           "name": "latticedx:composeFiles",
-          "value": "iiot.yml"
+          "value": "iiot.yml,prod.yml"
         }
       ]
     },
@@ -6030,7 +6030,7 @@
         },
         {
           "name": "latticedx:composeFiles",
-          "value": "iiot.yml"
+          "value": "iiot.yml,prod.yml"
         }
       ]
     },
@@ -6206,38 +6206,6 @@
     },
     {
       "type": "container",
-      "bom-ref": "pkg:oci/redis@sha256%3A7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe?repository_url=redis&tag=7.4-alpine",
-      "name": "redis:7.4-alpine",
-      "version": "sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe",
-      "purl": "pkg:oci/redis@sha256%3A7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe?repository_url=redis&tag=7.4-alpine",
-      "hashes": [
-        {
-          "alg": "SHA-256",
-          "content": "7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe"
-        }
-      ],
-      "licenses": [
-        {
-          "expression": "LicenseRef-RSALv2 OR SSPL-1.0"
-        }
-      ],
-      "properties": [
-        {
-          "name": "latticedx:category",
-          "value": "oci-image"
-        },
-        {
-          "name": "latticedx:imageRef",
-          "value": "redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe"
-        },
-        {
-          "name": "latticedx:composeFiles",
-          "value": "nocobase.yml,prod.yml"
-        }
-      ]
-    },
-    {
-      "type": "container",
       "bom-ref": "pkg:oci/rustfs@sha256%3Aee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a?repository_url=rustfs%2Frustfs&tag=1.0.6",
       "name": "rustfs/rustfs:1.0.6",
       "version": "sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a",
@@ -6272,20 +6240,20 @@
     },
     {
       "type": "container",
-      "bom-ref": "pkg:oci/timescaledb@sha256%3A769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72?repository_url=timescale%2Ftimescaledb&tag=2.19.3-pg16-oss",
-      "name": "timescale/timescaledb:2.19.3-pg16-oss",
-      "version": "sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72",
-      "purl": "pkg:oci/timescaledb@sha256%3A769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72?repository_url=timescale%2Ftimescaledb&tag=2.19.3-pg16-oss",
+      "bom-ref": "pkg:oci/valkey@sha256%3A9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc?repository_url=valkey%2Fvalkey&tag=8.1-alpine",
+      "name": "valkey/valkey:8.1-alpine",
+      "version": "sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc",
+      "purl": "pkg:oci/valkey@sha256%3A9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc?repository_url=valkey%2Fvalkey&tag=8.1-alpine",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72"
+          "content": "9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc"
         }
       ],
       "licenses": [
         {
           "license": {
-            "id": "Apache-2.0"
+            "id": "BSD-3-Clause"
           }
         }
       ],
@@ -6296,11 +6264,11 @@
         },
         {
           "name": "latticedx:imageRef",
-          "value": "timescale/timescaledb:2.19.3-pg16-oss@sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72"
+          "value": "valkey/valkey:8.1-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc"
         },
         {
           "name": "latticedx:composeFiles",
-          "value": "iiot.yml"
+          "value": "nocobase.yml,prod.yml"
         }
       ]
     }
@@ -6515,9 +6483,8 @@
         "pkg:oci/pgvector@sha256%3A33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337?repository_url=pgvector%2Fpgvector&tag=0.8.1-pg16",
         "pkg:oci/postgres@sha256%3Af2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d?repository_url=postgres&tag=16.16-alpine",
         "pkg:oci/prometheus@sha256%3A339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1?repository_url=prom%2Fprometheus&tag=v3.3.0",
-        "pkg:oci/redis@sha256%3A7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe?repository_url=redis&tag=7.4-alpine",
         "pkg:oci/rustfs@sha256%3Aee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a?repository_url=rustfs%2Frustfs&tag=1.0.6",
-        "pkg:oci/timescaledb@sha256%3A769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72?repository_url=timescale%2Ftimescaledb&tag=2.19.3-pg16-oss"
+        "pkg:oci/valkey@sha256%3A9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc?repository_url=valkey%2Fvalkey&tag=8.1-alpine"
       ]
     },
     {
@@ -7345,15 +7312,11 @@
       "dependsOn": []
     },
     {
-      "ref": "pkg:oci/redis@sha256%3A7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe?repository_url=redis&tag=7.4-alpine",
-      "dependsOn": []
-    },
-    {
       "ref": "pkg:oci/rustfs@sha256%3Aee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a?repository_url=rustfs%2Frustfs&tag=1.0.6",
       "dependsOn": []
     },
     {
-      "ref": "pkg:oci/timescaledb@sha256%3A769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72?repository_url=timescale%2Ftimescaledb&tag=2.19.3-pg16-oss",
+      "ref": "pkg:oci/valkey@sha256%3A9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc?repository_url=valkey%2Fvalkey&tag=8.1-alpine",
       "dependsOn": []
     }
   ]

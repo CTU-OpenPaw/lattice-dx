@@ -19,25 +19,25 @@ test('prod.yml enforces 4 isolated networks, mandatory secrets, pinned upgraded 
   const prod = read('infra/compose/prod.yml');
   assert.match(prod, /^name:\s*lattice-dx-prod/m);
 
-  // 4 networks: edge (public), plus internal app/data/scanner
-  for (const net of ['edge:', 'app:', 'data:', 'scanner:']) {
+  // 5 networks: edge (public), plus internal app/data/scanner/iiot-net
+  for (const net of ['edge:', 'app:', 'data:', 'scanner:', 'iiot-net:']) {
     assert.ok(prod.includes(net), `prod.yml missing network ${net}`);
   }
   const internalCount = (prod.match(/internal:\s*true/g) || []).length;
-  assert.ok(internalCount >= 3, `Expected app/data/scanner networks internal: true, found ${internalCount}`);
+  assert.ok(internalCount >= 4, `Expected app/data/scanner/iiot-net networks internal: true, found ${internalCount}`);
 
   // All image lines must be pinned with @sha256
   const imageLines = prod.split(/\r?\n/).filter((l) => /^\s*image:/.test(l));
-  assert.ok(imageLines.length >= 17, `Expected >=17 pinned service images in prod.yml, found ${imageLines.length}`);
+  assert.ok(imageLines.length >= 19, `Expected >=19 pinned service images in prod.yml, found ${imageLines.length}`);
   for (const line of imageLines) {
     assert.match(line, /@sha256:[a-f0-9]{64}/, `Unpinned image in prod.yml: ${line}`);
   }
 
-  // Upgraded stack versions and Wave 4 pinned digests
+  // Upgraded stack versions and OSI pinned digests (Valkey BSD-3-Clause replaces Redis)
   for (const expected of [
     'postgres:16.16-alpine@sha256:',
     'pgvector/pgvector:0.8.1-pg16@sha256:',
-    'redis:7.4-alpine@sha256:',
+    'valkey/valkey:8.1-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc',
     'caddy:2.10-alpine@sha256:',
     'apache/apisix:3.19.0-debian@sha256:',
     'quay.io/keycloak/keycloak:26.8.2@sha256:',
@@ -52,9 +52,12 @@ test('prod.yml enforces 4 isolated networks, mandatory secrets, pinned upgraded 
     'otel/opentelemetry-collector-contrib:0.123.0@sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2',
     'prom/prometheus:v3.3.0@sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1',
     'grafana/grafana-oss:11.5.8@sha256:b8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48',
+    'eclipse-mosquitto:2.0.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353',
+    'nodered/node-red:4.0.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5',
   ]) {
     assert.ok(prod.includes(expected), `prod.yml must pin ${expected}`);
   }
+  assert.doesNotMatch(prod, /redis:7\.4-alpine/);
 
   // Zero hardcoded dev secrets
   assert.doesNotMatch(prod, /local-demo-password|local-nocobase-password|local-admin-password|public-fixture|local-gateway-secret/);
@@ -95,7 +98,13 @@ test('prod.yml enforces 4 isolated networks, mandatory secrets, pinned upgraded 
     'DX_METRICS_TOKEN=CHANGE_ME_METRICS_TOKEN',
     'GRAFANA_ADMIN_PASSWORD=CHANGE_ME_GRAFANA_ADMIN_PASSWORD',
     'FILE_STORAGE_PROVIDER=s3',
+    'DX_PG_RLS_SESSION=true',
     'PG_ARCHIVE_COMMAND=/bin/true',
+    'MQTT_ADMIN_USER=',
+    'MQTT_ADMIN_PASSWORD=',
+    'MQTT_BRIDGE_USER=',
+    'MQTT_BRIDGE_PASSWORD=',
+    'DX_IIOT_INGEST_TOKEN=',
   ]) {
     assert.ok(envEx.includes(reqVar), `prod.env.example missing ${reqVar}`);
   }
@@ -273,15 +282,16 @@ test('observability configs and PostgreSQL PITR archive script meet security, SP
   assert.match(pitrSh, /wal-g/);
 });
 
-test('iiot.yml enforces internal iiot-net, pinned digests, non-root caps, and localhost-only UI port', () => {
+test('iiot.yml enforces internal iiot-net, Mosquitto Dynamic Security, Node-RED LWT, pinned digests, non-root caps, and localhost-only UI port', () => {
   const iiot = read('infra/compose/iiot.yml');
   assert.match(iiot, /SPDX-License-Identifier:\s*Apache-2\.0/);
   assert.match(iiot, /iiot-net:\s*\r?\n\s*driver:\s*bridge\s*\r?\n\s*internal:\s*true/);
   assert.match(iiot, /no-new-privileges:true/);
   assert.match(iiot, /cap_drop:\s*\r?\n\s*-\s*ALL/);
   assert.match(iiot, /mem_limit:/);
+  assert.doesNotMatch(iiot, /timescaledb/i);
   const imageLines = iiot.split(/\r?\n/).filter((l) => /^\s*image:/.test(l));
-  assert.ok(imageLines.length >= 3);
+  assert.equal(imageLines.length, 2, `Expected exactly 2 pinned images (mosquitto + nodered) in iiot.yml, found ${imageLines.length}`);
   for (const line of imageLines) {
     assert.match(line, /@sha256:[a-f0-9]{64}/, `Unpinned image in iiot.yml: ${line}`);
   }
@@ -289,6 +299,17 @@ test('iiot.yml enforces internal iiot-net, pinned digests, non-root caps, and lo
     .map((m) => m[1])
     .filter((v) => /:\d+/.test(v));
   assert.deepEqual(portMatches, ['127.0.0.1:1880:1880']);
+
+  const dynsecSh = read('infra/config/mosquitto/init-dynsec.sh');
+  assert.ok(dynsecSh.startsWith('#!/bin/sh\n'), 'init-dynsec.sh must start with POSIX #!/bin/sh and LF');
+  assert.equal(dynsecSh.includes('\r'), false, 'init-dynsec.sh must use LF line endings');
+  assert.match(dynsecSh, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(dynsecSh, /mosquitto_ctrl dynsec init/);
+  assert.match(dynsecSh, /chown 1883:1883/);
+
+  const mosqConf = read('infra/config/mosquitto/mosquitto.conf');
+  assert.match(mosqConf, /allow_anonymous\s+false/);
+  assert.match(mosqConf, /mosquitto_dynamic_security\.so/);
 });
 
 test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak prod realm meet zero-trust standards', () => {
@@ -317,6 +338,8 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(apisixProd, /\/api\/dxos-mcp\/\*/);
   assert.match(apisixProd, /\/api\/dxosBlocks:telemetryIngest/);
   assert.match(apisixProd, /\/api\/dxosBlocks:alarmIngest/);
+  assert.match(apisixProd, /\/api\/dxosBroker:deviceStatusIngest/);
+  assert.match(apisixProd, /\/api\/dxosBroker:orionNotify/);
   assert.match(apisixProd, /\/api\/dxos:openapi/);
   assert.match(apisixProd, /\/api\/dxos:asyncapi/);
   assert.match(apisixProd, /\/api\/dxos:manifest/);
@@ -388,7 +411,7 @@ test('local compose stacks upgrade all images to non-EOL digests, add Redis PubS
     assert.match(text, /mem_limit:/);
   }
   const nocobase = read('infra/compose/nocobase.yml');
-  assert.match(nocobase, /redis:7\.4-alpine@sha256:/);
+  assert.match(nocobase, /valkey\/valkey:8\.1-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc/);
   assert.match(nocobase, /PUBSUB_ADAPTER:\s*redis/);
 
   const integration = read('infra/compose/integration.yml');

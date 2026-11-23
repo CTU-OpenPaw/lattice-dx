@@ -30,6 +30,9 @@ networks:
   scanner:
     driver: bridge
     internal: true
+  iiot-net:
+    driver: bridge
+    internal: true
 
 services:
   caddy:
@@ -155,12 +158,13 @@ services:
 
   redis:
     <<: *hardened
-    image: redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+    # BSD-3-Clause OSI-clean Redis-compatible store (Valkey)
+    image: valkey/valkey:8.1-alpine@sha256:9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc
     cap_add:
       - SETUID
       - SETGID
     command:
-      - redis-server
+      - valkey-server
       - --appendonly
       - "yes"
       - --requirepass
@@ -179,7 +183,7 @@ services:
     mem_limit: 640m
     cpus: "0.5"
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      test: ["CMD-SHELL", "valkey-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -613,6 +617,79 @@ services:
       retries: 10
       start_period: 20s
 
+  mosquitto:
+    <<: *hardened
+    profiles: ["iiot"]
+    image: eclipse-mosquitto:2.0.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+      - KILL
+    entrypoint: ["/bin/sh", "/mosquitto/init-dynsec.sh"]
+    environment:
+      MQTT_ADMIN_USER: ${MQTT_ADMIN_USER:?Set MQTT_ADMIN_USER}
+      MQTT_ADMIN_PASSWORD: ${MQTT_ADMIN_PASSWORD:?Set MQTT_ADMIN_PASSWORD}
+      MQTT_BRIDGE_USER: ${MQTT_BRIDGE_USER:?Set MQTT_BRIDGE_USER}
+      MQTT_BRIDGE_PASSWORD: ${MQTT_BRIDGE_PASSWORD:?Set MQTT_BRIDGE_PASSWORD}
+    expose:
+      - "1883"
+    volumes:
+      - ../config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ../config/mosquitto/init-dynsec.sh:/mosquitto/init-dynsec.sh:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    networks:
+      - iiot-net
+    mem_limit: 256m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 1883 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  nodered:
+    <<: *hardened
+    profiles: ["iiot"]
+    image: nodered/node-red:4.0.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        node -e 'const fs=require("fs");const u=process.env.MQTT_BRIDGE_USER||"";const p=process.env.MQTT_BRIDGE_PASSWORD||"";if(u&&p){fs.writeFileSync("/data/flows_cred.json",JSON.stringify({"latticedx-mqtt-broker":{user:u,password:p}}),{mode:0o600});}'
+        exec /usr/src/node-red/entrypoint.sh "$$@"
+    environment:
+      TZ: Asia/Ho_Chi_Minh
+      MQTT_BRIDGE_USER: ${MQTT_BRIDGE_USER:?Set MQTT_BRIDGE_USER}
+      MQTT_BRIDGE_PASSWORD: ${MQTT_BRIDGE_PASSWORD:?Set MQTT_BRIDGE_PASSWORD}
+      DX_IIOT_INGEST_URL: http://nocobase/api/dxosBlocks:telemetryIngest
+      DX_IIOT_STATUS_URL: http://nocobase/api/dxosBroker:deviceStatusIngest
+      DX_ORION_URL: http://orion-ld:1026
+      DX_IIOT_INGEST_TOKEN: ${DX_IIOT_INGEST_TOKEN:?Set DX_IIOT_INGEST_TOKEN}
+    expose:
+      - "1880"
+    volumes:
+      - nodered-data:/data
+      - ../config/nodered/flows.json:/data/flows.json:ro
+      - ../config/nodered/settings.js:/data/settings.js:ro
+    networks:
+      - iiot-net
+      - app
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+      nocobase:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:1880/').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
 volumes:
   caddy-data:
   caddy-config:
@@ -627,3 +704,6 @@ volumes:
   n8n-data:
   prometheus-data:
   grafana-data:
+  mosquitto-data:
+  mosquitto-log:
+  nodered-data:

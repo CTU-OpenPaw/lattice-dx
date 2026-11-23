@@ -111,7 +111,7 @@ routes:
 
   - id: dxos-telemetry-ingest
     priority: 80
-    uris: [/api/dxosBlocks:telemetryIngest, /api/dxosBlocks:alarmIngest]
+    uris: [/api/dxosBlocks:telemetryIngest, /api/dxosBlocks:alarmIngest, /api/dxosBroker:deviceStatusIngest, /api/dxosBroker:orionNotify]
     plugins:
       limit-count:
         count: 300

@@ -1099,13 +1099,13 @@ test('telemetry-points collection, migration 20261123000500, and OSI-clean IIoT 
     'TimescaleDB migration must invoke create_hypertable with if_not_exists => TRUE, migrate_data => TRUE',
   );
 
-  // Verify IIoT compose and configs
+  // Verify IIoT compose and configs (Valkey/PG only, unused timescaledb removed)
   const repoRoot = path.resolve(PLUGIN_ROOT, '../../..');
   const iiotYml = readFileSync(path.join(repoRoot, 'infra/compose/iiot.yml'), 'utf8');
   assert.match(iiotYml, /SPDX-License-Identifier:\s*Apache-2\.0/);
   assert.match(iiotYml, /eclipse-mosquitto:2\.0\.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353/);
   assert.match(iiotYml, /nodered\/node-red:4\.0\.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5/);
-  assert.match(iiotYml, /timescale\/timescaledb:2\.19\.3-pg16-oss@sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72/);
+  assert.doesNotMatch(iiotYml, /timescaledb/i);
   assert.doesNotMatch(iiotYml, /thingsboard|emqx|:latest\b/i);
   assert.match(iiotYml, /no-new-privileges:true/);
   assert.match(iiotYml, /cap_drop:\s*\r?\n\s*-\s*ALL/);
@@ -1120,12 +1120,17 @@ test('telemetry-points collection, migration 20261123000500, and OSI-clean IIoT 
   const mosq = readFileSync(path.join(repoRoot, 'infra/config/mosquitto/mosquitto.conf'), 'utf8');
   assert.match(mosq, /SPDX-License-Identifier:\s*Apache-2\.0/);
   assert.match(mosq, /listener\s+1883/);
+  assert.match(mosq, /allow_anonymous\s+false/);
+  assert.match(mosq, /plugin\s+\/usr\/lib\/mosquitto_dynamic_security\.so/);
   assert.match(mosq, /persistence\s+true/);
 
   const flowsRaw = readFileSync(path.join(repoRoot, 'infra/config/nodered/flows.json'), 'utf8');
   const flows = JSON.parse(flowsRaw);
   assert.ok(Array.isArray(flows) && flows.length >= 4);
   assert.ok(flows.some((n) => n.type === 'mqtt in' && n.topic === 'latticedx/+/+/telemetry'));
+  assert.ok(flows.some((n) => n.type === 'mqtt in' && n.topic === 'latticedx/+/+/status'));
+  const statusFn = flows.find((n) => n.id === 'latticedx-status-fn');
+  assert.ok(statusFn && String(statusFn.func || '').includes('dxosBroker:deviceStatusIngest'));
   const sanitizerNode = flows.find((n) => n.type === 'function');
   assert.ok(sanitizerNode && String(sanitizerNode.func || '').includes('X-Lattice-Edge-Token'));
   assert.ok(String(sanitizerNode.func || '').includes("env.get('DX_IIOT_INGEST_URL') || 'http://nocobase/api/dxosBlocks:telemetryIngest'"));
@@ -1400,17 +1405,17 @@ test('Fix Round 2: Node-RED sanitizer function routes to http://nocobase/api/dxo
   const fakeNode = { warn: (m) => warnings.push(m), error: (m) => errors.push(m) };
   const fakeEnv = new Map([['DX_IIOT_INGEST_TOKEN', 'edge-secret-token-2026-0123456789']]);
 
-  // Whitespace-only value must be dropped (never coerced to 0)
+  // Whitespace-only value must be dropped (never coerced to 0) on both NocoBase and Orion outputs
   const dropped = fn(
     { topic: 'latticedx/org-a/12/telemetry', payload: { numericValue: '   ' } },
     fakeNode,
     { get: (k) => fakeEnv.get(k) },
   );
-  assert.equal(dropped, null);
+  assert.deepEqual(dropped, [null, null]);
   assert.ok(warnings.length > 0);
 
   // Valid MQTT telemetry uses internal docker URL http://nocobase/api/dxosBlocks:telemetryIngest
-  const out = fn(
+  const [out, orionSkipped] = fn(
     { topic: 'latticedx/org-a/12/telemetry', payload: JSON.stringify({ metricName: 'temperature', value: -14.5, unit: 'CEL' }) },
     fakeNode,
     { get: (k) => fakeEnv.get(k) },
@@ -1420,7 +1425,24 @@ test('Fix Round 2: Node-RED sanitizer function routes to http://nocobase/api/dxo
   assert.equal(out.payload.organizationId, 'org-a');
   assert.equal(out.payload.assetEntityId, 'urn:ngsi-ld:Asset:org-a:native:12');
   assert.equal(out.payload.numericValue, -14.5);
+  assert.equal(orionSkipped, null);
   assert.equal(errors.length, 0);
+
+  // When DX_ORION_URL is set, output 2 emits a matching NGSI-LD Property PATCH
+  const orionEnv = new Map([
+    ['DX_IIOT_INGEST_TOKEN', 'edge-secret-token-2026-0123456789'],
+    ['DX_ORION_URL', 'http://orion-ld:1026'],
+  ]);
+  const [ingestWithOrion, orionOut] = fn(
+    { topic: 'latticedx/org-a/12/telemetry', payload: JSON.stringify({ metricName: 'temperature', value: -14.5, unit: 'CEL' }) },
+    fakeNode,
+    { get: (k) => orionEnv.get(k) },
+  );
+  assert.equal(ingestWithOrion.payload.numericValue, -14.5);
+  assert.equal(orionOut.url, 'http://orion-ld:1026/ngsi-ld/v1/entities/urn%3Angsi-ld%3AAsset%3Aorg-a%3Anative%3A12/attrs');
+  assert.equal(orionOut.headers['NGSILD-Tenant'], 'org-a');
+  assert.equal(orionOut.payload.temperature.type, 'Property');
+  assert.equal(orionOut.payload.temperature.value, -14.5);
 });
 
 test('dxosBlocks:telemetryIngest resolves Bearer JWT and verified DB roles when ACL skipCheck leaves currentUser undefined', async () => {

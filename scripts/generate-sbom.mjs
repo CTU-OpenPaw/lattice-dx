@@ -51,6 +51,7 @@ export const OCI_IMAGE_LICENSES = Object.freeze({
       ? { kind: 'id', value: 'Apache-2.0' }
       : { kind: 'name', value: 'Timescale License (TSL)' }
   ),
+  'valkey/valkey': () => ({ kind: 'id', value: 'BSD-3-Clause' }),
 });
 
 const PLATFORM_BINARY_FAMILIES = [
