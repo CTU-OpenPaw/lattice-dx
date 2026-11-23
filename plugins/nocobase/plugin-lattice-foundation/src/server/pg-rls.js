@@ -53,6 +53,15 @@ const TENANT_RLS_TABLES = Object.freeze([
   'latticeApiKeys',
   'latticePkiKeys',
   'latticeCryptoLedger',
+  'latticeFrozenSnapshots',
+  'latticeDataLineage',
+  'latticeDataQuarantine',
+  'latticeOrderLines',
+  'latticeStockLots',
+  'latticeEpodRecords',
+  'latticeDecisionTables',
+  'latticeDelegations',
+  'latticeTwinShadows',
 ]);
 
 const TENANT_RLS_TABLE_SET = new Set(TENANT_RLS_TABLES);

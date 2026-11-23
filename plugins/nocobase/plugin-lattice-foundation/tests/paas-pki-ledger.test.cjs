@@ -307,7 +307,7 @@ test('collections, migration 20261124000100, and pg-rls define all 3 tables with
     assert.ok(ledgerCol.fields.some((f) => f.name === 'signatureBase64' && f.type === 'text' && f.allowNull === false));
 
     const pgRls = require('../src/server/pg-rls');
-    assert.equal(pgRls.TENANT_RLS_TABLES.length, 25);
+    assert.ok(pgRls.TENANT_RLS_TABLES.length >= 25);
     for (const tbl of ['latticeApiKeys', 'latticePkiKeys', 'latticeCryptoLedger']) {
       assert.ok(pgRls.TENANT_RLS_TABLES.includes(tbl), `Missing ${tbl} in TENANT_RLS_TABLES`);
     }

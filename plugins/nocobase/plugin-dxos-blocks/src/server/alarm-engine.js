@@ -17,6 +17,7 @@ const ALARM_NOTIF_DEDUP_WINDOW_MS = 30 * 60 * 1000;
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const METRIC_NAME_RE = /^[a-zA-Z0-9_.-]{1,128}$/;
 const TELEMETRY_URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
+const BAD_TELEMETRY_QUALITIES = new Set(['bad', 'fault', 'corrupt', 'quarantined']);
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -356,10 +357,11 @@ async function ingestTelemetryPoint(db, {
   assetEntityId = '',
   metricName = 'temperature',
   numericValue,
-  unit = 'CEL',
+  unit,
   quality = 'good',
   sourceProtocol = 'http',
   observedAt = null,
+  bypassQuarantine = false,
 } = {}) {
   const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
   if (!ORG_ID_RE.test(orgId)) {
@@ -424,6 +426,57 @@ async function ingestTelemetryPoint(db, {
     });
     if (!assetRow || (val(assetRow, 'organizationId') && val(assetRow, 'organizationId') !== orgId)) {
       throw failAlarm('TELEMETRY_ASSET_NOT_FOUND', 404, 'Không tìm thấy tài sản trong phạm vi tổ chức.');
+    }
+  }
+
+  const hasExplicitUnit = unit !== null && unit !== undefined && String(unit).trim() !== '';
+  const isTemperatureMetric = metric.toLowerCase() === 'temperature' || (hasExplicitUnit && cleanUnit.toUpperCase() === 'CEL');
+  const isOutOfPhysicalRange = isTemperatureMetric && (parsedValue < -100 || parsedValue > 150);
+  const isBadQuality = BAD_TELEMETRY_QUALITIES.has(cleanQuality.toLowerCase());
+  const quarantineReason = bypassQuarantine !== true
+    ? (isOutOfPhysicalRange
+      ? 'SENSOR_OUT_OF_PHYSICAL_RANGE'
+      : (isBadQuality ? 'BAD_TELEMETRY_QUALITY' : null))
+    : null;
+
+  if (quarantineReason) {
+    const quarantineRepo = db?.getRepository?.('latticeDataQuarantine');
+    if (quarantineRepo && typeof quarantineRepo.create === 'function') {
+      const quarantineUid = `QRN-${Date.now().toString(36).toUpperCase()}-${randomBytes(4).toString('hex').toUpperCase()}`;
+      const createdQuarantine = await quarantineRepo.create({
+        values: {
+          organizationId: orgId,
+          quarantineUid,
+          sourceSystem: 'iiot',
+          assetEntityId: entityId,
+          metricName: metric,
+          numericValue: parsedValue,
+          unit: cleanUnit,
+          reasonCode: quarantineReason,
+          severity: quarantineReason === 'SENSOR_OUT_OF_PHYSICAL_RANGE' ? 'high' : 'medium',
+          rawPayload: {
+            organizationId: orgId,
+            ...(resolvedAssetId != null ? { assetId: resolvedAssetId } : {}),
+            assetEntityId: entityId,
+            metricName: metric,
+            numericValue: parsedValue,
+            unit: cleanUnit,
+            quality: cleanQuality,
+            sourceProtocol: cleanProtocol,
+            observedAt: observedDate.toISOString(),
+          },
+          status: 'quarantined',
+          active: true,
+        },
+      });
+      return {
+        quarantined: true,
+        quarantineUid: val(createdQuarantine, 'quarantineUid') || quarantineUid,
+        quarantineId: val(createdQuarantine, 'id') ?? null,
+        reasonCode: quarantineReason,
+        point: null,
+        triggeredAlarms: [],
+      };
     }
   }
 

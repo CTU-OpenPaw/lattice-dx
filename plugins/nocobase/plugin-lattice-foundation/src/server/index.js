@@ -27,7 +27,13 @@ const {registerNotificationCenter}=require('./notification-center');
 const {registerSlaEngine}=require('./sla-engine');
 const {registerObservability}=require('./observability');
 const {registerPaasApiKeys, createPaasApiKeyAuthMiddleware}=require('./paas-api-keys');
-const {registerPkiLedger}=require('./pki-ledger');
+const {registerPkiLedger, appendLedgerEntrySafely}=require('./pki-ledger');
+const {
+  registerDataGovernance,
+  computeMeanKineticTemperature,
+  recordLineageEdge,
+  captureQuarantineRecord,
+}=require('./data-governance');
 const {attachRlsPolicyToTable}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
@@ -56,6 +62,7 @@ class LatticeFoundationPlugin extends Plugin {
     registerObservability(this.app);
     registerPaasApiKeys(this.app);
     registerPkiLedger(this.app);
+    registerDataGovernance(this.app);
     this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'acl'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
@@ -82,5 +89,10 @@ class LatticeFoundationPlugin extends Plugin {
     await this.db.sequelize.transaction((transaction) => seedFoundation(this.db, transaction));
   }
 }
+LatticeFoundationPlugin.appendLedgerEntrySafely = appendLedgerEntrySafely;
+LatticeFoundationPlugin.computeMeanKineticTemperature = computeMeanKineticTemperature;
+LatticeFoundationPlugin.recordLineageEdge = recordLineageEdge;
+LatticeFoundationPlugin.captureQuarantineRecord = captureQuarantineRecord;
+LatticeFoundationPlugin.registerDataGovernance = registerDataGovernance;
 module.exports = LatticeFoundationPlugin;
 module.exports.default = LatticeFoundationPlugin;
