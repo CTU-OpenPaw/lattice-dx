@@ -12,6 +12,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  ADMIN_BUILDER_TOOL_NAMES,
+  OPERATIONAL_TOOL_NAMES,
   val,
   failTool,
   resolveCallerRoleNames,
@@ -20,6 +22,7 @@ const {
   safeGetResource,
   invokeResourceAction,
   createAuditedTool,
+  createDxosTools,
   SYSTEM_PROTECTED_COLLECTIONS,
   CUSTOM_COLLECTION_RE,
   FIELD_NAME_RE,
@@ -27,6 +30,7 @@ const {
   ALLOWED_BLOCK_MODELS,
 } = require('../src/server/ai-tools-core');
 const { createBuilderTools } = require('../src/server/ai-builder-tools');
+const { createMcpGatewayMiddleware } = require('../src/server/mcp-gateway');
 
 function makeBuilderHarness() {
   const flowModels = [
@@ -592,4 +596,353 @@ test('DxosRecordWorkbenchBlockModel is allowed and createCollection ensures orga
     const m = q.match(/CREATE INDEX IF NOT EXISTS "([^"]+)"/);
     assert.ok(m && m[1].length <= 63, `Expected index name <= 63 chars, got ${m?.[1]?.length}: ${m?.[1]}`);
   }
+});
+
+test('17-tool registry invariant (adminMcpToolsListed17 === 17) holds after Native Automation extension', async () => {
+  const { db } = makeBuilderHarness();
+  const allTools = createDxosTools();
+  assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
+  assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
+  assert.equal(allTools.length, 17);
+
+  const mw = createMcpGatewayMiddleware({
+    db,
+    tools: allTools,
+    itOtTools: [],
+    authResolver: async (token) => {
+      if (token === 'root-token') return { currentUser: { id: 1, username: 'admin' }, currentRoles: ['root'] };
+      if (token === 'emp-token') return { currentUser: { id: 9, username: 'emp9' }, currentRoles: ['ldx_employee'] };
+      return null;
+    },
+  });
+
+  const adminListCtx = {
+    path: '/api/dxos-mcp',
+    method: 'POST',
+    headers: { authorization: 'Bearer root-token' },
+    request: { body: { jsonrpc: '2.0', id: 101, method: 'tools/list' } },
+    set() {},
+  };
+  await mw(adminListCtx, async () => {});
+  const adminMcpToolsListed17 = adminListCtx.body.result.tools.length;
+  assert.equal(adminMcpToolsListed17, 17);
+
+  const wfToolMeta = adminListCtx.body.result.tools.find((t) => t.name === 'dxos_configure_workflow');
+  assert.ok(wfToolMeta, 'dxos_configure_workflow must remain in the 17-tool matrix');
+  assert.equal(wfToolMeta.inputSchema.properties.operation.enum.includes('listAutomations'), true);
+  assert.equal(wfToolMeta.inputSchema.properties.operation.enum.includes('runAutomation'), true);
+  assert.equal(wfToolMeta.inputSchema.properties.ruleKey.type, 'string');
+  assert.equal(wfToolMeta.inputSchema.properties.sampleEvent.type, 'object');
+  assert.equal(wfToolMeta.inputSchema.properties.triggerEventType.type, 'string');
+  assert.equal(wfToolMeta.inputSchema.properties.limit.type, 'integer');
+
+  const empListCtx = {
+    path: '/api/dxos-mcp',
+    method: 'POST',
+    headers: { authorization: 'Bearer emp-token' },
+    request: { body: { jsonrpc: '2.0', id: 102, method: 'tools/list' } },
+    set() {},
+  };
+  await mw(empListCtx, async () => {});
+  assert.equal(empListCtx.body.result.tools.length, 6);
+  assert.equal(empListCtx.body.result.tools.some((t) => t.name === 'dxos_configure_workflow'), false);
+});
+
+test('dxos_configure_workflow listAutomations delegates to dxosAutomations and falls back to tenant-scoped repo before flow_nodes', async () => {
+  const { db, ctx, byName } = makeBuilderHarness();
+  const wfTool = byName.get('dxos_configure_workflow');
+
+  // Strip workflows and flow_nodes repositories to confirm listAutomations branches BEFORE requiring flow_nodes
+  delete db.store.workflows;
+  delete db.store.flow_nodes;
+
+  // 1. Without resource or latticeAutomationRules repo -> 503 AUTOMATION_ENGINE_UNAVAILABLE
+  await assert.rejects(
+    () => wfTool.invoke(ctx, { operation: 'listAutomations' }),
+    (err) => err.status === 503 && err.code === 'AUTOMATION_ENGINE_UNAVAILABLE',
+  );
+
+  // 2. Repository fallback scoped strictly to actor.organizationId ('native-ui-lab') with run summaries
+  db.store.latticeAutomationRules = [
+    {
+      id: 1,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      name: 'CMMS Coldchain Auto-Ticket',
+      triggerEventType: 'alarm.raised',
+      dmnTableKey: 'cmms_priority_routing_v1',
+      actionsJson: [{ type: 'create_record' }, { type: 'notify_role' }],
+      active: true,
+      maxDepth: 8,
+    },
+    {
+      id: 2,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_epod_dispatch_notify',
+      name: 'ePOD Notify',
+      triggerEventType: 'epod.captured',
+      actionsJson: [{ type: 'call_connector' }],
+      active: false,
+      maxDepth: 4,
+    },
+    {
+      id: 3,
+      organizationId: 'foreign-org-b',
+      ruleKey: 'foreign_secret_rule',
+      name: 'Foreign Rule Must Not Leak',
+      triggerEventType: 'alarm.raised',
+      actionsJson: [{ type: 'notify_role' }],
+      active: true,
+    },
+  ];
+  db.store.latticeAutomationRuns = [
+    { id: 10, organizationId: 'native-ui-lab', ruleKey: 'auto_cmms_on_coldchain_fault', status: 'completed', finishedAt: '2026-11-23T10:00:00.000Z' },
+    { id: 11, organizationId: 'native-ui-lab', ruleKey: 'auto_cmms_on_coldchain_fault', status: 'failed', finishedAt: '2026-11-23T11:00:00.000Z' },
+    { id: 12, organizationId: 'foreign-org-b', ruleKey: 'auto_cmms_on_coldchain_fault', status: 'completed', finishedAt: '2026-11-23T12:00:00.000Z' },
+  ];
+
+  const fallbackAll = await wfTool.invoke(ctx, { operation: 'listAutomations', limit: 25 });
+  assert.equal(fallbackAll.organizationId, 'native-ui-lab');
+  assert.equal(fallbackAll.count, 2);
+  assert.equal(fallbackAll.items.some((r) => r.ruleKey === 'foreign_secret_rule'), false);
+  const cmmsRule = fallbackAll.items.find((r) => r.ruleKey === 'auto_cmms_on_coldchain_fault');
+  assert.ok(cmmsRule);
+  assert.equal(cmmsRule.actionCount, 2);
+  assert.equal(cmmsRule.runSummary.totalRuns, 2);
+  assert.equal(cmmsRule.runSummary.succeededRuns, 1);
+  assert.equal(cmmsRule.runSummary.failedRuns, 1);
+  assert.equal(cmmsRule.runSummary.latestRunId, 11);
+  assert.equal(cmmsRule.runSummary.latestStatus, 'failed');
+  assert.equal(fallbackAll.totalRecentRuns, 2);
+
+  const fallbackFiltered = await wfTool.invoke(ctx, { operation: 'listAutomations', triggerEventType: 'alarm.raised', limit: 10 });
+  assert.equal(fallbackFiltered.count, 1);
+  assert.equal(fallbackFiltered.items[0].ruleKey, 'auto_cmms_on_coldchain_fault');
+
+  // 3. Resource delegation when dxosAutomations is registered
+  const resourceCalls = [];
+  const baseGetRes = ctx.app.resourceManager.getResource;
+  ctx.app.resourceManager.getResource = (resName) => {
+    if (resName === 'dxosAutomations') {
+      return {
+        actions: {
+          get: (actionName) => actionName === 'listRules' ? {
+            handler: async (subCtx) => {
+              resourceCalls.push({ method: subCtx.method, params: subCtx.action.params });
+              subCtx.body = {
+                organizationId: subCtx.action.params.values.organizationId,
+                items: [{ ruleKey: 'delegated_rule_1', triggerEventType: 'telemetry.threshold_breached' }],
+              };
+            },
+          } : null,
+        },
+      };
+    }
+    return baseGetRes(resName);
+  };
+
+  const delegated = await wfTool.invoke(ctx, {
+    operation: 'listAutomations',
+    triggerEventType: 'telemetry.threshold_breached',
+    limit: 15,
+  });
+  assert.equal(delegated.organizationId, 'native-ui-lab');
+  assert.equal(delegated.items.length, 1);
+  assert.equal(delegated.items[0].ruleKey, 'delegated_rule_1');
+  assert.equal(resourceCalls.length, 1);
+  assert.equal(resourceCalls[0].method, 'GET');
+  assert.equal(resourceCalls[0].params.organizationId, 'native-ui-lab');
+  assert.equal(resourceCalls[0].params.triggerEventType, 'telemetry.threshold_breached');
+  assert.equal(resourceCalls[0].params.limit, 15);
+  assert.equal(resourceCalls[0].params.values.organizationId, 'native-ui-lab');
+});
+
+test('dxos_configure_workflow runAutomation handles missing ruleKey, dryRun, live dxosAutomations invocation, and non-admin block', async () => {
+  const { db, ctx, byName } = makeBuilderHarness();
+  const wfTool = byName.get('dxos_configure_workflow');
+
+  // Strip workflows and flow_nodes to ensure runAutomation does not depend on flow_nodes
+  delete db.store.workflows;
+  delete db.store.flow_nodes;
+
+  // 1. Missing ruleKey/workflowId fails cleanly with 400
+  await assert.rejects(
+    () => wfTool.invoke(ctx, { operation: 'runAutomation' }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_RULE_KEY_REQUIRED',
+  );
+  await assert.rejects(
+    () => wfTool.invoke(ctx, { operation: 'runAutomation', dryRun: true }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_RULE_KEY_REQUIRED',
+  );
+
+  // 2. Mount dxosAutomations:runNow and ensure dryRun does NOT trigger live execution
+  const runNowCalls = [];
+  const baseGetRes = ctx.app.resourceManager.getResource;
+  ctx.app.resourceManager.getResource = (resName) => {
+    if (resName === 'dxosAutomations') {
+      return {
+        actions: {
+          get: (actionName) => actionName === 'runNow' ? {
+            handler: async (subCtx) => {
+              runNowCalls.push({ method: subCtx.method, params: subCtx.action.params });
+              subCtx.body = {
+                executed: true,
+                organizationId: subCtx.action.params.values.organizationId,
+                ruleKey: subCtx.action.params.values.ruleKey,
+                runId: 801,
+                status: 'completed',
+              };
+            },
+          } : null,
+        },
+      };
+    }
+    return baseGetRes(resName);
+  };
+
+  const dry = await wfTool.invoke(ctx, {
+    operation: 'runAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    sampleEvent: { assetCode: 'COLD-ROOM-A1', tempC: -9.5 },
+    dryRun: true,
+  });
+  assert.deepEqual(dry, {
+    dryRun: true,
+    operation: 'runAutomation',
+    organizationId: 'native-ui-lab',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    sampleEvent: { assetCode: 'COLD-ROOM-A1', tempC: -9.5 },
+  });
+  assert.equal(runNowCalls.length, 0);
+
+  // 3. Live resource invocation delegates to dxosAutomations:runNow
+  const live = await wfTool.invoke(ctx, {
+    operation: 'runAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    sampleEvent: { assetCode: 'COLD-ROOM-A1', tempC: -9.5 },
+  });
+  assert.equal(live.executed, true);
+  assert.equal(live.runId, 801);
+  assert.equal(runNowCalls.length, 1);
+  assert.equal(runNowCalls[0].method, 'POST');
+  assert.equal(runNowCalls[0].params.organizationId, 'native-ui-lab');
+  assert.equal(runNowCalls[0].params.ruleKey, 'auto_cmms_on_coldchain_fault');
+  assert.deepEqual(runNowCalls[0].params.sampleEvent, { assetCode: 'COLD-ROOM-A1', tempC: -9.5 });
+  assert.deepEqual(runNowCalls[0].params.data, { assetCode: 'COLD-ROOM-A1', tempC: -9.5 });
+  assert.deepEqual(runNowCalls[0].params.values.sampleEvent, { assetCode: 'COLD-ROOM-A1', tempC: -9.5 });
+  assert.deepEqual(runNowCalls[0].params.values.data, { assetCode: 'COLD-ROOM-A1', tempC: -9.5 });
+
+  // 4. Fallback to plugin-dxos-studio automation-engine.js (executeAutomationRuleNow & executeRuleAgainstEvent) and clean 503 when unavailable
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  const noAutoResCtx = {
+    ...ctx,
+    app: {
+      ...ctx.app,
+      resourceManager: { getResource: () => null },
+    },
+  };
+  const engineCalls = [];
+  Module._load = function (request, parent, isMain) {
+    if (String(request).includes('automation-engine')) {
+      return {
+        executeAutomationRuleNow: async (_db, opts) => {
+          engineCalls.push(opts);
+          return { executed: true, via: 'engine-module', ruleKey: opts.ruleKey, organizationId: opts.organizationId };
+        },
+      };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const engineRes = await wfTool.invoke(noAutoResCtx, {
+      operation: 'runAutomation',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      config: { source: 'config-fallback' },
+    });
+    assert.equal(engineRes.executed, true);
+    assert.equal(engineRes.via, 'engine-module');
+    assert.equal(engineCalls.length, 1);
+    assert.equal(engineCalls[0].organizationId, 'native-ui-lab');
+    assert.deepEqual(engineCalls[0].sampleEvent, { source: 'config-fallback' });
+  } finally {
+    Module._load = origLoad;
+  }
+
+  // Fallback via real automation-engine.js export shape (executeRuleAgainstEvent + tenant-scoped latticeAutomationRules)
+  db.store.latticeAutomationRules = [
+    {
+      id: 71,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      triggerEventType: 'alarm.raised',
+    },
+    {
+      id: 72,
+      organizationId: 'foreign-org-b',
+      ruleKey: 'foreign_rule_only',
+      triggerEventType: 'alarm.raised',
+    },
+  ];
+  const ruleEngineCalls = [];
+  Module._load = function (request, parent, isMain) {
+    if (String(request).includes('automation-engine')) {
+      return {
+        executeRuleAgainstEvent: async (_db, ruleRow, eventPayload) => {
+          ruleEngineCalls.push({ ruleRow, eventPayload });
+          return { status: 'completed', ruleKey: ruleRow.ruleKey, organizationId: eventPayload.organizationId };
+        },
+      };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const viaRealShape = await wfTool.invoke(noAutoResCtx, {
+      operation: 'runAutomation',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      sampleEvent: { assetCode: 'COLD-ROOM-A1' },
+    });
+    assert.equal(viaRealShape.run.status, 'completed');
+    assert.equal(ruleEngineCalls.length, 1);
+    assert.equal(ruleEngineCalls[0].eventPayload.type, 'alarm.raised');
+    assert.deepEqual(ruleEngineCalls[0].eventPayload.data, { assetCode: 'COLD-ROOM-A1' });
+
+    await assert.rejects(
+      () => wfTool.invoke(noAutoResCtx, { operation: 'runAutomation', ruleKey: 'foreign_rule_only' }),
+      (err) => err.status === 404 && err.code === 'AUTOMATION_RULE_NOT_FOUND',
+    );
+  } finally {
+    Module._load = origLoad;
+  }
+
+  Module._load = function (request, parent, isMain) {
+    if (String(request).includes('automation-engine')) {
+      const err = new Error(`Cannot find module '${request}'`);
+      err.code = 'MODULE_NOT_FOUND';
+      throw err;
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    await assert.rejects(
+      () => wfTool.invoke(noAutoResCtx, { operation: 'runAutomation', ruleKey: 'auto_cmms_on_coldchain_fault' }),
+      (err) => err.status === 503 && err.code === 'AUTOMATION_ENGINE_UNAVAILABLE',
+    );
+  } finally {
+    Module._load = origLoad;
+  }
+
+  // 5. Non-admin employee is rejected 403
+  const empCtx = {
+    ...ctx,
+    state: { currentUser: { id: 9, username: 'emp9' }, currentRoles: ['ldx_employee'], currentRole: 'ldx_employee' },
+  };
+  await assert.rejects(
+    () => wfTool.invoke(empCtx, { operation: 'listAutomations' }),
+    (err) => err.status === 403 && err.code === 'DXOS_ADMIN_REQUIRED',
+  );
+  await assert.rejects(
+    () => wfTool.invoke(empCtx, { operation: 'runAutomation', ruleKey: 'auto_cmms_on_coldchain_fault' }),
+    (err) => err.status === 403 && err.code === 'DXOS_ADMIN_REQUIRED',
+  );
 });

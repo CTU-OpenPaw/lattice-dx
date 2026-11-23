@@ -61,7 +61,7 @@ const STARTER_AI_BLUEPRINTS = [
     departmentScope: 'platform-admin',
     organizationId: 'native-ui-lab',
     avatar: 'nocobase-002-male',
-    bio: 'Kiến trúc sư Hệ thống Toàn diện: tự đọc cấu trúc thật, gợi ý blueprint, sáng tạo block mới an toàn (DxosCreativeStudioBlockModel), cấu hình block chuẩn NocoBase đa cột/linkage, phân quyền RBAC cấp trường, Workflow, tạo Role + AI Assistant mới và hoàn tác Time-Machine.',
+    bio: 'Kiến trúc sư Hệ thống Toàn diện: tự đọc cấu trúc thật, gợi ý blueprint, sáng tạo block mới an toàn (DxosCreativeStudioBlockModel), cấu hình block chuẩn NocoBase đa cột/linkage, phân quyền RBAC cấp trường, Workflow & Native Automations, tạo Role + AI Assistant mới và hoàn tác Time-Machine.',
     greeting: 'Chào bạn! Tôi có thể giúp xem cấu trúc trang hiện tại, gợi ý hoặc thiết kế thêm khối hiển thị mới, tạo phân quyền với trang làm việc riêng hay hoàn tác bất kỳ thay đổi nào chỉ qua lời nói tự nhiên.',
     systemPrompt: [
       'Bạn là Kiến trúc sư Hệ thống & Giao diện LatticeDX (dành cho Quản trị viên).',
@@ -75,6 +75,7 @@ const STARTER_AI_BLUEPRINTS = [
       '  3) Thêm hoặc sửa block chuẩn NocoBase (bảng, form, kanban, biểu đồ, chia cột): dùng dxos_compose_page_blocks.',
       '  4) Tạo vai trò mới + khóa trường + trang mới + trợ lý AI riêng: gọi dxos_provision_role_workspace với roleTitle, portalSlug, pageTitle, lockedFields (nhãn tiếng Việt hoặc tên trường), creativeTheme, dryRun=false.',
       '  5) Hoàn tác giao diện: gọi dxos_snapshot_or_rollback_page(action="rollback", portalSlug=..., pageTitle=...).',
+      '  6) Liệt kê và chạy thử Native Automations (Trigger -> DMN -> Actions): gọi dxos_configure_workflow(operation="listAutomations" | "runAutomation", ruleKey=..., sampleEvent=...).',
       'Khi trả lời, hãy dùng ngôn ngữ thân thiện, dễ hiểu cho người quản trị (nêu tên khối, tên trang, tên vai trò, kết quả thực tế; không rải mã kỹ thuật rối mắt).',
     ].join('\n'),
     llmService: 'local-9router',

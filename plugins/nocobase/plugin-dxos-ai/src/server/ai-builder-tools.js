@@ -9,6 +9,7 @@
 'use strict';
 
 const { createHash } = require('node:crypto');
+const path = require('node:path');
 const {
   LDX_ROLE_RE,
   NATIVE_SURFACE_ACTIONS,
@@ -96,6 +97,275 @@ async function resolveOrgCrewBindings(db, organizationId, val) {
     ...(byRole.ldx_dispatcher || mgr ? { dispatcherEmployeeId: byRole.ldx_dispatcher || mgr } : {}),
     ...(byRole.ldx_driver || worker ? { driverEmployeeId: byRole.ldx_driver || worker } : {}),
   };
+}
+
+const FORBIDDEN_AUTOMATION_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const AUTOMATION_RULE_KEY_RE = /^[a-zA-Z0-9_.:-]{1,64}$/;
+
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Load @latticedx/plugin-dxos-studio automation-engine cleanly, rethrowing transitive errors.
+ */
+function loadStudioAutomationEngine() {
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-dxos-studio/dist/server/automation-engine',
+        '@latticedx/plugin-dxos-studio/src/server/automation-engine',
+        '../../../plugin-dxos-studio/dist/server/automation-engine',
+        '../../../plugin-dxos-studio/src/server/automation-engine',
+      ]
+    : [
+        '@latticedx/plugin-dxos-studio/src/server/automation-engine',
+        '../../../plugin-dxos-studio/src/server/automation-engine',
+        '../../../plugin-dxos-studio/dist/server/automation-engine',
+      ];
+  for (const modPath of candidates) {
+    try {
+      return require(modPath);
+    } catch (err) {
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
+    }
+  }
+  return null;
+}
+
+/**
+ * Aggregate per-rule execution statistics from latticeAutomationRuns within a single tenant.
+ */
+async function summarizeAutomationRuns(db, organizationId, val) {
+  const runsRepo = db?.getRepository?.('latticeAutomationRuns');
+  if (!runsRepo || typeof runsRepo.find !== 'function') {
+    return { totalRecentRuns: 0, byRuleKey: {} };
+  }
+  const rawRuns = (await runsRepo.find({ filter: { organizationId }, sort: ['-id'], limit: 200 })) || [];
+  const scopedRuns = rawRuns.filter((run) => val(run, 'organizationId') === organizationId);
+  const byRuleKey = {};
+  for (const run of scopedRuns) {
+    const rk = String(val(run, 'ruleKey') || (val(run, 'ruleId') != null ? `id:${val(run, 'ruleId')}` : '')).trim();
+    if (!rk || FORBIDDEN_AUTOMATION_KEYS.has(rk)) continue;
+    const status = String(val(run, 'status') || 'unknown').trim().toLowerCase();
+    const runId = Number(val(run, 'id')) || 0;
+    const ranAt = val(run, 'finishedAt') || val(run, 'startedAt') || val(run, 'createdAt') || null;
+    const ranAtIso = ranAt instanceof Date ? ranAt.toISOString() : (ranAt ? String(ranAt) : null);
+    if (!Object.hasOwn(byRuleKey, rk)) {
+      byRuleKey[rk] = {
+        totalRuns: 0,
+        succeededRuns: 0,
+        failedRuns: 0,
+        skippedRuns: 0,
+        latestRunId: runId || null,
+        latestStatus: status,
+        latestRunAt: ranAtIso,
+      };
+    }
+    const bucket = byRuleKey[rk];
+    bucket.totalRuns += 1;
+    if (status === 'completed' || status === 'succeeded' || status === 'success') bucket.succeededRuns += 1;
+    else if (status === 'failed' || status === 'error') bucket.failedRuns += 1;
+    else if (status === 'skipped' || status === 'halted') bucket.skippedRuns += 1;
+    if (runId > (bucket.latestRunId || 0)) {
+      bucket.latestRunId = runId;
+      bucket.latestStatus = status;
+      bucket.latestRunAt = ranAtIso;
+    }
+  }
+  return { totalRecentRuns: scopedRuns.length, byRuleKey };
+}
+
+/**
+ * List tenant-scoped native automation rules via dxosAutomations resource or repository fallback.
+ */
+async function runListAutomations(ctx, db, actor, args, { val, failTool, hasRes, invokeResourceAction }) {
+  const triggerEventType = typeof args.triggerEventType === 'string' && args.triggerEventType.trim()
+    ? args.triggerEventType.trim()
+    : '';
+  const limit = Math.max(1, Math.min(200, Number(args.limit) || 50));
+
+  if (hasRes(ctx, 'dxosAutomations')) {
+    const listParams = {
+      organizationId: actor.organizationId,
+      ...(triggerEventType ? { triggerEventType } : {}),
+      limit,
+    };
+    return invokeResourceAction(ctx, 'dxosAutomations', 'listRules', {
+      ...listParams,
+      values: listParams,
+      method: 'GET',
+    });
+  }
+
+  const rulesRepo = db?.getRepository?.('latticeAutomationRules');
+  if (!rulesRepo || typeof rulesRepo.find !== 'function') {
+    throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ Automation (dxosAutomations / latticeAutomationRules) chưa sẵn sàng.');
+  }
+
+  const filter = {
+    organizationId: actor.organizationId,
+    ...(triggerEventType ? { triggerEventType } : {}),
+  };
+  const rawRules = (await rulesRepo.find({ filter, sort: ['id'], limit })) || [];
+  const scopedRules = rawRules
+    .filter((r) => {
+      if (val(r, 'organizationId') !== actor.organizationId) return false;
+      if (triggerEventType && String(val(r, 'triggerEventType') || '').trim() !== triggerEventType) return false;
+      return true;
+    })
+    .slice(0, limit);
+
+  const runSummary = await summarizeAutomationRuns(db, actor.organizationId, val);
+  const items = scopedRules.map((r) => {
+    const id = val(r, 'id') ?? null;
+    const rk = val(r, 'ruleKey') || null;
+    const stats = (rk && Object.hasOwn(runSummary.byRuleKey, rk) ? runSummary.byRuleKey[rk] : null)
+      || (id != null && Object.hasOwn(runSummary.byRuleKey, `id:${id}`) ? runSummary.byRuleKey[`id:${id}`] : null);
+    const rawActions = val(r, 'actionsJson') ?? val(r, 'actions');
+    const actions = Array.isArray(rawActions) ? rawActions : [];
+    return {
+      id,
+      ruleKey: rk,
+      name: val(r, 'name') || null,
+      description: val(r, 'description') || null,
+      organizationId: val(r, 'organizationId'),
+      triggerEventType: val(r, 'triggerEventType') || null,
+      dmnTableKey: val(r, 'dmnTableKey') || null,
+      active: val(r, 'active') !== undefined ? Boolean(val(r, 'active')) : (val(r, 'enabled') !== false),
+      maxDepth: Number(val(r, 'maxDepth')) || 8,
+      actionCount: actions.length,
+      runSummary: stats || {
+        totalRuns: 0,
+        succeededRuns: 0,
+        failedRuns: 0,
+        skippedRuns: 0,
+        latestRunId: null,
+        latestStatus: null,
+        latestRunAt: null,
+      },
+    };
+  });
+
+  return {
+    operation: 'listAutomations',
+    organizationId: actor.organizationId,
+    count: items.length,
+    items,
+    totalRecentRuns: runSummary.totalRecentRuns,
+  };
+}
+
+/**
+ * Validate and trigger a native automation rule manually (dryRun, dxosAutomations, or engine module).
+ */
+async function runAutomationExecution(ctx, db, actor, args, { val, failTool, hasRes, invokeResourceAction }) {
+  let ruleKey = typeof args.ruleKey === 'string' ? args.ruleKey.trim() : '';
+  const parsedWorkflowId = args.workflowId != null ? Number(args.workflowId) : null;
+  const ruleId = parsedWorkflowId != null && Number.isInteger(parsedWorkflowId) && parsedWorkflowId > 0
+    ? parsedWorkflowId
+    : null;
+  if (!ruleKey && ruleId == null) {
+    throw failTool('AUTOMATION_RULE_KEY_REQUIRED', 400, 'Cần ruleKey hoặc workflowId để chạy automation.');
+  }
+  if (ruleKey && (FORBIDDEN_AUTOMATION_KEYS.has(ruleKey) || !AUTOMATION_RULE_KEY_RE.test(ruleKey))) {
+    throw failTool('AUTOMATION_RULE_KEY_INVALID', 400, 'ruleKey không hợp lệ.');
+  }
+
+  const sampleEvent = isPlainObject(args.sampleEvent)
+    ? args.sampleEvent
+    : (isPlainObject(args.config) ? args.config : {});
+
+  if (args.dryRun) {
+    return {
+      dryRun: true,
+      operation: 'runAutomation',
+      organizationId: actor.organizationId,
+      ruleKey: ruleKey || null,
+      ...(ruleId != null ? { workflowId: ruleId } : {}),
+      sampleEvent,
+    };
+  }
+
+  const isEnvelope = Boolean(sampleEvent.type || sampleEvent.eventType || isPlainObject(sampleEvent.data));
+
+  if (hasRes(ctx, 'dxosAutomations')) {
+    if (!ruleKey && ruleId != null) {
+      const rulesRepo = db?.getRepository?.('latticeAutomationRules');
+      const byId = rulesRepo?.findOne ? await rulesRepo.findOne({ filter: { organizationId: actor.organizationId, id: ruleId } }) : null;
+      if (byId && val(byId, 'organizationId') === actor.organizationId && val(byId, 'ruleKey')) {
+        ruleKey = String(val(byId, 'ruleKey')).trim();
+      }
+    }
+    const runParams = {
+      organizationId: actor.organizationId,
+      ...(ruleKey ? { ruleKey } : {}),
+      ...(ruleId != null ? { id: ruleId, ruleId } : {}),
+      sampleEvent,
+      ...(isEnvelope ? { event: { ...sampleEvent, organizationId: actor.organizationId } } : { data: sampleEvent }),
+    };
+    return invokeResourceAction(ctx, 'dxosAutomations', 'runNow', {
+      ...runParams,
+      values: runParams,
+      method: 'POST',
+    });
+  }
+
+  const engineMod = loadStudioAutomationEngine();
+  const runFn = engineMod && (
+    typeof engineMod.executeAutomationRuleNow === 'function'
+      ? engineMod.executeAutomationRuleNow
+      : (typeof engineMod.runAutomationNow === 'function' ? engineMod.runAutomationNow : null)
+  );
+  if (runFn) {
+    return runFn(db, {
+      organizationId: actor.organizationId,
+      ...(ruleKey ? { ruleKey } : {}),
+      ...(ruleId != null ? { id: ruleId, ruleId } : {}),
+      sampleEvent,
+      actor,
+      ctx,
+    });
+  }
+
+  if (engineMod && typeof engineMod.executeRuleAgainstEvent === 'function') {
+    const rulesRepo = db?.getRepository?.('latticeAutomationRules');
+    if (!rulesRepo || typeof rulesRepo.findOne !== 'function') {
+      throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ Automation Engine (latticeAutomationRules) chưa sẵn sàng.');
+    }
+    const filter = ruleKey
+      ? { organizationId: actor.organizationId, ruleKey }
+      : { organizationId: actor.organizationId, id: ruleId };
+    const ruleRow = await rulesRepo.findOne({ filter });
+    if (!ruleRow || val(ruleRow, 'organizationId') !== actor.organizationId) {
+      throw failTool('AUTOMATION_RULE_NOT_FOUND', 404, `Không tìm thấy automation rule "${ruleKey || ruleId}" trong phạm vi tổ chức.`);
+    }
+    const eventPayload = isEnvelope
+      ? { ...sampleEvent, organizationId: actor.organizationId }
+      : {
+          type: val(ruleRow, 'triggerEventType') || 'manual.trigger',
+          source: 'dxos-ai:dxos_configure_workflow',
+          depth: 0,
+          organizationId: actor.organizationId,
+          data: sampleEvent,
+        };
+    const run = await engineMod.executeRuleAgainstEvent(db, ruleRow, eventPayload, {
+      app: ctx?.app || db?.app,
+      actor: {
+        id: actor.userId,
+        userId: actor.userId,
+        employeeId: actor.employeeId,
+        username: actor.username,
+        organizationId: actor.organizationId,
+      },
+      ignoreCooldown: true,
+    });
+    return { run };
+  }
+
+  throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ Automation Engine (dxosAutomations) chưa sẵn sàng.');
 }
 
 function createBuilderTools(deps) {
@@ -929,12 +1199,12 @@ function createBuilderTools(deps) {
       name: 'dxos_configure_workflow',
       adminOnly: true,
       defaultPermission: 'ASK',
-      introduction: { title: 'Kỹ sư Cấu hình Workflow', about: 'Đọc đồ thị node, sửa config node, thêm node mới, dựng custom workflow và bật/tắt trigger.' },
-      description: 'Inspect workflow flow_nodes graphs, update node configs, add nodes, build custom collection workflows, and toggle enabled state (Admin only).',
+      introduction: { title: 'Kỹ sư Cấu hình Workflow & Automation', about: 'Đọc đồ thị node, sửa config node, thêm node mới, dựng custom workflow, bật/tắt trigger, liệt kê và chạy Native Automations.' },
+      description: 'Inspect workflow flow_nodes graphs, update node configs, add nodes, build custom collection workflows, toggle enabled state, and list or run native DMN automations (Admin only).',
       schema: {
-        description: 'Workflow graph engineering operation.',
+        description: 'Workflow graph engineering and Native Automation operation.',
         properties: {
-          operation: { type: 'string', required: true, enum: ['inspectWorkflow', 'updateNodeConfig', 'addNode', 'buildCustomWorkflow', 'toggleWorkflow'] },
+          operation: { type: 'string', required: true, enum: ['inspectWorkflow', 'updateNodeConfig', 'addNode', 'buildCustomWorkflow', 'toggleWorkflow', 'listAutomations', 'runAutomation'] },
           workflowId: { type: 'integer' },
           titleQuery: { type: 'string', maxLength: 100 },
           title: { type: 'string', maxLength: 120 },
@@ -950,10 +1220,21 @@ function createBuilderTools(deps) {
           config: { type: 'object' },
           configPatch: { type: 'object' },
           enabled: { type: 'boolean' },
+          ruleKey: { type: 'string', maxLength: 64 },
+          sampleEvent: { type: 'object' },
+          triggerEventType: { type: 'string', maxLength: 100 },
+          limit: { type: 'integer' },
           dryRun: { type: 'boolean', default: false },
         },
       },
       async run(ctx, db, actor, args) {
+        if (args.operation === 'listAutomations') {
+          return runListAutomations(ctx, db, actor, args, { val, failTool, hasRes, invokeResourceAction });
+        }
+        if (args.operation === 'runAutomation') {
+          return runAutomationExecution(ctx, db, actor, args, { val, failTool, hasRes, invokeResourceAction });
+        }
+
         const wfRepo = db.getRepository('workflows');
         const nodeRepo = db.getRepository('flow_nodes');
         if (!wfRepo || !nodeRepo) throw failTool('WORKFLOW_ENGINE_UNAVAILABLE', 503, 'Workflow/flow_nodes repository unavailable.');

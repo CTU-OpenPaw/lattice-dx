@@ -204,7 +204,7 @@ test('all 7 pre-20261124 sibling-plugin migrations attach PG RLS across all 8 ta
   }
 });
 
-test('migration 20261124000500-reconcile-sibling-rls discovers and attaches PG RLS for all 34 TENANT_RLS_TABLES and is a safe no-op on non-Postgres and down()', async () => {
+test('migration 20261124000500-reconcile-sibling-rls discovers and attaches PG RLS for all 42 TENANT_RLS_TABLES and is a safe no-op on non-Postgres and down()', async () => {
   const migPath = path.join(REPO_ROOT, 'plugins/nocobase/plugin-dxos-ai/src/server/migrations/20261124000500-reconcile-sibling-rls.js');
   const migSrc = readFileSync(migPath, 'utf8');
   assert.match(migSrc, /SPDX-License-Identifier:\s*Apache-2\.0/);
@@ -212,13 +212,13 @@ test('migration 20261124000500-reconcile-sibling-rls discovers and attaches PG R
   assert.match(migSrc, /attachRlsPolicyToTable/);
 
   const pgRls = require(PG_RLS_PATH);
-  assert.equal(pgRls.TENANT_RLS_TABLES.length, 34);
+  assert.equal(pgRls.TENANT_RLS_TABLES.length, 42);
 
   const MigrationCls = loadMigrationClass(migPath);
 
-  // 1. Postgres fallback reconciles all 34 tables via discoverTenantRlsTables -> attachRlsPolicyToTable
+  // 1. Postgres fallback reconciles all 42 tables via discoverTenantRlsTables -> attachRlsPolicyToTable
   const sqlLog = [];
-  const fakeTx = { id: 'tx-reconcile-34' };
+  const fakeTx = { id: 'tx-reconcile-42' };
   const migPg = new MigrationCls({
     db: {
       sequelize: {

@@ -181,14 +181,23 @@ function safeGetResource(ctx, resourceName) {
   return null;
 }
 
-async function invokeResourceAction(ctx, resourceName, actionName, { filterByTk, values } = {}) {
+async function invokeResourceAction(ctx, resourceName, actionName, options = {}) {
+  const { filterByTk, values, method, ...extraParams } = options && typeof options === 'object' ? options : {};
   const resource = safeGetResource(ctx, resourceName);
   const handler = resource?.actions?.get?.(actionName)?.handler || resource?.actions?.[actionName];
   if (typeof handler !== 'function') {
     throw failTool('HOST_ACTION_UNAVAILABLE', 503, `Dịch vụ ${resourceName}:${actionName} chưa sẵn sàng.`);
   }
-  const params = { resourceName, actionName, ...(filterByTk != null ? { filterByTk } : {}), ...(values ? { values } : {}) };
+  const params = {
+    resourceName,
+    actionName,
+    ...extraParams,
+    ...(filterByTk != null ? { filterByTk } : {}),
+    ...(values ? { values } : {}),
+  };
   const subCtx = {
+    ...(method ? { method } : {}),
+    ...(method === 'GET' ? { query: { ...extraParams } } : {}),
     app: ctx.app,
     db: ctx.db,
     dataSource: ctx.dataSource || ctx.app?.mainDataSource,
