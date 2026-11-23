@@ -1,0 +1,67 @@
+# @file LatticeDX — Open Digital Enterprise Platform
+# @author CTU-OpenPaw
+# @copyright (C) 2026 CTU-OpenPaw
+# @license Apache-2.0
+# @see https://github.com/CTU-OpenPaw/lattice-dx
+# SPDX-License-Identifier: Apache-2.0
+
+groups:
+  - name: latticedx-core-alerts
+    interval: 30s
+    rules:
+      - alert: LatticeDxNocoBaseDown
+        expr: up{job="nocobase"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: core-runtime
+        annotations:
+          summary: "LatticeDX NocoBase engine is down"
+          description: "Prometheus failed to scrape /api/dxos:metrics on nocobase:80 for more than 1 minute."
+
+      - alert: LatticeDxHigh5xxRate
+        expr: |
+          (
+            sum(rate(latticedx_http_requests_total{status_class="5xx"}[5m]))
+            /
+            clamp_min(sum(rate(latticedx_http_requests_total[5m])), 0.001)
+          ) > 0.05
+          and
+          sum(rate(latticedx_http_requests_total[5m])) > 0.01
+        for: 2m
+        labels:
+          severity: critical
+          component: http-api
+        annotations:
+          summary: "LatticeDX HTTP 5xx error rate exceeds 5%"
+          description: "HTTP 5xx response ratio exceeded 5% over the last 5 minutes."
+
+      - alert: LatticeDxOutboxBacklogHigh
+        expr: sum(latticedx_outbox_by_state{state=~"pending|retry|failed"}) > 50
+        for: 5m
+        labels:
+          severity: warning
+          component: context-outbox
+        annotations:
+          summary: "LatticeDX NGSI-LD/n8n outbox backlog is high"
+          description: "Pending, retry, and failed context outbox events exceed 50 items ({{ $value }})."
+
+      - alert: LatticeDxCriticalColdAlarmsActive
+        expr: latticedx_active_alarms_total > 0
+        for: 3m
+        labels:
+          severity: critical
+          component: cold-chain-alarms
+        annotations:
+          summary: "Active LatticeDX incident or cold-chain alarms require triage"
+          description: "{{ $value }} open or acknowledged incident alarms have remained active for more than 3 minutes."
+
+      - alert: LatticeDxQuotaSpike
+        expr: delta(latticedx_ai_audit_logs_total[15m]) > 200
+        for: 5m
+        labels:
+          severity: warning
+          component: ai-mcp-quota
+        annotations:
+          summary: "LatticeDX AI/MCP invocation spike detected"
+          description: "AI and MCP audit log volume increased by {{ $value }} invocations in 15 minutes; review tenant token quotas."

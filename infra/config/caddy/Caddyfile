@@ -11,7 +11,7 @@
     X-Content-Type-Options "nosniff"
     X-Frame-Options "SAMEORIGIN"
     Referrer-Policy "strict-origin-when-cross-origin"
-    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    Permissions-Policy "camera=(self), microphone=(), geolocation=(self)"
     -Server
   }
 }
@@ -20,8 +20,10 @@
   import security_headers
   encode gzip zstd
 
-  handle /v1/* {
-    reverse_proxy gateway:9080
+  handle /api/* {
+    reverse_proxy gateway:9080 {
+      flush_interval -1
+    }
   }
 
   handle {

@@ -28,7 +28,7 @@ test('prod.yml enforces 4 isolated networks, mandatory secrets, pinned upgraded 
 
   // All image lines must be pinned with @sha256
   const imageLines = prod.split(/\r?\n/).filter((l) => /^\s*image:/.test(l));
-  assert.ok(imageLines.length >= 15, `Expected >=15 pinned service images in prod.yml, found ${imageLines.length}`);
+  assert.ok(imageLines.length >= 17, `Expected >=17 pinned service images in prod.yml, found ${imageLines.length}`);
   for (const line of imageLines) {
     assert.match(line, /@sha256:[a-f0-9]{64}/, `Unpinned image in prod.yml: ${line}`);
   }
@@ -51,6 +51,7 @@ test('prod.yml enforces 4 isolated networks, mandatory secrets, pinned upgraded 
     'gotenberg/gotenberg:8.20.1@sha256:cda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac',
     'otel/opentelemetry-collector-contrib:0.123.0@sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2',
     'prom/prometheus:v3.3.0@sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1',
+    'grafana/grafana-oss:11.5.8@sha256:b8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48',
   ]) {
     assert.ok(prod.includes(expected), `prod.yml must pin ${expected}`);
   }
@@ -92,6 +93,7 @@ test('prod.yml enforces 4 isolated networks, mandatory secrets, pinned upgraded 
     'NOCOBASE_APP_KEY=',
     'APISIX_OIDC_CLIENT_SECRET=',
     'DX_METRICS_TOKEN=CHANGE_ME_METRICS_TOKEN',
+    'GRAFANA_ADMIN_PASSWORD=CHANGE_ME_GRAFANA_ADMIN_PASSWORD',
     'FILE_STORAGE_PROVIDER=s3',
     'PG_ARCHIVE_COMMAND=/bin/true',
   ]) {
@@ -144,10 +146,31 @@ test('prod.yml wires file-scanner, observability profile, pdf profile, nocobase 
   const prom = serviceSection(prod, 'prometheus');
   assert.match(prom, /profiles:\s*\["observability"\]/);
   assert.match(prom, /\.\.\/config\/prometheus\/prometheus\.yml:[^:\r\n]+:ro/);
+  assert.match(prom, /\.\.\/config\/prometheus\/alerts\.yml:\/etc\/prometheus\/alerts\.yml:ro/);
   assert.match(prom, /\/tmp:uid=65534,gid=65534,mode=0700,noexec,nosuid,size=16m/);
   assert.match(prom, /mem_limit:\s*512m/);
   assert.match(prom, /-\s*app/);
   assert.match(prom, /-\s*data/);
+
+  const grafana = serviceSection(prod, 'grafana');
+  assert.match(grafana, /profiles:\s*\["observability"\]/);
+  assert.match(grafana, /grafana\/grafana-oss:11\.5\.8@sha256:b8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48/);
+  assert.doesNotMatch(grafana, /^\s*ports:/m);
+  assert.match(grafana, /GF_SECURITY_ADMIN_USER:\s*\$\{GRAFANA_ADMIN_USER:-admin\}/);
+  assert.match(grafana, /GF_SECURITY_ADMIN_PASSWORD:\s*\$\{GRAFANA_ADMIN_PASSWORD:\?Set GRAFANA_ADMIN_PASSWORD\}/);
+  assert.match(grafana, /GF_USERS_ALLOW_SIGN_UP:\s*"false"/);
+  assert.match(grafana, /GF_ANALYTICS_REPORTING_ENABLED:\s*"false"/);
+  assert.match(grafana, /\.\.\/config\/grafana\/provisioning:\/etc\/grafana\/provisioning:ro/);
+  assert.match(grafana, /\.\.\/config\/grafana\/dashboards:\/var\/lib\/grafana\/dashboards:ro/);
+  assert.match(grafana, /grafana-data:\/var\/lib\/grafana/);
+  assert.match(grafana, /prometheus:/);
+  assert.match(grafana, /mem_limit:\s*512m/);
+  assert.match(grafana, /cpus:\s*"0\.5"/);
+  assert.match(grafana, /127\.0\.0\.1:3000\/api\/health/);
+  assert.match(grafana, /-\s*app/);
+  assert.match(grafana, /-\s*data/);
+  assert.doesNotMatch(grafana, /-\s*edge/);
+  assert.match(prod, /^volumes:[\s\S]*^\s{2}grafana-data:/m);
 
   const gotenberg = serviceSection(prod, 'gotenberg');
   assert.match(gotenberg, /profiles:\s*\["pdf"\]/);
@@ -177,6 +200,7 @@ test('observability configs and PostgreSQL PITR archive script meet security, SP
 
   const promCfg = read('infra/config/prometheus/prometheus.yml');
   assert.match(promCfg, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(promCfg, /rule_files:\s*\["\/etc\/prometheus\/alerts\.yml"\]/);
   assert.match(promCfg, /nocobase:80/);
   assert.match(promCfg, /\/api\/dxos:metrics/);
   assert.match(promCfg, /caddy:2020/);
@@ -184,6 +208,50 @@ test('observability configs and PostgreSQL PITR archive script meet security, SP
   assert.match(promCfg, /keycloak:9000/);
   assert.match(promCfg, /credentials_file:/);
   assert.doesNotMatch(promCfg, /CHANGE_ME_|bearer_token:\s*["']?[A-Za-z0-9._-]{8,}/i);
+
+  assert.equal(existsSync(join(ROOT, 'infra/config/prometheus/alerts.yml')), true, 'Missing infra/config/prometheus/alerts.yml');
+  const alertsCfg = read('infra/config/prometheus/alerts.yml');
+  assert.match(alertsCfg, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(alertsCfg, /@copyright\s*\(C\)\s*2026 CTU-OpenPaw/);
+  for (const alertName of [
+    'LatticeDxNocoBaseDown',
+    'LatticeDxHigh5xxRate',
+    'LatticeDxOutboxBacklogHigh',
+    'LatticeDxCriticalColdAlarmsActive',
+    'LatticeDxQuotaSpike',
+  ]) {
+    assert.match(alertsCfg, new RegExp(`alert:\\s*${alertName}\\b`), `alerts.yml missing alert ${alertName}`);
+  }
+
+  assert.equal(existsSync(join(ROOT, 'infra/config/grafana/provisioning/datasources/prometheus.yml')), true, 'Missing Grafana datasource provisioning');
+  const grafanaDs = read('infra/config/grafana/provisioning/datasources/prometheus.yml');
+  assert.match(grafanaDs, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(grafanaDs, /@copyright\s*\(C\)\s*2026 CTU-OpenPaw/);
+  assert.match(grafanaDs, /name:\s*Prometheus/);
+  assert.match(grafanaDs, /uid:\s*latticedx-prom/);
+  assert.match(grafanaDs, /url:\s*http:\/\/prometheus:9090/);
+  assert.match(grafanaDs, /isDefault:\s*true/);
+
+  assert.equal(existsSync(join(ROOT, 'infra/config/grafana/provisioning/dashboards/dashboards.yml')), true, 'Missing Grafana dashboards provider provisioning');
+  const grafanaDashProv = read('infra/config/grafana/provisioning/dashboards/dashboards.yml');
+  assert.match(grafanaDashProv, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(grafanaDashProv, /@copyright\s*\(C\)\s*2026 CTU-OpenPaw/);
+  assert.match(grafanaDashProv, /path:\s*\/var\/lib\/grafana\/dashboards/);
+
+  assert.equal(existsSync(join(ROOT, 'infra/config/grafana/dashboards/latticedx-360.json')), true, 'Missing Grafana latticedx-360.json dashboard');
+  const dashText = read('infra/config/grafana/dashboards/latticedx-360.json');
+  const dash = JSON.parse(dashText);
+  assert.equal(dash.uid, 'latticedx-360');
+  assert.ok(Array.isArray(dash.panels) && dash.panels.length >= 6, 'latticedx-360.json must define >= 6 observability panels');
+  const exprs = dash.panels.flatMap((p) => (p.targets || []).map((t) => String(t.expr || ''))).join('\n');
+  assert.match(exprs, /latticedx_http_requests_total/);
+  assert.match(exprs, /latticedx_http_request_duration_seconds_bucket/);
+  assert.match(exprs, /latticedx_active_alarms_total/);
+  assert.match(exprs, /latticedx_outbox_by_state/);
+  assert.match(exprs, /latticedx_unread_notifications_total/);
+  assert.match(exprs, /up\{job="nocobase"\}/);
+  assert.match(dashText, /latticedx-prom/);
+  assert.doesNotMatch(dashText, /CHANGE_ME_|local-gateway-secret/i);
 
   const pitrSh = read('infra/config/postgres/pitr-archive.sh');
   assert.ok(pitrSh.startsWith('#!/bin/sh\n'), 'pitr-archive.sh must start with POSIX #!/bin/sh and LF');
@@ -218,6 +286,9 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(caddy, /Strict-Transport-Security/);
   assert.match(caddy, /X-Content-Type-Options\s+"?nosniff"?/);
   assert.match(caddy, /X-Frame-Options\s+"?SAMEORIGIN"?/);
+  assert.match(caddy, /Permissions-Policy\s+"camera=\(self\),\s*microphone=\(\),\s*geolocation=\(self\)"/);
+  assert.match(caddy, /handle\s+\/api\/\*\s*\{\s*reverse_proxy\s+gateway:9080\s*\{\s*flush_interval\s+-1\s*\}/s);
+  assert.doesNotMatch(caddy, /\/v1\/\*/);
   assert.match(caddy, /reverse_proxy\s+nocobase:80/);
   assert.match(caddy, /reverse_proxy\s+keycloak:8080/);
   assert.match(caddy, /http:\/\/:2020/);
@@ -228,8 +299,20 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.doesNotMatch(apisixProd, /ssl_verify:\s*false/);
   assert.doesNotMatch(apisixProd, /local-gateway-secret/);
   assert.doesNotMatch(apisixProd, /"api:4000"/);
+  assert.doesNotMatch(apisixProd, /\/v1\//);
   assert.match(apisixProd, /proxy-rewrite/);
   assert.match(apisixProd, /\/api\/dxos:health/);
+  assert.match(apisixProd, /\/api\/dxos-oidc\/\*/);
+  assert.match(apisixProd, /\/api\/dxos-mcp/);
+  assert.match(apisixProd, /\/api\/dxos-mcp\/\*/);
+  assert.match(apisixProd, /\/api\/dxosBlocks:telemetryIngest/);
+  assert.match(apisixProd, /\/api\/dxosBlocks:alarmIngest/);
+  assert.match(apisixProd, /\/api\/dxos:openapi/);
+  assert.match(apisixProd, /\/api\/dxos:asyncapi/);
+  assert.match(apisixProd, /\/api\/dxos:manifest/);
+  assert.match(apisixProd, /\/api\/dxos:sw\.js/);
+  assert.match(apisixProd, /\/api\/dxosWms:publicTrack/);
+  assert.match(apisixProd, /uri:\s*\/api\/\*/);
   assert.match(apisixProd, /"nocobase:80"/);
   assert.match(apisixProd, /ssl_verify:\s*true/);
   assert.match(apisixProd, /policy:\s*redis/);

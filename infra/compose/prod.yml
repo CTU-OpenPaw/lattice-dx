@@ -552,6 +552,7 @@ services:
       DX_METRICS_TOKEN: ${DX_METRICS_TOKEN:?Set DX_METRICS_TOKEN}
     volumes:
       - ../config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     networks:
       - app
@@ -563,6 +564,34 @@ services:
       interval: 15s
       timeout: 5s
       retries: 10
+
+  grafana:
+    <<: *hardened
+    profiles: ["observability"]
+    image: grafana/grafana-oss:11.5.8@sha256:b8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    volumes:
+      - ../config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    networks:
+      - app
+      - data
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    mem_limit: 512m
+    cpus: "0.5"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null 2>&1 || curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   gotenberg:
     <<: *hardened
@@ -597,3 +626,4 @@ volumes:
   orion-mongo-data:
   n8n-data:
   prometheus-data:
+  grafana-data:
