@@ -130,6 +130,25 @@ async function saveVoucherPatch(db, collection, id, organizationId, row, patch, 
   return { ...toObj(row), ...patch };
 }
 
+async function safeAppendVoucherLedger(db, { organizationId, eventType, collection, recordId, actor, payload, metadata = null }) {
+  try {
+    if (typeof db?.getRepository !== 'function' || !db.getRepository('latticeCryptoLedger')) return;
+    const { appendLedgerEntry } = require('./pki-ledger');
+    await appendLedgerEntry(db, {
+      organizationId,
+      eventType,
+      targetCollection: collection,
+      targetRecordId: String(recordId),
+      actor: {
+        userId: actor?.userId ? String(actor.userId) : null,
+        username: actor?.username || (actor?.employeeId ? `employee-${actor.employeeId}` : 'operator'),
+      },
+      payload,
+      metadata,
+    });
+  } catch {}
+}
+
 async function safeLogLifecycle(db, { organizationId, collection, recordId, body, actor }) {
   try {
     await recordChatterEntry(db, {
@@ -206,6 +225,14 @@ async function submitVoucher(db, { collection, id, organizationId, actor, expect
     body: `Trình duyệt chứng từ ${updated.code || recordId} (draft -> submitted)`,
     actor,
   });
+  await safeAppendVoucherLedger(db, {
+    organizationId,
+    eventType: 'voucher.submitted',
+    collection,
+    recordId,
+    actor,
+    payload: updated,
+  });
   try {
     await dispatchRoleNotifications(db, {
       organizationId,
@@ -256,6 +283,15 @@ async function cancelVoucher(db, { collection, id, organizationId, actor, cancel
     recordId,
     body: `Hủy chứng từ ${updated.code || recordId}: ${reason}`,
     actor,
+  });
+  await safeAppendVoucherLedger(db, {
+    organizationId,
+    eventType: 'voucher.cancelled',
+    collection,
+    recordId,
+    actor,
+    payload: updated,
+    metadata: { cancelReason: reason },
   });
   await safeNotifyRequester(db, {
     organizationId,
@@ -326,6 +362,15 @@ async function amendVoucher(db, { collection, id, organizationId, actor, patch =
     recordId: created.amended.id,
     body: `Khởi tạo bản điều chỉnh #${created.amended.amendmentNo} từ ${created.source.code} (ID ${recordId})`,
     actor,
+  });
+  await safeAppendVoucherLedger(db, {
+    organizationId,
+    eventType: 'voucher.amended',
+    collection,
+    recordId: created.amended.id,
+    actor,
+    payload: created.amended,
+    metadata: { amendedFromId: recordId, amendmentNo: created.amended.amendmentNo },
   });
   await safeNotifyRequester(db, {
     organizationId,

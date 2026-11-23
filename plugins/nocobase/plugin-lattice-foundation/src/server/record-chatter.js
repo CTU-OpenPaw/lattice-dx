@@ -149,6 +149,32 @@ async function recordChatterEntry(
     },
     ...(transaction ? { transaction } : {}),
   });
+  try {
+    if (typeof db?.getRepository === 'function' && db.getRepository('latticeCryptoLedger')) {
+      const { appendLedgerEntry } = require('./pki-ledger');
+      await appendLedgerEntry(
+        db,
+        {
+          organizationId: String(organizationId),
+          eventType: `chatter.${String(entryType || 'comment')}`,
+          targetCollection: String(targetCollection),
+          targetRecordId: String(targetRecordId),
+          actor: {
+            userId: authorUserId != null ? String(authorUserId) : null,
+            username: String(authorName || 'system').slice(0, 120),
+          },
+          payload: {
+            chatterId: val(created, 'id') ?? null,
+            entryType: String(entryType || 'comment'),
+            body: String(body || '').slice(0, 2000),
+            mentionsJson: Array.isArray(mentionsJson) ? mentionsJson : [],
+            diffJson: diffJson || null,
+          },
+        },
+        transaction ? { transaction } : {},
+      );
+    }
+  } catch {}
   return created;
 }
 

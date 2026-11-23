@@ -9,6 +9,7 @@
 'use strict';
 
 const { createHash, timingSafeEqual } = require('node:crypto');
+const { buildOpenApiSpec, buildAsyncApiSpec } = require('./openapi-spec');
 
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 const HISTOGRAM_BUCKETS = Object.freeze([
@@ -459,6 +460,16 @@ async function checkDbHealth(db) {
   }
 }
 
+function resolveRequestServerUrl(ctx) {
+  const rawProto = getReqHeader(ctx, 'x-forwarded-proto').split(',')[0].trim().toLowerCase();
+  const proto = rawProto === 'https' || rawProto === 'http' ? rawProto : (ctx?.protocol === 'https' ? 'https' : 'http');
+  const rawHost = (getReqHeader(ctx, 'x-forwarded-host') || getReqHeader(ctx, 'host') || String(ctx?.host || '')).split(',')[0].trim();
+  if (rawHost && /^[a-zA-Z0-9.:[\]-]{1,253}$/.test(rawHost)) {
+    return `${proto}://${rawHost}`;
+  }
+  return 'http://localhost:13014';
+}
+
 function registerObservability(app, { env = process.env, registry = createMetricsRegistry() } = {}) {
   const middleware = createObservabilityMiddleware(registry, { env });
 
@@ -504,11 +515,33 @@ function registerObservability(app, { env = process.env, registry = createMetric
         ctx.body = await registry.formatPrometheusMetrics(activeDb);
         if (next) await next();
       },
+      openapi: async (ctx, next) => {
+        if (ctx.method && ctx.method !== 'GET') {
+          failObs(ctx, 405, 'Method not allowed.', 'METHOD_NOT_ALLOWED');
+        }
+        ctx.withoutDataWrapping = true;
+        setHeader(ctx, 'Content-Type', 'application/json; charset=utf-8');
+        setHeader(ctx, 'Cache-Control', 'no-store');
+        ctx.status = 200;
+        ctx.body = buildOpenApiSpec({ serverUrl: resolveRequestServerUrl(ctx), version });
+        if (next) await next();
+      },
+      asyncapi: async (ctx, next) => {
+        if (ctx.method && ctx.method !== 'GET') {
+          failObs(ctx, 405, 'Method not allowed.', 'METHOD_NOT_ALLOWED');
+        }
+        ctx.withoutDataWrapping = true;
+        setHeader(ctx, 'Content-Type', 'application/json; charset=utf-8');
+        setHeader(ctx, 'Cache-Control', 'no-store');
+        ctx.status = 200;
+        ctx.body = buildAsyncApiSpec({ serverUrl: resolveRequestServerUrl(ctx), version });
+        if (next) await next();
+      },
     },
   });
 
   if (typeof app?.acl?.allow === 'function') {
-    app.acl.allow('dxos', ['health', 'metrics'], 'public');
+    app.acl.allow('dxos', ['health', 'metrics', 'openapi', 'asyncapi'], 'public');
   }
 
   return { registry, middleware };

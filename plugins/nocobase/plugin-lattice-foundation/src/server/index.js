@@ -26,6 +26,8 @@ const {registerVoucherLifecycleResource}=require('./voucher-lifecycle');
 const {registerNotificationCenter}=require('./notification-center');
 const {registerSlaEngine}=require('./sla-engine');
 const {registerObservability}=require('./observability');
+const {registerPaasApiKeys, createPaasApiKeyAuthMiddleware}=require('./paas-api-keys');
+const {registerPkiLedger}=require('./pki-ledger');
 const {attachRlsPolicyToTable}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
@@ -52,6 +54,9 @@ class LatticeFoundationPlugin extends Plugin {
     registerNotificationCenter(this.app);
     registerSlaEngine(this.app);
     registerObservability(this.app);
+    registerPaasApiKeys(this.app);
+    registerPkiLedger(this.app);
+    this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'acl'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
     registerSampleApplications(catalog);

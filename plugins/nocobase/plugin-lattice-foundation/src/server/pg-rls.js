@@ -50,6 +50,9 @@ const TENANT_RLS_TABLES = Object.freeze([
   'latticeAiQuotaUsage',
   'latticeAiApprovalQueue',
   'latticeTelemetryPoints',
+  'latticeApiKeys',
+  'latticePkiKeys',
+  'latticeCryptoLedger',
 ]);
 
 const TENANT_RLS_TABLE_SET = new Set(TENANT_RLS_TABLES);
