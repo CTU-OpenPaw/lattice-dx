@@ -204,6 +204,10 @@ function createVoucherLifecycleBar(client, React, app) {
     recordVersion = null,
     amendmentNo = 0,
     amendedFromId = null,
+    showPkiBadge = true,
+    showLineage = true,
+    showPrintVoucher = true,
+    printDocumentType = 'order',
     onUpdated,
   }) {
     const api = useApi();
@@ -217,7 +221,40 @@ function createVoucherLifecycleBar(client, React, app) {
     });
     const [reasonText, setReasonText] = React.useState('');
     const [busy, setBusy] = React.useState(false);
-    const [statusNote, setStatusNote] = React.useState('');
+    const [statusNote, setStatusNote] = React.useState(null);
+    const currentTargetKey = `${String(targetCollection || '')}:${Number(targetRecordId) || 0}`;
+    const [pkiState, setPkiState] = React.useState({
+      targetKey: currentTargetKey,
+      loading: false,
+      entry: null,
+      total: 0,
+      verifyResult: null,
+      error: null,
+    });
+    const [lineageState, setLineageState] = React.useState({
+      targetKey: currentTargetKey,
+      open: false,
+      loading: false,
+      nodes: [],
+      edges: [],
+      truncated: false,
+      error: null,
+    });
+    const [printDocType, setPrintDocType] = React.useState(
+      ['order', 'delivery_note', 'epod'].includes(printDocumentType) ? printDocumentType : 'order',
+    );
+    const [printState, setPrintState] = React.useState({
+      targetKey: currentTargetKey,
+      open: false,
+      loading: false,
+      html: null,
+      htmlSha256: null,
+      qrVerificationHash: null,
+      ledgerSeq: null,
+      keyId: null,
+      documentType: null,
+      error: null,
+    });
 
     React.useEffect(() => {
       setInfo({
@@ -228,7 +265,21 @@ function createVoucherLifecycleBar(client, React, app) {
         lineage: [],
       });
       setReasonText('');
-      setStatusNote('');
+      setStatusNote(null);
+      setPkiState({ targetKey: currentTargetKey, loading: false, entry: null, total: 0, verifyResult: null, error: null });
+      setLineageState({ targetKey: currentTargetKey, open: false, loading: false, nodes: [], edges: [], truncated: false, error: null });
+      setPrintState({
+        targetKey: currentTargetKey,
+        open: false,
+        loading: false,
+        html: null,
+        htmlSha256: null,
+        qrVerificationHash: null,
+        ledgerSeq: null,
+        keyId: null,
+        documentType: null,
+        error: null,
+      });
     }, [targetCollection, targetRecordId]);
 
     React.useEffect(() => {
@@ -240,6 +291,34 @@ function createVoucherLifecycleBar(client, React, app) {
         ...(amendedFromId != null ? { amendedFromId } : {}),
       }));
     }, [recordStatus, recordVersion, amendmentNo, amendedFromId]);
+
+    const loadPkiEntries = React.useCallback(async (isCancelled = () => false) => {
+      if (!api?.request || !validTarget || showPkiBadge === false) return;
+      const reqKey = currentTargetKey;
+      const recId = String(Number(targetRecordId));
+      try {
+        const res = await api.request({
+          url: 'dxosLedger:entries',
+          method: 'get',
+          params: { targetCollection, targetRecordId: recId, pageSize: 5 },
+          skipNotify: true,
+        });
+        if (isCancelled()) return;
+        const payload = res?.data?.data || res?.data || {};
+        const items = Array.isArray(payload.items) ? payload.items : [];
+        setPkiState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
+          ...prev,
+          loading: false,
+          entry: items[0] || null,
+          total: Number(payload.total) || items.length,
+          error: null,
+        }));
+      } catch {
+        if (!isCancelled()) {
+          setPkiState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : { ...prev, loading: false }));
+        }
+      }
+    }, [api, targetCollection, targetRecordId, validTarget, showPkiBadge, currentTargetKey]);
 
     const loadVoucherState = React.useCallback(async (isCancelled = () => false) => {
       if (!api?.request || !validTarget) return;
@@ -291,10 +370,148 @@ function createVoucherLifecycleBar(client, React, app) {
     React.useEffect(() => {
       let cancelled = false;
       loadVoucherState(() => cancelled);
+      loadPkiEntries(() => cancelled);
       return () => { cancelled = true; };
-    }, [loadVoucherState]);
+    }, [loadVoucherState, loadPkiEntries]);
 
     if (!validTarget) return null;
+
+    const handleVerifyPki = async () => {
+      if (!api?.request || pkiState.loading) return;
+      const reqKey = currentTargetKey;
+      setPkiState((prev) => ({ ...prev, targetKey: reqKey, loading: true, error: null }));
+      try {
+        const res = await api.request({ url: 'dxosLedger:verify', method: 'get', skipNotify: true });
+        const payload = res?.data?.data || res?.data || {};
+        setPkiState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
+          ...prev,
+          loading: false,
+          verifyResult: {
+            valid: Boolean(payload.valid),
+            checkedCount: Number(payload.checkedCount) || 0,
+            brokenAtSeq: payload.brokenAtSeq ?? null,
+          },
+          error: null,
+        }));
+      } catch (err) {
+        setPkiState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
+          ...prev,
+          loading: false,
+          error: err?.response?.data?.errors?.[0]?.message || 'Không xác minh được chuỗi Merkle PKI.',
+        }));
+      }
+    };
+
+    const handleToggleLineage = async () => {
+      if (lineageState.open) {
+        setLineageState((prev) => ({ ...prev, open: false }));
+        return;
+      }
+      const reqKey = currentTargetKey;
+      if (!api?.request) {
+        setLineageState((prev) => ({ ...prev, targetKey: reqKey, open: true, error: 'Chưa kết nối API tra cứu phả hệ.' }));
+        return;
+      }
+      setLineageState((prev) => ({ ...prev, targetKey: reqKey, open: true, loading: true, error: null }));
+      try {
+        const res = await api.request({
+          url: 'dxosDataGov:lineageTrace',
+          method: 'get',
+          params: { collection: targetCollection, recordId: String(Number(targetRecordId)), maxDepth: 3, direction: 'both' },
+          skipNotify: true,
+        });
+        const payload = res?.data?.data || res?.data || {};
+        setLineageState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
+          targetKey: reqKey,
+          open: true,
+          loading: false,
+          nodes: Array.isArray(payload.nodes) ? payload.nodes : [],
+          edges: Array.isArray(payload.edges) ? payload.edges : [],
+          truncated: Boolean(payload.truncated),
+          error: null,
+        }));
+      } catch (err) {
+        setLineageState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
+          targetKey: reqKey,
+          open: true,
+          loading: false,
+          nodes: [],
+          edges: [],
+          truncated: false,
+          error: err?.response?.data?.errors?.[0]?.message || 'Không tải được đồ thị phả hệ dữ liệu.',
+        }));
+      }
+    };
+
+    const handlePrintVoucher = async () => {
+      if (!api?.request || printState.loading) return;
+      const reqKey = currentTargetKey;
+      setPrintState((prev) => ({ ...prev, targetKey: reqKey, loading: true, error: null }));
+      try {
+        const res = await api.request({
+          url: 'dxosWms:printVoucher',
+          method: 'get',
+          params: { documentType: printDocType, orderId: Number(targetRecordId) },
+          skipNotify: true,
+        });
+        const payload = res?.data?.data || res?.data || {};
+        if (!payload.html) {
+          setPrintState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
+            targetKey: reqKey,
+            open: false,
+            loading: false,
+            html: null,
+            htmlSha256: null,
+            qrVerificationHash: null,
+            ledgerSeq: null,
+            keyId: null,
+            documentType: null,
+            error: 'Không nhận được nội dung HTML chứng từ hợp lệ.',
+          }));
+          return;
+        }
+        setPrintState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
+          targetKey: reqKey,
+          open: true,
+          loading: false,
+          html: String(payload.html),
+          htmlSha256: payload.htmlSha256 || null,
+          qrVerificationHash: payload.qrVerificationHash || null,
+          ledgerSeq: payload.ledgerSeq ?? null,
+          keyId: payload.keyId || null,
+          documentType: payload.documentType || printDocType,
+          error: null,
+        }));
+      } catch (err) {
+        setPrintState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
+          targetKey: reqKey,
+          open: false,
+          loading: false,
+          html: null,
+          htmlSha256: null,
+          qrVerificationHash: null,
+          ledgerSeq: null,
+          keyId: null,
+          documentType: null,
+          error: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không có quyền hoặc chưa sẵn sàng bản in chứng từ.',
+        }));
+      }
+    };
+
+    const triggerBrowserPrint = () => {
+      try {
+        if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
+          const frame = document.querySelector('iframe[title="Chứng từ In DX-OS"]');
+          if (frame?.contentWindow && typeof frame.contentWindow.print === 'function') {
+            frame.contentWindow.print();
+            return;
+          }
+        }
+        if (typeof window !== 'undefined' && typeof window.print === 'function') {
+          window.print();
+        }
+      } catch {}
+    };
 
     const curStatus = String(info.status || '').toLowerCase();
     const statusBadge = VOUCHER_STATUS_META[curStatus] || {
@@ -336,6 +553,7 @@ function createVoucherLifecycleBar(client, React, app) {
           setStatusNote(`Đã cập nhật trạng thái: ${updated.status || action}.`);
         }
         await loadVoucherState();
+        await loadPkiEntries();
         if (typeof onUpdated === 'function') onUpdated(updated);
       } catch (err) {
         setStatusNote(err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thực hiện được thao tác chứng từ.');
@@ -361,6 +579,11 @@ function createVoucherLifecycleBar(client, React, app) {
       minWidth: 0,
       textAlign: 'center',
     });
+
+    const canPrintOrder = showPrintVoucher !== false && (
+      targetCollection === 'latticeOrders' || printDocumentType === 'delivery_note'
+    );
+    const showGovernanceRow = showPkiBadge !== false || showLineage !== false || canPrintOrder;
 
     return h('div', {
       'data-testid': 'dxos-voucher-lifecycle-bar',
@@ -446,6 +669,179 @@ function createVoucherLifecycleBar(client, React, app) {
         ),
       ),
       statusNote ? h('div', { style: { fontSize: 11, color: '#1d4ed8' } }, statusNote) : null,
+      showGovernanceRow ? h('div', {
+        style: {
+          paddingTop: 8,
+          borderTop: '1px dashed #cbd5e1',
+          display: 'grid',
+          gap: 8,
+        },
+      },
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'space-between' } },
+          showPkiBadge !== false ? h('div', {
+            'data-testid': 'dxos-workbench-pki-badge',
+            style: {
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: 6,
+              padding: '4px 8px',
+              borderRadius: 8,
+              border: '1px solid #cbd5e1',
+              background: '#ffffff',
+              fontSize: 11,
+            },
+          },
+            h('strong', { style: { color: '#0f172a' } }, 'Ed25519 PKI:'),
+            pkiState.entry
+              ? h('span', { style: { color: '#334155' } }, `Seq #${pkiState.entry.seq} · ${pkiState.entry.keyId || 'key'} · ${String(pkiState.entry.entryHash || '').slice(0, 12)}`)
+              : h('span', { style: { color: '#64748b' } }, 'Chưa có bút ký sổ cái'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-workbench-pki-verify-btn',
+              disabled: pkiState.loading,
+              onClick: handleVerifyPki,
+              style: {
+                padding: '2px 8px',
+                borderRadius: 6,
+                border: '1px solid #0284c7',
+                background: '#f0f9ff',
+                color: '#0369a1',
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: 'pointer',
+              },
+            }, pkiState.loading ? 'Đang kiểm…' : 'Xác minh PKI'),
+            pkiState.verifyResult ? h('span', {
+              style: {
+                fontWeight: 700,
+                color: pkiState.verifyResult.valid ? '#166534' : '#991b1b',
+                background: pkiState.verifyResult.valid ? '#dcfce7' : '#fee2e2',
+                padding: '1px 6px',
+                borderRadius: 999,
+              },
+            }, pkiState.verifyResult.valid
+              ? `Hợp lệ (${pkiState.verifyResult.checkedCount} mục)`
+              : `Sai lệch tại seq #${pkiState.verifyResult.brokenAtSeq ?? '?'}`) : null,
+            pkiState.error ? h('span', { style: { color: '#b91c1c' } }, pkiState.error) : null,
+          ) : null,
+          canPrintOrder ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
+            h('select', {
+              'aria-label': 'Loại chứng từ in',
+              value: printDocType,
+              onChange: (e) => setPrintDocType(e.target.value),
+              style: { padding: '4px 6px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#ffffff', fontSize: 11 },
+            },
+              h('option', { value: 'order' }, 'Đơn hàng (order)'),
+              h('option', { value: 'delivery_note' }, 'Phiếu giao hàng (delivery_note)'),
+              h('option', { value: 'epod' }, 'Chứng thư ePOD (epod)'),
+            ),
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-workbench-print-voucher-btn',
+              disabled: printState.loading,
+              onClick: handlePrintVoucher,
+              style: {
+                padding: '4px 10px',
+                borderRadius: 6,
+                border: '1px solid #334155',
+                background: '#0f172a',
+                color: '#ffffff',
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              },
+            }, printState.loading ? 'Đang tạo bản in…' : 'In chứng từ'),
+          ) : null,
+        ),
+        printState.error ? h('div', { style: { fontSize: 11, color: '#b91c1c', background: '#fee2e2', padding: '4px 8px', borderRadius: 6 } }, printState.error) : null,
+        printState.open && printState.html ? h('div', {
+          'data-testid': 'dxos-workbench-print-modal',
+          style: {
+            padding: 10,
+            borderRadius: 8,
+            border: '1px solid #94a3b8',
+            background: '#ffffff',
+            display: 'grid',
+            gap: 8,
+          },
+        },
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 6, fontSize: 11 } },
+            h('div', null,
+              h('strong', null, 'Bản xem trước chứng từ In DX-OS'),
+              printState.htmlSha256 ? h('span', { style: { marginLeft: 8, color: '#475569' } }, `SHA-256: ${String(printState.htmlSha256).slice(0, 16)}…`) : null,
+              printState.keyId ? h('span', { style: { marginLeft: 8, color: '#0369a1' } }, `PKI: ${printState.keyId}${printState.ledgerSeq != null ? ` #${printState.ledgerSeq}` : ''}`) : null,
+            ),
+            h('div', { style: { display: 'flex', gap: 6 } },
+              h('button', {
+                type: 'button',
+                onClick: triggerBrowserPrint,
+                style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #2563eb', background: '#eff6ff', color: '#1d4ed8', fontSize: 11, fontWeight: 700, cursor: 'pointer' },
+              }, 'In / Lưu PDF'),
+              h('button', {
+                type: 'button',
+                onClick: () => setPrintState((prev) => ({ ...prev, open: false })),
+                style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc', fontSize: 11, cursor: 'pointer' },
+              }, 'Đóng'),
+            ),
+          ),
+          h('iframe', {
+            sandbox: '',
+            title: 'Chứng từ In DX-OS',
+            srcDoc: String(printState.html),
+            style: { width: '100%', height: 320, border: '1px solid #cbd5e1', borderRadius: 6, background: '#ffffff' },
+          }),
+        ) : null,
+        showLineage !== false ? h('div', {
+          'data-testid': 'dxos-workbench-lineage-panel',
+          style: { display: 'grid', gap: 6 },
+        },
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 } },
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-workbench-lineage-btn',
+              onClick: handleToggleLineage,
+              style: {
+                padding: '4px 10px',
+                borderRadius: 6,
+                border: '1px solid #6366f1',
+                background: lineageState.open ? '#6366f1' : '#eef2ff',
+                color: lineageState.open ? '#ffffff' : '#4338ca',
+                fontSize: 11,
+                fontWeight: 700,
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              },
+            }, lineageState.open ? 'Ẩn Phả hệ (Lineage)' : 'Xem Phả hệ (Lineage)'),
+          ),
+          lineageState.open ? h('div', {
+            style: {
+              padding: 8,
+              borderRadius: 8,
+              border: '1px solid #c7d2fe',
+              background: '#ffffff',
+              fontSize: 11,
+              display: 'grid',
+              gap: 4,
+            },
+          },
+            lineageState.loading ? h('div', { style: { color: '#64748b' } }, 'Đang truy vết phả hệ dữ liệu…') : null,
+            lineageState.error ? h('div', { style: { color: '#b91c1c' } }, lineageState.error) : null,
+            !lineageState.loading && !lineageState.error ? h('div', null,
+              h('div', { style: { fontWeight: 700, color: '#312e81', marginBottom: 4 } },
+                `Nút: ${lineageState.nodes.length} · Quan hệ: ${lineageState.edges.length}${lineageState.truncated ? ' (đã giới hạn)' : ''}`,
+              ),
+              lineageState.edges.length
+                ? lineageState.edges.map((edge, idx) => h('div', {
+                    key: edge.edgeUid || idx,
+                    style: { padding: '3px 6px', borderRadius: 4, background: '#f8fafc', border: '1px solid #e2e8f0', marginBottom: 3 },
+                  }, `${edge.sourceCollection}#${edge.sourceRecordId} —[${edge.relationType}]→ ${edge.targetCollection}#${edge.targetRecordId}`))
+                : h('div', { style: { color: '#64748b' } }, 'Chưa có liên kết phả hệ thượng nguồn / hạ nguồn.'),
+            ) : null,
+          ) : null,
+        ) : null,
+      ) : null,
     );
   };
 }

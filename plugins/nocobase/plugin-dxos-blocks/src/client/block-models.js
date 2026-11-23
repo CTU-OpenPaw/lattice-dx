@@ -21,6 +21,8 @@ const {
 } = require('./blocks-helpers');
 const { createCreativeStudioView, DEFAULT_CREATIVE_BLUEPRINT } = require('./creative-studio-block');
 const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
+const { createWebGisBlockView } = require('./webgis-block');
+const { createKanbanScheduleBlockView } = require('./kanban-schedule-block');
 const {
   fetchPageSurfaceState,
   fetchInspectPageBlocks,
@@ -672,6 +674,9 @@ function createBlockRenderers(client, React, antd, app) {
       cfg.showVoucherActions !== false ? h(VoucherLifecycleBar, {
         targetCollection: activeCollection,
         targetRecordId: activeRecordId,
+        showPkiBadge: cfg.showPkiBadge !== false,
+        showLineage: cfg.showLineage !== false,
+        showPrintVoucher: cfg.showPrintVoucher !== false,
         onUpdated: (updated) => {
           if (updated?.id && Number(updated.id) !== activeRecordId) {
             setRecordIdInput(String(updated.id));
@@ -696,6 +701,8 @@ function createBlockRenderers(client, React, antd, app) {
     DxosParaVaultView,
     DxosCreativeStudioView: createCreativeStudioView(client, React, antd, app, { subscribeModelConfig }),
     DxosRecordWorkbenchView,
+    DxosWebGisView: createWebGisBlockView(client, React, antd, app, { subscribeModelConfig }),
+    DxosKanbanScheduleView: createKanbanScheduleBlockView(client, React, antd, app, { subscribeModelConfig }),
   };
 }
 
@@ -729,6 +736,12 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   }
   class DxosRecordWorkbenchBlockModel extends BaseBlockModel {
     renderComponent() { return h(views.DxosRecordWorkbenchView, { model: this, liveConfig: extractLiveConfig(this) }); }
+  }
+  class DxosWebGisBlockModel extends BaseBlockModel {
+    renderComponent() { return h(views.DxosWebGisView, { model: this, liveConfig: extractLiveConfig(this) }); }
+  }
+  class DxosKanbanScheduleBlockModel extends BaseBlockModel {
+    renderComponent() { return h(views.DxosKanbanScheduleView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
 
   const specs = [
@@ -862,6 +875,63 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
         showExport: { type: 'boolean', title: 'Hiển thị thanh Xuất báo cáo', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
         showVoucherActions: { type: 'boolean', title: 'Hiển thị nút Vòng đời chứng từ', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
         showChatter: { type: 'boolean', title: 'Hiển thị Nhật ký Chatter', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
+        showPkiBadge: { type: 'boolean', title: 'Hiển thị huy hiệu Ed25519 PKI', 'x-decorator': 'FormItem', 'x-component': 'Switch', 'x-component-props': { defaultChecked: true } },
+        showLineage: { type: 'boolean', title: 'Hiển thị Phả hệ dữ liệu (Lineage)', 'x-decorator': 'FormItem', 'x-component': 'Switch', 'x-component-props': { defaultChecked: true } },
+        showPrintVoucher: { type: 'boolean', title: 'Hiển thị nút In chứng từ', 'x-decorator': 'FormItem', 'x-component': 'Switch', 'x-component-props': { defaultChecked: true } },
+      },
+    ],
+    [
+      DxosWebGisBlockModel,
+      'DX-OS Bản đồ Giám sát WebGIS [D]',
+      {
+        title: 'Bản đồ Giám sát Chuỗi lạnh WebGIS [D]',
+        defaultOrganizationId: '',
+        centerLat: 15.8,
+        centerLng: 106.5,
+        showTwinOverlay: true,
+      },
+      {
+        title: { type: 'string', title: 'Tiêu đề Bản đồ', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        defaultOrganizationId: { type: 'string', title: 'Mã tổ chức mặc định (Admin)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        centerLat: { type: 'number', title: 'Vĩ độ tâm bản đồ', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        centerLng: { type: 'number', title: 'Kinh độ tâm bản đồ', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        showTwinOverlay: { type: 'boolean', title: 'Hiển thị lớp trạng thái Digital Twin', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
+      },
+    ],
+    [
+      DxosKanbanScheduleBlockModel,
+      'DX-OS Bảng Kanban & Lịch [H]',
+      {
+        title: 'Bảng Kanban & Lịch vận hành [H]',
+        collection: 'latticeOrders',
+        viewMode: 'kanban',
+        pageSize: 40,
+      },
+      {
+        title: { type: 'string', title: 'Tiêu đề Block', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        collection: {
+          type: 'string',
+          title: 'Collection nghiệp vụ',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: [
+            { label: 'Đơn Logistics (latticeOrders)', value: 'latticeOrders' },
+            { label: 'Yêu cầu mua sắm (latticeRequests)', value: 'latticeRequests' },
+            { label: 'Phiếu dịch vụ (latticeServiceTickets)', value: 'latticeServiceTickets' },
+            { label: 'Lô kho lạnh (latticeStockLots)', value: 'latticeStockLots' },
+          ],
+        },
+        viewMode: {
+          type: 'string',
+          title: 'Chế độ hiển thị mặc định',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: [
+            { label: 'Bảng Kanban theo giai đoạn', value: 'kanban' },
+            { label: 'Lịch biểu theo tuần (Schedule)', value: 'schedule' },
+          ],
+        },
+        pageSize: { type: 'number', title: 'Số bản ghi tối đa', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
       },
     ],
   ];

@@ -52,7 +52,7 @@ test('dxos-blocks helpers reject unsafe URLs, enforce ACL button filtering, and 
   assert.equal(metrics[1].targetPath, null);
 });
 
-test('registerDxosBlockModels registers all 8 configurable BlockModel subclasses with flowEngine settings flows', () => {
+test('registerDxosBlockModels registers all 10 configurable BlockModel subclasses with flowEngine settings flows', () => {
   const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
 
   class MockBlockModel {
@@ -81,6 +81,8 @@ test('registerDxosBlockModels registers all 8 configurable BlockModel subclasses
     'DxosParaVaultBlockModel',
     'DxosCreativeStudioBlockModel',
     'DxosRecordWorkbenchBlockModel',
+    'DxosWebGisBlockModel',
+    'DxosKanbanScheduleBlockModel',
   ];
   assert.deepEqual(Object.keys(models).sort(), expectedNames.slice().sort());
   assert.deepEqual(Object.keys(registered).sort(), expectedNames.slice().sort());
