@@ -47,7 +47,7 @@ class DxosParaPlugin extends Plugin {
     this.db.on('latticeParaDocuments.afterUpdate', scheduleChunkSync);
     this.db.on('latticeParaDocuments.afterDestroy', scheduleChunkDelete);
 
-    this.app.resourceManager.use(createParaScopeMiddleware(this.db), { tag: 'dxosParaScope', after: 'acl' });
+    this.app.resourceManager.use(createParaScopeMiddleware(this.db), { tag: 'dxosParaScope', after: 'acl', before: 'latticeNativeScope' });
     this.app.resourceManager.define({
       name: 'latticePara',
       actions: createParaActions(this.db),

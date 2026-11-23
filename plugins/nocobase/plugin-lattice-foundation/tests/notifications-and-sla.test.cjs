@@ -1231,3 +1231,133 @@ test('SLA engine pushes active:{$ne:false} to DB filter and honors saved busines
   assert.equal(monBreach.items[0].elapsedMinutes, 90);
   assert.equal(tables.latticeNotifications.filter((n) => n.category === 'sla').length, 1);
 });
+
+test('SLA engine handles weekend-holiday overlaps (01-01/04-30/05-01/09-02), parses JSON-string notifyChannels, and dispatches unwrapped channels via fetchImpl', async () => {
+  const { computeElapsedSlaMinutes, evaluateSlaBreaches, registerSlaEngine } = require('../src/server/sla-engine');
+
+  // 1. Weekend-holiday overlap coverage in GMT+7 (Sat/Sun overlapping fixed holidays must stay 0 with no boundary drift)
+  // 2028-01-01 (Saturday)
+  assert.equal(
+    computeElapsedSlaMinutes('2028-01-01T08:00:00+07:00', '2028-01-02T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+  assert.equal(
+    computeElapsedSlaMinutes('2027-12-31T17:00:00+07:00', '2028-01-03T09:00:00+07:00', { businessHoursOnly: true }),
+    90,
+  );
+  // 2028-04-30 (Sunday) followed by 2028-05-01 (Monday)
+  assert.equal(
+    computeElapsedSlaMinutes('2028-04-28T17:00:00+07:00', '2028-05-02T09:00:00+07:00', { businessHoursOnly: true }),
+    90,
+  );
+  // 2027-05-01 (Saturday) preceded by 2027-04-30 (Friday)
+  assert.equal(
+    computeElapsedSlaMinutes('2027-04-29T16:30:00+07:00', '2027-05-03T08:30:00+07:00', { businessHoursOnly: true }),
+    90,
+  );
+  // 2028-09-02 (Saturday) & 2029-09-02 (Sunday)
+  assert.equal(
+    computeElapsedSlaMinutes('2028-09-01T17:00:00+07:00', '2028-09-04T08:30:00+07:00', { businessHoursOnly: true }),
+    60,
+  );
+  assert.equal(
+    computeElapsedSlaMinutes('2029-08-31T17:00:00+07:00', '2029-09-03T08:30:00+07:00', { businessHoursOnly: true }),
+    60,
+  );
+
+  // 2. End-to-end fetchImpl dispatch with businessHoursOnly: true wrapper + raw JSON string notifyChannels from ORM/DB driver
+  const { db, tables } = makeEnterpriseHarness({
+    slaPolicies: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        targetCollection: 'latticeServiceTickets',
+        priority: 'high',
+        warnAfterMinutes: 45,
+        breachAfterMinutes: 90,
+        escalateToRole: 'ldx_manager',
+        notifyChannels: '{"channels":["apprise"],"businessHoursOnly":true}',
+        active: true,
+      },
+      {
+        id: 2,
+        organizationId: 'org-a',
+        targetCollection: 'latticeRequests',
+        priority: 'normal',
+        warnAfterMinutes: 120,
+        breachAfterMinutes: 240,
+        escalateToRole: 'ldx_manager',
+        notifyChannels: '["webhook"]',
+        active: true,
+      },
+      {
+        id: 3,
+        organizationId: 'org-a',
+        targetCollection: 'latticeOrders',
+        priority: 'low',
+        warnAfterMinutes: 120,
+        breachAfterMinutes: 240,
+        escalateToRole: 'ldx_manager',
+        notifyChannels: '{invalid-json',
+        active: true,
+      },
+    ],
+    serviceTickets: [
+      {
+        id: 10,
+        organizationId: 'org-a',
+        code: 'TKT-BH-FETCH',
+        name: 'Apprise unwrap test',
+        status: 'open',
+        priority: 'high',
+        active: true,
+        createdAt: '2026-11-20T17:00:00+07:00',
+      },
+    ],
+  });
+
+  // policies action deserializes raw JSON string rows cleanly
+  const { app, resources } = makeAppHarness(db);
+  registerSlaEngine(app);
+  const slaActions = resources.get('latticeSla');
+  const polCtx = makeCtx({ user: { id: 101 }, role: 'ldx_employee', method: 'GET' });
+  await slaActions.policies(polCtx, async () => {});
+  const ticketPolicy = polCtx.body.items.find((p) => p.targetCollection === 'latticeServiceTickets');
+  const reqPolicy = polCtx.body.items.find((p) => p.targetCollection === 'latticeRequests');
+  const ordPolicy = polCtx.body.items.find((p) => p.targetCollection === 'latticeOrders');
+  assert.deepEqual(ticketPolicy.notifyChannels, ['apprise']);
+  assert.equal(ticketPolicy.businessHoursOnly, true);
+  assert.deepEqual(reqPolicy.notifyChannels, ['webhook']);
+  assert.equal(reqPolicy.businessHoursOnly, false);
+  assert.equal(ordPolicy.notifyChannels, null);
+  assert.equal(ordPolicy.businessHoursOnly, false);
+
+  // Breach evaluation at Mon 09:00+07:00 (90 business mins) dispatches ONLY to unwrapped 'apprise' URL via fetchImpl
+  const fetchedUrls = [];
+  const report = await evaluateSlaBreaches(db, {
+    organizationId: 'org-a',
+    now: new Date('2026-11-23T09:00:00+07:00'),
+    dryRun: false,
+    env: {
+      DX_APPRISE_URL: 'https://apprise.example.com/sla-notify',
+      DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.com/should-not-fire',
+    },
+    fetchImpl: async (url, init) => {
+      fetchedUrls.push({ url: String(url), method: init?.method, body: JSON.parse(init?.body || '{}') });
+      return { ok: true, status: 200, body: { cancel: async () => {} } };
+    },
+  });
+
+  assert.equal(report.breachedCount, 1);
+  assert.equal(report.escalatedCount, 1);
+  assert.equal(report.items[0].businessHoursOnly, true);
+  assert.equal(report.items[0].elapsedMinutes, 90);
+  assert.equal(fetchedUrls.length, 1);
+  assert.equal(fetchedUrls[0].url, 'https://apprise.example.com/sla-notify');
+  assert.equal(fetchedUrls[0].method, 'POST');
+  assert.equal(fetchedUrls[0].body.tag, 'sla');
+
+  const notifRows = tables.latticeNotifications.filter((n) => n.category === 'sla');
+  assert.equal(notifRows.length, 1);
+  assert.deepEqual(notifRows[0].channelsDispatched, ['in_app', 'apprise']);
+});

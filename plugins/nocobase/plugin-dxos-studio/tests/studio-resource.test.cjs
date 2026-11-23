@@ -1076,3 +1076,221 @@ test('solutionBundleExport restricts organizationId=all to root and scopes non-r
     );
   }
 });
+
+test('DxosStudioPlugin registers dxosServiceScope before latticeNativeScope and composed charts:queryData pipeline preserves preset $or scopes and PG RLS', async () => {
+  const Module = require('node:module');
+  const { buildServiceGrant } = require(path.join(PLUGIN_ROOT, 'src/server/service-roles.js'));
+
+  const studioIndexPath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+  const foundationIndexPath = require.resolve(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/index.js'));
+  const origLoad = Module._load;
+  class MockPlugin {
+    constructor(app, options = {}) {
+      this.app = app;
+      this.db = app?.db;
+      this.options = options;
+    }
+  }
+  class MockMigration {
+    constructor(context = {}) { this.context = context; }
+  }
+  delete require.cache[studioIndexPath];
+  delete require.cache[foundationIndexPath];
+  Module._load = function mockedNocobase(request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin, Migration: MockMigration };
+    if (request === '@nocobase/database') return { defineCollection: (def) => def };
+    return origLoad.call(this, request, parent, isMain);
+  };
+
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  try {
+    const LatticeFoundationPlugin = require(foundationIndexPath);
+    const DxosStudioPlugin = require(studioIndexPath);
+
+    const employees = [{ id: 8, userId: 80, organizationId: 'org-a', departmentId: 2, active: true }];
+    const fakeTx = { id: 'tx-composed-svc' };
+    const sqlCalls = [];
+    const db = {
+      on() {},
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (cb) => cb(fakeTx),
+        query: async (sql, opts) => {
+          sqlCalls.push({ sql, opts });
+          return [[]];
+        },
+      },
+      getRepository(name) {
+        if (name === 'latticeEmployees') {
+          return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+        }
+        return null;
+      },
+    };
+    const registered = [];
+    const app = {
+      db,
+      use() {},
+      resourceManager: {
+        use(fn, opts) { registered.push({ fn, opts }); },
+        define() {},
+      },
+      acl: { allow() {}, registerSnippet() {} },
+      cronJobManager: { addJob() {} },
+      logger: { info() {}, warn() {}, error() {} },
+    };
+
+    // Load plugin-lattice-foundation FIRST (matching install-workspace.mjs), then plugin-dxos-studio
+    await new LatticeFoundationPlugin(app).load();
+    await new DxosStudioPlugin(app).load();
+
+    const svcEntry = registered.find((m) => m.opts?.tag === 'dxosServiceScope');
+    const nativeEntry = registered.find((m) => m.opts?.tag === 'latticeNativeScope');
+    assert.ok(svcEntry, 'DxosStudioPlugin must register dxosServiceScope');
+    assert.ok(nativeEntry, 'LatticeFoundationPlugin must register latticeNativeScope');
+    assert.deepEqual(svcEntry.opts, {
+      tag: 'dxosServiceScope',
+      after: 'acl',
+      before: 'latticeNativeScope',
+    });
+
+    // Resolve topological middleware ordering (matching NocoBase Toposort / @hapi/topo)
+    const resolveOrder = (entries) => {
+      const remaining = [...entries];
+      const ordered = [];
+      const placed = new Set(['acl']);
+      while (remaining.length) {
+        const idx = remaining.findIndex((item) => {
+          const afterTags = item.opts?.after ? (Array.isArray(item.opts.after) ? item.opts.after : [item.opts.after]) : [];
+          const afterOk = afterTags.every((t) => placed.has(t) || !entries.some((e) => e.opts?.tag === t));
+          const blockedByBefore = remaining.some((other) => {
+            if (other === item) return false;
+            const beforeTags = other.opts?.before ? (Array.isArray(other.opts.before) ? other.opts.before : [other.opts.before]) : [];
+            return beforeTags.includes(item.opts?.tag);
+          });
+          return afterOk && !blockedByBefore;
+        });
+        assert.ok(idx >= 0, 'Cycle detected in middleware topological constraints');
+        const [chosen] = remaining.splice(idx, 1);
+        ordered.push(chosen);
+        if (chosen.opts?.tag) placed.add(chosen.opts.tag);
+      }
+      return ordered;
+    };
+
+    const sortedTags = resolveOrder(registered).map((m) => m.opts?.tag);
+    assert.ok(
+      sortedTags.indexOf('dxosServiceScope') < sortedTags.indexOf('latticeNativeScope'),
+      `Expected dxosServiceScope before latticeNativeScope, got ${sortedTags.join(' -> ')}`,
+    );
+
+    const compose = (middlewares, handler) => async (ctx) => {
+      let idx = -1;
+      const dispatch = async (i) => {
+        if (i <= idx) throw new Error('next() called multiple times');
+        idx = i;
+        const fn = i < middlewares.length ? middlewares[i] : handler;
+        if (!fn) return undefined;
+        return fn(ctx, () => dispatch(i + 1));
+      };
+      return dispatch(0);
+    };
+
+    // Substitute CURRENT_USER in service-roles.js preset view scope (as NocoBase ACL does)
+    const viewAction = buildServiceGrant('ldx_employee').actions.find((a) => a.name === 'view');
+    const presetScope = JSON.parse(
+      JSON.stringify(viewAction.scope.scope).replaceAll('{{ ctx.state.currentUser.id }}', '80'),
+    );
+
+    // Pre-fix order [nativeMw, serviceMw] fails 403 on charts:queryData for latticeServiceTickets
+    process.env.DX_PG_RLS_SESSION = 'false';
+    await assert.rejects(
+      () => compose([nativeEntry.fn, svcEntry.fn], async () => {})({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: {
+          resourceName: 'charts',
+          actionName: 'queryData',
+          params: { values: { mode: 'builder', collection: 'latticeServiceTickets', filter: structuredClone(presetScope) } },
+        },
+      }),
+      (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+    );
+
+    // Post-fix order [serviceMw, nativeMw] succeeds on charts:queryData with preset $or scope and PG RLS
+    process.env.DX_PG_RLS_SESSION = 'true';
+    sqlCalls.length = 0;
+    let handlerRan = false;
+    let seenTx = null;
+    const okCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: {
+        resourceName: 'charts',
+        actionName: 'queryData',
+        params: { values: { mode: 'builder', collection: 'latticeServiceTickets', filter: structuredClone(presetScope) } },
+      },
+    };
+    await compose([svcEntry.fn, nativeEntry.fn], async (ctx) => {
+      handlerRan = true;
+      seenTx = ctx.state.latticeRlsTransaction;
+    })(okCtx);
+    assert.equal(handlerRan, true);
+    assert.equal(seenTx, fakeTx);
+    assert.equal(okCtx.state.latticeRlsOrg, 'org-a');
+    assert.equal(sqlCalls.length, 1);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(okCtx.action.params.values.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { $or: [{ requesterId: { $eq: 8 } }, { assigneeId: { $eq: 8 } }] },
+      ],
+    });
+
+    // Conflict-safe rewriting preserves direct fields and passes downstream latticeNativeScope
+    const conflictCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: {
+        resourceName: 'charts',
+        actionName: 'queryData',
+        params: {
+          values: {
+            mode: 'builder',
+            collection: 'latticeServiceTickets',
+            filter: { 'requester.userId': 80, requesterId: 99, 'assignee.userId': { $eq: '80' }, assigneeId: 77 },
+          },
+        },
+      },
+    };
+    await compose([svcEntry.fn, nativeEntry.fn], async () => {})(conflictCtx);
+    assert.deepEqual(conflictCtx.action.params.values.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { requesterId: 99, assigneeId: 77, $and: [{ requesterId: { $eq: 8 } }, { assigneeId: { $eq: 8 } }] },
+      ],
+    });
+
+    // Foreign userId still fails closed 403 in the composed pipeline
+    await assert.rejects(
+      () => compose([svcEntry.fn, nativeEntry.fn], async () => {})({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: {
+          resourceName: 'charts',
+          actionName: 'queryData',
+          params: {
+            values: {
+              mode: 'builder',
+              collection: 'latticeServiceTickets',
+              filter: { $or: [{ 'requester.userId': '99' }, { 'assignee.userId': '80' }] },
+            },
+          },
+        },
+      }),
+      (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+    );
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+    Module._load = origLoad;
+    delete require.cache[studioIndexPath];
+    delete require.cache[foundationIndexPath];
+  }
+});

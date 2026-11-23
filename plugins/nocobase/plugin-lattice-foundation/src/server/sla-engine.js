@@ -99,7 +99,19 @@ function defaultSlaThresholds(priority) {
 }
 
 function extractPolicyChannelConfig(row) {
-  const rawChannels = val(row, 'notifyChannels');
+  let rawChannels = val(row, 'notifyChannels');
+  if (typeof rawChannels === 'string') {
+    const trimmed = rawChannels.trim();
+    if (trimmed) {
+      try {
+        rawChannels = JSON.parse(trimmed);
+      } catch {
+        rawChannels = null;
+      }
+    } else {
+      rawChannels = null;
+    }
+  }
   const directBh = val(row, 'businessHoursOnly');
   if (Array.isArray(rawChannels)) {
     return {
