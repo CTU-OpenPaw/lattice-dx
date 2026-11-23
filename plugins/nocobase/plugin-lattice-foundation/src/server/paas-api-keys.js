@@ -17,7 +17,13 @@ const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const ROLE_NAME_RE = /^[a-zA-Z0-9_-]{2,64}$/;
 const ALLOWED_PAT_SCOPES = new Set(['read', 'write', 'wms', 'dmn', 'iot', 'ai', 'ledger']);
 const ELEVATED_ROLES = new Set(['root', 'admin', 'ldx_admin']);
-const PRIVATE_PKI_LEDGER_RESOURCES = new Set(['latticeApiKeys', 'latticePkiKeys', 'latticeCryptoLedger']);
+const PRIVATE_PKI_LEDGER_RESOURCES = new Set([
+  'latticeApiKeys',
+  'latticePkiKeys',
+  'latticeCryptoLedger',
+  'latticeConnectors',
+  'latticeWebhookSubscriptions',
+]);
 const SAFE_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const READ_ONLY_SAFE_POST_ACTIONS = new Set(['list', 'get', 'count']);
 const READ_ONLY_SAFE_POST_RESOURCE_ACTIONS = new Set([
@@ -45,6 +51,12 @@ const READ_ONLY_MUTATING_ACTIONS = new Set([
   'outboxDlqReplay', 'solutionBundleImport', 'solutionBundleRollback',
   'reindex', 'extractAttachment', 'bootstrapDefaults', 'portalCopilot',
   'rollbackPageSnapshot', 'approveAction', 'rejectAction', 'dispatch', 'retry', 'upload',
+  'publish', 'rotateSecret', 'testConnection', 'toggleSubscription', 'deleteSubscription',
+  'replayDlq', 'resetCircuit', 'dispatchNow', 'provisionDevice', 'revokeDevice',
+  'deviceStatusIngest', 'orionCreateSubscription', 'orionToggleSubscription',
+  'orionDeleteSubscription', 'orionNotify', 'saveRule', 'toggleRule', 'deleteRule',
+  'runNow', 'replayRun', 'createDomain', 'installBusinessPack', 'provisionTenant',
+  'twinSetDesired', 'twinAckCommand', 'bulkImportDryRun', 'bulkImportCommit',
 ]);
 const LAST_USED_THROTTLE_MS = 60_000;
 

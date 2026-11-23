@@ -46,10 +46,10 @@ function withMockedNocobase(fn) {
     });
 }
 
-test('pg-rls defines all 34 tenant-scoped tables, validates identifiers strictly, and parameterizes set_config', async () => {
+test('pg-rls defines all 42 tenant-scoped tables, validates identifiers strictly, and parameterizes set_config', async () => {
   const pgRls = require('../src/server/pg-rls');
 
-  assert.equal(pgRls.TENANT_RLS_TABLES.length, 34);
+  assert.equal(pgRls.TENANT_RLS_TABLES.length, 42);
   for (const required of [
     'latticeRequests', 'latticeOrders', 'latticeAssets', 'latticeEmployees',
     'latticeDepartments', 'latticeLocations', 'latticeIncidentCases', 'latticeIncidentRules',
@@ -62,6 +62,9 @@ test('pg-rls defines all 34 tenant-scoped tables, validates identifiers strictly
     'latticeFrozenSnapshots', 'latticeDataLineage', 'latticeDataQuarantine',
     'latticeOrderLines', 'latticeStockLots', 'latticeEpodRecords',
     'latticeDecisionTables', 'latticeDelegations', 'latticeTwinShadows',
+    'latticeConnectors', 'latticeEventBus', 'latticeWebhookSubscriptions',
+    'latticeWebhookDeliveries', 'latticeIotDevices', 'latticeBrokerSubscriptions',
+    'latticeAutomationRules', 'latticeAutomationRuns',
   ]) {
     assert.ok(pgRls.TENANT_RLS_TABLES.includes(required), `Missing RLS table ${required}`);
   }

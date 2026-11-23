@@ -62,6 +62,14 @@ const TENANT_RLS_TABLES = Object.freeze([
   'latticeDecisionTables',
   'latticeDelegations',
   'latticeTwinShadows',
+  'latticeConnectors',
+  'latticeEventBus',
+  'latticeWebhookSubscriptions',
+  'latticeWebhookDeliveries',
+  'latticeIotDevices',
+  'latticeBrokerSubscriptions',
+  'latticeAutomationRules',
+  'latticeAutomationRuns',
 ]);
 
 const TENANT_RLS_TABLE_SET = new Set(TENANT_RLS_TABLES);

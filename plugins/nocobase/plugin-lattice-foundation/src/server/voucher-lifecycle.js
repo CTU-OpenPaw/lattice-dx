@@ -150,6 +150,35 @@ async function safeAppendVoucherLedger(db, { organizationId, eventType, collecti
   );
 }
 
+async function safeEmitVoucherEvent(db, { organizationId, eventType, collection, recordId, actor, payload }) {
+  try {
+    const { publishDomainEvent } = require('./event-bus');
+    await publishDomainEvent(db, {
+      organizationId,
+      type: eventType,
+      source: `latticedx/vouchers/${collection}`,
+      subject: `${collection}:${recordId}`,
+      data: {
+        collection,
+        recordId: Number(recordId) || recordId,
+        code: payload?.code || null,
+        status: payload?.status || null,
+        version: payload?.version || null,
+        actor: actor
+          ? {
+              userId: actor.userId || null,
+              employeeId: actor.employeeId || null,
+              username: actor.username || null,
+            }
+          : null,
+        record: payload,
+      },
+    });
+  } catch {
+    // Non-fatal: voucher transitions must not fail when event bus repository is absent in isolated tests
+  }
+}
+
 async function safeLogLifecycle(db, { organizationId, collection, recordId, body, actor }) {
   try {
     await recordChatterEntry(db, {
@@ -238,6 +267,14 @@ async function submitVoucher(db, { collection, id, organizationId, actor, expect
     actor,
     payload: updated,
   });
+  await safeEmitVoucherEvent(db, {
+    organizationId,
+    eventType: 'voucher.submitted',
+    collection,
+    recordId,
+    actor,
+    payload: updated,
+  });
   try {
     await dispatchRoleNotifications(db, {
       organizationId,
@@ -297,6 +334,14 @@ async function cancelVoucher(db, { collection, id, organizationId, actor, cancel
     actor,
     payload: updated,
     metadata: { cancelReason: reason },
+  });
+  await safeEmitVoucherEvent(db, {
+    organizationId,
+    eventType: 'voucher.cancelled',
+    collection,
+    recordId,
+    actor,
+    payload: updated,
   });
   await safeNotifyRequester(db, {
     organizationId,
@@ -376,6 +421,14 @@ async function amendVoucher(db, { collection, id, organizationId, actor, patch =
     actor,
     payload: created.amended,
     metadata: { amendedFromId: recordId, amendmentNo: created.amended.amendmentNo },
+  });
+  await safeEmitVoucherEvent(db, {
+    organizationId,
+    eventType: 'voucher.amended',
+    collection,
+    recordId: created.amended.id,
+    actor,
+    payload: created.amended,
   });
   await safeNotifyRequester(db, {
     organizationId,

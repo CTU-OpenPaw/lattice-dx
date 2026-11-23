@@ -376,7 +376,7 @@ function makeHttpCtx({ method = 'GET', state = {}, headers = {}, params = {}, qu
   };
 }
 
-test('Task 2.1 collections, migration 20261124000200, and 34-table pg-rls define clean schema, named indexes, and reversible RLS DDL', async () => {
+test('Task 2.1 collections, migration 20261124000200, and 42-table pg-rls define clean schema, named indexes, and reversible RLS DDL', async () => {
   await withMockedNocobase(async () => {
     const frozenCol = require('../src/server/collections/frozen-snapshots');
     const lineageCol = require('../src/server/collections/data-lineage');
@@ -404,13 +404,15 @@ test('Task 2.1 collections, migration 20261124000200, and 34-table pg-rls define
     assert.ok(quarantineCol.indexes.some((i) => i.name === 'idx_lattice_quarantine_org_status'));
 
     const pgRls = require('../src/server/pg-rls');
-    assert.equal(pgRls.TENANT_RLS_TABLES.length, 34);
+    assert.equal(pgRls.TENANT_RLS_TABLES.length, 42);
     for (const tbl of [
       'latticeFrozenSnapshots', 'latticeDataLineage', 'latticeDataQuarantine',
       'latticeOrderLines', 'latticeStockLots', 'latticeEpodRecords',
       'latticeDecisionTables', 'latticeDelegations', 'latticeTwinShadows',
+      'latticeConnectors', 'latticeEventBus', 'latticeWebhookSubscriptions', 'latticeWebhookDeliveries',
+      'latticeIotDevices', 'latticeBrokerSubscriptions', 'latticeAutomationRules', 'latticeAutomationRuns',
     ]) {
-      assert.ok(pgRls.TENANT_RLS_TABLES.includes(tbl), `Missing Wave 2 RLS table ${tbl}`);
+      assert.ok(pgRls.TENANT_RLS_TABLES.includes(tbl), `Missing Wave 2/v1.0.0 RLS table ${tbl}`);
     }
 
     const Migration = require('../src/server/migrations/20261124000200-data-governance-lineage-quarantine');

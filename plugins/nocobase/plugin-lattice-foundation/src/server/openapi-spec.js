@@ -131,7 +131,114 @@ const API_OPERATIONS = Object.freeze([
 
   ['/api/dxos-mcp', 'post', 'AI Workforce & MCP', 'Inbound 2-way Enterprise MCP JSON-RPC gateway', false],
   ['/api/dxos-mcp/it-ot', 'post', 'AI Workforce & MCP', 'IT/OT MCP JSON-RPC endpoint for telemetry and workflows', false],
+
+  ['/api/dxosVault:list', 'get', 'Connector & Secrets Vault', 'List organization connectors with masked secrets', false],
+  ['/api/dxosVault:save', 'post', 'Connector & Secrets Vault', 'Create or update an encrypted connector in vault', false],
+  ['/api/dxosVault:rotateSecret', 'post', 'Connector & Secrets Vault', 'Rotate encrypted connector secrets', false],
+  ['/api/dxosVault:delete', 'post', 'Connector & Secrets Vault', 'Delete a connector from vault', false],
+  ['/api/dxosVault:testConnection', 'post', 'Connector & Secrets Vault', 'Test connector endpoint reachability with SSRF guard', false],
+
+  ['/api/dxosEvents:listEvents', 'get', 'Event Bus & Webhooks', 'List CloudEvents 1.0 domain events', false],
+  ['/api/dxosEvents:publish', 'post', 'Event Bus & Webhooks', 'Publish a CloudEvents 1.0 domain event', false],
+  ['/api/dxosEvents:listSubscriptions', 'get', 'Event Bus & Webhooks', 'List webhook subscriptions with masked secrets', false],
+  ['/api/dxosEvents:saveSubscription', 'post', 'Event Bus & Webhooks', 'Create or update a Standard Webhooks subscription', false],
+  ['/api/dxosEvents:toggleSubscription', 'post', 'Event Bus & Webhooks', 'Enable or disable a webhook subscription', false],
+  ['/api/dxosEvents:deleteSubscription', 'post', 'Event Bus & Webhooks', 'Delete a webhook subscription', false],
+  ['/api/dxosEvents:listDeliveries', 'get', 'Event Bus & Webhooks', 'List outbound webhook delivery attempts and DLQ', false],
+  ['/api/dxosEvents:dispatchNow', 'post', 'Event Bus & Webhooks', 'Immediately drain due outbound webhook deliveries', false],
+  ['/api/dxosEvents:replayDlq', 'post', 'Event Bus & Webhooks', 'Replay dead-lettered webhook deliveries', false],
+  ['/api/dxosEvents:resetCircuit', 'post', 'Event Bus & Webhooks', 'Reset an open webhook subscription circuit breaker', false],
+
+  ['/api/dxosBroker:listDevices', 'get', 'IoT Broker Control Plane', 'List registered IoT broker devices', false],
+  ['/api/dxosBroker:provisionDevice', 'post', 'IoT Broker Control Plane', 'Provision Mosquitto DynSec device credentials and topic ACL', false],
+  ['/api/dxosBroker:revokeDevice', 'post', 'IoT Broker Control Plane', 'Revoke IoT device MQTT credentials', false],
+  ['/api/dxosBroker:deviceStatusIngest', 'post', 'IoT Broker Control Plane', 'Ingest device BIRTH/DEATH LWT status event', true],
+  ['/api/dxosBroker:orionEntities', 'get', 'IoT Broker Control Plane', 'Inspect live FIWARE Orion-LD entities', false],
+  ['/api/dxosBroker:orionListSubscriptions', 'get', 'IoT Broker Control Plane', 'List NGSI-LD broker subscriptions', false],
+  ['/api/dxosBroker:orionCreateSubscription', 'post', 'IoT Broker Control Plane', 'Create NGSI-LD subscription in Orion-LD', false],
+  ['/api/dxosBroker:orionToggleSubscription', 'post', 'IoT Broker Control Plane', 'Toggle NGSI-LD broker subscription', false],
+  ['/api/dxosBroker:orionDeleteSubscription', 'post', 'IoT Broker Control Plane', 'Delete NGSI-LD broker subscription', false],
+  ['/api/dxosBroker:orionNotify', 'post', 'IoT Broker Control Plane', 'Receive inbound Orion-LD subscription notification webhook', true],
+
+  ['/api/dxosAutomations:listRules', 'get', 'Native Automation Engine', 'List organization automation rules', false],
+  ['/api/dxosAutomations:saveRule', 'post', 'Native Automation Engine', 'Create or update an automation rule (Trigger -> DMN -> Actions)', false],
+  ['/api/dxosAutomations:toggleRule', 'post', 'Native Automation Engine', 'Enable or disable an automation rule', false],
+  ['/api/dxosAutomations:deleteRule', 'post', 'Native Automation Engine', 'Delete an automation rule', false],
+  ['/api/dxosAutomations:listRuns', 'get', 'Native Automation Engine', 'List automation execution runs and step traces', false],
+  ['/api/dxosAutomations:runNow', 'post', 'Native Automation Engine', 'Execute an automation rule manually', false],
+  ['/api/dxosAutomations:replayRun', 'post', 'Native Automation Engine', 'Replay an automation execution run', false],
+
+  ['/api/dxosBuilder:listDomains', 'get', 'Visual Domain Builder', 'List dynamic latticeCustom* domains', false],
+  ['/api/dxosBuilder:createDomain', 'post', 'Visual Domain Builder', 'Create a dynamic latticeCustom* domain with RLS and portal page', false],
+  ['/api/dxosBuilder:listBusinessPacks', 'get', 'Visual Domain Builder', 'List installable enterprise business packs', false],
+  ['/api/dxosBuilder:installBusinessPack', 'post', 'Visual Domain Builder', 'Install a business pack into organization scope', false],
+  ['/api/dxosBuilder:listTenants', 'get', 'Visual Domain Builder', 'List provisioned tenant organizations', false],
+  ['/api/dxosBuilder:provisionTenant', 'post', 'Visual Domain Builder', 'Provision a new multi-tenant organization workspace', false],
 ]);
+
+const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Za-z0-9_]+$/;
+const AUTO_MANAGED_FIELDS = new Set(['id', 'createdAt', 'updatedAt']);
+
+function mapFieldTypeToJsonSchema(field) {
+  const type = String(field?.type || field?.options?.type || 'string').trim().toLowerCase();
+  const schema = {};
+  if (['integer', 'bigint', 'bigInt'.toLowerCase()].includes(type)) {
+    schema.type = 'integer';
+  } else if (['float', 'double', 'decimal', 'number'].includes(type)) {
+    schema.type = 'number';
+  } else if (type === 'boolean') {
+    schema.type = 'boolean';
+  } else if (['json', 'jsonb'].includes(type)) {
+    schema.type = 'object';
+    schema.additionalProperties = true;
+  } else if (['date', 'datetime', 'time'].includes(type)) {
+    schema.type = 'string';
+    schema.format = 'date-time';
+  } else {
+    schema.type = 'string';
+  }
+  const enumSource = field?.options?.uiSchema?.enum || field?.uiSchema?.enum;
+  if (Array.isArray(enumSource) && enumSource.length > 0) {
+    const vals = enumSource
+      .map((item) => (item && typeof item === 'object' ? (item.value ?? item.label) : item))
+      .filter((v) => typeof v === 'string' || typeof v === 'number');
+    if (vals.length > 0) schema.enum = vals;
+  }
+  const title = field?.options?.uiSchema?.title || field?.uiSchema?.title;
+  if (typeof title === 'string' && title.trim()) {
+    schema.description = title.trim();
+  }
+  return schema;
+}
+
+function collectCustomCollections(db) {
+  if (!db) return [];
+  let rawEntries = [];
+  if (db.collections instanceof Map) {
+    rawEntries = [...db.collections.entries()];
+  } else if (Array.isArray(db.collections)) {
+    rawEntries = db.collections.map((c, i) => [c?.name || c?.options?.name || String(i), c]);
+  } else if (db.collections && typeof db.collections === 'object') {
+    rawEntries = Object.entries(db.collections);
+  } else if (typeof db.getCollections === 'function') {
+    const list = db.getCollections() || [];
+    rawEntries = (Array.isArray(list) ? list : [...list]).map((c) => [c?.name || c?.options?.name, c]);
+  }
+
+  const out = [];
+  const seen = new Set();
+  for (const [key, col] of rawEntries) {
+    const name = String(col?.name || col?.options?.name || key || '').trim();
+    if (!CUSTOM_COLLECTION_RE.test(name) || seen.has(name)) continue;
+    seen.add(name);
+    const title = String(col?.options?.title || col?.title || name).trim();
+    const rawFields = col?.fields instanceof Map
+      ? [...col.fields.values()]
+      : (Array.isArray(col?.fields) ? col.fields : (col?.fields && typeof col.fields === 'object' ? Object.values(col.fields) : []));
+    out.push({ name, title, fields: rawFields });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
 
 function makeOperationId(pathStr, method) {
   const cleaned = pathStr
@@ -141,10 +248,16 @@ function makeOperationId(pathStr, method) {
   return `${method}_${cleaned}`;
 }
 
-function buildOpenApiSpec({ serverUrl, version } = {}) {
+function buildOpenApiSpec({ serverUrl, version, db } = {}) {
   const resolvedUrl = normalizeServerUrl(serverUrl);
   const resolvedVersion = version || resolveVersionFallback();
   const paths = {};
+  const schemas = {
+    GenericResponse: {
+      type: 'object',
+      additionalProperties: true,
+    },
+  };
 
   for (const [pathStr, method, tag, summary, isPublic] of API_OPERATIONS) {
     if (!paths[pathStr]) paths[pathStr] = {};
@@ -180,12 +293,86 @@ function buildOpenApiSpec({ serverUrl, version } = {}) {
     paths[pathStr][method] = op;
   }
 
+  for (const col of collectCustomCollections(db)) {
+    const properties = {
+      id: { type: 'integer' },
+      organizationId: { type: 'string' },
+    };
+    const required = [];
+    for (const field of col.fields) {
+      const fName = String(field?.name || field?.options?.name || '').trim();
+      if (!fName) continue;
+      properties[fName] = mapFieldTypeToJsonSchema(field);
+      const allowNull = field?.options?.allowNull ?? field?.allowNull;
+      if (allowNull === false && !AUTO_MANAGED_FIELDS.has(fName) && !required.includes(fName)) {
+        required.push(fName);
+      }
+    }
+    schemas[col.name] = {
+      type: 'object',
+      title: col.title,
+      properties,
+      ...(required.length > 0 ? { required } : {}),
+      additionalProperties: true,
+    };
+
+    const schemaRef = { $ref: `#/components/schemas/${col.name}` };
+    const customOps = [
+      ['list', 'get', `List ${col.title} (${col.name}) records`, {
+        type: 'object',
+        properties: {
+          data: { type: 'array', items: schemaRef },
+          meta: { type: 'object', additionalProperties: true },
+        },
+      }, false],
+      ['get', 'get', `Get single ${col.title} (${col.name}) record`, schemaRef, false],
+      ['create', 'post', `Create ${col.title} (${col.name}) record`, schemaRef, true],
+      ['update', 'post', `Update ${col.title} (${col.name}) record`, schemaRef, true],
+      ['destroy', 'post', `Delete ${col.title} (${col.name}) record`, { $ref: '#/components/schemas/GenericResponse' }, false],
+    ];
+
+    for (const [actionName, method, summary, resSchema, hasBodySchema] of customOps) {
+      const pathStr = `/api/${col.name}:${actionName}`;
+      if (!paths[pathStr]) paths[pathStr] = {};
+      const op = {
+        operationId: makeOperationId(pathStr, method),
+        summary,
+        tags: ['Dynamic Custom Domains'],
+        security: [{ bearerAuth: [] }, { latticeApiKey: [] }],
+        responses: {
+          200: {
+            description: 'Successful response',
+            content: {
+              'application/json': {
+                schema: resSchema,
+              },
+            },
+          },
+          400: { description: 'Validation error' },
+          401: { description: 'Authentication required or invalid credential' },
+          403: { description: 'Insufficient role or scope permissions' },
+        },
+      };
+      if (method === 'post') {
+        op.requestBody = {
+          required: false,
+          content: {
+            'application/json': {
+              schema: hasBodySchema ? schemaRef : { type: 'object', additionalProperties: true },
+            },
+          },
+        };
+      }
+      paths[pathStr][method] = op;
+    }
+  }
+
   return {
     openapi: '3.1.0',
     info: {
       title: 'LatticeDX Enterprise Digital OS API',
       version: resolvedVersion,
-      summary: 'Multi-tenant Open-Core PaaS, PKI Ledger, ERP, WMS, DMN, IoT, and AI MCP API',
+      summary: 'Multi-tenant Open-Core PaaS, PKI Ledger, ERP, WMS, DMN, IoT, Event Bus, and AI MCP API',
       license: {
         name: 'Apache-2.0',
         identifier: 'Apache-2.0',
@@ -214,12 +401,7 @@ function buildOpenApiSpec({ serverUrl, version } = {}) {
           description: 'Scoped PaaS API key header (ldx_pat_<8hex>_<32hex>)',
         },
       },
-      schemas: {
-        GenericResponse: {
-          type: 'object',
-          additionalProperties: true,
-        },
-      },
+      schemas,
     },
   };
 }

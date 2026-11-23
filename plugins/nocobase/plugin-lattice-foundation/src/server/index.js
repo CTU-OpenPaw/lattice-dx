@@ -34,6 +34,16 @@ const {
   recordLineageEdge,
   captureQuarantineRecord,
 }=require('./data-governance');
+const {
+  registerConnectorVault,
+  resolveConnectorSecrets,
+}=require('./connector-vault');
+const {
+  registerEventBus,
+  publishDomainEvent,
+  registerEventBusListener,
+  verifyStandardWebhookSignature,
+}=require('./event-bus');
 const {attachRlsPolicyToTable}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
@@ -63,6 +73,11 @@ class LatticeFoundationPlugin extends Plugin {
     registerPaasApiKeys(this.app);
     registerPkiLedger(this.app);
     registerDataGovernance(this.app);
+    const vaultApi = registerConnectorVault(this.app);
+    const eventBusApi = registerEventBus(this.app, { startDrainer: true });
+    this.app.latticeVault = vaultApi;
+    this.app.latticeEvents = eventBusApi;
+    this._stopEventBusDrainer = eventBusApi.stopDrainer;
     this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'auth'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
@@ -85,6 +100,24 @@ class LatticeFoundationPlugin extends Plugin {
     }});
     this.app.acl.allow('latticeApps', ['list', 'get'], 'loggedIn');
   }
+  stopEventBusDrainer() {
+    if (typeof this._stopEventBusDrainer === 'function') {
+      this._stopEventBusDrainer();
+      this._stopEventBusDrainer = null;
+    }
+  }
+  async unload() {
+    this.stopEventBusDrainer();
+    if (typeof super.unload === 'function') await super.unload();
+  }
+  async remove() {
+    this.stopEventBusDrainer();
+    if (typeof super.remove === 'function') await super.remove();
+  }
+  async destroy() {
+    this.stopEventBusDrainer();
+    if (typeof super.destroy === 'function') await super.destroy();
+  }
   async install() {
     await this.db.sequelize.transaction((transaction) => seedFoundation(this.db, transaction));
   }
@@ -94,5 +127,9 @@ LatticeFoundationPlugin.computeMeanKineticTemperature = computeMeanKineticTemper
 LatticeFoundationPlugin.recordLineageEdge = recordLineageEdge;
 LatticeFoundationPlugin.captureQuarantineRecord = captureQuarantineRecord;
 LatticeFoundationPlugin.registerDataGovernance = registerDataGovernance;
+LatticeFoundationPlugin.publishDomainEvent = publishDomainEvent;
+LatticeFoundationPlugin.registerEventBusListener = registerEventBusListener;
+LatticeFoundationPlugin.verifyStandardWebhookSignature = verifyStandardWebhookSignature;
+LatticeFoundationPlugin.resolveConnectorSecrets = resolveConnectorSecrets;
 module.exports = LatticeFoundationPlugin;
 module.exports.default = LatticeFoundationPlugin;

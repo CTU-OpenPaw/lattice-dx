@@ -20,6 +20,9 @@ const HISTOGRAM_BUCKETS = Object.freeze([
   { le: 2.0, label: '2.0' },
 ]);
 const OUTBOX_STATES = Object.freeze(['pending', 'retry', 'processing', 'delivered', 'failed']);
+const EVENT_BUS_STATUSES = Object.freeze(['queued', 'dispatched', 'partial_failed']);
+const WEBHOOK_DELIVERY_STATUSES = Object.freeze(['pending', 'processing', 'delivered', 'retry_wait', 'dlq']);
+const WEBHOOK_CIRCUIT_STATES = Object.freeze(['closed', 'open', 'half_open']);
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 const METRICS_ALLOWED_ROLES = new Set(['root', 'ldx_admin']);
 
@@ -175,6 +178,18 @@ function toStatusClass(status) {
   return 'other';
 }
 
+async function hasQueryableRepo(db, collection) {
+  try {
+    if (typeof db?.hasCollection === 'function' && !db.hasCollection(collection)) {
+      return false;
+    }
+    const repo = db?.getRepository?.(collection);
+    return Boolean(repo && typeof repo.count === 'function');
+  } catch {
+    return false;
+  }
+}
+
 async function safeCount(db, collection, filter) {
   try {
     if (typeof db?.hasCollection === 'function' && !db.hasCollection(collection)) {
@@ -191,19 +206,63 @@ async function safeCount(db, collection, filter) {
 }
 
 async function collectDbGauges(db) {
-  const [aiAuditLogsTotal, activeAlarmsTotal, unreadNotificationsTotal, slaPoliciesActive, ...outboxCounts] =
-    await Promise.all([
-      safeCount(db, 'latticeAiAuditLogs'),
-      safeCount(db, 'latticeIncidentCases', { status: { $in: ['open', 'acknowledged'] } }),
-      safeCount(db, 'latticeNotifications', { readAt: null, active: true }),
-      safeCount(db, 'latticeSlaPolicies', { active: true }),
-      ...OUTBOX_STATES.map((state) => safeCount(db, 'latticeContextOutbox', { state })),
-    ]);
+  const [
+    aiAuditLogsTotal,
+    activeAlarmsTotal,
+    unreadNotificationsTotal,
+    slaPoliciesActive,
+    hasEventBusRepo,
+    hasDeliveriesRepo,
+    hasSubscriptionsRepo,
+    ...outboxCounts
+  ] = await Promise.all([
+    safeCount(db, 'latticeAiAuditLogs'),
+    safeCount(db, 'latticeIncidentCases', { status: { $in: ['open', 'acknowledged'] } }),
+    safeCount(db, 'latticeNotifications', { readAt: null, active: true }),
+    safeCount(db, 'latticeSlaPolicies', { active: true }),
+    hasQueryableRepo(db, 'latticeEventBus'),
+    hasQueryableRepo(db, 'latticeWebhookDeliveries'),
+    hasQueryableRepo(db, 'latticeWebhookSubscriptions'),
+    ...OUTBOX_STATES.map((state) => safeCount(db, 'latticeContextOutbox', { state })),
+  ]);
 
   const outboxByState = {};
   OUTBOX_STATES.forEach((state, idx) => {
     outboxByState[state] = outboxCounts[idx] ?? 0;
   });
+
+  let eventBusByStatus = null;
+  if (hasEventBusRepo) {
+    const counts = await Promise.all(
+      EVENT_BUS_STATUSES.map((status) => safeCount(db, 'latticeEventBus', { status })),
+    );
+    eventBusByStatus = {};
+    EVENT_BUS_STATUSES.forEach((status, idx) => {
+      eventBusByStatus[status] = counts[idx] ?? 0;
+    });
+  }
+
+  let webhookDeliveriesByStatus = null;
+  if (hasDeliveriesRepo) {
+    const counts = await Promise.all(
+      WEBHOOK_DELIVERY_STATUSES.map((status) => safeCount(db, 'latticeWebhookDeliveries', { status })),
+    );
+    webhookDeliveriesByStatus = {};
+    WEBHOOK_DELIVERY_STATUSES.forEach((status, idx) => {
+      webhookDeliveriesByStatus[status] = counts[idx] ?? 0;
+    });
+  }
+
+  let webhookCircuitsByState = null;
+  if (hasSubscriptionsRepo) {
+    const counts = await Promise.all(
+      WEBHOOK_CIRCUIT_STATES.map((circuitState) => safeCount(db, 'latticeWebhookSubscriptions', { circuitState })),
+    );
+    webhookCircuitsByState = {};
+    WEBHOOK_CIRCUIT_STATES.forEach((circuitState, idx) => {
+      webhookCircuitsByState[circuitState] = counts[idx] ?? 0;
+    });
+  }
 
   return {
     ai_audit_logs_total: aiAuditLogsTotal,
@@ -211,6 +270,9 @@ async function collectDbGauges(db) {
     active_alarms_total: activeAlarmsTotal,
     unread_notifications_total: unreadNotificationsTotal,
     sla_policies_active: slaPoliciesActive,
+    event_bus_by_status: eventBusByStatus,
+    webhook_deliveries_by_status: webhookDeliveriesByStatus,
+    webhook_circuits_by_state: webhookCircuitsByState,
   };
 }
 
@@ -281,6 +343,30 @@ function createMetricsRegistry() {
     lines.push('# HELP latticedx_sla_policies_active Count of active SLA escalation policies.');
     lines.push('# TYPE latticedx_sla_policies_active gauge');
     lines.push(`latticedx_sla_policies_active ${gauges.sla_policies_active}`);
+
+    if (gauges.event_bus_by_status) {
+      lines.push('# HELP latticedx_event_bus_by_status Count of domain events in event bus by delivery status.');
+      lines.push('# TYPE latticedx_event_bus_by_status gauge');
+      for (const status of EVENT_BUS_STATUSES) {
+        lines.push(`latticedx_event_bus_by_status{status="${status}"} ${gauges.event_bus_by_status[status]}`);
+      }
+    }
+
+    if (gauges.webhook_deliveries_by_status) {
+      lines.push('# HELP latticedx_webhook_deliveries_by_status Count of outbound webhook deliveries by status.');
+      lines.push('# TYPE latticedx_webhook_deliveries_by_status gauge');
+      for (const status of WEBHOOK_DELIVERY_STATUSES) {
+        lines.push(`latticedx_webhook_deliveries_by_status{status="${status}"} ${gauges.webhook_deliveries_by_status[status]}`);
+      }
+    }
+
+    if (gauges.webhook_circuits_by_state) {
+      lines.push('# HELP latticedx_webhook_circuits_by_state Count of webhook subscriptions by circuit breaker state.');
+      lines.push('# TYPE latticedx_webhook_circuits_by_state gauge');
+      for (const state of WEBHOOK_CIRCUIT_STATES) {
+        lines.push(`latticedx_webhook_circuits_by_state{state="${state}"} ${gauges.webhook_circuits_by_state[state]}`);
+      }
+    }
 
     lines.push('# HELP latticedx_uptime_seconds Node.js process uptime in seconds.');
     lines.push('# TYPE latticedx_uptime_seconds gauge');
@@ -471,7 +557,7 @@ function resolveRequestServerUrl(ctx) {
   return 'http://localhost:13014';
 }
 
-async function serveSpecDocument(ctx, next, buildSpec, version) {
+async function serveSpecDocument(ctx, next, buildSpec, version, db) {
   if (ctx.method && ctx.method !== 'GET') {
     failObs(ctx, 405, 'Method not allowed.', 'METHOD_NOT_ALLOWED');
   }
@@ -479,7 +565,7 @@ async function serveSpecDocument(ctx, next, buildSpec, version) {
   setHeader(ctx, 'Content-Type', 'application/json; charset=utf-8');
   setHeader(ctx, 'Cache-Control', 'no-store');
   ctx.status = 200;
-  ctx.body = buildSpec({ serverUrl: resolveRequestServerUrl(ctx), version });
+  ctx.body = buildSpec({ serverUrl: resolveRequestServerUrl(ctx), version, db });
   if (next) await next();
 }
 
@@ -529,8 +615,8 @@ function registerObservability(app, { env = process.env, registry = createMetric
         ctx.body = await registry.formatPrometheusMetrics(activeDb);
         if (next) await next();
       },
-      openapi: (ctx, next) => serveSpecDocument(ctx, next, buildOpenApiSpec, version),
-      asyncapi: (ctx, next) => serveSpecDocument(ctx, next, buildAsyncApiSpec, version),
+      openapi: (ctx, next) => serveSpecDocument(ctx, next, buildOpenApiSpec, version, ctx?.db || app?.db || null),
+      asyncapi: (ctx, next) => serveSpecDocument(ctx, next, buildAsyncApiSpec, version, ctx?.db || app?.db || null),
       ...mobilePwaActions,
     },
   });
@@ -545,6 +631,9 @@ function registerObservability(app, { env = process.env, registry = createMetric
 module.exports = {
   HISTOGRAM_BUCKETS,
   OUTBOX_STATES,
+  EVENT_BUS_STATUSES,
+  WEBHOOK_DELIVERY_STATUSES,
+  WEBHOOK_CIRCUIT_STATES,
   isTrustedOrigin,
   collectDbGauges,
   createMetricsRegistry,

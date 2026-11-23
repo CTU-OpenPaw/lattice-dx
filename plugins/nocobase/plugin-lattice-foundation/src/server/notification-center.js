@@ -9,6 +9,7 @@
 'use strict';
 
 const { resolveNativeActor } = require('./native-scope');
+const { callerRoles } = require('./native-portal-helpers');
 
 const VALID_CATEGORIES = new Set(['mention', 'voucher', 'sla', 'alarm', 'approval', 'system']);
 const VALID_SEVERITIES = new Set(['info', 'warning', 'high', 'critical']);
@@ -423,14 +424,52 @@ function registerNotificationCenter(app) {
     return next();
   }, { tag: 'latticeNotificationScopeGuard', after: 'acl' });
 
-  const resolveScopedUser = async (ctx) => {
+  const isVerifiedRoot = async (ctx) => {
+    const roles = callerRoles(ctx);
+    if (!roles.includes('root')) return false;
+    const uid = val(ctx?.state?.currentUser, 'id');
+    const ruRepo = db?.getRepository?.('rolesUsers');
+    if (ruRepo && typeof ruRepo.find === 'function' && uid != null) {
+      const bindings = (await ruRepo.find({ filter: { userId: Number(uid) } })) || [];
+      return bindings.some((b) => String(val(b, 'roleName') || '').trim() === 'root');
+    }
+    return true;
+  };
+
+  const resolveScopedUser = async (ctx, { allowRootWithoutEmployee = false } = {}) => {
     if (!ctx?.state?.currentUser) throw failNotif('NATIVE_LOGIN_REQUIRED', 401);
-    const actor = await resolveNativeActor(db, ctx.state.currentUser);
-    return {
-      organizationId: actor.organizationId,
-      userId: Number(actor.userId),
-      employeeId: actor.employeeId,
-    };
+    const empRepo = db?.getRepository?.('latticeEmployees');
+    if (!empRepo && allowRootWithoutEmployee && (await isVerifiedRoot(ctx))) {
+      return {
+        organizationId: null,
+        userId: Number(val(ctx.state.currentUser, 'id')) || null,
+        employeeId: null,
+        rootWithoutOrg: true,
+      };
+    }
+    try {
+      const actor = await resolveNativeActor(db, ctx.state.currentUser);
+      return {
+        organizationId: actor.organizationId,
+        userId: Number(actor.userId),
+        employeeId: actor.employeeId,
+        rootWithoutOrg: false,
+      };
+    } catch (err) {
+      if (
+        allowRootWithoutEmployee
+        && ['NATIVE_EMPLOYEE_NOT_FOUND', 'NATIVE_MEMBERSHIP_REQUIRED', 'NATIVE_MEMBERSHIP_INVALID'].includes(err?.code)
+        && (await isVerifiedRoot(ctx))
+      ) {
+        return {
+          organizationId: null,
+          userId: Number(val(ctx.state.currentUser, 'id')) || null,
+          employeeId: null,
+          rootWithoutOrg: true,
+        };
+      }
+      throw err;
+    }
   };
 
   app.resourceManager.define({
@@ -438,7 +477,11 @@ function registerNotificationCenter(app) {
     actions: {
       listMine: async (ctx, next) => {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
-        const { organizationId, userId } = await resolveScopedUser(ctx);
+        const { organizationId, userId, rootWithoutOrg } = await resolveScopedUser(ctx, { allowRootWithoutEmployee: true });
+        if (rootWithoutOrg) {
+          ctx.body = { organizationId: null, total: 0, unreadCount: 0, items: [] };
+          return next();
+        }
         const params = readParams(ctx);
         const limit = Math.max(1, Math.min(100, Math.floor(Number(params.limit) || 30)));
         const page = Math.max(1, Math.min(10000, Math.floor(Number(params.page) || 1)));
@@ -480,7 +523,11 @@ function registerNotificationCenter(app) {
 
       unreadCount: async (ctx, next) => {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
-        const { organizationId, userId } = await resolveScopedUser(ctx);
+        const { organizationId, userId, rootWithoutOrg } = await resolveScopedUser(ctx, { allowRootWithoutEmployee: true });
+        if (rootWithoutOrg) {
+          ctx.body = { organizationId: null, unreadCount: 0 };
+          return next();
+        }
         const repo = db.getRepository('latticeNotifications');
         if (!repo) {
           ctx.body = { organizationId, unreadCount: 0 };
