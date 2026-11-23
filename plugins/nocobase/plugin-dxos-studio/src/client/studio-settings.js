@@ -596,7 +596,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         onSelectSection: (nextSec) => { setTab('governance'); setGovSection(nextSec); },
         selectedOrg,
         organizations,
-        employees: orgEmployees,
+        employees,
         openRoute,
       }) : null,
     );

@@ -150,6 +150,7 @@ function createReactHarness() {
       for (const eff of batch) {
         await eff();
       }
+      await new Promise((resolve) => setImmediate(resolve));
       tree = renderNode(React.createElement(ComponentFn, props));
     }
     return tree;
@@ -791,5 +792,240 @@ test('DMN rejects malformed JSON safely without calling API and bundled dist/cli
   } finally {
     Module._load = origLoad;
   }
+});
+
+test('Minor 1 (ledger): filter typing fires zero requests, Apply/Pagination fetch once, and stale responses are ignored', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const harness = createReactHarness();
+  let entriesResolverQueue = [];
+  let manualQueueMode = false;
+
+  const { client, requests } = createApiMock({
+    'dxosLedger:publicKey': async () => ({ organizationId: 'org-a', keyId: 'ed25519-test' }),
+    'dxosLedger:status': async () => ({ organizationId: 'org-a', entryCount: 45, latestSeq: 45 }),
+    'dxosLedger:entries': async (req) => {
+      if (manualQueueMode) {
+        return new Promise((resolve) => {
+          entriesResolverQueue.push({ req, resolve });
+        });
+      }
+      return {
+        organizationId: 'org-a',
+        total: 45,
+        page: req.params?.page || 1,
+        pageSize: 20,
+        items: [
+          {
+            seq: req.params?.page === 2 ? 25 : 45,
+            eventType: req.params?.eventType || 'document.signed',
+            targetCollection: req.params?.targetCollection || 'latticeOrders',
+            targetRecordId: 'REC-1',
+            entryHash: 'hash_1',
+            merkleRoot: 'root_1',
+            recordedAt: '2026-11-23T04:00:00.000Z',
+          },
+        ],
+      };
+    },
+  });
+
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Consoles, { initialSection: 'ledger', selectedOrg: 'org-a' });
+  assert.equal(requests.filter((r) => r.url === 'dxosLedger:entries').length, 1);
+
+  const countBeforeTyping = requests.length;
+  const eventInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-filter-eventtype')[0];
+  const colInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-filter-collection')[0];
+  assert.ok(eventInput && colInput);
+
+  // Typing several characters must NOT trigger API requests
+  for (const ch of ['d', 'do', 'doc', 'document.signed']) {
+    eventInput.props.onChange({ target: { value: ch } });
+    tree = await harness.mountAndFlush(Consoles, { initialSection: 'ledger', selectedOrg: 'org-a' });
+  }
+  colInput.props.onChange({ target: { value: 'latticeOrders' } });
+  tree = await harness.mountAndFlush(Consoles, { initialSection: 'ledger', selectedOrg: 'org-a' });
+  assert.equal(requests.length, countBeforeTyping, 'Typing in ledger filter inputs must not fire API requests');
+
+  // Clicking "Áp dụng lọc" triggers 1 fetch batch with applied filters
+  const applyBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-apply-filter-btn')[0];
+  assert.ok(applyBtn);
+  await applyBtn.props.onClick();
+  tree = harness.render(Consoles, { initialSection: 'ledger', selectedOrg: 'org-a' });
+
+  const entryReqs = requests.filter((r) => r.url === 'dxosLedger:entries');
+  assert.equal(entryReqs.length, 2);
+  assert.equal(entryReqs[1].params.eventType, 'document.signed');
+  assert.equal(entryReqs[1].params.targetCollection, 'latticeOrders');
+  assert.equal(entryReqs[1].params.page, 1);
+
+  // Clicking "Trang sau" fetches page 2 preserving applied filters
+  const nextBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-next-page-btn')[0];
+  assert.ok(nextBtn && !nextBtn.props.disabled);
+  await nextBtn.props.onClick();
+  tree = harness.render(Consoles, { initialSection: 'ledger', selectedOrg: 'org-a' });
+
+  const afterPageReqs = requests.filter((r) => r.url === 'dxosLedger:entries');
+  assert.equal(afterPageReqs.length, 3);
+  assert.equal(afterPageReqs[2].params.page, 2);
+  assert.equal(afterPageReqs[2].params.eventType, 'document.signed');
+
+  // Stale-response sequence guard: request #1 resolves AFTER request #2
+  manualQueueMode = true;
+  const eventInput2 = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-filter-eventtype')[0];
+  eventInput2.props.onChange({ target: { value: 'stale.event' } });
+  tree = harness.render(Consoles, { initialSection: 'ledger', selectedOrg: 'org-a' });
+  const pStale = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-apply-filter-btn')[0].props.onClick();
+
+  eventInput2.props.onChange({ target: { value: 'fresh.event' } });
+  tree = harness.render(Consoles, { initialSection: 'ledger', selectedOrg: 'org-a' });
+  const pFresh = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-apply-filter-btn')[0].props.onClick();
+
+  assert.equal(entriesResolverQueue.length, 2);
+  // Resolve #2 (fresh) first, then #1 (stale) second
+  entriesResolverQueue[1].resolve({
+    organizationId: 'org-a',
+    total: 1,
+    page: 1,
+    items: [{ seq: 202, eventType: 'fresh.event', targetCollection: 'latticeOrders', targetRecordId: 'NEW', entryHash: 'h2', merkleRoot: 'r2', recordedAt: '2026-11-23T05:00:00.000Z' }],
+  });
+  await pFresh;
+  entriesResolverQueue[0].resolve({
+    organizationId: 'org-a',
+    total: 1,
+    page: 1,
+    items: [{ seq: 101, eventType: 'stale.event', targetCollection: 'latticeOrders', targetRecordId: 'OLD', entryHash: 'h1', merkleRoot: 'r1', recordedAt: '2026-11-23T01:00:00.000Z' }],
+  });
+  await pStale;
+
+  tree = harness.render(Consoles, { initialSection: 'ledger', selectedOrg: 'org-a' });
+  const tableDump = JSON.stringify(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-entries-table')[0]);
+  assert.ok(tableDump.includes('fresh.event'));
+  assert.ok(!tableDump.includes('stale.event'), 'Stale out-of-order ledger response must not overwrite newer results');
+});
+
+test('Minor 2 (multi-org): orgOverride clears to empty without snapping back and filters full employee datalist dynamically', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  const harness = createReactHarness();
+  const allEmployees = [
+    { id: 1, userId: 101, name: 'Alice OrgA', code: 'EMP-A1', organizationId: 'org-a', roles: ['ldx_operator'] },
+    { id: 2, userId: 202, name: 'Bob OrgB', code: 'EMP-B1', organizationId: 'org-b', roles: ['ldx_operator'] },
+  ];
+
+  // Verify studio-settings passes full employees list (not pre-filtered orgEmployees) to GovernanceConsoles
+  const studioApi = createApiMock({
+    'dxosStudio:listTemplates': async () => ({ items: [] }),
+    'dxosStudio:listEmployees': async () => ({ items: allEmployees, organizations: ['org-a', 'org-b'], organizationCounts: { 'org-a': 1, 'org-b': 1 } }),
+    'dxosStudio:readiness': async () => ({ plugins: [] }),
+    'dxosApiKeys:list': async () => ({ items: [] }),
+  });
+  const Page = createDxosStudioSettingsPage(studioApi.client, harness.React, {}, {});
+  let studioTree = await harness.mountAndFlush(Page);
+  collectNodes(studioTree, (n) => n.props?.['data-testid'] === 'dxos-studio-tab-api-keys')[0].props.onClick();
+  studioTree = await harness.mountAndFlush(Page);
+  const expandedStudio = expandElement(studioTree);
+  const studioOrgInput = collectNodes(expandedStudio, (n) => n.props?.['data-testid'] === 'dxos-gov-org-override-input')[0];
+  assert.ok(studioOrgInput);
+  assert.equal(studioOrgInput.props.value, 'org-a');
+
+  // Direct GovernanceConsoles test for clearing to '' and switching to 'org-b'
+  const { client, requests } = createApiMock({
+    'dxosApiKeys:list': async () => ({ items: [] }),
+  });
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  const baseProps = {
+    initialSection: 'api-keys',
+    selectedOrg: 'org-a',
+    organizations: ['org-a', 'org-b'],
+    employees: allEmployees,
+  };
+  let tree = await harness.mountAndFlush(Consoles, baseProps);
+
+  let orgInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-gov-org-override-input')[0];
+  assert.equal(orgInput.props.value, 'org-a');
+  let dl = collectNodes(tree, (n) => n.type === 'datalist' && n.props?.id === 'dxos-gov-emp-users')[0];
+  assert.ok(JSON.stringify(dl).includes('Alice OrgA'));
+  assert.equal(JSON.stringify(dl).includes('Bob OrgB'), false);
+
+  // Explicit clear to '' must NOT snap back to props.selectedOrg ('org-a')
+  orgInput.props.onChange({ target: { value: '' } });
+  tree = await harness.mountAndFlush(Consoles, baseProps);
+  orgInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-gov-org-override-input')[0];
+  assert.equal(orgInput.props.value, '', 'Cleared orgOverride must remain empty instead of snapping back');
+  dl = collectNodes(tree, (n) => n.type === 'datalist' && n.props?.id === 'dxos-gov-emp-users')[0];
+  assert.ok(JSON.stringify(dl).includes('Alice OrgA'));
+  assert.ok(JSON.stringify(dl).includes('Bob OrgB'));
+
+  // Override to 'org-b' filters datalist to org-b employees and reloads with organizationId='org-b'
+  orgInput.props.onChange({ target: { value: 'org-b' } });
+  tree = await harness.mountAndFlush(Consoles, baseProps);
+  dl = collectNodes(tree, (n) => n.type === 'datalist' && n.props?.id === 'dxos-gov-emp-users')[0];
+  assert.equal(JSON.stringify(dl).includes('Alice OrgA'), false);
+  assert.ok(JSON.stringify(dl).includes('Bob OrgB'));
+  assert.ok(requests.some((r) => r.url === 'dxosApiKeys:list' && r.params?.organizationId === 'org-b'));
+});
+
+test('Minor 3 (input/timezone): local datetime-local default, trimmed userId in issueApiKey, and strict sample parsing in holdLotByMkt', async () => {
+  const { createDxosGovernanceConsoles, defaultEndsAtIso, parseSamplesInput } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+
+  // 1. defaultEndsAtIso uses local timezone components rather than UTC slice
+  const sampleMs = new Date(2026, 10, 23, 22, 15, 0).getTime();
+  const expectedDt = new Date(sampleMs + 7 * 86_400_000);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const expectedLocal = `${expectedDt.getFullYear()}-${pad2(expectedDt.getMonth() + 1)}-${pad2(expectedDt.getDate())}T${pad2(expectedDt.getHours())}:${pad2(expectedDt.getMinutes())}`;
+  assert.equal(defaultEndsAtIso(sampleMs), expectedLocal);
+
+  // 2. parseSamplesInput rejects non-numeric tokens cleanly
+  assert.deepEqual(parseSamplesInput('2.5, 4.0; 9.5'), { ok: true, samples: [2.5, 4, 9.5], invalidTokens: [], error: null });
+  assert.deepEqual(parseSamplesInput('   '), { ok: true, samples: [], invalidTokens: [], error: null });
+  const badParsed = parseSamplesInput('2.5, abc, xyz');
+  assert.equal(badParsed.ok, false);
+  assert.deepEqual(badParsed.invalidTokens, ['abc', 'xyz']);
+
+  // 3. issueApiKey with whitespace-only userId submits cleanly without userId: 0
+  const harness = createReactHarness();
+  const { client, requests } = createApiMock({
+    'dxosApiKeys:list': async () => ({ items: [] }),
+    'dxosApiKeys:issue': async (req) => ({ id: 99, name: req.data.name, token: 'ldx_pat_test_token' }),
+    'dxosWms:lots': async () => ({ items: [] }),
+  });
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Consoles, { initialSection: 'api-keys', selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-name-input')[0].props.onChange({ target: { value: 'Trim Test Key' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-userid-input')[0].props.onChange({ target: { value: '   ' } });
+  tree = harness.render(Consoles, { initialSection: 'api-keys', selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-issue-form')[0].props.onSubmit({ preventDefault() {} });
+
+  const issueReq = requests.find((r) => r.url === 'dxosApiKeys:issue');
+  assert.ok(issueReq);
+  assert.equal('userId' in issueReq.data, false, 'Whitespace-only userId must be omitted instead of coerced to 0');
+
+  // Invalid non-numeric userId blocks submission with inline error
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-userid-input')[0].props.onChange({ target: { value: 'abc' } });
+  tree = harness.render(Consoles, { initialSection: 'api-keys', selectedOrg: 'org-a' });
+  const issueCountBefore = requests.filter((r) => r.url === 'dxosApiKeys:issue').length;
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-issue-form')[0].props.onSubmit({ preventDefault() {} });
+  tree = harness.render(Consoles, { initialSection: 'api-keys', selectedOrg: 'org-a' });
+  assert.equal(requests.filter((r) => r.url === 'dxosApiKeys:issue').length, issueCountBefore);
+  assert.ok(JSON.stringify(tree).includes('userId không hợp lệ'));
+
+  // 4. holdLotByMkt rejects malformed non-numeric sample input instead of falling back to telemetry
+  const wmsHarness = createReactHarness();
+  const wmsMock = createApiMock({
+    'dxosWms:lots': async () => ({ items: [] }),
+    'dxosWms:holdLotByMkt': async () => ({ held: false, lotCode: 'LOT-1' }),
+  });
+  const WmsConsoles = createDxosGovernanceConsoles(wmsMock.client, wmsHarness.React, {}, {});
+  let wmsTree = await wmsHarness.mountAndFlush(WmsConsoles, { initialSection: 'wms-epod', selectedOrg: 'org-a' });
+  collectNodes(wmsTree, (n) => n.props?.['data-testid'] === 'dxos-wms-mkthold-lotcode')[0].props.onChange({ target: { value: 'LOT-1' } });
+  collectNodes(wmsTree, (n) => n.props?.['data-testid'] === 'dxos-wms-mkthold-samples')[0].props.onChange({ target: { value: 'bad-temp, NaN' } });
+  wmsTree = wmsHarness.render(WmsConsoles, { initialSection: 'wms-epod', selectedOrg: 'org-a' });
+  await collectNodes(wmsTree, (n) => n.props?.['data-testid'] === 'dxos-wms-mkthold-form')[0].props.onSubmit({ preventDefault() {} });
+  wmsTree = wmsHarness.render(WmsConsoles, { initialSection: 'wms-epod', selectedOrg: 'org-a' });
+
+  assert.equal(wmsMock.requests.some((r) => r.url === 'dxosWms:holdLotByMkt'), false, 'Malformed samplesC must fail explicitly without falling back to telemetry');
+  const errBanner = collectNodes(wmsTree, (n) => n.props?.role === 'status')[0];
+  assert.ok(errBanner && textOf(errBanner).includes('bad-temp'));
 });
 

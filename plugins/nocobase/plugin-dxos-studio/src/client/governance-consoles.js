@@ -33,8 +33,10 @@ const DEFAULT_DMN_INPUTS = '[{"name":"temperature","type":"number"}]';
 const DEFAULT_DMN_OUTPUTS = '[{"name":"action","type":"string"}]';
 const DEFAULT_DMN_RULES = '[{"when":{"temperature":{"op":"gt","value":8}},"then":{"action":"hold_mkt"}}]';
 
-function defaultEndsAtIso() {
-  return new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 16);
+function defaultEndsAtIso(nowMs = Date.now()) {
+  const dt = new Date(nowMs + 7 * 86_400_000);
+  const pad2 = (n) => String(n).padStart(2, '0');
+  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}T${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
 }
 
 function unwrapData(res) {
@@ -65,12 +67,25 @@ function formatTs(value) {
 }
 
 function parseSamplesInput(text) {
-  return String(text || '')
+  const tokens = String(text || '')
     .split(/[\s,;]+/)
     .map((s) => s.trim())
-    .filter(Boolean)
-    .map(Number)
-    .filter((n) => Number.isFinite(n));
+    .filter(Boolean);
+  const invalidTokens = [];
+  const samples = [];
+  for (const token of tokens) {
+    const num = Number(token);
+    if (!Number.isFinite(num)) invalidTokens.push(token);
+    else samples.push(num);
+  }
+  return {
+    ok: invalidTokens.length === 0,
+    samples,
+    invalidTokens,
+    error: invalidTokens.length
+      ? `Chuỗi mẫu nhiệt độ chứa giá trị không hợp lệ: ${invalidTokens.join(', ')}.`
+      : null,
+  };
 }
 
 function safeJsonParse(rawText, label) {
@@ -256,7 +271,7 @@ function renderLedgerConsole(h, S, state, patchState, actions, busy) {
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
       h('h3', { style: { margin: 0, fontSize: 16 } }, 'Ed25519 PKI & Merkle Crypto Ledger'),
       h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
-        h('button', { type: 'button', onClick: actions.loadLedger, disabled: loading, style: S.btn(false, false, loading) }, 'Làm mới Ledger'),
+        h('button', { type: 'button', onClick: () => actions.loadLedger(), disabled: loading, style: S.btn(false, false, loading) }, 'Làm mới Ledger'),
         h('button', { 'data-testid': 'dxos-ledger-verify-btn', type: 'button', onClick: actions.verifyLedger, disabled: busy, style: S.btn(true, false, busy) }, 'Kiểm toán Chuỗi Merkle (Verify Chain)'),
       ),
     ),
@@ -301,17 +316,17 @@ function renderLedgerConsole(h, S, state, patchState, actions, busy) {
     h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'flex-end' } },
       h('div', { style: { minWidth: 180 } },
         h('label', { style: S.label }, 'Lọc eventType'),
-        h('input', { type: 'text', value: eventType, placeholder: 'VD: wms.epod_captured', onChange: (e) => patchState((p) => ({ ...p, eventType: e.target.value, page: 1 })), style: S.input }),
+        h('input', { 'data-testid': 'dxos-ledger-filter-eventtype', type: 'text', value: eventType, placeholder: 'VD: wms.epod_captured', onChange: (e) => patchState((p) => ({ ...p, eventType: e.target.value })), style: S.input }),
       ),
       h('div', { style: { minWidth: 180 } },
         h('label', { style: S.label }, 'Lọc targetCollection'),
-        h('input', { type: 'text', value: targetCollection, placeholder: 'VD: latticeOrders', onChange: (e) => patchState((p) => ({ ...p, targetCollection: e.target.value, page: 1 })), style: S.input }),
+        h('input', { 'data-testid': 'dxos-ledger-filter-collection', type: 'text', value: targetCollection, placeholder: 'VD: latticeOrders', onChange: (e) => patchState((p) => ({ ...p, targetCollection: e.target.value })), style: S.input }),
       ),
-      h('button', { type: 'button', onClick: actions.loadLedger, style: S.btn(false) }, 'Áp dụng lọc'),
+      h('button', { 'data-testid': 'dxos-ledger-apply-filter-btn', type: 'button', onClick: actions.applyLedgerFilters, style: S.btn(false) }, 'Áp dụng lọc'),
       h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginLeft: 'auto' } },
-        h('button', { type: 'button', disabled: loading || page <= 1, onClick: () => patchState((p) => ({ ...p, page: Math.max(1, p.page - 1) })), style: S.btn(false, false, loading || page <= 1) }, 'Trang trước'),
+        h('button', { 'data-testid': 'dxos-ledger-prev-page-btn', type: 'button', disabled: loading || page <= 1, onClick: () => actions.changeLedgerPage(Math.max(1, page - 1)), style: S.btn(false, false, loading || page <= 1) }, 'Trang trước'),
         h('span', { style: { fontSize: 12, color: '#64748b' } }, `Tổng ${total} mục · Trang ${page}`),
-        h('button', { type: 'button', disabled: loading || page * 20 >= total, onClick: () => patchState((p) => ({ ...p, page: p.page + 1 })), style: S.btn(false, false, loading || page * 20 >= total) }, 'Trang sau'),
+        h('button', { 'data-testid': 'dxos-ledger-next-page-btn', type: 'button', disabled: loading || page * 20 >= total, onClick: () => actions.changeLedgerPage(page + 1), style: S.btn(false, false, loading || page * 20 >= total) }, 'Trang sau'),
       ),
     ),
 
@@ -561,7 +576,7 @@ function renderWmsEpodConsole(h, S, state, patchState, actions, busy) {
       h('form', { 'data-testid': 'dxos-wms-mkthold-form', onSubmit: actions.holdLotByMkt, style: S.subCard },
         h('div', { style: { fontSize: 13, fontWeight: 700 } }, 'Kiểm tra MKT & Tạm giữ Lô (MKT Hold Check)'),
         h('input', { 'data-testid': 'dxos-wms-mkthold-lotcode', type: 'text', required: true, placeholder: 'lotCode cần kiểm tra', value: mktForm.lotCode, onChange: (e) => setMkt({ lotCode: e.target.value }), style: S.input }),
-        h('input', { type: 'text', placeholder: 'Mẫu nhiệt °C (VD: 2.5, 4.0, 9.5)', value: mktForm.samplesC, onChange: (e) => setMkt({ samplesC: e.target.value }), style: S.input }),
+        h('input', { 'data-testid': 'dxos-wms-mkthold-samples', type: 'text', placeholder: 'Mẫu nhiệt °C (VD: 2.5, 4.0, 9.5)', value: mktForm.samplesC, onChange: (e) => setMkt({ samplesC: e.target.value }), style: S.input }),
         h('div', { style: S.grid2 },
           h('input', { type: 'number', step: '0.1', placeholder: 'Ngưỡng tối đa °C', value: mktForm.maxAllowedC, onChange: (e) => setMkt({ maxAllowedC: e.target.value }), style: S.input }),
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
@@ -783,13 +798,22 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
   return function DxosGovernanceConsoles(props = {}) {
     const hookApi = useApi();
     const api = props.api || hookApi;
-    const employees = Array.isArray(props.employees) ? props.employees : [];
+    const hasApi = Boolean(api?.request);
+    const allEmployees = Array.isArray(props.employees) ? props.employees : [];
     const organizations = Array.isArray(props.organizations) ? props.organizations : [];
 
     const [internalSection, setInternalSection] = React.useState(props.initialSection || 'api-keys');
-    const [orgOverride, setOrgOverride] = React.useState('');
+    const [orgOverride, setOrgOverride] = React.useState(null);
     const [feedback, setFeedback] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
+    const [runtimeRef] = React.useState(() => ({
+      api,
+      ledgerSeq: 0,
+      ledgerPage: 1,
+      ledgerEventType: '',
+      ledgerTargetCollection: '',
+    }));
+    runtimeRef.api = api;
 
     const [apiKeyState, setApiKeyState] = React.useState({
       items: [],
@@ -805,6 +829,8 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
       page: 1,
       eventType: '',
       targetCollection: '',
+      appliedEventType: '',
+      appliedTargetCollection: '',
       verifyResult: null,
       loading: false,
     });
@@ -848,8 +874,15 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
     const activeSection = GOVERNANCE_SECTIONS.some((s) => s.id === props.activeSection)
       ? props.activeSection
       : internalSection;
-    const effectiveOrg = String(orgOverride || props.selectedOrg || '').trim();
+    React.useEffect(() => {
+      setOrgOverride(null);
+    }, [props.selectedOrg]);
+    const orgInputValue = orgOverride !== null ? orgOverride : String(props.selectedOrg || '');
+    const effectiveOrg = String(orgInputValue).trim();
     const orgPayload = effectiveOrg ? { organizationId: effectiveOrg } : {};
+    const employees = effectiveOrg
+      ? allEmployees.filter((emp) => !emp.organizationId || emp.organizationId === effectiveOrg)
+      : allEmployees;
 
     function selectSection(nextId) {
       setInternalSection(nextId);
@@ -871,38 +904,55 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
     }
 
     const loadApiKeys = React.useCallback(async () => {
-      if (!api?.request) return;
+      const clientApi = runtimeRef.api;
+      if (!clientApi?.request) return;
       setApiKeyState((p) => ({ ...p, loading: true }));
       try {
-        const res = await api.request({ url: 'dxosApiKeys:list', method: 'get', params: { ...orgPayload, limit: 50 }, skipNotify: true });
+        const res = await clientApi.request({ url: 'dxosApiKeys:list', method: 'get', params: { ...orgPayload, limit: 50 }, skipNotify: true });
         const d = unwrapData(res);
         setApiKeyState((p) => ({ ...p, items: Array.isArray(d.items) ? d.items : [], loading: false }));
       } catch (err) {
         setApiKeyState((p) => ({ ...p, loading: false }));
         setFeedback({ type: 'error', text: extractError(err, 'Không tải được danh sách API Key.') });
       }
-    }, [api, effectiveOrg]);
+    }, [hasApi, effectiveOrg]);
 
-    const loadLedger = React.useCallback(async () => {
-      if (!api?.request) return;
-      setLedgerState((p) => ({ ...p, loading: true }));
+    const loadLedger = React.useCallback(async (opts = {}) => {
+      const clientApi = runtimeRef.api;
+      if (!clientApi?.request) return;
+      const reqSeq = ++runtimeRef.ledgerSeq;
+      const nextPage = Math.max(1, Number(opts.page ?? runtimeRef.ledgerPage ?? 1));
+      const nextEventType = String(opts.eventType ?? runtimeRef.ledgerEventType ?? '').trim();
+      const nextTargetCollection = String(opts.targetCollection ?? runtimeRef.ledgerTargetCollection ?? '').trim();
+      runtimeRef.ledgerPage = nextPage;
+      runtimeRef.ledgerEventType = nextEventType;
+      runtimeRef.ledgerTargetCollection = nextTargetCollection;
+
+      setLedgerState((p) => ({
+        ...p,
+        page: nextPage,
+        appliedEventType: nextEventType,
+        appliedTargetCollection: nextTargetCollection,
+        loading: true,
+      }));
       try {
         const [pkRes, stRes, entRes] = await Promise.all([
-          api.request({ url: 'dxosLedger:publicKey', method: 'get', params: orgPayload, skipNotify: true }),
-          api.request({ url: 'dxosLedger:status', method: 'get', params: orgPayload, skipNotify: true }),
-          api.request({
+          clientApi.request({ url: 'dxosLedger:publicKey', method: 'get', params: orgPayload, skipNotify: true }),
+          clientApi.request({ url: 'dxosLedger:status', method: 'get', params: orgPayload, skipNotify: true }),
+          clientApi.request({
             url: 'dxosLedger:entries',
             method: 'get',
             params: {
               ...orgPayload,
-              page: ledgerState.page,
+              page: nextPage,
               pageSize: 20,
-              ...(ledgerState.eventType ? { eventType: ledgerState.eventType } : {}),
-              ...(ledgerState.targetCollection ? { targetCollection: ledgerState.targetCollection } : {}),
+              ...(nextEventType ? { eventType: nextEventType } : {}),
+              ...(nextTargetCollection ? { targetCollection: nextTargetCollection } : {}),
             },
             skipNotify: true,
           }),
         ]);
+        if (reqSeq !== runtimeRef.ledgerSeq) return;
         const ent = unwrapData(entRes);
         setLedgerState((p) => ({
           ...p,
@@ -913,19 +963,21 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
           loading: false,
         }));
       } catch (err) {
+        if (reqSeq !== runtimeRef.ledgerSeq) return;
         setLedgerState((p) => ({ ...p, loading: false }));
         setFeedback({ type: 'error', text: extractError(err, 'Không tải được Crypto Ledger.') });
       }
-    }, [api, effectiveOrg, ledgerState.page, ledgerState.eventType, ledgerState.targetCollection]);
+    }, [hasApi, effectiveOrg]);
 
     const loadDataGov = React.useCallback(async () => {
-      if (!api?.request) return;
+      const clientApi = runtimeRef.api;
+      if (!clientApi?.request) return;
       setDataGovState((p) => ({ ...p, loading: true }));
       try {
         const [sumRes, snapRes, qRes] = await Promise.all([
-          api.request({ url: 'dxosDataGov:tierSummary', method: 'get', params: orgPayload, skipNotify: true }),
-          api.request({ url: 'dxosDataGov:listSnapshots', method: 'get', params: { ...orgPayload, page: 1, pageSize: 20 }, skipNotify: true }),
-          api.request({ url: 'dxosDataGov:quarantineList', method: 'get', params: { ...orgPayload, page: 1, pageSize: 50 }, skipNotify: true }),
+          clientApi.request({ url: 'dxosDataGov:tierSummary', method: 'get', params: orgPayload, skipNotify: true }),
+          clientApi.request({ url: 'dxosDataGov:listSnapshots', method: 'get', params: { ...orgPayload, page: 1, pageSize: 20 }, skipNotify: true }),
+          clientApi.request({ url: 'dxosDataGov:quarantineList', method: 'get', params: { ...orgPayload, page: 1, pageSize: 50 }, skipNotify: true }),
         ]);
         setDataGovState((p) => ({
           ...p,
@@ -938,62 +990,78 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
         setDataGovState((p) => ({ ...p, loading: false }));
         setFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Data Governance.') });
       }
-    }, [api, effectiveOrg]);
+    }, [hasApi, effectiveOrg]);
 
     const loadWmsLots = React.useCallback(async () => {
-      if (!api?.request) return;
+      const clientApi = runtimeRef.api;
+      if (!clientApi?.request) return;
       setWmsState((p) => ({ ...p, loading: true }));
       try {
-        const res = await api.request({ url: 'dxosWms:lots', method: 'get', params: { ...orgPayload, limit: 100 }, skipNotify: true });
+        const res = await clientApi.request({ url: 'dxosWms:lots', method: 'get', params: { ...orgPayload, limit: 100 }, skipNotify: true });
         const d = unwrapData(res);
         setWmsState((p) => ({ ...p, lots: Array.isArray(d.items) ? d.items : [], loading: false }));
       } catch (err) {
         setWmsState((p) => ({ ...p, loading: false }));
         setFeedback({ type: 'error', text: extractError(err, 'Không tải được danh sách lô kho.') });
       }
-    }, [api, effectiveOrg]);
+    }, [hasApi, effectiveOrg]);
 
     const loadDmnTables = React.useCallback(async () => {
-      if (!api?.request) return;
+      const clientApi = runtimeRef.api;
+      if (!clientApi?.request) return;
       setDmnState((p) => ({ ...p, loading: true }));
       try {
-        const res = await api.request({ url: 'dxosDmn:listTables', method: 'get', params: { ...orgPayload, limit: 100 }, skipNotify: true });
+        const res = await clientApi.request({ url: 'dxosDmn:listTables', method: 'get', params: { ...orgPayload, limit: 100 }, skipNotify: true });
         const d = unwrapData(res);
         setDmnState((p) => ({ ...p, tables: Array.isArray(d.items) ? d.items : [], loading: false }));
       } catch (err) {
         setDmnState((p) => ({ ...p, loading: false }));
         setFeedback({ type: 'error', text: extractError(err, 'Không tải được bảng DMN.') });
       }
-    }, [api, effectiveOrg]);
+    }, [hasApi, effectiveOrg]);
 
     const loadDelegations = React.useCallback(async () => {
-      if (!api?.request) return;
+      const clientApi = runtimeRef.api;
+      if (!clientApi?.request) return;
       setDelegationState((p) => ({ ...p, loading: true }));
       try {
-        const res = await api.request({ url: 'dxosDelegations:list', method: 'get', params: { ...orgPayload, limit: 100 }, skipNotify: true });
+        const res = await clientApi.request({ url: 'dxosDelegations:list', method: 'get', params: { ...orgPayload, limit: 100 }, skipNotify: true });
         const d = unwrapData(res);
         setDelegationState((p) => ({ ...p, items: Array.isArray(d.items) ? d.items : [], loading: false }));
       } catch (err) {
         setDelegationState((p) => ({ ...p, loading: false }));
         setFeedback({ type: 'error', text: extractError(err, 'Không tải được danh sách ủy quyền.') });
       }
-    }, [api, effectiveOrg]);
+    }, [hasApi, effectiveOrg]);
 
     React.useEffect(() => {
       if (activeSection === 'api-keys') loadApiKeys();
-      else if (activeSection === 'ledger') loadLedger();
-      else if (activeSection === 'data-gov') loadDataGov();
-      else if (activeSection === 'wms-epod') loadWmsLots();
-      else if (activeSection === 'dmn') loadDmnTables();
-      else if (activeSection === 'delegations') loadDelegations();
-    }, [activeSection, effectiveOrg, loadApiKeys, loadLedger, loadDataGov, loadWmsLots, loadDmnTables, loadDelegations]);
+      else if (activeSection === 'ledger') loadLedger({ page: 1 });
+      else {
+        runtimeRef.ledgerSeq += 1;
+        if (activeSection === 'data-gov') loadDataGov();
+        else if (activeSection === 'wms-epod') loadWmsLots();
+        else if (activeSection === 'dmn') loadDmnTables();
+        else if (activeSection === 'delegations') loadDelegations();
+      }
+    }, [activeSection, effectiveOrg, hasApi]);
 
     const actions = {
       loadApiKeys,
       issueApiKey: (e) => {
         e?.preventDefault?.();
+        const f = apiKeyState.form;
+        const rawUserId = String(f.userId ?? '').trim();
+        let parsedUserId;
+        if (rawUserId !== '') {
+          parsedUserId = Number(rawUserId);
+          if (!Number.isInteger(parsedUserId) || parsedUserId <= 0) {
+            setFeedback({ type: 'error', text: 'userId không hợp lệ: phải là số nguyên dương hoặc để trống.' });
+            return;
+          }
+        }
+        const rawExpires = String(f.expiresInDays ?? '').trim();
         return runMutation('Không cấp phát được API Key.', async () => {
-          const f = apiKeyState.form;
           const res = await api.request({
             url: 'dxosApiKeys:issue',
             method: 'post',
@@ -1002,8 +1070,8 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
               name: String(f.name || '').trim(),
               roleName: String(f.roleName || '').trim(),
               scopes: f.scopes || [],
-              ...(f.expiresInDays ? { expiresInDays: Number(f.expiresInDays) } : {}),
-              ...(f.userId ? { userId: Number(f.userId) } : {}),
+              ...(rawExpires ? { expiresInDays: Number(rawExpires) } : {}),
+              ...(parsedUserId !== undefined ? { userId: parsedUserId } : {}),
             },
           });
           const d = unwrapData(res);
@@ -1019,6 +1087,16 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
       }),
 
       loadLedger,
+      applyLedgerFilters: () => loadLedger({
+        page: 1,
+        eventType: ledgerState.eventType,
+        targetCollection: ledgerState.targetCollection,
+      }),
+      changeLedgerPage: (nextPage) => loadLedger({
+        page: nextPage,
+        eventType: runtimeRef.ledgerEventType,
+        targetCollection: runtimeRef.ledgerTargetCollection,
+      }),
       verifyLedger: () => runMutation('Không kiểm toán được chuỗi Merkle.', async () => {
         const res = await api.request({ url: 'dxosLedger:verify', method: 'post', data: orgPayload });
         const report = unwrapData(res);
@@ -1067,15 +1145,23 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
       }),
       computeMkt: (e) => {
         e?.preventDefault?.();
+        const f = dataGovState.mktForm;
+        const parsed = parseSamplesInput(f.samplesC);
+        if (!parsed.ok) {
+          setFeedback({ type: 'error', text: parsed.error });
+          return;
+        }
+        if (!parsed.samples.length) {
+          setFeedback({ type: 'error', text: 'Vui lòng nhập ít nhất 1 mẫu nhiệt độ °C hợp lệ.' });
+          return;
+        }
         return runMutation('Không tính được Arrhenius MKT.', async () => {
-          const f = dataGovState.mktForm;
-          const samplesC = parseSamplesInput(f.samplesC);
           const res = await api.request({
             url: 'dxosDataGov:computeMkt',
             method: 'post',
             data: {
               ...orgPayload,
-              samplesC,
+              samplesC: parsed.samples,
               ...(f.deltaH_kJ_mol ? { deltaH_kJ_mol: Number(f.deltaH_kJ_mol) } : {}),
               ...(f.maxAllowedC !== '' ? { maxAllowedC: Number(f.maxAllowedC) } : {}),
             },
@@ -1133,16 +1219,20 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
       },
       holdLotByMkt: (e) => {
         e?.preventDefault?.();
+        const f = wmsState.mktForm;
+        const parsed = parseSamplesInput(f.samplesC);
+        if (!parsed.ok) {
+          setFeedback({ type: 'error', text: parsed.error });
+          return;
+        }
         return runMutation('Không kiểm tra MKT lô hàng được.', async () => {
-          const f = wmsState.mktForm;
-          const samplesC = parseSamplesInput(f.samplesC);
           const res = await api.request({
             url: 'dxosWms:holdLotByMkt',
             method: 'post',
             data: {
               ...orgPayload,
               lotCode: f.lotCode,
-              ...(samplesC.length ? { samplesC } : {}),
+              ...(parsed.samples.length ? { samplesC: parsed.samples } : {}),
               ...(f.maxAllowedC !== '' ? { maxAllowedC: Number(f.maxAllowedC) } : {}),
               forceHold: Boolean(f.forceHold),
               ...(f.reason ? { reason: f.reason } : {}),
@@ -1272,8 +1362,9 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
       !props.selectedOrg || organizations.length > 1 ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', fontSize: 12 } },
         h('span', { style: { fontWeight: 600, color: '#475569' } }, 'Phạm vi Organization ID:'),
         h('input', {
+          'data-testid': 'dxos-gov-org-override-input',
           type: 'text',
-          value: effectiveOrg,
+          value: orgInputValue,
           placeholder: 'VD: org-a (bắt buộc với root)',
           onChange: (e) => setOrgOverride(e.target.value),
           style: { ...S.input, width: 220 },
@@ -1302,4 +1393,9 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
   };
 }
 
-module.exports = { createDxosGovernanceConsoles, GOVERNANCE_SECTIONS };
+module.exports = {
+  createDxosGovernanceConsoles,
+  GOVERNANCE_SECTIONS,
+  defaultEndsAtIso,
+  parseSamplesInput,
+};
