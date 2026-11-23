@@ -76,19 +76,75 @@ function readParams(ctx) {
   return { ...p, ...v };
 }
 
+function readHeaderRole(ctx) {
+  if (typeof ctx?.get === 'function') {
+    const h = ctx.get('X-Role') || ctx.get('x-role');
+    if (h != null && String(h).trim()) return String(h).trim();
+  }
+  const raw = ctx?.headers?.['x-role']
+    ?? ctx?.headers?.['X-Role']
+    ?? ctx?.request?.headers?.['x-role']
+    ?? ctx?.request?.headers?.['X-Role'];
+  return raw != null ? String(raw).trim() : '';
+}
+
+function extractClaimedStudioRoles(ctx) {
+  const activeRole = ctx?.state?.currentRole != null ? String(ctx.state.currentRole).trim() : '';
+  if (activeRole) return [activeRole];
+  const headerRole = readHeaderRole(ctx);
+  if (headerRole) return [headerRole];
+  if (Array.isArray(ctx?.state?.currentRoles) && ctx.state.currentRoles.length) {
+    return ctx.state.currentRoles.map((r) => String(r || '').trim()).filter(Boolean);
+  }
+  return [];
+}
+
+async function resolveStudioCallerRoles(ctx, db) {
+  if (!ctx?.state?.currentUser) return [];
+  const claimed = extractClaimedStudioRoles(ctx);
+  const userId = val(ctx.state.currentUser, 'id');
+  const ruRepo = db?.getRepository?.('rolesUsers');
+  if (ruRepo && typeof ruRepo.find === 'function') {
+    if (userId == null || !/^[1-9]\d*$/.test(String(userId))) return [];
+    const bindings = (await ruRepo.find({ filter: { userId: Number(userId) } })) || [];
+    const assigned = new Set(
+      bindings
+        .filter((r) => val(r, 'userId') == null || Number(val(r, 'userId')) === Number(userId))
+        .map((r) => String(val(r, 'roleName') || '').trim())
+        .filter(Boolean),
+    );
+    if (assigned.size === 0) return [];
+    return claimed.length > 0 ? claimed.filter((r) => assigned.has(r)) : [...assigned];
+  }
+  return claimed;
+}
+
+async function isRootCaller(ctx, db) {
+  const roleNames = await resolveStudioCallerRoles(ctx, db);
+  return roleNames.includes('root');
+}
+
 async function isStudioAdmin(ctx, db) {
-  if (!ctx?.state?.currentUser) return false;
-  const roleNames = Array.isArray(ctx.state.currentRoles) && ctx.state.currentRoles.length
-    ? ctx.state.currentRoles
-    : ctx.state.currentRole ? [ctx.state.currentRole] : [];
+  const roleNames = await resolveStudioCallerRoles(ctx, db);
+  if (!roleNames.length) return false;
   if (roleNames.includes('root')) return true;
   const rolesRepo = db?.getRepository?.('roles');
-  if (!rolesRepo || !roleNames.length) return false;
-  const matched = (await rolesRepo.find({ filter: { name: { $in: roleNames } } })) || [];
+  if (!rolesRepo) return false;
+  let matched = [];
+  if (typeof rolesRepo.find === 'function') {
+    matched = (await rolesRepo.find({ filter: { name: { $in: roleNames } } })) || [];
+  } else if (typeof rolesRepo.findOne === 'function') {
+    for (const rName of roleNames) {
+      const row = await rolesRepo.findOne({ filter: { name: rName } });
+      if (row) matched.push(row);
+    }
+  }
   return matched.some((r) => {
-    if (val(r, 'allowConfigure') === true) return true;
+    const rName = String(val(r, 'name') || '').trim();
+    if (!rName || !roleNames.includes(rName)) return false;
+    if (val(r, 'allowAll') === true || val(r, 'allowConfigure') === true) return true;
     const snippets = val(r, 'snippets');
-    return Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*'));
+    return Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*') || snippets.includes('*'));
   });
 }
 
@@ -156,16 +212,9 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
     }
   }
 
-  function isRootCaller(ctx) {
-    const activeRole = ctx?.state?.currentRole;
-    if (activeRole) return activeRole === 'root';
-    const roles = Array.isArray(ctx?.state?.currentRoles) ? ctx.state.currentRoles : [];
-    return roles.includes('root');
-  }
-
   async function resolveSolutionBundleScope(ctx, params, incomingBundle = null, { allowAllString = false } = {}) {
     const requestedOrg = params.organizationId != null ? String(params.organizationId).trim() : '';
-    if (isRootCaller(ctx)) {
+    if (await isRootCaller(ctx, db)) {
       const metaOrg = incomingBundle?.metadata?.organizationId != null
         ? String(incomingBundle.metadata.organizationId).trim()
         : '';
@@ -522,4 +571,11 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
   };
 }
 
-module.exports = { DXOS_PLUGINS_CATALOG, isStudioAdmin, createDefaultApplyBlueprint, createDxosStudioActions };
+module.exports = {
+  DXOS_PLUGINS_CATALOG,
+  isStudioAdmin,
+  isRootCaller,
+  resolveStudioCallerRoles,
+  createDefaultApplyBlueprint,
+  createDxosStudioActions,
+};

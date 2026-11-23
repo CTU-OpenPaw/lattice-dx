@@ -750,7 +750,7 @@ test('readiness resolves host NocoBase version dynamically from NOCOBASE_VERSION
   const baseDb = (appVersion) => ({
     ...(appVersion ? { app: { version: appVersion } } : {}),
     hasCollection: () => false,
-    getRepository: () => ({ find: async () => [] }),
+    getRepository: (name) => (name === 'rolesUsers' || name === 'roles' ? null : { find: async () => [] }),
   });
   const origEnv = process.env.NOCOBASE_VERSION;
   try {
@@ -1006,9 +1006,21 @@ test('solutionBundleExport restricts organizationId=all to root and scopes non-r
     { id: 2, username: 'ai-b', organizationId: 'org-b', enabled: true },
   ];
 
+  const rolesUsers = [
+    { userId: 1, roleName: 'root' },
+    { userId: 20, roleName: 'ldx_sysadmin' },
+    { userId: 21, roleName: 'ldx_sysadmin' },
+    { userId: 999, roleName: 'ldx_sysadmin' },
+  ];
+
   const db = {
     hasCollection: () => true,
     getRepository(name) {
+      if (name === 'rolesUsers') {
+        return {
+          find: async ({ filter } = {}) => rolesUsers.filter((ru) => filter?.userId == null || Number(ru.userId) === Number(filter.userId)),
+        };
+      }
       if (name === 'roles') {
         return {
           find: async ({ filter }) => (filter?.name?.$in || []).map((n) => ({

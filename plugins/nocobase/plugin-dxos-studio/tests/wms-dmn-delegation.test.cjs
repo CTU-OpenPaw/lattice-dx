@@ -469,8 +469,24 @@ test('dxosWms epodCapture, zero-PII fail-closed publicTrack, and XSS-escaped pri
   assert.deepEqual(trackCtx.body.tempSummary, { mktCelsius: 4.32, inRange: true });
   assert.equal(trackCtx.body.ledgerVerification.verifiedFormat, true);
   const trackJson = JSON.stringify(trackCtx.body);
-  for (const pii of ['Nguyen Thi Giao Nhan', '567', '10.0452', '105.7469', 'data:image/png', 'drv-a', '150', 'org-a', 'Giao đủ']) {
+  const trackNoEntropyJson = JSON.stringify({
+    ...trackCtx.body,
+    trackingCode: undefined,
+    deliveredAt: undefined,
+    ledgerVerification: trackCtx.body.ledgerVerification
+      ? { ...trackCtx.body.ledgerVerification, merkleRoot: undefined }
+      : undefined,
+  });
+  assert.equal(trackCtx.body.recipientPhone, undefined);
+  assert.equal(trackCtx.body.recipientPhoneMasked, undefined);
+  assert.equal(trackCtx.body.recipientName, undefined);
+  assert.equal(trackCtx.body.driverUserId, undefined);
+  assert.equal(trackCtx.body.organizationId, undefined);
+  for (const pii of ['Nguyen Thi Giao Nhan', '0901234567', '090123', '***567', '10.0452', '105.7469', 'data:image/png', 'drv-a', 'org-a', 'Giao đủ']) {
     assert.equal(trackJson.includes(pii), false, `publicTrack leaked PII: ${pii}`);
+  }
+  for (const shortPii of ['567', '150']) {
+    assert.equal(trackNoEntropyJson.includes(shortPii), false, `publicTrack non-entropy payload leaked PII: ${shortPii}`);
   }
 
   // printVoucher enforces org isolation & strict HTML escaping without raw token
