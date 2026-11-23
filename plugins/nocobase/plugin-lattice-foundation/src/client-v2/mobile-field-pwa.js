@@ -10,7 +10,9 @@
 
 const OFFLINE_QUEUE_STORAGE_KEY = 'latticedx:mobile:offline-queue';
 const MAX_OFFLINE_QUEUE_ITEMS = 50;
+const MAX_OFFLINE_PAYLOAD_BYTES = 320 * 1024;
 const MAX_QR_PAYLOAD_LENGTH = 2048;
+const FORBIDDEN_STORAGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 const ALLOWED_OFFLINE_ACTIONS = Object.freeze({
   'wms.epodCapture': Object.freeze({ url: 'dxosWms:epodCapture', method: 'post', label: 'Xác nhận ePOD' }),
@@ -20,6 +22,7 @@ const ALLOWED_OFFLINE_ACTIONS = Object.freeze({
 const UNSAFE_QR_RE = /[\x00-\x1f\x7f<>\\]|(?:javascript|data|vbscript):|\.\./i;
 const URN_FULL_RE = /^urn:ngsi-ld:([A-Za-z][A-Za-z0-9_-]{0,47}):([a-zA-Z0-9._-]{1,64}):([a-zA-Z0-9._-]{1,32}):([a-zA-Z0-9._-]{1,64})$/;
 const URN_SHORT_RE = /^urn:ngsi-ld:([A-Za-z][A-Za-z0-9_-]{0,47}):([a-zA-Z0-9._-]{1,64})$/;
+const ENTITY_ID_RE = /^[a-zA-Z0-9:._-]{1,255}$/;
 const TRACKING_CODE_RE = /^LDX-TRK-[A-Z0-9-]{4,64}$/i;
 const TRACKING_TOKEN_RE = /^ldx_trk_[a-zA-Z0-9_-]{8,128}$/;
 const LOT_CODE_RE = /^LOT-[A-Z0-9._-]{1,64}$/i;
@@ -55,13 +58,52 @@ function isPlainObject(value) {
   return proto === Object.prototype || proto === null;
 }
 
+function stripForbiddenKeys(value, depth = 0) {
+  if (depth > 16) return undefined;
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const cleanArr = [];
+    for (const entry of value) {
+      const cleanEntry = stripForbiddenKeys(entry, depth + 1);
+      if (cleanEntry !== undefined) cleanArr.push(cleanEntry);
+    }
+    return cleanArr;
+  }
+  if (isPlainObject(value)) {
+    const cleanObj = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (FORBIDDEN_STORAGE_KEYS.has(key)) continue;
+      const cleanVal = stripForbiddenKeys(val, depth + 1);
+      if (cleanVal !== undefined) cleanObj[key] = cleanVal;
+    }
+    return cleanObj;
+  }
+  return undefined;
+}
+
+function isQuotaExceededError(err) {
+  if (!err || typeof err !== 'object') return false;
+  const name = String(err.name || '');
+  const code = Number(err.code);
+  return name === 'QuotaExceededError'
+    || name === 'NS_ERROR_DOM_QUOTA_REACHED'
+    || code === 22
+    || code === 1014;
+}
+
 function cloneSafePayload(payload) {
   if (!isPlainObject(payload)) {
     throw Object.assign(new Error('Dữ liệu hàng đợi phải là đối tượng JSON hợp lệ.'), { code: 'INVALID_OFFLINE_PAYLOAD' });
   }
   try {
-    const serialized = JSON.stringify(payload);
-    if (typeof serialized !== 'string' || serialized.length > 320 * 1024) {
+    const stripped = stripForbiddenKeys(payload);
+    if (!isPlainObject(stripped)) {
+      throw Object.assign(new Error('Dữ liệu hàng đợi phải là đối tượng JSON hợp lệ.'), { code: 'INVALID_OFFLINE_PAYLOAD' });
+    }
+    const serialized = JSON.stringify(stripped);
+    if (typeof serialized !== 'string' || serialized.length > MAX_OFFLINE_PAYLOAD_BYTES) {
       throw Object.assign(new Error('Dữ liệu hàng đợi vượt quá kích thước cho phép.'), { code: 'INVALID_OFFLINE_PAYLOAD' });
     }
     return JSON.parse(serialized);
@@ -77,11 +119,27 @@ function sanitizeStoredQueueItem(raw) {
   const spec = Object.hasOwn(ALLOWED_OFFLINE_ACTIONS, raw.actionType) ? ALLOWED_OFFLINE_ACTIONS[raw.actionType] : null;
   if (!spec) return null;
   if (!isPlainObject(raw.payload)) return null;
+  const strippedPayload = stripForbiddenKeys(raw.payload);
+  if (!isPlainObject(strippedPayload)) return null;
+  if (
+    strippedPayload.signatureDataUrl !== undefined
+    && (typeof strippedPayload.signatureDataUrl !== 'string' || strippedPayload.signatureDataUrl.length > MAX_OFFLINE_PAYLOAD_BYTES)
+  ) {
+    return null;
+  }
+  let cleanPayload;
+  try {
+    const serialized = JSON.stringify(strippedPayload);
+    if (typeof serialized !== 'string' || serialized.length > MAX_OFFLINE_PAYLOAD_BYTES) return null;
+    cleanPayload = JSON.parse(serialized);
+  } catch {
+    return null;
+  }
   return {
     id: raw.id.trim().slice(0, 128),
     actionType: raw.actionType,
     endpoint: spec.url,
-    payload: raw.payload,
+    payload: cleanPayload,
     createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : new Date().toISOString(),
     attempts: Number.isInteger(raw.attempts) && raw.attempts >= 0 ? raw.attempts : 0,
     lastError: typeof raw.lastError === 'string' ? raw.lastError.slice(0, 240) : null,
@@ -93,7 +151,20 @@ function writeOfflineQueue(items, storage) {
     throw Object.assign(new Error('Trình duyệt không hỗ trợ bộ nhớ ngoại tuyến.'), { code: 'OFFLINE_STORAGE_UNAVAILABLE' });
   }
   const bounded = Array.isArray(items) ? items.slice(0, MAX_OFFLINE_QUEUE_ITEMS) : [];
-  storage.setItem(OFFLINE_QUEUE_STORAGE_KEY, JSON.stringify(bounded));
+  try {
+    storage.setItem(OFFLINE_QUEUE_STORAGE_KEY, JSON.stringify(bounded));
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      throw Object.assign(
+        new Error('Bộ nhớ ngoại tuyến đã đầy (vượt dung lượng lưu trữ). Vui lòng đồng bộ hoặc xóa bớt tác vụ.'),
+        { code: 'OFFLINE_STORAGE_QUOTA_EXCEEDED', cause: err },
+      );
+    }
+    throw Object.assign(
+      new Error((err && err.message) || 'Không thể lưu dữ liệu vào bộ nhớ ngoại tuyến.'),
+      { code: 'OFFLINE_STORAGE_WRITE_FAILED', cause: err },
+    );
+  }
   return bounded;
 }
 
@@ -282,9 +353,45 @@ function hasUnsafeKeyInRawJson(rawText) {
   return /"(?:__proto__|constructor|prototype)"\s*:/.test(rawText);
 }
 
-function parsePositiveInt(val) {
+function parseStrictFiniteNumber(val) {
+  if (typeof val !== 'number' && typeof val !== 'string') return null;
+  if (typeof val === 'string' && val.trim() === '') return null;
   const num = Number(val);
-  return Number.isSafeInteger(num) && num > 0 ? num : null;
+  return Number.isFinite(num) ? num : null;
+}
+
+function parsePositiveInt(val) {
+  if (typeof val === 'number') {
+    return Number.isSafeInteger(val) && val > 0 ? val : null;
+  }
+  if (typeof val === 'string') {
+    const trimmed = val.trim();
+    if (!/^[1-9]\d{0,18}$/.test(trimmed)) return null;
+    const num = Number(trimmed);
+    return Number.isSafeInteger(num) && num > 0 ? num : null;
+  }
+  return null;
+}
+
+function parseTwinTarget(rawTarget) {
+  const numericId = parsePositiveInt(rawTarget);
+  if (numericId !== null) {
+    return { assetId: numericId, assetEntityId: null, label: `Asset #${numericId}` };
+  }
+  if (typeof rawTarget !== 'string') return null;
+  const trimmed = rawTarget.trim();
+  if (!trimmed || UNSAFE_QR_RE.test(trimmed) || !ENTITY_ID_RE.test(trimmed)) return null;
+  const fullMatch = URN_FULL_RE.exec(trimmed);
+  if (fullMatch) {
+    if (fullMatch[3] === 'native' && parsePositiveInt(fullMatch[4]) === null) return null;
+    return { assetId: null, assetEntityId: trimmed, label: trimmed };
+  }
+  const shortMatch = URN_SHORT_RE.exec(trimmed);
+  if (shortMatch) {
+    if (shortMatch[1] === 'Asset' && /^\d+$/.test(shortMatch[2]) && parsePositiveInt(shortMatch[2]) === null) return null;
+    return { assetId: null, assetEntityId: trimmed, label: trimmed };
+  }
+  return null;
 }
 
 function parseFieldQrPayload(raw) {
@@ -307,15 +414,29 @@ function parseFieldQrPayload(raw) {
     const extracted = { valid: true, kind: 'json', raw: text };
     let matchedCount = 0;
 
-    const urnRaw = parsed.urn || parsed.assetUrn || parsed.entityId;
-    if (typeof urnRaw === 'string' && URN_FULL_RE.test(urnRaw.trim())) {
-      const m = URN_FULL_RE.exec(urnRaw.trim());
-      extracted.urn = urnRaw.trim();
-      extracted.entityType = m[1];
-      extracted.organizationId = m[2];
-      extracted.entityId = m[4];
-      if (/^\d+$/.test(m[4])) extracted.assetId = Number(m[4]);
-      matchedCount += 1;
+    const urnRaw = parsed.urn || parsed.assetUrn || parsed.assetEntityId || parsed.entityId;
+    if (typeof urnRaw === 'string') {
+      const trimmedUrn = urnRaw.trim();
+      const m = URN_FULL_RE.exec(trimmedUrn);
+      if (m) {
+        extracted.urn = trimmedUrn;
+        extracted.entityType = m[1];
+        extracted.organizationId = m[2];
+        extracted.entityId = m[4];
+        const urnAssetId = parsePositiveInt(m[4]);
+        if (urnAssetId !== null) extracted.assetId = urnAssetId;
+        matchedCount += 1;
+      } else {
+        const ms = URN_SHORT_RE.exec(trimmedUrn);
+        if (ms) {
+          extracted.urn = trimmedUrn;
+          extracted.entityType = ms[1];
+          extracted.entityId = ms[2];
+          const urnAssetId = parsePositiveInt(ms[2]);
+          if (urnAssetId !== null) extracted.assetId = urnAssetId;
+          matchedCount += 1;
+        }
+      }
     }
     if (typeof parsed.trackingCode === 'string' && TRACKING_CODE_RE.test(parsed.trackingCode.trim())) {
       extracted.trackingCode = parsed.trackingCode.trim().toUpperCase();
@@ -342,9 +463,13 @@ function parseFieldQrPayload(raw) {
       extracted.assetId = assetId;
       matchedCount += 1;
     }
-    const targetTemp = parsed.targetTempC ?? parsed.setpointC;
-    if (targetTemp !== undefined && Number.isFinite(Number(targetTemp))) {
-      extracted.targetTempC = Number(targetTemp);
+    const targetTemp = parsed.targetTempC !== undefined ? parsed.targetTempC : parsed.setpointC;
+    if (targetTemp !== undefined && targetTemp !== null) {
+      const tempNum = parseStrictFiniteNumber(targetTemp);
+      if (tempNum === null || tempNum < -80 || tempNum > 120) {
+        return rejectQr('Nhiệt độ mục tiêu (targetTempC) trong QR phải là số hữu hạn trong khoảng [-80, 120] °C.');
+      }
+      extracted.targetTempC = tempNum;
       matchedCount += 1;
     }
     if (matchedCount === 0) {
@@ -365,7 +490,7 @@ function parseFieldQrPayload(raw) {
       organizationId: urnFullMatch[2],
       source: urnFullMatch[3],
       entityId,
-      assetId: /^\d+$/.test(entityId) ? Number(entityId) : null,
+      assetId: parsePositiveInt(entityId),
     };
   }
 
@@ -381,7 +506,7 @@ function parseFieldQrPayload(raw) {
       organizationId: null,
       source: null,
       entityId,
-      assetId: /^\d+$/.test(entityId) ? Number(entityId) : null,
+      assetId: parsePositiveInt(entityId),
     };
   }
 
@@ -404,16 +529,17 @@ function buildEpodPayload(fields = {}) {
     return { ok: false, error: 'Vui lòng nhập tên người nhận hàng.' };
   }
 
-  const rawQty = fields.deliveredQty === '' || fields.deliveredQty === undefined || fields.deliveredQty === null
-    ? 0
-    : Number(fields.deliveredQty);
-  if (!Number.isFinite(rawQty) || rawQty < 0) {
+  const qtyIsBlank = fields.deliveredQty === undefined
+    || fields.deliveredQty === null
+    || (typeof fields.deliveredQty === 'string' && fields.deliveredQty.trim() === '');
+  const rawQty = qtyIsBlank ? 0 : parseStrictFiniteNumber(fields.deliveredQty);
+  if (rawQty === null || rawQty < 0) {
     return { ok: false, error: 'Số lượng giao phải là số không âm.' };
   }
 
-  const gpsLat = Number(fields.gpsLat);
-  const gpsLng = Number(fields.gpsLng);
-  if (!Number.isFinite(gpsLat) || gpsLat < -90 || gpsLat > 90 || !Number.isFinite(gpsLng) || gpsLng < -180 || gpsLng > 180 || fields.gpsLat === '' || fields.gpsLng === '') {
+  const gpsLat = parseStrictFiniteNumber(fields.gpsLat);
+  const gpsLng = parseStrictFiniteNumber(fields.gpsLng);
+  if (gpsLat === null || gpsLat < -90 || gpsLat > 90 || gpsLng === null || gpsLng < -180 || gpsLng > 180) {
     return { ok: false, error: 'Cần tọa độ GPS hợp lệ (Lat [-90..90], Lng [-180..180]).' };
   }
 
@@ -444,9 +570,13 @@ function buildEpodPayload(fields = {}) {
   if (typeof fields.recipientPhone === 'string' && fields.recipientPhone.trim()) {
     payload.recipientPhone = fields.recipientPhone.trim().slice(0, 32);
   }
-  if (fields.gpsAccuracyM !== undefined && fields.gpsAccuracyM !== null && fields.gpsAccuracyM !== '') {
-    const acc = Number(fields.gpsAccuracyM);
-    if (Number.isFinite(acc) && acc >= 0) payload.gpsAccuracyM = acc;
+  if (
+    fields.gpsAccuracyM !== undefined
+    && fields.gpsAccuracyM !== null
+    && (typeof fields.gpsAccuracyM !== 'string' || fields.gpsAccuracyM.trim() !== '')
+  ) {
+    const acc = parseStrictFiniteNumber(fields.gpsAccuracyM);
+    if (acc !== null && acc >= 0) payload.gpsAccuracyM = acc;
   }
   if (typeof fields.notes === 'string' && fields.notes.trim()) {
     payload.notes = fields.notes.trim().slice(0, 500);
@@ -477,6 +607,7 @@ function createMobileFieldPwaPage(client, React, app) {
     const [qrInput, setQrInput] = React.useState('');
     const [qrResult, setQrResult] = React.useState(null);
     const [scannerActive, setScannerActive] = React.useState(false);
+    const [scannerStream, setScannerStream] = React.useState(null);
     const [scannerNote, setScannerNote] = React.useState('');
 
     const [orderCode, setOrderCode] = React.useState('');
@@ -505,36 +636,66 @@ function createMobileFieldPwaPage(client, React, app) {
     const drawingRef = React.useRef(false);
     const streamRef = React.useRef(null);
     const handleSyncRef = React.useRef(null);
+    const syncingRef = React.useRef(false);
+    const syncPromiseRef = React.useRef(null);
+    const storageRef = React.useRef(storage);
+    storageRef.current = storage;
+    const mountedRef = React.useRef(true);
+    const scannerStartSeqRef = React.useRef(0);
 
     const handleSync = React.useCallback(async (overrideOnline) => {
+      if (syncingRef.current) {
+        return syncPromiseRef.current || null;
+      }
       if (!apiClient || typeof apiClient.request !== 'function') {
         setStatusNotice({ type: 'warn', text: 'Chưa sẵn sàng kết nối API để đồng bộ.' });
         return null;
       }
       const effectiveOnline = typeof overrideOnline === 'boolean' ? overrideOnline : isOnline;
+      syncingRef.current = true;
       setSyncing(true);
-      try {
-        const res = await flushOfflineQueue({ apiClient, storage, isOnline: effectiveOnline });
-        setQueueItems(res.remaining);
-        if (res.synced > 0 || res.failed > 0) {
+      const run = (async () => {
+        try {
+          const res = await flushOfflineQueue({ apiClient, storage, isOnline: effectiveOnline });
+          setQueueItems(res.remaining);
+          const hasUnauthorized = Array.isArray(res.results)
+            && res.results.some((r) => r.status === 'deferred' && r.httpStatus === 401);
+          if (hasUnauthorized) {
+            setStatusNotice({
+              type: 'warn',
+              text: `Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại (giữ ${res.deferred} tác vụ trong hàng đợi${res.synced > 0 ? `, đã đồng bộ ${res.synced}` : ''}${res.failed > 0 ? `, ${res.failed} lỗi vĩnh viễn` : ''}).`,
+            });
+          } else if (res.synced > 0 || res.failed > 0) {
+            setStatusNotice({
+              type: res.failed > 0 ? 'warn' : 'success',
+              text: `Đồng bộ xong: ${res.synced} thành công, ${res.failed} lỗi vĩnh viễn, ${res.deferred} chờ thử lại.`,
+            });
+          } else if (res.deferred > 0) {
+            setStatusNotice({ type: 'warn', text: `Vẫn ngoại tuyến hoặc mất kết nối — giữ ${res.deferred} tác vụ trong hàng đợi.` });
+          } else {
+            setStatusNotice({ type: 'info', text: 'Hàng đợi ngoại tuyến đang trống.' });
+          }
+          return res;
+        } catch (err) {
           setStatusNotice({
-            type: res.failed > 0 ? 'warn' : 'success',
-            text: `Đồng bộ xong: ${res.synced} thành công, ${res.failed} lỗi vĩnh viễn, ${res.deferred} chờ thử lại.`,
+            type: 'error',
+            text: (err && err.message) || 'Không thể đồng bộ hàng đợi ngoại tuyến.',
           });
-        } else if (res.deferred > 0) {
-          setStatusNotice({ type: 'warn', text: `Vẫn ngoại tuyến hoặc mất kết nối — giữ ${res.deferred} tác vụ trong hàng đợi.` });
-        } else {
-          setStatusNotice({ type: 'info', text: 'Hàng đợi ngoại tuyến đang trống.' });
+          return null;
+        } finally {
+          syncingRef.current = false;
+          syncPromiseRef.current = null;
+          setSyncing(false);
         }
-        return res;
-      } finally {
-        setSyncing(false);
-      }
+      })();
+      syncPromiseRef.current = run;
+      return run;
     }, [apiClient, storage, isOnline]);
 
     handleSyncRef.current = handleSync;
 
     React.useEffect(() => {
+      mountedRef.current = true;
       // Inject PWA manifest link + register Service Worker cleanly once on mount in browser runtime.
       if (typeof document !== 'undefined' && document.head) {
         if (typeof document.querySelector === 'function' && !document.querySelector('link[rel="manifest"]')) {
@@ -548,18 +709,28 @@ function createMobileFieldPwaPage(client, React, app) {
       if (typeof navigator !== 'undefined' && navigator.serviceWorker && typeof navigator.serviceWorker.register === 'function') {
         navigator.serviceWorker.register('/api/dxos:sw.js', { scope: '/' }).catch(() => undefined);
       }
-      if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined;
 
+      const hasWindowEvents = typeof window !== 'undefined' && typeof window.addEventListener === 'function';
       const onOnline = () => {
         setIsOnline(true);
-        handleSyncRef.current?.(true)?.catch(() => undefined);
+        if (readOfflineQueue({ storage: storageRef.current }).length === 0) {
+          return undefined;
+        }
+        return handleSyncRef.current?.(true)?.catch(() => undefined);
       };
       const onOffline = () => setIsOnline(false);
-      window.addEventListener('online', onOnline);
-      window.addEventListener('offline', onOffline);
+
+      if (hasWindowEvents) {
+        window.addEventListener('online', onOnline);
+        window.addEventListener('offline', onOffline);
+      }
       return () => {
-        window.removeEventListener?.('online', onOnline);
-        window.removeEventListener?.('offline', onOffline);
+        mountedRef.current = false;
+        scannerStartSeqRef.current += 1;
+        if (hasWindowEvents) {
+          window.removeEventListener?.('online', onOnline);
+          window.removeEventListener?.('offline', onOffline);
+        }
         if (streamRef.current && typeof streamRef.current.getTracks === 'function') {
           for (const tr of streamRef.current.getTracks()) tr.stop?.();
           streamRef.current = null;
@@ -576,7 +747,11 @@ function createMobileFieldPwaPage(client, React, app) {
       }
       if (parsed.orderCode) setOrderCode(parsed.orderCode);
       if (parsed.orderId) setOrderId(String(parsed.orderId));
-      if (parsed.assetId) setTwinAssetId(String(parsed.assetId));
+      if (parsed.assetId) {
+        setTwinAssetId(String(parsed.assetId));
+      } else if (parsed.urn) {
+        setTwinAssetId(parsed.urn);
+      }
       if (parsed.targetTempC !== undefined) setTwinTargetTempC(String(parsed.targetTempC));
       if (parsed.lotCode) {
         setNotes((prev) => (prev && prev.includes(parsed.lotCode) ? prev : [prev, `Lô: ${parsed.lotCode}`].filter(Boolean).join(' | ')));
@@ -589,7 +764,12 @@ function createMobileFieldPwaPage(client, React, app) {
     }, []);
 
     const stopScanner = React.useCallback(() => {
+      scannerStartSeqRef.current += 1;
       setScannerActive(false);
+      setScannerStream(null);
+      if (videoRef.current && videoRef.current.srcObject) {
+        videoRef.current.srcObject = null;
+      }
       if (streamRef.current && typeof streamRef.current.getTracks === 'function') {
         for (const tr of streamRef.current.getTracks()) tr.stop?.();
         streamRef.current = null;
@@ -603,21 +783,48 @@ function createMobileFieldPwaPage(client, React, app) {
         setScannerNote('Thiết bị/trình duyệt chưa hỗ trợ Camera BarcodeDetector — vui lòng nhập mã QR thủ công bên dưới.');
         return;
       }
+      const startSeq = ++scannerStartSeqRef.current;
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        if (!mountedRef.current || scannerStartSeqRef.current !== startSeq) {
+          if (stream && typeof stream.getTracks === 'function') {
+            for (const tr of stream.getTracks()) tr.stop?.();
+          }
+          return;
+        }
+        if (streamRef.current && streamRef.current !== stream && typeof streamRef.current.getTracks === 'function') {
+          for (const tr of streamRef.current.getTracks()) tr.stop?.();
+        }
         streamRef.current = stream;
+        setScannerStream(stream);
         setScannerActive(true);
         setScannerNote('Đang bật camera quét mã QR...');
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          await videoRef.current.play?.();
-        }
+      } catch {
+        setScannerNote('Không mở được camera. Hãy cấp quyền camera hoặc dùng ô nhập thủ công.');
+        stopScanner();
+      }
+    }, [stopScanner]);
+
+    React.useEffect(() => {
+      if (!scannerActive) return undefined;
+      const activeStream = scannerStream || streamRef.current;
+      const videoEl = videoRef.current;
+      if (!activeStream || !videoEl) return undefined;
+
+      let cancelled = false;
+      let rafId = null;
+
+      videoEl.srcObject = activeStream;
+      Promise.resolve(videoEl.play?.()).catch(() => undefined);
+
+      const Detector = typeof window !== 'undefined' && typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
+      if (Detector) {
         const detector = new Detector({ formats: ['qr_code', 'code_128', 'ean_13'] });
         const scanTick = async () => {
-          if (!streamRef.current || !videoRef.current) return;
+          if (cancelled || !streamRef.current || !videoRef.current) return;
           try {
             const codes = await detector.detect(videoRef.current);
-            if (Array.isArray(codes) && codes.length > 0 && codes[0].rawValue) {
+            if (!cancelled && Array.isArray(codes) && codes.length > 0 && codes[0].rawValue) {
               const rawVal = String(codes[0].rawValue);
               setQrInput(rawVal);
               applyParsedQr(rawVal);
@@ -627,16 +834,31 @@ function createMobileFieldPwaPage(client, React, app) {
           } catch {
             // Continue scanning on frame error
           }
-          if (streamRef.current && typeof requestAnimationFrame === 'function') {
-            requestAnimationFrame(scanTick);
+          if (!cancelled && streamRef.current && typeof requestAnimationFrame === 'function') {
+            rafId = requestAnimationFrame(scanTick);
           }
         };
-        if (typeof requestAnimationFrame === 'function') requestAnimationFrame(scanTick);
-      } catch {
-        setScannerNote('Không mở được camera. Hãy cấp quyền camera hoặc dùng ô nhập thủ công.');
-        stopScanner();
+        if (typeof requestAnimationFrame === 'function') {
+          rafId = requestAnimationFrame(scanTick);
+        }
       }
-    }, [applyParsedQr, stopScanner]);
+
+      return () => {
+        cancelled = true;
+        if (rafId !== null && typeof cancelAnimationFrame === 'function') {
+          cancelAnimationFrame(rafId);
+        }
+        if (videoRef.current && videoRef.current.srcObject === activeStream) {
+          videoRef.current.srcObject = null;
+        }
+        if (typeof activeStream.getTracks === 'function') {
+          for (const tr of activeStream.getTracks()) tr.stop?.();
+        }
+        if (streamRef.current === activeStream) {
+          streamRef.current = null;
+        }
+      };
+    }, [scannerActive, scannerStream, applyParsedQr, stopScanner]);
 
     const captureGps = React.useCallback(() => {
       const geo = typeof navigator !== 'undefined' ? navigator.geolocation : null;
@@ -724,12 +946,29 @@ function createMobileFieldPwaPage(client, React, app) {
       }
     };
 
+    const tryEnqueueOffline = React.useCallback((actionType, payload, buildNoticeText) => {
+      try {
+        const queued = enqueueOfflineAction({ actionType, payload }, { storage });
+        setQueueItems(queued.queue);
+        setStatusNotice({ type: 'warn', text: buildNoticeText(queued.queue.length) });
+        return { queued: true, item: queued.item };
+      } catch (queueErr) {
+        const errorText = queueErr && queueErr.code === 'OFFLINE_QUEUE_FULL'
+          ? `Hàng đợi ngoại tuyến đã đầy (${MAX_OFFLINE_QUEUE_ITEMS}/${MAX_OFFLINE_QUEUE_ITEMS}). Vui lòng kết nối mạng và đồng bộ trước khi lưu thêm.`
+          : queueErr && queueErr.code === 'OFFLINE_STORAGE_QUOTA_EXCEEDED'
+            ? 'Bộ nhớ ngoại tuyến đã đầy (vượt dung lượng lưu trữ). Vui lòng đồng bộ hoặc giải phóng bộ nhớ trước khi lưu tiếp.'
+            : (queueErr && queueErr.message) || 'Không thể lưu tác vụ vào hàng đợi ngoại tuyến.';
+        setStatusNotice({ type: 'error', text: errorText });
+        return null;
+      }
+    }, [storage]);
+
     const submitEpod = async (ev) => {
       ev?.preventDefault?.();
       const liveCanvasUrl = hasSignature && canvasRef.current && typeof canvasRef.current.toDataURL === 'function'
         ? canvasRef.current.toDataURL('image/png')
         : '';
-      const finalSig = liveCanvasUrl || signatureDataUrl || props.testSignatureDataUrl || '';
+      const finalSig = liveCanvasUrl || signatureDataUrl || '';
 
       const built = buildEpodPayload({
         orderCode,
@@ -749,10 +988,11 @@ function createMobileFieldPwaPage(client, React, app) {
       }
 
       if (!isOnline || !apiClient || typeof apiClient.request !== 'function') {
-        const queued = enqueueOfflineAction({ actionType: 'wms.epodCapture', payload: built.payload }, { storage });
-        setQueueItems(queued.queue);
-        setStatusNotice({ type: 'warn', text: `Đang ngoại tuyến — đã lưu ePOD vào hàng đợi (${queued.queue.length}/${MAX_OFFLINE_QUEUE_ITEMS}).` });
-        return { queued: true, item: queued.item };
+        return tryEnqueueOffline(
+          'wms.epodCapture',
+          built.payload,
+          (len) => `Đang ngoại tuyến — đã lưu ePOD vào hàng đợi (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+        );
       }
 
       setSubmitting(true);
@@ -770,13 +1010,11 @@ function createMobileFieldPwaPage(client, React, app) {
         return body;
       } catch (err) {
         if (isTransientOrNetworkFailure(err)) {
-          const queued = enqueueOfflineAction({ actionType: 'wms.epodCapture', payload: built.payload }, { storage });
-          setQueueItems(queued.queue);
-          setStatusNotice({
-            type: 'warn',
-            text: `Mất kết nối máy chủ — đã tự động xếp hàng đợi ePOD (${queued.queue.length}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
-          });
-          return { queued: true, item: queued.item };
+          return tryEnqueueOffline(
+            'wms.epodCapture',
+            built.payload,
+            (len) => `Mất kết nối máy chủ — đã tự động xếp hàng đợi ePOD (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+          );
         }
         const errMsg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể gửi ePOD.';
         setStatusNotice({ type: 'error', text: errMsg });
@@ -788,31 +1026,48 @@ function createMobileFieldPwaPage(client, React, app) {
 
     const submitTwinDesired = async (ev) => {
       ev?.preventDefault?.();
-      const parsedId = parsePositiveInt(twinAssetId);
-      const tempNum = Number(twinTargetTempC);
-      if (parsedId === null || twinTargetTempC === '' || !Number.isFinite(tempNum)) {
-        setStatusNotice({ type: 'error', text: 'Cần Asset ID dương và nhiệt độ mục tiêu hợp lệ.' });
+      const target = parseTwinTarget(twinAssetId);
+      const tempNum = parseStrictFiniteNumber(twinTargetTempC);
+      if (!target || tempNum === null || tempNum < -80 || tempNum > 120) {
+        setStatusNotice({
+          type: 'error',
+          text: 'Cần Asset ID dương hoặc URN hợp lệ và nhiệt độ mục tiêu trong khoảng [-80, 120] °C.',
+        });
         return null;
       }
-      const payload = { assetId: parsedId, desiredPatch: { targetTempC: tempNum } };
+      const payload = target.assetId !== null
+        ? { assetId: target.assetId, desiredPatch: { targetTempC: tempNum } }
+        : { assetEntityId: target.assetEntityId, desiredPatch: { targetTempC: tempNum } };
       if (!isOnline || !apiClient || typeof apiClient.request !== 'function') {
-        const queued = enqueueOfflineAction({ actionType: 'iot.twinSetDesired', payload }, { storage });
-        setQueueItems(queued.queue);
-        setStatusNotice({ type: 'warn', text: `Đã xếp hàng đợi lệnh Digital Twin (${queued.queue.length}).` });
-        return { queued: true };
+        return tryEnqueueOffline(
+          'iot.twinSetDesired',
+          payload,
+          (len) => `Đã xếp hàng đợi lệnh Digital Twin (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+        );
       }
       try {
-        await apiClient.request({ url: 'dxosBlocks:twinSetDesired', method: 'post', data: payload });
-        setStatusNotice({ type: 'success', text: `Đã gửi lệnh Digital Twin tới Asset #${parsedId} (${tempNum}°C).` });
-        return { ok: true };
+        const res = await apiClient.request({ url: 'dxosBlocks:twinSetDesired', method: 'post', data: payload });
+        const body = res && res.data ? (res.data.data || res.data) : (res || {});
+        if (body && body.gatedByHitl === true) {
+          const approvalLabel = body.approvalId != null ? ` (Approval #${body.approvalId})` : '';
+          setStatusNotice({
+            type: 'warn',
+            text: `Thay đổi vượt ngưỡng an toàn — đã tạo yêu cầu phê duyệt HITL${approvalLabel} cho ${target.label} (${tempNum}°C).`,
+          });
+          return { ok: true, gatedByHitl: true, approvalId: body.approvalId ?? null, data: body };
+        }
+        setStatusNotice({ type: 'success', text: `Đã gửi lệnh Digital Twin tới ${target.label} (${tempNum}°C).` });
+        return { ok: true, data: body };
       } catch (err) {
         if (isTransientOrNetworkFailure(err)) {
-          const queued = enqueueOfflineAction({ actionType: 'iot.twinSetDesired', payload }, { storage });
-          setQueueItems(queued.queue);
-          setStatusNotice({ type: 'warn', text: `Mất mạng — đã lưu lệnh Digital Twin vào hàng đợi (${queued.queue.length}).` });
-          return { queued: true };
+          return tryEnqueueOffline(
+            'iot.twinSetDesired',
+            payload,
+            (len) => `Mất mạng — đã lưu lệnh Digital Twin vào hàng đợi (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+          );
         }
-        setStatusNotice({ type: 'error', text: err?.message || 'Không thể gửi lệnh Digital Twin.' });
+        const errMsg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể gửi lệnh Digital Twin.';
+        setStatusNotice({ type: 'error', text: errMsg });
         return null;
       }
     };
@@ -1138,11 +1393,11 @@ function createMobileFieldPwaPage(client, React, app) {
         h('div', { style: { fontSize: 14, fontWeight: 700, marginBottom: 8 } }, '3. Điều khiển nhanh Digital Twin Kho lạnh'),
         h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 } },
           h('input', {
-            type: 'number',
+            type: 'text',
             'data-testid': 'mobile-pwa-twin-asset-input',
             value: twinAssetId,
             onChange: (e) => setTwinAssetId(e.target.value),
-            placeholder: 'Asset ID (vd: 12)',
+            placeholder: 'Asset ID hoặc URN (vd: 12)',
             style: inputStyle,
           }),
           h('input', {
@@ -1170,6 +1425,7 @@ module.exports = {
   OFFLINE_QUEUE_STORAGE_KEY,
   MAX_OFFLINE_QUEUE_ITEMS,
   ALLOWED_OFFLINE_ACTIONS,
+  sanitizeStoredQueueItem,
   enqueueOfflineAction,
   readOfflineQueue,
   flushOfflineQueue,

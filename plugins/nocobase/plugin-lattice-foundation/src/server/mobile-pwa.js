@@ -79,6 +79,7 @@ function buildServiceWorkerScript({ version = '1.0.0' } = {}) {
     '',
     'function isCacheableResponse(response) {',
     '  if (!response || !response.ok) return false;',
+    '  if (response.redirected) return false;',
     '  if (response.type && response.type !== "basic") return false;',
     '  const cc = String(response.headers && response.headers.get ? response.headers.get("Cache-Control") || "" : "").toLowerCase();',
     '  if (cc.includes("no-store") || cc.includes("private")) return false;',

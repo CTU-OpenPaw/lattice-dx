@@ -63,12 +63,24 @@ function createFakeReact() {
   const states = [];
   const refs = [];
   let refCursor = 0;
-  const effects = [];
+  let effectCursor = 0;
+  const effectSlots = [];
+  const pendingEffects = [];
+
+  function depsChanged(prevDeps, nextDeps) {
+    if (!nextDeps || !prevDeps) return true;
+    if (prevDeps.length !== nextDeps.length) return true;
+    for (let i = 0; i < nextDeps.length; i += 1) {
+      if (!Object.is(prevDeps[i], nextDeps[i])) return true;
+    }
+    return false;
+  }
 
   function resetCursors() {
     stateCursor = 0;
     refCursor = 0;
-    effects.length = 0;
+    effectCursor = 0;
+    pendingEffects.length = 0;
   }
 
   function createElement(type, props, ...children) {
@@ -100,8 +112,12 @@ function createFakeReact() {
       }
       return refs[idx];
     },
-    useEffect(fn) {
-      effects.push(fn);
+    useEffect(fn, deps) {
+      const idx = effectCursor++;
+      const prev = effectSlots[idx];
+      if (!prev || depsChanged(prev.deps, deps)) {
+        pendingEffects.push({ idx, fn, deps });
+      }
     },
     useCallback(fn) {
       return fn;
@@ -115,11 +131,25 @@ function createFakeReact() {
     },
     _flushEffects() {
       const cleanups = [];
-      for (const fn of effects.splice(0)) {
-        const res = fn();
-        if (typeof res === 'function') cleanups.push(res);
+      for (const eff of pendingEffects.splice(0)) {
+        const prev = effectSlots[eff.idx];
+        if (prev && typeof prev.cleanup === 'function') {
+          prev.cleanup();
+        }
+        const nextCleanup = eff.fn();
+        effectSlots[eff.idx] = { deps: eff.deps, cleanup: typeof nextCleanup === 'function' ? nextCleanup : null };
+        if (typeof nextCleanup === 'function') cleanups.push(nextCleanup);
       }
       return cleanups;
+    },
+    _unmount() {
+      for (let i = effectSlots.length - 1; i >= 0; i -= 1) {
+        const slot = effectSlots[i];
+        if (slot && typeof slot.cleanup === 'function') {
+          slot.cleanup();
+          slot.cleanup = null;
+        }
+      }
     },
     _refs: refs,
   };
@@ -237,6 +267,17 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
           clone() { return this; },
         };
       }
+      if (url.includes('sso-redirected')) {
+        return {
+          status: 200,
+          ok: true,
+          redirected: true,
+          type: 'basic',
+          url: 'https://field.latticedx.local/login',
+          headers: { get: (k) => (k.toLowerCase() === 'cache-control' ? 'public, max-age=300' : null) },
+          clone() { return this; },
+        };
+      }
       return {
         status: 200,
         ok: true,
@@ -313,7 +354,7 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
     assert.equal(offlineResp.status, 200);
   }
 
-  // Online response with no-store must NEVER be written into Cache Storage
+  // Online response with no-store or redirected: true must NEVER be written into Cache Storage
   fetchMode = 'online';
   let noStorePromise = null;
   listeners.get('fetch')({
@@ -324,6 +365,15 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
   await noStorePromise;
   const activeCache = openedCaches.get('latticedx-field-pwa-v1.0.0');
   assert.equal(activeCache._entries.has('/v/assets/private-nostore.js'), false);
+
+  let redirectedPromise = null;
+  listeners.get('fetch')({
+    request: { method: 'GET', url: 'https://field.latticedx.local/v/assets/sso-redirected.js', mode: 'cors' },
+    respondWith(p) { redirectedPromise = p; },
+  });
+  assert.ok(redirectedPromise);
+  await redirectedPromise;
+  assert.equal(activeCache._entries.has('/v/assets/sso-redirected.js'), false);
 
   // 3. Server resource registration + ACL + HTTP headers
   assert.equal(typeof registerMobilePwaActions, 'function');
