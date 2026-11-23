@@ -131,10 +131,10 @@ async function saveVoucherPatch(db, collection, id, organizationId, row, patch, 
 }
 
 async function safeAppendVoucherLedger(db, { organizationId, eventType, collection, recordId, actor, payload, metadata = null }) {
-  try {
-    if (typeof db?.getRepository !== 'function' || !db.getRepository('latticeCryptoLedger')) return;
-    const { appendLedgerEntry } = require('./pki-ledger');
-    await appendLedgerEntry(db, {
+  const { appendLedgerEntrySafely } = require('./pki-ledger');
+  return appendLedgerEntrySafely(
+    db,
+    {
       organizationId,
       eventType,
       targetCollection: collection,
@@ -145,8 +145,9 @@ async function safeAppendVoucherLedger(db, { organizationId, eventType, collecti
       },
       payload,
       metadata,
-    });
-  } catch {}
+    },
+    { scope: 'lattice:voucher-lifecycle' },
+  );
 }
 
 async function safeLogLifecycle(db, { organizationId, collection, recordId, body, actor }) {
@@ -163,7 +164,11 @@ async function safeLogLifecycle(db, { organizationId, collection, recordId, body
       authorEmployeeId: actor?.employeeId ? Number(actor.employeeId) : null,
       authorName: actor?.username || 'operator',
     });
-  } catch {}
+  } catch (err) {
+    const { isLedgerSecurityInvariant } = require('./pki-ledger');
+    if (isLedgerSecurityInvariant(err)) throw err;
+    console.error('[lattice:voucher-lifecycle] Lifecycle chatter failed:', err?.message || err);
+  }
 }
 
 async function safeNotifyRequester(db, { organizationId, collection, recordId, requesterId, title, body, severity = 'info', dedupKey }) {

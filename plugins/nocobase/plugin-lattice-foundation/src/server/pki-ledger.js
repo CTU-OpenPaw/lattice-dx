@@ -22,7 +22,7 @@ const {
 const { resolveNativeActor } = require('./native-scope');
 const { isPortalAdmin } = require('./native-portals');
 const { val, toPlain, getRepo } = require('./native-portal-helpers');
-const { assertApiKeyScope } = require('./paas-api-keys');
+const { assertApiKeyScope, readParams } = require('./paas-api-keys');
 
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const SIGNABLE_COLLECTIONS = new Set([
@@ -33,22 +33,46 @@ const SIGNABLE_COLLECTIONS = new Set([
   'latticeParaDocuments',
   'latticeIncidentCases',
 ]);
+const LEDGER_SECURITY_INVARIANTS = Object.freeze(new Set([
+  'PKI_MASTER_KEY_MISSING',
+  'PKI_KEY_INACTIVE',
+  'PKI_CIPHERTEXT_INVALID',
+  'LEDGER_IMMUTABLE',
+  'NATIVE_ORGANIZATION_MISMATCH',
+  'NATIVE_TENANT_REQUIRED',
+]));
 const ZERO_HASH = '0'.repeat(64);
 const orgWriteQueues = new Map();
+let savepointSeq = 0;
 
 function failPki(code, status = 400, message = code) {
   return Object.assign(new Error(message), { code, status });
 }
 
-function readParams(ctx) {
-  const p = ctx.action?.params || {};
-  const b = ctx.request?.body && typeof ctx.request.body === 'object' && !Array.isArray(ctx.request.body)
-    ? ctx.request.body
-    : {};
-  const v = p.values && typeof p.values === 'object' && !Array.isArray(p.values)
-    ? p.values
-    : {};
-  return { ...b, ...p, ...v };
+function isLedgerSecurityInvariant(err) {
+  return Boolean(err && typeof err.code === 'string' && LEDGER_SECURITY_INVARIANTS.has(err.code));
+}
+
+function hasLedgerRepositories(db) {
+  const ledgerRepo = getRepo(db, 'latticeCryptoLedger');
+  const pkiRepo = getRepo(db, 'latticePkiKeys');
+  return Boolean(
+    ledgerRepo
+    && typeof ledgerRepo.find === 'function'
+    && typeof ledgerRepo.create === 'function'
+    && pkiRepo
+    && typeof pkiRepo.find === 'function'
+    && typeof pkiRepo.create === 'function',
+  );
+}
+
+function logLedgerError(db, scope, err) {
+  const logger = db?.logger || db?.log;
+  if (typeof logger?.error === 'function') {
+    logger.error(`[${scope}] Ledger append failed`, err);
+    return;
+  }
+  console.error(`[${scope}] Ledger append failed:`, err?.message || err);
 }
 
 function sha256Hex(input) {
@@ -126,10 +150,15 @@ function decryptPrivateKeyPem(ciphertext, env = process.env) {
   }
   const [ivHex, tagHex, dataHex] = parts;
   const masterKey = resolvePkiMasterKey(env);
-  const decipher = createDecipheriv('aes-256-gcm', masterKey, Buffer.from(ivHex, 'hex'));
-  decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
-  const plain = Buffer.concat([decipher.update(Buffer.from(dataHex, 'hex')), decipher.final()]);
-  return plain.toString('utf8');
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', masterKey, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(tagHex, 'hex'));
+    const plain = Buffer.concat([decipher.update(Buffer.from(dataHex, 'hex')), decipher.final()]);
+    return plain.toString('utf8');
+  } catch (err) {
+    if (err?.code === 'PKI_MASTER_KEY_MISSING') throw err;
+    throw failPki('PKI_CIPHERTEXT_INVALID', 500, 'Encrypted PKI private key payload is invalid or tampered.');
+  }
 }
 
 function assertValidOrgId(organizationId) {
@@ -180,11 +209,17 @@ async function ensureOrgSigningKey(db, organizationId, options = {}) {
   const env = options.env || process.env;
   const txOpt = options.transaction ? { transaction: options.transaction } : {};
   const repo = getRepo(db, 'latticePkiKeys');
-  if (!repo) {
+  if (!repo || typeof repo.create !== 'function' || (typeof repo.findOne !== 'function' && typeof repo.find !== 'function')) {
     throw failPki('PKI_REPO_UNAVAILABLE', 503, 'latticePkiKeys repository is unavailable.');
   }
 
-  const existing = await repo.findOne({ filter: { organizationId: orgId }, ...txOpt });
+  const findKeyRow = async () => (
+    typeof repo.findOne === 'function'
+      ? repo.findOne({ filter: { organizationId: orgId }, ...txOpt })
+      : ((await repo.find({ filter: { organizationId: orgId }, limit: 1, ...txOpt })) || [])[0] || null
+  );
+
+  const existing = await findKeyRow();
   if (existing) {
     if (val(existing, 'active') === false) {
       throw failPki('PKI_KEY_INACTIVE', 403, 'Organization PKI signing key is inactive.');
@@ -216,7 +251,7 @@ async function ensureOrgSigningKey(db, organizationId, options = {}) {
     return toPlain(created);
   } catch (err) {
     if (err?.name === 'SequelizeUniqueConstraintError' || /unique/i.test(String(err?.message || ''))) {
-      const winner = await repo.findOne({ filter: { organizationId: orgId }, ...txOpt });
+      const winner = await findKeyRow();
       if (winner) return toPlain(winner);
     }
     throw err;
@@ -285,11 +320,12 @@ async function verifyPayloadSignature(db, organizationId, payload, signatureBase
 function runWithOrgMutex(organizationId, task) {
   const prev = orgWriteQueues.get(organizationId) || Promise.resolve();
   const next = prev.then(task, task);
-  const cleanup = next.finally(() => {
+  const clear = () => {
     if (orgWriteQueues.get(organizationId) === cleanup) {
       orgWriteQueues.delete(organizationId);
     }
-  });
+  };
+  const cleanup = next.then(clear, clear);
   orgWriteQueues.set(organizationId, cleanup);
   return next;
 }
@@ -327,7 +363,7 @@ async function appendLedgerEntry(
   }
 
   const ledgerRepo = getRepo(db, 'latticeCryptoLedger');
-  if (!ledgerRepo || typeof ledgerRepo.create !== 'function') {
+  if (!ledgerRepo || typeof ledgerRepo.find !== 'function' || typeof ledgerRepo.create !== 'function') {
     throw failPki('LEDGER_REPO_UNAVAILABLE', 503, 'latticeCryptoLedger repository is unavailable.');
   }
 
@@ -399,6 +435,40 @@ async function appendLedgerEntry(
     }
     return execute(null);
   });
+}
+
+async function appendLedgerEntrySafely(db, entryArgs, options = {}) {
+  if (!hasLedgerRepositories(db)) return null;
+  const { transaction, scope = 'lattice:ledger', ...appendOpts } = options;
+  const isPg = db?.sequelize?.getDialect?.() === 'postgres' && typeof db?.sequelize?.query === 'function';
+
+  if (transaction && isPg) {
+    savepointSeq += 1;
+    const spName = `sp_dxos_ledger_${savepointSeq}`;
+    await db.sequelize.query(`SAVEPOINT ${spName}`, { transaction });
+    try {
+      const entry = await appendLedgerEntry(db, entryArgs, { ...appendOpts, transaction });
+      await db.sequelize.query(`RELEASE SAVEPOINT ${spName}`, { transaction });
+      return entry;
+    } catch (err) {
+      try {
+        await db.sequelize.query(`ROLLBACK TO SAVEPOINT ${spName}`, { transaction });
+      } catch (rbErr) {
+        logLedgerError(db, scope, rbErr);
+      }
+      if (isLedgerSecurityInvariant(err)) throw err;
+      logLedgerError(db, scope, err);
+      return null;
+    }
+  }
+
+  try {
+    return await appendLedgerEntry(db, entryArgs, appendOpts);
+  } catch (err) {
+    if (isLedgerSecurityInvariant(err)) throw err;
+    logLedgerError(db, scope, err);
+    return null;
+  }
 }
 
 async function verifyLedgerChain(db, organizationId) {
@@ -755,15 +825,19 @@ function registerPkiLedger(app) {
 
 module.exports = {
   SIGNABLE_COLLECTIONS,
+  LEDGER_SECURITY_INVARIANTS,
   ZERO_HASH,
   canonicalJson,
   computeMerkleRoot,
   encryptPrivateKeyPem,
   decryptPrivateKeyPem,
+  isLedgerSecurityInvariant,
+  hasLedgerRepositories,
   ensureOrgSigningKey,
   signCanonicalPayload,
   verifyPayloadSignature,
   appendLedgerEntry,
+  appendLedgerEntrySafely,
   verifyLedgerChain,
   registerLedgerHooks,
   registerPkiLedger,

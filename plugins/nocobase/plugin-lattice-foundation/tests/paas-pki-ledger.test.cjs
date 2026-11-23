@@ -54,6 +54,7 @@ function makeInMemoryPaasDb({ dialect = 'postgres', withLedgerRepo = true } = {}
     { id: 20, username: 'emp-alice', active: true },
     { id: 30, username: 'emp-bob-orgb', active: true },
     { id: 40, username: 'disabled-user', active: false },
+    { id: 50, username: 'emp-charlie', active: true },
   ];
   const roles = [
     { name: 'root', allowConfigure: true, snippets: ['pm', 'pm.*'] },
@@ -67,12 +68,14 @@ function makeInMemoryPaasDb({ dialect = 'postgres', withLedgerRepo = true } = {}
     { userId: 20, roleName: 'ldx_employee' },
     { userId: 30, roleName: 'ldx_employee' },
     { userId: 40, roleName: 'ldx_employee' },
+    { userId: 50, roleName: 'ldx_employee' },
   ];
   const employees = [
     { id: 100, userId: 10, organizationId: 'org-a', departmentId: 1, active: true, code: 'ADM-A', name: 'Admin A' },
     { id: 200, userId: 20, organizationId: 'org-a', departmentId: 1, active: true, code: 'EMP-A', name: 'Alice A' },
     { id: 300, userId: 30, organizationId: 'org-b', departmentId: 2, active: true, code: 'EMP-B', name: 'Bob B' },
     { id: 400, userId: 40, organizationId: 'org-a', departmentId: 1, active: true, code: 'EMP-OFF', name: 'Disabled User' },
+    { id: 500, userId: 50, organizationId: 'org-a', departmentId: 1, active: true, code: 'EMP-C', name: 'Charlie A' },
   ];
   const apiKeys = [];
   const pkiKeys = [];
@@ -254,21 +257,28 @@ function makeInMemoryPaasDb({ dialect = 'postgres', withLedgerRepo = true } = {}
   return { db, users, roles, rolesUsers, employees, apiKeys, pkiKeys, ledgerEntries, orders, chatter, sqlQueries };
 }
 
-function makeHttpCtx({ method = 'GET', state = {}, headers = {}, params = {}, query = {}, body = undefined } = {}) {
+function makeHttpCtx({ method = 'GET', path = '', state = {}, headers = {}, params = {}, query = {}, body = undefined, preserveHeaderCase = false } = {}) {
   const resHeaders = {};
   const normalizedHeaders = {};
   for (const [k, v] of Object.entries(headers)) {
-    normalizedHeaders[String(k).toLowerCase()] = v;
+    normalizedHeaders[preserveHeaderCase ? k : String(k).toLowerCase()] = v;
   }
   return {
     method,
+    path,
     headers: normalizedHeaders,
-    request: { headers: { ...normalizedHeaders }, ...(body !== undefined ? { body } : {}) },
+    request: { path, headers: { ...normalizedHeaders }, ...(body !== undefined ? { body } : {}) },
     response: { headers: resHeaders },
     query,
     state: { ...state },
     action: { resourceName: params.resourceName || '', actionName: params.actionName || '', params },
-    get(k) { return this.headers[String(k).toLowerCase()] || ''; },
+    get(k) {
+      const target = String(k).toLowerCase();
+      for (const [hk, hv] of Object.entries(this.headers)) {
+        if (hk.toLowerCase() === target) return hv || '';
+      }
+      return '';
+    },
     set(k, v) { this.response.headers[k] = v; },
     throw(status, message, props) { throw Object.assign(new Error(message || `HTTP ${status}`), { status }, props || {}); },
   };
@@ -328,7 +338,11 @@ test('collections, migration 20261124000100, and pg-rls define all 3 tables with
     assert.match(upSql, /CREATE TABLE IF NOT EXISTS "latticeApiKeys"/);
     assert.match(upSql, /CREATE TABLE IF NOT EXISTS "latticePkiKeys"/);
     assert.match(upSql, /CREATE TABLE IF NOT EXISTS "latticeCryptoLedger"/);
+    assert.match(upSql, /CREATE UNIQUE INDEX IF NOT EXISTS uidx_lattice_api_keys_hash ON "latticeApiKeys" \("keyHash"\)/);
+    assert.match(upSql, /CREATE UNIQUE INDEX IF NOT EXISTS uidx_lattice_pki_keys_org ON "latticePkiKeys" \("organizationId"\)/);
     assert.match(upSql, /CREATE UNIQUE INDEX IF NOT EXISTS [^\n]+ ON "latticeCryptoLedger" \("organizationId", seq\)/);
+    assert.equal(/"keyHash"\s+VARCHAR\(128\)\s+NOT\s+NULL\s+UNIQUE/i.test(upSql), false);
+    assert.equal(/"organizationId"\s+VARCHAR\(255\)\s+NOT\s+NULL\s+UNIQUE/i.test(upSql), false);
     assert.deepEqual(rlsAttached.map((r) => r.tableName), ['latticeApiKeys', 'latticePkiKeys', 'latticeCryptoLedger']);
     assert.equal(rlsAttached.every((r) => r.opts?.transaction === fakeTx), true);
 
@@ -780,6 +794,9 @@ test('OpenAPI 3.1.0, AsyncAPI 3.0.0, observability dxos:openapi/asyncapi endpoin
 
   const openapi = buildOpenApiSpec({ serverUrl: 'https://dx.example.org' });
   assert.equal(openapi.openapi, '3.1.0');
+  assert.equal(openapi.info.license.name, 'Apache-2.0');
+  assert.equal(openapi.info.license.identifier, 'Apache-2.0');
+  assert.equal(Object.hasOwn(openapi.info.license, 'url'), false);
   assert.equal(openapi.servers[0].url, 'https://dx.example.org');
   assert.ok(openapi.components.securitySchemes.bearerAuth);
   assert.ok(openapi.components.securitySchemes.latticeApiKey);
@@ -924,27 +941,97 @@ test('edge cases: read-only PAT scope clamp, Bearer precedence, expiresInDays bo
   await keyActions.issue(roIssueCtx, async () => {});
   const roToken = roIssueCtx.body.token;
 
-  // Read-only PAT allows GET & POST dxosLedger:verify, blocks mutating POST create
+  // Read-only PAT fail-closed policy: permits explicit safe read-only POST actions and blocks mutating POST/PUT/PATCH/DELETE
   const roVerifyCtx = makeHttpCtx({
     method: 'POST',
     headers: { 'x-lattice-api-key': roToken },
     params: { resourceName: 'dxosLedger', actionName: 'verify' },
   });
-  roVerifyCtx.action.resourceName = 'dxosLedger';
-  roVerifyCtx.action.actionName = 'verify';
   await authMw(roVerifyCtx, async () => ledgerActions.verify(roVerifyCtx, async () => {}));
   assert.equal(roVerifyCtx.body.valid, true);
 
-  const roMutateCtx = makeHttpCtx({
-    method: 'POST',
-    headers: { 'x-lattice-api-key': roToken },
+  for (const [resourceName, actionName] of [
+    ['dxosLedger', 'verifySignature'],
+    ['latticePara', 'hybridSearch'],
+    ['dxosDmn', 'evaluate'],
+    ['dxosStudio', 'solutionBundleDiff'],
+    ['charts', 'queryData'],
+    ['latticeIntegrations', 'record'],
+    ['latticeIntegrations', 'context'],
+    ['latticeIntegrations', 'proposals'],
+    ['latticeIntegrations', 'proposalReceipt'],
+    ['latticeOrders', 'list'],
+    ['latticeOrders', 'get'],
+    ['latticeOrders', 'count'],
+  ]) {
+    let passed = false;
+    await authMw(makeHttpCtx({
+      method: 'POST',
+      headers: { 'x-lattice-api-key': roToken },
+      params: { resourceName, actionName },
+    }), async () => { passed = true; });
+    assert.equal(passed, true, `Expected read-only POST ${resourceName}:${actionName} to be allowed`);
+  }
+
+  for (const blockedCase of [
+    { method: 'POST', resourceName: 'latticeOrders', actionName: 'create' },
+    { method: 'POST', resourceName: 'latticeOrders.items', actionName: 'add' },
+    { method: 'POST', resourceName: 'latticeOrders.items', actionName: 'remove' },
+    { method: 'POST', resourceName: 'latticeOrders.items', actionName: 'set' },
+    { method: 'POST', resourceName: 'latticeOrders.items', actionName: 'toggle' },
+    { method: 'POST', resourceName: 'dxosWms', actionName: 'receiveStock' },
+    { method: 'POST', resourceName: 'latticeIntegrations', actionName: 'propose' },
+    { method: 'POST', resourceName: 'latticeIntegrations', actionName: 'receive' },
+    { method: 'POST', path: '/api/dxos-mcp', resourceName: '', actionName: '' },
+    { method: 'POST', path: '/api/dxos-mcp/it-ot', resourceName: 'dxosMcp', actionName: 'rpc' },
+    { method: 'PUT', resourceName: 'latticeOrders', actionName: 'update' },
+    { method: 'PATCH', resourceName: 'latticeOrders', actionName: 'update' },
+    { method: 'DELETE', resourceName: 'latticeOrders', actionName: 'destroy' },
+    { method: 'GET', resourceName: 'latticeOrders', actionName: 'destroy' },
+  ]) {
+    await assert.rejects(
+      () => authMw(makeHttpCtx({
+        method: blockedCase.method,
+        path: blockedCase.path || '',
+        headers: { 'x-lattice-api-key': roToken },
+        params: { resourceName: blockedCase.resourceName, actionName: blockedCase.actionName },
+      }), async () => {}),
+      (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+      `Expected ${blockedCase.method} ${blockedCase.path || `${blockedCase.resourceName}:${blockedCase.actionName}`} to be blocked`,
+    );
+  }
+
+  // clampHeaderRole strips mixed-case X-Role / X-ROLE keys before setting lowercase x-role
+  const mixedCaseCtx = makeHttpCtx({
+    method: 'GET',
+    preserveHeaderCase: true,
+    headers: { 'x-lattice-api-key': roToken, 'X-Role': 'root', 'X-ROLE': 'ldx_admin' },
   });
-  roMutateCtx.action.resourceName = 'latticeOrders';
-  roMutateCtx.action.actionName = 'create';
+  await authMw(mixedCaseCtx, async () => {});
+  assert.equal(mixedCaseCtx.headers['x-role'], 'ldx_employee');
+  assert.equal(mixedCaseCtx.headers['X-Role'], undefined);
+  assert.equal(mixedCaseCtx.headers['X-ROLE'], undefined);
+  assert.equal(mixedCaseCtx.request.headers['x-role'], 'ldx_employee');
+  assert.equal(mixedCaseCtx.request.headers['X-Role'], undefined);
+
+  // root issuing a PAT with mismatched organizationId vs target employee org fails closed 403
   await assert.rejects(
-    () => authMw(roMutateCtx, async () => {}),
-    (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+    () => keyActions.issue(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 1, username: 'root-admin' }, currentRole: 'root' },
+      params: { values: { name: 'RootMismatch', userId: 20, organizationId: 'org-b', roleName: 'ldx_employee', scopes: ['read'] } },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'NATIVE_ORGANIZATION_MISMATCH',
   );
+
+  // root issuing a PAT without organizationId inherits employee organizationId cleanly
+  const rootMatchCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 1, username: 'root-admin' }, currentRole: 'root' },
+    params: { values: { name: 'RootInheritedOrg', userId: 20, roleName: 'ldx_employee', scopes: ['read'] } },
+  });
+  await keyActions.issue(rootMatchCtx, async () => {});
+  assert.equal(rootMatchCtx.body.organizationId, 'org-a');
 
   // Bearer ldx_pat_ does NOT override existing currentUser, while X-Lattice-API-Key DOES
   const preAuthBearer = makeHttpCtx({
@@ -965,8 +1052,89 @@ test('edge cases: read-only PAT scope clamp, Bearer precedence, expiresInDays bo
   assert.equal(preAuthHeader.state.currentUser.id, 20);
   assert.equal(preAuthHeader.state.currentRole, 'ldx_employee');
 
-  // Non-owner employee denied 403 on dxosLedger:signDocument (order 1 belongs to requester 200 / assignee 100; Bob is 300 in org-b, let's test org-a non-owner)
-  db.getRepository('latticeEmployees');
+  // Authorization checks:
+  // 1) Same-org non-owner (Charlie, userId 50, empId 500) denied 403 on dxosLedger:signDocument for order 1 (requester 200 / assignee 100)
+  await assert.rejects(
+    () => ledgerActions.signDocument(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 50, username: 'emp-charlie' }, currentRole: 'ldx_employee' },
+      params: { values: { targetCollection: 'latticeOrders', targetRecordId: 1 } },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'LEDGER_SIGN_FORBIDDEN',
+  );
+
+  // 2) Same-org non-owner (Charlie) denied 403 on dxosApiKeys:revoke for Alice's key; cross-org (Bob) denied 404
+  await assert.rejects(
+    () => keyActions.revoke(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 50, username: 'emp-charlie' }, currentRole: 'ldx_employee' },
+      params: { values: { id: roIssueCtx.body.id } },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'API_KEY_FORBIDDEN',
+  );
+  await assert.rejects(
+    () => keyActions.revoke(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 30, username: 'emp-bob-orgb' }, currentRole: 'ldx_employee' },
+      params: { values: { id: roIssueCtx.body.id } },
+    }), async () => {}),
+    (err) => err.status === 404 && err.code === 'API_KEY_NOT_FOUND',
+  );
+
+  // 3) Cross-org caller denied 403 NATIVE_ORGANIZATION_MISMATCH on dxosLedger read/verify actions
+  for (const [actName, method, extra] of [
+    ['publicKey', 'GET', {}],
+    ['entries', 'GET', {}],
+    ['status', 'GET', {}],
+    ['verify', 'POST', {}],
+    ['verifySignature', 'POST', { payload: { a: 1 }, signatureBase64: 'AAAA' }],
+  ]) {
+    await assert.rejects(
+      () => ledgerActions[actName](makeHttpCtx({
+        method,
+        state: { currentUser: { id: 20, username: 'emp-alice' }, currentRole: 'ldx_employee' },
+        params: { values: { organizationId: 'org-b', ...extra } },
+      }), async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_ORGANIZATION_MISMATCH',
+      `Expected cross-org dxosLedger:${actName} to fail 403`,
+    );
+  }
+
+  // 4) PAT scope enforcement on dxosLedger:signDocument (['read'] and ['wms'] denied 403; ['ledger'] succeeds)
+  const wmsIssueCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 20, username: 'emp-alice' }, currentRole: 'ldx_employee' },
+    params: { values: { name: 'WMS Only Key', roleName: 'ldx_employee', scopes: ['wms'] } },
+  });
+  await keyActions.issue(wmsIssueCtx, async () => {});
+
+  const ledgerIssueCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 20, username: 'emp-alice' }, currentRole: 'ldx_employee' },
+    params: { values: { name: 'Ledger Key', roleName: 'ldx_employee', scopes: ['ledger'] } },
+  });
+  await keyActions.issue(ledgerIssueCtx, async () => {});
+
+  for (const deniedToken of [roToken, wmsIssueCtx.body.token]) {
+    const deniedSignCtx = makeHttpCtx({
+      method: 'POST',
+      headers: { 'x-lattice-api-key': deniedToken },
+      params: { resourceName: 'dxosLedger', actionName: 'signDocument', values: { targetCollection: 'latticeOrders', targetRecordId: 1 } },
+    });
+    await assert.rejects(
+      () => authMw(deniedSignCtx, async () => ledgerActions.signDocument(deniedSignCtx, async () => {})),
+      (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+    );
+  }
+
+  const allowedSignCtx = makeHttpCtx({
+    method: 'POST',
+    headers: { 'x-lattice-api-key': ledgerIssueCtx.body.token },
+    params: { resourceName: 'dxosLedger', actionName: 'signDocument', values: { targetCollection: 'latticeOrders', targetRecordId: 1, reason: 'Ledger PAT sign' } },
+  });
+  await authMw(allowedSignCtx, async () => ledgerActions.signDocument(allowedSignCtx, async () => {}));
+  assert.equal(allowedSignCtx.body.signed, true);
+
   await appendLedgerEntry(db, {
     organizationId: 'org-a',
     eventType: 'voucher.created',
@@ -1025,4 +1193,186 @@ test('edge cases: read-only PAT scope clamp, Bearer precedence, expiresInDays bo
     authorName: 'emp-alice',
   });
   assert.ok(chatterRow);
+});
+
+test('runWithOrgMutex rejects failed appendLedgerEntry cleanly without UnhandledPromiseRejection or blocking later org appends', async () => {
+  const { appendLedgerEntry, verifyLedgerChain } = require('../src/server/pki-ledger');
+  const { db, ledgerEntries } = makeInMemoryPaasDb({ withLedgerRepo: true });
+
+  const unhandled = [];
+  const onUnhandled = (reason) => { unhandled.push(reason); };
+  process.on('unhandledRejection', onUnhandled);
+
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevEncKey = process.env.ENCRYPTION_FIELD_KEY;
+  const prevAppKey = process.env.APP_KEY;
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.ENCRYPTION_FIELD_KEY;
+    delete process.env.APP_KEY;
+
+    await assert.rejects(
+      () => appendLedgerEntry(db, {
+        organizationId: 'org-mutex-fail',
+        eventType: 'voucher.submitted',
+        targetCollection: 'latticeOrders',
+        targetRecordId: '1',
+        actor: { userId: '20', username: 'emp-alice' },
+        payload: { id: 1 },
+      }),
+      (err) => err.code === 'PKI_MASTER_KEY_MISSING',
+    );
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevEncKey === undefined) delete process.env.ENCRYPTION_FIELD_KEY; else process.env.ENCRYPTION_FIELD_KEY = prevEncKey;
+    if (prevAppKey === undefined) delete process.env.APP_KEY; else process.env.APP_KEY = prevAppKey;
+  }
+
+  // Wait a microtask/macrotask tick to confirm Node emits zero unhandledRejection events
+  await new Promise((resolveTick) => setTimeout(resolveTick, 25));
+  process.off('unhandledRejection', onUnhandled);
+  assert.equal(unhandled.length, 0, `Unexpected unhandledRejection: ${unhandled.map((e) => e?.message || e).join('; ')}`);
+
+  // Subsequent append for the exact same org must succeed cleanly without being wedged
+  const recovered = await appendLedgerEntry(db, {
+    organizationId: 'org-mutex-fail',
+    eventType: 'voucher.submitted',
+    targetCollection: 'latticeOrders',
+    targetRecordId: '1',
+    actor: { userId: '20', username: 'emp-alice' },
+    payload: { id: 1, recovered: true },
+  });
+  assert.equal(Number(recovered.seq), 1);
+  assert.equal(ledgerEntries.filter((e) => e.organizationId === 'org-mutex-fail').length, 1);
+  const report = await verifyLedgerChain(db, 'org-mutex-fail');
+  assert.equal(report.valid, true);
+});
+
+test('voucher-lifecycle and record-chatter skip minimal partial mocks, propagate security invariants, and isolate non-security PG failures in SAVEPOINT', async () => {
+  const { submitVoucher } = require('../src/server/voucher-lifecycle');
+  const { recordChatterEntry } = require('../src/server/record-chatter');
+  const { ensureOrgSigningKey } = require('../src/server/pki-ledger');
+
+  // 1. Minimal mock with latticeCryptoLedger but missing latticePkiKeys skips cleanly
+  const baseNoPki = makeInMemoryPaasDb({ withLedgerRepo: true });
+  const partialDb = {
+    ...baseNoPki.db,
+    getRepository(name) {
+      if (name === 'latticePkiKeys') return null;
+      return baseNoPki.db.getRepository(name);
+    },
+  };
+  const subNoPki = await submitVoucher(partialDb, {
+    collection: 'latticeOrders',
+    id: 1,
+    organizationId: 'org-a',
+    actor: { userId: '20', employeeId: 200, username: 'emp-alice' },
+    expectedVersion: 1,
+  });
+  assert.equal(subNoPki.status, 'submitted');
+  assert.equal(baseNoPki.ledgerEntries.length, 0);
+
+  // 2. Security invariants (PKI_MASTER_KEY_MISSING, PKI_KEY_INACTIVE, PKI_CIPHERTEXT_INVALID) propagate instead of being swallowed
+  const invHarness = makeInMemoryPaasDb({ withLedgerRepo: true });
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevEncKey = process.env.ENCRYPTION_FIELD_KEY;
+  const prevAppKey = process.env.APP_KEY;
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.ENCRYPTION_FIELD_KEY;
+    delete process.env.APP_KEY;
+
+    await assert.rejects(
+      () => recordChatterEntry(invHarness.db, {
+        organizationId: 'org-a',
+        targetCollection: 'latticeOrders',
+        targetRecordId: 1,
+        body: 'Must propagate PKI_MASTER_KEY_MISSING',
+        authorName: 'emp-alice',
+      }),
+      (err) => err.code === 'PKI_MASTER_KEY_MISSING',
+    );
+    await assert.rejects(
+      () => submitVoucher(invHarness.db, {
+        collection: 'latticeOrders',
+        id: 1,
+        organizationId: 'org-a',
+        actor: { userId: '20', employeeId: 200, username: 'emp-alice' },
+        expectedVersion: 1,
+      }),
+      (err) => err.code === 'PKI_MASTER_KEY_MISSING',
+    );
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevEncKey === undefined) delete process.env.ENCRYPTION_FIELD_KEY; else process.env.ENCRYPTION_FIELD_KEY = prevEncKey;
+    if (prevAppKey === undefined) delete process.env.APP_KEY; else process.env.APP_KEY = prevAppKey;
+  }
+
+  // PKI_KEY_INACTIVE propagates from recordChatterEntry and submitVoucher
+  const inactiveHarness = makeInMemoryPaasDb({ withLedgerRepo: true });
+  await ensureOrgSigningKey(inactiveHarness.db, 'org-a');
+  inactiveHarness.pkiKeys[0].active = false;
+  await assert.rejects(
+    () => recordChatterEntry(inactiveHarness.db, {
+      organizationId: 'org-a',
+      targetCollection: 'latticeOrders',
+      targetRecordId: 1,
+      body: 'Inactive key must propagate',
+      authorName: 'emp-alice',
+    }),
+    (err) => err.code === 'PKI_KEY_INACTIVE',
+  );
+  inactiveHarness.pkiKeys[0].active = true;
+  inactiveHarness.pkiKeys[0].encryptedPrivateKey = 'corrupted';
+  await assert.rejects(
+    () => recordChatterEntry(inactiveHarness.db, {
+      organizationId: 'org-a',
+      targetCollection: 'latticeOrders',
+      targetRecordId: 1,
+      body: 'Corrupt key must propagate',
+      authorName: 'emp-alice',
+    }),
+    (err) => err.code === 'PKI_CIPHERTEXT_INVALID',
+  );
+
+  // 3. Non-security error inside recordChatterEntry with caller PG transaction uses SAVEPOINT + ROLLBACK TO SAVEPOINT + logger
+  const pgHarness = makeInMemoryPaasDb({ dialect: 'postgres', withLedgerRepo: true });
+  const loggedErrors = [];
+  const origLedgerRepo = pgHarness.db.getRepository('latticeCryptoLedger');
+  const pgFailDb = {
+    ...pgHarness.db,
+    logger: {
+      error: (msg, err) => loggedErrors.push({ msg, err }),
+    },
+    getRepository(name) {
+      if (name === 'latticeCryptoLedger') {
+        return {
+          ...origLedgerRepo,
+          create: async () => {
+            throw new Error('simulated transient PG ledger failure');
+          },
+        };
+      }
+      return pgHarness.db.getRepository(name);
+    },
+  };
+  const callerTx = { id: 'tx-caller-pg' };
+  const row = await recordChatterEntry(
+    pgFailDb,
+    {
+      organizationId: 'org-a',
+      targetCollection: 'latticeOrders',
+      targetRecordId: 1,
+      body: 'Savepoint protects outer PG tx',
+      authorName: 'emp-alice',
+    },
+    { transaction: callerTx },
+  );
+  assert.ok(row);
+  assert.equal(loggedErrors.length, 1);
+  assert.match(loggedErrors[0].err.message, /simulated transient PG ledger failure/);
+  const sqlList = pgHarness.sqlQueries.map((q) => q.sql);
+  assert.ok(sqlList.some((s) => /^SAVEPOINT sp_dxos_ledger_\d+$/.test(s)));
+  assert.ok(sqlList.some((s) => /^ROLLBACK TO SAVEPOINT sp_dxos_ledger_\d+$/.test(s)));
+  assert.equal(pgHarness.sqlQueries.every((q) => q.opts?.transaction === callerTx), true);
 });

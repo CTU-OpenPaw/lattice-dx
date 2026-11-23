@@ -18,11 +18,32 @@ const ROLE_NAME_RE = /^[a-zA-Z0-9_-]{2,64}$/;
 const ALLOWED_PAT_SCOPES = new Set(['read', 'write', 'wms', 'dmn', 'iot', 'ai', 'ledger']);
 const ELEVATED_ROLES = new Set(['root', 'admin', 'ldx_admin']);
 const PRIVATE_PKI_LEDGER_RESOURCES = new Set(['latticeApiKeys', 'latticePkiKeys', 'latticeCryptoLedger']);
+const SAFE_HTTP_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const READ_ONLY_SAFE_POST_ACTIONS = new Set(['list', 'get', 'count']);
+const READ_ONLY_SAFE_POST_RESOURCE_ACTIONS = new Set([
+  'dxosLedger:verify',
+  'dxosLedger:verifySignature',
+  'latticePara:hybridSearch',
+  'dxosDmn:evaluate',
+  'dxosStudio:solutionBundleDiff',
+  'charts:queryData',
+  'latticeIntegrations:record',
+  'latticeIntegrations:context',
+  'latticeIntegrations:proposals',
+  'latticeIntegrations:proposalReceipt',
+]);
 const READ_ONLY_MUTATING_ACTIONS = new Set([
-  'create', 'update', 'destroy', 'submit', 'cancel', 'amend',
+  'create', 'update', 'destroy', 'add', 'remove', 'set', 'toggle', 'move',
+  'updateOrCreate', 'firstOrCreate', 'submit', 'cancel', 'amend',
   'post', 'issue', 'revoke', 'signDocument', 'savePolicy',
   'evaluateNow', 'markRead', 'markAllRead', 'save', 'delete',
   'saveProfile', 'deleteProfile', 'installWorkflow', 'composePortals',
+  'receiveStock', 'issueStock', 'epodCapture', 'propose', 'receive', 'receiveAlert',
+  'saveTable', 'saveDelegation', 'freezeSnapshot', 'resolveQuarantine',
+  'telemetryIngest', 'alarmIngest', 'alarmAck', 'alarmClear',
+  'outboxDlqReplay', 'solutionBundleImport', 'solutionBundleRollback',
+  'reindex', 'extractAttachment', 'bootstrapDefaults', 'portalCopilot',
+  'rollbackPageSnapshot', 'approveAction', 'rejectAction', 'dispatch', 'retry', 'upload',
 ]);
 const LAST_USED_THROTTLE_MS = 60_000;
 
@@ -152,6 +173,13 @@ async function resolveVerifiedCallerRoles(ctx, db, userId) {
   return claimed;
 }
 
+function hasAdminRolePrivilege(roleRow) {
+  if (!roleRow) return false;
+  if (val(roleRow, 'allowConfigure') === true) return true;
+  const snippets = val(roleRow, 'snippets');
+  return Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*'));
+}
+
 async function isAdminByRoles(db, roleNames) {
   if (!Array.isArray(roleNames) || !roleNames.length) return false;
   if (roleNames.includes('root')) return true;
@@ -161,9 +189,7 @@ async function isAdminByRoles(db, roleNames) {
   return matched.some((role) => {
     const name = val(role, 'name');
     if (name && !roleNames.includes(name)) return false;
-    if (val(role, 'allowConfigure') === true) return true;
-    const snippets = val(role, 'snippets');
-    return Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*'));
+    return hasAdminRolePrivilege(role);
   });
 }
 
@@ -174,10 +200,7 @@ async function isElevatedRoleName(db, roleName) {
   const rolesRepo = getRepo(db, 'roles');
   if (!rolesRepo || typeof rolesRepo.findOne !== 'function') return false;
   const row = await rolesRepo.findOne({ filter: { name: clean } });
-  if (!row) return false;
-  if (val(row, 'allowConfigure') === true) return true;
-  const snippets = val(row, 'snippets');
-  return Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*'));
+  return hasAdminRolePrivilege(row);
 }
 
 function assertApiKeyScope(ctx, requiredScopes) {
@@ -190,12 +213,42 @@ function assertApiKeyScope(ctx, requiredScopes) {
 }
 
 function clampHeaderRole(ctx, roleName) {
-  if (ctx?.headers && typeof ctx.headers === 'object') {
-    ctx.headers['x-role'] = roleName;
+  for (const bag of [ctx?.headers, ctx?.request?.headers]) {
+    if (!bag || typeof bag !== 'object') continue;
+    for (const key of Object.keys(bag)) {
+      if (key.toLowerCase() === 'x-role' && key !== 'x-role') {
+        delete bag[key];
+      }
+    }
+    bag['x-role'] = roleName;
   }
-  if (ctx?.request?.headers && typeof ctx.request.headers === 'object') {
-    ctx.request.headers['x-role'] = roleName;
+}
+
+function isAllowedReadOnlyRequest(ctx, method) {
+  const fullResource = String(ctx?.action?.resourceName || '').trim();
+  const baseResource = fullResource.split('.')[0];
+  const actionName = String(ctx?.action?.actionName || '').trim();
+  const reqPath = String(ctx?.path || ctx?.request?.path || ctx?.url || '')
+    .split('?')[0]
+    .trim()
+    .replace(/\/+$/, '')
+    .toLowerCase();
+  const isMcpPath = reqPath === '/api/dxos-mcp'
+    || reqPath.endsWith('/api/dxos-mcp')
+    || reqPath === '/api/dxos-mcp/it-ot'
+    || reqPath.endsWith('/api/dxos-mcp/it-ot')
+    || baseResource === 'dxosMcp';
+
+  if (SAFE_HTTP_METHODS.has(method)) {
+    return !isMcpPath && !READ_ONLY_MUTATING_ACTIONS.has(actionName);
   }
+  if (method !== 'POST' || isMcpPath) {
+    return false;
+  }
+  if (READ_ONLY_SAFE_POST_RESOURCE_ACTIONS.has(`${fullResource}:${actionName}`)) {
+    return true;
+  }
+  return Boolean(baseResource) && READ_ONLY_SAFE_POST_ACTIONS.has(actionName);
 }
 
 function createPaasApiKeyAuthMiddleware(db) {
@@ -324,9 +377,8 @@ function createPaasApiKeyAuthMiddleware(db) {
     }
 
     const method = String(ctx.method || 'GET').trim().toUpperCase();
-    const actionName = String(ctx.action?.actionName || '').trim();
-    const isReadOnlyPat = scopes.length > 0 && scopes.every((s) => s === 'read');
-    if (isReadOnlyPat && (['PUT', 'PATCH', 'DELETE'].includes(method) || READ_ONLY_MUTATING_ACTIONS.has(actionName))) {
+    const isReadOnlyPat = scopes.length === 0 || scopes.every((s) => s === 'read');
+    if (isReadOnlyPat && !isAllowedReadOnlyRequest(ctx, method)) {
       throw failApiKey('API_KEY_SCOPE_INSUFFICIENT', 403, 'Read-only API key cannot invoke mutating operations.');
     }
 
@@ -419,7 +471,7 @@ async function resolveIssueTarget({ db, callerUserId, callerRolesVerified, isRoo
         }
       } else {
         const empOrg = String(val(emp, 'organizationId') || '').trim();
-        if (!isRoot && empOrg !== organizationId) {
+        if (organizationId && empOrg !== organizationId) {
           throw failApiKey('NATIVE_ORGANIZATION_MISMATCH', 403, 'Target user belongs to a different organization.');
         }
         if (!organizationId) organizationId = empOrg;
@@ -625,6 +677,9 @@ module.exports = {
   ALLOWED_PAT_SCOPES,
   ELEVATED_ROLES,
   PRIVATE_PKI_LEDGER_RESOURCES,
+  READ_ONLY_SAFE_POST_ACTIONS,
+  READ_ONLY_SAFE_POST_RESOURCE_ACTIONS,
+  readParams,
   assertApiKeyScope,
   createPaasApiKeyAuthMiddleware,
   registerPaasApiKeys,

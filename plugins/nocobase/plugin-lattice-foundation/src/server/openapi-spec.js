@@ -189,7 +189,6 @@ function buildOpenApiSpec({ serverUrl, version } = {}) {
       license: {
         name: 'Apache-2.0',
         identifier: 'Apache-2.0',
-        url: 'https://www.apache.org/licenses/LICENSE-2.0',
       },
     },
     servers: [

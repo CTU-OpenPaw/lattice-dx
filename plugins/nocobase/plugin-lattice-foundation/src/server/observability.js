@@ -470,6 +470,18 @@ function resolveRequestServerUrl(ctx) {
   return 'http://localhost:13014';
 }
 
+async function serveSpecDocument(ctx, next, buildSpec, version) {
+  if (ctx.method && ctx.method !== 'GET') {
+    failObs(ctx, 405, 'Method not allowed.', 'METHOD_NOT_ALLOWED');
+  }
+  ctx.withoutDataWrapping = true;
+  setHeader(ctx, 'Content-Type', 'application/json; charset=utf-8');
+  setHeader(ctx, 'Cache-Control', 'no-store');
+  ctx.status = 200;
+  ctx.body = buildSpec({ serverUrl: resolveRequestServerUrl(ctx), version });
+  if (next) await next();
+}
+
 function registerObservability(app, { env = process.env, registry = createMetricsRegistry() } = {}) {
   const middleware = createObservabilityMiddleware(registry, { env });
 
@@ -515,28 +527,8 @@ function registerObservability(app, { env = process.env, registry = createMetric
         ctx.body = await registry.formatPrometheusMetrics(activeDb);
         if (next) await next();
       },
-      openapi: async (ctx, next) => {
-        if (ctx.method && ctx.method !== 'GET') {
-          failObs(ctx, 405, 'Method not allowed.', 'METHOD_NOT_ALLOWED');
-        }
-        ctx.withoutDataWrapping = true;
-        setHeader(ctx, 'Content-Type', 'application/json; charset=utf-8');
-        setHeader(ctx, 'Cache-Control', 'no-store');
-        ctx.status = 200;
-        ctx.body = buildOpenApiSpec({ serverUrl: resolveRequestServerUrl(ctx), version });
-        if (next) await next();
-      },
-      asyncapi: async (ctx, next) => {
-        if (ctx.method && ctx.method !== 'GET') {
-          failObs(ctx, 405, 'Method not allowed.', 'METHOD_NOT_ALLOWED');
-        }
-        ctx.withoutDataWrapping = true;
-        setHeader(ctx, 'Content-Type', 'application/json; charset=utf-8');
-        setHeader(ctx, 'Cache-Control', 'no-store');
-        ctx.status = 200;
-        ctx.body = buildAsyncApiSpec({ serverUrl: resolveRequestServerUrl(ctx), version });
-        if (next) await next();
-      },
+      openapi: (ctx, next) => serveSpecDocument(ctx, next, buildOpenApiSpec, version),
+      asyncapi: (ctx, next) => serveSpecDocument(ctx, next, buildAsyncApiSpec, version),
     },
   });
 
