@@ -583,6 +583,193 @@ async function seedPkiAndColdSnapshot(api, organizationId, orderId) {
   };
 }
 
+const DEFAULT_SHOWCASE_WEBHOOK_SECRET = 'demo-showcase-webhook-secret-2026';
+
+async function seedCmmsBusinessPack(api, organizationId) {
+  const packs = unwrapList(
+    await api(`dxosBuilder:listBusinessPacks?organizationId=${encodeURIComponent(organizationId)}`),
+  );
+  const cmmsPack = packs.find((p) => p?.packKey === 'cmms-maintenance');
+
+  const domains = unwrapList(await api('dxosBuilder:listDomains'));
+  const workOrdersDomain = domains.find((d) => d?.collectionName === 'latticeCustomWorkOrders');
+  const hasCmmsPortal = Boolean(
+    workOrdersDomain
+    && Array.isArray(workOrdersDomain.portalPages)
+    && workOrdersDomain.portalPages.some((p) => p?.path === '/p/cmms'),
+  );
+
+  if (cmmsPack?.installed === true && hasCmmsPortal) {
+    return {
+      seeded: false,
+      alreadyInstalled: true,
+      packKey: 'cmms-maintenance',
+      collectionName: 'latticeCustomWorkOrders',
+      dmnTableKey: 'cmms_priority_routing_v1',
+      automationRuleKey: 'auto_cmms_on_coldchain_fault',
+      portalPath: '/p/cmms',
+    };
+  }
+
+  const installed = await api('dxosBuilder:installBusinessPack', {
+    method: 'POST',
+    values: {
+      organizationId,
+      packKey: 'cmms-maintenance',
+    },
+  });
+
+  if (
+    installed?.installed !== true
+    || installed?.domain?.collectionName !== 'latticeCustomWorkOrders'
+    || installed?.dmnTable?.tableKey !== 'cmms_priority_routing_v1'
+    || installed?.automationRule?.ruleKey !== 'auto_cmms_on_coldchain_fault'
+    || installed?.domain?.portalPage?.path !== '/p/cmms'
+  ) {
+    throw new Error('dxosBuilder:installBusinessPack(cmms-maintenance) returned incomplete pack state');
+  }
+
+  return {
+    seeded: true,
+    alreadyInstalled: false,
+    packKey: 'cmms-maintenance',
+    collectionName: installed.domain.collectionName,
+    dmnTableKey: installed.dmnTable.tableKey,
+    automationRuleKey: installed.automationRule.ruleKey,
+    portalPath: installed.domain.portalPage.path,
+  };
+}
+
+async function seedConnectorVault(api, organizationId) {
+  const connectorKey = 'n8n-coldchain-orchestrator';
+  const listed = unwrapList(
+    await api(`dxosVault:list?organizationId=${encodeURIComponent(organizationId)}&limit=200`),
+  );
+  const existing = listed.find((c) => c?.connectorKey === connectorKey);
+  if (existing) {
+    return {
+      seeded: false,
+      id: existing.id ?? null,
+      connectorKey,
+      connectorType: existing.connectorType || 'n8n',
+      authType: existing.authType || 'hmac',
+      hasSecrets: Boolean(existing.hasSecrets),
+    };
+  }
+
+  const webhookSecret = process.env.DX_WEBHOOK_SECRET || DEFAULT_SHOWCASE_WEBHOOK_SECRET;
+  const saved = await api('dxosVault:save', {
+    method: 'POST',
+    values: {
+      organizationId,
+      connectorKey,
+      name: 'n8n Cold-Chain Alert Orchestrator',
+      connectorType: 'n8n',
+      baseUrl: 'http://n8n:5678/webhook/latticedx/v1/coldchain-alert',
+      authType: 'hmac',
+      secrets: {
+        webhookSecret,
+      },
+    },
+  });
+
+  return {
+    seeded: true,
+    id: saved?.id ?? null,
+    connectorKey: saved?.connectorKey || connectorKey,
+    connectorType: saved?.connectorType || 'n8n',
+    authType: saved?.authType || 'hmac',
+    hasSecrets: Boolean(saved?.hasSecrets ?? true),
+  };
+}
+
+async function seedMqttDevice(api, organizationId, linkedAsset) {
+  const deviceKey = 'cold-truck-ct-01';
+  const listed = unwrapList(
+    await api(`dxosBroker:listDevices?organizationId=${encodeURIComponent(organizationId)}&limit=200`),
+  );
+  const existing = listed.find((d) => d?.deviceKey === deviceKey);
+  if (existing) {
+    return {
+      seeded: false,
+      id: existing.id ?? null,
+      deviceKey,
+      assetId: existing.assetId ?? null,
+      mqttUsername: existing.mqttUsername || null,
+      mqttClientId: existing.mqttClientId || null,
+      topicPrefix: existing.topicPrefix || null,
+      brokerSynced: Boolean(existing?.metadataJson?.brokerSynced),
+      mqttPasswordProvisioned: false,
+    };
+  }
+
+  const assetId = linkedAsset?.id ?? null;
+  const provisioned = await api('dxosBroker:provisionDevice', {
+    method: 'POST',
+    values: {
+      organizationId,
+      deviceKey,
+      name: 'Xe Tải Lạnh Cần Thơ 01 (Sensor)',
+      ...(assetId != null ? { assetId } : {}),
+    },
+  });
+  const dev = provisioned?.device || {};
+
+  // Never include or log the one-time mqttPassword in seed summaries.
+  return {
+    seeded: true,
+    id: dev.id ?? null,
+    deviceKey: dev.deviceKey || deviceKey,
+    assetId: dev.assetId ?? assetId,
+    mqttUsername: dev.mqttUsername || null,
+    mqttClientId: dev.mqttClientId || null,
+    topicPrefix: dev.topicPrefix || null,
+    brokerSynced: Boolean(provisioned?.brokerSynced),
+    mqttPasswordProvisioned: Boolean(provisioned?.mqttPassword),
+  };
+}
+
+async function seedWebhookSubscription(api, organizationId) {
+  const subscriptionKey = 'n8n-coldchain-alerts';
+  const listed = unwrapList(
+    await api(`dxosEvents:listSubscriptions?organizationId=${encodeURIComponent(organizationId)}&limit=200`),
+  );
+  const existing = listed.find((s) => s?.subscriptionKey === subscriptionKey);
+  if (existing) {
+    return {
+      seeded: false,
+      id: existing.id ?? null,
+      subscriptionKey,
+      eventPattern: existing.eventPattern || 'alarm.*',
+      hasSigningSecret: Boolean(existing.hasSigningSecret),
+      active: existing.active !== false,
+    };
+  }
+
+  const signingSecret = process.env.DX_WEBHOOK_SECRET || DEFAULT_SHOWCASE_WEBHOOK_SECRET;
+  const saved = await api('dxosEvents:saveSubscription', {
+    method: 'POST',
+    values: {
+      organizationId,
+      subscriptionKey,
+      name: 'Gửi cảnh báo Cold-Chain sang n8n',
+      targetUrl: 'http://n8n:5678/webhook/latticedx/v1/coldchain-alert',
+      eventPattern: 'alarm.*',
+      signingSecret,
+      active: true,
+    },
+  });
+
+  return {
+    seeded: true,
+    id: saved?.id ?? null,
+    subscriptionKey: saved?.subscriptionKey || subscriptionKey,
+    eventPattern: saved?.eventPattern || 'alarm.*',
+    hasSigningSecret: Boolean(saved?.hasSigningSecret ?? true),
+    active: saved?.active !== false,
+  };
+}
+
 export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch) {
   const api = await createSeederClient(options, fetchImpl);
   const { organizationId } = options;
@@ -595,6 +782,14 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
   const dmn = await seedDmnTable(api, organizationId);
   const delegation = await seedDelegationSample(api, organizationId, ctx);
   const pkiSnapshot = await seedPkiAndColdSnapshot(api, organizationId, wms.orderId);
+  const cmmsPack = await seedCmmsBusinessPack(api, organizationId);
+  const connectorVault = await seedConnectorVault(api, organizationId);
+  const mqttDevice = await seedMqttDevice(
+    api,
+    organizationId,
+    assets.assetsByCode['REEFER-TRUCK-HCM-02'] || assets.assetsByCode['COLD-CHILLER-CT-01'],
+  );
+  const webhookSubscription = await seedWebhookSubscription(api, organizationId);
 
   const paraReindex = await api('latticePara:reindex', {
     method: 'POST',
@@ -620,6 +815,10 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
     dmn,
     delegation,
     pkiSnapshot,
+    cmmsPack,
+    connectorVault,
+    mqttDevice,
+    webhookSubscription,
     paraReindex,
     triage,
     portals,

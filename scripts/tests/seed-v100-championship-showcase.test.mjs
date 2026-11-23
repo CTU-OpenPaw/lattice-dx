@@ -56,6 +56,7 @@ function createMockShowcaseServer({
   initialLedgerEntries = [],
   initialSnapshots = [],
   delegationCreateError = null,
+  omitCmmsPortalOnDomain = false,
 } = {}) {
   const state = {
     nextId: 100,
@@ -70,6 +71,12 @@ function createMockShowcaseServer({
     delegations: [],
     ledgerEntries: [...initialLedgerEntries],
     snapshots: [...initialSnapshots],
+    domains: [],
+    automationRules: [],
+    connectors: [],
+    iotDevices: [],
+    webhookSubscriptions: [],
+    provisionedPasswords: [],
     calls: [],
   };
 
@@ -227,6 +234,152 @@ function createMockShowcaseServer({
       state.snapshots.push(snap);
       return jsonResp(snap);
     }
+    if (parsedUrl.pathname === '/api/dxosBuilder:listBusinessPacks') {
+      const hasCol = state.domains.some((d) => d.collectionName === 'latticeCustomWorkOrders');
+      const hasDmn = state.dmnTables.some((t) => t.tableKey === 'cmms_priority_routing_v1');
+      const hasRule = state.automationRules.some((r) => r.ruleKey === 'auto_cmms_on_coldchain_fault');
+      return jsonResp({
+        items: [
+          {
+            packKey: 'cmms-maintenance',
+            installed: Boolean(hasCol && hasDmn && hasRule),
+          },
+        ],
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosBuilder:listDomains') {
+      return jsonResp({ items: state.domains });
+    }
+    if (parsedUrl.pathname === '/api/dxosBuilder:installBusinessPack') {
+      if (body.packKey !== 'cmms-maintenance') {
+        return errorResp(400, 'UNKNOWN_BUSINESS_PACK', 'Unsupported pack');
+      }
+      if (!state.domains.some((d) => d.collectionName === 'latticeCustomWorkOrders')) {
+        state.domains.push({
+          collectionName: 'latticeCustomWorkOrders',
+          rlsProtected: true,
+          portalPages: omitCmmsPortalOnDomain ? [] : [{ path: '/p/cmms', title: 'CMMS Maintenance' }],
+        });
+      } else if (!omitCmmsPortalOnDomain) {
+        const existingDom = state.domains.find((d) => d.collectionName === 'latticeCustomWorkOrders');
+        existingDom.portalPages = [{ path: '/p/cmms', title: 'CMMS Maintenance' }];
+      }
+      if (!state.dmnTables.some((t) => t.tableKey === 'cmms_priority_routing_v1')) {
+        state.dmnTables.push({ id: ++state.nextId, organizationId: body.organizationId, tableKey: 'cmms_priority_routing_v1' });
+      }
+      if (!state.automationRules.some((r) => r.ruleKey === 'auto_cmms_on_coldchain_fault')) {
+        state.automationRules.push({ id: ++state.nextId, organizationId: body.organizationId, ruleKey: 'auto_cmms_on_coldchain_fault' });
+      }
+      return jsonResp({
+        installed: true,
+        packKey: 'cmms-maintenance',
+        organizationId: body.organizationId,
+        domain: {
+          collectionName: 'latticeCustomWorkOrders',
+          rls: { attached: true, verified: true },
+          portalPage: { path: '/p/cmms' },
+        },
+        dmnTable: { tableKey: 'cmms_priority_routing_v1' },
+        automationRule: { ruleKey: 'auto_cmms_on_coldchain_fault' },
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosVault:list') {
+      return jsonResp({
+        organizationId: parsedUrl.searchParams.get('organizationId'),
+        items: state.connectors.map(({ secrets, ...safe }) => ({
+          ...safe,
+          hasSecrets: Boolean(secrets && Object.keys(secrets).length > 0),
+          secretKeys: secrets ? Object.keys(secrets) : [],
+        })),
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosVault:save') {
+      const idx = state.connectors.findIndex(
+        (c) => c.organizationId === body.organizationId && c.connectorKey === body.connectorKey,
+      );
+      const entry = {
+        id: idx >= 0 ? state.connectors[idx].id : ++state.nextId,
+        organizationId: body.organizationId,
+        connectorKey: body.connectorKey,
+        name: body.name,
+        connectorType: body.connectorType,
+        baseUrl: body.baseUrl,
+        authType: body.authType,
+        secrets: body.secrets || {},
+      };
+      if (idx >= 0) state.connectors[idx] = entry;
+      else state.connectors.push(entry);
+      return jsonResp({
+        id: entry.id,
+        organizationId: entry.organizationId,
+        connectorKey: entry.connectorKey,
+        connectorType: entry.connectorType,
+        authType: entry.authType,
+        hasSecrets: Boolean(body.secrets && Object.keys(body.secrets).length > 0),
+        secretKeys: Object.keys(entry.secrets),
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosBroker:listDevices') {
+      return jsonResp({
+        items: state.iotDevices.map(({ mqttPassword, ...safe }) => safe),
+        total: state.iotDevices.length,
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosBroker:provisionDevice') {
+      if (state.iotDevices.some((d) => d.organizationId === body.organizationId && d.deviceKey === body.deviceKey)) {
+        return errorResp(409, 'BROKER_DEVICE_EXISTS', 'Device exists');
+      }
+      const pwd = `mock-mqtt-secret-${++state.nextId}`;
+      state.provisionedPasswords.push(pwd);
+      const device = {
+        id: ++state.nextId,
+        organizationId: body.organizationId,
+        deviceKey: body.deviceKey,
+        name: body.name,
+        assetId: body.assetId ?? null,
+        mqttUsername: `ldx_${body.organizationId}_${body.deviceKey}`,
+        mqttClientId: `ldx-${body.organizationId}-${body.deviceKey}`,
+        topicPrefix: `latticedx/${body.organizationId}/${body.deviceKey}`,
+        metadataJson: { brokerSynced: true },
+      };
+      state.iotDevices.push({ ...device, mqttPassword: pwd });
+      return jsonResp({
+        device,
+        mqttPassword: pwd,
+        brokerSynced: true,
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosEvents:listSubscriptions') {
+      return jsonResp({
+        organizationId: parsedUrl.searchParams.get('organizationId'),
+        items: state.webhookSubscriptions.map(({ signingSecret, ...safe }) => ({
+          ...safe,
+          hasSigningSecret: Boolean(signingSecret),
+        })),
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosEvents:saveSubscription') {
+      const idx = state.webhookSubscriptions.findIndex(
+        (s) => s.organizationId === body.organizationId && s.subscriptionKey === body.subscriptionKey,
+      );
+      const entry = {
+        id: idx >= 0 ? state.webhookSubscriptions[idx].id : ++state.nextId,
+        organizationId: body.organizationId,
+        subscriptionKey: body.subscriptionKey,
+        name: body.name,
+        targetUrl: body.targetUrl,
+        eventPattern: body.eventPattern,
+        signingSecret: body.signingSecret,
+        active: body.active !== false,
+      };
+      if (idx >= 0) state.webhookSubscriptions[idx] = entry;
+      else state.webhookSubscriptions.push(entry);
+      const { signingSecret, ...safe } = entry;
+      return jsonResp({
+        ...safe,
+        hasSigningSecret: Boolean(signingSecret),
+      });
+    }
     if (parsedUrl.pathname === '/api/latticePara:reindex') {
       return jsonResp({ indexedCount: 5 });
     }
@@ -276,7 +429,7 @@ test('mock twinSetDesired catches forbidden keys (compressorMode, doorLocked) an
   );
 });
 
-test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idempotent on repeat run', async () => {
+test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idempotent on repeat run with zero secret leaks', async () => {
   const { state, mockFetch } = createMockShowcaseServer();
   const options = {
     origin: 'http://localhost:13014',
@@ -298,8 +451,29 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(first.delegation.seeded, true);
   assert.equal(first.pkiSnapshot.signedNow, true);
   assert.equal(first.pkiSnapshot.frozenNow, true);
+  assert.equal(first.cmmsPack.seeded, true);
+  assert.equal(first.cmmsPack.collectionName, 'latticeCustomWorkOrders');
+  assert.equal(first.cmmsPack.dmnTableKey, 'cmms_priority_routing_v1');
+  assert.equal(first.cmmsPack.automationRuleKey, 'auto_cmms_on_coldchain_fault');
+  assert.equal(first.cmmsPack.portalPath, '/p/cmms');
+  assert.equal(first.connectorVault.seeded, true);
+  assert.equal(first.connectorVault.connectorKey, 'n8n-coldchain-orchestrator');
+  assert.equal(first.connectorVault.hasSecrets, true);
+  assert.equal(first.mqttDevice.seeded, true);
+  assert.equal(first.mqttDevice.deviceKey, 'cold-truck-ct-01');
+  assert.equal(first.mqttDevice.mqttPasswordProvisioned, true);
+  assert.equal(first.mqttDevice.mqttPassword, undefined);
+  assert.equal(first.webhookSubscription.seeded, true);
+  assert.equal(first.webhookSubscription.subscriptionKey, 'n8n-coldchain-alerts');
+  assert.equal(first.webhookSubscription.hasSigningSecret, true);
 
-  // Second run MUST create zero duplicate resources
+  const firstJson = JSON.stringify(first);
+  assert.equal(firstJson.includes('demo-showcase-webhook-secret-2026'), false);
+  for (const pwd of state.provisionedPasswords) {
+    assert.equal(firstJson.includes(pwd), false, 'Summary leaked raw mqttPassword');
+  }
+
+  // Second run MUST create zero duplicate resources and leak zero secrets
   const second = await runV100ChampionshipShowcaseSeed(options, mockFetch);
   assert.equal(second.result, 'PASS');
   assert.equal(second.locations.created, 0);
@@ -315,15 +489,51 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(second.delegation.seeded, false);
   assert.equal(second.pkiSnapshot.signedNow, false);
   assert.equal(second.pkiSnapshot.frozenNow, false);
+  assert.equal(second.cmmsPack.seeded, false);
+  assert.equal(second.cmmsPack.alreadyInstalled, true);
+  assert.equal(second.connectorVault.seeded, false);
+  assert.equal(second.connectorVault.hasSecrets, true);
+  assert.equal(second.mqttDevice.seeded, false);
+  assert.equal(second.mqttDevice.mqttPasswordProvisioned, false);
+  assert.equal(second.mqttDevice.mqttPassword, undefined);
+  assert.equal(second.webhookSubscription.seeded, false);
+  assert.equal(second.webhookSubscription.hasSigningSecret, true);
   assert.equal(state.locations.length, 3);
   assert.equal(state.assets.length, 3);
   assert.equal(state.orders.length, 1);
   assert.equal(state.orderLines.length, 2);
   assert.equal(state.lots.length, 4);
-  assert.equal(state.dmnTables.length, 1);
+  assert.equal(state.dmnTables.length, 2);
   assert.equal(state.delegations.length, 1);
   assert.equal(state.ledgerEntries.length, 1);
   assert.equal(state.snapshots.length, 1);
+  assert.equal(state.domains.length, 1);
+  assert.equal(state.automationRules.length, 1);
+  assert.equal(state.connectors.length, 1);
+  assert.equal(state.iotDevices.length, 1);
+  assert.equal(state.webhookSubscriptions.length, 1);
+
+  const secondJson = JSON.stringify(second);
+  assert.equal(secondJson.includes('demo-showcase-webhook-secret-2026'), false);
+  for (const pwd of state.provisionedPasswords) {
+    assert.equal(secondJson.includes(pwd), false, 'Repeat summary leaked raw mqttPassword');
+  }
+});
+
+test('runV100ChampionshipShowcaseSeed repairs CMMS pack if /p/cmms portal page is missing and keeps secrets masked', async () => {
+  const { state, mockFetch } = createMockShowcaseServer({ omitCmmsPortalOnDomain: true });
+  const options = {
+    origin: 'http://localhost:13014',
+    organizationId: 'native-ui-lab',
+    token: 'tok-root',
+  };
+  const first = await runV100ChampionshipShowcaseSeed(options, mockFetch);
+  assert.equal(first.cmmsPack.seeded, true);
+  const second = await runV100ChampionshipShowcaseSeed(options, mockFetch);
+  // Because /p/cmms was omitted from listDomains in this fixture, seedCmmsBusinessPack triggers idempotent reinstall without duplicating records
+  assert.equal(second.cmmsPack.seeded, true);
+  assert.equal(state.domains.length, 1);
+  assert.equal(state.automationRules.length, 1);
 });
 
 test('runV100ChampionshipShowcaseSeed paginates ledger/snapshots beyond 100 entries and filters snapshots strictly by latticeOrders', async () => {

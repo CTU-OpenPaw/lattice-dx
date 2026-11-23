@@ -68,6 +68,7 @@
     "setup:dxos-ai": "node scripts/setup-dxos-ai-workforce.mjs",
     "acceptance:dxos-ai-mcp": "node scripts/acceptance-dxos-ai-and-mcp.mjs",
     "acceptance:headless-paas": "node scripts/acceptance-headless-paas.mjs",
+    "acceptance:broker-automation-builder": "node scripts/acceptance-broker-automation-builder.mjs",
     "seed:v100-showcase": "node scripts/seed-v100-championship-showcase.mjs",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "backup:full": "node scripts/full-backup-core.mjs backup",
