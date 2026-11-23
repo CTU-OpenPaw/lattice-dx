@@ -17,6 +17,17 @@ const {
   queryTelemetryTimeSeries,
 } = require('./alarm-engine');
 const { executeGovernedExport } = require('./governed-export');
+const {
+  getTwinShadow,
+  requestDesiredSetpoint,
+  ackCommandFromEdge,
+} = require('./digital-twin');
+const {
+  ALLOWED_IMPORT_COLLECTIONS,
+  OPTIONAL_IMPORT_COLLECTIONS,
+  runBulkImportDryRun,
+  commitBulkImport,
+} = require('./bulk-import');
 
 const ALLOWED_PROPOSAL_COLLECTIONS = new Set([
   'latticeAssets',
@@ -308,7 +319,29 @@ function buildOwnerFilterClauses(db, collection, actor) {
   return clauses;
 }
 
-function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT_BROKER_URL, fetchImpl = fetch, ingestToken } = {}) {
+function resolveScopedOrganizationId(isRoot, actor, input = {}) {
+  if (!isRoot) {
+    if (
+      input.organizationId !== undefined
+      && input.organizationId !== null
+      && String(input.organizationId).trim() !== ''
+      && String(input.organizationId).trim() !== actor.organizationId
+    ) {
+      throw fail('DXOS_CROSS_ORG_FORBIDDEN', 403);
+    }
+    return actor.organizationId;
+  }
+  if (typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim())) {
+    return input.organizationId.trim();
+  }
+  if (typeof input.assetEntityId === 'string') {
+    const m = URN_RE.exec(input.assetEntityId.trim());
+    if (m) return m[1];
+  }
+  throw fail('DXOS_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ.');
+}
+
+function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT_BROKER_URL, fetchImpl = fetch, ingestToken, downlinkUrl } = {}) {
   const brokerOrigin = normalizeBrokerOrigin(brokerUrl);
 
   return {
@@ -775,6 +808,114 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       }
 
       ctx.body = { query: rawQuery, count: items.length, items };
+      return next();
+    },
+
+    twinShadow: async (ctx, next) => {
+      if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection: 'latticeAssets', action: 'view' });
+      const organizationId = resolveScopedOrganizationId(isRoot, actor, input);
+      ctx.body = await getTwinShadow(db, {
+        organizationId,
+        assetId: input.assetId,
+        assetEntityId: input.assetEntityId,
+      });
+      return next();
+    },
+
+    twinSetDesired: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection: 'latticeAssets', action: 'update' });
+      if (!isRoot && input.hitlApproved === true) {
+        throw fail('TWIN_HITL_APPROVAL_REQUIRED', 403, 'Chỉ quy trình phê duyệt HITL hoặc root mới được xác nhận thay đổi vượt ngưỡng.');
+      }
+      const organizationId = resolveScopedOrganizationId(isRoot, actor, input);
+      const actorName = val(ctx.state?.currentUser, 'username') || (actor ? `user-${actor.userId}` : 'root');
+      ctx.body = await requestDesiredSetpoint(db, {
+        organizationId,
+        assetId: input.assetId,
+        assetEntityId: input.assetEntityId,
+        desiredPatch: input.desiredPatch ?? input.desired,
+        hitlApproved: isRoot && input.hitlApproved === true,
+        actor: actor
+          ? { ...actor, username: actorName }
+          : { userId: val(ctx.state?.currentUser, 'id'), username: actorName },
+        currentUser: ctx.state?.currentUser,
+        ...(downlinkUrl !== undefined ? { downlinkUrl } : {}),
+        fetchImpl,
+        ingestToken,
+      });
+      return next();
+    },
+
+    twinAckCommand: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const auth = await resolveTelemetryIngestAuth(db, ctx, input, { ingestToken });
+      const actorName = auth.mode === 'edge-token'
+        ? 'edge-gateway'
+        : (val(ctx.state?.currentUser, 'username') || (auth.actor ? `user-${auth.actor.userId}` : 'root'));
+      ctx.body = await ackCommandFromEdge(db, {
+        organizationId: auth.organizationId,
+        assetId: input.assetId,
+        assetEntityId: input.assetEntityId,
+        commandId: input.commandId,
+        reportedPatch: input.reportedPatch ?? input.reported,
+        ackStatus: input.ackStatus,
+        actorName,
+      });
+      return next();
+    },
+
+    bulkImportDryRun: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      if (!ctx.state?.currentUser?.id && ctx.state?.currentRole !== 'root') {
+        throw fail('NATIVE_LOGIN_REQUIRED', 401);
+      }
+      const input = readParams(ctx);
+      const collection = String(input.collection || '').trim();
+      if (!ALLOWED_IMPORT_COLLECTIONS.has(collection) && !(OPTIONAL_IMPORT_COLLECTIONS.has(collection) && db?.getRepository?.(collection))) {
+        throw fail('BULK_IMPORT_COLLECTION_FORBIDDEN', 403, `Không được phép import vào collection "${collection}".`);
+      }
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'create' });
+      const organizationId = resolveScopedOrganizationId(isRoot, actor, input);
+      ctx.body = await runBulkImportDryRun(db, {
+        organizationId,
+        collection,
+        format: input.format,
+        content: input.content,
+        rows: input.rows,
+      });
+      return next();
+    },
+
+    bulkImportCommit: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      if (!ctx.state?.currentUser?.id && ctx.state?.currentRole !== 'root') {
+        throw fail('NATIVE_LOGIN_REQUIRED', 401);
+      }
+      const input = readParams(ctx);
+      const collection = String(input.collection || '').trim();
+      if (!ALLOWED_IMPORT_COLLECTIONS.has(collection) && !(OPTIONAL_IMPORT_COLLECTIONS.has(collection) && db?.getRepository?.(collection))) {
+        throw fail('BULK_IMPORT_COLLECTION_FORBIDDEN', 403, `Không được phép import vào collection "${collection}".`);
+      }
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'create' });
+      const organizationId = resolveScopedOrganizationId(isRoot, actor, input);
+      const actorName = val(ctx.state?.currentUser, 'username') || (actor ? `user-${actor.userId}` : 'root');
+      ctx.body = await commitBulkImport(db, {
+        organizationId,
+        collection,
+        format: input.format,
+        content: input.content,
+        rows: input.rows,
+        previewToken: input.previewToken,
+        actor: {
+          userId: actor?.userId || val(ctx.state?.currentUser, 'id'),
+          username: actorName,
+        },
+      });
       return next();
     },
   };

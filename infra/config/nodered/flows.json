@@ -101,5 +101,161 @@
     "x": 960,
     "y": 140,
     "wires": []
+  },
+  {
+    "id": "latticedx-twin-downlink-tab",
+    "type": "tab",
+    "label": "LatticeDX Digital Twin Downlink",
+    "disabled": false,
+    "info": "SPDX-License-Identifier: Apache-2.0 — Validates POST /twin/command downlink requests and publishes to latticedx/<orgId>/<assetKey>/command on Mosquitto; forwards latticedx/+/+/ack back to NocoBase dxosBlocks:twinAckCommand."
+  },
+  {
+    "id": "latticedx-twin-http-in",
+    "type": "http in",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "POST /twin/command",
+    "url": "/twin/command",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 170,
+    "y": 120,
+    "wires": [
+      [
+        "latticedx-twin-command-fn"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-command-fn",
+    "type": "function",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Validate & Route Twin Command",
+    "func": "const expectedToken = String(env.get('DX_IIOT_INGEST_TOKEN') || '').trim();\nif (expectedToken.length < 16) {\n  node.error('DX_IIOT_INGEST_TOKEN missing or shorter than 16 chars; refusing twin command');\n  return null;\n}\nconst hdrs = (msg.req && msg.req.headers) || msg.headers || {};\nlet providedToken = '';\nfor (const [k, v] of Object.entries(hdrs)) {\n  if (k.toLowerCase() === 'x-lattice-edge-token' && typeof v === 'string') {\n    providedToken = v.trim();\n    break;\n  }\n}\nlet diff = expectedToken.length ^ providedToken.length;\nconst maxLen = Math.max(expectedToken.length, providedToken.length);\nfor (let i = 0; i < maxLen; i += 1) {\n  const a = i < expectedToken.length ? expectedToken.charCodeAt(i) : 0;\n  const b = i < providedToken.length ? providedToken.charCodeAt(i) : 0;\n  diff |= a ^ b;\n}\nif (diff !== 0) {\n  node.warn('Rejected twin command with invalid X-Lattice-Edge-Token');\n  return null;\n}\nlet data = msg.payload;\nif (typeof data === 'string') {\n  try {\n    data = JSON.parse(data);\n  } catch (err) {\n    node.warn('Invalid JSON twin command payload: ' + err.message);\n    return null;\n  }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) {\n  node.warn('Twin command payload must be a JSON object');\n  return null;\n}\nconst orgId = String(data.organizationId || '').trim();\nif (!/^[a-zA-Z0-9_-]{1,80}$/.test(orgId)) {\n  node.warn('Rejected invalid organizationId in twin command: ' + orgId);\n  return null;\n}\nconst rawAssetId = data.assetId != null && /^[1-9]\\d{0,18}$/.test(String(data.assetId)) ? String(data.assetId) : '';\nconst rawEntity = typeof data.assetEntityId === 'string' ? data.assetEntityId.trim() : '';\nlet assetKey = rawAssetId;\nif (!assetKey && rawEntity) {\n  const urnMatch = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\\d{0,18})$/.exec(rawEntity);\n  if (urnMatch) {\n    if (urnMatch[1] !== orgId) {\n      node.warn('Rejected cross-org URN in twin command');\n      return null;\n    }\n    assetKey = urnMatch[2];\n  } else if (/^[a-zA-Z0-9_.-]{1,128}$/.test(rawEntity)) {\n    assetKey = rawEntity;\n  } else {\n    node.warn('Rejected unsafe assetEntityId for MQTT topic: ' + rawEntity);\n    return null;\n  }\n}\nif (!assetKey) {\n  node.warn('Missing assetId or assetEntityId in twin command');\n  return null;\n}\nconst assetEntityId = rawEntity || ('urn:ngsi-ld:Asset:' + orgId + ':native:' + assetKey);\nmsg.topic = 'latticedx/' + orgId + '/' + assetKey + '/command';\nmsg.qos = 1;\nmsg.retain = false;\nmsg.statusCode = 202;\nmsg.payload = {\n  organizationId: orgId,\n  ...(rawAssetId ? { assetId: Number(rawAssetId) } : {}),\n  assetEntityId,\n  ...(data.commandId ? { commandId: String(data.commandId).slice(0, 64) } : {}),\n  desired: data.desired || data.desiredPatch || {},\n  issuedAt: data.issuedAt || new Date().toISOString()\n};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 5,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 450,
+    "y": 120,
+    "wires": [
+      [
+        "latticedx-twin-mqtt-out",
+        "latticedx-twin-http-res"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-mqtt-out",
+    "type": "mqtt out",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "MQTT Command Out",
+    "topic": "",
+    "qos": "1",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "latticedx-mqtt-broker",
+    "x": 740,
+    "y": 100,
+    "wires": []
+  },
+  {
+    "id": "latticedx-twin-http-res",
+    "type": "http response",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Command Accepted",
+    "statusCode": "202",
+    "headers": {},
+    "x": 740,
+    "y": 160,
+    "wires": []
+  },
+  {
+    "id": "latticedx-twin-ack-mqtt-in",
+    "type": "mqtt in",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "MQTT Twin Ack In",
+    "topic": "latticedx/+/+/ack",
+    "qos": "1",
+    "datatype": "auto-detect",
+    "broker": "latticedx-mqtt-broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 170,
+    "y": 260,
+    "wires": [
+      [
+        "latticedx-twin-ack-fn"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-ack-fn",
+    "type": "function",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Sign & Forward Twin Ack",
+    "func": "const rawTopic = String(msg.topic || '');\nconst parts = rawTopic.split('/');\nif (parts.length !== 4 || parts[0] !== 'latticedx' || parts[3] !== 'ack') {\n  node.warn('Ignored invalid twin ack topic: ' + rawTopic);\n  return null;\n}\nconst orgId = parts[1].trim();\nconst topicAsset = parts[2].trim();\nif (!/^[a-zA-Z0-9_-]{1,80}$/.test(orgId)) {\n  node.warn('Rejected invalid organizationId in twin ack topic: ' + orgId);\n  return null;\n}\nlet data = msg.payload;\nif (typeof data === 'string') {\n  try {\n    data = JSON.parse(data);\n  } catch (err) {\n    node.warn('Invalid JSON twin ack payload: ' + err.message);\n    return null;\n  }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) {\n  node.warn('Twin ack payload must be a JSON object');\n  return null;\n}\nconst edgeToken = String(env.get('DX_IIOT_INGEST_TOKEN') || '').trim();\nif (edgeToken.length < 16) {\n  node.error('DX_IIOT_INGEST_TOKEN missing or shorter than 16 chars; refusing twin ack dispatch');\n  return null;\n}\nconst assetId = data.assetId != null && /^[1-9]\\d{0,18}$/.test(String(data.assetId)) ? Number(data.assetId) : undefined;\nconst assetEntityId = String(data.assetEntityId || (/^[1-9]\\d{0,18}$/.test(topicAsset) ? 'urn:ngsi-ld:Asset:' + orgId + ':native:' + topicAsset : topicAsset)).trim().slice(0, 255);\nif (!assetEntityId) {\n  node.warn('Missing assetEntityId in twin ack');\n  return null;\n}\nconst reportedPatch = data.reportedPatch && typeof data.reportedPatch === 'object' && !Array.isArray(data.reportedPatch)\n  ? data.reportedPatch\n  : (data.reported && typeof data.reported === 'object' && !Array.isArray(data.reported) ? data.reported : {});\nmsg.url = String(env.get('DX_TWIN_ACK_URL') || 'http://nocobase/api/dxosBlocks:twinAckCommand').trim();\nmsg.headers = {\n  'Content-Type': 'application/json',\n  'X-Lattice-Edge-Token': edgeToken\n};\nmsg.payload = {\n  organizationId: orgId,\n  ...(assetId !== undefined ? { assetId } : {}),\n  assetEntityId,\n  ...(data.commandId ? { commandId: String(data.commandId).slice(0, 64) } : {}),\n  ackStatus: data.ackStatus === 'failed' ? 'failed' : 'acked',\n  reportedPatch\n};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 5,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 440,
+    "y": 260,
+    "wires": [
+      [
+        "latticedx-twin-ack-http"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-ack-http",
+    "type": "http request",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "POST dxosBlocks:twinAckCommand",
+    "method": "POST",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 730,
+    "y": 260,
+    "wires": [
+      [
+        "latticedx-twin-ack-debug"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-ack-debug",
+    "type": "debug",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Twin Ack Status",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "statusCode",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 960,
+    "y": 260,
+    "wires": []
   }
 ]
