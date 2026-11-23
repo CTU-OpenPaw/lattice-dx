@@ -9,11 +9,17 @@
 'use strict';
 
 const { createDxosGovernanceConsoles, GOVERNANCE_SECTIONS } = require('./governance-consoles');
+const { createBuilderBrokerPanels } = require('./builder-broker-panels');
 
 function createDxosStudioSettingsPage(client, React, antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
   const GovernanceConsoles = createDxosGovernanceConsoles(client, React, antd, app);
+  const {
+    BrokerAndEventsPanel,
+    VaultAndAutomationPanel,
+    DomainBuilderAndTenantsPanel,
+  } = createBuilderBrokerPanels(client, React, antd, app);
 
   function openRoute(path) {
     const url = app?.getRouteUrl?.(path) || path;
@@ -194,6 +200,9 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           workflows: Array.isArray(b.workflows) ? b.workflows.length : 0,
           customCollections: Array.isArray(b.customCollections) ? b.customCollections.length : 0,
           aiProfiles: Array.isArray(b.aiProfiles) ? b.aiProfiles.length : 0,
+          governance: (Array.isArray(b?.governance?.decisionTables) ? b.governance.decisionTables.length : 0)
+            + (Array.isArray(b?.governance?.slaPolicies) ? b.governance.slaPolicies.length : 0)
+            + (Array.isArray(b?.governance?.incidentRules) ? b.governance.incidentRules.length : 0),
         };
         setBundleText(JSON.stringify(b, null, 2));
         setBundleInfo({
@@ -312,6 +321,9 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       ['pof', '4. Sẵn sàng PoF & Hệ thống'],
       ['outbox', '5. Hàng đợi Outbox & DLQ'],
       ['gitops', '6. GitOps Bundle'],
+      ['broker', '7. Broker & Sự kiện'],
+      ['automation', '8. Vault & Automation'],
+      ['builder', '9. Domain Builder & Tenant'],
     ];
 
     const btnStyle = (primary = false, danger = false, disabled = false) => ({
@@ -369,7 +381,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           role: 'tab',
           'data-testid': `dxos-studio-tab-${k}`,
           'aria-selected': tab === k,
-          onClick: () => setTab(k),
+          onClick: () => { setTab(k); setFeedback(null); },
           style: { ...btnStyle(tab === k), padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 },
         }, label)),
       ),
@@ -387,7 +399,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
             type: 'button',
             'data-testid': `dxos-studio-tab-${sec.id}`,
             'aria-pressed': active,
-            onClick: () => { setTab('governance'); setGovSection(sec.id); },
+            onClick: () => { setTab('governance'); setGovSection(sec.id); setFeedback(null); },
             style: { ...btnStyle(active), padding: '5px 10px', fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 },
           }, sec.label);
         }),
@@ -536,7 +548,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
       tab === 'gitops' ? h('div', { 'data-testid': 'dxos-studio-gitops-bundle-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-          h('h3', { style: { margin: 0, fontSize: 16 } }, 'GitOps Solution Bundle v2 (Schema · RBAC · Portals · Workflows · AI)'),
+          h('h3', { style: { margin: 0, fontSize: 16 } }, 'GitOps Solution Bundle v3 (Schema · RBAC · Portals · Workflows · AI · Governance)'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h('button', { type: 'button', disabled: busyAction, onClick: handleExportBundle, style: btnStyle(true, false, busyAction) }, 'Xuất Bundle JSON'),
             h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: handleDownloadBundle, style: btnStyle(false, false, busyAction || !bundleText.trim()) }, 'Tải tệp .json'),
@@ -564,6 +576,24 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
             ['workflows', 'Quy trình', bundleInfo?.applied?.workflowsUpserted, bundleInfo?.diff?.sections?.workflows, bundleInfo?.counts?.workflows],
             ['customCollections', 'Bảng tùy biến', bundleInfo?.applied?.customCollectionsUpserted, bundleInfo?.diff?.sections?.customCollections, bundleInfo?.counts?.customCollections],
             ['aiProfiles', 'Nhân sự AI', bundleInfo?.applied?.aiProfilesUpserted, bundleInfo?.diff?.sections?.aiProfiles, bundleInfo?.counts?.aiProfiles],
+            ['governance', 'Quản trị Governance', (() => {
+              const ap = bundleInfo?.applied;
+              if (!ap || (ap.decisionTablesUpserted === undefined && ap.slaPoliciesUpserted === undefined && ap.incidentRulesUpserted === undefined)) return undefined;
+              return Number(ap.decisionTablesUpserted || 0) + Number(ap.slaPoliciesUpserted || 0) + Number(ap.incidentRulesUpserted || 0);
+            })(), (() => {
+              const parts = [
+                bundleInfo?.diff?.sections?.decisionTables || bundleInfo?.diff?.governance?.decisionTables,
+                bundleInfo?.diff?.sections?.slaPolicies || bundleInfo?.diff?.governance?.slaPolicies,
+                bundleInfo?.diff?.sections?.incidentRules || bundleInfo?.diff?.governance?.incidentRules,
+              ].filter(Boolean);
+              if (!parts.length) return undefined;
+              return {
+                added: parts.flatMap((s) => s.added || []),
+                changed: parts.flatMap((s) => s.changed || []),
+                unchanged: parts.flatMap((s) => s.unchanged || []),
+                removed: parts.flatMap((s) => s.removed || []),
+              };
+            })(), bundleInfo?.counts?.governance],
           ].map(([key, label, appliedCount, diffObj, expCount]) => {
             const removedCount = diffObj?.removed?.length || 0;
             const diffSummary = diffObj
@@ -584,11 +614,35 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         h('textarea', {
           value: bundleText,
           onChange: (e) => setBundleText(e.target.value),
-          placeholder: 'Dán hoặc xuất JSON latticedx.solution-bundle/v2 (hỗ trợ cả v1) tại đây…',
+          placeholder: 'Dán hoặc xuất JSON latticedx.solution-bundle/v3 (hỗ trợ cả v1/v2) tại đây…',
           rows: 10,
           style: { width: '100%', padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12 },
         }),
       ) : null,
+
+      tab === 'broker' ? h(BrokerAndEventsPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      tab === 'automation' ? h(VaultAndAutomationPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      tab === 'builder' ? h(DomainBuilderAndTenantsPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
 
       isGovernanceTab ? h(GovernanceConsoles, {
         api,

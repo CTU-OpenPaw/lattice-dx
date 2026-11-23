@@ -246,7 +246,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       }
       const gov = incomingBundle.governance;
       if (gov && typeof gov === 'object' && !Array.isArray(gov)) {
-        for (const key of ['decisionTables', 'slaPolicies', 'incidentRules']) {
+        for (const key of ['decisionTables', 'slaPolicies', 'incidentRules', 'automationRules', 'webhookSubscriptions']) {
           const items = Array.isArray(gov[key]) ? gov[key] : [];
           for (const item of items) {
             const itemOrg = item?.organizationId != null ? String(item.organizationId).trim() : '';

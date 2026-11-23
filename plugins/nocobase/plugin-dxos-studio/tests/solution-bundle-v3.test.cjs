@@ -820,7 +820,13 @@ test('Fix Round 1 (C1): rollback reconciles empty baselines, deletes child-befor
 
   const emptyBase = await exportSolutionBundle(h2.db, { organizationId: 'org-a' });
   assert.deepEqual(emptyBase.routesAndBlocks, { routes: [], flowModels: [] });
-  assert.deepEqual(emptyBase.governance, { decisionTables: [], slaPolicies: [], incidentRules: [] });
+  assert.deepEqual(emptyBase.governance, {
+    decisionTables: [],
+    slaPolicies: [],
+    incidentRules: [],
+    automationRules: [],
+    webhookSubscriptions: [],
+  });
 
   const nonEmptyInc = structuredClone(emptyBase);
   nonEmptyInc.routesAndBlocks.routes.push({

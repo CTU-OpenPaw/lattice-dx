@@ -1029,6 +1029,23 @@ function createDxosWmsActions(db) {
         };
       }, { organizationId, foundation }), foundation);
 
+      if (result?.held) {
+        const { emitDomainEventSafely } = require('./domain-events');
+        await emitDomainEventSafely(db, ctx, {
+          organizationId,
+          type: 'lot.held_mkt',
+          source: 'dxos-studio:wms',
+          subject: result.lotCode || '',
+          data: {
+            lotCode: result.lotCode,
+            mktCelsius: result.mktCelsius,
+            thresholdCelsius: result.thresholdCelsius,
+            lotStatus: result.lotStatus,
+            severity: 'high',
+          },
+        });
+      }
+
       ctx.body = result;
       return next();
     },
@@ -1177,6 +1194,26 @@ function createDxosWmsActions(db) {
 
         return serializeEpod(row);
       }, { organizationId, foundation }), foundation);
+
+      const { emitDomainEventSafely } = require('./domain-events');
+      await emitDomainEventSafely(db, ctx, {
+        organizationId,
+        type: 'epod.signed',
+        source: 'dxos-studio:wms',
+        subject: createdEpod?.epodUid || trackingCode || '',
+        data: {
+          epodUid: createdEpod?.epodUid,
+          trackingCode,
+          orderId: createdEpod?.orderId,
+          orderCode: createdEpod?.orderCode,
+          recipientName: createdEpod?.recipientName,
+          deliveredQty: createdEpod?.deliveredQty,
+          signatureSha256: createdEpod?.signatureSha256,
+          ledgerSeq: createdEpod?.ledgerSeq,
+          keyId: createdEpod?.keyId,
+          deliveredAt: createdEpod?.deliveredAt,
+        },
+      });
 
       ctx.body = { epod: createdEpod, trackingCode, trackingToken };
       return next();

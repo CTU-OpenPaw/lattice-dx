@@ -20,8 +20,21 @@ const {
 } = require('./wms-engine');
 const { createDxosDmnActions } = require('./dmn-engine');
 const { createDxosDelegationsActions } = require('./delegation-engine');
+const {
+  createAutomationDirectGuardMiddleware,
+  createDxosAutomationsActions,
+  registerAutomationEventListener,
+} = require('./automation-engine');
+const { createDxosBuilderActions } = require('./domain-builder');
 
 class DxosStudioPlugin extends Plugin {
+  stopAutomationListener() {
+    if (this._automationListenerHandle && typeof this._automationListenerHandle.stop === 'function') {
+      this._automationListenerHandle.stop();
+    }
+    this._automationListenerHandle = null;
+  }
+
   async load() {
     this.db.on('latticeServiceTickets.beforeValidate', validateServiceTicket);
     for (const colName of WMS_DMN_COLLECTIONS) {
@@ -30,6 +43,7 @@ class DxosStudioPlugin extends Plugin {
 
     this.app.resourceManager.use(createServiceScopeMiddleware(this.db), { tag: 'dxosServiceScope', after: 'acl', before: 'latticeNativeScope' });
     this.app.resourceManager.use(createWmsDmnDirectGuardMiddleware(this.db), { tag: 'dxosWmsDmnScope', after: 'acl', before: 'latticeNativeScope' });
+    this.app.resourceManager.use(createAutomationDirectGuardMiddleware(this.db), { tag: 'dxosAutomationScope', after: 'acl', before: 'latticeNativeScope' });
 
     this.app.resourceManager.define({
       name: 'dxosStudio',
@@ -47,6 +61,14 @@ class DxosStudioPlugin extends Plugin {
       name: 'dxosDelegations',
       actions: createDxosDelegationsActions(this.db),
     });
+    this.app.resourceManager.define({
+      name: 'dxosAutomations',
+      actions: createDxosAutomationsActions(this.db),
+    });
+    this.app.resourceManager.define({
+      name: 'dxosBuilder',
+      actions: createDxosBuilderActions(this.db),
+    });
 
     this.app.acl.registerSnippet({
       name: 'pm.dxosStudio',
@@ -60,6 +82,31 @@ class DxosStudioPlugin extends Plugin {
     this.app.acl.allow('dxosWms', ['publicTrack'], 'public');
     this.app.acl.allow('dxosDmn', ['listTables', 'saveTable', 'evaluate'], 'loggedIn');
     this.app.acl.allow('dxosDelegations', ['list', 'create', 'revoke', 'activeForUser'], 'loggedIn');
+    this.app.acl.allow(
+      'dxosAutomations',
+      ['listRules', 'saveRule', 'toggleRule', 'deleteRule', 'testRule', 'runNow', 'listRuns', 'getRunTrace', 'replayRun'],
+      'loggedIn',
+    );
+    this.app.acl.allow(
+      'dxosBuilder',
+      ['listDomains', 'createDomain', 'listBusinessPacks', 'installBusinessPack', 'listTenants', 'provisionTenant'],
+      'loggedIn',
+    );
+
+    this.stopAutomationListener();
+    this._automationListenerHandle = registerAutomationEventListener(this.app, this.db);
+  }
+
+  async unload() {
+    this.stopAutomationListener();
+  }
+
+  async remove() {
+    this.stopAutomationListener();
+  }
+
+  async destroy() {
+    this.stopAutomationListener();
   }
 }
 

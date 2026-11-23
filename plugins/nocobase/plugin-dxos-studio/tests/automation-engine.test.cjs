@@ -1,0 +1,757 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const Module = require('node:module');
+const path = require('node:path');
+
+const originalLoad = Module._load;
+Module._load = function mockedNocobaseLoad(request, parent, isMain) {
+  if (request === '@nocobase/server') {
+    return { Plugin: class {}, Migration: class {} };
+  }
+  if (request === '@nocobase/database') {
+    return { defineCollection: (def) => def };
+  }
+  return originalLoad.call(this, request, parent, isMain);
+};
+
+let automationModule;
+let wmsModule;
+let DxosStudioPlugin;
+let AutomationRulesAndRunsMigration;
+let autoRulesCol;
+let autoRunsCol;
+let orgsCol;
+try {
+  automationModule = require('../src/server/automation-engine');
+  wmsModule = require('../src/server/wms-engine');
+  DxosStudioPlugin = require('../src/server/index');
+  AutomationRulesAndRunsMigration = require('../src/server/migrations/20261125000300-automation-rules-and-runs');
+  autoRulesCol = require('../src/server/collections/automation-rules');
+  autoRunsCol = require('../src/server/collections/automation-runs');
+  orgsCol = require('../src/server/collections/organizations');
+} finally {
+  Module._load = originalLoad;
+}
+
+const {
+  AUTOMATION_COLLECTIONS,
+  createAutomationDirectGuardMiddleware,
+  createDxosAutomationsActions,
+  executeRuleAgainstEvent,
+  interpolateTemplate,
+  isAllowlistedTargetCollection,
+  matchesFilter,
+  registerAutomationEventListener,
+} = automationModule;
+const { createDxosWmsActions } = wmsModule;
+
+const FOUNDATION_DIR = path.resolve(__dirname, '../../plugin-lattice-foundation/src/server');
+const eventBus = require(path.join(FOUNDATION_DIR, 'event-bus'));
+const connectorVault = require(path.join(FOUNDATION_DIR, 'connector-vault'));
+const pkiLedger = require(path.join(FOUNDATION_DIR, 'pki-ledger'));
+
+function matchRow(row, filter) {
+  if (!filter || typeof filter !== 'object') return true;
+  for (const [k, v] of Object.entries(filter)) {
+    if (k === '$and' && Array.isArray(v)) {
+      if (!v.every((sub) => matchRow(row, sub))) return false;
+      continue;
+    }
+    if (k === '$or' && Array.isArray(v)) {
+      if (!v.some((sub) => matchRow(row, sub))) return false;
+      continue;
+    }
+    const actual = row?.[k];
+    if (v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date)) {
+      if ('$in' in v && (!Array.isArray(v.$in) || !v.$in.includes(actual))) return false;
+      if ('$ne' in v && actual === v.$ne) return false;
+      if ('$gt' in v && !(Number(actual) > Number(v.$gt))) return false;
+      if ('$gte' in v && !(Number(actual) >= Number(v.$gte))) return false;
+      if ('$lt' in v && !(Number(actual) < Number(v.$lt))) return false;
+      if ('$lte' in v && !(Number(actual) <= Number(v.$lte))) return false;
+    } else if (actual !== v) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function makeInMemoryDb(seed = {}) {
+  const store = {};
+  const seq = {};
+  for (const [col, rows] of Object.entries(seed)) {
+    store[col] = rows.map((r, i) => ({ id: i + 1, ...structuredClone(r) }));
+    seq[col] = rows.length + 1;
+  }
+
+  function makeRepo(name) {
+    if (!store[name]) {
+      store[name] = [];
+      seq[name] = 1;
+    }
+    return {
+      async find({ filter = {}, sort = [], limit = 200, offset = 0 } = {}) {
+        let rows = store[name].filter((r) => matchRow(r, filter));
+        if (Array.isArray(sort) && sort.length > 0) {
+          const primary = String(sort[0]);
+          const desc = primary.startsWith('-');
+          const key = desc ? primary.slice(1) : primary;
+          rows = rows.slice().sort((a, b) => {
+            const av = a[key] instanceof Date ? a[key].getTime() : a[key];
+            const bv = b[key] instanceof Date ? b[key].getTime() : b[key];
+            if (av === bv) return 0;
+            if (av === undefined || av === null) return 1;
+            if (bv === undefined || bv === null) return -1;
+            return (av < bv ? -1 : 1) * (desc ? -1 : 1);
+          });
+        }
+        return rows.slice(offset, offset + limit).map((r) => ({ ...r }));
+      },
+      async findOne({ filter = {}, filterByTk } = {}) {
+        const list = await this.find({
+          filter: filterByTk !== undefined ? { id: filterByTk, ...filter } : filter,
+          limit: 1,
+        });
+        return list[0] || null;
+      },
+      async count({ filter = {} } = {}) {
+        return store[name].filter((r) => matchRow(r, filter)).length;
+      },
+      async create({ values }) {
+        const id = values.id ?? seq[name]++;
+        const now = new Date();
+        const row = { id, createdAt: now, updatedAt: now, ...structuredClone(values) };
+        store[name].push(row);
+        return { ...row };
+      },
+      async update({ filter = {}, filterByTk, values }) {
+        const eff = filterByTk !== undefined ? { id: filterByTk, ...filter } : filter;
+        let updated = 0;
+        for (const row of store[name]) {
+          if (matchRow(row, eff)) {
+            Object.assign(row, structuredClone(values), { updatedAt: new Date() });
+            updated += 1;
+          }
+        }
+        return [updated];
+      },
+      async destroy({ filter = {}, filterByTk } = {}) {
+        const eff = filterByTk !== undefined ? { id: filterByTk, ...filter } : filter;
+        const before = store[name].length;
+        store[name] = store[name].filter((r) => !matchRow(r, eff));
+        return before - store[name].length;
+      },
+    };
+  }
+
+  const sqlQueries = [];
+  const rlsCalls = [];
+
+  const db = {
+    store,
+    sqlQueries,
+    rlsCalls,
+    _omitRepos: new Set(),
+    getRepository(name) {
+      if (this._omitRepos.has(name)) return null;
+      return makeRepo(name);
+    },
+    on() {},
+    async attachLatticeRlsPolicy(tableName) {
+      rlsCalls.push({ action: 'attach', tableName });
+    },
+    async detachLatticeRlsPolicy(tableName) {
+      rlsCalls.push({ action: 'detach', tableName });
+    },
+    sequelize: {
+      getDialect: () => 'postgres',
+      async transaction(fn) {
+        return fn({ id: 'tx-1' });
+      },
+      async query(sql) {
+        sqlQueries.push(String(sql).trim());
+        return [[], []];
+      },
+    },
+  };
+
+  return db;
+}
+
+function makeCtx({ userId = 1, role = 'ldx_admin', organizationId = 'org-a', params = {}, patScopes = null, isRoot = false } = {}) {
+  return {
+    method: 'POST',
+    state: {
+      currentUser: { id: userId, username: `user_${userId}`, organizationId, isRoot },
+      currentRole: role,
+      currentRoles: [role],
+      ...(patScopes ? { authType: 'pat', patScopes } : {}),
+    },
+    action: { params },
+    body: null,
+  };
+}
+
+test('collections and reversible migration 20261125000300 create automation tables, named indexes, and PG RLS', async () => {
+  assert.equal(autoRulesCol.options?.name || autoRulesCol.name, 'latticeAutomationRules');
+  assert.equal(autoRunsCol.options?.name || autoRunsCol.name, 'latticeAutomationRuns');
+  assert.equal(orgsCol.options?.name || orgsCol.name, 'latticeOrganizations');
+
+  for (const col of [autoRulesCol, autoRunsCol, orgsCol]) {
+    const fields = col.options?.fields || col.fields || [];
+    for (const f of fields) {
+      assert.notEqual(f.unique, true, `Collection field ${f.name} must not declare inline unique`);
+    }
+  }
+
+  const db = makeInMemoryDb();
+  const migration = new AutomationRulesAndRunsMigration({ db });
+  migration.db = db;
+
+  await migration.up();
+  const upSql = db.sqlQueries.join('\n');
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS "latticeAutomationRules"/);
+  assert.match(upSql, /CREATE UNIQUE INDEX IF NOT EXISTS "uidx_lattice_auto_rules_org_key"/);
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS "latticeAutomationRuns"/);
+  assert.match(upSql, /CREATE INDEX IF NOT EXISTS "idx_lattice_auto_runs_org_rule"/);
+  assert.match(upSql, /CREATE INDEX IF NOT EXISTS "idx_lattice_auto_runs_org_started"/);
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS "latticeOrganizations"/);
+  assert.deepEqual(
+    db.rlsCalls.filter((c) => c.action === 'attach').map((c) => c.tableName),
+    ['latticeAutomationRules', 'latticeAutomationRuns'],
+  );
+
+  await migration.down();
+  const downSql = db.sqlQueries.join('\n');
+  assert.match(downSql, /DROP TABLE IF EXISTS "latticeAutomationRuns"/);
+  assert.match(downSql, /DROP TABLE IF EXISTS "latticeAutomationRules"/);
+  assert.match(downSql, /DROP TABLE IF EXISTS "latticeOrganizations"/);
+  assert.deepEqual(
+    db.rlsCalls.filter((c) => c.action === 'detach').map((c) => c.tableName),
+    ['latticeAutomationRuns', 'latticeAutomationRules'],
+  );
+});
+
+test('direct guard blocks non-root CRUD & charts:queryData on automation tables, and role/PAT ACL enforces permissions', async () => {
+  const db = makeInMemoryDb({
+    latticeEmployees: [
+      { id: 1, userId: 10, organizationId: 'org-a', active: true },
+      { id: 2, userId: 20, organizationId: 'org-a', active: true },
+    ],
+    rolesUsers: [
+      { userId: 10, roleName: 'ldx_employee' },
+      { userId: 20, roleName: 'ldx_admin' },
+      { userId: 1, roleName: 'root' },
+    ],
+  });
+
+  const guard = createAutomationDirectGuardMiddleware(db);
+
+  for (const col of AUTOMATION_COLLECTIONS) {
+    await assert.rejects(
+      () => guard({
+        action: { resourceName: col, actionName: 'create', params: {} },
+        state: { currentUser: { id: 20 }, currentRole: 'ldx_admin' },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'AUTOMATION_DIRECT_CRUD_FORBIDDEN',
+    );
+    await assert.rejects(
+      () => guard({
+        action: { resourceName: 'charts', actionName: 'queryData', params: { collection: col } },
+        state: { currentUser: { id: 20 }, currentRole: 'ldx_admin' },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'AUTOMATION_DIRECT_CRUD_FORBIDDEN',
+    );
+  }
+
+  let rootPassed = false;
+  await guard({
+    action: { resourceName: 'latticeAutomationRules', actionName: 'list', params: {} },
+    state: { currentUser: { id: 1, isRoot: true }, currentRole: 'root' },
+  }, async () => { rootPassed = true; });
+  assert.equal(rootPassed, true);
+
+  const actions = createDxosAutomationsActions(db);
+  await assert.rejects(
+    () => actions.saveRule(makeCtx({
+      userId: 10,
+      role: 'ldx_employee',
+      params: { ruleKey: 'emp_rule', name: 'Denied', actionsJson: [] },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'FORBIDDEN',
+  );
+
+  await assert.rejects(
+    () => actions.saveRule(makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      patScopes: ['read'],
+      params: { ruleKey: 'read_pat_denied', name: 'Denied', actionsJson: [] },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'PAT_SCOPE_DENIED',
+  );
+
+  const okCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    patScopes: ['write'],
+    params: {
+      ruleKey: 'pat_write_ok',
+      name: 'Allowed Rule',
+      triggerEventType: 'alarm.triggered',
+      actionsJson: [],
+    },
+  });
+  await actions.saveRule(okCtx, async () => {});
+  assert.equal(okCtx.body.rule.ruleKey, 'pat_write_ok');
+});
+
+test('filter matching, DMN evaluation, recursion depth >= 8 stop, and template/prototype safety', async () => {
+  const ctxSample = {
+    id: 'evt-1',
+    type: 'alarm.triggered',
+    source: 'telemetry',
+    depth: 1,
+    organizationId: 'org-a',
+    data: { severity: 'critical', tempC: 11.5, zone: 'chiller-1', tags: ['pharma', 'gdp'] },
+    dmn: { priority: 'P1', role: 'ldx_manager' },
+  };
+
+  assert.equal(matchesFilter({ severity: 'critical', tempC: { $gte: 8, $lte: 15 }, zone: { $in: ['chiller-1', 'chiller-2'] } }, ctxSample), true);
+  assert.equal(matchesFilter({ field: 'tempC', $gt: 12 }, ctxSample), false);
+  assert.equal(matchesFilter({ field: 'tempC', $lt: 12 }, ctxSample), true);
+  assert.equal(matchesFilter({ source: 'telemetry', 'data.severity': 'critical' }, ctxSample), true);
+
+  // Prototype pollution and code-eval safety
+  assert.equal(interpolateTemplate('Safe {{data.zone}} {{__proto__.polluted}} {{constructor.name}} {{1+1}}', ctxSample), 'Safe chiller-1   ');
+  assert.equal(({}).polluted, undefined);
+  assert.equal(isAllowlistedTargetCollection('users'), false);
+  assert.equal(isAllowlistedTargetCollection('latticePkiKeys'), false);
+  assert.equal(isAllowlistedTargetCollection('latticeConnectors'), false);
+  assert.equal(isAllowlistedTargetCollection('latticeCustomWorkOrders'), true);
+  assert.equal(isAllowlistedTargetCollection('latticeServiceTickets'), true);
+
+  const db = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+    latticeDecisionTables: [
+      {
+        organizationId: 'org-a',
+        tableKey: 'coldchain_routing',
+        name: 'Coldchain Routing',
+        hitPolicy: 'FIRST',
+        version: 1,
+        active: true,
+        inputsJson: [{ name: 'severity', type: 'string' }],
+        outputsJson: [{ name: 'assignedRole', type: 'string' }, { name: 'ticketPriority', type: 'string' }],
+        rulesJson: [
+          { id: 'r1', when: { severity: 'critical' }, then: { assignedRole: 'ldx_manager', ticketPriority: 'urgent' } },
+          { id: 'r2', when: {}, then: { assignedRole: 'ldx_operator', ticketPriority: 'normal' } },
+        ],
+      },
+    ],
+  });
+
+  const actions = createDxosAutomationsActions(db);
+
+  // Reject unsafe template syntax on saveRule
+  await assert.rejects(
+    () => actions.saveRule(makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: {
+        ruleKey: 'bad_tpl_rule',
+        name: 'Bad Template',
+        actionsJson: [{ type: 'notify_role', role: 'ldx_admin', title: '{{constructor.constructor("return 1")()}}' }],
+      },
+    }), async () => {}),
+    (err) => err.status === 400 && err.code === 'UNSAFE_TEMPLATE_EXPRESSION',
+  );
+
+  // Save valid DMN-backed rule
+  await actions.saveRule(makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: {
+      ruleKey: 'dmn_escalation_rule',
+      name: 'DMN Escalation',
+      triggerEventType: 'alarm.triggered',
+      filterJson: { mktCelsius: { $gte: 8.0 } },
+      dmnTableKey: 'coldchain_routing',
+      maxDepth: 8,
+      actionsJson: [
+        {
+          type: 'create_record',
+          collection: 'latticeServiceTickets',
+          values: { title: 'Temp Alert {{data.lotCode}}', priority: '{{dmn.ticketPriority}}' },
+        },
+      ],
+    },
+  }), async () => {});
+
+  // Simulation via testRule
+  const simCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: {
+      ruleKey: 'dmn_escalation_rule',
+      event: { type: 'alarm.triggered', data: { severity: 'critical', mktCelsius: 9.8, lotCode: 'LOT-42' } },
+    },
+  });
+  await actions.testRule(simCtx, async () => {});
+  assert.equal(simCtx.body.simulation.matched, true);
+  assert.equal(simCtx.body.simulation.dmnResultJson.outputs.ticketPriority, 'urgent');
+  assert.equal(simCtx.body.simulation.stepTracesJson[0].output.values.title, 'Temp Alert LOT-42');
+  assert.equal(db.store.latticeServiceTickets?.length || 0, 0);
+
+  // Recursion depth >= 8 must abort & record skipped run trace
+  const skippedRun = await executeRuleAgainstEvent(db, db.store.latticeAutomationRules[0], {
+    id: 'evt-deep-8',
+    type: 'alarm.triggered',
+    organizationId: 'org-a',
+    depth: 8,
+    data: { severity: 'critical', mktCelsius: 10.2, lotCode: 'LOT-99' },
+  });
+  assert.equal(skippedRun.status, 'skipped');
+  assert.equal(skippedRun.matched, false);
+  assert.equal(skippedRun.stepTracesJson[0].type, 'recursion_guard');
+  assert.match(skippedRun.errorMessage, /RECURSION_DEPTH_LIMIT_EXCEEDED/);
+});
+
+test('all 6 action handlers, secret-free stepTracesJson, twin HITL gating, runNow (automationCode), and replayRun work end-to-end', async () => {
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+
+  try {
+    const db = makeInMemoryDb({
+      latticeEmployees: [
+        { userId: 20, organizationId: 'org-a', active: true },
+        { userId: 21, organizationId: 'org-a', active: true },
+      ],
+      rolesUsers: [
+        { userId: 20, roleName: 'ldx_admin' },
+        { userId: 21, roleName: 'ldx_manager' },
+      ],
+      latticeAssets: [{ id: 101, organizationId: 'org-a', entityId: 'freezer-01', name: 'Freezer 01' }],
+      latticeTwinShadows: [
+        { id: 1, organizationId: 'org-a', assetId: 101, assetEntityId: 'freezer-01', desiredJson: { targetTempC: 4.0 }, reportedJson: { targetTempC: 4.0 }, version: 1 },
+      ],
+      latticeCustomWorkOrders: [
+        { id: 50, organizationId: 'org-a', workOrderCode: 'WO-EXISTING', status: 'open' },
+      ],
+      latticeDecisionTables: [
+        {
+          organizationId: 'org-a',
+          tableKey: 'coldchain_triage',
+          name: 'Coldchain Triage',
+          hitPolicy: 'FIRST',
+          active: true,
+          inputsJson: [{ name: 'severity', type: 'string' }],
+          outputsJson: [{ name: 'assignedRole', type: 'string' }, { name: 'targetTempC', type: 'number' }],
+          rulesJson: [
+            { id: 'r1', when: { severity: 'critical' }, then: { assignedRole: 'ldx_manager', targetTempC: -2.0 } },
+          ],
+        },
+      ],
+    });
+
+    const encryptedSecretsJson = connectorVault.encryptVaultSecrets(
+      { token: 'super-secret-erp-token-xyz' },
+      process.env,
+    );
+    await db.getRepository('latticeConnectors').create({
+      values: {
+        organizationId: 'org-a',
+        connectorKey: 'erp_webhook',
+        name: 'ERP Webhook',
+        connectorType: 'http_api',
+        baseUrl: 'https://erp.example.com/hooks',
+        authType: 'bearer',
+        encryptedSecretsJson,
+        active: true,
+      },
+    });
+
+    const fetchCalls = [];
+    const mockFetch = async (url, init) => {
+      fetchCalls.push({ url, method: init.method, headers: init.headers, body: init.body });
+      return { ok: true, status: 200, async text() { return '{"ok":true}'; } };
+    };
+
+    const actions = createDxosAutomationsActions(db, { fetchImpl: mockFetch, env: { ...process.env, NODE_ENV: 'production' } });
+
+    await actions.saveRule(makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: {
+        ruleKey: 'auto_cmms_on_coldchain_fault',
+        name: 'All 6 Actions Showcase',
+        triggerEventType: 'alarm.triggered',
+        dmnTableKey: 'coldchain_triage',
+        actionsJson: [
+          {
+            type: 'create_record',
+            collection: 'latticeCustomWorkOrders',
+            values: { workOrderCode: 'WO-{{data.lotCode}}', title: 'Inspect {{data.deviceKey}}' },
+          },
+          {
+            type: 'update_record',
+            collection: 'latticeCustomWorkOrders',
+            filter: { workOrderCode: 'WO-EXISTING' },
+            values: { status: 'in_progress' },
+          },
+          {
+            type: 'notify_role',
+            role: '{{dmn.assignedRole}}',
+            title: 'Fault on {{data.deviceKey}}',
+            body: 'Check lot {{data.lotCode}}',
+            severity: 'critical',
+          },
+          {
+            type: 'call_connector',
+            connectorKey: 'erp_webhook',
+            path: '/alerts',
+            body: { lotCode: '{{data.lotCode}}', severity: '{{data.severity}}' },
+          },
+          {
+            type: 'twin_set_desired',
+            assetEntityId: 'freezer-01',
+            desiredPatch: { targetTempC: '{{dmn.targetTempC}}' },
+          },
+          {
+            type: 'trigger_ai_triage',
+            targetCollection: 'latticeAssets',
+            targetRecordId: 101,
+            recommendation: 'Inspect compressor for {{data.deviceKey}}',
+          },
+          {
+            type: 'create_record',
+            collection: 'latticePkiKeys',
+            values: { keyId: 'forged' },
+          },
+        ],
+      },
+    }), async () => {});
+
+    // Run via n8n contract (`automationCode` + `context`)
+    const runCtx = makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: {
+        automationCode: 'auto_cmms_on_coldchain_fault',
+        eventId: 'evt-n8n-001',
+        eventType: 'alarm.triggered',
+        context: { lotCode: 'LOT-77', deviceKey: 'freezer-01', severity: 'critical' },
+      },
+    });
+    await actions.runNow(runCtx, async () => {});
+    const run = runCtx.body.run;
+
+    assert.equal(run.status, 'partial');
+    assert.equal(run.stepTracesJson.length, 7);
+    assert.equal(run.stepTracesJson[0].status, 'completed');
+    assert.equal(run.stepTracesJson[0].output.record.organizationId, 'org-a');
+    assert.equal(run.stepTracesJson[1].status, 'completed');
+    assert.equal(run.stepTracesJson[1].output.updatedCount, 1);
+    assert.equal(run.stepTracesJson[2].status, 'completed');
+    assert.equal(run.stepTracesJson[3].status, 'completed', run.stepTracesJson[3].error || 'step 3 failed');
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].headers.Authorization, 'Bearer super-secret-erp-token-xyz');
+    assert.equal(JSON.stringify(run.stepTracesJson).includes('super-secret-erp-token-xyz'), false);
+
+    // Step 4: |(-2.0) - 4.0| = 6.0 > 2.0 -> routes through HITL approval queue!
+    assert.equal(run.stepTracesJson[4].status, 'completed');
+    assert.equal(run.stepTracesJson[4].output.gatedByHitl, true);
+    assert.ok(run.stepTracesJson[4].output.approvalId);
+    assert.equal(db.store.latticeAiApprovalQueue.length, 1);
+
+    // Step 5: trigger_ai_triage creates proposal scoped to org-a
+    assert.equal(run.stepTracesJson[5].status, 'completed');
+    assert.equal(db.store.latticeAgentProposals.length, 1);
+    assert.equal(db.store.latticeAgentProposals[0].organizationId, 'org-a');
+
+    // Step 6: forbidden system collection fails cleanly in step trace
+    assert.equal(run.stepTracesJson[6].status, 'failed');
+    assert.match(run.stepTracesJson[6].error, /TARGET_COLLECTION_FORBIDDEN/);
+
+    // Verify listRuns + getRunTrace + replayRun increments depth
+    const listCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'auto_cmms_on_coldchain_fault' } });
+    await actions.listRuns(listCtx, async () => {});
+    assert.equal(listCtx.body.items.length, 1);
+
+    const traceCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { runUid: run.runUid } });
+    await actions.getRunTrace(traceCtx, async () => {});
+    assert.equal(traceCtx.body.run.runUid, run.runUid);
+
+    const replayCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { runUid: run.runUid } });
+    await actions.replayRun(replayCtx, async () => {});
+    assert.equal(replayCtx.body.replayedFromRunUid, run.runUid);
+    assert.equal(replayCtx.body.run.depth, 1);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
+test('DxosStudioPlugin registers event listener on load, fires on WMS lot.held_mkt & epod.signed, and unsubscribes on unload', async () => {
+  const db = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    roles: [{ name: 'ldx_admin', allowAll: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+    latticeStockLots: [
+      { id: 1, organizationId: 'org-a', lotCode: 'LOT-MKT-1', sku: 'VAX-01', qtyOnHand: 50, qtyReserved: 0, status: 'available', maxTempC: 8 },
+    ],
+    latticeOrders: [
+      { id: 200, organizationId: 'org-a', code: 'ORD-200', status: 'dispatched' },
+    ],
+    latticeOrderLines: [
+      { id: 10, organizationId: 'org-a', orderId: 200, orderCode: 'ORD-200', sku: 'VAX-01', qtyOrdered: 10, status: 'issued' },
+    ],
+    latticeAutomationRules: [
+      {
+        organizationId: 'org-a',
+        ruleKey: 'on_lot_held_mkt',
+        name: 'On Lot Held MKT',
+        triggerEventType: 'lot.held_mkt',
+        actionsJson: [{ type: 'create_record', collection: 'latticeServiceTickets', values: { title: 'Hold {{data.lotCode}}' } }],
+        maxDepth: 8,
+        cooldownSec: 0,
+        active: true,
+      },
+      {
+        organizationId: 'org-a',
+        ruleKey: 'on_epod_signed',
+        name: 'On ePOD Signed',
+        triggerEventType: 'epod.signed',
+        actionsJson: [{ type: 'create_record', collection: 'latticeServiceTickets', values: { title: 'Signed {{data.epodUid}}' } }],
+        maxDepth: 8,
+        cooldownSec: 0,
+        active: true,
+      },
+    ],
+  });
+  await pkiLedger.ensureOrgSigningKey(db, 'org-a');
+
+  const definedResources = {};
+  const mockApp = {
+    latticeEvents: eventBus,
+    resourceManager: {
+      use() {},
+      define(spec) { definedResources[spec.name] = spec; },
+    },
+    acl: {
+      registerSnippet() {},
+      allow() {},
+    },
+  };
+
+  const plugin = Object.create(DxosStudioPlugin.prototype);
+  plugin.app = mockApp;
+  plugin.db = db;
+  await plugin.load();
+
+  try {
+    assert.ok(definedResources.dxosAutomations);
+    assert.ok(definedResources.dxosBuilder);
+
+    const wms = createDxosWmsActions(db);
+    const holdCtx = makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: { lotCode: 'LOT-MKT-1', samplesC: [12.5, 13.0, 12.8], intervalMinutes: 30, maxAllowedC: 8 },
+    });
+    holdCtx.app = mockApp;
+    await wms.holdLotByMkt(holdCtx, async () => {});
+    assert.equal(holdCtx.body.held, true);
+
+    const epodCtx = makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: {
+        orderId: 200,
+        orderCode: 'ORD-200',
+        recipientName: 'Clinic A',
+        deliveredQty: 10,
+        lat: 10.7626,
+        lng: 106.6602,
+        signatureDataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+      },
+    });
+    epodCtx.app = mockApp;
+    await wms.epodCapture(epodCtx, async () => {});
+    assert.ok(epodCtx.body.epod.epodUid);
+
+    assert.equal(db.store.latticeAutomationRuns.length, 2);
+    assert.deepEqual(
+      db.store.latticeAutomationRuns.map((r) => r.triggerEventType),
+      ['lot.held_mkt', 'epod.signed'],
+    );
+    assert.equal(db.store.latticeServiceTickets.length, 2);
+
+    // Unload cleanly stops listener so subsequent events do not execute rules
+    await plugin.unload();
+    const countBeforeUnload = db.store.latticeAutomationRuns.length;
+    await eventBus.publishDomainEvent(db, {
+      organizationId: 'org-a',
+      type: 'lot.held_mkt',
+      data: { lotCode: 'AFTER-UNLOAD' },
+      app: mockApp,
+    });
+    assert.equal(db.store.latticeAutomationRuns.length, countBeforeUnload);
+  } finally {
+    await plugin.destroy();
+  }
+
+  // Verify standalone listener handle unsubscribe also works & WMS stays resilient without eventBus repo
+  const isoDb = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    roles: [{ name: 'ldx_admin', allowAll: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+    latticeStockLots: [
+      { id: 1, organizationId: 'org-a', lotCode: 'LOT-ISO-1', sku: 'VAX-01', qtyOnHand: 20, status: 'available', maxTempC: 8 },
+    ],
+  });
+  isoDb._omitRepos.add('latticeEventBus');
+  const wmsIso = createDxosWmsActions(isoDb);
+  const isoCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: { lotCode: 'LOT-ISO-1', samplesC: [11.0, 12.0], intervalMinutes: 30, maxAllowedC: 8 },
+  });
+  await wmsIso.holdLotByMkt(isoCtx, async () => {});
+  assert.equal(isoCtx.body.held, true);
+
+  const handle = registerAutomationEventListener(null, db);
+  handle.stop();
+});
+
+test('all new server automation files satisfy CTU-OpenPaw SPDX header check', async () => {
+  const { addSourceHeader } = await import('../../../../scripts/source-headers.mjs');
+  const files = [
+    'plugins/nocobase/plugin-dxos-studio/src/server/collections/automation-rules.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/collections/automation-runs.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/collections/organizations.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/migrations/20261125000300-automation-rules-and-runs.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/automation-engine.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/domain-events.js',
+    'plugins/nocobase/plugin-dxos-studio/tests/automation-engine.test.cjs',
+  ];
+  const rootDir = path.resolve(__dirname, '../../../..');
+  for (const rel of files) {
+    const src = fs.readFileSync(path.join(rootDir, rel), 'utf8');
+    const res = addSourceHeader(src, rel);
+    assert.equal(res.status, 'present', `Missing or malformed SPDX header in ${rel}`);
+  }
+});

@@ -721,6 +721,8 @@ async function exportGovernanceSection(db, filterOrg) {
   const rawDmn = (await safeRepoFind(db, 'latticeDecisionTables', findOpts)).map(toObj);
   const rawSla = (await safeRepoFind(db, 'latticeSlaPolicies', findOpts)).map(toObj);
   const rawRules = (await safeRepoFind(db, 'latticeIncidentRules', findOpts)).map(toObj);
+  const rawAutomationRules = (await safeRepoFind(db, 'latticeAutomationRules', findOpts)).map(toObj);
+  const rawWebhookSubscriptions = (await safeRepoFind(db, 'latticeWebhookSubscriptions', findOpts)).map(toObj);
 
   const decisionTables = rawDmn
     .filter((d) => (!filterOrg || d.organizationId === filterOrg) && d.organizationId && d.tableKey)
@@ -775,7 +777,37 @@ async function exportGovernanceSection(db, filterOrg) {
     }))
     .sort((a, b) => `${a.organizationId}::${a.code}`.localeCompare(`${b.organizationId}::${b.code}`));
 
-  return { decisionTables, slaPolicies, incidentRules };
+  const automationRules = rawAutomationRules
+    .filter((r) => !filterOrg || r.organizationId === filterOrg)
+    .map((r) => ({
+      organizationId: String(r.organizationId || '').trim(),
+      ruleKey: String(r.ruleKey || '').trim(),
+      name: String(r.name || r.ruleKey || '').trim(),
+      description: r.description != null ? String(r.description) : null,
+      triggerEventType: String(r.triggerEventType || '*').trim(),
+      filterJson: r.filterJson != null ? stripSecretsDeep(r.filterJson) : null,
+      dmnTableKey: r.dmnTableKey != null ? String(r.dmnTableKey).trim() : null,
+      actionsJson: stripSecretsDeep(Array.isArray(r.actionsJson) ? r.actionsJson : []),
+      maxDepth: Number.isInteger(Number(r.maxDepth)) ? Number(r.maxDepth) : 8,
+      cooldownSec: Number.isInteger(Number(r.cooldownSec)) ? Number(r.cooldownSec) : 0,
+      active: r.active !== false,
+      createdBy: r.createdBy != null ? String(r.createdBy) : null,
+    }))
+    .sort((a, b) => `${a.organizationId}::${a.ruleKey}`.localeCompare(`${b.organizationId}::${b.ruleKey}`));
+
+  const webhookSubscriptions = rawWebhookSubscriptions
+    .filter((w) => !filterOrg || w.organizationId === filterOrg)
+    .map((w) => ({
+      organizationId: String(w.organizationId || '').trim(),
+      subscriptionKey: String(w.subscriptionKey || '').trim(),
+      name: String(w.name || w.subscriptionKey || '').trim(),
+      targetUrl: String(w.targetUrl || '').trim(),
+      eventPattern: String(w.eventPattern || '*').trim(),
+      active: w.active !== false,
+    }))
+    .sort((a, b) => `${a.organizationId}::${a.subscriptionKey}`.localeCompare(`${b.organizationId}::${b.subscriptionKey}`));
+
+  return { decisionTables, slaPolicies, incidentRules, automationRules, webhookSubscriptions };
 }
 
 async function exportSolutionBundle(db, { organizationId = null, platformVersion = DEFAULT_PLATFORM_VERSION } = {}) {
@@ -1384,6 +1416,65 @@ function validateGovernanceSection(governance, errors, metaOrgRaw = '') {
       }
     }
   }
+
+  if (governance.automationRules !== undefined) {
+    if (!Array.isArray(governance.automationRules)) {
+      errors.push('governance.automationRules must be an array');
+    } else {
+      for (let i = 0; i < governance.automationRules.length; i += 1) {
+        const a = governance.automationRules[i];
+        if (!a || typeof a !== 'object' || Array.isArray(a)) {
+          errors.push(`governance.automationRules[${i}] must be an object`);
+          continue;
+        }
+        validateGovernanceOrg(a, 'automationRules', i, requiresExplicitOrg, errors);
+        const ruleKey = String(a.ruleKey || '').trim();
+        if (!/^[a-z0-9][a-z0-9_-]{1,62}$/.test(ruleKey)) {
+          errors.push(`Invalid automation ruleKey "${ruleKey || '(empty)'}" at automationRules[${i}]`);
+        }
+        if (!String(a.name || '').trim()) {
+          errors.push(`Automation rule "${ruleKey || i}" requires a name`);
+        }
+        if (a.actionsJson !== undefined && !Array.isArray(a.actionsJson)) {
+          errors.push(`Automation actionsJson must be an array at automationRules[${i}]`);
+        }
+        if (a.maxDepth !== undefined && parseStrictIntInRange(a.maxDepth, 1, 8) === null) {
+          errors.push(`Invalid maxDepth "${String(a.maxDepth)}" at automationRules[${i}]`);
+        }
+        if (a.cooldownSec !== undefined && parseStrictIntInRange(a.cooldownSec, 0, 31_536_000) === null) {
+          errors.push(`Invalid cooldownSec "${String(a.cooldownSec)}" at automationRules[${i}]`);
+        }
+        validateNoUnsafeCodeOrXss(a, `governance.automationRules[${i}]`, errors);
+      }
+    }
+  }
+
+  if (governance.webhookSubscriptions !== undefined) {
+    if (!Array.isArray(governance.webhookSubscriptions)) {
+      errors.push('governance.webhookSubscriptions must be an array');
+    } else {
+      for (let i = 0; i < governance.webhookSubscriptions.length; i += 1) {
+        const w = governance.webhookSubscriptions[i];
+        if (!w || typeof w !== 'object' || Array.isArray(w)) {
+          errors.push(`governance.webhookSubscriptions[${i}] must be an object`);
+          continue;
+        }
+        validateGovernanceOrg(w, 'webhookSubscriptions', i, requiresExplicitOrg, errors);
+        const subKey = String(w.subscriptionKey || '').trim();
+        if (!subKey) {
+          errors.push(`Webhook subscription requires subscriptionKey at webhookSubscriptions[${i}]`);
+        }
+        const targetUrl = String(w.targetUrl || '').trim();
+        if (!/^https?:\/\/\S+$/i.test(targetUrl)) {
+          errors.push(`Webhook subscription requires valid http(s) targetUrl at webhookSubscriptions[${i}]`);
+        }
+        if (w.encryptedSigningSecret || w.signingSecret) {
+          errors.push(`Webhook subscription must not contain signing secret at webhookSubscriptions[${i}]`);
+        }
+        validateNoUnsafeCodeOrXss(w, `governance.webhookSubscriptions[${i}]`, errors);
+      }
+    }
+  }
 }
 
 function validateSolutionBundle(bundle) {
@@ -1555,6 +1646,16 @@ function diffSolutionBundle(currentBundle, incomingBundle) {
       inc.governance?.incidentRules,
       (r) => `${r?.organizationId || ''}::${r?.code || ''}`,
     ),
+    automationRules: diffSection(
+      cur.governance?.automationRules,
+      inc.governance?.automationRules,
+      (r) => `${r?.organizationId || ''}::${r?.ruleKey || ''}`,
+    ),
+    webhookSubscriptions: diffSection(
+      cur.governance?.webhookSubscriptions,
+      inc.governance?.webhookSubscriptions,
+      (w) => `${w?.organizationId || ''}::${w?.subscriptionKey || ''}`,
+    ),
   };
   const roleResources = diffSection(
     flattenRoleResources(cur.roles),
@@ -1580,6 +1681,8 @@ function diffSolutionBundle(currentBundle, incomingBundle) {
       decisionTables: sections.decisionTables,
       slaPolicies: sections.slaPolicies,
       incidentRules: sections.incidentRules,
+      automationRules: sections.automationRules,
+      webhookSubscriptions: sections.webhookSubscriptions,
     },
   };
 }
@@ -2433,18 +2536,26 @@ async function applyGovernanceSection(db, governance, targetOrg, { reconcileDele
       decisionTablesUpserted: 0,
       slaPoliciesUpserted: 0,
       incidentRulesUpserted: 0,
+      automationRulesUpserted: 0,
+      webhookSubscriptionsUpserted: 0,
       decisionTablesDeleted: 0,
       slaPoliciesDeleted: 0,
       incidentRulesDeleted: 0,
+      automationRulesDeleted: 0,
+      webhookSubscriptionsDeleted: 0,
     };
   }
 
   let decisionTablesUpserted = 0;
   let slaPoliciesUpserted = 0;
   let incidentRulesUpserted = 0;
+  let automationRulesUpserted = 0;
+  let webhookSubscriptionsUpserted = 0;
   let decisionTablesDeleted = 0;
   let slaPoliciesDeleted = 0;
   let incidentRulesDeleted = 0;
+  let automationRulesDeleted = 0;
+  let webhookSubscriptionsDeleted = 0;
 
   const upsertScopedRow = async (repo, uniqueFilter, values) => {
     const existing = await findOneSafe(repo, uniqueFilter, { transaction });
@@ -2615,13 +2726,105 @@ async function applyGovernanceSection(db, governance, targetOrg, { reconcileDele
     }
   }
 
+  const autoRepo = db?.getRepository?.('latticeAutomationRules');
+  const autoList = Array.isArray(governance.automationRules) ? governance.automationRules : [];
+  const keepAutoKeys = new Set();
+  for (const rawAuto of autoList) {
+    const clean = stripSecretsDeep(rawAuto);
+    const ruleKey = String(clean?.ruleKey || '').trim();
+    const rawItemOrg = clean?.organizationId != null ? String(clean.organizationId).trim() : '';
+    if (targetOrg && rawItemOrg && rawItemOrg !== targetOrg) {
+      throw failBundle('DXOS_ORG_MISMATCH', 403, `Automation rule "${ruleKey}" thuộc tổ chức "${rawItemOrg}", không khớp "${targetOrg}".`);
+    }
+    const scopedOrg = targetOrg || rawItemOrg;
+    if (!scopedOrg || scopedOrg.toLowerCase() === 'all' || !ruleKey) continue;
+    keepAutoKeys.add(`${scopedOrg}::${ruleKey}`);
+    if (autoRepo && (typeof autoRepo.create === 'function' || typeof autoRepo.update === 'function')) {
+      const values = {
+        organizationId: scopedOrg,
+        ruleKey,
+        name: String(clean.name || ruleKey),
+        description: clean.description != null ? String(clean.description) : null,
+        triggerEventType: String(clean.triggerEventType || '*').trim(),
+        filterJson: clean.filterJson ?? null,
+        dmnTableKey: clean.dmnTableKey != null ? String(clean.dmnTableKey).trim() : null,
+        actionsJson: Array.isArray(clean.actionsJson) ? clean.actionsJson : [],
+        maxDepth: parseStrictIntInRange(clean.maxDepth ?? 8, 1, 8) ?? 8,
+        cooldownSec: parseStrictIntInRange(clean.cooldownSec ?? 0, 0, 31_536_000) ?? 0,
+        active: clean.active !== false,
+        createdBy: clean.createdBy != null ? String(clean.createdBy) : null,
+      };
+      await upsertScopedRow(autoRepo, { organizationId: scopedOrg, ruleKey }, values);
+      automationRulesUpserted += 1;
+    }
+  }
+  if (reconcileDeletions && autoRepo && governance.automationRules !== undefined && typeof autoRepo.destroy === 'function') {
+    const findFilter = targetOrg ? { organizationId: targetOrg } : {};
+    const curAuto = (await safeRepoFind(db, 'latticeAutomationRules', { filter: findFilter, limit: 1000, transaction })).map(toObj);
+    for (const row of curAuto) {
+      const rowOrg = String(row?.organizationId || '').trim();
+      const rowKey = String(row?.ruleKey || '').trim();
+      if (!rowOrg || !rowKey) continue;
+      if (targetOrg && rowOrg !== targetOrg) continue;
+      if (!keepAutoKeys.has(`${rowOrg}::${rowKey}`)) {
+        await autoRepo.destroy({ filter: { organizationId: rowOrg, ruleKey: rowKey }, transaction });
+        automationRulesDeleted += 1;
+      }
+    }
+  }
+
+  const webhookRepo = db?.getRepository?.('latticeWebhookSubscriptions');
+  const webhookList = Array.isArray(governance.webhookSubscriptions) ? governance.webhookSubscriptions : [];
+  const keepWebhookKeys = new Set();
+  for (const rawHook of webhookList) {
+    const clean = stripSecretsDeep(rawHook);
+    const subscriptionKey = String(clean?.subscriptionKey || '').trim();
+    const rawItemOrg = clean?.organizationId != null ? String(clean.organizationId).trim() : '';
+    if (targetOrg && rawItemOrg && rawItemOrg !== targetOrg) {
+      throw failBundle('DXOS_ORG_MISMATCH', 403, `Webhook subscription "${subscriptionKey}" thuộc tổ chức "${rawItemOrg}", không khớp "${targetOrg}".`);
+    }
+    const scopedOrg = targetOrg || rawItemOrg;
+    if (!scopedOrg || scopedOrg.toLowerCase() === 'all' || !subscriptionKey) continue;
+    keepWebhookKeys.add(`${scopedOrg}::${subscriptionKey}`);
+    if (webhookRepo && (typeof webhookRepo.create === 'function' || typeof webhookRepo.update === 'function')) {
+      const values = {
+        organizationId: scopedOrg,
+        subscriptionKey,
+        name: String(clean.name || subscriptionKey),
+        targetUrl: String(clean.targetUrl || '').trim(),
+        eventPattern: String(clean.eventPattern || '*').trim(),
+        active: clean.active !== false,
+      };
+      await upsertScopedRow(webhookRepo, { organizationId: scopedOrg, subscriptionKey }, values);
+      webhookSubscriptionsUpserted += 1;
+    }
+  }
+  if (reconcileDeletions && webhookRepo && governance.webhookSubscriptions !== undefined && typeof webhookRepo.destroy === 'function') {
+    const findFilter = targetOrg ? { organizationId: targetOrg } : {};
+    const curHooks = (await safeRepoFind(db, 'latticeWebhookSubscriptions', { filter: findFilter, limit: 1000, transaction })).map(toObj);
+    for (const row of curHooks) {
+      const rowOrg = String(row?.organizationId || '').trim();
+      const rowKey = String(row?.subscriptionKey || '').trim();
+      if (!rowOrg || !rowKey) continue;
+      if (targetOrg && rowOrg !== targetOrg) continue;
+      if (!keepWebhookKeys.has(`${rowOrg}::${rowKey}`)) {
+        await webhookRepo.destroy({ filter: { organizationId: rowOrg, subscriptionKey: rowKey }, transaction });
+        webhookSubscriptionsDeleted += 1;
+      }
+    }
+  }
+
   return {
     decisionTablesUpserted,
     slaPoliciesUpserted,
     incidentRulesUpserted,
+    automationRulesUpserted,
+    webhookSubscriptionsUpserted,
     decisionTablesDeleted,
     slaPoliciesDeleted,
     incidentRulesDeleted,
+    automationRulesDeleted,
+    webhookSubscriptionsDeleted,
   };
 }
 
@@ -2674,9 +2877,13 @@ async function applySolutionBundleSections(
     decisionTablesUpserted: govCounts.decisionTablesUpserted,
     slaPoliciesUpserted: govCounts.slaPoliciesUpserted,
     incidentRulesUpserted: govCounts.incidentRulesUpserted,
+    automationRulesUpserted: govCounts.automationRulesUpserted,
+    webhookSubscriptionsUpserted: govCounts.webhookSubscriptionsUpserted,
     decisionTablesDeleted: govCounts.decisionTablesDeleted,
     slaPoliciesDeleted: govCounts.slaPoliciesDeleted,
     incidentRulesDeleted: govCounts.incidentRulesDeleted,
+    automationRulesDeleted: govCounts.automationRulesDeleted,
+    webhookSubscriptionsDeleted: govCounts.webhookSubscriptionsDeleted,
   };
 }
 
@@ -2707,7 +2914,7 @@ async function importSolutionBundle(db, incomingBundle, { dryRun = true, organiz
   const targetOrg = (rawOrg && rawOrg !== 'all' ? rawOrg : null)
     || (metaOrg && metaOrg !== 'all' ? metaOrg : null);
   if (targetOrg && incomingBundle.governance && typeof incomingBundle.governance === 'object') {
-    for (const listKey of ['decisionTables', 'slaPolicies', 'incidentRules']) {
+    for (const listKey of ['decisionTables', 'slaPolicies', 'incidentRules', 'automationRules', 'webhookSubscriptions']) {
       const items = Array.isArray(incomingBundle.governance[listKey]) ? incomingBundle.governance[listKey] : [];
       for (const item of items) {
         const itemOrg = item?.organizationId != null ? String(item.organizationId).trim() : '';
@@ -2850,6 +3057,7 @@ module.exports = {
   BUNDLE_SCHEMA_VERSION,
   ACCEPTED_SCHEMA_VERSIONS,
   RESERVED_SYSTEM_LAYOUT_UIDS,
+  SYSTEM_PROTECTED_COLLECTIONS,
   getRouteKey,
   sortRoutesTopologically,
   stripSecretsDeep,
