@@ -10,14 +10,20 @@
 
 const { createHash, randomBytes } = require('node:crypto');
 
-const BUNDLE_SCHEMA_VERSION = 'latticedx.solution-bundle/v2';
+const BUNDLE_SCHEMA_VERSION = 'latticedx.solution-bundle/v3';
 const ACCEPTED_SCHEMA_VERSIONS = new Set([
   'latticedx.solution-bundle/v1',
   'latticedx.solution-bundle/v2',
+  'latticedx.solution-bundle/v3',
 ]);
+const DEFAULT_PLATFORM_VERSION = '1.0.0';
 const FORBIDDEN_ROLES = new Set(['root', 'admin', 'ldx_admin']);
 const SAFE_ROLE_RE = /^ldx_[a-z0-9_]{2,48}$/;
 const SAFE_PORTAL_UID_RE = /^ldx-portal-[a-z0-9-]+$/;
+const SAFE_MANAGED_LAYOUT_UID_RE = /^(?:ldx-portal-[a-z0-9-]+|dxos-[a-z0-9-]+)$/;
+const SAFE_MODEL_UID_RE = /^[a-zA-Z0-9_.:-]{1,120}$/;
+const SAFE_ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+const SAFE_DMN_KEY_RE = /^[a-zA-Z0-9_-]{2,80}$/;
 const SAFE_ROUTE_PATH_RE = /^\/p\/[a-z0-9-]+$/;
 const SAFE_ROUTE_NAME_RE = /^p_[a-z0-9_]+$/;
 const SAFE_USERNAME_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/i;
@@ -28,6 +34,34 @@ const SAFE_FIELD_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,60}$/;
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const SECRET_KEY_RE = /password|secret|token|apikey|api_key|privatekey|authorization|cookie/i;
 const SENSITIVE_FIELD_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt/i;
+const FORBIDDEN_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const UNSAFE_CODE_KEY_RE = /^(?:jsCode|script|customScript|customCode|evalCode|runJs|renderScript|dangerouslySetInnerHTML|innerHTML|outerHTML|srcdoc|jsSettings|scriptSettings)$/i;
+const UNSAFE_XSS_VALUE_RE = /(?:<\s*\/?\s*script\b|<\s*iframe\b|\bjavascript\s*:|\bvbscript\s*:|\bdata\s*:\s*text\/html|\bon(?:error|load|click|mouseover|focus|submit|animationstart)\s*=)/i;
+const ALLOWED_ROUTE_TYPES = new Set(['group', 'flowPage', 'page', 'tabs', 'link']);
+const ALLOWED_FLOW_MODEL_USES = new Set([
+  'DxosPortalHeroBlockModel', 'DxosKpiMetricBlockModel', 'DxosContextTelemetryBlockModel',
+  'DxosAiProposalBlockModel', 'DxosWorkflowTasksBlockModel', 'DxosParaVaultBlockModel',
+  'DxosCreativeStudioBlockModel', 'DxosRecordWorkbenchBlockModel',
+  'DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel',
+  'LatticeFormBlockModel', 'LatticeListBlockModel', 'LatticeTaskInboxBlockModel',
+  'LatticeApprovalBlockModel', 'LatticeAttachmentBlockModel', 'LatticeActivityTimelineBlockModel',
+  'LatticeContextEntityBlockModel', 'LatticeWorkflowFormBlockModel',
+  'RootPageModel', 'PageModel', 'PageTabModel', 'TabsModel', 'TabsTabPaneModel',
+  'BlockGridModel', 'GridModel', 'RootGridModel', 'FormGridModel', 'CardBlockModel', 'ActionPanelModel',
+  'TableBlockModel', 'CreateFormModel', 'EditFormModel', 'DetailsBlockModel', 'DetailsModel',
+  'FilterFormModel', 'FilterFormBlockModel', 'KanbanBlockModel', 'ChartBlockModel',
+  'CalendarBlockModel', 'ListBlockModel', 'GridCardBlockModel', 'MarkdownBlockModel',
+  'MarkdownVoidBlockModel', 'FormModel', 'TableColumnModel', 'TableActionsColumnModel',
+  'ActionModel', 'FieldModel', 'DisplayFieldModel', 'FormFieldModel', 'FilterFormFieldModel',
+  'NativeTableBlock', 'NativeFormBlock', 'NativeDetailsBlock', 'BlockModel',
+  'table', 'createForm', 'editForm', 'details', 'filterForm', 'kanban', 'chart', 'calendar', 'list', 'gridCard', 'markdown', 'actionPanel',
+]);
+const VALID_HIT_POLICIES = new Set(['FIRST', 'COLLECT']);
+const VALID_SLA_PRIORITIES = new Set(['critical', 'high', 'normal', 'medium', 'low']);
+const VALID_RULE_OPERATORS = new Set([
+  '>', '>=', '<', '<=', '==', '===', '!=', '!==',
+  'gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'between', 'in', 'not_in', 'contains',
+]);
 const SNAPSHOT_PORTAL_SLUG = '__gitops_bundle__';
 const VALID_TOOL_PERMISSION_MODES = new Set(['ALLOW', 'ASK', 'OFF']);
 
@@ -106,6 +140,7 @@ function stripSecretsDeep(value, depth = 0) {
   if (typeof value !== 'object') return value;
   const out = {};
   for (const key of Object.keys(value).sort()) {
+    if (FORBIDDEN_PROTO_KEYS.has(key)) continue;
     if (SECRET_KEY_RE.test(key)) continue;
     const stripped = stripSecretsDeep(value[key], depth + 1);
     if (stripped !== undefined) out[key] = stripped;
@@ -241,7 +276,306 @@ function normalizePortalEntry(rawPortal) {
   };
 }
 
-async function exportSolutionBundle(db, { organizationId = null, platformVersion = '0.3.0' } = {}) {
+function buildStableRouteKey(routeObj, layoutUid, byId, keyCache = new Map(), visiting = new Set()) {
+  const rid = routeObj?.id != null ? String(routeObj.id) : '';
+  if (rid && keyCache.has(rid)) return keyCache.get(rid);
+  const explicit = String(routeObj?.key || routeObj?.schemaUid || routeObj?.uid || '').trim();
+  if (explicit) {
+    if (rid) keyCache.set(rid, explicit);
+    return explicit;
+  }
+  let parentKey = '';
+  const pid = routeObj?.parentId != null ? String(routeObj.parentId) : '';
+  if (pid && byId && byId.has(pid) && !visiting.has(pid)) {
+    if (rid) visiting.add(rid);
+    parentKey = buildStableRouteKey(byId.get(pid), layoutUid, byId, keyCache, visiting);
+    if (rid) visiting.delete(rid);
+  }
+  const type = String(routeObj?.type || 'page').trim();
+  const title = String(routeObj?.title || '').trim();
+  const computed = `${layoutUid}:${type}:${parentKey ? `${parentKey}:` : ''}${title || 'untitled'}`;
+  if (rid) keyCache.set(rid, computed);
+  return computed;
+}
+
+function collectManagedRoutesForLayout(allRoutes, layoutUid, linksByLayout) {
+  const inLayout = [];
+  const inLayoutIds = new Set();
+  const byId = new Map();
+  for (const r of allRoutes) {
+    if (!r) continue;
+    if (r.id != null) byId.set(String(r.id), r);
+    const direct = r.uiLayoutUid === layoutUid || r.layoutUid === layoutUid;
+    const linked = r.id != null && linksByLayout.get(layoutUid)?.has(String(r.id));
+    const inLayoutsArr = Array.isArray(r.uiLayouts) && r.uiLayouts.some((l) => val(l, 'uid') === layoutUid);
+    if (direct || linked || inLayoutsArr) {
+      inLayout.push(r);
+      if (r.id != null) inLayoutIds.add(String(r.id));
+    }
+  }
+  let expanded = true;
+  while (expanded) {
+    expanded = false;
+    for (const r of allRoutes) {
+      if (!r) continue;
+      const rid = r.id != null ? String(r.id) : '';
+      const pid = r.parentId != null ? String(r.parentId) : '';
+      if (rid && !inLayoutIds.has(rid) && pid && inLayoutIds.has(pid)) {
+        inLayout.push(r);
+        inLayoutIds.add(rid);
+        expanded = true;
+      }
+    }
+  }
+  return { inLayout, byId };
+}
+
+function extractGridChildUidsFromModel(modelObj) {
+  const out = [];
+  const rowsSources = [
+    modelObj?.props?.rows,
+    modelObj?.stepParams?.gridSettings?.grid?.rows,
+  ];
+  for (const rows of rowsSources) {
+    if (!rows || typeof rows !== 'object' || Array.isArray(rows)) continue;
+    for (const cols of Object.values(rows)) {
+      if (!Array.isArray(cols)) continue;
+      for (const col of cols) {
+        for (const uid of Array.isArray(col) ? col : []) {
+          if (typeof uid === 'string' && uid.trim()) out.push(uid.trim());
+        }
+      }
+    }
+  }
+  return out;
+}
+
+async function exportRoutesAndBlocksSection(db, rawPortals) {
+  const rawRoutes = (await safeRepoFind(db, 'desktopRoutes', { limit: 1000, appends: ['uiLayouts'] })).map(toObj);
+  const rawLinks = (await safeRepoFind(db, 'desktopRoutesUiLayouts', { limit: 2000 })).map(toObj);
+  const rawGrants = (await safeRepoFind(db, 'rolesDesktopRoutes', { limit: 2000 })).map(toObj);
+  const rawModels = (await safeRepoFind(db, 'flowModels', { limit: 2000 })).map(toObj);
+
+  const linksByLayout = new Map();
+  const unmanagedRouteIds = new Set();
+  const managedLayouts = new Set();
+
+  for (const p of (rawPortals || []).map(toObj)) {
+    const uid = String(p.uid || '').trim();
+    if (SAFE_MANAGED_LAYOUT_UID_RE.test(uid)) managedLayouts.add(uid);
+  }
+  for (const link of rawLinks) {
+    const uid = String(link.uiLayoutUid || '').trim();
+    const rid = link.desktopRouteId != null ? String(link.desktopRouteId) : '';
+    if (!uid || !rid) continue;
+    if (SAFE_MANAGED_LAYOUT_UID_RE.test(uid)) {
+      managedLayouts.add(uid);
+      if (!linksByLayout.has(uid)) linksByLayout.set(uid, new Set());
+      linksByLayout.get(uid).add(rid);
+    } else {
+      unmanagedRouteIds.add(rid);
+    }
+  }
+  for (const r of rawRoutes) {
+    const uid = String(r.uiLayoutUid || r.layoutUid || '').trim();
+    if (!uid) continue;
+    if (SAFE_MANAGED_LAYOUT_UID_RE.test(uid)) {
+      managedLayouts.add(uid);
+    } else if (r.id != null) {
+      unmanagedRouteIds.add(String(r.id));
+    }
+  }
+
+  const grantsByRouteId = new Map();
+  for (const g of rawGrants) {
+    const rid = g.desktopRouteId != null ? String(g.desktopRouteId) : '';
+    const roleName = String(g.roleName || '').trim();
+    if (!rid || !SAFE_ROLE_RE.test(roleName) || FORBIDDEN_ROLES.has(roleName)) continue;
+    if (!grantsByRouteId.has(rid)) grantsByRouteId.set(rid, new Set());
+    grantsByRouteId.get(rid).add(roleName);
+  }
+
+  const normalizedRoutes = [];
+  const seenRouteKeys = new Set();
+  const managedModelUids = new Set();
+  const excludedModelUids = new Set();
+
+  for (const r of rawRoutes) {
+    const rid = r.id != null ? String(r.id) : '';
+    if (rid && unmanagedRouteIds.has(rid)) {
+      if (r.schemaUid) excludedModelUids.add(String(r.schemaUid).trim());
+      if (r.menuSchemaUid) excludedModelUids.add(String(r.menuSchemaUid).trim());
+    }
+  }
+
+  for (const layoutUid of [...managedLayouts].sort()) {
+    const { inLayout, byId } = collectManagedRoutesForLayout(rawRoutes, layoutUid, linksByLayout);
+    const keyCache = new Map();
+    for (const r of inLayout) {
+      const type = String(r.type || 'page').trim();
+      if (!ALLOWED_ROUTE_TYPES.has(type)) continue;
+      const key = buildStableRouteKey(r, layoutUid, byId, keyCache);
+      if (!key || seenRouteKeys.has(`${layoutUid}::${key}`)) continue;
+      seenRouteKeys.add(`${layoutUid}::${key}`);
+
+      const pid = r.parentId != null ? String(r.parentId) : '';
+      const parentRoute = pid ? byId.get(pid) : null;
+      const parentKey = parentRoute ? buildStableRouteKey(parentRoute, layoutUid, byId, keyCache) : null;
+      const rid = r.id != null ? String(r.id) : '';
+      const roleGrants = rid && grantsByRouteId.has(rid) ? [...grantsByRouteId.get(rid)].sort() : [];
+
+      if (r.schemaUid) managedModelUids.add(String(r.schemaUid).trim());
+      if (r.menuSchemaUid) managedModelUids.add(String(r.menuSchemaUid).trim());
+
+      const cleanOptions = r.options && typeof r.options === 'object' && !Array.isArray(r.options)
+        ? stripSecretsDeep(r.options)
+        : undefined;
+
+      normalizedRoutes.push(stripSecretsDeep({
+        key,
+        layoutUid,
+        type,
+        title: String(r.title || key),
+        ...(r.icon ? { icon: String(r.icon) } : {}),
+        ...(r.schemaUid ? { schemaUid: String(r.schemaUid).trim() } : {}),
+        ...(r.menuSchemaUid ? { menuSchemaUid: String(r.menuSchemaUid).trim() } : {}),
+        parentKey,
+        ...(Number.isFinite(Number(r.sort)) ? { sort: Number(r.sort) } : {}),
+        ...(typeof r.hidden === 'boolean' ? { hidden: r.hidden } : {}),
+        ...(typeof r.hideInMenu === 'boolean' ? { hideInMenu: r.hideInMenu } : {}),
+        ...(typeof r.enableTabs === 'boolean' ? { enableTabs: r.enableTabs } : {}),
+        ...(typeof r.enableHeader === 'boolean' ? { enableHeader: r.enableHeader } : {}),
+        ...(typeof r.displayTitle === 'boolean' ? { displayTitle: r.displayTitle } : {}),
+        ...(cleanOptions && Object.keys(cleanOptions).length > 0 ? { options: cleanOptions } : {}),
+        roleGrants,
+      }));
+    }
+  }
+
+  normalizedRoutes.sort((a, b) => (
+    String(a.layoutUid).localeCompare(String(b.layoutUid))
+    || String(a.key).localeCompare(String(b.key))
+  ));
+
+  for (const m of rawModels) {
+    const uid = String(m.uid || '').trim();
+    const pid = m.parentId != null ? String(m.parentId).trim() : '';
+    if (!uid) continue;
+    if (pid && excludedModelUids.has(pid)) {
+      excludedModelUids.add(uid);
+      continue;
+    }
+    if (/^dxos-[a-z0-9_.:-]+$/i.test(uid)) {
+      managedModelUids.add(uid);
+    }
+  }
+
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const m of rawModels) {
+      const uid = String(m.uid || '').trim();
+      const pid = m.parentId != null ? String(m.parentId).trim() : '';
+      if (!uid || excludedModelUids.has(uid)) continue;
+      if (pid && managedModelUids.has(pid) && !managedModelUids.has(uid)) {
+        managedModelUids.add(uid);
+        grew = true;
+      }
+      if (managedModelUids.has(uid)) {
+        for (const childUid of extractGridChildUidsFromModel(m)) {
+          if (!excludedModelUids.has(childUid) && !managedModelUids.has(childUid)) {
+            managedModelUids.add(childUid);
+            grew = true;
+          }
+        }
+      }
+    }
+  }
+
+  const flowModels = rawModels
+    .filter((m) => {
+      const uid = String(m.uid || '').trim();
+      const use = String(m.use || '').trim();
+      return uid && managedModelUids.has(uid) && !excludedModelUids.has(uid) && ALLOWED_FLOW_MODEL_USES.has(use);
+    })
+    .map((m) => stripSecretsDeep({
+      uid: String(m.uid).trim(),
+      use: String(m.use).trim(),
+      ...(m.parentId != null ? { parentId: String(m.parentId).trim() } : {}),
+      ...(m.subKey ? { subKey: String(m.subKey) } : {}),
+      ...(m.subType ? { subType: String(m.subType) } : {}),
+      ...(m.sortIndex != null ? { sortIndex: Number(m.sortIndex) } : {}),
+      props: m.props && typeof m.props === 'object' && !Array.isArray(m.props) ? stripSecretsDeep(m.props) : {},
+      stepParams: m.stepParams && typeof m.stepParams === 'object' && !Array.isArray(m.stepParams) ? stripSecretsDeep(m.stepParams) : {},
+    }))
+    .sort((a, b) => String(a.uid).localeCompare(String(b.uid)));
+
+  return { routes: normalizedRoutes, flowModels };
+}
+
+async function exportGovernanceSection(db, filterOrg) {
+  const findOpts = filterOrg ? { filter: { organizationId: filterOrg }, limit: 1000 } : { limit: 1000 };
+  const rawDmn = (await safeRepoFind(db, 'latticeDecisionTables', findOpts)).map(toObj);
+  const rawSla = (await safeRepoFind(db, 'latticeSlaPolicies', findOpts)).map(toObj);
+  const rawRules = (await safeRepoFind(db, 'latticeIncidentRules', findOpts)).map(toObj);
+
+  const decisionTables = rawDmn
+    .filter((d) => (!filterOrg || d.organizationId === filterOrg) && d.organizationId && d.tableKey)
+    .map((d) => stripSecretsDeep({
+      organizationId: String(d.organizationId).trim(),
+      tableKey: String(d.tableKey).trim(),
+      name: String(d.name || d.tableKey),
+      ...(d.description ? { description: String(d.description) } : {}),
+      hitPolicy: String(d.hitPolicy || 'FIRST').trim().toUpperCase(),
+      inputsJson: Array.isArray(d.inputsJson) ? d.inputsJson : [],
+      outputsJson: Array.isArray(d.outputsJson) ? d.outputsJson : [],
+      rulesJson: Array.isArray(d.rulesJson) ? d.rulesJson : [],
+      version: Number(d.version) || 1,
+      published: d.published !== false,
+      ...(d.updatedBy ? { updatedBy: String(d.updatedBy) } : {}),
+      active: d.active !== false,
+    }))
+    .sort((a, b) => `${a.organizationId}::${a.tableKey}`.localeCompare(`${b.organizationId}::${b.tableKey}`));
+
+  const slaPolicies = rawSla
+    .filter((s) => (!filterOrg || s.organizationId === filterOrg) && s.organizationId && s.targetCollection)
+    .map((s) => stripSecretsDeep({
+      organizationId: String(s.organizationId).trim(),
+      targetCollection: String(s.targetCollection).trim(),
+      priority: String(s.priority || 'normal').trim().toLowerCase(),
+      warnAfterMinutes: Number(s.warnAfterMinutes) || 240,
+      breachAfterMinutes: Number(s.breachAfterMinutes) || 1440,
+      escalateToRole: String(s.escalateToRole || 'ldx_manager').trim(),
+      ...(s.notifyChannels !== undefined ? { notifyChannels: s.notifyChannels } : {}),
+      active: s.active !== false,
+    }))
+    .sort((a, b) => `${a.organizationId}::${a.targetCollection}::${a.priority}`.localeCompare(`${b.organizationId}::${b.targetCollection}::${b.priority}`));
+
+  const incidentRules = rawRules
+    .filter((r) => (!filterOrg || r.organizationId === filterOrg) && r.organizationId && r.code)
+    .map((r) => stripSecretsDeep({
+      organizationId: String(r.organizationId).trim(),
+      code: String(r.code).trim(),
+      name: String(r.name || r.code),
+      active: r.active !== false,
+      assetEntityId: String(r.assetEntityId || '').trim(),
+      attribute: String(r.attribute || '').trim(),
+      operator: String(r.operator || '>').trim(),
+      threshold: String(r.threshold ?? ''),
+      unit: String(r.unit || '').trim(),
+      severity: String(r.severity || 'medium').trim().toLowerCase(),
+      maxObservationAgeSeconds: String(r.maxObservationAgeSeconds ?? '300'),
+      cooldownSeconds: String(r.cooldownSeconds ?? '300'),
+      workflowDefinitionId: String(r.workflowDefinitionId || 'incident-response'),
+      workflowDefinitionVersion: String(r.workflowDefinitionVersion || '1'),
+      handlerId: String(r.handlerId || '').trim(),
+    }))
+    .sort((a, b) => `${a.organizationId}::${a.code}`.localeCompare(`${b.organizationId}::${b.code}`));
+
+  return { decisionTables, slaPolicies, incidentRules };
+}
+
+async function exportSolutionBundle(db, { organizationId = null, platformVersion = DEFAULT_PLATFORM_VERSION } = {}) {
   const rawOrg = organizationId != null ? String(organizationId).trim() : '';
   const filterOrg = rawOrg && rawOrg !== 'all' ? rawOrg : '';
 
@@ -381,13 +715,24 @@ async function exportSolutionBundle(db, { organizationId = null, platformVersion
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  const payload = { roles, portals, workflows, aiProfiles, customCollections };
+  const routesAndBlocks = await exportRoutesAndBlocksSection(db, rawPortals);
+  const governance = await exportGovernanceSection(db, filterOrg);
+
+  const payload = {
+    roles,
+    portals,
+    workflows,
+    aiProfiles,
+    customCollections,
+    routesAndBlocks,
+    governance,
+  };
   const contentSha256 = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 
   return {
     metadata: {
       schemaVersion: BUNDLE_SCHEMA_VERSION,
-      platformVersion: String(platformVersion || '0.3.0'),
+      platformVersion: String(platformVersion || DEFAULT_PLATFORM_VERSION),
       organizationId: filterOrg || 'all',
       exportedAt: new Date().toISOString(),
       contentSha256,
@@ -531,6 +876,268 @@ function validateRoleEntry(r, errors) {
   }
 }
 
+function findPrototypePollutionErrors(value, errors, pathStr = '$', depth = 0) {
+  if (depth > 40 || value === null || value === undefined || typeof value !== 'object') return;
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      findPrototypePollutionErrors(value[i], errors, `${pathStr}[${i}]`, depth + 1);
+    }
+    return;
+  }
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null && !(value instanceof Date)) {
+    errors.push(`Forbidden custom prototype at ${pathStr}`);
+    return;
+  }
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (FORBIDDEN_PROTO_KEYS.has(key)) {
+      errors.push(`Forbidden prototype key "${key}" at ${pathStr}`);
+      continue;
+    }
+    findPrototypePollutionErrors(value[key], errors, `${pathStr}.${key}`, depth + 1);
+  }
+}
+
+function validateNoUnsafeCodeOrXss(value, pathStr, errors, depth = 0) {
+  if (depth > 30 || value === null || value === undefined) return;
+  if (typeof value === 'string') {
+    if (UNSAFE_XSS_VALUE_RE.test(value)) {
+      errors.push(`Unsafe script or XSS payload forbidden at ${pathStr}`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i += 1) {
+      validateNoUnsafeCodeOrXss(value[i], `${pathStr}[${i}]`, errors, depth + 1);
+    }
+    return;
+  }
+  if (typeof value === 'object') {
+    for (const key of Object.keys(value)) {
+      if (UNSAFE_CODE_KEY_RE.test(key)) {
+        errors.push(`Unsafe custom code property "${key}" forbidden at ${pathStr}`);
+        continue;
+      }
+      validateNoUnsafeCodeOrXss(value[key], `${pathStr}.${key}`, errors, depth + 1);
+    }
+  }
+}
+
+function validateRoutesAndBlocks(routesAndBlocks, errors) {
+  if (!routesAndBlocks || typeof routesAndBlocks !== 'object' || Array.isArray(routesAndBlocks)) {
+    errors.push('routesAndBlocks must be an object');
+    return;
+  }
+  if (routesAndBlocks.routes !== undefined) {
+    if (!Array.isArray(routesAndBlocks.routes)) {
+      errors.push('routesAndBlocks.routes must be an array');
+    } else {
+      const parentByKey = new Map();
+      const seenKeys = new Set();
+      for (let i = 0; i < routesAndBlocks.routes.length; i += 1) {
+        const r = routesAndBlocks.routes[i];
+        if (!r || typeof r !== 'object' || Array.isArray(r)) {
+          errors.push(`routesAndBlocks.routes[${i}] must be an object`);
+          continue;
+        }
+        const key = String(r.key || r.schemaUid || r.uid || r.title || '').trim();
+        if (!key) {
+          errors.push(`routesAndBlocks.routes[${i}] must include key, schemaUid, uid, or title`);
+        }
+        const layoutUid = String(r.layoutUid || '').trim();
+        if (!SAFE_MANAGED_LAYOUT_UID_RE.test(layoutUid)) {
+          errors.push(`Invalid or unmanaged route layoutUid "${layoutUid || '(empty)'}" at routes[${i}]`);
+        }
+        const type = String(r.type || '').trim();
+        if (!ALLOWED_ROUTE_TYPES.has(type)) {
+          errors.push(`Unsupported route type "${type || '(empty)'}" at routes[${i}]`);
+        }
+        if (r.schemaUid !== undefined && r.schemaUid !== null && !SAFE_MODEL_UID_RE.test(String(r.schemaUid).trim())) {
+          errors.push(`Invalid route schemaUid "${String(r.schemaUid)}" at routes[${i}]`);
+        }
+        if (r.menuSchemaUid !== undefined && r.menuSchemaUid !== null && !SAFE_MODEL_UID_RE.test(String(r.menuSchemaUid).trim())) {
+          errors.push(`Invalid route menuSchemaUid "${String(r.menuSchemaUid)}" at routes[${i}]`);
+        }
+        if (r.roleGrants !== undefined) {
+          if (!Array.isArray(r.roleGrants)) {
+            errors.push(`Route roleGrants must be an array at routes[${i}]`);
+          } else {
+            for (const grant of r.roleGrants) {
+              const gName = String(grant || '').trim();
+              if (!SAFE_ROLE_RE.test(gName) || FORBIDDEN_ROLES.has(gName)) {
+                errors.push(`Forbidden or invalid route roleGrant "${gName || '(empty)'}" at routes[${i}]`);
+              }
+            }
+          }
+        }
+        if (key) {
+          const scopedKey = `${layoutUid}::${key}`;
+          if (seenKeys.has(scopedKey)) {
+            errors.push(`Duplicate route key "${key}" in layout "${layoutUid}"`);
+          }
+          seenKeys.add(scopedKey);
+          if (r.parentKey !== undefined && r.parentKey !== null) {
+            const pk = String(r.parentKey).trim();
+            if (pk) {
+              if (pk === key) errors.push(`Self-referential route parentKey "${pk}"`);
+              parentByKey.set(scopedKey, `${layoutUid}::${pk}`);
+            }
+          }
+        }
+        validateNoUnsafeCodeOrXss(r, `routesAndBlocks.routes[${i}]`, errors);
+      }
+      for (const start of parentByKey.keys()) {
+        const seenChain = new Set([start]);
+        let cur = parentByKey.get(start);
+        while (cur && parentByKey.has(cur)) {
+          if (seenChain.has(cur)) {
+            errors.push(`Cyclic route parentKey hierarchy involving "${cur}"`);
+            break;
+          }
+          seenChain.add(cur);
+          cur = parentByKey.get(cur);
+        }
+      }
+    }
+  }
+  if (routesAndBlocks.flowModels !== undefined) {
+    if (!Array.isArray(routesAndBlocks.flowModels)) {
+      errors.push('routesAndBlocks.flowModels must be an array');
+    } else {
+      const seenUids = new Set();
+      for (let i = 0; i < routesAndBlocks.flowModels.length; i += 1) {
+        const m = routesAndBlocks.flowModels[i];
+        if (!m || typeof m !== 'object' || Array.isArray(m)) {
+          errors.push(`routesAndBlocks.flowModels[${i}] must be an object`);
+          continue;
+        }
+        const uid = String(m.uid || '').trim();
+        if (!SAFE_MODEL_UID_RE.test(uid)) {
+          errors.push(`Invalid flowModel uid "${uid || '(empty)'}" at flowModels[${i}]`);
+        } else if (seenUids.has(uid)) {
+          errors.push(`Duplicate flowModel uid "${uid}"`);
+        } else {
+          seenUids.add(uid);
+        }
+        const use = String(m.use || '').trim();
+        if (!ALLOWED_FLOW_MODEL_USES.has(use)) {
+          errors.push(`Forbidden or unsupported flowModel use "${use || '(empty)'}" at flowModels[${i}]`);
+        }
+        validateNoUnsafeCodeOrXss(m, `routesAndBlocks.flowModels[${i}]`, errors);
+      }
+    }
+  }
+}
+
+function validateGovernanceSection(governance, errors) {
+  if (!governance || typeof governance !== 'object' || Array.isArray(governance)) {
+    errors.push('governance must be an object');
+    return;
+  }
+  if (governance.decisionTables !== undefined) {
+    if (!Array.isArray(governance.decisionTables)) {
+      errors.push('governance.decisionTables must be an array');
+    } else {
+      for (let i = 0; i < governance.decisionTables.length; i += 1) {
+        const d = governance.decisionTables[i];
+        if (!d || typeof d !== 'object' || Array.isArray(d)) {
+          errors.push(`governance.decisionTables[${i}] must be an object`);
+          continue;
+        }
+        const org = d.organizationId != null ? String(d.organizationId).trim() : '';
+        if (org && !SAFE_ORG_ID_RE.test(org)) {
+          errors.push(`Invalid organizationId "${org}" on decisionTables[${i}]`);
+        }
+        const tableKey = String(d.tableKey || '').trim();
+        if (!SAFE_DMN_KEY_RE.test(tableKey)) {
+          errors.push(`Invalid DMN tableKey "${tableKey || '(empty)'}" at decisionTables[${i}]`);
+        }
+        if (!String(d.name || '').trim()) {
+          errors.push(`DMN table "${tableKey || i}" requires a name`);
+        }
+        const hitPolicy = String(d.hitPolicy || 'FIRST').trim().toUpperCase();
+        if (!VALID_HIT_POLICIES.has(hitPolicy)) {
+          errors.push(`Unsupported DMN hitPolicy "${hitPolicy}" at decisionTables[${i}]`);
+        }
+        for (const arrKey of ['inputsJson', 'outputsJson', 'rulesJson']) {
+          if (d[arrKey] !== undefined && !Array.isArray(d[arrKey])) {
+            errors.push(`DMN ${arrKey} must be an array at decisionTables[${i}]`);
+          }
+        }
+        validateNoUnsafeCodeOrXss(d, `governance.decisionTables[${i}]`, errors);
+      }
+    }
+  }
+  if (governance.slaPolicies !== undefined) {
+    if (!Array.isArray(governance.slaPolicies)) {
+      errors.push('governance.slaPolicies must be an array');
+    } else {
+      for (let i = 0; i < governance.slaPolicies.length; i += 1) {
+        const s = governance.slaPolicies[i];
+        if (!s || typeof s !== 'object' || Array.isArray(s)) {
+          errors.push(`governance.slaPolicies[${i}] must be an object`);
+          continue;
+        }
+        const org = s.organizationId != null ? String(s.organizationId).trim() : '';
+        if (org && !SAFE_ORG_ID_RE.test(org)) {
+          errors.push(`Invalid organizationId "${org}" on slaPolicies[${i}]`);
+        }
+        const col = String(s.targetCollection || '').trim();
+        if (!SAFE_RESOURCE_COLLECTION_RE.test(col) || isProtectedCollection(col)) {
+          errors.push(`Invalid SLA targetCollection "${col || '(empty)'}" at slaPolicies[${i}]`);
+        }
+        const prio = String(s.priority || 'normal').trim().toLowerCase();
+        if (!VALID_SLA_PRIORITIES.has(prio)) {
+          errors.push(`Invalid SLA priority "${prio}" at slaPolicies[${i}]`);
+        }
+        const warn = Number(s.warnAfterMinutes ?? 240);
+        const breach = Number(s.breachAfterMinutes ?? 1440);
+        if (!Number.isInteger(warn) || warn < 1 || !Number.isInteger(breach) || breach < warn) {
+          errors.push(`Invalid SLA thresholds (warn=${warn}, breach=${breach}) at slaPolicies[${i}]`);
+        }
+        if (s.escalateToRole !== undefined) {
+          const role = String(s.escalateToRole || '').trim();
+          if (!SAFE_ROLE_RE.test(role) || FORBIDDEN_ROLES.has(role)) {
+            errors.push(`Invalid or forbidden SLA escalateToRole "${role}" at slaPolicies[${i}]`);
+          }
+        }
+        validateNoUnsafeCodeOrXss(s, `governance.slaPolicies[${i}]`, errors);
+      }
+    }
+  }
+  if (governance.incidentRules !== undefined) {
+    if (!Array.isArray(governance.incidentRules)) {
+      errors.push('governance.incidentRules must be an array');
+    } else {
+      for (let i = 0; i < governance.incidentRules.length; i += 1) {
+        const r = governance.incidentRules[i];
+        if (!r || typeof r !== 'object' || Array.isArray(r)) {
+          errors.push(`governance.incidentRules[${i}] must be an object`);
+          continue;
+        }
+        const org = r.organizationId != null ? String(r.organizationId).trim() : '';
+        if (org && !SAFE_ORG_ID_RE.test(org)) {
+          errors.push(`Invalid organizationId "${org}" on incidentRules[${i}]`);
+        }
+        if (!String(r.code || '').trim() || !String(r.name || '').trim()) {
+          errors.push(`Incident rule requires non-empty code and name at incidentRules[${i}]`);
+        }
+        if (!String(r.assetEntityId || '').trim() || !String(r.attribute || '').trim() || !String(r.unit || '').trim() || !String(r.handlerId || '').trim()) {
+          errors.push(`Incident rule requires assetEntityId, attribute, unit, and handlerId at incidentRules[${i}]`);
+        }
+        const op = String(r.operator || '').trim();
+        if (!VALID_RULE_OPERATORS.has(op)) {
+          errors.push(`Unsupported incident rule operator "${op || '(empty)'}" at incidentRules[${i}]`);
+        }
+        if (r.threshold === undefined || r.threshold === null || String(r.threshold).trim() === '') {
+          errors.push(`Incident rule requires threshold at incidentRules[${i}]`);
+        }
+        validateNoUnsafeCodeOrXss(r, `governance.incidentRules[${i}]`, errors);
+      }
+    }
+  }
+}
+
 function validateSolutionBundle(bundle) {
   const errors = [];
   if (!bundle || typeof bundle !== 'object' || Array.isArray(bundle)) {
@@ -549,6 +1156,7 @@ function validateSolutionBundle(bundle) {
   if (serializedLen > 5_000_000) {
     errors.push('Bundle exceeds maximum 5MB payload size');
   }
+  findPrototypePollutionErrors(bundle, errors);
   if (!ACCEPTED_SCHEMA_VERSIONS.has(bundle.metadata?.schemaVersion)) {
     errors.push(`Unsupported schemaVersion; expected ${[...ACCEPTED_SCHEMA_VERSIONS].join(' or ')}`);
   }
@@ -625,6 +1233,12 @@ function validateSolutionBundle(bundle) {
       }
     }
   }
+  if (bundle.routesAndBlocks !== undefined) {
+    validateRoutesAndBlocks(bundle.routesAndBlocks, errors);
+  }
+  if (bundle.governance !== undefined) {
+    validateGovernanceSection(bundle.governance, errors);
+  }
   return { valid: errors.length === 0, errors };
 }
 
@@ -668,6 +1282,31 @@ function diffSolutionBundle(currentBundle, incomingBundle) {
     workflows: diffSection(cur.workflows, inc.workflows, (w) => w?.key || w?.title),
     aiProfiles: diffSection(cur.aiProfiles, inc.aiProfiles, (p) => p?.username),
     customCollections: diffSection(cur.customCollections, inc.customCollections, (c) => c?.name),
+    routes: diffSection(
+      cur.routesAndBlocks?.routes,
+      inc.routesAndBlocks?.routes,
+      (r) => `${r?.layoutUid || ''}::${r?.key || r?.schemaUid || r?.uid || r?.title || ''}`,
+    ),
+    flowModels: diffSection(
+      cur.routesAndBlocks?.flowModels,
+      inc.routesAndBlocks?.flowModels,
+      (m) => m?.uid,
+    ),
+    decisionTables: diffSection(
+      cur.governance?.decisionTables,
+      inc.governance?.decisionTables,
+      (d) => `${d?.organizationId || ''}::${d?.tableKey || ''}`,
+    ),
+    slaPolicies: diffSection(
+      cur.governance?.slaPolicies,
+      inc.governance?.slaPolicies,
+      (s) => `${s?.organizationId || ''}::${s?.targetCollection || ''}::${s?.priority || 'normal'}`,
+    ),
+    incidentRules: diffSection(
+      cur.governance?.incidentRules,
+      inc.governance?.incidentRules,
+      (r) => `${r?.organizationId || ''}::${r?.code || ''}`,
+    ),
   };
   const roleResources = diffSection(
     flattenRoleResources(cur.roles),
@@ -681,7 +1320,20 @@ function diffSolutionBundle(currentBundle, incomingBundle) {
     summary.unchanged += s.unchanged.length;
     summary.removed += s.removed.length;
   }
-  return { summary, sections, roleResources };
+  return {
+    summary,
+    sections,
+    roleResources,
+    routesAndBlocks: {
+      routes: sections.routes,
+      flowModels: sections.flowModels,
+    },
+    governance: {
+      decisionTables: sections.decisionTables,
+      slaPolicies: sections.slaPolicies,
+      incidentRules: sections.incidentRules,
+    },
+  };
 }
 
 async function upsertRoleAndResources(db, rawRole, transaction) {
@@ -1134,6 +1786,413 @@ async function applyAiProfilesSection(db, profilesList, targetOrg, transaction) 
   return aiProfilesUpserted;
 }
 
+function sortRoutesTopologically(routes) {
+  const byKey = new Map();
+  for (const r of routes) {
+    const k = String(r?.key || r?.schemaUid || r?.uid || '').trim();
+    if (k && !byKey.has(k)) byKey.set(k, r);
+  }
+  const visited = new Set();
+  const visiting = new Set();
+  const ordered = [];
+  function visit(r) {
+    const k = String(r?.key || r?.schemaUid || r?.uid || '').trim();
+    if (!k || visited.has(k) || visiting.has(k)) return;
+    visiting.add(k);
+    const pk = r?.parentKey ? String(r.parentKey).trim() : '';
+    if (pk && byKey.has(pk)) visit(byKey.get(pk));
+    visiting.delete(k);
+    visited.add(k);
+    ordered.push(r);
+  }
+  for (const r of routes) visit(r);
+  return ordered;
+}
+
+async function applyRoutesAndBlocksSection(db, routesAndBlocks, transaction) {
+  if (!routesAndBlocks || typeof routesAndBlocks !== 'object') {
+    return { routesUpserted: 0, flowModelsUpserted: 0 };
+  }
+
+  let routesUpserted = 0;
+  let flowModelsUpserted = 0;
+
+  const routesList = Array.isArray(routesAndBlocks.routes) ? routesAndBlocks.routes : [];
+  const modelsList = Array.isArray(routesAndBlocks.flowModels) ? routesAndBlocks.flowModels : [];
+  const routesRepo = db?.getRepository?.('desktopRoutes');
+  const existingRoutes = routesRepo
+    ? ((await safeRepoFind(db, 'desktopRoutes', { limit: 1000, appends: ['uiLayouts'], transaction })) || []).map(toObj)
+    : [];
+  const existingLinks = routesRepo
+    ? ((await safeRepoFind(db, 'desktopRoutesUiLayouts', { limit: 2000, transaction })) || []).map(toObj)
+    : [];
+  const linksByLayout = new Map();
+  const unmanagedRouteIds = new Set();
+  for (const link of existingLinks) {
+    const uid = String(link.uiLayoutUid || '').trim();
+    const rid = link.desktopRouteId != null ? String(link.desktopRouteId) : '';
+    if (!uid || !rid) continue;
+    if (SAFE_MANAGED_LAYOUT_UID_RE.test(uid)) {
+      if (!linksByLayout.has(uid)) linksByLayout.set(uid, new Set());
+      linksByLayout.get(uid).add(rid);
+    } else {
+      unmanagedRouteIds.add(rid);
+    }
+  }
+  for (const r of existingRoutes) {
+    const uid = String(r.uiLayoutUid || r.layoutUid || '').trim();
+    const rid = r.id != null ? String(r.id) : '';
+    if (rid && uid && !SAFE_MANAGED_LAYOUT_UID_RE.test(uid)) {
+      unmanagedRouteIds.add(rid);
+    }
+  }
+  let expandedUnmanaged = true;
+  while (expandedUnmanaged) {
+    expandedUnmanaged = false;
+    for (const r of existingRoutes) {
+      const rid = r.id != null ? String(r.id) : '';
+      const pid = r.parentId != null ? String(r.parentId) : '';
+      if (rid && pid && unmanagedRouteIds.has(pid) && !unmanagedRouteIds.has(rid)) {
+        unmanagedRouteIds.add(rid);
+        expandedUnmanaged = true;
+      }
+    }
+  }
+  const unmanagedSchemaUids = new Set();
+  for (const r of existingRoutes) {
+    const rid = r.id != null ? String(r.id) : '';
+    if (!rid || !unmanagedRouteIds.has(rid)) continue;
+    if (r.schemaUid) unmanagedSchemaUids.add(String(r.schemaUid).trim());
+    if (r.menuSchemaUid) unmanagedSchemaUids.add(String(r.menuSchemaUid).trim());
+    if (r.key) unmanagedSchemaUids.add(String(r.key).trim());
+  }
+
+  if (routesRepo && routesList.length > 0 && (typeof routesRepo.create === 'function' || typeof routesRepo.update === 'function')) {
+    const linksRepo = db?.getRepository?.('desktopRoutesUiLayouts');
+    const grantsRepo = db?.getRepository?.('rolesDesktopRoutes');
+
+    const existingBySchemaUid = new Map();
+    const existingByExplicitKey = new Map();
+    const existingByLayoutAndKey = new Map();
+    for (const r of existingRoutes) {
+      const rid = r.id != null ? String(r.id) : '';
+      if (rid && unmanagedRouteIds.has(rid)) continue;
+      if (r.schemaUid) existingBySchemaUid.set(String(r.schemaUid).trim(), r);
+      if (r.key) existingByExplicitKey.set(String(r.key).trim(), r);
+    }
+    const touchedLayouts = new Set(
+      routesList.map((r) => String(r?.layoutUid || '').trim()).filter((u) => SAFE_MANAGED_LAYOUT_UID_RE.test(u)),
+    );
+    for (const layoutUid of touchedLayouts) {
+      const { inLayout, byId } = collectManagedRoutesForLayout(existingRoutes, layoutUid, linksByLayout);
+      const keyCache = new Map();
+      for (const r of inLayout) {
+        const rid = r.id != null ? String(r.id) : '';
+        if (rid && unmanagedRouteIds.has(rid)) continue;
+        const k = buildStableRouteKey(r, layoutUid, byId, keyCache);
+        if (k) existingByLayoutAndKey.set(`${layoutUid}::${k}`, r);
+      }
+    }
+
+    const upsertedIdByKey = new Map();
+    for (const rawRoute of sortRoutesTopologically(routesList)) {
+      const clean = stripSecretsDeep(rawRoute);
+      const layoutUid = String(clean?.layoutUid || '').trim();
+      const type = String(clean?.type || '').trim();
+      const routeKey = String(clean?.key || clean?.schemaUid || clean?.uid || '').trim();
+      if (!routeKey || !SAFE_MANAGED_LAYOUT_UID_RE.test(layoutUid) || !ALLOWED_ROUTE_TYPES.has(type)) continue;
+
+      const sUid = clean.schemaUid ? String(clean.schemaUid).trim() : '';
+      const mUid = clean.menuSchemaUid ? String(clean.menuSchemaUid).trim() : '';
+      if ((sUid && unmanagedSchemaUids.has(sUid)) || (mUid && unmanagedSchemaUids.has(mUid)) || unmanagedSchemaUids.has(routeKey)) {
+        throw failBundle('INVALID_SOLUTION_BUNDLE', 400, `Cannot overwrite unmanaged/admin route "${sUid || routeKey}"`);
+      }
+
+      let resolvedParentId = null;
+      if (clean.parentKey) {
+        const pk = String(clean.parentKey).trim();
+        resolvedParentId = upsertedIdByKey.get(`${layoutUid}::${pk}`)
+          ?? upsertedIdByKey.get(pk)
+          ?? val(existingByLayoutAndKey.get(`${layoutUid}::${pk}`), 'id')
+          ?? val(existingBySchemaUid.get(pk), 'id')
+          ?? val(existingByExplicitKey.get(pk), 'id')
+          ?? null;
+      }
+
+      const existing = (clean.schemaUid ? existingBySchemaUid.get(String(clean.schemaUid).trim()) : null)
+        || existingByLayoutAndKey.get(`${layoutUid}::${routeKey}`)
+        || existingByExplicitKey.get(routeKey)
+        || null;
+
+      const values = {
+        type,
+        title: String(clean.title || routeKey),
+        uiLayoutUid: layoutUid,
+        parentId: resolvedParentId,
+        ...(clean.icon !== undefined ? { icon: String(clean.icon) } : {}),
+        ...(clean.schemaUid !== undefined ? { schemaUid: String(clean.schemaUid).trim() } : {}),
+        ...(clean.menuSchemaUid !== undefined ? { menuSchemaUid: String(clean.menuSchemaUid).trim() } : {}),
+        ...(clean.sort !== undefined && Number.isFinite(Number(clean.sort)) ? { sort: Number(clean.sort) } : {}),
+        ...(typeof clean.hidden === 'boolean' ? { hidden: clean.hidden } : {}),
+        ...(typeof clean.hideInMenu === 'boolean' ? { hideInMenu: clean.hideInMenu } : {}),
+        ...(typeof clean.enableTabs === 'boolean' ? { enableTabs: clean.enableTabs } : {}),
+        ...(typeof clean.enableHeader === 'boolean' ? { enableHeader: clean.enableHeader } : {}),
+        ...(typeof clean.displayTitle === 'boolean' ? { displayTitle: clean.displayTitle } : {}),
+        ...(clean.options && typeof clean.options === 'object' && !Array.isArray(clean.options) ? { options: clean.options } : {}),
+      };
+
+      let routeId = val(existing, 'id');
+      if (existing) {
+        if (routeId != null && typeof routesRepo.update === 'function') {
+          await routesRepo.update({ filterByTk: routeId, filter: { id: routeId }, values, transaction });
+        } else if (typeof existing.update === 'function') {
+          await existing.update(values, { transaction });
+        } else if (clean.schemaUid && typeof routesRepo.update === 'function') {
+          await routesRepo.update({ filter: { schemaUid: String(clean.schemaUid).trim() }, values, transaction });
+        }
+      } else if (typeof routesRepo.create === 'function') {
+        const created = await routesRepo.create({ values, transaction });
+        routeId = val(created, 'id');
+      }
+
+      if (routeId != null) {
+        upsertedIdByKey.set(`${layoutUid}::${routeKey}`, routeId);
+        upsertedIdByKey.set(routeKey, routeId);
+        if (clean.schemaUid) upsertedIdByKey.set(String(clean.schemaUid).trim(), routeId);
+
+        if (linksRepo) {
+          const hasLink = await findOneSafe(linksRepo, { desktopRouteId: routeId, uiLayoutUid: layoutUid }, { transaction });
+          if (!hasLink && typeof linksRepo.create === 'function') {
+            await linksRepo.create({ values: { desktopRouteId: routeId, uiLayoutUid: layoutUid }, transaction });
+          }
+        }
+
+        if (grantsRepo && Array.isArray(clean.roleGrants)) {
+          const safeGrants = [...new Set(
+            clean.roleGrants
+              .map((g) => String(g || '').trim())
+              .filter((g) => SAFE_ROLE_RE.test(g) && !FORBIDDEN_ROLES.has(g)),
+          )];
+          const grantSet = new Set(safeGrants);
+          if (typeof grantsRepo.find === 'function') {
+            const curGrants = (await grantsRepo.find({ filter: { desktopRouteId: routeId }, transaction })) || [];
+            const haveSet = new Set();
+            for (const g of curGrants) {
+              const rName = String(val(g, 'roleName') || '').trim();
+              if (!rName) continue;
+              if (SAFE_ROLE_RE.test(rName) && !FORBIDDEN_ROLES.has(rName) && !grantSet.has(rName)) {
+                if (typeof grantsRepo.destroy === 'function') {
+                  await grantsRepo.destroy({ filter: { desktopRouteId: routeId, roleName: rName }, transaction });
+                }
+              } else {
+                haveSet.add(rName);
+              }
+            }
+            for (const roleName of safeGrants) {
+              if (!haveSet.has(roleName) && typeof grantsRepo.create === 'function') {
+                await grantsRepo.create({ values: { desktopRouteId: routeId, roleName }, transaction });
+              }
+            }
+          } else {
+            for (const roleName of safeGrants) {
+              const hasGrant = await findOneSafe(grantsRepo, { desktopRouteId: routeId, roleName }, { transaction });
+              if (!hasGrant && typeof grantsRepo.create === 'function') {
+                await grantsRepo.create({ values: { desktopRouteId: routeId, roleName }, transaction });
+              }
+            }
+          }
+        }
+      }
+      routesUpserted += 1;
+    }
+  }
+
+  const flowModelsRepo = db?.getRepository?.('flowModels');
+  if (flowModelsRepo && modelsList.length > 0) {
+    const existingModels = ((await safeRepoFind(db, 'flowModels', { limit: 2000, transaction })) || []).map(toObj);
+    const unmanagedModelUids = new Set(unmanagedSchemaUids);
+    let grewUnmanagedModels = true;
+    while (grewUnmanagedModels) {
+      grewUnmanagedModels = false;
+      for (const m of existingModels) {
+        const mUid = String(m.uid || '').trim();
+        const mPid = m.parentId != null ? String(m.parentId).trim() : '';
+        if (mUid && mPid && unmanagedModelUids.has(mPid) && !unmanagedModelUids.has(mUid)) {
+          unmanagedModelUids.add(mUid);
+          grewUnmanagedModels = true;
+        }
+      }
+    }
+
+    for (const rawModel of modelsList) {
+      const clean = stripSecretsDeep(rawModel);
+      const uid = String(clean?.uid || '').trim();
+      const use = String(clean?.use || '').trim();
+      if (!SAFE_MODEL_UID_RE.test(uid) || !ALLOWED_FLOW_MODEL_USES.has(use)) continue;
+      const pid = clean.parentId != null ? String(clean.parentId).trim() : '';
+      if (unmanagedModelUids.has(uid) || (pid && unmanagedModelUids.has(pid))) {
+        throw failBundle('INVALID_SOLUTION_BUNDLE', 400, `Cannot overwrite unmanaged/admin flowModel "${uid}"`);
+      }
+
+      const values = {
+        uid,
+        use,
+        ...(clean.parentId != null ? { parentId: String(clean.parentId).trim() } : {}),
+        ...(clean.subKey ? { subKey: String(clean.subKey) } : {}),
+        ...(clean.subType ? { subType: String(clean.subType) } : {}),
+        ...(clean.sortIndex != null && Number.isFinite(Number(clean.sortIndex)) ? { sortIndex: Number(clean.sortIndex) } : {}),
+        props: clean.props && typeof clean.props === 'object' && !Array.isArray(clean.props) ? clean.props : {},
+        stepParams: clean.stepParams && typeof clean.stepParams === 'object' && !Array.isArray(clean.stepParams) ? clean.stepParams : {},
+      };
+
+      const existing = await findOneSafe(flowModelsRepo, { uid }, { transaction })
+        || (typeof flowModelsRepo.findModelById === 'function' ? await flowModelsRepo.findModelById(uid) : null);
+
+      if (existing && typeof flowModelsRepo.update === 'function') {
+        await flowModelsRepo.update({ filter: { uid }, values, transaction });
+      } else if (existing && typeof existing.update === 'function') {
+        await existing.update(values, { transaction });
+      } else if (!existing && typeof flowModelsRepo.create === 'function') {
+        await flowModelsRepo.create({ values, transaction });
+      } else if (typeof flowModelsRepo.upsertModel === 'function') {
+        await flowModelsRepo.upsertModel(values, { transaction });
+      } else if (existing && typeof flowModelsRepo.updateSingleNode === 'function') {
+        await flowModelsRepo.updateSingleNode(values, { transaction });
+      }
+      flowModelsUpserted += 1;
+    }
+  }
+
+  return { routesUpserted, flowModelsUpserted };
+}
+
+async function applyGovernanceSection(db, governance, targetOrg, transaction) {
+  if (!governance || typeof governance !== 'object') {
+    return { decisionTablesUpserted: 0, slaPoliciesUpserted: 0, incidentRulesUpserted: 0 };
+  }
+
+  let decisionTablesUpserted = 0;
+  let slaPoliciesUpserted = 0;
+  let incidentRulesUpserted = 0;
+
+  const upsertScopedRow = async (repo, uniqueFilter, values) => {
+    const existing = await findOneSafe(repo, uniqueFilter, { transaction });
+    if (existing) {
+      const existingId = val(existing, 'id');
+      if (typeof repo.update === 'function') {
+        await repo.update({
+          ...(existingId != null ? { filterByTk: existingId } : {}),
+          filter: uniqueFilter,
+          values,
+          transaction,
+        });
+      } else if (typeof existing.update === 'function') {
+        await existing.update(values, { transaction });
+      }
+    } else if (typeof repo.create === 'function') {
+      await repo.create({ values, transaction });
+    }
+  };
+
+  const dmnRepo = db?.getRepository?.('latticeDecisionTables');
+  const dmnList = Array.isArray(governance.decisionTables) ? governance.decisionTables : [];
+  if (dmnRepo && dmnList.length > 0 && (typeof dmnRepo.create === 'function' || typeof dmnRepo.update === 'function')) {
+    for (const rawTable of dmnList) {
+      const clean = stripSecretsDeep(rawTable);
+      const tableKey = String(clean?.tableKey || '').trim();
+      const rawItemOrg = clean?.organizationId != null ? String(clean.organizationId).trim() : '';
+      if (targetOrg && rawItemOrg && rawItemOrg !== targetOrg) {
+        throw failBundle('DXOS_ORG_MISMATCH', 403, `DMN "${tableKey}" thuộc tổ chức "${rawItemOrg}", không khớp "${targetOrg}".`);
+      }
+      const scopedOrg = targetOrg || rawItemOrg;
+      if (!scopedOrg || !SAFE_DMN_KEY_RE.test(tableKey)) continue;
+      const values = {
+        organizationId: scopedOrg,
+        tableKey,
+        name: String(clean.name || tableKey),
+        ...(clean.description !== undefined ? { description: clean.description } : {}),
+        hitPolicy: VALID_HIT_POLICIES.has(String(clean.hitPolicy || 'FIRST').toUpperCase())
+          ? String(clean.hitPolicy || 'FIRST').toUpperCase()
+          : 'FIRST',
+        inputsJson: Array.isArray(clean.inputsJson) ? clean.inputsJson : [],
+        outputsJson: Array.isArray(clean.outputsJson) ? clean.outputsJson : [],
+        rulesJson: Array.isArray(clean.rulesJson) ? clean.rulesJson : [],
+        version: Number(clean.version) || 1,
+        published: clean.published !== false,
+        ...(clean.updatedBy !== undefined ? { updatedBy: clean.updatedBy } : {}),
+        active: clean.active !== false,
+      };
+      await upsertScopedRow(dmnRepo, { organizationId: scopedOrg, tableKey }, values);
+      decisionTablesUpserted += 1;
+    }
+  }
+
+  const slaRepo = db?.getRepository?.('latticeSlaPolicies');
+  const slaList = Array.isArray(governance.slaPolicies) ? governance.slaPolicies : [];
+  if (slaRepo && slaList.length > 0 && (typeof slaRepo.create === 'function' || typeof slaRepo.update === 'function')) {
+    for (const rawSla of slaList) {
+      const clean = stripSecretsDeep(rawSla);
+      const targetCollection = String(clean?.targetCollection || '').trim();
+      const priority = String(clean?.priority || 'normal').trim().toLowerCase();
+      const rawItemOrg = clean?.organizationId != null ? String(clean.organizationId).trim() : '';
+      if (targetOrg && rawItemOrg && rawItemOrg !== targetOrg) {
+        throw failBundle('DXOS_ORG_MISMATCH', 403, `SLA "${targetCollection}:${priority}" thuộc tổ chức "${rawItemOrg}", không khớp "${targetOrg}".`);
+      }
+      const scopedOrg = targetOrg || rawItemOrg;
+      if (!scopedOrg || !targetCollection || !VALID_SLA_PRIORITIES.has(priority)) continue;
+      const escalateRole = String(clean.escalateToRole || 'ldx_manager').trim();
+      const values = {
+        organizationId: scopedOrg,
+        targetCollection,
+        priority,
+        warnAfterMinutes: Number(clean.warnAfterMinutes) || 240,
+        breachAfterMinutes: Number(clean.breachAfterMinutes) || 1440,
+        escalateToRole: SAFE_ROLE_RE.test(escalateRole) && !FORBIDDEN_ROLES.has(escalateRole) ? escalateRole : 'ldx_manager',
+        ...(clean.notifyChannels !== undefined ? { notifyChannels: clean.notifyChannels } : {}),
+        active: clean.active !== false,
+      };
+      await upsertScopedRow(slaRepo, { organizationId: scopedOrg, targetCollection, priority }, values);
+      slaPoliciesUpserted += 1;
+    }
+  }
+
+  const ruleRepo = db?.getRepository?.('latticeIncidentRules');
+  const rulesList = Array.isArray(governance.incidentRules) ? governance.incidentRules : [];
+  if (ruleRepo && rulesList.length > 0 && (typeof ruleRepo.create === 'function' || typeof ruleRepo.update === 'function')) {
+    for (const rawRule of rulesList) {
+      const clean = stripSecretsDeep(rawRule);
+      const code = String(clean?.code || '').trim();
+      const rawItemOrg = clean?.organizationId != null ? String(clean.organizationId).trim() : '';
+      if (targetOrg && rawItemOrg && rawItemOrg !== targetOrg) {
+        throw failBundle('DXOS_ORG_MISMATCH', 403, `Incident rule "${code}" thuộc tổ chức "${rawItemOrg}", không khớp "${targetOrg}".`);
+      }
+      const scopedOrg = targetOrg || rawItemOrg;
+      if (!scopedOrg || !code) continue;
+      const values = {
+        organizationId: scopedOrg,
+        code,
+        name: String(clean.name || code),
+        active: clean.active !== false,
+        assetEntityId: String(clean.assetEntityId || '').trim(),
+        attribute: String(clean.attribute || '').trim(),
+        operator: String(clean.operator || '>').trim(),
+        threshold: String(clean.threshold ?? ''),
+        unit: String(clean.unit || '').trim(),
+        severity: String(clean.severity || 'medium').trim().toLowerCase(),
+        maxObservationAgeSeconds: String(clean.maxObservationAgeSeconds ?? '300'),
+        cooldownSeconds: String(clean.cooldownSeconds ?? '300'),
+        workflowDefinitionId: String(clean.workflowDefinitionId || 'incident-response'),
+        workflowDefinitionVersion: String(clean.workflowDefinitionVersion || '1'),
+        handlerId: String(clean.handlerId || '').trim(),
+      };
+      await upsertScopedRow(ruleRepo, { organizationId: scopedOrg, code }, values);
+      incidentRulesUpserted += 1;
+    }
+  }
+
+  return { decisionTablesUpserted, slaPoliciesUpserted, incidentRulesUpserted };
+}
+
 async function applySolutionBundleSections(db, bundle, { targetOrg = null, enableWorkflows = false } = {}, transaction) {
   let rolesUpserted = 0;
   let roleResourcesUpserted = 0;
@@ -1149,6 +2208,8 @@ async function applySolutionBundleSections(db, bundle, { targetOrg = null, enabl
   const wfCounts = await applyWorkflowsSection(db, bundle.workflows, { targetOrg, enableWorkflows }, transaction);
   const customCollectionsUpserted = await applyCustomCollectionsSection(db, bundle.customCollections, targetOrg, transaction);
   const aiProfilesUpserted = await applyAiProfilesSection(db, bundle.aiProfiles, targetOrg, transaction);
+  const routesBlocksCounts = await applyRoutesAndBlocksSection(db, bundle.routesAndBlocks, transaction);
+  const govCounts = await applyGovernanceSection(db, bundle.governance, targetOrg, transaction);
 
   return {
     rolesUpserted,
@@ -1158,6 +2219,11 @@ async function applySolutionBundleSections(db, bundle, { targetOrg = null, enabl
     nodesUpserted: wfCounts.nodesUpserted,
     customCollectionsUpserted,
     aiProfilesUpserted,
+    routesUpserted: routesBlocksCounts.routesUpserted,
+    flowModelsUpserted: routesBlocksCounts.flowModelsUpserted,
+    decisionTablesUpserted: govCounts.decisionTablesUpserted,
+    slaPoliciesUpserted: govCounts.slaPoliciesUpserted,
+    incidentRulesUpserted: govCounts.incidentRulesUpserted,
   };
 }
 
@@ -1187,6 +2253,21 @@ async function importSolutionBundle(db, incomingBundle, { dryRun = true, organiz
     : '';
   const targetOrg = (rawOrg && rawOrg !== 'all' ? rawOrg : null)
     || (metaOrg && metaOrg !== 'all' ? metaOrg : null);
+  if (targetOrg && incomingBundle.governance && typeof incomingBundle.governance === 'object') {
+    for (const listKey of ['decisionTables', 'slaPolicies', 'incidentRules']) {
+      const items = Array.isArray(incomingBundle.governance[listKey]) ? incomingBundle.governance[listKey] : [];
+      for (const item of items) {
+        const itemOrg = item?.organizationId != null ? String(item.organizationId).trim() : '';
+        if (itemOrg && itemOrg !== targetOrg) {
+          throw failBundle(
+            'DXOS_ORG_MISMATCH',
+            403,
+            `Bản ghi governance (${listKey}) thuộc tổ chức "${itemOrg}", không thể nhập vào "${targetOrg}".`,
+          );
+        }
+      }
+    }
+  }
   const current = await exportSolutionBundle(db, { organizationId: targetOrg });
   const diff = diffSolutionBundle(current, incomingBundle);
   if (dryRun !== false) {

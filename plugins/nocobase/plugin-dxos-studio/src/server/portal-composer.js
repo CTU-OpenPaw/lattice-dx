@@ -129,6 +129,17 @@ const OVERVIEW_SPECS = [
         use: 'DxosAiProposalBlockModel',
         config: { title: 'Đề xuất AI có Bằng chứng [I]', targetCollection: 'latticeIncidentCases', state: 'all', pageSize: 5, showEvidence: true },
       },
+      {
+        uidSuffix: 'webgis',
+        use: 'DxosWebGisBlockModel',
+        config: {
+          title: 'Bản đồ Giám sát Chuỗi lạnh WebGIS [D]',
+          defaultOrganizationId: '',
+          centerLat: 15.8,
+          centerLng: 106.5,
+          showTwinOverlay: true,
+        },
+      },
     ],
   },
   {
@@ -180,7 +191,26 @@ const OVERVIEW_SPECS = [
       {
         uidSuffix: 'workbench',
         use: 'DxosRecordWorkbenchBlockModel',
-        config: { title: 'Chứng từ, Chatter & Xuất báo cáo Logistics [W]', collection: 'latticeOrders', showExport: true, showVoucherActions: true, showChatter: true },
+        config: {
+          title: 'Chứng từ, Chatter & Xuất báo cáo Logistics [W]',
+          collection: 'latticeOrders',
+          showExport: true,
+          showVoucherActions: true,
+          showChatter: true,
+          showPkiBadge: true,
+          showLineage: true,
+          showPrintVoucher: true,
+        },
+      },
+      {
+        uidSuffix: 'kanban',
+        use: 'DxosKanbanScheduleBlockModel',
+        config: {
+          title: 'Bảng Kanban & Lịch Giao nhận [H]',
+          collection: 'latticeOrders',
+          viewMode: 'kanban',
+          pageSize: 40,
+        },
       },
     ],
   },
@@ -224,7 +254,16 @@ const OVERVIEW_SPECS = [
       {
         uidSuffix: 'workbench',
         use: 'DxosRecordWorkbenchBlockModel',
-        config: { title: 'Chứng từ, Chatter & Xuất báo cáo Dịch vụ [W]', collection: 'latticeServiceTickets', showExport: true, showVoucherActions: true, showChatter: true },
+        config: {
+          title: 'Chứng từ, Chatter & Xuất báo cáo Dịch vụ [W]',
+          collection: 'latticeServiceTickets',
+          showExport: true,
+          showVoucherActions: true,
+          showChatter: true,
+          showPkiBadge: true,
+          showLineage: true,
+          showPrintVoucher: true,
+        },
       },
     ],
   },

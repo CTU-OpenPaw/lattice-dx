@@ -376,17 +376,25 @@ test('v2 schema export + backward-compatible v1/v2 validation + privilege escala
     validateSolutionBundle,
   } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
 
-  assert.equal(BUNDLE_SCHEMA_VERSION, 'latticedx.solution-bundle/v2');
+  assert.equal(BUNDLE_SCHEMA_VERSION, 'latticedx.solution-bundle/v3');
   assert.ok(ACCEPTED_SCHEMA_VERSIONS instanceof Set);
   assert.equal(ACCEPTED_SCHEMA_VERSIONS.has('latticedx.solution-bundle/v1'), true);
   assert.equal(ACCEPTED_SCHEMA_VERSIONS.has('latticedx.solution-bundle/v2'), true);
+  assert.equal(ACCEPTED_SCHEMA_VERSIONS.has('latticedx.solution-bundle/v3'), true);
 
   const { db } = makeSolutionBundleDbHarness();
-  const v2Bundle = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.3.0' });
-  assert.equal(v2Bundle.metadata.schemaVersion, 'latticedx.solution-bundle/v2');
+  const v3Bundle = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '1.0.0' });
+  assert.equal(v3Bundle.metadata.schemaVersion, 'latticedx.solution-bundle/v3');
+  assert.equal(v3Bundle.metadata.platformVersion, '1.0.0');
+  assert.equal(validateSolutionBundle(v3Bundle).valid, true);
+
+  // Accepts v1 and v2 bundles cleanly
+  const v2Bundle = structuredClone(v3Bundle);
+  v2Bundle.metadata.schemaVersion = 'latticedx.solution-bundle/v2';
+  delete v2Bundle.routesAndBlocks;
+  delete v2Bundle.governance;
   assert.equal(validateSolutionBundle(v2Bundle).valid, true);
 
-  // Accepts v1 bundles cleanly
   const v1Bundle = structuredClone(v2Bundle);
   v1Bundle.metadata.schemaVersion = 'latticedx.solution-bundle/v1';
   assert.equal(validateSolutionBundle(v1Bundle).valid, true);

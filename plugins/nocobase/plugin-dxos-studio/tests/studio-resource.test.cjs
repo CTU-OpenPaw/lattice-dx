@@ -366,7 +366,7 @@ test('composePortals attaches blocks, orders grid rows above seed row, and creat
   assert.equal(ctx.body.dxosBlocksAttached, true);
   assert.equal(ctx.body.createdPages, 6);
   assert.equal(ctx.body.mobilePagesCreated, 4);
-  assert.equal(ctx.body.attachedBlocks, 15);
+  assert.equal(ctx.body.attachedBlocks, 17);
   assert.equal(updatedGrids.length, 4);
   for (const slug of ['procurement', 'logistics', 'services']) {
     const wbModel = flowModels.find((m) => m.uid === `dxos-ov-${slug}-workbench`);
@@ -600,6 +600,9 @@ test('OVERVIEW_SPECS wires DxosRecordWorkbenchBlockModel into procurement, logis
       showExport: true,
       showVoucherActions: true,
       showChatter: true,
+      showPkiBadge: true,
+      showLineage: true,
+      showPrintVoucher: true,
     },
     services: {
       title: 'Chứng từ, Chatter & Xuất báo cáo Dịch vụ [W]',
@@ -607,6 +610,9 @@ test('OVERVIEW_SPECS wires DxosRecordWorkbenchBlockModel into procurement, logis
       showExport: true,
       showVoucherActions: true,
       showChatter: true,
+      showPkiBadge: true,
+      showLineage: true,
+      showPrintVoucher: true,
     },
   };
   for (const [slug, cfg] of Object.entries(expected)) {
@@ -1060,7 +1066,7 @@ test('solutionBundleExport restricts organizationId=all to root and scopes non-r
         state: { currentUser: { id: 20 }, currentRole: 'ldx_sysadmin', currentRoles: ['ldx_sysadmin'] },
         action: { params: { organizationId: badOrg } },
       }, async () => {}),
-      (err) => err.status === 403 && err.code === 'NATIVE_ORGANIZATION_MISMATCH',
+      (err) => err.status === 403 && err.code === 'DXOS_ORG_MISMATCH',
     );
   }
 

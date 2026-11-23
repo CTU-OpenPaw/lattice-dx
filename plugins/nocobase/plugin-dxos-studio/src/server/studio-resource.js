@@ -137,7 +137,7 @@ function buildPluginStatusList(rows) {
       sdkProvidedByHost: true,
       installed: Boolean(row),
       enabled: val(row, 'enabled') === true,
-      version: val(row, 'version') || '0.1.0',
+      version: val(row, 'version') || '1.0.0',
     };
   });
 }
@@ -154,6 +154,65 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
     } catch {
       throw fail('INVALID_SOLUTION_BUNDLE', 400, 'Invalid Solution Bundle JSON');
     }
+  }
+
+  function isRootCaller(ctx) {
+    const activeRole = ctx?.state?.currentRole;
+    if (activeRole) return activeRole === 'root';
+    const roles = Array.isArray(ctx?.state?.currentRoles) ? ctx.state.currentRoles : [];
+    return roles.includes('root');
+  }
+
+  async function resolveSolutionBundleScope(ctx, params, incomingBundle = null, { allowAllString = false } = {}) {
+    const requestedOrg = params.organizationId != null ? String(params.organizationId).trim() : '';
+    if (isRootCaller(ctx)) {
+      const metaOrg = incomingBundle?.metadata?.organizationId != null
+        ? String(incomingBundle.metadata.organizationId).trim()
+        : '';
+      const resolved = requestedOrg || (metaOrg && metaOrg !== 'all' ? metaOrg : '');
+      if (!allowAllString && resolved === 'all') {
+        return { isRoot: true, organizationId: null };
+      }
+      return { isRoot: true, organizationId: resolved || null };
+    }
+
+    const actor = await resolveServiceActor(db, ctx.state?.currentUser);
+    if (requestedOrg && requestedOrg !== actor.organizationId) {
+      throw fail(
+        'DXOS_ORG_MISMATCH',
+        403,
+        'Chỉ tài khoản root mới được thao tác gói giải pháp toàn hệ thống hoặc tổ chức khác.',
+      );
+    }
+    if (incomingBundle && typeof incomingBundle === 'object') {
+      const metaOrg = incomingBundle.metadata?.organizationId != null
+        ? String(incomingBundle.metadata.organizationId).trim()
+        : '';
+      if (metaOrg && metaOrg !== actor.organizationId) {
+        throw fail(
+          'DXOS_ORG_MISMATCH',
+          403,
+          'Gói giải pháp thuộc tổ chức khác hoặc phạm vi toàn hệ thống (all), vượt quá phạm vi tổ chức của bạn.',
+        );
+      }
+      const gov = incomingBundle.governance;
+      if (gov && typeof gov === 'object' && !Array.isArray(gov)) {
+        for (const key of ['decisionTables', 'slaPolicies', 'incidentRules']) {
+          const items = Array.isArray(gov[key]) ? gov[key] : [];
+          for (const item of items) {
+            const itemOrg = item?.organizationId != null ? String(item.organizationId).trim() : '';
+            if (itemOrg && itemOrg !== actor.organizationId) {
+              throw fail(
+                'DXOS_ORG_MISMATCH',
+                403,
+                `Bản ghi governance (${key}) thuộc tổ chức "${itemOrg}", vượt quá phạm vi "${actor.organizationId}".`,
+              );
+            }
+          }
+        }
+      }
+    }
+    return { isRoot: false, organizationId: actor.organizationId };
   }
 
   return {
@@ -417,23 +476,8 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
-      const isRoot = ctx.state?.currentRole === 'root';
-      const requestedOrg = params.organizationId ? String(params.organizationId).trim() : '';
-      let organizationId = null;
-      if (isRoot) {
-        organizationId = requestedOrg || null;
-      } else {
-        const actor = await resolveServiceActor(db, ctx.state?.currentUser);
-        if (requestedOrg === 'all' || (requestedOrg && requestedOrg !== actor.organizationId)) {
-          throw fail(
-            'NATIVE_ORGANIZATION_MISMATCH',
-            403,
-            'Chỉ tài khoản root mới được xuất gói giải pháp toàn hệ thống hoặc tổ chức khác.',
-          );
-        }
-        organizationId = actor.organizationId;
-      }
-      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.3.0' });
+      const { organizationId } = await resolveSolutionBundleScope(ctx, params, null, { allowAllString: true });
+      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '1.0.0' });
       return next();
     },
 
@@ -441,10 +485,11 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
+      await resolveSolutionBundleScope(ctx, params, null);
       const incoming = parseIncomingBundle(params.bundle);
+      const { organizationId } = await resolveSolutionBundleScope(ctx, params, incoming);
       const validation = validateSolutionBundle(incoming);
       if (!validation.valid) throw fail('INVALID_SOLUTION_BUNDLE', 400, validation.errors.join('; '));
-      const organizationId = params.organizationId ? String(params.organizationId).trim() : (incoming.metadata?.organizationId !== 'all' ? incoming.metadata?.organizationId : null);
       const current = await exportSolutionBundle(db, { organizationId });
       ctx.body = diffSolutionBundle(current, incoming);
       return next();
@@ -454,8 +499,9 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
+      await resolveSolutionBundleScope(ctx, params, null);
       const incoming = parseIncomingBundle(params.bundle);
-      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
+      const { organizationId } = await resolveSolutionBundleScope(ctx, params, incoming);
       const dryRun = params.dryRun === false ? false : true;
       const enableWorkflows = typeof params.enableWorkflows === 'string'
         ? params.enableWorkflows === 'true'
@@ -468,7 +514,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
-      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
+      const { organizationId } = await resolveSolutionBundleScope(ctx, params, null, { allowAllString: true });
       const snapshotUid = params.snapshotUid ? String(params.snapshotUid).trim() : '';
       ctx.body = await rollbackLastSolutionBundle(db, { organizationId, snapshotUid });
       return next();
