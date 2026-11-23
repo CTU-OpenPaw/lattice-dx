@@ -63,11 +63,11 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
 ### 5:30 – 9:00 · IT/OT WebGIS, 2-Way Digital Twin, Proactive Triage & GraphRAG #16 / HITL
 - **Màn hình:** `/p/incidents` -> Floating `PortalAgentLauncher` -> `/admin/settings/dxos-ai` (Tab `6. Duyệt AI (HITL)`).
 - **Thao tác & Thông điệp:**
-  1. Trên **`/p/incidents`**, chỉ vào **`DxosWebGisBlockModel`**: bản đồ các kho lạnh Việt Nam (`HUB-CT`, `COLD-CHILLER-CT-01`, `REEFER-TRUCK-HCM-02`) hiển thị trực tiếp trạng thái **Digital Twin Shadow** (`synced` / `pending_hitl` / `dispatched`).
+  1. Trên **`/p/incidents`**, chỉ vào **`DxosWebGisBlockModel`**: bản đồ các kho lạnh Việt Nam hiển thị trực tiếp từ các bản ghi DB đã seed (`COLD-CHILLER-CT-01`, `REEFER-TRUCK-HCM-02`, `COLD-HUB-DN-03` gắn tọa độ `LOC-CT-COLD-01`, `LOC-HCM-HUB-02`, `LOC-DN-HUB-03`; `HUB-CT` chỉ là marker dự phòng khi DB trống chưa seed) cùng trạng thái **Digital Twin Shadow** (`synced` / `pending_hitl` / `dispatched`).
   2. Chỉ **`DxosContextTelemetryBlockModel`** (telemetry nhiệt độ chuỗi thời gian có ngưỡng cảnh báo `8.9°C > 8°C`) và **`DxosAiProposalBlockModel`**.
   3. Mở **1 nút Agent nổi duy nhất (`PortalAgentLauncher`)** góc dưới phải -> nhập câu tiếng Việt tự nhiên:
-     > *"Nếu kho lạnh COLD-CHILLER-CT-01 gặp sự cố thì những lô hàng và đơn hàng nào bị ảnh hưởng?"*
-     - Hệ thống gọi **`#16 dxos_graph_impact_analysis`** truy vết từ `latticeAssets` -> `latticeStockLots` -> `latticeOrderLines` -> `latticeOrders` -> `latticeEpodRecords` (có redaction PII).
+     > *"Phân tích ảnh hưởng dây chuyền nếu kho lạnh COLD-CHILLER-CT-01 gặp sự cố quá nhiệt trên toàn bộ chuỗi"*
+     - Hệ thống gọi **`#16 dxos_graph_impact_analysis`** (`collection: 'latticeAssets'`, `recordCode: 'COLD-CHILLER-CT-01'`, `maxDepth: 3`) truy vết từ `latticeAssets` -> `latticeStockLots` -> `latticeOrderLines` -> `latticeOrders` -> `latticeEpodRecords` (có redaction PII).
   4. Chuyển sang **`/admin/settings/dxos-ai` -> Tab `6. Duyệt AI (HITL)`**:
      - Bấm **Quét Sự cố Chủ động (`dxosAi:triageScan`)** để thấy agent tự đối chiếu Twin/Kho/Đơn hàng và đẩy đề xuất `dxos_wms_hold_lot` hoặc `dxos_twin_set_desired` (khi lệch setpoint `> 2.0°C`) vào hàng chờ phê duyệt con người.
      - Giải thích cơ chế an toàn: **AI chỉ đề xuất, người có thẩm quyền ACL bấm Duyệt (`dxosAi:approveAction`) mới thực thi xuống CSDL & Node-RED MQTT downlink (`latticedx/<orgId>/<assetKey>/command`)**.

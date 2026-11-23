@@ -38,14 +38,14 @@ Name                                | Version | License    | Purpose | Path
 ================================================================================
 First-Party Workspace Applications & Shared Packages (Apache-2.0)
 ================================================================================
-Name               | Version | License    | Purpose | Path
--------------------|---------|------------|---------|-----------------------
-lattice-dx         | 1.0.0   | Apache-2.0 | Monorepo root orchestration & PoF/SBOM tooling | package.json
-@dx/contracts      | 0.1.0   | Apache-2.0 | Shared action, expression, workflow & workspace contracts | packages/contracts
-@dx/api            | 0.1.0   | Apache-2.0 | Fastify headless enterprise API service | apps/api
-@dx/agent-worker   | 0.1.0   | Apache-2.0 | Incident advisory worker (node:http) | apps/agent-worker
-@dx/file-scanner   | 0.1.0   | Apache-2.0 | ClamAV TCP + RustFS S3 file quarantine sidecar | apps/file-scanner
-uc1-procurement    | 0.1.0   | Apache-2.0 | Reference procurement package manifests | packages/uc1-procurement
+Name                       | Version | License    | Purpose | Path
+---------------------------|---------|------------|---------|-----------------------
+lattice-dx                 | 1.0.0   | Apache-2.0 | Monorepo root orchestration & PoF/SBOM tooling | package.json
+@dx/contracts              | 1.0.0   | Apache-2.0 | Shared action, expression, workflow & workspace contracts | packages/contracts
+@dx/api                    | 1.0.0   | Apache-2.0 | Fastify headless enterprise API service | apps/api
+@dx/agent-worker           | 1.0.0   | Apache-2.0 | Incident advisory worker (node:http) | apps/agent-worker
+@dx/file-scanner           | 1.0.0   | Apache-2.0 | ClamAV TCP + RustFS S3 file quarantine sidecar | apps/file-scanner
+@latticedx/uc1-procurement | 1.0.0   | Apache-2.0 | Reference procurement package manifests | packages/uc1-procurement
 
 ================================================================================
 Third-Party Dependencies, Host Runtime & External OCI Services

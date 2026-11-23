@@ -42,7 +42,7 @@ Tài liệu này hướng dẫn Giám khảo / Quản trị viên tự kiểm ch
 
 1. Mở `/admin/settings/dxos-studio` (**DX-OS Control Studio — Xây dựng Hệ thống từ NocoBase**).
 2. Tại tab **`1. Quy trình Poka-yoke`**:
-   - Chọn mẫu **`Điều phối Logistics 5 bước Poka-yoke (latticeOrders)`** hoặc **`Quy trình Phiếu Dịch vụ Nội bộ (latticeServiceTickets)`**, bấm **`Cài đặt quy trình vào NocoBase`**.
+   - Chọn mẫu **`Logistics liên phòng ban 5 bước (Đơn vận chuyển) (latticeOrders)`** hoặc **`Miền thứ 2 — Dịch vụ Nội bộ & Nghỉ phép (latticeServiceTickets)`**, bấm **`Cài đặt quy trình vào NocoBase`**.
    - Bấm lại lần nữa để kiểm chứng tính idempotent (`Quy trình "..." đã tồn tại`), rồi bấm **`Mở Workflow Designer`** xem đồ thị node nối tiếp `upstreamNode -> downstreamId`.
 3. Tại tab **`2. Dựng cổng đa-block`** & **`6. GitOps Bundle`**:
    - Bấm **`Dựng Cổng Đa-Block ngay`** để bảo đảm 4 cổng (`/p/procurement`, `/p/incidents`, `/p/logistics`, `/p/services`) và `/v/mobile` đồng bộ đủ block tùy biến.
@@ -56,7 +56,7 @@ Tài liệu này hướng dẫn Giám khảo / Quản trị viên tự kiểm ch
 ## Phút 7–11: 10 Native v2 BlockModels, WebGIS, Kanban, PKI/Lineage & Mobile PWA
 
 1. Mở **`/p/logistics`**: kiểm tra **`DxosKanbanScheduleBlockModel`** (chuyển đổi giữa chế độ Kanban 6 cột & Lịch biểu 7 ngày) và **`DxosRecordWorkbenchBlockModel`** (huy hiệu **Ed25519 PKI**, ngăn **Phả hệ dữ liệu Lineage**, nút **In chứng từ** dùng `<iframe sandbox="" srcDoc>`, và xuất **CSV/XLSX/PDF Unicode** kiểm soát RBAC).
-2. Mở **`/p/incidents`**: kiểm tra **`DxosWebGisBlockModel`** (bản đồ chuỗi lạnh Việt Nam `HUB-CT`, `COLD-CHILLER-CT-01` kèm trạng thái **Digital Twin Shadow**), **`DxosContextTelemetryBlockModel`**, **`DxosAiProposalBlockModel`**, và mở nút Agent nổi duy nhất góc dưới phải (`PortalAgentLauncher`) để thử tra cứu GraphRAG `#16 dxos_graph_impact_analysis`.
+2. Mở **`/p/incidents`**: kiểm tra **`DxosWebGisBlockModel`** (bản đồ chuỗi lạnh Việt Nam hiển thị các bản ghi DB đã seed gồm `COLD-CHILLER-CT-01`, `REEFER-TRUCK-HCM-02`, `COLD-HUB-DN-03` tại `LOC-CT-COLD-01`, `LOC-HCM-HUB-02`, `LOC-DN-HUB-03` kèm trạng thái **Digital Twin Shadow**; `HUB-CT` chỉ xuất hiện làm marker dự phòng khi DB trống chưa seed), **`DxosContextTelemetryBlockModel`**, **`DxosAiProposalBlockModel`**, và mở nút Agent nổi duy nhất góc dưới phải (`PortalAgentLauncher`) để thử tra cứu GraphRAG `#16 dxos_graph_impact_analysis`.
 3. Mở **`/p/services`**: kiểm tra **`DxosParaVaultBlockModel`** (`latticeParaDocuments`), thử bật **UI Editor -> `Add block`** và kiểm tra sự hiện diện của toàn bộ **10 Native v2 BlockModels**:
    - `DxosPortalHeroBlockModel` (`DX-OS Portal Hero & Quick Actions`)
    - `DxosKpiMetricBlockModel` (`DX-OS KPI Metric Grid`)
