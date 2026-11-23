@@ -8,7 +8,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +18,49 @@ export const REPO_ROOT = resolve(__dirname, '..');
 
 export const BANNED_LICENSE_RE = /\bbsl(?:-1\.1)?\b|business[\s_-]*source[\s_-]*license/i;
 export const BANNED_TECH_RE = /\b(thingsboard|emqx)\b/i;
+
+export const OCI_IMAGE_LICENSES = Object.freeze({
+  'apache/apisix': () => ({ kind: 'id', value: 'Apache-2.0' }),
+  caddy: () => ({ kind: 'id', value: 'Apache-2.0' }),
+  'clamav/clamav': () => ({ kind: 'id', value: 'GPL-2.0-only' }),
+  'eclipse-mosquitto': () => ({ kind: 'expression', value: 'EPL-2.0 OR BSD-3-Clause' }),
+  'gotenberg/gotenberg': () => ({ kind: 'id', value: 'MIT' }),
+  'grafana/grafana-oss': () => ({ kind: 'id', value: 'AGPL-3.0-only' }),
+  'adorsys/keycloak-config-cli': () => ({ kind: 'id', value: 'Apache-2.0' }),
+  'quay.io/keycloak/keycloak': () => ({ kind: 'id', value: 'Apache-2.0' }),
+  mongo: () => ({ kind: 'id', value: 'SSPL-1.0' }),
+  'n8nio/n8n': () => ({ kind: 'name', value: 'Sustainable Use License' }),
+  'nocobase/nocobase': () => ({
+    kind: 'name',
+    value: 'NocoBase License Agreement (2026-02-24; Apache-2.0 + Clauses 4.2, 5.1-5.4)',
+  }),
+  'nodered/node-red': () => ({ kind: 'id', value: 'Apache-2.0' }),
+  'otel/opentelemetry-collector-contrib': () => ({ kind: 'id', value: 'Apache-2.0' }),
+  'fiware/orion-ld': () => ({ kind: 'id', value: 'AGPL-3.0-only' }),
+  'pgvector/pgvector': () => ({ kind: 'id', value: 'PostgreSQL' }),
+  postgres: () => ({ kind: 'id', value: 'PostgreSQL' }),
+  'prom/prometheus': () => ({ kind: 'id', value: 'Apache-2.0' }),
+  redis: (tag) => {
+    if (/^7\.[0-2](?:$|-)/.test(tag || '')) return { kind: 'id', value: 'BSD-3-Clause' };
+    if (/^[89]\./.test(tag || '')) return { kind: 'expression', value: 'LicenseRef-RSALv2 OR SSPL-1.0 OR AGPL-3.0-only' };
+    return { kind: 'expression', value: 'LicenseRef-RSALv2 OR SSPL-1.0' };
+  },
+  'rustfs/rustfs': () => ({ kind: 'id', value: 'Apache-2.0' }),
+  'timescale/timescaledb': (tag) => (
+    /(?:^|-)oss(?:$|-)/i.test(tag || '')
+      ? { kind: 'id', value: 'Apache-2.0' }
+      : { kind: 'name', value: 'Timescale License (TSL)' }
+  ),
+});
+
+const PLATFORM_BINARY_FAMILIES = [
+  { re: /^@esbuild\/[a-z0-9-]+$/i, parent: 'esbuild', siblingRe: /^@esbuild\/[a-z0-9-]+$/i },
+  { re: /^@rolldown\/binding-[a-z0-9-]+$/i, parent: 'rolldown', siblingRe: /^@rolldown\/binding-[a-z0-9-]+$/i },
+  { re: /^@typescript\/typescript-[a-z0-9-]+$/i, parent: 'typescript', siblingRe: /^@typescript\/typescript-[a-z0-9-]+$/i },
+  { re: /^lightningcss-[a-z0-9-]+$/i, parent: 'lightningcss', siblingRe: /^lightningcss-[a-z0-9-]+$/i },
+  { re: /^@img\/sharp-(?:libvips-)?[a-z0-9-]+$/i, parent: 'sharp', siblingRe: /^@img\/sharp-(?:libvips-)?[a-z0-9-]+$/i },
+  { re: /^@next\/swc-[a-z0-9-]+$/i, parent: 'next', siblingRe: /^@next\/swc-[a-z0-9-]+$/i },
+];
 
 function compareAscii(a, b) {
   if (a === b) return 0;
@@ -72,11 +115,185 @@ export function assertAllowedComponentName(nameValue, contextLabel) {
   }
 }
 
+function classifyLicenseValue(raw) {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return null;
+  if (/\s+(?:AND|OR|WITH)\s+|[()]/i.test(trimmed)) {
+    return { kind: 'expression', value: trimmed };
+  }
+  if (/\s/.test(trimmed)) {
+    return { kind: 'name', value: trimmed };
+  }
+  return { kind: 'id', value: trimmed };
+}
+
+function formatCycloneDxLicenseItem(item) {
+  if (!item) return null;
+  if (item.kind === 'expression') return { expression: item.value };
+  if (item.kind === 'name') return { license: { name: item.value } };
+  return { license: { id: item.value } };
+}
+
+function buildCycloneDxLicenses(licenseValues) {
+  const rawList = Array.isArray(licenseValues) ? licenseValues : [licenseValues];
+  const classified = rawList
+    .map((entry) => (typeof entry === 'object' && entry && entry.kind ? entry : classifyLicenseValue(entry)))
+    .filter(Boolean);
+  if (classified.length === 0) return undefined;
+  if (classified.length === 1) {
+    return [formatCycloneDxLicenseItem(classified[0])];
+  }
+  if (classified.some((item) => item.kind === 'expression')) {
+    return [{ expression: classified.map((item) => `(${item.value})`).join(' AND ') }];
+  }
+  return classified.map(formatCycloneDxLicenseItem);
+}
+
 function buildCycloneDxLicense(licenseStr) {
   if (!licenseStr || typeof licenseStr !== 'string') return undefined;
-  const trimmed = licenseStr.trim();
-  if (!trimmed) return undefined;
-  return [{ license: { id: trimmed } }];
+  return buildCycloneDxLicenses([licenseStr]);
+}
+
+export function resolveOciImageLicense(repo, tag = '') {
+  const normalizedRepo = String(repo || '')
+    .trim()
+    .replace(/^docker\.io\/(?:library\/)?/i, '')
+    .replace(/^library\//i, '');
+  const resolver = OCI_IMAGE_LICENSES[normalizedRepo];
+  if (typeof resolver !== 'function') return null;
+  return resolver(String(tag || '').trim());
+}
+
+function extractPackageLicense(pkg) {
+  if (!pkg || typeof pkg !== 'object') return null;
+  if (typeof pkg.license === 'string' && pkg.license.trim()) {
+    return pkg.license.trim();
+  }
+  if (pkg.license && typeof pkg.license === 'object' && typeof pkg.license.type === 'string' && pkg.license.type.trim()) {
+    return pkg.license.type.trim();
+  }
+  if (Array.isArray(pkg.licenses) && pkg.licenses.length > 0) {
+    const parts = pkg.licenses
+      .map((item) => (typeof item === 'string' ? item.trim() : String(item?.type || '').trim()))
+      .filter(Boolean);
+    if (parts.length === 1) return parts[0];
+    if (parts.length > 1) return parts.join(' OR ');
+  }
+  return null;
+}
+
+function collectInstalledNpmLicenses(rootDir) {
+  const exactMap = new Map();
+  const visitedDirs = new Set();
+
+  const recordManifest = (pkgJsonPath) => {
+    if (!existsSync(pkgJsonPath)) return;
+    let pkg;
+    try {
+      pkg = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
+    } catch {
+      return;
+    }
+    const name = typeof pkg?.name === 'string' ? pkg.name.trim() : '';
+    const version = typeof pkg?.version === 'string' ? pkg.version.trim() : '';
+    const lic = extractPackageLicense(pkg);
+    if (!name || !version || !lic) return;
+    const key = `${name}@${version}`;
+    if (!exactMap.has(key)) exactMap.set(key, new Set());
+    exactMap.get(key).add(lic);
+  };
+
+  const scanNodeModulesDir = (nmDir) => {
+    if (!existsSync(nmDir)) return;
+    let real;
+    try {
+      real = realpathSync(nmDir);
+    } catch {
+      return;
+    }
+    if (visitedDirs.has(real)) return;
+    visitedDirs.add(real);
+
+    let entries;
+    try {
+      entries = readdirSync(nmDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (entry.name === '.bin' || entry.name === '.cache') continue;
+      const full = join(nmDir, entry.name);
+      if (entry.name === '.pnpm' && entry.isDirectory()) {
+        let storeEntries;
+        try {
+          storeEntries = readdirSync(full, { withFileTypes: true });
+        } catch {
+          storeEntries = [];
+        }
+        for (const storeEntry of storeEntries) {
+          if (!storeEntry.isDirectory()) continue;
+          scanNodeModulesDir(join(full, storeEntry.name, 'node_modules'));
+        }
+        continue;
+      }
+
+      if (entry.name.startsWith('@')) {
+        let scopeEntries;
+        try {
+          scopeEntries = readdirSync(full, { withFileTypes: true });
+        } catch {
+          scopeEntries = [];
+        }
+        for (const scoped of scopeEntries) {
+          if (!scoped.isDirectory() && !scoped.isSymbolicLink()) continue;
+          const pkgDir = join(full, scoped.name);
+          recordManifest(join(pkgDir, 'package.json'));
+          const nestedNm = join(pkgDir, 'node_modules');
+          if (existsSync(nestedNm)) scanNodeModulesDir(nestedNm);
+        }
+        continue;
+      }
+
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      recordManifest(join(full, 'package.json'));
+      const nestedNm = join(full, 'node_modules');
+      if (existsSync(nestedNm)) scanNodeModulesDir(nestedNm);
+    }
+  };
+
+  scanNodeModulesDir(join(rootDir, 'node_modules'));
+  for (const base of [join(rootDir, 'apps'), join(rootDir, 'packages'), join(rootDir, 'plugins', 'nocobase')]) {
+    if (!existsSync(base)) continue;
+    for (const entry of readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      scanNodeModulesDir(join(base, entry.name, 'node_modules'));
+    }
+  }
+
+  return exactMap;
+}
+
+function resolveInstalledLicenseForPackage(name, version, installedMap) {
+  if (!installedMap || installedMap.size === 0) return [];
+  const exactKey = `${name}@${version}`;
+  if (installedMap.has(exactKey)) {
+    return Array.from(installedMap.get(exactKey)).sort(compareAscii);
+  }
+
+  const family = PLATFORM_BINARY_FAMILIES.find((item) => item.re.test(name));
+  if (!family) return [];
+
+  const siblingLicenses = new Set();
+  const suffix = `@${version}`;
+  for (const [key, licSet] of installedMap.entries()) {
+    if (!key.endsWith(suffix)) continue;
+    const candidateName = key.slice(0, key.length - suffix.length);
+    if (candidateName === family.parent || family.siblingRe.test(candidateName)) {
+      for (const lic of licSet) siblingLicenses.add(lic);
+    }
+  }
+  return siblingLicenses.size === 1 ? Array.from(siblingLicenses) : [];
 }
 
 function collectPackageManifestDirs(baseDir) {
@@ -300,6 +517,10 @@ export function parseComposeImages(rootDir) {
       const { repo, tag, digest, shortName } = splitImageReference(ref);
       const tagQuery = tag ? `&tag=${encodeURIComponent(tag)}` : '';
       const purl = `pkg:oci/${encodeURIComponent(shortName)}@sha256%3A${digest}?repository_url=${encodeURIComponent(repo)}${tagQuery}`;
+      const ociLicense = resolveOciImageLicense(repo, tag);
+      if (ociLicense) {
+        assertAllowedLicense(ociLicense.value, `OCI image ${tag ? `${repo}:${tag}` : repo}`);
+      }
       return {
         type: 'container',
         'bom-ref': purl,
@@ -307,6 +528,7 @@ export function parseComposeImages(rootDir) {
         version: `sha256:${digest}`,
         purl,
         hashes: [{ alg: 'SHA-256', content: digest }],
+        ...(ociLicense ? { licenses: buildCycloneDxLicenses([ociLicense]) } : {}),
         properties: [
           { name: 'latticedx:category', value: 'oci-image' },
           { name: 'latticedx:imageRef', value: ref },
@@ -316,7 +538,7 @@ export function parseComposeImages(rootDir) {
     });
 }
 
-function mergeThirdPartyEntries(entries) {
+function mergeThirdPartyEntries(entries, installedLicenseMap = new Map()) {
   const merged = new Map();
   for (const entry of entries) {
     const purl = encodeNpmPurl(entry.name, entry.version);
@@ -341,6 +563,11 @@ function mergeThirdPartyEntries(entries) {
   return Array.from(merged.values())
     .sort((a, b) => compareAscii(a.purl, b.purl))
     .map((item) => {
+      if (item.licenses.size === 0) {
+        for (const diskLic of resolveInstalledLicenseForPackage(item.name, item.version, installedLicenseMap)) {
+          item.licenses.add(diskLic);
+        }
+      }
       const licensesList = Array.from(item.licenses).sort(compareAscii);
       for (const lic of licensesList) {
         assertAllowedLicense(lic, `${item.name}@${item.version}`);
@@ -349,6 +576,7 @@ function mergeThirdPartyEntries(entries) {
         .sort(([ka], [kb]) => compareAscii(ka, kb))
         .map(([, val]) => val);
       const sourcesList = Array.from(item.sources).sort(compareAscii);
+      const licenses = buildCycloneDxLicenses(licensesList);
 
       return {
         type: 'library',
@@ -357,7 +585,7 @@ function mergeThirdPartyEntries(entries) {
         version: item.version,
         purl: item.purl,
         ...(hashesList.length > 0 ? { hashes: hashesList } : {}),
-        ...(licensesList.length > 0 ? { licenses: licensesList.map((id) => ({ license: { id } })) } : {}),
+        ...(licenses ? { licenses } : {}),
         properties: [
           { name: 'latticedx:category', value: 'npm-dependency' },
           { name: 'latticedx:lockSources', value: sourcesList.join(',') },
@@ -391,7 +619,8 @@ export function generateSbom({ rootDir = REPO_ROOT } = {}) {
     ? parseNpmPackageLock(readJsonSafe(authLockPath), authLockRel)
     : [];
 
-  const thirdPartyComponents = mergeThirdPartyEntries([...pnpmEntries, ...authEntries]);
+  const installedLicenseMap = collectInstalledNpmLicenses(rootDir);
+  const thirdPartyComponents = mergeThirdPartyEntries([...pnpmEntries, ...authEntries], installedLicenseMap);
   const containerComponents = parseComposeImages(rootDir);
 
   const components = [

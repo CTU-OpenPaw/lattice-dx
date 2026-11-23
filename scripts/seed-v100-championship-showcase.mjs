@@ -231,8 +231,8 @@ async function seedDigitalTwinShadow(api, organizationId, chillerAsset) {
       assetId: chillerAsset.id,
       desiredPatch: {
         targetTempC: 4.0,
-        compressorMode: 'eco-auto',
-        doorLocked: true,
+        fanMode: 'eco',
+        doorLock: 'locked',
       },
     },
   });
@@ -449,9 +449,34 @@ async function seedDmnTable(api, organizationId) {
   return { seeded: true, tableKey: 'cold_chain_approval_v1', id: saved?.table?.id ?? null };
 }
 
+const EXPECTED_DELEGATION_SKIP_RE = /\b(DELEGATION_TARGET_INACTIVE|DELEGATION_USER_INVALID|DELEGATION_SELF_FORBIDDEN|NATIVE_MEMBERSHIP_REQUIRED)\b/i;
+
+async function fetchPaginatedItems(api, buildPath, { pageSize = 100, getItemKey, maxPages = 50 } = {}) {
+  const collected = [];
+  const seenKeys = new Set();
+  for (let page = 1; page <= maxPages; page += 1) {
+    const res = await api(buildPath(page, pageSize));
+    const items = unwrapList(res);
+    if (!items.length) break;
+    let addedOnPage = 0;
+    for (const item of items) {
+      const key = typeof getItemKey === 'function' ? getItemKey(item) : null;
+      if (key != null) {
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+      }
+      collected.push(item);
+      addedOnPage += 1;
+    }
+    if (addedOnPage === 0 || items.length < pageSize) break;
+    if (typeof res?.total === 'number' && page * pageSize >= res.total) break;
+  }
+  return collected;
+}
+
 async function seedDelegationSample(api, organizationId, ctx) {
   const existing = unwrapList(
-    await api(`dxosDelegations:list?organizationId=${encodeURIComponent(organizationId)}`).catch(() => []),
+    await api(`dxosDelegations:list?organizationId=${encodeURIComponent(organizationId)}`),
   );
   if (existing.some((d) => d.status === 'active' || String(d.reason || '').includes('[v1.0.0]'))) {
     return { seeded: false, existingCount: existing.length };
@@ -481,16 +506,31 @@ async function seedDelegationSample(api, organizationId, ctx) {
     });
     return { seeded: true, delegationUid: created?.delegationUid || created?.delegation?.delegationUid || null };
   } catch (err) {
-    return { seeded: false, skippedReason: err.message };
+    const message = String(err?.message || '');
+    if (EXPECTED_DELEGATION_SKIP_RE.test(message)) {
+      return { seeded: false, skippedReason: message };
+    }
+    throw err;
   }
 }
 
 async function seedPkiAndColdSnapshot(api, organizationId, orderId) {
   const pubKey = await api(`dxosLedger:publicKey?organizationId=${encodeURIComponent(organizationId)}`);
 
-  const ledgerEntries = unwrapList(
-    await api(`dxosLedger:entries?organizationId=${encodeURIComponent(organizationId)}&limit=100`).catch(() => []),
-  );
+  const ledgerEntries = orderId != null
+    ? await fetchPaginatedItems(
+      api,
+      (page, pageSize) => (
+        `dxosLedger:entries?organizationId=${encodeURIComponent(organizationId)}`
+        + `&targetCollection=latticeOrders&targetRecordId=${encodeURIComponent(String(orderId))}`
+        + `&page=${page}&pageSize=${pageSize}`
+      ),
+      {
+        pageSize: 100,
+        getItemKey: (e) => (e?.id != null ? `id:${e.id}` : (e?.seq != null ? `seq:${e.seq}` : null)),
+      },
+    )
+    : [];
   const alreadySigned = orderId != null && ledgerEntries.some(
     (e) => e.targetCollection === 'latticeOrders' && String(e.targetRecordId) === String(orderId),
   );
@@ -508,10 +548,19 @@ async function seedPkiAndColdSnapshot(api, organizationId, orderId) {
     });
   }
 
-  const existingSnapshots = unwrapList(
-    await api(`dxosDataGov:listSnapshots?organizationId=${encodeURIComponent(organizationId)}&limit=50`).catch(() => []),
+  const existingSnapshots = await fetchPaginatedItems(
+    api,
+    (page, pageSize) => (
+      `dxosDataGov:listSnapshots?organizationId=${encodeURIComponent(organizationId)}`
+      + `&sourceCollection=latticeOrders&page=${page}&pageSize=${pageSize}`
+    ),
+    {
+      pageSize: 100,
+      getItemKey: (s) => (s?.snapshotUid ? `uid:${s.snapshotUid}` : (s?.id != null ? `id:${s.id}` : null)),
+    },
   );
-  const hasOrderSnapshot = existingSnapshots.some((s) => s.sourceCollection === 'latticeOrders');
+  const matchingOrderSnapshot = existingSnapshots.find((s) => s.sourceCollection === 'latticeOrders') || null;
+  const hasOrderSnapshot = Boolean(matchingOrderSnapshot);
   let frozenSnapshot = null;
   if (!hasOrderSnapshot) {
     frozenSnapshot = await api('dxosDataGov:freezeSnapshot', {
@@ -530,7 +579,7 @@ async function seedPkiAndColdSnapshot(api, organizationId, orderId) {
     signedNow: Boolean(signedResult?.signed),
     alreadySigned,
     frozenNow: Boolean(frozenSnapshot?.snapshotUid),
-    snapshotUid: frozenSnapshot?.snapshotUid || existingSnapshots[0]?.snapshotUid || null,
+    snapshotUid: frozenSnapshot?.snapshotUid || matchingOrderSnapshot?.snapshotUid || null,
   };
 }
 

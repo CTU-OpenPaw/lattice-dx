@@ -17,6 +17,7 @@ import {
   generateSbom,
   parseComposeImages,
   parsePnpmLockPackages,
+  resolveOciImageLicense,
   runSbomCli,
 } from '../generate-sbom.mjs';
 
@@ -104,7 +105,98 @@ test('generateSbom produces deterministic CycloneDX 1.5 BOM covering workspace p
   for (const img of ociImages) {
     assert.match(img.version, /^sha256:[a-f0-9]{64}$/);
     assert.equal(img.hashes?.[0]?.alg, 'SHA-256');
+    assert.ok(Array.isArray(img.licenses) && img.licenses.length > 0, `Missing OCI license on ${img.name}`);
   }
+
+  const byName = new Map(first.bom.components.map((c) => [`${c.name}@${c.version}`, c]));
+  const workspaceComps = first.bom.components.filter((c) =>
+    c.properties?.some((p) => p.name === 'latticedx:category' && ['workspace-app', 'workspace-package', 'nocobase-plugin'].includes(p.value)),
+  );
+  assert.equal(workspaceComps.length, 12);
+  for (const wsComp of workspaceComps) {
+    assert.equal(wsComp.version, '1.0.0', `Expected workspace component ${wsComp.name} to be 1.0.0`);
+    assert.equal(wsComp.licenses?.[0]?.license?.id, 'Apache-2.0');
+  }
+
+  const npmDeps = first.bom.components.filter((c) => c.properties?.some((p) => p.name === 'latticedx:category' && p.value === 'npm-dependency'));
+  const npmWithLicenses = npmDeps.filter((c) => Array.isArray(c.licenses) && c.licenses.length > 0);
+  assert.ok(npmWithLicenses.length >= 176, `Expected >= 176 npm dependencies with resolved licenses, got ${npmWithLicenses.length}/${npmDeps.length}`);
+  assert.equal(byName.get('@esbuild/linux-x64@0.28.2')?.licenses?.[0]?.license?.id, 'MIT');
+  assert.equal(byName.get('typescript@7.0.2')?.licenses?.[0]?.license?.id, 'Apache-2.0');
+  assert.equal(byName.get('lightningcss@1.33.0')?.licenses?.[0]?.license?.id, 'MPL-2.0');
+
+  const postgresImg = ociImages.find((c) => c.name.startsWith('postgres:'));
+  assert.equal(postgresImg?.licenses?.[0]?.license?.id, 'PostgreSQL');
+  const mosquittoImg = ociImages.find((c) => c.name.startsWith('eclipse-mosquitto:'));
+  assert.equal(mosquittoImg?.licenses?.[0]?.expression, 'EPL-2.0 OR BSD-3-Clause');
+  const redisImg = ociImages.find((c) => c.name.startsWith('redis:'));
+  assert.equal(redisImg?.licenses?.[0]?.expression, 'LicenseRef-RSALv2 OR SSPL-1.0');
+  const n8nImg = ociImages.find((c) => c.name.startsWith('n8nio/n8n:'));
+  assert.equal(n8nImg?.licenses?.[0]?.license?.name, 'Sustainable Use License');
+});
+
+test('generateSbom resolves npm licenses from node_modules / .pnpm, rejects BSL-1.1 in node_modules, and falls back gracefully when node_modules is absent', (t) => {
+  // 1. Without node_modules: falls back gracefully while preserving OCI & lockfile licenses
+  const noNmDir = makeTempProject(t);
+  writeMinimalProject(noNmDir);
+  const noNmBom = generateSbom({ rootDir: noNmDir }).bom;
+  const zodNoNm = noNmBom.components.find((c) => c.name === 'zod');
+  assert.equal(zodNoNm?.licenses, undefined);
+  const pgNoNm = noNmBom.components.find((c) => c.type === 'container');
+  assert.equal(pgNoNm?.licenses?.[0]?.license?.id, 'PostgreSQL');
+
+  // 2. With node_modules/.pnpm + cross-platform sibling + plugin node_modules
+  const withNmDir = makeTempProject(t);
+  writeMinimalProject(withNmDir, {
+    pnpmLockContent: [
+      "lockfileVersion: '9.0'",
+      'packages:',
+      '',
+      '  zod@3.24.2:',
+      '    resolution: {integrity: sha512-2kJm+q0S0vP9v4fK5v7z7Q==}',
+      '',
+      "  '@esbuild/linux-x64@0.28.2':",
+      '    resolution: {integrity: sha512-1kJm+q0S0vP9v4fK5v7z7Q==}',
+      '',
+      "  '@esbuild/win32-x64@0.28.2':",
+      '    resolution: {integrity: sha512-3kJm+q0S0vP9v4fK5v7z7Q==}',
+      '',
+      '  openid-client@6.8.9:',
+      '    resolution: {integrity: sha512-4kJm+q0S0vP9v4fK5v7z7Q==}',
+      '',
+      'snapshots:',
+      '',
+    ].join('\n'),
+  });
+  const zodPkgDir = join(withNmDir, 'node_modules', '.pnpm', 'zod@3.24.2', 'node_modules', 'zod');
+  mkdirSync(zodPkgDir, { recursive: true });
+  writeFileSync(join(zodPkgDir, 'package.json'), JSON.stringify({ name: 'zod', version: '3.24.2', license: 'MIT' }));
+
+  const esbuildWinDir = join(withNmDir, 'node_modules', '.pnpm', '@esbuild+win32-x64@0.28.2', 'node_modules', '@esbuild', 'win32-x64');
+  mkdirSync(esbuildWinDir, { recursive: true });
+  writeFileSync(join(esbuildWinDir, 'package.json'), JSON.stringify({ name: '@esbuild/win32-x64', version: '0.28.2', license: 'MIT' }));
+
+  const pluginNmDir = join(withNmDir, 'plugins', 'nocobase', 'plugin-enterprise-auth', 'node_modules', 'openid-client');
+  mkdirSync(pluginNmDir, { recursive: true });
+  writeFileSync(join(pluginNmDir, 'package.json'), JSON.stringify({ name: 'openid-client', version: '6.8.9', license: 'MIT' }));
+
+  const resolvedBom = generateSbom({ rootDir: withNmDir }).bom;
+  assert.equal(resolvedBom.components.find((c) => c.name === 'zod')?.licenses?.[0]?.license?.id, 'MIT');
+  assert.equal(resolvedBom.components.find((c) => c.name === '@esbuild/win32-x64')?.licenses?.[0]?.license?.id, 'MIT');
+  assert.equal(resolvedBom.components.find((c) => c.name === '@esbuild/linux-x64')?.licenses?.[0]?.license?.id, 'MIT');
+  assert.equal(resolvedBom.components.find((c) => c.name === 'openid-client')?.licenses?.[0]?.license?.id, 'MIT');
+
+  // 3. Rejects BSL-1.1 declared inside installed node_modules manifest
+  const bannedNmDir = makeTempProject(t);
+  writeMinimalProject(bannedNmDir);
+  const badZodDir = join(bannedNmDir, 'node_modules', '.pnpm', 'zod@3.24.2', 'node_modules', 'zod');
+  mkdirSync(badZodDir, { recursive: true });
+  writeFileSync(join(badZodDir, 'package.json'), JSON.stringify({ name: 'zod', version: '3.24.2', license: 'BSL-1.1' }));
+  assert.throws(() => generateSbom({ rootDir: bannedNmDir }), /Banned license/);
+
+  // 4. Verify timescale non-oss vs oss tag license resolution
+  assert.equal(resolveOciImageLicense('timescale/timescaledb', '2.19.3-pg16-oss')?.value, 'Apache-2.0');
+  assert.equal(resolveOciImageLicense('timescale/timescaledb', '2.19.3-pg16')?.value, 'Timescale License (TSL)');
 });
 
 test('parsePnpmLockPackages handles scoped packages and hashes accurately', () => {

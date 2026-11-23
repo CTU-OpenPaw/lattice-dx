@@ -16,7 +16,7 @@ import { assertSafeLabOrigin } from './setup-native-multi-portal-demo.mjs';
 const DEFAULT_ORG = 'native-ui-lab';
 const DEMO_PASS = process.env.NATIVE_DEMO_PASSWORD ?? 'NativeLab-2026!';
 
-export function parseHeadlessPaasArgs(argv) {
+export function parseHeadlessAcceptanceArgs(argv) {
   let origin = null;
   let reportPath = null;
   let organizationId = DEFAULT_ORG;
@@ -38,7 +38,9 @@ export function parseHeadlessPaasArgs(argv) {
   return { origin, reportPath, organizationId };
 }
 
-export async function createHeadlessPaasCaller(origin) {
+export const parseHeadlessPaasArgs = parseHeadlessAcceptanceArgs;
+
+export async function createHeadlessPaaSCallers(origin) {
   const safeOrigin = assertSafeLabOrigin(origin);
   const tokens = {};
 
@@ -58,7 +60,10 @@ export async function createHeadlessPaasCaller(origin) {
     process.env.NOCOBASE_ADMIN_EMAIL ?? 'admin@nocobase.com',
     process.env.NOCOBASE_ADMIN_PASSWORD ?? 'admin123',
   );
-  tokens.employee = await signIn('native.lab.employee@example.invalid', DEMO_PASS);
+  tokens.employee = await signIn(
+    process.env.NATIVE_DEMO_EMPLOYEE_EMAIL || 'native.lab.employee@example.invalid',
+    DEMO_PASS,
+  );
 
   return async function callActor(actorRole, path, { method = 'GET', values, bearerToken } = {}) {
     const cleanPath = String(path || '').replace(/^\/+/, '');
@@ -95,8 +100,9 @@ export async function createHeadlessPaasCaller(origin) {
   };
 }
 
-export async function runHeadlessPaasAcceptance(callActor, { organizationId = DEFAULT_ORG } = {}) {
-  const encFilter = (obj) => `filter=${encodeURIComponent(JSON.stringify(obj))}`;
+export const createHeadlessPaasCaller = createHeadlessPaaSCallers;
+
+export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DEFAULT_ORG } = {}) {
   const okActor = async (actorRole, path, opts) => {
     const res = await callActor(actorRole, path, opts);
     assert.ok(
@@ -110,6 +116,8 @@ export async function runHeadlessPaasAcceptance(callActor, { organizationId = DE
   const cleanupIds = {
     apiKeyId: null,
     apiKeyRevoked: false,
+    frozenSnapshotId: null,
+    frozenSnapshotUid: null,
     orderId: null,
     orderLineId: null,
     lotIds: [],
@@ -270,11 +278,18 @@ export async function runHeadlessPaasAcceptance(callActor, { organizationId = DE
     assert.equal(frozen.status, 'sealed');
     assert.ok(frozen.snapshotUid, 'freezeSnapshot missing snapshotUid');
     assert.ok(frozen.signatureBase64, 'freezeSnapshot missing signatureBase64');
+    cleanupIds.frozenSnapshotUid = frozen.snapshotUid;
+    if (frozen.id != null) {
+      cleanupIds.frozenSnapshotId = frozen.id;
+    }
 
     const getSnapRes = await okActor(
       'root',
       `dxosDataGov:getSnapshot?organizationId=${encodeURIComponent(organizationId)}&snapshotUid=${encodeURIComponent(frozen.snapshotUid)}`,
     );
+    if (!cleanupIds.frozenSnapshotId && getSnapRes.data?.id != null) {
+      cleanupIds.frozenSnapshotId = getSnapRes.data.id;
+    }
     assert.equal(getSnapRes.data?.hashVerified, true);
     assert.equal(getSnapRes.data?.signatureVerified, true);
 
@@ -496,7 +511,7 @@ export async function runHeadlessPaasAcceptance(callActor, { organizationId = DE
       values: {
         organizationId,
         assetId: tempAsset.id,
-        desiredPatch: { targetTempC: 4.0, doorLocked: true },
+        desiredPatch: { targetTempC: 4.0, doorLock: 'locked' },
       },
     });
     assert.equal(baseDesired.data?.gatedByHitl, false);
@@ -539,7 +554,9 @@ export async function runHeadlessPaasAcceptance(callActor, { organizationId = DE
         contentBase64: Buffer.from(sampleDoc, 'utf8').toString('base64'),
       },
     });
-    assert.equal(extractRes.data?.fields?.code, `ORD-OCR-${suffix}`);
+    assert.equal(extractRes.data?.targetCollection, 'latticeOrders');
+    assert.equal(extractRes.data?.suggestedValues?.code, `ORD-OCR-${suffix}`);
+    assert.ok(typeof extractRes.data?.confidence === 'number' && extractRes.data.confidence > 0);
 
     const triageRes = await okActor('root', 'dxosAi:triageScan', {
       method: 'POST',
@@ -551,7 +568,7 @@ export async function runHeadlessPaasAcceptance(callActor, { organizationId = DE
     const bundleRes = await okActor('root', `dxosStudio:solutionBundleExport?organizationId=${encodeURIComponent(organizationId)}`);
     const bundle = bundleRes.data || {};
     assert.equal(bundle.metadata?.organizationId, organizationId);
-    assert.match(String(bundle.metadata?.schemaVersion || ''), /^latticedx\.solution-bundle\/v[23]$/);
+    assert.equal(bundle.metadata?.schemaVersion, 'latticedx.solution-bundle/v3');
     assert.ok(typeof bundle.metadata?.contentSha256 === 'string' && bundle.metadata.contentSha256.length >= 32);
     assert.ok(Array.isArray(bundle.roles) && Array.isArray(bundle.portals));
     checks.autofillTriageAndBundleOk = true;
@@ -575,6 +592,25 @@ export async function runHeadlessPaasAcceptance(callActor, { organizationId = DE
       }
       await callActor('root', `latticeApiKeys:destroy?filterByTk=${cleanupIds.apiKeyId}`, { method: 'POST' }).catch(() => {});
     }
+    if (!cleanupIds.frozenSnapshotId && cleanupIds.frozenSnapshotUid) {
+      for (let page = 1; page <= 20; page += 1) {
+        const snapListRes = await callActor(
+          'root',
+          `dxosDataGov:listSnapshots?organizationId=${encodeURIComponent(organizationId)}&sourceCollection=latticeOrders&page=${page}&pageSize=100`,
+        ).catch(() => null);
+        const items = Array.isArray(snapListRes?.data?.items) ? snapListRes.data.items : [];
+        const matched = items.find((s) => s?.snapshotUid === cleanupIds.frozenSnapshotUid);
+        if (matched?.id != null) {
+          cleanupIds.frozenSnapshotId = matched.id;
+          break;
+        }
+        const total = typeof snapListRes?.data?.total === 'number' ? snapListRes.data.total : null;
+        if (!items.length || items.length < 100 || (total !== null && page * 100 >= total)) break;
+      }
+    }
+    if (cleanupIds.frozenSnapshotId) {
+      await callActor('root', `latticeFrozenSnapshots:destroy?filterByTk=${cleanupIds.frozenSnapshotId}`, { method: 'POST' }).catch(() => {});
+    }
     if (cleanupIds.approvalId) {
       await callActor('root', `latticeAiApprovalQueue:destroy?filterByTk=${cleanupIds.approvalId}`, { method: 'POST' }).catch(() => {});
     }
@@ -590,18 +626,6 @@ export async function runHeadlessPaasAcceptance(callActor, { organizationId = DE
     if (cleanupIds.epodId) {
       await callActor('root', `latticeEpodRecords:destroy?filterByTk=${cleanupIds.epodId}`, { method: 'POST' }).catch(() => {});
     }
-    if (cleanupIds.orderId) {
-      const allocListRes = await callActor(
-        'root',
-        `latticeStockAllocations:list?${encFilter({ orderId: cleanupIds.orderId })}`,
-      ).catch(() => null);
-      const allocs = Array.isArray(allocListRes?.data) ? allocListRes.data : [];
-      for (const alloc of allocs) {
-        if (alloc?.id) {
-          await callActor('root', `latticeStockAllocations:destroy?filterByTk=${alloc.id}`, { method: 'POST' }).catch(() => {});
-        }
-      }
-    }
     if (cleanupIds.orderLineId) {
       await callActor('root', `latticeOrderLines:destroy?filterByTk=${cleanupIds.orderLineId}`, { method: 'POST' }).catch(() => {});
     }
@@ -614,16 +638,18 @@ export async function runHeadlessPaasAcceptance(callActor, { organizationId = DE
   }
 }
 
+export const runHeadlessPaasAcceptance = runHeadlessPaaSAcceptance;
+
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   (async () => {
-    const opts = parseHeadlessPaasArgs(process.argv.slice(2));
+    const opts = parseHeadlessAcceptanceArgs(process.argv.slice(2));
     let origin = opts.origin;
     if (opts.reportPath) {
       const report = JSON.parse(await readFile(resolve(opts.reportPath), 'utf8'));
       origin = report.origin;
     }
-    const callActor = await createHeadlessPaasCaller(origin);
-    const result = await runHeadlessPaasAcceptance(callActor, { organizationId: opts.organizationId });
+    const callActor = await createHeadlessPaaSCallers(origin);
+    const result = await runHeadlessPaaSAcceptance(callActor, { organizationId: opts.organizationId });
     console.log(JSON.stringify(result, null, 2));
   })().catch((err) => {
     console.error(JSON.stringify({ result: 'FAIL', error: err.message }));

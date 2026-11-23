@@ -9,20 +9,55 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  parseHeadlessAcceptanceArgs,
+  createHeadlessPaaSCallers,
+  runHeadlessPaaSAcceptance,
   parseHeadlessPaasArgs,
+  createHeadlessPaasCaller,
   runHeadlessPaasAcceptance,
 } from '../acceptance-headless-paas.mjs';
 
-test('parseHeadlessPaasArgs validates origins and report path', () => {
-  assert.throws(() => parseHeadlessPaasArgs([]), /Usage:/);
-  assert.throws(() => parseHeadlessPaasArgs(['--origin=https://evil.example.com']), /Unsafe origin/);
+const ALLOWED_DESIRED_KEYS = new Set([
+  'targetTempC',
+  'maxTempC',
+  'minTempC',
+  'defrostMode',
+  'fanMode',
+  'doorLock',
+  'reportingIntervalSec',
+]);
+const ALLOWED_DEFROST_MODES = new Set(['auto', 'manual', 'off']);
+const ALLOWED_FAN_MODES = new Set(['auto', 'high', 'low', 'eco']);
+const ALLOWED_DOOR_LOCKS = new Set(['locked', 'unlocked']);
 
-  const parsed = parseHeadlessPaasArgs(['--origin=http://localhost:13014', '--org=custom-org']);
-  assert.equal(parsed.origin, 'http://localhost:13014');
-  assert.equal(parsed.organizationId, 'custom-org');
-});
+function validateMockDesiredPatch(desiredPatch) {
+  if (!desiredPatch || typeof desiredPatch !== 'object' || Array.isArray(desiredPatch) || Object.keys(desiredPatch).length === 0) {
+    return { ok: false, status: 400, data: { code: 'TWIN_DESIRED_INVALID' } };
+  }
+  for (const [key, rawVal] of Object.entries(desiredPatch)) {
+    if (!ALLOWED_DESIRED_KEYS.has(key)) {
+      return { ok: false, status: 400, data: { code: 'TWIN_FIELD_FORBIDDEN', field: key } };
+    }
+    if (key === 'doorLock' && (typeof rawVal !== 'string' || !ALLOWED_DOOR_LOCKS.has(rawVal))) {
+      return { ok: false, status: 400, data: { code: 'TWIN_FIELD_FORBIDDEN', field: key } };
+    }
+    if (key === 'fanMode' && (typeof rawVal !== 'string' || !ALLOWED_FAN_MODES.has(rawVal))) {
+      return { ok: false, status: 400, data: { code: 'TWIN_FIELD_FORBIDDEN', field: key } };
+    }
+    if (key === 'defrostMode' && (typeof rawVal !== 'string' || !ALLOWED_DEFROST_MODES.has(rawVal))) {
+      return { ok: false, status: 400, data: { code: 'TWIN_FIELD_FORBIDDEN', field: key } };
+    }
+    if ((key === 'targetTempC' || key === 'maxTempC' || key === 'minTempC') && (typeof rawVal !== 'number' || !Number.isFinite(rawVal))) {
+      return { ok: false, status: 400, data: { code: 'TWIN_DESIRED_INVALID', field: key } };
+    }
+  }
+  return null;
+}
 
-test('runHeadlessPaasAcceptance verifies all 8 PaaS checks and cleans up temporary records on success', async () => {
+function createMockHeadlessCaller({
+  freezeReturnsId = true,
+  bundleSchemaVersion = 'latticedx.solution-bundle/v3',
+} = {}) {
   const calls = [];
   const destroyed = [];
   const revokedPatTokens = new Set();
@@ -94,14 +129,39 @@ test('runHeadlessPaasAcceptance verifies all 8 PaaS checks and cleans up tempora
       return {
         ok: true,
         status: 200,
-        data: { status: 'sealed', snapshotUid: 'SNAP-001', payloadHash: 'abc', signatureBase64: 'snap-sig', keyId: 'key-1' },
+        data: {
+          ...(freezeReturnsId ? { id: 1401 } : {}),
+          status: 'sealed',
+          snapshotUid: 'SNAP-001',
+          payloadHash: 'abc',
+          signatureBase64: 'snap-sig',
+          keyId: 'key-1',
+        },
       };
     }
     if (resourceAction === 'dxosDataGov:getSnapshot') {
       return {
         ok: true,
         status: 200,
-        data: { snapshotUid: 'SNAP-001', hashVerified: true, signatureVerified: true, payloadJson: [{ id: 501 }] },
+        data: {
+          ...(freezeReturnsId ? { id: 1401 } : {}),
+          snapshotUid: 'SNAP-001',
+          hashVerified: true,
+          signatureVerified: true,
+          payloadJson: [{ id: 501 }],
+        },
+      };
+    }
+    if (resourceAction === 'dxosDataGov:listSnapshots') {
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          total: 1,
+          page: 1,
+          pageSize: 100,
+          items: [{ id: 1401, snapshotUid: 'SNAP-001', sourceCollection: 'latticeOrders' }],
+        },
       };
     }
     if (resourceAction === 'dxosLedger:verifySignature') {
@@ -169,6 +229,8 @@ test('runHeadlessPaasAcceptance verifies all 8 PaaS checks and cleans up tempora
       return { ok: true, status: 200, data: { shadow: { id: 1201, desiredJson: {}, reportedJson: {} } } };
     }
     if (resourceAction === 'dxosBlocks:twinSetDesired') {
+      const invalid = validateMockDesiredPatch(opts.values?.desiredPatch);
+      if (invalid) return invalid;
       if (opts.values?.desiredPatch?.targetTempC === 4.0) {
         return { ok: true, status: 200, data: { gatedByHitl: false, shadow: { id: 1201 } } };
       }
@@ -177,7 +239,17 @@ test('runHeadlessPaasAcceptance verifies all 8 PaaS checks and cleans up tempora
 
     if (resourceAction === 'latticePara:extractFormFields') {
       const m = Buffer.from(opts.values?.contentBase64 || '', 'base64').toString('utf8').match(/ORD-OCR-[A-Z0-9]+/);
-      return { ok: true, status: 200, data: { fields: { code: m ? m[0] : '' } } };
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          targetCollection: 'latticeOrders',
+          suggestedValues: { code: m ? m[0] : '' },
+          lineItems: [],
+          confidence: 0.9,
+          warnings: [],
+        },
+      };
     }
     if (resourceAction === 'dxosAi:triageScan') {
       return { ok: true, status: 200, data: { scannedCount: 4, matchedAlarms: 1, proposals: [] } };
@@ -187,16 +259,13 @@ test('runHeadlessPaasAcceptance verifies all 8 PaaS checks and cleans up tempora
         ok: true,
         status: 200,
         data: {
-          metadata: { schemaVersion: 'latticedx.solution-bundle/v3', platformVersion: '1.0.0', organizationId: 'native-ui-lab', contentSha256: 'a'.repeat(64) },
+          metadata: { schemaVersion: bundleSchemaVersion, platformVersion: '1.0.0', organizationId: 'native-ui-lab', contentSha256: 'a'.repeat(64) },
           roles: [{ name: 'ldx_employee' }],
           portals: [{ path: '/v/my-work' }],
         },
       };
     }
 
-    if (resourceAction === 'latticeStockAllocations:list') {
-      return { ok: true, status: 200, data: [{ id: 801 }] };
-    }
     if (resourceAction.endsWith(':destroy')) {
       destroyed.push(path);
       return { ok: true, status: 200, data: { ok: true } };
@@ -205,18 +274,72 @@ test('runHeadlessPaasAcceptance verifies all 8 PaaS checks and cleans up tempora
     throw new Error(`Unexpected mock API call: ${resourceAction}`);
   };
 
-  const result = await runHeadlessPaasAcceptance(callActor, { organizationId: 'native-ui-lab' });
+  return { callActor, calls, destroyed };
+}
+
+test('parseHeadlessAcceptanceArgs validates origins and exports brief + alias names', () => {
+  assert.equal(parseHeadlessPaasArgs, parseHeadlessAcceptanceArgs);
+  assert.equal(createHeadlessPaasCaller, createHeadlessPaaSCallers);
+  assert.equal(runHeadlessPaasAcceptance, runHeadlessPaaSAcceptance);
+  assert.equal(typeof createHeadlessPaaSCallers, 'function');
+
+  assert.throws(() => parseHeadlessAcceptanceArgs([]), /Usage:/);
+  assert.throws(() => parseHeadlessAcceptanceArgs(['--origin=https://evil.example.com']), /Unsafe origin/);
+
+  const parsed = parseHeadlessAcceptanceArgs(['--origin=http://localhost:13014', '--org=custom-org']);
+  assert.equal(parsed.origin, 'http://localhost:13014');
+  assert.equal(parsed.organizationId, 'custom-org');
+});
+
+test('mock dxosBlocks:twinSetDesired rejects forbidden keys and invalid enums with HTTP 400 TWIN_FIELD_FORBIDDEN', async () => {
+  const { callActor } = createMockHeadlessCaller();
+  const badKey = await callActor('root', 'dxosBlocks:twinSetDesired', {
+    method: 'POST',
+    values: { organizationId: 'native-ui-lab', assetId: 1101, desiredPatch: { targetTempC: 4.0, doorLocked: true } },
+  });
+  assert.equal(badKey.status, 400);
+  assert.equal(badKey.data?.code, 'TWIN_FIELD_FORBIDDEN');
+
+  const badEnum = await callActor('root', 'dxosBlocks:twinSetDesired', {
+    method: 'POST',
+    values: { organizationId: 'native-ui-lab', assetId: 1101, desiredPatch: { doorLock: 'yes', fanMode: 'turbo' } },
+  });
+  assert.equal(badEnum.status, 400);
+  assert.equal(badEnum.data?.code, 'TWIN_FIELD_FORBIDDEN');
+});
+
+test('runHeadlessPaaSAcceptance verifies all 8 PaaS checks and cleans up temporary records including frozen snapshots', async () => {
+  const { callActor, calls, destroyed } = createMockHeadlessCaller({ freezeReturnsId: true });
+
+  const result = await runHeadlessPaaSAcceptance(callActor, { organizationId: 'native-ui-lab' });
   assert.equal(result.result, 'PASS');
+  assert.equal(result.bundleSchemaVersion, 'latticedx.solution-bundle/v3');
   for (const [key, passed] of Object.entries(result.checks)) {
     assert.equal(passed, true, `Check ${key} failed`);
   }
+  assert.equal(calls.some((c) => c.path.includes('latticeStockAllocations')), false);
+  assert.ok(destroyed.some((p) => p.includes('latticeFrozenSnapshots:destroy?filterByTk=1401')));
   assert.ok(destroyed.some((p) => p.includes('latticeOrders:destroy?filterByTk=501')));
   assert.ok(destroyed.some((p) => p.includes('latticeAssets:destroy?filterByTk=1101')));
   assert.ok(destroyed.some((p) => p.includes('latticeAiApprovalQueue:destroy?filterByTk=1301')));
   assert.ok(destroyed.some((p) => p.includes('latticeApiKeys:destroy?filterByTk=91')));
 });
 
-test('runHeadlessPaasAcceptance runs cleanup even when an intermediate step fails', async () => {
+test('runHeadlessPaaSAcceptance looks up frozen snapshot id via listSnapshots when freezeSnapshot omits id and rejects v2 bundle', async () => {
+  const noIdMock = createMockHeadlessCaller({ freezeReturnsId: false });
+  const passRes = await runHeadlessPaasAcceptance(noIdMock.callActor, { organizationId: 'native-ui-lab' });
+  assert.equal(passRes.result, 'PASS');
+  assert.ok(noIdMock.destroyed.some((p) => p.includes('latticeFrozenSnapshots:destroy?filterByTk=1401')));
+
+  const v2Mock = createMockHeadlessCaller({ bundleSchemaVersion: 'latticedx.solution-bundle/v2' });
+  await assert.rejects(
+    () => runHeadlessPaaSAcceptance(v2Mock.callActor, { organizationId: 'native-ui-lab' }),
+    /latticedx\.solution-bundle\/v3/,
+  );
+  assert.ok(v2Mock.destroyed.some((p) => p.includes('latticeFrozenSnapshots:destroy?filterByTk=1401')));
+});
+
+test('runHeadlessPaaSAcceptance runs cleanup even when an intermediate step fails', async () => {
   const destroyed = [];
   const callActor = async (actorRole, path, opts = {}) => {
     const [resourceAction] = String(path).split('?');
@@ -238,6 +361,6 @@ test('runHeadlessPaasAcceptance runs cleanup even when an intermediate step fail
     throw new Error(`Unexpected call: ${resourceAction}`);
   };
 
-  await assert.rejects(() => runHeadlessPaasAcceptance(callActor), /Bearer PAT access 200/);
+  await assert.rejects(() => runHeadlessPaaSAcceptance(callActor), /Bearer PAT access 200/);
   assert.ok(destroyed.includes('latticeApiKeys:destroy?filterByTk=77'));
 });
