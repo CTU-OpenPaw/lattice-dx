@@ -12,14 +12,81 @@ const path = require('node:path');
 const { PARA_SPACES } = require('./schema');
 const { resolveParaActor } = require('./para-scope');
 const { executeHybridSearch, computeNeuralEmbedding } = require('./para-hybrid-search');
-const { MAX_UPLOAD_BYTES, extractTextFromBuffer, chunkDocumentText } = require('./document-extractor');
+const {
+  MAX_UPLOAD_BYTES,
+  ALLOWED_FORM_COLLECTIONS,
+  extractTextFromBuffer,
+  extractStructuredFormFields,
+  extractWithMultimodalOcr,
+  chunkDocumentText,
+} = require('./document-extractor');
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 const REINDEX_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager']);
 const EDIT_MANAGER_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_manager']);
+const RECOGNIZED_PARA_ROLES = new Set([
+  'root',
+  'admin',
+  'ldx_admin',
+  'ldx_director',
+  'ldx_manager',
+  'ldx_employee',
+  'ldx_warehouse',
+  'ldx_dispatcher',
+  'ldx_driver',
+]);
 
 function failAction(code, status, message) {
   return Object.assign(new Error(message || code), { code, status });
+}
+
+function buildSafeTextPreview(text, maxLen = 500) {
+  return String(text || '')
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]')
+    .replace(/([a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key)\s*[:=]\s*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]')
+    .trim()
+    .slice(0, maxLen);
+}
+
+async function hasFormExtractionAcl(db, ctx, roles, targetCollection) {
+  if (roles.includes('root')) return true;
+  if (!roles.length) return false;
+
+  const collectionsToCheck = ['latticeParaDocuments', targetCollection];
+  const viewActions = ['view', 'list', 'create'];
+  if (typeof ctx?.can === 'function') {
+    return collectionsToCheck.some((col) => (
+      ['view', 'list'].some((act) => Boolean(ctx.can({ resource: col, action: act })))
+    ));
+  }
+
+  const rolesRepo = db?.getRepository?.('roles');
+  const resRepo = db?.getRepository?.('dataSourcesRolesResources');
+  if (!rolesRepo && !resRepo) {
+    return roles.some((r) => RECOGNIZED_PARA_ROLES.has(r));
+  }
+
+  for (const roleName of roles) {
+    const role = rolesRepo?.findOne ? await rolesRepo.findOne({ filter: { name: roleName } }) : null;
+    if (val(role, 'allowAll') === true || val(role, 'allowConfigure') === true) return true;
+    if (resRepo?.findOne) {
+      for (const col of collectionsToCheck) {
+        const res = await resRepo.findOne({ filter: { roleName, name: col, dataSourceKey: 'main' } });
+        if (res) {
+          if (val(res, 'usingActionsConfig') === false) return true;
+          const actions = val(res, 'actions') || [];
+          if (actions.some((a) => viewActions.includes(a?.name || a))) return true;
+        }
+      }
+    }
+    const strategyActions = val(role, 'strategy')?.actions || [];
+    if (Array.isArray(strategyActions) && strategyActions.some((a) => ['view', 'list', '*:*', '*'].includes(a))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function resolveCallerRoles(ctx, db) {
@@ -199,7 +266,7 @@ async function syncDocumentChunks(db, docRow, {
   };
 }
 
-function createParaActions(db) {
+function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch } = {}) {
   return {
     summary: async (ctx, next) => {
       if (ctx.method !== 'GET') ctx.throw(405);
@@ -460,6 +527,149 @@ function createParaActions(db) {
         preview: extracted.text.slice(0, 300),
         chunksIndexed: syncResult.chunksCreated,
         embeddingEngine: syncResult.embeddingEngine,
+      };
+      if (typeof next === 'function') await next();
+    },
+
+    extractFormFields: async (ctx, next) => {
+      if (ctx.method !== 'POST') ctx.throw(405);
+      const userId = val(ctx.state?.currentUser, 'id');
+      if (userId == null || !/^[1-9]\d*$/.test(String(userId))) {
+        throw failAction('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập.');
+      }
+
+      const roles = await resolveCallerRoles(ctx, db);
+      const isRoot = roles.includes('root');
+      let actor = null;
+      if (!isRoot) {
+        actor = await resolveParaActor(db, ctx.state?.currentUser);
+      }
+
+      const params = readParams(ctx);
+      if (
+        !isRoot
+        && params.organizationId != null
+        && String(params.organizationId).trim()
+        && String(params.organizationId).trim() !== actor.organizationId
+      ) {
+        throw failAction('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không được phép trích xuất biểu mẫu cho tổ chức khác.');
+      }
+
+      const targetCollection = String(params.targetCollection || 'latticeOrders').trim();
+      if (!ALLOWED_FORM_COLLECTIONS.has(targetCollection)) {
+        throw failAction('INVALID_TARGET_COLLECTION', 400, 'Bảng đích auto-fill không hợp lệ.');
+      }
+
+      const permitted = await hasFormExtractionAcl(db, ctx, roles, targetCollection);
+      if (!permitted) {
+        throw failAction('PARA_ACL_FORBIDDEN', 403, 'Không có quyền xem tài liệu P.A.R.A. hoặc bảng đích để trích xuất biểu mẫu.');
+      }
+
+      let doc = null;
+      if (params.documentId != null && String(params.documentId).trim() !== '') {
+        const docIdStr = String(params.documentId).trim();
+        if (!/^[1-9]\d*$/.test(docIdStr)) {
+          throw failAction('PARA_DOCUMENT_ID_INVALID', 400, 'Mã documentId không hợp lệ.');
+        }
+        const docRepo = db?.getRepository?.('latticeParaDocuments');
+        const docFilter = { id: Number(docIdStr), ...(actor ? { organizationId: actor.organizationId } : {}) };
+        doc = docRepo
+          ? (typeof docRepo.findOne === 'function'
+            ? await docRepo.findOne({ filter: docFilter })
+            : ((await docRepo.find({ filter: docFilter, limit: 1 })) || [])[0])
+          : null;
+        if (!doc || (actor && val(doc, 'organizationId') !== actor.organizationId)) {
+          throw failAction('PARA_DOCUMENT_NOT_FOUND', 404, 'Không tìm thấy tài liệu P.A.R.A. trong phạm vi tổ chức của bạn.');
+        }
+      }
+
+      const hasBase64 = typeof params.contentBase64 === 'string' && params.contentBase64.trim().length > 0;
+      if (!hasBase64 && !doc) {
+        throw failAction('FORM_EXTRACT_INPUT_REQUIRED', 400, 'Cần cung cấp contentBase64 hoặc documentId hợp lệ.');
+      }
+
+      const filename = path.basename(String(params.filename || val(doc, 'code') || '').trim()).slice(0, 255);
+      const mimeType = String(params.mimeType || '').trim().slice(0, 120);
+
+      let extractionResult;
+      if (hasBase64) {
+        const rawBase64Input = params.contentBase64;
+        if (rawBase64Input.length > MAX_UPLOAD_BYTES) {
+          throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm base64 vượt quá giới hạn 2MB.');
+        }
+        const strippedPrefix = rawBase64Input
+          .trim()
+          .replace(/^data:[a-z0-9/+.-]+(?:;[a-z0-9=_-]+)*;base64,/i, '');
+        const cleanBase64 = strippedPrefix.replace(/\s+/g, '');
+        if (!cleanBase64 || !/^[A-Za-z0-9+/=]+$/.test(cleanBase64)) {
+          throw failAction('ATTACHMENT_BASE64_INVALID', 400, 'Dữ liệu contentBase64 không hợp lệ.');
+        }
+        const buffer = Buffer.from(cleanBase64, 'base64');
+        if (buffer.length === 0 || buffer.length > MAX_UPLOAD_BYTES) {
+          throw failAction('ATTACHMENT_TOO_LARGE', 400, 'Kích thước tệp đính kèm vượt quá giới hạn 2MB.');
+        }
+
+        extractionResult = await extractWithMultimodalOcr({
+          buffer,
+          filename,
+          mimeType,
+          targetCollection,
+          env,
+          fetchImpl,
+        });
+      } else {
+        const docOrg = val(doc, 'organizationId');
+        const docId = val(doc, 'id');
+        const textParts = [
+          val(doc, 'title'),
+          val(doc, 'summary'),
+          val(doc, 'contentMarkdown'),
+          val(doc, 'attachmentText'),
+        ].filter(Boolean);
+
+        const chunkRepo = db?.getRepository?.('latticeParaChunks');
+        if (chunkRepo && typeof chunkRepo.find === 'function') {
+          const attRows = (await chunkRepo.find({
+            filter: { documentId: docId, organizationId: docOrg, sourceType: 'attachment', active: true },
+            limit: 100,
+            sort: ['chunkIndex'],
+          })) || [];
+          for (const row of attRows) {
+            if (val(row, 'organizationId') === docOrg && Number(val(row, 'documentId')) === Number(docId)) {
+              const content = String(val(row, 'content') || '').trim();
+              if (content) textParts.push(content);
+            }
+          }
+        }
+
+        const docText = textParts.join('\n\n').trim();
+        const structured = extractStructuredFormFields(docText, { targetCollection });
+        extractionResult = {
+          text: docText,
+          format: 'para-document',
+          pageCount: 1,
+          ocrEngine: 'offline-deterministic-fallback',
+          targetCollection: structured.targetCollection,
+          fields: structured.fields,
+          lineItems: structured.lineItems,
+          confidence: structured.confidence,
+          warnings: structured.warnings,
+        };
+      }
+
+      ctx.body = {
+        organizationId: val(doc, 'organizationId') || actor?.organizationId || null,
+        documentId: doc ? val(doc, 'id') : null,
+        filename,
+        format: extractionResult.format,
+        pageCount: extractionResult.pageCount,
+        ocrEngine: extractionResult.ocrEngine,
+        targetCollection,
+        extractedTextPreview: buildSafeTextPreview(extractionResult.text, 500),
+        suggestedValues: extractionResult.fields,
+        lineItems: extractionResult.lineItems,
+        confidence: extractionResult.confidence,
+        warnings: extractionResult.warnings,
       };
       if (typeof next === 'function') await next();
     },
