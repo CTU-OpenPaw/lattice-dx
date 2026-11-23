@@ -813,3 +813,481 @@ test('client-v2 MobileFieldPwaPage renders field controls, handles QR/GPS/Canvas
     assert.equal(res.status, 'present', `${rel} missing valid SPDX Apache-2.0 header`);
   }
 });
+
+test('Fix Round 1 (Important 4 & Minor 4): strict numeric/URN/GPS validation & stored queue hardening', () => {
+  const {
+    OFFLINE_QUEUE_STORAGE_KEY,
+    parseFieldQrPayload,
+    buildEpodPayload,
+    readOfflineQueue,
+    sanitizeStoredQueueItem,
+  } = require('../src/client-v2/mobile-field-pwa');
+
+  // 1. Strict targetTempC parsing & [-80, 120] bounds
+  for (const badTempTag of [
+    '{"targetTempC":null}',
+    '{"targetTempC":""}',
+    '{"targetTempC":"   "}',
+    '{"targetTempC":false}',
+    '{"targetTempC":true}',
+    '{"targetTempC":[]}',
+    '{"targetTempC":{}}',
+    '{"targetTempC":"Infinity"}',
+    '{"targetTempC":"NaN"}',
+    '{"targetTempC":-80.1}',
+    '{"targetTempC":120.1}',
+    '{"orderCode":"ORD-1","targetTempC":false}',
+    '{"orderCode":"ORD-1","targetTempC":150}',
+    '{"orderCode":"ORD-1","targetTempC":""}',
+  ]) {
+    const res = parseFieldQrPayload(badTempTag);
+    assert.equal(res.valid, false, `Expected rejection for ${badTempTag}`);
+  }
+  const zeroTempTag = parseFieldQrPayload('{"assetId":5,"targetTempC":0}');
+  assert.equal(zeroTempTag.valid, true);
+  assert.equal(zeroTempTag.targetTempC, 0);
+  const minTempTag = parseFieldQrPayload('{"assetId":5,"setpointC":-80}');
+  assert.equal(minTempTag.valid, true);
+  assert.equal(minTempTag.targetTempC, -80);
+  const maxTempTag = parseFieldQrPayload('{"assetId":5,"targetTempC":120}');
+  assert.equal(maxTempTag.valid, true);
+  assert.equal(maxTempTag.targetTempC, 120);
+
+  // 2. Strict URN positive integer assetId (rejects 0 & unsafe integers)
+  const urnZero = parseFieldQrPayload('urn:ngsi-ld:Asset:org-ctu:native:0');
+  assert.equal(urnZero.valid, true);
+  assert.equal(urnZero.assetId, null);
+  const urnShortZero = parseFieldQrPayload('urn:ngsi-ld:Asset:0');
+  assert.equal(urnShortZero.valid, true);
+  assert.equal(urnShortZero.assetId, null);
+  const urnUnsafe = parseFieldQrPayload('urn:ngsi-ld:Asset:org-ctu:native:9999999999999999999');
+  assert.equal(urnUnsafe.valid, true);
+  assert.equal(urnUnsafe.assetId, null);
+  const jsonUrnZero = parseFieldQrPayload('{"urn":"urn:ngsi-ld:Asset:org-ctu:native:0"}');
+  assert.equal(jsonUrnZero.valid, true);
+  assert.equal(jsonUrnZero.assetId, undefined);
+
+  // 3. Strict buildEpodPayload GPS & qty coercion checks
+  const validSig = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+  for (const [lat, lng] of [
+    [null, null],
+    ['', ''],
+    ['   ', '   '],
+    [false, false],
+    [[], []],
+    [undefined, undefined],
+    ['10.0452', ''],
+    ['', '105.7469'],
+    [Infinity, 105.7],
+    [10.0, NaN],
+    [91, 105],
+    [10, -181],
+  ]) {
+    const built = buildEpodPayload({
+      recipientName: 'Nguyen Van A',
+      deliveredQty: 2,
+      gpsLat: lat,
+      gpsLng: lng,
+      signatureDataUrl: validSig,
+    });
+    assert.equal(built.ok, false, `Expected GPS rejection for (${String(lat)}, ${String(lng)})`);
+  }
+  const badQty = buildEpodPayload({
+    recipientName: 'Nguyen Van A',
+    deliveredQty: false,
+    gpsLat: 10.04,
+    gpsLng: 105.74,
+    signatureDataUrl: validSig,
+  });
+  assert.equal(badQty.ok, false);
+
+  // Genuine (0, 0) coordinate remains valid
+  const zeroGps = buildEpodPayload({
+    recipientName: 'Nguyen Van A',
+    deliveredQty: 0,
+    gpsLat: 0,
+    gpsLng: 0,
+    signatureDataUrl: validSig,
+  });
+  assert.equal(zeroGps.ok, true);
+  assert.equal(zeroGps.payload.gpsLat, 0);
+  assert.equal(zeroGps.payload.gpsLng, 0);
+
+  // 4. sanitizeStoredQueueItem & readOfflineQueue enforce 320KB cap and strip __proto__/constructor/prototype
+  const storage = makeMemoryStorage();
+  const oversizedSig = 'data:image/png;base64,' + 'A'.repeat(320 * 1024);
+  const rawStored = JSON.stringify([
+    {
+      id: 'mq-oversized',
+      actionType: 'wms.epodCapture',
+      payload: { recipientName: 'Too Big', gpsLat: 10, gpsLng: 105, signatureDataUrl: oversizedSig },
+    },
+    JSON.parse('{"id":"mq-polluted","actionType":"iot.twinSetDesired","payload":{"assetId":7,"__proto__":{"polluted":true},"constructor":{"bad":1},"prototype":{"bad":2},"desiredPatch":{"targetTempC":-18,"__proto__":{"nested":1}}}}'),
+  ]);
+  storage.setItem(OFFLINE_QUEUE_STORAGE_KEY, rawStored);
+  const sanitizedList = readOfflineQueue({ storage });
+  assert.equal(sanitizedList.length, 1);
+  assert.equal(sanitizedList[0].id, 'mq-polluted');
+  assert.equal(Object.hasOwn(sanitizedList[0].payload, '__proto__'), false);
+  assert.equal(Object.hasOwn(sanitizedList[0].payload, 'constructor'), false);
+  assert.equal(Object.hasOwn(sanitizedList[0].payload, 'prototype'), false);
+  assert.equal(Object.hasOwn(sanitizedList[0].payload.desiredPatch, '__proto__'), false);
+  assert.equal(({}).polluted, undefined);
+  assert.equal(sanitizeStoredQueueItem({
+    id: 'mq-big-2',
+    actionType: 'wms.epodCapture',
+    payload: { signatureDataUrl: oversizedSig },
+  }), null);
+});
+
+test('Fix Round 1 (Important 1): camera <video> srcObject binding & scan loop run after mount in useEffect and clean up on stop/unmount', async () => {
+  const { createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+    requestAnimationFrame: global.requestAnimationFrame,
+    cancelAnimationFrame: global.cancelAnimationFrame,
+  };
+
+  let tracksStopped = 0;
+  let playCalls = 0;
+  let detectCalls = 0;
+  const mockStream = {
+    getTracks() {
+      return [{ stop() { tracksStopped += 1; } }];
+    },
+  };
+  let nextRafId = 1;
+  const rafQueue = new Map();
+  const canceledRafIds = [];
+
+  Object.defineProperty(global, 'requestAnimationFrame', {
+    configurable: true,
+    value(cb) {
+      const id = nextRafId++;
+      rafQueue.set(id, cb);
+      return id;
+    },
+  });
+  Object.defineProperty(global, 'cancelAnimationFrame', {
+    configurable: true,
+    value(id) {
+      canceledRafIds.push(id);
+      rafQueue.delete(id);
+    },
+  });
+  Object.defineProperty(global, 'navigator', {
+    configurable: true,
+    value: {
+      onLine: true,
+      mediaDevices: {
+        getUserMedia: async () => mockStream,
+      },
+    },
+  });
+  Object.defineProperty(global, 'window', {
+    configurable: true,
+    value: {
+      localStorage: storage,
+      addEventListener() {},
+      removeEventListener() {},
+      BarcodeDetector: class {
+        async detect(videoEl) {
+          detectCalls += 1;
+          assert.equal(videoEl.srcObject, mockStream);
+          return [{ rawValue: 'ORD-2026-CAM1' }];
+        }
+      },
+    },
+  });
+  Object.defineProperty(global, 'document', {
+    configurable: true,
+    value: {
+      head: { appendChild() {} },
+      querySelector() { return null; },
+      createElement() { return {}; },
+    },
+  });
+
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    fakeReact._flushEffects();
+
+    // Initially no <video> rendered
+    assert.equal(findNode(tree, (n) => n.type === 'video'), null);
+
+    // Click camera scan -> acquires stream and enables scannerActive, BEFORE <video> mounts
+    const scanBtn = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-qr-scan-btn');
+    await scanBtn.props.onClick();
+
+    // Re-render mounts <video ref={videoRef}>; simulate React populating ref before useEffect runs
+    tree = fakeReact._render(MobilePage, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    const videoNode = findNode(tree, (n) => n.type === 'video');
+    assert.ok(videoNode, '<video> must mount when scannerActive becomes true');
+    const mockVideoEl = {
+      srcObject: null,
+      play() {
+        playCalls += 1;
+        return Promise.resolve();
+      },
+    };
+    videoNode.props.ref.current = mockVideoEl;
+
+    // Post-mount effect binds stream to videoRef.current.srcObject & starts BarcodeDetector loop
+    fakeReact._flushEffects();
+    assert.equal(mockVideoEl.srcObject, mockStream);
+    assert.equal(playCalls, 1);
+    assert.equal(rafQueue.size, 1);
+
+    // Execute rAF scan tick -> detects ORD-2026-CAM1, fills orderCode, stops scanner & stream
+    const [[, scanTick]] = [...rafQueue.entries()];
+    rafQueue.clear();
+    await scanTick();
+    assert.equal(detectCalls, 1);
+    assert.ok(tracksStopped >= 1);
+    assert.equal(mockVideoEl.srcObject, null);
+
+    tree = fakeReact._render(MobilePage, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    assert.equal(findNode(tree, (n) => n.type === 'video'), null);
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-order-input').props.value, 'ORD-2026-CAM1');
+
+    // Start again and verify component unmount stops stream tracks and cancels rAF
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-qr-scan-btn').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    const videoNode2 = findNode(tree, (n) => n.type === 'video');
+    const mockVideoEl2 = { srcObject: null, play: () => Promise.resolve() };
+    videoNode2.props.ref.current = mockVideoEl2;
+    fakeReact._flushEffects();
+    const prevStopped = tracksStopped;
+    fakeReact._unmount();
+    assert.ok(tracksStopped > prevStopped);
+    assert.ok(canceledRafIds.length >= 1);
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    Object.defineProperty(global, 'requestAnimationFrame', { configurable: true, writable: true, value: prevGlobals.requestAnimationFrame });
+    Object.defineProperty(global, 'cancelAnimationFrame', { configurable: true, writable: true, value: prevGlobals.cancelAnimationFrame });
+  }
+});
+
+test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota handling, syncingRef lock, HITL/URN, 401 notice & empty online skip', async () => {
+  const {
+    MAX_OFFLINE_QUEUE_ITEMS,
+    enqueueOfflineAction,
+    readOfflineQueue,
+    createMobileFieldPwaPage,
+  } = require('../src/client-v2/mobile-field-pwa');
+
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+  };
+
+  let isNavigatorOnline = false;
+  const windowListeners = new Map();
+  const storage = makeMemoryStorage();
+
+  Object.defineProperty(global, 'navigator', {
+    configurable: true,
+    value: {
+      get onLine() { return isNavigatorOnline; },
+    },
+  });
+  Object.defineProperty(global, 'window', {
+    configurable: true,
+    value: {
+      localStorage: storage,
+      addEventListener(ev, fn) { windowListeners.set(ev, fn); },
+      removeEventListener(ev) { windowListeners.delete(ev); },
+    },
+  });
+  Object.defineProperty(global, 'document', {
+    configurable: true,
+    value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } },
+  });
+
+  try {
+    // Part A: Important 2 — 50-item full queue & QuotaExceededError in submitEpod / submitTwinDesired never throw unhandled rejections
+    for (let i = 0; i < MAX_OFFLINE_QUEUE_ITEMS; i += 1) {
+      enqueueOfflineAction({ actionType: 'iot.twinSetDesired', payload: { assetId: i + 1, desiredPatch: { targetTempC: 4 } } }, { storage });
+    }
+    const fakeReactA = createFakeReact();
+    const MobilePageA = createMobileFieldPwaPage({ Plugin: class {} }, fakeReactA, {});
+    // Also test Minor 4: props.testSignatureDataUrl is ignored
+    let treeA = fakeReactA._render(MobilePageA, {
+      storage,
+      apiClient: { request: async () => ({ data: {} }) },
+      testSignatureDataUrl: 'data:image/png;base64,SHOULD_BE_IGNORED',
+    });
+    fakeReactA._flushEffects();
+
+    findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-recipient-input').props.onChange({ target: { value: 'Anh Binh' } });
+    findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-lat-input').props.onChange({ target: { value: '10.04' } });
+    findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-lng-input').props.onChange({ target: { value: '105.74' } });
+    treeA = fakeReactA._render(MobilePageA, {
+      storage,
+      apiClient: { request: async () => ({ data: {} }) },
+      testSignatureDataUrl: 'data:image/png;base64,SHOULD_BE_IGNORED',
+    });
+    // Without canvas signature, testSignatureDataUrl prop MUST NOT bypass signature check
+    const noSigRes = await findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-epod-submit').props.onClick({ preventDefault() {} });
+    assert.equal(noSigRes, null);
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    assert.ok(collectText(findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('chữ ký'));
+
+    // Draw signature via canvas mock, then hit OFFLINE_QUEUE_FULL cleanly on submitEpod & submitTwinDesired
+    const canvasNodeA = findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-signature-canvas');
+    canvasNodeA.props.ref.current = {
+      width: 440,
+      height: 160,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 440, height: 160 }),
+      getContext: () => ({ beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, clearRect() {} }),
+      toDataURL: () => 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
+    };
+    canvasNodeA.props.onPointerDown({ clientX: 5, clientY: 5, pointerId: 1 });
+    canvasNodeA.props.onPointerUp({ pointerId: 1 });
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+
+    const epodFullRes = await findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-epod-submit').props.onClick({ preventDefault() {} });
+    assert.equal(epodFullRes, null);
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    assert.ok(collectText(findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('50/50'));
+
+    findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-asset-input').props.onChange({ target: { value: '12' } });
+    findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-temp-input').props.onChange({ target: { value: '-18' } });
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    const twinFullRes = await findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit').props.onClick({ preventDefault() {} });
+    assert.equal(twinFullRes, null);
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    assert.ok(collectText(findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('đầy'));
+
+    // QuotaExceededError storage simulation
+    const quotaStorage = {
+      getItem: () => null,
+      setItem() {
+        throw Object.assign(new Error('DOM Exception 22'), { name: 'QuotaExceededError', code: 22 });
+      },
+    };
+    const fakeReactQ = createFakeReact();
+    const MobilePageQ = createMobileFieldPwaPage({ Plugin: class {} }, fakeReactQ, {});
+    let treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: { request: async () => ({ data: {} }) } });
+    fakeReactQ._flushEffects();
+    findNode(treeQ, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-asset-input').props.onChange({ target: { value: '12' } });
+    findNode(treeQ, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-temp-input').props.onChange({ target: { value: '-18' } });
+    treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: { request: async () => ({ data: {} }) } });
+    const quotaRes = await findNode(treeQ, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit').props.onClick({ preventDefault() {} });
+    assert.equal(quotaRes, null);
+    treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: { request: async () => ({ data: {} }) } });
+    assert.ok(collectText(findNode(treeQ, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('vượt dung lượng'));
+
+    // Part B: Important 3 + Minor 2 + Minor 3 — Concurrent handleSync lock, 401 notice, empty online skip, HITL & URN
+    isNavigatorOnline = true;
+    const syncStorage = makeMemoryStorage();
+    enqueueOfflineAction({
+      actionType: 'wms.epodCapture',
+      payload: { recipientName: 'Concurrent Test', deliveredQty: 1, gpsLat: 10, gpsLng: 105, signatureDataUrl: 'data:image/png;base64,AAA' },
+    }, { storage: syncStorage });
+
+    let epodPostCalls = 0;
+    let releaseFirstSync;
+    let mockMode = 'deferred-sync';
+    const twinCalls = [];
+    const syncApiClient = {
+      async request(req) {
+        if (req.url === 'dxosWms:epodCapture') {
+          epodPostCalls += 1;
+          if (mockMode === 'deferred-sync') {
+            await new Promise((resolve) => { releaseFirstSync = resolve; });
+            return { data: { trackingCode: 'LDX-TRK-SYNC1' } };
+          }
+          if (mockMode === '401') {
+            throw Object.assign(new Error('Unauthorized'), { response: { status: 401 } });
+          }
+        }
+        if (req.url === 'dxosBlocks:twinSetDesired') {
+          twinCalls.push(req.data);
+          return { data: { gatedByHitl: true, approvalId: 407 } };
+        }
+        return { data: { ok: true } };
+      },
+    };
+
+    const fakeReactB = createFakeReact();
+    const MobilePageB = createMobileFieldPwaPage({ Plugin: class {} }, fakeReactB, {});
+    let treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    fakeReactB._flushEffects();
+
+    // Simultaneous Sync button click + browser 'online' event + duplicate click MUST send only 1 POST
+    const syncBtn = findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-sync-btn');
+    const p1 = syncBtn.props.onClick();
+    const p2 = windowListeners.get('online')();
+    const p3 = syncBtn.props.onClick();
+    assert.equal(epodPostCalls, 1);
+    releaseFirstSync();
+    await Promise.all([p1, p2, p3]);
+    assert.equal(epodPostCalls, 1);
+    assert.equal(readOfflineQueue({ storage: syncStorage }).length, 0);
+
+    // Minor 3: Empty queue 'online' event skips auto-sync and does NOT emit "Hàng đợi ngoại tuyến đang trống."
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-qr-input').props.onChange({
+      target: { value: 'urn:ngsi-ld:Asset:org-ctu:edge:chiller-1' },
+    });
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-qr-parse-btn').props.onClick();
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    const noticeBeforeEmptyOnline = collectText(findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice'));
+    assert.ok(noticeBeforeEmptyOnline.includes('URN'));
+    await windowListeners.get('online')();
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    assert.equal(
+      collectText(findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')),
+      noticeBeforeEmptyOnline,
+    );
+
+    // Minor 2: Non-numeric URN populated twinAssetId, temp range validated [-80, 120], gatedByHitl renders HITL approval notice
+    assert.equal(
+      findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-asset-input').props.value,
+      'urn:ngsi-ld:Asset:org-ctu:edge:chiller-1',
+    );
+    findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-temp-input').props.onChange({ target: { value: '150' } });
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    await findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit').props.onClick({ preventDefault() {} });
+    assert.equal(twinCalls.length, 0);
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    assert.ok(collectText(findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('[-80, 120]'));
+
+    findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-temp-input').props.onChange({ target: { value: '4' } });
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    const hitlRes = await findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit').props.onClick({ preventDefault() {} });
+    assert.equal(hitlRes.gatedByHitl, true);
+    assert.equal(hitlRes.approvalId, 407);
+    assert.deepEqual(twinCalls[0], { assetEntityId: 'urn:ngsi-ld:Asset:org-ctu:edge:chiller-1', desiredPatch: { targetTempC: 4 } });
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    const hitlNotice = collectText(findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice'));
+    assert.ok(hitlNotice.includes('HITL'));
+    assert.ok(hitlNotice.includes('407'));
+
+    // Minor 3: 401 deferred queue item advises re-login instead of offline notice
+    mockMode = '401';
+    enqueueOfflineAction({
+      actionType: 'wms.epodCapture',
+      payload: { recipientName: 'Auth Retry', deliveredQty: 1, gpsLat: 10, gpsLng: 105, signatureDataUrl: 'data:image/png;base64,AAA' },
+    }, { storage: syncStorage });
+    await findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-sync-btn').props.onClick();
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
+    assert.equal(readOfflineQueue({ storage: syncStorage }).length, 1);
+    const unauthNotice = collectText(findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice'));
+    assert.ok(unauthNotice.includes('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại'));
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+  }
+});
