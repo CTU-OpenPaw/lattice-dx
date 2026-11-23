@@ -8,9 +8,12 @@
  */
 'use strict';
 
+const { createDxosGovernanceConsoles, GOVERNANCE_SECTIONS } = require('./governance-consoles');
+
 function createDxosStudioSettingsPage(client, React, antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+  const GovernanceConsoles = createDxosGovernanceConsoles(client, React, antd, app);
 
   function openRoute(path) {
     const url = app?.getRouteUrl?.(path) || path;
@@ -38,6 +41,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const [bundleText, setBundleText] = React.useState('');
     const [bundleInfo, setBundleInfo] = React.useState(null);
     const [enableBundleWorkflows, setEnableBundleWorkflows] = React.useState(false);
+    const [govSection, setGovSection] = React.useState('api-keys');
 
     const loadAll = React.useCallback(async () => {
       if (!api?.request) { setLoading(false); return; }
@@ -347,6 +351,8 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
     const requiredCount = activeTemplate?.requiredBindings?.length || 0;
     const missingCrew = Boolean(activeTemplate && selectedOrg && orgEmployees.length < requiredCount);
+    const isGovernanceTab = tab === 'governance' || GOVERNANCE_SECTIONS.some((s) => s.id === tab);
+    const activeGovSection = tab === 'governance' ? govSection : (isGovernanceTab ? tab : govSection);
 
     return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: '24px 24px 64px', maxWidth: 1120, margin: '0 auto', display: 'grid', gap: 16 } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, alignItems: 'center' } },
@@ -361,10 +367,30 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           key: k,
           type: 'button',
           role: 'tab',
+          'data-testid': `dxos-studio-tab-${k}`,
           'aria-selected': tab === k,
           onClick: () => setTab(k),
           style: { ...btnStyle(tab === k), padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 },
         }, label)),
+      ),
+      h('div', {
+        role: 'navigation',
+        'aria-label': 'Quản trị DX-OS v1.0',
+        'data-testid': 'dxos-studio-governance-nav',
+        style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: '8px 10px', borderRadius: 10, border: '1px solid #e2e8f0', background: '#f8fafc' },
+      },
+        h('span', { style: { fontSize: 12, fontWeight: 700, color: '#334155', marginRight: 4 } }, 'Quản trị DX-OS v1.0:'),
+        GOVERNANCE_SECTIONS.map((sec) => {
+          const active = isGovernanceTab && activeGovSection === sec.id;
+          return h('button', {
+            key: sec.id,
+            type: 'button',
+            'data-testid': `dxos-studio-tab-${sec.id}`,
+            'aria-pressed': active,
+            onClick: () => { setTab('governance'); setGovSection(sec.id); },
+            style: { ...btnStyle(active), padding: '5px 10px', fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 },
+          }, sec.label);
+        }),
       ),
       feedback ? h('div', {
         role: 'status',
@@ -563,6 +589,16 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           style: { width: '100%', padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12 },
         }),
       ) : null,
+
+      isGovernanceTab ? h(GovernanceConsoles, {
+        api,
+        activeSection: activeGovSection,
+        onSelectSection: (nextSec) => { setTab('governance'); setGovSection(nextSec); },
+        selectedOrg,
+        organizations,
+        employees: orgEmployees,
+        openRoute,
+      }) : null,
     );
   };
 }
