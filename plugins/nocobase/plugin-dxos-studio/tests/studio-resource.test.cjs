@@ -809,3 +809,270 @@ test('portal-composer COLLECTION_FIELD_GROUPS covers every interface field in do
     assert.deepEqual(missing, [], `COLLECTION_FIELD_GROUPS[${colName}] missing interface fields: ${missing.join(', ')}`);
   }
 });
+
+test('service-scope rewrites self requester.userId and assignee.userId filters, rejects foreign/unsafe filters, and wraps PG RLS context', async () => {
+  const Module = require('node:module');
+  const { createServiceScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/service-scope.js'));
+
+  const employees = [{ id: 8, userId: 80, organizationId: 'org-a', departmentId: 2, active: true }];
+  const ticket = { id: 19, organizationId: 'org-a', requesterId: 8, status: 'draft', version: 1 };
+  const fakeTx = { id: 'tx-svc-rls' };
+  const sqlCalls = [];
+  const repoTxCalls = [];
+  const db = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => cb(fakeTx),
+      query: async (sql, opts) => {
+        sqlCalls.push({ sql, opts });
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+      }
+      if (name === 'latticeServiceTickets') {
+        return {
+          findOne: async (opts) => {
+            repoTxCalls.push({ repo: name, transaction: opts?.transaction || null });
+            return ticket;
+          },
+        };
+      }
+      if (name === 'latticeDepartments') {
+        return {
+          findOne: async (opts) => {
+            repoTxCalls.push({ repo: name, transaction: opts?.transaction || null });
+            return { id: 2, organizationId: 'org-a', active: true };
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const mw = createServiceScopeMiddleware(db);
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  try {
+    process.env.DX_PG_RLS_SESSION = 'false';
+
+    // 1. NocoBase preset $or scope on latticeServiceTickets & charts:queryData
+    const presetFilter = { $or: [{ 'requester.userId': { $eq: 80 } }, { 'assignee.userId': { $eq: 80 } }] };
+    const snapshot = structuredClone(presetFilter);
+    const listCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: { resourceName: 'latticeServiceTickets', actionName: 'list', params: { filter: presetFilter } },
+    };
+    await mw(listCtx, async () => {});
+    assert.deepEqual(presetFilter, snapshot);
+    assert.deepEqual(listCtx.action.params.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { $or: [{ requesterId: { $eq: 8 } }, { assigneeId: { $eq: 8 } }] },
+      ],
+    });
+    assert.equal(listCtx.state.latticeRlsOrg, 'org-a');
+    assert.equal(sqlCalls.length, 0);
+
+    // Conflict-safe $and when requesterId/assigneeId also specified
+    const conflictCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: {
+        resourceName: 'latticeServiceTickets',
+        actionName: 'list',
+        params: { filter: { 'requester.userId': 80, requesterId: 99, 'assignee.userId': { $eq: '80' }, assigneeId: 77 } },
+      },
+    };
+    await mw(conflictCtx, async () => {});
+    assert.deepEqual(conflictCtx.action.params.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { requesterId: 99, assigneeId: 77, $and: [{ requesterId: { $eq: 8 } }, { assigneeId: { $eq: 8 } }] },
+      ],
+    });
+
+    const chartSelfCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: {
+        resourceName: 'charts',
+        actionName: 'queryData',
+        params: { values: { mode: 'builder', collection: 'latticeServiceTickets', filter: { 'assignee.userId': { $eq: 80 } } } },
+      },
+    };
+    await mw(chartSelfCtx, async () => {});
+    assert.deepEqual(chartSelfCtx.action.params.values.filter, {
+      $and: [{ organizationId: 'org-a' }, { assigneeId: { $eq: 8 } }],
+    });
+
+    // Foreign & unsafe filters still rejected 403
+    for (const badFilter of [
+      { 'requester.userId': { $eq: 99 } },
+      { 'assignee.userId': 99 },
+      { 'assignee.userId': { $ne: 80 } },
+      { 'requester.userId': { $gt: 1 } },
+      { 'assignee.identitySubject': 'sub-x' },
+      '{"__proto__":{"polluted":true}}',
+      '{"constructor":{"prototype":{"polluted":true}}}',
+    ]) {
+      await assert.rejects(
+        () => mw({
+          state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+          action: { resourceName: 'latticeServiceTickets', actionName: 'list', params: { filter: badFilter } },
+        }, async () => {}),
+        (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+      );
+    }
+
+    // 2. DX_PG_RLS_SESSION=true wraps latticeServiceTickets & charts:queryData in withTenantRlsContext
+    process.env.DX_PG_RLS_SESSION = 'true';
+    sqlCalls.length = 0;
+    repoTxCalls.length = 0;
+    let seenTx = null;
+    const rlsListCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 19, values: { name: 'RLS update', departmentId: 2 } } },
+    };
+    await mw(rlsListCtx, async () => { seenTx = rlsListCtx.state.latticeRlsTransaction; });
+    assert.equal(seenTx, fakeTx);
+    assert.equal(rlsListCtx.state.latticeRlsOrg, 'org-a');
+    assert.equal(sqlCalls.length, 1);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });
+    assert.ok(repoTxCalls.length >= 2 && repoTxCalls.every((c) => c.transaction === fakeTx));
+
+    sqlCalls.length = 0;
+    let chartSeenTx = null;
+    const rlsChartCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: { resourceName: 'charts', actionName: 'queryData', params: { values: { mode: 'builder', collection: 'latticeServiceTickets', filter: {} } } },
+    };
+    await mw(rlsChartCtx, async () => { chartSeenTx = rlsChartCtx.state.latticeRlsTransaction; });
+    assert.equal(chartSeenTx, fakeTx);
+    assert.equal(sqlCalls.length, 1);
+
+    // 3. Standalone fallback when pg-rls module is absent
+    const serviceScopePath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/service-scope.js'));
+    const origLoad = Module._load;
+    delete require.cache[serviceScopePath];
+    Module._load = function mockedMissingRls(request, parent, isMain) {
+      if (typeof request === 'string' && request.endsWith('pg-rls')) {
+        throw Object.assign(new Error(`Cannot find module '${request}'`), { code: 'MODULE_NOT_FOUND' });
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    try {
+      const standaloneMod = require(serviceScopePath);
+      const standaloneMw = standaloneMod.createServiceScopeMiddleware(db);
+      const fallbackCtx = {
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: { resourceName: 'latticeServiceTickets', actionName: 'list', params: { filter: { 'assignee.userId': 80 } } },
+      };
+      let ran = false;
+      await standaloneMw(fallbackCtx, async () => { ran = true; });
+      assert.equal(ran, true);
+      assert.deepEqual(fallbackCtx.action.params.filter, {
+        $and: [{ organizationId: 'org-a' }, { assigneeId: { $eq: 8 } }],
+      });
+    } finally {
+      Module._load = origLoad;
+      delete require.cache[serviceScopePath];
+    }
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+  }
+});
+
+test('solutionBundleExport restricts organizationId=all to root and scopes non-root isStudioAdmin via latticeEmployees', async () => {
+  const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
+
+  const employees = [
+    { id: 10, userId: 20, organizationId: 'org-a', departmentId: 1, active: true },
+    { id: 11, userId: 21, organizationId: 'org-b', departmentId: 2, active: false },
+  ];
+  const workflows = [
+    { id: 1, key: 'wf-a', title: 'WF Org A', current: true, enabled: true, options: { dxosOrganizationId: 'org-a' }, config: {} },
+    { id: 2, key: 'wf-b', title: 'WF Org B', current: true, enabled: true, options: { dxosOrganizationId: 'org-b' }, config: {} },
+  ];
+  const aiProfiles = [
+    { id: 1, username: 'ai-a', organizationId: 'org-a', enabled: true },
+    { id: 2, username: 'ai-b', organizationId: 'org-b', enabled: true },
+  ];
+
+  const db = {
+    hasCollection: () => true,
+    getRepository(name) {
+      if (name === 'roles') {
+        return {
+          find: async ({ filter }) => (filter?.name?.$in || []).map((n) => ({
+            name: n,
+            allowConfigure: n === 'ldx_sysadmin',
+            snippets: n === 'ldx_sysadmin' ? ['pm'] : [],
+          })),
+        };
+      }
+      if (name === 'latticeEmployees') {
+        return {
+          find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)),
+        };
+      }
+      if (name === 'workflows') {
+        return { find: async () => workflows };
+      }
+      if (name === 'latticeAiProfiles') {
+        return {
+          find: async ({ filter } = {}) => aiProfiles.filter((p) => !filter?.organizationId || p.organizationId === filter.organizationId),
+        };
+      }
+      return { find: async () => [] };
+    },
+  };
+
+  const actions = createDxosStudioActions(db, {});
+
+  // 1. Root can export all
+  const rootAllCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 1 }, currentRole: 'root', currentRoles: ['root'] },
+    action: { params: { organizationId: 'all' } },
+  };
+  await actions.solutionBundleExport(rootAllCtx, async () => {});
+  assert.equal(rootAllCtx.body.metadata.organizationId, 'all');
+  assert.deepEqual(rootAllCtx.body.workflows.map((w) => w.key), ['wf-a', 'wf-b']);
+
+  // 2. Non-root isStudioAdmin omitting organizationId exports ONLY their own org-a (never 'all')
+  const sysDefaultCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 20 }, currentRole: 'ldx_sysadmin', currentRoles: ['ldx_sysadmin'] },
+    action: { params: {} },
+  };
+  await actions.solutionBundleExport(sysDefaultCtx, async () => {});
+  assert.equal(sysDefaultCtx.body.metadata.organizationId, 'org-a');
+  assert.deepEqual(sysDefaultCtx.body.workflows.map((w) => w.key), ['wf-a']);
+  assert.deepEqual(sysDefaultCtx.body.aiProfiles.map((p) => p.username), ['ai-a']);
+
+  // 3. Non-root isStudioAdmin requesting organizationId='all' or foreign org-b is rejected 403
+  for (const badOrg of ['all', 'org-b']) {
+    await assert.rejects(
+      () => actions.solutionBundleExport({
+        method: 'GET',
+        state: { currentUser: { id: 20 }, currentRole: 'ldx_sysadmin', currentRoles: ['ldx_sysadmin'] },
+        action: { params: { organizationId: badOrg } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_ORGANIZATION_MISMATCH',
+    );
+  }
+
+  // 4. Non-root isStudioAdmin without active employee membership is rejected 403
+  for (const unmappedUserId of [21, 999]) {
+    await assert.rejects(
+      () => actions.solutionBundleExport({
+        method: 'GET',
+        state: { currentUser: { id: unmappedUserId }, currentRole: 'ldx_sysadmin', currentRoles: ['ldx_sysadmin'] },
+        action: { params: {} },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_MEMBERSHIP_REQUIRED',
+    );
+  }
+});

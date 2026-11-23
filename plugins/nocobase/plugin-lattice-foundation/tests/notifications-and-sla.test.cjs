@@ -1064,3 +1064,170 @@ test('Task 2.1 src files have zero Math.random() and src/client/*.js has zero no
     }
   }
 });
+
+test('computeElapsedSlaMinutes excludes Vietnamese weekends/holidays/lunch in GMT+7 when businessHoursOnly=true and preserves wall-clock when false', () => {
+  const {
+    VN_FIXED_HOLIDAYS,
+    VN_BUSINESS_WINDOWS,
+    VN_UTC_OFFSET_MS,
+    computeElapsedSlaMinutes,
+  } = require('../src/server/sla-engine');
+
+  assert.equal(typeof computeElapsedSlaMinutes, 'function');
+  assert.ok(VN_FIXED_HOLIDAYS instanceof Set);
+  for (const h of ['01-01', '04-30', '05-01', '09-02']) {
+    assert.equal(VN_FIXED_HOLIDAYS.has(h), true, `Missing Vietnamese fixed holiday ${h}`);
+  }
+  assert.ok(Array.isArray(VN_BUSINESS_WINDOWS) && VN_BUSINESS_WINDOWS.length === 2);
+  assert.equal(VN_UTC_OFFSET_MS, 7 * 60 * 60_000);
+
+  // Wall-clock mode untouched
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-21T08:00:00+07:00', '2026-11-21T10:30:00+07:00'),
+    150,
+  );
+  assert.equal(computeElapsedSlaMinutes(null, '2026-11-21T10:30:00+07:00'), 0);
+  assert.equal(computeElapsedSlaMinutes('2026-11-21T12:00:00+07:00', '2026-11-21T10:00:00+07:00'), 0);
+
+  // Weekend (Saturday & Sunday in GMT+7) = 0 business minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-21T08:00:00+07:00', '2026-11-22T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+
+  // Vietnamese fixed holidays = 0 business minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-09-02T08:00:00+07:00', '2026-09-02T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+  assert.equal(
+    computeElapsedSlaMinutes('2026-01-01T08:00:00+07:00', '2026-01-01T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+  assert.equal(
+    computeElapsedSlaMinutes('2026-04-30T08:00:00+07:00', '2026-05-01T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+
+  // Lunch break 12:00-13:30 GMT+7 excluded: 11:30 to 14:00 = 30 + 30 = 60 minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-23T11:30:00+07:00', '2026-11-23T14:00:00+07:00', { businessHoursOnly: true }),
+    60,
+  );
+
+  // Crossing National Day holiday (Tue 2026-09-01 17:00 -> Thu 2026-09-03 09:00) = 30 + 0 + 60 = 90 minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-09-01T17:00:00+07:00', '2026-09-03T09:00:00+07:00', { businessHoursOnly: true }),
+    90,
+  );
+
+  // Multi-day Mon..Wed full working days = 3 * 480 = 1440 minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-23T08:00:00+07:00', '2026-11-25T17:30:00+07:00', { businessHoursOnly: true }),
+    1440,
+  );
+
+  // Friday 16:30+07:00 to Monday 10:00+07:00 = 60 (Fri) + 0 (Sat/Sun) + 120 (Mon) = 180 minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-20T16:30:00+07:00', '2026-11-23T10:00:00+07:00', { businessHoursOnly: true }),
+    180,
+  );
+});
+
+test('SLA engine pushes active:{$ne:false} to DB filter and honors saved businessHoursOnly policies cleanly', async () => {
+  const { evaluateSlaBreaches, registerSlaEngine } = require('../src/server/sla-engine');
+  const { db, tables } = makeEnterpriseHarness({
+    serviceTickets: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        code: 'TKT-INACTIVE',
+        name: 'Soft deleted',
+        status: 'open',
+        priority: 'high',
+        active: false,
+        createdAt: '2026-11-10T01:00:00.000Z',
+      },
+      {
+        id: 2,
+        organizationId: 'org-a',
+        code: 'TKT-WEEKEND',
+        name: 'Opened Fri afternoon',
+        status: 'open',
+        priority: 'high',
+        active: true,
+        createdAt: '2026-11-20T17:00:00+07:00',
+      },
+    ],
+  });
+
+  const capturedFilters = [];
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!repo || !['latticeRequests', 'latticeOrders', 'latticeServiceTickets', 'latticeIncidentCases'].includes(name)) {
+      return repo;
+    }
+    return {
+      ...repo,
+      find: async (opts) => {
+        capturedFilters.push({ collection: name, filter: opts?.filter });
+        return repo.find(opts);
+      },
+    };
+  };
+
+  // Admin saves businessHoursOnly: true policy with notifyChannels: ['apprise']
+  const { app, resources } = makeAppHarness(db);
+  registerSlaEngine(app);
+  const slaActions = resources.get('latticeSla');
+  const saveCtx = makeCtx({
+    user: { id: 102 },
+    role: 'ldx_admin',
+    method: 'POST',
+    values: {
+      organizationId: 'org-a',
+      targetCollection: 'latticeServiceTickets',
+      priority: 'high',
+      warnAfterMinutes: 45,
+      breachAfterMinutes: 90,
+      escalateToRole: 'ldx_manager',
+      notifyChannels: ['apprise'],
+      businessHoursOnly: true,
+    },
+  });
+  await slaActions.savePolicy(saveCtx, async () => {});
+  assert.equal(saveCtx.body.businessHoursOnly, true);
+  assert.deepEqual(saveCtx.body.notifyChannels, ['apprise']);
+
+  const polCtx = makeCtx({ user: { id: 101 }, role: 'ldx_employee', method: 'GET' });
+  await slaActions.policies(polCtx, async () => {});
+  assert.equal(polCtx.body.items[0].businessHoursOnly, true);
+  assert.deepEqual(polCtx.body.items[0].notifyChannels, ['apprise']);
+
+  // At Mon 2026-11-23 08:30+07:00 -> 60 business minutes (Fri 17:00-17:30 + Mon 08:00-08:30): warning (not breached)
+  const monWarn = await evaluateSlaBreaches(db, {
+    organizationId: 'org-a',
+    now: new Date('2026-11-23T08:30:00+07:00'),
+    dryRun: true,
+  });
+  assert.equal(capturedFilters.length, 4);
+  for (const call of capturedFilters) {
+    assert.deepEqual(call.filter.active, { $ne: false }, `${call.collection} must push down active: { $ne: false }`);
+  }
+  assert.equal(monWarn.scanned, 1); // TKT-INACTIVE excluded at DB layer
+  assert.equal(monWarn.warningCount, 1);
+  assert.equal(monWarn.breachedCount, 0);
+  assert.equal(monWarn.items[0].elapsedMinutes, 60);
+
+  // At Mon 2026-11-23 09:00+07:00 -> 90 business minutes: breached
+  const monBreach = await evaluateSlaBreaches(db, {
+    organizationId: 'org-a',
+    now: new Date('2026-11-23T09:00:00+07:00'),
+    dryRun: false,
+  });
+  assert.equal(monBreach.breachedCount, 1);
+  assert.equal(monBreach.escalatedCount, 1);
+  assert.equal(monBreach.items[0].elapsedMinutes, 90);
+  assert.equal(tables.latticeNotifications.filter((n) => n.category === 'sla').length, 1);
+});

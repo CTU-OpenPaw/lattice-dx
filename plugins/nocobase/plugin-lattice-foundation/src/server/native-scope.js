@@ -66,6 +66,22 @@ function assertSafeSort(sort) {
     }
   }
 }
+const SELF_ACTOR_FILTER_FIELDS = Object.freeze({
+  'requester.userId': 'requesterId',
+  'assignee.userId': 'assigneeId',
+});
+function appendConflictSafeFilter(out, fieldName, filterValue) {
+  if (!Object.hasOwn(out, fieldName)) {
+    out[fieldName] = filterValue;
+    return;
+  }
+  if (out.$and !== undefined && !Array.isArray(out.$and)) {
+    throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+  }
+  out.$and = Array.isArray(out.$and)
+    ? [...out.$and, { [fieldName]: filterValue }]
+    : [{ [fieldName]: filterValue }];
+}
 function isSelfUserIdEquality(entry, actorUserId) {
   if (actorUserId == null) return false;
   const expected = String(actorUserId);
@@ -96,7 +112,9 @@ function sanitizeSafeFilter(node, options = {}, depth = 0) {
   }
   if (typeof target !== 'object') return target;
   const out = {};
-  let hasSelfRequesterRewrite = false;
+  const allowRequester = Boolean(options.allowSelfActorFilters || options.allowSelfRequesterUserId);
+  const allowAssignee = Boolean(options.allowSelfActorFilters);
+  const rewrittenFields = [];
   for (const [key, entry] of Object.entries(target)) {
     if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
@@ -105,14 +123,16 @@ function sanitizeSafeFilter(node, options = {}, depth = 0) {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
     if (!key.startsWith('$')) {
+      const mappedField = SELF_ACTOR_FILTER_FIELDS[key];
+      const selfFieldAllowed = (mappedField === 'requesterId' && allowRequester)
+        || (mappedField === 'assigneeId' && allowAssignee);
       if (
-        key === 'requester.userId'
-        && options.allowSelfRequesterUserId
+        selfFieldAllowed
         && options.actor?.userId != null
         && options.actor?.employeeId != null
         && isSelfUserIdEquality(entry, options.actor.userId)
       ) {
-        hasSelfRequesterRewrite = true;
+        rewrittenFields.push(mappedField);
         continue;
       }
       if (key.includes('.') || SENSITIVE_FILTER_KEY_RE.test(key)) {
@@ -121,18 +141,8 @@ function sanitizeSafeFilter(node, options = {}, depth = 0) {
     }
     out[key] = sanitizeSafeFilter(entry, options, depth + 1);
   }
-  if (hasSelfRequesterRewrite) {
-    const selfFilter = { $eq: options.actor.employeeId };
-    if (!Object.hasOwn(out, 'requesterId')) {
-      out.requesterId = selfFilter;
-    } else {
-      if (out.$and !== undefined && !Array.isArray(out.$and)) {
-        throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
-      }
-      out.$and = Array.isArray(out.$and)
-        ? [...out.$and, { requesterId: selfFilter }]
-        : [{ requesterId: selfFilter }];
-    }
+  for (const fieldName of rewrittenFields) {
+    appendConflictSafeFilter(out, fieldName, { $eq: options.actor.employeeId });
   }
   return out;
 }
@@ -264,9 +274,9 @@ function createNativeScopeMiddleware(db, definitions) {
       }
       if (isScopedCollection(col)) {
         const actor = await resolveNativeActor(db, ctx.state.currentUser);
-        const allowSelfRequesterUserId = ['latticeRequests', 'latticeOrders'].includes(col);
+        const allowSelfActorFilters = ['latticeRequests', 'latticeOrders'].includes(col);
         const nextValues = values.filter !== undefined
-          ? { ...values, filter: sanitizeSafeFilter(values.filter, { allowSelfRequesterUserId, actor }) }
+          ? { ...values, filter: sanitizeSafeFilter(values.filter, { allowSelfActorFilters, actor }) }
           : values;
         assertSafeSort(values.sort);
         ctx.state = ctx.state || {};
@@ -303,7 +313,7 @@ function createNativeScopeMiddleware(db, definitions) {
     }
     const document=['latticeRequests','latticeOrders'].includes(collectionName);
     if (params.filter !== undefined) {
-      params.filter = sanitizeSafeFilter(params.filter, { allowSelfRequesterUserId: document, actor });
+      params.filter = sanitizeSafeFilter(params.filter, { allowSelfActorFilters: document, actor });
     }
     assertSafeSort(params.sort);
     if (write.has(actionName) && collectionName === 'latticeEmployees') throw failure('NATIVE_IDENTITY_ADMIN_REQUIRED');

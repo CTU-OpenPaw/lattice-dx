@@ -10,6 +10,7 @@
 
 const { listWorkflowTemplates, buildWorkflowTemplate } = require('./workflow-templates');
 const { composePortals } = require('./portal-composer');
+const { resolveServiceActor } = require('./service-scope');
 const {
   exportSolutionBundle,
   diffSolutionBundle,
@@ -416,7 +417,22 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
-      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
+      const isRoot = ctx.state?.currentRole === 'root';
+      const requestedOrg = params.organizationId ? String(params.organizationId).trim() : '';
+      let organizationId = null;
+      if (isRoot) {
+        organizationId = requestedOrg || null;
+      } else {
+        const actor = await resolveServiceActor(db, ctx.state?.currentUser);
+        if (requestedOrg === 'all' || (requestedOrg && requestedOrg !== actor.organizationId)) {
+          throw fail(
+            'NATIVE_ORGANIZATION_MISMATCH',
+            403,
+            'Chỉ tài khoản root mới được xuất gói giải pháp toàn hệ thống hoặc tổ chức khác.',
+          );
+        }
+        organizationId = actor.organizationId;
+      }
       ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.3.0' });
       return next();
     },

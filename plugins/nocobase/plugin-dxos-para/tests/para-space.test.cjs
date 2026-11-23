@@ -347,3 +347,177 @@ test('para-scope enforces optimistic version locking on updates', async () => {
   assert.equal(okCtx.action.params.values.version, 4);
   assert.equal(okCtx.action.params.values.expectedVersion, undefined);
 });
+
+test('para-scope rewrites self owner.userId filters, rejects foreign/other dotted keys, and wraps PG RLS context', async () => {
+  const Module = require('node:module');
+  const { createParaScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/para-scope.js'));
+
+  const employees = [{ id: 11, userId: 101, organizationId: 'org-a', departmentId: 3, active: true }];
+  const docs = [{ id: 50, organizationId: 'org-a', ownerId: 11, version: 1, paraSpace: 'projects', active: true }];
+  const fakeTx = { id: 'tx-para-rls' };
+  const sqlCalls = [];
+  const repoTxCalls = [];
+  const db = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => cb(fakeTx),
+      query: async (sql, opts) => {
+        sqlCalls.push({ sql, opts });
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+      }
+      if (name === 'latticeParaDocuments') {
+        return {
+          findOne: async (opts) => {
+            repoTxCalls.push({ repo: name, transaction: opts?.transaction || null });
+            return docs[0];
+          },
+        };
+      }
+      if (name === 'latticeDepartments') {
+        return {
+          findOne: async (opts) => {
+            repoTxCalls.push({ repo: name, transaction: opts?.transaction || null });
+            return { id: 3, organizationId: 'org-a', active: true };
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const mw = createParaScopeMiddleware(db);
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  try {
+    process.env.DX_PG_RLS_SESSION = 'false';
+
+    // 1. Self owner.userId rewrites cleanly on list & charts:queryData
+    const rawFilter = { $or: [{ 'owner.userId': { $eq: 101 } }, { paraSpace: 'projects' }] };
+    const snapshot = structuredClone(rawFilter);
+    const listCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+      action: { resourceName: 'latticeParaDocuments', actionName: 'list', params: { filter: rawFilter } },
+    };
+    await mw(listCtx, async () => {});
+    assert.deepEqual(rawFilter, snapshot);
+    assert.deepEqual(listCtx.action.params.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { $or: [{ ownerId: { $eq: 11 } }, { paraSpace: 'projects' }] },
+      ],
+    });
+    assert.equal(listCtx.state.latticeRlsOrg, 'org-a');
+    assert.equal(sqlCalls.length, 0);
+
+    // Conflict-safe $and when ownerId is also present
+    const conflictCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+      action: {
+        resourceName: 'latticeParaDocuments',
+        actionName: 'list',
+        params: { filter: { ownerId: 99, 'owner.userId': '101' } },
+      },
+    };
+    await mw(conflictCtx, async () => {});
+    assert.deepEqual(conflictCtx.action.params.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { ownerId: 99, $and: [{ ownerId: { $eq: 11 } }] },
+      ],
+    });
+
+    const chartSelfCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+      action: {
+        resourceName: 'charts',
+        actionName: 'queryData',
+        params: { values: { mode: 'builder', collection: 'latticeParaDocuments', filter: { 'owner.userId': 101 } } },
+      },
+    };
+    await mw(chartSelfCtx, async () => {});
+    assert.deepEqual(chartSelfCtx.action.params.values.filter, {
+      $and: [{ organizationId: 'org-a' }, { ownerId: { $eq: 11 } }],
+    });
+
+    // Rejects foreign owner.userId, non-$eq operators, unrelated dotted keys, and prototype-pollution keys
+    for (const badFilter of [
+      { 'owner.userId': { $eq: 999 } },
+      { 'owner.userId': 999 },
+      { 'owner.userId': { $ne: 101 } },
+      { 'requester.userId': { $eq: 101 } },
+      { 'owner.identitySubject': 'sub-x' },
+      '{"__proto__":{"polluted":true}}',
+      '{"constructor":{"prototype":{"polluted":true}}}',
+    ]) {
+      await assert.rejects(
+        () => mw({
+          state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+          action: { resourceName: 'latticeParaDocuments', actionName: 'list', params: { filter: badFilter } },
+        }, async () => {}),
+        (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+      );
+    }
+
+    // 2. DX_PG_RLS_SESSION=true wraps latticeParaDocuments & charts:queryData in withTenantRlsContext
+    process.env.DX_PG_RLS_SESSION = 'true';
+    sqlCalls.length = 0;
+    repoTxCalls.length = 0;
+    let seenTx = null;
+    const rlsUpdateCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+      action: { resourceName: 'latticeParaDocuments', actionName: 'update', params: { filterByTk: 50, values: { title: 'RLS Doc', departmentId: 3 } } },
+    };
+    await mw(rlsUpdateCtx, async () => { seenTx = rlsUpdateCtx.state.latticeRlsTransaction; });
+    assert.equal(seenTx, fakeTx);
+    assert.equal(rlsUpdateCtx.state.latticeRlsOrg, 'org-a');
+    assert.equal(sqlCalls.length, 1);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });
+    assert.ok(repoTxCalls.length >= 2 && repoTxCalls.every((c) => c.transaction === fakeTx));
+
+    sqlCalls.length = 0;
+    let chartSeenTx = null;
+    const rlsChartCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+      action: { resourceName: 'charts', actionName: 'queryData', params: { values: { mode: 'builder', collection: 'latticeParaDocuments', filter: {} } } },
+    };
+    await mw(rlsChartCtx, async () => { chartSeenTx = rlsChartCtx.state.latticeRlsTransaction; });
+    assert.equal(chartSeenTx, fakeTx);
+    assert.equal(sqlCalls.length, 1);
+
+    // 3. Standalone fallback when pg-rls module is absent
+    const paraScopePath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/para-scope.js'));
+    const origLoad = Module._load;
+    delete require.cache[paraScopePath];
+    Module._load = function mockedMissingRls(request, parent, isMain) {
+      if (typeof request === 'string' && request.endsWith('pg-rls')) {
+        throw Object.assign(new Error(`Cannot find module '${request}'`), { code: 'MODULE_NOT_FOUND' });
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    try {
+      const standaloneMod = require(paraScopePath);
+      const standaloneMw = standaloneMod.createParaScopeMiddleware(db);
+      const fallbackCtx = {
+        state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
+        action: { resourceName: 'latticeParaDocuments', actionName: 'list', params: { filter: { 'owner.userId': 101 } } },
+      };
+      let ran = false;
+      await standaloneMw(fallbackCtx, async () => { ran = true; });
+      assert.equal(ran, true);
+      assert.deepEqual(fallbackCtx.action.params.filter, {
+        $and: [{ organizationId: 'org-a' }, { ownerId: { $eq: 11 } }],
+      });
+    } finally {
+      Module._load = origLoad;
+      delete require.cache[paraScopePath];
+    }
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+  }
+});

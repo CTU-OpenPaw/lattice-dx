@@ -21,8 +21,64 @@ const ROLE_RE = /^[a-zA-Z0-9_-]{2,64}$/;
 const ORG_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const SLA_BATCH_SIZE = 500;
 const SLA_MAX_SCAN = 5000;
+const DAY_MS = 86_400_000;
+const VN_UTC_OFFSET_MS = 7 * 60 * 60_000;
+const VN_FIXED_HOLIDAYS = new Set(['01-01', '04-30', '05-01', '09-02']);
+const VN_BUSINESS_WINDOWS = Object.freeze([
+  Object.freeze({ startMinute: 8 * 60, endMinute: 12 * 60 }),
+  Object.freeze({ startMinute: 13 * 60 + 30, endMinute: 17 * 60 + 30 }),
+]);
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
+
+function toTimestampMs(value) {
+  if (value === null || value === undefined || value === '') return NaN;
+  const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : NaN;
+}
+
+function formatVnMonthDay(vnDayStartMs) {
+  const d = new Date(vnDayStartMs);
+  const month = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${month}-${day}`;
+}
+
+function computeElapsedSlaMinutes(startDate, endDate, { businessHoursOnly = false, holidays = VN_FIXED_HOLIDAYS } = {}) {
+  const startMs = toTimestampMs(startDate);
+  const endMs = toTimestampMs(endDate === undefined ? new Date() : endDate);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return 0;
+  if (businessHoursOnly !== true) {
+    return (endMs - startMs) / 60_000;
+  }
+
+  const holidaySet = holidays instanceof Set
+    ? holidays
+    : new Set(Array.isArray(holidays) ? holidays : VN_FIXED_HOLIDAYS);
+  const vnStartMs = startMs + VN_UTC_OFFSET_MS;
+  const vnEndMs = endMs + VN_UTC_OFFSET_MS;
+  const startDayIdx = Math.floor(vnStartMs / DAY_MS);
+  const endDayIdx = Math.floor(vnEndMs / DAY_MS);
+
+  let businessMs = 0;
+  for (let dayIdx = startDayIdx; dayIdx <= endDayIdx; dayIdx += 1) {
+    const dayStartVnMs = dayIdx * DAY_MS;
+    const dayOfWeek = new Date(dayStartVnMs).getUTCDay();
+    if (dayOfWeek === 0 || dayOfWeek === 6) continue;
+    if (holidaySet.has(formatVnMonthDay(dayStartVnMs))) continue;
+
+    for (const win of VN_BUSINESS_WINDOWS) {
+      const winStart = dayStartVnMs + win.startMinute * 60_000;
+      const winEnd = dayStartVnMs + win.endMinute * 60_000;
+      const overlapStart = Math.max(vnStartMs, winStart);
+      const overlapEnd = Math.min(vnEndMs, winEnd);
+      if (overlapEnd > overlapStart) {
+        businessMs += overlapEnd - overlapStart;
+      }
+    }
+  }
+  return businessMs / 60_000;
+}
 
 function failSla(code, status = 400, message = code) {
   return Object.assign(new Error(message), { code, status });
@@ -37,13 +93,38 @@ function readParams(ctx) {
 function defaultSlaThresholds(priority) {
   const prio = String(priority || 'normal').trim().toLowerCase();
   if (HIGH_PRIORITY_SET.has(prio)) {
-    return { warnAfterMinutes: 30, breachAfterMinutes: 60, escalateToRole: 'ldx_manager', notifyChannels: null };
+    return { warnAfterMinutes: 30, breachAfterMinutes: 60, escalateToRole: 'ldx_manager', notifyChannels: null, businessHoursOnly: false };
   }
-  return { warnAfterMinutes: 240, breachAfterMinutes: 1440, escalateToRole: 'ldx_manager', notifyChannels: null };
+  return { warnAfterMinutes: 240, breachAfterMinutes: 1440, escalateToRole: 'ldx_manager', notifyChannels: null, businessHoursOnly: false };
 }
 
-function resolveEffectivePolicy(policyMap, organizationId, collection, priority) {
-  const fallback = defaultSlaThresholds(priority);
+function extractPolicyChannelConfig(row) {
+  const rawChannels = val(row, 'notifyChannels');
+  const directBh = val(row, 'businessHoursOnly');
+  if (Array.isArray(rawChannels)) {
+    return {
+      notifyChannels: rawChannels,
+      businessHoursOnly: typeof directBh === 'boolean' ? directBh : null,
+    };
+  }
+  if (rawChannels && typeof rawChannels === 'object') {
+    const channels = Array.isArray(rawChannels.channels) ? rawChannels.channels : null;
+    const bh = typeof directBh === 'boolean'
+      ? directBh
+      : (typeof rawChannels.businessHoursOnly === 'boolean' ? rawChannels.businessHoursOnly : null);
+    return {
+      notifyChannels: channels,
+      businessHoursOnly: bh,
+    };
+  }
+  return {
+    notifyChannels: null,
+    businessHoursOnly: typeof directBh === 'boolean' ? directBh : null,
+  };
+}
+
+function resolveEffectivePolicy(policyMap, organizationId, collection, priority, defaultBusinessHoursOnly = false) {
+  const fallback = { ...defaultSlaThresholds(priority), businessHoursOnly: Boolean(defaultBusinessHoursOnly) };
   const exact = policyMap.get(`${organizationId}|${collection}|${priority}`);
   const normal = policyMap.get(`${organizationId}|${collection}|normal`);
   const wildcard = policyMap.get(`${organizationId}|${collection}|*`);
@@ -53,9 +134,14 @@ function resolveEffectivePolicy(policyMap, organizationId, collection, priority)
   const breachAfterMinutes = Math.max(1, Number(val(chosen, 'breachAfterMinutes')) || fallback.breachAfterMinutes);
   const warnAfterMinutes = Math.max(1, Math.min(breachAfterMinutes, Number(val(chosen, 'warnAfterMinutes')) || fallback.warnAfterMinutes));
   const escalateToRole = String(val(chosen, 'escalateToRole') || fallback.escalateToRole).trim() || 'ldx_manager';
-  const rawChannels = val(chosen, 'notifyChannels');
-  const notifyChannels = Array.isArray(rawChannels) ? rawChannels : null;
-  return { warnAfterMinutes, breachAfterMinutes, escalateToRole, notifyChannels };
+  const cfg = extractPolicyChannelConfig(chosen);
+  return {
+    warnAfterMinutes,
+    breachAfterMinutes,
+    escalateToRole,
+    notifyChannels: cfg.notifyChannels,
+    businessHoursOnly: cfg.businessHoursOnly === null ? Boolean(defaultBusinessHoursOnly) : cfg.businessHoursOnly,
+  };
 }
 
 async function hasRecentSlaChatter(db, organizationId, targetCollection, targetRecordId, cutoffMs) {
@@ -82,7 +168,7 @@ async function hasRecentSlaChatter(db, organizationId, targetCollection, targetR
   }
 }
 
-async function evaluateSlaRecord(db, collection, row, { organizationId, policyMap, nowMs, cutoffMs, dryRun, env, fetchImpl }) {
+async function evaluateSlaRecord(db, collection, row, { organizationId, policyMap, nowMs, cutoffMs, dryRun, env, fetchImpl, businessHoursOnly = false }) {
   if (val(row, 'active') === false) return { scanned: false };
   const rowOrgId = String(val(row, 'organizationId') || '').trim();
   if (!rowOrgId || (organizationId && rowOrgId !== organizationId)) return { scanned: false };
@@ -91,12 +177,14 @@ async function evaluateSlaRecord(db, collection, row, { organizationId, policyMa
   if (!OPEN_SLA_STATUSES.has(status)) return { scanned: false };
 
   const startRaw = val(row, 'submittedAt') || val(row, 'firstSeenAt') || val(row, 'createdAt');
-  const startMs = startRaw ? new Date(startRaw).getTime() : NaN;
+  const startMs = toTimestampMs(startRaw);
   if (!Number.isFinite(startMs)) return { scanned: true, item: null };
 
-  const elapsedMinutes = Math.max(0, (nowMs - startMs) / 60_000);
   const priority = String(val(row, 'priority') || val(row, 'severity') || 'normal').trim().toLowerCase();
-  const policy = resolveEffectivePolicy(policyMap, rowOrgId, collection, priority);
+  const policy = resolveEffectivePolicy(policyMap, rowOrgId, collection, priority, Boolean(businessHoursOnly));
+  const elapsedMinutes = computeElapsedSlaMinutes(startMs, nowMs, {
+    businessHoursOnly: policy.businessHoursOnly,
+  });
 
   let slaState = 'ok';
   if (elapsedMinutes >= policy.breachAfterMinutes) slaState = 'breached';
@@ -167,6 +255,7 @@ async function evaluateSlaRecord(db, collection, row, { organizationId, policyMa
       warnAfterMinutes: policy.warnAfterMinutes,
       breachAfterMinutes: policy.breachAfterMinutes,
       escalateToRole: policy.escalateToRole,
+      businessHoursOnly: policy.businessHoursOnly,
       escalated,
     },
   };
@@ -180,6 +269,7 @@ async function evaluateCollectionSla(db, collection, options) {
 
   const filter = {
     status: { $in: [...OPEN_SLA_STATUSES] },
+    active: { $ne: false },
     ...(options.organizationId ? { organizationId: options.organizationId } : {}),
   };
   const seenIds = new Set();
@@ -227,7 +317,7 @@ async function evaluateCollectionSla(db, collection, options) {
   return { scanned, warningCount, breachedCount, escalatedCount, items };
 }
 
-async function evaluateSlaBreaches(db, { organizationId = null, now = new Date(), env = process.env, fetchImpl, dryRun = false } = {}) {
+async function evaluateSlaBreaches(db, { organizationId = null, now = new Date(), env = process.env, fetchImpl, dryRun = false, businessHoursOnly = false } = {}) {
   const nowDate = now instanceof Date ? now : new Date(now);
   const nowMs = Number.isFinite(nowDate.getTime()) ? nowDate.getTime() : Date.now();
   const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
@@ -264,6 +354,7 @@ async function evaluateSlaBreaches(db, { organizationId = null, now = new Date()
       dryRun,
       env,
       fetchImpl,
+      businessHoursOnly: Boolean(businessHoursOnly),
     });
     scanned += colReport.scanned;
     warningCount += colReport.warningCount;
@@ -282,6 +373,7 @@ async function evaluateSlaBreaches(db, { organizationId = null, now = new Date()
 }
 
 function serializePolicy(row) {
+  const { notifyChannels, businessHoursOnly } = extractPolicyChannelConfig(row);
   return {
     id: val(row, 'id') ?? null,
     organizationId: val(row, 'organizationId') || null,
@@ -290,11 +382,18 @@ function serializePolicy(row) {
     warnAfterMinutes: Number(val(row, 'warnAfterMinutes')) || 240,
     breachAfterMinutes: Number(val(row, 'breachAfterMinutes')) || 1440,
     escalateToRole: val(row, 'escalateToRole') || 'ldx_manager',
-    notifyChannels: Array.isArray(val(row, 'notifyChannels')) ? val(row, 'notifyChannels') : null,
+    notifyChannels,
+    businessHoursOnly: Boolean(businessHoursOnly),
     active: val(row, 'active') !== false,
     createdAt: val(row, 'createdAt') || null,
     updatedAt: val(row, 'updatedAt') || null,
   };
+}
+
+function parseBooleanFlag(value) {
+  if (value === true || value === 'true') return true;
+  if (value === false || value === 'false') return false;
+  return false;
 }
 
 function registerSlaEngine(app) {
@@ -325,7 +424,11 @@ function registerSlaEngine(app) {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
         const params = readParams(ctx);
         const { organizationId } = await resolveScope(ctx, params.organizationId);
-        const report = await evaluateSlaBreaches(db, { organizationId, dryRun: true });
+        const report = await evaluateSlaBreaches(db, {
+          organizationId,
+          dryRun: true,
+          businessHoursOnly: parseBooleanFlag(params.businessHoursOnly),
+        });
         ctx.body = { organizationId, ...report };
         return next();
       },
@@ -385,9 +488,20 @@ function registerSlaEngine(app) {
           throw failSla('SLA_ROLE_INVALID', 400, 'escalateToRole không hợp lệ.');
         }
 
-        const notifyChannels = Array.isArray(params.notifyChannels)
-          ? params.notifyChannels.map((c) => String(c || '').trim()).filter(Boolean).slice(0, 10)
+        const rawChannels = Array.isArray(params.notifyChannels)
+          ? params.notifyChannels
+          : (params.notifyChannels && typeof params.notifyChannels === 'object' && Array.isArray(params.notifyChannels.channels)
+            ? params.notifyChannels.channels
+            : null);
+        const cleanChannels = rawChannels
+          ? rawChannels.map((c) => String(c || '').trim()).filter(Boolean).slice(0, 10)
           : null;
+        const businessHoursOnly = params.businessHoursOnly !== undefined
+          ? parseBooleanFlag(params.businessHoursOnly)
+          : Boolean(params.notifyChannels && !Array.isArray(params.notifyChannels) && params.notifyChannels.businessHoursOnly === true);
+        const notifyChannels = businessHoursOnly
+          ? { channels: cleanChannels, businessHoursOnly: true }
+          : cleanChannels;
         const active = params.active === undefined ? true : Boolean(params.active);
 
         const repo = db.getRepository('latticeSlaPolicies');
@@ -426,7 +540,12 @@ function registerSlaEngine(app) {
         await requireAdmin(ctx);
         const params = readParams(ctx);
         const { organizationId } = await resolveScope(ctx, params.organizationId);
-        ctx.body = await evaluateSlaBreaches(db, { organizationId, now: new Date(), dryRun: false });
+        ctx.body = await evaluateSlaBreaches(db, {
+          organizationId,
+          now: new Date(),
+          dryRun: false,
+          businessHoursOnly: parseBooleanFlag(params.businessHoursOnly),
+        });
         return next();
       },
     },
@@ -463,6 +582,10 @@ function registerSlaEngine(app) {
 module.exports = {
   SLA_COLLECTIONS,
   OPEN_SLA_STATUSES,
+  VN_UTC_OFFSET_MS,
+  VN_FIXED_HOLIDAYS,
+  VN_BUSINESS_WINDOWS,
+  computeElapsedSlaMinutes,
   defaultSlaThresholds,
   evaluateSlaBreaches,
   registerSlaEngine,

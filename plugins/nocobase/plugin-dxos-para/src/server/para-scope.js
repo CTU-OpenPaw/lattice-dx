@@ -8,6 +8,34 @@
  */
 'use strict';
 
+const path = require('node:path');
+
+function loadPgRls() {
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '../../../plugin-lattice-foundation/dist/server/pg-rls',
+        '../../../plugin-lattice-foundation/src/server/pg-rls',
+      ]
+    : [
+        '../../../plugin-lattice-foundation/src/server/pg-rls',
+        '../../../plugin-lattice-foundation/dist/server/pg-rls',
+      ];
+  for (const modPath of candidates) {
+    try {
+      const mod = require(modPath);
+      if (mod && typeof mod.withTenantRlsContext === 'function') return mod;
+    } catch (err) {
+      if (err?.code !== 'MODULE_NOT_FOUND') throw err;
+    }
+  }
+  return null;
+}
+
+const pgRls = loadPgRls();
+const withTenantRlsContext = pgRls?.withTenantRlsContext || null;
+const installRlsTransactionBridge = pgRls?.installRlsTransactionBridge || null;
+
 function failure(code, status = 403, message = code) {
   return Object.assign(new Error(message), { code, status });
 }
@@ -53,39 +81,93 @@ function assertSafeSort(sort) {
   }
 }
 
-function assertSafeFilter(node, depth = 0) {
-  if (node == null) return;
+const SELF_ACTOR_FILTER_FIELDS = Object.freeze({
+  'owner.userId': 'ownerId',
+});
+
+function appendConflictSafeFilter(out, fieldName, filterValue) {
+  if (!Object.hasOwn(out, fieldName)) {
+    out[fieldName] = filterValue;
+    return;
+  }
+  if (out.$and !== undefined && !Array.isArray(out.$and)) {
+    throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+  }
+  out.$and = Array.isArray(out.$and)
+    ? [...out.$and, { [fieldName]: filterValue }]
+    : [{ [fieldName]: filterValue }];
+}
+
+function isSelfUserIdEquality(entry, actorUserId) {
+  if (actorUserId == null) return false;
+  const expected = String(actorUserId);
+  if (typeof entry === 'string' || typeof entry === 'number') {
+    return String(entry) === expected;
+  }
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  const keys = Object.keys(entry);
+  if (keys.length !== 1 || !Object.hasOwn(entry, '$eq')) return false;
+  const value = entry.$eq;
+  return (typeof value === 'string' || typeof value === 'number') && String(value) === expected;
+}
+
+function sanitizeSafeFilter(node, options = {}, depth = 0) {
+  if (node == null) return node;
   if (depth > 20) throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
   let target = node;
   if (typeof target === 'string') {
     const trimmed = target.trim();
-    if (!trimmed) return;
+    if (!trimmed) return node;
     if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
       try { target = JSON.parse(trimmed); } catch { throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED'); }
     } else {
-      return;
+      return node;
     }
   }
   if (Array.isArray(target)) {
-    for (const item of target) assertSafeFilter(item, depth + 1);
-    return;
+    return target.map((item) => sanitizeSafeFilter(item, options, depth + 1));
   }
-  if (typeof target !== 'object') return;
+  if (typeof target !== 'object') return target;
+  const out = {};
+  const allowOwner = Boolean(options.allowSelfOwnerUserId || options.allowSelfActorFilters);
+  const rewrittenFields = [];
   for (const [key, entry] of Object.entries(target)) {
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+    }
     if (key === '$where' || key === '$raw' || key === '$sql') {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
-    if (!key.startsWith('$') && (key.includes('.') || SENSITIVE_FILTER_KEY_RE.test(key))) {
-      throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+    if (!key.startsWith('$')) {
+      const mappedField = SELF_ACTOR_FILTER_FIELDS[key];
+      if (
+        mappedField
+        && allowOwner
+        && options.actor?.userId != null
+        && options.actor?.employeeId != null
+        && isSelfUserIdEquality(entry, options.actor.userId)
+      ) {
+        rewrittenFields.push(mappedField);
+        continue;
+      }
+      if (key.includes('.') || SENSITIVE_FILTER_KEY_RE.test(key)) {
+        throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+      }
     }
-    assertSafeFilter(entry, depth + 1);
+    out[key] = sanitizeSafeFilter(entry, options, depth + 1);
   }
+  for (const fieldName of rewrittenFields) {
+    appendConflictSafeFilter(out, fieldName, { $eq: options.actor.employeeId });
+  }
+  return out;
 }
 
 async function resolveParaActor(db, user, options = {}) {
   const id = val(user, 'id');
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_LOGIN_REQUIRED', 401);
-  const rows = await db.getRepository('latticeEmployees').find({ ...options, filter: { userId: id }, limit: 2 });
+  const empRepo = db?.getRepository?.('latticeEmployees');
+  if (!empRepo || typeof empRepo.find !== 'function') throw failure('NATIVE_MEMBERSHIP_REQUIRED');
+  const rows = (await empRepo.find({ ...options, filter: { userId: id }, limit: 2 })) || [];
   if (rows.length > 1) throw failure('NATIVE_MEMBERSHIP_AMBIGUOUS');
   const employee = rows[0];
   if (!employee || val(employee, 'active') !== true) throw failure('NATIVE_MEMBERSHIP_REQUIRED');
@@ -102,23 +184,38 @@ async function resolveParaActor(db, user, options = {}) {
 }
 
 function createParaScopeMiddleware(db) {
+  if (typeof installRlsTransactionBridge === 'function') {
+    installRlsTransactionBridge(db);
+  }
   const readActions = new Set(['list', 'get', 'count']);
   const writeActions = new Set(['create', 'update', 'destroy']);
 
   return async function paraScopeMiddleware(ctx, next) {
-    const { resourceName, actionName, params } = ctx.action || {};
+    const { resourceName, actionName } = ctx.action || {};
+    const params = ctx.action?.params || (ctx.action ? (ctx.action.params = {}) : {});
     if (resourceName === 'charts' && actionName === 'queryData' && ctx.state?.currentRole !== 'root') {
       if (params?.values?.collection === 'latticeParaChunks') {
         throw failure('PARA_CHUNKS_READ_ONLY', 403);
       }
       if (params?.values?.collection === 'latticeParaDocuments') {
         if (params.values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
-        assertSafeFilter(params.values.filter);
-        assertSafeSort(params.values.sort);
         const actor = await resolveParaActor(db, ctx.state?.currentUser);
-        params.values = { ...params.values, filter: { $and: [{ organizationId: actor.organizationId }, params.values.filter ?? {}] } };
+        const sanitizedFilter = params.values.filter !== undefined
+          ? sanitizeSafeFilter(params.values.filter, { allowSelfOwnerUserId: true, actor })
+          : params.values.filter;
+        assertSafeSort(params.values.sort);
+        params.values = { ...params.values, filter: { $and: [{ organizationId: actor.organizationId }, sanitizedFilter ?? {}] } };
         if (params.values.pageSize != null) params.values.pageSize = clampPageLimit(params.values.pageSize);
         if (params.values.limit != null) params.values.limit = clampPageLimit(params.values.limit);
+        ctx.state = ctx.state || {};
+        ctx.state.latticeNativeActor = actor;
+        ctx.state.latticeRlsOrg = actor.organizationId;
+        if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function' && typeof withTenantRlsContext === 'function') {
+          return withTenantRlsContext(db, actor.organizationId, (transaction) => {
+            ctx.state.latticeRlsTransaction = transaction;
+            return next();
+          });
+        }
         return next();
       }
     }
@@ -138,74 +235,89 @@ function createParaScopeMiddleware(db) {
     if (params?.targetCollection || (params?.appends && (!Array.isArray(params.appends) || params.appends.length)) || fields.some((f) => typeof f !== 'string' || f.includes('.'))) {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
-    assertSafeFilter(params?.filter);
+    const sanitizedFilter = params?.filter !== undefined
+      ? sanitizeSafeFilter(params.filter, { allowSelfOwnerUserId: true, actor })
+      : params?.filter;
     assertSafeSort(params?.sort);
 
     const activeRole = ctx.state?.currentRole || '';
     const isOwnerOnlyRole = !MANAGER_OR_ADMIN_ROLES.has(activeRole);
     const expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
-    let bumpedVersion = null;
     const scopeFilters = [{ organizationId: actor.organizationId }];
     if ((actionName === 'update' || actionName === 'destroy') && isOwnerOnlyRole) {
       scopeFilters.push({ ownerId: actor.employeeId });
     }
-    if ((actionName === 'update' || actionName === 'destroy') && params?.filterByTk != null) {
-      const docRepo = db.getRepository('latticeParaDocuments');
-      if (docRepo?.findOne) {
-        const existing = await docRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId } });
-        if (!existing) throw failure('PARA_DOCUMENT_NOT_FOUND', 404);
-        if (isOwnerOnlyRole && Number(val(existing, 'ownerId')) !== Number(actor.employeeId)) {
-          throw failure('PARA_OWNER_REQUIRED', 403);
-        }
-        if (actionName === 'update') {
-          const currentVersion = Number(val(existing, 'version')) || 1;
-          if (expectedVersion !== null && currentVersion !== expectedVersion) {
-            throw failure('VERSION_CONFLICT', 409, 'Tài liệu P.A.R.A. đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
-          }
-          bumpedVersion = currentVersion + 1;
-        }
-      }
-    }
-    params.filter = { $and: [...scopeFilters, params?.filter ?? {}] };
+    params.filter = { $and: [...scopeFilters, sanitizedFilter ?? {}] };
     if (params?.pageSize != null) params.pageSize = clampPageLimit(params.pageSize);
     if (params?.limit != null) params.limit = clampPageLimit(params.limit);
 
-    if (actionName === 'create' || actionName === 'update') {
-      const values = params?.values;
-      if (!values || typeof values !== 'object' || Array.isArray(values)) throw failure('NATIVE_VALUES_INVALID', 400);
-      for (const [k, v] of Object.entries(values)) {
-        if (['id', 'userId', 'ownerId', 'identitySubject'].includes(k) || (v !== null && typeof v === 'object')) {
-          throw failure('NATIVE_PROTECTED_FIELD');
+    const executeScoped = async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      let bumpedVersion = null;
+      if ((actionName === 'update' || actionName === 'destroy') && params?.filterByTk != null) {
+        const docRepo = db.getRepository('latticeParaDocuments');
+        if (docRepo?.findOne) {
+          const existing = await docRepo.findOne({ filter: { id: params.filterByTk, organizationId: actor.organizationId }, ...txOpt });
+          if (!existing) throw failure('PARA_DOCUMENT_NOT_FOUND', 404);
+          if (isOwnerOnlyRole && Number(val(existing, 'ownerId')) !== Number(actor.employeeId)) {
+            throw failure('PARA_OWNER_REQUIRED', 403);
+          }
+          if (actionName === 'update') {
+            const currentVersion = Number(val(existing, 'version')) || 1;
+            if (expectedVersion !== null && currentVersion !== expectedVersion) {
+              throw failure('VERSION_CONFLICT', 409, 'Tài liệu P.A.R.A. đã được người khác cập nhật (xung đột phiên bản). Vui lòng tải lại.');
+            }
+            bumpedVersion = currentVersion + 1;
+          }
         }
       }
-      if (values.organizationId !== undefined && values.organizationId !== actor.organizationId) {
-        throw failure('NATIVE_ORGANIZATION_MISMATCH');
-      }
-      const nextValues = { ...values, organizationId: actor.organizationId };
-      if (actionName === 'update' && bumpedVersion !== null) {
-        nextValues.version = bumpedVersion;
-        if (Array.isArray(params.whitelist) && !params.whitelist.includes('version')) {
-          params.whitelist = [...params.whitelist, 'version'];
-        }
-      }
-      if (actionName === 'create') {
-        nextValues.ownerId = actor.employeeId;
-        if (nextValues.departmentId == null && actor.departmentId != null) {
-          nextValues.departmentId = actor.departmentId;
-        }
-      }
-      if (nextValues.departmentId != null) {
-        if (!/^[1-9]\d*$/.test(String(nextValues.departmentId))) throw failure('NATIVE_REFERENCE_INVALID', 400);
-        const dept = await db.getRepository('latticeDepartments')?.findOne({
-          filter: { id: nextValues.departmentId, organizationId: actor.organizationId, active: true },
-        });
-        if (!dept) throw failure('NATIVE_REFERENCE_UNAVAILABLE');
-      }
-      params.values = nextValues;
-    }
 
-    ctx.state.latticeNativeActor = actor;
-    return next();
+      if (actionName === 'create' || actionName === 'update') {
+        const values = params?.values;
+        if (!values || typeof values !== 'object' || Array.isArray(values)) throw failure('NATIVE_VALUES_INVALID', 400);
+        for (const [k, v] of Object.entries(values)) {
+          if (['id', 'userId', 'ownerId', 'identitySubject'].includes(k) || (v !== null && typeof v === 'object')) {
+            throw failure('NATIVE_PROTECTED_FIELD');
+          }
+        }
+        if (values.organizationId !== undefined && values.organizationId !== actor.organizationId) {
+          throw failure('NATIVE_ORGANIZATION_MISMATCH');
+        }
+        const nextValues = { ...values, organizationId: actor.organizationId };
+        if (actionName === 'update' && bumpedVersion !== null) {
+          nextValues.version = bumpedVersion;
+          if (Array.isArray(params.whitelist) && !params.whitelist.includes('version')) {
+            params.whitelist = [...params.whitelist, 'version'];
+          }
+        }
+        if (actionName === 'create') {
+          nextValues.ownerId = actor.employeeId;
+          if (nextValues.departmentId == null && actor.departmentId != null) {
+            nextValues.departmentId = actor.departmentId;
+          }
+        }
+        if (nextValues.departmentId != null) {
+          if (!/^[1-9]\d*$/.test(String(nextValues.departmentId))) throw failure('NATIVE_REFERENCE_INVALID', 400);
+          const dept = await db.getRepository('latticeDepartments')?.findOne({
+            filter: { id: nextValues.departmentId, organizationId: actor.organizationId, active: true },
+            ...txOpt,
+          });
+          if (!dept) throw failure('NATIVE_REFERENCE_UNAVAILABLE');
+        }
+        params.values = nextValues;
+      }
+
+      ctx.state = ctx.state || {};
+      ctx.state.latticeNativeActor = actor;
+      ctx.state.latticeRlsOrg = actor.organizationId;
+      if (transaction) ctx.state.latticeRlsTransaction = transaction;
+      return next();
+    };
+
+    if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function' && typeof withTenantRlsContext === 'function') {
+      return withTenantRlsContext(db, actor.organizationId, (transaction) => executeScoped(transaction));
+    }
+    return executeScoped(null);
   };
 }
 

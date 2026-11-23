@@ -292,3 +292,91 @@ test('resource guard rewrites self requester.userId dataScope filters on documen
     { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
   );
 });
+
+test('resource guard rewrites self assignee.userId and NocoBase $or preset scope on documents while blocking foreign assignee filters', async () => {
+  const employee = { id: 1, userId: 12, departmentId: 3, organizationId: 'org-a', active: true };
+  const guard = api.createNativeScopeMiddleware(db([employee]), {
+    orders: { name: 'latticeOrders', fields: [] },
+    requests: { name: 'latticeRequests', fields: [] },
+    assets: { name: 'latticeAssets', fields: [] },
+  });
+  const makeCtx = (resourceName, actionName, params = {}) => ({
+    state: { currentUser: { id: 12 }, currentRole: 'ldx_employee' },
+    action: { resourceName, actionName, params },
+  });
+
+  // 1. NocoBase preset view scope: $or of requester.userId and assignee.userId
+  const presetScopeFilter = { $or: [{ 'requester.userId': { $eq: 12 } }, { 'assignee.userId': { $eq: 12 } }] };
+  const presetSnapshot = structuredClone(presetScopeFilter);
+  const orCtx = makeCtx('latticeRequests', 'list', { filter: presetScopeFilter });
+  let ran = false;
+  await guard(orCtx, async () => { ran = true; });
+  assert.equal(ran, true);
+  assert.deepEqual(presetScopeFilter, presetSnapshot);
+  assert.deepEqual(orCtx.action.params.filter, {
+    $and: [
+      { organizationId: 'org-a' },
+      { $or: [{ requesterId: { $eq: 1 } }, { assigneeId: { $eq: 1 } }] },
+    ],
+  });
+
+  // 2. Standalone assignee.userId ($eq string and scalar) on latticeOrders & latticeRequests
+  const standaloneEqCtx = makeCtx('latticeOrders', 'list', { filter: { 'assignee.userId': { $eq: '12' } } });
+  await guard(standaloneEqCtx, async () => {});
+  assert.deepEqual(standaloneEqCtx.action.params.filter, {
+    $and: [{ organizationId: 'org-a' }, { assigneeId: { $eq: 1 } }],
+  });
+
+  const standaloneScalarCtx = makeCtx('latticeRequests', 'get', { filter: { 'assignee.userId': 12 } });
+  await guard(standaloneScalarCtx, async () => {});
+  assert.deepEqual(standaloneScalarCtx.action.params.filter, {
+    $and: [{ organizationId: 'org-a' }, { assigneeId: { $eq: 1 } }],
+  });
+
+  // 3. Conflicting assigneeId alongside assignee.userId (in either key order) preserves both via $and
+  const conflictAssigneeCtx = makeCtx('latticeOrders', 'list', {
+    filter: { 'assignee.userId': 12, assigneeId: 88 },
+  });
+  await guard(conflictAssigneeCtx, async () => {});
+  assert.deepEqual(conflictAssigneeCtx.action.params.filter, {
+    $and: [{ organizationId: 'org-a' }, { assigneeId: 88, $and: [{ assigneeId: { $eq: 1 } }] }],
+  });
+
+  // 4. charts:queryData on latticeOrders with $or preset scope
+  const chartCtx = makeCtx('charts', 'queryData', {
+    values: { mode: 'builder', collection: 'latticeOrders', filter: { $or: [{ 'requester.userId': 12 }, { 'assignee.userId': 12 }] } },
+  });
+  await guard(chartCtx, async () => {});
+  assert.deepEqual(chartCtx.action.params.values.filter, {
+    $and: [
+      { organizationId: 'org-a' },
+      { $or: [{ requesterId: { $eq: 1 } }, { assigneeId: { $eq: 1 } }] },
+    ],
+  });
+
+  // 5. Reject foreign assignee.userId, non-$eq operators, sensitive relation keys, and non-document collections
+  for (const badFilter of [
+    { 'assignee.userId': { $eq: 99 } },
+    { 'assignee.userId': 99 },
+    { 'assignee.userId': { $ne: 12 } },
+    { 'assignee.userId': { $gt: 1 } },
+    { 'assignee.userId': { $eq: 12, $ne: 99 } },
+    { 'assignee.identitySubject': 'sub-x' },
+    { $or: [{ 'requester.userId': { $eq: 12 } }, { 'assignee.userId': { $eq: 99 } }] },
+  ]) {
+    await assert.rejects(
+      guard(makeCtx('latticeOrders', 'list', { filter: badFilter }), async () => {}),
+      { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+    );
+  }
+  await assert.rejects(
+    guard(makeCtx('latticeAssets', 'list', { filter: { 'assignee.userId': { $eq: 12 } } }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+  await assert.rejects(
+    guard(makeCtx('charts', 'queryData', {
+      values: { mode: 'builder', collection: 'latticeRequests', filter: { 'assignee.userId': { $eq: 99 } } },
+    }), async () => {}),
+    { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
+  );
+});
