@@ -249,7 +249,15 @@ function createAuditedTool(spec) {
           await hydrateQuotaBucketFromDb(db, actor.organizationId);
           checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
         }
-        const preparedArgs = typeof spec.prepareArgs === 'function' ? spec.prepareArgs(rawArgs) : rawArgs;
+        let normalizedRawArgs = rawArgs;
+        if (typeof normalizedRawArgs === 'string' && normalizedRawArgs.trim().startsWith('{')) {
+          try {
+            normalizedRawArgs = JSON.parse(normalizedRawArgs);
+          } catch {
+            // Preserve malformed JSON string so schemaHelper.validate reports the validation error
+          }
+        }
+        const preparedArgs = typeof spec.prepareArgs === 'function' ? spec.prepareArgs(normalizedRawArgs) : normalizedRawArgs;
         const checked = schemaHelper.validate(preparedArgs);
         if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
         const result = await spec.run(ctx, db, actor, checked.value);
@@ -319,6 +327,7 @@ function createDxosTools() {
     safeGetResource,
     invokeResourceAction,
     createAuditedTool,
+    redactPiiText,
     redactPiiDeep,
     ADMIN_BUILDER_TOOL_NAMES,
     WRITABLE_BUSINESS_COLLECTIONS,

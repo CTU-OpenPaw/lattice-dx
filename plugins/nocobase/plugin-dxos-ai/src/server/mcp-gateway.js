@@ -19,12 +19,13 @@ const {
 } = require('./ai-tools-core');
 const { buildEnterpriseTopology } = require('./mcp-itot-tools');
 const { recordAiAuditLog } = require('./ai-schemas');
-const { redactPiiDeep } = require('./ai-governance');
+const { redactPiiText, redactPiiDeep } = require('./ai-governance');
 const { analyzeGraphImpact } = require('./ai-copilot-tools');
 
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-03-26', '2024-11-05'];
 const ORG_ALARMS_URI_RE = /^dxos:\/\/org\/([a-zA-Z0-9_-]{1,80})\/alarms\/active$/;
 const ORG_LINEAGE_URI_RE = /^dxos:\/\/org\/([a-zA-Z0-9_-]{1,80})\/lineage\/([A-Za-z_][A-Za-z0-9_]{0,80})\/([^/?#]{1,120})$/;
+const FORBIDDEN_COLLECTION_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
 
 function cleanPromptArg(raw) {
   return String(raw ?? '').replace(/[\r\n\0]+/g, ' ').trim().slice(0, 200);
@@ -461,6 +462,11 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
         }
 
         const collection = lineageMatch[2];
+        if (FORBIDDEN_COLLECTION_NAMES.has(collection)) {
+          ctx.status = 200;
+          ctx.body = { jsonrpc: '2.0', id: reqId, error: { code: -32602, message: 'Invalid collection name in lineage URI.' } };
+          return;
+        }
         let decodedRecordId;
         try {
           decodedRecordId = decodeURIComponent(lineageMatch[3]).trim();
@@ -469,13 +475,21 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
           ctx.body = { jsonrpc: '2.0', id: reqId, error: { code: -32602, message: 'Invalid encoded recordId in lineage URI.' } };
           return;
         }
+        if (!decodedRecordId) {
+          ctx.status = 200;
+          ctx.body = { jsonrpc: '2.0', id: reqId, error: { code: -32602, message: 'Missing recordId in lineage URI.' } };
+          return;
+        }
         const effectiveActor = actor.isRoot ? { ...actor, organizationId: uriOrgId } : actor;
+        const targetArg = /^[1-9]\d*$/.test(decodedRecordId)
+          ? { recordId: decodedRecordId }
+          : { recordCode: decodedRecordId };
         try {
           const graphResult = await analyzeGraphImpact(
             activeDb,
             effectiveActor,
-            { collection, recordId: decodedRecordId, maxDepth: 2 },
-            { val, failTool, resolveReadablePolicies, isRowVisibleToActor, SYSTEM_PROTECTED_COLLECTIONS, redactPiiDeep },
+            { collection, ...targetArg, maxDepth: 2 },
+            { val, failTool, resolveReadablePolicies, isRowVisibleToActor, SYSTEM_PROTECTED_COLLECTIONS, redactPiiText },
           );
           ctx.status = 200;
           ctx.body = {

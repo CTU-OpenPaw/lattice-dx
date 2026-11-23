@@ -160,17 +160,28 @@ function buildParaChunkPoolEntries(chunks = [], { organizationId, visibleDocMap 
   return entries;
 }
 
+const PGVECTOR_TABLE_SPECS = new Map([
+  ['latticeParaChunks', 1536],
+  ['latticeParaDocuments', 256],
+]);
+const ALLOWED_PGVECTOR_TABLES = new Set(PGVECTOR_TABLE_SPECS.keys());
+
 /**
- * Safely probes PostgreSQL pgvector cosine similarity over latticeParaChunks.
- * Returns [] on non-postgres dialects, invalid embeddings, or missing vector columns.
+ * Safely probes PostgreSQL pgvector cosine similarity over allowlisted P.A.R.A. tables.
+ * Enforces exact vector dimension matching (1536 for latticeParaChunks, 256 for latticeParaDocuments)
+ * and returns [] on non-postgres dialects, invalid embeddings, or dimension mismatches.
  */
-async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, paraSpace = null, limit = 20 } = {}) {
+async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, table = 'latticeParaChunks', paraSpace = null, limit = 20 } = {}) {
+  const tableName = typeof table === 'string' && table.trim() ? table.trim() : 'latticeParaChunks';
+  if (!ALLOWED_PGVECTOR_TABLES.has(tableName)) return [];
+  const expectedDim = PGVECTOR_TABLE_SPECS.get(tableName);
+
   const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
   if (!orgId) return [];
   if (db?.sequelize?.getDialect?.() !== 'postgres' || typeof db?.sequelize?.query !== 'function') {
     return [];
   }
-  if (!Array.isArray(queryEmbedding) || queryEmbedding.length < 8 || queryEmbedding.length > 8192) {
+  if (!Array.isArray(queryEmbedding) || queryEmbedding.length !== expectedDim) {
     return [];
   }
   let magSq = 0;
@@ -193,7 +204,17 @@ async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, pa
     ...(cleanSpace ? { paraSpace: cleanSpace } : {}),
   };
   const spaceClause = cleanSpace ? '\n      AND "paraSpace" = :paraSpace' : '';
-  const sql = `SELECT id, "documentId", "organizationId", code, title, "paraSpace",
+  const sql = tableName === 'latticeParaDocuments'
+    ? `SELECT id, "organizationId", code, title, "paraSpace",
+           summary, "contentMarkdown", tags, status, "searchText", "embeddingJson",
+           1 - (embedding <=> CAST(:vectorLiteral AS vector)) AS "pgVectorSim"
+    FROM "latticeParaDocuments"
+    WHERE active = true
+      AND embedding IS NOT NULL
+      AND "organizationId" = :organizationId${spaceClause}
+    ORDER BY embedding <=> CAST(:vectorLiteral AS vector) ASC
+    LIMIT :limit`
+    : `SELECT id, "documentId", "organizationId", code, title, "paraSpace",
            "chunkIndex", "sectionTitle", "pageNumber", content, "embeddingJson",
            1 - (embedding <=> CAST(:vectorLiteral AS vector)) AS "pgVectorSim"
     FROM "latticeParaChunks"

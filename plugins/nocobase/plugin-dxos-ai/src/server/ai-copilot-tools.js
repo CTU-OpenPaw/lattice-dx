@@ -8,6 +8,7 @@
  */
 'use strict';
 
+const path = require('node:path');
 const {
   computeEmbedding,
   executePgVectorParaQuery,
@@ -20,7 +21,7 @@ const {
   computeRiskLevel,
   enqueueAiApproval,
 } = require('./ai-hitl');
-const { redactPiiDeep: defaultRedactPiiDeep } = require('./ai-governance');
+const { redactPiiText: defaultRedactPiiText } = require('./ai-governance');
 
 const DEFAULT_SYSTEM_PROTECTED = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
@@ -43,6 +44,52 @@ const GRAPH_COLLECTIONS = [
   'latticeRequests',
 ];
 const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]{0,80}$/;
+const FORBIDDEN_COLLECTION_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+const POSITIVE_INT_RE = /^[1-9]\d*$/;
+const ASSET_URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d*)$/;
+const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|cookie|credential|jwt|bearer|privatekey|private_key|sessionid|session_id|passphrase|access_key|client_secret/i;
+const COLLECTION_CODE_FIELDS = {
+  latticeAssets: ['code'],
+  latticeIncidentCases: ['code', 'assetEntityId'],
+  latticeTwinShadows: ['assetEntityId'],
+  latticeStockLots: ['lotCode', 'assetEntityId'],
+  latticeOrderLines: ['orderCode', 'lotCode'],
+  latticeOrders: ['code'],
+  latticeEpodRecords: ['epodUid', 'trackingCode', 'orderCode'],
+  latticeParaDocuments: ['code'],
+  latticeServiceTickets: ['code'],
+  latticeRequests: ['code'],
+};
+
+function loadSiblingModule(candidates) {
+  for (const modPath of candidates) {
+    try {
+      return require(modPath);
+    } catch (err) {
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
+    }
+  }
+  return null;
+}
+
+function loadParaHybridSearch() {
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-dxos-para/dist/server/para-hybrid-search',
+        '@latticedx/plugin-dxos-para/src/server/para-hybrid-search',
+        '../../../plugin-dxos-para/dist/server/para-hybrid-search',
+        '../../../plugin-dxos-para/src/server/para-hybrid-search',
+      ]
+    : [
+        '@latticedx/plugin-dxos-para/src/server/para-hybrid-search',
+        '../../../plugin-dxos-para/src/server/para-hybrid-search',
+        '../../../plugin-dxos-para/dist/server/para-hybrid-search',
+      ];
+  return loadSiblingModule(candidates);
+}
 
 async function resolveSearchableTargets(db, requestedCollections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val) {
   const dynamicCustom = [];
@@ -191,6 +238,32 @@ function summarizeModuleRows(rows, val) {
   return { total: rows.length, byStatus };
 }
 
+function buildSearchPoolEntry(colName, row, val, pgVectorSim = null) {
+  const id = val(row, 'id');
+  const label = String(val(row, 'name') || val(row, 'title') || val(row, 'code') || '');
+  const code = String(val(row, 'code') || id || '');
+  const summary = String(val(row, 'summary') || val(row, 'description') || val(row, 'contentMarkdown') || '');
+  const paraSpace = val(row, 'paraSpace') || null;
+  const item = {
+    collection: colName,
+    id,
+    code,
+    title: label,
+    status: val(row, 'status') || paraSpace || null,
+    ...(paraSpace ? { paraSpace, paraCitation: `[${colName}:${code}#${id} · ${paraSpace}]` } : {}),
+    citation: `[${colName}:${code}#${id}]`,
+  };
+  const rawSummary = [label, summary, val(row, 'tags') || '', val(row, 'batchCode') || ''].filter(Boolean).join(' · ');
+  return {
+    item,
+    titleText: `${code} ${label}`,
+    hayText: `${label} ${code} ${summary} ${val(row, 'tags') || ''} ${val(row, 'batchCode') || ''} ${val(row, 'searchText') || ''}`,
+    rawSummary,
+    embedding: val(row, 'embeddingJson'),
+    ...(pgVectorSim != null && Number.isFinite(Number(pgVectorSim)) ? { pgVectorSim: Number(pgVectorSim) } : {}),
+  };
+}
+
 function createCopilotTools(deps) {
   const {
     val, failTool, invokeResourceAction, createAuditedTool,
@@ -213,7 +286,7 @@ function createCopilotTools(deps) {
           limit: { type: 'integer', default: 8 },
         },
       },
-      async run(_ctx, db, actor, args) {
+      async run(ctx, db, actor, args) {
         const candidates = await resolveSearchableTargets(db, args.collections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val);
         const requestedParaChunks = Array.isArray(args.collections) && args.collections.includes('latticeParaChunks');
         const policyProbeCols = requestedParaChunks && !candidates.includes('latticeParaDocuments')
@@ -228,6 +301,7 @@ function createCopilotTools(deps) {
         const q = String(args.query || '').trim();
         const pool = [];
         const visibleParaDocMap = new Map();
+        const docPoolEntryById = new Map();
         const docScanCols = canSearchParaChunks && !targets.includes('latticeParaDocuments')
           ? [...targets, 'latticeParaDocuments']
           : targets;
@@ -245,27 +319,11 @@ function createCopilotTools(deps) {
               visibleParaDocMap.set(String(id), row);
             }
             if (!emitDocItems) continue;
-            const label = String(val(row, 'name') || val(row, 'title') || val(row, 'code') || '');
-            const code = String(val(row, 'code') || id || '');
-            const summary = String(val(row, 'summary') || val(row, 'description') || val(row, 'contentMarkdown') || '');
-            const paraSpace = val(row, 'paraSpace') || null;
-            const item = {
-              collection: colName,
-              id,
-              code,
-              title: label,
-              status: val(row, 'status') || paraSpace || null,
-              ...(paraSpace ? { paraSpace, paraCitation: `[${colName}:${code}#${id} · ${paraSpace}]` } : {}),
-              citation: `[${colName}:${code}#${id}]`,
-            };
-            const rawSummary = [label, summary, val(row, 'tags') || '', val(row, 'batchCode') || ''].filter(Boolean).join(' · ');
-            pool.push({
-              item,
-              titleText: `${code} ${label}`,
-              hayText: `${label} ${code} ${summary} ${val(row, 'tags') || ''} ${val(row, 'batchCode') || ''} ${val(row, 'searchText') || ''}`,
-              rawSummary,
-              embedding: val(row, 'embeddingJson'),
-            });
+            const entry = buildSearchPoolEntry(colName, row, val);
+            if (colName === 'latticeParaDocuments' && id != null) {
+              docPoolEntryById.set(String(id), entry);
+            }
+            pool.push(entry);
           }
         }
         let chunkSearched = false;
@@ -287,13 +345,59 @@ function createCopilotTools(deps) {
             }
           };
           if (q) {
-            const pgVecRows = await executePgVectorParaQuery(db, {
-              organizationId: actor.organizationId,
-              queryEmbedding: computeEmbedding(q),
-              limit: 40,
-            });
-            for (const r of pgVecRows) addChunkRow(r);
-            if (pgVecRows.length) chunkSearched = true;
+            const paraHybrid = loadParaHybridSearch();
+            const neuralEmbFn = typeof deps?.computeNeuralEmbedding === 'function'
+              ? deps.computeNeuralEmbedding
+              : paraHybrid?.computeNeuralEmbedding;
+            let usedNeuralChunks = false;
+            if (typeof neuralEmbFn === 'function') {
+              try {
+                const embEnv = ctx?.state?.dxosEmbeddingEnv || process.env;
+                const embFetch = ctx?.state?.dxosFetchImpl || globalThis.fetch;
+                const emb = await neuralEmbFn(q, { env: embEnv, fetchImpl: embFetch });
+                if (emb?.engine === 'neural' && Array.isArray(emb.vector) && emb.vector.length === 1536) {
+                  const pgVecRows = await executePgVectorParaQuery(db, {
+                    table: 'latticeParaChunks',
+                    organizationId: actor.organizationId,
+                    queryEmbedding: emb.vector,
+                    limit: 40,
+                  });
+                  for (const r of pgVecRows) addChunkRow(r);
+                  if (pgVecRows.length) chunkSearched = true;
+                  usedNeuralChunks = true;
+                }
+              } catch {
+                // Fall back to 256-dim deterministic path when neural provider is unavailable
+              }
+            }
+            if (!usedNeuralChunks) {
+              const pgDocRows = await executePgVectorParaQuery(db, {
+                table: 'latticeParaDocuments',
+                organizationId: actor.organizationId,
+                queryEmbedding: computeEmbedding(q),
+                limit: 40,
+              });
+              const docOwnOnly = ownOnlySet.has('latticeParaDocuments');
+              for (const docRow of pgDocRows) {
+                if (!docRow || val(docRow, 'organizationId') !== actor.organizationId || val(docRow, 'active') === false) continue;
+                if (!isRowVisibleToActor(docRow, actor, docOwnOnly)) continue;
+                const docId = val(docRow, 'id');
+                if (docId != null && !visibleParaDocMap.has(String(docId))) {
+                  visibleParaDocMap.set(String(docId), docRow);
+                }
+                if (!targets.includes('latticeParaDocuments')) continue;
+                const simRaw = val(docRow, 'pgVectorSim') ?? val(docRow, '_pgVectorSim');
+                const simVal = simRaw != null && Number.isFinite(Number(simRaw)) ? Number(simRaw) : null;
+                const existingEntry = docId != null ? docPoolEntryById.get(String(docId)) : null;
+                if (existingEntry) {
+                  if (simVal != null) existingEntry.pgVectorSim = simVal;
+                } else {
+                  const newEntry = buildSearchPoolEntry('latticeParaDocuments', docRow, val, simVal);
+                  if (docId != null) docPoolEntryById.set(String(docId), newEntry);
+                  pool.push(newEntry);
+                }
+              }
+            }
           }
           if (chunkRepo && typeof chunkRepo.find === 'function') {
             const chunkRows = (await chunkRepo.find({
@@ -647,12 +751,41 @@ function createCopilotTools(deps) {
 async function canReadLineageCollection(db, actor, val) {
   if (actor?.isAdmin) return true;
   const resourcesRepo = db?.getRepository?.('dataSourcesRolesResources');
-  if (!resourcesRepo) return true;
+  if (!resourcesRepo) return false;
   const rows = (await resourcesRepo.find({ filter: { name: 'latticeDataLineage', dataSourceKey: 'main' }, appends: ['actions'], limit: 50 })) || [];
   const roleSet = new Set(actor?.roleNames || []);
   const callerRows = rows.filter((r) => val(r, 'name') === 'latticeDataLineage' && roleSet.has(val(r, 'roleName')));
-  if (!callerRows.length) return true;
+  if (!callerRows.length) return false;
   return callerRows.some((r) => val(r, 'usingActionsConfig') === false || (val(r, 'actions') || []).some((a) => ['view', 'list', 'get'].includes(val(a, 'name'))));
+}
+
+function redactGraphValue(value, redactTextFn, depth = 0, seen = new WeakSet()) {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === 'string') {
+    const trimmed = value.length > 2000 ? `${value.slice(0, 2000)}...` : value;
+    return redactTextFn(trimmed).text;
+  }
+  if (depth > 8) return '[TRUNCATED]';
+  if (Array.isArray(value)) {
+    return value.map((item) => redactGraphValue(item, redactTextFn, depth + 1, seen));
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return '[CIRCULAR]';
+    seen.add(value);
+    const out = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (FORBIDDEN_COLLECTION_NAMES.has(k)) continue;
+      if (SENSITIVE_KEY_RE.test(k)) {
+        out[k] = '[REDACTED]';
+      } else {
+        out[k] = redactGraphValue(v, redactTextFn, depth + 1, seen);
+      }
+    }
+    seen.delete(value);
+    return out;
+  }
+  return redactTextFn(String(value)).text;
 }
 
 function resolveRowCode(row, fallbackId, val) {
@@ -666,15 +799,19 @@ function resolveRowCode(row, fallbackId, val) {
   );
 }
 
-function buildSafeGraphNode(colName, row, depth, fallbackId, val, redact) {
+function buildSafeGraphNode(colName, row, depth, fallbackId, val, redactTextFn) {
   const rawId = val(row, 'id') ?? fallbackId ?? resolveRowCode(row, '', val);
   const recordId = String(rawId ?? '');
-  const code = resolveRowCode(row, recordId, val);
+  const code = redactTextFn(resolveRowCode(row, recordId, val)).text;
   const rawTitle = String(val(row, 'name') || val(row, 'title') || val(row, 'productName') || code);
-  const cleanTitle = redact(rawTitle).value;
-  const status = val(row, 'status') || val(row, 'commandStatus') || null;
-  const severity = val(row, 'severity') || null;
-  const assetEntityId = val(row, 'assetEntityId') || val(row, 'entityId') || null;
+  const cleanTitle = redactTextFn(rawTitle).text;
+  const rawStatus = val(row, 'status') || val(row, 'commandStatus') || null;
+  const status = rawStatus != null ? redactTextFn(String(rawStatus)).text : null;
+  const rawSeverity = val(row, 'severity') || null;
+  const severity = rawSeverity != null ? redactTextFn(String(rawSeverity)).text : null;
+  const rawAssetEntityId = val(row, 'assetEntityId') || val(row, 'entityId') || null;
+  const assetEntityId = rawAssetEntityId != null ? redactTextFn(String(rawAssetEntityId)).text : null;
+  const safeCitationId = redactTextFn(recordId).text;
   const node = {
     key: `${colName}:${recordId}`,
     collection: colName,
@@ -686,16 +823,18 @@ function buildSafeGraphNode(colName, row, depth, fallbackId, val, redact) {
     ...(severity ? { severity } : {}),
     ...(assetEntityId ? { assetEntityId } : {}),
     depth,
-    citation: `[${colName}:${code}#${recordId}]`,
+    citation: `[${colName}:${code}#${safeCitationId}]`,
   };
   if (colName === 'latticeStockLots') {
-    node.sku = val(row, 'sku') || null;
+    const rawSku = val(row, 'sku');
+    node.sku = rawSku ? redactTextFn(String(rawSku)).text : null;
     node.qtyOnHand = val(row, 'qtyOnHand') ?? null;
     node.mktCelsius = val(row, 'mktCelsius') ?? null;
     node.targetTempMaxC = val(row, 'targetTempMaxC') ?? null;
   } else if (colName === 'latticeTwinShadows') {
-    node.commandStatus = val(row, 'commandStatus') || null;
-    node.lastDeltaJson = redact(val(row, 'lastDeltaJson') || {}).value;
+    const rawCmdStatus = val(row, 'commandStatus');
+    node.commandStatus = rawCmdStatus ? redactTextFn(String(rawCmdStatus)).text : null;
+    node.lastDeltaJson = redactGraphValue(val(row, 'lastDeltaJson') || {}, redactTextFn);
   }
   return node;
 }
@@ -737,11 +876,11 @@ function rowMatchesAsset(row, assetInfo, orgId, val) {
 }
 
 async function analyzeGraphImpact(db, actor, args, deps) {
-  const { val, failTool, resolveReadablePolicies, isRowVisibleToActor, SYSTEM_PROTECTED_COLLECTIONS, redactPiiDeep } = deps;
-  const redact = typeof redactPiiDeep === 'function' ? redactPiiDeep : defaultRedactPiiDeep;
+  const { val, failTool, resolveReadablePolicies, isRowVisibleToActor, SYSTEM_PROTECTED_COLLECTIONS, redactPiiText } = deps;
+  const redactTextFn = typeof redactPiiText === 'function' ? redactPiiText : defaultRedactPiiText;
   const protectedSet = SYSTEM_PROTECTED_COLLECTIONS || DEFAULT_SYSTEM_PROTECTED;
   const collection = String(args.collection || '').trim();
-  if (!IDENTIFIER_RE.test(collection)) {
+  if (!IDENTIFIER_RE.test(collection) || FORBIDDEN_COLLECTION_NAMES.has(collection)) {
     throw failTool('GRAPH_COLLECTION_INVALID', 400, 'Tên collection không hợp lệ.');
   }
   if (protectedSet.has(collection)) {
@@ -763,6 +902,104 @@ async function analyzeGraphImpact(db, actor, args, deps) {
   const canReadLineage = await canReadLineageCollection(db, actor, val);
 
   const rowCache = new Map();
+  const orderVisibilityCache = new Map();
+  const fetchedCache = new Map();
+
+  async function findOneByFilter(repo, filter) {
+    if (!repo) return null;
+    if (typeof repo.findOne === 'function') {
+      return (await repo.findOne({ filter })) || null;
+    }
+    if (typeof repo.find === 'function') {
+      const rows = (await repo.find({ filter, limit: 1 })) || [];
+      return rows[0] || null;
+    }
+    return null;
+  }
+
+  async function fetchRawRecord(colName, idStr, codeStr) {
+    const repo = db?.getRepository?.(colName);
+    if (!repo) return null;
+
+    if (idStr && POSITIVE_INT_RE.test(idStr) && Number.isSafeInteger(Number(idStr))) {
+      const numId = Number(idStr);
+      const hit = typeof repo.findOne === 'function'
+        ? await repo.findOne({ filterByTk: numId })
+        : await findOneByFilter(repo, { id: numId, organizationId: actor.organizationId });
+      if (hit) return hit;
+    }
+
+    if (codeStr) {
+      if (colName === 'latticeAssets') {
+        const urnMatch = ASSET_URN_RE.exec(codeStr);
+        if (urnMatch) {
+          if (urnMatch[1] !== actor.organizationId) {
+            return { organizationId: urnMatch[1], _crossOrgUrn: true };
+          }
+          const urnId = Number(urnMatch[2]);
+          if (Number.isSafeInteger(urnId) && urnId > 0) {
+            const urnHit = typeof repo.findOne === 'function'
+              ? await repo.findOne({ filterByTk: urnId })
+              : await findOneByFilter(repo, { id: urnId, organizationId: actor.organizationId });
+            if (urnHit) return urnHit;
+          }
+        }
+      }
+      const codeFields = COLLECTION_CODE_FIELDS[colName] || ['code'];
+      for (const field of codeFields) {
+        try {
+          const hit = await findOneByFilter(repo, { organizationId: actor.organizationId, [field]: codeStr });
+          if (hit) return hit;
+        } catch {
+          // Skip field if not present in a custom or mock schema
+        }
+      }
+    }
+    return null;
+  }
+
+  async function isParentOrderVisibleForLine(lineRow) {
+    if (!ownOnlySet.has('latticeOrders')) return true;
+    const orderId = val(lineRow, 'orderId');
+    const orderCode = val(lineRow, 'orderCode');
+    const idKey = orderId != null ? `id:${orderId}` : null;
+    const codeKey = orderCode ? `code:${orderCode}` : null;
+    if (idKey && orderVisibilityCache.has(idKey)) return orderVisibilityCache.get(idKey);
+    if (codeKey && orderVisibilityCache.has(codeKey)) return orderVisibilityCache.get(codeKey);
+    if (orderId == null && !orderCode) return false;
+
+    const visibleOrders = await loadOrgRows('latticeOrders');
+    const inLoaded = visibleOrders.find((o) => (
+      (orderId != null && Number(val(o, 'id')) === Number(orderId))
+      || (orderCode && String(val(o, 'code')) === String(orderCode))
+    ));
+    if (inLoaded) {
+      if (idKey) orderVisibilityCache.set(idKey, true);
+      if (codeKey) orderVisibilityCache.set(codeKey, true);
+      return true;
+    }
+
+    const probe = await fetchRawRecord('latticeOrders', orderId != null ? String(orderId) : '', orderCode ? String(orderCode) : '');
+    const visible = Boolean(
+      probe
+      && !probe._crossOrgUrn
+      && val(probe, 'organizationId') === actor.organizationId
+      && isRowVisibleToActor(probe, actor, true),
+    );
+    if (idKey) orderVisibilityCache.set(idKey, visible);
+    if (codeKey) orderVisibilityCache.set(codeKey, visible);
+    return visible;
+  }
+
+  async function isRecordVisibleToActor(colName, row) {
+    if (!row || row._crossOrgUrn || val(row, 'organizationId') !== actor.organizationId) return false;
+    if (!isRowVisibleToActor(row, actor, ownOnlySet.has(colName))) return false;
+    if (colName === 'latticeOrderLines' && ownOnlySet.has('latticeOrders')) {
+      return isParentOrderVisibleForLine(row);
+    }
+    return true;
+  }
+
   async function loadOrgRows(colName) {
     if (!allowedSet.has(colName)) return [];
     if (rowCache.has(colName)) return rowCache.get(colName);
@@ -773,7 +1010,14 @@ async function analyzeGraphImpact(db, actor, args, deps) {
     }
     const raw = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: 300, sort: ['-id'] })) || [];
     const isOwn = ownOnlySet.has(colName);
-    const visible = raw.filter((r) => val(r, 'organizationId') === actor.organizationId && isRowVisibleToActor(r, actor, isOwn));
+    const prelim = raw.filter((r) => val(r, 'organizationId') === actor.organizationId && isRowVisibleToActor(r, actor, isOwn));
+    let visible = prelim;
+    if (colName === 'latticeOrderLines' && ownOnlySet.has('latticeOrders')) {
+      visible = [];
+      for (const line of prelim) {
+        if (await isParentOrderVisibleForLine(line)) visible.push(line);
+      }
+    }
     rowCache.set(colName, visible);
     return visible;
   }
@@ -783,6 +1027,9 @@ async function analyzeGraphImpact(db, actor, args, deps) {
     return rows.find((r) => {
       if (recordIdStr && String(val(r, 'id')) === recordIdStr) return true;
       if (codeStr) {
+        if (colName === 'latticeAssets' && val(r, 'id') != null && codeStr === `urn:ngsi-ld:Asset:${actor.organizationId}:native:${val(r, 'id')}`) {
+          return true;
+        }
         for (const key of ['code', 'lotCode', 'epodUid', 'orderCode', 'entityId', 'assetEntityId']) {
           if (val(r, key) != null && String(val(r, key)) === codeStr) return true;
         }
@@ -791,17 +1038,60 @@ async function analyzeGraphImpact(db, actor, args, deps) {
     }) || null;
   }
 
-  // Verify root target strictly inside actor.organizationId
-  const rootRepo = db?.getRepository?.(collection);
-  let rootRow = await findRowAcrossOrg(collection, rawRecordId, rawRecordCode);
-  if (!rootRow && rawRecordId && rootRepo && typeof rootRepo.findOne === 'function') {
-    const probe = await rootRepo.findOne({ filterByTk: /^\d+$/.test(rawRecordId) ? Number(rawRecordId) : rawRecordId });
-    if (probe && val(probe, 'organizationId') !== actor.organizationId) {
-      throw failTool('RECORD_NOT_FOUND_OR_FORBIDDEN', 403, 'Không được phép phân tích bản ghi thuộc tổ chức khác.');
+  async function fetchOrgScopedRecord(colName, rawIdInput, rawCodeInput = '', { throwOnForbidden = false } = {}) {
+    if (!allowedSet.has(colName)) return null;
+    const idStr = rawIdInput != null ? String(rawIdInput).trim() : '';
+    const codeStr = rawCodeInput != null ? String(rawCodeInput).trim() : '';
+    const numericId = POSITIVE_INT_RE.test(idStr) && Number.isSafeInteger(Number(idStr)) ? idStr : '';
+    const lookupCode = codeStr || (!numericId ? idStr : '');
+    if (!numericId && !lookupCode) return null;
+
+    const cacheKey = `${colName}|${numericId}|${lookupCode}`;
+    if (!throwOnForbidden && fetchedCache.has(cacheKey)) {
+      return fetchedCache.get(cacheKey);
     }
-    if (probe && !isRowVisibleToActor(probe, actor, ownOnlySet.has(collection))) {
-      throw failTool('RECORD_NOT_FOUND_OR_FORBIDDEN', 403, 'Bạn không có quyền truy cập bản ghi này.');
+
+    const probe = await fetchRawRecord(colName, numericId, lookupCode);
+    if (!probe) {
+      if (!throwOnForbidden) fetchedCache.set(cacheKey, null);
+      return null;
     }
+    if (probe._crossOrgUrn || val(probe, 'organizationId') !== actor.organizationId) {
+      if (throwOnForbidden) {
+        throw failTool('RECORD_NOT_FOUND_OR_FORBIDDEN', 403, 'Không được phép phân tích bản ghi thuộc tổ chức khác.');
+      }
+      fetchedCache.set(cacheKey, null);
+      return null;
+    }
+    if (!(await isRecordVisibleToActor(colName, probe))) {
+      if (throwOnForbidden) {
+        throw failTool('RECORD_NOT_FOUND_OR_FORBIDDEN', 403, 'Bạn không có quyền truy cập bản ghi này.');
+      }
+      fetchedCache.set(cacheKey, null);
+      return null;
+    }
+    fetchedCache.set(cacheKey, probe);
+    return probe;
+  }
+
+  async function findOrFetchOrgRecord(colName, idVal, codeVal = '') {
+    const idStr = idVal != null ? String(idVal).trim() : '';
+    const codeStr = codeVal != null ? String(codeVal).trim() : '';
+    if (!idStr && !codeStr) return null;
+    const local = await findRowAcrossOrg(colName, idStr, codeStr);
+    if (local) return local;
+    return fetchOrgScopedRecord(colName, idStr, codeStr);
+  }
+
+  // Verify root target strictly inside actor.organizationId (and resolve beyond 300-row window)
+  const effectiveNumericId = POSITIVE_INT_RE.test(rawRecordId) && Number.isSafeInteger(Number(rawRecordId)) ? rawRecordId : '';
+  const effectiveCode = rawRecordCode || (!effectiveNumericId ? rawRecordId : '');
+  let rootRow = await findRowAcrossOrg(collection, rawRecordId, effectiveCode);
+  if (!rootRow) {
+    rootRow = await fetchOrgScopedRecord(collection, effectiveNumericId, effectiveCode, { throwOnForbidden: true });
+  }
+  if (!rootRow) {
+    throw failTool('GRAPH_ROOT_NOT_FOUND', 404, `Không tìm thấy bản ghi mục tiêu trong "${collection}" thuộc tổ chức.`);
   }
 
   const lineageRepo = canReadLineage ? db?.getRepository?.('latticeDataLineage') : null;
@@ -809,29 +1099,17 @@ async function analyzeGraphImpact(db, actor, args, deps) {
     ? ((await lineageRepo.find({ filter: { organizationId: actor.organizationId }, limit: 500 })) || []).filter((r) => val(r, 'organizationId') === actor.organizationId)
     : [];
 
-  if (!rootRow) {
-    const hasLineageRoot = Boolean(rawRecordId) && orgLineageRows.some((e) => (
-      (val(e, 'sourceCollection') === collection && String(val(e, 'sourceRecordId')) === rawRecordId)
-      || (val(e, 'targetCollection') === collection && String(val(e, 'targetRecordId')) === rawRecordId)
-    ));
-    if (!hasLineageRoot) {
-      throw failTool('GRAPH_ROOT_NOT_FOUND', 404, `Không tìm thấy bản ghi mục tiêu trong "${collection}" thuộc tổ chức.`);
-    }
-    rootRow = { id: rawRecordId, code: rawRecordCode || rawRecordId, organizationId: actor.organizationId };
-  }
-
-  const rootNode = buildSafeGraphNode(collection, rootRow, 0, rawRecordId || rawRecordCode, val, redact);
+  const rootNode = buildSafeGraphNode(collection, rootRow, 0, rawRecordId || rawRecordCode, val, redactTextFn);
   const visitedNodes = new Map([[rootNode.key, rootNode]]);
   const edgesMap = new Map();
   const queue = [{ collection, recordId: rootNode.recordId, row: rootRow, depth: 0 }];
   let truncated = false;
 
-  const enqueueNeighbor = (fromKey, targetCol, targetRow, relationType, nextDepth, fallbackId = null) => {
+  const enqueueNeighbor = async (fromKey, targetCol, targetRow, relationType, nextDepth, fallbackId = null) => {
     if (!allowedSet.has(targetCol) || !targetRow) return null;
-    if (val(targetRow, 'organizationId') !== actor.organizationId) return null;
-    if (!isRowVisibleToActor(targetRow, actor, ownOnlySet.has(targetCol))) return null;
+    if (!(await isRecordVisibleToActor(targetCol, targetRow))) return null;
 
-    const node = buildSafeGraphNode(targetCol, targetRow, nextDepth, fallbackId, val, redact);
+    const node = buildSafeGraphNode(targetCol, targetRow, nextDepth, fallbackId, val, redactTextFn);
     const edgeKey = `${fromKey}|${node.key}|${relationType}`;
     if (!edgesMap.has(edgeKey)) {
       edgesMap.set(edgeKey, {
@@ -856,8 +1134,12 @@ async function analyzeGraphImpact(db, actor, args, deps) {
     if (cur.depth >= maxDepth) continue;
     const nextDepth = cur.depth + 1;
     const curKey = `${cur.collection}:${cur.recordId}`;
+    const curRow = cur.row;
+    const curId = val(curRow, 'id') ?? cur.recordId;
+    const curCode = resolveRowCode(curRow, cur.recordId, val);
+    const curEdgeTokens = new Set([cur.recordId, String(curId), curCode].filter(Boolean));
 
-    // 1. Traverse latticeDataLineage edges strictly inside actor.organizationId & allowedSet
+    // 1. Traverse latticeDataLineage edges strictly inside actor.organizationId & allowedSet (never fabricating stubs)
     for (const edge of orgLineageRows) {
       const srcCol = val(edge, 'sourceCollection');
       const srcId = String(val(edge, 'sourceRecordId') ?? '');
@@ -867,37 +1149,25 @@ async function analyzeGraphImpact(db, actor, args, deps) {
 
       let neighborCol = null;
       let neighborId = null;
-      if (srcCol === cur.collection && srcId === cur.recordId) {
+      if (srcCol === cur.collection && curEdgeTokens.has(srcId)) {
         neighborCol = tgtCol;
         neighborId = tgtId;
-      } else if (tgtCol === cur.collection && tgtId === cur.recordId) {
+      } else if (tgtCol === cur.collection && curEdgeTokens.has(tgtId)) {
         neighborCol = srcCol;
         neighborId = srcId;
       }
       if (!neighborCol || !neighborId || !allowedSet.has(neighborCol)) continue;
 
       let neighborRow = await findRowAcrossOrg(neighborCol, neighborId, neighborId);
-      if (!neighborRow && !ownOnlySet.has(neighborCol)) {
-        const nRepo = db?.getRepository?.(neighborCol);
-        let foreignBlocked = false;
-        if (nRepo && typeof nRepo.findOne === 'function') {
-          const probe = await nRepo.findOne({ filterByTk: /^\d+$/.test(neighborId) ? Number(neighborId) : neighborId });
-          if (probe && val(probe, 'organizationId') !== actor.organizationId) foreignBlocked = true;
-        }
-        if (!foreignBlocked) {
-          neighborRow = { id: neighborId, code: neighborId, organizationId: actor.organizationId };
-        }
+      if (!neighborRow) {
+        neighborRow = await fetchOrgScopedRecord(neighborCol, neighborId, neighborId);
       }
       if (neighborRow) {
-        enqueueNeighbor(curKey, neighborCol, neighborRow, relType, nextDepth, neighborId);
+        await enqueueNeighbor(curKey, neighborCol, neighborRow, relType, nextDepth, neighborId);
       }
     }
 
     // 2. Structural cold-chain relationships inside caller's organizationId
-    const curRow = cur.row;
-    const curId = val(curRow, 'id') ?? cur.recordId;
-    const curCode = resolveRowCode(curRow, cur.recordId, val);
-
     if (cur.collection === 'latticeAssets' || cur.collection === 'latticeIncidentCases' || cur.collection === 'latticeTwinShadows') {
       const assetInfo = computeAssetMatchKeys(cur.collection, curRow, actor.organizationId, val);
       const [assets, incidents, shadows, lots, paraDocs] = await Promise.all([
@@ -907,30 +1177,38 @@ async function analyzeGraphImpact(db, actor, args, deps) {
         loadOrgRows('latticeStockLots'),
         loadOrgRows('latticeParaDocuments'),
       ]);
+      let matchedAsset = false;
       for (const a of assets) {
         const aKeys = computeAssetMatchKeys('latticeAssets', a, actor.organizationId, val);
         const matchesId = assetInfo.assetId != null && Number(val(a, 'id')) === Number(assetInfo.assetId);
         const matchesUrn = [...assetInfo.entityKeys].some((k) => aKeys.entityKeys.has(k));
-        if (matchesId || matchesUrn) enqueueNeighbor(curKey, 'latticeAssets', a, 'belongs_to_asset', nextDepth);
+        if (matchesId || matchesUrn) {
+          matchedAsset = true;
+          await enqueueNeighbor(curKey, 'latticeAssets', a, 'belongs_to_asset', nextDepth);
+        }
+      }
+      if (!matchedAsset && cur.collection !== 'latticeAssets' && allowedSet.has('latticeAssets')) {
+        const fallbackAsset = await findOrFetchOrgRecord('latticeAssets', assetInfo.assetId, assetInfo.warehouseCode || [...assetInfo.entityKeys][0] || '');
+        if (fallbackAsset) await enqueueNeighbor(curKey, 'latticeAssets', fallbackAsset, 'belongs_to_asset', nextDepth);
       }
       for (const inc of incidents) {
         if (rowMatchesAsset(inc, assetInfo, actor.organizationId, val)) {
-          enqueueNeighbor(curKey, 'latticeIncidentCases', inc, 'has_incident', nextDepth);
+          await enqueueNeighbor(curKey, 'latticeIncidentCases', inc, 'has_incident', nextDepth);
         }
       }
       for (const sh of shadows) {
         if (rowMatchesAsset(sh, assetInfo, actor.organizationId, val)) {
-          enqueueNeighbor(curKey, 'latticeTwinShadows', sh, 'has_twin_shadow', nextDepth);
+          await enqueueNeighbor(curKey, 'latticeTwinShadows', sh, 'has_twin_shadow', nextDepth);
         }
       }
       for (const lot of lots) {
         if (rowMatchesAsset(lot, assetInfo, actor.organizationId, val)) {
-          enqueueNeighbor(curKey, 'latticeStockLots', lot, 'stores_lot', nextDepth);
+          await enqueueNeighbor(curKey, 'latticeStockLots', lot, 'stores_lot', nextDepth);
         }
       }
       for (const doc of paraDocs) {
         if (val(doc, 'relatedCollection') === cur.collection && [String(curId), curCode].includes(String(val(doc, 'relatedRecordId') || ''))) {
-          enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
+          await enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
         }
       }
     }
@@ -945,55 +1223,73 @@ async function analyzeGraphImpact(db, actor, args, deps) {
         loadOrgRows('latticeOrders'),
         loadOrgRows('latticeParaDocuments'),
       ]);
+      let matchedAsset = false;
       for (const a of assets) {
         const aKeys = computeAssetMatchKeys('latticeAssets', a, actor.organizationId, val);
         if ([...assetInfo.entityKeys].some((k) => aKeys.entityKeys.has(k))) {
-          enqueueNeighbor(curKey, 'latticeAssets', a, 'stored_at_asset', nextDepth);
+          matchedAsset = true;
+          await enqueueNeighbor(curKey, 'latticeAssets', a, 'stored_at_asset', nextDepth);
         }
+      }
+      if (!matchedAsset && allowedSet.has('latticeAssets')) {
+        const fallbackAsset = await findOrFetchOrgRecord('latticeAssets', assetInfo.assetId, assetInfo.warehouseCode || [...assetInfo.entityKeys][0] || '');
+        if (fallbackAsset) await enqueueNeighbor(curKey, 'latticeAssets', fallbackAsset, 'stored_at_asset', nextDepth);
       }
       for (const inc of incidents) {
         if (rowMatchesAsset(inc, assetInfo, actor.organizationId, val)) {
-          enqueueNeighbor(curKey, 'latticeIncidentCases', inc, 'exposed_to_incident', nextDepth);
+          await enqueueNeighbor(curKey, 'latticeIncidentCases', inc, 'exposed_to_incident', nextDepth);
         }
       }
       for (const sh of shadows) {
         if (rowMatchesAsset(sh, assetInfo, actor.organizationId, val)) {
-          enqueueNeighbor(curKey, 'latticeTwinShadows', sh, 'monitored_by_twin', nextDepth);
+          await enqueueNeighbor(curKey, 'latticeTwinShadows', sh, 'monitored_by_twin', nextDepth);
         }
       }
       for (const line of lines) {
         const matchId = curId != null && val(line, 'lotId') != null && Number(val(line, 'lotId')) === Number(curId);
         const matchCode = curCode && val(line, 'lotCode') && String(val(line, 'lotCode')) === String(curCode);
         if (!matchId && !matchCode) continue;
-        const lineNode = enqueueNeighbor(curKey, 'latticeOrderLines', line, 'allocated_to_line', nextDepth);
+        const lineNode = await enqueueNeighbor(curKey, 'latticeOrderLines', line, 'allocated_to_line', nextDepth);
         if (lineNode && allowedSet.has('latticeOrders')) {
           const parentOrd = orders.find((o) => (
             (val(line, 'orderId') != null && Number(val(o, 'id')) === Number(val(line, 'orderId')))
             || (val(line, 'orderCode') && String(val(o, 'code')) === String(val(line, 'orderCode')))
-          ));
-          if (parentOrd) enqueueNeighbor(lineNode.key, 'latticeOrders', parentOrd, 'belongs_to_order', nextDepth);
+          )) || await findOrFetchOrgRecord('latticeOrders', val(line, 'orderId'), val(line, 'orderCode'));
+          if (parentOrd) await enqueueNeighbor(lineNode.key, 'latticeOrders', parentOrd, 'belongs_to_order', nextDepth);
         }
       }
       for (const doc of paraDocs) {
         if (val(doc, 'relatedCollection') === 'latticeStockLots' && [String(curId), curCode].includes(String(val(doc, 'relatedRecordId') || ''))) {
-          enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
+          await enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
         }
       }
     }
 
     if (cur.collection === 'latticeOrderLines') {
       const [orders, lots] = await Promise.all([loadOrgRows('latticeOrders'), loadOrgRows('latticeStockLots')]);
+      let matchedOrder = false;
       for (const ord of orders) {
         if ((val(curRow, 'orderId') != null && Number(val(ord, 'id')) === Number(val(curRow, 'orderId')))
           || (val(curRow, 'orderCode') && String(val(ord, 'code')) === String(val(curRow, 'orderCode')))) {
-          enqueueNeighbor(curKey, 'latticeOrders', ord, 'belongs_to_order', nextDepth);
+          matchedOrder = true;
+          await enqueueNeighbor(curKey, 'latticeOrders', ord, 'belongs_to_order', nextDepth);
         }
       }
+      if (!matchedOrder && allowedSet.has('latticeOrders')) {
+        const fallbackOrd = await findOrFetchOrgRecord('latticeOrders', val(curRow, 'orderId'), val(curRow, 'orderCode'));
+        if (fallbackOrd) await enqueueNeighbor(curKey, 'latticeOrders', fallbackOrd, 'belongs_to_order', nextDepth);
+      }
+      let matchedLot = false;
       for (const lot of lots) {
         if ((val(curRow, 'lotId') != null && Number(val(lot, 'id')) === Number(val(curRow, 'lotId')))
           || (val(curRow, 'lotCode') && String(val(lot, 'lotCode') || val(lot, 'code')) === String(val(curRow, 'lotCode')))) {
-          enqueueNeighbor(curKey, 'latticeStockLots', lot, 'consumes_lot', nextDepth);
+          matchedLot = true;
+          await enqueueNeighbor(curKey, 'latticeStockLots', lot, 'consumes_lot', nextDepth);
         }
+      }
+      if (!matchedLot && allowedSet.has('latticeStockLots')) {
+        const fallbackLot = await findOrFetchOrgRecord('latticeStockLots', val(curRow, 'lotId'), val(curRow, 'lotCode'));
+        if (fallbackLot) await enqueueNeighbor(curKey, 'latticeStockLots', fallbackLot, 'consumes_lot', nextDepth);
       }
     }
 
@@ -1008,33 +1304,41 @@ async function analyzeGraphImpact(db, actor, args, deps) {
         const matchOrdId = curId != null && val(line, 'orderId') != null && Number(val(line, 'orderId')) === Number(curId);
         const matchOrdCode = curCode && val(line, 'orderCode') && String(val(line, 'orderCode')) === String(curCode);
         if (!matchOrdId && !matchOrdCode) continue;
-        const lineNode = enqueueNeighbor(curKey, 'latticeOrderLines', line, 'has_order_line', nextDepth);
+        const lineNode = await enqueueNeighbor(curKey, 'latticeOrderLines', line, 'has_order_line', nextDepth);
         if (lineNode && allowedSet.has('latticeStockLots')) {
           const lot = lots.find((l) => (
             (val(line, 'lotId') != null && Number(val(l, 'id')) === Number(val(line, 'lotId')))
             || (val(line, 'lotCode') && String(val(l, 'lotCode') || val(l, 'code')) === String(val(line, 'lotCode')))
-          ));
-          if (lot) enqueueNeighbor(lineNode.key, 'latticeStockLots', lot, 'consumes_lot', nextDepth);
+          )) || await findOrFetchOrgRecord('latticeStockLots', val(line, 'lotId'), val(line, 'lotCode'));
+          if (lot) await enqueueNeighbor(lineNode.key, 'latticeStockLots', lot, 'consumes_lot', nextDepth);
         }
       }
       for (const epod of epods) {
         const matchOrdId = curId != null && val(epod, 'orderId') != null && Number(val(epod, 'orderId')) === Number(curId);
         const matchOrdCode = curCode && val(epod, 'orderCode') && String(val(epod, 'orderCode')) === String(curCode);
-        if (matchOrdId || matchOrdCode) enqueueNeighbor(curKey, 'latticeEpodRecords', epod, 'delivered_by_epod', nextDepth);
+        if (matchOrdId || matchOrdCode) await enqueueNeighbor(curKey, 'latticeEpodRecords', epod, 'delivered_by_epod', nextDepth);
       }
       for (const doc of paraDocs) {
         if (val(doc, 'relatedCollection') === 'latticeOrders' && [String(curId), curCode].includes(String(val(doc, 'relatedRecordId') || ''))) {
-          enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
+          await enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
         }
       }
     }
 
     if (cur.collection === 'latticeEpodRecords') {
       const orders = await loadOrgRows('latticeOrders');
+      let matchedOrder = false;
       for (const ord of orders) {
         const matchId = val(curRow, 'orderId') != null && Number(val(ord, 'id')) === Number(val(curRow, 'orderId'));
         const matchCode = val(curRow, 'orderCode') && String(val(ord, 'code')) === String(val(curRow, 'orderCode'));
-        if (matchId || matchCode) enqueueNeighbor(curKey, 'latticeOrders', ord, 'epod_for_order', nextDepth);
+        if (matchId || matchCode) {
+          matchedOrder = true;
+          await enqueueNeighbor(curKey, 'latticeOrders', ord, 'epod_for_order', nextDepth);
+        }
+      }
+      if (!matchedOrder && allowedSet.has('latticeOrders')) {
+        const fallbackOrd = await findOrFetchOrgRecord('latticeOrders', val(curRow, 'orderId'), val(curRow, 'orderCode'));
+        if (fallbackOrd) await enqueueNeighbor(curKey, 'latticeOrders', fallbackOrd, 'epod_for_order', nextDepth);
       }
     }
   }
@@ -1102,7 +1406,7 @@ async function analyzeGraphImpact(db, actor, args, deps) {
         || (val(t, 'assetId') != null && assetIds.has(Number(val(t, 'assetId'))))
       ))
       .slice(0, 20)
-      .map((t) => redact({
+      .map((t) => redactGraphValue({
         id: val(t, 'id'),
         assetId: val(t, 'assetId') ?? null,
         assetEntityId: val(t, 'assetEntityId') || null,
@@ -1111,10 +1415,22 @@ async function analyzeGraphImpact(db, actor, args, deps) {
         unit: val(t, 'unit') || null,
         quality: val(t, 'quality') || 'good',
         observedAt: val(t, 'observedAt') || null,
-      }).value);
+      }, redactTextFn));
   }
 
-  return redact({
+  const summary = redactGraphValue({
+    totalAffected: Math.max(0, nodes.length - 1),
+    incidentsCount,
+    activeIncidentsCount,
+    lotsCount,
+    ordersCount,
+    epodCount,
+    twinShadowsCount,
+    paraSopsCount,
+    byCollection,
+  }, redactTextFn);
+
+  return {
     organizationId: actor.organizationId,
     root: rootNode,
     maxDepth,
@@ -1124,22 +1440,12 @@ async function analyzeGraphImpact(db, actor, args, deps) {
     edgeCount: edges.length,
     impactScore,
     impactLevel,
-    summary: {
-      totalAffected: Math.max(0, nodes.length - 1),
-      incidentsCount,
-      activeIncidentsCount,
-      lotsCount,
-      ordersCount,
-      epodCount,
-      twinShadowsCount,
-      paraSopsCount,
-      byCollection,
-    },
+    summary,
     citations: [...new Set(nodes.map((n) => n.citation))],
     nodes,
     edges,
     ...(args.includeTelemetry ? { telemetry } : {}),
-  }).value;
+  };
 }
 
 async function assertIncidentUpdateRbac(db, actor, { val, failTool }) {
@@ -1262,7 +1568,7 @@ async function executeAlarmActionTool(ctx, db, actor, args, deps) {
   if (typeof row.update === 'function') {
     await row.update(patch, { context: ctx });
   } else if (typeof repo.update === 'function') {
-    await repo.update({ filterByTk: alarmId, values: patch });
+    await repo.update({ filterByTk: alarmId, filter: { organizationId: actor.organizationId }, values: patch });
   }
 
   return {

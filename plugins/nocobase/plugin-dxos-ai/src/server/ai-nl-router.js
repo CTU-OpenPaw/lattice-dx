@@ -127,7 +127,7 @@ function inferPortalFromUtterance(utterance, fallback = 'services') {
 }
 
 function detectUnsafeOrInjection(n) {
-  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*(?:huong dan|kiem tra|quyen|rbac|acl|phe duyet|hitl|bao mat)|ignore\s+previous|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|phe duyet|bao mat)|vuot\s+quyen|vo\s+hieu\s+hoa\s+(?:audit|nhat\s+ky|rls|bao\s+mat)|in\s+ra\s+[^\n]{0,40}?(?:mat\s+khau|api\s*key|token|bi\s+mat|secret|credential|private\s*key)|tiet\s+lo\s+[^\n]{0,40}?(?:mat\s+khau|bi\s+mat|token|api\s*key|secret|private\s*key|credential)|doc\s+(?:bien\s+moi\s+truong|\.env|process\.env)|xuat\s+toan\s+bo\s+(?:api\s*key|token|mat\s+khau|bang\s+users|du\s+lieu)|(?:xem|doc|xuat|lay)\s+(?:toan\s+bo\s+)?(?:du\s+lieu|don\s+hang|lo\s+hang|su\s+co|tai\s+lieu|bang)[^\n]{0,30}?(?:to\s+chuc|cong\s+ty|tenant|org)\s+khac|xem\s+luong\s+toan\s+cong\s+ty|cross[\s-]?tenant|tu\s+(?:phe\s+duyet|duyet)\s+(?:yeu\s+cau|don|phieu|ho\s+so)\s+(?:cua\s+)?(?:chinh\s+minh|toi)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong))/;
+  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*(?:huong dan|kiem tra|quyen|rbac|acl|phe duyet|hitl|bao mat)|ignore\s+(?:all\s+)?previous|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|phe duyet|bao mat)|vuot\s+quyen|vo\s+hieu\s+hoa\s+(?:audit|nhat\s+ky|rls|bao\s+mat)|in\s+ra\s+[^\n]{0,40}?(?:mat\s+khau|api\s*key|token|bi\s+mat|secret|credential|private\s*key)|tiet\s+lo\s+[^\n]{0,40}?(?:mat\s+khau|bi\s+mat|token|api\s*key|secret|private\s*key|credential)|doc\s+(?:bien\s+moi\s+truong|\.env|process\.env)|xuat\s+toan\s+bo\s+(?:api\s*key|token|mat\s+khau|bang\s+users|du\s+lieu)|(?:xem|doc|xuat|lay)\s+(?:toan\s+bo\s+)?(?:du\s+lieu|don\s+hang|lo\s+hang|su\s+co|tai\s+lieu|bang)[^\n]{0,30}?(?:to\s+chuc|cong\s+ty|tenant|org)\s+khac|xem\s+luong\s+toan\s+cong\s+ty|cross[\s-]?tenant|tu\s+(?:phe\s+duyet|duyet)\s+(?:yeu\s+cau|don|phieu|ho\s+so)\s+(?:cua\s+)?(?:chinh\s+minh|toi)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong))/;
   if (promptInjection.test(n)) {
     return {
       refused: true,
@@ -166,7 +166,7 @@ function extractGraphImpactArgs(raw, n) {
     else collection = 'latticeAssets';
   }
   if (!recordCode) {
-    const shortMatch = cleanRaw.match(/\b(?:kho\s+lanh|buong\s+lanh|may\s+nen|thiet\s+bi)\s+([A-Z][A-Z0-9-]{1,24})\b/);
+    const shortMatch = cleanRaw.match(/\b(?:kho\s+lanh|buong\s+lanh|may\s+nen|thiet\s+bi)\s+([A-Z0-9]{1,12}-[A-Z0-9-]{1,16}|[A-Z][A-Z0-9-]{0,16}\d[A-Z0-9-]{0,8})\b/);
     if (shortMatch && shortMatch[1]) recordCode = shortMatch[1].trim();
   }
   const includeTelemetry = /(nhiet\s+do|telemetry|cam\s+bien|do\s+am)/.test(n);
@@ -276,11 +276,17 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
   // 5. Alarm Acknowledge / Clear (OT Incident Ops)
   if (/(xac nhan\s+(?:tiep\s+nhan|nhan\s+xu\s+ly)?\s*(?:canh\s+bao|su\s+co|bao\s+dong)|ack\s+alarm|dong\s+(?:canh\s+bao|bao\s+dong)|tat\s+bao\s+dong|giai\s+toa\s+canh\s+bao|clear\s+alarm)/.test(n)) {
     const isClear = /(dong\s+(?:canh\s+bao|bao\s+dong)|tat\s+bao\s+dong|giai\s+toa|clear|da\s+khac\s+phuc\s+xong)/.test(n);
+    const alarmCodeMatch = stripDiacritics(raw).match(/\b((?:ALM|INC)-[A-Z0-9-]{1,40})\b/);
+    const alarmCode = alarmCodeMatch && alarmCodeMatch[1] ? alarmCodeMatch[1].trim() : null;
     return {
       intent: isClear ? 'ALARM_CLEAR' : 'ALARM_ACK',
       refused: false,
       toolName: 'dxos_alarm_action',
-      args: { action: isClear ? 'clear' : 'ack', note: raw },
+      args: {
+        action: isClear ? 'clear' : 'ack',
+        ...(alarmCode ? { alarmCode } : {}),
+        note: raw,
+      },
     };
   }
 
