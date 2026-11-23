@@ -34,7 +34,7 @@ function resolvePackageVersion() {
   } catch {
     // Fallback below
   }
-  return '0.3.0';
+  return '1.0.0';
 }
 
 function failObs(ctx, status, message, code) {

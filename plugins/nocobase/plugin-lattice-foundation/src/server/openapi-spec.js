@@ -31,7 +31,7 @@ function resolveVersionFallback() {
   } catch {
     // Fallback below
   }
-  return '0.3.0';
+  return '1.0.0';
 }
 
 const API_OPERATIONS = Object.freeze([

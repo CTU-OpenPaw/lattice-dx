@@ -1,0 +1,6013 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:d6946293-e58b-4e04-8322-64fbfaa066a4",
+  "version": 1,
+  "metadata": {
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "lattice-dx-sbom-generator",
+          "version": "1.0.0"
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:npm/lattice-dx@1.0.0",
+      "name": "lattice-dx",
+      "version": "1.0.0",
+      "purl": "pkg:npm/lattice-dx@1.0.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "application",
+      "bom-ref": "pkg:npm/%40dx/agent-worker@0.3.0",
+      "name": "@dx/agent-worker",
+      "version": "0.3.0",
+      "purl": "pkg:npm/%40dx/agent-worker@0.3.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "workspace-app"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "apps/agent-worker/package.json"
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:npm/%40dx/api@0.3.0",
+      "name": "@dx/api",
+      "version": "0.3.0",
+      "purl": "pkg:npm/%40dx/api@0.3.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "workspace-app"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "apps/api/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40dx/contracts@0.3.0",
+      "name": "@dx/contracts",
+      "version": "0.3.0",
+      "purl": "pkg:npm/%40dx/contracts@0.3.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "workspace-package"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "packages/contracts/package.json"
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:npm/%40dx/file-scanner@0.3.0",
+      "name": "@dx/file-scanner",
+      "version": "0.3.0",
+      "purl": "pkg:npm/%40dx/file-scanner@0.3.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "workspace-app"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "apps/file-scanner/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/aix-ppc64@0.28.2",
+      "name": "@esbuild/aix-ppc64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/aix-ppc64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5c4c5c3be76f2cabd5b4d4e26d24c17a3d4d0806da1a15a7f56c3564fc7cd2ab1a8613c57bff238163f421c84d7b41771f0914ee7f1e8e11fc6e3a27aa1b7c99"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/android-arm64@0.28.2",
+      "name": "@esbuild/android-arm64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/android-arm64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e587ca79e23ca967c16485febb6c590b76656f73acfe02d2dac6c428cf88e1939cb169874b658bcac09c4190c0151b250d45393a2ab8e207fa3d8375bc6c06e4"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/android-arm@0.28.2",
+      "name": "@esbuild/android-arm",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/android-arm@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9175e888f55519072721818e79aa2fc0e511a678830694aae00d37aa443e04c42ab461ba1d86a9df19def42d4ed72a384d1deac65097e48aaa997e9f168d8baa"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/android-x64@0.28.2",
+      "name": "@esbuild/android-x64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/android-x64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3b7f3b8ad7bb4b353209ccb72505f83f86cbb4403b6cb2e4c7e7acbdee491e7c987cd4f1715a57668f6385d07495328de38833b442d3754ee74bc36bd7a16cd5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/darwin-arm64@0.28.2",
+      "name": "@esbuild/darwin-arm64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/darwin-arm64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9f82aa90e42badac4725c82333546fc1b8a07d028828956933bc69f8ab318b2512ad17485e7b7bdd586b3c0c747d5e388607e62152a3c4c37d275b798f249593"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/darwin-x64@0.28.2",
+      "name": "@esbuild/darwin-x64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/darwin-x64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "baaeacb885983f7eeacc675d04a3f0e501103e2e8788b1ac3bb5269297f2698350dc3fab37ac3a59fc07fa7baa7065d6bdac06c31384ae83b86069c587de5acf"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/freebsd-arm64@0.28.2",
+      "name": "@esbuild/freebsd-arm64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/freebsd-arm64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9fe234053491228cbe77a44f2a7115c2a979530049a25cadbd8e2600e204268aca96a80f208f22c7ab25555adf6794e78fb825219be5a3295b07f1093cc5845f"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/freebsd-x64@0.28.2",
+      "name": "@esbuild/freebsd-x64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/freebsd-x64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "efc5c94c992f3ecd24cf6c3ad77d353c98d797883bab726a898319fccff2548ef710706b0914e0921bbda2a1bbbcfaaaf9aff269d116f1a0fe6a02a5939c6b9a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-arm64@0.28.2",
+      "name": "@esbuild/linux-arm64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-arm64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a56e000b43f78adf1cedda3d315338a79d45cc7cdd33f4d9adeaeeae045c1c9d964dad55435088ab5f319dc7e9049c38a23922659aca5b6c8805604ff768fa52"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-arm@0.28.2",
+      "name": "@esbuild/linux-arm",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-arm@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5e50e7bb6ab9ca8a9e9acfb16b2eb0480720f430c3ecaf512ca64404e3199b7724369241bce5f6d2d49f6f2f0a7ebae120d0f2bfd57661564a63f4a9a06248f3"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-ia32@0.28.2",
+      "name": "@esbuild/linux-ia32",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-ia32@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "0986e78fbf07b08780f8386050a80509fbcdb131c584c32b8a752b319a435c95ca37c4f75d589367ffb0b47795c44598f1ec12cd314dfa74664b03b6b5968b51"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-loong64@0.28.2",
+      "name": "@esbuild/linux-loong64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-loong64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6eec2477c9eca61e11f9a8d1bf0d2a3391e36bf4d7428c37a6dcd63b611b1bf72a70890796846b76506d425b21c98193345bdf91f279b693cb5646380edb0f7d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-mips64el@0.28.2",
+      "name": "@esbuild/linux-mips64el",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-mips64el@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "655ca46c3ca4ef9d7d57088d6fd2dc8fd9bc5cceafe55f6e28fbeb10c92411e7557b07fed22b6485a869e070e98044578702d1a56172a6c19b1bf27cb3442324"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-ppc64@0.28.2",
+      "name": "@esbuild/linux-ppc64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-ppc64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "0805e5f83b5df5452e25df2928a77087a30b9b7314322a8c3e6859ded4d25cfa9fc90def0e5e91e6165d67f918a232b8a1f5ed75f4afd6d16af17cd6c7785e35"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-riscv64@0.28.2",
+      "name": "@esbuild/linux-riscv64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-riscv64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "19e5c27a3e0842d53507e4250d5f16fd146f6f32373bf4adb2cfbf6c25efe25665b3958646dbb66bedc9900de2e2a21494c5e970779b5a917c024261013a30b8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-s390x@0.28.2",
+      "name": "@esbuild/linux-s390x",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-s390x@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "dc7d707936193f1b7f58e841caccd06726d2f70e652b3527d450ccb2010285b1d64301d841045f071802719bcf8631df2b22632227afbcc98451ac09add63d0e"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/linux-x64@0.28.2",
+      "name": "@esbuild/linux-x64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/linux-x64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e314d9af5154992a105b85c85a68addedcd0ad44d933e3773f45d5f3144e298179d177c8ef178ef74fb56d9bcdc3122e7d0f610d0551247e588603d517c03f1d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/netbsd-arm64@0.28.2",
+      "name": "@esbuild/netbsd-arm64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/netbsd-arm64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b120134633de0c1837a5d807a107e8601a1bd752a4d4519af65ba2e51207642a029096bd40a96f977fef2b3daeb02998623b3bca6251ff6367b2a7be1e3b799f"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/netbsd-x64@0.28.2",
+      "name": "@esbuild/netbsd-x64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/netbsd-x64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "96a9f3095fa633480800368a8a188283a89f81f5362f7879137deb35004dd58e0c6951a7cebcb39afbdfed41f1a6ba50744f21a6a2e8949f5197e4a42110e9cb"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/openbsd-arm64@0.28.2",
+      "name": "@esbuild/openbsd-arm64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/openbsd-arm64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "00bdaa2482c7ee5363ac3982403bddc4c7c0508bfc28c3593afaf0010f22f3ffe7b4bf457e584ec8c27c39948c05bf3f0165dedffe6fe52db4cb7cc2a1958aa1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/openbsd-x64@0.28.2",
+      "name": "@esbuild/openbsd-x64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/openbsd-x64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "42d8ae3f2b5c851c82e2bc142a17b125d40abc3b99ea15a5a22de282a3d03542424b5feff4488edd44ce5d1e80dc5a0ca387e700a6d625da9a23084ece1f2a13"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/openharmony-arm64@0.28.2",
+      "name": "@esbuild/openharmony-arm64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/openharmony-arm64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5a48580e6a538cbbc6952700d6bc234549a197893ca174777086eda969842e053f7457871e51259710ef75670d255f6b6f309ec41e6fcfc82d35ec162e0093ed"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/sunos-x64@0.28.2",
+      "name": "@esbuild/sunos-x64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/sunos-x64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "18f3129133ad327bf653617c8317b8228eaa995b3e60aca9f37d84b6aab1af48459e0997437af3c32b5e966dc6227ed3e15be245495fdec3a004e89376f69fee"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/win32-arm64@0.28.2",
+      "name": "@esbuild/win32-arm64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/win32-arm64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3c886112413db8f06579106b404269527ecc06789b6736c6cd858f998df1f98a1583ff79cdb8c1e02c4f3ce43c979b5860ce2631a0ad845f3fd4321f05043259"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/win32-ia32@0.28.2",
+      "name": "@esbuild/win32-ia32",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/win32-ia32@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "62625b7d396f53b49d9fd041fb83d1112e2807aa71812dfb30038d8fe841aff7295d2d5a04f297c4d9c36eef900963e3d28f5d832c5eabbf60e9ce4ff0a7ae60"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40esbuild/win32-x64@0.28.2",
+      "name": "@esbuild/win32-x64",
+      "version": "0.28.2",
+      "purl": "pkg:npm/%40esbuild/win32-x64@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e5e6e9c6bde758cceb2ffae7508ef9e4992e79ed1b1cbfc6ab459317d96f729bfbdf0029e5ebbc31f0548162bd6e15af6638fbc97f1eb5fffcb48f0d7b2ebde6"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40fastify/ajv-compiler@4.0.6",
+      "name": "@fastify/ajv-compiler",
+      "version": "4.0.6",
+      "purl": "pkg:npm/%40fastify/ajv-compiler@4.0.6",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "36dbb333449f68c25b1a59e3afd2d64143792f3812adb07cb5fff045935ab3ee04d4efcd9b3979ddeeebb93eb51c36724422460ba1712288263593b573911304"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40fastify/error@4.2.0",
+      "name": "@fastify/error",
+      "version": "4.2.0",
+      "purl": "pkg:npm/%40fastify/error@4.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "452a37b150d77c7b2488164a04f4609d04ed22aa62ffbce124e1260310a205c33b774bb07467712e5b0268bcc6b3cbfc367c484657c6d0de75a79c8568e7a7b5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40fastify/fast-json-stringify-compiler@5.1.0",
+      "name": "@fastify/fast-json-stringify-compiler",
+      "version": "5.1.0",
+      "purl": "pkg:npm/%40fastify/fast-json-stringify-compiler@5.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3f1718b4a2db43c67ec80a62aa32bc170c48c2f123dfc9363a22dcd7bbbc7642529667e2db01c73da4a76a8a813d0aadbc5f1856c0e00e93f6b270c27c5ae97f"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40fastify/forwarded@3.0.2",
+      "name": "@fastify/forwarded",
+      "version": "3.0.2",
+      "purl": "pkg:npm/%40fastify/forwarded@3.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "344f0780a2e061e8d5f650e9aa410568328c2d87a524155f1de92107450abd7d2085a817449aa0ebc7de83c7abd4d3d7c46e0df62eaf3f1cedf04fb7c077dc98"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40fastify/merge-json-schemas@0.2.1",
+      "name": "@fastify/merge-json-schemas",
+      "version": "0.2.1",
+      "purl": "pkg:npm/%40fastify/merge-json-schemas@0.2.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "380dca1810b2e8ab48bcb7fc0c8342e7cf34a398819435f84b1ccb412f07a2b2406ea96eccb467f345175346f1667ed43858458294490dab1fc27f671b8146e0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40fastify/proxy-addr@5.1.1",
+      "name": "@fastify/proxy-addr",
+      "version": "5.1.1",
+      "purl": "pkg:npm/%40fastify/proxy-addr@5.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "cefd3b63d184b83b093de819a0315de120d6699396f0dda96b4192ad898aa4877fb63b751e0a37063641563755a5f56b1da03e42fe636b0b52d8ee74279c4cf6"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40jridgewell/resolve-uri@3.1.2",
+      "name": "@jridgewell/resolve-uri",
+      "version": "3.1.2",
+      "purl": "pkg:npm/%40jridgewell/resolve-uri@3.1.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6d12128022233f6d3fb5b5923d63048b9e1054f45913192e0fd9492fe508c542adc15240f305b54eb6f58ccb354455e8d42053359ff98690bd42f98a59da292b"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40jridgewell/sourcemap-codec@1.6.0",
+      "name": "@jridgewell/sourcemap-codec",
+      "version": "1.6.0",
+      "purl": "pkg:npm/%40jridgewell/sourcemap-codec@1.6.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4fb8dffb9ce0b191f0349e25bd0eff69ecdbca4d27357fb32555a998703b558b04c7b6bbaabe5183921bb4916a920cdee58dacaeeab545463c43cdfb39dee217"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40jridgewell/trace-mapping@0.3.31",
+      "name": "@jridgewell/trace-mapping",
+      "version": "0.3.31",
+      "purl": "pkg:npm/%40jridgewell/trace-mapping@0.3.31",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "cf3351f9275048327373c8e869e3fc410a0242bf0db98c76748232b65d507811191c9f6e5ba85e6ecad881bcfc849c1441aa374d608cb667d5f0dbb5b7038b03"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-action-bridge@1.0.0",
+      "name": "@latticedx/plugin-action-bridge",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40latticedx/plugin-action-bridge@1.0.0",
+      "description": "Server-side PKCE account linking and scoped LatticeDX action proxy.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "nocobase-plugin"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "plugins/nocobase/action-bridge/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-ai@1.0.0",
+      "name": "@latticedx/plugin-dxos-ai",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40latticedx/plugin-dxos-ai@1.0.0",
+      "description": "Admin-configurable AI Employee workforce, NocoBase Admin Builder tools, cross-department workflow copilot, 6-plane Enterprise OS topology, and two-way Streamable HTTP MCP gateway.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "nocobase-plugin"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "plugins/nocobase/plugin-dxos-ai/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-blocks@1.0.0",
+      "name": "@latticedx/plugin-dxos-blocks",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40latticedx/plugin-dxos-blocks@1.0.0",
+      "description": "Six configurable Native v2 FlowEngine BlockModels for NocoBase UI Editor covering H-P-D-I spaces plus org-scoped telemetry and proposal read endpoints.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "nocobase-plugin"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "plugins/nocobase/plugin-dxos-blocks/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-para@1.0.0",
+      "name": "@latticedx/plugin-dxos-para",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40latticedx/plugin-dxos-para@1.0.0",
+      "description": "P.A.R.A. knowledge and document workspace collection ([H] Human Space) with strict organization isolation and NocoBase ACL grants.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "nocobase-plugin"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "plugins/nocobase/plugin-dxos-para/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-studio@1.0.0",
+      "name": "@latticedx/plugin-dxos-studio",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40latticedx/plugin-dxos-studio@1.0.0",
+      "description": "Administrator control studio inside NocoBase Settings for 1-click Poka-yoke workflows, multi-block portal composition, plugin monitoring, and internal-service domain templates.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "nocobase-plugin"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "plugins/nocobase/plugin-dxos-studio/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-enterprise-auth@1.0.0",
+      "name": "@latticedx/plugin-enterprise-auth",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40latticedx/plugin-enterprise-auth@1.0.0",
+      "description": "Native NocoBase sessions backed by explicit Keycloak identity mappings.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "nocobase-plugin"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "plugins/nocobase/plugin-enterprise-auth/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-lattice-foundation@1.0.0",
+      "name": "@latticedx/plugin-lattice-foundation",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40latticedx/plugin-lattice-foundation@1.0.0",
+      "description": "Department, Employee, Location and Asset registries.",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "nocobase-plugin"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "plugins/nocobase/plugin-lattice-foundation/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40latticedx/uc1-procurement@0.3.0",
+      "name": "@latticedx/uc1-procurement",
+      "version": "0.3.0",
+      "purl": "pkg:npm/%40latticedx/uc1-procurement@0.3.0",
+      "description": "LatticeDX Use Case 1: Mua sắm & Bàn giao tài sản (Procurement & Asset Handover Package)",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "workspace-package"
+        },
+        {
+          "name": "latticedx:manifest",
+          "value": "packages/uc1-procurement/package.json"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40oxc-project/types@0.152.0",
+      "name": "@oxc-project/types",
+      "version": "0.152.0",
+      "purl": "pkg:npm/%40oxc-project/types@0.152.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a0cff9acb066dad3e48348818241ff14e791dcf083a58d7d19380066330533c87d588f555bb70b833a7a9f0b5aad82a6a2f6af21067e15efd1297ffc0bc3bf47"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40pinojs/redact@0.4.0",
+      "name": "@pinojs/redact",
+      "version": "0.4.0",
+      "purl": "pkg:npm/%40pinojs/redact@0.4.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "93610d9e606e804febcd07c471d58770263efc533754bcc7f5c604b1b76ca2aaefcc029185465e44d84066f07c3a2b502754c179ddf2a96b5d8f34bac09281c2"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.12",
+      "name": "@rolldown/binding-android-arm-eabi",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "741fdad76d78a8a7c73170a982a4783994fe8d2e244f21176d01893eace86ede44c07e6b5f4f34a71137eda96ddd1cef4756dfd58cffc86a917eb600c6e3f0d0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-android-arm64@1.2.12",
+      "name": "@rolldown/binding-android-arm64",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-android-arm64@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "eca1c5810e5527120770b96bc2b7375db76cee84cd413ecf822f6040224aaddd9519a6ff524b08398a7a543f0ccc2b2d1b138a32035a98fc1409fc4f74fd4e1e"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.12",
+      "name": "@rolldown/binding-darwin-arm64",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "dd8221a870fdea703949a60d441475e879c6bf8a1abd9bd77c3fdac8733ea18674583ffc94102d7facd0b9ae2413202fa6aae5b8a5e5d259ce06888d6f2ef1f7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.12",
+      "name": "@rolldown/binding-darwin-x64",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "52eb89df9305c3882614eac4f6912a215f8adecc882af7a987e41cd7f9631d955da035b8a73fc91d1fde315a26f9364697fe4e3af18939668e095b7765faa1c4"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.12",
+      "name": "@rolldown/binding-freebsd-x64",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b8cbecb22b746b85beffb0fc09b1d4bc6ef5f661f74768f05c0961fd770fbee1d313483ef8bca617cf03086357d07336ac13a7d31af381792d201e9f2d22414d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.12",
+      "name": "@rolldown/binding-linux-arm-gnueabihf",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5dc16ed11d315a7c3349fe08420147d6b2487243cdd692f2d91fb8afd20307b61fbbfcacf5c56a7dae2906b3078fb6b7825f26211e2744d3e0d1ee48bc456cea"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.12",
+      "name": "@rolldown/binding-linux-arm64-gnu",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "dbad14aca827f2dcf7f5a93e48c0ce8ab2b3afb574e0cf5d58fc399655b4d12c018af099a1671104a57577c7179d1914992640dc17625260475a4efbdf8525a7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.12",
+      "name": "@rolldown/binding-linux-arm64-musl",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e582b523d4aa0e46cf81cd4803c0600e5df8b2ea944b6ab42969c1ae2ae6d04e756233ace9ea3a755ea36d07cd13f6ab807452bddd1050682da48a18c7e596a7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.12",
+      "name": "@rolldown/binding-linux-ppc64-gnu",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "46472b9a9ede15183be322f97d7114f7524459b7443cb7af5b01ad5e99a16e3943d52b5271b59398ef78061972f8ca3e91eb4a624766335bcd50a7964a5c7c71"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.12",
+      "name": "@rolldown/binding-linux-s390x-gnu",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "aaf2b80ee02c41cd814a3971f97afe233388befc5b199ab11707567c6e85e75f04ae3d061884b241b27aa486a9a673b194d3f3347be8fcbd01c01df4199fb357"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.12",
+      "name": "@rolldown/binding-linux-x64-gnu",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "43db8b04ee775dde1022ad563b27154323cfd4ee0786b684576aaa6f7b93ae7570e9066287d76e638bcd5ce8af2f5c68512d7fcfe5bc785e0d31f9766bc49d8f"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.12",
+      "name": "@rolldown/binding-linux-x64-musl",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "dc80715853236ce66c9033cabfc2dff410a76a194ab87b615a4627c88c4e1ff41c26b15c4b812671e9ed840a64c2bff9fa712a6652f37986f178c697ec0e6ee2"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.12",
+      "name": "@rolldown/binding-openharmony-arm64",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c6d5fad718382ca3e43d68a5654d729ca0a5cf91a3e1b7fbe0b30be2bdde54b5ae98a9c68e812bd4e48742131d6c10e86138beca3aee8efa597b6a549ea0abac"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.12",
+      "name": "@rolldown/binding-win32-arm64-msvc",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "02dedf3c1e8f09a223ce0221119171b93f81045aa24226c90d3e1ddcf8624777f813b6db31917868a6e56c57c4337b044d10ddd58890c7ff94fe0fc1fe8bb913"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.12",
+      "name": "@rolldown/binding-win32-x64-msvc",
+      "version": "1.2.12",
+      "purl": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "588c3685a54ac23b987579076a80b4985f0b7bbd53b820718eb74aa8b6c919cb5b040063f8295f98dbed6ce9f3a6add1a24368e7e575aa1b52cc9c97a2bb2495"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40rolldown/pluginutils@1.0.1",
+      "name": "@rolldown/pluginutils",
+      "version": "1.0.1",
+      "purl": "pkg:npm/%40rolldown/pluginutils@1.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "da3f5b1ade4987c863faf3ed8333ed97bda3d324711c0cae9a8a3a4cd7c08ec2c1d3852da52bcf6cf703701331cfb9fef42601d1cd46c501716118368e29aa1b"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/chai@5.2.3",
+      "name": "@types/chai",
+      "version": "5.2.3",
+      "purl": "pkg:npm/%40types/chai@5.2.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "330e79f28780f5f15bbfae7fcb8987b570ecf5b3e714c6402ff8f174f154a4e1c72175fdd667201076d2e4b6a1afea7064547c03b19095e456788e9c1850b650"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/deep-eql@4.0.2",
+      "name": "@types/deep-eql",
+      "version": "4.0.2",
+      "purl": "pkg:npm/%40types/deep-eql@4.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "73d87d75554c8a030f7386f04ef0b9771aada8967040f78fb168cf96948e9e88dba2bea91aa764e78d657c0ec0a8542be6907505176ad23b98f5d6fcd41c3217"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/estree@1.0.9",
+      "name": "@types/estree",
+      "version": "1.0.9",
+      "purl": "pkg:npm/%40types/estree@1.0.9",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "1a174f832d5e978fc898fd395f4e54c38730dbf33ddc10949a712f599352b650b310a304e05924f98a680393a21cd426a12ec269f6fc5dadcfc9af26d50af37a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/node@26.6.4",
+      "name": "@types/node",
+      "version": "26.6.4",
+      "purl": "pkg:npm/%40types/node@26.6.4",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "95d54f0c2ce3edfb1a199acb07436e1ee4ef25cb0d6accac040a8ca25aff720c6b2ddd716eac48af75c988f9c71c9502c63e6c345d6f9d18fd6969eb561e4972"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/pg@8.23.1",
+      "name": "@types/pg",
+      "version": "8.23.1",
+      "purl": "pkg:npm/%40types/pg@8.23.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7ca547a6290f760e062a4b3726e2c486fc12cafc33176de19da6cfcba0c3f258d56c2efee89e5d43376fe1aad5ea3aaae7b7639cc82cd47281c57e0ff1a048dc"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-aix-ppc64@7.0.2",
+      "name": "@typescript/typescript-aix-ppc64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-aix-ppc64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "31328a91607ba7fd04f718b5775b47b59e4f88b90610c22af3ca4ad82b9b6633ac2ed6132ea8602208bacdea456bef461d9ea1d3934c0a443118a88f5ccc57b5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-darwin-arm64@7.0.2",
+      "name": "@typescript/typescript-darwin-arm64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-darwin-arm64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "828c336abf4cc12fda456a7a7f76b8294ab34630198ceb2618d08ce8b713817ba6f9d05f82c05530df8082f38209b82e5f289c93a2c986906ccf131e6c9f2cc8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-darwin-x64@7.0.2",
+      "name": "@typescript/typescript-darwin-x64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-darwin-x64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "499f716489ea02936534673db345b5552b24b5848e7bd705a8d388aa63751acf129a48ca65816dd35ec6e15c0fc404889ce0ee01d6d35bbb1788551ff3ddd180"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-freebsd-arm64@7.0.2",
+      "name": "@typescript/typescript-freebsd-arm64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-freebsd-arm64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5b9347e32fc9d29948212e5bdb1bd312453b245c72a9d3003a07fe225865d2f1d05ca3b9759a3177e0bf8c4b6ae7a738177c24ef5441e013114365dd23e6f061"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-freebsd-x64@7.0.2",
+      "name": "@typescript/typescript-freebsd-x64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-freebsd-x64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "50c183c79b13a73370dd688f79b1fb97dd0859f26080477e7a01edfeaea9eff0a6df3aa857b5719065edfb70f13c8c3c09c9af001d23dec5557db857f8ce13a7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-linux-arm64@7.0.2",
+      "name": "@typescript/typescript-linux-arm64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-linux-arm64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "421e1e538ff2df20e39df8e3c8f62284c8f9fce0c8966b7e073bb5ece23e7e24910d6e7b4265394a237addec4f44d24f294cdc73520d6b535776b27e32a1e351"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-linux-arm@7.0.2",
+      "name": "@typescript/typescript-linux-arm",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-linux-arm@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "81f7d3df13f3f6c47b8ff6091319323e7b6b2343f610ff576cec96ced876fc6b3446cb4afbdd1105c3b49dc5e85f2fdb798965d525f0f38e8d7f6cdd9c4cf441"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-linux-loong64@7.0.2",
+      "name": "@typescript/typescript-linux-loong64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-linux-loong64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b841dc93d8bc8680335cf8984626f53bb9a23a7cf6dd2c4879597a1782d7a31faaa2fd4adf98c77045ba5472af648fa9caf97b7d910fe0c094e4b62f22ad46b9"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-linux-mips64el@7.0.2",
+      "name": "@typescript/typescript-linux-mips64el",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-linux-mips64el@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4782af00c9c4e375b941ea9bd0bcb9e8ede658c588020b0ccb3dfa0c26b271de676e0ffd9339b4962c3726871f46ac8963428f9b31636ecc28cd7c96d039c860"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-linux-ppc64@7.0.2",
+      "name": "@typescript/typescript-linux-ppc64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-linux-ppc64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "0ce471e5bdec77fe12ede6b2c66e0542ff80ec2ae45081916878b023ca221d3008d5f00f5a1178274bc09640bc6e20251d2555c31310ded8d9dbf0d56e742288"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-linux-riscv64@7.0.2",
+      "name": "@typescript/typescript-linux-riscv64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-linux-riscv64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c1fd23a840ce8eb3d19cac18472c890d1a35d4a31bbcc16b53eab8cea2b20a1383073be591b84d41f2af2f14027304e974369748765356e8742680ab28250c1d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-linux-s390x@7.0.2",
+      "name": "@typescript/typescript-linux-s390x",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-linux-s390x@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "224c097372fbca1cad59dfdec23cb13437ce9acc029bd1963094ffb9efdd53869935bc1979801eb6ae365722e6b264a3be85fbcfbe17e996980adcc0af412e1b"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-linux-x64@7.0.2",
+      "name": "@typescript/typescript-linux-x64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-linux-x64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "11875fd9c360eeb8025899f109d27e177577f4ef2285bdfb78702ed4b2bca00162ce04d06cf38aef31c75db3edf2b5f6e023aa3835de237b087f47c25c6ec7fc"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-netbsd-arm64@7.0.2",
+      "name": "@typescript/typescript-netbsd-arm64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-netbsd-arm64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "fa9a25605e0c174e1a3e93b9153907ada9fdc94403497ab2e468920caa6c965e63cb7977fa0f502e1a5fdfd4fe78fb5e7e15cb386acb9744088e440fe959de94"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-netbsd-x64@7.0.2",
+      "name": "@typescript/typescript-netbsd-x64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-netbsd-x64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f18213d041ccff776ad7464e545fc0ee973f61232d6dc79c72de2b5ad7b1ae74821ce3dca42d8a4cb5df4c247abc3a674a2635da178d6f51a237fc2ef93fc5c8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-openbsd-arm64@7.0.2",
+      "name": "@typescript/typescript-openbsd-arm64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-openbsd-arm64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "00f4fcf829589ee626d6ef7e920197a0c8f65735b37329b087680d4905724877e444318e4d592858b8c298e41268ef8fa2a439ec1d1f951a7d480fbb1a79e4cd"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-openbsd-x64@7.0.2",
+      "name": "@typescript/typescript-openbsd-x64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-openbsd-x64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c97eecf90d03967d03b7db44cd9b008d75d1ffecad04cec096095aab278c3f142ccc9d4986525d67a8cb03e23395d1ed7e55fcd5e9bb9436a8d715eef9a45192"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-sunos-x64@7.0.2",
+      "name": "@typescript/typescript-sunos-x64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-sunos-x64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "74b24319a2d9d43e073d09fadaed67f26043909444c0cb00902764c1de087aac3ec774d4c93b2a634622042b44e87e8ecf38069378ae677bc55914be13cfddd6"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-win32-arm64@7.0.2",
+      "name": "@typescript/typescript-win32-arm64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-win32-arm64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "1b2975572e8eb167ac2f39aaf843f415bedbe0d89de76df602f700d9215c758ade95da4db58145a1f3e39edeb6cbd850cbb553699a7ae480898ee01045a55c21"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40typescript/typescript-win32-x64@7.0.2",
+      "name": "@typescript/typescript-win32-x64",
+      "version": "7.0.2",
+      "purl": "pkg:npm/%40typescript/typescript-win32-x64@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d014371e40071e528b4a9d6a46f7f7494846a46b03ba107f8e0170ef982ecaa6f126a11a4b40b0fd514ef22da71e094953340246d30c47f20100a137113302e2"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40vitest/mocker@5.0.3",
+      "name": "@vitest/mocker",
+      "version": "5.0.3",
+      "purl": "pkg:npm/%40vitest/mocker@5.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4fcb160086e44b20239304dc68473722ed28f40dbb5f5fe4757ae2ce16641ae48a49c450b51cdc95f00ca4e4dc19d5c2b2ac5e5a5a46cb75e3a9a5bc0a92ce46"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40vitest/spy@5.0.3",
+      "name": "@vitest/spy",
+      "version": "5.0.3",
+      "purl": "pkg:npm/%40vitest/spy@5.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5e1172b104c1f0067e3f880c8be2e9a3df6f8360198b4a8aa5a07dc97425dfbf8268c1003cede21ffc065674b22f930f11188b7b3a6a4d5b6b47a5191f91825e"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/abstract-logging@2.0.1",
+      "name": "abstract-logging",
+      "version": "2.0.1",
+      "purl": "pkg:npm/abstract-logging@2.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d818d14d9c533ef85e3af19b06c94549839492bf928cfb4e9eb2cfdf77fe54858bcdecd0a5972a560ee36b72f87415e6cf38304fe6b4dbd8d1c793c28b726e88"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/ajv-formats@3.0.1",
+      "name": "ajv-formats",
+      "version": "3.0.1",
+      "purl": "pkg:npm/ajv-formats@3.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f2252a979d04511fae51c7514371c3a9ae84572a3776870bf20e5627714d7169aeeb621b90652e7bfa44c8b056f1518a2ae7133e0a9e92ce1f214d43038ca8c1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/ajv@8.20.0",
+      "name": "ajv",
+      "version": "8.20.0",
+      "purl": "pkg:npm/ajv@8.20.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4e16e58be3a53a3fa230f60505505f2773a60809da4b2367e0cd6fcfd4fa1a46b926df5b6bf1c8479ea3a32eb9b58ea4c7f142179557341f35f58eff194ac118"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/assertion-error@2.0.1",
+      "name": "assertion-error",
+      "version": "2.0.1",
+      "purl": "pkg:npm/assertion-error@2.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2338bc45071f7ea09e3558058a02a58b5b2c92521ba479c261ce809275c662807a82b26ac9e6f2ee3bf5d895108264c09c80e76dc935bb192c4f87733773d604"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/atomic-sleep@1.0.0",
+      "name": "atomic-sleep",
+      "version": "1.0.0",
+      "purl": "pkg:npm/atomic-sleep@1.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "90d3a30ea021ee9c745d6348fb841bce8891fe74e41c058db9ddaebe726ab83d7fc796bb11064c253d00733a8ad109faee863f4d34352db50a6a3669a7723db5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/avvio@9.3.0",
+      "name": "avvio",
+      "version": "9.3.0",
+      "purl": "pkg:npm/avvio@9.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "836b50ecb13ba0e4aa0dfc049b733e64231325ceca89909d278530c9925be5c9132b262ee743989afbf49821573ee617a0ce33912b7ccccf5743d282bf103be0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/chai@6.3.0",
+      "name": "chai",
+      "version": "6.3.0",
+      "purl": "pkg:npm/chai@6.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5d602dc09e8e1cefad8f410a0acd18d946a69f23b1b1e65696d538c76536c21f20e008a0763c2fb548ef2cfdadaa403f6afc4712dcf135aa86abf6063707242a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/cookie@1.1.1",
+      "name": "cookie",
+      "version": "1.1.1",
+      "purl": "pkg:npm/cookie@1.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7a2f00a2cee36b4c1e469173267100f541c9ffb5d09aa8256d1c277f60138dc07d5aaf3be15287f647e38e2acce94854dbf1397c561a77297284595d72a4a275"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/dequal@2.0.3",
+      "name": "dequal",
+      "version": "2.0.3",
+      "purl": "pkg:npm/dequal@2.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d237bea8f28710ca21bdf453084a370ab3c6e9c033018826ccacb1462612483912e9e1897725499bb59a600e4409a003f702c1d93e0411eca603968555c61708"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/detect-libc@2.1.2",
+      "name": "detect-libc",
+      "version": "2.1.2",
+      "purl": "pkg:npm/detect-libc@2.1.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "06d8f604e38ef37a375b21f9f5ef0c817b3111055c6ab9143a9118aee6c1d2eaf09cdd74c90dfae2bb22072535d67665a966199b4e62fe87fb8a8e26ce2841b5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/es-module-lexer@2.3.2",
+      "name": "es-module-lexer",
+      "version": "2.3.2",
+      "purl": "pkg:npm/es-module-lexer@2.3.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a681c6a4e4400688c926e72757d29b39abc44d6f250559e98645bbec4479fc1439173ee85d2a0235e93b207def4799d18ddb04cfddba89b1585fc2ad2d099dcb"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/esbuild@0.28.2",
+      "name": "esbuild",
+      "version": "0.28.2",
+      "purl": "pkg:npm/esbuild@0.28.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "1ca54b4bc76f208fb1a0a5bd926ab16d12ab9d61177c926bfc56618499a2a880747b4e7740d605a8e068b9330efe4e6c203e0cbc28940afbfc6fd338877db020"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/estree-walker@3.0.3",
+      "name": "estree-walker",
+      "version": "3.0.3",
+      "purl": "pkg:npm/estree-walker@3.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ed150a7d781230c933b7a66e5e6a9aa4ebab2c63cf7e08fa97db9167b9511a896f934cb6ca871cdf92dd731282e4f419767d8332a8a8010d8da1672b4ca9a6ea"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/expect-type@1.4.0",
+      "name": "expect-type",
+      "version": "1.4.0",
+      "purl": "pkg:npm/expect-type@1.4.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "29f61b9a9466d156cb8c4bd56bdc86c028bd188df8c6f8bb03f1d761640eeb90920f6bb731ccd4252bb05ca148c651ac801422cd5f6ae49f4d1e3e151b49fea4"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fast-decode-uri-component@1.0.1",
+      "name": "fast-decode-uri-component",
+      "version": "1.0.1",
+      "purl": "pkg:npm/fast-decode-uri-component@1.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "58a80a5a0e5e531bd1646c16f05bdf6da1fb0174a1d9c2fede3e5f306cd4302c56049ddd5776bb5b3f32d9ffee4347b707a5a6a1d0f7a12e788d343d1d54c822"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fast-deep-equal@3.1.3",
+      "name": "fast-deep-equal",
+      "version": "3.1.3",
+      "purl": "pkg:npm/fast-deep-equal@3.1.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7f7a90f68432f63d808417bf1fd542f75c0b98a042094fe00ce9ca340606e61b303bb04b2a3d3d1dce4760dcfd70623efb19690c22200da8ad56cd3701347ce1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fast-json-stringify@7.0.1",
+      "name": "fast-json-stringify",
+      "version": "7.0.1",
+      "purl": "pkg:npm/fast-json-stringify@7.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "79149ac804526dbc25063a4fe2f9d34c8443e503dc22b9a284fc4378dd43b4a9c73e0eba52e24bc7ef2194ad64685763bf3c90fddcc02e88b8bf0010f93fa264"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fast-querystring@1.1.2",
+      "name": "fast-querystring",
+      "version": "1.1.2",
+      "purl": "pkg:npm/fast-querystring@1.1.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "83a2ae2969855dcd1f203f16587d238ade20d00181a0984290931bd5199bb1211436f43e642f03e82519f86b45f2733348f5e786278fcb2aaa8a9ccd3449c78e"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fast-uri@3.1.9",
+      "name": "fast-uri",
+      "version": "3.1.9",
+      "purl": "pkg:npm/fast-uri@3.1.9",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "852ff45addd86b4e37a0a5ecd2c231acca4a4084d784c2c8ad500a2978b8828cc60bdbfb6115959d7219ce334f4ced3633d05dc4b096a8ad7245780dce257225"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fast-uri@4.2.3",
+      "name": "fast-uri",
+      "version": "4.2.3",
+      "purl": "pkg:npm/fast-uri@4.2.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2353d7c0fe5e02194d95c7698edf42801e7da29d99bd97f1c3e064a861552143a03690954dc4eaa771e14d7edbaf18f9bec8a9fa7498e274ef7dff9e200efa86"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fastify@5.12.8",
+      "name": "fastify",
+      "version": "5.12.8",
+      "purl": "pkg:npm/fastify@5.12.8",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9a83fc7b16f6b021cb51b264c29f88e82d2969d872e03f25a7449d9b363b1e149d66eaa6ecefeede8d9aabbbbca24690fffdf7403ce3dc6feef85b12741f10cf"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fastq@1.20.3",
+      "name": "fastq",
+      "version": "1.20.3",
+      "purl": "pkg:npm/fastq@1.20.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5cabf99e72ecea72c5ef536088a24b21914b90fc8812e3ac7a52c6eee8d99c6ad17d02bc1e9bd8f96a8a84025401d2e89b054712b552e0b7f11653ead3f15303"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fdir@6.5.0",
+      "name": "fdir",
+      "version": "6.5.0",
+      "purl": "pkg:npm/fdir@6.5.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b486d8b596ee70eb340511aa3c992c84951874bf920c7edd54cf208f2f84469dd60148cb105244fb4da46a7c87b708d63a7c2b298062c0098cd29e242c90275e"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/find-my-way@9.10.2",
+      "name": "find-my-way",
+      "version": "9.10.2",
+      "purl": "pkg:npm/find-my-way@9.10.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "81b2ccb939b6155e5089187f78cd2e84be27c8ebdb4aaa9ad8ade601202d908ab1bd8f199a82ce08b31ddacc8b593fd2ca1aef391ec63f138a8ff91c57aa3c6e"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/fsevents@2.3.3",
+      "name": "fsevents",
+      "version": "2.3.3",
+      "purl": "pkg:npm/fsevents@2.3.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e71a037d7f9f2fb7da0139da82658fa5b16dc21fd1efb5a630caaa1c64bae42defbc1d181eb805f81d58999df8e35b4c8f99fade4d36d765cda09c339617df43"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/ipaddr.js@2.5.0",
+      "name": "ipaddr.js",
+      "version": "2.5.0",
+      "purl": "pkg:npm/ipaddr.js@2.5.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6aafade4d01cf9c4baad94105560b6c7df023ea1ad28a4cc0dde066a876fd304a19c8b5d2a0ff9d5d8e4189d61a87f8ecb48af0dfb426d22c24286fcceca34d7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/jose@6.2.12",
+      "name": "jose",
+      "version": "6.2.12",
+      "purl": "pkg:npm/jose@6.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f4d88598911ec74b32d83939f23d94181487814b36ca917d7994aee0beaf8ce5f70e9f7a4b0d45dee2fe1fe0f5b31d368d965dcd44f41e0bc2cb9f42baf5dc5b"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/jose@6.2.15",
+      "name": "jose",
+      "version": "6.2.15",
+      "purl": "pkg:npm/jose@6.2.15",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a9d17a7b0719011b5e7faddf27d00a2993e0c70faded4487e872d761c0f80ab7664af0e9efdae92523c510a73dd1005e192eb7bb5290b4dd8c6501c2d320c8cc"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "plugins/nocobase/plugin-enterprise-auth/package-lock.json,pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/json-schema-ref-resolver@3.0.0",
+      "name": "json-schema-ref-resolver",
+      "version": "3.0.0",
+      "purl": "pkg:npm/json-schema-ref-resolver@3.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "84ead92152f98f26058f393bfb2ee7e490f31a553cadf583b98c87c066b6580f3fa5c98c1dece9db1b15c31ade6c3fd0f6df0d7390dba227b2483a42a78586e0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/json-schema-traverse@1.0.0",
+      "name": "json-schema-traverse",
+      "version": "1.0.0",
+      "purl": "pkg:npm/json-schema-traverse@1.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "34cf3f3fd9f75e35e12199f594b86415a0024ce5114178d6855e0103f4673aff31be0aadaa9017f483b89914314b1d51968e2dab37aa6f4b0e96bb9a3b2dddba"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/light-my-request@6.6.0",
+      "name": "light-my-request",
+      "version": "6.6.0",
+      "purl": "pkg:npm/light-my-request@6.6.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "08761bbbc46d6e8488a15b0767a61ee1c8f8030ff2836a001629a517b98dbdf0d5d7dd8b47b9c388ab5221f0ae2d3ecaa243d24e7ffd91f54b9b9386374036f0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-android-arm64@1.33.0",
+      "name": "lightningcss-android-arm64",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-android-arm64@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "804a514da94a768b29e016fca96b5cda23a013949e2079694b5ba9f5b16adb003262197551d4ce6d88877bdf3310cf5242f4a8a906752100f424da60dcc979a6"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-darwin-arm64@1.33.0",
+      "name": "lightningcss-darwin-arm64",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-darwin-arm64@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "49c89acfc79e9cd4ca9fd6f7b7bfb1af48a94e9f58c4a418e27a704379ab46e2f404054704bc99c687e168a04056dce6b5167fcd3ca8d3fb68e01d6e586fc38e"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-darwin-x64@1.33.0",
+      "name": "lightningcss-darwin-x64",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-darwin-x64@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "67950f031ceb8e558d3721b2ea2eb9709cf3be02790f74fac0cbecfa05a963d77ba9184036bc6a029e8b871220661584c35f117c94c6711c63b8b201afe9bc5d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-freebsd-x64@1.33.0",
+      "name": "lightningcss-freebsd-x64",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-freebsd-x64@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "41033f4e2fe141a8c9c0263e4625ae099f6c76d23f5d093b9c32b9bc2f2491dc22c5ecce94382f0f1efe453f908cae857054f8329b2ea019c7228fcedd2b5146"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-linux-arm-gnueabihf@1.33.0",
+      "name": "lightningcss-linux-arm-gnueabihf",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-linux-arm-gnueabihf@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "37b15505eea24b6e0c94ce91ff84414f11a14217991aceed890f54df652d17be4dccfe50ef158f46a2c108ac65450464deb6358c220f2f3c7b5b33a1b942112d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-linux-arm64-gnu@1.33.0",
+      "name": "lightningcss-linux-arm64-gnu",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-linux-arm64-gnu@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "8f6bff8ad9b2e0794dc6573abe829762006a362d0d8362d2860e33ec6b9fa4482cd393fedacb815728bd23a607ab9ba8545c7d1138a7dde08484b5725c64272a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-linux-arm64-musl@1.33.0",
+      "name": "lightningcss-linux-arm64-musl",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-linux-arm64-musl@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ca23b944e32e6108176c2eb4ca3654e4261215918a5cbd071404d7b7d987267d7ecd6e79a02b4c23d35f7158582cc1432fb815ee804fa27fc498c3068363afb5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-linux-x64-gnu@1.33.0",
+      "name": "lightningcss-linux-x64-gnu",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-linux-x64-gnu@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6abf89bbb2e670dd09a381692f88691726f0346f7fdc0fc1af9296da7da3c8e0e0dcc1195da0d800375e9a8352f810cd7cc80abf29492e3e12e6dc9101cb6e02"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-linux-x64-musl@1.33.0",
+      "name": "lightningcss-linux-x64-musl",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-linux-x64-musl@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4588986e4a24c34b6b7caaaacdf179e658229f010fac3dce2437d3b89cc5b3530aea21670de9dacf57ea2cbb57e084c6dce92d2505ce7936b0d5ac2b0409593f"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-win32-arm64-msvc@1.33.0",
+      "name": "lightningcss-win32-arm64-msvc",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-win32-arm64-msvc@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d4af8c3df2d2155a69873a5d6df92195693ac01ad339b0734b64fa75bd743cd399811f46a15b005b3c0dcae8546186d3a76de3fb846b9dc7ee8d9e2e0335efc0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss-win32-x64-msvc@1.33.0",
+      "name": "lightningcss-win32-x64-msvc",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss-win32-x64-msvc@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3a5108083c7f5e5d05a92a786ebcbccc59c2bc6a628371a5e200aabaf6301eea892840b5fa7f4d8039e216fa871a632fd5992a0c9ac3a8a292ca44c35fe7a1b8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/lightningcss@1.33.0",
+      "name": "lightningcss",
+      "version": "1.33.0",
+      "purl": "pkg:npm/lightningcss@1.33.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5a4503ae88ee26cd3192019fdae756c5adf21814713edc54901efd8ba68264b46073b3ccf1f65ef53a2c7cf0dcbc4a5065bb850129c762644b04b51b98b38820"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/magic-string@1.4.3",
+      "name": "magic-string",
+      "version": "1.4.3",
+      "purl": "pkg:npm/magic-string@1.4.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "cf5d8ec6668f184d05e3196919d8ee0147248a92e94254c0b809b21a13680fb383a58533bc37efb7151b8ccfe3c339f23f5efca23bbf2837728b6db4c0d27445"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/nanoid@3.3.20",
+      "name": "nanoid",
+      "version": "3.3.20",
+      "purl": "pkg:npm/nanoid@3.3.20",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b8a760d86dc63422909fd6f260ea716c6aab4f67c63b9291b7927ff1bde9a24f2b4faab119617a871332262118b407fe155c98b83f6145a0ea5f9b8f15827865"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/oauth4webapi@3.8.8",
+      "name": "oauth4webapi",
+      "version": "3.8.8",
+      "purl": "pkg:npm/oauth4webapi@3.8.8",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f0ddbc13e6bfa317d758180e32df993ff2547ff5d1f8815bbe40043cfde0ce75ce32ff41a400308888f44c5373ded1933dcd1943cce65813603759c0cacd209e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "plugins/nocobase/plugin-enterprise-auth/package-lock.json,pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/obug@2.2.1",
+      "name": "obug",
+      "version": "2.2.1",
+      "purl": "pkg:npm/obug@2.2.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5ebb2b853e6cc9bb4a23ac1a92bd923ce9466565986d45d9edad234fcfd039e00f6aefb55ff6d27a035ee5847be6826611941b2a78a7822ae618e10908893ad5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/on-exit-leak-free@2.1.2",
+      "name": "on-exit-leak-free",
+      "version": "2.1.2",
+      "purl": "pkg:npm/on-exit-leak-free@2.1.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d1e24963a8572c67f5b9d1f07cd7ed06a1fe83bdc4538079d389d978aa73d6c61129a7c0821c31109ba70763bbac36642f83c67ec3159d35d9d848e26dba9cb0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/openid-client@6.8.9",
+      "name": "openid-client",
+      "version": "6.8.9",
+      "purl": "pkg:npm/openid-client@6.8.9",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ea65cc44d2710ce7fa05f94458b5ee975530ccb173fbef4e7f3d4f6303f0c2c26cc9706c6df90ef89a36e79496d6a9c534b633e042561f3e365f838926bc9afe"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "plugins/nocobase/plugin-enterprise-auth/package-lock.json,pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pg-cloudflare@1.4.1",
+      "name": "pg-cloudflare",
+      "version": "1.4.1",
+      "purl": "pkg:npm/pg-cloudflare@1.4.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e8f41bb05599729f44989130cb97064362daf80316a4fe3a9606dbf17f94fd7b07214c1e603342a5eb8a724e51c4bd8c755162ee4adb6c48b99d7e1987b261ad"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pg-connection-string@2.14.1",
+      "name": "pg-connection-string",
+      "version": "2.14.1",
+      "purl": "pkg:npm/pg-connection-string@2.14.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a91de418d3c12e908db73d1ebdb280d18fcc4455f0492753fa94c9bd8a7f6d74dc45e65bbd7d64cc5d08c93735427c6a17b0196ce78184d2fc47999841957f30"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pg-int8@1.0.1",
+      "name": "pg-int8",
+      "version": "1.0.1",
+      "purl": "pkg:npm/pg-int8@1.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "582b5a6d2eadddcf129290c15256f59233acee5ebac6c19d2a920f66c838c11f81dfebbd500ba6da8752b05f6d9efc60f348786712d6332e294633ac148a90a7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pg-pool@3.14.0",
+      "name": "pg-pool",
+      "version": "3.14.0",
+      "purl": "pkg:npm/pg-pool@3.14.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "80ab4f9057503d4dc392ca2854b8bd2ec8d9c6bb015192296beeda571f8b579a4d8742b33f86657ae776a68f82a27af16ee5c6049e877deafa85d829201a416b"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pg-protocol@1.16.1",
+      "name": "pg-protocol",
+      "version": "1.16.1",
+      "purl": "pkg:npm/pg-protocol@1.16.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a7d54e14c88707f65b2404deb5b83ef7d3f1b2c4d5490467cae3d243aee6375fb52813a365a67cdd943396d9f13e12704ac0b79f0563275d0354995eadb1732e"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pg-types@2.2.0",
+      "name": "pg-types",
+      "version": "2.2.0",
+      "purl": "pkg:npm/pg-types@2.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a9300096b12c97cb383a211063af700ef70c21d40deb0773e688d088ecba61132eca7c5e9ce3743b9a02a4923a96c85ceac720018f2abc9d8e9ffa7e09763418"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pg@8.23.1",
+      "name": "pg",
+      "version": "8.23.1",
+      "purl": "pkg:npm/pg@8.23.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "68bf7a00700db568cf2c338baa7871fa7829f7e50aec44c453c549ac3086bec4928bf9862dc598b12e877ab83b96668125ee2ec2b7eab1aee04c415a4a2cc3a1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pgpass@1.0.5",
+      "name": "pgpass",
+      "version": "1.0.5",
+      "purl": "pkg:npm/pgpass@1.0.5",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "15d5bdaff8d066149ea21b35677b08d72c4540d16f31c9e67ee8f85813144f13ab0322cc693704d5a00c0624e56cc35a5ef04242e562d11ee177cb9d0d23fbba"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/picocolors@1.1.1",
+      "name": "picocolors",
+      "version": "1.1.1",
+      "purl": "pkg:npm/picocolors@1.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c5c787dac9e1b5be4cf658aa0ec984c39ea57b7efa993664117fe311bfd1c4d1727a036e97b78db250973fd1438ff2dcbb45fc284c8c71e3f69eda5a1eb0c454"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/picomatch@4.0.7",
+      "name": "picomatch",
+      "version": "4.0.7",
+      "purl": "pkg:npm/picomatch@4.0.7",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a9c26ef3c436216a89b030f9dbd24a31dc069bf76f2275b81ef427470887f49b62849bf318eb1c0ed1c4df1d6904a794393cac43c91598b9c9da426eef285c18"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pino-abstract-transport@3.0.0",
+      "name": "pino-abstract-transport",
+      "version": "3.0.0",
+      "purl": "pkg:npm/pino-abstract-transport@3.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c257d473353e9fb1f2fc76b98fd6bf819372ed67b9f9c5e9f182fe5fe3c6f12d0a5f1c3b9ff257037738e98d334339c827cdd44498b0cbb2e1e7a58ba2436ec6"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pino-std-serializers@7.1.0",
+      "name": "pino-std-serializers",
+      "version": "7.1.0",
+      "purl": "pkg:npm/pino-std-serializers@7.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "06774f1faeff271184c518225f5757d30d45bd9724e566b869a97dd7df12ad18598c7dc6c4a4142880676094dd8f61c3377510012d3a1e57dc49b423d8e1e66b"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pino@10.4.0",
+      "name": "pino",
+      "version": "10.4.0",
+      "purl": "pkg:npm/pino@10.4.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6e4d59313c06fd5ca6c7eccfa1adbc321373b9c16f5c95a9ddcb2b4aec6e1cf48c7947adb5a0a843926f834ee6b42e0918da5c7d3c33e35a150a736004af7ebc"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/postcss@8.5.29",
+      "name": "postcss",
+      "version": "8.5.29",
+      "purl": "pkg:npm/postcss@8.5.29",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e3d7068546d78fc41e9efd224ccc40d5c141cf15e872da42f548ddefbb7559c6c922bea717f788ee0ffc320c6b62574546e017be36bbc504706afa16ee482bc5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/postgres-array@2.0.0",
+      "name": "postgres-array",
+      "version": "2.0.0",
+      "purl": "pkg:npm/postgres-array@2.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "56966b52a53903af5e4325b6739080d63b4b79c0ac37653f6c3e958a5ac50d6ab9fb95081153bb9dacd2dd311c1dfd73b8f60efeca86bd4bd6eb683ce915d9b8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/postgres-bytea@1.0.1",
+      "name": "postgres-bytea",
+      "version": "1.0.1",
+      "purl": "pkg:npm/postgres-bytea@1.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e7ee47a979ec64f13ae4825948c919b544404597a57a5da85d410ef2b1fcdd54bf8711f9befd6e1eab8f839c19b3cc8c01f76ff7bd4853e91c3d47338bb35505"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/postgres-date@1.0.7",
+      "name": "postgres-date",
+      "version": "1.0.7",
+      "purl": "pkg:npm/postgres-date@1.0.7",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b2e0e68cb55083bf2730ad94678e788401be3805be1d03d9ea7fbe4cd0d45fe2f4fae5252f2c27a3124a0e8bb9d599becd30a3ac297436ae89f42e613fdbcafd"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/postgres-interval@1.2.0",
+      "name": "postgres-interval",
+      "version": "1.2.0",
+      "purl": "pkg:npm/postgres-interval@1.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f5985728cfebc37e74375a2fb961db1b19c687f48d278727c4788cd2bc44e15378d70b20f0ff335a7f61bff6ee2b4d113f85af94ecabfd10438a9b72c556e465"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/process-warning@4.0.1",
+      "name": "process-warning",
+      "version": "4.0.1",
+      "purl": "pkg:npm/process-warning@4.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ddcd8bcd0deb63d77485cd5e99cb0785f4fd270cf47028626ff40df3da0c136478e75c397f2ddfd1a7c0844445640c2b6c3538df0935d9dd0e441a4354c139d1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/process-warning@5.1.0",
+      "name": "process-warning",
+      "version": "5.1.0",
+      "purl": "pkg:npm/process-warning@5.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "8d049a547b0f82dcb0eb47b5ad0fc0fbf02b3c48ff4bca52fef167c866bf818157aca93fe91b83928a950d0e4d2393264b4d7af7c96d9409343680c134bba347"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/quick-format-unescaped@4.0.4",
+      "name": "quick-format-unescaped",
+      "version": "4.0.4",
+      "purl": "pkg:npm/quick-format-unescaped@4.0.4",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b580b5435860c91b87825a15fd85ecdb0d79ba73d587ca9fbbfa824df85361a99ac3b7f286e98a6b6c86a5d4a8f3bbd8df6ac87258fee1f59841750cb3d107be"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/real-require@1.0.0",
+      "name": "real-require",
+      "version": "1.0.0",
+      "purl": "pkg:npm/real-require@1.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3f89db41841f78f271452998faffca20dc55b9c9b8345de9decee926f78c4eda26e76151e181a5b5440b07c89d0d7c030d65be798ad60c56eecd49e3a161c5ee"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/require-from-string@2.0.2",
+      "name": "require-from-string",
+      "version": "2.0.2",
+      "purl": "pkg:npm/require-from-string@2.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5dfd2759ee91b1ece214cbbe029f5b8a251b9a996ae92f7fa7eef0ed85cffc904786b5030d48706bebc0372b9bbaa7d9593bde53ffc36151ac0c6ed128bfef13"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/ret@0.5.0",
+      "name": "ret",
+      "version": "0.5.0",
+      "purl": "pkg:npm/ret@0.5.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2355f1ad9490fa812b9114788d86c0c8412ed88d1abc1bef30ce4937ee84069ace1910aceb710da99def8dabeaf1f070dbeeb61b92c5e577a52b0b89a5cbdcc7"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/reusify@1.1.0",
+      "name": "reusify",
+      "version": "1.1.0",
+      "purl": "pkg:npm/reusify@1.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "83a4147dfd38a19a47b34786e69f37ac52e11de574d2e83f61ff6764ce9f2de52b3e0b814e44d039da40596b29321e794d97d54033da37735025f6d5440c5d23"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/rfdc@1.4.1",
+      "name": "rfdc",
+      "version": "1.4.1",
+      "purl": "pkg:npm/rfdc@1.4.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ab56f737942445459497b8b2ca569a8f790ea484f43768bd32a2044173fbdc656c37d730ddf771f17eb77049968491a2d8f3c2176dc88e9ee4b66777f6b6b020"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/rolldown@1.2.12",
+      "name": "rolldown",
+      "version": "1.2.12",
+      "purl": "pkg:npm/rolldown@1.2.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f3069fb1e89a1bcd3199749faa275436a65cca54e58663d966dfb36b69be8ecdac159f1d4cd96120e57659c6c83f1da18303c126911418500c67d6e00412d349"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/safe-regex2@5.1.1",
+      "name": "safe-regex2",
+      "version": "5.1.1",
+      "purl": "pkg:npm/safe-regex2@5.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "98e481bc718364cb8811931d3b3fda0846030afd04ee77dc36c221505fbf3fec42ec7c9fdc592fca6aa03db83d0f511d486bbeb8a6c9832d3d2bf44a29cee424"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/safe-stable-stringify@2.5.0",
+      "name": "safe-stable-stringify",
+      "version": "2.5.0",
+      "purl": "pkg:npm/safe-stable-stringify@2.5.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6f7ae9a532a6f53f8fb1508110e511e3a19623b7dd3acd3454a675fbd7351160da0ccbe341cead530b85c88a6b806813716a151d22ab53c1f7d591c0d9ed111c"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/secure-json-parse@4.1.0",
+      "name": "secure-json-parse",
+      "version": "4.1.0",
+      "purl": "pkg:npm/secure-json-parse@4.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9782a761f132a982710f094d57245f3b61383531df30a016754b80f09d32bded83cff13f3dd05ea58d3746fc89a6cb08a51170268083e79c00fa6103b3a07258"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/semver@7.8.5",
+      "name": "semver",
+      "version": "7.8.5",
+      "purl": "pkg:npm/semver@7.8.5",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "63bfca0ec6fc2e3a28669c1aa86cae94ee8342592c8029dc7211c693eb19218e1206f52870c044147e54af57c8e1d57e26f974c3a723bee71a222e34a6e462a0"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/set-cookie-parser@2.7.2",
+      "name": "set-cookie-parser",
+      "version": "2.7.2",
+      "purl": "pkg:npm/set-cookie-parser@2.7.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a1e33596953f52f853c70fa0ddc21fc571f225173fba275ddf22b53f6e368331ddb34b9d401633b37cbc8f8802096f9927b69dd3272d95df1160ef9b76eae5bf"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/sonic-boom@4.2.1",
+      "name": "sonic-boom",
+      "version": "4.2.1",
+      "purl": "pkg:npm/sonic-boom@4.2.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c3a031b6e6d76b6c135c052c64c316111aec21101dacad1273e154cad5af60084124bcae238965acc202d43b65352748f7d108f3a299ba6d8c32adc4019945f5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/source-map-js@1.2.2",
+      "name": "source-map-js",
+      "version": "1.2.2",
+      "purl": "pkg:npm/source-map-js@1.2.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2868fff18e37c77e5a6550edb7e27898ad61a0b18750b3187d290e0c93508cd0c2de85b53ea3e8c4cc28d292d4b1633f5041b338dfcdc5e1f2c047cd5cd3f757"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/split2@4.2.0",
+      "name": "split2",
+      "version": "4.2.0",
+      "purl": "pkg:npm/split2@4.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "51c8dc24e5a49eb36417a3cb5fcdea70733a28781528d915eb663c6b9b980d5bfdc9d19057000730aa877498ded554d6a658c6d1662908386b09d00e607e135a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/std-env@4.3.0",
+      "name": "std-env",
+      "version": "4.3.0",
+      "purl": "pkg:npm/std-env@4.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3ad53f1204359089b92b0a90a410ba644317ad946e8b5d70f3381f4d6a7c71d3bd07c39a3ec6c0f1b4c73b63fe1cda3556551318c541c0f87276eea9a1e5e26a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/thread-stream@4.2.0",
+      "name": "thread-stream",
+      "version": "4.2.0",
+      "purl": "pkg:npm/thread-stream@4.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7b6cd9f7ac120a16b306c6c435ffcf726ff8b301edd9c10a43ddab8548e42fd1822a24c324869305e9e313f9bd0d78b44019933039050dd3a8994cb6d00d6d0d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/tinybench@6.2.0",
+      "name": "tinybench",
+      "version": "6.2.0",
+      "purl": "pkg:npm/tinybench@6.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "efc5364e50760a755e9da8ce1737f704a4a6d09ea8cf92f4355ee0df62c23dc72f61cd256d6bf2b38777b945024b607537c3c07f6f9a7a447c8b529b0b71ceed"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/tinyexec@1.3.1",
+      "name": "tinyexec",
+      "version": "1.3.1",
+      "purl": "pkg:npm/tinyexec@1.3.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "182bc1ddaa32b3de88b8314131c4c1e3a24e47a99d32d013a2ac225bc2655a1b288759a11e2ff19fdb2cfc383b379e791a227212ddaace81bf3470b033a87510"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/tinyglobby@0.2.17",
+      "name": "tinyglobby",
+      "version": "0.2.17",
+      "purl": "pkg:npm/tinyglobby@0.2.17",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c1747f758a5ca8a99f5a911d66388a24ec023459dd0f40cc9eb5bf7188d51adb449017d581c2c51e836b963e3b9a339589cf72c8dbbae5a96c805e0d4324dada"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/toad-cache@3.7.4",
+      "name": "toad-cache",
+      "version": "3.7.4",
+      "purl": "pkg:npm/toad-cache@3.7.4",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9b54dd47faef4fb920189661b2936d5ddb1d624d1f75d1692491651b9b3e5243c5a3a9642e867760b39aa2f3d88ead51ef934fe497de4e548768eb04d3da5e0a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/tsx@4.23.15",
+      "name": "tsx",
+      "version": "4.23.15",
+      "purl": "pkg:npm/tsx@4.23.15",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6227b1d4ebe7f33db13e9396724222cac575492c91318f4190b17efaad322a20f10aa461a2c29f320de36a72a488b07067973f62bca5a0ac0665cac49adc312b"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/typescript@7.0.2",
+      "name": "typescript",
+      "version": "7.0.2",
+      "purl": "pkg:npm/typescript@7.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f0561abbdea8dcd28e85b8ca8bfa8dbc6fd6e63873c646dd9b9b23f406d9ff94f9b16aa7de12602df1b1dbbb11299593bf2cc23fc74b4414dfe6d05349155434"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/undici-types@8.9.0",
+      "name": "undici-types",
+      "version": "8.9.0",
+      "purl": "pkg:npm/undici-types@8.9.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2930f2453617f2c5a629702290f1c74b273adc244f11331cb728ca16ea5c0ba3812d74f7c6c3747bd685ee6fa6217bad156a545ee79db68c06ee22cece9d2442"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/vite@8.3.2",
+      "name": "vite",
+      "version": "8.3.2",
+      "purl": "pkg:npm/vite@8.3.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "490af5c7a5b9bd549b44e83bbecc9721ac4af5bd06ef3b13ebc69c7565919a7054b200e278b0911be45ea7d59d660729a2cbeffc64a7af8194501a81def5eaeb"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/vitest@5.0.3",
+      "name": "vitest",
+      "version": "5.0.3",
+      "purl": "pkg:npm/vitest@5.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "c4cc3ded2deb8ddb63e5d9156adee30aca96069bdc86cdd196941cb54ab0243d0a904464e34bf3d9f27bee50f05bf57387fa64d7c788b5803392876149eb378d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/why-is-node-running@3.2.1",
+      "name": "why-is-node-running",
+      "version": "3.2.1",
+      "purl": "pkg:npm/why-is-node-running@3.2.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4dbd85521078bd4b064257d2aae40b62402992e3c01505c6173c562871ee995cf674af97d51526fc79c80f8f937c819827591373039a0a4fdbb9808426be988d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/xtend@4.0.2",
+      "name": "xtend",
+      "version": "4.0.2",
+      "purl": "pkg:npm/xtend@4.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2ca614d620172575200179fd5118e2bbe3168725171ecbdfa7b99cb989bd75250a2b4fc28edad4c050310fcdbf98259bb4bb068c521a774c08b28778ceb4c011"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/apisix@sha256%3A9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141?repository_url=apache%2Fapisix&tag=3.19.0-debian",
+      "name": "apache/apisix:3.19.0-debian",
+      "version": "sha256:9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141",
+      "purl": "pkg:oci/apisix@sha256%3A9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141?repository_url=apache%2Fapisix&tag=3.19.0-debian",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "apache/apisix:3.19.0-debian@sha256:9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "core.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/caddy@sha256%3A4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d?repository_url=caddy&tag=2.10-alpine",
+      "name": "caddy:2.10-alpine",
+      "version": "sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d",
+      "purl": "pkg:oci/caddy@sha256%3A4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d?repository_url=caddy&tag=2.10-alpine",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/clamav@sha256%3A12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8?repository_url=clamav%2Fclamav&tag=1.5.5",
+      "name": "clamav/clamav:1.5.5",
+      "version": "sha256:12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8",
+      "purl": "pkg:oci/clamav@sha256%3A12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8?repository_url=clamav%2Fclamav&tag=1.5.5",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "clamav/clamav:1.5.5@sha256:12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "core.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/eclipse-mosquitto@sha256%3A94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353?repository_url=eclipse-mosquitto&tag=2.0.21",
+      "name": "eclipse-mosquitto:2.0.21",
+      "version": "sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353",
+      "purl": "pkg:oci/eclipse-mosquitto@sha256%3A94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353?repository_url=eclipse-mosquitto&tag=2.0.21",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "eclipse-mosquitto:2.0.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "iiot.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/gotenberg@sha256%3Acda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac?repository_url=gotenberg%2Fgotenberg&tag=8.20.1",
+      "name": "gotenberg/gotenberg:8.20.1",
+      "version": "sha256:cda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac",
+      "purl": "pkg:oci/gotenberg@sha256%3Acda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac?repository_url=gotenberg%2Fgotenberg&tag=8.20.1",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "cda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "gotenberg/gotenberg:8.20.1@sha256:cda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/grafana-oss@sha256%3Ab8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48?repository_url=grafana%2Fgrafana-oss&tag=11.5.8",
+      "name": "grafana/grafana-oss:11.5.8",
+      "version": "sha256:b8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48",
+      "purl": "pkg:oci/grafana-oss@sha256%3Ab8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48?repository_url=grafana%2Fgrafana-oss&tag=11.5.8",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "b8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "grafana/grafana-oss:11.5.8@sha256:b8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/keycloak-config-cli@sha256%3A1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411?repository_url=adorsys%2Fkeycloak-config-cli&tag=6.5.1-26",
+      "name": "adorsys/keycloak-config-cli:6.5.1-26",
+      "version": "sha256:1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411",
+      "purl": "pkg:oci/keycloak-config-cli@sha256%3A1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411?repository_url=adorsys%2Fkeycloak-config-cli&tag=6.5.1-26",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "adorsys/keycloak-config-cli:6.5.1-26@sha256:1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/keycloak@sha256%3A7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3?repository_url=quay.io%2Fkeycloak%2Fkeycloak&tag=26.8.2",
+      "name": "quay.io/keycloak/keycloak:26.8.2",
+      "version": "sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3",
+      "purl": "pkg:oci/keycloak@sha256%3A7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3?repository_url=quay.io%2Fkeycloak%2Fkeycloak&tag=26.8.2",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "core.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/mongo@sha256%3A479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01?repository_url=mongo&tag=8.0",
+      "name": "mongo:8.0",
+      "version": "sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01",
+      "purl": "pkg:oci/mongo@sha256%3A479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01?repository_url=mongo&tag=8.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "integration.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/n8n@sha256%3A5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f?repository_url=n8nio%2Fn8n&tag=2.48.1",
+      "name": "n8nio/n8n:2.48.1",
+      "version": "sha256:5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f",
+      "purl": "pkg:oci/n8n@sha256%3A5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f?repository_url=n8nio%2Fn8n&tag=2.48.1",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "n8nio/n8n:2.48.1@sha256:5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "integration.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/nocobase@sha256%3A04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777?repository_url=nocobase%2Fnocobase&tag=2.2.50",
+      "name": "nocobase/nocobase:2.2.50",
+      "version": "sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777",
+      "purl": "pkg:oci/nocobase@sha256%3A04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777?repository_url=nocobase%2Fnocobase&tag=2.2.50",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "native-rehearsal.yml,nocobase.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/node-red@sha256%3A0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5?repository_url=nodered%2Fnode-red&tag=4.0.9",
+      "name": "nodered/node-red:4.0.9",
+      "version": "sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5",
+      "purl": "pkg:oci/node-red@sha256%3A0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5?repository_url=nodered%2Fnode-red&tag=4.0.9",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "nodered/node-red:4.0.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "iiot.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/opentelemetry-collector-contrib@sha256%3Ae39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2?repository_url=otel%2Fopentelemetry-collector-contrib&tag=0.123.0",
+      "name": "otel/opentelemetry-collector-contrib:0.123.0",
+      "version": "sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2",
+      "purl": "pkg:oci/opentelemetry-collector-contrib@sha256%3Ae39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2?repository_url=otel%2Fopentelemetry-collector-contrib&tag=0.123.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "otel/opentelemetry-collector-contrib:0.123.0@sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/orion-ld@sha256%3Af562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b?repository_url=fiware%2Forion-ld&tag=1.12.0",
+      "name": "fiware/orion-ld:1.12.0",
+      "version": "sha256:f562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b",
+      "purl": "pkg:oci/orion-ld@sha256%3Af562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b?repository_url=fiware%2Forion-ld&tag=1.12.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "fiware/orion-ld:1.12.0@sha256:f562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "integration.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/pgvector@sha256%3A33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337?repository_url=pgvector%2Fpgvector&tag=0.8.1-pg16",
+      "name": "pgvector/pgvector:0.8.1-pg16",
+      "version": "sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337",
+      "purl": "pkg:oci/pgvector@sha256%3A33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337?repository_url=pgvector%2Fpgvector&tag=0.8.1-pg16",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "native-rehearsal.yml,nocobase.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/postgres@sha256%3Af2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d?repository_url=postgres&tag=16.16-alpine",
+      "name": "postgres:16.16-alpine",
+      "version": "sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d",
+      "purl": "pkg:oci/postgres@sha256%3Af2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d?repository_url=postgres&tag=16.16-alpine",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "postgres:16.16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "core.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/prometheus@sha256%3A339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1?repository_url=prom%2Fprometheus&tag=v3.3.0",
+      "name": "prom/prometheus:v3.3.0",
+      "version": "sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1",
+      "purl": "pkg:oci/prometheus@sha256%3A339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1?repository_url=prom%2Fprometheus&tag=v3.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "prom/prometheus:v3.3.0@sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/redis@sha256%3A7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe?repository_url=redis&tag=7.4-alpine",
+      "name": "redis:7.4-alpine",
+      "version": "sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe",
+      "purl": "pkg:oci/redis@sha256%3A7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe?repository_url=redis&tag=7.4-alpine",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "nocobase.yml,prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/rustfs@sha256%3Aee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a?repository_url=rustfs%2Frustfs&tag=1.0.6",
+      "name": "rustfs/rustfs:1.0.6",
+      "version": "sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a",
+      "purl": "pkg:oci/rustfs@sha256%3Aee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a?repository_url=rustfs%2Frustfs&tag=1.0.6",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "rustfs/rustfs:1.0.6@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "prod.yml"
+        }
+      ]
+    },
+    {
+      "type": "container",
+      "bom-ref": "pkg:oci/timescaledb@sha256%3A769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72?repository_url=timescale%2Ftimescaledb&tag=2.19.3-pg16-oss",
+      "name": "timescale/timescaledb:2.19.3-pg16-oss",
+      "version": "sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72",
+      "purl": "pkg:oci/timescaledb@sha256%3A769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72?repository_url=timescale%2Ftimescaledb&tag=2.19.3-pg16-oss",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "oci-image"
+        },
+        {
+          "name": "latticedx:imageRef",
+          "value": "timescale/timescaledb:2.19.3-pg16-oss@sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72"
+        },
+        {
+          "name": "latticedx:composeFiles",
+          "value": "iiot.yml"
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "pkg:npm/lattice-dx@1.0.0",
+      "dependsOn": [
+        "pkg:npm/%40dx/agent-worker@0.3.0",
+        "pkg:npm/%40dx/api@0.3.0",
+        "pkg:npm/%40dx/contracts@0.3.0",
+        "pkg:npm/%40dx/file-scanner@0.3.0",
+        "pkg:npm/%40esbuild/aix-ppc64@0.28.2",
+        "pkg:npm/%40esbuild/android-arm64@0.28.2",
+        "pkg:npm/%40esbuild/android-arm@0.28.2",
+        "pkg:npm/%40esbuild/android-x64@0.28.2",
+        "pkg:npm/%40esbuild/darwin-arm64@0.28.2",
+        "pkg:npm/%40esbuild/darwin-x64@0.28.2",
+        "pkg:npm/%40esbuild/freebsd-arm64@0.28.2",
+        "pkg:npm/%40esbuild/freebsd-x64@0.28.2",
+        "pkg:npm/%40esbuild/linux-arm64@0.28.2",
+        "pkg:npm/%40esbuild/linux-arm@0.28.2",
+        "pkg:npm/%40esbuild/linux-ia32@0.28.2",
+        "pkg:npm/%40esbuild/linux-loong64@0.28.2",
+        "pkg:npm/%40esbuild/linux-mips64el@0.28.2",
+        "pkg:npm/%40esbuild/linux-ppc64@0.28.2",
+        "pkg:npm/%40esbuild/linux-riscv64@0.28.2",
+        "pkg:npm/%40esbuild/linux-s390x@0.28.2",
+        "pkg:npm/%40esbuild/linux-x64@0.28.2",
+        "pkg:npm/%40esbuild/netbsd-arm64@0.28.2",
+        "pkg:npm/%40esbuild/netbsd-x64@0.28.2",
+        "pkg:npm/%40esbuild/openbsd-arm64@0.28.2",
+        "pkg:npm/%40esbuild/openbsd-x64@0.28.2",
+        "pkg:npm/%40esbuild/openharmony-arm64@0.28.2",
+        "pkg:npm/%40esbuild/sunos-x64@0.28.2",
+        "pkg:npm/%40esbuild/win32-arm64@0.28.2",
+        "pkg:npm/%40esbuild/win32-ia32@0.28.2",
+        "pkg:npm/%40esbuild/win32-x64@0.28.2",
+        "pkg:npm/%40fastify/ajv-compiler@4.0.6",
+        "pkg:npm/%40fastify/error@4.2.0",
+        "pkg:npm/%40fastify/fast-json-stringify-compiler@5.1.0",
+        "pkg:npm/%40fastify/forwarded@3.0.2",
+        "pkg:npm/%40fastify/merge-json-schemas@0.2.1",
+        "pkg:npm/%40fastify/proxy-addr@5.1.1",
+        "pkg:npm/%40jridgewell/resolve-uri@3.1.2",
+        "pkg:npm/%40jridgewell/sourcemap-codec@1.6.0",
+        "pkg:npm/%40jridgewell/trace-mapping@0.3.31",
+        "pkg:npm/%40latticedx/plugin-action-bridge@1.0.0",
+        "pkg:npm/%40latticedx/plugin-dxos-ai@1.0.0",
+        "pkg:npm/%40latticedx/plugin-dxos-blocks@1.0.0",
+        "pkg:npm/%40latticedx/plugin-dxos-para@1.0.0",
+        "pkg:npm/%40latticedx/plugin-dxos-studio@1.0.0",
+        "pkg:npm/%40latticedx/plugin-enterprise-auth@1.0.0",
+        "pkg:npm/%40latticedx/plugin-lattice-foundation@1.0.0",
+        "pkg:npm/%40latticedx/uc1-procurement@0.3.0",
+        "pkg:npm/%40oxc-project/types@0.152.0",
+        "pkg:npm/%40pinojs/redact@0.4.0",
+        "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.12",
+        "pkg:npm/%40rolldown/binding-android-arm64@1.2.12",
+        "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.12",
+        "pkg:npm/%40rolldown/binding-darwin-x64@1.2.12",
+        "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.12",
+        "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.12",
+        "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.12",
+        "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.12",
+        "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.12",
+        "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.12",
+        "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.12",
+        "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.12",
+        "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.12",
+        "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.12",
+        "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.12",
+        "pkg:npm/%40rolldown/pluginutils@1.0.1",
+        "pkg:npm/%40types/chai@5.2.3",
+        "pkg:npm/%40types/deep-eql@4.0.2",
+        "pkg:npm/%40types/estree@1.0.9",
+        "pkg:npm/%40types/node@26.6.4",
+        "pkg:npm/%40types/pg@8.23.1",
+        "pkg:npm/%40typescript/typescript-aix-ppc64@7.0.2",
+        "pkg:npm/%40typescript/typescript-darwin-arm64@7.0.2",
+        "pkg:npm/%40typescript/typescript-darwin-x64@7.0.2",
+        "pkg:npm/%40typescript/typescript-freebsd-arm64@7.0.2",
+        "pkg:npm/%40typescript/typescript-freebsd-x64@7.0.2",
+        "pkg:npm/%40typescript/typescript-linux-arm64@7.0.2",
+        "pkg:npm/%40typescript/typescript-linux-arm@7.0.2",
+        "pkg:npm/%40typescript/typescript-linux-loong64@7.0.2",
+        "pkg:npm/%40typescript/typescript-linux-mips64el@7.0.2",
+        "pkg:npm/%40typescript/typescript-linux-ppc64@7.0.2",
+        "pkg:npm/%40typescript/typescript-linux-riscv64@7.0.2",
+        "pkg:npm/%40typescript/typescript-linux-s390x@7.0.2",
+        "pkg:npm/%40typescript/typescript-linux-x64@7.0.2",
+        "pkg:npm/%40typescript/typescript-netbsd-arm64@7.0.2",
+        "pkg:npm/%40typescript/typescript-netbsd-x64@7.0.2",
+        "pkg:npm/%40typescript/typescript-openbsd-arm64@7.0.2",
+        "pkg:npm/%40typescript/typescript-openbsd-x64@7.0.2",
+        "pkg:npm/%40typescript/typescript-sunos-x64@7.0.2",
+        "pkg:npm/%40typescript/typescript-win32-arm64@7.0.2",
+        "pkg:npm/%40typescript/typescript-win32-x64@7.0.2",
+        "pkg:npm/%40vitest/mocker@5.0.3",
+        "pkg:npm/%40vitest/spy@5.0.3",
+        "pkg:npm/abstract-logging@2.0.1",
+        "pkg:npm/ajv-formats@3.0.1",
+        "pkg:npm/ajv@8.20.0",
+        "pkg:npm/assertion-error@2.0.1",
+        "pkg:npm/atomic-sleep@1.0.0",
+        "pkg:npm/avvio@9.3.0",
+        "pkg:npm/chai@6.3.0",
+        "pkg:npm/cookie@1.1.1",
+        "pkg:npm/dequal@2.0.3",
+        "pkg:npm/detect-libc@2.1.2",
+        "pkg:npm/es-module-lexer@2.3.2",
+        "pkg:npm/esbuild@0.28.2",
+        "pkg:npm/estree-walker@3.0.3",
+        "pkg:npm/expect-type@1.4.0",
+        "pkg:npm/fast-decode-uri-component@1.0.1",
+        "pkg:npm/fast-deep-equal@3.1.3",
+        "pkg:npm/fast-json-stringify@7.0.1",
+        "pkg:npm/fast-querystring@1.1.2",
+        "pkg:npm/fast-uri@3.1.9",
+        "pkg:npm/fast-uri@4.2.3",
+        "pkg:npm/fastify@5.12.8",
+        "pkg:npm/fastq@1.20.3",
+        "pkg:npm/fdir@6.5.0",
+        "pkg:npm/find-my-way@9.10.2",
+        "pkg:npm/fsevents@2.3.3",
+        "pkg:npm/ipaddr.js@2.5.0",
+        "pkg:npm/jose@6.2.12",
+        "pkg:npm/jose@6.2.15",
+        "pkg:npm/json-schema-ref-resolver@3.0.0",
+        "pkg:npm/json-schema-traverse@1.0.0",
+        "pkg:npm/light-my-request@6.6.0",
+        "pkg:npm/lightningcss-android-arm64@1.33.0",
+        "pkg:npm/lightningcss-darwin-arm64@1.33.0",
+        "pkg:npm/lightningcss-darwin-x64@1.33.0",
+        "pkg:npm/lightningcss-freebsd-x64@1.33.0",
+        "pkg:npm/lightningcss-linux-arm-gnueabihf@1.33.0",
+        "pkg:npm/lightningcss-linux-arm64-gnu@1.33.0",
+        "pkg:npm/lightningcss-linux-arm64-musl@1.33.0",
+        "pkg:npm/lightningcss-linux-x64-gnu@1.33.0",
+        "pkg:npm/lightningcss-linux-x64-musl@1.33.0",
+        "pkg:npm/lightningcss-win32-arm64-msvc@1.33.0",
+        "pkg:npm/lightningcss-win32-x64-msvc@1.33.0",
+        "pkg:npm/lightningcss@1.33.0",
+        "pkg:npm/magic-string@1.4.3",
+        "pkg:npm/nanoid@3.3.20",
+        "pkg:npm/oauth4webapi@3.8.8",
+        "pkg:npm/obug@2.2.1",
+        "pkg:npm/on-exit-leak-free@2.1.2",
+        "pkg:npm/openid-client@6.8.9",
+        "pkg:npm/pg-cloudflare@1.4.1",
+        "pkg:npm/pg-connection-string@2.14.1",
+        "pkg:npm/pg-int8@1.0.1",
+        "pkg:npm/pg-pool@3.14.0",
+        "pkg:npm/pg-protocol@1.16.1",
+        "pkg:npm/pg-types@2.2.0",
+        "pkg:npm/pg@8.23.1",
+        "pkg:npm/pgpass@1.0.5",
+        "pkg:npm/picocolors@1.1.1",
+        "pkg:npm/picomatch@4.0.7",
+        "pkg:npm/pino-abstract-transport@3.0.0",
+        "pkg:npm/pino-std-serializers@7.1.0",
+        "pkg:npm/pino@10.4.0",
+        "pkg:npm/postcss@8.5.29",
+        "pkg:npm/postgres-array@2.0.0",
+        "pkg:npm/postgres-bytea@1.0.1",
+        "pkg:npm/postgres-date@1.0.7",
+        "pkg:npm/postgres-interval@1.2.0",
+        "pkg:npm/process-warning@4.0.1",
+        "pkg:npm/process-warning@5.1.0",
+        "pkg:npm/quick-format-unescaped@4.0.4",
+        "pkg:npm/real-require@1.0.0",
+        "pkg:npm/require-from-string@2.0.2",
+        "pkg:npm/ret@0.5.0",
+        "pkg:npm/reusify@1.1.0",
+        "pkg:npm/rfdc@1.4.1",
+        "pkg:npm/rolldown@1.2.12",
+        "pkg:npm/safe-regex2@5.1.1",
+        "pkg:npm/safe-stable-stringify@2.5.0",
+        "pkg:npm/secure-json-parse@4.1.0",
+        "pkg:npm/semver@7.8.5",
+        "pkg:npm/set-cookie-parser@2.7.2",
+        "pkg:npm/sonic-boom@4.2.1",
+        "pkg:npm/source-map-js@1.2.2",
+        "pkg:npm/split2@4.2.0",
+        "pkg:npm/std-env@4.3.0",
+        "pkg:npm/thread-stream@4.2.0",
+        "pkg:npm/tinybench@6.2.0",
+        "pkg:npm/tinyexec@1.3.1",
+        "pkg:npm/tinyglobby@0.2.17",
+        "pkg:npm/toad-cache@3.7.4",
+        "pkg:npm/tsx@4.23.15",
+        "pkg:npm/typescript@7.0.2",
+        "pkg:npm/undici-types@8.9.0",
+        "pkg:npm/vite@8.3.2",
+        "pkg:npm/vitest@5.0.3",
+        "pkg:npm/why-is-node-running@3.2.1",
+        "pkg:npm/xtend@4.0.2",
+        "pkg:oci/apisix@sha256%3A9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141?repository_url=apache%2Fapisix&tag=3.19.0-debian",
+        "pkg:oci/caddy@sha256%3A4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d?repository_url=caddy&tag=2.10-alpine",
+        "pkg:oci/clamav@sha256%3A12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8?repository_url=clamav%2Fclamav&tag=1.5.5",
+        "pkg:oci/eclipse-mosquitto@sha256%3A94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353?repository_url=eclipse-mosquitto&tag=2.0.21",
+        "pkg:oci/gotenberg@sha256%3Acda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac?repository_url=gotenberg%2Fgotenberg&tag=8.20.1",
+        "pkg:oci/grafana-oss@sha256%3Ab8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48?repository_url=grafana%2Fgrafana-oss&tag=11.5.8",
+        "pkg:oci/keycloak-config-cli@sha256%3A1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411?repository_url=adorsys%2Fkeycloak-config-cli&tag=6.5.1-26",
+        "pkg:oci/keycloak@sha256%3A7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3?repository_url=quay.io%2Fkeycloak%2Fkeycloak&tag=26.8.2",
+        "pkg:oci/mongo@sha256%3A479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01?repository_url=mongo&tag=8.0",
+        "pkg:oci/n8n@sha256%3A5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f?repository_url=n8nio%2Fn8n&tag=2.48.1",
+        "pkg:oci/nocobase@sha256%3A04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777?repository_url=nocobase%2Fnocobase&tag=2.2.50",
+        "pkg:oci/node-red@sha256%3A0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5?repository_url=nodered%2Fnode-red&tag=4.0.9",
+        "pkg:oci/opentelemetry-collector-contrib@sha256%3Ae39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2?repository_url=otel%2Fopentelemetry-collector-contrib&tag=0.123.0",
+        "pkg:oci/orion-ld@sha256%3Af562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b?repository_url=fiware%2Forion-ld&tag=1.12.0",
+        "pkg:oci/pgvector@sha256%3A33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337?repository_url=pgvector%2Fpgvector&tag=0.8.1-pg16",
+        "pkg:oci/postgres@sha256%3Af2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d?repository_url=postgres&tag=16.16-alpine",
+        "pkg:oci/prometheus@sha256%3A339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1?repository_url=prom%2Fprometheus&tag=v3.3.0",
+        "pkg:oci/redis@sha256%3A7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe?repository_url=redis&tag=7.4-alpine",
+        "pkg:oci/rustfs@sha256%3Aee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a?repository_url=rustfs%2Frustfs&tag=1.0.6",
+        "pkg:oci/timescaledb@sha256%3A769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72?repository_url=timescale%2Ftimescaledb&tag=2.19.3-pg16-oss"
+      ]
+    },
+    {
+      "ref": "pkg:npm/%40dx/agent-worker@0.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40dx/api@0.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40dx/contracts@0.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40dx/file-scanner@0.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/aix-ppc64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/android-arm64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/android-arm@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/android-x64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/darwin-arm64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/darwin-x64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/freebsd-arm64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/freebsd-x64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-arm64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-arm@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-ia32@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-loong64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-mips64el@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-ppc64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-riscv64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-s390x@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/linux-x64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/netbsd-arm64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/netbsd-x64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/openbsd-arm64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/openbsd-x64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/openharmony-arm64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/sunos-x64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/win32-arm64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/win32-ia32@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40esbuild/win32-x64@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40fastify/ajv-compiler@4.0.6",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40fastify/error@4.2.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40fastify/fast-json-stringify-compiler@5.1.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40fastify/forwarded@3.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40fastify/merge-json-schemas@0.2.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40fastify/proxy-addr@5.1.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40jridgewell/resolve-uri@3.1.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40jridgewell/sourcemap-codec@1.6.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40jridgewell/trace-mapping@0.3.31",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40latticedx/plugin-action-bridge@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40latticedx/plugin-dxos-ai@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40latticedx/plugin-dxos-blocks@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40latticedx/plugin-dxos-para@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40latticedx/plugin-dxos-studio@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40latticedx/plugin-enterprise-auth@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40latticedx/plugin-lattice-foundation@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40latticedx/uc1-procurement@0.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40oxc-project/types@0.152.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40pinojs/redact@0.4.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-android-arm64@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-darwin-arm64@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-darwin-x64@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-freebsd-x64@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-linux-arm-gnueabihf@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-linux-arm64-gnu@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-linux-arm64-musl@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-linux-ppc64-gnu@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-linux-s390x-gnu@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-linux-x64-gnu@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-linux-x64-musl@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-openharmony-arm64@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-win32-arm64-msvc@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40rolldown/pluginutils@1.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/chai@5.2.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/deep-eql@4.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/estree@1.0.9",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/node@26.6.4",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/pg@8.23.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-aix-ppc64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-darwin-arm64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-darwin-x64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-freebsd-arm64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-freebsd-x64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-linux-arm64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-linux-arm@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-linux-loong64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-linux-mips64el@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-linux-ppc64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-linux-riscv64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-linux-s390x@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-linux-x64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-netbsd-arm64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-netbsd-x64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-openbsd-arm64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-openbsd-x64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-sunos-x64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-win32-arm64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40typescript/typescript-win32-x64@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40vitest/mocker@5.0.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40vitest/spy@5.0.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/abstract-logging@2.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/ajv-formats@3.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/ajv@8.20.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/assertion-error@2.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/atomic-sleep@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/avvio@9.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/chai@6.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/cookie@1.1.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/dequal@2.0.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/detect-libc@2.1.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/es-module-lexer@2.3.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/esbuild@0.28.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/estree-walker@3.0.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/expect-type@1.4.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fast-decode-uri-component@1.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fast-deep-equal@3.1.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fast-json-stringify@7.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fast-querystring@1.1.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fast-uri@3.1.9",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fast-uri@4.2.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fastify@5.12.8",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fastq@1.20.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fdir@6.5.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/find-my-way@9.10.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/fsevents@2.3.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/ipaddr.js@2.5.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/jose@6.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/jose@6.2.15",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/json-schema-ref-resolver@3.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/json-schema-traverse@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/light-my-request@6.6.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-android-arm64@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-darwin-arm64@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-darwin-x64@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-freebsd-x64@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-linux-arm-gnueabihf@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-linux-arm64-gnu@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-linux-arm64-musl@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-linux-x64-gnu@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-linux-x64-musl@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-win32-arm64-msvc@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss-win32-x64-msvc@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/lightningcss@1.33.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/magic-string@1.4.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/nanoid@3.3.20",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/oauth4webapi@3.8.8",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/obug@2.2.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/on-exit-leak-free@2.1.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/openid-client@6.8.9",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pg-cloudflare@1.4.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pg-connection-string@2.14.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pg-int8@1.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pg-pool@3.14.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pg-protocol@1.16.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pg-types@2.2.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pg@8.23.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pgpass@1.0.5",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/picocolors@1.1.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/picomatch@4.0.7",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pino-abstract-transport@3.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pino-std-serializers@7.1.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pino@10.4.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/postcss@8.5.29",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/postgres-array@2.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/postgres-bytea@1.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/postgres-date@1.0.7",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/postgres-interval@1.2.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/process-warning@4.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/process-warning@5.1.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/quick-format-unescaped@4.0.4",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/real-require@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/require-from-string@2.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/ret@0.5.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/reusify@1.1.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/rfdc@1.4.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/rolldown@1.2.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/safe-regex2@5.1.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/safe-stable-stringify@2.5.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/secure-json-parse@4.1.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/semver@7.8.5",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/set-cookie-parser@2.7.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/sonic-boom@4.2.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/source-map-js@1.2.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/split2@4.2.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/std-env@4.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/thread-stream@4.2.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/tinybench@6.2.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/tinyexec@1.3.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/tinyglobby@0.2.17",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/toad-cache@3.7.4",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/tsx@4.23.15",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/typescript@7.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/undici-types@8.9.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/vite@8.3.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/vitest@5.0.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/why-is-node-running@3.2.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/xtend@4.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/apisix@sha256%3A9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141?repository_url=apache%2Fapisix&tag=3.19.0-debian",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/caddy@sha256%3A4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d?repository_url=caddy&tag=2.10-alpine",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/clamav@sha256%3A12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8?repository_url=clamav%2Fclamav&tag=1.5.5",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/eclipse-mosquitto@sha256%3A94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353?repository_url=eclipse-mosquitto&tag=2.0.21",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/gotenberg@sha256%3Acda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac?repository_url=gotenberg%2Fgotenberg&tag=8.20.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/grafana-oss@sha256%3Ab8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48?repository_url=grafana%2Fgrafana-oss&tag=11.5.8",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/keycloak-config-cli@sha256%3A1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411?repository_url=adorsys%2Fkeycloak-config-cli&tag=6.5.1-26",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/keycloak@sha256%3A7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3?repository_url=quay.io%2Fkeycloak%2Fkeycloak&tag=26.8.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/mongo@sha256%3A479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01?repository_url=mongo&tag=8.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/n8n@sha256%3A5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f?repository_url=n8nio%2Fn8n&tag=2.48.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/nocobase@sha256%3A04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777?repository_url=nocobase%2Fnocobase&tag=2.2.50",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/node-red@sha256%3A0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5?repository_url=nodered%2Fnode-red&tag=4.0.9",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/opentelemetry-collector-contrib@sha256%3Ae39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2?repository_url=otel%2Fopentelemetry-collector-contrib&tag=0.123.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/orion-ld@sha256%3Af562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b?repository_url=fiware%2Forion-ld&tag=1.12.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/pgvector@sha256%3A33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337?repository_url=pgvector%2Fpgvector&tag=0.8.1-pg16",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/postgres@sha256%3Af2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d?repository_url=postgres&tag=16.16-alpine",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/prometheus@sha256%3A339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1?repository_url=prom%2Fprometheus&tag=v3.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/redis@sha256%3A7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe?repository_url=redis&tag=7.4-alpine",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/rustfs@sha256%3Aee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a?repository_url=rustfs%2Frustfs&tag=1.0.6",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:oci/timescaledb@sha256%3A769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72?repository_url=timescale%2Ftimescaledb&tag=2.19.3-pg16-oss",
+      "dependsOn": []
+    }
+  ]
+}

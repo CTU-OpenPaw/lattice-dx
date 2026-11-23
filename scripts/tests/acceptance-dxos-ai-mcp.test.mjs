@@ -71,12 +71,16 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
             { name: 'dxos_execute_record_action' },
             { name: 'dxos_my_tasks_copilot' },
             { name: 'dxos_orchestrate_enterprise_case' },
+            { name: 'dxos_graph_impact_analysis' },
+            { name: 'dxos_alarm_action' },
           ]
           : [
             { name: 'dxos_search_enterprise_context' },
             { name: 'dxos_execute_record_action' },
             { name: 'dxos_my_tasks_copilot' },
             { name: 'dxos_orchestrate_enterprise_case' },
+            { name: 'dxos_graph_impact_analysis' },
+            { name: 'dxos_alarm_action' },
           ];
         return { status: 200, json: { result: { tools } } };
       }
@@ -97,6 +101,43 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
           status: 200,
           json: { result: { contents: [{ text: JSON.stringify({ planes: new Array(6).fill({ order: 1 }), clause52Preserved: true }) }] } },
         };
+      }
+      if (rpcBody.method === 'prompts/list') {
+        const prompts = [
+          { name: 'dxos-cold-chain-incident-triage', arguments: [{ name: 'assetCode', required: true }] },
+          { name: 'dxos-fefo-dispatch-audit', arguments: [{ name: 'lotCode', required: true }] },
+          { name: 'dxos-executive-radar-brief', arguments: [] },
+        ];
+        if (role === 'root') {
+          prompts.push({ name: 'dxos-system-blueprint-architect', arguments: [{ name: 'goal', required: true }] });
+        }
+        return { status: 200, json: { result: { prompts } } };
+      }
+      if (rpcBody.method === 'prompts/get') {
+        const name = rpcBody.params?.name;
+        if (name === 'dxos-system-blueprint-architect' && role !== 'root') {
+          return { status: 200, json: { error: { code: -32003, message: 'Forbidden prompt' } } };
+        }
+        const assetCode = rpcBody.params?.arguments?.assetCode || 'UNKNOWN';
+        return {
+          status: 200,
+          json: {
+            result: {
+              description: 'Cold-chain incident triage prompt',
+              messages: [{ role: 'user', content: { type: 'text', text: `Triage asset ${assetCode} using dxos_graph_impact_analysis` } }],
+            },
+          },
+        };
+      }
+      if (rpcBody.method === 'resources/templates/list') {
+        const resourceTemplates = [
+          { uriTemplate: 'dxos://org/{organizationId}/lineage/{collection}/{recordId}', mimeType: 'application/json' },
+          { uriTemplate: 'dxos://org/{organizationId}/alarms/active', mimeType: 'application/json' },
+        ];
+        if (role === 'root') {
+          resourceTemplates.push({ uriTemplate: 'dxos://topology/planes', mimeType: 'application/json' });
+        }
+        return { status: 200, json: { result: { resourceTemplates } } };
       }
     }
     if (endpoint === '/api/dxos-mcp/it-ot') {
@@ -131,6 +172,10 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
   assert.equal(report.checks.employeeBuilderToolsHidden, true);
   assert.equal(report.checks.employeeBuilderCallDenied, true);
   assert.equal(report.checks.adminMcpToolsListed15, true);
+  assert.equal(report.checks.adminMcpToolsListed17, true);
+  assert.equal(report.checks.mcpPromptsListAndAdminHiddenOk, true);
+  assert.equal(report.checks.mcpPromptsGetOk, true);
+  assert.equal(report.checks.mcpResourceTemplatesListOk, true);
   assert.equal(report.checks.adminCreativeBlockDryRunOk, true);
   assert.equal(report.checks.adminProvisionRoleWorkspaceDryRunOk, true);
   assert.equal(report.checks.adminMcpDryRunCompose, true);

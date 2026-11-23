@@ -31,6 +31,8 @@ const OPERATIONAL_TOOLS = [
   'dxos_execute_record_action',
   'dxos_my_tasks_copilot',
   'dxos_orchestrate_enterprise_case',
+  'dxos_graph_impact_analysis',
+  'dxos_alarm_action',
 ];
 
 export function parseAiMcpAcceptanceArgs(argv) {
@@ -60,6 +62,10 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     employeePortalCopilotScoped: false,
     adminMcpInitialize: false,
     adminMcpToolsListed15: false,
+    adminMcpToolsListed17: false,
+    mcpPromptsListAndAdminHiddenOk: false,
+    mcpPromptsGetOk: false,
+    mcpResourceTemplatesListOk: false,
     adminMcpInspectOk: false,
     adminMcpDryRunCompose: false,
     adminMcpRbacInspectAndRootBlocked: false,
@@ -90,6 +96,9 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     const empToolNames = (empTools.json?.result?.tools || []).map((t) => t.name);
     for (const adminTool of ADMIN_TOOLS) {
       assert.ok(!empToolNames.includes(adminTool), `Non-admin tools/list leaked ${adminTool}`);
+    }
+    for (const opTool of OPERATIONAL_TOOLS) {
+      assert.ok(empToolNames.includes(opTool), `Non-admin tools/list missing operational tool ${opTool}`);
     }
     checks.employeeBuilderToolsHidden = true;
 
@@ -128,7 +137,9 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     for (const tool of [...ADMIN_TOOLS, ...OPERATIONAL_TOOLS]) {
       assert.ok(adminToolNames.includes(tool), `Admin MCP missing tool ${tool}`);
     }
+    assert.ok(adminToolNames.length >= 17, `Expected >= 17 admin+operational MCP tools, got ${adminToolNames.length}`);
     checks.adminMcpToolsListed15 = true;
+    checks.adminMcpToolsListed17 = true;
 
     const inspectCall = await rpcRequest('root', '/api/dxos-mcp', {
       jsonrpc: '2.0',
@@ -255,6 +266,52 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     assert.equal(topoJson.planes?.length, 6);
     assert.equal(topoJson.clause52Preserved, true);
     checks.adminMcpTopologyResource6Planes = true;
+
+    // 3b. MCP prompts/list, prompts/get, and resources/templates/list (with admin scoping)
+    const empPrompts = await rpcRequest('employee', '/api/dxos-mcp', { jsonrpc: '2.0', id: 26, method: 'prompts/list', params: {} });
+    assert.equal(empPrompts.status, 200);
+    const empPromptNames = (empPrompts.json?.result?.prompts || []).map((p) => p.name);
+    for (const opPrompt of ['dxos-cold-chain-incident-triage', 'dxos-fefo-dispatch-audit', 'dxos-executive-radar-brief']) {
+      assert.ok(empPromptNames.includes(opPrompt), `Employee prompts/list missing ${opPrompt}`);
+    }
+    assert.ok(!empPromptNames.includes('dxos-system-blueprint-architect'), 'Employee prompts/list leaked admin prompt');
+
+    const rootPrompts = await rpcRequest('root', '/api/dxos-mcp', { jsonrpc: '2.0', id: 27, method: 'prompts/list', params: {} });
+    assert.equal(rootPrompts.status, 200);
+    const rootPromptNames = (rootPrompts.json?.result?.prompts || []).map((p) => p.name);
+    assert.ok(rootPromptNames.includes('dxos-system-blueprint-architect'), 'Root prompts/list missing admin architect prompt');
+    assert.ok(rootPromptNames.length >= 4, `Expected >= 4 MCP prompts for admin, got ${rootPromptNames.length}`);
+    checks.mcpPromptsListAndAdminHiddenOk = true;
+
+    const empAdminPromptDeny = await rpcRequest('employee', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 28,
+      method: 'prompts/get',
+      params: { name: 'dxos-system-blueprint-architect', arguments: { goal: 'Unauthorized bypass attempt' } },
+    });
+    assert.equal(empAdminPromptDeny.json?.error?.code, -32003, 'Expected -32003 when employee fetches admin MCP prompt');
+
+    const empTriagePrompt = await rpcRequest('employee', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 29,
+      method: 'prompts/get',
+      params: { name: 'dxos-cold-chain-incident-triage', arguments: { assetCode: 'COLD-CHILLER-01' } },
+    });
+    assert.equal(empTriagePrompt.status, 200);
+    assert.match(String(empTriagePrompt.json?.result?.messages?.[0]?.content?.text || ''), /COLD-CHILLER-01/);
+    checks.mcpPromptsGetOk = true;
+
+    const empTemplates = await rpcRequest('employee', '/api/dxos-mcp', { jsonrpc: '2.0', id: 30, method: 'resources/templates/list', params: {} });
+    assert.equal(empTemplates.status, 200);
+    const empUris = (empTemplates.json?.result?.resourceTemplates || []).map((t) => t.uriTemplate);
+    assert.ok(empUris.includes('dxos://org/{organizationId}/lineage/{collection}/{recordId}'));
+    assert.ok(empUris.includes('dxos://org/{organizationId}/alarms/active'));
+    assert.ok(!empUris.includes('dxos://topology/planes'), 'Employee resources/templates/list leaked admin topology template');
+
+    const rootTemplates = await rpcRequest('root', '/api/dxos-mcp', { jsonrpc: '2.0', id: 31, method: 'resources/templates/list', params: {} });
+    const rootUris = (rootTemplates.json?.result?.resourceTemplates || []).map((t) => t.uriTemplate);
+    assert.ok(rootUris.includes('dxos://topology/planes'));
+    checks.mcpResourceTemplatesListOk = true;
 
     // 4. IT/OT Streamable MCP endpoint (/api/dxos-mcp/it-ot)
     const itOtList = await rpcRequest('root', '/api/dxos-mcp/it-ot', { jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} });

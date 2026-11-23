@@ -1,0 +1,243 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  parseHeadlessPaasArgs,
+  runHeadlessPaasAcceptance,
+} from '../acceptance-headless-paas.mjs';
+
+test('parseHeadlessPaasArgs validates origins and report path', () => {
+  assert.throws(() => parseHeadlessPaasArgs([]), /Usage:/);
+  assert.throws(() => parseHeadlessPaasArgs(['--origin=https://evil.example.com']), /Unsafe origin/);
+
+  const parsed = parseHeadlessPaasArgs(['--origin=http://localhost:13014', '--org=custom-org']);
+  assert.equal(parsed.origin, 'http://localhost:13014');
+  assert.equal(parsed.organizationId, 'custom-org');
+});
+
+test('runHeadlessPaasAcceptance verifies all 8 PaaS checks and cleans up temporary records on success', async () => {
+  const calls = [];
+  const destroyed = [];
+  const revokedPatTokens = new Set();
+  const issuedPatToken = 'ldx_pat_a1b2c3d4_0123456789abcdef0123456789abcdef';
+
+  const callActor = async (actorRole, path, opts = {}) => {
+    calls.push({ actorRole, path, opts });
+    const [resourceAction, query = ''] = String(path).split('?');
+
+    if (resourceAction === 'dxos:health') {
+      return { ok: true, status: 200, data: { status: 'ok', version: '1.0.0', dbHealthy: true } };
+    }
+    if (resourceAction === 'dxos:openapi') {
+      return { ok: true, status: 200, data: { openapi: '3.1.0', info: { version: '1.0.0' }, paths: { '/api/dxos:health': {} } } };
+    }
+    if (resourceAction === 'dxos:asyncapi') {
+      return { ok: true, status: 200, data: { asyncapi: '3.0.0', info: { version: '1.0.0' }, channels: { telemetry: {} } } };
+    }
+    if (resourceAction === 'dxos:manifest') {
+      return { ok: true, status: 200, data: { name: 'LatticeDX Field PWA', start_url: '/v/mobile' } };
+    }
+    if (resourceAction === 'dxos:sw.js') {
+      return { ok: true, status: 200, rawText: 'const CACHE_NAME = "latticedx-v1"; const urls = ["/api/dxos:manifest"];', data: {} };
+    }
+
+    if (resourceAction === 'dxosApiKeys:issue') {
+      if (actorRole === 'employee' && opts.values?.roleName === 'root') {
+        return { ok: false, status: 403, data: { code: 'API_KEY_ROLE_ESCALATION' } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        data: { id: 91, name: opts.values?.name, token: issuedPatToken, active: true },
+      };
+    }
+    if (resourceAction === 'dxosApiKeys:list') {
+      return { ok: true, status: 200, data: { organizationId: 'native-ui-lab', items: [{ id: 91, name: 'Mock PAT', active: true }] } };
+    }
+    if (resourceAction === 'dxosApiKeys:revoke') {
+      revokedPatTokens.add(issuedPatToken);
+      return { ok: true, status: 200, data: { id: opts.values?.id, active: false } };
+    }
+
+    if (resourceAction === 'dxosLedger:publicKey') {
+      if (opts.bearerToken && revokedPatTokens.has(opts.bearerToken)) {
+        return { ok: false, status: 401, data: { code: 'API_KEY_REVOKED' } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        data: { algorithm: 'Ed25519', active: true, keyId: 'key-1', publicKeyPem: 'BEGIN PUBLIC KEY MOCK' },
+      };
+    }
+
+    if (resourceAction === 'latticeOrders:create') {
+      return { ok: true, status: 200, data: { id: 501, code: opts.values?.code } };
+    }
+    if (resourceAction === 'dxosLedger:signDocument') {
+      return { ok: true, status: 200, data: { signed: true, signatureBase64: 'sig==', merkleRoot: 'root123' } };
+    }
+    if (resourceAction === 'dxosLedger:verify') {
+      return { ok: true, status: 200, data: { valid: true, brokenAtSeq: null, checkedCount: 3 } };
+    }
+
+    if (resourceAction === 'dxosDataGov:tierSummary') {
+      return { ok: true, status: 200, data: { organizationId: 'native-ui-lab', hotOrders: 2, coldSnapshots: 1 } };
+    }
+    if (resourceAction === 'dxosDataGov:freezeSnapshot') {
+      return {
+        ok: true,
+        status: 200,
+        data: { status: 'sealed', snapshotUid: 'SNAP-001', payloadHash: 'abc', signatureBase64: 'snap-sig', keyId: 'key-1' },
+      };
+    }
+    if (resourceAction === 'dxosDataGov:getSnapshot') {
+      return {
+        ok: true,
+        status: 200,
+        data: { snapshotUid: 'SNAP-001', hashVerified: true, signatureVerified: true, payloadJson: [{ id: 501 }] },
+      };
+    }
+    if (resourceAction === 'dxosLedger:verifySignature') {
+      return { ok: true, status: 200, data: { valid: true } };
+    }
+    if (resourceAction === 'dxosDataGov:lineage') {
+      return { ok: true, status: 200, data: { nodeCount: 2, nodes: [{ id: '1' }, { id: '2' }], edges: [{ id: 'e1' }] } };
+    }
+    if (resourceAction === 'dxosDataGov:listQuarantine') {
+      return { ok: true, status: 200, data: { items: [] } };
+    }
+
+    if (resourceAction === 'dxosWms:saveOrderLine') {
+      return { ok: true, status: 200, data: { orderLine: { id: 601, lineNo: 1 } } };
+    }
+    if (resourceAction === 'dxosWms:receiveStock') {
+      const lotId = opts.values?.lotCode?.includes('MKT') ? 702 : 701;
+      return { ok: true, status: 200, data: { lot: { id: lotId, lotCode: opts.values?.lotCode } } };
+    }
+    if (resourceAction === 'dxosWms:allocateFefo') {
+      return { ok: true, status: 200, data: { allocatedTotal: 10, shortfall: 0, allocations: [{ id: 801 }] } };
+    }
+    if (resourceAction === 'dxosWms:holdLotByMkt') {
+      return { ok: true, status: 200, data: { held: true, lotStatus: 'hold_mkt', mktCelsius: 13.3 } };
+    }
+    if (resourceAction === 'dxosWms:epodCapture') {
+      return {
+        ok: true,
+        status: 200,
+        data: { epod: { id: 901, epodUid: 'EPOD-901' }, trackingCode: 'TRK-901', trackingToken: 'tok-secret-1' },
+      };
+    }
+    if (resourceAction === 'dxosWms:printVoucher') {
+      return { ok: true, status: 200, data: { html: '<html>EPOD</html>', qrVerificationHash: 'qr-hash' } };
+    }
+    if (resourceAction === 'dxosWms:publicTrack') {
+      if (query.includes('MISSING-')) {
+        return { ok: false, status: 401, data: { code: 'TRACKING_UNAUTHORIZED' } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        data: { trackingCode: 'TRK-901', status: 'delivered', orderCode: 'ORD-PAAS-1' },
+      };
+    }
+
+    if (resourceAction === 'dxosDmn:saveTable') {
+      return { ok: true, status: 200, data: { table: { id: 1001, tableKey: opts.values?.tableKey } } };
+    }
+    if (resourceAction === 'dxosDmn:evaluate') {
+      return { ok: true, status: 200, data: { matched: true, result: { tier: 'director_approval' } } };
+    }
+    if (resourceAction === 'dxosDmn:listTables') {
+      const created = calls.find((c) => c.path === 'dxosDmn:saveTable')?.opts?.values?.tableKey;
+      return { ok: true, status: 200, data: { items: [{ id: 1001, tableKey: created }] } };
+    }
+    if (resourceAction === 'dxosDelegations:list') {
+      return { ok: true, status: 200, data: { items: [] } };
+    }
+
+    if (resourceAction === 'latticeAssets:create') {
+      return { ok: true, status: 200, data: { id: 1101, code: opts.values?.code } };
+    }
+    if (resourceAction === 'dxosBlocks:twinShadow') {
+      return { ok: true, status: 200, data: { shadow: { id: 1201, desiredJson: {}, reportedJson: {} } } };
+    }
+    if (resourceAction === 'dxosBlocks:twinSetDesired') {
+      if (opts.values?.desiredPatch?.targetTempC === 4.0) {
+        return { ok: true, status: 200, data: { gatedByHitl: false, shadow: { id: 1201 } } };
+      }
+      return { ok: true, status: 200, data: { gatedByHitl: true, deltaTempC: 6, approvalId: 1301 } };
+    }
+
+    if (resourceAction === 'latticePara:extractFormFields') {
+      const m = Buffer.from(opts.values?.contentBase64 || '', 'base64').toString('utf8').match(/ORD-OCR-[A-Z0-9]+/);
+      return { ok: true, status: 200, data: { fields: { code: m ? m[0] : '' } } };
+    }
+    if (resourceAction === 'dxosAi:triageScan') {
+      return { ok: true, status: 200, data: { scannedCount: 4, matchedAlarms: 1, proposals: [] } };
+    }
+    if (resourceAction === 'dxosStudio:solutionBundleExport') {
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          metadata: { schemaVersion: 'latticedx.solution-bundle/v3', platformVersion: '1.0.0', organizationId: 'native-ui-lab', contentSha256: 'a'.repeat(64) },
+          roles: [{ name: 'ldx_employee' }],
+          portals: [{ path: '/v/my-work' }],
+        },
+      };
+    }
+
+    if (resourceAction === 'latticeStockAllocations:list') {
+      return { ok: true, status: 200, data: [{ id: 801 }] };
+    }
+    if (resourceAction.endsWith(':destroy')) {
+      destroyed.push(path);
+      return { ok: true, status: 200, data: { ok: true } };
+    }
+
+    throw new Error(`Unexpected mock API call: ${resourceAction}`);
+  };
+
+  const result = await runHeadlessPaasAcceptance(callActor, { organizationId: 'native-ui-lab' });
+  assert.equal(result.result, 'PASS');
+  for (const [key, passed] of Object.entries(result.checks)) {
+    assert.equal(passed, true, `Check ${key} failed`);
+  }
+  assert.ok(destroyed.some((p) => p.includes('latticeOrders:destroy?filterByTk=501')));
+  assert.ok(destroyed.some((p) => p.includes('latticeAssets:destroy?filterByTk=1101')));
+  assert.ok(destroyed.some((p) => p.includes('latticeAiApprovalQueue:destroy?filterByTk=1301')));
+  assert.ok(destroyed.some((p) => p.includes('latticeApiKeys:destroy?filterByTk=91')));
+});
+
+test('runHeadlessPaasAcceptance runs cleanup even when an intermediate step fails', async () => {
+  const destroyed = [];
+  const callActor = async (actorRole, path, opts = {}) => {
+    const [resourceAction] = String(path).split('?');
+    if (resourceAction === 'dxos:health') return { ok: true, status: 200, data: { status: 'ok', version: '1.0.0' } };
+    if (resourceAction === 'dxos:openapi') return { ok: true, status: 200, data: { openapi: '3.1.0', info: { version: '1.0.0' }, paths: {} } };
+    if (resourceAction === 'dxos:asyncapi') return { ok: true, status: 200, data: { asyncapi: '3.0.0', info: { version: '1.0.0' }, channels: {} } };
+    if (resourceAction === 'dxos:manifest') return { ok: true, status: 200, data: { name: 'PWA', start_url: '/v/mobile' } };
+    if (resourceAction === 'dxos:sw.js') return { ok: true, status: 200, rawText: 'CACHE_NAME /api/dxos:manifest', data: {} };
+    if (resourceAction === 'dxosApiKeys:issue') {
+      if (actorRole === 'employee' && opts.values?.roleName === 'root') return { ok: false, status: 403, data: {} };
+      return { ok: true, status: 200, data: { id: 77, token: 'ldx_pat_11223344_0123456789abcdef0123456789abcdef' } };
+    }
+    if (resourceAction === 'dxosLedger:publicKey') return { ok: false, status: 500, data: { error: 'boom' } };
+    if (resourceAction === 'dxosApiKeys:revoke') return { ok: true, status: 200, data: { active: false } };
+    if (resourceAction.endsWith(':destroy')) {
+      destroyed.push(path);
+      return { ok: true, status: 200, data: {} };
+    }
+    throw new Error(`Unexpected call: ${resourceAction}`);
+  };
+
+  await assert.rejects(() => runHeadlessPaasAcceptance(callActor), /Bearer PAT access 200/);
+  assert.ok(destroyed.includes('latticeApiKeys:destroy?filterByTk=77'));
+});
