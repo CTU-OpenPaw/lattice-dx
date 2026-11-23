@@ -292,9 +292,9 @@ function makeV3Harness() {
   return { db, app, flowSurfaceCalls, byName, adminCtx, empCtx };
 }
 
-test('tools catalog registers 15 tools including 4 v3 architect/creative tools strictly restricted to admins', async () => {
+test('tools catalog registers 17 tools including 4 v3 architect/creative tools strictly restricted to admins', async () => {
   const { byName, empCtx } = makeV3Harness();
-  assert.equal(byName.size, 15);
+  assert.equal(byName.size, 17);
   for (const name of [
     'dxos_recommend_page_blueprint',
     'dxos_design_creative_block',

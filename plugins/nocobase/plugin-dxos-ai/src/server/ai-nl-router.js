@@ -127,14 +127,56 @@ function inferPortalFromUtterance(utterance, fallback = 'services') {
 }
 
 function detectUnsafeOrInjection(n) {
-  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*huong dan|ignore\s+previous|system\s+prompt|jailbreak|in ra\s+(?:mat khau|api\s*key|token|bi mat|secret|credential)|xuat\s+toan\s+bo\s+(?:api key|token|mat khau|bang users)|drop\s+table|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong))/;
+  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*(?:huong dan|kiem tra|quyen|rbac|acl|phe duyet|hitl|bao mat)|ignore\s+previous|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|phe duyet|bao mat)|vuot\s+quyen|vo\s+hieu\s+hoa\s+(?:audit|nhat\s+ky|rls|bao\s+mat)|in\s+ra\s+[^\n]{0,40}?(?:mat\s+khau|api\s*key|token|bi\s+mat|secret|credential|private\s*key)|tiet\s+lo\s+[^\n]{0,40}?(?:mat\s+khau|bi\s+mat|token|api\s*key|secret|private\s*key|credential)|doc\s+(?:bien\s+moi\s+truong|\.env|process\.env)|xuat\s+toan\s+bo\s+(?:api\s*key|token|mat\s+khau|bang\s+users|du\s+lieu)|(?:xem|doc|xuat|lay)\s+(?:toan\s+bo\s+)?(?:du\s+lieu|don\s+hang|lo\s+hang|su\s+co|tai\s+lieu|bang)[^\n]{0,30}?(?:to\s+chuc|cong\s+ty|tenant|org)\s+khac|xem\s+luong\s+toan\s+cong\s+ty|cross[\s-]?tenant|tu\s+(?:phe\s+duyet|duyet)\s+(?:yeu\s+cau|don|phieu|ho\s+so)\s+(?:cua\s+)?(?:chinh\s+minh|toi)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong))/;
   if (promptInjection.test(n)) {
     return {
       refused: true,
-      reason: 'Yêu cầu vi phạm chính sách bảo mật (injection, lộ bí mật hoặc leo thang đặc quyền hệ thống).',
+      reason: 'Yêu cầu vi phạm chính sách bảo mật (injection, lộ bí mật, vượt tenant hoặc leo thang đặc quyền hệ thống).',
     };
   }
   return null;
+}
+
+function extractGraphImpactArgs(raw, n) {
+  const cleanRaw = stripDiacritics(raw);
+  const codeRules = [
+    { re: /\b(LOT-[A-Z0-9-]+)\b/, collection: 'latticeStockLots' },
+    { re: /\b(ORD-[A-Z0-9-]+)\b/, collection: 'latticeOrders' },
+    { re: /\b((?:INC|ALM)-[A-Z0-9-]+)\b/, collection: 'latticeIncidentCases' },
+    { re: /\b(EPOD-[A-Z0-9-]+)\b/, collection: 'latticeEpodRecords' },
+    { re: /\b((?:AST|COLD-ROOM|KHO)-[A-Z0-9-]+)\b/, collection: 'latticeAssets' },
+    { re: /(urn:ngsi-ld:[^\s,;?]+)/, collection: 'latticeAssets' },
+  ];
+  let collection = null;
+  let recordCode = null;
+  for (const rule of codeRules) {
+    const m = cleanRaw.match(rule.re);
+    if (m && m[1]) {
+      collection = rule.collection;
+      recordCode = m[1].trim();
+      break;
+    }
+  }
+  if (!collection) {
+    if (/(lo\s+(?:hang|ton\s+kho|vaccine|duoc|lanh)|\blot\b)/.test(n)) collection = 'latticeStockLots';
+    else if (/(don\s+hang|don\s+van\s+chuyen)/.test(n)) collection = 'latticeOrders';
+    else if (/(epod|bien\s+ban\s+giao\s+nhan)/.test(n)) collection = 'latticeEpodRecords';
+    else if (/(kho\s+lanh|buong\s+lanh|may\s+nen|thiet\s+bi|tai\s+san)/.test(n)) collection = 'latticeAssets';
+    else if (/(su\s+co|canh\s+bao|bao\s+dong)/.test(n)) collection = 'latticeIncidentCases';
+    else collection = 'latticeAssets';
+  }
+  if (!recordCode) {
+    const shortMatch = cleanRaw.match(/\b(?:kho\s+lanh|buong\s+lanh|may\s+nen|thiet\s+bi)\s+([A-Z][A-Z0-9-]{1,24})\b/);
+    if (shortMatch && shortMatch[1]) recordCode = shortMatch[1].trim();
+  }
+  const includeTelemetry = /(nhiet\s+do|telemetry|cam\s+bien|do\s+am)/.test(n);
+  const maxDepth = /(toan\s+bo\s+chuoi|3\s+tang|sau\s+3|epod|khach\s+hang|ha\s+nguon)/.test(n) ? 3 : 2;
+  return {
+    collection,
+    ...(recordCode ? { recordCode } : {}),
+    maxDepth,
+    ...(includeTelemetry ? { includeTelemetry: true } : {}),
+  };
 }
 
 function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug = 'services' } = {}) {
@@ -242,7 +284,17 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
-  // 6. Cross-department Radar & Orchestration (check before personal tasks if asking company-wide)
+  // 6. GraphRAG Impact & Lineage Analysis (before Radar & broad RAG Search)
+  if (/(phan\s+tich\s+anh\s+huong|truy\s+vet\s+(?:pha\s+he|nguon\s+goc|day\s+chuyen|anh\s+huong|tac\s+dong|lo\s+hang|don\s+hang)|tac\s+dong\s+(?:day\s+chuyen|lien\s+hoan|ha\s+nguon|thuong\s+nguon)|(?:nhung|cac)\s+(?:lo|don\s+hang|thiet\s+bi|su\s+co|epod)[^.?]{0,30}bi\s+anh\s+huong|neu\s+(?:kho\s+lanh|buong\s+lanh|thiet\s+bi|lo\s+hang|may\s+nen|xe\s+lanh)[^.?]{0,50}(?:hong|su\s+co|qua\s+nhiet|mat\s+dien)[^.?]{0,50}(?:anh\s+huong|lien\s+quan|lo|don)|anh\s+huong\s+day\s+chuyen|impact\s+analysis|graphrag)/.test(n)) {
+    return {
+      intent: 'GRAPH_IMPACT_ANALYSIS',
+      refused: false,
+      toolName: 'dxos_graph_impact_analysis',
+      args: extractGraphImpactArgs(raw, n),
+    };
+  }
+
+  // 7. Cross-department Radar & Orchestration (check before personal tasks if asking company-wide)
   if (/(radar|diem\s+nghen|tong\s+hop\s+(?:toan\s+cong\s+ty|toan\s+he\s+thong|6\s+phan\s+he|lien\s+phong\s+ban)|dieu\s+phoi\s+lien|tong\s+quan\s+tinh\s+hinh\s+van\s+hanh)/.test(n)) {
     return {
       intent: 'ENTERPRISE_RADAR',

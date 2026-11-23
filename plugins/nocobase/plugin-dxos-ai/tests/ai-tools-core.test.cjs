@@ -230,7 +230,7 @@ test('non-admin is strictly blocked from all 11 Admin Builder tools and foreign 
   const tools = createDxosTools();
   const byName = new Map(tools.map((t) => [t.definition.name, t]));
   assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
-  assert.equal(OPERATIONAL_TOOL_NAMES.length, 4);
+  assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
 
   const empCtx = makeCtx(db, { userId: 9, roles: ['ldx_employee'] });
   const scope = await resolveActorScope(empCtx, db);

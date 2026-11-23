@@ -42,6 +42,8 @@ const OPERATIONAL_TOOL_NAMES = [
   'dxos_execute_record_action',
   'dxos_my_tasks_copilot',
   'dxos_orchestrate_enterprise_case',
+  'dxos_graph_impact_analysis',
+  'dxos_alarm_action',
 ];
 
 const WRITABLE_BUSINESS_COLLECTIONS = new Set([
@@ -247,7 +249,8 @@ function createAuditedTool(spec) {
           await hydrateQuotaBucketFromDb(db, actor.organizationId);
           checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
         }
-        const checked = schemaHelper.validate(rawArgs);
+        const preparedArgs = typeof spec.prepareArgs === 'function' ? spec.prepareArgs(rawArgs) : rawArgs;
+        const checked = schemaHelper.validate(preparedArgs);
         if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
         const result = await spec.run(ctx, db, actor, checked.value);
         const completionTokens = estimateTokens(result);
@@ -316,6 +319,7 @@ function createDxosTools() {
     safeGetResource,
     invokeResourceAction,
     createAuditedTool,
+    redactPiiDeep,
     ADMIN_BUILDER_TOOL_NAMES,
     WRITABLE_BUSINESS_COLLECTIONS,
     PROTECTED_SERVER_FIELDS,

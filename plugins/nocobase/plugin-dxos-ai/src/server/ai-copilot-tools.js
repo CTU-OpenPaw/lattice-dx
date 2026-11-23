@@ -8,13 +8,41 @@
  */
 'use strict';
 
-const { rankHybridRecords, buildParaChunkPoolEntries } = require('./ai-hybrid-search');
+const {
+  computeEmbedding,
+  executePgVectorParaQuery,
+  rankHybridRecords,
+  buildParaChunkPoolEntries,
+} = require('./ai-hybrid-search');
 const {
   resolveEffectiveToolMode,
   buildDiffPreview,
   computeRiskLevel,
   enqueueAiApproval,
 } = require('./ai-hitl');
+const { redactPiiDeep: defaultRedactPiiDeep } = require('./ai-governance');
+
+const DEFAULT_SYSTEM_PROTECTED = new Set([
+  'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
+  'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
+  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue', 'latticeUiSnapshots',
+]);
+
+const MAX_GRAPH_DEPTH = 4;
+const MAX_GRAPH_NODES = 60;
+const GRAPH_COLLECTIONS = [
+  'latticeAssets',
+  'latticeIncidentCases',
+  'latticeTwinShadows',
+  'latticeStockLots',
+  'latticeOrderLines',
+  'latticeOrders',
+  'latticeEpodRecords',
+  'latticeParaDocuments',
+  'latticeServiceTickets',
+  'latticeRequests',
+];
+const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]{0,80}$/;
 
 async function resolveSearchableTargets(db, requestedCollections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val) {
   const dynamicCustom = [];
@@ -243,20 +271,47 @@ function createCopilotTools(deps) {
         let chunkSearched = false;
         if (canSearchParaChunks) {
           const chunkRepo = db?.getRepository?.('latticeParaChunks');
+          const chunkByKey = new Map();
+          const addChunkRow = (row) => {
+            if (!row || val(row, 'organizationId') !== actor.organizationId || val(row, 'active') === false) return;
+            const cid = val(row, 'id');
+            const key = cid != null ? `id:${cid}` : `doc:${val(row, 'documentId')}:${val(row, 'chunkIndex') ?? 0}`;
+            const prev = chunkByKey.get(key);
+            if (!prev) {
+              chunkByKey.set(key, typeof row?.toJSON === 'function' ? row.toJSON() : { ...row });
+              return;
+            }
+            const nextSim = val(row, 'pgVectorSim') ?? val(row, '_pgVectorSim');
+            if (nextSim != null && Number.isFinite(Number(nextSim))) {
+              prev.pgVectorSim = Number(nextSim);
+            }
+          };
+          if (q) {
+            const pgVecRows = await executePgVectorParaQuery(db, {
+              organizationId: actor.organizationId,
+              queryEmbedding: computeEmbedding(q),
+              limit: 40,
+            });
+            for (const r of pgVecRows) addChunkRow(r);
+            if (pgVecRows.length) chunkSearched = true;
+          }
           if (chunkRepo && typeof chunkRepo.find === 'function') {
             const chunkRows = (await chunkRepo.find({
               filter: { organizationId: actor.organizationId },
               limit: q ? 120 : 40,
               sort: ['-id'],
             })) || [];
-            const chunkPool = buildParaChunkPoolEntries(chunkRows, {
+            for (const r of chunkRows) addChunkRow(r);
+            chunkSearched = true;
+          }
+          if (chunkByKey.size) {
+            const chunkPool = buildParaChunkPoolEntries([...chunkByKey.values()], {
               organizationId: actor.organizationId,
               visibleDocMap: visibleParaDocMap,
               ownOnly: ownOnlySet.has('latticeParaDocuments'),
               val,
             });
             pool.push(...chunkPool);
-            chunkSearched = true;
           }
         }
         const searchedCollections = chunkSearched && !targets.includes('latticeParaChunks')
@@ -537,7 +592,691 @@ function createCopilotTools(deps) {
         return { executed: true, mode: 'executeCoordinatedResponse', organizationId: actor.organizationId, created };
       },
     }),
+
+    createAuditedTool({
+      name: 'dxos_graph_impact_analysis',
+      adminOnly: false,
+      defaultPermission: 'ALLOW',
+      introduction: { title: 'Phân tích Ảnh hưởng GraphRAG', about: 'Truy vết phả hệ latticeDataLineage và quan hệ kho lạnh - lô - đơn hàng - sự cố - ePOD có kiểm soát RBAC.' },
+      description: 'Traverse organization-scoped latticeDataLineage edges and structural cold-chain relationships (assets, incidents, twin shadows, stock lots, order lines, orders, ePOD, P.A.R.A.) respecting RBAC and PII redaction.',
+      prepareArgs(rawArgs) {
+        if (rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs) && typeof rawArgs.recordId === 'number' && Number.isInteger(rawArgs.recordId)) {
+          return { ...rawArgs, recordId: String(rawArgs.recordId) };
+        }
+        return rawArgs;
+      },
+      schema: {
+        description: 'GraphRAG impact analysis parameters.',
+        properties: {
+          collection: { type: 'string', required: true, maxLength: 80, description: 'Starting collection name.' },
+          recordId: { type: 'string', maxLength: 120, description: 'Record ID (string or integer).' },
+          recordCode: { type: 'string', maxLength: 120, description: 'Optional business code or URN.' },
+          maxDepth: { type: 'integer', default: 2, description: 'Traversal depth bounded 1..4.' },
+          includeTelemetry: { type: 'boolean', default: false, description: 'Include recent telemetry points if readable.' },
+        },
+      },
+      async run(_ctx, db, actor, args) {
+        return analyzeGraphImpact(db, actor, args, deps);
+      },
+    }),
+
+    createAuditedTool({
+      name: 'dxos_alarm_action',
+      adminOnly: false,
+      defaultPermission: 'ASK',
+      introduction: { title: 'Xử lý Cảnh báo IoT/Chuỗi lạnh', about: 'Xác nhận tiếp nhận (ack) hoặc đóng cảnh báo (clear) trong latticeIncidentCases với RBAC và HITL.' },
+      description: 'Acknowledge (ack) or clear/close (clear) an active alarm in latticeIncidentCases strictly inside caller organizationId with update RBAC and HITL approval support.',
+      schema: {
+        description: 'Alarm acknowledgement or clearance action.',
+        properties: {
+          action: { type: 'string', required: true, enum: ['ack', 'clear'] },
+          alarmId: { type: 'integer', description: 'Numeric ID of the alarm in latticeIncidentCases.' },
+          alarmCode: { type: 'string', maxLength: 80, description: 'Optional alarm code (INC-... or ALM-...).' },
+          assetEntityId: { type: 'string', maxLength: 140, description: 'Optional asset entity URN/ID.' },
+          note: { type: 'string', maxLength: 500, description: 'Ack resolution note or closure note (clamped to 255 chars).' },
+          requireApproval: { type: 'boolean', default: false },
+        },
+      },
+      async run(ctx, db, actor, args) {
+        return executeAlarmActionTool(ctx, db, actor, args, deps);
+      },
+    }),
   ];
 }
 
-module.exports = { createCopilotTools };
+async function canReadLineageCollection(db, actor, val) {
+  if (actor?.isAdmin) return true;
+  const resourcesRepo = db?.getRepository?.('dataSourcesRolesResources');
+  if (!resourcesRepo) return true;
+  const rows = (await resourcesRepo.find({ filter: { name: 'latticeDataLineage', dataSourceKey: 'main' }, appends: ['actions'], limit: 50 })) || [];
+  const roleSet = new Set(actor?.roleNames || []);
+  const callerRows = rows.filter((r) => val(r, 'name') === 'latticeDataLineage' && roleSet.has(val(r, 'roleName')));
+  if (!callerRows.length) return true;
+  return callerRows.some((r) => val(r, 'usingActionsConfig') === false || (val(r, 'actions') || []).some((a) => ['view', 'list', 'get'].includes(val(a, 'name'))));
+}
+
+function resolveRowCode(row, fallbackId, val) {
+  return String(
+    val(row, 'code')
+    || val(row, 'lotCode')
+    || val(row, 'epodUid')
+    || val(row, 'orderCode')
+    || fallbackId
+    || '',
+  );
+}
+
+function buildSafeGraphNode(colName, row, depth, fallbackId, val, redact) {
+  const rawId = val(row, 'id') ?? fallbackId ?? resolveRowCode(row, '', val);
+  const recordId = String(rawId ?? '');
+  const code = resolveRowCode(row, recordId, val);
+  const rawTitle = String(val(row, 'name') || val(row, 'title') || val(row, 'productName') || code);
+  const cleanTitle = redact(rawTitle).value;
+  const status = val(row, 'status') || val(row, 'commandStatus') || null;
+  const severity = val(row, 'severity') || null;
+  const assetEntityId = val(row, 'assetEntityId') || val(row, 'entityId') || null;
+  const node = {
+    key: `${colName}:${recordId}`,
+    collection: colName,
+    id: rawId != null && /^\d+$/.test(String(rawId)) ? Number(rawId) : rawId,
+    recordId,
+    code,
+    title: cleanTitle,
+    status,
+    ...(severity ? { severity } : {}),
+    ...(assetEntityId ? { assetEntityId } : {}),
+    depth,
+    citation: `[${colName}:${code}#${recordId}]`,
+  };
+  if (colName === 'latticeStockLots') {
+    node.sku = val(row, 'sku') || null;
+    node.qtyOnHand = val(row, 'qtyOnHand') ?? null;
+    node.mktCelsius = val(row, 'mktCelsius') ?? null;
+    node.targetTempMaxC = val(row, 'targetTempMaxC') ?? null;
+  } else if (colName === 'latticeTwinShadows') {
+    node.commandStatus = val(row, 'commandStatus') || null;
+    node.lastDeltaJson = redact(val(row, 'lastDeltaJson') || {}).value;
+  }
+  return node;
+}
+
+function computeAssetMatchKeys(colName, row, orgId, val) {
+  const keys = new Set();
+  const id = val(row, 'id');
+  const code = val(row, 'code');
+  const entityId = val(row, 'entityId');
+  const assetEntityId = val(row, 'assetEntityId');
+  const assetId = val(row, 'assetId');
+  if (entityId) keys.add(String(entityId));
+  if (assetEntityId) keys.add(String(assetEntityId));
+  if (colName === 'latticeAssets') {
+    if (id != null) {
+      keys.add(`urn:ngsi-ld:Asset:${orgId}:native:${id}`);
+    }
+    if (code) keys.add(String(code));
+  }
+  return {
+    entityKeys: keys,
+    assetId: colName === 'latticeAssets' ? id : assetId,
+    warehouseCode: colName === 'latticeAssets' ? code : val(row, 'warehouseCode'),
+    locationId: colName === 'latticeAssets' ? val(row, 'locationId') : val(row, 'warehouseLocationId'),
+  };
+}
+
+function rowMatchesAsset(row, assetInfo, orgId, val) {
+  const rowEntity = val(row, 'assetEntityId') || val(row, 'entityId');
+  const rowAssetId = val(row, 'assetId');
+  const rowWarehouseCode = val(row, 'warehouseCode');
+  const rowLocId = val(row, 'warehouseLocationId') ?? val(row, 'locationId');
+  if (rowEntity && assetInfo.entityKeys.has(String(rowEntity))) return true;
+  if (assetInfo.assetId != null && rowAssetId != null && Number(rowAssetId) === Number(assetInfo.assetId)) return true;
+  if (rowEntity && assetInfo.assetId != null && String(rowEntity) === `urn:ngsi-ld:Asset:${orgId}:native:${assetInfo.assetId}`) return true;
+  if (assetInfo.warehouseCode && rowWarehouseCode && String(rowWarehouseCode) === String(assetInfo.warehouseCode)) return true;
+  if (assetInfo.locationId != null && rowLocId != null && Number(rowLocId) === Number(assetInfo.locationId)) return true;
+  return false;
+}
+
+async function analyzeGraphImpact(db, actor, args, deps) {
+  const { val, failTool, resolveReadablePolicies, isRowVisibleToActor, SYSTEM_PROTECTED_COLLECTIONS, redactPiiDeep } = deps;
+  const redact = typeof redactPiiDeep === 'function' ? redactPiiDeep : defaultRedactPiiDeep;
+  const protectedSet = SYSTEM_PROTECTED_COLLECTIONS || DEFAULT_SYSTEM_PROTECTED;
+  const collection = String(args.collection || '').trim();
+  if (!IDENTIFIER_RE.test(collection)) {
+    throw failTool('GRAPH_COLLECTION_INVALID', 400, 'Tên collection không hợp lệ.');
+  }
+  if (protectedSet.has(collection)) {
+    throw failTool('COLLECTION_FORBIDDEN', 403, `Không được phép truy vấn phân tích trên bảng hệ thống "${collection}".`);
+  }
+  const rawRecordId = args.recordId != null ? String(args.recordId).trim() : '';
+  const rawRecordCode = args.recordCode != null ? String(args.recordCode).trim() : '';
+  if (!rawRecordId && !rawRecordCode) {
+    throw failTool('GRAPH_TARGET_REQUIRED', 400, 'Cần cung cấp recordId hoặc recordCode để phân tích ảnh hưởng.');
+  }
+
+  const maxDepth = Math.max(1, Math.min(MAX_GRAPH_DEPTH, Math.floor(Number(args.maxDepth) || 2)));
+  const probeCols = [...new Set([collection, ...GRAPH_COLLECTIONS, ...(args.includeTelemetry ? ['latticeTelemetryPoints'] : [])])];
+  const { allowedCollections, ownOnlySet } = await resolveReadablePolicies(db, actor, probeCols);
+  const allowedSet = new Set(allowedCollections);
+  if (!allowedSet.has(collection)) {
+    throw failTool('RBAC_READ_DENIED', 403, `Vai trò hiện tại không có quyền xem "${collection}".`);
+  }
+  const canReadLineage = await canReadLineageCollection(db, actor, val);
+
+  const rowCache = new Map();
+  async function loadOrgRows(colName) {
+    if (!allowedSet.has(colName)) return [];
+    if (rowCache.has(colName)) return rowCache.get(colName);
+    const repo = db?.getRepository?.(colName);
+    if (!repo || typeof repo.find !== 'function') {
+      rowCache.set(colName, []);
+      return [];
+    }
+    const raw = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: 300, sort: ['-id'] })) || [];
+    const isOwn = ownOnlySet.has(colName);
+    const visible = raw.filter((r) => val(r, 'organizationId') === actor.organizationId && isRowVisibleToActor(r, actor, isOwn));
+    rowCache.set(colName, visible);
+    return visible;
+  }
+
+  async function findRowAcrossOrg(colName, recordIdStr, codeStr = '') {
+    const rows = await loadOrgRows(colName);
+    return rows.find((r) => {
+      if (recordIdStr && String(val(r, 'id')) === recordIdStr) return true;
+      if (codeStr) {
+        for (const key of ['code', 'lotCode', 'epodUid', 'orderCode', 'entityId', 'assetEntityId']) {
+          if (val(r, key) != null && String(val(r, key)) === codeStr) return true;
+        }
+      }
+      return false;
+    }) || null;
+  }
+
+  // Verify root target strictly inside actor.organizationId
+  const rootRepo = db?.getRepository?.(collection);
+  let rootRow = await findRowAcrossOrg(collection, rawRecordId, rawRecordCode);
+  if (!rootRow && rawRecordId && rootRepo && typeof rootRepo.findOne === 'function') {
+    const probe = await rootRepo.findOne({ filterByTk: /^\d+$/.test(rawRecordId) ? Number(rawRecordId) : rawRecordId });
+    if (probe && val(probe, 'organizationId') !== actor.organizationId) {
+      throw failTool('RECORD_NOT_FOUND_OR_FORBIDDEN', 403, 'Không được phép phân tích bản ghi thuộc tổ chức khác.');
+    }
+    if (probe && !isRowVisibleToActor(probe, actor, ownOnlySet.has(collection))) {
+      throw failTool('RECORD_NOT_FOUND_OR_FORBIDDEN', 403, 'Bạn không có quyền truy cập bản ghi này.');
+    }
+  }
+
+  const lineageRepo = canReadLineage ? db?.getRepository?.('latticeDataLineage') : null;
+  const orgLineageRows = lineageRepo && typeof lineageRepo.find === 'function'
+    ? ((await lineageRepo.find({ filter: { organizationId: actor.organizationId }, limit: 500 })) || []).filter((r) => val(r, 'organizationId') === actor.organizationId)
+    : [];
+
+  if (!rootRow) {
+    const hasLineageRoot = Boolean(rawRecordId) && orgLineageRows.some((e) => (
+      (val(e, 'sourceCollection') === collection && String(val(e, 'sourceRecordId')) === rawRecordId)
+      || (val(e, 'targetCollection') === collection && String(val(e, 'targetRecordId')) === rawRecordId)
+    ));
+    if (!hasLineageRoot) {
+      throw failTool('GRAPH_ROOT_NOT_FOUND', 404, `Không tìm thấy bản ghi mục tiêu trong "${collection}" thuộc tổ chức.`);
+    }
+    rootRow = { id: rawRecordId, code: rawRecordCode || rawRecordId, organizationId: actor.organizationId };
+  }
+
+  const rootNode = buildSafeGraphNode(collection, rootRow, 0, rawRecordId || rawRecordCode, val, redact);
+  const visitedNodes = new Map([[rootNode.key, rootNode]]);
+  const edgesMap = new Map();
+  const queue = [{ collection, recordId: rootNode.recordId, row: rootRow, depth: 0 }];
+  let truncated = false;
+
+  const enqueueNeighbor = (fromKey, targetCol, targetRow, relationType, nextDepth, fallbackId = null) => {
+    if (!allowedSet.has(targetCol) || !targetRow) return null;
+    if (val(targetRow, 'organizationId') !== actor.organizationId) return null;
+    if (!isRowVisibleToActor(targetRow, actor, ownOnlySet.has(targetCol))) return null;
+
+    const node = buildSafeGraphNode(targetCol, targetRow, nextDepth, fallbackId, val, redact);
+    const edgeKey = `${fromKey}|${node.key}|${relationType}`;
+    if (!edgesMap.has(edgeKey)) {
+      edgesMap.set(edgeKey, {
+        source: fromKey,
+        target: node.key,
+        relationType,
+      });
+    }
+    if (!visitedNodes.has(node.key)) {
+      if (visitedNodes.size >= MAX_GRAPH_NODES) {
+        truncated = true;
+        return null;
+      }
+      visitedNodes.set(node.key, node);
+      queue.push({ collection: targetCol, recordId: node.recordId, row: targetRow, depth: nextDepth });
+    }
+    return node;
+  };
+
+  while (queue.length > 0 && visitedNodes.size < MAX_GRAPH_NODES) {
+    const cur = queue.shift();
+    if (cur.depth >= maxDepth) continue;
+    const nextDepth = cur.depth + 1;
+    const curKey = `${cur.collection}:${cur.recordId}`;
+
+    // 1. Traverse latticeDataLineage edges strictly inside actor.organizationId & allowedSet
+    for (const edge of orgLineageRows) {
+      const srcCol = val(edge, 'sourceCollection');
+      const srcId = String(val(edge, 'sourceRecordId') ?? '');
+      const tgtCol = val(edge, 'targetCollection');
+      const tgtId = String(val(edge, 'targetRecordId') ?? '');
+      const relType = String(val(edge, 'relationType') || 'lineage');
+
+      let neighborCol = null;
+      let neighborId = null;
+      if (srcCol === cur.collection && srcId === cur.recordId) {
+        neighborCol = tgtCol;
+        neighborId = tgtId;
+      } else if (tgtCol === cur.collection && tgtId === cur.recordId) {
+        neighborCol = srcCol;
+        neighborId = srcId;
+      }
+      if (!neighborCol || !neighborId || !allowedSet.has(neighborCol)) continue;
+
+      let neighborRow = await findRowAcrossOrg(neighborCol, neighborId, neighborId);
+      if (!neighborRow && !ownOnlySet.has(neighborCol)) {
+        const nRepo = db?.getRepository?.(neighborCol);
+        let foreignBlocked = false;
+        if (nRepo && typeof nRepo.findOne === 'function') {
+          const probe = await nRepo.findOne({ filterByTk: /^\d+$/.test(neighborId) ? Number(neighborId) : neighborId });
+          if (probe && val(probe, 'organizationId') !== actor.organizationId) foreignBlocked = true;
+        }
+        if (!foreignBlocked) {
+          neighborRow = { id: neighborId, code: neighborId, organizationId: actor.organizationId };
+        }
+      }
+      if (neighborRow) {
+        enqueueNeighbor(curKey, neighborCol, neighborRow, relType, nextDepth, neighborId);
+      }
+    }
+
+    // 2. Structural cold-chain relationships inside caller's organizationId
+    const curRow = cur.row;
+    const curId = val(curRow, 'id') ?? cur.recordId;
+    const curCode = resolveRowCode(curRow, cur.recordId, val);
+
+    if (cur.collection === 'latticeAssets' || cur.collection === 'latticeIncidentCases' || cur.collection === 'latticeTwinShadows') {
+      const assetInfo = computeAssetMatchKeys(cur.collection, curRow, actor.organizationId, val);
+      const [assets, incidents, shadows, lots, paraDocs] = await Promise.all([
+        cur.collection === 'latticeAssets' ? Promise.resolve([]) : loadOrgRows('latticeAssets'),
+        cur.collection === 'latticeIncidentCases' ? Promise.resolve([]) : loadOrgRows('latticeIncidentCases'),
+        cur.collection === 'latticeTwinShadows' ? Promise.resolve([]) : loadOrgRows('latticeTwinShadows'),
+        loadOrgRows('latticeStockLots'),
+        loadOrgRows('latticeParaDocuments'),
+      ]);
+      for (const a of assets) {
+        const aKeys = computeAssetMatchKeys('latticeAssets', a, actor.organizationId, val);
+        const matchesId = assetInfo.assetId != null && Number(val(a, 'id')) === Number(assetInfo.assetId);
+        const matchesUrn = [...assetInfo.entityKeys].some((k) => aKeys.entityKeys.has(k));
+        if (matchesId || matchesUrn) enqueueNeighbor(curKey, 'latticeAssets', a, 'belongs_to_asset', nextDepth);
+      }
+      for (const inc of incidents) {
+        if (rowMatchesAsset(inc, assetInfo, actor.organizationId, val)) {
+          enqueueNeighbor(curKey, 'latticeIncidentCases', inc, 'has_incident', nextDepth);
+        }
+      }
+      for (const sh of shadows) {
+        if (rowMatchesAsset(sh, assetInfo, actor.organizationId, val)) {
+          enqueueNeighbor(curKey, 'latticeTwinShadows', sh, 'has_twin_shadow', nextDepth);
+        }
+      }
+      for (const lot of lots) {
+        if (rowMatchesAsset(lot, assetInfo, actor.organizationId, val)) {
+          enqueueNeighbor(curKey, 'latticeStockLots', lot, 'stores_lot', nextDepth);
+        }
+      }
+      for (const doc of paraDocs) {
+        if (val(doc, 'relatedCollection') === cur.collection && [String(curId), curCode].includes(String(val(doc, 'relatedRecordId') || ''))) {
+          enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
+        }
+      }
+    }
+
+    if (cur.collection === 'latticeStockLots') {
+      const assetInfo = computeAssetMatchKeys('latticeStockLots', curRow, actor.organizationId, val);
+      const [assets, incidents, shadows, lines, orders, paraDocs] = await Promise.all([
+        loadOrgRows('latticeAssets'),
+        loadOrgRows('latticeIncidentCases'),
+        loadOrgRows('latticeTwinShadows'),
+        loadOrgRows('latticeOrderLines'),
+        loadOrgRows('latticeOrders'),
+        loadOrgRows('latticeParaDocuments'),
+      ]);
+      for (const a of assets) {
+        const aKeys = computeAssetMatchKeys('latticeAssets', a, actor.organizationId, val);
+        if ([...assetInfo.entityKeys].some((k) => aKeys.entityKeys.has(k))) {
+          enqueueNeighbor(curKey, 'latticeAssets', a, 'stored_at_asset', nextDepth);
+        }
+      }
+      for (const inc of incidents) {
+        if (rowMatchesAsset(inc, assetInfo, actor.organizationId, val)) {
+          enqueueNeighbor(curKey, 'latticeIncidentCases', inc, 'exposed_to_incident', nextDepth);
+        }
+      }
+      for (const sh of shadows) {
+        if (rowMatchesAsset(sh, assetInfo, actor.organizationId, val)) {
+          enqueueNeighbor(curKey, 'latticeTwinShadows', sh, 'monitored_by_twin', nextDepth);
+        }
+      }
+      for (const line of lines) {
+        const matchId = curId != null && val(line, 'lotId') != null && Number(val(line, 'lotId')) === Number(curId);
+        const matchCode = curCode && val(line, 'lotCode') && String(val(line, 'lotCode')) === String(curCode);
+        if (!matchId && !matchCode) continue;
+        const lineNode = enqueueNeighbor(curKey, 'latticeOrderLines', line, 'allocated_to_line', nextDepth);
+        if (lineNode && allowedSet.has('latticeOrders')) {
+          const parentOrd = orders.find((o) => (
+            (val(line, 'orderId') != null && Number(val(o, 'id')) === Number(val(line, 'orderId')))
+            || (val(line, 'orderCode') && String(val(o, 'code')) === String(val(line, 'orderCode')))
+          ));
+          if (parentOrd) enqueueNeighbor(lineNode.key, 'latticeOrders', parentOrd, 'belongs_to_order', nextDepth);
+        }
+      }
+      for (const doc of paraDocs) {
+        if (val(doc, 'relatedCollection') === 'latticeStockLots' && [String(curId), curCode].includes(String(val(doc, 'relatedRecordId') || ''))) {
+          enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
+        }
+      }
+    }
+
+    if (cur.collection === 'latticeOrderLines') {
+      const [orders, lots] = await Promise.all([loadOrgRows('latticeOrders'), loadOrgRows('latticeStockLots')]);
+      for (const ord of orders) {
+        if ((val(curRow, 'orderId') != null && Number(val(ord, 'id')) === Number(val(curRow, 'orderId')))
+          || (val(curRow, 'orderCode') && String(val(ord, 'code')) === String(val(curRow, 'orderCode')))) {
+          enqueueNeighbor(curKey, 'latticeOrders', ord, 'belongs_to_order', nextDepth);
+        }
+      }
+      for (const lot of lots) {
+        if ((val(curRow, 'lotId') != null && Number(val(lot, 'id')) === Number(val(curRow, 'lotId')))
+          || (val(curRow, 'lotCode') && String(val(lot, 'lotCode') || val(lot, 'code')) === String(val(curRow, 'lotCode')))) {
+          enqueueNeighbor(curKey, 'latticeStockLots', lot, 'consumes_lot', nextDepth);
+        }
+      }
+    }
+
+    if (cur.collection === 'latticeOrders') {
+      const [lines, lots, epods, paraDocs] = await Promise.all([
+        loadOrgRows('latticeOrderLines'),
+        loadOrgRows('latticeStockLots'),
+        loadOrgRows('latticeEpodRecords'),
+        loadOrgRows('latticeParaDocuments'),
+      ]);
+      for (const line of lines) {
+        const matchOrdId = curId != null && val(line, 'orderId') != null && Number(val(line, 'orderId')) === Number(curId);
+        const matchOrdCode = curCode && val(line, 'orderCode') && String(val(line, 'orderCode')) === String(curCode);
+        if (!matchOrdId && !matchOrdCode) continue;
+        const lineNode = enqueueNeighbor(curKey, 'latticeOrderLines', line, 'has_order_line', nextDepth);
+        if (lineNode && allowedSet.has('latticeStockLots')) {
+          const lot = lots.find((l) => (
+            (val(line, 'lotId') != null && Number(val(l, 'id')) === Number(val(line, 'lotId')))
+            || (val(line, 'lotCode') && String(val(l, 'lotCode') || val(l, 'code')) === String(val(line, 'lotCode')))
+          ));
+          if (lot) enqueueNeighbor(lineNode.key, 'latticeStockLots', lot, 'consumes_lot', nextDepth);
+        }
+      }
+      for (const epod of epods) {
+        const matchOrdId = curId != null && val(epod, 'orderId') != null && Number(val(epod, 'orderId')) === Number(curId);
+        const matchOrdCode = curCode && val(epod, 'orderCode') && String(val(epod, 'orderCode')) === String(curCode);
+        if (matchOrdId || matchOrdCode) enqueueNeighbor(curKey, 'latticeEpodRecords', epod, 'delivered_by_epod', nextDepth);
+      }
+      for (const doc of paraDocs) {
+        if (val(doc, 'relatedCollection') === 'latticeOrders' && [String(curId), curCode].includes(String(val(doc, 'relatedRecordId') || ''))) {
+          enqueueNeighbor(curKey, 'latticeParaDocuments', doc, 'documented_by', nextDepth);
+        }
+      }
+    }
+
+    if (cur.collection === 'latticeEpodRecords') {
+      const orders = await loadOrgRows('latticeOrders');
+      for (const ord of orders) {
+        const matchId = val(curRow, 'orderId') != null && Number(val(ord, 'id')) === Number(val(curRow, 'orderId'));
+        const matchCode = val(curRow, 'orderCode') && String(val(ord, 'code')) === String(val(curRow, 'orderCode'));
+        if (matchId || matchCode) enqueueNeighbor(curKey, 'latticeOrders', ord, 'epod_for_order', nextDepth);
+      }
+    }
+  }
+
+  const nodes = [...visitedNodes.values()];
+  const edges = [...edgesMap.values()];
+  const byCollection = {};
+  let rawScore = 0;
+  let incidentsCount = 0;
+  let activeIncidentsCount = 0;
+  let lotsCount = 0;
+  let ordersCount = 0;
+  let epodCount = 0;
+  let twinShadowsCount = 0;
+  let paraSopsCount = 0;
+
+  for (const n of nodes) {
+    byCollection[n.collection] = (byCollection[n.collection] || 0) + 1;
+    if (n.collection === 'latticeIncidentCases') {
+      incidentsCount += 1;
+      const st = String(n.status || 'open').toLowerCase();
+      if (!['closed', 'cleared', 'resolved'].includes(st)) {
+        activeIncidentsCount += 1;
+        const sev = String(n.severity || 'medium').toLowerCase();
+        rawScore += sev === 'critical' ? 35 : sev === 'high' ? 25 : sev === 'medium' ? 15 : 8;
+      }
+    } else if (n.collection === 'latticeStockLots') {
+      lotsCount += 1;
+      rawScore += 10;
+      const st = String(n.status || '').toLowerCase();
+      if (['hold_mkt', 'quarantined', 'expired'].includes(st) || (n.mktCelsius != null && n.targetTempMaxC != null && n.mktCelsius > n.targetTempMaxC)) {
+        rawScore += 10;
+      }
+    } else if (n.collection === 'latticeOrders') {
+      ordersCount += 1;
+      const st = String(n.status || '').toLowerCase();
+      if (!['cancelled', 'completed'].includes(st)) rawScore += 12;
+    } else if (n.collection === 'latticeTwinShadows') {
+      twinShadowsCount += 1;
+      if (['pending', 'failed', 'drift'].includes(String(n.commandStatus || '').toLowerCase())) rawScore += 10;
+    } else if (n.collection === 'latticeEpodRecords') {
+      epodCount += 1;
+      rawScore += 5;
+    } else if (n.collection === 'latticeParaDocuments') {
+      paraSopsCount += 1;
+    }
+  }
+
+  const impactScore = Math.min(100, rawScore);
+  const impactLevel = impactScore >= 75 ? 'critical' : impactScore >= 45 ? 'high' : impactScore >= 20 ? 'medium' : 'low';
+
+  let telemetry = [];
+  if (args.includeTelemetry && allowedSet.has('latticeTelemetryPoints')) {
+    const assetEntities = new Set(nodes.map((n) => n.assetEntityId).filter(Boolean));
+    for (const n of nodes) {
+      if (n.collection === 'latticeAssets' && n.id != null) {
+        assetEntities.add(`urn:ngsi-ld:Asset:${actor.organizationId}:native:${n.id}`);
+      }
+    }
+    const assetIds = new Set(nodes.filter((n) => n.collection === 'latticeAssets' && n.id != null).map((n) => Number(n.id)));
+    const tpRows = (assetEntities.size || assetIds.size) ? await loadOrgRows('latticeTelemetryPoints') : [];
+    telemetry = tpRows
+      .filter((t) => (
+        (val(t, 'assetEntityId') && assetEntities.has(String(val(t, 'assetEntityId'))))
+        || (val(t, 'assetId') != null && assetIds.has(Number(val(t, 'assetId'))))
+      ))
+      .slice(0, 20)
+      .map((t) => redact({
+        id: val(t, 'id'),
+        assetId: val(t, 'assetId') ?? null,
+        assetEntityId: val(t, 'assetEntityId') || null,
+        metricName: val(t, 'metricName') || 'temperature',
+        numericValue: val(t, 'numericValue') ?? null,
+        unit: val(t, 'unit') || null,
+        quality: val(t, 'quality') || 'good',
+        observedAt: val(t, 'observedAt') || null,
+      }).value);
+  }
+
+  return redact({
+    organizationId: actor.organizationId,
+    root: rootNode,
+    maxDepth,
+    maxNodes: MAX_GRAPH_NODES,
+    truncated,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    impactScore,
+    impactLevel,
+    summary: {
+      totalAffected: Math.max(0, nodes.length - 1),
+      incidentsCount,
+      activeIncidentsCount,
+      lotsCount,
+      ordersCount,
+      epodCount,
+      twinShadowsCount,
+      paraSopsCount,
+      byCollection,
+    },
+    citations: [...new Set(nodes.map((n) => n.citation))],
+    nodes,
+    edges,
+    ...(args.includeTelemetry ? { telemetry } : {}),
+  }).value;
+}
+
+async function assertIncidentUpdateRbac(db, actor, { val, failTool }) {
+  if (actor.isAdmin) return;
+  const resourcesRepo = db?.getRepository?.('dataSourcesRolesResources');
+  if (!resourcesRepo) {
+    throw failTool('RBAC_POLICY_MISSING', 403, 'Chưa có kho cấu hình phân quyền RBAC cho latticeIncidentCases.');
+  }
+  const policies = (await resourcesRepo.find({ filter: { name: 'latticeIncidentCases', dataSourceKey: 'main' }, appends: ['actions'], limit: 50 })) || [];
+  const roleSet = new Set(actor.roleNames || []);
+  const callerPolicies = policies.filter((p) => val(p, 'name') === 'latticeIncidentCases' && roleSet.has(val(p, 'roleName')));
+  const canUpdate = callerPolicies.some((p) => (
+    val(p, 'usingActionsConfig') === false
+    || (val(p, 'actions') || []).some((a) => val(a, 'name') === 'update')
+  ));
+  if (!canUpdate) {
+    throw failTool('RBAC_ACTION_DENIED', 403, 'Vai trò hiện tại không có quyền cập nhật (update) cảnh báo trên latticeIncidentCases.');
+  }
+}
+
+async function executeAlarmActionTool(ctx, db, actor, args, deps) {
+  const { val, failTool } = deps;
+  await assertIncidentUpdateRbac(db, actor, deps);
+
+  const repo = db?.getRepository?.('latticeIncidentCases');
+  if (!repo) throw failTool('INCIDENT_REPO_UNAVAILABLE', 503, 'Kho sự cố chưa sẵn sàng.');
+
+  const cleanCode = typeof args.alarmCode === 'string' ? args.alarmCode.trim() : '';
+  const cleanEntityId = typeof args.assetEntityId === 'string' ? args.assetEntityId.trim() : '';
+  if (args.alarmId == null && !cleanCode && !cleanEntityId) {
+    throw failTool('ALARM_TARGET_REQUIRED', 400, 'Cần alarmId, alarmCode hoặc assetEntityId để xác định cảnh báo.');
+  }
+
+  let row = null;
+  if (args.alarmId != null) {
+    if (!Number.isInteger(args.alarmId) || args.alarmId <= 0) {
+      throw failTool('ALARM_ID_INVALID', 400, 'alarmId phải là số nguyên dương.');
+    }
+    row = await repo.findOne({ filterByTk: args.alarmId });
+    if (!row || val(row, 'organizationId') !== actor.organizationId) {
+      throw failTool('ALARM_NOT_FOUND', 404, 'Không tìm thấy cảnh báo trong phạm vi tổ chức.');
+    }
+  } else if (cleanCode) {
+    const rows = (await repo.find({ filter: { organizationId: actor.organizationId, code: cleanCode }, limit: 5 })) || [];
+    row = rows.find((r) => val(r, 'organizationId') === actor.organizationId && val(r, 'code') === cleanCode) || null;
+    if (!row) throw failTool('ALARM_NOT_FOUND', 404, 'Không tìm thấy cảnh báo theo mã trong phạm vi tổ chức.');
+  } else {
+    const rows = (await repo.find({ filter: { organizationId: actor.organizationId, assetEntityId: cleanEntityId }, sort: ['-id'], limit: 20 })) || [];
+    const orgRows = rows.filter((r) => val(r, 'organizationId') === actor.organizationId && val(r, 'assetEntityId') === cleanEntityId);
+    row = orgRows.find((r) => !['closed', 'cleared'].includes(String(val(r, 'status') || 'open').toLowerCase())) || orgRows[0] || null;
+    if (!row) throw failTool('ALARM_NOT_FOUND', 404, 'Không tìm thấy cảnh báo cho thiết bị này trong phạm vi tổ chức.');
+  }
+
+  const curStatus = String(val(row, 'status') || 'open').toLowerCase();
+  if (curStatus === 'closed' || curStatus === 'cleared') {
+    throw failTool('ALARM_ALREADY_CLEARED', 409, 'Cảnh báo này đã được đóng trước đó.');
+  }
+
+  const alarmId = val(row, 'id');
+  const actorName = String(actor.username || `user-${actor.userId}`).slice(0, 120);
+  const rawNote = typeof args.note === 'string' ? args.note.trim() : '';
+  const now = new Date();
+  const patch = args.action === 'ack'
+    ? {
+        status: 'acknowledged',
+        acknowledgedAt: val(row, 'acknowledgedAt') || now,
+        acknowledgedBy: actorName,
+        ...(rawNote ? { resolutionNote: rawNote.slice(0, 255) } : {}),
+      }
+    : {
+        status: 'closed',
+        clearedAt: now,
+        clearedBy: actorName,
+        closeNote: (rawNote || `Đã đóng cảnh báo bởi ${actorName}`).slice(0, 255),
+      };
+
+  const aiEmployee = ctx?.state?.dxosAiUsername || null;
+  const approvedQueueId = ctx?.state?.dxosApprovedQueueId || null;
+  if (!approvedQueueId) {
+    const effectiveMode = await resolveEffectiveToolMode(db, {
+      aiEmployee,
+      toolName: 'dxos_alarm_action',
+      defaultPermission: 'ASK',
+    });
+    if (effectiveMode === 'OFF') {
+      throw failTool('TOOL_PERMISSION_OFF', 403, 'Công cụ dxos_alarm_action đang tắt trên hồ sơ AI này.');
+    }
+    if (args.requireApproval === true || effectiveMode === 'ASK') {
+      const diffPreview = buildDiffPreview({
+        collection: 'latticeIncidentCases',
+        operation: 'update',
+        recordId: alarmId,
+        existing: row,
+        values: patch,
+      });
+      const queued = await enqueueAiApproval(db, {
+        actor,
+        aiEmployee,
+        toolName: 'dxos_alarm_action',
+        targetCollection: 'latticeIncidentCases',
+        targetRecordId: alarmId,
+        operation: 'update',
+        proposedArgs: {
+          action: args.action,
+          alarmId,
+          ...(rawNote ? { note: rawNote.slice(0, 255) } : {}),
+        },
+        diffPreview,
+        riskLevel: args.action === 'clear' ? 'high' : computeRiskLevel({ operation: 'update', values: patch, requireApproval: args.requireApproval === true, existing: row }),
+      });
+      return {
+        status: 'pending_approval',
+        approvalId: queued.id,
+        message: 'Yêu cầu xử lý cảnh báo đã vào hàng chờ phê duyệt con người (HITL).',
+        diffPreview: queued.diffPreview,
+      };
+    }
+  }
+
+  if (typeof row.update === 'function') {
+    await row.update(patch, { context: ctx });
+  } else if (typeof repo.update === 'function') {
+    await repo.update({ filterByTk: alarmId, values: patch });
+  }
+
+  return {
+    updated: true,
+    action: args.action,
+    alarmId,
+    alarmCode: val(row, 'code') || null,
+    organizationId: actor.organizationId,
+    status: patch.status,
+    acknowledgedBy: patch.acknowledgedBy || val(row, 'acknowledgedBy') || null,
+    clearedBy: patch.clearedBy || val(row, 'clearedBy') || null,
+    resolutionNote: patch.resolutionNote || val(row, 'resolutionNote') || null,
+    closeNote: patch.closeNote || val(row, 'closeNote') || null,
+  };
+}
+
+module.exports = { createCopilotTools, analyzeGraphImpact };
