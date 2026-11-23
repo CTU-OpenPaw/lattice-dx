@@ -1,50 +1,57 @@
 # Nguồn và giấy phép
 
-Mã gốc LatticeDX dùng Apache-2.0, toàn văn ở root [`LICENSE`](../LICENSE) và thông báo phân tách phạm vi tại [`NOTICE`](../NOTICE). Giấy phép đó không thay thế giấy phép dependency hay dịch vụ container bên ngoài. Source NocoBase được tham chiếu bằng submodule `upstream/nocobase` và không sao chép vào Docker build của API, phạm vi Vitest hay gói phát hành `.tar.gz`. Runtime riêng dùng image upstream; kiểm tra nguồn/license ở [nocobase-source-review.md](nocobase-source-review.md).
+Mã gốc LatticeDX **`v1.0.0`** dùng **Apache-2.0**, toàn văn ở root [`LICENSE`](../LICENSE) và thông báo phân tách phạm vi tại [`NOTICE`](../NOTICE). Giấy phép đó không thay thế giấy phép dependency hay dịch vụ container bên ngoài. Source NocoBase được tham chiếu bằng submodule `upstream/nocobase` và không sao chép vào Docker build của API, phạm vi Vitest hay gói phát hành `latticedx-1.0.0-src.tar.gz`. Runtime riêng dùng image upstream; kiểm tra nguồn/license ở [nocobase-source-review.md](nocobase-source-review.md) và SBOM CycloneDX 1.5 tự động tại [`docs/sbom-cyclonedx.json`](sbom-cyclonedx.json).
 
-| Thành phần trực tiếp | Nguồn / license / Digest Compose |
+## 1. Thành phần trực tiếp & toàn bộ 20 OCI Images khóa Digest `@sha256:`
+
+Mọi định danh giấy phép dưới đây được đồng bộ 1-1 với `OCI_IMAGE_LICENSES` trong [`scripts/generate-sbom.mjs`](../scripts/generate-sbom.mjs) và [`docs/sbom-cyclonedx.json`](sbom-cyclonedx.json):
+
+| Thành phần trực tiếp | Nguồn / Giấy phép (SPDX) / Digest Compose |
 | --- | --- |
-| React | https://react.dev — MIT (UI plugin NocoBase) |
-| Fastify | https://github.com/fastify/fastify — MIT |
-| jose | https://github.com/panva/jose — MIT |
-| node-postgres | https://github.com/brianc/node-postgres — MIT |
-| Keycloak 26.8.2 | https://github.com/keycloak/keycloak — Apache-2.0 (`quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3` trong `infra/compose/core.yml`, `prod.yml`) |
-| APISIX 3.19.0 | https://github.com/apache/apisix — Apache-2.0 (`apache/apisix:3.19.0-debian@sha256:9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141` trong `infra/compose/core.yml`, `prod.yml`) |
-| PostgreSQL 16.16 | https://www.postgresql.org/about/licence/ — PostgreSQL License (`postgres:16.16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d` trong `core.yml`, `prod.yml`) |
-| pgvector 0.8.1 (PG 16) | https://github.com/pgvector/pgvector — PostgreSQL License (`pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337` trong `nocobase.yml`, `native-rehearsal.yml`, `prod.yml`) |
-| RustFS 1.0.6 | https://github.com/rustfs/rustfs — Apache-2.0 (`rustfs/rustfs:1.0.6@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a` trong `prod.yml`) |
-| Caddy 2.10 | https://github.com/caddyserver/caddy — Apache-2.0 (`caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d` trong `prod.yml`) |
-| NocoBase runtime 2.2.50 | `nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777` trong `infra/compose/nocobase.yml`, `native-rehearsal.yml` và `prod.yml` — NocoBase License Agreement (2026-02-24: Apache-2.0 + Clauses 4.2, 5.1–5.4; một số package/plugin mang AGPL-3.0 / Commercial; giữ Clause 5.2 `Powered by NocoBase`, `https://www.nocobase.com`). |
-| FIWARE Orion-LD 1.12.0 | https://github.com/FIWARE/context.Orion-LD — AGPL-3.0 (`fiware/orion-ld:1.12.0@sha256:f562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b` trong `integration.yml`, `prod.yml`); giao tiếp qua HTTP NGSI-LD |
-| MongoDB 8.0 | https://github.com/mongodb/mongo — SSPL-1.0 (`mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01` trong `integration.yml`, `prod.yml`); DB container riêng cho Orion-LD |
-| n8n 2.48.1 | https://github.com/n8n-io/n8n — Sustainable Use License (non-OSI; `n8nio/n8n:2.48.1@sha256:5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f` trong `integration.yml`, `prod.yml`); dịch vụ tự động hóa độc lập |
-| ClamAV 1.5.5 | https://github.com/Cisco-Talos/clamav — GPL-2.0 (`clamav/clamav:1.5.5@sha256:12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8` trong `core.yml`, `prod.yml`); chạy dịch vụ độc lập qua TCP socket |
-| Eclipse Mosquitto 2.0.21 | https://github.com/eclipse-mosquitto/mosquitto — EPL-2.0 (`eclipse-mosquitto:2.0.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353` trong `iiot.yml`); MQTT broker IIoT chuẩn OSI |
-| Node-RED 4.0.9 | https://github.com/node-red/node-red — Apache-2.0 (`nodered/node-red:4.0.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5` trong `iiot.yml`); chuẩn hóa giao thức IIoT |
-| TimescaleDB OSS 2.19.3 | https://github.com/timescale/timescaledb — Apache-2.0 (`timescale/timescaledb:2.19.3-pg16-oss@sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72` trong `iiot.yml`); kho chuỗi thời gian OSS thuần |
+| React | https://react.dev — `MIT` (UI plugin NocoBase, host-provided) |
+| Fastify `5.12.8` | https://github.com/fastify/fastify — `MIT` |
+| jose `6.2.12` | https://github.com/panva/jose — `MIT` |
+| node-postgres (`pg`) `8.23.1` | https://github.com/brianc/node-postgres — `MIT` |
+| PostgreSQL `16.16` | https://www.postgresql.org/about/licence/ — `PostgreSQL` (`postgres:16.16-alpine@sha256:f2f98726820d0342055351c6e9d36e705f5bfffb3dd53ff556325114b08afb6d` trong `infra/compose/core.yml`, `prod.yml`) |
+| pgvector `0.8.1` (PG 16) | https://github.com/pgvector/pgvector — `PostgreSQL` (`pgvector/pgvector:0.8.1-pg16@sha256:33198da2828a14c30348d2ccb4750833d5ed9a44c88d840a0e523d7417120337` trong `nocobase.yml`, `native-rehearsal.yml`, `prod.yml`) |
+| Redis `7.4` | https://github.com/redis/redis — `LicenseRef-RSALv2 OR SSPL-1.0` (`redis:7.4-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe` trong `nocobase.yml`, `prod.yml`) |
+| RustFS `1.0.6` | https://github.com/rustfs/rustfs — `Apache-2.0` (`rustfs/rustfs:1.0.6@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a` trong `prod.yml`) |
+| Caddy `2.10` | https://github.com/caddyserver/caddy — `Apache-2.0` (`caddy:2.10-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d` trong `prod.yml`) |
+| Keycloak `26.8.2` | https://github.com/keycloak/keycloak — `Apache-2.0` (`quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3` trong `core.yml`, `prod.yml`) |
+| keycloak-config-cli `6.5.1-26` | https://github.com/adorsys/keycloak-config-cli — `Apache-2.0` (`adorsys/keycloak-config-cli:6.5.1-26@sha256:1b22dfaa9ae0c71f74b0342f9221a6510f272da5def683dbba26a98e6b1b1411` trong `prod.yml`) |
+| Apache APISIX `3.19.0` | https://github.com/apache/apisix — `Apache-2.0` (`apache/apisix:3.19.0-debian@sha256:9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141` trong `core.yml`, `prod.yml`) |
+| NocoBase runtime `2.2.50` | `nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777` trong `nocobase.yml`, `native-rehearsal.yml`, `prod.yml` — `NocoBase License Agreement (2026-02-24; Apache-2.0 + Clauses 4.2, 5.1-5.4)` (giữ Clause 5.2 `Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`). |
+| FIWARE Orion-LD `1.12.0` | https://github.com/FIWARE/context.Orion-LD — `AGPL-3.0-only` (`fiware/orion-ld:1.12.0@sha256:f562a93ed84cccae05063688e1c3605f75060d0c7b9cd004561eec43bcbd613b` trong `integration.yml`, `prod.yml`); giao tiếp qua HTTP NGSI-LD |
+| MongoDB `8.0` | https://github.com/mongodb/mongo — `SSPL-1.0` (`mongo:8.0@sha256:479e85ced54ffb8a40dade1dcde2da2a9ae858515b9415e9cc54bfb8f0575d01` trong `integration.yml`, `prod.yml`); DB container riêng cho Orion-LD |
+| n8n `2.48.1` | https://github.com/n8n-io/n8n — `Sustainable Use License` (non-OSI; `n8nio/n8n:2.48.1@sha256:5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f` trong `integration.yml`, `prod.yml`); dịch vụ tự động hóa độc lập |
+| ClamAV `1.5.5` | https://github.com/Cisco-Talos/clamav — `GPL-2.0-only` (`clamav/clamav:1.5.5@sha256:12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8` trong `core.yml`, `prod.yml`); chạy dịch vụ độc lập qua TCP socket |
+| Eclipse Mosquitto `2.0.21` | https://github.com/eclipse-mosquitto/mosquitto — `EPL-2.0 OR BSD-3-Clause` (`eclipse-mosquitto:2.0.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353` trong `iiot.yml`); MQTT broker IIoT chuẩn OSI |
+| Node-RED `4.0.9` | https://github.com/node-red/node-red — `Apache-2.0` (`nodered/node-red:4.0.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5` trong `iiot.yml`); chuẩn hóa giao thức IIoT & downlink Twin |
+| TimescaleDB OSS `2.19.3` | https://github.com/timescale/timescaledb — `Apache-2.0` (`timescale/timescaledb:2.19.3-pg16-oss@sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72` trong `iiot.yml`); kho chuỗi thời gian OSS thuần (`-oss`) |
+| OpenTelemetry Collector Contrib `0.123.0` | https://github.com/open-telemetry/opentelemetry-collector-contrib — `Apache-2.0` (`otel/opentelemetry-collector-contrib:0.123.0@sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2` trong `prod.yml`) |
+| Prometheus `v3.3.0` | https://github.com/prometheus/prometheus — `Apache-2.0` (`prom/prometheus:v3.3.0@sha256:339ce86a59413be18d0e445472891d022725b4803fab609069110205e79fb2f1` trong `prod.yml`) |
+| Grafana OSS `11.5.8` | https://github.com/grafana/grafana — `AGPL-3.0-only` (`grafana/grafana-oss:11.5.8@sha256:b8121de93047fd77c77de806bae9706e7d60de21c3bd5381a5db0167f94c6a48` trong `prod.yml`); dịch vụ dashboard quan sát 360° tách biên mạng container |
+| Gotenberg `8.20.1` | https://github.com/gotenberg/gotenberg — `MIT` (`gotenberg/gotenberg:8.20.1@sha256:cda4386c7ed38f18bc6897828be01ba7361c99929a5c84ec5e293d7916e29bac` trong `prod.yml`); kết xuất PDF tùy chọn (profile `pdf`) |
 
-## Cam kết Thuần khiết Giấy phép OSS (OSS License Purity Guarantee)
+## 2. Cam kết Thuần khiết Giấy phép OSS & SBOM CycloneDX 1.5
 
-Khi thiết kế kiến trúc mở rộng `v0.3.0`, nhóm **CTU-OpenPaw** chủ động loại bỏ hoàn toàn các thành phần mang giấy phép nguồn hạn chế **BSL-1.1** (ví dụ **ThingsBoard**, **EMQX**) khỏi ngăn xếp IIoT và quan sát hệ thống, thay thế 100% bằng các giải pháp được OSI phê chuẩn (permissive / weak-copyleft):
-- **Node-RED (`Apache-2.0`)**, **TimescaleDB bản `-oss` (`Apache-2.0`)**, **OpenTelemetry Collector (`Apache-2.0`)** và **Prometheus (`Apache-2.0`)** thay cho các nền tảng phân tích/IIoT có điều khoản BSL-1.1 hoặc TSL.
-- **Eclipse Mosquitto (`EPL-2.0`)** thay cho EMQX nhằm bảo đảm broker MQTT thuần OSI weak-copyleft.
-- **Gotenberg (`MIT`)** cho kết xuất tài liệu container hóa tùy chọn.
+Khi phát triển từ nhánh `v0.3.0` lên **`v1.0.0`**, nhóm **CTU-OpenPaw** chủ động loại bỏ hoàn toàn các thành phần mang giấy phép nguồn hạn chế **BSL-1.1 / Business Source License** (như **ThingsBoard**, **EMQX**) khỏi toàn bộ mã nguồn, lockfile và OCI container:
+- **Kiểm chứng tự động qua CycloneDX 1.5 SBOM:** Lệnh `pnpm release:sbom` (`node scripts/generate-sbom.mjs --out=docs/sbom-cyclonedx.json`) tạo hồ sơ [`docs/sbom-cyclonedx.json`](sbom-cyclonedx.json) gồm **`209` thành phần** (`workspace=12`, `npm=177`, `oci=20`, trong đó `208/209` thành phần có giấy phép đã phân giải — duy nhất `fsevents@2.3.3` là tùy chọn đặc thù macOS không cài trên Windows), đồng thời từ chối mọi gói hoặc image chứa `BSL-1.1`, `thingsboard` hoặc `emqx`.
+- **Biên giới container tách biệt:** Các dịch vụ ngoài như **Grafana OSS `11.5.8` (`AGPL-3.0-only`)**, **FIWARE Orion-LD `1.12.0` (`AGPL-3.0-only`)**, **ClamAV `1.5.5` (`GPL-2.0-only`)**, **MongoDB `8.0` (`SSPL-1.0`)**, **Redis `7.4` (`LicenseRef-RSALv2 OR SSPL-1.0`)** và **n8n `2.48.1` (`Sustainable Use License`)** chỉ chạy qua tiến trình OCI tách biệt, giao tiếp qua giao thức mạng chuẩn (HTTP/TCP/SQL/MQTT) và không bị đóng gói tĩnh hay liên kết vào mã nguồn Apache-2.0 của LatticeDX.
 
-Thông tin trên là danh sách nguồn/license cấp project, không phải tư vấn pháp lý toàn diện. Node, pnpm, TypeScript, Vitest, tsx, typings và dependency gián tiếp giữ thông báo riêng trong package (`123` nhóm entry trong [dependency-inventory.md](dependency-inventory.md)). Linux image có thêm package hệ thống với license riêng.
+Thông tin trên là danh sách nguồn/license cấp project, không phải tư vấn pháp lý toàn diện. Xem kiểm kê chi tiết các nhóm package npm trong [dependency-inventory.md](dependency-inventory.md), quy trình build từ nguồn trong [build-from-source.md](build-from-source.md) và checklist PoF trong [oss-pof-compliance.md](oss-pof-compliance.md).
 
-Dependencies npm khóa bằng `pnpm-lock.yaml`; container images trong `infra/compose/*.yml` đều khóa digest `@sha256:`. Quy trình build từ nguồn được ghi tại [build-from-source.md](build-from-source.md), kiểm toán PoF tại [oss-pof-compliance.md](oss-pof-compliance.md).
+## 3. Phạm vi 7 Plugin Native NocoBase (`v1.0.0`)
 
-## Phạm vi plugin native
-
-| Package của nhóm | Phiên bản hiện tại | Vai trò |
-| --- | --- | --- |
-| `@latticedx/plugin-lattice-foundation` | `0.27.0` | Collections nghiệp vụ, migration, guard, Multi-Portal UI, Record Chatter, Chứng từ bất biến, Chuông thông báo SSE, SLA Engine và tích hợp native. |
-| `@latticedx/plugin-enterprise-auth` | `0.3.0` | Cầu nối đăng nhập doanh nghiệp qua Keycloak (OIDC + PKCE), Redis session cache, Backchannel Logout và đồng bộ vai trò 2 chiều. |
-| `@latticedx/plugin-action-bridge` | `0.3.0` | Kết nối giao diện và action proxy với API LatticeDX. |
-| `@latticedx/plugin-dxos-para` | `0.3.0` | Không gian tri thức P.A.R.A. (`latticeParaDocuments`), trích xuất PDF/DOCX (`latticeParaChunks`), ACL 7 vai trò và Semantic Neural + Hybrid RAG (`latticePara:hybridSearch`, `reindex`). |
-| `@latticedx/plugin-dxos-blocks` | `0.3.0` | 7 Native v2 `BlockModel` tùy biến trong UI Editor, IIoT `telemetryIngest` + biểu đồ `timeseries-line`, xuất báo cáo RBAC CSV/XLSX/PDF Unicode và Command Palette `Ctrl+K`. |
-| `@latticedx/plugin-dxos-studio` | `0.3.0` | Màn hình `/admin/settings/dxos-studio`, 4 mẫu quy trình Poka-yoke, `composePortals` + `/mobile`, Outbox/DLQ replay, GitOps Solution Bundle apply/rollback và `latticeServiceTickets`. |
-| `@latticedx/plugin-dxos-ai` | `0.3.0` | Màn hình `/admin/settings/dxos-ai`, 15 Unified Tools, Nhân sự AI động, Hàng chờ Phê duyệt AI HITL (`latticeAiApprovalQueue`), Hạn mức AI bền vững PostgreSQL (`latticeAiQuotaUsage`), Time-Machine và 2-Way MCP Gateway. |
+| Package của nhóm | Phiên bản | Vai trò |
+| --- | :---: | --- |
+| `@latticedx/plugin-lattice-foundation` | `1.0.0` | Collections nghiệp vụ, 7 vai trò `ldx_*`, Multi-Portal + Mobile Field PWA `/v/mobile`, PaaS API Keys (`ldx_pat_*`), Sổ cái Ed25519/Merkle PKI, Phân tầng Hot–Warm–Cold/Lineage/Quarantine/MKT, 34 bảng PostgreSQL RLS, OpenAPI 3.1/AsyncAPI 3.0 & Prometheus `/api/dxos:metrics`. |
+| `@latticedx/plugin-enterprise-auth` | `1.0.0` | Cầu nối đăng nhập doanh nghiệp qua Keycloak (OIDC + PKCE), Redis session cache, Backchannel Logout và đồng bộ vai trò 2 chiều. |
+| `@latticedx/plugin-action-bridge` | `1.0.0` | Kết nối giao diện và action proxy với API LatticeDX. |
+| `@latticedx/plugin-dxos-para` | `1.0.0` | Không gian tri thức P.A.R.A. (`latticeParaDocuments`), trích xuất PDF/DOCX/XLSX/PPTX (`latticeParaChunks`), OCR Form Autofill (`latticePara:extractFormFields`), ACL 7 vai trò và Hybrid RAG `pgvector` HNSW + RRF. |
+| `@latticedx/plugin-dxos-blocks` | `1.0.0` | **10 Native v2 `BlockModel`s** (bao gồm `DxosWebGisBlockModel` & `DxosKanbanScheduleBlockModel`), Digital Twin 2 chiều + Node-RED downlink, Bulk Import 2 pha, IIoT `telemetryIngest` + cảnh báo, xuất báo cáo RBAC CSV/XLSX/PDF Unicode và Command Palette `Ctrl+K`. |
+| `@latticedx/plugin-dxos-studio` | `1.0.0` | Màn hình `/admin/settings/dxos-studio` (6 tab Studio + 6 Governance Consoles), OMS/WMS/FEFO/ePOD + `publicTrack`, DMN Engine, Ủy quyền vai trò, 4 quy trình Poka-yoke, Outbox/DLQ và GitOps Solution Bundle v3 (`latticedx.solution-bundle/v3`). |
+| `@latticedx/plugin-dxos-ai` | `1.0.0` | Màn hình `/admin/settings/dxos-ai` (6 tab), **17 Unified AI Tools** (`11` Admin Builder + `6` Operational), Proactive Incident Triage (`dxosAi:triageScan`), Hàng chờ AI HITL (`latticeAiApprovalQueue`), Hạn mức PostgreSQL (`latticeAiQuotaUsage`), Time-Machine và 2-Way MCP Gateway (`/api/dxos-mcp`, `/api/dxos-mcp/it-ot`). |
 
 Cả bảy package khai báo `Apache-2.0` cho mã nhóm, có file `LICENSE` + `README.md` riêng và dùng SDK từ host (`sdkProvidedByHost: true`, `testedRuntime: "2.2.50"`). Giữ thông báo bản quyền và giấy phép của dependency được đóng gói cùng plugin theo phạm vi áp dụng của chúng; xem tổng hợp tại [`COPYRIGHT.txt`](../COPYRIGHT.txt).
 

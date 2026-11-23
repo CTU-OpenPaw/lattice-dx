@@ -1,6 +1,6 @@
 # Thiết kế DX-OS tối thiểu
 
-Ngày: 2026-10-06. Trạng thái: phương án đề xuất để làm cơ sở triển khai. Chưa cài hoặc tích hợp những dịch vụ mới trong tài liệu này.
+Ngày khởi tạo: 2026-10-06 (lịch sử kiến trúc nền). Cập nhật đối chiếu nghiệm thu **`v1.0.0`**: **2026-11-23** — toàn bộ 11 hạng mục ở Mục 6 đã chuyển sang trạng thái **Đạt (`v1.0.0`)** với bằng chứng thực thi trong kho mã nguồn.
 
 ## 1. Mục tiêu và ranh giới
 
@@ -12,40 +12,38 @@ Danh sách bảy lớp công nghệ là tham chiếu; các nguyên lý kỹ thu�
 
 ## 2. Thành phần đề xuất
 
-| Năng lực | Thành phần | Trách nhiệm | Trạng thái |
+| Năng lực | Thành phần | Trách nhiệm | Trạng thái (khởi tạo 2026-10-06) |
 | --- | --- | --- | --- |
-| Identity/SSO | Keycloak | Định danh, đăng nhập OIDC và service account | Đề xuất |
-| API Gateway | Apache APISIX | Cửa vào API, kiểm tra token theo cấu hình, định tuyến, giới hạn lưu lượng | Đề xuất |
-| Dữ liệu cấu trúc | PostgreSQL + API của nhóm | Hồ sơ, quyền nghiệp vụ, metadata và nhật ký tác vụ | Đề xuất |
-| Dữ liệu phi cấu trúc | SeaweedFS S3 + API tệp | Nội dung tệp; PostgreSQL giữ metadata và quyền truy cập | Đề xuất |
-| Workflow | Flowable OSS engine/REST | Trạng thái quy trình, user task, service task, lịch sử thực thi | Đề xuất |
-| Giao diện | Next.js web | Cổng truy cập và giao diện minh họa ban đầu | Bộ khung đang chạy |
-| Studio low-code | NocoBase | Tạo biểu mẫu, màn hình và cấu hình nghiệp vụ | Đã clone, giấy phép chưa xác minh đủ |
-| Agent | Worker của nhóm | Nhận tác vụ, gọi mô hình/tools và trả đề xuất | Chỉ có demo kết nối |
-| NGSI-LD | Broker phù hợp sau kiểm tra | Thực thể ngữ cảnh và subscriptions | Chưa chọn phiên bản/broker |
+| Identity/SSO | Keycloak | Định danh, đăng nhập OIDC và service account | Đề xuất (đã hiện thực `26.8.2` + `plugin-enterprise-auth`) |
+| API Gateway | Apache APISIX | Cửa vào API, kiểm tra token theo cấu hình, định tuyến, giới hạn lưu lượng | Đề xuất (đã hiện thực `3.19.0` + `Caddy 2.10`) |
+| Dữ liệu cấu trúc | PostgreSQL + API của nhóm | Hồ sơ, quyền nghiệp vụ, metadata và nhật ký tác vụ | Đề xuất (đã hiện thực `PG 16.16` + `pgvector 0.8.1` + `34`-bảng RLS) |
+| Dữ liệu phi cấu trúc | RustFS S3 / S3-compatible + API tệp | Nội dung tệp; PostgreSQL giữ metadata và quyền truy cập | Đề xuất (đã hiện thực `RustFS 1.0.6` + `apps/file-scanner` + `ClamAV 1.5.5`) |
+| Workflow | Workflow engine/REST + n8n | Trạng thái quy trình, user task, service task, lịch sử thực thi | Đề xuất (đã hiện thực NocoBase Workflow + Poka-yoke + n8n `2.48.1`) |
+| Giao diện | Multi-Portal + NocoBase UI | Cổng truy cập và giao diện minh họa | Đã nâng cấp lên 4 cổng `/p/*` + `/v/mobile` + 10 BlockModel v2 |
+| Studio low-code | NocoBase `2.2.50` | Tạo biểu mẫu, màn hình và cấu hình nghiệp vụ (Plane #6) | Đã tích hợp chuẩn Clause 5.2 (`7` plugin `Apache-2.0` `1.0.0`) |
+| Agent | DX-OS AI Workforce & MCP | Nhận tác vụ, gọi tools/GraphRAG và trả đề xuất HITL | Đã hiện thực `17` Unified Tools + Proactive Triage + `/api/dxos-mcp` |
+| NGSI-LD | FIWARE Orion-LD `1.12.0` + IIoT OSI | Thực thể ngữ cảnh, Digital Twin Shadow và subscriptions | Đã hiện thực Orion-LD + Mosquitto + Node-RED + TimescaleDB OSS |
 
 Nguồn kiểm tra ban đầu: [Keycloak](https://github.com/keycloak/keycloak), [APISIX](https://github.com/apache/apisix), [PostgreSQL license](https://www.postgresql.org/about/licence/), [Flowable OSS](https://github.com/flowable/flowable-engine), [Flowable documentation](https://www.flowable.com/open-source/docs/bpmn/ch02-GettingStarted), [SeaweedFS](https://github.com/seaweedfs/seaweedfs).
-
-SeaweedFS là ứng viên S3 có LICENSE Apache-2.0 ở repo; không coi đó là kết quả kiểm toán dependency hoặc image. Chọn phiên bản, ghi checksum/image digest và kiểm tra license trước mỗi bước tích hợp. Không sử dụng plugin thương mại hoặc UI thương mại của Flowable trong phạm vi mặc định.
 
 ## 3. Sơ đồ vận hành
 
 ```mermaid
 flowchart TB
-  Web[Web của nhóm - tầng giao diện]
-  Studio[NocoBase Studio - có điều kiện giấy phép]
-  Identity[Keycloak]
-  Gateway[APISIX]
-  API[API headless của nhóm]
-  Workflow[Flowable]
-  DB[(PostgreSQL)]
-  Files[(S3 Storage)]
-  Broker[NGSI-LD Broker]
-  Worker[Agent worker]
+  Web[Portals & /v/mobile PWA]
+  Studio[NocoBase 2.2.50 Studio - Plane #6]
+  Identity[Keycloak 26.8.2]
+  Gateway[Caddy 2.10 + APISIX 3.19.0]
+  API[Headless PaaS API & 7 Plugins]
+  Workflow[Poka-yoke Workflows + DMN + n8n]
+  DB[(PostgreSQL 16 + pgvector + RLS)]
+  Files[(RustFS 1.0.6 + file-scanner + ClamAV)]
+  Broker[Orion-LD 1.12.0 + Mosquitto + Node-RED]
+  Worker[DX-OS AI Workforce & MCP]
   Web --> Identity
-  Studio -. SSO qua adapter đã kiểm chứng .-> Identity
+  Studio -. OIDC+PKCE / Backchannel .-> Identity
   Web --> Gateway
-  Studio -. API/plugin .-> Gateway
+  Studio --> Gateway
   Gateway --> API
   API --> DB
   API --> Files
@@ -55,69 +53,56 @@ flowchart TB
   Worker --> API
 ```
 
-SSO NocoBase là mục tiêu cần kiểm chứng bằng plugin/adaptor hợp lệ; chưa giả định có connector miễn phí sẵn. UI quản trị của dịch vụ upstream chỉ phục vụ vận hành nội bộ, không là điều kiện sử dụng API. Nền tảng người dùng thuộc tầng giao diện; endpoint lõi không render màn hình nghiệp vụ.
-
 ## 4. Quyền sở hữu dữ liệu và quyền truy cập
 
 - Keycloak quản lý danh tính; API quản lý quyền nghiệp vụ theo subject và tổ chức. Không coi token hợp lệ là đủ quyền trên mọi dữ liệu.
 - API sở hữu hồ sơ nghiệp vụ và metadata tệp; workflow engine sở hữu tiến độ thực thi. Hai bên liên hệ bằng process ID và business ID, không cùng tự ghi một trạng thái quy trình.
 - S3 giữ nội dung tệp; truy cập phải đi qua kiểm tra quyền hoặc URL có thời hạn sau khi kiểm tra quyền. Upload phải được kiểm dịch trước khi người khác tải xuống.
 - Broker quản lý thuộc tính ngữ cảnh; dữ liệu đo có thời điểm và nguồn. Không đồng bộ hai chiều toàn bộ bảng/thuộc tính mặc định.
-- Studio giữ cấu hình giao diện và dữ liệu nội bộ cần thiết của nó trong database riêng. Dùng plugin/custom data source gọi API cho hồ sơ dùng chung; đây là công việc phát triển và kiểm chứng, không là tính năng đã có.
-- Worker dùng danh tính dịch vụ, công cụ được cho phép và quyền giới hạn. Không truy cập thẳng database của ứng dụng khác. Agent đề xuất, user task ghi nhận quyết định của con người.
+- Studio giữ cấu hình giao diện và dữ liệu nội bộ cần thiết của nó trong database riêng hoặc cấu hình plugin `sdkProvidedByHost: true`.
+- Worker dùng danh tính dịch vụ, công cụ được cho phép và quyền giới hạn. Không truy cập thẳng database của ứng dụng khác. Agent đề xuất, user task / hàng chờ HITL ghi nhận quyết định của con người.
 
 ## 5. Luồng minh họa đầu tiên
 
-Chọn một luồng thử năng lực thuộc không gian P: tiếp nhận hồ sơ, đính kèm, phân tích và phê duyệt. Đây chưa là quyết định ngách nghiệp vụ cuối cùng.
+1. Người dùng đăng nhập bằng Keycloak (`plugin-enterprise-auth`).
+2. Gửi hồ sơ qua gateway (`Caddy` -> `APISIX`); API kiểm tra quyền RBAC/RLS và lưu vào PostgreSQL.
+3. Upload tệp, kiểm dịch ClamAV (`apps/file-scanner`), lưu nội dung ở RustFS S3 và metadata tại API.
+4. API khởi tạo quy trình Poka-yoke; worker/triage tạo đề xuất có bằng chứng và chuyển sang duyệt con người (Manual Task / AI HITL).
+5. Người được giao nhiệm vụ xem hồ sơ, duyệt hoặc từ chối qua API/UI hoặc DMN/Delegation. Hệ thống ghi vết Chatter, Chứng từ bất biến và Sổ cái Ed25519/Merkle.
+6. Người dùng xem trạng thái và phả hệ dữ liệu từ API/WebGIS/Kanban; dữ liệu bền vững sau khởi động lại và diễn tập khôi phục.
 
-1. Người dùng đăng nhập bằng Keycloak.
-2. Gửi hồ sơ qua gateway; API kiểm tra quyền và lưu vào PostgreSQL.
-3. Upload tệp, kiểm dịch, lưu nội dung ở S3 và metadata tại API.
-4. API khởi tạo quy trình; workflow gọi worker để tạo đề xuất và chuyển sang user task.
-5. Người được giao nhiệm vụ xem hồ sơ, duyệt hoặc từ chối qua API. Workflow ghi lịch sử và kết thúc/đi tiếp theo điều kiện.
-6. Người dùng xem trạng thái từ API; kết quả tồn tại sau khi khởi động lại dịch vụ.
+## 6. Đối chiếu yêu cầu và tiêu chí nghiệm thu (`v1.0.0`)
 
-Ở bước đầu, web hiện tại cung cấp form. Khi NocoBase đủ điều kiện, tạo cùng một form bằng Studio và gọi cùng API để chứng minh tái sử dụng lõi.
+Bảng đối chiếu dưới đây cập nhật trạng thái thực tế của toàn bộ 11 tiêu chí thiết kế tối thiểu trên nhánh phát hành **`v1.0.0`** (chi tiết ánh xạ đầy đủ theo khung điểm OLP PMNM 2026 xem tại [olp-2026-architecture-matrix.md](olp-2026-architecture-matrix.md)):
 
-## 6. Đối chiếu yêu cầu và tiêu chí nghiệm thu
-
-| Yêu cầu | Bằng chứng cần có | Hiện tại |
+| Yêu cầu | Bằng chứng cần có | Hiện tại (`v1.0.0`) |
 | --- | --- | --- |
-| Lõi headless | Gọi API và hoàn thành quy trình khi tắt giao diện | Chưa |
-| Identity/SSO | Hai ứng dụng dùng cùng danh tính; request không có token bị từ chối | Chưa |
-| Gateway | Route và chính sách được cấu hình; backend nghiệp vụ không mở trực tiếp ra ngoài | Chưa |
-| Dữ liệu cấu trúc/phi cấu trúc | Lưu hồ sơ và tệp; quyền đọc/ghi; dữ liệu còn sau restart | Chưa |
-| Workflow | Start, chờ duyệt, hoàn thành và truy xuất lịch sử qua API | Chưa |
-| Ứng dụng H-P-D-I | Luồng nghiệp vụ dùng được từ giao diện | Chỉ có demo kết nối |
-| Vòng đời dữ liệu | Dữ liệu tác nghiệp tách với bản lịch sử; có job xuất dữ liệu và truy vấn bản xuất | Chưa |
-| IT/OT | Sự kiện dữ liệu hiện trường từ NGSI-LD tạo hoặc bổ sung một hồ sơ/quy trình | Chưa |
-| Nguồn gốc và chất lượng | Trace được hồ sơ → bản đo/tệp → nguồn; dữ liệu sai bị cách ly hoặc đánh dấu | Chưa |
-| Zero-Trust và GitOps | Kiểm tra quyền ở dịch vụ, kiểm dịch tệp, cấu hình triển khai trong Git và reconciliation; thử restart/restore | Chưa; CI hiện chỉ kiểm tra mã |
-| Cắm/rút và tái sử dụng | Đăng ký app, khai báo endpoint/quyền; thay/tắt app không làm hỏng API lõi | Chưa |
-
-Chỉ hoàn thành bốn dịch vụ bắt buộc chưa có nghĩa đã hoàn thành toàn bộ yêu cầu kỹ thuật. Agent và NGSI-LD là hướng phát triển đã chọn của nhóm, chưa được tính là năng lực thực tế.
+| Lõi headless | Gọi API và hoàn thành quy trình khi tắt giao diện | **Đạt (v1.0.0)** — Fastify headless backend [`apps/api/src/app.ts`](../apps/api/src/app.ts), hợp đồng [`packages/contracts/`](../packages/contracts/src/index.ts), Scoped PaaS API Keys [`paas-api-keys.js`](../plugins/nocobase/plugin-lattice-foundation/src/server/paas-api-keys.js) (`dxosApiKeys:issue`/`list`/`revoke`), đặc tả sống `/api/dxos:openapi` (OpenAPI `3.1.0`) & `/api/dxos:asyncapi` (AsyncAPI `3.0.0`) tại [`openapi-spec.js`](../plugins/nocobase/plugin-lattice-foundation/src/server/openapi-spec.js), và kiểm chứng 8 suite headless [`scripts/acceptance-headless-paas.mjs`](../scripts/acceptance-headless-paas.mjs) (`pnpm acceptance:headless-paas`). |
+| Identity/SSO | Hai ứng dụng dùng cùng danh tính; request không có token bị từ chối | **Đạt (v1.0.0)** — Keycloak `26.8.2` + `adorsys/keycloak-config-cli` (`infra/compose/core.yml`, `prod.yml`), plugin [`plugin-enterprise-auth`](../plugins/nocobase/plugin-enterprise-auth/src/server/index.js) (OIDC + PKCE, Redis `7.4` session cache, `enterpriseAuth:backchannelLogout`, đồng bộ vai trò 2 chiều chống leo thang quyền tại `policy.js`, kiểm thử `routes.test.cjs` & `policy.test.cjs`), và JWT/PAT verification fail-closed `401`/`403` trên `/api/*` & `/api/dxos-mcp`. |
+| Gateway | Route và chính sách được cấu hình; backend nghiệp vụ không mở trực tiếp ra ngoài | **Đạt (v1.0.0)** — Edge Zero-Trust [`infra/compose/prod.yml`](../infra/compose/prod.yml): `Caddy 2.10` ([`Caddyfile`](../infra/config/caddy/Caddyfile)) chỉ mở cổng `80`/`443` với HSTS/CSP/Permissions-Policy, định tuyến toàn bộ `/api/*` qua `Apache APISIX 3.19.0` ([`apisix.prod.yaml`](../infra/config/apisix/apisix.prod.yaml)) có giới hạn lưu lượng Redis `limit-count`, OIDC bridge `/api/dxos-oidc/*`, MCP `/api/dxos-mcp*` & `dxosBlocks:telemetryIngest`; dịch vụ nội bộ nằm trên mạng bridge tách biên `app`/`data` (kiểm chứng bởi [`scripts/tests/infra-compose-security.test.mjs`](../scripts/tests/infra-compose-security.test.mjs)). |
+| Dữ liệu cấu trúc/phi cấu trúc | Lưu hồ sơ và tệp; quyền đọc/ghi; dữ liệu còn sau restart | **Đạt (v1.0.0)** — PostgreSQL `16.16` + `pgvector 0.8.1` với **34 bảng PostgreSQL RLS** ([`pg-rls.js`](../plugins/nocobase/plugin-lattice-foundation/src/server/pg-rls.js)), khóa lạc quan `version`, composite indexes `(organizationId, code)`; lưu tệp qua [`apps/file-scanner/src/server.ts`](../apps/file-scanner/src/server.ts) + `RustFS 1.0.6` S3 + quét virus TCP `ClamAV 1.5.5` + trích xuất PDF/DOCX/XLSX/PPTX (`latticeParaChunks`, [`document-extractor.js`](../plugins/nocobase/plugin-dxos-para/src/server/document-extractor.js)); diễn tập bền vững sau restart qua [`scripts/stack-recovery.mjs`](../scripts/stack-recovery.mjs) (`pnpm backup:rehearse-stack`). |
+| Workflow | Start, chờ duyệt, hoàn thành và truy xuất lịch sử qua API | **Đạt (v1.0.0)** — 4 mẫu quy trình Poka-yoke ([`workflow-templates.js`](../plugins/nocobase/plugin-dxos-studio/src/server/workflow-templates.js): `procurement`, `logistics-5step`, `incident-uc2`, `internal-service`), vòng đời chứng từ bất biến `latticeVoucher:submit`/`cancel`/`amend`/`lineage` ([`voucher-lifecycle.js`](../plugins/nocobase/plugin-lattice-foundation/src/server/voucher-lifecycle.js)), bảng quyết định **DMN** `dxosDmn:*` ([`dmn-engine.js`](../plugins/nocobase/plugin-dxos-studio/src/server/dmn-engine.js)), **Ủy quyền** `dxosDelegations:*` ([`delegation-engine.js`](../plugins/nocobase/plugin-dxos-studio/src/server/delegation-engine.js)), SLA Engine (`latticeSla:*`), n8n `2.48.1` + Outbox `SKIP LOCKED` và kiểm chứng E2E [`scripts/acceptance-logistics-and-rbac.mjs`](../scripts/acceptance-logistics-and-rbac.mjs). |
+| Ứng dụng H-P-D-I | Luồng nghiệp vụ dùng được từ giao diện | **Đạt (v1.0.0)** — 4 Cổng nghiệp vụ `/p/procurement`, `/p/incidents`, `/p/logistics`, `/p/services` + cổng di động **`/v/mobile` PWA** ([`mobile-field-pwa.js`](../plugins/nocobase/plugin-lattice-foundation/src/client-v2/mobile-field-pwa.js)), **10 Native v2 `BlockModel`s** ([`block-models.js`](../plugins/nocobase/plugin-dxos-blocks/src/client/block-models.js) gồm `DxosWebGisBlockModel`, `DxosKanbanScheduleBlockModel`, `DxosRecordWorkbenchBlockModel`, `DxosCreativeStudioBlockModel`...), 6 Governance Consoles trong `/admin/settings/dxos-studio`, Trung tâm AI `/admin/settings/dxos-ai` + 1 nút `PortalAgentLauncher`, và kịch bản seed [`scripts/seed-v100-championship-showcase.mjs`](../scripts/seed-v100-championship-showcase.mjs). |
+| Vòng đời dữ liệu | Dữ liệu tác nghiệp tách với bản lịch sử; có job xuất dữ liệu và truy vấn bản xuất | **Đạt (v1.0.0)** — Phân tầng **Hot–Warm–Cold** + đóng băng bản chụp ký mật mã (`latticeFrozenSnapshots`, `dxosDataGov:tierSummary`/`freezeSnapshot`/`listSnapshots`/`getSnapshot` trong [`data-governance.js`](../plugins/nocobase/plugin-lattice-foundation/src/server/data-governance.js), migration `20261124000200`), xuất báo cáo kiểm soát RBAC theo cột CSV/XLSX/PDF Unicode (`dxosBlocks:exportReport` trong [`governed-export.js`](../plugins/nocobase/plugin-dxos-blocks/src/server/governed-export.js)) và chuỗi thời gian IIoT `TimescaleDB OSS 2.19.3` / `latticeTelemetryPoints`. |
+| IT/OT | Sự kiện dữ liệu hiện trường từ NGSI-LD tạo hoặc bổ sung một hồ sơ/quy trình | **Đạt (v1.0.0)** — FIWARE Orion-LD `1.12.0` (`integration.yml`, `prod.yml`) + stack IIoT chuẩn OSI ([`infra/compose/iiot.yml`](../infra/compose/iiot.yml): `Eclipse Mosquitto 2.0.21` -> `Node-RED 4.0.9` -> `dxosBlocks:telemetryIngest` & `alarmIngest`), **2-Way Digital Twin Shadow** (`latticeTwinShadows`, `dxosBlocks:twinShadow`/`twinSetDesired`/`twinAckCommand`, downlink Node-RED `POST /twin/command` trong [`infra/config/nodered/flows.json`](../infra/config/nodered/flows.json) + cổng HITL khi lệch `> 2.0°C`), cùng 4 IT/OT MCP tools ([`mcp-itot-tools.js`](../plugins/nocobase/plugin-dxos-ai/src/server/mcp-itot-tools.js)) & Proactive Triage ([`proactive-triage.js`](../plugins/nocobase/plugin-dxos-ai/src/server/proactive-triage.js)). |
+| Nguồn gốc và chất lượng | Trace được hồ sơ → bản đo/tệp → nguồn; dữ liệu sai bị cách ly hoặc đánh dấu | **Đạt (v1.0.0)** — Đồ thị **Phả hệ dữ liệu (`latticeDataLineage`)** + `dxosDataGov:lineage`/`lineageTrace` & AI tool `#16 dxos_graph_impact_analysis` ([`ai-copilot-tools.js`](../plugins/nocobase/plugin-dxos-ai/src/server/ai-copilot-tools.js)), **Sổ cái Ed25519 + Merkle (`latticeCryptoLedger`, `dxosLedger:signDocument`/`verify`/`verifySignature`)**, **Cách ly dữ liệu bất thường (`latticeDataQuarantine`, `dxosDataGov:listQuarantine`/`resolveQuarantine`)**, tính **Arrhenius MKT (`computeMeanKineticTemperature` + `dxosWms:holdLotByMkt`)**, và nhập liệu 2 pha chống công thức độc hại ([`bulk-import.js`](../plugins/nocobase/plugin-dxos-blocks/src/server/bulk-import.js)). |
+| Zero-Trust và GitOps | Kiểm tra quyền ở dịch vụ, kiểm dịch tệp, cấu hình triển khai trong Git và reconciliation; thử restart/restore | **Đạt (v1.0.0)** — Fail-closed RBAC + 34-table PG RLS + `apps/file-scanner` ClamAV + SSRF guard, **GitOps Solution Bundle v3** (`latticedx.solution-bundle/v3`, `dxosStudio:solutionBundleExport`/`Diff`/`Import`/`Rollback` tại [`solution-bundle.js`](../plugins/nocobase/plugin-dxos-studio/src/server/solution-bundle.js)), quan sát 360° **OTel + Prometheus (`alerts.yml`, `/api/dxos:metrics`) + Grafana OSS `11.5.8` (`latticedx-360.json`)**, diễn tập khôi phục toàn stack (`pnpm backup:rehearse-stack`) và CI kiểm tra tự động ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml): `check`, `dependency-audit`, `compose-validate`, `trivy-scan`). |
+| Cắm/rút và tái sử dụng | Đăng ký app, khai báo endpoint/quyền; thay/tắt app không làm hỏng API lõi | **Đạt (v1.0.0)** — 7 plugin Apache-2.0 độc lập (`sdkProvidedByHost: true`) bật/tắt live trong NocoBase Plugin Manager (`/admin/pm/list`), khối `DxosParaVaultBlockModel` và cross-plugin loader (`loadCrossPluginModule` trong `ai-resource.js`, `proactive-triage.js`) hạ cấp mềm khi tắt mô-đun liên quan, hệ thống đăng ký ứng dụng `latticeApps` + plug-and-play OMS/WMS/TMS chuỗi lạnh ([`wms-engine.js`](../plugins/nocobase/plugin-dxos-studio/src/server/wms-engine.js)), và cô lập PoF kiểm chứng bởi [`scripts/verify-pof-readiness.mjs`](../scripts/verify-pof-readiness.mjs) (`pnpm pof:check`). |
 
 ## 7. Ảnh hưởng đến repo
 
-Giữ cấu trúc hiện tại. Khi triển khai:
+Cấu trúc đã triển khai thực tế:
 
-- `infra/compose/`: tệp ghép dịch vụ theo profile và phiên bản khóa.
-- `infra/config/`: cấu hình realm/client, gateway và dịch vụ.
-- `apps/api/`: module identity, hồ sơ, tệp và workflow adapter, thêm khi thực hiện từng lát chức năng.
-- `apps/agent-worker/`: tools và handlers khi có tác vụ thật.
-- `apps/studio/`: manifest nguồn/phiên bản, cấu hình và hướng dẫn build riêng NocoBase; không tự động ép vào pnpm workspace nếu không tương thích.
-- `plugins/nocobase/`: plugin nhóm viết theo SDK phiên bản đã khóa.
-- `packages/contracts/`: API/event schema; `packages/core/` chỉ tạo khi xuất hiện logic nền tảng dùng chung.
-- `solutions/`: BPMN, mô hình, seed và mô tả ứng dụng demo.
+- `infra/compose/` & `infra/config/`: tệp ghép dịch vụ khóa `@sha256:` và cấu hình Caddy, APISIX, Keycloak, Orion-LD, n8n, Mosquitto, Node-RED, OTel, Prometheus, Grafana.
+- `apps/api/`, `apps/agent-worker/`, `apps/file-scanner/`: lõi API Fastify, worker sự cố, sidecar quét virus ClamAV + RustFS S3.
+- `plugins/nocobase/`: 7 plugin Apache-2.0 (`1.0.0`, `sdkProvidedByHost: true`).
+- `packages/contracts/`: API/event/workflow/workspace contracts.
+- `solutions/` & `scripts/`: giải pháp mẫu Logistics/Workflows, seeder showcase `v1.0.0`, bộ nghiệm thu Headless PaaS / AI MCP / Logistics RBAC, trình sinh SBOM CycloneDX 1.5 và kiểm toán PoF.
 
-Không nhân bản quy trình chính ở cả Flowable và NocoBase. NocoBase đóng vai trò giao diện/configuration và adapter với quy trình chính. Workflow nội bộ Studio, nếu dùng, phải có phạm vi riêng.
+## 8. Thứ tự triển khai (đã hoàn tất)
 
-## 8. Thứ tự triển khai
-
-1. Dựng PostgreSQL, Keycloak và APISIX; bảo vệ một API lưu hồ sơ và kiểm tra bằng hai người dùng khác quyền.
-2. Thêm lưu tệp và Flowable; chạy luồng tiếp nhận → chờ duyệt → kết thúc, thử restart.
-3. Đưa luồng lên giao diện; khảo sát giấy phép/version/plugin NocoBase song song, chỉ tích hợp khi xác định rõ quyền sử dụng.
-4. Nối NGSI-LD và agent thật cho bài toán được chọn; ghi dữ liệu nguồn và kết quả đề xuất.
-5. Bổ sung lịch sử/phân tích, lineage, quan sát, GitOps và kiểm thử khôi phục để chứng minh các nguyên lý kỹ thuật.
-
-Tiêu chí chọn phiên bản mỗi dịch vụ: release ổn định, có source public và hướng dẫn build; license và dependency được ghi nhận; không yêu cầu secret/thành phần thương mại để chạy chức năng demo.
+1. Dựng PostgreSQL, Keycloak và APISIX; bảo vệ API theo vai trò & `organizationId` -> **Hoàn tất + mở rộng Zero-Trust Caddy + 34-table RLS**.
+2. Lưu tệp + kiểm dịch ClamAV + workflow Poka-yoke + thử restart/restore -> **Hoàn tất + mở rộng RustFS + `stack-recovery.mjs`**.
+3. Đưa luồng lên Multi-Portal + NocoBase `2.2.50` chuẩn Clause 5.2 -> **Hoàn tất + mở rộng `/v/mobile` PWA + 10 Native v2 BlockModels**.
+4. Nối FIWARE Orion-LD + IIoT OSI + 2-Way Digital Twin + AI Workforce 17 Tools + 2-Way MCP -> **Hoàn tất + mở rộng Proactive Triage + HITL + GraphRAG**.
+5. Bổ sung Hot-Warm-Cold, Ed25519 PKI, Data Lineage, Quarantine, GitOps Bundle v3, OTel/Prometheus/Grafana, SBOM CycloneDX 1.5 & nghiệm thu Headless PaaS -> **Hoàn tất ở `v1.0.0`**.
