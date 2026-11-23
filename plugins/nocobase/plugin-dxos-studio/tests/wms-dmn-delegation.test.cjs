@@ -535,6 +535,10 @@ test('dxosDmn evaluates FIRST and COLLECT policies declaratively without eval/Fu
       { name: 'ldx_admin', allowConfigure: true, snippets: ['pm'] },
       { name: 'ldx_employee', allowConfigure: false, snippets: [] },
     ],
+    rolesUsers: [
+      { userId: 100, roleName: 'ldx_admin' },
+      { userId: 200, roleName: 'ldx_employee' },
+    ],
   });
   const dmn = createDxosDmnActions(harness.db);
 
@@ -972,5 +976,513 @@ test('Ledger security invariants propagate and optional foundation loader handle
   } finally {
     Module._load = origLoad;
     delete require.cache[wmsPath];
+  }
+});
+
+test('Fix Round 1 (Important 1): stripEpodSecretsFromBody scrubs Sequelize model :get and :list responses without leaking trackingTokenHash', async () => {
+  const { createWmsDmnDirectGuardMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const harness = makeTestHarness({
+    employees: [{ id: 10, userId: 100, organizationId: 'org-a', active: true }],
+  });
+  const mw = createWmsDmnDirectGuardMiddleware(harness.db);
+
+  const makeSequelizeModel = (attrs) => ({
+    dataValues: { ...attrs },
+    get(k) { return this.dataValues[k]; },
+    toJSON() { return { ...this.dataValues }; },
+  });
+
+  // 1. Direct :get returning Sequelize model instance
+  const modelGet = makeSequelizeModel({
+    id: 11,
+    organizationId: 'org-a',
+    trackingCode: 'LDX-TRK-GET-1',
+    trackingTokenHash: 'secret-get-hash',
+    status: 'delivered',
+  });
+  const getCtx = {
+    state: { currentUser: { id: 100 }, currentRole: 'ldx_manager' },
+    action: { resourceName: 'latticeEpodRecords', actionName: 'get', params: { filterByTk: 11 } },
+    body: null,
+  };
+  await mw(getCtx, async () => {
+    getCtx.body = modelGet;
+  });
+  assert.equal(JSON.stringify(getCtx.body).includes('secret-get-hash'), false);
+  assert.equal(JSON.stringify(getCtx.body).includes('trackingTokenHash'), false);
+  assert.equal(getCtx.body.trackingTokenHash, undefined);
+  assert.equal(modelGet.dataValues.trackingTokenHash, undefined);
+  assert.equal(getCtx.body.trackingCode, 'LDX-TRK-GET-1');
+
+  // 2. Direct { data: model } wrapper
+  const modelData = makeSequelizeModel({
+    id: 12,
+    organizationId: 'org-a',
+    trackingCode: 'LDX-TRK-DATA-2',
+    trackingTokenHash: 'secret-data-hash',
+  });
+  const dataCtx = {
+    state: { currentUser: { id: 100 }, currentRole: 'ldx_manager' },
+    action: { resourceName: 'latticeEpodRecords', actionName: 'get', params: { filterByTk: 12 } },
+    body: null,
+  };
+  await mw(dataCtx, async () => {
+    dataCtx.body = { data: modelData };
+  });
+  assert.equal(JSON.stringify(dataCtx.body).includes('secret-data-hash'), false);
+  assert.equal(dataCtx.body.data.trackingTokenHash, undefined);
+  assert.equal(modelData.dataValues.trackingTokenHash, undefined);
+});
+
+test('Fix Round 1 (Important 2): lot lookups forward FOR UPDATE lock and holdLotByMkt rolls back atomically on ledger failure', async () => {
+  const { createDxosWmsActions } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+
+  // Part A: lock forwarding via lotRepo AND via db.getModel when transaction.LOCK.UPDATE exists
+  const lockCalls = [];
+  const fakeTx = { id: 'tx-lock', LOCK: { UPDATE: 'UPDATE' } };
+  const baseHarness = makeTestHarness({
+    employees: [{ id: 10, userId: 100, organizationId: 'org-a', active: true }],
+    orders: [{ id: 501, code: 'ORD-LOCK-1', organizationId: 'org-a', status: 'approved' }],
+  });
+  const origLotRepo = baseHarness.db.getRepository('latticeStockLots');
+  const trackedLotRepo = {
+    ...origLotRepo,
+    findOne: async (opts) => {
+      lockCalls.push({ op: 'repo.findOne', lock: opts?.lock, tx: opts?.transaction });
+      return origLotRepo.findOne(opts);
+    },
+    find: async (opts) => {
+      lockCalls.push({ op: 'repo.find', lock: opts?.lock, tx: opts?.transaction });
+      return origLotRepo.find(opts);
+    },
+  };
+  const lockDb = {
+    ...baseHarness.db,
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (fn) => fn(fakeTx),
+      query: async () => [[]],
+    },
+    getRepository: (name) => (name === 'latticeStockLots' ? trackedLotRepo : baseHarness.db.getRepository(name)),
+  };
+  const wmsLock = createDxosWmsActions(lockDb);
+  const whCtx = (values) => ({
+    method: 'POST',
+    state: { currentUser: { id: 100, username: 'wh-a' }, currentRole: 'ldx_warehouse' },
+    can: () => true,
+    action: { params: { values } },
+  });
+
+  await wmsLock.receiveStock(whCtx({ lotCode: 'LOT-L1', sku: 'SKU-L', productName: 'Cold', qtyOnHand: 20, expiryDate: '2027-06-01' }), async () => {});
+  await wmsLock.allocateFefo(whCtx({ sku: 'SKU-L', quantity: 5, orderId: 501, orderCode: 'ORD-LOCK-1', lineNo: 1 }), async () => {});
+  await wmsLock.issueStock(whCtx({ lotCode: 'LOT-L1', quantity: 2 }), async () => {});
+  await wmsLock.holdLotByMkt(whCtx({ lotCode: 'LOT-L1', samplesC: [18, 22], maxAllowedC: 8 }), async () => {});
+
+  assert.equal(lockCalls.length, 4);
+  assert.deepEqual(
+    lockCalls.map((c) => [c.op, c.lock, c.tx?.id]),
+    [
+      ['repo.findOne', 'UPDATE', 'tx-lock'],
+      ['repo.find', 'UPDATE', 'tx-lock'],
+      ['repo.findOne', 'UPDATE', 'tx-lock'],
+      ['repo.findOne', 'UPDATE', 'tx-lock'],
+    ],
+  );
+
+  // Part B: db.getModel path also forwards lock: 'UPDATE'
+  const modelCalls = [];
+  const modelDb = {
+    ...lockDb,
+    getModel: (name) => (name === 'latticeStockLots'
+      ? {
+          findOne: async (opts) => {
+            modelCalls.push({ op: 'model.findOne', lock: opts.lock, tx: opts.transaction });
+            return origLotRepo.findOne({ filter: opts.where });
+          },
+          findAll: async (opts) => {
+            modelCalls.push({ op: 'model.findAll', lock: opts.lock, tx: opts.transaction });
+            return origLotRepo.find({ filter: opts.where, sort: ['expiryDate', 'id'], limit: opts.limit });
+          },
+        }
+      : null),
+  };
+  const wmsModel = createDxosWmsActions(modelDb);
+  await wmsModel.receiveStock(whCtx({ lotCode: 'LOT-M1', sku: 'SKU-M', productName: 'Cold M', qtyOnHand: 10, expiryDate: '2027-06-01' }), async () => {});
+  await wmsModel.allocateFefo(whCtx({ sku: 'SKU-M', quantity: 4 }), async () => {});
+  assert.deepEqual(
+    modelCalls.map((c) => [c.op, c.lock, c.tx?.id]),
+    [
+      ['model.findOne', 'UPDATE', 'tx-lock'],
+      ['model.findAll', 'UPDATE', 'tx-lock'],
+    ],
+  );
+
+  // Part C: holdLotByMkt rolls back lot update and quarantine row atomically when PKI ledger fails
+  const prevEnv = process.env.NODE_ENV;
+  const prevFieldKey = process.env.ENCRYPTION_FIELD_KEY;
+  const prevAppKey = process.env.APP_KEY;
+  try {
+    const rbHarness = makeTestHarness({
+      employees: [{ id: 10, userId: 100, organizationId: 'org-a', active: true }],
+    });
+    rbHarness.stockLots.push({
+      id: 1,
+      organizationId: 'org-a',
+      lotCode: 'LOT-RB-1',
+      sku: 'SKU-RB',
+      productName: 'Cold RB',
+      qtyOnHand: 15,
+      qtyReserved: 0,
+      expiryDate: new Date('2027-06-01'),
+      targetTempMinC: 2,
+      targetTempMaxC: 8,
+      mktCelsius: null,
+      status: 'available',
+      holdReason: null,
+      heldAt: null,
+      heldBy: null,
+      active: true,
+    });
+    // Rollback-capable sequelize.transaction mock
+    rbHarness.db.sequelize = {
+      getDialect: () => 'sqlite',
+      transaction: async (fn) => {
+        const snapLots = rbHarness.stockLots.map((r) => ({ ...r }));
+        const snapQtn = rbHarness.quarantineRows.map((r) => ({ ...r }));
+        const snapLedger = rbHarness.ledgerEntries.map((r) => ({ ...r }));
+        try {
+          return await fn({ id: 'tx-rb', LOCK: { UPDATE: 'UPDATE' } });
+        } catch (err) {
+          rbHarness.stockLots.splice(0, rbHarness.stockLots.length, ...snapLots);
+          rbHarness.quarantineRows.splice(0, rbHarness.quarantineRows.length, ...snapQtn);
+          rbHarness.ledgerEntries.splice(0, rbHarness.ledgerEntries.length, ...snapLedger);
+          throw err;
+        }
+      },
+    };
+    process.env.NODE_ENV = 'production';
+    delete process.env.ENCRYPTION_FIELD_KEY;
+    delete process.env.APP_KEY;
+
+    const wmsRb = createDxosWmsActions(rbHarness.db);
+    await assert.rejects(
+      () => wmsRb.holdLotByMkt(whCtx({ lotCode: 'LOT-RB-1', samplesC: [22, 24], maxAllowedC: 8 }), async () => {}),
+      (err) => err.code === 'PKI_MASTER_KEY_MISSING',
+    );
+    assert.equal(rbHarness.stockLots[0].status, 'available');
+    assert.equal(rbHarness.stockLots[0].mktCelsius, null);
+    assert.equal(rbHarness.stockLots[0].holdReason, null);
+    assert.equal(rbHarness.quarantineRows.length, 0);
+    assert.equal(rbHarness.ledgerEntries.length, 0);
+  } finally {
+    if (prevEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevEnv;
+    if (prevFieldKey === undefined) delete process.env.ENCRYPTION_FIELD_KEY; else process.env.ENCRYPTION_FIELD_KEY = prevFieldKey;
+    if (prevAppKey === undefined) delete process.env.APP_KEY; else process.env.APP_KEY = prevAppKey;
+  }
+});
+
+test('Fix Round 1 (Important 3): positive int validation for lineNo/orderLineId, line SKU mismatch, and one-sided temp band check', async () => {
+  const { createDxosWmsActions } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const harness = makeTestHarness({
+    employees: [{ id: 10, userId: 100, organizationId: 'org-a', active: true }],
+    orders: [{ id: 501, code: 'ORD-V-1', organizationId: 'org-a', status: 'approved' }],
+  });
+  harness.orderLines.push({
+    id: 701,
+    organizationId: 'org-a',
+    orderId: 501,
+    orderCode: 'ORD-V-1',
+    lineNo: 1,
+    sku: 'SKU-OTHER',
+    productName: 'Other Product',
+    requestedQty: 10,
+    allocatedQty: 0,
+    status: 'pending',
+  });
+  const wms = createDxosWmsActions(harness.db);
+  const whCtx = (values) => ({
+    method: 'POST',
+    state: { currentUser: { id: 100, username: 'wh-a' }, currentRole: 'ldx_warehouse' },
+    can: () => true,
+    action: { params: { values } },
+  });
+
+  // Receive one-sided hot-only lot (targetTempMinC=15, max=null), one-sided cold-only lot (min=null, max=-15), and matching [2,8] lot
+  await wms.receiveStock(whCtx({ lotCode: 'LOT-HOT-ONLY', sku: 'SKU-VAC', productName: 'Vac', qtyOnHand: 50, expiryDate: '2026-12-01', targetTempMinC: 15 }), async () => {});
+  await wms.receiveStock(whCtx({ lotCode: 'LOT-COLD-ONLY', sku: 'SKU-VAC', productName: 'Vac', qtyOnHand: 50, expiryDate: '2026-12-02', targetTempMaxC: -15 }), async () => {});
+  await wms.receiveStock(whCtx({ lotCode: 'LOT-OK', sku: 'SKU-VAC', productName: 'Vac', qtyOnHand: 20, expiryDate: '2027-01-01', targetTempMinC: 2, targetTempMaxC: 8 }), async () => {});
+
+  // Invalid lineNo rejected 400 in allocateFefo & issueStock
+  for (const badLine of ['abc', '0', 0, -1, 1.5, '', true]) {
+    await assert.rejects(
+      () => wms.allocateFefo(whCtx({ sku: 'SKU-VAC', quantity: 5, orderCode: 'ORD-V-1', lineNo: badLine }), async () => {}),
+      (err) => err.status === 400 && err.code === 'WMS_LINE_NO_INVALID',
+    );
+    await assert.rejects(
+      () => wms.issueStock(whCtx({ lotCode: 'LOT-OK', quantity: 1, orderCode: 'ORD-V-1', lineNo: badLine }), async () => {}),
+      (err) => err.status === 400 && err.code === 'WMS_LINE_NO_INVALID',
+    );
+  }
+
+  // Invalid orderLineId rejected 400 in issueStock
+  for (const badId of ['abc', '0', 0, -3, 2.5, '', true]) {
+    await assert.rejects(
+      () => wms.issueStock(whCtx({ lotCode: 'LOT-OK', quantity: 1, orderLineId: badId }), async () => {}),
+      (err) => err.status === 400 && err.code === 'WMS_ORDER_LINE_ID_INVALID',
+    );
+  }
+
+  // Existing orderLine SKU mismatch rejected 400 without reserving any stock
+  await assert.rejects(
+    () => wms.allocateFefo(whCtx({ sku: 'SKU-VAC', quantity: 5, orderId: 501, orderCode: 'ORD-V-1', lineNo: 1, minTempC: 2, maxTempC: 8 }), async () => {}),
+    (err) => err.status === 400 && err.code === 'WMS_ORDER_LINE_SKU_MISMATCH',
+  );
+  assert.equal(harness.stockLots.find((l) => l.lotCode === 'LOT-OK').qtyReserved, 0);
+
+  // One-sided disjoint temp lots skipped; allocates from LOT-OK on lineNo 2
+  const allocCtx = whCtx({ sku: 'SKU-VAC', quantity: 5, orderId: 501, orderCode: 'ORD-V-1', lineNo: 2, minTempC: 2, maxTempC: 8, now: '2026-11-23T00:00:00Z' });
+  await wms.allocateFefo(allocCtx, async () => {});
+  assert.deepEqual(allocCtx.body.allocations.map((a) => a.lotCode), ['LOT-OK']);
+});
+
+test('Fix Round 1 (Important 4): delegation rejects elevated sub-snippets, REST guard protects status/qtyOnHand & ePOD chart fields', async () => {
+  const { createDxosDelegationsActions } = require(path.join(PLUGIN_ROOT, 'src/server/delegation-engine.js'));
+  const { createWmsDmnDirectGuardMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+
+  const harness = makeTestHarness({
+    employees: [
+      { id: 10, userId: 100, organizationId: 'org-a', active: true },
+      { id: 11, userId: 101, organizationId: 'org-a', active: true },
+    ],
+    roles: [
+      { name: 'studio_helper', allowConfigure: false, snippets: ['pm.dxosStudio'] },
+      { name: 'acl_helper', allowConfigure: false, snippets: ['acl.roles'] },
+      { name: 'star_helper', allowConfigure: false, snippets: ['*'] },
+      { name: 'star_colon', allowConfigure: false, snippets: ['*:*'] },
+      { name: 'ui_helper', allowConfigure: false, snippets: ['ui.editor'] },
+      { name: 'strategy_star', allowConfigure: false, snippets: [], strategy: { actions: ['*:*'] } },
+    ],
+    rolesUsers: [
+      { userId: 100, roleName: 'studio_helper' },
+      { userId: 100, roleName: 'acl_helper' },
+      { userId: 100, roleName: 'star_helper' },
+      { userId: 100, roleName: 'star_colon' },
+      { userId: 100, roleName: 'ui_helper' },
+      { userId: 100, roleName: 'strategy_star' },
+    ],
+  });
+  const dlg = createDxosDelegationsActions(harness.db);
+  const now = new Date('2026-11-23T00:00:00Z');
+  const plus5d = new Date('2026-11-28T00:00:00Z');
+
+  for (const roleName of ['studio_helper', 'acl_helper', 'star_helper', 'star_colon', 'ui_helper', 'strategy_star']) {
+    await assert.rejects(
+      () => dlg.create({
+        method: 'POST',
+        state: { currentUser: { id: 100 }, currentRole: roleName },
+        action: { params: { values: { delegateUserId: 101, roleName, startsAt: now, endsAt: plus5d } } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'DELEGATION_ESCALATION_FORBIDDEN',
+    );
+  }
+
+  const mw = createWmsDmnDirectGuardMiddleware(harness.db);
+
+  // Direct REST write rejects protected fields on latticeOrderLines and latticeStockLots
+  for (const field of ['status', 'allocatedQty', 'lotId', 'lotCode']) {
+    await assert.rejects(
+      () => mw({
+        state: { currentUser: { id: 100 }, currentRole: 'ldx_warehouse' },
+        action: { resourceName: 'latticeOrderLines', actionName: 'update', params: { filterByTk: 1, values: { [field]: 'x' } } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_DOCUMENT_PROTECTED_FIELD',
+    );
+  }
+  for (const field of ['qtyOnHand', 'qtyReserved', 'status', 'mktCelsius', 'holdReason', 'heldAt', 'heldBy']) {
+    await assert.rejects(
+      () => mw({
+        state: { currentUser: { id: 100 }, currentRole: 'ldx_warehouse' },
+        action: { resourceName: 'latticeStockLots', actionName: 'create', params: { values: { [field]: 'x' } } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_DOCUMENT_PROTECTED_FIELD',
+    );
+  }
+
+  // charts:queryData rejects sensitive fields on latticeEpodRecords in measures, dimensions, filter, and sort
+  for (const badValues of [
+    { mode: 'builder', collection: 'latticeEpodRecords', measures: [{ field: 'trackingTokenHash', aggregation: 'count' }] },
+    { mode: 'builder', collection: 'latticeEpodRecords', dimensions: [{ field: ['latticeEpodRecords', 'signatureDataUrl'] }] },
+    { mode: 'builder', collection: 'latticeEpodRecords', dimensions: [{ field: 'recipientPhoneMasked' }] },
+    { mode: 'builder', collection: 'latticeEpodRecords', measures: [{ field: 'gpsLat', aggregation: 'avg' }] },
+    { mode: 'builder', collection: 'latticeEpodRecords', dimensions: [{ field: 'gpsLng' }] },
+    { mode: 'builder', collection: 'latticeEpodRecords', filter: { gpsLat: { $gt: 0 } } },
+    { mode: 'builder', collection: 'latticeEpodRecords', filter: { recipientPhoneMasked: { $ne: null } } },
+    { mode: 'builder', collection: 'latticeEpodRecords', sort: ['-gpsLng'] },
+  ]) {
+    await assert.rejects(
+      () => mw({
+        state: { currentUser: { id: 100 }, currentRole: 'ldx_manager' },
+        action: { resourceName: 'charts', actionName: 'queryData', params: { values: badValues } },
+      }, async () => {}),
+      (err) => err.status === 403,
+    );
+  }
+
+  // Non-sensitive ePOD chart query succeeds and is scoped to organizationId
+  const safeChartCtx = {
+    state: { currentUser: { id: 100 }, currentRole: 'ldx_manager' },
+    action: {
+      resourceName: 'charts',
+      actionName: 'queryData',
+      params: {
+        values: {
+          mode: 'builder',
+          collection: 'latticeEpodRecords',
+          measures: [{ field: 'id', aggregation: 'count' }],
+          dimensions: [{ field: 'status' }],
+          filter: { status: 'delivered' },
+        },
+      },
+    },
+  };
+  await mw(safeChartCtx, async () => {});
+  assert.deepEqual(safeChartCtx.action.params.values.filter, {
+    $and: [{ organizationId: 'org-a' }, { status: 'delivered' }],
+  });
+});
+
+test('Fix Round 1 (Minor 1-4): PAT scopes on read/eval, PG RLS on custom actions, and rolesUsers verification', async () => {
+  const { createDxosWmsActions } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const { createDxosDmnActions } = require(path.join(PLUGIN_ROOT, 'src/server/dmn-engine.js'));
+  const { createDxosDelegationsActions } = require(path.join(PLUGIN_ROOT, 'src/server/delegation-engine.js'));
+
+  const harness = makeTestHarness({
+    employees: [
+      { id: 10, userId: 100, organizationId: 'org-a', active: true },
+      { id: 11, userId: 101, organizationId: 'org-a', active: true },
+    ],
+    orders: [{ id: 501, code: 'ORD-M-1', organizationId: 'org-a', status: 'approved' }],
+    roles: [
+      { name: 'ldx_admin', allowConfigure: true, snippets: ['pm'] },
+      { name: 'ldx_warehouse', allowConfigure: false, snippets: [] },
+      { name: 'ldx_employee', allowConfigure: false, snippets: [] },
+    ],
+    rolesUsers: [
+      { userId: 100, roleName: 'ldx_admin' },
+      { userId: 101, roleName: 'ldx_employee' },
+    ],
+    resources: [
+      { name: 'latticeOrders', roleName: 'ldx_warehouse', dataSourceKey: 'main', usingActionsConfig: false },
+    ],
+  });
+  harness.decisionTables.push({
+    id: 1,
+    organizationId: 'org-a',
+    tableKey: 't_rls',
+    name: 'T',
+    hitPolicy: 'FIRST',
+    inputsJson: [{ name: 'x' }],
+    outputsJson: [{ name: 'y' }],
+    rulesJson: [{ when: { x: 1 }, then: { y: 'ok' } }],
+    version: 1,
+    active: true,
+  });
+  harness.delegations.push({
+    id: 1,
+    organizationId: 'org-a',
+    delegationUid: 'DLG-1',
+    delegatorUserId: 100,
+    delegateUserId: 102,
+    roleName: 'ldx_manager',
+    startsAt: new Date('2026-11-20T00:00:00Z'),
+    endsAt: new Date('2026-11-30T00:00:00Z'),
+    status: 'active',
+    active: true,
+  });
+
+  const wms = createDxosWmsActions(harness.db);
+  const dmn = createDxosDmnActions(harness.db);
+  const dlg = createDxosDelegationsActions(harness.db);
+
+  // Minor 1: iot-only PAT rejected 403 API_KEY_SCOPE_INSUFFICIENT on all read/eval actions
+  const iotPatState = (overrides = {}) => ({
+    currentUser: { id: 100, username: 'adm-a' },
+    currentRole: 'ldx_admin',
+    latticeApiKey: { scopes: ['iot'] },
+    ...overrides,
+  });
+  for (const call of [
+    () => wms.orderLines({ method: 'GET', state: iotPatState(), can: () => true, action: { params: {} } }, async () => {}),
+    () => wms.lots({ method: 'GET', state: iotPatState(), can: () => true, action: { params: {} } }, async () => {}),
+    () => wms.printVoucher({ method: 'GET', state: iotPatState(), can: () => true, action: { params: { documentType: 'order', orderId: 501 } } }, async () => {}),
+    () => dmn.listTables({ method: 'GET', state: iotPatState(), action: { params: {} } }, async () => {}),
+    () => dmn.evaluate({ method: 'POST', state: iotPatState(), action: { params: { values: { tableKey: 't_rls', context: { x: 1 } } } } }, async () => {}),
+    () => dlg.list({ method: 'GET', state: iotPatState(), action: { params: {} } }, async () => {}),
+    () => dlg.activeForUser({ method: 'GET', state: iotPatState(), action: { params: {} } }, async () => {}),
+  ]) {
+    await assert.rejects(call, (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT');
+  }
+
+  // read-scoped PAT succeeds on read/eval routes
+  const readPatState = {
+    currentUser: { id: 100, username: 'adm-a' },
+    currentRole: 'ldx_admin',
+    latticeApiKey: { scopes: ['read'] },
+  };
+  const readEvalCtx = { method: 'POST', state: readPatState, action: { params: { values: { tableKey: 't_rls', context: { x: 1 } } } } };
+  await dmn.evaluate(readEvalCtx, async () => {});
+  assert.equal(readEvalCtx.body.result.y, 'ok');
+
+  // Minor 4: rolesUsers cross-check blocks spoofed currentRole when ctx.can is absent
+  await assert.rejects(
+    () => dmn.saveTable({
+      method: 'POST',
+      state: { currentUser: { id: 101, username: 'emp-spoof' }, currentRole: 'ldx_admin' },
+      action: { params: { values: { tableKey: 'spoof', name: 'Spoof', inputsJson: [{ name: 'x' }], outputsJson: [{ name: 'y' }], rulesJson: [] } } },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_ACL_DENIED',
+  );
+  await assert.rejects(
+    () => wms.receiveStock({
+      method: 'POST',
+      state: { currentUser: { id: 101, username: 'emp-spoof' }, currentRole: 'ldx_warehouse' },
+      action: { params: { values: { lotCode: 'LOT-SP', sku: 'S', productName: 'P', qtyOnHand: 5, expiryDate: '2027-01-01' } } },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_ACL_DENIED',
+  );
+  const spoofDlgListCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 101 }, currentRole: 'ldx_admin' },
+    action: { params: {} },
+  };
+  await dlg.list(spoofDlgListCtx, async () => {});
+  assert.equal(spoofDlgListCtx.body.items.length, 0);
+
+  // Minor 2: DX_PG_RLS_SESSION=true wraps custom actions in PG RLS session context
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  const sqlCalls = [];
+  const fakeRlsTx = { id: 'tx-custom-rls', LOCK: { UPDATE: 'UPDATE' } };
+  harness.db.sequelize = {
+    getDialect: () => 'postgres',
+    transaction: async (cb) => cb(fakeRlsTx),
+    query: async (sql, opts) => { sqlCalls.push({ sql, opts }); return [[]]; },
+  };
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    await wms.lots({ method: 'GET', state: { currentUser: { id: 100 }, currentRole: 'ldx_admin' }, can: () => true, action: { params: {} } }, async () => {});
+    await dmn.evaluate({ method: 'POST', state: { currentUser: { id: 100 }, currentRole: 'ldx_admin' }, action: { params: { values: { tableKey: 't_rls', context: { x: 1 } } } } }, async () => {});
+    await dlg.list({ method: 'GET', state: { currentUser: { id: 100 }, currentRole: 'ldx_admin' }, action: { params: {} } }, async () => {});
+    await wms.receiveStock({
+      method: 'POST',
+      state: { currentUser: { id: 100, username: 'adm-a' }, currentRole: 'ldx_admin' },
+      can: () => true,
+      action: { params: { values: { lotCode: 'LOT-RLS-1', sku: 'SKU-R', productName: 'R', qtyOnHand: 5, expiryDate: '2027-01-01' } } },
+    }, async () => {});
+    const setConfigCalls = sqlCalls.filter((c) => c.sql === "SELECT set_config('app.current_org', :orgId, true)");
+    assert.equal(setConfigCalls.length, 4);
+    assert.ok(setConfigCalls.every((c) => c.opts?.replacements?.orgId === 'org-a' && c.opts?.transaction === fakeRlsTx));
+    assert.ok(sqlCalls.some((c) => c.sql.includes('pg_advisory_xact_lock') && c.opts?.transaction === fakeRlsTx));
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION; else process.env.DX_PG_RLS_SESSION = prevRls;
   }
 });

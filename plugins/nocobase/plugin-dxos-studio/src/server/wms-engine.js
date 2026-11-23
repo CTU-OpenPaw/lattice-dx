@@ -8,269 +8,48 @@
  */
 'use strict';
 
-const { createHash, randomBytes, timingSafeEqual } = require('node:crypto');
-const path = require('node:path');
-const { resolveServiceActor } = require('./service-scope');
+const { randomBytes } = require('node:crypto');
+const {
+  ORG_ID_RE,
+  val,
+  toPlain,
+  fail,
+  loadFoundationSet,
+  sha256Hex,
+  timingSafeEqualHex,
+  readParams,
+  parseFinite,
+  parseStrictPositiveInt,
+  parseOptionalDate,
+  parseTempBand,
+  escapeHtml,
+  maskPhone,
+  assertPatScope,
+  hasCollectionPermission,
+  isOrgAdmin,
+  resolveTenantActor,
+  appendAuditLedger,
+  runWithOptionalRls,
+  runInTx,
+  saveRow,
+} = require('./wms-dmn-shared');
+const {
+  WMS_DMN_COLLECTIONS,
+  stripEpodSecretsFromBody,
+  createWmsDmnDirectGuardMiddleware: createDirectGuardWithFoundation,
+  validateTenantCollectionRecord,
+} = require('./wms-direct-guard');
 
-function loadFoundationModule(moduleName) {
-  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
-  const candidates = inDist
-    ? [
-        `../../../plugin-lattice-foundation/dist/server/${moduleName}`,
-        `../../../plugin-lattice-foundation/src/server/${moduleName}`,
-      ]
-    : [
-        `../../../plugin-lattice-foundation/src/server/${moduleName}`,
-        `../../../plugin-lattice-foundation/dist/server/${moduleName}`,
-      ];
-  for (const modPath of candidates) {
-    try {
-      return require(modPath);
-    } catch (err) {
-      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
-        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
-      if (!isDirectMissing) throw err;
-    }
-  }
-  return null;
-}
+const foundation = loadFoundationSet();
 
-const pkiLedger = loadFoundationModule('pki-ledger');
-const dataGovernance = loadFoundationModule('data-governance');
-const paasApiKeys = loadFoundationModule('paas-api-keys');
-const pgRls = loadFoundationModule('pg-rls');
-
-const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const URN_ORG_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
-const SENSITIVE_FILTER_KEY_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt|trackingTokenHash|signatureDataUrl/i;
-const LEDGER_SECURITY_INVARIANTS = new Set([
-  'PKI_MASTER_KEY_MISSING',
-  'PKI_KEY_INACTIVE',
-  'PKI_CIPHERTEXT_INVALID',
-  'LEDGER_IMMUTABLE',
-  'NATIVE_ORGANIZATION_MISMATCH',
-  'NATIVE_TENANT_REQUIRED',
-]);
-const WMS_DMN_COLLECTIONS = new Set([
-  'latticeOrderLines',
-  'latticeStockLots',
-  'latticeEpodRecords',
-  'latticeDecisionTables',
-  'latticeDelegations',
-]);
-const DIRECT_WRITE_LOCKED_COLLECTIONS = new Set([
-  'latticeEpodRecords',
-  'latticeDecisionTables',
-  'latticeDelegations',
-]);
-const LOT_PROTECTED_DIRECT_FIELDS = new Set(['qtyReserved', 'mktCelsius', 'heldAt', 'heldBy', 'status', 'holdReason']);
-const ORDER_LINE_PROTECTED_DIRECT_FIELDS = new Set(['allocatedQty', 'lotId', 'lotCode']);
 const BLOCKED_LOT_STATUSES = new Set(['hold_mkt', 'expired', 'quarantined']);
 const DUMMY_HASH_HEX = '0'.repeat(64);
 const R_KJ_MOL_K = 0.008314472;
 
-const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
-const toPlain = (row) => (row ? (typeof row.toJSON === 'function' ? row.toJSON() : { ...row }) : null);
-
-function fail(code, status = 400, message = code) {
-  return Object.assign(new Error(message), { code, status });
-}
-
-function isSecurityInvariant(err) {
-  return Boolean(
-    pkiLedger?.isLedgerSecurityInvariant?.(err)
-    || (err && typeof err.code === 'string' && LEDGER_SECURITY_INVARIANTS.has(err.code)),
-  );
-}
-
-function sha256Hex(input) {
-  return createHash('sha256').update(String(input ?? ''), 'utf8').digest('hex');
-}
-
-function timingSafeEqualHex(a, b) {
-  if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length || a.length === 0 || a.length % 2 !== 0) {
-    return false;
-  }
-  if (!/^[0-9a-f]+$/i.test(a) || !/^[0-9a-f]+$/i.test(b)) return false;
-  try {
-    return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
-  } catch {
-    return false;
-  }
-}
-
-function readParams(ctx) {
-  const p = ctx?.action?.params || {};
-  const b = ctx?.request?.body && typeof ctx.request.body === 'object' && !Array.isArray(ctx.request.body)
-    ? ctx.request.body
-    : {};
-  const q = ctx?.query && typeof ctx.query === 'object' && !Array.isArray(ctx.query)
-    ? ctx.query
-    : {};
-  const v = p.values && typeof p.values === 'object' && !Array.isArray(p.values)
-    ? p.values
-    : {};
-  return { ...q, ...b, ...p, ...v };
-}
-
-function parseFinite(raw) {
-  if (raw === null || raw === undefined || typeof raw === 'boolean' || typeof raw === 'object') return null;
-  if (typeof raw === 'string' && raw.trim() === '') return null;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : null;
-}
-
-function parseOptionalDate(raw, code = 'WMS_DATE_INVALID') {
-  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
-  const dt = raw instanceof Date ? new Date(raw.getTime()) : new Date(String(raw));
-  if (!Number.isFinite(dt.getTime())) throw fail(code, 400, 'Định dạng ngày giờ không hợp lệ.');
-  return dt;
-}
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-    .replace(/`/g, '&#96;');
-}
-
-function maskPhone(raw) {
-  if (raw === undefined || raw === null) return null;
-  const trimmed = String(raw).trim();
-  if (!trimmed) return null;
-  const digits = trimmed.replace(/\D/g, '');
-  if (digits.length >= 3) return `***${digits.slice(-3)}`;
-  if (trimmed.length >= 3) return `***${trimmed.slice(-3)}`;
-  return '***';
-}
-
-function assertPatScope(ctx, requiredScopes) {
-  if (typeof paasApiKeys?.assertApiKeyScope === 'function') {
-    return paasApiKeys.assertApiKeyScope(ctx, requiredScopes);
-  }
-  const pat = ctx?.state?.latticeApiKey;
-  if (!pat) return true;
-  const held = new Set(Array.isArray(pat.scopes) ? pat.scopes : []);
-  const needed = Array.isArray(requiredScopes) ? requiredScopes : [requiredScopes];
-  if (needed.some((s) => held.has(s))) return true;
-  throw fail('API_KEY_SCOPE_INSUFFICIENT', 403, `API key thiếu quyền (${needed.join(' hoặc ')}).`);
-}
-
-async function hasCollectionPermission(db, ctx, collections, action = 'view') {
-  const candidates = action === 'view' ? ['view', 'list'] : (Array.isArray(action) ? action : [action]);
-  const cols = Array.isArray(collections) ? collections : [collections];
-  if (typeof ctx?.can === 'function') {
-    return cols.some((col) => candidates.some((act) => Boolean(ctx.can({ resource: col, action: act }))));
-  }
-  const roleNames = Array.isArray(ctx?.state?.currentRoles) && ctx.state.currentRoles.length
-    ? ctx.state.currentRoles
-    : ctx?.state?.currentRole ? [ctx.state.currentRole] : [];
-  if (!roleNames.length) return false;
-  const rolesRepo = db?.getRepository?.('roles');
-  const resRepo = db?.getRepository?.('dataSourcesRolesResources');
-  for (const roleName of roleNames) {
-    const role = rolesRepo?.findOne ? await rolesRepo.findOne({ filter: { name: roleName } }) : null;
-    if (val(role, 'allowAll') === true || val(role, 'allowConfigure') === true) return true;
-    const snippets = val(role, 'snippets');
-    if (Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*'))) return true;
-    if (resRepo?.findOne) {
-      for (const col of cols) {
-        const res = await resRepo.findOne({ filter: { roleName, name: col, dataSourceKey: 'main' } });
-        if (res) {
-          if (val(res, 'usingActionsConfig') === false) return true;
-          const actions = val(res, 'actions') || [];
-          if (actions.some((a) => candidates.includes(a?.name || a))) return true;
-        }
-      }
-    }
-    const strategyActions = val(role, 'strategy')?.actions || [];
-    if (Array.isArray(strategyActions) && strategyActions.some((a) => candidates.includes(a) || a === '*:*')) {
-      return true;
-    }
-  }
-  return false;
-}
-
-async function isOrgAdmin(db, ctx) {
-  if (!ctx?.state?.currentUser) return false;
-  const roleNames = Array.isArray(ctx?.state?.currentRoles) && ctx.state.currentRoles.length
-    ? ctx.state.currentRoles
-    : ctx?.state?.currentRole ? [ctx.state.currentRole] : [];
-  if (roleNames.includes('root')) return true;
-  if (!roleNames.length) return false;
-  const rolesRepo = db?.getRepository?.('roles');
-  if (!rolesRepo || typeof rolesRepo.find !== 'function') return false;
-  const matched = (await rolesRepo.find({ filter: { name: { $in: roleNames } } })) || [];
-  return matched.some((r) => {
-    const rName = val(r, 'name');
-    if (rName && !roleNames.includes(rName)) return false;
-    if (val(r, 'allowAll') === true || val(r, 'allowConfigure') === true) return true;
-    const snippets = val(r, 'snippets');
-    return Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*'));
-  });
-}
-
-async function resolveTenantActor(db, ctx, {
-  requireOrg = true,
-  requestedOrgId = null,
-  aclCollections = ['latticeOrders', 'latticeAssets'],
-  aclAction = 'view',
-  patScopes = null,
-} = {}) {
-  const userId = val(ctx?.state?.currentUser, 'id');
-  if (userId == null || !/^[1-9]\d*$/.test(String(userId))) {
-    throw fail('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập.');
-  }
-  if (patScopes) assertPatScope(ctx, patScopes);
-
-  const username = String(val(ctx.state.currentUser, 'username') || `user-${userId}`);
-  const isRoot = ctx.state?.currentRole === 'root';
-  if (isRoot) {
-    let organizationId = null;
-    const rawOrg = requestedOrgId != null ? String(requestedOrgId).trim() : '';
-    if (rawOrg) {
-      if (!ORG_ID_RE.test(rawOrg)) throw fail('WMS_ORG_INVALID', 400, 'organizationId không hợp lệ.');
-      organizationId = rawOrg;
-    } else {
-      const empRepo = db?.getRepository?.('latticeEmployees');
-      const rows = empRepo?.find ? (await empRepo.find({ filter: { userId: String(userId) }, limit: 2 })) || [] : [];
-      if (rows.length === 1 && val(rows[0], 'active') === true) {
-        organizationId = val(rows[0], 'organizationId');
-      }
-    }
-    if (requireOrg && (!organizationId || !ORG_ID_RE.test(organizationId))) {
-      throw fail('WMS_ORG_REQUIRED', 400, 'Tài khoản root cần truyền organizationId hợp lệ.');
-    }
-    return {
-      isRoot: true,
-      organizationId,
-      actor: { userId: String(userId), employeeId: null, organizationId, username },
-    };
-  }
-
-  const actor = await resolveServiceActor(db, ctx.state.currentUser);
-  if (requestedOrgId != null && String(requestedOrgId).trim() !== '' && String(requestedOrgId).trim() !== actor.organizationId) {
-    throw fail('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không được truy cập dữ liệu của tổ chức khác.');
-  }
-  if (aclCollections && aclCollections.length) {
-    const allowed = await hasCollectionPermission(db, ctx, aclCollections, aclAction);
-    if (!allowed) {
-      throw fail('DXOS_ACL_DENIED', 403, 'Vai trò hiện tại không có quyền thực hiện thao tác này.');
-    }
-  }
-  return {
-    isRoot: false,
-    organizationId: actor.organizationId,
-    actor: { ...actor, username },
-  };
-}
-
 function computeMeanKineticTemperature(samplesC, { deltaH_kJ_mol = 83.14472, maxAllowedC = null } = {}) {
-  if (typeof dataGovernance?.computeMeanKineticTemperature === 'function') {
-    return dataGovernance.computeMeanKineticTemperature(samplesC, { deltaH_kJ_mol, maxAllowedC });
+  if (typeof foundation?.dataGovernance?.computeMeanKineticTemperature === 'function') {
+    return foundation.dataGovernance.computeMeanKineticTemperature(samplesC, { deltaH_kJ_mol, maxAllowedC });
   }
   if (!Array.isArray(samplesC) || samplesC.length === 0) {
     throw fail('MKT_INVALID_SAMPLE', 400, 'Cần ít nhất một mẫu nhiệt độ hợp lệ để tính MKT.');
@@ -316,36 +95,9 @@ function computeMeanKineticTemperature(samplesC, { deltaH_kJ_mol = 83.14472, max
   };
 }
 
-async function appendAuditLedger(db, { organizationId, eventType, targetCollection, targetRecordId, actor, payload, metadata = null, transaction = null, scope = 'dxos:studio' }) {
-  if (typeof pkiLedger?.appendLedgerEntrySafely !== 'function') return null;
-  try {
-    return await pkiLedger.appendLedgerEntrySafely(
-      db,
-      {
-        organizationId,
-        eventType,
-        targetCollection,
-        targetRecordId: String(targetRecordId),
-        actor: {
-          userId: actor?.userId ? String(actor.userId) : null,
-          employeeId: actor?.employeeId ?? null,
-          username: actor?.username || (actor?.employeeId ? `employee-${actor.employeeId}` : 'operator'),
-        },
-        payload,
-        metadata,
-      },
-      { scope, ...(transaction ? { transaction } : {}) },
-    );
-  } catch (err) {
-    if (isSecurityInvariant(err)) throw err;
-    console.error(`[${scope}] Ledger append error:`, err?.message || err);
-    return null;
-  }
-}
-
 async function recordLineageSafely(db, edgeArgs) {
-  if (typeof dataGovernance?.recordLineageEdge === 'function') {
-    return dataGovernance.recordLineageEdge(db, edgeArgs);
+  if (typeof foundation?.dataGovernance?.recordLineageEdge === 'function') {
+    return foundation.dataGovernance.recordLineageEdge(db, edgeArgs);
   }
   const repo = db?.getRepository?.('latticeDataLineage');
   if (!repo || typeof repo.create !== 'function') return null;
@@ -382,12 +134,13 @@ async function recordLineageSafely(db, edgeArgs) {
 }
 
 async function captureQuarantineSafely(db, args) {
-  if (typeof dataGovernance?.captureQuarantineRecord === 'function') {
-    return dataGovernance.captureQuarantineRecord(db, args);
+  if (typeof foundation?.dataGovernance?.captureQuarantineRecord === 'function') {
+    return foundation.dataGovernance.captureQuarantineRecord(db, args);
   }
   const repo = db?.getRepository?.('latticeDataQuarantine');
   if (!repo || typeof repo.create !== 'function') return null;
   const quarantineUid = `qtn-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
+  const txOpt = args.transaction ? { transaction: args.transaction } : {};
   const created = await repo.create({
     values: {
       organizationId: args.organizationId,
@@ -403,37 +156,87 @@ async function captureQuarantineSafely(db, args) {
       status: 'quarantined',
       active: true,
     },
+    ...txOpt,
   });
   await appendAuditLedger(db, {
     organizationId: args.organizationId,
     eventType: 'data.quarantined',
     targetCollection: 'latticeDataQuarantine',
     targetRecordId: String(val(created, 'id') || quarantineUid),
-    actor: { username: 'wms-mkt-guard' },
+    actor: args.actor || { username: 'wms-mkt-guard' },
     payload: { quarantineUid, reasonCode: args.reasonCode, numericValue: args.numericValue },
+    transaction: args.transaction || null,
     scope: 'dxos:wms-quarantine',
+    foundation,
   });
   return toPlain(created);
 }
 
-async function runInTx(db, fn) {
-  if (typeof db?.sequelize?.transaction === 'function') {
-    return db.sequelize.transaction((transaction) => fn(transaction));
+async function findLockedLot(db, lotRepo, filter, transaction) {
+  const lockOpt = transaction?.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {};
+  const model = transaction?.LOCK?.UPDATE ? db?.getModel?.('latticeStockLots') : null;
+  if (model && typeof model.findOne === 'function') {
+    return model.findOne({
+      where: filter,
+      transaction,
+      ...lockOpt,
+    });
   }
-  return fn(null);
+  const txOpt = transaction ? { transaction, ...lockOpt } : {};
+  return lotRepo.findOne({ filter, ...txOpt });
 }
 
-async function saveRow(repo, row, patch, filter, transaction) {
+async function findLockedLots(db, lotRepo, { filter, sort = ['expiryDate', 'id'], limit = 500, transaction = null } = {}) {
+  const lockOpt = transaction?.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {};
+  const model = transaction?.LOCK?.UPDATE ? db?.getModel?.('latticeStockLots') : null;
+  if (model && typeof model.findAll === 'function') {
+    const order = Array.isArray(sort)
+      ? sort.map((field) => {
+          const desc = String(field).startsWith('-');
+          const name = desc ? String(field).slice(1) : String(field);
+          return [name, desc ? 'DESC' : 'ASC'];
+        })
+      : undefined;
+    return model.findAll({
+      where: filter,
+      ...(order ? { order } : {}),
+      ...(limit ? { limit } : {}),
+      transaction,
+      ...lockOpt,
+    });
+  }
+  const txOpt = transaction ? { transaction, ...lockOpt } : {};
+  return lotRepo.find({ filter, sort, limit, ...txOpt });
+}
+
+async function resolveOrderRef(db, organizationId, params, { requireOrder = false, lookupByCode = true, transaction = null } = {}) {
+  let orderId = params.orderId != null && /^[1-9]\d*$/.test(String(params.orderId)) ? Number(params.orderId) : null;
+  let orderCode = typeof params.orderCode === 'string' ? params.orderCode.trim() : '';
+  const ordersRepo = db.getRepository?.('latticeOrders');
   const txOpt = transaction ? { transaction } : {};
-  if (repo && typeof repo.update === 'function' && val(row, 'id') != null) {
-    const res = await repo.update({ filterByTk: val(row, 'id'), filter, values: patch, ...txOpt });
-    if (Array.isArray(res) && res[0]) return res[0];
+  let matchedOrder = null;
+
+  if (orderId != null && ordersRepo?.findOne) {
+    matchedOrder = await ordersRepo.findOne({ filter: { id: orderId, organizationId }, ...txOpt });
+    if (!matchedOrder || val(matchedOrder, 'organizationId') !== organizationId) {
+      throw fail('WMS_ORDER_NOT_FOUND', 404, 'Không tìm thấy đơn hàng trong phạm vi tổ chức.');
+    }
+    if (!orderCode) orderCode = val(matchedOrder, 'code') || String(orderId);
+  } else if (lookupByCode && orderCode && ordersRepo?.findOne) {
+    matchedOrder = await ordersRepo.findOne({ filter: { code: orderCode, organizationId }, ...txOpt });
+    if (matchedOrder && val(matchedOrder, 'organizationId') === organizationId) {
+      orderId = val(matchedOrder, 'id') ?? orderId;
+    } else {
+      matchedOrder = null;
+    }
   }
-  if (typeof row?.update === 'function') {
-    await row.update(patch, txOpt);
-    return row;
+
+  if (requireOrder && !orderCode && orderId == null) {
+    throw fail('WMS_ORDER_REQUIRED', 400, 'Cần orderCode hoặc orderId.');
   }
-  return Object.assign(row, patch);
+  if (requireOrder && !orderCode) orderCode = String(orderId);
+
+  return { orderId, orderCode, matchedOrder, ordersRepo };
 }
 
 function serializeOrderLine(row) {
@@ -535,7 +338,9 @@ function isLotCompatibleForFefo(lot, { organizationId, sku, nowMs, minTempC, max
   const lotMax = parseFinite(val(lot, 'targetTempMaxC'));
   const lotMkt = parseFinite(val(lot, 'mktCelsius'));
   if (minTempC !== null && lotMin !== null && lotMin < minTempC) return false;
+  if (maxTempC !== null && lotMin !== null && lotMin > maxTempC) return false;
   if (maxTempC !== null && lotMax !== null && lotMax > maxTempC) return false;
+  if (minTempC !== null && lotMax !== null && lotMax < minTempC) return false;
   if (minTempC !== null && lotMkt !== null && lotMkt < minTempC) return false;
   if (maxTempC !== null && lotMkt !== null && lotMkt > maxTempC) return false;
   return true;
@@ -618,6 +423,10 @@ function buildPrintableVoucherHtml({ documentType, organizationId, order, orderL
 }
 
 function createDxosWmsActions(db) {
+  if (typeof foundation?.pgRls?.installRlsTransactionBridge === 'function') {
+    foundation.pgRls.installRlsTransactionBridge(db);
+  }
+
   return {
     orderLines: async (ctx, next) => {
       if ((ctx.method || 'GET') !== 'GET') throw fail('METHOD_NOT_ALLOWED', 405);
@@ -627,7 +436,8 @@ function createDxosWmsActions(db) {
         requestedOrgId: params.organizationId,
         aclCollections: ['latticeOrders', 'latticeOrderLines'],
         aclAction: 'view',
-      });
+        patScopes: ['read', 'write', 'wms'],
+      }, foundation);
       const repo = db.getRepository?.('latticeOrderLines');
       if (!repo) {
         ctx.body = { organizationId, items: [] };
@@ -641,7 +451,9 @@ function createDxosWmsActions(db) {
         ...(typeof params.status === 'string' && params.status.trim() ? { status: params.status.trim() } : {}),
       };
       const limit = Math.max(1, Math.min(200, Math.floor(Number(params.limit) || 100)));
-      const rows = (await repo.find({ filter, sort: ['lineNo', 'id'], limit })) || [];
+      const rows = await runWithOptionalRls(db, organizationId, (transaction) => (
+        repo.find({ filter, sort: ['lineNo', 'id'], limit, ...(transaction ? { transaction } : {}) })
+      ), foundation) || [];
       ctx.body = { organizationId, items: rows.map(serializeOrderLine) };
       return next();
     },
@@ -655,7 +467,7 @@ function createDxosWmsActions(db) {
         aclCollections: ['latticeOrders', 'latticeOrderLines'],
         aclAction: 'update',
         patScopes: ['write', 'wms'],
-      });
+      }, foundation);
       const sku = typeof params.sku === 'string' ? params.sku.trim().slice(0, 128) : '';
       const productName = typeof params.productName === 'string' ? params.productName.trim().slice(0, 255) : '';
       const requestedQty = parseFinite(params.requestedQty);
@@ -663,59 +475,35 @@ function createDxosWmsActions(db) {
       if (!productName) throw fail('WMS_PRODUCT_REQUIRED', 400, 'Cần tên sản phẩm.');
       if (requestedQty === null || requestedQty <= 0) throw fail('WMS_QTY_INVALID', 400, 'requestedQty phải > 0.');
 
-      const lineNo = params.lineNo != null ? Number(params.lineNo) : 1;
-      if (!Number.isInteger(lineNo) || lineNo < 1) throw fail('WMS_LINE_NO_INVALID', 400, 'lineNo phải là số nguyên dương.');
-
-      const targetTempMinC = params.targetTempMinC != null ? parseFinite(params.targetTempMinC) : null;
-      const targetTempMaxC = params.targetTempMaxC != null ? parseFinite(params.targetTempMaxC) : null;
-      if ((params.targetTempMinC != null && targetTempMinC === null) || (params.targetTempMaxC != null && targetTempMaxC === null)) {
-        throw fail('WMS_TEMP_BAND_INVALID', 400, 'Khoảng nhiệt độ mục tiêu không hợp lệ.');
-      }
-      if (targetTempMinC !== null && targetTempMaxC !== null && targetTempMinC > targetTempMaxC) {
-        throw fail('WMS_TEMP_BAND_INVALID', 400, 'targetTempMinC không được lớn hơn targetTempMaxC.');
-      }
-
-      let orderId = params.orderId != null && /^[1-9]\d*$/.test(String(params.orderId)) ? Number(params.orderId) : null;
-      let orderCode = typeof params.orderCode === 'string' ? params.orderCode.trim() : '';
-      const ordersRepo = db.getRepository?.('latticeOrders');
-      if (orderId != null && ordersRepo?.findOne) {
-        const ord = await ordersRepo.findOne({ filter: { id: orderId, organizationId } });
-        if (!ord || val(ord, 'organizationId') !== organizationId) {
-          throw fail('WMS_ORDER_NOT_FOUND', 404, 'Không tìm thấy đơn hàng trong phạm vi tổ chức.');
-        }
-        if (!orderCode) orderCode = val(ord, 'code') || String(orderId);
-      } else if (orderCode && ordersRepo?.findOne) {
-        const ord = await ordersRepo.findOne({ filter: { code: orderCode, organizationId } });
-        if (ord && val(ord, 'organizationId') === organizationId) orderId = val(ord, 'id') ?? orderId;
-      }
-      if (!orderCode && orderId == null) {
-        throw fail('WMS_ORDER_REQUIRED', 400, 'Cần orderCode hoặc orderId.');
-      }
-      if (!orderCode) orderCode = String(orderId);
+      const lineNo = parseStrictPositiveInt(params.lineNo, 1, 'WMS_LINE_NO_INVALID', 'lineNo phải là số nguyên dương.');
+      const { minTempC: targetTempMinC, maxTempC: targetTempMaxC } = parseTempBand(params.targetTempMinC, params.targetTempMaxC);
 
       const lineRepo = db.getRepository?.('latticeOrderLines');
       if (!lineRepo) throw fail('WMS_REPO_UNAVAILABLE', 503);
 
-      const existing = await lineRepo.findOne({ filter: { organizationId, orderCode, lineNo } });
-      const values = {
-        organizationId,
-        orderId,
-        orderCode,
-        lineNo,
-        sku,
-        productName,
-        requestedQty,
-        unit: typeof params.unit === 'string' && params.unit.trim() ? params.unit.trim().slice(0, 64) : 'UNIT',
-        targetTempMinC,
-        targetTempMaxC,
-        notes: typeof params.notes === 'string' ? params.notes.trim().slice(0, 1000) : null,
-      };
-      let saved;
-      if (existing) {
-        saved = await saveRow(lineRepo, existing, values, { organizationId }, null);
-      } else {
-        saved = await lineRepo.create({ values: { ...values, allocatedQty: 0, status: 'pending' } });
-      }
+      const saved = await runWithOptionalRls(db, organizationId, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const { orderId, orderCode } = await resolveOrderRef(db, organizationId, params, { requireOrder: true, transaction });
+        const existing = await lineRepo.findOne({ filter: { organizationId, orderCode, lineNo }, ...txOpt });
+        const values = {
+          organizationId,
+          orderId,
+          orderCode,
+          lineNo,
+          sku,
+          productName,
+          requestedQty,
+          unit: typeof params.unit === 'string' && params.unit.trim() ? params.unit.trim().slice(0, 64) : 'UNIT',
+          targetTempMinC,
+          targetTempMaxC,
+          notes: typeof params.notes === 'string' ? params.notes.trim().slice(0, 1000) : null,
+        };
+        if (existing) {
+          return saveRow(lineRepo, existing, values, { organizationId }, transaction);
+        }
+        return lineRepo.create({ values: { ...values, allocatedQty: 0, status: 'pending' }, ...txOpt });
+      }, foundation);
+
       ctx.body = { orderLine: serializeOrderLine(saved) };
       return next();
     },
@@ -729,7 +517,7 @@ function createDxosWmsActions(db) {
         aclCollections: ['latticeOrders', 'latticeAssets', 'latticeStockLots'],
         aclAction: 'create',
         patScopes: ['write', 'wms'],
-      });
+      }, foundation);
 
       const lotCode = typeof params.lotCode === 'string' ? params.lotCode.trim().slice(0, 128) : '';
       const sku = typeof params.sku === 'string' ? params.sku.trim().slice(0, 128) : '';
@@ -747,14 +535,7 @@ function createDxosWmsActions(db) {
         throw fail('WMS_EXPIRY_INVALID', 400, 'expiryDate phải sau manufacturedAt.');
       }
 
-      const targetTempMinC = params.targetTempMinC != null ? parseFinite(params.targetTempMinC) : null;
-      const targetTempMaxC = params.targetTempMaxC != null ? parseFinite(params.targetTempMaxC) : null;
-      if ((params.targetTempMinC != null && targetTempMinC === null) || (params.targetTempMaxC != null && targetTempMaxC === null)) {
-        throw fail('WMS_TEMP_BAND_INVALID', 400);
-      }
-      if (targetTempMinC !== null && targetTempMaxC !== null && targetTempMinC > targetTempMaxC) {
-        throw fail('WMS_TEMP_BAND_INVALID', 400, 'targetTempMinC không được lớn hơn targetTempMaxC.');
-      }
+      const { minTempC: targetTempMinC, maxTempC: targetTempMaxC } = parseTempBand(params.targetTempMinC, params.targetTempMaxC);
 
       const assetEntityId = typeof params.assetEntityId === 'string' ? params.assetEntityId.trim().slice(0, 255) : null;
       if (assetEntityId) {
@@ -767,20 +548,20 @@ function createDxosWmsActions(db) {
       const warehouseLocationId = params.warehouseLocationId != null && /^[1-9]\d*$/.test(String(params.warehouseLocationId))
         ? Number(params.warehouseLocationId)
         : null;
-      const locRepo = db.getRepository?.('latticeLocations');
-      if (warehouseLocationId != null && locRepo?.findOne) {
-        const loc = await locRepo.findOne({ filter: { id: warehouseLocationId, organizationId, active: true } });
-        if (!loc || val(loc, 'organizationId') !== organizationId) {
-          throw fail('WMS_LOCATION_NOT_FOUND', 404, 'Không tìm thấy kho hợp lệ trong tổ chức.');
-        }
-      }
-
       const lotRepo = db.getRepository?.('latticeStockLots');
       if (!lotRepo) throw fail('WMS_REPO_UNAVAILABLE', 503);
 
-      const saved = await runInTx(db, async (transaction) => {
+      const saved = await runWithOptionalRls(db, organizationId, () => runInTx(db, async (transaction) => {
         const txOpt = transaction ? { transaction } : {};
-        const existing = await lotRepo.findOne({ filter: { organizationId, lotCode }, ...txOpt });
+        const locRepo = db.getRepository?.('latticeLocations');
+        if (warehouseLocationId != null && locRepo?.findOne) {
+          const loc = await locRepo.findOne({ filter: { id: warehouseLocationId, organizationId, active: true }, ...txOpt });
+          if (!loc || val(loc, 'organizationId') !== organizationId) {
+            throw fail('WMS_LOCATION_NOT_FOUND', 404, 'Không tìm thấy kho hợp lệ trong tổ chức.');
+          }
+        }
+
+        const existing = await findLockedLot(db, lotRepo, { organizationId, lotCode }, transaction);
         let row;
         if (existing) {
           if (val(existing, 'sku') !== sku) {
@@ -834,9 +615,10 @@ function createDxosWmsActions(db) {
           payload: serialized,
           transaction,
           scope: 'dxos:wms',
+          foundation,
         });
         return serialized;
-      });
+      }, { organizationId, foundation }), foundation);
 
       ctx.body = { lot: saved };
       return next();
@@ -850,7 +632,8 @@ function createDxosWmsActions(db) {
         requestedOrgId: params.organizationId,
         aclCollections: ['latticeOrders', 'latticeAssets', 'latticeStockLots'],
         aclAction: 'view',
-      });
+        patScopes: ['read', 'write', 'wms'],
+      }, foundation);
       const lotRepo = db.getRepository?.('latticeStockLots');
       if (!lotRepo) {
         ctx.body = { organizationId, items: [] };
@@ -863,7 +646,9 @@ function createDxosWmsActions(db) {
         ...(typeof params.lotCode === 'string' && params.lotCode.trim() ? { lotCode: params.lotCode.trim() } : {}),
       };
       const limit = Math.max(1, Math.min(200, Math.floor(Number(params.limit) || 100)));
-      const rows = (await lotRepo.find({ filter, sort: ['expiryDate', 'id'], limit })) || [];
+      const rows = await runWithOptionalRls(db, organizationId, (transaction) => (
+        lotRepo.find({ filter, sort: ['expiryDate', 'id'], limit, ...(transaction ? { transaction } : {}) })
+      ), foundation) || [];
       ctx.body = { organizationId, items: rows.map(serializeLot) };
       return next();
     },
@@ -877,47 +662,44 @@ function createDxosWmsActions(db) {
         aclCollections: ['latticeOrders', 'latticeAssets', 'latticeStockLots'],
         aclAction: 'update',
         patScopes: ['write', 'wms'],
-      });
+      }, foundation);
 
       const sku = typeof params.sku === 'string' ? params.sku.trim().slice(0, 128) : '';
       const quantity = parseFinite(params.quantity);
       if (!sku) throw fail('WMS_SKU_REQUIRED', 400, 'Cần mã SKU để phân bổ FEFO.');
       if (quantity === null || quantity <= 0) throw fail('WMS_QTY_INVALID', 400, 'Số lượng phân bổ phải > 0.');
 
-      const minTempC = params.minTempC != null ? parseFinite(params.minTempC) : null;
-      const maxTempC = params.maxTempC != null ? parseFinite(params.maxTempC) : null;
-      if ((params.minTempC != null && minTempC === null) || (params.maxTempC != null && maxTempC === null)) {
-        throw fail('WMS_TEMP_BAND_INVALID', 400);
-      }
-      if (minTempC !== null && maxTempC !== null && minTempC > maxTempC) {
-        throw fail('WMS_TEMP_BAND_INVALID', 400);
-      }
+      const { minTempC, maxTempC } = parseTempBand(params.minTempC, params.maxTempC);
       const nowDate = parseOptionalDate(params.now, 'WMS_DATE_INVALID') || new Date();
       const nowMs = nowDate.getTime();
-
-      let orderId = params.orderId != null && /^[1-9]\d*$/.test(String(params.orderId)) ? Number(params.orderId) : null;
-      let orderCode = typeof params.orderCode === 'string' ? params.orderCode.trim() : '';
-      const lineNo = params.lineNo != null ? Number(params.lineNo) : 1;
-      const ordersRepo = db.getRepository?.('latticeOrders');
-      if (orderId != null && ordersRepo?.findOne) {
-        const ord = await ordersRepo.findOne({ filter: { id: orderId, organizationId } });
-        if (!ord || val(ord, 'organizationId') !== organizationId) {
-          throw fail('WMS_ORDER_NOT_FOUND', 404, 'Không tìm thấy đơn hàng trong tổ chức.');
-        }
-        if (!orderCode) orderCode = val(ord, 'code') || String(orderId);
-      }
+      const lineNo = parseStrictPositiveInt(params.lineNo, 1, 'WMS_LINE_NO_INVALID', 'lineNo phải là số nguyên dương.');
 
       const lotRepo = db.getRepository?.('latticeStockLots');
       if (!lotRepo) throw fail('WMS_REPO_UNAVAILABLE', 503);
       const lineRepo = db.getRepository?.('latticeOrderLines');
 
-      const result = await runInTx(db, async (transaction) => {
+      const result = await runWithOptionalRls(db, organizationId, () => runInTx(db, async (transaction) => {
         const txOpt = transaction ? { transaction } : {};
-        const rawLots = (await lotRepo.find({
+        const { orderId, orderCode } = await resolveOrderRef(db, organizationId, params, {
+          requireOrder: false,
+          lookupByCode: false,
+          transaction,
+        });
+
+        const resolvedCode = orderCode || (orderId != null ? String(orderId) : '');
+        let existingLine = null;
+        if (lineRepo && resolvedCode) {
+          existingLine = await lineRepo.findOne({ filter: { organizationId, orderCode: resolvedCode, lineNo }, ...txOpt });
+          if (existingLine && val(existingLine, 'sku') !== sku) {
+            throw fail('WMS_ORDER_LINE_SKU_MISMATCH', 400, 'SKU của dòng đơn hàng không khớp với SKU phân bổ FEFO.');
+          }
+        }
+
+        const rawLots = (await findLockedLots(db, lotRepo, {
           filter: { organizationId, sku, status: 'available', active: true },
           sort: ['expiryDate', 'id'],
           limit: 500,
-          ...txOpt,
+          transaction,
         })) || [];
 
         const eligible = rawLots
@@ -952,9 +734,7 @@ function createDxosWmsActions(db) {
         const shortfall = Number(Math.max(0, remaining).toFixed(6));
         let orderLine = null;
 
-        if (lineRepo && (orderCode || orderId != null)) {
-          const resolvedCode = orderCode || String(orderId);
-          const existingLine = await lineRepo.findOne({ filter: { organizationId, orderCode: resolvedCode, lineNo }, ...txOpt });
+        if (lineRepo && resolvedCode) {
           const primaryLot = allocations[0] || null;
           const nextStatus = allocatedTotal === 0 ? 'pending' : (shortfall === 0 ? 'allocated' : 'partial');
           if (existingLine) {
@@ -1003,6 +783,7 @@ function createDxosWmsActions(db) {
           payload: { sku, quantity, allocatedTotal, shortfall, allocations },
           transaction,
           scope: 'dxos:wms',
+          foundation,
         });
 
         for (const alloc of allocations) {
@@ -1025,7 +806,7 @@ function createDxosWmsActions(db) {
           allocations: allocations.map(({ productName: _p, ...rest }) => rest),
           orderLine,
         };
-      });
+      }, { organizationId, foundation }), foundation);
 
       ctx.body = result;
       return next();
@@ -1040,7 +821,7 @@ function createDxosWmsActions(db) {
         aclCollections: ['latticeOrders', 'latticeAssets', 'latticeStockLots'],
         aclAction: 'update',
         patScopes: ['write', 'wms'],
-      });
+      }, foundation);
 
       const quantity = parseFinite(params.quantity);
       if (quantity === null || quantity <= 0) throw fail('WMS_QTY_INVALID', 400, 'Số lượng xuất kho phải > 0.');
@@ -1048,14 +829,20 @@ function createDxosWmsActions(db) {
       const lotCode = typeof params.lotCode === 'string' ? params.lotCode.trim() : '';
       if (lotId == null && !lotCode) throw fail('WMS_LOT_REQUIRED', 400, 'Cần lotId hoặc lotCode.');
 
+      const orderLineId = params.orderLineId != null
+        ? parseStrictPositiveInt(params.orderLineId, undefined, 'WMS_ORDER_LINE_ID_INVALID', 'orderLineId phải là số nguyên dương.')
+        : null;
+      const lineNo = parseStrictPositiveInt(params.lineNo, 1, 'WMS_LINE_NO_INVALID', 'lineNo phải là số nguyên dương.');
+      const orderCode = typeof params.orderCode === 'string' ? params.orderCode.trim() : '';
+
       const lotRepo = db.getRepository?.('latticeStockLots');
       if (!lotRepo) throw fail('WMS_REPO_UNAVAILABLE', 503);
       const lineRepo = db.getRepository?.('latticeOrderLines');
 
-      const result = await runInTx(db, async (transaction) => {
+      const result = await runWithOptionalRls(db, organizationId, () => runInTx(db, async (transaction) => {
         const txOpt = transaction ? { transaction } : {};
         const filter = lotId != null ? { organizationId, id: lotId } : { organizationId, lotCode };
-        const lot = await lotRepo.findOne({ filter, ...txOpt });
+        const lot = await findLockedLot(db, lotRepo, filter, transaction);
         if (!lot || val(lot, 'organizationId') !== organizationId) {
           throw fail('WMS_LOT_NOT_FOUND', 404, 'Không tìm thấy lô hàng trong phạm vi tổ chức.');
         }
@@ -1084,10 +871,10 @@ function createDxosWmsActions(db) {
         );
 
         let orderLine = null;
-        if (lineRepo && (params.orderLineId != null || params.orderCode)) {
-          const lineFilter = params.orderLineId != null
-            ? { organizationId, id: Number(params.orderLineId) }
-            : { organizationId, orderCode: String(params.orderCode).trim(), lineNo: params.lineNo != null ? Number(params.lineNo) : 1 };
+        if (lineRepo && (orderLineId != null || orderCode)) {
+          const lineFilter = orderLineId != null
+            ? { organizationId, id: orderLineId }
+            : { organizationId, orderCode, lineNo };
           const line = await lineRepo.findOne({ filter: lineFilter, ...txOpt });
           if (line && val(line, 'organizationId') === organizationId) {
             const updatedLine = await saveRow(lineRepo, line, { status: 'dispatched' }, { organizationId }, transaction);
@@ -1105,10 +892,11 @@ function createDxosWmsActions(db) {
           payload: { lotCode: serialized.lotCode, issuedQty: quantity, qtyOnHand: nextOnHand, status: nextStatus },
           transaction,
           scope: 'dxos:wms',
+          foundation,
         });
 
         return { lot: serialized, issuedQty: quantity, orderLine };
-      });
+      }, { organizationId, foundation }), foundation);
 
       ctx.body = result;
       return next();
@@ -1123,112 +911,125 @@ function createDxosWmsActions(db) {
         aclCollections: ['latticeOrders', 'latticeAssets', 'latticeStockLots'],
         aclAction: 'update',
         patScopes: ['write', 'wms'],
-      });
+      }, foundation);
 
       const lotId = params.lotId != null && /^[1-9]\d*$/.test(String(params.lotId)) ? Number(params.lotId) : null;
       const lotCode = typeof params.lotCode === 'string' ? params.lotCode.trim() : '';
       if (lotId == null && !lotCode) throw fail('WMS_LOT_REQUIRED', 400, 'Cần lotId hoặc lotCode.');
 
-      const lotRepo = db.getRepository?.('latticeStockLots');
-      if (!lotRepo) throw fail('WMS_REPO_UNAVAILABLE', 503);
-      const lot = await lotRepo.findOne({ filter: lotId != null ? { organizationId, id: lotId } : { organizationId, lotCode } });
-      if (!lot || val(lot, 'organizationId') !== organizationId) {
-        throw fail('WMS_LOT_NOT_FOUND', 404, 'Không tìm thấy lô hàng trong phạm vi tổ chức.');
-      }
-
-      let samples = Array.isArray(params.samplesC) ? params.samplesC : null;
-      if (!samples || !samples.length) {
-        const assetEntityId = val(lot, 'assetEntityId');
-        const tsRepo = db.getRepository?.('latticeTelemetryPoints');
-        if (assetEntityId && tsRepo?.find) {
-          const pts = (await tsRepo.find({
-            filter: { organizationId, assetEntityId, metricName: 'temperature' },
-            sort: ['-observedAt', '-id'],
-            limit: 500,
-          })) || [];
-          samples = pts
-            .filter((p) => val(p, 'organizationId') === organizationId && val(p, 'assetEntityId') === assetEntityId)
-            .map((p) => parseFinite(val(p, 'numericValue')))
-            .filter((v) => v !== null);
-        }
-      }
-
-      const profile = String(params.coldChainProfile || '').trim().toLowerCase();
-      const lotMaxTemp = parseFinite(val(lot, 'targetTempMaxC'));
-      const lotMinTemp = parseFinite(val(lot, 'targetTempMinC'));
       const explicitMax = params.maxAllowedC != null ? parseFinite(params.maxAllowedC) : null;
       if (params.maxAllowedC != null && explicitMax === null) {
         throw fail('MKT_INVALID_SAMPLE', 400, 'maxAllowedC không hợp lệ.');
       }
-      const thresholdCelsius = explicitMax
-        ?? lotMaxTemp
-        ?? (profile === 'frozen' || (lotMinTemp !== null && lotMinTemp <= -15) ? -15 : 8);
 
-      const forceHold = params.forceHold === true;
-      if ((!samples || !samples.length) && !forceHold) {
-        throw fail('WMS_MKT_SAMPLES_REQUIRED', 400, 'Cần chuỗi mẫu nhiệt độ hoặc telemetry thiết bị để tính MKT.');
-      }
+      const lotRepo = db.getRepository?.('latticeStockLots');
+      if (!lotRepo) throw fail('WMS_REPO_UNAVAILABLE', 503);
 
-      const mktResult = samples && samples.length
-        ? computeMeanKineticTemperature(samples, { maxAllowedC: thresholdCelsius })
-        : {
-            mktCelsius: val(lot, 'mktCelsius') ?? thresholdCelsius,
-            minTempCelsius: null,
-            maxTempCelsius: null,
-            avgTempCelsius: null,
-            sampleCount: 0,
-            excursionCount: 0,
-            thresholdCelsius,
-            breached: false,
-          };
+      const result = await runWithOptionalRls(db, organizationId, () => runInTx(db, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const lotFilter = lotId != null ? { organizationId, id: lotId } : { organizationId, lotCode };
+        const lot = await findLockedLot(db, lotRepo, lotFilter, transaction);
+        if (!lot || val(lot, 'organizationId') !== organizationId) {
+          throw fail('WMS_LOT_NOT_FOUND', 404, 'Không tìm thấy lô hàng trong phạm vi tổ chức.');
+        }
 
-      const held = forceHold || mktResult.mktCelsius > thresholdCelsius;
-      const reason = String(
-        params.reason || (forceHold ? 'Tạm giữ lô thủ công theo quy định QA' : `MKT ${mktResult.mktCelsius}°C vượt ngưỡng ${thresholdCelsius}°C`),
-      ).slice(0, 255);
+        let samples = Array.isArray(params.samplesC) ? params.samplesC : null;
+        if (!samples || !samples.length) {
+          const assetEntityId = val(lot, 'assetEntityId');
+          const tsRepo = db.getRepository?.('latticeTelemetryPoints');
+          if (assetEntityId && tsRepo?.find) {
+            const pts = (await tsRepo.find({
+              filter: { organizationId, assetEntityId, metricName: 'temperature' },
+              sort: ['-observedAt', '-id'],
+              limit: 500,
+              ...txOpt,
+            })) || [];
+            samples = pts
+              .filter((p) => val(p, 'organizationId') === organizationId && val(p, 'assetEntityId') === assetEntityId)
+              .map((p) => parseFinite(val(p, 'numericValue')))
+              .filter((v) => v !== null);
+          }
+        }
 
-      const patch = {
-        mktCelsius: mktResult.mktCelsius,
-        ...(held ? {
-          status: 'hold_mkt',
-          holdReason: reason,
-          heldAt: new Date(),
-          heldBy: actor.username,
-        } : {}),
-      };
-      const updated = await saveRow(lotRepo, lot, patch, { organizationId }, null);
+        const profile = String(params.coldChainProfile || '').trim().toLowerCase();
+        const lotMaxTemp = parseFinite(val(lot, 'targetTempMaxC'));
+        const lotMinTemp = parseFinite(val(lot, 'targetTempMinC'));
+        const thresholdCelsius = explicitMax
+          ?? lotMaxTemp
+          ?? (profile === 'frozen' || (lotMinTemp !== null && lotMinTemp <= -15) ? -15 : 8);
 
-      if (held) {
-        await captureQuarantineSafely(db, {
-          organizationId,
-          sourceSystem: 'wms_mkt',
-          assetEntityId: val(lot, 'assetEntityId') || `lot:${val(lot, 'lotCode')}`,
-          metricName: 'mkt_celsius',
-          numericValue: mktResult.mktCelsius,
-          unit: 'CEL',
-          reasonCode: 'MKT_THRESHOLD_EXCEEDED',
-          severity: 'high',
-          rawPayload: { lotCode: val(lot, 'lotCode'), sku: val(lot, 'sku'), thresholdCelsius, mktResult, holdReason: reason },
-        });
-        await appendAuditLedger(db, {
-          organizationId,
-          eventType: 'wms.lot_mkt_hold',
-          targetCollection: 'latticeStockLots',
-          targetRecordId: String(val(updated, 'id') ?? val(lot, 'lotCode')),
-          actor,
-          payload: { lotCode: val(lot, 'lotCode'), mktCelsius: mktResult.mktCelsius, thresholdCelsius, holdReason: reason },
-          scope: 'dxos:wms',
-        });
-      }
+        const forceHold = params.forceHold === true;
+        if ((!samples || !samples.length) && !forceHold) {
+          throw fail('WMS_MKT_SAMPLES_REQUIRED', 400, 'Cần chuỗi mẫu nhiệt độ hoặc telemetry thiết bị để tính MKT.');
+        }
 
-      ctx.body = {
-        held,
-        lotCode: val(lot, 'lotCode'),
-        mktCelsius: mktResult.mktCelsius,
-        thresholdCelsius,
-        lotStatus: val(updated, 'status') || (held ? 'hold_mkt' : 'available'),
-        mktDetails: mktResult,
-      };
+        const mktResult = samples && samples.length
+          ? computeMeanKineticTemperature(samples, { maxAllowedC: thresholdCelsius })
+          : {
+              mktCelsius: val(lot, 'mktCelsius') ?? thresholdCelsius,
+              minTempCelsius: null,
+              maxTempCelsius: null,
+              avgTempCelsius: null,
+              sampleCount: 0,
+              excursionCount: 0,
+              thresholdCelsius,
+              breached: false,
+            };
+
+        const held = forceHold || mktResult.mktCelsius > thresholdCelsius;
+        const reason = String(
+          params.reason || (forceHold ? 'Tạm giữ lô thủ công theo quy định QA' : `MKT ${mktResult.mktCelsius}°C vượt ngưỡng ${thresholdCelsius}°C`),
+        ).slice(0, 255);
+
+        const patch = {
+          mktCelsius: mktResult.mktCelsius,
+          ...(held ? {
+            status: 'hold_mkt',
+            holdReason: reason,
+            heldAt: new Date(),
+            heldBy: actor.username,
+          } : {}),
+        };
+        const updated = await saveRow(lotRepo, lot, patch, { organizationId }, transaction);
+
+        if (held) {
+          await captureQuarantineSafely(db, {
+            organizationId,
+            sourceSystem: 'wms_mkt',
+            assetEntityId: val(lot, 'assetEntityId') || `lot:${val(lot, 'lotCode')}`,
+            metricName: 'mkt_celsius',
+            numericValue: mktResult.mktCelsius,
+            unit: 'CEL',
+            reasonCode: 'MKT_THRESHOLD_EXCEEDED',
+            severity: 'high',
+            rawPayload: { lotCode: val(lot, 'lotCode'), sku: val(lot, 'sku'), thresholdCelsius, mktResult, holdReason: reason },
+            actor,
+            transaction,
+          });
+          await appendAuditLedger(db, {
+            organizationId,
+            eventType: 'wms.lot_mkt_hold',
+            targetCollection: 'latticeStockLots',
+            targetRecordId: String(val(updated, 'id') ?? val(lot, 'lotCode')),
+            actor,
+            payload: { lotCode: val(lot, 'lotCode'), mktCelsius: mktResult.mktCelsius, thresholdCelsius, holdReason: reason },
+            transaction,
+            scope: 'dxos:wms',
+            foundation,
+          });
+        }
+
+        return {
+          held,
+          lotCode: val(lot, 'lotCode'),
+          mktCelsius: mktResult.mktCelsius,
+          thresholdCelsius,
+          lotStatus: val(updated, 'status') || (held ? 'hold_mkt' : 'available'),
+          mktDetails: mktResult,
+        };
+      }, { organizationId, foundation }), foundation);
+
+      ctx.body = result;
       return next();
     },
 
@@ -1241,7 +1042,7 @@ function createDxosWmsActions(db) {
         aclCollections: ['latticeOrders', 'latticeEpodRecords'],
         aclAction: 'update',
         patScopes: ['write', 'wms'],
-      });
+      }, foundation);
 
       const recipientName = typeof params.recipientName === 'string' ? params.recipientName.trim().slice(0, 128) : '';
       if (!recipientName) throw fail('EPOD_RECIPIENT_REQUIRED', 400, 'Cần tên người nhận hàng.');
@@ -1262,23 +1063,6 @@ function createDxosWmsActions(db) {
       const signatureDataUrl = typeof params.signatureDataUrl === 'string' ? params.signatureDataUrl.trim() : '';
       if (!signatureDataUrl || signatureDataUrl.length < 4 || Buffer.byteLength(signatureDataUrl, 'utf8') > 256 * 1024) {
         throw fail('EPOD_SIGNATURE_INVALID', 400, 'Chữ ký điện tử ePOD không hợp lệ hoặc vượt quá 256KB.');
-      }
-
-      let orderId = params.orderId != null && /^[1-9]\d*$/.test(String(params.orderId)) ? Number(params.orderId) : null;
-      let orderCode = typeof params.orderCode === 'string' ? params.orderCode.trim() : '';
-      const ordersRepo = db.getRepository?.('latticeOrders');
-      let matchedOrder = null;
-      if (orderId != null && ordersRepo?.findOne) {
-        matchedOrder = await ordersRepo.findOne({ filter: { id: orderId, organizationId } });
-        if (!matchedOrder || val(matchedOrder, 'organizationId') !== organizationId) {
-          throw fail('WMS_ORDER_NOT_FOUND', 404, 'Không tìm thấy đơn hàng trong phạm vi tổ chức.');
-        }
-        if (!orderCode) orderCode = val(matchedOrder, 'code') || String(orderId);
-      } else if (orderCode && ordersRepo?.findOne) {
-        matchedOrder = await ordersRepo.findOne({ filter: { code: orderCode, organizationId } });
-        if (matchedOrder && val(matchedOrder, 'organizationId') === organizationId) {
-          orderId = val(matchedOrder, 'id') ?? orderId;
-        }
       }
 
       const deliveredAt = parseOptionalDate(params.deliveredAt, 'EPOD_DATE_INVALID') || new Date();
@@ -1303,8 +1087,14 @@ function createDxosWmsActions(db) {
       const epodRepo = db.getRepository?.('latticeEpodRecords');
       if (!epodRepo) throw fail('WMS_REPO_UNAVAILABLE', 503);
 
-      const createdEpod = await runInTx(db, async (transaction) => {
+      const createdEpod = await runWithOptionalRls(db, organizationId, () => runInTx(db, async (transaction) => {
         const txOpt = transaction ? { transaction } : {};
+        const { orderId, orderCode, matchedOrder, ordersRepo } = await resolveOrderRef(db, organizationId, params, {
+          requireOrder: false,
+          lookupByCode: true,
+          transaction,
+        });
+
         const ledgerEntry = await appendAuditLedger(db, {
           organizationId,
           eventType: 'wms.epod_captured',
@@ -1324,6 +1114,7 @@ function createDxosWmsActions(db) {
           },
           transaction,
           scope: 'dxos:epod',
+          foundation,
         });
 
         const row = await epodRepo.create({
@@ -1385,7 +1176,7 @@ function createDxosWmsActions(db) {
         });
 
         return serializeEpod(row);
-      });
+      }, { organizationId, foundation }), foundation);
 
       ctx.body = { epod: createdEpod, trackingCode, trackingToken };
       return next();
@@ -1441,7 +1232,8 @@ function createDxosWmsActions(db) {
         requestedOrgId: params.organizationId,
         aclCollections: ['latticeOrders', 'latticeOrderLines', 'latticeEpodRecords'],
         aclAction: 'view',
-      });
+        patScopes: ['read', 'write', 'wms'],
+      }, foundation);
 
       const documentType = String(params.documentType || '').trim();
       if (!['order', 'delivery_note', 'epod'].includes(documentType)) {
@@ -1455,58 +1247,65 @@ function createDxosWmsActions(db) {
         throw fail('PRINT_TARGET_REQUIRED', 400, 'Cần orderId, orderCode hoặc epodUid.');
       }
 
-      const ordersRepo = db.getRepository?.('latticeOrders');
-      const lineRepo = db.getRepository?.('latticeOrderLines');
-      const epodRepo = db.getRepository?.('latticeEpodRecords');
+      const voucherData = await runWithOptionalRls(db, organizationId, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const ordersRepo = db.getRepository?.('latticeOrders');
+        const lineRepo = db.getRepository?.('latticeOrderLines');
+        const epodRepo = db.getRepository?.('latticeEpodRecords');
 
-      let epod = null;
-      if (epodRepo?.findOne) {
-        if (epodUid) epod = await epodRepo.findOne({ filter: { organizationId, epodUid } });
-        else if (orderId != null) epod = await epodRepo.findOne({ filter: { organizationId, orderId } });
-        else if (orderCode) epod = await epodRepo.findOne({ filter: { organizationId, orderCode } });
-        if (epod && val(epod, 'organizationId') !== organizationId) epod = null;
-      }
-      if (!orderCode && epod) orderCode = val(epod, 'orderCode') || '';
-
-      let order = null;
-      if (ordersRepo?.findOne) {
-        if (orderId != null) order = await ordersRepo.findOne({ filter: { organizationId, id: orderId } });
-        else if (orderCode) order = await ordersRepo.findOne({ filter: { organizationId, code: orderCode } });
-        else if (val(epod, 'orderId') != null) order = await ordersRepo.findOne({ filter: { organizationId, id: val(epod, 'orderId') } });
-        if (order && val(order, 'organizationId') !== organizationId) order = null;
-      }
-      if (!orderCode && order) orderCode = val(order, 'code') || '';
-
-      let orderLines = [];
-      if (lineRepo?.find) {
-        const lineFilter = orderId != null
-          ? { organizationId, orderId }
-          : (orderCode ? { organizationId, orderCode } : null);
-        if (lineFilter) {
-          const rows = (await lineRepo.find({ filter: lineFilter, sort: ['lineNo', 'id'], limit: 200 })) || [];
-          orderLines = rows.filter((r) => val(r, 'organizationId') === organizationId);
+        let epod = null;
+        if (epodRepo?.findOne) {
+          if (epodUid) epod = await epodRepo.findOne({ filter: { organizationId, epodUid }, ...txOpt });
+          else if (orderId != null) epod = await epodRepo.findOne({ filter: { organizationId, orderId }, ...txOpt });
+          else if (orderCode) epod = await epodRepo.findOne({ filter: { organizationId, orderCode }, ...txOpt });
+          if (epod && val(epod, 'organizationId') !== organizationId) epod = null;
         }
-      }
+        if (!orderCode && epod) orderCode = val(epod, 'orderCode') || '';
 
-      if (!order && !orderLines.length && !epod) {
-        throw fail('VOUCHER_NOT_FOUND', 404, 'Không tìm thấy chứng từ trong phạm vi tổ chức.');
-      }
-
-      let ledgerSeq = val(epod, 'ledgerSeq') ?? null;
-      let keyId = val(epod, 'keyId') || null;
-      if ((ledgerSeq == null || !keyId) && db.getRepository?.('latticeCryptoLedger')?.find) {
-        const targetId = String(val(order, 'id') ?? val(epod, 'epodUid') ?? orderCode);
-        const ledgerRows = (await db.getRepository('latticeCryptoLedger').find({
-          filter: { organizationId, targetRecordId: targetId },
-          sort: ['-seq'],
-          limit: 1,
-        })) || [];
-        if (ledgerRows[0] && val(ledgerRows[0], 'organizationId') === organizationId) {
-          ledgerSeq = val(ledgerRows[0], 'seq') ?? ledgerSeq;
-          keyId = val(ledgerRows[0], 'keyId') || keyId;
+        let order = null;
+        if (ordersRepo?.findOne) {
+          if (orderId != null) order = await ordersRepo.findOne({ filter: { organizationId, id: orderId }, ...txOpt });
+          else if (orderCode) order = await ordersRepo.findOne({ filter: { organizationId, code: orderCode }, ...txOpt });
+          else if (val(epod, 'orderId') != null) order = await ordersRepo.findOne({ filter: { organizationId, id: val(epod, 'orderId') }, ...txOpt });
+          if (order && val(order, 'organizationId') !== organizationId) order = null;
         }
-      }
+        if (!orderCode && order) orderCode = val(order, 'code') || '';
 
+        let orderLines = [];
+        if (lineRepo?.find) {
+          const lineFilter = orderId != null
+            ? { organizationId, orderId }
+            : (orderCode ? { organizationId, orderCode } : null);
+          if (lineFilter) {
+            const rows = (await lineRepo.find({ filter: lineFilter, sort: ['lineNo', 'id'], limit: 200, ...txOpt })) || [];
+            orderLines = rows.filter((r) => val(r, 'organizationId') === organizationId);
+          }
+        }
+
+        if (!order && !orderLines.length && !epod) {
+          throw fail('VOUCHER_NOT_FOUND', 404, 'Không tìm thấy chứng từ trong phạm vi tổ chức.');
+        }
+
+        let ledgerSeq = val(epod, 'ledgerSeq') ?? null;
+        let keyId = val(epod, 'keyId') || null;
+        if ((ledgerSeq == null || !keyId) && db.getRepository?.('latticeCryptoLedger')?.find) {
+          const targetId = String(val(order, 'id') ?? val(epod, 'epodUid') ?? orderCode);
+          const ledgerRows = (await db.getRepository('latticeCryptoLedger').find({
+            filter: { organizationId, targetRecordId: targetId },
+            sort: ['-seq'],
+            limit: 1,
+            ...txOpt,
+          })) || [];
+          if (ledgerRows[0] && val(ledgerRows[0], 'organizationId') === organizationId) {
+            ledgerSeq = val(ledgerRows[0], 'seq') ?? ledgerSeq;
+            keyId = val(ledgerRows[0], 'keyId') || keyId;
+          }
+        }
+
+        return { order, orderLines, epod, ledgerSeq, keyId };
+      }, foundation);
+
+      const { order, orderLines, epod, ledgerSeq, keyId } = voucherData;
       const qrVerificationHash = sha256Hex(
         val(epod, 'trackingCode') || `${documentType}:${organizationId}:${orderCode || epodUid || orderId}`,
       );
@@ -1528,177 +1327,8 @@ function createDxosWmsActions(db) {
   };
 }
 
-function clampPageLimit(limit) {
-  const n = Number(limit);
-  if (!Number.isFinite(n) || n < 1) return 20;
-  return Math.min(200, Math.floor(n));
-}
-
-function sanitizeDirectFilter(node, depth = 0) {
-  if (node == null) return node;
-  if (depth > 20) throw fail('NATIVE_RELATION_EXPANSION_UNSUPPORTED', 403);
-  let target = node;
-  if (typeof target === 'string') {
-    const trimmed = target.trim();
-    if (!trimmed) return node;
-    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-      try { target = JSON.parse(trimmed); } catch { throw fail('NATIVE_RELATION_EXPANSION_UNSUPPORTED', 403); }
-    } else {
-      return node;
-    }
-  }
-  if (Array.isArray(target)) return target.map((item) => sanitizeDirectFilter(item, depth + 1));
-  if (typeof target !== 'object') return target;
-  const out = {};
-  for (const [key, entry] of Object.entries(target)) {
-    if (key === '__proto__' || key === 'constructor' || key === 'prototype' || key === '$where' || key === '$raw' || key === '$sql') {
-      throw fail('NATIVE_RELATION_EXPANSION_UNSUPPORTED', 403);
-    }
-    if (!key.startsWith('$') && (key.includes('.') || SENSITIVE_FILTER_KEY_RE.test(key))) {
-      throw fail('NATIVE_RELATION_EXPANSION_UNSUPPORTED', 403);
-    }
-    out[key] = sanitizeDirectFilter(entry, depth + 1);
-  }
-  return out;
-}
-
-function assertSafeDirectSort(sort) {
-  if (sort == null) return;
-  const items = Array.isArray(sort) ? sort : String(sort).split(',');
-  for (const item of items) {
-    const clean = String(item || '').trim().replace(/^-/, '');
-    if (!clean) continue;
-    if (clean.includes('.') || SENSITIVE_FILTER_KEY_RE.test(clean)) {
-      throw fail('NATIVE_RELATION_EXPANSION_UNSUPPORTED', 403);
-    }
-  }
-}
-
-function stripEpodSecretsFromBody(ctx) {
-  const scrub = (row) => {
-    if (!row || typeof row !== 'object') return row;
-    if (typeof row.toJSON === 'function') {
-      const plain = row.toJSON();
-      if (plain && typeof plain === 'object') delete plain.trackingTokenHash;
-      return plain;
-    }
-    if (row.dataValues && typeof row.dataValues === 'object') {
-      delete row.dataValues.trackingTokenHash;
-    }
-    delete row.trackingTokenHash;
-    return row;
-  };
-  const body = ctx?.body;
-  if (Array.isArray(body)) {
-    ctx.body = body.map(scrub);
-  } else if (body && typeof body === 'object') {
-    if (Array.isArray(body.rows)) body.rows = body.rows.map(scrub);
-    if (Array.isArray(body.items)) body.items = body.items.map(scrub);
-    if (Array.isArray(body.data)) body.data = body.data.map(scrub);
-    else if (body.data && typeof body.data === 'object') body.data = scrub(body.data);
-    scrub(body);
-  }
-}
-
 function createWmsDmnDirectGuardMiddleware(db) {
-  if (typeof pgRls?.installRlsTransactionBridge === 'function') {
-    pgRls.installRlsTransactionBridge(db);
-  }
-  const readActions = new Set(['list', 'get', 'count']);
-  const writeActions = new Set(['create', 'update', 'destroy']);
-
-  return async function wmsDmnDirectGuardMiddleware(ctx, next) {
-    const { resourceName, actionName } = ctx.action || {};
-    const params = ctx.action?.params || (ctx.action ? (ctx.action.params = {}) : {});
-    if (ctx.state?.currentRole === 'root') return next();
-
-    if (resourceName === 'charts' && actionName === 'queryData' && WMS_DMN_COLLECTIONS.has(String(params?.values?.collection || ''))) {
-      if (params.values.mode !== 'builder') throw fail('NATIVE_CHART_MODE_UNSUPPORTED', 403);
-      const actor = await resolveServiceActor(db, ctx.state?.currentUser);
-      const sanitizedFilter = params.values.filter !== undefined ? sanitizeDirectFilter(params.values.filter) : params.values.filter;
-      assertSafeDirectSort(params.values.sort);
-      params.values = { ...params.values, filter: { $and: [{ organizationId: actor.organizationId }, sanitizedFilter ?? {}] } };
-      if (params.values.pageSize != null) params.values.pageSize = clampPageLimit(params.values.pageSize);
-      if (params.values.limit != null) params.values.limit = clampPageLimit(params.values.limit);
-      ctx.state = ctx.state || {};
-      ctx.state.latticeNativeActor = actor;
-      ctx.state.latticeRlsOrg = actor.organizationId;
-      if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function' && typeof pgRls?.withTenantRlsContext === 'function') {
-        return pgRls.withTenantRlsContext(db, actor.organizationId, (transaction) => {
-          ctx.state.latticeRlsTransaction = transaction;
-          return next();
-        });
-      }
-      return next();
-    }
-
-    const collectionName = String(resourceName || '').split('.')[0];
-    if (!WMS_DMN_COLLECTIONS.has(collectionName)) return next();
-
-    const actor = await resolveServiceActor(db, ctx.state?.currentUser);
-    if (resourceName !== collectionName) throw fail('NATIVE_ASSOCIATION_ACTION_UNSUPPORTED', 403);
-    if (!readActions.has(actionName) && !writeActions.has(actionName)) throw fail('NATIVE_ACTION_UNSUPPORTED', 403);
-
-    if (writeActions.has(actionName)) {
-      if (DIRECT_WRITE_LOCKED_COLLECTIONS.has(collectionName)) {
-        throw fail('DXOS_DIRECT_WRITE_FORBIDDEN', 403, `Không được ghi trực tiếp vào ${collectionName}; hãy dùng API nghiệp vụ chuyên biệt.`);
-      }
-      if (actionName === 'destroy') {
-        throw fail('NATIVE_DOCUMENT_DELETE_UNSUPPORTED', 403);
-      }
-    }
-
-    const fields = params?.fields == null ? [] : Array.isArray(params.fields) ? params.fields : String(params.fields).split(',');
-    if (params?.targetCollection || (params?.appends && (!Array.isArray(params.appends) || params.appends.length)) || fields.some((f) => typeof f !== 'string' || f.includes('.'))) {
-      throw fail('NATIVE_RELATION_EXPANSION_UNSUPPORTED', 403);
-    }
-    const sanitizedFilter = params?.filter !== undefined ? sanitizeDirectFilter(params.filter) : params?.filter;
-    assertSafeDirectSort(params?.sort);
-    params.filter = { $and: [{ organizationId: actor.organizationId }, sanitizedFilter ?? {}] };
-    if (params?.pageSize != null) params.pageSize = clampPageLimit(params.pageSize);
-    if (params?.limit != null) params.limit = clampPageLimit(params.limit);
-
-    if (actionName === 'create' || actionName === 'update') {
-      const values = params?.values;
-      if (!values || typeof values !== 'object' || Array.isArray(values)) throw fail('NATIVE_VALUES_INVALID', 400);
-      const protectedSet = collectionName === 'latticeStockLots' ? LOT_PROTECTED_DIRECT_FIELDS : ORDER_LINE_PROTECTED_DIRECT_FIELDS;
-      for (const [k, v] of Object.entries(values)) {
-        if (['id', 'userId', 'identitySubject'].includes(k) || (v !== null && typeof v === 'object')) {
-          throw fail('NATIVE_PROTECTED_FIELD', 403);
-        }
-        if (protectedSet.has(k)) throw fail('NATIVE_DOCUMENT_PROTECTED_FIELD', 403);
-      }
-      if (values.organizationId !== undefined && values.organizationId !== actor.organizationId) {
-        throw fail('NATIVE_ORGANIZATION_MISMATCH', 403);
-      }
-      params.values = { ...values, organizationId: actor.organizationId };
-    }
-
-    ctx.state = ctx.state || {};
-    ctx.state.latticeNativeActor = actor;
-    ctx.state.latticeRlsOrg = actor.organizationId;
-
-    const run = async (transaction) => {
-      if (transaction) ctx.state.latticeRlsTransaction = transaction;
-      await next();
-      if (collectionName === 'latticeEpodRecords') stripEpodSecretsFromBody(ctx);
-    };
-
-    if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function' && typeof pgRls?.withTenantRlsContext === 'function') {
-      return pgRls.withTenantRlsContext(db, actor.organizationId, (transaction) => run(transaction));
-    }
-    return run(null);
-  };
-}
-
-function validateTenantCollectionRecord(model, options = {}) {
-  const actor = options.context?.state?.latticeNativeActor;
-  if (!actor || !actor.organizationId) return;
-  if (typeof model?.set === 'function') model.set('organizationId', actor.organizationId);
-  else if (model && typeof model === 'object') model.organizationId = actor.organizationId;
-  if (Array.isArray(options?.fields) && !options.fields.includes('organizationId')) {
-    options.fields.push('organizationId');
-  }
+  return createDirectGuardWithFoundation(db, foundation);
 }
 
 module.exports = {
@@ -1710,6 +1340,7 @@ module.exports = {
   sha256Hex,
   readParams,
   parseFinite,
+  parseStrictPositiveInt,
   parseOptionalDate,
   escapeHtml,
   maskPhone,
@@ -1719,6 +1350,7 @@ module.exports = {
   resolveTenantActor,
   appendAuditLedger,
   computeMeanKineticTemperature,
+  stripEpodSecretsFromBody,
   createDxosWmsActions,
   createWmsDmnDirectGuardMiddleware,
   validateTenantCollectionRecord,

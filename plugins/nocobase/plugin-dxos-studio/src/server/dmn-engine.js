@@ -9,6 +9,7 @@
 'use strict';
 
 const {
+  defaultFoundation,
   val,
   fail,
   readParams,
@@ -17,7 +18,9 @@ const {
   hasCollectionPermission,
   resolveTenantActor,
   appendAuditLedger,
-} = require('./wms-engine');
+  runWithOptionalRls,
+  saveRow,
+} = require('./wms-dmn-shared');
 
 const TABLE_KEY_RE = /^[a-zA-Z0-9_-]{2,80}$/;
 const FIELD_NAME_RE = /^[a-zA-Z0-9_.-]{1,64}$/;
@@ -261,7 +264,11 @@ function serializeDecisionTable(row) {
   };
 }
 
-function createDxosDmnActions(db) {
+function createDxosDmnActions(db, foundation = defaultFoundation) {
+  if (typeof foundation?.pgRls?.installRlsTransactionBridge === 'function') {
+    foundation.pgRls.installRlsTransactionBridge(db);
+  }
+
   return {
     listTables: async (ctx, next) => {
       if ((ctx.method || 'GET') !== 'GET') throw fail('METHOD_NOT_ALLOWED', 405);
@@ -270,7 +277,8 @@ function createDxosDmnActions(db) {
         requireOrg: false,
         requestedOrgId: params.organizationId,
         aclCollections: null,
-      });
+        patScopes: ['read', 'write', 'dmn'],
+      }, foundation);
       const repo = db.getRepository?.('latticeDecisionTables');
       if (!repo) {
         ctx.body = { organizationId, items: [] };
@@ -282,7 +290,9 @@ function createDxosDmnActions(db) {
         ...(params.activeOnly === true || params.activeOnly === 'true' ? { active: true } : {}),
       };
       const limit = Math.max(1, Math.min(200, Math.floor(Number(params.limit) || 100)));
-      const rows = (await repo.find({ filter, sort: ['tableKey', 'id'], limit })) || [];
+      const rows = await runWithOptionalRls(db, organizationId, (transaction) => (
+        repo.find({ filter, sort: ['tableKey', 'id'], limit, ...(transaction ? { transaction } : {}) })
+      ), foundation) || [];
       ctx.body = { organizationId, items: rows.map(serializeDecisionTable) };
       return next();
     },
@@ -295,7 +305,7 @@ function createDxosDmnActions(db) {
         requestedOrgId: params.organizationId,
         aclCollections: null,
         patScopes: ['write', 'dmn'],
-      });
+      }, foundation);
       if (!isRoot) {
         const adminOk = await isOrgAdmin(db, ctx);
         const granted = await hasCollectionPermission(db, ctx, ['latticeDecisionTables'], ['create', 'update']);
@@ -323,45 +333,42 @@ function createDxosDmnActions(db) {
       const repo = db.getRepository?.('latticeDecisionTables');
       if (!repo) throw fail('DMN_REPO_UNAVAILABLE', 503);
 
-      const existing = await repo.findOne({ filter: { organizationId, tableKey } });
-      const patch = {
-        organizationId,
-        tableKey,
-        name,
-        description: typeof params.description === 'string' ? params.description.trim().slice(0, 500) : null,
-        hitPolicy,
-        inputsJson,
-        outputsJson,
-        rulesJson,
-        published: params.published === undefined ? true : Boolean(params.published),
-        active: params.active === undefined ? true : Boolean(params.active),
-        updatedBy: actor.username,
-        version: existing ? (Number(val(existing, 'version')) || 1) + 1 : 1,
-      };
+      const serialized = await runWithOptionalRls(db, organizationId, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const existing = await repo.findOne({ filter: { organizationId, tableKey }, ...txOpt });
+        const patch = {
+          organizationId,
+          tableKey,
+          name,
+          description: typeof params.description === 'string' ? params.description.trim().slice(0, 500) : null,
+          hitPolicy,
+          inputsJson,
+          outputsJson,
+          rulesJson,
+          published: params.published === undefined ? true : Boolean(params.published),
+          active: params.active === undefined ? true : Boolean(params.active),
+          updatedBy: actor.username,
+          version: existing ? (Number(val(existing, 'version')) || 1) + 1 : 1,
+        };
 
-      let saved;
-      if (existing) {
-        if (repo.update && val(existing, 'id') != null) {
-          const res = await repo.update({ filterByTk: val(existing, 'id'), filter: { organizationId }, values: patch });
-          saved = Array.isArray(res) && res[0] ? res[0] : Object.assign(existing, patch);
-        } else if (typeof existing.update === 'function') {
-          await existing.update(patch);
-          saved = existing;
-        }
-      } else {
-        saved = await repo.create({ values: patch });
-      }
+        const saved = existing
+          ? await saveRow(repo, existing, patch, { organizationId }, transaction)
+          : await repo.create({ values: patch, ...txOpt });
 
-      const serialized = serializeDecisionTable(saved);
-      await appendAuditLedger(db, {
-        organizationId,
-        eventType: 'dmn.table_saved',
-        targetCollection: 'latticeDecisionTables',
-        targetRecordId: String(serialized.id ?? tableKey),
-        actor,
-        payload: { tableKey, hitPolicy, version: serialized.version, ruleCount: rulesJson.length },
-        scope: 'dxos:dmn',
-      });
+        const out = serializeDecisionTable(saved);
+        await appendAuditLedger(db, {
+          organizationId,
+          eventType: 'dmn.table_saved',
+          targetCollection: 'latticeDecisionTables',
+          targetRecordId: String(out.id ?? tableKey),
+          actor,
+          payload: { tableKey, hitPolicy, version: out.version, ruleCount: rulesJson.length },
+          transaction,
+          scope: 'dxos:dmn',
+          foundation,
+        });
+        return out;
+      }, foundation);
 
       ctx.body = { table: serialized };
       return next();
@@ -375,16 +382,12 @@ function createDxosDmnActions(db) {
         requestedOrgId: params.organizationId,
         aclCollections: null,
         patScopes: ['read', 'write', 'dmn'],
-      });
+      }, foundation);
       const tableKey = typeof params.tableKey === 'string' ? params.tableKey.trim() : '';
       if (!tableKey) throw fail('DMN_TABLE_KEY_REQUIRED', 400, 'Cần tableKey để đánh giá DMN.');
 
       const repo = db.getRepository?.('latticeDecisionTables');
       if (!repo) throw fail('DMN_REPO_UNAVAILABLE', 503);
-      const table = await repo.findOne({ filter: { organizationId, tableKey } });
-      if (!table || val(table, 'organizationId') !== organizationId || val(table, 'active') === false) {
-        throw fail('DMN_TABLE_NOT_FOUND', 404, 'Không tìm thấy bảng quyết định DMN đang hoạt động trong tổ chức.');
-      }
 
       let evalContext = params.context ?? params.input ?? {};
       if (typeof evalContext === 'string') {
@@ -393,6 +396,13 @@ function createDxosDmnActions(db) {
         } catch {
           throw fail('DMN_CONTEXT_INVALID', 400, 'context DMN không phải JSON hợp lệ.');
         }
+      }
+
+      const table = await runWithOptionalRls(db, organizationId, (transaction) => (
+        repo.findOne({ filter: { organizationId, tableKey }, ...(transaction ? { transaction } : {}) })
+      ), foundation);
+      if (!table || val(table, 'organizationId') !== organizationId || val(table, 'active') === false) {
+        throw fail('DMN_TABLE_NOT_FOUND', 404, 'Không tìm thấy bảng quyết định DMN đang hoạt động trong tổ chức.');
       }
 
       const evaluation = evaluateDecisionTable(table, evalContext);
