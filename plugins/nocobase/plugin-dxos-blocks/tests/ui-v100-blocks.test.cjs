@@ -93,7 +93,16 @@ function createMiniHooks() {
     return tree;
   };
 
-  return { React, render };
+  const unmount = () => {
+    for (const ef of effects) {
+      if (ef && typeof ef.cleanup === 'function') {
+        ef.cleanup();
+        ef.cleanup = undefined;
+      }
+    }
+  };
+
+  return { React, render, unmount };
 }
 
 function resolveTree(node) {
@@ -638,4 +647,306 @@ test('Task 3.1 client submodules obey build.mjs bundler rule, XSS safety, and SP
   }
   const testAbs = path.join(PLUGIN_ROOT, 'tests/ui-v100-blocks.test.cjs');
   assert.equal(addSourceHeader(readFileSync(testAbs, 'utf8'), 'tests/ui-v100-blocks.test.cjs').status, 'present');
+});
+
+test('DxosKanbanScheduleBlockView ignores slow stale collection/unmounted responses on rapid collection switches', async () => {
+  const { createKanbanScheduleBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/kanban-schedule-block.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  let resolveOrders;
+  let rejectOrders;
+  let ordersMode = 'resolve';
+  const api = {
+    async request(req) {
+      if (req.url === 'latticeOrders:list') {
+        return new Promise((resolve, reject) => {
+          resolveOrders = resolve;
+          rejectOrders = reject;
+        });
+      }
+      if (req.url === 'latticeStockLots:list') {
+        return {
+          data: {
+            data: [{ id: 301, lotCode: 'LOT-FAST-301', productName: 'Insulin Lạnh', status: 'available' }],
+          },
+        };
+      }
+      if (req.url === 'latticeRequests:list') {
+        return {
+          data: {
+            data: [{ id: 401, code: 'REQ-401', name: 'Yêu cầu mới', status: 'draft' }],
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const View = createKanbanScheduleBlockView({ useAPIClient: () => api }, React, {}, {});
+  let tree = render(View, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+
+  // Rapidly switch collection while latticeOrders:list is still pending
+  const select = collectNodes(tree).find((n) => n.type === 'select');
+  assert.ok(select);
+  select.props.onChange({ target: { value: 'latticeStockLots' } });
+  tree = render(View, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render(View, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+  assert.ok(textOf(tree).includes('LOT-FAST-301'));
+
+  // Now the slow stale latticeOrders response arrives -> must NOT clobber LOT-FAST-301
+  assert.equal(typeof resolveOrders, 'function');
+  if (ordersMode === 'resolve') {
+    resolveOrders({
+      data: {
+        data: [{ id: 999, code: 'ORD-STALE-999', name: 'Stale order', status: 'draft' }],
+      },
+    });
+  }
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render(View, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+  assert.ok(textOf(tree).includes('LOT-FAST-301'));
+  assert.equal(textOf(tree).includes('ORD-STALE-999'), false);
+
+  // Switch back to latticeOrders (slow) then switch to latticeRequests, then reject stale latticeOrders
+  collectNodes(tree).find((n) => n.type === 'select').props.onChange({ target: { value: 'latticeOrders' } });
+  tree = render(View, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+  assert.equal(textOf(tree).includes('LOT-FAST-301'), false, 'Switching collections must clear previous collection cards immediately');
+
+  collectNodes(tree).find((n) => n.type === 'select').props.onChange({ target: { value: 'latticeRequests' } });
+  tree = render(View, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render(View, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+  assert.ok(textOf(tree).includes('REQ-401'));
+
+  rejectOrders(new Error('Late network error'));
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render(View, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+  assert.ok(textOf(tree).includes('REQ-401'));
+  assert.equal(textOf(tree).includes('Không tải được dữ liệu'), false);
+
+  // Unmount cancels in-flight fetch
+  const hooks2 = createMiniHooks();
+  let resolveAfterUnmount;
+  let stateUpdatesAfterUnmount = 0;
+  const origUseState = hooks2.React.useState;
+  let trackAfterUnmount = false;
+  hooks2.React.useState = (init) => {
+    const [val, setVal] = origUseState(init);
+    return [val, (u) => {
+      if (trackAfterUnmount) stateUpdatesAfterUnmount += 1;
+      return setVal(u);
+    }];
+  };
+  const UnmountView = createKanbanScheduleBlockView({
+    useAPIClient: () => ({
+      request: () => new Promise((resolve) => { resolveAfterUnmount = resolve; }),
+    }),
+  }, hooks2.React, {}, {});
+  hooks2.render(UnmountView, { model: { props: { collection: 'latticeOrders' } } });
+  trackAfterUnmount = true;
+  hooks2.unmount();
+  resolveAfterUnmount({ data: { data: [{ id: 1, code: 'ORD-GHOST', status: 'draft' }] } });
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(stateUpdatesAfterUnmount, 0, 'Unmounted kanban view must ignore late API resolutions');
+  unmount();
+});
+
+test('DxosWebGisBlockView passes organizationId inside params.filter, guards stale/unmounted loads, and separates stacked city pins', async () => {
+  const {
+    createWebGisBlockView,
+    inferCoordsForRecord,
+    projectGeoPoint,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+
+  // Minor 3: indices 0..3 matching same city get distinct angular coordinates & projected SVG points
+  const stackedCoords = [0, 1, 2, 3].map((idx) => inferCoordsForRecord({ code: `CT-${idx}`, name: 'Kho lạnh Cần Thơ' }, new Map(), idx));
+  const latLngKeys = new Set(stackedCoords.map((c) => `${c.lat},${c.lng}`));
+  assert.equal(latLngKeys.size, 4, 'Indices 0..3 at same city must have 4 distinct lat/lng coordinates');
+  const svgKeys = new Set(stackedCoords.map((c) => {
+    const pt = projectGeoPoint(c.lat, c.lng);
+    return `${pt.x},${pt.y}`;
+  }));
+  assert.equal(svgKeys.size, 4, 'Indices 0..3 at same city must have 4 distinct SVG coordinates');
+
+  // Minor 1 & Important 1: params.filter.organizationId on :list, organizationId on twinShadow, and stale org guard
+  const { React, render, unmount } = createMiniHooks();
+  const seenCalls = [];
+  let resolveOrgOldAssets;
+  const api = {
+    async request(req) {
+      seenCalls.push(req);
+      if (req.url === 'latticeAssets:list') {
+        if (req.params?.filter?.organizationId === 'org-old') {
+          return new Promise((resolve) => { resolveOrgOldAssets = resolve; });
+        }
+        return {
+          data: {
+            data: [{ id: 50, code: 'AST-NEW-50', name: 'Kho Hà Nội New', kind: 'cold_room', status: 'active' }],
+          },
+        };
+      }
+      if (req.url === 'latticeLocations:list') {
+        return { data: { data: [] } };
+      }
+      if (req.url === 'latticeIncidentCases:list') {
+        return { data: { data: [] } };
+      }
+      if (req.url === 'dxosBlocks:twinShadow') {
+        return {
+          data: {
+            data: {
+              shadow: { assetId: 50, commandStatus: 'synced', desiredJson: { targetTempC: -18 }, reportedJson: { targetTempC: -18 } },
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const View = createWebGisBlockView({ useAPIClient: () => api }, React, {}, {});
+  render(View, { model: { props: { defaultOrganizationId: 'org-old', showTwinOverlay: true } } });
+
+  // Verify org-old used params.filter.organizationId (and NOT top-level params.organizationId)
+  const oldAssetCall = seenCalls.find((c) => c.url === 'latticeAssets:list');
+  assert.equal(oldAssetCall.params.organizationId, undefined);
+  assert.deepEqual(oldAssetCall.params.filter, { organizationId: 'org-old' });
+  const oldIncidentCall = seenCalls.find((c) => c.url === 'latticeIncidentCases:list');
+  assert.equal(oldIncidentCall.params.organizationId, undefined);
+  assert.deepEqual(oldIncidentCall.params.filter, { organizationId: 'org-old', status: { $ne: 'closed' } });
+
+  // Switch organization rapidly to org-new
+  let tree = render(View, { model: { props: { defaultOrganizationId: 'org-new', showTwinOverlay: true } } });
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render(View, { model: { props: { defaultOrganizationId: 'org-new', showTwinOverlay: true } } });
+  assert.ok(textOf(tree).includes('AST-NEW-50'));
+  const twinCall = seenCalls.find((c) => c.url === 'dxosBlocks:twinShadow');
+  assert.equal(twinCall.data.organizationId, 'org-new');
+
+  // Resolve slow org-old assets late -> must NOT overwrite AST-NEW-50
+  resolveOrgOldAssets({
+    data: { data: [{ id: 9, code: 'AST-OLD-STALE', name: 'Kho Cũ', kind: 'cold_room', status: 'active' }] },
+  });
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render(View, { model: { props: { defaultOrganizationId: 'org-new', showTwinOverlay: true } } });
+  assert.ok(textOf(tree).includes('AST-NEW-50'));
+  assert.equal(textOf(tree).includes('AST-OLD-STALE'), false);
+  unmount();
+});
+
+test('createVoucherLifecycleBar enforces canPrintOrder strictly, protects PKI verify spinner against loadPkiEntries, and falls back on sandbox SecurityError', async () => {
+  const { createVoucherLifecycleBar } = require(path.join(PLUGIN_ROOT, 'src/client/chatter-panel.js'));
+
+  // 1. canPrintOrder strictly requires targetCollection === 'latticeOrders' even when printDocumentType === 'delivery_note'
+  const hooksReq = createMiniHooks();
+  const ReqBar = createVoucherLifecycleBar({ useAPIClient: () => null }, hooksReq.React, {});
+  const reqTree = hooksReq.render(ReqBar, {
+    targetCollection: 'latticeRequests',
+    targetRecordId: 12,
+    printDocumentType: 'delivery_note',
+  });
+  assert.equal(findByTestId(reqTree, 'dxos-workbench-print-voucher-btn'), null);
+
+  const hooksOrd = createMiniHooks();
+  const OrdBar = createVoucherLifecycleBar({ useAPIClient: () => null }, hooksOrd.React, {});
+  const ordTree = hooksOrd.render(OrdBar, {
+    targetCollection: 'latticeOrders',
+    targetRecordId: 12,
+    printDocumentType: 'delivery_note',
+  });
+  assert.ok(findByTestId(ordTree, 'dxos-workbench-print-voucher-btn'));
+
+  // 2. loadPkiEntries settling while handleVerifyPki is in flight must NOT clear handleVerifyPki's spinner
+  let resolveEntries;
+  let resolveVerify;
+  const pkiApi = {
+    async request(req) {
+      if (req.url === 'latticeVoucher:lineage') {
+        return { data: { data: { items: [{ id: 12, code: 'ORD-12', status: 'approved', version: 1 }] } } };
+      }
+      if (req.url === 'dxosLedger:entries') {
+        return new Promise((resolve) => { resolveEntries = resolve; });
+      }
+      if (req.url === 'dxosLedger:verify') {
+        return new Promise((resolve) => { resolveVerify = resolve; });
+      }
+      if (req.url === 'dxosWms:printVoucher') {
+        return {
+          data: {
+            data: {
+              documentType: 'order',
+              html: '<!doctype html><html><body>OK</body></html>',
+              htmlSha256: 'abc123',
+            },
+          },
+        };
+      }
+      return { data: { data: {} } };
+    },
+  };
+
+  const pkiHooks = createMiniHooks();
+  const PkiBar = createVoucherLifecycleBar({ useAPIClient: () => pkiApi }, pkiHooks.React, {});
+  let pkiTree = pkiHooks.render(PkiBar, { targetCollection: 'latticeOrders', targetRecordId: 12 });
+
+  // Start handleVerifyPki while dxosLedger:entries is still pending
+  const verifyPromise = findByTestId(pkiTree, 'dxos-workbench-pki-verify-btn').props.onClick();
+  pkiTree = pkiHooks.render(PkiBar, { targetCollection: 'latticeOrders', targetRecordId: 12 });
+  assert.equal(findByTestId(pkiTree, 'dxos-workbench-pki-verify-btn').props.disabled, true);
+  assert.ok(textOf(findByTestId(pkiTree, 'dxos-workbench-pki-verify-btn')).includes('Đang kiểm'));
+
+  // Settle loadPkiEntries while dxosLedger:verify is STILL pending -> spinner must stay active!
+  resolveEntries({
+    data: {
+      data: {
+        total: 1,
+        items: [{ seq: 88, keyId: 'ed25519-live', entryHash: 'facefeed12345678' }],
+      },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 15));
+  pkiTree = pkiHooks.render(PkiBar, { targetCollection: 'latticeOrders', targetRecordId: 12 });
+  assert.equal(findByTestId(pkiTree, 'dxos-workbench-pki-verify-btn').props.disabled, true, 'loadPkiEntries must not clear verify spinner');
+  assert.ok(textOf(findByTestId(pkiTree, 'dxos-workbench-pki-badge')).includes('88'));
+
+  // Settle handleVerifyPki -> spinner clears and result appears
+  resolveVerify({ data: { data: { valid: true, checkedCount: 88 } } });
+  await verifyPromise;
+  pkiTree = pkiHooks.render(PkiBar, { targetCollection: 'latticeOrders', targetRecordId: 12 });
+  assert.equal(findByTestId(pkiTree, 'dxos-workbench-pki-verify-btn').props.disabled, false);
+  assert.ok(textOf(findByTestId(pkiTree, 'dxos-workbench-pki-badge')).includes('Hợp lệ (88 mục)'));
+  assert.ok(textOf(findByTestId(pkiTree, 'dxos-workbench-pki-badge')).includes('88'));
+
+  // 3. triggerBrowserPrint falls back to window.print() when sandboxed iframe throws SecurityError
+  await findByTestId(pkiTree, 'dxos-workbench-print-voucher-btn').props.onClick();
+  pkiTree = pkiHooks.render(PkiBar, { targetCollection: 'latticeOrders', targetRecordId: 12 });
+  const browserPrintBtn = findByTestId(pkiTree, 'dxos-workbench-print-browser-btn');
+  assert.ok(browserPrintBtn);
+
+  const origDoc = global.document;
+  const origWin = global.window;
+  let windowPrintCount = 0;
+  try {
+    global.document = {
+      querySelector: () => ({
+        contentWindow: {
+          print() {
+            throw Object.assign(new Error('Blocked a frame with origin "null"'), { name: 'SecurityError' });
+          },
+        },
+      }),
+    };
+    global.window = {
+      print() {
+        windowPrintCount += 1;
+      },
+    };
+    browserPrintBtn.props.onClick();
+    assert.equal(windowPrintCount, 1, 'Sandboxed iframe SecurityError must fall back to window.print()');
+  } finally {
+    global.document = origDoc;
+    global.window = origWin;
+  }
+  pkiHooks.unmount();
 });

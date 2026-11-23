@@ -213,12 +213,15 @@ function inferCoordsForRecord(record, locationById, index) {
   }
 
   const haystack = `${record?.code || ''} ${record?.name || ''} ${record?.address || ''} ${loc?.name || ''} ${loc?.address || ''}`.toLowerCase();
+  const safeIdx = Math.max(0, Number(index) || 0);
   for (const city of VIETNAM_CITY_COORDS) {
     if (city.keys.some((k) => haystack.includes(k))) {
-      const jitter = Math.floor(index / 4) * 0.22 * (index % 2 === 0 ? 1 : -1);
+      const ring = Math.floor(safeIdx / 4);
+      const angle = (safeIdx % 4) * (Math.PI / 2) + ring * 0.55;
+      const radius = 0.14 + ring * 0.14;
       return {
-        lat: Number((city.lat + jitter * 0.5).toFixed(4)),
-        lng: Number((city.lng + jitter * 0.5).toFixed(4)),
+        lat: Number((city.lat + Math.sin(angle) * radius * 1.6).toFixed(4)),
+        lng: Number((city.lng + Math.cos(angle) * radius).toFixed(4)),
       };
     }
   }
@@ -270,18 +273,45 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       usingFallback: true,
       error: '',
     });
+    const [reqTracker] = React.useState(() => ({ seq: 0, unmounted: false }));
 
-    const loadGeoData = React.useCallback(async () => {
+    React.useEffect(() => {
+      reqTracker.unmounted = false;
+      return () => {
+        reqTracker.unmounted = true;
+        reqTracker.seq += 1;
+      };
+    }, [reqTracker]);
+
+    const loadGeoData = React.useCallback(async (isCancelled = null) => {
       if (!api?.request) return;
+      reqTracker.seq += 1;
+      const mySeq = reqTracker.seq;
+      const isStale = () => (
+        reqTracker.unmounted
+        || reqTracker.seq !== mySeq
+        || (typeof isCancelled === 'function' && isCancelled())
+      );
+
       setState((prev) => ({ ...prev, loading: true, error: '' }));
 
-      const orgParams = cfg.defaultOrganizationId ? { organizationId: String(cfg.defaultOrganizationId).trim() } : {};
-      const safeFetchList = async (url, extraParams = {}) => {
+      const orgId = cfg.defaultOrganizationId ? String(cfg.defaultOrganizationId).trim() : '';
+      const orgParams = orgId ? { organizationId: orgId } : {};
+      const safeFetchList = async (url, extraFilter = null) => {
+        const mergedFilter = orgId && extraFilter
+          ? { organizationId: orgId, ...extraFilter }
+          : orgId
+            ? { organizationId: orgId }
+            : extraFilter;
         try {
           const res = await api.request({
             url,
             method: 'get',
-            params: { pageSize: 50, sort: ['-id'], ...orgParams, ...extraParams },
+            params: {
+              pageSize: 50,
+              sort: ['-id'],
+              ...(mergedFilter ? { filter: mergedFilter } : {}),
+            },
             skipNotify: true,
           });
           const rows = res?.data?.data ?? res?.data?.items ?? [];
@@ -294,8 +324,9 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       const [assets, locations, incidents] = await Promise.all([
         safeFetchList('latticeAssets:list'),
         safeFetchList('latticeLocations:list'),
-        safeFetchList('latticeIncidentCases:list', { filter: { status: { $ne: 'closed' } } }),
+        safeFetchList('latticeIncidentCases:list', { status: { $ne: 'closed' } }),
       ]);
+      if (isStale()) return;
 
       const locationById = new Map();
       for (const loc of Array.isArray(locations) ? locations : []) {
@@ -315,7 +346,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       const shadowsByAssetId = new Map();
       if (cfg.showTwinOverlay !== false && Array.isArray(assets) && assets.length) {
         await Promise.all(assets.slice(0, 6).map(async (asset) => {
-          if (asset?.id == null) return;
+          if (isStale() || asset?.id == null) return;
           try {
             const res = await api.request({
               url: 'dxosBlocks:twinShadow',
@@ -330,6 +361,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           }
         }));
       }
+      if (isStale()) return;
 
       const markers = [];
       const seenLocIds = new Set();
@@ -392,6 +424,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         });
       }
 
+      if (isStale()) return;
       if (markers.length) {
         setState({ loading: false, markers, usingFallback: false, error: '' });
       } else {
@@ -402,10 +435,12 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           error: assets === null && locations === null ? 'Đang hiển thị tuyến mặc định (chưa kết nối dữ liệu tài sản).' : '',
         });
       }
-    }, [api, cfg.defaultOrganizationId, cfg.showTwinOverlay]);
+    }, [api, cfg.defaultOrganizationId, cfg.showTwinOverlay, reqTracker]);
 
     React.useEffect(() => {
-      loadGeoData();
+      let cancelled = false;
+      loadGeoData(() => cancelled);
+      return () => { cancelled = true; };
     }, [loadGeoData]);
 
     const classifiedMarkers = React.useMemo(
@@ -485,7 +520,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           h('button', { type: 'button', 'data-testid': 'dxos-webgis-filter-warehouses', onClick: () => setFilterMode('warehouses'), style: filterBtnStyle(filterMode === 'warehouses') }, 'Kho & Trạm'),
           h('button', {
             type: 'button',
-            onClick: loadGeoData,
+            onClick: () => loadGeoData(),
             disabled: state.loading,
             style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc', fontSize: 11, fontWeight: 600, cursor: 'pointer' },
           }, state.loading ? 'Đang tải…' : 'Làm mới'),
@@ -657,5 +692,6 @@ module.exports = {
   DEFAULT_VIETNAM_GEO_MARKERS,
   projectGeoPoint,
   classifyColdChainMarker,
+  inferCoordsForRecord,
   createWebGisBlockView,
 };

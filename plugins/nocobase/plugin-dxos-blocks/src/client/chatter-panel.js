@@ -12,6 +12,7 @@ const { SAFE_COLLECTION_RE, requestAndDownloadExport } = require('./blocks-helpe
 
 const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
 const CANCELLABLE_STATUSES = new Set(['submitted', 'approved', 'in_progress']);
+const PRINTABLE_ORDER_DOCUMENT_TYPES = new Set(['order', 'delivery_note', 'epod']);
 const VOUCHER_STATUS_META = {
   draft: { label: 'Nháp (draft)', bg: '#f1f5f9', color: '#334155', border: '#cbd5e1' },
   submitted: { label: 'Đã trình duyệt (submitted)', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
@@ -223,6 +224,15 @@ function createVoucherLifecycleBar(client, React, app) {
     const [busy, setBusy] = React.useState(false);
     const [statusNote, setStatusNote] = React.useState(null);
     const currentTargetKey = `${String(targetCollection || '')}:${Number(targetRecordId) || 0}`;
+    const [reqTracker] = React.useState(() => ({
+      pkiEntriesSeq: 0,
+      pkiVerifySeq: 0,
+      pkiVerifying: false,
+      lineageSeq: 0,
+      printSeq: 0,
+      unmounted: false,
+    }));
+    const [printFrameHolder] = React.useState(() => ({ el: null }));
     const [pkiState, setPkiState] = React.useState({
       targetKey: currentTargetKey,
       loading: false,
@@ -241,7 +251,7 @@ function createVoucherLifecycleBar(client, React, app) {
       error: null,
     });
     const [printDocType, setPrintDocType] = React.useState(
-      ['order', 'delivery_note', 'epod'].includes(printDocumentType) ? printDocumentType : 'order',
+      PRINTABLE_ORDER_DOCUMENT_TYPES.has(printDocumentType) ? printDocumentType : 'order',
     );
     const [printState, setPrintState] = React.useState({
       targetKey: currentTargetKey,
@@ -256,7 +266,35 @@ function createVoucherLifecycleBar(client, React, app) {
       error: null,
     });
 
+    const effectivePrintDocType = PRINTABLE_ORDER_DOCUMENT_TYPES.has(printDocType) ? printDocType : 'order';
+    const canPrintOrder = showPrintVoucher !== false
+      && targetCollection === 'latticeOrders'
+      && PRINTABLE_ORDER_DOCUMENT_TYPES.has(effectivePrintDocType);
+
     React.useEffect(() => {
+      reqTracker.unmounted = false;
+      return () => {
+        reqTracker.unmounted = true;
+        reqTracker.pkiEntriesSeq += 1;
+        reqTracker.pkiVerifySeq += 1;
+        reqTracker.pkiVerifying = false;
+        reqTracker.lineageSeq += 1;
+        reqTracker.printSeq += 1;
+      };
+    }, [reqTracker]);
+
+    React.useEffect(() => {
+      if (PRINTABLE_ORDER_DOCUMENT_TYPES.has(printDocumentType)) {
+        setPrintDocType((prev) => (prev === printDocumentType ? prev : printDocumentType));
+      }
+    }, [printDocumentType]);
+
+    React.useEffect(() => {
+      reqTracker.pkiEntriesSeq += 1;
+      reqTracker.pkiVerifySeq += 1;
+      reqTracker.pkiVerifying = false;
+      reqTracker.lineageSeq += 1;
+      reqTracker.printSeq += 1;
       setInfo({
         status: String(recordStatus || ''),
         version: recordVersion ?? null,
@@ -296,6 +334,13 @@ function createVoucherLifecycleBar(client, React, app) {
       if (!api?.request || !validTarget || showPkiBadge === false) return;
       const reqKey = currentTargetKey;
       const recId = String(Number(targetRecordId));
+      const myEntriesSeq = ++reqTracker.pkiEntriesSeq;
+      const verifySeqAtStart = reqTracker.pkiVerifySeq;
+      const isStale = () => (
+        reqTracker.unmounted
+        || reqTracker.pkiEntriesSeq !== myEntriesSeq
+        || (typeof isCancelled === 'function' && isCancelled())
+      );
       try {
         const res = await api.request({
           url: 'dxosLedger:entries',
@@ -303,22 +348,30 @@ function createVoucherLifecycleBar(client, React, app) {
           params: { targetCollection, targetRecordId: recId, pageSize: 5 },
           skipNotify: true,
         });
-        if (isCancelled()) return;
+        if (isStale()) return;
         const payload = res?.data?.data || res?.data || {};
         const items = Array.isArray(payload.items) ? payload.items : [];
-        setPkiState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
-          ...prev,
-          loading: false,
-          entry: items[0] || null,
-          total: Number(payload.total) || items.length,
-          error: null,
-        }));
+        setPkiState((prev) => {
+          if (prev.targetKey && prev.targetKey !== reqKey) return prev;
+          const verifyActiveOrRan = reqTracker.pkiVerifying || reqTracker.pkiVerifySeq !== verifySeqAtStart;
+          return {
+            ...prev,
+            loading: verifyActiveOrRan ? prev.loading : false,
+            entry: items[0] || null,
+            total: Number(payload.total) || items.length,
+            error: verifyActiveOrRan ? prev.error : null,
+          };
+        });
       } catch {
-        if (!isCancelled()) {
-          setPkiState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : { ...prev, loading: false }));
+        if (!isStale()) {
+          setPkiState((prev) => {
+            if (prev.targetKey && prev.targetKey !== reqKey) return prev;
+            if (reqTracker.pkiVerifying || reqTracker.pkiVerifySeq !== verifySeqAtStart) return prev;
+            return { ...prev, loading: false };
+          });
         }
       }
-    }, [api, targetCollection, targetRecordId, validTarget, showPkiBadge, currentTargetKey]);
+    }, [api, targetCollection, targetRecordId, validTarget, showPkiBadge, currentTargetKey, reqTracker]);
 
     const loadVoucherState = React.useCallback(async (isCancelled = () => false) => {
       if (!api?.request || !validTarget) return;
@@ -377,11 +430,16 @@ function createVoucherLifecycleBar(client, React, app) {
     if (!validTarget) return null;
 
     const handleVerifyPki = async () => {
-      if (!api?.request || pkiState.loading) return;
+      if (!api?.request || pkiState.loading || reqTracker.pkiVerifying) return;
       const reqKey = currentTargetKey;
+      const myVerifySeq = ++reqTracker.pkiVerifySeq;
+      reqTracker.pkiVerifying = true;
+      const isStale = () => reqTracker.unmounted || reqTracker.pkiVerifySeq !== myVerifySeq;
       setPkiState((prev) => ({ ...prev, targetKey: reqKey, loading: true, error: null }));
       try {
         const res = await api.request({ url: 'dxosLedger:verify', method: 'get', skipNotify: true });
+        if (isStale()) return;
+        reqTracker.pkiVerifying = false;
         const payload = res?.data?.data || res?.data || {};
         setPkiState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
           ...prev,
@@ -394,6 +452,8 @@ function createVoucherLifecycleBar(client, React, app) {
           error: null,
         }));
       } catch (err) {
+        if (isStale()) return;
+        reqTracker.pkiVerifying = false;
         setPkiState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
           ...prev,
           loading: false,
@@ -412,6 +472,8 @@ function createVoucherLifecycleBar(client, React, app) {
         setLineageState((prev) => ({ ...prev, targetKey: reqKey, open: true, error: 'Chưa kết nối API tra cứu phả hệ.' }));
         return;
       }
+      const myLineageSeq = ++reqTracker.lineageSeq;
+      const isStale = () => reqTracker.unmounted || reqTracker.lineageSeq !== myLineageSeq;
       setLineageState((prev) => ({ ...prev, targetKey: reqKey, open: true, loading: true, error: null }));
       try {
         const res = await api.request({
@@ -420,6 +482,7 @@ function createVoucherLifecycleBar(client, React, app) {
           params: { collection: targetCollection, recordId: String(Number(targetRecordId)), maxDepth: 3, direction: 'both' },
           skipNotify: true,
         });
+        if (isStale()) return;
         const payload = res?.data?.data || res?.data || {};
         setLineageState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
           targetKey: reqKey,
@@ -431,6 +494,7 @@ function createVoucherLifecycleBar(client, React, app) {
           error: null,
         }));
       } catch (err) {
+        if (isStale()) return;
         setLineageState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
           targetKey: reqKey,
           open: true,
@@ -444,16 +508,19 @@ function createVoucherLifecycleBar(client, React, app) {
     };
 
     const handlePrintVoucher = async () => {
-      if (!api?.request || printState.loading) return;
+      if (!api?.request || printState.loading || !canPrintOrder) return;
       const reqKey = currentTargetKey;
+      const myPrintSeq = ++reqTracker.printSeq;
+      const isStale = () => reqTracker.unmounted || reqTracker.printSeq !== myPrintSeq;
       setPrintState((prev) => ({ ...prev, targetKey: reqKey, loading: true, error: null }));
       try {
         const res = await api.request({
           url: 'dxosWms:printVoucher',
           method: 'get',
-          params: { documentType: printDocType, orderId: Number(targetRecordId) },
+          params: { documentType: effectivePrintDocType, orderId: Number(targetRecordId) },
           skipNotify: true,
         });
+        if (isStale()) return;
         const payload = res?.data?.data || res?.data || {};
         if (!payload.html) {
           setPrintState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
@@ -479,10 +546,11 @@ function createVoucherLifecycleBar(client, React, app) {
           qrVerificationHash: payload.qrVerificationHash || null,
           ledgerSeq: payload.ledgerSeq ?? null,
           keyId: payload.keyId || null,
-          documentType: payload.documentType || printDocType,
+          documentType: payload.documentType || effectivePrintDocType,
           error: null,
         }));
       } catch (err) {
+        if (isStale()) return;
         setPrintState((prev) => (prev.targetKey && prev.targetKey !== reqKey ? prev : {
           targetKey: reqKey,
           open: false,
@@ -500,13 +568,17 @@ function createVoucherLifecycleBar(client, React, app) {
 
     const triggerBrowserPrint = () => {
       try {
-        if (typeof document !== 'undefined' && typeof document.querySelector === 'function') {
-          const frame = document.querySelector('iframe[title="Chứng từ In DX-OS"]');
-          if (frame?.contentWindow && typeof frame.contentWindow.print === 'function') {
-            frame.contentWindow.print();
-            return;
-          }
+        const frame = printFrameHolder.el
+          || (typeof document !== 'undefined' && typeof document.querySelector === 'function'
+            ? (document.querySelector(`iframe[data-print-target="${currentTargetKey}"]`)
+              || document.querySelector('iframe[title="Chứng từ In DX-OS"]'))
+            : null);
+        if (frame?.contentWindow && typeof frame.contentWindow.print === 'function') {
+          frame.contentWindow.print();
+          return;
         }
+      } catch {}
+      try {
         if (typeof window !== 'undefined' && typeof window.print === 'function') {
           window.print();
         }
@@ -545,6 +617,7 @@ function createVoucherLifecycleBar(client, React, app) {
           method: 'post',
           data: payload,
         });
+        if (reqTracker.unmounted) return;
         const updated = res?.data?.data || res?.data || {};
         if (action === 'cancel' || action === 'amend') setReasonText('');
         if (action === 'amend') {
@@ -554,11 +627,13 @@ function createVoucherLifecycleBar(client, React, app) {
         }
         await loadVoucherState();
         await loadPkiEntries();
-        if (typeof onUpdated === 'function') onUpdated(updated);
+        if (!reqTracker.unmounted && typeof onUpdated === 'function') onUpdated(updated);
       } catch (err) {
-        setStatusNote(err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thực hiện được thao tác chứng từ.');
+        if (!reqTracker.unmounted) {
+          setStatusNote(err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thực hiện được thao tác chứng từ.');
+        }
       } finally {
-        setBusy(false);
+        if (!reqTracker.unmounted) setBusy(false);
       }
     };
 
@@ -580,9 +655,6 @@ function createVoucherLifecycleBar(client, React, app) {
       textAlign: 'center',
     });
 
-    const canPrintOrder = showPrintVoucher !== false && (
-      targetCollection === 'latticeOrders' || printDocumentType === 'delivery_note'
-    );
     const showGovernanceRow = showPkiBadge !== false || showLineage !== false || canPrintOrder;
 
     return h('div', {
@@ -776,6 +848,7 @@ function createVoucherLifecycleBar(client, React, app) {
             h('div', { style: { display: 'flex', gap: 6 } },
               h('button', {
                 type: 'button',
+                'data-testid': 'dxos-workbench-print-browser-btn',
                 onClick: triggerBrowserPrint,
                 style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #2563eb', background: '#eff6ff', color: '#1d4ed8', fontSize: 11, fontWeight: 700, cursor: 'pointer' },
               }, 'In / Lưu PDF'),
@@ -787,8 +860,10 @@ function createVoucherLifecycleBar(client, React, app) {
             ),
           ),
           h('iframe', {
+            ref: (el) => { printFrameHolder.el = el || null; },
             sandbox: '',
             title: 'Chứng từ In DX-OS',
+            'data-print-target': currentTargetKey,
             srcDoc: String(printState.html),
             style: { width: '100%', height: 320, border: '1px solid #cbd5e1', borderRadius: 6, background: '#ffffff' },
           }),

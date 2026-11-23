@@ -222,6 +222,19 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
     const [cancelTargetId, setCancelTargetId] = React.useState(null);
     const [cancelReason, setCancelReason] = React.useState('');
     const [statusNote, setStatusNote] = React.useState('');
+    const [reqTracker] = React.useState(() => ({
+      seq: 0,
+      unmounted: false,
+      collection: configuredCollection,
+    }));
+
+    React.useEffect(() => {
+      reqTracker.unmounted = false;
+      return () => {
+        reqTracker.unmounted = true;
+        reqTracker.seq += 1;
+      };
+    }, [reqTracker]);
 
     React.useEffect(() => {
       setActiveCollection(configuredCollection);
@@ -231,22 +244,45 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
       setViewMode(configuredMode);
     }, [configuredMode]);
 
-    const loadRecords = React.useCallback(async () => {
+    React.useEffect(() => {
+      if (reqTracker.collection !== activeCollection) {
+        reqTracker.collection = activeCollection;
+        reqTracker.seq += 1;
+        setRecords([]);
+        setCancelTargetId(null);
+        setCancelReason('');
+        setStatusNote('');
+      }
+    }, [activeCollection, reqTracker]);
+
+    const loadRecords = React.useCallback(async (isCancelled = null) => {
       if (!api?.request) return;
+      reqTracker.seq += 1;
+      const mySeq = reqTracker.seq;
+      const targetCollection = activeCollection;
+      const isStale = () => (
+        reqTracker.unmounted
+        || reqTracker.seq !== mySeq
+        || reqTracker.collection !== targetCollection
+        || (typeof isCancelled === 'function' && isCancelled())
+      );
+
       setLoading(true);
       setStatusNote('');
       const limit = Math.max(5, Math.min(100, Number(cfg.pageSize) || 40));
       try {
         const res = await api.request({
-          url: `${activeCollection}:list`,
+          url: `${targetCollection}:list`,
           method: 'get',
           params: { pageSize: limit, sort: ['-id'] },
           skipNotify: true,
         });
+        if (isStale()) return;
         const rows = res?.data?.data ?? res?.data?.items ?? [];
         setRecords(Array.isArray(rows) ? rows : []);
       } catch {
-        if (activeCollection === 'latticeStockLots') {
+        if (isStale()) return;
+        if (targetCollection === 'latticeStockLots') {
           try {
             const lotsRes = await api.request({
               url: 'dxosWms:lots',
@@ -254,9 +290,11 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
               params: { limit },
               skipNotify: true,
             });
+            if (isStale()) return;
             const items = lotsRes?.data?.data?.items ?? lotsRes?.data?.items ?? [];
             setRecords(Array.isArray(items) ? items : []);
           } catch {
+            if (isStale()) return;
             setRecords([]);
             setStatusNote('Không tải được danh sách lô tồn kho.');
           }
@@ -265,12 +303,14 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
           setStatusNote('Không tải được dữ liệu cho phân hệ đã chọn.');
         }
       } finally {
-        setLoading(false);
+        if (!isStale()) setLoading(false);
       }
-    }, [api, activeCollection, cfg.pageSize]);
+    }, [api, activeCollection, cfg.pageSize, reqTracker]);
 
     React.useEffect(() => {
-      loadRecords();
+      let cancelled = false;
+      loadRecords(() => cancelled);
+      return () => { cancelled = true; };
     }, [loadRecords]);
 
     const filteredRecords = React.useMemo(() => {
@@ -307,6 +347,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
           return;
         }
       }
+      const targetCollection = activeCollection;
       setBusyId(rec.id);
       try {
         setStatusNote(action === 'submit' ? `Đang trình duyệt ${rec.code || `#${rec.id}`}…` : `Đang hủy ${rec.code || `#${rec.id}`}…`);
@@ -314,20 +355,23 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
           url: `latticeVoucher:${action}`,
           method: 'post',
           data: {
-            collection: activeCollection,
+            collection: targetCollection,
             id: Number(rec.id),
             ...(rec.version != null ? { expectedVersion: rec.version } : {}),
             ...(action === 'cancel' ? { cancelReason: String(cancelReason).trim() } : {}),
           },
         });
+        if (reqTracker.unmounted || reqTracker.collection !== targetCollection) return;
         setCancelTargetId(null);
         setCancelReason('');
         setStatusNote(action === 'submit' ? 'Đã trình duyệt chứng từ.' : 'Đã hủy chứng từ.');
         await loadRecords();
       } catch (err) {
-        setStatusNote(err?.response?.data?.errors?.[0]?.message || 'Không thực hiện được chuyển trạng thái.');
+        if (!reqTracker.unmounted && reqTracker.collection === targetCollection) {
+          setStatusNote(err?.response?.data?.errors?.[0]?.message || 'Không thực hiện được chuyển trạng thái.');
+        }
       } finally {
-        setBusyId(null);
+        if (!reqTracker.unmounted) setBusyId(null);
       }
     };
 
@@ -385,7 +429,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
           }, 'Lịch (Schedule)'),
           h('button', {
             type: 'button',
-            onClick: loadRecords,
+            onClick: () => loadRecords(),
             disabled: loading,
             style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc', fontSize: 12, fontWeight: 600, cursor: 'pointer' },
           }, loading ? 'Đang tải…' : 'Làm mới'),
@@ -395,7 +439,16 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
         h('select', {
           'aria-label': 'Chọn phân hệ Kanban',
           value: activeCollection,
-          onChange: (e) => { setActiveCollection(normalizeKanbanCollection(e.target.value)); setCancelTargetId(null); },
+          onChange: (e) => {
+            const nextCollection = normalizeKanbanCollection(e.target.value);
+            if (nextCollection !== activeCollection) {
+              setRecords([]);
+              setStatusNote('');
+              setCancelReason('');
+            }
+            setActiveCollection(nextCollection);
+            setCancelTargetId(null);
+          },
           style: { padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         }, collectionOptions.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label))),
         h('input', {
