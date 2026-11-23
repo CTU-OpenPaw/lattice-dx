@@ -664,8 +664,12 @@ test('2-Phase SHA-256 Bulk Import enforces allowlist, RFC-4180 CSV, limits, form
     format: 'json',
     rows: [{ lotCode: 'LOT-01', sku: 'VAC-01', productName: 'Vaccine A', qtyOnHand: 50, expiryDate: '2027-06-01T00:00:00Z' }],
     signingSecret: 'unit-test-import-secret-2026',
-    ttlMs: -1000,
+    ttlMs: 5,
   });
+  const expiredAtMs = Date.parse(expiredDry.expiresAt);
+  while (Date.now() <= expiredAtMs + 2) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   await assert.rejects(
     () => commitBulkImport(db, {
       organizationId: 'org-a',
@@ -848,22 +852,59 @@ test('blocks-api, plugin index.js ACLs & direct REST guard, and Node-RED twin do
   const ackHttp = flows.find((n) => n.z === 'latticedx-twin-downlink-tab' && n.type === 'http request');
   assert.ok(ackHttp && ackHttp.url === '' && ackHttp.method === 'POST');
 
-  const cmdFnNode = flows.find((n) => n.z === 'latticedx-twin-downlink-tab' && n.type === 'function' && n.wires?.flat().includes(mqttOut.id));
+  const cmdFnNode = flows.find((n) => n.z === 'latticedx-twin-downlink-tab' && n.type === 'function' && n.wires?.[0]?.includes(mqttOut.id));
+  const errResNode = flows.find((n) => n.z === 'latticedx-twin-downlink-tab' && n.type === 'http response' && n.id === 'latticedx-twin-http-err');
   const ackFnNode = flows.find((n) => n.z === 'latticedx-twin-downlink-tab' && n.type === 'function' && n.wires?.flat().includes(ackHttp.id));
-  assert.ok(cmdFnNode && ackFnNode);
+  assert.ok(cmdFnNode && errResNode && ackFnNode);
+  assert.equal(cmdFnNode.outputs, 2);
+  assert.ok(cmdFnNode.wires[1].includes(errResNode.id), 'Second output of twin command function must wire to http error response');
 
   const envMap = new Map([['DX_IIOT_INGEST_TOKEN', 'edge-secret-token-2026-0123456789']]);
   const fakeEnv = { get: (k) => envMap.get(k) };
   const fakeNode = { warn: () => {}, error: () => {} };
 
   const runCmdFn = new Function('msg', 'node', 'env', cmdFnNode.func);
-  assert.equal(runCmdFn({ headers: {}, payload: { organizationId: 'org-a', assetId: 12 } }, fakeNode, fakeEnv), null);
-  assert.equal(runCmdFn({ headers: { 'x-lattice-edge-token': 'edge-secret-token-2026-0123456789' }, payload: { organizationId: 'org-a', assetEntityId: 'bad/#' } }, fakeNode, fakeEnv), null);
-  const cmdOut = runCmdFn({
-    headers: { 'X-Lattice-Edge-Token': 'edge-secret-token-2026-0123456789' },
-    payload: { organizationId: 'org-a', assetId: 12, commandId: 'cmd-123', desired: { targetTempC: -18 } },
+  const unauthOut = runCmdFn({ res: { id: 'res-1' }, headers: {}, payload: { organizationId: 'org-a', assetId: 12 } }, fakeNode, fakeEnv);
+  assert.equal(unauthOut[0], null);
+  assert.equal(unauthOut[1].statusCode, 401);
+  assert.equal(unauthOut[1].res.id, 'res-1');
+
+  const badTokenOut = runCmdFn({ headers: { 'x-lattice-edge-token': 'wrong-token-value-1234567890' }, payload: { organizationId: 'org-a', assetId: 12 } }, fakeNode, fakeEnv);
+  assert.equal(badTokenOut[0], null);
+  assert.equal(badTokenOut[1].statusCode, 401);
+
+  const badEntityOut = runCmdFn({ headers: { 'x-lattice-edge-token': 'edge-secret-token-2026-0123456789' }, payload: { organizationId: 'org-a', assetEntityId: 'bad/#' } }, fakeNode, fakeEnv);
+  assert.equal(badEntityOut[0], null);
+  assert.equal(badEntityOut[1].statusCode, 400);
+
+  // Cross-org URN in assetEntityId MUST be rejected 400 even when valid assetId is supplied
+  const crossOrgUrnWithAssetId = runCmdFn({
+    headers: { 'x-lattice-edge-token': 'edge-secret-token-2026-0123456789' },
+    payload: { organizationId: 'org-a', assetId: 12, assetEntityId: 'urn:ngsi-ld:Asset:org-b:native:12' },
   }, fakeNode, fakeEnv);
-  assert.equal(cmdOut.topic, 'latticedx/org-a/12/command');
+  assert.equal(crossOrgUrnWithAssetId[0], null);
+  assert.equal(crossOrgUrnWithAssetId[1].statusCode, 400);
+
+  const mismatchUrnOut = runCmdFn({
+    headers: { 'x-lattice-edge-token': 'edge-secret-token-2026-0123456789' },
+    payload: { organizationId: 'org-a', assetId: 12, assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:99' },
+  }, fakeNode, fakeEnv);
+  assert.equal(mismatchUrnOut[0], null);
+  assert.equal(mismatchUrnOut[1].statusCode, 400);
+
+  const cmdOutArr = runCmdFn({
+    headers: { 'X-Lattice-Edge-Token': 'edge-secret-token-2026-0123456789' },
+    payload: {
+      organizationId: 'org-a',
+      assetId: 12,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+      commandId: 'cmd-123',
+      desired: { targetTempC: -18 },
+    },
+  }, fakeNode, fakeEnv);
+  assert.equal(cmdOutArr[1], null);
+  assert.equal(cmdOutArr[0].statusCode, 202);
+  assert.equal(cmdOutArr[0].topic, 'latticedx/org-a/12/command');
 
   const runAckFn = new Function('msg', 'node', 'env', ackFnNode.func);
   assert.equal(runAckFn({ topic: 'bad/topic', payload: {} }, fakeNode, fakeEnv), null);
@@ -876,4 +917,513 @@ test('blocks-api, plugin index.js ACLs & direct REST guard, and Node-RED twin do
   assert.equal(ackOut.headers['X-Lattice-Edge-Token'], 'edge-secret-token-2026-0123456789');
   assert.equal(ackOut.payload.organizationId, 'org-a');
   assert.equal(ackOut.payload.assetEntityId, 'urn:ngsi-ld:Asset:org-a:native:12');
+});
+
+test('Digital Twin executes DB + ledger inside transaction before downlink, enforces merged bounds, and aligns fallback lineage edgeUid', async () => {
+  const { requestDesiredSetpoint } = require(path.join(PLUGIN_ROOT, 'src/server/digital-twin.js'));
+
+  // 1. Transactional rollback proof: real snapshot-rollback sequelize stub ensures uncommitted writes roll back & fetchImpl never fires
+  const committed = {
+    shadows: [],
+    approvals: [],
+    ledger: [],
+  };
+  const assets = [{ id: 12, code: 'CH-12', name: 'Kho A', organizationId: 'org-a', status: 'active' }];
+  const pkiKeys = [
+    { id: 1, organizationId: 'org-a', keyId: 'k1', algorithm: 'Ed25519', publicKeyPem: 'stub', encryptedPrivateKey: '00:00:00', fingerprintSha256: '0'.repeat(64), active: false },
+  ];
+  let activeBuffer = null;
+  let txSeq = 0;
+  const txEventLog = [];
+
+  const getStore = (name, tx) => {
+    const buf = tx && activeBuffer?.tx === tx ? activeBuffer.data : committed;
+    return buf[name];
+  };
+  const makeTxRepo = (storeName) => ({
+    find: async ({ filter = {}, limit = 100, transaction } = {}) => {
+      const arr = storeName ? getStore(storeName, transaction) : [];
+      return arr.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v)).slice(0, limit);
+    },
+    findOne: async ({ filter = {}, transaction } = {}) => {
+      const arr = storeName ? getStore(storeName, transaction) : [];
+      return arr.find((r) => Object.entries(filter).every(([k, v]) => r[k] === v)) || null;
+    },
+    create: async ({ values, transaction }) => {
+      txEventLog.push(`create:${storeName}`);
+      const arr = getStore(storeName, transaction);
+      const row = { id: arr.length + 100, ...values };
+      arr.push(row);
+      return row;
+    },
+    update: async ({ filterByTk, filter = {}, values, transaction }) => {
+      txEventLog.push(`update:${storeName}`);
+      const arr = getStore(storeName, transaction);
+      const out = [];
+      for (const row of arr) {
+        if ((filterByTk == null || Number(row.id) === Number(filterByTk)) && Object.entries(filter).every(([k, v]) => row[k] === v)) {
+          Object.assign(row, values);
+          out.push(row);
+        }
+      }
+      return out;
+    },
+  });
+
+  const txDb = {
+    sequelize: {
+      getDialect: () => 'sqlite',
+      transaction: async (fn) => {
+        const tx = { id: `tx-${++txSeq}` };
+        const snapshot = {
+          shadows: structuredClone(committed.shadows),
+          approvals: structuredClone(committed.approvals),
+          ledger: structuredClone(committed.ledger),
+        };
+        activeBuffer = { tx, data: snapshot };
+        txEventLog.push(`tx:start:${tx.id}`);
+        try {
+          const out = await fn(tx);
+          committed.shadows = snapshot.shadows;
+          committed.approvals = snapshot.approvals;
+          committed.ledger = snapshot.ledger;
+          txEventLog.push(`tx:commit:${tx.id}`);
+          return out;
+        } catch (err) {
+          txEventLog.push(`tx:rollback:${tx.id}`);
+          throw err;
+        } finally {
+          activeBuffer = null;
+        }
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeTwinShadows') return makeTxRepo('shadows');
+      if (name === 'latticeAiApprovalQueue') return makeTxRepo('approvals');
+      if (name === 'latticeCryptoLedger') return makeTxRepo('ledger');
+      if (name === 'latticePkiKeys') {
+        return {
+          find: async ({ filter = {} } = {}) => pkiKeys.filter((k) => k.organizationId === filter.organizationId),
+          findOne: async ({ filter = {} } = {}) => pkiKeys.find((k) => k.organizationId === filter.organizationId) || null,
+          create: async ({ values }) => values,
+        };
+      }
+      if (name === 'latticeAssets') {
+        return { findOne: async ({ filter = {} } = {}) => assets.find((a) => a.id === filter.id && a.organizationId === filter.organizationId) || null };
+      }
+      return null;
+    },
+  };
+
+  let downlinkCalls = 0;
+  await assert.rejects(
+    () => requestDesiredSetpoint(txDb, {
+      organizationId: 'org-a',
+      assetId: 12,
+      desiredPatch: { targetTempC: -18 },
+      actor: { userId: '101', username: 'mgr-a' },
+      downlinkUrl: 'http://nodered:1880/twin/command',
+      fetchImpl: async () => {
+        downlinkCalls += 1;
+        return new Response('', { status: 202 });
+      },
+    }),
+    (err) => err.code === 'PKI_KEY_INACTIVE',
+  );
+  assert.equal(downlinkCalls, 0, 'Node-RED webhook MUST NOT fire when ledger/transaction fails');
+  assert.equal(committed.shadows.length, 0, 'Shadow insert MUST roll back on PKI_KEY_INACTIVE');
+
+  // HITL path rollback when PKI key is inactive
+  committed.shadows.push({
+    id: 501,
+    organizationId: 'org-a',
+    assetId: 12,
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    desiredJson: { targetTempC: -18, minTempC: -22, maxTempC: -15 },
+    reportedJson: {},
+    commandStatus: 'synced',
+    version: 1,
+  });
+  await assert.rejects(
+    () => requestDesiredSetpoint(txDb, {
+      organizationId: 'org-a',
+      assetId: 12,
+      desiredPatch: { targetTempC: -10 },
+      actor: { userId: '101', username: 'mgr-a' },
+    }),
+    (err) => err.code === 'PKI_KEY_INACTIVE',
+  );
+  assert.equal(committed.approvals.length, 0, 'HITL approval queue insert MUST roll back on PKI_KEY_INACTIVE');
+  assert.equal(committed.shadows[0].commandStatus, 'synced', 'HITL shadow status update MUST roll back');
+
+  // 2. Merged minTempC/maxTempC bounds check catches partial patches inverting persisted bounds
+  const { db: mergedDb, shadows: mergedShadows } = makeTwinAndImportHarness();
+  await requestDesiredSetpoint(mergedDb, {
+    organizationId: 'org-a',
+    assetId: 12,
+    desiredPatch: { targetTempC: -18, minTempC: -22, maxTempC: -15 },
+    actor: { userId: '101', username: 'mgr-a' },
+  });
+  await assert.rejects(
+    () => requestDesiredSetpoint(mergedDb, {
+      organizationId: 'org-a',
+      assetId: 12,
+      desiredPatch: { minTempC: -10 },
+      actor: { userId: '101', username: 'mgr-a' },
+    }),
+    (err) => err.status === 400 && err.code === 'TWIN_DESIRED_INVALID',
+  );
+  await assert.rejects(
+    () => requestDesiredSetpoint(mergedDb, {
+      organizationId: 'org-a',
+      assetId: 12,
+      desiredPatch: { maxTempC: -25 },
+      actor: { userId: '101', username: 'mgr-a' },
+    }),
+    (err) => err.status === 400 && err.code === 'TWIN_DESIRED_INVALID',
+  );
+  assert.equal(mergedShadows[0].desiredJson.minTempC, -22);
+  assert.equal(mergedShadows[0].desiredJson.maxTempC, -15);
+
+  // 3. Commit-before-dispatch execution order proof
+  txEventLog.length = 0;
+  const orderRes = await requestDesiredSetpoint(
+    {
+      sequelize: txDb.sequelize,
+      getRepository: (name) => {
+        if (name === 'latticeCryptoLedger' || name === 'latticePkiKeys') return null;
+        return txDb.getRepository(name);
+      },
+    },
+    {
+      organizationId: 'org-a',
+      assetId: 12,
+      desiredPatch: { targetTempC: -17 },
+      actor: { userId: '101', username: 'mgr-a' },
+      downlinkUrl: 'http://nodered:1880/twin/command',
+      fetchImpl: async () => {
+        txEventLog.push('fetch:dispatch');
+        return new Response('', { status: 202 });
+      },
+    },
+  );
+  assert.equal(orderRes.downlinkDispatched, true);
+  const commitIdx = txEventLog.findIndex((e) => e.startsWith('tx:commit:'));
+  const fetchIdx = txEventLog.indexOf('fetch:dispatch');
+  assert.ok(commitIdx >= 0 && fetchIdx > commitIdx, `Expected tx:commit before fetch:dispatch, got ${txEventLog.join(' -> ')}`);
+
+  // 4. Fallback recordTwinLineageSafely matches data-governance.js edgeUid format `lin-${sha256.slice(0, 32)}`
+  const twinPath = path.join(PLUGIN_ROOT, 'src/server/digital-twin.js');
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (typeof request === 'string' && request.includes('data-governance')) {
+      const err = new Error(`Cannot find module '${request}'`);
+      err.code = 'MODULE_NOT_FOUND';
+      throw err;
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  let isolatedTwin;
+  try {
+    delete require.cache[require.resolve(twinPath)];
+    isolatedTwin = require(twinPath);
+  } finally {
+    Module._load = origLoad;
+    delete require.cache[require.resolve(twinPath)];
+  }
+  const fallbackLin = makeTwinAndImportHarness({ withLineage: true });
+  await isolatedTwin.requestDesiredSetpoint(fallbackLin.db, {
+    organizationId: 'org-a',
+    assetId: 12,
+    desiredPatch: { targetTempC: -18 },
+    actor: { userId: '101', username: 'mgr-a' },
+  });
+  assert.equal(fallbackLin.lineageEdges.length, 1);
+  assert.match(fallbackLin.lineageEdges[0].edgeUid, /^lin-[0-9a-f]{32}$/);
+  const normalLin = makeTwinAndImportHarness({ withLineage: true });
+  await requestDesiredSetpoint(normalLin.db, {
+    organizationId: 'org-a',
+    assetId: 12,
+    desiredPatch: { targetTempC: -18 },
+    actor: { userId: '101', username: 'mgr-a' },
+  });
+  assert.equal(fallbackLin.lineageEdges[0].edgeUid, normalLin.lineageEdges[0].edgeUid);
+});
+
+test('Bulk Import validates cross-org & missing FKs, rejects malformed quoted CSV, negative qtyReserved, and invalid ttlMs', async () => {
+  const {
+    parseRfc4180Csv,
+    runBulkImportDryRun,
+    commitBulkImport,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/bulk-import.js'));
+
+  // 1. Trailing unquoted non-whitespace characters after closing CSV quote must fail 400
+  assert.throws(
+    () => parseRfc4180Csv('code,name\n"A"trailing,"Valid"\n'),
+    (err) => err.status === 400 && err.code === 'BULK_IMPORT_PARSE_ERROR',
+  );
+  assert.throws(
+    () => parseRfc4180Csv('code,name\n"A" "B","Valid"\n'),
+    (err) => err.status === 400 && err.code === 'BULK_IMPORT_PARSE_ERROR',
+  );
+  const spacedRows = parseRfc4180Csv('code,name\n"A"  \t,"Valid" \n');
+  assert.equal(spacedRows[0].code, 'A');
+  assert.equal(spacedRows[0].name, 'Valid');
+
+  // 2. Non-finite / non-positive ttlMs rejected 400 BULK_IMPORT_TTL_INVALID
+  const { db, departments, locations } = makeTwinAndImportHarness();
+  departments.push(
+    { id: 3, code: 'DEPT-A', name: 'Kho A', organizationId: 'org-a', active: true },
+    { id: 4, code: 'DEPT-B', name: 'Kho B', organizationId: 'org-b', active: true },
+  );
+  locations.push(
+    { id: 2, code: 'LOC-B', name: 'Kho Org B', organizationId: 'org-b', active: true },
+  );
+
+  for (const badTtl of [0, -1000, NaN, Infinity, -Infinity, 'abc', '', null, true]) {
+    await assert.rejects(
+      () => runBulkImportDryRun(db, {
+        organizationId: 'org-a',
+        collection: 'latticeDepartments',
+        format: 'json',
+        rows: [{ code: 'D-1', name: 'Dept 1' }],
+        ttlMs: badTtl,
+      }),
+      (err) => err.status === 400 && err.code === 'BULK_IMPORT_TTL_INVALID',
+    );
+  }
+
+  // 3. Negative qtyReserved rejected 400 INVALID_QUANTITY instead of clamping to 0
+  const negQtyDry = await runBulkImportDryRun(db, {
+    organizationId: 'org-a',
+    collection: 'latticeStockLots',
+    format: 'json',
+    rows: [
+      { lotCode: 'LOT-NEG', sku: 'VAC-01', productName: 'Vaccine', qtyOnHand: 20, qtyReserved: -5, expiryDate: '2027-06-01T00:00:00Z' },
+    ],
+  });
+  assert.equal(negQtyDry.validCount, 0);
+  assert.equal(negQtyDry.invalidCount, 1);
+  assert.equal(negQtyDry.errors[0].code, 'INVALID_QUANTITY');
+
+  // 4. Cross-org & missing relational FK checks (departmentId, locationId, custodianId, warehouseLocationId)
+  const assetFkDry = await runBulkImportDryRun(db, {
+    organizationId: 'org-a',
+    collection: 'latticeAssets',
+    format: 'json',
+    rows: [
+      { code: 'AST-OK', name: 'Valid Asset', departmentId: 3, locationId: 1, custodianId: 10 },
+      { code: 'AST-XORG-DEPT', name: 'Cross-org Dept', departmentId: 4 },
+      { code: 'AST-XORG-LOC', name: 'Cross-org Loc', locationId: 2 },
+      { code: 'AST-XORG-CUST', name: 'Cross-org Custodian', custodianId: 20 },
+      { code: 'AST-MISS-DEPT', name: 'Missing Dept', departmentId: 9999 },
+    ],
+  });
+  assert.equal(assetFkDry.validCount, 1);
+  assert.equal(assetFkDry.invalidCount, 4);
+  assert.equal(assetFkDry.errors[0].code, 'DXOS_CROSS_ORG_FORBIDDEN');
+  assert.equal(assetFkDry.errors[1].code, 'DXOS_CROSS_ORG_FORBIDDEN');
+  assert.equal(assetFkDry.errors[2].code, 'DXOS_CROSS_ORG_FORBIDDEN');
+  assert.equal(assetFkDry.errors[3].code, 'BULK_IMPORT_REFERENCE_NOT_FOUND');
+
+  const locFkDry = await runBulkImportDryRun(db, {
+    organizationId: 'org-a',
+    collection: 'latticeLocations',
+    format: 'json',
+    rows: [
+      { code: 'LOC-OK', name: 'Valid Loc', departmentId: 3 },
+      { code: 'LOC-XORG', name: 'Bad Loc', departmentId: 4 },
+    ],
+  });
+  assert.equal(locFkDry.validCount, 1);
+  assert.equal(locFkDry.invalidCount, 1);
+  assert.equal(locFkDry.errors[0].code, 'DXOS_CROSS_ORG_FORBIDDEN');
+
+  const lotFkDry = await runBulkImportDryRun(db, {
+    organizationId: 'org-a',
+    collection: 'latticeStockLots',
+    format: 'json',
+    rows: [
+      { lotCode: 'LOT-OK-WH', sku: 'VAC-1', productName: 'Vac', qtyOnHand: 10, warehouseLocationId: 1, expiryDate: '2027-06-01T00:00:00Z' },
+      { lotCode: 'LOT-XORG-WH', sku: 'VAC-1', productName: 'Vac', qtyOnHand: 10, warehouseLocationId: 2, expiryDate: '2027-06-01T00:00:00Z' },
+      { lotCode: 'LOT-MISS-WH', sku: 'VAC-1', productName: 'Vac', qtyOnHand: 10, warehouseLocationId: 9999, expiryDate: '2027-06-01T00:00:00Z' },
+      { lotCode: 'LOT-XORG-URN', sku: 'VAC-1', productName: 'Vac', qtyOnHand: 10, assetEntityId: 'urn:ngsi-ld:Asset:org-b:native:99', expiryDate: '2027-06-01T00:00:00Z' },
+    ],
+  });
+  assert.equal(lotFkDry.validCount, 1);
+  assert.equal(lotFkDry.invalidCount, 3);
+  assert.equal(lotFkDry.errors[0].code, 'DXOS_CROSS_ORG_FORBIDDEN');
+  assert.equal(lotFkDry.errors[1].code, 'BULK_IMPORT_REFERENCE_NOT_FOUND');
+  assert.equal(lotFkDry.errors[2].code, 'DXOS_CROSS_ORG_FORBIDDEN');
+
+  // Valid FK commit succeeds
+  const assetCommit = await commitBulkImport(db, {
+    organizationId: 'org-a',
+    collection: 'latticeAssets',
+    format: 'json',
+    rows: [
+      { code: 'AST-OK', name: 'Valid Asset', departmentId: 3, locationId: 1, custodianId: 10 },
+      { code: 'AST-XORG-DEPT', name: 'Cross-org Dept', departmentId: 4 },
+      { code: 'AST-XORG-LOC', name: 'Cross-org Loc', locationId: 2 },
+      { code: 'AST-XORG-CUST', name: 'Cross-org Custodian', custodianId: 20 },
+      { code: 'AST-MISS-DEPT', name: 'Missing Dept', departmentId: 9999 },
+    ],
+    previewToken: assetFkDry.previewToken,
+  });
+  assert.equal(assetCommit.committedCount, 1);
+});
+
+test('DxosBlocksServerPlugin registers dxosTelemetryDirectGuard before latticeNativeScope and composed charts:queryData pipeline blocks direct telemetry/twin access', async () => {
+  const blocksIndexPath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+  const foundationIndexPath = require.resolve(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/index.js'));
+  const origLoad = Module._load;
+  class MockPlugin {
+    constructor(app, options = {}) {
+      this.app = app;
+      this.db = app?.db;
+      this.options = options;
+    }
+  }
+  class MockMigration {
+    constructor(context = {}) { this.context = context; }
+  }
+  delete require.cache[blocksIndexPath];
+  delete require.cache[foundationIndexPath];
+  Module._load = function mockedNocobase(request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin, Migration: MockMigration };
+    if (request === '@nocobase/database') return { defineCollection: (def) => def };
+    return origLoad.call(this, request, parent, isMain);
+  };
+
+  try {
+    const LatticeFoundationPlugin = require(foundationIndexPath);
+    const DxosBlocksServerPlugin = require(blocksIndexPath);
+
+    const employees = [{ id: 11, userId: 101, organizationId: 'org-a', departmentId: 3, active: true }];
+    const db = {
+      on() {},
+      sequelize: {
+        getDialect: () => 'sqlite',
+        transaction: async (cb) => cb({ id: 'tx-composed' }),
+        query: async () => [[]],
+      },
+      getRepository(name) {
+        if (name === 'latticeEmployees') {
+          return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+        }
+        return null;
+      },
+    };
+    const registered = [];
+    const app = {
+      db,
+      use() {},
+      resourceManager: {
+        use(fn, opts) { registered.push({ fn, opts }); },
+        define() {},
+      },
+      acl: { allow() {}, registerSnippet() {} },
+      cronJobManager: { addJob() {} },
+      logger: { info() {}, warn() {}, error() {} },
+    };
+
+    // Load plugin-lattice-foundation FIRST (matching runtime load order), then plugin-dxos-blocks
+    await new LatticeFoundationPlugin(app).load();
+    await new DxosBlocksServerPlugin(app).load();
+
+    const guardEntry = registered.find((m) => m.opts?.tag === 'dxosTelemetryDirectGuard');
+    const nativeEntry = registered.find((m) => m.opts?.tag === 'latticeNativeScope');
+    assert.ok(guardEntry, 'DxosBlocksServerPlugin must register dxosTelemetryDirectGuard');
+    assert.ok(nativeEntry, 'LatticeFoundationPlugin must register latticeNativeScope');
+    assert.deepEqual(guardEntry.opts, {
+      tag: 'dxosTelemetryDirectGuard',
+      after: 'acl',
+      before: 'latticeNativeScope',
+    });
+
+    const resolveOrder = (entries) => {
+      const remaining = [...entries];
+      const ordered = [];
+      const placed = new Set(['acl']);
+      while (remaining.length) {
+        const idx = remaining.findIndex((item) => {
+          const afterTags = item.opts?.after ? (Array.isArray(item.opts.after) ? item.opts.after : [item.opts.after]) : [];
+          const afterOk = afterTags.every((t) => placed.has(t) || !entries.some((e) => e.opts?.tag === t));
+          const blockedByBefore = remaining.some((other) => {
+            if (other === item) return false;
+            const beforeTags = other.opts?.before ? (Array.isArray(other.opts.before) ? other.opts.before : [other.opts.before]) : [];
+            return beforeTags.includes(item.opts?.tag);
+          });
+          return afterOk && !blockedByBefore;
+        });
+        assert.ok(idx >= 0, 'Cycle detected in middleware topological constraints');
+        const [chosen] = remaining.splice(idx, 1);
+        ordered.push(chosen);
+        if (chosen.opts?.tag) placed.add(chosen.opts.tag);
+      }
+      return ordered;
+    };
+
+    const sortedEntries = resolveOrder(registered);
+    const sortedTags = sortedEntries.map((m) => m.opts?.tag);
+    assert.ok(
+      sortedTags.indexOf('dxosTelemetryDirectGuard') < sortedTags.indexOf('latticeNativeScope'),
+      `Expected dxosTelemetryDirectGuard before latticeNativeScope, got ${sortedTags.join(' -> ')}`,
+    );
+
+    const compose = (middlewares, handler) => async (ctx) => {
+      let idx = -1;
+      const dispatch = async (i) => {
+        if (i <= idx) throw new Error('next() called multiple times');
+        idx = i;
+        const fn = i < middlewares.length ? middlewares[i] : handler;
+        if (!fn) return undefined;
+        return fn(ctx, () => dispatch(i + 1));
+      };
+      return dispatch(0);
+    };
+
+    const pipeline = compose([guardEntry.fn, nativeEntry.fn], async () => {});
+
+    // Both without mode:'builder' and with mode:'builder', direct guard MUST reject before latticeNativeScope
+    for (const values of [
+      { collection: 'latticeTwinShadows' },
+      { mode: 'builder', collection: 'latticeTwinShadows' },
+    ]) {
+      await assert.rejects(
+        () => pipeline({
+          state: { currentRole: 'ldx_manager', currentUser: { id: 101 } },
+          action: { resourceName: 'charts', actionName: 'queryData', params: { values } },
+        }),
+        (err) => err.status === 403 && err.code === 'TWIN_DIRECT_CRUD_FORBIDDEN',
+      );
+    }
+
+    for (const values of [
+      { collection: 'latticeTelemetryPoints' },
+      { mode: 'builder', collection: 'latticeTelemetryPoints' },
+    ]) {
+      await assert.rejects(
+        () => pipeline({
+          state: { currentRole: 'ldx_manager', currentUser: { id: 101 } },
+          action: { resourceName: 'charts', actionName: 'queryData', params: { values } },
+        }),
+        (err) => err.status === 403 && err.code === 'TELEMETRY_DIRECT_CRUD_FORBIDDEN',
+      );
+    }
+
+    // Normal scoped chart query passes both middlewares
+    let downstreamRan = false;
+    const okCtx = {
+      state: { currentRole: 'ldx_manager', currentUser: { id: 101 } },
+      action: { resourceName: 'charts', actionName: 'queryData', params: { values: { mode: 'builder', collection: 'latticeAssets' } } },
+    };
+    await compose([guardEntry.fn, nativeEntry.fn], async () => { downstreamRan = true; })(okCtx);
+    assert.equal(downstreamRan, true);
+    assert.equal(okCtx.state.latticeRlsOrg, 'org-a');
+  } finally {
+    Module._load = origLoad;
+    delete require.cache[blocksIndexPath];
+    delete require.cache[foundationIndexPath];
+  }
 });

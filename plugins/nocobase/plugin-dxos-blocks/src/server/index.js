@@ -31,7 +31,7 @@ class DxosBlocksServerPlugin extends Plugin {
           throw Object.assign(new Error('Vui lòng sử dụng dxosBlocks:twinShadow, dxosBlocks:twinSetDesired và dxosBlocks:twinAckCommand.'), { code: 'TWIN_DIRECT_CRUD_FORBIDDEN', status: 403 });
         }
         return next();
-      }, { tag: 'dxosTelemetryDirectGuard', after: 'acl' });
+      }, { tag: 'dxosTelemetryDirectGuard', after: 'acl', before: 'latticeNativeScope' });
     }
     this.app.resourceManager.define({
       name: 'dxosBlocks',

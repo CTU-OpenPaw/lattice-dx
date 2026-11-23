@@ -12,10 +12,12 @@ const { createHash, createHmac, randomBytes, timingSafeEqual } = require('node:c
 const path = require('node:path');
 
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+const URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
 const MAX_IMPORT_BYTES = 2 * 1024 * 1024;
 const MAX_IMPORT_ROWS = 500;
 const MAX_CONSUMED_NONCES = 10000;
 const DEFAULT_TOKEN_TTL_MS = 15 * 60 * 1000;
+const MAX_DATE_MS = 8.64e15;
 const TOKEN_RE = /^ldx_imp_([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/;
 const FORMULA_PREFIX_RE = /^(?:[=+\-@\t\r]|\s+[=+\-@])/;
 const SCRIPT_PAYLOAD_RE = /<script\b|javascript:|onerror\s*=|onload\s*=/i;
@@ -37,6 +39,20 @@ const ALLOWED_IMPORT_COLLECTIONS = new Set([
   'latticeDepartments',
 ]);
 const OPTIONAL_IMPORT_COLLECTIONS = new Set(['latticeStockLots']);
+
+const REFERENCE_FIELD_TARGETS = {
+  latticeAssets: [
+    { field: 'departmentId', collection: 'latticeDepartments' },
+    { field: 'locationId', collection: 'latticeLocations' },
+    { field: 'custodianId', collection: 'latticeEmployees' },
+  ],
+  latticeLocations: [
+    { field: 'departmentId', collection: 'latticeDepartments' },
+  ],
+  latticeStockLots: [
+    { field: 'warehouseLocationId', collection: 'latticeLocations' },
+  ],
+};
 
 const COLLECTION_SPECS = {
   latticeAssets: {
@@ -162,6 +178,7 @@ function parseRfc4180Csv(rawContent) {
   let row = [];
   let cell = '';
   let inQuotes = false;
+  let quoteClosed = false;
 
   for (let i = 0; i < text.length; i += 1) {
     const ch = text[i];
@@ -172,9 +189,36 @@ function parseRfc4180Csv(rawContent) {
           i += 1;
         } else {
           inQuotes = false;
+          quoteClosed = true;
         }
       } else {
         cell += ch;
+      }
+      continue;
+    }
+
+    if (quoteClosed) {
+      if (ch === ',') {
+        row.push(cell);
+        cell = '';
+        quoteClosed = false;
+      } else if (ch === '\r') {
+        if (text[i + 1] === '\n') i += 1;
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = '';
+        quoteClosed = false;
+      } else if (ch === '\n') {
+        row.push(cell);
+        rows.push(row);
+        row = [];
+        cell = '';
+        quoteClosed = false;
+      } else if (ch === ' ' || ch === '\t') {
+        continue;
+      } else {
+        throw failImport('BULK_IMPORT_PARSE_ERROR', 400, 'Ký tự không hợp lệ sau dấu ngoặc kép đóng trong CSV.');
       }
       continue;
     }
@@ -206,7 +250,7 @@ function parseRfc4180Csv(rawContent) {
   if (inQuotes) {
     throw failImport('BULK_IMPORT_PARSE_ERROR', 400, 'Chuỗi trích dẫn CSV chưa được đóng.');
   }
-  if (cell.length > 0 || row.length > 0) {
+  if (cell.length > 0 || row.length > 0 || quoteClosed) {
     row.push(cell);
     rows.push(row);
   }
@@ -403,9 +447,15 @@ function validateAndSanitizeRow(collection, rawRow) {
     clean.sku = sku;
     clean.productName = productName;
     clean.qtyOnHand = qtyOnHand;
-    clean.qtyReserved = rawRow.qtyReserved !== undefined && rawRow.qtyReserved !== ''
-      ? Math.max(0, parseFiniteNum(rawRow.qtyReserved, 'qtyReserved'))
-      : 0;
+    if (rawRow.qtyReserved !== undefined && rawRow.qtyReserved !== null && rawRow.qtyReserved !== '') {
+      const qtyReserved = parseFiniteNum(rawRow.qtyReserved, 'qtyReserved');
+      if (qtyReserved < 0) {
+        throw failImport('INVALID_QUANTITY', 400, 'qtyReserved không được nhỏ hơn 0.');
+      }
+      clean.qtyReserved = qtyReserved;
+    } else {
+      clean.qtyReserved = 0;
+    }
     clean.unit = sanitizeTextCell(rawRow.unit, { maxLen: 64 }) || 'UNIT';
     clean.expiryDate = expiryDate;
     if (rawRow.manufacturedAt !== undefined && rawRow.manufacturedAt !== '') {
@@ -440,20 +490,93 @@ function validateAndSanitizeRow(collection, rawRow) {
   return ordered;
 }
 
-function prepareImportBatch(collection, rawRows) {
+async function findReferenceRow(repo, filter, transaction = null) {
+  const txOpt = transaction ? { transaction } : {};
+  if (typeof repo.findOne === 'function') {
+    return repo.findOne({ filter, ...txOpt });
+  }
+  if (typeof repo.find === 'function') {
+    const list = (await repo.find({ filter, limit: 1, ...txOpt })) || [];
+    return list[0] || null;
+  }
+  return null;
+}
+
+async function assertRowReferencesInOrg(db, organizationId, collection, cleanRow, { transaction = null, cache = null } = {}) {
+  if (collection === 'latticeStockLots' && cleanRow.assetEntityId) {
+    const urnMatch = URN_RE.exec(cleanRow.assetEntityId);
+    if (urnMatch && urnMatch[1] !== organizationId) {
+      throw failImport('DXOS_CROSS_ORG_FORBIDDEN', 403, 'assetEntityId không thuộc phạm vi tổ chức.');
+    }
+  }
+
+  const refSpecs = REFERENCE_FIELD_TARGETS[collection];
+  if (!refSpecs || !refSpecs.length || typeof db?.getRepository !== 'function') return;
+
+  for (const spec of refSpecs) {
+    const refId = cleanRow[spec.field];
+    if (refId === undefined || refId === null) continue;
+
+    const cacheKey = `${spec.collection}:${refId}`;
+    const cachedVerdict = cache?.get(cacheKey);
+    if (cachedVerdict === 'ok') continue;
+    if (cachedVerdict === 'cross_org') {
+      throw failImport('DXOS_CROSS_ORG_FORBIDDEN', 403, `${spec.field} (${refId}) không thuộc phạm vi tổ chức.`);
+    }
+    if (cachedVerdict === 'missing') {
+      throw failImport('BULK_IMPORT_REFERENCE_NOT_FOUND', 400, `${spec.field} (${refId}) không tồn tại trong tổ chức.`);
+    }
+
+    const refRepo = db.getRepository(spec.collection);
+    if (!refRepo || (typeof refRepo.findOne !== 'function' && typeof refRepo.find !== 'function')) {
+      continue;
+    }
+
+    const orgMatch = await findReferenceRow(refRepo, { id: refId, organizationId }, transaction);
+    const matchedOrg = orgMatch ? val(orgMatch, 'organizationId') : null;
+    if (orgMatch && (!matchedOrg || matchedOrg === organizationId)) {
+      cache?.set(cacheKey, 'ok');
+      continue;
+    }
+    if (matchedOrg && matchedOrg !== organizationId) {
+      cache?.set(cacheKey, 'cross_org');
+      throw failImport('DXOS_CROSS_ORG_FORBIDDEN', 403, `${spec.field} (${refId}) không thuộc phạm vi tổ chức.`);
+    }
+
+    let anyMatch = null;
+    try {
+      anyMatch = await findReferenceRow(refRepo, { id: refId }, transaction);
+    } catch {
+      anyMatch = null;
+    }
+    const anyOrg = anyMatch ? val(anyMatch, 'organizationId') : null;
+    if (anyMatch && anyOrg && anyOrg !== organizationId) {
+      cache?.set(cacheKey, 'cross_org');
+      throw failImport('DXOS_CROSS_ORG_FORBIDDEN', 403, `${spec.field} (${refId}) không thuộc phạm vi tổ chức.`);
+    }
+
+    cache?.set(cacheKey, 'missing');
+    throw failImport('BULK_IMPORT_REFERENCE_NOT_FOUND', 400, `${spec.field} (${refId}) không tồn tại trong tổ chức.`);
+  }
+}
+
+async function prepareImportBatch(db, organizationId, collection, rawRows) {
   const uniqueKey = COLLECTION_SPECS[collection].uniqueKey;
   const seenKeys = new Set();
+  const refCache = new Map();
   const validRows = [];
   const errors = [];
 
-  rawRows.forEach((rawRow, idx) => {
+  for (let idx = 0; idx < rawRows.length; idx += 1) {
+    const rawRow = rawRows[idx];
     const rowNumber = idx + 1;
     try {
       const sanitized = validateAndSanitizeRow(collection, rawRow);
+      await assertRowReferencesInOrg(db, organizationId, collection, sanitized, { cache: refCache });
       const keyVal = sanitized[uniqueKey];
       if (seenKeys.has(keyVal)) {
         errors.push({ row: rowNumber, code: 'DUPLICATE_CODE_IN_BATCH', message: `Trùng ${uniqueKey} "${keyVal}" trong tệp import.` });
-        return;
+        continue;
       }
       seenKeys.add(keyVal);
       validRows.push(sanitized);
@@ -464,7 +587,7 @@ function prepareImportBatch(collection, rawRows) {
         message: err?.message || 'Dòng dữ liệu không hợp lệ.',
       });
     }
-  });
+  }
 
   return { validRows, errors, totalRows: rawRows.length };
 }
@@ -541,10 +664,25 @@ async function runBulkImportDryRun(db, {
   const collection = assertAllowedImportCollection(db, rawCollection);
   const secret = resolveImportSigningSecret(signingSecret, env);
 
+  const resolvedTtlMs = ttlMs === undefined ? DEFAULT_TOKEN_TTL_MS : Number(ttlMs);
+  if (
+    ttlMs === null
+    || typeof ttlMs === 'boolean'
+    || typeof ttlMs === 'object'
+    || (typeof ttlMs === 'string' && ttlMs.trim() === '')
+    || !Number.isFinite(resolvedTtlMs)
+    || resolvedTtlMs <= 0
+  ) {
+    throw failImport('BULK_IMPORT_TTL_INVALID', 400, 'ttlMs phải là số dương hữu hạn.');
+  }
+  const expiresAt = Date.now() + resolvedTtlMs;
+  if (!Number.isFinite(expiresAt) || expiresAt > MAX_DATE_MS) {
+    throw failImport('BULK_IMPORT_TTL_INVALID', 400, 'ttlMs vượt quá giới hạn thời gian hợp lệ.');
+  }
+
   const rawRows = parseInputBatch({ format, content, rows });
-  const { validRows, errors, totalRows } = prepareImportBatch(collection, rawRows);
+  const { validRows, errors, totalRows } = await prepareImportBatch(db, orgId, collection, rawRows);
   const payloadSha256 = computeBatchSha256(orgId, collection, validRows);
-  const expiresAt = Date.now() + Number(ttlMs);
   const nonce = randomBytes(16).toString('hex');
 
   const previewToken = signPreviewToken(
@@ -584,7 +722,7 @@ async function commitBulkImport(db, {
   const secret = resolveImportSigningSecret(signingSecret, env);
 
   const rawRows = parseInputBatch({ format, content, rows });
-  const { validRows } = prepareImportBatch(collection, rawRows);
+  const { validRows } = await prepareImportBatch(db, orgId, collection, rawRows);
   const payloadSha256 = computeBatchSha256(orgId, collection, validRows);
 
   const claims = verifyPreviewToken(previewToken, {
@@ -627,7 +765,10 @@ async function commitBulkImport(db, {
     }
 
     const txOpt = transaction ? { transaction } : {};
+    const txRefCache = new Map();
     for (const row of validRows) {
+      await assertRowReferencesInOrg(db, orgId, collection, row, { transaction, cache: txRefCache });
+
       let existing = null;
       if (typeof repo.findOne === 'function') {
         existing = await repo.findOne({

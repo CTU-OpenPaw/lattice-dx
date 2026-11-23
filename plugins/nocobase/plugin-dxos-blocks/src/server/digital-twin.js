@@ -105,10 +105,13 @@ function isSecurityInvariant(err, pkiLedger) {
   return Boolean(err && typeof err.code === 'string' && LEDGER_SECURITY_INVARIANTS.has(err.code));
 }
 
-async function recordTwinLedgerSafely(db, entryArgs) {
+async function recordTwinLedgerSafely(db, entryArgs, { transaction = null } = {}) {
   const pki = loadFoundationModule('pki-ledger');
   if (!pki || typeof pki.appendLedgerEntrySafely !== 'function') return null;
-  return pki.appendLedgerEntrySafely(db, entryArgs, { scope: 'dxos:digital-twin' });
+  return pki.appendLedgerEntrySafely(db, entryArgs, {
+    scope: 'dxos:digital-twin',
+    ...(transaction ? { transaction } : {}),
+  });
 }
 
 async function recordTwinLineageSafely(db, {
@@ -120,6 +123,7 @@ async function recordTwinLineageSafely(db, {
   desiredPatch,
   actorName,
   observedAt,
+  transaction = null,
 }) {
   const sourceCollection = assetId != null ? 'latticeAssets' : 'latticeTwinShadows';
   const sourceRecordId = String(assetId != null ? assetId : (shadowId ?? assetEntityId));
@@ -140,6 +144,7 @@ async function recordTwinLineageSafely(db, {
         actorName,
         metadataJson,
         observedAt,
+        transaction,
       });
     } catch (err) {
       if (isSecurityInvariant(err)) throw err;
@@ -149,12 +154,14 @@ async function recordTwinLineageSafely(db, {
 
   const lineageRepo = db?.getRepository?.('latticeDataLineage');
   if (!lineageRepo || typeof lineageRepo.create !== 'function') return null;
-  const edgeUid = createHash('sha256')
+  const txOpt = transaction ? { transaction } : {};
+  const edgeUid = `lin-${createHash('sha256')
     .update(`${organizationId}|${sourceCollection}|${sourceRecordId}|${targetCollection}|${targetRecordId}|twin_command`)
-    .digest('hex');
+    .digest('hex')
+    .slice(0, 32)}`;
   try {
     if (typeof lineageRepo.findOne === 'function') {
-      const existing = await lineageRepo.findOne({ filter: { organizationId, edgeUid } });
+      const existing = await lineageRepo.findOne({ filter: { organizationId, edgeUid }, ...txOpt });
       if (existing) return existing;
     }
     return await lineageRepo.create({
@@ -170,6 +177,7 @@ async function recordTwinLineageSafely(db, {
         metadataJson,
         observedAt,
       },
+      ...txOpt,
     });
   } catch (err) {
     if (isSecurityInvariant(err)) throw err;
@@ -371,15 +379,33 @@ function serializeShadow(row, defaults = {}) {
   };
 }
 
-async function findShadowRow(shadowRepo, organizationId, assetEntityId) {
+async function runInTwinTx(db, organizationId, fn) {
+  const execute = async (transaction) => {
+    const isPostgres = typeof db?.sequelize?.getDialect === 'function' && db.sequelize.getDialect() === 'postgres';
+    if (isPostgres && transaction) {
+      const pgRls = loadFoundationModule('pg-rls');
+      if (pgRls && typeof pgRls.setTransactionRlsOrg === 'function') {
+        await pgRls.setTransactionRlsOrg(db, organizationId, transaction);
+      }
+    }
+    return fn(transaction || null);
+  };
+  if (typeof db?.sequelize?.transaction === 'function') {
+    return db.sequelize.transaction(execute);
+  }
+  return execute(null);
+}
+
+async function findShadowRow(shadowRepo, organizationId, assetEntityId, transaction = null) {
   if (!shadowRepo) return null;
+  const txOpt = transaction ? { transaction } : {};
   if (typeof shadowRepo.findOne === 'function') {
-    const row = await shadowRepo.findOne({ filter: { organizationId, assetEntityId } });
+    const row = await shadowRepo.findOne({ filter: { organizationId, assetEntityId }, ...txOpt });
     if (row && val(row, 'organizationId') && val(row, 'organizationId') !== organizationId) return null;
     return row || null;
   }
   if (typeof shadowRepo.find === 'function') {
-    const rows = (await shadowRepo.find({ filter: { organizationId, assetEntityId }, limit: 1 })) || [];
+    const rows = (await shadowRepo.find({ filter: { organizationId, assetEntityId }, limit: 1, ...txOpt })) || [];
     const row = rows[0] || null;
     if (row && val(row, 'organizationId') && val(row, 'organizationId') !== organizationId) return null;
     return row;
@@ -387,14 +413,20 @@ async function findShadowRow(shadowRepo, organizationId, assetEntityId) {
   return null;
 }
 
-async function updateShadowRow(repo, row, patch) {
+async function updateShadowRow(repo, row, patch, { organizationId = null, transaction = null } = {}) {
+  const txOpt = transaction ? { transaction } : {};
   if (typeof row?.update === 'function') {
-    await row.update(patch);
+    await row.update(patch, txOpt);
     return row;
   }
   const id = val(row, 'id');
   if (repo && typeof repo.update === 'function' && id != null) {
-    const res = await repo.update({ filterByTk: id, values: patch });
+    const res = await repo.update({
+      filterByTk: id,
+      ...(organizationId ? { filter: { organizationId } } : {}),
+      values: patch,
+      ...txOpt,
+    });
     if (Array.isArray(res) && res[0]) return res[0];
   }
   return Object.assign(row || {}, patch);
@@ -453,122 +485,192 @@ async function requestDesiredSetpoint(db, opts = {}) {
     actor?.username || val(currentUser, 'username') || `user-${requesterUserId}`,
   ).slice(0, 120);
 
-  let shadowRow = await findShadowRow(shadowRepo, organizationId, assetEntityId);
-  const currentDesired = shadowRow && isPlainObject(val(shadowRow, 'desiredJson')) ? { ...val(shadowRow, 'desiredJson') } : {};
-  const currentReported = shadowRow && isPlainObject(val(shadowRow, 'reportedJson')) ? { ...val(shadowRow, 'reportedJson') } : {};
-  const curVersion = shadowRow ? (Number(val(shadowRow, 'version')) || 1) : 0;
+  const txResult = await runInTwinTx(db, organizationId, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const shadowRow = await findShadowRow(shadowRepo, organizationId, assetEntityId, transaction);
+    const currentDesired = shadowRow && isPlainObject(val(shadowRow, 'desiredJson')) ? { ...val(shadowRow, 'desiredJson') } : {};
+    const currentReported = shadowRow && isPlainObject(val(shadowRow, 'reportedJson')) ? { ...val(shadowRow, 'reportedJson') } : {};
+    const curVersion = shadowRow ? (Number(val(shadowRow, 'version')) || 1) : 0;
 
-  const baselineTemp = parseFinite(currentDesired.targetTempC ?? currentReported.targetTempC);
-  const deltaTempC = desiredPatch.targetTempC !== undefined && baselineTemp !== null
-    ? Number((desiredPatch.targetTempC - baselineTemp).toFixed(2))
-    : null;
-
-  if (
-    desiredPatch.targetTempC !== undefined
-    && baselineTemp !== null
-    && Math.abs(desiredPatch.targetTempC - baselineTemp) > HITL_TEMP_THRESHOLD_C
-    && opts.hitlApproved !== true
-  ) {
-    const rawShadowId = val(shadowRow, 'id');
-    const shadowId = rawShadowId != null && /^[1-9]\d*$/.test(String(rawShadowId)) ? Number(rawShadowId) : null;
-    let approvalId = null;
-    const queueRepo = db?.getRepository?.('latticeAiApprovalQueue');
-    if (queueRepo && typeof queueRepo.create === 'function') {
-      const approvalRow = await queueRepo.create({
-        values: {
-          organizationId,
-          requesterUserId,
-          requesterUsername,
-          aiEmployee: 'dxos-ops',
-          toolName: 'dxos_twin_set_desired',
-          targetCollection: 'latticeTwinShadows',
-          targetRecordId: shadowId,
-          operation: 'update',
-          proposedArgs: { assetEntityId, desiredPatch, baselineTemp },
-          diffPreview: {
-            targetTempC: {
-              before: baselineTemp,
-              after: desiredPatch.targetTempC,
-              delta: deltaTempC,
-            },
-          },
-          riskLevel: 'high',
-          status: 'pending',
-          expiresAt: new Date(Date.now() + 24 * 3600_000),
-        },
-      });
-      approvalId = val(approvalRow, 'id') ?? null;
+    const nextDesired = { ...currentDesired, ...desiredPatch };
+    if (
+      nextDesired.minTempC !== undefined
+      && nextDesired.maxTempC !== undefined
+      && nextDesired.minTempC > nextDesired.maxTempC
+    ) {
+      throw failTwin('TWIN_DESIRED_INVALID', 400, 'minTempC không được lớn hơn maxTempC.');
     }
 
-    const updated = await updateShadowRow(shadowRepo, shadowRow, {
-      commandStatus: 'pending_hitl',
-      version: curVersion + 1,
-      updatedBy: requesterUsername,
-    });
+    const baselineTemp = parseFinite(currentDesired.targetTempC ?? currentReported.targetTempC);
+    const deltaTempC = desiredPatch.targetTempC !== undefined && baselineTemp !== null
+      ? Number((desiredPatch.targetTempC - baselineTemp).toFixed(2))
+      : null;
 
-    await recordTwinLedgerSafely(db, {
+    if (
+      desiredPatch.targetTempC !== undefined
+      && baselineTemp !== null
+      && Math.abs(desiredPatch.targetTempC - baselineTemp) > HITL_TEMP_THRESHOLD_C
+      && opts.hitlApproved !== true
+    ) {
+      const rawShadowId = val(shadowRow, 'id');
+      const shadowId = rawShadowId != null && /^[1-9]\d*$/.test(String(rawShadowId)) ? Number(rawShadowId) : null;
+      let approvalId = null;
+      const queueRepo = db?.getRepository?.('latticeAiApprovalQueue');
+      if (queueRepo && typeof queueRepo.create === 'function') {
+        const approvalRow = await queueRepo.create({
+          values: {
+            organizationId,
+            requesterUserId,
+            requesterUsername,
+            aiEmployee: 'dxos-ops',
+            toolName: 'dxos_twin_set_desired',
+            targetCollection: 'latticeTwinShadows',
+            targetRecordId: shadowId,
+            operation: 'update',
+            proposedArgs: { assetEntityId, desiredPatch, baselineTemp },
+            diffPreview: {
+              targetTempC: {
+                before: baselineTemp,
+                after: desiredPatch.targetTempC,
+                delta: deltaTempC,
+              },
+            },
+            riskLevel: 'high',
+            status: 'pending',
+            expiresAt: new Date(Date.now() + 24 * 3600_000),
+          },
+          ...txOpt,
+        });
+        approvalId = val(approvalRow, 'id') ?? null;
+      }
+
+      const updated = await updateShadowRow(
+        shadowRepo,
+        shadowRow,
+        {
+          commandStatus: 'pending_hitl',
+          version: curVersion + 1,
+          updatedBy: requesterUsername,
+        },
+        { organizationId, transaction },
+      );
+
+      await recordTwinLedgerSafely(
+        db,
+        {
+          organizationId,
+          eventType: 'iot.twin_hitl_required',
+          targetCollection: 'latticeTwinShadows',
+          targetRecordId: String(shadowId ?? assetEntityId),
+          actor: { userId: String(requesterUserId), username: requesterUsername },
+          payload: { assetEntityId, desiredPatch, baselineTemp, deltaTempC, approvalId },
+        },
+        { transaction },
+      );
+
+      return {
+        gatedByHitl: true,
+        deltaTempC,
+        approvalId,
+        shadow: serializeShadow(updated),
+      };
+    }
+
+    // Validate downlink URL upfront before mutating shadow or invoking fetchImpl
+    const rawDownlinkUrl = opts.downlinkUrl !== undefined ? opts.downlinkUrl : process.env.DX_NODERED_COMMAND_URL;
+    const validatedDownlinkUrl = validateDownlinkUrl(rawDownlinkUrl, opts.env || process.env);
+
+    const delta = computeShadowDelta(nextDesired, currentReported);
+    const commandId = `cmd-${randomBytes(8).toString('hex')}`;
+    const now = new Date();
+
+    const updated = shadowRow
+      ? await updateShadowRow(
+          shadowRepo,
+          shadowRow,
+          {
+            ...(assetId != null ? { assetId } : {}),
+            desiredJson: nextDesired,
+            lastDeltaJson: delta,
+            pendingCommandId: commandId,
+            commandStatus: 'dispatched',
+            lastDispatchedAt: now,
+            version: curVersion + 1,
+            updatedBy: requesterUsername,
+          },
+          { organizationId, transaction },
+        )
+      : await shadowRepo.create({
+          values: {
+            organizationId,
+            ...(assetId != null ? { assetId } : {}),
+            assetEntityId,
+            desiredJson: nextDesired,
+            reportedJson: {},
+            lastDeltaJson: delta,
+            pendingCommandId: commandId,
+            commandStatus: 'dispatched',
+            lastDispatchedAt: now,
+            version: 1,
+            updatedBy: requesterUsername,
+          },
+          ...txOpt,
+        });
+
+    const rawSavedId = val(updated, 'id');
+    const shadowId = rawSavedId != null && /^[1-9]\d*$/.test(String(rawSavedId)) ? Number(rawSavedId) : null;
+
+    await recordTwinLedgerSafely(
+      db,
+      {
+        organizationId,
+        eventType: 'iot.twin_desired_dispatched',
+        targetCollection: 'latticeTwinShadows',
+        targetRecordId: String(shadowId ?? assetEntityId),
+        actor: { userId: String(requesterUserId), username: requesterUsername },
+        payload: {
+          assetEntityId,
+          commandId,
+          desiredPatch,
+          downlinkConfigured: Boolean(validatedDownlinkUrl),
+        },
+      },
+      { transaction },
+    );
+
+    await recordTwinLineageSafely(db, {
       organizationId,
-      eventType: 'iot.twin_hitl_required',
-      targetCollection: 'latticeTwinShadows',
-      targetRecordId: String(shadowId ?? assetEntityId),
-      actor: { userId: String(requesterUserId), username: requesterUsername },
-      payload: { assetEntityId, desiredPatch, baselineTemp, deltaTempC, approvalId },
+      assetId,
+      shadowId,
+      assetEntityId,
+      commandId,
+      desiredPatch,
+      actorName: requesterUsername,
+      observedAt: now,
+      transaction,
     });
 
     return {
-      gatedByHitl: true,
-      deltaTempC,
-      approvalId,
+      gatedByHitl: false,
+      commandId,
+      now,
+      nextDesired,
+      validatedDownlinkUrl,
       shadow: serializeShadow(updated),
     };
+  });
+
+  if (txResult.gatedByHitl) {
+    return txResult;
   }
 
-  // Validate downlink URL upfront before mutating shadow or invoking fetchImpl
-  const rawDownlinkUrl = opts.downlinkUrl !== undefined ? opts.downlinkUrl : process.env.DX_NODERED_COMMAND_URL;
-  const validatedDownlinkUrl = validateDownlinkUrl(rawDownlinkUrl, opts.env || process.env);
-
-  const nextDesired = { ...currentDesired, ...desiredPatch };
-  const delta = computeShadowDelta(nextDesired, currentReported);
-  const commandId = `cmd-${randomBytes(8).toString('hex')}`;
-  const now = new Date();
-
-  const updated = shadowRow
-    ? await updateShadowRow(shadowRepo, shadowRow, {
-        ...(assetId != null ? { assetId } : {}),
-        desiredJson: nextDesired,
-        lastDeltaJson: delta,
-        pendingCommandId: commandId,
-        commandStatus: 'dispatched',
-        lastDispatchedAt: now,
-        version: curVersion + 1,
-        updatedBy: requesterUsername,
-      })
-    : await shadowRepo.create({
-        values: {
-          organizationId,
-          ...(assetId != null ? { assetId } : {}),
-          assetEntityId,
-          desiredJson: nextDesired,
-          reportedJson: {},
-          lastDeltaJson: delta,
-          pendingCommandId: commandId,
-          commandStatus: 'dispatched',
-          lastDispatchedAt: now,
-          version: 1,
-          updatedBy: requesterUsername,
-        },
-      });
-
-  const rawSavedId = val(updated, 'id');
-  const shadowId = rawSavedId != null && /^[1-9]\d*$/.test(String(rawSavedId)) ? Number(rawSavedId) : null;
-
   let downlinkDispatched = false;
-  if (validatedDownlinkUrl) {
+  if (txResult.validatedDownlinkUrl) {
     const fetchImpl = opts.fetchImpl || globalThis.fetch;
     const edgeToken = String(opts.ingestToken !== undefined ? opts.ingestToken : (process.env.DX_IIOT_INGEST_TOKEN || '')).trim();
     if (typeof fetchImpl === 'function') {
       try {
-        const res = await fetchImpl(validatedDownlinkUrl, {
+        const res = await fetchImpl(txResult.validatedDownlinkUrl, {
           method: 'POST',
           redirect: 'error',
           signal: AbortSignal.timeout(3000),
@@ -580,10 +682,10 @@ async function requestDesiredSetpoint(db, opts = {}) {
             organizationId,
             ...(assetId != null ? { assetId } : {}),
             assetEntityId,
-            commandId,
-            desired: nextDesired,
+            commandId: txResult.commandId,
+            desired: txResult.nextDesired,
             desiredPatch,
-            issuedAt: now.toISOString(),
+            issuedAt: txResult.now.toISOString(),
           }),
         });
         if (res?.ok) {
@@ -597,31 +699,11 @@ async function requestDesiredSetpoint(db, opts = {}) {
     }
   }
 
-  await recordTwinLedgerSafely(db, {
-    organizationId,
-    eventType: 'iot.twin_desired_dispatched',
-    targetCollection: 'latticeTwinShadows',
-    targetRecordId: String(shadowId ?? assetEntityId),
-    actor: { userId: String(requesterUserId), username: requesterUsername },
-    payload: { assetEntityId, commandId, desiredPatch, downlinkDispatched },
-  });
-
-  await recordTwinLineageSafely(db, {
-    organizationId,
-    assetId,
-    shadowId,
-    assetEntityId,
-    commandId,
-    desiredPatch,
-    actorName: requesterUsername,
-    observedAt: now,
-  });
-
   return {
     gatedByHitl: false,
-    commandId,
+    commandId: txResult.commandId,
     downlinkDispatched,
-    shadow: serializeShadow(updated),
+    shadow: txResult.shadow,
   };
 }
 
@@ -679,72 +761,90 @@ async function ackCommandFromEdge(db, opts = {}) {
 
   const now = new Date();
   const actorName = String(opts.actorName || 'edge-gateway').slice(0, 120);
-  let shadowRow = await findShadowRow(shadowRepo, organizationId, assetEntityId);
 
-  if (!shadowRow) {
-    const delta = computeShadowDelta({}, reportedPatch);
-    const nextStatus = ackStatus === 'failed' ? 'failed' : 'synced';
-    const created = await shadowRepo.create({
-      values: {
-        organizationId,
+  return runInTwinTx(db, organizationId, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const shadowRow = await findShadowRow(shadowRepo, organizationId, assetEntityId, transaction);
+
+    if (!shadowRow) {
+      const delta = computeShadowDelta({}, reportedPatch);
+      const nextStatus = ackStatus === 'failed' ? 'failed' : 'synced';
+      const created = await shadowRepo.create({
+        values: {
+          organizationId,
+          ...(assetId != null ? { assetId } : {}),
+          assetEntityId,
+          desiredJson: {},
+          reportedJson: reportedPatch,
+          lastDeltaJson: delta,
+          pendingCommandId: null,
+          commandStatus: nextStatus,
+          lastAckedAt: now,
+          lastReportedAt: now,
+          version: 1,
+          updatedBy: actorName,
+        },
+        ...txOpt,
+      });
+      await recordTwinLedgerSafely(
+        db,
+        {
+          organizationId,
+          eventType: 'iot.twin_command_acked',
+          targetCollection: 'latticeTwinShadows',
+          targetRecordId: String(val(created, 'id') ?? assetEntityId),
+          actor: { userId: null, username: actorName },
+          payload: { assetEntityId, commandId: cleanCommandId, ackStatus, commandStatus: nextStatus, reportedPatch },
+        },
+        { transaction },
+      );
+      return serializeShadow(created);
+    }
+
+    const currentDesired = isPlainObject(val(shadowRow, 'desiredJson')) ? { ...val(shadowRow, 'desiredJson') } : {};
+    const currentReported = isPlainObject(val(shadowRow, 'reportedJson')) ? { ...val(shadowRow, 'reportedJson') } : {};
+    const nextReported = { ...currentReported, ...reportedPatch };
+    const delta = computeShadowDelta(currentDesired, nextReported);
+    const nextStatus = ackStatus === 'failed'
+      ? 'failed'
+      : (delta.inSync ? 'synced' : 'acked');
+
+    const curPending = val(shadowRow, 'pendingCommandId') ?? null;
+    const nextPending = cleanCommandId && curPending === cleanCommandId ? null : curPending;
+    const curVersion = Number(val(shadowRow, 'version')) || 1;
+
+    const updated = await updateShadowRow(
+      shadowRepo,
+      shadowRow,
+      {
         ...(assetId != null ? { assetId } : {}),
-        assetEntityId,
-        desiredJson: {},
-        reportedJson: reportedPatch,
+        reportedJson: nextReported,
         lastDeltaJson: delta,
-        pendingCommandId: null,
+        pendingCommandId: nextPending,
         commandStatus: nextStatus,
         lastAckedAt: now,
         lastReportedAt: now,
-        version: 1,
+        version: curVersion + 1,
         updatedBy: actorName,
       },
-    });
-    await recordTwinLedgerSafely(db, {
-      organizationId,
-      eventType: 'iot.twin_command_acked',
-      targetCollection: 'latticeTwinShadows',
-      targetRecordId: String(val(created, 'id') ?? assetEntityId),
-      actor: { userId: null, username: actorName },
-      payload: { assetEntityId, commandId: cleanCommandId, ackStatus, commandStatus: nextStatus, reportedPatch },
-    });
-    return serializeShadow(created);
-  }
+      { organizationId, transaction },
+    );
 
-  const currentDesired = isPlainObject(val(shadowRow, 'desiredJson')) ? { ...val(shadowRow, 'desiredJson') } : {};
-  const currentReported = isPlainObject(val(shadowRow, 'reportedJson')) ? { ...val(shadowRow, 'reportedJson') } : {};
-  const nextReported = { ...currentReported, ...reportedPatch };
-  const delta = computeShadowDelta(currentDesired, nextReported);
-  const nextStatus = ackStatus === 'failed'
-    ? 'failed'
-    : (delta.inSync ? 'synced' : 'acked');
+    await recordTwinLedgerSafely(
+      db,
+      {
+        organizationId,
+        eventType: 'iot.twin_command_acked',
+        targetCollection: 'latticeTwinShadows',
+        targetRecordId: String(val(updated, 'id') ?? assetEntityId),
+        actor: { userId: null, username: actorName },
+        payload: { assetEntityId, commandId: cleanCommandId, ackStatus, commandStatus: nextStatus, reportedPatch },
+      },
+      { transaction },
+    );
 
-  const curPending = val(shadowRow, 'pendingCommandId') ?? null;
-  const nextPending = cleanCommandId && curPending === cleanCommandId ? null : curPending;
-  const curVersion = Number(val(shadowRow, 'version')) || 1;
-
-  const updated = await updateShadowRow(shadowRepo, shadowRow, {
-    ...(assetId != null ? { assetId } : {}),
-    reportedJson: nextReported,
-    lastDeltaJson: delta,
-    pendingCommandId: nextPending,
-    commandStatus: nextStatus,
-    lastAckedAt: now,
-    lastReportedAt: now,
-    version: curVersion + 1,
-    updatedBy: actorName,
+    return serializeShadow(updated);
   });
-
-  await recordTwinLedgerSafely(db, {
-    organizationId,
-    eventType: 'iot.twin_command_acked',
-    targetCollection: 'latticeTwinShadows',
-    targetRecordId: String(val(updated, 'id') ?? assetEntityId),
-    actor: { userId: null, username: actorName },
-    payload: { assetEntityId, commandId: cleanCommandId, ackStatus, commandStatus: nextStatus, reportedPatch },
-  });
-
-  return serializeShadow(updated);
 }
 
 module.exports = {
