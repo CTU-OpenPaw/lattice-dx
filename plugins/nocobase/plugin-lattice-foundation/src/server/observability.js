@@ -10,6 +10,7 @@
 
 const { createHash, timingSafeEqual } = require('node:crypto');
 const { buildOpenApiSpec, buildAsyncApiSpec } = require('./openapi-spec');
+const { registerMobilePwaActions } = require('./mobile-pwa');
 
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 const HISTOGRAM_BUCKETS = Object.freeze([
@@ -492,6 +493,7 @@ function registerObservability(app, { env = process.env, registry = createMetric
   }
 
   const version = resolvePackageVersion();
+  const mobilePwaActions = registerMobilePwaActions({ version });
 
   app.resourceManager.define({
     name: 'dxos',
@@ -529,11 +531,12 @@ function registerObservability(app, { env = process.env, registry = createMetric
       },
       openapi: (ctx, next) => serveSpecDocument(ctx, next, buildOpenApiSpec, version),
       asyncapi: (ctx, next) => serveSpecDocument(ctx, next, buildAsyncApiSpec, version),
+      ...mobilePwaActions,
     },
   });
 
   if (typeof app?.acl?.allow === 'function') {
-    app.acl.allow('dxos', ['health', 'metrics', 'openapi', 'asyncapi'], 'public');
+    app.acl.allow('dxos', ['health', 'metrics', 'openapi', 'asyncapi', 'manifest', 'sw.js', 'sw'], 'public');
   }
 
   return { registry, middleware };

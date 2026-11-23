@@ -16,8 +16,15 @@
   'use strict';
   const actions = require('../client/actions');
   const {createWorkspaceApi} = require('../client/workspace-api');
+  const mobileFieldPwa = require('./mobile-field-pwa');
+  const {createMobileFieldPwaPage} = mobileFieldPwa;
   class LatticeFoundationClientV2 extends client.Plugin {
-    async load() {}
+    async load() {
+      const MobileFieldPwaPage = createMobileFieldPwaPage(client, React, this.app);
+      if (this.app?.router && typeof this.app.router.add === 'function') {
+        this.app.router.add('dxos-mobile-field', { path: '/mobile', Component: MobileFieldPwaPage });
+      }
+    }
   }
-  return {__esModule: true, default: LatticeFoundationClientV2, createWorkspaceApi, ...actions};
+  return {__esModule: true, default: LatticeFoundationClientV2, createWorkspaceApi, ...actions, ...mobileFieldPwa};
 });
