@@ -24,6 +24,8 @@ const DEFAULT_TOOL_NAMES = [
   'dxos_execute_record_action',
   'dxos_my_tasks_copilot',
   'dxos_orchestrate_enterprise_case',
+  'dxos_graph_impact_analysis',
+  'dxos_alarm_action',
 ];
 
 const DEFAULT_ROLE_OPTIONS = [
@@ -227,6 +229,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const [approvalStatusFilter, setApprovalStatusFilter] = React.useState('pending');
     const [approvalNotes, setApprovalNotes] = React.useState({});
     const [approvalBusyId, setApprovalBusyId] = React.useState(null);
+    const [triageScanning, setTriageScanning] = React.useState(false);
     const quotaReqSeqRef = typeof React.useRef === 'function'
       ? React.useRef(0)
       : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: 0 }), []) : { current: 0 });
@@ -390,6 +393,35 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Xử lý phê duyệt AI thất bại.' });
       } finally {
         setApprovalBusyId(null);
+      }
+    };
+
+    const handleTriageScan = async () => {
+      if (!api?.request || triageScanning) return;
+      setTriageScanning(true);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:triageScan',
+          method: 'post',
+          data: {},
+        });
+        const d = res?.data?.data || res?.data || {};
+        const scannedCount = Number(d.scannedCount || 0);
+        const proposalsCreated = Number(d.proposalsCreated || 0);
+        const deduplicatedSkipped = Number(d.deduplicatedSkipped || 0);
+        setNotice({
+          type: 'ok',
+          text: `Quét cảnh báo chủ động (${scannedCount} sự cố): tạo mới ${proposalsCreated} đề xuất HITL, bỏ qua ${deduplicatedSkipped} trùng lặp.`,
+        });
+        await loadApprovals(approvalStatusFilter);
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Quét cảnh báo chủ động thất bại.',
+        });
+      } finally {
+        setTriageScanning(false);
       }
     };
 
@@ -838,7 +870,14 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             h('div', { style: { fontSize: 12, color: '#64748b' } },
               `Hiển thị ${approvals.length} yêu cầu (${approvalStatusFilter})${approvalsLoading ? ' · Đang tải…' : ''}`),
           ),
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-ai-triage-scan-btn',
+              onClick: handleTriageScan,
+              disabled: triageScanning || approvalsLoading,
+              style: btnStyle(true, false),
+            }, triageScanning ? 'Đang quét cảnh báo…' : 'Quét Cảnh báo Chủ động (Proactive Triage)'),
             h('select', {
               'data-testid': 'dxos-hitl-status-filter',
               value: approvalStatusFilter,
@@ -854,7 +893,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             h('button', {
               type: 'button',
               onClick: () => loadApprovals(approvalStatusFilter),
-              disabled: approvalsLoading,
+              disabled: approvalsLoading || triageScanning,
               style: btnStyle(false),
             }, 'Tải lại hàng chờ'),
           ),
@@ -870,6 +909,9 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               const statusBg = item.status === 'executed' ? '#dcfce7' : item.status === 'pending' ? '#e0f2fe' : '#fee2e2';
               const statusFg = item.status === 'executed' ? '#166534' : item.status === 'pending' ? '#075985' : '#991b1b';
               const changes = Array.isArray(item.diffPreview?.changes) ? item.diffPreview.changes : [];
+              const diffSummary = typeof item.diffPreview?.summary === 'string' ? item.diffPreview.summary.trim() : '';
+              const affectedLots = Array.isArray(item.diffPreview?.affectedLots) ? item.diffPreview.affectedLots : [];
+              const downstreamOrders = Array.isArray(item.diffPreview?.downstreamOrders) ? item.diffPreview.downstreamOrders : [];
               const rowBusy = approvalBusyId === item.id;
               return h('div', {
                 key: item.id,
@@ -891,9 +933,36 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                   `Người yêu cầu: ${item.requesterUsername || `#${item.requesterUserId}`} · AI: ${item.aiEmployee || '—'} · Tổ chức: ${item.organizationId}`),
                 h('div', {
                   'data-testid': `dxos-hitl-diff-${item.id}`,
-                  style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff', fontSize: 12, display: 'grid', gap: 4 },
+                  style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff', fontSize: 12, display: 'grid', gap: 6 },
                 },
                   h('strong', { style: { fontSize: 11, color: '#334155', textTransform: 'uppercase' } }, 'Xem trước thay đổi (diffPreview)'),
+                  diffSummary ? h('div', {
+                    'data-testid': `dxos-hitl-summary-${item.id}`,
+                    style: { padding: '6px 8px', borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0', color: '#0f172a', fontSize: 12 },
+                  }, diffSummary) : null,
+                  (affectedLots.length || downstreamOrders.length) ? h('div', {
+                    'data-testid': `dxos-hitl-affected-lots-${item.id}`,
+                    style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
+                  },
+                    affectedLots.map((lot, idx) => {
+                      const label = typeof lot === 'string'
+                        ? lot
+                        : `${lot?.lotCode || lot?.code || `#${lot?.id || idx + 1}`}${lot?.sku ? ` (${lot.sku})` : ''}`;
+                      return h('span', {
+                        key: `lot-${lot?.id ?? lot?.lotCode ?? idx}`,
+                        style: badgeStyle('#fef3c7', '#92400e'),
+                      }, `Lô: ${label}`);
+                    }),
+                    downstreamOrders.map((ord, idx) => {
+                      const label = typeof ord === 'string'
+                        ? ord
+                        : (ord?.orderCode || ord?.code || `#${ord?.orderId || idx + 1}`);
+                      return h('span', {
+                        key: `ord-${ord?.orderId ?? ord?.orderCode ?? idx}`,
+                        style: badgeStyle('#e0f2fe', '#075985'),
+                      }, `Đơn: ${label}`);
+                    }),
+                  ) : null,
                   changes.length
                     ? changes.map((ch) => h('div', {
                       key: ch.field,
@@ -942,6 +1011,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
 }
 
 module.exports = {
+  DEFAULT_TOOL_NAMES,
   MODEL_PRESETS,
   createDxosAiStudioPage,
   buildProfileDraftFromStarter,

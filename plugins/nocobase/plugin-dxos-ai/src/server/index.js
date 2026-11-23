@@ -16,6 +16,7 @@ const { createItOtMcpTools } = require('./mcp-itot-tools');
 const { createMcpGatewayMiddleware } = require('./mcp-gateway');
 const { createDxosAiActions } = require('./ai-resource');
 const { attachAppPubSub } = require('./surface-events');
+const { startProactiveTriageScheduler } = require('./proactive-triage');
 
 class DxosAiPlugin extends Plugin {
   async load() {
@@ -115,6 +116,14 @@ class DxosAiPlugin extends Plugin {
     this.app.acl.allow('dxosAi', 'listApprovals', 'loggedIn');
     this.app.acl.allow('dxosAi', 'approveAction', 'loggedIn');
     this.app.acl.allow('dxosAi', 'rejectAction', 'loggedIn');
+    this.app.acl.allow('dxosAi', 'triageScan', 'loggedIn');
+
+    this._triageScheduler = startProactiveTriageScheduler(this.db, { env: process.env });
+  }
+
+  async unload() {
+    this._triageScheduler?.stop?.();
+    this._triageScheduler = null;
   }
 }
 

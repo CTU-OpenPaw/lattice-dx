@@ -225,7 +225,7 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   await actions.listProfiles(listCtx, async () => {});
   assert.equal(listCtx.body.profiles.length, 7);
   assert.ok(Array.isArray(listCtx.body.catalog.availableTools));
-  assert.equal(listCtx.body.catalog.availableTools.length, 15);
+  assert.equal(listCtx.body.catalog.availableTools.length, 17);
 
   const auditCtx = adminCtx({});
   await actions.auditLogs(auditCtx, async () => {});
@@ -329,7 +329,8 @@ test('createDxosAiStudioPage renders 4-tab studio UI & helper utilities, and plu
     assert.ok(registered.snippets.includes('pm.dxosAi'));
     assert.ok(registered.allowed.includes('dxosAi:portalCopilot:loggedIn'));
     assert.ok(registered.allowed.includes('dxosAi:pageSurfaceState:loggedIn'));
-    assert.equal(registered.tools.length, 15);
+    assert.ok(registered.allowed.includes('dxosAi:triageScan:loggedIn'));
+    assert.equal(registered.tools.length, 17);
 
     const ClientPluginMod = require(path.join(PLUGIN_ROOT, 'src/client/index.js'));
     const clientUsedProviders = [];
@@ -1052,7 +1053,10 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
 });
 
 test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk badge, reason validation, and approve/reject actions', async () => {
-  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const { createDxosAiStudioPage, DEFAULT_TOOL_NAMES } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  assert.equal(DEFAULT_TOOL_NAMES.length, 17);
+  assert.equal(DEFAULT_TOOL_NAMES.includes('dxos_graph_impact_analysis'), true);
+  assert.equal(DEFAULT_TOOL_NAMES.includes('dxos_alarm_action'), true);
 
   const findAll = (node, pred, acc = []) => {
     if (!node || typeof node !== 'object') return acc;
@@ -1083,6 +1087,8 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
       riskLevel: 'high',
       status: 'pending',
       diffPreview: {
+        summary: 'Tăng mức ưu tiên phiếu xử lý máy nén A1',
+        affectedLots: [{ id: 301, lotCode: 'LOT-VAC-301', sku: 'VAC-01' }],
         before: { priority: 'low' },
         after: { priority: 'critical' },
         changes: [{ field: 'priority', before: 'low', after: 'critical' }],
@@ -1111,6 +1117,7 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
     request: async (req) => {
       apiCalls.push(req);
       if (req.url === 'dxosAi:listApprovals') return { data: { data: { items: pendingItems } } };
+      if (req.url === 'dxosAi:triageScan') return { data: { data: { scannedCount: 2, proposalsCreated: 1, deduplicatedSkipped: 1 } } };
       if (req.url === 'dxosAi:approveAction') return { data: { data: { id: req.data.approvalId, status: 'executed' } } };
       if (req.url === 'dxosAi:rejectAction') return { data: { data: { id: req.data.approvalId, status: 'rejected' } } };
       return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
@@ -1165,6 +1172,18 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
   assert.equal(dump.includes('latticeServiceTickets'), true);
   assert.equal(dump.includes('critical'), true);
   assert.equal(dump.includes('high'), true);
+  assert.equal(dump.includes('Tăng mức ưu tiên phiếu xử lý máy nén A1'), true);
+  assert.equal(dump.includes('LOT-VAC-301 (VAC-01)'), true);
+
+  // Trigger Proactive Triage Scan button -> calls POST dxosAi:triageScan and reloads approvals queue
+  const triageBtn = findAll(tree, (n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-ai-triage-scan-btn')[0];
+  assert.ok(triageBtn, 'Proactive Triage Scan button must render inside Tab 6');
+  const listCallsBefore = apiCalls.filter((c) => c.url === 'dxosAi:listApprovals').length;
+  await triageBtn.props.onClick();
+  tree = render();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:triageScan' && c.method === 'post'), true);
+  assert.equal(apiCalls.filter((c) => c.url === 'dxosAi:listApprovals').length > listCallsBefore, true);
+  assert.equal(JSON.stringify(tree).includes('tạo mới 1 đề xuất HITL, bỏ qua 1 trùng lặp'), true);
 
   // Reject without >= 3 chars note shows validation notice without calling rejectAction
   const rejectBtn402 = findAll(tree, (n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-hitl-reject-402')[0];
