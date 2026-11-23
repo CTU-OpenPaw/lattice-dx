@@ -32,6 +32,7 @@ const {
   createDxosTools,
 } = require('./ai-tools-core');
 const {
+  HITL_APPROVER_ROLES,
   isRootActor,
   isHitlApprover,
   listApprovals,
@@ -141,7 +142,171 @@ function validateFallbackDesiredPatch(rawPatch) {
   return clean;
 }
 
-async function executeTwinSetpointApproval(targetDb, actor, row, rawArgs) {
+function parseOptionalPositiveInt(raw, fieldName = 'id') {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw === 'string' && raw.trim() === '') return null;
+  if (typeof raw === 'boolean' || typeof raw === 'object') {
+    throw failTool('HITL_ARGS_MISMATCH', 409, `${fieldName} trong proposedArgs không hợp lệ.`);
+  }
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (!/^[1-9]\d{0,18}$/.test(trimmed)) {
+      throw failTool('HITL_ARGS_MISMATCH', 409, `${fieldName} trong proposedArgs phải là số nguyên dương.`);
+    }
+    const n = Number(trimmed);
+    if (!Number.isSafeInteger(n) || n <= 0) {
+      throw failTool('HITL_ARGS_MISMATCH', 409, `${fieldName} trong proposedArgs vượt quá giới hạn số nguyên hợp lệ.`);
+    }
+    return n;
+  }
+  if (typeof raw === 'number') {
+    if (!Number.isSafeInteger(raw) || raw <= 0) {
+      throw failTool('HITL_ARGS_MISMATCH', 409, `${fieldName} trong proposedArgs phải là số nguyên dương.`);
+    }
+    return raw;
+  }
+  throw failTool('HITL_ARGS_MISMATCH', 409, `${fieldName} trong proposedArgs không hợp lệ.`);
+}
+
+function isAdminRoleRecord(role) {
+  if (!role) return false;
+  if (val(role, 'allowAll') === true || val(role, 'allowConfigure') === true) return true;
+  const snippets = val(role, 'snippets');
+  if (Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*') || snippets.includes('*'))) {
+    return true;
+  }
+  const strategyActions = val(role, 'strategy')?.actions || [];
+  return Array.isArray(strategyActions) && strategyActions.some((a) => {
+    const actName = typeof a === 'string' ? a : (val(a, 'name') || a?.name);
+    return actName === 'update' || actName === '*' || actName === '*:*';
+  });
+}
+
+async function assertApproverCollectionUpdateAcl(targetDb, ctx, actor, collections) {
+  const cols = (Array.isArray(collections) ? collections : [collections])
+    .map((c) => String(c || '').trim())
+    .filter(Boolean);
+  if (!cols.length) {
+    throw failTool('DXOS_ACL_DENIED', 403, 'Không xác định được collection đích để kiểm tra phân quyền.');
+  }
+
+  if (typeof ctx?.can === 'function') {
+    const allowed = cols.some((c) => Boolean(ctx.can({ resource: c, action: 'update' })));
+    if (!allowed) {
+      throw failTool('DXOS_ACL_DENIED', 403, `Vai trò hiện tại không có quyền cập nhật (update) trên ${cols.join(', ')}.`);
+    }
+    return true;
+  }
+
+  if (actor?.isAdmin || isRootActor(actor)) {
+    return true;
+  }
+
+  const roleNames = Array.isArray(actor?.roleNames)
+    ? actor.roleNames.map((r) => String(r || '').trim()).filter(Boolean)
+    : [];
+  if (!roleNames.length) {
+    throw failTool('DXOS_ACL_DENIED', 403, `Tài khoản thiếu vai trò hợp lệ để cập nhật ${cols.join(', ')}.`);
+  }
+
+  const rolesRepo = targetDb?.getRepository?.('roles');
+  if (rolesRepo) {
+    let roleRows = [];
+    if (typeof rolesRepo.find === 'function') {
+      roleRows = (await rolesRepo.find({ filter: { name: { $in: roleNames } }, limit: 100 })) || [];
+    } else if (typeof rolesRepo.findOne === 'function') {
+      for (const rName of roleNames) {
+        const r = await rolesRepo.findOne({ filter: { name: rName } });
+        if (r) roleRows.push(r);
+      }
+    }
+    const matchedAdminOrStrategy = roleRows.some((r) => {
+      const rName = val(r, 'name');
+      if (rName && !roleNames.includes(rName)) return false;
+      return isAdminRoleRecord(r);
+    });
+    if (matchedAdminOrStrategy) return true;
+  }
+
+  const resRepo = targetDb?.getRepository?.('dataSourcesRolesResources');
+  if (resRepo) {
+    let resRows = [];
+    if (typeof resRepo.find === 'function') {
+      resRows = (await resRepo.find({
+        filter: { roleName: { $in: roleNames }, name: { $in: cols }, dataSourceKey: 'main' },
+        appends: ['actions'],
+        limit: 250,
+      })) || [];
+    } else if (typeof resRepo.findOne === 'function') {
+      for (const rName of roleNames) {
+        for (const col of cols) {
+          const row = await resRepo.findOne({
+            filter: { roleName: rName, name: col, dataSourceKey: 'main' },
+            appends: ['actions'],
+          });
+          if (row) resRows.push(row);
+        }
+      }
+    }
+    const roleSet = new Set(roleNames);
+    const colSet = new Set(cols);
+    const hasUpdateGrant = resRows.some((r) => {
+      if (!roleSet.has(val(r, 'roleName'))) return false;
+      if (!colSet.has(val(r, 'name'))) return false;
+      const dsKey = val(r, 'dataSourceKey');
+      if (dsKey != null && dsKey !== 'main') return false;
+      if (val(r, 'usingActionsConfig') === false) return true;
+      const actions = val(r, 'actions') || [];
+      return Array.isArray(actions) && actions.some((a) => {
+        const actName = typeof a === 'string' ? a : (val(a, 'name') || a?.name);
+        return actName === 'update' || actName === '*' || actName === '*:*';
+      });
+    });
+    if (hasUpdateGrant) return true;
+  }
+
+  throw failTool('DXOS_ACL_DENIED', 403, `Vai trò hiện tại không có quyền cập nhật (update) trên ${cols.join(', ')}.`);
+}
+
+async function runInOptionalTx(targetDb, fn) {
+  if (typeof targetDb?.sequelize?.transaction === 'function') {
+    return targetDb.sequelize.transaction(async (transaction) => fn(transaction || null));
+  }
+  return fn(null);
+}
+
+function computeFallbackShadowDelta(desired = {}, reported = {}) {
+  const desObj = desired && typeof desired === 'object' && !Array.isArray(desired) ? desired : {};
+  const repObj = reported && typeof reported === 'object' && !Array.isArray(reported) ? reported : {};
+  const fields = {};
+  let inSync = true;
+  for (const key of Object.keys(desObj).sort()) {
+    const desVal = desObj[key];
+    const hasDirectRep = Object.hasOwn(repObj, key) && repObj[key] !== undefined;
+    const hasTempFallback = !hasDirectRep && key === 'targetTempC'
+      && (repObj.temperature !== undefined || repObj.tempC !== undefined);
+    const repVal = hasDirectRep
+      ? repObj[key]
+      : (hasTempFallback ? (repObj.temperature ?? repObj.tempC) : null);
+    const matched = (hasDirectRep || hasTempFallback)
+      && (desVal === repVal || (Object.is(desVal, -0) && Object.is(repVal, 0)));
+    if (matched) continue;
+    inSync = false;
+    const numericDelta = typeof desVal === 'number' && Number.isFinite(desVal)
+      && typeof repVal === 'number' && Number.isFinite(repVal)
+      ? Number((desVal - repVal).toFixed(4))
+      : null;
+    fields[key] = {
+      desired: desVal,
+      reported: repVal,
+      numericDelta: Object.is(numericDelta, -0) ? 0 : numericDelta,
+    };
+  }
+  return { inSync, fields };
+}
+
+async function executeTwinSetpointApproval(targetDb, ctx, actor, row, rawArgs) {
+  await assertApproverCollectionUpdateAcl(targetDb, ctx, actor, ['latticeAssets', 'latticeTwinShadows']);
   if (row.targetCollection && String(row.targetCollection).trim() !== 'latticeTwinShadows') {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'targetCollection không khớp công cụ dxos_twin_set_desired.');
   }
@@ -150,24 +315,33 @@ async function executeTwinSetpointApproval(targetDb, actor, row, rawArgs) {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'desiredPatch của yêu cầu Digital Twin không hợp lệ.');
   }
 
-  let assetId = rawArgs.assetId != null && String(rawArgs.assetId).trim() !== '' ? Number(rawArgs.assetId) : null;
+  let assetId = parseOptionalPositiveInt(rawArgs.assetId, 'assetId');
   let assetEntityId = typeof rawArgs.assetEntityId === 'string' ? rawArgs.assetEntityId.trim() : '';
+  const targetShadowId = parseOptionalPositiveInt(row.targetRecordId, 'targetRecordId');
 
   const shadowRepo = targetDb?.getRepository?.('latticeTwinShadows');
   let existingShadow = null;
-  if (row.targetRecordId != null && shadowRepo && typeof shadowRepo.findOne === 'function') {
-    existingShadow = await shadowRepo.findOne({ filterByTk: Number(row.targetRecordId) });
-    if (existingShadow) {
-      if (val(existingShadow, 'organizationId') !== row.organizationId) {
-        throw failTool('DXOS_ORG_MISMATCH', 403, 'Shadow không thuộc phạm vi tổ chức.');
-      }
-      const shadowEntity = String(val(existingShadow, 'assetEntityId') || '').trim();
-      if (assetEntityId && shadowEntity && shadowEntity !== assetEntityId) {
-        throw failTool('HITL_ARGS_MISMATCH', 409, 'assetEntityId không khớp bản ghi latticeTwinShadows.');
-      }
-      if (!assetEntityId && shadowEntity) assetEntityId = shadowEntity;
-      if (assetId == null && val(existingShadow, 'assetId') != null) assetId = Number(val(existingShadow, 'assetId'));
+  if (targetShadowId != null) {
+    if (!shadowRepo || typeof shadowRepo.findOne !== 'function') {
+      throw failTool('TWIN_REPO_UNAVAILABLE', 503, 'Kho Digital Twin shadow chưa sẵn sàng.');
     }
+    existingShadow = await shadowRepo.findOne({ filterByTk: targetShadowId });
+    if (!existingShadow) {
+      throw failTool('SHADOW_NOT_FOUND', 404, 'Không tìm thấy bản ghi Digital Twin shadow.');
+    }
+    if (val(existingShadow, 'organizationId') !== row.organizationId) {
+      throw failTool('DXOS_ORG_MISMATCH', 403, 'Shadow không thuộc phạm vi tổ chức.');
+    }
+    const shadowEntity = String(val(existingShadow, 'assetEntityId') || '').trim();
+    if (assetEntityId && shadowEntity && shadowEntity !== assetEntityId) {
+      throw failTool('HITL_ARGS_MISMATCH', 409, 'assetEntityId không khớp bản ghi latticeTwinShadows.');
+    }
+    const shadowAssetId = parseOptionalPositiveInt(val(existingShadow, 'assetId'), 'shadow.assetId');
+    if (assetId != null && shadowAssetId != null && assetId !== shadowAssetId) {
+      throw failTool('HITL_ARGS_MISMATCH', 409, 'assetId không khớp bản ghi latticeTwinShadows.');
+    }
+    if (!assetEntityId && shadowEntity) assetEntityId = shadowEntity;
+    if (assetId == null && shadowAssetId != null) assetId = shadowAssetId;
   }
 
   if (!assetEntityId && assetId == null) {
@@ -176,6 +350,9 @@ async function executeTwinSetpointApproval(targetDb, actor, row, rawArgs) {
   const urnMatch = assetEntityId ? TWIN_URN_RE.exec(assetEntityId) : null;
   if (urnMatch && urnMatch[1] !== row.organizationId) {
     throw failTool('DXOS_ORG_MISMATCH', 403, 'assetEntityId không thuộc phạm vi tổ chức của hàng chờ HITL.');
+  }
+  if (urnMatch && assetId != null && Number(urnMatch[2]) !== assetId) {
+    throw failTool('HITL_ARGS_MISMATCH', 409, 'assetId không khớp URN assetEntityId.');
   }
 
   const twinMod = loadCrossPluginModule(resolveCrossPluginCandidates('plugin-dxos-blocks', 'digital-twin'));
@@ -196,70 +373,98 @@ async function executeTwinSetpointApproval(targetDb, actor, row, rawArgs) {
   }
   const cleanPatch = validateFallbackDesiredPatch(desiredPatch);
   const resolvedEntityId = assetEntityId || `urn:ngsi-ld:Asset:${row.organizationId}:native:${assetId}`;
-  if (!existingShadow && typeof shadowRepo.findOne === 'function') {
-    existingShadow = await shadowRepo.findOne({ filter: { organizationId: row.organizationId, assetEntityId: resolvedEntityId } });
-  }
-  const commandId = `cmd-${randomBytes(8).toString('hex')}`;
-  const now = new Date();
-  if (existingShadow) {
-    const prevDesired = val(existingShadow, 'desiredJson') && typeof val(existingShadow, 'desiredJson') === 'object' ? val(existingShadow, 'desiredJson') : {};
-    const nextDesired = { ...prevDesired, ...cleanPatch };
-    const nextVersion = (Number(val(existingShadow, 'version')) || 1) + 1;
-    const patch = {
-      desiredJson: nextDesired,
-      pendingCommandId: commandId,
-      commandStatus: 'dispatched',
-      lastDispatchedAt: now,
-      version: nextVersion,
-      updatedBy: actor.username,
-    };
-    if (typeof existingShadow.update === 'function') {
-      await existingShadow.update(patch);
-    } else if (typeof shadowRepo.update === 'function') {
-      await shadowRepo.update({ filterByTk: val(existingShadow, 'id'), filter: { organizationId: row.organizationId }, values: patch });
+
+  return runInOptionalTx(targetDb, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    let targetShadow = existingShadow;
+    if (!targetShadow && typeof shadowRepo.findOne === 'function') {
+      targetShadow = await shadowRepo.findOne({
+        filter: { organizationId: row.organizationId, assetEntityId: resolvedEntityId },
+        ...txOpt,
+      });
+      if (targetShadow && val(targetShadow, 'organizationId') !== row.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Shadow không thuộc phạm vi tổ chức.');
+      }
     }
-    return { gatedByHitl: false, fallback: true, commandId, desiredJson: nextDesired };
-  }
+    const commandId = `cmd-${randomBytes(8).toString('hex')}`;
+    const now = new Date();
+    if (targetShadow) {
+      const prevDesired = val(targetShadow, 'desiredJson') && typeof val(targetShadow, 'desiredJson') === 'object'
+        ? val(targetShadow, 'desiredJson')
+        : {};
+      const nextDesired = { ...prevDesired, ...cleanPatch };
+      if (
+        nextDesired.minTempC !== undefined
+        && nextDesired.maxTempC !== undefined
+        && Number(nextDesired.minTempC) > Number(nextDesired.maxTempC)
+      ) {
+        throw failTool('TWIN_DESIRED_INVALID', 400, 'minTempC không được lớn hơn maxTempC.');
+      }
+      const reportedJson = val(targetShadow, 'reportedJson') && typeof val(targetShadow, 'reportedJson') === 'object'
+        ? val(targetShadow, 'reportedJson')
+        : {};
+      const lastDeltaJson = computeFallbackShadowDelta(nextDesired, reportedJson);
+      const nextVersion = (Number(val(targetShadow, 'version')) || 1) + 1;
+      const patch = {
+        desiredJson: nextDesired,
+        lastDeltaJson,
+        pendingCommandId: commandId,
+        commandStatus: 'dispatched',
+        lastDispatchedAt: now,
+        version: nextVersion,
+        updatedBy: actor.username,
+      };
+      if (typeof targetShadow.update === 'function') {
+        await targetShadow.update(patch, txOpt);
+      } else if (typeof shadowRepo.update === 'function') {
+        await shadowRepo.update({
+          filterByTk: val(targetShadow, 'id'),
+          filter: { organizationId: row.organizationId },
+          values: patch,
+          ...txOpt,
+        });
+      }
+      return { gatedByHitl: false, fallback: true, commandId, desiredJson: nextDesired, lastDeltaJson };
+    }
 
-  if (typeof shadowRepo.create !== 'function') {
-    throw failTool('TWIN_REPO_UNAVAILABLE', 503, 'Kho Digital Twin shadow chưa hỗ trợ tạo mới.');
-  }
-  const created = await shadowRepo.create({
-    values: {
-      organizationId: row.organizationId,
-      ...(assetId != null ? { assetId } : {}),
-      assetEntityId: resolvedEntityId,
+    if (typeof shadowRepo.create !== 'function') {
+      throw failTool('TWIN_REPO_UNAVAILABLE', 503, 'Kho Digital Twin shadow chưa hỗ trợ tạo mới.');
+    }
+    const lastDeltaJson = computeFallbackShadowDelta(cleanPatch, {});
+    const created = await shadowRepo.create({
+      values: {
+        organizationId: row.organizationId,
+        ...(assetId != null ? { assetId } : {}),
+        assetEntityId: resolvedEntityId,
+        desiredJson: cleanPatch,
+        reportedJson: {},
+        lastDeltaJson,
+        pendingCommandId: commandId,
+        commandStatus: 'dispatched',
+        lastDispatchedAt: now,
+        version: 1,
+        updatedBy: actor.username,
+      },
+      ...txOpt,
+    });
+    return {
+      gatedByHitl: false,
+      fallback: true,
+      commandId,
+      shadowId: val(created, 'id') ?? null,
       desiredJson: cleanPatch,
-      reportedJson: {},
-      lastDeltaJson: {},
-      pendingCommandId: commandId,
-      commandStatus: 'dispatched',
-      lastDispatchedAt: now,
-      version: 1,
-      updatedBy: actor.username,
-    },
+      lastDeltaJson,
+    };
   });
-  return { gatedByHitl: false, fallback: true, commandId, shadowId: val(created, 'id') ?? null, desiredJson: cleanPatch };
-}
-
-async function hasExplicitWmsPolicies(targetDb, roleNames) {
-  const resRepo = targetDb?.getRepository?.('dataSourcesRolesResources');
-  if (!resRepo || typeof resRepo.find !== 'function' || !Array.isArray(roleNames) || !roleNames.length) {
-    return false;
-  }
-  const rows = (await resRepo.find({
-    filter: { name: { $in: ['latticeStockLots', 'latticeOrders', 'latticeAssets'] }, dataSourceKey: 'main' },
-    limit: 50,
-  })) || [];
-  return rows.some((r) => roleNames.includes(val(r, 'roleName')));
 }
 
 async function executeWmsHoldLotApproval(targetDb, ctx, actor, row, rawArgs) {
+  await assertApproverCollectionUpdateAcl(targetDb, ctx, actor, ['latticeStockLots', 'latticeOrders', 'latticeAssets']);
   if (row.targetCollection && String(row.targetCollection).trim() !== 'latticeStockLots') {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'targetCollection không khớp công cụ dxos_wms_hold_lot.');
   }
-  const argsLotId = rawArgs.lotId != null && String(rawArgs.lotId).trim() !== '' ? Number(rawArgs.lotId) : null;
-  const rowRecId = row.targetRecordId != null ? Number(row.targetRecordId) : null;
+  const argsLotId = parseOptionalPositiveInt(rawArgs.lotId, 'lotId');
+  const rowRecId = parseOptionalPositiveInt(row.targetRecordId, 'targetRecordId');
   if (rowRecId != null && argsLotId != null && argsLotId !== rowRecId) {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'lotId trong proposedArgs không khớp targetRecordId.');
   }
@@ -269,36 +474,38 @@ async function executeWmsHoldLotApproval(targetDb, ctx, actor, row, rawArgs) {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'Thiếu lotId hoặc lotCode trong proposedArgs.');
   }
 
-  const wmsMod = loadCrossPluginModule(resolveCrossPluginCandidates('plugin-dxos-studio', 'wms-engine'));
-  if (wmsMod && typeof wmsMod.holdLotByMkt === 'function') {
-    return wmsMod.holdLotByMkt(targetDb, {
-      organizationId: row.organizationId,
-      actor: { ...actor, organizationId: row.organizationId },
-      lotId,
-      lotCode: lotCode || undefined,
-      maxAllowedC: rawArgs.maxAllowedC,
-      samplesC: rawArgs.samplesC,
-      forceHold: rawArgs.forceHold !== undefined
-        ? Boolean(rawArgs.forceHold)
-        : (!Array.isArray(rawArgs.samplesC) || !rawArgs.samplesC.length),
-      reason: rawArgs.reason || `HITL approved hold (#${row.id})`,
-      hitlApproved: true,
-    });
+  const lotRepo = targetDb?.getRepository?.('latticeStockLots');
+  if (lotId != null && lotCode && lotRepo && typeof lotRepo.findOne === 'function') {
+    const existingLot = await lotRepo.findOne({ filter: { organizationId: row.organizationId, id: lotId } });
+    if (!existingLot || val(existingLot, 'organizationId') !== row.organizationId) {
+      throw failTool('WMS_LOT_NOT_FOUND', 404, 'Không tìm thấy lô hàng trong phạm vi tổ chức.');
+    }
+    if (val(existingLot, 'lotCode') !== lotCode) {
+      throw failTool('HITL_ARGS_MISMATCH', 409, 'lotCode không khớp bản ghi lô hàng.');
+    }
   }
+
+  const wmsMod = loadCrossPluginModule(resolveCrossPluginCandidates('plugin-dxos-studio', 'wms-engine'));
   if (wmsMod && typeof wmsMod.createDxosWmsActions === 'function') {
     const wmsActions = wmsMod.createDxosWmsActions(targetDb);
     if (typeof wmsActions?.holdLotByMkt === 'function') {
-      const explicitPolicies = await hasExplicitWmsPolicies(targetDb, actor.roleNames);
+      const stateRole = String(ctx?.state?.currentRole || '').trim();
+      const roleNames = Array.isArray(actor.roleNames) ? actor.roleNames : [];
+      const resolvedCurrentRole = actor.isRoot
+        ? 'root'
+        : (stateRole && roleNames.includes(stateRole)
+          ? stateRole
+          : (roleNames.find((r) => HITL_APPROVER_ROLES.has(r)) || roleNames[0] || ''));
       const subCtx = {
         app: ctx.app,
         db: targetDb,
         method: 'POST',
-        can: typeof ctx?.can === 'function' ? ctx.can : (!explicitPolicies ? () => isHitlApprover(actor) : undefined),
+        can: typeof ctx?.can === 'function' ? ctx.can : undefined,
         state: {
           ...(ctx.state || {}),
           currentUser: { id: actor.userId, username: actor.username },
-          currentRoles: actor.roleNames || [],
-          currentRole: actor.isRoot ? 'root' : (actor.roleNames?.[0] || ''),
+          currentRoles: roleNames,
+          currentRole: resolvedCurrentRole,
           dxosApprovedQueueId: row.id,
         },
         action: {
@@ -323,37 +530,40 @@ async function executeWmsHoldLotApproval(targetDb, ctx, actor, row, rawArgs) {
     }
   }
 
-  const lotRepo = targetDb?.getRepository?.('latticeStockLots');
   if (!lotRepo) throw failTool('WMS_REPO_UNAVAILABLE', 503, 'Kho lô hàng (latticeStockLots) chưa sẵn sàng.');
-  const filter = lotId != null ? { organizationId: row.organizationId, id: lotId } : { organizationId: row.organizationId, lotCode };
-  const lot = typeof lotRepo.findOne === 'function' ? await lotRepo.findOne({ filter }) : null;
-  if (!lot || val(lot, 'organizationId') !== row.organizationId) {
-    throw failTool('WMS_LOT_NOT_FOUND', 404, 'Không tìm thấy lô hàng trong phạm vi tổ chức.');
-  }
-  if (lotCode && val(lot, 'lotCode') && val(lot, 'lotCode') !== lotCode) {
-    throw failTool('HITL_ARGS_MISMATCH', 409, 'lotCode không khớp bản ghi lô hàng.');
-  }
-  const patch = {
-    status: 'hold_mkt',
-    holdReason: String(rawArgs.reason || `HITL approved hold (#${row.id})`).slice(0, 255),
-    heldAt: new Date(),
-    heldBy: actor.username,
-  };
-  if (typeof lot.update === 'function') {
-    await lot.update(patch);
-  } else if (typeof lotRepo.update === 'function') {
-    await lotRepo.update({ filterByTk: val(lot, 'id'), filter: { organizationId: row.organizationId }, values: patch });
-  }
-  return {
-    held: true,
-    fallback: true,
-    lotId: val(lot, 'id') ?? lotId,
-    lotCode: val(lot, 'lotCode') || lotCode,
-    lotStatus: 'hold_mkt',
-  };
+  return runInOptionalTx(targetDb, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const filter = lotId != null ? { organizationId: row.organizationId, id: lotId } : { organizationId: row.organizationId, lotCode };
+    const lot = typeof lotRepo.findOne === 'function' ? await lotRepo.findOne({ filter, ...txOpt }) : null;
+    if (!lot || val(lot, 'organizationId') !== row.organizationId) {
+      throw failTool('WMS_LOT_NOT_FOUND', 404, 'Không tìm thấy lô hàng trong phạm vi tổ chức.');
+    }
+    if (lotCode && val(lot, 'lotCode') !== lotCode) {
+      throw failTool('HITL_ARGS_MISMATCH', 409, 'lotCode không khớp bản ghi lô hàng.');
+    }
+    const patch = {
+      status: 'hold_mkt',
+      holdReason: String(rawArgs.reason || `HITL approved hold (#${row.id})`).slice(0, 255),
+      heldAt: new Date(),
+      heldBy: actor.username,
+    };
+    if (typeof lot.update === 'function') {
+      await lot.update(patch, txOpt);
+    } else if (typeof lotRepo.update === 'function') {
+      await lotRepo.update({ filterByTk: val(lot, 'id'), filter: { organizationId: row.organizationId }, values: patch, ...txOpt });
+    }
+    return {
+      held: true,
+      fallback: true,
+      lotId: val(lot, 'id') ?? lotId,
+      lotCode: val(lot, 'lotCode') || lotCode,
+      lotStatus: 'hold_mkt',
+    };
+  });
 }
 
-async function executeAlarmActionApproval(targetDb, actor, row, rawArgs) {
+async function executeAlarmActionApproval(targetDb, ctx, actor, row, rawArgs) {
+  await assertApproverCollectionUpdateAcl(targetDb, ctx, actor, ['latticeIncidentCases']);
   if (row.targetCollection && String(row.targetCollection).trim() !== 'latticeIncidentCases') {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'targetCollection không khớp công cụ dxos_alarm_action.');
   }
@@ -361,8 +571,8 @@ async function executeAlarmActionApproval(targetDb, actor, row, rawArgs) {
   if (actionOp !== 'ack' && actionOp !== 'clear') {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'action của dxos_alarm_action phải là ack hoặc clear.');
   }
-  const argsAlarmId = rawArgs.alarmId != null && String(rawArgs.alarmId).trim() !== '' ? Number(rawArgs.alarmId) : null;
-  const rowRecId = row.targetRecordId != null ? Number(row.targetRecordId) : null;
+  const argsAlarmId = parseOptionalPositiveInt(rawArgs.alarmId, 'alarmId');
+  const rowRecId = parseOptionalPositiveInt(row.targetRecordId, 'targetRecordId');
   if (rowRecId != null && argsAlarmId != null && argsAlarmId !== rowRecId) {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'alarmId trong proposedArgs không khớp targetRecordId.');
   }
@@ -380,7 +590,7 @@ async function executeAlarmActionApproval(targetDb, actor, row, rawArgs) {
   if (!alarmRow || val(alarmRow, 'organizationId') !== row.organizationId) {
     throw failTool('ALARM_NOT_FOUND', 404, 'Không tìm thấy cảnh báo trong phạm vi tổ chức.');
   }
-  if (alarmCode && val(alarmRow, 'code') && val(alarmRow, 'code') !== alarmCode) {
+  if (alarmCode && val(alarmRow, 'code') !== alarmCode) {
     throw failTool('HITL_ARGS_MISMATCH', 409, 'alarmCode không khớp bản ghi cảnh báo.');
   }
 
@@ -405,35 +615,45 @@ async function executeAlarmActionApproval(targetDb, actor, row, rawArgs) {
     }
   }
 
-  const curStatus = String(val(alarmRow, 'status') || 'open').toLowerCase();
-  if (curStatus === 'closed' || curStatus === 'cleared') {
-    throw failTool('ALARM_ALREADY_CLEARED', 409, 'Cảnh báo đã được đóng trước đó.');
-  }
-  const now = new Date();
-  const patch = actionOp === 'clear'
-    ? {
-        status: 'closed',
-        clearedAt: now,
-        clearedBy: String(actor.username || 'operator').slice(0, 120),
-        closeNote: (note || `Đã đóng cảnh báo bởi ${actor.username}`).slice(0, 255),
-      }
-    : {
-        status: 'acknowledged',
-        acknowledgedAt: val(alarmRow, 'acknowledgedAt') || now,
-        acknowledgedBy: String(actor.username || 'operator').slice(0, 120),
-        ...(note ? { resolutionNote: note.slice(0, 255) } : {}),
-      };
-  if (typeof alarmRow.update === 'function') {
-    await alarmRow.update(patch);
-  } else if (typeof incRepo.update === 'function') {
-    await incRepo.update({ filterByTk: val(alarmRow, 'id'), filter: { organizationId: row.organizationId }, values: patch });
-  }
-  return {
-    id: val(alarmRow, 'id'),
-    code: val(alarmRow, 'code'),
-    status: patch.status,
-    fallback: true,
-  };
+  return runInOptionalTx(targetDb, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const targetId = val(alarmRow, 'id');
+    const freshAlarm = typeof incRepo.findOne === 'function' && targetId != null
+      ? await incRepo.findOne({ filter: { organizationId: row.organizationId, id: targetId }, ...txOpt })
+      : alarmRow;
+    if (!freshAlarm || val(freshAlarm, 'organizationId') !== row.organizationId) {
+      throw failTool('ALARM_NOT_FOUND', 404, 'Không tìm thấy cảnh báo trong phạm vi tổ chức.');
+    }
+    const curStatus = String(val(freshAlarm, 'status') || 'open').toLowerCase();
+    if (curStatus === 'closed' || curStatus === 'cleared') {
+      throw failTool('ALARM_ALREADY_CLEARED', 409, 'Cảnh báo đã được đóng trước đó.');
+    }
+    const now = new Date();
+    const patch = actionOp === 'clear'
+      ? {
+          status: 'closed',
+          clearedAt: now,
+          clearedBy: String(actor.username || 'operator').slice(0, 120),
+          closeNote: (note || `Đã đóng cảnh báo bởi ${actor.username}`).slice(0, 255),
+        }
+      : {
+          status: 'acknowledged',
+          acknowledgedAt: val(freshAlarm, 'acknowledgedAt') || now,
+          acknowledgedBy: String(actor.username || 'operator').slice(0, 120),
+          ...(note ? { resolutionNote: note.slice(0, 255) } : {}),
+        };
+    if (typeof freshAlarm.update === 'function') {
+      await freshAlarm.update(patch, txOpt);
+    } else if (typeof incRepo.update === 'function') {
+      await incRepo.update({ filterByTk: val(freshAlarm, 'id'), filter: { organizationId: row.organizationId }, values: patch, ...txOpt });
+    }
+    return {
+      id: val(freshAlarm, 'id'),
+      code: val(freshAlarm, 'code'),
+      status: patch.status,
+      fallback: true,
+    };
+  });
 }
 
 function serializeProfile(row) {
@@ -1011,19 +1231,19 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         }
 
         if (row.toolName === 'dxos_twin_set_desired') {
-          return executeTwinSetpointApproval(targetDb, actor, row, rawArgs);
+          return executeTwinSetpointApproval(targetDb, ctx, actor, row, rawArgs);
         }
         if (row.toolName === 'dxos_wms_hold_lot') {
           return executeWmsHoldLotApproval(targetDb, ctx, actor, row, rawArgs);
         }
         if (row.toolName === 'dxos_alarm_action') {
-          return executeAlarmActionApproval(targetDb, actor, row, rawArgs);
+          return executeAlarmActionApproval(targetDb, ctx, actor, row, rawArgs);
         }
 
         const argsCol = String(rawArgs.collection || '').trim();
         const argsOp = String(rawArgs.operation || '').trim();
-        const argsRecId = rawArgs.recordId != null && String(rawArgs.recordId).trim() !== '' ? Number(rawArgs.recordId) : null;
-        const rowRecId = row.targetRecordId != null ? Number(row.targetRecordId) : null;
+        const argsRecId = parseOptionalPositiveInt(rawArgs.recordId, 'recordId');
+        const rowRecId = parseOptionalPositiveInt(row.targetRecordId, 'targetRecordId');
         if (
           argsCol !== String(row.targetCollection || '').trim()
           || argsOp !== String(row.operation || '').trim()

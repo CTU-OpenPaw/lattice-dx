@@ -414,7 +414,11 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           type: 'ok',
           text: `Quét cảnh báo chủ động (${scannedCount} sự cố): tạo mới ${proposalsCreated} đề xuất HITL, bỏ qua ${deduplicatedSkipped} trùng lặp.`,
         });
-        await loadApprovals(approvalStatusFilter);
+        const nextFilter = proposalsCreated > 0 ? 'pending' : approvalStatusFilter;
+        if (nextFilter !== approvalStatusFilter) {
+          setApprovalStatusFilter(nextFilter);
+        }
+        await loadApprovals(nextFilter);
       } catch (err) {
         setNotice({
           type: 'error',
@@ -964,8 +968,8 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                     }),
                   ) : null,
                   changes.length
-                    ? changes.map((ch) => h('div', {
-                      key: ch.field,
+                    ? changes.map((ch, idx) => h('div', {
+                      key: ch?.field || idx,
                       style: { display: 'flex', flexWrap: 'wrap', gap: 6, fontFamily: 'monospace', fontSize: 11, color: '#0f172a' },
                     },
                       h('strong', null, `${ch.field}:`),

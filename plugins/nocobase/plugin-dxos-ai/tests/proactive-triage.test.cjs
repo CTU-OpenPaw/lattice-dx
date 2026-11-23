@@ -177,6 +177,7 @@ function makeTriageHarness({ withRBACGrants = true } = {}) {
     latticeEmployees: [
       { id: 13, userId: 9, code: 'EMP-9', organizationId: 'org-a', active: true },
       { id: 14, userId: 10, code: 'MGR-10', organizationId: 'org-a', active: true },
+      { id: 15, userId: 11, code: 'DIR-11', organizationId: 'org-a', active: true },
       { id: 16, userId: 12, code: 'DISP-12', organizationId: 'org-a', active: true },
       { id: 21, userId: 20, code: 'MGR-20', organizationId: 'org-b', active: true },
     ],
@@ -192,6 +193,7 @@ function makeTriageHarness({ withRBACGrants = true } = {}) {
       { userId: 1, roleName: 'root' },
       { userId: 9, roleName: 'ldx_employee' },
       { userId: 10, roleName: 'ldx_manager' },
+      { userId: 11, roleName: 'ldx_director' },
       { userId: 12, roleName: 'ldx_dispatcher' },
       { userId: 20, roleName: 'ldx_manager' },
     ],
@@ -214,6 +216,27 @@ function makeTriageHarness({ withRBACGrants = true } = {}) {
           {
             roleName: 'ldx_manager',
             name: 'latticeAssets',
+            dataSourceKey: 'main',
+            usingActionsConfig: true,
+            actions: [{ name: 'view' }, { name: 'update' }],
+          },
+          {
+            roleName: 'ldx_manager',
+            name: 'latticeTwinShadows',
+            dataSourceKey: 'main',
+            usingActionsConfig: true,
+            actions: [{ name: 'view' }, { name: 'update' }],
+          },
+          {
+            roleName: 'ldx_manager',
+            name: 'latticeIncidentCases',
+            dataSourceKey: 'main',
+            usingActionsConfig: true,
+            actions: [{ name: 'view' }, { name: 'update' }],
+          },
+          {
+            roleName: 'ldx_director',
+            name: 'latticeServiceTickets',
             dataSourceKey: 'main',
             usingActionsConfig: true,
             actions: [{ name: 'view' }, { name: 'update' }],
@@ -713,4 +736,613 @@ test('approveAction executes dxos_wms_hold_lot, dxos_twin_set_desired, and dxos_
   } finally {
     Module._load = origLoad;
   }
+});
+
+test('Fix Round 1 (Important 1): approveAction enforces fail-closed target-collection update ACL & reverts card to pending on 403', async () => {
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { runProactiveIncidentTriage } = require(path.join(PLUGIN_ROOT, 'src/server/proactive-triage.js'));
+
+  // Case A: ldx_director only has grants on latticeServiceTickets (no WMS/Twin/Incident grants)
+  const { db, store, makeCtx } = makeTriageHarness({ withRBACGrants: true });
+  const actions = createDxosAiActions(db);
+  await runProactiveIncidentTriage(db, { organizationId: 'org-a', actor: { userId: 12, username: 'disp12' } });
+
+  const holdCard = store.latticeAiApprovalQueue.find((q) => q.toolName === 'dxos_wms_hold_lot');
+  const twinCard = store.latticeAiApprovalQueue.find((q) => q.toolName === 'dxos_twin_set_desired');
+  const alarmCard = store.latticeAiApprovalQueue.find((q) => q.toolName === 'dxos_alarm_action');
+
+  for (const card of [holdCard, twinCard, alarmCard]) {
+    await assert.rejects(
+      () => actions.approveAction(makeCtx({
+        userId: 11,
+        username: 'dir11',
+        roles: ['ldx_director'],
+        values: { approvalId: card.id, note: 'Attempt without target ACL' },
+      }), async () => {}),
+      (err) => err.status === 403 && err.code === 'DXOS_ACL_DENIED',
+    );
+    const reloaded = store.latticeAiApprovalQueue.find((q) => q.id === card.id);
+    assert.equal(reloaded.status, 'pending', `Card #${card.id} must revert to pending after 403 ACL denial`);
+    assert.equal(reloaded.decidedByUserId, null);
+    assert.equal(reloaded.decidedAt, null);
+  }
+  assert.equal(store.latticeStockLots.find((l) => l.id === 301).status, 'available');
+  assert.equal(store.latticeTwinShadows.find((s) => s.id === 202).desiredJson.targetTempC, -18);
+  assert.equal(store.latticeIncidentCases.find((a) => a.id === 1).status, 'open');
+
+  // Case B: Empty dataSourcesRolesResources (withRBACGrants=false) fails closed (never fail-open!)
+  const noAcl = makeTriageHarness({ withRBACGrants: false });
+  const noAclActions = createDxosAiActions(noAcl.db);
+  await runProactiveIncidentTriage(noAcl.db, { organizationId: 'org-a', actor: { userId: 12, username: 'disp12' } });
+  const noAclHold = noAcl.store.latticeAiApprovalQueue.find((q) => q.toolName === 'dxos_wms_hold_lot');
+  await assert.rejects(
+    () => noAclActions.approveAction(noAcl.makeCtx({
+      userId: 10,
+      username: 'mgr10',
+      roles: ['ldx_manager'],
+      values: { approvalId: noAclHold.id },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_ACL_DENIED',
+  );
+  assert.equal(noAcl.store.latticeAiApprovalQueue.find((q) => q.id === noAclHold.id).status, 'pending');
+
+  // Case C: ctx.can returning false fails closed with 403 DXOS_ACL_DENIED even if DB grants exist
+  const deniedCanCtx = makeCtx({
+    userId: 10,
+    username: 'mgr10',
+    roles: ['ldx_manager'],
+    values: { approvalId: holdCard.id },
+  });
+  deniedCanCtx.can = () => false;
+  await assert.rejects(
+    () => actions.approveAction(deniedCanCtx, async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_ACL_DENIED',
+  );
+  assert.equal(store.latticeAiApprovalQueue.find((q) => q.id === holdCard.id).status, 'pending');
+
+  // Case D: Multi-role approver with empty currentRole picks approver role ('ldx_manager') and preserves verified currentRole
+  noAcl.store.rolesUsers.push({ userId: 10, roleName: 'ldx_employee' });
+  noAcl.store.roles.find((r) => r.name === 'ldx_manager').strategy = { actions: ['update'] };
+  const multiRoleCtx = noAcl.makeCtx({
+    userId: 10,
+    username: 'mgr10',
+    roles: ['ldx_employee', 'ldx_manager'],
+    values: { approvalId: noAclHold.id },
+  });
+  multiRoleCtx.state.currentRole = '';
+  await noAclActions.approveAction(multiRoleCtx, async () => {});
+  assert.equal(multiRoleCtx.body.status, 'executed');
+
+  // Case E: allowAll: true role passes ACL & verified currentRole ('ldx_director') is preserved into wmsActions.holdLotByMkt
+  const allowAllHarness = makeTriageHarness({ withRBACGrants: false });
+  allowAllHarness.store.rolesUsers.push({ userId: 11, roleName: 'ldx_manager' });
+  allowAllHarness.store.roles.find((r) => r.name === 'ldx_director').allowAll = true;
+  const allowAllActions = createDxosAiActions(allowAllHarness.db);
+  await runProactiveIncidentTriage(allowAllHarness.db, { organizationId: 'org-a', actor: { userId: 12, username: 'disp12' } });
+  const dirHold = allowAllHarness.store.latticeAiApprovalQueue.find((q) => q.toolName === 'dxos_wms_hold_lot');
+  let seenWmsRole = null;
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (String(request).includes('wms-engine')) {
+      return {
+        createDxosWmsActions: () => ({
+          holdLotByMkt: async (subCtx) => {
+            seenWmsRole = subCtx.state.currentRole;
+            subCtx.body = { held: true };
+          },
+        }),
+      };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const dirCtx = allowAllHarness.makeCtx({
+      userId: 11,
+      username: 'dir11',
+      roles: ['ldx_director', 'ldx_manager'],
+      values: { approvalId: dirHold.id },
+    });
+    dirCtx.state.currentRole = 'ldx_director';
+    await allowAllActions.approveAction(dirCtx, async () => {});
+    assert.equal(dirCtx.body.status, 'executed');
+    assert.equal(seenWmsRole, 'ldx_director');
+  } finally {
+    Module._load = origLoad;
+  }
+});
+
+test('Fix Round 1 (Important 2): runProactiveIncidentTriage serializes concurrent Promise.all sweeps per org and queries PG advisory lock', async () => {
+  const { runProactiveIncidentTriage } = require(path.join(PLUGIN_ROOT, 'src/server/proactive-triage.js'));
+  const { db, store } = makeTriageHarness();
+
+  // Inject async delay into latticeIncidentCases.find and latticeStockLots.find to force interleaving if unlocked
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!repo) return repo;
+    return {
+      ...repo,
+      find: async (opts) => {
+        await new Promise((r) => setTimeout(r, 8));
+        return repo.find(opts);
+      },
+    };
+  };
+
+  const results = await Promise.all([
+    runProactiveIncidentTriage(db, { organizationId: 'org-a', actor: { userId: 12, username: 'disp12' } }),
+    runProactiveIncidentTriage(db, { organizationId: 'org-a', actor: { userId: 12, username: 'disp12' } }),
+    runProactiveIncidentTriage(db, { organizationId: 'org-a', actor: { userId: 12, username: 'disp12' } }),
+  ]);
+
+  assert.equal(store.latticeAiApprovalQueue.length, 3, 'Concurrent sweeps must produce ZERO duplicate HITL cards');
+  const totalCreated = results.reduce((sum, r) => sum + r.proposalsCreated, 0);
+  const totalSkipped = results.reduce((sum, r) => sum + r.deduplicatedSkipped, 0);
+  assert.equal(totalCreated, 3);
+  assert.equal(totalSkipped, 6);
+
+  // Verify PostgreSQL advisory lock is acquired inside sequelize.transaction when dialect is postgres
+  const pgQueries = [];
+  const pgHarness = makeTriageHarness();
+  pgHarness.db.sequelize = {
+    getDialect: () => 'postgres',
+    transaction: async (fn) => fn({ pgTx: true }),
+    query: async (sql, opts) => {
+      pgQueries.push({ sql, opts });
+      return [[]];
+    },
+  };
+  await runProactiveIncidentTriage(pgHarness.db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    alarmIds: [2],
+  });
+  assert.ok(
+    pgQueries.some((q) => q.sql.includes('pg_advisory_xact_lock') && q.opts?.replacements?.lockKey === 'latticedx:triage:org-a'),
+    'Must acquire tenant-scoped pg_advisory_xact_lock in postgres dialect',
+  );
+});
+
+test('Fix Round 1 (Important 3): proactive-triage redacts CCCD, phone, email, and tokens while preserving ALM/LOT/ORD codes and URNs', async () => {
+  const { runProactiveIncidentTriage } = require(path.join(PLUGIN_ROOT, 'src/server/proactive-triage.js'));
+  const { db, store } = makeTriageHarness();
+
+  store.latticeAssets = [
+    {
+      id: 109,
+      code: '',
+      name: 'Kho lạnh B9 liên hệ 0912345678 ops@coldchain.vn',
+      entityId: 'urn:ngsi-ld:Asset:org-a:native:109',
+      organizationId: 'org-a',
+      status: 'active',
+    },
+  ];
+  store.latticeStockLots = [
+    {
+      id: 309,
+      organizationId: 'org-a',
+      lotCode: 'LOT-PII-309',
+      sku: 'VAC-09',
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:109',
+      targetTempMaxC: -15,
+      mktCelsius: -10,
+      holdReason: 'Ghi chú cũ CCCD 079091009999 sk-secretLiveKey9988',
+      status: 'available',
+      active: true,
+    },
+  ];
+  store.latticeOrderLines = [
+    {
+      id: 409,
+      organizationId: 'org-a',
+      orderId: 509,
+      orderCode: 'ORD-PII-509',
+      lotId: 309,
+      lotCode: 'LOT-PII-309',
+    },
+  ];
+  store.latticeOrders = [
+    { id: 509, code: 'ORD-PII-509', organizationId: 'org-a', status: 'approved' },
+  ];
+  store.latticeIncidentCases = [
+    {
+      id: 91,
+      code: 'ALM-PII-91',
+      name: 'Sự cố quá nhiệt CCCD 079091001234 SĐT +84987654321 Bearer secretToken987654321',
+      organizationId: 'org-a',
+      assetId: 109,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:109',
+      severity: 'critical',
+      status: 'open',
+      proposal: '',
+      resolutionNote: 'Liên hệ 0901234567',
+    },
+  ];
+
+  const res = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+  });
+  assert.equal(res.proposalsCreated, 1);
+
+  const alarm = store.latticeIncidentCases.find((a) => a.id === 91);
+  const card = store.latticeAiApprovalQueue[0];
+  const serialized = JSON.stringify({ proposal: alarm.proposal, card });
+
+  for (const leaked of ['079091001234', '079091009999', '0912345678', '84987654321', 'secretToken987654321', 'sk-secretLiveKey9988', 'ops@coldchain.vn']) {
+    assert.equal(serialized.includes(leaked), false, `Raw PII/secret "${leaked}" must be stripped`);
+  }
+  assert.ok(serialized.includes('[REDACTED_CCCD]'));
+  assert.ok(serialized.includes('[REDACTED_PHONE]'));
+  assert.ok(serialized.includes('ALM-PII-91'), 'Business alarm code must be preserved');
+  assert.ok(serialized.includes('LOT-PII-309'), 'Business lot code must be preserved');
+  assert.ok(serialized.includes('ORD-PII-509'), 'Business order code must be preserved');
+  assert.ok(serialized.includes('urn:ngsi-ld:Asset:org-a:native:109'), 'NGSI-LD URN must be preserved');
+});
+
+test('Fix Round 1 (Important 4): strict ID parsing, integrity checks, lastDeltaJson, merged temp bounds, and fallback transactions', async () => {
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { db, store, makeCtx } = makeTriageHarness();
+  const actions = createDxosAiActions(db);
+
+  const makePending = (overrides) => db.getRepository('latticeAiApprovalQueue').create({
+    values: {
+      organizationId: 'org-a',
+      requesterUserId: 12,
+      requesterUsername: 'disp12',
+      aiEmployee: 'dxos-coordinator',
+      operation: 'update',
+      riskLevel: 'high',
+      status: 'pending',
+      expiresAt: new Date(Date.now() + 3600_000),
+      ...overrides,
+    },
+  });
+
+  // 1. Invalid IDs ('abc', -1, 1.5, 0) reject with 409 HITL_ARGS_MISMATCH
+  for (const badId of ['abc', -1, 1.5, 0]) {
+    const badLot = await makePending({
+      toolName: 'dxos_wms_hold_lot',
+      targetCollection: 'latticeStockLots',
+      targetRecordId: null,
+      proposedArgs: { lotId: badId, lotCode: 'LOT-VAC-301', organizationId: 'org-a', forceHold: true },
+    });
+    await assert.rejects(
+      () => actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: badLot.id } }), async () => {}),
+      (err) => err.status === 409 && err.code === 'HITL_ARGS_MISMATCH',
+    );
+
+    const badAlarm = await makePending({
+      toolName: 'dxos_alarm_action',
+      targetCollection: 'latticeIncidentCases',
+      targetRecordId: null,
+      proposedArgs: { action: 'ack', alarmId: badId, alarmCode: 'ALM-MED-1' },
+    });
+    await assert.rejects(
+      () => actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: badAlarm.id } }), async () => {}),
+      (err) => err.status === 409 && err.code === 'HITL_ARGS_MISMATCH',
+    );
+
+    const badTwin = await makePending({
+      toolName: 'dxos_twin_set_desired',
+      targetCollection: 'latticeTwinShadows',
+      targetRecordId: null,
+      proposedArgs: { assetId: badId, desiredPatch: { targetTempC: -20 } },
+    });
+    await assert.rejects(
+      () => actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: badTwin.id } }), async () => {}),
+      (err) => err.status === 409 && err.code === 'HITL_ARGS_MISMATCH',
+    );
+  }
+
+  // 2. executeTwinSetpointApproval: deleted targetRecordId -> 404 SHADOW_NOT_FOUND; mismatched assetId -> 409
+  const missingShadowRow = await makePending({
+    toolName: 'dxos_twin_set_desired',
+    targetCollection: 'latticeTwinShadows',
+    targetRecordId: 99999,
+    proposedArgs: { assetId: 103, desiredPatch: { targetTempC: -20 } },
+  });
+  await assert.rejects(
+    () => actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: missingShadowRow.id } }), async () => {}),
+    (err) => err.status === 404 && err.code === 'SHADOW_NOT_FOUND',
+  );
+
+  const mismatchedAssetTwin = await makePending({
+    toolName: 'dxos_twin_set_desired',
+    targetCollection: 'latticeTwinShadows',
+    targetRecordId: 202,
+    proposedArgs: { assetId: 102, desiredPatch: { targetTempC: -20 } },
+  });
+  await assert.rejects(
+    () => actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: mismatchedAssetTwin.id } }), async () => {}),
+    (err) => err.status === 409 && err.code === 'HITL_ARGS_MISMATCH',
+  );
+
+  // 3. executeWmsHoldLotApproval: lotId + mismatched lotCode throws 409 BEFORE calling wmsActions.holdLotByMkt
+  let wmsCalled = false;
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (String(request).includes('wms-engine')) {
+      return {
+        createDxosWmsActions: () => ({
+          holdLotByMkt: async () => { wmsCalled = true; },
+        }),
+      };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const mismatchLotRow = await makePending({
+      toolName: 'dxos_wms_hold_lot',
+      targetCollection: 'latticeStockLots',
+      targetRecordId: 301,
+      proposedArgs: { lotId: 301, lotCode: 'LOT-WRONG-999', organizationId: 'org-a', forceHold: true },
+    });
+    await assert.rejects(
+      () => actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: mismatchLotRow.id } }), async () => {}),
+      (err) => err.status === 409 && err.code === 'HITL_ARGS_MISMATCH',
+    );
+    assert.equal(wmsCalled, false, 'wmsActions.holdLotByMkt must NOT be called when lotCode mismatches lotId');
+  } finally {
+    Module._load = origLoad;
+  }
+
+  // 4. Standalone fallback: merged minTempC > maxTempC rejected, lastDeltaJson updated, and db.sequelize.transaction used
+  store.latticeTwinShadows.find((s) => s.id === 202).desiredJson = { targetTempC: -18, maxTempC: -15 };
+  let txCount = 0;
+  const origTx = db.sequelize.transaction;
+  db.sequelize.transaction = async (fn) => {
+    txCount += 1;
+    return origTx(fn);
+  };
+  Module._load = function (request, parent, isMain) {
+    if (String(request).includes('digital-twin') || String(request).includes('wms-engine') || String(request).includes('alarm-engine')) {
+      throw Object.assign(new Error(`Cannot find module '${request}'`), { code: 'MODULE_NOT_FOUND' });
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const badMergedTemp = await makePending({
+      toolName: 'dxos_twin_set_desired',
+      targetCollection: 'latticeTwinShadows',
+      targetRecordId: 202,
+      proposedArgs: { assetId: 103, desiredPatch: { minTempC: -10 } },
+    });
+    await assert.rejects(
+      () => actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: badMergedTemp.id } }), async () => {}),
+      (err) => err.status === 400 && err.code === 'TWIN_DESIRED_INVALID',
+    );
+
+    const validTwinFb = await makePending({
+      toolName: 'dxos_twin_set_desired',
+      targetCollection: 'latticeTwinShadows',
+      targetRecordId: 202,
+      proposedArgs: { assetId: 103, desiredPatch: { targetTempC: -22 } },
+    });
+    const txBeforeTwin = txCount;
+    await actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: validTwinFb.id } }), async () => {});
+    assert.ok(txCount > txBeforeTwin, 'Twin fallback must run inside db.sequelize.transaction');
+    const updated202 = store.latticeTwinShadows.find((s) => s.id === 202);
+    assert.equal(updated202.lastDeltaJson.inSync, false);
+    assert.equal(updated202.lastDeltaJson.fields.targetTempC.numericDelta, -10);
+
+    const validAlarmFb = await makePending({
+      toolName: 'dxos_alarm_action',
+      targetCollection: 'latticeIncidentCases',
+      targetRecordId: 1,
+      proposedArgs: { action: 'ack', alarmId: 1, note: 'Fallback ack tx' },
+    });
+    const txBeforeAlarm = txCount;
+    await actions.approveAction(makeCtx({ userId: 10, username: 'mgr10', roles: ['ldx_manager'], values: { approvalId: validAlarmFb.id } }), async () => {});
+    assert.ok(txCount > txBeforeAlarm, 'Alarm fallback must run inside db.sequelize.transaction');
+    assert.equal(store.latticeIncidentCases.find((a) => a.id === 1).status, 'acknowledged');
+  } finally {
+    Module._load = origLoad;
+    db.sequelize.transaction = origTx;
+  }
+});
+
+test('Fix Round 1 (Minor 2-5): entityId backfill, dispatched/ack skip, null-targetRecordId dedup symmetry, alarmIds bounds, and Tab 6 UI filter switch', async () => {
+  const { buildTriageRecommendation, runProactiveIncidentTriage } = require(path.join(PLUGIN_ROOT, 'src/server/proactive-triage.js'));
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const { db, store } = makeTriageHarness();
+
+  // Minor 2: assetEntityId backfilled from latticeAssets.entityId matches telemetry & custom entity lots
+  store.latticeAssets.push({
+    id: 104,
+    code: 'CH-104',
+    name: 'Kho tùy chỉnh',
+    entityId: 'urn:ngsi-ld:Asset:org-a:custom-ch104',
+    organizationId: 'org-a',
+    status: 'active',
+  });
+  store.latticeTelemetryPoints.push({
+    id: 701,
+    organizationId: 'org-a',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:custom-ch104',
+    metricName: 'temperature',
+    numericValue: -9.5,
+    observedAt: new Date().toISOString(),
+  });
+  store.latticeIncidentCases = [
+    {
+      id: 41,
+      code: 'ALM-BACKFILL-41',
+      name: 'Nhiệt độ tăng cao',
+      organizationId: 'org-a',
+      assetId: 104,
+      assetEntityId: '',
+      severity: 'high',
+      status: 'open',
+      proposal: '',
+    },
+  ];
+  const backfillRes = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    dryRun: true,
+  });
+  assert.equal(backfillRes.proposals.length, 1);
+  assert.ok(backfillRes.proposals[0].causalSummary.includes('-9.5°C'));
+  assert.equal(backfillRes.proposals[0].proposedArgs.assetEntityId, 'urn:ngsi-ld:Asset:org-a:custom-ch104');
+
+  // Minor 3: skip twin setpoint while commandStatus='dispatched' AND skip redundant 'ack' when alarm.status='acknowledged'
+  const skippedRec = buildTriageRecommendation({
+    alarm: { id: 51, code: 'ALM-ACK-51', name: 'Trôi setpoint', organizationId: 'org-a', status: 'acknowledged', severity: 'high' },
+    shadow: { id: 205, organizationId: 'org-a', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:105', commandStatus: 'dispatched', desiredJson: { targetTempC: -20 } },
+    stockLots: [],
+  });
+  assert.equal(skippedRec, null, 'Dispatched shadow + acknowledged alarm with no other actions must return null');
+
+  // Minor 4a: explicit empty / invalid alarmIds matches 0 instead of scanning all; >50 ids capped cleanly
+  const emptyIdsRes = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    alarmIds: [],
+  });
+  assert.equal(emptyIdsRes.scannedCount, 0);
+  const invalidIdsRes = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    alarmIds: [-1, 'bad'],
+  });
+  assert.equal(invalidIdsRes.scannedCount, 0);
+
+  store.latticeIncidentCases.push(
+    { id: 1001, code: 'ALM-CAP-1', name: 'In cap', organizationId: 'org-a', severity: 'medium', status: 'open', proposal: '' },
+    { id: 1060, code: 'ALM-CAP-60', name: 'Beyond cap', organizationId: 'org-a', severity: 'medium', status: 'open', proposal: '' },
+  );
+  const cappedIds = Array.from({ length: 65 }, (_, i) => 1001 + i);
+  const cappedRes = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    alarmIds: cappedIds,
+    dryRun: true,
+  });
+  assert.deepEqual(cappedRes.proposals.map((p) => p.alarmId), [1001], 'alarmIds must be capped at 50 entries');
+
+  // Minor 4b: null-targetRecordId dedup symmetry intra-sweep and cross-sweep on unshadowed assetEntityId
+  store.latticeIncidentCases = [
+    {
+      id: 61,
+      code: 'ALM-UNSHAD-61',
+      name: 'Nhiệt độ tăng kho 106',
+      organizationId: 'org-a',
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:106',
+      severity: 'high',
+      status: 'open',
+      proposal: '',
+    },
+    {
+      id: 62,
+      code: 'ALM-UNSHAD-62',
+      name: 'Nhiệt độ tăng kho 106 lần 2',
+      organizationId: 'org-a',
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:106',
+      severity: 'medium',
+      status: 'open',
+      proposal: '',
+    },
+  ];
+  const unshadSweep1 = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+  });
+  assert.equal(unshadSweep1.proposalsCreated, 1);
+  assert.equal(unshadSweep1.deduplicatedSkipped, 1);
+
+  const unshadSweep2 = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    alarmIds: [62],
+  });
+  assert.equal(unshadSweep2.proposalsCreated, 0);
+  assert.equal(unshadSweep2.deduplicatedSkipped, 1, 'Cross-sweep dedup must match intra-sweep dedup when targetRecordId is null');
+
+  // Minor 5: ai-studio-page switches approvalStatusFilter to 'pending' on new triage proposals & handles duplicate/empty change fields
+  const stateSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let sIdx = 0;
+  let eIdx = 0;
+  let mIdx = 0;
+  const listFilters = [];
+  const depsChanged = (p, n) => !p || !n || p.length !== n.length || n.some((d, i) => d !== p[i]);
+  const ReactMock = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const i = sIdx++;
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+      return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+    },
+    useRef: (init) => ({ current: init }),
+    useEffect: (fn, deps) => {
+      const i = eIdx++;
+      effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+    },
+    useMemo: (fn, deps) => {
+      const i = mIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps };
+      return memoSlots[i].value;
+    },
+    useCallback: (fn, deps) => {
+      const i = mIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps };
+      return memoSlots[i].value;
+    },
+  };
+  const api = {
+    request: async (req) => {
+      if (req.url === 'dxosAi:listApprovals') {
+        listFilters.push(req.params?.status);
+        return {
+          data: {
+            data: {
+              items: [{
+                id: 901,
+                targetCollection: 'latticeStockLots',
+                operation: 'update',
+                toolName: 'dxos_wms_hold_lot',
+                status: 'pending',
+                diffPreview: { changes: [{ field: '', before: null, after: 'a' }, { field: '', before: 'a', after: 'b' }] },
+              }],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:triageScan') return { data: { data: { scannedCount: 1, proposalsCreated: 1, deduplicatedSkipped: 0 } } };
+      return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, ReactMock, {}, {});
+  const render = () => {
+    sIdx = 0; eIdx = 0; mIdx = 0;
+    const t = Page();
+    for (const fx of effectSlots) { if (fx.changed) { fx.changed = false; fx.fn(); } }
+    return t;
+  };
+  const findAll = (n, pred, acc = []) => {
+    if (!n || typeof n !== 'object') return acc;
+    if (pred(n)) acc.push(n);
+    const kids = Array.isArray(n.children) ? n.children.flat(Infinity) : [];
+    for (const k of kids) findAll(k, pred, acc);
+    return acc;
+  };
+  let tree = render();
+  findAll(tree, (n) => n.type === 'button' && n.children?.includes('6. Duyệt AI (HITL)'))[0].props.onClick();
+  tree = render();
+  const statusSelect = findAll(tree, (n) => n.type === 'select' && n.props?.['data-testid'] === 'dxos-hitl-status-filter')[0];
+  statusSelect.props.onChange({ target: { value: 'executed' } });
+  tree = render();
+  const triageBtn = findAll(tree, (n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-ai-triage-scan-btn')[0];
+  await triageBtn.props.onClick();
+  tree = render();
+  const statusSelectAfter = findAll(tree, (n) => n.type === 'select' && n.props?.['data-testid'] === 'dxos-hitl-status-filter')[0];
+  assert.equal(statusSelectAfter.props.value, 'pending', 'Must switch filter back to pending when new proposals are created');
+  assert.equal(listFilters[listFilters.length - 1], 'pending');
+  const changeRows = findAll(tree, (n) => n.type === 'div' && n.props?.style?.fontFamily === 'monospace');
+  assert.equal(changeRows.length, 2);
+  assert.equal(changeRows[0].props.key, 0);
+  assert.equal(changeRows[1].props.key, 1);
 });
