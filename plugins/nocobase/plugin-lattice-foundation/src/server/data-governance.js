@@ -87,6 +87,13 @@ function parseFiniteNumberStrict(raw) {
   return Number.isFinite(n) ? n : null;
 }
 
+async function withOptionalTransaction(db, fn) {
+  if (typeof db?.sequelize?.transaction === 'function') {
+    return db.sequelize.transaction(fn);
+  }
+  return fn(null);
+}
+
 function sanitizePlainValue(value, { stripSensitive = false } = {}, depth = 0) {
   if (depth > 20) return null;
   if (value === null || value === undefined) return null;
@@ -149,10 +156,24 @@ function sanitizeSnapshotFilter(node, depth = 0) {
       return node;
     }
   }
+  if (target === null || target === undefined) {
+    if (depth === 0) {
+      throw failGov('DATA_GOV_FILTER_INVALID', 400, 'Snapshot filter must be a plain object.');
+    }
+    return null;
+  }
   if (Array.isArray(target)) {
+    if (depth === 0) {
+      throw failGov('DATA_GOV_FILTER_INVALID', 400, 'Snapshot filter must be a plain object.');
+    }
     return target.map((item) => sanitizeSnapshotFilter(item, depth + 1));
   }
-  if (typeof target !== 'object') return target;
+  if (typeof target !== 'object' || target instanceof Date || target instanceof RegExp) {
+    if (depth === 0) {
+      throw failGov('DATA_GOV_FILTER_INVALID', 400, 'Snapshot filter must be a plain object.');
+    }
+    return target;
+  }
 
   const out = {};
   for (const key of Object.keys(target)) {
@@ -186,7 +207,7 @@ function computeMeanKineticTemperature(samplesC, { deltaH_kJ_mol = DEFAULT_DELTA
   }
 
   let thresholdCelsius = null;
-  if (maxAllowedC !== null && maxAllowedC !== undefined && String(maxAllowedC).trim() !== '') {
+  if (maxAllowedC !== null && maxAllowedC !== undefined && !(typeof maxAllowedC === 'string' && maxAllowedC.trim() === '')) {
     const parsedMax = parseFiniteNumberStrict(maxAllowedC);
     if (parsedMax === null || parsedMax <= ABSOLUTE_ZERO_C) {
       throw failGov('MKT_INVALID_THRESHOLD', 400, 'maxAllowedC must be a finite temperature above -273.15 °C.');
@@ -683,8 +704,9 @@ function registerDataGovernanceHooks(db) {
   } catch {
     // Ignore frozen db stubs
   }
-  const guardImmutable = (_model, options) => {
-    if (options?.allowSystemMigration === true || options?.context?.state?.currentRole === 'root') {
+  const guardImmutable = (instance, options) => {
+    const resolvedOpts = options && typeof options === 'object' ? options : instance;
+    if (resolvedOpts?.allowSystemMigration === true || resolvedOpts?.context?.state?.currentRole === 'root') {
       return;
     }
     throw failGov('COLD_SNAPSHOT_IMMUTABLE', 403, 'Cold-tier frozen snapshots are sealed and immutable.');
@@ -797,9 +819,6 @@ function registerDataGovernance(app) {
 
         for (const { row, dir } of candidateEdges) {
           const serialized = serializeLineageEdge(row);
-          if (!edgesMap.has(serialized.edgeUid)) {
-            edgesMap.set(serialized.edgeUid, serialized);
-          }
           const nextCol = dir === 'outbound' ? serialized.targetCollection : serialized.sourceCollection;
           const nextId = dir === 'outbound' ? serialized.targetRecordId : serialized.sourceRecordId;
           const nextKey = `${nextCol}:${nextId}`;
@@ -815,6 +834,9 @@ function registerDataGovernance(app) {
               depth: cur.depth + 1,
             });
             queue.push({ collection: nextCol, recordId: nextId, depth: cur.depth + 1 });
+          }
+          if (!edgesMap.has(serialized.edgeUid)) {
+            edgesMap.set(serialized.edgeUid, serialized);
           }
         }
       }
@@ -919,13 +941,6 @@ function registerDataGovernance(app) {
     const lookupFilter = qUid
       ? { organizationId: scope.organizationId, quarantineUid: qUid }
       : { organizationId: scope.organizationId, id: numericId };
-    const row = await qRepo.findOne({ filter: lookupFilter });
-    if (!row || val(row, 'organizationId') !== scope.organizationId) {
-      throw failGov('QUARANTINE_NOT_FOUND', 404, 'Quarantine record not found in organization scope.');
-    }
-    if (String(val(row, 'status') || 'quarantined') !== 'quarantined') {
-      throw failGov('QUARANTINE_ALREADY_RESOLVED', 409, 'Quarantine record has already been resolved.');
-    }
 
     const resolutionNote = params.resolutionNote != null
       ? String(params.resolutionNote).trim().slice(0, 500)
@@ -936,101 +951,129 @@ function registerDataGovernance(app) {
     }
     const releaseToTelemetry = nextStatus === 'approved_release' && wantsRelease;
 
-    let releasePayload = null;
-    if (releaseToTelemetry) {
-      const candidateVal = params.correctedNumericValue !== undefined
-        ? params.correctedNumericValue
-        : val(row, 'numericValue');
-      const parsedReleaseVal = parseFiniteNumberStrict(candidateVal);
-      const metricName = String(val(row, 'metricName') || '').trim();
-      const unit = String(val(row, 'unit') || 'CEL').trim();
-      const assetEntityId = String(val(row, 'assetEntityId') || '').trim();
-      const isTemp = metricName.toLowerCase() === 'temperature' || unit.toUpperCase() === 'CEL';
-      if (
-        parsedReleaseVal === null
-        || !assetEntityId
-        || !metricName
-        || (isTemp && (parsedReleaseVal < -100 || parsedReleaseVal > 150))
-      ) {
-        throw failGov(
-          'QUARANTINE_RELEASE_VALUE_INVALID',
-          400,
-          'Released telemetry value must be a finite physical measurement within valid sensor bounds.',
-        );
-      }
-      const raw = val(row, 'rawPayload') || {};
-      const obsRaw = raw.observedAt;
-      const obsDate = obsRaw && Number.isFinite(new Date(obsRaw).getTime()) ? new Date(obsRaw) : new Date();
-      const validAssetId = raw.assetId != null && /^[1-9]\d{0,18}$/.test(String(raw.assetId))
-        ? Number(raw.assetId)
-        : null;
-      releasePayload = {
-        organizationId: scope.organizationId,
-        ...(validAssetId != null ? { assetId: validAssetId } : {}),
-        assetEntityId,
-        metricName,
-        numericValue: parsedReleaseVal,
-        unit,
-        quality: 'good',
-        sourceProtocol: String(raw.sourceProtocol || 'quarantine_release').slice(0, 64),
-        observedAt: obsDate,
-      };
-    }
+    const { updated, releasedPoint } = await withOptionalTransaction(db, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      const qModel = transaction ? db.getModel?.('latticeDataQuarantine') : null;
+      const row = qModel && typeof qModel.findOne === 'function'
+        ? await qModel.findOne({
+          where: lookupFilter,
+          transaction,
+          ...(transaction.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {}),
+        })
+        : await qRepo.findOne({ filter: lookupFilter, ...txOpt });
 
-    let releasedPoint = null;
-    if (releasePayload) {
-      const tsRepo = getRepo(db, 'latticeTelemetryPoints');
-      if (!tsRepo || typeof tsRepo.create !== 'function') {
-        throw failGov('TELEMETRY_REPO_UNAVAILABLE', 503, 'latticeTelemetryPoints repository is unavailable.');
+      if (!row || val(row, 'organizationId') !== scope.organizationId) {
+        throw failGov('QUARANTINE_NOT_FOUND', 404, 'Quarantine record not found in organization scope.');
       }
-      const createdPt = await tsRepo.create({ values: releasePayload });
-      releasedPoint = toPlain(createdPt);
-      if (releasedPoint?.id != null) {
-        await recordLineageEdge(db, {
+      if (String(val(row, 'status') || 'quarantined') !== 'quarantined') {
+        throw failGov('QUARANTINE_ALREADY_RESOLVED', 409, 'Quarantine record has already been resolved.');
+      }
+
+      let releasePayload = null;
+      if (releaseToTelemetry) {
+        const candidateVal = params.correctedNumericValue !== undefined
+          ? params.correctedNumericValue
+          : val(row, 'numericValue');
+        const parsedReleaseVal = parseFiniteNumberStrict(candidateVal);
+        const metricName = String(val(row, 'metricName') || '').trim();
+        const unit = String(val(row, 'unit') || 'CEL').trim();
+        const assetEntityId = String(val(row, 'assetEntityId') || '').trim();
+        const isTemp = metricName.toLowerCase() === 'temperature' || unit.toUpperCase() === 'CEL';
+        if (
+          parsedReleaseVal === null
+          || !assetEntityId
+          || !metricName
+          || (isTemp && (parsedReleaseVal < -100 || parsedReleaseVal > 150))
+        ) {
+          throw failGov(
+            'QUARANTINE_RELEASE_VALUE_INVALID',
+            400,
+            'Released telemetry value must be a finite physical measurement within valid sensor bounds.',
+          );
+        }
+        const raw = val(row, 'rawPayload') || {};
+        const obsRaw = raw.observedAt;
+        const obsDate = obsRaw && Number.isFinite(new Date(obsRaw).getTime()) ? new Date(obsRaw) : new Date();
+        const validAssetId = raw.assetId != null && /^[1-9]\d{0,18}$/.test(String(raw.assetId))
+          ? Number(raw.assetId)
+          : null;
+        releasePayload = {
           organizationId: scope.organizationId,
-          sourceCollection: 'latticeDataQuarantine',
-          sourceRecordId: String(val(row, 'quarantineUid') || val(row, 'id')),
-          targetCollection: 'latticeTelemetryPoints',
-          targetRecordId: String(releasedPoint.id),
-          relationType: 'released_from_quarantine',
-          actorName: scope.actor.username,
-          metadataJson: { numericValue: releasePayload.numericValue, resolutionNote },
-        });
+          ...(validAssetId != null ? { assetId: validAssetId } : {}),
+          assetEntityId,
+          metricName,
+          numericValue: parsedReleaseVal,
+          unit,
+          quality: 'good',
+          sourceProtocol: String(raw.sourceProtocol || 'quarantine_release').slice(0, 64),
+          observedAt: obsDate,
+        };
       }
-    }
 
-    const resolvedAt = new Date();
-    const patch = {
-      status: nextStatus,
-      resolvedBy: scope.actor.username,
-      resolvedAt,
-      ...(resolutionNote !== null ? { resolutionNote } : {}),
-    };
-    let updated = row;
-    if (typeof row.update === 'function') {
-      updated = await row.update(patch);
-    } else if (typeof qRepo.update === 'function') {
-      const res = await qRepo.update({
-        filterByTk: val(row, 'id'),
-        filter: { organizationId: scope.organizationId },
-        values: patch,
-      });
-      if (Array.isArray(res) && res[0]) updated = res[0];
-    }
+      let txReleasedPoint = null;
+      if (releasePayload) {
+        const tsRepo = getRepo(db, 'latticeTelemetryPoints');
+        if (!tsRepo || typeof tsRepo.create !== 'function') {
+          throw failGov('TELEMETRY_REPO_UNAVAILABLE', 503, 'latticeTelemetryPoints repository is unavailable.');
+        }
+        const createdPt = await tsRepo.create({ values: releasePayload, ...txOpt });
+        txReleasedPoint = toPlain(createdPt);
+        if (txReleasedPoint?.id != null) {
+          await recordLineageEdge(db, {
+            organizationId: scope.organizationId,
+            sourceCollection: 'latticeDataQuarantine',
+            sourceRecordId: String(val(row, 'quarantineUid') || val(row, 'id')),
+            targetCollection: 'latticeTelemetryPoints',
+            targetRecordId: String(txReleasedPoint.id),
+            relationType: 'released_from_quarantine',
+            actorName: scope.actor.username,
+            metadataJson: { numericValue: releasePayload.numericValue, resolutionNote },
+            ...txOpt,
+          });
+        }
+      }
 
-    await appendLedgerEntrySafely(db, {
-      organizationId: scope.organizationId,
-      eventType: 'data.quarantine_resolved',
-      targetCollection: 'latticeDataQuarantine',
-      targetRecordId: String(val(row, 'quarantineUid') || val(row, 'id')),
-      actor: scope.actor,
-      payload: {
-        quarantineUid: val(row, 'quarantineUid'),
+      const resolvedAt = new Date();
+      const patch = {
         status: nextStatus,
-        releasedTelemetryId: releasedPoint?.id ?? null,
-        resolutionNote,
-      },
-    }, { scope: 'dxosDataGov:quarantineResolve' });
+        resolvedBy: scope.actor.username,
+        resolvedAt,
+        ...(resolutionNote !== null ? { resolutionNote } : {}),
+      };
+      let updatedRow = row;
+      if (typeof row.update === 'function') {
+        updatedRow = await row.update(patch, txOpt);
+      } else if (typeof qRepo.update === 'function') {
+        const res = await qRepo.update({
+          filterByTk: val(row, 'id'),
+          filter: { organizationId: scope.organizationId, status: 'quarantined' },
+          values: patch,
+          ...txOpt,
+        });
+        if (Array.isArray(res)) {
+          if (!res[0]) {
+            throw failGov('QUARANTINE_ALREADY_RESOLVED', 409, 'Quarantine record has already been resolved.');
+          }
+          updatedRow = res[0];
+        }
+      }
+
+      await appendLedgerEntrySafely(db, {
+        organizationId: scope.organizationId,
+        eventType: 'data.quarantine_resolved',
+        targetCollection: 'latticeDataQuarantine',
+        targetRecordId: String(val(row, 'quarantineUid') || val(row, 'id')),
+        actor: scope.actor,
+        payload: {
+          quarantineUid: val(row, 'quarantineUid'),
+          status: nextStatus,
+          releasedTelemetryId: txReleasedPoint?.id ?? null,
+          resolutionNote,
+        },
+      }, { scope: 'dxosDataGov:quarantineResolve', ...txOpt });
+
+      return { updated: updatedRow, releasedPoint: txReleasedPoint };
+    });
 
     ctx.body = {
       quarantine: serializeQuarantineRow(updated),
@@ -1127,8 +1170,10 @@ function registerDataGovernance(app) {
         if (!['cold', 'warm'].includes(tier)) {
           throw failGov('DATA_GOV_TIER_INVALID', 400, "tier must be 'cold' or 'warm'.");
         }
-        const retentionDays = params.retentionDays !== undefined ? Number(params.retentionDays) : 1825;
-        if (!Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 36500) {
+        const retentionDays = params.retentionDays !== undefined
+          ? parseFiniteNumberStrict(params.retentionDays)
+          : 1825;
+        if (retentionDays === null || !Number.isInteger(retentionDays) || retentionDays < 1 || retentionDays > 36500) {
           throw failGov('DATA_GOV_RETENTION_INVALID', 400, 'retentionDays must be an integer between 1 and 36500.');
         }
 
@@ -1166,70 +1211,78 @@ function registerDataGovernance(app) {
         const frozenAt = new Date();
         const expiresAt = new Date(frozenAt.getTime() + retentionDays * 86_400_000);
 
-        let signatureBase64 = null;
-        let keyId = null;
-        const pkiRepo = getRepo(db, 'latticePkiKeys');
-        if (pkiRepo && typeof pkiRepo.create === 'function' && (typeof pkiRepo.findOne === 'function' || typeof pkiRepo.find === 'function')) {
-          const signed = await signCanonicalPayload(db, scope.organizationId, sanitizedRecords);
-          signatureBase64 = signed.signatureBase64;
-          keyId = signed.keyId;
-        }
+        const { created, lineageEdgesRecorded } = await withOptionalTransaction(db, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
 
-        const ledgerEntry = await appendLedgerEntrySafely(db, {
-          organizationId: scope.organizationId,
-          eventType: 'data.snapshot_frozen',
-          targetCollection: 'latticeFrozenSnapshots',
-          targetRecordId: snapshotUid,
-          actor: scope.actor,
-          payload: {
-            snapshotUid,
-            sourceCollection,
-            tier,
-            recordCount: sanitizedRecords.length,
-            payloadHash,
-          },
-          metadata: { retentionDays, ...(coldStorageUri ? { coldStorageUri } : {}) },
-        }, { scope: 'dxosDataGov:freezeSnapshot' });
+          let signatureBase64 = null;
+          let keyId = null;
+          const pkiRepo = getRepo(db, 'latticePkiKeys');
+          if (pkiRepo && typeof pkiRepo.create === 'function' && (typeof pkiRepo.findOne === 'function' || typeof pkiRepo.find === 'function')) {
+            const signed = await signCanonicalPayload(db, scope.organizationId, sanitizedRecords, txOpt);
+            signatureBase64 = signed.signatureBase64;
+            keyId = signed.keyId;
+          }
 
-        const created = await snapshotRepo.create({
-          values: {
+          const ledgerEntry = await appendLedgerEntrySafely(db, {
             organizationId: scope.organizationId,
-            snapshotUid,
-            tier,
-            sourceCollection,
-            filterSummary: sanitizedFilter || {},
-            recordCount: sanitizedRecords.length,
-            payloadJson: sanitizedRecords,
-            payloadHash,
-            ledgerEntrySeq: ledgerEntry?.seq ?? null,
-            signatureBase64,
-            keyId,
-            frozenAt,
-            frozenBy: scope.actor.username,
-            retentionDays,
-            expiresAt,
-            coldStorageUri,
-            status: 'sealed',
-            active: true,
-          },
-        });
-
-        let lineageEdgesRecorded = 0;
-        for (const rec of sanitizedRecords.slice(0, MAX_LINEAGE_EDGES_PER_FREEZE)) {
-          if (rec?.id == null) continue;
-          const edge = await recordLineageEdge(db, {
-            organizationId: scope.organizationId,
-            sourceCollection,
-            sourceRecordId: String(rec.id),
+            eventType: 'data.snapshot_frozen',
             targetCollection: 'latticeFrozenSnapshots',
             targetRecordId: snapshotUid,
-            relationType: 'frozen_into',
-            actorName: scope.actor.username,
-            metadataJson: { tier, payloadHash },
-            observedAt: frozenAt,
+            actor: scope.actor,
+            payload: {
+              snapshotUid,
+              sourceCollection,
+              tier,
+              recordCount: sanitizedRecords.length,
+              payloadHash,
+            },
+            metadata: { retentionDays, ...(coldStorageUri ? { coldStorageUri } : {}) },
+          }, { scope: 'dxosDataGov:freezeSnapshot', ...txOpt });
+
+          const createdRow = await snapshotRepo.create({
+            values: {
+              organizationId: scope.organizationId,
+              snapshotUid,
+              tier,
+              sourceCollection,
+              filterSummary: sanitizedFilter || {},
+              recordCount: sanitizedRecords.length,
+              payloadJson: sanitizedRecords,
+              payloadHash,
+              ledgerEntrySeq: ledgerEntry?.seq ?? null,
+              signatureBase64,
+              keyId,
+              frozenAt,
+              frozenBy: scope.actor.username,
+              retentionDays,
+              expiresAt,
+              coldStorageUri,
+              status: 'sealed',
+              active: true,
+            },
+            ...txOpt,
           });
-          if (edge) lineageEdgesRecorded += 1;
-        }
+
+          let edgesRecorded = 0;
+          for (const rec of sanitizedRecords.slice(0, MAX_LINEAGE_EDGES_PER_FREEZE)) {
+            if (rec?.id == null) continue;
+            const edge = await recordLineageEdge(db, {
+              organizationId: scope.organizationId,
+              sourceCollection,
+              sourceRecordId: String(rec.id),
+              targetCollection: 'latticeFrozenSnapshots',
+              targetRecordId: snapshotUid,
+              relationType: 'frozen_into',
+              actorName: scope.actor.username,
+              metadataJson: { tier, payloadHash },
+              observedAt: frozenAt,
+              ...txOpt,
+            });
+            if (edge) edgesRecorded += 1;
+          }
+
+          return { created: createdRow, lineageEdgesRecorded: edgesRecorded };
+        });
 
         ctx.body = {
           ...serializeSnapshotSummary(created, { includePayload: false }),
@@ -1346,8 +1399,14 @@ function registerDataGovernance(app) {
         const scope = await resolveDataGovScope(db, ctx, params.organizationId);
         await assertReadPrivilege(db, ctx, scope, ['latticeTelemetryPoints', 'latticeAssets']);
 
-        const deltaH_kJ_mol = params.deltaH_kJ_mol ?? DEFAULT_DELTA_H_KJ_MOL;
-        const maxAllowedC = params.maxAllowedC ?? null;
+        const rawDeltaH = params.deltaH_kJ_mol;
+        const deltaH_kJ_mol = rawDeltaH === undefined || rawDeltaH === null || (typeof rawDeltaH === 'string' && rawDeltaH.trim() === '')
+          ? DEFAULT_DELTA_H_KJ_MOL
+          : rawDeltaH;
+        const rawMaxAllowed = params.maxAllowedC;
+        const maxAllowedC = rawMaxAllowed === undefined || rawMaxAllowed === null || (typeof rawMaxAllowed === 'string' && rawMaxAllowed.trim() === '')
+          ? null
+          : rawMaxAllowed;
 
         let samplesC = params.samplesC;
         const hasSamplesParam = samplesC !== undefined && !(typeof samplesC === 'string' && samplesC.trim() === '');
@@ -1360,7 +1419,7 @@ function registerDataGovernance(app) {
               throw failGov('MKT_INVALID_SAMPLE', 400, 'Malformed samplesC JSON array.');
             }
           } else if (trimmed) {
-            samplesC = trimmed.split(',').map((s) => Number(s.trim()));
+            samplesC = trimmed.split(',').map((s) => s.trim());
           }
         }
 

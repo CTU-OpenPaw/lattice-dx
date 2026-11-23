@@ -913,6 +913,271 @@ test('dxosDataGov enforces RBAC, org isolation, snapshot freeze/verify/immutabil
   assert.equal(aliasListQ.body.items.length, 2);
 });
 
+test('Task 2.1 Round 1 regression guards: bulk hooks, tx atomicity, CSV MKT, lineage truncation, filter/retention, PAT & ctx.can ACL', async () => {
+  const { registerDataGovernance, captureQuarantineRecord, recordLineageEdge } = require('../src/server/data-governance');
+  const { registerPaasApiKeys, createPaasApiKeyAuthMiddleware } = require('../src/server/paas-api-keys');
+  const { db, snapshots, quarantineRows, telemetryPoints, ledgerEntries, pkiKeys } = makeInMemoryDataGovDb({ withPki: true });
+
+  const resources = new Map();
+  const app = {
+    db,
+    resourceManager: {
+      define(def) { resources.set(def.name, def.actions); },
+      use() {},
+    },
+    acl: { allow() {} },
+  };
+  registerPaasApiKeys(app);
+  registerDataGovernance(app);
+  const gov = resources.get('dxosDataGov');
+  const keyActions = resources.get('dxosApiKeys');
+  const authMw = createPaasApiKeyAuthMiddleware(db);
+
+  // 1. Minor 1: guardImmutable handles both instance hooks (instance, options) and bulk hooks (options as 1st arg)
+  const freezeSetupCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 10, username: 'org-a-admin' }, currentRole: 'ldx_admin' },
+    params: { values: { sourceCollection: 'latticeOrders' } },
+  });
+  await gov.freezeSnapshot(freezeSetupCtx, async () => {});
+  assert.equal(snapshots.length, 1);
+
+  for (const hook of ['beforeBulkUpdate', 'beforeBulkDestroy']) {
+    await assert.rejects(
+      () => db.emit(`latticeFrozenSnapshots.${hook}`, { where: { id: snapshots[0].id } }),
+      (err) => err.status === 403 && err.code === 'COLD_SNAPSHOT_IMMUTABLE',
+    );
+    await db.emit(`latticeFrozenSnapshots.${hook}`, { allowSystemMigration: true });
+    await db.emit(`latticeFrozenSnapshots.${hook}`, { context: { state: { currentRole: 'root' } } });
+  }
+  for (const hook of ['beforeUpdate', 'beforeDestroy']) {
+    await assert.rejects(
+      () => db.emit(`latticeFrozenSnapshots.${hook}`, snapshots[0], {}),
+      (err) => err.status === 403 && err.code === 'COLD_SNAPSHOT_IMMUTABLE',
+    );
+    await db.emit(`latticeFrozenSnapshots.${hook}`, snapshots[0], { allowSystemMigration: true });
+    await db.emit(`latticeFrozenSnapshots.${hook}`, snapshots[0], { context: { state: { currentRole: 'root' } } });
+  }
+  await assert.rejects(
+    () => db.getRepository('latticeFrozenSnapshots').update({ filter: { id: snapshots[0].id }, values: { status: 'tampered' } }),
+    (err) => err.status === 403 && err.code === 'COLD_SNAPSHOT_IMMUTABLE',
+  );
+  await db.getRepository('latticeFrozenSnapshots').update({
+    filter: { id: snapshots[0].id },
+    values: { coldStorageUri: 's3://bucket/migrated' },
+    allowSystemMigration: true,
+  });
+  assert.equal(snapshots[0].coldStorageUri, 's3://bucket/migrated');
+
+  // 2. Minor 2: freezeSnapshot & quarantineResolve wrap multi-step writes in db.sequelize.transaction
+  let txCount = 0;
+  const origTx = db.sequelize.transaction;
+  db.sequelize.transaction = async (cb) => {
+    txCount += 1;
+    const snapBackup = snapshots.map((s) => ({ ...s }));
+    const ledgerBackup = ledgerEntries.map((l) => ({ ...l }));
+    const qBackup = quarantineRows.map((q) => ({ ...q }));
+    const tsBackup = telemetryPoints.map((t) => ({ ...t }));
+    try {
+      return await origTx(cb);
+    } catch (err) {
+      snapshots.splice(0, snapshots.length, ...snapBackup);
+      ledgerEntries.splice(0, ledgerEntries.length, ...ledgerBackup);
+      quarantineRows.splice(0, quarantineRows.length, ...qBackup);
+      telemetryPoints.splice(0, telemetryPoints.length, ...tsBackup);
+      throw err;
+    }
+  };
+
+  const qTxRec = await captureQuarantineRecord(db, {
+    organizationId: 'org-a',
+    sourceSystem: 'iiot',
+    assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+    metricName: 'temperature',
+    numericValue: -19,
+    unit: 'CEL',
+    reasonCode: 'BAD_TELEMETRY_QUALITY',
+    severity: 'medium',
+    rawPayload: { numericValue: -19, quality: 'bad' },
+  });
+  const beforeTx = txCount;
+  const beforeLedgerLen = ledgerEntries.length;
+  const beforePtsLen = telemetryPoints.length;
+  pkiKeys[0].active = false;
+  await assert.rejects(
+    () => gov.quarantineResolve(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 21, username: 'org-a-ops' }, currentRole: 'ldx_operator' },
+      params: { values: { quarantineUid: qTxRec.quarantineUid, status: 'approved_release', releaseToTelemetry: true } },
+    }), async () => {}),
+    (err) => err.code === 'PKI_KEY_INACTIVE',
+  );
+  assert.equal(txCount, beforeTx + 1);
+  assert.equal(telemetryPoints.length, beforePtsLen);
+  assert.equal(ledgerEntries.length, beforeLedgerLen);
+  assert.equal(quarantineRows.find((q) => q.quarantineUid === qTxRec.quarantineUid).status, 'quarantined');
+  pkiKeys[0].active = true;
+
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (name !== 'latticeFrozenSnapshots') return repo;
+    return {
+      ...repo,
+      create: async () => { throw new Error('Simulated snapshot insert failure'); },
+    };
+  };
+  await assert.rejects(
+    () => gov.freezeSnapshot(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10, username: 'org-a-admin' }, currentRole: 'ldx_admin' },
+      params: { values: { sourceCollection: 'latticeOrders' } },
+    }), async () => {}),
+    /Simulated snapshot insert failure/,
+  );
+  assert.equal(txCount, beforeTx + 2);
+  assert.equal(ledgerEntries.length, beforeLedgerLen);
+  db.getRepository = origGetRepo;
+  db.sequelize.transaction = origTx;
+
+  // 3. Minor 3: computeMkt CSV parsing rejects empty segments (4,,8) & handles empty optional params consistently
+  await assert.rejects(
+    () => gov.computeMkt(makeHttpCtx({
+      method: 'GET',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { samplesC: '4,,8' },
+    }), async () => {}),
+    (err) => err.status === 400 && err.code === 'MKT_INVALID_SAMPLE',
+  );
+  const csvValidCtx = makeHttpCtx({
+    method: 'GET',
+    state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+    params: { samplesC: '4, 8', deltaH_kJ_mol: '', maxAllowedC: '' },
+  });
+  await gov.computeMkt(csvValidCtx, async () => {});
+  assert.equal(csvValidCtx.body.sampleCount, 2);
+  assert.equal(csvValidCtx.body.thresholdCelsius, null);
+  assert.equal(csvValidCtx.body.breached, false);
+
+  await assert.rejects(
+    () => gov.computeMkt(makeHttpCtx({
+      method: 'GET',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { samplesC: '4,8', deltaH_kJ_mol: 'invalid' },
+    }), async () => {}),
+    (err) => err.status === 400 && err.code === 'MKT_INVALID_PARAMS',
+  );
+  await assert.rejects(
+    () => gov.computeMkt(makeHttpCtx({
+      method: 'GET',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { samplesC: '4,8', maxAllowedC: [] },
+    }), async () => {}),
+    (err) => err.status === 400 && err.code === 'MKT_INVALID_THRESHOLD',
+  );
+
+  // 4. Minor 4: lineageTrace truncation at MAX_LINEAGE_NODES=100 emits zero dangling edges
+  for (let i = 1; i <= 110; i += 1) {
+    await recordLineageEdge(db, {
+      organizationId: 'org-a',
+      sourceCollection: 'latticeOrders',
+      sourceRecordId: 'ROOT-FANOUT',
+      targetCollection: 'latticeServiceTickets',
+      targetRecordId: `FAN-${i}`,
+      relationType: 'spawned',
+    });
+  }
+  const truncTraceCtx = makeHttpCtx({
+    method: 'GET',
+    state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+    params: { collection: 'latticeOrders', recordId: 'ROOT-FANOUT', maxDepth: 2, direction: 'outbound' },
+  });
+  await gov.lineageTrace(truncTraceCtx, async () => {});
+  assert.equal(truncTraceCtx.body.truncated, true);
+  assert.equal(truncTraceCtx.body.nodeCount, 100);
+  assert.equal(truncTraceCtx.body.nodes.length, 100);
+  const nodeKeys = new Set(truncTraceCtx.body.nodes.map((n) => n.key));
+  assert.equal(truncTraceCtx.body.edges.length, 99);
+  for (const edge of truncTraceCtx.body.edges) {
+    assert.ok(nodeKeys.has(`${edge.sourceCollection}:${edge.sourceRecordId}`), 'Dangling edge source node');
+    assert.ok(nodeKeys.has(`${edge.targetCollection}:${edge.targetRecordId}`), 'Dangling edge target node');
+  }
+
+  // 5. Minor 5: sanitizeSnapshotFilter rejects non-plain-object/array at depth=0; retentionDays rejects booleans/non-finite
+  for (const badFilter of [[1, 2], '[1, 2]', 123, true, 'null']) {
+    await assert.rejects(
+      () => gov.freezeSnapshot(makeHttpCtx({
+        method: 'POST',
+        state: { currentUser: { id: 10, username: 'org-a-admin' }, currentRole: 'ldx_admin' },
+        params: { values: { sourceCollection: 'latticeOrders', filter: badFilter } },
+      }), async () => {}),
+      (err) => err.status === 400 && err.code === 'DATA_GOV_FILTER_INVALID',
+    );
+  }
+  for (const badRetention of [true, false, [5], NaN, Infinity, '', null, 0, -3]) {
+    await assert.rejects(
+      () => gov.freezeSnapshot(makeHttpCtx({
+        method: 'POST',
+        state: { currentUser: { id: 10, username: 'org-a-admin' }, currentRole: 'ldx_admin' },
+        params: { values: { sourceCollection: 'latticeOrders', retentionDays: badRetention } },
+      }), async () => {}),
+      (err) => err.status === 400 && err.code === 'DATA_GOV_RETENTION_INVALID',
+    );
+  }
+
+  // 6. Minor 6: read-only PAT rejection on quarantineResolve (GET & POST), read-only PAT allowance on POST computeMkt, and ctx.can ACL path
+  const roPatCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 10, username: 'org-a-admin' }, currentRole: 'ldx_admin' },
+    params: { values: { name: 'Round1 RO', roleName: 'ldx_admin', scopes: ['read'] } },
+  });
+  await keyActions.issue(roPatCtx, async () => {});
+  const roToken = roPatCtx.body.token;
+
+  for (const method of ['GET', 'POST']) {
+    const roResolveCtx = makeHttpCtx({
+      method,
+      headers: { 'x-lattice-api-key': roToken },
+      params: {
+        resourceName: 'dxosDataGov',
+        actionName: 'quarantineResolve',
+        values: { quarantineUid: qTxRec.quarantineUid, status: 'rejected' },
+      },
+    });
+    await assert.rejects(
+      () => authMw(roResolveCtx, async () => gov.quarantineResolve(roResolveCtx, async () => {})),
+      (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+    );
+  }
+
+  const roPostMktCtx = makeHttpCtx({
+    method: 'POST',
+    headers: { 'x-lattice-api-key': roToken },
+    params: { resourceName: 'dxosDataGov', actionName: 'computeMkt', values: { samplesC: [2, 8], maxAllowedC: 8 } },
+  });
+  await authMw(roPostMktCtx, async () => gov.computeMkt(roPostMktCtx, async () => {}));
+  assert.equal(roPostMktCtx.body.sampleCount, 2);
+  assert.equal(roPostMktCtx.body.breached, false);
+
+  const deniedCanCtx = makeHttpCtx({
+    method: 'GET',
+    state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
+  });
+  deniedCanCtx.can = () => false;
+  await assert.rejects(
+    () => gov.tierSummary(deniedCanCtx, async () => {}),
+    (err) => err.status === 403 && err.code === 'DATA_GOV_FORBIDDEN',
+  );
+
+  const allowedCanCtx = makeHttpCtx({
+    method: 'GET',
+    state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
+  });
+  allowedCanCtx.can = ({ resource, action }) => resource === 'latticeOrders' && action === 'view';
+  await gov.tierSummary(allowedCanCtx, async () => {});
+  assert.equal(allowedCanCtx.body.organizationId, 'org-a');
+});
+
 test('Task 2.1 files carry valid Apache-2.0 SPDX headers', async () => {
   const { addSourceHeader } = await import(pathToFileURL(join(REPO_ROOT, 'scripts/source-headers.mjs')).href);
   for (const rel of [
