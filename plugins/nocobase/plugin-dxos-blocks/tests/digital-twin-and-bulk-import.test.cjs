@@ -1056,6 +1056,20 @@ test('Digital Twin executes DB + ledger inside transaction before downlink, enfo
   assert.equal(committed.approvals.length, 0, 'HITL approval queue insert MUST roll back on PKI_KEY_INACTIVE');
   assert.equal(committed.shadows[0].commandStatus, 'synced', 'HITL shadow status update MUST roll back');
 
+  // Ack path rollback when PKI key is inactive
+  const { ackCommandFromEdge } = require(path.join(PLUGIN_ROOT, 'src/server/digital-twin.js'));
+  await assert.rejects(
+    () => ackCommandFromEdge(txDb, {
+      organizationId: 'org-a',
+      assetId: 12,
+      reportedPatch: { targetTempC: -17 },
+      ackStatus: 'acked',
+    }),
+    (err) => err.code === 'PKI_KEY_INACTIVE',
+  );
+  assert.equal(committed.shadows[0].commandStatus, 'synced', 'Ack shadow status update MUST roll back on PKI_KEY_INACTIVE');
+  assert.equal(committed.shadows[0].reportedJson.targetTempC, undefined, 'Ack reportedJson mutation MUST roll back');
+
   // 2. Merged minTempC/maxTempC bounds check catches partial patches inverting persisted bounds
   const { db: mergedDb, shadows: mergedShadows } = makeTwinAndImportHarness();
   await requestDesiredSetpoint(mergedDb, {
@@ -1271,6 +1285,55 @@ test('Bulk Import validates cross-org & missing FKs, rejects malformed quoted CS
     previewToken: assetFkDry.previewToken,
   });
   assert.equal(assetCommit.committedCount, 1);
+
+  // 5. TOCTOU guard inside commitBulkImport transaction rejects missing FK deterministically before create
+  const toctouRows = [{ code: 'AST-TOCTOU', name: 'Toctou Asset', departmentId: 3 }];
+  const toctouDry = await runBulkImportDryRun(db, {
+    organizationId: 'org-a',
+    collection: 'latticeAssets',
+    format: 'json',
+    rows: toctouRows,
+  });
+  assert.equal(toctouDry.validCount, 1);
+  let deptLookups = 0;
+  let assetCreateCalled = false;
+  const toctouDb = {
+    sequelize: db.sequelize,
+    getRepository(name) {
+      if (name === 'latticeDepartments') {
+        return {
+          findOne: async ({ filter = {} } = {}) => {
+            deptLookups += 1;
+            // Succeed during outer prepareImportBatch, then vanish inside tx
+            if (deptLookups === 1) return departments.find((d) => d.id === filter.id && d.organizationId === filter.organizationId) || null;
+            return null;
+          },
+        };
+      }
+      if (name === 'latticeAssets') {
+        const base = db.getRepository('latticeAssets');
+        return {
+          ...base,
+          create: async (args) => {
+            assetCreateCalled = true;
+            return base.create(args);
+          },
+        };
+      }
+      return db.getRepository(name);
+    },
+  };
+  await assert.rejects(
+    () => commitBulkImport(toctouDb, {
+      organizationId: 'org-a',
+      collection: 'latticeAssets',
+      format: 'json',
+      rows: toctouRows,
+      previewToken: toctouDry.previewToken,
+    }),
+    (err) => err.status === 400 && err.code === 'BULK_IMPORT_REFERENCE_NOT_FOUND',
+  );
+  assert.equal(assetCreateCalled, false, 'TOCTOU guard MUST reject before repo.create');
 });
 
 test('DxosBlocksServerPlugin registers dxosTelemetryDirectGuard before latticeNativeScope and composed charts:queryData pipeline blocks direct telemetry/twin access', async () => {
