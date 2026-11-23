@@ -480,6 +480,7 @@ test('dxosApiKeys enforces token hashing, RBAC escalation lock, middleware auth,
   assert.equal(patCtx.state.currentUser.id, 20);
   assert.equal(patCtx.state.currentRole, 'ldx_employee');
   assert.equal(patCtx.headers['x-role'], 'ldx_employee');
+  assert.equal(patCtx.skipAuthCheck, true);
   assert.deepEqual(patCtx.state.latticeApiKey.scopes, ['read', 'wms']);
   assert.ok(apiKeys[0].lastUsedAt);
 
@@ -492,16 +493,37 @@ test('dxosApiKeys enforces token hashing, RBAC escalation lock, middleware auth,
   assert.equal(bearerCtx.state.currentUser.id, 10);
   assert.equal(bearerCtx.state.currentRole, 'ldx_admin');
   assert.equal(bearerCtx.headers['x-role'], 'ldx_admin');
+  assert.equal(bearerCtx.skipAuthCheck, true);
 
-  // Invalid PAT rejected with 401
+  // Non-PAT Bearer or anonymous request passes through without setting skipAuthCheck
+  const jwtPassCtx = makeHttpCtx({
+    method: 'GET',
+    headers: { authorization: 'Bearer eyJ.fake.jwt' },
+  });
+  let jwtRanNext = false;
+  await authMw(jwtPassCtx, async () => { jwtRanNext = true; });
+  assert.equal(jwtRanNext, true);
+  assert.equal(jwtPassCtx.skipAuthCheck, undefined);
+
+  const anonPassCtx = makeHttpCtx({ method: 'GET', headers: {} });
+  let anonRanNext = false;
+  await authMw(anonPassCtx, async () => { anonRanNext = true; });
+  assert.equal(anonRanNext, true);
+  assert.equal(anonPassCtx.skipAuthCheck, undefined);
+
+  // Invalid PAT rejected with 401 and must never set skipAuthCheck
+  const badKeyCtx = makeHttpCtx({ headers: { 'x-lattice-api-key': 'ldx_pat_deadbeef_00000000000000000000000000000000' } });
   await assert.rejects(
-    () => authMw(makeHttpCtx({ headers: { 'x-lattice-api-key': 'ldx_pat_deadbeef_00000000000000000000000000000000' } }), async () => {}),
+    () => authMw(badKeyCtx, async () => {}),
     (err) => err.status === 401,
   );
+  assert.equal(badKeyCtx.skipAuthCheck, undefined);
+  const badBearerCtx = makeHttpCtx({ headers: { authorization: 'Bearer ldx_pat_bad_format' } });
   await assert.rejects(
-    () => authMw(makeHttpCtx({ headers: { authorization: 'Bearer ldx_pat_bad_format' } }), async () => {}),
+    () => authMw(badBearerCtx, async () => {}),
     (err) => err.status === 401,
   );
+  assert.equal(badBearerCtx.skipAuthCheck, undefined);
 
   // Expired PAT rejected with 401
   apiKeys[1].expiresAt = new Date(Date.now() - 60_000).toISOString();
@@ -862,7 +884,7 @@ test('OpenAPI 3.1.0, AsyncAPI 3.0.0, observability dxos:openapi/asyncapi endpoin
   assert.equal(aaCtx.response.headers['Cache-Control'], 'no-store');
   assert.equal(aaCtx.body.asyncapi, '3.0.0');
 
-  // Verify plugin index.js wires PaaS API keys middleware BEFORE acl + dxosLedger
+  // Verify plugin index.js wires PaaS API keys middleware BEFORE auth + dxosLedger
   await withMockedNocobase(async () => {
     const indexPath = require.resolve('../src/server/index');
     delete require.cache[indexPath];
@@ -882,7 +904,7 @@ test('OpenAPI 3.1.0, AsyncAPI 3.0.0, observability dxos:openapi/asyncapi endpoin
     await plugin.load();
     assert.ok(pluginResources.has('dxosApiKeys'));
     assert.ok(pluginResources.has('dxosLedger'));
-    assert.ok(rmUses.some((m) => m.opts?.tag === 'latticePaasApiKeyAuth' && m.opts?.before === 'acl'));
+    assert.ok(rmUses.some((m) => m.opts?.tag === 'latticePaasApiKeyAuth' && m.opts?.before === 'auth'));
   });
 
   // Verify SPDX Apache-2.0 headers on all Task 1.1 files

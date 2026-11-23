@@ -348,6 +348,7 @@ function createPaasApiKeyAuthMiddleware(db) {
     clampHeaderRole(ctx, roleName);
     ctx.auth = ctx.auth || {};
     ctx.auth.user = userPlain;
+    ctx.skipAuthCheck = true;
 
     const scopes = Array.isArray(val(keyRow, 'scopesJson')) ? val(keyRow, 'scopesJson') : [];
     ctx.state.latticeApiKey = {
@@ -383,7 +384,7 @@ function createPaasApiKeyAuthMiddleware(db) {
       throw failApiKey('API_KEY_SCOPE_INSUFFICIENT', 403, 'Read-only API key cannot invoke mutating operations.');
     }
 
-    return next();
+    return await next();
   };
 }
 

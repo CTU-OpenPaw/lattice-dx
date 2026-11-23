@@ -63,7 +63,7 @@ class LatticeFoundationPlugin extends Plugin {
     registerPaasApiKeys(this.app);
     registerPkiLedger(this.app);
     registerDataGovernance(this.app);
-    this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'acl'});
+    this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'auth'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
     registerSampleApplications(catalog);
