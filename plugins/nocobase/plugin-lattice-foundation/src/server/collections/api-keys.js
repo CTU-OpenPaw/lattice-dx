@@ -17,7 +17,7 @@ module.exports = require('@nocobase/database').defineCollection({
     { name: 'organizationId', type: 'string', allowNull: false },
     { name: 'name', type: 'string', allowNull: false },
     { name: 'keyPrefix', type: 'string', allowNull: false },
-    { name: 'keyHash', type: 'string', unique: true, allowNull: false },
+    { name: 'keyHash', type: 'string', allowNull: false },
     { name: 'userId', type: 'bigInt', allowNull: false },
     { name: 'employeeId', type: 'bigInt' },
     { name: 'roleName', type: 'string', allowNull: false },

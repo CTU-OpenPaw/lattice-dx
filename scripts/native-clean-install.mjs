@@ -88,6 +88,7 @@ export async function nativeCleanInstall({run=defaultRun,port=13004,onProgress=(
     const migrationPlugins = [
       { directory: 'plugin-lattice-foundation', pkg: '@latticedx/plugin-lattice-foundation' },
       { directory: 'plugin-dxos-para', pkg: '@latticedx/plugin-dxos-para' },
+      { directory: 'plugin-dxos-blocks', pkg: '@latticedx/plugin-dxos-blocks' },
       { directory: 'plugin-dxos-studio', pkg: '@latticedx/plugin-dxos-studio' },
       { directory: 'plugin-dxos-ai', pkg: '@latticedx/plugin-dxos-ai' },
     ];

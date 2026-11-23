@@ -81,18 +81,24 @@ function loadFoundationModule(subpath) {
   const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
   const candidates = inDist
     ? [
+        `@latticedx/plugin-lattice-foundation/dist/server/${subpath}`,
+        `@latticedx/plugin-lattice-foundation/src/server/${subpath}`,
         `../../../plugin-lattice-foundation/dist/server/${subpath}`,
         `../../../plugin-lattice-foundation/src/server/${subpath}`,
       ]
     : [
+        `@latticedx/plugin-lattice-foundation/src/server/${subpath}`,
         `../../../plugin-lattice-foundation/src/server/${subpath}`,
+        `@latticedx/plugin-lattice-foundation/dist/server/${subpath}`,
         `../../../plugin-lattice-foundation/dist/server/${subpath}`,
       ];
   for (const modPath of candidates) {
     try {
       return require(modPath);
     } catch (err) {
-      if (err?.code !== 'MODULE_NOT_FOUND') throw err;
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
     }
   }
   return null;

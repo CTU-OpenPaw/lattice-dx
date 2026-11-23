@@ -48,7 +48,7 @@ const SENSITIVE_FILTER_KEY_RE = /password|secret|token|apikey|api_key|identitySu
 const SENSITIVE_CHART_COLLECTIONS = new Set([
   'users', 'roles', 'dataSourcesRoles', 'dataSourcesRolesResources',
   'authenticators', 'applicationTokens', 'apiKeys', 'sessions',
-  'latticeAiAuditLogs', 'latticeAiProfiles',
+  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiApprovalQueue',
 ]);
 function clampPageLimit(limit) {
   const n = Number(limit);

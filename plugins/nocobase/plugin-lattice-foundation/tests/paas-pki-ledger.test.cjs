@@ -292,12 +292,14 @@ test('collections, migration 20261124000100, and pg-rls define all 3 tables with
 
     assert.equal(apiKeysCol.name, 'latticeApiKeys');
     assert.deepEqual(apiKeysCol.migrationRules, ['schema-only']);
-    assert.ok(apiKeysCol.fields.some((f) => f.name === 'keyHash' && f.unique === true && f.allowNull === false));
+    assert.ok(apiKeysCol.fields.some((f) => f.name === 'keyHash' && f.unique !== true && f.allowNull === false));
+    assert.ok(apiKeysCol.indexes.some((i) => i.name === 'uidx_lattice_api_keys_hash' && i.unique === true));
     assert.ok(apiKeysCol.fields.some((f) => f.name === 'scopesJson' && f.type === 'jsonb'));
 
     assert.equal(pkiKeysCol.name, 'latticePkiKeys');
     assert.deepEqual(pkiKeysCol.migrationRules, ['schema-only']);
-    assert.ok(pkiKeysCol.fields.some((f) => f.name === 'organizationId' && f.unique === true && f.allowNull === false));
+    assert.ok(pkiKeysCol.fields.some((f) => f.name === 'organizationId' && f.unique !== true && f.allowNull === false));
+    assert.ok(pkiKeysCol.indexes.some((i) => i.name === 'uidx_lattice_pki_keys_org' && i.unique === true));
     assert.ok(pkiKeysCol.fields.some((f) => f.name === 'encryptedPrivateKey' && f.type === 'text' && f.allowNull === false));
 
     assert.equal(ledgerCol.name, 'latticeCryptoLedger');

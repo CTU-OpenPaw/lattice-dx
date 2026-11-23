@@ -85,7 +85,7 @@ class DxosAiPlugin extends Plugin {
           }
         }
         return next();
-      }, { tag: 'dxosAiProfileScope', after: 'acl' });
+      }, { tag: 'dxosAiProfileScope', after: 'acl', before: 'latticeNativeScope' });
 
       this.app.resourceManager.use(async (ctx, next) => {
         if (ctx.state?.currentRole === 'root') return next();
@@ -98,7 +98,7 @@ class DxosAiPlugin extends Plugin {
           throw failTool('DXOS_HITL_DIRECT_CRUD_FORBIDDEN', 403, 'Vui lòng sử dụng API phê duyệt HITL chuyên dụng (dxosAi:listApprovals / approveAction / rejectAction).');
         }
         return next();
-      }, { tag: 'dxosAiHitlScope', after: 'acl' });
+      }, { tag: 'dxosAiHitlScope', after: 'acl', before: 'latticeNativeScope' });
     }
 
     attachAppPubSub(this.app);

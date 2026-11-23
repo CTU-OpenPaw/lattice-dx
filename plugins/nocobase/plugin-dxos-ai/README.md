@@ -1,6 +1,6 @@
 # `@latticedx/plugin-dxos-ai`
 
-Plugin Apache-2.0 thuộc trụ cột **Trí tuệ Thực thi `[I]`** của nền tảng **LatticeDX Enterprise Digital OS** trên NocoBase `2.2.38` (`sdkProvidedByHost: true`).
+Plugin Apache-2.0 thuộc trụ cột **Trí tuệ Thực thi `[I]`** của nền tảng **LatticeDX Enterprise Digital OS** trên NocoBase `2.2.50` (`sdkProvidedByHost: true`).
 
 ## Năng lực chính
 - **Quản trị Nhân sự AI Động (`/admin/settings/dxos-ai` · `latticeAiProfiles`):** Quản trị viên tạo mới, nhân bản, chỉnh sửa prompt/SOP, chọn mô hình, gán quyền công cụ (`ALLOW` tự chạy / `ASK` xác nhận / `OFF`), gắn MCP ngoài và gán nút tác vụ nhanh lên từng Portal/Block.

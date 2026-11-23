@@ -139,6 +139,10 @@ test('resource guard scopes dynamic latticeCustom* collections and rejects blind
     { code: 'NATIVE_CHART_COLLECTION_FORBIDDEN' },
   );
   await assert.rejects(
+    guard(ctx('charts', 'queryData', { values: { mode: 'builder', collection: 'latticeAiApprovalQueue' } }), async () => {}),
+    { code: 'NATIVE_CHART_COLLECTION_FORBIDDEN' },
+  );
+  await assert.rejects(
     guard(ctx('charts', 'queryData', { values: { mode: 'builder', collection: 'latticeAssets', filter: { 'user.password': { $ne: null } } } }), async () => {}),
     { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
   );

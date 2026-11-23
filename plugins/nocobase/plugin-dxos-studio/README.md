@@ -1,6 +1,6 @@
 # `@latticedx/plugin-dxos-studio`
 
-Trung tâm quản trị **DX-OS Admin Control Studio** (`/admin/settings/dxos-studio`) và phân hệ nghiệp vụ mẫu thứ hai (`latticeServiceTickets`) cho NocoBase 2.2.38.
+Trung tâm quản trị **DX-OS Admin Control Studio** (`/admin/settings/dxos-studio`) và phân hệ nghiệp vụ mẫu thứ hai (`latticeServiceTickets`) cho NocoBase 2.2.50.
 
 ## Năng lực chính
 - **Tab 1 — Quy trình Poka-yoke:** Cài 1-click 4 mẫu quy trình native NocoBase (`procurement`, **`logistics-5step` liên phòng ban 5 bước**, `incident-uc2`, và `internal-service`) và mở chỉnh tiếp trực tiếp trong Workflow Designer.

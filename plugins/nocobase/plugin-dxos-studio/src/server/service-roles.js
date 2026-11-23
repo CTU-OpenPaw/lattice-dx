@@ -47,7 +47,7 @@ async function installServiceRoleGrants(db) {
   const resources = db.getRepository('dataSourcesRolesResources');
   if (!roles || !resources) return { granted: [] };
   const granted = [];
-  await db.sequelize.transaction(async (transaction) => {
+  const run = async (transaction) => {
     for (const roleName of ALL_ROLES) {
       if (!(await roles.findOne({ filter: { name: roleName }, transaction }))) continue;
       const filter = { name: serviceTickets.name, roleName, dataSourceKey: 'main' };
@@ -55,7 +55,9 @@ async function installServiceRoleGrants(db) {
       await resources.create({ values: buildServiceGrant(roleName), transaction });
       granted.push(roleName);
     }
-  });
+  };
+  if (typeof db.sequelize?.transaction === 'function') await db.sequelize.transaction(run);
+  else await run(undefined);
   return { granted };
 }
 

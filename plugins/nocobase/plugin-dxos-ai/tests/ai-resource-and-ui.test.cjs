@@ -515,7 +515,10 @@ test('dxosAi ignores client defaultOrigin bearer forwarding & locks latticeAiPro
     const ServerPlugin = require(path.join(PLUGIN_ROOT, 'src/server/index.js'));
     await new ServerPlugin(pluginApp).load();
     assert.equal(hooks.has('latticeAiProfiles.beforeValidate'), true);
-    const scopeMw = rmMiddlewares.find((m) => m.opts?.tag === 'dxosAiProfileScope')?.fn;
+    const scopeEntry = rmMiddlewares.find((m) => m.opts?.tag === 'dxosAiProfileScope');
+    assert.equal(scopeEntry?.opts?.after, 'acl');
+    assert.equal(scopeEntry?.opts?.before, 'latticeNativeScope');
+    const scopeMw = scopeEntry?.fn;
     assert.equal(typeof scopeMw, 'function');
 
     // Non-admin direct REST mutation on latticeAiProfiles rejected 403

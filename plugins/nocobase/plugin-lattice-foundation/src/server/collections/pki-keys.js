@@ -14,7 +14,7 @@ module.exports = require('@nocobase/database').defineCollection({
   createdAt: true,
   updatedAt: true,
   fields: [
-    { name: 'organizationId', type: 'string', unique: true, allowNull: false },
+    { name: 'organizationId', type: 'string', allowNull: false },
     { name: 'keyId', type: 'string', allowNull: false },
     { name: 'algorithm', type: 'string', defaultValue: 'Ed25519' },
     { name: 'publicKeyPem', type: 'text', allowNull: false },

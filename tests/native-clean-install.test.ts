@@ -19,6 +19,7 @@ async function orchestratorFixture(count='0'){
   const migrations=[
     { pkg:'@latticedx/plugin-lattice-foundation', dir:'plugin-lattice-foundation', name:'20261107000100-shared-upload-receipts/@latticedx/plugin-lattice-foundation' },
     { pkg:'@latticedx/plugin-dxos-para', dir:'plugin-dxos-para', name:'20261120000100-dxos-para-init/@latticedx/plugin-dxos-para' },
+    { pkg:'@latticedx/plugin-dxos-blocks', dir:'plugin-dxos-blocks', name:'20261123000500-dxos-telemetry-timeseries/@latticedx/plugin-dxos-blocks' },
     { pkg:'@latticedx/plugin-dxos-studio', dir:'plugin-dxos-studio', name:'20261120000200-dxos-service-tickets/@latticedx/plugin-dxos-studio' },
     { pkg:'@latticedx/plugin-dxos-ai', dir:'plugin-dxos-ai', name:'20261121000100-dxos-ai-workforce/@latticedx/plugin-dxos-ai' },
   ];

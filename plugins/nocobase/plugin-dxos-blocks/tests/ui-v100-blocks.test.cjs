@@ -611,6 +611,11 @@ test('registerDxosBlockModels registers DxosWebGisBlockModel & DxosKanbanSchedul
   assert.ok(findByTestId(wbDefault, 'dxos-workbench-lineage-panel'));
   assert.ok(findByTestId(wbDefault, 'dxos-workbench-print-voucher-btn'));
 
+  // Block model hero default subtitle reflects NocoBase 2.2.50
+  const blockModelsSrc = readFileSync(path.join(PLUGIN_ROOT, 'src/client/block-models.js'), 'utf8');
+  assert.equal(blockModelsSrc.includes('Nền mở NocoBase 2.2.50 cho H–P–D–I'), true);
+  assert.equal(blockModelsSrc.includes('2.2.38'), false);
+
   const wbHidden = resolveTree(new models.DxosRecordWorkbenchBlockModel({
     props: {
       collection: 'latticeOrders',

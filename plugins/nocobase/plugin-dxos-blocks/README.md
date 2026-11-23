@@ -1,6 +1,6 @@
 # `@latticedx/plugin-dxos-blocks`
 
-Thư viện **6 Block Native v2 tùy biến sâu** xuất hiện trực tiếp trong nút **Add block** của NocoBase 2.2.38 UI Editor, bao phủ cả 4 không gian kiến trúc DX-OS (**H – P – D – I**):
+Thư viện **6 Block Native v2 tùy biến sâu** xuất hiện trực tiếp trong nút **Add block** của NocoBase 2.2.50 UI Editor, bao phủ cả 4 không gian kiến trúc DX-OS (**H – P – D – I**):
 
 1. **DX-OS Portal Hero & Quick Actions (`DxosPortalHeroBlockModel`, `[H]`):** Banner cổng thông tin, mô tả và các nút thao tác nhanh tự động ẩn/hiện theo quyền ACL của vai trò.
 2. **DX-OS KPI Metric Grid (`DxosKpiMetricBlockModel`, `[D]`):** Lưới chỉ số thời gian thực cấu hình số cột, collection bất kỳ, bộ lọc JSON và liên kết mở trang.

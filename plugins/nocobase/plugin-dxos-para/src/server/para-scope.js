@@ -14,11 +14,15 @@ function loadPgRls() {
   const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
   const candidates = inDist
     ? [
+        '@latticedx/plugin-lattice-foundation/dist/server/pg-rls',
+        '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
         '../../../plugin-lattice-foundation/dist/server/pg-rls',
         '../../../plugin-lattice-foundation/src/server/pg-rls',
       ]
     : [
+        '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
         '../../../plugin-lattice-foundation/src/server/pg-rls',
+        '@latticedx/plugin-lattice-foundation/dist/server/pg-rls',
         '../../../plugin-lattice-foundation/dist/server/pg-rls',
       ];
   for (const modPath of candidates) {
@@ -26,7 +30,9 @@ function loadPgRls() {
       const mod = require(modPath);
       if (mod && typeof mod.withTenantRlsContext === 'function') return mod;
     } catch (err) {
-      if (err?.code !== 'MODULE_NOT_FOUND') throw err;
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
     }
   }
   return null;

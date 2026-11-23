@@ -750,7 +750,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       'DX-OS Portal Hero & Quick Actions',
       {
         title: 'Không gian Điều hành Doanh nghiệp DX-OS',
-        subtitle: 'Nền mở NocoBase 2.2.38 cho H–P–D–I',
+        subtitle: 'Nền mở NocoBase 2.2.50 cho H–P–D–I',
         badge: 'DX-OS',
         accentColor: '#1677ff',
         actionsJson: DEFAULT_HERO_ACTIONS,
