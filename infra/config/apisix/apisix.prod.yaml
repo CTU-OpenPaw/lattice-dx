@@ -19,7 +19,7 @@ global_rules:
       cors:
         allow_origins: "${{LATTICE_ALLOWED_ORIGIN}}"
         allow_methods: "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-        allow_headers: "Authorization,Content-Type,X-Role,X-Request-Id,X-Lattice-API-Key,X-DX-Edge-Token,X-Authenticator"
+        allow_headers: "Authorization,Content-Type,X-Role,X-Request-Id,X-Lattice-API-Key,X-Lattice-Edge-Token,X-DX-Edge-Token,X-Authenticator"
         allow_credential: true
         max_age: 3600
 
@@ -62,7 +62,7 @@ routes:
 
   - id: dxos-oidc-bridge
     priority: 80
-    uri: /api/dxos-oidc/*
+    uris: [/api/dxos-oidc, /api/dxos-oidc/*]
     plugins:
       openid-connect:
         client_id: dx-gateway
@@ -104,6 +104,10 @@ routes:
       type: roundrobin
       nodes:
         "nocobase:80": 1
+      timeout:
+        connect: 6
+        send: 600
+        read: 600
 
   - id: dxos-telemetry-ingest
     priority: 80
@@ -142,4 +146,8 @@ routes:
       type: roundrobin
       nodes:
         "nocobase:80": 1
+      timeout:
+        connect: 6
+        send: 600
+        read: 600
 #END

@@ -253,6 +253,16 @@ test('observability configs and PostgreSQL PITR archive script meet security, SP
   assert.match(dashText, /latticedx-prom/);
   assert.doesNotMatch(dashText, /CHANGE_ME_|local-gateway-secret/i);
 
+  const panel5 = dash.panels.find((p) => p.id === 5);
+  assert.ok(panel5, 'latticedx-360.json missing Panel 5 (Database & Engine Health)');
+  const panel5Override = (panel5.fieldConfig?.overrides || []).find(
+    (o) => o?.matcher?.id === 'byFrameRefID' && o?.matcher?.options === 'B',
+  );
+  assert.ok(panel5Override, 'Panel 5 missing byFrameRefID: "B" override for Uptime Seconds');
+  const panel5Props = new Map((panel5Override.properties || []).map((prop) => [prop.id, prop.value]));
+  assert.equal(panel5Props.get('unit'), 's');
+  assert.deepEqual(panel5Props.get('mappings'), []);
+
   const pitrSh = read('infra/config/postgres/pitr-archive.sh');
   assert.ok(pitrSh.startsWith('#!/bin/sh\n'), 'pitr-archive.sh must start with POSIX #!/bin/sh and LF');
   assert.equal(pitrSh.includes('\r'), false, 'pitr-archive.sh must use LF line endings');
@@ -317,11 +327,22 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(apisixProd, /ssl_verify:\s*true/);
   assert.match(apisixProd, /policy:\s*redis/);
   assert.match(apisixProd, /APISIX_OIDC_CLIENT_SECRET/);
+  assert.match(apisixProd, /allow_headers:[^\r\n]*X-Lattice-Edge-Token/);
+  assert.match(apisixProd, /id:\s*dxos-oidc-bridge[\s\S]*?uris:\s*\[\/api\/dxos-oidc,\s*\/api\/dxos-oidc\/\*\]/);
+  assert.match(apisixProd, /id:\s*dxos-mcp[\s\S]*?timeout:\s*\r?\n\s*connect:\s*6\s*\r?\n\s*send:\s*600\s*\r?\n\s*read:\s*600/);
+  assert.match(apisixProd, /id:\s*dxos-core-api[\s\S]*?timeout:\s*\r?\n\s*connect:\s*6\s*\r?\n\s*send:\s*600\s*\r?\n\s*read:\s*600/);
 
   const apisixCfg = read('infra/config/apisix/config.prod.yaml');
   assert.match(apisixCfg, /response-rewrite/);
   assert.match(apisixCfg, /proxy-rewrite/);
   assert.match(apisixCfg, /cors/);
+  assert.match(apisixCfg, /nginx_config:\s*\r?\n\s+http:/);
+  assert.match(apisixCfg, /real_ip_header:\s*"?X-Forwarded-For"?/);
+  assert.match(apisixCfg, /real_ip_recursive:\s*"?on"?/);
+  assert.match(apisixCfg, /real_ip_from:/);
+  for (const cidr of ['127.0.0.1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']) {
+    assert.ok(apisixCfg.includes(cidr), `config.prod.yaml real_ip_from missing ${cidr}`);
+  }
 
   const initProd = read('infra/config/postgres/init-prod.sh');
   assert.match(initProd, /ON_ERROR_STOP=1/);
