@@ -31,7 +31,7 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
   - **Đội ngũ Logistics 5 bước:** `native.lab.manager@example.invalid`, `native.lab.worker@example.invalid`, `native.lab.dispatcher@example.invalid`, `native.lab.driver@example.invalid` (mật khẩu chung `NativeLab-2026!`)
 - **Các Tab Trình duyệt Chuẩn bị sẵn:**
   1. `http://localhost:13014/admin/settings/dxos-ai` (Trung tâm 6 Phân hệ, AI Workforce & HITL)
-  2. `http://localhost:13014/admin/settings/dxos-studio` (Control Studio **9 Tabs**, 6 Governance Consoles & GitOps Bundle v3) & `http://localhost:13014/admin/settings/dxos-flow-studio` (LatticeFlow v2 Full-Screen DAG Studio — 24 node types, HITL Pause/Resume & **DX-OS Flow Architect**)
+  2. `http://localhost:13014/admin/settings/dxos-studio` (Control Studio **9 Tabs**, 6 Governance Consoles & GitOps Bundle v3) & `http://localhost:13014/admin/settings/workflow/automation` (**Workflow -> Workflow Automation**: LatticeFlow v2 Canvas-First Studio — 24 node types, HITL Pause/Resume & **Agent Chat gốc `dxos-architect`** đồng bộ SSE)
   3. `http://localhost:13014/p/logistics` (Logistics 5 bước, Kanban/Schedule, PKI & Printable Voucher)
   4. `http://localhost:13014/p/incidents` (WebGIS Chuỗi lạnh, IIoT Digital Twin & GraphRAG Enterprise Agent)
   5. `http://localhost:13014/p/cmms` (CMMS Bảo trì Thiết bị — `latticeCustomWorkOrders` từ Business Pack 1-nhấp)
