@@ -1,0 +1,1395 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const crypto = require('node:crypto');
+const EventEmitter = require('node:events');
+const fs = require('node:fs');
+const Module = require('node:module');
+const path = require('node:path');
+const { pathToFileURL } = require('node:url');
+
+const originalLoad = Module._load;
+Module._load = function mockedNocobaseLoad(request, parent, isMain) {
+  if (request === '@nocobase/server') return { Plugin: class {}, Migration: class {} };
+  if (request === '@nocobase/database') return { defineCollection: (def) => def };
+  return originalLoad.call(this, request, parent, isMain);
+};
+
+let executorMod;
+let automationMod;
+let DxosStudioPlugin;
+try {
+  executorMod = require('../src/server/flow/executor');
+  automationMod = require('../src/server/automation-engine');
+  DxosStudioPlugin = require('../src/server/index');
+} finally {
+  Module._load = originalLoad;
+}
+
+const { getFlowBlueprint } = require('../src/server/flow/blueprints');
+const connectorVault = require(path.resolve(__dirname, '../../plugin-lattice-foundation/src/server/connector-vault'));
+
+const {
+  executeFlowGraph,
+  dryRunFlowGraph,
+  testSingleFlowNode,
+  resumeFlowRun,
+  dispatchRecordTriggerEvent,
+  dispatchWebhookIngress,
+  tickDueDelayedRuns,
+} = executorMod;
+const {
+  createDxosAutomationsActions,
+  executeRuleAgainstEvent,
+  validateRulePayload,
+} = automationMod;
+
+function matchRow(row, filter) {
+  if (!filter || typeof filter !== 'object') return true;
+  for (const [k, v] of Object.entries(filter)) {
+    if (k === '$and' && Array.isArray(v)) {
+      if (!v.every((sub) => matchRow(row, sub))) return false;
+      continue;
+    }
+    if (k === '$or' && Array.isArray(v)) {
+      if (!v.some((sub) => matchRow(row, sub))) return false;
+      continue;
+    }
+    const actual = row?.[k];
+    if (v && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date)) {
+      if ('$in' in v && (!Array.isArray(v.$in) || !v.$in.includes(actual))) return false;
+      if ('$ne' in v && actual === v.$ne) return false;
+      if ('$gt' in v && !(Number(actual) > Number(v.$gt))) return false;
+      if ('$gte' in v && !(Number(actual) >= Number(v.$gte))) return false;
+      if ('$lt' in v && !(Number(actual) < Number(v.$lt))) return false;
+      if ('$lte' in v && !(Number(actual) <= Number(v.$lte))) return false;
+    } else if (actual !== v) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function makeFlowDb(seed = {}) {
+  const emitter = new EventEmitter();
+  const baseSeed = {
+    latticeEmployees: [
+      { id: 1, userId: 20, organizationId: 'org-a', active: true },
+      { id: 2, userId: 21, organizationId: 'org-a', active: true },
+      { id: 3, userId: 22, organizationId: 'org-a', active: true },
+    ],
+    rolesUsers: [
+      { userId: 20, roleName: 'ldx_admin' },
+      { userId: 21, roleName: 'ldx_manager' },
+      { userId: 22, roleName: 'ldx_operator' },
+    ],
+    ...seed,
+  };
+  const store = {};
+  const seq = {};
+  for (const [col, rows] of Object.entries(baseSeed)) {
+    store[col] = rows.map((r, i) => ({ id: r.id ?? i + 1, ...structuredClone(r) }));
+    seq[col] = store[col].length + 1;
+  }
+
+  function makeRepo(name) {
+    if (!store[name]) {
+      store[name] = [];
+      seq[name] = 1;
+    }
+    return {
+      async find({ filter = {}, sort = [], limit = 200, offset = 0 } = {}) {
+        let rows = store[name].filter((r) => matchRow(r, filter));
+        if (Array.isArray(sort) && sort.length > 0) {
+          const primary = String(sort[0]);
+          const desc = primary.startsWith('-');
+          const key = desc ? primary.slice(1) : primary;
+          rows = rows.slice().sort((a, b) => {
+            const av = a[key] instanceof Date ? a[key].getTime() : a[key];
+            const bv = b[key] instanceof Date ? b[key].getTime() : b[key];
+            if (av === bv) return 0;
+            if (av === undefined || av === null) return 1;
+            if (bv === undefined || bv === null) return -1;
+            return (av < bv ? -1 : 1) * (desc ? -1 : 1);
+          });
+        }
+        return rows.slice(offset, offset + limit).map((r) => ({ ...r }));
+      },
+      async findOne({ filter = {}, filterByTk } = {}) {
+        const eff = filterByTk !== undefined ? { id: filterByTk, ...filter } : filter;
+        const rows = await this.find({ filter: eff, limit: 1 });
+        return rows[0] || null;
+      },
+      async count({ filter = {} } = {}) {
+        return store[name].filter((r) => matchRow(r, filter)).length;
+      },
+      async create({ values }) {
+        const id = values.id ?? seq[name]++;
+        const now = new Date();
+        const row = { id, createdAt: now, updatedAt: now, ...structuredClone(values) };
+        store[name].push(row);
+        return { ...row };
+      },
+      async update({ filter = {}, filterByTk, values }) {
+        const eff = filterByTk !== undefined ? { id: filterByTk, ...filter } : filter;
+        let updated = 0;
+        for (const row of store[name]) {
+          if (matchRow(row, eff)) {
+            Object.assign(row, structuredClone(values), { updatedAt: new Date() });
+            updated += 1;
+          }
+        }
+        return [updated];
+      },
+      async destroy({ filter = {}, filterByTk } = {}) {
+        const eff = filterByTk !== undefined ? { id: filterByTk, ...filter } : filter;
+        const before = store[name].length;
+        store[name] = store[name].filter((r) => !matchRow(r, eff));
+        return before - store[name].length;
+      },
+    };
+  }
+
+  return {
+    store,
+    emitter,
+    getRepository(name) {
+      return makeRepo(name);
+    },
+    on(event, fn) {
+      emitter.on(event, fn);
+    },
+    off(event, fn) {
+      emitter.off(event, fn);
+    },
+    removeListener(event, fn) {
+      emitter.removeListener(event, fn);
+    },
+    async emitHook(event, model, opts = {}) {
+      const listeners = emitter.listeners(event);
+      for (const fn of listeners) {
+        await fn(model, opts);
+      }
+    },
+    sequelize: {
+      getDialect: () => 'sqlite',
+    },
+  };
+}
+
+function makeCtx({ userId = 20, role = 'ldx_admin', organizationId = 'org-a', params = {}, headers = {}, body = null } = {}) {
+  return {
+    method: 'POST',
+    state: {
+      currentUser: { id: userId, username: `user_${userId}`, organizationId },
+      currentRole: role,
+      currentRoles: [role],
+    },
+    action: { params },
+    request: { headers, body },
+    body: null,
+  };
+}
+
+test('DAG branching (control.if + control.switch) and control.parallel -> control.merge (wait_all & first_completed)', async () => {
+  const db = makeFlowDb({
+    latticeRequests: [{ id: 1, organizationId: 'org-a', code: 'REQ-1', name: 'Initial' }],
+  });
+
+  const graphRule = {
+    organizationId: 'org-a',
+    ruleKey: 'dag_branch_merge_rule',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.event', config: { eventType: 'order.created' } },
+        { id: 'if_1', type: 'control.if', config: { condition: { field: 'data.amount', op: 'gt', value: 100 } } },
+        {
+          id: 'sw_1',
+          type: 'control.switch',
+          config: {
+            expression: 'data.tier',
+            cases: [
+              { port: 'case_0', equals: 'gold' },
+              { port: 'case_1', equals: 'silver' },
+            ],
+          },
+        },
+        { id: 'par_1', type: 'control.parallel', config: {} },
+        {
+          id: 'tr_a',
+          type: 'logic.transform',
+          config: { baseFromInput: false, operations: [{ op: 'set', target: 'branchA', value: 'alpha' }] },
+        },
+        {
+          id: 'tr_b',
+          type: 'logic.transform',
+          config: { baseFromInput: false, operations: [{ op: 'set', target: 'branchB', value: 'beta' }] },
+        },
+        { id: 'merge_all', type: 'control.merge', config: { mode: 'wait_all' } },
+        {
+          id: 'create_ticket',
+          type: 'data.create',
+          config: {
+            collection: 'latticeServiceTickets',
+            values: {
+              code: 'DAG-{{event.id}}',
+              name: 'Merged {{nodes.merge_all.output.merged.branchA}}-{{nodes.merge_all.output.merged.branchB}}',
+              priority: 'high',
+            },
+          },
+        },
+        { id: 'notify_low', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Low amount' } },
+        { id: 'notify_silver', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Silver tier' } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'if_1', targetHandle: 'in' },
+        { id: 'e2', source: 'if_1', sourceHandle: 'true', target: 'sw_1', targetHandle: 'in' },
+        { id: 'e3', source: 'if_1', sourceHandle: 'false', target: 'notify_low', targetHandle: 'in' },
+        { id: 'e4', source: 'sw_1', sourceHandle: 'case_0', target: 'par_1', targetHandle: 'in' },
+        { id: 'e5', source: 'sw_1', sourceHandle: 'case_1', target: 'notify_silver', targetHandle: 'in' },
+        { id: 'e6', source: 'par_1', sourceHandle: 'main', target: 'tr_a', targetHandle: 'in' },
+        { id: 'e7', source: 'par_1', sourceHandle: 'main', target: 'tr_b', targetHandle: 'in' },
+        { id: 'e8', source: 'tr_a', sourceHandle: 'main', target: 'merge_all', targetHandle: 'in' },
+        { id: 'e9', source: 'tr_b', sourceHandle: 'main', target: 'merge_all', targetHandle: 'in' },
+        { id: 'e10', source: 'merge_all', sourceHandle: 'main', target: 'create_ticket', targetHandle: 'in' },
+      ],
+    },
+  };
+
+  const run = await executeFlowGraph(db, graphRule, {
+    id: 'evt-dag-1',
+    type: 'order.created',
+    organizationId: 'org-a',
+    data: { amount: 500, tier: 'gold' },
+  });
+
+  assert.equal(run.status, 'completed');
+  assert.equal(run.graphVersion, 2);
+  assert.equal(run.nodeStatesJson.merge_all.status, 'completed');
+  assert.deepEqual(run.nodeStatesJson.merge_all.output.merged, { branchA: 'alpha', branchB: 'beta' });
+  assert.equal(run.nodeStatesJson.notify_low.status, 'skipped');
+  assert.equal(run.nodeStatesJson.notify_low.reason, 'BRANCH_NOT_TAKEN');
+  assert.equal(run.nodeStatesJson.notify_silver.status, 'skipped');
+  assert.equal(db.store.latticeServiceTickets.length, 1);
+  assert.equal(db.store.latticeServiceTickets[0].name, 'Merged alpha-beta');
+
+  // first_completed merge succeeds even when one parallel branch errors out
+  const firstMergeRule = {
+    organizationId: 'org-a',
+    ruleKey: 'first_merge_rule',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'par_1', type: 'control.parallel', config: {} },
+        { id: 'ok_branch', type: 'logic.transform', config: { baseFromInput: false, operations: [{ op: 'set', target: 'winner', value: 'ok' }] } },
+        { id: 'fail_branch', type: 'logic.dmn', config: { tableKey: 'missing_dmn_table' } },
+        { id: 'merge_first', type: 'control.merge', config: { mode: 'first_completed' } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'par_1' },
+        { id: 'e2', source: 'par_1', sourceHandle: 'main', target: 'ok_branch' },
+        { id: 'e3', source: 'par_1', sourceHandle: 'main', target: 'fail_branch' },
+        { id: 'e4', source: 'ok_branch', sourceHandle: 'main', target: 'merge_first' },
+        { id: 'e5', source: 'fail_branch', sourceHandle: 'main', target: 'merge_first' },
+      ],
+      settings: { errorPolicy: 'continue' },
+    },
+  };
+  const firstRun = await executeFlowGraph(db, firstMergeRule, { organizationId: 'org-a', data: {} });
+  assert.equal(firstRun.status, 'partial');
+  assert.equal(firstRun.nodeStatesJson.merge_first.status, 'completed');
+  assert.deepEqual(firstRun.nodeStatesJson.merge_first.output.merged, { winner: 'ok' });
+});
+
+test('error port routing catches node failure while unhandled failure stops execution', async () => {
+  const db = makeFlowDb();
+
+  // With error edge -> routes to error handler and continues
+  const errorHandledRule = {
+    organizationId: 'org-a',
+    ruleKey: 'err_port_rule',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'bad_step', type: 'logic.dmn', config: { tableKey: 'missing_dmn_table' } },
+        { id: 'ok_downstream', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Should not run' } },
+        {
+          id: 'err_handler',
+          type: 'notify.send',
+          config: { roleNames: ['ldx_admin'], title: 'Caught: {{steps.bad_step.error}}' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'bad_step' },
+        { id: 'e2', source: 'bad_step', sourceHandle: 'main', target: 'ok_downstream' },
+        { id: 'e3', source: 'bad_step', sourceHandle: 'error', target: 'err_handler' },
+      ],
+    },
+  };
+  const handledRun = await executeFlowGraph(db, errorHandledRule, { organizationId: 'org-a', data: {} });
+  assert.equal(handledRun.nodeStatesJson.bad_step.status, 'failed');
+  assert.match(handledRun.nodeStatesJson.bad_step.error, /DMN_TABLE_NOT_FOUND/);
+  assert.equal(handledRun.nodeStatesJson.ok_downstream.status, 'skipped');
+  assert.equal(handledRun.nodeStatesJson.err_handler.status, 'completed');
+  assert.equal(db.store.latticeNotifications.length, 1);
+  assert.match(db.store.latticeNotifications[0].title, /Caught: DMN_TABLE_NOT_FOUND/);
+
+  // Without error edge & errorPolicy=stop -> fails & halts
+  const fatalRule = {
+    organizationId: 'org-a',
+    ruleKey: 'fatal_stop_rule',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'bad_step', type: 'logic.dmn', config: { tableKey: 'missing_dmn_table' } },
+        { id: 'never_runs', type: 'notify.send', config: { roleNames: ['ldx_admin'], title: 'Never' } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'bad_step' },
+        { id: 'e2', source: 'bad_step', sourceHandle: 'main', target: 'never_runs' },
+      ],
+      settings: { errorPolicy: 'stop' },
+    },
+  };
+  const fatalRun = await executeFlowGraph(db, fatalRule, { organizationId: 'org-a', data: {} });
+  assert.equal(fatalRun.status, 'failed');
+  assert.equal(fatalRun.nodeStatesJson.bad_step.status, 'failed');
+  assert.notEqual(fatalRun.nodeStatesJson.never_runs?.status, 'completed');
+  assert.equal(db.store.latticeNotifications.length, 1);
+});
+
+test('control.loop executes acyclic item subgraph in topological order, runs done branch, and enforces 100 cap', async () => {
+  const db = makeFlowDb();
+  const loopRule = {
+    organizationId: 'org-a',
+    ruleKey: 'loop_rule',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'loop_1', type: 'control.loop', config: { itemsPath: 'data.items', maxIterations: 50 } },
+        {
+          id: 'item_create',
+          type: 'data.create',
+          config: {
+            collection: 'latticeServiceTickets',
+            values: { code: 'L-{{loop.index}}-{{loop.item.sku}}', name: 'Item {{loop.item.sku}}' },
+          },
+        },
+        {
+          id: 'done_notify',
+          type: 'notify.send',
+          config: { roleNames: ['ldx_operator'], title: 'Done {{nodes.loop_1.output.count}}' },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'loop_1' },
+        { id: 'e2', source: 'loop_1', sourceHandle: 'item', target: 'item_create' },
+        { id: 'e3', source: 'loop_1', sourceHandle: 'done', target: 'done_notify' },
+      ],
+    },
+  };
+
+  const run = await executeFlowGraph(db, loopRule, {
+    organizationId: 'org-a',
+    data: { items: [{ sku: 'A1' }, { sku: 'B2' }, { sku: 'C3' }] },
+  });
+  assert.equal(run.status, 'completed');
+  assert.equal(db.store.latticeServiceTickets.length, 3);
+  assert.deepEqual(
+    db.store.latticeServiceTickets.map((t) => t.code),
+    ['L-0-A1', 'L-1-B2', 'L-2-C3'],
+  );
+  assert.equal(run.nodeStatesJson.loop_1.output.results.length, 3);
+  assert.equal(db.store.latticeNotifications.length, 1);
+  assert.equal(db.store.latticeNotifications[0].title, 'Done 3');
+
+  // >100 maxIterations is rejected by validator
+  const overCapRule = {
+    organizationId: 'org-a',
+    ruleKey: 'loop_over_cap',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'loop_1', type: 'control.loop', config: { itemsPath: 'data.items', maxIterations: 150 } },
+      ],
+      edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'loop_1' }],
+    },
+  };
+  const capFail = await executeFlowGraph(db, overCapRule, { organizationId: 'org-a', data: { items: [1, 2] } });
+  assert.equal(capFail.status, 'failed');
+  assert.match(capFail.errorMessage, /100/);
+
+  // >100 items array with maxIterations: 100 caps cleanly at 100
+  const manyItems = Array.from({ length: 120 }, (_, i) => ({ sku: `S-${i}` }));
+  const cappedRule = {
+    organizationId: 'org-a',
+    ruleKey: 'loop_capped_100',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'loop_1', type: 'control.loop', config: { itemsPath: 'data.items', maxIterations: 100 } },
+        { id: 'item_tr', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'seen', value: '{{loop.index}}' }] } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'loop_1' },
+        { id: 'e2', source: 'loop_1', sourceHandle: 'item', target: 'item_tr' },
+      ],
+    },
+  };
+  const cappedRun = await executeFlowGraph(db, cappedRule, { organizationId: 'org-a', data: { items: manyItems } });
+  assert.equal(cappedRun.status, 'completed');
+  assert.equal(cappedRun.nodeStatesJson.loop_1.output.count, 100);
+  assert.equal(cappedRun.nodeStatesJson.loop_1.output.truncated, true);
+  assert.equal(cappedRun.nodeStatesJson.loop_1.output.results.length, 100);
+});
+
+test('control.approval HITL pause/resume lifecycle enforces org isolation, token check, and 409 double-resume; control.delay ticks due runs only', async () => {
+  const procBp = getFlowBlueprint('auto_procurement_hitl_approval');
+  assert.ok(procBp);
+
+  const db = makeFlowDb({
+    latticeRequests: [
+      { id: 42, organizationId: 'org-a', code: 'REQ-PROC-001', name: 'Compressor', amount: 75000000, status: 'draft' },
+    ],
+    latticeAutomationRules: [
+      {
+        organizationId: 'org-a',
+        ruleKey: procBp.ruleKey,
+        name: procBp.name,
+        schemaVersion: 2,
+        graphJson: procBp.graphJson,
+        active: true,
+      },
+    ],
+  });
+
+  // 1. Live execution suspends at approval_director
+  const suspendedRun = await executeFlowGraph(db, db.store.latticeAutomationRules[0], {
+    ...procBp.sampleEvent,
+    organizationId: 'org-a',
+  }, { actor: { userId: 10, username: 'requester_10' } });
+
+  assert.equal(suspendedRun.status, 'suspended');
+  assert.equal(suspendedRun.suspendedNodeId, 'approval_director');
+  assert.ok(suspendedRun.approvalId);
+  assert.ok(suspendedRun.resumeToken);
+  assert.equal(db.store.latticeAiApprovalQueue.length, 1);
+  assert.equal(db.store.latticeAiApprovalQueue[0].status, 'pending');
+  assert.equal(db.store.latticeAutomationRuns[0].resumeToken, undefined, 'Raw resumeToken must NEVER be stored in DB');
+  assert.ok(db.store.latticeAutomationRuns[0].resumeTokenHash);
+
+  // 2. Wrong org -> 403
+  await assert.rejects(
+    () => resumeFlowRun(db, {
+      organizationId: 'org-b',
+      runUid: suspendedRun.runUid,
+      decision: 'approved',
+      resumeToken: suspendedRun.resumeToken,
+      actor: { userId: 99, username: 'evil_b' },
+    }),
+    (err) => err.status === 403 && err.code === 'NATIVE_ORGANIZATION_MISMATCH',
+  );
+
+  // 3. Invalid resumeToken -> 403
+  await assert.rejects(
+    () => resumeFlowRun(db, {
+      organizationId: 'org-a',
+      runUid: suspendedRun.runUid,
+      decision: 'approved',
+      resumeToken: 'forged-resume-token-0000',
+      actor: { userId: 21, username: 'mgr_21' },
+    }),
+    (err) => err.status === 403 && err.code === 'INVALID_RESUME_TOKEN',
+  );
+
+  // 4. Valid resume -> continues approved branch (updates latticeRequests & notifies ldx_operator)
+  const resumed = await resumeFlowRun(db, {
+    organizationId: 'org-a',
+    runUid: suspendedRun.runUid,
+    decision: 'approved',
+    payload: { note: 'Approved by Director' },
+    resumeToken: suspendedRun.resumeToken,
+    actor: { userId: 21, username: 'mgr_21' },
+  });
+  assert.equal(resumed.status, 'completed');
+  assert.equal(resumed.suspendedNodeId, null);
+  assert.equal(resumed.nodeStatesJson.update_approved_budget.status, 'completed');
+  assert.equal(resumed.nodeStatesJson.notify_operator_approved.status, 'completed');
+  assert.equal(resumed.nodeStatesJson.notify_employee_rejected.status, 'skipped');
+  assert.equal(db.store.latticeRequests[0].priority, 'approved_budget');
+  assert.equal(db.store.latticeAiApprovalQueue[0].status, 'approved');
+  assert.equal(db.store.latticeNotifications.length, 1);
+
+  // 5. Double resume -> 409
+  await assert.rejects(
+    () => resumeFlowRun(db, {
+      organizationId: 'org-a',
+      runUid: suspendedRun.runUid,
+      decision: 'approved',
+      resumeToken: suspendedRun.resumeToken,
+      actor: { userId: 21, username: 'mgr_21' },
+    }),
+    (err) => err.status === 409 && err.code === 'RUN_ALREADY_RESUMED',
+  );
+
+  // 6. Control.delay pause + tickDueDelayedRuns (and expired approval is NEVER auto-approved)
+  const delayRule = {
+    organizationId: 'org-a',
+    ruleKey: 'delay_test_rule',
+    name: 'Delay Test',
+    schemaVersion: 2,
+    active: true,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'd1', type: 'control.delay', config: { untilIso: new Date(Date.now() - 5000).toISOString() } },
+        { id: 'n1', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Delay Resumed' } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'd1' },
+        { id: 'e2', source: 'd1', sourceHandle: 'main', target: 'n1' },
+      ],
+    },
+  };
+  await db.getRepository('latticeAutomationRules').create({ values: delayRule });
+  const delayed = await executeFlowGraph(db, delayRule, { organizationId: 'org-a', data: {} });
+  assert.equal(delayed.status, 'suspended');
+  assert.equal(delayed.suspendedNodeId, 'd1');
+
+  const tickRes = await tickDueDelayedRuns(db);
+  assert.equal(tickRes.processedCount, 1);
+  const afterTickRun = await db.getRepository('latticeAutomationRuns').findOne({ filter: { runUid: delayed.runUid } });
+  assert.equal(afterTickRun.status, 'completed');
+  assert.ok(db.store.latticeNotifications.some((n) => n.title === 'Delay Resumed'));
+});
+
+test('testSingleFlowNode executes isolated node with pinned inputs and blocks SSRF / system collections', async () => {
+  const db = makeFlowDb({
+    latticeServiceTickets: [{ id: 7, organizationId: 'org-a', code: 'T-7', name: 'Old' }],
+  });
+
+  // Dry-run isolated node with pinned {{steps.*}} & {{nodes.*}}
+  const resDry = await testSingleFlowNode(db, {
+    organizationId: 'org-a',
+    nodeId: 'n_create',
+    graph: {
+      version: 2,
+      nodes: [
+        {
+          id: 'n_create',
+          type: 'data.create',
+          config: {
+            collection: 'latticeServiceTickets',
+            values: { code: 'PIN-{{steps.prev_1.code}}', name: 'From {{nodes.prev_1.output.source}}' },
+          },
+        },
+      ],
+      edges: [],
+    },
+    pinnedInputs: {
+      steps: { prev_1: { code: '999', source: 'sensor-x' } },
+    },
+  });
+  assert.equal(resDry.ok, true);
+  assert.equal(resDry.status, 'completed');
+  assert.equal(resDry.output.simulated, true);
+  assert.equal(resDry.output.record.code, 'PIN-999');
+  assert.equal(resDry.output.record.name, 'From sensor-x');
+  assert.equal(db.store.latticeServiceTickets.length, 1, 'dryRun must not write DB');
+
+  // System table rejected
+  await assert.rejects(
+    () => testSingleFlowNode(db, {
+      organizationId: 'org-a',
+      nodeId: 'bad_col',
+      graph: {
+        version: 2,
+        nodes: [{ id: 'bad_col', type: 'data.create', config: { collection: 'users', values: { username: 'pwn' } } }],
+        edges: [],
+      },
+    }),
+    (err) => err.code === 'TARGET_COLLECTION_FORBIDDEN',
+  );
+
+  // SSRF metadata URL rejected
+  await assert.rejects(
+    () => testSingleFlowNode(db, {
+      organizationId: 'org-a',
+      nodeId: 'bad_ssrf',
+      graph: {
+        version: 2,
+        nodes: [
+          {
+            id: 'bad_ssrf',
+            type: 'integration.http',
+            config: { connectorKey: 'ext', url: 'http://169.254.169.254/latest/meta-data' },
+          },
+        ],
+        edges: [],
+      },
+    }),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE',
+  );
+});
+
+test('dispatchWebhookIngress enforces HMAC-SHA256 fail-closed and runs partner-webhook-sync blueprint', async () => {
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+
+  try {
+    const partnerBp = getFlowBlueprint('auto_partner_webhook_sync');
+    assert.ok(partnerBp);
+    const webhookSecret = 'wh-inbound-secret-abc-1234';
+    const erpSecret = 'erp-outbound-token-xyz';
+    const db = makeFlowDb({
+      latticeAutomationRules: [
+        {
+          organizationId: 'org-a',
+          ruleKey: partnerBp.ruleKey,
+          name: partnerBp.name,
+          schemaVersion: 2,
+          graphJson: partnerBp.graphJson,
+          active: true,
+        },
+      ],
+      latticeConnectors: [
+        {
+          organizationId: 'org-a',
+          connectorKey: `webhook:${partnerBp.ruleKey}`,
+          name: 'Inbound Partner Webhook Secret',
+          connectorType: 'webhook',
+          baseUrl: 'https://partner.example.com',
+          authType: 'hmac',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ webhookSecret }, process.env),
+          active: true,
+        },
+        {
+          organizationId: 'org-a',
+          connectorKey: 'erp-webhook-sync',
+          name: 'ERP Sync Connector',
+          connectorType: 'http_api',
+          baseUrl: 'https://erp.example.com/api',
+          authType: 'bearer',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ token: erpSecret }, process.env),
+          active: true,
+        },
+      ],
+    });
+
+    const payloadObj = partnerBp.sampleEvent.data;
+    const rawBody = JSON.stringify(payloadObj);
+
+    // Missing signature -> 401/403
+    await assert.rejects(
+      () => dispatchWebhookIngress(db, {
+        organizationId: 'org-a',
+        ruleKey: partnerBp.ruleKey,
+        headers: {},
+        rawBody,
+        parsedBody: payloadObj,
+      }),
+      (err) => (err.status === 401 || err.status === 403) && err.code === 'WEBHOOK_SIGNATURE_INVALID',
+    );
+
+    // Invalid signature -> 401/403
+    await assert.rejects(
+      () => dispatchWebhookIngress(db, {
+        organizationId: 'org-a',
+        ruleKey: partnerBp.ruleKey,
+        headers: { 'x-lattice-signature-256': 'sha256=' + '0'.repeat(64) },
+        rawBody,
+        parsedBody: payloadObj,
+      }),
+      (err) => (err.status === 401 || err.status === 403) && err.code === 'WEBHOOK_SIGNATURE_INVALID',
+    );
+
+    // Valid HMAC signature executes partner-webhook-sync (fail 1st item -> error branch, succeed 2nd -> done branch)
+    const validSig = 'sha256=' + crypto.createHmac('sha256', webhookSecret).update(rawBody, 'utf8').digest('hex');
+    let callIdx = 0;
+    const syncedBodies = [];
+    const res = await dispatchWebhookIngress(db, {
+      organizationId: 'org-a',
+      ruleKey: partnerBp.ruleKey,
+      headers: { 'X-Lattice-Signature-256': validSig },
+      rawBody,
+      parsedBody: payloadObj,
+      options: {
+        env: { ...process.env, NODE_ENV: 'production' },
+        lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+        fetchImpl: async (_url, init) => {
+          callIdx += 1;
+          syncedBodies.push(JSON.parse(init.body));
+          if (callIdx === 1) return { ok: false, status: 500 };
+          return { ok: true, status: 200, json: async () => ({ synced: true }) };
+        },
+      },
+    });
+
+    assert.ok(res.runUid);
+    assert.equal(syncedBodies.length, 2);
+    assert.equal(syncedBodies[0].item.sku, 'SKU-001');
+    assert.equal(syncedBodies[1].item.sku, 'SKU-002');
+    assert.equal(db.store.latticeNotifications.length, 2);
+    assert.match(db.store.latticeNotifications[0].title, /Lỗi đồng bộ/);
+    assert.match(db.store.latticeNotifications[1].title, /Hoàn tất đồng bộ/);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
+test('coldchain-emergency.json Graph v2 blueprint and v1 actionsJson compatibility execute cleanly', async () => {
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+
+  try {
+    const coldBp = getFlowBlueprint('auto_cmms_on_coldchain_fault');
+    assert.ok(coldBp);
+
+    const db = makeFlowDb({
+      latticeAssets: [{ id: 1, organizationId: 'org-a', code: 'FREEZER-01', status: 'active' }],
+      latticeTwinShadows: [
+        {
+          id: 1,
+          organizationId: 'org-a',
+          assetId: 1,
+          assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:1',
+          desiredJson: { targetTempC: 8.0 },
+          reportedJson: { targetTempC: 8.0 },
+          version: 1,
+        },
+      ],
+      latticeDecisionTables: [
+        {
+          organizationId: 'org-a',
+          tableKey: 'cmms_priority_routing_v1',
+          hitPolicy: 'FIRST',
+          active: true,
+          rulesJson: [
+            { when: { severity: 'critical' }, then: { workOrderPriority: 'critical', assignedRole: 'ldx_manager', slaHours: 2 } },
+            { when: {}, then: { workOrderPriority: 'medium', assignedRole: 'ldx_operator', slaHours: 24 } },
+          ],
+        },
+      ],
+      latticeConnectors: [
+        {
+          organizationId: 'org-a',
+          connectorKey: 'n8n-coldchain-orchestrator',
+          connectorType: 'n8n',
+          baseUrl: 'https://n8n.example.com/webhook/coldchain',
+          authType: 'hmac',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ secret: 'n8n-secret-1234' }, process.env),
+          active: true,
+        },
+      ],
+    });
+
+    const n8nPayloads = [];
+    const v2Run = await executeRuleAgainstEvent(
+      db,
+      {
+        organizationId: 'org-a',
+        ruleKey: coldBp.ruleKey,
+        name: coldBp.name,
+        schemaVersion: 2,
+        graphJson: coldBp.graphJson,
+      },
+      { ...coldBp.sampleEvent, organizationId: 'org-a' },
+      {
+        env: { ...process.env, NODE_ENV: 'production' },
+        lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+        fetchImpl: async (_url, init) => {
+          n8nPayloads.push(JSON.parse(init.body));
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        },
+      },
+    );
+
+    assert.equal(v2Run.status, 'completed');
+    assert.equal(v2Run.graphVersion, 2);
+    assert.equal(db.store.latticeCustomWorkOrders.length, 1);
+    const woId = db.store.latticeCustomWorkOrders[0].id;
+    assert.equal(db.store.latticeAgentProposals[0].targetRecordId, woId);
+    assert.equal(n8nPayloads.length, 1);
+    assert.equal(n8nPayloads[0].workOrderId, woId);
+
+    // Dry-run via dryRunFlowGraph causes zero DB mutations
+    const dryRes = await dryRunFlowGraph(
+      db,
+      coldBp.graphJson,
+      { ...coldBp.sampleEvent, organizationId: 'org-a' },
+      { env: { ...process.env, NODE_ENV: 'production' }, lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }] },
+    );
+    assert.equal(dryRes.status, 'completed');
+    assert.equal(db.store.latticeCustomWorkOrders.length, 1);
+
+    // Legacy v1 actionsJson rule also continues to execute backward-compatibly
+    const v1Run = await executeRuleAgainstEvent(
+      db,
+      {
+        organizationId: 'org-a',
+        ruleKey: 'v1_compat_rule',
+        triggerEventType: 'alarm.triggered',
+        actionsJson: [
+          { type: 'create_record', collection: 'latticeServiceTickets', values: { code: 'V1-{{id}}', name: 'V1 Ticket' } },
+          { type: 'notify_role', role: 'ldx_operator', title: 'Ticket #{{steps.0.id}}' },
+        ],
+      },
+      { id: 'evt-v1', type: 'alarm.triggered', organizationId: 'org-a', data: {} },
+    );
+    assert.equal(v1Run.status, 'completed');
+    assert.equal(db.store.latticeServiceTickets.length, 1);
+    assert.equal(db.store.latticeNotifications.at(-1).title, `Ticket #${db.store.latticeServiceTickets[0].id}`);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
+test('automation-engine v2 actions, validateRulePayload v2, and DxosStudioPlugin ORM hooks + ACL wiring work cleanly', async () => {
+  const procBp = getFlowBlueprint('auto_procurement_hitl_approval');
+  const partnerBp = getFlowBlueprint('auto_partner_webhook_sync');
+  const webhookSecret = 'wh-action-secret-9999';
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+
+  try {
+    const db = makeFlowDb({
+      latticeEmployees: [
+        { userId: 20, organizationId: 'org-a', active: true },
+        { userId: 21, organizationId: 'org-a', active: true },
+      ],
+      rolesUsers: [
+        { userId: 20, roleName: 'ldx_admin' },
+        { userId: 21, roleName: 'ldx_manager' },
+      ],
+      latticeRequests: [
+        { id: 42, organizationId: 'org-a', code: 'REQ-PROC-001', name: 'Compressor', amount: 75000000, status: 'draft' },
+      ],
+      latticeConnectors: [
+        {
+          organizationId: 'org-a',
+          connectorKey: `webhook:${partnerBp.ruleKey}`,
+          connectorType: 'webhook',
+          baseUrl: 'https://partner.example.com',
+          authType: 'hmac',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ webhookSecret }, process.env),
+          active: true,
+        },
+      ],
+    });
+
+    // validateRulePayload v2 auto-computes triggerIndexJson and v1 compat summary
+    const validatedV2 = validateRulePayload({
+      ruleKey: procBp.ruleKey,
+      name: procBp.name,
+      schemaVersion: 2,
+      graphJson: procBp.graphJson,
+    });
+    assert.equal(validatedV2.schemaVersion, 2);
+    assert.equal(validatedV2.triggerIndexJson[0].triggerType, 'record');
+    assert.equal(validatedV2.triggerIndexJson[0].collection, 'latticeRequests');
+    assert.equal(validatedV2.triggerIndexJson[0].operation, 'create');
+    assert.equal(validatedV2.triggerEventType, 'record.latticeRequests.create');
+
+    const actions = createDxosAutomationsActions(db);
+
+    // nodeRegistry
+    const regCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
+    await actions.nodeRegistry(regCtx, async () => {});
+    assert.equal(regCtx.body.nodeTypes.length, 24);
+
+    // testNode
+    const tnCtx = makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: {
+        graph: procBp.graphJson,
+        nodeId: 'if_over_50m',
+        pinnedInputs: { data: { amount: 75000000 } },
+      },
+    });
+    await actions.testNode(tnCtx, async () => {});
+    assert.equal(tnCtx.body.result.ok, true);
+    assert.equal(tnCtx.body.result.nextPort, 'true');
+
+    // Save v2 procurement rule & v2 webhook rule
+    await actions.saveRule(makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: { rule: { ruleKey: procBp.ruleKey, name: procBp.name, schemaVersion: 2, graphJson: procBp.graphJson } },
+    }), async () => {});
+    await actions.saveRule(makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: { rule: { ruleKey: partnerBp.ruleKey, name: partnerBp.name, schemaVersion: 2, graphJson: partnerBp.graphJson } },
+    }), async () => {});
+
+    // Mount DxosStudioPlugin -> verify ACL + ORM record hook triggers procurement flow & unload stops it
+    const aclAllowed = {};
+    const mockApp = {
+      resourceManager: { use() {}, define() {} },
+      acl: { registerSnippet() {}, allow(res, list) { aclAllowed[res] = list; } },
+    };
+    const plugin = Object.create(DxosStudioPlugin.prototype);
+    plugin.app = mockApp;
+    plugin.db = db;
+    await plugin.load();
+
+    try {
+      for (const actionName of ['builderCatalog', 'aiAssist', 'nodeRegistry', 'testNode', 'resumeRun']) {
+        assert.ok(aclAllowed.dxosAutomations.includes(actionName), `Missing ACL action ${actionName}`);
+      }
+
+      // ORM afterCreate fires record trigger -> pauses at approval_director
+      await db.emitHook('latticeRequests.afterCreate', {
+        id: 42,
+        organizationId: 'org-a',
+        code: 'REQ-PROC-001',
+        name: 'Compressor',
+        amount: 75000000,
+      });
+      assert.equal(db.store.latticeAutomationRuns.length, 1);
+      const runUid = db.store.latticeAutomationRuns[0].runUid;
+      assert.equal(db.store.latticeAutomationRuns[0].status, 'suspended');
+
+      // resumeRun action resumes suspended run
+      const resCtx = makeCtx({
+        userId: 21,
+        role: 'ldx_manager',
+        params: { runUid, decision: 'approved' },
+      });
+      await actions.resumeRun(resCtx, async () => {});
+      assert.equal(resCtx.body.run.status, 'completed');
+
+      // webhookIngress action rejects bad HMAC & accepts valid HMAC
+      const whPayload = { batchId: 'B1', partnerCode: 'P1', items: [] };
+      const whRaw = JSON.stringify(whPayload);
+      await assert.rejects(
+        () => actions.webhookIngress(makeCtx({
+          params: { organizationId: 'org-a', ruleKey: partnerBp.ruleKey },
+          headers: { 'x-lattice-signature-256': 'sha256=' + 'f'.repeat(64) },
+          body: whPayload,
+        }), async () => {}),
+        (err) => err.code === 'WEBHOOK_SIGNATURE_INVALID',
+      );
+      const sig = 'sha256=' + crypto.createHmac('sha256', webhookSecret).update(whRaw, 'utf8').digest('hex');
+      const whCtx = makeCtx({
+        params: { organizationId: 'org-a', ruleKey: partnerBp.ruleKey },
+        headers: { 'x-lattice-signature-256': sig },
+        body: whPayload,
+      });
+      whCtx.request.rawBody = whRaw;
+      await actions.webhookIngress(whCtx, async () => {});
+      assert.equal(whCtx.body.ok, true);
+      assert.equal(whCtx.body.run.status, 'completed');
+
+      // Unload disables ORM hooks
+      await plugin.unload();
+      const runsBefore = db.store.latticeAutomationRuns.length;
+      await db.emitHook('latticeRequests.afterCreate', {
+        id: 43,
+        organizationId: 'org-a',
+        amount: 90000000,
+      });
+      assert.equal(db.store.latticeAutomationRuns.length, runsBefore);
+    } finally {
+      await plugin.destroy();
+    }
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
+test('security fix: cross-tenant organizationId override blocked across executeFlowGraph, testSingleFlowNode, and actions', async () => {
+  const tenantDb = makeFlowDb({
+    latticeEmployees: [{ id: 1, userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+    latticeServiceTickets: [
+      { id: 1, organizationId: 'org-a', code: 'A-1', name: 'Org A Ticket' },
+      { id: 2, organizationId: 'org-b', code: 'B-1', name: 'Org B Secret Ticket' },
+    ],
+  });
+  const queryGraph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.manual', config: {} },
+      { id: 'q1', type: 'data.query', config: { collection: 'latticeServiceTickets', filter: {} } },
+    ],
+    edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'q1' }],
+  };
+  const orgARule = { organizationId: 'org-a', ruleKey: 'tenant_query_rule', name: 'Tenant Query', schemaVersion: 2, active: true, graphJson: queryGraph };
+  await tenantDb.getRepository('latticeAutomationRules').create({ values: orgARule });
+
+  const execSpoof = await executeFlowGraph(tenantDb, orgARule, {
+    organizationId: 'org-b',
+    organizationid: 'org-b',
+    data: { organizationId: 'org-b' },
+  });
+  assert.equal(execSpoof.organizationId, 'org-a');
+  assert.equal(execSpoof.nodeStatesJson.q1.output.items.length, 1);
+  assert.equal(execSpoof.nodeStatesJson.q1.output.items[0].organizationId, 'org-a');
+
+  const inlineSpoof = await executeFlowGraph(tenantDb, { ...queryGraph }, {
+    organizationId: 'org-b',
+    data: { organizationId: 'org-b' },
+  }, { organizationId: 'org-a' });
+  assert.equal(inlineSpoof.organizationId, 'org-a');
+  assert.equal(inlineSpoof.nodeStatesJson.q1.output.items.length, 1);
+  assert.equal(inlineSpoof.nodeStatesJson.q1.output.items[0].code, 'A-1');
+
+  const pinSpoof = await testSingleFlowNode(tenantDb, {
+    organizationId: 'org-a',
+    nodeId: 'q1',
+    graph: queryGraph,
+    pinnedInputs: { organizationId: 'org-b', event: { organizationId: 'org-b' }, data: { organizationId: 'org-b' } },
+    options: { live: true },
+  });
+  assert.equal(pinSpoof.ok, true);
+  assert.equal(pinSpoof.output.items.length, 1);
+  assert.equal(pinSpoof.output.items[0].organizationId, 'org-a');
+
+  const tenantActions = createDxosAutomationsActions(tenantDb);
+  const tnSpoofCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: {
+      live: true,
+      rule: { organizationId: 'org-b', graphJson: queryGraph },
+      nodeId: 'q1',
+      pinnedInputs: { organizationId: 'org-b', event: { organizationId: 'org-b' }, data: { organizationId: 'org-b' } },
+    },
+  });
+  await tenantActions.testNode(tnSpoofCtx, async () => {});
+  assert.equal(tnSpoofCtx.body.result.output.items.length, 1);
+  assert.equal(tnSpoofCtx.body.result.output.items[0].organizationId, 'org-a');
+
+  const trSpoofCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: { ruleKey: 'tenant_query_rule', event: { organizationId: 'org-b', data: { organizationId: 'org-b' } } },
+  });
+  await tenantActions.testRule(trSpoofCtx, async () => {});
+  assert.equal(trSpoofCtx.body.simulation.organizationId, 'org-a');
+  assert.equal(trSpoofCtx.body.simulation.nodeStatesJson.q1.output.items[0].organizationId, 'org-a');
+
+  const rnSpoofCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: { ruleKey: 'tenant_query_rule', event: { organizationId: 'org-b', data: { organizationId: 'org-b' } } },
+  });
+  await tenantActions.runNow(rnSpoofCtx, async () => {});
+  assert.equal(rnSpoofCtx.body.run.organizationId, 'org-a');
+  assert.equal(rnSpoofCtx.body.run.nodeStatesJson.q1.output.items.length, 1);
+  assert.equal(rnSpoofCtx.body.run.nodeStatesJson.q1.output.items[0].organizationId, 'org-a');
+
+  const rpSpoofCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: { runUid: rnSpoofCtx.body.run.runUid, event: { organizationId: 'org-b', data: { organizationId: 'org-b' } } },
+  });
+  await tenantActions.replayRun(rpSpoofCtx, async () => {});
+  assert.equal(rpSpoofCtx.body.run.organizationId, 'org-a');
+  assert.equal(rpSpoofCtx.body.run.nodeStatesJson.q1.output.items.length, 1);
+  assert.equal(rpSpoofCtx.body.run.nodeStatesJson.q1.output.items[0].organizationId, 'org-a');
+});
+
+test('draftGraphJson save without graphJson preserves schemaVersion 1, triggerIndexJson, and publishedVersion', async () => {
+  const db = makeFlowDb({
+    latticeEmployees: [{ id: 1, userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+    latticeAutomationRules: [
+      {
+        organizationId: 'org-a',
+        ruleKey: 'published_v2_rule',
+        name: 'Published V2',
+        schemaVersion: 2,
+        publishedVersion: 2,
+        triggerEventType: 'manual.trigger',
+        triggerIndexJson: [{ triggerType: 'event', eventType: 'manual.trigger' }],
+        graphJson: { version: 2, nodes: [{ id: 't1', type: 'trigger.manual', config: {} }], edges: [] },
+        active: true,
+      },
+    ],
+  });
+
+  const draftOnlyValidated = validateRulePayload({
+    ruleKey: 'v1_with_draft',
+    name: 'V1 With Draft',
+    triggerEventType: 'alarm.triggered',
+    actionsJson: [{ type: 'create_record', collection: 'latticeServiceTickets', values: { code: 'T1' } }],
+    draftGraphJson: {
+      version: 2,
+      nodes: [{ id: 'tr_draft', type: 'trigger.record', config: { collection: 'latticeRequests', operation: 'create' } }],
+      edges: [],
+    },
+  });
+  assert.equal(draftOnlyValidated.schemaVersion, 1);
+  assert.equal(draftOnlyValidated.triggerEventType, 'alarm.triggered');
+  assert.equal(draftOnlyValidated.triggerIndexJson.length, 1);
+  assert.equal(draftOnlyValidated.triggerIndexJson[0].triggerType, 'event');
+  assert.equal(draftOnlyValidated.triggerIndexJson[0].eventType, 'alarm.triggered');
+  assert.equal(draftOnlyValidated.triggerIndexJson[0].collection, null);
+  assert.equal(draftOnlyValidated.actionsJson.length, 1);
+  assert.equal(draftOnlyValidated.draftGraphJson.nodes[0].id, 'tr_draft');
+
+  const actions = createDxosAutomationsActions(db);
+  const saveDraftCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: {
+      rule: {
+        ruleKey: 'published_v2_rule',
+        name: 'Published V2 With Draft',
+        schemaVersion: 2,
+        draftGraphJson: {
+          version: 2,
+          nodes: [{ id: 'tr_sched', type: 'trigger.schedule', config: { cron: '*/5 * * * *' } }],
+          edges: [],
+        },
+      },
+    },
+  });
+  await actions.saveRule(saveDraftCtx, async () => {});
+  assert.equal(saveDraftCtx.body.rule.publishedVersion, 2);
+  assert.notEqual(saveDraftCtx.body.rule.triggerIndexJson?.[0]?.triggerType, 'schedule');
+});
+
+test('resumeFlowRun dryRun preserves suspended DB status and explicit empty resumeToken is rejected', async () => {
+  const db = makeFlowDb();
+  const hitlRule = {
+    organizationId: 'org-a',
+    ruleKey: 'dry_resume_hitl',
+    name: 'Dry Resume HITL',
+    schemaVersion: 2,
+    active: true,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'ap1', type: 'control.approval', config: { title: 'Approve?' } },
+        { id: 'ok1', type: 'notify.send', config: { roleNames: ['ldx_admin'], title: 'Approved Notify' } },
+        { id: 'no1', type: 'notify.send', config: { roleNames: ['ldx_admin'], title: 'Rejected Notify' } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'ap1' },
+        { id: 'e2', source: 'ap1', sourceHandle: 'approved', target: 'ok1' },
+        { id: 'e3', source: 'ap1', sourceHandle: 'rejected', target: 'no1' },
+      ],
+    },
+  };
+  await db.getRepository('latticeAutomationRules').create({ values: hitlRule });
+  const suspRun = await executeFlowGraph(db, hitlRule, { organizationId: 'org-a', data: {} });
+  assert.equal(suspRun.status, 'suspended');
+
+  await assert.rejects(
+    () => resumeFlowRun(db, {
+      organizationId: 'org-a',
+      runUid: suspRun.runUid,
+      decision: 'approved',
+      resumeToken: '',
+      actor: { userId: 20, username: 'admin' },
+    }),
+    (err) => err.status === 403 && err.code === 'INVALID_RESUME_TOKEN',
+  );
+
+  const dryResume = await resumeFlowRun(db, {
+    organizationId: 'org-a',
+    runUid: suspRun.runUid,
+    decision: 'approved',
+    resumeToken: suspRun.resumeToken,
+    actor: { userId: 20, username: 'admin' },
+    dryRun: true,
+  });
+  assert.equal(dryResume.status, 'completed');
+  const persistedRun = await db.getRepository('latticeAutomationRuns').findOne({ filter: { runUid: suspRun.runUid } });
+  assert.equal(persistedRun.status, 'suspended');
+  assert.equal((db.store.latticeNotifications || []).length, 0);
+
+  const liveAfterDry = await resumeFlowRun(db, {
+    organizationId: 'org-a',
+    runUid: suspRun.runUid,
+    decision: 'approved',
+    resumeToken: suspRun.resumeToken,
+    actor: { userId: 20, username: 'admin' },
+  });
+  assert.equal(liveAfterDry.status, 'completed');
+  assert.equal((db.store.latticeNotifications || []).length, 1);
+});
+
+test('webhookIngress and dispatchWebhookIngress strip resumeToken, resumeTokenHash, and internal traces', async () => {
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+
+  try {
+    const whApprovalRuleKey = 'wh_hitl_secret_strip';
+    const whSecret = 'wh-strip-secret-xyz';
+    const db = makeFlowDb({
+      latticeConnectors: [
+        {
+          organizationId: 'org-a',
+          connectorKey: `webhook:${whApprovalRuleKey}`,
+          connectorType: 'webhook',
+          baseUrl: 'https://partner.example.com',
+          authType: 'hmac',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ webhookSecret: whSecret }, process.env),
+          active: true,
+        },
+      ],
+      latticeAutomationRules: [
+        {
+          organizationId: 'org-a',
+          ruleKey: whApprovalRuleKey,
+          name: 'Webhook Approval',
+          schemaVersion: 2,
+          active: true,
+          graphJson: {
+            version: 2,
+            nodes: [
+              { id: 'wh1', type: 'trigger.webhook', config: { webhookPath: '/hitl', authMode: 'hmac' } },
+              { id: 'ap1', type: 'control.approval', config: { title: 'Approve Webhook' } },
+            ],
+            edges: [{ id: 'e1', source: 'wh1', sourceHandle: 'main', target: 'ap1' }],
+          },
+        },
+      ],
+    });
+    const actions = createDxosAutomationsActions(db);
+    const whBody = JSON.stringify({ event: 'go' });
+    const whSig = 'sha256=' + crypto.createHmac('sha256', whSecret).update(whBody, 'utf8').digest('hex');
+
+    const directWh = await dispatchWebhookIngress(db, {
+      organizationId: 'org-a',
+      ruleKey: whApprovalRuleKey,
+      headers: { 'x-lattice-signature-256': whSig },
+      rawBody: whBody,
+    });
+    assert.equal(directWh.status, 'suspended');
+    assert.equal(directWh.resumeToken, undefined);
+    assert.equal(directWh.resumeTokenHash, undefined);
+    assert.equal(directWh.nodeStatesJson, undefined);
+    assert.equal(directWh.stepTracesJson, undefined);
+    assert.equal(directWh.triggerPayloadJson, undefined);
+    assert.equal(directWh.run, undefined);
+
+    const actionWhCtx = makeCtx({
+      params: { organizationId: 'org-a', ruleKey: whApprovalRuleKey },
+      headers: { 'x-lattice-signature-256': whSig },
+      body: { event: 'go' },
+    });
+    actionWhCtx.request.rawBody = whBody;
+    await actions.webhookIngress(actionWhCtx, async () => {});
+    assert.deepEqual(Object.keys(actionWhCtx.body).sort(), ['ok', 'run']);
+    assert.deepEqual(Object.keys(actionWhCtx.body.run).sort(), ['runUid', 'status']);
+    assert.equal(actionWhCtx.body.run.status, 'suspended');
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
+test('control.loop isolates per-iteration traces and propagates inner suspension cleanly', async () => {
+  const db = makeFlowDb({
+    latticeServiceTickets: [{ id: 1, organizationId: 'org-a', code: 'A-1', name: 'Org A Ticket' }],
+  });
+  const loopErrRule = {
+    organizationId: 'org-a',
+    ruleKey: 'loop_isolated_err',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'lp1', type: 'control.loop', config: { itemsPath: 'data.items', maxIterations: 10 } },
+        {
+          id: 'step_body',
+          type: 'data.query',
+          continueOnFail: true,
+          config: { collection: '{{loop.item.col}}', filter: {} },
+        },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'lp1' },
+        { id: 'e2', source: 'lp1', sourceHandle: 'item', target: 'step_body' },
+      ],
+    },
+  };
+  const loopErrRun = await executeFlowGraph(db, loopErrRule, {
+    organizationId: 'org-a',
+    data: { items: [{ col: 'latticeServiceTickets' }, { col: 'users' }] },
+  });
+  assert.equal(loopErrRun.nodeStatesJson.lp1.output.results.length, 2);
+  assert.equal(loopErrRun.nodeStatesJson.lp1.output.results[0].count, 1);
+  assert.equal(loopErrRun.nodeStatesJson.lp1.output.results[1], null);
+
+  const loopSuspRule = {
+    organizationId: 'org-a',
+    ruleKey: 'loop_suspend_rule',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'lp1', type: 'control.loop', config: { itemsPath: 'data.items', maxIterations: 10 } },
+        { id: 'ap_item', type: 'control.approval', config: { title: 'Approve {{loop.item.sku}}' } },
+        { id: 'done_notify', type: 'notify.send', config: { roleNames: ['ldx_admin'], title: 'Should Not Fire' } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'lp1' },
+        { id: 'e2', source: 'lp1', sourceHandle: 'item', target: 'ap_item' },
+        { id: 'e3', source: 'lp1', sourceHandle: 'done', target: 'done_notify' },
+      ],
+    },
+  };
+  const loopSuspRun = await executeFlowGraph(db, loopSuspRule, {
+    organizationId: 'org-a',
+    data: { items: [{ sku: 'S1' }, { sku: 'S2' }] },
+  });
+  assert.equal(loopSuspRun.status, 'suspended');
+  assert.equal(loopSuspRun.suspendedNodeId, 'ap_item');
+  assert.equal((db.store.latticeNotifications || []).length, 0);
+});
+
+test('flow/executor.js stays <= 350 lines, zero domain leakage, zero Copilot/eval, valid SPDX header', async () => {
+  const { addSourceHeader } = await import(pathToFileURL(path.resolve(__dirname, '../../../../scripts/source-headers.mjs')).href);
+  const rootDir = path.resolve(__dirname, '../../../..');
+  const execRel = 'plugins/nocobase/plugin-dxos-studio/src/server/flow/executor.js';
+  const testRel = 'plugins/nocobase/plugin-dxos-studio/tests/flow-executor.test.cjs';
+
+  const execSrc = fs.readFileSync(path.join(rootDir, execRel), 'utf8');
+  const lines = execSrc.split(/\r?\n/).length;
+  assert.ok(lines <= 350, `executor.js has ${lines} lines (> 350)`);
+  const forbiddenRe = /\b(?:cold-?chain|vaccine|vac-?xin|mkt|cmms|freezer|lotCode|copilot)\b|\beval\s*\(|new\s+Function/i;
+  assert.equal(forbiddenRe.test(execSrc), false, 'executor.js must have zero domain terms, Copilot, or eval');
+
+  for (const rel of [execRel, testRel]) {
+    const src = fs.readFileSync(path.join(rootDir, rel), 'utf8');
+    const hdr = addSourceHeader(src, rel);
+    assert.equal(hdr.status, 'present', `Missing/malformed SPDX header in ${rel}`);
+  }
+});

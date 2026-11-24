@@ -1,0 +1,211 @@
+{
+  "blueprintKey": "auto_mkt_quarantine_response",
+  "ruleKey": "auto_mkt_quarantine_response",
+  "name": "Cách ly Lô vượt ngưỡng MKT & Đồng bộ Đối tác (DAG v2)",
+  "description": "Đánh giá bảng quyết định cold_chain_approval_v1 khi lô bị giữ MKT (lot.held_mkt), mở hồ sơ sự cố trên latticeIncidentCases, phân tích AI Triage và rẽ nhánh đồng bộ n8n cho cấp quality_hold_director trước khi thông báo ldx_manager.",
+  "category": "wms",
+  "triggerEventType": "lot.held_mkt",
+  "dmnTableKey": "cold_chain_approval_v1",
+  "cooldownSec": 60,
+  "maxDepth": 8,
+  "active": true,
+  "sampleEvent": {
+    "type": "lot.held_mkt",
+    "source": "dxos-studio:wms",
+    "subject": "LOT-VAX-01",
+    "data": {
+      "lotCode": "LOT-VAX-01",
+      "sku": "SKU-VAX-MKT-28",
+      "mktCelsius": 10.4,
+      "maxTempC": 11.2,
+      "thresholdCelsius": 8.0,
+      "lotStatus": "hold_mkt",
+      "severity": "high",
+      "assetEntityId": "lot:LOT-VAX-01",
+      "totalAmountM": 650
+    }
+  },
+  "graphJson": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "trig_mkt_hold",
+        "type": "trigger.event",
+        "label": "Nhận sự kiện giữ lô MKT",
+        "position": { "x": 80, "y": 240 },
+        "config": {
+          "eventType": "lot.held_mkt",
+          "filterJson": null
+        }
+      },
+      {
+        "id": "dmn_mkt_tier",
+        "type": "logic.dmn",
+        "label": "Xác định cấp phê duyệt MKT (DMN)",
+        "position": { "x": 360, "y": 240 },
+        "config": {
+          "tableKey": "cold_chain_approval_v1",
+          "facts": {
+            "maxTempC": "{{data.maxTempC}}",
+            "totalAmountM": "{{data.totalAmountM}}"
+          }
+        }
+      },
+      {
+        "id": "create_incident",
+        "type": "data.create",
+        "label": "Mở hồ sơ sự cố cách ly MKT",
+        "position": { "x": 640, "y": 240 },
+        "config": {
+          "collection": "latticeIncidentCases",
+          "values": {
+            "code": "MKT-{{event.id}}",
+            "name": "Cách ly lô vượt MKT: {{data.lotCode}}",
+            "runId": "mkt-{{event.id}}",
+            "assetEntityId": "lot:{{data.lotCode}}",
+            "handlerId": "ldx_manager",
+            "severity": "critical",
+            "status": "open",
+            "proposal": "Lô {{data.lotCode}} có MKT={{data.mktCelsius}}°C vượt ngưỡng {{data.thresholdCelsius}}°C (cấp duyệt: {{dmn.approvalTier}})."
+          }
+        }
+      },
+      {
+        "id": "ai_triage_mkt",
+        "type": "ai.agent",
+        "label": "AI Triage đánh giá hồ sơ cách ly",
+        "position": { "x": 920, "y": 240 },
+        "config": {
+          "targetCollection": "latticeIncidentCases",
+          "targetRecordId": "{{steps.create_incident.id}}",
+          "severity": "high",
+          "recommendation": "Đánh giá sai lệch MKT cho lô {{data.lotCode}} ({{data.mktCelsius}}°C) gắn với sự cố #{{steps.create_incident.id}}, phê duyệt cấp {{dmn.approvalTier}} trong {{dmn.slaMinutes}} phút."
+        }
+      },
+      {
+        "id": "if_director_tier",
+        "type": "control.if",
+        "label": "Cấp Giám đốc Chất lượng?",
+        "position": { "x": 1200, "y": 240 },
+        "config": {
+          "condition": {
+            "field": "dmn.approvalTier",
+            "op": "eq",
+            "value": "quality_hold_director"
+          }
+        }
+      },
+      {
+        "id": "http_n8n_mkt",
+        "type": "integration.http",
+        "label": "Đồng bộ n8n Giám đốc Chất lượng",
+        "position": { "x": 1480, "y": 100 },
+        "config": {
+          "connectorKey": "n8n-coldchain-orchestrator",
+          "method": "POST",
+          "path": "",
+          "body": {
+            "eventType": "{{event.type}}",
+            "lotCode": "{{data.lotCode}}",
+            "mktCelsius": "{{data.mktCelsius}}",
+            "incidentId": "{{steps.create_incident.id}}",
+            "approvalTier": "{{dmn.approvalTier}}",
+            "slaMinutes": "{{dmn.slaMinutes}}"
+          }
+        }
+      },
+      {
+        "id": "notify_mgr_director",
+        "type": "notify.send",
+        "label": "Thông báo Quản lý (Cấp Giám đốc)",
+        "position": { "x": 1760, "y": 100 },
+        "config": {
+          "roleNames": ["ldx_manager"],
+          "category": "wms",
+          "severity": "critical",
+          "title": "Cách ly lô MKT: {{data.lotCode}} ({{dmn.approvalTier}})",
+          "body": "Đã mở hồ sơ sự cố #{{steps.create_incident.id}} cho lô {{data.lotCode}} (MKT {{data.mktCelsius}}°C) và đồng bộ n8n.",
+          "targetCollection": "latticeIncidentCases",
+          "targetRecordId": "{{steps.create_incident.id}}",
+          "targetPath": "/p/wms"
+        }
+      },
+      {
+        "id": "notify_mgr_standard",
+        "type": "notify.send",
+        "label": "Thông báo Quản lý (Nhánh tiêu chuẩn)",
+        "position": { "x": 1480, "y": 380 },
+        "config": {
+          "roleNames": ["ldx_manager"],
+          "category": "wms",
+          "severity": "warning",
+          "title": "Cách ly lô MKT: {{data.lotCode}} ({{dmn.approvalTier}})",
+          "body": "Đã mở hồ sơ sự cố #{{steps.create_incident.id}} cho lô {{data.lotCode}} (MKT {{data.mktCelsius}}°C).",
+          "targetCollection": "latticeIncidentCases",
+          "targetRecordId": "{{steps.create_incident.id}}",
+          "targetPath": "/p/wms"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_trig_dmn",
+        "source": "trig_mkt_hold",
+        "sourceHandle": "main",
+        "target": "dmn_mkt_tier",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_dmn_create",
+        "source": "dmn_mkt_tier",
+        "sourceHandle": "main",
+        "target": "create_incident",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_create_ai",
+        "source": "create_incident",
+        "sourceHandle": "main",
+        "target": "ai_triage_mkt",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_ai_if",
+        "source": "ai_triage_mkt",
+        "sourceHandle": "main",
+        "target": "if_director_tier",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_if_http",
+        "source": "if_director_tier",
+        "sourceHandle": "true",
+        "target": "http_n8n_mkt",
+        "targetHandle": "in",
+        "label": "quality_hold_director"
+      },
+      {
+        "id": "e_http_notify",
+        "source": "http_n8n_mkt",
+        "sourceHandle": "main",
+        "target": "notify_mgr_director",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_if_notify_std",
+        "source": "if_director_tier",
+        "sourceHandle": "false",
+        "target": "notify_mgr_standard",
+        "targetHandle": "in",
+        "label": "Cấp khác"
+      }
+    ],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 },
+    "settings": {
+      "errorPolicy": "stop",
+      "cooldownSec": 60,
+      "maxDepth": 8,
+      "timeoutMs": 30000
+    }
+  }
+}

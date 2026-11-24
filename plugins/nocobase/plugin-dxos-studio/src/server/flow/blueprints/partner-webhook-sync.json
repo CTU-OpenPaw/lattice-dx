@@ -1,0 +1,168 @@
+{
+  "blueprintKey": "auto_partner_webhook_sync",
+  "ruleKey": "auto_partner_webhook_sync",
+  "name": "Đồng bộ Webhook Đối tác B2B theo Vòng lặp (HMAC + Error Branch)",
+  "description": "Nhận Webhook đối tác qua trigger.webhook (xác thực HMAC), trích xuất mảng items bằng logic.transform, lặp an toàn qua control.loop (tối đa 50 phần tử) đẩy sang connector erp-webhook-sync kèm nhánh error cảnh báo ldx_operator và nhánh done báo cáo hoàn tất.",
+  "category": "b2b-integration",
+  "triggerEventType": "webhook.inbound",
+  "dmnTableKey": null,
+  "cooldownSec": 0,
+  "maxDepth": 8,
+  "active": true,
+  "sampleEvent": {
+    "type": "webhook.inbound",
+    "source": "dxos-studio:webhook",
+    "subject": "partner-sync",
+    "data": {
+      "partnerCode": "ERP-PARTNER-01",
+      "batchId": "BATCH-20261124-01",
+      "items": [
+        { "sku": "SKU-001", "qty": 120, "warehouseCode": "WH-CT-01" },
+        { "sku": "SKU-002", "qty": 80, "warehouseCode": "WH-HCM-01" }
+      ]
+    }
+  },
+  "graphJson": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "trig_webhook_partner",
+        "type": "trigger.webhook",
+        "label": "Webhook Đối tác (HMAC)",
+        "position": { "x": 80, "y": 240 },
+        "config": {
+          "webhookPath": "partner-sync",
+          "authMode": "hmac",
+          "secretHeader": "X-Lattice-Signature-256"
+        }
+      },
+      {
+        "id": "transform_items",
+        "type": "logic.transform",
+        "label": "Trích xuất danh sách items",
+        "position": { "x": 360, "y": 240 },
+        "config": {
+          "operations": [
+            {
+              "op": "set",
+              "target": "partnerCode",
+              "source": "data.partnerCode"
+            },
+            {
+              "op": "set",
+              "target": "batchId",
+              "source": "data.batchId"
+            },
+            {
+              "op": "set",
+              "target": "items",
+              "source": "data.items"
+            }
+          ]
+        }
+      },
+      {
+        "id": "loop_items",
+        "type": "control.loop",
+        "label": "Lặp từng phần tử đồng bộ",
+        "position": { "x": 640, "y": 240 },
+        "config": {
+          "itemsPath": "items",
+          "maxIterations": 50
+        }
+      },
+      {
+        "id": "http_erp_sync",
+        "type": "integration.http",
+        "label": "Gọi connector ERP Webhook Sync",
+        "position": { "x": 920, "y": 100 },
+        "config": {
+          "connectorKey": "erp-webhook-sync",
+          "method": "POST",
+          "path": "/sync",
+          "body": {
+            "partnerCode": "{{data.partnerCode}}",
+            "batchId": "{{data.batchId}}",
+            "item": "{{loop.item}}",
+            "index": "{{loop.index}}"
+          }
+        }
+      },
+      {
+        "id": "notify_sync_error",
+        "type": "notify.send",
+        "label": "Cảnh báo lỗi đồng bộ ERP",
+        "position": { "x": 1200, "y": 100 },
+        "config": {
+          "roleNames": ["ldx_operator"],
+          "category": "integration",
+          "severity": "critical",
+          "title": "Lỗi đồng bộ Webhook đối tác ({{data.partnerCode}})",
+          "body": "Đồng bộ phần tử #{{loop.index}} lô {{data.batchId}} qua erp-webhook-sync thất bại: {{steps.http_erp_sync.error}}",
+          "targetPath": "/admin/settings/dxos-flow-studio"
+        }
+      },
+      {
+        "id": "notify_sync_done",
+        "type": "notify.send",
+        "label": "Thông báo hoàn tất đồng bộ",
+        "position": { "x": 920, "y": 380 },
+        "config": {
+          "roleNames": ["ldx_operator"],
+          "category": "integration",
+          "severity": "info",
+          "title": "Hoàn tất đồng bộ Webhook đối tác ({{data.partnerCode}})",
+          "body": "Đã hoàn tất xử lý lô {{data.batchId}} qua connector erp-webhook-sync.",
+          "targetPath": "/admin/settings/dxos-flow-studio"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_hook_transform",
+        "source": "trig_webhook_partner",
+        "sourceHandle": "main",
+        "target": "transform_items",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_transform_loop",
+        "source": "transform_items",
+        "sourceHandle": "main",
+        "target": "loop_items",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_loop_item",
+        "source": "loop_items",
+        "sourceHandle": "item",
+        "target": "http_erp_sync",
+        "targetHandle": "in",
+        "label": "item"
+      },
+      {
+        "id": "e_http_error",
+        "source": "http_erp_sync",
+        "sourceHandle": "error",
+        "target": "notify_sync_error",
+        "targetHandle": "in",
+        "label": "error"
+      },
+      {
+        "id": "e_loop_done",
+        "source": "loop_items",
+        "sourceHandle": "done",
+        "target": "notify_sync_done",
+        "targetHandle": "in",
+        "label": "done"
+      }
+    ],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 },
+    "settings": {
+      "errorPolicy": "stop",
+      "cooldownSec": 0,
+      "maxDepth": 8,
+      "timeoutMs": 30000
+    }
+  }
+}

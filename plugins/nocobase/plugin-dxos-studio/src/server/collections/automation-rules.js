@@ -29,6 +29,11 @@ module.exports = defineCollection({
     { name: 'active', type: 'boolean', allowNull: false, defaultValue: true },
     { name: 'lastTriggeredAt', type: 'date', allowNull: true },
     { name: 'createdBy', type: 'string', allowNull: true },
+    { name: 'schemaVersion', type: 'integer', allowNull: false, defaultValue: 1 },
+    { name: 'graphJson', type: 'jsonb', allowNull: true },
+    { name: 'draftGraphJson', type: 'jsonb', allowNull: true },
+    { name: 'publishedVersion', type: 'integer', allowNull: false, defaultValue: 1 },
+    { name: 'triggerIndexJson', type: 'jsonb', allowNull: false, defaultValue: [] },
   ],
   indexes: [
     { name: 'uidx_lattice_auto_rules_org_key', fields: ['organizationId', 'ruleKey'], unique: true },

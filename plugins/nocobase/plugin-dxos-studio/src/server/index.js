@@ -24,7 +24,9 @@ const {
   createAutomationDirectGuardMiddleware,
   createDxosAutomationsActions,
   registerAutomationEventListener,
+  registerRecordTriggerHooks,
 } = require('./automation-engine');
+const { tickDueDelayedRuns } = require('./flow/executor');
 const { createDxosBuilderActions } = require('./domain-builder');
 const { fail, readParams, resolveVerifiedRoles } = require('./wms-dmn-shared');
 
@@ -77,6 +79,14 @@ class DxosStudioPlugin extends Plugin {
       this._automationListenerHandle.stop();
     }
     this._automationListenerHandle = null;
+    if (this._recordHooksHandle && typeof this._recordHooksHandle.stop === 'function') {
+      this._recordHooksHandle.stop();
+    }
+    this._recordHooksHandle = null;
+    if (this._delayTicker) {
+      clearInterval(this._delayTicker);
+      this._delayTicker = null;
+    }
   }
 
   async load() {
@@ -127,9 +137,14 @@ class DxosStudioPlugin extends Plugin {
     this.app.acl.allow('dxosWms', ['publicTrack'], 'public');
     this.app.acl.allow('dxosDmn', ['listTables', 'saveTable', 'evaluate'], 'loggedIn');
     this.app.acl.allow('dxosDelegations', ['list', 'create', 'revoke', 'activeForUser'], 'loggedIn');
+    this.app.acl.allow('dxosAutomations', ['webhookIngress'], 'public');
     this.app.acl.allow(
       'dxosAutomations',
-      ['listRules', 'saveRule', 'toggleRule', 'deleteRule', 'testRule', 'runNow', 'listRuns', 'getRunTrace', 'replayRun', 'builderCatalog', 'aiAssist'],
+      [
+        'listRules', 'saveRule', 'toggleRule', 'deleteRule', 'testRule', 'runNow',
+        'listRuns', 'getRunTrace', 'replayRun', 'builderCatalog', 'aiAssist',
+        'nodeRegistry', 'testNode', 'resumeRun',
+      ],
       'loggedIn',
     );
     this.app.acl.allow(
@@ -140,6 +155,14 @@ class DxosStudioPlugin extends Plugin {
 
     this.stopAutomationListener();
     this._automationListenerHandle = registerAutomationEventListener(this.app, this.db);
+    this._recordHooksHandle = registerRecordTriggerHooks(this.app, this.db);
+    const delayTickMs = Number(process.env.DX_FLOW_DELAY_TICK_MS || 0);
+    if (Number.isFinite(delayTickMs) && delayTickMs >= 100) {
+      this._delayTicker = setInterval(() => {
+        tickDueDelayedRuns(this.db, { app: this.app }).catch(() => {});
+      }, delayTickMs);
+      if (typeof this._delayTicker.unref === 'function') this._delayTicker.unref();
+    }
   }
 
   async unload() {

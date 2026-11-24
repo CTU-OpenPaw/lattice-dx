@@ -23,6 +23,13 @@ const {
   validateFilterStructure,
 } = require('./automation-copilot');
 const {
+  buildTriggerIndex,
+  graphV2SummaryToV1Compat,
+} = require('./flow/schema');
+const { validateFlowGraph } = require('./flow/validator');
+const flowRegistry = require('./flow/registry');
+const getFlowExecutor = () => require('./flow/executor');
+const {
   assertPatScope,
   clampPageLimit,
   fail,
@@ -467,7 +474,29 @@ function validateRulePayload(payload) {
   if (!name) {
     throw fail('MISSING_RULE_NAME', 400, 'name is required');
   }
-  const triggerEventType = String(payload.triggerEventType || '*').trim() || '*';
+  const isV2 = Number(payload.schemaVersion) === 2 || isPlainObject(payload.graphJson);
+  let normalizedGraph = null;
+  let normalizedDraft = null;
+  if (isPlainObject(payload.graphJson)) {
+    const gRes = validateFlowGraph(payload.graphJson, { nodeRegistry: flowRegistry, requireTrigger: true });
+    if (!gRes.ok) {
+      throw fail(gRes.errors[0]?.code || 'FLOW_INVALID_GRAPH', 400, gRes.errors[0]?.message || 'Invalid flow graph');
+    }
+    normalizedGraph = gRes.graph;
+  }
+  if (isPlainObject(payload.draftGraphJson)) {
+    const dRes = validateFlowGraph(payload.draftGraphJson, { nodeRegistry: flowRegistry, requireTrigger: false });
+    if (!dRes.ok) {
+      throw fail(dRes.errors[0]?.code || 'FLOW_INVALID_GRAPH', 400, dRes.errors[0]?.message || 'Invalid draft flow graph');
+    }
+    normalizedDraft = dRes.graph;
+  }
+  const compat = normalizedGraph
+    ? graphV2SummaryToV1Compat({ ...payload, graphJson: normalizedGraph })
+    : null;
+  const triggerEventType = payload.triggerEventType !== undefined
+    ? String(payload.triggerEventType || '*').trim() || '*'
+    : (compat?.triggerEventType || '*');
   const rawActions = Array.isArray(payload.actionsJson) ? payload.actionsJson : [];
   const actionsJson = [];
   for (let i = 0; i < rawActions.length; i += 1) {
@@ -513,31 +542,42 @@ function validateRulePayload(payload) {
     }
     actionsJson.push(cleanAct);
   }
-  if (payload.filterJson !== undefined && payload.filterJson !== null) {
-    const filterRes = validateFilterStructure(payload.filterJson, 'filterJson');
+  const effectiveFilter = payload.filterJson !== undefined ? payload.filterJson : (compat?.filterJson ?? null);
+  if (effectiveFilter !== undefined && effectiveFilter !== null) {
+    const filterRes = validateFilterStructure(effectiveFilter, 'filterJson');
     if (!filterRes.ok) {
       throw fail(filterRes.code, 400, filterRes.message);
     }
   }
-  const rawMaxDepth = payload.maxDepth === undefined || payload.maxDepth === null ? 8 : Number(payload.maxDepth);
+  const effectiveMaxDepthInput = payload.maxDepth !== undefined && payload.maxDepth !== null ? payload.maxDepth : (compat?.maxDepth ?? 8);
+  const rawMaxDepth = Number(effectiveMaxDepthInput);
   if (!Number.isInteger(rawMaxDepth) || rawMaxDepth < 1 || rawMaxDepth > MAX_HARD_DEPTH) {
     throw fail('INVALID_MAX_DEPTH', 400, `maxDepth must be an integer between 1 and ${MAX_HARD_DEPTH}`);
   }
-  const rawCooldown = payload.cooldownSec === undefined || payload.cooldownSec === null ? 0 : Number(payload.cooldownSec);
+  const effectiveCooldownInput = payload.cooldownSec !== undefined && payload.cooldownSec !== null ? payload.cooldownSec : (compat?.cooldownSec ?? 0);
+  const rawCooldown = Number(effectiveCooldownInput);
   if (!Number.isInteger(rawCooldown) || rawCooldown < 0) {
     throw fail('INVALID_COOLDOWN', 400, 'cooldownSec must be a non-negative integer');
   }
+  const finalActions = actionsJson.length > 0 ? actionsJson : (compat?.actionsJson || []);
   return {
     ruleKey,
     name,
     description: payload.description ? String(payload.description) : null,
     triggerEventType,
-    filterJson: payload.filterJson ? sanitizePlainObject(payload.filterJson) : null,
-    dmnTableKey: payload.dmnTableKey ? String(payload.dmnTableKey).trim() : null,
-    actionsJson: sanitizePlainObject(actionsJson),
+    filterJson: effectiveFilter ? sanitizePlainObject(effectiveFilter) : null,
+    dmnTableKey: payload.dmnTableKey !== undefined
+      ? (payload.dmnTableKey ? String(payload.dmnTableKey).trim() : null)
+      : (compat?.dmnTableKey || null),
+    actionsJson: sanitizePlainObject(finalActions),
     maxDepth: rawMaxDepth,
     cooldownSec: rawCooldown,
     active: payload.active === undefined ? true : Boolean(payload.active),
+    schemaVersion: isV2 ? 2 : 1,
+    triggerIndexJson: normalizedGraph ? buildTriggerIndex(normalizedGraph, { triggerEventType }) : buildTriggerIndex(null, { triggerEventType }),
+    ...(normalizedGraph ? { graphJson: normalizedGraph } : payload.graphJson === null ? { graphJson: null } : {}),
+    ...(normalizedDraft ? { draftGraphJson: normalizedDraft } : payload.draftGraphJson === null ? { draftGraphJson: null } : {}),
+    ...(payload.publishedVersion !== undefined ? { publishedVersion: Math.max(1, Number(payload.publishedVersion) || 1) } : {}),
   };
 }
 
@@ -1093,8 +1133,21 @@ async function executeActionStep({
 
 async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
   const rule = toPlain(ruleRow) || {};
-  const organizationId = String(rule.organizationId || '').trim();
+  const authOrgId = String(rule.organizationId || options.organizationId || '').trim();
+  const scopedOpts = authOrgId ? { ...options, organizationId: authOrgId } : options;
+  if (
+    Number(rule.schemaVersion) === 2
+    || (rule.graphJson && Array.isArray(rule.graphJson.nodes) && rule.graphJson.nodes.length > 0)
+    || (scopedOpts.useDraft && rule.draftGraphJson && Array.isArray(rule.draftGraphJson.nodes) && rule.draftGraphJson.nodes.length > 0)
+  ) {
+    return getFlowExecutor().executeFlowGraph(db, ruleRow, rawEvent, scopedOpts);
+  }
+  const organizationId = authOrgId;
   const event = normalizeIncomingEvent(rawEvent, organizationId);
+  if (organizationId) {
+    event.organizationId = organizationId;
+    event.organizationid = organizationId;
+  }
   const runUid = `run_${crypto.randomUUID()}`;
   const startedAt = new Date();
   const startMs = startedAt.getTime();
@@ -1455,6 +1508,58 @@ function registerAutomationEventListener(app, db, options = {}) {
   };
 }
 
+function registerRecordTriggerHooks(app, db, options = {}) {
+  if (!db || typeof db.on !== 'function') return { stop() {} };
+  let active = true;
+  const attached = [];
+  const hookedCollections = new Set();
+
+  const attachForCollection = (colName) => {
+    const col = String(colName || '').trim();
+    if (!col || hookedCollections.has(col) || !isAllowlistedTargetCollection(col)) return;
+    hookedCollections.add(col);
+    for (const [hookName, op] of [['afterCreate', 'create'], ['afterUpdate', 'update'], ['afterDestroy', 'delete']]) {
+      const evName = `${col}.${hookName}`;
+      const fn = async (model, hookOpts = {}) => {
+        if (!active || hookOpts?.skipFlowTrigger) return;
+        const record = toPlain(model) || {};
+        const orgId = String(record.organizationId || hookOpts?.organizationId || '').trim();
+        if (!orgId) return;
+        try {
+          await getFlowExecutor().dispatchRecordTriggerEvent(
+            hookOpts?.db || db,
+            { collection: col, operation: op, organizationId: orgId, recordId: val(model, 'id') ?? record.id ?? null, record, data: record, depth: Number(hookOpts?.depth || 0) },
+            { ...options, app: hookOpts?.app || app },
+          );
+        } catch (err) {
+          app?.logger?.error?.('[dxosFlow] Record hook dispatch failed', { collection: col, operation: op, error: err?.message || String(err) });
+        }
+      };
+      db.on(evName, fn);
+      attached.push({ event: evName, fn });
+    }
+  };
+
+  for (const col of ALLOWLISTED_BUSINESS_COLLECTIONS) attachForCollection(col);
+  if (db.collections && typeof db.collections.keys === 'function') {
+    for (const col of db.collections.keys()) attachForCollection(col);
+  }
+  const onColLoaded = (evt) => attachForCollection(evt?.collection?.name || evt?.name);
+  db.on('collection:loaded', onColLoaded);
+  attached.push({ event: 'collection:loaded', fn: onColLoaded });
+
+  return {
+    stop() {
+      if (!active) return;
+      active = false;
+      for (const { event, fn } of attached) {
+        if (typeof db.off === 'function') db.off(event, fn);
+        else if (typeof db.removeListener === 'function') db.removeListener(event, fn);
+      }
+    },
+  };
+}
+
 function createDxosAutomationsActions(db, options = {}) {
   const foundation = options.foundation || loadFoundationSet();
 
@@ -1486,9 +1591,16 @@ function createDxosAutomationsActions(db, options = {}) {
     if (!repo) throw fail('REPOSITORY_UNAVAILABLE', 500, 'latticeAutomationRules repository is not registered');
     const existing = await repo.findOne({ filter: { organizationId, ruleKey: validated.ruleKey } });
     if (existing) {
+      const nextValues = { ...validated };
+      if (validated.schemaVersion === 2 && isPlainObject(validated.graphJson) && validated.publishedVersion === undefined) {
+        nextValues.publishedVersion = Math.max(1, Number(val(existing, 'publishedVersion') || 1) + 1);
+      }
+      if (!isPlainObject(validated.graphJson) && validated.graphJson !== null && isPlainObject(val(existing, 'graphJson'))) {
+        delete nextValues.triggerIndexJson;
+      }
       await repo.update({
         filter: { organizationId, ruleKey: validated.ruleKey },
-        values: validated,
+        values: nextValues,
       });
       return repo.findOne({ filter: { organizationId, ruleKey: validated.ruleKey } });
     }
@@ -1589,12 +1701,17 @@ function createDxosAutomationsActions(db, options = {}) {
       }
 
       const rawEvent = params.event || params.sampleEvent || params.context || params.data || params.payload || {};
-      const simulation = await executeRuleAgainstEvent(db, ruleObj, rawEvent, {
+      const scopedEvent = isPlainObject(rawEvent)
+        ? { ...sanitizePlainObject(rawEvent), organizationId, organizationid: organizationId }
+        : rawEvent;
+      const simulation = await executeRuleAgainstEvent(db, ruleObj, scopedEvent, {
         ...options,
+        organizationId,
         app: ctx?.app || db?.app,
         actor,
         dryRun: true,
         ignoreCooldown: true,
+        useDraft: Boolean(params.useDraft),
       });
       ctx.body = { simulation };
       return next();
@@ -1613,22 +1730,23 @@ function createDxosAutomationsActions(db, options = {}) {
       if (!ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
 
       const defaultEventType = String(val(ruleRow, 'triggerEventType') || 'manual.trigger').split(',')[0].trim() || 'manual.trigger';
-      const eventPayload = isPlainObject(params.event)
-        ? params.event
+      const baseEventPayload = isPlainObject(params.event)
+        ? sanitizePlainObject(params.event)
         : isPlainObject(params.sampleEvent)
-          ? params.sampleEvent
+          ? sanitizePlainObject(params.sampleEvent)
           : {
               id: params.eventId,
               type: params.eventType || defaultEventType,
               source: params.source || 'dxos-studio:manual',
               subject: params.subject,
               depth: params.depth ?? 0,
-              organizationId,
               data: params.data || params.context || params.payload || {},
             };
+      const eventPayload = { ...baseEventPayload, organizationId, organizationid: organizationId };
 
       const run = await executeRuleAgainstEvent(db, ruleRow, eventPayload, {
         ...options,
+        organizationId,
         app: ctx?.app || db?.app,
         actor,
         ignoreCooldown: params.ignoreCooldown !== false,
@@ -1718,10 +1836,13 @@ function createDxosAutomationsActions(db, options = {}) {
           organizationId,
         );
       }
+      eventEnvelope.organizationId = organizationId;
+      eventEnvelope.organizationid = organizationId;
       eventEnvelope.depth = Number(orig.depth || 0) + 1;
 
       const replay = await executeRuleAgainstEvent(db, ruleRow, eventEnvelope, {
         ...options,
+        organizationId,
         app: ctx?.app || db?.app,
         actor,
         ignoreCooldown: true,
@@ -1778,6 +1899,85 @@ function createDxosAutomationsActions(db, options = {}) {
       ctx.body = { ...result, applied: false };
       return next();
     },
+
+    async nodeRegistry(ctx, next) {
+      const params = readParams(ctx);
+      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
+      await requireOrgRoles(ctx, params, { mutating: false });
+      ctx.body = { nodeTypes: flowRegistry.listNodeSchemas() };
+      return next();
+    },
+
+    async testNode(ctx, next) {
+      const params = readParams(ctx);
+      const isLive = params.live === true || params.dryRun === false;
+      const { organizationId, actor } = await requireOrgRoles(ctx, params, {
+        mutating: isLive,
+        allowedPatScopes: isLive ? ['write', 'ai', 'iot'] : ['read', 'write', 'ai', 'iot'],
+      });
+      let ruleObj = isPlainObject(params.rule) ? { ...sanitizePlainObject(params.rule), organizationId } : null;
+      const inlineGraph = isPlainObject(params.graph)
+        ? { ...sanitizePlainObject(params.graph), organizationId }
+        : (isPlainObject(params.graphJson) ? { ...sanitizePlainObject(params.graphJson), organizationId } : null);
+      if (!inlineGraph && !ruleObj && (params.ruleKey || params.automationCode)) {
+        const key = String(params.ruleKey || params.automationCode).trim();
+        const found = await db.getRepository('latticeAutomationRules')?.findOne({ filter: { organizationId, ruleKey: key } });
+        if (!found) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${key} not found`);
+        ruleObj = toPlain(found);
+      }
+      const result = await getFlowExecutor().testSingleFlowNode(db, {
+        graph: inlineGraph,
+        rule: ruleObj,
+        nodeId: params.nodeId,
+        pinnedInputs: params.pinnedInputs || params.input || {},
+        organizationId,
+        actor,
+        options: { ...options, organizationId, app: ctx?.app || db?.app, dryRun: !isLive, live: isLive, useDraft: Boolean(params.useDraft) },
+      });
+      ctx.body = { result };
+      return next();
+    },
+
+    async resumeRun(ctx, next) {
+      const params = readParams(ctx);
+      const { organizationId, actor } = await requireOrgRoles(ctx, params, {
+        mutating: true,
+        allowedPatScopes: ['write', 'ai', 'iot'],
+      });
+      const run = await getFlowExecutor().resumeFlowRun(db, {
+        organizationId,
+        runUid: params.runUid,
+        decision: params.decision || 'approved',
+        payload: isPlainObject(params.payload) ? params.payload : {},
+        resumeToken: params.resumeToken,
+        actor,
+        dryRun: Boolean(params.dryRun),
+        options: { ...options, app: ctx?.app || db?.app },
+      });
+      ctx.body = { run };
+      return next();
+    },
+
+    async webhookIngress(ctx, next) {
+      const params = readParams(ctx);
+      const headers = ctx?.request?.headers || ctx?.headers || {};
+      const organizationId = String(params.organizationId || params.orgId || headers['x-organization-id'] || '').trim();
+      const ruleKey = String(params.ruleKey || params.automationCode || '').trim();
+      const rawBody = ctx?.request?.rawBody ?? (typeof ctx?.request?.body === 'string' ? ctx.request.body : undefined);
+      const parsedBody = isPlainObject(ctx?.request?.body)
+        ? ctx.request.body
+        : (isPlainObject(params.payload) ? params.payload : (isPlainObject(params.body) ? params.body : undefined));
+      const res = await getFlowExecutor().dispatchWebhookIngress(db, {
+        organizationId,
+        ruleKey,
+        headers,
+        rawBody,
+        parsedBody,
+        options: { ...options, app: ctx?.app || db?.app },
+      });
+      ctx.body = { ok: true, run: { runUid: res.runUid, status: res.status } };
+      return next();
+    },
   };
 }
 
@@ -1789,6 +1989,7 @@ module.exports = {
   RULE_KEY_RE,
   VALID_ACTION_TYPES,
   buildConnectorUrl,
+  buildFallbackAuthHeaders,
   buildHmacHeaders,
   createAutomationDirectGuardMiddleware,
   createDxosAutomationsActions,
@@ -1798,7 +1999,13 @@ module.exports = {
   hasUnsafeTemplateSyntax,
   interpolateTemplate,
   isAllowlistedTargetCollection,
+  loadCrossPluginModules,
   matchesFilter,
+  normalizeIncomingEvent,
   registerAutomationEventListener,
+  registerRecordTriggerHooks,
+  sanitizeAutomationWriteValues,
+  sanitizePlainObject,
+  scrubSecrets,
   validateRulePayload,
 };

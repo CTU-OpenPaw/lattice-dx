@@ -31,10 +31,18 @@ module.exports = defineCollection({
     { name: 'startedAt', type: 'date', allowNull: false },
     { name: 'finishedAt', type: 'date', allowNull: true },
     { name: 'durationMs', type: 'integer', allowNull: true },
+    { name: 'graphVersion', type: 'integer', allowNull: false, defaultValue: 1 },
+    { name: 'nodeStatesJson', type: 'jsonb', allowNull: false, defaultValue: {} },
+    { name: 'suspendedNodeId', type: 'string', allowNull: true },
+    { name: 'resumeTokenHash', type: 'string', allowNull: true },
+    { name: 'resumeAt', type: 'date', allowNull: true },
+    { name: 'approvalId', type: 'bigInt', allowNull: true },
+    { name: 'triggerPayloadJson', type: 'jsonb', allowNull: true },
   ],
   indexes: [
     { name: 'uidx_lattice_auto_runs_org_uid', fields: ['organizationId', 'runUid'], unique: true },
     { name: 'idx_lattice_auto_runs_org_rule', fields: ['organizationId', 'ruleKey'] },
     { name: 'idx_lattice_auto_runs_org_started', fields: ['organizationId', 'startedAt'] },
+    { name: 'idx_lattice_auto_runs_org_status_resume', fields: ['organizationId', 'status', 'resumeAt'] },
   ],
 });

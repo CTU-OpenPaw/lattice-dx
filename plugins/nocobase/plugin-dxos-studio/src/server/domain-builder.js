@@ -15,7 +15,14 @@ const {
   RULE_KEY_RE,
   ALLOWLISTED_BUSINESS_COLLECTIONS,
 } = require('./automation-engine');
-const { AUTOMATION_BLUEPRINTS } = require('./automation-copilot');
+const { getFlowBlueprint } = require('./flow/blueprints');
+const { buildTriggerIndex } = require('./flow/schema');
+let AUTOMATION_BLUEPRINTS = [];
+try {
+  ({ AUTOMATION_BLUEPRINTS = [] } = require('./automation-copilot'));
+} catch {
+  AUTOMATION_BLUEPRINTS = [];
+}
 const {
   ORG_ID_RE,
   assertPatScope,
@@ -1164,20 +1171,25 @@ function createDxosBuilderActions(db, options = {}) {
       const rulesRepo = db.getRepository?.('latticeAutomationRules');
       const ruleKey = 'auto_cmms_on_coldchain_fault';
       if (!RULE_KEY_RE.test(ruleKey)) throw fail('INVALID_PACK_RULE', 500, 'Invalid pack rule key');
+      const flowBlueprint = getFlowBlueprint(ruleKey);
       const cmmsBlueprint = AUTOMATION_BLUEPRINTS.find((b) => b.ruleKey === ruleKey);
       const ruleValues = {
         organizationId,
         ruleKey,
-        name: cmmsBlueprint?.name || 'Auto Create CMMS Work Order on Cold-Chain Alarm',
+        name: flowBlueprint?.name || cmmsBlueprint?.name || 'Auto Create CMMS Work Order on Cold-Chain Alarm',
         description:
+          flowBlueprint?.description ||
           cmmsBlueprint?.description ||
           'Evaluates cmms_priority_routing_v1 DMN and creates a CMMS work order plus notifies the assigned role.',
-        triggerEventType: cmmsBlueprint?.triggerEventType || 'alarm.triggered,device.offline',
+        triggerEventType: flowBlueprint?.triggerEventType || cmmsBlueprint?.triggerEventType || 'alarm.triggered,device.offline',
         filterJson: cmmsBlueprint?.filterJson ?? null,
-        dmnTableKey: cmmsBlueprint?.dmnTableKey || 'cmms_priority_routing_v1',
+        dmnTableKey: flowBlueprint?.dmnTableKey || cmmsBlueprint?.dmnTableKey || 'cmms_priority_routing_v1',
         actionsJson: structuredClone(cmmsBlueprint?.actionsJson || []),
-        maxDepth: cmmsBlueprint?.maxDepth ?? 8,
-        cooldownSec: cmmsBlueprint?.cooldownSec ?? 60,
+        draftGraphJson: flowBlueprint?.graphJson ? structuredClone(flowBlueprint.graphJson) : null,
+        triggerIndexJson: flowBlueprint?.graphJson ? buildTriggerIndex(flowBlueprint.graphJson, flowBlueprint) : [],
+        schemaVersion: 1,
+        maxDepth: flowBlueprint?.maxDepth ?? cmmsBlueprint?.maxDepth ?? 8,
+        cooldownSec: flowBlueprint?.cooldownSec ?? cmmsBlueprint?.cooldownSec ?? 60,
         active: true,
         createdBy: actor?.username ? String(actor.username) : null,
       };
