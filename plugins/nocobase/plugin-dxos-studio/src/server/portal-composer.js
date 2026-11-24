@@ -212,6 +212,17 @@ const OVERVIEW_SPECS = [
           pageSize: 40,
         },
       },
+      {
+        uidSuffix: 'wms-ops',
+        use: 'DxosWmsOpsBlockModel',
+        config: {
+          title: 'Vận hành Kho FEFO & Nhập lô hàng loạt [W]',
+          defaultOrganizationId: '',
+          defaultTab: 'fefo',
+          defaultImportCollection: 'latticeStockLots',
+          showBulkImport: true,
+        },
+      },
     ],
   },
   {
@@ -301,7 +312,16 @@ const DEFAULT_MOBILE_OPERATIONAL_ROLES = [
   'ldx_driver',
   'ldx_director',
 ];
-const EXCLUDED_MOBILE_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_sysadmin', 'ldx_connector']);
+const EXCLUDED_MOBILE_ROLES = new Set(['root', 'admin', 'anonymous', 'member', 'ldx_admin', 'ldx_sysadmin', 'ldx_connector']);
+const BUSINESS_ROLE_RE = /^[a-z][a-z0-9_]{1,40}$/;
+const RESERVED_SYSTEM_ROLES = new Set(['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector']);
+function isEnterpriseBusinessRole(roleName) {
+  if (typeof roleName !== 'string') return false;
+  const clean = roleName.trim();
+  if (!BUSINESS_ROLE_RE.test(clean) && !/^ldx_[a-z0-9_]{2,40}$/.test(clean)) return false;
+  if (clean.startsWith('r_')) return false;
+  return !RESERVED_SYSTEM_ROLES.has(clean);
+}
 
 const MOBILE_PORTAL_PAGES = [
   {
@@ -393,7 +413,7 @@ function findExistingPage(routes, layoutUid, groupTitle, pageTitle, linkedRouteI
 async function grantRolesToRoutes(db, routeIds, roleNames) {
   const grantsRepo = db.getRepository?.('rolesDesktopRoutes');
   const cleanRouteIds = [...new Set((routeIds || []).filter((id) => id != null))];
-  const cleanRoles = [...new Set((roleNames || []).filter((r) => typeof r === 'string' && r.startsWith('ldx_')))];
+  const cleanRoles = [...new Set((roleNames || []).filter(isEnterpriseBusinessRole))];
   if (!grantsRepo || !cleanRouteIds.length || !cleanRoles.length) return 0;
 
   let have = new Set();
@@ -435,7 +455,7 @@ async function resolveMobileOperationalRoles(db) {
     rows
       .map((r) => ({ name: val(r, 'name'), allowConfigure: val(r, 'allowConfigure'), snippets: val(r, 'snippets') }))
       .filter((r) => typeof r.name === 'string'
-        && /^ldx_[a-z0-9_]+$/.test(r.name)
+        && isEnterpriseBusinessRole(r.name)
         && !EXCLUDED_MOBILE_ROLES.has(r.name)
         && r.allowConfigure !== true
         && !(Array.isArray(r.snippets) && (r.snippets.includes('pm') || r.snippets.includes('pm.*'))))
@@ -659,7 +679,7 @@ async function composePortals(db, { applyBlueprint }) {
   if (linksRepo) {
     for (const ov of OVERVIEW_SPECS) {
       const uid = `ldx-portal-${ov.slug}`;
-      const configuredRoles = Array.isArray(portalMeta[uid]?.roles) ? portalMeta[uid].roles.filter((r) => typeof r === 'string' && r.startsWith('ldx_')) : [];
+      const configuredRoles = Array.isArray(portalMeta[uid]?.roles) ? portalMeta[uid].roles.filter(isEnterpriseBusinessRole) : [];
       if (!configuredRoles.length) continue;
       const links = (await linksRepo.find({ filter: { uiLayoutUid: uid } })) || [];
       const routeIds = [...new Set(links.map((l) => val(l, 'desktopRouteId')).filter((id) => id != null))];

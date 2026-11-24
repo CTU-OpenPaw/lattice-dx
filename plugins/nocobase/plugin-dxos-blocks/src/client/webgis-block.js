@@ -13,6 +13,8 @@ const { isSafeAppPath } = require('./blocks-helpers');
 const SVG_WIDTH = 640;
 const SVG_HEIGHT = 360;
 const SVG_PAD = 24;
+const MAPLIBRE_CSS_ID = 'dxos-maplibre-css';
+const HITL_DELTA_THRESHOLD_C = 2.0;
 
 const DEFAULT_VIETNAM_BOUNDS = {
   minLat: 8.0,
@@ -88,6 +90,32 @@ const VIETNAM_CITY_COORDS = [
   { keys: ['hai phong', 'hải phòng'], lat: 20.8449, lng: 106.6881 },
   { keys: ['nha trang', 'khanh hoa', 'khánh hòa'], lat: 12.2388, lng: 109.1967 },
 ];
+
+// Simplified WGS84 mainland reference polygon for Vietnam offline vector fallback
+const VIETNAM_OFFLINE_OUTLINE_COORDS = [
+  [105.0, 8.6],
+  [104.5, 10.4],
+  [106.2, 10.9],
+  [107.6, 11.2],
+  [109.2, 12.2],
+  [109.3, 13.8],
+  [108.4, 15.9],
+  [107.6, 16.8],
+  [106.6, 17.5],
+  [105.7, 19.8],
+  [107.1, 21.5],
+  [105.3, 22.8],
+  [102.9, 22.4],
+  [103.5, 20.5],
+  [104.7, 18.6],
+  [106.1, 16.5],
+  [107.5, 14.3],
+  [106.6, 11.7],
+  [105.1, 10.1],
+  [105.0, 8.6],
+];
+
+let cachedWorkerBlobUrl = null;
 
 function parseFiniteGeo(value) {
   if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
@@ -233,6 +261,334 @@ function inferCoordsForRecord(record, locationById, index) {
   };
 }
 
+function buildMarkersGeoJson(markers = []) {
+  const features = [];
+  for (const raw of Array.isArray(markers) ? markers : []) {
+    if (!raw || typeof raw !== 'object') continue;
+    const pt = projectGeoPoint(raw.lat, raw.lng);
+    if (!pt) continue;
+    const meta = raw.meta || classifyColdChainMarker(raw);
+    features.push({
+      type: 'Feature',
+      id: String(raw.id || raw.code || features.length),
+      geometry: {
+        type: 'Point',
+        coordinates: [pt.lng, pt.lat],
+      },
+      properties: {
+        id: String(raw.id || raw.code || features.length),
+        assetId: raw.assetId ?? null,
+        assetEntityId: raw.assetEntityId || '',
+        organizationId: raw.organizationId || '',
+        code: String(raw.code || ''),
+        name: String(raw.name || ''),
+        kind: String(raw.kind || 'asset'),
+        address: String(raw.address || ''),
+        level: meta.level,
+        color: meta.color,
+        twinStatus: meta.twinStatus,
+        temperatureC: meta.temperatureC,
+        targetTempC: meta.targetTempC,
+        alarmCount: Number(raw.alarmCount || 0),
+        latestAlarm: String(raw.latestAlarm || ''),
+        status: String(raw.status || 'active'),
+      },
+    });
+  }
+  return { type: 'FeatureCollection', features };
+}
+
+function buildCorridorsGeoJson(markers = [], defaultMarkers = DEFAULT_VIETNAM_GEO_MARKERS) {
+  const features = [];
+  const backboneCoords = (Array.isArray(defaultMarkers) ? defaultMarkers : DEFAULT_VIETNAM_GEO_MARKERS)
+    .map((m) => projectGeoPoint(m.lat, m.lng))
+    .filter(Boolean)
+    .map((pt) => [pt.lng, pt.lat]);
+
+  if (backboneCoords.length >= 2) {
+    features.push({
+      type: 'Feature',
+      id: 'corridor-vietnam-backbone',
+      geometry: {
+        type: 'LineString',
+        coordinates: backboneCoords,
+      },
+      properties: {
+        id: 'corridor-vietnam-backbone',
+        name: 'Hành lang Chuỗi lạnh ĐBSCL – TP.HCM – Đà Nẵng – Hà Nội',
+        corridorType: 'backbone',
+      },
+    });
+  }
+
+  const validMarkers = (Array.isArray(markers) ? markers : [])
+    .map((m) => ({ m, pt: projectGeoPoint(m?.lat, m?.lng) }))
+    .filter((entry) => Boolean(entry.pt))
+    .sort((a, b) => a.pt.lat - b.pt.lat);
+
+  if (validMarkers.length >= 2) {
+    features.push({
+      type: 'Feature',
+      id: 'corridor-active-coldchain',
+      geometry: {
+        type: 'LineString',
+        coordinates: validMarkers.map((entry) => [entry.pt.lng, entry.pt.lat]),
+      },
+      properties: {
+        id: 'corridor-active-coldchain',
+        name: 'Tuyến tài sản chuỗi lạnh đang hoạt động',
+        corridorType: 'active',
+      },
+    });
+  }
+
+  return { type: 'FeatureCollection', features };
+}
+
+function buildOfflineWgs84VectorStyle({ centerLng = 106.5, centerLat = 15.8, zoom = 5.2 } = {}) {
+  const graticuleFeatures = [];
+  for (let lat = 8; lat <= 24; lat += 2) {
+    graticuleFeatures.push({
+      type: 'Feature',
+      geometry: { type: 'LineString', coordinates: [[100, lat], [112, lat]] },
+      properties: { axis: 'lat', value: lat },
+    });
+  }
+  for (let lng = 102; lng <= 110; lng += 2) {
+    graticuleFeatures.push({
+      type: 'Feature',
+      geometry: { type: 'LineString', coordinates: [[lng, 6], [lng, 25]] },
+      properties: { axis: 'lng', value: lng },
+    });
+  }
+
+  const landFeatures = [
+    {
+      type: 'Feature',
+      geometry: {
+        type: 'Polygon',
+        coordinates: [VIETNAM_OFFLINE_OUTLINE_COORDS],
+      },
+      properties: { region: 'vietnam-wgs84-corridor' },
+    },
+  ];
+
+  return {
+    version: 8,
+    name: 'latticedx-offline-wgs84',
+    center: [Number(centerLng) || 106.5, Number(centerLat) || 15.8],
+    zoom: Number(zoom) || 5.2,
+    sources: {
+      'offline-wgs84-graticule': {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: graticuleFeatures },
+      },
+      'offline-wgs84-land': {
+        type: 'geojson',
+        data: { type: 'FeatureCollection', features: landFeatures },
+      },
+    },
+    layers: [
+      {
+        id: 'offline-wgs84-bg',
+        type: 'background',
+        paint: { 'background-color': '#0f172a' },
+      },
+      {
+        id: 'offline-wgs84-land-fill',
+        type: 'fill',
+        source: 'offline-wgs84-land',
+        paint: { 'fill-color': '#172554', 'fill-opacity': 0.85 },
+      },
+      {
+        id: 'offline-wgs84-land-outline',
+        type: 'line',
+        source: 'offline-wgs84-land',
+        paint: { 'line-color': '#38bdf8', 'line-width': 1.2, 'line-opacity': 0.45 },
+      },
+      {
+        id: 'offline-wgs84-graticule-line',
+        type: 'line',
+        source: 'offline-wgs84-graticule',
+        paint: { 'line-color': '#334155', 'line-width': 0.8, 'line-dasharray': [2, 3] },
+      },
+    ],
+  };
+}
+
+function buildOnlineOrHybridStyle({ tileUrlTemplate = '', centerLng = 106.5, centerLat = 15.8, zoom = 5.2 } = {}) {
+  const baseStyle = buildOfflineWgs84VectorStyle({ centerLng, centerLat, zoom });
+  const tpl = typeof tileUrlTemplate === 'string' ? tileUrlTemplate.trim() : '';
+  if (!tpl || !/^https?:\/\//i.test(tpl)) {
+    return baseStyle;
+  }
+  return {
+    ...baseStyle,
+    name: 'latticedx-hybrid-wgs84',
+    sources: {
+      ...baseStyle.sources,
+      'osm-raster': {
+        type: 'raster',
+        tiles: [tpl],
+        tileSize: 256,
+        attribution: '© OpenStreetMap contributors',
+      },
+    },
+    layers: [
+      ...baseStyle.layers,
+      {
+        id: 'osm-raster-layer',
+        type: 'raster',
+        source: 'osm-raster',
+        paint: { 'raster-opacity': 0.72 },
+      },
+    ],
+  };
+}
+
+function canBrowserUseWebGL() {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return false;
+  try {
+    const canvas = document.createElement('canvas');
+    if (!canvas || typeof canvas.getContext !== 'function') return false;
+    return Boolean(canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl'));
+  } catch {
+    return false;
+  }
+}
+
+function resolveMapLibre(liveConfig) {
+  if (liveConfig?.maplibreOverride) return liveConfig.maplibreOverride;
+  if (typeof globalThis !== 'undefined' && globalThis.__DXOS_TEST_MAPLIBRE__) {
+    return globalThis.__DXOS_TEST_MAPLIBRE__;
+  }
+  if (!canBrowserUseWebGL()) return null;
+  if (typeof globalThis !== 'undefined' && globalThis.__DXOS_MAPLIBRE_BUNDLE__?.maplibre?.Map) {
+    return globalThis.__DXOS_MAPLIBRE_BUNDLE__.maplibre;
+  }
+  if (typeof globalThis !== 'undefined' && globalThis.maplibregl?.Map) {
+    return globalThis.maplibregl;
+  }
+  return null;
+}
+
+function injectMapLibreCss() {
+  if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return false;
+  if (document.getElementById(MAPLIBRE_CSS_ID)) return true;
+  const cssText = typeof globalThis !== 'undefined' ? globalThis.__DXOS_MAPLIBRE_BUNDLE__?.cssText : '';
+  if (!cssText) return false;
+  const target = document.head || document.documentElement || document.body;
+  if (!target || typeof document.createElement !== 'function' || typeof target.appendChild !== 'function') return false;
+  const el = document.createElement('style');
+  el.id = MAPLIBRE_CSS_ID;
+  el.textContent = cssText;
+  target.appendChild(el);
+  return true;
+}
+
+function ensureMapLibreWorker(maplibre) {
+  if (!maplibre || typeof maplibre.setWorkerUrl !== 'function') return;
+  if (cachedWorkerBlobUrl) {
+    maplibre.setWorkerUrl(cachedWorkerBlobUrl);
+    return;
+  }
+  const workerText = typeof globalThis !== 'undefined' ? globalThis.__DXOS_MAPLIBRE_BUNDLE__?.workerText : '';
+  if (!workerText || typeof Blob === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return;
+  try {
+    cachedWorkerBlobUrl = URL.createObjectURL(new Blob([workerText], { type: 'text/javascript' }));
+    maplibre.setWorkerUrl(cachedWorkerBlobUrl);
+  } catch {
+    // Worker URL optional fallback
+  }
+}
+
+function syncMapLibreLayers(map, markersGeoJson, corridorsGeoJson, selectedId) {
+  if (!map) return;
+  const corridorSource = map.getSource?.('dxos-corridors');
+  if (corridorSource && typeof corridorSource.setData === 'function') {
+    corridorSource.setData(corridorsGeoJson);
+  } else if (typeof map.addSource === 'function') {
+    map.addSource('dxos-corridors', { type: 'geojson', data: corridorsGeoJson });
+  }
+  if (!map.getLayer?.('dxos-corridors-line') && typeof map.addLayer === 'function') {
+    map.addLayer({
+      id: 'dxos-corridors-line',
+      type: 'line',
+      source: 'dxos-corridors',
+      paint: {
+        'line-color': '#38bdf8',
+        'line-width': 2.5,
+        'line-opacity': 0.72,
+        'line-dasharray': [2, 2],
+      },
+    });
+  }
+
+  const assetsSource = map.getSource?.('dxos-assets');
+  if (assetsSource && typeof assetsSource.setData === 'function') {
+    assetsSource.setData(markersGeoJson);
+  } else if (typeof map.addSource === 'function') {
+    map.addSource('dxos-assets', {
+      type: 'geojson',
+      data: markersGeoJson,
+      cluster: true,
+      clusterMaxZoom: 12,
+      clusterRadius: 48,
+    });
+  }
+
+  if (!map.getLayer?.('dxos-clusters') && typeof map.addLayer === 'function') {
+    map.addLayer({
+      id: 'dxos-clusters',
+      type: 'circle',
+      source: 'dxos-assets',
+      filter: ['has', 'point_count'],
+      paint: {
+        'circle-color': ['step', ['get', 'point_count'], '#0284c7', 10, '#d97706', 25, '#dc2626'],
+        'circle-radius': ['step', ['get', 'point_count'], 16, 10, 22, 25, 28],
+        'circle-stroke-width': 2,
+        'circle-stroke-color': '#ffffff',
+      },
+    });
+  }
+  if (!map.getLayer?.('dxos-cluster-count') && typeof map.addLayer === 'function') {
+    map.addLayer({
+      id: 'dxos-cluster-count',
+      type: 'symbol',
+      source: 'dxos-assets',
+      filter: ['has', 'point_count'],
+      layout: {
+        'text-field': ['get', 'point_count_abbreviated'],
+        'text-size': 12,
+      },
+      paint: {
+        'text-color': '#ffffff',
+      },
+    });
+  }
+  if (!map.getLayer?.('dxos-unclustered-point') && typeof map.addLayer === 'function') {
+    map.addLayer({
+      id: 'dxos-unclustered-point',
+      type: 'circle',
+      source: 'dxos-assets',
+      filter: ['!', ['has', 'point_count']],
+      paint: {
+        'circle-color': ['coalesce', ['get', 'color'], '#059669'],
+        'circle-radius': ['case', ['==', ['get', 'id'], selectedId || ''], 10, 7],
+        'circle-stroke-width': ['case', ['==', ['get', 'id'], selectedId || ''], 3, 2],
+        'circle-stroke-color': '#ffffff',
+      },
+    });
+  } else if (typeof map.setPaintProperty === 'function') {
+    try {
+      map.setPaintProperty('dxos-unclustered-point', 'circle-radius', ['case', ['==', ['get', 'id'], selectedId || ''], 10, 7]);
+      map.setPaintProperty('dxos-unclustered-point', 'circle-stroke-width', ['case', ['==', ['get', 'id'], selectedId || ''], 3, 2]);
+    } catch {
+      // Ignore on lightweight mock map instances
+    }
+  }
+}
+
 function safeGo(app, path) {
   if (!isSafeAppPath(path)) return;
   if (app?.router?.navigate) app.router.navigate(path);
@@ -259,6 +615,9 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       defaultOrganizationId: '',
       centerLat: 15.8,
       centerLng: 106.5,
+      zoom: 5.2,
+      tileUrlTemplate: '',
+      offlineOnly: false,
       showTwinOverlay: true,
       ...(model?.props || {}),
       ...stepCfg,
@@ -267,21 +626,50 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
 
     const [filterMode, setFilterMode] = React.useState('all');
     const [selectedId, setSelectedId] = React.useState('');
+    const [drawerOpen, setDrawerOpen] = React.useState(false);
+    const [offlineStyleMode, setOfflineStyleMode] = React.useState(
+      () => Boolean(cfg.offlineOnly) || (typeof navigator !== 'undefined' && navigator.onLine === false) || !cfg.tileUrlTemplate,
+    );
+    const [webglFailed, setWebglFailed] = React.useState(false);
     const [state, setState] = React.useState({
       loading: false,
       markers: DEFAULT_VIETNAM_GEO_MARKERS,
       usingFallback: true,
       error: '',
     });
+
+    // Twin Control Drawer state
+    const [twinForm, setTwinForm] = React.useState({
+      targetTempInput: '-18.0',
+      defrostMode: 'auto',
+      fanMode: 'auto',
+      doorLock: 'locked',
+    });
+    const [twinBusy, setTwinBusy] = React.useState(false);
+    const [twinFeedback, setTwinFeedback] = React.useState({ type: '', text: '' });
+
     const [reqTracker] = React.useState(() => ({ seq: 0, unmounted: false }));
+    const [mapHolder] = React.useState(() => ({
+      containerEl: null,
+      map: null,
+      ready: false,
+      offlineSwitched: false,
+      latestGeo: { markersGeoJson: buildMarkersGeoJson([]), corridorsGeoJson: buildCorridorsGeoJson([]), selectedId: '' },
+      onSelectMarker: null,
+    }));
 
     React.useEffect(() => {
       reqTracker.unmounted = false;
       return () => {
         reqTracker.unmounted = true;
         reqTracker.seq += 1;
+        if (mapHolder.map && typeof mapHolder.map.remove === 'function') {
+          try { mapHolder.map.remove(); } catch {}
+          mapHolder.map = null;
+          mapHolder.ready = false;
+        }
       };
-    }, [reqTracker]);
+    }, [reqTracker, mapHolder]);
 
     const loadGeoData = React.useCallback(async (isCancelled = null) => {
       if (!api?.request) return;
@@ -303,21 +691,29 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           : orgId
             ? { organizationId: orgId }
             : extraFilter;
+        const pageSize = 200;
+        const allRows = [];
         try {
-          const res = await api.request({
-            url,
-            method: 'get',
-            params: {
-              pageSize: 50,
-              sort: ['-id'],
-              ...(mergedFilter ? { filter: mergedFilter } : {}),
-            },
-            skipNotify: true,
-          });
-          const rows = res?.data?.data ?? res?.data?.items ?? [];
-          return Array.isArray(rows) ? rows : [];
+          for (let page = 1; page <= 10; page += 1) {
+            const res = await api.request({
+              url,
+              method: 'get',
+              params: {
+                pageSize,
+                ...(page > 1 ? { page } : {}),
+                sort: ['-id'],
+                ...(mergedFilter ? { filter: mergedFilter } : {}),
+              },
+              skipNotify: true,
+            });
+            const rows = res?.data?.data ?? res?.data?.items ?? [];
+            if (!Array.isArray(rows) || !rows.length) break;
+            allRows.push(...rows);
+            if (rows.length < pageSize) break;
+          }
+          return allRows;
         } catch {
-          return null;
+          return allRows.length ? allRows : null;
         }
       };
 
@@ -345,23 +741,28 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
 
       const shadowsByAssetId = new Map();
       if (cfg.showTwinOverlay !== false && Array.isArray(assets) && assets.length) {
-        await Promise.all(assets.slice(0, 6).map(async (asset) => {
-          if (isStale() || asset?.id == null) return;
-          const twinOrg = String(orgParams.organizationId || asset?.organizationId || '').trim();
-          if (!twinOrg) return;
-          try {
-            const res = await api.request({
-              url: 'dxosBlocks:twinShadow',
-              method: 'post',
-              data: { assetId: asset.id, organizationId: twinOrg },
-              skipNotify: true,
-            });
-            const payload = res?.data?.data || res?.data || {};
-            if (payload.shadow) shadowsByAssetId.set(Number(asset.id), payload.shadow);
-          } catch {
-            // Optional Digital Twin endpoint unavailable or forbidden -> degrade silently
-          }
-        }));
+        const CONCURRENCY = 8;
+        for (let i = 0; i < assets.length; i += CONCURRENCY) {
+          if (isStale()) return;
+          const batch = assets.slice(i, i + CONCURRENCY);
+          await Promise.all(batch.map(async (asset) => {
+            if (isStale() || asset?.id == null) return;
+            const twinOrg = String(orgParams.organizationId || asset?.organizationId || '').trim();
+            if (!twinOrg) return;
+            try {
+              const res = await api.request({
+                url: 'dxosBlocks:twinShadow',
+                method: 'post',
+                data: { assetId: asset.id, organizationId: twinOrg },
+                skipNotify: true,
+              });
+              const payload = res?.data?.data || res?.data || {};
+              if (payload.shadow) shadowsByAssetId.set(Number(asset.id), payload.shadow);
+            } catch {
+              // Optional Digital Twin endpoint unavailable or forbidden -> degrade silently
+            }
+          }));
+        }
       }
       if (isStale()) return;
 
@@ -386,9 +787,16 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           const isWarehouse = String(asset?.kind || '').toLowerCase().includes('warehouse')
             || String(asset?.kind || '').toLowerCase().includes('cold')
             || asset?.locationId != null;
+          const markerOrg = String(orgId || asset?.organizationId || shadow?.organizationId || '').trim();
+          const markerEntityId = asset?.entityId
+            || shadow?.assetEntityId
+            || (asset?.id != null && markerOrg ? `urn:ngsi-ld:Asset:${markerOrg}:native:${asset.id}` : '');
 
           markers.push({
             id: `asset-${asset.id ?? idx}`,
+            assetId: asset.id ?? null,
+            assetEntityId: markerEntityId,
+            organizationId: markerOrg,
             code: asset.code || `AST-${asset.id ?? idx}`,
             name: asset.name || asset.code || 'Tài sản chuỗi lạnh',
             kind: isWarehouse ? 'warehouse' : 'asset',
@@ -413,6 +821,8 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           const coords = inferCoordsForRecord(loc, locationById, markers.length + idx);
           markers.push({
             id: `loc-${loc.id ?? idx}`,
+            assetId: null,
+            organizationId: String(orgId || loc?.organizationId || '').trim(),
             code: loc.code || `LOC-${loc.id ?? idx}`,
             name: loc.name || loc.code || 'Kho / Trạm',
             kind: 'warehouse',
@@ -473,6 +883,191 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         || null;
     }, [visibleMarkers, selectedId]);
 
+    const markersGeoJson = React.useMemo(() => buildMarkersGeoJson(visibleMarkers), [visibleMarkers]);
+    const corridorsGeoJson = React.useMemo(() => buildCorridorsGeoJson(visibleMarkers), [visibleMarkers]);
+
+    const handleSelectMarker = React.useCallback((marker) => {
+      const id = typeof marker === 'string' ? marker : marker?.id;
+      if (!id) return;
+      setSelectedId(id);
+      setDrawerOpen(true);
+      setTwinFeedback({ type: '', text: '' });
+      const target = classifiedMarkers.find((m) => m.id === id);
+      if (target) {
+        const initTemp = target.desiredJson?.targetTempC ?? target.targetTempC ?? target.temperatureC ?? -18;
+        setTwinForm({
+          targetTempInput: String(initTemp),
+          defrostMode: target.desiredJson?.defrostMode || 'auto',
+          fanMode: target.desiredJson?.fanMode || 'auto',
+          doorLock: target.desiredJson?.doorLock || 'locked',
+        });
+      }
+    }, [classifiedMarkers]);
+
+    mapHolder.onSelectMarker = handleSelectMarker;
+    mapHolder.latestGeo = { markersGeoJson, corridorsGeoJson, selectedId: selectedMarker?.id || '' };
+
+    const maplibreLib = resolveMapLibre(cfg);
+    const useMapLibreCanvas = Boolean(maplibreLib && !webglFailed);
+
+    const mountMapLibre = React.useCallback((containerEl) => {
+      mapHolder.containerEl = containerEl;
+      if (!containerEl || !maplibreLib || mapHolder.map || webglFailed) return;
+      try {
+        injectMapLibreCss();
+        ensureMapLibreWorker(maplibreLib);
+        const startOffline = Boolean(cfg.offlineOnly)
+          || (typeof navigator !== 'undefined' && navigator.onLine === false)
+          || !cfg.tileUrlTemplate;
+        const initialStyle = startOffline
+          ? buildOfflineWgs84VectorStyle({ centerLng: cfg.centerLng, centerLat: cfg.centerLat, zoom: cfg.zoom })
+          : buildOnlineOrHybridStyle({
+              tileUrlTemplate: cfg.tileUrlTemplate,
+              centerLng: cfg.centerLng,
+              centerLat: cfg.centerLat,
+              zoom: cfg.zoom,
+            });
+
+        const map = new maplibreLib.Map({
+          container: containerEl,
+          style: initialStyle,
+          center: [Number(cfg.centerLng) || 106.5, Number(cfg.centerLat) || 15.8],
+          zoom: Number(cfg.zoom) || 5.2,
+          attributionControl: false,
+        });
+        mapHolder.map = map;
+        if (typeof maplibreLib.NavigationControl === 'function' && typeof map.addControl === 'function') {
+          try { map.addControl(new maplibreLib.NavigationControl({ showCompass: true }), 'top-right'); } catch {}
+        }
+
+        const applyLayers = () => {
+          mapHolder.ready = true;
+          const cur = mapHolder.latestGeo;
+          syncMapLibreLayers(map, cur.markersGeoJson, cur.corridorsGeoJson, cur.selectedId);
+        };
+
+        map.on('load', applyLayers);
+        map.on('style.load', applyLayers);
+        map.on('click', 'dxos-clusters', (e) => {
+          const cluster = e?.features?.[0];
+          const clusterId = cluster?.properties?.cluster_id;
+          const src = map.getSource?.('dxos-assets');
+          if (clusterId != null && src && typeof src.getClusterExpansionZoom === 'function') {
+            src.getClusterExpansionZoom(clusterId, (err, zoom) => {
+              if (!err && typeof map.easeTo === 'function') {
+                map.easeTo({ center: cluster.geometry.coordinates, zoom });
+              }
+            });
+          }
+        });
+        map.on('click', 'dxos-unclustered-point', (e) => {
+          const featId = e?.features?.[0]?.properties?.id;
+          if (featId && typeof mapHolder.onSelectMarker === 'function') {
+            mapHolder.onSelectMarker(String(featId));
+          }
+        });
+        map.on('error', () => {
+          if (!mapHolder.offlineSwitched) {
+            mapHolder.offlineSwitched = true;
+            setOfflineStyleMode(true);
+            if (typeof map.setStyle === 'function') {
+              try {
+                map.setStyle(buildOfflineWgs84VectorStyle({ centerLng: cfg.centerLng, centerLat: cfg.centerLat, zoom: cfg.zoom }));
+              } catch {}
+            }
+          }
+        });
+      } catch {
+        setWebglFailed(true);
+        setOfflineStyleMode(true);
+      }
+    }, [mapHolder, maplibreLib, webglFailed, cfg.offlineOnly, cfg.tileUrlTemplate, cfg.centerLng, cfg.centerLat, cfg.zoom]);
+
+    React.useEffect(() => {
+      if (mapHolder.map && mapHolder.ready) {
+        syncMapLibreLayers(mapHolder.map, markersGeoJson, corridorsGeoJson, selectedMarker?.id || '');
+      }
+    }, [mapHolder, markersGeoJson, corridorsGeoJson, selectedMarker?.id]);
+
+    const baselineTemp = React.useMemo(() => {
+      if (!selectedMarker) return null;
+      return parseFiniteGeo(selectedMarker.desiredJson?.targetTempC ?? selectedMarker.targetTempC ?? selectedMarker.temperatureC);
+    }, [selectedMarker]);
+
+    const parsedInputTemp = parseFiniteGeo(twinForm.targetTempInput);
+    const previewDeltaTemp = baselineTemp !== null && parsedInputTemp !== null
+      ? Number((parsedInputTemp - baselineTemp).toFixed(2))
+      : null;
+    const requiresHitl = previewDeltaTemp !== null && Math.abs(previewDeltaTemp) > HITL_DELTA_THRESHOLD_C;
+
+    async function handleTwinSubmit(e) {
+      if (e && typeof e.preventDefault === 'function') e.preventDefault();
+      if (!api?.request || !selectedMarker || twinBusy) return;
+      if (parsedInputTemp === null || parsedInputTemp < -80 || parsedInputTemp > 120) {
+        setTwinFeedback({ type: 'error', text: 'targetTempC phải là số hợp lệ trong [-80, 120]°C.' });
+        return;
+      }
+      const twinOrg = String(selectedMarker.organizationId || cfg.defaultOrganizationId || '').trim();
+      if (!twinOrg) {
+        setTwinFeedback({ type: 'error', text: 'Thiếu organizationId để gửi lệnh Digital Twin.' });
+        return;
+      }
+
+      setTwinBusy(true);
+      setTwinFeedback({ type: '', text: '' });
+      try {
+        const desiredPatch = {
+          targetTempC: Number(parsedInputTemp.toFixed(3)),
+          ...(twinForm.defrostMode ? { defrostMode: twinForm.defrostMode } : {}),
+          ...(twinForm.fanMode ? { fanMode: twinForm.fanMode } : {}),
+          ...(twinForm.doorLock ? { doorLock: twinForm.doorLock } : {}),
+        };
+        const res = await api.request({
+          url: 'dxosBlocks:twinSetDesired',
+          method: 'post',
+          data: {
+            ...(selectedMarker.assetId != null ? { assetId: selectedMarker.assetId } : {}),
+            ...(selectedMarker.assetEntityId ? { assetEntityId: selectedMarker.assetEntityId } : {}),
+            organizationId: twinOrg,
+            desiredPatch,
+          },
+          skipNotify: true,
+        });
+        const payload = res?.data?.data || res?.data || {};
+        const nextShadow = payload.shadow || null;
+        if (nextShadow) {
+          setState((prev) => ({
+            ...prev,
+            markers: prev.markers.map((m) => (m.id === selectedMarker.id
+              ? {
+                  ...m,
+                  twinStatus: nextShadow.commandStatus || m.twinStatus,
+                  desiredJson: nextShadow.desiredJson || m.desiredJson,
+                  reportedJson: nextShadow.reportedJson || m.reportedJson,
+                  targetTempC: parseFiniteGeo(nextShadow.desiredJson?.targetTempC) ?? m.targetTempC,
+                }
+              : m)),
+          }));
+        }
+        if (payload.gatedByHitl) {
+          setTwinFeedback({
+            type: 'warning',
+            text: `Yêu cầu vượt ±2.0°C đã chuyển phê duyệt HITL (Mã #${payload.approvalId ?? '—'}, trạng thái: ${nextShadow?.commandStatus || 'pending_hitl'}, Δ = ${payload.deltaTempC ?? previewDeltaTemp}°C).`,
+          });
+        } else {
+          setTwinFeedback({
+            type: 'success',
+            text: `Đã gửi lệnh Digital Twin (${payload.commandId || 'cmd'}, trạng thái: ${nextShadow?.commandStatus || 'dispatched'}).`,
+          });
+        }
+      } catch (err) {
+        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không gửi được lệnh Digital Twin.';
+        setTwinFeedback({ type: 'error', text: msg });
+      } finally {
+        setTwinBusy(false);
+      }
+    }
+
     const corridorPolylinePoints = React.useMemo(
       () => DEFAULT_VIETNAM_GEO_MARKERS
         .map((m) => projectGeoPoint(m.lat, m.lng))
@@ -513,7 +1108,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         h('div', null,
           h('strong', { style: { fontSize: 15, color: '#0f172a' } }, String(cfg.title || 'WebGIS Chuỗi lạnh [D]')),
           h('div', { style: { fontSize: 11, color: '#64748b' } },
-            `Tuyến ĐBSCL – TP.HCM – Đà Nẵng – Hà Nội · ${visibleMarkers.length} điểm hiển thị${state.usingFallback ? ' (dữ liệu mẫu)' : ''}`,
+            `Tuyến ĐBSCL – TP.HCM – Đà Nẵng – Hà Nội · ${visibleMarkers.length} điểm hiển thị${state.usingFallback ? ' (dữ liệu mẫu)' : ''}${useMapLibreCanvas ? (offlineStyleMode ? ' · MapLibre WGS84 Offline' : ' · MapLibre GL') : ' · Vector WGS84 Fallback'}`,
           ),
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
@@ -547,75 +1142,78 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
             minWidth: 0,
           },
         },
-          h('svg', {
-            viewBox: `0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`,
-            role: 'img',
-            'aria-label': 'Bản đồ hành lang chuỗi lạnh Việt Nam',
-            style: { width: '100%', height: 'auto', display: 'block' },
-          },
-            // Lat/Lng grid lines
-            [10, 14, 18, 22].map((latLine) => {
-              const pt = projectGeoPoint(latLine, 106);
-              return pt ? h('g', { key: `lat-${latLine}` },
-                h('line', { x1: 0, x2: SVG_WIDTH, y1: pt.y, y2: pt.y, stroke: '#334155', strokeDasharray: '3 4', strokeWidth: 0.8 }),
-                h('text', { x: 6, y: pt.y - 4, fill: '#64748b', fontSize: 9 }, `${latLine}°N`),
-              ) : null;
-            }),
-            [104, 106, 108].map((lngLine) => {
-              const pt = projectGeoPoint(15, lngLine);
-              return pt ? h('g', { key: `lng-${lngLine}` },
-                h('line', { x1: pt.x, x2: pt.x, y1: 0, y2: SVG_HEIGHT, stroke: '#334155', strokeDasharray: '3 4', strokeWidth: 0.8 }),
-                h('text', { x: pt.x + 3, y: 12, fill: '#64748b', fontSize: 9 }, `${lngLine}°E`),
-              ) : null;
-            }),
-            // Vietnam corridor silhouette + cold-chain route
-            h('polyline', {
-              fill: 'none',
-              stroke: '#38bdf8',
-              strokeOpacity: 0.55,
-              strokeWidth: 2.5,
-              strokeDasharray: '6 4',
-              points: corridorPolylinePoints,
-            }),
-            centerGeo ? h('circle', {
-              cx: centerGeo.x,
-              cy: centerGeo.y,
-              r: 3,
-              fill: '#38bdf8',
-              fillOpacity: 0.35,
-            }) : null,
-            // Station / Asset pins
-            visibleMarkers.map((m) => {
-              const isSelected = selectedMarker && selectedMarker.id === m.id;
-              return h('g', {
-                key: m.id,
-                'data-testid': 'dxos-webgis-pin',
-                'data-severity': m.meta.level,
-                'data-twin-status': m.meta.twinStatus,
-                role: 'button',
-                'aria-label': `${m.code} ${m.name}`,
-                style: { cursor: 'pointer' },
-                onClick: () => setSelectedId(m.id),
+          useMapLibreCanvas
+            ? h('div', {
+                'data-testid': 'dxos-webgis-maplibre-canvas',
+                ref: mountMapLibre,
+                style: { width: '100%', height: 340, borderRadius: 8, overflow: 'hidden' },
+              })
+            : h('svg', {
+                'data-testid': 'dxos-webgis-svg-fallback',
+                viewBox: `0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`,
+                role: 'img',
+                'aria-label': 'Bản đồ hành lang chuỗi lạnh Việt Nam',
+                style: { width: '100%', height: 'auto', display: 'block' },
               },
-                isSelected ? h('circle', { cx: m.geo.x, cy: m.geo.y, r: 15, fill: m.meta.color, fillOpacity: 0.22, stroke: '#f8fafc', strokeWidth: 1.5 }) : null,
-                h('circle', { cx: m.geo.x, cy: m.geo.y, r: isSelected ? 8.5 : 7, fill: m.meta.color, stroke: '#ffffff', strokeWidth: 2 }),
-                h('text', {
-                  x: Math.min(SVG_WIDTH - 64, m.geo.x + 11),
-                  y: m.geo.y + 4,
-                  fill: '#f8fafc',
-                  fontSize: 10,
-                  fontWeight: 700,
-                }, String(m.code)),
-              );
-            }),
-          ),
+                [10, 14, 18, 22].map((latLine) => {
+                  const pt = projectGeoPoint(latLine, 106);
+                  return pt ? h('g', { key: `lat-${latLine}` },
+                    h('line', { x1: 0, x2: SVG_WIDTH, y1: pt.y, y2: pt.y, stroke: '#334155', strokeDasharray: '3 4', strokeWidth: 0.8 }),
+                    h('text', { x: 6, y: pt.y - 4, fill: '#64748b', fontSize: 9 }, `${latLine}°N`),
+                  ) : null;
+                }),
+                [104, 106, 108].map((lngLine) => {
+                  const pt = projectGeoPoint(15, lngLine);
+                  return pt ? h('g', { key: `lng-${lngLine}` },
+                    h('line', { x1: pt.x, x2: pt.x, y1: 0, y2: SVG_HEIGHT, stroke: '#334155', strokeDasharray: '3 4', strokeWidth: 0.8 }),
+                    h('text', { x: pt.x + 3, y: 12, fill: '#64748b', fontSize: 9 }, `${lngLine}°E`),
+                  ) : null;
+                }),
+                h('polyline', {
+                  fill: 'none',
+                  stroke: '#38bdf8',
+                  strokeOpacity: 0.55,
+                  strokeWidth: 2.5,
+                  strokeDasharray: '6 4',
+                  points: corridorPolylinePoints,
+                }),
+                centerGeo ? h('circle', {
+                  cx: centerGeo.x,
+                  cy: centerGeo.y,
+                  r: 3,
+                  fill: '#38bdf8',
+                  fillOpacity: 0.35,
+                }) : null,
+                visibleMarkers.map((m) => {
+                  const isSelected = selectedMarker && selectedMarker.id === m.id;
+                  return h('g', {
+                    key: m.id,
+                    'data-testid': 'dxos-webgis-pin',
+                    'data-severity': m.meta.level,
+                    'data-twin-status': m.meta.twinStatus,
+                    role: 'button',
+                    'aria-label': `${m.code} ${m.name}`,
+                    style: { cursor: 'pointer' },
+                    onClick: () => handleSelectMarker(m),
+                  },
+                    isSelected ? h('circle', { cx: m.geo.x, cy: m.geo.y, r: 15, fill: m.meta.color, fillOpacity: 0.22, stroke: '#f8fafc', strokeWidth: 1.5 }) : null,
+                    h('circle', { cx: m.geo.x, cy: m.geo.y, r: isSelected ? 8.5 : 7, fill: m.meta.color, stroke: '#ffffff', strokeWidth: 2 }),
+                    h('text', {
+                      x: Math.min(SVG_WIDTH - 64, m.geo.x + 11),
+                      y: m.geo.y + 4,
+                      fill: '#f8fafc',
+                      fontSize: 10,
+                      fontWeight: 700,
+                    }, String(m.code)),
+                  );
+                }),
+              ),
           h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 6, fontSize: 11, color: '#cbd5e1' } },
             h('span', null, h('span', { style: { color: '#059669', fontWeight: 800 } }, '● '), 'Ổn định (#059669)'),
             h('span', null, h('span', { style: { color: '#d97706', fontWeight: 800 } }, '● '), 'Cảnh báo / MKT Hold (#d97706)'),
             h('span', null, h('span', { style: { color: '#dc2626', fontWeight: 800 } }, '● '), 'Nguy cấp (#dc2626)'),
           ),
         ),
-        // Selected telemetry & Digital Twin detail panel
         h('div', {
           'data-testid': 'dxos-webgis-detail-panel',
           style: {
@@ -665,6 +1263,21 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                 },
               }, selectedMarker.meta.twinStatus),
             ) : null,
+            cfg.showTwinOverlay !== false ? h('button', {
+              type: 'button',
+              'data-testid': 'dxos-webgis-open-twin-drawer-btn',
+              onClick: () => handleSelectMarker(selectedMarker),
+              style: {
+                padding: '6px 10px',
+                borderRadius: 6,
+                border: '1px solid #0284c7',
+                background: '#f0f9ff',
+                color: '#0369a1',
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: 'pointer',
+              },
+            }, 'Điều khiển Digital Twin') : null,
             selectedMarker.alarmCount > 0 ? h('div', { style: { fontSize: 12, color: '#991b1b', background: '#fee2e2', padding: '6px 8px', borderRadius: 6 } },
               `Sự cố đang mở (${selectedMarker.alarmCount}): ${selectedMarker.latestAlarm || 'Cảnh báo ngưỡng nhiệt'}`,
             ) : null,
@@ -685,6 +1298,114 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           ) : h('div', { style: { fontSize: 13, color: '#64748b' } }, 'Không có điểm giám sát phù hợp với bộ lọc hiện tại.'),
         ),
       ),
+      drawerOpen && selectedMarker ? h('div', {
+        'data-testid': 'dxos-webgis-twin-drawer',
+        role: 'region',
+        'aria-label': `Điều khiển Digital Twin ${selectedMarker.code}`,
+        style: {
+          borderRadius: 10,
+          border: '1px solid #93c5fd',
+          background: '#f8fafc',
+          padding: 14,
+          display: 'grid',
+          gap: 10,
+        },
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+          h('strong', { style: { fontSize: 13, color: '#0f172a' } }, `Desktop Digital Twin Control — ${selectedMarker.code} (${selectedMarker.name})`),
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-webgis-close-twin-drawer-btn',
+            onClick: () => setDrawerOpen(false),
+            style: { border: '1px solid #cbd5e1', background: '#ffffff', borderRadius: 6, padding: '2px 8px', fontSize: 11, cursor: 'pointer' },
+          }, 'Đóng'),
+        ),
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 } },
+          h('label', { style: { display: 'grid', gap: 4, fontSize: 11, color: '#475569' } },
+            'Nhiệt độ mục tiêu (°C)',
+            h('input', {
+              type: 'number',
+              step: '0.5',
+              'data-testid': 'dxos-twin-target-temp-input',
+              value: twinForm.targetTempInput,
+              onChange: (e) => setTwinForm((prev) => ({ ...prev, targetTempInput: e.target.value })),
+              style: { padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
+            }),
+          ),
+          h('label', { style: { display: 'grid', gap: 4, fontSize: 11, color: '#475569' } },
+            'Chế độ xả đá (defrost)',
+            h('select', {
+              'data-testid': 'dxos-twin-defrost-select',
+              value: twinForm.defrostMode,
+              onChange: (e) => setTwinForm((prev) => ({ ...prev, defrostMode: e.target.value })),
+              style: { padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
+            },
+              h('option', { value: 'auto' }, 'auto'),
+              h('option', { value: 'manual' }, 'manual'),
+              h('option', { value: 'off' }, 'off'),
+            ),
+          ),
+          h('label', { style: { display: 'grid', gap: 4, fontSize: 11, color: '#475569' } },
+            'Quạt dàn lạnh (fan)',
+            h('select', {
+              'data-testid': 'dxos-twin-fan-select',
+              value: twinForm.fanMode,
+              onChange: (e) => setTwinForm((prev) => ({ ...prev, fanMode: e.target.value })),
+              style: { padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
+            },
+              h('option', { value: 'auto' }, 'auto'),
+              h('option', { value: 'high' }, 'high'),
+              h('option', { value: 'low' }, 'low'),
+              h('option', { value: 'eco' }, 'eco'),
+            ),
+          ),
+          h('label', { style: { display: 'grid', gap: 4, fontSize: 11, color: '#475569' } },
+            'Khóa cửa kho (doorLock)',
+            h('select', {
+              'data-testid': 'dxos-twin-door-select',
+              value: twinForm.doorLock,
+              onChange: (e) => setTwinForm((prev) => ({ ...prev, doorLock: e.target.value })),
+              style: { padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
+            },
+              h('option', { value: 'locked' }, 'locked'),
+              h('option', { value: 'unlocked' }, 'unlocked'),
+            ),
+          ),
+        ),
+        requiresHitl ? h('div', {
+          'data-testid': 'dxos-twin-hitl-warning',
+          style: { fontSize: 12, color: '#92400e', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 6, padding: '6px 10px' },
+        }, `Cảnh báo HITL: Thay đổi ${previewDeltaTemp > 0 ? `+${previewDeltaTemp}` : previewDeltaTemp}°C vượt ngưỡng ±2.0°C — lệnh sẽ cần phê duyệt HITL.`) : null,
+        twinFeedback.text ? h('div', {
+          'data-testid': 'dxos-twin-feedback',
+          style: {
+            fontSize: 12,
+            padding: '6px 10px',
+            borderRadius: 6,
+            background: twinFeedback.type === 'error' ? '#fee2e2' : twinFeedback.type === 'warning' ? '#fef3c7' : '#dcfce7',
+            color: twinFeedback.type === 'error' ? '#991b1b' : twinFeedback.type === 'warning' ? '#92400e' : '#166534',
+            border: `1px solid ${twinFeedback.type === 'error' ? '#fca5a5' : twinFeedback.type === 'warning' ? '#fcd34d' : '#86efac'}`,
+          },
+        }, twinFeedback.text) : null,
+        h('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end', flexWrap: 'wrap' } },
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-twin-submit-btn',
+            disabled: twinBusy,
+            onClick: handleTwinSubmit,
+            style: {
+              padding: '6px 14px',
+              borderRadius: 6,
+              border: 'none',
+              background: requiresHitl ? '#d97706' : '#0284c7',
+              color: '#ffffff',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: twinBusy ? 'wait' : 'pointer',
+            },
+          }, twinBusy ? 'Đang gửi lệnh…' : (requiresHitl ? 'Gửi yêu cầu HITL' : 'Áp dụng Setpoint Digital Twin')),
+        ),
+      ) : null,
     );
   };
 }
@@ -695,5 +1416,9 @@ module.exports = {
   projectGeoPoint,
   classifyColdChainMarker,
   inferCoordsForRecord,
+  buildMarkersGeoJson,
+  buildCorridorsGeoJson,
+  buildOfflineWgs84VectorStyle,
+  buildOnlineOrHybridStyle,
   createWebGisBlockView,
 };

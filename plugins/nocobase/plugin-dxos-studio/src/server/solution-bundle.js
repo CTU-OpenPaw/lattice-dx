@@ -2163,12 +2163,26 @@ async function applyWorkflowsSection(db, workflowsList, { targetOrg, enableWorkf
   return { workflowsUpserted, nodesUpserted };
 }
 
+async function resolveFirstActiveOrg(db, transaction) {
+  const rows = (await safeRepoFind(db, 'latticeOrganizations', { limit: 50, transaction })) || [];
+  for (const row of rows) {
+    const orgId = String(val(row, 'organizationId') || '').trim();
+    if (!orgId || orgId.toLowerCase() === 'all') continue;
+    if (val(row, 'active') === false) continue;
+    const status = String(val(row, 'status') || 'active').trim().toLowerCase();
+    if (status === 'inactive' || status === 'disabled') continue;
+    return orgId;
+  }
+  return '';
+}
+
 async function applyCustomCollectionsSection(db, collectionsList, targetOrg, transaction) {
   const colsRepo = db?.getRepository?.('collections');
   if (!colsRepo || !Array.isArray(collectionsList)) return 0;
   if (typeof colsRepo.create !== 'function' && typeof colsRepo.update !== 'function') return 0;
   const fieldsRepo = db?.getRepository?.('fields');
   let customCollectionsUpserted = 0;
+  let cachedDefaultOrg;
 
   const txOpts = transaction ? { transaction } : {};
 
@@ -2177,12 +2191,28 @@ async function applyCustomCollectionsSection(db, collectionsList, targetOrg, tra
     const cname = String(cleanCol?.name || '').trim();
     if (!CUSTOM_COLLECTION_RE.test(cname)) continue;
 
+    const explicitOrgField = (Array.isArray(cleanCol.fields) ? cleanCol.fields : []).find(
+      (f) => f && f.name === 'organizationId' && typeof f.defaultValue === 'string' && f.defaultValue.trim(),
+    );
+    let resolvedOrg = String(targetOrg || cleanCol.organizationId || explicitOrgField?.defaultValue || '').trim();
+    if (!resolvedOrg) {
+      if (cachedDefaultOrg === undefined) cachedDefaultOrg = await resolveFirstActiveOrg(db, transaction);
+      resolvedOrg = cachedDefaultOrg;
+    }
+    if (!resolvedOrg) {
+      throw failBundle(
+        'ORGANIZATION_REQUIRED',
+        400,
+        `Collection "${cname}" yêu cầu organizationId mục tiêu hoặc một tổ chức đang hoạt động trong latticeOrganizations.`,
+      );
+    }
+
     const clampedOrgField = {
       name: 'organizationId',
       type: 'string',
       interface: 'input',
       allowNull: false,
-      defaultValue: targetOrg || 'native-ui-lab',
+      defaultValue: resolvedOrg,
       uiSchema: { type: 'string', title: 'Mã tổ chức' },
     };
     const rawNormalizedFields = (Array.isArray(cleanCol.fields) ? cleanCol.fields : [])
@@ -2268,11 +2298,23 @@ async function applyAiProfilesSection(db, profilesList, targetOrg, transaction) 
   const aiRepo = db?.getRepository?.('latticeAiProfiles');
   if (!aiRepo || !Array.isArray(profilesList)) return 0;
   let aiProfilesUpserted = 0;
+  let cachedDefaultOrg;
 
   for (const rawProf of profilesList) {
     const clean = stripSecretsDeep(rawProf);
     if (!clean?.username) continue;
-    const scopedOrg = targetOrg || clean.organizationId || 'native-ui-lab';
+    let scopedOrg = String(targetOrg || clean.organizationId || '').trim();
+    if (!scopedOrg) {
+      if (cachedDefaultOrg === undefined) cachedDefaultOrg = await resolveFirstActiveOrg(db, transaction);
+      scopedOrg = cachedDefaultOrg;
+    }
+    if (!scopedOrg) {
+      throw failBundle(
+        'ORGANIZATION_REQUIRED',
+        400,
+        `AI profile "${clean.username}" yêu cầu organizationId mục tiêu hoặc một tổ chức đang hoạt động trong latticeOrganizations.`,
+      );
+    }
     const isAdminBuilder = clean.isAdminBuilder === true;
     const rawTools = Array.isArray(clean.tools) ? clean.tools.map((t) => String(t || '').trim()).filter(Boolean) : [];
     const safeTools = isAdminBuilder ? rawTools : rawTools.filter((t) => !isAdminBuilderTool(t));

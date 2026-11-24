@@ -43,9 +43,13 @@ function filterCommands(items, query, { isAdmin = false } = {}) {
   return out;
 }
 
-function detectIsAdmin(client, app) {
+function detectIsAdmin(client, app, userCtx) {
   try {
-    const role = app?.apiClient?.auth?.role || client?.useCurrentUserContext?.()?.data?.currentRole || '';
+    const hasExplicitUserCtx = arguments.length >= 3;
+    const ctxRole = hasExplicitUserCtx
+      ? userCtx?.data?.currentRole
+      : (typeof client?.useCurrentUserContext === 'function' ? client.useCurrentUserContext()?.data?.currentRole : undefined);
+    const role = app?.apiClient?.auth?.role || ctxRole || '';
     return ['root', 'admin', 'ldx_admin'].includes(String(role));
   } catch {
     return false;
@@ -131,16 +135,25 @@ function mergeSearchHits(paraDocs = [], globalItems = []) {
 function createCommandPaletteProvider(client, React, _antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+  const useCurrentUser = typeof client?.useCurrentUserContext === 'function'
+    ? client.useCurrentUserContext
+    : () => null;
 
   return function LatticeCommandPaletteProvider(props) {
     const api = useApi();
+    let userCtx = null;
+    try {
+      userCtx = useCurrentUser();
+    } catch {
+      userCtx = null;
+    }
     const [open, setOpen] = React.useState(false);
     const [query, setQuery] = React.useState('');
     const [portalItems, setPortalItems] = React.useState(null);
     const [searchHits, setSearchHits] = React.useState([]);
     const [activeIndex, setActiveIndex] = React.useState(0);
 
-    const isAdmin = detectIsAdmin(client, app);
+    const isAdmin = detectIsAdmin(client, app, userCtx);
     const localMatches = React.useMemo(
       () => filterCommands(portalItems || DEFAULT_COMMAND_ITEMS, query, { isAdmin }),
       [portalItems, query, isAdmin],

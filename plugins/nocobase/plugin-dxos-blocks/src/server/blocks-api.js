@@ -625,12 +625,41 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       const input = readParams(ctx);
       const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection: 'latticeIncidentCases', action: 'create' });
-      const orgId = isRoot
-        ? (typeof input.organizationId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(input.organizationId.trim()) ? input.organizationId.trim() : 'native-ui-lab')
-        : actor.organizationId;
-
       let assetEntityId = typeof input.assetEntityId === 'string' ? input.assetEntityId.trim() : '';
       const assetId = input.assetId != null && /^[1-9]\d{0,18}$/.test(String(input.assetId)) ? Number(input.assetId) : null;
+
+      let orgId = isRoot ? '' : actor.organizationId;
+      if (isRoot) {
+        if (typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim())) {
+          orgId = input.organizationId.trim();
+        } else if (assetEntityId) {
+          const urnMatch = URN_RE.exec(assetEntityId);
+          if (urnMatch) orgId = urnMatch[1];
+        }
+        if (!orgId && assetId != null) {
+          const assetRow = await db.getRepository?.('latticeAssets')?.findOne?.({ filter: { id: assetId } });
+          const assetOrg = String(val(assetRow, 'organizationId') || '').trim();
+          if (ORG_ID_RE.test(assetOrg)) orgId = assetOrg;
+        }
+        if (!orgId) {
+          const orgRepo = db.getRepository?.('latticeOrganizations');
+          if (orgRepo) {
+            let orgRow = null;
+            if (typeof orgRepo.find === 'function') {
+              const rows = (await orgRepo.find({ filter: { active: true }, limit: 1, sort: ['id'] })) || [];
+              orgRow = rows[0] || null;
+            } else if (typeof orgRepo.findOne === 'function') {
+              orgRow = await orgRepo.findOne({ filter: { active: true }, sort: ['id'] });
+            }
+            const candidate = String(val(orgRow, 'organizationId') || '').trim();
+            if (ORG_ID_RE.test(candidate)) orgId = candidate;
+          }
+        }
+        if (!orgId) {
+          throw fail('ORG_REQUIRED', 400, 'Cần organizationId hợp lệ để ghi nhận cảnh báo.');
+        }
+      }
+
       if (!assetEntityId && assetId != null) {
         assetEntityId = `urn:ngsi-ld:Asset:${orgId}:native:${assetId}`;
       }

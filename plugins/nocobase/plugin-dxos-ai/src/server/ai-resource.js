@@ -16,6 +16,7 @@ const {
   normalizeToolPermissionsMap,
   validateAiProfilePayload,
   recordAiAuditLog,
+  resolveDefaultOrganizationId,
 } = require('./ai-schemas');
 const {
   ALL_LDX_ROLES,
@@ -659,7 +660,7 @@ async function executeAlarmActionApproval(targetDb, ctx, actor, row, rawArgs) {
   });
 }
 
-function serializeProfile(row) {
+function serializeProfile(row, defaultOrgId = '') {
   if (!row) return null;
   return {
     id: val(row, 'id') ?? null,
@@ -667,7 +668,7 @@ function serializeProfile(row) {
     nickname: val(row, 'nickname'),
     position: val(row, 'position') || '',
     departmentScope: val(row, 'departmentScope') || 'general',
-    organizationId: val(row, 'organizationId') || 'native-ui-lab',
+    organizationId: val(row, 'organizationId') || defaultOrgId || null,
     avatar: val(row, 'avatar') || 'nocobase-015-male',
     bio: val(row, 'bio') || '',
     greeting: val(row, 'greeting') || '',
@@ -763,8 +764,12 @@ async function ensureLocalLlmServiceRecord(db, env = process.env) {
   return { configured: true, skipped: false, serviceName: 'local-9router', baseURL };
 }
 
-async function upsertAndSyncProfile(db, input, { actorUser, defaultOrigin, auditToolName = 'dxosAi:saveProfile' } = {}) {
-  const validated = validateAiProfilePayload(input, { adminToolNames: ADMIN_BUILDER_TOOL_NAMES });
+async function upsertAndSyncProfile(db, input, { actorUser, defaultOrigin, defaultOrganizationId = '', auditToolName = 'dxosAi:saveProfile' } = {}) {
+  const resolvedDefaultOrg = defaultOrganizationId || (await resolveDefaultOrganizationId(db, { actor: actorUser, fallback: 'default' }));
+  const validated = validateAiProfilePayload(input, {
+    adminToolNames: ADMIN_BUILDER_TOOL_NAMES,
+    defaultOrganizationId: resolvedDefaultOrg,
+  });
   const locked = enforceProfileRoleLock(validated, ADMIN_BUILDER_TOOL_NAMES);
   const profileRepo = db?.getRepository?.('latticeAiProfiles');
   let savedRow = locked;
@@ -780,7 +785,7 @@ async function upsertAndSyncProfile(db, input, { actorUser, defaultOrigin, audit
     }
   }
 
-  const normalized = serializeProfile(savedRow) || locked;
+  const normalized = serializeProfile(savedRow, resolvedDefaultOrg) || locked;
   const sync = await syncProfileToNocobaseAi(db, normalized, {
     adminToolNames: ADMIN_BUILDER_TOOL_NAMES,
     defaultOrigin,
@@ -1041,11 +1046,33 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
   return {
     async listProfiles(ctx, next) {
       const targetDb = await requireAdmin(ctx);
+      const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
+      const defaultOrg = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env });
       const repo = targetDb?.getRepository?.('latticeAiProfiles');
       const rows = repo ? (await repo.find({ sort: ['username'] })) || [] : [];
+      const orgRepo = targetDb?.getRepository?.('latticeOrganizations');
+      let organizations = [];
+      if (orgRepo && typeof orgRepo.find === 'function') {
+        try {
+          const orgRows = (await orgRepo.find({ limit: 100 })) || [];
+          organizations = [...new Set(
+            orgRows
+              .filter((r) => val(r, 'active') !== false && !['inactive', 'disabled'].includes(String(val(r, 'status') || 'active').toLowerCase()))
+              .map((r) => String(val(r, 'organizationId') || '').trim())
+              .filter((id) => id && id.toLowerCase() !== 'all'),
+          )];
+        } catch {}
+      }
+      if (defaultOrg && !organizations.includes(defaultOrg)) organizations.unshift(defaultOrg);
       ctx.body = {
-        profiles: rows.map(serializeProfile),
-        catalog: buildCatalogMeta(),
+        profiles: rows.map((r) => serializeProfile(r, defaultOrg)),
+        organizations,
+        defaultOrganizationId: defaultOrg || null,
+        catalog: {
+          ...buildCatalogMeta(),
+          organizations,
+          defaultOrganizationId: defaultOrg || null,
+        },
       };
       if (typeof next === 'function') await next();
     },
@@ -1053,9 +1080,11 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
     async saveProfile(ctx, next) {
       const targetDb = await requireAdmin(ctx);
       const actorUser = ctx?.state?.currentUser || ctx?.auth?.user;
+      const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
+      const defaultOrg = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env, fallback: 'default' });
       const payload = readActionPayload(ctx);
       const defaultOrigin = env?.NOCOBASE_INTERNAL_URL;
-      ctx.body = await upsertAndSyncProfile(targetDb, payload, { actorUser, defaultOrigin });
+      ctx.body = await upsertAndSyncProfile(targetDb, payload, { actorUser, defaultOrigin, defaultOrganizationId: defaultOrg });
       if (typeof next === 'function') await next();
     },
 
@@ -1098,13 +1127,16 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
     async bootstrapDefaults(ctx, next) {
       const targetDb = await requireAdmin(ctx);
       const actorUser = ctx?.state?.currentUser || ctx?.auth?.user;
+      const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
+      const defaultOrg = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env, fallback: 'default' });
       const defaultOrigin = env?.NOCOBASE_INTERNAL_URL;
 
       const profiles = [];
       for (const bp of STARTER_AI_BLUEPRINTS) {
-        const res = await upsertAndSyncProfile(targetDb, bp, {
+        const res = await upsertAndSyncProfile(targetDb, { ...bp, organizationId: bp.organizationId || defaultOrg }, {
           actorUser,
           defaultOrigin,
+          defaultOrganizationId: defaultOrg,
           auditToolName: null,
         });
         profiles.push(res.profile.username);
@@ -1121,9 +1153,10 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
           const hasLegacyKey = rawPerms && typeof rawPerms === 'object' && Object.prototype.hasOwnProperty.call(rawPerms, LEGACY_WORKFLOW_TASKS_TOOL);
           const hasLegacyCol = val(row, 'toolPermissionsJson') !== undefined;
           if (hasLegacyKey || hasLegacyCol) {
-            await upsertAndSyncProfile(targetDb, serializeProfile(row), {
+            await upsertAndSyncProfile(targetDb, serializeProfile(row, defaultOrg), {
               actorUser,
               defaultOrigin,
+              defaultOrganizationId: defaultOrg,
               auditToolName: null,
             });
           }
@@ -1223,7 +1256,12 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
     async quotaSummary(ctx, next) {
       const targetDb = await requireAdmin(ctx);
       const params = readActionPayload(ctx);
-      const requestedOrg = String(ctx?.action?.params?.organizationId || params.organizationId || 'native-ui-lab').trim();
+      const explicitOrg = String(ctx?.action?.params?.organizationId || params.organizationId || '').trim();
+      const actorScope = explicitOrg ? null : await resolveActorScope(ctx, targetDb, { defaultFallback: '' }).catch(() => null);
+      const requestedOrg = explicitOrg || (await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env }));
+      if (!requestedOrg) {
+        throw failTool('AI_ORG_REQUIRED', 400, 'Cần organizationId hoặc một tổ chức đang hoạt động trong latticeOrganizations.');
+      }
       const summary = await getQuotaSummaryPersistent(targetDb, requestedOrg, env);
       const auditTotals = await computeAllTimeAuditTotals(targetDb, summary.organizationId);
       ctx.body = {

@@ -101,13 +101,31 @@ function parseToolModeMap(input) {
   return out;
 }
 
-function createEmptyProfileDraft() {
+function resolveStudioDefaultOrg({ topology, catalog, profiles, app } = {}) {
+  const candidates = [
+    topology?.defaultOrganizationId,
+    ...(Array.isArray(topology?.organizations) ? topology.organizations : []),
+    catalog?.defaultOrganizationId,
+    ...(Array.isArray(catalog?.organizations) ? catalog.organizations : []),
+    ...(Array.isArray(profiles) ? profiles.map((p) => p?.organizationId) : []),
+    app?.defaultOrganizationId,
+    app?.organizationId,
+    typeof globalThis !== 'undefined' ? globalThis.__LATTICEDX_DEFAULT_ORG__ : '',
+  ];
+  for (const c of candidates) {
+    const clean = String(c || '').trim();
+    if (clean && clean.toLowerCase() !== 'all') return clean;
+  }
+  return '';
+}
+
+function createEmptyProfileDraft(defaultOrg = '') {
   return {
     username: '',
     nickname: '',
     position: 'Trợ lý AI Phòng ban',
     departmentScope: 'general',
-    organizationId: 'native-ui-lab',
+    organizationId: String(defaultOrg || '').trim(),
     llmService: 'local-9router',
     modelName: 'ag/gemini-3.8-flash',
     enabled: true,
@@ -221,11 +239,11 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     });
     const [topology, setTopology] = React.useState(null);
     const [auditItems, setAuditItems] = React.useState([]);
-    const [draft, setDraft] = React.useState(() => createEmptyProfileDraft());
+    const [draft, setDraft] = React.useState(() => createEmptyProfileDraft(resolveStudioDefaultOrg({ app })));
     const [mcpText, setMcpText] = React.useState(() => JSON.stringify(createEmptyProfileDraft().mcpServers, null, 2));
     const [promptsText, setPromptsText] = React.useState(() => JSON.stringify(createEmptyProfileDraft().quickPrompts, null, 2));
-    const [quotaOrg, setQuotaOrg] = React.useState('native-ui-lab');
-    const [quotaOrgDraft, setQuotaOrgDraft] = React.useState('native-ui-lab');
+    const [quotaOrg, setQuotaOrg] = React.useState(() => resolveStudioDefaultOrg({ app }) || 'native-ui-lab');
+    const [quotaOrgDraft, setQuotaOrgDraft] = React.useState(() => resolveStudioDefaultOrg({ app }) || 'native-ui-lab');
     const [quotaSummary, setQuotaSummary] = React.useState(null);
     const [quotaLoading, setQuotaLoading] = React.useState(false);
     const [customModelMode, setCustomModelMode] = React.useState(false);
@@ -244,11 +262,16 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const hitlReqSeqRef = typeof React.useRef === 'function'
       ? React.useRef(0)
       : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: 0 }), []) : { current: 0 });
+    const quotaOrgCommittedRef = typeof React.useRef === 'function'
+      ? React.useRef(false)
+      : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: false }), []) : { current: false });
 
     const selectDraft = (next) => {
+      const fallbackOrg = resolveStudioDefaultOrg({ topology, catalog, profiles, app });
       const normalized = {
-        ...createEmptyProfileDraft(),
+        ...createEmptyProfileDraft(fallbackOrg),
         ...next,
+        organizationId: String(next?.organizationId || fallbackOrg || '').trim(),
         toolPermissions: parseToolModeMap(next?.toolPermissions),
         allowedRoles: Array.isArray(next?.allowedRoles) ? next.allowedRoles : ['ldx_employee'],
         portalBindings: Array.isArray(next?.portalBindings) ? next.portalBindings : [],
@@ -272,15 +295,35 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         const pRes = await api.request({ url: 'dxosAi:listProfiles', method: 'get', skipNotify: true });
         setForbidden(false);
         const pData = pRes?.data?.data || pRes?.data || {};
-        if (Array.isArray(pData.profiles)) setProfiles(pData.profiles);
+        const loadedProfiles = Array.isArray(pData.profiles) ? pData.profiles : [];
+        if (Array.isArray(pData.profiles)) setProfiles(loadedProfiles);
         if (pData.catalog) setCatalog(pData.catalog);
 
         const [tRes, aRes] = await Promise.allSettled([
           api.request({ url: 'dxosAi:enterpriseTopology', method: 'get' }),
           api.request({ url: 'dxosAi:auditLogs', method: 'get', params: { pageSize: 40 } }),
         ]);
+        let loadedTopology = null;
         if (tRes.status === 'fulfilled') {
-          setTopology(tRes.value?.data?.data || tRes.value?.data || null);
+          loadedTopology = tRes.value?.data?.data || tRes.value?.data || null;
+          setTopology(loadedTopology);
+        }
+        const discoveredOrg = resolveStudioDefaultOrg({
+          topology: loadedTopology,
+          catalog: {
+            ...(pData.catalog || {}),
+            ...(Array.isArray(pData.organizations) ? { organizations: pData.organizations } : {}),
+            ...(pData.defaultOrganizationId ? { defaultOrganizationId: pData.defaultOrganizationId } : {}),
+          },
+          profiles: loadedProfiles,
+          app,
+        });
+        if (discoveredOrg) {
+          if (!quotaOrgCommittedRef.current) {
+            setQuotaOrg(discoveredOrg);
+            setQuotaOrgDraft(discoveredOrg);
+          }
+          setDraft((prev) => (prev && !prev.organizationId ? { ...prev, organizationId: discoveredOrg } : prev));
         }
         if (aRes.status === 'fulfilled') {
           const data = aRes.value?.data?.data || aRes.value?.data || {};
@@ -303,7 +346,12 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       const reqSeq = ++quotaReqSeqRef.current;
       setQuotaLoading(true);
       try {
-        const targetOrg = String(orgId || 'native-ui-lab').trim() || 'native-ui-lab';
+        const fallbackOrg = resolveStudioDefaultOrg({ topology, catalog, profiles, app }) || quotaOrg || '';
+        const targetOrg = String(orgId || fallbackOrg).trim();
+        if (!targetOrg) {
+          setQuotaSummary(null);
+          return;
+        }
         const qRes = await api.request({ url: 'dxosAi:quotaSummary', method: 'get', params: { organizationId: targetOrg } });
         if (reqSeq !== quotaReqSeqRef.current) return;
         setQuotaSummary(qRes?.data?.data || qRes?.data || null);
@@ -323,7 +371,10 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     }, [api, clientDenied, quotaOrg]);
 
     const commitQuotaOrg = (rawOrg) => {
-      const nextOrg = String(rawOrg || '').trim() || 'native-ui-lab';
+      quotaOrgCommittedRef.current = true;
+      const fallbackOrg = resolveStudioDefaultOrg({ topology, catalog, profiles, app }) || quotaOrg || '';
+      const nextOrg = String(rawOrg || '').trim() || fallbackOrg;
+      if (!nextOrg) return;
       setQuotaOrgDraft(nextOrg);
       if (nextOrg === quotaOrg) {
         loadQuota(nextOrg);
@@ -521,7 +572,14 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const roleOptions = Array.isArray(catalog?.roleOptions) ? catalog.roleOptions : DEFAULT_ROLE_OPTIONS;
     const runtimeVersion = resolveTopologyRuntimeVersion(topology, app);
     const isPresetModel = MODEL_PRESETS.includes(customModelText);
-    const orgOptions = [...new Set(['native-ui-lab', ...(profiles || []).map((p) => p?.organizationId).filter(Boolean), quotaOrg].filter(Boolean))];
+    const discoveredOrgOptions = [
+      topology?.defaultOrganizationId,
+      ...(Array.isArray(topology?.organizations) ? topology.organizations : []),
+      catalog?.defaultOrganizationId,
+      ...(Array.isArray(catalog?.organizations) ? catalog.organizations : []),
+      ...(profiles || []).map((p) => p?.organizationId),
+    ].map((o) => String(o || '').trim()).filter((o) => o && o.toLowerCase() !== 'all');
+    const orgOptions = [...new Set([...discoveredOrgOptions, ...(discoveredOrgOptions.length ? [] : [quotaOrg])].filter(Boolean))];
     const dayUsage = quotaSummary?.dayUsage || quotaSummary?.usage || {};
     const limits = quotaSummary?.limits || {};
     const allTimeTotals = quotaSummary?.allTimeTotals || quotaSummary?.auditTotals || {};
@@ -619,7 +677,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         h('div', { style: { display: 'grid', gap: 10 } },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
             h('strong', { style: { fontSize: 15 } }, `Nhân sự AI (${profiles.length})`),
-            h('button', { type: 'button', onClick: () => selectDraft(createEmptyProfileDraft()), style: btnStyle(false) }, '+ Tạo mới'),
+            h('button', { type: 'button', onClick: () => selectDraft(createEmptyProfileDraft(resolveStudioDefaultOrg({ topology, catalog, profiles, app }))), style: btnStyle(false) }, '+ Tạo mới'),
           ),
           profiles.map((p) => h('div', {
             key: p.username,
@@ -1028,6 +1086,7 @@ module.exports = {
   createDxosAiStudioPage,
   buildProfileDraftFromStarter,
   createEmptyProfileDraft,
+  resolveStudioDefaultOrg,
   parseToolModeMap,
   parseModelSelection,
   resolveTopologyRuntimeVersion,

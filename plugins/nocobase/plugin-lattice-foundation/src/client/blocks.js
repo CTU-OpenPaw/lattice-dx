@@ -136,14 +136,14 @@ function createBlockComponents(client,React,antd) {
     React.useEffect(()=>{let active=true;if(!manifestId||!blockId)return()=>{active=false};Promise.all([api.applications(),api.connection()]).then(([apps,status])=>{
       if(active){setManifest(apps.find(a=>a.id===manifestId));setConnection(status)}
     }).catch(e=>{if(active)setNotice(e.message)});return()=>{active=false};},[api,manifestId]);
-    React.useEffect(()=>{let active=true;const timer=setInterval(()=>api.connection().then(status=>{if(active)setConnection(status)}).catch(()=>{}),30000);return()=>{active=false;clearInterval(timer)};},[api]);
-    React.useEffect(()=>{if(!connection.connected||!connection.expiresAt)return;const timer=setTimeout(()=>setConnection({connected:false}),Math.max(0,new Date(connection.expiresAt).getTime()-Date.now()));return()=>clearTimeout(timer);},[connection]);
+    React.useEffect(()=>{let active=true;const timer=setInterval(()=>api.connection().then(status=>{if(active)setConnection(status)}).catch(()=>{}),30000);timer?.unref?.();return()=>{active=false;clearInterval(timer)};},[api]);
+    React.useEffect(()=>{if(!connection.connected||!connection.expiresAt)return;const timer=setTimeout(()=>setConnection({connected:false}),Math.max(0,new Date(connection.expiresAt).getTime()-Date.now()));timer?.unref?.();return()=>clearTimeout(timer);},[connection]);
     const sourceBlock=manifest?.blocks.find(b=>b.id===blockId);
     const block=React.useMemo(()=>contextId&&sourceBlock?{...sourceBlock,...(manifest.collections.find(c=>c.id===sourceBlock.collection)?.resource==='workflows'?{runId:contextId}:{recordId:contextId})}:sourceBlock,[sourceBlock,contextId,manifest]);
     if(!manifestId||!blockId)return h('p',null,'Chưa chọn cấu hình. Mở cài đặt block → Chọn ứng dụng và block.');
     if(block&&expectedType&&block.type!==expectedType)return h('p',{role:'alert'},'Loại block không khớp cấu hình đã chọn.');
-    return h('div',null,notice&&h('p',{role:'alert'},notice),!connected&&h('a',{href:'/lattice'},'Mở Workspace để kết nối API'),
-      connected&&manifest?.workspace?.panels?.length>0&&h('a',{href:manifest.route},'Mở Workspace để xử lý công việc'),
+    return h('div',null,notice&&h('p',{role:'alert'},notice),!connected&&h('a',{href:'/admin/lattice-workspace'},'Mở Workspace để kết nối API'),
+      connected&&manifest?.workspace?.panels?.length>0&&h('a',{href:'/admin/lattice-workspace'},'Mở Workspace để xử lý công việc'),
       block?h({form:FormBlock,list:ListBlock,'task-inbox':TaskInboxBlock,approval:ApprovalBlock,'workflow-form':WorkflowFormBlock,attachment:AttachmentBlock,'activity-timeline':ActivityTimelineBlock,'context-entity':ContextEntityBlock}[block.type],{manifest,block,api,connected,actorId:connection.identity?.subject,actorName:connection.identity?.username,canReadDirectory:connection.capabilities?.directoryRead===true,refreshKey:refresh,onSaved:()=>setRefresh(n=>n+1)}):h('p',null,'Đang tải hoặc không tìm thấy cấu hình block.'));
   }
   const WorkflowFormBlock=ApprovalBlock;

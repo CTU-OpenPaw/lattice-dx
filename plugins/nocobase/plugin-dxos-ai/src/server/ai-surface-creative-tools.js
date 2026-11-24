@@ -9,11 +9,20 @@
 'use strict';
 
 const { randomBytes } = require('node:crypto');
-const { validateAiProfilePayload, recordAiAuditLog } = require('./ai-schemas');
+const { validateAiProfilePayload, recordAiAuditLog, resolveDefaultOrganizationId } = require('./ai-schemas');
 const { enforceProfileRoleLock, syncProfileToNocobaseAi } = require('./ai-sync');
 const { publishSurfaceUpdate } = require('./surface-events');
 
 const LDX_ROLE_RE = /^ldx_[a-z][a-z0-9_]{1,40}$/;
+const BUSINESS_ROLE_RE = /^[a-z][a-z0-9_]{1,40}$/;
+const RESERVED_SYSTEM_ROLES = new Set(['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector']);
+function isBusinessRoleName(roleName) {
+  if (typeof roleName !== 'string') return false;
+  const clean = roleName.trim();
+  if (!BUSINESS_ROLE_RE.test(clean) && !LDX_ROLE_RE.test(clean)) return false;
+  if (clean.startsWith('r_')) return false;
+  return !RESERVED_SYSTEM_ROLES.has(clean);
+}
 const IMMUTABLE_WRITE_FIELDS = new Set(['id', 'createdAt', 'updatedAt', 'organizationId', 'identitySubject', 'userId']);
 const VALID_CREATIVE_THEMES = new Set(['industrial-cockpit', 'emerald-ops', 'amber-alert', 'royal-indigo', 'clean-light']);
 const VALID_QUERY_KINDS = new Set(['collection', 'telemetry', 'tasks', 'timeseries']);
@@ -359,13 +368,13 @@ async function propagatePortalRolesToRoutes(db, layoutUid, routeIds, explicitRol
   const linksRepo = db?.getRepository?.('desktopRoutesUiLayouts');
   if (!rolesRoutesRepo || !routeIds.length) return [];
 
-  let targetRoles = Array.isArray(explicitRoles) ? explicitRoles.filter((r) => LDX_ROLE_RE.test(r)) : [];
+  let targetRoles = Array.isArray(explicitRoles) ? explicitRoles.filter((r) => isBusinessRoleName(r)) : [];
   if (!targetRoles.length && linksRepo) {
     const existingLinks = (await linksRepo.find({ filter: { uiLayoutUid: layoutUid }, limit: 400 })) || [];
     const existingRouteIds = existingLinks.map((l) => val(l, 'desktopRouteId')).filter((id) => id != null);
     if (existingRouteIds.length) {
       const existingGrants = (await rolesRoutesRepo.find({ filter: { desktopRouteId: { $in: existingRouteIds } }, limit: 400 })) || [];
-      targetRoles = [...new Set(existingGrants.map((g) => val(g, 'roleName')).filter((r) => LDX_ROLE_RE.test(r)))];
+      targetRoles = [...new Set(existingGrants.map((g) => val(g, 'roleName')).filter((r) => isBusinessRoleName(r)))];
     }
   }
   for (const desktopRouteId of routeIds) {
@@ -1049,8 +1058,8 @@ function createSurfaceAndCreativeTools(deps) {
         let effectiveRoleName = args.roleName
           ? String(args.roleName).trim()
           : (args.roleTitle ? slugifyVietnameseToLdxRole(args.roleTitle) : '');
-        if (!LDX_ROLE_RE.test(effectiveRoleName)) {
-          throw failTool('ROLE_FORBIDDEN', 403, 'Chỉ cho phép tạo hoặc cấu hình vai trò tùy chỉnh bắt đầu bằng ldx_*.');
+        if (!isBusinessRoleName(effectiveRoleName)) {
+          throw failTool('ROLE_FORBIDDEN', 403, 'Tên vai trò phải theo mẫu [a-z][a-z0-9_]+ và không thuộc nhóm vai trò hệ thống bị cấm.');
         }
         if (!SLUG_RE.test(args.portalSlug || '')) throw failTool('PORTAL_SLUG_INVALID', 400, 'Slug portal không hợp lệ.');
         const effectiveColName = args.collectionName || await inferPortalPrimaryCollection(db, args.portalSlug, null, val);
@@ -1130,7 +1139,7 @@ function createSurfaceAndCreativeTools(deps) {
           let existingRoles = [];
           if (rolesRoutesRepo && existingRouteIds.length) {
             const grants = (await rolesRoutesRepo.find({ filter: { desktopRouteId: { $in: existingRouteIds } }, limit: 400 })) || [];
-            existingRoles = grants.map((g) => val(g, 'roleName')).filter((r) => LDX_ROLE_RE.test(r));
+            existingRoles = grants.map((g) => val(g, 'roleName')).filter((r) => isBusinessRoleName(r));
           }
           const mergedRoles = [...new Set([...existingRoles, effectiveRoleName])];
           await invokeResourceAction(ctx, 'latticePortals', 'save', {
@@ -1190,12 +1199,13 @@ function createSurfaceAndCreativeTools(deps) {
         const aiUsername = effectiveAiUsername;
         const aiNickname = String(args.aiNickname || `Trợ lý ${args.roleTitle || effectiveRoleName} AI`).trim();
         const adminToolList = Array.isArray(deps.ADMIN_BUILDER_TOOL_NAMES) ? deps.ADMIN_BUILDER_TOOL_NAMES : [];
+        const resolvedOrgId = await resolveDefaultOrganizationId(db, { actor, ctx, fallback: 'default' });
         const rawProfile = {
           username: aiUsername,
           nickname: aiNickname,
           position: `Trợ lý Chuyên trách ${args.roleTitle || effectiveRoleName}`,
           departmentScope: effectiveRoleName,
-          organizationId: actor.organizationId || 'native-ui-lab',
+          organizationId: resolvedOrgId,
           isAdminBuilder: false,
           allowedRoles: [effectiveRoleName],
           portalBindings: [args.portalSlug],
@@ -1246,6 +1256,9 @@ function createSurfaceAndCreativeTools(deps) {
 
 module.exports = {
   LDX_ROLE_RE,
+  BUSINESS_ROLE_RE,
+  RESERVED_SYSTEM_ROLES,
+  isBusinessRoleName,
   IMMUTABLE_WRITE_FIELDS,
   NATIVE_SURFACE_ACTIONS,
   VALID_WIDGET_TYPES,

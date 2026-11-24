@@ -39,6 +39,7 @@ const {
   createWmsDmnDirectGuardMiddleware: createDirectGuardWithFoundation,
   validateTenantCollectionRecord,
 } = require('./wms-direct-guard');
+const { renderQrSvg } = require('./qr-svg');
 
 const foundation = loadFoundationSet();
 
@@ -46,6 +47,16 @@ const URN_ORG_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,1
 const BLOCKED_LOT_STATUSES = new Set(['hold_mkt', 'expired', 'quarantined']);
 const DUMMY_HASH_HEX = '0'.repeat(64);
 const R_KJ_MOL_K = 0.008314472;
+const MAX_EPOD_PHOTO_BYTES = 512 * 1024;
+const SAFE_RASTER_DATA_URL_RE = /^data:image\/(?:png|jpeg|jpg|webp|gif);base64,[A-Za-z0-9+/=_-]+$/i;
+
+function isSafeRasterImageDataUrl(value, maxBytes = MAX_EPOD_PHOTO_BYTES) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed || Buffer.byteLength(trimmed, 'utf8') > maxBytes) return false;
+  if (/^data:image\/svg\+xml/i.test(trimmed)) return false;
+  return SAFE_RASTER_DATA_URL_RE.test(trimmed);
+}
 
 function computeMeanKineticTemperature(samplesC, { deltaH_kJ_mol = 83.14472, maxAllowedC = null } = {}) {
   if (typeof foundation?.dataGovernance?.computeMeanKineticTemperature === 'function') {
@@ -297,6 +308,19 @@ function serializeLot(row) {
 function serializeEpod(row) {
   if (!row) return null;
   const deliveredAt = val(row, 'deliveredAt');
+  const rawTemp = val(row, 'tempSummaryJson');
+  const hasMktFields = rawTemp && typeof rawTemp === 'object' && !Array.isArray(rawTemp)
+    && (rawTemp.mktCelsius !== undefined || rawTemp.inRange !== undefined);
+  const cleanTempSummary = hasMktFields
+    ? {
+        mktCelsius: rawTemp.mktCelsius ?? null,
+        inRange: typeof rawTemp.inRange === 'boolean' ? rawTemp.inRange : null,
+      }
+    : null;
+  const rawPhoto = val(row, 'evidencePhotoDataUrl') || rawTemp?.evidencePhotoDataUrl || null;
+  const evidencePhotoDataUrl = typeof rawPhoto === 'string' && isSafeRasterImageDataUrl(rawPhoto, MAX_EPOD_PHOTO_BYTES)
+    ? rawPhoto.trim()
+    : null;
   return {
     id: val(row, 'id') ?? null,
     organizationId: val(row, 'organizationId'),
@@ -314,7 +338,8 @@ function serializeEpod(row) {
     gpsLng: val(row, 'gpsLng') ?? null,
     gpsAccuracyM: val(row, 'gpsAccuracyM') ?? null,
     photoHashesJson: val(row, 'photoHashesJson') || [],
-    tempSummaryJson: val(row, 'tempSummaryJson') || null,
+    evidencePhotoDataUrl,
+    tempSummaryJson: cleanTempSummary,
     ledgerSeq: val(row, 'ledgerSeq') != null ? Number(val(row, 'ledgerSeq')) : null,
     ledgerSignatureBase64: val(row, 'ledgerSignatureBase64') || null,
     keyId: val(row, 'keyId') || null,
@@ -346,7 +371,7 @@ function isLotCompatibleForFefo(lot, { organizationId, sku, nowMs, minTempC, max
   return true;
 }
 
-function buildPrintableVoucherHtml({ documentType, organizationId, order, orderLines, epod, ledgerSeq, keyId, qrVerificationHash }) {
+function buildPrintableVoucherHtml({ documentType, organizationId, order, orderLines, epod, ledgerSeq, keyId, qrVerificationHash, qrTrackPath }) {
   const docTitleMap = {
     order: 'Đơn hàng Logistics (OMS)',
     delivery_note: 'Phiếu xuất kho & Giao hàng (Delivery Note)',
@@ -354,6 +379,14 @@ function buildPrintableVoucherHtml({ documentType, organizationId, order, orderL
   };
   const title = docTitleMap[documentType] || 'Chứng từ Vận hành LatticeDX';
   const orderCode = val(order, 'code') || val(epod, 'orderCode') || val(orderLines?.[0], 'orderCode') || '-';
+  const trackUrl = qrTrackPath || `/v/track/${encodeURIComponent(val(epod, 'trackingCode') || orderCode)}?verify=${encodeURIComponent(String(qrVerificationHash || '').slice(0, 16))}`;
+  let qrSvgHtml = '';
+  try {
+    qrSvgHtml = renderQrSvg(trackUrl, { size: 132, margin: 2 });
+  } catch {
+    qrSvgHtml = '';
+  }
+
   const linesHtml = (Array.isArray(orderLines) ? orderLines : []).map((line, idx) => `
     <tr>
       <td>${escapeHtml(val(line, 'lineNo') ?? idx + 1)}</td>
@@ -369,6 +402,14 @@ function buildPrintableVoucherHtml({ documentType, organizationId, order, orderL
 
   const deliveredRaw = epod ? val(epod, 'deliveredAt') : null;
   const deliveredStr = deliveredRaw instanceof Date ? deliveredRaw.toISOString() : String(deliveredRaw || '');
+  const rawSigUrl = epod ? String(val(epod, 'signatureDataUrl') || '').trim() : '';
+  const sigImgHtml = rawSigUrl && isSafeRasterImageDataUrl(rawSigUrl, 256 * 1024)
+    ? `<div class="epod-media"><div><strong>Chữ ký người nhận (ePOD):</strong></div><img src="${escapeHtml(rawSigUrl)}" alt="Chữ ký ePOD" class="epod-sig-img" /></div>`
+    : '';
+  const rawPhotoUrl = epod ? String(val(epod, 'evidencePhotoDataUrl') || val(epod, 'tempSummaryJson')?.evidencePhotoDataUrl || '').trim() : '';
+  const photoImgHtml = rawPhotoUrl && isSafeRasterImageDataUrl(rawPhotoUrl, MAX_EPOD_PHOTO_BYTES)
+    ? `<div class="epod-media"><div><strong>Ảnh minh chứng giao nhận:</strong></div><img src="${escapeHtml(rawPhotoUrl)}" alt="Ảnh minh chứng ePOD" class="epod-photo-img" /></div>`
+    : '';
   const epodBlock = epod ? `
     <section class="epod">
       <h2>Xác nhận Giao nhận (ePOD)</h2>
@@ -376,6 +417,7 @@ function buildPrintableVoucherHtml({ documentType, organizationId, order, orderL
       <p><strong>Người nhận:</strong> ${escapeHtml(val(epod, 'recipientName'))} (${escapeHtml(val(epod, 'recipientPhoneMasked') || '***')})</p>
       <p><strong>Số lượng giao:</strong> ${escapeHtml(val(epod, 'deliveredQty') ?? 0)} | <strong>Thời điểm:</strong> ${escapeHtml(deliveredStr)}</p>
       <p><strong>SHA-256 chữ ký:</strong> <code>${escapeHtml(val(epod, 'signatureSha256') || '')}</code></p>
+      ${(sigImgHtml || photoImgHtml) ? `<div class="epod-media-row">${sigImgHtml}${photoImgHtml}</div>` : ''}
     </section>
   ` : '';
 
@@ -386,12 +428,17 @@ function buildPrintableVoucherHtml({ documentType, organizationId, order, orderL
   <title>${escapeHtml(title)} — ${escapeHtml(orderCode)}</title>
   <style>
     body { font-family: system-ui, -apple-system, sans-serif; color: #0f172a; margin: 24px; }
-    .hdr { display: flex; justify-content: space-between; border-bottom: 2px solid #0f172a; padding-bottom: 12px; margin-bottom: 16px; }
-    .org-badge { background: #e2e8f0; padding: 4px 10px; border-radius: 4px; font-weight: 600; font-size: 12px; }
+    .hdr { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; border-bottom: 2px solid #0f172a; padding-bottom: 12px; margin-bottom: 16px; }
+    .org-badge { background: #e2e8f0; padding: 4px 10px; border-radius: 4px; font-weight: 600; font-size: 12px; display: inline-block; margin-bottom: 8px; }
+    .qr-box { text-align: right; }
     table { width: 100%; border-collapse: collapse; margin-top: 12px; }
     th, td { border: 1px solid #cbd5e1; padding: 6px 8px; text-align: left; font-size: 13px; }
     th { background: #f8fafc; }
-    .stamp { margin-top: 18px; padding: 10px; border: 1px dashed #64748b; background: #f8fafc; font-size: 12px; }
+    .epod-media-row { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; }
+    .epod-media { font-size: 12px; }
+    .epod-sig-img { max-width: 260px; max-height: 110px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; margin-top: 4px; }
+    .epod-photo-img { max-width: 260px; max-height: 160px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; margin-top: 4px; }
+    .stamp { margin-top: 18px; padding: 10px; border: 1px dashed #64748b; background: #f8fafc; font-size: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
     @media print { body { margin: 0; } }
   </style>
 </head>
@@ -401,7 +448,10 @@ function buildPrintableVoucherHtml({ documentType, organizationId, order, orderL
       <h1>${escapeHtml(title)}</h1>
       <p><strong>Mã chứng từ:</strong> ${escapeHtml(orderCode)} | <strong>Trạng thái:</strong> ${escapeHtml(val(order, 'status') || val(epod, 'status') || 'active')}</p>
     </div>
-    <div><span class="org-badge">ORG: ${escapeHtml(organizationId)}</span></div>
+    <div class="qr-box">
+      <span class="org-badge">ORG: ${escapeHtml(organizationId)}</span>
+      ${qrSvgHtml ? `<div class="qr-svg">${qrSvgHtml}</div>` : ''}
+    </div>
   </header>
   ${order ? `<section class="meta">
     <p><strong>Tiêu đề:</strong> ${escapeHtml(val(order, 'name') || '')}</p>
@@ -415,8 +465,11 @@ function buildPrintableVoucherHtml({ documentType, organizationId, order, orderL
   </table>
   ${epodBlock}
   <footer class="stamp">
-    <div><strong>Xác thực mật mã Ed25519:</strong> Ledger Seq #${escapeHtml(ledgerSeq ?? 'N/A')} | Key ID: <code>${escapeHtml(keyId || 'N/A')}</code></div>
-    <div><strong>QR Verification Link Hash:</strong> <code>#verify=${escapeHtml(qrVerificationHash)}</code></div>
+    <div>
+      <div><strong>Xác thực mật mã Ed25519:</strong> Ledger Seq #${escapeHtml(ledgerSeq ?? 'N/A')} | Key ID: <code>${escapeHtml(keyId || 'N/A')}</code></div>
+      <div><strong>Tra cứu Công khai:</strong> <code>${escapeHtml(trackUrl)}</code></div>
+      <div><strong>QR Verification Link Hash:</strong> <code>#verify=${escapeHtml(qrVerificationHash)}</code></div>
+    </div>
   </footer>
 </body>
 </html>`;
@@ -1091,15 +1144,32 @@ function createDxosWmsActions(db) {
       const trackingTokenHash = sha256Hex(trackingToken);
 
       const rawTemp = params.tempSummary ?? params.tempSummaryJson;
-      const tempSummaryJson = rawTemp && typeof rawTemp === 'object' && !Array.isArray(rawTemp)
+      const baseTempSummary = rawTemp && typeof rawTemp === 'object' && !Array.isArray(rawTemp)
         ? {
             mktCelsius: parseFinite(rawTemp.mktCelsius),
             inRange: typeof rawTemp.inRange === 'boolean' ? rawTemp.inRange : null,
           }
         : null;
-      const photoHashesJson = Array.isArray(params.photoHashes ?? params.photoHashesJson)
-        ? (params.photoHashes ?? params.photoHashesJson).map((h) => String(h).trim().slice(0, 128)).filter(Boolean).slice(0, 20)
+      const rawEvidencePhoto = params.evidencePhotoDataUrl;
+      let evidencePhotoDataUrl = null;
+      let evidencePhotoSha256 = null;
+      if (rawEvidencePhoto !== undefined && rawEvidencePhoto !== null && (typeof rawEvidencePhoto !== 'string' || rawEvidencePhoto.trim() !== '')) {
+        if (!isSafeRasterImageDataUrl(rawEvidencePhoto, MAX_EPOD_PHOTO_BYTES)) {
+          throw fail('EPOD_PHOTO_INVALID', 400, 'Ảnh minh chứng ePOD phải là ảnh PNG/JPEG/WebP/GIF base64 hợp lệ và tối đa 512KB.');
+        }
+        evidencePhotoDataUrl = rawEvidencePhoto.trim();
+        evidencePhotoSha256 = sha256Hex(evidencePhotoDataUrl);
+      }
+      const rawHashes = Array.isArray(params.photoHashes ?? params.photoHashesJson)
+        ? (params.photoHashes ?? params.photoHashesJson).map((h) => String(h).trim().slice(0, 128)).filter(Boolean)
         : [];
+      if (evidencePhotoSha256 && !rawHashes.includes(evidencePhotoSha256)) {
+        rawHashes.push(evidencePhotoSha256);
+      }
+      const photoHashesJson = rawHashes.slice(0, 20);
+      const tempSummaryJson = evidencePhotoDataUrl
+        ? { ...(baseTempSummary || {}), evidencePhotoDataUrl, evidencePhotoSha256 }
+        : baseTempSummary;
 
       const epodRepo = db.getRepository?.('latticeEpodRecords');
       if (!epodRepo) throw fail('WMS_REPO_UNAVAILABLE', 503);
@@ -1125,6 +1195,7 @@ function createDxosWmsActions(db) {
             orderCode: orderCode || null,
             deliveredQty,
             signatureSha256,
+            ...(evidencePhotoSha256 ? { evidencePhotoSha256 } : {}),
             gpsLat,
             gpsLng,
             deliveredAt: deliveredAt.toISOString(),
@@ -1198,7 +1269,7 @@ function createDxosWmsActions(db) {
       const { emitDomainEventSafely } = require('./domain-events');
       await emitDomainEventSafely(db, ctx, {
         organizationId,
-        type: 'epod.signed',
+        type: 'epod.captured',
         source: 'dxos-studio:wms',
         subject: createdEpod?.epodUid || trackingCode || '',
         data: {
@@ -1343,9 +1414,22 @@ function createDxosWmsActions(db) {
       }, foundation);
 
       const { order, orderLines, epod, ledgerSeq, keyId } = voucherData;
+      const trackCodeForQr = val(epod, 'trackingCode') || orderCode || epodUid || String(orderId || 'DOC');
       const qrVerificationHash = sha256Hex(
         val(epod, 'trackingCode') || `${documentType}:${organizationId}:${orderCode || epodUid || orderId}`,
       );
+      const passedToken = typeof (params.trackingToken ?? params.token) === 'string'
+        ? String(params.trackingToken ?? params.token).trim()
+        : '';
+      const hasVerifiedToken = Boolean(
+        epod
+        && passedToken
+        && val(epod, 'trackingTokenHash')
+        && timingSafeEqualHex(String(val(epod, 'trackingTokenHash')), sha256Hex(passedToken)),
+      );
+      const qrTrackPath = hasVerifiedToken
+        ? `/v/track/${encodeURIComponent(trackCodeForQr)}?token=${encodeURIComponent(passedToken)}`
+        : `/v/track/${encodeURIComponent(trackCodeForQr)}?verify=${encodeURIComponent(qrVerificationHash.slice(0, 16))}`;
       const html = buildPrintableVoucherHtml({
         documentType,
         organizationId,
@@ -1355,10 +1439,11 @@ function createDxosWmsActions(db) {
         ledgerSeq,
         keyId,
         qrVerificationHash,
+        qrTrackPath,
       });
       const htmlSha256 = sha256Hex(html);
 
-      ctx.body = { documentType, organizationId, html, htmlSha256, qrVerificationHash, ledgerSeq, keyId };
+      ctx.body = { documentType, organizationId, html, htmlSha256, qrVerificationHash, qrTrackPath, ledgerSeq, keyId };
       return next();
     },
   };

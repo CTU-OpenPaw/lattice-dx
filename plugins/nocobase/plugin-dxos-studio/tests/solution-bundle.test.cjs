@@ -1044,3 +1044,44 @@ test('applyCustomCollectionsSection invokes db.attachLatticeRlsPolicy after coll
   assert.equal(res.applied.customCollectionsUpserted, 1);
   assert.deepEqual(rlsAttached, [{ tableName: 'latticeCustomColdChainLog', hasTx: true }]);
 });
+
+test('Task 16: solution-bundle resolves organizationId dynamically from active latticeOrganizations and fails cleanly when none exists', async () => {
+  const { importSolutionBundle } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { db, customCollections, aiProfiles } = makeSolutionBundleDbHarness();
+  const orgRows = [
+    { id: 1, organizationId: 'inactive-org', active: false, status: 'inactive' },
+    { id: 2, organizationId: 'acme-pharma', active: true, status: 'active' },
+  ];
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'latticeOrganizations') {
+      return { find: async () => [...orgRows] };
+    }
+    return origGetRepo(name);
+  };
+
+  const bundleNoOrg = {
+    metadata: { schemaVersion: 'latticedx.solution-bundle/v2' },
+    customCollections: [
+      { name: 'latticeCustomPharmaBatch', title: 'Pharma Batch', fields: [{ name: 'batchNo', type: 'string' }] },
+    ],
+    aiProfiles: [
+      { username: 'pharma-bot', nickname: 'Pharma Bot', enabled: true, isAdminBuilder: false, allowedRoles: ['ops_manager'] },
+    ],
+  };
+
+  const res = await importSolutionBundle(db, bundleNoOrg, { dryRun: false });
+  assert.equal(res.applied.customCollectionsUpserted, 1);
+  assert.equal(res.applied.aiProfilesUpserted, 1);
+  const createdCol = customCollections.find((c) => c.name === 'latticeCustomPharmaBatch');
+  assert.equal(createdCol.fields.find((f) => f.name === 'organizationId').defaultValue, 'acme-pharma');
+  const createdAi = aiProfiles.find((p) => p.username === 'pharma-bot');
+  assert.equal(createdAi.organizationId, 'acme-pharma');
+
+  // Empty latticeOrganizations with no targetOrg/clean.organizationId fails cleanly
+  orgRows.length = 0;
+  await assert.rejects(
+    () => importSolutionBundle(db, bundleNoOrg, { dryRun: false }),
+    (err) => err.status === 400 && err.code === 'ORGANIZATION_REQUIRED',
+  );
+});

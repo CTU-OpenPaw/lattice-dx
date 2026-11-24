@@ -823,3 +823,291 @@ test('DxosRecordWorkbenchBlockModel, RecordChatterView, and VoucherLifecycleBar 
   await refreshBtn.props.onClick();
   assert.ok(chatterCalls.some((c) => c.url === 'latticeChatter:list'));
 });
+
+test('Task 16: CommandPaletteProvider calls useCurrentUserContext unconditionally across role transitions (Rules of Hooks)', () => {
+  const { createCommandPaletteProvider } = require(path.join(PLUGIN_ROOT, 'src/client/command-palette.js'));
+
+  // Strict hook-order recorder simulating React's internal hook cursor enforcement
+  const hookLog = [];
+  let currentPass = [];
+  let stateCursor = 0;
+  const states = [];
+  const strictReact = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState(init) {
+      currentPass.push('useState');
+      const idx = stateCursor++;
+      if (!(idx in states)) states[idx] = typeof init === 'function' ? init() : init;
+      return [states[idx], (u) => { states[idx] = typeof u === 'function' ? u(states[idx]) : u; }];
+    },
+    useEffect() { currentPass.push('useEffect'); },
+    useMemo(fn) { currentPass.push('useMemo'); return fn(); },
+    useCallback(fn) { currentPass.push('useCallback'); return fn; },
+  };
+
+  let authRole = 'admin';
+  let ctxRole = '';
+  let userCtxCalls = 0;
+  const mockClient = {
+    useAPIClient() {
+      currentPass.push('useAPIClient');
+      return { auth: { role: authRole } };
+    },
+    useCurrentUserContext() {
+      currentPass.push('useCurrentUserContext');
+      userCtxCalls += 1;
+      return { data: { currentRole: ctxRole } };
+    },
+  };
+  const mockApp = { apiClient: { auth: { get role() { return authRole; } } } };
+
+  const Provider = createCommandPaletteProvider(mockClient, strictReact, {}, mockApp);
+  const renderPass = () => {
+    currentPass = [];
+    stateCursor = 0;
+    const out = Provider({ children: 'OK' });
+    hookLog.push(currentPass.slice());
+    return out;
+  };
+
+  // Render 1: app.apiClient.auth.role === 'admin'
+  renderPass();
+  // Render 2: app.apiClient.auth.role === '' and ctxRole === 'ldx_admin'
+  authRole = '';
+  ctxRole = 'ldx_admin';
+  renderPass();
+  // Render 3: app.apiClient.auth.role === '' and ctxRole === 'ldx_employee'
+  ctxRole = 'ldx_employee';
+  renderPass();
+
+  assert.equal(userCtxCalls, 3, 'useCurrentUserContext must be called on every render regardless of app.apiClient.auth.role');
+  assert.deepEqual(hookLog[1], hookLog[0], 'Hook call order must be identical when role changes from admin to empty');
+  assert.deepEqual(hookLog[2], hookLog[0], 'Hook call order must be identical across role transitions');
+});
+
+test('Task 16: DxosParaVaultView reads ?paraDocId=, handles popstate & detail drawer, and resolves orgs without hardcoded native-ui-lab', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  const depsChanged = (a, b) => !a || !b || a.length !== b.length || a.some((v, i) => !Object.is(v, b[i]));
+  const states = [];
+  const effects = [];
+  const memos = [];
+  const callbacks = [];
+  let si = 0;
+  let ei = 0;
+  let mi = 0;
+  let ci = 0;
+  let dirty = false;
+  const hooksReact = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({
+      type,
+      props: props || {},
+      children: children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false),
+    }),
+    useState(init) {
+      const idx = si++;
+      if (!(idx in states)) states[idx] = typeof init === 'function' ? init() : init;
+      return [states[idx], (u) => { states[idx] = typeof u === 'function' ? u(states[idx]) : u; dirty = true; }];
+    },
+    useEffect(fn, deps) {
+      const idx = ei++;
+      const prev = effects[idx];
+      if (!prev || depsChanged(prev.deps, deps)) {
+        effects[idx] = { fn, deps, cleanup: prev?.cleanup, pending: true };
+      }
+    },
+    useMemo(fn, deps) {
+      const idx = mi++;
+      const prev = memos[idx];
+      if (!prev || depsChanged(prev.deps, deps)) memos[idx] = { value: fn(), deps };
+      return memos[idx].value;
+    },
+    useCallback(fn, deps) {
+      const idx = ci++;
+      const prev = callbacks[idx];
+      if (!prev || depsChanged(prev.deps, deps)) callbacks[idx] = { fn, deps };
+      return callbacks[idx].fn;
+    },
+  };
+  const renderTree = (el) => {
+    let out;
+    for (let p = 0; p < 5; p += 1) {
+      si = 0; ei = 0; mi = 0; ci = 0; dirty = false;
+      out = el.type(el.props);
+      for (const ef of effects) {
+        if (ef && ef.pending) {
+          ef.pending = false;
+          if (typeof ef.cleanup === 'function') ef.cleanup();
+          ef.cleanup = ef.fn();
+        }
+      }
+      if (!dirty) break;
+    }
+    return out;
+  };
+  const findByTestId = (n, id) => {
+    if (!n || typeof n !== 'object') return null;
+    if (n.props?.['data-testid'] === id) return n;
+    for (const c of Array.isArray(n.children) ? n.children.flat(Infinity) : []) {
+      const hit = findByTestId(c, id);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  class MockBlockModel {
+    constructor(opts = {}) { this.props = opts.props || {}; }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams() { return {}; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const origWin = global.window;
+  const winListeners = new Map();
+  const replacedUrls = [];
+  const apiCalls = [];
+  try {
+    global.window = {
+      location: {
+        pathname: '/p/services',
+        search: '?paraDocId=99',
+        href: 'http://localhost/p/services?paraDocId=99',
+      },
+      history: {
+        replaceState: (_s, _t, u) => {
+          replacedUrls.push(u);
+          global.window.location.search = u.includes('?') ? `?${u.split('?')[1]}` : '';
+          global.window.location.href = `http://localhost${u}`;
+        },
+      },
+      addEventListener: (ev, fn) => winListeners.set(ev, fn),
+      removeEventListener: (ev) => winListeners.delete(ev),
+    };
+
+    const api = {
+      async request(req) {
+        apiCalls.push(req);
+        if (req.url === 'latticeParaDocuments:list') {
+          return {
+            data: {
+              data: [{ id: 5, code: 'SOP-05', title: 'Quy trình Kho lạnh', paraSpace: 'resources', summary: 'Tóm tắt 05' }],
+            },
+          };
+        }
+        if (req.url === 'latticeParaDocuments:get' && String(req.params?.filterByTk) === '99') {
+          return {
+            data: {
+              data: { id: 99, code: 'SOP-99', title: 'Tài liệu chi tiết 99', paraSpace: 'projects', summary: 'Chi tiết qua filterByTk', content: 'Nội dung đầy đủ 99' },
+            },
+          };
+        }
+        if (req.url === 'latticePara:summary') {
+          return { data: { data: { organizationId: null, organizations: [] } } };
+        }
+        if (req.url === 'latticeOrganizations:list') {
+          return { data: { data: [{ id: 1, organizationId: 'acme-cold-chain', active: true }] } };
+        }
+        if (req.url === 'latticeParaDocuments:create') {
+          return { data: { data: { id: 100, ...req.data } } };
+        }
+        return { data: { data: {} } };
+      },
+    };
+
+    const models = registerDxosBlockModels(
+      { useAPIClient: () => api, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+      hooksReact,
+      {},
+      { BlockModel: MockBlockModel },
+      { registerModels() {} },
+      {},
+    );
+    const paraInst = new models.DxosParaVaultBlockModel({ props: { title: 'Kho P.A.R.A.' } });
+    let tree = renderTree(paraInst.renderComponent());
+    await new Promise((r) => setTimeout(r, 25));
+    tree = renderTree(paraInst.renderComponent());
+
+    // 1. Loaded ?paraDocId=99 via filterByTk and rendered detail card
+    assert.ok(apiCalls.some((c) => c.url === 'latticeParaDocuments:get' && String(c.params?.filterByTk) === '99'));
+    const detail = findByTestId(tree, 'dxos-para-doc-detail');
+    assert.ok(detail, 'Expected dxos-para-doc-detail to render for ?paraDocId=99');
+    assert.ok(JSON.stringify(detail).includes('SOP-99'));
+    assert.ok(JSON.stringify(detail).includes('Nội dung đầy đủ 99'));
+
+    // 2. Dynamic org resolved from latticeOrganizations:list (no hardcoded native-ui-lab anywhere)
+    const dump = JSON.stringify(tree);
+    assert.ok(dump.includes('acme-cold-chain'));
+    assert.equal(dump.includes('native-ui-lab'), false, 'DxosParaVaultView must never fall back to hardcoded native-ui-lab');
+
+    // 3. Close button clears paraDocId from URL and hides detail card
+    findByTestId(tree, 'dxos-para-doc-detail-close').props.onClick();
+    tree = renderTree(paraInst.renderComponent());
+    assert.equal(findByTestId(tree, 'dxos-para-doc-detail'), null);
+    assert.deepEqual(replacedUrls, ['/p/services']);
+
+    // 4. popstate to ?paraDocId=5 highlights & opens item #5 from loaded items
+    global.window.location.search = '?paraDocId=5';
+    global.window.location.href = 'http://localhost/p/services?paraDocId=5';
+    winListeners.get('popstate')?.();
+    tree = renderTree(paraInst.renderComponent());
+    const detail5 = findByTestId(tree, 'dxos-para-doc-detail');
+    assert.ok(detail5 && JSON.stringify(detail5).includes('SOP-05'));
+    assert.ok(JSON.stringify(tree).includes('"data-selected":"true"'));
+  } finally {
+    global.window = origWin;
+  }
+});
+
+test('Task 16: dxosBlocks:alarmIngest resolves root organizationId dynamically and fails 400 ORG_REQUIRED when unresolvable', async () => {
+  const { createDxosBlocksActions } = require(path.join(PLUGIN_ROOT, 'src/server/blocks-api.js'));
+
+  const createdIncidents = [];
+  let orgRows = [];
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeOrganizations') {
+        return {
+          find: async () => orgRows,
+        };
+      }
+      if (name === 'latticeIncidentCases') {
+        return {
+          find: async () => [],
+          create: async ({ values }) => {
+            const row = { id: createdIncidents.length + 1, ...values };
+            createdIncidents.push(row);
+            return row;
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const actions = createDxosBlocksActions(db, {});
+
+  // 1. Root with no organizationId and no active latticeOrganizations -> 400 ORG_REQUIRED
+  await assert.rejects(
+    () => actions.alarmIngest({
+      method: 'POST',
+      state: { currentUser: { id: 1, username: 'root' }, currentRole: 'root' },
+      action: { params: { values: { ruleCode: 'TEMP-HIGH', severity: 'high' } } },
+    }, async () => {}),
+    (err) => err.status === 400 && err.code === 'ORG_REQUIRED',
+  );
+
+  // 2. Root with active latticeOrganizations record resolves dynamically (never 'native-ui-lab')
+  orgRows = [{ id: 10, organizationId: 'mekong-pharma', active: true }];
+  const okCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 1, username: 'root' }, currentRole: 'root' },
+    action: { params: { values: { assetId: 12, ruleCode: 'TEMP-HIGH', severity: 'high', summary: 'Cảnh báo động' } } },
+  };
+  await actions.alarmIngest(okCtx, async () => {});
+  assert.equal(createdIncidents.length, 1);
+  assert.equal(createdIncidents[0].organizationId, 'mekong-pharma');
+  assert.equal(createdIncidents[0].assetEntityId, 'urn:ngsi-ld:Asset:mekong-pharma:native:12');
+});

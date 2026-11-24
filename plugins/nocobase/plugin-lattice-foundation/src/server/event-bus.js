@@ -424,8 +424,9 @@ async function publishDomainEvent(
   }
 
   try {
-    await effectiveApp?.pubSubManager?.publish?.('lattice:surface', {
+    await effectiveApp?.pubSubManager?.publish?.('latticedx:surface-updates', {
       kind: 'domain_event',
+      portalSlug: '*',
       organizationId: orgId,
       eventId,
       eventType: cleanType,

@@ -847,7 +847,6 @@ test('CodeQL remediation: build.mjs bundles avoid dep wrapper interpolation, ful
   const customBundleFiles = [
     'plugins/nocobase/plugin-lattice-foundation/scripts/build.mjs',
     'plugins/nocobase/plugin-dxos-ai/build.mjs',
-    'plugins/nocobase/plugin-dxos-blocks/build.mjs',
   ];
   for (const rel of customBundleFiles) {
     const src = readFileSync(join(REPO_ROOT, rel), 'utf8');
@@ -855,10 +854,15 @@ test('CodeQL remediation: build.mjs bundles avoid dep wrapper interpolation, ful
     assert.match(src, /__modules\[id\]\(module,\s*module\.exports,\s*id\)/, `${rel} must pass id into __modules[id]`);
     assert.equal(/\$\{JSON\.stringify\((?:dependencies|deps)\)\}/.test(src), false, `${rel} must not interpolate deps JSON into wrapper function string`);
   }
-  const studioBuildSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-dxos-studio/build.mjs'), 'utf8');
-  assert.match(studioBuildSrc, /esbuild\.build\(/, 'plugin-dxos-studio/build.mjs must use esbuild bundler');
-  assert.match(studioBuildSrc, /__dxosHostExternals/, 'plugin-dxos-studio/build.mjs must resolve host externals lexically');
-  assert.equal(/\$\{JSON\.stringify\((?:dependencies|deps)\)\}/.test(studioBuildSrc), false, 'plugin-dxos-studio/build.mjs must not interpolate deps JSON into wrapper function string');
+  for (const esbuildRel of [
+    'plugins/nocobase/plugin-dxos-studio/build.mjs',
+    'plugins/nocobase/plugin-dxos-blocks/build.mjs',
+  ]) {
+    const esbuildSrc = readFileSync(join(REPO_ROOT, esbuildRel), 'utf8');
+    assert.match(esbuildSrc, /esbuild\.build\(/, `${esbuildRel} must use esbuild bundler`);
+    assert.match(esbuildSrc, /__dxosHostExternals/, `${esbuildRel} must resolve host externals lexically`);
+    assert.equal(/\$\{JSON\.stringify\((?:dependencies|deps)\)\}/.test(esbuildSrc), false, `${esbuildRel} must not interpolate deps JSON into wrapper function string`);
+  }
 
   const backupCoreSrc = readFileSync(join(REPO_ROOT, 'scripts/full-backup-core.mjs'), 'utf8');
   assert.match(backupCoreSrc, /DX_RESTORE_ARG_JSON/);
@@ -904,7 +908,6 @@ test('CodeQL remediation: build.mjs bundles avoid dep wrapper interpolation, ful
     'plugins/nocobase/plugin-lattice-foundation/dist/client/index.js',
     'plugins/nocobase/plugin-lattice-foundation/dist/client-v2/index.js',
     'plugins/nocobase/plugin-dxos-ai/dist/client/index.js',
-    'plugins/nocobase/plugin-dxos-blocks/dist/client/index.js',
   ]) {
     const bundleSrc = readFileSync(join(REPO_ROOT, distRel), 'utf8');
     assert.match(bundleSrc, /const __deps = \{/);
@@ -913,6 +916,9 @@ test('CodeQL remediation: build.mjs bundles avoid dep wrapper interpolation, ful
   const studioDistSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-dxos-studio/dist/client/index.js'), 'utf8');
   assert.match(studioDistSrc, /define\(['"]@latticedx\/plugin-dxos-studio['"]/);
   assert.equal(/\bnew Function\s*\(|\beval\s*\(/.test(studioDistSrc), false);
+  const blocksDistSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-dxos-blocks/dist/client/index.js'), 'utf8');
+  assert.match(blocksDistSrc, /define\(['"]@latticedx\/plugin-dxos-blocks['"]/);
+  assert.match(blocksDistSrc, /var __dxosHostExternals = \{/);
 
   // Runtime smoke check on compiled client bundle with top-level __deps + __load
   const origLoad = Module._load;

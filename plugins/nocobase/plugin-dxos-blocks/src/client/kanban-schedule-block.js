@@ -617,6 +617,60 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                     }),
               )),
             ),
+            scheduleGrid.unscheduled.length > 0
+              ? h('div', {
+                  'data-testid': 'dxos-schedule-unscheduled',
+                  style: {
+                    borderRadius: 8,
+                    border: '1px dashed #cbd5e1',
+                    background: '#f8fafc',
+                    padding: 10,
+                    display: 'grid',
+                    gap: 8,
+                  },
+                },
+                  h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 800, color: '#334155' } },
+                    h('span', null, 'Chưa xếp lịch (Chưa có ngày)'),
+                    h('span', { style: { fontSize: 11, color: '#64748b' } }, `${scheduleGrid.unscheduled.length} bản ghi`),
+                  ),
+                  h('div', {
+                    style: {
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
+                      gap: 8,
+                    },
+                  },
+                    scheduleGrid.unscheduled.map((rec, idx) => {
+                      const sla = resolveSlaBadge(rec);
+                      const st = resolveRecordStage(rec, activeCollection);
+                      const meta = STAGE_META[st] || { bg: '#f1f5f9', color: '#334155' };
+                      const onCardClick = typeof cfg.onRecordClick === 'function' ? () => cfg.onRecordClick(rec, activeCollection) : undefined;
+                      return h('div', {
+                        key: rec.id ?? idx,
+                        'data-testid': `dxos-schedule-unscheduled-item-${rec.id ?? idx}`,
+                        onClick: onCardClick,
+                        style: {
+                          padding: 8,
+                          borderRadius: 6,
+                          background: '#ffffff',
+                          border: sla ? `1px solid ${sla.border}` : '1px solid #e2e8f0',
+                          fontSize: 11,
+                          display: 'grid',
+                          gap: 3,
+                          cursor: onCardClick ? 'pointer' : 'default',
+                        },
+                      },
+                        h('strong', { style: { color: '#0f172a' } }, String(rec.code || rec.lotCode || `#${rec.id ?? idx}`)),
+                        h('div', { style: { color: '#475569', wordBreak: 'break-word' } }, String(rec.name || rec.title || rec.productName || 'Bản ghi')),
+                        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
+                          h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: meta.bg, color: meta.color, fontWeight: 700 } }, st),
+                          sla ? h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: sla.bg, color: sla.color, fontWeight: 700 } }, sla.label) : null,
+                        ),
+                      );
+                    }),
+                  ),
+                )
+              : null,
           ),
     );
   };

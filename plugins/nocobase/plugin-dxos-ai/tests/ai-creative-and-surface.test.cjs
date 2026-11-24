@@ -583,3 +583,55 @@ test('creative DSL supports chatter, export-bar, and voucher-actions widgets and
   const src = readFileSync(path.join(__dirname, '../src/server/ai-surface-creative-tools.js'), 'utf8');
   assert.equal(src.includes('Math.random'), false);
 });
+
+test('Task 16: custom non-ldx_ business role ops_manager works across provision, RBAC, and portal tools while reserved roles stay blocked', async () => {
+  const { db, byName, adminCtx } = makeV3Harness();
+  db.store.latticeOrganizations = [{ id: 1, organizationId: 'acme-pharma', active: true, status: 'active' }];
+  const provision = byName.get('dxos_provision_role_workspace');
+  const rbacTool = byName.get('dxos_manage_rbac_permissions');
+  const portalTool = byName.get('dxos_manage_portal_and_acl');
+
+  for (const forbidden of ['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector', 'r_temp']) {
+    await assert.rejects(
+      () => provision.invoke(adminCtx, { roleName: forbidden, portalSlug: 'cold-qa', pageTitle: 'Bad Role', collectionName: 'latticeCustomColdAudits' }),
+      (err) => err.status === 403 && err.code === 'ROLE_FORBIDDEN',
+    );
+    await assert.rejects(
+      () => rbacTool.invoke(adminCtx, { operation: 'ensureCustomRole', roleName: forbidden }),
+      (err) => err.status === 403 && err.code === 'ROLE_TARGET_FORBIDDEN',
+    );
+  }
+
+  const provRes = await provision.invoke(adminCtx, {
+    roleName: 'ops_manager',
+    roleTitle: 'Operations Manager',
+    portalSlug: 'cold-qa',
+    pageTitle: 'Ops Control',
+    collectionName: 'latticeCustomColdAudits',
+    lockedFields: ['auditVerdict'],
+  });
+  assert.equal(provRes.provisioned, true);
+  assert.equal(provRes.roleName, 'ops_manager');
+  assert.ok(db.store.roles.some((r) => r.name === 'ops_manager'));
+  const aiProf = db.store.latticeAiProfiles.find((p) => p.username === provRes.aiEmployee);
+  assert.equal(aiProf.organizationId, 'acme-pharma');
+  assert.deepEqual(aiProf.allowedRoles, ['ops_manager']);
+
+  const rbacRes = await rbacTool.invoke(adminCtx, {
+    operation: 'grantResource',
+    roleName: 'ops_manager',
+    collectionName: 'latticeCustomColdAudits',
+    actions: ['view', 'create'],
+  });
+  assert.equal(rbacRes.applied, true);
+
+  const portalRes = await portalTool.invoke(adminCtx, {
+    operation: 'grant',
+    slug: 'cold-qa',
+    roleNames: ['ops_manager', 'anonymous', 'r_bad'],
+  });
+  assert.equal(portalRes.applied, true);
+  assert.ok(portalRes.assignedRoles.includes('ops_manager'));
+  assert.equal(portalRes.assignedRoles.includes('anonymous'), false);
+  assert.equal(portalRes.assignedRoles.includes('r_bad'), false);
+});

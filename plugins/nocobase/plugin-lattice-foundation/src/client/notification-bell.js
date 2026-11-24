@@ -9,6 +9,8 @@
 'use strict';
 
 const POLL_INTERVAL_MS = 60_000;
+const SSE_RECONNECT_BASE_MS = 3_000;
+const PORTAL_SLUG_RE = /^[a-z0-9_-]{1,64}$/i;
 
 const CATEGORY_TABS = [
   { key: 'all', label: 'Tất cả' },
@@ -32,12 +34,43 @@ function readCurrentPathname() {
   return String(window.location.pathname || '');
 }
 
+function isMobileBellPath(pathname) {
+  const clean = String(pathname || '').split('?')[0].split('#')[0].trim();
+  return clean === '/v/mobile'
+    || clean.startsWith('/v/mobile/')
+    || clean === '/mobile'
+    || clean.startsWith('/mobile/');
+}
+
 function isVisibleBellPath(pathname) {
   const clean = String(pathname || '').split('?')[0].split('#')[0].trim();
   if (!clean || clean === '/signin' || clean.startsWith('/signin/') || clean === '/signup' || clean.startsWith('/signup/')) {
     return false;
   }
-  return clean === '/p' || clean.startsWith('/p/') || clean === '/admin' || clean.startsWith('/admin/');
+  return clean === '/p'
+    || clean.startsWith('/p/')
+    || clean === '/admin'
+    || clean.startsWith('/admin/')
+    || isMobileBellPath(clean);
+}
+
+function resolveBellPortalSlug(pathname) {
+  const clean = String(pathname || '').split('?')[0].split('#')[0].trim();
+  const pMatch = /^\/p\/([a-z0-9_-]{1,64})(?:\/|$)/i.exec(clean);
+  if (pMatch && PORTAL_SLUG_RE.test(pMatch[1])) return pMatch[1].toLowerCase();
+  if (isMobileBellPath(clean)) return 'mobile';
+  if (clean === '/admin' || clean.startsWith('/admin/')) return 'admin';
+  return 'workspace';
+}
+
+function resolveEventSourceCtor() {
+  if (typeof globalThis !== 'undefined' && typeof globalThis.EventSource === 'function') {
+    return globalThis.EventSource;
+  }
+  if (typeof window !== 'undefined' && typeof window.EventSource === 'function') {
+    return window.EventSource;
+  }
+  return null;
 }
 
 function isMobileViewport() {
@@ -86,14 +119,17 @@ function createBellIcon(h) {
   );
 }
 
-function createNotificationBellProvider(client, React, _antd, app) {
+function createNotificationBellCore(client, React, _antd, app, { defaultVariant = 'floating', hasTopbar = false } = {}) {
   if (!React || typeof React.createElement !== 'function') return null;
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+  const useCb = typeof React.useCallback === 'function' ? React.useCallback : (fn) => fn;
+  const useRefSafe = typeof React.useRef === 'function' ? React.useRef : (init) => ({ current: init });
 
-  return function LatticeNotificationBellProvider({ children } = {}) {
+  return function LatticeNotificationBell({ children, variant = defaultVariant, pathname: pathnameProp } = {}) {
     const api = useApi();
-    const [pathname, setPathname] = React.useState(() => readCurrentPathname());
+    const isTopbar = variant === 'topbar';
+    const [pathname, setPathname] = React.useState(() => pathnameProp || readCurrentPathname());
     const [mobile, setMobile] = React.useState(() => isMobileViewport());
     const [open, setOpen] = React.useState(false);
     const [unreadCount, setUnreadCount] = React.useState(0);
@@ -101,11 +137,19 @@ function createNotificationBellProvider(client, React, _antd, app) {
     const [category, setCategory] = React.useState('all');
     const [loading, setLoading] = React.useState(false);
     const [authRejected, setAuthRejected] = React.useState(false);
+    const openRef = useRefSafe(open);
+    openRef.current = open;
+
+    React.useEffect(() => {
+      if (pathnameProp && pathnameProp !== pathname) {
+        setPathname(pathnameProp);
+      }
+    }, [pathnameProp]);
 
     React.useEffect(() => {
       if (typeof window === 'undefined') return undefined;
       const syncPath = () => {
-        const next = readCurrentPathname();
+        const next = pathnameProp || readCurrentPathname();
         setPathname((prev) => (prev === next ? prev : next));
       };
       const media = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 767px)') : null;
@@ -118,11 +162,16 @@ function createNotificationBellProvider(client, React, _antd, app) {
         window.removeEventListener?.('popstate', syncPath);
         media?.removeEventListener?.('change', syncMobile);
       };
-    }, []);
+    }, [pathnameProp]);
 
-    const visible = Boolean(!authRejected && isVisibleBellPath(pathname) && isAuthenticatedClient(api));
+    const effectivePath = pathnameProp || pathname;
+    const suppressedByTopbar = !isTopbar && Boolean(hasTopbar) && !isMobileBellPath(effectivePath);
+    const pathAllowed = isTopbar
+      ? (!effectivePath || isVisibleBellPath(effectivePath))
+      : isVisibleBellPath(effectivePath);
+    const visible = Boolean(!suppressedByTopbar && !authRejected && pathAllowed && isAuthenticatedClient(api));
 
-    const fetchUnreadCount = React.useCallback(async () => {
+    const fetchUnreadCount = useCb(async () => {
       if (!visible || typeof api?.request !== 'function') return;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       try {
@@ -140,7 +189,7 @@ function createNotificationBellProvider(client, React, _antd, app) {
       }
     }, [api, visible]);
 
-    const fetchInbox = React.useCallback(async (selectedCategory = category) => {
+    const fetchInbox = useCb(async (selectedCategory = category) => {
       if (!visible || typeof api?.request !== 'function') return;
       setLoading(true);
       try {
@@ -165,40 +214,127 @@ function createNotificationBellProvider(client, React, _antd, app) {
       }
     }, [api, visible, category]);
 
+    const fetchInboxRef = useRefSafe(fetchInbox);
+    fetchInboxRef.current = fetchInbox;
+    const fetchUnreadCountRef = useRefSafe(fetchUnreadCount);
+    fetchUnreadCountRef.current = fetchUnreadCount;
+
     React.useEffect(() => {
       setAuthRejected(false);
-    }, [api?.auth?.role, pathname]);
+    }, [api?.auth?.role, effectivePath]);
+
+    const portalSlug = resolveBellPortalSlug(effectivePath);
 
     React.useEffect(() => {
       if (!visible) {
         setOpen(false);
         return undefined;
       }
-      fetchUnreadCount();
+      fetchUnreadCountRef.current?.();
       if (typeof window === 'undefined') return undefined;
+
+      let disposed = false;
+      let es = null;
+      let reconnectTimer = null;
+      let retryAttempt = 0;
+
       const timer = setInterval(() => {
         if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
-          fetchUnreadCount();
+          fetchUnreadCountRef.current?.();
         }
       }, POLL_INTERVAL_MS);
       if (typeof timer?.unref === 'function') timer.unref();
+
+      const handleSsePayload = (ev) => {
+        if (disposed) return;
+        let parsed = null;
+        if (ev && typeof ev.data === 'string' && ev.data.trim()) {
+          try {
+            parsed = JSON.parse(ev.data);
+          } catch {
+            parsed = null;
+          }
+        }
+        if (!parsed || typeof parsed !== 'object') return;
+        if (Number.isFinite(Number(parsed.unreadCount)) && Number(parsed.unreadCount) >= 0) {
+          setUnreadCount(Number(parsed.unreadCount));
+          if (openRef.current) fetchInboxRef.current?.();
+          return;
+        }
+        const kind = String(parsed.kind || parsed.type || '').trim().toLowerCase();
+        if (kind === 'notification' || kind === 'unread_count' || ev?.type === 'notification' || ev?.type === 'unread_count') {
+          fetchUnreadCountRef.current?.();
+          if (openRef.current) fetchInboxRef.current?.();
+        }
+      };
+
+      const connectSse = () => {
+        if (disposed) return;
+        const EventSourceCtor = resolveEventSourceCtor();
+        if (typeof EventSourceCtor !== 'function') return;
+        const sseUrl = `/api/dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
+        try {
+          es = new EventSourceCtor(sseUrl, { withCredentials: true });
+        } catch {
+          es = null;
+          return;
+        }
+
+        const resetRetry = () => {
+          retryAttempt = 0;
+        };
+
+        if (typeof es.addEventListener === 'function') {
+          es.addEventListener('snapshot', resetRetry);
+          es.addEventListener('notification', handleSsePayload);
+          es.addEventListener('unread_count', handleSsePayload);
+          es.addEventListener('update', handleSsePayload);
+          es.addEventListener('message', handleSsePayload);
+        } else {
+          es.onmessage = handleSsePayload;
+        }
+
+        es.onopen = resetRetry;
+        es.onerror = () => {
+          try { es?.close?.(); } catch {}
+          es = null;
+          if (disposed || reconnectTimer) return;
+          const delayMs = Math.min(POLL_INTERVAL_MS, SSE_RECONNECT_BASE_MS * (2 ** Math.min(4, retryAttempt)));
+          retryAttempt += 1;
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connectSse();
+          }, delayMs);
+          if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
+        };
+      };
+
+      connectSse();
+
       const onVisibility = () => {
         if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-          fetchUnreadCount();
+          fetchUnreadCountRef.current?.();
         }
       };
       if (typeof document !== 'undefined') {
         document.addEventListener?.('visibilitychange', onVisibility);
       }
       return () => {
+        disposed = true;
         clearInterval(timer);
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        try { es?.close?.(); } catch {}
+        es = null;
         if (typeof document !== 'undefined') {
           document.removeEventListener?.('visibilitychange', onVisibility);
         }
       };
-    }, [visible, fetchUnreadCount]);
+    }, [visible, portalSlug, api]);
 
-    const setPopoverOpen = React.useCallback((next) => {
+    const setPopoverOpen = useCb((next) => {
       setOpen(next);
       if (next) fetchInbox(category);
     }, [category, fetchInbox]);
@@ -281,12 +417,47 @@ function createNotificationBellProvider(client, React, _antd, app) {
     };
 
     if (!visible) {
-      return h(React.Fragment, null, children);
+      return isTopbar ? null : h(React.Fragment, null, children);
     }
 
-    const wrapStyle = mobile
-      ? { position: 'fixed', top: 6, right: 54, zIndex: 1050, pointerEvents: 'auto' }
-      : { position: 'fixed', top: 8, right: 210, zIndex: 1050, pointerEvents: 'auto' };
+    const wrapStyle = isTopbar
+      ? { position: 'relative', display: 'inline-flex', alignItems: 'center', height: 46, verticalAlign: 'middle', lineHeight: 1.2, marginRight: 6 }
+      : (mobile
+        ? { position: 'fixed', top: 6, right: 54, zIndex: 1050, pointerEvents: 'auto' }
+        : { position: 'fixed', top: 8, right: 210, zIndex: 1050, pointerEvents: 'auto' });
+
+    const buttonStyle = isTopbar
+      ? {
+          position: 'relative',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          height: 30,
+          padding: '0 10px',
+          borderRadius: 6,
+          border: '1px solid rgba(255, 255, 255, 0.24)',
+          background: open ? '#1d4ed8' : 'rgba(255, 255, 255, 0.12)',
+          color: '#ffffff',
+          fontSize: 12,
+          fontWeight: 600,
+          cursor: 'pointer',
+        }
+      : {
+          position: 'relative',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          height: 30,
+          padding: '0 10px',
+          borderRadius: 999,
+          border: '1px solid rgba(148, 163, 184, 0.45)',
+          background: open ? '#1d4ed8' : 'rgba(255, 255, 255, 0.94)',
+          color: open ? '#ffffff' : '#1e293b',
+          fontSize: 12,
+          fontWeight: 600,
+          cursor: 'pointer',
+          boxShadow: '0 2px 8px rgba(15, 23, 42, 0.12)',
+        };
 
     const popoverStyle = {
       position: 'fixed',
@@ -306,33 +477,16 @@ function createNotificationBellProvider(client, React, _antd, app) {
       color: '#0f172a',
     };
 
-    return h(React.Fragment, null,
-      children,
-      h('div', { 'data-testid': 'ldx-notification-bell-wrap', style: wrapStyle },
-        h('button', {
-          type: 'button',
-          'data-testid': 'ldx-notification-bell-btn',
-          'aria-label': 'Thông báo',
-          'aria-expanded': open,
-          title: 'Thông báo (Alt+N)',
-          onClick: togglePopover,
-          style: {
-            position: 'relative',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            height: 30,
-            padding: '0 10px',
-            borderRadius: 999,
-            border: '1px solid rgba(148, 163, 184, 0.45)',
-            background: open ? '#1d4ed8' : 'rgba(255, 255, 255, 0.94)',
-            color: open ? '#ffffff' : '#1e293b',
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: 'pointer',
-            boxShadow: '0 2px 8px rgba(15, 23, 42, 0.12)',
-          },
-        },
+    const bellWrap = h('div', { 'data-testid': 'ldx-notification-bell-wrap', 'data-variant': isTopbar ? 'topbar' : 'floating', style: wrapStyle },
+      h('button', {
+        type: 'button',
+        'data-testid': 'ldx-notification-bell-btn',
+        'aria-label': 'Thông báo',
+        'aria-expanded': open,
+        title: 'Thông báo (Alt+N)',
+        onClick: togglePopover,
+        style: buttonStyle,
+      },
           createBellIcon(h),
           !mobile ? h('span', null, 'Thông báo') : null,
           unreadCount > 0 ? h('span', {
@@ -458,18 +612,36 @@ function createNotificationBellProvider(client, React, _antd, app) {
                 }),
           ),
         ) : null,
-      ),
-    );
+      );
+
+    return isTopbar ? bellWrap : h(React.Fragment, null, children, bellWrap);
   };
+}
+
+function createNotificationBellProvider(client, React, antd, app, options = {}) {
+  return createNotificationBellCore(client, React, antd, app, {
+    defaultVariant: options.variant || 'floating',
+    hasTopbar: Boolean(options.hasTopbar),
+  });
+}
+
+function createTopbarNotificationBell(client, React, antd, app) {
+  return createNotificationBellCore(client, React, antd, app, {
+    defaultVariant: 'topbar',
+    hasTopbar: false,
+  });
 }
 
 module.exports = {
   POLL_INTERVAL_MS,
   CATEGORY_TABS,
   readCurrentPathname,
+  isMobileBellPath,
   isVisibleBellPath,
+  resolveBellPortalSlug,
   isMobileViewport,
   isAuthenticatedClient,
   isSafeInternalTargetPath,
   createNotificationBellProvider,
+  createTopbarNotificationBell,
 };

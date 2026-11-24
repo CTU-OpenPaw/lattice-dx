@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { createDmnVisualEditor } = require('./dmn-visual-editor');
+
 const GOVERNANCE_SECTIONS = Object.freeze([
   { id: 'api-keys', key: 'api-keys', label: 'PaaS API Keys', title: '1. Khóa API Phạm vi (PaaS PAT)' },
   { id: 'ledger', key: 'ledger', label: 'PKI & Merkle Ledger', title: '2. Sổ cái Mật mã Ed25519 & Merkle' },
@@ -621,12 +623,13 @@ function renderWmsEpodConsole(h, S, state, patchState, actions, busy) {
   );
 }
 
-function renderDmnConsole(h, S, state, patchState, actions, busy) {
-  const { tables, loading, form, simTableKey, simContextText, simResult } = state;
+function renderDmnConsole(h, S, state, patchState, actions, busy, DmnVisualEditor, api, orgId) {
+  const { tables, loading, form, simTableKey, simContextText, simResult, loadedTable } = state;
   const setForm = (patch) => patchState((p) => ({ ...p, form: { ...p.form, ...patch } }));
   const selectTable = (tbl) => {
     patchState((p) => ({
       ...p,
+      loadedTable: { ...tbl },
       simTableKey: tbl.tableKey,
       form: {
         tableKey: tbl.tableKey,
@@ -639,6 +642,21 @@ function renderDmnConsole(h, S, state, patchState, actions, busy) {
       },
     }));
   };
+
+  const initialVisualTable = (() => {
+    const pIn = safeJsonParse(form.inputsText, 'inputs');
+    const pOut = safeJsonParse(form.outputsText, 'outputs');
+    const pRules = safeJsonParse(form.rulesText, 'rules');
+    return {
+      tableKey: form.tableKey || 'cold-chain-rule',
+      name: form.name || 'Cold Chain Policy',
+      description: form.description || '',
+      hitPolicy: form.hitPolicy || 'FIRST',
+      inputsJson: pIn.ok && Array.isArray(pIn.value) ? pIn.value : [{ name: 'temperature', type: 'number' }],
+      outputsJson: pOut.ok && Array.isArray(pOut.value) ? pOut.value : [{ name: 'action', type: 'string' }],
+      rulesJson: pRules.ok && Array.isArray(pRules.value) ? pRules.value : [],
+    };
+  })();
 
   return h('div', { 'data-testid': 'dxos-governance-console-dmn', style: S.card },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
@@ -664,54 +682,85 @@ function renderDmnConsole(h, S, state, patchState, actions, busy) {
       ),
     ),
 
-    h('div', { style: S.grid2 },
-      h('form', { 'data-testid': 'dxos-dmn-save-form', onSubmit: actions.saveDmnTable, style: S.subCard },
-        h('div', { style: { fontSize: 13, fontWeight: 700 } }, 'Soạn thảo & Lưu Bảng DMN'),
-        h('div', { style: S.grid2 },
-          h('div', null,
-            h('label', { style: S.label }, 'tableKey'),
-            h('input', { type: 'text', required: true, value: form.tableKey, onChange: (e) => setForm({ tableKey: e.target.value }), style: S.input }),
-          ),
-          h('div', null,
-            h('label', { style: S.label }, 'Hit Policy'),
-            h('select', { 'data-testid': 'dxos-dmn-hitpolicy-select', value: form.hitPolicy, onChange: (e) => setForm({ hitPolicy: e.target.value }), style: S.input },
-              h('option', { value: 'FIRST' }, 'FIRST'),
-              h('option', { value: 'COLLECT' }, 'COLLECT'),
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12 } },
+      h('div', { style: S.grid2 },
+        h('form', { 'data-testid': 'dxos-dmn-save-form', onSubmit: actions.saveDmnTable, style: S.subCard },
+          h('div', { style: { fontSize: 13, fontWeight: 700 } }, 'Soạn thảo & Lưu Bảng DMN (JSON)'),
+          h('div', { style: S.grid2 },
+            h('div', null,
+              h('label', { style: S.label }, 'tableKey'),
+              h('input', { type: 'text', required: true, value: form.tableKey, onChange: (e) => setForm({ tableKey: e.target.value }), style: S.input }),
+            ),
+            h('div', null,
+              h('label', { style: S.label }, 'Hit Policy'),
+              h('select', { 'data-testid': 'dxos-dmn-hitpolicy-select', value: form.hitPolicy, onChange: (e) => setForm({ hitPolicy: e.target.value }), style: S.input },
+                h('option', { value: 'FIRST' }, 'FIRST'),
+                h('option', { value: 'UNIQUE' }, 'UNIQUE'),
+                h('option', { value: 'COLLECT' }, 'COLLECT'),
+                h('option', { value: 'PRIORITY' }, 'PRIORITY'),
+              ),
             ),
           ),
+          h('input', { type: 'text', required: true, placeholder: 'Tên bảng quyết định', value: form.name, onChange: (e) => setForm({ name: e.target.value }), style: S.input }),
+          h('div', null,
+            h('label', { style: S.label }, 'Inputs Schema JSON'),
+            h('textarea', { rows: 2, value: form.inputsText, onChange: (e) => setForm({ inputsText: e.target.value }), style: S.textarea }),
+          ),
+          h('div', null,
+            h('label', { style: S.label }, 'Outputs Schema JSON'),
+            h('textarea', { rows: 2, value: form.outputsText, onChange: (e) => setForm({ outputsText: e.target.value }), style: S.textarea }),
+          ),
+          h('div', null,
+            h('label', { style: S.label }, 'Rules JSON'),
+            h('textarea', { rows: 5, value: form.rulesText, onChange: (e) => setForm({ rulesText: e.target.value }), style: S.textarea }),
+          ),
+          h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Lưu Bảng Quyết định'),
         ),
-        h('input', { type: 'text', required: true, placeholder: 'Tên bảng quyết định', value: form.name, onChange: (e) => setForm({ name: e.target.value }), style: S.input }),
-        h('div', null,
-          h('label', { style: S.label }, 'Inputs Schema JSON'),
-          h('textarea', { rows: 2, value: form.inputsText, onChange: (e) => setForm({ inputsText: e.target.value }), style: S.textarea }),
+
+        h('form', { 'data-testid': 'dxos-dmn-eval-form', onSubmit: actions.evaluateDmn, style: S.subCard },
+          h('div', { style: { fontSize: 13, fontWeight: 700 } }, 'Mô phỏng Luật (Rule Simulator)'),
+          h('div', null,
+            h('label', { style: S.label }, 'tableKey đánh giá'),
+            h('input', { type: 'text', required: true, value: simTableKey, onChange: (e) => patchState((p) => ({ ...p, simTableKey: e.target.value })), style: S.input }),
+          ),
+          h('div', null,
+            h('label', { style: S.label }, 'Context đầu vào JSON'),
+            h('textarea', { rows: 5, value: simContextText, onChange: (e) => patchState((p) => ({ ...p, simContextText: e.target.value })), style: S.textarea }),
+          ),
+          h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Chạy Mô phỏng DMN'),
+          simResult ? h('div', { 'data-testid': 'dxos-dmn-eval-result', style: { padding: 10, borderRadius: 6, background: '#ffffff', border: '1px solid #cbd5e1', fontSize: 12, display: 'grid', gap: 4 } },
+            h('div', null, h('strong', null, `Matched: ${simResult.matched ? 'YES' : 'NO'}`), ` · Hit Policy: ${simResult.hitPolicy} · Matched Rule Index: ${simResult.matchedRuleIndex ?? '-'}`),
+            h('pre', { style: { margin: 0, fontSize: 11, overflowX: 'auto' } }, JSON.stringify(simResult.hitPolicy === 'COLLECT' ? simResult.results : (simResult.outputs ?? simResult.result), null, 2)),
+          ) : null,
         ),
-        h('div', null,
-          h('label', { style: S.label }, 'Outputs Schema JSON'),
-          h('textarea', { rows: 2, value: form.outputsText, onChange: (e) => setForm({ outputsText: e.target.value }), style: S.textarea }),
-        ),
-        h('div', null,
-          h('label', { style: S.label }, 'Rules JSON'),
-          h('textarea', { rows: 5, value: form.rulesText, onChange: (e) => setForm({ rulesText: e.target.value }), style: S.textarea }),
-        ),
-        h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Lưu Bảng Quyết định'),
       ),
 
-      h('form', { 'data-testid': 'dxos-dmn-eval-form', onSubmit: actions.evaluateDmn, style: S.subCard },
-        h('div', { style: { fontSize: 13, fontWeight: 700 } }, 'Mô phỏng Luật (Rule Simulator)'),
-        h('div', null,
-          h('label', { style: S.label }, 'tableKey đánh giá'),
-          h('input', { type: 'text', required: true, value: simTableKey, onChange: (e) => patchState((p) => ({ ...p, simTableKey: e.target.value })), style: S.input }),
-        ),
-        h('div', null,
-          h('label', { style: S.label }, 'Context đầu vào JSON'),
-          h('textarea', { rows: 5, value: simContextText, onChange: (e) => patchState((p) => ({ ...p, simContextText: e.target.value })), style: S.textarea }),
-        ),
-        h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Chạy Mô phỏng DMN'),
-        simResult ? h('div', { 'data-testid': 'dxos-dmn-eval-result', style: { padding: 10, borderRadius: 6, background: '#ffffff', border: '1px solid #cbd5e1', fontSize: 12, display: 'grid', gap: 4 } },
-          h('div', null, h('strong', null, `Matched: ${simResult.matched ? 'YES' : 'NO'}`), ` · Hit Policy: ${simResult.hitPolicy} · Matched Rule Index: ${simResult.matchedRuleIndex ?? '-'}`),
-          h('pre', { style: { margin: 0, fontSize: 11, overflowX: 'auto' } }, JSON.stringify(simResult.hitPolicy === 'COLLECT' ? simResult.results : (simResult.outputs ?? simResult.result), null, 2)),
-        ) : null,
-      ),
+      DmnVisualEditor ? h('div', { style: { order: -1 } },
+        h(DmnVisualEditor, {
+          initialTable: initialVisualTable,
+          table: loadedTable || tables[0] || undefined,
+          organizationId: orgId || undefined,
+          api,
+          busy,
+          onChange: (nextTbl) => {
+            patchState((p) => ({
+              ...p,
+              simTableKey: nextTbl.tableKey || p.simTableKey,
+              form: {
+                tableKey: nextTbl.tableKey || '',
+                name: nextTbl.name || '',
+                description: nextTbl.description || '',
+                hitPolicy: nextTbl.hitPolicy || 'FIRST',
+                inputsText: JSON.stringify(nextTbl.inputsJson || [], null, 2),
+                outputsText: JSON.stringify(nextTbl.outputsJson || [], null, 2),
+                rulesText: JSON.stringify(nextTbl.rulesJson || [], null, 2),
+              },
+            }));
+          },
+          onSave: actions.saveVisualDmnTable,
+          onEvaluate: actions.evaluateVisualDmn,
+        }),
+      ) : null,
     ),
   );
 }
@@ -794,6 +843,7 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
   const S = makeStyles();
+  const DmnVisualEditor = createDmnVisualEditor(React, _antd);
 
   return function DxosGovernanceConsoles(props = {}) {
     const hookApi = useApi();
@@ -860,6 +910,7 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
     const [dmnState, setDmnState] = React.useState({
       tables: [],
       loading: false,
+      loadedTable: null,
       form: { tableKey: 'cold-chain-rule', name: 'Cold Chain Policy', description: '', hitPolicy: 'FIRST', inputsText: DEFAULT_DMN_INPUTS, outputsText: DEFAULT_DMN_OUTPUTS, rulesText: DEFAULT_DMN_RULES },
       simTableKey: 'cold-chain-rule',
       simContextText: '{"temperature": 10}',
@@ -1309,6 +1360,36 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
           setDmnState((p) => ({ ...p, simResult: unwrapData(res) }));
         });
       },
+      saveVisualDmnTable: async (payload) => {
+        if (!api?.request) return null;
+        let saved = null;
+        await runMutation('Không lưu được bảng quyết định DMN.', async () => {
+          const res = await api.request({
+            url: 'dxosDmn:saveTable',
+            method: 'post',
+            data: { ...orgPayload, ...payload },
+          });
+          saved = unwrapData(res);
+          setFeedback({ type: 'success', text: `Đã lưu bảng DMN "${saved.table?.tableKey || payload.tableKey}" (v${saved.table?.version || 1}).` });
+          await loadDmnTables();
+        });
+        return saved;
+      },
+      evaluateVisualDmn: async ({ tableKey, context }) => {
+        if (!api?.request) return null;
+        const res = await api.request({
+          url: 'dxosDmn:evaluate',
+          method: 'post',
+          data: {
+            ...orgPayload,
+            tableKey: tableKey || dmnState.simTableKey,
+            context: context || {},
+          },
+        });
+        const evalOut = unwrapData(res);
+        setDmnState((p) => ({ ...p, simResult: evalOut }));
+        return evalOut;
+      },
 
       loadDelegations,
       createDelegation: (e) => {
@@ -1387,7 +1468,7 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
       activeSection === 'ledger' ? renderLedgerConsole(h, S, ledgerState, setLedgerState, actions, busy) : null,
       activeSection === 'data-gov' ? renderDataGovConsole(h, S, dataGovState, setDataGovState, actions, busy) : null,
       activeSection === 'wms-epod' ? renderWmsEpodConsole(h, S, wmsState, setWmsState, actions, busy) : null,
-      activeSection === 'dmn' ? renderDmnConsole(h, S, dmnState, setDmnState, actions, busy) : null,
+      activeSection === 'dmn' ? renderDmnConsole(h, S, dmnState, setDmnState, actions, busy, DmnVisualEditor, api, effectiveOrg) : null,
       activeSection === 'delegations' ? renderDelegationsConsole(h, S, delegationState, setDelegationState, actions, employees, busy) : null,
     );
   };

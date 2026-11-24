@@ -18,13 +18,19 @@
   const {createWorkspaceApi} = require('../client/workspace-api');
   const mobileFieldPwa = require('./mobile-field-pwa');
   const {createMobileFieldPwaPage} = mobileFieldPwa;
+  const publicTrack = require('./public-track-page');
+  const {createPublicTrackPage} = publicTrack;
   class LatticeFoundationClientV2 extends client.Plugin {
     async load() {
       const MobileFieldPwaPage = createMobileFieldPwaPage(client, React, this.app);
+      const PublicTrackPage = createPublicTrackPage(client, React, this.app);
       if (this.app?.router && typeof this.app.router.add === 'function') {
         this.app.router.add('dxos-mobile-field', { path: '/mobile', Component: MobileFieldPwaPage });
+        this.app.router.add('dxos-mobile-field-sub', { path: '/mobile/*', Component: MobileFieldPwaPage });
+        this.app.router.add('dxos-public-track', { path: '/track/:code', Component: PublicTrackPage });
+        this.app.router.add('dxos-public-track-root', { path: '/track', Component: PublicTrackPage });
       }
     }
   }
-  return {__esModule: true, default: LatticeFoundationClientV2, createWorkspaceApi, ...actions, ...mobileFieldPwa};
+  return {__esModule: true, default: LatticeFoundationClientV2, createWorkspaceApi, ...actions, ...mobileFieldPwa, ...publicTrack};
 });

@@ -588,7 +588,106 @@ function createVoucherLifecycleBar(client, React, app) {
       }
     };
 
+    const cloneSafePrintNode = (srcNode, doc) => {
+      if (!srcNode || !doc) return null;
+      if (srcNode.nodeType === 3) {
+        return doc.createTextNode(String(srcNode.textContent || ''));
+      }
+      if (srcNode.nodeType !== 1) return null;
+      const rawTag = String(srcNode.tagName || '').toLowerCase();
+      if (!rawTag || ['script', 'iframe', 'object', 'embed', 'link', 'meta', 'base'].includes(rawTag)) {
+        return null;
+      }
+      const isSvg = srcNode.namespaceURI === 'http://www.w3.org/2000/svg'
+        || ['svg', 'path', 'rect', 'circle', 'line', 'polyline', 'polygon', 'g', 'text', 'defs', 'use'].includes(rawTag);
+      const el = isSvg && typeof doc.createElementNS === 'function'
+        ? doc.createElementNS('http://www.w3.org/2000/svg', rawTag)
+        : doc.createElement(rawTag);
+      const attrs = Array.from(srcNode.attributes || []);
+      for (const attr of attrs) {
+        const attrName = String(attr?.name || '');
+        const lowerName = attrName.toLowerCase();
+        const attrVal = String(attr?.value ?? '');
+        if (!attrName || lowerName.startsWith('on') || lowerName === 'srcdoc') continue;
+        if ((lowerName === 'href' || lowerName === 'src' || lowerName === 'xlink:href')
+          && /^\s*(javascript|vbscript|data\s*:\s*text\/html)/i.test(attrVal)) {
+          continue;
+        }
+        el.setAttribute(attrName, attrVal);
+      }
+      if (rawTag === 'style') {
+        const cssText = String(srcNode.textContent || '').replace(/<\/style/gi, '').replace(/@import/gi, '/*blocked*/');
+        el.appendChild(doc.createTextNode(cssText));
+        return el;
+      }
+      for (const child of Array.from(srcNode.childNodes || [])) {
+        const cloned = cloneSafePrintNode(child, doc);
+        if (cloned) el.appendChild(cloned);
+      }
+      return el;
+    };
+
     const triggerBrowserPrint = () => {
+      if (
+        printState.html
+        && typeof DOMParser === 'function'
+        && typeof document !== 'undefined'
+        && typeof document.createElement === 'function'
+        && document.body
+        && typeof document.body.appendChild === 'function'
+        && document.head
+        && typeof document.head.appendChild === 'function'
+        && typeof window !== 'undefined'
+        && typeof window.print === 'function'
+      ) {
+        try {
+          const prevRoot = document.getElementById?.('dxos-isolated-print-root');
+          prevRoot?.remove?.();
+          const prevStyle = document.getElementById?.('dxos-isolated-print-style');
+          prevStyle?.remove?.();
+
+          const parsed = new DOMParser().parseFromString(String(printState.html), 'text/html');
+          const printStyle = document.createElement('style');
+          printStyle.setAttribute('id', 'dxos-isolated-print-style');
+          printStyle.textContent = [
+            '@media screen { #dxos-isolated-print-root { display: none !important; } }',
+            '@media print {',
+            '  body > *:not(#dxos-isolated-print-root) { display: none !important; }',
+            '  #dxos-isolated-print-root { display: block !important; position: static !important; margin: 0 !important; padding: 0 !important; background: #ffffff !important; }',
+            '}',
+          ].join('\n');
+
+          const printRoot = document.createElement('div');
+          printRoot.setAttribute('id', 'dxos-isolated-print-root');
+          for (const headChild of Array.from(parsed?.head?.childNodes || [])) {
+            if (String(headChild?.tagName || '').toLowerCase() === 'style') {
+              const clonedStyle = cloneSafePrintNode(headChild, document);
+              if (clonedStyle) printRoot.appendChild(clonedStyle);
+            }
+          }
+          for (const bodyChild of Array.from(parsed?.body?.childNodes || [])) {
+            const clonedNode = cloneSafePrintNode(bodyChild, document);
+            if (clonedNode) printRoot.appendChild(clonedNode);
+          }
+
+          document.head.appendChild(printStyle);
+          document.body.appendChild(printRoot);
+
+          const cleanup = () => {
+            try { printRoot.remove?.(); } catch {}
+            try { printStyle.remove?.(); } catch {}
+            if (typeof window.removeEventListener === 'function') {
+              window.removeEventListener('afterprint', cleanup);
+            }
+          };
+          if (typeof window.addEventListener === 'function') {
+            window.addEventListener('afterprint', cleanup);
+          }
+          window.print();
+          return;
+        } catch {}
+      }
+
       try {
         const frame = printFrameHolder.el
           || (typeof document !== 'undefined' && typeof document.querySelector === 'function'

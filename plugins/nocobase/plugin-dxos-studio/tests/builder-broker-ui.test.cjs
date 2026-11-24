@@ -1008,3 +1008,64 @@ test('VaultAndAutomationPanel skips dxosAutomations:listRules and listRuns while
   assert.equal(requests.some((r) => r.url === 'dxosAutomations:listRuns' && r.params?.organizationId === 'org-a'), true);
   assert.equal(JSON.stringify(tree).includes('r_org-a'), true);
 });
+
+test('Task 15b: governance-consoles DMN section embeds DmnVisualEditor with grid rule editing, save, and Live Test Simulator', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const harness = createQueuedReactHarness();
+  const tables = [
+    {
+      id: 1,
+      tableKey: 'cold-chain-rule',
+      name: 'Cold Chain Policy',
+      hitPolicy: 'FIRST',
+      inputsJson: [{ name: 'temperature', type: 'number' }],
+      outputsJson: [{ name: 'action', type: 'string' }],
+      rulesJson: [{ when: { temperature: { op: 'gt', value: 8 } }, then: { action: 'hold_mkt' } }],
+      version: 1,
+    },
+  ];
+  const { client, requests } = createApiMock({
+    'dxosDmn:listTables': async () => ({ organizationId: 'org-a', items: tables }),
+    'dxosDmn:saveTable': async (req) => ({ table: { ...req.data, version: 2 } }),
+    'dxosDmn:evaluate': async (req) => ({
+      tableKey: req.data.tableKey,
+      hitPolicy: 'FIRST',
+      matched: Number(req.data.context?.temperature) > 8,
+      matchedRuleIndex: Number(req.data.context?.temperature) > 8 ? 0 : -1,
+      matchedRuleIndices: Number(req.data.context?.temperature) > 8 ? [0] : [],
+      outputs: Number(req.data.context?.temperature) > 8 ? { action: 'hold_mkt' } : null,
+    }),
+  });
+
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Consoles, { initialSection: 'dmn', selectedOrg: 'org-a' });
+
+  // DmnVisualEditor must be embedded inside governance-consoles DMN section
+  const visualEditor = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-visual-editor')[0];
+  assert.ok(visualEditor, 'governance-consoles DMN section must render DmnVisualEditor');
+
+  // Add a rule row in visual editor grid and run live simulator
+  const addRuleBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-add-rule-btn')[0];
+  assert.ok(addRuleBtn);
+  addRuleBtn.props.onClick();
+  tree = await harness.flush(Consoles, { initialSection: 'dmn', selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => String(n.props?.['data-testid'] || '').startsWith('dmn-rule-row-')).length, 2);
+
+  // Run simulator inside DmnVisualEditor with temperature=12 (> 8) -> highlights matched row 0
+  const simTempInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-input-temperature')[0];
+  assert.ok(simTempInput, 'Live Test Simulator must expose dmn-sim-input-temperature');
+  simTempInput.props.onChange({ target: { value: '12' } });
+  tree = await harness.flush(Consoles, { initialSection: 'dmn', selectedOrg: 'org-a' });
+  const simRunBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-run-btn')[0];
+  assert.ok(simRunBtn);
+  await simRunBtn.props.onClick();
+  tree = await harness.flush(Consoles, { initialSection: 'dmn', selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosDmn:evaluate' && r.data?.tableKey === 'cold-chain-rule'));
+  const row0 = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-rule-row-0')[0];
+  assert.equal(row0.props['data-matched'], 'true');
+
+  // Save via visual editor Save button -> calls dxosDmn:saveTable with 2 rules
+  const saveBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-save-btn')[0];
+  await saveBtn.props.onClick();
+  assert.ok(requests.some((r) => r.url === 'dxosDmn:saveTable' && r.data?.rulesJson?.length === 2));
+});

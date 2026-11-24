@@ -1717,3 +1717,92 @@ test('Task 4: resolveEffectiveDelegatedRoles enforced across flow/durable-store 
   assert.equal(harness.ledgerEntries.at(-1).metadataJson.delegatedFromUserId, 100);
   assert.ok(chatter.some((c) => c.diffJson?.delegationUid === 'DLG-ORD-101' && c.diffJson?.delegatedFromUserId === 100));
 });
+
+test('Task 14b: printVoucher embeds ISO QR SVG + ePOD signature/photo, and epodCapture validates & persists evidencePhotoDataUrl without PII leak', async () => {
+  const { createDxosWmsActions } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const { OVERVIEW_SPECS } = require(path.join(PLUGIN_ROOT, 'src/server/portal-composer.js'));
+
+  const harness = makeTestHarness({
+    employees: [{ id: 15, userId: 150, organizationId: 'org-a', active: true }],
+    orders: [{ id: 810, code: 'ORD-QR-810', name: 'Cold Shipment QR', customer: 'BV Cần Thơ', organizationId: 'org-a', status: 'in_transit' }],
+  });
+  const wms = createDxosWmsActions(harness.db);
+
+  const driverCtx = (values) => ({
+    method: 'POST',
+    state: { currentUser: { id: 150, username: 'drv-qr' }, currentRole: 'ldx_driver' },
+    can: () => true,
+    action: { params: { values } },
+  });
+
+  // 1. epodCapture rejects SVG/XSS/oversized evidencePhotoDataUrl with 400 EPOD_PHOTO_INVALID
+  for (const badPhoto of [
+    'data:image/svg+xml;base64,PHN2Zz48c2NyaXB0PmFsZXJ0KDEpPC9zY3JpcHQ+PC9zdmc+',
+    'javascript:alert(1)',
+    'data:image/png;base64,<script>alert(1)</script>',
+    'data:image/jpeg;base64,' + 'A'.repeat(520 * 1024),
+  ]) {
+    await assert.rejects(
+      () => wms.epodCapture(driverCtx({
+        orderId: 810,
+        recipientName: 'Nguyen Van B',
+        deliveredQty: 5,
+        gpsLat: 10.04,
+        gpsLng: 105.74,
+        signatureDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
+        evidencePhotoDataUrl: badPhoto,
+      }), async () => {}),
+      (err) => err.status === 400 && err.code === 'EPOD_PHOTO_INVALID',
+    );
+  }
+
+  // 2. Valid epodCapture persists evidencePhotoDataUrl + SHA-256 hash cleanly without leaking into publicTrack
+  const validPhoto = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/';
+  const validSig = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+  const capCtx = driverCtx({
+    orderId: 810,
+    recipientName: 'Nguyen Van B',
+    deliveredQty: 5,
+    gpsLat: 10.04,
+    gpsLng: 105.74,
+    signatureDataUrl: validSig,
+    evidencePhotoDataUrl: validPhoto,
+    tempSummary: { mktCelsius: 3.8, inRange: true },
+  });
+  await wms.epodCapture(capCtx, async () => {});
+
+  const expectedPhotoHash = createHash('sha256').update(validPhoto).digest('hex');
+  assert.ok(capCtx.body.epod.photoHashesJson.includes(expectedPhotoHash));
+  assert.equal(capCtx.body.epod.evidencePhotoDataUrl, validPhoto);
+  assert.equal(harness.epodRecords[0].tempSummaryJson.evidencePhotoDataUrl, validPhoto);
+
+  // publicTrack must NEVER leak evidencePhotoDataUrl or signatureDataUrl
+  const trackCtx = {
+    method: 'GET',
+    state: {},
+    action: { params: { trackingCode: capCtx.body.trackingCode, token: capCtx.body.trackingToken } },
+  };
+  await wms.publicTrack(trackCtx, async () => {});
+  assert.equal(JSON.stringify(trackCtx.body).includes(validPhoto), false);
+  assert.equal(JSON.stringify(trackCtx.body).includes(validSig), false);
+
+  // 3. printVoucher embeds genuine ISO QR <svg> linking /v/track/<code> + ePOD signature image, without leaking raw trackingToken
+  const printCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 150 }, currentRole: 'ldx_driver' },
+    can: () => true,
+    action: { params: { documentType: 'epod', epodUid: capCtx.body.epod.epodUid } },
+  };
+  await wms.printVoucher(printCtx, async () => {});
+  assert.ok(printCtx.body.html.includes('<svg xmlns="http://www.w3.org/2000/svg"'));
+  assert.ok(printCtx.body.html.includes('<path d="M'));
+  assert.ok(printCtx.body.html.includes(`/v/track/${capCtx.body.trackingCode}`));
+  assert.ok(printCtx.body.html.includes(`<img src="${validSig}"`));
+  assert.equal(printCtx.body.html.includes(capCtx.body.trackingToken), false, 'printVoucher must not leak raw trackingToken unless explicitly verified');
+
+  // 4. Task 15b: portal-composer attaches DxosWmsOpsBlockModel onto /p/logistics
+  const logisticsSpec = OVERVIEW_SPECS.find((s) => s.slug === 'logistics');
+  assert.ok(logisticsSpec);
+  const wmsOps = logisticsSpec.blocks.find((b) => b.use === 'DxosWmsOpsBlockModel');
+  assert.ok(wmsOps, 'OVERVIEW_SPECS logistics must attach DxosWmsOpsBlockModel');
+});

@@ -705,7 +705,7 @@ test('portal-composer OVERVIEW_SPECS includes WebGIS in incidents, Kanban in log
 
   const logistics = OVERVIEW_SPECS.find((s) => s.slug === 'logistics');
   assert.ok(logistics);
-  assert.deepEqual(logistics.blocks.map((b) => b.uidSuffix), ['hero', 'kpi', 'tasks', 'workbench', 'kanban']);
+  assert.deepEqual(logistics.blocks.map((b) => b.uidSuffix), ['hero', 'kpi', 'tasks', 'workbench', 'kanban', 'wms-ops']);
   const kanban = logistics.blocks.find((b) => b.uidSuffix === 'kanban');
   assert.equal(kanban.use, 'DxosKanbanScheduleBlockModel');
   assert.deepEqual(kanban.config, {

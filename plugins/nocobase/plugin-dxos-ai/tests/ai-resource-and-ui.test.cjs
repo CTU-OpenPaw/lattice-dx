@@ -1809,3 +1809,139 @@ test('Task 4: SUPPORTED_HITL_TOOLS includes latticeflow.approval, Approve/Reject
   assert.equal(rejectCtx.body.flowRun?.status, 'completed');
   assert.ok(db.stores.latticeServiceTickets.some((t) => t.code === 'HITL-NO-R1'));
 });
+
+test('Task 16: multi-tenant non-native-ui-lab org resolution works dynamically across server actions, actor scope, and ai-studio-page UI', async () => {
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { resolveActorScope } = require(path.join(PLUGIN_ROOT, 'src/server/ai-tools-core.js'));
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+
+  const db = makeMockDb();
+  db.stores.latticeOrganizations = [
+    { id: 1, organizationId: 'acme-pharma', active: true, status: 'active' },
+  ];
+  const actions = createDxosAiActions(db, {
+    env: {},
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ version: '1.8' }) }),
+  });
+
+  // 1. resolveActorScope for root without latticeEmployees resolves first active latticeOrganizations ('acme-pharma')
+  const actor = await resolveActorScope({ state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] } }, db);
+  assert.equal(actor.organizationId, 'acme-pharma');
+
+  // 2. bootstrapDefaults & listProfiles & quotaSummary resolve 'acme-pharma' without 'native-ui-lab'
+  const rootCtx = { state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions.bootstrapDefaults(rootCtx, async () => {});
+  assert.ok(db.stores.latticeAiProfiles.every((p) => p.organizationId === 'acme-pharma'));
+
+  const listCtx = { state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions.listProfiles(listCtx, async () => {});
+  assert.equal(listCtx.body.defaultOrganizationId, 'acme-pharma');
+  assert.deepEqual(listCtx.body.organizations, ['acme-pharma']);
+
+  const quotaCtx = { state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions.quotaSummary(quotaCtx, async () => {});
+  assert.equal(quotaCtx.body.organizationId, 'acme-pharma');
+
+  // Empty latticeOrganizations & no explicit org fails cleanly on quotaSummary
+  db.stores.latticeOrganizations.length = 0;
+  await assert.rejects(
+    () => actions.quotaSummary({ state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } }, async () => {}),
+    (err) => err.status === 400 && err.code === 'AI_ORG_REQUIRED',
+  );
+
+  // 3. ai-studio-page initializes quotaOrg & orgOptions dynamically from loaded topology/profiles without 'native-ui-lab'
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let stateIdx = 0;
+  let refIdx = 0;
+  let effectIdx = 0;
+  let memoIdx = 0;
+  const quotaReqs = [];
+  const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, idx) => d !== prev[idx]);
+  const api = {
+    request: async (req) => {
+      if (req.url === 'dxosAi:listProfiles') {
+        return {
+          data: {
+            data: {
+              profiles: [{ username: 'pharma-ops', nickname: 'Pharma Ops', organizationId: 'acme-pharma', allowedRoles: ['ops_manager'], portalBindings: ['incidents'] }],
+              organizations: ['acme-pharma'],
+              defaultOrganizationId: 'acme-pharma',
+              catalog: { availableTools: ['dxos_search_enterprise_context'], organizations: ['acme-pharma'], defaultOrganizationId: 'acme-pharma' },
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:enterpriseTopology') {
+        return { data: { data: { organizations: ['acme-pharma'], defaultOrganizationId: 'acme-pharma', planes: [] } } };
+      }
+      if (req.url === 'dxosAi:quotaSummary') {
+        quotaReqs.push(req.params?.organizationId);
+        return { data: { data: { organizationId: req.params?.organizationId, day: '2026-11-24', limits: {}, dayUsage: {}, usage: {}, allTimeTotals: {} } } };
+      }
+      return { data: { data: { items: [] } } };
+    },
+  };
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const i = stateIdx++;
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+      return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+    },
+    useRef: (init) => {
+      const i = refIdx++;
+      if (!(i in refSlots)) refSlots[i] = { current: init };
+      return refSlots[i];
+    },
+    useEffect: (fn, deps) => {
+      const i = effectIdx++;
+      effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+    },
+    useMemo: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps };
+      return memoSlots[i].value;
+    },
+    useCallback: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps };
+      return memoSlots[i].value;
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, {});
+  const render = () => {
+    stateIdx = 0; refIdx = 0; effectIdx = 0; memoIdx = 0;
+    const tree = Page();
+    for (const eff of effectSlots) {
+      if (eff.changed) { eff.changed = false; eff.fn(); }
+    }
+    return tree;
+  };
+  const findAll = (node, pred, acc = []) => {
+    if (!node || typeof node !== 'object') return acc;
+    if (pred(node)) acc.push(node);
+    const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    for (const k of kids) findAll(k, pred, acc);
+    return acc;
+  };
+
+  let tree = render();
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render();
+  const quotaTabBtn = findAll(tree, (n) => n.type === 'button' && n.children?.includes('5. Hạn mức & Chi phí AI'))[0];
+  quotaTabBtn.props.onClick();
+  tree = render();
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render();
+
+  assert.deepEqual(quotaReqs, ['acme-pharma']);
+  const selectEl = findAll(tree, (n) => n.type === 'select' && n.props?.['data-testid'] === 'dxos-quota-org-select')[0];
+  assert.equal(selectEl.props.value, 'acme-pharma');
+  const dump = JSON.stringify(selectEl);
+  assert.equal(dump.includes('acme-pharma'), true);
+  assert.equal(dump.includes('native-ui-lab'), false);
+});

@@ -1029,3 +1029,642 @@ test('UI background 400/403 fixes: webgis-block passes/skips organizationId on t
   assert.equal(verifyCall.params.organizationId, 'org-ctx');
   pkiHooks.unmount();
 });
+
+test('Task 13: webgis-block builds GeoJSON FeatureCollections (points + cold-chain corridors) and offline WGS84 vector style', () => {
+  const {
+    buildMarkersGeoJson,
+    buildCorridorsGeoJson,
+    buildOfflineWgs84VectorStyle,
+    DEFAULT_VIETNAM_GEO_MARKERS,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+
+  assert.equal(typeof buildMarkersGeoJson, 'function');
+  assert.equal(typeof buildCorridorsGeoJson, 'function');
+  assert.equal(typeof buildOfflineWgs84VectorStyle, 'function');
+
+  const markersGeo = buildMarkersGeoJson([
+    ...DEFAULT_VIETNAM_GEO_MARKERS,
+    { id: 'bad-1', code: 'BAD', name: 'Invalid', lat: 999, lng: 106 },
+  ]);
+  assert.equal(markersGeo.type, 'FeatureCollection');
+  assert.equal(markersGeo.features.length, DEFAULT_VIETNAM_GEO_MARKERS.length);
+  assert.equal(markersGeo.features[0].geometry.type, 'Point');
+  assert.deepEqual(markersGeo.features[0].geometry.coordinates, [DEFAULT_VIETNAM_GEO_MARKERS[0].lng, DEFAULT_VIETNAM_GEO_MARKERS[0].lat]);
+  assert.equal(markersGeo.features[0].properties.code, 'HUB-CT');
+
+  const corridorsGeo = buildCorridorsGeoJson(DEFAULT_VIETNAM_GEO_MARKERS);
+  assert.equal(corridorsGeo.type, 'FeatureCollection');
+  assert.ok(corridorsGeo.features.length >= 1);
+  assert.equal(corridorsGeo.features[0].geometry.type, 'LineString');
+  assert.ok(corridorsGeo.features[0].geometry.coordinates.length >= 4);
+
+  const offlineStyle = buildOfflineWgs84VectorStyle();
+  assert.equal(offlineStyle.version, 8);
+  assert.ok(offlineStyle.sources && offlineStyle.layers && offlineStyle.layers.length >= 2);
+  const serializedStyle = JSON.stringify(offlineStyle);
+  assert.equal(/https?:\/\//i.test(serializedStyle), false, 'Offline WGS84 vector style must contain zero external http(s) URLs');
+});
+
+test('Task 13: DxosWebGisBlockView loads >6 assets without 6-asset cap, wires MapLibre cluster:true + offline fallback, and Desktop Twin Drawer calls twinSetDesired with HITL feedback', async () => {
+  const { createWebGisBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  const tenAssets = Array.from({ length: 10 }, (_, idx) => ({
+    id: 201 + idx,
+    code: `COLD-${idx + 1}`,
+    name: `Kho lạnh ${idx + 1}`,
+    kind: 'cold_room',
+    status: 'active',
+    lat: 10.0 + idx * 0.8,
+    lng: 105.7 + (idx % 3) * 0.5,
+    temperatureC: -18.0,
+    targetTempC: -18.0,
+    organizationId: 'org-many',
+  }));
+
+  const calls = [];
+  const api = {
+    async request(req) {
+      calls.push(req);
+      if (req.url === 'latticeAssets:list') {
+        return { data: { data: tenAssets } };
+      }
+      if (req.url === 'latticeLocations:list') {
+        return { data: { data: [] } };
+      }
+      if (req.url === 'latticeIncidentCases:list') {
+        return { data: { data: [] } };
+      }
+      if (req.url === 'dxosBlocks:twinShadow') {
+        const assetId = Number(req.data?.assetId);
+        return {
+          data: {
+            data: {
+              shadow: {
+                assetId,
+                commandStatus: 'synced',
+                desiredJson: { targetTempC: -18.0, defrostMode: 'auto', fanMode: 'auto', doorLock: 'locked' },
+                reportedJson: { targetTempC: -18.0 },
+              },
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosBlocks:twinSetDesired') {
+        const target = Number(req.data?.desiredPatch?.targetTempC);
+        const delta = Number((target - (-18.0)).toFixed(2));
+        if (Math.abs(delta) > 2.0) {
+          return {
+            data: {
+              data: {
+                gatedByHitl: true,
+                deltaTempC: delta,
+                approvalId: 777,
+                shadow: {
+                  assetId: Number(req.data?.assetId),
+                  commandStatus: 'pending_hitl',
+                  desiredJson: { targetTempC: -18.0 },
+                  reportedJson: { targetTempC: -18.0 },
+                },
+              },
+            },
+          };
+        }
+        return {
+          data: {
+            data: {
+              gatedByHitl: false,
+              commandId: 'cmd-twin-ok-1',
+              downlinkDispatched: true,
+              shadow: {
+                assetId: Number(req.data?.assetId),
+                commandStatus: 'dispatched',
+                desiredJson: { ...req.data?.desiredPatch },
+                reportedJson: { targetTempC: -18.0 },
+              },
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  // Mock MapLibre GL JS instance to verify cluster: true, setData(), click selection, and tile error -> offline WGS84 fallback
+  const mapSources = new Map();
+  const mapLayers = [];
+  const mapListeners = new Map();
+  const setStyleCalls = [];
+  const setDataCalls = [];
+  const mockMapInstance = {
+    addSource(id, spec) {
+      const src = {
+        ...spec,
+        setData(nextData) {
+          src.data = nextData;
+          setDataCalls.push({ id, data: nextData });
+        },
+        getClusterExpansionZoom(_cid, cb) { cb(null, 8); },
+      };
+      mapSources.set(id, src);
+    },
+    getSource(id) { return mapSources.get(id) || null; },
+    addLayer(layer) { mapLayers.push(layer); },
+    getLayer(id) { return mapLayers.find((l) => l.id === id) || null; },
+    setStyle(style) {
+      setStyleCalls.push(style);
+      mapSources.clear();
+      mapLayers.length = 0;
+      for (const fn of mapListeners.get('style.load') || []) fn({});
+    },
+    on(eventName, layerOrFn, maybeFn) {
+      const key = typeof layerOrFn === 'string' ? `${eventName}:${layerOrFn}` : eventName;
+      const handler = typeof layerOrFn === 'string' ? maybeFn : layerOrFn;
+      if (!mapListeners.has(key)) mapListeners.set(key, []);
+      mapListeners.get(key).push(handler);
+    },
+    getCanvas() { return { style: {} }; },
+    easeTo() {},
+    addControl() {},
+    resize() {},
+    remove() {},
+  };
+  let mapInitOptions = null;
+  const mockMapLibre = {
+    Map: class MockMap {
+      constructor(opts) {
+        mapInitOptions = opts;
+        Object.assign(this, mockMapInstance);
+      }
+    },
+    NavigationControl: class MockNavControl {},
+    setWorkerUrl() {},
+  };
+
+  const View = createWebGisBlockView({ useAPIClient: () => api }, React, {}, {});
+  let tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+
+  // 1. All 10 assets fetched twinShadow (no 6-asset cap!) and all 10 features rendered
+  const twinShadowCalls = calls.filter((c) => c.url === 'dxosBlocks:twinShadow');
+  assert.equal(twinShadowCalls.length, 10, 'Must fetch twinShadow for all 10 assets without 6-asset truncation');
+
+  // Attach mock DOM container so MapLibre initializes
+  const mapHolderNode = findByTestId(tree, 'dxos-webgis-maplibre-canvas');
+  assert.ok(mapHolderNode, 'Must render MapLibre container when maplibreOverride is provided');
+  if (typeof mapHolderNode.props.ref === 'function') {
+    mapHolderNode.props.ref({ nodeType: 1 });
+  }
+  for (const fn of mapListeners.get('load') || []) fn({});
+  tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+
+  assert.ok(mapInitOptions);
+  const assetsSource = mapSources.get('dxos-assets');
+  assert.ok(assetsSource, 'MapLibre must register dxos-assets GeoJSON source');
+  assert.equal(assetsSource.cluster, true, 'MapLibre dxos-assets source must enable native cluster: true');
+  assert.equal(assetsSource.data.features.length, 10, 'GeoJSON FeatureCollection must contain all 10 asset features');
+  assert.ok(mapSources.get('dxos-corridors'), 'MapLibre must register dxos-corridors LineString source');
+  assert.ok(setDataCalls.length >= 1 || assetsSource.data.features.length === 10);
+
+  // 2. Simulate MapLibre tile fetch error -> degrades cleanly to offline WGS84 vector style
+  for (const fn of mapListeners.get('error') || []) {
+    fn({ error: new Error('Failed to fetch tile'), sourceId: 'osm-raster' });
+  }
+  tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+  assert.ok(setStyleCalls.length >= 1, 'MapLibre tile error must trigger offline WGS84 vector fallback style');
+  assert.equal(/https?:\/\//i.test(JSON.stringify(setStyleCalls[0])), false);
+
+  // 3. Simulate marker click on unclustered point -> opens Desktop Digital Twin Control Drawer
+  const clickHandlers = mapListeners.get('click:dxos-unclustered-point') || [];
+  assert.ok(clickHandlers.length >= 1);
+  clickHandlers[0]({ features: [{ properties: { id: 'asset-201' } }] });
+  tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+
+  const drawer = findByTestId(tree, 'dxos-webgis-twin-drawer');
+  assert.ok(drawer, 'Clicking marker must open Desktop Digital Twin Control Drawer');
+
+  // 4. Small delta (-18 -> -19.0) calls dxosBlocks:twinSetDesired without HITL gate
+  const tempInput = findByTestId(tree, 'dxos-twin-target-temp-input');
+  tempInput.props.onChange({ target: { value: '-19' } });
+  tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+  await findByTestId(tree, 'dxos-twin-submit-btn').props.onClick();
+  tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+  const setDesiredSmall = calls.find((c) => c.url === 'dxosBlocks:twinSetDesired');
+  assert.ok(setDesiredSmall);
+  assert.equal(setDesiredSmall.data.assetId, 201);
+  assert.equal(setDesiredSmall.data.organizationId, 'org-many');
+  assert.equal(setDesiredSmall.data.desiredPatch.targetTempC, -19);
+  assert.ok(textOf(findByTestId(tree, 'dxos-twin-feedback')).includes('dispatched') || textOf(findByTestId(tree, 'dxos-twin-feedback')).includes('cmd-twin-ok-1'));
+
+  // 5. Large delta (-18 -> -12.0, |delta| > 2.0C) displays HITL warning & pending_hitl approval feedback
+  findByTestId(tree, 'dxos-twin-target-temp-input').props.onChange({ target: { value: '-12' } });
+  tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+  assert.ok(findByTestId(tree, 'dxos-twin-hitl-warning'), 'Large setpoint delta (>2.0C) must show HITL warning');
+  await findByTestId(tree, 'dxos-twin-submit-btn').props.onClick();
+  tree = render(View, {
+    model: { props: { title: 'WebGIS > 6 Assets', showTwinOverlay: true } },
+    liveConfig: { maplibreOverride: mockMapLibre },
+  });
+  const fbText = textOf(findByTestId(tree, 'dxos-twin-feedback'));
+  assert.ok(fbText.includes('HITL') && fbText.includes('777'), `Expected HITL approval feedback with ID 777, got: ${fbText}`);
+  unmount();
+});
+
+test('Task 14b: chatter-panel isolates only sanitized voucher HTML for clean printing without allow-scripts or full-page pollution', async () => {
+  const { createVoucherLifecycleBar } = require(path.join(PLUGIN_ROOT, 'src/client/chatter-panel.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  const api = {
+    async request(req) {
+      if (req.url === 'latticeVoucher:lineage') {
+        return { data: { data: { items: [{ id: 12, code: 'ORD-12', status: 'approved', version: 1 }] } } };
+      }
+      if (req.url === 'dxosWms:printVoucher') {
+        return {
+          data: {
+            data: {
+              documentType: 'epod',
+              html: '<!doctype html><html><head><style>.hdr{color:#0f172a}</style></head><body><div class="hdr">VOUCHER-ORD-12</div><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1z"/></svg><script>window.__xss=1</script></body></html>',
+              htmlSha256: 'hash12',
+            },
+          },
+        };
+      }
+      return { data: { data: {} } };
+    },
+  };
+
+  const Bar = createVoucherLifecycleBar({ useAPIClient: () => api }, React, {});
+  let tree = render(Bar, { targetCollection: 'latticeOrders', targetRecordId: 12 });
+  await findByTestId(tree, 'dxos-workbench-print-voucher-btn').props.onClick();
+  tree = render(Bar, { targetCollection: 'latticeOrders', targetRecordId: 12 });
+
+  const printBtn = findByTestId(tree, 'dxos-workbench-print-browser-btn');
+  assert.ok(printBtn);
+
+  const origDoc = global.document;
+  const origWin = global.window;
+  const origDomParser = global.DOMParser;
+  const appended = [];
+  const removed = [];
+  const winEvents = new Map();
+  let printCount = 0;
+
+  try {
+    const makeEl = (tag) => ({
+      tagName: String(tag).toUpperCase(),
+      id: '',
+      attributes: [],
+      style: {},
+      children: [],
+      textContent: '',
+      setAttribute(k, v) {
+        if (k === 'id') this.id = v;
+        this.attributes.push({ name: k, value: v });
+      },
+      appendChild(child) { this.children.push(child); return child; },
+      remove() { removed.push(this); },
+    });
+
+    global.DOMParser = class MockDomParser {
+      parseFromString(htmlStr) {
+        // Minimal safe DOM representation with style, div, svg, and script node to verify script stripping
+        const scriptNode = { nodeType: 1, tagName: 'SCRIPT', attributes: [], childNodes: [], textContent: 'window.__xss=1' };
+        const pathNode = { nodeType: 1, tagName: 'PATH', namespaceURI: 'http://www.w3.org/2000/svg', attributes: [{ name: 'd', value: 'M0 0h1v1z' }], childNodes: [] };
+        const svgNode = { nodeType: 1, tagName: 'SVG', namespaceURI: 'http://www.w3.org/2000/svg', attributes: [{ name: 'xmlns', value: 'http://www.w3.org/2000/svg' }], childNodes: [pathNode] };
+        const divNode = { nodeType: 1, tagName: 'DIV', attributes: [{ name: 'onclick', value: 'alert(1)' }, { name: 'class', value: 'hdr' }], childNodes: [{ nodeType: 3, textContent: 'VOUCHER-ORD-12' }] };
+        const styleNode = { nodeType: 1, tagName: 'STYLE', attributes: [], childNodes: [{ nodeType: 3, textContent: '.hdr{color:#0f172a}' }] };
+        return {
+          head: { childNodes: [styleNode] },
+          body: { childNodes: [divNode, svgNode, scriptNode] },
+        };
+      }
+    };
+
+    global.document = {
+      head: { appendChild(el) { appended.push(el); } },
+      body: {
+        appendChild(el) { appended.push(el); },
+        removeChild(el) { removed.push(el); },
+      },
+      getElementById(id) { return appended.find((n) => n.id === id) || null; },
+      querySelector() { return null; },
+      createElement: makeEl,
+      createElementNS: (_ns, tag) => makeEl(tag),
+      createTextNode: (t) => ({ nodeType: 3, textContent: t }),
+    };
+    global.window = {
+      addEventListener(ev, fn) { winEvents.set(ev, fn); },
+      removeEventListener(ev) { winEvents.delete(ev); },
+      print() { printCount += 1; },
+    };
+
+    printBtn.props.onClick();
+    assert.equal(printCount, 1);
+    const printRoot = appended.find((n) => n.id === 'dxos-isolated-print-root');
+    const printStyle = appended.find((n) => n.id === 'dxos-isolated-print-style');
+    assert.ok(printRoot, 'Must mount isolated print root container');
+    assert.ok(printStyle, 'Must inject @media print stylesheet hiding non-voucher UI');
+    assert.ok(printStyle.textContent.includes('@media print'));
+    const serializedRoot = JSON.stringify(printRoot);
+    assert.ok(serializedRoot.includes('VOUCHER-ORD-12'));
+    assert.equal(serializedRoot.includes('__xss'), false, 'Isolated print must strip <script> tags');
+    assert.equal(serializedRoot.includes('onclick'), false, 'Isolated print must strip inline on* attributes');
+
+    // Trigger afterprint cleanup
+    winEvents.get('afterprint')?.();
+    assert.ok(removed.includes(printRoot));
+    assert.ok(removed.includes(printStyle));
+  } finally {
+    global.document = origDoc;
+    global.window = origWin;
+    if (origDomParser === undefined) delete global.DOMParser;
+    else global.DOMParser = origDomParser;
+    unmount();
+  }
+});
+
+test('Task 15b: DxosWmsOpsBlockModel registers cleanly and executes FEFO, issueStock, holdLotByMkt, and 2-Phase Bulk Import Wizard', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { createWmsOpsBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/wms-ops-block.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const calls = [];
+  const api = {
+    async request(req) {
+      calls.push(req);
+      if (req.url === 'dxosWms:lots') {
+        return {
+          data: {
+            data: {
+              organizationId: 'org-a',
+              items: [
+                { id: 1, lotCode: 'LOT-CT-01', sku: 'VAC-01', productName: 'Vaccine Cần Thơ', qtyOnHand: 40, qtyReserved: 5, qtyAvailable: 35, unit: 'VIAL', expiryDate: '2027-06-01T00:00:00Z', mktCelsius: 4.2, status: 'available' },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosWms:allocateFefo') {
+        return { data: { data: { allocatedTotal: 10, shortfall: 0, allocations: [{ lotCode: 'LOT-CT-01', qtyAllocated: 10 }] } } };
+      }
+      if (req.url === 'dxosWms:issueStock') {
+        return { data: { data: { issuedQty: 5, lot: { lotCode: 'LOT-CT-01', qtyOnHand: 35, status: 'available' } } } };
+      }
+      if (req.url === 'dxosWms:holdLotByMkt') {
+        return { data: { data: { held: true, lotCode: 'LOT-CT-01', mktCelsius: 12.4, thresholdCelsius: 8, lotStatus: 'hold_mkt' } } };
+      }
+      if (req.url === 'dxosBlocks:bulkImportDryRun') {
+        return {
+          data: {
+            data: {
+              collection: req.data.collection,
+              totalRows: 2,
+              validCount: 2,
+              invalidCount: 0,
+              payloadSha256: 'sha256_batch_ok',
+              previewToken: 'ldx_imp_preview_tok_123',
+              sampleValidRows: [{ lotCode: 'LOT-IMP-1', sku: 'VAC-02' }],
+              invalidRows: [],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosBlocks:bulkImportCommit') {
+        return {
+          data: {
+            data: {
+              committedCount: 2,
+              skippedDuplicates: 0,
+              collection: req.data.collection,
+              payloadSha256: 'sha256_batch_ok',
+            },
+          },
+        };
+      }
+      return { data: { data: {} } };
+    },
+  };
+
+  const registered = {};
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => api, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels(m) { Object.assign(registered, m); } },
+    {},
+  );
+  assert.ok(models.DxosWmsOpsBlockModel && registered.DxosWmsOpsBlockModel);
+
+  const View = createWmsOpsBlockView({ useAPIClient: () => api }, React, {}, {});
+  let tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+
+  assert.ok(findByTestId(tree, 'dxos-wms-ops-block'));
+  assert.ok(textOf(tree).includes('LOT-CT-01'));
+
+  // 1. FEFO allocation
+  findByTestId(tree, 'dxos-wms-ops-fefo-sku').props.onChange({ target: { value: 'VAC-01' } });
+  findByTestId(tree, 'dxos-wms-ops-fefo-qty').props.onChange({ target: { value: '10' } });
+  findByTestId(tree, 'dxos-wms-ops-fefo-order').props.onChange({ target: { value: 'ORD-10' } });
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  await findByTestId(tree, 'dxos-wms-ops-fefo-form').props.onSubmit({ preventDefault() {} });
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  assert.ok(calls.some((c) => c.url === 'dxosWms:allocateFefo' && c.data.sku === 'VAC-01' && c.data.quantity === 10));
+  assert.ok(textOf(findByTestId(tree, 'dxos-wms-ops-fefo-result')).includes('LOT-CT-01:10'));
+
+  // 2. issueStock
+  findByTestId(tree, 'dxos-wms-ops-issue-lot').props.onChange({ target: { value: 'LOT-CT-01' } });
+  findByTestId(tree, 'dxos-wms-ops-issue-qty').props.onChange({ target: { value: '5' } });
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  await findByTestId(tree, 'dxos-wms-ops-issue-form').props.onSubmit({ preventDefault() {} });
+  assert.ok(calls.some((c) => c.url === 'dxosWms:issueStock' && c.data.lotCode === 'LOT-CT-01' && c.data.quantity === 5));
+
+  // 3. holdLotByMkt
+  findByTestId(tree, 'dxos-wms-ops-mkt-lot').props.onChange({ target: { value: 'LOT-CT-01' } });
+  findByTestId(tree, 'dxos-wms-ops-mkt-samples').props.onChange({ target: { value: '2.5, 14.0' } });
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  await findByTestId(tree, 'dxos-wms-ops-mkt-form').props.onSubmit({ preventDefault() {} });
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  assert.ok(calls.some((c) => c.url === 'dxosWms:holdLotByMkt' && c.data.lotCode === 'LOT-CT-01'));
+  assert.ok(textOf(findByTestId(tree, 'dxos-wms-ops-mkt-result')).includes('hold_mkt'));
+
+  // 4. 2-Phase Bulk Import Wizard: switch tab -> Dry-Run -> Commit (single-use token cleared after commit)
+  findByTestId(tree, 'dxos-wms-ops-tab-import').props.onClick();
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  findByTestId(tree, 'dxos-wms-ops-import-content').props.onChange({
+    target: { value: 'lotCode,sku,productName,qtyOnHand,expiryDate\nLOT-IMP-1,VAC-02,Vac,10,2027-12-01' },
+  });
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  await findByTestId(tree, 'dxos-wms-ops-import-dryrun-btn').props.onClick();
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  assert.ok(calls.some((c) => c.url === 'dxosBlocks:bulkImportDryRun' && c.data.collection === 'latticeStockLots'));
+  assert.ok(findByTestId(tree, 'dxos-wms-ops-import-preview'));
+
+  await findByTestId(tree, 'dxos-wms-ops-import-commit-btn').props.onClick();
+  tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
+  assert.ok(calls.some((c) => c.url === 'dxosBlocks:bulkImportCommit' && c.data.previewToken === 'ldx_imp_preview_tok_123'));
+  assert.ok(textOf(findByTestId(tree, 'dxos-wms-ops-import-commit-result')).includes('2'));
+  assert.equal(findByTestId(tree, 'dxos-wms-ops-import-commit-btn').props.disabled, true, 'Single-use previewToken must be cleared after commit');
+  unmount();
+});
+
+test('Task 16: creative-studio-block displays real meta.count for count widgets while keeping evaluateQueryStats backward-compatible', async () => {
+  const {
+    evaluateQueryStats,
+    resolveWidgetValue,
+    createCreativeStudioView,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/creative-studio-block.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  // Direct unit compatibility on evaluateQueryStats & resolveWidgetValue
+  assert.equal(evaluateQueryStats([{ id: 1 }, { id: 2 }], { metric: 'count' }), 2);
+  assert.equal(resolveWidgetValue({ queryId: 'q1', metric: 'count' }, { q1: [{ id: 1 }, { id: 2 }] }), 2);
+  assert.equal(resolveWidgetValue({ queryId: 'q1', metric: 'count' }, { q1: [{ id: 1 }, { id: 2 }] }, { q1: 145 }), 145);
+
+  const api = {
+    async request(req) {
+      if (req.url === 'latticeOrders:list') {
+        const rows = Array.from({ length: 20 }, (_, i) => ({ id: i + 1, status: i % 2 === 0 ? 'draft' : 'submitted' }));
+        return { data: { data: rows, meta: { count: 145 } } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const View = createCreativeStudioView({ useAPIClient: () => api }, React, {}, {});
+  const blueprintJson = JSON.stringify({
+    title: 'Báo cáo Tổng hợp',
+    queries: [{ id: 'orders', collection: 'latticeOrders', limit: 20 }],
+    widgets: [
+      { type: 'gauge', title: 'Tổng đơn thực tế', queryId: 'orders', metric: 'count', max: 200, unit: 'đơn' },
+      { type: 'rule-callout', title: 'Cảnh báo tồn đọng', queryId: 'orders', metric: 'count', operator: 'gt', threshold: 100 },
+    ],
+  });
+
+  let tree = render(View, { model: { props: { blueprintJson } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render(View, { model: { props: { blueprintJson } } });
+
+  const dump = textOf(tree);
+  assert.ok(dump.includes('145 đơn'), `Expected real meta.count 145 in gauge widget, got: ${dump}`);
+  assert.ok(dump.includes('Giá trị hiện tại: 145'), `Expected real meta.count 145 in rule-callout widget, got: ${dump}`);
+  assert.equal(dump.includes('20 đơn'), false, 'Must not display capped rows.length (20) when meta.count is 145');
+  unmount();
+});
+
+test('Task 16: DxosKanbanScheduleBlockView renders unscheduled bucket in schedule mode with stage, SLA, and click handler', async () => {
+  const { createKanbanScheduleBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/kanban-schedule-block.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  const todayIso = new Date().toISOString();
+  let mode = 'with-unscheduled';
+  const api = {
+    async request(req) {
+      if (req.url === 'latticeOrders:list') {
+        if (mode === 'all-scheduled') {
+          return {
+            data: {
+              data: [
+                { id: 10, code: 'ORD-SCHED-10', name: 'Đơn đã có lịch', status: 'submitted', submittedAt: todayIso },
+              ],
+            },
+          };
+        }
+        return {
+          data: {
+            data: [
+              { id: 1, code: 'ORD-SCHED-1', name: 'Đơn đúng tuần', status: 'submitted', submittedAt: todayIso },
+              { id: 2, code: 'ORD-UNSCHED-2', name: 'Đơn chưa có ngày hẹn', status: 'draft', slaStatus: 'breached' },
+            ],
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const clicked = [];
+  const View = createKanbanScheduleBlockView({ useAPIClient: () => api }, React, {}, {});
+  let tree = render(View, {
+    model: {
+      props: {
+        collection: 'latticeOrders',
+        viewMode: 'schedule',
+        onRecordClick: (rec, col) => clicked.push({ id: rec.id, col }),
+      },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render(View, {
+    model: {
+      props: {
+        collection: 'latticeOrders',
+        viewMode: 'schedule',
+        onRecordClick: (rec, col) => clicked.push({ id: rec.id, col }),
+      },
+    },
+  });
+
+  const unschedSection = findByTestId(tree, 'dxos-schedule-unscheduled');
+  assert.ok(unschedSection, 'Schedule view must render dxos-schedule-unscheduled when unscheduled records exist');
+  const unschedText = textOf(unschedSection);
+  assert.ok(unschedText.includes('ORD-UNSCHED-2'));
+  assert.ok(unschedText.includes('Đơn chưa có ngày hẹn'));
+  assert.ok(unschedText.includes('draft'));
+  assert.ok(unschedText.includes('SLA Quá hạn'));
+
+  const unschedItem = findByTestId(tree, 'dxos-schedule-unscheduled-item-2');
+  assert.ok(unschedItem);
+  unschedItem.props.onClick();
+  assert.deepEqual(clicked, [{ id: 2, col: 'latticeOrders' }]);
+
+  // When all records have dates, unscheduled section is hidden
+  mode = 'all-scheduled';
+  const refreshHooks = createMiniHooks();
+  const CleanView = createKanbanScheduleBlockView({ useAPIClient: () => api }, refreshHooks.React, {}, {});
+  let cleanTree = refreshHooks.render(CleanView, { model: { props: { collection: 'latticeOrders', viewMode: 'schedule' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  cleanTree = refreshHooks.render(CleanView, { model: { props: { collection: 'latticeOrders', viewMode: 'schedule' } } });
+  assert.equal(findByTestId(cleanTree, 'dxos-schedule-unscheduled'), null);
+  refreshHooks.unmount();
+  unmount();
+});

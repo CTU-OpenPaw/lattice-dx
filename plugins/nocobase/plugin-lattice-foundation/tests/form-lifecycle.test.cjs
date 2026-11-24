@@ -18,7 +18,7 @@ function hooks(){
     useRef(value){const i=index++;if(!slots[i])slots[i]={current:value};return slots[i];},
     useMemo(fn,deps){const i=index++;if(!slots[i]||!same(slots[i].deps,deps))slots[i]={value:fn(),deps};return slots[i].value;},
     useEffect(fn,deps){const i=index++;if(!slots[i]||!same(slots[i].deps,deps)){queue.push(()=>{slots[i]?.cleanup?.();slots[i]={deps,cleanup:fn()}})}}};
-  return {react,slots,render(fn){index=0;const result=fn();const effects=queue;queue=[];effects.forEach(run=>run());return result;}};
+  return {react,slots,render(fn){index=0;const result=fn();const effects=queue;queue=[];effects.forEach(run=>run());return result;},cleanup(){for(const s of slots){if(typeof s?.cleanup==='function'){s.cleanup();s.cleanup=null;}}}};
 }
 function find(node,predicate){if(!node||typeof node!=='object')return null;if(predicate(node))return node;for(const child of node.children||[]){const result=find(child,predicate);if(result)return result;}return null;}
 test('form ignores delayed write results and callbacks after disconnect',async()=>{
@@ -45,4 +45,23 @@ test('native configured block clears its connection at declared expiry',async t=
   const props={manifestId:'purchasing',blockId:'create-request',expectedType:'form'};
   env.render(()=>ConfiguredBlock(props));await new Promise(setImmediate);env.render(()=>ConfiguredBlock(props));
   assert.equal(env.slots[1].value.connected,true);t.mock.timers.tick(1001);assert.equal(env.slots[1].value.connected,false);
+});
+test('ConfiguredBlock routes workspace links to /admin/lattice-workspace instead of legacy /lattice/*',async()=>{
+  let connected=false;
+  const host={request:async options=>options.url==='latticeApps:list'?{data:{data:{items:[manifest]}}}:{data:{connected}}};
+  const env=hooks();const {ConfiguredBlock}=createBlockComponents({useAPIClient:()=>host},env.react,{});
+  const props={manifestId:'purchasing',blockId:'create-request',expectedType:'form'};
+  env.render(()=>ConfiguredBlock(props));await new Promise(setImmediate);
+  const disconnectedTree=env.render(()=>ConfiguredBlock(props));
+  const disconnectedLink=find(disconnectedTree,n=>n.type==='a');
+  assert.equal(disconnectedLink.props.href,'/admin/lattice-workspace');
+
+  connected=true;
+  const env2=hooks();const {ConfiguredBlock:ConfiguredConnected}=createBlockComponents({useAPIClient:()=>host},env2.react,{});
+  env2.render(()=>ConfiguredConnected(props));await new Promise(setImmediate);
+  const connectedTree=env2.render(()=>ConfiguredConnected(props));
+  const connectedLink=find(connectedTree,n=>n.type==='a');
+  assert.equal(connectedLink.props.href,'/admin/lattice-workspace');
+  env.cleanup();
+  env2.cleanup();
 });

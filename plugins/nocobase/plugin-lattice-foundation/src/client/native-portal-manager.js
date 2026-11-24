@@ -9,6 +9,7 @@
 'use strict';
 
 const { createMultiPortalSettingsPage } = require('./native-portal-settings');
+const { createTopbarNotificationBell } = require('./notification-bell');
 
 function toPortalSlug(title) {
   return String(title || '')
@@ -265,7 +266,15 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     });
   }
 
+  const useLoc = typeof router?.useLocation === 'function' ? router.useLocation : null;
+  const TopbarBellCore = createTopbarNotificationBell(client, React, antd, app);
+  function TopbarNotificationBell({ model } = {}) {
+    const loc = useLoc ? useLoc() : null;
+    return TopbarBellCore ? h(TopbarBellCore, { model, variant: 'topbar', pathname: loc?.pathname }) : null;
+  }
+
   let hasTopbarSwitcher = false;
+  let hasTopbarNotificationBell = false;
   const TopbarBase = clientV2?.TopbarActionModel || app?.flowEngine?.getModelClass?.('TopbarActionModel');
   const AdminBase = clientV2?.AdminLayoutModel || app?.flowEngine?.getModelClass?.('AdminLayoutModel');
   if (typeof TopbarBase === 'function' && TopbarBase !== AdminBase && typeof app?.flowEngine?.registerModels === 'function') {
@@ -273,7 +282,16 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
       constructor(...args) { super(...args); this.sort = -50; this.actionId = 'portal-switcher'; this.testId = 'portal-switcher-button'; }
       render() { return h(TopbarPortalSwitcher, { model: this }); }
     }
-    app.flowEngine.registerModels({ PortalSwitcherTopbarActionModel });
+    const topbarModels = { PortalSwitcherTopbarActionModel };
+    if (TopbarBellCore) {
+      class NotificationBellTopbarActionModel extends TopbarBase {
+        constructor(...args) { super(...args); this.sort = -40; this.actionId = 'notification-bell'; this.testId = 'ldx-notification-bell-btn'; }
+        render() { return h(TopbarNotificationBell, { model: this }); }
+      }
+      topbarModels.NotificationBellTopbarActionModel = NotificationBellTopbarActionModel;
+      hasTopbarNotificationBell = true;
+    }
+    app.flowEngine.registerModels(topbarModels);
     hasTopbarSwitcher = true;
   }
   const existingSwitcherPanel = app?.flowEngine?.getModelClass?.('AppSwitcherActionPanelModel');
@@ -284,13 +302,16 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     app.use(client.PinnedPluginListProvider, {
       items: {
         ldxPortalSwitcher: { order: -50, component: TopbarPortalSwitcher, pin: true, snippet: '*' },
+        ...(TopbarBellCore ? { ldxNotificationBell: { order: -40, component: TopbarNotificationBell, pin: true, snippet: '*' } } : {}),
       },
     });
     hasTopbarSwitcher = true;
+    if (TopbarBellCore) hasTopbarNotificationBell = true;
   }
 
   return {
-    MultiPortalSettingsPage, PortalBar, TopbarPortalSwitcher, hasTopbarSwitcher, preloadPortals,
+    MultiPortalSettingsPage, PortalBar, TopbarPortalSwitcher, hasTopbarSwitcher,
+    TopbarNotificationBell, hasTopbarNotificationBell, preloadPortals,
     navigateToPortal, requestBuilderMode, consumeBuilderIntent, setPortals: syncPortals, upsertPortal,
     ensureLayoutModelsReady, setPermissions: allow => { portalsRef.allowConfigUI = Boolean(allow); },
     ensureDynamicLayoutsRegistered: items => ensureDynamicLayoutsRegistered(app, items),

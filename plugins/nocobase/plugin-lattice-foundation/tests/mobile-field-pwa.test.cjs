@@ -805,6 +805,7 @@ test('client-v2 MobileFieldPwaPage renders field controls, handles QR/GPS/Canvas
   for (const rel of [
     'plugins/nocobase/plugin-lattice-foundation/src/server/mobile-pwa.js',
     'plugins/nocobase/plugin-lattice-foundation/src/server/observability.js',
+    'plugins/nocobase/plugin-lattice-foundation/src/client-v2/mobile-offline-db.js',
     'plugins/nocobase/plugin-lattice-foundation/src/client-v2/mobile-field-pwa.js',
     'plugins/nocobase/plugin-lattice-foundation/src/client-v2/index.js',
     'plugins/nocobase/plugin-lattice-foundation/tests/mobile-field-pwa.test.cjs',
@@ -1289,5 +1290,700 @@ test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota h
     Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
     Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
     Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+  }
+});
+
+function createMockIndexedDb({ failOpen = false, quotaExceededOnPut = false } = {}) {
+  const databases = new Map();
+  let lastDbHandle = null;
+
+  function makeRequest(executor) {
+    const req = { result: undefined, error: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null };
+    queueMicrotask(() => executor(req));
+    return req;
+  }
+
+  const factory = {
+    _databases: databases,
+    _getLastDb: () => lastDbHandle,
+    open(name, version = 1) {
+      const req = { result: undefined, error: null, onsuccess: null, onerror: null, onupgradeneeded: null, onblocked: null };
+      queueMicrotask(() => {
+        if (failOpen) {
+          const err = Object.assign(new Error('IndexedDB disabled in private mode'), { name: 'InvalidStateError' });
+          req.error = err;
+          req.onerror?.({ target: req });
+          return;
+        }
+        let dbState = databases.get(name);
+        const needsUpgrade = !dbState || dbState.version < version;
+        if (!dbState) {
+          dbState = { name, version, stores: new Map() };
+          databases.set(name, dbState);
+        } else {
+          dbState.version = version;
+        }
+        const dbHandle = {
+          name,
+          version,
+          closed: false,
+          objectStoreNames: {
+            contains: (storeName) => dbState.stores.has(storeName),
+          },
+          createObjectStore(storeName, opts = {}) {
+            if (!dbState.stores.has(storeName)) {
+              dbState.stores.set(storeName, { keyPath: opts.keyPath || 'id', records: new Map(), indexes: new Set() });
+            }
+            const storeMeta = dbState.stores.get(storeName);
+            return {
+              createIndex(idxName) { storeMeta.indexes.add(idxName); },
+            };
+          },
+          close() { dbHandle.closed = true; },
+          transaction(storeNames) {
+            const list = Array.isArray(storeNames) ? storeNames : [storeNames];
+            const tx = { oncomplete: null, onerror: null, onabort: null, error: null };
+            let pendingOps = 0;
+            let txFailed = false;
+            const maybeComplete = () => {
+              if (!txFailed && pendingOps === 0) {
+                queueMicrotask(() => tx.oncomplete?.({ target: tx }));
+              }
+            };
+            tx.objectStore = (storeName) => {
+              if (!list.includes(storeName) || !dbState.stores.has(storeName)) {
+                throw new Error(`Missing objectStore ${storeName}`);
+              }
+              const storeMeta = dbState.stores.get(storeName);
+              return {
+                getAll() {
+                  pendingOps += 1;
+                  return makeRequest((r) => {
+                    r.result = Array.from(storeMeta.records.values()).map((v) => JSON.parse(JSON.stringify(v)));
+                    r.onsuccess?.({ target: r });
+                    pendingOps -= 1;
+                    maybeComplete();
+                  });
+                },
+                get(key) {
+                  pendingOps += 1;
+                  return makeRequest((r) => {
+                    const hit = storeMeta.records.get(key);
+                    r.result = hit ? JSON.parse(JSON.stringify(hit)) : undefined;
+                    r.onsuccess?.({ target: r });
+                    pendingOps -= 1;
+                    maybeComplete();
+                  });
+                },
+                put(value) {
+                  pendingOps += 1;
+                  return makeRequest((r) => {
+                    if (quotaExceededOnPut) {
+                      const err = Object.assign(new Error('DOM Exception 22'), { name: 'QuotaExceededError', code: 22 });
+                      r.error = err;
+                      tx.error = err;
+                      txFailed = true;
+                      r.onerror?.({ target: r });
+                      tx.onerror?.({ target: tx });
+                      return;
+                    }
+                    const k = value[storeMeta.keyPath];
+                    storeMeta.records.set(k, JSON.parse(JSON.stringify(value)));
+                    r.result = k;
+                    r.onsuccess?.({ target: r });
+                    pendingOps -= 1;
+                    maybeComplete();
+                  });
+                },
+                delete(key) {
+                  pendingOps += 1;
+                  return makeRequest((r) => {
+                    storeMeta.records.delete(key);
+                    r.result = undefined;
+                    r.onsuccess?.({ target: r });
+                    pendingOps -= 1;
+                    maybeComplete();
+                  });
+                },
+              };
+            };
+            return tx;
+          },
+        };
+        lastDbHandle = dbHandle;
+        req.result = dbHandle;
+        if (needsUpgrade && typeof req.onupgradeneeded === 'function') {
+          req.onupgradeneeded({ target: req, oldVersion: 0, newVersion: version });
+        }
+        req.onsuccess?.({ target: req });
+      });
+      return req;
+    },
+  };
+  return factory;
+}
+
+test('Task 17 (mobile-offline-db): IndexedDB outbox CRUD, status transitions, quota handling & localStorage/memory fallback', async () => {
+  const {
+    OUTBOX_DB_NAME,
+    OUTBOX_STORE_NAME,
+    MAX_OUTBOX_ITEMS,
+    enqueueOutboxItem,
+    listOutboxItems,
+    removeOutboxItem,
+    updateOutboxStatus,
+    resetMemoryOutboxStore,
+  } = require('../src/client-v2/mobile-offline-db');
+
+  assert.equal(OUTBOX_DB_NAME, 'latticedx-mobile-outbox');
+  assert.equal(OUTBOX_STORE_NAME, 'outbox');
+  assert.equal(MAX_OUTBOX_ITEMS, 50);
+
+  // 1. IndexedDB path when globalThis.indexedDB is present
+  const prevIdb = globalThis.indexedDB;
+  const mockIdb = createMockIndexedDb();
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: mockIdb });
+  try {
+    const item1 = await enqueueOutboxItem({
+      actionType: 'wms.epodCapture',
+      payload: {
+        orderCode: 'ORD-IDB-1',
+        recipientName: 'Tran Thi B',
+        deliveredQty: 4,
+        gpsLat: 10.03,
+        gpsLng: 105.78,
+        signatureDataUrl: 'data:image/png;base64,AAAA',
+        evidencePhotoDataUrl: 'data:image/jpeg;base64,PHOTO_DATA_1',
+      },
+    });
+    assert.ok(item1.id.startsWith('mq-'));
+    assert.equal(item1.status, 'pending');
+    assert.equal(item1.endpoint, 'dxosWms:epodCapture');
+    assert.equal(item1.payload.evidencePhotoDataUrl, 'data:image/jpeg;base64,PHOTO_DATA_1');
+
+    const item2 = await enqueueOutboxItem({
+      actionType: 'iot.twinSetDesired',
+      payload: { assetId: 99, desiredPatch: { targetTempC: -18 } },
+    });
+    const list1 = await listOutboxItems();
+    assert.equal(list1.length, 2);
+    assert.equal(list1[0].id, item1.id);
+    assert.equal(list1[1].id, item2.id);
+
+    const updated = await updateOutboxStatus(item1.id, {
+      status: 'failed',
+      attempts: 2,
+      lastError: '503 Service Unavailable',
+      httpStatus: 503,
+    });
+    assert.equal(updated.status, 'failed');
+    assert.equal(updated.attempts, 2);
+    assert.equal(updated.lastError, '503 Service Unavailable');
+    assert.equal(updated.httpStatus, 503);
+
+    const failedOnly = await listOutboxItems({ status: 'failed' });
+    assert.equal(failedOnly.length, 1);
+    assert.equal(failedOnly[0].id, item1.id);
+
+    const remaining = await removeOutboxItem(item1.id);
+    assert.equal(remaining.length, 1);
+    assert.equal(remaining[0].id, item2.id);
+
+    // Rejects unsupported action & prototype pollution
+    await assert.rejects(
+      () => enqueueOutboxItem({ actionType: 'dxosApiKeys:issue', payload: {} }),
+      { code: 'UNSUPPORTED_OFFLINE_ACTION' },
+    );
+    await assert.rejects(
+      () => enqueueOutboxItem({ actionType: 'wms.epodCapture', payload: null }),
+      { code: 'INVALID_OFFLINE_PAYLOAD' },
+    );
+  } finally {
+    Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: prevIdb });
+  }
+
+  // 2. IndexedDB QuotaExceededError propagates cleanly as OFFLINE_STORAGE_QUOTA_EXCEEDED
+  const quotaIdb = createMockIndexedDb({ quotaExceededOnPut: true });
+  await assert.rejects(
+    () => enqueueOutboxItem({ actionType: 'iot.twinSetDesired', payload: { assetId: 1, desiredPatch: { targetTempC: 2 } } }, { indexedDB: quotaIdb }),
+    { code: 'OFFLINE_STORAGE_QUOTA_EXCEEDED' },
+  );
+
+  // 3. Fallback to localStorage when IndexedDB open fails (e.g. private browsing)
+  const failingIdb = createMockIndexedDb({ failOpen: true });
+  const fallbackStorage = makeMemoryStorage();
+  const lsItem = await enqueueOutboxItem(
+    { actionType: 'wms.epodCapture', payload: { orderCode: 'ORD-LS-1', recipientName: 'Anh C', gpsLat: 10, gpsLng: 105, signatureDataUrl: 'data:image/png;base64,AAA' } },
+    { indexedDB: failingIdb, storage: fallbackStorage },
+  );
+  assert.equal((await listOutboxItems({ indexedDB: failingIdb, storage: fallbackStorage })).length, 1);
+  await updateOutboxStatus(lsItem.id, 'failed', { indexedDB: failingIdb, storage: fallbackStorage });
+  assert.equal((await listOutboxItems({ indexedDB: failingIdb, storage: fallbackStorage }))[0].status, 'failed');
+  await removeOutboxItem(lsItem.id, { indexedDB: failingIdb, storage: fallbackStorage });
+  assert.equal((await listOutboxItems({ indexedDB: failingIdb, storage: fallbackStorage })).length, 0);
+
+  // 4. Fallback to in-memory store when both IndexedDB and localStorage are unavailable
+  resetMemoryOutboxStore();
+  const prevWin = global.window;
+  Object.defineProperty(global, 'window', { configurable: true, writable: true, value: undefined });
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: undefined });
+  try {
+    const memItem = await enqueueOutboxItem({
+      actionType: 'iot.twinSetDesired',
+      payload: { assetId: 7, desiredPatch: { targetTempC: -20 } },
+    });
+    assert.equal((await listOutboxItems()).length, 1);
+    await updateOutboxStatus(memItem.id, { status: 'failed', lastError: 'Offline' });
+    assert.equal((await listOutboxItems())[0].status, 'failed');
+    await removeOutboxItem(memItem.id);
+    assert.equal((await listOutboxItems()).length, 0);
+  } finally {
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevWin });
+    Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: prevIdb });
+  }
+});
+
+test('Task 17 (ePOD photo capture): attaches evidencePhotoDataUrl in online submit & IndexedDB offline queue', async () => {
+  const { buildEpodPayload, createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+  const { listOutboxItems } = require('../src/client-v2/mobile-offline-db');
+
+  // 1. buildEpodPayload validates & includes evidencePhotoDataUrl
+  const validSig = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB';
+  const validPhoto = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/';
+  const okWithPhoto = buildEpodPayload({
+    orderCode: 'ORD-PHOTO-1',
+    recipientName: 'Le Van Anh',
+    deliveredQty: 5,
+    gpsLat: 10.04,
+    gpsLng: 105.74,
+    signatureDataUrl: validSig,
+    evidencePhotoDataUrl: validPhoto,
+  });
+  assert.equal(okWithPhoto.ok, true);
+  assert.equal(okWithPhoto.payload.evidencePhotoDataUrl, validPhoto);
+
+  const badPhoto = buildEpodPayload({
+    recipientName: 'Le Van Anh',
+    deliveredQty: 5,
+    gpsLat: 10.04,
+    gpsLng: 105.74,
+    signatureDataUrl: validSig,
+    evidencePhotoDataUrl: 'javascript:alert(1)',
+  });
+  assert.equal(badPhoto.ok, false);
+
+  const svgPhoto = buildEpodPayload({
+    recipientName: 'Le Van Anh',
+    deliveredQty: 5,
+    gpsLat: 10.04,
+    gpsLng: 105.74,
+    signatureDataUrl: validSig,
+    evidencePhotoDataUrl: 'data:image/svg+xml;base64,PHN2Zz4=',
+  });
+  assert.equal(svgPhoto.ok, false);
+
+  // 2. UI photo upload + camera snapshot + online/offline persistence into IndexedDB
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+  const mockIdb = createMockIndexedDb();
+  const requests = [];
+  let failNetwork = false;
+  const mockApi = {
+    async request(req) {
+      requests.push(req);
+      if (failNetwork) throw new Error('Network offline');
+      return { data: { epod: { epodUid: 'EPOD-PHOTO-1', trackingCode: 'LDX-TRK-PH1' }, trackingCode: 'LDX-TRK-PH1' } };
+    },
+  };
+
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+    indexedDB: globalThis.indexedDB,
+    FileReader: globalThis.FileReader,
+  };
+
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: mockIdb });
+  Object.defineProperty(globalThis, 'FileReader', {
+    configurable: true,
+    writable: true,
+    value: class FakeFileReader {
+      readAsDataURL(file) {
+        queueMicrotask(() => {
+          this.result = file._mockDataUrl || validPhoto;
+          this.onload?.({ target: this });
+        });
+      }
+    },
+  });
+  Object.defineProperty(global, 'navigator', {
+    configurable: true,
+    value: { onLine: true },
+  });
+  Object.defineProperty(global, 'window', {
+    configurable: true,
+    value: { localStorage: storage, addEventListener() {}, removeEventListener() {} },
+  });
+  Object.defineProperty(global, 'document', {
+    configurable: true,
+    value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } },
+  });
+
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: mockApi });
+    fakeReact._flushEffects();
+
+    // Fill required fields + signature
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-order-input').props.onChange({ target: { value: 'ORD-PHOTO-1' } });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-recipient-input').props.onChange({ target: { value: 'Le Van Anh' } });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-lat-input').props.onChange({ target: { value: '10.04' } });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-lng-input').props.onChange({ target: { value: '105.74' } });
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: mockApi });
+
+    const canvasNode = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-signature-canvas');
+    canvasNode.props.ref.current = {
+      width: 440,
+      height: 160,
+      getBoundingClientRect: () => ({ left: 0, top: 0, width: 440, height: 160 }),
+      getContext: () => ({ beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, clearRect() {} }),
+      toDataURL: () => validSig,
+    };
+    canvasNode.props.onPointerDown({ clientX: 5, clientY: 5, pointerId: 1 });
+    canvasNode.props.onPointerUp({ pointerId: 1 });
+
+    // Attach camera photo via file input
+    const photoInput = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-photo-input');
+    assert.ok(photoInput, 'Photo capture input must be rendered');
+    await photoInput.props.onChange({ target: { files: [{ type: 'image/jpeg', size: 1024, _mockDataUrl: validPhoto }] } });
+    await new Promise((r) => setTimeout(r, 10));
+
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: mockApi });
+    const preview = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-photo-preview');
+    assert.ok(preview, 'Photo preview must be rendered after capture');
+    assert.equal(preview.props.src, validPhoto);
+
+    // Online submit carries evidencePhotoDataUrl
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-epod-submit').props.onClick({ preventDefault() {} });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].data.evidencePhotoDataUrl, validPhoto);
+
+    // Offline submit persists evidencePhotoDataUrl in IndexedDB outbox
+    failNetwork = true;
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-epod-submit').props.onClick({ preventDefault() {} });
+    const idbItems = await listOutboxItems({ indexedDB: mockIdb, storage });
+    assert.equal(idbItems.length, 1);
+    assert.equal(idbItems[0].payload.evidencePhotoDataUrl, validPhoto);
+
+    // Clear photo clears preview
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: mockApi });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-photo-clear').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: mockApi });
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-photo-preview'), null);
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: prevGlobals.indexedDB });
+    Object.defineProperty(globalThis, 'FileReader', { configurable: true, writable: true, value: prevGlobals.FileReader });
+  }
+});
+
+test('Task 17 (cross-platform QR): camera video/canvas + manual fallback when BarcodeDetector is unavailable (Safari/iOS/Firefox)', async () => {
+  const { createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+  };
+
+  let tracksStopped = 0;
+  let drawImageCalls = 0;
+  const mockStream = {
+    getTracks() {
+      return [{ stop() { tracksStopped += 1; } }];
+    },
+  };
+  Object.defineProperty(global, 'navigator', {
+    configurable: true,
+    value: {
+      onLine: true,
+      mediaDevices: { getUserMedia: async () => mockStream },
+    },
+  });
+  // No BarcodeDetector on window (Safari/iOS/Firefox scenario)
+  Object.defineProperty(global, 'window', {
+    configurable: true,
+    value: { localStorage: storage, addEventListener() {}, removeEventListener() {} },
+  });
+  Object.defineProperty(global, 'document', {
+    configurable: true,
+    value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } },
+  });
+
+  try {
+    const decodedFrames = [];
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    const qrFrameDecoder = (imageData) => {
+      decodedFrames.push(imageData);
+      return 'ORD-SAFARI-2026';
+    };
+    let tree = fakeReact._render(MobilePage, { storage, apiClient: { request: async () => ({ data: {} }) }, qrFrameDecoder });
+    fakeReact._flushEffects();
+
+    // Start camera scanner without BarcodeDetector -> activates video + canvas fallback
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-qr-scan-btn').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, apiClient: { request: async () => ({ data: {} }) }, qrFrameDecoder });
+
+    const videoNode = findNode(tree, (n) => n.type === 'video');
+    const qrCanvasNode = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-qr-canvas');
+    const captureFrameBtn = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-qr-capture-frame-btn');
+    const fallbackBadge = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-qr-fallback-badge');
+    assert.ok(videoNode, 'Camera <video> must open even when BarcodeDetector is unavailable');
+    assert.ok(qrCanvasNode, 'Fallback QR <canvas> must be rendered');
+    assert.ok(captureFrameBtn, 'Capture QR frame button must be rendered in fallback mode');
+    assert.ok(fallbackBadge, 'Fallback mode badge must be visible');
+
+    videoNode.props.ref.current = { srcObject: null, videoWidth: 320, videoHeight: 240, play: () => Promise.resolve() };
+    qrCanvasNode.props.ref.current = {
+      width: 320,
+      height: 240,
+      getContext: () => ({
+        drawImage() { drawImageCalls += 1; },
+        getImageData: () => ({ width: 320, height: 240, data: new Uint8ClampedArray(320 * 240 * 4) }),
+      }),
+      toDataURL: () => 'data:image/png;base64,FRAME',
+    };
+    fakeReact._flushEffects();
+
+    await captureFrameBtn.props.onClick();
+    assert.equal(drawImageCalls, 1);
+    assert.equal(decodedFrames.length, 1);
+    assert.ok(tracksStopped >= 1);
+
+    tree = fakeReact._render(MobilePage, { storage, apiClient: { request: async () => ({ data: {} }) }, qrFrameDecoder });
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-order-input').props.value, 'ORD-SAFARI-2026');
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+  }
+});
+
+test('Task 17 (Outbox Inspector & Notification Badge SSE): lists pending/failed items, Retry individual/all, Delete, and live SSE unread count', async () => {
+  const { createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+  const { enqueueOutboxItem, updateOutboxStatus, listOutboxItems } = require('../src/client-v2/mobile-offline-db');
+
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+  const mockIdb = createMockIndexedDb();
+
+  const itemPending = await enqueueOutboxItem({
+    actionType: 'iot.twinSetDesired',
+    payload: { assetId: 101, desiredPatch: { targetTempC: -18 } },
+  }, { indexedDB: mockIdb, storage });
+  const itemFailed = await enqueueOutboxItem({
+    actionType: 'wms.epodCapture',
+    payload: { orderCode: 'ORD-FAIL-1', recipientName: 'Pham D', deliveredQty: 2, gpsLat: 10, gpsLng: 105, signatureDataUrl: 'data:image/png;base64,AAA' },
+  }, { indexedDB: mockIdb, storage });
+  await updateOutboxStatus(itemFailed.id, { status: 'failed', attempts: 2, lastError: '503 Gateway Timeout', httpStatus: 503 }, { indexedDB: mockIdb, storage });
+
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+    indexedDB: globalThis.indexedDB,
+    EventSource: globalThis.EventSource,
+  };
+
+  let createdEs = null;
+  let closedEs = false;
+  class FakeEventSource {
+    constructor(url) {
+      this.url = url;
+      this.listeners = new Map();
+      createdEs = this;
+    }
+    addEventListener(type, fn) {
+      this.listeners.set(type, fn);
+    }
+    emit(type, data) {
+      const fn = this.listeners.get(type);
+      if (fn) fn({ data: typeof data === 'string' ? data : JSON.stringify(data) });
+    }
+    close() { closedEs = true; }
+  }
+
+  let failRetry = false;
+  let serverUnread = 3;
+  const apiCalls = [];
+  const authApi = {
+    auth: { role: 'ldx_driver', getToken: () => 'jwt-mobile-1' },
+    async request(req) {
+      apiCalls.push(req);
+      if (req.url === 'latticeNotifications:unreadCount') {
+        return { data: { data: { unreadCount: serverUnread } } };
+      }
+      if (req.url === 'latticeNotifications:listMine') {
+        return { data: { data: { unreadCount: serverUnread, items: [{ id: 9, category: 'alarm', severity: 'high', title: 'Cảnh báo nhiệt độ Kho A', readAt: null }] } } };
+      }
+      if (req.url === 'dxosWms:epodCapture' && failRetry) {
+        throw Object.assign(new Error('503 Retry Failed'), { response: { status: 503 } });
+      }
+      return { data: { ok: true } };
+    },
+  };
+
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: mockIdb });
+  Object.defineProperty(globalThis, 'EventSource', { configurable: true, writable: true, value: FakeEventSource });
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'window', {
+    configurable: true,
+    value: { localStorage: storage, EventSource: FakeEventSource, addEventListener() {}, removeEventListener() {} },
+  });
+  Object.defineProperty(global, 'document', {
+    configurable: true,
+    value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } },
+  });
+
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+
+    // 1. Header notification badge shows unreadCount = 3 and updates via SSE
+    const notifBadge = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge');
+    assert.ok(notifBadge, 'Notification badge must render in header');
+    assert.ok(collectText(notifBadge).includes('3'));
+    assert.ok(createdEs, 'EventSource must subscribe when authenticated');
+
+    createdEs.emit('notification', { unreadCount: 7 });
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge')).includes('7'));
+
+    serverUnread = 9;
+    createdEs.emit('update', { kind: 'notification', type: 'notification', portalSlug: 'mobile' });
+    await Promise.resolve();
+    await Promise.resolve();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge')).includes('9'));
+    serverUnread = 3;
+
+    // Click notif badge -> opens notification panel & loads listMine
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    const notifPanel = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-panel');
+    assert.ok(notifPanel);
+    assert.ok(collectText(notifPanel).includes('Cảnh báo nhiệt độ Kho A'));
+
+    // 2. Queue badge shows 2 items; clicking opens Outbox Inspector drawer
+    assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge')).includes('2'));
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+
+    const drawer = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-outbox-drawer');
+    assert.ok(drawer, 'Outbox Inspector drawer must open');
+    assert.ok(collectText(drawer).includes('503 Gateway Timeout'));
+    assert.ok(findNode(drawer, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-item-${itemPending.id}`));
+    assert.ok(findNode(drawer, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-item-${itemFailed.id}`));
+
+    // 3. Delete itemPending -> removes from IndexedDB and updates badge count to 1
+    await findNode(drawer, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-delete-${itemPending.id}`).props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    assert.equal((await listOutboxItems({ indexedDB: mockIdb, storage })).length, 1);
+    assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge')).includes('1'));
+
+    // 4. Retry individual item (failure keeps item with incremented attempts, then success drains it to 0)
+    failRetry = true;
+    await findNode(tree, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-retry-${itemFailed.id}`).props.onClick();
+    const afterFailedRetry = await listOutboxItems({ indexedDB: mockIdb, storage });
+    assert.equal(afterFailedRetry.length, 1);
+    assert.equal(afterFailedRetry[0].status, 'failed');
+    assert.equal(afterFailedRetry[0].attempts, 3);
+
+    failRetry = false;
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    await findNode(tree, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-retry-${itemFailed.id}`).props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    assert.equal((await listOutboxItems({ indexedDB: mockIdb, storage })).length, 0);
+    assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge')).includes('0'));
+
+    // 5. Retry all button triggers sync across remaining items
+    await enqueueOutboxItem({
+      actionType: 'iot.twinSetDesired',
+      payload: { assetId: 202, desiredPatch: { targetTempC: 2 } },
+    }, { indexedDB: mockIdb, storage });
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-outbox-retry-all').props.onClick();
+    assert.equal((await listOutboxItems({ indexedDB: mockIdb, storage })).length, 0);
+
+    fakeReact._unmount();
+    assert.equal(closedEs, true, 'EventSource must close on unmount');
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: prevGlobals.indexedDB });
+    Object.defineProperty(globalThis, 'EventSource', { configurable: true, writable: true, value: prevGlobals.EventSource });
+  }
+});
+
+test('Task 16 baseline (mobile-offline-db): preserves deterministic FIFO order for items enqueued in the same millisecond', async () => {
+  const {
+    enqueueOutboxItem,
+    listOutboxItems,
+    resetMemoryOutboxStore,
+  } = require('../src/client-v2/mobile-offline-db');
+
+  const origNow = Date.now;
+  const fixedTs = 1795500000000;
+  Date.now = () => fixedTs;
+  try {
+    // 1. IndexedDB same-ms ordering (10 rapid enqueues)
+    const mockIdb = createMockIndexedDb();
+    const idbIds = [];
+    for (let i = 0; i < 10; i += 1) {
+      const item = await enqueueOutboxItem({
+        actionType: 'iot.twinSetDesired',
+        payload: { assetId: 1000 + i, desiredPatch: { targetTempC: -18 } },
+      }, { indexedDB: mockIdb });
+      idbIds.push(item.id);
+    }
+    const idbListed = await listOutboxItems({ indexedDB: mockIdb });
+    assert.deepEqual(idbListed.map((x) => x.id), idbIds);
+    assert.deepEqual(idbListed.map((x) => x.payload.assetId), Array.from({ length: 10 }, (_, i) => 1000 + i));
+
+    // 2. localStorage fallback same-ms ordering
+    const storage = makeMemoryStorage();
+    const failingIdb = createMockIndexedDb({ failOpen: true });
+    const lsIds = [];
+    for (let i = 0; i < 6; i += 1) {
+      const item = await enqueueOutboxItem({
+        actionType: 'iot.twinSetDesired',
+        payload: { assetId: 2000 + i, desiredPatch: { targetTempC: -15 } },
+      }, { indexedDB: failingIdb, storage });
+      lsIds.push(item.id);
+    }
+    const lsListed = await listOutboxItems({ indexedDB: failingIdb, storage });
+    assert.deepEqual(lsListed.map((x) => x.id), lsIds);
+
+    // 3. In-memory fallback same-ms ordering
+    resetMemoryOutboxStore();
+    const memIds = [];
+    for (let i = 0; i < 6; i += 1) {
+      const item = await enqueueOutboxItem({
+        actionType: 'iot.twinSetDesired',
+        payload: { assetId: 3000 + i, desiredPatch: { targetTempC: -12 } },
+      }, { useIndexedDB: false });
+      memIds.push(item.id);
+    }
+    const memListed = await listOutboxItems({ useIndexedDB: false });
+    assert.deepEqual(memListed.map((x) => x.id), memIds);
+  } finally {
+    Date.now = origNow;
   }
 });

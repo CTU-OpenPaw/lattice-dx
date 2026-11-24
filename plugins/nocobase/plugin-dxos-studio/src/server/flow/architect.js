@@ -20,7 +20,14 @@ const { createDefaultRegistry, listNodeSchemas } = require('./registry');
 const { callConfiguredLlm, redactPiiForLlm, resolveActiveLlmService } = require('./llm-client');
 const { listFlowBlueprints } = require('./blueprints');
 
-const LDX_ROLE_RE = /^ldx_[a-z0-9_]{2,40}$/;
+const BUSINESS_ROLE_RE = /^[a-z][a-z0-9_]{1,40}$/;
+const RESERVED_SYSTEM_ROLES = new Set(['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector']);
+const isBusinessRoleName = (roleName) => {
+  const clean = String(roleName || '').trim();
+  if (!BUSINESS_ROLE_RE.test(clean) && !/^ldx_[a-z0-9_]{2,40}$/.test(clean)) return false;
+  if (clean.startsWith('r_')) return false;
+  return !RESERVED_SYSTEM_ROLES.has(clean);
+};
 const SENSITIVE_FIELD_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt|signatureDataUrl|encrypted/i;
 const VI_SECURITY_RE = /(?:bo qua (?:tat ca )?(?:huong dan|kiem tra|bao mat|quyen)|(?:bang|table|collection|vao|tren|trong|tao|ghi|sua|xoa|doc)\s+(?:the\s+)?(?:users|roles)\b)/i;
 const DEFAULT_LDX_ROLES = Object.freeze(['ldx_admin', 'ldx_manager', 'ldx_operator', 'ldx_dispatcher', 'ldx_employee', 'ldx_viewer']);
@@ -70,7 +77,7 @@ async function buildFlowStudioCatalog(db, organizationId, options = {}) {
   for (const name of ALLOWLISTED_BUSINESS_COLLECTIONS) upsertCol(name, null);
   for (const row of colRows.map(toPlain)) upsertCol(String(row?.name || '').trim(), row);
   if (db?.collections && typeof db.collections.entries === 'function') for (const [n, o] of db.collections.entries()) upsertCol(String(n || '').trim(), o);
-  const foundRoles = [...new Set(roleRows.map((r) => String(val(r, 'name') || '').trim()).filter((n) => LDX_ROLE_RE.test(n)))];
+  const foundRoles = [...new Set(roleRows.map((r) => String(val(r, 'name') || '').trim()).filter((n) => isBusinessRoleName(n)))];
   return {
     organizationId: orgId || null, llmConfigured: Boolean(llm?.configured),
     llmService: llm?.configured ? { source: llm.source, serviceName: llm.serviceName, provider: llm.provider, modelName: llm.modelName } : null,
@@ -202,7 +209,7 @@ function synthesizeOfflineFallback({ mode, prompt, baseGraph, targetNodeId, trac
     const patch = {};
     const num = String(prompt || '').match(/(-?\d+(?:[.,]\d+)?)/);
     if (node.type === 'control.if' && num) patch.condition = patchIfConditionNumeric(node.config?.condition, Number(num[1].replace(',', '.')));
-    else if (node.type === 'control.approval' && LDX_ROLE_RE.test(pickRole)) patch.approverRole = pickRole;
+    else if (node.type === 'control.approval' && isBusinessRoleName(pickRole)) patch.approverRole = pickRole;
     else if (node.type === 'notify.send') patch.roleNames = [pickRole];
     else if (node.type === 'logic.dmn' && pickDmn) patch.tableKey = pickDmn;
     else if (node.type.startsWith('data.') && pNorm.includes(pickCol.toLowerCase())) patch.collection = pickCol;

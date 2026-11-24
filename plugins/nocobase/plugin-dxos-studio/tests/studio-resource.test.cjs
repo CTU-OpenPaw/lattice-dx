@@ -366,7 +366,7 @@ test('composePortals attaches blocks, orders grid rows above seed row, and creat
   assert.equal(ctx.body.dxosBlocksAttached, true);
   assert.equal(ctx.body.createdPages, 6);
   assert.equal(ctx.body.mobilePagesCreated, 4);
-  assert.equal(ctx.body.attachedBlocks, 17);
+  assert.equal(ctx.body.attachedBlocks, 18);
   assert.equal(updatedGrids.length, 4);
   for (const slug of ['procurement', 'logistics', 'services']) {
     const wbModel = flowModels.find((m) => m.uid === `dxos-ov-${slug}-workbench`);
@@ -1310,5 +1310,53 @@ test('DxosStudioPlugin registers dxosServiceScope before latticeNativeScope and 
     Module._load = origLoad;
     delete require.cache[studioIndexPath];
     delete require.cache[foundationIndexPath];
+  }
+});
+
+test('Task 16: portal-composer and flow/architect allow custom non-ldx_ business roles (ops_manager) and exclude reserved roles', async () => {
+  const { composeMobilePortal } = require(path.join(PLUGIN_ROOT, 'src/server/portal-composer.js'));
+  const { buildFlowStudioCatalog } = require(path.join(PLUGIN_ROOT, 'src/server/flow/architect.js'));
+
+  const grants = [];
+  const db = {
+    hasCollection: () => false,
+    getRepository(name) {
+      if (name === 'desktopRoutes') return { find: async () => [{ id: 1, parentId: null, type: 'group', title: 'Mobile', uiLayoutUid: 'mobile-layout-model' }] };
+      if (name === 'desktopRoutesUiLayouts') return { find: async () => [{ desktopRouteId: 1, uiLayoutUid: 'mobile-layout-model' }] };
+      if (name === 'rolesDesktopRoutes') {
+        return {
+          find: async () => [],
+          create: async ({ values }) => { grants.push(values); return values; },
+        };
+      }
+      if (name === 'roles') {
+        return {
+          find: async () => [
+            { name: 'root', allowConfigure: true, snippets: ['pm'] },
+            { name: 'admin', allowConfigure: true, snippets: ['pm'] },
+            { name: 'anonymous', allowConfigure: false, snippets: [] },
+            { name: 'member', allowConfigure: false, snippets: [] },
+            { name: 'ldx_sysadmin', allowConfigure: true, snippets: ['pm'] },
+            { name: 'ldx_connector', allowConfigure: false, snippets: [] },
+            { name: 'r_temp_01', allowConfigure: false, snippets: [] },
+            { name: 'ops_manager', allowConfigure: false, snippets: [] },
+          ],
+        };
+      }
+      return null;
+    },
+  };
+
+  await composeMobilePortal(db, { applyBlueprint: async () => ({}) });
+  const grantedRoles = grants.map((g) => g.roleName);
+  assert.ok(grantedRoles.includes('ops_manager'), 'Expected ops_manager to receive mobile operational grant');
+  for (const blocked of ['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector', 'r_temp_01']) {
+    assert.equal(grantedRoles.includes(blocked), false, `Did not expect ${blocked} to receive grant`);
+  }
+
+  const catalog = await buildFlowStudioCatalog(db, 'acme-pharma');
+  assert.ok(catalog.roles.includes('ops_manager'));
+  for (const blocked of ['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector', 'r_temp_01']) {
+    assert.equal(catalog.roles.includes(blocked), false);
   }
 });

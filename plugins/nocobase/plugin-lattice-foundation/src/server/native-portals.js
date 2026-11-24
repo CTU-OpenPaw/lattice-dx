@@ -9,7 +9,7 @@
 'use strict';
 
 const {
-  BUILTIN_UIDS, val, getRepo, callerRoles, normalizePortalInput, inspectPortalRoutes,
+  BUILTIN_UIDS, val, getRepo, callerRoles, isBusinessPortalRole, normalizePortalInput, inspectPortalRoutes,
   sanitizeRouteTree, sortPortals, createPortalMetaStore, loadPortalData, grantedLdxRoles, buildPortalDto,
 } = require('./native-portal-helpers');
 
@@ -32,15 +32,15 @@ async function isPortalAdmin(ctx, db) {
 
 async function syncPortalRoles(db, uid, requestedRoles, transaction, metaMap = {}) {
   const allRoles = await (getRepo(db, 'roles')?.find({ transaction }) || []);
-  const validLdx = new Set(allRoles.map(r => val(r, 'name')).filter(n => typeof n === 'string' && n.startsWith('ldx_')));
-  const checked = [...new Set(requestedRoles.filter(r => typeof r === 'string' && validLdx.has(r)))].sort();
+  const validBusinessRoles = new Set(allRoles.filter(r => isBusinessPortalRole(r)).map(r => val(r, 'name')));
+  const checked = [...new Set(requestedRoles.filter(r => typeof r === 'string' && validBusinessRoles.has(r)))].sort();
   const linksRepo = getRepo(db, 'desktopRoutesUiLayouts');
   const grantsRepo = getRepo(db, 'rolesDesktopRoutes');
   if (!linksRepo || !grantsRepo) return checked;
   const links = await linksRepo.find({ filter: { uiLayoutUid: uid }, transaction }) || [];
   const routeIds = [...new Set(links.filter(l => val(l, 'uiLayoutUid') === uid).map(l => val(l, 'desktopRouteId')).filter(id => id != null))];
-  if (!routeIds.length || !validLdx.size) return checked;
-  const existing = await grantsRepo.find({ filter: { desktopRouteId: { $in: routeIds }, roleName: { $in: [...validLdx] } }, transaction }) || [];
+  if (!routeIds.length || !validBusinessRoles.size) return checked;
+  const existing = await grantsRepo.find({ filter: { desktopRouteId: { $in: routeIds }, roleName: { $in: [...validBusinessRoles] } }, transaction }) || [];
   const have = new Set(existing.map(g => `${val(g, 'desktopRouteId')}:${val(g, 'roleName')}`));
   for (const desktopRouteId of routeIds) {
     for (const roleName of checked) {
@@ -49,7 +49,7 @@ async function syncPortalRoles(db, uid, requestedRoles, transaction, metaMap = {
       }
     }
   }
-  const unchecked = [...validLdx].filter(name => !checked.includes(name));
+  const unchecked = [...validBusinessRoles].filter(name => !checked.includes(name));
   if (unchecked.length) {
     const allRouteLinks = await linksRepo.find({ filter: { desktopRouteId: { $in: routeIds } }, transaction }) || [];
     const otherLayoutsByRoute = new Map();
@@ -103,7 +103,7 @@ function registerNativePortals(app, injectedDb) {
         const meta = metaMap[layout.uid];
         const { firstPagePath } = inspectPortalRoutes(routes, layout.routePath, null);
         return {
-          ...buildPortalDto(layout, meta, routes, grantedLdxRoles(data.routeIdsByPortal.get(layout.uid), data.rolesByRoute, meta?.roles)),
+          ...buildPortalDto(layout, meta, routes, grantedLdxRoles(data.routeIdsByPortal.get(layout.uid), data.rolesByRoute, meta?.roles, data.excludedRoles)),
           firstPagePath,
         };
       }));
@@ -211,7 +211,7 @@ function registerNativePortals(app, injectedDb) {
       if (!layout) fail(ctx, 404, 'Portal not found.');
       const routes = data.routesByPortal.get(uid) || [];
       const meta = metaMap[uid] || {};
-      const roles = grantedLdxRoles(data.routeIdsByPortal.get(uid), data.rolesByRoute, meta.roles);
+      const roles = grantedLdxRoles(data.routeIdsByPortal.get(uid), data.rolesByRoute, meta.roles, data.excludedRoles);
       const portal = buildPortalDto(layout, meta, routes, roles);
       delete portal.routeCount;
       delete portal.roles;

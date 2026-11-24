@@ -23,6 +23,7 @@ const { createCreativeStudioView, DEFAULT_CREATIVE_BLUEPRINT } = require('./crea
 const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
 const { createWebGisBlockView } = require('./webgis-block');
 const { createKanbanScheduleBlockView } = require('./kanban-schedule-block');
+const { createWmsOpsBlockView } = require('./wms-ops-block');
 const {
   fetchPageSurfaceState,
   fetchInspectPageBlocks,
@@ -385,6 +386,19 @@ function createBlockRenderers(client, React, antd, app) {
     );
   }
 
+  function readParaDocIdFromLocation() {
+    if (typeof window === 'undefined' || !window.location) return '';
+    try {
+      const search = String(window.location.search || '');
+      if (!search) return '';
+      const params = new URLSearchParams(search);
+      const raw = params.get('paraDocId');
+      return raw ? String(raw).trim() : '';
+    } catch {
+      return '';
+    }
+  }
+
   function DxosParaVaultView({ model, liveConfig }) {
     const api = useApi();
     const cfg = useBlockConfig(React, model, {
@@ -402,6 +416,30 @@ function createBlockRenderers(client, React, antd, app) {
     const [creating, setCreating] = React.useState(false);
     const [draftTitle, setDraftTitle] = React.useState('');
     const [draftCode, setDraftCode] = React.useState('');
+    const [activeParaDocId, setActiveParaDocId] = React.useState(() => readParaDocIdFromLocation());
+    const [selectedDocState, setSelectedDocState] = React.useState({ loading: false, doc: null, error: '' });
+
+    const locationSearch = typeof window !== 'undefined' && window.location ? String(window.location.search || '') : '';
+
+    React.useEffect(() => {
+      const nextDocId = readParaDocIdFromLocation();
+      setActiveParaDocId(nextDocId);
+    }, [locationSearch]);
+
+    React.useEffect(() => {
+      if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined;
+      const onPopState = () => {
+        setActiveParaDocId(readParaDocIdFromLocation());
+      };
+      window.addEventListener('popstate', onPopState);
+      return () => {
+        if (typeof window.removeEventListener === 'function') {
+          window.removeEventListener('popstate', onPopState);
+        }
+      };
+    }, []);
+
+    const ctxOrg = String(cfg.defaultOrganizationId || cfg.organizationId || app?.apiClient?.auth?.organizationId || '').trim();
 
     const load = React.useCallback(async () => {
       setState((prev) => ({ ...prev, loading: true, error: '' }));
@@ -410,32 +448,116 @@ function createBlockRenderers(client, React, antd, app) {
           fetchParaVault(api, { paraSpace: space, search, pageSize: cfg.pageSize }),
           fetchParaSummary(api),
         ]);
+        let orgs = Array.isArray(summary.organizations) ? summary.organizations.map((o) => String(o || '').trim()).filter(Boolean) : [];
+        if (summary.organizationId == null && !orgs.length && api?.request) {
+          try {
+            const orgRes = await api.request({
+              url: 'latticeOrganizations:list',
+              method: 'get',
+              params: { pageSize: 20, filter: { active: true }, sort: ['id'] },
+              skipNotify: true,
+            });
+            const rows = Array.isArray(orgRes?.data?.data) ? orgRes.data.data : [];
+            orgs = rows
+              .map((r) => String(r?.organizationId || r?.code || r?.id || '').trim())
+              .filter(Boolean);
+          } catch {
+            // Fallback gracefully if organization list is unavailable
+          }
+        }
+        if (ctxOrg && !orgs.includes(ctxOrg)) {
+          orgs = [ctxOrg, ...orgs];
+        }
         setState({ loading: false, items: res.items, pluginDisabled: res.pluginDisabled, error: '' });
-        setOrgInfo({ loaded: true, organizationId: summary.organizationId, organizations: summary.organizations || [] });
+        setOrgInfo({ loaded: true, organizationId: summary.organizationId, organizations: orgs });
         if (summary.organizationId == null) {
-          const fallback = cfg.defaultOrganizationId || summary.organizations?.[0] || 'native-ui-lab';
-          setSelectedOrg((prev) => (prev && (summary.organizations || []).includes(prev) ? prev : fallback));
+          const fallback = ctxOrg || orgs[0] || '';
+          setSelectedOrg((prev) => (prev && orgs.includes(prev) ? prev : fallback));
         }
       } catch {
         setState({ loading: false, items: [], pluginDisabled: false, error: 'Không tải được tài liệu P.A.R.A.' });
       }
-    }, [api, space, search, cfg.pageSize, cfg.defaultOrganizationId]);
+    }, [api, space, search, cfg.pageSize, ctxOrg]);
 
     React.useEffect(() => { setSpace(cfg.paraSpace || 'all'); }, [cfg.paraSpace]);
     React.useEffect(() => { load(); }, [load]);
 
+    React.useEffect(() => {
+      if (!activeParaDocId) {
+        setSelectedDocState({ loading: false, doc: null, error: '' });
+        return undefined;
+      }
+      const matchedInList = state.items.find(
+        (d) => d && (String(d.id) === String(activeParaDocId) || (d.code && String(d.code) === String(activeParaDocId))),
+      );
+      if (matchedInList) {
+        setSelectedDocState({ loading: false, doc: matchedInList, error: '' });
+        return undefined;
+      }
+      if (!api?.request) {
+        setSelectedDocState({ loading: false, doc: null, error: 'Không tải được chi tiết tài liệu P.A.R.A.' });
+        return undefined;
+      }
+      let active = true;
+      setSelectedDocState((prev) => ({ ...prev, loading: true, error: '' }));
+      api.request({
+        url: 'latticeParaDocuments:get',
+        method: 'get',
+        params: { filterByTk: activeParaDocId },
+        skipNotify: true,
+      }).then((res) => {
+        if (!active) return;
+        const doc = res?.data?.data || res?.data || null;
+        if (doc && (doc.id != null || doc.title || doc.code)) {
+          setSelectedDocState({ loading: false, doc, error: '' });
+        } else {
+          setSelectedDocState({ loading: false, doc: null, error: `Không tìm thấy tài liệu P.A.R.A. #${activeParaDocId}.` });
+        }
+      }).catch(() => {
+        if (active) {
+          setSelectedDocState({ loading: false, doc: null, error: `Không tải được tài liệu P.A.R.A. #${activeParaDocId}.` });
+        }
+      });
+      return () => { active = false; };
+    }, [activeParaDocId, state.items, api]);
+
+    function clearSelectedParaDoc() {
+      setActiveParaDocId('');
+      setSelectedDocState({ loading: false, doc: null, error: '' });
+      if (typeof window !== 'undefined' && window.location) {
+        try {
+          const url = new URL(window.location.href || `http://localhost${window.location.pathname || '/'}${window.location.search || ''}`);
+          if (url.searchParams.has('paraDocId')) {
+            url.searchParams.delete('paraDocId');
+            const nextSearch = url.searchParams.toString();
+            const nextRel = `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${url.hash || ''}`;
+            if (window.history && typeof window.history.replaceState === 'function') {
+              window.history.replaceState(null, '', nextRel);
+            } else if (app?.router?.navigate) {
+              app.router.navigate(nextRel);
+            }
+          }
+        } catch {}
+      }
+    }
+
     const isRootAdmin = orgInfo.loaded && orgInfo.organizationId === null;
-    const orgChoices = orgInfo.organizations.length ? orgInfo.organizations : ['native-ui-lab'];
+    const orgChoices = orgInfo.organizations.length ? orgInfo.organizations : (ctxOrg ? [ctxOrg] : []);
+    const resolvedRootOrg = String(selectedOrg || ctxOrg || orgChoices[0] || '').trim();
 
     async function handleQuickCreate(e) {
       e.preventDefault();
       if (!api?.request || !draftTitle.trim() || creating) return;
+      if (isRootAdmin && !resolvedRootOrg) {
+        setState((prev) => ({ ...prev, error: 'Chưa có tổ chức (organizationId) khả dụng để tạo tài liệu.' }));
+        return;
+      }
       setCreating(true);
       try {
         const code = (draftCode.trim() || `PARA-${Date.now().toString(36).toUpperCase()}`);
         const data = { code, title: draftTitle.trim(), paraSpace: space === 'all' ? 'projects' : space, status: 'active' };
         if (isRootAdmin) {
-          data.organizationId = String(selectedOrg || cfg.defaultOrganizationId || orgChoices[0] || 'native-ui-lab').trim();
+          data.organizationId = resolvedRootOrg;
         }
         await api.request({ url: 'latticeParaDocuments:create', method: 'post', data });
         setDraftTitle('');
@@ -475,31 +597,83 @@ function createBlockRenderers(client, React, antd, app) {
           },
         }, label)),
       ),
+      activeParaDocId ? h('div', {
+        'data-testid': 'dxos-para-doc-detail',
+        style: {
+          marginBottom: 10,
+          padding: 12,
+          borderRadius: 10,
+          border: '1.5px solid #93c5fd',
+          background: '#eff6ff',
+          display: 'grid',
+          gap: 6,
+        },
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+          h('strong', { style: { fontSize: 13, color: '#1e3a8a' } },
+            selectedDocState.doc
+              ? `${selectedDocState.doc.code ? `${selectedDocState.doc.code} — ` : ''}${selectedDocState.doc.title || `#${activeParaDocId}`}`
+              : `Tài liệu P.A.R.A. #${activeParaDocId}`),
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-para-doc-detail-close',
+            onClick: clearSelectedParaDoc,
+            style: {
+              padding: '2px 8px',
+              borderRadius: 6,
+              border: '1px solid #93c5fd',
+              background: '#ffffff',
+              color: '#1d4ed8',
+              fontSize: 11,
+              fontWeight: 700,
+              cursor: 'pointer',
+            },
+          }, 'Đóng'),
+        ),
+        selectedDocState.loading ? h('div', { style: { fontSize: 12, color: '#475569' } }, 'Đang tải chi tiết tài liệu…') : null,
+        selectedDocState.error ? h('div', { style: { fontSize: 12, color: '#b45309' } }, selectedDocState.error) : null,
+        selectedDocState.doc?.paraSpace ? h('div', { style: { fontSize: 11, color: '#4338ca', fontWeight: 700, textTransform: 'uppercase' } }, `Phân vùng: ${selectedDocState.doc.paraSpace}`) : null,
+        selectedDocState.doc?.summary ? h('div', { style: { fontSize: 12, color: '#334155' } }, selectedDocState.doc.summary) : null,
+        selectedDocState.doc?.content ? h('div', { style: { fontSize: 12, color: '#0f172a', whiteSpace: 'pre-wrap' } }, selectedDocState.doc.content) : null,
+      ) : null,
       cfg.enableQuickCreate !== false ? h('form', { onSubmit: handleQuickCreate, style: { display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' } },
         isRootAdmin ? h('select', {
-          value: selectedOrg || orgChoices[0],
+          value: resolvedRootOrg,
           onChange: (e) => setSelectedOrg(e.target.value),
           'aria-label': 'Tổ chức',
           style: { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
-        }, orgChoices.map((oid) => h('option', { key: oid, value: oid }, oid))) : null,
+        }, orgChoices.length
+          ? orgChoices.map((oid) => h('option', { key: oid, value: oid }, oid))
+          : h('option', { value: '' }, '-- Chưa có tổ chức --')) : null,
         h('input', { value: draftCode, placeholder: 'Mã (tùy chọn)', onChange: (e) => setDraftCode(e.target.value), style: { flex: '0 1 120px', minWidth: 0, maxWidth: '100%', padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
         h('input', { value: draftTitle, placeholder: 'Tiêu đề tài liệu P.A.R.A. mới…', onChange: (e) => setDraftTitle(e.target.value), style: { flex: '1 1 150px', minWidth: 0, maxWidth: '100%', padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 } }),
-        h('button', { type: 'submit', disabled: creating || !draftTitle.trim(), style: { padding: '4px 12px', borderRadius: 6, border: 'none', background: '#0f766e', color: '#fff', fontSize: 12, cursor: 'pointer' } }, creating ? 'Đang lưu…' : '+ Thêm tài liệu'),
+        h('button', { type: 'submit', disabled: creating || !draftTitle.trim() || (isRootAdmin && !resolvedRootOrg), style: { padding: '4px 12px', borderRadius: 6, border: 'none', background: '#0f766e', color: '#fff', fontSize: 12, cursor: 'pointer' } }, creating ? 'Đang lưu…' : '+ Thêm tài liệu'),
       ) : null,
       state.error ? h('div', { style: { fontSize: 12, color: '#b45309', marginBottom: 6 } }, state.error) : null,
       !state.loading && !state.items.length
         ? h('div', { style: { fontSize: 13, color: '#64748b' } }, 'Chưa có tài liệu nào trong phân vùng này.')
         : h('div', { style: { display: 'grid', gap: 6 } },
-          state.items.map((doc) => h('div', {
-            key: doc.id,
-            style: { padding: '8px 10px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff' },
-          },
-            h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 600 } },
-              h('span', null, `${doc.code} — ${doc.title}`),
-              h('span', { style: { fontSize: 11, color: '#4f46e5', textTransform: 'uppercase' } }, doc.paraSpace),
-            ),
-            doc.summary ? h('div', { style: { fontSize: 12, color: '#64748b', marginTop: 2 } }, doc.summary) : null,
-          )),
+          state.items.map((doc) => {
+            const isSelected = Boolean(activeParaDocId && (String(doc.id) === String(activeParaDocId) || (doc.code && String(doc.code) === String(activeParaDocId))));
+            return h('div', {
+              key: doc.id,
+              'data-selected': isSelected ? 'true' : undefined,
+              onClick: doc.id != null ? () => setActiveParaDocId(String(doc.id)) : undefined,
+              style: {
+                padding: '8px 10px',
+                borderRadius: 8,
+                border: isSelected ? '2px solid #1677ff' : '1px solid #e2e8f0',
+                background: isSelected ? '#eff6ff' : '#fff',
+                cursor: doc.id != null ? 'pointer' : 'default',
+              },
+            },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 600 } },
+                h('span', null, `${doc.code} — ${doc.title}`),
+                h('span', { style: { fontSize: 11, color: '#4f46e5', textTransform: 'uppercase' } }, doc.paraSpace),
+              ),
+              doc.summary ? h('div', { style: { fontSize: 12, color: '#64748b', marginTop: 2 } }, doc.summary) : null,
+            );
+          }),
         ),
     );
   }
@@ -706,6 +880,7 @@ function createBlockRenderers(client, React, antd, app) {
     DxosRecordWorkbenchView,
     DxosWebGisView: createWebGisBlockView(client, React, antd, app, { subscribeModelConfig }),
     DxosKanbanScheduleView: createKanbanScheduleBlockView(client, React, antd, app, { subscribeModelConfig }),
+    DxosWmsOpsView: createWmsOpsBlockView(client, React, antd, app, { subscribeModelConfig }),
   };
 }
 
@@ -745,6 +920,9 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   }
   class DxosKanbanScheduleBlockModel extends BaseBlockModel {
     renderComponent() { return h(views.DxosKanbanScheduleView, { model: this, liveConfig: extractLiveConfig(this) }); }
+  }
+  class DxosWmsOpsBlockModel extends BaseBlockModel {
+    renderComponent() { return h(views.DxosWmsOpsView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
 
   const specs = [
@@ -935,6 +1113,44 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           ],
         },
         pageSize: { type: 'number', title: 'Số bản ghi tối đa', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+      },
+    ],
+    [
+      DxosWmsOpsBlockModel,
+      'DX-OS Vận hành Kho FEFO & Bulk Import [W]',
+      {
+        title: 'Vận hành Kho FEFO & Nhập lô hàng loạt [W]',
+        defaultOrganizationId: '',
+        defaultTab: 'fefo',
+        defaultImportCollection: 'latticeStockLots',
+        showBulkImport: true,
+      },
+      {
+        title: { type: 'string', title: 'Tiêu đề Block', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        defaultOrganizationId: { type: 'string', title: 'Mã tổ chức mặc định (Admin)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        defaultTab: {
+          type: 'string',
+          title: 'Thẻ mặc định',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: [
+            { label: 'Xuất kho FEFO & MKT', value: 'fefo' },
+            { label: 'Nhập lô hàng loạt (2-Phase Wizard)', value: 'import' },
+          ],
+        },
+        defaultImportCollection: {
+          type: 'string',
+          title: 'Collection nhập lô mặc định',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: [
+            { label: 'Lô kho lạnh (latticeStockLots)', value: 'latticeStockLots' },
+            { label: 'Tài sản & Thiết bị (latticeAssets)', value: 'latticeAssets' },
+            { label: 'Đơn Logistics (latticeOrders)', value: 'latticeOrders' },
+            { label: 'Yêu cầu mua sắm (latticeRequests)', value: 'latticeRequests' },
+          ],
+        },
+        showBulkImport: { type: 'boolean', title: 'Hiển thị Wizard Nhập lô 2 pha', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
       },
     ],
   ];

@@ -8,16 +8,29 @@
  */
 'use strict';
 
-const OFFLINE_QUEUE_STORAGE_KEY = 'latticedx:mobile:offline-queue';
-const MAX_OFFLINE_QUEUE_ITEMS = 50;
-const MAX_OFFLINE_PAYLOAD_BYTES = 320 * 1024;
-const MAX_QR_PAYLOAD_LENGTH = 2048;
-const FORBIDDEN_STORAGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const {
+  OUTBOX_STORAGE_KEY,
+  MAX_OUTBOX_ITEMS,
+  MAX_PHOTO_DATA_URL_BYTES,
+  ALLOWED_OFFLINE_ACTIONS,
+  isQuotaExceededError,
+  isValidRasterImageDataUrl,
+  isIndexedDbAvailable,
+  sanitizeOutboxItem,
+  resolveStorage,
+  readSyncFallbackOutbox,
+  writeSyncFallbackOutbox,
+  enqueueSyncFallbackOutbox,
+  removeSyncFallbackOutbox,
+  enqueueOutboxItem,
+  listOutboxItems,
+  removeOutboxItem,
+  updateOutboxStatus,
+} = require('./mobile-offline-db');
 
-const ALLOWED_OFFLINE_ACTIONS = Object.freeze({
-  'wms.epodCapture': Object.freeze({ url: 'dxosWms:epodCapture', method: 'post', label: 'Xác nhận ePOD' }),
-  'iot.twinSetDesired': Object.freeze({ url: 'dxosBlocks:twinSetDesired', method: 'post', label: 'Đặt ngưỡng Twin' }),
-});
+const OFFLINE_QUEUE_STORAGE_KEY = OUTBOX_STORAGE_KEY;
+const MAX_OFFLINE_QUEUE_ITEMS = MAX_OUTBOX_ITEMS;
+const MAX_QR_PAYLOAD_LENGTH = 2048;
 
 const UNSAFE_QR_RE = /[\x00-\x1f\x7f<>\\]|(?:javascript|data|vbscript):|\.\./i;
 const URN_FULL_RE = /^urn:ngsi-ld:([A-Za-z][A-Za-z0-9_-]{0,47}):([a-zA-Z0-9._-]{1,64}):([a-zA-Z0-9._-]{1,32}):([a-zA-Z0-9._-]{1,64})$/;
@@ -28,205 +41,16 @@ const TRACKING_TOKEN_RE = /^ldx_trk_[a-zA-Z0-9_-]{8,128}$/;
 const LOT_CODE_RE = /^LOT-[A-Z0-9._-]{1,64}$/i;
 const ORDER_CODE_RE = /^ORD-[A-Z0-9._-]{1,64}$/i;
 
-let fallbackIdCounter = 0;
-
-function generateQueueId() {
-  if (typeof globalThis !== 'undefined' && globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
-    return 'mq-' + globalThis.crypto.randomUUID();
-  }
-  fallbackIdCounter = (fallbackIdCounter + 1) % 1000000;
-  return 'mq-' + Date.now().toString(36) + '-' + fallbackIdCounter.toString(36) + '-' + Math.random().toString(36).slice(2, 8);
-}
-
-function resolveStorage(storageOrOpts) {
-  if (storageOrOpts && typeof storageOrOpts.getItem === 'function' && typeof storageOrOpts.setItem === 'function') {
-    return storageOrOpts;
-  }
-  const candidate = storageOrOpts && storageOrOpts.storage ? storageOrOpts.storage : null;
-  if (candidate && typeof candidate.getItem === 'function' && typeof candidate.setItem === 'function') {
-    return candidate;
-  }
-  if (typeof window !== 'undefined' && window.localStorage && typeof window.localStorage.getItem === 'function') {
-    return window.localStorage;
-  }
-  return null;
-}
-
 function isPlainObject(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const proto = Object.getPrototypeOf(value);
   return proto === Object.prototype || proto === null;
 }
 
-function stripForbiddenKeys(value, depth = 0) {
-  if (depth > 16) return undefined;
-  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    const cleanArr = [];
-    for (const entry of value) {
-      const cleanEntry = stripForbiddenKeys(entry, depth + 1);
-      if (cleanEntry !== undefined) cleanArr.push(cleanEntry);
-    }
-    return cleanArr;
-  }
-  if (isPlainObject(value)) {
-    const cleanObj = {};
-    for (const [key, val] of Object.entries(value)) {
-      if (FORBIDDEN_STORAGE_KEYS.has(key)) continue;
-      const cleanVal = stripForbiddenKeys(val, depth + 1);
-      if (cleanVal !== undefined) cleanObj[key] = cleanVal;
-    }
-    return cleanObj;
-  }
-  return undefined;
-}
-
-function isQuotaExceededError(err) {
-  if (!err || typeof err !== 'object') return false;
-  const name = String(err.name || '');
-  const code = Number(err.code);
-  return name === 'QuotaExceededError'
-    || name === 'NS_ERROR_DOM_QUOTA_REACHED'
-    || code === 22
-    || code === 1014;
-}
-
-function cloneSafePayload(payload) {
-  if (!isPlainObject(payload)) {
-    throw Object.assign(new Error('Dữ liệu hàng đợi phải là đối tượng JSON hợp lệ.'), { code: 'INVALID_OFFLINE_PAYLOAD' });
-  }
-  try {
-    const stripped = stripForbiddenKeys(payload);
-    if (!isPlainObject(stripped)) {
-      throw Object.assign(new Error('Dữ liệu hàng đợi phải là đối tượng JSON hợp lệ.'), { code: 'INVALID_OFFLINE_PAYLOAD' });
-    }
-    const serialized = JSON.stringify(stripped);
-    if (typeof serialized !== 'string' || serialized.length > MAX_OFFLINE_PAYLOAD_BYTES) {
-      throw Object.assign(new Error('Dữ liệu hàng đợi vượt quá kích thước cho phép.'), { code: 'INVALID_OFFLINE_PAYLOAD' });
-    }
-    return JSON.parse(serialized);
-  } catch (err) {
-    if (err && err.code === 'INVALID_OFFLINE_PAYLOAD') throw err;
-    throw Object.assign(new Error('Không thể tuần tự hóa dữ liệu hàng đợi.'), { code: 'INVALID_OFFLINE_PAYLOAD' });
-  }
-}
-
-function sanitizeStoredQueueItem(raw) {
-  if (!isPlainObject(raw)) return null;
-  if (typeof raw.id !== 'string' || !raw.id.trim()) return null;
-  const spec = Object.hasOwn(ALLOWED_OFFLINE_ACTIONS, raw.actionType) ? ALLOWED_OFFLINE_ACTIONS[raw.actionType] : null;
-  if (!spec) return null;
-  if (!isPlainObject(raw.payload)) return null;
-  const strippedPayload = stripForbiddenKeys(raw.payload);
-  if (!isPlainObject(strippedPayload)) return null;
-  if (
-    strippedPayload.signatureDataUrl !== undefined
-    && (typeof strippedPayload.signatureDataUrl !== 'string' || strippedPayload.signatureDataUrl.length > MAX_OFFLINE_PAYLOAD_BYTES)
-  ) {
-    return null;
-  }
-  let cleanPayload;
-  try {
-    const serialized = JSON.stringify(strippedPayload);
-    if (typeof serialized !== 'string' || serialized.length > MAX_OFFLINE_PAYLOAD_BYTES) return null;
-    cleanPayload = JSON.parse(serialized);
-  } catch {
-    return null;
-  }
-  return {
-    id: raw.id.trim().slice(0, 128),
-    actionType: raw.actionType,
-    endpoint: spec.url,
-    payload: cleanPayload,
-    createdAt: typeof raw.createdAt === 'string' && raw.createdAt ? raw.createdAt : new Date().toISOString(),
-    attempts: Number.isInteger(raw.attempts) && raw.attempts >= 0 ? raw.attempts : 0,
-    lastError: typeof raw.lastError === 'string' ? raw.lastError.slice(0, 240) : null,
-  };
-}
-
-function writeOfflineQueue(items, storage) {
-  if (!storage || typeof storage.setItem !== 'function') {
-    throw Object.assign(new Error('Trình duyệt không hỗ trợ bộ nhớ ngoại tuyến.'), { code: 'OFFLINE_STORAGE_UNAVAILABLE' });
-  }
-  const bounded = Array.isArray(items) ? items.slice(0, MAX_OFFLINE_QUEUE_ITEMS) : [];
-  try {
-    storage.setItem(OFFLINE_QUEUE_STORAGE_KEY, JSON.stringify(bounded));
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      throw Object.assign(
-        new Error('Bộ nhớ ngoại tuyến đã đầy (vượt dung lượng lưu trữ). Vui lòng đồng bộ hoặc xóa bớt tác vụ.'),
-        { code: 'OFFLINE_STORAGE_QUOTA_EXCEEDED', cause: err },
-      );
-    }
-    throw Object.assign(
-      new Error((err && err.message) || 'Không thể lưu dữ liệu vào bộ nhớ ngoại tuyến.'),
-      { code: 'OFFLINE_STORAGE_WRITE_FAILED', cause: err },
-    );
-  }
-  return bounded;
-}
-
-function readOfflineQueue(storageOrOpts = {}) {
-  const storage = resolveStorage(storageOrOpts);
-  if (!storage) return [];
-  try {
-    const raw = storage.getItem(OFFLINE_QUEUE_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    const clean = [];
-    for (const entry of parsed) {
-      const sanitized = sanitizeStoredQueueItem(entry);
-      if (sanitized) clean.push(sanitized);
-      if (clean.length >= MAX_OFFLINE_QUEUE_ITEMS) break;
-    }
-    return clean;
-  } catch {
-    return [];
-  }
-}
-
-function enqueueOfflineAction(entry, opts = {}) {
-  const storage = resolveStorage(opts && opts.storage ? opts.storage : entry && entry.storage ? entry.storage : null);
-  if (!storage) {
-    throw Object.assign(new Error('Bộ nhớ ngoại tuyến không khả dụng.'), { code: 'OFFLINE_STORAGE_UNAVAILABLE' });
-  }
-  const actionType = entry && typeof entry.actionType === 'string' ? entry.actionType.trim() : '';
-  const spec = Object.hasOwn(ALLOWED_OFFLINE_ACTIONS, actionType) ? ALLOWED_OFFLINE_ACTIONS[actionType] : null;
-  if (!spec) {
-    throw Object.assign(new Error('Loại thao tác ngoại tuyến không được hỗ trợ.'), { code: 'UNSUPPORTED_OFFLINE_ACTION' });
-  }
-  const safePayload = cloneSafePayload(entry ? entry.payload : null);
-  const current = readOfflineQueue({ storage });
-  if (current.length >= MAX_OFFLINE_QUEUE_ITEMS) {
-    throw Object.assign(
-      new Error('Hàng đợi ngoại tuyến đã đạt giới hạn tối đa ' + MAX_OFFLINE_QUEUE_ITEMS + ' tác vụ.'),
-      { code: 'OFFLINE_QUEUE_FULL' },
-    );
-  }
-  const item = {
-    id: generateQueueId(),
-    actionType,
-    endpoint: spec.url,
-    payload: safePayload,
-    createdAt: new Date().toISOString(),
-    attempts: 0,
-    lastError: null,
-  };
-  const next = writeOfflineQueue([...current, item], storage);
-  return { item, queue: next };
-}
-
-function removeOfflineQueueItem(id, storageOrOpts = {}) {
-  const storage = resolveStorage(storageOrOpts);
-  if (!storage) return [];
-  const targetId = typeof id === 'string' ? id.trim() : '';
-  const current = readOfflineQueue({ storage });
-  const next = current.filter((item) => item.id !== targetId);
-  return writeOfflineQueue(next, storage);
-}
+const sanitizeStoredQueueItem = sanitizeOutboxItem;
+const readOfflineQueue = readSyncFallbackOutbox;
+const enqueueOfflineAction = enqueueSyncFallbackOutbox;
+const removeOfflineQueueItem = removeSyncFallbackOutbox;
 
 function extractHttpStatus(err) {
   const raw = err && (err.status ?? err.statusCode ?? (err.response && err.response.status));
@@ -244,9 +68,16 @@ function isTransientOrNetworkFailure(err) {
   return status === 408 || status === 429 || status >= 500;
 }
 
-async function flushOfflineQueue({ apiClient, storage, onProgress, isOnline } = {}) {
+async function flushOfflineQueue({ apiClient, storage, indexedDB, onProgress, isOnline } = {}) {
   const resolvedStorage = resolveStorage(storage);
-  const initialQueue = readOfflineQueue({ storage: resolvedStorage });
+  const outboxOpts = {
+    storage: resolvedStorage,
+    ...(indexedDB !== undefined ? { indexedDB } : {}),
+  };
+  const hasIdb = isIndexedDbAvailable(outboxOpts);
+  const initialQueue = hasIdb
+    ? await listOutboxItems(outboxOpts)
+    : readSyncFallbackOutbox({ storage: resolvedStorage });
   const online = typeof isOnline === 'boolean'
     ? isOnline
     : (typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean' ? navigator.onLine : true);
@@ -279,6 +110,9 @@ async function flushOfflineQueue({ apiClient, storage, onProgress, isOnline } = 
     if (!spec) {
       failed += 1;
       dropIds.add(item.id);
+      if (hasIdb) {
+        await removeOutboxItem(item.id, outboxOpts).catch(() => undefined);
+      }
       results.push({ id: item.id, actionType: item.actionType, status: 'failed', httpStatus: 400, error: 'Unsupported action' });
       if (typeof onProgress === 'function') {
         onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, deferred, itemId: item.id, outcome: 'failed' });
@@ -290,6 +124,9 @@ async function flushOfflineQueue({ apiClient, storage, onProgress, isOnline } = 
       const response = await apiClient.request({ url: spec.url, method: spec.method, data: item.payload });
       synced += 1;
       dropIds.add(item.id);
+      if (hasIdb) {
+        await removeOutboxItem(item.id, outboxOpts).catch(() => undefined);
+      }
       results.push({
         id: item.id,
         actionType: item.actionType,
@@ -306,18 +143,33 @@ async function flushOfflineQueue({ apiClient, storage, onProgress, isOnline } = 
         // Drop permanently invalid 400/403/404/422 mutations rather than looping forever.
         failed += 1;
         dropIds.add(item.id);
+        if (hasIdb) {
+          await removeOutboxItem(item.id, outboxOpts).catch(() => undefined);
+        }
         results.push({ id: item.id, actionType: item.actionType, status: 'failed', httpStatus: status, error: message });
         if (typeof onProgress === 'function') {
           onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, deferred, itemId: item.id, outcome: 'failed' });
         }
       } else {
         deferred += 1;
+        const nextAttempts = (Number(item.attempts) || 0) + 1;
         const retriedItem = {
           ...item,
-          attempts: (Number(item.attempts) || 0) + 1,
+          status: 'failed',
+          attempts: nextAttempts,
           lastError: message,
+          httpStatus: status || null,
+          updatedAt: new Date().toISOString(),
         };
         updatedDeferredMap.set(item.id, retriedItem);
+        if (hasIdb) {
+          await updateOutboxStatus(item.id, {
+            status: 'failed',
+            attempts: nextAttempts,
+            lastError: message,
+            httpStatus: status || null,
+          }, outboxOpts).catch(() => undefined);
+        }
         results.push({ id: item.id, actionType: item.actionType, status: 'deferred', httpStatus: status || null, error: message });
         if (typeof onProgress === 'function') {
           onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, deferred, itemId: item.id, outcome: 'deferred' });
@@ -326,14 +178,19 @@ async function flushOfflineQueue({ apiClient, storage, onProgress, isOnline } = 
     }
   }
 
-  // Re-read storage so items enqueued concurrently during async flush are preserved.
-  const latestQueue = readOfflineQueue({ storage: resolvedStorage });
-  const finalQueue = [];
-  for (const currentItem of latestQueue) {
-    if (dropIds.has(currentItem.id)) continue;
-    finalQueue.push(updatedDeferredMap.get(currentItem.id) || currentItem);
+  let persisted;
+  if (hasIdb) {
+    persisted = await listOutboxItems(outboxOpts);
+  } else {
+    // Re-read storage so items enqueued concurrently during async flush are preserved.
+    const latestQueue = readSyncFallbackOutbox({ storage: resolvedStorage });
+    const finalQueue = [];
+    for (const currentItem of latestQueue) {
+      if (dropIds.has(currentItem.id)) continue;
+      finalQueue.push(updatedDeferredMap.get(currentItem.id) || currentItem);
+    }
+    persisted = resolvedStorage ? writeSyncFallbackOutbox(finalQueue, resolvedStorage) : finalQueue;
   }
-  const persisted = resolvedStorage ? writeOfflineQueue(finalQueue, resolvedStorage) : finalQueue;
 
   return {
     total: initialQueue.length,
@@ -560,6 +417,18 @@ function buildEpodPayload(fields = {}) {
     deliveredAt: new Date().toISOString(),
   };
 
+  if (
+    fields.evidencePhotoDataUrl !== undefined
+    && fields.evidencePhotoDataUrl !== null
+    && String(fields.evidencePhotoDataUrl).trim() !== ''
+  ) {
+    const photoUrl = typeof fields.evidencePhotoDataUrl === 'string' ? fields.evidencePhotoDataUrl.trim() : '';
+    if (!isValidRasterImageDataUrl(photoUrl, MAX_PHOTO_DATA_URL_BYTES)) {
+      return { ok: false, error: 'Ảnh minh chứng ePOD phải là ảnh PNG/JPEG/WebP hợp lệ và tối đa 512KB.' };
+    }
+    payload.evidencePhotoDataUrl = photoUrl;
+  }
+
   if (typeof fields.orderCode === 'string' && fields.orderCode.trim()) {
     payload.orderCode = fields.orderCode.trim().slice(0, 64);
   }
@@ -584,6 +453,55 @@ function buildEpodPayload(fields = {}) {
   return { ok: true, payload };
 }
 
+function isAuthenticatedMobileClient(api, storage) {
+  if (!api || typeof api.request !== 'function') return false;
+  try {
+    if (typeof api.auth?.getToken === 'function' && api.auth.getToken()) return true;
+  } catch {}
+  if (api.auth?.role && api.auth.role !== 'anonymous') return true;
+  try {
+    if (storage && typeof storage.getItem === 'function' && storage.getItem('NOCOBASE_TOKEN')) return true;
+    if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function' && localStorage.getItem('NOCOBASE_TOKEN')) {
+      return true;
+    }
+  } catch {}
+  return false;
+}
+
+function formatOutboxItemSummary(item) {
+  if (!item || !item.payload) return '';
+  if (item.actionType === 'wms.epodCapture') {
+    const parts = [];
+    if (item.payload.orderCode) parts.push(item.payload.orderCode);
+    if (item.payload.recipientName) parts.push(item.payload.recipientName);
+    if (item.payload.evidencePhotoDataUrl) parts.push('Có ảnh');
+    return parts.join(' · ') || 'ePOD';
+  }
+  if (item.actionType === 'iot.twinSetDesired') {
+    const target = item.payload.assetId != null ? `Asset #${item.payload.assetId}` : (item.payload.assetEntityId || 'Twin');
+    const temp = item.payload.desiredPatch?.targetTempC;
+    return temp !== undefined ? `${target} → ${temp}°C` : target;
+  }
+  return item.endpoint || item.actionType;
+}
+
+function invokeQrDecoder(decoder, imageData) {
+  if (typeof decoder !== 'function' || !imageData) return null;
+  try {
+    const direct = decoder(imageData);
+    if (typeof direct === 'string' && direct.trim()) return direct.trim();
+    if (direct && typeof direct.data === 'string' && direct.data.trim()) return direct.data.trim();
+  } catch {}
+  if (imageData.data && imageData.width && imageData.height) {
+    try {
+      const res = decoder(imageData.data, imageData.width, imageData.height);
+      if (typeof res === 'string' && res.trim()) return res.trim();
+      if (res && typeof res.data === 'string' && res.data.trim()) return res.data.trim();
+    } catch {}
+  }
+  return null;
+}
+
 function createMobileFieldPwaPage(client, React, app) {
   // Resolve hook selection safely without accessing React.createElement or hooks at load() time.
   const useApiHook = typeof client?.useAPIClient === 'function'
@@ -597,18 +515,34 @@ function createMobileFieldPwaPage(client, React, app) {
     const hookApi = useApiHook();
     const apiClient = props.apiClient || hookApi || app?.apiClient || null;
     const storage = props.storage || (typeof window !== 'undefined' ? window.localStorage : null);
+    const outboxOpts = React.useMemo(() => ({
+      storage,
+      ...(props.indexedDB !== undefined ? { indexedDB: props.indexedDB } : {}),
+    }), [storage, props.indexedDB]);
 
     const [isOnline, setIsOnline] = React.useState(() => (
       typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean' ? navigator.onLine : true
     ));
-    const [queueItems, setQueueItems] = React.useState(() => readOfflineQueue({ storage }));
+    const [queueItems, setQueueItems] = React.useState(() => readSyncFallbackOutbox({ storage }));
     const [syncing, setSyncing] = React.useState(false);
+    const [outboxOpen, setOutboxOpen] = React.useState(false);
+    const [retryingItemId, setRetryingItemId] = React.useState(null);
+
+    const [notifUnreadCount, setNotifUnreadCount] = React.useState(() => {
+      const initial = Number(props.notificationUnreadCount);
+      return Number.isFinite(initial) && initial >= 0 ? initial : 0;
+    });
+    const [notifOpen, setNotifOpen] = React.useState(false);
+    const [notifItems, setNotifItems] = React.useState([]);
+    const [notifLoading, setNotifLoading] = React.useState(false);
 
     const [qrInput, setQrInput] = React.useState('');
     const [qrResult, setQrResult] = React.useState(null);
     const [scannerActive, setScannerActive] = React.useState(false);
     const [scannerStream, setScannerStream] = React.useState(null);
+    const [scannerMode, setScannerMode] = React.useState('idle');
     const [scannerNote, setScannerNote] = React.useState('');
+    const [qrSnapshotUrl, setQrSnapshotUrl] = React.useState('');
 
     const [orderCode, setOrderCode] = React.useState('');
     const [orderId, setOrderId] = React.useState('');
@@ -624,6 +558,10 @@ function createMobileFieldPwaPage(client, React, app) {
 
     const [hasSignature, setHasSignature] = React.useState(false);
     const [signatureDataUrl, setSignatureDataUrl] = React.useState('');
+    const [evidencePhotoDataUrl, setEvidencePhotoDataUrl] = React.useState('');
+    const [photoCameraActive, setPhotoCameraActive] = React.useState(false);
+    const [photoCameraStream, setPhotoCameraStream] = React.useState(null);
+
     const [submitting, setSubmitting] = React.useState(false);
     const [receipt, setReceipt] = React.useState(null);
     const [statusNotice, setStatusNotice] = React.useState(null);
@@ -631,6 +569,7 @@ function createMobileFieldPwaPage(client, React, app) {
     const [twinAssetId, setTwinAssetId] = React.useState('');
     const [twinTargetTempC, setTwinTargetTempC] = React.useState('');
 
+    // Keep canvasRef as the first useRef(null) to preserve deterministic signature-canvas test ref lookup.
     const canvasRef = React.useRef(null);
     const videoRef = React.useRef(null);
     const drawingRef = React.useRef(false);
@@ -640,8 +579,16 @@ function createMobileFieldPwaPage(client, React, app) {
     const syncPromiseRef = React.useRef(null);
     const storageRef = React.useRef(storage);
     storageRef.current = storage;
+    const outboxOptsRef = React.useRef(outboxOpts);
+    outboxOptsRef.current = outboxOpts;
     const mountedRef = React.useRef(true);
     const scannerStartSeqRef = React.useRef(0);
+    const qrCanvasRef = React.useRef(null);
+    const photoVideoRef = React.useRef(null);
+    const photoStreamRef = React.useRef(null);
+    const qrFrameDecoderRef = React.useRef(null);
+    qrFrameDecoderRef.current = props.qrFrameDecoder || (typeof window !== 'undefined' ? window.jsQR : null);
+    const refreshUnreadCountRef = React.useRef(null);
 
     const handleSync = React.useCallback(async (overrideOnline) => {
       if (syncingRef.current) {
@@ -656,7 +603,12 @@ function createMobileFieldPwaPage(client, React, app) {
       setSyncing(true);
       const run = (async () => {
         try {
-          const res = await flushOfflineQueue({ apiClient, storage, isOnline: effectiveOnline });
+          const res = await flushOfflineQueue({
+            apiClient,
+            storage: outboxOptsRef.current.storage,
+            indexedDB: outboxOptsRef.current.indexedDB,
+            isOnline: effectiveOnline,
+          });
           setQueueItems(res.remaining);
           const hasUnauthorized = Array.isArray(res.results)
             && res.results.some((r) => r.status === 'deferred' && r.httpStatus === 401);
@@ -690,7 +642,7 @@ function createMobileFieldPwaPage(client, React, app) {
       })();
       syncPromiseRef.current = run;
       return run;
-    }, [apiClient, storage, isOnline]);
+    }, [apiClient, isOnline]);
 
     handleSyncRef.current = handleSync;
 
@@ -710,10 +662,19 @@ function createMobileFieldPwaPage(client, React, app) {
         navigator.serviceWorker.register('/api/dxos:sw.js', { scope: '/' }).catch(() => undefined);
       }
 
+      listOutboxItems(outboxOptsRef.current)
+        .then((items) => {
+          if (mountedRef.current) setQueueItems(items);
+        })
+        .catch(() => undefined);
+
       const hasWindowEvents = typeof window !== 'undefined' && typeof window.addEventListener === 'function';
-      const onOnline = () => {
+      const onOnline = async () => {
         setIsOnline(true);
-        if (readOfflineQueue({ storage: storageRef.current }).length === 0) {
+        const current = isIndexedDbAvailable(outboxOptsRef.current)
+          ? await listOutboxItems(outboxOptsRef.current).catch(() => [])
+          : readSyncFallbackOutbox({ storage: storageRef.current });
+        if (current.length === 0) {
           return undefined;
         }
         return handleSyncRef.current?.(true)?.catch(() => undefined);
@@ -735,8 +696,110 @@ function createMobileFieldPwaPage(client, React, app) {
           for (const tr of streamRef.current.getTracks()) tr.stop?.();
           streamRef.current = null;
         }
+        if (photoStreamRef.current && typeof photoStreamRef.current.getTracks === 'function') {
+          for (const tr of photoStreamRef.current.getTracks()) tr.stop?.();
+          photoStreamRef.current = null;
+        }
       };
     }, []);
+
+    const refreshUnreadCount = React.useCallback(async () => {
+      if (!isAuthenticatedMobileClient(apiClient, storageRef.current)) return null;
+      try {
+        const res = await apiClient.request({
+          url: 'latticeNotifications:unreadCount',
+          method: 'get',
+          skipNotify: true,
+        });
+        const count = Number(res?.data?.data?.unreadCount ?? res?.data?.unreadCount ?? 0);
+        if (mountedRef.current && Number.isFinite(count) && count >= 0) {
+          setNotifUnreadCount(count);
+        }
+        return count;
+      } catch {
+        return null;
+      }
+    }, [apiClient]);
+
+    refreshUnreadCountRef.current = refreshUnreadCount;
+
+    React.useEffect(() => {
+      if (!isAuthenticatedMobileClient(apiClient, storageRef.current)) return undefined;
+      refreshUnreadCountRef.current?.();
+
+      const EventSourceCtor = props.EventSource
+        || (typeof globalThis !== 'undefined' ? globalThis.EventSource : null)
+        || (typeof window !== 'undefined' ? window.EventSource : null);
+      if (!isOnline || typeof EventSourceCtor !== 'function') return undefined;
+
+      let es = null;
+      const sseUrl = props.notificationSseUrl || '/api/dxosAi:surfaceEvents?portalSlug=mobile';
+      try {
+        es = new EventSourceCtor(sseUrl, { withCredentials: true });
+      } catch {
+        return undefined;
+      }
+
+      const handleSsePayload = (ev) => {
+        if (!mountedRef.current) return;
+        let parsed = null;
+        if (ev && typeof ev.data === 'string' && ev.data.trim()) {
+          try {
+            parsed = JSON.parse(ev.data);
+          } catch {
+            parsed = null;
+          }
+        }
+        if (!parsed || typeof parsed !== 'object') return;
+        if (Number.isFinite(Number(parsed.unreadCount)) && Number(parsed.unreadCount) >= 0) {
+          setNotifUnreadCount(Number(parsed.unreadCount));
+          return;
+        }
+        const kind = String(parsed.kind || parsed.type || '').trim().toLowerCase();
+        if (kind === 'notification' || kind === 'unread_count' || ev?.type === 'notification' || ev?.type === 'unread_count') {
+          refreshUnreadCountRef.current?.();
+        }
+      };
+
+      if (typeof es.addEventListener === 'function') {
+        es.addEventListener('notification', handleSsePayload);
+        es.addEventListener('unread_count', handleSsePayload);
+        es.addEventListener('update', handleSsePayload);
+        es.addEventListener('message', handleSsePayload);
+      } else {
+        es.onmessage = handleSsePayload;
+      }
+
+      return () => {
+        try { es?.close?.(); } catch {}
+      };
+    }, [apiClient, isOnline, props.EventSource, props.notificationSseUrl]);
+
+    const toggleNotifications = React.useCallback(async () => {
+      const next = !notifOpen;
+      setNotifOpen(next);
+      if (!next || !isAuthenticatedMobileClient(apiClient, storageRef.current)) return;
+      setNotifLoading(true);
+      try {
+        const res = await apiClient.request({
+          url: 'latticeNotifications:listMine',
+          method: 'get',
+          params: { limit: 15 },
+          skipNotify: true,
+        });
+        const data = res?.data?.data || res?.data || {};
+        if (mountedRef.current) {
+          setNotifItems(Array.isArray(data.items) ? data.items : []);
+          if (data.unreadCount != null && Number.isFinite(Number(data.unreadCount))) {
+            setNotifUnreadCount(Math.max(0, Number(data.unreadCount)));
+          }
+        }
+      } catch {
+        // Retain current items on error
+      } finally {
+        if (mountedRef.current) setNotifLoading(false);
+      }
+    }, [apiClient, notifOpen]);
 
     const applyParsedQr = React.useCallback((rawText) => {
       const parsed = parseFieldQrPayload(rawText);
@@ -767,6 +830,7 @@ function createMobileFieldPwaPage(client, React, app) {
       scannerStartSeqRef.current += 1;
       setScannerActive(false);
       setScannerStream(null);
+      setScannerMode('idle');
       if (videoRef.current && videoRef.current.srcObject) {
         videoRef.current.srcObject = null;
       }
@@ -779,8 +843,9 @@ function createMobileFieldPwaPage(client, React, app) {
     const startCameraScanner = React.useCallback(async () => {
       const hasMedia = typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function';
       const Detector = typeof window !== 'undefined' && typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
-      if (!hasMedia || !Detector) {
-        setScannerNote('Thiết bị/trình duyệt chưa hỗ trợ Camera BarcodeDetector — vui lòng nhập mã QR thủ công bên dưới.');
+      if (!hasMedia) {
+        setScannerMode('manual_only');
+        setScannerNote('Thiết bị/trình duyệt chưa hỗ trợ Camera — vui lòng nhập mã QR thủ công bên dưới.');
         return;
       }
       const startSeq = ++scannerStartSeqRef.current;
@@ -797,13 +862,53 @@ function createMobileFieldPwaPage(client, React, app) {
         }
         streamRef.current = stream;
         setScannerStream(stream);
+        setQrSnapshotUrl('');
+        setScannerMode(Detector ? 'barcode_detector' : 'camera_canvas_fallback');
         setScannerActive(true);
-        setScannerNote('Đang bật camera quét mã QR...');
+        setScannerNote(
+          Detector
+            ? 'Đang bật camera quét mã QR...'
+            : 'Trình duyệt không hỗ trợ BarcodeDetector — đang dùng chế độ Camera + Canvas dự phòng (hoặc nhập mã QR thủ công bên dưới).',
+        );
       } catch {
         setScannerNote('Không mở được camera. Hãy cấp quyền camera hoặc dùng ô nhập thủ công.');
         stopScanner();
       }
     }, [stopScanner]);
+
+    const captureQrFrameFromVideo = React.useCallback(() => {
+      const videoEl = videoRef.current;
+      const qrCanvas = qrCanvasRef.current;
+      if (!videoEl || !qrCanvas || typeof qrCanvas.getContext !== 'function') {
+        setScannerNote('Chưa sẵn sàng khung hình camera/canvas — vui lòng nhập mã QR thủ công.');
+        return null;
+      }
+      const width = Number(videoEl.videoWidth) || Number(qrCanvas.width) || 320;
+      const height = Number(videoEl.videoHeight) || Number(qrCanvas.height) || 240;
+      qrCanvas.width = width;
+      qrCanvas.height = height;
+      const ctx = qrCanvas.getContext('2d');
+      if (!ctx || typeof ctx.drawImage !== 'function') return null;
+      ctx.drawImage(videoEl, 0, 0, width, height);
+      if (typeof qrCanvas.toDataURL === 'function') {
+        try {
+          setQrSnapshotUrl(qrCanvas.toDataURL('image/png'));
+        } catch {}
+      }
+      const decoder = qrFrameDecoderRef.current;
+      if (typeof decoder === 'function' && typeof ctx.getImageData === 'function') {
+        const imageData = ctx.getImageData(0, 0, width, height);
+        const decoded = invokeQrDecoder(decoder, imageData);
+        if (decoded) {
+          setQrInput(decoded);
+          const parsed = applyParsedQr(decoded);
+          stopScanner();
+          return parsed;
+        }
+      }
+      setScannerNote('Đã chụp khung hình camera — nếu không tự giải mã, hãy dán hoặc nhập mã QR vào ô bên dưới.');
+      return null;
+    }, [applyParsedQr, stopScanner]);
 
     React.useEffect(() => {
       if (!scannerActive) return undefined;
@@ -818,7 +923,7 @@ function createMobileFieldPwaPage(client, React, app) {
       Promise.resolve(videoEl.play?.()).catch(() => undefined);
 
       const Detector = typeof window !== 'undefined' && typeof window.BarcodeDetector === 'function' ? window.BarcodeDetector : null;
-      if (Detector) {
+      if (Detector && scannerMode === 'barcode_detector') {
         const detector = new Detector({ formats: ['qr_code', 'code_128', 'ean_13'] });
         const scanTick = async () => {
           if (cancelled || !streamRef.current || !videoRef.current) return;
@@ -858,7 +963,108 @@ function createMobileFieldPwaPage(client, React, app) {
           streamRef.current = null;
         }
       };
-    }, [scannerActive, scannerStream, applyParsedQr, stopScanner]);
+    }, [scannerActive, scannerStream, scannerMode, applyParsedQr, stopScanner]);
+
+    const stopPhotoCamera = React.useCallback(() => {
+      setPhotoCameraActive(false);
+      setPhotoCameraStream(null);
+      if (photoVideoRef.current && photoVideoRef.current.srcObject) {
+        photoVideoRef.current.srcObject = null;
+      }
+      if (photoStreamRef.current && typeof photoStreamRef.current.getTracks === 'function') {
+        for (const tr of photoStreamRef.current.getTracks()) tr.stop?.();
+        photoStreamRef.current = null;
+      }
+    }, []);
+
+    const startPhotoCamera = React.useCallback(async () => {
+      const hasMedia = typeof navigator !== 'undefined' && navigator.mediaDevices && typeof navigator.mediaDevices.getUserMedia === 'function';
+      if (!hasMedia) {
+        setStatusNotice({ type: 'warn', text: 'Thiết bị không hỗ trợ camera trực tiếp — hãy dùng nút chọn ảnh từ thiết bị.' });
+        return;
+      }
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+        if (!mountedRef.current) {
+          for (const tr of stream.getTracks?.() || []) tr.stop?.();
+          return;
+        }
+        if (photoStreamRef.current && photoStreamRef.current !== stream) {
+          for (const tr of photoStreamRef.current.getTracks?.() || []) tr.stop?.();
+        }
+        photoStreamRef.current = stream;
+        setPhotoCameraStream(stream);
+        setPhotoCameraActive(true);
+      } catch {
+        setStatusNotice({ type: 'error', text: 'Không mở được camera chụp ảnh minh chứng.' });
+      }
+    }, []);
+
+    React.useEffect(() => {
+      if (!photoCameraActive) return undefined;
+      const activeStream = photoCameraStream || photoStreamRef.current;
+      const videoEl = photoVideoRef.current;
+      if (!activeStream || !videoEl) return undefined;
+      videoEl.srcObject = activeStream;
+      Promise.resolve(videoEl.play?.()).catch(() => undefined);
+      return () => {
+        if (photoVideoRef.current && photoVideoRef.current.srcObject === activeStream) {
+          photoVideoRef.current.srcObject = null;
+        }
+        for (const tr of activeStream.getTracks?.() || []) tr.stop?.();
+        if (photoStreamRef.current === activeStream) photoStreamRef.current = null;
+      };
+    }, [photoCameraActive, photoCameraStream]);
+
+    const capturePhotoSnapshot = React.useCallback(() => {
+      const videoEl = photoVideoRef.current;
+      if (!videoEl || typeof document === 'undefined' || typeof document.createElement !== 'function') return;
+      const canvas = document.createElement('canvas');
+      const width = Number(videoEl.videoWidth) || 640;
+      const height = Number(videoEl.videoHeight) || 480;
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext?.('2d');
+      if (!ctx || typeof ctx.drawImage !== 'function' || typeof canvas.toDataURL !== 'function') return;
+      ctx.drawImage(videoEl, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+      if (isValidRasterImageDataUrl(dataUrl, MAX_PHOTO_DATA_URL_BYTES)) {
+        setEvidencePhotoDataUrl(dataUrl);
+        setStatusNotice({ type: 'success', text: 'Đã chụp ảnh minh chứng giao hàng.' });
+      } else {
+        setStatusNotice({ type: 'error', text: 'Ảnh chụp vượt quá giới hạn 512KB.' });
+      }
+      stopPhotoCamera();
+    }, [stopPhotoCamera]);
+
+    const handlePhotoFileChange = React.useCallback((ev) => {
+      const file = ev?.target?.files?.[0];
+      if (!file) return;
+      const fileType = String(file.type || '').toLowerCase();
+      if (fileType && (!fileType.startsWith('image/') || fileType.includes('svg'))) {
+        setStatusNotice({ type: 'error', text: 'Chỉ chấp nhận ảnh PNG, JPEG hoặc WebP.' });
+        return;
+      }
+      const ReaderCtor = typeof FileReader !== 'undefined' ? FileReader : globalThis.FileReader;
+      if (typeof ReaderCtor !== 'function') {
+        setStatusNotice({ type: 'error', text: 'Trình duyệt không hỗ trợ đọc tệp ảnh.' });
+        return;
+      }
+      const reader = new ReaderCtor();
+      reader.onload = () => {
+        const resultUrl = typeof reader.result === 'string' ? reader.result.trim() : '';
+        if (!isValidRasterImageDataUrl(resultUrl, MAX_PHOTO_DATA_URL_BYTES)) {
+          setStatusNotice({ type: 'error', text: 'Ảnh minh chứng không hợp lệ hoặc vượt quá 512KB.' });
+          return;
+        }
+        setEvidencePhotoDataUrl(resultUrl);
+        setStatusNotice({ type: 'success', text: 'Đã đính kèm ảnh minh chứng giao hàng.' });
+      };
+      reader.onerror = () => {
+        setStatusNotice({ type: 'error', text: 'Không thể đọc tệp ảnh đã chọn.' });
+      };
+      reader.readAsDataURL(file);
+    }, []);
 
     const captureGps = React.useCallback(() => {
       const geo = typeof navigator !== 'undefined' ? navigator.geolocation : null;
@@ -946,22 +1152,65 @@ function createMobileFieldPwaPage(client, React, app) {
       }
     };
 
-    const tryEnqueueOffline = React.useCallback((actionType, payload, buildNoticeText) => {
+    const tryEnqueueOffline = React.useCallback(async (actionType, payload, buildNoticeText) => {
       try {
-        const queued = enqueueOfflineAction({ actionType, payload }, { storage });
-        setQueueItems(queued.queue);
-        setStatusNotice({ type: 'warn', text: buildNoticeText(queued.queue.length) });
-        return { queued: true, item: queued.item };
+        const queuedItem = await enqueueOutboxItem({ actionType, payload }, outboxOptsRef.current);
+        const nextQueue = await listOutboxItems(outboxOptsRef.current);
+        setQueueItems(nextQueue);
+        setStatusNotice({ type: 'warn', text: buildNoticeText(nextQueue.length) });
+        return { queued: true, item: queuedItem };
       } catch (queueErr) {
         const errorText = queueErr && queueErr.code === 'OFFLINE_QUEUE_FULL'
           ? `Hàng đợi ngoại tuyến đã đầy (${MAX_OFFLINE_QUEUE_ITEMS}/${MAX_OFFLINE_QUEUE_ITEMS}). Vui lòng kết nối mạng và đồng bộ trước khi lưu thêm.`
-          : queueErr && queueErr.code === 'OFFLINE_STORAGE_QUOTA_EXCEEDED'
+          : (queueErr && (queueErr.code === 'OFFLINE_STORAGE_QUOTA_EXCEEDED' || isQuotaExceededError(queueErr)))
             ? 'Bộ nhớ ngoại tuyến đã đầy (vượt dung lượng lưu trữ). Vui lòng đồng bộ hoặc giải phóng bộ nhớ trước khi lưu tiếp.'
             : (queueErr && queueErr.message) || 'Không thể lưu tác vụ vào hàng đợi ngoại tuyến.';
         setStatusNotice({ type: 'error', text: errorText });
         return null;
       }
-    }, [storage]);
+    }, []);
+
+    const retrySingleOutboxItem = React.useCallback(async (item) => {
+      if (!item || !item.id) return null;
+      if (!apiClient || typeof apiClient.request !== 'function') {
+        setStatusNotice({ type: 'warn', text: 'Chưa sẵn sàng kết nối API để thử lại.' });
+        return null;
+      }
+      const spec = Object.hasOwn(ALLOWED_OFFLINE_ACTIONS, item.actionType) ? ALLOWED_OFFLINE_ACTIONS[item.actionType] : null;
+      if (!spec) return null;
+
+      setRetryingItemId(item.id);
+      try {
+        await updateOutboxStatus(item.id, 'syncing', outboxOptsRef.current);
+        await apiClient.request({ url: spec.url, method: spec.method, data: item.payload });
+        const remaining = await removeOutboxItem(item.id, outboxOptsRef.current);
+        setQueueItems(remaining);
+        setStatusNotice({ type: 'success', text: `Đã đồng bộ thành công tác vụ ${formatOutboxItemSummary(item)}.` });
+        return { ok: true, remaining };
+      } catch (err) {
+        const status = extractHttpStatus(err);
+        const msg = String(err && err.message ? err.message : 'Network error').slice(0, 240);
+        await updateOutboxStatus(item.id, {
+          status: 'failed',
+          attempts: (Number(item.attempts) || 0) + 1,
+          lastError: msg,
+          httpStatus: status || null,
+        }, outboxOptsRef.current);
+        const refreshed = await listOutboxItems(outboxOptsRef.current);
+        setQueueItems(refreshed);
+        setStatusNotice({ type: 'error', text: `Thử lại thất bại: ${msg}` });
+        return { ok: false, error: msg };
+      } finally {
+        setRetryingItemId(null);
+      }
+    }, [apiClient]);
+
+    const deleteSingleOutboxItem = React.useCallback(async (id) => {
+      const remaining = await removeOutboxItem(id, outboxOptsRef.current);
+      setQueueItems(remaining);
+      setStatusNotice({ type: 'info', text: 'Đã xóa tác vụ khỏi hàng đợi ngoại tuyến.' });
+      return remaining;
+    }, []);
 
     const submitEpod = async (ev) => {
       ev?.preventDefault?.();
@@ -981,6 +1230,7 @@ function createMobileFieldPwaPage(client, React, app) {
         gpsAccuracyM,
         notes,
         signatureDataUrl: finalSig,
+        evidencePhotoDataUrl,
       });
       if (!built.ok) {
         setStatusNotice({ type: 'error', text: built.error });
@@ -1122,6 +1372,8 @@ function createMobileFieldPwaPage(client, React, app) {
       cursor: 'pointer',
     };
 
+    const unreadLabel = notifUnreadCount > 99 ? '99+' : String(notifUnreadCount);
+
     return h('div', {
       'data-testid': 'mobile-pwa-root',
       style: {
@@ -1136,23 +1388,153 @@ function createMobileFieldPwaPage(client, React, app) {
       },
     },
       // Header
-      h('header', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 } },
+      h('header', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 } },
         h('div', null,
           h('div', { style: { fontSize: 18, fontWeight: 800, letterSpacing: '-0.02em' } }, 'LatticeDX Field PWA'),
           h('div', { style: { fontSize: 12, color: '#94a3b8' } }, 'Giao nhận hiện trường · /v/mobile'),
         ),
-        h('span', {
-          'data-testid': 'mobile-pwa-queue-badge',
-          style: {
-            padding: '6px 10px',
-            borderRadius: 999,
-            background: queueItems.length > 0 ? '#b45309' : '#1e293b',
-            border: '1px solid #475569',
-            fontSize: 12,
-            fontWeight: 700,
-          },
-        }, `Hàng đợi: ${queueItems.length}`),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+          h('button', {
+            type: 'button',
+            'data-testid': 'mobile-pwa-notif-badge',
+            onClick: toggleNotifications,
+            title: 'Thông báo hiện trường',
+            style: {
+              padding: '6px 10px',
+              borderRadius: 999,
+              background: notifUnreadCount > 0 ? '#dc2626' : '#1e293b',
+              border: '1px solid #475569',
+              color: '#f8fafc',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer',
+            },
+          }, `Thông báo: ${unreadLabel}`),
+          h('button', {
+            type: 'button',
+            'data-testid': 'mobile-pwa-queue-badge',
+            onClick: () => setOutboxOpen((v) => !v),
+            title: 'Mở Outbox Inspector',
+            style: {
+              padding: '6px 10px',
+              borderRadius: 999,
+              background: queueItems.length > 0 ? '#b45309' : '#1e293b',
+              border: '1px solid #475569',
+              color: '#f8fafc',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer',
+            },
+          }, `Hàng đợi: ${queueItems.length}`),
+        ),
       ),
+
+      // Notification Panel
+      notifOpen ? h('section', {
+        'data-testid': 'mobile-pwa-notif-panel',
+        style: { ...cardStyle, borderColor: '#3b82f6' },
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 } },
+          h('strong', { style: { fontSize: 14 } }, `Hộp thư thông báo (${notifUnreadCount} chưa đọc)`),
+          h('button', {
+            type: 'button',
+            onClick: () => setNotifOpen(false),
+            style: { ...btnSecondaryStyle, minHeight: 32, padding: '4px 10px', fontSize: 12 },
+          }, 'Đóng'),
+        ),
+        notifLoading && notifItems.length === 0
+          ? h('div', { style: { fontSize: 12, color: '#94a3b8' } }, 'Đang tải thông báo...')
+          : notifItems.length === 0
+            ? h('div', { style: { fontSize: 12, color: '#94a3b8' } }, 'Không có thông báo mới.')
+            : notifItems.map((it) => h('div', {
+                key: it.id,
+                style: {
+                  padding: '8px 10px',
+                  borderRadius: 8,
+                  background: it.readAt ? '#0f172a' : '#172554',
+                  border: '1px solid #334155',
+                  marginBottom: 6,
+                  fontSize: 12,
+                },
+              },
+                h('div', { style: { fontWeight: 700 } }, it.title),
+                it.body ? h('div', { style: { color: '#cbd5e1', marginTop: 2 } }, String(it.body).slice(0, 120)) : null,
+              )),
+      ) : null,
+
+      // Outbox Inspector Drawer
+      outboxOpen ? h('section', {
+        'data-testid': 'mobile-pwa-outbox-drawer',
+        style: { ...cardStyle, borderColor: '#f59e0b' },
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8 } },
+          h('div', { style: { fontSize: 14, fontWeight: 800 } }, `Outbox Inspector (${queueItems.length}/${MAX_OFFLINE_QUEUE_ITEMS})`),
+          h('div', { style: { display: 'flex', gap: 6 } },
+            h('button', {
+              type: 'button',
+              'data-testid': 'mobile-pwa-outbox-retry-all',
+              disabled: syncing || queueItems.length === 0,
+              onClick: () => handleSync(true),
+              style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#0284c7', borderColor: '#0284c7' },
+            }, syncing ? 'Đang gửi...' : 'Thử lại tất cả'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'mobile-pwa-outbox-close',
+              onClick: () => setOutboxOpen(false),
+              style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12 },
+            }, 'Đóng'),
+          ),
+        ),
+        queueItems.length === 0
+          ? h('div', { style: { fontSize: 12, color: '#94a3b8' } }, 'Hàng đợi ngoại tuyến đang trống.')
+          : queueItems.map((item) => {
+              const spec = ALLOWED_OFFLINE_ACTIONS[item.actionType] || {};
+              const isFailed = item.status === 'failed';
+              const statusLabel = item.status === 'syncing' ? 'Đang gửi' : isFailed ? 'Thất bại' : 'Chờ đồng bộ';
+              return h('div', {
+                key: item.id,
+                'data-testid': `mobile-pwa-outbox-item-${item.id}`,
+                style: {
+                  padding: 10,
+                  borderRadius: 8,
+                  background: '#0f172a',
+                  border: `1px solid ${isFailed ? '#ef4444' : '#334155'}`,
+                  marginBottom: 8,
+                },
+              },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+                  h('strong', { style: { fontSize: 13 } }, `${spec.label || item.actionType} · ${formatOutboxItemSummary(item)}`),
+                  h('span', {
+                    style: {
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '2px 8px',
+                      borderRadius: 999,
+                      background: isFailed ? '#7f1d1d' : '#1e3a8a',
+                      color: '#f8fafc',
+                    },
+                  }, statusLabel),
+                ),
+                h('div', { style: { fontSize: 11, color: '#94a3b8', marginTop: 4 } }, `Lần thử: ${item.attempts || 0} · ${item.createdAt}`),
+                item.lastError ? h('div', { style: { fontSize: 11, color: '#fca5a5', marginTop: 3 } }, item.lastError) : null,
+                h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `mobile-pwa-outbox-retry-${item.id}`,
+                    disabled: retryingItemId === item.id,
+                    onClick: () => retrySingleOutboxItem(item),
+                    style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#0369a1' },
+                  }, retryingItemId === item.id ? 'Đang thử lại...' : 'Thử lại'),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `mobile-pwa-outbox-delete-${item.id}`,
+                    onClick: () => deleteSingleOutboxItem(item.id),
+                    style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#7f1d1d', borderColor: '#ef4444' },
+                  }, 'Xóa'),
+                ),
+              );
+            }),
+      ) : null,
 
       // Network Banner + Sync Action
       h('section', {
@@ -1195,7 +1577,13 @@ function createMobileFieldPwaPage(client, React, app) {
 
       // QR Scanner Card
       h('section', { style: cardStyle },
-        h('div', { style: { fontSize: 15, fontWeight: 700, marginBottom: 10 } }, '1. Quét mã QR / Barcode (Đơn hàng, Lô, URN)'),
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8 } },
+          h('div', { style: { fontSize: 15, fontWeight: 700 } }, '1. Quét mã QR / Barcode (Đơn hàng, Lô, URN)'),
+          scannerMode === 'camera_canvas_fallback' ? h('span', {
+            'data-testid': 'mobile-pwa-qr-fallback-badge',
+            style: { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#78350f', color: '#fde68a' },
+          }, 'Canvas Fallback') : null,
+        ),
         h('div', { style: { display: 'flex', gap: 8, marginBottom: 10 } },
           h('button', {
             type: 'button',
@@ -1203,12 +1591,31 @@ function createMobileFieldPwaPage(client, React, app) {
             onClick: scannerActive ? stopScanner : startCameraScanner,
             style: { ...btnSecondaryStyle, flex: 1 },
           }, scannerActive ? 'Dừng Camera' : 'Quét QR bằng Camera'),
+          scannerActive && scannerMode === 'camera_canvas_fallback' ? h('button', {
+            type: 'button',
+            'data-testid': 'mobile-pwa-qr-capture-frame-btn',
+            onClick: captureQrFrameFromVideo,
+            style: { ...btnSecondaryStyle, background: '#0284c7', borderColor: '#0284c7' },
+          }, 'Chụp khung hình') : null,
         ),
         scannerActive ? h('video', {
           ref: videoRef,
           muted: true,
           playsInline: true,
           style: { width: '100%', maxHeight: 200, borderRadius: 8, background: '#000', marginBottom: 10 },
+        }) : null,
+        scannerActive && scannerMode === 'camera_canvas_fallback' ? h('canvas', {
+          ref: qrCanvasRef,
+          width: 320,
+          height: 240,
+          'data-testid': 'mobile-pwa-qr-canvas',
+          style: { display: 'none' },
+        }) : null,
+        qrSnapshotUrl ? h('img', {
+          src: qrSnapshotUrl,
+          alt: 'Khung hình QR đã chụp',
+          'data-testid': 'mobile-pwa-qr-snapshot-preview',
+          style: { width: '100%', maxHeight: 140, objectFit: 'contain', borderRadius: 8, marginBottom: 8, border: '1px solid #475569' },
         }) : null,
         scannerNote ? h('div', { style: { fontSize: 12, color: '#fbbf24', marginBottom: 8 } }, scannerNote) : null,
         h('label', { style: labelStyle, htmlFor: 'mobile-qr-input' }, 'Nhập / dán mã QR (ORD-..., LOT-..., LDX-TRK-..., urn:ngsi-ld:...)'),
@@ -1235,7 +1642,7 @@ function createMobileFieldPwaPage(client, React, app) {
         }, qrResult.valid ? `Hợp lệ [${qrResult.kind}]: ${qrResult.orderCode || qrResult.trackingCode || qrResult.lotCode || qrResult.urn || 'OK'}` : qrResult.error) : null,
       ),
 
-      // ePOD Capture Form + GPS + Canvas Signature
+      // ePOD Capture Form + GPS + Camera Photo + Canvas Signature
       h('section', { style: cardStyle },
         h('div', { style: { fontSize: 15, fontWeight: 700, marginBottom: 10 } }, '2. Ghi nhận Giao hàng Điện tử (ePOD)'),
         h('label', { style: labelStyle, htmlFor: 'mobile-order-input' }, 'Mã đơn hàng (Order Code)'),
@@ -1323,6 +1730,56 @@ function createMobileFieldPwaPage(client, React, app) {
           }, gpsLat && gpsLng
             ? `GPS: ${gpsLat}, ${gpsLng}${gpsAccuracyM != null ? ` (±${gpsAccuracyM}m)` : ''}`
             : 'Chưa có tọa độ GPS.'),
+        ),
+
+        // Camera Photo Evidence Capture
+        h('div', { style: { marginBottom: 12 } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 8 } },
+            h('span', { style: { ...labelStyle, marginBottom: 0 } }, 'Ảnh minh chứng giao hàng (Camera / Tệp)'),
+            h('div', { style: { display: 'flex', gap: 6 } },
+              h('button', {
+                type: 'button',
+                'data-testid': 'mobile-pwa-photo-camera-btn',
+                onClick: photoCameraActive ? stopPhotoCamera : startPhotoCamera,
+                style: { ...btnSecondaryStyle, minHeight: 36, padding: '6px 10px', fontSize: 12 },
+              }, photoCameraActive ? 'Tắt Camera ảnh' : 'Chụp bằng Camera'),
+              evidencePhotoDataUrl ? h('button', {
+                type: 'button',
+                'data-testid': 'mobile-pwa-photo-clear',
+                onClick: () => setEvidencePhotoDataUrl(''),
+                style: { ...btnSecondaryStyle, minHeight: 36, padding: '6px 10px', fontSize: 12, background: '#7f1d1d' },
+              }, 'Xóa ảnh') : null,
+            ),
+          ),
+          h('input', {
+            type: 'file',
+            accept: 'image/*',
+            capture: 'environment',
+            'data-testid': 'mobile-pwa-photo-input',
+            onChange: handlePhotoFileChange,
+            style: { ...inputStyle, padding: '8px 10px', fontSize: 13 },
+          }),
+          photoCameraActive ? h('div', { style: { marginBottom: 8 } },
+            h('video', {
+              ref: photoVideoRef,
+              muted: true,
+              playsInline: true,
+              'data-testid': 'mobile-pwa-photo-video',
+              style: { width: '100%', maxHeight: 180, borderRadius: 8, background: '#000', marginBottom: 6 },
+            }),
+            h('button', {
+              type: 'button',
+              'data-testid': 'mobile-pwa-photo-snapshot-btn',
+              onClick: capturePhotoSnapshot,
+              style: { ...btnSecondaryStyle, width: '100%', background: '#0284c7', borderColor: '#0284c7' },
+            }, 'Chụp ảnh minh chứng'),
+          ) : null,
+          evidencePhotoDataUrl ? h('img', {
+            src: evidencePhotoDataUrl,
+            alt: 'Ảnh minh chứng ePOD',
+            'data-testid': 'mobile-pwa-photo-preview',
+            style: { width: '100%', maxHeight: 180, objectFit: 'cover', borderRadius: 8, border: '1px solid #475569' },
+          }) : null,
         ),
 
         // Canvas Signature Pad
@@ -1430,6 +1887,10 @@ module.exports = {
   readOfflineQueue,
   flushOfflineQueue,
   removeOfflineQueueItem,
+  enqueueOutboxItem,
+  listOutboxItems,
+  removeOutboxItem,
+  updateOutboxStatus,
   parseFieldQrPayload,
   buildEpodPayload,
   createMobileFieldPwaPage,

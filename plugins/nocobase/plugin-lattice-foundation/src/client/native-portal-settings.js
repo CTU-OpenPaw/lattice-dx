@@ -9,6 +9,7 @@
 'use strict';
 
 const { createPortalModals } = require('./native-portal-modals');
+const { isBusinessPortalRole } = require('../shared/portal-roles');
 
 const FALLBACK_LDX_ROLES = [
   { name: 'ldx_employee', title: 'Lattice — Nhân viên' },
@@ -56,8 +57,8 @@ function createMultiPortalSettingsPage(client, React, antd, app, router, helpers
         }
         if (roleRes.status === 'fulfilled') {
           const rows = roleRes.value?.data?.data;
-          const ldx = Array.isArray(rows) ? rows.filter(r => String(r?.name || '').startsWith('ldx_')) : [];
-          if (ldx.length) setRoles(ldx);
+          const businessRoles = Array.isArray(rows) ? rows.filter(isBusinessPortalRole) : [];
+          if (businessRoles.length) setRoles(businessRoles);
         }
       } catch {
         setError('Không tải được danh sách Portal.');
@@ -189,7 +190,7 @@ function createMultiPortalSettingsPage(client, React, antd, app, router, helpers
           h(antd.Tag, null, `${portal.routeCount ?? 0} trang/nhóm`),
           ...(Array.isArray(portal.roles) && portal.roles.length
             ? portal.roles.map(r => h(antd.Tag, { key: r, color: 'geekblue' }, r))
-            : [h('span', { key: 'none' }, 'Chưa gán role ldx_*')])),
+            : [h('span', { key: 'none' }, 'Chưa gán vai trò')])),
         h('div', { style: { display: 'flex', gap: 8, marginTop: 'auto', paddingTop: 4 } },
           h(antd.Button, { size: 'small', onClick: () => enterPortal(portal) }, 'Vào Portal'),
           h(antd.Button, { size: 'small', type: 'primary', ghost: true, onClick: () => openBuilder(portal) }, 'Mở Builder'),
