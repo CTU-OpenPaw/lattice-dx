@@ -565,3 +565,127 @@ test('Wave 4B P1 #3: redactPiiText & redactPiiForLlm scrub JSON-quoted secrets a
   assert.equal(llmObj.redacted.safe, 'ok');
   assert.ok(llmObj.redactedCount >= 6);
 });
+
+test('Task 11: recordAiAuditLog, quota accounting, and createAuditedTool track real provider usage & tokenSource while preserving 17 canonical tools', async () => {
+  const {
+    recordQuotaUsage,
+    recordQuotaUsagePersistent,
+    getQuotaSummary,
+    resetQuotaBuckets,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/ai-governance.js'));
+  const {
+    aiAuditLogs,
+    recordAiAuditLog,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/ai-schemas.js'));
+  const {
+    ADMIN_BUILDER_TOOL_NAMES,
+    OPERATIONAL_TOOL_NAMES,
+    createAuditedTool,
+    createDxosTools,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/ai-tools-core.js'));
+
+  // 1. Canonical 17-tool matrix preserved intact
+  const allTools = createDxosTools();
+  assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
+  assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
+  assert.equal(allTools.length, 17);
+
+  // 2. aiAuditLogs schema & recordAiAuditLog support usage + totalTokens + tokenSource ('provider' vs 'estimated')
+  const fieldNames = aiAuditLogs.fields.map((f) => f.name);
+  assert.equal(fieldNames.includes('totalTokens'), true);
+  assert.equal(fieldNames.includes('tokenSource'), true);
+
+  const createdLogs = [];
+  const mockDb = {
+    getRepository(name) {
+      if (name === 'roles') return { find: async () => [] };
+      if (name === 'rolesUsers') return { find: async () => [{ userId: 5, roleName: 'ldx_employee' }] };
+      if (name === 'latticeEmployees') return { find: async () => [{ id: 5, userId: 5, organizationId: 'org-tel', active: true }] };
+      if (name === 'latticeAiAuditLogs') return { create: async ({ values }) => { createdLogs.push(values); return values; }, find: async () => createdLogs };
+      return null;
+    },
+  };
+
+  await recordAiAuditLog(mockDb, {
+    actorUserId: 5,
+    actorUsername: 'emp5',
+    organizationId: 'org-tel',
+    channel: 'ai-tool',
+    toolName: 'dxos_search_enterprise_context',
+    status: 'allowed',
+    usage: { promptTokens: 320, completionTokens: 80, totalTokens: 400 },
+  });
+  assert.equal(createdLogs[0].promptTokens, 320);
+  assert.equal(createdLogs[0].completionTokens, 80);
+  assert.equal(createdLogs[0].totalTokens, 400);
+  assert.equal(createdLogs[0].tokenSource, 'provider');
+
+  await recordAiAuditLog(mockDb, {
+    actorUserId: 5,
+    actorUsername: 'emp5',
+    organizationId: 'org-tel',
+    channel: 'ai-tool',
+    toolName: 'dxos_search_enterprise_context',
+    status: 'allowed',
+    promptTokens: 45,
+    completionTokens: 15,
+  });
+  assert.equal(createdLogs[1].totalTokens, 60);
+  assert.equal(createdLogs[1].tokenSource, 'estimated');
+
+  // 3. Quota accounting accepts usage: { promptTokens, completionTokens, totalTokens } and tracks provider vs estimated
+  resetQuotaBuckets();
+  const actor = { userId: 5, organizationId: 'org-tel' };
+  const provMetric = recordQuotaUsage(actor, {
+    usage: { promptTokens: 300, completionTokens: 100, totalTokens: 400 },
+    costUsd: 0.004,
+  });
+  assert.equal(provMetric.tokenSource, 'provider');
+  assert.equal(provMetric.providerTokens, 400);
+  assert.equal(provMetric.providerCalls, 1);
+
+  const estMetric = await recordQuotaUsagePersistent(mockDb, actor, {
+    promptTokens: 50,
+    completionTokens: 25,
+    costUsd: 0.001,
+  });
+  assert.equal(estMetric.tokenSource, 'estimated');
+  assert.equal(estMetric.estimatedTokens, 75);
+  assert.equal(estMetric.estimatedCalls, 1);
+
+  const summary = getQuotaSummary('org-tel');
+  assert.equal(summary.usage.totalTokens, 475);
+  assert.equal(summary.usage.providerTokens, 400);
+  assert.equal(summary.usage.estimatedTokens, 75);
+  assert.equal(summary.usage.providerCalls, 1);
+  assert.equal(summary.usage.estimatedCalls, 1);
+
+  // 4. createAuditedTool records tokenSource='provider' when tool returns usage vs 'estimated' when fallback
+  const providerTool = createAuditedTool({
+    name: 'dxos_provider_usage_probe',
+    description: 'Provider usage probe',
+    schema: { properties: { q: { type: 'string' } } },
+    run: async () => ({
+      ok: true,
+      usage: { promptTokens: 150, completionTokens: 50, totalTokens: 200 },
+    }),
+  });
+  await providerTool.invoke({ db: mockDb, state: { currentUser: { id: 5, username: 'emp5' }, currentRole: 'ldx_employee' } }, { q: 'hi' });
+  const lastProvLog = createdLogs.at(-1);
+  assert.equal(lastProvLog.promptTokens, 150);
+  assert.equal(lastProvLog.completionTokens, 50);
+  assert.equal(lastProvLog.totalTokens, 200);
+  assert.equal(lastProvLog.tokenSource, 'provider');
+
+  const estimatedTool = createAuditedTool({
+    name: 'dxos_estimated_usage_probe',
+    description: 'Estimated usage probe',
+    schema: { properties: { q: { type: 'string' } } },
+    run: async () => ({ ok: true }),
+  });
+  await estimatedTool.invoke({ db: mockDb, state: { currentUser: { id: 5, username: 'emp5' }, currentRole: 'ldx_employee' } }, { q: 'hi' });
+  const lastEstLog = createdLogs.at(-1);
+  assert.equal(lastEstLog.tokenSource, 'estimated');
+  assert.equal(lastEstLog.totalTokens, lastEstLog.promptTokens + lastEstLog.completionTokens);
+  resetQuotaBuckets();
+});

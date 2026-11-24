@@ -1408,4 +1408,104 @@ test('Live Postgres schema guard: skips latticeAssets.entityId SQL filter when c
   assert.equal(res.scannedCount, 1);
   assert.equal(res.proposals.length, 1);
   assert.ok(res.proposals[0].diffPreview?.affectedLots?.some((l) => l.lotCode === 'LOT-MKT-99'));
+  assert.equal(res.proposals[0].mode, 'offline_fallback');
+  assert.equal(res.mode, 'offline_fallback');
+  assert.equal(res.tokenSource, 'estimated');
+});
+
+test('Task 11: proactive-triage executes real LLM via callLlmJson when configured, records provider token usage, redacts PII, and falls back cleanly', async () => {
+  const { runProactiveIncidentTriage } = require(path.join(PLUGIN_ROOT, 'src/server/proactive-triage.js'));
+  const { db, store } = makeTriageHarness();
+
+  store.llmServices = [
+    {
+      id: 1,
+      name: 'local-9router',
+      provider: 'openai-completions',
+      enabled: true,
+      options: { baseURL: 'https://llm.example.com/v1', apiKey: 'sk-triage-secret-111' },
+      enabledModels: { models: [{ value: 'ag/gemini-3.8-flash' }] },
+    },
+  ];
+  store.latticeIncidentCases = [
+    {
+      id: 91,
+      code: 'ALM-LLM-91',
+      name: 'Nhiệt độ buồng lạnh A2 tăng đột ngột, liên hệ 0912345678 hoặc ops@example.com',
+      organizationId: 'org-a',
+      assetId: 102,
+      assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:102',
+      severity: 'critical',
+      status: 'open',
+      proposal: '',
+    },
+  ];
+
+  const sentBodies = [];
+  const llmRes = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    env: {},
+    fetchImpl: async (_url, init) => {
+      sentBodies.push(JSON.parse(init.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          model: 'ag/gemini-3.8-flash',
+          usage: { prompt_tokens: 210, completion_tokens: 65, total_tokens: 275 },
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  toolName: 'dxos_wms_hold_lot',
+                  riskLevel: 'critical',
+                  causalSummary: 'Excursion on CH-102 threatens LOT-VAC-301 and downstream ORD-A-501.',
+                  proposalText: 'LLM đề xuất tạm giữ MKT lô LOT-VAC-301 ngay qua HITL để bảo toàn chuỗi lạnh.',
+                  reason: 'Nhiệt độ -10.5C vượt ngưỡng tối đa -15C trên LOT-VAC-301',
+                }),
+              },
+            },
+          ],
+        }),
+      };
+    },
+  });
+
+  assert.equal(sentBodies.length, 1);
+  assert.equal(sentBodies[0].response_format?.type, 'json_object');
+  const sentJson = JSON.stringify(sentBodies[0].messages);
+  assert.equal(sentJson.includes('0912345678'), false);
+  assert.equal(sentJson.includes('ops@example.com'), false);
+
+  assert.equal(llmRes.mode, 'llm');
+  assert.equal(llmRes.tokenSource, 'provider');
+  assert.deepEqual(llmRes.usage, { promptTokens: 210, completionTokens: 65, totalTokens: 275 });
+  assert.equal(llmRes.proposalsCreated, 1);
+  assert.equal(llmRes.proposals[0].mode, 'llm');
+  assert.equal(llmRes.proposals[0].tokenSource, 'provider');
+  assert.deepEqual(llmRes.proposals[0].usage, { promptTokens: 210, completionTokens: 65, totalTokens: 275 });
+  assert.equal(llmRes.proposals[0].toolName, 'dxos_wms_hold_lot');
+  assert.equal(llmRes.proposals[0].targetRecordId, 301);
+  assert.ok(llmRes.proposals[0].proposalText.includes('LOT-VAC-301'));
+  assert.ok(store.latticeAiAuditLogs.some((l) => l.tokenSource === 'provider' && l.totalTokens === 275));
+
+  // Fallback when LLM returns HTTP 502 or invalid JSON -> deterministic offline_fallback
+  store.latticeAiApprovalQueue = [];
+  store.latticeIncidentCases[0].proposal = '';
+  const fallbackRes = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    env: {},
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: 'not valid json' } }] }),
+    }),
+  });
+  assert.equal(fallbackRes.mode, 'offline_fallback');
+  assert.equal(fallbackRes.tokenSource, 'estimated');
+  assert.equal(fallbackRes.proposals[0].mode, 'offline_fallback');
+  assert.equal(fallbackRes.proposals[0].tokenSource, 'estimated');
+  assert.equal(fallbackRes.proposals[0].toolName, 'dxos_wms_hold_lot');
 });

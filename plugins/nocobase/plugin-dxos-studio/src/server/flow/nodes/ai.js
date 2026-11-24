@@ -15,6 +15,33 @@ const { isAllowlistedTargetCollection, isForbiddenCollection } = require('./data
 const { flowHelpers } = require('./triggers');
 
 const { isPlainObject, sanitizePlainObject, interpolateTemplate, buildEvalContext, resolveOrgId, pickHelper } = flowHelpers;
+const VALID_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
+const estTokens = (v) => { const s = typeof v === 'string' ? v : JSON.stringify(v ?? ''); return s ? Math.max(1, Math.ceil(s.length / 3.2)) : 1; };
+
+function normalizeLlmUsage(rawUsage, promptPayload = '', responsePayload = '') {
+  const pRaw = rawUsage?.promptTokens ?? rawUsage?.prompt_tokens ?? rawUsage?.input_tokens;
+  const cRaw = rawUsage?.completionTokens ?? rawUsage?.completion_tokens ?? rawUsage?.output_tokens;
+  const tRaw = rawUsage?.totalTokens ?? rawUsage?.total_tokens;
+  const hasProvider = Boolean(rawUsage && (Number.isFinite(Number(pRaw)) || Number.isFinite(Number(cRaw)) || Number.isFinite(Number(tRaw))));
+  if (hasProvider) {
+    const promptTokens = Math.max(0, Math.trunc(Number(pRaw) || 0));
+    const completionTokens = Math.max(0, Math.trunc(Number(cRaw) || 0));
+    const totalTokens = Number.isFinite(Number(tRaw)) ? Math.max(promptTokens + completionTokens, Math.trunc(Number(tRaw))) : (promptTokens + completionTokens);
+    return { usage: { promptTokens, completionTokens, totalTokens }, tokenSource: 'provider' };
+  }
+  const promptTokens = estTokens(promptPayload);
+  const completionTokens = estTokens(responsePayload);
+  return { usage: { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens }, tokenSource: 'estimated' };
+}
+
+async function callLlmJson({ db, env = process.env, systemPrompt = '', userPayload = {}, model, temperature = 0.2, maxTokens = 1200, timeoutMs = 15000, fetchImpl, lookupImpl, connectorVault } = {}) {
+  const messages = [...(systemPrompt ? [{ role: 'system', content: String(systemPrompt) }] : []), { role: 'user', content: userPayload ?? {} }];
+  const res = await callConfiguredLlm({ db, env, messages, model, temperature, maxTokens, responseFormat: 'json', timeoutMs, fetchImpl, lookupImpl, connectorVault });
+  if (res.ok && isPlainObject(res.parsedJson)) {
+    return { ok: true, mode: 'llm', data: res.parsedJson, model: res.model || null, piiRedactedCount: res.piiRedactedCount || 0, ...normalizeLlmUsage(res.usage, userPayload, res.content) };
+  }
+  return { ok: false, mode: 'offline_fallback', data: null, reason: res?.reason || 'LLM unavailable or non-JSON response', piiRedactedCount: res?.piiRedactedCount || 0, ...normalizeLlmUsage(null, userPayload, '') };
+}
 
 const aiNodes = [
   {
@@ -93,13 +120,14 @@ const aiNodes = [
     color: '#722ed1',
     inputs: ['in'],
     outputs: ['main', 'error'],
-    defaultConfig: { targetCollection: 'latticeAssets', targetRecordId: 0, severity: 'medium', recommendation: '', evidence: null, aiEmployee: 'ops_triage', toolName: 'triage_flow_event' },
+    defaultConfig: { targetCollection: 'latticeAssets', targetRecordId: 0, severity: 'medium', recommendation: '', prompt: '', evidence: null, aiEmployee: 'ops_triage', toolName: 'triage_flow_event', model: '', temperature: 0.2, maxTokens: 1000 },
     inputSchema: {
       fields: [
         { name: 'targetCollection', label: 'Target Collection', type: 'collection', required: true },
         { name: 'targetRecordId', label: 'Target Record ID', type: 'string' },
         { name: 'severity', label: 'Severity', type: 'select', options: ['low', 'medium', 'high', 'critical'] },
         { name: 'recommendation', label: 'Recommendation', type: 'textarea', required: true },
+        { name: 'prompt', label: 'Agent Triage Prompt', type: 'textarea' },
         { name: 'evidence', label: 'Evidence (JSON)', type: 'json' },
       ],
     },
@@ -108,6 +136,7 @@ const aiNodes = [
       const evalCtx = buildEvalContext(context, input);
       const interp = pickHelper(helpers, 'interpolateTemplate', interpolateTemplate);
       const san = pickHelper(helpers, 'sanitizePlainObject', sanitizePlainObject);
+      const env = options?.env || process.env;
       const targetCollection = String(interp(cfg.targetCollection || 'latticeAssets', evalCtx)).trim();
       const orgId = resolveOrgId(context, input, options, cfg);
       const allowed = typeof helpers?.isAllowlistedTargetCollection === 'function' ? helpers.isAllowlistedTargetCollection(targetCollection) : isAllowlistedTargetCollection(targetCollection);
@@ -118,13 +147,45 @@ const aiNodes = [
 
       const rawRecId = interp(cfg.targetRecordId ?? evalCtx.data?.recordId ?? 0, evalCtx);
       const targetRecordId = Number.isFinite(Number(rawRecId)) ? Number(rawRecId) : 0;
-      const recommendation = String(interp(cfg.recommendation || cfg.summary || `AI triage recommendation (${node?.id || 'ai.agent'})`, evalCtx));
-      const severity = String(interp(cfg.severity || 'medium', evalCtx));
-      const evidence = san(interp(cfg.evidence ?? { eventType: evalCtx.event?.type || null, data: evalCtx.data, dmn: evalCtx.dmn || {} }, evalCtx));
+      const baseRec = String(interp(cfg.recommendation || cfg.summary || `AI triage recommendation (${node?.id || 'ai.agent'})`, evalCtx));
+      const rawSev = String(interp(cfg.severity || 'medium', evalCtx)).toLowerCase();
+      const baseSeverity = VALID_SEVERITIES.has(rawSev) ? rawSev : 'medium';
+      const baseEvidence = san(interp(cfg.evidence ?? { eventType: evalCtx.event?.type || null, data: evalCtx.data, dmn: evalCtx.dmn || {} }, evalCtx));
 
-      if (options?.dryRun) {
-        return { output: { target: 'latticeAgentProposals', targetCollection, targetRecordId, severity, recommendation, state: 'simulated', simulated: true }, nextPort: 'main' };
+      if (options?.dryRun && typeof options?.fetchImpl !== 'function' && typeof options?.callLlmJson !== 'function') {
+        const svc = await resolveActiveLlmService(db, env);
+        if (svc.configured) {
+          const base = String(svc.baseURL || '').replace(/\/+$/, '');
+          const endpoint = base.endsWith('/chat/completions') ? base : `${base}/chat/completions`;
+          await assertSafeLlmUrl(endpoint, { env, connectorVault: options?.connectorVault, lookupImpl: options?.lookupImpl, allowExplicitHost: svc.allowExplicitHost || null, skipDnsCheck: typeof options?.lookupImpl !== 'function' });
+        }
+        return { output: { target: 'latticeAgentProposals', targetCollection, targetRecordId, severity: baseSeverity, recommendation: baseRec, mode: 'simulated', state: 'simulated', simulated: true }, nextPort: 'main' };
       }
+
+      const userPayload = { instruction: cfg.prompt ? String(interp(cfg.prompt, evalCtx)) : baseRec, targetCollection, targetRecordId, defaultSeverity: baseSeverity, event: evalCtx.event || null, data: evalCtx.data || {}, dmn: evalCtx.dmn || {} };
+      const llmCaller = typeof options?.callLlmJson === 'function' ? options.callLlmJson : callLlmJson;
+      const llmRes = await llmCaller({
+        db, env, systemPrompt: 'You are an enterprise operations triage agent. Respond ONLY with strict JSON matching schema: {"severity":"low"|"medium"|"high"|"critical","recommendation":string,"summary"?:string,"evidence"?:object}.',
+        userPayload, model: cfg.model ? String(interp(cfg.model, evalCtx)).trim() : undefined,
+        temperature: cfg.temperature ?? 0.2, maxTokens: cfg.maxTokens ?? 1000, timeoutMs: cfg.timeoutMs ?? 15000,
+        fetchImpl: options?.fetchImpl, lookupImpl: options?.lookupImpl, connectorVault: options?.connectorVault,
+      });
+
+      const useLlm = Boolean(llmRes?.ok && isPlainObject(llmRes.data));
+      const llmSev = useLlm ? String(llmRes.data.severity || '').trim().toLowerCase() : '';
+      const severity = VALID_SEVERITIES.has(llmSev) ? llmSev : baseSeverity;
+      const llmRec = useLlm && typeof llmRes.data.recommendation === 'string' ? llmRes.data.recommendation.trim().slice(0, 2000) : '';
+      const recommendation = llmRec || baseRec;
+      const llmSum = useLlm && typeof llmRes.data.summary === 'string' ? llmRes.data.summary.trim().slice(0, 500) : '';
+      const evidence = useLlm && (isPlainObject(llmRes.data.evidence) || llmSum)
+        ? san({ ...(isPlainObject(baseEvidence) ? baseEvidence : {}), ...(isPlainObject(llmRes.data.evidence) ? llmRes.data.evidence : {}), ...(llmSum ? { summary: llmSum } : {}) })
+        : baseEvidence;
+      const mode = useLlm ? 'llm' : 'offline_fallback';
+      const { usage, tokenSource } = useLlm
+        ? normalizeLlmUsage(llmRes.usage, userPayload, llmRes.data)
+        : normalizeLlmUsage(null, userPayload, { severity, recommendation });
+      const meta = { mode, severity, recommendation, usage, tokenSource, piiRedactedCount: llmRes?.piiRedactedCount || 0, ...(useLlm && llmRes.model ? { model: llmRes.model } : {}) };
+
       const eventId = String(evalCtx.event?.id || context?.runUid || crypto.randomUUID());
       const proposalRepo = db?.getRepository?.('latticeAgentProposals');
       if (typeof proposalRepo?.create === 'function') {
@@ -138,7 +199,7 @@ const aiNodes = [
             targetCollection, targetRecordId, recordFingerprint: fp.slice(0, 32), recommendation, evidence, state: 'proposed',
           },
         });
-        return { output: { target: 'latticeAgentProposals', id: val(created, 'id') ?? null, receiptKey, state: 'proposed' }, nextPort: 'main' };
+        return { output: { target: 'latticeAgentProposals', id: val(created, 'id') ?? null, receiptKey, state: 'proposed', ...meta }, nextPort: 'main' };
       }
       const queueRepo = db?.getRepository?.('latticeAiApprovalQueue');
       if (typeof queueRepo?.create === 'function') {
@@ -151,11 +212,11 @@ const aiNodes = [
             proposedArgs: evidence, diffPreview: recommendation, riskLevel: severity, status: 'pending',
           },
         });
-        return { output: { target: 'latticeAiApprovalQueue', id: val(created, 'id') ?? null, status: 'pending' }, nextPort: 'main' };
+        return { output: { target: 'latticeAiApprovalQueue', id: val(created, 'id') ?? null, status: 'pending', ...meta }, nextPort: 'main' };
       }
       throw fail('AGENT_PROPOSAL_REPO_UNAVAILABLE', 503, 'No proposal repository (latticeAgentProposals or latticeAiApprovalQueue) available');
     },
   },
 ];
 
-module.exports = { aiNodes };
+module.exports = { aiNodes, callLlmJson, normalizeLlmUsage };

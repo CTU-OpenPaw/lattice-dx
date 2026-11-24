@@ -9,11 +9,12 @@
 'use strict';
 
 const { defineToolSchema } = require('./schema-helper');
-const { recordAiAuditLog, redactAuditText, normalizeToolPermissionsMap } = require('./ai-schemas');
+const { recordAiAuditLog, redactAuditText, normalizeToolPermissionsMap, resolveDefaultOrganizationId } = require('./ai-schemas');
 const {
   redactPiiText,
   redactPiiDeep,
   estimateTokens,
+  normalizeTokenUsage,
   estimateCostUsd,
   checkAndConsumeAiQuota,
   hydrateQuotaBucketFromDb,
@@ -22,6 +23,7 @@ const {
 const { createBuilderTools } = require('./ai-builder-tools');
 const { createOperationalTools } = require('./ai-operational-tools');
 const { createSurfaceAndCreativeTools } = require('./ai-surface-creative-tools');
+const { orchestrateEnterpriseAppBuild, verifyEnterpriseApp } = require('./app-builder-orchestrator');
 
 const ADMIN_BUILDER_TOOL_NAMES = [
   'dxos_inspect_architecture',
@@ -73,6 +75,7 @@ const ALLOWED_BLOCK_MODELS = [
   'DxosPortalHeroBlockModel', 'DxosKpiMetricBlockModel', 'DxosContextTelemetryBlockModel',
   'DxosAiProposalBlockModel', 'DxosWorkflowTasksBlockModel', 'DxosParaVaultBlockModel',
   'DxosCreativeStudioBlockModel', 'DxosRecordWorkbenchBlockModel',
+  'DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel', 'DxosWmsOpsBlockModel',
   'NativeTableBlock', 'NativeFormBlock', 'NativeDetailsBlock',
   'table', 'createForm', 'editForm', 'details', 'filterForm', 'kanban', 'chart', 'calendar', 'list', 'gridCard', 'markdown', 'actionPanel',
 ];
@@ -132,7 +135,7 @@ async function isStudioAdmin(ctx, db) {
   });
 }
 
-async function resolveActorScope(ctx, db) {
+async function resolveActorScope(ctx, db, { defaultFallback = 'native-ui-lab' } = {}) {
   const user = ctx?.state?.currentUser || ctx?.auth?.user;
   const userId = val(user, 'id');
   if (!userId) throw failTool('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập để thực thi công cụ.');
@@ -153,7 +156,9 @@ async function resolveActorScope(ctx, db) {
     ? String(ctx.state.dxosTargetOrganizationId).trim()
     : '';
   const empOrg = val(employee, 'organizationId') || '';
-  const organizationId = targetOrgOverride || empOrg || String(ctx?.state?.defaultOrgId || 'native-ui-lab');
+  const organizationId = targetOrgOverride
+    || empOrg
+    || (await resolveDefaultOrganizationId(targetDb, { ctx, fallback: defaultFallback }));
   const employeeId = (targetOrgOverride && empOrg && empOrg !== targetOrgOverride)
     ? null
     : (val(employee, 'id') || null);
@@ -290,16 +295,37 @@ function createAuditedTool(spec) {
         const checked = schemaHelper.validate(preparedArgs);
         if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
         const result = await spec.run(ctx, db, actor, checked.value);
-        const completionTokens = estimateTokens(result);
+        const estCompletion = estimateTokens(result);
+        const providerUsage = result?.usage || result?._llmUsage || ctx?.state?.dxosLlmUsage || null;
+        const usageInfo = normalizeTokenUsage(
+          providerUsage
+            ? { usage: providerUsage }
+            : { promptTokens, completionTokens: estCompletion, tokenSource: 'estimated' },
+          promptTokens,
+          estCompletion,
+        );
         const modelName = ctx?.state?.dxosModelName || ctx?.state?.modelName || '';
         const estimatedCostUsd = isHitlApprovedReplay
           ? 0
-          : estimateCostUsd(promptTokens, completionTokens, modelName, process.env);
+          : estimateCostUsd(usageInfo.promptTokens, usageInfo.completionTokens, modelName, process.env);
         const redactedArgs = redactPiiDeep(checked.value);
         const redactedRes = redactPiiText(redactAuditText(JSON.stringify(result).slice(0, 600)));
         const piiRedactedCount = redactedArgs.count + redactedRes.count;
+        const usagePayload = {
+          promptTokens: usageInfo.promptTokens,
+          completionTokens: usageInfo.completionTokens,
+          totalTokens: usageInfo.totalTokens,
+        };
         if (!isHitlApprovedReplay) {
-          await recordQuotaUsagePersistent(db, actor, { promptTokens, completionTokens, costUsd: estimatedCostUsd, piiRedactedCount });
+          await recordQuotaUsagePersistent(db, actor, {
+            promptTokens: usageInfo.promptTokens,
+            completionTokens: usageInfo.completionTokens,
+            totalTokens: usageInfo.totalTokens,
+            usage: providerUsage || usagePayload,
+            tokenSource: usageInfo.tokenSource,
+            costUsd: estimatedCostUsd,
+            piiRedactedCount,
+          });
         }
         await recordAiAuditLog(db, {
           actorUserId: actor.userId,
@@ -311,8 +337,11 @@ function createAuditedTool(spec) {
           argsSummary: redactedArgs.value,
           status: result?.degraded ? 'degraded' : 'allowed',
           durationMs: Date.now() - started,
-          promptTokens,
-          completionTokens,
+          promptTokens: usageInfo.promptTokens,
+          completionTokens: usageInfo.completionTokens,
+          totalTokens: usageInfo.totalTokens,
+          usage: providerUsage || usagePayload,
+          tokenSource: usageInfo.tokenSource,
           estimatedCostUsd,
           piiRedactedCount,
           resultSummary: redactedRes.text,
@@ -333,6 +362,8 @@ function createAuditedTool(spec) {
           durationMs: Date.now() - started,
           promptTokens,
           completionTokens: 0,
+          totalTokens: promptTokens,
+          tokenSource: 'estimated',
           estimatedCostUsd: estimateCostUsd(promptTokens, 0, '', process.env),
           piiRedactedCount: redactedArgs.count + redactedErr.count,
           errorCode: err?.code || 'TOOL_ERROR',
@@ -368,9 +399,78 @@ function createDxosTools() {
     ALLOWED_BLOCK_MODELS,
     SEARCHABLE_COLLECTIONS,
   };
+  const surfaceTools = createSurfaceAndCreativeTools(shared).map((tool) => {
+    if (tool?.definition?.name !== 'dxos_provision_role_workspace') return tool;
+    const orchestratorTool = createAuditedTool({
+      name: 'dxos_provision_role_workspace',
+      adminOnly: true,
+      defaultPermission: 'ASK',
+      introduction: {
+        title: 'Kiến trúc sư Ứng dụng Doanh nghiệp & Phân hệ Mới',
+        about: 'Dựng trọn gói phân hệ (Snapshot + Schema/Relations/RLS/OpenAPI + RBAC + Portal 10 BlockModels + DMN + LatticeFlow v2 + Stock n8n + Verifier & 2-round Self-Healing) hoặc kiểm chứng ứng dụng.',
+      },
+      description: 'End-to-end Enterprise App Builder & Workspace Architect: provision role/workspace/AI (default), build full-stack enterprise app with deterministic verification & 2-round self-healing (operation="build_enterprise_app"), or verify existing app (operation="verify_app").',
+      schema: {
+        description: 'Role-to-Workspace & Full-Stack Enterprise App Builder request.',
+        properties: {
+          operation: { type: 'string', default: 'provision_role_workspace', enum: ['provision_role_workspace', 'build_enterprise_app', 'verify_app'] },
+          roleName: { type: 'string', maxLength: 42 },
+          roleTitle: { type: 'string', maxLength: 100 },
+          portalSlug: { type: 'string', maxLength: 40 },
+          pageTitle: { type: 'string', maxLength: 100 },
+          collectionName: { type: 'string', maxLength: 64 },
+          collectionTitle: { type: 'string', maxLength: 100 },
+          fields: { type: 'array', items: { type: 'object' } },
+          lockedFields: { type: 'array', items: { type: 'string' } },
+          creativeTheme: { type: 'string', enum: ['industrial-cockpit', 'emerald-ops', 'amber-alert', 'royal-indigo', 'clean-light'], default: 'amber-alert' },
+          blocks: { type: 'array', items: { type: 'object' } },
+          dmnTable: { type: 'object' },
+          dmnTableKey: { type: 'string', maxLength: 80 },
+          flowGraph: { type: 'object' },
+          flowRuleKey: { type: 'string', maxLength: 80 },
+          n8nWorkflow: { type: 'object' },
+          n8nWorkflowId: { type: 'string', maxLength: 80 },
+          n8nConnectorKey: { type: 'string', maxLength: 64 },
+          activateN8n: { type: 'boolean', default: true },
+          maxHealRounds: { type: 'integer', default: 2 },
+          target: { type: 'object' },
+          aiUsername: { type: 'string', maxLength: 60 },
+          aiNickname: { type: 'string', maxLength: 120 },
+          dryRun: { type: 'boolean', default: false },
+        },
+      },
+      async run(ctx, db, actor, args) {
+        if (args.operation === 'verify_app') {
+          const target = args.target && typeof args.target === 'object' ? { ...args.target } : {};
+          return verifyEnterpriseApp(ctx, db, actor, {
+            ...target,
+            ...(args.collectionName ? { collectionName: args.collectionName } : {}),
+            ...(args.portalSlug ? { portalSlug: args.portalSlug } : {}),
+            ...(args.pageTitle ? { pageTitle: args.pageTitle } : {}),
+            ...(args.roleName ? { roleName: args.roleName } : {}),
+            ...(args.lockedFields ? { lockedFields: args.lockedFields } : {}),
+            ...(args.dmnTableKey ? { dmnTableKey: args.dmnTableKey } : {}),
+            ...(args.flowRuleKey ? { flowRuleKey: args.flowRuleKey } : {}),
+            ...(args.n8nWorkflowId ? { n8nWorkflowId: args.n8nWorkflowId } : {}),
+          });
+        }
+        return orchestrateEnterpriseAppBuild(ctx, db, actor, args);
+      },
+    });
+    return {
+      ...orchestratorTool,
+      async invoke(ctx, rawArgs = {}) {
+        const op = rawArgs && typeof rawArgs === 'object' ? rawArgs.operation : undefined;
+        if (op === 'build_enterprise_app' || op === 'verify_app') {
+          return orchestratorTool.invoke(ctx, rawArgs);
+        }
+        return tool.invoke(ctx, rawArgs);
+      },
+    };
+  });
   return [
     ...createBuilderTools(shared),
-    ...createSurfaceAndCreativeTools(shared),
+    ...surfaceTools,
     ...createOperationalTools(shared),
   ];
 }

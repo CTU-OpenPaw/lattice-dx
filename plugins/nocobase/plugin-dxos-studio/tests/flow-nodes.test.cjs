@@ -1090,3 +1090,136 @@ test('security regressions: JSON-stringified secrets, IPv6 AAAA DNS, header scru
   });
   assert.equal(observedDepth, 4);
 });
+
+test('Task 11: ai.agent invokes real LLM gateway (callLlmJson) with structured JSON schema, usage telemetry, and offline_fallback', async () => {
+  const reg = createDefaultRegistry();
+  const agentNode = reg.getNodeType('ai.agent');
+  const { callLlmJson } = require('../src/server/flow/nodes/ai');
+  assert.equal(typeof callLlmJson, 'function');
+
+  // 1. Offline / unconfigured fallback tags mode='offline_fallback' & tokenSource='estimated'
+  const offlineDb = makeMockDb({ llmServices: [] });
+  const offlineRes = await agentNode.execute({
+    config: {
+      targetCollection: 'latticeAssets',
+      targetRecordId: 12,
+      severity: 'high',
+      recommendation: 'Inspect compressor unit',
+    },
+    context: { organizationId: 'org-a', event: { id: 'evt_off_1', type: 'asset.alert' } },
+    db: offlineDb,
+    options: { env: {} },
+  });
+  assert.equal(offlineRes.nextPort, 'main');
+  assert.equal(offlineRes.output.mode, 'offline_fallback');
+  assert.equal(offlineRes.output.tokenSource, 'estimated');
+  assert.ok(offlineRes.output.usage.promptTokens > 0);
+  assert.ok(offlineRes.output.usage.completionTokens > 0);
+  assert.equal(
+    offlineRes.output.usage.totalTokens,
+    offlineRes.output.usage.promptTokens + offlineRes.output.usage.completionTokens,
+  );
+  assert.equal(offlineDb.store.latticeAgentProposals[0].recommendation, 'Inspect compressor unit');
+
+  // 2. Configured real LLM gateway returns structured JSON, mode='llm', and provider token usage
+  const llmDb = makeMockDb({
+    llmServices: [
+      {
+        id: 1,
+        name: 'local-9router',
+        provider: 'openai-completions',
+        enabled: true,
+        options: { baseURL: 'https://llm.example.com/v1', apiKey: 'sk-agent-secret-999' },
+        enabledModels: { models: [{ value: 'ag/gemini-3.8-flash' }] },
+      },
+    ],
+  });
+  let sentPayload = null;
+  const llmRes = await agentNode.execute({
+    config: {
+      targetCollection: 'latticeAssets',
+      targetRecordId: 25,
+      severity: 'medium',
+      recommendation: 'Fallback text',
+      prompt: 'Triage excursion for customer alice@example.com phone 0912345678',
+    },
+    context: {
+      organizationId: 'org-a',
+      event: { id: 'evt_llm_2', type: 'telemetry.alert' },
+      data: { assetCode: 'CH-25', temperature: -8.5 },
+    },
+    db: llmDb,
+    options: {
+      env: {},
+      fetchImpl: async (_url, init) => {
+        sentPayload = JSON.parse(init.body);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            model: 'ag/gemini-3.8-flash',
+            usage: { prompt_tokens: 140, completion_tokens: 45, total_tokens: 185 },
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    severity: 'critical',
+                    recommendation: 'Dispatch technician to inspect CH-25 condenser coil immediately.',
+                    summary: 'Thermal drift detected on CH-25',
+                    evidence: { rootCause: 'condenser_drift', observedTempC: -8.5 },
+                  }),
+                },
+              },
+            ],
+          }),
+        };
+      },
+    },
+  });
+
+  assert.equal(llmRes.nextPort, 'main');
+  assert.equal(llmRes.output.mode, 'llm');
+  assert.equal(llmRes.output.tokenSource, 'provider');
+  assert.deepEqual(llmRes.output.usage, { promptTokens: 140, completionTokens: 45, totalTokens: 185 });
+  assert.equal(llmRes.output.severity, 'critical');
+  assert.equal(llmRes.output.recommendation, 'Dispatch technician to inspect CH-25 condenser coil immediately.');
+  assert.equal(sentPayload.response_format?.type, 'json_object');
+  const sentStr = JSON.stringify(sentPayload.messages);
+  assert.equal(sentStr.includes('alice@example.com'), false);
+  assert.equal(sentStr.includes('0912345678'), false);
+  assert.equal(llmDb.store.latticeAgentProposals[0].recommendation, 'Dispatch technician to inspect CH-25 condenser coil immediately.');
+
+  // 3. Invalid JSON or HTTP 500 from LLM falls back cleanly to offline_fallback without crashing flow
+  const errFallbackRes = await agentNode.execute({
+    config: {
+      targetCollection: 'latticeAssets',
+      targetRecordId: 26,
+      severity: 'high',
+      recommendation: 'Deterministic safety recommendation',
+    },
+    context: { organizationId: 'org-a', event: { id: 'evt_err_3', type: 'asset.alert' } },
+    db: llmDb,
+    options: {
+      env: {},
+      fetchImpl: async () => ({ ok: false, status: 503, text: async () => 'upstream busy' }),
+    },
+  });
+  assert.equal(errFallbackRes.nextPort, 'main');
+  assert.equal(errFallbackRes.output.mode, 'offline_fallback');
+  assert.equal(errFallbackRes.output.tokenSource, 'estimated');
+  assert.equal(errFallbackRes.output.recommendation, 'Deterministic safety recommendation');
+
+  // 4. SSRF URL in llmServices must STILL fail closed before fetchImpl
+  const ssrfDb = makeMockDb({
+    llmServices: [{ id: 2, name: 'bad', enabled: true, options: { baseURL: 'http://169.254.169.254/v1', apiKey: 'sk-123' } }],
+  });
+  await assert.rejects(
+    () => agentNode.execute({
+      config: { targetCollection: 'latticeAssets', targetRecordId: 27, recommendation: 'Test' },
+      context: { organizationId: 'org-a' },
+      db: ssrfDb,
+      options: { env: {} },
+    }),
+    /SSRF|metadata|blocked|UNSAFE/i,
+  );
+});

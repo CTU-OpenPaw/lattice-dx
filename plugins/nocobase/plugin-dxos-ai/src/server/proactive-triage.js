@@ -11,7 +11,16 @@
 const { createHash } = require('node:crypto');
 const path = require('node:path');
 const { enqueueAiApproval } = require('./ai-hitl');
-const { redactPiiText, redactPiiDeep } = require('./ai-governance');
+const { recordAiAuditLog } = require('./ai-schemas');
+const {
+  redactPiiText,
+  redactPiiDeep,
+  redactPiiForLlm,
+  estimateTokens,
+  estimateCostUsd,
+  normalizeTokenUsage,
+  recordQuotaUsagePersistent,
+} = require('./ai-governance');
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -75,6 +84,69 @@ function loadFoundationDataGovernance() {
         '../../../plugin-lattice-foundation/dist/server/data-governance',
       ];
   return loadSiblingModule(candidates);
+}
+
+function loadFoundationPgRls() {
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-lattice-foundation/dist/server/pg-rls',
+        '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
+        '../../../plugin-lattice-foundation/dist/server/pg-rls',
+        '../../../plugin-lattice-foundation/src/server/pg-rls',
+      ]
+    : [
+        '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
+        '../../../plugin-lattice-foundation/src/server/pg-rls',
+        '../../../plugin-lattice-foundation/dist/server/pg-rls',
+      ];
+  return loadSiblingModule(candidates);
+}
+
+function loadFlowLlmClient() {
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-dxos-studio/dist/server/flow/llm-client',
+        '@latticedx/plugin-dxos-studio/src/server/flow/llm-client',
+        '../../../plugin-dxos-studio/dist/server/flow/llm-client',
+        '../../../plugin-dxos-studio/src/server/flow/llm-client',
+      ]
+    : [
+        '@latticedx/plugin-dxos-studio/src/server/flow/llm-client',
+        '../../../plugin-dxos-studio/src/server/flow/llm-client',
+        '../../../plugin-dxos-studio/dist/server/flow/llm-client',
+      ];
+  return loadSiblingModule(candidates);
+}
+
+async function runWithOptionalTenantRls(db, orgId, fn) {
+  const pgRls = loadFoundationPgRls();
+  if (
+    pgRls
+    && typeof pgRls.canUsePgRlsSession === 'function'
+    && pgRls.canUsePgRlsSession(db)
+    && !pgRls.getActiveRlsContext?.()?.transaction
+    && ORG_ID_RE.test(String(orgId || ''))
+    && typeof pgRls.withTenantRlsContext === 'function'
+  ) {
+    return pgRls.withTenantRlsContext(db, String(orgId), fn);
+  }
+  return fn(null);
+}
+
+async function runWithOptionalSystemRlsBypass(db, fn) {
+  const pgRls = loadFoundationPgRls();
+  if (
+    pgRls
+    && typeof pgRls.canUsePgRlsSession === 'function'
+    && pgRls.canUsePgRlsSession(db)
+    && !pgRls.getActiveRlsContext?.()?.transaction
+    && typeof pgRls.withSystemRlsBypass === 'function'
+  ) {
+    return pgRls.withSystemRlsBypass(db, fn);
+  }
+  return fn(null);
 }
 
 async function recordTriageLineageSafely(db, {
@@ -404,6 +476,7 @@ function buildTriageRecommendation({
     }).value;
 
     return {
+      mode: 'offline_fallback',
       alarmId,
       alarmCode,
       severity,
@@ -454,6 +527,7 @@ function buildTriageRecommendation({
     }).value;
 
     return {
+      mode: 'offline_fallback',
       alarmId,
       alarmCode,
       severity,
@@ -496,6 +570,7 @@ function buildTriageRecommendation({
     ],
   }).value;
   return {
+    mode: 'offline_fallback',
     alarmId,
     alarmCode,
     severity,
@@ -587,6 +662,187 @@ async function runWithOrgSweepLock(orgId, fn) {
   }
 }
 
+const VALID_TRIAGE_RISK_LEVELS = new Set(['medium', 'high', 'critical']);
+const VALID_TRIAGE_TOOLS = new Set(['dxos_wms_hold_lot', 'dxos_twin_set_desired', 'dxos_alarm_action']);
+
+async function callLlmJson({
+  db,
+  env = process.env,
+  systemPrompt = '',
+  userPayload = {},
+  model,
+  temperature = 0.2,
+  maxTokens = 1000,
+  timeoutMs = 15000,
+  fetchImpl,
+  lookupImpl,
+  connectorVault,
+} = {}) {
+  const llmClient = loadFlowLlmClient();
+  if (!llmClient || typeof llmClient.callConfiguredLlm !== 'function') {
+    const promptTokens = estimateTokens(userPayload);
+    return {
+      ok: false,
+      mode: 'offline_fallback',
+      data: null,
+      reason: 'flow/llm-client unavailable',
+      usage: { promptTokens, completionTokens: 1, totalTokens: promptTokens + 1 },
+      tokenSource: 'estimated',
+    };
+  }
+  const redactedInput = redactPiiForLlm(userPayload).redacted;
+  const messages = [
+    ...(systemPrompt ? [{ role: 'system', content: String(systemPrompt) }] : []),
+    { role: 'user', content: redactedInput ?? {} },
+  ];
+  const res = await llmClient.callConfiguredLlm({
+    db,
+    env,
+    messages,
+    model,
+    temperature,
+    maxTokens,
+    responseFormat: 'json',
+    timeoutMs,
+    fetchImpl,
+    lookupImpl,
+    connectorVault,
+  });
+  if (res?.ok && res.parsedJson && typeof res.parsedJson === 'object' && !Array.isArray(res.parsedJson)) {
+    const norm = normalizeTokenUsage(
+      res.usage ? { usage: res.usage } : { promptTokens: estimateTokens(redactedInput), completionTokens: estimateTokens(res.content), tokenSource: 'estimated' },
+      estimateTokens(redactedInput),
+      estimateTokens(res.content),
+    );
+    return {
+      ok: true,
+      mode: 'llm',
+      data: res.parsedJson,
+      model: res.model || null,
+      piiRedactedCount: res.piiRedactedCount || 0,
+      usage: { promptTokens: norm.promptTokens, completionTokens: norm.completionTokens, totalTokens: norm.totalTokens },
+      tokenSource: norm.tokenSource,
+    };
+  }
+  const promptTokens = estimateTokens(redactedInput);
+  return {
+    ok: false,
+    mode: 'offline_fallback',
+    data: null,
+    reason: res?.reason || 'LLM unconfigured or invalid JSON response',
+    piiRedactedCount: res?.piiRedactedCount || 0,
+    usage: { promptTokens, completionTokens: 1, totalTokens: promptTokens + 1 },
+    tokenSource: 'estimated',
+  };
+}
+
+async function refineTriageRecommendationWithLlm({
+  db,
+  baseRec,
+  alarm,
+  context,
+  env = process.env,
+  fetchImpl,
+  lookupImpl,
+  connectorVault,
+  customCallLlmJson,
+} = {}) {
+  const userPayload = {
+    alarm: {
+      id: baseRec.alarmId,
+      code: baseRec.alarmCode,
+      name: redactPiiText(String(val(alarm, 'name') || '')).text,
+      severity: baseRec.severity,
+      status: String(val(alarm, 'status') || 'open'),
+    },
+    baselineRecommendation: {
+      toolName: baseRec.toolName,
+      targetCollection: baseRec.targetCollection,
+      targetRecordId: baseRec.targetRecordId,
+      riskLevel: baseRec.riskLevel,
+      causalSummary: baseRec.causalSummary,
+      proposalText: baseRec.proposalText,
+    },
+    affectedLots: (context?.stockLots || []).slice(0, 5).map(summarizeLot),
+    downstreamOrders: (context?.downstreamOrders || []).slice(0, 5),
+    observedTempC: parseFinite(val(context?.latestTelemetry, 'numericValue')),
+  };
+
+  const caller = typeof customCallLlmJson === 'function' ? customCallLlmJson : callLlmJson;
+  const llmOut = await caller({
+    db,
+    env,
+    systemPrompt: [
+      'You are LatticeDX Proactive Incident Triage AI.',
+      'Respond ONLY with strict JSON matching schema:',
+      '{"toolName":"dxos_wms_hold_lot"|"dxos_twin_set_desired"|"dxos_alarm_action","riskLevel":"medium"|"high"|"critical","causalSummary":string,"proposalText":string,"reason":string}.',
+      'Preserve exact alarm/lot/order codes and never include PII.',
+    ].join(' '),
+    userPayload,
+    fetchImpl,
+    lookupImpl,
+    connectorVault,
+  });
+
+  if (llmOut?.ok && llmOut.data && typeof llmOut.data === 'object' && !Array.isArray(llmOut.data)) {
+    const parsed = llmOut.data;
+    const hasUsefulText = typeof parsed.proposalText === 'string' || typeof parsed.causalSummary === 'string' || typeof parsed.reason === 'string';
+    if (hasUsefulText) {
+      const nextCausal = typeof parsed.causalSummary === 'string' && parsed.causalSummary.trim()
+        ? redactPiiText(parsed.causalSummary.trim()).text.slice(0, 300)
+        : baseRec.causalSummary;
+      const nextProposal = typeof parsed.proposalText === 'string' && parsed.proposalText.trim()
+        ? redactPiiText(parsed.proposalText.trim()).text.slice(0, 500)
+        : baseRec.proposalText;
+      const rawRisk = String(parsed.riskLevel || '').trim().toLowerCase();
+      const nextRisk = VALID_TRIAGE_RISK_LEVELS.has(rawRisk) ? rawRisk : baseRec.riskLevel;
+      const nextReason = typeof parsed.reason === 'string' && parsed.reason.trim()
+        ? redactPiiText(parsed.reason.trim()).text.slice(0, 255)
+        : null;
+      const nextToolName = VALID_TRIAGE_TOOLS.has(parsed.toolName) && parsed.toolName === baseRec.toolName
+        ? parsed.toolName
+        : baseRec.toolName;
+
+      const nextArgs = { ...baseRec.proposedArgs };
+      if (nextReason) {
+        if (nextToolName === 'dxos_wms_hold_lot') nextArgs.reason = nextReason;
+        else if (nextToolName === 'dxos_alarm_action') nextArgs.note = nextReason;
+      }
+      const nextDiffPreview = baseRec.diffPreview && typeof baseRec.diffPreview === 'object'
+        ? { ...baseRec.diffPreview, summary: nextCausal }
+        : baseRec.diffPreview;
+
+      const norm = normalizeTokenUsage(
+        llmOut.usage ? { usage: llmOut.usage, tokenSource: llmOut.tokenSource } : { promptTokens: estimateTokens(userPayload), completionTokens: estimateTokens(nextProposal), tokenSource: 'estimated' },
+        estimateTokens(userPayload),
+        estimateTokens(nextProposal),
+      );
+      return {
+        ...baseRec,
+        mode: 'llm',
+        model: llmOut.model || null,
+        tokenSource: norm.tokenSource,
+        usage: { promptTokens: norm.promptTokens, completionTokens: norm.completionTokens, totalTokens: norm.totalTokens },
+        toolName: nextToolName,
+        riskLevel: nextRisk,
+        causalSummary: nextCausal,
+        proposalText: nextProposal,
+        proposedArgs: nextArgs,
+        diffPreview: nextDiffPreview,
+      };
+    }
+  }
+
+  const pTok = estimateTokens(userPayload);
+  const cTok = estimateTokens(baseRec.proposalText);
+  return {
+    ...baseRec,
+    mode: 'offline_fallback',
+    tokenSource: 'estimated',
+    usage: { promptTokens: pTok, completionTokens: cTok, totalTokens: pTok + cTok },
+  };
+}
+
 async function runProactiveIncidentTriage(db, {
   organizationId,
   actor = null,
@@ -595,6 +851,11 @@ async function runProactiveIncidentTriage(db, {
   dryRun = false,
   overwriteProposal = false,
   dedupWindowMs = TRIAGE_DEDUP_WINDOW_MS,
+  env = process.env,
+  fetchImpl,
+  lookupImpl,
+  connectorVault,
+  callLlmJson: customCallLlmJson,
 } = {}) {
   const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
   if (!ORG_ID_RE.test(orgId)) {
@@ -610,6 +871,9 @@ async function runProactiveIncidentTriage(db, {
         matchedAlarms: 0,
         proposalsCreated: 0,
         deduplicatedSkipped: 0,
+        mode: 'offline_fallback',
+        tokenSource: 'estimated',
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         proposals: [],
       };
     }
@@ -625,21 +889,34 @@ async function runProactiveIncidentTriage(db, {
         matchedAlarms: 0,
         proposalsCreated: 0,
         deduplicatedSkipped: 0,
+        mode: 'offline_fallback',
+        tokenSource: 'estimated',
+        usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         proposals: [],
       };
     }
     const alarmIdFilter = hasExplicitAlarmIds ? new Set(validAlarmIds) : null;
     const cap = Math.max(1, Math.min(50, Number(maxAlarms) || 10));
 
-    const rawRows = (await incRepo.find({
-      filter: {
-        organizationId: orgId,
-        status: { $in: ['open', 'acknowledged'] },
-        ...(alarmIdFilter ? { id: { $in: [...alarmIdFilter] } } : {}),
-      },
-      sort: ['-id'],
-      limit: 200,
-    })) || [];
+    const queueRepo = db?.getRepository?.('latticeAiApprovalQueue');
+    const { rawRows, existingPending } = await runWithOptionalTenantRls(db, orgId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      const foundAlarms = (await incRepo.find({
+        filter: {
+          organizationId: orgId,
+          status: { $in: ['open', 'acknowledged'] },
+          ...(alarmIdFilter ? { id: { $in: [...alarmIdFilter] } } : {}),
+        },
+        sort: ['-id'],
+        limit: 200,
+        ...txOpt,
+      })) || [];
+      const foundPending = !dryRun && queueRepo && typeof queueRepo.find === 'function'
+        ? ((await queueRepo.find({ filter: { organizationId: orgId, status: 'pending' }, sort: ['-id'], limit: 500, ...txOpt })) || [])
+          .filter((r) => val(r, 'organizationId') === orgId && String(val(r, 'status') || '').toLowerCase() === 'pending')
+        : [];
+      return { rawRows: foundAlarms, existingPending: foundPending };
+    });
 
     const activeAlarms = rawRows
       .filter((row) => {
@@ -656,12 +933,6 @@ async function runProactiveIncidentTriage(db, {
       })
       .slice(0, cap);
 
-    const queueRepo = db?.getRepository?.('latticeAiApprovalQueue');
-    const existingPending = !dryRun && queueRepo && typeof queueRepo.find === 'function'
-      ? ((await queueRepo.find({ filter: { organizationId: orgId, status: 'pending' }, sort: ['-id'], limit: 500 })) || [])
-        .filter((r) => val(r, 'organizationId') === orgId && String(val(r, 'status') || '').toLowerCase() === 'pending')
-      : [];
-
     const triageActor = {
       userId: Number(actor?.userId || 1),
       username: String(actor?.username || 'dxos-proactive-triage').slice(0, 120),
@@ -670,21 +941,43 @@ async function runProactiveIncidentTriage(db, {
 
     let proposalsCreated = 0;
     let deduplicatedSkipped = 0;
+    let anyLlm = false;
+    let anyProviderTokens = false;
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+    let totalTokens = 0;
     const proposals = [];
     const nowMs = Date.now();
     const sweepDedupKeys = new Set();
 
     for (const alarm of activeAlarms) {
-      const context = await correlateAlarmContext(db, orgId, alarm);
-      const rec = buildTriageRecommendation({ alarm, ...context });
-      if (!rec) {
+      const context = await runWithOptionalTenantRls(db, orgId, () => correlateAlarmContext(db, orgId, alarm));
+      const baseRec = buildTriageRecommendation({ alarm, ...context });
+      if (!baseRec) {
         continue;
       }
+
+      const rec = await refineTriageRecommendationWithLlm({
+        db,
+        baseRec,
+        alarm,
+        context,
+        env,
+        fetchImpl,
+        lookupImpl,
+        connectorVault,
+        customCallLlmJson,
+      });
+      if (rec.mode === 'llm') anyLlm = true;
+      if (rec.tokenSource === 'provider') anyProviderTokens = true;
+      totalPromptTokens += Number(rec.usage?.promptTokens || 0);
+      totalCompletionTokens += Number(rec.usage?.completionTokens || 0);
+      totalTokens += Number(rec.usage?.totalTokens || 0);
 
       if (!dryRun) {
         const existingProposal = String(val(alarm, 'proposal') || '').trim();
         if (!existingProposal || overwriteProposal === true) {
-          await updateIncidentProposalSafely(incRepo, alarm, rec.proposalText);
+          await runWithOptionalTenantRls(db, orgId, () => updateIncidentProposalSafely(incRepo, alarm, rec.proposalText));
         }
 
         const sweepKey = buildApprovalDedupKey({
@@ -702,6 +995,10 @@ async function runProactiveIncidentTriage(db, {
             && db?.sequelize?.getDialect?.() === 'postgres'
             && typeof db?.sequelize?.query === 'function'
           ) {
+            const pgRls = loadFoundationPgRls();
+            if (pgRls && typeof pgRls.canUsePgRlsSession === 'function' && pgRls.canUsePgRlsSession(db) && typeof pgRls.setTransactionRlsOrg === 'function') {
+              await pgRls.setTransactionRlsOrg(db, orgId, transaction);
+            }
             await db.sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:lockKey))', {
               replacements: { lockKey: `latticedx:triage:${orgId}` },
               transaction,
@@ -734,6 +1031,30 @@ async function runProactiveIncidentTriage(db, {
           ? await db.sequelize.transaction(enqueueTx)
           : await enqueueTx(null);
 
+        if (rec.mode === 'llm') {
+          const llmCostUsd = estimateCostUsd(rec.usage.promptTokens, rec.usage.completionTokens, rec.model || '', env);
+          await recordQuotaUsagePersistent(db, triageActor, {
+            usage: rec.usage,
+            tokenSource: rec.tokenSource,
+            costUsd: llmCostUsd,
+            piiRedactedCount: 0,
+          });
+          await runWithOptionalTenantRls(db, orgId, () => recordAiAuditLog(db, {
+            actorUserId: triageActor.userId,
+            actorUsername: triageActor.username,
+            organizationId: orgId,
+            channel: 'proactive-triage-llm',
+            aiEmployee: 'dxos-coordinator',
+            toolName: 'proactive_triage_llm',
+            argsSummary: { alarmId: rec.alarmId, alarmCode: rec.alarmCode, mode: rec.mode },
+            status: 'allowed',
+            usage: rec.usage,
+            tokenSource: rec.tokenSource,
+            estimatedCostUsd: llmCostUsd,
+            resultSummary: rec.proposalText,
+          }));
+        }
+
         if (outcome.duplicated) {
           deduplicatedSkipped += 1;
           proposals.push({ ...rec, status: 'deduplicated_skipped', approvalId: null });
@@ -745,7 +1066,7 @@ async function runProactiveIncidentTriage(db, {
         existingPending.push(created);
         proposalsCreated += 1;
 
-        await recordTriageLineageSafely(db, {
+        await runWithOptionalTenantRls(db, orgId, () => recordTriageLineageSafely(db, {
           organizationId: orgId,
           alarmId: rec.alarmId,
           alarmCode: rec.alarmCode,
@@ -755,8 +1076,11 @@ async function runProactiveIncidentTriage(db, {
             targetCollection: rec.targetCollection,
             targetRecordId: rec.targetRecordId,
             severity: rec.severity,
+            mode: rec.mode,
+            tokenSource: rec.tokenSource,
+            usage: rec.usage,
           },
-        });
+        }));
 
         proposals.push({ ...rec, status: 'pending', approvalId: created.id });
       } else {
@@ -770,6 +1094,9 @@ async function runProactiveIncidentTriage(db, {
       matchedAlarms: activeAlarms.length,
       proposalsCreated,
       deduplicatedSkipped,
+      mode: anyLlm ? 'llm' : 'offline_fallback',
+      tokenSource: anyProviderTokens ? 'provider' : 'estimated',
+      usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens, totalTokens },
       proposals,
     };
   });
@@ -789,7 +1116,11 @@ function startProactiveTriageScheduler(db, { env = process.env, intervalMs } = {
     try {
       const incRepo = db?.getRepository?.('latticeIncidentCases');
       if (!incRepo || typeof incRepo.find !== 'function') return;
-      const rows = (await incRepo.find({ filter: { status: { $in: ['open', 'acknowledged'] } }, limit: 200 })) || [];
+      const rows = await runWithOptionalSystemRlsBypass(db, (transaction) => incRepo.find({
+        filter: { status: { $in: ['open', 'acknowledged'] } },
+        limit: 200,
+        ...(transaction ? { transaction } : {}),
+      })) || [];
       const orgIds = [...new Set(rows.map((r) => val(r, 'organizationId')).filter((o) => ORG_ID_RE.test(String(o || ''))))];
       for (const orgId of orgIds) {
         await runProactiveIncidentTriage(db, {
@@ -824,6 +1155,7 @@ function startProactiveTriageScheduler(db, { env = process.env, intervalMs } = {
 
 module.exports = {
   TRIAGE_DEDUP_WINDOW_MS,
+  callLlmJson,
   buildTriageRecommendation,
   runProactiveIncidentTriage,
   startProactiveTriageScheduler,

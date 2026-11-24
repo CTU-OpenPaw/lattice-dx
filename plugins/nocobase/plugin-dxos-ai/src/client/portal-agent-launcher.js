@@ -28,6 +28,28 @@ function sanitizeFlowCtxText(raw, maxLen = 120) {
     .slice(0, maxLen);
 }
 
+function sanitizeFlowNodeSummary(raw, { stringMaxLen = 1200, arrayMaxLen = 1200 } = {}) {
+  if (Array.isArray(raw)) {
+    const parts = [];
+    for (const item of raw) {
+      if (typeof item === 'string' || typeof item === 'number') {
+        const clean = sanitizeFlowCtxText(item, 120);
+        if (clean) parts.push(clean);
+      } else if (item && typeof item === 'object') {
+        const id = sanitizeFlowCtxText(item.id || item.nodeId || '', 60);
+        const type = sanitizeFlowCtxText(item.type || item.nodeType || '', 60);
+        const label = sanitizeFlowCtxText(item.label || item.title || '', 80);
+        if (id || type || label) {
+          const head = id && type ? `${id}(${type})` : (id || type);
+          parts.push(label ? `${head}:${label}` : head);
+        }
+      }
+    }
+    return sanitizeFlowCtxText(parts.join(', '), arrayMaxLen);
+  }
+  return sanitizeFlowCtxText(raw, stringMaxLen);
+}
+
 function readFlowStudioContext() {
   const raw = typeof window !== 'undefined' ? window.__LATTICEDX_FLOW_CONTEXT__ : null;
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -51,7 +73,7 @@ function readFlowStudioContext() {
     selectedRunUid: sanitizeFlowCtxText(raw.selectedRunUid),
     selectedRunStatus: sanitizeFlowCtxText(raw.selectedRunStatus),
     nodeCount,
-    nodeSummary: sanitizeFlowCtxText(raw.nodeSummary),
+    nodeSummary: sanitizeFlowNodeSummary(raw.nodeSummary, { stringMaxLen: 120, arrayMaxLen: 1200 }),
   };
 }
 
@@ -129,7 +151,7 @@ function buildHiddenPageSystemContext({ portalSlug = '', pageTitle = '', pathnam
       const selectedNodeLabel = sanitizeFlowCtxText(flowContext.selectedNodeLabel);
       const selectedRunUid = sanitizeFlowCtxText(flowContext.selectedRunUid);
       const selectedRunStatus = sanitizeFlowCtxText(flowContext.selectedRunStatus);
-      const nodeSummary = sanitizeFlowCtxText(flowContext.nodeSummary);
+      const nodeSummary = sanitizeFlowNodeSummary(flowContext.nodeSummary, { stringMaxLen: 1200, arrayMaxLen: 1200 });
       const summaryFields = [
         `organizationId="${orgId}"`,
         `view="${view}"`,

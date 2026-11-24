@@ -3319,3 +3319,235 @@ test('dxos_configure_workflow supports bidirectional n8n connector bridge (listC
     else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
 });
+
+test('Task 10: belongsTo/json/enum field creation, all 10 Native v2 BlockModels, aiAssist 45s LLM_TIMEOUT mapping, portal-agent-launcher full nodeSummary, and 8 n8n REST API v1 + DMN operations', async () => {
+  const { db, ctx, byName } = makeBuilderHarness();
+  const schemaTool = byName.get('dxos_extend_collection_schema');
+  const composeTool = byName.get('dxos_compose_page_blocks');
+  const wfTool = byName.get('dxos_configure_workflow');
+
+  // 1. belongsTo, json, enum field creation & blocking belongsTo -> users
+  await assert.rejects(
+    () => schemaTool.invoke(ctx, {
+      operation: 'createCollection',
+      collectionName: 'latticeCustomInvalidRel',
+      fields: [{ name: 'ownerUser', type: 'belongsTo', target: 'users', title: 'Owner' }],
+    }),
+    (err) => err.status === 400 || err.status === 403,
+  );
+
+  const createdCol = await schemaTool.invoke(ctx, {
+    operation: 'createCollection',
+    collectionName: 'latticeCustomColdSensors',
+    title: 'Cảm biến Lạnh',
+    fields: [
+      { name: 'orderRef', type: 'belongsTo', target: 'latticeOrders', title: 'Đơn hàng' },
+      { name: 'calibrationJson', type: 'json', title: 'Hiệu chuẩn JSON' },
+      { name: 'alertTier', type: 'enum', enumValues: ['info', 'warning', 'critical'], title: 'Mức cảnh báo' },
+    ],
+  });
+  assert.equal(createdCol.created, true);
+  const colDef = db.store.collections.find((c) => c.name === 'latticeCustomColdSensors');
+  assert.equal(colDef.fields.some((f) => f.name === 'orderRef' && f.type === 'belongsTo' && f.target === 'latticeOrders'), true);
+  assert.equal(colDef.fields.some((f) => f.name === 'calibrationJson' && f.type === 'json'), true);
+  assert.equal(colDef.fields.some((f) => f.name === 'alertTier' && Array.isArray(f.uiSchema?.enum) && f.uiSchema.enum.length === 3), true);
+
+  // 2. All 10 Native v2 BlockModels (incl. DxosWebGisBlockModel, DxosKanbanScheduleBlockModel, DxosWmsOpsBlockModel) allowed
+  for (const blockUse of ['DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel', 'DxosWmsOpsBlockModel']) {
+    const added = await composeTool.invoke(ctx, {
+      action: 'addBlock',
+      portalSlug: 'services',
+      blockUse,
+      title: `Block ${blockUse}`,
+      dryRun: true,
+    });
+    assert.equal(added.dryRun, true);
+    assert.equal(added.blockUse, blockUse);
+  }
+
+  // 3. aiAssist 45s timeout maps AbortError / LLM_TIMEOUT -> LLM_TIMEOUT (NOT AUTOMATION_AI_REFUSED)
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  let capturedTimeoutMs = null;
+  try {
+    Module._load = function patchedLoad(request, parent, isMain) {
+      if (String(request).includes('flow/architect')) {
+        return {
+          async runFlowArchitect(opts) {
+            capturedTimeoutMs = opts?.timeoutMs;
+            const abortErr = new Error('The operation was aborted due to timeout');
+            abortErr.name = 'AbortError';
+            throw abortErr;
+          },
+        };
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    const noResCtx = { ...ctx, app: { ...ctx.app, resourceManager: { getResource: () => null } } };
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'draftAutomation',
+        goal: 'Khi nhiệt độ vượt -15 độ tạo phiếu bảo trì',
+      }),
+      (err) => err.code === 'LLM_TIMEOUT' && err.code !== 'AUTOMATION_AI_REFUSED',
+    );
+    assert.equal(capturedTimeoutMs, 45000);
+  } finally {
+    Module._load = origLoad;
+  }
+
+  // 4. portal-agent-launcher.js forwards full array nodeSummary (> 120 chars) from flow-studio-app.js
+  const { readFlowStudioContext, buildHiddenPageSystemContext } = require('../src/client/portal-agent-launcher');
+  const origWindow = global.window;
+  try {
+    const nodes = Array.from({ length: 12 }, (_, idx) => ({
+      id: `node_${idx + 1}`,
+      type: idx === 0 ? 'trigger.event' : 'notify.send',
+      label: `Bước xử lý nghiệp vụ số ${idx + 1}`,
+    }));
+    global.window = {
+      location: { pathname: '/admin/settings/workflow/automation' },
+      __LATTICEDX_FLOW_CONTEXT__: {
+        organizationId: 'native-ui-lab',
+        ruleKey: 'auto_12_nodes',
+        nodeCount: 12,
+        nodeSummary: nodes,
+      },
+    };
+    const flowCtx = readFlowStudioContext();
+    assert.ok(flowCtx.nodeSummary.includes('node_12'), 'Full array nodeSummary must include node_12 without truncating at 120 chars');
+    assert.ok(flowCtx.nodeSummary.length > 120);
+    const sysPrompt = buildHiddenPageSystemContext({ pathname: '/admin/settings/workflow/automation', flowContext: flowCtx });
+    assert.ok(sysPrompt.includes('node_12'));
+  } finally {
+    if (origWindow === undefined) delete global.window;
+    else global.window = origWindow;
+  }
+
+  // 5. n8n-bridge-tool.js 8 REST API v1 operations via n8n-api-client.js + DMN operations
+  const bridge = require('../src/server/n8n-bridge-tool');
+  const connectorVault = require('../../plugin-lattice-foundation/src/server/connector-vault');
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'dxos-ai-task10-n8n-v1-test-key-2026';
+  try {
+    db.store.latticeConnectors = [
+      {
+        id: 1,
+        organizationId: 'native-ui-lab',
+        connectorKey: 'n8n-api-main',
+        name: 'Stock n8n API',
+        connectorType: 'n8n',
+        appType: 'n8n_api',
+        baseUrl: 'http://n8n:5678',
+        authType: 'api_key',
+        encryptedSecretsJson: connectorVault.encryptVaultSecrets({ apiKey: 'n8n_api_secret_123456' }, process.env),
+        active: true,
+      },
+      {
+        id: 2,
+        organizationId: 'native-ui-lab',
+        connectorKey: 'telegram-ops',
+        name: 'Telegram Ops Bot',
+        connectorType: 'http_api',
+        appType: 'telegram',
+        baseUrl: 'https://api.telegram.org',
+        authType: 'api_key',
+        encryptedSecretsJson: connectorVault.encryptVaultSecrets({ botToken: '123456:ABC-DEF-telegram-token' }, process.env),
+        active: true,
+      },
+    ];
+    db.store.latticeDecisionTables = [];
+
+    const apiCalls = [];
+    const n8nDeps = {
+      val,
+      failTool,
+      hasRes: () => false,
+      invokeResourceAction,
+      hasForbiddenProtoKeys: () => false,
+      sanitizeAutomationValue: (x) => x,
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+      fetchImpl: async (url, init) => {
+        apiCalls.push({ method: init.method, url });
+        const pathname = new URL(url).pathname;
+        if (pathname === '/api/v1/workflows' && init.method === 'GET') {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'wf-1', name: 'Cold Chain', active: true }] }) };
+        }
+        if (pathname === '/api/v1/workflows' && init.method === 'POST') {
+          return { ok: true, status: 201, text: async () => JSON.stringify({ id: 'wf-2', name: 'New Sync', active: false }) };
+        }
+        if (pathname === '/api/v1/workflows/wf-2' && init.method === 'PUT') {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'wf-2', name: 'Updated Sync', active: false }) };
+        }
+        if (pathname === '/api/v1/workflows/wf-2/activate' && init.method === 'POST') {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'wf-2', active: true }) };
+        }
+        if (pathname === '/api/v1/executions' && init.method === 'GET') {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'ex-10', status: 'error' }] }) };
+        }
+        if (pathname === '/api/v1/executions/ex-10/retry' && init.method === 'POST') {
+          return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'ex-11', status: 'running' }) };
+        }
+        if (pathname === '/api/v1/credentials' && init.method === 'POST') {
+          return { ok: true, status: 201, text: async () => JSON.stringify({ id: 'cred-88', name: 'Telegram Ops Bot', type: 'telegramApi' }) };
+        }
+        return { ok: false, status: 404, text: async () => '{"message":"not found"}' };
+      },
+    };
+    const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+
+    const appsRes = await bridge.runListConnectedApps(ctx, db, actor, {}, n8nDeps);
+    assert.ok(appsRes.items.some((a) => a.appType === 'telegram' && a.configuredCount === 1));
+    assert.equal(JSON.stringify(appsRes).includes('ABC-DEF-telegram-token'), false);
+
+    const wfs = await bridge.runListN8nWorkflows(ctx, db, actor, {}, n8nDeps);
+    assert.equal(wfs.data[0].id, 'wf-1');
+
+    const createdWf = await bridge.runCreateN8nWorkflow(ctx, db, actor, { workflow: { name: 'New Sync', nodes: [], connections: {} } }, n8nDeps);
+    assert.equal(createdWf.id, 'wf-2');
+
+    const updatedWf = await bridge.runUpdateN8nWorkflow(ctx, db, actor, { workflowId: 'wf-2', workflow: { name: 'Updated Sync', nodes: [], connections: {} } }, n8nDeps);
+    assert.equal(updatedWf.name, 'Updated Sync');
+
+    const activatedWf = await bridge.runActivateN8nWorkflow(ctx, db, actor, { workflowId: 'wf-2', active: true }, n8nDeps);
+    assert.equal(activatedWf.active, true);
+
+    const execs = await bridge.runListN8nExecutions(ctx, db, actor, { workflowId: 'wf-2' }, n8nDeps);
+    assert.equal(execs.data[0].id, 'ex-10');
+
+    const retried = await bridge.runRetryN8nExecution(ctx, db, actor, { executionId: 'ex-10' }, n8nDeps);
+    assert.equal(retried.id, 'ex-11');
+
+    const synced = await bridge.runSyncN8nCredential(ctx, db, actor, { connectorKey: 'telegram-ops' }, n8nDeps);
+    assert.equal(synced.synced, true);
+    assert.equal(synced.n8nCredentialId, 'cred-88');
+    assert.equal(db.store.latticeConnectors[1].n8nCredentialId, 'cred-88');
+
+    // DMN operations via dxos_configure_workflow
+    const noResCtx = { ...ctx, app: { ...ctx.app, resourceManager: { getResource: () => null } } };
+    const savedDmn = await wfTool.invoke(noResCtx, {
+      operation: 'dmn_save_table',
+      tableKey: 'cold_sla_v1',
+      name: 'Cold SLA',
+      hitPolicy: 'FIRST',
+      inputsJson: [{ name: 'tempC', type: 'number' }],
+      outputsJson: [{ name: 'tier', type: 'string' }],
+      rulesJson: [{ when: { tempC: { op: 'gt', value: -15 } }, then: { tier: 'critical' } }],
+    });
+    assert.equal(savedDmn.table.tableKey, 'cold_sla_v1');
+
+    const listedDmn = await wfTool.invoke(noResCtx, { operation: 'dmn_list_tables' });
+    assert.equal(listedDmn.items.length, 1);
+
+    const evalDmn = await wfTool.invoke(noResCtx, {
+      operation: 'dmn_evaluate',
+      tableKey: 'cold_sla_v1',
+      context: { tempC: -10 },
+    });
+    assert.equal(evalDmn.matched, true);
+    assert.equal(evalDmn.result.tier, 'critical');
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});

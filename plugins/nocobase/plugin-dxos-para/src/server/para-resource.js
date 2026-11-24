@@ -11,7 +11,12 @@
 const path = require('node:path');
 const { PARA_SPACES } = require('./schema');
 const { resolveParaActor } = require('./para-scope');
-const { executeHybridSearch, computeNeuralEmbedding } = require('./para-hybrid-search');
+const {
+  executeHybridSearch,
+  computeNeuralEmbeddingsBatch,
+  resolveEmbeddingDim,
+  resolveEmbeddingEndpoint,
+} = require('./para-hybrid-search');
 const {
   MAX_UPLOAD_BYTES,
   ALLOWED_FORM_COLLECTIONS,
@@ -323,12 +328,11 @@ async function syncDocumentChunks(db, docRow, {
 
   const chunks = [...docChunks, ...attachmentChunks].map((c, idx) => ({ ...c, chunkIndex: idx }));
 
-  const prepared = [];
-  for (const chunk of chunks) {
-    const embInput = [code, title, chunk.sectionTitle, tags, chunk.content].filter(Boolean).join('\n');
-    const emb = await computeNeuralEmbedding(embInput, { env, fetchImpl });
-    prepared.push({ chunk, emb });
-  }
+  const embInputs = chunks.map((chunk) => [code, title, chunk.sectionTitle, tags, chunk.content].filter(Boolean).join('\n'));
+  const embeddings = chunks.length
+    ? await computeNeuralEmbeddingsBatch(embInputs, { env, fetchImpl })
+    : [];
+  const prepared = chunks.map((chunk, idx) => ({ chunk, emb: embeddings[idx] }));
 
   const createdRows = [];
   await withOptionalTransaction(db, async (transaction) => {
@@ -367,8 +371,8 @@ async function syncDocumentChunks(db, docRow, {
   if (typeof db?.sequelize?.query === 'function') {
     for (const { row, emb } of createdRows) {
       const cid = val(row, 'id');
-      if (cid == null || emb.engine !== 'neural' || emb.dim !== 1536) continue;
-      if (!Array.isArray(emb.vector) || !emb.vector.every(Number.isFinite)) continue;
+      if (cid == null || emb.engine !== 'neural' || !Number.isInteger(emb.dim) || emb.dim < 8 || emb.dim > 8192) continue;
+      if (!Array.isArray(emb.vector) || emb.vector.length !== emb.dim || !emb.vector.every(Number.isFinite)) continue;
       try {
         const vecLiteral = `[${emb.vector.map((n) => Number(n)).join(',')}]`;
         await db.sequelize.query(
@@ -376,7 +380,7 @@ async function syncDocumentChunks(db, docRow, {
           { replacements: { vec: vecLiteral, id: cid, org: organizationId } },
         );
       } catch {
-        // Plain Postgres without pgvector column: keep JSONB vector only
+        // Plain Postgres without pgvector column or pre-migration fixed vector(1536): keep JSONB vector only
       }
     }
   }
@@ -402,7 +406,7 @@ async function syncDocumentChunks(db, docRow, {
  * @param {Function} [options.fetchImpl=globalThis.fetch] - Fetch implementation for remote OCR/embeddings.
  * @returns {Record<string, Function>} Resource action map.
  */
-function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch } = {}) {
+function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch, getIndexingFailures = null } = {}) {
   return {
     summary: async (ctx, next) => {
       if (ctx.method !== 'GET') ctx.throw(405);
@@ -486,6 +490,8 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         query,
         paraSpace: rawSpace,
         limit,
+        env,
+        fetchImpl,
       });
       const embeddingEngine = items.some((it) => it.embeddingEngine === 'neural') ? 'neural' : 'deterministic-fallback';
       ctx.body = {
@@ -558,7 +564,7 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
       let neuralChunks = 0;
       let fallbackChunks = 0;
       for (const doc of docs) {
-        const res = await syncDocumentChunks(db, doc);
+        const res = await syncDocumentChunks(db, doc, { env, fetchImpl });
         chunksIndexed += res.chunksCreated;
         neuralChunks += res.neuralChunks;
         fallbackChunks += res.fallbackChunks;
@@ -619,7 +625,12 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         throw failAction('ATTACHMENT_NO_TEXT', 400, 'Không trích xuất được nội dung văn bản từ tệp đính kèm.');
       }
 
-      const syncResult = await syncDocumentChunks(db, doc, { attachmentText: extracted.text, attachmentFilename: filename });
+      const syncResult = await syncDocumentChunks(db, doc, {
+        attachmentText: extracted.text,
+        attachmentFilename: filename,
+        env,
+        fetchImpl,
+      });
       if (!val(doc, 'summary') && typeof doc?.update === 'function') {
         try {
           await doc.update({ summary: extracted.text.slice(0, 300) }, { context: { skipParaChunkSync: true } });
@@ -761,6 +772,90 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         lineItems: extractionResult.lineItems,
         confidence: extractionResult.confidence,
         warnings: extractionResult.warnings,
+      };
+      if (typeof next === 'function') await next();
+    },
+
+    indexHealth: async (ctx, next) => {
+      if (ctx.method !== 'GET') ctx.throw(405);
+      const userId = val(ctx.state?.currentUser, 'id');
+      if (userId == null || !/^[1-9]\d*$/.test(String(userId))) {
+        throw failAction('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập.');
+      }
+
+      const roles = await resolveCallerRoles(ctx, db);
+      const isRoot = roles.includes('root');
+      let organizationId = null;
+      if (isRoot) {
+        const requested = ctx.action?.params?.organizationId;
+        if (typeof requested === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(requested.trim())) {
+          organizationId = requested.trim();
+        }
+      } else {
+        const actor = await resolveParaActor(db, ctx.state?.currentUser);
+        organizationId = actor.organizationId;
+      }
+
+      const docRepo = db?.getRepository?.('latticeParaDocuments');
+      const chunkRepo = db?.getRepository?.('latticeParaChunks');
+      const docFilter = { active: true, ...(organizationId ? { organizationId } : {}) };
+      const chunkFilter = { active: true, ...(organizationId ? { organizationId } : {}) };
+
+      let documentsCount = 0;
+      if (docRepo && typeof docRepo.count === 'function') {
+        documentsCount = Number(await docRepo.count({ filter: docFilter })) || 0;
+      } else if (docRepo && typeof docRepo.find === 'function') {
+        const rows = (await docRepo.find({ filter: docFilter, fields: ['id', 'organizationId', 'active'], limit: 1000 })) || [];
+        documentsCount = rows.filter((r) => val(r, 'active') !== false && (!organizationId || val(r, 'organizationId') === organizationId)).length;
+      }
+
+      const rawChunks = chunkRepo && typeof chunkRepo.find === 'function'
+        ? ((await chunkRepo.find({
+            filter: chunkFilter,
+            fields: ['id', 'organizationId', 'embeddingEngine', 'embeddingDim', 'active'],
+            limit: 5000,
+          })) || [])
+        : [];
+      const activeChunks = rawChunks.filter(
+        (c) => val(c, 'active') !== false && (!organizationId || val(c, 'organizationId') === organizationId),
+      );
+      let neuralChunks = 0;
+      const dimSet = new Set();
+      for (const chunk of activeChunks) {
+        if (val(chunk, 'embeddingEngine') === 'neural') neuralChunks += 1;
+        const dim = Number(val(chunk, 'embeddingDim'));
+        if (Number.isInteger(dim) && dim > 0) dimSet.add(dim);
+      }
+
+      let pgvectorAvailable = false;
+      if (typeof db?.sequelize?.query === 'function') {
+        try {
+          const [extRows] = await db.sequelize.query("SELECT 1 AS present FROM pg_extension WHERE extname = 'vector' LIMIT 1;");
+          pgvectorAvailable = Array.isArray(extRows) && extRows.length > 0;
+        } catch {
+          pgvectorAvailable = false;
+        }
+      }
+
+      const allFailures = typeof getIndexingFailures === 'function' ? (getIndexingFailures() || []) : [];
+      const recentFailures = allFailures
+        .filter((f) => !organizationId || f.organizationId === organizationId)
+        .slice(-20)
+        .reverse();
+
+      ctx.body = {
+        organizationId,
+        documentsCount,
+        chunksCount: activeChunks.length,
+        neuralChunks,
+        fallbackChunks: activeChunks.length - neuralChunks,
+        targetEmbeddingDim: resolveEmbeddingDim(env),
+        embeddingDims: [...dimSet].sort((a, b) => a - b),
+        pgvectorAvailable,
+        embeddingConfigured: Boolean(resolveEmbeddingEndpoint(env)),
+        ocrConfigured: Boolean(String(env?.DX_OCR_ENDPOINT || '').trim()),
+        pendingRetries: recentFailures.filter((f) => f.retryable && !f.resolved).length,
+        recentFailures,
       };
       if (typeof next === 'function') await next();
     },

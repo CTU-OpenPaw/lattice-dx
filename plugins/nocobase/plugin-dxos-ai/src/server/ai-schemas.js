@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { redactPiiText, redactPiiDeep, replaceSecretKvPairs } = require('./ai-governance');
+const { redactPiiText, redactPiiDeep, replaceSecretKvPairs, normalizeTokenUsage } = require('./ai-governance');
 
 const LEGACY_WORKFLOW_TASKS_TOOL = ['dxos_my_tasks_co', 'pilot'].join('');
 const CANONICAL_WORKFLOW_TASKS_TOOL = 'dxos_my_workflow_tasks';
@@ -40,6 +40,43 @@ function normalizeToolPermissionsMap(rawPerms) {
 
 const USERNAME_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const ORG_RE = /^[-a-zA-Z0-9_]{1,80}$/;
+
+function getEnvDefaultOrgId(env = process.env) {
+  const candidate = String(env?.DX_DEFAULT_ORG_ID || '').trim();
+  return candidate && candidate.toLowerCase() !== 'all' ? candidate : '';
+}
+
+async function resolveFirstActiveOrganizationId(db) {
+  const orgRepo = db?.getRepository?.('latticeOrganizations');
+  if (!orgRepo || typeof orgRepo.find !== 'function') return '';
+  try {
+    const rows = (await orgRepo.find({ limit: 50 })) || [];
+    for (const row of rows) {
+      const readField = (k) => (typeof row?.get === 'function' ? row.get(k) : row?.[k]);
+      const orgId = String(readField('organizationId') || '').trim();
+      if (!orgId || orgId.toLowerCase() === 'all') continue;
+      if (readField('active') === false) continue;
+      const status = String(readField('status') || 'active').trim().toLowerCase();
+      if (status === 'inactive' || status === 'disabled') continue;
+      return orgId;
+    }
+  } catch {
+    // Non-fatal in minimal mock harnesses
+  }
+  return '';
+}
+
+async function resolveDefaultOrganizationId(db, { actor = null, ctx = null, env = process.env, fallback = '' } = {}) {
+  const actorOrg = String(actor?.organizationId || '').trim();
+  if (actorOrg && actorOrg.toLowerCase() !== 'all') return actorOrg;
+  const ctxOrg = String(ctx?.state?.defaultOrgId || '').trim();
+  if (ctxOrg && ctxOrg.toLowerCase() !== 'all') return ctxOrg;
+  const envOrg = getEnvDefaultOrgId(env);
+  if (envOrg) return envOrg;
+  const firstOrg = await resolveFirstActiveOrganizationId(db);
+  if (firstOrg) return firstOrg;
+  return String(fallback || '').trim();
+}
 const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|cookie|credential|jwt|bearer|privatekey|private_key|sessionid|session_id|passphrase|access_key|client_secret/i;
 const VALID_MODES = new Set(['ALLOW', 'ASK', 'OFF']);
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1', 'host.docker.internal']);
@@ -52,7 +89,6 @@ const STARTER_AI_BLUEPRINTS = [
     nickname: 'Tổng Điều phối viên DX-OS',
     position: 'AI Điều phối Đa-Agent Trung tâm',
     departmentScope: 'enterprise-wide',
-    organizationId: 'native-ui-lab',
     avatar: 'nocobase-044-male',
     bio: 'Phân tích yêu cầu phức tạp, điều phối tác nhân chuyên môn đúng thẩm quyền và tổng hợp kết quả.',
     greeting: 'Xin chào! Tôi là Điều phối viên DX-OS. Hãy nêu mục tiêu, tôi sẽ phân rã và phối hợp đúng chuyên viên AI xử lý.',
@@ -87,24 +123,24 @@ const STARTER_AI_BLUEPRINTS = [
     nickname: 'Kiến trúc sư Hệ thống & Block AI',
     position: 'Admin System Builder (Chỉ Root/Admin)',
     departmentScope: 'platform-admin',
-    organizationId: 'native-ui-lab',
     avatar: 'nocobase-002-male',
-    bio: 'Kiến trúc sư Hệ thống Toàn diện: tự đọc cấu trúc thật, gợi ý blueprint, sáng tạo block mới an toàn (DxosCreativeStudioBlockModel), cấu hình block chuẩn NocoBase đa cột/linkage, phân quyền RBAC cấp trường, LatticeFlow v2 DAG & DX-OS Flow Architect (dựng đồ thị DAG đa nhánh với Graph v2 gồm 24 loại node, vá từng node, sửa lỗi lần chạy fix_error, mô phỏng node/flow, phê duyệt resume HITL và gợi ý tối ưu 1-click), tạo Role + AI Assistant mới và hoàn tác Time-Machine.',
-    greeting: 'Chào bạn! Tôi có thể giúp xem cấu trúc trang hiện tại, gợi ý hoặc thiết kế thêm khối hiển thị mới, tạo phân quyền với trang làm việc riêng, dựng hoặc tối ưu đồ thị tự động hóa LatticeFlow v2 đa nhánh, phê duyệt lượt chạy HITL hay hoàn tác bất kỳ thay đổi nào chỉ qua lời nói tự nhiên.',
+    bio: 'Kiến trúc sư Hệ thống Toàn diện: tự đọc cấu trúc thật, gợi ý blueprint, sáng tạo block mới an toàn (đủ 10 Native v2 BlockModels gồm WebGIS, Kanban, WMS Ops, Creative Studio), dựng trọn bộ Enterprise App kèm Verifier + 2 vòng Self-Healing, cấu hình bảng quyết định DMN, LatticeFlow v2 DAG & quản trị 2 chiều Stock n8n REST API v1, tạo Role + AI Assistant mới và hoàn tác Time-Machine.',
+    greeting: 'Chào bạn! Tôi có thể dựng trọn gói phân hệ doanh nghiệp (Schema + RLS + OpenAPI + RBAC + Portal 10 BlockModels + DMN + LatticeFlow v2 + Stock n8n + tự kiểm chứng/tự sửa), quản trị workflow n8n & bảng DMN, hoặc hoàn tác giao diện chỉ qua tiếng Việt tự nhiên.',
     systemPrompt: [
       'Bạn là Kiến trúc sư Hệ thống & Giao diện LatticeDX (dành cho Quản trị viên).',
       'Khi mở chat trên bất kỳ portal nào, ngữ cảnh ngầm sẽ đính kèm [Ngữ cảnh trang hiện tại: portalSlug="...", pageTitle="..."]. Hãy TỰ ĐỘNG đọc portalSlug & pageTitle từ đó.',
       'QUY TẮC GIAO TIẾP TỰ NHIÊN:',
-      '- Người dùng sẽ nói tiếng Việt đời thường (ví dụ: "đặt ngang cạnh phần chỉ số", "cảnh báo đỏ nếu nhiệt độ cao hơn âm 15 độ", "tạo vai trò mới cho đội Thanh tra Chuỗi lạnh, khóa cột kết luận kiểm định", "tạo flow khi yêu cầu mua sắm > 50 triệu thì tạm dừng chờ giám đốc phê duyệt HITL", "hoàn tác trang này về bố cục 1 cột ban đầu").',
+      '- Người dùng sẽ nói tiếng Việt đời thường (ví dụ: "đặt ngang cạnh phần chỉ số", "cảnh báo đỏ nếu nhiệt độ cao hơn âm 15 độ", "xây dựng phân hệ Quản lý Bảo trì kèm DMN và WebGIS", "tạo flow khi yêu cầu mua sắm > 50 triệu thì tạm dừng chờ giám đốc phê duyệt HITL", "hoàn tác trang này về bố cục 1 cột ban đầu").',
       '- TUYỆT ĐỐI KHÔNG BAO GIỜ hỏi người dùng nhập mã blockUid, portalSlug, collectionName, roleName dạng ldx_*, hay JSON.',
-      '- Hành động ngay (dryRun=false) khi quản trị viên yêu cầu tạo, sửa, thêm khối, tạo vai trò hoặc hoàn tác:',
+      '- Hành động ngay (dryRun=false) khi quản trị viên yêu cầu tạo, sửa, thêm khối, dựng ứng dụng, tạo vai trò hoặc hoàn tác:',
       '  1) Xem khối/gợi ý cho trang hiện tại: gọi dxos_compose_page_blocks(action="listBlocks", portalSlug=...) hoặc dxos_recommend_page_blueprint(portalSlug=...).',
       '  2) Thiết kế & gắn khối sáng tạo mới (gauge, nhiệt kế, cảnh báo đỏ, pipeline, thao tác nhanh): gọi dxos_design_creative_block với portalSlug, pageTitle, title, theme ("industrial-cockpit" | "emerald-ops" | "amber-alert" | "royal-indigo" | "clean-light"), placeBesideTitle (tên tiếng Việt như "Chỉ số" nếu muốn đặt ngang 2 cột), goal (mô tả yêu cầu) và dryRun=false.',
-      '  3) Thêm hoặc sửa block chuẩn NocoBase (bảng, form, kanban, biểu đồ, chia cột): dùng dxos_compose_page_blocks.',
-      '  4) Tạo vai trò mới + khóa trường + trang mới + trợ lý AI riêng: gọi dxos_provision_role_workspace với roleTitle, portalSlug, pageTitle, lockedFields (nhãn tiếng Việt hoặc tên trường), creativeTheme, dryRun=false.',
-      '  5) Hoàn tác giao diện: gọi dxos_snapshot_or_rollback_page(action="rollback", portalSlug=..., pageTitle=...).',
-      '  6) DX-OS Flow Architect & LatticeFlow v2 DAG + Dịch vụ n8n (Đồ thị Graph v2 đa nhánh với 24 loại node và cầu nối n8n Vault/Webhook): gọi dxos_configure_workflow với operation="listAutomations" | "draftAutomation" | "patchAutomation" | "suggestAutomation" | "testAutomation" | "resumeAutomation" | "saveAutomation" | "runAutomation" hoặc tương tác trực tiếp với dịch vụ n8n qua operation="listConnectors" | "testConnector" (kiểm tra /healthz) | "invokeN8n" (kích hoạt luồng webhook n8n ký HMAC với connectorKey, webhookPath, payload). Chỉ đặt apply=true khi quản trị viên xác nhận lưu thay đổi.',
-      'Khi trả lời, hãy dùng ngôn ngữ thân thiện, dễ hiểu cho người quản trị (nêu tên khối, tên trang, tên vai trò, tên luồng tự động và các bước sẽ chạy hay bỏ qua; không rải mã kỹ thuật rối mắt).',
+      '  3) Thêm hoặc sửa block chuẩn NocoBase hoặc 10 Native v2 BlockModels (bao gồm DxosWebGisBlockModel, DxosKanbanScheduleBlockModel, DxosWmsOpsBlockModel): dùng dxos_compose_page_blocks.',
+      '  4) Mở rộng bảng & trường quan hệ (belongsTo, json, enum, FORCE RLS): gọi dxos_extend_collection_schema.',
+      '  5) Tạo vai trò mới hoặc dựng trọn gói phân hệ doanh nghiệp có kiểm chứng & tự sửa (2 vòng): gọi dxos_provision_role_workspace (mặc định tạo role+trang+AI; dùng operation="build_enterprise_app" hoặc operation="verify_app" cho Full-Stack App Builder & Verifier).',
+      '  6) Hoàn tác giao diện: gọi dxos_snapshot_or_rollback_page(action="rollback", portalSlug=..., pageTitle=...).',
+      '  7) LatticeFlow v2 (DX-OS Flow Architect), DMN & Stock n8n REST API v1: gọi dxos_configure_workflow với operation="listAutomations" | "draftAutomation" | "patchAutomation" | "suggestAutomation" | "testAutomation" | "resumeAutomation" | "saveAutomation" | "runAutomation", hoặc quản lý bảng quyết định DMN ("dmn_list_tables" | "dmn_save_table" | "dmn_evaluate"), hoặc quản trị kết nối/workflow Stock n8n ("listConnectors" | "testConnector" | "invokeN8n" | "list_connected_apps" | "list_n8n_workflows" | "create_n8n_workflow" | "update_n8n_workflow" | "activate_n8n_workflow" | "list_n8n_executions" | "retry_n8n_execution" | "sync_n8n_credential"). Chỉ đặt apply=true khi quản trị viên xác nhận lưu thay đổi.',
+      'Khi trả lời, hãy dùng ngôn ngữ thân thiện, dễ hiểu cho người quản trị (nêu tên khối, tên trang, tên vai trò, kết quả kiểm chứng, tên luồng tự động và các bước sẽ chạy hay bỏ qua; không rải mã kỹ thuật rối mắt).',
     ].join('\n'),
     llmService: 'local-9router',
     modelName: 'ag/gemini-3.8-flash',
@@ -143,7 +179,6 @@ const STARTER_AI_BLUEPRINTS = [
     nickname: 'Chuyên viên Kho lạnh & Sự cố IoT AI',
     position: 'Kỹ sư AI Vận hành IT/OT',
     departmentScope: 'operations-itot',
-    organizationId: 'native-ui-lab',
     avatar: 'nocobase-001-male',
     bio: 'Giám sát ngữ cảnh FIWARE Orion-LD qua MCP, đối chiếu SOP P.A.R.A. và lập phiếu bảo trì hoặc phân tích ca sự cố liên phòng ban.',
     greeting: 'Xin chào! Tôi theo dõi cảm biến Orion-LD, hàng đợi sự cố và sẵn sàng lập phiếu bảo trì hoặc biên bản liên thông trực tiếp.',
@@ -178,7 +213,6 @@ const STARTER_AI_BLUEPRINTS = [
     nickname: 'Điều phối viên Chuỗi lạnh 5 Bước AI',
     position: 'Chuyên viên AI Vận tải & Điều phối',
     departmentScope: 'logistics-5step',
-    organizationId: 'native-ui-lab',
     avatar: 'nocobase-003-female',
     bio: 'Hỗ trợ theo dõi đơn vận chuyển 5 bước liên phòng ban, radar điểm nghẽn, đối soát công việc thủ công và tạo nháp đơn hàng đúng chuẩn.',
     greeting: 'Chào bạn! Tôi hỗ trợ theo dõi đơn vận chuyển 5 chặng, radar điểm nghẽn và tóm tắt công việc giao nhận của bạn.',
@@ -212,7 +246,6 @@ const STARTER_AI_BLUEPRINTS = [
     nickname: 'Trợ lý Nội bộ, Mua sắm & P.A.R.A. AI',
     position: 'Chuyên viên AI Dịch vụ & Tri thức',
     departmentScope: 'workspace-para',
-    organizationId: 'native-ui-lab',
     avatar: 'nocobase-004-female',
     bio: 'Tra cứu tri thức P.A.R.A. có trích dẫn nguồn, tạo yêu cầu mua sắm / phiếu dịch vụ / phân hệ tùy chỉnh và điều phối liên phòng ban.',
     greeting: 'Xin chào! Tôi có thể tra cứu SOP P.A.R.A., soạn phiếu dịch vụ, lập biên bản phân hệ mới hoặc tóm tắt hộp việc giúp bạn.',
@@ -257,7 +290,7 @@ const aiProfiles = {
     { name: 'nickname', type: 'string', interface: 'input', allowNull: false },
     { name: 'position', type: 'string', interface: 'input' },
     { name: 'departmentScope', type: 'string', interface: 'input', defaultValue: 'general' },
-    { name: 'organizationId', type: 'string', interface: 'input', allowNull: false, defaultValue: 'native-ui-lab' },
+    { name: 'organizationId', type: 'string', interface: 'input', allowNull: false },
     { name: 'avatar', type: 'string', interface: 'input', defaultValue: 'nocobase-015-male' },
     { name: 'bio', type: 'text', interface: 'textarea' },
     { name: 'greeting', type: 'text', interface: 'textarea' },
@@ -299,6 +332,8 @@ const aiAuditLogs = {
     { name: 'durationMs', type: 'integer', defaultValue: 0 },
     { name: 'promptTokens', type: 'integer', defaultValue: 0 },
     { name: 'completionTokens', type: 'integer', defaultValue: 0 },
+    { name: 'totalTokens', type: 'integer', defaultValue: 0 },
+    { name: 'tokenSource', type: 'string', defaultValue: 'estimated' },
     { name: 'estimatedCostUsd', type: 'double', defaultValue: 0 },
     { name: 'piiRedactedCount', type: 'integer', defaultValue: 0 },
     { name: 'errorCode', type: 'string' },
@@ -346,7 +381,7 @@ const aiQuotaUsage = {
   createdAt: true,
   updatedAt: true,
   fields: [
-    { name: 'organizationId', type: 'string', allowNull: false, defaultValue: 'native-ui-lab' },
+    { name: 'organizationId', type: 'string', allowNull: false },
     { name: 'dayKey', type: 'string', allowNull: false },
     { name: 'userId', type: 'string', allowNull: false },
     { name: 'calls', type: 'integer', defaultValue: 0, allowNull: false },
@@ -370,7 +405,7 @@ const aiApprovalQueue = {
   createdAt: true,
   updatedAt: true,
   fields: [
-    { name: 'organizationId', type: 'string', allowNull: false, defaultValue: 'native-ui-lab' },
+    { name: 'organizationId', type: 'string', allowNull: false },
     { name: 'requesterUserId', type: 'bigInt', allowNull: false },
     { name: 'requesterUsername', type: 'string' },
     { name: 'aiEmployee', type: 'string' },
@@ -456,7 +491,7 @@ function sanitizeAuditSummary(value, depth = 0) {
   return String(value);
 }
 
-function validateAiProfilePayload(input = {}, { adminToolNames = [] } = {}) {
+function validateAiProfilePayload(input = {}, { adminToolNames = [], defaultOrganizationId = '' } = {}) {
   const username = String(input.username || '').trim().toLowerCase();
   if (!USERNAME_RE.test(username)) {
     throw failSchema('AI_USERNAME_INVALID', 'username phải gồm 2-63 ký tự [a-z0-9_-].');
@@ -465,7 +500,7 @@ function validateAiProfilePayload(input = {}, { adminToolNames = [] } = {}) {
   if (!nickname) {
     throw failSchema('AI_NICKNAME_REQUIRED', 'Vui lòng nhập tên hiển thị của AI Employee.');
   }
-  const organizationId = String(input.organizationId || 'native-ui-lab').trim();
+  const organizationId = String(input.organizationId || defaultOrganizationId || getEnvDefaultOrgId() || 'default').trim();
   if (!ORG_RE.test(organizationId)) {
     throw failSchema('AI_ORG_INVALID', 'Mã tổ chức không hợp lệ.');
   }
@@ -541,28 +576,35 @@ async function recordAiAuditLog(db, entry = {}) {
   const piiCount = entry.piiRedactedCount != null
     ? Math.max(0, Number(entry.piiRedactedCount) || 0)
     : (sanitizedArgs.count + redactedResult.count);
+  const { promptTokens, completionTokens, totalTokens, tokenSource } = normalizeTokenUsage(entry);
+  const baseValues = {
+    actorUserId: entry.actorUserId ?? null,
+    actorUsername: String(entry.actorUsername || '').slice(0, 100) || null,
+    organizationId: String(entry.organizationId || '').slice(0, 80) || null,
+    channel: String(entry.channel || 'ai-tool').slice(0, 40),
+    aiEmployee: entry.aiEmployee ? String(entry.aiEmployee).slice(0, 80) : null,
+    toolName: String(entry.toolName || 'unknown').slice(0, 120),
+    argsSummary: sanitizedArgs.value,
+    status: String(entry.status || 'allowed').slice(0, 32),
+    durationMs: Math.max(0, Number(entry.durationMs) || 0),
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    tokenSource,
+    estimatedCostUsd: Math.max(0, Number(entry.estimatedCostUsd) || 0),
+    piiRedactedCount: piiCount,
+    errorCode: entry.errorCode ? String(entry.errorCode).slice(0, 80) : null,
+    resultSummary: redactedResult.text ? redactedResult.text.slice(0, 1000) : null,
+  };
   try {
-    return await repo.create({
-      values: {
-        actorUserId: entry.actorUserId ?? null,
-        actorUsername: String(entry.actorUsername || '').slice(0, 100) || null,
-        organizationId: String(entry.organizationId || '').slice(0, 80) || null,
-        channel: String(entry.channel || 'ai-tool').slice(0, 40),
-        aiEmployee: entry.aiEmployee ? String(entry.aiEmployee).slice(0, 80) : null,
-        toolName: String(entry.toolName || 'unknown').slice(0, 120),
-        argsSummary: sanitizedArgs.value,
-        status: String(entry.status || 'allowed').slice(0, 32),
-        durationMs: Math.max(0, Number(entry.durationMs) || 0),
-        promptTokens: Math.max(0, Number(entry.promptTokens) || 0),
-        completionTokens: Math.max(0, Number(entry.completionTokens) || 0),
-        estimatedCostUsd: Math.max(0, Number(entry.estimatedCostUsd) || 0),
-        piiRedactedCount: piiCount,
-        errorCode: entry.errorCode ? String(entry.errorCode).slice(0, 80) : null,
-        resultSummary: redactedResult.text ? redactedResult.text.slice(0, 1000) : null,
-      },
-    });
+    return await repo.create({ values: baseValues });
   } catch {
-    return null;
+    try {
+      const { totalTokens: _tt, tokenSource: _ts, ...legacyValues } = baseValues;
+      return await repo.create({ values: legacyValues });
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -581,4 +623,7 @@ module.exports = {
   sanitizeAuditSummary,
   validateAiProfilePayload,
   recordAiAuditLog,
+  getEnvDefaultOrgId,
+  resolveFirstActiveOrganizationId,
+  resolveDefaultOrganizationId,
 };

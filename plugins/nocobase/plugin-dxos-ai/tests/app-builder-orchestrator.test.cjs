@@ -1,0 +1,444 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const {
+  ADMIN_BUILDER_TOOL_NAMES,
+  OPERATIONAL_TOOL_NAMES,
+  ALLOWED_BLOCK_MODELS,
+  createDxosTools,
+} = require('../src/server/ai-tools-core');
+
+function makeOrchestratorHarness({ dialect = 'mock', pgRlsActive = true } = {}) {
+  const store = {
+    uiLayouts: [
+      { uid: 'ldx-portal-cold-assets', title: 'Cold Assets', layoutType: 'desktop', routeName: 'p_cold_assets', routePath: '/p/cold-assets' },
+    ],
+    desktopRoutes: [],
+    desktopRoutesUiLayouts: [],
+    rolesDesktopRoutes: [],
+    flowModels: [],
+    collections: [
+      { name: 'latticeAssets', title: 'Assets', fields: [{ name: 'id', type: 'bigInt' }, { name: 'code', type: 'string' }, { name: 'name', type: 'string' }, { name: 'organizationId', type: 'string' }] },
+    ],
+    fields: [],
+    roles: [
+      { name: 'root', title: 'Root', allowConfigure: true },
+      { name: 'admin', title: 'Admin', allowConfigure: true },
+      { name: 'ldx_employee', title: 'Nhân viên', allowConfigure: false, snippets: [] },
+    ],
+    dataSourcesRoles: [],
+    dataSourcesRolesResources: [],
+    rolesUsers: [{ id: 1, userId: 1, roleName: 'root' }],
+    latticeEmployees: [
+      { id: 13, userId: 9, code: 'EMP-9', name: 'NV', organizationId: 'native-ui-lab', active: true, user: { roles: [{ name: 'ldx_employee' }] } },
+    ],
+    latticeAiProfiles: [],
+    latticeAiAuditLogs: [],
+    latticeUiSnapshots: [],
+    latticeDecisionTables: [],
+    latticeAutomationRules: [],
+    latticeAutomationRuns: [],
+    latticeConnectors: [],
+    aiEmployees: [],
+    rolesAiEmployees: [],
+  };
+
+  let nextId = 100;
+  const sqlCalls = [];
+  const rlsAttachedTables = new Set();
+
+  const matchFilter = (row, filter = {}) => Object.entries(filter).every(([k, v]) => {
+    if (k === '$or' && Array.isArray(v)) return v.some((sub) => matchFilter(row, sub));
+    if (k === '$and' && Array.isArray(v)) return v.every((sub) => matchFilter(row, sub));
+    if (v && typeof v === 'object' && '$in' in v) return v.$in.includes(row[k]);
+    return row[k] === v;
+  });
+
+  const wrap = (arr, row, extra = {}) => ({
+    ...row,
+    ...extra,
+    get: (k) => (k === 'fields' && row.fields ? row.fields : row[k]),
+    toJSON: () => ({ ...row }),
+    update: async (u) => { Object.assign(row, u); return wrap(arr, row, extra); },
+  });
+
+  const db = {
+    store,
+    sqlCalls,
+    rlsAttachedTables,
+    hasCollection: (n) => store.collections.some((c) => c.name === n),
+    getCollection: (n) => {
+      const hit = store.collections.find((c) => c.name === n);
+      if (!hit) return null;
+      return {
+        name: hit.name,
+        options: { title: hit.title, fields: hit.fields || [] },
+        fields: hit.fields || [],
+        hasField: (fn) => (hit.fields || []).some((f) => f.name === fn),
+        sync: async () => {},
+      };
+    },
+    attachLatticeRlsPolicy: async (tableName) => {
+      rlsAttachedTables.add(tableName);
+      return { applied: true, tableName };
+    },
+    sequelize: {
+      getDialect: () => dialect,
+      transaction: async (fn) => fn({ id: 'tx-1' }),
+      query: async (sql, opts = {}) => {
+        sqlCalls.push({ sql, opts });
+        if (/FROM\s+pg_class/i.test(sql)) {
+          return [[{ relname: opts?.replacements?.tableName || 'latticeCustomColdAssets', relrowsecurity: pgRlsActive, relforcerowsecurity: pgRlsActive }]];
+        }
+        if (/FROM\s+pg_policies/i.test(sql)) {
+          return [[{ policyname: 'lattice_tenant_isolation' }]];
+        }
+        return [[], { rowCount: 1 }];
+      },
+    },
+    sync: async () => {},
+    getRepository(name) {
+      const arr = store[name];
+      if (!arr) return null;
+      const base = {
+        find: async ({ filter = {}, limit = 200 } = {}) => arr.filter((r) => matchFilter(r, filter)).slice(0, limit).map((r) => wrap(arr, r)),
+        findOne: async ({ filter = {}, filterByTk } = {}) => {
+          const hit = filterByTk != null
+            ? arr.find((r) => String(r.id ?? r.uid ?? r.name) === String(filterByTk))
+            : arr.find((r) => matchFilter(r, filter));
+          if (!hit) return null;
+          if (name === 'collections') {
+            return wrap(arr, hit, {
+              load: async () => {},
+              getFields: async () => hit.fields || [],
+            });
+          }
+          return wrap(arr, hit);
+        },
+        count: async ({ filter = {} } = {}) => arr.filter((r) => matchFilter(r, filter)).length,
+        create: async ({ values }) => {
+          const id = values.id ?? ++nextId;
+          const row = { id, ...values };
+          arr.push(row);
+          if (name === 'collections') {
+            return wrap(arr, row, {
+              load: async () => {},
+              getFields: async () => row.fields || [],
+            });
+          }
+          return wrap(arr, row);
+        },
+        update: async ({ filter = {}, filterByTk, values }) => {
+          const hits = arr.filter((r) => (filterByTk != null ? String(r.id ?? r.uid ?? r.name) === String(filterByTk) : matchFilter(r, filter)));
+          for (const h of hits) Object.assign(h, values);
+          return hits.map((h) => wrap(arr, h));
+        },
+        destroy: async ({ filter = {} } = {}) => {
+          let removed = 0;
+          for (let i = arr.length - 1; i >= 0; i--) {
+            if (matchFilter(arr[i], filter)) { arr.splice(i, 1); removed += 1; }
+          }
+          return removed;
+        },
+      };
+      if (name === 'flowModels') {
+        base.findModelByParentId = async (parentUid, { subKey } = {}) => {
+          const hit = arr.find((m) => m.parentId === parentUid && (!subKey || m.subKey === subKey));
+          return hit ? { ...hit, subModels: { items: arr.filter((c) => c.parentId === hit.uid) } } : null;
+        };
+        base.findModelById = async (uid) => arr.find((m) => m.uid === uid) || null;
+        base.upsertModel = async (model) => {
+          const idx = arr.findIndex((m) => m.uid === model.uid);
+          if (idx >= 0) Object.assign(arr[idx], model);
+          else arr.push({ ...model });
+          return model.uid;
+        };
+        base.updateSingleNode = async (node) => {
+          const hit = arr.find((m) => m.uid === node.uid);
+          if (!hit) return false;
+          Object.assign(hit, { ...node, props: { ...(hit.props || {}), ...(node.props || {}) }, stepParams: { ...(hit.stepParams || {}), ...(node.stepParams || {}) } });
+          return true;
+        };
+      }
+      return base;
+    },
+  };
+
+  const ctx = {
+    db,
+    state: { currentUser: { id: 1, username: 'admin' }, currentRoles: ['root'], currentRole: 'root' },
+    app: {
+      acl: { getRole: () => ({ revokeResource: () => {}, grantAction: () => {} }) },
+      resourceManager: {
+        getResource: (resName) => {
+          if (resName === 'flowSurfaces') {
+            return {
+              actions: {
+                get: () => ({
+                  handler: async (subCtx) => {
+                    const bp = subCtx.action.params.values;
+                    const groupId = ++nextId;
+                    const pageId = ++nextId;
+                    const tabId = ++nextId;
+                    const tabUid = `tab-${pageId}`;
+                    const gridUid = `grid-${pageId}`;
+                    store.desktopRoutes.push({ id: groupId, title: bp.navigation.group.title, type: 'group', parentId: null });
+                    store.desktopRoutes.push({ id: pageId, title: bp.navigation.item.title, type: 'flowPage', parentId: groupId, schemaUid: `pg-${pageId}` });
+                    store.desktopRoutes.push({ id: tabId, title: bp.navigation.item.title, type: 'tabs', parentId: pageId, schemaUid: tabUid });
+                    store.desktopRoutesUiLayouts.push(
+                      { desktopRouteId: groupId, uiLayoutUid: bp.navigation.layoutUid },
+                      { desktopRouteId: pageId, uiLayoutUid: bp.navigation.layoutUid },
+                      { desktopRouteId: tabId, uiLayoutUid: bp.navigation.layoutUid },
+                    );
+                    store.flowModels.push({ uid: gridUid, use: 'BlockGridModel', parentId: tabUid, subKey: 'grid', props: { rows: {}, sizes: {}, rowOrder: [] }, stepParams: {} });
+                    subCtx.body = { data: { pageUid: `pg-${pageId}`, tabUid, groupId, pageId, tabId } };
+                  },
+                }),
+              },
+            };
+          }
+          if (resName === 'latticePortals') {
+            return {
+              actions: {
+                get: () => ({
+                  handler: async (subCtx) => {
+                    const v = subCtx.action.params.values;
+                    const uid = `ldx-portal-${v.slug}`;
+                    const ex = store.uiLayouts.find((l) => l.uid === uid);
+                    if (ex) Object.assign(ex, v);
+                    else store.uiLayouts.push({ uid, ...v });
+                    subCtx.body = { data: { uid } };
+                  },
+                }),
+              },
+            };
+          }
+          return null;
+        },
+      },
+    },
+  };
+
+  return { db, ctx, store };
+}
+
+test('17 canonical MCP tool names remain unchanged and all 10 Native v2 BlockModels are in ALLOWED_BLOCK_MODELS', () => {
+  assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
+  assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
+  const tools = createDxosTools();
+  assert.equal(tools.length, 17);
+  for (const model of [
+    'DxosPortalHeroBlockModel',
+    'DxosKpiMetricBlockModel',
+    'DxosContextTelemetryBlockModel',
+    'DxosAiProposalBlockModel',
+    'DxosWorkflowTasksBlockModel',
+    'DxosParaVaultBlockModel',
+    'DxosCreativeStudioBlockModel',
+    'DxosRecordWorkbenchBlockModel',
+    'DxosWebGisBlockModel',
+    'DxosKanbanScheduleBlockModel',
+    'DxosWmsOpsBlockModel',
+  ]) {
+    assert.equal(ALLOWED_BLOCK_MODELS.includes(model), true, `${model} must be in ALLOWED_BLOCK_MODELS`);
+  }
+});
+
+test('orchestrateEnterpriseAppBuild synthesizes full-stack app (Snapshot + schema/relations + RLS + OpenAPI + RBAC + 10-block Portal + DMN + Flow v2 + n8n) and passes deterministic verifier', async () => {
+  const { orchestrateEnterpriseAppBuild, verifyEnterpriseApp } = require('../src/server/app-builder-orchestrator');
+  const { db, ctx, store } = makeOrchestratorHarness();
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+
+  const n8nCalls = [];
+  const fakeN8nClient = {
+    async createWorkflow(wf) {
+      n8nCalls.push({ op: 'create', wf });
+      return { id: 'wf-cold-901', name: wf.name, active: false };
+    },
+    async activateWorkflow(id, active) {
+      n8nCalls.push({ op: 'activate', id, active });
+      return { id, active };
+    },
+    async getWorkflow(id) {
+      n8nCalls.push({ op: 'get', id });
+      return { id, name: 'Cold Assets Orchestrator', active: true };
+    },
+  };
+
+  const result = await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    portalSlug: 'cold-assets',
+    pageTitle: 'Quản lý Thiết bị Lạnh',
+    roleTitle: 'Kỹ sư Thiết bị Lạnh',
+    collectionName: 'latticeCustomColdAssets',
+    collectionTitle: 'Thiết bị Lạnh Doanh nghiệp',
+    fields: [
+      { name: 'assetRef', type: 'belongsTo', target: 'latticeAssets', title: 'Tài sản gốc' },
+      { name: 'telemetryConfig', type: 'json', title: 'Cấu hình cảm biến' },
+      { name: 'severity', type: 'enum', enumValues: ['low', 'medium', 'high', 'critical'], title: 'Mức độ' },
+    ],
+    lockedFields: ['telemetryConfig'],
+    blocks: [
+      { blockUse: 'DxosWebGisBlockModel', title: 'Bản đồ Kho lạnh' },
+      { blockUse: 'DxosKanbanScheduleBlockModel', title: 'Lịch bảo trì' },
+      { blockUse: 'DxosWmsOpsBlockModel', title: 'Thao tác WMS' },
+    ],
+    dmnTable: {
+      tableKey: 'cold_asset_priority_v1',
+      name: 'Ưu tiên xử lý Thiết bị Lạnh',
+      hitPolicy: 'FIRST',
+      inputsJson: [{ name: 'severity', type: 'string' }],
+      outputsJson: [{ name: 'priority', type: 'string' }],
+      rulesJson: [
+        { when: { severity: { op: 'eq', value: 'critical' } }, then: { priority: 'P1' } },
+        { when: { severity: '*' }, then: { priority: 'P3' } },
+      ],
+      sampleInput: { severity: 'critical' },
+    },
+    flowGraph: {
+      ruleKey: 'auto_cold_asset_v2',
+      name: 'Cold Asset Alert v2',
+      graphJson: {
+        version: 2,
+        nodes: [
+          { id: 'trig_1', type: 'trigger.record', label: 'On Asset', config: { collection: 'latticeCustomColdAssets', operation: 'create' } },
+          { id: 'dmn_1', type: 'logic.dmn', label: 'DMN Priority', config: { tableKey: 'cold_asset_priority_v1' } },
+          { id: 'not_1', type: 'notify.send', label: 'Notify', config: { roleNames: ['ldx_ky_su_thiet_bi_lanh'], severity: 'high', title: 'Asset {{data.code}}' } },
+        ],
+        edges: [
+          { id: 'e1', source: 'trig_1', sourceHandle: 'main', target: 'dmn_1', targetHandle: 'in' },
+          { id: 'e2', source: 'dmn_1', sourceHandle: 'main', target: 'not_1', targetHandle: 'in' },
+        ],
+      },
+      sampleEvent: { type: 'record.latticeCustomColdAssets.create', data: { code: 'CA-01', severity: 'critical' } },
+    },
+    n8nWorkflow: {
+      name: 'Cold Assets Partner Sync',
+      nodes: [{ id: 'n1', name: 'Webhook', type: 'n8n-nodes-base.webhook', parameters: {} }],
+      connections: {},
+    },
+  }, { n8nClient: fakeN8nClient });
+
+  assert.equal(result.built, true);
+  assert.equal(result.ok, true);
+  assert.ok(result.preBuildSnapshotUid);
+  assert.equal(result.collectionName, 'latticeCustomColdAssets');
+  assert.equal(db.rlsAttachedTables.has('latticeCustomColdAssets'), true);
+  assert.equal(store.collections.some((c) => c.name === 'latticeCustomColdAssets'), true);
+  const createdCol = store.collections.find((c) => c.name === 'latticeCustomColdAssets');
+  assert.equal(createdCol.fields.some((f) => f.name === 'assetRef' && f.type === 'belongsTo' && f.target === 'latticeAssets'), true);
+  assert.equal(createdCol.fields.some((f) => f.name === 'telemetryConfig' && f.type === 'json'), true);
+  assert.equal(createdCol.fields.some((f) => f.name === 'severity' && Array.isArray(f.uiSchema?.enum)), true);
+  assert.equal(store.flowModels.some((m) => m.use === 'DxosWebGisBlockModel'), true);
+  assert.equal(store.flowModels.some((m) => m.use === 'DxosKanbanScheduleBlockModel'), true);
+  assert.equal(store.flowModels.some((m) => m.use === 'DxosWmsOpsBlockModel'), true);
+  assert.equal(store.latticeDecisionTables.some((t) => t.tableKey === 'cold_asset_priority_v1'), true);
+  assert.equal(store.latticeAutomationRules.some((r) => r.ruleKey === 'auto_cold_asset_v2'), true);
+  assert.equal(result.n8nWorkflowId, 'wf-cold-901');
+  assert.equal(n8nCalls.some((c) => c.op === 'activate' && c.active === true), true);
+  assert.equal(result.verification.ok, true);
+  assert.ok(Array.isArray(result.verification.checks) && result.verification.checks.length >= 6);
+
+  // Standalone verifyEnterpriseApp also passes
+  const verified = await verifyEnterpriseApp(ctx, db, actor, {
+    collectionName: 'latticeCustomColdAssets',
+    portalSlug: 'cold-assets',
+    pageTitle: 'Quản lý Thiết bị Lạnh',
+    roleName: result.roleName,
+    lockedFields: ['telemetryConfig'],
+    dmnTableKey: 'cold_asset_priority_v1',
+    flowRuleKey: 'auto_cold_asset_v2',
+    n8nWorkflowId: 'wf-cold-901',
+  }, { n8nClient: fakeN8nClient });
+  assert.equal(verified.ok, true);
+});
+
+test('orchestrateEnterpriseAppBuild runs up to 2 targeted self-healing rounds when round 1 verification detects injected failures', async () => {
+  const { orchestrateEnterpriseAppBuild } = require('../src/server/app-builder-orchestrator');
+  const { db, ctx, store } = makeOrchestratorHarness();
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+
+  let n8nActive = false;
+  const fakeN8nClient = {
+    async createWorkflow(wf) { return { id: 'wf-heal-1', name: wf.name, active: false }; },
+    async activateWorkflow(id, active) { n8nActive = Boolean(active); return { id, active: n8nActive }; },
+    async getWorkflow(id) { return { id, name: 'Heal WF', active: n8nActive }; },
+  };
+
+  let verifyRound = 0;
+  const result = await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    portalSlug: 'cold-assets',
+    pageTitle: 'Trang Tự Sửa',
+    roleTitle: 'Kiểm định Tự Sửa',
+    collectionName: 'latticeCustomHealTest',
+    fields: [{ name: 'batchCode', type: 'string', title: 'Mã lô' }],
+    n8nWorkflow: { name: 'Heal WF', nodes: [], connections: {} },
+  }, {
+    n8nClient: fakeN8nClient,
+    onBeforeVerify: async (round) => {
+      verifyRound = round;
+      if (round === 1) {
+        // Inject intentional round-1 failures: drop RLS attachment & deactivate n8n workflow
+        db.rlsAttachedTables.delete('latticeCustomHealTest');
+        n8nActive = false;
+      }
+    },
+  });
+
+  assert.equal(verifyRound >= 2, true, 'Verifier must execute round 1 (fail) and round 2 (pass after self-heal)');
+  assert.equal(result.ok, true, 'App build must auto-heal to PASS on round 2');
+  assert.equal(result.healRounds, 1);
+  assert.ok(result.repairs.some((r) => r.checkId === 'pg_rls_enforced' && r.repaired === true));
+  assert.ok(result.repairs.some((r) => r.checkId === 'n8n_workflow_active' && r.repaired === true));
+  assert.equal(db.rlsAttachedTables.has('latticeCustomHealTest'), true);
+  assert.equal(n8nActive, true);
+  assert.equal(store.latticeUiSnapshots.length >= 1, true);
+});
+
+test('dxos_provision_role_workspace exposes build_enterprise_app and verify_app while blocking non-admins and system tables', async () => {
+  const { db, ctx } = makeOrchestratorHarness();
+  const byName = new Map(createDxosTools().map((t) => [t.definition.name, t]));
+  const tool = byName.get('dxos_provision_role_workspace');
+
+  const empCtx = {
+    ...ctx,
+    state: { currentUser: { id: 9, username: 'emp9' }, currentRoles: ['ldx_employee'], currentRole: 'ldx_employee' },
+  };
+  await assert.rejects(
+    () => tool.invoke(empCtx, { operation: 'build_enterprise_app', portalSlug: 'cold-assets', pageTitle: 'Hack', collectionName: 'latticeCustomHack' }),
+    (err) => err.status === 403,
+  );
+  await assert.rejects(
+    () => tool.invoke(ctx, { operation: 'build_enterprise_app', portalSlug: 'cold-assets', pageTitle: 'Sys', collectionName: 'users' }),
+    (err) => err.status === 400 || err.status === 403,
+  );
+
+  const built = await tool.invoke(ctx, {
+    operation: 'build_enterprise_app',
+    portalSlug: 'cold-assets',
+    pageTitle: 'Phân hệ Đóng gói',
+    roleTitle: 'Điều hành Đóng gói',
+    collectionName: 'latticeCustomPacking',
+    fields: [{ name: 'lotRef', type: 'belongsTo', target: 'latticeAssets', title: 'Lô liên kết' }],
+  });
+  assert.equal(built.built, true);
+  assert.equal(built.ok, true);
+
+  const verified = await tool.invoke(ctx, {
+    operation: 'verify_app',
+    portalSlug: 'cold-assets',
+    pageTitle: 'Phân hệ Đóng gói',
+    collectionName: 'latticeCustomPacking',
+    roleName: built.roleName,
+  });
+  assert.equal(verified.ok, true);
+});

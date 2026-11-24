@@ -9,6 +9,8 @@
 'use strict';
 
 const EMBEDDING_DIM = 256;
+const DEFAULT_NEURAL_EMBEDDING_DIM = 1536;
+const MAX_EMBEDDING_BATCH_SIZE = 16;
 const NEURAL_TIMEOUT_MS = 4500;
 const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small';
 const STOP_WORDS = new Set(['va', 'cua', 'cho', 'trong', 'voi', 'cac', 'nhung', 'mot', 'tai', 've', 'la', 'co', 'khong', 'duoc', 'bi']);
@@ -81,7 +83,7 @@ function computeDeterministicEmbedding(text, dim = EMBEDDING_DIM) {
 }
 
 function resolveEmbeddingEndpoint(env = process.env) {
-  const direct = String(env?.DXOS_EMBEDDING_URL || '').trim();
+  const direct = String(env?.DXOS_EMBEDDING_URL || env?.DX_EMBEDDING_URL || '').trim();
   const base = String(env?.AGENT_BASE_URL || '').trim();
   let candidate = direct;
   if (!candidate && base) {
@@ -111,6 +113,23 @@ function resolveEmbeddingEndpoint(env = process.env) {
   };
 }
 
+function resolveEmbeddingDim(env = process.env) {
+  const raw = String(env?.DX_EMBEDDING_DIM ?? env?.DXOS_EMBEDDING_DIM ?? '').trim();
+  if (!raw) return DEFAULT_NEURAL_EMBEDDING_DIM;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 8 || parsed > 8192) {
+    return DEFAULT_NEURAL_EMBEDDING_DIM;
+  }
+  return parsed;
+}
+
+function hasExplicitEmbeddingDim(env = process.env) {
+  const raw = String(env?.DX_EMBEDDING_DIM ?? env?.DXOS_EMBEDDING_DIM ?? '').trim();
+  if (!raw) return false;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed >= 8 && parsed <= 8192;
+}
+
 function deterministicFallbackResult(text) {
   return {
     vector: computeDeterministicEmbedding(text),
@@ -118,6 +137,121 @@ function deterministicFallbackResult(text) {
     model: 'fnv1a-256',
     engine: 'deterministic-fallback',
   };
+}
+
+function normalizeNeuralVector(rawVec) {
+  if (!Array.isArray(rawVec) || rawVec.length < 8 || rawVec.length > 8192) {
+    return null;
+  }
+  const vector = new Array(rawVec.length);
+  let magSq = 0;
+  for (let i = 0; i < rawVec.length; i += 1) {
+    const n = Number(rawVec[i]);
+    if (!Number.isFinite(n)) return null;
+    vector[i] = n;
+    magSq += n * n;
+  }
+  if (magSq <= 0) return null;
+  return vector;
+}
+
+async function computeNeuralEmbeddingsBatch(texts = [], {
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  batchSize = MAX_EMBEDDING_BATCH_SIZE,
+} = {}) {
+  const items = Array.isArray(texts) ? texts : [texts];
+  if (!items.length) return [];
+
+  const safeBatchSize = Math.max(1, Math.min(MAX_EMBEDDING_BATCH_SIZE, Number(batchSize) || MAX_EMBEDDING_BATCH_SIZE));
+  const endpoint = resolveEmbeddingEndpoint(env);
+  if (!endpoint || typeof fetchImpl !== 'function') {
+    return items.map((t) => deterministicFallbackResult(String(t || '').trim()));
+  }
+
+  const targetDim = hasExplicitEmbeddingDim(env) ? resolveEmbeddingDim(env) : null;
+  const results = new Array(items.length);
+
+  for (let start = 0; start < items.length; start += safeBatchSize) {
+    const end = Math.min(items.length, start + safeBatchSize);
+    const activeIndices = [];
+    const activeInputs = [];
+
+    for (let idx = start; idx < end; idx += 1) {
+      const cleanText = String(items[idx] || '').trim();
+      if (!cleanText) {
+        results[idx] = deterministicFallbackResult('');
+      } else {
+        activeIndices.push(idx);
+        activeInputs.push(cleanText.slice(0, 8000));
+      }
+    }
+
+    if (!activeInputs.length) continue;
+
+    try {
+      const headers = { 'content-type': 'application/json' };
+      if (endpoint.apiKey) headers.authorization = `Bearer ${endpoint.apiKey}`;
+      const bodyPayload = {
+        model: endpoint.model,
+        input: activeInputs,
+        ...(targetDim ? { dimensions: targetDim } : {}),
+      };
+      const res = await fetchImpl(endpoint.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(bodyPayload),
+        redirect: 'error',
+        signal: AbortSignal.timeout(NEURAL_TIMEOUT_MS),
+      });
+      if (!res || !res.ok) {
+        for (let k = 0; k < activeIndices.length; k += 1) {
+          results[activeIndices[k]] = deterministicFallbackResult(activeInputs[k]);
+        }
+        continue;
+      }
+
+      const payload = await res.json();
+      const rawByPos = new Array(activeInputs.length).fill(null);
+      if (Array.isArray(payload?.data)) {
+        payload.data.forEach((entry, seqIdx) => {
+          const pos = Number.isInteger(entry?.index) && entry.index >= 0 && entry.index < activeInputs.length
+            ? entry.index
+            : seqIdx;
+          if (pos >= 0 && pos < activeInputs.length) {
+            rawByPos[pos] = entry?.embedding ?? entry?.vector ?? null;
+          }
+        });
+      } else if (Array.isArray(payload?.embeddings)) {
+        for (let pos = 0; pos < activeInputs.length; pos += 1) {
+          rawByPos[pos] = payload.embeddings[pos] ?? null;
+        }
+      } else if (activeInputs.length === 1 && (payload?.embedding || payload?.vector)) {
+        rawByPos[0] = payload.embedding || payload.vector;
+      }
+
+      const modelName = String(payload?.model || endpoint.model);
+      for (let k = 0; k < activeIndices.length; k += 1) {
+        const vector = normalizeNeuralVector(rawByPos[k]);
+        if (vector) {
+          results[activeIndices[k]] = {
+            vector,
+            dim: vector.length,
+            model: modelName,
+            engine: 'neural',
+          };
+        } else {
+          results[activeIndices[k]] = deterministicFallbackResult(activeInputs[k]);
+        }
+      }
+    } catch {
+      for (let k = 0; k < activeIndices.length; k += 1) {
+        results[activeIndices[k]] = deterministicFallbackResult(activeInputs[k]);
+      }
+    }
+  }
+
+  return results;
 }
 
 async function computeNeuralEmbedding(text, { env = process.env, fetchImpl = globalThis.fetch } = {}) {
@@ -129,36 +263,30 @@ async function computeNeuralEmbedding(text, { env = process.env, fetchImpl = glo
     return deterministicFallbackResult(cleanText);
   }
 
+  const targetDim = hasExplicitEmbeddingDim(env) ? resolveEmbeddingDim(env) : null;
   try {
     const headers = { 'content-type': 'application/json' };
     if (endpoint.apiKey) headers.authorization = `Bearer ${endpoint.apiKey}`;
+    const bodyPayload = {
+      model: endpoint.model,
+      input: cleanText.slice(0, 8000),
+      ...(targetDim ? { dimensions: targetDim } : {}),
+    };
     const res = await fetchImpl(endpoint.url, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: endpoint.model,
-        input: cleanText.slice(0, 8000),
-      }),
+      body: JSON.stringify(bodyPayload),
       redirect: 'error',
       signal: AbortSignal.timeout(NEURAL_TIMEOUT_MS),
     });
     if (!res || !res.ok) return deterministicFallbackResult(cleanText);
 
     const payload = await res.json();
-    const rawVec = payload?.data?.[0]?.embedding || payload?.embedding || payload?.vector;
-    if (!Array.isArray(rawVec) || rawVec.length < 8 || rawVec.length > 8192) {
+    const rawVec = payload?.data?.[0]?.embedding || payload?.embeddings?.[0] || payload?.embedding || payload?.vector;
+    const vector = normalizeNeuralVector(rawVec);
+    if (!vector) {
       return deterministicFallbackResult(cleanText);
     }
-
-    const vector = new Array(rawVec.length);
-    let magSq = 0;
-    for (let i = 0; i < rawVec.length; i += 1) {
-      const n = Number(rawVec[i]);
-      if (!Number.isFinite(n)) return deterministicFallbackResult(cleanText);
-      vector[i] = n;
-      magSq += n * n;
-    }
-    if (magSq <= 0) return deterministicFallbackResult(cleanText);
 
     return {
       vector,
@@ -446,7 +574,12 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
   };
 
   if (db?.sequelize?.query && queryNorm) {
-    if (queryEmb.engine === 'neural' && queryEmb.dim === 1536 && queryEmb.vector.every(Number.isFinite)) {
+    if (
+      queryEmb.engine === 'neural'
+      && queryEmb.dim >= 8
+      && queryEmb.dim <= 8192
+      && queryEmb.vector.every(Number.isFinite)
+    ) {
       try {
         const vecLiteral = `[${queryEmb.vector.map((n) => Number(n)).join(',')}]`;
         const [vecRows] = await db.sequelize.query(
@@ -457,11 +590,12 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
            FROM "latticeParaChunks"
            WHERE active = true
              AND embedding IS NOT NULL
+             AND "embeddingDim" = :dim
              AND (:org::text IS NULL OR "organizationId" = :org)
              AND (:paraSpace::text IS NULL OR "paraSpace" = :paraSpace)
            ORDER BY embedding <=> CAST(:vec AS vector) ASC
            LIMIT 200`,
-          { replacements: { vec: vecLiteral, org: organizationId || null, paraSpace: paraSpace || null } },
+          { replacements: { vec: vecLiteral, dim: queryEmb.dim, org: organizationId || null, paraSpace: paraSpace || null } },
         );
         if (Array.isArray(vecRows)) {
           for (const r of vecRows) mergeRow(r);
@@ -589,13 +723,17 @@ async function executeHybridSearch(db, {
 
 module.exports = {
   EMBEDDING_DIM,
+  DEFAULT_NEURAL_EMBEDDING_DIM,
+  MAX_EMBEDDING_BATCH_SIZE,
   NEURAL_TIMEOUT_MS,
   stripVietnameseDiacritics,
   normalizeSearchText,
   tokenizeVietnamese,
   computeDeterministicEmbedding,
+  resolveEmbeddingDim,
   resolveEmbeddingEndpoint,
   computeNeuralEmbedding,
+  computeNeuralEmbeddingsBatch,
   cosineSimilarity,
   buildSnippet,
   extractDocumentSearchText,

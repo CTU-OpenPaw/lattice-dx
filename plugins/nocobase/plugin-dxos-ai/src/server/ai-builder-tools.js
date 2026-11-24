@@ -12,6 +12,7 @@ const { createHash, timingSafeEqual } = require('node:crypto');
 const path = require('node:path');
 const {
   LDX_ROLE_RE,
+  isBusinessRoleName,
   NATIVE_SURFACE_ACTIONS,
   collectPortalRouteSet,
   resolvePortalRoutes,
@@ -30,8 +31,21 @@ const {
   bumpSurfaceRevision,
 } = require('./ai-surface-creative-tools');
 const { publishSurfaceUpdate } = require('./surface-events');
-const { runListConnectors, runTestConnector, runInvokeN8n } = require('./n8n-bridge-tool');
+const {
+  runListConnectors,
+  runTestConnector,
+  runInvokeN8n,
+  runListN8nWorkflows,
+  runCreateN8nWorkflow,
+  runUpdateN8nWorkflow,
+  runActivateN8nWorkflow,
+  runListN8nExecutions,
+  runRetryN8nExecution,
+  runSyncN8nCredential,
+  runListConnectedApps,
+} = require('./n8n-bridge-tool');
 
+const AI_ASSIST_TIMEOUT_MS = 45000;
 const ALLOWED_WORKFLOW_NODE_TYPES = ['condition', 'manual', 'update', 'create', 'query', 'calculation', 'output', 'parallel', 'delay'];
 const FIELD_INTERFACE_MAP = {
   text: { interface: 'textarea', uiType: 'string' },
@@ -40,6 +54,9 @@ const FIELD_INTERFACE_MAP = {
   boolean: { interface: 'checkbox', uiType: 'boolean' },
   date: { interface: 'datetime', uiType: 'string' },
   select: { interface: 'select', uiType: 'string' },
+  enum: { interface: 'select', uiType: 'string' },
+  json: { interface: 'json', uiType: 'object' },
+  jsonb: { interface: 'json', uiType: 'object' },
   string: { interface: 'input', uiType: 'string' },
 };
 
@@ -57,23 +74,55 @@ function buildSafePgIndexName(colLower, suffix) {
   return `idx_${colLower.slice(0, maxBase)}_${hash}_${suffix}`;
 }
 
-function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE) {
+function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE, protectedCollections = null) {
   const fname = String(rawField?.name || '').trim();
   if (!FIELD_NAME_RE.test(fname)) {
     throw failTool('FIELD_NAME_INVALID', 400, `Tên trường "${fname}" không hợp lệ.`);
   }
-  const ftype = Object.prototype.hasOwnProperty.call(FIELD_INTERFACE_MAP, rawField?.type) ? rawField.type : 'string';
+  const rawType = String(rawField?.type || 'string').trim();
+  if (rawType === 'belongsTo') {
+    const target = String(rawField?.target || rawField?.targetCollection || '').trim();
+    if (!target || protectedCollections?.has(target) || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
+      throw failTool('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ belongsTo "${target || '(empty)'}" không hợp lệ hoặc bị bảo vệ.`);
+    }
+    const foreignKey = String(rawField?.foreignKey || `${fname}Id`).trim();
+    const targetKey = String(rawField?.targetKey || 'id').trim();
+    if (!FIELD_NAME_RE.test(foreignKey) || !FIELD_NAME_RE.test(targetKey)) {
+      throw failTool('FIELD_NAME_INVALID', 400, `foreignKey/targetKey không hợp lệ cho trường "${fname}".`);
+    }
+    return {
+      name: fname,
+      type: 'belongsTo',
+      interface: 'obo',
+      target,
+      foreignKey,
+      targetKey,
+      uiSchema: {
+        type: 'object',
+        title: String(rawField?.title || fname),
+        'x-component': 'AssociationField',
+      },
+    };
+  }
+  const ftype = Object.prototype.hasOwnProperty.call(FIELD_INTERFACE_MAP, rawType) ? rawType : 'string';
   const meta = FIELD_INTERFACE_MAP[ftype];
-  const enumValues = Array.isArray(rawField?.enumValues) ? rawField.enumValues.map((v) => String(v).trim()).filter(Boolean) : [];
+  const rawEnumList = Array.isArray(rawField?.enumValues)
+    ? rawField.enumValues
+    : (Array.isArray(rawField?.enum) ? rawField.enum : []);
+  const enumValues = rawEnumList
+    .map((v) => (v && typeof v === 'object' ? String(v.value ?? v.label ?? '').trim() : String(v ?? '').trim()))
+    .filter(Boolean);
+  const resolvedType = (ftype === 'select' || ftype === 'enum') ? 'string' : (ftype === 'jsonb' ? 'json' : ftype);
   return {
     name: fname,
-    type: ftype === 'select' ? 'string' : ftype,
+    type: resolvedType,
     interface: meta.interface,
     ...(rawField?.defaultValue !== undefined ? { defaultValue: rawField.defaultValue } : {}),
+    ...(enumValues.length ? { enum: enumValues } : {}),
     uiSchema: {
       type: meta.uiType,
       title: String(rawField?.title || fname),
-      ...(ftype === 'select' && enumValues.length ? { enum: enumValues.map((v) => ({ value: v, label: v })) } : {}),
+      ...((ftype === 'select' || ftype === 'enum') && enumValues.length ? { enum: enumValues.map((v) => ({ value: v, label: v })) } : {}),
     },
   };
 }
@@ -2096,7 +2145,18 @@ function applyTopSuggestionsDraft(ruleObj, suggestions) {
   return draft;
 }
 
+function isLlmTimeoutError(err) {
+  if (!err || typeof err !== 'object') return false;
+  if (err.code === 'LLM_TIMEOUT' || err.code === 'ABORT_ERR' || err.name === 'AbortError' || err.name === 'TimeoutError') {
+    return true;
+  }
+  return err.status === 504 || /\bLLM_TIMEOUT\b|timed?\s*out|aborted due to timeout/i.test(String(err.message || ''));
+}
+
 function extractArchitectResult(res, failTool) {
+  if (res && res.refused !== true && (res.code === 'LLM_TIMEOUT' || res.error === 'LLM_TIMEOUT')) {
+    throw failTool('LLM_TIMEOUT', 504, res.reason || res.error || 'Yêu cầu LLM quá thời gian chờ (45s).');
+  }
   if (res && (res.refused === true || res.ok === false)) {
     throw failTool('AUTOMATION_AI_REFUSED', 400, res.error || res.reason || 'Yêu cầu DX-OS Flow Architect bị từ chối.');
   }
@@ -2117,6 +2177,7 @@ function isLegacyV1NodePatch(mode, payload) {
 
 async function callFlowArchitectIfAvailable(ctx, db, actor, mode, payload, deps) {
   const { failTool, hasRes } = deps;
+  const timeoutMs = Number(payload.timeoutMs) || AI_ASSIST_TIMEOUT_MS;
   const rawTarget = payload.nodeId || payload.targetNodeId || payload.targetNode;
   const architectTargetNode = rawTarget === 'cooldown' || rawTarget === 'guard'
     ? 'trigger'
@@ -2125,6 +2186,7 @@ async function callFlowArchitectIfAvailable(ctx, db, actor, mode, payload, deps)
       : rawTarget);
   const architectPayload = {
     ...payload,
+    timeoutMs,
     ...(architectTargetNode ? { targetNode: architectTargetNode, target: architectTargetNode, targetNodeId: architectTargetNode } : {}),
   };
   const requiresGraphV2 = Boolean(
@@ -2140,8 +2202,9 @@ async function callFlowArchitectIfAvailable(ctx, db, actor, mode, payload, deps)
       const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'aiAssist', {
         ...architectPayload,
         mode,
+        timeoutMs,
         organizationId: actor.organizationId,
-        values: { ...architectPayload, mode, organizationId: actor.organizationId },
+        values: { ...architectPayload, mode, timeoutMs, organizationId: actor.organizationId },
         method: 'POST',
       }, deps);
       if (delegated.ok) {
@@ -2157,6 +2220,9 @@ async function callFlowArchitectIfAvailable(ctx, db, actor, mode, payload, deps)
         }
       }
     } catch (err) {
+      if (isLlmTimeoutError(err)) {
+        throw failTool('LLM_TIMEOUT', 504, err?.message || 'Yêu cầu LLM quá thời gian chờ (45s).');
+      }
       const errMsg = String(err?.message || '');
       const isSecurityRefusal = err?.code === 'AUTOMATION_AI_REFUSED'
         || err?.code === 'AI_ASSIST_REFUSED'
@@ -2193,6 +2259,7 @@ async function callFlowArchitectIfAvailable(ctx, db, actor, mode, payload, deps)
       db,
       env: process.env,
       mode,
+      timeoutMs,
       prompt: architectPayload.prompt || architectPayload.goal || '',
       rule: architectPayload.rule,
       graph: architectPayload.graph || architectPayload.graphJson,
@@ -2206,6 +2273,9 @@ async function callFlowArchitectIfAvailable(ctx, db, actor, mode, payload, deps)
     });
     return { source: 'module', data: extractArchitectResult(res, failTool) };
   } catch (err) {
+    if (isLlmTimeoutError(err)) {
+      throw failTool('LLM_TIMEOUT', 504, err?.message || 'Yêu cầu LLM quá thời gian chờ (45s).');
+    }
     if (err?.code === 'AUTOMATION_AI_REFUSED') throw err;
     if (err?.status === 400 && /refus|unsafe|inject|system|forbidden|proto/i.test(String(err.message || ''))) {
       throw failTool('AUTOMATION_AI_REFUSED', 400, err.message);
@@ -3440,6 +3510,10 @@ async function runResumeAutomation(ctx, db, actor, args, deps) {
         employeeId: actor.employeeId,
         username: actor.username,
         organizationId: actor.organizationId,
+        roleNames: Array.isArray(actor.roleNames) ? actor.roleNames : [],
+        roles: Array.isArray(actor.roleNames) ? actor.roleNames : [],
+        isAdmin: Boolean(actor.isAdmin),
+        isRoot: Boolean(actor.isRoot),
       },
       dryRun: false,
       options: { app: ctx?.app || db?.app },
@@ -3464,6 +3538,92 @@ async function runResumeAutomation(ctx, db, actor, args, deps) {
   }
 
   throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ tiếp tục HITL (dxosAutomations:resumeRun / flow/executor) chưa sẵn sàng.');
+}
+
+async function runDmnActionViaStudioOrResource(ctx, db, actor, actionName, method, payload, deps) {
+  const { failTool, hasRes, invokeResourceAction } = deps;
+  if (hasResourceAction(hasRes, ctx, 'dxosDmn', actionName)) {
+    return invokeResourceAction(ctx, 'dxosDmn', actionName, {
+      method,
+      organizationId: actor.organizationId,
+      ...payload,
+      ...(method === 'POST' ? { values: { organizationId: actor.organizationId, ...payload } } : {}),
+    });
+  }
+  const dmnMod = loadStudioModule('dmn-engine');
+  if (dmnMod && typeof dmnMod.createDxosDmnActions === 'function') {
+    const actions = dmnMod.createDxosDmnActions(db);
+    const handler = actions?.[actionName];
+    if (typeof handler === 'function') {
+      const subCtx = {
+        method,
+        ...(method === 'GET' ? { query: { organizationId: actor.organizationId, ...payload } } : {}),
+        app: ctx?.app,
+        db,
+        state: {
+          ...(ctx?.state || {}),
+          currentUser: { id: actor.userId, username: actor.username },
+          currentRoles: Array.isArray(actor.roleNames) ? actor.roleNames : (actor.isRoot ? ['root'] : ['admin']),
+          currentRole: actor.isRoot ? 'root' : (actor.roleNames?.[0] || 'admin'),
+        },
+        action: {
+          params: {
+            organizationId: actor.organizationId,
+            ...payload,
+            ...(method === 'POST' ? { values: { organizationId: actor.organizationId, ...payload } } : {}),
+          },
+        },
+        body: null,
+      };
+      await handler(subCtx, async () => {});
+      return subCtx.body || {};
+    }
+  }
+  throw failTool('DMN_ENGINE_UNAVAILABLE', 503, 'Dịch vụ DMN (dxosDmn / dmn-engine) chưa sẵn sàng.');
+}
+
+async function runDmnListTables(ctx, db, actor, args, deps) {
+  const res = await runDmnActionViaStudioOrResource(ctx, db, actor, 'listTables', 'GET', {
+    ...(args.tableKey ? { tableKey: args.tableKey } : {}),
+    ...(args.active !== undefined ? { activeOnly: Boolean(args.active) } : {}),
+    ...(args.limit ? { limit: args.limit } : {}),
+  }, deps);
+  return { operation: 'dmn_list_tables', organizationId: actor.organizationId, ...(res || {}) };
+}
+
+async function runDmnSaveTable(ctx, db, actor, args, deps) {
+  const { failTool } = deps;
+  if (hasForbiddenProtoKeys(args.rulesJson) || hasForbiddenProtoKeys(args.inputsJson) || hasForbiddenProtoKeys(args.outputsJson)) {
+    throw failTool('AUTOMATION_AI_REFUSED', 400, 'Dữ liệu DMN chứa khóa prototype bị cấm.');
+  }
+  const dmnPayload = {
+    tableKey: args.tableKey,
+    name: args.name || args.title || args.tableKey,
+    description: args.description,
+    hitPolicy: args.hitPolicy || 'FIRST',
+    inputsJson: args.inputsJson,
+    outputsJson: args.outputsJson,
+    rulesJson: args.rulesJson,
+    ...(args.active !== undefined ? { active: Boolean(args.active) } : {}),
+  };
+  if (args.dryRun === true) {
+    return { operation: 'dmn_save_table', dryRun: true, organizationId: actor.organizationId, table: dmnPayload };
+  }
+  const res = await runDmnActionViaStudioOrResource(ctx, db, actor, 'saveTable', 'POST', dmnPayload, deps);
+  return { operation: 'dmn_save_table', organizationId: actor.organizationId, ...(res || {}) };
+}
+
+async function runDmnEvaluate(ctx, db, actor, args, deps) {
+  const { failTool } = deps;
+  if (hasForbiddenProtoKeys(args.context) || hasForbiddenProtoKeys(args.sampleEvent)) {
+    throw failTool('AUTOMATION_AI_REFUSED', 400, 'Ngữ cảnh đánh giá DMN chứa khóa prototype bị cấm.');
+  }
+  const evalCtx = isPlainObject(args.context) ? args.context : (isPlainObject(args.sampleEvent) ? args.sampleEvent : {});
+  const res = await runDmnActionViaStudioOrResource(ctx, db, actor, 'evaluate', 'POST', {
+    tableKey: args.tableKey,
+    context: evalCtx,
+  }, deps);
+  return { operation: 'dmn_evaluate', organizationId: actor.organizationId, ...(res || {}) };
 }
 
 function createBuilderTools(deps) {
@@ -3846,7 +4006,7 @@ function createBuilderTools(deps) {
         if (!SLUG_RE.test(args.slug)) throw failTool('PORTAL_SLUG_INVALID', 400, 'Slug portal không hợp lệ.');
         const operation = args.operation || 'grant';
         const layoutUid = `ldx-portal-${args.slug}`;
-        const safeRoles = (args.roleNames || (operation === 'grant' ? ['ldx_employee', 'ldx_manager'] : [])).filter((r) => LDX_ROLE_RE.test(r));
+        const safeRoles = (args.roleNames || (operation === 'grant' ? ['ldx_employee', 'ldx_manager'] : [])).filter((r) => isBusinessRoleName(r));
         const title = args.title || `Portal ${args.slug}`;
         if (args.dryRun) {
           return { dryRun: true, operation, layoutUid, path: `/p/${args.slug}`, title, roleNames: safeRoles };
@@ -3871,7 +4031,7 @@ function createBuilderTools(deps) {
           let existingRoles = [];
           if (rolesRoutesRepo && portalRouteIds.length) {
             const grants = (await rolesRoutesRepo.find({ filter: { desktopRouteId: { $in: portalRouteIds } }, limit: 400 })) || [];
-            existingRoles = grants.map((g) => val(g, 'roleName')).filter((r) => LDX_ROLE_RE.test(r));
+            existingRoles = grants.map((g) => val(g, 'roleName')).filter((r) => isBusinessRoleName(r));
           }
           const mergedRoles = [...new Set([...existingRoles, ...safeRoles])];
           const saved = await invokeResourceAction(ctx, 'latticePortals', 'save', {
@@ -3944,7 +4104,7 @@ function createBuilderTools(deps) {
         }
         const rawFields = Array.isArray(args.fields) ? args.fields : [];
         if (!rawFields.length) throw failTool('FIELDS_REQUIRED', 400, 'Cần ít nhất 1 trường dữ liệu trong fields.');
-        const normalizedFields = rawFields.map((f) => buildFieldDefinition(f, failTool, FIELD_NAME_RE));
+        const normalizedFields = rawFields.map((f) => buildFieldDefinition(f, failTool, FIELD_NAME_RE, SYSTEM_PROTECTED_COLLECTIONS));
         if (args.operation === 'createCollection') {
           const has = (n) => normalizedFields.some((f) => f.name === n);
           if (!has('status')) normalizedFields.unshift({ name: 'status', type: 'string', interface: 'input', defaultValue: 'draft', uiSchema: { type: 'string', title: 'Trạng thái' } });
@@ -4052,8 +4212,8 @@ function createBuilderTools(deps) {
         },
       },
       async run(ctx, db, _actor, args) {
-        if (!LDX_ROLE_RE.test(args.roleName || '')) {
-          throw failTool('ROLE_TARGET_FORBIDDEN', 403, `Chỉ được phép cấu hình vai trò theo mẫu ldx_*; từ chối "${args.roleName}".`);
+        if (!isBusinessRoleName(args.roleName || '')) {
+          throw failTool('ROLE_TARGET_FORBIDDEN', 403, `Không được phép cấu hình vai trò hệ thống hoặc tên vai trò không hợp lệ "${args.roleName}".`);
         }
         if (args.collectionName && SYSTEM_PROTECTED_COLLECTIONS.has(args.collectionName)) {
           throw failTool('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được thay đổi phân quyền bảng hệ thống "${args.collectionName}".`);
@@ -4100,7 +4260,7 @@ function createBuilderTools(deps) {
             if (role && typeof role.update === 'function') await role.update({ title: values.title });
             else role = await rolesRepo.create({ values });
           }
-          if (args.cloneFromRole && LDX_ROLE_RE.test(args.cloneFromRole)) {
+          if (args.cloneFromRole && isBusinessRoleName(args.cloneFromRole)) {
             if (resourcesRepo) {
               const srcRes = (await resourcesRepo.find({ filter: { roleName: args.cloneFromRole, dataSourceKey: 'main' }, appends: ['actions'], limit: 100 })) || [];
               if (dsRolesRepo && !(await dsRolesRepo.findOne({ filter: { roleName: args.roleName, dataSourceKey: 'main' } }))) {
@@ -4299,17 +4459,23 @@ function createBuilderTools(deps) {
       adminOnly: true,
       defaultPermission: 'ASK',
       introduction: { title: 'Kỹ sư Workflow & DX-OS Flow Architect', about: 'Đọc/chỉnh đồ thị workflow, liệt kê/chạy, thiết kế LatticeFlow v2 DAG đa nhánh, vá node hoặc sửa lỗi fix_error, gợi ý tối ưu, mô phỏng node/flow, lưu và phê duyệt resume HITL.' },
-      description: 'Inspect workflow flow_nodes graphs, update node configs, add nodes, build custom collection workflows, toggle enabled state, and list, run, suggest, draft, patch, save, test (flow or single node), or resume HITL LatticeFlow v2 / native automations (Admin only).',
+      description: 'Inspect workflow flow_nodes graphs, update node configs, add nodes, build custom collection workflows, toggle enabled state, manage DMN decision tables, manage Stock n8n REST API v1 workflows/executions/credentials, and list, run, suggest, draft, patch, save, test, or resume HITL LatticeFlow v2 automations (Admin only).',
       prepareArgs(raw) {
         if (!isPlainObject(raw)) return raw;
         const next = { ...raw };
         if (typeof next.nodeId === 'number' && Number.isInteger(next.nodeId)) {
           next.nodeId = String(next.nodeId);
         }
+        if (typeof next.workflowId === 'number' && Number.isInteger(next.workflowId)) {
+          next.workflowId = String(next.workflowId);
+        }
+        if (typeof next.executionId === 'number' && Number.isInteger(next.executionId)) {
+          next.executionId = String(next.executionId);
+        }
         return next;
       },
       schema: {
-        description: 'Workflow graph engineering and LatticeFlow v2 / Native Automation operation.',
+        description: 'Workflow graph engineering, DMN decision tables, Stock n8n REST API v1, and LatticeFlow v2 / Native Automation operation.',
         properties: {
           operation: {
             type: 'string',
@@ -4331,12 +4497,42 @@ function createBuilderTools(deps) {
               'listConnectors',
               'testConnector',
               'invokeN8n',
+              'dmn_list_tables',
+              'dmn_save_table',
+              'dmn_evaluate',
+              'list_n8n_workflows',
+              'create_n8n_workflow',
+              'update_n8n_workflow',
+              'activate_n8n_workflow',
+              'list_n8n_executions',
+              'retry_n8n_execution',
+              'sync_n8n_credential',
+              'list_connected_apps',
             ],
           },
           connectorKey: { type: 'string', maxLength: 64, description: 'Vault connector key (e.g. n8n-enterprise-orchestrator).' },
+          n8nConnectorKey: { type: 'string', maxLength: 64, description: 'Target n8n API connector key when syncing credentials.' },
           connectorType: { type: 'string', maxLength: 32, description: 'Optional connector type filter (n8n, webhook, mqtt, orion_ld, http_api).' },
           webhookPath: { type: 'string', maxLength: 200, description: 'Relative webhook path on the target n8n connector.' },
-          workflowId: { type: 'integer' },
+          workflowId: { type: 'string', maxLength: 80 },
+          executionId: { type: 'string', maxLength: 80 },
+          workflow: { type: 'object', description: 'Stock n8n workflow JSON object for create_n8n_workflow / update_n8n_workflow.' },
+          active: { type: 'boolean' },
+          tags: { type: 'array', items: { type: 'string' } },
+          status: { type: 'string', maxLength: 40 },
+          includeData: { type: 'boolean' },
+          cursor: { type: 'string', maxLength: 120 },
+          n8nCredentialType: { type: 'string', maxLength: 80 },
+          credentialName: { type: 'string', maxLength: 120 },
+          idempotencyKey: { type: 'string', maxLength: 120 },
+          tableKey: { type: 'string', maxLength: 80, description: 'DMN decision table key.' },
+          name: { type: 'string', maxLength: 160 },
+          description: { type: 'string', maxLength: 500 },
+          hitPolicy: { type: 'string', enum: ['FIRST', 'COLLECT'] },
+          inputsJson: { type: 'array', items: { type: 'object' } },
+          outputsJson: { type: 'array', items: { type: 'object' } },
+          rulesJson: { type: 'array', items: { type: 'object' } },
+          context: { type: 'object', description: 'DMN evaluation input context.' },
           titleQuery: { type: 'string', maxLength: 100 },
           title: { type: 'string', maxLength: 120 },
           collectionName: { type: 'string', maxLength: 60 },
@@ -4383,6 +4579,7 @@ function createBuilderTools(deps) {
           isStudioAdmin,
           SYSTEM_PROTECTED_COLLECTIONS,
         };
+        const bridgeDeps = { ...automationDeps, hasForbiddenProtoKeys, sanitizeAutomationValue };
         if (args.operation === 'listAutomations') {
           return runListAutomations(ctx, db, actor, args, automationDeps);
         }
@@ -4414,15 +4611,51 @@ function createBuilderTools(deps) {
           return runTestConnector(ctx, db, actor, args, automationDeps);
         }
         if (args.operation === 'invokeN8n') {
-          return runInvokeN8n(ctx, db, actor, args, { ...automationDeps, hasForbiddenProtoKeys, sanitizeAutomationValue });
+          return runInvokeN8n(ctx, db, actor, args, bridgeDeps);
+        }
+        if (args.operation === 'dmn_list_tables') {
+          return runDmnListTables(ctx, db, actor, args, automationDeps);
+        }
+        if (args.operation === 'dmn_save_table') {
+          return runDmnSaveTable(ctx, db, actor, args, automationDeps);
+        }
+        if (args.operation === 'dmn_evaluate') {
+          return runDmnEvaluate(ctx, db, actor, args, automationDeps);
+        }
+        if (args.operation === 'list_n8n_workflows') {
+          return runListN8nWorkflows(ctx, db, actor, args, bridgeDeps);
+        }
+        if (args.operation === 'create_n8n_workflow') {
+          return runCreateN8nWorkflow(ctx, db, actor, args, bridgeDeps);
+        }
+        if (args.operation === 'update_n8n_workflow') {
+          return runUpdateN8nWorkflow(ctx, db, actor, args, bridgeDeps);
+        }
+        if (args.operation === 'activate_n8n_workflow') {
+          return runActivateN8nWorkflow(ctx, db, actor, args, bridgeDeps);
+        }
+        if (args.operation === 'list_n8n_executions') {
+          return runListN8nExecutions(ctx, db, actor, args, bridgeDeps);
+        }
+        if (args.operation === 'retry_n8n_execution') {
+          return runRetryN8nExecution(ctx, db, actor, args, bridgeDeps);
+        }
+        if (args.operation === 'sync_n8n_credential') {
+          return runSyncN8nCredential(ctx, db, actor, args, bridgeDeps);
+        }
+        if (args.operation === 'list_connected_apps') {
+          return runListConnectedApps(ctx, db, actor, args, bridgeDeps);
         }
 
         const wfRepo = db.getRepository('workflows');
         const nodeRepo = db.getRepository('flow_nodes');
         if (!wfRepo || !nodeRepo) throw failTool('WORKFLOW_ENGINE_UNAVAILABLE', 503, 'Workflow/flow_nodes repository unavailable.');
+        const numericWorkflowId = args.workflowId != null && /^\d+$/.test(String(args.workflowId).trim())
+          ? Number(args.workflowId)
+          : args.workflowId;
 
         if (args.operation === 'inspectWorkflow') {
-          let wf = args.workflowId ? await wfRepo.findOne({ filterByTk: args.workflowId }) : null;
+          let wf = numericWorkflowId ? await wfRepo.findOne({ filterByTk: numericWorkflowId }) : null;
           if (!wf && args.titleQuery) {
             const all = (await wfRepo.find({ filter: { current: true }, limit: 100 })) || [];
             const q = args.titleQuery.toLowerCase();
@@ -4455,8 +4688,8 @@ function createBuilderTools(deps) {
           }
           const numericNodeId = args.nodeId != null && /^\d+$/.test(String(args.nodeId).trim()) ? Number(args.nodeId) : args.nodeId;
           let node = numericNodeId ? await nodeRepo.findOne({ filterByTk: numericNodeId }) : null;
-          if (!node && args.workflowId && args.nodeKey) {
-            node = await nodeRepo.findOne({ filter: { workflowId: args.workflowId, key: args.nodeKey } });
+          if (!node && numericWorkflowId && args.nodeKey) {
+            node = await nodeRepo.findOne({ filter: { workflowId: numericWorkflowId, key: args.nodeKey } });
           }
           if (!node) throw failTool('WORKFLOW_NODE_NOT_FOUND', 404, 'Không tìm thấy node workflow cần chỉnh sửa.');
           const prevCfg = val(node, 'config') || {};
@@ -4468,14 +4701,14 @@ function createBuilderTools(deps) {
         }
 
         if (args.operation === 'addNode') {
-          if (!args.workflowId || !args.nodeType) throw failTool('WORKFLOW_NODE_ARGS_REQUIRED', 400, 'Cần workflowId và nodeType.');
+          if (!numericWorkflowId || !args.nodeType) throw failTool('WORKFLOW_NODE_ARGS_REQUIRED', 400, 'Cần workflowId và nodeType.');
           const key = args.nodeKey || `dxos_${args.nodeType}_${Date.now().toString(36)}`;
-          if (args.dryRun) return { dryRun: true, workflowId: args.workflowId, nodeType: args.nodeType, key, upstreamNodeId: args.upstreamNodeId || null };
+          if (args.dryRun) return { dryRun: true, workflowId: numericWorkflowId, nodeType: args.nodeType, key, upstreamNodeId: args.upstreamNodeId || null };
           const up = args.upstreamNodeId ? await nodeRepo.findOne({ filterByTk: args.upstreamNodeId }) : null;
           const prevDownstreamId = up ? val(up, 'downstreamId') ?? null : null;
           const created = await nodeRepo.create({
             values: {
-              workflowId: args.workflowId,
+              workflowId: numericWorkflowId,
               key,
               title: args.title || `Bước ${args.nodeType}`,
               type: args.nodeType,
@@ -4498,17 +4731,17 @@ function createBuilderTools(deps) {
         }
 
         if (args.operation === 'toggleWorkflow') {
-          if (!args.workflowId) throw failTool('WORKFLOW_ID_REQUIRED', 400, 'Cần workflowId để bật/tắt workflow.');
+          if (!numericWorkflowId) throw failTool('WORKFLOW_ID_REQUIRED', 400, 'Cần workflowId để bật/tắt workflow.');
           const enabled = args.enabled !== false;
-          if (args.dryRun) return { dryRun: true, workflowId: args.workflowId, enabled };
+          if (args.dryRun) return { dryRun: true, workflowId: numericWorkflowId, enabled };
           if (hasRes(ctx, 'workflows')) {
-            await invokeResourceAction(ctx, 'workflows', 'update', { filterByTk: args.workflowId, values: { enabled } });
+            await invokeResourceAction(ctx, 'workflows', 'update', { filterByTk: numericWorkflowId, values: { enabled } });
           } else {
-            const wf = await wfRepo.findOne({ filterByTk: args.workflowId });
+            const wf = await wfRepo.findOne({ filterByTk: numericWorkflowId });
             if (!wf) throw failTool('WORKFLOW_NOT_FOUND', 404, 'Không tìm thấy workflow.');
             await wf.update({ enabled });
           }
-          return { applied: true, workflowId: args.workflowId, enabled };
+          return { applied: true, workflowId: numericWorkflowId, enabled };
         }
 
         // buildCustomWorkflow
