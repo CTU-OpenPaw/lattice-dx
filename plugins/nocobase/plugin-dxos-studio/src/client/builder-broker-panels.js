@@ -8,18 +8,8 @@
  */
 'use strict';
 
-const { createAutomationStudioPanel } = require('./automation-studio-panel');
-
 const CONNECTOR_TYPES = ['n8n', 'webhook', 'mqtt', 'orion_ld', 'http_api', 'smtp_notify'];
 const AUTH_TYPES = ['bearer', 'hmac', 'basic', 'api_key', 'none'];
-const AUTOMATION_ACTION_TYPES = [
-  'create_record',
-  'update_record',
-  'notify_role',
-  'call_connector',
-  'twin_set_desired',
-  'trigger_ai_triage',
-];
 const FIELD_TYPES = ['string', 'text', 'integer', 'float', 'boolean', 'date', 'datetime', 'json'];
 const BUILDER_ROLES = [
   'ldx_admin',
@@ -35,11 +25,6 @@ const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const PORTAL_PATH_RE = /^\/p\/[a-z0-9-]+$/;
 const POSITIVE_INT_RE = /^[1-9]\d{0,18}$/;
 
-const DEFAULT_AUTOMATION_ACTIONS = [
-  { type: 'create_record', collection: 'latticeCustomWorkOrders', values: { title: 'Bảo trì khẩn kho lạnh' } },
-  { type: 'notify_role', role: 'ldx_operator', title: 'Cảnh báo tự động từ Automation Engine' },
-];
-const DEFAULT_SAMPLE_EVENT = '{\n  "type": "telemetry.alarm",\n  "data": {\n    "temperature": 12.5,\n    "assetId": 1\n  }\n}';
 const DEFAULT_CMMS_PACK = Object.freeze({
   packKey: 'cmms-maintenance',
   title: 'Bảo trì Thiết bị CMMS',
@@ -1017,22 +1002,10 @@ function createBrokerAndEventsPanel(client, React, _antd, app) {
 function createVaultAndAutomationPanel(client, React, _antd, app) {
   const h = React.createElement;
   const S = makeStyles();
-  const AutomationStudioPanel = createAutomationStudioPanel(client, React, _antd, app, {
-    unwrapData,
-    extractError,
-    formatTs,
-    safeJsonParse,
-    statusTone,
-    makeStyles,
-    AUTOMATION_ACTION_TYPES,
-    BUILDER_ROLES,
-    DEFAULT_AUTOMATION_ACTIONS,
-    DEFAULT_SAMPLE_EVENT,
-  });
 
   return function VaultAndAutomationPanel(props = {}) {
     const rt = usePanelRuntime(React, client, app, props);
-    const { effectiveOrg, orgPayload, hasApi, runtimeRef, reportFeedback, busy, runMutation } = rt;
+    const { effectiveOrg, orgPayload, hasApi, runtimeRef, openRoute, reportFeedback, busy, runMutation } = rt;
 
     const [loading, setLoading] = React.useState(false);
     const [connectors, setConnectors] = React.useState([]);
@@ -1050,24 +1023,10 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
 
     const [rules, setRules] = React.useState([]);
     const [runs, setRuns] = React.useState([]);
-    const [rawCatalog, setRawCatalog] = React.useState(null);
-    const [selectedRuleKey, setSelectedRuleKey] = React.useState('');
-    const [selectedRun, setSelectedRun] = React.useState(null);
     const [loadSeqRef] = React.useState(() => ({ current: 0 }));
-    const [selectedRuleKeyRef] = React.useState(() => ({ current: '' }));
-
-    const updateSelectedRuleKey = React.useCallback((nextKey) => {
-      const normalized = String(nextKey || '');
-      selectedRuleKeyRef.current = normalized;
-      setSelectedRuleKey(normalized);
-    }, []);
 
     React.useEffect(() => {
       loadSeqRef.current += 1;
-      selectedRuleKeyRef.current = '';
-      setSelectedRuleKey('');
-      setSelectedRun(null);
-      setRawCatalog(null);
       setTestResult(null);
       setRotateTargetKey('');
       setRotateSecretText('');
@@ -1076,77 +1035,29 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
       setRuns([]);
     }, [effectiveOrg]);
 
-    const loadAll = React.useCallback(async (overrideRuleKey) => {
+    const loadAll = React.useCallback(async () => {
       const clientApi = runtimeRef.api;
       if (!clientApi?.request) return;
       const seq = (loadSeqRef.current += 1);
-      const runFilterKey = overrideRuleKey !== undefined ? overrideRuleKey : selectedRuleKeyRef.current;
       const reqOrgPayload = { ...orgPayload };
       setLoading(true);
-      try {
-        const catalogPromise = (async () => {
-          try {
-            return await clientApi.request({ url: 'dxosAutomations:builderCatalog', method: 'get', params: reqOrgPayload, skipNotify: true });
-          } catch {
-            return null;
-          }
-        })();
-        const results = await Promise.allSettled([
-          clientApi.request({ url: 'dxosVault:list', method: 'get', params: reqOrgPayload, skipNotify: true }),
-          clientApi.request({ url: 'dxosAutomations:listRules', method: 'get', params: reqOrgPayload, skipNotify: true }),
-          clientApi.request({
-            url: 'dxosAutomations:listRuns',
-            method: 'get',
-            params: { ...reqOrgPayload, ...(runFilterKey ? { ruleKey: runFilterKey } : {}) },
-            skipNotify: true,
-          }),
-        ]);
-        if (seq !== loadSeqRef.current) return;
-        const firstErr = results.find((r) => r.status === 'rejected');
-        if (firstErr) {
-          reportFeedback({ type: 'error', text: extractError(firstErr.reason, 'Không tải được dữ liệu Vault & Automation.') });
-        }
-        if (results[0].status === 'fulfilled') {
-          const d = unwrapData(results[0].value);
-          setConnectors(Array.isArray(d.items) ? d.items : []);
-        }
-        if (results[1].status === 'fulfilled') {
-          const d = unwrapData(results[1].value);
-          setRules(Array.isArray(d.items) ? d.items : []);
-        }
-        if (results[2].status === 'fulfilled') {
-          const d = unwrapData(results[2].value);
-          const nextRuns = Array.isArray(d.items) ? d.items : [];
-          setRuns(nextRuns);
-          if (nextRuns.length) {
-            setSelectedRun((prev) => {
-              if (!prev) return nextRuns[0];
-              const prevId = prev.runUid ?? prev.runId ?? prev.id;
-              const refreshed = prevId != null ? nextRuns.find((r) => (r.runUid ?? r.runId ?? r.id) === prevId) : null;
-              return refreshed || nextRuns[0];
-            });
-          } else {
-            setSelectedRun(null);
-          }
-        }
-        const catalogRes = await catalogPromise;
-        if (seq !== loadSeqRef.current) return;
-        if (catalogRes) {
-          const cd = unwrapData(catalogRes);
-          if (cd && typeof cd === 'object' && Object.keys(cd).length > 0) {
-            setRawCatalog(cd);
-          } else {
-            setRawCatalog(null);
-          }
-        } else {
-          setRawCatalog(null);
-        }
-      } catch (err) {
-        if (seq !== loadSeqRef.current) return;
-        reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') });
-      } finally {
-        if (seq === loadSeqRef.current) setLoading(false);
-      }
+      let pendingCount = 3;
+      const done = () => {
+        pendingCount -= 1;
+        if (pendingCount === 0 && seq === loadSeqRef.current) setLoading(false);
+      };
+      clientApi.request({ url: 'dxosVault:list', method: 'get', params: reqOrgPayload, skipNotify: true })
+        .then((res) => { if (seq === loadSeqRef.current) setConnectors(Array.isArray(unwrapData(res).items) ? unwrapData(res).items : []); })
+        .catch((err) => { if (seq === loadSeqRef.current) reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') }); })
+        .finally(done);
+      clientApi.request({ url: 'dxosAutomations:listRules', method: 'get', params: reqOrgPayload, skipNotify: true })
+        .then((res) => { if (seq === loadSeqRef.current) setRules(Array.isArray(unwrapData(res).items) ? unwrapData(res).items : []); })
+        .catch((err) => { if (seq === loadSeqRef.current) reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') }); })
+        .finally(done);
+      clientApi.request({ url: 'dxosAutomations:listRuns', method: 'get', params: reqOrgPayload, skipNotify: true })
+        .then((res) => { if (seq === loadSeqRef.current) setRuns(Array.isArray(unwrapData(res).items) ? unwrapData(res).items : []); })
+        .catch((err) => { if (seq === loadSeqRef.current) reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') }); })
+        .finally(done);
     }, [effectiveOrg, hasApi]);
 
     React.useEffect(() => {
@@ -1425,25 +1336,121 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
         ),
       ),
 
-      // Section 2: Visual Automation Studio & Inline AI Copilot
-      h(AutomationStudioPanel, {
-        effectiveOrg,
-        orgPayload,
-        runtimeRef,
-        reportFeedback,
-        busy,
-        runMutation,
-        loading,
-        loadAll,
-        connectors,
-        rules,
-        runs,
-        rawCatalog,
-        selectedRuleKey,
-        setSelectedRuleKey: updateSelectedRuleKey,
-        selectedRun,
-        setSelectedRun,
-      }),
+      // Section 2: Slim LatticeFlow v2 Automation Summary & Studio Launcher
+      h('div', { 'data-testid': 'dxos-automation-summary-card', style: S.card },
+        h('div', { style: S.rowBetween },
+          h('div', null,
+            h('h3', { style: { margin: 0, fontSize: 16 } }, 'LatticeFlow v2 — Automation Rules & Full-Screen Studio'),
+            h('p', { style: { margin: '4px 0 0', fontSize: 12, color: '#64748b' } }, 'Quản trị nhanh quy tắc tự động hóa & lịch sử chạy; mở DX-OS Flow Studio toàn màn hình để thiết kế DAG, HITL và Flow Architect.'),
+          ),
+          h('button', {
+            'data-testid': 'dxos-open-flow-studio-btn',
+            type: 'button',
+            onClick: () => openRoute('/admin/settings/dxos-flow-studio'),
+            style: S.btn(true),
+          }, 'Mở Full-Screen LatticeFlow Studio ↗'),
+        ),
+        h('div', { style: S.kpiGrid },
+          [
+            ['Tổng Flow Rules', rules.length],
+            ['Đang kích hoạt', rules.filter((r) => r.active !== false).length],
+            ['Lượt chạy gần đây', runs.length],
+            ['Chờ duyệt HITL', runs.filter((r) => r.status === 'suspended').length],
+          ].map(([label, count]) => h('div', { key: label, style: S.kpiBox },
+            h('div', { style: { fontSize: 11, color: '#64748b' } }, label),
+            h('div', { style: { fontSize: 18, fontWeight: 700, color: '#0f172a', marginTop: 2 } }, count),
+          )),
+        ),
+        h('div', { style: S.tableWrap },
+          h('table', { 'data-testid': 'dxos-automation-rules-table', style: S.table },
+            h('thead', null, h('tr', null, ['Rule Key', 'Tên quy trình', 'Trigger', 'Schema', 'Trạng thái', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
+            h('tbody', null,
+              !rules.length
+                ? h('tr', null, h('td', { colSpan: 6, style: { ...S.td, color: '#64748b' } }, 'Chưa có Automation Rule nào. Nhấn "Mở Full-Screen LatticeFlow Studio ↗" để khởi tạo từ 6 Blueprint mẫu.'))
+                : rules.map((r) => h('tr', { key: r.id || r.ruleKey },
+                  h('td', { style: S.td }, h('code', null, r.ruleKey)),
+                  h('td', { style: S.td }, r.name || r.ruleKey),
+                  h('td', { style: S.td }, h('code', null, r.triggerEventType || '*')),
+                  h('td', { style: S.td }, h('span', { style: S.badge(Number(r.schemaVersion) === 2 || r.graphJson ? 'info' : 'neutral') }, Number(r.schemaVersion) === 2 || r.graphJson ? 'v2 DAG' : 'v1')),
+                  h('td', { style: S.td }, h('span', { style: S.badge(r.active !== false ? 'ok' : 'neutral') }, r.active !== false ? 'active' : 'paused')),
+                  h('td', { style: { ...S.td, display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                    h('button', {
+                      'data-testid': `dxos-automation-open-studio-${r.ruleKey}`,
+                      type: 'button',
+                      onClick: () => openRoute(`/admin/settings/dxos-flow-studio?ruleKey=${encodeURIComponent(r.ruleKey)}`),
+                      style: S.btn(false),
+                    }, 'Mở trong Studio ↗'),
+                    h('button', {
+                      'data-testid': `dxos-automation-run-${r.ruleKey}`,
+                      type: 'button',
+                      disabled: busy,
+                      onClick: () => runMutation(`Không chạy được rule "${r.ruleKey}".`, async (clientApi) => {
+                        const evType = String(r.triggerEventType || 'manual.trigger').split(',')[0].trim() || 'manual.trigger';
+                        await clientApi.request({ url: 'dxosAutomations:runNow', method: 'post', data: { ...orgPayload, ruleKey: r.ruleKey, sampleEvent: r.sampleEvent || { type: evType, data: {} } } });
+                        reportFeedback({ type: 'success', text: `Đã chạy rule "${r.ruleKey}".` });
+                        await loadAll();
+                      }),
+                      style: S.btn(true, false, busy),
+                    }, 'Run Now'),
+                    h('button', {
+                      'data-testid': `dxos-automation-toggle-${r.ruleKey}`,
+                      type: 'button',
+                      disabled: busy,
+                      onClick: () => runMutation('Không đổi được trạng thái rule.', async (clientApi) => {
+                        await clientApi.request({ url: 'dxosAutomations:toggleRule', method: 'post', data: { ...orgPayload, ruleKey: r.ruleKey, active: r.active === false } });
+                        await loadAll();
+                      }),
+                      style: S.btn(false, false, busy),
+                    }, r.active !== false ? 'Tạm dừng' : 'Bật'),
+                    h('button', {
+                      'data-testid': `dxos-automation-delete-${r.ruleKey}`,
+                      type: 'button',
+                      disabled: busy,
+                      onClick: () => runMutation('Không xóa được rule.', async (clientApi) => {
+                        await clientApi.request({ url: 'dxosAutomations:deleteRule', method: 'post', data: { ...orgPayload, ruleKey: r.ruleKey } });
+                        reportFeedback({ type: 'success', text: `Đã xóa rule "${r.ruleKey}".` });
+                        await loadAll();
+                      }),
+                      style: S.btn(false, true, busy),
+                    }, 'Xóa'),
+                  ),
+                )),
+            ),
+          ),
+        ),
+        h('div', { style: S.tableWrap },
+          h('table', { 'data-testid': 'dxos-automation-runs-table', style: S.table },
+            h('thead', null, h('tr', null, ['Run UID', 'Rule Key', 'Trạng thái', 'Thời gian', 'Bắt đầu', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
+            h('tbody', null,
+              !runs.length
+                ? h('tr', null, h('td', { colSpan: 6, style: { ...S.td, color: '#64748b' } }, 'Chưa có lịch sử chạy Automation nào.'))
+                : runs.slice(0, 20).map((run) => {
+                  const uid = String(run.runUid || run.runId || run.id || '');
+                  return h('tr', { key: uid },
+                    h('td', { style: S.td }, h('code', null, uid)),
+                    h('td', { style: S.td }, h('code', null, run.ruleKey || '-')),
+                    h('td', { style: S.td }, h('span', { style: S.badge(statusTone(run.status)) }, run.status || 'completed')),
+                    h('td', { style: S.td }, `${run.durationMs ?? 0} ms`),
+                    h('td', { style: S.td }, formatTs(run.startedAt)),
+                    h('td', { style: S.td },
+                      h('button', {
+                        'data-testid': `dxos-automation-replay-${uid}`,
+                        type: 'button',
+                        disabled: busy,
+                        onClick: () => runMutation('Không phát lại được run.', async (clientApi) => {
+                          await clientApi.request({ url: 'dxosAutomations:replayRun', method: 'post', data: { ...orgPayload, ...(run.runUid ? { runUid: run.runUid } : { runId: run.runId || run.id }) } });
+                          reportFeedback({ type: 'success', text: `Đã replay "${uid}".` });
+                          await loadAll();
+                        }),
+                        style: S.btn(false, false, busy),
+                      }, 'Replay'),
+                    ),
+                  );
+                }),
+            ),
+          ),
+        ),
+      ),
     );
   };
 }

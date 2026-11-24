@@ -15,11 +15,19 @@
 })(function (client, React, antd) {
   'use strict';
   const { createDxosStudioSettingsPage } = require('./studio-settings');
+  const { createFlowStudioApp } = require('./flow/flow-studio-app');
 
   class DxosStudioClientPlugin extends client.Plugin {
     async load() {
       const Page = createDxosStudioSettingsPage(client, React, antd, this.app);
+      const FlowPage = createFlowStudioApp(client, React, antd, this.app);
       if (this.app?.pluginSettingsManager && typeof this.app.pluginSettingsManager.add === 'function') {
+        this.app.pluginSettingsManager.add('dxos-flow-studio', {
+          title: 'DX-OS Flow Studio',
+          icon: 'ApartmentOutlined',
+          Component: FlowPage,
+          aclSnippet: 'pm',
+        });
         this.app.pluginSettingsManager.add('dxos-studio', {
           title: 'DX-OS Studio',
           icon: 'ControlOutlined',
@@ -30,5 +38,10 @@
     }
   }
 
-  return { __esModule: true, default: DxosStudioClientPlugin, createDxosStudioSettingsPage };
+  return {
+    __esModule: true,
+    default: DxosStudioClientPlugin,
+    createDxosStudioSettingsPage,
+    createFlowStudioApp,
+  };
 });

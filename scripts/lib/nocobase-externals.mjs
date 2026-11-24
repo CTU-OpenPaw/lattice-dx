@@ -12,6 +12,7 @@ export const DEFAULT_NOCOBASE_VERSION = '2.2.50';
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const SHARED_VENDOR_VERSIONS = {
   react: '18.2.0',
+  'react-dom': '18.2.0',
   antd: '5.24.2',
 };
 const NOCOBASE_EXTERNAL_NAMES = [
