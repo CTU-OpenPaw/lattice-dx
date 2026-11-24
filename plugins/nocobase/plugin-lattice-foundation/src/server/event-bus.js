@@ -14,7 +14,7 @@ const {
   timingSafeEqual,
 } = require('node:crypto');
 const { resolveNativeActor } = require('./native-scope');
-const { canUsePgRlsSession, getActiveRlsContext, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
+const { canUsePgRlsSession, getActiveRlsContext, runInRlsSavepoint, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
 const { val, getRepo, callerRoles } = require('./native-portal-helpers');
 const { assertApiKeyScope, readParams } = require('./paas-api-keys');
 const {
@@ -253,6 +253,16 @@ function serializeDelivery(row) {
   };
 }
 
+function runEventsScopedDb(db, organizationId, fn) {
+  const activeTx = getActiveRlsContext()?.transaction || null;
+  if (!canUsePgRlsSession(db) || activeTx) {
+    return fn(activeTx || undefined);
+  }
+  return organizationId
+    ? withTenantRlsContext(db, organizationId, (tx) => fn(tx))
+    : withSystemRlsBypass(db, (tx) => fn(tx));
+}
+
 async function publishDomainEvent(
   db,
   {
@@ -309,82 +319,98 @@ async function publishDomainEvent(
     data: data === undefined ? null : data,
   };
 
-  const txOpt = effectiveTx ? { transaction: effectiveTx } : {};
-  const eventRepo = getRepo(db, 'latticeEventBus');
-  let createdEvent = null;
-  if (eventRepo && typeof eventRepo.create === 'function') {
-    createdEvent = await eventRepo.create({
-      values: {
-        organizationId: orgId,
-        eventId,
-        eventType: cleanType,
-        source: cleanSource,
-        subject: cleanSubject,
-        specVersion: '1.0',
-        correlationId: cleanCorrelationId,
-        causationId: cleanCausationId,
-        depth: cleanDepth,
-        payloadJson: cloudEvent,
-        occurredAt,
-        status: 'queued',
-      },
-      ...txOpt,
-    });
-  }
-
-  let deliveriesQueued = 0;
-  const subRepo = getRepo(db, 'latticeWebhookSubscriptions');
-  const delRepo = getRepo(db, 'latticeWebhookDeliveries');
-  if (subRepo && typeof subRepo.find === 'function' && delRepo && typeof delRepo.create === 'function') {
-    const subs = (await subRepo.find({
-      filter: { organizationId: orgId, active: true },
-      limit: 500,
-      ...txOpt,
-    })) || [];
-    for (const sub of subs) {
-      if (val(sub, 'organizationId') !== orgId || val(sub, 'active') === false) continue;
-      if (!matchesEventPattern(val(sub, 'eventPattern'), cleanType)) continue;
-      const subId = Number(val(sub, 'id'));
-      if (!Number.isInteger(subId) || subId <= 0) continue;
-      await delRepo.create({
+  const persistEvent = async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
+    const eventRepo = getRepo(db, 'latticeEventBus');
+    let createdEvent = null;
+    if (eventRepo && typeof eventRepo.create === 'function') {
+      createdEvent = await eventRepo.create({
         values: {
           organizationId: orgId,
           eventId,
-          subscriptionId: subId,
           eventType: cleanType,
-          attempt: 0,
-          maxAttempts: DEFAULT_MAX_ATTEMPTS,
-          status: 'pending',
-          nextAttemptAt: occurredAt,
-          lockedAt: null,
-          lockedBy: null,
-          httpStatus: null,
-          lastError: null,
-          payloadSnapshotJson: cloudEvent,
-          deliveredAt: null,
+          source: cleanSource,
+          subject: cleanSubject,
+          specVersion: '1.0',
+          correlationId: cleanCorrelationId,
+          causationId: cleanCausationId,
+          depth: cleanDepth,
+          payloadJson: cloudEvent,
+          occurredAt,
+          status: 'queued',
         },
         ...txOpt,
       });
-      deliveriesQueued += 1;
     }
-  }
 
-  if (createdEvent && deliveriesQueued === 0) {
-    try {
-      if (typeof createdEvent.update === 'function') {
-        await createdEvent.update({ status: 'dispatched' }, txOpt);
-      } else if (typeof eventRepo?.update === 'function') {
-        await eventRepo.update({
-          filterByTk: val(createdEvent, 'id'),
-          filter: { organizationId: orgId },
-          values: { status: 'dispatched' },
+    let deliveriesQueued = 0;
+    const subRepo = getRepo(db, 'latticeWebhookSubscriptions');
+    const delRepo = getRepo(db, 'latticeWebhookDeliveries');
+    if (subRepo && typeof subRepo.find === 'function' && delRepo && typeof delRepo.create === 'function') {
+      const subs = (await subRepo.find({
+        filter: { organizationId: orgId, active: true },
+        limit: 500,
+        ...txOpt,
+      })) || [];
+      for (const sub of subs) {
+        if (val(sub, 'organizationId') !== orgId || val(sub, 'active') === false) continue;
+        if (!matchesEventPattern(val(sub, 'eventPattern'), cleanType)) continue;
+        const subId = Number(val(sub, 'id'));
+        if (!Number.isInteger(subId) || subId <= 0) continue;
+        await delRepo.create({
+          values: {
+            organizationId: orgId,
+            eventId,
+            subscriptionId: subId,
+            eventType: cleanType,
+            attempt: 0,
+            maxAttempts: DEFAULT_MAX_ATTEMPTS,
+            status: 'pending',
+            nextAttemptAt: occurredAt,
+            lockedAt: null,
+            lockedBy: null,
+            httpStatus: null,
+            lastError: null,
+            payloadSnapshotJson: cloudEvent,
+            deliveredAt: null,
+          },
           ...txOpt,
         });
+        deliveriesQueued += 1;
       }
-    } catch {
-      // Non-fatal status refinement
     }
-  }
+
+    if (createdEvent && deliveriesQueued === 0) {
+      const markDispatched = async (spTx) => {
+        const markOpt = spTx ? { transaction: spTx } : txOpt;
+        if (typeof createdEvent.update === 'function') {
+          await createdEvent.update({ status: 'dispatched' }, markOpt);
+        } else if (typeof eventRepo?.update === 'function') {
+          await eventRepo.update({
+            filterByTk: val(createdEvent, 'id'),
+            filter: { organizationId: orgId },
+            values: { status: 'dispatched' },
+            ...markOpt,
+          });
+        }
+      };
+      try {
+        if (tx && getActiveRlsContext()?.transaction === tx) {
+          await runInRlsSavepoint(db, markDispatched);
+        } else {
+          await markDispatched(tx);
+        }
+      } catch {
+        // Non-fatal status refinement
+      }
+    }
+
+    return { createdEvent, deliveriesQueued };
+  };
+
+  const { createdEvent, deliveriesQueued } = effectiveTx
+    ? await persistEvent(effectiveTx)
+    : await runEventsScopedDb(db, orgId, persistEvent);
 
   for (const listener of [...eventBusListeners]) {
     try {
@@ -434,14 +460,16 @@ async function updateRowCompat(repo, row, filter, values, transaction = null) {
   return row;
 }
 
-async function syncParentEventStatus(db, organizationId, eventId) {
+async function syncParentEventStatus(db, organizationId, eventId, { transaction = null } = {}) {
   const eventRepo = getRepo(db, 'latticeEventBus');
   const delRepo = getRepo(db, 'latticeWebhookDeliveries');
   if (!eventRepo || !delRepo || typeof delRepo.find !== 'function') return;
-  try {
+  const runSync = async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
     const rows = (await delRepo.find({
       filter: { organizationId, eventId },
       limit: 500,
+      ...txOpt,
     })) || [];
     if (!rows.length) return;
     const statuses = rows.map((r) => val(r, 'status'));
@@ -452,11 +480,27 @@ async function syncParentEventStatus(db, organizationId, eventId) {
       nextStatus = 'dispatched';
     }
     const evRow = typeof eventRepo.findOne === 'function'
-      ? await eventRepo.findOne({ filter: { organizationId, eventId } })
+      ? await eventRepo.findOne({ filter: { organizationId, eventId }, ...txOpt })
       : null;
     if (evRow && val(evRow, 'status') !== nextStatus) {
-      await updateRowCompat(eventRepo, evRow, { organizationId, eventId }, { status: nextStatus });
+      await updateRowCompat(eventRepo, evRow, { organizationId, eventId }, { status: nextStatus }, tx);
     }
+  };
+  try {
+    const activeTx = transaction || getActiveRlsContext()?.transaction || null;
+    if (activeTx) {
+      if (getActiveRlsContext()?.transaction === activeTx) {
+        await runInRlsSavepoint(db, runSync);
+      } else {
+        await runSync(activeTx);
+      }
+      return;
+    }
+    if (canUsePgRlsSession(db) && organizationId) {
+      await withTenantRlsContext(db, organizationId, runSync);
+      return;
+    }
+    await runSync(null);
   } catch {
     // Non-fatal event bus status sync
   }
@@ -494,6 +538,8 @@ async function claimDueDeliveries(db, {
           await (organizationId
             ? withTenantRlsContext(db, organizationId, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } }))
             : withSystemRlsBypass(db, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } })));
+        } else if (getActiveRlsContext()?.transaction) {
+          await runInRlsSavepoint(db, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } }));
         } else {
           await db.sequelize.query(reclaimSql, { replacements: { cutoff } });
         }
@@ -605,9 +651,10 @@ async function dispatchOneDelivery(
   const delOrg = val(delivery, 'organizationId');
   const eventId = val(delivery, 'eventId');
   const subId = Number(val(delivery, 'subscriptionId'));
-  const runScopedDb = (fn) => (!getActiveRlsContext()?.transaction && canUsePgRlsSession(db) && delOrg
+  const externalActiveTx = getActiveRlsContext()?.transaction || null;
+  const runScopedDb = (fn) => (!externalActiveTx && canUsePgRlsSession(db) && delOrg
     ? withTenantRlsContext(db, delOrg, fn)
-    : fn(undefined));
+    : fn(externalActiveTx || undefined));
 
   const prep = await runScopedDb(async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
@@ -623,8 +670,8 @@ async function dispatchOneDelivery(
         lockedBy: null,
         nextAttemptAt: null,
       }, transaction);
-      await syncParentEventStatus(db, delOrg, eventId);
       return {
+        syncAfterTx: true,
         earlyResult: { outcome: 'dlq', processed: true, result: { id: delId, eventId, status: 'dlq', reason: 'SUBSCRIPTION_INACTIVE' } },
       };
     }
@@ -658,7 +705,13 @@ async function dispatchOneDelivery(
     const connectorId = val(sub, 'connectorId');
     if (connectorId != null) {
       try {
-        const resolved = await resolveConnectorSecrets(db, delOrg, connectorId, { env });
+        const resolveSecrets = (spTx) => resolveConnectorSecrets(db, delOrg, connectorId, {
+          env,
+          ...(spTx ? { transaction: spTx } : (transaction ? { transaction } : {})),
+        });
+        const resolved = transaction && getActiveRlsContext()?.transaction === transaction
+          ? await runInRlsSavepoint(db, resolveSecrets)
+          : await resolveSecrets(transaction);
         extraHeaders = buildConnectorAuthHeaders(resolved.connector.authType, resolved.secrets);
       } catch {
         // Proceed without connector override if connector was removed/inactive
@@ -669,6 +722,9 @@ async function dispatchOneDelivery(
   });
 
   if (prep.earlyResult) {
+    if (prep.syncAfterTx) {
+      await syncParentEventStatus(db, delOrg, eventId, externalActiveTx ? { transaction: externalActiveTx } : undefined);
+    }
     return prep.earlyResult;
   }
 
@@ -742,7 +798,7 @@ async function dispatchOneDelivery(
     errorMessage = String(err?.message || 'Webhook delivery failed').slice(0, 1000);
   }
 
-  return runScopedDb(async (transaction) => {
+  const stepOutcome = await runScopedDb(async (transaction) => {
     if (ok) {
       await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
         attempt: nextAttempt,
@@ -760,7 +816,6 @@ async function dispatchOneDelivery(
         circuitOpenUntil: null,
         lastError: null,
       }, transaction);
-      await syncParentEventStatus(db, delOrg, eventId);
       return {
         outcome: 'delivered',
         processed: true,
@@ -794,7 +849,6 @@ async function dispatchOneDelivery(
       lastError: errorMessage,
     }, transaction);
 
-    await syncParentEventStatus(db, delOrg, eventId);
     return {
       outcome: nextStatus,
       processed: true,
@@ -809,6 +863,9 @@ async function dispatchOneDelivery(
       },
     };
   });
+
+  await syncParentEventStatus(db, delOrg, eventId, externalActiveTx ? { transaction: externalActiveTx } : undefined);
+  return stepOutcome;
 }
 
 async function dispatchDueWebhookDeliveries(
@@ -970,15 +1027,16 @@ async function resolveEventsCaller(db, ctx, requestedOrgId = null, { requireOrg 
   };
 }
 
-async function findSubscriptionInOrg(repo, organizationId, params) {
+async function findSubscriptionInOrg(repo, organizationId, params, { transaction = null } = {}) {
+  const txOpt = transaction ? { transaction } : {};
   const id = Number(params.id ?? params.subscriptionId ?? params.filterByTk);
   const subKey = typeof params.subscriptionKey === 'string' ? params.subscriptionKey.trim().toLowerCase() : '';
   if (Number.isInteger(id) && id > 0) {
-    const row = await repo.findOne({ filter: { id, organizationId } });
+    const row = await repo.findOne({ filter: { id, organizationId }, ...txOpt });
     return row && val(row, 'organizationId') === organizationId ? row : null;
   }
   if (subKey) {
-    const row = await repo.findOne({ filter: { organizationId, subscriptionKey: subKey } });
+    const row = await repo.findOne({ filter: { organizationId, subscriptionKey: subKey }, ...txOpt });
     return row && val(row, 'organizationId') === organizationId ? row : null;
   }
   return null;
@@ -1038,13 +1096,18 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
         if (typeof params.correlationId === 'string' && params.correlationId.trim()) {
           filter.correlationId = params.correlationId.trim();
         }
-        const rows = (await repo.find({
-          filter,
-          sort: ['-occurredAt', '-id'],
-          offset: (page - 1) * pageSize,
-          limit: pageSize,
-        })) || [];
-        const total = typeof repo.count === 'function' ? await repo.count({ filter }) : rows.length;
+        const { rows, total } = await runEventsScopedDb(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const foundRows = (await repo.find({
+            filter,
+            sort: ['-occurredAt', '-id'],
+            offset: (page - 1) * pageSize,
+            limit: pageSize,
+            ...txOpt,
+          })) || [];
+          const foundTotal = typeof repo.count === 'function' ? await repo.count({ filter, ...txOpt }) : foundRows.length;
+          return { rows: foundRows, total: foundTotal };
+        });
         ctx.body = {
           organizationId: scope.organizationId,
           total,
@@ -1104,7 +1167,12 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
           filter.active = params.active === true || params.active === 'true';
         }
         const limit = Math.max(1, Math.min(200, Math.floor(Number(params.limit) || 100)));
-        const rows = (await repo.find({ filter, sort: ['id'], limit })) || [];
+        const rows = (await runEventsScopedDb(db, scope.organizationId, (transaction) => repo.find({
+          filter,
+          sort: ['id'],
+          limit,
+          ...(transaction ? { transaction } : {}),
+        }))) || [];
         ctx.body = {
           organizationId: scope.organizationId,
           items: rows
@@ -1149,47 +1217,51 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
           if (!Number.isInteger(parsedConnId) || parsedConnId <= 0) {
             throw failEvent('CONNECTOR_ID_INVALID', 400, 'connectorId must be a positive integer.');
           }
-          const connRepo = getRepo(db, 'latticeConnectors');
-          if (connRepo && typeof connRepo.findOne === 'function') {
-            const connRow = await connRepo.findOne({ filter: { id: parsedConnId, organizationId: scope.organizationId } });
-            if (!connRow || val(connRow, 'organizationId') !== scope.organizationId) {
-              throw failEvent('CONNECTOR_NOT_FOUND', 404, 'Referenced connector not found in organization scope.');
-            }
-          }
           connectorId = parsedConnId;
         }
 
-        const existing = await findSubscriptionInOrg(repo, scope.organizationId, {
-          id: params.id ?? params.filterByTk,
-          subscriptionKey,
+        const saved = await runEventsScopedDb(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          if (connectorId != null) {
+            const connRepo = getRepo(db, 'latticeConnectors');
+            if (connRepo && typeof connRepo.findOne === 'function') {
+              const connRow = await connRepo.findOne({ filter: { id: connectorId, organizationId: scope.organizationId }, ...txOpt });
+              if (!connRow || val(connRow, 'organizationId') !== scope.organizationId) {
+                throw failEvent('CONNECTOR_NOT_FOUND', 404, 'Referenced connector not found in organization scope.');
+              }
+            }
+          }
+
+          const existing = await findSubscriptionInOrg(repo, scope.organizationId, {
+            id: params.id ?? params.filterByTk,
+            subscriptionKey,
+          }, { transaction });
+
+          let encryptedSigningSecret = existing ? val(existing, 'encryptedSigningSecret') || null : null;
+          if (params.signingSecret !== undefined) {
+            const rawSecret = typeof params.signingSecret === 'string' ? params.signingSecret.trim() : '';
+            encryptedSigningSecret = rawSecret ? encryptSecretText(rawSecret, env) : null;
+          }
+
+          const values = {
+            organizationId: scope.organizationId,
+            subscriptionKey,
+            name,
+            targetUrl,
+            eventPattern,
+            encryptedSigningSecret,
+            connectorId,
+            active: params.active === undefined ? (existing ? val(existing, 'active') !== false : true) : Boolean(params.active),
+            ...(existing ? {} : { failureCount: 0, circuitState: 'closed', circuitOpenUntil: null, lastError: null }),
+          };
+
+          if (existing) {
+            return updateRowCompat(repo, existing, { id: val(existing, 'id'), organizationId: scope.organizationId }, values, transaction);
+          }
+          return repo.create({ values, ...txOpt });
         });
 
-        let encryptedSigningSecret = existing ? val(existing, 'encryptedSigningSecret') || null : null;
-        if (params.signingSecret !== undefined) {
-          const rawSecret = typeof params.signingSecret === 'string' ? params.signingSecret.trim() : '';
-          encryptedSigningSecret = rawSecret ? encryptSecretText(rawSecret, env) : null;
-        }
-
-        const values = {
-          organizationId: scope.organizationId,
-          subscriptionKey,
-          name,
-          targetUrl,
-          eventPattern,
-          encryptedSigningSecret,
-          connectorId,
-          active: params.active === undefined ? (existing ? val(existing, 'active') !== false : true) : Boolean(params.active),
-          ...(existing ? {} : { failureCount: 0, circuitState: 'closed', circuitOpenUntil: null, lastError: null }),
-        };
-
-        let saved;
-        if (existing) {
-          saved = await updateRowCompat(repo, existing, { id: val(existing, 'id'), organizationId: scope.organizationId }, values);
-        } else {
-          saved = await repo.create({ values });
-        }
-
-        ctx.body = serializeSubscription(saved || values);
+        ctx.body = serializeSubscription(saved);
         if (next) return next();
       },
 
@@ -1203,16 +1275,19 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
         }
         const repo = getRepo(db, 'latticeWebhookSubscriptions');
         if (!repo) throw failEvent('EVENTS_REPO_UNAVAILABLE', 503, 'latticeWebhookSubscriptions repository is unavailable.');
-        const row = await findSubscriptionInOrg(repo, scope.organizationId, params);
-        if (!row) throw failEvent('SUBSCRIPTION_NOT_FOUND', 404, 'Webhook subscription not found.');
+        const updated = await runEventsScopedDb(db, scope.organizationId, async (transaction) => {
+          const row = await findSubscriptionInOrg(repo, scope.organizationId, params, { transaction });
+          if (!row) throw failEvent('SUBSCRIPTION_NOT_FOUND', 404, 'Webhook subscription not found.');
 
-        const nextActive = params.active === undefined ? !(val(row, 'active') !== false) : Boolean(params.active);
-        const updated = await updateRowCompat(
-          repo,
-          row,
-          { id: val(row, 'id'), organizationId: scope.organizationId },
-          { active: nextActive },
-        );
+          const nextActive = params.active === undefined ? !(val(row, 'active') !== false) : Boolean(params.active);
+          return updateRowCompat(
+            repo,
+            row,
+            { id: val(row, 'id'), organizationId: scope.organizationId },
+            { active: nextActive },
+            transaction,
+          );
+        });
         ctx.body = serializeSubscription(updated);
         if (next) return next();
       },
@@ -1227,17 +1302,21 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
         }
         const repo = getRepo(db, 'latticeWebhookSubscriptions');
         if (!repo) throw failEvent('EVENTS_REPO_UNAVAILABLE', 503, 'latticeWebhookSubscriptions repository is unavailable.');
-        const row = await findSubscriptionInOrg(repo, scope.organizationId, params);
-        if (!row) throw failEvent('SUBSCRIPTION_NOT_FOUND', 404, 'Webhook subscription not found.');
+        const deletedRes = await runEventsScopedDb(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const row = await findSubscriptionInOrg(repo, scope.organizationId, params, { transaction });
+          if (!row) throw failEvent('SUBSCRIPTION_NOT_FOUND', 404, 'Webhook subscription not found.');
 
-        const id = val(row, 'id');
-        const subscriptionKey = val(row, 'subscriptionKey');
-        if (typeof repo.destroy === 'function') {
-          await repo.destroy({ filter: { id, organizationId: scope.organizationId } });
-        } else if (typeof row.destroy === 'function') {
-          await row.destroy();
-        }
-        ctx.body = { deleted: true, id, subscriptionKey };
+          const id = val(row, 'id');
+          const subscriptionKey = val(row, 'subscriptionKey');
+          if (typeof repo.destroy === 'function') {
+            await repo.destroy({ filter: { id, organizationId: scope.organizationId }, ...txOpt });
+          } else if (typeof row.destroy === 'function') {
+            await row.destroy(transaction ? { transaction } : undefined);
+          }
+          return { deleted: true, id, subscriptionKey };
+        });
+        ctx.body = deletedRes;
         if (next) return next();
       },
 
@@ -1264,13 +1343,18 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
         if (params.subscriptionId != null && /^[1-9]\d*$/.test(String(params.subscriptionId))) {
           filter.subscriptionId = Number(params.subscriptionId);
         }
-        const rows = (await repo.find({
-          filter,
-          sort: ['-id'],
-          offset: (page - 1) * pageSize,
-          limit: pageSize,
-        })) || [];
-        const total = typeof repo.count === 'function' ? await repo.count({ filter }) : rows.length;
+        const { rows, total } = await runEventsScopedDb(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const foundRows = (await repo.find({
+            filter,
+            sort: ['-id'],
+            offset: (page - 1) * pageSize,
+            limit: pageSize,
+            ...txOpt,
+          })) || [];
+          const foundTotal = typeof repo.count === 'function' ? await repo.count({ filter, ...txOpt }) : foundRows.length;
+          return { rows: foundRows, total: foundTotal };
+        });
         ctx.body = {
           organizationId: scope.organizationId,
           total,
@@ -1326,27 +1410,36 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
           filter.eventId = params.eventId.trim();
         }
         const limit = Math.max(1, Math.min(200, Math.floor(Number(params.limit) || 50)));
-        let rows = (await delRepo.find({ filter, sort: ['id'], limit })) || [];
-        if (Array.isArray(params.deliveryIds) && params.deliveryIds.length > 0) {
-          const wanted = new Set(params.deliveryIds.map((id) => Number(id)));
-          rows = rows.filter((r) => wanted.has(Number(val(r, 'id'))));
-        }
+        const { replayedIds, eventIds } = await runEventsScopedDb(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          let rows = (await delRepo.find({ filter, sort: ['id'], limit, ...txOpt })) || [];
+          if (Array.isArray(params.deliveryIds) && params.deliveryIds.length > 0) {
+            const wanted = new Set(params.deliveryIds.map((id) => Number(id)));
+            rows = rows.filter((r) => wanted.has(Number(val(r, 'id'))));
+          }
 
-        const nowDate = new Date();
-        const replayedIds = [];
-        for (const row of rows) {
-          if (val(row, 'organizationId') !== scope.organizationId || val(row, 'status') !== 'dlq') continue;
-          const id = val(row, 'id');
-          await updateRowCompat(delRepo, row, { id, organizationId: scope.organizationId }, {
-            status: 'pending',
-            attempt: 0,
-            nextAttemptAt: nowDate,
-            lockedAt: null,
-            lockedBy: null,
-            lastError: null,
-          });
-          await syncParentEventStatus(db, scope.organizationId, val(row, 'eventId'));
-          if (id != null) replayedIds.push(Number(id));
+          const nowDate = new Date();
+          const ids = [];
+          const touchedEvents = new Set();
+          for (const row of rows) {
+            if (val(row, 'organizationId') !== scope.organizationId || val(row, 'status') !== 'dlq') continue;
+            const id = val(row, 'id');
+            await updateRowCompat(delRepo, row, { id, organizationId: scope.organizationId }, {
+              status: 'pending',
+              attempt: 0,
+              nextAttemptAt: nowDate,
+              lockedAt: null,
+              lockedBy: null,
+              lastError: null,
+            }, transaction);
+            const evId = val(row, 'eventId');
+            if (evId) touchedEvents.add(evId);
+            if (id != null) ids.push(Number(id));
+          }
+          return { replayedIds: ids, eventIds: [...touchedEvents] };
+        });
+        for (const evId of eventIds) {
+          await syncParentEventStatus(db, scope.organizationId, evId);
         }
         ctx.body = {
           organizationId: scope.organizationId,
@@ -1366,20 +1459,23 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
         }
         const subRepo = getRepo(db, 'latticeWebhookSubscriptions');
         if (!subRepo) throw failEvent('EVENTS_REPO_UNAVAILABLE', 503, 'latticeWebhookSubscriptions repository is unavailable.');
-        const row = await findSubscriptionInOrg(subRepo, scope.organizationId, params);
-        if (!row) throw failEvent('SUBSCRIPTION_NOT_FOUND', 404, 'Webhook subscription not found.');
+        const updated = await runEventsScopedDb(db, scope.organizationId, async (transaction) => {
+          const row = await findSubscriptionInOrg(subRepo, scope.organizationId, params, { transaction });
+          if (!row) throw failEvent('SUBSCRIPTION_NOT_FOUND', 404, 'Webhook subscription not found.');
 
-        const updated = await updateRowCompat(
-          subRepo,
-          row,
-          { id: val(row, 'id'), organizationId: scope.organizationId },
-          {
-            circuitState: 'closed',
-            failureCount: 0,
-            circuitOpenUntil: null,
-            lastError: null,
-          },
-        );
+          return updateRowCompat(
+            subRepo,
+            row,
+            { id: val(row, 'id'), organizationId: scope.organizationId },
+            {
+              circuitState: 'closed',
+              failureCount: 0,
+              circuitOpenUntil: null,
+              lastError: null,
+            },
+            transaction,
+          );
+        });
         ctx.body = serializeSubscription(updated);
         if (next) return next();
       },
@@ -1465,6 +1561,7 @@ module.exports = {
   matchesEventPattern,
   computeWebhookBackoffMs,
   publishDomainEvent,
+  syncParentEventStatus,
   claimDueDeliveries,
   dispatchOneDelivery,
   dispatchDueWebhookDeliveries,

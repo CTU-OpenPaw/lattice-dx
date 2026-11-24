@@ -44,6 +44,8 @@ const {
   sanitizeOutgoingHeaders,
 } = require('./flow/security-helpers');
 const getFlowExecutor = () => require('./flow/executor');
+const { computeNextCronRun, extractScheduleConfigFromRule, parseCronExpression } = require('./flow/cron');
+const { resolveEffectiveDelegatedRoles } = require('./delegation-engine');
 const {
   assertPatScope,
   clampPageLimit,
@@ -575,6 +577,32 @@ function validateRulePayload(payload) {
     throw fail('INVALID_COOLDOWN', 400, 'cooldownSec must be a non-negative integer');
   }
   const finalActions = actionsJson.length > 0 ? actionsJson : (compat?.actionsJson || []);
+  const triggerIndexJson = normalizedGraph
+    ? buildTriggerIndex(normalizedGraph, { triggerEventType })
+    : buildTriggerIndex(null, { triggerEventType });
+  const isActive = payload.active === undefined ? true : Boolean(payload.active);
+  const inferredSchedule = extractScheduleConfigFromRule({
+    cronExpression: payload.cronExpression,
+    graphJson: normalizedGraph,
+    triggerIndexJson,
+  });
+  let cronExpression = null;
+  let nextRunAt = null;
+  if (payload.cronExpression !== undefined) {
+    const trimmedCron = payload.cronExpression === null ? '' : String(payload.cronExpression).trim();
+    if (trimmedCron) {
+      parseCronExpression(trimmedCron);
+      cronExpression = trimmedCron;
+    }
+  } else if (inferredSchedule?.cronExpression) {
+    parseCronExpression(inferredSchedule.cronExpression);
+    cronExpression = inferredSchedule.cronExpression;
+  }
+  if (payload.nextRunAt !== undefined) {
+    nextRunAt = payload.nextRunAt ? new Date(payload.nextRunAt) : null;
+  } else if (cronExpression && isActive) {
+    nextRunAt = computeNextCronRun(cronExpression, new Date());
+  }
   return {
     ruleKey,
     name,
@@ -587,9 +615,11 @@ function validateRulePayload(payload) {
     actionsJson: sanitizePlainObject(finalActions),
     maxDepth: rawMaxDepth,
     cooldownSec: rawCooldown,
-    active: payload.active === undefined ? true : Boolean(payload.active),
+    active: isActive,
     schemaVersion: isV2 ? 2 : 1,
-    triggerIndexJson: normalizedGraph ? buildTriggerIndex(normalizedGraph, { triggerEventType }) : buildTriggerIndex(null, { triggerEventType }),
+    triggerIndexJson,
+    ...(cronExpression !== null || payload.cronExpression !== undefined ? { cronExpression } : {}),
+    ...(nextRunAt !== null || payload.cronExpression !== undefined || payload.nextRunAt !== undefined ? { nextRunAt } : {}),
     ...(normalizedGraph ? { graphJson: normalizedGraph } : payload.graphJson === null ? { graphJson: null } : {}),
     ...(normalizedDraft ? { draftGraphJson: normalizedDraft } : payload.draftGraphJson === null ? { draftGraphJson: null } : {}),
     ...(payload.publishedVersion !== undefined ? { publishedVersion: Math.max(1, Number(payload.publishedVersion) || 1) } : {}),
@@ -1192,6 +1222,11 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
       startedAt,
       finishedAt,
       durationMs: Math.max(0, finishedAt.getTime() - startMs),
+      triggerPayloadJson: {
+        event: cloneSafe(event),
+        data: cloneSafe(event.data),
+        record: rawEvent?.record && typeof rawEvent.record === 'object' ? cloneSafe(rawEvent.record) : null,
+      },
       ...fields,
     };
     rememberRunSnapshot(runUid, event);
@@ -1723,7 +1758,17 @@ function sanitizeRunRecord(row) {
 function createDxosAutomationsActions(db, options = {}) {
   const foundation = options.foundation || loadFoundationSet();
 
-  async function requireOrgRoles(ctx, params, { mutating = false, requireManagerOrAdmin = mutating, allowedPatScopes = null } = {}) {
+  async function requireOrgRoles(
+    ctx,
+    params,
+    {
+      mutating = false,
+      requireManagerOrAdmin = mutating,
+      allowedPatScopes = null,
+      allowDelegatedScope = null,
+      allowDelegatedApprovals = false,
+    } = {},
+  ) {
     if (allowedPatScopes) {
       assertAutomationPatScope(ctx, allowedPatScopes, foundation);
     }
@@ -1740,10 +1785,37 @@ function createDxosAutomationsActions(db, options = {}) {
     );
     const roles = await resolveVerifiedRoles(db, ctx);
     const orgAdmin = await isOrgAdmin(db, ctx);
-    if (requireManagerOrAdmin && !hasAnyRole(roles, MUTATING_ROLES) && !orgAdmin) {
+    let effectiveRoles = Array.isArray(roles) ? [...roles] : [];
+    let effectiveActor = actor;
+    if (allowDelegatedScope && actor?.id != null) {
+      const delRes = await resolveEffectiveDelegatedRoles(
+        db,
+        { organizationId, userId: actor.id, scope: allowDelegatedScope },
+        foundation,
+      );
+      if (Array.isArray(delRes?.delegatedRoles) && delRes.delegatedRoles.length > 0) {
+        effectiveRoles = Array.from(new Set([...effectiveRoles, ...delRes.delegatedRoles]));
+        const firstDel = delRes.matchedDelegations?.[0] || null;
+        effectiveActor = {
+          ...actor,
+          roles: effectiveRoles,
+          roleNames: effectiveRoles,
+          ...(firstDel
+            ? {
+                delegatedFromUserId: firstDel.delegatorUserId,
+                delegationUid: firstDel.delegationUid,
+                matchedDelegations: delRes.matchedDelegations,
+              }
+            : {}),
+        };
+      }
+    }
+    const hasMutating = hasAnyRole(effectiveRoles, MUTATING_ROLES) || orgAdmin;
+    const hasDelegatedApprovalAccess = allowDelegatedApprovals && Boolean(effectiveActor?.delegationUid);
+    if (requireManagerOrAdmin && !hasMutating && !hasDelegatedApprovalAccess) {
       throw fail('FORBIDDEN', 403, 'Manager or admin role required for automation changes');
     }
-    return { organizationId, actor, roles };
+    return { organizationId, actor: effectiveActor, roles: effectiveRoles };
   }
 
   async function upsertAutomationRule(organizationId, validated, actor) {
@@ -1816,8 +1888,15 @@ function createDxosAutomationsActions(db, options = {}) {
         const repo = db.getRepository('latticeAutomationRules');
         const existing = repo ? await repo.findOne({ filter: { organizationId, ruleKey } }) : null;
         if (!existing) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
-        const nextActive = params.active !== undefined ? Boolean(params.active) : !Boolean(val(existing, 'active'));
-        await repo.update({ filter: { organizationId, ruleKey }, values: { active: nextActive } });
+        const existingPlain = toPlain(existing) || {};
+        const nextActive = params.active !== undefined ? Boolean(params.active) : !Boolean(existingPlain.active);
+        const schedCfg = extractScheduleConfigFromRule(existingPlain);
+        const nextValues = { active: nextActive };
+        if (schedCfg?.cronExpression) {
+          nextValues.cronExpression = schedCfg.cronExpression;
+          nextValues.nextRunAt = nextActive ? computeNextCronRun(schedCfg.cronExpression, new Date()) : null;
+        }
+        await repo.update({ filter: { organizationId, ruleKey }, values: nextValues });
         return repo.findOne({ filter: { organizationId, ruleKey } });
       });
       ctx.body = { rule: toPlain(updated) };
@@ -1971,6 +2050,16 @@ function createDxosAutomationsActions(db, options = {}) {
         const ruleRow = rulesRepo ? await rulesRepo.findOne({ filter: { organizationId, ruleKey: origRun.ruleKey } }) : null;
         if (!ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${origRun.ruleKey} not found`);
         let eventEnvelope = params.event ? normalizeIncomingEvent(params.event, organizationId) : null;
+        if (!eventEnvelope && origRun.triggerPayloadJson && typeof origRun.triggerPayloadJson === 'object') {
+          const tp = origRun.triggerPayloadJson;
+          const tpEvent = tp.event && typeof tp.event === 'object'
+            ? tp.event
+            : { id: origRun.triggerEventId, type: origRun.triggerEventType, organizationId, data: tp.data || {} };
+          eventEnvelope = normalizeIncomingEvent(tpEvent, organizationId);
+          if (tp.record !== undefined && eventEnvelope.record === undefined) {
+            eventEnvelope.record = tp.record && typeof tp.record === 'object' ? cloneSafe(tp.record) : tp.record;
+          }
+        }
         if (!eventEnvelope && origRun.triggerEventId) {
           const busRepo = db.getRepository('latticeEventBus');
           const busRow = busRepo ? await busRepo.findOne({ filter: { organizationId, eventId: origRun.triggerEventId } }) : null;
@@ -2118,6 +2207,8 @@ function createDxosAutomationsActions(db, options = {}) {
       const { organizationId, actor } = await requireOrgRoles(ctx, params, {
         mutating: true,
         allowedPatScopes: ['write', 'ai', 'iot'],
+        allowDelegatedScope: 'latticeAutomationRuns',
+        allowDelegatedApprovals: true,
       });
       const run = await getFlowExecutor().resumeFlowRun(db, {
         organizationId,

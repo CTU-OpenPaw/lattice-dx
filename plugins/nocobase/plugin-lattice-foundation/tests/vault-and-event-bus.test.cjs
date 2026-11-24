@@ -702,6 +702,7 @@ test('event-bus emits CloudEvents 1.0, signs/verifies Standard Webhooks HMAC, ha
     assert.equal(deliveries.length, 1);
     assert.equal(receivedByListener.length, 1);
     assert.equal(pubSubMessages.length, 1);
+    assert.equal(pubSubMessages[0].channel, 'latticedx:surface-updates');
 
     // Cross-plugin compatibility: app.latticeEvents.publishDomainEvent(event, opts) and publishDomainEvent(db, event, opts) with eventType alias
     const boundRes = await busApi.publishDomainEvent({ organizationId: 'org-a', eventType: 'alarm.bound_check', data: { x: 1 } }, {});
@@ -1478,5 +1479,124 @@ test('Whole-Delta security regression: whsec_ base64, IPv6/numeric/single-label 
   for (const act of ['listEvents', 'listSubscriptions', 'listDeliveries']) {
     const patEvList = await invokeWithPat(readToken, 'dxosEvents', act, 'GET');
     assert.ok(Array.isArray(patEvList.body.items));
+  }
+});
+
+test('Task 1 remediation: dispatchOneDelivery isolates syncParentEventStatus from write TX and forwards transaction explicitly', async () => {
+  const { dispatchOneDelivery, syncParentEventStatus } = require('../src/server/event-bus');
+  const { withTenantRlsContext } = require('../src/server/pg-rls');
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+
+  let txSeq = 0;
+  let currentTxAborted = false;
+  const openTxs = new Set();
+  const syncFindTxs = [];
+  const committedDeliveries = [];
+  let failSyncRead = true;
+
+  const sub = {
+    id: 1,
+    organizationId: 'org-a',
+    subscriptionKey: 'wh-1',
+    targetUrl: 'https://hooks.example.org/wh',
+    active: true,
+    failureCount: 0,
+    circuitState: 'closed',
+  };
+  const delivery = {
+    id: 10,
+    organizationId: 'org-a',
+    eventId: 'ev-sp-1',
+    subscriptionId: 1,
+    eventType: 'order.submitted',
+    attempt: 0,
+    maxAttempts: 3,
+    status: 'processing',
+    payloadSnapshotJson: { id: 'ev-sp-1' },
+  };
+  const evRow = { id: 1, organizationId: 'org-a', eventId: 'ev-sp-1', status: 'queued' };
+
+  const db = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => {
+        const tx = { id: `tx-ev-${++txSeq}`, LOCK: { UPDATE: 'UPDATE' } };
+        openTxs.add(tx);
+        currentTxAborted = false;
+        try {
+          return await cb(tx);
+        } finally {
+          openTxs.delete(tx);
+        }
+      },
+      query: async (sql) => {
+        const text = String(sql);
+        if (text.startsWith('ROLLBACK TO SAVEPOINT ')) {
+          currentTxAborted = false;
+        }
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeWebhookSubscriptions') {
+        return {
+          findOne: async () => ({ ...sub, get: (k) => sub[k] }),
+          update: async ({ values }) => { Object.assign(sub, values); return [sub]; },
+        };
+      }
+      if (name === 'latticeWebhookDeliveries') {
+        return {
+          find: async (opts) => {
+            syncFindTxs.push({ tx: opts?.transaction || null, inOpenTx: openTxs.size });
+            if (failSyncRead) {
+              currentTxAborted = true;
+              throw Object.assign(new Error('simulated 42P01'), { code: '42P01' });
+            }
+            return [{ ...delivery, get: (k) => delivery[k] }];
+          },
+          update: async ({ values }) => {
+            if (currentTxAborted) throw Object.assign(new Error('25P02 aborted'), { code: '25P02' });
+            Object.assign(delivery, values);
+            committedDeliveries.push({ ...delivery });
+            return [delivery];
+          },
+        };
+      }
+      if (name === 'latticeEventBus') {
+        return {
+          findOne: async (opts) => {
+            syncFindTxs.push({ tx: opts?.transaction || null, inOpenTx: openTxs.size });
+            return { ...evRow, get: (k) => evRow[k] };
+          },
+          update: async ({ values }) => { Object.assign(evRow, values); return [evRow]; },
+        };
+      }
+      return null;
+    },
+  };
+
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const res = await dispatchOneDelivery(db, { ...delivery, get: (k) => delivery[k] }, {
+      fetchImpl: async () => ({ status: 200, ok: true, body: { cancel: async () => {} } }),
+    });
+    assert.equal(res.outcome, 'delivered');
+    assert.equal(delivery.status, 'delivered');
+    assert.ok(committedDeliveries.some((d) => d.status === 'delivered'));
+    assert.equal(syncFindTxs.length, 1);
+    assert.ok(syncFindTxs[0].tx, 'syncParentEventStatus must run in its own scoped transaction');
+
+    // When called inside an active RLS transaction, syncParentEventStatus isolates via SAVEPOINT and forwards tx
+    failSyncRead = false;
+    syncFindTxs.length = 0;
+    await withTenantRlsContext(db, 'org-a', async (tx) => {
+      await syncParentEventStatus(db, 'org-a', 'ev-sp-1', { transaction: tx });
+      assert.equal(syncFindTxs[0].tx, tx);
+      assert.equal(syncFindTxs[1].tx, tx);
+    });
+    assert.equal(evRow.status, 'dispatched');
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
   }
 });

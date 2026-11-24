@@ -38,6 +38,14 @@
   reverse_proxy keycloak:8080
 }
 
+{$N8N_DOMAIN} {
+  import security_headers
+  encode gzip zstd
+  reverse_proxy n8n:5678 {
+    flush_interval -1
+  }
+}
+
 http://:2020 {
   handle /metrics {
     metrics

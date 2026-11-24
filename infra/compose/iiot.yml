@@ -72,8 +72,12 @@ services:
       MQTT_BRIDGE_PASSWORD: ${MQTT_BRIDGE_PASSWORD:-local-nodered-bridge-password}
       DX_IIOT_INGEST_URL: ${DX_IIOT_INGEST_URL:-http://nocobase/api/dxosBlocks:telemetryIngest}
       DX_IIOT_STATUS_URL: ${DX_IIOT_STATUS_URL:-http://nocobase/api/dxosBroker:deviceStatusIngest}
+      DX_TWIN_ACK_URL: ${DX_TWIN_ACK_URL:-http://nocobase/api/dxosBlocks:twinAckCommand}
       DX_ORION_URL: ${DX_ORION_URL:-}
       DX_IIOT_INGEST_TOKEN: ${DX_IIOT_INGEST_TOKEN:-}
+      NODERED_CREDENTIAL_SECRET: ${NODERED_CREDENTIAL_SECRET:-}
+      NODERED_ADMIN_USER: ${NODERED_ADMIN_USER:-}
+      NODERED_ADMIN_PASS_HASH: ${NODERED_ADMIN_PASS_HASH:-}
     ports:
       - "127.0.0.1:1880:1880"
     volumes:

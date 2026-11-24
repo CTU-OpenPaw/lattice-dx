@@ -11,7 +11,8 @@
 const { createHash, timingSafeEqual } = require('node:crypto');
 const { buildOpenApiSpec, buildAsyncApiSpec } = require('./openapi-spec');
 const { registerMobilePwaActions } = require('./mobile-pwa');
-const { canUsePgRlsSession, withSystemRlsBypass } = require('./pg-rls');
+const { canUsePgRlsSession, getActiveRlsContext, runInRlsSavepoint, withSystemRlsBypass } = require('./pg-rls');
+const { createOtelExporter } = require('./otel-exporter');
 
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 const HISTOGRAM_BUCKETS = Object.freeze([
@@ -198,74 +199,59 @@ async function safeCount(db, collection, filter, transaction) {
     }
     const repo = db?.getRepository?.(collection);
     if (!repo || typeof repo.count !== 'function') return 0;
-    const opts = filter || transaction
-      ? { ...(filter ? { filter } : {}), ...(transaction ? { transaction } : {}) }
-      : undefined;
-    const count = await repo.count(opts);
-    const num = Number(count);
-    return Number.isFinite(num) && num >= 0 ? num : 0;
+    const executeCount = async (tx) => {
+      const opts = filter || tx
+        ? { ...(filter ? { filter } : {}), ...(tx ? { transaction: tx } : {}) }
+        : undefined;
+      const count = await repo.count(opts);
+      const num = Number(count);
+      return Number.isFinite(num) && num >= 0 ? num : 0;
+    };
+    if (transaction && getActiveRlsContext()?.transaction === transaction) {
+      return await runInRlsSavepoint(db, executeCount);
+    }
+    return await executeCount(transaction);
   } catch {
     return 0;
   }
 }
 
 async function collectDbGaugesWithTx(db, transaction = undefined) {
-  const [
-    aiAuditLogsTotal,
-    activeAlarmsTotal,
-    unreadNotificationsTotal,
-    slaPoliciesActive,
-    hasEventBusRepo,
-    hasDeliveriesRepo,
-    hasSubscriptionsRepo,
-    ...outboxCounts
-  ] = await Promise.all([
-    safeCount(db, 'latticeAiAuditLogs', undefined, transaction),
-    safeCount(db, 'latticeIncidentCases', { status: { $in: ['open', 'acknowledged'] } }, transaction),
-    safeCount(db, 'latticeNotifications', { readAt: null, active: true }, transaction),
-    safeCount(db, 'latticeSlaPolicies', { active: true }, transaction),
-    hasQueryableRepo(db, 'latticeEventBus'),
-    hasQueryableRepo(db, 'latticeWebhookDeliveries'),
-    hasQueryableRepo(db, 'latticeWebhookSubscriptions'),
-    ...OUTBOX_STATES.map((state) => safeCount(db, 'latticeContextOutbox', { state }, transaction)),
-  ]);
+  const aiAuditLogsTotal = await safeCount(db, 'latticeAiAuditLogs', undefined, transaction);
+  const activeAlarmsTotal = await safeCount(db, 'latticeIncidentCases', { status: { $in: ['open', 'acknowledged'] } }, transaction);
+  const unreadNotificationsTotal = await safeCount(db, 'latticeNotifications', { readAt: null, active: true }, transaction);
+  const slaPoliciesActive = await safeCount(db, 'latticeSlaPolicies', { active: true }, transaction);
+  const hasEventBusRepo = await hasQueryableRepo(db, 'latticeEventBus');
+  const hasDeliveriesRepo = await hasQueryableRepo(db, 'latticeWebhookDeliveries');
+  const hasSubscriptionsRepo = await hasQueryableRepo(db, 'latticeWebhookSubscriptions');
 
   const outboxByState = {};
-  OUTBOX_STATES.forEach((state, idx) => {
-    outboxByState[state] = outboxCounts[idx] ?? 0;
-  });
+  for (const state of OUTBOX_STATES) {
+    outboxByState[state] = await safeCount(db, 'latticeContextOutbox', { state }, transaction);
+  }
 
   let eventBusByStatus = null;
   if (hasEventBusRepo) {
-    const counts = await Promise.all(
-      EVENT_BUS_STATUSES.map((status) => safeCount(db, 'latticeEventBus', { status }, transaction)),
-    );
     eventBusByStatus = {};
-    EVENT_BUS_STATUSES.forEach((status, idx) => {
-      eventBusByStatus[status] = counts[idx] ?? 0;
-    });
+    for (const status of EVENT_BUS_STATUSES) {
+      eventBusByStatus[status] = await safeCount(db, 'latticeEventBus', { status }, transaction);
+    }
   }
 
   let webhookDeliveriesByStatus = null;
   if (hasDeliveriesRepo) {
-    const counts = await Promise.all(
-      WEBHOOK_DELIVERY_STATUSES.map((status) => safeCount(db, 'latticeWebhookDeliveries', { status }, transaction)),
-    );
     webhookDeliveriesByStatus = {};
-    WEBHOOK_DELIVERY_STATUSES.forEach((status, idx) => {
-      webhookDeliveriesByStatus[status] = counts[idx] ?? 0;
-    });
+    for (const status of WEBHOOK_DELIVERY_STATUSES) {
+      webhookDeliveriesByStatus[status] = await safeCount(db, 'latticeWebhookDeliveries', { status }, transaction);
+    }
   }
 
   let webhookCircuitsByState = null;
   if (hasSubscriptionsRepo) {
-    const counts = await Promise.all(
-      WEBHOOK_CIRCUIT_STATES.map((circuitState) => safeCount(db, 'latticeWebhookSubscriptions', { circuitState }, transaction)),
-    );
     webhookCircuitsByState = {};
-    WEBHOOK_CIRCUIT_STATES.forEach((circuitState, idx) => {
-      webhookCircuitsByState[circuitState] = counts[idx] ?? 0;
-    });
+    for (const circuitState of WEBHOOK_CIRCUIT_STATES) {
+      webhookCircuitsByState[circuitState] = await safeCount(db, 'latticeWebhookSubscriptions', { circuitState }, transaction);
+    }
   }
 
   return {
@@ -287,11 +273,16 @@ async function collectDbGauges(db) {
   return collectDbGaugesWithTx(db, undefined);
 }
 
-function createMetricsRegistry() {
+function createMetricsRegistry({ otelExporter = null } = {}) {
   const requestCounts = new Map();
   const bucketCounts = HISTOGRAM_BUCKETS.map(() => 0);
   let durationSum = 0;
   let durationCount = 0;
+  let activeOtelExporter = otelExporter;
+
+  function setOtelExporter(exporter) {
+    activeOtelExporter = exporter || null;
+  }
 
   function recordRequest(method, statusCode, durationSeconds) {
     const normMethod = normalizeMethod(method);
@@ -383,22 +374,53 @@ function createMetricsRegistry() {
     lines.push('# TYPE latticedx_uptime_seconds gauge');
     lines.push(`latticedx_uptime_seconds ${Math.floor(process.uptime())}`);
 
+    if (activeOtelExporter && typeof activeOtelExporter.getOtelStats === 'function') {
+      const otelStats = activeOtelExporter.getOtelStats();
+      lines.push('# HELP latticedx_otel_spans_recorded_total Total OpenTelemetry spans recorded.');
+      lines.push('# TYPE latticedx_otel_spans_recorded_total counter');
+      lines.push(`latticedx_otel_spans_recorded_total ${Number(otelStats.recordedSpans || 0)}`);
+
+      lines.push('# HELP latticedx_otel_spans_exported_total Total OpenTelemetry spans exported.');
+      lines.push('# TYPE latticedx_otel_spans_exported_total counter');
+      lines.push(`latticedx_otel_spans_exported_total ${Number(otelStats.exportedSpans || 0)}`);
+
+      lines.push('# HELP latticedx_otel_spans_dropped_total Total OpenTelemetry spans dropped due to queue overflow.');
+      lines.push('# TYPE latticedx_otel_spans_dropped_total counter');
+      lines.push(`latticedx_otel_spans_dropped_total ${Number(otelStats.droppedSpans || 0)}`);
+
+      lines.push('# HELP latticedx_otel_export_failures_total Total OpenTelemetry OTLP/HTTP export failures.');
+      lines.push('# TYPE latticedx_otel_export_failures_total counter');
+      lines.push(`latticedx_otel_export_failures_total ${Number(otelStats.exportFailures || 0)}`);
+
+      lines.push('# HELP latticedx_otel_queue_size Current OpenTelemetry span queue depth.');
+      lines.push('# TYPE latticedx_otel_queue_size gauge');
+      lines.push(`latticedx_otel_queue_size ${Number(otelStats.queuedSpans || 0)}`);
+    }
+
     return `${lines.join('\n')}\n`;
   }
 
   return {
     recordRequest,
+    setOtelExporter,
     formatPrometheusMetrics,
   };
 }
 
-function createObservabilityMiddleware(registry, { env = process.env } = {}) {
-  const activeRegistry = registry || createMetricsRegistry();
+function createObservabilityMiddleware(registry, { env = process.env, otelExporter = null } = {}) {
+  const activeRegistry = registry || createMetricsRegistry({ otelExporter });
+  const traceMw = otelExporter && typeof otelExporter.traceMiddleware === 'function'
+    ? otelExporter.traceMiddleware()
+    : null;
   return async function dxosObservabilityMiddleware(ctx, next) {
     const startNs = process.hrtime.bigint();
     let caughtError = null;
     try {
-      await next();
+      if (traceMw) {
+        await traceMw(ctx, next);
+      } else {
+        await next();
+      }
     } catch (error) {
       caughtError = error;
       throw error;
@@ -580,8 +602,21 @@ async function serveSpecDocument(ctx, next, buildSpec, version, db) {
   if (next) await next();
 }
 
-function registerObservability(app, { env = process.env, registry = createMetricsRegistry() } = {}) {
-  const middleware = createObservabilityMiddleware(registry, { env });
+function registerObservability(app, { env = process.env, registry = createMetricsRegistry(), otelExporter } = {}) {
+  const version = resolvePackageVersion();
+  const activeOtel = otelExporter || createOtelExporter({
+    serviceName: String(env?.OTEL_SERVICE_NAME || 'latticedx-nocobase').trim(),
+    serviceVersion: version,
+    endpoint: env?.OTEL_EXPORTER_OTLP_ENDPOINT ?? '',
+  });
+  if (typeof registry?.setOtelExporter === 'function') {
+    registry.setOtelExporter(activeOtel);
+  }
+  const middleware = createObservabilityMiddleware(registry, { env, otelExporter: activeOtel });
+
+  if (app && typeof app === 'object') {
+    app.latticeOtel = activeOtel;
+  }
 
   if (typeof app?.use === 'function') {
     app.use(middleware, { tag: 'dxosObservability', before: 'cors' });
@@ -589,7 +624,6 @@ function registerObservability(app, { env = process.env, registry = createMetric
     app.resourceManager.use(middleware, { tag: 'dxosObservability' });
   }
 
-  const version = resolvePackageVersion();
   const mobilePwaActions = registerMobilePwaActions({ version });
 
   app.resourceManager.define({
@@ -607,6 +641,7 @@ function registerObservability(app, { env = process.env, registry = createMetric
           version,
           uptimeSec: Math.floor(process.uptime()),
           dbHealthy,
+          otel: activeOtel.getOtelStats(),
         };
         if (next) await next();
       },
@@ -636,7 +671,7 @@ function registerObservability(app, { env = process.env, registry = createMetric
     app.acl.allow('dxos', ['health', 'metrics', 'openapi', 'asyncapi', 'manifest', 'sw.js', 'sw'], 'public');
   }
 
-  return { registry, middleware };
+  return { registry, middleware, otelExporter: activeOtel };
 }
 
 module.exports = {

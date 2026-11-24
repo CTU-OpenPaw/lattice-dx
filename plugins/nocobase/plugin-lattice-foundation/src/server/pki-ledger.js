@@ -23,6 +23,7 @@ const { resolveNativeActor } = require('./native-scope');
 const { isPortalAdmin } = require('./native-portals');
 const { val, toPlain, getRepo } = require('./native-portal-helpers');
 const { assertApiKeyScope, readParams } = require('./paas-api-keys');
+const { canUsePgRlsSession, getActiveRlsContext, withTenantRlsContext } = require('./pg-rls');
 
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const SIGNABLE_COLLECTIONS = new Set([
@@ -206,8 +207,12 @@ function serializeLedgerEntry(row) {
 
 async function ensureOrgSigningKey(db, organizationId, options = {}) {
   const orgId = assertValidOrgId(organizationId);
+  if (!options.transaction && !getActiveRlsContext()?.transaction && canUsePgRlsSession(db)) {
+    return withTenantRlsContext(db, orgId, (transaction) => ensureOrgSigningKey(db, orgId, { ...options, transaction }));
+  }
   const env = options.env || process.env;
-  const txOpt = options.transaction ? { transaction: options.transaction } : {};
+  const effectiveTx = options.transaction || getActiveRlsContext()?.transaction || null;
+  const txOpt = effectiveTx ? { transaction: effectiveTx } : {};
   const repo = getRepo(db, 'latticePkiKeys');
   if (!repo || typeof repo.create !== 'function' || (typeof repo.findOne !== 'function' && typeof repo.find !== 'function')) {
     throw failPki('PKI_REPO_UNAVAILABLE', 503, 'latticePkiKeys repository is unavailable.');
@@ -277,7 +282,7 @@ async function signCanonicalPayload(db, organizationId, payload, options = {}) {
   };
 }
 
-async function verifyPayloadSignature(db, organizationId, payload, signatureBase64, expectedKeyId = null) {
+async function verifyPayloadSignature(db, organizationId, payload, signatureBase64, expectedKeyId = null, options = {}) {
   const orgId = assertValidOrgId(organizationId);
   const canonical = canonicalJson(payload ?? {});
   const payloadHash = sha256Hex(canonical);
@@ -290,7 +295,11 @@ async function verifyPayloadSignature(db, organizationId, payload, signatureBase
   if (!repo) {
     return { valid: false, reason: 'PKI_REPO_UNAVAILABLE', keyId: null, fingerprintSha256: null, payloadHash };
   }
-  const keyRow = await repo.findOne({ filter: { organizationId: orgId } });
+  const activeTx = options.transaction || getActiveRlsContext()?.transaction || null;
+  const findKey = (tx) => repo.findOne({ filter: { organizationId: orgId }, ...(tx ? { transaction: tx } : {}) });
+  const keyRow = !activeTx && canUsePgRlsSession(db)
+    ? await withTenantRlsContext(db, orgId, findKey)
+    : await findKey(activeTx);
   if (!keyRow || val(keyRow, 'active') === false) {
     return { valid: false, reason: 'KEY_NOT_FOUND', keyId: null, fingerprintSha256: null, payloadHash };
   }
@@ -427,8 +436,12 @@ async function appendLedgerEntry(
   };
 
   return runWithOrgMutex(orgId, async () => {
-    if (options.transaction) {
-      return execute(options.transaction);
+    const activeTx = options.transaction || getActiveRlsContext()?.transaction || null;
+    if (activeTx) {
+      return execute(activeTx);
+    }
+    if (canUsePgRlsSession(db)) {
+      return withTenantRlsContext(db, orgId, execute);
     }
     if (typeof db?.sequelize?.transaction === 'function') {
       return db.sequelize.transaction(execute);
@@ -471,14 +484,29 @@ async function appendLedgerEntrySafely(db, entryArgs, options = {}) {
   }
 }
 
-async function verifyLedgerChain(db, organizationId) {
+async function verifyLedgerChain(db, organizationId, options = {}) {
   const orgId = assertValidOrgId(organizationId);
   const ledgerRepo = getRepo(db, 'latticeCryptoLedger');
   if (!ledgerRepo || typeof ledgerRepo.find !== 'function') {
     throw failPki('LEDGER_REPO_UNAVAILABLE', 503, 'latticeCryptoLedger repository is unavailable.');
   }
 
-  const entries = await fetchAllOrgEntries(ledgerRepo, orgId, null);
+  const readChain = async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const foundEntries = await fetchAllOrgEntries(ledgerRepo, orgId, transaction || null);
+    const pkiRepo = getRepo(db, 'latticePkiKeys');
+    const foundKeyRows = pkiRepo
+      ? ((typeof pkiRepo.find === 'function'
+        ? await pkiRepo.find({ filter: { organizationId: orgId }, limit: 50, ...txOpt })
+        : [await pkiRepo.findOne({ filter: { organizationId: orgId }, ...txOpt })].filter(Boolean)) || [])
+      : [];
+    return { entries: foundEntries, keyRows: foundKeyRows };
+  };
+  const activeTx = options.transaction || getActiveRlsContext()?.transaction || null;
+  const { entries, keyRows } = !activeTx && canUsePgRlsSession(db)
+    ? await withTenantRlsContext(db, orgId, readChain)
+    : await readChain(activeTx);
+
   if (entries.length === 0) {
     return {
       valid: true,
@@ -490,12 +518,6 @@ async function verifyLedgerChain(db, organizationId) {
     };
   }
 
-  const pkiRepo = getRepo(db, 'latticePkiKeys');
-  const keyRows = pkiRepo
-    ? ((typeof pkiRepo.find === 'function'
-      ? await pkiRepo.find({ filter: { organizationId: orgId }, limit: 50 })
-      : [await pkiRepo.findOne({ filter: { organizationId: orgId } })].filter(Boolean)) || [])
-    : [];
   const keysById = new Map();
   for (const kr of keyRows) {
     if (val(kr, 'organizationId') !== orgId) continue;
@@ -637,6 +659,14 @@ function registerPkiLedger(app) {
   const db = app.db;
   registerLedgerHooks(db);
 
+  const runOrgLedgerDb = (organizationId, fn) => {
+    const activeTx = getActiveRlsContext()?.transaction || null;
+    if (canUsePgRlsSession(db) && !activeTx && organizationId) {
+      return withTenantRlsContext(db, organizationId, fn);
+    }
+    return fn(activeTx || undefined);
+  };
+
   app.resourceManager.define({
     name: 'dxosLedger',
     actions: {
@@ -644,7 +674,7 @@ function registerPkiLedger(app) {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
         const params = readParams(ctx);
         const { organizationId } = await resolveLedgerCallerOrg(db, ctx, params.organizationId);
-        const keyRow = await ensureOrgSigningKey(db, organizationId);
+        const keyRow = await runOrgLedgerDb(organizationId, (transaction) => ensureOrgSigningKey(db, organizationId, { transaction }));
         ctx.body = serializePublicKeyRow(keyRow);
         if (next) return next();
       },
@@ -672,13 +702,18 @@ function registerPkiLedger(app) {
           if (next) return next();
           return;
         }
-        const rows = (await repo.find({
-          filter,
-          sort: params.sort === 'seq' ? ['seq'] : ['-seq'],
-          offset: (page - 1) * pageSize,
-          limit: pageSize,
-        })) || [];
-        const total = typeof repo.count === 'function' ? await repo.count({ filter }) : rows.length;
+        const { rows, total } = await runOrgLedgerDb(organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const foundRows = (await repo.find({
+            filter,
+            sort: params.sort === 'seq' ? ['seq'] : ['-seq'],
+            offset: (page - 1) * pageSize,
+            limit: pageSize,
+            ...txOpt,
+          })) || [];
+          const foundTotal = typeof repo.count === 'function' ? await repo.count({ filter, ...txOpt }) : foundRows.length;
+          return { rows: foundRows, total: foundTotal };
+        });
         ctx.body = {
           organizationId,
           total,
@@ -695,31 +730,33 @@ function registerPkiLedger(app) {
         const { organizationId } = await resolveLedgerCallerOrg(db, ctx, params.organizationId);
         const repo = getRepo(db, 'latticeCryptoLedger');
         const pkiRepo = getRepo(db, 'latticePkiKeys');
-        const keyRow = pkiRepo ? await pkiRepo.findOne({ filter: { organizationId } }) : null;
-        if (!repo) {
-          ctx.body = {
+        const statusBody = await runOrgLedgerDb(organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const keyRow = pkiRepo ? await pkiRepo.findOne({ filter: { organizationId }, ...txOpt }) : null;
+          if (!repo) {
+            return {
+              organizationId,
+              latestSeq: 0,
+              merkleRoot: ZERO_HASH,
+              headHash: ZERO_HASH,
+              entryCount: 0,
+              keyId: val(keyRow, 'keyId') || null,
+            };
+          }
+          const [latest] = (await repo.find({ filter: { organizationId }, sort: ['-seq'], limit: 1, ...txOpt })) || [];
+          const entryCount = typeof repo.count === 'function'
+            ? await repo.count({ filter: { organizationId }, ...txOpt })
+            : (latest ? Number(val(latest, 'seq')) : 0);
+          return {
             organizationId,
-            latestSeq: 0,
-            merkleRoot: ZERO_HASH,
-            headHash: ZERO_HASH,
-            entryCount: 0,
-            keyId: val(keyRow, 'keyId') || null,
+            latestSeq: latest ? Number(val(latest, 'seq')) : 0,
+            merkleRoot: latest ? String(val(latest, 'merkleRoot')) : ZERO_HASH,
+            headHash: latest ? String(val(latest, 'entryHash')) : ZERO_HASH,
+            entryCount,
+            keyId: val(keyRow, 'keyId') || val(latest, 'keyId') || null,
           };
-          if (next) return next();
-          return;
-        }
-        const [latest] = (await repo.find({ filter: { organizationId }, sort: ['-seq'], limit: 1 })) || [];
-        const entryCount = typeof repo.count === 'function'
-          ? await repo.count({ filter: { organizationId } })
-          : (latest ? Number(val(latest, 'seq')) : 0);
-        ctx.body = {
-          organizationId,
-          latestSeq: latest ? Number(val(latest, 'seq')) : 0,
-          merkleRoot: latest ? String(val(latest, 'merkleRoot')) : ZERO_HASH,
-          headHash: latest ? String(val(latest, 'entryHash')) : ZERO_HASH,
-          entryCount,
-          keyId: val(keyRow, 'keyId') || val(latest, 'keyId') || null,
-        };
+        });
+        ctx.body = statusBody;
         if (next) return next();
       },
 
@@ -727,7 +764,7 @@ function registerPkiLedger(app) {
         if (ctx.method && !['GET', 'POST'].includes(ctx.method)) ctx.throw(405);
         const params = readParams(ctx);
         const { organizationId } = await resolveLedgerCallerOrg(db, ctx, params.organizationId);
-        const report = await verifyLedgerChain(db, organizationId);
+        const report = await runOrgLedgerDb(organizationId, (transaction) => verifyLedgerChain(db, organizationId, { transaction }));
         ctx.body = { organizationId, ...report };
         if (next) return next();
       },
@@ -751,35 +788,38 @@ function registerPkiLedger(app) {
         if (!repo || typeof repo.findOne !== 'function') {
           throw failPki('LEDGER_COLLECTION_UNAVAILABLE', 503, 'Target collection repository unavailable.');
         }
-        const record = await repo.findOne({ filter: { id: targetRecordId, organizationId } });
-        if (!record || val(record, 'organizationId') !== organizationId) {
-          throw failPki('LEDGER_RECORD_NOT_FOUND', 404, 'Target document not found in organization scope.');
-        }
-
         const adminOk = isRoot || (await isPortalAdmin(ctx, db));
-        if (!adminOk) {
-          const empId = actor.employeeId != null ? Number(actor.employeeId) : null;
-          const isOwner = empId != null && [
-            val(record, 'requesterId'),
-            val(record, 'assigneeId'),
-            val(record, 'ownerId'),
-            val(record, 'custodianId'),
-            val(record, 'handlerId'),
-          ].some((ownerRef) => ownerRef != null && Number(ownerRef) === empId);
-          if (!isOwner) {
-            throw failPki('LEDGER_SIGN_FORBIDDEN', 403, 'Only an administrator or document owner may sign this record.');
+        const entry = await runOrgLedgerDb(organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const record = await repo.findOne({ filter: { id: targetRecordId, organizationId }, ...txOpt });
+          if (!record || val(record, 'organizationId') !== organizationId) {
+            throw failPki('LEDGER_RECORD_NOT_FOUND', 404, 'Target document not found in organization scope.');
           }
-        }
 
-        const snapshot = toPlain(record);
-        const entry = await appendLedgerEntry(db, {
-          organizationId,
-          eventType: 'document.signed',
-          targetCollection,
-          targetRecordId: String(targetRecordId),
-          actor,
-          payload: snapshot,
-          metadata: params.reason ? { reason: String(params.reason).trim().slice(0, 255) } : null,
+          if (!adminOk) {
+            const empId = actor.employeeId != null ? Number(actor.employeeId) : null;
+            const isOwner = empId != null && [
+              val(record, 'requesterId'),
+              val(record, 'assigneeId'),
+              val(record, 'ownerId'),
+              val(record, 'custodianId'),
+              val(record, 'handlerId'),
+            ].some((ownerRef) => ownerRef != null && Number(ownerRef) === empId);
+            if (!isOwner) {
+              throw failPki('LEDGER_SIGN_FORBIDDEN', 403, 'Only an administrator or document owner may sign this record.');
+            }
+          }
+
+          const snapshot = toPlain(record);
+          return appendLedgerEntry(db, {
+            organizationId,
+            eventType: 'document.signed',
+            targetCollection,
+            targetRecordId: String(targetRecordId),
+            actor,
+            payload: snapshot,
+            metadata: params.reason ? { reason: String(params.reason).trim().slice(0, 255) } : null,
+          }, { transaction });
         });
 
         ctx.body = {
@@ -809,7 +849,9 @@ function registerPkiLedger(app) {
         }
         const signatureBase64 = params.signatureBase64;
         const expectedKeyId = params.keyId ? String(params.keyId).trim() : null;
-        const result = await verifyPayloadSignature(db, organizationId, payload, signatureBase64, expectedKeyId);
+        const result = await runOrgLedgerDb(organizationId, (transaction) => (
+          verifyPayloadSignature(db, organizationId, payload, signatureBase64, expectedKeyId, { transaction })
+        ));
         ctx.body = { organizationId, ...result };
         if (next) return next();
       },

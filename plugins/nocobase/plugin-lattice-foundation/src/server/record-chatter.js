@@ -10,6 +10,12 @@
 
 const { resolveNativeActor } = require('./native-scope');
 const { dispatchNotification, resolveNotificationTargetPath } = require('./notification-center');
+const {
+  canUsePgRlsSession,
+  getActiveRlsContext,
+  withSystemRlsBypass,
+  withTenantRlsContext,
+} = require('./pg-rls');
 
 const ALLOWED_CHATTER_COLLECTIONS = new Set([
   'latticeRequests',
@@ -61,12 +67,16 @@ function extractMentionTokens(text) {
   return out;
 }
 
-async function resolveOrganizationMentions(db, organizationId, tokens) {
+async function resolveOrganizationMentions(db, organizationId, tokens, { transaction = null } = {}) {
   if (!organizationId || !Array.isArray(tokens) || !tokens.length) return [];
   const empRepo = db?.getRepository?.('latticeEmployees');
   if (!empRepo) return [];
   const tokenSet = new Set(tokens.map((t) => String(t).trim().toLowerCase()).filter(Boolean));
-  const employees = (await empRepo.find({ filter: { organizationId, active: true }, limit: 500 })) || [];
+  const employees = (await empRepo.find({
+    filter: { organizationId, active: true },
+    limit: 500,
+    ...(transaction ? { transaction } : {}),
+  })) || [];
   const matched = [];
   const seenIds = new Set();
   for (const emp of employees) {
@@ -134,44 +144,51 @@ async function recordChatterEntry(
 ) {
   const repo = db?.getRepository?.('latticeRecordChatter');
   if (!repo || typeof repo.create !== 'function') return null;
-  const created = await repo.create({
-    values: {
-      organizationId: String(organizationId),
-      targetCollection: String(targetCollection),
-      targetRecordId: Number(targetRecordId),
-      entryType: String(entryType || 'comment'),
-      body: String(body || '').slice(0, 2000),
-      mentionsJson: Array.isArray(mentionsJson) ? mentionsJson : [],
-      diffJson: diffJson || null,
-      ...(authorUserId != null ? { authorUserId: Number(authorUserId) } : {}),
-      ...(authorEmployeeId != null ? { authorEmployeeId: Number(authorEmployeeId) } : {}),
-      authorName: String(authorName || 'system').slice(0, 120),
-    },
-    ...(transaction ? { transaction } : {}),
-  });
-  const { appendLedgerEntrySafely } = require('./pki-ledger');
-  await appendLedgerEntrySafely(
-    db,
-    {
-      organizationId: String(organizationId),
-      eventType: `chatter.${String(entryType || 'comment')}`,
-      targetCollection: String(targetCollection),
-      targetRecordId: String(targetRecordId),
-      actor: {
-        userId: authorUserId != null ? String(authorUserId) : null,
-        username: String(authorName || 'system').slice(0, 120),
-      },
-      payload: {
-        chatterId: val(created, 'id') ?? null,
+  const writeEntry = async (tx) => {
+    const created = await repo.create({
+      values: {
+        organizationId: String(organizationId),
+        targetCollection: String(targetCollection),
+        targetRecordId: Number(targetRecordId),
         entryType: String(entryType || 'comment'),
         body: String(body || '').slice(0, 2000),
         mentionsJson: Array.isArray(mentionsJson) ? mentionsJson : [],
         diffJson: diffJson || null,
+        ...(authorUserId != null ? { authorUserId: Number(authorUserId) } : {}),
+        ...(authorEmployeeId != null ? { authorEmployeeId: Number(authorEmployeeId) } : {}),
+        authorName: String(authorName || 'system').slice(0, 120),
       },
-    },
-    { transaction, scope: 'lattice:record-chatter' },
-  );
-  return created;
+      ...(tx ? { transaction: tx } : {}),
+    });
+    const { appendLedgerEntrySafely } = require('./pki-ledger');
+    await appendLedgerEntrySafely(
+      db,
+      {
+        organizationId: String(organizationId),
+        eventType: `chatter.${String(entryType || 'comment')}`,
+        targetCollection: String(targetCollection),
+        targetRecordId: String(targetRecordId),
+        actor: {
+          userId: authorUserId != null ? String(authorUserId) : null,
+          username: String(authorName || 'system').slice(0, 120),
+        },
+        payload: {
+          chatterId: val(created, 'id') ?? null,
+          entryType: String(entryType || 'comment'),
+          body: String(body || '').slice(0, 2000),
+          mentionsJson: Array.isArray(mentionsJson) ? mentionsJson : [],
+          diffJson: diffJson || null,
+        },
+      },
+      { transaction: tx, scope: 'lattice:record-chatter' },
+    );
+    return created;
+  };
+  const activeTx = transaction || getActiveRlsContext()?.transaction || null;
+  if (!activeTx && canUsePgRlsSession(db) && organizationId) {
+    return withTenantRlsContext(db, String(organizationId), writeEntry);
+  }
+  return writeEntry(activeTx);
 }
 
 async function recordFieldDiffChatter(db, { organizationId, targetCollection, targetRecordId, before, after, actor }, opts = {}) {
@@ -211,7 +228,10 @@ async function resolveVerifiedTarget(db, ctx, targetCollection, targetRecordId) 
   const isRoot = ctx.state?.currentRole === 'root';
   if (isRoot) {
     if (!ctx.state?.currentUser) throw failChatter('NATIVE_LOGIN_REQUIRED', 401);
-    const row = await repo.findOne({ filter: { id } });
+    const findRootRow = (transaction) => repo.findOne({ filter: { id }, ...(transaction ? { transaction } : {}) });
+    const row = canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction
+      ? await withSystemRlsBypass(db, findRootRow)
+      : await findRootRow(getActiveRlsContext()?.transaction);
     if (!row) throw failChatter('CHATTER_TARGET_NOT_FOUND', 404, 'Không tìm thấy bản ghi mục tiêu.');
     return {
       isRoot: true,
@@ -226,7 +246,13 @@ async function resolveVerifiedTarget(db, ctx, targetCollection, targetRecordId) 
   }
 
   const actor = await resolveNativeActor(db, ctx.state?.currentUser);
-  const row = await repo.findOne({ filter: { id, organizationId: actor.organizationId } });
+  const findOrgRow = (transaction) => repo.findOne({
+    filter: { id, organizationId: actor.organizationId },
+    ...(transaction ? { transaction } : {}),
+  });
+  const row = canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction
+    ? await withTenantRlsContext(db, actor.organizationId, findOrgRow)
+    : await findOrgRow(getActiveRlsContext()?.transaction);
   if (!row) {
     throw failChatter('CHATTER_TARGET_NOT_FOUND', 404, 'Không tìm thấy bản ghi trong phạm vi tổ chức.');
   }
@@ -274,8 +300,15 @@ function registerChatterResource(app) {
           targetCollection,
           targetRecordId: recordId,
         };
-        const rows = repo ? (await repo.find({ filter, sort: ['-id'], limit })) || [] : [];
-        const total = repo && typeof repo.count === 'function' ? await repo.count({ filter }) : rows.length;
+        const readList = async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const foundRows = repo ? (await repo.find({ filter, sort: ['-id'], limit, ...txOpt })) || [] : [];
+          const foundTotal = repo && typeof repo.count === 'function' ? await repo.count({ filter, ...txOpt }) : foundRows.length;
+          return { rows: foundRows, total: foundTotal };
+        };
+        const { rows, total } = canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction
+          ? await withTenantRlsContext(db, actor.organizationId, readList)
+          : await readList(getActiveRlsContext()?.transaction);
         ctx.body = {
           organizationId: actor.organizationId,
           targetCollection,
@@ -296,19 +329,25 @@ function registerChatterResource(app) {
           throw failChatter('CHATTER_BODY_REQUIRED', 400, 'Nội dung trao đổi phải từ 1 đến 2000 ký tự.');
         }
         const tokens = extractMentionTokens(body);
-        const mentions = await resolveOrganizationMentions(db, actor.organizationId, tokens);
-        const created = await recordChatterEntry(db, {
-          organizationId: actor.organizationId,
-          targetCollection,
-          targetRecordId: recordId,
-          entryType: 'comment',
-          body,
-          mentionsJson: mentions,
-          diffJson: null,
-          authorUserId: actor.userId ? Number(actor.userId) : null,
-          authorEmployeeId: actor.employeeId ? Number(actor.employeeId) : null,
-          authorName: actor.username || 'operator',
-        });
+        const writePost = async (transaction) => {
+          const mentions = await resolveOrganizationMentions(db, actor.organizationId, tokens, { transaction });
+          const created = await recordChatterEntry(db, {
+            organizationId: actor.organizationId,
+            targetCollection,
+            targetRecordId: recordId,
+            entryType: 'comment',
+            body,
+            mentionsJson: mentions,
+            diffJson: null,
+            authorUserId: actor.userId ? Number(actor.userId) : null,
+            authorEmployeeId: actor.employeeId ? Number(actor.employeeId) : null,
+            authorName: actor.username || 'operator',
+          }, { transaction });
+          return { mentions, created };
+        };
+        const { mentions, created } = canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction
+          ? await withTenantRlsContext(db, actor.organizationId, writePost)
+          : await writePost(getActiveRlsContext()?.transaction);
         const chatterId = val(created, 'id');
         const targetPath = resolveNotificationTargetPath(targetCollection);
         for (const mention of mentions) {
@@ -327,7 +366,7 @@ function registerChatterResource(app) {
               targetRecordId: recordId,
               targetPath,
               ...(chatterId != null ? { dedupKey: `mention:${targetCollection}:${recordId}:${chatterId}` } : {}),
-            });
+            }, { app });
           } catch {}
         }
         try {

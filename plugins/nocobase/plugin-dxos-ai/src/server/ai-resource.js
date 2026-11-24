@@ -59,6 +59,7 @@ const SUPPORTED_HITL_TOOLS = new Set([
   'dxos_twin_set_desired',
   'dxos_wms_hold_lot',
   'dxos_alarm_action',
+  'latticeflow.approval',
 ]);
 const TWIN_URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
 const ALLOWED_TWIN_DESIRED_KEYS = new Set([
@@ -862,22 +863,179 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
     return targetDb;
   }
 
+  async function applyDelegatedRolesToActor(targetDb, actor, { organizationId, scope } = {}) {
+    if (!actor || actor.userId == null || !organizationId) return actor;
+    const delegationEngine = loadCrossPluginModule(
+      resolveCrossPluginCandidates('plugin-dxos-studio', 'delegation-engine'),
+    );
+    if (typeof delegationEngine?.resolveEffectiveDelegatedRoles !== 'function') return actor;
+    const delRes = await delegationEngine.resolveEffectiveDelegatedRoles(targetDb, {
+      organizationId,
+      userId: actor.userId,
+      scope,
+    });
+    const delegatedRoles = Array.isArray(delRes?.delegatedRoles) ? delRes.delegatedRoles : [];
+    if (!delegatedRoles.length) return actor;
+    const firstDel = delRes.matchedDelegations?.[0] || null;
+    const mergedRoleNames = Array.from(new Set([...(actor.roleNames || []), ...delegatedRoles]));
+    const adminSet = DEFAULT_ADMIN_ROLES instanceof Set ? DEFAULT_ADMIN_ROLES : new Set(DEFAULT_ADMIN_ROLES);
+    return {
+      ...actor,
+      roleNames: mergedRoleNames,
+      isAdmin: Boolean(actor.isAdmin || mergedRoleNames.some((r) => adminSet.has(r))),
+      ...(firstDel
+        ? {
+            delegatedFromUserId: firstDel.delegatorUserId,
+            delegationUid: firstDel.delegationUid,
+            matchedDelegations: delRes.matchedDelegations,
+          }
+        : {}),
+    };
+  }
+
+  function assertFlowApprovalAuthority(actor, row, rawArgs) {
+    const targetCol = String(row?.targetCollection || '').trim();
+    if (targetCol && targetCol !== 'latticeAutomationRuns') {
+      throw failTool('HITL_ARGS_MISMATCH', 409, 'latticeflow.approval yêu cầu targetCollection là latticeAutomationRuns.');
+    }
+    const runUid = String(rawArgs?.runUid || '').trim();
+    if (!runUid) {
+      throw failTool('HITL_ARGS_MISMATCH', 409, 'latticeflow.approval thiếu runUid trong proposedArgs.');
+    }
+    const approverRole = String(rawArgs?.approverRole || '').trim();
+    if (
+      approverRole
+      && !isRootActor(actor)
+      && !actor?.isAdmin
+      && !(actor?.roleNames || []).includes(approverRole)
+    ) {
+      throw failTool(
+        'HITL_FORBIDDEN',
+        403,
+        `Vai trò "${approverRole}" được yêu cầu để xử lý bước phê duyệt flow.`,
+      );
+    }
+    return { runUid, approverRole };
+  }
+
+  async function executeFlowApprovalDecision(targetDb, ctx, actor, row, rawArgs, flowDecision) {
+    const { runUid } = assertFlowApprovalAuthority(actor, row, rawArgs);
+    const flowExecutor = loadCrossPluginModule(
+      resolveCrossPluginCandidates('plugin-dxos-studio', 'flow/executor'),
+    );
+    if (typeof flowExecutor?.resumeFlowRun !== 'function') {
+      throw failTool('HITL_TOOL_UNAVAILABLE', 503, 'Bộ thực thi flow/executor chưa sẵn sàng.');
+    }
+    return flowExecutor.resumeFlowRun(targetDb, {
+      organizationId: row.organizationId,
+      runUid,
+      decision: flowDecision,
+      payload: {
+        approvalId: row.id ?? null,
+        note: row.decisionNote || '',
+        nodeId: rawArgs?.nodeId || null,
+        ...(actor?.delegationUid
+          ? { delegatedFromUserId: actor.delegatedFromUserId, delegationUid: actor.delegationUid }
+          : {}),
+      },
+      actor: {
+        id: actor.userId,
+        userId: actor.userId,
+        username: actor.username,
+        roleNames: actor.roleNames || [],
+        roles: actor.roleNames || [],
+        isAdmin: Boolean(actor.isAdmin),
+        ...(actor?.delegationUid
+          ? { delegatedFromUserId: actor.delegatedFromUserId, delegationUid: actor.delegationUid }
+          : {}),
+      },
+      options: { app: ctx?.app || targetDb?.app },
+    });
+  }
+
   async function runHitlDecision(ctx, decision, buildExecutor) {
     if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
       throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
     }
     const targetDb = resolveDb(ctx);
-    const actor = await resolveActorScope(ctx, targetDb);
+    const baseActor = await resolveActorScope(ctx, targetDb);
     const payload = readActionPayload(ctx);
     const approvalId = payload.approvalId ?? payload.id ?? ctx?.action?.params?.approvalId ?? ctx?.action?.params?.filterByTk;
     const note = payload.note ?? payload.decisionNote ?? payload.reason ?? '';
-    return decideApproval(targetDb, {
-      actor,
+
+    let peekRow = null;
+    const queueRepo = targetDb?.getRepository?.('latticeAiApprovalQueue');
+    const numericId = Number(approvalId);
+    if (queueRepo && typeof queueRepo.findOne === 'function' && Number.isInteger(numericId) && numericId > 0) {
+      const found = await queueRepo.findOne({
+        filter: {
+          id: numericId,
+          ...(!isRootActor(baseActor) && baseActor.organizationId ? { organizationId: baseActor.organizationId } : {}),
+        },
+      });
+      if (found) {
+        peekRow = {
+          id: val(found, 'id'),
+          organizationId: val(found, 'organizationId'),
+          toolName: val(found, 'toolName'),
+          targetCollection: val(found, 'targetCollection'),
+          proposedArgs: val(found, 'proposedArgs'),
+        };
+      }
+    }
+
+    const effectiveActor = await applyDelegatedRolesToActor(targetDb, baseActor, {
+      organizationId: peekRow?.organizationId || baseActor.organizationId,
+      scope: [peekRow?.targetCollection, 'latticeAiApprovalQueue'].filter(Boolean),
+    });
+
+    if (decision === 'reject' && peekRow?.toolName === 'latticeflow.approval') {
+      if (!isRootActor(effectiveActor) && peekRow.organizationId && peekRow.organizationId !== effectiveActor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép từ chối yêu cầu HITL của tổ chức khác.');
+      }
+      assertFlowApprovalAuthority(effectiveActor, peekRow, peekRow.proposedArgs || {});
+    }
+
+    const result = await decideApproval(targetDb, {
+      actor: effectiveActor,
       approvalId,
       decision,
       note,
-      ...(typeof buildExecutor === 'function' ? { executeApprovedWrite: buildExecutor(targetDb, actor) } : {}),
+      ...(typeof buildExecutor === 'function' ? { executeApprovedWrite: buildExecutor(targetDb, effectiveActor) } : {}),
     });
+
+    if (effectiveActor?.delegationUid) {
+      await recordAiAuditLog(targetDb, {
+        organizationId: result?.organizationId || peekRow?.organizationId || effectiveActor.organizationId,
+        userId: effectiveActor.userId,
+        username: effectiveActor.username,
+        aiEmployee: result?.aiEmployee || 'flow-orchestrator',
+        toolName: result?.toolName || peekRow?.toolName || 'latticeflow.approval',
+        targetCollection: result?.targetCollection || peekRow?.targetCollection || 'latticeAiApprovalQueue',
+        targetRecordId: result?.targetRecordId ?? null,
+        argsSummary: {
+          approvalId: result?.id ?? approvalId,
+          decision,
+          delegatedFromUserId: effectiveActor.delegatedFromUserId,
+          delegationUid: effectiveActor.delegationUid,
+        },
+        status: decision === 'approve' ? 'approved' : 'rejected',
+        durationMs: 0,
+      }).catch(() => {});
+    }
+
+    if (decision === 'reject' && result?.toolName === 'latticeflow.approval' && result?.proposedArgs?.runUid) {
+      const flowRun = await executeFlowApprovalDecision(
+        targetDb,
+        ctx,
+        effectiveActor,
+        result,
+        result.proposedArgs,
+        'rejected',
+      );
+      return { ...result, flowRun };
+    }
+    return result;
   }
 
   return {
@@ -1261,6 +1419,9 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         if (row.toolName === 'dxos_alarm_action') {
           return executeAlarmActionApproval(targetDb, ctx, actor, row, rawArgs);
         }
+        if (row.toolName === 'latticeflow.approval') {
+          return executeFlowApprovalDecision(targetDb, ctx, actor, row, rawArgs, 'approved');
+        }
 
         const argsCol = String(rawArgs.collection || '').trim();
         const argsOp = String(rawArgs.operation || '').trim();
@@ -1324,6 +1485,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
 }
 
 module.exports = {
+  SUPPORTED_HITL_TOOLS,
   serializeProfile,
   ensureLocalLlmServiceRecord,
   upsertAndSyncProfile,

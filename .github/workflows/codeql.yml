@@ -7,9 +7,15 @@
 name: CodeQL
 on:
   push:
-    branches: [main, feat/v0.2.0-enterprise-hardening]
+    branches:
+      - main
+      - feat/v1.0.0-olp-championship
+      - 'feat/**'
   pull_request:
-    branches: [main]
+    branches:
+      - main
+      - feat/v1.0.0-olp-championship
+      - 'feat/**'
   schedule:
     - cron: '0 3 * * 1'
 
@@ -18,16 +24,22 @@ permissions:
   security-events: write
   actions: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   analyze:
     name: Analyze (javascript-typescript)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
         with:
           languages: javascript-typescript
           queries: security-extended
+          build-mode: none
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:javascript-typescript"

@@ -1768,3 +1768,321 @@ test('Whole-Delta P1 & P2 regressions: ALS depth, webhook rawBody/connectorType,
     else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
 });
+
+test('Task 4: migration 20261127000300, pinned graphSnapshotJson, triggerPayloadJson replay, node.timeoutMs, 5-field cron, and scheduler ticker', async () => {
+  // 1. Migration 20261127000300 has reversible up() & down() + Apache-2.0 header
+  const migOrigLoad = Module._load;
+  Module._load = function mockedNocobase(request, parent, isMain) {
+    if (request === '@nocobase/server') return { Migration: class { constructor(ctx) { this.context = ctx; } }, Plugin: class {} };
+    return migOrigLoad.call(this, request, parent, isMain);
+  };
+  let MigClass;
+  try {
+    MigClass = require('../src/server/migrations/20261127000300-flow-snapshot-and-schedule.js');
+  } finally {
+    Module._load = migOrigLoad;
+  }
+  const sqlStmts = [];
+  const fakeTx = { id: 'tx-mig-0300' };
+  const mig = new MigClass({
+    db: {
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (fn) => fn(fakeTx),
+        query: async (sql) => { sqlStmts.push(sql); return [[]]; },
+      },
+    },
+  });
+  await mig.up();
+  const upSql = sqlStmts.join('\n');
+  assert.match(upSql, /"latticeAutomationRuns".*ADD COLUMN IF NOT EXISTS "graphSnapshotJson"/i);
+  assert.match(upSql, /"latticeAutomationRuns".*ADD COLUMN IF NOT EXISTS "triggerPayloadJson"/i);
+  assert.match(upSql, /"latticeAutomationRules".*ADD COLUMN IF NOT EXISTS "cronExpression"/i);
+  assert.match(upSql, /"latticeAutomationRules".*ADD COLUMN IF NOT EXISTS "nextRunAt"/i);
+  sqlStmts.length = 0;
+  await mig.down();
+  const downSql = sqlStmts.join('\n');
+  assert.match(downSql, /"latticeAutomationRuns".*DROP COLUMN IF EXISTS "graphSnapshotJson"/i);
+  assert.match(downSql, /"latticeAutomationRules".*DROP COLUMN IF EXISTS "nextRunAt"/i);
+  assert.match(downSql, /"latticeAutomationRules".*DROP COLUMN IF EXISTS "cronExpression"/i);
+
+  // 2. 5-field cron evaluator (matchesCron & computeNextCronRun)
+  const { matchesCron, computeNextCronRun, tickFlowScheduler, tickExpiredApprovals } = require('../src/server/flow/cron');
+  assert.equal(matchesCron('*/15 * * * *', new Date('2026-11-24T08:30:00Z')), true);
+  assert.equal(matchesCron('*/15 * * * *', new Date('2026-11-24T08:31:00Z')), false);
+  // 2026-11-24 is Tuesday (dayOfWeek = 2); 08:00 Asia/Ho_Chi_Minh = 01:00 UTC
+  assert.equal(matchesCron('0 8 * * 1-5', new Date('2026-11-24T01:00:00Z'), 'Asia/Ho_Chi_Minh'), true);
+  assert.equal(matchesCron('0 8 * * 1-5', new Date('2026-11-22T01:00:00Z'), 'Asia/Ho_Chi_Minh'), false); // Sunday
+  const nextUtc = computeNextCronRun('30 9 * * *', new Date('2026-11-24T09:30:00Z'));
+  assert.equal(nextUtc.toISOString(), '2026-11-25T09:30:00.000Z');
+  const nextStep = computeNextCronRun('*/15 * * * *', new Date('2026-11-24T08:16:20Z'));
+  assert.equal(nextStep.toISOString(), '2026-11-24T08:30:00.000Z');
+  assert.throws(() => matchesCron('invalid cron', new Date()), /FLOW_INVALID_CRON/);
+
+  // 3. Pinned graphSnapshotJson on suspend & used on resume even after rule graph is modified/deleted
+  const snapDb = makeFlowDb({
+    latticeAutomationRules: [
+      {
+        organizationId: 'org-a',
+        ruleKey: 'pinned_snapshot_rule',
+        name: 'Pinned Snapshot Rule',
+        schemaVersion: 2,
+        active: true,
+        graphJson: {
+          version: 2,
+          nodes: [
+            { id: 't1', type: 'trigger.manual', config: {} },
+            { id: 'ap1', type: 'control.approval', config: { approverRole: 'ldx_manager', title: 'Approve' } },
+            { id: 'c_old', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'PINNED-OLD', name: 'Old Graph' } } },
+          ],
+          edges: [
+            { id: 'e1', source: 't1', sourceHandle: 'main', target: 'ap1' },
+            { id: 'e2', source: 'ap1', sourceHandle: 'approved', target: 'c_old' },
+          ],
+        },
+      },
+    ],
+  });
+  const suspSnap = await executeFlowGraph(snapDb, snapDb.store.latticeAutomationRules[0], { organizationId: 'org-a', data: { ticketId: 99 } });
+  assert.equal(suspSnap.status, 'suspended');
+  assert.ok(snapDb.store.latticeAutomationRuns[0].graphSnapshotJson?.nodes?.some((n) => n.id === 'c_old'));
+  assert.equal(snapDb.store.latticeAutomationRuns[0].triggerPayloadJson?.data?.ticketId, 99);
+
+  // Edit rule AFTER run suspended to point to c_new -> resume MUST still run c_old from pinned snapshot
+  snapDb.store.latticeAutomationRules[0].graphJson = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.manual', config: {} },
+      { id: 'ap1', type: 'control.approval', config: { approverRole: 'ldx_manager', title: 'Approve' } },
+      { id: 'c_new', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'MUTATED-NEW', name: 'New Graph' } } },
+    ],
+    edges: [
+      { id: 'e1', source: 't1', sourceHandle: 'main', target: 'ap1' },
+      { id: 'e2', source: 'ap1', sourceHandle: 'approved', target: 'c_new' },
+    ],
+  };
+  const resumedSnap = await resumeFlowRun(snapDb, {
+    organizationId: 'org-a',
+    runUid: suspSnap.runUid,
+    decision: 'approved',
+    resumeToken: suspSnap.resumeToken,
+    actor: { userId: 21, username: 'mgr_21' },
+  });
+  assert.equal(resumedSnap.status, 'completed');
+  assert.equal(snapDb.store.latticeServiceTickets.some((t) => t.code === 'PINNED-OLD'), true);
+  assert.equal(snapDb.store.latticeServiceTickets.some((t) => t.code === 'MUTATED-NEW'), false);
+
+  // 4. triggerPayloadJson persisted on run creation & reused on replayRun without in-memory cache or eventBus
+  const replayDb = makeFlowDb({
+    latticeAutomationRules: [
+      {
+        organizationId: 'org-a',
+        ruleKey: 'replay_payload_rule',
+        name: 'Replay Payload Rule',
+        schemaVersion: 2,
+        active: true,
+        graphJson: {
+          version: 2,
+          nodes: [
+            { id: 't1', type: 'trigger.manual', config: {} },
+            { id: 'c1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'RPL-{{data.orderRef}}', name: 'Replayed {{data.note}}' } } },
+          ],
+          edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'c1' }],
+        },
+      },
+    ],
+    latticeAutomationRuns: [
+      {
+        id: 500,
+        organizationId: 'org-a',
+        ruleKey: 'replay_payload_rule',
+        runUid: 'run_persisted_payload_1',
+        triggerEventId: 'evt_persisted_1',
+        triggerEventType: 'manual.trigger',
+        status: 'completed',
+        depth: 0,
+        triggerPayloadJson: {
+          event: { id: 'evt_persisted_1', type: 'manual.trigger', organizationId: 'org-a', data: { orderRef: 'ORD-777', note: 'Cold-A' } },
+          data: { orderRef: 'ORD-777', note: 'Cold-A' },
+        },
+      },
+    ],
+  });
+  const replayActions = createDxosAutomationsActions(replayDb);
+  const replayCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { runUid: 'run_persisted_payload_1' } });
+  await replayActions.replayRun(replayCtx, async () => {});
+  assert.equal(replayCtx.body.run.status, 'completed');
+  assert.equal(replayDb.store.latticeServiceTickets[0].code, 'RPL-ORD-777');
+  assert.equal(replayDb.store.latticeServiceTickets[0].name, 'Replayed Cold-A');
+
+  // 5. node.timeoutMs enforced cleanly with error-port routing
+  const regMod = require('../src/server/flow/registry');
+  const timeoutRegistry = regMod.createDefaultRegistry();
+  timeoutRegistry.registerNodeType({
+    type: 'logic.slow_test',
+    category: 'logic',
+    label: 'Slow Test Node',
+    outputs: ['main', 'error'],
+    async execute() {
+      await new Promise((r) => setTimeout(r, 250));
+      return { output: { done: true }, nextPort: 'main' };
+    },
+  });
+  const timeoutDb = makeFlowDb();
+  const timeoutRun = await executeFlowGraph(
+    timeoutDb,
+    {
+      organizationId: 'org-a',
+      ruleKey: 'timeout_rule',
+      schemaVersion: 2,
+      graphJson: {
+        version: 2,
+        nodes: [
+          { id: 't1', type: 'trigger.manual', config: {} },
+          { id: 'slow1', type: 'logic.slow_test', timeoutMs: 25, config: {} },
+          { id: 'err_n', type: 'notify.send', config: { roleNames: ['ldx_admin'], title: 'TimedOut: {{steps.slow1.error}}' } },
+        ],
+        edges: [
+          { id: 'e1', source: 't1', sourceHandle: 'main', target: 'slow1' },
+          { id: 'e2', source: 'slow1', sourceHandle: 'error', target: 'err_n' },
+        ],
+      },
+    },
+    { organizationId: 'org-a', data: {} },
+    { nodeRegistry: timeoutRegistry },
+  );
+  assert.equal(timeoutRun.nodeStatesJson.slow1.status, 'failed');
+  assert.match(timeoutRun.nodeStatesJson.slow1.error, /timed out/i);
+  assert.equal(timeoutRun.nodeStatesJson.err_n.status, 'completed');
+
+  // 6. DX_FLOW_DELAY_TICK_MS='0' disables ticker; default is 15000; tickFlowScheduler ticks schedule, delay, & expires overdue approvals under PG advisory lock + RLS bypass
+  const prevTickEnv = process.env.DX_FLOW_DELAY_TICK_MS;
+  const prevRlsEnv = process.env.DX_PG_RLS_SESSION;
+  try {
+    process.env.DX_FLOW_DELAY_TICK_MS = '0';
+    const disabledPlugin = Object.create(DxosStudioPlugin.prototype);
+    disabledPlugin.app = { resourceManager: { use() {}, define() {} }, acl: { registerSnippet() {}, allow() {} } };
+    disabledPlugin.db = makeFlowDb();
+    await disabledPlugin.load();
+    assert.equal(disabledPlugin._delayTicker ?? null, null, "DX_FLOW_DELAY_TICK_MS='0' must disable setInterval");
+    await disabledPlugin.destroy();
+
+    delete process.env.DX_FLOW_DELAY_TICK_MS;
+    const defaultPlugin = Object.create(DxosStudioPlugin.prototype);
+    defaultPlugin.app = { resourceManager: { use() {}, define() {} }, acl: { registerSnippet() {}, allow() {} } };
+    defaultPlugin.db = makeFlowDb();
+    await defaultPlugin.load();
+    assert.ok(defaultPlugin._delayTicker, 'Default DX_FLOW_DELAY_TICK_MS (15000) must start ticker');
+    await defaultPlugin.destroy();
+
+    // Verify tickFlowScheduler with trigger.schedule + control.delay + overdue control.approval expiry under PG RLS & advisory lock
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const schedQueries = [];
+    const schedDb = makeFlowDb({
+      latticeAutomationRules: [
+        {
+          id: 1,
+          organizationId: 'org-s',
+          ruleKey: 'cron_digest_rule',
+          name: 'Cron Digest',
+          schemaVersion: 2,
+          active: true,
+          cronExpression: '*/15 * * * *',
+          nextRunAt: new Date('2026-11-24T08:15:00Z'),
+          graphJson: {
+            version: 2,
+            nodes: [
+              { id: 't1', type: 'trigger.schedule', config: { cron: '*/15 * * * *', timezone: 'UTC' } },
+              { id: 'c1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'CRON-TICK', name: 'Cron Fired' } } },
+            ],
+            edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'c1' }],
+          },
+        },
+        {
+          id: 2,
+          organizationId: 'org-s',
+          ruleKey: 'delay_tick_rule',
+          name: 'Delay Rule',
+          schemaVersion: 2,
+          active: true,
+          graphJson: {
+            version: 2,
+            nodes: [
+              { id: 't1', type: 'trigger.manual', config: {} },
+              { id: 'd1', type: 'control.delay', config: { durationSec: 10 } },
+              { id: 'c1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'DELAY-DONE', name: 'Delay Fired' } } },
+            ],
+            edges: [
+              { id: 'e1', source: 't1', sourceHandle: 'main', target: 'd1' },
+              { id: 'e2', source: 'd1', sourceHandle: 'main', target: 'c1' },
+            ],
+          },
+        },
+      ],
+      latticeAutomationRuns: [
+        {
+          id: 10,
+          organizationId: 'org-s',
+          ruleKey: 'delay_tick_rule',
+          runUid: 'run_delay_due',
+          triggerEventType: 'manual.trigger',
+          status: 'suspended',
+          suspendedNodeId: 'd1',
+          resumeAt: new Date('2026-11-24T08:10:00Z'),
+          approvalId: null,
+          nodeStatesJson: { t1: { status: 'completed', output: {} }, d1: { status: 'suspended', suspend: { kind: 'delay' } } },
+          stepTracesJson: [],
+        },
+        {
+          id: 11,
+          organizationId: 'org-s',
+          ruleKey: 'delay_tick_rule',
+          runUid: 'run_approval_overdue',
+          triggerEventType: 'manual.trigger',
+          status: 'suspended',
+          suspendedNodeId: 'ap1',
+          resumeAt: new Date('2026-11-24T08:05:00Z'),
+          approvalId: 88,
+          nodeStatesJson: { ap1: { status: 'suspended', suspend: { kind: 'approval', approvalId: 88 } } },
+          stepTracesJson: [],
+        },
+      ],
+      latticeAiApprovalQueue: [
+        { id: 88, organizationId: 'org-s', status: 'pending', expiresAt: new Date('2026-11-24T08:05:00Z') },
+      ],
+    });
+    schedDb.sequelize = {
+      getDialect: () => 'postgres',
+      transaction: async (fn) => fn({ id: 'tx-sched' }),
+      query: async (sql, opts) => {
+        schedQueries.push({ sql: String(sql), org: opts?.replacements?.orgId || null });
+        if (String(sql).includes('pg_try_advisory_xact_lock')) {
+          return [[{ acquired: true }]];
+        }
+        return [[], { rowCount: 1 }];
+      },
+    };
+
+    const tickOut = await tickFlowScheduler(schedDb, { now: new Date('2026-11-24T08:16:00Z') });
+    assert.equal(tickOut.scheduled.processedCount, 1);
+    assert.equal(tickOut.delayed.processedCount, 1);
+    assert.equal(tickOut.expired.processedCount, 1);
+    assert.equal(schedDb.store.latticeServiceTickets.some((t) => t.code === 'CRON-TICK'), true);
+    assert.equal(schedDb.store.latticeServiceTickets.some((t) => t.code === 'DELAY-DONE'), true);
+    assert.equal(new Date(schedDb.store.latticeAutomationRules[0].nextRunAt).toISOString(), '2026-11-24T08:30:00.000Z');
+    assert.equal(schedDb.store.latticeAutomationRuns.find((r) => r.runUid === 'run_approval_overdue').status, 'expired');
+    assert.equal(schedDb.store.latticeAiApprovalQueue[0].status, 'expired');
+    assert.ok(schedQueries.some((q) => q.sql.includes("set_config('app.rls_bypass', 'on', true)")));
+    assert.ok(schedQueries.some((q) => q.sql.includes('pg_try_advisory_xact_lock')));
+    assert.ok(schedQueries.some((q) => q.sql.includes("set_config('app.current_org'") && q.org === 'org-s'));
+
+    // Also test direct tickExpiredApprovals skips non-expired approvals
+    const expDirect = await tickExpiredApprovals(schedDb, { now: new Date('2026-11-24T08:16:00Z') });
+    assert.equal(expDirect.processedCount, 0);
+  } finally {
+    if (prevTickEnv === undefined) delete process.env.DX_FLOW_DELAY_TICK_MS;
+    else process.env.DX_FLOW_DELAY_TICK_MS = prevTickEnv;
+    if (prevRlsEnv === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRlsEnv;
+  }
+});

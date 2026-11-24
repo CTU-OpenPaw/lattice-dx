@@ -440,3 +440,202 @@ test('sensitive tenant collections are blocked on non-root charts:queryData and 
     });
   }
 });
+
+test('Task 1 remediation: resolveNativeActor({ transaction }), updateScopedDocument chatter, root SQL charts, and attachments/integrations work under FORCE RLS', async () => {
+  const { registerNativeRequestAttachments } = require('../src/server/native-request-attachments');
+  const { createIntegrationActions } = require('../src/server/native-integrations');
+  const { getActiveRlsContext } = require('../src/server/pg-rls');
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+
+  const txStates = new WeakMap();
+  const sqlEvents = [];
+  let txSeq = 0;
+  const employee = { id: 1, userId: 12, departmentId: 3, organizationId: 'org-a', active: true };
+  const reqRow = { id: 5, organizationId: 'org-a', requesterId: 1, status: 'draft', name: 'Req 5', version: 1 };
+  const chatterRows = [];
+
+  const isVisible = (opts) => {
+    const st = opts?.transaction ? txStates.get(opts.transaction) : null;
+    return Boolean(st && (st.bypass === 'on' || st.orgId === 'org-a'));
+  };
+
+  const rlsDb = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => {
+        const tx = { id: `tx-remed-${++txSeq}`, LOCK: { UPDATE: 'UPDATE', SHARE: 'SHARE' } };
+        txStates.set(tx, { bypass: '', orgId: '' });
+        return cb(tx);
+      },
+      query: async (sql, opts = {}) => {
+        const text = String(sql);
+        sqlEvents.push({ text, tx: opts?.transaction || null });
+        const st = opts?.transaction ? txStates.get(opts.transaction) : null;
+        if (text.includes("SELECT current_setting('app.rls_bypass', true) AS prev")) {
+          return [[{ prev: st?.bypass || '' }]];
+        }
+        if (text.includes("set_config('app.rls_bypass', 'on'")) {
+          if (st) st.bypass = 'on';
+          return [[]];
+        }
+        if (text.includes("set_config('app.rls_bypass', :prev")) {
+          if (st) st.bypass = String(opts?.replacements?.prev || '');
+          return [[]];
+        }
+        if (text.includes("set_config('app.current_org'")) {
+          if (st) st.orgId = String(opts?.replacements?.orgId || '');
+          return [[]];
+        }
+        if (text.includes('lattice_native_request_attachments')) {
+          return [[{ fileId: 'f-1', filename: 'a.pdf', size: 10, scanStatus: 'clean' }]];
+        }
+        return [[]];
+      },
+    },
+    getModel(name) {
+      if (name === 'latticeRequests') {
+        return {
+          findOne: async ({ where, transaction }) => {
+            if (!isVisible({ transaction })) return null;
+            return where.id == reqRow.id ? { ...reqRow, get: (k) => reqRow[k], toJSON: () => ({ ...reqRow }) } : null;
+          },
+        };
+      }
+      return null;
+    },
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return {
+          find: async (opts) => (isVisible(opts) ? [{ ...employee, get: (k) => employee[k] }] : []),
+          findOne: async (opts) => (isVisible(opts) ? { ...employee, get: (k) => employee[k] } : null),
+        };
+      }
+      if (name === 'latticeRequests') {
+        return {
+          findOne: async (opts) => (isVisible(opts) ? { ...reqRow, get: (k) => reqRow[k] } : null),
+          update: async (opts) => {
+            if (!isVisible(opts)) return [];
+            Object.assign(reqRow, opts.values);
+            return [{ ...reqRow, toJSON: () => ({ ...reqRow }) }];
+          },
+        };
+      }
+      if (name === 'latticeRecordChatter') {
+        return {
+          create: async (opts) => {
+            if (!isVisible(opts)) throw Object.assign(new Error('42501 RLS violation'), { code: '42501' });
+            const c = { id: chatterRows.length + 1, ...opts.values };
+            chatterRows.push(c);
+            return c;
+          },
+        };
+      }
+      if (name === 'latticeIncidentCases') {
+        return {
+          findOne: async (opts) => (isVisible(opts) ? null : null),
+          create: async (opts) => {
+            if (!isVisible(opts)) throw Object.assign(new Error('42501 RLS violation'), { code: '42501' });
+            return { id: 77, ...opts.values };
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+
+    // 1. resolveNativeActor({ transaction }) succeeds on bare transaction and restores bypass afterward
+    await rlsDb.sequelize.transaction(async (bareTx) => {
+      const actor = await api.resolveNativeActor(rlsDb, { id: 12 }, { transaction: bareTx });
+      assert.equal(actor.organizationId, 'org-a');
+      assert.equal(txStates.get(bareTx).bypass, '', 'app.rls_bypass must be restored after employee lookup');
+    });
+
+    // 2. native-request-attachments withRequest succeeds without NATIVE_MEMBERSHIP_REQUIRED (403)
+    const resources = new Map();
+    registerNativeRequestAttachments({
+      db: rlsDb,
+      resourceManager: { define: (def) => resources.set(def.name, def.actions) },
+      acl: { allow() {} },
+    });
+    const attCtx = {
+      method: 'GET',
+      query: { requestId: '5' },
+      state: { currentUser: { id: 12 }, currentRole: 'ldx_employee', currentRoles: ['ldx_employee'] },
+      dataSource: {
+        acl: {
+          can: () => true,
+          resolveActionParams: async () => ({ mergedParams: {} }),
+        },
+      },
+      set() {},
+      throw(s, m) { throw Object.assign(new Error(m || String(s)), { status: s }); },
+    };
+    await resources.get('latticeRequestAttachments').list(attCtx, async () => {});
+    assert.equal(attCtx.body.length, 1);
+
+    // 3. updateScopedDocument wraps recordChatterSafe in withTenantRlsContext
+    await api.updateScopedDocument(
+      rlsDb,
+      { state: { currentUser: { id: 12, username: 'emp12' } }, action: { resourceName: 'latticeRequests', params: { filterByTk: 5, values: { name: 'Req 5 Updated', expectedVersion: 1 } } } },
+      { userId: '12', employeeId: 1, organizationId: 'org-a' },
+    );
+    assert.equal(chatterRows.length, 1);
+
+    // 4. Root charts:queryData mode='sql' wraps next() in withSystemRlsBypass
+    const guard = api.createNativeScopeMiddleware(rlsDb, { requests: { name: 'latticeRequests', fields: [] } });
+    let sqlChartRlsCtx = null;
+    await guard({
+      state: { currentUser: { id: 1 }, currentRole: 'root' },
+      action: { resourceName: 'charts', actionName: 'queryData', params: { values: { mode: 'sql', sql: 'SELECT count(*) FROM "latticeRequests"' } } },
+    }, async () => {
+      sqlChartRlsCtx = getActiveRlsContext();
+    });
+    assert.equal(sqlChartRlsCtx?.systemRlsBypass, true);
+
+    // 5. native-integrations receiveAlert succeeds under DX_PG_RLS_SESSION=true
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/api/latticeAssets:get')) {
+        return {
+          ok: true,
+          status: 200,
+          body: new ReadableStream({
+            start(controller) {
+              controller.enqueue(Buffer.from(JSON.stringify({ data: { id: 5, name: 'Asset 5', status: 'active' } })));
+              controller.close();
+            },
+          }),
+        };
+      }
+      throw new Error(`Unexpected fetch ${url}`);
+    };
+    rlsDb.getRepository = ((origGet) => (name) => {
+      if (name === 'latticeAssets') {
+        return { findOne: async () => ({ id: 5, organizationId: 'org-a' }) };
+      }
+      return origGet(name);
+    })(rlsDb.getRepository);
+    try {
+      const integActions = createIntegrationActions();
+      const alertCtx = {
+        method: 'POST',
+        app: { db: rlsDb },
+        state: { currentUser: { id: 12 }, currentRole: 'ldx_connector' },
+        get: () => '',
+        action: { params: { values: { eventId: 'evt-rls-1', assetId: 5, handlerId: 1, severity: 'high' } } },
+        throw(s, m) { throw Object.assign(new Error(m || String(s)), { status: s }); },
+      };
+      await integActions.receiveAlert(alertCtx);
+      assert.equal(alertCtx.body.id, 77);
+      assert.equal(alertCtx.body.duplicate, false);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
+});

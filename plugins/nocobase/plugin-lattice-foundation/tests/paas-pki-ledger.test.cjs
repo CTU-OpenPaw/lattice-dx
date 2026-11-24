@@ -845,10 +845,35 @@ test('OpenAPI 3.1.0, AsyncAPI 3.0.0, observability dxos:openapi/asyncapi endpoin
     '/api/dxosDataGov:freezeSnapshot',
     '/api/dxosBlocks:telemetryIngest',
     '/api/dxosStudio:composePortals',
+    '/api/dxosN8n:status',
+    '/api/dxosN8n:appCatalog',
+    '/api/dxosN8n:workflows',
+    '/api/dxosN8n:getWorkflow',
+    '/api/dxosN8n:createWorkflow',
+    '/api/dxosN8n:updateWorkflow',
+    '/api/dxosN8n:activateWorkflow',
+    '/api/dxosN8n:executions',
+    '/api/dxosN8n:retryExecution',
+    '/api/dxosN8n:syncCredential',
     '/api/dxosAi:portalAgents',
     '/api/dxos-mcp',
   ]) {
     assert.ok(openapi.paths[requiredPath], `OpenAPI missing path ${requiredPath}`);
+  }
+  for (const [n8nPath, method] of [
+    ['/api/dxosN8n:status', 'get'],
+    ['/api/dxosN8n:appCatalog', 'get'],
+    ['/api/dxosN8n:workflows', 'get'],
+    ['/api/dxosN8n:getWorkflow', 'get'],
+    ['/api/dxosN8n:createWorkflow', 'post'],
+    ['/api/dxosN8n:updateWorkflow', 'post'],
+    ['/api/dxosN8n:activateWorkflow', 'post'],
+    ['/api/dxosN8n:executions', 'get'],
+    ['/api/dxosN8n:retryExecution', 'post'],
+    ['/api/dxosN8n:syncCredential', 'post'],
+  ]) {
+    assert.ok(openapi.paths[n8nPath]?.[method], `OpenAPI missing ${method.toUpperCase()} ${n8nPath}`);
+    assert.deepEqual(openapi.paths[n8nPath][method].tags, ['Stock n8n Integration']);
   }
 
   const asyncapi = buildAsyncApiSpec({ serverUrl: 'https://dx.example.org' });
@@ -1399,4 +1424,89 @@ test('voucher-lifecycle and record-chatter skip minimal partial mocks, propagate
   assert.ok(sqlList.some((s) => /^SAVEPOINT sp_dxos_ledger_\d+$/.test(s)));
   assert.ok(sqlList.some((s) => /^ROLLBACK TO SAVEPOINT sp_dxos_ledger_\d+$/.test(s)));
   assert.equal(pgHarness.sqlQueries.every((q) => q.opts?.transaction === callerTx), true);
+});
+
+test('Task 4: paas-api-keys enforces write scope on default mutating routes for non-write PATs (iot/dmn/ai/ledger/read)', async () => {
+  const { registerPaasApiKeys, createPaasApiKeyAuthMiddleware } = require('../src/server/paas-api-keys');
+  const { db } = makeInMemoryPaasDb();
+  const resources = new Map();
+  registerPaasApiKeys({
+    db,
+    resourceManager: { define(def) { resources.set(def.name, def.actions); }, use() {} },
+    acl: { allow() {} },
+  });
+  const keyActions = resources.get('dxosApiKeys');
+  const authMw = createPaasApiKeyAuthMiddleware(db);
+
+  const tokens = {};
+  for (const scope of ['read', 'iot', 'dmn', 'ai', 'ledger', 'wms', 'write']) {
+    const issueCtx = makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10, username: 'org-admin' }, currentRole: 'ldx_admin' },
+      params: { values: { name: `Key-${scope}`, roleName: 'ldx_admin', scopes: [scope] } },
+    });
+    await keyActions.issue(issueCtx, async () => {});
+    tokens[scope] = issueCtx.body.token;
+  }
+
+  // Non-write PATs (iot, dmn, ai, ledger, wms, read) MUST be denied 403 on generic mutating routes lacking resource-specific override
+  const defaultMutatingRoutes = [
+    { method: 'POST', resourceName: 'latticeOrders', actionName: 'create' },
+    { method: 'PUT', resourceName: 'latticeOrders', actionName: 'update' },
+    { method: 'DELETE', resourceName: 'latticeOrders', actionName: 'destroy' },
+    { method: 'POST', resourceName: 'latticeServiceTickets', actionName: 'create' },
+    { method: 'POST', resourceName: 'latticeVoucher', actionName: 'submit' },
+    { method: 'POST', resourceName: 'dxosStudio', actionName: 'composePortals' },
+  ];
+  for (const scope of ['read', 'iot', 'dmn', 'ai', 'ledger', 'wms']) {
+    for (const route of defaultMutatingRoutes) {
+      await assert.rejects(
+        () => authMw(makeHttpCtx({
+          method: route.method,
+          headers: { 'x-lattice-api-key': tokens[scope] },
+          params: { resourceName: route.resourceName, actionName: route.actionName },
+        }), async () => {}),
+        (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+        `Expected ${scope} PAT to be denied on ${route.method} ${route.resourceName}:${route.actionName}`,
+      );
+    }
+  }
+
+  // write PAT succeeds on default mutating routes
+  for (const route of defaultMutatingRoutes) {
+    let passed = false;
+    await authMw(makeHttpCtx({
+      method: route.method,
+      headers: { 'x-lattice-api-key': tokens.write },
+      params: { resourceName: route.resourceName, actionName: route.actionName },
+    }), async () => { passed = true; });
+    assert.equal(passed, true, `Expected write PAT to pass ${route.method} ${route.resourceName}:${route.actionName}`);
+  }
+
+  // Resource-specific scope overrides still work (e.g. dmn -> dxosDmn:saveTable, ledger -> dxosLedger:signDocument, wms -> dxosWms:receiveStock, iot/ai -> dxosAutomations:runNow)
+  for (const [scope, resourceName, actionName] of [
+    ['dmn', 'dxosDmn', 'saveTable'],
+    ['ledger', 'dxosLedger', 'signDocument'],
+    ['wms', 'dxosWms', 'receiveStock'],
+    ['iot', 'dxosAutomations', 'runNow'],
+    ['ai', 'dxosAutomations', 'aiAssist'],
+  ]) {
+    let passed = false;
+    await authMw(makeHttpCtx({
+      method: 'POST',
+      headers: { 'x-lattice-api-key': tokens[scope] },
+      params: { resourceName, actionName },
+    }), async () => { passed = true; });
+    assert.equal(passed, true, `Expected ${scope} PAT override to pass ${resourceName}:${actionName}`);
+  }
+
+  // Wrong narrow scope on overridden route is STILL denied (e.g. iot PAT on dxosDmn:saveTable)
+  await assert.rejects(
+    () => authMw(makeHttpCtx({
+      method: 'POST',
+      headers: { 'x-lattice-api-key': tokens.iot },
+      params: { resourceName: 'dxosDmn', actionName: 'saveTable' },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+  );
 });

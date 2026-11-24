@@ -1511,3 +1511,209 @@ test('Fix Round 1 (Minor 1-4): PAT scopes on read/eval, PG RLS on custom actions
     if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION; else process.env.DX_PG_RLS_SESSION = prevRls;
   }
 });
+
+test('Task 4: resolveEffectiveDelegatedRoles enforced across flow/durable-store resume and voucher-lifecycle submit/cancel/amend with audit & ledger metadata', async () => {
+  const { resolveEffectiveDelegatedRoles } = require(path.join(PLUGIN_ROOT, 'src/server/delegation-engine.js'));
+  assert.equal(typeof resolveEffectiveDelegatedRoles, 'function');
+
+  const { claimSuspendedRun } = require(path.join(PLUGIN_ROOT, 'src/server/flow/durable-store.js'));
+  const { submitVoucher, cancelVoucher, amendVoucher } = require(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/voucher-lifecycle.js'));
+
+  const now = new Date('2026-11-24T12:00:00Z');
+  const harness = makeTestHarness({
+    employees: [
+      { id: 10, userId: 100, organizationId: 'org-a', active: true },
+      { id: 11, userId: 101, organizationId: 'org-a', active: true },
+      { id: 12, userId: 102, organizationId: 'org-a', active: true },
+      { id: 20, userId: 200, organizationId: 'org-b', active: true },
+    ],
+    orders: [
+      {
+        id: 701,
+        organizationId: 'org-a',
+        code: 'ORD-DLG-701',
+        name: 'Delegated Cold Order',
+        requesterId: 10,
+        status: 'draft',
+        version: 1,
+        amendmentNo: 0,
+        amendedFromId: null,
+      },
+    ],
+    roles: [
+      { name: 'ldx_manager', allowConfigure: false, snippets: [] },
+      { name: 'ldx_employee', allowConfigure: false, snippets: [] },
+      { name: 'ldx_admin', allowConfigure: true, snippets: ['pm'] },
+    ],
+    rolesUsers: [
+      { userId: 100, roleName: 'ldx_manager' },
+      { userId: 101, roleName: 'ldx_employee' },
+      { userId: 102, roleName: 'ldx_employee' },
+    ],
+  });
+
+  // Add automation runs + chatter repos to harness
+  const automationRuns = [
+    {
+      id: 1,
+      organizationId: 'org-a',
+      ruleKey: 'flow_dlg_test',
+      runUid: 'run_dlg_1',
+      status: 'suspended',
+      suspendedNodeId: 'ap1',
+      approvalId: 55,
+      nodeStatesJson: { ap1: { status: 'suspended', suspend: { kind: 'approval', approverRole: 'ldx_manager' } } },
+    },
+  ];
+  const chatter = [];
+  const origGetRepo = harness.db.getRepository.bind(harness.db);
+  harness.db.getRepository = (name) => {
+    if (name === 'latticeAutomationRuns') {
+      return {
+        findOne: async ({ filter = {} } = {}) => automationRuns.find((r) => Object.entries(filter).every(([k, v]) => r[k] === v)) || null,
+        update: async ({ filter = {}, values = {} } = {}) => {
+          let n = 0;
+          for (const r of automationRuns) {
+            if (Object.entries(filter).every(([k, v]) => r[k] === v)) {
+              Object.assign(r, values);
+              n += 1;
+            }
+          }
+          return [n];
+        },
+      };
+    }
+    if (name === 'latticeRecordChatter') {
+      return {
+        create: async ({ values }) => { const row = { id: chatter.length + 1, ...values }; chatter.push(row); return row; },
+      };
+    }
+    return origGetRepo(name);
+  };
+
+  harness.delegations.push(
+    {
+      id: 1,
+      organizationId: 'org-a',
+      delegationUid: 'DLG-ORD-101',
+      delegatorUserId: 100,
+      delegateUserId: 101,
+      roleName: 'ldx_manager',
+      scopeCollection: 'latticeOrders',
+      startsAt: new Date('2026-11-23T00:00:00Z'),
+      endsAt: new Date('2026-11-26T00:00:00Z'),
+      status: 'active',
+      active: true,
+    },
+    {
+      id: 2,
+      organizationId: 'org-a',
+      delegationUid: 'DLG-FLOW-101',
+      delegatorUserId: 100,
+      delegateUserId: 101,
+      roleName: 'ldx_manager',
+      scopeCollection: 'latticeAutomationRuns',
+      startsAt: new Date('2026-11-23T00:00:00Z'),
+      endsAt: new Date('2026-11-26T00:00:00Z'),
+      status: 'active',
+      active: true,
+    },
+    {
+      id: 3,
+      organizationId: 'org-a',
+      delegationUid: 'DLG-EXPIRED-102',
+      delegatorUserId: 100,
+      delegateUserId: 102,
+      roleName: 'ldx_manager',
+      scopeCollection: null,
+      startsAt: new Date('2026-11-20T00:00:00Z'),
+      endsAt: new Date('2026-11-24T01:00:00Z'),
+      status: 'active',
+      active: true,
+    },
+  );
+
+  // 1. resolveEffectiveDelegatedRoles honors scope, window, and ignores expired/unmatched
+  const ordDlg = await resolveEffectiveDelegatedRoles(harness.db, { organizationId: 'org-a', userId: 101, scope: 'latticeOrders', now });
+  assert.deepEqual(ordDlg.roles, ['ldx_manager']);
+  assert.equal(ordDlg.delegationUid, 'DLG-ORD-101');
+  assert.equal(ordDlg.delegatedFromUserId, 100);
+
+  const reqDlg = await resolveEffectiveDelegatedRoles(harness.db, { organizationId: 'org-a', userId: 101, scope: 'latticeRequests', now });
+  assert.deepEqual(reqDlg.roles, []);
+  assert.equal(reqDlg.delegationUid, null);
+
+  const expDlg = await resolveEffectiveDelegatedRoles(harness.db, { organizationId: 'org-a', userId: 102, scope: 'latticeOrders', now });
+  assert.deepEqual(expDlg.roles, []);
+
+  // 2. flow/durable-store claimSuspendedRun rejects user 102 (expired delegation) with 403 and accepts user 101 with delegation metadata
+  const deniedClaim = await claimSuspendedRun(harness.db, {
+    organizationId: 'org-a',
+    runUid: 'run_dlg_1',
+    actor: { userId: 102, username: 'emp102' },
+    now,
+  });
+  assert.equal(deniedClaim.ok, false);
+  assert.equal(deniedClaim.statusCode, 403);
+
+  const okClaim = await claimSuspendedRun(harness.db, {
+    organizationId: 'org-a',
+    runUid: 'run_dlg_1',
+    actor: { userId: 101, username: 'emp101' },
+    now,
+  });
+  assert.equal(okClaim.ok, true);
+  assert.equal(okClaim.delegation.delegationUid, 'DLG-FLOW-101');
+  assert.equal(okClaim.delegation.delegatedFromUserId, 100);
+
+  // 3. voucher-lifecycle submit/cancel/amend reject user 102 (403) and wrong-scope user 101 on latticeRequests,
+  //    but allow user 101 on latticeOrders with delegatedFromUserId & delegationUid in ledger metadata & chatter!
+  await assert.rejects(
+    () => submitVoucher(harness.db, {
+      collection: 'latticeOrders',
+      id: 701,
+      organizationId: 'org-a',
+      actor: { userId: 102, employeeId: 12, username: 'emp102' },
+      expectedVersion: 1,
+      now,
+    }),
+    (err) => err.status === 403,
+  );
+
+  const subRes = await submitVoucher(harness.db, {
+    collection: 'latticeOrders',
+    id: 701,
+    organizationId: 'org-a',
+    actor: { userId: 101, employeeId: 11, username: 'emp101' },
+    expectedVersion: 1,
+    now,
+  });
+  assert.equal(subRes.status, 'submitted');
+  assert.equal(harness.ledgerEntries.at(-1).metadataJson.delegationUid, 'DLG-ORD-101');
+  assert.equal(harness.ledgerEntries.at(-1).metadataJson.delegatedFromUserId, 100);
+
+  const canRes = await cancelVoucher(harness.db, {
+    collection: 'latticeOrders',
+    id: 701,
+    organizationId: 'org-a',
+    actor: { userId: 101, employeeId: 11, username: 'emp101' },
+    cancelReason: 'Cancelled under delegation',
+    expectedVersion: 2,
+    now,
+  });
+  assert.equal(canRes.status, 'cancelled');
+  assert.equal(harness.ledgerEntries.at(-1).metadataJson.delegationUid, 'DLG-ORD-101');
+  assert.equal(harness.ledgerEntries.at(-1).metadataJson.delegatedFromUserId, 100);
+
+  const amdRes = await amendVoucher(harness.db, {
+    collection: 'latticeOrders',
+    id: 701,
+    organizationId: 'org-a',
+    actor: { userId: 101, employeeId: 11, username: 'emp101' },
+    now,
+  });
+  assert.equal(amdRes.code, 'ORD-DLG-701-AMD1');
+  assert.equal(harness.ledgerEntries.at(-1).metadataJson.delegationUid, 'DLG-ORD-101');
+  assert.equal(harness.ledgerEntries.at(-1).metadataJson.delegatedFromUserId, 100);
+  assert.ok(chatter.some((c) => c.diffJson?.delegationUid === 'DLG-ORD-101' && c.diffJson?.delegatedFromUserId === 100));
+});

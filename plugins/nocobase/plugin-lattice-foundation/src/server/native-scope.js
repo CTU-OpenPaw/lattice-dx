@@ -14,8 +14,10 @@ const {
   canUsePgRlsSession,
   setContextRlsTransaction,
   setTransactionRlsOrg,
+  setTransactionRlsBypass,
   withTenantRlsContext,
   withSystemRlsBypass,
+  runInRlsSavepoint,
 } = require('./pg-rls');
 
 function failure(code, status = 403, message = code) {
@@ -43,9 +45,30 @@ async function resolveNativeActor(db, user, options = {}) {
   const id = value(user, 'id');
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_LOGIN_REQUIRED', 401);
   const findEmployee = (findOptions) => db.getRepository('latticeEmployees').find({ ...findOptions, filter: { userId: id }, limit: 2 });
-  const rows = !options.transaction && !getActiveRlsContext()?.transaction && canUsePgRlsSession(db)
-    ? await withSystemRlsBypass(db, (transaction) => findEmployee({ ...options, transaction }))
-    : await findEmployee(options);
+  let rows;
+  if (!options.transaction && !getActiveRlsContext()?.transaction && canUsePgRlsSession(db)) {
+    rows = await withSystemRlsBypass(db, (transaction) => findEmployee({ ...options, transaction }));
+  } else if (options.transaction && !getActiveRlsContext()?.transaction && canUsePgRlsSession(db)) {
+    const prevRaw = await db.sequelize.query("SELECT current_setting('app.rls_bypass', true) AS prev", {
+      transaction: options.transaction,
+    });
+    const prevBypass = prevRaw?.[0]?.[0]?.prev ?? '';
+    if (prevBypass !== 'on') {
+      await setTransactionRlsBypass(db, options.transaction);
+    }
+    try {
+      rows = await findEmployee(options);
+    } finally {
+      if (prevBypass !== 'on') {
+        await db.sequelize.query("SELECT set_config('app.rls_bypass', :prev, true)", {
+          replacements: { prev: prevBypass },
+          transaction: options.transaction,
+        }).catch(() => {});
+      }
+    }
+  } else {
+    rows = await findEmployee(options);
+  }
   if (rows.length > 1) throw failure('NATIVE_MEMBERSHIP_AMBIGUOUS');
   const employee = rows[0];
   if (!employee || value(employee,'active') !== true) throw failure('NATIVE_MEMBERSHIP_REQUIRED');
@@ -192,10 +215,15 @@ function scopeNativeValues(values, actor, { allowPlainJson = false } = {}) {
 async function recordChatterSafe(db, ctx, actor, id, beforeSnapshot, updatedSnapshot) {
   if (!beforeSnapshot || !updatedSnapshot) return;
   try {
-    const { recordFieldDiffChatter } = require('./record-chatter');
-    await recordFieldDiffChatter(db, {
+    const chatterRepo = db?.getRepository?.('latticeRecordChatter');
+    if (!chatterRepo || typeof chatterRepo.create !== 'function') return;
+    const { ALLOWED_CHATTER_COLLECTIONS, computeRecordFieldDiff, recordFieldDiffChatter } = require('./record-chatter');
+    const targetCollection = ctx?.action?.resourceName;
+    if (!ALLOWED_CHATTER_COLLECTIONS.has(targetCollection)) return;
+    if (!computeRecordFieldDiff(beforeSnapshot, updatedSnapshot).length) return;
+    const payload = {
       organizationId: actor.organizationId,
-      targetCollection: ctx.action.resourceName,
+      targetCollection,
       targetRecordId: Number(id),
       before: beforeSnapshot,
       after: updatedSnapshot,
@@ -203,7 +231,15 @@ async function recordChatterSafe(db, ctx, actor, id, beforeSnapshot, updatedSnap
         ...actor,
         username: value(ctx.state?.currentUser, 'username') || (actor.employeeId ? `employee-${actor.employeeId}` : 'operator'),
       },
-    });
+    };
+    const activeTx = getActiveRlsContext()?.transaction || null;
+    if (canUsePgRlsSession(db) && !activeTx && actor?.organizationId) {
+      await withTenantRlsContext(db, actor.organizationId, (transaction) => recordFieldDiffChatter(db, payload, { transaction }));
+    } else if (activeTx) {
+      await runInRlsSavepoint(db, (transaction) => recordFieldDiffChatter(db, payload, { transaction }));
+    } else {
+      await recordFieldDiffChatter(db, payload);
+    }
   } catch {}
 }
 
@@ -296,7 +332,7 @@ function createNativeScopeMiddleware(db, definitions) {
       const values = params.values || {};
       const col = String(values.collection || '');
       if (ctx.state.currentRole === 'root') {
-        if (canUsePgRlsSession(db) && (isScopedCollection(col) || col.startsWith('lattice'))) {
+        if (canUsePgRlsSession(db) && (values.mode === 'sql' || isScopedCollection(col) || col.startsWith('lattice'))) {
           return withSystemRlsBypass(db, (transaction) => {
             setContextRlsTransaction(ctx, transaction);
             return next();

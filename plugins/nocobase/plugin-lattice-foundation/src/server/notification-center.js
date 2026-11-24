@@ -11,6 +11,12 @@
 const { resolveNativeActor } = require('./native-scope');
 const { callerRoles } = require('./native-portal-helpers');
 const { assertSafeConnectorUrl, assertSafeConnectorUrlAsync } = require('./connector-vault');
+const {
+  canUsePgRlsSession,
+  getActiveRlsContext,
+  runInRlsSavepoint,
+  withTenantRlsContext,
+} = require('./pg-rls');
 
 const VALID_CATEGORIES = new Set(['mention', 'voucher', 'sla', 'alarm', 'approval', 'system']);
 const VALID_SEVERITIES = new Set(['info', 'warning', 'high', 'critical']);
@@ -44,6 +50,27 @@ function readParams(ctx) {
 function resolveNotificationTargetPath(targetCollection) {
   const col = String(targetCollection || '').trim();
   return COLLECTION_PORTAL_PATHS[col] || '/admin/lattice-workspace';
+}
+
+function resolveNotificationPortalSlug(targetPath, explicitSlug = null) {
+  const cleanExplicit = typeof explicitSlug === 'string' ? explicitSlug.trim().toLowerCase() : '';
+  if (cleanExplicit && /^[a-z0-9_-]{1,64}$/.test(cleanExplicit)) return cleanExplicit;
+  const clean = String(targetPath || '').split('?')[0].split('#')[0].trim();
+  const pMatch = /^\/p\/([a-z0-9_-]{1,64})(?:\/|$)/i.exec(clean);
+  if (pMatch) return pMatch[1].toLowerCase();
+  if (clean === '/v/mobile' || clean.startsWith('/v/mobile/') || clean === '/mobile' || clean.startsWith('/mobile/')) {
+    return 'mobile';
+  }
+  if (clean === '/admin' || clean.startsWith('/admin/')) return 'admin';
+  return '*';
+}
+
+async function publishNotificationSurfaceUpdate(app, payload) {
+  try {
+    await app?.pubSubManager?.publish?.('latticedx:surface-updates', payload);
+  } catch {
+    // Non-fatal pub/sub forward
+  }
 }
 
 function isSafeExternalWebhookUrl(rawUrl) {
@@ -185,6 +212,14 @@ async function dispatchExternalChannels({
   return outcomes.filter(Boolean);
 }
 
+function runNotifTenantDb(db, organizationId, fn, explicitTx = null) {
+  const activeTx = explicitTx || getActiveRlsContext()?.transaction || null;
+  if (!canUsePgRlsSession(db) || activeTx || !organizationId) {
+    return fn(activeTx || undefined);
+  }
+  return withTenantRlsContext(db, organizationId, (tx) => fn(tx));
+}
+
 async function dispatchNotification(
   db,
   payload = {},
@@ -194,6 +229,7 @@ async function dispatchNotification(
     lookupImpl,
     enforceDnsInMock = false,
     transaction = null,
+    app = null,
   } = {},
 ) {
   const organizationId = typeof payload.organizationId === 'string' ? payload.organizationId.trim() : '';
@@ -216,27 +252,6 @@ async function dispatchNotification(
   const dedupKey = typeof payload.dedupKey === 'string' && payload.dedupKey.trim()
     ? payload.dedupKey.trim().slice(0, 255)
     : null;
-
-  if (dedupKey && typeof repo.find === 'function') {
-    const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
-    const recent = (await repo.find({
-      filter: { organizationId, recipientUserId, dedupKey },
-      sort: ['-id'],
-      limit: 10,
-      ...(transaction ? { transaction } : {}),
-    })) || [];
-    const hit = recent.find((row) => {
-      if (val(row, 'organizationId') !== organizationId) return false;
-      if (Number(val(row, 'recipientUserId')) !== recipientUserId) return false;
-      if (val(row, 'dedupKey') !== dedupKey) return false;
-      const createdAtRaw = val(row, 'createdAt');
-      const createdMs = createdAtRaw ? new Date(createdAtRaw).getTime() : Date.now();
-      return Number.isFinite(createdMs) && createdMs > cutoffMs;
-    });
-    if (hit) {
-      return { ...serializeNotification(hit), deduplicated: true, skipped: true };
-    }
-  }
 
   const rawCategory = String(payload.category || 'system').trim().toLowerCase();
   const category = VALID_CATEGORIES.has(rawCategory) ? rawCategory : 'system';
@@ -270,8 +285,38 @@ async function dispatchNotification(
     active: true,
   };
 
-  const created = await repo.create({ values, ...(transaction ? { transaction } : {}) });
-  const serialized = serializeNotification(created || values);
+  const persisted = await runNotifTenantDb(db, organizationId, async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
+    if (dedupKey && typeof repo.find === 'function') {
+      const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
+      const recent = (await repo.find({
+        filter: { organizationId, recipientUserId, dedupKey },
+        sort: ['-id'],
+        limit: 10,
+        ...txOpt,
+      })) || [];
+      const hit = recent.find((row) => {
+        if (val(row, 'organizationId') !== organizationId) return false;
+        if (Number(val(row, 'recipientUserId')) !== recipientUserId) return false;
+        if (val(row, 'dedupKey') !== dedupKey) return false;
+        const createdAtRaw = val(row, 'createdAt');
+        const createdMs = createdAtRaw ? new Date(createdAtRaw).getTime() : Date.now();
+        return Number.isFinite(createdMs) && createdMs > cutoffMs;
+      });
+      if (hit) {
+        return { dedupResult: { ...serializeNotification(hit), deduplicated: true, skipped: true } };
+      }
+    }
+
+    const created = await repo.create({ values, ...txOpt });
+    return { created, serialized: serializeNotification(created || values) };
+  }, transaction);
+
+  if (persisted.dedupResult) {
+    return persisted.dedupResult;
+  }
+
+  const { created, serialized } = persisted;
   const externalChannels = await dispatchExternalChannels({
     env,
     fetchImpl,
@@ -284,18 +329,38 @@ async function dispatchNotification(
   const channelsDispatched = ['in_app', ...externalChannels];
   if (externalChannels.length > 0) {
     try {
-      if (typeof created?.update === 'function') {
-        await created.update({ channelsDispatched }, transaction ? { transaction } : undefined);
-      } else if (typeof repo.update === 'function' && serialized.id != null) {
-        await repo.update({ filterByTk: serialized.id, values: { channelsDispatched }, ...(transaction ? { transaction } : {}) });
-      }
+      const applyChannelPatch = async (tx) => {
+        const txOpt = tx ? { transaction: tx } : {};
+        if (typeof created?.update === 'function') {
+          await created.update({ channelsDispatched }, tx ? { transaction: tx } : undefined);
+        } else if (typeof repo.update === 'function' && serialized.id != null) {
+          await repo.update({ filterByTk: serialized.id, values: { channelsDispatched }, ...txOpt });
+        }
+      };
+      await runNotifTenantDb(db, organizationId, (tx) => (
+        tx && getActiveRlsContext()?.transaction === tx
+          ? runInRlsSavepoint(db, applyChannelPatch)
+          : applyChannelPatch(tx)
+      ), transaction);
     } catch {}
   }
+
+  const effectiveApp = app || payload.app || db?.app || null;
+  await publishNotificationSurfaceUpdate(effectiveApp, {
+    kind: 'notification',
+    type: 'notification',
+    portalSlug: resolveNotificationPortalSlug(serialized.targetPath, payload.portalSlug),
+    organizationId,
+    recipientUserId,
+    notificationId: serialized.id ?? null,
+    category,
+    severity,
+  });
 
   return { ...serialized, channelsDispatched, deduplicated: false, skipped: false };
 }
 
-async function resolveEmployeeUsersForRoles(db, organizationId, roleNames) {
+async function resolveEmployeeUsersForRoles(db, organizationId, roleNames, { transaction = null } = {}) {
   const empRepo = db?.getRepository?.('latticeEmployees');
   if (!empRepo || typeof empRepo.find !== 'function') return [];
   const targetRoles = new Set(
@@ -305,67 +370,74 @@ async function resolveEmployeeUsersForRoles(db, organizationId, roleNames) {
   );
   if (!targetRoles.size) return [];
 
-  const employees = (await empRepo.find({ filter: { organizationId, active: true }, limit: 1000 })) || [];
-  const activeWithUser = [];
-  for (const emp of employees) {
-    if (val(emp, 'active') !== true || val(emp, 'organizationId') !== organizationId) continue;
-    const uid = val(emp, 'userId');
-    if (uid == null || !/^[1-9]\d*$/.test(String(uid))) continue;
-    activeWithUser.push({
-      employeeId: Number(val(emp, 'id')),
-      userId: Number(uid),
-    });
-  }
-  if (!activeWithUser.length) return [];
-
-  const userIds = [...new Set(activeWithUser.map((e) => e.userId))];
-  const allowedUserIds = new Set();
-  const ruRepo = db.getRepository?.('rolesUsers');
-  if (ruRepo && typeof ruRepo.find === 'function') {
-    const bindings = (await ruRepo.find({
-      filter: { userId: { $in: userIds }, roleName: { $in: [...targetRoles] } },
-      limit: 2000,
-    })) || [];
-    for (const row of bindings) {
-      const uid = Number(val(row, 'userId'));
-      const rName = String(val(row, 'roleName') || '').trim();
-      if (userIds.includes(uid) && targetRoles.has(rName)) {
-        allowedUserIds.add(uid);
-      }
+  return runNotifTenantDb(db, organizationId, async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
+    const employees = (await empRepo.find({ filter: { organizationId, active: true }, limit: 1000, ...txOpt })) || [];
+    const activeWithUser = [];
+    for (const emp of employees) {
+      if (val(emp, 'active') !== true || val(emp, 'organizationId') !== organizationId) continue;
+      const uid = val(emp, 'userId');
+      if (uid == null || !/^[1-9]\d*$/.test(String(uid))) continue;
+      activeWithUser.push({
+        employeeId: Number(val(emp, 'id')),
+        userId: Number(uid),
+      });
     }
-  } else {
-    const usersRepo = db.getRepository?.('users');
-    if (usersRepo && typeof usersRepo.find === 'function') {
-      const users = (await usersRepo.find({
-        filter: { id: { $in: userIds } },
-        appends: ['roles'],
-        limit: 1000,
+    if (!activeWithUser.length) return [];
+
+    const userIds = [...new Set(activeWithUser.map((e) => e.userId))];
+    const allowedUserIds = new Set();
+    const ruRepo = db.getRepository?.('rolesUsers');
+    if (ruRepo && typeof ruRepo.find === 'function') {
+      const bindings = (await ruRepo.find({
+        filter: { userId: { $in: userIds }, roleName: { $in: [...targetRoles] } },
+        limit: 2000,
+        ...txOpt,
       })) || [];
-      for (const u of users) {
-        const uid = Number(val(u, 'id'));
-        const uRoles = Array.isArray(val(u, 'roles')) ? val(u, 'roles') : [];
-        if (uRoles.some((r) => targetRoles.has(typeof r === 'string' ? r : val(r, 'name')))) {
+      for (const row of bindings) {
+        const uid = Number(val(row, 'userId'));
+        const rName = String(val(row, 'roleName') || '').trim();
+        if (userIds.includes(uid) && targetRoles.has(rName)) {
           allowedUserIds.add(uid);
         }
       }
+    } else {
+      const usersRepo = db.getRepository?.('users');
+      if (usersRepo && typeof usersRepo.find === 'function') {
+        const users = (await usersRepo.find({
+          filter: { id: { $in: userIds } },
+          appends: ['roles'],
+          limit: 1000,
+          ...txOpt,
+        })) || [];
+        for (const u of users) {
+          const uid = Number(val(u, 'id'));
+          const uRoles = Array.isArray(val(u, 'roles')) ? val(u, 'roles') : [];
+          if (uRoles.some((r) => targetRoles.has(typeof r === 'string' ? r : val(r, 'name')))) {
+            allowedUserIds.add(uid);
+          }
+        }
+      }
     }
-  }
 
-  const seenUsers = new Set();
-  const targets = [];
-  for (const item of activeWithUser) {
-    if (!allowedUserIds.has(item.userId) || seenUsers.has(item.userId)) continue;
-    seenUsers.add(item.userId);
-    targets.push(item);
-  }
-  return targets;
+    const seenUsers = new Set();
+    const targets = [];
+    for (const item of activeWithUser) {
+      if (!allowedUserIds.has(item.userId) || seenUsers.has(item.userId)) continue;
+      seenUsers.add(item.userId);
+      targets.push(item);
+    }
+    return targets;
+  }, transaction);
 }
 
 async function dispatchRoleNotifications(db, { organizationId, roleNames = [], ...rest } = {}, options = {}) {
   if (!ORG_RE.test(String(organizationId || '').trim())) {
     throw failNotif('NOTIFICATION_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ.');
   }
-  const targets = await resolveEmployeeUsersForRoles(db, organizationId, roleNames);
+  const targets = await resolveEmployeeUsersForRoles(db, organizationId, roleNames, {
+    transaction: options.transaction || null,
+  });
   const results = [];
   let dispatchedCount = 0;
   let skippedCount = 0;
@@ -497,17 +569,22 @@ function registerNotificationCenter(app) {
           ...(category ? { category } : {}),
           ...(unreadOnly ? { readAt: null } : {}),
         };
-        const rows = (await repo.find({
-          filter: listFilter,
-          sort: ['-createdAt', '-id'],
-          offset: (page - 1) * limit,
-          limit,
-        })) || [];
-        const total = typeof repo.count === 'function' ? await repo.count({ filter: listFilter }) : rows.length;
-        const unreadFilter = { ...baseFilter, readAt: null };
-        const unreadCount = typeof repo.count === 'function'
-          ? await repo.count({ filter: unreadFilter })
-          : ((await repo.find({ filter: unreadFilter, limit: 500 })) || []).length;
+        const { rows, total, unreadCount } = await runNotifTenantDb(db, organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const foundRows = (await repo.find({
+            filter: listFilter,
+            sort: ['-createdAt', '-id'],
+            offset: (page - 1) * limit,
+            limit,
+            ...txOpt,
+          })) || [];
+          const foundTotal = typeof repo.count === 'function' ? await repo.count({ filter: listFilter, ...txOpt }) : foundRows.length;
+          const unreadFilter = { ...baseFilter, readAt: null };
+          const foundUnread = typeof repo.count === 'function'
+            ? await repo.count({ filter: unreadFilter, ...txOpt })
+            : ((await repo.find({ filter: unreadFilter, limit: 500, ...txOpt })) || []).length;
+          return { rows: foundRows, total: foundTotal, unreadCount: foundUnread };
+        });
 
         ctx.body = {
           organizationId,
@@ -531,9 +608,12 @@ function registerNotificationCenter(app) {
           return next();
         }
         const filter = { organizationId, recipientUserId: userId, active: true, readAt: null };
-        const unreadCount = typeof repo.count === 'function'
-          ? await repo.count({ filter })
-          : ((await repo.find({ filter, limit: 500 })) || []).length;
+        const unreadCount = await runNotifTenantDb(db, organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          return typeof repo.count === 'function'
+            ? repo.count({ filter, ...txOpt })
+            : ((await repo.find({ filter, limit: 500, ...txOpt })) || []).length;
+        });
         ctx.body = { organizationId, unreadCount };
         return next();
       },
@@ -548,19 +628,31 @@ function registerNotificationCenter(app) {
         }
         const repo = db.getRepository('latticeNotifications');
         if (!repo) throw failNotif('NOTIFICATION_NOT_FOUND', 404, 'Không tìm thấy thông báo.');
-        const row = await repo.findOne({ filter: { id, organizationId, recipientUserId: userId } });
-        if (!row || val(row, 'organizationId') !== organizationId || Number(val(row, 'recipientUserId')) !== userId) {
-          throw failNotif('NOTIFICATION_NOT_FOUND', 404, 'Không tìm thấy thông báo trong phạm vi tài khoản.');
-        }
-        const now = val(row, 'readAt') || new Date();
-        if (!val(row, 'readAt')) {
-          if (typeof repo.update === 'function') {
-            await repo.update({ filterByTk: id, filter: { organizationId, recipientUserId: userId }, values: { readAt: now } });
-          } else if (typeof row.update === 'function') {
-            await row.update({ readAt: now });
+        const { row, now } = await runNotifTenantDb(db, organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const found = await repo.findOne({ filter: { id, organizationId, recipientUserId: userId }, ...txOpt });
+          if (!found || val(found, 'organizationId') !== organizationId || Number(val(found, 'recipientUserId')) !== userId) {
+            throw failNotif('NOTIFICATION_NOT_FOUND', 404, 'Không tìm thấy thông báo trong phạm vi tài khoản.');
           }
-        }
+          const readTimestamp = val(found, 'readAt') || new Date();
+          if (!val(found, 'readAt')) {
+            if (typeof repo.update === 'function') {
+              await repo.update({ filterByTk: id, filter: { organizationId, recipientUserId: userId }, values: { readAt: readTimestamp }, ...txOpt });
+            } else if (typeof found.update === 'function') {
+              await found.update({ readAt: readTimestamp }, transaction ? { transaction } : undefined);
+            }
+          }
+          return { row: found, now: readTimestamp };
+        });
         ctx.body = { ...serializeNotification(row), readAt: now instanceof Date ? now.toISOString() : now };
+        await publishNotificationSurfaceUpdate(app, {
+          kind: 'notification',
+          type: 'unread_count',
+          portalSlug: '*',
+          organizationId,
+          recipientUserId: userId,
+          notificationId: id,
+        });
         return next();
       },
 
@@ -583,21 +675,36 @@ function registerNotificationCenter(app) {
           readAt: null,
           ...(category ? { category } : {}),
         };
-        const unreadCount = typeof repo.count === 'function'
-          ? await repo.count({ filter })
-          : ((await repo.find({ filter, limit: 1000 })) || []).length;
-        const now = new Date();
-        if (unreadCount > 0) {
-          if (typeof repo.update === 'function') {
-            await repo.update({ filter, values: { readAt: now } });
-          } else {
-            const rows = (await repo.find({ filter, limit: 1000 })) || [];
-            for (const row of rows) {
-              if (typeof row.update === 'function') await row.update({ readAt: now });
+        const { unreadCount, now } = await runNotifTenantDb(db, organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const countVal = typeof repo.count === 'function'
+            ? await repo.count({ filter, ...txOpt })
+            : ((await repo.find({ filter, limit: 1000, ...txOpt })) || []).length;
+          const readTimestamp = new Date();
+          if (countVal > 0) {
+            if (typeof repo.update === 'function') {
+              await repo.update({ filter, values: { readAt: readTimestamp }, ...txOpt });
+            } else {
+              const rows = (await repo.find({ filter, limit: 1000, ...txOpt })) || [];
+              for (const row of rows) {
+                if (typeof row.update === 'function') {
+                  await row.update({ readAt: readTimestamp }, transaction ? { transaction } : undefined);
+                }
+              }
             }
           }
-        }
+          return { unreadCount: countVal, now: readTimestamp };
+        });
         ctx.body = { organizationId, updatedCount: unreadCount, readAt: now.toISOString() };
+        if (unreadCount > 0) {
+          await publishNotificationSurfaceUpdate(app, {
+            kind: 'notification',
+            type: 'unread_count',
+            portalSlug: '*',
+            organizationId,
+            recipientUserId: userId,
+          });
+        }
         return next();
       },
     },

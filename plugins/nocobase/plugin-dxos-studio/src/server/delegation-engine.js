@@ -383,9 +383,117 @@ function createDxosDelegationsActions(db, foundation = defaultFoundation) {
   };
 }
 
+async function resolveEffectiveDelegatedRoles(
+  db,
+  { organizationId, userId, scope = null, now = new Date() } = {},
+  foundation = defaultFoundation,
+) {
+  const empty = {
+    roles: [],
+    delegations: [],
+    delegatedRoles: [],
+    matchedDelegations: [],
+    primaryDelegation: null,
+    delegatedFromUserId: null,
+    delegationUid: null,
+  };
+  const cleanOrgId = typeof organizationId === 'string' ? organizationId.trim() : '';
+  const uid = Number(userId);
+  if (!cleanOrgId || !Number.isInteger(uid) || uid <= 0) return empty;
+
+  const repo = db?.getRepository?.('latticeDelegations');
+  if (!repo || typeof repo.find !== 'function') return empty;
+
+  const nowDate = now instanceof Date ? now : new Date(now);
+  const nowMs = nowDate.getTime();
+  if (!Number.isFinite(nowMs)) return empty;
+
+  const scopeList = Array.isArray(scope)
+    ? scope.map((s) => String(s || '').trim()).filter(Boolean)
+    : (typeof scope === 'string' && scope.trim() ? [scope.trim()] : []);
+  const scopeSet = new Set(scopeList);
+
+  const runQuery = async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const rows = (await repo.find({
+      filter: { organizationId: cleanOrgId, delegateUserId: uid, status: 'active', active: true },
+      sort: ['-id'],
+      limit: 200,
+      ...txOpt,
+    })) || [];
+    if (!rows.length) return [];
+
+    const rolesRepo = db?.getRepository?.('roles');
+    const candidateRoles = [...new Set(rows.map((r) => String(val(r, 'roleName') || '').trim()).filter(Boolean))];
+    const elevatedSet = new Set();
+    if (rolesRepo && candidateRoles.length) {
+      if (typeof rolesRepo.find === 'function') {
+        const rRows = (await rolesRepo.find({ filter: { name: { $in: candidateRoles } }, ...txOpt })) || [];
+        for (const rr of rRows) {
+          if (isElevatedRoleRow(rr)) elevatedSet.add(String(val(rr, 'name') || '').trim());
+        }
+      } else if (typeof rolesRepo.findOne === 'function') {
+        for (const rn of candidateRoles) {
+          const rr = await rolesRepo.findOne({ filter: { name: rn }, ...txOpt });
+          if (isElevatedRoleRow(rr)) elevatedSet.add(rn);
+        }
+      }
+    }
+
+    return rows
+      .filter((r) => {
+        if (val(r, 'organizationId') !== cleanOrgId) return false;
+        if (Number(val(r, 'delegateUserId')) !== uid) return false;
+        if (val(r, 'status') !== 'active' || val(r, 'active') === false) return false;
+        const roleName = String(val(r, 'roleName') || '').trim();
+        if (!roleName || FORBIDDEN_DELEGATION_ROLES.has(roleName.toLowerCase()) || elevatedSet.has(roleName)) {
+          return false;
+        }
+        const startMs = new Date(val(r, 'startsAt')).getTime();
+        const endMs = new Date(val(r, 'endsAt')).getTime();
+        if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs > nowMs || endMs <= nowMs) {
+          return false;
+        }
+        const rowScope = val(r, 'scopeCollection') ? String(val(r, 'scopeCollection')).trim() : '';
+        if (scopeSet.size > 0) {
+          return !rowScope || scopeSet.has(rowScope);
+        }
+        return !rowScope;
+      })
+      .map(serializeDelegation)
+      .sort((a, b) => Number(Boolean(b.scopeCollection)) - Number(Boolean(a.scopeCollection)));
+  };
+
+  const pgRls = foundation?.pgRls;
+  const activeRls = typeof pgRls?.getActiveRlsContext === 'function' ? pgRls.getActiveRlsContext() : null;
+  let matched;
+  if (activeRls?.transaction && activeRls.sequelize === db?.sequelize) {
+    matched = await runQuery(activeRls.transaction);
+  } else if (typeof pgRls?.canUsePgRlsSession === 'function' && pgRls.canUsePgRlsSession(db)) {
+    matched = typeof pgRls.withTenantRlsContext === 'function'
+      ? await pgRls.withTenantRlsContext(db, cleanOrgId, runQuery)
+      : await pgRls.withSystemRlsBypass(db, runQuery);
+  } else {
+    matched = await runQuery(null);
+  }
+
+  const roles = [...new Set(matched.map((d) => d.roleName))];
+  const primaryDelegation = matched[0] || null;
+  return {
+    roles,
+    delegations: matched,
+    delegatedRoles: roles,
+    matchedDelegations: matched,
+    primaryDelegation,
+    delegatedFromUserId: primaryDelegation?.delegatorUserId ?? null,
+    delegationUid: primaryDelegation?.delegationUid ?? null,
+  };
+}
+
 module.exports = {
   FORBIDDEN_DELEGATION_ROLES,
   MAX_DELEGATION_MS,
   isElevatedRoleRow,
   createDxosDelegationsActions,
+  resolveEffectiveDelegatedRoles,
 };

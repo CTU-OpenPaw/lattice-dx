@@ -161,13 +161,19 @@ function registerContextResource(app){
    const page=Math.max(1,Math.min(100000,Number(params.page)||1)),pageSize=Math.max(1,Math.min(100,Number(params.pageSize)||20));
    const repo=app.db.getRepository('latticeContextOutbox');
    const filter={...(params.eventId?{eventId:String(params.eventId)}:{}),...(params.state?{state:String(params.state)}:{})};
-   const rows=await repo.find({filter,fields:['id','eventId','entityId','organizationId','collectionName','recordId','state','attempts','nextAttemptAt','deliveredAt','errorCode'],offset:(page-1)*pageSize,limit:pageSize,sort:['-id']});
-   ctx.body={items:rows,page,pageSize,total:await repo.count({filter}),enabled:!!brokerConfig(process.env)};
+   const runStatus=async transaction=>{
+    const txOpt=transaction?{transaction}:{};
+    const rows=await repo.find({filter,fields:['id','eventId','entityId','organizationId','collectionName','recordId','state','attempts','nextAttemptAt','deliveredAt','errorCode'],offset:(page-1)*pageSize,limit:pageSize,sort:['-id'],...txOpt});
+    const total=await repo.count({filter,...txOpt});
+    return {items:rows,page,pageSize,total,enabled:!!brokerConfig(process.env)};
+   };
+   ctx.body=canUsePgRlsSession(app.db)?await withSystemRlsBypass(app.db,runStatus):await runStatus(undefined);
   },
   retry:async ctx=>{
    root(ctx);if(ctx.method!=='POST')ctx.throw(405);
    const eventId=ctx.action.params.values?.eventId;if(!/^native-[a-f0-9]{64}$/.test(eventId??''))ctx.throw(400,'Invalid context event ID');
-   const result=await app.db.getRepository('latticeContextOutbox').update({filter:{eventId,state:{$in:['retry','failed']}},values:{state:'pending',attempts:0,nextAttemptAt:new Date(),errorCode:null}});
+   const runRetry=transaction=>app.db.getRepository('latticeContextOutbox').update({filter:{eventId,state:{$in:['retry','failed']}},values:{state:'pending',attempts:0,nextAttemptAt:new Date(),errorCode:null},...(transaction?{transaction}:{})});
+   const result=canUsePgRlsSession(app.db)?await withSystemRlsBypass(app.db,runRetry):await runRetry(undefined);
    ctx.body={reset:Array.isArray(result)?result.length:0};
   },
  }});

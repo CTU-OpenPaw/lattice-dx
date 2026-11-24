@@ -13,13 +13,14 @@ const SAFE_LDX_ROLE_RE=/^ldx_[a-z][a-z0-9_]{1,40}$/;
 function resolveCacheOptions(env=process.env){
   const explicit=String(env?.DX_NATIVE_AUTH_CACHE_STORE||'').trim().toLowerCase();
   if(explicit==='memory')return {name:'enterprise-login',prefix:'enterprise-login',store:'memory'};
-  const useRedis=explicit==='redis'||String(env?.CACHE_DEFAULT_STORE||'').trim().toLowerCase()==='redis'||Boolean(env?.REDIS_URL);
+  const redisUrl=String(env?.DX_NATIVE_AUTH_SESSION_REDIS_URL||env?.REDIS_URL||env?.CACHE_REDIS_URL||'').trim();
+  const useRedis=explicit==='redis'||String(env?.CACHE_DEFAULT_STORE||'').trim().toLowerCase()==='redis'||Boolean(redisUrl);
   if(useRedis){
     return {
       name:'enterprise-login',
       prefix:'enterprise-login',
       store:'redis',
-      ...(env?.REDIS_URL?{url:String(env.REDIS_URL).trim()}:{}),
+      ...(redisUrl?{url:redisUrl}:{}),
     };
   }
   return {name:'enterprise-login',prefix:'enterprise-login',store:'memory'};
@@ -167,7 +168,9 @@ function deploymentConfig(env){
   let internal;
   if(env.DX_NATIVE_AUTH_INTERNAL_ISSUER){
     internal=new URL(env.DX_NATIVE_AUTH_INTERNAL_ISSUER);
-    if(issuer.protocol!=='http:'||!['localhost','127.0.0.1'].includes(issuer.hostname)||internal.protocol!=='http:'||internal.hostname!=='keycloak'||internal.port!=='8080'||internal.pathname!==issuer.pathname||internal.username||internal.password||internal.search||internal.hash)throw Error('Internal transport is only supported for the local Keycloak development service.');
+    const issuerLoopback=issuer.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(issuer.hostname);
+    const issuerAllowed=issuer.protocol==='https:'||issuerLoopback;
+    if(!issuerAllowed||internal.protocol!=='http:'||internal.hostname!=='keycloak'||internal.port!=='8080'||internal.pathname!==issuer.pathname||internal.username||internal.password||internal.search||internal.hash)throw Error('Internal transport is only supported for the local Keycloak development service.');
   }
   return {issuer:issuer.href.replace(/\/$/,''),origin:origin.origin,clientId:env.DX_NATIVE_AUTH_CLIENT_ID,internal:internal?.origin,callback:origin.origin+'/api/enterpriseAuth:callback',insecure:issuer.protocol==='http:'};
 }

@@ -250,7 +250,7 @@ function buildRlsPolicySql(tableName, { schema = 'public', policyName = RLS_POLI
   const predicate = [
     "current_setting('app.rls_bypass', true) = 'on'",
     "current_setting('app.current_org', true) = '*'",
-    '"organizationId" = current_setting(\'app.current_org\', true)',
+    '"organizationId" = nullif(current_setting(\'app.current_org\', true), \'\')',
   ].join(' OR ');
 
   return {

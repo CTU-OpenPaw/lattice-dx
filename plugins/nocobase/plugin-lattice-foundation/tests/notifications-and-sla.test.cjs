@@ -1415,3 +1415,340 @@ test('SLA engine handles weekend-holiday overlaps (01-01/04-30/05-01/09-02), par
   assert.equal(notifRows.length, 1);
   assert.deepEqual(notifRows[0].channelsDispatched, ['in_app', 'apprise']);
 });
+
+test('Task 1 remediation: evaluateSlaBreaches never holds a DB transaction open across fetchImpl, forwards transaction, and isolates chatter 25P02 failures', async () => {
+  const { evaluateSlaBreaches } = require('../src/server/sla-engine');
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+  let openTxCount = 0;
+  let txAborted = false;
+  let activeSp = null;
+  const chatterFindTxs = [];
+  const chatterCreateTxs = [];
+  const savepointQueries = [];
+
+  const { db, tables } = makeEnterpriseHarness({
+    requests: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        code: 'REQ-SLA-TX',
+        name: 'Breached Request',
+        status: 'submitted',
+        priority: 'critical',
+        active: true,
+        submittedAt: new Date(Date.now() - 120 * 60_000).toISOString(),
+      },
+    ],
+  });
+
+  db.sequelize = {
+    getDialect: () => 'postgres',
+    transaction: async (cb) => {
+      openTxCount += 1;
+      txAborted = false;
+      activeSp = null;
+      try {
+        return await cb({ id: `tx-sla-${openTxCount}`, LOCK: { UPDATE: 'UPDATE' } });
+      } finally {
+        openTxCount -= 1;
+      }
+    },
+    query: async (sql) => {
+      const text = String(sql);
+      savepointQueries.push(text);
+      if (text.startsWith('SAVEPOINT ')) {
+        activeSp = text;
+        return [[]];
+      }
+      if (text.startsWith('ROLLBACK TO SAVEPOINT ')) {
+        txAborted = false;
+        return [[]];
+      }
+      if (text.startsWith('RELEASE SAVEPOINT ')) {
+        activeSp = null;
+        return [[]];
+      }
+      return [[]];
+    },
+  };
+
+  const origGetRepo = db.getRepository.bind(db);
+  let failChatterFindOnce = true;
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (name === 'latticeRecordChatter') {
+      return {
+        ...repo,
+        find: async (opts) => {
+          chatterFindTxs.push(opts?.transaction || null);
+          if (failChatterFindOnce) {
+            failChatterFindOnce = false;
+            txAborted = true;
+            throw Object.assign(new Error('simulated chatter lookup error'), { code: '42P01' });
+          }
+          if (txAborted) throw Object.assign(new Error('25P02 aborted'), { code: '25P02' });
+          return repo.find(opts);
+        },
+        create: async (opts) => {
+          chatterCreateTxs.push(opts?.transaction || null);
+          if (txAborted) throw Object.assign(new Error('25P02 aborted'), { code: '25P02' });
+          return repo.create(opts);
+        },
+      };
+    }
+    return repo;
+  };
+
+  let fetchSawOpenTx = null;
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const report = await evaluateSlaBreaches(db, {
+      organizationId: 'org-a',
+      now: new Date(),
+      env: { DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.com/sla-tx-test' },
+      fetchImpl: async () => {
+        fetchSawOpenTx = openTxCount;
+        return { ok: true, status: 200, body: { cancel: async () => {} } };
+      },
+    });
+    assert.equal(report.breachedCount, 1);
+    assert.equal(report.escalatedCount, 1);
+    assert.equal(fetchSawOpenTx, 0, 'DB transaction must NOT be open during outbound HTTP fetch');
+    assert.equal(chatterFindTxs.length, 1);
+    assert.ok(chatterFindTxs[0], 'hasRecentSlaChatter must receive explicit transaction');
+    assert.equal(chatterCreateTxs.length, 1);
+    assert.ok(chatterCreateTxs[0], 'recordChatterEntry must receive explicit transaction after savepoint rollback');
+    assert.ok(savepointQueries.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT ')));
+    assert.equal(tables.latticeRecordChatter.length, 1);
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
+});
+
+test('Task 16: Notification Bell supports /v/mobile, Topbar variant, EventSource SSE updates/reconnect/cleanup, and server pub/sub bridge', async () => {
+  const {
+    isVisibleBellPath,
+    resolveBellPortalSlug,
+    createTopbarNotificationBell,
+    createNotificationBellProvider,
+  } = require('../src/client/notification-bell');
+  const { dispatchNotification } = require('../src/server/notification-center');
+
+  // 1. Visibility & portal slug resolution for /v/mobile and /mobile
+  for (const p of ['/v/mobile', '/v/mobile/outbox', '/mobile', '/mobile/field', '/p/logistics', '/admin/lattice-workspace']) {
+    assert.equal(isVisibleBellPath(p), true, `Expected bell visible on ${p}`);
+  }
+  for (const p of ['', '/', '/signin', '/signin/oidc', '/signup']) {
+    assert.equal(isVisibleBellPath(p), false, `Expected bell hidden on ${p}`);
+  }
+  assert.equal(resolveBellPortalSlug('/v/mobile/outbox'), 'mobile');
+  assert.equal(resolveBellPortalSlug('/mobile'), 'mobile');
+  assert.equal(resolveBellPortalSlug('/p/incidents/case-1'), 'incidents');
+  assert.equal(resolveBellPortalSlug('/admin/lattice-workspace'), 'admin');
+
+  // 2. Topbar Bell renders inline variant, subscribes via EventSource, reconnects on error, and closes on unmount
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevEventSource = globalThis.EventSource;
+  try {
+    const esInstances = [];
+    class FakeEventSource {
+      constructor(url, opts) {
+        this.url = url;
+        this.opts = opts;
+        this.listeners = new Map();
+        this.closed = false;
+        esInstances.push(this);
+      }
+      addEventListener(type, fn) {
+        this.listeners.set(type, fn);
+      }
+      emit(type, payload) {
+        const fn = this.listeners.get(type);
+        if (fn) fn({ type, data: JSON.stringify(payload) });
+      }
+      close() {
+        this.closed = true;
+      }
+    }
+
+    globalThis.EventSource = FakeEventSource;
+    globalThis.window = {
+      location: { pathname: '/v/mobile', assign() {} },
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      addEventListener() {},
+      removeEventListener() {},
+      EventSource: FakeEventSource,
+    };
+    globalThis.document = {
+      visibilityState: 'visible',
+      addEventListener() {},
+      removeEventListener() {},
+    };
+
+    let cursor = 0;
+    const state = [];
+    const effects = [];
+    const cleanups = [];
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState(init) {
+        const idx = cursor++;
+        if (!(idx in state)) state[idx] = typeof init === 'function' ? init() : init;
+        return [state[idx], (v) => { state[idx] = typeof v === 'function' ? v(state[idx]) : v; }];
+      },
+      useEffect(fn, deps) {
+        const idx = cursor++;
+        const prev = state[idx];
+        if (!prev || !deps || deps.some((d, i) => d !== prev.deps[i])) {
+          state[idx] = { deps };
+          effects.push({ idx, fn });
+        }
+      },
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useRef: (init) => {
+        const idx = cursor++;
+        return state[idx] ?? (state[idx] = { current: init });
+      },
+    };
+
+    let serverUnread = 2;
+    let unreadCalls = 0;
+    const api = {
+      auth: { role: 'ldx_driver', getToken: () => 'tok-mobile' },
+      request: async ({ url }) => {
+        if (url === 'latticeNotifications:unreadCount') {
+          unreadCalls += 1;
+          return { data: { data: { unreadCount: serverUnread } } };
+        }
+        return { data: { data: { items: [], unreadCount: serverUnread } } };
+      },
+    };
+
+    const TopbarBell = createTopbarNotificationBell({ useAPIClient: () => api }, React, {}, {});
+    const find = (node, pred) => {
+      if (!node || typeof node !== 'object') return null;
+      if (pred(node)) return node;
+      if (typeof node.type === 'function') return find(node.type(node.props), pred);
+      return node.children?.flat(Infinity).map((c) => find(c, pred)).find(Boolean) || null;
+    };
+    const renderTopbar = (props) => {
+      cursor = 0;
+      const ui = TopbarBell(props);
+      while (effects.length) {
+        const { fn } = effects.shift();
+        const cleanup = fn();
+        if (typeof cleanup === 'function') cleanups.push(cleanup);
+      }
+      return ui;
+    };
+
+    let ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
+    await Promise.resolve();
+    await Promise.resolve();
+    ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
+
+    const wrap = find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-bell-wrap');
+    assert.ok(wrap);
+    assert.equal(wrap.props['data-variant'], 'topbar');
+    assert.equal(wrap.props.style.position, 'relative');
+    assert.equal(wrap.props.style.height, 46);
+    assert.equal(esInstances.length, 1);
+    assert.equal(esInstances[0].url, '/api/dxosAi:surfaceEvents?portalSlug=incidents');
+    assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '2');
+
+    // Direct unreadCount SSE update on 'unread_count'
+    esInstances[0].emit('unread_count', { unreadCount: 5 });
+    ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
+    assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '5');
+
+    // 'update' frame emitted by surface-events.js with type: 'notification' triggers unreadCount refresh
+    serverUnread = 9;
+    const beforeUpdateCalls = unreadCalls;
+    esInstances[0].emit('update', { kind: 'notification', type: 'notification', portalSlug: 'incidents' });
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(unreadCalls, beforeUpdateCalls + 1);
+    ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
+    assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '9');
+
+    // Error closes EventSource cleanly; unmount cleans up all EventSource handles
+    esInstances[0].onerror();
+    assert.equal(esInstances[0].closed, true);
+    while (cleanups.length) cleanups.pop()();
+
+    // Floating provider suppresses duplicate desktop pill when hasTopbar: true, but still renders on /v/mobile
+    state.length = 0;
+    const FloatingWithTopbar = createNotificationBellProvider({ useAPIClient: () => api }, React, {}, {}, { hasTopbar: true });
+    cursor = 0;
+    globalThis.window.location.pathname = '/p/incidents';
+    const suppressedDesktop = FloatingWithTopbar({ children: React.createElement('div', null, 'app') });
+    assert.equal(find(suppressedDesktop, (n) => n.props?.['data-testid'] === 'ldx-notification-bell-wrap'), null);
+
+    state.length = 0;
+    cursor = 0;
+    globalThis.window.location.pathname = '/v/mobile';
+    const mobileFallback = FloatingWithTopbar({ children: React.createElement('div', null, 'mobile') });
+    while (effects.length) {
+      const { fn } = effects.shift();
+      const cleanup = fn();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+    }
+    const mobileWrap = find(mobileFallback, (n) => n.props?.['data-testid'] === 'ldx-notification-bell-wrap');
+    assert.ok(mobileWrap, 'Floating bell fallback must remain visible on /v/mobile');
+    while (cleanups.length) cleanups.pop()();
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document;
+    else globalThis.document = prevDocument;
+    if (prevEventSource === undefined) delete globalThis.EventSource;
+    else globalThis.EventSource = prevEventSource;
+  }
+
+  // 3. Server dispatchNotification publishes to 'latticedx:surface-updates'
+  const published = [];
+  const { db } = makeEnterpriseHarness();
+  const mockApp = {
+    pubSubManager: {
+      publish: async (channel, msg) => {
+        published.push({ channel, msg });
+      },
+    },
+  };
+  const created = await dispatchNotification(db, {
+    organizationId: 'org-a',
+    recipientUserId: 101,
+    category: 'sla',
+    severity: 'high',
+    title: 'SLA Warning',
+    targetCollection: 'latticeIncidentCases',
+    dedupKey: 'task16-sse-bridge-1',
+  }, { app: mockApp });
+  assert.equal(created.deduplicated, false);
+  assert.equal(published.length, 1);
+  assert.equal(published[0].channel, 'latticedx:surface-updates');
+  assert.equal(published[0].msg.kind, 'notification');
+  assert.equal(published[0].msg.type, 'notification');
+  assert.equal(published[0].msg.portalSlug, 'incidents');
+  assert.equal(published[0].msg.organizationId, 'org-a');
+  assert.equal(published[0].msg.recipientUserId, 101);
+  assert.equal(published[0].msg.category, 'sla');
+  assert.equal(published[0].msg.severity, 'high');
+
+  // Deduplicated call does not emit duplicate pub/sub event
+  const deduped = await dispatchNotification(db, {
+    organizationId: 'org-a',
+    recipientUserId: 101,
+    category: 'sla',
+    severity: 'high',
+    title: 'SLA Warning',
+    targetCollection: 'latticeIncidentCases',
+    dedupKey: 'task16-sse-bridge-1',
+  }, { app: mockApp });
+  assert.equal(deduped.deduplicated, true);
+  assert.equal(published.length, 1);
+});

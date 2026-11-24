@@ -11,8 +11,15 @@
 const { resolveNativeActor } = require('./native-scope');
 const { recordChatterEntry } = require('./record-chatter');
 const { dispatchNotification, dispatchRoleNotifications, resolveNotificationTargetPath } = require('./notification-center');
+const {
+  canUsePgRlsSession,
+  getActiveRlsContext,
+  withSystemRlsBypass,
+  withTenantRlsContext,
+} = require('./pg-rls');
 
 const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
+const VOUCHER_PRIVILEGED_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_manager', 'ldx_director']);
 const IMMUTABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'completed', 'cancelled']);
 const CANCELLABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'in_progress']);
 const PROTECTED_VOUCHER_FIELDS = new Set([
@@ -82,7 +89,10 @@ async function resolveVoucherCaller(db, ctx, collection, id) {
   if (isRoot) {
     if (!ctx.state?.currentUser) throw failVoucher('NATIVE_LOGIN_REQUIRED', 401);
     const repo = db.getRepository(collection);
-    const row = repo ? await repo.findOne({ filter: { id: recordId } }) : null;
+    const findRootVoucher = (transaction) => (repo ? repo.findOne({ filter: { id: recordId }, ...(transaction ? { transaction } : {}) }) : null);
+    const row = canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction
+      ? await withSystemRlsBypass(db, findRootVoucher)
+      : await findRootVoucher(getActiveRlsContext()?.transaction);
     if (!row) throw failVoucher('VOUCHER_NOT_FOUND', 404, 'Không tìm thấy chứng từ.');
     return {
       organizationId: val(row, 'organizationId'),
@@ -91,18 +101,121 @@ async function resolveVoucherCaller(db, ctx, collection, id) {
         userId: String(val(ctx.state.currentUser, 'id') || ''),
         employeeId: null,
         username: val(ctx.state.currentUser, 'username') || 'root',
+        isRoot: true,
+        roleNames: ['root'],
       },
     };
   }
   const actor = await resolveNativeActor(db, ctx.state?.currentUser);
+  const inlineRoles = [];
+  if (typeof ctx.state?.currentRole === 'string' && ctx.state.currentRole.trim()) {
+    inlineRoles.push(ctx.state.currentRole.trim());
+  }
   return {
     organizationId: actor.organizationId,
     recordId,
     actor: {
       ...actor,
+      ...(inlineRoles.length ? { roleNames: Array.from(new Set([...(actor.roleNames || []), ...inlineRoles])) } : {}),
       username: val(ctx.state?.currentUser, 'username') || `employee-${actor.employeeId}`,
     },
   };
+}
+
+function loadCrossPluginDelegationEngine() {
+  const path = require('node:path');
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-dxos-studio/dist/server/delegation-engine',
+        '@latticedx/plugin-dxos-studio/src/server/delegation-engine',
+        '../../../plugin-dxos-studio/dist/server/delegation-engine',
+        '../../../plugin-dxos-studio/src/server/delegation-engine',
+      ]
+    : [
+        '@latticedx/plugin-dxos-studio/src/server/delegation-engine',
+        '../../../plugin-dxos-studio/src/server/delegation-engine',
+        '../../../plugin-dxos-studio/dist/server/delegation-engine',
+      ];
+  for (const modPath of candidates) {
+    try {
+      return require(modPath);
+    } catch (err) {
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
+    }
+  }
+  return null;
+}
+
+async function resolveVoucherAuthority(db, { organizationId, collection, row, actor, transaction, now = new Date() }) {
+  if (!actor || typeof actor !== 'object') {
+    throw failVoucher('VOUCHER_FORBIDDEN', 403, 'Cần thông tin người thao tác hợp lệ để thực hiện thao tác chứng từ.');
+  }
+  if (actor.isRoot || actor.isAdmin) {
+    return { authorized: true, delegation: null };
+  }
+  const empId = actor.employeeId != null ? Number(actor.employeeId) : null;
+  const reqId = val(row, 'requesterId') != null ? Number(val(row, 'requesterId')) : null;
+  const asgId = val(row, 'assigneeId') != null ? Number(val(row, 'assigneeId')) : null;
+  if (empId !== null && Number.isInteger(empId) && (empId === reqId || empId === asgId)) {
+    return { authorized: true, delegation: null };
+  }
+
+  const directRoles = new Set(
+    [
+      ...(Array.isArray(actor.roleNames) ? actor.roleNames : []),
+      ...(Array.isArray(actor.roles) ? actor.roles : []),
+      ...(typeof actor.currentRole === 'string' ? [actor.currentRole] : []),
+    ]
+      .map((r) => String(r || '').trim())
+      .filter(Boolean),
+  );
+  if ([...directRoles].some((r) => VOUCHER_PRIVILEGED_ROLES.has(r))) {
+    return { authorized: true, delegation: null };
+  }
+
+  const rolesUsersRepo = db?.getRepository?.('rolesUsers');
+  if (rolesUsersRepo && typeof rolesUsersRepo.find === 'function' && actor.userId != null) {
+    const uidNum = Number(actor.userId);
+    const uidFilterVal = Number.isInteger(uidNum) && uidNum > 0 ? uidNum : String(actor.userId);
+    const roleRows = (await rolesUsersRepo.find({
+      filter: { userId: uidFilterVal },
+      ...(transaction ? { transaction } : {}),
+      limit: 50,
+    })) || [];
+    for (const rr of roleRows) {
+      const rn = String(val(rr, 'roleName') || '').trim();
+      if (rn) directRoles.add(rn);
+    }
+    if ([...directRoles].some((r) => VOUCHER_PRIVILEGED_ROLES.has(r))) {
+      return { authorized: true, delegation: null };
+    }
+  }
+
+  if (actor.userId != null) {
+    const delegationEngine = loadCrossPluginDelegationEngine();
+    if (typeof delegationEngine?.resolveEffectiveDelegatedRoles === 'function') {
+      const delRes = await delegationEngine.resolveEffectiveDelegatedRoles(
+        db,
+        { organizationId, userId: actor.userId, scope: collection, now },
+        { pgRls: require('./pg-rls') },
+      );
+      const matchedPrivileged = (delRes?.matchedDelegations || []).find((d) =>
+        VOUCHER_PRIVILEGED_ROLES.has(String(d?.roleName || '').trim()),
+      );
+      if (matchedPrivileged) {
+        return { authorized: true, delegation: matchedPrivileged };
+      }
+    }
+  }
+
+  throw failVoucher(
+    'VOUCHER_FORBIDDEN',
+    403,
+    'Không có quyền thực hiện thao tác trên chứng từ này (cần chủ chứng từ, vai trò quản lý hoặc ủy quyền hợp lệ).',
+  );
 }
 
 async function findLockedVoucher(db, collection, id, organizationId, transaction) {
@@ -179,7 +292,7 @@ async function safeEmitVoucherEvent(db, { organizationId, eventType, collection,
   }
 }
 
-async function safeLogLifecycle(db, { organizationId, collection, recordId, body, actor }) {
+async function safeLogLifecycle(db, { organizationId, collection, recordId, body, actor, diffJson = null }) {
   try {
     await recordChatterEntry(db, {
       organizationId,
@@ -188,7 +301,7 @@ async function safeLogLifecycle(db, { organizationId, collection, recordId, body
       entryType: 'lifecycle',
       body,
       mentionsJson: [],
-      diffJson: null,
+      diffJson,
       authorUserId: actor?.userId ? Number(actor.userId) : null,
       authorEmployeeId: actor?.employeeId ? Number(actor.employeeId) : null,
       authorName: actor?.username || 'operator',
@@ -205,13 +318,20 @@ async function safeNotifyRequester(db, { organizationId, collection, recordId, r
   try {
     const empRepo = db?.getRepository?.('latticeEmployees');
     if (!empRepo) return;
-    let emp = null;
-    if (typeof empRepo.findOne === 'function') {
-      emp = await empRepo.findOne({ filter: { id: Number(requesterId), organizationId, active: true } });
-    } else if (typeof empRepo.find === 'function') {
-      const list = (await empRepo.find({ filter: { id: Number(requesterId), organizationId, active: true }, limit: 1 })) || [];
-      emp = list[0] || null;
-    }
+    const findRequester = async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      if (typeof empRepo.findOne === 'function') {
+        return empRepo.findOne({ filter: { id: Number(requesterId), organizationId, active: true }, ...txOpt });
+      }
+      if (typeof empRepo.find === 'function') {
+        const list = (await empRepo.find({ filter: { id: Number(requesterId), organizationId, active: true }, limit: 1, ...txOpt })) || [];
+        return list[0] || null;
+      }
+      return null;
+    };
+    const emp = canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction && organizationId
+      ? await withTenantRlsContext(db, organizationId, findRequester)
+      : await findRequester(getActiveRlsContext()?.transaction);
     const uid = val(emp, 'userId');
     if (uid == null || !/^[1-9]\d*$/.test(String(uid))) return;
     await dispatchNotification(db, {
@@ -230,12 +350,20 @@ async function safeNotifyRequester(db, { organizationId, collection, recordId, r
   } catch {}
 }
 
-async function submitVoucher(db, { collection, id, organizationId, actor, expectedVersion = null }) {
+function runVoucherTenantTx(db, organizationId, fn) {
+  if (canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction && organizationId) {
+    return withTenantRlsContext(db, organizationId, fn);
+  }
+  return db.sequelize.transaction(fn);
+}
+
+async function submitVoucher(db, { collection, id, organizationId, actor, expectedVersion = null, now = new Date() }) {
   const recordId = assertValidVoucherTarget(collection, id);
   const expVer = parseOptionalVersion(expectedVersion);
-  const updated = await db.sequelize.transaction(async (transaction) => {
+  const { updated, delegation } = await runVoucherTenantTx(db, organizationId, async (transaction) => {
     const row = await findLockedVoucher(db, collection, recordId, organizationId, transaction);
     if (!row) throw failVoucher('VOUCHER_NOT_FOUND', 404, 'Không tìm thấy chứng từ trong phạm vi tổ chức.');
+    const authRes = await resolveVoucherAuthority(db, { organizationId, collection, row, actor, transaction, now });
     const curStatus = String(val(row, 'status') || 'draft').toLowerCase();
     if (curStatus !== 'draft') {
       throw failVoucher('VOUCHER_SUBMIT_INVALID_STATE', 409, 'Chỉ chứng từ ở trạng thái nháp (draft) mới được trình duyệt.');
@@ -250,14 +378,19 @@ async function submitVoucher(db, { collection, id, organizationId, actor, expect
       submittedBy: String(actor?.username || actor?.employeeId || 'operator').slice(0, 120),
       version: curVer + 1,
     };
-    return saveVoucherPatch(db, collection, recordId, organizationId, row, patch, transaction);
+    const saved = await saveVoucherPatch(db, collection, recordId, organizationId, row, patch, transaction);
+    return { updated: saved, delegation: authRes.delegation };
   });
+  const delMeta = delegation
+    ? { delegatedFromUserId: delegation.delegatorUserId, delegationUid: delegation.delegationUid }
+    : null;
   await safeLogLifecycle(db, {
     organizationId,
     collection,
     recordId,
     body: `Trình duyệt chứng từ ${updated.code || recordId} (draft -> submitted)`,
     actor,
+    diffJson: delMeta,
   });
   await safeAppendVoucherLedger(db, {
     organizationId,
@@ -266,6 +399,7 @@ async function submitVoucher(db, { collection, id, organizationId, actor, expect
     recordId,
     actor,
     payload: updated,
+    metadata: delMeta,
   });
   await safeEmitVoucherEvent(db, {
     organizationId,
@@ -292,16 +426,17 @@ async function submitVoucher(db, { collection, id, organizationId, actor, expect
   return updated;
 }
 
-async function cancelVoucher(db, { collection, id, organizationId, actor, cancelReason = '', expectedVersion = null }) {
+async function cancelVoucher(db, { collection, id, organizationId, actor, cancelReason = '', expectedVersion = null, now = new Date() }) {
   const recordId = assertValidVoucherTarget(collection, id);
   const expVer = parseOptionalVersion(expectedVersion);
   const reason = typeof cancelReason === 'string' ? cancelReason.trim() : '';
   if (reason.length < 3 || reason.length > 255) {
     throw failVoucher('VOUCHER_CANCEL_REASON_REQUIRED', 400, 'Cần lý do hủy chứng từ từ 3 đến 255 ký tự.');
   }
-  const updated = await db.sequelize.transaction(async (transaction) => {
+  const { updated, delegation } = await runVoucherTenantTx(db, organizationId, async (transaction) => {
     const row = await findLockedVoucher(db, collection, recordId, organizationId, transaction);
     if (!row) throw failVoucher('VOUCHER_NOT_FOUND', 404, 'Không tìm thấy chứng từ trong phạm vi tổ chức.');
+    const authRes = await resolveVoucherAuthority(db, { organizationId, collection, row, actor, transaction, now });
     const curStatus = String(val(row, 'status') || 'draft').toLowerCase();
     if (!CANCELLABLE_VOUCHER_STATUSES.has(curStatus)) {
       throw failVoucher('VOUCHER_CANCEL_INVALID_STATE', 409, 'Chỉ được hủy chứng từ đang trình duyệt/đã duyệt/đang xử lý.');
@@ -317,14 +452,19 @@ async function cancelVoucher(db, { collection, id, organizationId, actor, cancel
       cancelReason: reason,
       version: curVer + 1,
     };
-    return saveVoucherPatch(db, collection, recordId, organizationId, row, patch, transaction);
+    const saved = await saveVoucherPatch(db, collection, recordId, organizationId, row, patch, transaction);
+    return { updated: saved, delegation: authRes.delegation };
   });
+  const delMeta = delegation
+    ? { delegatedFromUserId: delegation.delegatorUserId, delegationUid: delegation.delegationUid }
+    : null;
   await safeLogLifecycle(db, {
     organizationId,
     collection,
     recordId,
     body: `Hủy chứng từ ${updated.code || recordId}: ${reason}`,
     actor,
+    diffJson: delMeta,
   });
   await safeAppendVoucherLedger(db, {
     organizationId,
@@ -333,7 +473,7 @@ async function cancelVoucher(db, { collection, id, organizationId, actor, cancel
     recordId,
     actor,
     payload: updated,
-    metadata: { cancelReason: reason },
+    metadata: { cancelReason: reason, ...(delMeta || {}) },
   });
   await safeEmitVoucherEvent(db, {
     organizationId,
@@ -356,11 +496,12 @@ async function cancelVoucher(db, { collection, id, organizationId, actor, cancel
   return updated;
 }
 
-async function amendVoucher(db, { collection, id, organizationId, actor, patch = {} }) {
+async function amendVoucher(db, { collection, id, organizationId, actor, patch = {}, now = new Date() }) {
   const recordId = assertValidVoucherTarget(collection, id);
-  const created = await db.sequelize.transaction(async (transaction) => {
+  const created = await runVoucherTenantTx(db, organizationId, async (transaction) => {
     const row = await findLockedVoucher(db, collection, recordId, organizationId, transaction);
     if (!row) throw failVoucher('VOUCHER_NOT_FOUND', 404, 'Không tìm thấy chứng từ trong phạm vi tổ chức.');
+    const authRes = await resolveVoucherAuthority(db, { organizationId, collection, row, actor, transaction, now });
     const source = toObj(row);
     if (String(source.status || '').toLowerCase() !== 'cancelled') {
       throw failVoucher('VOUCHER_AMEND_REQUIRES_CANCELLED', 409, 'Chỉ được lập bản điều chỉnh (Amend) từ chứng từ đã Hủy (cancelled).');
@@ -396,15 +537,19 @@ async function amendVoucher(db, { collection, id, organizationId, actor, patch =
     else if (source.requesterId != null) values.requesterId = Number(source.requesterId);
 
     const inserted = await repo.create({ values, transaction });
-    return { source, amended: toObj(inserted) };
+    return { source, amended: toObj(inserted), delegation: authRes.delegation };
   });
 
+  const delMeta = created.delegation
+    ? { delegatedFromUserId: created.delegation.delegatorUserId, delegationUid: created.delegation.delegationUid }
+    : null;
   await safeLogLifecycle(db, {
     organizationId,
     collection,
     recordId,
     body: `Lập bản điều chỉnh ${created.amended.code} từ chứng từ đã hủy ${created.source.code}`,
     actor,
+    diffJson: delMeta,
   });
   await safeLogLifecycle(db, {
     organizationId,
@@ -412,6 +557,7 @@ async function amendVoucher(db, { collection, id, organizationId, actor, patch =
     recordId: created.amended.id,
     body: `Khởi tạo bản điều chỉnh #${created.amended.amendmentNo} từ ${created.source.code} (ID ${recordId})`,
     actor,
+    diffJson: delMeta,
   });
   await safeAppendVoucherLedger(db, {
     organizationId,
@@ -420,7 +566,7 @@ async function amendVoucher(db, { collection, id, organizationId, actor, patch =
     recordId: created.amended.id,
     actor,
     payload: created.amended,
-    metadata: { amendedFromId: recordId, amendmentNo: created.amended.amendmentNo },
+    metadata: { amendedFromId: recordId, amendmentNo: created.amended.amendmentNo, ...(delMeta || {}) },
   });
   await safeEmitVoucherEvent(db, {
     organizationId,
@@ -446,35 +592,42 @@ async function amendVoucher(db, { collection, id, organizationId, actor, patch =
 async function getVoucherLineage(db, { collection, id, organizationId }) {
   const recordId = assertValidVoucherTarget(collection, id);
   const repo = db.getRepository(collection);
-  const anchor = await repo.findOne({ filter: { id: recordId, organizationId } });
-  if (!anchor) throw failVoucher('VOUCHER_NOT_FOUND', 404, 'Không tìm thấy chứng từ trong phạm vi tổ chức.');
+  const readLineage = async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const anchor = await repo.findOne({ filter: { id: recordId, organizationId }, ...txOpt });
+    if (!anchor) throw failVoucher('VOUCHER_NOT_FOUND', 404, 'Không tìm thấy chứng từ trong phạm vi tổ chức.');
 
-  let root = toObj(anchor);
-  const visitedUp = new Set([Number(root.id)]);
-  for (let i = 0; i < 50 && root.amendedFromId != null; i += 1) {
-    const parentId = Number(root.amendedFromId);
-    if (!Number.isInteger(parentId) || visitedUp.has(parentId)) break;
-    visitedUp.add(parentId);
-    const parent = await repo.findOne({ filter: { id: parentId, organizationId } });
-    if (!parent) break;
-    root = toObj(parent);
+    let root = toObj(anchor);
+    const visitedUp = new Set([Number(root.id)]);
+    for (let i = 0; i < 50 && root.amendedFromId != null; i += 1) {
+      const parentId = Number(root.amendedFromId);
+      if (!Number.isInteger(parentId) || visitedUp.has(parentId)) break;
+      visitedUp.add(parentId);
+      const parent = await repo.findOne({ filter: { id: parentId, organizationId }, ...txOpt });
+      if (!parent) break;
+      root = toObj(parent);
+    }
+
+    const items = [root];
+    const seen = new Set([Number(root.id)]);
+    let curId = Number(root.id);
+    for (let i = 0; i < 50; i += 1) {
+      const nextRow = await repo.findOne({ filter: { organizationId, amendedFromId: curId }, ...txOpt });
+      if (!nextRow) break;
+      const obj = toObj(nextRow);
+      const nid = Number(obj.id);
+      if (seen.has(nid)) break;
+      seen.add(nid);
+      items.push(obj);
+      curId = nid;
+    }
+
+    return { collection, rootId: Number(root.id), items };
+  };
+  if (canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction && organizationId) {
+    return withTenantRlsContext(db, organizationId, readLineage);
   }
-
-  const items = [root];
-  const seen = new Set([Number(root.id)]);
-  let curId = Number(root.id);
-  for (let i = 0; i < 50; i += 1) {
-    const nextRow = await repo.findOne({ filter: { organizationId, amendedFromId: curId } });
-    if (!nextRow) break;
-    const obj = toObj(nextRow);
-    const nid = Number(obj.id);
-    if (seen.has(nid)) break;
-    seen.add(nid);
-    items.push(obj);
-    curId = nid;
-  }
-
-  return { collection, rootId: Number(root.id), items };
+  return readLineage(getActiveRlsContext()?.transaction);
 }
 
 function registerVoucherLifecycleResource(app) {

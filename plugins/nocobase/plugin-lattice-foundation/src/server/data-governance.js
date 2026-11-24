@@ -12,6 +12,7 @@ const { createHash, randomBytes } = require('node:crypto');
 const { resolveNativeActor } = require('./native-scope');
 const { val, toPlain, getRepo, callerRoles } = require('./native-portal-helpers');
 const { assertApiKeyScope, readParams } = require('./paas-api-keys');
+const { canUsePgRlsSession, getActiveRlsContext, withTenantRlsContext } = require('./pg-rls');
 const {
   canonicalJson,
   signCanonicalPayload,
@@ -87,7 +88,22 @@ function parseFiniteNumberStrict(raw) {
   return Number.isFinite(n) ? n : null;
 }
 
-async function withOptionalTransaction(db, fn) {
+function runDataGovDb(db, organizationId, fn) {
+  const activeTx = getActiveRlsContext()?.transaction || null;
+  if (canUsePgRlsSession(db) && !activeTx && organizationId && ORG_ID_RE.test(String(organizationId))) {
+    return withTenantRlsContext(db, String(organizationId), fn);
+  }
+  return fn(activeTx || undefined);
+}
+
+async function withOptionalTransaction(db, fn, organizationId = null) {
+  const activeTx = getActiveRlsContext()?.transaction || null;
+  if (activeTx) {
+    return fn(activeTx);
+  }
+  if (canUsePgRlsSession(db) && organizationId && ORG_ID_RE.test(String(organizationId))) {
+    return withTenantRlsContext(db, String(organizationId), fn);
+  }
   if (typeof db?.sequelize?.transaction === 'function') {
     return db.sequelize.transaction(fn);
   }
@@ -368,57 +384,64 @@ async function recordLineageEdge(db, {
     return null;
   }
 
-  const txOpt = transaction ? { transaction } : {};
-  const edgeUid = `lin-${sha256Hex(`${orgId}|${srcCol}|${srcId}|${tgtCol}|${tgtId}|${rel}`).slice(0, 32)}`;
+  const execute = async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
+    const edgeUid = `lin-${sha256Hex(`${orgId}|${srcCol}|${srcId}|${tgtCol}|${tgtId}|${rel}`).slice(0, 32)}`;
 
-  const findExisting = async () => {
-    if (typeof repo.findOne === 'function') {
-      return repo.findOne({ filter: { organizationId: orgId, edgeUid }, ...txOpt });
+    const findExisting = async () => {
+      if (typeof repo.findOne === 'function') {
+        return repo.findOne({ filter: { organizationId: orgId, edgeUid }, ...txOpt });
+      }
+      if (typeof repo.find === 'function') {
+        const rows = (await repo.find({ filter: { organizationId: orgId, edgeUid }, limit: 1, ...txOpt })) || [];
+        return rows[0] || null;
+      }
+      return null;
+    };
+
+    const existing = await findExisting();
+    if (existing && val(existing, 'organizationId') === orgId) {
+      return serializeLineageEdge(existing);
     }
-    if (typeof repo.find === 'function') {
-      const rows = (await repo.find({ filter: { organizationId: orgId, edgeUid }, limit: 1, ...txOpt })) || [];
-      return rows[0] || null;
+
+    const obsDate = observedAt ? new Date(observedAt) : new Date();
+    if (!Number.isFinite(obsDate.getTime())) {
+      throw failGov('LINEAGE_TIMESTAMP_INVALID', 400, 'Invalid observedAt timestamp.');
     }
-    return null;
+    const cleanMeta = metadataJson && typeof metadataJson === 'object'
+      ? sanitizePlainValue(metadataJson)
+      : null;
+
+    try {
+      const created = await repo.create({
+        values: {
+          organizationId: orgId,
+          edgeUid,
+          sourceCollection: srcCol,
+          sourceRecordId: srcId,
+          targetCollection: tgtCol,
+          targetRecordId: tgtId,
+          relationType: rel,
+          actorName: actorName ? String(actorName).trim().slice(0, 255) : null,
+          metadataJson: cleanMeta,
+          observedAt: obsDate,
+        },
+        ...txOpt,
+      });
+      return serializeLineageEdge(created);
+    } catch (err) {
+      if (err?.name === 'SequelizeUniqueConstraintError' || /unique/i.test(String(err?.message || ''))) {
+        const winner = await findExisting();
+        if (winner) return serializeLineageEdge(winner);
+      }
+      throw err;
+    }
   };
 
-  const existing = await findExisting();
-  if (existing && val(existing, 'organizationId') === orgId) {
-    return serializeLineageEdge(existing);
+  if (transaction) {
+    return execute(transaction);
   }
-
-  const obsDate = observedAt ? new Date(observedAt) : new Date();
-  if (!Number.isFinite(obsDate.getTime())) {
-    throw failGov('LINEAGE_TIMESTAMP_INVALID', 400, 'Invalid observedAt timestamp.');
-  }
-  const cleanMeta = metadataJson && typeof metadataJson === 'object'
-    ? sanitizePlainValue(metadataJson)
-    : null;
-
-  try {
-    const created = await repo.create({
-      values: {
-        organizationId: orgId,
-        edgeUid,
-        sourceCollection: srcCol,
-        sourceRecordId: srcId,
-        targetCollection: tgtCol,
-        targetRecordId: tgtId,
-        relationType: rel,
-        actorName: actorName ? String(actorName).trim().slice(0, 255) : null,
-        metadataJson: cleanMeta,
-        observedAt: obsDate,
-      },
-      ...txOpt,
-    });
-    return serializeLineageEdge(created);
-  } catch (err) {
-    if (err?.name === 'SequelizeUniqueConstraintError' || /unique/i.test(String(err?.message || ''))) {
-      const winner = await findExisting();
-      if (winner) return serializeLineageEdge(winner);
-    }
-    throw err;
-  }
+  return runDataGovDb(db, orgId, execute);
 }
 
 async function captureQuarantineRecord(db, {
@@ -458,46 +481,54 @@ async function captureQuarantineRecord(db, {
     : { value: rawPayload ?? null };
   const quarantineUid = `QRN-${Date.now().toString(36).toUpperCase()}-${randomBytes(4).toString('hex').toUpperCase()}`;
 
-  const created = await repo.create({
-    values: {
+  const execute = async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
+    const created = await repo.create({
+      values: {
+        organizationId: orgId,
+        quarantineUid,
+        sourceSystem: cleanSystem,
+        assetEntityId: assetEntityId ? String(assetEntityId).trim().slice(0, 255) : null,
+        metricName: metricName ? String(metricName).trim().slice(0, 128) : null,
+        numericValue: parsedVal,
+        unit: unit ? String(unit).trim().slice(0, 64) : null,
+        reasonCode: cleanReason,
+        severity: cleanSev,
+        rawPayload: cleanPayload,
+        status: 'quarantined',
+        active: true,
+      },
+      ...txOpt,
+    });
+
+    await appendLedgerEntrySafely(db, {
       organizationId: orgId,
-      quarantineUid,
-      sourceSystem: cleanSystem,
-      assetEntityId: assetEntityId ? String(assetEntityId).trim().slice(0, 255) : null,
-      metricName: metricName ? String(metricName).trim().slice(0, 128) : null,
-      numericValue: parsedVal,
-      unit: unit ? String(unit).trim().slice(0, 64) : null,
-      reasonCode: cleanReason,
-      severity: cleanSev,
-      rawPayload: cleanPayload,
-      status: 'quarantined',
-      active: true,
-    },
-    ...(transaction ? { transaction } : {}),
-  });
+      eventType: 'data.quarantined',
+      targetCollection: 'latticeDataQuarantine',
+      targetRecordId: quarantineUid,
+      actor: actor || { username: cleanSystem },
+      payload: {
+        quarantineUid,
+        sourceSystem: cleanSystem,
+        assetEntityId: assetEntityId || null,
+        metricName: metricName || null,
+        numericValue: parsedVal,
+        unit: unit || null,
+        reasonCode: cleanReason,
+        severity: cleanSev,
+      },
+    }, {
+      scope: 'dxosDataGov:quarantine',
+      ...txOpt,
+    });
 
-  await appendLedgerEntrySafely(db, {
-    organizationId: orgId,
-    eventType: 'data.quarantined',
-    targetCollection: 'latticeDataQuarantine',
-    targetRecordId: quarantineUid,
-    actor: actor || { username: cleanSystem },
-    payload: {
-      quarantineUid,
-      sourceSystem: cleanSystem,
-      assetEntityId: assetEntityId || null,
-      metricName: metricName || null,
-      numericValue: parsedVal,
-      unit: unit || null,
-      reasonCode: cleanReason,
-      severity: cleanSev,
-    },
-  }, {
-    scope: 'dxosDataGov:quarantine',
-    ...(transaction ? { transaction } : {}),
-  });
+    return serializeQuarantineRow(created);
+  };
 
-  return serializeQuarantineRow(created);
+  if (transaction) {
+    return execute(transaction);
+  }
+  return runDataGovDb(db, orgId, execute);
 }
 
 async function resolveVerifiedRoles(db, ctx) {
@@ -667,8 +698,9 @@ async function assertReadPrivilege(db, ctx, scope, collections = []) {
   return true;
 }
 
-async function scanOrgRows(repo, organizationId, filter = {}, maxScan = MAX_SCAN) {
+async function scanOrgRows(repo, organizationId, filter = {}, maxScan = MAX_SCAN, transaction = null) {
   if (!repo || typeof repo.find !== 'function') return [];
+  const txOpt = transaction ? { transaction } : {};
   const results = [];
   const seenKeys = new Set();
   for (let offset = 0; offset < maxScan;) {
@@ -677,6 +709,7 @@ async function scanOrgRows(repo, organizationId, filter = {}, maxScan = MAX_SCAN
       limit: Math.min(BATCH_SIZE, maxScan - offset),
       offset,
       sort: ['id'],
+      ...txOpt,
     })) || [];
     if (!Array.isArray(batch) || batch.length === 0) break;
     let unseenCount = 0;
@@ -773,73 +806,78 @@ function registerDataGovernance(app) {
     let truncated = false;
 
     if (lineageRepo && typeof lineageRepo.find === 'function') {
-      while (queue.length > 0 && visitedNodes.size < MAX_LINEAGE_NODES) {
-        const cur = queue.shift();
-        if (cur.depth >= maxDepth) continue;
+      await runDataGovDb(db, scope.organizationId, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        while (queue.length > 0 && visitedNodes.size < MAX_LINEAGE_NODES) {
+          const cur = queue.shift();
+          if (cur.depth >= maxDepth) continue;
 
-        const candidateEdges = [];
-        if (direction !== 'inbound') {
-          const outRows = (await lineageRepo.find({
-            filter: {
-              organizationId: scope.organizationId,
-              sourceCollection: cur.collection,
-              sourceRecordId: cur.recordId,
-            },
-            limit: 100,
-          })) || [];
-          for (const row of outRows) {
-            if (
-              val(row, 'organizationId') === scope.organizationId
-              && val(row, 'sourceCollection') === cur.collection
-              && String(val(row, 'sourceRecordId')) === cur.recordId
-            ) {
-              candidateEdges.push({ row, dir: 'outbound' });
+          const candidateEdges = [];
+          if (direction !== 'inbound') {
+            const outRows = (await lineageRepo.find({
+              filter: {
+                organizationId: scope.organizationId,
+                sourceCollection: cur.collection,
+                sourceRecordId: cur.recordId,
+              },
+              limit: 100,
+              ...txOpt,
+            })) || [];
+            for (const row of outRows) {
+              if (
+                val(row, 'organizationId') === scope.organizationId
+                && val(row, 'sourceCollection') === cur.collection
+                && String(val(row, 'sourceRecordId')) === cur.recordId
+              ) {
+                candidateEdges.push({ row, dir: 'outbound' });
+              }
             }
           }
-        }
-        if (direction !== 'outbound') {
-          const inRows = (await lineageRepo.find({
-            filter: {
-              organizationId: scope.organizationId,
-              targetCollection: cur.collection,
-              targetRecordId: cur.recordId,
-            },
-            limit: 100,
-          })) || [];
-          for (const row of inRows) {
-            if (
-              val(row, 'organizationId') === scope.organizationId
-              && val(row, 'targetCollection') === cur.collection
-              && String(val(row, 'targetRecordId')) === cur.recordId
-            ) {
-              candidateEdges.push({ row, dir: 'inbound' });
+          if (direction !== 'outbound') {
+            const inRows = (await lineageRepo.find({
+              filter: {
+                organizationId: scope.organizationId,
+                targetCollection: cur.collection,
+                targetRecordId: cur.recordId,
+              },
+              limit: 100,
+              ...txOpt,
+            })) || [];
+            for (const row of inRows) {
+              if (
+                val(row, 'organizationId') === scope.organizationId
+                && val(row, 'targetCollection') === cur.collection
+                && String(val(row, 'targetRecordId')) === cur.recordId
+              ) {
+                candidateEdges.push({ row, dir: 'inbound' });
+              }
             }
           }
-        }
 
-        for (const { row, dir } of candidateEdges) {
-          const serialized = serializeLineageEdge(row);
-          const nextCol = dir === 'outbound' ? serialized.targetCollection : serialized.sourceCollection;
-          const nextId = dir === 'outbound' ? serialized.targetRecordId : serialized.sourceRecordId;
-          const nextKey = `${nextCol}:${nextId}`;
-          if (!visitedNodes.has(nextKey)) {
-            if (visitedNodes.size >= MAX_LINEAGE_NODES) {
-              truncated = true;
-              break;
+          for (const { row, dir } of candidateEdges) {
+            const serialized = serializeLineageEdge(row);
+            const nextCol = dir === 'outbound' ? serialized.targetCollection : serialized.sourceCollection;
+            const nextId = dir === 'outbound' ? serialized.targetRecordId : serialized.sourceRecordId;
+            const nextKey = `${nextCol}:${nextId}`;
+            if (!visitedNodes.has(nextKey)) {
+              if (visitedNodes.size >= MAX_LINEAGE_NODES) {
+                truncated = true;
+                break;
+              }
+              visitedNodes.set(nextKey, {
+                key: nextKey,
+                collection: nextCol,
+                recordId: nextId,
+                depth: cur.depth + 1,
+              });
+              queue.push({ collection: nextCol, recordId: nextId, depth: cur.depth + 1 });
             }
-            visitedNodes.set(nextKey, {
-              key: nextKey,
-              collection: nextCol,
-              recordId: nextId,
-              depth: cur.depth + 1,
-            });
-            queue.push({ collection: nextCol, recordId: nextId, depth: cur.depth + 1 });
-          }
-          if (!edgesMap.has(serialized.edgeUid)) {
-            edgesMap.set(serialized.edgeUid, serialized);
+            if (!edgesMap.has(serialized.edgeUid)) {
+              edgesMap.set(serialized.edgeUid, serialized);
+            }
           }
         }
-      }
+      });
     }
 
     ctx.body = {
@@ -882,12 +920,18 @@ function registerDataGovernance(app) {
     if (cleanSev) filter.severity = cleanSev;
     if (cleanEntity) filter.assetEntityId = cleanEntity;
 
-    const rawRows = (await qRepo.find({
-      filter,
-      sort: ['-id'],
-      offset: (page - 1) * pageSize,
-      limit: pageSize,
-    })) || [];
+    const { rawRows, total } = await runDataGovDb(db, scope.organizationId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      const foundRows = (await qRepo.find({
+        filter,
+        sort: ['-id'],
+        offset: (page - 1) * pageSize,
+        limit: pageSize,
+        ...txOpt,
+      })) || [];
+      const foundTotal = typeof qRepo.count === 'function' ? await qRepo.count({ filter, ...txOpt }) : null;
+      return { rawRows: foundRows, total: foundTotal };
+    });
     const filtered = rawRows.filter((r) => (
       val(r, 'organizationId') === scope.organizationId
       && (!cleanStatus || val(r, 'status') === cleanStatus)
@@ -895,11 +939,11 @@ function registerDataGovernance(app) {
       && (!cleanSev || val(r, 'severity') === cleanSev)
       && (!cleanEntity || val(r, 'assetEntityId') === cleanEntity)
     ));
-    const total = typeof qRepo.count === 'function' ? await qRepo.count({ filter }) : filtered.length;
+    const finalTotal = total !== null ? total : filtered.length;
 
     ctx.body = {
       organizationId: scope.organizationId,
-      total,
+      total: finalTotal,
       page,
       pageSize,
       items: filtered.map(serializeQuarantineRow),
@@ -1073,7 +1117,7 @@ function registerDataGovernance(app) {
       }, { scope: 'dxosDataGov:quarantineResolve', ...txOpt });
 
       return { updated: updatedRow, releasedPoint: txReleasedPoint };
-    });
+    }, scope.organizationId);
 
     ctx.body = {
       quarantine: serializeQuarantineRow(updated),
@@ -1092,13 +1136,13 @@ function registerDataGovernance(app) {
         await assertReadPrivilege(db, ctx, scope, ['latticeOrders', 'latticeServiceTickets', 'latticeFrozenSnapshots']);
 
         const orgId = scope.organizationId;
-        const [orders, tickets, snapshots, lineage, quarantine] = await Promise.all([
-          scanOrgRows(getRepo(db, 'latticeOrders'), orgId),
-          scanOrgRows(getRepo(db, 'latticeServiceTickets'), orgId),
-          scanOrgRows(getRepo(db, 'latticeFrozenSnapshots'), orgId),
-          scanOrgRows(getRepo(db, 'latticeDataLineage'), orgId),
-          scanOrgRows(getRepo(db, 'latticeDataQuarantine'), orgId),
-        ]);
+        const { orders, tickets, snapshots, lineage, quarantine } = await runDataGovDb(db, orgId, async (transaction) => ({
+          orders: await scanOrgRows(getRepo(db, 'latticeOrders'), orgId, {}, MAX_SCAN, transaction),
+          tickets: await scanOrgRows(getRepo(db, 'latticeServiceTickets'), orgId, {}, MAX_SCAN, transaction),
+          snapshots: await scanOrgRows(getRepo(db, 'latticeFrozenSnapshots'), orgId, {}, MAX_SCAN, transaction),
+          lineage: await scanOrgRows(getRepo(db, 'latticeDataLineage'), orgId, {}, MAX_SCAN, transaction),
+          quarantine: await scanOrgRows(getRepo(db, 'latticeDataQuarantine'), orgId, {}, MAX_SCAN, transaction),
+        }));
 
         let hotOrders = 0;
         let warmOrders = 0;
@@ -1201,18 +1245,17 @@ function registerDataGovernance(app) {
         const queryFilter = sanitizedFilter && Object.keys(sanitizedFilter).length > 0
           ? { $and: [{ organizationId: scope.organizationId }, sanitizedFilter] }
           : { organizationId: scope.organizationId };
-        const rawRows = (await targetRepo.find({ filter: queryFilter, sort: ['id'], limit })) || [];
-        const scopedRows = rawRows.filter((r) => val(r, 'organizationId') === scope.organizationId);
-        const sanitizedRecords = scopedRows.map((row) => sanitizePlainValue(toPlain(row), { stripSensitive: true }));
-
-        const canonicalPayload = canonicalJson(sanitizedRecords);
-        const payloadHash = sha256Hex(canonicalPayload);
-        const snapshotUid = `SNP-${Date.now().toString(36).toUpperCase()}-${randomBytes(4).toString('hex').toUpperCase()}`;
-        const frozenAt = new Date();
-        const expiresAt = new Date(frozenAt.getTime() + retentionDays * 86_400_000);
-
         const { created, lineageEdgesRecorded } = await withOptionalTransaction(db, async (transaction) => {
           const txOpt = transaction ? { transaction } : {};
+          const rawRows = (await targetRepo.find({ filter: queryFilter, sort: ['id'], limit, ...txOpt })) || [];
+          const scopedRows = rawRows.filter((r) => val(r, 'organizationId') === scope.organizationId);
+          const sanitizedRecords = scopedRows.map((row) => sanitizePlainValue(toPlain(row), { stripSensitive: true }));
+
+          const canonicalPayload = canonicalJson(sanitizedRecords);
+          const payloadHash = sha256Hex(canonicalPayload);
+          const snapshotUid = `SNP-${Date.now().toString(36).toUpperCase()}-${randomBytes(4).toString('hex').toUpperCase()}`;
+          const frozenAt = new Date();
+          const expiresAt = new Date(frozenAt.getTime() + retentionDays * 86_400_000);
 
           let signatureBase64 = null;
           let keyId = null;
@@ -1282,7 +1325,7 @@ function registerDataGovernance(app) {
           }
 
           return { created: createdRow, lineageEdgesRecorded: edgesRecorded };
-        });
+        }, scope.organizationId);
 
         ctx.body = {
           ...serializeSnapshotSummary(created, { includePayload: false }),
@@ -1312,22 +1355,28 @@ function registerDataGovernance(app) {
         if (srcCol) filter.sourceCollection = srcCol;
         if (tier) filter.tier = tier;
 
-        const rows = (await repo.find({
-          filter,
-          sort: ['-frozenAt', '-id'],
-          offset: (page - 1) * pageSize,
-          limit: pageSize,
-        })) || [];
+        const { rows, total } = await runDataGovDb(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const foundRows = (await repo.find({
+            filter,
+            sort: ['-frozenAt', '-id'],
+            offset: (page - 1) * pageSize,
+            limit: pageSize,
+            ...txOpt,
+          })) || [];
+          const foundTotal = typeof repo.count === 'function' ? await repo.count({ filter, ...txOpt }) : null;
+          return { rows: foundRows, total: foundTotal };
+        });
         const scoped = rows.filter((r) => (
           val(r, 'organizationId') === scope.organizationId
           && (!srcCol || val(r, 'sourceCollection') === srcCol)
           && (!tier || val(r, 'tier') === tier)
         ));
-        const total = typeof repo.count === 'function' ? await repo.count({ filter }) : scoped.length;
+        const finalTotal = total !== null ? total : scoped.length;
 
         ctx.body = {
           organizationId: scope.organizationId,
-          total,
+          total: finalTotal,
           page,
           pageSize,
           items: scoped.map((r) => serializeSnapshotSummary(r, { includePayload: false })),
@@ -1353,27 +1402,32 @@ function registerDataGovernance(app) {
           throw failGov('DATA_GOV_SNAPSHOT_REPO_UNAVAILABLE', 503, 'latticeFrozenSnapshots repository is unavailable.');
         }
 
-        const row = await repo.findOne({
-          filter: snapshotUid
-            ? { organizationId: scope.organizationId, snapshotUid }
-            : { organizationId: scope.organizationId, id: numericId },
+        const { row, signatureVerified } = await runDataGovDb(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const found = await repo.findOne({
+            filter: snapshotUid
+              ? { organizationId: scope.organizationId, snapshotUid }
+              : { organizationId: scope.organizationId, id: numericId },
+            ...txOpt,
+          });
+          if (!found || val(found, 'organizationId') !== scope.organizationId) {
+            throw failGov('SNAPSHOT_NOT_FOUND', 404, 'Frozen snapshot not found in organization scope.');
+          }
+          const payload = val(found, 'payloadJson') ?? [];
+          let sigVerified = null;
+          const sigVal = val(found, 'signatureBase64');
+          const keyIdVal = val(found, 'keyId');
+          if (sigVal && getRepo(db, 'latticePkiKeys')) {
+            const sigCheck = await verifyPayloadSignature(db, scope.organizationId, payload, sigVal, keyIdVal, txOpt);
+            sigVerified = sigCheck.valid;
+          }
+          return { row: found, signatureVerified: sigVerified };
         });
-        if (!row || val(row, 'organizationId') !== scope.organizationId) {
-          throw failGov('SNAPSHOT_NOT_FOUND', 404, 'Frozen snapshot not found in organization scope.');
-        }
 
         const payloadJson = val(row, 'payloadJson') ?? [];
         const storedHash = String(val(row, 'payloadHash') || '');
         const recomputedHash = sha256Hex(canonicalJson(payloadJson));
         const hashVerified = Boolean(storedHash && recomputedHash === storedHash);
-
-        let signatureVerified = null;
-        const sig = val(row, 'signatureBase64');
-        const keyId = val(row, 'keyId');
-        if (sig && getRepo(db, 'latticePkiKeys')) {
-          const sigCheck = await verifyPayloadSignature(db, scope.organizationId, payloadJson, sig, keyId);
-          signatureVerified = sigCheck.valid;
-        }
 
         ctx.body = {
           ...serializeSnapshotSummary(row, { includePayload: true }),
@@ -1435,6 +1489,7 @@ function registerDataGovernance(app) {
         }
 
         let assetEntityId = typeof params.assetEntityId === 'string' ? params.assetEntityId.trim() : '';
+        let pendingAssetId = null;
         if (assetEntityId) {
           const urnMatch = URN_RE.exec(assetEntityId);
           if (urnMatch && urnMatch[1] !== scope.organizationId) {
@@ -1444,15 +1499,7 @@ function registerDataGovernance(app) {
           if (!/^[1-9]\d{0,18}$/.test(String(params.assetId))) {
             throw failGov('MKT_ASSET_ID_INVALID', 400, 'Invalid assetId.');
           }
-          const assetId = Number(params.assetId);
-          const assetRepo = getRepo(db, 'latticeAssets');
-          if (assetRepo && typeof assetRepo.findOne === 'function') {
-            const asset = await assetRepo.findOne({ filter: { id: assetId, organizationId: scope.organizationId } });
-            if (!asset || val(asset, 'organizationId') !== scope.organizationId) {
-              throw failGov('MKT_ASSET_NOT_FOUND', 404, 'Asset not found in organization scope.');
-            }
-          }
-          assetEntityId = `urn:ngsi-ld:Asset:${scope.organizationId}:native:${assetId}`;
+          pendingAssetId = Number(params.assetId);
         }
 
         const metricName = String(params.metricName || 'temperature').trim();
@@ -1478,12 +1525,25 @@ function registerDataGovernance(app) {
         const observedCond = {};
         if (startMs !== null) observedCond.$gte = new Date(startMs);
         if (endMs !== null) observedCond.$lte = new Date(endMs);
-        const filter = {
-          ...(assetEntityId ? { assetEntityId } : {}),
-          metricName,
-          ...(Object.keys(observedCond).length ? { observedAt: observedCond } : {}),
-        };
-        const rows = await scanOrgRows(tsRepo, scope.organizationId, filter, MAX_SCAN);
+        const rows = await runDataGovDb(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          if (pendingAssetId !== null) {
+            const assetRepo = getRepo(db, 'latticeAssets');
+            if (assetRepo && typeof assetRepo.findOne === 'function') {
+              const asset = await assetRepo.findOne({ filter: { id: pendingAssetId, organizationId: scope.organizationId }, ...txOpt });
+              if (!asset || val(asset, 'organizationId') !== scope.organizationId) {
+                throw failGov('MKT_ASSET_NOT_FOUND', 404, 'Asset not found in organization scope.');
+              }
+            }
+            assetEntityId = `urn:ngsi-ld:Asset:${scope.organizationId}:native:${pendingAssetId}`;
+          }
+          const filter = {
+            ...(assetEntityId ? { assetEntityId } : {}),
+            metricName,
+            ...(Object.keys(observedCond).length ? { observedAt: observedCond } : {}),
+          };
+          return scanOrgRows(tsRepo, scope.organizationId, filter, MAX_SCAN, transaction);
+        });
         const extracted = [];
         for (const r of rows) {
           if (assetEntityId && val(r, 'assetEntityId') !== assetEntityId) continue;

@@ -90,8 +90,10 @@ test('prod.yml enforces 4 isolated networks, mandatory secrets, pinned upgraded 
   for (const reqVar of [
     'LATTICE_DOMAIN=',
     'KEYCLOAK_DOMAIN=',
+    'N8N_DOMAIN=',
     'POSTGRES_SUPERUSER_PASSWORD=',
     'NOCOBASE_DB_PASSWORD=',
+    'NOCOBASE_APP_DB_PASSWORD=',
     'REDIS_PASSWORD=',
     'NOCOBASE_APP_KEY=',
     'APISIX_OIDC_CLIENT_SECRET=',
@@ -99,12 +101,14 @@ test('prod.yml enforces 4 isolated networks, mandatory secrets, pinned upgraded 
     'GRAFANA_ADMIN_PASSWORD=CHANGE_ME_GRAFANA_ADMIN_PASSWORD',
     'FILE_STORAGE_PROVIDER=s3',
     'DX_PG_RLS_SESSION=true',
-    'PG_ARCHIVE_COMMAND=/bin/true',
+    'PG_ARCHIVE_COMMAND=/bin/sh /etc/postgresql/pitr-archive.sh %p %f',
+    'OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318',
     'MQTT_ADMIN_USER=',
     'MQTT_ADMIN_PASSWORD=',
     'MQTT_BRIDGE_USER=',
     'MQTT_BRIDGE_PASSWORD=',
     'DX_IIOT_INGEST_TOKEN=',
+    'NODERED_CREDENTIAL_SECRET=',
   ]) {
     assert.ok(envEx.includes(reqVar), `prod.env.example missing ${reqVar}`);
   }
@@ -142,8 +146,28 @@ test('prod.yml wires file-scanner, observability profile, pdf profile, nocobase 
   assert.match(nocobase, /DX_METRICS_TOKEN:\s*\$\{DX_METRICS_TOKEN:\?Set DX_METRICS_TOKEN\}/);
   assert.match(nocobase, /DX_PG_RLS_SESSION:\s*\$\{DX_PG_RLS_SESSION:-true\}/);
   assert.match(nocobase, /DXOS_GOTENBERG_URL:\s*\$\{DXOS_GOTENBERG_URL:-\}/);
+  assert.match(nocobase, /OTEL_EXPORTER_OTLP_ENDPOINT:\s*(?:\$\{OTEL_EXPORTER_OTLP_ENDPOINT:-)?http:\/\/otel-collector:4318\}?/);
+  assert.match(nocobase, /DX_IIOT_INGEST_TOKEN:\s*\$\{DX_IIOT_INGEST_TOKEN:\?Set DX_IIOT_INGEST_TOKEN\}/);
+  assert.match(nocobase, /DX_MQTT_BROKER_HOST:\s*\$\{DX_MQTT_BROKER_HOST:-mosquitto\}/);
+  assert.match(nocobase, /DX_NODERED_COMMAND_URL:\s*\$\{DX_NODERED_COMMAND_URL:-http:\/\/nodered:1880\/twin\/command\}/);
+  assert.match(nocobase, /DX_ALLOW_INTERNAL_CONNECTORS:\s*\$\{DX_ALLOW_INTERNAL_CONNECTORS:-true\}/);
+  assert.match(nocobase, /-\s*iiot-net/);
   assert.match(nocobase, /^\s+file-scanner:\s*$/m);
   assert.doesNotMatch(nocobase, /^\s+api:\s*$/m);
+
+  const caddySvc = serviceSection(prod, 'caddy');
+  assert.match(caddySvc, /N8N_DOMAIN:\s*\$\{N8N_DOMAIN:\?Set N8N_DOMAIN\}/);
+
+  const n8nSvc = serviceSection(prod, 'n8n');
+  assert.match(n8nSvc, /profiles:\s*\["n8n"\]/);
+  assert.match(n8nSvc, /N8N_PUBLIC_API_DISABLED:\s*"false"/);
+
+  const noderedSvc = serviceSection(prod, 'nodered');
+  assert.match(noderedSvc, /NODERED_CREDENTIAL_SECRET:\s*\$\{NODERED_CREDENTIAL_SECRET:\?Set NODERED_CREDENTIAL_SECRET\}/);
+  const noderedSettings = read('infra/config/nodered/settings.js');
+  assert.match(noderedSettings, /NODERED_CREDENTIAL_SECRET/);
+  assert.match(noderedSettings, /NODERED_ADMIN_USER/);
+  assert.match(noderedSettings, /NODERED_ADMIN_PASS_HASH/);
 
   const otel = serviceSection(prod, 'otel-collector');
   assert.match(otel, /profiles:\s*\["observability"\]/);
@@ -193,10 +217,18 @@ test('prod.yml wires file-scanner, observability profile, pdf profile, nocobase 
   assert.match(gotenberg, /-\s*app/);
   assert.doesNotMatch(gotenberg, /-\s*edge/);
 
-  for (const pgSvc of ['postgres', 'nocobase-db']) {
+  for (const [pgSvc, expectedVol] of [
+    ['postgres', 'postgres-wal-archive'],
+    ['nocobase-db', 'nocobase-wal-archive'],
+  ]) {
     const sec = serviceSection(prod, pgSvc);
     assert.match(sec, /\.\.\/config\/postgres\/pitr-archive\.sh:[^:\r\n]+:ro/);
+    assert.match(sec, /include_if_exists=\/etc\/postgresql\/pitr\.conf/);
+    assert.match(sec, /archive_command=\$\{PG_ARCHIVE_COMMAND:-\/bin\/sh \/etc\/postgresql\/pitr-archive\.sh %p %f\}/);
+    assert.match(sec, new RegExp(`${expectedVol}:\\/var\\/lib\\/postgresql\\/wal-archive`));
+    assert.match(prod, new RegExp(`^volumes:[\\s\\S]*^\\s{2}${expectedVol}:`, 'm'));
   }
+  assert.doesNotMatch(serviceSection(prod, 'nocobase-db'), /postgres-wal-archive/);
 });
 
 test('observability configs and PostgreSQL PITR archive script meet security, SPDX, and credential hygiene standards', () => {
@@ -322,6 +354,8 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.doesNotMatch(caddy, /\/v1\/\*/);
   assert.match(caddy, /reverse_proxy\s+nocobase:80/);
   assert.match(caddy, /reverse_proxy\s+keycloak:8080/);
+  assert.match(caddy, /\{\$N8N_DOMAIN\}/);
+  assert.match(caddy, /reverse_proxy\s+n8n:5678/);
   assert.match(caddy, /http:\/\/:2020/);
   assert.match(caddy, /metrics/);
   assert.match(caddy, /respond 404/);
@@ -333,7 +367,11 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.doesNotMatch(apisixProd, /\/v1\//);
   assert.match(apisixProd, /proxy-rewrite/);
   assert.match(apisixProd, /\/api\/dxos:health/);
-  assert.match(apisixProd, /\/api\/dxos-oidc\/\*/);
+  assert.match(apisixProd, /\/api\/enterpriseAuth\*/);
+  assert.match(apisixProd, /\/api\/enterpriseAuth:start/);
+  assert.match(apisixProd, /\/api\/enterpriseAuth:callback/);
+  assert.match(apisixProd, /\/api\/enterpriseAuth:backchannelLogout/);
+  assert.match(apisixProd, /\/api\/dxosLedger:verifySignature/);
   assert.match(apisixProd, /\/api\/dxos-mcp/);
   assert.match(apisixProd, /\/api\/dxos-mcp\/\*/);
   assert.match(apisixProd, /\/api\/dxosBlocks:telemetryIngest/);
@@ -351,7 +389,8 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(apisixProd, /policy:\s*redis/);
   assert.match(apisixProd, /APISIX_OIDC_CLIENT_SECRET/);
   assert.match(apisixProd, /allow_headers:[^\r\n]*X-Lattice-Edge-Token/);
-  assert.match(apisixProd, /id:\s*dxos-oidc-bridge[\s\S]*?uris:\s*\[\/api\/dxos-oidc,\s*\/api\/dxos-oidc\/\*\]/);
+  assert.match(apisixProd, /id:\s*dxos-enterprise-auth[\s\S]*?\/api\/enterpriseAuth\*/);
+  assert.match(apisixProd, /id:\s*dxos-oidc-bridge[\s\S]*?use_jwks:\s*true/);
   assert.match(apisixProd, /id:\s*dxos-mcp[\s\S]*?timeout:\s*\r?\n\s*connect:\s*6\s*\r?\n\s*send:\s*600\s*\r?\n\s*read:\s*600/);
   assert.match(apisixProd, /id:\s*dxos-core-api[\s\S]*?timeout:\s*\r?\n\s*connect:\s*6\s*\r?\n\s*send:\s*600\s*\r?\n\s*read:\s*600/);
 
@@ -380,21 +419,29 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(initNocobaseDb, /NOSUPERUSER\s+NOCREATEDB\s+NOCREATEROLE\s+NOINHERIT\s+NOBYPASSRLS/);
   assert.match(initNocobaseDb, /ALTER DATABASE/);
   assert.match(initNocobaseDb, /ALTER SCHEMA public OWNER TO/);
+  assert.match(initNocobaseDb, /APP_PASSWORD="\$\{NOCOBASE_APP_DB_PASSWORD:\?Set NOCOBASE_APP_DB_PASSWORD\}"/);
+  assert.doesNotMatch(initNocobaseDb, /NOCOBASE_APP_DB_PASSWORD:-\$\{NOCOBASE_DB_PASSWORD/);
 
   const prodText = read('infra/compose/prod.yml');
   const nocobaseDbSec = serviceSection(prodText, 'nocobase-db');
   assert.match(nocobaseDbSec, /002-init-nocobase-db\.sh:ro/);
   assert.match(nocobaseDbSec, /NOCOBASE_APP_DB_USER:\s*\$\{NOCOBASE_APP_DB_USER:-nocobase_app\}/);
+  assert.match(nocobaseDbSec, /NOCOBASE_APP_DB_PASSWORD:\s*\$\{NOCOBASE_APP_DB_PASSWORD:\?Set NOCOBASE_APP_DB_PASSWORD\}/);
+  assert.doesNotMatch(nocobaseDbSec, /NOCOBASE_APP_DB_PASSWORD:-\$\{NOCOBASE_DB_PASSWORD/);
   const nocobaseSec = serviceSection(prodText, 'nocobase');
   assert.match(nocobaseSec, /DB_USER:\s*\$\{NOCOBASE_APP_DB_USER:-nocobase_app\}/);
-  assert.match(nocobaseSec, /DB_PASSWORD:\s*\$\{NOCOBASE_APP_DB_PASSWORD:-\$\{NOCOBASE_DB_PASSWORD:\?Set NOCOBASE_DB_PASSWORD\}\}/);
+  assert.match(nocobaseSec, /DB_PASSWORD:\s*\$\{NOCOBASE_APP_DB_PASSWORD:\?Set NOCOBASE_APP_DB_PASSWORD\}/);
+  assert.doesNotMatch(nocobaseSec, /DB_PASSWORD:\s*\$\{NOCOBASE_APP_DB_PASSWORD:-\$\{NOCOBASE_DB_PASSWORD/);
   const prodEnvEx = read('infra/compose/prod.env.example');
   assert.match(prodEnvEx, /NOCOBASE_APP_DB_USER=nocobase_app/);
-  assert.match(prodEnvEx, /NOCOBASE_APP_DB_PASSWORD=/);
+  assert.match(prodEnvEx, /NOCOBASE_APP_DB_PASSWORD=CHANGE_ME_/);
 
   const pitr = read('infra/config/postgres/pitr.conf');
+  assert.equal(pitr.includes('\r'), false, 'pitr.conf must use LF line endings');
   assert.match(pitr, /wal_level\s*=\s*replica/);
   assert.match(pitr, /archive_mode\s*=\s*on/);
+  assert.match(pitr, /archive_command\s*=\s*'\/bin\/sh \/etc\/postgresql\/pitr-archive\.sh %p %f'/);
+  assert.doesNotMatch(pitr, /archive_command\s*=\s*'\/bin\/true'/);
 
   const realm = JSON.parse(read('infra/config/keycloak/lattice-realm.prod.json'));
   assert.equal(realm.sslRequired, 'external');

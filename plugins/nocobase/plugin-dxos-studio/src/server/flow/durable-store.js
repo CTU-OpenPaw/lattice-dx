@@ -9,10 +9,15 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { fail, sha256Hex, timingSafeEqualHex, toPlain, val } = require('../wms-dmn-shared');
+const { appendAuditLedger, fail, sha256Hex, timingSafeEqualHex, toPlain, val } = require('../wms-dmn-shared');
 const { cloneSafe } = require('./schema');
 
 const inFlightClaims = new Set();
+const APPROVAL_PRIVILEGED_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager']);
+
+function getDelegationEngine() {
+  return require('../delegation-engine');
+}
 
 function generateResumeToken() {
   const token = crypto.randomBytes(24).toString('hex');
@@ -48,6 +53,7 @@ async function createRunRecord(db, payload = {}) {
     resumeAt: payload.resumeAt ?? null,
     approvalId: payload.approvalId ?? null,
     triggerPayloadJson: payload.triggerPayloadJson ? cloneSafe(payload.triggerPayloadJson) : null,
+    graphSnapshotJson: payload.graphSnapshotJson ? cloneSafe(payload.graphSnapshotJson) : null,
   };
   const runsRepo = db?.getRepository?.('latticeAutomationRuns');
   if (runsRepo && typeof runsRepo.create === 'function') {
@@ -85,7 +91,7 @@ async function updateNodeState(db, organizationId, runUid, nodeId, state, stepTr
 
 async function suspendRun(db, {
   organizationId, runUid, nodeId, approvalId = null, resumeAt = null,
-  resumeTokenHash = null, nodeStatesJson, stepTracesJson, triggerPayloadJson, dmnResultJson,
+  resumeTokenHash = null, nodeStatesJson, stepTracesJson, triggerPayloadJson, dmnResultJson, graphSnapshotJson,
 } = {}) {
   const cleanOrgId = String(organizationId || '').trim();
   const cleanRunUid = String(runUid || '').trim();
@@ -107,14 +113,85 @@ async function suspendRun(db, {
   if (stepTracesJson !== undefined) values.stepTracesJson = cloneSafe(stepTracesJson);
   if (triggerPayloadJson !== undefined) values.triggerPayloadJson = cloneSafe(triggerPayloadJson);
   if (dmnResultJson !== undefined) values.dmnResultJson = cloneSafe(dmnResultJson);
+  if (graphSnapshotJson !== undefined) values.graphSnapshotJson = cloneSafe(graphSnapshotJson);
 
   await runsRepo.update({ filter: { organizationId: cleanOrgId, runUid: cleanRunUid }, values });
   const updated = typeof runsRepo.findOne === 'function' ? await runsRepo.findOne({ filter: { organizationId: cleanOrgId, runUid: cleanRunUid } }) : null;
   return updated ? toPlain(updated) : { organizationId: cleanOrgId, runUid: cleanRunUid, ...values };
 }
 
+async function verifyApprovalResumeAuthority(db, organizationId, run, actor, now = new Date()) {
+  const suspendMeta = run?.nodeStatesJson?.[run?.suspendedNodeId]?.suspend;
+  const isApproval = run?.approvalId != null || suspendMeta?.kind === 'approval';
+  if (!isApproval || !actor) {
+    return { ok: true, delegation: null };
+  }
+  const requiredRole = String(
+    suspendMeta?.approverRole || run?.nodeStatesJson?.[run?.suspendedNodeId]?.output?.approverRole || '',
+  ).trim();
+  const uid = Number(actor.userId ?? actor.id);
+  const directRoles = new Set();
+  if (actor.isRoot) directRoles.add('root');
+  if (actor.isAdmin) directRoles.add('admin');
+  if (actor.role) directRoles.add(String(actor.role).trim());
+
+  const ruRepo = db?.getRepository?.('rolesUsers');
+  if (ruRepo && typeof ruRepo.find === 'function' && Number.isInteger(uid) && uid > 0) {
+    const bindings = (await ruRepo.find({ filter: { userId: uid } })) || [];
+    for (const b of bindings) {
+      const rn = String(val(b, 'roleName') || '').trim();
+      if (rn) directRoles.add(rn);
+    }
+  } else if (Array.isArray(actor.roleNames)) {
+    for (const rn of actor.roleNames) {
+      if (rn) directRoles.add(String(rn).trim());
+    }
+  }
+
+  const isAdminDirect = directRoles.has('root') || directRoles.has('admin') || directRoles.has('ldx_admin');
+  if (isAdminDirect) return { ok: true, delegation: null };
+  const directOk = requiredRole
+    ? directRoles.has(requiredRole)
+    : [...directRoles].some((r) => APPROVAL_PRIVILEGED_ROLES.has(r));
+  if (directOk) return { ok: true, delegation: null };
+
+  if (Number.isInteger(uid) && uid > 0) {
+    const dlgMod = getDelegationEngine();
+    if (typeof dlgMod?.resolveEffectiveDelegatedRoles === 'function') {
+      const resolved = await dlgMod.resolveEffectiveDelegatedRoles(db, {
+        organizationId,
+        userId: uid,
+        scope: 'latticeAutomationRuns',
+        now,
+      });
+      const matchedDlg = (resolved.delegations || []).find((d) => (
+        requiredRole ? d.roleName === requiredRole : APPROVAL_PRIVILEGED_ROLES.has(d.roleName)
+      ));
+      if (matchedDlg) {
+        return {
+          ok: true,
+          delegation: {
+            delegatedFromUserId: matchedDlg.delegatorUserId,
+            delegationUid: matchedDlg.delegationUid,
+            roleName: matchedDlg.roleName,
+          },
+        };
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    statusCode: 403,
+    code: 'DELEGATION_OR_ROLE_REQUIRED',
+    error: requiredRole
+      ? `Role "${requiredRole}" or an active delegation is required to resume this approval`
+      : 'Approver role or active delegation is required to resume this approval',
+  };
+}
+
 async function claimSuspendedRun(db, {
-  organizationId, runUid, expectedNodeId = null, resumeToken = null, actor = null, requireToken = false,
+  organizationId, runUid, expectedNodeId = null, resumeToken = null, actor = null, requireToken = false, now = new Date(),
 } = {}) {
   const cleanRunUid = String(runUid || '').trim();
   const cleanOrgId = String(organizationId || '').trim();
@@ -160,6 +237,11 @@ async function claimSuspendedRun(db, {
       }
     }
 
+    const authCheck = await verifyApprovalResumeAuthority(db, cleanOrgId, run, actor, now);
+    if (!authCheck.ok) {
+      return authCheck;
+    }
+
     const dialect = typeof db?.sequelize?.getDialect === 'function' ? db.sequelize.getDialect() : 'postgres';
     let claimed = null;
     if (typeof db?.sequelize?.query === 'function' && dialect === 'postgres') {
@@ -170,7 +252,7 @@ async function claimSuspendedRun(db, {
       if (Array.isArray(rows) && rows.length > 0) {
         claimed = toPlain(rows[0]);
       } else {
-        const isInMemoryStub = Array.isArray(meta) && meta.length === 0 && Boolean(db?.store);
+        const isInMemoryStub = Boolean(db?.store) && ((Array.isArray(meta) && meta.length === 0) || Number(meta?.rowCount) > 0);
         if (!isInMemoryStub) {
           return { ok: false, statusCode: 409, code: 'RUN_ALREADY_RESUMED', error: 'Run already claimed concurrently' };
         }
@@ -188,7 +270,29 @@ async function claimSuspendedRun(db, {
       claimed = refreshed ? toPlain(refreshed) : { ...run, status: 'resuming' };
     }
 
-    return { ok: true, run: claimed || { ...run, status: 'resuming' }, actor: actor || null };
+    if (authCheck.delegation?.delegationUid) {
+      await appendAuditLedger(db, {
+        organizationId: cleanOrgId,
+        eventType: 'flow.approval_resumed',
+        targetCollection: 'latticeAutomationRuns',
+        targetRecordId: cleanRunUid,
+        actor,
+        payload: {
+          runUid: cleanRunUid,
+          nodeId: run.suspendedNodeId,
+          delegatedFromUserId: authCheck.delegation.delegatedFromUserId,
+          delegationUid: authCheck.delegation.delegationUid,
+        },
+        metadata: {
+          delegatedFromUserId: authCheck.delegation.delegatedFromUserId,
+          delegationUid: authCheck.delegation.delegationUid,
+          roleName: authCheck.delegation.roleName,
+        },
+        scope: 'dxos:flow-resume',
+      }).catch(() => {});
+    }
+
+    return { ok: true, run: claimed || { ...run, status: 'resuming' }, actor: actor || null, delegation: authCheck.delegation || null };
   } finally {
     inFlightClaims.delete(claimKey);
   }
@@ -200,5 +304,6 @@ module.exports = {
   createRunRecord,
   updateNodeState,
   suspendRun,
+  verifyApprovalResumeAuthority,
   claimSuspendedRun,
 };

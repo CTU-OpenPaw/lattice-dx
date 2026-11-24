@@ -1641,3 +1641,171 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
     global.MutationObserver = origMutationObserver;
   }
 });
+
+test('Task 4: SUPPORTED_HITL_TOOLS includes latticeflow.approval, Approve/Reject call resumeFlowRun, and latticeDelegations is enforced', async () => {
+  const aiResource = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { createDxosAiActions, SUPPORTED_HITL_TOOLS } = aiResource;
+  assert.ok(SUPPORTED_HITL_TOOLS instanceof Set, 'SUPPORTED_HITL_TOOLS must be exported');
+  assert.equal(SUPPORTED_HITL_TOOLS.has('latticeflow.approval'), true);
+
+  const db = makeMockDb();
+  db.stores.rolesUsers = [
+    { userId: 1, roleName: 'root' },
+    { userId: 2, roleName: 'ldx_employee' },
+    { userId: 3, roleName: 'ldx_employee' },
+    { userId: 4, roleName: 'ldx_manager' },
+  ];
+  db.stores.latticeEmployees = [
+    { id: 20, userId: 2, organizationId: 'org-a', active: true },
+    { id: 30, userId: 3, organizationId: 'org-a', active: true },
+    { id: 40, userId: 4, organizationId: 'org-a', active: true },
+  ];
+  db.stores.latticeServiceTickets = [];
+  db.stores.latticeNotifications = [];
+  db.stores.latticeDelegations = [];
+
+  const flowRule = {
+    id: 1,
+    organizationId: 'org-a',
+    ruleKey: 'hitl_bridge_flow',
+    name: 'HITL Bridge Flow',
+    schemaVersion: 2,
+    active: true,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'ap1', type: 'control.approval', config: { approverRole: 'ldx_manager', title: 'Approve ticket' } },
+        { id: 'ok1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'HITL-OK-{{data.code}}', name: 'Approved Flow' } } },
+        { id: 'rej1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'HITL-NO-{{data.code}}', name: 'Rejected Flow' } } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'ap1', targetHandle: 'in' },
+        { id: 'e2', source: 'ap1', sourceHandle: 'approved', target: 'ok1', targetHandle: 'in' },
+        { id: 'e3', source: 'ap1', sourceHandle: 'rejected', target: 'rej1', targetHandle: 'in' },
+      ],
+    },
+  };
+  db.stores.latticeAutomationRules = [flowRule];
+  db.stores.latticeAutomationRuns = [];
+  db.stores.latticeAiApprovalQueue = [];
+
+  // Add update() on makeRepo for latticeAutomationRuns and latticeAiApprovalQueue
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!repo) return null;
+    if (typeof repo.update === 'function') return repo;
+    return {
+      ...repo,
+      async update({ filter = {}, filterByTk, values = {} } = {}) {
+        const arr = db.stores[name] || [];
+        let updated = 0;
+        for (const row of arr) {
+          const idMatch = filterByTk == null || String(row.id) === String(filterByTk);
+          const fMatch = Object.entries(filter).every(([k, v]) => String(row[k]) === String(v));
+          if (idMatch && fMatch) {
+            Object.assign(row, values);
+            updated += 1;
+          }
+        }
+        return [updated];
+      },
+    };
+  };
+
+  // Start two suspended flow runs via plugin-dxos-studio executor
+  const origLoad = Module._load;
+  Module._load = function mockedNocobase(request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: class {}, Migration: class {} };
+    if (request === '@nocobase/database') return { defineCollection: (def) => def };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  let executeFlowGraph;
+  try {
+    ({ executeFlowGraph } = require(path.resolve(PLUGIN_ROOT, '../plugin-dxos-studio/src/server/flow/executor.js')));
+  } finally {
+    Module._load = origLoad;
+  }
+
+  const runApprove = await executeFlowGraph(db, flowRule, { organizationId: 'org-a', data: { code: 'A1' } }, { actor: { userId: 2, username: 'emp2' } });
+  const runReject = await executeFlowGraph(db, flowRule, { organizationId: 'org-a', data: { code: 'R1' } }, { actor: { userId: 2, username: 'emp2' } });
+  assert.equal(runApprove.status, 'suspended');
+  assert.equal(runReject.status, 'suspended');
+  assert.equal(db.stores.latticeAiApprovalQueue.length, 2);
+
+  const actions = createDxosAiActions(db, { env: {} });
+
+  // 1. Un-delegated employee (userId 3) denied 403
+  await assert.rejects(
+    () => actions.approveAction({
+      method: 'POST',
+      state: { currentUser: { id: 3, username: 'emp3' }, currentRole: 'ldx_employee' },
+      action: { params: { values: { approvalId: runApprove.approvalId, note: 'Try without delegation' } } },
+    }, async () => {}),
+    (err) => err.status === 403,
+  );
+
+  // 2. Wrong-scope delegation (scopeCollection: 'latticeOrders') still denied 403 on latticeAutomationRuns HITL
+  db.stores.latticeDelegations.push({
+    id: 1,
+    organizationId: 'org-a',
+    delegationUid: 'DLG-WRONG-SCOPE',
+    delegatorUserId: 4,
+    delegateUserId: 3,
+    roleName: 'ldx_manager',
+    scopeCollection: 'latticeOrders',
+    startsAt: new Date(Date.now() - 60_000),
+    endsAt: new Date(Date.now() + 3600_000),
+    status: 'active',
+    active: true,
+  });
+  await assert.rejects(
+    () => actions.approveAction({
+      method: 'POST',
+      state: { currentUser: { id: 3, username: 'emp3' }, currentRole: 'ldx_employee' },
+      action: { params: { values: { approvalId: runApprove.approvalId, note: 'Wrong scope delegation' } } },
+    }, async () => {}),
+    (err) => err.status === 403,
+  );
+
+  // 3. Valid delegation for latticeAutomationRuns allows userId 3 to APPROVE and resumes flow run approved branch
+  db.stores.latticeDelegations.push({
+    id: 2,
+    organizationId: 'org-a',
+    delegationUid: 'DLG-HITL-001',
+    delegatorUserId: 4,
+    delegateUserId: 3,
+    roleName: 'ldx_manager',
+    scopeCollection: 'latticeAutomationRuns',
+    startsAt: new Date(Date.now() - 60_000),
+    endsAt: new Date(Date.now() + 3600_000),
+    status: 'active',
+    active: true,
+  });
+
+  const approveCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 3, username: 'emp3' }, currentRole: 'ldx_employee' },
+    action: { params: { values: { approvalId: runApprove.approvalId, note: 'Approved via delegation' } } },
+  };
+  await actions.approveAction(approveCtx, async () => {});
+  assert.equal(approveCtx.body.status, 'executed');
+  assert.equal(approveCtx.body.executionResult.status, 'completed');
+  assert.ok(db.stores.latticeServiceTickets.some((t) => t.code === 'HITL-OK-A1'));
+  assert.ok(
+    db.stores.latticeAiAuditLogs.some((l) => l.argsSummary?.delegationUid === 'DLG-HITL-001' && Number(l.argsSummary?.delegatedFromUserId) === 4),
+    'Audit log must capture delegatedFromUserId and delegationUid',
+  );
+
+  // 4. Reject via direct manager (userId 4) resumes flow run rejected branch cleanly
+  const rejectCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 4, username: 'mgr4' }, currentRole: 'ldx_manager' },
+    action: { params: { values: { approvalId: runReject.approvalId, note: 'Budget rejected' } } },
+  };
+  await actions.rejectAction(rejectCtx, async () => {});
+  assert.equal(rejectCtx.body.status, 'rejected');
+  assert.equal(rejectCtx.body.flowRun?.status, 'completed');
+  assert.ok(db.stores.latticeServiceTickets.some((t) => t.code === 'HITL-NO-R1'));
+});

@@ -6,7 +6,7 @@
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
-import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { constants, type Stats } from 'node:fs';
 import { lstat, mkdir, open, readdir, realpath, unlink } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -419,6 +419,86 @@ export interface FileScannerServerOptions {
     | { kind: 'filesystem'; backend: NativeStorageBackend };
   scan: (content: Buffer) => Promise<'clean' | 'rejected'>;
   now?: () => number;
+  otelEndpoint?: string;
+}
+
+const TRACEPARENT_RE = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i;
+const ZERO_TRACE_ID = '0'.repeat(32);
+const ZERO_SPAN_ID = '0'.repeat(16);
+
+function parseTraceparentHeader(raw: string | string[] | undefined): { traceId: string; parentSpanId: string; traceFlags: string } | null {
+  const val = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof val !== 'string') return null;
+  const match = val.trim().match(TRACEPARENT_RE);
+  if (!match) return null;
+  const version = match[1].toLowerCase();
+  const traceId = match[2].toLowerCase();
+  const parentSpanId = match[3].toLowerCase();
+  const traceFlags = match[4].toLowerCase();
+  if (version === 'ff' || traceId === ZERO_TRACE_ID || parentSpanId === ZERO_SPAN_ID) return null;
+  return { traceId, parentSpanId, traceFlags };
+}
+
+function resolveOtlpTracesUrl(raw?: string): string {
+  const trimmed = String(raw ?? '').trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  try {
+    const u = new URL(trimmed);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+  } catch {
+    return '';
+  }
+  return trimmed.endsWith('/v1/traces') ? trimmed : `${trimmed}/v1/traces`;
+}
+
+function pushFileScannerSpan(tracesUrl: string, span: {
+  traceId: string;
+  spanId: string;
+  parentSpanId?: string;
+  method: string;
+  path: string;
+  statusCode: number;
+  startUnixNano: bigint;
+  endUnixNano: bigint;
+}) {
+  if (!tracesUrl || typeof globalThis.fetch !== 'function') return;
+  const payload = {
+    resourceSpans: [
+      {
+        resource: {
+          attributes: [{ key: 'service.name', value: { stringValue: 'latticedx-file-scanner' } }],
+        },
+        scopeSpans: [
+          {
+            scope: { name: '@dx/file-scanner', version: '1.0.0' },
+            spans: [
+              {
+                traceId: span.traceId,
+                spanId: span.spanId,
+                ...(span.parentSpanId ? { parentSpanId: span.parentSpanId } : {}),
+                name: `HTTP ${span.method} ${span.path}`,
+                kind: 2,
+                startTimeUnixNano: span.startUnixNano.toString(),
+                endTimeUnixNano: span.endUnixNano.toString(),
+                attributes: [
+                  { key: 'http.request.method', value: { stringValue: span.method } },
+                  { key: 'url.path', value: { stringValue: span.path } },
+                  { key: 'http.response.status_code', value: { intValue: String(span.statusCode) } },
+                ],
+                status: { code: span.statusCode >= 500 ? 2 : 1 },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  void globalThis.fetch(tracesUrl, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(2000),
+  }).catch(() => {});
 }
 
 const MAX_DRAIN_BYTES = 8 * 1024 * 1024;
@@ -566,6 +646,7 @@ export function createFileScannerServer(options: FileScannerServerOptions) {
   const nonces = new NonceReplayCache(MAX_NONCES, NONCE_WINDOW_MS);
   const now = options.now ?? Date.now;
   const keyLocks = new Map<string, Promise<unknown>>();
+  const otlpTracesUrl = resolveOtlpTracesUrl(options.otelEndpoint ?? process.env.OTEL_EXPORTER_OTLP_ENDPOINT);
 
   async function withUploadLock<T>(lockKey: string, work: () => Promise<T>): Promise<T> {
     const previous = keyLocks.get(lockKey);
@@ -584,6 +665,30 @@ export function createFileScannerServer(options: FileScannerServerOptions) {
   async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const method = (req.method ?? 'GET').toUpperCase();
     const path = (req.url ?? '/').split('?')[0];
+    const incomingTrace = parseTraceparentHeader(req.headers.traceparent);
+    const traceId = incomingTrace ? incomingTrace.traceId : randomBytes(16).toString('hex');
+    const spanId = randomBytes(8).toString('hex');
+    const traceFlags = incomingTrace ? incomingTrace.traceFlags : '01';
+    const traceparent = `00-${traceId}-${spanId}-${traceFlags}`;
+    res.setHeader('traceparent', traceparent);
+
+    if (otlpTracesUrl) {
+      const startUnixNano = BigInt(Date.now()) * 1_000_000n;
+      const startHr = process.hrtime.bigint();
+      res.once('finish', () => {
+        const elapsedNs = process.hrtime.bigint() - startHr;
+        pushFileScannerSpan(otlpTracesUrl, {
+          traceId,
+          spanId,
+          parentSpanId: incomingTrace?.parentSpanId,
+          method,
+          path,
+          statusCode: res.statusCode,
+          startUnixNano,
+          endUnixNano: startUnixNano + (elapsedNs >= 0n ? elapsedNs : 0n),
+        });
+      });
+    }
 
     if (method === 'GET' && path === '/health') {
       sendJson(res, 200, { status: 'ok', service: 'file-scanner' });

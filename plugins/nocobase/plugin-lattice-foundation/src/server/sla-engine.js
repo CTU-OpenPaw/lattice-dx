@@ -9,7 +9,7 @@
 'use strict';
 
 const { resolveNativeActor } = require('./native-scope');
-const { canUsePgRlsSession, getActiveRlsContext, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
+const { canUsePgRlsSession, getActiveRlsContext, runInRlsSavepoint, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
 const { isPortalAdmin } = require('./native-portals');
 const { recordChatterEntry } = require('./record-chatter');
 const { dispatchRoleNotifications, resolveNotificationTargetPath, DEDUP_WINDOW_MS } = require('./notification-center');
@@ -157,10 +157,10 @@ function resolveEffectivePolicy(policyMap, organizationId, collection, priority,
   };
 }
 
-async function hasRecentSlaChatter(db, organizationId, targetCollection, targetRecordId, cutoffMs) {
+async function hasRecentSlaChatter(db, organizationId, targetCollection, targetRecordId, cutoffMs, { transaction = null } = {}) {
   const chatterRepo = db?.getRepository?.('latticeRecordChatter');
   if (!chatterRepo || typeof chatterRepo.find !== 'function') return false;
-  try {
+  const runFind = async (tx) => {
     const rows = (await chatterRepo.find({
       filter: {
         organizationId,
@@ -170,18 +170,25 @@ async function hasRecentSlaChatter(db, organizationId, targetCollection, targetR
       },
       sort: ['-id'],
       limit: 5,
+      ...(tx ? { transaction: tx } : {}),
     })) || [];
     return rows.some((r) => {
       if (val(r, 'entryType') !== 'sla_escalation') return false;
       const ts = new Date(val(r, 'createdAt') || 0).getTime();
       return Number.isFinite(ts) && ts > cutoffMs;
     });
+  };
+  try {
+    if (transaction && getActiveRlsContext()?.transaction === transaction) {
+      return await runInRlsSavepoint(db, runFind);
+    }
+    return await runFind(transaction);
   } catch {
     return false;
   }
 }
 
-async function evaluateSlaRecord(db, collection, row, { organizationId, policyMap, nowMs, cutoffMs, dryRun, env, fetchImpl, businessHoursOnly = false }) {
+async function evaluateSlaRecord(db, collection, row, { organizationId, policyMap, nowMs, businessHoursOnly = false }) {
   if (val(row, 'active') === false) return { scanned: false };
   const rowOrgId = String(val(row, 'organizationId') || '').trim();
   if (!rowOrgId || (organizationId && rowOrgId !== organizationId)) return { scanned: false };
@@ -207,54 +214,12 @@ async function evaluateSlaRecord(db, collection, row, { organizationId, policyMa
   const recordId = Number(val(row, 'id'));
   const code = val(row, 'code') || `#${recordId}`;
   const name = val(row, 'name') || '';
-  let escalated = false;
-
-  if (slaState === 'breached' && !dryRun && Number.isInteger(recordId) && recordId > 0) {
-    const dedupKey = `sla:${collection}:${recordId}:breached`;
-    const elapsedRounded = Math.round(elapsedMinutes);
-    const title = `Quá hạn SLA (${code})`;
-    const body = `${collection} ${code}${name ? ` (${name})` : ''} đã mở ${elapsedRounded} phút, vượt ngưỡng ${policy.breachAfterMinutes} phút.`;
-
-    let dispatchedCount = 0;
-    try {
-      const roleRes = await dispatchRoleNotifications(db, {
-        organizationId: rowOrgId,
-        roleNames: [policy.escalateToRole],
-        category: 'sla',
-        severity: priority === 'critical' ? 'critical' : 'high',
-        title,
-        body,
-        targetCollection: collection,
-        targetRecordId: recordId,
-        targetPath: resolveNotificationTargetPath(collection),
-        dedupKey,
-        notifyChannels: policy.notifyChannels,
-      }, { env, fetchImpl });
-      dispatchedCount = Number(roleRes?.dispatchedCount) || 0;
-    } catch {}
-
-    let chatterAdded = false;
-    const alreadyLogged = await hasRecentSlaChatter(db, rowOrgId, collection, recordId, cutoffMs);
-    if (!alreadyLogged) {
-      try {
-        const entry = await recordChatterEntry(db, {
-          organizationId: rowOrgId,
-          targetCollection: collection,
-          targetRecordId: recordId,
-          entryType: 'sla_escalation',
-          body: `Cảnh báo leo thang SLA: ${body} (Chuyển tới ${policy.escalateToRole})`,
-          mentionsJson: [],
-          diffJson: null,
-          authorName: 'sla-engine',
-        });
-        chatterAdded = Boolean(entry);
-      } catch {}
-    }
-    escalated = dispatchedCount > 0 || chatterAdded;
-  }
 
   return {
     scanned: true,
+    breachContext: slaState === 'breached' && Number.isInteger(recordId) && recordId > 0
+      ? { policy, elapsedMinutes }
+      : null,
     item: {
       organizationId: rowOrgId,
       collection,
@@ -269,15 +234,77 @@ async function evaluateSlaRecord(db, collection, row, { organizationId, policyMa
       breachAfterMinutes: policy.breachAfterMinutes,
       escalateToRole: policy.escalateToRole,
       businessHoursOnly: policy.businessHoursOnly,
-      escalated,
+      escalated: false,
     },
   };
+}
+
+async function escalateBreachedRecord(db, { item, breachContext }, { cutoffMs, env, fetchImpl }) {
+  const { policy, elapsedMinutes } = breachContext;
+  const elapsedRounded = Math.round(elapsedMinutes);
+  const title = `Quá hạn SLA (${item.code})`;
+  const body = `${item.collection} ${item.code}${item.name ? ` (${item.name})` : ''} đã mở ${elapsedRounded} phút, vượt ngưỡng ${policy.breachAfterMinutes} phút.`;
+  const dedupKey = `sla:${item.collection}:${item.recordId}:breached`;
+
+  let dispatchedCount = 0;
+  try {
+    const roleRes = await dispatchRoleNotifications(db, {
+      organizationId: item.organizationId,
+      roleNames: [policy.escalateToRole],
+      category: 'sla',
+      severity: item.priority === 'critical' ? 'critical' : 'high',
+      title,
+      body,
+      targetCollection: item.collection,
+      targetRecordId: item.recordId,
+      targetPath: resolveNotificationTargetPath(item.collection),
+      dedupKey,
+      notifyChannels: policy.notifyChannels,
+    }, { env, fetchImpl });
+    dispatchedCount = Number(roleRes?.dispatchedCount) || 0;
+  } catch {}
+
+  const runChatterCheckAndWrite = async (transaction) => {
+    const alreadyLogged = await hasRecentSlaChatter(db, item.organizationId, item.collection, item.recordId, cutoffMs, { transaction });
+    if (alreadyLogged) return false;
+    const writeChatter = (tx) => recordChatterEntry(db, {
+      organizationId: item.organizationId,
+      targetCollection: item.collection,
+      targetRecordId: item.recordId,
+      entryType: 'sla_escalation',
+      body: `Cảnh báo leo thang SLA: ${body} (Chuyển tới ${policy.escalateToRole})`,
+      mentionsJson: [],
+      diffJson: null,
+      authorName: 'sla-engine',
+    }, tx ? { transaction: tx } : {});
+    try {
+      const entry = transaction && getActiveRlsContext()?.transaction === transaction
+        ? await runInRlsSavepoint(db, writeChatter)
+        : await writeChatter(transaction);
+      return Boolean(entry);
+    } catch {
+      return false;
+    }
+  };
+
+  let chatterAdded = false;
+  try {
+    const activeTx = getActiveRlsContext()?.transaction || null;
+    if (canUsePgRlsSession(db) && !activeTx) {
+      chatterAdded = await withTenantRlsContext(db, item.organizationId, runChatterCheckAndWrite);
+    } else {
+      chatterAdded = await runChatterCheckAndWrite(activeTx);
+    }
+  } catch {}
+
+  item.escalated = dispatchedCount > 0 || chatterAdded;
+  return item.escalated;
 }
 
 async function evaluateCollectionSla(db, collection, options) {
   const repo = db?.getRepository?.(collection);
   if (!repo || typeof repo.find !== 'function') {
-    return { scanned: 0, warningCount: 0, breachedCount: 0, escalatedCount: 0, items: [] };
+    return { scanned: 0, warningCount: 0, breachedCount: 0, items: [], pendingEscalations: [] };
   }
 
   const filter = {
@@ -287,10 +314,10 @@ async function evaluateCollectionSla(db, collection, options) {
   };
   const seenIds = new Set();
   const items = [];
+  const pendingEscalations = [];
   let scanned = 0;
   let warningCount = 0;
   let breachedCount = 0;
-  let escalatedCount = 0;
   let offset = 0;
 
   while (offset < SLA_MAX_SCAN) {
@@ -319,7 +346,9 @@ async function evaluateCollectionSla(db, collection, options) {
       if (outcome.item.slaState === 'warning') warningCount += 1;
       else if (outcome.item.slaState === 'breached') {
         breachedCount += 1;
-        if (outcome.item.escalated) escalatedCount += 1;
+        if (!options.dryRun && outcome.breachContext) {
+          pendingEscalations.push({ item: outcome.item, breachContext: outcome.breachContext });
+        }
       }
       items.push(outcome.item);
     }
@@ -328,15 +357,15 @@ async function evaluateCollectionSla(db, collection, options) {
     offset += batch.length;
   }
 
-  return { scanned, warningCount, breachedCount, escalatedCount, items };
+  return { scanned, warningCount, breachedCount, items, pendingEscalations };
 }
 
 async function evaluateSlaBreaches(db, { organizationId = null, now = new Date(), env = process.env, fetchImpl, dryRun = false, businessHoursOnly = false } = {}) {
-  const runEvaluation = async (transaction) => {
-    const nowDate = now instanceof Date ? now : new Date(now);
-    const nowMs = Number.isFinite(nowDate.getTime()) ? nowDate.getTime() : Date.now();
-    const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
+  const nowDate = now instanceof Date ? now : new Date(now);
+  const nowMs = Number.isFinite(nowDate.getTime()) ? nowDate.getTime() : Date.now();
+  const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
 
+  const runScan = async (transaction) => {
     const policyMap = new Map();
     const policyRepo = db?.getRepository?.('latticeSlaPolicies');
     if (policyRepo && typeof policyRepo.find === 'function') {
@@ -358,43 +387,55 @@ async function evaluateSlaBreaches(db, { organizationId = null, now = new Date()
     let scanned = 0;
     let warningCount = 0;
     let breachedCount = 0;
-    let escalatedCount = 0;
     const items = [];
+    const pendingEscalations = [];
 
     for (const collection of SLA_COLLECTIONS) {
       const colReport = await evaluateCollectionSla(db, collection, {
         organizationId,
         policyMap,
         nowMs,
-        cutoffMs,
         dryRun,
-        env,
-        fetchImpl,
         businessHoursOnly: Boolean(businessHoursOnly),
         transaction,
       });
       scanned += colReport.scanned;
       warningCount += colReport.warningCount;
       breachedCount += colReport.breachedCount;
-      escalatedCount += colReport.escalatedCount;
       items.push(...colReport.items);
+      pendingEscalations.push(...colReport.pendingEscalations);
     }
 
     return {
       scanned,
       warningCount,
       breachedCount,
-      escalatedCount,
       items,
+      pendingEscalations,
     };
   };
 
-  if (canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction) {
-    return organizationId
-      ? withTenantRlsContext(db, organizationId, runEvaluation)
-      : withSystemRlsBypass(db, runEvaluation);
+  const scanResult = canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction
+    ? await (organizationId
+      ? withTenantRlsContext(db, organizationId, runScan)
+      : withSystemRlsBypass(db, runScan))
+    : await runScan(getActiveRlsContext()?.transaction);
+
+  let escalatedCount = 0;
+  if (!dryRun && scanResult.pendingEscalations.length > 0) {
+    for (const pending of scanResult.pendingEscalations) {
+      const escalated = await escalateBreachedRecord(db, pending, { cutoffMs, env, fetchImpl });
+      if (escalated) escalatedCount += 1;
+    }
   }
-  return runEvaluation(getActiveRlsContext()?.transaction);
+
+  return {
+    scanned: scanResult.scanned,
+    warningCount: scanResult.warningCount,
+    breachedCount: scanResult.breachedCount,
+    escalatedCount,
+    items: scanResult.items,
+  };
 }
 
 function serializePolicy(row) {

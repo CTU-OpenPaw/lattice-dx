@@ -250,8 +250,10 @@ const controlNodes = [
       const title = String(interp(cfg.title || 'Flow Approval Required', evalCtx));
       const summary = String(interp(cfg.summary || '', evalCtx));
       const riskLevel = String(interp(cfg.riskLevel || 'medium', evalCtx));
+      const rawTtlMs = Number(cfg.ttlMs);
       const ttlHours = Math.max(1, Math.min(720, Number(cfg.ttlHours) || 24));
-      const resumeAt = new Date(Date.now() + ttlHours * 3600_000).toISOString();
+      const ttlDurationMs = Number.isFinite(rawTtlMs) && rawTtlMs > 0 ? Math.min(720 * 3600_000, rawTtlMs) : ttlHours * 3600_000;
+      const resumeAt = new Date(Date.now() + ttlDurationMs).toISOString();
       if (options?.dryRun) return { output: { status: 'simulated_approval', nextPort: 'approved', approverRole, title, summary, riskLevel }, nextPort: 'approved' };
       let approvalId = null;
       const queueRepo = db?.getRepository?.('latticeAiApprovalQueue');

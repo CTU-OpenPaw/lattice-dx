@@ -9,7 +9,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
-const { fail, loadFoundationModule, sha256Hex, timingSafeEqualHex, toPlain, val } = require('../wms-dmn-shared');
+const { defaultFoundation, fail, loadFoundationModule, sha256Hex, timingSafeEqualHex, toPlain, val } = require('../wms-dmn-shared');
 const { MAX_HARD_DEPTH, buildTriggerIndex, cloneSafe, isPlainObject, normalizeGraph, v1RuleToGraphV2 } = require('./schema');
 const { validateFlowGraph } = require('./validator');
 const { claimSuspendedRun, createRunRecord, generateResumeToken, hashResumeToken, suspendRun } = require('./durable-store');
@@ -55,7 +55,8 @@ async function runSingleNode({ node, nodeInput, reg, execState, db, app, options
   if (!def) throw fail('FLOW_UNKNOWN_NODE_TYPE', 400, `Unknown node type "${node.type}"`);
   const nodeOpts = node.type === 'iot.twin_command' && !options?.digitalTwin ? { ...options, digitalTwin: helpers.loadCrossPluginModules(app, options).digitalTwinMod } : options;
   try {
-    const res = await runNodeInRlsSavepoint(db, () => def.execute({ node, config: node.config, input: nodeInput, context: resolveFlowContext(node, nodeInput, execState), db, app, options: nodeOpts, helpers }));
+    const [timeoutMs, execP] = [Number(node.timeoutMs ?? node.config?.timeoutMs), runNodeInRlsSavepoint(db, () => def.execute({ node, config: node.config, input: nodeInput, context: resolveFlowContext(node, nodeInput, execState), db, app, options: nodeOpts, helpers }))];
+    let timerId; if (Number.isFinite(timeoutMs) && timeoutMs > 0) execP.catch(() => {}); const res = await (Number.isFinite(timeoutMs) && timeoutMs > 0 ? Promise.race([execP, new Promise((_, rej) => { timerId = setTimeout(() => rej(fail('FLOW_NODE_TIMEOUT', 504, `Node "${node.id}" timed out after ${timeoutMs}ms`)), timeoutMs); })]).finally(() => { if (timerId) clearTimeout(timerId); }) : execP);
     const durationMs = Math.max(0, Date.now() - t0);
     if (res?.error) { recordNodeOutput(execState, node, res.output ?? null, 'failed', String(res.error)); return { ok: false, node, output: res.output ?? null, error: String(res.error), durationMs, loopMeta }; }
     if (res?.suspend && !options.dryRun) { recordNodeOutput(execState, node, res.output ?? null, 'suspended'); return { ok: true, suspend: res.suspend, node, output: res.output ?? null, durationMs, loopMeta }; }
@@ -142,11 +143,11 @@ function resolveNormalizedRuleAndGraph(ruleOrGraph, options = {}) {
     : (rule.graphJson?.nodes?.length || (Number(rule.schemaVersion) === 2 && isPlainObject(rule.graphJson))) ? rule.graphJson : v1RuleToGraphV2(rule);
   return { rule, graph: normalizeGraph(srcGraph) };
 }
-async function finalizeDagRun(db, { organizationId, runUid, execRes, execState, nodeStatesJson, stepTracesJson, triggerPayloadJson, dryRun, fallbackRecord, startedMs }) {
+async function finalizeDagRun(db, { organizationId, runUid, execRes, execState, nodeStatesJson, stepTracesJson, triggerPayloadJson, graphSnapshotJson, dryRun, fallbackRecord, startedMs }) {
   if (execRes.suspended) {
     const [{ token, tokenHash }, { node: sNode, suspend }] = [generateResumeToken(), execRes.suspended];
-    const tpBase = triggerPayloadJson || (isPlainObject(fallbackRecord?.triggerPayloadJson) ? fallbackRecord.triggerPayloadJson : null);
-    const saved = await suspendRun(db, { organizationId, runUid, nodeId: sNode.id, approvalId: suspend.approvalId ?? null, resumeAt: suspend.resumeAt ? new Date(suspend.resumeAt) : null, resumeTokenHash: tokenHash, nodeStatesJson, stepTracesJson, dmnResultJson: execState.dmnResult, ...(tpBase ? { triggerPayloadJson: { ...tpBase, dmn: execState.dmn, dmnResult: execState.dmnResult, actor: execState.actor } } : {}) });
+    const [tpBase, snap] = [triggerPayloadJson || (isPlainObject(fallbackRecord?.triggerPayloadJson) ? fallbackRecord.triggerPayloadJson : null), graphSnapshotJson || fallbackRecord?.graphSnapshotJson || null];
+    const saved = await suspendRun(db, { organizationId, runUid, nodeId: sNode.id, approvalId: suspend.approvalId ?? null, resumeAt: suspend.resumeAt ? new Date(suspend.resumeAt) : null, resumeTokenHash: tokenHash, nodeStatesJson, stepTracesJson, dmnResultJson: execState.dmnResult, ...(snap ? { graphSnapshotJson: cloneSafe(snap) } : {}), ...(tpBase ? { triggerPayloadJson: { ...tpBase, dmn: execState.dmn, dmnResult: execState.dmnResult, actor: execState.actor } } : {}) });
     return { ...saved, status: 'suspended', suspendedNodeId: sNode.id, approvalId: suspend.approvalId ?? null, resumeToken: token };
   }
   const values = { status: computeRunStatus(stepTracesJson, execRes.halted), matched: true, graphVersion: 2, dmnResultJson: execState.dmnResult, nodeStatesJson, stepTracesJson, errorMessage: stepTracesJson.filter((t) => t.status === 'failed' && t.error).map((t) => t.error).join('; ') || execRes.haltError || null, suspendedNodeId: null, resumeTokenHash: null, resumeAt: null, finishedAt: new Date(), durationMs: Math.max(0, Date.now() - startedMs) };
@@ -180,15 +181,15 @@ async function executeFlowGraph(db, ruleRow, triggerContext = {}, options = {}) 
     if (!scopedOpts.dryRun && !scopedOpts.ignoreCooldown && cooldownSec > 0 && rule.lastTriggeredAt && Number.isFinite(new Date(rule.lastTriggeredAt).getTime()) && startMs - new Date(rule.lastTriggeredAt).getTime() < cooldownSec * 1000) return finishEarly('skipped', 'COOLDOWN_ACTIVE', [{ stepIndex: 0, type: 'cooldown_guard', status: 'skipped', output: { cooldownSec }, error: 'COOLDOWN_ACTIVE', durationMs: 0 }]);
     const execState = buildExecState(event, scopedOpts, { record: eng.sanitizePlainObject(triggerContext?.record ?? null) });
     if (!eng.matchesFilter(validation.triggerNode?.config?.filterJson, execState) || !eng.matchesFilter(rule.filterJson, execState)) return finishEarly('skipped', 'FILTER_NOT_MATCHED');
-    const triggerPayloadJson = { event, data: event.data, record: execState.record };
-    let baseRun = { organizationId, ruleId: val(ruleRow, 'id') ?? rule.id ?? null, ruleKey: String(rule.ruleKey || 'inline_flow'), runUid, triggerEventId: event.id, triggerEventType: event.type, status: 'running', depth: Number(event.depth || 0), matched: true, graphVersion: 2, triggerPayloadJson, startedAt: new Date(startMs) };
+    const triggerPayloadJson = { event: cloneSafe(event), data: cloneSafe(event.data), record: cloneSafe(execState.record) };
+    let baseRun = { organizationId, ruleId: val(ruleRow, 'id') ?? rule.id ?? null, ruleKey: String(rule.ruleKey || 'inline_flow'), runUid, triggerEventId: event.id, triggerEventType: event.type, status: 'running', depth: Number(event.depth || 0), matched: true, graphVersion: 2, graphSnapshotJson: cloneSafe(graph), triggerPayloadJson, startedAt: new Date(startMs) };
     if (!scopedOpts.dryRun) { baseRun = await createRunRecord(db, baseRun); execState.runId = val(baseRun, 'id') ?? baseRun.id ?? null; execState.runUid = runUid; }
     const [nodeMap, nodeStatesJson, stepTracesJson, initInputs] = [new Map(graph.nodes.map((n) => [n.id, n])), {}, [], new Map()];
     const rootIds = validation.triggerNode ? [validation.triggerNode.id] : validation.topoOrder.filter((id) => !graph.edges.some((e) => e.target === id));
     rootIds.forEach((id) => initInputs.set(id, [{ from: '__trigger__', output: { type: event.type, data: event.data, record: execState.record, webhook: triggerContext?.webhook ?? null, schedule: triggerContext?.schedule ?? null, timestamp: event.time } }]));
     const execRes = await runWithOrmDepth(Number(event.depth || 0) + 1, () => traverseDag({ graph, subTopo: validation.topoOrder, nodeMap, edges: graph.edges, initialInputs: initInputs, execState, nodeStatesJson, stepTracesJson, reg, db, app, options: scopedOpts, helpers: buildNodeHelpers(db, app, scopedOpts, execState) }));
     if (!scopedOpts.dryRun && rule.ruleKey) await db?.getRepository?.('latticeAutomationRules')?.update?.({ filter: { organizationId, ruleKey: rule.ruleKey }, values: { lastTriggeredAt: new Date() } }).catch(() => {});
-    return finalizeDagRun(db, { organizationId, runUid, execRes, execState, nodeStatesJson, stepTracesJson, triggerPayloadJson, dryRun: Boolean(scopedOpts.dryRun), fallbackRecord: baseRun, startedMs: startMs });
+    return finalizeDagRun(db, { organizationId, runUid, execRes, execState, nodeStatesJson, stepTracesJson, triggerPayloadJson, graphSnapshotJson: graph, dryRun: Boolean(scopedOpts.dryRun), fallbackRecord: baseRun, startedMs: startMs });
   });
 }
 const dryRunFlowGraph = (db, ruleOrGraph, sampleEvent = {}, options = {}) => executeFlowGraph(db, ruleOrGraph, sampleEvent, { ...options, dryRun: true, ignoreCooldown: true });
@@ -224,7 +225,7 @@ async function testSingleFlowNode(db, { graph, rule, nodeId, pinnedInputs = {}, 
 async function claimOrPreviewSuspended(db, { organizationId, runUid, resumeToken, actor, dryRun }) {
   const [cleanUid, cleanOrg, hasToken] = [String(runUid || '').trim(), String(organizationId || '').trim(), resumeToken !== undefined && resumeToken !== null];
   if (hasToken && !String(resumeToken).trim()) throw fail('INVALID_RESUME_TOKEN', 403, 'Invalid or missing resume token');
-  if (!dryRun) { const c = await claimSuspendedRun(db, { organizationId, runUid, resumeToken, actor, requireToken: hasToken }); if (!c.ok) throw fail(c.code, c.statusCode, c.error); return c.run; }
+  if (!dryRun) { const c = await claimSuspendedRun(db, { organizationId, runUid, resumeToken, actor, requireToken: hasToken }); if (!c.ok) throw fail(c.code, c.statusCode, c.error); return c.delegation ? { ...c.run, _delegation: c.delegation } : c.run; }
   if (!cleanUid || !cleanOrg) throw fail(!cleanUid ? 'MISSING_RUN_ID' : 'NATIVE_TENANT_REQUIRED', 400, 'organizationId and runUid are required');
   const repo = db?.getRepository?.('latticeAutomationRuns');
   const row = await repo?.findOne?.({ filter: { organizationId: cleanOrg, runUid: cleanUid } });
@@ -240,9 +241,8 @@ async function resumeFlowRun(db, { organizationId, runUid, decision = 'approved'
   const [eng, orgId] = [getEngine(), String(organizationId || run.organizationId || '').trim()];
   try {
     return await runAutomationWithRls(db, orgId, async () => {
-      const ruleRow = options.rule || await db?.getRepository?.('latticeAutomationRules')?.findOne({ filter: { organizationId: orgId, ruleKey: run.ruleKey } });
-      if (!ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule "${run.ruleKey}" not found`);
-      const [{ graph }, reg] = [resolveNormalizedRuleAndGraph(ruleRow, options), options.nodeRegistry || registry];
+      const hasSnap = isPlainObject(run.graphSnapshotJson); const ruleRow = hasSnap ? null : (options.rule || await db?.getRepository?.('latticeAutomationRules')?.findOne({ filter: { organizationId: orgId, ruleKey: run.ruleKey } })); if (!hasSnap && !ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule "${run.ruleKey}" not found`);
+      const [{ graph }, reg] = [hasSnap ? { graph: normalizeGraph(run.graphSnapshotJson) } : resolveNormalizedRuleAndGraph(ruleRow, options), options.nodeRegistry || registry];
       const validation = validateFlowGraph(graph, { nodeRegistry: reg, requireTrigger: false });
       if (!validation.ok) throw fail('FLOW_INVALID_GRAPH', 400, validation.errors[0]?.message || 'Invalid flow graph');
       const sNode = graph.nodes.find((n) => n.id === run.suspendedNodeId);
@@ -258,7 +258,7 @@ async function resumeFlowRun(db, { organizationId, runUid, decision = 'approved'
       execState.runUid = run.runUid;
       const nodeMap = new Map(graph.nodes.map((n) => [n.id, n]));
       Object.entries(nodeStatesJson).forEach(([nid, st]) => { const n = nodeMap.get(nid); if (n) recordNodeOutput(execState, n, st.output ?? null, st.status || 'completed', st.error || null); });
-      const resumedOut = { ...(isPlainObject(nodeStatesJson[sNode.id]?.output) ? nodeStatesJson[sNode.id].output : {}), status: resumedPort, decision: resumedPort, payload: execState.resumePayload, resumedAt: new Date().toISOString() };
+      const resumedOut = { ...(isPlainObject(nodeStatesJson[sNode.id]?.output) ? nodeStatesJson[sNode.id].output : {}), status: resumedPort, decision: resumedPort, payload: execState.resumePayload, resumedAt: new Date().toISOString(), ...(run._delegation ? { delegatedFromUserId: run._delegation.delegatorUserId, delegationUid: run._delegation.delegationUid } : {}) };
       recordNodeOutput(execState, sNode, resumedOut, 'completed');
       nodeStatesJson[sNode.id] = { status: 'completed', output: resumedOut, nextPort: resumedPort, nextPorts: [resumedPort] };
       const sTrace = [...stepTracesJson].reverse().find((t) => t.nodeId === sNode.id);
@@ -271,7 +271,7 @@ async function resumeFlowRun(db, { organizationId, runUid, decision = 'approved'
         else if (!downSet.has(e.source) && nodeStatesJson[e.source]?.status === 'completed' && (nodeStatesJson[e.source].nextPorts || [nodeStatesJson[e.source].nextPort || 'main']).includes(e.sourceHandle)) initInputs.get(e.target)?.push({ from: e.source, output: nodeStatesJson[e.source].output });
       });
       const execRes = await runWithOrmDepth(Number(event.depth || 0) + 1, () => traverseDag({ graph, subTopo, nodeMap, edges: graph.edges, initialInputs: initInputs, execState, nodeStatesJson, stepTracesJson, reg, db, app: scopedOpts.app || db?.app, options: scopedOpts, helpers: buildNodeHelpers(db, scopedOpts.app || db?.app, scopedOpts, execState) }));
-      return finalizeDagRun(db, { organizationId: orgId, runUid: run.runUid, execRes, execState, nodeStatesJson, stepTracesJson, triggerPayloadJson: isPlainObject(run.triggerPayloadJson) ? tp : { event, data: event.data, record: tp.record ?? null }, dryRun, fallbackRecord: run, startedMs: run.startedAt ? new Date(run.startedAt).getTime() : Date.now() });
+      return finalizeDagRun(db, { organizationId: orgId, runUid: run.runUid, execRes, execState, nodeStatesJson, stepTracesJson, triggerPayloadJson: isPlainObject(run.triggerPayloadJson) ? tp : { event, data: event.data, record: tp.record ?? null }, graphSnapshotJson: graph, dryRun, fallbackRecord: run, startedMs: run.startedAt ? new Date(run.startedAt).getTime() : Date.now() });
     });
   } catch (err) {
     if (!dryRun) await runAutomationWithRls(db, orgId, () => db?.getRepository?.('latticeAutomationRuns')?.update?.({ filter: { organizationId: orgId, runUid: run.runUid }, values: { status: 'failed', errorMessage: err?.message || String(err), finishedAt: new Date() } })).catch(() => {});
@@ -331,10 +331,9 @@ async function dispatchWebhookIngress(db, { organizationId, ruleKey, headers = {
   });
 }
 async function tickDueDelayedRuns(db, options = {}) {
-  const runsRepo = db?.getRepository?.('latticeAutomationRuns');
-  const [limit, nowMs, results] = [Math.min(50, Math.max(1, Number(options.batchSize) || 50)), options.now ? new Date(options.now).getTime() : Date.now(), []];
+  const [runsRepo, limit, nowMs, results] = [db?.getRepository?.('latticeAutomationRuns'), Math.min(50, Math.max(1, Number(options.batchSize) || 50)), options.now ? new Date(options.now).getTime() : Date.now(), []];
   if (!runsRepo?.find || !Number.isFinite(nowMs)) return { processedCount: 0, results };
-  const rows = await runAutomationWithRls(db, options.organizationId, () => runsRepo.find({ filter: { status: 'suspended', ...(options.organizationId ? { organizationId: options.organizationId } : {}) }, limit }));
+  const rows = await (!options.organizationId && defaultFoundation?.pgRls?.canUsePgRlsSession?.(db) ? defaultFoundation.pgRls.withSystemRlsBypass(db, () => runsRepo.find({ filter: { status: 'suspended' }, limit })) : runAutomationWithRls(db, options.organizationId, () => runsRepo.find({ filter: { status: 'suspended', ...(options.organizationId ? { organizationId: options.organizationId } : {}) }, limit })));
   for (const r of (rows || []).map(toPlain)) {
     const resumeMs = r?.resumeAt ? new Date(r.resumeAt).getTime() : NaN;
     if (!r || r.status !== 'suspended' || !Number.isFinite(resumeMs) || resumeMs > nowMs || r.approvalId != null || r.nodeStatesJson?.[r.suspendedNodeId]?.suspend?.kind === 'approval') continue;

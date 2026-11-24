@@ -26,7 +26,7 @@ const {
   registerAutomationEventListener,
   registerRecordTriggerHooks,
 } = require('./automation-engine');
-const { tickDueDelayedRuns } = require('./flow/executor');
+const { tickFlowScheduler } = require('./flow/cron');
 const { createDxosBuilderActions } = require('./domain-builder');
 const { fail, readParams, resolveVerifiedRoles } = require('./wms-dmn-shared');
 

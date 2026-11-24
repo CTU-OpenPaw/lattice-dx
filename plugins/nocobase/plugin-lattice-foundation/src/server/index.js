@@ -26,6 +26,7 @@ const {registerVoucherLifecycleResource}=require('./voucher-lifecycle');
 const {registerNotificationCenter}=require('./notification-center');
 const {registerSlaEngine}=require('./sla-engine');
 const {registerObservability}=require('./observability');
+const {createOtelExporter}=require('./otel-exporter');
 const {registerPaasApiKeys, createPaasApiKeyAuthMiddleware}=require('./paas-api-keys');
 const {registerPkiLedger, appendLedgerEntrySafely}=require('./pki-ledger');
 const {
@@ -69,7 +70,12 @@ class LatticeFoundationPlugin extends Plugin {
     registerVoucherLifecycleResource(this.app);
     registerNotificationCenter(this.app);
     registerSlaEngine(this.app);
-    registerObservability(this.app);
+    const otelExporter = createOtelExporter({
+      serviceName: process.env.OTEL_SERVICE_NAME || 'latticedx-nocobase',
+      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    });
+    this._otelExporter = otelExporter;
+    registerObservability(this.app, { otelExporter });
     registerPaasApiKeys(this.app);
     registerPkiLedger(this.app);
     registerDataGovernance(this.app);
@@ -106,16 +112,26 @@ class LatticeFoundationPlugin extends Plugin {
       this._stopEventBusDrainer = null;
     }
   }
+  async stopOtelExporter() {
+    if (this._otelExporter && typeof this._otelExporter.shutdown === 'function') {
+      const exporter = this._otelExporter;
+      this._otelExporter = null;
+      await exporter.shutdown().catch(() => {});
+    }
+  }
   async unload() {
     this.stopEventBusDrainer();
+    await this.stopOtelExporter();
     if (typeof super.unload === 'function') await super.unload();
   }
   async remove() {
     this.stopEventBusDrainer();
+    await this.stopOtelExporter();
     if (typeof super.remove === 'function') await super.remove();
   }
   async destroy() {
     this.stopEventBusDrainer();
+    await this.stopOtelExporter();
     if (typeof super.destroy === 'function') await super.destroy();
   }
   async install() {

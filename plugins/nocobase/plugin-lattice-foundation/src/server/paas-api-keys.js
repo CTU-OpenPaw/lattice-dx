@@ -58,6 +58,7 @@ const READ_ONLY_MUTATING_ACTIONS = new Set([
   'orionDeleteSubscription', 'orionNotify', 'saveRule', 'toggleRule', 'deleteRule',
   'runNow', 'replayRun', 'createDomain', 'installBusinessPack', 'provisionTenant',
   'twinSetDesired', 'twinAckCommand', 'bulkImportDryRun', 'bulkImportCommit',
+  'createWorkflow', 'updateWorkflow', 'activateWorkflow', 'retryExecution', 'syncCredential',
 ]);
 const LAST_USED_THROTTLE_MS = 60_000;
 
@@ -238,6 +239,63 @@ function clampHeaderRole(ctx, roleName) {
   }
 }
 
+const MUTATING_RESOURCE_ACTION_SCOPE_OVERRIDES = new Map([
+  ['dxosLedger:signDocument', ['ledger']],
+  ['dxosDmn:saveTable', ['dmn']],
+  ['dxosDmn:saveDelegation', ['dmn']],
+  ['dxosBlocks:telemetryIngest', ['iot']],
+  ['dxosBlocks:twinSetDesired', ['iot']],
+  ['dxosBlocks:twinAckCommand', ['iot']],
+  ['dxosBlocks:alarmIngest', ['iot']],
+  ['dxosBlocks:alarmAck', ['iot']],
+  ['dxosBlocks:alarmClear', ['iot']],
+  ['dxosBlocks:provisionDevice', ['iot']],
+  ['dxosBlocks:revokeDevice', ['iot']],
+  ['dxosBlocks:deviceStatusIngest', ['iot']],
+]);
+const MUTATING_RESOURCE_SCOPE_OVERRIDES = new Map([
+  ['dxosWms', ['wms']],
+  ['dxosAutomations', ['ai', 'iot']],
+  ['dxosBroker', ['iot']],
+  ['dxosAi', ['ai']],
+  ['dxosMcp', ['ai']],
+  ['dxosN8n', ['ai']],
+]);
+
+function resolveMutatingResourceScopes(ctx) {
+  const fullResource = String(ctx?.action?.resourceName || '').trim();
+  const baseResource = fullResource.split('.')[0];
+  const actionName = String(ctx?.action?.actionName || '').trim();
+  const exactKey = fullResource && actionName ? `${fullResource}:${actionName}` : '';
+  if (exactKey && MUTATING_RESOURCE_ACTION_SCOPE_OVERRIDES.has(exactKey)) {
+    return MUTATING_RESOURCE_ACTION_SCOPE_OVERRIDES.get(exactKey);
+  }
+  const baseKey = baseResource && actionName ? `${baseResource}:${actionName}` : '';
+  if (baseKey && MUTATING_RESOURCE_ACTION_SCOPE_OVERRIDES.has(baseKey)) {
+    return MUTATING_RESOURCE_ACTION_SCOPE_OVERRIDES.get(baseKey);
+  }
+  if (fullResource && MUTATING_RESOURCE_SCOPE_OVERRIDES.has(fullResource)) {
+    return MUTATING_RESOURCE_SCOPE_OVERRIDES.get(fullResource);
+  }
+  if (baseResource && MUTATING_RESOURCE_SCOPE_OVERRIDES.has(baseResource)) {
+    return MUTATING_RESOURCE_SCOPE_OVERRIDES.get(baseResource);
+  }
+  const reqPath = String(ctx?.path || ctx?.request?.path || ctx?.url || '')
+    .split('?')[0]
+    .trim()
+    .replace(/\/+$/, '')
+    .toLowerCase();
+  if (
+    reqPath === '/api/dxos-mcp'
+    || reqPath.endsWith('/api/dxos-mcp')
+    || reqPath === '/api/dxos-mcp/it-ot'
+    || reqPath.endsWith('/api/dxos-mcp/it-ot')
+  ) {
+    return ['ai'];
+  }
+  return null;
+}
+
 function isAllowedReadOnlyRequest(ctx, method) {
   const fullResource = String(ctx?.action?.resourceName || '').trim();
   const baseResource = fullResource.split('.')[0];
@@ -405,6 +463,20 @@ function createPaasApiKeyAuthMiddleware(db) {
     const isReadOnlyPat = scopes.length === 0 || scopes.every((s) => s === 'read');
     if (isReadOnlyPat && !isAllowedReadOnlyRequest(ctx, method)) {
       throw failApiKey('API_KEY_SCOPE_INSUFFICIENT', 403, 'Read-only API key cannot invoke mutating operations.');
+    }
+    if (!isReadOnlyPat && !scopes.includes('write') && !isAllowedReadOnlyRequest(ctx, method)) {
+      const overrideScopes = resolveMutatingResourceScopes(ctx);
+      if (!overrideScopes) {
+        throw failApiKey('API_KEY_SCOPE_INSUFFICIENT', 403, 'API key requires "write" scope for mutating operations.');
+      }
+      const allowedForRoute = new Set(['write', ...overrideScopes]);
+      if (!scopes.some((s) => allowedForRoute.has(s))) {
+        throw failApiKey(
+          'API_KEY_SCOPE_INSUFFICIENT',
+          403,
+          `API key lacks required scope (${overrideScopes.join(' or ')}) for mutating operation.`,
+        );
+      }
     }
 
     return await next();

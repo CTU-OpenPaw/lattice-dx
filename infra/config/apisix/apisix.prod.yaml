@@ -44,6 +44,31 @@ routes:
       - /api/dxos:manifest
       - /api/dxos:sw.js
       - /api/dxosWms:publicTrack
+      - /api/dxosLedger:verifySignature
+    plugins:
+      limit-count:
+        count: 120
+        time_window: 60
+        key_type: var
+        key: remote_addr
+        rejected_code: 429
+        policy: redis
+        redis_host: redis
+        redis_port: 6379
+        redis_password: "${{REDIS_PASSWORD}}"
+    upstream:
+      type: roundrobin
+      nodes:
+        "nocobase:80": 1
+
+  - id: dxos-enterprise-auth
+    priority: 85
+    uris:
+      - /api/enterpriseAuth:start
+      - /api/enterpriseAuth:callback
+      - /api/enterpriseAuth:finish
+      - /api/enterpriseAuth:backchannelLogout
+      - /api/enterpriseAuth*
     plugins:
       limit-count:
         count: 120

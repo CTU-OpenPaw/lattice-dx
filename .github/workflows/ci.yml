@@ -5,13 +5,28 @@
 # @see https://github.com/CTU-OpenPaw/lattice-dx
 # SPDX-License-Identifier: Apache-2.0
 name: Check
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - main
+      - feat/v1.0.0-olp-championship
+      - 'feat/**'
+  pull_request:
+    branches:
+      - main
+      - feat/v1.0.0-olp-championship
+      - 'feat/**'
 permissions:
   contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -23,10 +38,28 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+      - name: Verify targeted Vitest suites (@dx/api, @dx/file-scanner, action-bridge)
+        run: >-
+          pnpm exec vitest run
+          apps/api/src
+          apps/file-scanner/src
+          plugins/nocobase/action-bridge
       - name: Verify Apache-2.0 SPDX headers
         run: node scripts/source-headers.mjs --check
       - name: Verify OSS PoF readiness
         run: pnpm pof:check
+      - name: Verify CycloneDX SBOM freshness
+        run: pnpm release:sbom -- --check
+      - name: Verify Vietnamese NL Agent evaluation (>=95% pass)
+        run: node scripts/eval-vietnamese-nl-agent.mjs --min-pass=95
+      - name: Verify brand naming hygiene
+        run: |
+          set -euo pipefail
+          BRAND_TERM="$(printf 'co%s' 'pilot')"
+          if git grep -in "$BRAND_TERM" -- . ':!docs/superpowers/*'; then
+            echo "Forbidden legacy brand term detected outside docs/superpowers/*" >&2
+            exit 1
+          fi
       - name: Verify NocoBase plugin contracts and script tests
         run: >-
           node --test
@@ -38,10 +71,12 @@ jobs:
           plugins/nocobase/plugin-dxos-studio/tests/*.test.cjs
           plugins/nocobase/plugin-dxos-ai/tests/*.test.cjs
           scripts/tests/*.test.mjs
+          tests/native-ui-fixture.test.mjs
           tests/nocobase-externals.test.mjs
 
   dependency-audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -54,9 +89,12 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Audit production dependencies for moderate/high/critical vulnerabilities
         run: pnpm audit --prod --audit-level=moderate
+      - name: Audit production dependencies for low+ vulnerabilities (PoF Championship gate)
+        run: pnpm audit --prod --audit-level=low
 
   compose-validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Validate all Docker Compose stacks
@@ -74,9 +112,11 @@ jobs:
             docker compose -f infra/compose/core.yml -f infra/compose/uc1-sample.yml config --quiet
           docker compose -f infra/compose/iiot.yml config --quiet
           docker compose --env-file infra/compose/prod.env.example -f infra/compose/prod.yml --profile observability --profile pdf config --quiet
+          docker compose --env-file infra/compose/prod.env.example -f infra/compose/prod.yml --profile n8n --profile iiot --profile observability --profile pdf --profile iam-sync config --quiet
 
   trivy-scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Run Trivy vulnerability, misconfiguration, and secret scan

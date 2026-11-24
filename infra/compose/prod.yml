@@ -47,6 +47,7 @@ services:
     environment:
       LATTICE_DOMAIN: ${LATTICE_DOMAIN:?Set LATTICE_DOMAIN}
       KEYCLOAK_DOMAIN: ${KEYCLOAK_DOMAIN:?Set KEYCLOAK_DOMAIN}
+      N8N_DOMAIN: ${N8N_DOMAIN:?Set N8N_DOMAIN}
     volumes:
       - ../config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
@@ -81,11 +82,13 @@ services:
     command:
       - postgres
       - -c
+      - include_if_exists=/etc/postgresql/pitr.conf
+      - -c
       - wal_level=replica
       - -c
       - archive_mode=on
       - -c
-      - archive_command=${PG_ARCHIVE_COMMAND:-/bin/true}
+      - archive_command=${PG_ARCHIVE_COMMAND:-/bin/sh /etc/postgresql/pitr-archive.sh %p %f}
       - -c
       - archive_timeout=300
       - -c
@@ -99,8 +102,10 @@ services:
       LATTICE_DB_PASSWORD: ${LATTICE_DB_PASSWORD:?Set LATTICE_DB_PASSWORD}
       KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set KEYCLOAK_DB_PASSWORD}
       N8N_DB_PASSWORD: ${N8N_DB_PASSWORD:?Set N8N_DB_PASSWORD}
+      PITR_WAL_DIR: /var/lib/postgresql/wal-archive
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      - postgres-wal-archive:/var/lib/postgresql/wal-archive
       - ../config/postgres/init-prod.sh:/docker-entrypoint-initdb.d/001-init-prod.sh:ro
       - ../config/postgres/pitr.conf:/etc/postgresql/pitr.conf:ro
       - ../config/postgres/pitr-archive.sh:/etc/postgresql/pitr-archive.sh:ro
@@ -126,11 +131,13 @@ services:
     command:
       - postgres
       - -c
+      - include_if_exists=/etc/postgresql/pitr.conf
+      - -c
       - wal_level=replica
       - -c
       - archive_mode=on
       - -c
-      - archive_command=${PG_ARCHIVE_COMMAND:-/bin/true}
+      - archive_command=${PG_ARCHIVE_COMMAND:-/bin/sh /etc/postgresql/pitr-archive.sh %p %f}
       - -c
       - archive_timeout=300
       - -c
@@ -142,9 +149,11 @@ services:
       POSTGRES_USER: ${NOCOBASE_DB_USER:?Set NOCOBASE_DB_USER}
       POSTGRES_PASSWORD: ${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}
       NOCOBASE_APP_DB_USER: ${NOCOBASE_APP_DB_USER:-nocobase_app}
-      NOCOBASE_APP_DB_PASSWORD: ${NOCOBASE_APP_DB_PASSWORD:-${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}}
+      NOCOBASE_APP_DB_PASSWORD: ${NOCOBASE_APP_DB_PASSWORD:?Set NOCOBASE_APP_DB_PASSWORD}
+      PITR_WAL_DIR: /var/lib/postgresql/wal-archive
     volumes:
       - nocobase-db-data:/var/lib/postgresql/data
+      - nocobase-wal-archive:/var/lib/postgresql/wal-archive
       - ../config/postgres/init-pgvector.sql:/docker-entrypoint-initdb.d/001-pgvector.sql:ro
       - ../config/postgres/init-nocobase-db.sh:/docker-entrypoint-initdb.d/002-init-nocobase-db.sh:ro
       - ../config/postgres/pitr.conf:/etc/postgresql/pitr.conf:ro
@@ -311,6 +320,7 @@ services:
       S3_ENDPOINT: http://rustfs:9000
       S3_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:?Set RUSTFS_ACCESS_KEY}
       S3_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:?Set RUSTFS_SECRET_KEY}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
     volumes:
       - engine-objects:/var/lib/latticedx/objects
     networks:
@@ -415,6 +425,7 @@ services:
 
   n8n:
     <<: *hardened
+    profiles: ["n8n"]
     image: n8nio/n8n:2.48.1@sha256:5e022f23ef9eaac3f51467e021610c218ed7eb5b41a05edb388ef1c8e00e009f
     cap_add:
       - CHOWN
@@ -433,6 +444,13 @@ services:
       N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
       N8N_RUNNERS_ENABLED: "true"
       N8N_SECURE_COOKIE: "true"
+      N8N_PUBLIC_API_DISABLED: "false"
+      N8N_HOST: ${N8N_DOMAIN:?Set N8N_DOMAIN}
+      N8N_PROTOCOL: https
+      N8N_PORT: "5678"
+      WEBHOOK_URL: https://${N8N_DOMAIN:?Set N8N_DOMAIN}/
+      N8N_EDITOR_BASE_URL: https://${N8N_DOMAIN:?Set N8N_DOMAIN}/
+      N8N_PROXY_HOPS: "1"
     volumes:
       - n8n-data:/home/node/.n8n
     networks:
@@ -466,7 +484,7 @@ services:
       DB_PORT: "5432"
       DB_DATABASE: nocobase
       DB_USER: ${NOCOBASE_APP_DB_USER:-nocobase_app}
-      DB_PASSWORD: ${NOCOBASE_APP_DB_PASSWORD:-${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}}
+      DB_PASSWORD: ${NOCOBASE_APP_DB_PASSWORD:?Set NOCOBASE_APP_DB_PASSWORD}
       TZ: Asia/Ho_Chi_Minh
       PUBSUB_ADAPTER: redis
       PUBSUB_ADAPTER_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/1
@@ -485,6 +503,17 @@ services:
       DX_METRICS_TOKEN: ${DX_METRICS_TOKEN:?Set DX_METRICS_TOKEN}
       DX_PG_RLS_SESSION: ${DX_PG_RLS_SESSION:-true}
       DXOS_GOTENBERG_URL: ${DXOS_GOTENBERG_URL:-}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+      DX_IIOT_INGEST_TOKEN: ${DX_IIOT_INGEST_TOKEN:?Set DX_IIOT_INGEST_TOKEN}
+      DX_MQTT_BROKER_HOST: ${DX_MQTT_BROKER_HOST:-mosquitto}
+      DX_MQTT_BROKER_PORT: ${DX_MQTT_BROKER_PORT:-1883}
+      MQTT_ADMIN_USER: ${MQTT_ADMIN_USER:?Set MQTT_ADMIN_USER}
+      MQTT_ADMIN_PASSWORD: ${MQTT_ADMIN_PASSWORD:?Set MQTT_ADMIN_PASSWORD}
+      DX_NODERED_COMMAND_URL: ${DX_NODERED_COMMAND_URL:-http://nodered:1880/twin/command}
+      N8N_URL: ${N8N_URL:-http://n8n:5678}
+      N8N_WEBHOOK_BASE_URL: ${N8N_WEBHOOK_BASE_URL:-http://n8n:5678/webhook}
+      DX_ALLOW_INTERNAL_CONNECTORS: ${DX_ALLOW_INTERNAL_CONNECTORS:-true}
+      DX_INTERNAL_SERVICE_HOSTS: ${DX_INTERNAL_SERVICE_HOSTS:-n8n,orion-ld,nodered,mosquitto}
       S3_ENDPOINT: http://rustfs:9000
       S3_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY:?Set RUSTFS_ACCESS_KEY}
       S3_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY:?Set RUSTFS_SECRET_KEY}
@@ -502,6 +531,7 @@ services:
       - edge
       - app
       - data
+      - iiot-net
     depends_on:
       nocobase-db:
         condition: service_healthy
@@ -669,8 +699,12 @@ services:
       MQTT_BRIDGE_PASSWORD: ${MQTT_BRIDGE_PASSWORD:?Set MQTT_BRIDGE_PASSWORD}
       DX_IIOT_INGEST_URL: http://nocobase/api/dxosBlocks:telemetryIngest
       DX_IIOT_STATUS_URL: http://nocobase/api/dxosBroker:deviceStatusIngest
+      DX_TWIN_ACK_URL: http://nocobase/api/dxosBlocks:twinAckCommand
       DX_ORION_URL: http://orion-ld:1026
       DX_IIOT_INGEST_TOKEN: ${DX_IIOT_INGEST_TOKEN:?Set DX_IIOT_INGEST_TOKEN}
+      NODERED_CREDENTIAL_SECRET: ${NODERED_CREDENTIAL_SECRET:?Set NODERED_CREDENTIAL_SECRET}
+      NODERED_ADMIN_USER: ${NODERED_ADMIN_USER:-nodered_admin}
+      NODERED_ADMIN_PASS_HASH: ${NODERED_ADMIN_PASS_HASH:-}
     expose:
       - "1880"
     volumes:
@@ -697,7 +731,9 @@ volumes:
   caddy-data:
   caddy-config:
   postgres-data:
+  postgres-wal-archive:
   nocobase-db-data:
+  nocobase-wal-archive:
   nocobase-storage:
   redis-data:
   rustfs-data:
