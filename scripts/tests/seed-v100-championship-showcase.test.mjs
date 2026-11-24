@@ -520,6 +520,9 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(first.connectorVault.seeded, true);
   assert.equal(first.connectorVault.connectorKey, 'n8n-coldchain-orchestrator');
   assert.equal(first.connectorVault.hasSecrets, true);
+  assert.equal(state.connectors.length, 1);
+  assert.deepEqual(Object.keys(state.connectors[0].secrets), ['secret']);
+  assert.equal(state.connectors[0].secrets.secret, 'demo-showcase-webhook-secret-2026');
   assert.equal(first.mqttDevice.seeded, true);
   assert.equal(first.mqttDevice.deviceKey, 'cold-truck-ct-01');
   assert.equal(first.mqttDevice.mqttPasswordProvisioned, true);
@@ -527,6 +530,13 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(first.webhookSubscription.seeded, true);
   assert.equal(first.webhookSubscription.subscriptionKey, 'n8n-coldchain-alerts');
   assert.equal(first.webhookSubscription.hasSigningSecret, true);
+
+  const vaultSaveCallIdx = state.calls.indexOf('/api/dxosVault:save');
+  const devProvisionCallIdx = state.calls.indexOf('/api/dxosBroker:provisionDevice');
+  const runNowCallIdx = state.calls.indexOf('/api/dxosAutomations:runNow');
+  assert.ok(vaultSaveCallIdx >= 0 && devProvisionCallIdx >= 0 && runNowCallIdx >= 0);
+  assert.ok(vaultSaveCallIdx < runNowCallIdx, 'seedConnectorVault must execute before automation runNow');
+  assert.ok(devProvisionCallIdx < runNowCallIdx, 'seedMqttDevice must execute before automation runNow');
 
   const firstJson = JSON.stringify(first);
   assert.equal(firstJson.includes('demo-showcase-webhook-secret-2026'), false);

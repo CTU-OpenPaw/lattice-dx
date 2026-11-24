@@ -25,6 +25,10 @@ function createMockAcceptanceCaller({
   leakMqttPasswordInList = false,
   omitCustomCollectionInOpenApi = false,
   failStep = null,
+  skipCmmsCoreStep = false,
+  missingConnectorOnStep4 = false,
+  initialAutomationRuns = [],
+  initialAutomationRules = [],
 } = {}) {
   const state = {
     nextId: 100,
@@ -36,8 +40,8 @@ function createMockAcceptanceCaller({
     subscriptions: [],
     deliveries: [],
     dmnTables: [],
-    automationRules: [],
-    automationRuns: [],
+    automationRules: [...initialAutomationRules],
+    automationRuns: [...initialAutomationRuns],
     workOrders: [],
     domains: new Map(),
     customRecords: new Map(),
@@ -196,8 +200,17 @@ function createMockAcceptanceCaller({
           id: ++state.nextId,
           organizationId: values.organizationId,
           ruleKey: 'auto_cmms_on_coldchain_fault',
-          triggerEventType: 'alarm.triggered',
+          name: 'Auto CMMS Cold-Chain Fault',
+          triggerEventType: 'alarm.triggered,device.offline',
           dmnTableKey: 'cmms_priority_routing_v1',
+          cooldownSec: 60,
+          actionsJson: [
+            { type: 'create_record', collection: 'latticeCustomWorkOrders' },
+            { type: 'notify_role', role: '{{dmn.assignedRole}}' },
+            { type: 'twin_set_desired', when: { 'dmn.workOrderPriority': 'critical' }, desiredPatch: { targetTempC: 4.0, fanMode: 'high' } },
+            { type: 'trigger_ai_triage', when: { 'dmn.workOrderPriority': 'critical' } },
+            { type: 'call_connector', when: { 'dmn.workOrderPriority': 'critical' }, connectorKey: 'n8n-coldchain-orchestrator' },
+          ],
         });
       }
       return okResp({
@@ -251,14 +264,20 @@ function createMockAcceptanceCaller({
       return okResp({ device: dev || null, brokerSynced: false });
     }
     if (resourceAction === 'dxosAutomations:saveRule') {
-      const rule = { id: ++state.nextId, ...values };
-      state.automationRules.push(rule);
+      const idx = state.automationRules.findIndex(
+        (r) => r.organizationId === values.organizationId && r.ruleKey === values.ruleKey,
+      );
+      const rule = { id: idx >= 0 ? state.automationRules[idx].id : ++state.nextId, ...values };
+      if (idx >= 0) state.automationRules[idx] = rule;
+      else state.automationRules.push(rule);
       return okResp({ rule });
     }
     if (resourceAction === 'dxosAutomations:deleteRule') {
-      state.automationRules = state.automationRules.filter(
-        (r) => !(r.organizationId === values.organizationId && r.ruleKey === values.ruleKey),
+      const idx = state.automationRules.findIndex(
+        (r) => r.organizationId === values.organizationId && r.ruleKey === values.ruleKey,
       );
+      if (idx < 0) return errResp(404, 'RULE_NOT_FOUND', `Automation rule ${values.ruleKey} not found`);
+      state.automationRules.splice(idx, 1);
       return okResp({ deleted: true, ruleKey: values.ruleKey });
     }
     if (resourceAction === 'dxosAutomations:listRules') {
@@ -311,8 +330,10 @@ function createMockAcceptanceCaller({
           organizationId: values.organizationId,
           ruleKey: rule.ruleKey,
           runUid: `run_${state.nextId}`,
+          triggerEventId: evt.eventId,
+          subject: dev.deviceKey,
           status: 'completed',
-          stepTracesJson: [{ stepIndex: 0, type: 'create_record', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id } }],
+          stepTracesJson: [{ stepIndex: 0, type: 'create_record', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id, record: wo } }],
         });
       }
       const { mqttPassword, ...safeDev } = dev;
@@ -329,19 +350,34 @@ function createMockAcceptanceCaller({
         status: 'open',
       };
       state.workOrders.push(wo);
+      const stepTraces = [
+        { stepIndex: 0, type: 'create_record', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id, record: wo } },
+        { stepIndex: 1, type: 'notify_role', status: 'completed', output: { dispatched: 1 } },
+        {
+          stepIndex: 2,
+          type: 'twin_set_desired',
+          status: skipCmmsCoreStep ? 'skipped' : 'completed',
+          ...(skipCmmsCoreStep ? { skipReason: 'BRANCH_CONDITION_NOT_MATCHED', output: null } : { output: { shadow: { id: 901, assetId: wo.assetId }, approvalId: 902 } }),
+        },
+        { stepIndex: 3, type: 'trigger_ai_triage', status: 'completed', output: { id: 903, target: 'latticeAgentProposals' } },
+        {
+          stepIndex: 4,
+          type: 'call_connector',
+          status: missingConnectorOnStep4 ? 'failed' : 'completed',
+          ...(missingConnectorOnStep4
+            ? { output: null, error: 'CONNECTOR_NOT_FOUND: n8n-coldchain-orchestrator' }
+            : { output: { connectorKey: 'n8n-coldchain-orchestrator', status: 200, ok: true } }),
+        },
+      ];
       const run = {
         id: ++state.nextId,
         organizationId: values.organizationId,
         ruleKey: values.ruleKey,
         runUid: `run_${state.nextId}`,
-        status: 'completed',
+        subject: values.subject ?? values.data?.deviceKey ?? '',
+        status: missingConnectorOnStep4 ? 'partial' : 'completed',
         dmnResultJson: { tableKey: 'cmms_priority_routing_v1', outputs: { workOrderPriority: wo.priority, assignedRole: 'ldx_manager' } },
-        stepTracesJson: [
-          { stepIndex: 0, type: 'create_record', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id } },
-          { stepIndex: 1, type: 'notify_role', status: 'completed', output: { dispatched: 1 } },
-          { stepIndex: 2, type: 'twin_set_desired', status: 'completed', output: { shadow: { id: 901 }, approvalId: 902 } },
-          { stepIndex: 3, type: 'trigger_ai_triage', status: 'completed', output: { id: 903, target: 'latticeAgentProposals' } },
-        ],
+        stepTracesJson: stepTraces,
       };
       state.automationRuns.push(run);
       return okResp({ run });
@@ -350,20 +386,56 @@ function createMockAcceptanceCaller({
       const org = query.get('organizationId');
       return okResp({
         organizationId: org,
-        eventTypes: [{ type: 'alarm.triggered' }],
-        actionTypes: [{ type: 'create_record' }],
+        eventTypes: [{ type: 'alarm.triggered' }, { type: 'sla.warning' }, { type: 'sla.breached' }],
+        actionTypes: [{ type: 'create_record' }, { type: 'notify_role' }],
         dmnTables: [{ key: 'cmms_priority_routing_v1', name: 'CMMS Priority Routing' }],
         collections: [{ name: 'latticeCustomWorkOrders', fields: [{ name: 'workOrderCode', type: 'string' }, { name: 'priority', type: 'string' }] }],
         connectors: state.connectors.map(({ secrets, ...safe }) => safe),
-        roles: ['ldx_admin', 'ldx_manager', 'ldx_operator'],
+        roles: ['ldx_admin', 'ldx_manager', 'ldx_operator', 'ldx_dispatcher'],
         blueprints: [
           { ruleKey: 'auto_cmms_on_coldchain_fault' },
           { ruleKey: 'auto_mkt_quarantine_response' },
-          { ruleKey: 'auto_sla_breach_escalation' },
+          {
+            ruleKey: 'auto_sla_breach_escalation',
+            name: 'Leo thang Cảnh báo & Vi phạm SLA (3 bước rẽ nhánh)',
+            triggerEventType: 'sla.warning,sla.breached',
+            filterJson: null,
+            dmnTableKey: null,
+            cooldownSec: 120,
+            maxDepth: 8,
+            active: true,
+            actionsJson: [
+              { type: 'notify_role', when: { 'event.type': 'sla.warning' }, role: 'ldx_dispatcher' },
+              { type: 'create_record', when: { 'event.type': 'sla.breached' }, collection: 'latticeServiceTickets', values: { code: 'SLA-{{id}}' } },
+              { type: 'notify_role', when: { 'event.type': 'sla.breached' }, role: 'ldx_manager' },
+            ],
+          },
         ],
       });
     }
     if (resourceAction === 'dxosAutomations:testRule') {
+      const targetRuleKey = values.rule?.ruleKey || values.ruleKey;
+      if (targetRuleKey === 'auto_sla_breach_escalation') {
+        const evType = String(values.event?.type || 'sla.breached');
+        const isWarn = evType === 'sla.warning';
+        const isBreach = evType === 'sla.breached';
+        return okResp({
+          simulation: {
+            dmnResultJson: null,
+            stepTracesJson: [
+              { stepIndex: 0, type: 'notify_role', status: isWarn ? 'simulated' : 'skipped', ...(isWarn ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+              { stepIndex: 1, type: 'create_record', status: isBreach ? 'simulated' : 'skipped', ...(isBreach ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+              { stepIndex: 2, type: 'notify_role', status: isBreach ? 'simulated' : 'skipped', ...(isBreach ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+            ],
+          },
+        });
+      }
+      if (!values.rule && targetRuleKey !== 'auto_cmms_on_coldchain_fault') {
+        const found = state.automationRules.find(
+          (r) => r.organizationId === values.organizationId && r.ruleKey === targetRuleKey,
+        );
+        if (!found) return errResp(404, 'RULE_NOT_FOUND', `Automation rule ${targetRuleKey} not found`);
+      }
       const sev = String(values.event?.data?.severity || 'high');
       const isCrit = sev === 'critical';
       return okResp({
@@ -386,29 +458,76 @@ function createMockAcceptanceCaller({
       if (values.mode === 'suggest') {
         return okResp({ mode: 'suggest', applied: false, suggestions: [{ id: 'add_cooldown_guard', title: 'Add cooldown' }] });
       }
+      const upsertMockRule = (draftRule) => {
+        const idx = state.automationRules.findIndex(
+          (r) => r.organizationId === values.organizationId && r.ruleKey === draftRule.ruleKey,
+        );
+        const saved = {
+          id: idx >= 0 ? state.automationRules[idx].id : ++state.nextId,
+          organizationId: values.organizationId,
+          ...draftRule,
+        };
+        if (idx >= 0) state.automationRules[idx] = saved;
+        else state.automationRules.push(saved);
+        return saved;
+      };
       if (values.mode === 'node') {
-        return okResp({
-          mode: 'node',
-          applied: false,
-          draftRule: {
-            ruleKey: 'auto_cmms_on_coldchain_fault',
-            actionsJson: [
-              { type: 'create_record', collection: 'latticeCustomWorkOrders' },
-              { type: 'notify_role', role: '{{dmn.assignedRole}}' },
-              { type: 'twin_set_desired', desiredPatch: { targetTempC: 3.5, fanMode: 'high' } },
-            ],
-          },
-        });
-      }
-      return okResp({
-        mode: 'full',
-        applied: false,
-        draftRule: {
-          ruleKey: 'auto_coldchain_draft',
+        let baseRule = values.rule || null;
+        if (!baseRule && values.ruleKey) {
+          baseRule = state.automationRules.find(
+            (r) => r.organizationId === values.organizationId && r.ruleKey === values.ruleKey,
+          );
+          if (!baseRule) return errResp(404, 'RULE_NOT_FOUND', `Automation rule ${values.ruleKey} not found`);
+        }
+        const cooldownMatch = String(values.prompt || '').match(/cooldown\s*(\d+)/i);
+        const targetTempMatch = String(values.prompt || '').match(/(-?\d+(?:\.\d+)?)\s*(?:độ|do\b)/i);
+        const cloned = JSON.parse(JSON.stringify(baseRule || {
+          ruleKey: 'auto_cmms_on_coldchain_fault',
+          name: 'CMMS Fault Rule',
           triggerEventType: 'alarm.triggered',
-          actionsJson: [{ type: 'create_record', collection: 'latticeCustomWorkOrders' }, { type: 'notify_role', role: 'ldx_manager' }],
-        },
-      });
+          cooldownSec: 60,
+          actionsJson: [
+            { type: 'create_record', collection: 'latticeCustomWorkOrders' },
+            { type: 'notify_role', role: '{{dmn.assignedRole}}' },
+            { type: 'twin_set_desired', desiredPatch: { targetTempC: 4.0, fanMode: 'high' } },
+          ],
+        }));
+        if (cooldownMatch && values.targetNode === 'trigger') {
+          cloned.cooldownSec = Number(cooldownMatch[1]);
+        }
+        if (targetTempMatch && cloned.actionsJson?.[2]?.type === 'twin_set_desired') {
+          cloned.actionsJson[2].desiredPatch = {
+            ...(cloned.actionsJson[2].desiredPatch || {}),
+            targetTempC: Number(targetTempMatch[1]),
+          };
+        }
+        if (values.apply === true) {
+          const savedRule = upsertMockRule(cloned);
+          return okResp({ mode: 'node', applied: true, draftRule: cloned, savedRule });
+        }
+        return okResp({ mode: 'node', applied: false, draftRule: cloned });
+      }
+      const targetTempMatch = String(values.prompt || '').match(/(-?\d+(?:\.\d+)?)\s*(?:độ|do\b)/i);
+      const targetTempC = targetTempMatch ? Number(targetTempMatch[1]) : 4.0;
+      const draftRule = {
+        ruleKey: values.rule?.ruleKey || 'auto_coldchain_draft',
+        name: 'AI Cold-Chain Draft Rule',
+        triggerEventType: 'alarm.triggered,device.offline',
+        dmnTableKey: 'cmms_priority_routing_v1',
+        cooldownSec: 60,
+        maxDepth: 8,
+        active: true,
+        actionsJson: [
+          { type: 'create_record', collection: 'latticeCustomWorkOrders' },
+          { type: 'notify_role', role: 'ldx_manager' },
+          { type: 'twin_set_desired', when: { 'dmn.workOrderPriority': 'critical' }, desiredPatch: { targetTempC, fanMode: 'high' } },
+        ],
+      };
+      if (values.apply === true) {
+        const savedRule = upsertMockRule(draftRule);
+        return okResp({ mode: 'full', applied: true, draftRule, savedRule });
+      }
+      return okResp({ mode: 'full', applied: false, draftRule });
     }
     if (resourceAction === 'dxosAutomations:listRuns') {
       const org = query.get('organizationId');
@@ -416,6 +535,20 @@ function createMockAcceptanceCaller({
       return okResp({
         items: state.automationRuns.filter((r) => (!org || r.organizationId === org) && (!rKey || r.ruleKey === rKey)),
       });
+    }
+    if (resourceAction === 'latticeAutomationRuns:list') {
+      const f = JSON.parse(query.get('filter') || '{}');
+      return okResp(
+        state.automationRuns.filter((r) =>
+          Object.entries(f).every(([k, v]) => (v === undefined ? true : r?.[k] === v)),
+        ),
+      );
+    }
+    if (resourceAction === 'latticeAutomationRuns:destroy') {
+      state.destroyedPaths.push(path);
+      const id = Number(query.get('filterByTk'));
+      state.automationRuns = state.automationRuns.filter((r) => Number(r.id) !== id);
+      return okResp({ ok: true });
     }
     if (resourceAction === 'latticeCustomWorkOrders:get') {
       const id = Number(query.get('filterByTk'));
@@ -689,7 +822,23 @@ test('parseBrokerAcceptanceArgs validates origins and parses report/origin/org f
 });
 
 test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, masks secrets, and cleans up', async () => {
-  const { callActor, state } = createMockAcceptanceCaller();
+  const showcaseRun = {
+    id: 50,
+    organizationId: 'native-ui-lab',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    runUid: 'run_showcase_coldchain_1',
+    triggerEventId: 'evt_showcase_1',
+    status: 'completed',
+    stepTracesJson: [
+      {
+        stepIndex: 0,
+        type: 'create_record',
+        status: 'completed',
+        output: { collection: 'latticeCustomWorkOrders', id: 51, record: { deviceKey: 'cold-truck-ct-01', assetId: 11 } },
+      },
+    ],
+  };
+  const { callActor, state } = createMockAcceptanceCaller({ initialAutomationRuns: [showcaseRun] });
   const res = await runBrokerAutomationBuilderAcceptance(callActor, { organizationId: 'native-ui-lab' });
 
   assert.equal(res.status, 'PASS');
@@ -707,10 +856,13 @@ test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, ma
     assert.equal(summaryText.includes(pwd), false, 'Acceptance summary leaked mqttPassword');
   }
 
-  // Temporary entities cleaned up
+  // Temporary entities cleaned up (showcase run preserved)
   assert.equal(state.connectors.length, 0);
   assert.equal(state.subscriptions.length, 0);
   assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_lwt_wo_')), false);
+  assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_ai_temp_')), false);
+  assert.deepEqual(state.automationRuns.map((r) => r.id), [50]);
+  assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAutomationRuns:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('collections:destroy?filterByTk=latticeCustomAcc')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAssets:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeIotDevices:destroy?')));
@@ -718,11 +870,71 @@ test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, ma
   assert.equal(res.automationStudio.blueprintCount, 3);
   assert.equal(res.automationStudio.criticalSimulatedSteps, 5);
   assert.equal(res.automationStudio.highSkippedSteps, 3);
+  assert.equal(res.automationStudio.slaWarningSimulatedSteps, 1);
+  assert.equal(res.automationStudio.slaBreachedSimulatedSteps, 2);
   assert.equal(res.automationStudio.aiNodeTargetTempC, 3.5);
+  assert.match(res.automationStudio.aiAppliedTempRuleKey, /^acc_ai_temp_/);
+  assert.equal(res.automationStudio.aiAppliedCooldownSec, 180);
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeCustomWorkOrders:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeTwinShadows:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAgentProposals:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAiApprovalQueue:destroy?')));
+});
+
+test('runBrokerAutomationBuilderAcceptance tolerates partial step 4 call_connector failure on clean-install but fails closed if core steps 0..3 skip or fail', async () => {
+  const partialOkMock = createMockAcceptanceCaller({ missingConnectorOnStep4: true });
+  const partialRes = await runBrokerAutomationBuilderAcceptance(partialOkMock.callActor, { organizationId: 'native-ui-lab' });
+  assert.equal(partialRes.status, 'PASS');
+  assert.equal(partialOkMock.state.automationRuns.length, 0);
+
+  const skippedCoreMock = createMockAcceptanceCaller({ skipCmmsCoreStep: true });
+  await assert.rejects(
+    () => runBrokerAutomationBuilderAcceptance(skippedCoreMock.callActor, { organizationId: 'native-ui-lab' }),
+    /twin_set_desired.*status === 'completed'/,
+  );
+  assert.equal(skippedCoreMock.state.automationRuns.length, 0);
+  assert.equal(skippedCoreMock.state.automationRules.some((r) => r.ruleKey.startsWith('acc_lwt_wo_')), false);
+});
+
+test('runBrokerAutomationBuilderAcceptance uses saved auto_sla_breach_escalation ruleKey when present and cleans up aiTempRuleKey runs', async () => {
+  const { callActor, state } = createMockAcceptanceCaller({
+    initialAutomationRules: [
+      {
+        id: 40,
+        organizationId: 'native-ui-lab',
+        ruleKey: 'auto_sla_breach_escalation',
+        name: 'Saved SLA Escalation',
+        triggerEventType: 'sla.warning,sla.breached',
+        actionsJson: [
+          { type: 'notify_role', when: { 'event.type': 'sla.warning' }, role: 'ldx_dispatcher' },
+          { type: 'create_record', when: { 'event.type': 'sla.breached' }, collection: 'latticeServiceTickets' },
+          { type: 'notify_role', when: { 'event.type': 'sla.breached' }, role: 'ldx_manager' },
+        ],
+      },
+    ],
+  });
+  const wrappedCallActor = async (actorRole, path, opts = {}) => {
+    const res = await callActor(actorRole, path, opts);
+    if (path === 'dxosAutomations:aiAssist' && opts?.values?.apply === true && opts?.values?.mode === 'full') {
+      state.automationRuns.push({
+        id: ++state.nextId,
+        organizationId: opts.values.organizationId,
+        ruleKey: opts.values.ruleKey,
+        runUid: `run_ai_temp_${state.nextId}`,
+        status: 'completed',
+        stepTracesJson: [],
+      });
+    }
+    return res;
+  };
+  const res = await runBrokerAutomationBuilderAcceptance(wrappedCallActor, { organizationId: 'native-ui-lab' });
+  assert.equal(res.status, 'PASS');
+  assert.equal(state.automationRuns.length, 0);
+  assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_ai_temp_')), false);
+  const slaTestCall = state.calls.find(
+    (c) => c.path === 'dxosAutomations:testRule' && c.opts?.values?.ruleKey === 'auto_sla_breach_escalation',
+  );
+  assert.ok(slaTestCall, 'Expected testRule to use ruleKey=auto_sla_breach_escalation when rule is already saved');
 });
 
 test('runBrokerAutomationBuilderAcceptance fails closed on leaked mqttPassword or missing OpenAPI custom paths and still cleans up', async () => {

@@ -14,6 +14,52 @@ const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.
 
 const BLOCKED_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
+const RULE_KEY_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
+const MAX_HARD_DEPTH = 8;
+const VALID_ACTION_TYPES = new Set([
+  'create_record',
+  'update_record',
+  'notify_role',
+  'call_connector',
+  'twin_set_desired',
+  'trigger_ai_triage',
+]);
+const VALID_FILTER_OPERATORS = new Set([
+  '$eq',
+  'eq',
+  '$ne',
+  'ne',
+  '$gt',
+  'gt',
+  '$gte',
+  'gte',
+  '$lt',
+  'lt',
+  '$lte',
+  'lte',
+  '$in',
+  'in',
+  '$nin',
+  'nin',
+  '$exists',
+  'exists',
+  '$contains',
+  'contains',
+]);
+const EXPLICIT_FILTER_CLAUSE_KEYS = new Set([
+  'op',
+  'value',
+  '$eq',
+  '$ne',
+  '$gt',
+  '$gte',
+  '$lt',
+  '$lte',
+  '$in',
+  '$nin',
+  '$exists',
+  '$contains',
+]);
 const LDX_ROLE_RE = /^ldx_[a-z0-9_]{2,40}$/;
 const SENSITIVE_FIELD_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt|signatureDataUrl|encrypted/i;
 
@@ -77,6 +123,10 @@ const FORBIDDEN_SYSTEM_COLLECTIONS = new Set([
   'latticeAutomationRules',
   'latticeAutomationRuns',
 ]);
+
+const FORBIDDEN_SYSTEM_COLLECTIONS_LOWER = new Set(
+  [...FORBIDDEN_SYSTEM_COLLECTIONS].map((c) => c.toLowerCase()),
+);
 
 const DEFAULT_LDX_ROLES = Object.freeze([
   'ldx_admin',
@@ -982,6 +1032,211 @@ function hasBlockedProtoInValue(value, seen = new WeakSet()) {
   return false;
 }
 
+function hasUnsafeTemplateSyntax(value) {
+  if (typeof value === 'string') {
+    const matches = value.matchAll(/\{\{([^{}]*)\}\}/g);
+    for (const match of matches) {
+      const expr = String(match[1] || '').trim();
+      if (!expr || !/^[a-zA-Z0-9_.\-$]+$/.test(expr)) return true;
+      const parts = expr.split('.').filter(Boolean);
+      if (!parts.length || parts.some((p) => BLOCKED_PROTO_KEYS.has(p))) return true;
+    }
+    return false;
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => hasUnsafeTemplateSyntax(item));
+  }
+  if (isPlainObject(value)) {
+    return Object.getOwnPropertyNames(value).some(
+      (k) => BLOCKED_PROTO_KEYS.has(k) || hasUnsafeTemplateSyntax(value[k]),
+    );
+  }
+  return false;
+}
+
+function isSafeTemplateCollectionExpr(col) {
+  const trimmed = String(col || '').trim();
+  if (!trimmed || hasUnsafeTemplateSyntax(trimmed)) return false;
+  return /^\{\{[^{}]+\}\}$/.test(trimmed);
+}
+
+function validateFilterStructure(node, fieldLabel = 'filterJson') {
+  if (node === null || node === undefined) return { ok: true };
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const res = validateFilterStructure(item, fieldLabel);
+      if (!res.ok) return res;
+    }
+    return { ok: true };
+  }
+  if (!isPlainObject(node)) {
+    return { ok: false, code: 'INVALID_FILTER_CLAUSE', message: `${fieldLabel} must be a plain object, array, or null` };
+  }
+  if (Object.getOwnPropertyNames(node).some((k) => BLOCKED_PROTO_KEYS.has(k))) {
+    return { ok: false, code: 'UNSAFE_TEMPLATE_EXPRESSION', message: `${fieldLabel} contains forbidden prototype key` };
+  }
+  if (hasUnsafeTemplateSyntax(node)) {
+    return { ok: false, code: 'UNSAFE_TEMPLATE_EXPRESSION', message: `${fieldLabel} contains unsafe template or prototype key` };
+  }
+  if (typeof node.field === 'string') {
+    const opsKeys = Object.keys(node).filter((k) => k !== 'field');
+    const isExplicitClause = opsKeys.some((k) => EXPLICIT_FILTER_CLAUSE_KEYS.has(k));
+    if (isExplicitClause) {
+      if ('op' in node) {
+        const opStr = String(node.op || '').trim();
+        if (!opStr || BLOCKED_PROTO_KEYS.has(opStr) || !VALID_FILTER_OPERATORS.has(opStr)) {
+          return {
+            ok: false,
+            code: 'INVALID_FILTER_OPERATOR',
+            message: `${fieldLabel} explicit clause has invalid or empty operator`,
+          };
+        }
+      } else {
+        const nonValueKeys = opsKeys.filter((k) => k !== 'value');
+        if (nonValueKeys.length === 0 && !opsKeys.includes('value')) {
+          return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel} explicit clause has no operators` };
+        }
+        for (const k of nonValueKeys) {
+          if (!VALID_FILTER_OPERATORS.has(k)) {
+            return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel} contains unsupported operator "${k}"` };
+          }
+        }
+      }
+    }
+  }
+  for (const [key, expected] of Object.entries(node)) {
+    if (
+      key === '$and' ||
+      key === 'and' ||
+      key === 'all' ||
+      key === '$or' ||
+      key === 'or' ||
+      key === 'any' ||
+      (key === 'rules' && Array.isArray(expected))
+    ) {
+      if (!Array.isArray(expected)) {
+        return { ok: false, code: 'INVALID_FILTER_CLAUSE', message: `${fieldLabel}.${key} must be an array` };
+      }
+      for (const item of expected) {
+        const res = validateFilterStructure(item, `${fieldLabel}.${key}`);
+        if (!res.ok) return res;
+      }
+      continue;
+    }
+    if (key === '$not') {
+      const res = validateFilterStructure(expected, `${fieldLabel}.$not`);
+      if (!res.ok) return res;
+      continue;
+    }
+    if (isPlainObject(expected)) {
+      if (Object.getOwnPropertyNames(expected).some((k) => BLOCKED_PROTO_KEYS.has(k))) {
+        return { ok: false, code: 'UNSAFE_TEMPLATE_EXPRESSION', message: `${fieldLabel}.${key} contains forbidden prototype key` };
+      }
+      if (Object.keys(expected).length === 0) {
+        return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel}.${key} operator object cannot be empty` };
+      }
+    }
+  }
+  return { ok: true };
+}
+
+function validateActionCollectionSecurity(act) {
+  const actType = String(act?.type || '').trim();
+  const mutatingCol = String(
+    actType === 'create_record' || actType === 'update_record'
+      ? (act?.collection || act?.targetCollection || '')
+      : (act?.collection || ''),
+  ).trim();
+  if (mutatingCol) {
+    if (!isCatalogSafeCollection(mutatingCol) && !isSafeTemplateCollectionExpr(mutatingCol)) {
+      return { ok: false, error: `Target collection "${mutatingCol}" is forbidden.` };
+    }
+  }
+  const refCol = actType === 'create_record' || actType === 'update_record'
+    ? ''
+    : String(act?.targetCollection || '').trim();
+  if (refCol) {
+    const hasBrace = refCol.includes('{') || refCol.includes('}');
+    if (hasBrace) {
+      if (!isSafeTemplateCollectionExpr(refCol)) {
+        return { ok: false, error: `Target collection template "${refCol}" is unsafe.` };
+      }
+    } else if (FORBIDDEN_SYSTEM_COLLECTIONS.has(refCol) || FORBIDDEN_SYSTEM_COLLECTIONS_LOWER.has(refCol.toLowerCase())) {
+      return { ok: false, error: `Target collection "${refCol}" is forbidden.` };
+    }
+  }
+  return { ok: true };
+}
+
+function validateRuleDraft(rule, { requireRuleKeyAndName = false } = {}) {
+  if (!isPlainObject(rule)) {
+    return { ok: false, code: 'INVALID_RULE', message: 'draftRule must be a plain object.' };
+  }
+  if (hasBlockedProtoInValue(rule)) {
+    return { ok: false, code: 'UNSAFE_TEMPLATE_EXPRESSION', message: 'draftRule contains forbidden prototype key.' };
+  }
+  if (hasUnsafeTemplateSyntax(rule)) {
+    return { ok: false, code: 'UNSAFE_TEMPLATE_EXPRESSION', message: 'draftRule contains unsafe template or prototype key.' };
+  }
+  const ruleKey = String(rule.ruleKey || rule.automationCode || '').trim();
+  if (requireRuleKeyAndName || ruleKey) {
+    if (!RULE_KEY_RE.test(ruleKey)) {
+      return { ok: false, code: 'INVALID_RULE_KEY', message: 'ruleKey must match ^[a-z0-9][a-z0-9_-]{1,62}$' };
+    }
+  }
+  const name = String(rule.name || '').trim();
+  if (requireRuleKeyAndName && !name) {
+    return { ok: false, code: 'MISSING_RULE_NAME', message: 'name is required' };
+  }
+  if (rule.actionsJson !== undefined && !Array.isArray(rule.actionsJson)) {
+    return { ok: false, code: 'INVALID_ACTIONS_JSON', message: 'actionsJson must be an array' };
+  }
+  const actions = Array.isArray(rule.actionsJson) ? rule.actionsJson : [];
+  for (let i = 0; i < actions.length; i += 1) {
+    const act = actions[i];
+    if (!isPlainObject(act) || !VALID_ACTION_TYPES.has(String(act.type || '').trim())) {
+      return { ok: false, code: 'INVALID_ACTION_TYPE', message: `actionsJson[${i}].type must be a valid automation action` };
+    }
+    if (act.when !== undefined && act.when !== null) {
+      if (!isPlainObject(act.when)) {
+        return { ok: false, code: 'INVALID_ACTION_CONDITION', message: `actionsJson[${i}].when must be a plain object or null` };
+      }
+      const whenRes = validateFilterStructure(act.when, `actionsJson[${i}].when`);
+      if (!whenRes.ok) return whenRes;
+    }
+    if (act.label !== undefined && act.label !== null && typeof act.label !== 'string') {
+      return { ok: false, code: 'INVALID_ACTION_LABEL', message: `actionsJson[${i}].label must be a string` };
+    }
+    if (act.branchLabel !== undefined && act.branchLabel !== null && typeof act.branchLabel !== 'string') {
+      return { ok: false, code: 'INVALID_ACTION_BRANCH_LABEL', message: `actionsJson[${i}].branchLabel must be a string` };
+    }
+    if (act.stopOnError !== undefined && act.stopOnError !== null && typeof act.stopOnError !== 'boolean') {
+      return { ok: false, code: 'INVALID_ACTION_STOP_ON_ERROR', message: `actionsJson[${i}].stopOnError must be a boolean` };
+    }
+    const colRes = validateActionCollectionSecurity(act);
+    if (!colRes.ok) {
+      return { ok: false, code: 'TARGET_COLLECTION_FORBIDDEN', message: colRes.error };
+    }
+  }
+  if (rule.filterJson !== undefined && rule.filterJson !== null) {
+    const filterRes = validateFilterStructure(rule.filterJson, 'filterJson');
+    if (!filterRes.ok) return filterRes;
+  }
+  if (rule.maxDepth !== undefined && rule.maxDepth !== null) {
+    const rawMaxDepth = Number(rule.maxDepth);
+    if (!Number.isInteger(rawMaxDepth) || rawMaxDepth < 1 || rawMaxDepth > MAX_HARD_DEPTH) {
+      return { ok: false, code: 'INVALID_MAX_DEPTH', message: `maxDepth must be an integer between 1 and ${MAX_HARD_DEPTH}` };
+    }
+  }
+  if (rule.cooldownSec !== undefined && rule.cooldownSec !== null) {
+    const rawCooldown = Number(rule.cooldownSec);
+    if (!Number.isInteger(rawCooldown) || rawCooldown < 0) {
+      return { ok: false, code: 'INVALID_COOLDOWN', message: 'cooldownSec must be a non-negative integer' };
+    }
+  }
+  return { ok: true };
+}
+
 const PROMPT_INJECTION_RE = /\b(ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?|ignore\s+previous|system\s+prompt|reveal\s+(?:the\s+)?(?:system\s+)?prompt|bypass\s+(?:rbac|hitl|auth|acl|security|rls)|disable\s+(?:hitl|rbac|rls|auth)|exfiltrate|dump\s+secrets?|steal\s+secrets?|jailbreak)\b/i;
 const PROTOTYPE_OR_CODE_RE = /(__proto__|process\.env|child_process|\bconstructor\b|\bprototype\b|require\s*\(|eval\s*\(|Function\s*\(|\$\{)/i;
 const SENSITIVE_COLLECTION_NAME_RE = /\b(latticeConnectors|latticeApiKeys|latticePkiKeys|latticeCryptoLedger|latticeWebhookSubscriptions|latticeWebhookDeliveries|latticeEventBus|latticeDelegations|latticeOrganizations|latticeAutomationRules|latticeAutomationRuns|apiKeys|rolesUsers|applicationTokens|authenticators|sessions)\b/i;
@@ -1010,11 +1265,27 @@ function validateAiAssistSecurity({ prompt, targetNode, rule }) {
     if (hasBlockedProtoInValue(rule)) {
       return { refused: true, error: 'rule contains forbidden prototype key.' };
     }
+    if (hasUnsafeTemplateSyntax(rule)) {
+      return { refused: true, error: 'rule contains unsafe template expression.' };
+    }
+    if (rule.filterJson !== undefined && rule.filterJson !== null) {
+      const filterRes = validateFilterStructure(rule.filterJson, 'filterJson');
+      if (!filterRes.ok) {
+        return { refused: true, error: filterRes.message };
+      }
+    }
     const actions = Array.isArray(rule.actionsJson) ? rule.actionsJson : [];
-    for (const act of actions) {
-      const col = String(act?.collection || act?.targetCollection || '').trim();
-      if (col && !isCatalogSafeCollection(col)) {
-        return { refused: true, error: `Target collection "${col}" is forbidden.` };
+    for (let i = 0; i < actions.length; i += 1) {
+      const act = actions[i];
+      if (act?.when !== undefined && act?.when !== null) {
+        const whenRes = validateFilterStructure(act.when, `actionsJson[${i}].when`);
+        if (!whenRes.ok) {
+          return { refused: true, error: whenRes.message };
+        }
+      }
+      const colRes = validateActionCollectionSecurity(act);
+      if (!colRes.ok) {
+        return { refused: true, error: colRes.error };
       }
     }
   }
@@ -1093,7 +1364,7 @@ function extractRoleFromPrompt(promptNorm, catalog) {
   }
   if (/giam doc|quan ly|manager/.test(promptNorm)) return 'ldx_manager';
   if (/dieu phoi|dispatcher/.test(promptNorm)) return 'ldx_dispatcher';
-  if (/kho|warehouse/.test(promptNorm)) return 'ldx_warehouse';
+  if (/\bkho\b|warehouse/.test(promptNorm)) return 'ldx_warehouse';
   if (/tai xe|driver/.test(promptNorm)) return 'ldx_driver';
   if (/van hanh|ky thuat|operator/.test(promptNorm)) return 'ldx_operator';
   if (/quan tri|admin/.test(promptNorm)) return 'ldx_admin';
@@ -1326,6 +1597,55 @@ function buildSuggestionsForRule(rule, catalog) {
   return suggestions;
 }
 
+function dmnHasOutputField(catalog, dmnTableKey, fieldName) {
+  if (!dmnTableKey) return false;
+  const list = Array.isArray(catalog?.dmnTables) ? catalog.dmnTables : [];
+  const table = list.find((t) => (t.tableKey || t.key) === dmnTableKey);
+  if (table && Array.isArray(table.outputsJson)) {
+    return table.outputsJson.some((o) => String(o?.name || '').trim() === fieldName);
+  }
+  return dmnTableKey === 'cmms_priority_routing_v1' && fieldName === 'workOrderPriority';
+}
+
+function buildDefaultCreateValuesForCollection(collectionName, { dmnTableKey = null, catalog = null } = {}) {
+  if (collectionName === 'latticeCustomWorkOrders') {
+    return {
+      workOrderCode: 'WO-{{id}}',
+      title: 'Cold-Chain Fault: {{data.deviceKey}}',
+      assetId: '{{data.assetId}}',
+      deviceKey: '{{data.deviceKey}}',
+      priority: dmnHasOutputField(catalog, dmnTableKey, 'workOrderPriority') ? '{{dmn.workOrderPriority}}' : 'high',
+      status: 'open',
+      faultSummary: '{{data.message}}',
+    };
+  }
+  if (collectionName === 'latticeIncidentCases') {
+    return {
+      code: 'INC-{{id}}',
+      name: 'Sự cố {{type}}: {{subject}}',
+      runId: 'run-{{id}}',
+      assetEntityId: 'asset:{{data.deviceKey}}',
+      handlerId: 'ldx_manager',
+      severity: 'high',
+      status: 'open',
+    };
+  }
+  if (collectionName === 'latticeServiceTickets') {
+    return {
+      code: 'SRV-{{id}}',
+      name: 'Xử lý {{type}}: {{subject}}',
+      serviceType: 'facilities',
+      priority: 'high',
+      description: 'Tạo tự động từ sự kiện {{type}} ({{subject}}).',
+    };
+  }
+  return {
+    code: 'AUTO-{{id}}',
+    name: 'Xử lý {{type}}: {{subject}}',
+    status: 'open',
+  };
+}
+
 function synthesizeFullRule({ prompt, rule, catalog }) {
   const promptNorm = normalizeSearchText(prompt);
   const existingRule = isPlainObject(rule) ? cloneSafe(rule) : {};
@@ -1359,9 +1679,20 @@ function synthesizeFullRule({ prompt, rule, catalog }) {
     } else if (/device\.offline|mat ket noi|lwt/.test(promptNorm) && !/alarm\.triggered/.test(promptNorm)) {
       draftRule.triggerEventType = 'device.offline';
     }
-    const matchedCol = findMatchingCollection(catalog, draftRule.actionsJson[0]?.collection, promptNorm);
-    if (matchedCol && draftRule.actionsJson[0]?.type === 'create_record') {
+    const origCol = draftRule.actionsJson[0]?.collection;
+    const matchedCol = findMatchingCollection(catalog, origCol, promptNorm);
+    if (matchedCol && draftRule.actionsJson[0]?.type === 'create_record' && matchedCol !== origCol) {
       draftRule.actionsJson[0].collection = matchedCol;
+      draftRule.actionsJson[0].label = `Tạo bản ghi trên ${matchedCol}`;
+      draftRule.actionsJson[0].values = buildDefaultCreateValuesForCollection(matchedCol, {
+        dmnTableKey: draftRule.dmnTableKey,
+        catalog,
+      });
+      for (const act of draftRule.actionsJson) {
+        if ((act.type === 'notify_role' || act.type === 'trigger_ai_triage') && act.targetCollection === origCol) {
+          act.targetCollection = matchedCol;
+        }
+      }
     }
     const matchedConn = findMatchingConnector(catalog, null, promptNorm);
     if (matchedConn) {
@@ -1383,9 +1714,10 @@ function synthesizeFullRule({ prompt, rule, catalog }) {
 
     const actionsJson = [];
     if (/tao phieu|create|ticket|workorder|incident|ghi/.test(promptNorm) || matchedCol) {
-      const values = matchedCol === 'latticeServiceTickets'
-        ? { code: 'AUTO-{{id}}', name: 'Xử lý {{type}}: {{subject}}', serviceType: 'facilities', priority: 'medium' }
-        : { code: 'AUTO-{{id}}', title: 'Xử lý {{type}}: {{subject}}', status: 'open' };
+      const values = buildDefaultCreateValuesForCollection(matchedCol, {
+        dmnTableKey: matchedDmn,
+        catalog,
+      });
       actionsJson.push({
         type: 'create_record',
         label: `Tạo bản ghi trên ${matchedCol}`,
@@ -1491,47 +1823,57 @@ function synthesizeFullRule({ prompt, rule, catalog }) {
 function resolveTargetNode({ targetNode, promptNorm, actions }) {
   const explicit = String(targetNode || '').trim();
   if (explicit) {
-    if (/^(?:trigger|filter|dmn)$/i.test(explicit)) return explicit.toLowerCase();
-    if (/^step:\d+$/i.test(explicit)) return explicit.toLowerCase();
-    if (/^\d+$/.test(explicit)) return `step:${explicit}`;
+    if (/^(?:trigger|filter|dmn)$/i.test(explicit)) {
+      return { target: explicit.toLowerCase(), invalidTargetNode: null };
+    }
+    if (/^(?:actions|step:new|step:append)$/i.test(explicit)) {
+      return { target: 'step:append', invalidTargetNode: null };
+    }
+    if (/^step:\d+$/i.test(explicit)) {
+      return { target: explicit.toLowerCase(), invalidTargetNode: null };
+    }
+    if (/^\d+$/.test(explicit)) {
+      return { target: `step:${explicit}`, invalidTargetNode: null };
+    }
+    return { target: null, invalidTargetNode: explicit };
   }
 
   const stepNumMatch = promptNorm.match(/(?:buoc|step)\s*#?\s*(\d+)/i);
   if (stepNumMatch) {
     const rawIdx = Number(stepNumMatch[1]);
     if (Number.isInteger(rawIdx) && rawIdx >= 0 && rawIdx < actions.length) {
-      return `step:${rawIdx}`;
+      return { target: `step:${rawIdx}`, invalidTargetNode: null };
     }
     if (Number.isInteger(rawIdx) && rawIdx >= 1 && rawIdx - 1 < actions.length) {
-      return `step:${rawIdx - 1}`;
+      return { target: `step:${rawIdx - 1}`, invalidTargetNode: null };
     }
   }
 
-  if (/them buoc|add step|them hanh dong|bo sung buoc/.test(promptNorm)) return 'step:append';
+  if (/them buoc|add step|them hanh dong|bo sung buoc/.test(promptNorm)) return { target: 'step:append', invalidTargetNode: null };
   if (/nhiet do|ha nhiet|targettempc|setpoint|digital twin|twin/.test(promptNorm)) {
     const idx = actions.findIndex((a) => a.type === 'twin_set_desired');
-    return idx >= 0 ? `step:${idx}` : 'step:append';
+    return { target: idx >= 0 ? `step:${idx}` : 'step:append', invalidTargetNode: null };
   }
   if (/n8n|webhook|connector|ket noi/.test(promptNorm)) {
     const idx = actions.findIndex((a) => a.type === 'call_connector');
-    return idx >= 0 ? `step:${idx}` : 'step:append';
+    return { target: idx >= 0 ? `step:${idx}` : 'step:append', invalidTargetNode: null };
   }
   if (/ai triage|triage|phan tich/.test(promptNorm)) {
     const idx = actions.findIndex((a) => a.type === 'trigger_ai_triage');
-    return idx >= 0 ? `step:${idx}` : 'step:append';
+    return { target: idx >= 0 ? `step:${idx}` : 'step:append', invalidTargetNode: null };
   }
   if (/thong bao|notify|vai tro/.test(promptNorm)) {
     const idx = actions.findIndex((a) => a.type === 'notify_role');
-    return idx >= 0 ? `step:${idx}` : 'step:append';
+    return { target: idx >= 0 ? `step:${idx}` : 'step:append', invalidTargetNode: null };
   }
   if (/tao phieu|tao ban ghi|create_record/.test(promptNorm)) {
     const idx = actions.findIndex((a) => a.type === 'create_record');
-    return idx >= 0 ? `step:${idx}` : 'step:append';
+    return { target: idx >= 0 ? `step:${idx}` : 'step:append', invalidTargetNode: null };
   }
-  if (/dmn|bang quyet dinh|decision table/.test(promptNorm)) return 'dmn';
-  if (/bo loc|dieu kien loc|filter/.test(promptNorm)) return 'filter';
-  if (/cooldown|trigger|su kien|maxdepth|do sau/.test(promptNorm)) return 'trigger';
-  return actions.length > 0 ? 'step:0' : 'trigger';
+  if (/dmn|bang quyet dinh|decision table/.test(promptNorm)) return { target: 'dmn', invalidTargetNode: null };
+  if (/bo loc|dieu kien loc|filter/.test(promptNorm)) return { target: 'filter', invalidTargetNode: null };
+  if (/cooldown|trigger|su kien|maxdepth|do sau/.test(promptNorm)) return { target: 'trigger', invalidTargetNode: null };
+  return { target: actions.length > 0 ? 'step:0' : 'trigger', invalidTargetNode: null };
 }
 
 function patchTargetNode({ prompt, rule, targetNode, catalog }) {
@@ -1553,7 +1895,17 @@ function patchTargetNode({ prompt, rule, targetNode, catalog }) {
   if (!Array.isArray(draftRule.actionsJson)) draftRule.actionsJson = [];
 
   const promptNorm = normalizeSearchText(prompt);
-  const resolvedTarget = resolveTargetNode({ targetNode, promptNorm, actions: draftRule.actionsJson });
+  const { target: resolvedTarget, invalidTargetNode } = resolveTargetNode({
+    targetNode,
+    promptNorm,
+    actions: draftRule.actionsJson,
+  });
+  if (invalidTargetNode || !resolvedTarget) {
+    return {
+      refused: true,
+      error: `Invalid targetNode "${invalidTargetNode || targetNode}". Supported values: trigger, filter, dmn, actions, step:append, step:new, or step:<index>.`,
+    };
+  }
   const diffSummary = [];
   let patch = { targetNode: resolvedTarget };
 
@@ -1595,10 +1947,14 @@ function patchTargetNode({ prompt, rule, targetNode, catalog }) {
       patch.dmnTableKey = null;
       diffSummary.push('Đã gỡ liên kết DMN table');
     } else {
-      const dmnKey = findMatchingDmnTable(catalog, draftRule.dmnTableKey, promptNorm) || draftRule.dmnTableKey;
+      const dmnKey = findMatchingDmnTable(catalog, draftRule.dmnTableKey, promptNorm) || draftRule.dmnTableKey || null;
       draftRule.dmnTableKey = dmnKey;
       patch.dmnTableKey = dmnKey;
-      diffSummary.push(`Cập nhật dmnTableKey = ${dmnKey}`);
+      if (dmnKey) {
+        diffSummary.push(`Cập nhật dmnTableKey = ${dmnKey}`);
+      } else {
+        diffSummary.push('Không tìm thấy bảng DMN phù hợp để gắn cho rule.');
+      }
     }
   } else if (resolvedTarget === 'step:append') {
     const temp = extractTemperature(promptNorm, prompt);
@@ -1743,14 +2099,14 @@ function patchTargetNode({ prompt, rule, targetNode, catalog }) {
           if (step.type === 'notify_role') {
             step.body = cleanPrompt;
             updatedFields.body = cleanPrompt;
+            diffSummary.push(`Cập nhật nội dung bước #${idx}`);
           } else if (step.type === 'trigger_ai_triage') {
             step.recommendation = cleanPrompt;
             updatedFields.recommendation = cleanPrompt;
+            diffSummary.push(`Cập nhật nội dung bước #${idx}`);
           } else {
-            step.label = cleanPrompt;
-            updatedFields.label = cleanPrompt;
+            diffSummary.push(`Không nhận diện được tham số cấu trúc cho bước #${idx} (${step.type}); giữ nguyên label và cấu hình.`);
           }
-          diffSummary.push(`Cập nhật nội dung bước #${idx}`);
         }
       }
 
@@ -1786,72 +2142,86 @@ function runAutomationAiAssist({ mode, prompt, rule, targetNode, catalog } = {})
   const sec = validateAiAssistSecurity({ prompt, targetNode, rule });
   if (sec.refused) return sec;
 
+  let result;
   if (resolvedMode === 'full') {
     const cleanPrompt = String(prompt || '').trim();
     if (!cleanPrompt) {
       return { refused: true, error: 'Prompt is required when mode is "full".' };
     }
-    return synthesizeFullRule({ prompt: cleanPrompt, rule, catalog });
-  }
-
-  if (resolvedMode === 'node') {
+    result = synthesizeFullRule({ prompt: cleanPrompt, rule, catalog });
+  } else if (resolvedMode === 'node') {
     const cleanPrompt = String(prompt || '').trim();
     if (!cleanPrompt) {
       return { refused: true, error: 'Prompt is required when mode is "node".' };
     }
-    return patchTargetNode({ prompt: cleanPrompt, rule, targetNode, catalog });
-  }
-
-  const baseRule = isPlainObject(rule) ? cloneSafe(rule) : getBlueprintByKey('auto_cmms_on_coldchain_fault');
-  const suggestions = buildSuggestionsForRule(baseRule, catalog);
-  const topPreview = cloneSafe(baseRule);
-  if (!Array.isArray(topPreview.actionsJson)) topPreview.actionsJson = [];
-  for (const sug of suggestions) {
-    if (sug.id === 'add_cooldown_guard') topPreview.cooldownSec = 60;
-    if (sug.id === 'narrow_broad_trigger') {
-      topPreview.triggerEventType = sug.patch.triggerEventType;
-      topPreview.filterJson = sug.patch.filterJson;
-    }
-    if (sug.id === 'use_dmn_outputs' && Array.isArray(sug.previewRule?.actionsJson)) {
-      topPreview.actionsJson = cloneSafe(sug.previewRule.actionsJson);
-    }
-    if (sug.id === 'add_twin_hitl_step' && !topPreview.actionsJson.some((a) => a.type === 'twin_set_desired')) {
-      topPreview.actionsJson.push(cloneSafe(sug.previewRule.actionsJson.at(-1)));
-    }
-    if (sug.id === 'add_ai_triage_step' && !topPreview.actionsJson.some((a) => a.type === 'trigger_ai_triage')) {
-      topPreview.actionsJson.push(cloneSafe(sug.previewRule.actionsJson.at(-1)));
-    }
-    if (sug.id === 'add_vault_connector_step' && !topPreview.actionsJson.some((a) => a.type === 'call_connector')) {
-      topPreview.actionsJson.push(cloneSafe(sug.previewRule.actionsJson.at(-1)));
-    }
-    if (sug.id === 'add_conditional_branch' && !topPreview.actionsJson.some((a) => isPlainObject(a.when) && Object.keys(a.when).length > 0)) {
-      const highImpactIdx = topPreview.actionsJson.findIndex((a) => ['twin_set_desired', 'call_connector', 'trigger_ai_triage'].includes(a.type));
-      const idxToBranch = highImpactIdx >= 0 ? highImpactIdx : topPreview.actionsJson.length - 1;
-      if (idxToBranch >= 0) {
-        topPreview.actionsJson[idxToBranch].when = cloneSafe(sug.patch.when);
-        topPreview.actionsJson[idxToBranch].branchLabel = sug.patch.branchLabel;
+    result = patchTargetNode({ prompt: cleanPrompt, rule, targetNode, catalog });
+  } else {
+    const baseRule = isPlainObject(rule) ? cloneSafe(rule) : getBlueprintByKey('auto_cmms_on_coldchain_fault');
+    const suggestions = buildSuggestionsForRule(baseRule, catalog);
+    const topPreview = cloneSafe(baseRule);
+    if (!Array.isArray(topPreview.actionsJson)) topPreview.actionsJson = [];
+    for (const sug of suggestions) {
+      if (sug.id === 'add_cooldown_guard') topPreview.cooldownSec = 60;
+      if (sug.id === 'narrow_broad_trigger') {
+        topPreview.triggerEventType = sug.patch.triggerEventType;
+        topPreview.filterJson = sug.patch.filterJson;
+      }
+      if (sug.id === 'use_dmn_outputs' && Array.isArray(sug.previewRule?.actionsJson)) {
+        topPreview.actionsJson = cloneSafe(sug.previewRule.actionsJson);
+      }
+      if (sug.id === 'add_twin_hitl_step' && !topPreview.actionsJson.some((a) => a.type === 'twin_set_desired')) {
+        topPreview.actionsJson.push(cloneSafe(sug.previewRule.actionsJson.at(-1)));
+      }
+      if (sug.id === 'add_ai_triage_step' && !topPreview.actionsJson.some((a) => a.type === 'trigger_ai_triage')) {
+        topPreview.actionsJson.push(cloneSafe(sug.previewRule.actionsJson.at(-1)));
+      }
+      if (sug.id === 'add_vault_connector_step' && !topPreview.actionsJson.some((a) => a.type === 'call_connector')) {
+        topPreview.actionsJson.push(cloneSafe(sug.previewRule.actionsJson.at(-1)));
+      }
+      if (sug.id === 'add_conditional_branch' && !topPreview.actionsJson.some((a) => isPlainObject(a.when) && Object.keys(a.when).length > 0)) {
+        const highImpactIdx = topPreview.actionsJson.findIndex((a) => ['twin_set_desired', 'call_connector', 'trigger_ai_triage'].includes(a.type));
+        const idxToBranch = highImpactIdx >= 0 ? highImpactIdx : topPreview.actionsJson.length - 1;
+        if (idxToBranch >= 0) {
+          topPreview.actionsJson[idxToBranch].when = cloneSafe(sug.patch.when);
+          topPreview.actionsJson[idxToBranch].branchLabel = sug.patch.branchLabel;
+        }
       }
     }
+
+    result = {
+      refused: false,
+      mode: 'suggest',
+      summary:
+        suggestions.length > 0
+          ? `Phát hiện ${suggestions.length} đề xuất tối ưu hóa quy trình dựa trên dữ liệu hệ thống.`
+          : 'Quy trình đã đầy đủ các lớp bảo vệ (cooldown, filter, branching và kết nối hệ thống).',
+      draftRule: topPreview,
+      suggestions,
+      diffSummary: suggestions.map((s) => s.title),
+      sampleEvent: resolveSampleEventForRule(baseRule, catalog),
+    };
   }
 
-  return {
-    refused: false,
-    mode: 'suggest',
-    summary:
-      suggestions.length > 0
-        ? `Phát hiện ${suggestions.length} đề xuất tối ưu hóa quy trình dựa trên dữ liệu hệ thống.`
-        : 'Quy trình đã đầy đủ các lớp bảo vệ (cooldown, filter, branching và kết nối hệ thống).',
-    draftRule: topPreview,
-    suggestions,
-    diffSummary: suggestions.map((s) => s.title),
-    sampleEvent: resolveSampleEventForRule(baseRule, catalog),
-  };
+  if (result?.refused) return result;
+  if (result?.draftRule) {
+    const draftCheck = validateRuleDraft(result.draftRule, { requireRuleKeyAndName: resolvedMode === 'full' });
+    if (!draftCheck.ok) {
+      return { refused: true, error: draftCheck.message };
+    }
+  }
+  return result;
 }
 
 module.exports = {
   ACTION_SCHEMA_CATALOG,
   AUTOMATION_BLUEPRINTS,
+  BLOCKED_PROTO_KEYS,
+  MAX_HARD_DEPTH,
+  RULE_KEY_RE,
   STANDARD_EVENT_CATALOG,
+  VALID_ACTION_TYPES,
   buildAutomationBuilderCatalog,
+  hasUnsafeTemplateSyntax,
   runAutomationAiAssist,
+  validateFilterStructure,
 };

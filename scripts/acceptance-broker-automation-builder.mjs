@@ -367,6 +367,7 @@ async function verifyMqttLwtAutomationCmms(callActor, okActor, organizationId, s
       && (ev?.subject === deviceKey || ev?.payloadJson?.data?.deviceKey === deviceKey),
   );
   assert.ok(offlineEvt, 'device.offline CloudEvent missing from dxosEvents:listEvents');
+  cleanup.offlineEventId = offlineEvt?.eventId ?? null;
 
   const lwtRunsRes = await okActor(
     'root',
@@ -397,12 +398,42 @@ async function verifyMqttLwtAutomationCmms(callActor, okActor, organizationId, s
     },
   });
   const cmmsRun = runNowRes.data?.run;
+  cleanup.cmmsRunUid = cmmsRun?.runUid ?? null;
+  cleanup.cmmsRunId = cmmsRun?.id ?? null;
   assert.ok(
     ['completed', 'partial'].includes(cmmsRun?.status),
     `Expected auto_cmms_on_coldchain_fault runNow completed or partial, got ${cmmsRun?.status}: ${cmmsRun?.errorMessage}`,
   );
   assert.equal(cmmsRun?.dmnResultJson?.outputs?.workOrderPriority, 'critical');
   const traces = Array.isArray(cmmsRun?.stepTracesJson) ? cmmsRun.stepTracesJson : [];
+  const requiredCoreSteps = [
+    { index: 0, type: 'create_record' },
+    { index: 1, type: 'notify_role' },
+    { index: 2, type: 'twin_set_desired' },
+    { index: 3, type: 'trigger_ai_triage' },
+  ];
+  for (const expected of requiredCoreSteps) {
+    const step = traces.find((s) => s?.stepIndex === expected.index) ?? traces[expected.index];
+    assert.ok(step, `Missing step ${expected.index} (${expected.type}) in auto_cmms_on_coldchain_fault stepTracesJson`);
+    assert.equal(step.type, expected.type, `Expected step ${expected.index} type=${expected.type}, got ${step.type}`);
+    assert.equal(
+      step.status,
+      'completed',
+      `Expected step ${expected.index} (${expected.type}) status === 'completed', got ${step.status}: ${step.error || step.skipReason || ''}`,
+    );
+  }
+  const optionalConnectorStep = traces.find((s) => s?.stepIndex === 4) ?? traces[4];
+  if (optionalConnectorStep) {
+    assert.equal(
+      optionalConnectorStep.type,
+      'call_connector',
+      `Expected optional step 4 type=call_connector, got ${optionalConnectorStep.type}`,
+    );
+    assert.ok(
+      ['completed', 'failed'].includes(optionalConnectorStep.status),
+      `Expected optional step 4 (call_connector) status completed or failed, got ${optionalConnectorStep.status}`,
+    );
+  }
   for (const step of traces) {
     if (step?.type === 'create_record' && step?.output?.collection === 'latticeCustomWorkOrders' && step?.output?.id != null) {
       cleanup.workOrderIds.push(step.output.id);
@@ -696,7 +727,7 @@ async function verifyTenantProvisioning(callActor, okActor, suffix, cleanup) {
   return { subOrgId, keyId: prov1.data.pkiKey.keyId, adminUsername };
 }
 
-async function verifyAutomationStudioAndCopilot(callActor, okActor, organizationId) {
+async function verifyAutomationStudioAndCopilot(callActor, okActor, organizationId, suffix = 'TEST', cleanup = null) {
   const catRes = await okActor('root', `dxosAutomations:builderCatalog?organizationId=${encodeURIComponent(organizationId)}`);
   const cat = catRes.data || {};
   assert.ok(Array.isArray(cat.blueprints) && cat.blueprints.length >= 3, 'builderCatalog missing 3 enterprise blueprints');
@@ -747,6 +778,74 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
     assert.equal(highTraces[idx]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
   }
 
+  const existingRulesRes = await okActor(
+    'root',
+    `dxosAutomations:listRules?organizationId=${encodeURIComponent(organizationId)}&limit=200`,
+  );
+  const existingSlaRule = unwrapList(existingRulesRes.data).find((r) => r?.ruleKey === 'auto_sla_breach_escalation');
+  const slaBlueprint = cat.blueprints.find((b) => b?.ruleKey === 'auto_sla_breach_escalation');
+  assert.ok(existingSlaRule || slaBlueprint, 'Missing auto_sla_breach_escalation in listRules and builderCatalog blueprints');
+  const slaTestTarget = existingSlaRule
+    ? { ruleKey: 'auto_sla_breach_escalation' }
+    : { rule: slaBlueprint };
+
+  const slaWarnRes = await okActor('root', 'dxosAutomations:testRule', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ...slaTestTarget,
+      event: {
+        type: 'sla.warning',
+        source: 'dxos-sla',
+        subject: `TKT-ACC-${suffix}`,
+        data: {
+          targetCollection: 'latticeServiceTickets',
+          recordId: 15,
+          code: `TKT-ACC-${suffix}`,
+          priority: 'high',
+          remainingMinutes: 15,
+        },
+      },
+    },
+  });
+  const slaWarnTraces = slaWarnRes.data?.simulation?.stepTracesJson || [];
+  assert.equal(slaWarnTraces.length, 3, 'Expected 3 step traces for auto_sla_breach_escalation (sla.warning)');
+  assert.equal(slaWarnTraces[0]?.type, 'notify_role');
+  assert.equal(slaWarnTraces[0]?.status, 'simulated', 'Expected step 0 (notify_role) simulated for sla.warning');
+  for (const idx of [1, 2]) {
+    assert.equal(slaWarnTraces[idx]?.status, 'skipped', `Expected step ${idx} skipped for sla.warning`);
+    assert.equal(slaWarnTraces[idx]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+  }
+
+  const slaBreachRes = await okActor('root', 'dxosAutomations:testRule', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ...slaTestTarget,
+      event: {
+        type: 'sla.breached',
+        source: 'dxos-sla',
+        subject: `TKT-ACC-${suffix}`,
+        data: {
+          targetCollection: 'latticeServiceTickets',
+          recordId: 15,
+          code: `TKT-ACC-${suffix}`,
+          priority: 'urgent',
+          overdueMinutes: 30,
+          remainingMinutes: 0,
+        },
+      },
+    },
+  });
+  const slaBreachTraces = slaBreachRes.data?.simulation?.stepTracesJson || [];
+  assert.equal(slaBreachTraces.length, 3, 'Expected 3 step traces for auto_sla_breach_escalation (sla.breached)');
+  assert.equal(slaBreachTraces[0]?.status, 'skipped', 'Expected step 0 skipped for sla.breached');
+  assert.equal(slaBreachTraces[0]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+  assert.equal(slaBreachTraces[1]?.type, 'create_record');
+  assert.equal(slaBreachTraces[1]?.status, 'simulated', 'Expected step 1 (create_record) simulated for sla.breached');
+  assert.equal(slaBreachTraces[2]?.type, 'notify_role');
+  assert.equal(slaBreachTraces[2]?.status, 'simulated', 'Expected step 2 (notify_role) simulated for sla.breached');
+
   const suggestRes = await okActor('root', 'dxosAutomations:aiAssist', {
     method: 'POST',
     values: { organizationId, mode: 'suggest', ruleKey: 'auto_cmms_on_coldchain_fault', apply: false },
@@ -781,6 +880,74 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
   assert.ok(fullRes.data?.draftRule?.ruleKey && Array.isArray(fullRes.data?.draftRule?.actionsJson));
   assert.ok(fullRes.data.draftRule.actionsJson.length >= 2);
 
+  const aiTempRuleKey = `acc_ai_temp_${String(suffix).toLowerCase()}`;
+  if (cleanup) cleanup.aiTempRuleKey = aiTempRuleKey;
+
+  const aiApplyFullRes = await okActor('root', 'dxosAutomations:aiAssist', {
+    method: 'POST',
+    values: {
+      organizationId,
+      mode: 'full',
+      ruleKey: aiTempRuleKey,
+      rule: { ruleKey: aiTempRuleKey },
+      prompt: 'Khi có cảnh báo kho lạnh nghiêm trọng, tạo phiếu bảo trì CMMS và nếu critical thì hạ nhiệt 3.5 độ',
+      apply: true,
+    },
+  });
+  assert.equal(aiApplyFullRes.data?.applied, true, 'aiAssist(full, apply=true) must return applied=true');
+  assert.equal(aiApplyFullRes.data?.savedRule?.ruleKey, aiTempRuleKey, 'aiAssist(full, apply=true) savedRule.ruleKey mismatch');
+
+  const listAfterApplyRes = await okActor(
+    'root',
+    `dxosAutomations:listRules?organizationId=${encodeURIComponent(organizationId)}&limit=200`,
+  );
+  const persistedTempRule = unwrapList(listAfterApplyRes.data).find((r) => r?.ruleKey === aiTempRuleKey);
+  assert.ok(persistedTempRule, `Applied temporary rule ${aiTempRuleKey} missing from dxosAutomations:listRules`);
+  assert.equal(
+    persistedTempRule.actionsJson?.find((a) => a?.type === 'twin_set_desired')?.desiredPatch?.targetTempC,
+    3.5,
+  );
+
+  const aiApplyNodeRes = await okActor('root', 'dxosAutomations:aiAssist', {
+    method: 'POST',
+    values: {
+      organizationId,
+      mode: 'node',
+      ruleKey: aiTempRuleKey,
+      targetNode: 'trigger',
+      prompt: 'Đặt cooldown 180 giây',
+      apply: true,
+    },
+  });
+  assert.equal(aiApplyNodeRes.data?.applied, true, 'aiAssist(node, apply=true) must return applied=true');
+  assert.equal(aiApplyNodeRes.data?.savedRule?.ruleKey, aiTempRuleKey);
+  assert.equal(aiApplyNodeRes.data?.savedRule?.cooldownSec, 180);
+
+  const reloadedRulesRes = await okActor(
+    'root',
+    `dxosAutomations:listRules?organizationId=${encodeURIComponent(organizationId)}&limit=200`,
+  );
+  const reloadedTempRule = unwrapList(reloadedRulesRes.data).find((r) => r?.ruleKey === aiTempRuleKey);
+  assert.ok(reloadedTempRule, `Reloaded temporary rule ${aiTempRuleKey} missing from dxosAutomations:listRules`);
+  assert.equal(reloadedTempRule.cooldownSec, 180, 'Expected cooldownSec=180 on reloaded temporary rule');
+
+  const tempRuleTestRes = await okActor('root', 'dxosAutomations:testRule', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ruleKey: aiTempRuleKey,
+      event: {
+        type: 'alarm.triggered',
+        data: { severity: 'critical', deviceKey: 'probe-ct-01', assetId: 1, temperature: 11.2, message: 'Temp rule dry run' },
+      },
+    },
+  });
+  assert.ok(
+    Array.isArray(tempRuleTestRes.data?.simulation?.stepTracesJson)
+    && tempRuleTestRes.data.simulation.stepTracesJson.length >= 2,
+    'Expected persisted temporary rule to simulate cleanly via dxosAutomations:testRule',
+  );
+
   const injectRes = await callActor('root', 'dxosAutomations:aiAssist', {
     method: 'POST',
     values: {
@@ -795,16 +962,20 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
     blueprintCount: cat.blueprints.length,
     criticalSimulatedSteps: critTraces.filter((s) => s?.status === 'simulated').length,
     highSkippedSteps: highTraces.filter((s) => s?.status === 'skipped').length,
+    slaWarningSimulatedSteps: slaWarnTraces.filter((s) => s?.status === 'simulated').length,
+    slaBreachedSimulatedSteps: slaBreachTraces.filter((s) => s?.status === 'simulated').length,
     aiNodeTargetTempC: nodeRes.data?.draftRule?.actionsJson?.[2]?.desiredPatch?.targetTempC ?? null,
     aiSuggestCount: suggestRes.data?.suggestions?.length ?? 0,
+    aiAppliedTempRuleKey: aiTempRuleKey,
+    aiAppliedCooldownSec: reloadedTempRule.cooldownSec,
   };
 }
 
-async function destroyMatchingIds(callActor, collection, filter) {
+async function destroyMatchingIds(callActor, collection, filter, matchFn = null) {
   const qs = encodeURIComponent(JSON.stringify(filter));
   const res = await callActor('root', `${collection}:list?filter=${qs}&pageSize=200`).catch(() => null);
   for (const row of unwrapList(res?.data)) {
-    if (row?.id != null) {
+    if (row?.id != null && (!matchFn || matchFn(row))) {
       await callActor('root', `${collection}:destroy?filterByTk=${encodeURIComponent(row.id)}`, { method: 'POST' }).catch(() => {});
     }
   }
@@ -829,14 +1000,12 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
       subscriptionId: cleanup.subscriptionId,
     });
   }
-  if (cleanup.lwtRuleKey) {
-    await callActor('root', 'dxosAutomations:deleteRule', {
-      method: 'POST',
-      values: { organizationId, ruleKey: cleanup.lwtRuleKey },
-    }).catch(() => {});
-  }
 
   const woIdSet = new Set(cleanup.workOrderIds.filter((id) => id != null));
+  const proposalIdSet = new Set(cleanup.proposalIds.filter((id) => id != null));
+  const approvalQueueIdSet = new Set(cleanup.approvalQueueIds.filter((id) => id != null));
+  const twinShadowIdSet = new Set(cleanup.twinShadowIds.filter((id) => id != null));
+
   if (cleanup.assetId) {
     const woRes = await callActor(
       'root',
@@ -846,6 +1015,79 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
       if (row?.id != null) woIdSet.add(row.id);
     }
   }
+
+  if (cleanup.lwtRuleKey) {
+    await destroyMatchingIds(callActor, 'latticeAutomationRuns', {
+      organizationId,
+      ruleKey: cleanup.lwtRuleKey,
+    });
+    await callActor('root', 'dxosAutomations:deleteRule', {
+      method: 'POST',
+      values: { organizationId, ruleKey: cleanup.lwtRuleKey },
+    }).catch(() => {});
+  }
+  if (cleanup.aiTempRuleKey) {
+    await destroyMatchingIds(callActor, 'latticeAutomationRuns', {
+      organizationId,
+      ruleKey: cleanup.aiTempRuleKey,
+    });
+    await callActor('root', 'dxosAutomations:deleteRule', {
+      method: 'POST',
+      values: { organizationId, ruleKey: cleanup.aiTempRuleKey },
+    }).catch(() => {});
+  }
+  if (
+    cleanup.cmmsRunId != null
+    || cleanup.cmmsRunUid
+    || cleanup.offlineEventId
+    || cleanup.deviceKey
+    || cleanup.assetId != null
+    || woIdSet.size > 0
+  ) {
+    await destroyMatchingIds(
+      callActor,
+      'latticeAutomationRuns',
+      { organizationId, ruleKey: 'auto_cmms_on_coldchain_fault' },
+      (row) => {
+        const runTraces = Array.isArray(row?.stepTracesJson) ? row.stepTracesJson : [];
+        const matched = (
+          (cleanup.cmmsRunId != null && Number(row?.id) === Number(cleanup.cmmsRunId))
+          || (cleanup.cmmsRunUid && row?.runUid === cleanup.cmmsRunUid)
+          || (cleanup.offlineEventId && row?.triggerEventId === cleanup.offlineEventId)
+          || (cleanup.deviceKey && row?.subject === cleanup.deviceKey)
+          || runTraces.some((step) => {
+            const rec = step?.output?.record;
+            if (cleanup.deviceKey && rec?.deviceKey === cleanup.deviceKey) return true;
+            if (
+              cleanup.assetId != null
+              && (Number(rec?.assetId) === Number(cleanup.assetId) || Number(step?.output?.shadow?.assetId) === Number(cleanup.assetId))
+            ) {
+              return true;
+            }
+            if (step?.output?.id != null && woIdSet.has(step.output.id)) return true;
+            return false;
+          })
+        );
+        if (matched) {
+          for (const step of runTraces) {
+            if (step?.type === 'create_record' && step?.output?.collection === 'latticeCustomWorkOrders' && step?.output?.id != null) {
+              woIdSet.add(step.output.id);
+            }
+            if (step?.type === 'trigger_ai_triage' && step?.output?.id != null) {
+              if (step.output.target === 'latticeAiApprovalQueue') approvalQueueIdSet.add(step.output.id);
+              else proposalIdSet.add(step.output.id);
+            }
+            if (step?.type === 'twin_set_desired') {
+              if (step?.output?.shadow?.id != null) twinShadowIdSet.add(step.output.shadow.id);
+              if (step?.output?.approvalId != null) approvalQueueIdSet.add(step.output.approvalId);
+            }
+          }
+        }
+        return matched;
+      },
+    );
+  }
+
   for (const woId of woIdSet) {
     await callActor('root', `latticeCustomWorkOrders:destroy?filterByTk=${encodeURIComponent(woId)}`, { method: 'POST' }).catch(() => {});
   }
@@ -853,13 +1095,13 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
   for (const incId of cleanup.incidentIds) {
     await callActor('root', `latticeIncidentCases:destroy?filterByTk=${encodeURIComponent(incId)}`, { method: 'POST' }).catch(() => {});
   }
-  for (const propId of cleanup.proposalIds) {
+  for (const propId of proposalIdSet) {
     await callActor('root', `latticeAgentProposals:destroy?filterByTk=${encodeURIComponent(propId)}`, { method: 'POST' }).catch(() => {});
   }
-  for (const qId of cleanup.approvalQueueIds) {
+  for (const qId of approvalQueueIdSet) {
     await callActor('root', `latticeAiApprovalQueue:destroy?filterByTk=${encodeURIComponent(qId)}`, { method: 'POST' }).catch(() => {});
   }
-  for (const twId of cleanup.twinShadowIds) {
+  for (const twId of twinShadowIdSet) {
     await callActor('root', `latticeTwinShadows:destroy?filterByTk=${encodeURIComponent(twId)}`, { method: 'POST' }).catch(() => {});
   }
 
@@ -918,6 +1160,10 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
     subscriptionKey: null,
     subscriptionId: null,
     lwtRuleKey: null,
+    aiTempRuleKey: null,
+    offlineEventId: null,
+    cmmsRunUid: null,
+    cmmsRunId: null,
     assetId: null,
     deviceId: null,
     deviceKey: null,
@@ -954,7 +1200,7 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
     const brokerAutomationSummary = await verifyMqttLwtAutomationCmms(callActor, okActor, organizationId, suffix, cleanup);
     checks.mqttDynSecLwtAutomationCmmsOk = true;
 
-    const automationStudioSummary = await verifyAutomationStudioAndCopilot(callActor, okActor, organizationId);
+    const automationStudioSummary = await verifyAutomationStudioAndCopilot(callActor, okActor, organizationId, suffix, cleanup);
     checks.automationStudioAndCopilotOk = true;
 
     const webhooksSummary = await verifyWebhooksHmacCircuitDlq(callActor, okActor, organizationId, suffix, cleanup);

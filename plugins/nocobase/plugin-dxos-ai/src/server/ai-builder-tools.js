@@ -305,6 +305,76 @@ function hasResourceAction(hasRes, ctx, resourceName, actionName) {
   return typeof handler === 'function';
 }
 
+function isNativeMembershipRequiredError(err) {
+  if (!err) return false;
+  if (err.code === 'NATIVE_MEMBERSHIP_REQUIRED') return true;
+  return err.code === 'HOST_ACTION_ERROR'
+    && err.status === 403
+    && /\bNATIVE_MEMBERSHIP_REQUIRED\b/.test(String(err.message || ''));
+}
+
+async function verifyStudioAdmin(ctx, db, actor, deps) {
+  if (typeof deps?.isStudioAdmin === 'function') {
+    return Boolean(await deps.isStudioAdmin(ctx, db));
+  }
+  return Boolean(actor?.isAdmin);
+}
+
+async function hasVerifiedRootRole(ctx, db, actor, deps) {
+  const headerRole = String(ctx?.headers?.['x-role'] || ctx?.request?.headers?.['x-role'] || '').trim();
+  if (headerRole && headerRole !== 'root') return false;
+
+  const callerRoles = typeof deps?.resolveCallerRoleNames === 'function'
+    ? await deps.resolveCallerRoleNames(ctx, db, actor?.userId)
+    : [];
+  const stateRoles = Array.isArray(ctx?.state?.currentRoles)
+    ? ctx.state.currentRoles.map((r) => String(r || '').trim()).filter(Boolean)
+    : [];
+
+  const ruRepo = db?.getRepository?.('rolesUsers');
+  if (ruRepo && typeof ruRepo.find === 'function' && actor?.userId != null) {
+    const rows = (await ruRepo.find({ filter: { userId: actor.userId } })) || [];
+    const dbRoles = rows.map((r) => String(deps.val(r, 'roleName') || '').trim()).filter(Boolean);
+    if (!dbRoles.includes('root')) return false;
+    if (stateRoles.length && !stateRoles.includes('root')) return false;
+    return true;
+  }
+
+  return Boolean(
+    actor?.isRoot
+    || callerRoles.includes('root')
+    || stateRoles.includes('root')
+    || ctx?.state?.currentUser?.isRoot === true,
+  );
+}
+
+async function buildAutomationDelegationCtx(ctx, db, actor, deps) {
+  const isRootCaller = await hasVerifiedRootRole(ctx, db, actor, deps);
+  if (!isRootCaller) return ctx;
+  return {
+    ...ctx,
+    state: {
+      ...(ctx?.state || {}),
+      currentRole: 'root',
+    },
+  };
+}
+
+async function invokeDxosAutomationsAction(ctx, db, actor, actionName, options, deps) {
+  const { invokeResourceAction } = deps;
+  const delegationCtx = await buildAutomationDelegationCtx(ctx, db, actor, deps);
+  try {
+    const result = await invokeResourceAction(delegationCtx, 'dxosAutomations', actionName, options);
+    return { ok: true, result };
+  } catch (err) {
+    const isAdminVerified = await verifyStudioAdmin(ctx, db, actor, deps);
+    if (isAdminVerified && isNativeMembershipRequiredError(err)) {
+      return { ok: false, fallbackReason: 'NATIVE_MEMBERSHIP_REQUIRED' };
+    }
+    throw err;
+  }
+}
+
 /**
  * Aggregate per-rule execution statistics from latticeAutomationRuns within a single tenant.
  */
@@ -351,7 +421,8 @@ async function summarizeAutomationRuns(db, organizationId, val) {
 /**
  * List tenant-scoped native automation rules via dxosAutomations resource or repository fallback.
  */
-async function runListAutomations(ctx, db, actor, args, { val, failTool, hasRes, invokeResourceAction }) {
+async function runListAutomations(ctx, db, actor, args, deps) {
+  const { val, failTool, hasRes } = deps;
   const triggerEventType = typeof args.triggerEventType === 'string' && args.triggerEventType.trim()
     ? args.triggerEventType.trim()
     : '';
@@ -363,11 +434,12 @@ async function runListAutomations(ctx, db, actor, args, { val, failTool, hasRes,
       ...(triggerEventType ? { triggerEventType } : {}),
       limit,
     };
-    return invokeResourceAction(ctx, 'dxosAutomations', 'listRules', {
+    const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'listRules', {
       ...listParams,
       values: listParams,
       method: 'GET',
-    });
+    }, deps);
+    if (delegated.ok) return delegated.result;
   }
 
   const rulesRepo = db?.getRepository?.('latticeAutomationRules');
@@ -431,7 +503,8 @@ async function runListAutomations(ctx, db, actor, args, { val, failTool, hasRes,
 /**
  * Validate and trigger a native automation rule manually (dryRun, dxosAutomations, or engine module).
  */
-async function runAutomationExecution(ctx, db, actor, args, { val, failTool, hasRes, invokeResourceAction }) {
+async function runAutomationExecution(ctx, db, actor, args, deps) {
+  const { val, failTool, hasRes } = deps;
   let ruleKey = typeof args.ruleKey === 'string' ? args.ruleKey.trim() : '';
   const parsedWorkflowId = args.workflowId != null ? Number(args.workflowId) : null;
   const ruleId = parsedWorkflowId != null && Number.isInteger(parsedWorkflowId) && parsedWorkflowId > 0
@@ -444,9 +517,13 @@ async function runAutomationExecution(ctx, db, actor, args, { val, failTool, has
     throw failTool('AUTOMATION_RULE_KEY_INVALID', 400, 'ruleKey không hợp lệ.');
   }
 
-  const sampleEvent = isPlainObject(args.sampleEvent)
+  if (hasForbiddenProtoKeys(args.sampleEvent) || hasForbiddenProtoKeys(args.config)) {
+    throw failTool('AUTOMATION_AI_REFUSED', 400, 'Phát hiện khóa đối tượng bị cấm (__proto__, constructor, prototype).');
+  }
+  const rawSampleEvent = isPlainObject(args.sampleEvent)
     ? args.sampleEvent
     : (isPlainObject(args.config) ? args.config : {});
+  const sampleEvent = sanitizeAutomationValue(rawSampleEvent);
 
   if (args.dryRun) {
     return {
@@ -473,14 +550,19 @@ async function runAutomationExecution(ctx, db, actor, args, { val, failTool, has
       organizationId: actor.organizationId,
       ...(ruleKey ? { ruleKey } : {}),
       ...(ruleId != null ? { id: ruleId, ruleId } : {}),
-      sampleEvent,
-      ...(isEnvelope ? { event: { ...sampleEvent, organizationId: actor.organizationId } } : { data: sampleEvent }),
+      ...(isEnvelope
+        ? {
+            sampleEvent,
+            event: { ...sampleEvent, organizationId: actor.organizationId },
+          }
+        : { data: sampleEvent }),
     };
-    return invokeResourceAction(ctx, 'dxosAutomations', 'runNow', {
+    const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'runNow', {
       ...runParams,
       values: runParams,
       method: 'POST',
-    });
+    }, deps);
+    if (delegated.ok) return delegated.result;
   }
 
   const engineMod = loadStudioAutomationEngine();
@@ -761,9 +843,14 @@ function validateAndNormalizeRule(rawRule, failTool, protectedCollections) {
       if (!targetCol || protectedCollections?.has(targetCol) || !isAllowlistedAutomationCollection(targetCol)) {
         throw failTool('AUTOMATION_AI_REFUSED', 400, `Bảng đích "${targetCol || '(empty)'}" không được phép thao tác.`);
       }
-      if (AUTOMATION_CORE_VOUCHERS.has(targetCol) && isPlainObject(act.values)) {
-        for (const f of AUTOMATION_PROTECTED_VOUCHER_FIELDS) {
-          delete act.values[f];
+      for (const payloadKey of ['values', 'data', 'patch', 'payload']) {
+        if (!isPlainObject(act[payloadKey])) continue;
+        delete act[payloadKey].id;
+        delete act[payloadKey].organizationId;
+        if (AUTOMATION_CORE_VOUCHERS.has(targetCol)) {
+          for (const f of AUTOMATION_PROTECTED_VOUCHER_FIELDS) {
+            delete act[payloadKey][f];
+          }
         }
       }
     }
@@ -811,16 +898,16 @@ async function loadTenantAutomationRule(db, organizationId, ruleKey, val, failTo
 }
 
 async function saveTenantAutomationRule(ctx, db, actor, ruleCandidate, deps) {
-  const { val, failTool, hasRes, invokeResourceAction, SYSTEM_PROTECTED_COLLECTIONS } = deps;
+  const { val, failTool, hasRes, SYSTEM_PROTECTED_COLLECTIONS } = deps;
   const validated = validateAndNormalizeRule(ruleCandidate, failTool, SYSTEM_PROTECTED_COLLECTIONS);
   if (hasResourceAction(hasRes, ctx, 'dxosAutomations', 'saveRule')) {
-    const res = await invokeResourceAction(ctx, 'dxosAutomations', 'saveRule', {
+    const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'saveRule', {
       organizationId: actor.organizationId,
       rule: validated,
       values: { organizationId: actor.organizationId, rule: validated },
       method: 'POST',
-    });
-    return res?.rule || validated;
+    }, deps);
+    if (delegated.ok) return delegated.result?.rule || validated;
   }
   const rulesRepo = db?.getRepository?.('latticeAutomationRules');
   if (!rulesRepo || typeof rulesRepo.findOne !== 'function') {
@@ -952,11 +1039,11 @@ function summarizeSimulationSteps(simulation) {
 }
 
 async function simulateRuleDryRun(ctx, db, actor, ruleObj, sampleEvent, deps) {
-  const { hasRes, invokeResourceAction } = deps;
+  const { hasRes } = deps;
   const eventEnvelope = buildEventEnvelopeForSimulation(ruleObj, sampleEvent, actor.organizationId);
   let simulation = null;
   if (hasResourceAction(hasRes, ctx, 'dxosAutomations', 'testRule')) {
-    const res = await invokeResourceAction(ctx, 'dxosAutomations', 'testRule', {
+    const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'testRule', {
       organizationId: actor.organizationId,
       ...(ruleObj?.ruleKey ? { ruleKey: ruleObj.ruleKey } : {}),
       ...(isPlainObject(ruleObj) ? { rule: ruleObj } : {}),
@@ -972,9 +1059,12 @@ async function simulateRuleDryRun(ctx, db, actor, ruleObj, sampleEvent, deps) {
         data: eventEnvelope.data,
       },
       method: 'POST',
-    });
-    simulation = res?.simulation || res;
-  } else {
+    }, deps);
+    if (delegated.ok) {
+      simulation = delegated.result?.simulation || delegated.result;
+    }
+  }
+  if (!simulation) {
     const engineMod = loadStudioAutomationEngine();
     if (engineMod && typeof engineMod.executeRuleAgainstEvent === 'function') {
       simulation = await engineMod.executeRuleAgainstEvent(
@@ -1002,14 +1092,32 @@ async function simulateRuleDryRun(ctx, db, actor, ruleObj, sampleEvent, deps) {
   return { simulation, stepTraces, executedSteps, skippedSteps };
 }
 
+function extractNegativeNumericLiteral(goalText) {
+  const rawLow = String(goalText || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const explicitNeg = rawLow.match(/(?:(?<![\p{L}\p{N}_])(?:âm|trừ)\s+|(?<![a-z0-9])-\s*)(\d+(?:\.\d+)?)\s*(?:độ|°\s*c|°|c)?(?=\s|$|[,.;%)°]|độ)/iu);
+  if (explicitNeg) return -Number(explicitNeg[1]);
+  const masked = rawLow.replace(/(?<![\p{L}\p{N}_])độ\s+ẩm(?![\p{L}\p{N}_])/giu, 'do_am');
+  const nForNeg = stripDiacriticsSimple(masked).toLowerCase().replace(/\s+/g, ' ').trim();
+  const asciiNeg = nForNeg.match(/(?:(?<!(?<!\bnhiet\s)\bdo\s)\bam\s+|\btru\s+|(?<![a-z0-9])-\s*)(\d+(?:\.\d+)?)\s*(?:do|°c|°|c)?\b/);
+  if (asciiNeg) return -Number(asciiNeg[1]);
+  return null;
+}
+
+function isHumidityGoal(rawText, normText) {
+  const rawLow = String(rawText || '').normalize('NFC').toLowerCase();
+  if (/(?<![\p{L}\p{N}_])độ\s+ẩm(?![\p{L}\p{N}_])/iu.test(rawLow)) return true;
+  if (/(?<![\p{L}\p{N}_])độ\s+âm(?![\p{L}\p{N}_])/iu.test(rawLow)) return false;
+  return /(?<!\bnhiet\s)\bdo\s+am\b/.test(String(normText || ''));
+}
+
 function extractNumericThreshold(goalText) {
   const n = stripDiacriticsSimple(goalText).toLowerCase().replace(/\s+/g, ' ').trim();
-  const neg = n.match(/(?:am\s+|tru\s+|-\s*)(\d+(?:\.\d+)?)\s*(?:do|°c|°|c)?\b/);
-  if (neg) {
+  const negVal = extractNegativeNumericLiteral(goalText);
+  if (negVal !== null) {
     const op = /(?:<|<=|thap hon|nho hon|duoi)\b/.test(n) ? 'lt' : 'gt';
-    return { value: -Number(neg[1]), op };
+    return { value: negVal, op };
   }
-  const pos = n.match(/(?:>|>=|vuot|cao hon|lon hon|tren|duoi|thap hon|nho hon|nguong|thanh|len|xuong)\s*(-?\d+(?:\.\d+)?)\s*(?:do|°c|°|c|%|phut|h|gio)?\b/);
+  const pos = n.match(/(?:>|>=|vuot|cao hon|lon hon|tren|duoi|thap hon|nho hon|nguong|thanh|len|xuong)\s*(\d+(?:\.\d+)?)\s*(?:do|°c|°|c|%|phut|h|gio)?\b/);
   if (pos) {
     const op = /(?:<|<=|thap hon|nho hon|duoi)\b/.test(n) ? 'lt' : 'gt';
     return { value: Number(pos[1]), op };
@@ -1098,7 +1206,7 @@ async function draftRuleFromGoal(db, actor, args, val) {
   const threshold = extractNumericThreshold(goalText);
   let filterJson = null;
   if (threshold !== null) {
-    const field = n.includes('do am') ? 'humidity' : (n.includes('ap suat') ? 'pressure' : (n.includes('mkt') ? 'mktC' : (n.includes('sla') ? 'overdueMinutes' : 'tempC')));
+    const field = isHumidityGoal(goalText, n) ? 'humidity' : (n.includes('ap suat') ? 'pressure' : (n.includes('mkt') ? 'mktC' : (n.includes('sla') ? 'overdueMinutes' : 'tempC')));
     filterJson = { field, op: threshold.op, value: threshold.value };
   } else if (n.includes('nghiem trong') || n.includes('critical') || n.includes('khan cap')) {
     filterJson = { field: 'severity', op: 'in', value: ['critical', 'high'] };
@@ -1214,23 +1322,36 @@ async function draftRuleFromGoal(db, actor, args, val) {
   };
 }
 
-function inferPatchTargetNode(goalText, explicitTarget) {
+function inferPatchTargetFromConfig(explicitTrigger, cfgPatch) {
+  if (explicitTrigger || cfgPatch?.triggerEventType !== undefined) return 'trigger';
+  if (cfgPatch?.cooldownSec !== undefined || cfgPatch?.maxDepth !== undefined) return 'cooldown';
+  if (cfgPatch && Object.prototype.hasOwnProperty.call(cfgPatch, 'dmnTableKey')) return 'dmn';
+  if (cfgPatch && (cfgPatch.type || isPlainObject(cfgPatch.action))) return 'actions';
+  return 'filter';
+}
+
+function inferPatchTargetNode(goalText, explicitTarget, { cfgPatch = null, explicitTrigger = null } = {}) {
   if (typeof explicitTarget === 'string' && explicitTarget.trim()) {
     return explicitTarget.trim();
   }
   const n = stripDiacriticsSimple(goalText).toLowerCase().replace(/\s+/g, ' ').trim();
-  const stepColon = n.match(/\bstep\s*:\s*(\d+)\b/);
-  if (stepColon) return `step:${stepColon[1]}`;
-  const buoc = n.match(/\b(?:buoc|hanh dong)(?:\s+thu)?\s*(\d+)\b/);
-  if (buoc) {
-    const idx = Number(buoc[1]);
-    return `step:${idx >= 1 ? idx - 1 : 0}`;
+  if (n) {
+    const stepColon = n.match(/\bstep\s*:\s*(\d+)\b/);
+    if (stepColon) return `step:${stepColon[1]}`;
+    const buoc = n.match(/\b(?:buoc|hanh dong)(?:\s+thu)?\s*(\d+)\b/);
+    if (buoc) {
+      const idx = Number(buoc[1]);
+      return `step:${idx >= 1 ? idx - 1 : 0}`;
+    }
+    if (n.includes('cooldown') || n.includes('chong lap') || n.includes('gian cach')) return 'cooldown';
+    if (n.includes('dmn') || n.includes('bang quyet dinh')) return 'dmn';
+    if (n.includes('trigger') || n.includes('su kien kich hoat')) return 'trigger';
+    if (/(?:them|bo sung)\s+(?:[^\n]{0,16}\s)?buoc\b/.test(n)) return 'actions';
+    if (n.includes('filter') || n.includes('bo loc') || n.includes('dieu kien') || n.includes('nguong') || n.includes('nhanh')) return 'filter';
   }
-  if (n.includes('cooldown') || n.includes('chong lap') || n.includes('gian cach')) return 'cooldown';
-  if (n.includes('dmn') || n.includes('bang quyet dinh')) return 'dmn';
-  if (n.includes('trigger') || n.includes('su kien kich hoat')) return 'trigger';
-  if (/(?:them|bo sung)\s+(?:[^\n]{0,16}\s)?buoc\b/.test(n)) return 'actions';
-  if (n.includes('filter') || n.includes('bo loc') || n.includes('dieu kien') || n.includes('nguong') || n.includes('nhanh')) return 'filter';
+  if (explicitTrigger || cfgPatch) {
+    return inferPatchTargetFromConfig(explicitTrigger, cfgPatch);
+  }
   return 'filter';
 }
 
@@ -1316,10 +1437,12 @@ function extractCopilotResult(res, failTool) {
 }
 
 async function callStudioCopilotIfAvailable(ctx, db, actor, mode, payload, deps) {
-  const { failTool, hasRes, invokeResourceAction } = deps;
+  const { failTool, hasRes } = deps;
   const copilotTargetNode = payload.targetNode === 'cooldown' || payload.targetNode === 'guard'
     ? 'trigger'
-    : payload.targetNode;
+    : (payload.targetNode === 'actions' || payload.targetNode === 'step:new'
+      ? 'step:append'
+      : payload.targetNode);
   const copilotPayload = {
     ...payload,
     ...(copilotTargetNode ? { targetNode: copilotTargetNode, target: copilotTargetNode } : {}),
@@ -1327,16 +1450,20 @@ async function callStudioCopilotIfAvailable(ctx, db, actor, mode, payload, deps)
 
   if (hasResourceAction(hasRes, ctx, 'dxosAutomations', 'aiAssist')) {
     try {
-      const res = await invokeResourceAction(ctx, 'dxosAutomations', 'aiAssist', {
+      const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'aiAssist', {
         ...copilotPayload,
         mode,
         organizationId: actor.organizationId,
         values: { ...copilotPayload, mode, organizationId: actor.organizationId },
         method: 'POST',
-      });
-      return { source: 'resource', data: extractCopilotResult(res, failTool) };
+      }, deps);
+      if (delegated.ok) {
+        return { source: 'resource', data: extractCopilotResult(delegated.result, failTool) };
+      }
     } catch (err) {
-      if (err?.code === 'AUTOMATION_AI_REFUSED') throw err;
+      if (err?.code === 'AUTOMATION_AI_REFUSED' || err?.code === 'AI_ASSIST_REFUSED') {
+        throw failTool('AUTOMATION_AI_REFUSED', 400, err.message);
+      }
       if (err?.status === 400 && /refus|unsafe|inject|system|forbidden|proto/i.test(String(err.message || ''))) {
         throw failTool('AUTOMATION_AI_REFUSED', 400, err.message);
       }
@@ -1396,17 +1523,12 @@ async function runSuggestAutomation(ctx, db, actor, args, deps) {
   const shouldApply = Boolean(args.apply && !args.dryRun);
   assertSafeAutomationInput(goalText, args.rule, args, failTool, SYSTEM_PROTECTED_COLLECTIONS);
 
-  let targetRule = isPlainObject(args.rule) ? sanitizeAutomationValue(args.rule) : null;
-  if (!targetRule && ruleKey) {
-    if (hasResourceAction(deps.hasRes, ctx, 'dxosAutomations', 'aiAssist')) {
-      const rulesRepo = db?.getRepository?.('latticeAutomationRules');
-      const row = rulesRepo?.findOne ? await rulesRepo.findOne({ filter: { organizationId: actor.organizationId, ruleKey } }) : null;
-      if (row && val(row, 'organizationId') === actor.organizationId) {
-        targetRule = toPlainAutomationRule(row, val);
-      }
-    } else {
-      targetRule = await loadTenantAutomationRule(db, actor.organizationId, ruleKey, val, failTool);
-    }
+  let targetRule = isPlainObject(args.rule)
+    ? validateAndNormalizeRule(args.rule, failTool, SYSTEM_PROTECTED_COLLECTIONS)
+    : null;
+  if (ruleKey) {
+    const loadedRule = await loadTenantAutomationRule(db, actor.organizationId, ruleKey, val, failTool);
+    if (!targetRule) targetRule = loadedRule;
   }
 
   const copilotHit = await callStudioCopilotIfAvailable(ctx, db, actor, 'suggest', {
@@ -1420,6 +1542,9 @@ async function runSuggestAutomation(ctx, db, actor, args, deps) {
   if (copilotHit) {
     const data = copilotHit.data;
     let draftRule = data.draftRule || data.previewRule || data.rule || null;
+    if (draftRule) {
+      draftRule = validateAndNormalizeRule(draftRule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+    }
     let applied = Boolean(data.applied || data.saved || data.savedRule);
     if (shouldApply && !applied && draftRule) {
       draftRule = await saveTenantAutomationRule(ctx, db, actor, draftRule, deps);
@@ -1507,14 +1632,16 @@ async function runDraftAutomation(ctx, db, actor, args, deps) {
   }
   assertSafeAutomationInput(goalText, args.rule, args, failTool, SYSTEM_PROTECTED_COLLECTIONS);
 
-  const copilotHit = await callStudioCopilotIfAvailable(ctx, db, actor, 'full', {
-    prompt: goalText,
-    goal: goalText,
-    ...(args.ruleKey ? { ruleKey: args.ruleKey } : {}),
-    ...(isPlainObject(args.rule) ? { rule: sanitizeAutomationValue(args.rule) } : {}),
-    ...(isPlainObject(args.sampleEvent) ? { sampleEvent: sanitizeAutomationValue(args.sampleEvent) } : {}),
-    apply: shouldApply,
-  }, deps);
+  const copilotHit = goalText
+    ? await callStudioCopilotIfAvailable(ctx, db, actor, 'full', {
+        prompt: goalText,
+        goal: goalText,
+        ...(args.ruleKey ? { ruleKey: args.ruleKey } : {}),
+        ...(isPlainObject(args.rule) ? { rule: sanitizeAutomationValue(args.rule) } : {}),
+        ...(isPlainObject(args.sampleEvent) ? { sampleEvent: sanitizeAutomationValue(args.sampleEvent) } : {}),
+        apply: shouldApply,
+      }, deps)
+    : null;
 
   let draftRule = null;
   let simulation = null;
@@ -1586,33 +1713,43 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
   const shouldApply = Boolean(args.apply && !args.dryRun);
   assertSafeAutomationInput(goalText, args.rule, args, failTool, SYSTEM_PROTECTED_COLLECTIONS);
 
+  const cfgPatch = isPlainObject(args.configPatch)
+    ? sanitizeAutomationValue(args.configPatch)
+    : (isPlainObject(args.config) ? sanitizeAutomationValue(args.config) : null);
+  if (cfgPatch && hasUnsafeAutomationTemplate(cfgPatch)) {
+    throw failTool('AUTOMATION_AI_REFUSED', 400, 'configPatch chứa biểu thức template không an toàn.');
+  }
+  const explicitTrigger = typeof args.triggerEventType === 'string' && args.triggerEventType.trim()
+    ? args.triggerEventType.trim()
+    : null;
+
   if (!isPlainObject(args.rule) && !ruleKey) {
     throw failTool('AUTOMATION_RULE_KEY_REQUIRED', 400, 'Cần ruleKey hoặc rule để vá (patch) automation.');
   }
   let baseRule = null;
   if (isPlainObject(args.rule)) {
     baseRule = validateAndNormalizeRule(args.rule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
-  } else if (hasResourceAction(deps.hasRes, ctx, 'dxosAutomations', 'aiAssist')) {
-    const rulesRepo = db?.getRepository?.('latticeAutomationRules');
-    const row = rulesRepo?.findOne ? await rulesRepo.findOne({ filter: { organizationId: actor.organizationId, ruleKey } }) : null;
-    if (row && val(row, 'organizationId') === actor.organizationId) {
-      baseRule = toPlainAutomationRule(row, val);
-    }
   } else {
     baseRule = await loadTenantAutomationRule(db, actor.organizationId, ruleKey, val, failTool);
   }
 
-  const resolvedTarget = inferPatchTargetNode(goalText, args.targetNode);
+  const resolvedTarget = inferPatchTargetNode(goalText, args.targetNode, { cfgPatch, explicitTrigger });
+  const shouldUseLocalPatcher = Boolean(cfgPatch || explicitTrigger);
+  const copilotTargetNode = resolvedTarget === 'actions' || resolvedTarget === 'step:new'
+    ? 'step:append'
+    : resolvedTarget;
 
-  const copilotHit = await callStudioCopilotIfAvailable(ctx, db, actor, 'node', {
-    prompt: goalText,
-    goal: goalText,
-    ruleKey: baseRule?.ruleKey || ruleKey,
-    targetNode: resolvedTarget,
-    target: resolvedTarget,
-    ...(baseRule ? { rule: baseRule, currentRule: baseRule } : {}),
-    apply: shouldApply,
-  }, deps);
+  const copilotHit = !shouldUseLocalPatcher
+    ? await callStudioCopilotIfAvailable(ctx, db, actor, 'node', {
+        prompt: goalText,
+        goal: goalText,
+        ruleKey: baseRule?.ruleKey || ruleKey,
+        targetNode: copilotTargetNode,
+        target: copilotTargetNode,
+        ...(baseRule ? { rule: baseRule, currentRule: baseRule } : {}),
+        apply: shouldApply,
+      }, deps)
+    : null;
 
   if (copilotHit) {
     const data = copilotHit.data;
@@ -1649,9 +1786,6 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
 
   const nextRule = clonePlain(baseRule);
   const nGoal = stripDiacriticsSimple(goalText).toLowerCase().replace(/\s+/g, ' ').trim();
-  const cfgPatch = isPlainObject(args.configPatch)
-    ? sanitizeAutomationValue(args.configPatch)
-    : (isPlainObject(args.config) ? sanitizeAutomationValue(args.config) : null);
   let patch = {};
   let diffSummary = '';
 
@@ -1664,11 +1798,12 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       : (extracted !== null ? extracted : (prevCooldown > 0 ? prevCooldown : 120));
     nextRule.cooldownSec = Math.max(0, Math.round(nextCooldown));
     if (cfgPatch?.maxDepth !== undefined) nextRule.maxDepth = Number(cfgPatch.maxDepth);
+    if (cfgPatch?.active !== undefined) nextRule.active = Boolean(cfgPatch.active);
     patch = { cooldownSec: nextRule.cooldownSec };
     diffSummary = `Cập nhật cooldownSec: ${prevCooldown}s -> ${nextRule.cooldownSec}s (giữ nguyên filter và ${nextRule.actionsJson.length} bước).`;
   } else if (resolvedTarget === 'trigger') {
     const prevTrigger = nextRule.triggerEventType;
-    let nextTrigger = args.triggerEventType || cfgPatch?.triggerEventType || null;
+    let nextTrigger = explicitTrigger || cfgPatch?.triggerEventType || null;
     if (!nextTrigger) {
       if (nGoal.includes('device.offline') || nGoal.includes('mat ket noi')) nextTrigger = 'device.offline';
       else if (nGoal.includes('lot.held_mkt') || nGoal.includes('mkt')) nextTrigger = 'lot.held_mkt';
@@ -1677,24 +1812,47 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       else nextTrigger = 'alarm.triggered';
     }
     nextRule.triggerEventType = String(nextTrigger).trim();
+    if (cfgPatch?.cooldownSec !== undefined) nextRule.cooldownSec = Math.max(0, Math.round(Number(cfgPatch.cooldownSec)));
+    if (cfgPatch?.active !== undefined) nextRule.active = Boolean(cfgPatch.active);
     patch = { triggerEventType: nextRule.triggerEventType };
     diffSummary = `Đổi triggerEventType: "${prevTrigger}" -> "${nextRule.triggerEventType}".`;
   } else if (resolvedTarget === 'dmn') {
     const prevDmn = nextRule.dmnTableKey;
     const dmnMatch = goalText.match(/\b([a-z0-9]+(?:_[a-z0-9]+)+_v\d+|[a-z0-9]+(?:_[a-z0-9]+)+)\b/i);
-    const candidateDmn = cfgPatch?.dmnTableKey || (dmnMatch && !dmnMatch[1].startsWith('auto_') ? dmnMatch[1] : null) || prevDmn;
+    const hasExplicitDmn = cfgPatch && Object.prototype.hasOwnProperty.call(cfgPatch, 'dmnTableKey');
+    const candidateDmn = hasExplicitDmn
+      ? cfgPatch.dmnTableKey
+      : ((dmnMatch && !dmnMatch[1].startsWith('auto_') ? dmnMatch[1] : null) || prevDmn);
     nextRule.dmnTableKey = candidateDmn ? String(candidateDmn).trim() : null;
     patch = { dmnTableKey: nextRule.dmnTableKey };
     diffSummary = `Cập nhật dmnTableKey: "${prevDmn || 'none'}" -> "${nextRule.dmnTableKey || 'none'}".`;
   } else if (resolvedTarget === 'filter') {
     const prevFilter = nextRule.filterJson;
-    if (cfgPatch && (cfgPatch.field || cfgPatch.$and || cfgPatch.$or || isPlainObject(cfgPatch.filterJson))) {
-      nextRule.filterJson = isPlainObject(cfgPatch.filterJson) ? cfgPatch.filterJson : cfgPatch;
-    } else {
+    const metaOnlyKeys = new Set(['active', 'name', 'description', 'cooldownSec', 'maxDepth', 'triggerEventType', 'dmnTableKey']);
+    const hasFilterKey = cfgPatch && Object.prototype.hasOwnProperty.call(cfgPatch, 'filterJson');
+    const hasFilterShape = cfgPatch && (
+      cfgPatch.field
+      || cfgPatch.$and
+      || cfgPatch.$or
+      || cfgPatch.$not
+      || Object.keys(cfgPatch).some((k) => !metaOnlyKeys.has(k))
+    );
+    if (hasFilterKey) {
+      nextRule.filterJson = cfgPatch.filterJson ? clonePlain(cfgPatch.filterJson) : null;
+    } else if (hasFilterShape) {
+      nextRule.filterJson = clonePlain(cfgPatch);
+    } else if (cfgPatch) {
+      if (cfgPatch.active !== undefined) nextRule.active = Boolean(cfgPatch.active);
+      if (cfgPatch.name !== undefined) nextRule.name = String(cfgPatch.name);
+      if (cfgPatch.description !== undefined) nextRule.description = cfgPatch.description ? String(cfgPatch.description) : null;
+      if (cfgPatch.cooldownSec !== undefined) nextRule.cooldownSec = Math.max(0, Math.round(Number(cfgPatch.cooldownSec)));
+      if (cfgPatch.maxDepth !== undefined) nextRule.maxDepth = Number(cfgPatch.maxDepth);
+    }
+    if (!hasFilterKey && !hasFilterShape && goalText) {
       const thr = extractNumericThreshold(goalText);
       const clauses = [];
       if (thr !== null) {
-        const field = nGoal.includes('do am') ? 'humidity' : (nGoal.includes('ap suat') ? 'pressure' : 'tempC');
+        const field = isHumidityGoal(goalText, nGoal) ? 'humidity' : (nGoal.includes('ap suat') ? 'pressure' : 'tempC');
         clauses.push({ field, op: thr.op, value: thr.value });
       }
       if (nGoal.includes('critical') || nGoal.includes('nghiem trong')) {
@@ -1710,15 +1868,19 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
         nextRule.filterJson = { $and: clauses };
       }
     }
-    patch = { filterJson: nextRule.filterJson };
+    patch = cfgPatch && !hasFilterKey && !hasFilterShape
+      ? clonePlain(cfgPatch)
+      : { filterJson: nextRule.filterJson };
     diffSummary = `Cập nhật filterJson (giữ nguyên cooldownSec=${nextRule.cooldownSec} và ${nextRule.actionsJson.length} bước).`;
   } else if (resolvedTarget === 'actions' || resolvedTarget === 'step:new') {
     const role = inferRoleFromGoal(goalText);
     const newAction = isPlainObject(cfgPatch) && cfgPatch.type
       ? cfgPatch
-      : (nGoal.includes('triage') || nGoal.includes('ai phan tich')
-        ? { type: 'trigger_ai_triage', label: 'AI Triage bổ sung', targetCollection: 'latticeAssets' }
-        : { type: 'notify_role', label: `Thông báo ${role}`, role, category: 'automation', severity: 'warning', title: 'Cảnh báo bổ sung: {{data.deviceKey}}' });
+      : (isPlainObject(cfgPatch?.action) && cfgPatch.action.type
+        ? cfgPatch.action
+        : (nGoal.includes('triage') || nGoal.includes('ai phan tich')
+          ? { type: 'trigger_ai_triage', label: 'AI Triage bổ sung', targetCollection: 'latticeAssets' }
+          : { type: 'notify_role', label: `Thông báo ${role}`, role, category: 'automation', severity: 'warning', title: 'Cảnh báo bổ sung: {{data.deviceKey}}' }));
     nextRule.actionsJson.push(newAction);
     patch = { addedStepIndex: nextRule.actionsJson.length - 1, action: newAction };
     diffSummary = `Thêm bước step:${nextRule.actionsJson.length - 1} (${newAction.type}).`;
@@ -1875,6 +2037,7 @@ async function runTestAutomation(ctx, db, actor, args, deps) {
 function createBuilderTools(deps) {
   const {
     val, failTool, safeGetResource, invokeResourceAction, createAuditedTool,
+    resolveCallerRoleNames, isStudioAdmin,
     SYSTEM_PROTECTED_COLLECTIONS, CUSTOM_COLLECTION_RE, FIELD_NAME_RE, SLUG_RE, ALLOWED_BLOCK_MODELS,
   } = deps;
   const hasRes = (ctx, name) => (typeof safeGetResource === 'function' ? safeGetResource(ctx, name) : null);
@@ -2754,7 +2917,15 @@ function createBuilderTools(deps) {
         },
       },
       async run(ctx, db, actor, args) {
-        const automationDeps = { val, failTool, hasRes, invokeResourceAction, SYSTEM_PROTECTED_COLLECTIONS };
+        const automationDeps = {
+          val,
+          failTool,
+          hasRes,
+          invokeResourceAction,
+          resolveCallerRoleNames,
+          isStudioAdmin,
+          SYSTEM_PROTECTED_COLLECTIONS,
+        };
         if (args.operation === 'listAutomations') {
           return runListAutomations(ctx, db, actor, args, automationDeps);
         }

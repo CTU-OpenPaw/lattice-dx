@@ -54,6 +54,7 @@ const {
   createAutomationDirectGuardMiddleware,
   createDxosAutomationsActions,
   executeRuleAgainstEvent,
+  hasUnsafeTemplateSyntax,
   interpolateTemplate,
   isAllowlistedTargetCollection,
   matchesFilter,
@@ -63,6 +64,7 @@ const {
 const {
   AUTOMATION_BLUEPRINTS,
   STANDARD_EVENT_CATALOG,
+  runAutomationAiAssist,
 } = copilotModule;
 const { createDxosWmsActions } = wmsModule;
 
@@ -1495,6 +1497,328 @@ test('builderCatalog returns safe non-secret metadata and aiAssist supports full
     if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
     else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
+});
+
+test('R1 & R2 security and copilot regressions: ReDoS, matchesFilter fail-closed, triage blocklist, webhookSecret HMAC, pagination, and copilot fixes', async () => {
+  // 1. R1 P1 #5: Linear-time O(n) scanning for 20k unclosed {{ tokens and padded whitespace in templates
+  const ctxSample = {
+    id: 'evt-redos',
+    type: 'alarm.triggered',
+    data: { severity: 'critical', targetCollection: 'users', zone: 'cold-a' },
+  };
+  const twentyKUnclosed = '{{'.repeat(20000);
+  const spacePadded = '{{' + ' '.repeat(10000) + 'a' + ' '.repeat(10000);
+  const tStart = performance.now();
+  assert.equal(hasUnsafeTemplateSyntax(twentyKUnclosed), false);
+  assert.equal(interpolateTemplate(twentyKUnclosed, ctxSample), twentyKUnclosed);
+  assert.equal(interpolateTemplate(spacePadded, ctxSample), spacePadded);
+  const elapsedMs = performance.now() - tStart;
+  assert.ok(elapsedMs < 500, `Template scanning took too long (${elapsedMs.toFixed(1)}ms), potential ReDoS`);
+
+  // 2. R1 P1 #3: matchesFilter & validateRulePayload fail-closed on falsy op, empty ops, and blocked own keys
+  assert.equal(matchesFilter({ field: 'severity', op: '', value: 'critical' }, ctxSample), false);
+  assert.equal(matchesFilter({ field: 'severity', op: null, value: 'critical' }, ctxSample), false);
+  assert.equal(matchesFilter({ field: 'severity', op: '   ', value: 'critical' }, ctxSample), false);
+  assert.equal(matchesFilter({ field: 'severity', value: 'critical', extra: 1 }, ctxSample), false);
+  assert.equal(matchesFilter({ severity: {} }, ctxSample), false);
+  assert.equal(matchesFilter(JSON.parse('{"__proto__":{"polluted":true}}'), ctxSample), false);
+  assert.equal(matchesFilter(JSON.parse('{"severity":"critical","__proto__":{"polluted":true}}'), ctxSample), false);
+  const nonEnumProto = {};
+  Object.defineProperty(nonEnumProto, '__proto__', { value: { polluted: true }, enumerable: false });
+  assert.equal(matchesFilter(nonEnumProto, ctxSample), false);
+
+  const protoFilter = JSON.parse('{"__proto__":{"polluted":true}}');
+  for (const badRule of [
+    { ruleKey: 'bad_filter_empty_op', name: 'Bad', filterJson: { field: 'a', op: '', value: 1 }, actionsJson: [] },
+    { ruleKey: 'bad_filter_null_op', name: 'Bad', filterJson: { $and: [{ field: 'a', op: null, value: 1 }] }, actionsJson: [] },
+    { ruleKey: 'bad_when_empty_op', name: 'Bad', actionsJson: [{ type: 'notify_role', role: 'ldx_admin', title: 'X', when: { field: 'a', op: '', value: 1 } }] },
+    { ruleKey: 'bad_filter_proto', name: 'Bad', filterJson: protoFilter, actionsJson: [] },
+  ]) {
+    assert.throws(() => validateRulePayload(badRule), (err) => err.status === 400);
+  }
+
+  // 3. R1 P1 #2 (engine): trigger_ai_triage rejects system, sensitive, and automation collections (static & interpolated)
+  const db = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+    latticeAutomationRules: [
+      { id: 1, organizationId: 'org-a', ruleKey: 'r_1', name: 'R1', triggerEventType: 'alarm.triggered', actionsJson: [], active: true, updatedAt: new Date(1000) },
+      { id: 2, organizationId: 'org-a', ruleKey: 'r_2', name: 'R2', triggerEventType: 'alarm.triggered', actionsJson: [], active: true, updatedAt: new Date(2000) },
+      { id: 3, organizationId: 'org-a', ruleKey: 'r_3', name: 'R3', triggerEventType: 'alarm.triggered', actionsJson: [], active: true, updatedAt: new Date(3000) },
+      { id: 4, organizationId: 'org-a', ruleKey: 'r_4', name: 'R4', triggerEventType: 'alarm.triggered', actionsJson: [], active: true, updatedAt: new Date(4000) },
+    ],
+    latticeAutomationRuns: [
+      { id: 1, organizationId: 'org-a', ruleKey: 'r_list', runUid: 'run_1', status: 'completed', startedAt: new Date(1000) },
+      { id: 2, organizationId: 'org-a', ruleKey: 'r_list', runUid: 'run_2', status: 'completed', startedAt: new Date(2000) },
+      { id: 3, organizationId: 'org-a', ruleKey: 'r_list', runUid: 'run_3', status: 'completed', startedAt: new Date(3000) },
+    ],
+  });
+
+  const failClosedWhenRun = await executeRuleAgainstEvent(
+    db,
+    {
+      organizationId: 'org-a',
+      ruleKey: 'when_empty_op_test',
+      triggerEventType: '*',
+      actionsJson: [
+        { type: 'trigger_ai_triage', targetCollection: 'latticeAssets', targetRecordId: 1, when: { field: 'severity', op: '', value: 'critical' } },
+      ],
+    },
+    { organizationId: 'org-a', type: 'alarm.triggered', data: { severity: 'critical' } },
+  );
+  assert.equal(failClosedWhenRun.stepTracesJson[0].status, 'skipped');
+  assert.equal(failClosedWhenRun.stepTracesJson[0].skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+
+  const triageRejectRun = await executeRuleAgainstEvent(
+    db,
+    {
+      organizationId: 'org-a',
+      ruleKey: 'triage_blocklist_test',
+      triggerEventType: '*',
+      actionsJson: [
+        { type: 'trigger_ai_triage', targetCollection: 'users', targetRecordId: 1, recommendation: 'Leak' },
+        { type: 'trigger_ai_triage', targetCollection: '{{data.targetCollection}}', targetRecordId: 1, recommendation: 'Interp leak' },
+        { type: 'trigger_ai_triage', targetCollection: 'latticeConnectors', targetRecordId: 1, recommendation: 'Sensitive' },
+        { type: 'trigger_ai_triage', targetCollection: 'latticeAutomationRules', targetRecordId: 1, recommendation: 'Self' },
+        { type: 'trigger_ai_triage', targetCollection: 'latticeAssets', targetRecordId: 1, recommendation: 'Valid asset' },
+      ],
+    },
+    { organizationId: 'org-a', type: 'alarm.triggered', data: { targetCollection: 'users' } },
+  );
+  assert.equal(triageRejectRun.status, 'partial');
+  for (const idx of [0, 1, 2, 3]) {
+    assert.equal(triageRejectRun.stepTracesJson[idx].status, 'failed');
+    assert.match(triageRejectRun.stepTracesJson[idx].error, /TARGET_COLLECTION_FORBIDDEN/);
+  }
+  assert.equal(triageRejectRun.stepTracesJson[4].status, 'completed');
+  assert.equal(db.store.latticeAgentProposals.length, 1);
+  assert.equal(db.store.latticeAgentProposals[0].targetCollection, 'latticeAssets');
+
+  // 4. R1 P1 #4: buildHmacHeaders resolves secrets.webhookSecret
+  const whKey = crypto.randomBytes(32);
+  const whSecret = `whsec_${whKey.toString('base64')}`;
+  const hmacBody = JSON.stringify({ hello: 'world' });
+  const whHeaders = buildHmacHeaders(hmacBody, { webhookSecret: whSecret });
+  const expectedWhSig = crypto
+    .createHmac('sha256', whKey)
+    .update(`${whHeaders['webhook-id']}.${whHeaders['webhook-timestamp']}.${hmacBody}`)
+    .digest('base64');
+  assert.equal(whHeaders['webhook-signature'], `v1,${expectedWhSig}`);
+  const plainWhHeaders = buildHmacHeaders(hmacBody, { webhookSecret: 'raw-webhook-secret' });
+  assert.match(plainWhHeaders['X-Lattice-Signature-256'], /^sha256=[0-9a-f]{64}$/);
+
+  // 5. R2 P1 #4: listRules and listRuns compute numeric limit and offset properly
+  const actions = createDxosAutomationsActions(db);
+  const rulesDefaultCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
+  await actions.listRules(rulesDefaultCtx, async () => {});
+  assert.equal(rulesDefaultCtx.body.items.length, 4);
+
+  const rulesPagedCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { limit: 2, offset: 1 } });
+  await actions.listRules(rulesPagedCtx, async () => {});
+  assert.deepEqual(rulesPagedCtx.body.items.map((r) => r.ruleKey), ['r_3', 'r_2']);
+
+  const runsPagedCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'r_list', pageSize: 1, offset: 1 } });
+  await actions.listRuns(runsPagedCtx, async () => {});
+  assert.deepEqual(runsPagedCtx.body.items.map((r) => r.runUid), ['run_2']);
+
+  // 6. R1 P1 #2 (copilot) + R2 P1 #3 + R1 P1 #7 + R1 P2 #8: aiAssist fixes
+  const slaBlueprint = AUTOMATION_BLUEPRINTS.find((b) => b.ruleKey === 'auto_sla_breach_escalation');
+  const slaSuggestRes = runAutomationAiAssist({ mode: 'suggest', rule: slaBlueprint, catalog: { collections: [], dmnTables: [], connectors: [] } });
+  assert.equal(slaSuggestRes.refused, false);
+  assert.equal(slaSuggestRes.draftRule.actionsJson[0].targetCollection, '{{data.targetCollection}}');
+
+  const slaNodeRes = runAutomationAiAssist({
+    mode: 'node',
+    rule: slaBlueprint,
+    targetNode: 'step:0',
+    prompt: 'Đổi vai trò sang ldx_manager',
+  });
+  assert.equal(slaNodeRes.refused, false);
+  assert.equal(slaNodeRes.draftRule.actionsJson[0].role, 'ldx_manager');
+  assert.equal(slaNodeRes.draftRule.actionsJson[0].targetCollection, '{{data.targetCollection}}');
+
+  // Mutating collection vs metadata targetCollection rejection in aiAssist
+  assert.equal(
+    runAutomationAiAssist({
+      mode: 'suggest',
+      rule: { ruleKey: 'bad_mut', name: 'Bad', actionsJson: [{ type: 'create_record', collection: 'users', values: {} }] },
+    }).refused,
+    true,
+  );
+  assert.equal(
+    runAutomationAiAssist({
+      mode: 'suggest',
+      rule: { ruleKey: 'bad_ref', name: 'Bad', actionsJson: [{ type: 'notify_role', role: 'ldx_admin', title: 'X', targetCollection: 'users' }] },
+    }).refused,
+    true,
+  );
+  assert.equal(
+    runAutomationAiAssist({
+      mode: 'suggest',
+      rule: { ruleKey: 'bad_tpl_col', name: 'Bad', actionsJson: [{ type: 'notify_role', role: 'ldx_admin', title: 'X', targetCollection: '{{constructor.name}}' }] },
+    }).refused,
+    true,
+  );
+  assert.equal(
+    runAutomationAiAssist({
+      mode: 'suggest',
+      rule: { ruleKey: 'ok_tpl_mut', name: 'Ok', actionsJson: [{ type: 'create_record', collection: '{{data.col}}', values: { x: 1 } }] },
+    }).refused,
+    false,
+  );
+
+  // Invalid targetNode is refused rather than silently falling back to step:0
+  const invalidNodeRes = runAutomationAiAssist({
+    mode: 'node',
+    rule: slaBlueprint,
+    targetNode: 'unknown_node_xyz',
+    prompt: 'Đổi gì đó',
+  });
+  assert.equal(invalidNodeRes.refused, true);
+  await assert.rejects(
+    () => actions.aiAssist(makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: { mode: 'node', rule: slaBlueprint, targetNode: 'step:invalid', prompt: 'Đổi gì đó' },
+    }), async () => {}),
+    (err) => err.status === 400 && err.code === 'AI_ASSIST_REFUSED',
+  );
+
+  // targetNode: 'actions', 'step:new', 'step:append' normalize to step:append and append a step
+  for (const appendTarget of ['actions', 'step:new', 'step:append']) {
+    const appendRes = runAutomationAiAssist({
+      mode: 'node',
+      rule: slaBlueprint,
+      targetNode: appendTarget,
+      prompt: 'Thông báo ldx_admin kiểm tra SLA',
+    });
+    assert.equal(appendRes.refused, false);
+    assert.equal(appendRes.targetNode, 'step:append');
+    assert.equal(appendRes.patch.targetNode, 'step:3');
+    assert.equal(appendRes.draftRule.actionsJson.length, 4);
+    assert.equal(appendRes.draftRule.actionsJson[3].type, 'notify_role');
+  }
+
+  // targetNode: 'dmn' when dmnTableKey stays null reports clean message
+  const dmnNullRes = runAutomationAiAssist({
+    mode: 'node',
+    rule: { ...slaBlueprint, dmnTableKey: null },
+    targetNode: 'dmn',
+    prompt: 'Gắn bảng quyết định phù hợp',
+    catalog: { dmnTables: [], collections: [], connectors: [] },
+  });
+  assert.equal(dmnNullRes.refused, false);
+  assert.equal(dmnNullRes.draftRule.dmnTableKey, null);
+  assert.match(dmnNullRes.summary, /Không tìm thấy bảng DMN phù hợp/);
+  assert.doesNotMatch(dmnNullRes.summary, /dmnTableKey = null/);
+
+  // Non-notify/triage step keeps step.label intact when prompt has no structured parameter
+  const stepKeepLabelRes = runAutomationAiAssist({
+    mode: 'node',
+    rule: slaBlueprint,
+    targetNode: 'step:1',
+    prompt: 'Mô tả chung không có tham số cụ thể',
+  });
+  assert.equal(stepKeepLabelRes.refused, false);
+  assert.equal(stepKeepLabelRes.draftRule.actionsJson[1].label, slaBlueprint.actionsJson[1].label);
+  assert.deepEqual(stepKeepLabelRes.patch.updatedFields, {});
+
+  // synthesizeFullRule generates schema-valid default values per collection
+  const customCatalog = {
+    collections: [
+      { name: 'latticeCustomWorkOrders' },
+      { name: 'latticeIncidentCases' },
+      { name: 'latticeServiceTickets' },
+      { name: 'latticeCustomSensors' },
+    ],
+    dmnTables: [],
+    connectors: [],
+    roles: ['ldx_operator', 'ldx_manager'],
+  };
+  const incFull = runAutomationAiAssist({
+    mode: 'full',
+    prompt: 'Khi voucher.submitted tạo hồ sơ latticeIncidentCases',
+    catalog: customCatalog,
+  });
+  assert.equal(incFull.refused, false);
+  assert.equal(incFull.draftRule.actionsJson[0].collection, 'latticeIncidentCases');
+  assert.equal(incFull.draftRule.actionsJson[0].values.code, 'INC-{{id}}');
+  assert.equal(incFull.draftRule.actionsJson[0].values.runId, 'run-{{id}}');
+  assert.equal(incFull.draftRule.actionsJson[0].values.handlerId, 'ldx_manager');
+  assert.doesNotThrow(() => validateRulePayload(incFull.draftRule));
+
+  const srvFull = runAutomationAiAssist({
+    mode: 'full',
+    prompt: 'Khi epod.signed tạo phiếu latticeServiceTickets',
+    catalog: customCatalog,
+  });
+  assert.equal(srvFull.refused, false);
+  assert.equal(srvFull.draftRule.actionsJson[0].collection, 'latticeServiceTickets');
+  assert.equal(srvFull.draftRule.actionsJson[0].values.code, 'SRV-{{id}}');
+  assert.equal(srvFull.draftRule.actionsJson[0].values.serviceType, 'facilities');
+  assert.equal(srvFull.draftRule.actionsJson[0].values.priority, 'high');
+  assert.ok(srvFull.draftRule.actionsJson[0].values.description);
+  assert.doesNotThrow(() => validateRulePayload(srvFull.draftRule));
+
+  const woFull = runAutomationAiAssist({
+    mode: 'full',
+    prompt: 'Khi voucher.submitted tạo bản ghi latticeCustomWorkOrders',
+    catalog: customCatalog,
+  });
+  assert.equal(woFull.refused, false);
+  assert.equal(woFull.draftRule.actionsJson[0].collection, 'latticeCustomWorkOrders');
+  assert.equal(woFull.draftRule.actionsJson[0].values.workOrderCode, 'WO-{{id}}');
+  assert.equal(woFull.draftRule.actionsJson[0].values.status, 'open');
+  assert.doesNotThrow(() => validateRulePayload(woFull.draftRule));
+
+  const customFull = runAutomationAiAssist({
+    mode: 'full',
+    prompt: 'Khi epod.signed ghi dữ liệu vào latticeCustomSensors',
+    catalog: customCatalog,
+  });
+  assert.equal(customFull.refused, false);
+  assert.equal(customFull.draftRule.actionsJson[0].collection, 'latticeCustomSensors');
+  assert.ok(customFull.draftRule.actionsJson[0].values.code);
+  assert.ok(customFull.draftRule.actionsJson[0].values.name);
+  assert.equal(customFull.draftRule.actionsJson[0].values.status, 'open');
+  assert.doesNotThrow(() => validateRulePayload(customFull.draftRule));
+
+  const woDmnFull = runAutomationAiAssist({
+    mode: 'full',
+    prompt: 'Khi voucher.submitted tạo bản ghi latticeCustomWorkOrders theo bảng cmms_priority_routing_v1',
+    catalog: {
+      ...customCatalog,
+      dmnTables: [{ tableKey: 'cmms_priority_routing_v1', outputsJson: [{ name: 'workOrderPriority' }] }],
+    },
+  });
+  assert.equal(woDmnFull.refused, false);
+  assert.equal(woDmnFull.draftRule.actionsJson[0].values.priority, '{{dmn.workOrderPriority}}');
+  assert.doesNotThrow(() => validateRulePayload(woDmnFull.draftRule));
+
+  const bpSwitchedCol = runAutomationAiAssist({
+    mode: 'full',
+    prompt: 'Khi lot.held_mkt vượt ngưỡng MKT, tạo phiếu latticeServiceTickets',
+    catalog: customCatalog,
+  });
+  assert.equal(bpSwitchedCol.refused, false);
+  assert.equal(bpSwitchedCol.draftRule.actionsJson[0].collection, 'latticeServiceTickets');
+  assert.equal(bpSwitchedCol.draftRule.actionsJson[0].values.code, 'SRV-{{id}}');
+  assert.equal(bpSwitchedCol.draftRule.actionsJson[0].values.priority, 'high');
+  assert.doesNotThrow(() => validateRulePayload(bpSwitchedCol.draftRule));
+
+  // Unsafe template in generated draftRule (e.g. {{1+1}}) is refused across node and suggest modes
+  const unsafeNodePrompt = runAutomationAiAssist({
+    mode: 'node',
+    rule: slaBlueprint,
+    targetNode: 'step:0',
+    prompt: 'Nội dung {{1+1}}',
+  });
+  assert.equal(unsafeNodePrompt.refused, true);
+  const unsafeSuggestRule = runAutomationAiAssist({
+    mode: 'suggest',
+    rule: { ...slaBlueprint, actionsJson: [{ type: 'notify_role', role: 'ldx_admin', title: '{{1+1}}' }] },
+  });
+  assert.equal(unsafeSuggestRule.refused, true);
 });
 
 test('all new server automation files satisfy CTU-OpenPaw SPDX header check', async () => {

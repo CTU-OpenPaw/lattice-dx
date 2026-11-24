@@ -1004,3 +1004,564 @@ test('Inline AI Automation Copilot supports suggest, node, full modes and 1-clic
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-rule-key-input')[0].props.value, 'ai_sla_escalation_flow');
   assert.equal(collectNodes(tree, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-canvas-node-step-')).length, 2);
 });
+
+function createQueuedReactHarness() {
+  const statesByComponent = new WeakMap();
+  const effectsByComponent = new WeakMap();
+  const memosByComponent = new WeakMap();
+  const callbacksByComponent = new WeakMap();
+  let currentComponent = null;
+  let stateIdx = 0;
+  let effectIdx = 0;
+  let memoIdx = 0;
+  let callbackIdx = 0;
+  let pendingUpdates = 0;
+  const pendingEffects = [];
+
+  function getBucket(map, comp) {
+    let arr = map.get(comp);
+    if (!arr) {
+      arr = [];
+      map.set(comp, arr);
+    }
+    return arr;
+  }
+
+  function depsChanged(prevDeps, nextDeps) {
+    if (!prevDeps || !Array.isArray(nextDeps) || nextDeps.length !== prevDeps.length) return true;
+    return nextDeps.some((d, i) => !Object.is(d, prevDeps[i]));
+  }
+
+  const React = {
+    Fragment: 'Fragment',
+    createElement(type, props, ...children) {
+      const flat = [];
+      for (const c of children) {
+        if (Array.isArray(c)) flat.push(...c);
+        else flat.push(c);
+      }
+      return { type, props: props || {}, children: flat };
+    },
+    useState(init) {
+      const comp = currentComponent;
+      const bucket = getBucket(statesByComponent, comp);
+      const idx = stateIdx++;
+      if (bucket.length <= idx) {
+        bucket[idx] = {
+          value: typeof init === 'function' ? init() : init,
+          queue: [],
+        };
+      }
+      const slot = bucket[idx];
+      // Drain queued updaters in hook declaration order at render time (React 18/19 async batching)
+      while (slot.queue.length > 0) {
+        const next = slot.queue.shift();
+        slot.value = typeof next === 'function' ? next(slot.value) : next;
+      }
+      const setState = (next) => {
+        slot.queue.push(next);
+        pendingUpdates += 1;
+      };
+      return [slot.value, setState];
+    },
+    useEffect(fn, deps) {
+      const comp = currentComponent;
+      const bucket = getBucket(effectsByComponent, comp);
+      const idx = effectIdx++;
+      const prev = bucket[idx];
+      if (!prev || depsChanged(prev.deps, deps)) {
+        bucket[idx] = { deps: Array.isArray(deps) ? deps.slice() : null };
+        pendingEffects.push(fn);
+      }
+    },
+    useCallback(fn, deps) {
+      const comp = currentComponent;
+      const bucket = getBucket(callbacksByComponent, comp);
+      const idx = callbackIdx++;
+      const prev = bucket[idx];
+      if (!prev || depsChanged(prev.deps, deps)) {
+        bucket[idx] = { deps: Array.isArray(deps) ? deps.slice() : null, fn };
+      }
+      return bucket[idx].fn;
+    },
+    useMemo(fn, deps) {
+      const comp = currentComponent;
+      const bucket = getBucket(memosByComponent, comp);
+      const idx = memoIdx++;
+      const prev = bucket[idx];
+      if (!prev || depsChanged(prev.deps, deps)) {
+        bucket[idx] = { deps: Array.isArray(deps) ? deps.slice() : null, value: fn() };
+      }
+      return bucket[idx].value;
+    },
+  };
+
+  function renderNode(node) {
+    if (!node || typeof node !== 'object') return node;
+    if (Array.isArray(node)) return node.map(renderNode);
+    if (typeof node.type === 'function') {
+      const prevComp = currentComponent;
+      const prevS = stateIdx;
+      const prevE = effectIdx;
+      const prevM = memoIdx;
+      const prevC = callbackIdx;
+      currentComponent = node.type;
+      stateIdx = 0;
+      effectIdx = 0;
+      memoIdx = 0;
+      callbackIdx = 0;
+      let out;
+      try {
+        out = node.type(node.props || {});
+      } finally {
+        currentComponent = prevComp;
+        stateIdx = prevS;
+        effectIdx = prevE;
+        memoIdx = prevM;
+        callbackIdx = prevC;
+      }
+      return renderNode(out);
+    }
+    if (Array.isArray(node.children)) {
+      return { ...node, children: node.children.map(renderNode) };
+    }
+    return node;
+  }
+
+  async function flush(ComponentFn, props = {}) {
+    pendingUpdates = 0;
+    let tree = renderNode(React.createElement(ComponentFn, props));
+    for (let pass = 0; pass < 12; pass += 1) {
+      if (pendingEffects.length === 0 && pendingUpdates === 0) break;
+      const batch = pendingEffects.splice(0, pendingEffects.length);
+      for (const eff of batch) {
+        await eff();
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      if (pendingUpdates > 0 || pendingEffects.length > 0 || batch.length > 0) {
+        pendingUpdates = 0;
+        tree = renderNode(React.createElement(ComponentFn, props));
+      }
+    }
+    return tree;
+  }
+
+  return {
+    React,
+    render: (ComponentFn, props = {}) => {
+      pendingUpdates = 0;
+      return renderNode(React.createElement(ComponentFn, props));
+    },
+    mountAndFlush: flush,
+    flush,
+  };
+}
+
+test('R1 P0 #1 & P2 #9 (queued React 18/19 async batching): preserves selectedNode step:0/step:2 on label & targetTempC typing and buffers $in CSV lists', async () => {
+  const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
+  const harness = createQueuedReactHarness();
+  const { client, requests } = createApiMock({
+    'dxosVault:list': async () => ({ items: [] }),
+    'dxosAutomations:listRules': async () => ({ items: [] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosAutomations:saveRule': async (req) => ({ rule: { id: 1, ...req.data } }),
+  });
+
+  const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+
+  // Load 5-step blueprint
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-blueprint-toggle-btn')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-blueprint-load-auto_cmms_on_coldchain_fault')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+
+  // Select step:0 and edit label under queued async batching -> selectedNode must stay on step:0
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-0')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #1'));
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-label-input')[0].props.onChange({ target: { value: 'CMMS khẩn' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #1'));
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-label-input')[0].props.value, 'CMMS khẩn');
+
+  // Select step:2 (twin_set_desired) and type targetTempC '4.0' -> '3.5' -> selectedNode must stay on step:2
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-2')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #3'));
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-target-temp')[0].props.onChange({ target: { value: '4.0' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #3'));
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-target-temp')[0].props.value, '4.0');
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-target-temp')[0].props.onChange({ target: { value: '3.5' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #3'));
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-target-temp')[0].props.value, '3.5');
+
+  // Switch step:2 when operator to $in and type comma-separated 'high, critical' without losing the comma mid-typing
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-when-op')[0].props.onChange({ target: { value: '$in' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-when-value')[0].props.onChange({ target: { value: 'high, ' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-when-value')[0].props.value, 'high, ');
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-when-value')[0].props.onChange({ target: { value: 'high, critical' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+
+  // Save directly (even before blur) and verify coerced values + preserved step edits
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-rule-form')[0].props.onSubmit({ preventDefault() {} });
+  const saveReq = requests.find((r) => r.url === 'dxosAutomations:saveRule');
+  assert.ok(saveReq);
+  assert.equal(saveReq.data.actionsJson[0].label, 'CMMS khẩn');
+  assert.equal(saveReq.data.actionsJson[2].desiredPatch.targetTempC, 3.5);
+  assert.deepEqual(saveReq.data.actionsJson[2].when.value, ['high', 'critical']);
+
+  // Trigger onBlur coercion cleanly too and keep selectedNode on step:2
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-target-temp')[0].props.onBlur();
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-when-value')[0].props.onBlur();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #3'));
+
+  // Batched addStep + duplicateStep + moveStep + removeStep keep selection aligned without dropping to trigger
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-add-action-btn')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #6'));
+
+  const step5Card = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-5')[0];
+  collectNodes(step5Card, (n) => n.type === 'button' && textOf(n) === '↑')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #5'));
+
+  const step4Card = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-4')[0];
+  collectNodes(step4Card, (n) => n.type === 'button' && textOf(n) === '⧉')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #6'));
+  assert.equal(collectNodes(tree, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-canvas-node-step-')).length, 7);
+
+  const step5AfterDup = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-5')[0];
+  collectNodes(step5AfterDup, (n) => n.type === 'button' && textOf(n) === 'Xóa')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-canvas-node-step-')).length, 6);
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Inspector · Bước #6'));
+});
+
+test('R1 P1 #6: org-switch clears stale Vault/Automation state, drops stale async responses via loadSeqRef, isolates Dry-Run highlights, and safely handles applyAiCandidate', async () => {
+  const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
+  const harness = createQueuedReactHarness();
+
+  let resolveSlowOrgARuns = null;
+  let slowOrgARunsPromise = null;
+  const listRunsRequests = [];
+
+  const { client, requests } = createApiMock({
+    'dxosVault:list': async (req) => ({
+      items: req.params.organizationId === 'org-a'
+        ? [{ id: 1, connectorKey: 'n8n-org-a', name: 'n8n Org A', connectorType: 'n8n', authType: 'bearer', hasSecrets: true }]
+        : [{ id: 2, connectorKey: 'n8n-org-b', name: 'n8n Org B', connectorType: 'n8n', authType: 'bearer', hasSecrets: true }],
+    }),
+    'dxosVault:testConnection': async (req) => ({
+      ok: true,
+      statusCode: 200,
+      latencyMs: 9,
+      message: 'Org A reachable',
+      connectorKey: req.data.connectorKey,
+    }),
+    'dxosAutomations:builderCatalog': async (req) => {
+      if (req.params.organizationId === 'org-b') throw new Error('404 catalog unavailable on org-b');
+      return {
+        eventTypes: [{ eventType: 'custom.org_a.event', label: 'Org A Custom Event' }],
+        dmnTables: [{ tableKey: 'org_a_dmn', name: 'Org A DMN', outputs: ['tier'] }],
+        collections: [{ name: 'latticeCustomOrgA', title: 'Org A Domain', fields: ['code'] }],
+        roles: ['ldx_admin'],
+        connectors: [],
+      };
+    },
+    'dxosAutomations:listRules': async (req) => ({
+      items: req.params.organizationId === 'org-a'
+        ? [
+          {
+            id: 101,
+            ruleKey: 'rule_org_a',
+            name: 'Rule Org A',
+            triggerEventType: 'alarm.triggered',
+            dmnTableKey: 'cmms_priority_routing_v1',
+            actionsJson: [
+              { type: 'notify_role', label: 'Step 0', role: 'ldx_operator', title: 'A0' },
+              { type: 'notify_role', label: 'Step 1', role: 'ldx_manager', title: 'A1' },
+              { type: 'notify_role', label: 'Step 2', role: 'ldx_manager', title: 'A2' },
+            ],
+            active: true,
+          },
+          {
+            id: 102,
+            ruleKey: 'rule_org_a_2',
+            name: 'Rule Org A 2',
+            triggerEventType: 'device.offline',
+            actionsJson: [{ type: 'notify_role', label: 'B0', role: 'ldx_operator', title: 'B0' }],
+            active: true,
+          },
+        ]
+        : [
+          {
+            id: 201,
+            ruleKey: 'rule_org_b',
+            name: 'Rule Org B',
+            triggerEventType: 'telemetry.alarm',
+            actionsJson: [{ type: 'notify_role', label: 'Org B Step', role: 'ldx_operator', title: 'B' }],
+            active: true,
+          },
+        ],
+    }),
+    'dxosAutomations:listRuns': async (req) => {
+      listRunsRequests.push({ org: req.params.organizationId, ruleKey: req.params.ruleKey || '' });
+      if (req.params.organizationId === 'org-a' && req.params.ruleKey === 'rule_org_a') {
+        if (!slowOrgARunsPromise) {
+          slowOrgARunsPromise = new Promise((resolve) => {
+            resolveSlowOrgARuns = resolve;
+          });
+        }
+        return slowOrgARunsPromise;
+      }
+      if (req.params.organizationId === 'org-a') {
+        return {
+          items: [
+            {
+              id: 901,
+              runId: 'run-org-a-901',
+              ruleKey: 'rule_org_a',
+              status: 'completed',
+              durationMs: 12,
+              stepTracesJson: [{ stepIndex: 0, status: 'completed', durationMs: 5 }],
+            },
+          ],
+        };
+      }
+      return { items: [] };
+    },
+    'dxosAutomations:testRule': async (req) => ({
+      simulation: {
+        ruleKey: req.data.rule.ruleKey,
+        status: 'completed',
+        durationMs: 6,
+        dmnResultJson: { tableKey: 'cmms_priority_routing_v1', matched: true, outputs: { workOrderPriority: 'critical' } },
+        stepTracesJson: [{ stepIndex: 0, type: 'notify_role', status: 'simulated', durationMs: 3 }],
+      },
+    }),
+    'dxosAutomations:aiAssist': async () => ({
+      summary: 'Generated compact 2-step flow',
+      rule: {
+        ruleKey: 'ai_compact_flow',
+        name: 'AI Compact Flow',
+        triggerEventType: 'telemetry.alarm',
+        actionsJson: [
+          { type: 'notify_role', label: 'Step 0', role: 'ldx_operator', title: 'S0' },
+          { type: 'notify_role', label: 'Step 1', role: 'ldx_manager', title: 'S1' },
+        ],
+      },
+    }),
+  });
+
+  const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+
+  assert.ok(JSON.stringify(tree).includes('custom.org_a.event'));
+  assert.ok(JSON.stringify(tree).includes('run-org-a-901'));
+
+  // Populate Vault testResult, rotate form, and load rule_org_a + run Dry-Run
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-test-n8n-org-a')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-test-result').length, 1);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-open-n8n-org-a')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-input')[0].props.onChange({ target: { value: 'temp-secret-a' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-form').length, 1);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-edit-rule_org_a')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-dryrun-btn')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-trace-inspector')[0]).includes('Dry-Run Simulation'));
+
+  // Editing ruleKey or switching rule clears stale Dry-Run highlights
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-rule-key-input')[0].props.onChange({ target: { value: 'rule_edited' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-trace-inspector').length, 0);
+
+  // Re-run Dry-Run on rule_org_a, then switch to rule_org_a_2 -> selectedRun clears; + Rule mới also clears
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-edit-rule_org_a')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-dryrun-btn')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-edit-rule_org_a_2')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-trace-inspector').length, 0);
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-dryrun-btn')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-new-rule-btn')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-trace-inspector').length, 0);
+
+  // Select step:2 on rule_org_a and apply a 2-step full AI draft -> must navigate to 'trigger' (never stale step:2)
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-edit-rule_org_a')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-2')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-full-btn')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-apply-btn')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-inspector')[0]).includes('Node 1: Event Trigger'));
+
+  // Trigger an in-flight org-a listRuns request, then immediately switch to org-b BEFORE org-a resolves
+  const pendingInspectPromise = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-runs-btn-rule_org_a')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-b' });
+
+  // Verify org-b clears stale Vault/Automation state, falls back to default catalog (no custom.org_a.event), and never queries org-b with rule_org_a
+  const orgBRunReqs = listRunsRequests.filter((r) => r.org === 'org-b');
+  assert.ok(orgBRunReqs.length >= 1);
+  assert.equal(orgBRunReqs.some((r) => r.ruleKey === 'rule_org_a'), false, 'org-b listRuns must not inherit org-a selectedRuleKey');
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-test-result').length, 0);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-form').length, 0);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-trace-inspector').length, 0);
+  assert.equal(JSON.stringify(tree).includes('custom.org_a.event'), false, 'Failed org-b catalog fetch must clear org-a rawCatalog');
+  assert.ok(JSON.stringify(tree).includes('rule_org_b'));
+
+  // Now resolve the stale org-a response AFTER org-b finished -> loadSeqRef must discard it!
+  resolveSlowOrgARuns({
+    items: [{ id: 999, runId: 'stale-org-a-run', ruleKey: 'rule_org_a', status: 'completed', durationMs: 99 }],
+  });
+  await pendingInspectPromise;
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-b' });
+  assert.equal(JSON.stringify(tree).includes('stale-org-a-run'), false, 'Stale org-a response must never overwrite org-b runs');
+  assert.ok(requests.some((r) => r.url === 'dxosAutomations:listRules' && r.params?.organizationId === 'org-b'));
+});
+
+test('R1 P2 #9: preserves multi-clause / $or / $not / $and when conditions, blocks prototype keys in pairsToObject, and rejects invalid non-object items in Actions JSON', async () => {
+  const autoPanel = require(path.join(PLUGIN_ROOT, 'src/client/automation-studio-panel.js'));
+  const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
+
+  // Unit assertions on parseWhenCondition and pairsToObject
+  const multiClause = { $or: [{ severity: 'critical' }, { maxTempC: { $gt: 8 } }] };
+  const parsedOr = autoPanel.parseWhenCondition(multiClause);
+  assert.equal(parsedOr.isComplex, true);
+  assert.deepEqual(parsedOr.rawWhen, multiClause);
+
+  const twoFieldWhen = { severity: 'critical', maxTempC: { $gt: 8 } };
+  const parsedTwo = autoPanel.parseWhenCondition(twoFieldWhen);
+  assert.equal(parsedTwo.isComplex, true);
+  assert.equal(parsedTwo.rows.length, 2);
+
+  const sanitizedObj = autoPanel.pairsToObject([
+    { key: '__proto__', value: '{"polluted":true}' },
+    { key: 'constructor', value: 'bad' },
+    { key: 'prototype', value: 'bad' },
+    { key: 'title', value: 'Safe Title' },
+  ]);
+  assert.deepEqual(Object.keys(sanitizedObj), ['title']);
+  assert.equal(({}).polluted, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(sanitizedObj, 'constructor'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(sanitizedObj, 'prototype'), false);
+
+  // Integration check on AutomationStudioPanel UI
+  const harness = createQueuedReactHarness();
+  const feedbackCalls = [];
+  const complexWhen = { $and: [{ severity: 'critical' }, { $or: [{ maxTempC: { $gt: 8 } }, { mktCelsius: { $gte: 10 } }] }] };
+  const { client, requests } = createApiMock({
+    'dxosVault:list': async () => ({ items: [] }),
+    'dxosAutomations:listRules': async () => ({
+      items: [
+        {
+          id: 55,
+          ruleKey: 'multi_clause_rule',
+          name: 'Multi Clause Rule',
+          triggerEventType: 'lot.held_mkt',
+          actionsJson: [
+            {
+              type: 'notify_role',
+              label: 'Initial Step',
+              when: complexWhen,
+              branchLabel: 'Nhánh đa điều kiện',
+              role: 'ldx_manager',
+              title: 'Alert',
+            },
+          ],
+          active: true,
+        },
+      ],
+    }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosAutomations:saveRule': async (req) => ({ rule: { id: 55, ...req.data } }),
+  });
+
+  const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(VaultAndAutomationPanel, {
+    selectedOrg: 'org-a',
+    setFeedback: (fb) => feedbackCalls.push(fb),
+  });
+
+  // Load multi_clause_rule and select step:0
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-edit-multi_clause_rule')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-0')[0].props.onClick();
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-when-complex').length, 1);
+
+  // Edit branchLabel and step label -> multi-clause `when` must stay 100% untouched on Save
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-branch-label')[0].props.onChange({ target: { value: 'Nhánh đã đổi tên' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-label-input')[0].props.onChange({ target: { value: 'Updated Label' } });
+  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-rule-form')[0].props.onSubmit({ preventDefault() {} });
+  const saveReq = requests.find((r) => r.url === 'dxosAutomations:saveRule');
+  assert.ok(saveReq);
+  assert.equal(saveReq.data.actionsJson[0].branchLabel, 'Nhánh đã đổi tên');
+  assert.deepEqual(saveReq.data.actionsJson[0].when, complexWhen);
+
+  // Invalid non-object array elements in Actions JSON must NOT corrupt actionsList and must block Save
+  for (const invalidJson of ['[123]', '[null]', '["str"]', '[[]]']) {
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-actions-json')[0].props.onChange({ target: { value: invalidJson } });
+    tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+    assert.equal(collectNodes(tree, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-canvas-node-step-')).length, 1);
+    const saveCountBefore = requests.filter((r) => r.url === 'dxosAutomations:saveRule').length;
+    await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-rule-form')[0].props.onSubmit({ preventDefault() {} });
+    assert.equal(requests.filter((r) => r.url === 'dxosAutomations:saveRule').length, saveCountBefore);
+  }
+});
+
+test('R1 P1 #7: DEFAULT_AUTOMATION_BLUEPRINTS and DEFAULT_AUTOMATION_CATALOG enforce schema parity for Twin, IncidentCases, and ServiceTickets', () => {
+  const { DEFAULT_AUTOMATION_BLUEPRINTS, DEFAULT_AUTOMATION_CATALOG } = require(path.join(PLUGIN_ROOT, 'src/client/automation-studio-panel.js'));
+  const { SERVICE_PRIORITIES, SERVICE_TYPES } = require(path.join(PLUGIN_ROOT, 'src/server/service-schema.js'));
+
+  const bp0 = DEFAULT_AUTOMATION_BLUEPRINTS.find((b) => b.ruleKey === 'auto_cmms_on_coldchain_fault');
+  assert.ok(bp0);
+  assert.equal(bp0.actionsJson[2].type, 'twin_set_desired');
+  assert.equal(bp0.actionsJson[2].assetEntityId, '{{data.assetEntityId}}');
+
+  const bp1 = DEFAULT_AUTOMATION_BLUEPRINTS.find((b) => b.ruleKey === 'auto_mkt_quarantine_response');
+  assert.ok(bp1);
+  const incCreate = bp1.actionsJson[0];
+  assert.equal(incCreate.collection, 'latticeIncidentCases');
+  for (const reqField of ['code', 'name', 'runId', 'assetEntityId', 'handlerId', 'severity', 'status', 'proposal']) {
+    assert.ok(Object.prototype.hasOwnProperty.call(incCreate.values, reqField) && incCreate.values[reqField], `Blueprint 1 missing latticeIncidentCases.${reqField}`);
+  }
+
+  const bp2 = DEFAULT_AUTOMATION_BLUEPRINTS.find((b) => b.ruleKey === 'auto_sla_breach_escalation');
+  assert.ok(bp2);
+  const tktCreate = bp2.actionsJson[1];
+  assert.equal(tktCreate.collection, 'latticeServiceTickets');
+  for (const reqField of ['code', 'name', 'serviceType', 'priority', 'description']) {
+    assert.ok(Object.prototype.hasOwnProperty.call(tktCreate.values, reqField) && tktCreate.values[reqField], `Blueprint 2 missing latticeServiceTickets.${reqField}`);
+  }
+  assert.ok(SERVICE_TYPES.includes(tktCreate.values.serviceType));
+  assert.ok(SERVICE_PRIORITIES.includes(tktCreate.values.priority));
+  assert.equal(tktCreate.values.priority, 'high');
+  assert.equal(JSON.stringify(DEFAULT_AUTOMATION_BLUEPRINTS).includes('"urgent"'), false, 'DEFAULT_AUTOMATION_BLUEPRINTS must never use urgent priority');
+  assert.equal(JSON.stringify(DEFAULT_AUTOMATION_CATALOG).includes('"urgent"'), false, 'DEFAULT_AUTOMATION_CATALOG must never use urgent priority');
+});

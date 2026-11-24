@@ -1053,30 +1053,55 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
     const [rawCatalog, setRawCatalog] = React.useState(null);
     const [selectedRuleKey, setSelectedRuleKey] = React.useState('');
     const [selectedRun, setSelectedRun] = React.useState(null);
+    const [loadSeqRef] = React.useState(() => ({ current: 0 }));
+    const [selectedRuleKeyRef] = React.useState(() => ({ current: '' }));
+
+    const updateSelectedRuleKey = React.useCallback((nextKey) => {
+      const normalized = String(nextKey || '');
+      selectedRuleKeyRef.current = normalized;
+      setSelectedRuleKey(normalized);
+    }, []);
+
+    React.useEffect(() => {
+      loadSeqRef.current += 1;
+      selectedRuleKeyRef.current = '';
+      setSelectedRuleKey('');
+      setSelectedRun(null);
+      setRawCatalog(null);
+      setTestResult(null);
+      setRotateTargetKey('');
+      setRotateSecretText('');
+      setConnectors([]);
+      setRules([]);
+      setRuns([]);
+    }, [effectiveOrg]);
 
     const loadAll = React.useCallback(async (overrideRuleKey) => {
       const clientApi = runtimeRef.api;
       if (!clientApi?.request) return;
-      const runFilterKey = overrideRuleKey !== undefined ? overrideRuleKey : selectedRuleKey;
+      const seq = (loadSeqRef.current += 1);
+      const runFilterKey = overrideRuleKey !== undefined ? overrideRuleKey : selectedRuleKeyRef.current;
+      const reqOrgPayload = { ...orgPayload };
       setLoading(true);
       try {
         const catalogPromise = (async () => {
           try {
-            return await clientApi.request({ url: 'dxosAutomations:builderCatalog', method: 'get', params: orgPayload, skipNotify: true });
+            return await clientApi.request({ url: 'dxosAutomations:builderCatalog', method: 'get', params: reqOrgPayload, skipNotify: true });
           } catch {
             return null;
           }
         })();
         const results = await Promise.allSettled([
-          clientApi.request({ url: 'dxosVault:list', method: 'get', params: orgPayload, skipNotify: true }),
-          clientApi.request({ url: 'dxosAutomations:listRules', method: 'get', params: orgPayload, skipNotify: true }),
+          clientApi.request({ url: 'dxosVault:list', method: 'get', params: reqOrgPayload, skipNotify: true }),
+          clientApi.request({ url: 'dxosAutomations:listRules', method: 'get', params: reqOrgPayload, skipNotify: true }),
           clientApi.request({
             url: 'dxosAutomations:listRuns',
             method: 'get',
-            params: { ...orgPayload, ...(runFilterKey ? { ruleKey: runFilterKey } : {}) },
+            params: { ...reqOrgPayload, ...(runFilterKey ? { ruleKey: runFilterKey } : {}) },
             skipNotify: true,
           }),
         ]);
+        if (seq !== loadSeqRef.current) return;
         const firstErr = results.find((r) => r.status === 'rejected');
         if (firstErr) {
           reportFeedback({ type: 'error', text: extractError(firstErr.reason, 'Không tải được dữ liệu Vault & Automation.') });
@@ -1100,19 +1125,27 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
               const refreshed = prevId != null ? nextRuns.find((r) => (r.runUid ?? r.runId ?? r.id) === prevId) : null;
               return refreshed || nextRuns[0];
             });
+          } else {
+            setSelectedRun(null);
           }
         }
         const catalogRes = await catalogPromise;
+        if (seq !== loadSeqRef.current) return;
         if (catalogRes) {
           const cd = unwrapData(catalogRes);
           if (cd && typeof cd === 'object' && Object.keys(cd).length > 0) {
             setRawCatalog(cd);
+          } else {
+            setRawCatalog(null);
           }
+        } else {
+          setRawCatalog(null);
         }
       } catch (err) {
+        if (seq !== loadSeqRef.current) return;
         reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') });
       } finally {
-        setLoading(false);
+        if (seq === loadSeqRef.current) setLoading(false);
       }
     }, [effectiveOrg, hasApi]);
 
@@ -1394,6 +1427,7 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
 
       // Section 2: Visual Automation Studio & Inline AI Copilot
       h(AutomationStudioPanel, {
+        effectiveOrg,
         orgPayload,
         runtimeRef,
         reportFeedback,
@@ -1406,7 +1440,7 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
         runs,
         rawCatalog,
         selectedRuleKey,
-        setSelectedRuleKey,
+        setSelectedRuleKey: updateSelectedRuleKey,
         selectedRun,
         setSelectedRun,
       }),

@@ -20,10 +20,23 @@ function norm(input) {
   return stripDiacritics(input).toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+const GRAPH_IMPACT_RE = /(phan\s+tich\s+anh\s+huong|truy\s+vet\s+(?:pha\s+he|nguon\s+goc|day\s+chuyen|anh\s+huong|tac\s+dong|lo\s+hang|don\s+hang)|tac\s+dong\s+(?:day\s+chuyen|lien\s+hoan|ha\s+nguon|thuong\s+nguon)|(?:nhung|cac)\s+(?:lo|don\s+hang|thiet\s+bi|su\s+co|epod)[^.?]{0,30}bi\s+anh\s+huong|neu\s+(?:kho\s+lanh|buong\s+lanh|thiet\s+bi|lo\s+hang|may\s+nen|xe\s+lanh)[^.?]{0,50}(?:hong|su\s+co|qua\s+nhiet|mat\s+dien)[^.?]{0,50}(?:anh\s+huong|lien\s+quan|lo|don)|anh\s+huong\s+day\s+chuyen|impact\s+analysis|graphrag)/;
+
+function extractNegativeVietnameseNumber(utterance) {
+  const rawLow = String(utterance || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const explicitNeg = rawLow.match(/(?:(?<![\p{L}\p{N}_])(?:âm|trừ)\s+|(?<![a-z0-9])-\s*)(\d+(?:\.\d+)?)\s*(?:độ|°\s*c|°|c)?(?=\s|$|[,.;%)°]|độ)/iu);
+  if (explicitNeg) return -Number(explicitNeg[1]);
+  const masked = rawLow.replace(/(?<![\p{L}\p{N}_])độ\s+ẩm(?![\p{L}\p{N}_])/giu, 'do_am');
+  const nForNeg = norm(masked);
+  const asciiNeg = nForNeg.match(/(?:(?<!(?<!\bnhiet\s)\bdo\s)\bam\s+|\btru\s+|(?<![a-z0-9])-\s*)(\d+(?:\.\d+)?)\s*(?:do|°c|°|c)?\b/);
+  if (asciiNeg) return -Number(asciiNeg[1]);
+  return null;
+}
+
 function extractVietnameseThreshold(utterance) {
   const n = norm(utterance);
-  const neg = n.match(/(?:am\s+|tru\s+|-\s*)(\d+(?:\.\d+)?)\s*(?:do|°c|°|c)?\b/);
-  if (neg) return -Number(neg[1]);
+  const neg = extractNegativeVietnameseNumber(utterance);
+  if (neg !== null) return neg;
   const pos = n.match(/(?:>|>=|vuot|cao hon|lon hon|tren|tu|duoi|thap hon|nho hon|nguong)\s*(\d+(?:\.\d+)?)\s*(?:do|°c|%|phut|h|gio)?\b/);
   if (pos) return Number(pos[1]);
   return null;
@@ -212,10 +225,12 @@ function extractAutomationSampleEvent(raw, n) {
   const sample = {};
   const thr = extractVietnameseThreshold(raw);
   const exactNum = n.match(/(?:tempc|nhiet do)\s*(?:=|la|:)?\s*(-?\d+(?:\.\d+)?)/i);
-  const negExact = n.match(/(?:am|tru)\s*(\d+(?:\.\d+)?)\s*(?:do|°c|c)?\b/);
+  const negExact = extractNegativeVietnameseNumber(raw);
+  const humMatch = n.match(/(?<!\bnhiet\s)\bdo am\s*(?:=|la|:|vuot|cao hon|lon hon|tren|duoi|thap hon|nho hon|nguong|>|>=|<|<=)?\s*(\d+(?:\.\d+)?)\s*%?/);
+  if (humMatch) sample.humidity = Number(humMatch[1]);
   if (exactNum) sample.tempC = Number(exactNum[1]);
-  else if (negExact) sample.tempC = -Number(negExact[1]);
-  else if (thr !== null) sample.tempC = thr;
+  else if (negExact !== null) sample.tempC = negExact;
+  else if (thr !== null && !(humMatch && !/(?:nhiet do|tempc|temperature)/.test(n))) sample.tempC = thr;
   const assetMatch = cleanRaw.match(/\b((?:COLD-ROOM|AST|CHILLER|ROOM|DEVICE)-[A-Z0-9-]{1,32})\b/);
   if (assetMatch && assetMatch[1]) {
     sample.deviceKey = assetMatch[1];
@@ -296,11 +311,13 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
+  const isGraphImpact = GRAPH_IMPACT_RE.test(n);
+
   // 3.5. Native Automation Copilot (Suggest / Test / Patch / Draft) — Admin only
-  const hasAutomationTopic = /(?:automation|luong tu dong|tu dong hoa|rule tu dong|quy trinh tu dong|\bauto_[a-z0-9][a-z0-9_-]*\b|\brule\b)/.test(n);
+  const hasAutomationTopic = !isGraphImpact && /(?:automation|luong tu dong|tu dong hoa|rule tu dong|quy trinh tu dong|\bauto_[a-z0-9][a-z0-9_-]*\b|(?:toi\s+uu|sua|cap\s+nhat|chay\s+thu|mo\s+phong)\s+rule\b)/.test(n);
   if (hasAutomationTopic) {
     const ruleKey = extractAutomationRuleKey(raw);
-    const isSuggest = /(goi y toi uu|de xuat cai tien|toi uu(?:\s+(?:automation|rule|luong))?|phan tich(?:\s+(?:automation|rule|luong))?|kiem tra(?:\s+(?:automation|rule|luong)))/.test(n);
+    const isSuggest = /(goi y toi uu|de xuat cai tien|toi uu(?:\s+(?:automation|rule|luong))?|phan tich\s+(?:automation|rule|luong)|kiem tra\s+(?:automation|rule|luong))/.test(n);
     const isTest = /(mo phong|dry[\s-]?run|chay thu)/.test(n);
     const isDraftExplicit = /(?:^|\s)(?:tao|dung|lap|thiet ke|xay dung)\s+(?:moi\s+)?(?:automation|luong tu dong|quy trinh tu dong|rule tu dong|tu dong hoa)\b/.test(n);
     const isPatchVerb = /(?:doi|sua|chinh|cap nhat|xoa|gan)\s+(?:[^\n]{0,24}?\s)?(?:buoc(?:\s+\d+)?|step(?:\s*:\s*\d+)?|dieu kien|nguong|nhiet do|cooldown|dmn|nhanh|bo loc|filter|trigger)/.test(n)
@@ -416,7 +433,7 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
   }
 
   // 6. GraphRAG Impact & Lineage Analysis (before Radar & broad RAG Search)
-  if (/(phan\s+tich\s+anh\s+huong|truy\s+vet\s+(?:pha\s+he|nguon\s+goc|day\s+chuyen|anh\s+huong|tac\s+dong|lo\s+hang|don\s+hang)|tac\s+dong\s+(?:day\s+chuyen|lien\s+hoan|ha\s+nguon|thuong\s+nguon)|(?:nhung|cac)\s+(?:lo|don\s+hang|thiet\s+bi|su\s+co|epod)[^.?]{0,30}bi\s+anh\s+huong|neu\s+(?:kho\s+lanh|buong\s+lanh|thiet\s+bi|lo\s+hang|may\s+nen|xe\s+lanh)[^.?]{0,50}(?:hong|su\s+co|qua\s+nhiet|mat\s+dien)[^.?]{0,50}(?:anh\s+huong|lien\s+quan|lo|don)|anh\s+huong\s+day\s+chuyen|impact\s+analysis|graphrag)/.test(n)) {
+  if (isGraphImpact) {
     return {
       intent: 'GRAPH_IMPACT_ANALYSIS',
       refused: false,

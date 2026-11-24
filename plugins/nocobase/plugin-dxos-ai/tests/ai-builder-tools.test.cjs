@@ -829,7 +829,7 @@ test('dxos_configure_workflow runAutomation handles missing ruleKey, dryRun, liv
   });
   assert.equal(runNowCalls.length, 0);
 
-  // 3. Live resource invocation delegates to dxosAutomations:runNow
+  // 3. Live resource invocation delegates to dxosAutomations:runNow without flat sampleEvent overriding defaultEventType
   const live = await wfTool.invoke(ctx, {
     operation: 'runAutomation',
     ruleKey: 'auto_cmms_on_coldchain_fault',
@@ -841,10 +841,23 @@ test('dxos_configure_workflow runAutomation handles missing ruleKey, dryRun, liv
   assert.equal(runNowCalls[0].method, 'POST');
   assert.equal(runNowCalls[0].params.organizationId, 'native-ui-lab');
   assert.equal(runNowCalls[0].params.ruleKey, 'auto_cmms_on_coldchain_fault');
-  assert.deepEqual(runNowCalls[0].params.sampleEvent, { assetCode: 'COLD-ROOM-A1', tempC: -9.5 });
+  assert.equal(runNowCalls[0].params.sampleEvent, undefined);
+  assert.equal(runNowCalls[0].params.event, undefined);
   assert.deepEqual(runNowCalls[0].params.data, { assetCode: 'COLD-ROOM-A1', tempC: -9.5 });
-  assert.deepEqual(runNowCalls[0].params.values.sampleEvent, { assetCode: 'COLD-ROOM-A1', tempC: -9.5 });
+  assert.equal(runNowCalls[0].params.values.sampleEvent, undefined);
+  assert.equal(runNowCalls[0].params.values.event, undefined);
   assert.deepEqual(runNowCalls[0].params.values.data, { assetCode: 'COLD-ROOM-A1', tempC: -9.5 });
+
+  // Envelope sampleEvent preserves sampleEvent & event with tenant organizationId
+  await wfTool.invoke(ctx, {
+    operation: 'runAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    sampleEvent: { type: 'alarm.triggered', organizationId: 'foreign-org', data: { assetCode: 'COLD-ROOM-A1', tempC: -7 } },
+  });
+  assert.equal(runNowCalls.length, 2);
+  assert.equal(runNowCalls[1].params.event.type, 'alarm.triggered');
+  assert.equal(runNowCalls[1].params.event.organizationId, 'native-ui-lab');
+  assert.equal(runNowCalls[1].params.sampleEvent.type, 'alarm.triggered');
 
   // 4. Fallback to plugin-dxos-studio automation-engine.js (executeAutomationRuleNow & executeRuleAgainstEvent) and clean 503 when unavailable
   const Module = require('node:module');
@@ -1376,4 +1389,443 @@ test('dxos_configure_workflow integrates end-to-end with real plugin-dxos-studio
     () => wfTool.invoke(noResCtx, { operation: 'draftAutomation', goal: 'Create automation writing into users table' }),
     (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
   );
+});
+
+test('R2 P1 #1/#2/#3 and P2 #1/#2/#3 regressions for dxos_configure_workflow & dxosAutomations delegation', async () => {
+  const { createDxosAutomationsActions } = require('../../plugin-dxos-studio/src/server/automation-engine');
+  const { db, ctx, byName } = makeBuilderHarness();
+  const wfTool = byName.get('dxos_configure_workflow');
+
+  delete db.store.workflows;
+  delete db.store.flow_nodes;
+  db.store.latticeNotifications = [];
+  db.store.latticeAutomationRuns = [];
+  db.store.rolesUsers = [
+    { id: 1, userId: 1, roleName: 'admin' },
+    { id: 2, userId: 1, roleName: 'root' },
+    { id: 3, userId: 2, roleName: 'admin' },
+    { id: 4, userId: 9, roleName: 'ldx_employee' },
+  ];
+  db.store.latticeAutomationRules = [
+    {
+      id: 1,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      name: 'CMMS Coldchain Auto-Ticket',
+      triggerEventType: 'alarm.triggered',
+      filterJson: { field: 'tempC', op: 'gt', value: -15 },
+      dmnTableKey: null,
+      cooldownSec: 0,
+      maxDepth: 6,
+      active: true,
+      actionsJson: [
+        { type: 'notify_role', label: 'Báo quản lý', role: 'ldx_manager', title: 'Alert {{data.deviceKey}}' },
+      ],
+    },
+    {
+      id: 2,
+      organizationId: 'foreign-org-b',
+      ruleKey: 'foreign_org_rule',
+      name: 'Foreign Org Rule',
+      triggerEventType: 'alarm.triggered',
+      actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'Foreign' }],
+      active: true,
+    },
+  ];
+
+  const studioActions = createDxosAutomationsActions(db);
+  const mountRealStudio = (targetCtx) => ({
+    ...targetCtx,
+    app: {
+      ...targetCtx.app,
+      resourceManager: {
+        isDefined: (n) => n === 'dxosAutomations',
+        getResource: (n) => (n === 'dxosAutomations' ? {
+          actions: {
+            get: (actName) => (typeof studioActions[actName] === 'function' ? { handler: studioActions[actName] } : null),
+          },
+        } : null),
+      },
+    },
+  });
+
+  // 1. R2 P1 #1 + P1 #2: multi-role ['admin', 'root'] without X-Role: root header (currentRole='admin', no employee row)
+  // delegates cleanly with currentRole='root' and preserves ruleRow.triggerEventType on flat sampleEvent
+  const multiRoleRootCtx = mountRealStudio({
+    ...ctx,
+    headers: {},
+    state: { currentUser: { id: 1, username: 'super_admin' }, currentRoles: ['admin', 'root'], currentRole: 'admin' },
+  });
+  const listRoot = await wfTool.invoke(multiRoleRootCtx, { operation: 'listAutomations' });
+  assert.equal(listRoot.items.length, 1);
+  assert.equal(listRoot.items[0].ruleKey, 'auto_cmms_on_coldchain_fault');
+  assert.equal(multiRoleRootCtx.state.currentRole, 'admin');
+
+  const runFlatRoot = await wfTool.invoke(multiRoleRootCtx, {
+    operation: 'runAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    sampleEvent: { deviceKey: 'COLD-ROOM-A1', tempC: -9 },
+  });
+  assert.equal(runFlatRoot.run.status, 'completed');
+  assert.equal(runFlatRoot.run.triggerEventType, 'alarm.triggered');
+
+  // 2. R2 P1 #2: verified non-root isStudioAdmin (no root role, no latticeEmployees row) catches ONLY NATIVE_MEMBERSHIP_REQUIRED
+  // and falls back cleanly to verified tenant-scoped local copilot/engine across all 7 operations
+  const nonRootAdminCtx = mountRealStudio({
+    ...ctx,
+    headers: {},
+    state: { currentUser: { id: 2, username: 'org_admin_only' }, currentRoles: ['admin'], currentRole: 'admin' },
+  });
+  const nrList = await wfTool.invoke(nonRootAdminCtx, { operation: 'listAutomations' });
+  assert.equal(nrList.count, 1);
+  assert.equal(nrList.items[0].ruleKey, 'auto_cmms_on_coldchain_fault');
+
+  const nrRun = await wfTool.invoke(nonRootAdminCtx, {
+    operation: 'runAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    sampleEvent: { deviceKey: 'COLD-ROOM-A1', tempC: -9 },
+  });
+  assert.equal(nrRun.run.status, 'completed');
+  assert.equal(nrRun.run.triggerEventType, 'alarm.triggered');
+
+  const nrSuggest = await wfTool.invoke(nonRootAdminCtx, {
+    operation: 'suggestAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+  });
+  assert.equal(nrSuggest.applied, false);
+  assert.equal(nrSuggest.suggestions.some((s) => s.id === 'add_cooldown_guard'), true);
+
+  const nrDraft = await wfTool.invoke(nonRootAdminCtx, {
+    operation: 'draftAutomation',
+    goal: 'Tạo automation khi nhiệt độ vượt âm 15 độ thì cảnh báo quản lý',
+    apply: false,
+  });
+  assert.equal(nrDraft.applied, false);
+  assert.ok(nrDraft.draftRule.ruleKey);
+
+  const nrPatch = await wfTool.invoke(nonRootAdminCtx, {
+    operation: 'patchAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    targetNode: 'cooldown',
+    goal: 'Đặt cooldown 180 giây',
+    apply: false,
+  });
+  assert.equal(nrPatch.applied, false);
+  assert.equal(nrPatch.draftRule.cooldownSec, 180);
+
+  const nrSave = await wfTool.invoke(nonRootAdminCtx, {
+    operation: 'saveAutomation',
+    rule: {
+      ruleKey: 'auto_nonroot_admin_saved',
+      name: 'Saved By Non-Root Admin',
+      triggerEventType: 'alarm.triggered',
+      actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'Hi' }],
+    },
+  });
+  assert.equal(nrSave.saved, true);
+  assert.equal(db.store.latticeAutomationRules.some((r) => r.ruleKey === 'auto_nonroot_admin_saved' && r.organizationId === 'native-ui-lab'), true);
+
+  const nrTest = await wfTool.invoke(nonRootAdminCtx, {
+    operation: 'testAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    sampleEvent: { deviceKey: 'COLD-ROOM-A1', tempC: -9 },
+  });
+  assert.equal(nrTest.dryRun, true);
+  assert.equal(nrTest.matched, true);
+
+  // Explicit X-Role: admin step-down on ['admin', 'root'] does NOT escalate currentRole to 'root'
+  let observedRoleOnStepDown = null;
+  const stepDownCtx = {
+    ...ctx,
+    headers: { 'x-role': 'admin' },
+    state: { currentUser: { id: 1, username: 'super_admin' }, currentRoles: ['admin', 'root'], currentRole: 'admin' },
+    app: {
+      ...ctx.app,
+      resourceManager: {
+        isDefined: (n) => n === 'dxosAutomations',
+        getResource: (n) => (n === 'dxosAutomations' ? {
+          actions: {
+            get: (actName) => actName === 'listRules' ? {
+              handler: async (subCtx) => {
+                observedRoleOnStepDown = subCtx.state.currentRole;
+                subCtx.body = { items: [] };
+              },
+            } : null,
+          },
+        } : null),
+      },
+    },
+  };
+  await wfTool.invoke(stepDownCtx, { operation: 'listAutomations' });
+  assert.equal(observedRoleOnStepDown, 'admin');
+
+  // Non-NATIVE_MEMBERSHIP_REQUIRED errors (FORBIDDEN, AI_ASSIST_REFUSED, 404) are NEVER swallowed
+  const strictErrorCtx = (code, status, message) => ({
+    ...nonRootAdminCtx,
+    app: {
+      ...nonRootAdminCtx.app,
+      resourceManager: {
+        isDefined: (n) => n === 'dxosAutomations',
+        getResource: (n) => (n === 'dxosAutomations' ? {
+          actions: {
+            get: () => ({
+              handler: async () => {
+                throw Object.assign(new Error(message), { code, status });
+              },
+            }),
+          },
+        } : null),
+      },
+    },
+  });
+  await assert.rejects(
+    () => wfTool.invoke(strictErrorCtx('FORBIDDEN', 403, 'Forbidden by policy'), { operation: 'listAutomations' }),
+    (err) => err.status === 403 && err.code === 'FORBIDDEN',
+  );
+  await assert.rejects(
+    () => wfTool.invoke(strictErrorCtx('AI_ASSIST_REFUSED', 400, 'Unsafe directive'), { operation: 'draftAutomation', goal: 'test' }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+  );
+  await assert.rejects(
+    () => wfTool.invoke(strictErrorCtx('RULE_NOT_FOUND', 404, 'Rule missing'), { operation: 'runAutomation', ruleKey: 'auto_cmms_on_coldchain_fault' }),
+    (err) => err.status === 404 && err.code === 'RULE_NOT_FOUND',
+  );
+
+  // 3. R2 P1 #3: rule-only draftAutomation, targetNode='actions'|'step:new' -> 'step:append', and configPatch/triggerEventType local patching
+  const ruleOnlyDraft = await wfTool.invoke(multiRoleRootCtx, {
+    operation: 'draftAutomation',
+    rule: {
+      ruleKey: 'auto_rule_only_draft',
+      name: 'Rule Only Draft',
+      triggerEventType: 'alarm.triggered',
+      actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'Alert' }],
+    },
+    apply: false,
+  });
+  assert.equal(ruleOnlyDraft.applied, false);
+  assert.equal(ruleOnlyDraft.draftRule.ruleKey, 'auto_rule_only_draft');
+  assert.equal(ruleOnlyDraft.simulation.matched, true);
+
+  const aiAssistObservedTargets = [];
+  const spyAiAssistCtx = {
+    ...multiRoleRootCtx,
+    app: {
+      ...multiRoleRootCtx.app,
+      resourceManager: {
+        isDefined: (n) => n === 'dxosAutomations',
+        getResource: (n) => (n === 'dxosAutomations' ? {
+          actions: {
+            get: (actName) => {
+              if (actName === 'aiAssist') {
+                return {
+                  handler: async (subCtx) => {
+                    aiAssistObservedTargets.push(subCtx.action.params.values.targetNode);
+                    return studioActions.aiAssist(subCtx, async () => {});
+                  },
+                };
+              }
+              return typeof studioActions[actName] === 'function' ? { handler: studioActions[actName] } : null;
+            },
+          },
+        } : null),
+      },
+    },
+  };
+
+  const patchedAppendActions = await wfTool.invoke(spyAiAssistCtx, {
+    operation: 'patchAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    targetNode: 'actions',
+    goal: 'Thêm bước AI triage cho sự cố',
+    apply: false,
+  });
+  assert.equal(aiAssistObservedTargets[0], 'step:append');
+  assert.equal(patchedAppendActions.draftRule.actionsJson.length, 2);
+
+  await wfTool.invoke(spyAiAssistCtx, {
+    operation: 'patchAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    targetNode: 'step:new',
+    goal: 'Thêm bước thông báo cho ldx_director',
+    apply: false,
+  });
+  assert.equal(aiAssistObservedTargets[1], 'step:append');
+
+  // configPatch and triggerEventType without goal bypass aiAssist cleanly via deterministic local patcher
+  const cfgPatchCooldown = await wfTool.invoke(multiRoleRootCtx, {
+    operation: 'patchAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    configPatch: { cooldownSec: 450 },
+    apply: false,
+  });
+  assert.equal(cfgPatchCooldown.targetNode, 'cooldown');
+  assert.equal(cfgPatchCooldown.draftRule.cooldownSec, 450);
+
+  const cfgPatchTrigger = await wfTool.invoke(multiRoleRootCtx, {
+    operation: 'patchAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    triggerEventType: 'device.offline',
+    apply: false,
+  });
+  assert.equal(cfgPatchTrigger.targetNode, 'trigger');
+  assert.equal(cfgPatchTrigger.draftRule.triggerEventType, 'device.offline');
+
+  // 4. R2 P2 #1: suggestAutomation returns 404 on unknown/foreign ruleKey even with dxosAutomations:aiAssist mounted,
+  // and validates preview draftRule when apply !== true
+  await assert.rejects(
+    () => wfTool.invoke(multiRoleRootCtx, { operation: 'suggestAutomation', ruleKey: 'nonexistent_rule_xyz' }),
+    (err) => err.status === 404 && err.code === 'AUTOMATION_RULE_NOT_FOUND',
+  );
+  await assert.rejects(
+    () => wfTool.invoke(multiRoleRootCtx, { operation: 'suggestAutomation', ruleKey: 'foreign_org_rule' }),
+    (err) => err.status === 404 && err.code === 'AUTOMATION_RULE_NOT_FOUND',
+  );
+
+  const unsafePreviewCtx = {
+    ...multiRoleRootCtx,
+    app: {
+      ...multiRoleRootCtx.app,
+      resourceManager: {
+        isDefined: (n) => n === 'dxosAutomations',
+        getResource: (n) => (n === 'dxosAutomations' ? {
+          actions: {
+            get: (actName) => actName === 'aiAssist' ? {
+              handler: async (subCtx) => {
+                subCtx.body = {
+                  suggestions: [{ id: 'bad', title: 'Bad preview' }],
+                  draftRule: {
+                    ruleKey: 'auto_bad_preview',
+                    name: 'Bad Preview',
+                    triggerEventType: 'alarm.triggered',
+                    actionsJson: [{ type: 'create_record', collection: 'users', values: { username: 'pwn' } }],
+                  },
+                };
+              },
+            } : null,
+          },
+        } : null),
+      },
+    },
+  };
+  await assert.rejects(
+    () => wfTool.invoke(unsafePreviewCtx, { operation: 'suggestAutomation', ruleKey: 'auto_cmms_on_coldchain_fault', apply: false }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+  );
+
+  // 5. R2 P2 #2: validateAndNormalizeRule scrubs id, organizationId & protected voucher fields across values/data/patch/payload,
+  // and runAutomation dryRun validates __proto__ & sanitizes sampleEvent
+  const scrubbedSave = await wfTool.invoke(nonRootAdminCtx, {
+    operation: 'saveAutomation',
+    dryRun: true,
+    rule: {
+      ruleKey: 'auto_scrub_aliases',
+      name: 'Scrub Aliases',
+      triggerEventType: 'alarm.triggered',
+      actionsJson: [
+        {
+          type: 'create_record',
+          collection: 'latticeOrders',
+          values: { id: 99, organizationId: 'evil-org', status: 'approved', version: 9, name: 'SafeOrder1' },
+          data: { id: 99, organizationId: 'evil-org', status: 'submitted', cancelledBy: 'hacker', name: 'SafeOrder2' },
+          patch: { id: 99, organizationId: 'evil-org', amendedFromId: 12, name: 'SafeOrder3' },
+          payload: { id: 99, organizationId: 'evil-org', amendmentNo: 2, name: 'SafeOrder4' },
+        },
+        {
+          type: 'update_record',
+          collection: 'latticeCustomWorkOrders',
+          filter: { deviceKey: 'A1' },
+          patch: { id: 77, organizationId: 'evil-org', status: 'in_progress', title: 'Keep custom status' },
+          data: { id: 78, organizationId: 'evil-org', title: 'Keep title' },
+        },
+      ],
+    },
+  });
+  const orderStep = scrubbedSave.rule.actionsJson[0];
+  for (const alias of ['values', 'data', 'patch', 'payload']) {
+    assert.equal(orderStep[alias].id, undefined);
+    assert.equal(orderStep[alias].organizationId, undefined);
+    assert.equal(orderStep[alias].status, undefined);
+    assert.equal(orderStep[alias].version, undefined);
+    assert.equal(orderStep[alias].cancelledBy, undefined);
+    assert.equal(orderStep[alias].amendedFromId, undefined);
+    assert.equal(orderStep[alias].amendmentNo, undefined);
+    assert.ok(orderStep[alias].name);
+  }
+  const customStep = scrubbedSave.rule.actionsJson[1];
+  assert.equal(customStep.patch.id, undefined);
+  assert.equal(customStep.patch.organizationId, undefined);
+  assert.equal(customStep.patch.status, 'in_progress');
+  assert.equal(customStep.data.id, undefined);
+  assert.equal(customStep.data.organizationId, undefined);
+
+  await assert.rejects(
+    () => wfTool.invoke(nonRootAdminCtx, {
+      operation: 'runAutomation',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      dryRun: true,
+      sampleEvent: JSON.parse('{"tempC":-8,"__proto__":{"polluted":true}}'),
+    }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+  );
+  await assert.rejects(
+    () => wfTool.invoke(nonRootAdminCtx, {
+      operation: 'runAutomation',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      dryRun: true,
+      config: { constructor: { prototype: { polluted: true } } },
+    }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+  );
+
+  // 6. R2 P2 #3: "độ ẩm 90%" never parses as -90 in draftAutomation/patchAutomation threshold extraction
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  const isolatedAdminCtx = {
+    ...nonRootAdminCtx,
+    app: { ...nonRootAdminCtx.app, resourceManager: { getResource: () => null } },
+  };
+  Module._load = function (request, parent, isMain) {
+    if (String(request).includes('automation-copilot') || String(request).includes('automation-engine')) {
+      const err = new Error(`Cannot find module '${request}'`);
+      err.code = 'MODULE_NOT_FOUND';
+      throw err;
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const humidityDraft = await wfTool.invoke(isolatedAdminCtx, {
+      operation: 'draftAutomation',
+      goal: 'Tạo automation khi độ ẩm vượt 90% thì thông báo ldx_operator',
+      apply: false,
+    });
+    assert.equal(humidityDraft.draftRule.filterJson.field, 'humidity');
+    assert.equal(humidityDraft.draftRule.filterJson.op, 'gt');
+    assert.equal(humidityDraft.draftRule.filterJson.value, 90);
+
+    const humidityPlainDraft = await wfTool.invoke(isolatedAdminCtx, {
+      operation: 'draftAutomation',
+      goal: 'Tạo automation cảnh báo khi độ ẩm 90%',
+      apply: false,
+    });
+    assert.notEqual(humidityPlainDraft.draftRule.filterJson?.value, -90);
+
+    const asciiHumidityPatch = await wfTool.invoke(isolatedAdminCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      targetNode: 'filter',
+      goal: 'Sua dieu kien loc do am 90%',
+      apply: false,
+    });
+    assert.notEqual(asciiHumidityPatch.draftRule.filterJson?.value, -90);
+
+    const negTempDraft = await wfTool.invoke(isolatedAdminCtx, {
+      operation: 'draftAutomation',
+      goal: 'Tạo automation khi nhiệt độ âm 15 độ thì cảnh báo quản lý',
+      apply: false,
+    });
+    assert.equal(negTempDraft.draftRule.filterJson.field, 'tempC');
+    assert.equal(negTempDraft.draftRule.filterJson.value, -15);
+  } finally {
+    Module._load = origLoad;
+  }
 });

@@ -93,6 +93,42 @@ test('parseVietnameseNaturalIntent routes Automation Copilot intents accurately 
   const empDraft = parseVietnameseNaturalIntent('Tạo automation cảnh báo khi mất điện kho lạnh', { isAdmin: false, portalSlug: 'incidents' });
   assert.equal(empDraft.refused, true);
   assert.equal(empDraft.toolName, null);
+
+  // R2 P2 #3 regressions:
+  // 1) GraphRAG impact query containing "theo rule SLA" must NOT be hijacked as AUTOMATION_SUGGEST
+  for (const adminFlag of [true, false]) {
+    const graphImpactWithRule = parseVietnameseNaturalIntent('Phân tích ảnh hưởng theo rule SLA của lô LOT-VAC-001', { isAdmin: adminFlag, portalSlug: 'logistics' });
+    assert.equal(graphImpactWithRule.refused, false);
+    assert.equal(graphImpactWithRule.intent, 'GRAPH_IMPACT_ANALYSIS');
+    assert.equal(graphImpactWithRule.toolName, 'dxos_graph_impact_analysis');
+    assert.equal(graphImpactWithRule.args.collection, 'latticeStockLots');
+    assert.equal(graphImpactWithRule.args.recordCode, 'LOT-VAC-001');
+  }
+
+  // Automation draft containing "kiểm tra" must route to draftAutomation, not suggestAutomation
+  const draftCheck = parseVietnameseNaturalIntent('Tạo automation kiểm tra nhiệt độ kho lạnh vượt 8 độ', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(draftCheck.refused, false);
+  assert.equal(draftCheck.toolName, 'dxos_configure_workflow');
+  assert.equal(draftCheck.args.operation, 'draftAutomation');
+
+  // 2) "độ ẩm 90%" (do am 90%) must NEVER collide with "âm" (-90)
+  const { extractVietnameseThreshold } = require(path.join(PLUGIN_ROOT, 'src/server/ai-nl-router.js'));
+  assert.equal(extractVietnameseThreshold('độ ẩm 90%'), null);
+  assert.equal(extractVietnameseThreshold('do am 90%'), null);
+  assert.equal(extractVietnameseThreshold('Cảnh báo khi độ ẩm vượt 90%'), 90);
+  assert.equal(extractVietnameseThreshold('Nhiệt độ âm 15 độ C'), -15);
+  assert.equal(extractVietnameseThreshold('nhiet do am 15 do'), -15);
+  assert.equal(extractVietnameseThreshold('Thêm nhiệt kế cho COLD-ROOM-01 khi nhiệt độ vượt 8 độ'), 8);
+
+  const humiditySim = parseVietnameseNaturalIntent('Mô phỏng chạy thử dry-run rule auto_cmms_on_coldchain_fault với độ ẩm 90%', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(humiditySim.args.operation, 'testAutomation');
+  assert.equal(humiditySim.args.sampleEvent.humidity, 90);
+  assert.equal(humiditySim.args.sampleEvent.tempC, undefined);
+
+  const tempAndHumiditySim = parseVietnameseNaturalIntent('Mô phỏng chạy thử dry-run rule auto_cmms_on_coldchain_fault với nhiệt độ âm 15 độ và độ ẩm 90%', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(tempAndHumiditySim.args.operation, 'testAutomation');
+  assert.equal(tempAndHumiditySim.args.sampleEvent.tempC, -15);
+  assert.equal(tempAndHumiditySim.args.sampleEvent.humidity, 90);
 });
 
 test('Vietnamese Natural-Language 72-case Eval Suite achieves >= 95% pass rate via eval-vietnamese-nl-agent.mjs', async () => {

@@ -984,7 +984,7 @@ async function seedConnectorVault(api, organizationId) {
       baseUrl: 'http://n8n:5678/webhook/latticedx/v1/coldchain-alert',
       authType: 'hmac',
       secrets: {
-        webhookSecret,
+        secret: webhookSecret,
       },
     },
   });
@@ -1099,13 +1099,13 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
   const delegation = await seedDelegationSample(api, organizationId, ctx);
   const pkiSnapshot = await seedPkiAndColdSnapshot(api, organizationId, wms.orderId);
   const cmmsPack = await seedCmmsBusinessPack(api, organizationId);
-  const automationShowcase = await seedFlagshipAutomationRules(api, organizationId, assets);
   const connectorVault = await seedConnectorVault(api, organizationId);
   const mqttDevice = await seedMqttDevice(
     api,
     organizationId,
     assets.assetsByCode['REEFER-TRUCK-HCM-02'] || assets.assetsByCode['COLD-CHILLER-CT-01'],
   );
+  const automationShowcase = await seedFlagshipAutomationRules(api, organizationId, assets);
   const webhookSubscription = await seedWebhookSubscription(api, organizationId);
 
   const paraReindex = await api('latticePara:reindex', {

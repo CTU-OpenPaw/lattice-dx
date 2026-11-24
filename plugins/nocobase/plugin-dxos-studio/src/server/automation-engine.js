@@ -13,8 +13,14 @@ const path = require('path');
 const { evaluateDecisionTable } = require('./dmn-engine');
 const { SYSTEM_PROTECTED_COLLECTIONS } = require('./solution-bundle');
 const {
+  BLOCKED_PROTO_KEYS,
+  MAX_HARD_DEPTH,
+  RULE_KEY_RE,
+  VALID_ACTION_TYPES,
   buildAutomationBuilderCatalog,
+  hasUnsafeTemplateSyntax,
   runAutomationAiAssist,
+  validateFilterStructure,
 } = require('./automation-copilot');
 const {
   assertPatScope,
@@ -32,17 +38,8 @@ const {
 } = require('./wms-dmn-shared');
 
 const AUTOMATION_COLLECTIONS = Object.freeze(['latticeAutomationRules', 'latticeAutomationRuns']);
-const RULE_KEY_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const MUTATING_ROLES = new Set(['ldx_admin', 'ldx_manager', 'root', 'admin']);
-const VALID_ACTION_TYPES = new Set([
-  'create_record',
-  'update_record',
-  'notify_role',
-  'call_connector',
-  'twin_set_desired',
-  'trigger_ai_triage',
-]);
 const CORE_VOUCHER_COLLECTIONS = new Set([
   'latticeRequests',
   'latticeOrders',
@@ -84,8 +81,12 @@ const SENSITIVE_TARGET_COLLECTIONS = new Set([
   'latticeEpodRecords',
   'latticeOrganizations',
 ]);
-const BLOCKED_PATH_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
-const MAX_HARD_DEPTH = 8;
+const BLOCKED_PATH_SEGMENTS = BLOCKED_PROTO_KEYS;
+const FORBIDDEN_TRIAGE_COLLECTIONS_LOWER = new Set(
+  [...(SYSTEM_PROTECTED_COLLECTIONS || []), ...SENSITIVE_TARGET_COLLECTIONS, ...AUTOMATION_COLLECTIONS].map((c) =>
+    String(c).toLowerCase(),
+  ),
+);
 const CONNECTOR_TIMEOUT_MS = 5000;
 
 const recentRunEventSnapshots = new Map();
@@ -101,7 +102,7 @@ function rememberRunSnapshot(runUid, eventEnvelope) {
 }
 
 function isPlainObject(value) {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value) && !(value instanceof Date);
 }
 
 function sanitizePlainObject(value, seen = new WeakSet()) {
@@ -144,28 +145,6 @@ function getSafePath(root, rawPath) {
   return current;
 }
 
-function hasUnsafeTemplateSyntax(value) {
-  if (typeof value === 'string') {
-    const matches = value.matchAll(/\{\{([\s\S]*?)\}\}/g);
-    for (const match of matches) {
-      const expr = String(match[1] || '').trim();
-      if (!expr || !/^[a-zA-Z0-9_.\-$]+$/.test(expr)) return true;
-      const parts = expr.split('.').filter(Boolean);
-      if (!parts.length || parts.some((p) => BLOCKED_PATH_SEGMENTS.has(p))) return true;
-    }
-    return false;
-  }
-  if (Array.isArray(value)) {
-    return value.some((item) => hasUnsafeTemplateSyntax(item));
-  }
-  if (isPlainObject(value)) {
-    return Object.getOwnPropertyNames(value).some(
-      (k) => BLOCKED_PATH_SEGMENTS.has(k) || hasUnsafeTemplateSyntax(value[k]),
-    );
-  }
-  return false;
-}
-
 function resolveTemplateExpr(expr, context) {
   const trimmed = String(expr || '').trim();
   if (!trimmed || !/^[a-zA-Z0-9_.\-$]+$/.test(trimmed)) return undefined;
@@ -181,12 +160,12 @@ function resolveTemplateExpr(expr, context) {
 
 function interpolateTemplate(value, context) {
   if (typeof value === 'string') {
-    const singleMatch = value.match(/^\{\{\s*([^{}]+?)\s*\}\}$/);
+    const singleMatch = value.match(/^\{\{([^{}]+)\}\}$/);
     if (singleMatch) {
       const resolved = resolveTemplateExpr(singleMatch[1], context);
       return resolved === undefined ? '' : resolved;
     }
-    return value.replace(/\{\{([\s\S]*?)\}\}/g, (_full, expr) => {
+    return value.replace(/\{\{([^{}]*)\}\}/g, (_full, expr) => {
       const resolved = resolveTemplateExpr(expr, context);
       if (resolved === undefined || resolved === null) return '';
       if (typeof resolved === 'object') return JSON.stringify(resolved);
@@ -225,7 +204,11 @@ function lookupFilterValue(eventContext, key) {
 }
 
 function matchOperatorObject(actual, ops) {
-  for (const [op, expected] of Object.entries(ops)) {
+  if (!isPlainObject(ops)) return false;
+  if (Object.getOwnPropertyNames(ops).some((k) => BLOCKED_PATH_SEGMENTS.has(k))) return false;
+  const entries = Object.entries(ops);
+  if (entries.length === 0) return false;
+  for (const [op, expected] of entries) {
     if (BLOCKED_PATH_SEGMENTS.has(op)) return false;
     switch (op) {
       case '$eq':
@@ -301,6 +284,7 @@ function matchOperatorObject(actual, ops) {
 
 function isOperatorObject(obj) {
   if (!isPlainObject(obj)) return false;
+  if (Object.getOwnPropertyNames(obj).some((k) => BLOCKED_PATH_SEGMENTS.has(k))) return false;
   const keys = Object.keys(obj);
   return keys.length > 0 && keys.every((k) => k.startsWith('$'));
 }
@@ -311,7 +295,11 @@ function matchesFilter(filterJson, eventContext) {
     return filterJson.every((clause) => matchesFilter(clause, eventContext));
   }
   if (!isPlainObject(filterJson)) return false;
+  if (Object.getOwnPropertyNames(filterJson).some((k) => BLOCKED_PATH_SEGMENTS.has(k))) {
+    return false;
+  }
   const entries = Object.entries(filterJson).filter(([k]) => !BLOCKED_PATH_SEGMENTS.has(k));
+  if (Object.keys(filterJson).length > 0 && entries.length === 0) return false;
   if (entries.length === 0) return true;
 
   if (typeof filterJson.field === 'string') {
@@ -320,9 +308,14 @@ function matchesFilter(filterJson, eventContext) {
       ['op', 'value', '$eq', '$ne', '$gt', '$gte', '$lt', '$lte', '$in', '$nin', '$exists', '$contains'].includes(k),
     );
     if (isExplicitClause) {
+      if ('op' in filterJson && !String(filterJson.op || '').trim()) {
+        return false;
+      }
       const actual = lookupFilterValue(eventContext, filterJson.field);
       if (filterJson.op) {
-        return matchOperatorObject(actual, { [String(filterJson.op)]: filterJson.value });
+        const opKey = String(filterJson.op).trim();
+        if (!opKey || BLOCKED_PATH_SEGMENTS.has(opKey)) return false;
+        return matchOperatorObject(actual, { [opKey]: filterJson.value });
       }
       const opsObj = {};
       for (const k of opsKeys) {
@@ -489,8 +482,9 @@ function validateRulePayload(payload) {
       if (!isPlainObject(act.when)) {
         throw fail('INVALID_ACTION_CONDITION', 400, `actionsJson[${i}].when must be a plain object or null`);
       }
-      if (hasUnsafeTemplateSyntax(act.when)) {
-        throw fail('UNSAFE_TEMPLATE_EXPRESSION', 400, `actionsJson[${i}].when contains unsafe template or prototype key`);
+      const whenRes = validateFilterStructure(act.when, `actionsJson[${i}].when`);
+      if (!whenRes.ok) {
+        throw fail(whenRes.code, 400, whenRes.message);
       }
     }
     if (act.label !== undefined && act.label !== null && typeof act.label !== 'string') {
@@ -519,8 +513,11 @@ function validateRulePayload(payload) {
     }
     actionsJson.push(cleanAct);
   }
-  if (payload.filterJson !== undefined && payload.filterJson !== null && hasUnsafeTemplateSyntax(payload.filterJson)) {
-    throw fail('UNSAFE_TEMPLATE_EXPRESSION', 400, 'filterJson contains unsafe template or prototype key');
+  if (payload.filterJson !== undefined && payload.filterJson !== null) {
+    const filterRes = validateFilterStructure(payload.filterJson, 'filterJson');
+    if (!filterRes.ok) {
+      throw fail(filterRes.code, 400, filterRes.message);
+    }
   }
   const rawMaxDepth = payload.maxDepth === undefined || payload.maxDepth === null ? 8 : Number(payload.maxDepth);
   if (!Number.isInteger(rawMaxDepth) || rawMaxDepth < 1 || rawMaxDepth > MAX_HARD_DEPTH) {
@@ -662,7 +659,9 @@ function decodeHmacKey(secret) {
 }
 
 function buildHmacHeaders(bodyString, secrets) {
-  const secret = String(secrets?.secret || secrets?.signingSecret || secrets?.hmacSecret || secrets?.apiKey || '');
+  const secret = String(
+    secrets?.secret || secrets?.signingSecret || secrets?.hmacSecret || secrets?.webhookSecret || secrets?.apiKey || '',
+  );
   const hmacKey = decodeHmacKey(secret);
   if (!hmacKey) return {};
   const webhookId = `msg_${crypto.randomUUID()}`;
@@ -978,6 +977,15 @@ async function executeActionStep({
       const targetCollection = String(
         interpolateTemplate(action.targetCollection || 'latticeAssets', eventContext),
       ).trim();
+      if (
+        !targetCollection ||
+        SYSTEM_PROTECTED_COLLECTIONS?.has(targetCollection) ||
+        SENSITIVE_TARGET_COLLECTIONS.has(targetCollection) ||
+        AUTOMATION_COLLECTIONS.includes(targetCollection) ||
+        FORBIDDEN_TRIAGE_COLLECTIONS_LOWER.has(targetCollection.toLowerCase())
+      ) {
+        throw new Error(`TARGET_COLLECTION_FORBIDDEN: ${targetCollection || '(empty)'}`);
+      }
       const targetRecordIdRaw = interpolateTemplate(action.targetRecordId ?? eventContext?.data?.assetId ?? 0, eventContext);
       const targetRecordId = Number.isFinite(Number(targetRecordIdRaw)) ? Number(targetRecordIdRaw) : 0;
       const recommendation = String(
@@ -1237,7 +1245,7 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
       const type = String(act.type || '');
       const label = typeof act.label === 'string' && act.label.trim() ? act.label.trim() : null;
       const branchLabel = typeof act.branchLabel === 'string' && act.branchLabel.trim() ? act.branchLabel.trim() : null;
-      if (isPlainObject(act.when) && Object.keys(act.when).length > 0 && !matchesFilter(act.when, eventContext)) {
+      if (isPlainObject(act.when) && Object.getOwnPropertyNames(act.when).length > 0 && !matchesFilter(act.when, eventContext)) {
         eventContext.steps[idx] = { status: 'skipped', type, output: null };
         simulatedSteps.push({
           stepIndex: idx,
@@ -1502,7 +1510,9 @@ function createDxosAutomationsActions(db, options = {}) {
       const filter = { organizationId };
       if (params.active !== undefined) filter.active = params.active === true || params.active === 'true';
       if (params.triggerEventType) filter.triggerEventType = String(params.triggerEventType);
-      const { limit, offset } = clampPageLimit(params);
+      const limit = clampPageLimit(params.limit ?? params.pageSize);
+      const rawOffset = Number(params.offset);
+      const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
       const rows = repo
         ? await repo.find({ filter, sort: ['-updatedAt', '-id'], limit, offset })
         : [];
@@ -1635,7 +1645,9 @@ function createDxosAutomationsActions(db, options = {}) {
       const filter = { organizationId };
       if (params.ruleKey) filter.ruleKey = String(params.ruleKey).trim();
       if (params.status) filter.status = String(params.status).trim();
-      const { limit, offset } = clampPageLimit(params);
+      const limit = clampPageLimit(params.limit ?? params.pageSize);
+      const rawOffset = Number(params.offset);
+      const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
       const rows = repo
         ? await repo.find({ filter, sort: ['-startedAt', '-id'], limit, offset })
         : [];

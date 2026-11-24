@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const BLOCKED_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 const FILTER_OPERATORS = [
   { value: '$eq', label: '= bằng' },
   { value: '$ne', label: '≠ khác' },
@@ -80,6 +82,7 @@ const DEFAULT_AUTOMATION_BLUEPRINTS = [
       data: {
         deviceKey: 'COLD-CHILLER-CT-01',
         assetId: 1,
+        assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:1',
         severity: 'critical',
         temperature: 11.4,
         message: 'Nhiệt độ buồng lạnh vượt ngưỡng 8°C',
@@ -118,7 +121,7 @@ const DEFAULT_AUTOMATION_BLUEPRINTS = [
         when: { field: 'dmn.workOrderPriority', op: '$eq', value: 'critical' },
         branchLabel: 'Khi ưu tiên = critical',
         assetId: '{{data.assetId}}',
-        assetEntityId: '{{data.deviceKey}}',
+        assetEntityId: '{{data.assetEntityId}}',
         desiredPatch: { targetTempC: 2.0, fanMode: 'high', doorLock: 'locked' },
       },
       {
@@ -166,6 +169,8 @@ const DEFAULT_AUTOMATION_BLUEPRINTS = [
         sku: 'SKU-VAX-MKT-28',
         mktCelsius: 10.2,
         maxTempC: 11.1,
+        thresholdCelsius: 8.0,
+        assetEntityId: 'lot:LOT-V100-MKT-HOLD',
         totalAmountM: 650,
         severity: 'critical',
       },
@@ -176,12 +181,14 @@ const DEFAULT_AUTOMATION_BLUEPRINTS = [
         label: 'Mở hồ sơ sự cố chất lượng',
         collection: 'latticeIncidentCases',
         values: {
-          caseCode: 'INC-{{data.lotCode}}',
-          title: 'Cách ly lô vượt MKT: {{data.lotCode}}',
+          code: 'MKT-{{id}}',
+          name: 'Cách ly lô vượt MKT: {{data.lotCode}}',
+          runId: 'mkt-{{id}}',
+          assetEntityId: 'lot:{{data.lotCode}}',
+          handlerId: 'ldx_manager',
           severity: 'critical',
           status: 'open',
-          lotCode: '{{data.lotCode}}',
-          summary: 'MKT={{data.mktCelsius}}°C, duyệt={{dmn.approvalTier}}',
+          proposal: 'Lô {{data.lotCode}} có MKT={{data.mktCelsius}}°C vượt ngưỡng 8°C (duyệt: {{dmn.approvalTier}}).',
         },
       },
       {
@@ -235,9 +242,10 @@ const DEFAULT_AUTOMATION_BLUEPRINTS = [
       data: {
         targetCollection: 'latticeServiceTickets',
         recordId: 101,
-        ticketCode: 'TKT-SLA-01',
-        priority: 'urgent',
-        elapsedMinutes: 250,
+        code: 'TKT-SLA-01',
+        priority: 'high',
+        overdueMinutes: 250,
+        remainingMinutes: 0,
       },
     },
     actionsJson: [
@@ -249,8 +257,8 @@ const DEFAULT_AUTOMATION_BLUEPRINTS = [
         role: 'ldx_dispatcher',
         severity: 'warning',
         category: 'sla',
-        title: 'Sắp chạm ngưỡng SLA: {{data.ticketCode}}',
-        body: 'Đã qua {{data.elapsedMinutes}} phút trên {{data.targetCollection}} #{{data.recordId}}',
+        title: 'Sắp chạm ngưỡng SLA: {{data.code}}',
+        body: 'Còn {{data.remainingMinutes}} phút trước hạn SLA trên {{data.targetCollection}} #{{data.recordId}}',
         targetPath: '/p/services',
       },
       {
@@ -260,11 +268,11 @@ const DEFAULT_AUTOMATION_BLUEPRINTS = [
         branchLabel: 'Khi sự kiện = sla.breached',
         collection: 'latticeServiceTickets',
         values: {
-          ticketCode: 'ESC-{{id}}',
-          title: 'Vi phạm SLA: {{data.ticketCode}}',
-          priority: 'urgent',
-          category: 'sla_escalation',
-          summary: 'Quá hạn {{data.elapsedMinutes}} phút trên {{data.targetCollection}} #{{data.recordId}}',
+          code: 'SLA-{{id}}',
+          name: 'Vi phạm SLA: {{data.code}}',
+          serviceType: 'facilities',
+          priority: 'high',
+          description: 'Quá hạn {{data.overdueMinutes}} phút trên {{data.targetCollection}} #{{data.recordId}}.',
         },
       },
       {
@@ -275,7 +283,7 @@ const DEFAULT_AUTOMATION_BLUEPRINTS = [
         role: 'ldx_manager',
         severity: 'critical',
         category: 'sla',
-        title: 'VI PHẠM SLA: {{data.ticketCode}}',
+        title: 'VI PHẠM SLA: {{data.code}}',
         body: 'Đã mở phiếu leo thang #{{steps.1.id}} cho {{data.targetCollection}}',
         targetCollection: 'latticeServiceTickets',
         targetPath: '/p/services',
@@ -296,7 +304,7 @@ const DEFAULT_AUTOMATION_CATALOG = {
       eventType: 'alarm.triggered',
       label: 'Kích hoạt Cảnh báo Thiết bị',
       category: 'iot',
-      sampleEvent: { type: 'alarm.triggered', data: { deviceKey: 'COLD-CHILLER-CT-01', assetId: 1, severity: 'critical', temperature: 11.4, message: 'Vượt ngưỡng nhiệt độ 8°C' } },
+      sampleEvent: { type: 'alarm.triggered', data: { deviceKey: 'COLD-CHILLER-CT-01', assetId: 1, assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:1', severity: 'critical', temperature: 11.4, message: 'Vượt ngưỡng nhiệt độ 8°C' } },
     },
     {
       eventType: 'device.offline',
@@ -332,7 +340,7 @@ const DEFAULT_AUTOMATION_CATALOG = {
       eventType: 'sla.breached',
       label: 'Vi phạm Ngưỡng SLA',
       category: 'sla',
-      sampleEvent: { type: 'sla.breached', data: { targetCollection: 'latticeServiceTickets', recordId: 15, code: 'TKT-001', priority: 'urgent', overdueMinutes: 30 } },
+      sampleEvent: { type: 'sla.breached', data: { targetCollection: 'latticeServiceTickets', recordId: 15, code: 'TKT-001', priority: 'high', overdueMinutes: 30 } },
     },
     {
       eventType: 'epod.signed',
@@ -545,7 +553,7 @@ function serializeFilterRows(rows, complexJson) {
       op: String(r?.op || '$eq').trim() || '$eq',
       value: r?.value ?? '',
     }))
-    .filter((r) => r.field);
+    .filter((r) => r.field && !BLOCKED_PROTO_KEYS.has(r.field));
 
   if (!cleanRows.length) return null;
 
@@ -587,14 +595,42 @@ function serializeFilterRows(rows, complexJson) {
 
 function parseWhenCondition(when) {
   if (!when || typeof when !== 'object') {
-    return { enabled: false, field: 'dmn.workOrderPriority', op: '$eq', value: 'critical' };
+    return {
+      enabled: false,
+      isComplex: false,
+      field: 'dmn.workOrderPriority',
+      op: '$eq',
+      value: 'critical',
+      rows: [],
+      rawWhen: null,
+    };
   }
+  const keys = Array.isArray(when) ? [] : Object.keys(when);
+  const hasLogicalKey = Array.isArray(when)
+    || keys.some((k) => ['$or', '$not', '$and', 'or', 'any', 'and', 'all', 'rules'].includes(k));
   const parsed = parseFilterJsonToState(when);
-  if (parsed.rows.length > 0) {
-    const first = parsed.rows[0];
-    return { enabled: true, field: first.field, op: first.op, value: first.value };
+  const isComplex = Boolean(hasLogicalKey || parsed.complexJson || parsed.rows.length !== 1);
+  if (isComplex) {
+    return {
+      enabled: true,
+      isComplex: true,
+      field: parsed.rows[0]?.field || '',
+      op: parsed.rows[0]?.op || '$eq',
+      value: parsed.rows[0]?.value ?? '',
+      rows: parsed.rows,
+      rawWhen: when,
+    };
   }
-  return { enabled: true, field: 'dmn.workOrderPriority', op: '$eq', value: 'critical', rawWhen: when };
+  const first = parsed.rows[0];
+  return {
+    enabled: true,
+    isComplex: false,
+    field: first.field,
+    op: first.op,
+    value: first.value,
+    rows: parsed.rows,
+    rawWhen: null,
+  };
 }
 
 function summarizeConditionRow(row) {
@@ -606,15 +642,26 @@ function describeWhenLabel(action) {
   if (!action?.when) return 'Luồng chính (Mọi mức)';
   if (action.branchLabel) return String(action.branchLabel);
   const parsed = parseWhenCondition(action.when);
+  if (parsed.isComplex) {
+    const hasOrNot = Array.isArray(action.when)
+      || Object.keys(action.when).some((k) => ['$or', '$not', 'or', 'any'].includes(k));
+    if (!hasOrNot && parsed.rows.length > 1) {
+      return `Khi ${parsed.rows.map(summarizeConditionRow).join(' & ')}`;
+    }
+    const jsonStr = JSON.stringify(action.when);
+    return `Khi ${jsonStr.length > 72 ? `${jsonStr.slice(0, 69)}...` : jsonStr}`;
+  }
   return `Khi ${parsed.field} ${parsed.op} ${parsed.value}`;
 }
 
 function buildKeyValuePairs(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
-  return Object.entries(obj).map(([k, v]) => ({
-    key: k,
-    value: typeof v === 'string' ? v : JSON.stringify(v),
-  }));
+  return Object.entries(obj)
+    .filter(([k]) => !BLOCKED_PROTO_KEYS.has(String(k).trim()))
+    .map(([k, v]) => ({
+      key: k,
+      value: typeof v === 'string' ? v : JSON.stringify(v),
+    }));
 }
 
 function pairsToObject(pairs, { allowBlank = false } = {}) {
@@ -622,7 +669,9 @@ function pairsToObject(pairs, { allowBlank = false } = {}) {
   for (const pair of pairs) {
     const rawKey = String(pair?.key ?? '');
     const k = allowBlank ? rawKey : rawKey.trim();
-    if (!allowBlank && !k.trim()) continue;
+    const trimmedKey = k.trim();
+    if (!allowBlank && !trimmedKey) continue;
+    if (BLOCKED_PROTO_KEYS.has(trimmedKey)) continue;
     const raw = pair?.value ?? '';
     if (typeof raw === 'string') {
       const t = raw.trim();
@@ -646,7 +695,8 @@ function cleanBlankObjectKeys(obj) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
   const out = {};
   for (const [k, v] of Object.entries(obj)) {
-    if (String(k).trim()) out[k] = v;
+    const trimmed = String(k).trim();
+    if (trimmed && !BLOCKED_PROTO_KEYS.has(trimmed)) out[k] = v;
   }
   return out;
 }
@@ -969,6 +1019,31 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
     }
   }
 
+  function normalizeSelectedNodeForList(node, len) {
+    if (!String(node || '').startsWith('step:')) return node || 'trigger';
+    const idx = Number(String(node).slice(5));
+    if (!len) return 'trigger';
+    if (!Number.isInteger(idx) || idx < 0 || idx >= len) return `step:${len - 1}`;
+    return node;
+  }
+
+  function clearStepBufferKeys(rawBuf, idx) {
+    const nextWhen = { ...(rawBuf?.whenValues || {}) };
+    const nextTemp = { ...(rawBuf?.targetTempC || {}) };
+    delete nextWhen[idx];
+    delete nextTemp[idx];
+    return { whenValues: nextWhen, targetTempC: nextTemp };
+  }
+
+  function remapStepBufferMap(mapObj, remapIndex) {
+    const out = {};
+    for (const [k, v] of Object.entries(mapObj || {})) {
+      const nextKey = remapIndex(Number(k));
+      if (nextKey !== null && nextKey !== undefined) out[nextKey] = v;
+    }
+    return out;
+  }
+
   return function AutomationStudioPanel(props = {}) {
     const {
       orgPayload = {},
@@ -988,17 +1063,26 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
       setSelectedRun,
     } = props;
 
-    const [selectedNode, setSelectedNode] = React.useState('trigger');
+    const effectiveOrg = String(props.effectiveOrg ?? orgPayload?.organizationId ?? '').trim();
+
+    const [flowState, setFlowState] = React.useState(() => {
+      const initialList = cloneSafe(DEFAULT_AUTOMATION_ACTIONS);
+      return {
+        selectedNode: 'trigger',
+        list: initialList,
+        text: JSON.stringify(initialList, null, 2),
+        rawBuffers: { whenValues: {}, targetTempC: {} },
+      };
+    });
+    const selectedNode = flowState.selectedNode;
+    const actionsList = flowState.list;
+    const actionsText = flowState.text;
+    const rawBuffers = flowState.rawBuffers;
+
     const [showBlueprints, setShowBlueprints] = React.useState(false);
     const [showAdvancedJson, setShowAdvancedJson] = React.useState(false);
     const [ruleSearch, setRuleSearch] = React.useState('');
     const [sampleEventText, setSampleEventText] = React.useState(DEFAULT_SAMPLE_EVENT);
-    const [actionsState, setActionsState] = React.useState(() => ({
-      list: cloneSafe(DEFAULT_AUTOMATION_ACTIONS),
-      text: JSON.stringify(DEFAULT_AUTOMATION_ACTIONS, null, 2),
-    }));
-    const actionsList = actionsState.list;
-    const actionsText = actionsState.text;
     const [filterState, setFilterState] = React.useState({ rows: [], complexJson: null });
     const filterRows = filterState.rows;
     const complexFilterJson = filterState.complexJson;
@@ -1017,6 +1101,11 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
     const [aiBusy, setAiBusy] = React.useState(false);
     const [aiResult, setAiResult] = React.useState(null);
 
+    React.useEffect(() => {
+      setAiResult(null);
+      setActiveFieldTarget(null);
+    }, [effectiveOrg]);
+
     const catalog = React.useMemo(
       () => normalizeCatalog(rawCatalog, connectors, BUILDER_ROLES),
       [rawCatalog, connectors],
@@ -1027,37 +1116,82 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
       return parsed.ok ? parsed.value : null;
     }, [sampleEventText]);
 
-    function updateActions(nextOrUpdater) {
-      let nextLen = 0;
-      setActionsState((prev) => {
-        const resolved = typeof nextOrUpdater === 'function' ? nextOrUpdater(prev.list) : nextOrUpdater;
-        const safeList = Array.isArray(resolved) ? resolved : [];
-        nextLen = safeList.length;
-        return { list: safeList, text: JSON.stringify(safeList, null, 2) };
+    function setSelectedNode(nextOrUpdater) {
+      setFlowState((prev) => {
+        const resolved = typeof nextOrUpdater === 'function' ? nextOrUpdater(prev.selectedNode) : nextOrUpdater;
+        const normalized = normalizeSelectedNodeForList(resolved, prev.list.length);
+        return normalized === prev.selectedNode ? prev : { ...prev, selectedNode: normalized };
       });
-      setSelectedNode((prev) => {
-        if (!String(prev).startsWith('step:')) return prev;
-        const idx = Number(String(prev).slice(5));
-        if (!nextLen) return 'trigger';
-        if (!Number.isInteger(idx) || idx < 0 || idx >= nextLen) return `step:${nextLen - 1}`;
-        return prev;
+    }
+
+    function clearDryRunIfActive() {
+      setSelectedRun?.((prev) => (prev?._isDryRun ? null : prev));
+    }
+
+    function updateStructuralRuleForm(updater) {
+      clearDryRunIfActive();
+      setRuleForm(updater);
+    }
+
+    function updateSampleEventText(raw) {
+      clearDryRunIfActive();
+      setSampleEventText(raw);
+    }
+
+    function updateActions(nextOrUpdater, options = {}) {
+      const { nextNode, clearDryRun = true, nextRawBuffers } = options;
+      if (clearDryRun) clearDryRunIfActive();
+      setFlowState((prev) => {
+        const resolved = typeof nextOrUpdater === 'function' ? nextOrUpdater(prev.list, prev) : nextOrUpdater;
+        const safeList = (Array.isArray(resolved) ? resolved : []).filter(
+          (item) => item && typeof item === 'object' && !Array.isArray(item),
+        );
+        const candidateNode = nextNode !== undefined
+          ? (typeof nextNode === 'function' ? nextNode(prev.selectedNode, safeList) : nextNode)
+          : prev.selectedNode;
+        const resolvedBuffers = nextRawBuffers !== undefined
+          ? (typeof nextRawBuffers === 'function' ? nextRawBuffers(prev.rawBuffers, safeList) : nextRawBuffers)
+          : prev.rawBuffers;
+        return {
+          selectedNode: normalizeSelectedNodeForList(candidateNode, safeList.length),
+          list: safeList,
+          text: JSON.stringify(safeList, null, 2),
+          rawBuffers: resolvedBuffers || { whenValues: {}, targetTempC: {} },
+        };
       });
     }
 
     function handleActionsJsonChange(raw) {
-      setActionsState((prev) => {
+      clearDryRunIfActive();
+      setFlowState((prev) => {
         let nextList = prev.list;
+        let nextNode = prev.selectedNode;
+        let nextBuffers = prev.rawBuffers;
         try {
           const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) nextList = parsed;
+          if (
+            Array.isArray(parsed)
+            && parsed.every((item) => item && typeof item === 'object' && !Array.isArray(item))
+          ) {
+            nextList = parsed;
+            nextNode = normalizeSelectedNodeForList(prev.selectedNode, nextList.length);
+            nextBuffers = { whenValues: {}, targetTempC: {} };
+          }
         } catch {
           // Defer validation error until Save or Dry-Run
         }
-        return { list: nextList, text: raw };
+        return {
+          ...prev,
+          list: nextList,
+          text: raw,
+          selectedNode: nextNode,
+          rawBuffers: nextBuffers,
+        };
       });
     }
 
     function updateFilterState(nextOrUpdater, nextComplex = null) {
+      clearDryRunIfActive();
       setFilterState((prev) => {
         const nextRows = typeof nextOrUpdater === 'function' ? nextOrUpdater(prev.rows) : nextOrUpdater;
         return { rows: Array.isArray(nextRows) ? nextRows : [], complexJson: nextComplex };
@@ -1067,15 +1201,23 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
     function applyRuleToCanvas(ruleObj, { updateSample = false, nextNode = 'trigger' } = {}) {
       if (!ruleObj || typeof ruleObj !== 'object') return;
       const isActive = ruleObj.active !== false && ruleObj.enabled !== false;
-      const loadedActions = Array.isArray(ruleObj.actionsJson)
+      const rawLoadedActions = Array.isArray(ruleObj.actionsJson)
         ? ruleObj.actionsJson
         : (Array.isArray(ruleObj.actions) ? ruleObj.actions : []);
-      const filterState = parseFilterJsonToState(ruleObj.filterJson ?? null);
+      const loadedActions = rawLoadedActions.filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+      const nextFilterState = parseFilterJsonToState(ruleObj.filterJson ?? null);
       const maxDepthNum = Number(ruleObj.maxDepth);
       const cooldownNum = Number(ruleObj.cooldownSec);
+      const nextRuleKey = String(ruleObj.ruleKey || '');
 
+      if (nextRuleKey !== String(ruleForm.ruleKey || '')) {
+        setSelectedRun?.(null);
+      } else {
+        clearDryRunIfActive();
+      }
+      setActiveFieldTarget(null);
       setRuleForm({
-        ruleKey: String(ruleObj.ruleKey || ''),
+        ruleKey: nextRuleKey,
         name: String(ruleObj.name || ''),
         description: ruleObj.description ? String(ruleObj.description) : '',
         triggerEventType: String(ruleObj.triggerEventType || 'telemetry.alarm'),
@@ -1084,15 +1226,22 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
         maxDepth: Number.isFinite(maxDepthNum) && maxDepthNum >= 1 ? Math.min(8, maxDepthNum) : 8,
         active: isActive,
       });
-      updateFilterState(filterState.rows, filterState.complexJson);
-      updateActions(cloneSafe(loadedActions));
+      setFilterState({
+        rows: Array.isArray(nextFilterState.rows) ? nextFilterState.rows : [],
+        complexJson: nextFilterState.complexJson ?? null,
+      });
+      updateActions(cloneSafe(loadedActions), {
+        nextNode: nextNode || undefined,
+        clearDryRun: false,
+        nextRawBuffers: { whenValues: {}, targetTempC: {} },
+      });
       if (updateSample && ruleObj.sampleEvent && typeof ruleObj.sampleEvent === 'object') {
         setSampleEventText(JSON.stringify(ruleObj.sampleEvent, null, 2));
       }
-      if (nextNode) setSelectedNode(nextNode);
     }
 
     function handleNewRule() {
+      setSelectedRun?.(null);
       applyRuleToCanvas({
         ruleKey: '',
         name: '',
@@ -1104,22 +1253,38 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
         maxDepth: 8,
         active: true,
         actionsJson: cloneSafe(DEFAULT_AUTOMATION_ACTIONS),
-      });
+      }, { nextNode: 'trigger' });
       setSampleEventText(DEFAULT_SAMPLE_EVENT);
       setAiResult(null);
-      setSelectedNode('trigger');
     }
 
     function buildCurrentRulePayload(parsedActionsValue) {
       const cooldownSec = Math.max(0, Number.parseInt(String(ruleForm.cooldownSec ?? 0), 10) || 0);
       const maxDepthRaw = Number.parseInt(String(ruleForm.maxDepth ?? 8), 10);
       const maxDepth = Number.isFinite(maxDepthRaw) ? Math.min(8, Math.max(1, maxDepthRaw)) : 8;
-      const sanitizedActions = (Array.isArray(parsedActionsValue) ? parsedActionsValue : []).map((act) => {
-        if (!act || typeof act !== 'object') return act;
+      const sanitizedActions = (Array.isArray(parsedActionsValue) ? parsedActionsValue : []).map((act, idx) => {
+        if (!act || typeof act !== 'object' || Array.isArray(act)) return act;
         const copy = { ...act };
         if (copy.values && typeof copy.values === 'object') copy.values = cleanBlankObjectKeys(copy.values);
         if (copy.filter && typeof copy.filter === 'object') copy.filter = cleanBlankObjectKeys(copy.filter);
         if (copy.body && typeof copy.body === 'object' && !Array.isArray(copy.body)) copy.body = cleanBlankObjectKeys(copy.body);
+        if (Object.prototype.hasOwnProperty.call(rawBuffers.whenValues, idx) && copy.when) {
+          const parsedWhen = parseWhenCondition(copy.when);
+          if (!parsedWhen.isComplex) {
+            copy.when = {
+              field: parsedWhen.field,
+              op: parsedWhen.op,
+              value: coerceConditionValue(rawBuffers.whenValues[idx], parsedWhen.op),
+            };
+          }
+        }
+        if (copy.type === 'twin_set_desired' && Object.prototype.hasOwnProperty.call(rawBuffers.targetTempC, idx)) {
+          const rawTemp = String(rawBuffers.targetTempC[idx] ?? '');
+          const nextDesired = { ...(copy.desiredPatch || {}) };
+          if (rawTemp.trim() === '') delete nextDesired.targetTempC;
+          else nextDesired.targetTempC = coerceScalarValue(rawTemp);
+          copy.desiredPatch = nextDesired;
+        }
         return copy;
       });
       return {
@@ -1137,11 +1302,15 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
       };
     }
 
+    function hasValidActionObjects(actionsArr) {
+      return Array.isArray(actionsArr) && actionsArr.every((item) => item && typeof item === 'object' && !Array.isArray(item));
+    }
+
     function handleSaveRule(e) {
       e?.preventDefault?.();
       const parsedActions = safeJsonParse(actionsText, 'Actions JSON');
-      if (!parsedActions.ok || !Array.isArray(parsedActions.value)) {
-        reportFeedback({ type: 'error', text: parsedActions.error || 'Actions phải là mảng JSON hợp lệ.' });
+      if (!parsedActions.ok || !hasValidActionObjects(parsedActions.value)) {
+        reportFeedback({ type: 'error', text: parsedActions.error || 'Actions phải là mảng JSON gồm các object hợp lệ.' });
         return;
       }
       const rulePayload = buildCurrentRulePayload(parsedActions.value);
@@ -1188,8 +1357,8 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
 
     function handleDryRun() {
       const parsedActions = safeJsonParse(actionsText, 'Actions JSON');
-      if (!parsedActions.ok || !Array.isArray(parsedActions.value)) {
-        reportFeedback({ type: 'error', text: parsedActions.error || 'Actions phải là mảng JSON hợp lệ.' });
+      if (!parsedActions.ok || !hasValidActionObjects(parsedActions.value)) {
+        reportFeedback({ type: 'error', text: parsedActions.error || 'Actions phải là mảng JSON gồm các object hợp lệ.' });
         return;
       }
       const parsedSample = safeJsonParse(sampleEventText, 'Sample Event JSON');
@@ -1198,6 +1367,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
         return;
       }
       const draftPayload = buildCurrentRulePayload(parsedActions.value);
+      const simulatedRuleKey = String(draftPayload.ruleKey || '');
       const simRule = {
         ...draftPayload,
         ruleKey: draftPayload.ruleKey || 'draft_preview_rule',
@@ -1220,8 +1390,9 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
           ...sim,
           ruleKey: sim.ruleKey || simRule.ruleKey,
           _isDryRun: true,
+          _simulatedRuleKey: simulatedRuleKey,
         };
-        setSelectedRun(enrichedSim);
+        setSelectedRun?.(enrichedSim);
         reportFeedback({
           type: sim.status === 'failed' ? 'error' : 'success',
           text: `Dry-Run "${simRule.ruleKey}": ${sim.status || 'completed'} (${sim.durationMs ?? 0} ms).`,
@@ -1253,9 +1424,9 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
         });
         const d = unwrapData(res);
         const runObj = d.run || d;
-        setSelectedRuleKey(key);
+        setSelectedRuleKey?.(key);
         if (runObj && (runObj.stepTracesJson || runObj.stepTraces || runObj.runUid || runObj.runId || runObj.id)) {
-          setSelectedRun(runObj);
+          setSelectedRun?.(runObj);
         }
         reportFeedback({ type: 'success', text: `Đã chạy thử rule "${key}" (${runObj.status || 'completed'}).` });
         await loadAll(key);
@@ -1263,7 +1434,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
     }
 
     function handleInspectRuns(ruleKey) {
-      setSelectedRuleKey(ruleKey);
+      setSelectedRuleKey?.(ruleKey);
       return loadAll(ruleKey);
     }
 
@@ -1283,7 +1454,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
         });
         const d = unwrapData(res);
         const nextRun = d.run || d;
-        if (nextRun && (nextRun.stepTracesJson || nextRun.stepTraces)) setSelectedRun(nextRun);
+        if (nextRun && (nextRun.stepTracesJson || nextRun.stepTraces)) setSelectedRun?.(nextRun);
         reportFeedback({ type: 'success', text: `Đã phát lại Run #${runId}.` });
         await loadAll();
       });
@@ -1293,7 +1464,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
       const clientApi = runtimeRef?.api;
       if (!clientApi?.request || aiBusy || busy) return;
       const parsedActions = safeJsonParse(actionsText, 'Actions JSON');
-      const currentActions = parsedActions.ok && Array.isArray(parsedActions.value) ? parsedActions.value : actionsList;
+      const currentActions = parsedActions.ok && hasValidActionObjects(parsedActions.value) ? parsedActions.value : actionsList;
       const ruleDraft = buildCurrentRulePayload(currentActions);
       setAiBusy(true);
       reportFeedback(null);
@@ -1319,7 +1490,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
           patch: d.patch || null,
           sampleEvent: d.sampleEvent || null,
           suggestions: Array.isArray(d.suggestions) ? d.suggestions : [],
-          targetNode: d.targetNode || selectedNode,
+          targetNode: d.targetNode || (mode === 'full' ? 'trigger' : selectedNode),
         });
         reportFeedback({ type: 'success', text: `AI Copilot (${mode}) đã hoàn tất đề xuất.` });
       } catch (err) {
@@ -1329,67 +1500,140 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
       }
     }
 
-    function applyAiCandidate(candidateRule, candidatePatch, candidateSample) {
+    function applyAiCandidate(candidateRule, candidatePatch, candidateSample, candidateTargetNode) {
       const parsedActions = safeJsonParse(actionsText, 'Actions JSON');
-      const baseActions = parsedActions.ok && Array.isArray(parsedActions.value) ? parsedActions.value : actionsList;
+      const baseActions = parsedActions.ok && hasValidActionObjects(parsedActions.value) ? parsedActions.value : actionsList;
       const base = buildCurrentRulePayload(baseActions);
 
       let merged = candidateRule && typeof candidateRule === 'object' ? { ...base, ...candidateRule } : { ...base };
       if (!candidateRule && candidatePatch && typeof candidatePatch === 'object') {
         merged = { ...merged, ...candidatePatch };
         if (candidatePatch.stepIndex != null && candidatePatch.action) {
+          const stepIdxPatch = Number(candidatePatch.stepIndex);
           const nextActs = cloneSafe(base.actionsJson);
-          nextActs[Number(candidatePatch.stepIndex)] = candidatePatch.action;
+          if (Number.isInteger(stepIdxPatch) && stepIdxPatch >= 0 && stepIdxPatch <= nextActs.length) {
+            nextActs[stepIdxPatch] = candidatePatch.action;
+          }
           merged.actionsJson = nextActs;
         }
       }
       if (candidateSample && typeof candidateSample === 'object') {
         merged.sampleEvent = candidateSample;
       }
+      const rawTarget = candidateTargetNode !== undefined ? candidateTargetNode : aiResult?.targetNode;
+      const mergedActions = Array.isArray(merged.actionsJson)
+        ? merged.actionsJson
+        : (Array.isArray(merged.actions) ? merged.actions : []);
+      let nextNode = rawTarget && /^(trigger|filter|dmn|step:\d+)$/.test(rawTarget) ? rawTarget : 'trigger';
+      if (nextNode.startsWith('step:')) {
+        const targetStepIdx = Number(nextNode.slice(5));
+        if (!Number.isInteger(targetStepIdx) || targetStepIdx < 0 || targetStepIdx >= mergedActions.length) {
+          nextNode = 'trigger';
+        }
+      }
       applyRuleToCanvas(merged, {
         updateSample: Boolean(merged.sampleEvent),
-        nextNode: selectedNode,
+        nextNode,
       });
       reportFeedback({ type: 'success', text: `Đã áp dụng đề xuất AI vào Canvas (${merged.ruleKey || 'draft'}).` });
     }
 
-    function mutateStep(idx, updater) {
-      updateActions((prev) => prev.map((act, i) => (i === idx ? updater(cloneSafe(act)) : act)));
+    function mutateStep(idx, updater, options = {}) {
+      const { keepBuffers = true } = options;
+      updateActions(
+        (prevList) => prevList.map((act, i) => (i === idx ? updater(cloneSafe(act)) : act)),
+        {
+          nextRawBuffers: keepBuffers
+            ? undefined
+            : (prevBuf) => clearStepBufferKeys(prevBuf, idx),
+        },
+      );
     }
 
     function moveStep(idx, delta) {
-      updateActions((prev) => {
-        const target = idx + delta;
-        if (target < 0 || target >= prev.length) return prev;
-        const next = cloneSafe(prev);
-        const [item] = next.splice(idx, 1);
-        next.splice(target, 0, item);
-        return next;
-      });
-      const target = idx + delta;
-      if (target >= 0 && target < actionsList.length) setSelectedNode(`step:${target}`);
+      updateActions(
+        (prevList) => {
+          const target = idx + delta;
+          if (idx < 0 || idx >= prevList.length || target < 0 || target >= prevList.length) return prevList;
+          const next = cloneSafe(prevList);
+          const [item] = next.splice(idx, 1);
+          next.splice(target, 0, item);
+          return next;
+        },
+        {
+          nextNode: (prevNode, nextList) => {
+            const target = idx + delta;
+            if (idx >= 0 && target >= 0 && target < nextList.length) return `step:${target}`;
+            return prevNode;
+          },
+          nextRawBuffers: (prevBuf, nextList) => {
+            const target = idx + delta;
+            if (idx < 0 || target < 0 || target >= nextList.length) return prevBuf;
+            const swapIdx = (k) => (k === idx ? target : (k === target ? idx : k));
+            return {
+              whenValues: remapStepBufferMap(prevBuf?.whenValues, swapIdx),
+              targetTempC: remapStepBufferMap(prevBuf?.targetTempC, swapIdx),
+            };
+          },
+        },
+      );
     }
 
     function duplicateStep(idx) {
-      updateActions((prev) => {
-        if (idx < 0 || idx >= prev.length) return prev;
-        const next = cloneSafe(prev);
-        const copy = cloneSafe(next[idx]);
-        if (copy.label) copy.label = `${copy.label} (bản sao)`;
-        next.splice(idx + 1, 0, copy);
-        return next;
-      });
-      setSelectedNode(`step:${idx + 1}`);
+      updateActions(
+        (prevList) => {
+          if (idx < 0 || idx >= prevList.length) return prevList;
+          const next = cloneSafe(prevList);
+          const copy = cloneSafe(next[idx]);
+          if (copy.label) copy.label = `${copy.label} (bản sao)`;
+          next.splice(idx + 1, 0, copy);
+          return next;
+        },
+        {
+          nextNode: (prevNode, nextList) => (idx >= 0 && idx + 1 < nextList.length ? `step:${idx + 1}` : prevNode),
+          nextRawBuffers: (prevBuf) => {
+            const shiftUp = (k) => (k > idx ? k + 1 : k);
+            return {
+              whenValues: remapStepBufferMap(prevBuf?.whenValues, shiftUp),
+              targetTempC: remapStepBufferMap(prevBuf?.targetTempC, shiftUp),
+            };
+          },
+        },
+      );
+    }
+
+    function removeStep(idx) {
+      updateActions(
+        (prevList) => prevList.filter((_, i) => i !== idx),
+        {
+          nextNode: (prevNode, nextList) => {
+            if (!String(prevNode || '').startsWith('step:')) return prevNode;
+            const curIdx = Number(String(prevNode).slice(5));
+            if (!nextList.length) return 'trigger';
+            if (!Number.isInteger(curIdx) || curIdx < 0) return 'trigger';
+            if (curIdx === idx) return `step:${Math.min(idx, nextList.length - 1)}`;
+            if (curIdx > idx) return `step:${curIdx - 1}`;
+            return prevNode;
+          },
+          nextRawBuffers: (prevBuf) => {
+            const shiftDown = (k) => (k === idx ? null : (k > idx ? k - 1 : k));
+            return {
+              whenValues: remapStepBufferMap(prevBuf?.whenValues, shiftDown),
+              targetTempC: remapStepBufferMap(prevBuf?.targetTempC, shiftDown),
+            };
+          },
+        },
+      );
     }
 
     function addStep(customAction) {
       const nextAct = customAction || defaultActionForType('notify_role');
-      let nextIdx = actionsList.length;
-      updateActions((prev) => {
-        nextIdx = prev.length;
-        return [...cloneSafe(prev), nextAct];
-      });
-      setSelectedNode(`step:${nextIdx}`);
+      updateActions(
+        (prevList) => [...cloneSafe(prevList), cloneSafe(nextAct)],
+        {
+          nextNode: (_prevNode, nextList) => `step:${nextList.length - 1}`,
+        },
+      );
     }
 
     function insertVariableChip(chip) {
@@ -1435,10 +1679,14 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
       ? tracesRaw
       : (typeof tracesRaw === 'string' ? (() => { try { return JSON.parse(tracesRaw); } catch { return []; } })() : []);
 
+    const currentRuleKey = String(ruleForm.ruleKey || '');
     const runMatchesCanvas = Boolean(
       selectedRun && (
         selectedRun._isDryRun
-        || (ruleForm.ruleKey && selectedRun.ruleKey === ruleForm.ruleKey)
+          ? ('_simulatedRuleKey' in selectedRun
+            ? currentRuleKey === String(selectedRun._simulatedRuleKey || '')
+            : Boolean(currentRuleKey && selectedRun.ruleKey === currentRuleKey))
+          : Boolean(currentRuleKey && selectedRun.ruleKey === currentRuleKey)
       ),
     );
     const stepTraceByIndex = new Map();
@@ -1523,6 +1771,8 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
       const colInfo = catalog.collections.find((c) => c.name === act.collection) || catalog.collections[0];
       const fieldHints = colInfo?.fields || [];
       const whenCond = parseWhenCondition(act.when);
+      const hasWhenBuffer = Object.prototype.hasOwnProperty.call(rawBuffers.whenValues, idx);
+      const whenInputValue = hasWhenBuffer ? rawBuffers.whenValues[idx] : whenCond.value;
 
       return h('div', { style: { display: 'grid', gap: 10 } },
         h('div', { style: S.grid2 },
@@ -1538,7 +1788,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                   ...template,
                   label: old.label || template.label,
                   ...(old.when ? { when: old.when, branchLabel: old.branchLabel } : {}),
-                }));
+                }), { keepBuffers: false });
               },
               style: S.input,
             }, AUTOMATION_ACTION_TYPES.map((t) => h('option', { key: t, value: t }, `${ACTION_META[t]?.icon || ''} ${t}`))),
@@ -1574,7 +1824,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                     d.branchLabel = 'Khi ưu tiên = critical';
                   }
                   return d;
-                });
+                }, { keepBuffers: false });
               },
               style: { ...S.input, width: 'auto', minWidth: 180 },
             },
@@ -1583,47 +1833,123 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
             ),
           ),
           act.when ? h('div', { style: { display: 'grid', gap: 6 } },
-            h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 110px 1fr', gap: 6 } },
-              h('input', {
-                type: 'text',
-                list: 'dxos-automation-filter-fields',
-                placeholder: 'VD: dmn.workOrderPriority',
-                value: whenCond.field,
-                onChange: (e) => mutateStep(idx, (d) => {
-                  const cur = parseWhenCondition(d.when);
-                  return {
-                    ...d,
-                    when: { field: e.target.value, op: cur.op, value: coerceConditionValue(cur.value, cur.op) },
-                  };
+            whenCond.isComplex
+              ? h('div', {
+                'data-testid': 'dxos-automation-step-when-complex',
+                style: {
+                  padding: 8,
+                  borderRadius: 6,
+                  border: '1px solid #ddd6fe',
+                  background: '#ffffff',
+                  display: 'grid',
+                  gap: 4,
+                  fontSize: 11,
+                  color: '#4c1d95',
+                },
+              },
+                h('strong', null, 'Điều kiện nhánh đa mệnh đề / logic ($and, $or, $not) — được giữ nguyên vẹn:'),
+                whenCond.rows.length > 0
+                  ? h('div', { style: S.rowWrap }, whenCond.rows.map((r, ri) => h('span', { key: ri, style: S.badge('info') }, summarizeConditionRow(r))))
+                  : null,
+                h('code', { style: { fontSize: 11, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#334155' } }, JSON.stringify(act.when)),
+                h('span', { style: { color: '#64748b' } }, 'Dùng mục "JSON Actions & Sample Event nâng cao" bên dưới để chỉnh sửa trực tiếp biểu thức nhiều điều kiện (mọi sửa đổi nhãn/trường khác không làm mất mệnh đề 2..N).'),
+              )
+              : h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 110px 1fr', gap: 6 } },
+                h('input', {
+                  'data-testid': 'dxos-automation-step-when-field',
+                  type: 'text',
+                  list: 'dxos-automation-filter-fields',
+                  placeholder: 'VD: dmn.workOrderPriority',
+                  value: whenCond.field,
+                  onChange: (e) => {
+                    const nextField = e.target.value;
+                    updateActions((prevList, prevFlow) => prevList.map((d, i) => {
+                      if (i !== idx) return d;
+                      const cur = parseWhenCondition(d.when);
+                      const rawBuf = Object.prototype.hasOwnProperty.call(prevFlow.rawBuffers.whenValues, idx)
+                        ? prevFlow.rawBuffers.whenValues[idx]
+                        : cur.value;
+                      return {
+                        ...d,
+                        when: { field: nextField, op: cur.op, value: coerceConditionValue(rawBuf, cur.op) },
+                      };
+                    }));
+                  },
+                  style: S.input,
                 }),
-                style: S.input,
-              }),
-              h('select', {
-                value: whenCond.op,
-                onChange: (e) => mutateStep(idx, (d) => {
-                  const cur = parseWhenCondition(d.when);
-                  return {
-                    ...d,
-                    when: { field: cur.field, op: e.target.value, value: coerceConditionValue(cur.value, e.target.value) },
-                  };
+                h('select', {
+                  'data-testid': 'dxos-automation-step-when-op',
+                  value: whenCond.op,
+                  onChange: (e) => {
+                    const nextOp = e.target.value;
+                    updateActions((prevList, prevFlow) => prevList.map((d, i) => {
+                      if (i !== idx) return d;
+                      const cur = parseWhenCondition(d.when);
+                      const rawBuf = Object.prototype.hasOwnProperty.call(prevFlow.rawBuffers.whenValues, idx)
+                        ? prevFlow.rawBuffers.whenValues[idx]
+                        : cur.value;
+                      return {
+                        ...d,
+                        when: { field: cur.field, op: nextOp, value: coerceConditionValue(rawBuf, nextOp) },
+                      };
+                    }));
+                  },
+                  style: S.input,
+                }, FILTER_OPERATORS.map((op) => h('option', { key: op.value, value: op.value }, op.label))),
+                h('input', {
+                  'data-testid': 'dxos-automation-step-when-value',
+                  type: 'text',
+                  placeholder: 'critical',
+                  value: whenInputValue,
+                  onChange: (e) => {
+                    const rawVal = e.target.value;
+                    updateActions(
+                      (prevList) => prevList.map((d, i) => {
+                        if (i !== idx) return d;
+                        const cur = parseWhenCondition(d.when);
+                        return {
+                          ...d,
+                          when: { field: cur.field, op: cur.op, value: coerceConditionValue(rawVal, cur.op) },
+                        };
+                      }),
+                      {
+                        nextRawBuffers: (prevBuf) => ({
+                          ...prevBuf,
+                          whenValues: { ...(prevBuf?.whenValues || {}), [idx]: rawVal },
+                        }),
+                      },
+                    );
+                  },
+                  onBlur: () => {
+                    setFlowState((prev) => {
+                      if (!Object.prototype.hasOwnProperty.call(prev.rawBuffers.whenValues, idx)) return prev;
+                      const rawVal = prev.rawBuffers.whenValues[idx];
+                      const nextWhenValues = { ...prev.rawBuffers.whenValues };
+                      delete nextWhenValues[idx];
+                      const nextList = cloneSafe(prev.list);
+                      const targetAct = nextList[idx];
+                      if (targetAct && targetAct.when) {
+                        const cur = parseWhenCondition(targetAct.when);
+                        if (!cur.isComplex) {
+                          nextList[idx] = {
+                            ...targetAct,
+                            when: { field: cur.field, op: cur.op, value: coerceConditionValue(rawVal, cur.op) },
+                          };
+                        }
+                      }
+                      return {
+                        ...prev,
+                        list: nextList,
+                        text: JSON.stringify(nextList, null, 2),
+                        rawBuffers: { ...prev.rawBuffers, whenValues: nextWhenValues },
+                      };
+                    });
+                  },
+                  style: S.input,
                 }),
-                style: S.input,
-              }, FILTER_OPERATORS.map((op) => h('option', { key: op.value, value: op.value }, op.label))),
-              h('input', {
-                type: 'text',
-                placeholder: 'critical',
-                value: whenCond.value,
-                onChange: (e) => mutateStep(idx, (d) => {
-                  const cur = parseWhenCondition(d.when);
-                  return {
-                    ...d,
-                    when: { field: cur.field, op: cur.op, value: coerceConditionValue(e.target.value, cur.op) },
-                  };
-                }),
-                style: S.input,
-              }),
-            ),
+              ),
             h('input', {
+              'data-testid': 'dxos-automation-step-branch-label',
               type: 'text',
               placeholder: 'Nhãn nhánh hiển thị trên sơ đồ (VD: Khi ưu tiên = critical)',
               value: act.branchLabel || '',
@@ -1923,12 +2249,51 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
             h('div', null,
               h('label', { style: S.label }, 'Target Temp (°C)'),
               h('input', {
+                'data-testid': 'dxos-automation-step-target-temp',
                 type: 'text',
-                value: act.desiredPatch?.targetTempC ?? '',
-                onChange: (e) => mutateStep(idx, (d) => ({
-                  ...d,
-                  desiredPatch: { ...(d.desiredPatch || {}), targetTempC: coerceScalarValue(e.target.value) },
-                })),
+                value: Object.prototype.hasOwnProperty.call(rawBuffers.targetTempC, idx)
+                  ? rawBuffers.targetTempC[idx]
+                  : (act.desiredPatch?.targetTempC ?? ''),
+                onChange: (e) => {
+                  const rawTemp = e.target.value;
+                  updateActions(
+                    (prevList) => prevList.map((d, i) => {
+                      if (i !== idx) return d;
+                      const nextDesired = { ...(d.desiredPatch || {}) };
+                      if (rawTemp.trim() === '') delete nextDesired.targetTempC;
+                      else nextDesired.targetTempC = coerceScalarValue(rawTemp);
+                      return { ...d, desiredPatch: nextDesired };
+                    }),
+                    {
+                      nextRawBuffers: (prevBuf) => ({
+                        ...prevBuf,
+                        targetTempC: { ...(prevBuf?.targetTempC || {}), [idx]: rawTemp },
+                      }),
+                    },
+                  );
+                },
+                onBlur: () => {
+                  setFlowState((prev) => {
+                    if (!Object.prototype.hasOwnProperty.call(prev.rawBuffers.targetTempC, idx)) return prev;
+                    const rawTemp = String(prev.rawBuffers.targetTempC[idx] ?? '');
+                    const nextTargets = { ...prev.rawBuffers.targetTempC };
+                    delete nextTargets[idx];
+                    const nextList = cloneSafe(prev.list);
+                    const targetAct = nextList[idx];
+                    if (targetAct) {
+                      const nextDesired = { ...(targetAct.desiredPatch || {}) };
+                      if (rawTemp.trim() === '') delete nextDesired.targetTempC;
+                      else nextDesired.targetTempC = coerceScalarValue(rawTemp);
+                      nextList[idx] = { ...targetAct, desiredPatch: nextDesired };
+                    }
+                    return {
+                      ...prev,
+                      list: nextList,
+                      text: JSON.stringify(nextList, null, 2),
+                      rawBuffers: { ...prev.rawBuffers, targetTempC: nextTargets },
+                    };
+                  });
+                },
                 style: S.input,
               }),
             ),
@@ -2383,7 +2748,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                       }, '⧉'),
                       h('button', {
                         type: 'button',
-                        onClick: (e) => { e?.stopPropagation?.(); updateActions((prev) => prev.filter((_, i) => i !== idx)); },
+                        onClick: (e) => { e?.stopPropagation?.(); removeStep(idx); },
                         style: S.miniBtn(true),
                       }, 'Xóa'),
                     ),
@@ -2419,7 +2784,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                     required: true,
                     placeholder: 'VD: auto_cmms_on_coldchain_fault',
                     value: ruleForm.ruleKey,
-                    onChange: (e) => setRuleForm((p) => ({ ...p, ruleKey: e.target.value })),
+                    onChange: (e) => updateStructuralRuleForm((p) => ({ ...p, ruleKey: e.target.value })),
                     style: S.input,
                   }),
                 ),
@@ -2440,7 +2805,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                 h('input', {
                   type: 'checkbox',
                   checked: Boolean(ruleForm.active),
-                  onChange: (e) => setRuleForm((p) => ({ ...p, active: Boolean(e?.target?.checked) })),
+                  onChange: (e) => updateStructuralRuleForm((p) => ({ ...p, active: Boolean(e?.target?.checked) })),
                 }),
                 'Kích hoạt Rule tự động theo Event Bus',
               ),
@@ -2456,7 +2821,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                     const primaryType = triggerPatterns[0] || 'telemetry.alarm';
                     const matched = catalog.eventTypes.find((ev) => ev.eventType === primaryType);
                     if (matched?.sampleEvent) {
-                      setSampleEventText(JSON.stringify(matched.sampleEvent, null, 2));
+                      updateSampleEventText(JSON.stringify(matched.sampleEvent, null, 2));
                       reportFeedback({ type: 'info', text: `Đã nạp Sample Event chuẩn cho "${primaryType}".` });
                     }
                   },
@@ -2468,7 +2833,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                 h('select', {
                   value: catalog.eventTypes.some((e) => e.eventType === ruleForm.triggerEventType) ? ruleForm.triggerEventType : '',
                   onChange: (e) => {
-                    if (e.target.value) setRuleForm((p) => ({ ...p, triggerEventType: e.target.value }));
+                    if (e.target.value) updateStructuralRuleForm((p) => ({ ...p, triggerEventType: e.target.value }));
                   },
                   style: S.input,
                 },
@@ -2484,7 +2849,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                   required: true,
                   placeholder: 'telemetry.alarm',
                   value: ruleForm.triggerEventType,
-                  onChange: (e) => setRuleForm((p) => ({ ...p, triggerEventType: e.target.value })),
+                  onChange: (e) => updateStructuralRuleForm((p) => ({ ...p, triggerEventType: e.target.value })),
                   style: S.input,
                 }),
               ),
@@ -2539,7 +2904,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                     type: 'number',
                     min: 0,
                     value: ruleForm.cooldownSec,
-                    onChange: (e) => setRuleForm((p) => ({ ...p, cooldownSec: e.target.value === '' ? 0 : Math.max(0, Number(e.target.value) || 0) })),
+                    onChange: (e) => updateStructuralRuleForm((p) => ({ ...p, cooldownSec: e.target.value === '' ? 0 : Math.max(0, Number(e.target.value) || 0) })),
                     style: S.input,
                   }),
                 ),
@@ -2551,7 +2916,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                     min: 1,
                     max: 8,
                     value: ruleForm.maxDepth,
-                    onChange: (e) => setRuleForm((p) => ({ ...p, maxDepth: Math.min(8, Math.max(1, Number(e.target.value) || 8)) })),
+                    onChange: (e) => updateStructuralRuleForm((p) => ({ ...p, maxDepth: Math.min(8, Math.max(1, Number(e.target.value) || 8)) })),
                     style: S.input,
                   }),
                 ),
@@ -2565,7 +2930,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                 h('label', { style: S.label }, 'Chọn bảng DMN'),
                 h('select', {
                   value: ruleForm.dmnTableKey || '',
-                  onChange: (e) => setRuleForm((p) => ({ ...p, dmnTableKey: e.target.value })),
+                  onChange: (e) => updateStructuralRuleForm((p) => ({ ...p, dmnTableKey: e.target.value })),
                   style: S.input,
                 },
                   h('option', { value: '' }, '-- Không dùng DMN --'),
@@ -2582,7 +2947,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                   type: 'text',
                   placeholder: 'cmms_priority_routing_v1',
                   value: ruleForm.dmnTableKey,
-                  onChange: (e) => setRuleForm((p) => ({ ...p, dmnTableKey: e.target.value })),
+                  onChange: (e) => updateStructuralRuleForm((p) => ({ ...p, dmnTableKey: e.target.value })),
                   style: S.input,
                 }),
               ),
@@ -2643,7 +3008,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                       'data-testid': 'dxos-automation-sample-event',
                       rows: 3,
                       value: sampleEventText,
-                      onChange: (e) => setSampleEventText(e.target.value),
+                      onChange: (e) => updateSampleEventText(e.target.value),
                       style: S.textarea,
                     }),
                   ),
@@ -2740,7 +3105,7 @@ function createAutomationStudioPanel(_client, React, _antd, _app, helpers = {}) 
                     sugTarget ? h('button', {
                       'data-testid': `dxos-automation-ai-apply-suggestion-${sid}`,
                       type: 'button',
-                      onClick: () => applyAiCandidate(sug.previewRule || sug.rule, sug.patch, sug.sampleEvent),
+                      onClick: () => applyAiCandidate(sug.previewRule || sug.rule, sug.patch, sug.sampleEvent, sug.targetNode),
                       style: S.miniBtn(false),
                     }, 'Áp dụng') : null,
                   );
@@ -2839,4 +3204,8 @@ module.exports = {
   normalizeCatalog,
   parseFilterJsonToState,
   serializeFilterRows,
+  parseWhenCondition,
+  pairsToObject,
+  coerceScalarValue,
+  coerceConditionValue,
 };
