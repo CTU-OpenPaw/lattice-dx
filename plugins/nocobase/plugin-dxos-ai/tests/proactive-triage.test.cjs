@@ -1346,3 +1346,66 @@ test('Fix Round 1 (Minor 2-5): entityId backfill, dispatched/ack skip, null-targ
   assert.equal(changeRows[0].props.key, 0);
   assert.equal(changeRows[1].props.key, 1);
 });
+
+test('Live Postgres schema guard: skips latticeAssets.entityId SQL filter when column is absent and correlates lot:* incidents', async () => {
+  const { runProactiveIncidentTriage } = require(path.join(PLUGIN_ROOT, 'src/server/proactive-triage.js'));
+  const { db, store } = makeTriageHarness();
+
+  // Simulate NocoBase PostgreSQL schema where latticeAssets does NOT define an entityId column
+  db.getCollection = (name) => {
+    if (name === 'latticeAssets') {
+      return {
+        hasField: (field) => field !== 'entityId',
+        getField: (field) => (field === 'entityId' ? null : { name: field }),
+      };
+    }
+    return null;
+  };
+  const baseAssetRepo = db.getRepository('latticeAssets');
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name !== 'latticeAssets') return origGetRepo(name);
+    return {
+      ...baseAssetRepo,
+      async findOne(opts = {}) {
+        if (opts?.filter && Object.prototype.hasOwnProperty.call(opts.filter, 'entityId')) {
+          throw new Error('column latticeAssets.entityId does not exist');
+        }
+        return baseAssetRepo.findOne(opts);
+      },
+    };
+  };
+
+  store.latticeStockLots.push({
+    id: 88,
+    organizationId: 'org-a',
+    lotCode: 'LOT-MKT-99',
+    sku: 'SKU-VAC-99',
+    status: 'hold_mkt',
+    mktCelsius: 13.1,
+    targetTempMaxC: 8,
+    active: true,
+  });
+  store.latticeIncidentCases = [
+    {
+      id: 77,
+      code: 'MKT-77',
+      name: 'Cách ly lô vượt MKT: LOT-MKT-99',
+      organizationId: 'org-a',
+      assetId: null,
+      assetEntityId: 'lot:LOT-MKT-99',
+      severity: 'critical',
+      status: 'open',
+      proposal: '',
+    },
+  ];
+
+  const res = await runProactiveIncidentTriage(db, {
+    organizationId: 'org-a',
+    actor: { userId: 12, username: 'disp12' },
+    dryRun: true,
+  });
+  assert.equal(res.scannedCount, 1);
+  assert.equal(res.proposals.length, 1);
+  assert.ok(res.proposals[0].diffPreview?.affectedLots?.some((l) => l.lotCode === 'LOT-MKT-99'));
+});

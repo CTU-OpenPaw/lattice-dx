@@ -121,6 +121,7 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     orderId: null,
     orderLineId: null,
     lotIds: [],
+    mktLotCode: null,
     epodId: null,
     dmnTableId: null,
     approvalId: null,
@@ -337,6 +338,7 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     const expiryIso = new Date(Date.now() + 90 * 86_400_000).toISOString();
     const fefoLotCode = `LOT-FEFO-${suffix}`;
     const mktLotCode = `LOT-MKT-${suffix}`;
+    cleanupIds.mktLotCode = mktLotCode;
 
     const fefoLotRes = await okActor('root', 'dxosWms:receiveStock', {
       method: 'POST',
@@ -631,6 +633,30 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     }
     for (const lotId of cleanupIds.lotIds) {
       await callActor('root', `latticeStockLots:destroy?filterByTk=${lotId}`, { method: 'POST' }).catch(() => {});
+    }
+    if (cleanupIds.mktLotCode) {
+      const targetEntity = `lot:${cleanupIds.mktLotCode}`;
+      const incFilter = encodeURIComponent(JSON.stringify({ organizationId, assetEntityId: targetEntity }));
+      const incListRes = await callActor('root', `latticeIncidentCases:list?pageSize=50&filter=${incFilter}`).catch(() => null);
+      const incRows = Array.isArray(incListRes?.data)
+        ? incListRes.data
+        : (Array.isArray(incListRes?.data?.items) ? incListRes.data.items : []);
+      for (const row of incRows) {
+        if (row?.id != null && String(row?.assetEntityId || '') === targetEntity) {
+          await callActor('root', `latticeIncidentCases:destroy?filterByTk=${row.id}`, { method: 'POST' }).catch(() => {});
+        }
+      }
+
+      const runFilter = encodeURIComponent(JSON.stringify({ organizationId, ruleKey: 'auto_mkt_quarantine_response' }));
+      const runListRes = await callActor('root', `latticeAutomationRuns:list?pageSize=50&sort=-id&filter=${runFilter}`).catch(() => null);
+      const runRows = Array.isArray(runListRes?.data)
+        ? runListRes.data
+        : (Array.isArray(runListRes?.data?.items) ? runListRes.data.items : []);
+      for (const row of runRows) {
+        if (row?.id != null && JSON.stringify({ eventPayloadJson: row.eventPayloadJson, resultJson: row.resultJson }).includes(cleanupIds.mktLotCode)) {
+          await callActor('root', `latticeAutomationRuns:destroy?filterByTk=${row.id}`, { method: 'POST' }).catch(() => {});
+        }
+      }
     }
     if (cleanupIds.orderId) {
       await callActor('root', `latticeOrders:destroy?filterByTk=${cleanupIds.orderId}`, { method: 'POST' }).catch(() => {});

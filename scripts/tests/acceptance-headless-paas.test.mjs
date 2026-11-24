@@ -266,6 +266,25 @@ function createMockHeadlessCaller({
       };
     }
 
+    if (resourceAction === 'latticeIncidentCases:list') {
+      const mktLotCode = calls.find((c) => c.path === 'dxosWms:holdLotByMkt')?.opts?.values?.lotCode;
+      return {
+        ok: true,
+        status: 200,
+        data: mktLotCode ? [{ id: 1501, organizationId: 'native-ui-lab', assetEntityId: `lot:${mktLotCode}` }] : [],
+      };
+    }
+    if (resourceAction === 'latticeAutomationRuns:list') {
+      const mktLotCode = calls.find((c) => c.path === 'dxosWms:holdLotByMkt')?.opts?.values?.lotCode;
+      return {
+        ok: true,
+        status: 200,
+        data: mktLotCode
+          ? [{ id: 1601, organizationId: 'native-ui-lab', ruleKey: 'auto_mkt_quarantine_response', eventPayloadJson: { lotCode: mktLotCode } }]
+          : [],
+      };
+    }
+
     if (resourceAction.endsWith(':destroy')) {
       destroyed.push(path);
       return { ok: true, status: 200, data: { ok: true } };
@@ -322,6 +341,8 @@ test('runHeadlessPaaSAcceptance verifies all 8 PaaS checks and cleans up tempora
   assert.ok(destroyed.some((p) => p.includes('latticeOrders:destroy?filterByTk=501')));
   assert.ok(destroyed.some((p) => p.includes('latticeAssets:destroy?filterByTk=1101')));
   assert.ok(destroyed.some((p) => p.includes('latticeAiApprovalQueue:destroy?filterByTk=1301')));
+  assert.ok(destroyed.some((p) => p.includes('latticeIncidentCases:destroy?filterByTk=1501')));
+  assert.ok(destroyed.some((p) => p.includes('latticeAutomationRuns:destroy?filterByTk=1601')));
   assert.ok(destroyed.some((p) => p.includes('latticeApiKeys:destroy?filterByTk=91')));
 });
 
@@ -354,6 +375,25 @@ test('runHeadlessPaaSAcceptance runs cleanup even when an intermediate step fail
     }
     if (resourceAction === 'dxosLedger:publicKey') return { ok: false, status: 500, data: { error: 'boom' } };
     if (resourceAction === 'dxosApiKeys:revoke') return { ok: true, status: 200, data: { active: false } };
+    if (resourceAction === 'latticeIncidentCases:list') {
+      const mktLotCode = calls.find((c) => c.path === 'dxosWms:holdLotByMkt')?.opts?.values?.lotCode;
+      return {
+        ok: true,
+        status: 200,
+        data: mktLotCode ? [{ id: 1501, organizationId: 'native-ui-lab', assetEntityId: `lot:${mktLotCode}` }] : [],
+      };
+    }
+    if (resourceAction === 'latticeAutomationRuns:list') {
+      const mktLotCode = calls.find((c) => c.path === 'dxosWms:holdLotByMkt')?.opts?.values?.lotCode;
+      return {
+        ok: true,
+        status: 200,
+        data: mktLotCode
+          ? [{ id: 1601, organizationId: 'native-ui-lab', ruleKey: 'auto_mkt_quarantine_response', eventPayloadJson: { lotCode: mktLotCode } }]
+          : [],
+      };
+    }
+
     if (resourceAction.endsWith(':destroy')) {
       destroyed.push(path);
       return { ok: true, status: 200, data: {} };

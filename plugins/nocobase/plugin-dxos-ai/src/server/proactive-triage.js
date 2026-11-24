@@ -166,11 +166,20 @@ async function correlateAlarmContext(db, organizationId, alarm) {
   let asset = null;
   const assetRepo = db?.getRepository?.('latticeAssets');
   if (assetRepo && typeof assetRepo.findOne === 'function') {
+    const assetCol = db?.getCollection?.('latticeAssets');
+    const hasEntityIdCol = assetCol
+      ? Boolean(assetCol.hasField?.('entityId') || assetCol.getField?.('entityId'))
+      : true;
     if (assetId != null) {
       asset = await assetRepo.findOne({ filter: { id: assetId, organizationId } });
     }
     if (!asset && assetEntityId) {
-      asset = await assetRepo.findOne({ filter: { organizationId, entityId: assetEntityId } });
+      if (hasEntityIdCol) {
+        asset = await assetRepo.findOne({ filter: { organizationId, entityId: assetEntityId } });
+      }
+      if (!asset && !assetEntityId.includes(':')) {
+        asset = await assetRepo.findOne({ filter: { organizationId, code: assetEntityId } });
+      }
     }
     if (asset && val(asset, 'organizationId') !== organizationId) asset = null;
     if (asset && assetId == null && val(asset, 'id') != null) {
@@ -200,7 +209,8 @@ async function correlateAlarmContext(db, organizationId, alarm) {
     for (const lot of lotRows) {
       if (val(lot, 'organizationId') !== organizationId) continue;
       const lotEntity = String(val(lot, 'assetEntityId') || '').trim();
-      const lotAssetMatches = (assetEntityId && lotEntity === assetEntityId)
+      const lotCode = String(val(lot, 'lotCode') || '').trim();
+      const lotAssetMatches = (assetEntityId && (lotEntity === assetEntityId || (lotCode && assetEntityId === `lot:${lotCode}`)))
         || (assetId != null && lotEntity === `urn:ngsi-ld:Asset:${organizationId}:native:${assetId}`);
       if (lotAssetMatches) stockLots.push(lot);
     }
