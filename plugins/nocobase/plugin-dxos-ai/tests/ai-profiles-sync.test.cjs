@@ -193,3 +193,16 @@ test('validateMcpServerUrl blocks IPv6-mapped SSRF & arbitrary internal HTTP hos
   assert.equal(cleaned.includes('eyJhbGciOiJIUzI1NiJ9'), false);
   assert.equal(cleaned.includes('sk-secretKey99'), false);
 });
+
+test('validateMcpServerUrl blocks 127.0.0.0/8 outside LOOPBACK_HOSTS and IPv6-mapped SSRF while preserving LOOPBACK_HOSTS', () => {
+  const isSsrfBlocked = (err) => err && err.code === 'MCP_URL_SSRF_BLOCKED';
+  assert.throws(() => validateMcpServerUrl('http://127.0.0.2:8080/mcp'), isSsrfBlocked);
+  assert.throws(() => validateMcpServerUrl('https://127.0.0.2:8080/mcp'), isSsrfBlocked);
+  assert.throws(() => validateMcpServerUrl('http://127.0.0.0:8080/mcp'), isSsrfBlocked);
+  assert.throws(() => validateMcpServerUrl('http://[::ffff:169.254.169.254]/mcp'), isSsrfBlocked);
+
+  assert.equal(validateMcpServerUrl('http://127.0.0.1:8080/mcp'), 'http://127.0.0.1:8080/mcp');
+  assert.equal(validateMcpServerUrl('http://localhost:8080/mcp'), 'http://localhost:8080/mcp');
+  assert.equal(validateMcpServerUrl('http://[::1]:8080/mcp'), 'http://[::1]:8080/mcp');
+  assert.equal(validateMcpServerUrl('http://host.docker.internal:8080/mcp'), 'http://host.docker.internal:8080/mcp');
+});

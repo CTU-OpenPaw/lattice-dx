@@ -47,6 +47,8 @@ try {
 
 const {
   AUTOMATION_COLLECTIONS,
+  buildConnectorUrl,
+  buildHmacHeaders,
   createAutomationDirectGuardMiddleware,
   createDxosAutomationsActions,
   executeRuleAgainstEvent,
@@ -157,11 +159,13 @@ function makeInMemoryDb(seed = {}) {
   }
 
   const sqlQueries = [];
+  const sqlCalls = [];
   const rlsCalls = [];
 
   const db = {
     store,
     sqlQueries,
+    sqlCalls,
     rlsCalls,
     _omitRepos: new Set(),
     getRepository(name) {
@@ -169,19 +173,20 @@ function makeInMemoryDb(seed = {}) {
       return makeRepo(name);
     },
     on() {},
-    async attachLatticeRlsPolicy(tableName) {
-      rlsCalls.push({ action: 'attach', tableName });
+    async attachLatticeRlsPolicy(tableName, opts) {
+      rlsCalls.push({ action: 'attach', tableName, opts });
     },
-    async detachLatticeRlsPolicy(tableName) {
-      rlsCalls.push({ action: 'detach', tableName });
+    async detachLatticeRlsPolicy(tableName, opts) {
+      rlsCalls.push({ action: 'detach', tableName, opts });
     },
     sequelize: {
       getDialect: () => 'postgres',
       async transaction(fn) {
         return fn({ id: 'tx-1' });
       },
-      async query(sql) {
+      async query(sql, opts) {
         sqlQueries.push(String(sql).trim());
+        sqlCalls.push({ sql: String(sql).trim(), opts });
         return [[], []];
       },
     },
@@ -486,11 +491,15 @@ test('all 6 action handlers, secret-free stepTracesJson, twin HITL gating, runNo
 
     const fetchCalls = [];
     const mockFetch = async (url, init) => {
-      fetchCalls.push({ url, method: init.method, headers: init.headers, body: init.body });
+      fetchCalls.push({ url, method: init.method, headers: init.headers, body: init.body, redirect: init.redirect });
       return { ok: true, status: 200, async text() { return '{"ok":true}'; } };
     };
 
-    const actions = createDxosAutomationsActions(db, { fetchImpl: mockFetch, env: { ...process.env, NODE_ENV: 'production' } });
+    const actions = createDxosAutomationsActions(db, {
+      fetchImpl: mockFetch,
+      env: { ...process.env, NODE_ENV: 'production' },
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    });
 
     await actions.saveRule(makeCtx({
       userId: 20,
@@ -568,6 +577,7 @@ test('all 6 action handlers, secret-free stepTracesJson, twin HITL gating, runNo
     assert.equal(run.stepTracesJson[2].status, 'completed');
     assert.equal(run.stepTracesJson[3].status, 'completed', run.stepTracesJson[3].error || 'step 3 failed');
     assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].redirect, 'error');
     assert.equal(fetchCalls[0].headers.Authorization, 'Bearer super-secret-erp-token-xyz');
     assert.equal(JSON.stringify(run.stepTracesJson).includes('super-secret-erp-token-xyz'), false);
 
@@ -735,6 +745,238 @@ test('DxosStudioPlugin registers event listener on load, fires on WMS lot.held_m
 
   const handle = registerAutomationEventListener(null, db);
   handle.stop();
+});
+
+test('Security fixes: migration tx/app.current_org RLS, latticeApiKey PAT scope, connector origin/DNS/redirect/whsec_, association guard, sanitizeDirectFilter, and voucher field strip', async () => {
+  // 1. Migration 20261125000300 passes transaction opts to every SQL/RLS call and uses app.current_org in fallback RLS
+  const txDb = makeInMemoryDb();
+  const txMig = new AutomationRulesAndRunsMigration({ db: txDb });
+  txMig.db = txDb;
+  await txMig.up();
+  assert.ok(txDb.sqlCalls.length >= 8);
+  assert.ok(txDb.sqlCalls.every((c) => c.opts?.transaction?.id === 'tx-1'));
+  assert.ok(txDb.rlsCalls.filter((c) => c.action === 'attach').every((c) => c.opts?.transaction?.id === 'tx-1'));
+
+  await txMig.down();
+  assert.ok(txDb.rlsCalls.filter((c) => c.action === 'detach').every((c) => c.opts?.transaction?.id === 'tx-1'));
+
+  const origLoad = Module._load;
+  const fallbackDb = makeInMemoryDb();
+  fallbackDb.attachLatticeRlsPolicy = undefined;
+  fallbackDb.detachLatticeRlsPolicy = undefined;
+  Module._load = function fallbackMockLoad(request, parent, isMain) {
+    if (String(request).includes('pg-rls')) {
+      const err = new Error('Simulated missing pg-rls');
+      err.code = 'MODULE_NOT_FOUND';
+      err.requireStack = [];
+      throw err;
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const fallbackMig = new AutomationRulesAndRunsMigration({ db: fallbackDb });
+    fallbackMig.db = fallbackDb;
+    await fallbackMig.up();
+    const policySql = fallbackDb.sqlCalls.map((c) => c.sql).join('\n');
+    assert.match(policySql, /current_setting\('app\.current_org', true\)/);
+    assert.doesNotMatch(policySql, /app\.organization_id/);
+    assert.match(policySql, /IS NULL OR .* = '' OR .* = '\*'/);
+  } finally {
+    Module._load = origLoad;
+  }
+
+  // 2. Association bypass, forged isRoot, and real ctx.state.latticeApiKey PAT scopes
+  const db = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [
+      { userId: 1, roleName: 'root' },
+      { userId: 20, roleName: 'ldx_admin' },
+    ],
+    latticeServiceTickets: [
+      { id: 10, organizationId: 'org-a', ticketCode: 'TKT-1', status: 'submitted', version: 2, summary: 'Old' },
+    ],
+    latticeCustomWorkOrders: [
+      { id: 50, organizationId: 'org-a', workOrderCode: 'WO-1', status: 'new' },
+    ],
+  });
+  const guard = createAutomationDirectGuardMiddleware(db);
+  await assert.rejects(
+    () => guard({
+      action: { resourceName: 'latticeAutomationRules.ruleOwner', actionName: 'list', params: {} },
+      state: { currentUser: { id: 20, isRoot: true }, currentRole: 'root' },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'AUTOMATION_DIRECT_CRUD_FORBIDDEN',
+  );
+
+  const actions = createDxosAutomationsActions(db);
+  await assert.rejects(
+    () => actions.saveRule({
+      ...makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'pat_blocked', name: 'X', actionsJson: [] } }),
+      state: {
+        currentUser: { id: 20, username: 'admin_20' },
+        currentRole: 'ldx_admin',
+        currentRoles: ['ldx_admin'],
+        latticeApiKey: { id: 7, scopes: ['read'] },
+      },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+  );
+  await assert.rejects(
+    () => actions.listRules({
+      ...makeCtx({ userId: 20, role: 'ldx_admin', params: {} }),
+      state: {
+        currentUser: { id: 20, username: 'admin_20' },
+        currentRole: 'ldx_admin',
+        currentRoles: ['ldx_admin'],
+        latticeApiKey: { id: 8, scopes: ['dmn'] },
+      },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+  );
+
+  // 3. call_connector URL override blocking & DNS rebinding & redirect: 'error'
+  for (const badOverride of [
+    'https://evil.com/steal',
+    'http://169.254.169.254/latest/meta-data',
+    '//evil.com/steal',
+    'https://erp.example.com:8443/hooks',
+  ]) {
+    assert.throws(
+      () => buildConnectorUrl('https://erp.example.com/hooks', badOverride),
+      (err) => err.status === 400 && err.code === 'CONNECTOR_URL_OVERRIDE_FORBIDDEN',
+    );
+  }
+  assert.equal(buildConnectorUrl('https://erp.example.com/hooks', '/alerts'), 'https://erp.example.com/hooks/alerts');
+
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+  try {
+    await db.getRepository('latticeConnectors').create({
+      values: {
+        organizationId: 'org-a',
+        connectorKey: 'erp_hook',
+        name: 'ERP',
+        connectorType: 'http_api',
+        baseUrl: 'https://erp.example.com/hooks',
+        authType: 'none',
+        encryptedSecretsJson: connectorVault.encryptVaultSecrets({}, process.env),
+        active: true,
+      },
+    });
+    let fetchAttempted = 0;
+    const blockedFetch = async () => { fetchAttempted += 1; return { ok: true, status: 200, text: async () => '{}' }; };
+
+    const overrideRun = await executeRuleAgainstEvent(
+      db,
+      {
+        organizationId: 'org-a',
+        ruleKey: 'url_override_test',
+        triggerEventType: '*',
+        actionsJson: [{ type: 'call_connector', connectorKey: 'erp_hook', url: 'https://evil.com/exfil' }],
+      },
+      { organizationId: 'org-a', type: 'alarm.triggered', data: {} },
+      { fetchImpl: blockedFetch, env: { ...process.env, NODE_ENV: 'production' }, lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }] },
+    );
+    assert.equal(overrideRun.stepTracesJson[0].status, 'failed');
+    assert.match(overrideRun.stepTracesJson[0].error, /CONNECTOR_URL_OVERRIDE_FORBIDDEN/);
+    assert.equal(fetchAttempted, 0);
+
+    const rebindRun = await executeRuleAgainstEvent(
+      db,
+      {
+        organizationId: 'org-a',
+        ruleKey: 'dns_rebind_test',
+        triggerEventType: '*',
+        actionsJson: [{ type: 'call_connector', connectorKey: 'erp_hook', path: '/alerts' }],
+      },
+      { organizationId: 'org-a', type: 'alarm.triggered', data: {} },
+      { fetchImpl: blockedFetch, env: { ...process.env, NODE_ENV: 'production' }, lookupImpl: async () => [{ address: '127.0.0.1', family: 4 }] },
+    );
+    assert.equal(rebindRun.stepTracesJson[0].status, 'failed');
+    assert.match(rebindRun.stepTracesJson[0].error, /blocked by SSRF policy/);
+    assert.equal(fetchAttempted, 0);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+
+  // 4. whsec_ base64 HMAC decoding matches Standard Webhooks key bytes
+  const rawKey = crypto.randomBytes(32);
+  const whsec = `whsec_${rawKey.toString('base64')}`;
+  const bodyStr = JSON.stringify({ event: 'epod.signed' });
+  const hmacHeaders = buildHmacHeaders(bodyStr, { secret: whsec });
+  const expectedB64 = crypto
+    .createHmac('sha256', rawKey)
+    .update(`${hmacHeaders['webhook-id']}.${hmacHeaders['webhook-timestamp']}.${bodyStr}`)
+    .digest('base64');
+  assert.equal(hmacHeaders['webhook-signature'], `v1,${expectedB64}`);
+
+  // 5. sanitizeDirectFilter + protected voucher field stripping vs custom collection business fields
+  const filterBlockedRun = await executeRuleAgainstEvent(
+    db,
+    {
+      organizationId: 'org-a',
+      ruleKey: 'filter_sqli_test',
+      triggerEventType: '*',
+      actionsJson: [
+        { type: 'update_record', collection: 'latticeCustomWorkOrders', filter: { $where: '1=1' }, values: { status: 'closed' } },
+        { type: 'update_record', collection: 'latticeCustomWorkOrders', filter: { 'asset.name': 'Freezer' }, values: { status: 'closed' } },
+      ],
+    },
+    { organizationId: 'org-a', type: 'alarm.triggered', data: {} },
+  );
+  assert.equal(filterBlockedRun.stepTracesJson[0].status, 'failed');
+  assert.match(filterBlockedRun.stepTracesJson[0].error, /NATIVE_RELATION_EXPANSION_UNSUPPORTED/);
+  assert.equal(filterBlockedRun.stepTracesJson[1].status, 'failed');
+  assert.match(filterBlockedRun.stepTracesJson[1].error, /NATIVE_RELATION_EXPANSION_UNSUPPORTED/);
+
+  const voucherStripRun = await executeRuleAgainstEvent(
+    db,
+    {
+      organizationId: 'org-a',
+      ruleKey: 'voucher_strip_test',
+      triggerEventType: '*',
+      actionsJson: [
+        {
+          type: 'create_record',
+          collection: 'latticeServiceTickets',
+          values: { id: 999, organizationId: 'org-evil', status: 'approved', version: 9, submittedBy: 'attacker', summary: 'Clean create' },
+        },
+        {
+          type: 'update_record',
+          collection: 'latticeServiceTickets',
+          filter: { ticketCode: 'TKT-1' },
+          values: { id: 888, organizationId: 'org-evil', status: 'cancelled', version: 99, cancelledBy: 'attacker', summary: 'Updated note' },
+        },
+        {
+          type: 'create_record',
+          collection: 'latticeCustomWorkOrders',
+          values: { id: 777, organizationId: 'org-evil', workOrderCode: 'WO-OPEN', status: 'open' },
+        },
+      ],
+    },
+    { organizationId: 'org-a', type: 'alarm.triggered', data: {} },
+  );
+  assert.equal(voucherStripRun.status, 'completed');
+  const createdTicket = db.store.latticeServiceTickets.find((t) => t.summary === 'Clean create');
+  assert.equal(createdTicket.organizationId, 'org-a');
+  assert.notEqual(createdTicket.id, 999);
+  assert.equal(createdTicket.status, undefined);
+  assert.equal(createdTicket.version, undefined);
+  assert.equal(createdTicket.submittedBy, undefined);
+
+  const updatedTicket = db.store.latticeServiceTickets.find((t) => t.ticketCode === 'TKT-1');
+  assert.equal(updatedTicket.id, 10);
+  assert.equal(updatedTicket.organizationId, 'org-a');
+  assert.equal(updatedTicket.status, 'submitted');
+  assert.equal(updatedTicket.version, 2);
+  assert.equal(updatedTicket.cancelledBy, undefined);
+  assert.equal(updatedTicket.summary, 'Updated note');
+
+  const createdCustom = db.store.latticeCustomWorkOrders.find((w) => w.workOrderCode === 'WO-OPEN');
+  assert.notEqual(createdCustom.id, 777);
+  assert.equal(createdCustom.organizationId, 'org-a');
+  assert.equal(createdCustom.status, 'open');
 });
 
 test('all new server automation files satisfy CTU-OpenPaw SPDX header check', async () => {

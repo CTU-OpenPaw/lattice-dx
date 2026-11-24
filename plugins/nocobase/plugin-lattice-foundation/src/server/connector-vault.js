@@ -14,6 +14,7 @@ const {
   createHash,
   randomBytes,
 } = require('node:crypto');
+const dns = require('node:dns');
 const net = require('node:net');
 const { resolveNativeActor } = require('./native-scope');
 const { val, getRepo, callerRoles } = require('./native-portal-helpers');
@@ -143,8 +144,8 @@ function decryptVaultSecrets(ciphertext, env = process.env) {
 }
 
 function isBlockedIpv4(host) {
-  const parts = host.split('.');
-  if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p))) return false;
+  const parts = String(host || '').split('.');
+  if (parts.length !== 4 || !parts.every((p) => /^(?:0|[1-9]\d{0,2})$/.test(p))) return false;
   const octets = parts.map(Number);
   if (octets.some((n) => n < 0 || n > 255)) return true;
   const [a, b] = octets;
@@ -156,16 +157,177 @@ function isBlockedIpv4(host) {
   return false;
 }
 
-function isBlockedIpv6(bareHost) {
+function extractRawAuthorityHost(rawUrl) {
+  const m = String(rawUrl || '').match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i);
+  if (!m) return '';
+  const authority = m[1];
+  if (!authority || authority.includes('@') || authority.includes('\\')) return '';
+  if (authority.startsWith('[')) {
+    const close = authority.indexOf(']');
+    if (close < 0) return '';
+    return authority.slice(1, close).toLowerCase().replace(/\.+$/, '');
+  }
+  const colonIdx = authority.indexOf(':');
+  const host = colonIdx >= 0 ? authority.slice(0, colonIdx) : authority;
+  return host.toLowerCase().replace(/\.+$/, '');
+}
+
+function isNonCanonicalNumericHost(host) {
+  const clean = String(host || '').toLowerCase().replace(/\.+$/, '');
+  if (!clean) return false;
+  if (/^\d+$/.test(clean) || /^0x[0-9a-f]+$/i.test(clean)) {
+    return true;
+  }
+  const parts = clean.split('.');
+  if (parts.length >= 1 && parts.length <= 4 && parts.every((p) => /^(?:0x[0-9a-f]+|0[0-7]*|[1-9]\d*)$/i.test(p))) {
+    if (parts.length !== 4) return true;
+    if (parts.some((p) => /^0x/i.test(p) || (p.length > 1 && p.startsWith('0')))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function parseIpv6Hextets(rawAddr) {
+  let addr = String(rawAddr || '').toLowerCase().replace(/^\[|\]$/g, '');
+  const zoneIdx = addr.indexOf('%');
+  if (zoneIdx >= 0) addr = addr.slice(0, zoneIdx);
+  if (!addr || !addr.includes(':')) return null;
+
+  const doubleColonParts = addr.split('::');
+  if (doubleColonParts.length > 2) return null;
+
+  const expandSide = (side, isRight) => {
+    if (!side) return [];
+    const tokens = side.split(':');
+    const out = [];
+    for (let i = 0; i < tokens.length; i += 1) {
+      const tok = tokens[i];
+      if (tok.includes('.')) {
+        if (i !== tokens.length - 1 || (doubleColonParts.length === 2 && !isRight)) {
+          return null;
+        }
+        const octs = tok.split('.');
+        if (octs.length !== 4 || !octs.every((o) => /^(?:0|[1-9]\d{0,2})$/.test(o) && Number(o) <= 255)) {
+          return null;
+        }
+        const [a, b, c, d] = octs.map(Number);
+        out.push(((a << 8) | b) & 0xffff, ((c << 8) | d) & 0xffff);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(tok)) return null;
+        out.push(parseInt(tok, 16));
+      }
+    }
+    return out;
+  };
+
+  if (doubleColonParts.length === 1) {
+    const groups = expandSide(doubleColonParts[0], true);
+    return groups && groups.length === 8 ? groups : null;
+  }
+
+  const left = expandSide(doubleColonParts[0], false);
+  const right = expandSide(doubleColonParts[1], true);
+  if (!left || !right) return null;
+  const missing = 8 - (left.length + right.length);
+  if (missing < 1) return null;
+  return [...left, ...Array(missing).fill(0), ...right];
+}
+
+function hextetsToIpv4(hi, lo) {
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
+function isBlockedIpv6(rawHost) {
+  const bareHost = String(rawHost || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   if (!bareHost.includes(':')) return false;
-  return (
-    bareHost === '::'
-    || bareHost === '::1'
-    || bareHost.startsWith('::ffff:')
-    || /^fe[89ab][0-9a-f]?:/i.test(bareHost)
-    || /^f[cd][0-9a-f]{0,2}:/i.test(bareHost)
-    || /^ff[0-9a-f]{2}:/i.test(bareHost)
-  );
+  if (bareHost.includes('%')) return true;
+
+  const h = parseIpv6Hextets(bareHost);
+  if (!h) return true;
+
+  const [h0, h1, h2, h3, h4, h5, h6, h7] = h;
+  const isAllZeroPrefix5 = h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0;
+
+  if (isAllZeroPrefix5 && h5 === 0 && h6 === 0 && (h7 === 0 || h7 === 1)) return true;
+
+  // IPv4-mapped IPv6 ::ffff:0:0/96 (covers ::ffff:169.254.169.254, ::ffff:127.0.0.1, 0:0:0:0:0:ffff:...)
+  if (isAllZeroPrefix5 && h5 === 0xffff) {
+    return true;
+  }
+
+  // IPv4-compatible IPv6 ::/96 (e.g. ::127.0.0.1 / ::169.254.169.254)
+  if (isAllZeroPrefix5 && h5 === 0 && isBlockedIpv4(hextetsToIpv4(h6, h7))) return true;
+
+  // IPv4-translated IPv6 ::ffff:0:0:0/96
+  if (h0 === 0 && h1 === 0 && h2 === 0 && h3 === 0 && h4 === 0xffff && h5 === 0) {
+    return true;
+  }
+
+  // NAT64 prefixes 64:ff9b::/96 and 64:ff9b:1::/48
+  if (h0 === 0x0064 && h1 === 0xff9b && (h2 === 0 || h2 === 1)) {
+    if (h2 === 1 || isBlockedIpv4(hextetsToIpv4(h6, h7))) return true;
+  }
+
+  // 6to4 prefix 2002::/16 embedding IPv4 in h1:h2
+  if (h0 === 0x2002 && isBlockedIpv4(hextetsToIpv4(h1, h2))) return true;
+
+  // Link-local fe80::/10, ULA fc00::/7 (includes fd00:ec2::254), Multicast ff00::/8
+  if ((h0 & 0xffc0) === 0xfe80) return true;
+  if ((h0 & 0xfe00) === 0xfc00) return true;
+  if ((h0 & 0xff00) === 0xff00) return true;
+
+  // Discard 100::/64 and Documentation 2001:db8::/32
+  if (h0 === 0x0100 && h1 === 0 && h2 === 0 && h3 === 0) return true;
+  if (h0 === 0x2001 && h1 === 0x0db8) return true;
+
+  return false;
+}
+
+function isBlockedIpAddress(rawAddr) {
+  const clean = String(rawAddr || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!clean) return true;
+  if (clean.includes(':')) return isBlockedIpv6(clean);
+  if (isNonCanonicalNumericHost(clean)) return true;
+  if (net.isIPv4(clean)) return isBlockedIpv4(clean);
+  return true;
+}
+
+function isBlockedMetadataHost(bare) {
+  const clean = String(bare || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!clean) return false;
+  if (
+    clean === 'metadata.google.internal'
+    || clean.endsWith('.metadata.google.internal')
+    || clean === 'metadata.azure.com'
+    || clean.endsWith('.metadata.azure.com')
+    || clean === 'metadata.aws.internal'
+    || clean === 'instance-data'
+    || (net.isIPv4(clean) && clean.startsWith('169.254.'))
+    || clean === 'fd00:ec2::254'
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function resolveAllowInternalConnectorHosts({ allowInternal, isRoot = false, env = process.env } = {}) {
+  if (typeof allowInternal === 'boolean') return allowInternal;
+  const explicit = String(env?.DX_ALLOW_INTERNAL_CONNECTORS || '').trim().toLowerCase();
+  if (explicit === 'true') return true;
+  if (explicit === 'false') return false;
+  const isProd = String(env?.NODE_ENV || '').trim().toLowerCase() === 'production';
+  if (!isProd) return true;
+  return Boolean(isRoot);
+}
+
+function isInternalAllowlistedHost(bare, env = process.env) {
+  if (INTERNAL_CONNECTOR_HOST_ALLOWLIST.has(bare)) return true;
+  const extraAllowlist = String(env?.DX_CONNECTOR_INTERNAL_ALLOWLIST || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return extraAllowlist.includes(bare);
 }
 
 function resolveAllowedProtocols(connectorType) {
@@ -174,9 +336,9 @@ function resolveAllowedProtocols(connectorType) {
   return new Set(['http:', 'https:']);
 }
 
-function assertSafeConnectorUrl(rawUrl, { connectorType = 'http_api', env = process.env } = {}) {
+function assertSafeConnectorUrl(rawUrl, { connectorType = 'http_api', env = process.env, allowInternal } = {}) {
   const trimmed = typeof rawUrl === 'string' ? rawUrl.trim() : '';
-  if (!trimmed || trimmed.length > 2048) {
+  if (!trimmed || trimmed.length > 2048 || /[\u0000-\u001f\u007f\s]/.test(trimmed)) {
     throw failVault('CONNECTOR_URL_UNSAFE', 400, 'Connector URL is required and must be <= 2048 characters.');
   }
   let parsed;
@@ -194,25 +356,40 @@ function assertSafeConnectorUrl(rawUrl, { connectorType = 'http_api', env = proc
     throw failVault('CONNECTOR_URL_UNSAFE', 400, 'Embedded credentials in connector URL are forbidden.');
   }
 
+  const rawAuthorityHost = extractRawAuthorityHost(trimmed);
+  if (!rawAuthorityHost) {
+    throw failVault('CONNECTOR_URL_UNSAFE', 400, 'Connector URL authority is invalid.');
+  }
+  if (isNonCanonicalNumericHost(rawAuthorityHost)) {
+    throw failVault('CONNECTOR_URL_UNSAFE', 400, `Non-canonical numeric hostname ${rawAuthorityHost} is blocked.`);
+  }
+  if (rawAuthorityHost.includes(':') && isBlockedIpv6(rawAuthorityHost)) {
+    throw failVault('CONNECTOR_URL_UNSAFE', 400, `Blocked IPv6 address: ${rawAuthorityHost}`);
+  }
+
   const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   if (!bare) {
     throw failVault('CONNECTOR_URL_UNSAFE', 400, 'Connector URL hostname is empty.');
   }
+  if (isNonCanonicalNumericHost(bare)) {
+    throw failVault('CONNECTOR_URL_UNSAFE', 400, `Non-canonical numeric hostname ${bare} is blocked.`);
+  }
 
-  const extraAllowlist = String(env?.DX_CONNECTOR_INTERNAL_ALLOWLIST || '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  if (INTERNAL_CONNECTOR_HOST_ALLOWLIST.has(bare) || extraAllowlist.includes(bare)) {
+  // Metadata IPs and hostnames are unconditionally blocked for all callers and environments.
+  if (isBlockedMetadataHost(bare) || isBlockedMetadataHost(rawAuthorityHost)) {
+    throw failVault('CONNECTOR_URL_UNSAFE', 400, `Cloud metadata hostname or IP ${bare} is blocked.`);
+  }
+
+  const effectiveAllowInternal = resolveAllowInternalConnectorHosts({ allowInternal, env });
+  if (effectiveAllowInternal && isInternalAllowlistedHost(bare, env)) {
     return parsed.toString();
   }
 
   if (
-    bare.endsWith('.localhost')
+    bare === 'localhost'
+    || bare.endsWith('.localhost')
     || bare.endsWith('.local')
     || bare.endsWith('.internal')
-    || bare === 'metadata.google.internal'
-    || bare === 'metadata.azure.com'
   ) {
     throw failVault('CONNECTOR_URL_UNSAFE', 400, `Internal metadata or local hostname ${bare} is blocked.`);
   }
@@ -228,15 +405,72 @@ function assertSafeConnectorUrl(rawUrl, { connectorType = 'http_api', env = proc
   return parsed.toString();
 }
 
+async function assertSafeConnectorUrlAsync(
+  rawUrl,
+  {
+    connectorType = 'http_api',
+    env = process.env,
+    allowInternal,
+    lookupImpl,
+    skipDnsCheck = false,
+  } = {},
+) {
+  const validatedUrl = assertSafeConnectorUrl(rawUrl, { connectorType, env, allowInternal });
+  const parsed = new URL(validatedUrl);
+  const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+
+  const effectiveAllowInternal = resolveAllowInternalConnectorHosts({ allowInternal, env });
+  if (effectiveAllowInternal && isInternalAllowlistedHost(bare, env)) {
+    return validatedUrl;
+  }
+  if (net.isIP(bare) !== 0) {
+    return validatedUrl;
+  }
+  if (skipDnsCheck === true) {
+    return validatedUrl;
+  }
+
+  const lookup = typeof lookupImpl === 'function' ? lookupImpl : dns.promises.lookup;
+  let records;
+  try {
+    records = await lookup(bare, { all: true });
+  } catch (err) {
+    throw failVault(
+      'CONNECTOR_URL_UNSAFE',
+      400,
+      `DNS resolution failed for connector host ${bare}: ${err?.code || err?.message || 'unknown error'}`,
+    );
+  }
+
+  const list = Array.isArray(records) ? records : (records ? [records] : []);
+  const addresses = list.map((r) => (typeof r === 'string' ? r : r?.address)).filter(Boolean);
+  if (addresses.length === 0) {
+    throw failVault('CONNECTOR_URL_UNSAFE', 400, `DNS resolution returned no IP addresses for ${bare}.`);
+  }
+  for (const addr of addresses) {
+    if (isBlockedIpAddress(addr)) {
+      throw failVault('CONNECTOR_URL_UNSAFE', 400, `Resolved IP address ${addr} for ${bare} is blocked by SSRF policy.`);
+    }
+  }
+  return validatedUrl;
+}
+
 function serializeConnector(row, { env = process.env } = {}) {
   if (!row) return null;
-  const enc = val(row, 'encryptedSecretsJson');
+  const rawEnc = val(row, 'encryptedSecretsJson');
   let secretKeys = [];
   let hasSecrets = false;
-  if (enc && String(enc).trim()) {
-    const decrypted = decryptVaultSecrets(enc, env);
-    secretKeys = Object.keys(decrypted).sort();
-    hasSecrets = secretKeys.length > 0;
+  let decryptionError = false;
+  if (rawEnc && String(rawEnc).trim()) {
+    try {
+      const decrypted = decryptVaultSecrets(rawEnc, env);
+      secretKeys = Object.keys(decrypted).sort();
+      hasSecrets = secretKeys.length > 0;
+    } catch {
+      secretKeys = [];
+      hasSecrets = Boolean(rawEnc);
+      decryptionError = true;
+    }
   }
   const lastTestedAt = val(row, 'lastTestedAt');
   return {
@@ -249,6 +483,7 @@ function serializeConnector(row, { env = process.env } = {}) {
     authType: val(row, 'authType') || 'none',
     hasSecrets,
     secretKeys,
+    decryptionError,
     secretVersion: Number(val(row, 'secretVersion')) || 1,
     lastTestedAt: lastTestedAt ? (lastTestedAt instanceof Date ? lastTestedAt.toISOString() : String(lastTestedAt)) : null,
     lastTestStatus: val(row, 'lastTestStatus') || null,
@@ -422,9 +657,24 @@ function defaultTcpProbe(host, port, timeoutMs = TEST_TIMEOUT_MS) {
 
 async function probeConnectorEndpoint(
   { connectorType, baseUrl, authType = 'none', secrets = {} },
-  { env = process.env, fetchImpl = globalThis.fetch, tcpProbeImpl = defaultTcpProbe } = {},
+  {
+    env = process.env,
+    fetchImpl = globalThis.fetch,
+    tcpProbeImpl = defaultTcpProbe,
+    allowInternal,
+    lookupImpl,
+    enforceDnsInMock = false,
+  } = {},
 ) {
-  const validatedUrl = assertSafeConnectorUrl(baseUrl, { connectorType, env });
+  const isMockTransport = fetchImpl !== globalThis.fetch || tcpProbeImpl !== defaultTcpProbe;
+  const skipDnsCheck = isMockTransport && typeof lookupImpl !== 'function' && !enforceDnsInMock;
+  const validatedUrl = await assertSafeConnectorUrlAsync(baseUrl, {
+    connectorType,
+    env,
+    allowInternal,
+    lookupImpl,
+    skipDnsCheck,
+  });
   const parsed = new URL(validatedUrl);
   const started = Date.now();
 
@@ -526,7 +776,7 @@ function registerConnectorVaultDirectGuard(app) {
   }, { tag: 'latticeVaultDirectGuard', after: 'acl' });
 }
 
-function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImpl } = {}) {
+function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImpl, lookupImpl, enforceDnsInMock = false } = {}) {
   const db = app.db;
   registerConnectorVaultDirectGuard(app);
 
@@ -535,8 +785,12 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
     actions: {
       list: async (ctx, next) => {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
+        assertApiKeyScope(ctx, ['read', 'write']);
         const params = readParams(ctx);
         const scope = await resolveVaultCaller(db, ctx, params.organizationId, { requireOrg: false });
+        if (!scope.isAdmin) {
+          throw failVault('VAULT_ADMIN_REQUIRED', 403, 'Administrator role is required to list connectors.');
+        }
         const repo = getRepo(db, 'latticeConnectors');
         if (!repo || typeof repo.find !== 'function') {
           ctx.body = { organizationId: scope.organizationId, items: [] };
@@ -591,9 +845,10 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
           throw failVault('CONNECTOR_AUTH_TYPE_INVALID', 400, `Unsupported authType: ${authType}`);
         }
 
+        const allowInternal = resolveAllowInternalConnectorHosts({ isRoot: scope.isRoot, env });
         let baseUrl = null;
         if (params.baseUrl !== undefined && params.baseUrl !== null && String(params.baseUrl).trim() !== '') {
-          baseUrl = assertSafeConnectorUrl(String(params.baseUrl), { connectorType, env });
+          baseUrl = assertSafeConnectorUrl(String(params.baseUrl), { connectorType, env, allowInternal });
         } else if (connectorType !== 'smtp_notify') {
           throw failVault('CONNECTOR_URL_UNSAFE', 400, 'baseUrl is required for this connectorType.');
         }
@@ -733,9 +988,10 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
           ? decryptVaultSecrets(val(row, 'encryptedSecretsJson'), env)
           : sanitizeSecretsObject(params.secrets);
 
+        const allowInternal = resolveAllowInternalConnectorHosts({ isRoot: scope.isRoot, env });
         const result = await probeConnectorEndpoint(
           { connectorType, baseUrl, authType, secrets },
-          { env, fetchImpl, tcpProbeImpl },
+          { env, fetchImpl, tcpProbeImpl, allowInternal, lookupImpl, enforceDnsInMock },
         );
 
         const testedAt = new Date();
@@ -776,6 +1032,9 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
     },
     assertSafeConnectorUrl: (rawUrl, opts = {}) =>
       assertSafeConnectorUrl(rawUrl, { env, ...opts }),
+    assertSafeConnectorUrlAsync: (rawUrl, opts = {}) =>
+      assertSafeConnectorUrlAsync(rawUrl, { env, lookupImpl, ...opts }),
+    buildConnectorAuthHeaders,
     encryptVaultSecrets: (secretsObj) => encryptVaultSecrets(secretsObj, env),
     decryptVaultSecrets: (ciphertext) => decryptVaultSecrets(ciphertext, env),
   };
@@ -786,11 +1045,19 @@ module.exports = {
   VALID_AUTH_TYPES,
   INTERNAL_CONNECTOR_HOST_ALLOWLIST,
   resolveVaultMasterKey,
+  resolveAllowInternalConnectorHosts,
+  isBlockedIpv4,
+  isBlockedIpv6,
+  isBlockedIpAddress,
+  isNonCanonicalNumericHost,
+  isBlockedMetadataHost,
   encryptSecretText,
   decryptSecretText,
   encryptVaultSecrets,
   decryptVaultSecrets,
+  buildConnectorAuthHeaders,
   assertSafeConnectorUrl,
+  assertSafeConnectorUrlAsync,
   serializeConnector,
   resolveConnectorSecrets,
   probeConnectorEndpoint,

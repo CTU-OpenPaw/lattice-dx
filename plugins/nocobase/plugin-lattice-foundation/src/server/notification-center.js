@@ -10,6 +10,7 @@
 
 const { resolveNativeActor } = require('./native-scope');
 const { callerRoles } = require('./native-portal-helpers');
+const { assertSafeConnectorUrl, assertSafeConnectorUrlAsync } = require('./connector-vault');
 
 const VALID_CATEGORIES = new Set(['mention', 'voucher', 'sla', 'alarm', 'approval', 'system']);
 const VALID_SEVERITIES = new Set(['info', 'warning', 'high', 'critical']);
@@ -45,58 +46,27 @@ function resolveNotificationTargetPath(targetCollection) {
   return COLLECTION_PORTAL_PATHS[col] || '/admin/lattice-workspace';
 }
 
-function isBlockedIpv4(host) {
-  const parts = host.split('.');
-  if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p))) return false;
-  const octets = parts.map(Number);
-  if (octets.some((n) => n < 0 || n > 255)) return true;
-  const [a, b] = octets;
-  if (a === 0 || a === 10 || a === 127 || a >= 224) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  return false;
-}
-
-function isBlockedIpv6(bareHost) {
-  if (!bareHost.includes(':')) return false;
-  return (
-    bareHost === '::'
-    || bareHost === '::1'
-    || bareHost.startsWith('::ffff:')
-    || /^fe[89ab][0-9a-f]?:/i.test(bareHost)
-    || /^f[cd][0-9a-f]{0,2}:/i.test(bareHost)
-    || /^ff[0-9a-f]{2}:/i.test(bareHost)
-  );
-}
-
 function isSafeExternalWebhookUrl(rawUrl) {
-  const trimmed = String(rawUrl || '').trim();
-  if (!trimmed || trimmed.length > 2048) return false;
-  let parsed;
   try {
-    parsed = new URL(trimmed);
+    assertSafeConnectorUrl(rawUrl, { connectorType: 'webhook', allowInternal: false });
+    return true;
   } catch {
     return false;
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-  if (parsed.username || parsed.password) return false;
-  const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-  if (!bare) return false;
-  if (
-    bare === 'localhost'
-    || bare.endsWith('.localhost')
-    || bare.endsWith('.local')
-    || bare.endsWith('.internal')
-    || bare === 'metadata.google.internal'
-    || bare === 'metadata.azure.com'
-  ) {
+}
+
+async function isSafeExternalWebhookUrlAsync(rawUrl, { lookupImpl, skipDnsCheck = false } = {}) {
+  try {
+    await assertSafeConnectorUrlAsync(rawUrl, {
+      connectorType: 'webhook',
+      allowInternal: false,
+      lookupImpl,
+      skipDnsCheck,
+    });
+    return true;
+  } catch {
     return false;
   }
-  if (isBlockedIpv6(bare)) return false;
-  if (isBlockedIpv4(bare)) return false;
-  return true;
 }
 
 async function sendJsonWebhook(fetchImpl, url, payload) {
@@ -145,27 +115,39 @@ function channelAllowed(notifyChannels, channelName) {
   return notifyChannels.includes(channelName) || notifyChannels.includes('all') || notifyChannels.includes('external');
 }
 
-async function dispatchExternalChannels({ env, fetchImpl, notification, notifyChannels }) {
+async function dispatchExternalChannels({
+  env,
+  fetchImpl,
+  lookupImpl,
+  enforceDnsInMock = false,
+  notification,
+  notifyChannels,
+}) {
   if (typeof fetchImpl !== 'function' || !env || typeof env !== 'object') return [];
 
+  const isMockFetch = fetchImpl !== globalThis.fetch;
+  const skipDnsCheck = isMockFetch && typeof lookupImpl !== 'function' && !enforceDnsInMock;
   const tasks = [];
   const appriseUrl = String(env.DX_APPRISE_URL || '').trim();
   if (appriseUrl && channelAllowed(notifyChannels, 'apprise') && isSafeExternalWebhookUrl(appriseUrl)) {
     const typeMap = { critical: 'failure', high: 'failure', warning: 'warning', info: 'info' };
-    tasks.push(
-      sendJsonWebhook(fetchImpl, appriseUrl, {
+    tasks.push((async () => {
+      if (!(await isSafeExternalWebhookUrlAsync(appriseUrl, { lookupImpl, skipDnsCheck }))) return null;
+      const ok = await sendJsonWebhook(fetchImpl, appriseUrl, {
         title: notification.title,
         body: notification.body || notification.title,
         type: typeMap[notification.severity] || 'info',
         tag: notification.category,
-      }).then((ok) => (ok ? 'apprise' : null)),
-    );
+      });
+      return ok ? 'apprise' : null;
+    })());
   }
 
   const webhookUrl = String(env.DX_NOTIFICATION_WEBHOOK_URL || '').trim();
   if (webhookUrl && channelAllowed(notifyChannels, 'webhook') && isSafeExternalWebhookUrl(webhookUrl)) {
-    tasks.push(
-      sendJsonWebhook(fetchImpl, webhookUrl, {
+    tasks.push((async () => {
+      if (!(await isSafeExternalWebhookUrlAsync(webhookUrl, { lookupImpl, skipDnsCheck }))) return null;
+      const ok = await sendJsonWebhook(fetchImpl, webhookUrl, {
         event: 'lattice.notification',
         id: notification.id,
         organizationId: notification.organizationId,
@@ -178,21 +160,24 @@ async function dispatchExternalChannels({ env, fetchImpl, notification, notifyCh
         targetRecordId: notification.targetRecordId,
         targetPath: notification.targetPath,
         createdAt: notification.createdAt,
-      }).then((ok) => (ok ? 'webhook' : null)),
-    );
+      });
+      return ok ? 'webhook' : null;
+    })());
   }
 
   const tgToken = String(env.DX_TELEGRAM_BOT_TOKEN || '').trim();
   const tgChat = String(env.DX_TELEGRAM_CHAT_ID || '').trim();
   if (tgToken && tgChat && channelAllowed(notifyChannels, 'telegram') && TELEGRAM_TOKEN_RE.test(tgToken) && TELEGRAM_CHAT_RE.test(tgChat)) {
     const tgUrl = `https://api.telegram.org/bot${tgToken}/sendMessage`;
-    tasks.push(
-      sendJsonWebhook(fetchImpl, tgUrl, {
+    tasks.push((async () => {
+      if (!(await isSafeExternalWebhookUrlAsync(tgUrl, { lookupImpl, skipDnsCheck }))) return null;
+      const ok = await sendJsonWebhook(fetchImpl, tgUrl, {
         chat_id: tgChat,
         text: `[${String(notification.severity || 'info').toUpperCase()}] ${notification.title}${notification.body ? `\n${notification.body}` : ''}`,
         disable_web_page_preview: true,
-      }).then((ok) => (ok ? 'telegram' : null)),
-    );
+      });
+      return ok ? 'telegram' : null;
+    })());
   }
 
   if (!tasks.length) return [];
@@ -200,7 +185,17 @@ async function dispatchExternalChannels({ env, fetchImpl, notification, notifyCh
   return outcomes.filter(Boolean);
 }
 
-async function dispatchNotification(db, payload = {}, { env = process.env, fetchImpl = globalThis.fetch, transaction = null } = {}) {
+async function dispatchNotification(
+  db,
+  payload = {},
+  {
+    env = process.env,
+    fetchImpl = globalThis.fetch,
+    lookupImpl,
+    enforceDnsInMock = false,
+    transaction = null,
+  } = {},
+) {
   const organizationId = typeof payload.organizationId === 'string' ? payload.organizationId.trim() : '';
   if (!ORG_RE.test(organizationId)) {
     throw failNotif('NOTIFICATION_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho thông báo.');
@@ -280,6 +275,8 @@ async function dispatchNotification(db, payload = {}, { env = process.env, fetch
   const externalChannels = await dispatchExternalChannels({
     env,
     fetchImpl,
+    lookupImpl,
+    enforceDnsInMock,
     notification: serialized,
     notifyChannels: payload.notifyChannels,
   });
@@ -615,6 +612,7 @@ module.exports = {
   DEDUP_WINDOW_MS,
   EXTERNAL_TIMEOUT_MS,
   isSafeExternalWebhookUrl,
+  isSafeExternalWebhookUrlAsync,
   resolveNotificationTargetPath,
   dispatchNotification,
   dispatchRoleNotifications,

@@ -17,6 +17,7 @@ const {
 } = require('./automation-engine');
 const {
   ORG_ID_RE,
+  assertPatScope,
   clampPageLimit,
   fail,
   isOrgAdmin,
@@ -44,7 +45,7 @@ const ALLOWED_FIELD_TYPES = new Set([
   'json',
   'belongsTo',
 ]);
-const ADMIN_ROLES = new Set(['ldx_admin', 'ldx_manager', 'root', 'admin']);
+const ADMIN_ROLES = new Set(['ldx_admin', 'root', 'admin']);
 const DEFAULT_DOMAIN_ROLES = ['ldx_admin', 'ldx_manager', 'ldx_operator', 'ldx_employee'];
 const DEFAULT_ROLE_ACTIONS = Object.freeze({
   ldx_admin: ['view', 'list', 'get', 'create', 'update', 'destroy'],
@@ -171,11 +172,23 @@ function sanitizeFields(rawFields) {
       throw fail('INVALID_FIELD_TYPE', 400, `Unsupported field type "${type}" on field "${name}"`);
     }
     let target = null;
+    let foreignKey = null;
     if (type === 'belongsTo') {
       target = String(f.target || '').trim();
       const targetAllowed = CUSTOM_COLLECTION_RE.test(target) || ALLOWLISTED_BUSINESS_COLLECTIONS.has(target);
       if (!target || SYSTEM_PROTECTED_COLLECTIONS.has(target) || !targetAllowed) {
         throw fail('INVALID_BELONGS_TO_TARGET', 400, `Disallowed belongsTo target "${target || '(empty)'}" on field "${name}"`);
+      }
+      if (f.foreignKey !== undefined && f.foreignKey !== null) {
+        if (typeof f.foreignKey !== 'string') {
+          throw fail('INVALID_FOREIGN_KEY', 400, `Invalid foreignKey on field "${name}"`);
+        }
+        foreignKey = f.foreignKey.trim();
+      } else {
+        foreignKey = `${name}Id`;
+      }
+      if (!FIELD_NAME_RE.test(foreignKey) || BLOCKED_FIELD_NAMES.has(foreignKey) || foreignKey === 'organizationId') {
+        throw fail('INVALID_FOREIGN_KEY', 400, `Invalid foreignKey "${foreignKey || '(empty)'}" on field "${name}"`);
       }
     }
     const enumValues = Array.isArray(f.enumValues)
@@ -189,7 +202,7 @@ function sanitizeFields(rawFields) {
       required: Boolean(f.required),
       indexed: Boolean(f.indexed),
       ...(enumValues && enumValues.length > 0 ? { enumValues } : {}),
-      ...(target ? { target, foreignKey: f.foreignKey ? String(f.foreignKey).trim() : `${name}Id` } : {}),
+      ...(target ? { target, foreignKey } : {}),
     });
   }
   return sanitized;
@@ -215,24 +228,33 @@ async function upsertRepoRow(repo, filter, values) {
   return null;
 }
 
-async function attachAndVerifyPgRls(db, collectionName) {
+async function attachAndVerifyPgRls(db, collectionName, opts = {}) {
   let attached = false;
   if (typeof db?.attachLatticeRlsPolicy === 'function') {
     await db.attachLatticeRlsPolicy(collectionName);
     attached = true;
   } else {
-    const pgRls = loadFoundationModule('pg-rls');
+    const pgRls = opts.pgRls !== undefined ? opts.pgRls : loadFoundationModule('pg-rls');
     if (pgRls && typeof pgRls.attachRlsPolicyToTable === 'function') {
       await pgRls.attachRlsPolicyToTable(db, collectionName);
       attached = true;
     } else if (db?.sequelize && typeof db.sequelize.query === 'function') {
       const dialect = typeof db.sequelize.getDialect === 'function' ? db.sequelize.getDialect() : 'postgres';
       if (dialect === 'postgres') {
-        await db.sequelize.query(`ALTER TABLE "${collectionName}" ENABLE ROW LEVEL SECURITY`);
-        await db.sequelize.query(`ALTER TABLE "${collectionName}" FORCE ROW LEVEL SECURITY`);
-        await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${collectionName}"`);
+        const safeTable = String(collectionName).replace(/[^A-Za-z0-9_]/g, '');
+        if (!safeTable) {
+          throw fail('INVALID_COLLECTION_NAME', 400, 'Invalid collectionName for RLS policy');
+        }
+        const predicate = [
+          "current_setting('app.current_org', true) IS NULL",
+          "current_setting('app.current_org', true) = ''",
+          "current_setting('app.current_org', true) = '*'",
+          '"organizationId" = current_setting(\'app.current_org\', true)',
+        ].join(' OR ');
+        await db.sequelize.query(`ALTER TABLE "${safeTable}" ENABLE ROW LEVEL SECURITY`);
+        await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${safeTable}"`);
         await db.sequelize.query(
-          `CREATE POLICY "lattice_tenant_isolation" ON "${collectionName}" USING ("organizationId" = current_setting('app.current_org_id', true)) WITH CHECK ("organizationId" = current_setting('app.current_org_id', true))`,
+          `CREATE POLICY "lattice_tenant_isolation" ON "${safeTable}" AS PERMISSIVE FOR ALL TO PUBLIC USING (${predicate}) WITH CHECK (${predicate})`,
         );
         attached = true;
       }
@@ -321,18 +343,55 @@ async function grantDomainRbac(db, collectionName, roleNames) {
   return grantedRoles;
 }
 
+async function upsertFlowModel(flowModelsRepo, spec) {
+  if (!flowModelsRepo) return null;
+  if (typeof flowModelsRepo.upsertModel === 'function') {
+    await flowModelsRepo.upsertModel(spec);
+    return typeof flowModelsRepo.findOne === 'function'
+      ? (await flowModelsRepo.findOne({ filter: { uid: spec.uid } })) || spec
+      : spec;
+  }
+  return upsertRepoRow(flowModelsRepo, { uid: spec.uid }, spec);
+}
+
 async function upsertPortalPageForDomain(db, { slug, title, collectionName, roleNames }) {
   const cleanSlug = String(slug || '').trim().toLowerCase().replace(/^\/+p\//, '');
   if (!PORTAL_SLUG_RE.test(cleanSlug)) {
     throw fail('INVALID_PORTAL_SLUG', 400, `portalSlug must match ${PORTAL_SLUG_RE.source}`);
   }
   const routePath = `/p/${cleanSlug}`;
+  const layoutUid = `ldx-portal-${cleanSlug}`;
+  const routeName = `p_${cleanSlug.replace(/-/g, '_')}`;
+  const portalTitle = title || cleanSlug;
+
+  const uiLayoutsRepo = db.getRepository?.('uiLayouts');
   const desktopRoutesRepo = db.getRepository?.('desktopRoutes');
+  const linksRepo = db.getRepository?.('desktopRoutesUiLayouts');
   const rolesRoutesRepo = db.getRepository?.('rolesDesktopRoutes');
   const flowModelsRepo = db.getRepository?.('flowModels');
+
   const schemaUid = buildStableUid('dxos-page', cleanSlug);
   const tabSchemaUid = buildStableUid('dxos-tab', cleanSlug);
+  const gridUid = buildStableUid('dxos-grid', cleanSlug);
   const blockUid = buildStableUid('dxos-tbl', `${cleanSlug}-${collectionName}`);
+
+  if (uiLayoutsRepo) {
+    await upsertRepoRow(
+      uiLayoutsRepo,
+      { uid: layoutUid },
+      {
+        uid: layoutUid,
+        name: cleanSlug,
+        title: portalTitle,
+        type: 'desktop',
+        layoutType: 'desktop',
+        routeName,
+        routePath,
+        authCheck: true,
+        enabled: true,
+      },
+    );
+  }
 
   let pageRoute = null;
   if (desktopRoutesRepo) {
@@ -340,11 +399,14 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
       desktopRoutesRepo,
       { schemaUid },
       {
-        type: 'page',
-        title: title || cleanSlug,
+        type: 'flowPage',
+        title: portalTitle,
         schemaUid,
+        uiLayoutUid: layoutUid,
         enableTabs: false,
         hideInMenu: false,
+        hidden: false,
+        displayTitle: true,
         options: {
           path: routePath,
           collectionName,
@@ -359,11 +421,19 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
         {
           parentId: pageId,
           type: 'tabs',
-          title: title || cleanSlug,
+          title: portalTitle,
           schemaUid: tabSchemaUid,
+          uiLayoutUid: layoutUid,
           hideInMenu: true,
         },
       );
+      if (linksRepo) {
+        await upsertRepoRow(
+          linksRepo,
+          { uiLayoutUid: layoutUid, desktopRouteId: pageId },
+          { uiLayoutUid: layoutUid, desktopRouteId: pageId },
+        );
+      }
       if (rolesRoutesRepo) {
         const grants = (Array.isArray(roleNames) && roleNames.length ? roleNames : DEFAULT_DOMAIN_ROLES).filter((r) =>
           ROLE_NAME_RE.test(String(r)),
@@ -380,41 +450,93 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
   }
 
   if (flowModelsRepo) {
-    await upsertRepoRow(
-      flowModelsRepo,
-      { uid: tabSchemaUid },
-      {
-        uid: tabSchemaUid,
-        use: 'PageTabModel',
-        parentId: schemaUid,
-        props: { title: title || cleanSlug, routePath },
+    await upsertFlowModel(flowModelsRepo, {
+      uid: schemaUid,
+      use: 'PageModel',
+      props: { title: portalTitle },
+      stepParams: {
+        pageSettings: {
+          general: { title: portalTitle },
+        },
       },
-    );
-    await upsertRepoRow(
-      flowModelsRepo,
-      { uid: blockUid },
-      {
-        uid: blockUid,
-        use: 'TableBlockModel',
-        parentId: tabSchemaUid,
-        subKey: 'grid',
-        subType: 'array',
-        props: {
-          resourceSettings: {
-            init: {
-              dataSourceKey: 'main',
-              collectionName,
-            },
+    });
+    await upsertFlowModel(flowModelsRepo, {
+      uid: tabSchemaUid,
+      use: 'PageTabModel',
+      parentId: schemaUid,
+      subKey: 'tabs',
+      subType: 'array',
+      props: { title: portalTitle, routePath },
+      stepParams: {},
+    });
+
+    const existingGrid = typeof flowModelsRepo.findOne === 'function'
+      ? await flowModelsRepo.findOne({ filter: { uid: gridUid } })
+      : null;
+    const baseRows = existingGrid?.props?.rows && typeof existingGrid.props.rows === 'object'
+      ? { ...existingGrid.props.rows }
+      : {};
+    const baseSizes = existingGrid?.props?.sizes && typeof existingGrid.props.sizes === 'object'
+      ? { ...existingGrid.props.sizes }
+      : {};
+    const baseOrder = Array.isArray(existingGrid?.props?.rowOrder)
+      ? [...existingGrid.props.rowOrder]
+      : Object.keys(baseRows);
+    const alreadyPlaced = Object.values(baseRows).flat(2).includes(blockUid);
+    if (!alreadyPlaced) {
+      let rowKey = 'row_1';
+      let idx = 1;
+      while (Object.hasOwn(baseRows, rowKey)) {
+        idx += 1;
+        rowKey = `row_${idx}`;
+      }
+      baseRows[rowKey] = [[blockUid]];
+      baseSizes[rowKey] = [24];
+      if (!baseOrder.includes(rowKey)) baseOrder.push(rowKey);
+    }
+    const gridLayout = { rows: baseRows, sizes: baseSizes, rowOrder: baseOrder };
+
+    await upsertFlowModel(flowModelsRepo, {
+      uid: gridUid,
+      use: 'GridModel',
+      parentId: tabSchemaUid,
+      subKey: 'grid',
+      subType: 'object',
+      props: { ...gridLayout },
+      stepParams: {
+        gridSettings: {
+          grid: { ...gridLayout },
+        },
+      },
+    });
+    await upsertFlowModel(flowModelsRepo, {
+      uid: blockUid,
+      use: 'TableBlockModel',
+      parentId: gridUid,
+      subKey: 'items',
+      subType: 'array',
+      props: {
+        collectionName,
+        dataSourceKey: 'main',
+      },
+      stepParams: {
+        resourceSettings: {
+          init: {
+            dataSourceKey: 'main',
+            collectionName,
           },
         },
       },
-    );
+    });
   }
 
   return {
     path: routePath,
+    layoutUid,
     schemaUid,
     tabSchemaUid,
+    gridUid,
+    blockUid,
     routeId: val(pageRoute, 'id') ?? null,
   };
 }
@@ -520,12 +642,43 @@ async function createOrUpdateDomainCollection(db, params) {
 }
 
 async function generateOrEnsureOrgPkiKey(db, organizationId, env) {
+  const effectiveEnv = env && typeof env === 'object' && env.env && typeof env.env === 'object'
+    ? env.env
+    : env || process.env;
+  const rawSecret = String(
+    effectiveEnv?.DX_VAULT_MASTER_KEY
+      || effectiveEnv?.ENCRYPTION_FIELD_KEY
+      || effectiveEnv?.NOCOBASE_APP_KEY
+      || effectiveEnv?.APP_KEY
+      || '',
+  ).trim();
+  const isProduction = String(effectiveEnv?.NODE_ENV || '').trim().toLowerCase() === 'production';
+
+  if (isProduction && !rawSecret) {
+    throw fail(
+      'PKI_MASTER_KEY_MISSING',
+      500,
+      'DX_VAULT_MASTER_KEY, ENCRYPTION_FIELD_KEY, NOCOBASE_APP_KEY, or APP_KEY must be set in production.',
+    );
+  }
+
+  const ledgerEnv = rawSecret && !effectiveEnv?.ENCRYPTION_FIELD_KEY && !effectiveEnv?.APP_KEY
+    ? { ...effectiveEnv, ENCRYPTION_FIELD_KEY: rawSecret }
+    : effectiveEnv;
+
   const pkiLedger = loadFoundationModule('pki-ledger');
   if (pkiLedger && typeof pkiLedger.ensureOrgSigningKey === 'function') {
     try {
-      const res = await pkiLedger.ensureOrgSigningKey(db, organizationId, { env });
+      const res = await pkiLedger.ensureOrgSigningKey(db, organizationId, { env: ledgerEnv });
       if (res) return toPlain(res);
-    } catch {
+    } catch (err) {
+      if (
+        err?.code === 'PKI_MASTER_KEY_MISSING'
+        || err?.code === 'PKI_KEY_INACTIVE'
+        || err?.code === 'PKI_CIPHERTEXT_INVALID'
+      ) {
+        throw err;
+      }
       // Fallback below if isolated unit test repository has custom shape
     }
   }
@@ -540,7 +693,7 @@ async function generateOrEnsureOrgPkiKey(db, organizationId, env) {
   const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
   const spkiDer = publicKey.export({ type: 'spki', format: 'der' });
   const fingerprintSha256 = crypto.createHash('sha256').update(spkiDer).digest('hex');
-  const keyMaterial = String(env?.ENCRYPTION_FIELD_KEY || env?.APP_KEY || 'lattice-dev-fallback-key');
+  const keyMaterial = rawSecret || 'lattice-dev-fallback-key';
   const aesKey = crypto.createHash('sha256').update(keyMaterial).digest();
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
@@ -563,10 +716,49 @@ async function generateOrEnsureOrgPkiKey(db, organizationId, env) {
   return toPlain(created);
 }
 
+function assertBuilderPatScope(ctx, requiredScopes, foundation) {
+  if (ctx?.state?.latticeApiKey) {
+    return assertPatScope(ctx, requiredScopes, foundation);
+  }
+  const rawPatScopes = ctx?.state?.patScopes || ctx?.state?.currentUser?.patScopes || ctx?.state?.apiKey?.scopes;
+  const isLegacyPat = ctx?.state?.authType === 'pat' || Boolean(ctx?.state?.apiKey) || rawPatScopes !== undefined;
+  if (!isLegacyPat) return true;
+  const heldList = Array.isArray(rawPatScopes)
+    ? rawPatScopes
+    : typeof rawPatScopes === 'string'
+      ? rawPatScopes.split(',')
+      : [];
+  const held = new Set(heldList.map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+  const needed = Array.isArray(requiredScopes) ? requiredScopes : [requiredScopes];
+  if (needed.some((s) => held.has(String(s).toLowerCase()))) return true;
+  throw fail('API_KEY_SCOPE_INSUFFICIENT', 403, `API key lacks required scope (${needed.join(' or ')}).`);
+}
+
 function createDxosBuilderActions(db, options = {}) {
   const foundation = options.foundation || loadFoundationSet();
 
-  async function requireBuilderAdmin(ctx, params, { requireOrg = true } = {}) {
+  async function requireBuilderAdmin(ctx, params, { requireOrg = true, rootOnly = false, patScopes = null } = {}) {
+    const userId = val(ctx?.state?.currentUser, 'id');
+    if (userId == null || !/^[1-9]\d*$/.test(String(userId))) {
+      throw fail('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập.');
+    }
+    assertBuilderPatScope(ctx, patScopes || (rootOnly ? ['write'] : ['read', 'write']), foundation);
+
+    const roles = await resolveVerifiedRoles(db, ctx);
+    const ruRepo = db?.getRepository?.('rolesUsers');
+    const hasRuRepo = Boolean(ruRepo && typeof ruRepo.find === 'function');
+    const isRoot = roles.includes('root') || (!hasRuRepo && ctx?.state?.currentUser?.isRoot === true);
+
+    if ((rootOnly || ctx?.state?.currentRole === 'root') && !isRoot) {
+      throw fail('ROOT_ADMIN_REQUIRED', 403, 'Verified root role required for DX-OS Studio builder mutations');
+    }
+
+    const orgAdmin = await isOrgAdmin(db, ctx);
+    const allowed = isRoot || roles.some((r) => ADMIN_ROLES.has(String(r))) || orgAdmin;
+    if (!allowed) {
+      throw fail('FORBIDDEN', 403, 'Verified root or ldx_admin role required for DX-OS Studio builder');
+    }
+
     const rawReqOrg = params.organizationId ?? params.tenantId ?? null;
     const requestedOrgId = rawReqOrg != null ? String(rawReqOrg).trim() || null : null;
     const { organizationId, actor } = await resolveTenantActor(
@@ -579,19 +771,13 @@ function createDxosBuilderActions(db, options = {}) {
       },
       foundation,
     );
-    const roles = await resolveVerifiedRoles(db, ctx);
-    const orgAdmin = await isOrgAdmin(db, ctx);
-    const allowed = roles.some((r) => ADMIN_ROLES.has(String(r))) || orgAdmin;
-    if (!allowed) {
-      throw fail('FORBIDDEN', 403, 'Admin or manager role required for DX-OS Studio builder');
-    }
-    return { organizationId, actor, roles };
+    return { organizationId, actor, roles, isRoot };
   }
 
   return {
     async listDomains(ctx, next) {
       const params = readParams(ctx);
-      await requireBuilderAdmin(ctx, params, { requireOrg: false });
+      await requireBuilderAdmin(ctx, params, { requireOrg: false, rootOnly: false, patScopes: ['read', 'write'] });
 
       const collectionsRepo = db.getRepository?.('collections');
       const fieldsRepo = db.getRepository?.('fields');
@@ -652,7 +838,7 @@ function createDxosBuilderActions(db, options = {}) {
 
     async createDomain(ctx, next) {
       const params = readParams(ctx);
-      await requireBuilderAdmin(ctx, params, { requireOrg: false });
+      await requireBuilderAdmin(ctx, params, { requireOrg: false, rootOnly: true, patScopes: ['write'] });
       const domain = await createOrUpdateDomainCollection(db, params);
       ctx.body = { domain };
       return next();
@@ -660,7 +846,7 @@ function createDxosBuilderActions(db, options = {}) {
 
     async listBusinessPacks(ctx, next) {
       const params = readParams(ctx);
-      const { organizationId } = await requireBuilderAdmin(ctx, params, { requireOrg: false });
+      const { organizationId } = await requireBuilderAdmin(ctx, params, { requireOrg: false, rootOnly: false, patScopes: ['read', 'write'] });
 
       const colsRepo = db.getRepository?.('collections');
       const dmnRepo = db.getRepository?.('latticeDecisionTables');
@@ -689,7 +875,7 @@ function createDxosBuilderActions(db, options = {}) {
 
     async installBusinessPack(ctx, next) {
       const params = readParams(ctx);
-      const { organizationId, actor } = await requireBuilderAdmin(ctx, params);
+      const { organizationId, actor } = await requireBuilderAdmin(ctx, params, { requireOrg: true, rootOnly: true, patScopes: ['write'] });
       const packKey = String(params.packKey || '').trim();
       if (packKey !== 'cmms-maintenance') {
         throw fail('UNKNOWN_BUSINESS_PACK', 400, `Unsupported business pack "${packKey || '(empty)'}"`);
@@ -831,9 +1017,11 @@ function createDxosBuilderActions(db, options = {}) {
 
     async listTenants(ctx, next) {
       const params = readParams(ctx);
-      const { organizationId } = await requireBuilderAdmin(ctx, params, { requireOrg: false });
-      const roles = await resolveVerifiedRoles(db, ctx);
-      const isRoot = ctx?.state?.currentUser?.isRoot === true || roles.includes('root');
+      const { organizationId, isRoot } = await requireBuilderAdmin(ctx, params, {
+        requireOrg: false,
+        rootOnly: false,
+        patScopes: ['read', 'write'],
+      });
 
       const orgRepo = db.getRepository?.('latticeOrganizations');
       const deptRepo = db.getRepository?.('latticeDepartments');
@@ -884,7 +1072,7 @@ function createDxosBuilderActions(db, options = {}) {
       if (!ORG_ID_RE.test(organizationId) || organizationId.toLowerCase() === 'all') {
         throw fail('INVALID_ORGANIZATION_ID', 400, 'organizationId must match ^[a-zA-Z0-9][a-zA-Z0-9_-]{1,62}$');
       }
-      await requireBuilderAdmin(ctx, params, { requireOrg: true });
+      await requireBuilderAdmin(ctx, params, { requireOrg: true, rootOnly: true, patScopes: ['write'] });
       const name = String(params.name || organizationId).trim();
       const region = String(params.region || 'VN').trim() || 'VN';
 
@@ -1000,31 +1188,93 @@ function createDxosBuilderActions(db, options = {}) {
         const usersRepo = db.getRepository?.('users');
         const rolesUsersRepo = db.getRepository?.('rolesUsers');
         const empRepo = db.getRepository?.('latticeEmployees');
+        const resolvedUsername = adminUsername || (adminEmail.includes('@') ? adminEmail.split('@')[0] : adminEmail);
+        const resolvedEmail = adminEmail || `${resolvedUsername}@${organizationId}.local`;
         let userRow = null;
+        let createdNewUser = false;
+        let generatedTempPassword = null;
 
         if (usersRepo) {
-          const lookupFilter = adminUsername ? { username: adminUsername } : { email: adminEmail };
-          userRow = await usersRepo.findOne({ filter: lookupFilter });
+          const byUsername = adminUsername ? await usersRepo.findOne({ filter: { username: adminUsername } }) : null;
+          const byEmail = adminEmail ? await usersRepo.findOne({ filter: { email: adminEmail } }) : null;
+          if (byUsername && byEmail && val(byUsername, 'id') !== val(byEmail, 'id')) {
+            throw fail('USER_ORG_CONFLICT', 403, 'adminUsername and adminEmail resolve to different existing users');
+          }
+          userRow = byUsername || byEmail || null;
+          if (!userRow && resolvedUsername && resolvedUsername !== adminUsername) {
+            userRow = await usersRepo.findOne({ filter: { username: resolvedUsername } });
+          }
+          if (!userRow && resolvedEmail && resolvedEmail !== adminEmail) {
+            userRow = await usersRepo.findOne({ filter: { email: resolvedEmail } });
+          }
+
           if (userRow) {
-            const existingOrg = val(userRow, 'organizationId');
-            if (existingOrg && existingOrg !== organizationId) {
-              throw fail('USER_ORG_CONFLICT', 403, `User "${val(userRow, 'username') || adminUsername}" belongs to another organization`);
+            const existingUserId = val(userRow, 'id');
+            const legacyUserOrg = val(userRow, 'organizationId');
+            if (legacyUserOrg && legacyUserOrg !== organizationId) {
+              throw fail('USER_ORG_CONFLICT', 403, `User "${val(userRow, 'username') || resolvedUsername}" belongs to another organization`);
+            }
+            if (rolesUsersRepo && existingUserId != null) {
+              let roleBindings = [];
+              if (typeof rolesUsersRepo.find === 'function') {
+                roleBindings = (await rolesUsersRepo.find({ filter: { userId: existingUserId } })) || [];
+              } else if (typeof rolesUsersRepo.findOne === 'function') {
+                const rootRow = await rolesUsersRepo.findOne({ filter: { userId: existingUserId, roleName: 'root' } });
+                const adminRow = await rolesUsersRepo.findOne({ filter: { userId: existingUserId, roleName: 'admin' } });
+                roleBindings = [rootRow, adminRow].filter(Boolean);
+              }
+              const holdsPrivilegedRole = roleBindings.some((ru) => {
+                const rUserId = val(ru, 'userId');
+                if (rUserId != null && String(rUserId) !== String(existingUserId)) return false;
+                const rName = String(val(ru, 'roleName') || '').trim().toLowerCase();
+                return rName === 'root' || rName === 'admin';
+              });
+              if (holdsPrivilegedRole) {
+                throw fail(
+                  'USER_ORG_CONFLICT',
+                  403,
+                  `Privileged user "${val(userRow, 'username') || resolvedUsername}" cannot be attached to tenant "${organizationId}"`,
+                );
+              }
+            }
+            if (!empRepo || typeof empRepo.find !== 'function') {
+              throw fail(
+                'USER_ORG_CONFLICT',
+                403,
+                `Cannot verify organization membership for existing user "${val(userRow, 'username') || resolvedUsername}"`,
+              );
+            }
+            const empRows = (await empRepo.find({ filter: { userId: existingUserId }, limit: 100 })) || [];
+            const ownedRows = empRows.filter((e) => {
+              const eUserId = val(e, 'userId');
+              return eUserId == null || String(eUserId) === String(existingUserId);
+            });
+            if (ownedRows.length === 0 || ownedRows.some((e) => val(e, 'organizationId') !== organizationId)) {
+              throw fail(
+                'USER_ORG_CONFLICT',
+                403,
+                `User "${val(userRow, 'username') || resolvedUsername}" belongs to another organization or lacks membership in "${organizationId}"`,
+              );
             }
           } else {
-            const rawPwd = params.adminPassword
+            const hasExplicitPassword =
+              params.adminPassword !== undefined && params.adminPassword !== null && String(params.adminPassword) !== '';
+            const rawPwd = hasExplicitPassword
               ? String(params.adminPassword)
               : crypto.randomBytes(18).toString('base64url');
-            const salt = crypto.randomBytes(16).toString('hex');
-            const derived = crypto.scryptSync(rawPwd, salt, 64).toString('hex');
             userRow = await usersRepo.create({
               values: {
-                username: adminUsername || adminEmail.split('@')[0],
-                email: adminEmail || `${adminUsername}@${organizationId}.local`,
-                nickname: params.adminNickname || adminUsername || 'Tenant Admin',
-                password: `scrypt$${salt}$${derived}`,
-                organizationId,
+                username: resolvedUsername,
+                email: resolvedEmail,
+                nickname: params.adminNickname || resolvedUsername || 'Tenant Admin',
+                password: rawPwd,
+                roles: ['ldx_admin'],
               },
             });
+            createdNewUser = true;
+            if (!hasExplicitPassword) {
+              generatedTempPassword = rawPwd;
+            }
           }
         }
 
@@ -1045,8 +1295,8 @@ function createDxosBuilderActions(db, options = {}) {
             {
               organizationId,
               code: empCode,
-              name: params.adminNickname || adminUsername || 'Tenant Admin',
-              email: adminEmail || `${adminUsername || 'admin'}@${organizationId}.local`,
+              name: params.adminNickname || resolvedUsername || 'Tenant Admin',
+              email: resolvedEmail,
               userId,
               departmentId: departments[0]?.id ?? null,
               active: true,
@@ -1055,10 +1305,11 @@ function createDxosBuilderActions(db, options = {}) {
         }
         adminAccount = {
           userId,
-          username: val(userRow, 'username') || adminUsername,
-          email: val(userRow, 'email') || adminEmail,
+          username: val(userRow, 'username') || resolvedUsername,
+          email: val(userRow, 'email') || resolvedEmail,
           role: 'ldx_admin',
           employeeId: val(employeeRow, 'id') ?? null,
+          ...(createdNewUser && generatedTempPassword ? { tempPassword: generatedTempPassword } : {}),
         };
       }
 
@@ -1085,8 +1336,11 @@ function createDxosBuilderActions(db, options = {}) {
 
 module.exports = {
   BUSINESS_PACK_CATALOG,
+  attachAndVerifyPgRls,
   buildSafePgIndexName,
   createDxosBuilderActions,
   createOrUpdateDomainCollection,
+  generateOrEnsureOrgPkiKey,
   sanitizeFields,
+  upsertPortalPageForDomain,
 };

@@ -8,57 +8,77 @@
  */
 'use strict';
 
-const path = require('path');
+const path = require('node:path');
 const { Migration } = require('@nocobase/server');
 
 function loadPgRls() {
-  const candidates = [
-    path.resolve(__dirname, '../../../../plugin-lattice-foundation/src/server/pg-rls'),
-    '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
-  ];
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-lattice-foundation/dist/server/pg-rls',
+        '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
+        '../../../../plugin-lattice-foundation/dist/server/pg-rls',
+        '../../../../plugin-lattice-foundation/src/server/pg-rls',
+      ]
+    : [
+        '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
+        '../../../../plugin-lattice-foundation/src/server/pg-rls',
+        '@latticedx/plugin-lattice-foundation/dist/server/pg-rls',
+        '../../../../plugin-lattice-foundation/dist/server/pg-rls',
+      ];
   for (const modPath of candidates) {
     try {
-      return require(modPath);
-    } catch {
-      // Fall through to raw SQL / db helper fallback when foundation plugin is absent.
+      const mod = require(modPath);
+      if (mod && typeof mod.attachRlsPolicyToTable === 'function') return mod;
+    } catch (err) {
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
     }
   }
   return null;
 }
 
-async function attachRls(db, tableName, pgRls) {
+async function attachRls(db, tableName, pgRls, transaction) {
+  const txOpt = transaction ? { transaction } : undefined;
   if (typeof db?.attachLatticeRlsPolicy === 'function') {
-    await db.attachLatticeRlsPolicy(tableName);
+    await db.attachLatticeRlsPolicy(tableName, txOpt);
     return;
   }
   if (pgRls && typeof pgRls.attachRlsPolicyToTable === 'function') {
-    await pgRls.attachRlsPolicyToTable(db, tableName);
+    await pgRls.attachRlsPolicyToTable(db, tableName, txOpt);
     return;
   }
   const safeTable = String(tableName).replace(/[^A-Za-z0-9_]/g, '');
   if (!safeTable) return;
-  await db.sequelize.query(`ALTER TABLE "${safeTable}" ENABLE ROW LEVEL SECURITY`);
-  await db.sequelize.query(`ALTER TABLE "${safeTable}" FORCE ROW LEVEL SECURITY`);
-  await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${safeTable}"`);
+  const predicate = [
+    "current_setting('app.current_org', true) IS NULL",
+    "current_setting('app.current_org', true) = ''",
+    "current_setting('app.current_org', true) = '*'",
+    '"organizationId" = current_setting(\'app.current_org\', true)',
+  ].join(' OR ');
+  await db.sequelize.query(`ALTER TABLE "${safeTable}" ENABLE ROW LEVEL SECURITY`, txOpt);
+  await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${safeTable}"`, txOpt);
   await db.sequelize.query(
-    `CREATE POLICY "lattice_tenant_isolation" ON "${safeTable}" USING ("organizationId" = current_setting('app.current_org_id', true)) WITH CHECK ("organizationId" = current_setting('app.current_org_id', true))`,
+    `CREATE POLICY "lattice_tenant_isolation" ON "${safeTable}" AS PERMISSIVE FOR ALL TO PUBLIC USING (${predicate}) WITH CHECK (${predicate})`,
+    txOpt,
   );
 }
 
-async function detachRls(db, tableName, pgRls) {
+async function detachRls(db, tableName, pgRls, transaction) {
+  const txOpt = transaction ? { transaction } : undefined;
   if (typeof db?.detachLatticeRlsPolicy === 'function') {
-    await db.detachLatticeRlsPolicy(tableName);
+    await db.detachLatticeRlsPolicy(tableName, txOpt);
     return;
   }
   if (pgRls && typeof pgRls.detachRlsPolicyFromTable === 'function') {
-    await pgRls.detachRlsPolicyFromTable(db, tableName);
+    await pgRls.detachRlsPolicyFromTable(db, tableName, txOpt);
     return;
   }
   const safeTable = String(tableName).replace(/[^A-Za-z0-9_]/g, '');
   if (!safeTable) return;
-  await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${safeTable}"`);
-  await db.sequelize.query(`ALTER TABLE "${safeTable}" NO FORCE ROW LEVEL SECURITY`).catch(() => {});
-  await db.sequelize.query(`ALTER TABLE "${safeTable}" DISABLE ROW LEVEL SECURITY`).catch(() => {});
+  await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${safeTable}"`, txOpt);
+  await db.sequelize.query(`ALTER TABLE IF EXISTS "${safeTable}" DISABLE ROW LEVEL SECURITY`, txOpt).catch(() => {});
 }
 
 module.exports = class AutomationRulesAndRunsMigration extends Migration {
@@ -72,85 +92,101 @@ module.exports = class AutomationRulesAndRunsMigration extends Migration {
     const dialect = typeof sequelize.getDialect === 'function' ? sequelize.getDialect() : 'postgres';
     if (dialect !== 'postgres') return;
 
-    await sequelize.query(`
-      CREATE TABLE IF NOT EXISTS "latticeAutomationRules" (
-        "id" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-        "organizationId" VARCHAR(128) NOT NULL,
-        "ruleKey" VARCHAR(128) NOT NULL,
-        "name" VARCHAR(255) NOT NULL,
-        "description" TEXT,
-        "triggerEventType" VARCHAR(128) NOT NULL DEFAULT '*',
-        "filterJson" JSONB,
-        "dmnTableKey" VARCHAR(128),
-        "actionsJson" JSONB NOT NULL DEFAULT '[]'::jsonb,
-        "maxDepth" INTEGER NOT NULL DEFAULT 8,
-        "cooldownSec" INTEGER NOT NULL DEFAULT 0,
-        "active" BOOLEAN NOT NULL DEFAULT TRUE,
-        "lastTriggeredAt" TIMESTAMPTZ,
-        "createdBy" VARCHAR(128),
-        "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await sequelize.query(
-      'CREATE UNIQUE INDEX IF NOT EXISTS "uidx_lattice_auto_rules_org_key" ON "latticeAutomationRules" ("organizationId", "ruleKey")',
-    );
-    await sequelize.query(
-      'CREATE INDEX IF NOT EXISTS "idx_lattice_auto_rules_org_event" ON "latticeAutomationRules" ("organizationId", "triggerEventType")',
-    );
+    const runUp = async (transaction) => {
+      const txOpt = transaction ? { transaction } : undefined;
 
-    await sequelize.query(`
-      CREATE TABLE IF NOT EXISTS "latticeAutomationRuns" (
-        "id" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-        "organizationId" VARCHAR(128) NOT NULL,
-        "ruleId" BIGINT,
-        "ruleKey" VARCHAR(128) NOT NULL,
-        "runUid" VARCHAR(128) NOT NULL,
-        "triggerEventId" VARCHAR(128),
-        "triggerEventType" VARCHAR(128) NOT NULL,
-        "status" VARCHAR(32) NOT NULL DEFAULT 'running',
-        "depth" INTEGER NOT NULL DEFAULT 0,
-        "matched" BOOLEAN NOT NULL DEFAULT FALSE,
-        "dmnResultJson" JSONB,
-        "stepTracesJson" JSONB NOT NULL DEFAULT '[]'::jsonb,
-        "errorMessage" TEXT,
-        "startedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        "finishedAt" TIMESTAMPTZ,
-        "durationMs" INTEGER,
-        "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await sequelize.query(
-      'CREATE UNIQUE INDEX IF NOT EXISTS "uidx_lattice_auto_runs_org_uid" ON "latticeAutomationRuns" ("organizationId", "runUid")',
-    );
-    await sequelize.query(
-      'CREATE INDEX IF NOT EXISTS "idx_lattice_auto_runs_org_rule" ON "latticeAutomationRuns" ("organizationId", "ruleKey")',
-    );
-    await sequelize.query(
-      'CREATE INDEX IF NOT EXISTS "idx_lattice_auto_runs_org_started" ON "latticeAutomationRuns" ("organizationId", "startedAt")',
-    );
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "latticeAutomationRules" (
+          "id" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          "organizationId" VARCHAR(128) NOT NULL,
+          "ruleKey" VARCHAR(128) NOT NULL,
+          "name" VARCHAR(255) NOT NULL,
+          "description" TEXT,
+          "triggerEventType" VARCHAR(128) NOT NULL DEFAULT '*',
+          "filterJson" JSONB,
+          "dmnTableKey" VARCHAR(128),
+          "actionsJson" JSONB NOT NULL DEFAULT '[]'::jsonb,
+          "maxDepth" INTEGER NOT NULL DEFAULT 8,
+          "cooldownSec" INTEGER NOT NULL DEFAULT 0,
+          "active" BOOLEAN NOT NULL DEFAULT TRUE,
+          "lastTriggeredAt" TIMESTAMPTZ,
+          "createdBy" VARCHAR(128),
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `, txOpt);
+      await sequelize.query(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "uidx_lattice_auto_rules_org_key" ON "latticeAutomationRules" ("organizationId", "ruleKey")',
+        txOpt,
+      );
+      await sequelize.query(
+        'CREATE INDEX IF NOT EXISTS "idx_lattice_auto_rules_org_event" ON "latticeAutomationRules" ("organizationId", "triggerEventType")',
+        txOpt,
+      );
 
-    await sequelize.query(`
-      CREATE TABLE IF NOT EXISTS "latticeOrganizations" (
-        "id" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-        "organizationId" VARCHAR(128) NOT NULL,
-        "name" VARCHAR(255) NOT NULL,
-        "region" VARCHAR(64) NOT NULL DEFAULT 'VN',
-        "status" VARCHAR(32) NOT NULL DEFAULT 'active',
-        "active" BOOLEAN NOT NULL DEFAULT TRUE,
-        "metadataJson" JSONB,
-        "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await sequelize.query(
-      'CREATE UNIQUE INDEX IF NOT EXISTS "uidx_lattice_orgs_org_id" ON "latticeOrganizations" ("organizationId")',
-    );
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "latticeAutomationRuns" (
+          "id" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          "organizationId" VARCHAR(128) NOT NULL,
+          "ruleId" BIGINT,
+          "ruleKey" VARCHAR(128) NOT NULL,
+          "runUid" VARCHAR(128) NOT NULL,
+          "triggerEventId" VARCHAR(128),
+          "triggerEventType" VARCHAR(128) NOT NULL,
+          "status" VARCHAR(32) NOT NULL DEFAULT 'running',
+          "depth" INTEGER NOT NULL DEFAULT 0,
+          "matched" BOOLEAN NOT NULL DEFAULT FALSE,
+          "dmnResultJson" JSONB,
+          "stepTracesJson" JSONB NOT NULL DEFAULT '[]'::jsonb,
+          "errorMessage" TEXT,
+          "startedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "finishedAt" TIMESTAMPTZ,
+          "durationMs" INTEGER,
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `, txOpt);
+      await sequelize.query(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "uidx_lattice_auto_runs_org_uid" ON "latticeAutomationRuns" ("organizationId", "runUid")',
+        txOpt,
+      );
+      await sequelize.query(
+        'CREATE INDEX IF NOT EXISTS "idx_lattice_auto_runs_org_rule" ON "latticeAutomationRuns" ("organizationId", "ruleKey")',
+        txOpt,
+      );
+      await sequelize.query(
+        'CREATE INDEX IF NOT EXISTS "idx_lattice_auto_runs_org_started" ON "latticeAutomationRuns" ("organizationId", "startedAt")',
+        txOpt,
+      );
 
-    const pgRls = loadPgRls();
-    await attachRls(db, 'latticeAutomationRules', pgRls);
-    await attachRls(db, 'latticeAutomationRuns', pgRls);
+      await sequelize.query(`
+        CREATE TABLE IF NOT EXISTS "latticeOrganizations" (
+          "id" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          "organizationId" VARCHAR(128) NOT NULL,
+          "name" VARCHAR(255) NOT NULL,
+          "region" VARCHAR(64) NOT NULL DEFAULT 'VN',
+          "status" VARCHAR(32) NOT NULL DEFAULT 'active',
+          "active" BOOLEAN NOT NULL DEFAULT TRUE,
+          "metadataJson" JSONB,
+          "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `, txOpt);
+      await sequelize.query(
+        'CREATE UNIQUE INDEX IF NOT EXISTS "uidx_lattice_orgs_org_id" ON "latticeOrganizations" ("organizationId")',
+        txOpt,
+      );
+
+      const pgRls = loadPgRls();
+      await attachRls(db, 'latticeAutomationRules', pgRls, transaction);
+      await attachRls(db, 'latticeAutomationRuns', pgRls, transaction);
+    };
+
+    if (typeof sequelize.transaction === 'function') {
+      await sequelize.transaction(runUp);
+    } else {
+      await runUp(undefined);
+    }
   }
 
   async down() {
@@ -161,20 +197,29 @@ module.exports = class AutomationRulesAndRunsMigration extends Migration {
     const dialect = typeof sequelize.getDialect === 'function' ? sequelize.getDialect() : 'postgres';
     if (dialect !== 'postgres') return;
 
-    const pgRls = loadPgRls();
-    await detachRls(db, 'latticeAutomationRuns', pgRls);
-    await detachRls(db, 'latticeAutomationRules', pgRls);
+    const runDown = async (transaction) => {
+      const txOpt = transaction ? { transaction } : undefined;
+      const pgRls = loadPgRls();
+      await detachRls(db, 'latticeAutomationRuns', pgRls, transaction);
+      await detachRls(db, 'latticeAutomationRules', pgRls, transaction);
 
-    await sequelize.query('DROP INDEX IF EXISTS "idx_lattice_auto_runs_org_started"');
-    await sequelize.query('DROP INDEX IF EXISTS "idx_lattice_auto_runs_org_rule"');
-    await sequelize.query('DROP INDEX IF EXISTS "uidx_lattice_auto_runs_org_uid"');
-    await sequelize.query('DROP TABLE IF EXISTS "latticeAutomationRuns"');
+      await sequelize.query('DROP INDEX IF EXISTS "idx_lattice_auto_runs_org_started"', txOpt);
+      await sequelize.query('DROP INDEX IF EXISTS "idx_lattice_auto_runs_org_rule"', txOpt);
+      await sequelize.query('DROP INDEX IF EXISTS "uidx_lattice_auto_runs_org_uid"', txOpt);
+      await sequelize.query('DROP TABLE IF EXISTS "latticeAutomationRuns"', txOpt);
 
-    await sequelize.query('DROP INDEX IF EXISTS "idx_lattice_auto_rules_org_event"');
-    await sequelize.query('DROP INDEX IF EXISTS "uidx_lattice_auto_rules_org_key"');
-    await sequelize.query('DROP TABLE IF EXISTS "latticeAutomationRules"');
+      await sequelize.query('DROP INDEX IF EXISTS "idx_lattice_auto_rules_org_event"', txOpt);
+      await sequelize.query('DROP INDEX IF EXISTS "uidx_lattice_auto_rules_org_key"', txOpt);
+      await sequelize.query('DROP TABLE IF EXISTS "latticeAutomationRules"', txOpt);
 
-    await sequelize.query('DROP INDEX IF EXISTS "uidx_lattice_orgs_org_id"');
-    await sequelize.query('DROP TABLE IF EXISTS "latticeOrganizations"');
+      await sequelize.query('DROP INDEX IF EXISTS "uidx_lattice_orgs_org_id"', txOpt);
+      await sequelize.query('DROP TABLE IF EXISTS "latticeOrganizations"', txOpt);
+    };
+
+    if (typeof sequelize.transaction === 'function') {
+      await sequelize.transaction(runDown);
+    } else {
+      await runDown(undefined);
+    }
   }
 };

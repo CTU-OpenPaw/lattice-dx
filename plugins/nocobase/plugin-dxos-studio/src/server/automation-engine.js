@@ -13,6 +13,7 @@ const path = require('path');
 const { evaluateDecisionTable } = require('./dmn-engine');
 const { SYSTEM_PROTECTED_COLLECTIONS } = require('./solution-bundle');
 const {
+  assertPatScope,
   clampPageLimit,
   fail,
   isOrgAdmin,
@@ -21,6 +22,7 @@ const {
   readParams,
   resolveTenantActor,
   resolveVerifiedRoles,
+  sanitizeDirectFilter,
   toPlain,
   val,
 } = require('./wms-dmn-shared');
@@ -36,6 +38,23 @@ const VALID_ACTION_TYPES = new Set([
   'call_connector',
   'twin_set_desired',
   'trigger_ai_triage',
+]);
+const CORE_VOUCHER_COLLECTIONS = new Set([
+  'latticeRequests',
+  'latticeOrders',
+  'latticeServiceTickets',
+]);
+const PROTECTED_VOUCHER_FIELDS = new Set([
+  'id',
+  'status',
+  'version',
+  'amendedFromId',
+  'amendmentNo',
+  'submittedAt',
+  'submittedBy',
+  'cancelledAt',
+  'cancelledBy',
+  'cancelReason',
 ]);
 const ALLOWLISTED_BUSINESS_COLLECTIONS = new Set([
   'latticeRequests',
@@ -373,15 +392,27 @@ function isAllowlistedTargetCollection(collectionName) {
 }
 
 function loadSiblingBlocksModule(relName) {
-  const candidates = [
-    path.resolve(__dirname, `../../../plugin-dxos-blocks/src/server/${relName}`),
-    `@latticedx/plugin-dxos-blocks/src/server/${relName}`,
-  ];
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        path.resolve(__dirname, `../../../plugin-dxos-blocks/dist/server/${relName}`),
+        `@latticedx/plugin-dxos-blocks/dist/server/${relName}`,
+        path.resolve(__dirname, `../../../plugin-dxos-blocks/src/server/${relName}`),
+        `@latticedx/plugin-dxos-blocks/src/server/${relName}`,
+      ]
+    : [
+        path.resolve(__dirname, `../../../plugin-dxos-blocks/src/server/${relName}`),
+        `@latticedx/plugin-dxos-blocks/src/server/${relName}`,
+        path.resolve(__dirname, `../../../plugin-dxos-blocks/dist/server/${relName}`),
+        `@latticedx/plugin-dxos-blocks/dist/server/${relName}`,
+      ];
   for (const modPath of candidates) {
     try {
       return require(modPath);
-    } catch {
-      // Optional sibling plugin fallback
+    } catch (err) {
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
     }
   }
   return null;
@@ -408,15 +439,19 @@ function extractPatScopes(ctx) {
   return null;
 }
 
-function assertAutomationPatScope(ctx, allowedScopes) {
+function assertAutomationPatScope(ctx, allowedScopes, foundation) {
+  if (ctx?.state?.latticeApiKey) {
+    return assertPatScope(ctx, allowedScopes, foundation || undefined);
+  }
   const isPat = ctx?.state?.authType === 'pat' || Boolean(ctx?.state?.apiKey) || extractPatScopes(ctx) !== null;
-  if (!isPat) return;
+  if (!isPat) return true;
   const scopes = extractPatScopes(ctx) || [];
-  if (scopes.includes('*') || scopes.includes('admin')) return;
+  if (scopes.includes('*')) return true;
   const ok = allowedScopes.some((s) => scopes.includes(s));
   if (!ok) {
     throw fail('PAT_SCOPE_DENIED', 403, `PAT requires one of scopes [${allowedScopes.join(', ')}]`);
   }
+  return true;
 }
 
 function hasAnyRole(roles, allowedSet) {
@@ -502,12 +537,67 @@ function normalizeIncomingEvent(rawEvent, fallbackOrgId) {
 }
 
 function buildConnectorUrl(baseUrl, pathOrUrl) {
+  const baseRaw = String(baseUrl || '').trim();
+  let baseParsed;
+  try {
+    baseParsed = new URL(baseRaw);
+  } catch {
+    throw fail('CONNECTOR_URL_OVERRIDE_FORBIDDEN', 400, 'CONNECTOR_URL_OVERRIDE_FORBIDDEN: Invalid connector baseUrl');
+  }
+
   const p = String(pathOrUrl || '').trim();
-  if (!p) return String(baseUrl || '').trim();
-  if (/^https?:\/\//i.test(p)) return p;
-  const base = String(baseUrl || '').replace(/\/+$/, '');
+  if (!p) return baseRaw;
+
+  if (/^\/\//.test(p) || /\\/.test(p) || /[\u0000-\u001f\u007f]/.test(p)) {
+    throw fail('CONNECTOR_URL_OVERRIDE_FORBIDDEN', 400, `CONNECTOR_URL_OVERRIDE_FORBIDDEN: Unsafe connector path "${p}"`);
+  }
+
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(p)) {
+    let targetParsed;
+    try {
+      targetParsed = new URL(p);
+    } catch {
+      throw fail('CONNECTOR_URL_OVERRIDE_FORBIDDEN', 400, `CONNECTOR_URL_OVERRIDE_FORBIDDEN: Invalid connector URL "${p}"`);
+    }
+    if (
+      targetParsed.origin !== baseParsed.origin ||
+      targetParsed.protocol !== baseParsed.protocol ||
+      targetParsed.host !== baseParsed.host ||
+      targetParsed.username !== baseParsed.username ||
+      targetParsed.password !== baseParsed.password
+    ) {
+      throw fail(
+        'CONNECTOR_URL_OVERRIDE_FORBIDDEN',
+        400,
+        `CONNECTOR_URL_OVERRIDE_FORBIDDEN: Action URL "${p}" cannot switch origin from "${baseParsed.origin}"`,
+      );
+    }
+    return targetParsed.toString();
+  }
+
+  const base = baseRaw.replace(/\/+$/, '');
   const rel = p.startsWith('/') ? p : `/${p}`;
-  return `${base}${rel}`;
+  const candidate = `${base}${rel}`;
+  let candidateParsed;
+  try {
+    candidateParsed = new URL(candidate);
+  } catch {
+    throw fail('CONNECTOR_URL_OVERRIDE_FORBIDDEN', 400, 'CONNECTOR_URL_OVERRIDE_FORBIDDEN: Invalid resolved connector URL');
+  }
+  if (
+    candidateParsed.origin !== baseParsed.origin ||
+    candidateParsed.protocol !== baseParsed.protocol ||
+    candidateParsed.host !== baseParsed.host ||
+    candidateParsed.username !== baseParsed.username ||
+    candidateParsed.password !== baseParsed.password
+  ) {
+    throw fail(
+      'CONNECTOR_URL_OVERRIDE_FORBIDDEN',
+      400,
+      `CONNECTOR_URL_OVERRIDE_FORBIDDEN: Resolved connector URL switched origin from "${baseParsed.origin}"`,
+    );
+  }
+  return candidate;
 }
 
 function scrubSecrets(text, secrets) {
@@ -521,14 +611,24 @@ function scrubSecrets(text, secrets) {
   return out;
 }
 
+function decodeHmacKey(secret) {
+  const s = String(secret || '').trim();
+  if (!s) return null;
+  if (s.startsWith('whsec_')) {
+    return Buffer.from(s.slice(6), 'base64');
+  }
+  return s;
+}
+
 function buildHmacHeaders(bodyString, secrets) {
   const secret = String(secrets?.secret || secrets?.signingSecret || secrets?.hmacSecret || secrets?.apiKey || '');
-  if (!secret) return {};
+  const hmacKey = decodeHmacKey(secret);
+  if (!hmacKey) return {};
   const webhookId = `msg_${crypto.randomUUID()}`;
   const ts = String(Math.floor(Date.now() / 1000));
-  const hexSig = crypto.createHmac('sha256', secret).update(bodyString || '').digest('hex');
+  const hexSig = crypto.createHmac('sha256', hmacKey).update(bodyString || '').digest('hex');
   const b64Sig = crypto
-    .createHmac('sha256', secret)
+    .createHmac('sha256', hmacKey)
     .update(`${webhookId}.${ts}.${bodyString || ''}`)
     .digest('base64');
   return {
@@ -579,6 +679,18 @@ async function emitStepDomainEvent(db, eventBusMod, orgId, eventPayload, depth, 
   }
 }
 
+function sanitizeAutomationWriteValues(targetCollection, rawValues) {
+  const values = isPlainObject(rawValues) ? sanitizePlainObject(rawValues) : {};
+  delete values.id;
+  delete values.organizationId;
+  if (CORE_VOUCHER_COLLECTIONS.has(targetCollection)) {
+    for (const field of PROTECTED_VOUCHER_FIELDS) {
+      delete values[field];
+    }
+  }
+  return values;
+}
+
 async function executeActionStep({
   action,
   stepIndex,
@@ -610,7 +722,7 @@ async function executeActionStep({
         throw new Error(`Repository not found for collection ${targetCollection}`);
       }
       const rawValues = interpolateTemplate(action.values || action.data || action.payload || {}, eventContext);
-      const values = isPlainObject(rawValues) ? sanitizePlainObject(rawValues) : {};
+      const values = sanitizeAutomationWriteValues(targetCollection, rawValues);
       values.organizationId = organizationId;
       const created = await repo.create({ values });
       const plain = toPlain(created) || {};
@@ -636,10 +748,10 @@ async function executeActionStep({
       if (!isPlainObject(rawFilter) || Object.keys(rawFilter).length === 0) {
         throw new Error('update_record requires non-empty filter or recordId');
       }
-      const scopedFilter = { ...sanitizePlainObject(rawFilter), organizationId };
+      const sanitizedFilter = sanitizeDirectFilter(rawFilter);
+      const scopedFilter = { ...sanitizePlainObject(sanitizedFilter), organizationId };
       const rawValues = interpolateTemplate(action.values || action.patch || action.data || {}, eventContext);
-      const values = isPlainObject(rawValues) ? sanitizePlainObject(rawValues) : {};
-      delete values.organizationId;
+      const values = sanitizeAutomationWriteValues(targetCollection, rawValues);
 
       const existing = await repo.find({ filter: scopedFilter, limit: Number(action.limit || 20) });
       const list = Array.isArray(existing) ? existing : [];
@@ -720,11 +832,20 @@ async function executeActionStep({
         env: options.env,
       });
       const resolvedUrl = buildConnectorUrl(connector.baseUrl, interpolateTemplate(action.url || action.path || '', eventContext));
+      const ssrfOpts = {
+        connectorType: connector.connectorType || 'http_api',
+        env: options.env,
+        ...(typeof options.lookupImpl === 'function' ? { lookupImpl: options.lookupImpl } : {}),
+      };
       if (typeof vaultMod.assertSafeConnectorUrl === 'function') {
-        vaultMod.assertSafeConnectorUrl(resolvedUrl, {
-          connectorType: connector.connectorType || 'http_api',
-          env: options.env,
-        });
+        vaultMod.assertSafeConnectorUrl(resolvedUrl, ssrfOpts);
+      }
+      if (typeof vaultMod.assertSafeConnectorUrlAsync === 'function') {
+        await vaultMod.assertSafeConnectorUrlAsync(resolvedUrl, ssrfOpts);
+      } else if (typeof vaultMod.resolveAndAssertSafeAddress === 'function') {
+        await vaultMod.resolveAndAssertSafeAddress(resolvedUrl, ssrfOpts);
+      } else if (typeof vaultMod.assertSafeConnectorDns === 'function') {
+        await vaultMod.assertSafeConnectorDns(resolvedUrl, ssrfOpts);
       }
       const method = String(action.method || 'POST').toUpperCase();
       if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
@@ -760,6 +881,7 @@ async function executeActionStep({
           method,
           headers,
           body: bodyPayload,
+          redirect: 'error',
           signal: controller.signal,
         });
       } catch (err) {
@@ -1146,13 +1268,14 @@ function createAutomationDirectGuardMiddleware(db, foundationOverride) {
   const foundation = foundationOverride || loadFoundationSet();
   return async function dxosAutomationDirectGuard(ctx, next) {
     const resourceName = ctx?.action?.resourceName;
+    const baseResource = String(resourceName || '').split('.')[0];
     const actionName = ctx?.action?.actionName;
     const params = readParams(ctx);
-    const collection = params?.collection || params?.table || params?.collectionName;
+    const collection = String(params?.collection || params?.table || params?.collectionName || '').split('.')[0].trim();
 
-    const isDirectAutomation = AUTOMATION_COLLECTIONS.includes(resourceName);
+    const isDirectAutomation = AUTOMATION_COLLECTIONS.includes(baseResource);
     const isChartOnAutomation =
-      resourceName === 'charts' &&
+      baseResource === 'charts' &&
       actionName === 'queryData' &&
       AUTOMATION_COLLECTIONS.includes(collection);
 
@@ -1161,7 +1284,8 @@ function createAutomationDirectGuardMiddleware(db, foundationOverride) {
     }
 
     const roles = await resolveVerifiedRoles(db, ctx);
-    const isRoot = ctx?.state?.currentUser?.isRoot === true || roles.includes('root');
+    const hasRuRepo = typeof db?.getRepository?.('rolesUsers')?.find === 'function';
+    const isRoot = roles.includes('root') || (!hasRuRepo && ctx?.state?.currentUser?.isRoot === true);
     if (isRoot) {
       return next();
     }
@@ -1169,7 +1293,7 @@ function createAutomationDirectGuardMiddleware(db, foundationOverride) {
     throw fail(
       'AUTOMATION_DIRECT_CRUD_FORBIDDEN',
       403,
-      `Direct access to ${isChartOnAutomation ? collection : resourceName} is restricted; use /api/dxosAutomations:*`,
+      `Direct access to ${isChartOnAutomation ? collection : baseResource} is restricted; use /api/dxosAutomations:*`,
     );
   };
 }
@@ -1212,7 +1336,7 @@ function createDxosAutomationsActions(db, options = {}) {
 
   async function requireOrgRoles(ctx, params, { mutating = false, allowedPatScopes = null } = {}) {
     if (allowedPatScopes) {
-      assertAutomationPatScope(ctx, allowedPatScopes);
+      assertAutomationPatScope(ctx, allowedPatScopes, foundation);
     }
     const requestedOrgId = params.organizationId != null ? String(params.organizationId).trim() : null;
     const { organizationId, actor } = await resolveTenantActor(
@@ -1236,7 +1360,7 @@ function createDxosAutomationsActions(db, options = {}) {
   return {
     async listRules(ctx, next) {
       const params = readParams(ctx);
-      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot']);
+      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
       const repo = db.getRepository('latticeAutomationRules');
       const filter = { organizationId };
@@ -1321,7 +1445,7 @@ function createDxosAutomationsActions(db, options = {}) {
 
     async testRule(ctx, next) {
       const params = readParams(ctx);
-      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot']);
+      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId, actor } = await requireOrgRoles(ctx, params, { mutating: false });
       const repo = db.getRepository('latticeAutomationRules');
 
@@ -1385,7 +1509,7 @@ function createDxosAutomationsActions(db, options = {}) {
 
     async listRuns(ctx, next) {
       const params = readParams(ctx);
-      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot']);
+      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
       const repo = db.getRepository('latticeAutomationRuns');
       const filter = { organizationId };
@@ -1401,7 +1525,7 @@ function createDxosAutomationsActions(db, options = {}) {
 
     async getRunTrace(ctx, next) {
       const params = readParams(ctx);
-      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot']);
+      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
       const repo = db.getRepository('latticeAutomationRuns');
       const runUid = params.runUid ? String(params.runUid).trim() : null;
@@ -1482,6 +1606,9 @@ module.exports = {
   CUSTOM_COLLECTION_RE,
   MAX_HARD_DEPTH,
   RULE_KEY_RE,
+  VALID_ACTION_TYPES,
+  buildConnectorUrl,
+  buildHmacHeaders,
   createAutomationDirectGuardMiddleware,
   createDxosAutomationsActions,
   executeRuleAgainstEvent,

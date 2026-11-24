@@ -9,6 +9,7 @@
 'use strict';
 
 const { createHash, randomBytes } = require('node:crypto');
+const net = require('node:net');
 
 const BUNDLE_SCHEMA_VERSION = 'latticedx.solution-bundle/v3';
 const ACCEPTED_SCHEMA_VERSIONS = new Set([
@@ -1300,6 +1301,205 @@ function validateGovernanceOrg(item, label, index, requiresExplicitOrg, errors) 
   }
 }
 
+const INTERNAL_WEBHOOK_HOST_ALLOWLIST = new Set([
+  'n8n',
+  'orion-ld',
+  'mosquitto',
+  'nodered',
+  'nocobase',
+  'localhost',
+  '127.0.0.1',
+]);
+
+let cachedAutomationEngine = null;
+function getAutomationEngine() {
+  if (!cachedAutomationEngine) {
+    try {
+      cachedAutomationEngine = require('./automation-engine');
+    } catch {
+      cachedAutomationEngine = null;
+    }
+  }
+  return cachedAutomationEngine;
+}
+
+function getConnectorVaultMod() {
+  try {
+    const shared = require('./wms-dmn-shared');
+    return typeof shared?.loadFoundationModule === 'function'
+      ? shared.loadFoundationModule('connector-vault')
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function isBlockedPrivateIpv4(host) {
+  const parts = String(host || '').split('.');
+  if (parts.length !== 4 || !parts.every((p) => /^(?:0|[1-9]\d{0,2})$/.test(p))) return false;
+  const octets = parts.map(Number);
+  if (octets.some((n) => n < 0 || n > 255)) return true;
+  const [a, b] = octets;
+  return (
+    a === 0
+    || a === 10
+    || a === 127
+    || a >= 224
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127)
+  );
+}
+
+function validateSafeWebhookTargetUrl(rawUrl, contextLabel = 'webhookSubscriptions', { env = process.env } = {}) {
+  const trimmed = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!trimmed || trimmed.length > 2048 || /[\u0000-\u001f\u007f\s]/.test(trimmed)) {
+    return `${contextLabel} targetUrl must be a non-empty URL <= 2048 chars`;
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return `${contextLabel} targetUrl is malformed`;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return `${contextLabel} targetUrl protocol "${parsed.protocol}" is forbidden`;
+  }
+  if (parsed.username || parsed.password) {
+    return `${contextLabel} targetUrl must not embed credentials`;
+  }
+  const authorityMatch = trimmed.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i);
+  const authority = authorityMatch ? authorityMatch[1] : '';
+  if (!authority || authority.includes('@') || authority.includes('\\')) {
+    return `${contextLabel} targetUrl authority is invalid`;
+  }
+  const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!bare) {
+    return `${contextLabel} targetUrl hostname is empty`;
+  }
+  if (
+    /^\d+$/.test(bare)
+    || /^0x[0-9a-f]+$/i.test(bare)
+    || (bare.split('.').length <= 4 && bare.split('.').every((p) => /^(?:0x[0-9a-f]+|0[0-7]*|[1-9]\d*)$/i.test(p))
+      && (bare.split('.').length !== 4 || bare.split('.').some((p) => /^0x/i.test(p) || (p.length > 1 && p.startsWith('0')))))
+  ) {
+    return `${contextLabel} targetUrl non-canonical numeric host "${bare}" is blocked`;
+  }
+  if (
+    bare === 'metadata.google.internal'
+    || bare.endsWith('.metadata.google.internal')
+    || bare === 'metadata.azure.com'
+    || bare.endsWith('.metadata.azure.com')
+    || bare === 'metadata.aws.internal'
+    || bare === 'instance-data'
+    || bare === 'fd00:ec2::254'
+    || bare.startsWith('169.254.')
+  ) {
+    return `${contextLabel} targetUrl metadata host "${bare}" is blocked by SSRF policy`;
+  }
+
+  const extraAllowlist = String(env?.DX_CONNECTOR_INTERNAL_ALLOWLIST || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  const inInternalAllowlist = INTERNAL_WEBHOOK_HOST_ALLOWLIST.has(bare) || extraAllowlist.includes(bare);
+  const explicitInternal = String(env?.DX_ALLOW_INTERNAL_CONNECTORS || '').trim().toLowerCase();
+  const isProd = String(env?.NODE_ENV || '').trim().toLowerCase() === 'production';
+  const allowInternal = explicitInternal === 'true' || (explicitInternal !== 'false' && !isProd);
+
+  if (parsed.protocol === 'http:' && !(allowInternal && inInternalAllowlist)) {
+    return `${contextLabel} targetUrl must use https:// (plain http:// is blocked for "${bare}")`;
+  }
+
+  const vaultMod = getConnectorVaultMod();
+  if (typeof vaultMod?.assertSafeConnectorUrl === 'function') {
+    try {
+      vaultMod.assertSafeConnectorUrl(trimmed, { connectorType: 'http_api', env });
+    } catch (err) {
+      return `${contextLabel} targetUrl rejected: ${err?.message || 'SSRF policy violation'}`;
+    }
+  } else if (!(allowInternal && inInternalAllowlist)) {
+    if (bare === 'localhost' || bare.endsWith('.localhost') || bare.endsWith('.local') || bare.endsWith('.internal')) {
+      return `${contextLabel} targetUrl internal host "${bare}" is blocked by SSRF policy`;
+    }
+    if (net.isIPv4(bare) && isBlockedPrivateIpv4(bare)) {
+      return `${contextLabel} targetUrl private IPv4 "${bare}" is blocked by SSRF policy`;
+    }
+    if (bare.includes(':')) {
+      const lower = bare.toLowerCase();
+      if (lower === '::1' || lower === '::' || lower.startsWith('fe80:') || lower.startsWith('fc') || lower.startsWith('fd') || lower.includes('ffff:')) {
+        return `${contextLabel} targetUrl internal/private IPv6 "${bare}" is blocked by SSRF policy`;
+      }
+    }
+    if (!bare.includes('.') && !bare.includes(':')) {
+      return `${contextLabel} targetUrl non-allowlisted host "${bare}" is blocked by SSRF policy`;
+    }
+  }
+  return null;
+}
+
+function validateAutomationRuleEntry(a, index, errors) {
+  const ruleKey = String(a.ruleKey || '').trim();
+  if (!/^[a-z0-9][a-z0-9_-]{1,62}$/.test(ruleKey)) {
+    errors.push(`Invalid automation ruleKey "${ruleKey || '(empty)'}" at automationRules[${index}]`);
+  }
+  if (!String(a.name || '').trim()) {
+    errors.push(`Automation rule "${ruleKey || index}" requires a name`);
+  }
+  const engine = getAutomationEngine();
+  if (a.filterJson !== undefined && a.filterJson !== null) {
+    if (typeof a.filterJson !== 'object' || Array.isArray(a.filterJson)) {
+      errors.push(`Automation filterJson must be an object at automationRules[${index}]`);
+    } else if (engine?.hasUnsafeTemplateSyntax?.(a.filterJson)) {
+      errors.push(`Automation filterJson contains unsafe template syntax at automationRules[${index}]`);
+    }
+  }
+  if (a.actionsJson !== undefined) {
+    if (!Array.isArray(a.actionsJson)) {
+      errors.push(`Automation actionsJson must be an array at automationRules[${index}]`);
+    } else {
+      for (let j = 0; j < a.actionsJson.length; j += 1) {
+        const act = a.actionsJson[j];
+        if (!act || typeof act !== 'object' || Array.isArray(act)) {
+          errors.push(`Automation actionsJson[${j}] must be an object at automationRules[${index}]`);
+          continue;
+        }
+        const actType = String(act.type || '').trim();
+        if (!engine?.VALID_ACTION_TYPES?.has(actType)) {
+          errors.push(`Invalid automation action type "${actType || '(empty)'}" at automationRules[${index}].actionsJson[${j}]`);
+        }
+        if (engine?.hasUnsafeTemplateSyntax?.(act)) {
+          errors.push(`Unsafe template syntax in automationRules[${index}].actionsJson[${j}]`);
+        }
+        if (actType === 'create_record' || actType === 'update_record') {
+          const targetCollection = String(act.collection || act.targetCollection || '').trim();
+          if (!engine?.isAllowlistedTargetCollection?.(targetCollection)) {
+            errors.push(`Forbidden target collection "${targetCollection || '(empty)'}" at automationRules[${index}].actionsJson[${j}]`);
+          }
+        }
+        if (actType === 'call_connector') {
+          const connKey = String(act.connectorKey || act.connector || '').trim();
+          if (!connKey) {
+            errors.push(`call_connector requires connectorKey at automationRules[${index}].actionsJson[${j}]`);
+          }
+          const rawOverride = String(act.url || act.path || '').trim();
+          if (/^(?:[a-zA-Z][a-zA-Z0-9+.-]*:|\/\/)/.test(rawOverride)) {
+            errors.push(`call_connector cannot override origin/scheme at automationRules[${index}].actionsJson[${j}]`);
+          }
+        }
+      }
+    }
+  }
+  if (a.maxDepth !== undefined && parseStrictIntInRange(a.maxDepth, 1, 8) === null) {
+    errors.push(`Invalid maxDepth "${String(a.maxDepth)}" at automationRules[${index}]`);
+  }
+  if (a.cooldownSec !== undefined && parseStrictIntInRange(a.cooldownSec, 0, 31_536_000) === null) {
+    errors.push(`Invalid cooldownSec "${String(a.cooldownSec)}" at automationRules[${index}]`);
+  }
+  validateNoUnsafeCodeOrXss(a, `governance.automationRules[${index}]`, errors);
+}
+
 function validateGovernanceSection(governance, errors, metaOrgRaw = '') {
   if (!governance || typeof governance !== 'object' || Array.isArray(governance)) {
     errors.push('governance must be an object');
@@ -1428,23 +1628,7 @@ function validateGovernanceSection(governance, errors, metaOrgRaw = '') {
           continue;
         }
         validateGovernanceOrg(a, 'automationRules', i, requiresExplicitOrg, errors);
-        const ruleKey = String(a.ruleKey || '').trim();
-        if (!/^[a-z0-9][a-z0-9_-]{1,62}$/.test(ruleKey)) {
-          errors.push(`Invalid automation ruleKey "${ruleKey || '(empty)'}" at automationRules[${i}]`);
-        }
-        if (!String(a.name || '').trim()) {
-          errors.push(`Automation rule "${ruleKey || i}" requires a name`);
-        }
-        if (a.actionsJson !== undefined && !Array.isArray(a.actionsJson)) {
-          errors.push(`Automation actionsJson must be an array at automationRules[${i}]`);
-        }
-        if (a.maxDepth !== undefined && parseStrictIntInRange(a.maxDepth, 1, 8) === null) {
-          errors.push(`Invalid maxDepth "${String(a.maxDepth)}" at automationRules[${i}]`);
-        }
-        if (a.cooldownSec !== undefined && parseStrictIntInRange(a.cooldownSec, 0, 31_536_000) === null) {
-          errors.push(`Invalid cooldownSec "${String(a.cooldownSec)}" at automationRules[${i}]`);
-        }
-        validateNoUnsafeCodeOrXss(a, `governance.automationRules[${i}]`, errors);
+        validateAutomationRuleEntry(a, i, errors);
       }
     }
   }
@@ -1465,8 +1649,9 @@ function validateGovernanceSection(governance, errors, metaOrgRaw = '') {
           errors.push(`Webhook subscription requires subscriptionKey at webhookSubscriptions[${i}]`);
         }
         const targetUrl = String(w.targetUrl || '').trim();
-        if (!/^https?:\/\/\S+$/i.test(targetUrl)) {
-          errors.push(`Webhook subscription requires valid http(s) targetUrl at webhookSubscriptions[${i}]`);
+        const urlErr = validateSafeWebhookTargetUrl(targetUrl, `webhookSubscriptions[${i}]`);
+        if (urlErr) {
+          errors.push(urlErr);
         }
         if (w.encryptedSigningSecret || w.signingSecret) {
           errors.push(`Webhook subscription must not contain signing secret at webhookSubscriptions[${i}]`);
@@ -2729,7 +2914,16 @@ async function applyGovernanceSection(db, governance, targetOrg, { reconcileDele
   const autoRepo = db?.getRepository?.('latticeAutomationRules');
   const autoList = Array.isArray(governance.automationRules) ? governance.automationRules : [];
   const keepAutoKeys = new Set();
-  for (const rawAuto of autoList) {
+  for (let i = 0; i < autoList.length; i += 1) {
+    const rawAuto = autoList[i];
+    const applyErrors = [];
+    if (!rawAuto || typeof rawAuto !== 'object' || Array.isArray(rawAuto)) {
+      throw failBundle('INVALID_SOLUTION_BUNDLE', 400, `governance.automationRules[${i}] must be an object`);
+    }
+    validateAutomationRuleEntry(rawAuto, i, applyErrors);
+    if (applyErrors.length > 0) {
+      throw failBundle('INVALID_SOLUTION_BUNDLE', 400, applyErrors.join('; '));
+    }
     const clean = stripSecretsDeep(rawAuto);
     const ruleKey = String(clean?.ruleKey || '').trim();
     const rawItemOrg = clean?.organizationId != null ? String(clean.organizationId).trim() : '';
@@ -2776,7 +2970,15 @@ async function applyGovernanceSection(db, governance, targetOrg, { reconcileDele
   const webhookRepo = db?.getRepository?.('latticeWebhookSubscriptions');
   const webhookList = Array.isArray(governance.webhookSubscriptions) ? governance.webhookSubscriptions : [];
   const keepWebhookKeys = new Set();
-  for (const rawHook of webhookList) {
+  for (let i = 0; i < webhookList.length; i += 1) {
+    const rawHook = webhookList[i];
+    if (!rawHook || typeof rawHook !== 'object' || Array.isArray(rawHook)) {
+      throw failBundle('INVALID_SOLUTION_BUNDLE', 400, `governance.webhookSubscriptions[${i}] must be an object`);
+    }
+    const urlErr = validateSafeWebhookTargetUrl(rawHook.targetUrl, `webhookSubscriptions[${i}]`);
+    if (urlErr) {
+      throw failBundle('INVALID_SOLUTION_BUNDLE', 400, urlErr);
+    }
     const clean = stripSecretsDeep(rawHook);
     const subscriptionKey = String(clean?.subscriptionKey || '').trim();
     const rawItemOrg = clean?.organizationId != null ? String(clean.organizationId).trim() : '';
@@ -3058,9 +3260,11 @@ module.exports = {
   ACCEPTED_SCHEMA_VERSIONS,
   RESERVED_SYSTEM_LAYOUT_UIDS,
   SYSTEM_PROTECTED_COLLECTIONS,
+  applyGovernanceSection,
   getRouteKey,
   sortRoutesTopologically,
   stripSecretsDeep,
+  validateSafeWebhookTargetUrl,
   exportSolutionBundle,
   validateSolutionBundle,
   diffSolutionBundle,

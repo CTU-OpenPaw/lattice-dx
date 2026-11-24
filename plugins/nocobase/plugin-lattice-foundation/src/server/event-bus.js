@@ -18,9 +18,11 @@ const { val, getRepo, callerRoles } = require('./native-portal-helpers');
 const { assertApiKeyScope, readParams } = require('./paas-api-keys');
 const {
   assertSafeConnectorUrl,
+  assertSafeConnectorUrlAsync,
   buildConnectorAuthHeaders,
   decryptSecretText,
   encryptSecretText,
+  resolveAllowInternalConnectorHosts,
   resolveConnectorSecrets,
 } = require('./connector-vault');
 
@@ -52,11 +54,21 @@ function normalizeRawBody(body) {
   return JSON.stringify(body ?? {});
 }
 
+function decodeSigningSecret(secret) {
+  if (Buffer.isBuffer(secret)) return secret;
+  const raw = String(secret ?? '');
+  if (raw.startsWith('whsec_')) {
+    return Buffer.from(raw.slice(6), 'base64');
+  }
+  return Buffer.from(raw, 'utf8');
+}
+
 function signStandardWebhookPayload({ webhookId, timestamp, body, secret }) {
   const cleanId = String(webhookId || '').trim();
   const tsStr = String(timestamp ?? Math.floor(Date.now() / 1000)).trim();
   const rawBody = normalizeRawBody(body);
-  const mac = createHmac('sha256', Buffer.from(String(secret || ''), 'utf8'))
+  const keyBuf = decodeSigningSecret(secret);
+  const mac = createHmac('sha256', keyBuf)
     .update(`${cleanId}.${tsStr}.${rawBody}`, 'utf8')
     .digest('base64');
   return `v1,${mac}`;
@@ -74,13 +86,18 @@ function verifyStandardWebhookSignature({
   if (
     typeof webhookId !== 'string'
     || !webhookId.trim()
-    || typeof secret !== 'string'
+    || (typeof secret !== 'string' && !Buffer.isBuffer(secret))
     || !secret
     || typeof signature !== 'string'
     || !signature.trim()
     || body === undefined
     || body === null
   ) {
+    return false;
+  }
+
+  const keyBuf = decodeSigningSecret(secret);
+  if (!keyBuf.length) {
     return false;
   }
 
@@ -98,7 +115,7 @@ function verifyStandardWebhookSignature({
   }
 
   const rawBody = normalizeRawBody(body);
-  const expectedBuf = createHmac('sha256', Buffer.from(secret, 'utf8'))
+  const expectedBuf = createHmac('sha256', keyBuf)
     .update(`${webhookId.trim()}.${tsStr}.${rawBody}`, 'utf8')
     .digest();
 
@@ -552,6 +569,215 @@ async function claimDueDeliveries(db, {
   return due;
 }
 
+async function dispatchOneDelivery(
+  db,
+  delivery,
+  {
+    subRepo,
+    delRepo,
+    safeNowMs = Date.now(),
+    nowDate = new Date(safeNowMs),
+    fetchImpl = globalThis.fetch,
+    env = process.env,
+    allowInternal,
+    lookupImpl,
+    enforceDnsInMock = false,
+    randomFn = Math.random,
+  } = {},
+) {
+  const effectiveSubRepo = subRepo || getRepo(db, 'latticeWebhookSubscriptions');
+  const effectiveDelRepo = delRepo || getRepo(db, 'latticeWebhookDeliveries');
+  const delId = val(delivery, 'id');
+  const delOrg = val(delivery, 'organizationId');
+  const eventId = val(delivery, 'eventId');
+  const subId = Number(val(delivery, 'subscriptionId'));
+
+  const sub = effectiveSubRepo && typeof effectiveSubRepo.findOne === 'function'
+    ? await effectiveSubRepo.findOne({ filter: { id: subId, organizationId: delOrg } })
+    : null;
+
+  if (!sub || val(sub, 'organizationId') !== delOrg || val(sub, 'active') === false) {
+    await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
+      status: 'dlq',
+      lastError: 'Webhook subscription missing or inactive',
+      lockedAt: null,
+      lockedBy: null,
+      nextAttemptAt: null,
+    });
+    await syncParentEventStatus(db, delOrg, eventId);
+    return { outcome: 'dlq', processed: true, result: { id: delId, eventId, status: 'dlq', reason: 'SUBSCRIPTION_INACTIVE' } };
+  }
+
+  const circuitState = val(sub, 'circuitState') || 'closed';
+  const openUntilRaw = val(sub, 'circuitOpenUntil');
+  const openUntilMs = openUntilRaw ? new Date(openUntilRaw).getTime() : 0;
+
+  if (circuitState === 'open') {
+    if (Number.isFinite(openUntilMs) && openUntilMs > safeNowMs) {
+      await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
+        status: Number(val(delivery, 'attempt')) > 0 ? 'retry_wait' : 'pending',
+        nextAttemptAt: new Date(openUntilMs),
+        lockedAt: null,
+        lockedBy: null,
+      });
+      return {
+        outcome: 'skipped_circuit',
+        processed: false,
+        result: { id: delId, eventId, status: 'skipped_circuit', circuitOpenUntil: new Date(openUntilMs).toISOString() },
+      };
+    }
+    await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
+      circuitState: 'half_open',
+    });
+  }
+
+  const wasHalfOpen = circuitState === 'half_open' || (circuitState === 'open' && (!Number.isFinite(openUntilMs) || safeNowMs >= openUntilMs));
+  const currentAttempt = Number(val(delivery, 'attempt')) || 0;
+  const maxAttempts = Math.max(1, Number(val(delivery, 'maxAttempts')) || DEFAULT_MAX_ATTEMPTS);
+  const nextAttempt = currentAttempt + 1;
+
+  let httpStatus = null;
+  let errorMessage = null;
+  let ok = false;
+
+  try {
+    const isMockTransport = fetchImpl !== globalThis.fetch;
+    const skipDnsCheck = isMockTransport && typeof lookupImpl !== 'function' && !enforceDnsInMock;
+    const targetUrl = await assertSafeConnectorUrlAsync(val(sub, 'targetUrl'), {
+      connectorType: 'webhook',
+      env,
+      allowInternal,
+      lookupImpl,
+      skipDnsCheck,
+    });
+    if (typeof fetchImpl !== 'function') {
+      throw new Error('HTTP fetch implementation unavailable');
+    }
+    const rawBody = JSON.stringify(val(delivery, 'payloadSnapshotJson') || {});
+    const webhookId = `msg_${eventId}_${delId ?? nextAttempt}`;
+    const timestampSec = String(Math.floor(safeNowMs / 1000));
+
+    let extraHeaders = {};
+    const connectorId = val(sub, 'connectorId');
+    if (connectorId != null) {
+      try {
+        const resolved = await resolveConnectorSecrets(db, delOrg, connectorId, { env });
+        extraHeaders = buildConnectorAuthHeaders(resolved.connector.authType, resolved.secrets);
+      } catch {
+        // Proceed without connector override if connector was removed/inactive
+      }
+    }
+
+    const headers = {
+      ...extraHeaders,
+      'Content-Type': 'application/json',
+      'webhook-id': webhookId,
+      'webhook-timestamp': timestampSec,
+      'ce-id': String(eventId),
+      'ce-type': String(val(delivery, 'eventType') || ''),
+      'ce-specversion': '1.0',
+    };
+
+    const encSecret = val(sub, 'encryptedSigningSecret');
+    if (encSecret && String(encSecret).trim()) {
+      const signingSecret = decryptSecretText(encSecret, env);
+      headers['webhook-signature'] = signStandardWebhookPayload({
+        webhookId,
+        timestamp: timestampSec,
+        body: rawBody,
+        secret: signingSecret,
+      });
+    }
+
+    const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+      ? AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)
+      : undefined;
+    const response = await fetchImpl(targetUrl, {
+      method: 'POST',
+      redirect: 'error',
+      headers,
+      body: rawBody,
+      ...(signal ? { signal } : {}),
+    });
+    try { await response?.body?.cancel?.(); } catch {}
+
+    httpStatus = Number(response?.status) || null;
+    if (httpStatus != null && httpStatus >= 200 && httpStatus < 300) {
+      ok = true;
+    } else {
+      errorMessage = `Webhook endpoint returned HTTP ${httpStatus || 'unknown'}`;
+    }
+  } catch (err) {
+    errorMessage = String(err?.message || 'Webhook delivery failed').slice(0, 1000);
+  }
+
+  if (ok) {
+    await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
+      attempt: nextAttempt,
+      status: 'delivered',
+      httpStatus,
+      lastError: null,
+      lockedAt: null,
+      lockedBy: null,
+      nextAttemptAt: null,
+      deliveredAt: nowDate,
+    });
+    await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
+      failureCount: 0,
+      circuitState: 'closed',
+      circuitOpenUntil: null,
+      lastError: null,
+    });
+    await syncParentEventStatus(db, delOrg, eventId);
+    return {
+      outcome: 'delivered',
+      processed: true,
+      result: { id: delId, eventId, status: 'delivered', httpStatus, attempt: nextAttempt },
+    };
+  }
+
+  const isDlq = nextAttempt >= maxAttempts;
+  const nextStatus = isDlq ? 'dlq' : 'retry_wait';
+  const backoffMs = isDlq ? 0 : computeWebhookBackoffMs(nextAttempt, { randomFn });
+  const nextAttemptAt = isDlq ? null : new Date(safeNowMs + backoffMs);
+
+  await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
+    attempt: nextAttempt,
+    status: nextStatus,
+    httpStatus,
+    lastError: errorMessage,
+    lockedAt: null,
+    lockedBy: null,
+    nextAttemptAt,
+  });
+
+  const nextFailures = (Number(val(sub, 'failureCount')) || 0) + 1;
+  const shouldOpen = wasHalfOpen || nextFailures >= CIRCUIT_FAILURE_THRESHOLD;
+  const nextCircuitState = shouldOpen ? 'open' : 'closed';
+  const nextOpenUntil = shouldOpen ? new Date(safeNowMs + CIRCUIT_COOLDOWN_MS) : null;
+  await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
+    failureCount: nextFailures,
+    circuitState: nextCircuitState,
+    circuitOpenUntil: nextOpenUntil,
+    lastError: errorMessage,
+  });
+
+  await syncParentEventStatus(db, delOrg, eventId);
+  return {
+    outcome: nextStatus,
+    processed: true,
+    result: {
+      id: delId,
+      eventId,
+      status: nextStatus,
+      httpStatus,
+      attempt: nextAttempt,
+      circuitState: nextCircuitState,
+      nextAttemptAt: nextAttemptAt ? nextAttemptAt.toISOString() : null,
+    },
+  };
+}
+
 async function dispatchDueWebhookDeliveries(
   db,
   {
@@ -560,6 +786,9 @@ async function dispatchDueWebhookDeliveries(
     now = new Date(),
     fetchImpl = globalThis.fetch,
     env = process.env,
+    allowInternal,
+    lookupImpl,
+    enforceDnsInMock = false,
     workerId = 'dxos-event-bus',
     staleLockMs = 120_000,
     randomFn = Math.random,
@@ -598,184 +827,24 @@ async function dispatchDueWebhookDeliveries(
   const results = [];
 
   for (const delivery of claimed) {
-    const delId = val(delivery, 'id');
-    const delOrg = val(delivery, 'organizationId');
-    const eventId = val(delivery, 'eventId');
-    const subId = Number(val(delivery, 'subscriptionId'));
-
-    const sub = typeof subRepo.findOne === 'function'
-      ? await subRepo.findOne({ filter: { id: subId, organizationId: delOrg } })
-      : null;
-
-    if (!sub || val(sub, 'organizationId') !== delOrg || val(sub, 'active') === false) {
-      await updateRowCompat(delRepo, delivery, { id: delId, organizationId: delOrg }, {
-        status: 'dlq',
-        lastError: 'Webhook subscription missing or inactive',
-        lockedAt: null,
-        lockedBy: null,
-        nextAttemptAt: null,
-      });
-      await syncParentEventStatus(db, delOrg, eventId);
-      dlqCount += 1;
-      processedCount += 1;
-      results.push({ id: delId, eventId, status: 'dlq', reason: 'SUBSCRIPTION_INACTIVE' });
-      continue;
-    }
-
-    const circuitState = val(sub, 'circuitState') || 'closed';
-    const openUntilRaw = val(sub, 'circuitOpenUntil');
-    const openUntilMs = openUntilRaw ? new Date(openUntilRaw).getTime() : 0;
-
-    if (circuitState === 'open') {
-      if (Number.isFinite(openUntilMs) && openUntilMs > safeNowMs) {
-        await updateRowCompat(delRepo, delivery, { id: delId, organizationId: delOrg }, {
-          status: Number(val(delivery, 'attempt')) > 0 ? 'retry_wait' : 'pending',
-          nextAttemptAt: new Date(openUntilMs),
-          lockedAt: null,
-          lockedBy: null,
-        });
-        skippedCircuitCount += 1;
-        results.push({ id: delId, eventId, status: 'skipped_circuit', circuitOpenUntil: new Date(openUntilMs).toISOString() });
-        continue;
-      }
-      await updateRowCompat(subRepo, sub, { id: subId, organizationId: delOrg }, {
-        circuitState: 'half_open',
-      });
-    }
-
-    const wasHalfOpen = circuitState === 'half_open' || (circuitState === 'open' && (!Number.isFinite(openUntilMs) || safeNowMs >= openUntilMs));
-    const currentAttempt = Number(val(delivery, 'attempt')) || 0;
-    const maxAttempts = Math.max(1, Number(val(delivery, 'maxAttempts')) || DEFAULT_MAX_ATTEMPTS);
-    const nextAttempt = currentAttempt + 1;
-
-    let httpStatus = null;
-    let errorMessage = null;
-    let ok = false;
-
-    try {
-      const targetUrl = assertSafeConnectorUrl(val(sub, 'targetUrl'), { connectorType: 'webhook', env });
-      if (typeof fetchImpl !== 'function') {
-        throw new Error('HTTP fetch implementation unavailable');
-      }
-      const rawBody = JSON.stringify(val(delivery, 'payloadSnapshotJson') || {});
-      const webhookId = `msg_${eventId}_${delId ?? nextAttempt}`;
-      const timestampSec = String(Math.floor(safeNowMs / 1000));
-
-      let extraHeaders = {};
-      const connectorId = val(sub, 'connectorId');
-      if (connectorId != null) {
-        try {
-          const resolved = await resolveConnectorSecrets(db, delOrg, connectorId, { env });
-          extraHeaders = buildConnectorAuthHeaders(resolved.connector.authType, resolved.secrets);
-        } catch {
-          // Proceed without connector override if connector was removed/inactive
-        }
-      }
-
-      const headers = {
-        ...extraHeaders,
-        'Content-Type': 'application/json',
-        'webhook-id': webhookId,
-        'webhook-timestamp': timestampSec,
-        'ce-id': String(eventId),
-        'ce-type': String(val(delivery, 'eventType') || ''),
-        'ce-specversion': '1.0',
-      };
-
-      const encSecret = val(sub, 'encryptedSigningSecret');
-      if (encSecret && String(encSecret).trim()) {
-        const signingSecret = decryptSecretText(encSecret, env);
-        headers['webhook-signature'] = signStandardWebhookPayload({
-          webhookId,
-          timestamp: timestampSec,
-          body: rawBody,
-          secret: signingSecret,
-        });
-      }
-
-      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-        ? AbortSignal.timeout(WEBHOOK_TIMEOUT_MS)
-        : undefined;
-      const response = await fetchImpl(targetUrl, {
-        method: 'POST',
-        redirect: 'error',
-        headers,
-        body: rawBody,
-        ...(signal ? { signal } : {}),
-      });
-      try { await response?.body?.cancel?.(); } catch {}
-
-      httpStatus = Number(response?.status) || null;
-      if (httpStatus != null && httpStatus >= 200 && httpStatus < 300) {
-        ok = true;
-      } else {
-        errorMessage = `Webhook endpoint returned HTTP ${httpStatus || 'unknown'}`;
-      }
-    } catch (err) {
-      errorMessage = String(err?.message || 'Webhook delivery failed').slice(0, 1000);
-    }
-
-    processedCount += 1;
-    if (ok) {
-      await updateRowCompat(delRepo, delivery, { id: delId, organizationId: delOrg }, {
-        attempt: nextAttempt,
-        status: 'delivered',
-        httpStatus,
-        lastError: null,
-        lockedAt: null,
-        lockedBy: null,
-        nextAttemptAt: null,
-        deliveredAt: nowDate,
-      });
-      await updateRowCompat(subRepo, sub, { id: subId, organizationId: delOrg }, {
-        failureCount: 0,
-        circuitState: 'closed',
-        circuitOpenUntil: null,
-        lastError: null,
-      });
-      await syncParentEventStatus(db, delOrg, eventId);
-      deliveredCount += 1;
-      results.push({ id: delId, eventId, status: 'delivered', httpStatus, attempt: nextAttempt });
-    } else {
-      const isDlq = nextAttempt >= maxAttempts;
-      const nextStatus = isDlq ? 'dlq' : 'retry_wait';
-      const backoffMs = isDlq ? 0 : computeWebhookBackoffMs(nextAttempt, { randomFn });
-      const nextAttemptAt = isDlq ? null : new Date(safeNowMs + backoffMs);
-
-      await updateRowCompat(delRepo, delivery, { id: delId, organizationId: delOrg }, {
-        attempt: nextAttempt,
-        status: nextStatus,
-        httpStatus,
-        lastError: errorMessage,
-        lockedAt: null,
-        lockedBy: null,
-        nextAttemptAt,
-      });
-
-      const nextFailures = (Number(val(sub, 'failureCount')) || 0) + 1;
-      const shouldOpen = wasHalfOpen || nextFailures >= CIRCUIT_FAILURE_THRESHOLD;
-      const nextCircuitState = shouldOpen ? 'open' : 'closed';
-      const nextOpenUntil = shouldOpen ? new Date(safeNowMs + CIRCUIT_COOLDOWN_MS) : null;
-      await updateRowCompat(subRepo, sub, { id: subId, organizationId: delOrg }, {
-        failureCount: nextFailures,
-        circuitState: nextCircuitState,
-        circuitOpenUntil: nextOpenUntil,
-        lastError: errorMessage,
-      });
-
-      await syncParentEventStatus(db, delOrg, eventId);
-      if (isDlq) dlqCount += 1;
-      else retryWaitCount += 1;
-      results.push({
-        id: delId,
-        eventId,
-        status: nextStatus,
-        httpStatus,
-        attempt: nextAttempt,
-        circuitState: nextCircuitState,
-        nextAttemptAt: nextAttemptAt ? nextAttemptAt.toISOString() : null,
-      });
-    }
+    const step = await dispatchOneDelivery(db, delivery, {
+      subRepo,
+      delRepo,
+      safeNowMs,
+      nowDate,
+      fetchImpl,
+      env,
+      allowInternal,
+      lookupImpl,
+      enforceDnsInMock,
+      randomFn,
+    });
+    if (step.processed) processedCount += 1;
+    if (step.outcome === 'delivered') deliveredCount += 1;
+    else if (step.outcome === 'retry_wait') retryWaitCount += 1;
+    else if (step.outcome === 'dlq') dlqCount += 1;
+    else if (step.outcome === 'skipped_circuit') skippedCircuitCount += 1;
+    results.push(step.result);
   }
 
   return {
@@ -902,7 +971,7 @@ function registerEventBusDirectGuard(app) {
   }, { tag: 'latticeEventBusDirectGuard', after: 'acl' });
 }
 
-function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch, startDrainer = true } = {}) {
+function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch, lookupImpl, enforceDnsInMock = false, startDrainer = true } = {}) {
   const db = app.db;
   registerEventBusDirectGuard(app);
 
@@ -911,8 +980,12 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
     actions: {
       listEvents: async (ctx, next) => {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
+        assertApiKeyScope(ctx, ['read', 'write']);
         const params = readParams(ctx);
         const scope = await resolveEventsCaller(db, ctx, params.organizationId, { requireOrg: false });
+        if (!scope.isAdmin) {
+          throw failEvent('EVENTS_ADMIN_REQUIRED', 403, 'Administrator role is required to list domain events.');
+        }
         const repo = getRepo(db, 'latticeEventBus');
         const page = Math.max(1, Math.min(10000, Math.floor(Number(params.page) || 1)));
         const pageSize = Math.max(1, Math.min(200, Math.floor(Number(params.pageSize ?? params.limit) || 20)));
@@ -980,8 +1053,12 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
 
       listSubscriptions: async (ctx, next) => {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
+        assertApiKeyScope(ctx, ['read', 'write']);
         const params = readParams(ctx);
         const scope = await resolveEventsCaller(db, ctx, params.organizationId, { requireOrg: false });
+        if (!scope.isAdmin) {
+          throw failEvent('EVENTS_ADMIN_REQUIRED', 403, 'Administrator role is required to list webhook subscriptions.');
+        }
         const repo = getRepo(db, 'latticeWebhookSubscriptions');
         if (!repo || typeof repo.find !== 'function') {
           ctx.body = { organizationId: scope.organizationId, items: [] };
@@ -1027,7 +1104,8 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
         if (!name || name.length > 120) {
           throw failEvent('SUBSCRIPTION_NAME_REQUIRED', 400, 'Subscription name is required (1..120 chars).');
         }
-        const targetUrl = assertSafeConnectorUrl(params.targetUrl, { connectorType: 'webhook', env });
+        const allowInternal = resolveAllowInternalConnectorHosts({ isRoot: scope.isRoot, env });
+        const targetUrl = assertSafeConnectorUrl(params.targetUrl, { connectorType: 'webhook', env, allowInternal });
         const eventPattern = typeof params.eventPattern === 'string' && params.eventPattern.trim()
           ? params.eventPattern.trim().slice(0, 255)
           : '*';
@@ -1132,8 +1210,12 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
 
       listDeliveries: async (ctx, next) => {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
+        assertApiKeyScope(ctx, ['read', 'write']);
         const params = readParams(ctx);
         const scope = await resolveEventsCaller(db, ctx, params.organizationId, { requireOrg: false });
+        if (!scope.isAdmin) {
+          throw failEvent('EVENTS_ADMIN_REQUIRED', 403, 'Administrator role is required to list webhook deliveries.');
+        }
         const repo = getRepo(db, 'latticeWebhookDeliveries');
         const page = Math.max(1, Math.min(10000, Math.floor(Number(params.page) || 1)));
         const pageSize = Math.max(1, Math.min(200, Math.floor(Number(params.pageSize ?? params.limit) || 20)));
@@ -1176,11 +1258,15 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
         if (!scope.isAdmin) {
           throw failEvent('EVENTS_ADMIN_REQUIRED', 403, 'Administrator role is required to dispatch webhook deliveries.');
         }
+        const allowInternal = resolveAllowInternalConnectorHosts({ isRoot: scope.isRoot, env });
         ctx.body = await dispatchDueWebhookDeliveries(db, {
           organizationId: scope.organizationId,
           batchSize: Math.max(1, Math.min(100, Number(params.batchSize) || 20)),
           fetchImpl,
           env,
+          allowInternal,
+          lookupImpl,
+          enforceDnsInMock,
         });
         if (next) return next();
       },
@@ -1303,7 +1389,7 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
     timer = setInterval(() => {
       if (inFlight) return;
       inFlight = true;
-      dispatchDueWebhookDeliveries(db, { fetchImpl, env })
+      dispatchDueWebhookDeliveries(db, { fetchImpl, env, lookupImpl, enforceDnsInMock })
         .catch(() => {
           // Non-fatal if migrations are still running during startup
         })
@@ -1323,9 +1409,13 @@ function registerEventBus(app, { env = process.env, fetchImpl = globalThis.fetch
       return publishDomainEvent(db, { app, ...(maybeOpts || {}), ...(event || {}) });
     },
     registerEventBusListener,
+    decodeSigningSecret,
     verifyStandardWebhookSignature,
     signStandardWebhookPayload,
-    dispatchDueWebhookDeliveries: (opts = {}) => dispatchDueWebhookDeliveries(db, { fetchImpl, env, ...opts }),
+    dispatchOneDelivery: (delivery, opts = {}) =>
+      dispatchOneDelivery(db, delivery, { fetchImpl, env, lookupImpl, enforceDnsInMock, ...opts }),
+    dispatchDueWebhookDeliveries: (opts = {}) =>
+      dispatchDueWebhookDeliveries(db, { fetchImpl, env, lookupImpl, enforceDnsInMock, ...opts }),
     stopDrainer,
   };
 }
@@ -1335,6 +1425,7 @@ module.exports = {
   CIRCUIT_COOLDOWN_MS,
   WEBHOOK_TIMEOUT_MS,
   DRAINER_INTERVAL_MS,
+  decodeSigningSecret,
   signStandardWebhookPayload,
   verifyStandardWebhookSignature,
   registerEventBusListener,
@@ -1342,6 +1433,7 @@ module.exports = {
   computeWebhookBackoffMs,
   publishDomainEvent,
   claimDueDeliveries,
+  dispatchOneDelivery,
   dispatchDueWebhookDeliveries,
   registerEventBus,
 };

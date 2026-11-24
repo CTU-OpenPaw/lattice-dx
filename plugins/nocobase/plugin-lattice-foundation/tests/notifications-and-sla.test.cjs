@@ -246,7 +246,7 @@ test('dispatchNotification validates tenant/recipient, writes row, and deduplica
 });
 
 test('dispatchNotification validates external webhook/apprise/telegram URLs against SSRF and degrades non-fatally', async () => {
-  const { dispatchNotification, isSafeExternalWebhookUrl } = require('../src/server/notification-center');
+  const { dispatchNotification, isSafeExternalWebhookUrl, isSafeExternalWebhookUrlAsync } = require('../src/server/notification-center');
 
   // SSRF-unsafe URLs rejected
   for (const unsafe of [
@@ -257,10 +257,22 @@ test('dispatchNotification validates external webhook/apprise/telegram URLs agai
     'http://[fd00:ec2::254]/latest/meta-data',
     'http://[fe80::1]/hook',
     'http://[::ffff:169.254.169.254]/hook',
+    'http://[::ffff:127.0.0.1]/hook',
+    'http://[0:0:0:0:0:ffff:169.254.169.254]/hook',
+    'http://[::169.254.169.254]/hook',
+    'http://2130706433/hook',
+    'http://0x7f000001/hook',
+    'http://0177.0.0.1/hook',
+    'http://127.1/hook',
+    'http://redis:6379/',
+    'http://postgres:5432/',
+    'http://keycloak:8080/',
+    'http://n8n:5678/webhook',
     'http://0.0.0.0/hook',
     'http://10.0.0.5/hook',
     'http://192.168.1.10/hook',
     'http://metadata.google.internal/computeMetadata/v1/',
+    'http://metadata.azure.com/metadata/instance',
     'https://user:secret@hooks.example.com/notify',
     'ftp://hooks.example.com/notify',
     'file:///etc/passwd',
@@ -269,6 +281,26 @@ test('dispatchNotification validates external webhook/apprise/telegram URLs agai
   }
   assert.equal(isSafeExternalWebhookUrl('https://hooks.example.com/apprise'), true);
   assert.equal(isSafeExternalWebhookUrl('https://fcm.googleapis.com/fcm/send'), true);
+
+  // Async DNS-rebinding rejection in notification-center
+  assert.equal(
+    await isSafeExternalWebhookUrlAsync('https://rebind.example.com/hook', {
+      lookupImpl: async () => [{ address: '::ffff:127.0.0.1', family: 6 }],
+    }),
+    false,
+  );
+  assert.equal(
+    await isSafeExternalWebhookUrlAsync('https://rebind.example.com/hook', {
+      lookupImpl: async () => [{ address: '169.254.169.254', family: 4 }],
+    }),
+    false,
+  );
+  assert.equal(
+    await isSafeExternalWebhookUrlAsync('https://public.example.com/hook', {
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    }),
+    true,
+  );
 
   const calls = [];
   const { db } = makeEnterpriseHarness();
@@ -291,6 +323,28 @@ test('dispatchNotification validates external webhook/apprise/telegram URLs agai
   });
   assert.equal(calls.length, 0);
   assert.deepEqual(blockedRes.channelsDispatched, ['in_app']);
+
+  // DNS rebinding to loopback/link-local blocks fetchImpl in dispatchNotification
+  const dnsRebindRes = await dispatchNotification(db, {
+    organizationId: 'org-a',
+    recipientUserId: 101,
+    title: 'DNS rebinding guard test',
+    dedupKey: 'ssrf-dns-rebind',
+  }, {
+    env: {
+      DX_APPRISE_URL: 'https://rebind-apprise.example.com/notify',
+      DX_NOTIFICATION_WEBHOOK_URL: 'https://rebind-hook.example.com/hook',
+    },
+    lookupImpl: async (host) => (host.includes('apprise')
+      ? [{ address: '127.0.0.1', family: 4 }]
+      : [{ address: '::ffff:169.254.169.254', family: 6 }]),
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true };
+    },
+  });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(dnsRebindRes.channelsDispatched, ['in_app']);
 
   // Valid external endpoints fan out with timeout + redirect: 'error'
   const okRes = await dispatchNotification(db, {

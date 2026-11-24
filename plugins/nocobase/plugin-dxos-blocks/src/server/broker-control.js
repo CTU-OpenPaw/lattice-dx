@@ -9,6 +9,8 @@
 'use strict';
 
 const net = require('node:net');
+const path = require('node:path');
+const dns = require('node:dns');
 const { randomBytes, timingSafeEqual } = require('node:crypto');
 const { ingestTelemetryPoint, ingestOrDeduplicateAlarm } = require('./alarm-engine');
 const { emitDomainEventSafely, resolvePublishDomainEvent } = require('./domain-events');
@@ -349,8 +351,41 @@ function publishMqttControl({
 
 // --- SSRF Protection for Orion-LD & Webhook Callbacks ---
 
-function isBlockedIpv4(host) {
+function extractRawAuthorityHost(trimmedUrl) {
+  const match = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]+)/.exec(String(trimmedUrl || ''));
+  if (!match) return '';
+  let authority = match[1];
+  const atIdx = authority.lastIndexOf('@');
+  if (atIdx >= 0) authority = authority.slice(atIdx + 1);
+  if (authority.startsWith('[')) {
+    const closeIdx = authority.indexOf(']');
+    return closeIdx >= 0 ? authority.slice(1, closeIdx).toLowerCase() : authority.toLowerCase();
+  }
+  const colonIdx = authority.indexOf(':');
+  return (colonIdx >= 0 ? authority.slice(0, colonIdx) : authority).toLowerCase().replace(/\.+$/, '');
+}
+
+function isObfuscatedNumericIp(host) {
+  if (!host || host.includes(':')) return false;
+  if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/i.test(host)) return true;
   const parts = host.split('.');
+  if (parts.length > 1 && parts.every((p) => /^(?:\d+|0x[0-9a-f]+)$/i.test(p))) {
+    if (parts.length !== 4) return true;
+    if (parts.some((p) => /^0x/i.test(p) || /^0\d+$/.test(p))) return true;
+  }
+  return false;
+}
+
+function parseIpv4Octets(host) {
+  const parts = String(host || '').split('.');
+  if (parts.length !== 4 || !parts.every((p) => /^(?:0|[1-9]\d{0,2})$/.test(p))) return null;
+  const octets = parts.map(Number);
+  if (octets.some((n) => n < 0 || n > 255)) return null;
+  return octets;
+}
+
+function isBlockedIpv4(host) {
+  const parts = String(host || '').split('.');
   if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p))) return false;
   const octets = parts.map(Number);
   if (octets.some((n) => n < 0 || n > 255)) return true;
@@ -363,16 +398,101 @@ function isBlockedIpv4(host) {
   return false;
 }
 
-function isBlockedIpv6(bareHost) {
-  if (!bareHost.includes(':')) return false;
-  return (
-    bareHost === '::'
-    || bareHost === '::1'
-    || bareHost.startsWith('::ffff:')
-    || /^fe[89ab][0-9a-f]?:/i.test(bareHost)
-    || /^f[cd][0-9a-f]{0,2}:/i.test(bareHost)
-    || /^ff[0-9a-f]{2}:/i.test(bareHost)
-  );
+function expandIpv6Groups(rawHost) {
+  let host = String(rawHost || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  const zoneIdx = host.indexOf('%');
+  if (zoneIdx >= 0) host = host.slice(0, zoneIdx);
+  if (!host.includes(':')) return null;
+
+  const lastColon = host.lastIndexOf(':');
+  const tail = host.slice(lastColon + 1);
+  let tailGroups = null;
+  if (tail.includes('.')) {
+    const octets = parseIpv4Octets(tail);
+    if (!octets) return null;
+    tailGroups = [((octets[0] << 8) | octets[1]) >>> 0, ((octets[2] << 8) | octets[3]) >>> 0];
+    host = host.slice(0, lastColon);
+    if (host.endsWith(':')) host = `${host}:`;
+  }
+
+  const parts = host.split('::');
+  if (parts.length > 2) return null;
+  const parseSide = (side) => {
+    if (!side) return [];
+    const out = [];
+    for (const token of side.split(':')) {
+      if (!/^[0-9a-f]{1,4}$/i.test(token)) return null;
+      out.push(parseInt(token, 16));
+    }
+    return out;
+  };
+
+  const targetGroups = tailGroups ? 6 : 8;
+  if (parts.length === 1) {
+    const groups = parseSide(parts[0]);
+    if (!groups || groups.length !== targetGroups) return null;
+    return tailGroups ? [...groups, ...tailGroups] : groups;
+  }
+
+  const left = parseSide(parts[0]);
+  const right = parseSide(parts[1]);
+  if (!left || !right) return null;
+  const missing = targetGroups - (left.length + right.length);
+  if (missing < 1) return null;
+  return [...left, ...new Array(missing).fill(0), ...right, ...(tailGroups || [])];
+}
+
+function groupsToIpv4(hi, lo) {
+  return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`;
+}
+
+function isBlockedIpv6(bareHost, { allowPublicMapped = false } = {}) {
+  if (!String(bareHost || '').includes(':')) return false;
+  const groups = expandIpv6Groups(bareHost);
+  if (!groups) return true;
+  const isZeroPrefix5 = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0;
+  if (isZeroPrefix5 && groups[5] === 0 && groups[6] === 0 && (groups[7] === 0 || groups[7] === 1)) {
+    return true;
+  }
+  if (isZeroPrefix5 && groups[5] === 0) {
+    return isBlockedIpv4(groupsToIpv4(groups[6], groups[7]));
+  }
+  if (isZeroPrefix5 && groups[5] === 0xffff) {
+    const mappedIpv4 = groupsToIpv4(groups[6], groups[7]);
+    if (!allowPublicMapped) return true;
+    return isBlockedIpv4(mappedIpv4);
+  }
+  if (groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0xffff && groups[5] === 0) {
+    return isBlockedIpv4(groupsToIpv4(groups[6], groups[7]));
+  }
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b && groups[2] === 0 && groups[3] === 0 && groups[4] === 0 && groups[5] === 0) {
+    return isBlockedIpv4(groupsToIpv4(groups[6], groups[7]));
+  }
+  if (groups[0] === 0x2002) {
+    return isBlockedIpv4(groupsToIpv4(groups[1], groups[2]));
+  }
+  if ((groups[0] & 0xffc0) === 0xfe80) return true;
+  if ((groups[0] & 0xffc0) === 0xfec0) return true;
+  if ((groups[0] & 0xfe00) === 0xfc00) return true;
+  if ((groups[0] & 0xff00) === 0xff00) return true;
+  if (groups[0] === 0x0100 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0) return true;
+  return false;
+}
+
+function isBlockedResolvedIp(addr) {
+  const clean = String(addr || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  const zoneIdx = clean.indexOf('%');
+  const noZone = zoneIdx >= 0 ? clean.slice(0, zoneIdx) : clean;
+  if (!noZone || net.isIP(noZone) === 0) return true;
+  if (noZone.includes(':')) return isBlockedIpv6(noZone, { allowPublicMapped: true });
+  return isBlockedIpv4(noZone);
+}
+
+function parseExtraAllowHosts(env, extraEnvKey) {
+  return String(env?.[extraEnvKey] || '')
+    .split(',')
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function validateBrokerUrl(rawUrl, {
@@ -396,14 +516,15 @@ function validateBrokerUrl(rawUrl, {
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw failBroker(errorCode, 400, 'URL broker chỉ chấp nhận HTTP/HTTPS và không được chứa thông tin xác thực.');
   }
+  const rawHost = extractRawAuthorityHost(trimmed);
+  if (isObfuscatedNumericIp(rawHost)) {
+    throw failBroker(errorCode, 400, `Host broker "${rawHost}" bị chặn bởi chính sách chống SSRF.`);
+  }
   const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
   if (!bare) {
     throw failBroker(errorCode, 400, 'Hostname broker không hợp lệ.');
   }
-  const extraHosts = String(env?.[extraEnvKey] || '')
-    .split(',')
-    .map((h) => h.trim().toLowerCase())
-    .filter(Boolean);
+  const extraHosts = parseExtraAllowHosts(env, extraEnvKey);
   if (allowHosts.has(bare) || extraHosts.includes(bare)) {
     return preservePath ? parsed.toString() : parsed.origin;
   }
@@ -417,10 +538,62 @@ function validateBrokerUrl(rawUrl, {
     || /^0x[0-9a-f]+$/i.test(bare)
     || isBlockedIpv6(bare)
     || isBlockedIpv4(bare)
+    || (!bare.includes('.') && !bare.includes(':'))
   ) {
     throw failBroker(errorCode, 400, `Host broker "${bare}" bị chặn bởi chính sách chống SSRF.`);
   }
   return preservePath ? parsed.toString() : parsed.origin;
+}
+
+async function resolveDnsRecords(hostname, lookupImpl) {
+  if (lookupImpl.length >= 3) {
+    return new Promise((resolve, reject) => {
+      lookupImpl(hostname, { all: true }, (err, addresses) => {
+        if (err) reject(err);
+        else resolve(addresses);
+      });
+    });
+  }
+  return lookupImpl(hostname, { all: true });
+}
+
+async function assertSafeBrokerDns(validatedUrl, {
+  allowHosts = DEFAULT_ALLOWED_ORION_HOSTS,
+  extraEnvKey = 'DX_ORION_HOST_ALLOWLIST',
+  env = process.env,
+  errorCode = 'BROKER_URL_FORBIDDEN',
+  lookupImpl = dns.promises.lookup,
+} = {}) {
+  if (!validatedUrl) return null;
+  const parsed = new URL(validatedUrl);
+  const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  const extraHosts = parseExtraAllowHosts(env, extraEnvKey);
+  if (allowHosts.has(bare) || extraHosts.includes(bare) || net.isIP(bare) !== 0) {
+    return validatedUrl;
+  }
+  if (typeof lookupImpl !== 'function') {
+    throw failBroker(errorCode, 400, 'DNS lookup validator không khả dụng.');
+  }
+  let records;
+  try {
+    records = await resolveDnsRecords(bare, lookupImpl);
+  } catch {
+    throw failBroker(errorCode, 400, `Không phân giải được DNS an toàn cho host broker "${bare}".`);
+  }
+  const list = Array.isArray(records) ? records : (records ? [records] : []);
+  const addresses = list
+    .map((item) => (typeof item === 'string' ? item : item?.address))
+    .map((addr) => String(addr || '').trim())
+    .filter(Boolean);
+  if (addresses.length === 0) {
+    throw failBroker(errorCode, 400, `Host broker "${bare}" không trả về địa chỉ IP hợp lệ.`);
+  }
+  for (const addr of addresses) {
+    if (isBlockedResolvedIp(addr)) {
+      throw failBroker(errorCode, 400, `Host broker "${bare}" phân giải tới địa chỉ nội bộ/bị chặn (${addr}).`);
+    }
+  }
+  return validatedUrl;
 }
 
 function validateOrionBrokerUrl(rawUrl, env = process.env) {
@@ -443,7 +616,92 @@ function validateCallbackUrl(rawUrl, env = process.env) {
   });
 }
 
+async function validateOrionBrokerUrlAsync(rawUrl, { env = process.env, lookupImpl = dns.promises.lookup } = {}) {
+  const safe = validateOrionBrokerUrl(rawUrl, env);
+  if (!safe) return null;
+  return assertSafeBrokerDns(safe, {
+    allowHosts: DEFAULT_ALLOWED_ORION_HOSTS,
+    extraEnvKey: 'DX_ORION_HOST_ALLOWLIST',
+    env,
+    errorCode: 'BROKER_URL_FORBIDDEN',
+    lookupImpl,
+  });
+}
+
+async function validateCallbackUrlAsync(rawUrl, { env = process.env, lookupImpl = dns.promises.lookup } = {}) {
+  const safe = validateCallbackUrl(rawUrl, env);
+  if (!safe) return null;
+  return assertSafeBrokerDns(safe, {
+    allowHosts: DEFAULT_ALLOWED_CALLBACK_HOSTS,
+    extraEnvKey: 'DX_ORION_CALLBACK_HOST_ALLOWLIST',
+    env,
+    errorCode: 'BROKER_CALLBACK_FORBIDDEN',
+    lookupImpl,
+  });
+}
+
 // --- Auth & Tenant Helpers ---
+
+function loadFoundationPaasApiKeys() {
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-lattice-foundation/dist/server/paas-api-keys',
+        '@latticedx/plugin-lattice-foundation/src/server/paas-api-keys',
+        '../../../plugin-lattice-foundation/dist/server/paas-api-keys',
+        '../../../plugin-lattice-foundation/src/server/paas-api-keys',
+      ]
+    : [
+        '@latticedx/plugin-lattice-foundation/src/server/paas-api-keys',
+        '../../../plugin-lattice-foundation/src/server/paas-api-keys',
+        '@latticedx/plugin-lattice-foundation/dist/server/paas-api-keys',
+        '../../../plugin-lattice-foundation/dist/server/paas-api-keys',
+      ];
+  for (const modPath of candidates) {
+    try {
+      const mod = require(modPath);
+      if (mod && typeof mod.assertApiKeyScope === 'function') return mod;
+    } catch {
+      // Standalone tests or partial plugin setups fall back to local PAT scope verification.
+    }
+  }
+  return null;
+}
+
+function assertBrokerApiKeyScope(ctx, requiredScopes) {
+  const pat = ctx?.state?.latticeApiKey;
+  if (!pat) return true;
+  const paasApiKeys = loadFoundationPaasApiKeys();
+  if (paasApiKeys) {
+    return paasApiKeys.assertApiKeyScope(ctx, requiredScopes);
+  }
+  const held = new Set(
+    Array.isArray(pat.scopes)
+      ? pat.scopes.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean)
+      : [],
+  );
+  const needed = Array.isArray(requiredScopes) ? requiredScopes : [requiredScopes];
+  if (needed.some((s) => held.has(String(s || '').trim().toLowerCase()))) return true;
+  throw failBroker('API_KEY_SCOPE_INSUFFICIENT', 403, `API key lacks required scope (${needed.join(' or ')}).`);
+}
+
+async function verifyCallerRoleMembership(db, ctx) {
+  const rolesUsersRepo = db?.getRepository?.('rolesUsers');
+  if (!rolesUsersRepo || typeof rolesUsersRepo.find !== 'function') return;
+  const activeRole = String(ctx?.state?.currentRole || '').trim();
+  const userId = val(ctx?.state?.currentUser, 'id');
+  if (userId == null) {
+    throw failBroker('DXOS_BROKER_FORBIDDEN', 403, 'Không xác định được tài khoản để kiểm tra vai trò.');
+  }
+  const bindings = (await rolesUsersRepo.find({ filter: { userId }, limit: 50 })) || [];
+  const hasBinding = Boolean(activeRole) && bindings.some((b) => (
+    (val(b, 'userId') == null || String(val(b, 'userId')) === String(userId))
+    && String(val(b, 'roleName') || '').trim() === activeRole
+  ));
+  if (!hasBinding) {
+    throw failBroker('DXOS_BROKER_FORBIDDEN', 403, 'Vai trò yêu cầu không thuộc tài khoản hiện tại.');
+  }
+}
 
 async function resolveNativeEmployee(db, user) {
   const id = val(user, 'id');
@@ -577,8 +835,13 @@ async function resolveEdgeOrJwtAuth(db, ctx, input = {}, { ingestToken } = {}) {
   if (!ctx?.state?.currentUser?.id && ctx?.state?.currentRole !== 'root') {
     throw failBroker('NATIVE_LOGIN_REQUIRED', 401);
   }
+  if (ctx?.state?.currentRole === 'root' && !ctx?.state?.currentUser) {
+    throw failBroker('NATIVE_LOGIN_REQUIRED', 401);
+  }
+  assertBrokerApiKeyScope(ctx, ['iot', 'write']);
+  await verifyCallerRoleMembership(db, ctx);
+
   if (ctx?.state?.currentRole === 'root') {
-    if (!ctx?.state?.currentUser) throw failBroker('NATIVE_LOGIN_REQUIRED', 401);
     const orgId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
     if (!ORG_ID_RE.test(orgId)) {
       throw failBroker('BROKER_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho thao tác root.');
@@ -607,21 +870,16 @@ async function resolveBrokerOperator(db, ctx, input = {}, { write = false, requi
     throw failBroker('NATIVE_LOGIN_REQUIRED', 401);
   }
   const activeRole = String(ctx?.state?.currentRole || '').trim();
-  const userId = val(ctx?.state?.currentUser, 'id');
-
-  // Verify role membership against rolesUsers when repository exists and has rows
-  const rolesUsersRepo = db?.getRepository?.('rolesUsers');
-  if (activeRole && userId != null && rolesUsersRepo && typeof rolesUsersRepo.find === 'function') {
-    const bindings = (await rolesUsersRepo.find({ filter: { userId }, limit: 50 })) || [];
-    if (bindings.length > 0 && !bindings.some((b) => String(val(b, 'roleName') || '').trim() === activeRole)) {
-      throw failBroker('DXOS_BROKER_FORBIDDEN', 403, 'Vai trò yêu cầu không thuộc tài khoản hiện tại.');
-    }
-  }
-
   const isRoot = activeRole === 'root';
-  if (isRoot) {
-    if (!ctx?.state?.currentUser) throw failBroker('NATIVE_LOGIN_REQUIRED', 401);
-  } else {
+  if (isRoot && !ctx?.state?.currentUser) {
+    throw failBroker('NATIVE_LOGIN_REQUIRED', 401);
+  }
+  assertBrokerApiKeyScope(ctx, write ? ['iot', 'write'] : ['read', 'iot', 'write']);
+
+  // Verify role membership against rolesUsers when repository exists (fail closed on empty/missing binding)
+  await verifyCallerRoleMembership(db, ctx);
+
+  if (!isRoot) {
     const allowedSet = write ? BROKER_WRITE_ROLES : BROKER_READ_ROLES;
     let roleAllowed = allowedSet.has(activeRole);
     if (!roleAllowed && activeRole) {
@@ -794,6 +1052,7 @@ function buildDynSecProvisionCommands({ organizationId, deviceKey, mqttUsername,
 function createDxosBrokerActions(db, {
   brokerUrl,
   fetchImpl = fetch,
+  lookupImpl,
   ingestToken,
   mqtt = null,
   orionCallbackUrl,
@@ -804,6 +1063,24 @@ function createDxosBrokerActions(db, {
     const raw = brokerUrl !== undefined ? brokerUrl : env?.DX_NATIVE_CONTEXT_BROKER_URL;
     if (!raw || !String(raw).trim()) return null;
     return validateOrionBrokerUrl(String(raw), env);
+  };
+
+  const resolveVerifiedOrionOrigin = async () => {
+    const origin = resolveOrionOrigin();
+    if (!origin) return null;
+    const effectiveLookup = typeof lookupImpl === 'function'
+      ? lookupImpl
+      : (fetchImpl === fetch ? dns.promises.lookup : null);
+    if (effectiveLookup) {
+      await assertSafeBrokerDns(origin, {
+        allowHosts: DEFAULT_ALLOWED_ORION_HOSTS,
+        extraEnvKey: 'DX_ORION_HOST_ALLOWLIST',
+        env,
+        errorCode: 'BROKER_URL_FORBIDDEN',
+        lookupImpl: effectiveLookup,
+      });
+    }
+    return origin;
   };
 
   const resolveMqttSettings = () => {
@@ -1318,7 +1595,7 @@ function createDxosBrokerActions(db, {
       if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw failBroker('METHOD_NOT_ALLOWED', 405);
       const input = readParams(ctx);
       const { organizationId } = await resolveBrokerOperator(db, ctx, input, { write: false, requireRootOrg: true });
-      const brokerOrigin = resolveOrionOrigin();
+      const brokerOrigin = await resolveVerifiedOrionOrigin();
       const entityType = typeof input.entityType === 'string' && input.entityType.trim()
         ? input.entityType.trim()
         : '';
@@ -1479,7 +1756,7 @@ function createDxosBrokerActions(db, {
       if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw failBroker('METHOD_NOT_ALLOWED', 405);
       const input = readParams(ctx);
       const { isRoot, organizationId } = await resolveBrokerOperator(db, ctx, input, { write: false, requireRootOrg: false });
-      const brokerOrigin = resolveOrionOrigin();
+      const brokerOrigin = await resolveVerifiedOrionOrigin();
 
       const repo = db?.getRepository?.('latticeBrokerSubscriptions');
       const filter = {
@@ -1529,7 +1806,7 @@ function createDxosBrokerActions(db, {
       if ((ctx.method || 'POST') !== 'POST') throw failBroker('METHOD_NOT_ALLOWED', 405);
       const input = readParams(ctx);
       const { organizationId } = await resolveBrokerOperator(db, ctx, input, { write: true, requireRootOrg: true });
-      const brokerOrigin = resolveOrionOrigin();
+      const brokerOrigin = await resolveVerifiedOrionOrigin();
       const callbackUri = resolveCallbackEndpoint(input.notificationEndpoint);
 
       const rawKey = typeof input.subscriptionKey === 'string' && input.subscriptionKey.trim()
@@ -1653,7 +1930,7 @@ function createDxosBrokerActions(db, {
       const organizationId = scopedOrg || val(row, 'organizationId');
       const nextActive = input.active !== undefined ? Boolean(input.active) : !Boolean(val(row, 'active'));
 
-      const brokerOrigin = resolveOrionOrigin();
+      const brokerOrigin = await resolveVerifiedOrionOrigin();
       const externalId = val(row, 'externalSubscriptionId');
       let orionSynced = false;
       let lastError = null;
@@ -1711,7 +1988,7 @@ function createDxosBrokerActions(db, {
       const subscriptionKey = val(row, 'subscriptionKey');
       const externalId = val(row, 'externalSubscriptionId');
 
-      const brokerOrigin = resolveOrionOrigin();
+      const brokerOrigin = await resolveVerifiedOrionOrigin();
       let orionSynced = false;
       if (brokerOrigin && externalId) {
         try {
@@ -1900,6 +2177,11 @@ module.exports = {
   publishMqttControl,
   validateOrionBrokerUrl,
   validateCallbackUrl,
+  validateOrionBrokerUrlAsync,
+  validateCallbackUrlAsync,
+  assertSafeBrokerDns,
+  assertBrokerApiKeyScope,
+  isBlockedResolvedIp,
   normalizeDeviceStatus,
   buildDynSecProvisionCommands,
   emitDomainEventSafely,

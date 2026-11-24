@@ -16,7 +16,7 @@ const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|coo
 const VALID_MODES = new Set(['ALLOW', 'ASK', 'OFF']);
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1', 'host.docker.internal']);
 const STACK_HTTP_HOSTS = new Set(['orion-ld', 'n8n', 'keycloak', 'nocobase', 'lattice-dx-orion-ld', 'lattice-dx-n8n', 'lattice-dx-keycloak']);
-const SSRF_BLOCKED_HOST_RE = /^(0\.0\.0\.0|\[?::\]?|\[?::ffff:.*|169\.254\.\d+\.\d+|fe80:.*|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|127\.0\.0\.0|metadata\.google\.internal|metadata\.azure\.com)$/i;
+const SSRF_BLOCKED_HOST_RE = /^(0\.0\.0\.0|\[?::\]?|\[?::ffff:.*|169\.254\.\d+\.\d+|fe80:.*|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+|127\.\d+\.\d+\.\d+|metadata\.google\.internal|metadata\.azure\.com)$/i;
 
 const STARTER_AI_BLUEPRINTS = [
   {
@@ -384,7 +384,8 @@ function validateMcpServerUrl(rawUrl) {
   }
   const host = parsed.hostname.toLowerCase();
   const bareHost = host.replace(/^\[|\]$/g, '');
-  if (SSRF_BLOCKED_HOST_RE.test(host) || SSRF_BLOCKED_HOST_RE.test(bareHost)) {
+  const isLoopbackHost = LOOPBACK_HOSTS.has(host) || LOOPBACK_HOSTS.has(bareHost);
+  if (!isLoopbackHost && (SSRF_BLOCKED_HOST_RE.test(host) || SSRF_BLOCKED_HOST_RE.test(bareHost))) {
     throw failSchema('MCP_URL_SSRF_BLOCKED', 'Unsafe SSRF metadata, private, or wildcard host blocked');
   }
   const extraAllowlist = new Set(
@@ -393,7 +394,7 @@ function validateMcpServerUrl(rawUrl) {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean),
   );
-  const isAllowedHttpHost = LOOPBACK_HOSTS.has(host) || STACK_HTTP_HOSTS.has(bareHost) || extraAllowlist.has(bareHost);
+  const isAllowedHttpHost = isLoopbackHost || STACK_HTTP_HOSTS.has(bareHost) || extraAllowlist.has(bareHost);
   if (parsed.protocol === 'http:' && !isAllowedHttpHost) {
     throw failSchema('MCP_URL_HTTPS_REQUIRED', 'External HTTP MCP endpoints must use https:// (or be an allowlisted stack host)');
   }

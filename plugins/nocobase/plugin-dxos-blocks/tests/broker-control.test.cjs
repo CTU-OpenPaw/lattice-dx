@@ -1109,3 +1109,345 @@ test('src/server/index.js wires dxosBroker ACLs and protects latticeIotDevices &
     );
   }
 });
+
+test('dxosBroker enforces PaaS PAT scopes (403 API_KEY_SCOPE_INSUFFICIENT) across read, write, and PAT-authenticated ingest actions', async () => {
+  const { createDxosBrokerActions } = require(path.join(PLUGIN_ROOT, 'src/server/broker-control.js'));
+  const h = makeBrokerHarness({
+    initialDevices: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        deviceKey: 'sensor-pat',
+        name: 'PAT Sensor',
+        mqttUsername: 'ldx_org-a_sensor-pat',
+        mqttClientId: 'ldx-org-a-sensor-pat',
+        assetId: 12,
+        assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:12',
+        topicPrefix: 'latticedx/org-a/sensor-pat',
+        status: 'provisioned',
+        metadataJson: {},
+      },
+    ],
+    initialSubs: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        subscriptionKey: 'sub-pat',
+        brokerType: 'orion_ld',
+        externalSubscriptionId: 'urn:ngsi-ld:Subscription:org-a:sub-pat',
+        entityType: 'Asset',
+        watchedAttributesJson: ['temperature'],
+        notificationEndpoint: 'http://nocobase/api/dxosBroker:orionNotify',
+        throttlingSec: 5,
+        active: true,
+      },
+    ],
+  });
+
+  const actions = createDxosBrokerActions(h.db, {
+    brokerUrl: 'http://orion-ld:1026',
+    fetchImpl: async (url, init = {}) => {
+      if (url.includes('/ngsi-ld/v1/entities')) return new Response('[]', { status: 200 });
+      if (url.includes('/ngsi-ld/v1/subscriptions') && init.method === 'GET') return new Response('[]', { status: 200 });
+      if (url.endsWith('/ngsi-ld/v1/subscriptions') && init.method === 'POST') return new Response('', { status: 201 });
+      return new Response(null, { status: 204 });
+    },
+    ingestToken: 'edge-token-secret-2026-0123456789',
+  });
+
+  // Wrong-scope ldx_pat_* (['ledger']) rejected 403 on all dxosBroker actions
+  const wrongPat = { scopes: ['ledger'] };
+  const wrongState = { currentUser: { id: 101, username: 'op-a' }, currentRole: 'ldx_operator', latticeApiKey: wrongPat };
+  for (const [fn, ctx] of [
+    ['listDevices', { method: 'GET', state: wrongState, action: { params: {} } }],
+    ['orionEntities', { method: 'GET', state: wrongState, action: { params: {} } }],
+    ['orionListSubscriptions', { method: 'GET', state: wrongState, action: { params: {} } }],
+    ['provisionDevice', { method: 'POST', state: wrongState, action: { params: { values: { deviceKey: 'pat-dev-1', name: 'PAT Dev 1' } } } }],
+    ['revokeDevice', { method: 'POST', state: wrongState, action: { params: { values: { deviceKey: 'sensor-pat' } } } }],
+    ['orionCreateSubscription', { method: 'POST', state: wrongState, action: { params: { values: { subscriptionKey: 'sub-ledger-deny', entityType: 'Asset' } } } }],
+    ['orionToggleSubscription', { method: 'POST', state: wrongState, action: { params: { values: { subscriptionKey: 'sub-pat', active: false } } } }],
+    ['orionDeleteSubscription', { method: 'POST', state: wrongState, action: { params: { values: { subscriptionKey: 'sub-pat' } } } }],
+    ['deviceStatusIngest', { method: 'POST', headers: {}, state: wrongState, action: { params: { values: { organizationId: 'org-a', deviceKey: 'sensor-pat', status: 'BIRTH' } } } }],
+    ['orionNotify', { method: 'POST', headers: { 'NGSILD-Tenant': 'org-a' }, state: wrongState, request: { body: { data: [{ id: 'urn:ngsi-ld:Asset:org-a:native:12', temperature: { type: 'Property', value: -18 } }] } } }],
+  ]) {
+    await assert.rejects(
+      () => actions[fn](ctx, async () => {}),
+      (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+      `Expected 403 API_KEY_SCOPE_INSUFFICIENT for ['ledger'] PAT on ${fn}`,
+    );
+  }
+
+  // Read-only PAT (['read']) allowed on read ops, rejected 403 on mutating & PAT ingest ops
+  const readState = { currentUser: { id: 101, username: 'op-a' }, currentRole: 'ldx_operator', latticeApiKey: { scopes: ['read'] } };
+  const listCtx = { method: 'GET', state: readState, action: { params: {} } };
+  await actions.listDevices(listCtx, async () => {});
+  assert.equal(listCtx.body.items.length, 1);
+
+  await actions.orionEntities({ method: 'GET', state: readState, action: { params: {} } }, async () => {});
+  await actions.orionListSubscriptions({ method: 'GET', state: readState, action: { params: {} } }, async () => {});
+
+  for (const [fn, ctx] of [
+    ['provisionDevice', { method: 'POST', state: readState, action: { params: { values: { deviceKey: 'pat-dev-ro', name: 'RO Dev' } } } }],
+    ['orionCreateSubscription', { method: 'POST', state: readState, action: { params: { values: { subscriptionKey: 'sub-ro-deny', entityType: 'Asset' } } } }],
+    ['deviceStatusIngest', { method: 'POST', headers: {}, state: readState, action: { params: { values: { organizationId: 'org-a', deviceKey: 'sensor-pat', status: 'BIRTH' } } } }],
+    ['orionNotify', { method: 'POST', headers: { 'NGSILD-Tenant': 'org-a' }, state: readState, request: { body: { data: [{ id: 'urn:ngsi-ld:Asset:org-a:native:12', temperature: { type: 'Property', value: -18 } }] } } }],
+  ]) {
+    await assert.rejects(
+      () => actions[fn](ctx, async () => {}),
+      (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+      `Expected 403 API_KEY_SCOPE_INSUFFICIENT for ['read'] PAT on ${fn}`,
+    );
+  }
+
+  // 'iot' PAT allowed on read, write, deviceStatusIngest, and orionNotify
+  const iotState = { currentUser: { id: 101, username: 'op-a' }, currentRole: 'ldx_operator', latticeApiKey: { scopes: ['iot'] } };
+  const provIotCtx = {
+    method: 'POST',
+    app: h.app,
+    state: iotState,
+    action: { params: { values: { deviceKey: 'pat-dev-ok', name: 'PAT Dev OK' } } },
+  };
+  await actions.provisionDevice(provIotCtx, async () => {});
+  assert.equal(provIotCtx.body.device.deviceKey, 'pat-dev-ok');
+
+  const ingestIotCtx = {
+    method: 'POST',
+    app: h.app,
+    headers: {},
+    state: iotState,
+    action: { params: { values: { organizationId: 'org-a', deviceKey: 'pat-dev-ok', status: 'BIRTH' } } },
+  };
+  await actions.deviceStatusIngest(ingestIotCtx, async () => {});
+  assert.equal(ingestIotCtx.body.device.status, 'online');
+
+  const notifyIotCtx = {
+    method: 'POST',
+    app: h.app,
+    headers: { 'NGSILD-Tenant': 'org-a' },
+    state: iotState,
+    request: {
+      body: {
+        data: [{ id: 'urn:ngsi-ld:Asset:org-a:native:12', temperature: { type: 'Property', value: -19.5, unitCode: 'CEL' } }],
+      },
+    },
+  };
+  await actions.orionNotify(notifyIotCtx, async () => {});
+  assert.equal(notifyIotCtx.body.ingestedCount, 1);
+});
+
+test('dxosBroker fails closed 403 when rolesUsers repo exists and returns 0 rows for caller', async () => {
+  const { createDxosBrokerActions } = require(path.join(PLUGIN_ROOT, 'src/server/broker-control.js'));
+  const h = makeBrokerHarness({
+    rolesUsers: [
+      { userId: 102, roleName: 'ldx_operator' },
+    ],
+  });
+  // Also verify explicit empty rolesUsers table returning [] for all users
+  const emptyRolesDb = {
+    ...h.db,
+    getRepository(name) {
+      if (name === 'rolesUsers') {
+        return { find: async () => [] };
+      }
+      return h.db.getRepository(name);
+    },
+  };
+
+  const actionsWithOtherBindings = createDxosBrokerActions(h.db, {});
+  const actionsWithEmptyRepo = createDxosBrokerActions(emptyRolesDb, {});
+
+  for (const actions of [actionsWithOtherBindings, actionsWithEmptyRepo]) {
+    // Non-root user with 0 role bindings in rolesUsers cannot trust ctx.state.currentRole
+    await assert.rejects(
+      () => actions.listDevices({
+        method: 'GET',
+        state: { currentUser: { id: 101 }, currentRole: 'ldx_operator' },
+        action: { params: {} },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'DXOS_BROKER_FORBIDDEN',
+    );
+    await assert.rejects(
+      () => actions.provisionDevice({
+        method: 'POST',
+        state: { currentUser: { id: 101 }, currentRole: 'ldx_admin' },
+        action: { params: { values: { deviceKey: 'spoof-dev', name: 'Spoof' } } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'DXOS_BROKER_FORBIDDEN',
+    );
+    // Spoofed root role with 0 role bindings in rolesUsers also fails closed 403
+    await assert.rejects(
+      () => actions.listDevices({
+        method: 'GET',
+        state: { currentUser: { id: 101 }, currentRole: 'root' },
+        action: { params: {} },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'DXOS_BROKER_FORBIDDEN',
+    );
+  }
+
+  // User 102 HAS matching { userId: 102, roleName: 'ldx_operator' } binding -> allowed, but spoofed role denied
+  const okListCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 102 }, currentRole: 'ldx_operator' },
+    action: { params: {} },
+  };
+  await actionsWithOtherBindings.listDevices(okListCtx, async () => {});
+  assert.equal(okListCtx.body.organizationId, 'org-a');
+
+  await assert.rejects(
+    () => actionsWithOtherBindings.listDevices({
+      method: 'GET',
+      state: { currentUser: { id: 102 }, currentRole: 'ldx_admin' },
+      action: { params: {} },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_BROKER_FORBIDDEN',
+  );
+});
+
+test('Orion-LD & callback SSRF hardening rejects single-label services, ::ffff: IPv4-mapped IPv6, obfuscated numeric IPs, and DNS rebinding', async () => {
+  const {
+    validateOrionBrokerUrl,
+    validateCallbackUrl,
+    validateOrionBrokerUrlAsync,
+    createDxosBrokerActions,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/broker-control.js'));
+
+  // Non-allowlisted single-label internal Docker/cloud hosts rejected 400
+  for (const badSingleLabel of [
+    'http://redis:6379',
+    'http://postgres:5432',
+    'http://keycloak:8080',
+    'http://metadata',
+    'http://nocobase:3000',
+  ]) {
+    assert.throws(
+      () => validateOrionBrokerUrl(badSingleLabel),
+      (err) => err.status === 400 && err.code === 'BROKER_URL_FORBIDDEN',
+      `Expected validateOrionBrokerUrl to reject ${badSingleLabel}`,
+    );
+  }
+  for (const badCallbackSingleLabel of [
+    'http://redis:6379/hook',
+    'http://postgres:5432/hook',
+    'http://orion-ld:1026/hook',
+    'http://metadata/latest',
+  ]) {
+    assert.throws(
+      () => validateCallbackUrl(badCallbackSingleLabel),
+      (err) => err.status === 400 && err.code === 'BROKER_CALLBACK_FORBIDDEN',
+      `Expected validateCallbackUrl to reject ${badCallbackSingleLabel}`,
+    );
+  }
+
+  // ::ffff: IPv4-mapped IPv6 & integer/hex/octal obfuscated numeric IPs rejected 400
+  for (const badObfuscated of [
+    'http://[::ffff:169.254.169.254]/latest/meta-data',
+    'http://[::ffff:a9fe:a9fe]/latest',
+    'http://[0:0:0:0:0:ffff:169.254.169.254]/latest',
+    'http://[::ffff:127.0.0.1]:1026',
+    'http://[::ffff:10.0.0.5]:1026',
+    'http://2130706433:1026',
+    'http://2852039166/latest/meta-data',
+    'http://0x7f000001:1026',
+    'http://0177.0.0.1:1026',
+    'http://017700000001:1026',
+    'http://127.1:1026',
+  ]) {
+    assert.throws(
+      () => validateOrionBrokerUrl(badObfuscated),
+      (err) => err.status === 400 && err.code === 'BROKER_URL_FORBIDDEN',
+      `Expected validateOrionBrokerUrl to reject ${badObfuscated}`,
+    );
+    assert.throws(
+      () => validateCallbackUrl(badObfuscated),
+      (err) => err.status === 400 && err.code === 'BROKER_CALLBACK_FORBIDDEN',
+      `Expected validateCallbackUrl to reject ${badObfuscated}`,
+    );
+  }
+
+  // Async DNS-rebinding validator rejects private/link-local/mapped resolved IPs and lookup failures
+  await assert.rejects(
+    () => validateOrionBrokerUrlAsync('https://rebind.example.org/ngsi-ld', {
+      lookupImpl: async () => [{ address: '169.254.169.254', family: 4 }],
+    }),
+    (err) => err.status === 400 && err.code === 'BROKER_URL_FORBIDDEN',
+  );
+  await assert.rejects(
+    () => validateOrionBrokerUrlAsync('https://rebind-mapped.example.org', {
+      lookupImpl: async () => [{ address: '::ffff:169.254.169.254', family: 6 }],
+    }),
+    (err) => err.status === 400 && err.code === 'BROKER_URL_FORBIDDEN',
+  );
+  await assert.rejects(
+    () => validateOrionBrokerUrlAsync('https://rebind-mixed.example.org', {
+      lookupImpl: async () => [
+        { address: '93.184.216.34', family: 4 },
+        { address: '127.0.0.1', family: 4 },
+      ],
+    }),
+    (err) => err.status === 400 && err.code === 'BROKER_URL_FORBIDDEN',
+  );
+  await assert.rejects(
+    () => validateOrionBrokerUrlAsync('https://nxdomain.example.org', {
+      lookupImpl: async () => { throw new Error('ENOTFOUND'); },
+    }),
+    (err) => err.status === 400 && err.code === 'BROKER_URL_FORBIDDEN',
+  );
+  assert.equal(
+    await validateOrionBrokerUrlAsync('https://broker.example.org/ngsi-ld', {
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    }),
+    'https://broker.example.org',
+  );
+
+  // Action-level DNS-rebinding check blocks outbound fetch before fetchImpl is called
+  const h = makeBrokerHarness({
+    initialSubs: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        subscriptionKey: 'sub-rebind',
+        brokerType: 'orion_ld',
+        externalSubscriptionId: 'urn:ngsi-ld:Subscription:org-a:sub-rebind',
+        entityType: 'Asset',
+        watchedAttributesJson: ['temperature'],
+        notificationEndpoint: 'http://nocobase/api/dxosBroker:orionNotify',
+        throttlingSec: 5,
+        active: true,
+      },
+    ],
+  });
+  let fetchCalled = 0;
+  const rebindActions = createDxosBrokerActions(h.db, {
+    brokerUrl: 'https://rebind.example.org',
+    lookupImpl: async () => [{ address: '169.254.169.254', family: 4 }],
+    fetchImpl: async () => {
+      fetchCalled += 1;
+      return new Response('[]', { status: 200 });
+    },
+  });
+
+  for (const [fn, ctx] of [
+    ['orionEntities', { method: 'GET', state: { currentUser: { id: 101 }, currentRole: 'ldx_operator' }, action: { params: {} } }],
+    ['orionListSubscriptions', { method: 'GET', state: { currentUser: { id: 101 }, currentRole: 'ldx_operator' }, action: { params: {} } }],
+    ['orionCreateSubscription', { method: 'POST', state: { currentUser: { id: 101 }, currentRole: 'ldx_operator' }, action: { params: { values: { subscriptionKey: 'sub-rebind-new', entityType: 'Asset' } } } }],
+    ['orionToggleSubscription', { method: 'POST', state: { currentUser: { id: 101 }, currentRole: 'ldx_operator' }, action: { params: { values: { subscriptionKey: 'sub-rebind', active: false } } } }],
+    ['orionDeleteSubscription', { method: 'POST', state: { currentUser: { id: 101 }, currentRole: 'ldx_operator' }, action: { params: { values: { subscriptionKey: 'sub-rebind' } } } }],
+  ]) {
+    await assert.rejects(
+      () => rebindActions[fn](ctx, async () => {}),
+      (err) => err.status === 400 && err.code === 'BROKER_URL_FORBIDDEN',
+      `Expected ${fn} to fail closed 400 on DNS rebinding`,
+    );
+  }
+  assert.equal(fetchCalled, 0, 'Outbound fetchImpl must never be invoked when DNS resolves to private/metadata IP');
+
+  // Unit tests passing fake fetchImpl without lookupImpl for non-internal host still work seamlessly
+  const fakeFetchActions = createDxosBrokerActions(h.db, {
+    brokerUrl: 'https://broker.example.org',
+    fetchImpl: async () => new Response('[]', { status: 200 }),
+  });
+  const okEntCtx = { method: 'GET', state: { currentUser: { id: 101 }, currentRole: 'ldx_operator' }, action: { params: {} } };
+  await fakeFetchActions.orionEntities(okEntCtx, async () => {});
+  assert.equal(okEntCtx.body.orionReachable, true);
+});

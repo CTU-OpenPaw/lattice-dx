@@ -1155,3 +1155,73 @@ test('Fix Round 1 (I1): studio-resource verifies rolesUsers, prioritizes active 
   ignoreInFilter = true;
   assert.equal(await isStudioAdmin({ state: { currentUser: { id: 50 }, currentRole: 'ldx_employee' } }, db), false);
 });
+
+test('Whole-delta security: solution-bundle blocks SSRF webhook targetUrls and unsafe automationRules actions in validate & apply', async () => {
+  const { exportSolutionBundle, validateSolutionBundle, importSolutionBundle, applyGovernanceSection } = require(
+    path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'),
+  );
+  const { db } = makeV3Harness();
+  const base = await exportSolutionBundle(db, { organizationId: 'org-a' });
+
+  // Valid external HTTPS + internal compose allowlisted n8n HTTP pass validation
+  const okBundle = structuredClone(base);
+  okBundle.governance.webhookSubscriptions.push(
+    { organizationId: 'org-a', subscriptionKey: 'ext_https', name: 'ERP', targetUrl: 'https://erp.example.com/hook', eventPattern: '*', active: true },
+    { organizationId: 'org-a', subscriptionKey: 'n8n_local', name: 'n8n', targetUrl: 'http://n8n:5678/webhook', eventPattern: '*', active: true },
+  );
+  assert.equal(validateSolutionBundle(okBundle).valid, true);
+
+  // SSRF targetUrls rejected in validateSolutionBundle, importSolutionBundle, and direct applyGovernanceSection
+  for (const badUrl of [
+    'http://public.example.com/hook',
+    'http://169.254.169.254/latest/meta-data',
+    'https://10.0.0.1/hook',
+    'https://internal-redis/hook',
+  ]) {
+    const ssrfBundle = structuredClone(base);
+    ssrfBundle.governance.webhookSubscriptions.push({
+      organizationId: 'org-a',
+      subscriptionKey: 'bad_hook',
+      name: 'Bad',
+      targetUrl: badUrl,
+      eventPattern: '*',
+      active: true,
+    });
+    assert.equal(validateSolutionBundle(ssrfBundle).valid, false, `Expected SSRF rejection for ${badUrl}`);
+    await assert.rejects(
+      () => importSolutionBundle(db, ssrfBundle, { dryRun: false, organizationId: 'org-a' }),
+      (err) => err.status === 400 && err.code === 'INVALID_SOLUTION_BUNDLE',
+    );
+    await assert.rejects(
+      () => applyGovernanceSection(db, ssrfBundle.governance, 'org-a', {}),
+      (err) => err.status === 400 && err.code === 'INVALID_SOLUTION_BUNDLE',
+    );
+  }
+
+  // Unsafe automationRules actions & templates rejected in validateSolutionBundle & importSolutionBundle
+  for (const [label, badActions] of [
+    ['create_record users', [{ type: 'create_record', collection: 'users', values: { username: 'pwn' } }]],
+    ['create_record latticePkiKeys', [{ type: 'create_record', collection: 'latticePkiKeys', values: { keyId: 'forged' } }]],
+    ['update_record users', [{ type: 'update_record', collection: 'users', filter: { id: 1 }, values: { role: 'root' } }]],
+    ['unknown action', [{ type: 'eval_js', code: 'process.exit(1)' }]],
+    ['unsafe template', [{ type: 'notify_role', role: 'ldx_manager', title: '{{1+1}}' }]],
+    ['call_connector origin override', [{ type: 'call_connector', connectorKey: 'erp', url: 'https://evil.com/steal' }]],
+  ]) {
+    const badAuto = structuredClone(base);
+    badAuto.governance.automationRules.push({
+      organizationId: 'org-a',
+      ruleKey: 'unsafe_rule',
+      name: 'Unsafe Rule',
+      triggerEventType: '*',
+      actionsJson: badActions,
+      maxDepth: 8,
+      cooldownSec: 0,
+      active: true,
+    });
+    assert.equal(validateSolutionBundle(badAuto).valid, false, `Expected automation validation rejection for ${label}`);
+    await assert.rejects(
+      () => importSolutionBundle(db, badAuto, { dryRun: false, organizationId: 'org-a' }),
+      (err) => err.status === 400 && err.code === 'INVALID_SOLUTION_BUNDLE',
+    );
+  }
+});

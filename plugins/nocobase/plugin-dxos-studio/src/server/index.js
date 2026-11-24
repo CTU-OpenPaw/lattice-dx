@@ -26,6 +26,50 @@ const {
   registerAutomationEventListener,
 } = require('./automation-engine');
 const { createDxosBuilderActions } = require('./domain-builder');
+const { fail, readParams, resolveVerifiedRoles } = require('./wms-dmn-shared');
+
+function createOrganizationDirectGuardMiddleware(db) {
+  return async function dxosOrganizationDirectGuard(ctx, next) {
+    const resourceName = String(ctx?.action?.resourceName || '').trim();
+    const baseResource = resourceName.split('.')[0];
+    const actionName = String(ctx?.action?.actionName || '').trim();
+    const params = readParams(ctx);
+    const bodyValues = ctx?.request?.body?.values;
+    const actionValues = ctx?.action?.params?.values;
+    const chartCollection = String(
+      params?.collection
+        || params?.table
+        || params?.collectionName
+        || actionValues?.collection
+        || bodyValues?.collection
+        || '',
+    ).trim();
+
+    const isDirectOrg = baseResource === 'latticeOrganizations';
+    const isChartOnOrg =
+      baseResource === 'charts' &&
+      actionName === 'queryData' &&
+      chartCollection === 'latticeOrganizations';
+
+    if (!isDirectOrg && !isChartOnOrg) {
+      return next();
+    }
+
+    const roles = await resolveVerifiedRoles(db, ctx);
+    const ruRepo = db?.getRepository?.('rolesUsers');
+    const hasRuRepo = Boolean(ruRepo && typeof ruRepo.find === 'function');
+    const isRoot = roles.includes('root') || (!hasRuRepo && ctx?.state?.currentUser?.isRoot === true);
+    if (isRoot) {
+      return next();
+    }
+
+    throw fail(
+      'ORGANIZATION_DIRECT_CRUD_FORBIDDEN',
+      403,
+      `Direct access to ${isChartOnOrg ? chartCollection : resourceName} is restricted to root; use /api/dxosBuilder:listTenants`,
+    );
+  };
+}
 
 class DxosStudioPlugin extends Plugin {
   stopAutomationListener() {
@@ -44,6 +88,7 @@ class DxosStudioPlugin extends Plugin {
     this.app.resourceManager.use(createServiceScopeMiddleware(this.db), { tag: 'dxosServiceScope', after: 'acl', before: 'latticeNativeScope' });
     this.app.resourceManager.use(createWmsDmnDirectGuardMiddleware(this.db), { tag: 'dxosWmsDmnScope', after: 'acl', before: 'latticeNativeScope' });
     this.app.resourceManager.use(createAutomationDirectGuardMiddleware(this.db), { tag: 'dxosAutomationScope', after: 'acl', before: 'latticeNativeScope' });
+    this.app.resourceManager.use(createOrganizationDirectGuardMiddleware(this.db), { tag: 'dxosOrganizationScope', after: 'acl', before: 'latticeNativeScope' });
 
     this.app.resourceManager.define({
       name: 'dxosStudio',
@@ -110,5 +155,6 @@ class DxosStudioPlugin extends Plugin {
   }
 }
 
+DxosStudioPlugin.createOrganizationDirectGuardMiddleware = createOrganizationDirectGuardMiddleware;
 module.exports = DxosStudioPlugin;
 module.exports.default = DxosStudioPlugin;

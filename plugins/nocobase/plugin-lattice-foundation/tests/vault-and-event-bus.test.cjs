@@ -465,14 +465,22 @@ test('connector-vault enforces AES-256-GCM encryption, production fail-closed ke
     assert.equal(saveCtx.body.secrets, undefined);
     assert.equal(connectors[0].encryptedSecretsJson.includes('super-secret-n8n-token'), false);
 
-    // List (even as employee) returns org-a masked connector without secrets
+    // List denied for non-admin employee (403 VAULT_ADMIN_REQUIRED) and allowed with masked secrets for admin
+    await assert.rejects(
+      () => vault.list(makeHttpCtx({
+        method: 'GET',
+        state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
+      }), async () => {}),
+      (err) => err.status === 403 && err.code === 'VAULT_ADMIN_REQUIRED',
+    );
     const listCtx = makeHttpCtx({
       method: 'GET',
-      state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
     });
     await vault.list(listCtx, async () => {});
     assert.equal(listCtx.body.items.length, 1);
     assert.equal(listCtx.body.items[0].hasSecrets, true);
+    assert.equal(listCtx.body.items[0].decryptionError, false);
     assert.equal(listCtx.body.items[0].encryptedSecretsJson, undefined);
 
     // Internal resolveConnectorSecrets decrypts for server consumers and blocks cross-org
@@ -1040,7 +1048,9 @@ test('LatticeFoundationPlugin wires dxosVault, dxosEvents, static exports, clean
     assert.ok(resources.has('dxosVault'));
     assert.ok(resources.has('dxosEvents'));
     assert.ok(app.latticeVault?.resolveConnectorSecrets);
+    assert.equal(typeof app.latticeVault?.assertSafeConnectorUrlAsync, 'function');
     assert.ok(app.latticeEvents?.publishDomainEvent);
+    assert.equal(typeof app.latticeEvents?.decodeSigningSecret, 'function');
     assert.ok(app._latticeEventBusTimer);
     await plugin.unload();
     assert.equal(app._latticeEventBusTimer, null);
@@ -1055,9 +1065,418 @@ test('LatticeFoundationPlugin wires dxosVault, dxosEvents, static exports, clean
     'plugins/nocobase/plugin-lattice-foundation/src/server/migrations/20261125000100-connectors-events-webhooks.js',
     'plugins/nocobase/plugin-lattice-foundation/src/server/connector-vault.js',
     'plugins/nocobase/plugin-lattice-foundation/src/server/event-bus.js',
+    'plugins/nocobase/plugin-lattice-foundation/src/server/notification-center.js',
     'plugins/nocobase/plugin-lattice-foundation/tests/vault-and-event-bus.test.cjs',
+    'plugins/nocobase/plugin-lattice-foundation/tests/notifications-and-sla.test.cjs',
   ]) {
     const res = addSourceHeader(readFileSync(join(REPO_ROOT, rel), 'utf8'), rel);
     assert.equal(res.status, 'present', `${rel} missing valid SPDX header`);
+  }
+});
+
+test('Whole-Delta security regression: whsec_ base64, IPv6/numeric/single-label SSRF, DNS rebinding, decrypt degradation, and RBAC/PAT scopes', async () => {
+  const {
+    assertSafeConnectorUrl,
+    assertSafeConnectorUrlAsync,
+    encryptVaultSecrets,
+    registerConnectorVault,
+  } = require('../src/server/connector-vault');
+  const {
+    decodeSigningSecret,
+    signStandardWebhookPayload,
+    verifyStandardWebhookSignature,
+    publishDomainEvent,
+    dispatchDueWebhookDeliveries,
+    registerEventBus,
+  } = require('../src/server/event-bus');
+  const {
+    registerPaasApiKeys,
+    createPaasApiKeyAuthMiddleware,
+  } = require('../src/server/paas-api-keys');
+
+  // 1. Standard Webhooks whsec_ base64 decoding matches Standard Webhooks & n8n spec
+  const rawSecretBytes = crypto.randomBytes(32);
+  const whsec = `whsec_${rawSecretBytes.toString('base64')}`;
+  assert.equal(Buffer.compare(decodeSigningSecret(whsec), rawSecretBytes), 0);
+  assert.equal(Buffer.compare(decodeSigningSecret('plain-utf8-key'), Buffer.from('plain-utf8-key', 'utf8')), 0);
+
+  const tsSec = '1763900100';
+  const rawBody = '{"event":"alarm.raised","temp":9.4}';
+  const expectedMac = crypto.createHmac('sha256', rawSecretBytes)
+    .update(`msg_spec_1.${tsSec}.${rawBody}`, 'utf8')
+    .digest('base64');
+  const signed = signStandardWebhookPayload({
+    webhookId: 'msg_spec_1',
+    timestamp: tsSec,
+    body: rawBody,
+    secret: whsec,
+  });
+  assert.equal(signed, `v1,${expectedMac}`);
+  assert.equal(verifyStandardWebhookSignature({
+    webhookId: 'msg_spec_1',
+    timestamp: tsSec,
+    body: rawBody,
+    signature: signed,
+    secret: whsec,
+    nowMs: Number(tsSec) * 1000,
+  }), true);
+  assert.equal(verifyStandardWebhookSignature({
+    webhookId: 'msg_spec_1',
+    timestamp: tsSec,
+    body: rawBody,
+    signature: signed,
+    secret: 'whsec_',
+    nowMs: Number(tsSec) * 1000,
+  }), false);
+
+  // 2. SSRF blocking for ::ffff:, IPv4-compatible IPv6, numeric/octal/hex hosts, single-label hosts, and allowInternal gate
+  for (const unsafeUrl of [
+    'http://[::ffff:169.254.169.254]/latest/meta-data/',
+    'http://[::ffff:127.0.0.1]:8080/hook',
+    'http://[0:0:0:0:0:ffff:169.254.169.254]/hook',
+    'http://[::169.254.169.254]/hook',
+    'http://[::127.0.0.1]/hook',
+    'http://2130706433/hook',
+    'http://0x7f000001/hook',
+    'http://017700000001/hook',
+    'http://0177.0.0.1/hook',
+    'http://0x7f.0.0.1/hook',
+    'http://127.1/hook',
+    'mqtt://2130706433:1883',
+    'mqtt://0x7f000001:1883',
+    'http://redis:6379/',
+    'http://postgres:5432/',
+    'http://keycloak:8080/',
+    'http://metadata.google.internal/computeMetadata/v1/',
+    'http://metadata.azure.com/metadata/instance',
+  ]) {
+    assert.throws(
+      () => assertSafeConnectorUrl(unsafeUrl, { allowInternal: true }),
+      (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+      `Expected SSRF block even with allowInternal=true for ${unsafeUrl}`,
+    );
+  }
+
+  // Metadata NEVER allowed even if misconfigured in DX_CONNECTOR_INTERNAL_ALLOWLIST
+  assert.throws(
+    () => assertSafeConnectorUrl('http://169.254.169.254/latest/meta-data/', {
+      allowInternal: true,
+      env: { DX_CONNECTOR_INTERNAL_ALLOWLIST: '169.254.169.254,metadata.google.internal' },
+    }),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+  assert.throws(
+    () => assertSafeConnectorUrl('http://metadata.google.internal/computeMetadata/v1/', {
+      allowInternal: true,
+      env: { DX_CONNECTOR_INTERNAL_ALLOWLIST: 'metadata.google.internal' },
+    }),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+
+  // Internal compose allowlist blocked when allowInternal=false or NODE_ENV=production without opt-in
+  for (const internalUrl of [
+    'http://n8n:5678/webhook/test',
+    'http://orion-ld:1026/ngsi-ld/v1/entities',
+    'mqtt://mosquitto:1883',
+    'http://nodered:1880/health',
+    'http://nocobase:13000/api/dxos:health',
+    'http://localhost:5678/hook',
+    'http://127.0.0.1:8088/hook',
+  ]) {
+    const connectorType = internalUrl.startsWith('mqtt:') ? 'mqtt' : 'http_api';
+    assert.throws(
+      () => assertSafeConnectorUrl(internalUrl, { connectorType, allowInternal: false }),
+      (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+      `Expected allowInternal=false block for ${internalUrl}`,
+    );
+    assert.throws(
+      () => assertSafeConnectorUrl(internalUrl, { connectorType, env: { NODE_ENV: 'production' } }),
+      (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+      `Expected production default block for ${internalUrl}`,
+    );
+    assert.ok(
+      assertSafeConnectorUrl(internalUrl, {
+        connectorType,
+        env: { NODE_ENV: 'production', DX_ALLOW_INTERNAL_CONNECTORS: 'true' },
+      }),
+    );
+  }
+
+  // 3. Async DNS rebinding checks on assertSafeConnectorUrlAsync
+  for (const reboundIp of ['169.254.169.254', '127.0.0.1', '::ffff:127.0.0.1', '::ffff:169.254.169.254', '10.0.0.4', 'fe80::1', '::1', '0.0.0.0']) {
+    await assert.rejects(
+      () => assertSafeConnectorUrlAsync('https://rebind.example.org/hook', {
+        lookupImpl: async () => [{ address: reboundIp, family: reboundIp.includes(':') ? 6 : 4 }],
+      }),
+      (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+      `Expected DNS rebinding block for ${reboundIp}`,
+    );
+  }
+  await assert.rejects(
+    () => assertSafeConnectorUrlAsync('https://dual-stack.example.org/hook', {
+      lookupImpl: async () => [
+        { address: '93.184.216.34', family: 4 },
+        { address: '::ffff:127.0.0.1', family: 6 },
+      ],
+    }),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+  await assert.rejects(
+    () => assertSafeConnectorUrlAsync('https://missing-host.example.invalid/hook', {
+      lookupImpl: async () => {
+        throw Object.assign(new Error('getaddrinfo ENOTFOUND missing-host.example.invalid'), { code: 'ENOTFOUND' });
+      },
+    }),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+  assert.equal(
+    await assertSafeConnectorUrlAsync('https://public.example.org/hook', {
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    }),
+    'https://public.example.org/hook',
+  );
+
+  // 4. Production non-root vs root internal connector rules, DNS-rebinding in testConnection/dispatchNow,
+  //    decrypt-error resilience on dxosVault:list, employee 403s, and wrong-scope PAT 403s
+  const { db, connectors } = makeInMemoryVaultEventDb({ withEmployeesForRoot: true });
+  const resources = new Map();
+  const app = {
+    db,
+    resourceManager: { define(def) { resources.set(def.name, def.actions); }, use() {} },
+    acl: { allow() {} },
+    logger: { error() {}, warn() {}, info() {} },
+  };
+  const prodVaultEnv = { NODE_ENV: 'production', DX_VAULT_MASTER_KEY: 'prod-vault-secret-2026' };
+  const probeFetchCalls = [];
+  const busFetchCalls = [];
+  const dnsMap = new Map([
+    ['rebind.attacker.example', [{ address: '169.254.169.254', family: 4 }]],
+    ['webhook-rebind.example', [{ address: '::ffff:127.0.0.1', family: 6 }]],
+    ['public.partner.example', [{ address: '93.184.216.34', family: 4 }]],
+  ]);
+  const testLookup = async (host) => dnsMap.get(host) || [{ address: '93.184.216.34', family: 4 }];
+
+  registerPaasApiKeys(app);
+  registerConnectorVault(app, {
+    env: prodVaultEnv,
+    lookupImpl: testLookup,
+    fetchImpl: async (url, init) => {
+      probeFetchCalls.push({ url, init });
+      return { ok: true, status: 200, body: { cancel: async () => {} } };
+    },
+  });
+  registerEventBus(app, {
+    startDrainer: false,
+    env: prodVaultEnv,
+    lookupImpl: testLookup,
+    fetchImpl: async (url, init) => {
+      busFetchCalls.push({ url, init });
+      return { ok: true, status: 200, body: { cancel: async () => {} } };
+    },
+  });
+
+  const vault = resources.get('dxosVault');
+  const dxosEvents = resources.get('dxosEvents');
+  const keyActions = resources.get('dxosApiKeys');
+  const authMw = createPaasApiKeyAuthMiddleware(db);
+
+  // In production, ldx_admin cannot save/probe internal compose hosts; verified root CAN
+  await assert.rejects(
+    () => vault.save(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { connectorKey: 'admin-n8n', name: 'Blocked Admin n8n', connectorType: 'n8n', baseUrl: 'http://n8n:5678' } },
+    }), async () => {}),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+  await assert.rejects(
+    () => vault.testConnection(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { connectorType: 'http_api', baseUrl: 'http://127.0.0.1:8080/health' } },
+    }), async () => {}),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+  await assert.rejects(
+    () => dxosEvents.saveSubscription(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { subscriptionKey: 'admin-internal', name: 'Blocked', targetUrl: 'http://n8n:5678/webhook/test' } },
+    }), async () => {}),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+
+  // Verified root succeeds on internal compose host in production
+  const rootSaveCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 1 }, currentRole: 'root' },
+    params: { values: { organizationId: 'org-a', connectorKey: 'root-n8n', name: 'Root n8n', connectorType: 'n8n', baseUrl: 'http://n8n:5678' } },
+  });
+  await vault.save(rootSaveCtx, async () => {});
+  assert.equal(rootSaveCtx.body.connectorKey, 'root-n8n');
+
+  // DNS rebinding blocks testConnection BEFORE fetchImpl runs
+  await assert.rejects(
+    () => vault.testConnection(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { connectorType: 'http_api', baseUrl: 'https://rebind.attacker.example/hook' } },
+    }), async () => {}),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+  assert.equal(probeFetchCalls.length, 0);
+
+  // DNS rebinding in webhook delivery blocks fetchImpl and marks delivery retry_wait cleanly
+  await dxosEvents.saveSubscription(makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+    params: {
+      values: {
+        subscriptionKey: 'rebind-hook',
+        name: 'Rebind Hook',
+        targetUrl: 'https://webhook-rebind.example/events',
+        eventPattern: 'rebind.*',
+      },
+    },
+  }), async () => {});
+  await publishDomainEvent(db, { organizationId: 'org-a', type: 'rebind.test', data: { ping: 1 } });
+  const dispatchRebindRes = await dispatchDueWebhookDeliveries(db, {
+    organizationId: 'org-a',
+    env: prodVaultEnv,
+    lookupImpl: testLookup,
+    fetchImpl: async (url, init) => {
+      busFetchCalls.push({ url, init });
+      return { ok: true, status: 200, body: { cancel: async () => {} } };
+    },
+  });
+  assert.equal(dispatchRebindRes.retryWaitCount, 1);
+  assert.equal(busFetchCalls.length, 0);
+
+  // Corrupted / rotated ciphertext in DB degrades gracefully on dxosVault:list instead of 500
+  const goodEnc = encryptVaultSecrets({ apiKey: 'ok-1' }, prodVaultEnv);
+  connectors.push({
+    id: 901,
+    organizationId: 'org-a',
+    connectorKey: 'corrupt-conn',
+    name: 'Corrupt Key Connector',
+    connectorType: 'webhook',
+    baseUrl: 'https://public.partner.example/hook',
+    authType: 'api_key',
+    encryptedSecretsJson: 'bad-iv:bad-tag:deadbeef',
+    secretVersion: 1,
+    active: true,
+  });
+  connectors.push({
+    id: 902,
+    organizationId: 'org-a',
+    connectorKey: 'rotated-key-conn',
+    name: 'Old Master Key Connector',
+    connectorType: 'webhook',
+    baseUrl: 'https://public.partner.example/hook2',
+    authType: 'api_key',
+    encryptedSecretsJson: encryptVaultSecrets({ apiKey: 'old' }, { NODE_ENV: 'production', DX_VAULT_MASTER_KEY: 'previous-rotated-key' }),
+    secretVersion: 1,
+    active: true,
+  });
+  connectors.push({
+    id: 903,
+    organizationId: 'org-a',
+    connectorKey: 'healthy-conn',
+    name: 'Healthy Connector',
+    connectorType: 'webhook',
+    baseUrl: 'https://public.partner.example/hook3',
+    authType: 'api_key',
+    encryptedSecretsJson: goodEnc,
+    secretVersion: 1,
+    active: true,
+  });
+
+  const adminListCtx = makeHttpCtx({
+    method: 'GET',
+    state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+  });
+  await vault.list(adminListCtx, async () => {});
+  const corruptItem = adminListCtx.body.items.find((c) => c.connectorKey === 'corrupt-conn');
+  const rotatedItem = adminListCtx.body.items.find((c) => c.connectorKey === 'rotated-key-conn');
+  const healthyItem = adminListCtx.body.items.find((c) => c.connectorKey === 'healthy-conn');
+  assert.equal(corruptItem.decryptionError, true);
+  assert.deepEqual(corruptItem.secretKeys, []);
+  assert.equal(corruptItem.hasSecrets, true);
+  assert.equal(rotatedItem.decryptionError, true);
+  assert.deepEqual(rotatedItem.secretKeys, []);
+  assert.equal(rotatedItem.hasSecrets, true);
+  assert.equal(healthyItem.decryptionError, false);
+  assert.deepEqual(healthyItem.secretKeys, ['apiKey']);
+
+  // Non-admin employee denied 403 on dxosVault:list & dxosEvents:listEvents/listSubscriptions/listDeliveries
+  await assert.rejects(
+    () => vault.list(makeHttpCtx({ method: 'GET', state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' } }), async () => {}),
+    (err) => err.status === 403 && err.code === 'VAULT_ADMIN_REQUIRED',
+  );
+  for (const readAction of ['listEvents', 'listSubscriptions', 'listDeliveries']) {
+    await assert.rejects(
+      () => dxosEvents[readAction](makeHttpCtx({ method: 'GET', state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' } }), async () => {}),
+      (err) => err.status === 403 && err.code === 'EVENTS_ADMIN_REQUIRED',
+      `Expected 403 EVENTS_ADMIN_REQUIRED for employee on dxosEvents:${readAction}`,
+    );
+  }
+
+  // Wrong-scope PAT (['ledger']) denied 403 API_KEY_SCOPE_INSUFFICIENT on ALL dxosVault:* and dxosEvents:* actions
+  const ledgerIssueCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 10, username: 'org-a-admin' }, currentRole: 'ldx_admin' },
+    params: { values: { name: 'Ledger Only Admin PAT', roleName: 'ldx_admin', scopes: ['ledger'] } },
+  });
+  await keyActions.issue(ledgerIssueCtx, async () => {});
+  const ledgerToken = ledgerIssueCtx.body.token;
+
+  const invokeWithPat = async (token, resourceName, actionName, method, values = {}) => {
+    const reqCtx = makeHttpCtx({
+      method,
+      headers: { 'x-lattice-api-key': token },
+      params: { resourceName, actionName, values },
+    });
+    const handler = resourceName === 'dxosVault' ? vault[actionName] : dxosEvents[actionName];
+    await authMw(reqCtx, async () => handler(reqCtx, async () => {}));
+    return reqCtx;
+  };
+
+  for (const [resName, actName, httpMethod] of [
+    ['dxosVault', 'list', 'GET'],
+    ['dxosVault', 'save', 'POST'],
+    ['dxosVault', 'rotateSecret', 'POST'],
+    ['dxosVault', 'delete', 'POST'],
+    ['dxosVault', 'testConnection', 'POST'],
+    ['dxosEvents', 'listEvents', 'GET'],
+    ['dxosEvents', 'listSubscriptions', 'GET'],
+    ['dxosEvents', 'listDeliveries', 'GET'],
+    ['dxosEvents', 'publish', 'POST'],
+    ['dxosEvents', 'saveSubscription', 'POST'],
+    ['dxosEvents', 'toggleSubscription', 'POST'],
+    ['dxosEvents', 'deleteSubscription', 'POST'],
+    ['dxosEvents', 'dispatchNow', 'POST'],
+    ['dxosEvents', 'replayDlq', 'POST'],
+    ['dxosEvents', 'resetCircuit', 'POST'],
+  ]) {
+    await assert.rejects(
+      () => invokeWithPat(ledgerToken, resName, actName, httpMethod),
+      (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+      `Expected 403 API_KEY_SCOPE_INSUFFICIENT for ['ledger'] PAT on ${resName}:${actName}`,
+    );
+  }
+
+  // Valid ['read'] PAT succeeds on dxosVault:list & dxosEvents:list* for ldx_admin
+  const readIssueCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 10, username: 'org-a-admin' }, currentRole: 'ldx_admin' },
+    params: { values: { name: 'Read Admin PAT', roleName: 'ldx_admin', scopes: ['read'] } },
+  });
+  await keyActions.issue(readIssueCtx, async () => {});
+  const readToken = readIssueCtx.body.token;
+  const patVaultList = await invokeWithPat(readToken, 'dxosVault', 'list', 'GET');
+  assert.ok(Array.isArray(patVaultList.body.items));
+  for (const act of ['listEvents', 'listSubscriptions', 'listDeliveries']) {
+    const patEvList = await invokeWithPat(readToken, 'dxosEvents', act, 'GET');
+    assert.ok(Array.isArray(patEvList.body.items));
   }
 });

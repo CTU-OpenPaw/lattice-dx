@@ -11,9 +11,28 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const Module = require('node:module');
 const path = require('node:path');
 
-const { createDxosBuilderActions, buildSafePgIndexName } = require('../src/server/domain-builder');
+const {
+  attachAndVerifyPgRls,
+  createDxosBuilderActions,
+  buildSafePgIndexName,
+  generateOrEnsureOrgPkiKey,
+} = require('../src/server/domain-builder');
+
+const origLoad = Module._load;
+Module._load = function mockedNocobaseLoad(request, parent, isMain) {
+  if (request === '@nocobase/server') return { Plugin: class {}, Migration: class {} };
+  if (request === '@nocobase/database') return { defineCollection: (def) => def };
+  return origLoad.call(this, request, parent, isMain);
+};
+let createOrganizationDirectGuardMiddleware;
+try {
+  ({ createOrganizationDirectGuardMiddleware } = require('../src/server'));
+} finally {
+  Module._load = origLoad;
+}
 const { handleDomainEvent } = require('../src/server/automation-engine');
 const {
   exportSolutionBundle,
@@ -167,21 +186,38 @@ function makeCtx({ userId = 1, role = 'ldx_admin', organizationId = 'org-a', par
 test('createDomain validates collection & field specs, verifies PG RLS, creates index, grants RBAC, creates /p/<slug>, and listDomains inspects it', async () => {
   const db = makeBuilderDb({
     latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
-    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+    rolesUsers: [
+      { userId: 1, roleName: 'root' },
+      { userId: 20, roleName: 'ldx_admin' },
+    ],
   });
   const builder = createDxosBuilderActions(db);
 
-  // Reject invalid names and system collections
+  // Non-root ldx_admin is blocked 403 ROOT_ADMIN_REQUIRED on createDomain mutation
   await assert.rejects(
     () => builder.createDomain(makeCtx({
       userId: 20,
+      role: 'ldx_admin',
+      params: { collectionName: 'latticeCustomSensors', fields: [{ name: 'x', type: 'string' }] },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'ROOT_ADMIN_REQUIRED',
+  );
+
+  // Reject invalid names, system collections, and unsafe belongsTo foreignKey
+  await assert.rejects(
+    () => builder.createDomain(makeCtx({
+      userId: 1,
+      role: 'root',
+      isRoot: true,
       params: { collectionName: 'users', fields: [{ name: 'x', type: 'string' }] },
     }), async () => {}),
     (err) => err.status === 400 && err.code === 'INVALID_COLLECTION_NAME',
   );
   await assert.rejects(
     () => builder.createDomain(makeCtx({
-      userId: 20,
+      userId: 1,
+      role: 'root',
+      isRoot: true,
       params: {
         collectionName: 'latticeCustomSensors',
         fields: [{ name: '__proto__', type: 'string' }],
@@ -191,13 +227,27 @@ test('createDomain validates collection & field specs, verifies PG RLS, creates 
   );
   await assert.rejects(
     () => builder.createDomain(makeCtx({
-      userId: 20,
+      userId: 1,
+      role: 'root',
+      isRoot: true,
       params: {
         collectionName: 'latticeCustomSensors',
         fields: [{ name: 'owner', type: 'belongsTo', target: 'users' }],
       },
     }), async () => {}),
     (err) => err.status === 400 && err.code === 'INVALID_BELONGS_TO_TARGET',
+  );
+  await assert.rejects(
+    () => builder.createDomain(makeCtx({
+      userId: 1,
+      role: 'root',
+      isRoot: true,
+      params: {
+        collectionName: 'latticeCustomSensors',
+        fields: [{ name: 'asset', type: 'belongsTo', target: 'latticeAssets', foreignKey: '__proto__' }],
+      },
+    }), async () => {}),
+    (err) => err.status === 400 && err.code === 'INVALID_FOREIGN_KEY',
   );
 
   // Verify safe PG index length truncation
@@ -208,7 +258,9 @@ test('createDomain validates collection & field specs, verifies PG RLS, creates 
   db.setRlsVerifyDisabled(true);
   await assert.rejects(
     () => builder.createDomain(makeCtx({
-      userId: 20,
+      userId: 1,
+      role: 'root',
+      isRoot: true,
       params: {
         collectionName: 'latticeCustomInspections',
         fields: [{ name: 'code', type: 'string', required: true }],
@@ -218,9 +270,11 @@ test('createDomain validates collection & field specs, verifies PG RLS, creates 
   );
   db.setRlsVerifyDisabled(false);
 
-  // Create valid custom domain with belongsTo + enumValues + portal page
+  // Create valid custom domain with belongsTo + enumValues + NocoBase 2.2.50 Multi-Portal page
   const createCtx = makeCtx({
-    userId: 20,
+    userId: 1,
+    role: 'root',
+    isRoot: true,
     params: {
       collectionName: 'latticeCustomInspections',
       title: 'Cold-Chain Inspections',
@@ -248,10 +302,18 @@ test('createDomain validates collection & field specs, verifies PG RLS, creates 
   assert.equal(db.store.dataSourcesRolesResources.length, 3);
   assert.equal(dom.portalPage.path, '/p/inspections');
   assert.equal(db.store.rolesDesktopRoutes.length, 3);
-  assert.ok(db.store.flowModels.some((m) => m.use === 'TableBlockModel'));
+  // NocoBase 2.2.50 Multi-Portal layout + junction + GridModel hierarchy
+  assert.ok(db.store.uiLayouts.some((l) => l.uid === 'ldx-portal-inspections' && l.routePath === '/p/inspections'));
+  assert.ok(db.store.desktopRoutes.some((r) => r.type === 'flowPage' && r.schemaUid === dom.portalPage.schemaUid));
+  assert.ok(db.store.desktopRoutes.some((r) => r.type === 'tabs' && r.parentId === dom.portalPage.routeId));
+  assert.ok(db.store.desktopRoutesUiLayouts.some((link) => link.uiLayoutUid === 'ldx-portal-inspections' && link.desktopRouteId === dom.portalPage.routeId));
+  assert.ok(db.store.flowModels.some((m) => m.use === 'PageModel' && m.uid === dom.portalPage.schemaUid));
+  assert.ok(db.store.flowModels.some((m) => m.use === 'PageTabModel' && m.parentId === dom.portalPage.schemaUid));
+  assert.ok(db.store.flowModels.some((m) => m.use === 'GridModel' && m.parentId === dom.portalPage.tabSchemaUid));
+  assert.ok(db.store.flowModels.some((m) => m.use === 'TableBlockModel' && m.parentId === dom.portalPage.gridUid));
 
-  // listDomains lists schema, RLS status, and bound portal page
-  const listCtx = makeCtx({ userId: 20, params: {} });
+  // listDomains allows org-scoped ldx_admin to inspect schema, RLS status, and bound portal page
+  const listCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
   await builder.listDomains(listCtx, async () => {});
   assert.equal(listCtx.body.items.length, 1);
   assert.equal(listCtx.body.items[0].collectionName, 'latticeCustomInspections');
@@ -266,33 +328,44 @@ test('installBusinessPack cmms-maintenance is idempotent and wires end-to-end al
       { userId: 21, organizationId: 'org-a', active: true },
     ],
     rolesUsers: [
+      { userId: 1, roleName: 'root' },
       { userId: 20, roleName: 'ldx_admin' },
       { userId: 21, roleName: 'ldx_manager' },
     ],
   });
   const builder = createDxosBuilderActions(db);
 
-  // Before install
-  const beforeCtx = makeCtx({ userId: 20, params: {} });
+  // Before install (org-scoped ldx_admin can read catalog)
+  const beforeCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
   await builder.listBusinessPacks(beforeCtx, async () => {});
   assert.equal(beforeCtx.body.items[0].packKey, 'cmms-maintenance');
   assert.equal(beforeCtx.body.items[0].installed, false);
 
-  // First install + repeat install (idempotency)
-  const install1 = makeCtx({ userId: 20, params: { packKey: 'cmms-maintenance' } });
+  // Non-root ldx_admin cannot mutate platform packs/schemas
+  await assert.rejects(
+    () => builder.installBusinessPack(makeCtx({ userId: 20, role: 'ldx_admin', params: { packKey: 'cmms-maintenance' } }), async () => {}),
+    (err) => err.status === 403 && err.code === 'ROOT_ADMIN_REQUIRED',
+  );
+
+  // First install + repeat install by verified root (idempotency)
+  const install1 = makeCtx({ userId: 1, role: 'root', isRoot: true, params: { packKey: 'cmms-maintenance', organizationId: 'org-a' } });
   await builder.installBusinessPack(install1, async () => {});
   assert.equal(install1.body.installed, true);
   assert.equal(install1.body.domain.collectionName, 'latticeCustomWorkOrders');
   assert.equal(install1.body.dmnTable.tableKey, 'cmms_priority_routing_v1');
   assert.equal(install1.body.automationRule.ruleKey, 'auto_cmms_on_coldchain_fault');
 
-  const install2 = makeCtx({ userId: 20, params: { packKey: 'cmms-maintenance' } });
+  const install2 = makeCtx({ userId: 1, role: 'root', isRoot: true, params: { packKey: 'cmms-maintenance', organizationId: 'org-a' } });
   await builder.installBusinessPack(install2, async () => {});
   assert.equal(db.store.latticeDecisionTables.length, 1);
   assert.equal(db.store.latticeAutomationRules.length, 1);
-  assert.equal(db.store.desktopRoutes.filter((r) => r.type === 'page').length, 1);
+  assert.equal(db.store.desktopRoutes.filter((r) => r.type === 'flowPage').length, 1);
+  assert.ok(db.store.uiLayouts.some((l) => l.uid === 'ldx-portal-cmms' && l.routePath === '/p/cmms'));
+  assert.ok(db.store.desktopRoutesUiLayouts.some((link) => link.uiLayoutUid === 'ldx-portal-cmms'));
+  assert.ok(db.store.flowModels.some((m) => m.use === 'GridModel'));
+  assert.ok(db.store.flowModels.some((m) => m.use === 'TableBlockModel'));
 
-  const afterCtx = makeCtx({ userId: 20, params: {} });
+  const afterCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
   await builder.listBusinessPacks(afterCtx, async () => {});
   assert.equal(afterCtx.body.items[0].installed, true);
 
@@ -341,18 +414,25 @@ test('provisionTenant and listTenants provision isolated org, departments, locat
   assert.equal(prov1.body.slaCount, 4);
   assert.equal(prov1.body.adminAccount.username, 'saigon_admin');
   assert.equal(prov1.body.adminAccount.role, 'ldx_admin');
+  assert.equal(prov1.body.adminAccount.tempPassword, undefined);
 
-  // Password must be hashed, never plaintext
+  // Raw password is passed to NocoBase PasswordField (no double-hash scrypt$) and user carries roles without synthetic organizationId
   const createdUser = db.store.users.find((u) => u.username === 'saigon_admin');
-  assert.ok(createdUser.password.startsWith('scrypt$'));
+  assert.equal(createdUser.password, 'StrongTempPassword123!');
+  assert.equal(createdUser.organizationId, undefined);
+  assert.deepEqual(createdUser.roles, ['ldx_admin']);
+  assert.ok(db.store.rolesUsers.some((ru) => Number(ru.userId) === createdUser.id && ru.roleName === 'ldx_admin'));
 
-  // Provision second tenant to check isolation
-  await builder.provisionTenant(makeCtx({
+  // Auto-generated password reveals one-time tempPassword when adminPassword omitted
+  const prov2 = makeCtx({
     userId: 1,
     role: 'root',
     isRoot: true,
     params: { organizationId: 'pharma-vn-02', name: 'Hanoi Med', adminUsername: 'hanoi_admin' },
-  }), async () => {});
+  });
+  await builder.provisionTenant(prov2, async () => {});
+  assert.equal(typeof prov2.body.adminAccount.tempPassword, 'string');
+  assert.ok(prov2.body.adminAccount.tempPassword.length >= 12);
 
   // Cross-org existing user conflict blocked
   await assert.rejects(
@@ -397,6 +477,137 @@ test('provisionTenant and listTenants provision isolated org, departments, locat
   await builder.listTenants(orgAdminList, async () => {});
   assert.equal(orgAdminList.body.items.length, 1);
   assert.equal(orgAdminList.body.items[0].organizationId, 'pharma-vn-01');
+});
+
+test('Builder RBAC/PAT scope enforcement, latticeOrganizations direct CRUD guard, user hijack block, fallback RLS GUC, and prod PKI fail-closed', async () => {
+  const db = makeBuilderDb({
+    latticeOrganizations: [
+      { id: 1, organizationId: 'org-a', name: 'Org A' },
+      { id: 2, organizationId: 'org-b', name: 'Org B' },
+    ],
+    latticeEmployees: [
+      { userId: 20, organizationId: 'org-a', active: true },
+      { userId: 21, organizationId: 'org-a', active: true },
+      { userId: 22, organizationId: 'org-b', active: true },
+    ],
+    rolesUsers: [
+      { userId: 1, roleName: 'root' },
+      { userId: 20, roleName: 'ldx_admin' },
+      { userId: 21, roleName: 'ldx_manager' },
+      { userId: 22, roleName: 'ldx_admin' },
+    ],
+    users: [
+      { id: 1, username: 'superroot' },
+      { id: 30, username: 'orphan_user', email: 'orphan@example.com' },
+      { id: 31, username: 'multi_org_user', email: 'multi@example.com' },
+    ],
+  });
+  db.store.latticeEmployees.push(
+    { id: 90, userId: 31, organizationId: 'org-a', active: true },
+    { id: 91, userId: 31, organizationId: 'org-b', active: true },
+  );
+
+  const builder = createDxosBuilderActions(db);
+  const orgGuard = createOrganizationDirectGuardMiddleware(db);
+
+  // 1. Forged isRoot=true without rolesUsers root binding, plus ldx_manager/ldx_admin, are blocked on mutations
+  for (const ctx of [
+    makeCtx({ userId: 20, role: 'root', isRoot: true, params: { organizationId: 'org-new', name: 'New' } }),
+    makeCtx({ userId: 21, role: 'ldx_manager', isRoot: false, params: { organizationId: 'org-new', name: 'New' } }),
+  ]) {
+    await assert.rejects(
+      () => builder.provisionTenant(ctx, async () => {}),
+      (err) => err.status === 403 && err.code === 'ROOT_ADMIN_REQUIRED',
+    );
+  }
+
+  // Non-admin ldx_manager is blocked on builder reads
+  await assert.rejects(
+    () => builder.listDomains(makeCtx({ userId: 21, role: 'ldx_manager' }), async () => {}),
+    (err) => err.status === 403 && err.code === 'FORBIDDEN',
+  );
+  await assert.rejects(
+    () => builder.listTenants(makeCtx({ userId: 21, role: 'ldx_manager' }), async () => {}),
+    (err) => err.status === 403 && err.code === 'FORBIDDEN',
+  );
+
+  // 2. Real ctx.state.latticeApiKey PAT scopes enforced on builder mutations and reads
+  const readOnlyRootPat = {
+    ...makeCtx({ userId: 1, role: 'root', isRoot: true, params: { packKey: 'cmms-maintenance', organizationId: 'org-a' } }),
+    state: {
+      currentUser: { id: 1, username: 'root', isRoot: true },
+      currentRole: 'root',
+      currentRoles: ['root'],
+      latticeApiKey: { id: 90, scopes: ['read'] },
+    },
+  };
+  await assert.rejects(
+    () => builder.installBusinessPack(readOnlyRootPat, async () => {}),
+    (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+  );
+  await builder.listDomains(readOnlyRootPat, async () => {});
+
+  const dmnOnlyPat = {
+    ...readOnlyRootPat,
+    state: { ...readOnlyRootPat.state, latticeApiKey: { id: 91, scopes: ['dmn'] } },
+  };
+  await assert.rejects(
+    () => builder.listTenants(dmnOnlyPat, async () => {}),
+    (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
+  );
+
+  // 3. Direct REST & association & chart guard on latticeOrganizations blocks non-root (incl. forged isRoot), preserves dxosBuilder:listTenants
+  for (const blockedReq of [
+    { state: { currentUser: { id: 20 }, currentRole: 'ldx_admin' }, action: { resourceName: 'latticeOrganizations', actionName: 'list', params: {} } },
+    { state: { currentUser: { id: 20 }, currentRole: 'ldx_admin' }, action: { resourceName: 'latticeOrganizations', actionName: 'create', params: {} } },
+    { state: { currentUser: { id: 20, isRoot: true }, currentRole: 'root' }, action: { resourceName: 'latticeOrganizations.employees', actionName: 'list', params: {} } },
+    { state: { currentUser: { id: 20 }, currentRole: 'ldx_admin' }, action: { resourceName: 'charts', actionName: 'queryData', params: { collection: 'latticeOrganizations' } } },
+  ]) {
+    await assert.rejects(
+      () => orgGuard(blockedReq, async () => {}),
+      (err) => err.status === 403 && err.code === 'ORGANIZATION_DIRECT_CRUD_FORBIDDEN',
+    );
+  }
+  let rootOrgGuardPassed = false;
+  await orgGuard({
+    state: { currentUser: { id: 1, isRoot: true }, currentRole: 'root', currentRoles: ['root'] },
+    action: { resourceName: 'latticeOrganizations', actionName: 'list', params: {} },
+  }, async () => { rootOrgGuardPassed = true; });
+  assert.equal(rootOrgGuardPassed, true);
+
+  const scopedTenantCtx = makeCtx({ userId: 20, role: 'ldx_admin', organizationId: 'org-a', params: {} });
+  await builder.listTenants(scopedTenantCtx, async () => {});
+  assert.deepEqual(scopedTenantCtx.body.items.map((o) => o.organizationId), ['org-a']);
+
+  // 4. provisionTenant refuses existing root user, orphan user without membership, and multi-org user
+  for (const conflictUsername of ['superroot', 'orphan_user', 'multi_org_user']) {
+    await assert.rejects(
+      () => builder.provisionTenant(makeCtx({
+        userId: 1,
+        role: 'root',
+        isRoot: true,
+        params: { organizationId: 'org-a', name: 'Org A', adminUsername: conflictUsername },
+      }), async () => {}),
+      (err) => err.status === 403 && err.code === 'USER_ORG_CONFLICT',
+    );
+  }
+
+  // 5. Fallback PG RLS policy in domain-builder uses exact app.current_org GUC predicate
+  const fallbackDb = makeBuilderDb();
+  fallbackDb.attachLatticeRlsPolicy = undefined;
+  const rlsResult = await attachAndVerifyPgRls(fallbackDb, 'latticeCustomCheck', { pgRls: null });
+  assert.equal(rlsResult.attached, true);
+  assert.equal(rlsResult.verified, true);
+  const policySql = fallbackDb.queries.map((q) => q.sql).join('\n');
+  assert.match(policySql, /current_setting\('app\.current_org', true\)/);
+  assert.doesNotMatch(policySql, /app\.organization_id/);
+  assert.match(policySql, /IS NULL OR .* = '' OR .* = '\*'/);
+
+  // 6. Production PKI master key fails closed when no key material configured
+  await assert.rejects(
+    () => generateOrEnsureOrgPkiKey(fallbackDb, 'org-prod', { env: { NODE_ENV: 'production' } }),
+    (err) => err.status === 500 && err.code === 'PKI_MASTER_KEY_MISSING',
+  );
 });
 
 test('Solution Bundle v3 governance supports automationRules & secret-free webhookSubscriptions export, diff, apply, and validation', async () => {
