@@ -64,6 +64,18 @@ function buildScenarioPresets(rule, graph) {
     presets.push({ key: 'alarm_critical', label: 'Sự cố Critical (CMMS + HITL)', event: { type: 'alarm.triggered', data: { severity: 'critical', deviceKey: 'cold-truck-ct-01', assetId: 4, temperatureC: -11.4, message: 'Kho lạnh vượt ngưỡng -15°C' } } });
     presets.push({ key: 'alarm_warning', label: 'Cảnh báo Warning', event: { type: 'alarm.triggered', data: { severity: 'warning', deviceKey: 'cold-truck-ct-01', assetId: 4, temperatureC: -17.8 } } });
   }
+  if (nodes.some((n) => n?.type === 'integration.http' && (String(n.config?.connectorKey || '').includes('n8n') || String(n.config?.path || '').includes('orchestrator')))) {
+    presets.push({
+      key: 'n8n_critical_batch',
+      label: 'n8n Critical Batch (PKI Sign)',
+      event: { type: evtType, data: { id: 1, code: 'REQ-COMP-01', amount: 125000000, severity: 'critical', temperatureC: -9.5, slaOverdueMinutes: 45, items: [{ sku: 'LOT-A1', qty: 40, value: 75000000 }, { sku: 'LOT-B2', qty: 25, value: 50000000 }] } },
+    });
+    presets.push({
+      key: 'n8n_escalated',
+      label: 'n8n Escalated Branch',
+      event: { type: evtType, data: { id: 1, code: 'REQ-ESC-02', amount: 35000000, severity: 'high', slaOverdueMinutes: 20, items: [{ sku: 'LOT-C3', qty: 10, value: 35000000 }] } },
+    });
+  }
   if (!presets.length) {
     presets.push({ key: 'default', label: 'Sự kiện mặc định', event: { type: evtType, data: { id: 1, status: 'active', severity: 'high' } } });
   }

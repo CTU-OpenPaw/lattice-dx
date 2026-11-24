@@ -22,15 +22,16 @@ const { createNodePalette } = require('./node-palette');
 const { createPlaybackBar } = require('./playback-bar');
 const { createNodeInspector } = require('./node-inspector');
 const { createFlowListView } = require('./flow-list-view');
+const { createN8nSetupModal } = require('./n8n-setup-modal');
 
 const freshDoc = (seed) => makeFreshDoc(seed, makeBlankFlow);
 
 function createFlowStudioApp(client, React, _antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
-  const [FlowCanvas, NodePalette, PlaybackBar, NodeInspector, FlowListView, FlowTestRunner] = [
+  const [FlowCanvas, NodePalette, PlaybackBar, NodeInspector, FlowListView, FlowTestRunner, N8nSetupModal] = [
     createFlowCanvas(React, vendor), createNodePalette(React), createPlaybackBar(React),
-    createNodeInspector(React), createFlowListView(React), createFlowTestRunner(React),
+    createNodeInspector(React), createFlowListView(React), createFlowTestRunner(React), createN8nSetupModal(React),
   ];
 
   return function FlowStudioApp(props = {}) {
@@ -164,8 +165,10 @@ function createFlowStudioApp(client, React, _antd, app) {
         if (d.message) refs.reportFb({ type: 'success', text: String(d.message) });
         if (d.applied === true) refs.loadAll?.();
       };
+      const onAiOpening = () => { setDoc((d) => (d.selId ? { ...d, selId: null } : d)); setUi((u) => ({ ...u, paletteOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false, n8nOpen: false, insertEdge: null, appendSource: null })); };
       window.addEventListener('latticedx:flow-updated', onFlowUpdated);
-      return () => window.removeEventListener?.('latticedx:flow-updated', onFlowUpdated);
+      window.addEventListener('latticedx:ai-chat-opening', onAiOpening);
+      return () => { window.removeEventListener?.('latticedx:flow-updated', onFlowUpdated); window.removeEventListener?.('latticedx:ai-chat-opening', onAiOpening); };
     }, []);
 
     const makeNode = (schema, pos) => ({ id: nextId(String(schema.type || 'node').split('.').pop() || 'node', doc.graph), type: schema.type, label: schema.label || schema.type, continueOnFail: false, position: pos || { x: 120 + (doc.graph.nodes.length % 5) * 240, y: 160 + Math.floor(doc.graph.nodes.length / 5) * 140 }, config: sanitizeSafeValue(schema.defaultConfig || {}) });
@@ -229,15 +232,6 @@ function createFlowStudioApp(client, React, _antd, app) {
     const handleQuickTestNode = (nodeId) => { const ev = sampleEvt(buildSavePayload()); setDoc((d) => ({ ...d, selId: nodeId })); setUi((u) => ({ ...u, inspTab: 'output', inspTabSeq: (u.inspTabSeq || 0) + 1 })); return handleTestNode(nodeId, { event: ev, data: ev.data || {}, dmn: {}, steps: {} }); };
     const handleResume = (runUid, decision) => runAction('resume', 'dxosAutomations:resumeRun', { ...orgPayload, runUid, decision }, doneRun(`HITL ${decision} hoàn tất`));
     const openRoute = (path) => { if (app?.router?.navigate) app.router.navigate(path); else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(path) || path); };
-    const openAiArchitect = () => {
-      setDoc((d) => (d.selId ? { ...d, selId: null } : d));
-      setUi((u) => ({ ...u, paletteOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false, insertEdge: null, appendSource: null }));
-      const aiCtx = app?.flowEngine?.context?.ai || app?.context?.ai;
-      const fallback = () => reportFb({ type: 'info', text: 'Hãy mở trợ lý DX-OS Architect ở góc dưới bên phải màn hình để tạo hoặc sửa workflow.' });
-      if (!aiCtx || typeof aiCtx.triggerTask !== 'function') return fallback();
-      const sysCtx = `[Ngữ cảnh Workflow Automation: organizationId="${cleanCtx(effectiveOrg, 64)}", view="${ui.view}", ruleKey="${cleanCtx(doc.rule.ruleKey, 64)}", ruleName="${cleanCtx(doc.rule.name, 80)}", nodeCount=${(doc.graph.nodes || []).length}${selectedNode ? `, selectedNodeId="${cleanCtx(selectedNode.id, 64)}", selectedNodeType="${cleanCtx(selectedNode.type, 48)}"` : ''}${runUi.selectedRun?.runUid ? `, selectedRunUid="${cleanCtx(runUi.selectedRun.runUid, 64)}", selectedRunStatus="${cleanCtx(runUi.selectedRun.status, 32)}"` : ''}]\nHãy giao tiếp bằng tiếng Việt tự nhiên, sử dụng công cụ dxos_configure_workflow để dựng bản nháp, chỉnh sửa node, chạy thử Dry-Run hoặc lưu quy trình trực tiếp lên Canvas.`;
-      return Promise.resolve(aiCtx.triggerTask({ aiEmployee: 'dxos-architect', auto: true, open: true, tasks: [{ autoSend: false, message: { system: sysCtx } }] })).catch(fallback);
-    };
     const handleImportDsl = () => {
       const parsed = parseDslText(dsl.text); if (!parsed.ok) return setDsl((m) => ({ ...m, error: parsed.error }));
       const d = parsed.value, gRaw = isObj(d?.graphJson) ? d.graphJson : (Array.isArray(d?.nodes) ? d : null);
@@ -289,17 +283,17 @@ function createFlowStudioApp(client, React, _antd, app) {
     const valTone = validation.errors.length ? 'err' : (validation.warnings.length ? 'act' : 'ok');
     const valLbl = validation.errors.length ? `⚠ ${validation.errors.length} lỗi` : (validation.warnings.length ? `⚠ ${validation.warnings.length} cảnh báo` : '✓ Hợp lệ');
     const tools = [
-      ['dxos-flow-validation-btn', valLbl, () => setUi((u) => ({ ...u, valOpen: !u.valOpen, testRunnerOpen: false, settingsOpen: false })), valTone, false],
-      ['dxos-flow-test-data-btn', '🧪 Test Data', () => setUi((u) => ({ ...u, testRunnerOpen: !u.testRunnerOpen, valOpen: false, settingsOpen: false })), ui.testRunnerOpen ? 'act' : 'ghost', false],
+      ['dxos-flow-validation-btn', valLbl, () => setUi((u) => ({ ...u, valOpen: !u.valOpen, testRunnerOpen: false, settingsOpen: false, n8nOpen: false })), valTone, false],
+      ['dxos-flow-test-data-btn', '🧪 Test Data', () => setUi((u) => ({ ...u, testRunnerOpen: !u.testRunnerOpen, valOpen: false, settingsOpen: false, n8nOpen: false })), ui.testRunnerOpen ? 'act' : 'ghost', false],
+      ['dxos-flow-n8n-setup-btn', '⚡ n8n', () => setUi((u) => ({ ...u, n8nOpen: !u.n8nOpen, testRunnerOpen: false, valOpen: false, settingsOpen: false })), ui.n8nOpen ? 'act' : 'ghost', false],
       ['dxos-flow-dsl-btn', '{ } DSL', () => setDsl({ open: true, format: 'json', text: serializeFlowDsl(dslObj(), 'json'), error: null }), 'ghost', false],
-      ['dxos-flow-open-architect-btn', '✦ AI Architect', openAiArchitect, 'ai', false],
       ['dxos-flow-dryrun-btn', '▶ Chạy thử', () => handleDryRun(null), 'act', Boolean(ui.busy.dryRun)],
       ['dxos-flow-save-btn', 'Lưu', handleSave, 'pri', data.loading || Boolean(ui.busy.save)],
       ['dxos-flow-run-now-btn', '⚡ Chạy ngay', () => handleRunNow(), 'run', Boolean(ui.busy.runNow)],
     ];
 
     return h('div', { 'data-testid': 'dxos-flow-studio-app', style: { height: props.embedded ? 640 : 'calc(100vh - 196px)', minHeight: 540, display: 'flex', flexDirection: 'column', background: '#f8fafc', overflow: 'hidden', position: 'relative' } },
-      ui.view === 'list' ? h(React.Fragment, null, fbBar, h(FlowListView, { rules: data.rules, runs: data.runs, blueprints, loading: data.loading, runBusy: Boolean(ui.busy.runNow), effectiveOrg, orgList, onOrgChange: setOrgOverride, bpOpen: ui.bpOpen, onToggleBlueprints: (force) => setUi((u) => ({ ...u, bpOpen: typeof force === 'boolean' ? force : !u.bpOpen })), onLoadBlueprint: loadBlueprint, onOpenRule: openRuleInEditor, onRunNow: (r) => handleRunNow(r), onNewFlow: handleNewFlow, onOpenAiArchitect: openAiArchitect, onOpenRoute: openRoute, onToggleRuleActive: handleToggleRuleActive, onDuplicateRule: handleDuplicateRule }))
+      ui.view === 'list' ? h(React.Fragment, null, fbBar, h(FlowListView, { rules: data.rules, runs: data.runs, blueprints, loading: data.loading, runBusy: Boolean(ui.busy.runNow), effectiveOrg, orgList, onOrgChange: setOrgOverride, bpOpen: ui.bpOpen, onToggleBlueprints: (force) => setUi((u) => ({ ...u, bpOpen: typeof force === 'boolean' ? force : !u.bpOpen })), onLoadBlueprint: loadBlueprint, onOpenRule: openRuleInEditor, onRunNow: (r) => handleRunNow(r), onNewFlow: handleNewFlow, onOpenN8nSetup: () => setUi((u) => ({ ...u, n8nOpen: true })), onOpenRoute: openRoute, onToggleRuleActive: handleToggleRuleActive, onDuplicateRule: handleDuplicateRule }))
         : h(React.Fragment, null,
           h('header', { 'data-testid': 'dxos-flow-toolbar', style: { minHeight: 50, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'nowrap', overflowX: 'auto', gap: 8, padding: '6px 12px', borderBottom: '1px solid #e2e8f0', background: '#ffffff', boxSizing: 'border-box' } },
             h('div', { style: { ...ROW, minWidth: 0, flexShrink: 1 } },
@@ -326,10 +320,11 @@ function createFlowStudioApp(client, React, _antd, app) {
               canUndo: doc.undo.length > 0, canRedo: doc.redo.length > 0, onUndo: () => undoRedo(-1), onRedo: () => undoRedo(1), xyflowOverride: props.xyflowOverride,
             }),
             h(NodePalette, { nodeTypes, onAddNode: addNodeOnly, insertEdge: ui.insertEdge, onInsertNode: insertBetweenEdge, onCancelInsert: () => setUi((u) => ({ ...u, insertEdge: null })), appendSource: ui.appendSource, onAppendNode: appendNodeAfter, onCancelAppend: () => setUi((u) => ({ ...u, appendSource: null })), open: ui.paletteOpen, onToggleOpen: (next) => setUi((u) => ({ ...u, paletteOpen: Boolean(next) })) }),
-            h(NodeInspector, { rule: doc.rule, graph: doc.graph, selectedNode, nodeSchema: selectedSchema, catalog, activeTrace, nodeValidationIssues: selectedNode ? (validation.byNodeId[selectedNode.id] || []) : [], testOutput: runUi.testOut, testBusy: Boolean(ui.busy.testNode), onTestNode: handleTestNode, onCloseInspector: () => setDoc((d) => ({ ...d, selId: null })), onUpdateNode: (id, pt) => commitGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === id ? { ...n, ...pt } : n)) })), onDeleteNode: handleDeleteNode, externalTab: ui.inspTab, externalTabSeq: ui.inspTabSeq }),
+            h(NodeInspector, { rule: doc.rule, graph: doc.graph, selectedNode, nodeSchema: selectedSchema, catalog, activeTrace, nodeValidationIssues: selectedNode ? (validation.byNodeId[selectedNode.id] || []) : [], testOutput: runUi.testOut, testBusy: Boolean(ui.busy.testNode), onTestNode: handleTestNode, onOpenN8nSetup: () => setUi((u) => ({ ...u, n8nOpen: true })), onCloseInspector: () => setDoc((d) => ({ ...d, selId: null })), onUpdateNode: (id, pt) => commitGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === id ? { ...n, ...pt } : n)) })), onDeleteNode: handleDeleteNode, externalTab: ui.inspTab, externalTabSeq: ui.inspTabSeq }),
           ),
           h(PlaybackBar, { runs: data.runs, selectedRun: runUi.selectedRun, onSelectRun: (r) => setRunWithIdx(r, false), playbackIndex: runUi.idx, onStepChange: (idx) => setRunUi((s) => ({ ...s, playing: false, idx })), onFocusNode: focusNode, playing: runUi.playing, onTogglePlay: () => setRunUi((s) => ({ ...s, idx: !s.playing && s.idx >= tracesLen - 1 ? 0 : s.idx, playing: !s.playing })), onResumeApproval: handleResume, resumeBusy: Boolean(ui.busy.resume), autoExpandSeq: runUi.autoExpandSeq }),
         ),
+      h(N8nSetupModal, { open: ui.n8nOpen, api, organizationId: effectiveOrg, selectedNode, onClose: () => setUi((u) => ({ ...u, n8nOpen: false })), onConnectorsChanged: () => loadAll(), onApplyToSelectedNode: (p) => selectedNode && commitGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === selectedNode.id ? { ...n, config: { ...(n.config || {}), connectorKey: p.connectorKey, method: 'POST', path: p.path } } : n)) })), onOpenEnterpriseBlueprint: () => { const bp = blueprints.find((b) => (b.blueprintKey || b.ruleKey) === 'auto_enterprise_n8n_compliance'); if (bp) loadBlueprint(bp); setUi((u) => ({ ...u, view: 'editor', bpOpen: false, n8nOpen: false })); } }),
       dsl.open ? renderDslModal(h, { dsl, dslObj, serializeFlowDsl, setDsl, handleImportDsl }) : null,
     );
   };

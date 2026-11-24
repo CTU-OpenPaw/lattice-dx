@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { N8N_WEBHOOK_PRESETS } = require('./n8n-setup-modal');
+
 function createNodeInspector(React) {
   const h = React.createElement;
   const BLOCKED = new Set(['__proto__', 'constructor', 'prototype']);
@@ -87,7 +89,7 @@ function createNodeInspector(React) {
   return function NodeInspector(props = {}) {
     const {
       rule = null, graph = null, selectedNode = null, nodeSchema = null, catalog = {},
-      onUpdateNode, onDeleteNode, onCloseInspector, onTestNode,
+      onUpdateNode, onDeleteNode, onCloseInspector, onTestNode, onOpenN8nSetup,
       testOutput = null, testBusy = false, activeTrace = null, externalTab = null, externalTabSeq = 0,
       nodeValidationIssues = [],
     } = props;
@@ -193,10 +195,14 @@ function createNodeInspector(React) {
       if (selectSpec) {
         const strVal = String(val || '');
         const hasVal = !strVal || selectSpec.items.some((it) => it.value === strVal);
-        return h('select', { ...base, value: strVal, style: S.input, onChange: (e) => updateConfigField(f.name, e?.target?.value ?? '') },
+        const selEl = h('select', { ...base, value: strVal, style: S.input, onChange: (e) => updateConfigField(f.name, e?.target?.value ?? '') },
           selectSpec.placeholder ? h('option', { value: '' }, selectSpec.placeholder) : null,
           selectSpec.items.map((it) => h('option', { key: it.value, value: it.value }, it.label)),
           !hasVal ? h('option', { value: strVal }, strVal) : null);
+        if (f.name === 'connectorKey' && onOpenN8nSetup) {
+          return h('div', { style: S.grid(4) }, selEl, h('button', { type: 'button', 'data-testid': 'dxos-flow-open-n8n-from-inspector', onClick: () => onOpenN8nSetup(), style: S.btn(false, false, false) }, '⚙ Cấu hình dịch vụ n8n'));
+        }
+        return selEl;
       }
       if (f.type === 'boolean') return h('label', { style: S.checkRow }, h('input', { 'data-testid': testId, type: 'checkbox', checked: Boolean(val), onChange: (e) => updateConfigField(f.name, Boolean(e?.target?.checked)) }), f.label || f.name);
       if (f.type === 'number') return h('input', { ...base, type: 'number', value: val ?? '', style: S.input, onChange: (e) => updateConfigField(f.name, toNum(e)) });
@@ -211,6 +217,8 @@ function createNodeInspector(React) {
       }
       return h('div', { style: S.grid(4) },
         f.name === 'eventType' && safeEvents.length ? h('select', { 'data-testid': 'dxos-flow-field-eventType-picker', style: S.input, value: safeEvents.some((ev) => ev.type === val) ? String(val) : '', onChange: (e) => e?.target?.value && updateConfigField(f.name, e.target.value) }, h('option', { value: '' }, '-- Pick standard event --'), safeEvents.map((ev) => h('option', { key: ev.type, value: ev.type }, `${ev.type} — ${ev.label}`))) : null,
+        f.name === 'path' && node.type === 'integration.http' ? h('select', { 'data-testid': 'dxos-flow-n8n-path-picker', style: S.input, value: N8N_WEBHOOK_PRESETS.some((p) => p.path === val) ? String(val) : '', onChange: (e) => e?.target?.value && updateConfigField(f.name, e.target.value) }, h('option', { value: '' }, '-- Chọn preset n8n Webhook --'), N8N_WEBHOOK_PRESETS.map((p) => h('option', { key: p.key, value: p.path }, `${p.path} — ${p.name}`))) : null,
+        f.name === 'connectorKey' && onOpenN8nSetup ? h('button', { type: 'button', 'data-testid': 'dxos-flow-open-n8n-from-inspector', onClick: () => onOpenN8nSetup(), style: S.btn(false, false, false) }, '⚙ Cấu hình dịch vụ n8n') : null,
         h('input', { ...base, type: 'text', value: String(val ?? ''), style: S.input, onChange: (e) => updateConfigField(f.name, e?.target?.value ?? '') }));
     }
 

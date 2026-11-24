@@ -900,11 +900,11 @@ test('validateFlowGraph enforces exact node schema ports (trigger inputs:[], con
   assert.ok(badSwitchRes.errors.some((e) => e.code === 'FLOW_INVALID_PORT' && e.edgeId === 'e_bad'));
 });
 
-test('all 6 built-in flow blueprints validate strictly against createDefaultRegistry()', () => {
+test('all 7 built-in flow blueprints validate strictly against createDefaultRegistry()', () => {
   const { validateFlowGraph } = validatorMod;
   const registry = registryMod.createDefaultRegistry();
   const blueprints = blueprintsMod.listFlowBlueprints();
-  assert.equal(blueprints.length, 6);
+  assert.equal(blueprints.length, 7);
   for (const bp of blueprints) {
     const res = validateFlowGraph(bp.graphJson, { nodeRegistry: registry });
     assert.equal(res.ok, true, `Blueprint "${bp.blueprintKey}" failed validation: ${JSON.stringify(res.errors)}`);

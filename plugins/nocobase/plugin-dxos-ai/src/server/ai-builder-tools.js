@@ -30,6 +30,7 @@ const {
   bumpSurfaceRevision,
 } = require('./ai-surface-creative-tools');
 const { publishSurfaceUpdate } = require('./surface-events');
+const { runListConnectors, runTestConnector, runInvokeN8n } = require('./n8n-bridge-tool');
 
 const ALLOWED_WORKFLOW_NODE_TYPES = ['condition', 'manual', 'update', 'create', 'query', 'calculation', 'output', 'parallel', 'delay'];
 const FIELD_INTERFACE_MAP = {
@@ -4327,8 +4328,14 @@ function createBuilderTools(deps) {
               'saveAutomation',
               'testAutomation',
               'resumeAutomation',
+              'listConnectors',
+              'testConnector',
+              'invokeN8n',
             ],
           },
+          connectorKey: { type: 'string', maxLength: 64, description: 'Vault connector key (e.g. n8n-enterprise-orchestrator).' },
+          connectorType: { type: 'string', maxLength: 32, description: 'Optional connector type filter (n8n, webhook, mqtt, orion_ld, http_api).' },
+          webhookPath: { type: 'string', maxLength: 200, description: 'Relative webhook path on the target n8n connector.' },
           workflowId: { type: 'integer' },
           titleQuery: { type: 'string', maxLength: 100 },
           title: { type: 'string', maxLength: 120 },
@@ -4399,6 +4406,15 @@ function createBuilderTools(deps) {
         }
         if (args.operation === 'resumeAutomation') {
           return runResumeAutomation(ctx, db, actor, args, automationDeps);
+        }
+        if (args.operation === 'listConnectors') {
+          return runListConnectors(ctx, db, actor, args, automationDeps);
+        }
+        if (args.operation === 'testConnector') {
+          return runTestConnector(ctx, db, actor, args, automationDeps);
+        }
+        if (args.operation === 'invokeN8n') {
+          return runInvokeN8n(ctx, db, actor, args, { ...automationDeps, hasForbiddenProtoKeys, sanitizeAutomationValue });
         }
 
         const wfRepo = db.getRepository('workflows');

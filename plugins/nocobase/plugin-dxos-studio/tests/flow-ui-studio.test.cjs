@@ -219,13 +219,14 @@ test('flow/* modules obey strict per-file line limits, SPDX header, zero forbidd
   assert.ok(flowFiles.includes('flow-list-view.js'), 'flow-list-view.js must exist');
   assert.ok(flowFiles.includes('flow-studio-app.js'), 'flow-studio-app.js must exist');
   assert.ok(flowFiles.includes('flow-dsl.js'), 'flow-dsl.js must exist');
-  assert.equal(flowFiles.length, 11, 'flow/ directory must contain vendor-shims + modular UI/validation/runner files');
+  assert.equal(flowFiles.length, 12, 'flow/ directory must contain vendor-shims + modular UI/validation/runner/n8n files');
 
   const budgets = {
     'flow-list-view.js': 280,
     'flow-studio-helpers.js': 220,
     'flow-test-runner.js': 200,
     'flow-validation.js': 150,
+    'n8n-setup-modal.js': 250,
     'node-palette.js': 245,
     'node-inspector.js': 345,
     'playback-bar.js': 260,
@@ -303,6 +304,13 @@ test('src/client/index.js registers workflow.automation under Workflow, preserve
   assert.equal(byKey['workflow.automation'].aclSnippet, 'pm');
   assert.equal(byKey['workflow.automation'].sort, 20);
   assert.equal(typeof byKey['workflow.automation'].Component, 'function');
+  assert.ok(byKey['workflow.connectors'], 'Must register workflow.connectors under Workflow');
+  assert.equal(byKey['workflow.connectors'].title, 'Connectors & n8n');
+  assert.equal(byKey['workflow.connectors'].icon, 'ApiOutlined');
+  assert.equal(byKey['workflow.connectors'].aclSnippet, 'pm');
+  assert.equal(byKey['workflow.connectors'].sort, 30);
+  assert.equal(typeof byKey['workflow.connectors'].Component, 'function');
+  assert.equal(added[added.length - 1].key, 'dxos-studio', 'dxos-studio must remain registered last');
   assert.equal(byKey['dxos-flow-studio'].Component, byKey['workflow.automation'].Component);
 
   const flowTree = await harness.mountAndFlush(byKey['workflow.automation'].Component, {});
@@ -369,12 +377,14 @@ test('Screen 1 FlowListView supports search, active/paused/HITL filters, HITL ca
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   assert.ok(requests.some((r) => r.url === 'dxosAutomations:runNow' && r.data.ruleKey === blueprints[0].ruleKey));
 
-  // Toggle 6-Blueprint gallery
+  // Toggle Blueprints gallery (now includes 7th Enterprise n8n Orchestrator blueprint) & confirm duplicate AI buttons removed
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-ai-btn').length, 0);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-n8n-setup-btn').length, 1);
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-blueprints-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   const gallery = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-blueprints-gallery')[0];
   assert.ok(gallery);
-  assert.equal(collectNodes(gallery, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-flow-blueprint-load-')).length, 6);
+  assert.equal(collectNodes(gallery, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-flow-blueprint-load-')).length, 7);
 
   // Pending HITL callout opens suspended rule directly in Editor with HITL banner visible
   collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-list-hitl-open-${blueprints[3].ruleKey}`)[0].props.onClick();
@@ -673,14 +683,10 @@ test('Native Agent Chat trigger (ai.triggerTask), window.__LATTICEDX_FLOW_CONTEX
     assert.equal(globalThis.window.__LATTICEDX_FLOW_CONTEXT__?.organizationId, 'org-a');
     assert.equal(globalThis.window.__LATTICEDX_FLOW_CONTEXT__?.view, 'list');
 
-    // Clicking AI button in List View triggers native Agent Chat with dxos-architect
-    await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-ai-btn')[0].props.onClick();
-    assert.equal(triggeredTasks.length, 1);
-    assert.equal(triggeredTasks[0].aiEmployee, 'dxos-architect');
-    assert.equal(triggeredTasks[0].auto, true);
-    assert.equal(triggeredTasks[0].open, true);
-    assert.equal(triggeredTasks[0].tasks[0].autoSend, false);
-    assert.ok(triggeredTasks[0].tasks[0].message.system.includes('organizationId="org-a"'));
+    // Duplicate inline AI buttons MUST be absent; native floating bottom-right launcher reads __LATTICEDX_FLOW_CONTEXT__
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-ai-btn').length, 0);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-empty-ai-btn').length, 0);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-open-architect-btn').length, 0);
 
     // Cross-org SSE event MUST be ignored
     globalThis.window.dispatchEvent({
@@ -728,13 +734,12 @@ test('Native Agent Chat trigger (ai.triggerTask), window.__LATTICEDX_FLOW_CONTEX
     assert.equal(globalThis.window.__LATTICEDX_FLOW_CONTEXT__?.ruleKey, 'ai_drafted_rule');
     assert.equal(globalThis.window.__LATTICEDX_FLOW_CONTEXT__?.view, 'editor');
 
-    // Fallback toast when aiCtx.triggerTask is unavailable
+    // Duplicate toolbar AI button removed; single floating launcher unifies AI chat entry point
     const h2 = createQueuedReactHarness();
-    const fbList = [];
     const AppNoAi = createFlowStudioApp(client, h2.React, {}, {});
-    const treeNoAi = await h2.mountAndFlush(AppNoAi, { selectedOrg: 'org-a', initialView: 'editor', setFeedback: (fb) => fbList.push(fb) });
-    collectNodes(treeNoAi, (n) => n.props?.['data-testid'] === 'dxos-flow-open-architect-btn')[0].props.onClick();
-    assert.ok(fbList.some((f) => f?.type === 'info' && f.text.includes('DX-OS Architect')));
+    const treeNoAi = await h2.mountAndFlush(AppNoAi, { selectedOrg: 'org-a', initialView: 'editor' });
+    assert.equal(collectNodes(treeNoAi, (n) => n.props?.['data-testid'] === 'dxos-flow-open-architect-btn').length, 0);
+    assert.equal(collectNodes(treeNoAi, (n) => n.props?.['data-testid'] === 'dxos-flow-n8n-setup-btn').length, 1);
 
     // Unmount cleans up window bridge & listeners
     harness.unmount();
@@ -809,10 +814,11 @@ test('JSON / YAML DSL modal blocks prototype pollution, imports valid JSON/YAML,
   assert.equal(JSON.stringify(tree).includes('stale-org-a-run'), false);
 });
 
-test('All 6 LatticeFlow v2 server blueprints enforce schema parity (no urgent priority on ServiceTickets, required fields present)', () => {
+test('All 7 LatticeFlow v2 server blueprints enforce schema parity (no urgent priority on ServiceTickets, required fields present)', () => {
   const { SERVICE_PRIORITIES, SERVICE_TYPES } = require(path.join(PLUGIN_ROOT, 'src/server/service-schema.js'));
   const blueprints = getBlueprints();
-  assert.equal(blueprints.length, 6);
+  assert.equal(blueprints.length, 7);
+  assert.ok(blueprints.some((b) => b.ruleKey === 'auto_enterprise_n8n_compliance'));
 
   const slaBp = blueprints.find((b) => b.ruleKey === 'auto_sla_breach_escalation');
   const tktNode = slaBp.graphJson.nodes.find((n) => n.type === 'data.create' && n.config?.collection === 'latticeServiceTickets');
@@ -1277,10 +1283,11 @@ test('Round 2 Leaf + quick-append, validation badge/pill click-to-focus, AI dism
     const filterField = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-filterJson')[0];
     if (filterField) assert.equal(filterField.props.value, '');
 
-    // Opening AI Architect auto-dismisses open NodeInspector
-    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-open-architect-btn')[0].props.onClick();
+    // Opening floating native AI chat (latticedx:ai-chat-opening) auto-dismisses open NodeInspector
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-open-architect-btn').length, 0);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector').length, 1);
+    winHandlers['latticedx:ai-chat-opening']?.({ detail: { pathname: '/admin/settings/workflow/automation' } });
     tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
-    assert.equal(triggered.length, 1);
     assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector').length, 0);
 
     // Leaf + quick-append auto-connects a new DMN node with empty tableKey -> triggers dirty badge + validation badge
@@ -1317,4 +1324,64 @@ test('Round 2 Leaf + quick-append, validation badge/pill click-to-focus, AI dism
     if (origWin === undefined) delete globalThis.window;
     else globalThis.window = origWin;
   }
+});
+
+test('N8nSetupModal saves & tests n8n service directly in Workflow Automation, refreshes catalog, and applies webhook presets to integration.http', async () => {
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const { resolveN8nEditorUrl } = require(path.join(PLUGIN_ROOT, 'src/client/flow/n8n-setup-modal.js'));
+  assert.equal(resolveN8nEditorUrl('http://n8n:5678'), 'http://localhost:5678');
+  assert.equal(resolveN8nEditorUrl('https://n8n.example.org/hook'), 'https://n8n.example.org');
+
+  const harness = createQueuedReactHarness();
+  const nodeTypes = getRegistrySchemas();
+  const blueprints = getBlueprints();
+  const vaultConnectors = [];
+  const { client, requests } = createApiMock({
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints, connectors: vaultConnectors.map((c) => ({ ...c })) }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: [] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosVault:list': async () => ({ items: vaultConnectors }),
+    'dxosVault:save': async (req) => {
+      const saved = { id: 1, ...req.data, hasSecrets: Boolean(req.data.secrets), lastTestStatus: null };
+      delete saved.secrets;
+      vaultConnectors.splice(0, vaultConnectors.length, saved);
+      return saved;
+    },
+    'dxosVault:testConnection': async (req) => ({ ok: true, statusCode: 200, latencyMs: 7, connectorKey: req.data.connectorKey, message: 'Endpoint reachable (HTTP 200)' }),
+  });
+
+  const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a' });
+
+  // Open N8nSetupModal from List View button
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-n8n-setup-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-setup-modal').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-open-editor-link')[0].props.href, 'http://localhost:5678');
+
+  // Fill secret & save connector
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-secret-input')[0].props.onChange({ target: { value: 'whsec_test_123' } });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-save-form')[0].props.onSubmit({ preventDefault() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const saveVault = requests.find((r) => r.url === 'dxosVault:save');
+  assert.equal(saveVault.data.connectorType, 'n8n');
+  assert.equal(saveVault.data.authType, 'hmac');
+  assert.deepEqual(saveVault.data.secrets, { secret: 'whsec_test_123' });
+
+  // Test /healthz directly from modal
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-test-n8n-enterprise-orchestrator')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-test-result')[0]).includes('HTTP 200'));
+
+  // Open Enterprise n8n blueprint on Canvas & inspect HTTP node
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-open-blueprint-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-call_n8n_orchestrator').length, 1);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-call_n8n_orchestrator')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-open-n8n-from-inspector').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-n8n-path-picker').length, 1);
 });

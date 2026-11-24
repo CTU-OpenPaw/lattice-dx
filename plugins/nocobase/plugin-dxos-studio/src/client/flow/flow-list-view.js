@@ -32,7 +32,7 @@ function createFlowListView(React) {
     const {
       rules = [], runs = [], blueprints = [], loading = false, runBusy = false,
       effectiveOrg = '', orgList = [], onOrgChange, bpOpen = false, onToggleBlueprints,
-      onLoadBlueprint, onOpenRule, onRunNow, onNewFlow, onOpenAiArchitect, onOpenRoute,
+      onLoadBlueprint, onOpenRule, onRunNow, onNewFlow, onOpenN8nSetup, onOpenRoute,
       onToggleRuleActive, onDuplicateRule,
     } = props;
     const [search, setSearch] = React.useState('');
@@ -69,13 +69,13 @@ function createFlowListView(React) {
       h('header', { 'data-testid': 'dxos-flow-list-header', style: S.header },
         h('div', { style: { display: 'grid', gap: 2 } },
           h('strong', { style: { fontSize: 16, color: '#0F172A', letterSpacing: '-0.01em' } }, 'Workflow Automation'),
-          h('span', { style: { fontSize: 12, color: '#64748B' } }, 'Thiết kế DAG, mô phỏng Dry-Run, phê duyệt HITL và điều phối qua AI Architect'),
+          h('span', { style: { fontSize: 12, color: '#64748B' } }, 'Thiết kế DAG, mô phỏng Dry-Run, phê duyệt HITL và điều phối dịch vụ n8n'),
         ),
         h('div', { style: S.row },
           h('input', { 'data-testid': 'dxos-flow-org-input', type: 'text', list: orgList.length ? 'dxos-flow-org-list' : undefined, value: effectiveOrg, placeholder: 'Org ID', onChange: (e) => onOrgChange?.(e?.target?.value ?? ''), style: { ...S.input, width: 120 } }),
           orgList.length ? h('datalist', { id: 'dxos-flow-org-list' }, orgList.map((o) => h('option', { key: o, value: o }, o))) : null,
           h('input', { 'data-testid': 'dxos-flow-list-search', type: 'search', value: search, placeholder: 'Tìm theo tên, ruleKey, trigger…', onChange: (e) => setSearch(e?.target?.value ?? ''), style: { ...S.input, width: 210 } }),
-          h('button', { 'data-testid': 'dxos-flow-list-ai-btn', type: 'button', onClick: () => onOpenAiArchitect?.(), style: S.btn('ai') }, '✦ Tạo bằng AI'),
+          h('button', { 'data-testid': 'dxos-flow-n8n-setup-btn', type: 'button', onClick: () => onOpenN8nSetup?.(), style: S.btn('active') }, '⚡ Cấu hình n8n'),
           h('button', { 'data-testid': 'dxos-flow-blueprints-btn', type: 'button', onClick: () => onToggleBlueprints?.(), style: S.btn(bpOpen ? 'active' : 'ghost') }, `Mẫu sẵn có (${safeBlueprints.length})`),
           h('button', { 'data-testid': 'dxos-flow-new-btn', type: 'button', onClick: () => onNewFlow?.(), style: S.btn('primary') }, '+ Tạo luồng mới'),
         ),
@@ -145,10 +145,10 @@ function createFlowListView(React) {
         : !filteredRules.length
           ? h('div', { 'data-testid': 'dxos-flow-list-empty', style: { padding: 36, textAlign: 'center', borderRadius: 12, background: '#FFFFFF', border: '1px dashed #CBD5E1', display: 'grid', gap: 10, justifyItems: 'center' } },
             h('strong', { style: { fontSize: 14, color: '#0F172A' } }, safeRules.length ? 'Không có quy trình phù hợp bộ lọc hiện tại' : 'Chưa có quy trình tự động hóa nào'),
-            h('span', { style: { fontSize: 12, color: '#64748B' } }, 'Bắt đầu nhanh từ 6 Blueprint chuẩn công nghiệp hoặc mô tả yêu cầu để AI Architect dựng DAG.'),
+            h('span', { style: { fontSize: 12, color: '#64748B' } }, 'Bắt đầu nhanh từ Blueprint chuẩn công nghiệp hoặc cấu hình kết nối n8n.'),
             h('div', { style: S.row },
               h('button', { 'data-testid': 'dxos-flow-empty-blueprint-btn', type: 'button', onClick: () => onToggleBlueprints?.(true), style: S.btn('primary') }, '+ Tạo từ Blueprint'),
-              h('button', { 'data-testid': 'dxos-flow-empty-ai-btn', type: 'button', onClick: () => onOpenAiArchitect?.(), style: S.btn('ai') }, '✦ Tạo bằng AI'),
+              h('button', { 'data-testid': 'dxos-flow-empty-n8n-btn', type: 'button', onClick: () => onOpenN8nSetup?.(), style: S.btn('active') }, '⚡ Cấu hình n8n'),
             ),
           )
           : h('div', { style: { display: 'grid', gap: 10 } },

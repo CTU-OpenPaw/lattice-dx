@@ -168,7 +168,7 @@ function synthesizeOfflineFallback({ mode, prompt, baseGraph, targetNodeId, trac
   const pNorm = stripAccents(prompt);
   const pickCol = catalog.collections.find((c) => pNorm.includes(c.name.toLowerCase()))?.name || catalog.collections[0]?.name || 'latticeServiceTickets';
   const pickRole = catalog.roles.find((r) => pNorm.includes(r.toLowerCase())) || (/manager|giam doc|quan ly/.test(pNorm) ? 'ldx_manager' : 'ldx_operator');
-  const pickConn = catalog.connectors.find((c) => pNorm.includes(c.connectorKey.toLowerCase()))?.connectorKey || catalog.connectors[0]?.connectorKey || '';
+  const pickConn = catalog.connectors.find((c) => pNorm.includes(c.connectorKey.toLowerCase()))?.connectorKey || (/\bn8n\b/.test(pNorm) ? catalog.connectors.find((c) => c.connectorType === 'n8n')?.connectorKey : '') || catalog.connectors[0]?.connectorKey || '';
   const pickDmn = catalog.dmnTables.find((t) => pNorm.includes(t.tableKey.toLowerCase()) || (t.name && pNorm.includes(stripAccents(t.name))))?.tableKey || null;
   const fbBase = baseGraph || normalizeGraph({ version: 2, nodes: [{ id: 'trig_1', type: 'trigger.manual', label: 'Manual Trigger', config: {} }], edges: [] });
 
@@ -224,7 +224,7 @@ function synthesizeOfflineFallback({ mode, prompt, baseGraph, targetNodeId, trac
   }
   if (/duyet|phe duyet|approval|hitl/.test(pNorm)) chain({ id: 'approval_1', type: 'control.approval', label: 'Manager Approval', config: { approverRole: pickRole, title: 'Approval Required: {{data.code}}', summary: 'Human review required', riskLevel: 'high', ttlHours: 24 } }, 'approved');
   if (/\bllm\b|tom tat|\bsummarize\b|\bai\b/.test(pNorm)) chain({ id: 'llm_1', type: 'ai.llm', label: 'AI Summary', config: { systemPrompt: 'Summarize input cleanly in JSON.', userPrompt: '{{data}}', responseFormat: 'json', fallbackOutput: { summary: 'Fallback summary' } } });
-  if (pickConn && /connector|webhook|dong bo|sync|http/.test(pNorm)) chain({ id: 'http_1', type: 'integration.http', label: `Call ${pickConn}`, config: { connectorKey: pickConn, method: 'POST', path: '/sync', body: { eventType: '{{type}}', data: '{{data}}' } } });
+  if (pickConn && /connector|webhook|dong bo|sync|http|\bn8n\b|orchestrat/.test(pNorm)) chain({ id: 'http_1', type: 'integration.http', label: `Call ${pickConn}`, config: { connectorKey: pickConn, method: 'POST', path: /\bn8n\b/.test(pNorm) ? '/webhook/latticedx/v1/enterprise-compliance-orchestrator' : '/sync', body: { eventType: '{{type}}', organizationId: '{{organizationId}}', data: '{{data}}' } } });
   else if (/cap nhat|update/.test(pNorm)) chain({ id: 'upd_1', type: 'data.update', label: `Update ${pickCol}`, config: { collection: pickCol, recordId: '{{data.id}}', filter: { id: '{{data.id}}' }, values: { status: 'processed' } } });
   else if (/tao |create|ghi /.test(pNorm) && trig.type !== 'trigger.record') chain({ id: 'crt_1', type: 'data.create', label: `Create ${pickCol}`, config: { collection: pickCol, values: { code: 'FLOW-{{id}}', name: 'Generated {{type}}' } } });
   chain({ id: 'notify_1', type: 'notify.send', label: `Notify ${pickRole}`, config: { roleNames: [pickRole], severity: 'info', title: 'Flow Notification ({{type}})', body: 'Processed event {{subject}}' } });

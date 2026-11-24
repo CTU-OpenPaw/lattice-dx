@@ -28,6 +28,7 @@ const DEFAULT_BLUEPRINTS = [
   ['auto_procurement_hitl_approval', 'Procurement HITL Approval', 'erp-procurement', 'trigger.record', { collection: 'latticeRequests', operation: 'create' }, 'control.approval', 'Director Approval', { approverRole: 'ldx_manager' }],
   ['auto_scheduled_ai_digest', 'Scheduled AI Ops Digest', 'ai-ops', 'trigger.schedule', { cron: '0 8 * * 1-5' }, 'ai.llm', 'AI Digest', { userPrompt: 'Summarize incidents' }],
   ['auto_partner_webhook_sync', 'Partner B2B Webhook Sync', 'b2b-integration', 'trigger.webhook', { webhookPath: 'partner-sync', authMode: 'hmac' }, 'integration.http', 'Sync Connector', { connectorKey: 'erp-webhook-sync', method: 'POST' }],
+  ['auto_enterprise_n8n_compliance', 'n8n Compliance & PKI Orchestrator', 'n8n-orchestration', 'trigger.record', { collection: 'latticeRequests', operation: 'create' }, 'integration.http', 'Call n8n Orchestrator', { connectorKey: 'n8n-enterprise-orchestrator', method: 'POST', path: '/webhook/latticedx/v1/enterprise-compliance-orchestrator' }],
 ].map(([ruleKey, name, category, tType, tCfg, sType, sLabel, sCfg]) => ({
   blueprintKey: ruleKey, ruleKey, name, category, active: true, cooldownSec: 60, maxDepth: 8,
   graphJson: {
@@ -80,7 +81,7 @@ const FRESH_DATA = { rules: [], runs: [], catalog: null, regTypes: [], loading: 
 const FRESH_RUN = { selectedRun: null, idx: 0, playing: false, testOut: null, autoExpandSeq: 0 };
 const makeFreshUi = (view) => ({
   view, settingsOpen: false, bpOpen: false, paletteOpen: false,
-  testRunnerOpen: false, valOpen: false, insertEdge: null, appendSource: null,
+  testRunnerOpen: false, valOpen: false, n8nOpen: false, insertEdge: null, appendSource: null,
   fb: null, busy: {}, inspTab: null, inspTabSeq: 0,
 });
 

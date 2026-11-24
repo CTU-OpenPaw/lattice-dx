@@ -19,6 +19,7 @@ const requireFromTest = createRequire(import.meta.url);
 
 const COLDCHAIN_PATH = join(ROOT, 'infra/config/n8n/dxos-coldchain-alert-orchestrator.json');
 const EPOD_PATH = join(ROOT, 'infra/config/n8n/dxos-epod-partner-sync.json');
+const ENT_COMPLIANCE_PATH = join(ROOT, 'infra/config/n8n/dxos-enterprise-compliance-orchestrator.json');
 
 const SECRET_TOKEN_RE = /(?:ldx_pat_[0-9a-f]{8}_[0-9a-f]{32}|whsec_[A-Za-z0-9+/=]{12,}|sk-(?:proj-|live-|test-)?[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/;
 
@@ -561,4 +562,63 @@ test('epod-partner-sync: attestation builder maps ePOD & voucher targets to dxos
   assert.equal(responseBody.eventId, 'evt-epod-901');
   assert.equal(responseBody.attested, true);
   assert.equal(responseBody.merkleRoot, 'abc123');
+});
+
+test('enterprise-compliance-orchestrator: 13-node graph validates HMAC, risk tiers, PKI normalization, partner dossier, and fan-in aggregation', () => {
+  const { raw, workflow } = loadWorkflow(ENT_COMPLIANCE_PATH);
+  assert.equal(workflow.nodes.length, 13);
+  assert.equal(workflow.active, false);
+  assert.equal(SECRET_TOKEN_RE.test(raw), false);
+  assert.equal(workflow.meta?.spdx, 'SPDX-License-Identifier: Apache-2.0');
+
+  const verifyFn = compileCodeNode(workflow, 'Verify Standard Webhook');
+  const secret = `whsec_${randomBytes(32).toString('base64')}`;
+  const rawBody = JSON.stringify({ organizationId: 'org-ent', amount: 125000000, severity: 'critical' });
+  const ts = String(Math.floor(Date.now() / 1000));
+  const whId = 'msg_ent_1';
+  const sig = signStandardWebhook({ webhookId: whId, timestampSec: ts, rawBody, secret });
+  const verified = runCode(verifyFn, {
+    json: { headers: { 'webhook-id': whId, 'webhook-timestamp': ts, 'webhook-signature': sig }, rawBody },
+    env: { DX_WEBHOOK_SECRET: secret },
+  });
+  assert.equal(verified.authenticated, true);
+
+  const scoreFn = compileCodeNode(workflow, 'Score Risk & Batch Compliance');
+  const crit = runCode(scoreFn, {
+    json: {
+      body: {
+        organizationId: 'org-ent',
+        type: 'record.latticeRequests.create',
+        data: { id: 7, code: 'REQ-ENT-7', amount: 125000000, severity: 'critical', temperatureC: -8, slaOverdueMinutes: 45, items: [{ sku: 'A', value: 60 }, { sku: 'B', value: 40 }] },
+      },
+    },
+  });
+  assert.equal(crit.tier, 'critical');
+  assert.equal(crit.riskScore, 100);
+  assert.equal(crit.signDocumentPayload.targetRecordId, 7);
+
+  const normPkiFn = compileCodeNode(workflow, 'Normalize PKI Attestation');
+  const pkiItem = runCode(normPkiFn, { json: { body: { data: { signed: true, keyId: 'ed25519-k1', merkleRoot: 'mrk-999' } } } });
+  assert.equal(pkiItem.signed, true);
+  assert.equal(pkiItem.merkleRoot, 'mrk-999');
+
+  const dossierFn = compileCodeNode(workflow, 'Build Partner & Regulatory Dossier');
+  const dossierItem = runCode(dossierFn, { json: crit });
+  assert.equal(dossierItem.kind, 'partner_dossier');
+  assert.equal(dossierItem.itemCount, 2);
+
+  const aggNode = getNode(workflow, 'Aggregate Orchestration Receipt');
+  const aggFn = new Function('$input', '$', '$execution', aggNode.parameters.jsCode);
+  const aggOut = aggFn(
+    { all: () => [{ json: pkiItem }, { json: dossierItem }] },
+    (name) => {
+      assert.equal(name, 'Score Risk & Batch Compliance');
+      return { first: () => ({ json: crit }) };
+    },
+    { id: 'exec-live-13' },
+  );
+  assert.equal(aggOut[0].json.ok, true);
+  assert.equal(aggOut[0].json.n8nExecutionId, 'exec-live-13');
+  assert.equal(aggOut[0].json.pkiAttestation.merkleRoot, 'mrk-999');
+  assert.equal(aggOut[0].json.partnerDispatch.itemCount, 2);
 });

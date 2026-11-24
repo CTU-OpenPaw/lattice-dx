@@ -1,0 +1,190 @@
+{
+  "blueprintKey": "auto_enterprise_n8n_compliance",
+  "ruleKey": "auto_enterprise_n8n_compliance",
+  "name": "Điều phối Tuân thủ & Ký sổ cái PKI qua n8n (Enterprise)",
+  "description": "Khi tạo bản ghi trên latticeRequests > 10.000.000 VNĐ, đẩy payload sang dịch vụ n8n thật (n8n-enterprise-orchestrator) để chấm điểm rủi ro 13 node, gọi ngược NocoBase ký Ed25519/Merkle Root song song đóng gói hồ sơ đối tác và phản hồi kết quả về LatticeFlow v2.",
+  "category": "n8n-orchestration",
+  "triggerEventType": "record.latticeRequests.create",
+  "dmnTableKey": null,
+  "cooldownSec": 0,
+  "maxDepth": 8,
+  "active": true,
+  "sampleEvent": {
+    "type": "record.latticeRequests.create",
+    "source": "dxos-studio:orm",
+    "subject": "REQ-COMP-01",
+    "data": {
+      "id": 1,
+      "code": "REQ-COMP-01",
+      "amount": 125000000,
+      "severity": "critical",
+      "temperatureC": -9.5,
+      "slaOverdueMinutes": 45,
+      "items": [
+        { "sku": "LOT-A1", "qty": 40, "value": 75000000 },
+        { "sku": "LOT-B2", "qty": 25, "value": 50000000 }
+      ]
+    }
+  },
+  "graphJson": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "trig_compliance",
+        "type": "trigger.record",
+        "label": "Khi tạo yêu cầu (latticeRequests)",
+        "position": { "x": 60, "y": 220 },
+        "config": {
+          "collection": "latticeRequests",
+          "operation": "create",
+          "filterJson": null
+        }
+      },
+      {
+        "id": "if_needs_orchestration",
+        "type": "control.if",
+        "label": "Giá trị > 10 triệu VNĐ?",
+        "position": { "x": 340, "y": 220 },
+        "config": {
+          "condition": {
+            "field": "data.amount",
+            "op": "gt",
+            "value": 10000000
+          }
+        }
+      },
+      {
+        "id": "call_n8n_orchestrator",
+        "type": "integration.http",
+        "label": "Điều phối 13-node trên n8n",
+        "position": { "x": 640, "y": 140 },
+        "timeoutMs": 15000,
+        "config": {
+          "connectorKey": "n8n-enterprise-orchestrator",
+          "method": "POST",
+          "path": "/webhook/latticedx/v1/enterprise-compliance-orchestrator",
+          "timeoutMs": 15000,
+          "body": {
+            "eventType": "{{event.type}}",
+            "organizationId": "{{organizationId}}",
+            "targetCollection": "latticeRequests",
+            "targetRecordId": "{{data.id}}",
+            "code": "{{data.code}}",
+            "amount": "{{data.amount}}",
+            "severity": "{{data.severity}}",
+            "temperatureC": "{{data.temperatureC}}",
+            "slaOverdueMinutes": "{{data.slaOverdueMinutes}}",
+            "items": "{{data.items}}"
+          }
+        }
+      },
+      {
+        "id": "if_n8n_critical",
+        "type": "control.if",
+        "label": "n8n phân tầng Critical?",
+        "position": { "x": 960, "y": 140 },
+        "config": {
+          "condition": {
+            "field": "steps.call_n8n_orchestrator.output.response.tier",
+            "op": "eq",
+            "value": "critical"
+          }
+        }
+      },
+      {
+        "id": "notify_critical_director",
+        "type": "notify.send",
+        "label": "Báo Giám đốc (PKI Merkle Signed)",
+        "position": { "x": 1280, "y": 60 },
+        "config": {
+          "roleNames": ["ldx_manager"],
+          "severity": "critical",
+          "category": "approval",
+          "title": "n8n PKI Critical ({{steps.call_n8n_orchestrator.output.response.riskScore}}/100)",
+          "body": "n8n Execution #{{steps.call_n8n_orchestrator.output.response.n8nExecutionId}} · Merkle Root: {{steps.call_n8n_orchestrator.output.response.pkiAttestation.merkleRoot}}"
+        }
+      },
+      {
+        "id": "notify_standard_receipt",
+        "type": "notify.send",
+        "label": "Thông báo kết quả phân tầng",
+        "position": { "x": 1280, "y": 240 },
+        "config": {
+          "roleNames": ["ldx_operator"],
+          "severity": "info",
+          "category": "system",
+          "title": "n8n phân tầng {{steps.call_n8n_orchestrator.output.response.tier}}",
+          "body": "Hoàn tất điều phối n8n Execution #{{steps.call_n8n_orchestrator.output.response.n8nExecutionId}} ({{steps.call_n8n_orchestrator.output.response.riskScore}}/100)."
+        }
+      },
+      {
+        "id": "notify_n8n_error",
+        "type": "notify.send",
+        "label": "Cảnh báo lỗi gọi n8n",
+        "position": { "x": 960, "y": 340 },
+        "config": {
+          "roleNames": ["ldx_operator"],
+          "severity": "high",
+          "category": "alarm",
+          "title": "Lỗi kết nối n8n Orchestrator",
+          "body": "Không thể điều phối tới dịch vụ n8n cho hồ sơ {{data.code}}."
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_trig_if",
+        "source": "trig_compliance",
+        "sourceHandle": "main",
+        "target": "if_needs_orchestration",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_if_n8n",
+        "source": "if_needs_orchestration",
+        "sourceHandle": "true",
+        "target": "call_n8n_orchestrator",
+        "targetHandle": "in",
+        "label": "> 10M"
+      },
+      {
+        "id": "e_n8n_tier",
+        "source": "call_n8n_orchestrator",
+        "sourceHandle": "main",
+        "target": "if_n8n_critical",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_n8n_err",
+        "source": "call_n8n_orchestrator",
+        "sourceHandle": "error",
+        "target": "notify_n8n_error",
+        "targetHandle": "in",
+        "label": "error"
+      },
+      {
+        "id": "e_crit_yes",
+        "source": "if_n8n_critical",
+        "sourceHandle": "true",
+        "target": "notify_critical_director",
+        "targetHandle": "in",
+        "label": "critical"
+      },
+      {
+        "id": "e_crit_no",
+        "source": "if_n8n_critical",
+        "sourceHandle": "false",
+        "target": "notify_standard_receipt",
+        "targetHandle": "in",
+        "label": "non-critical"
+      }
+    ],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 },
+    "settings": {
+      "errorPolicy": "stop",
+      "cooldownSec": 0,
+      "maxDepth": 8,
+      "timeoutMs": 30000
+    }
+  }
+}

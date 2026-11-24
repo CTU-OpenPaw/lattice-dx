@@ -638,9 +638,14 @@ test('17-tool registry invariant (adminMcpToolsListed17 === 17) holds after Nati
     'saveAutomation',
     'testAutomation',
     'resumeAutomation',
+    'listConnectors',
+    'testConnector',
+    'invokeN8n',
   ]) {
     assert.equal(wfToolMeta.inputSchema.properties.operation.enum.includes(expectedOp), true, `Missing operation ${expectedOp}`);
   }
+  assert.equal(wfToolMeta.inputSchema.properties.connectorKey.type, 'string');
+  assert.equal(wfToolMeta.inputSchema.properties.webhookPath.type, 'string');
   const bannedTermRe = new RegExp(['co', 'pilot'].join(''), 'i');
   assert.equal(bannedTermRe.test(wfToolMeta.description), false, 'dxos_configure_workflow description must not contain banned branding');
   assert.equal(wfToolMeta.inputSchema.properties.ruleKey.type, 'string');
@@ -3177,5 +3182,140 @@ test('dxos_configure_workflow emits monotonic flow-studio SSE events across draf
   } finally {
     unsubscribe();
     Module._load = origLoad;
+  }
+});
+
+test('dxos_configure_workflow supports bidirectional n8n connector bridge (listConnectors, testConnector, invokeN8n) with HMAC signing, tenant isolation, and SSRF protection', async () => {
+  const { runInvokeN8n, runTestConnector } = require('../src/server/n8n-bridge-tool');
+  const { createHmac } = require('node:crypto');
+  const connectorVault = require('../../plugin-lattice-foundation/src/server/connector-vault');
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'dxos-ai-n8n-bridge-test-master-key-2026';
+
+  try {
+    const { db, ctx, byName } = makeBuilderHarness();
+    const wfTool = byName.get('dxos_configure_workflow');
+    const sharedSecret = 'whsec_' + Buffer.from('0123456789abcdef0123456789abcdef', 'utf8').toString('base64');
+
+    db.store.latticeConnectors = [
+      {
+        id: 1,
+        organizationId: 'native-ui-lab',
+        connectorKey: 'n8n-enterprise-orchestrator',
+        name: 'n8n Enterprise',
+        connectorType: 'n8n',
+        baseUrl: 'http://n8n:5678',
+        authType: 'hmac',
+        encryptedSecretsJson: connectorVault.encryptVaultSecrets({ secret: sharedSecret }, process.env),
+        active: true,
+      },
+      {
+        id: 2,
+        organizationId: 'other-org',
+        connectorKey: 'n8n-other',
+        name: 'Other Org n8n',
+        connectorType: 'n8n',
+        baseUrl: 'https://other-n8n.example.org',
+        authType: 'hmac',
+        encryptedSecretsJson: connectorVault.encryptVaultSecrets({ secret: 'other-secret-999' }, process.env),
+        active: true,
+      },
+    ];
+
+    const noResCtx = { ...ctx, app: { ...ctx.app, resourceManager: { getResource: () => null } } };
+
+    // 1. listConnectors returns only caller org without secrets
+    const listed = await wfTool.invoke(noResCtx, { operation: 'listConnectors', connectorType: 'n8n' });
+    assert.equal(listed.operation, 'listConnectors');
+    assert.equal(listed.items.length, 1);
+    assert.equal(listed.items[0].connectorKey, 'n8n-enterprise-orchestrator');
+    assert.equal(listed.items[0].hasSecrets, true);
+    assert.equal(JSON.stringify(listed).includes('encryptedSecretsJson'), false);
+    assert.equal(JSON.stringify(listed).includes(sharedSecret), false);
+
+    // 2. Cross-tenant connectorKey rejected fail-closed
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, { operation: 'invokeN8n', connectorKey: 'n8n-other', webhookPath: '/webhook/x' }),
+      (err) => err.status === 403 || err.status === 404,
+    );
+
+    // 3. Dry-Run invokeN8n previews target URL safely & rejects prototype pollution / origin override
+    const dryInv = await wfTool.invoke(noResCtx, {
+      operation: 'invokeN8n',
+      connectorKey: 'n8n-enterprise-orchestrator',
+      webhookPath: '/webhook/latticedx/v1/enterprise-compliance-orchestrator',
+      dryRun: true,
+    });
+    assert.equal(dryInv.dryRun, true);
+    assert.equal(dryInv.url, 'http://n8n:5678/webhook/latticedx/v1/enterprise-compliance-orchestrator');
+
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, { operation: 'invokeN8n', connectorKey: 'n8n-enterprise-orchestrator', webhookPath: 'https://evil.example.net/hook' }),
+      (err) => err.status === 400,
+    );
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, { operation: 'invokeN8n', connectorKey: 'n8n-enterprise-orchestrator', payload: JSON.parse('{"__proto__":{"polluted":true}}') }),
+      (err) => err.code === 'AUTOMATION_AI_REFUSED',
+    );
+
+    // 4. Live invokeN8n signs Standard Webhooks v1 HMAC headers & returns scrubbed JSON receipt
+    const actor = { organizationId: 'native-ui-lab', isAdmin: true, isRoot: true };
+    const bridgeDeps = {
+      val,
+      failTool,
+      hasRes: () => false,
+      invokeResourceAction,
+      hasForbiddenProtoKeys: () => false,
+      sanitizeAutomationValue: (x) => x,
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+      fetchImpl: async (url, init) => {
+        if (url.endsWith('/healthz')) {
+          return { ok: true, status: 200, text: async () => '{"status":"ok"}' };
+        }
+        const rawBody = init.body;
+        const msgId = init.headers['webhook-id'];
+        const ts = init.headers['webhook-timestamp'];
+        const sig = init.headers['webhook-signature'];
+        const keyBytes = Buffer.from(sharedSecret.slice(6), 'base64');
+        const expected = 'v1,' + createHmac('sha256', keyBytes).update(`${msgId}.${ts}.${rawBody}`, 'utf8').digest('base64');
+        assert.equal(sig, expected);
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            ok: true,
+            tier: 'critical',
+            riskScore: 95,
+            n8nExecutionId: 'exec-77',
+            apiKey: 'should-be-redacted-9999',
+          }),
+        };
+      },
+    };
+
+    const probe = await runTestConnector(noResCtx, db, actor, { connectorKey: 'n8n-enterprise-orchestrator' }, bridgeDeps);
+    assert.equal(probe.ok, true);
+    assert.equal(probe.statusCode, 200);
+
+    const invoked = await runInvokeN8n(
+      noResCtx,
+      db,
+      actor,
+      {
+        connectorKey: 'n8n-enterprise-orchestrator',
+        webhookPath: '/webhook/latticedx/v1/enterprise-compliance-orchestrator',
+        payload: { organizationId: 'evil-override', amount: 125000000, severity: 'critical' },
+      },
+      bridgeDeps,
+    );
+    assert.equal(invoked.ok, true);
+    assert.equal(invoked.status, 200);
+    assert.equal(invoked.organizationId, 'native-ui-lab');
+    assert.equal(invoked.response.tier, 'critical');
+    assert.equal(invoked.response.n8nExecutionId, 'exec-77');
+    assert.equal(JSON.stringify(invoked.response).includes('should-be-redacted-9999'), false);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
 });

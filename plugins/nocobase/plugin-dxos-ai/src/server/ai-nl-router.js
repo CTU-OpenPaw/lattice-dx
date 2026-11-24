@@ -335,6 +335,51 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
 
   const isGraphImpact = GRAPH_IMPACT_RE.test(n);
 
+  // 3.4. Direct n8n Service & Vault Connector Bridge (List / Test / Invoke n8n) — Admin only
+  const isFlowDraftPrompt = /(?:^|\s)(?:tao|dung|lap|thiet\s+ke|xay\s+dung)\s+(?:moi\s+)?(?:automation|flow|dag|luong\s+tu\s+dong|quy\s+trinh)\b/.test(n);
+  if (!isGraphImpact && !isFlowDraftPrompt) {
+    const connMatch = raw.match(/\b(n8n-[a-z0-9_-]{2,60}|erp-webhook-sync)\b/i);
+    const webhookPathMatch = raw.match(/(\/webhook\/[a-z0-9/_-]{2,120})/i);
+    const extractedConn = connMatch && connMatch[1] ? connMatch[1].trim().toLowerCase() : null;
+    const extractedPath = webhookPathMatch && webhookPathMatch[1] ? webhookPathMatch[1].trim() : null;
+
+    if (/(?:liet\s+ke|xem\s+danh\s+sach|danh\s+sach)\s+(?:cac\s+)?(?:ket\s+noi\s+n8n|n8n|connector)\b/.test(n)) {
+      const denied = requireAdminOrRefuse('n8n_connector_list');
+      if (denied) return denied;
+      return {
+        intent: 'N8N_LIST_CONNECTORS',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: { operation: 'listConnectors', ...(n.includes('n8n') ? { connectorType: 'n8n' } : {}) },
+      };
+    }
+    if (/(?:kiem\s+tra|test|ping)\s+(?:ket\s+noi\s+)?(?:n8n|connector)\b/.test(n)) {
+      const denied = requireAdminOrRefuse('n8n_connector_test');
+      if (denied) return denied;
+      return {
+        intent: 'N8N_TEST_CONNECTOR',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: { operation: 'testConnector', ...(extractedConn ? { connectorKey: extractedConn } : {}) },
+      };
+    }
+    if (/(?:goi\s+(?:truc\s+tiep\s+)?(?:luong\s+)?n8n|chay\s+(?:luong\s+)?n8n|kich\s+hoat\s+(?:luong\s+)?n8n|day\s+sang\s+n8n|invoke\s+n8n)/.test(n)) {
+      const denied = requireAdminOrRefuse('n8n_invoke');
+      if (denied) return denied;
+      return {
+        intent: 'N8N_INVOKE',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'invokeN8n',
+          ...(extractedConn ? { connectorKey: extractedConn } : {}),
+          ...(extractedPath ? { webhookPath: extractedPath } : {}),
+          payload: { goal: raw },
+        },
+      };
+    }
+  }
+
   // 3.5. DX-OS Flow Architect (Suggest / Test / Patch / Draft / Resume / Fix Error) — Admin only
   const runUid = extractAutomationRunUid(raw);
   const preExtractedRuleKey = extractAutomationRuleKey(raw);

@@ -1312,6 +1312,7 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
 
   // 1. Path matching (both nested Workflow route and alias route, case-insensitive, strips ?/#)
   assert.equal(isFlowStudioPath('/admin/settings/workflow/automation'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/connectors'), true);
   assert.equal(isFlowStudioPath('/admin/settings/workflow/automation/'), true);
   assert.equal(isFlowStudioPath('/admin/settings/workflow/automation/rule-123?organizationId=org-a#canvas'), true);
   assert.equal(isFlowStudioPath('/ADMIN/Settings/Workflow/Automation'), true);
@@ -1578,6 +1579,8 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
     assert.equal(triggeredAdmin.length, 1);
     assert.equal(triggeredAdmin[0].aiEmployee, 'dxos-architect');
     assert.ok(triggeredAdmin[0].tasks[0].message.system.includes('ruleKey="auto_1"'));
+    assert.ok(triggeredAdmin[0].tasks[0].message.system.includes('invokeN8n'));
+    assert.equal(dispatchedEvents.some((e) => e.type === 'latticedx:ai-chat-opening'), true);
 
     // MutationObserver ignores mutations inside dxos-portal-ai-float-btn cleanly
     assert.ok(observerCallbacks.length >= 1);

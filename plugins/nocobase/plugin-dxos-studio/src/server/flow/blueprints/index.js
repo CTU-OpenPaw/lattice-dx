@@ -14,6 +14,7 @@ const slaEscalation = require('./sla-escalation.json');
 const procurementHitlApproval = require('./procurement-hitl-approval.json');
 const scheduledAiDigest = require('./scheduled-ai-digest.json');
 const partnerWebhookSync = require('./partner-webhook-sync.json');
+const enterpriseN8nCompliance = require('./enterprise-n8n-compliance.json');
 
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
@@ -32,6 +33,7 @@ const RAW_BLUEPRINTS = [
   procurementHitlApproval,
   scheduledAiDigest,
   partnerWebhookSync,
+  enterpriseN8nCompliance,
 ];
 
 const FLOW_BLUEPRINTS = deepFreeze(RAW_BLUEPRINTS.map((bp) => structuredClone(bp)));

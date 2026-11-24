@@ -16,7 +16,7 @@ function inferPortalSlug(pathname) {
 
 function isFlowStudioPath(pathname) {
   const clean = String(pathname || '').split('?')[0].split('#')[0].trim().toLowerCase().replace(/\/+$/, '');
-  return /^\/admin\/settings\/(?:workflow\/automation|dxos-flow-studio)(?:\/.*)?$/.test(clean);
+  return /^\/admin\/settings\/(?:workflow\/(?:automation|connectors)|dxos-flow-studio)(?:\/.*)?$/.test(clean);
 }
 
 function sanitizeFlowCtxText(raw, maxLen = 120) {
@@ -146,7 +146,7 @@ function buildHiddenPageSystemContext({ portalSlug = '', pageTitle = '', pathnam
       if (nodeSummary) {
         lines.push(`Danh sách node hiện tại: ${nodeSummary}`);
       }
-      lines.push('Khi quản trị viên yêu cầu tạo, sửa, thêm/xóa node, chạy thử hoặc phê duyệt HITL, hãy dùng ngay công cụ dxos_configure_workflow với ruleKey trên mà không truyền organizationId (hệ thống tự xác thực theo phiên đăng nhập) và không hỏi lại mã kỹ thuật.');
+      lines.push('Khi quản trị viên yêu cầu tạo, sửa, thêm/xóa node, chạy thử, phê duyệt HITL hoặc kiểm tra/kích hoạt dịch vụ n8n, hãy dùng ngay công cụ dxos_configure_workflow (listAutomations/draftAutomation/patchAutomation/testAutomation/resumeAutomation hoặc listConnectors/testConnector/invokeN8n) với ruleKey/connectorKey phù hợp mà không truyền organizationId (hệ thống tự xác thực theo phiên đăng nhập) và không hỏi lại mã kỹ thuật.');
     }
   }
   return lines.join('\n');
@@ -420,6 +420,12 @@ function createPortalAgentLauncher(client, React, _antd, app) {
 
     const handleOpenChat = async (e) => {
       e?.stopPropagation?.();
+      if (onFlowStudio && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+        const evt = typeof CustomEvent === 'function'
+          ? new CustomEvent('latticedx:ai-chat-opening', { detail: { pathname } })
+          : { type: 'latticedx:ai-chat-opening', detail: { pathname } };
+        window.dispatchEvent(evt);
+      }
       await openNativePortalChat(app, {
         employee: defaultEmployee,
         portalSlug,

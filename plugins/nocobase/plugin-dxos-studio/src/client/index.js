@@ -16,8 +16,36 @@
   'use strict';
   const { createDxosStudioSettingsPage } = require('./studio-settings');
   const { createFlowStudioApp } = require('./flow/flow-studio-app');
+  const { createBuilderBrokerPanels } = require('./builder-broker-panels');
 
-  function registerStudioSettings(app, Page, FlowPage) {
+  function createWorkflowConnectorsPage(app) {
+    const h = React.createElement;
+    const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, React, antd, app);
+    const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+    return function WorkflowConnectorsPage() {
+      const api = useApi();
+      const [selectedOrg, setSelectedOrg] = React.useState('');
+      const [organizations, setOrganizations] = React.useState([]);
+      React.useEffect(() => {
+        if (!api?.request) return;
+        api.request({ url: 'dxosStudio:listEmployees', method: 'get', skipNotify: true })
+          .then((res) => {
+            const orgs = res?.data?.data?.organizations || res?.data?.organizations || [];
+            if (Array.isArray(orgs) && orgs.length) {
+              setOrganizations(orgs);
+              setSelectedOrg((cur) => cur || orgs[0]);
+            }
+          })
+          .catch(() => {});
+      }, [Boolean(api?.request)]);
+      const openRoute = (p) => { if (app?.router?.navigate) app.router.navigate(p); else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(p) || p); };
+      return h('div', { 'data-testid': 'dxos-workflow-connectors-tab', style: { padding: 14, background: '#f8fafc', minHeight: 520 } },
+        h(VaultAndAutomationPanel, { api, selectedOrg, organizations, openRoute }),
+      );
+    };
+  }
+
+  function registerStudioSettings(app, Page, FlowPage, ConnectorsPage) {
     const psm = app?.pluginSettingsManager;
     if (!psm || typeof psm.add !== 'function') return;
 
@@ -56,6 +84,15 @@
       aclSnippet: 'pm',
       sort: 20,
     });
+    if (ConnectorsPage) {
+      psm.add('workflow.connectors', {
+        title: 'Connectors & n8n',
+        icon: 'ApiOutlined',
+        Component: ConnectorsPage,
+        aclSnippet: 'pm',
+        sort: 30,
+      });
+    }
     psm.add('dxos-flow-studio', {
       title: 'Workflow Automation',
       icon: 'ApartmentOutlined',
@@ -76,7 +113,8 @@
     async load() {
       const Page = createDxosStudioSettingsPage(client, React, antd, this.app);
       const FlowPage = createFlowStudioApp(client, React, antd, this.app);
-      registerStudioSettings(this.app, Page, FlowPage);
+      const ConnectorsPage = createWorkflowConnectorsPage(this.app);
+      registerStudioSettings(this.app, Page, FlowPage, ConnectorsPage);
     }
   }
 
