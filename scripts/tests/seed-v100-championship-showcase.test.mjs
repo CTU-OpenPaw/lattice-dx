@@ -73,6 +73,8 @@ function createMockShowcaseServer({
     snapshots: [...initialSnapshots],
     domains: [],
     automationRules: [],
+    automationRuns: [],
+    workOrders: [],
     connectors: [],
     iotDevices: [],
     webhookSubscriptions: [],
@@ -283,6 +285,57 @@ function createMockShowcaseServer({
         automationRule: { ruleKey: 'auto_cmms_on_coldchain_fault' },
       });
     }
+    if (parsedUrl.pathname === '/api/dxosAutomations:listRules') {
+      const org = parsedUrl.searchParams.get('organizationId');
+      return jsonResp({
+        items: state.automationRules.filter((r) => !org || r.organizationId === org),
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosAutomations:saveRule') {
+      const idx = state.automationRules.findIndex(
+        (r) => r.organizationId === body.organizationId && r.ruleKey === body.ruleKey,
+      );
+      const entry = {
+        id: idx >= 0 ? state.automationRules[idx].id : ++state.nextId,
+        ...body,
+      };
+      if (idx >= 0) state.automationRules[idx] = entry;
+      else state.automationRules.push(entry);
+      return jsonResp({ rule: entry });
+    }
+    if (parsedUrl.pathname === '/api/latticeCustomWorkOrders:list') {
+      const f = JSON.parse(parsedUrl.searchParams.get('filter') || '{}');
+      return jsonResp(
+        state.workOrders.filter((w) => !f.organizationId || w.organizationId === f.organizationId),
+      );
+    }
+    if (parsedUrl.pathname === '/api/dxosAutomations:runNow') {
+      const wo = {
+        id: ++state.nextId,
+        organizationId: body.organizationId,
+        workOrderCode: `WO-${state.nextId}`,
+        deviceKey: body.data?.deviceKey || '',
+        priority: body.data?.severity === 'critical' ? 'critical' : 'high',
+        status: 'open',
+      };
+      state.workOrders.push(wo);
+      const run = {
+        id: ++state.nextId,
+        organizationId: body.organizationId,
+        ruleKey: body.ruleKey,
+        runUid: `run_${state.nextId}`,
+        status: 'completed',
+        stepTracesJson: [
+          { stepIndex: 0, type: 'create_record', status: 'completed', output: { id: wo.id } },
+          { stepIndex: 1, type: 'notify_role', status: 'completed', output: { dispatched: 1 } },
+          { stepIndex: 2, type: 'twin_set_desired', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
+          { stepIndex: 3, type: 'trigger_ai_triage', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
+          { stepIndex: 4, type: 'call_connector', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
+        ],
+      };
+      state.automationRuns.push(run);
+      return jsonResp({ run });
+    }
     if (parsedUrl.pathname === '/api/dxosVault:list') {
       return jsonResp({
         organizationId: parsedUrl.searchParams.get('organizationId'),
@@ -456,6 +509,14 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(first.cmmsPack.dmnTableKey, 'cmms_priority_routing_v1');
   assert.equal(first.cmmsPack.automationRuleKey, 'auto_cmms_on_coldchain_fault');
   assert.equal(first.cmmsPack.portalPath, '/p/cmms');
+  assert.deepEqual(first.automationShowcase.ruleKeys, [
+    'auto_cmms_on_coldchain_fault',
+    'auto_mkt_quarantine_response',
+    'auto_sla_breach_escalation',
+  ]);
+  assert.equal(first.automationShowcase.initialRunTriggered, true);
+  assert.equal(first.automationShowcase.initialRunStepsCompleted, 2);
+  assert.equal(first.automationShowcase.initialRunStepsSkipped, 3);
   assert.equal(first.connectorVault.seeded, true);
   assert.equal(first.connectorVault.connectorKey, 'n8n-coldchain-orchestrator');
   assert.equal(first.connectorVault.hasSecrets, true);
@@ -508,7 +569,10 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(state.ledgerEntries.length, 1);
   assert.equal(state.snapshots.length, 1);
   assert.equal(state.domains.length, 1);
-  assert.equal(state.automationRules.length, 1);
+  assert.equal(state.automationRules.length, 3);
+  assert.equal(second.automationShowcase.createdRules.length, 0);
+  assert.equal(second.automationShowcase.initialRunTriggered, false);
+  assert.equal(state.workOrders.length, 1);
   assert.equal(state.connectors.length, 1);
   assert.equal(state.iotDevices.length, 1);
   assert.equal(state.webhookSubscriptions.length, 1);
@@ -533,7 +597,10 @@ test('runV100ChampionshipShowcaseSeed repairs CMMS pack if /p/cmms portal page i
   // Because /p/cmms was omitted from listDomains in this fixture, seedCmmsBusinessPack triggers idempotent reinstall without duplicating records
   assert.equal(second.cmmsPack.seeded, true);
   assert.equal(state.domains.length, 1);
-  assert.equal(state.automationRules.length, 1);
+  assert.equal(state.automationRules.length, 3);
+  assert.equal(second.automationShowcase.createdRules.length, 0);
+  assert.equal(second.automationShowcase.initialRunTriggered, false);
+  assert.equal(state.workOrders.length, 1);
 });
 
 test('runV100ChampionshipShowcaseSeed paginates ledger/snapshots beyond 100 entries and filters snapshots strictly by latticeOrders', async () => {

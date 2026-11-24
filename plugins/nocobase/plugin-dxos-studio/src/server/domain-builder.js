@@ -15,6 +15,7 @@ const {
   RULE_KEY_RE,
   ALLOWLISTED_BUSINESS_COLLECTIONS,
 } = require('./automation-engine');
+const { AUTOMATION_BLUEPRINTS } = require('./automation-copilot');
 const {
   ORG_ID_RE,
   assertPatScope,
@@ -1163,42 +1164,20 @@ function createDxosBuilderActions(db, options = {}) {
       const rulesRepo = db.getRepository?.('latticeAutomationRules');
       const ruleKey = 'auto_cmms_on_coldchain_fault';
       if (!RULE_KEY_RE.test(ruleKey)) throw fail('INVALID_PACK_RULE', 500, 'Invalid pack rule key');
+      const cmmsBlueprint = AUTOMATION_BLUEPRINTS.find((b) => b.ruleKey === ruleKey);
       const ruleValues = {
         organizationId,
         ruleKey,
-        name: 'Auto Create CMMS Work Order on Cold-Chain Alarm',
-        description: 'Evaluates cmms_priority_routing_v1 DMN and creates a CMMS work order plus notifies the assigned role.',
-        triggerEventType: 'alarm.triggered',
-        filterJson: null,
-        dmnTableKey: 'cmms_priority_routing_v1',
-        actionsJson: [
-          {
-            type: 'create_record',
-            collection: 'latticeCustomWorkOrders',
-            values: {
-              workOrderCode: 'WO-{{id}}',
-              title: 'Cold-Chain Fault: {{data.deviceKey}}',
-              assetId: '{{data.assetId}}',
-              deviceKey: '{{data.deviceKey}}',
-              priority: '{{dmn.workOrderPriority}}',
-              status: 'open',
-              faultSummary: '{{data.message}}',
-              assignedRole: '{{dmn.assignedRole}}',
-            },
-          },
-          {
-            type: 'notify_role',
-            role: '{{dmn.assignedRole}}',
-            category: 'cmms',
-            severity: 'warning',
-            title: 'CMMS Work Order ({{dmn.workOrderPriority}})',
-            body: 'Auto-created CMMS work order for {{data.deviceKey}}',
-            targetCollection: 'latticeCustomWorkOrders',
-            targetPath: '/p/cmms',
-          },
-        ],
-        maxDepth: 8,
-        cooldownSec: 0,
+        name: cmmsBlueprint?.name || 'Auto Create CMMS Work Order on Cold-Chain Alarm',
+        description:
+          cmmsBlueprint?.description ||
+          'Evaluates cmms_priority_routing_v1 DMN and creates a CMMS work order plus notifies the assigned role.',
+        triggerEventType: cmmsBlueprint?.triggerEventType || 'alarm.triggered,device.offline',
+        filterJson: cmmsBlueprint?.filterJson ?? null,
+        dmnTableKey: cmmsBlueprint?.dmnTableKey || 'cmms_priority_routing_v1',
+        actionsJson: structuredClone(cmmsBlueprint?.actionsJson || []),
+        maxDepth: cmmsBlueprint?.maxDepth ?? 8,
+        cooldownSec: cmmsBlueprint?.cooldownSec ?? 60,
         active: true,
         createdBy: actor?.username ? String(actor.username) : null,
       };

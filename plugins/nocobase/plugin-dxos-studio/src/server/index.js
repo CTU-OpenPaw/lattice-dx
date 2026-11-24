@@ -129,7 +129,7 @@ class DxosStudioPlugin extends Plugin {
     this.app.acl.allow('dxosDelegations', ['list', 'create', 'revoke', 'activeForUser'], 'loggedIn');
     this.app.acl.allow(
       'dxosAutomations',
-      ['listRules', 'saveRule', 'toggleRule', 'deleteRule', 'testRule', 'runNow', 'listRuns', 'getRunTrace', 'replayRun'],
+      ['listRules', 'saveRule', 'toggleRule', 'deleteRule', 'testRule', 'runNow', 'listRuns', 'getRunTrace', 'replayRun', 'builderCatalog', 'aiAssist'],
       'loggedIn',
     );
     this.app.acl.allow(

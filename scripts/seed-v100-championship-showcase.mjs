@@ -640,6 +640,322 @@ async function seedCmmsBusinessPack(api, organizationId) {
   };
 }
 
+const FLAGSHIP_COLDCHAIN_BLUEPRINT = {
+  ruleKey: 'auto_cmms_on_coldchain_fault',
+  name: 'Ứng cứu khẩn Chuỗi lạnh & Bảo trì CMMS (5 bước rẽ nhánh)',
+  description:
+    'Đánh giá bảng quyết định cmms_priority_routing_v1, tự tạo phiếu bảo trì CMMS, báo vai trò phụ trách và rẽ nhánh khi ưu tiên = critical để hạ nhiệt Digital Twin (HITL), chạy AI Triage và đẩy điều phối sang n8n.',
+  triggerEventType: 'alarm.triggered,device.offline',
+  filterJson: null,
+  dmnTableKey: 'cmms_priority_routing_v1',
+  cooldownSec: 60,
+  maxDepth: 8,
+  active: true,
+  actionsJson: [
+    {
+      type: 'create_record',
+      label: 'Tạo phiếu bảo trì CMMS',
+      branchLabel: null,
+      when: null,
+      collection: 'latticeCustomWorkOrders',
+      values: {
+        workOrderCode: 'WO-{{id}}',
+        title: 'Cold-Chain Fault: {{data.deviceKey}}',
+        assetId: '{{data.assetId}}',
+        deviceKey: '{{data.deviceKey}}',
+        priority: '{{dmn.workOrderPriority}}',
+        status: 'open',
+        faultSummary: '{{data.message}}',
+        assignedRole: '{{dmn.assignedRole}}',
+      },
+    },
+    {
+      type: 'notify_role',
+      label: 'Thông báo vai trò phụ trách',
+      branchLabel: null,
+      when: null,
+      role: '{{dmn.assignedRole}}',
+      category: 'cmms',
+      severity: 'warning',
+      title: 'CMMS Work Order ({{dmn.workOrderPriority}})',
+      body: 'Tự tạo phiếu #{{steps.0.id}} cho {{data.deviceKey}}',
+      targetCollection: 'latticeCustomWorkOrders',
+      targetPath: '/p/cmms',
+    },
+    {
+      type: 'twin_set_desired',
+      label: 'Hạ nhiệt khẩn Digital Twin (HITL)',
+      branchLabel: 'Khi ưu tiên = critical',
+      when: { 'dmn.workOrderPriority': 'critical' },
+      assetId: '{{data.assetId}}',
+      assetEntityId: '{{data.assetEntityId}}',
+      desiredPatch: { targetTempC: 4.0, fanMode: 'high' },
+    },
+    {
+      type: 'trigger_ai_triage',
+      label: 'Phân tích sự cố bằng AI Triage',
+      branchLabel: 'Khi ưu tiên = critical',
+      when: { 'dmn.workOrderPriority': 'critical' },
+      targetCollection: 'latticeCustomWorkOrders',
+      targetRecordId: '{{steps.0.id}}',
+      severity: 'critical',
+      recommendation:
+        'Sự cố chuỗi lạnh nghiêm trọng trên {{data.deviceKey}}: kiểm tra máy nén, xác nhận lệnh hạ nhiệt 4°C và xử lý phiếu CMMS #{{steps.0.id}}.',
+    },
+    {
+      type: 'call_connector',
+      label: 'Đẩy điều phối sang n8n',
+      branchLabel: 'Khi ưu tiên = critical',
+      when: { 'dmn.workOrderPriority': 'critical' },
+      connectorKey: 'n8n-coldchain-orchestrator',
+      method: 'POST',
+      body: {
+        eventType: '{{type}}',
+        deviceKey: '{{data.deviceKey}}',
+        workOrderId: '{{steps.0.id}}',
+        priority: '{{dmn.workOrderPriority}}',
+        assignedRole: '{{dmn.assignedRole}}',
+        slaHours: '{{dmn.slaHours}}',
+      },
+    },
+  ],
+};
+
+const FLAGSHIP_ADDITIONAL_BLUEPRINTS = [
+  {
+    ruleKey: 'auto_mkt_quarantine_response',
+    name: 'Cách ly Lô Vắc-xin vượt MKT & Đồng bộ Đối tác (4 bước)',
+    description:
+      'Tự động mở hồ sơ sự cố khi lô vắc-xin bị hold MKT, chạy AI Triage gắn với hồ sơ sự cố, rẽ nhánh cấp Giám đốc Chất lượng sang n8n và thông báo ldx_manager.',
+    triggerEventType: 'lot.held_mkt',
+    filterJson: null,
+    dmnTableKey: 'cold_chain_approval_v1',
+    cooldownSec: 60,
+    maxDepth: 8,
+    active: true,
+    actionsJson: [
+      {
+        type: 'create_record',
+        label: 'Mở hồ sơ sự cố cách ly MKT',
+        branchLabel: null,
+        when: null,
+        collection: 'latticeIncidentCases',
+        values: {
+          code: 'MKT-{{id}}',
+          name: 'Cách ly lô vượt MKT: {{data.lotCode}}',
+          runId: 'mkt-{{id}}',
+          assetEntityId: 'lot:{{data.lotCode}}',
+          handlerId: 'ldx_manager',
+          severity: 'critical',
+          status: 'open',
+          proposal:
+            'Lô {{data.lotCode}} có MKT={{data.mktCelsius}}°C vượt ngưỡng {{data.thresholdCelsius}}°C (cấp duyệt: {{dmn.approvalTier}}).',
+        },
+      },
+      {
+        type: 'trigger_ai_triage',
+        label: 'AI Triage đánh giá hồ sơ cách ly',
+        branchLabel: null,
+        when: null,
+        targetCollection: 'latticeIncidentCases',
+        targetRecordId: '{{steps.0.id}}',
+        severity: 'high',
+        recommendation:
+          'Đánh giá sai lệch MKT cho lô {{data.lotCode}} ({{data.mktCelsius}}°C) gắn với sự cố #{{steps.0.id}}, phê duyệt cấp {{dmn.approvalTier}} trong {{dmn.slaMinutes}} phút.',
+      },
+      {
+        type: 'call_connector',
+        label: 'Đồng bộ n8n Giám đốc Chất lượng',
+        branchLabel: 'Cấp Giám đốc Chất lượng',
+        when: { 'dmn.approvalTier': 'quality_hold_director' },
+        connectorKey: 'n8n-coldchain-orchestrator',
+        method: 'POST',
+        body: {
+          eventType: '{{type}}',
+          lotCode: '{{data.lotCode}}',
+          mktCelsius: '{{data.mktCelsius}}',
+          incidentId: '{{steps.0.id}}',
+          approvalTier: '{{dmn.approvalTier}}',
+          slaMinutes: '{{dmn.slaMinutes}}',
+        },
+      },
+      {
+        type: 'notify_role',
+        label: 'Thông báo Quản lý Chuỗi lạnh',
+        branchLabel: null,
+        when: null,
+        role: 'ldx_manager',
+        category: 'wms',
+        severity: 'critical',
+        title: 'Cách ly lô MKT: {{data.lotCode}} ({{dmn.approvalTier}})',
+        body: 'Đã mở hồ sơ sự cố #{{steps.0.id}} cho lô {{data.lotCode}} (MKT {{data.mktCelsius}}°C).',
+        targetCollection: 'latticeIncidentCases',
+        targetRecordId: '{{steps.0.id}}',
+        targetPath: '/p/wms',
+      },
+    ],
+  },
+  {
+    ruleKey: 'auto_sla_breach_escalation',
+    name: 'Leo thang Cảnh báo & Vi phạm SLA (3 bước rẽ nhánh)',
+    description:
+      'Phân nhánh theo sla.warning (nhắc ldx_dispatcher) và sla.breached (tạo phiếu dịch vụ khẩn trên latticeServiceTickets và leo thang ldx_manager).',
+    triggerEventType: 'sla.warning,sla.breached',
+    filterJson: null,
+    dmnTableKey: null,
+    cooldownSec: 120,
+    maxDepth: 8,
+    active: true,
+    actionsJson: [
+      {
+        type: 'notify_role',
+        label: 'Nhắc điều phối viên sắp trễ SLA',
+        branchLabel: 'Khi sla.warning',
+        when: { 'event.type': 'sla.warning' },
+        role: 'ldx_dispatcher',
+        category: 'sla',
+        severity: 'warning',
+        title: 'Cảnh báo sắp chạm ngưỡng SLA ({{data.code}})',
+        body: 'Bản ghi {{data.targetCollection}} #{{data.recordId}} còn {{data.remainingMinutes}} phút trước hạn SLA.',
+        targetCollection: '{{data.targetCollection}}',
+        targetRecordId: '{{data.recordId}}',
+        targetPath: '/p/services',
+      },
+      {
+        type: 'create_record',
+        label: 'Tạo phiếu xử lý vi phạm SLA',
+        branchLabel: 'Khi sla.breached',
+        when: { 'event.type': 'sla.breached' },
+        collection: 'latticeServiceTickets',
+        values: {
+          code: 'SLA-{{id}}',
+          name: 'Vi phạm SLA: {{data.code}}',
+          serviceType: 'facilities',
+          priority: 'high',
+          description: 'Quá hạn SLA {{data.overdueMinutes}} phút trên {{data.targetCollection}} #{{data.recordId}}.',
+        },
+      },
+      {
+        type: 'notify_role',
+        label: 'Leo thang Quản lý khi vi phạm SLA',
+        branchLabel: 'Khi sla.breached',
+        when: { 'event.type': 'sla.breached' },
+        role: 'ldx_manager',
+        category: 'sla',
+        severity: 'critical',
+        title: 'Leo thang SLA quá hạn: {{data.code}}',
+        body: 'Đã tạo phiếu khẩn #{{steps.1.id}} do quá hạn SLA trên {{data.targetCollection}} #{{data.recordId}}.',
+        targetCollection: 'latticeServiceTickets',
+        targetRecordId: '{{steps.1.id}}',
+        targetPath: '/p/services',
+      },
+    ],
+  },
+];
+
+async function seedFlagshipAutomationRules(api, organizationId, assets) {
+  const existingRules = unwrapList(
+    await api(`dxosAutomations:listRules?organizationId=${encodeURIComponent(organizationId)}&limit=200`),
+  );
+  const byKey = new Map(existingRules.map((r) => [r?.ruleKey, r]));
+
+  const createdRules = [];
+  const upgradedRules = [];
+  const reusedRules = [];
+
+  const existingColdChain = byKey.get(FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey);
+  const isLegacyNonBranchingColdChain = Boolean(
+    existingColdChain
+    && Array.isArray(existingColdChain.actionsJson)
+    && existingColdChain.actionsJson.length <= 2
+    && !existingColdChain.actionsJson.some((step) => step && step.when),
+  );
+  if (!existingColdChain || isLegacyNonBranchingColdChain) {
+    await api('dxosAutomations:saveRule', {
+      method: 'POST',
+      values: { organizationId, ...FLAGSHIP_COLDCHAIN_BLUEPRINT },
+    });
+    if (isLegacyNonBranchingColdChain) upgradedRules.push(FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey);
+    else createdRules.push(FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey);
+  } else {
+    reusedRules.push(FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey);
+  }
+
+  for (const blueprint of FLAGSHIP_ADDITIONAL_BLUEPRINTS) {
+    if (!byKey.has(blueprint.ruleKey)) {
+      await api('dxosAutomations:saveRule', {
+        method: 'POST',
+        values: { organizationId, ...blueprint },
+      });
+      createdRules.push(blueprint.ruleKey);
+    } else {
+      reusedRules.push(blueprint.ruleKey);
+    }
+  }
+
+  const chillerAsset = assets?.assetsByCode?.['COLD-CHILLER-CT-01'] || assets?.['COLD-CHILLER-CT-01'] || null;
+  let existingWorkOrders = [];
+  let workOrdersCheckSucceeded = false;
+  let workOrdersListError = null;
+  try {
+    const woFilter = encodeURIComponent(JSON.stringify({ organizationId }));
+    existingWorkOrders = unwrapList(
+      await api(`latticeCustomWorkOrders:list?filter=${woFilter}&pageSize=5`),
+    );
+    workOrdersCheckSucceeded = true;
+  } catch (err) {
+    workOrdersListError = err?.message || String(err);
+  }
+
+  let initialRun = null;
+  if (workOrdersCheckSucceeded && existingWorkOrders.length === 0) {
+    const faultData = {
+      severity: 'high',
+      deviceKey: 'cold-truck-ct-01',
+      assetId: chillerAsset?.id ?? null,
+      ...(chillerAsset?.id != null
+        ? { assetEntityId: `urn:ngsi-ld:Asset:${organizationId}:native:${chillerAsset.id}` }
+        : {}),
+      temperature: 9.4,
+      message: 'Cảnh báo nhiệt độ kho lạnh Cần Thơ vượt ngưỡng 8°C (9.4°C)',
+    };
+    const runRes = await api('dxosAutomations:runNow', {
+      method: 'POST',
+      values: {
+        organizationId,
+        ruleKey: 'auto_cmms_on_coldchain_fault',
+        eventType: 'alarm.triggered',
+        subject: 'cold-truck-ct-01',
+        event: {
+          type: 'alarm.triggered',
+          subject: 'cold-truck-ct-01',
+          data: faultData,
+        },
+        data: faultData,
+      },
+    });
+    initialRun = runRes?.run || null;
+  }
+
+  const stepTraces = Array.isArray(initialRun?.stepTracesJson) ? initialRun.stepTracesJson : [];
+  return {
+    ruleKeys: [
+      FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey,
+      ...FLAGSHIP_ADDITIONAL_BLUEPRINTS.map((b) => b.ruleKey),
+    ],
+    createdRules,
+    upgradedRules,
+    reusedRules,
+    existingWorkOrdersCount: existingWorkOrders.length,
+    ...(workOrdersListError ? { workOrdersListError } : {}),
+    initialRunTriggered: Boolean(initialRun),
+    initialRunUid: initialRun?.runUid ?? null,
+    initialRunStatus: initialRun?.status ?? null,
+    initialRunStepsCompleted: stepTraces.filter((s) => s?.status === 'completed').length,
+    initialRunStepsSkipped: stepTraces.filter((s) => s?.status === 'skipped').length,
+  };
+}
+
 async function seedConnectorVault(api, organizationId) {
   const connectorKey = 'n8n-coldchain-orchestrator';
   const listed = unwrapList(
@@ -783,6 +1099,7 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
   const delegation = await seedDelegationSample(api, organizationId, ctx);
   const pkiSnapshot = await seedPkiAndColdSnapshot(api, organizationId, wms.orderId);
   const cmmsPack = await seedCmmsBusinessPack(api, organizationId);
+  const automationShowcase = await seedFlagshipAutomationRules(api, organizationId, assets);
   const connectorVault = await seedConnectorVault(api, organizationId);
   const mqttDevice = await seedMqttDevice(
     api,
@@ -816,6 +1133,7 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
     delegation,
     pkiSnapshot,
     cmmsPack,
+    automationShowcase,
     connectorVault,
     mqttDevice,
     webhookSubscription,

@@ -13,6 +13,10 @@ const path = require('path');
 const { evaluateDecisionTable } = require('./dmn-engine');
 const { SYSTEM_PROTECTED_COLLECTIONS } = require('./solution-bundle');
 const {
+  buildAutomationBuilderCatalog,
+  runAutomationAiAssist,
+} = require('./automation-copilot');
+const {
   assertPatScope,
   clampPageLimit,
   fail,
@@ -155,7 +159,9 @@ function hasUnsafeTemplateSyntax(value) {
     return value.some((item) => hasUnsafeTemplateSyntax(item));
   }
   if (isPlainObject(value)) {
-    return Object.entries(value).some(([k, v]) => BLOCKED_PATH_SEGMENTS.has(k) || hasUnsafeTemplateSyntax(v));
+    return Object.getOwnPropertyNames(value).some(
+      (k) => BLOCKED_PATH_SEGMENTS.has(k) || hasUnsafeTemplateSyntax(value[k]),
+    );
   }
   return false;
 }
@@ -208,7 +214,8 @@ function lookupFilterValue(eventContext, key) {
     pathStr.startsWith('data.') ||
     pathStr.startsWith('dmn.') ||
     pathStr.startsWith('event.') ||
-    pathStr.startsWith('envelope.')
+    pathStr.startsWith('envelope.') ||
+    pathStr.startsWith('steps.')
   ) {
     return getSafePath(eventContext, pathStr);
   }
@@ -468,15 +475,49 @@ function validateRulePayload(payload) {
     throw fail('MISSING_RULE_NAME', 400, 'name is required');
   }
   const triggerEventType = String(payload.triggerEventType || '*').trim() || '*';
-  const actionsJson = Array.isArray(payload.actionsJson) ? payload.actionsJson : [];
-  for (let i = 0; i < actionsJson.length; i += 1) {
-    const act = actionsJson[i];
+  const rawActions = Array.isArray(payload.actionsJson) ? payload.actionsJson : [];
+  const actionsJson = [];
+  for (let i = 0; i < rawActions.length; i += 1) {
+    const act = rawActions[i];
     if (!isPlainObject(act) || !VALID_ACTION_TYPES.has(String(act.type || '').trim())) {
       throw fail('INVALID_ACTION_TYPE', 400, `actionsJson[${i}].type must be a valid automation action`);
     }
     if (hasUnsafeTemplateSyntax(act)) {
       throw fail('UNSAFE_TEMPLATE_EXPRESSION', 400, `actionsJson[${i}] contains unsafe template or prototype key`);
     }
+    if (act.when !== undefined && act.when !== null) {
+      if (!isPlainObject(act.when)) {
+        throw fail('INVALID_ACTION_CONDITION', 400, `actionsJson[${i}].when must be a plain object or null`);
+      }
+      if (hasUnsafeTemplateSyntax(act.when)) {
+        throw fail('UNSAFE_TEMPLATE_EXPRESSION', 400, `actionsJson[${i}].when contains unsafe template or prototype key`);
+      }
+    }
+    if (act.label !== undefined && act.label !== null && typeof act.label !== 'string') {
+      throw fail('INVALID_ACTION_LABEL', 400, `actionsJson[${i}].label must be a string`);
+    }
+    if (act.branchLabel !== undefined && act.branchLabel !== null && typeof act.branchLabel !== 'string') {
+      throw fail('INVALID_ACTION_BRANCH_LABEL', 400, `actionsJson[${i}].branchLabel must be a string`);
+    }
+    if (act.stopOnError !== undefined && act.stopOnError !== null && typeof act.stopOnError !== 'boolean') {
+      throw fail('INVALID_ACTION_STOP_ON_ERROR', 400, `actionsJson[${i}].stopOnError must be a boolean`);
+    }
+    const cleanAct = sanitizePlainObject(act);
+    if (act.when === null || act.when === undefined) {
+      if (act.when === null) cleanAct.when = null;
+    } else {
+      cleanAct.when = sanitizePlainObject(act.when);
+    }
+    if (typeof act.label === 'string') {
+      cleanAct.label = act.label.trim().slice(0, 120);
+    }
+    if (typeof act.branchLabel === 'string') {
+      cleanAct.branchLabel = act.branchLabel.trim().slice(0, 80);
+    }
+    if (typeof act.stopOnError === 'boolean') {
+      cleanAct.stopOnError = act.stopOnError;
+    }
+    actionsJson.push(cleanAct);
   }
   if (payload.filterJson !== undefined && payload.filterJson !== null && hasUnsafeTemplateSyntax(payload.filterJson)) {
     throw fail('UNSAFE_TEMPLATE_EXPRESSION', 400, 'filterJson contains unsafe template or prototype key');
@@ -1126,6 +1167,20 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
     actor: options.actor || null,
     dmn: {},
     dmnResult: null,
+    steps: {},
+    event: {
+      id: event.id,
+      type: event.type,
+      source: event.source,
+      subject: event.subject,
+      time: event.time,
+      organizationid: event.organizationid,
+      organizationId: event.organizationId,
+      correlationid: event.correlationid,
+      causationid: event.causationid,
+      depth: event.depth,
+      data: event.data,
+    },
   };
 
   const matched = matchesFilter(rule.filterJson, eventContext);
@@ -1176,14 +1231,46 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
 
   const actions = Array.isArray(rule.actionsJson) ? rule.actionsJson : [];
   if (options.dryRun) {
-    const simulatedSteps = actions.map((act, idx) => ({
-      stepIndex: idx,
-      type: String(act.type || ''),
-      status: 'simulated',
-      output: interpolateTemplate(act, eventContext),
-      error: null,
-      durationMs: 0,
-    }));
+    const simulatedSteps = [];
+    for (let idx = 0; idx < actions.length; idx += 1) {
+      const act = actions[idx] || {};
+      const type = String(act.type || '');
+      const label = typeof act.label === 'string' && act.label.trim() ? act.label.trim() : null;
+      const branchLabel = typeof act.branchLabel === 'string' && act.branchLabel.trim() ? act.branchLabel.trim() : null;
+      if (isPlainObject(act.when) && Object.keys(act.when).length > 0 && !matchesFilter(act.when, eventContext)) {
+        eventContext.steps[idx] = { status: 'skipped', type, output: null };
+        simulatedSteps.push({
+          stepIndex: idx,
+          type,
+          ...(label ? { label } : {}),
+          ...(branchLabel ? { branchLabel } : {}),
+          status: 'skipped',
+          skipReason: 'BRANCH_CONDITION_NOT_MATCHED',
+          output: null,
+          error: null,
+          durationMs: 0,
+        });
+        continue;
+      }
+      const output = interpolateTemplate(act, eventContext);
+      eventContext.steps[idx] = {
+        ...(isPlainObject(output) ? output : {}),
+        id: `sim_${idx + 1}`,
+        status: 'simulated',
+        type,
+        output,
+      };
+      simulatedSteps.push({
+        stepIndex: idx,
+        type,
+        ...(label ? { label } : {}),
+        ...(branchLabel ? { branchLabel } : {}),
+        status: 'simulated',
+        output,
+        error: null,
+        durationMs: 0,
+      });
+    }
     return finalizeRun({
       status: 'completed',
       matched: true,
@@ -1195,8 +1282,29 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
 
   const stepTraces = [];
   for (let i = 0; i < actions.length; i += 1) {
+    const act = actions[i] || {};
+    const type = String(act.type || '').trim();
+    const label = typeof act.label === 'string' && act.label.trim() ? act.label.trim() : null;
+    const branchLabel = typeof act.branchLabel === 'string' && act.branchLabel.trim() ? act.branchLabel.trim() : null;
+
+    if (isPlainObject(act.when) && Object.keys(act.when).length > 0 && !matchesFilter(act.when, eventContext)) {
+      eventContext.steps[i] = { status: 'skipped', type, output: null };
+      stepTraces.push({
+        stepIndex: i,
+        type,
+        ...(label ? { label } : {}),
+        ...(branchLabel ? { branchLabel } : {}),
+        status: 'skipped',
+        skipReason: 'BRANCH_CONDITION_NOT_MATCHED',
+        output: null,
+        error: null,
+        durationMs: 0,
+      });
+      continue;
+    }
+
     const trace = await executeActionStep({
-      action: actions[i],
+      action: act,
       stepIndex: i,
       organizationId,
       eventContext,
@@ -1205,8 +1313,16 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
       app,
       options,
     });
+    if (label) trace.label = label;
+    if (branchLabel) trace.branchLabel = branchLabel;
     stepTraces.push(trace);
-    if (trace.status === 'failed' && actions[i]?.stopOnError === true) {
+    eventContext.steps[i] = {
+      ...(isPlainObject(trace.output) ? trace.output : {}),
+      status: trace.status,
+      type: trace.type,
+      output: trace.output,
+    };
+    if (trace.status === 'failed' && act.stopOnError === true) {
       break;
     }
   }
@@ -1334,7 +1450,7 @@ function registerAutomationEventListener(app, db, options = {}) {
 function createDxosAutomationsActions(db, options = {}) {
   const foundation = options.foundation || loadFoundationSet();
 
-  async function requireOrgRoles(ctx, params, { mutating = false, allowedPatScopes = null } = {}) {
+  async function requireOrgRoles(ctx, params, { mutating = false, requireManagerOrAdmin = mutating, allowedPatScopes = null } = {}) {
     if (allowedPatScopes) {
       assertAutomationPatScope(ctx, allowedPatScopes, foundation);
     }
@@ -1351,10 +1467,30 @@ function createDxosAutomationsActions(db, options = {}) {
     );
     const roles = await resolveVerifiedRoles(db, ctx);
     const orgAdmin = await isOrgAdmin(db, ctx);
-    if (mutating && !hasAnyRole(roles, MUTATING_ROLES) && !orgAdmin) {
+    if (requireManagerOrAdmin && !hasAnyRole(roles, MUTATING_ROLES) && !orgAdmin) {
       throw fail('FORBIDDEN', 403, 'Manager or admin role required for automation changes');
     }
     return { organizationId, actor, roles };
+  }
+
+  async function upsertAutomationRule(organizationId, validated, actor) {
+    const repo = db.getRepository('latticeAutomationRules');
+    if (!repo) throw fail('REPOSITORY_UNAVAILABLE', 500, 'latticeAutomationRules repository is not registered');
+    const existing = await repo.findOne({ filter: { organizationId, ruleKey: validated.ruleKey } });
+    if (existing) {
+      await repo.update({
+        filter: { organizationId, ruleKey: validated.ruleKey },
+        values: validated,
+      });
+      return repo.findOne({ filter: { organizationId, ruleKey: validated.ruleKey } });
+    }
+    return repo.create({
+      values: {
+        ...validated,
+        organizationId,
+        createdBy: actor?.username ? String(actor.username) : null,
+      },
+    });
   }
 
   return {
@@ -1381,26 +1517,7 @@ function createDxosAutomationsActions(db, options = {}) {
         allowedPatScopes: ['write', 'ai', 'iot'],
       });
       const validated = validateRulePayload(isPlainObject(params.rule) ? params.rule : params);
-      const repo = db.getRepository('latticeAutomationRules');
-      if (!repo) throw fail('REPOSITORY_UNAVAILABLE', 500, 'latticeAutomationRules repository is not registered');
-
-      const existing = await repo.findOne({ filter: { organizationId, ruleKey: validated.ruleKey } });
-      let saved;
-      if (existing) {
-        await repo.update({
-          filter: { organizationId, ruleKey: validated.ruleKey },
-          values: validated,
-        });
-        saved = await repo.findOne({ filter: { organizationId, ruleKey: validated.ruleKey } });
-      } else {
-        saved = await repo.create({
-          values: {
-            ...validated,
-            organizationId,
-            createdBy: actor?.username ? String(actor.username) : null,
-          },
-        });
-      }
+      const saved = await upsertAutomationRule(organizationId, validated, actor);
       ctx.body = { rule: toPlain(saved) };
       return next();
     },
@@ -1461,7 +1578,7 @@ function createDxosAutomationsActions(db, options = {}) {
         ruleObj = { ...validateRulePayload(params), organizationId };
       }
 
-      const rawEvent = params.event || params.context || params.data || params.payload || {};
+      const rawEvent = params.event || params.sampleEvent || params.context || params.data || params.payload || {};
       const simulation = await executeRuleAgainstEvent(db, ruleObj, rawEvent, {
         ...options,
         app: ctx?.app || db?.app,
@@ -1485,17 +1602,20 @@ function createDxosAutomationsActions(db, options = {}) {
       const ruleRow = repo ? await repo.findOne({ filter: { organizationId, ruleKey } }) : null;
       if (!ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
 
+      const defaultEventType = String(val(ruleRow, 'triggerEventType') || 'manual.trigger').split(',')[0].trim() || 'manual.trigger';
       const eventPayload = isPlainObject(params.event)
         ? params.event
-        : {
-            id: params.eventId,
-            type: params.eventType || val(ruleRow, 'triggerEventType') || 'manual.trigger',
-            source: params.source || 'dxos-studio:manual',
-            subject: params.subject,
-            depth: params.depth ?? 0,
-            organizationId,
-            data: params.data || params.context || params.payload || {},
-          };
+        : isPlainObject(params.sampleEvent)
+          ? params.sampleEvent
+          : {
+              id: params.eventId,
+              type: params.eventType || defaultEventType,
+              source: params.source || 'dxos-studio:manual',
+              subject: params.subject,
+              depth: params.depth ?? 0,
+              organizationId,
+              data: params.data || params.context || params.payload || {},
+            };
 
       const run = await executeRuleAgainstEvent(db, ruleRow, eventPayload, {
         ...options,
@@ -1597,6 +1717,55 @@ function createDxosAutomationsActions(db, options = {}) {
       ctx.body = { run: replay, replayedFromRunUid: orig.runUid };
       return next();
     },
+
+    async builderCatalog(ctx, next) {
+      const params = readParams(ctx);
+      assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
+      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
+      ctx.body = await buildAutomationBuilderCatalog(db, organizationId);
+      return next();
+    },
+
+    async aiAssist(ctx, next) {
+      const params = readParams(ctx);
+      const { organizationId, actor } = await requireOrgRoles(ctx, params, {
+        mutating: true,
+        allowedPatScopes: ['write', 'ai', 'iot'],
+      });
+      const rulesRepo = db.getRepository('latticeAutomationRules');
+      let targetRule = params.rule !== undefined ? params.rule : null;
+      const requestedRuleKey = String(params.ruleKey || params.automationCode || '').trim();
+      if (targetRule === null && requestedRuleKey && rulesRepo) {
+        const found = await rulesRepo.findOne({ filter: { organizationId, ruleKey: requestedRuleKey } });
+        if (found) {
+          targetRule = toPlain(found);
+        } else if (String(params.mode || '').trim().toLowerCase() === 'node') {
+          throw fail('RULE_NOT_FOUND', 404, `Automation rule ${requestedRuleKey} not found`);
+        }
+      }
+
+      const catalog = await buildAutomationBuilderCatalog(db, organizationId);
+      const result = runAutomationAiAssist({
+        mode: params.mode,
+        prompt: params.prompt,
+        rule: targetRule,
+        targetNode: params.targetNode,
+        catalog,
+      });
+      if (result?.refused) {
+        throw fail('AI_ASSIST_REFUSED', 400, result.error || 'AI assist request refused');
+      }
+
+      if (params.apply === true && result.draftRule) {
+        const validated = validateRulePayload(result.draftRule);
+        const saved = await upsertAutomationRule(organizationId, validated, actor);
+        ctx.body = { ...result, applied: true, savedRule: toPlain(saved) };
+        return next();
+      }
+
+      ctx.body = { ...result, applied: false };
+      return next();
+    },
   };
 }
 
@@ -1619,4 +1788,5 @@ module.exports = {
   isAllowlistedTargetCollection,
   matchesFilter,
   registerAutomationEventListener,
+  validateRulePayload,
 };

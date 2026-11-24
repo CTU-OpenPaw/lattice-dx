@@ -175,6 +175,7 @@ function createApiMock(handlers) {
 test('builder-broker-panels obeys SPDX, bundler, and security constraints', () => {
   const panelsPath = path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js');
   const studioPath = path.join(PLUGIN_ROOT, 'src/client/studio-settings.js');
+  const autoStudioPath = path.join(PLUGIN_ROOT, 'src/client/automation-studio-panel.js');
   const mod = require(panelsPath);
 
   assert.equal(typeof mod.createBuilderBrokerPanels, 'function');
@@ -182,13 +183,15 @@ test('builder-broker-panels obeys SPDX, bundler, and security constraints', () =
   assert.equal(typeof mod.VaultAndAutomationPanel, 'function');
   assert.equal(typeof mod.DomainBuilderAndTenantsPanel, 'function');
 
-  for (const filePath of [panelsPath, studioPath]) {
+  for (const filePath of [panelsPath, studioPath, autoStudioPath]) {
     const src = readFileSync(filePath, 'utf8');
     assert.ok(src.includes('SPDX-License-Identifier: Apache-2.0'), `Missing SPDX header in ${filePath}`);
     assert.doesNotMatch(src, /require\(['"](?:react|antd|@nocobase\/client)['"]\)/, `Forbidden external require in ${filePath}`);
     assert.doesNotMatch(src, /\blocalStorage\b|\bsessionStorage\b/, `Must not access browser storage in ${filePath}`);
     assert.doesNotMatch(src, /dangerouslySetInnerHTML/, `Must never use dangerouslySetInnerHTML in ${filePath}`);
   }
+  const autoSrc = readFileSync(autoStudioPath, 'utf8');
+  assert.doesNotMatch(autoSrc, /require\(['"][^'"]+['"]\)/, 'automation-studio-panel.js must have ZERO require() calls');
 });
 
 test('studio-settings exposes Tabs 7-9 and GitOps Solution Bundle v3 heading', async () => {
@@ -786,4 +789,218 @@ test('error handling and client-side validation surface errors without calling A
   await collectNodes(bTree, (n) => n.props?.['data-testid'] === 'dxos-builder-domain-form')[0].props.onSubmit({ preventDefault() {} });
   assert.equal(requests.some((r) => r.url === 'dxosBuilder:createDomain'), false);
   assert.ok(builderFeedback.some((f) => f && f.type === 'error' && f.text.includes('latticeCustom')));
+});
+
+test('Visual Automation Studio: Blueprint Gallery, 5-step branching Canvas, Filter/Cooldown save preservation, Dry-Run highlighting, and graceful catalog fallback', async () => {
+  const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
+  const harness = createReactHarness();
+  const feedbackCalls = [];
+  const rules = [
+    {
+      id: 1,
+      ruleKey: 'existing_cold_rule',
+      name: 'Existing Cold Rule',
+      triggerEventType: 'alarm.triggered',
+      filterJson: { temperature: { $gte: 8 } },
+      dmnTableKey: 'cmms_priority_routing_v1',
+      cooldownSec: 45,
+      maxDepth: 6,
+      actionsJson: [
+        { type: 'create_record', label: 'Mở CMMS', collection: 'latticeCustomWorkOrders', values: { title: 'WO {{data.deviceKey}}' } },
+      ],
+      active: true,
+    },
+  ];
+
+  const { client, requests } = createApiMock({
+    'dxosVault:list': async () => ({
+      items: [{ connectorKey: 'n8n-coldchain-orchestrator', name: 'n8n Cold-Chain', connectorType: 'n8n', authType: 'hmac' }],
+    }),
+    // Simulate legacy backend without builderCatalog -> must NOT emit error feedback
+    'dxosAutomations:builderCatalog': async () => {
+      throw new Error('404 builderCatalog not available');
+    },
+    'dxosAutomations:listRules': async () => ({ items: rules }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosAutomations:saveRule': async (req) => ({ rule: { id: 2, ...req.data } }),
+    'dxosAutomations:testRule': async (req) => ({
+      simulation: {
+        ruleKey: req.data.rule.ruleKey,
+        status: 'completed',
+        matched: true,
+        durationMs: 7,
+        dmnResultJson: {
+          tableKey: 'cmms_priority_routing_v1',
+          matched: true,
+          outputs: { workOrderPriority: 'high', assignedRole: 'ldx_operator', slaHours: 4 },
+        },
+        stepTracesJson: [
+          { stepIndex: 0, type: 'create_record', status: 'simulated', durationMs: 2 },
+          { stepIndex: 1, type: 'notify_role', status: 'simulated', durationMs: 1 },
+          { stepIndex: 2, type: 'twin_set_desired', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED', durationMs: 0 },
+          { stepIndex: 3, type: 'trigger_ai_triage', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED', durationMs: 0 },
+          { stepIndex: 4, type: 'call_connector', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED', durationMs: 0 },
+        ],
+      },
+    }),
+  });
+
+  const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(VaultAndAutomationPanel, {
+    selectedOrg: 'org-a',
+    setFeedback: (fb) => feedbackCalls.push(fb),
+  });
+
+  assert.equal(feedbackCalls.some((f) => f && f.type === 'error'), false, 'Missing builderCatalog must fall back silently');
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-studio-toolbar').length, 1);
+  const canvas = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-flow-canvas')[0];
+  assert.ok(canvas, 'Flow canvas must render');
+  assert.ok(collectNodes(canvas, (n) => n.type === 'svg').length >= 3, 'Flow canvas must render inline SVG connectors');
+
+  // Toggle Blueprint Gallery & load 5-step Cold-Chain blueprint
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-blueprint-toggle-btn')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+  const gallery = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-blueprint-gallery')[0];
+  assert.ok(gallery, 'Blueprint gallery must render 3 templates');
+  assert.equal(collectNodes(gallery, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-automation-blueprint-load-')).length, 3);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-blueprint-load-auto_cmms_on_coldchain_fault')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+
+  assert.equal(collectNodes(tree, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-canvas-node-step-')).length, 5);
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-flow-canvas')[0]).includes('Khi ưu tiên = critical'));
+
+  // Select Filter node -> edit Cooldown; Select Step 0 -> edit title value; Save Rule & verify preserved fields
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-filter')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-cooldown-input')[0].props.onChange({ target: { value: '180' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-0')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-label-input')[0].props.onChange({ target: { value: 'Mở CMMS khẩn cấp' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-step-val-title')[0].props.onChange({ target: { value: 'Cảnh báo kho lạnh {{data.deviceKey}}' } });
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-rule-form')[0].props.onSubmit({ preventDefault() {} });
+  const saveReq = requests.find((r) => r.url === 'dxosAutomations:saveRule');
+  assert.ok(saveReq);
+  assert.equal(saveReq.data.ruleKey, 'auto_cmms_on_coldchain_fault');
+  assert.equal(saveReq.data.cooldownSec, 180);
+  assert.equal(saveReq.data.maxDepth, 8);
+  assert.deepEqual(saveReq.data.filterJson, { severity: { $in: ['high', 'critical'] } });
+  assert.equal(saveReq.data.actionsJson[0].label, 'Mở CMMS khẩn cấp');
+  assert.equal(saveReq.data.actionsJson[0].values.title, 'Cảnh báo kho lạnh {{data.deviceKey}}');
+  assert.equal(saveReq.data.actionsJson[2].branchLabel, 'Khi ưu tiên = critical');
+  assert.ok(saveReq.data.actionsJson[2].when);
+
+  // Dry-Run illuminates simulated vs skipped nodes and DMN outputs on Canvas
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-dryrun-btn')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
+  const testReq = requests.find((r) => r.url === 'dxosAutomations:testRule');
+  assert.ok(testReq);
+  assert.equal(testReq.data.rule.ruleKey, 'auto_cmms_on_coldchain_fault');
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-dmn')[0]).includes('workOrderPriority: high'));
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-0')[0]).includes('simulated'));
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-step-2')[0]).includes('skipped'));
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-trace-inspector')[0]).includes('Dry-Run Simulation'));
+});
+
+test('Inline AI Automation Copilot supports suggest, node, full modes and 1-click Apply to Canvas', async () => {
+  const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
+  const harness = createReactHarness();
+  const { client, requests } = createApiMock({
+    'dxosVault:list': async () => ({ items: [] }),
+    'dxosAutomations:builderCatalog': async () => ({
+      eventTypes: [{ eventType: 'alarm.triggered', label: 'Alarm' }],
+      dmnTables: [{ tableKey: 'cmms_priority_routing_v1', name: 'CMMS Routing', outputs: ['workOrderPriority', 'assignedRole'] }],
+      collections: [{ name: 'latticeCustomWorkOrders', title: 'CMMS', fields: ['workOrderCode', 'title', 'priority'] }],
+      roles: ['ldx_admin', 'ldx_manager', 'ldx_operator'],
+      connectors: [],
+    }),
+    'dxosAutomations:listRules': async () => ({ items: [] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosAutomations:aiAssist': async (req) => {
+      if (req.data.mode === 'suggest') {
+        return {
+          summary: 'Nên bật cooldown 120s để tránh tạo trùng phiếu CMMS.',
+          diffSummary: ['Thêm cooldownSec = 120', 'Thêm điều kiện temperature >= 8'],
+          suggestions: [
+            {
+              id: 'add-cooldown',
+              title: 'Thêm Cooldown 120s + Filter >= 8°C',
+              description: 'Chống bão cảnh báo khi cảm biến dao động quanh ngưỡng.',
+              previewRule: {
+                ...req.data.rule,
+                ruleKey: 'ai_suggested_rule',
+                name: 'AI Suggested Cold-Chain',
+                cooldownSec: 120,
+                filterJson: { temperature: { $gte: 8 } },
+              },
+            },
+          ],
+        };
+      }
+      if (req.data.mode === 'node') {
+        return {
+          summary: `Đã vá node ${req.data.targetNode} theo ngữ cảnh.`,
+          diffSummary: ['Cập nhật cooldownSec = 240'],
+          patch: { cooldownSec: 240 },
+        };
+      }
+      return {
+        summary: 'Đã dựng flow SLA 2 nhánh từ mô tả tiếng Việt.',
+        diffSummary: ['Trigger sla.warning,sla.breached', '2 nhánh theo event.type'],
+        rule: {
+          ruleKey: 'ai_sla_escalation_flow',
+          name: 'AI SLA Escalation Flow',
+          triggerEventType: 'sla.warning,sla.breached',
+          filterJson: null,
+          dmnTableKey: '',
+          cooldownSec: 90,
+          maxDepth: 8,
+          active: true,
+          actionsJson: [
+            { type: 'notify_role', label: 'Nhắc dispatcher', when: { field: 'event.type', op: '$eq', value: 'sla.warning' }, branchLabel: 'sla.warning', role: 'ldx_dispatcher', title: 'Warning' },
+            { type: 'create_record', label: 'Tạo ticket khẩn', when: { field: 'event.type', op: '$eq', value: 'sla.breached' }, branchLabel: 'sla.breached', collection: 'latticeServiceTickets', values: { title: 'SLA Breached' } },
+          ],
+        },
+      };
+    },
+  });
+
+  const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+
+  const copilot = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-copilot')[0];
+  assert.ok(copilot);
+
+  // 1. Suggest mode + 1-click suggestion apply
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-prompt')[0].props.onChange({ target: { value: 'Tối ưu chống bão cảnh báo' } });
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-suggest-btn')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+
+  assert.ok(requests.some((r) => r.url === 'dxosAutomations:aiAssist' && r.data.mode === 'suggest'));
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-apply-suggestion-add-cooldown')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-rule-key-input')[0].props.value, 'ai_suggested_rule');
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-cooldown-input')[0].props.value, 120);
+
+  // 2. Node mode on Filter node
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-canvas-node-filter')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-node-btn')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosAutomations:aiAssist' && r.data.mode === 'node' && r.data.targetNode === 'filter'));
+
+  // 3. Full mode + Áp dụng vào Canvas
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-prompt')[0].props.onChange({ target: { value: 'Dựng flow leo thang SLA 2 nhánh' } });
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-full-btn')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosAutomations:aiAssist' && r.data.mode === 'full'));
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-ai-apply-btn')[0].props.onClick();
+  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-rule-key-input')[0].props.value, 'ai_sla_escalation_flow');
+  assert.equal(collectNodes(tree, (n) => String(n.props?.['data-testid'] || '').startsWith('dxos-canvas-node-step-')).length, 2);
 });

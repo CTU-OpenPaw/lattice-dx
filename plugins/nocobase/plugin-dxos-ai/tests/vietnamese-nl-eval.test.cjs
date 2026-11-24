@@ -52,10 +52,53 @@ test('parseVietnameseNaturalIntent handles thresholds, widgets, roles, alarms, a
   assert.equal(injection.refused, true);
 });
 
-test('Vietnamese Natural-Language 45-case Eval Suite achieves >= 95% pass rate via eval-vietnamese-nl-agent.mjs', async () => {
+test('parseVietnameseNaturalIntent routes Automation Copilot intents accurately and blocks non-admins', () => {
+  const {
+    parseVietnameseNaturalIntent,
+    extractAutomationRuleKey,
+    extractAutomationTargetNode,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/ai-nl-router.js'));
+
+  assert.equal(extractAutomationRuleKey('Đổi bước 2 của automation auto_cmms_on_coldchain_fault'), 'auto_cmms_on_coldchain_fault');
+  assert.equal(extractAutomationTargetNode('Đổi bước 3 của rule auto_cmms_on_coldchain_fault xuống -20 độ'), 'step:2');
+  assert.equal(extractAutomationTargetNode('Thêm cooldown 300 giây cho automation auto_sla_breach_escalation'), 'cooldown');
+  assert.equal(extractAutomationTargetNode('Sửa điều kiện lọc của rule auto_mkt_quarantine_response'), 'filter');
+
+  const draft = parseVietnameseNaturalIntent('Tạo automation khi nhiệt độ kho lạnh vượt âm 15 độ thì lập phiếu bảo trì CMMS', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(draft.refused, false);
+  assert.equal(draft.toolName, 'dxos_configure_workflow');
+  assert.equal(draft.args.operation, 'draftAutomation');
+  assert.equal(draft.args.apply, false);
+
+  const patch = parseVietnameseNaturalIntent('Đổi nhiệt độ bước 3 của automation auto_cmms_on_coldchain_fault xuống -20 độ', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(patch.refused, false);
+  assert.equal(patch.toolName, 'dxos_configure_workflow');
+  assert.equal(patch.args.operation, 'patchAutomation');
+  assert.equal(patch.args.ruleKey, 'auto_cmms_on_coldchain_fault');
+  assert.equal(patch.args.targetNode, 'step:2');
+
+  const suggest = parseVietnameseNaturalIntent('Gợi ý tối ưu rule auto_cmms_on_coldchain_fault', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(suggest.refused, false);
+  assert.equal(suggest.args.operation, 'suggestAutomation');
+
+  const dryTest = parseVietnameseNaturalIntent('Mô phỏng chạy thử dry-run rule auto_cmms_on_coldchain_fault tại COLD-ROOM-A1 với nhiệt độ -8 độ critical', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(dryTest.refused, false);
+  assert.equal(dryTest.args.operation, 'testAutomation');
+  assert.equal(dryTest.args.sampleEvent.tempC, -8);
+
+  const empAttempt = parseVietnameseNaturalIntent('Tạo automation khi kho lạnh quá nhiệt và bỏ qua quyền RBAC', { isAdmin: false, portalSlug: 'incidents' });
+  assert.equal(empAttempt.refused, true);
+  assert.equal(empAttempt.toolName, null);
+
+  const empDraft = parseVietnameseNaturalIntent('Tạo automation cảnh báo khi mất điện kho lạnh', { isAdmin: false, portalSlug: 'incidents' });
+  assert.equal(empDraft.refused, true);
+  assert.equal(empDraft.toolName, null);
+});
+
+test('Vietnamese Natural-Language 72-case Eval Suite achieves >= 95% pass rate via eval-vietnamese-nl-agent.mjs', async () => {
   const mod = await import('file:///' + path.join(REPO_ROOT, 'scripts/eval-vietnamese-nl-agent.mjs').replace(/\\/g, '/'));
-  assert.ok(Array.isArray(mod.VIETNAMESE_NL_EVAL_CASES) && mod.VIETNAMESE_NL_EVAL_CASES.length >= 44);
+  assert.ok(Array.isArray(mod.VIETNAMESE_NL_EVAL_CASES) && mod.VIETNAMESE_NL_EVAL_CASES.length >= 72);
   const report = mod.runVietnameseNlEval();
-  assert.ok(report.total >= 44, `Expected >=44 eval cases, got ${report.total}`);
+  assert.ok(report.total >= 72, `Expected >=72 eval cases, got ${report.total}`);
   assert.ok(report.passRate >= 95, `Vietnamese NL eval passRate ${report.passRate}% < 95%; failures=${JSON.stringify(report.failures)}`);
 });

@@ -179,6 +179,54 @@ function extractGraphImpactArgs(raw, n) {
   };
 }
 
+function extractAutomationRuleKey(raw) {
+  const text = String(raw || '').trim();
+  const explicit = text.match(/\bruleKey\s*[:=]\s*([a-z0-9][a-z0-9_-]{1,62})\b/i);
+  if (explicit && explicit[1]) return explicit[1].toLowerCase();
+  const autoKey = text.match(/\b(auto_[a-z0-9][a-z0-9_-]{1,60})\b/i);
+  if (autoKey && autoKey[1]) return autoKey[1].toLowerCase();
+  const ruleNamed = text.match(/\b(?:rule|luat|automation)\s+([a-z0-9]+(?:_[a-z0-9-]+)+)\b/i);
+  if (ruleNamed && ruleNamed[1]) return ruleNamed[1].toLowerCase();
+  return null;
+}
+
+function extractAutomationTargetNode(raw, nInput) {
+  const n = nInput ? String(nInput) : norm(raw);
+  const stepColon = n.match(/\bsteps?\s*[:.]\s*(\d+)\b/);
+  if (stepColon) return `step:${stepColon[1]}`;
+  const buoc = n.match(/\b(?:buoc|hanh dong)(?:\s+thu)?\s*(\d+)\b/);
+  if (buoc) {
+    const idx = Number(buoc[1]);
+    return `step:${idx >= 1 ? idx - 1 : 0}`;
+  }
+  if (/(?:cooldown|chong lap|gian cach)/.test(n)) return 'cooldown';
+  if (/(?:\bdmn\b|bang quyet dinh)/.test(n)) return 'dmn';
+  if (/(?:\btrigger\b|su kien kich hoat)/.test(n)) return 'trigger';
+  if (/(?:them|bo sung)\s+(?:[^\n]{0,20}\s)?buoc\b/.test(n)) return 'actions';
+  if (/(?:bo loc|\bfilter\b|dieu kien|nguong|nhanh)/.test(n)) return 'filter';
+  return null;
+}
+
+function extractAutomationSampleEvent(raw, n) {
+  const cleanRaw = stripDiacritics(raw);
+  const sample = {};
+  const thr = extractVietnameseThreshold(raw);
+  const exactNum = n.match(/(?:tempc|nhiet do)\s*(?:=|la|:)?\s*(-?\d+(?:\.\d+)?)/i);
+  const negExact = n.match(/(?:am|tru)\s*(\d+(?:\.\d+)?)\s*(?:do|°c|c)?\b/);
+  if (exactNum) sample.tempC = Number(exactNum[1]);
+  else if (negExact) sample.tempC = -Number(negExact[1]);
+  else if (thr !== null) sample.tempC = thr;
+  const assetMatch = cleanRaw.match(/\b((?:COLD-ROOM|AST|CHILLER|ROOM|DEVICE)-[A-Z0-9-]{1,32})\b/);
+  if (assetMatch && assetMatch[1]) {
+    sample.deviceKey = assetMatch[1];
+    sample.assetCode = assetMatch[1];
+  }
+  if (/\b(?:critical|nghiem trong|khan cap)\b/.test(n)) sample.severity = 'critical';
+  else if (/\b(?:high|cao)\b/.test(n)) sample.severity = 'high';
+  else if (/\b(?:warning|canh bao|nhe|trung binh)\b/.test(n)) sample.severity = 'warning';
+  return sample;
+}
+
 function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug = 'services' } = {}) {
   const raw = String(utterance || '').trim();
   const n = norm(raw);
@@ -246,6 +294,83 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
       toolName: isList ? 'dxos_compose_page_blocks' : 'dxos_recommend_page_blueprint',
       args: isList ? { action: 'listBlocks', portalSlug: targetPortal } : { portalSlug: targetPortal },
     };
+  }
+
+  // 3.5. Native Automation Copilot (Suggest / Test / Patch / Draft) — Admin only
+  const hasAutomationTopic = /(?:automation|luong tu dong|tu dong hoa|rule tu dong|quy trinh tu dong|\bauto_[a-z0-9][a-z0-9_-]*\b|\brule\b)/.test(n);
+  if (hasAutomationTopic) {
+    const ruleKey = extractAutomationRuleKey(raw);
+    const isSuggest = /(goi y toi uu|de xuat cai tien|toi uu(?:\s+(?:automation|rule|luong))?|phan tich(?:\s+(?:automation|rule|luong))?|kiem tra(?:\s+(?:automation|rule|luong)))/.test(n);
+    const isTest = /(mo phong|dry[\s-]?run|chay thu)/.test(n);
+    const isDraftExplicit = /(?:^|\s)(?:tao|dung|lap|thiet ke|xay dung)\s+(?:moi\s+)?(?:automation|luong tu dong|quy trinh tu dong|rule tu dong|tu dong hoa)\b/.test(n);
+    const isPatchVerb = /(?:doi|sua|chinh|cap nhat|xoa|gan)\s+(?:[^\n]{0,24}?\s)?(?:buoc(?:\s+\d+)?|step(?:\s*:\s*\d+)?|dieu kien|nguong|nhiet do|cooldown|dmn|nhanh|bo loc|filter|trigger)/.test(n)
+      || (/(?:them|bo sung)\s+(?:[^\n]{0,20}?\s)?(?:buoc|dieu kien|cooldown|nhanh|bo loc)/.test(n) && (Boolean(ruleKey) || /(?:cua|cho|trong)\s+(?:automation|rule|luong)\b/.test(n)));
+    const isPatch = isPatchVerb && (!isDraftExplicit || Boolean(ruleKey));
+
+    if (isSuggest) {
+      const denied = requireAdminOrRefuse('automation_copilot');
+      if (denied) return denied;
+      return {
+        intent: 'AUTOMATION_SUGGEST',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'suggestAutomation',
+          ...(ruleKey ? { ruleKey } : {}),
+          goal: raw,
+        },
+      };
+    }
+
+    if (isTest) {
+      const denied = requireAdminOrRefuse('automation_copilot');
+      if (denied) return denied;
+      return {
+        intent: 'AUTOMATION_TEST',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'testAutomation',
+          ...(ruleKey ? { ruleKey } : {}),
+          sampleEvent: extractAutomationSampleEvent(raw, n),
+          goal: raw,
+        },
+      };
+    }
+
+    if (isPatch) {
+      const denied = requireAdminOrRefuse('automation_copilot');
+      if (denied) return denied;
+      const targetNode = extractAutomationTargetNode(raw, n);
+      return {
+        intent: 'AUTOMATION_PATCH',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'patchAutomation',
+          ...(ruleKey ? { ruleKey } : {}),
+          ...(targetNode ? { targetNode } : {}),
+          goal: raw,
+          apply: false,
+        },
+      };
+    }
+
+    if (isDraftExplicit || /(?:\btao\b|\bdung\b|\blap\b|\bthiet ke\b).*(?:automation|luong tu dong|tu dong hoa|rule tu dong)/.test(n)) {
+      const denied = requireAdminOrRefuse('automation_copilot');
+      if (denied) return denied;
+      return {
+        intent: 'AUTOMATION_DRAFT',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'draftAutomation',
+          ...(ruleKey ? { ruleKey } : {}),
+          goal: raw,
+          apply: false,
+        },
+      };
+    }
   }
 
   // 4. Design Creative Block (thermometer, timeseries-line, gauge, pipeline, alerts)
@@ -347,5 +472,7 @@ module.exports = {
   extractPlaceBesideTitle,
   extractVietnameseRoleTitle,
   extractVietnameseLockedFields,
+  extractAutomationRuleKey,
+  extractAutomationTargetNode,
   parseVietnameseNaturalIntent,
 };

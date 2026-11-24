@@ -34,6 +34,7 @@ try {
   Module._load = origLoad;
 }
 const { handleDomainEvent } = require('../src/server/automation-engine');
+const connectorVault = require(path.resolve(__dirname, '../../plugin-lattice-foundation/src/server/connector-vault'));
 const {
   exportSolutionBundle,
   validateSolutionBundle,
@@ -443,68 +444,139 @@ test('createDomain uses NocoBase 2.2.50 flowSurfaces:applyBlueprint idempotently
   assert.equal(blueprintCalls.length, 1);
 });
 
-test('installBusinessPack cmms-maintenance is idempotent and wires end-to-end alarm -> DMN -> CMMS Work Order creation', async () => {
-  const db = makeBuilderDb({
-    latticeEmployees: [
-      { userId: 20, organizationId: 'org-a', active: true },
-      { userId: 21, organizationId: 'org-a', active: true },
-    ],
-    rolesUsers: [
-      { userId: 1, roleName: 'root' },
-      { userId: 20, roleName: 'ldx_admin' },
-      { userId: 21, roleName: 'ldx_manager' },
-    ],
-  });
-  const builder = createDxosBuilderActions(db);
+test('installBusinessPack cmms-maintenance is idempotent and wires end-to-end 5-step branching alarm -> DMN -> CMMS + Twin + Triage + n8n', async () => {
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
 
-  // Before install (org-scoped ldx_admin can read catalog)
-  const beforeCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
-  await builder.listBusinessPacks(beforeCtx, async () => {});
-  assert.equal(beforeCtx.body.items[0].packKey, 'cmms-maintenance');
-  assert.equal(beforeCtx.body.items[0].installed, false);
+  try {
+    const db = makeBuilderDb({
+      latticeEmployees: [
+        { userId: 20, organizationId: 'org-a', active: true },
+        { userId: 21, organizationId: 'org-a', active: true },
+      ],
+      rolesUsers: [
+        { userId: 1, roleName: 'root' },
+        { userId: 20, roleName: 'ldx_admin' },
+        { userId: 21, roleName: 'ldx_manager' },
+      ],
+      latticeAssets: [
+        { id: 88, organizationId: 'org-a', code: 'FREEZER-VN-02', name: 'Freezer VN 02', status: 'active' },
+      ],
+      latticeTwinShadows: [
+        {
+          id: 1,
+          organizationId: 'org-a',
+          assetId: 88,
+          assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:88',
+          desiredJson: { targetTempC: 8.0 },
+          reportedJson: { targetTempC: 8.0 },
+          version: 1,
+        },
+      ],
+      latticeConnectors: [
+        {
+          organizationId: 'org-a',
+          connectorKey: 'n8n-coldchain-orchestrator',
+          name: 'n8n Cold-Chain Orchestrator',
+          connectorType: 'n8n',
+          baseUrl: 'https://n8n.example.com/webhook/coldchain',
+          authType: 'hmac',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ secret: 'n8n-hmac-secret-unit' }, process.env),
+          active: true,
+        },
+      ],
+    });
+    const builder = createDxosBuilderActions(db);
 
-  // Non-root ldx_admin cannot mutate platform packs/schemas
-  await assert.rejects(
-    () => builder.installBusinessPack(makeCtx({ userId: 20, role: 'ldx_admin', params: { packKey: 'cmms-maintenance' } }), async () => {}),
-    (err) => err.status === 403 && err.code === 'ROOT_ADMIN_REQUIRED',
-  );
+    // Before install (org-scoped ldx_admin can read catalog)
+    const beforeCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
+    await builder.listBusinessPacks(beforeCtx, async () => {});
+    assert.equal(beforeCtx.body.items[0].packKey, 'cmms-maintenance');
+    assert.equal(beforeCtx.body.items[0].installed, false);
 
-  // First install + repeat install by verified root (idempotency)
-  const install1 = makeCtx({ userId: 1, role: 'root', isRoot: true, params: { packKey: 'cmms-maintenance', organizationId: 'org-a' } });
-  await builder.installBusinessPack(install1, async () => {});
-  assert.equal(install1.body.installed, true);
-  assert.equal(install1.body.domain.collectionName, 'latticeCustomWorkOrders');
-  assert.equal(install1.body.dmnTable.tableKey, 'cmms_priority_routing_v1');
-  assert.equal(install1.body.automationRule.ruleKey, 'auto_cmms_on_coldchain_fault');
+    // Non-root ldx_admin cannot mutate platform packs/schemas
+    await assert.rejects(
+      () => builder.installBusinessPack(makeCtx({ userId: 20, role: 'ldx_admin', params: { packKey: 'cmms-maintenance' } }), async () => {}),
+      (err) => err.status === 403 && err.code === 'ROOT_ADMIN_REQUIRED',
+    );
 
-  const install2 = makeCtx({ userId: 1, role: 'root', isRoot: true, params: { packKey: 'cmms-maintenance', organizationId: 'org-a' } });
-  await builder.installBusinessPack(install2, async () => {});
-  assert.equal(db.store.latticeDecisionTables.length, 1);
-  assert.equal(db.store.latticeAutomationRules.length, 1);
-  assert.equal(db.store.desktopRoutes.filter((r) => r.type === 'flowPage').length, 1);
-  assert.ok(db.store.uiLayouts.some((l) => l.uid === 'ldx-portal-cmms' && l.routePath === '/p/cmms'));
-  assert.ok(db.store.desktopRoutesUiLayouts.some((link) => link.uiLayoutUid === 'ldx-portal-cmms'));
-  assert.ok(db.store.flowModels.some((m) => m.use === 'GridModel'));
-  assert.ok(db.store.flowModels.some((m) => m.use === 'TableBlockModel'));
+    // First install + repeat install by verified root (idempotency)
+    const install1 = makeCtx({ userId: 1, role: 'root', isRoot: true, params: { packKey: 'cmms-maintenance', organizationId: 'org-a' } });
+    await builder.installBusinessPack(install1, async () => {});
+    assert.equal(install1.body.installed, true);
+    assert.equal(install1.body.domain.collectionName, 'latticeCustomWorkOrders');
+    assert.equal(install1.body.dmnTable.tableKey, 'cmms_priority_routing_v1');
+    assert.equal(install1.body.automationRule.ruleKey, 'auto_cmms_on_coldchain_fault');
+    assert.equal(install1.body.automationRule.triggerEventType, 'alarm.triggered,device.offline');
+    assert.equal(install1.body.automationRule.cooldownSec, 60);
+    assert.equal(install1.body.automationRule.actionsJson.length, 5);
+    assert.deepEqual(install1.body.automationRule.actionsJson[2].when, { 'dmn.workOrderPriority': 'critical' });
 
-  const afterCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
-  await builder.listBusinessPacks(afterCtx, async () => {});
-  assert.equal(afterCtx.body.items[0].installed, true);
+    const install2 = makeCtx({ userId: 1, role: 'root', isRoot: true, params: { packKey: 'cmms-maintenance', organizationId: 'org-a' } });
+    await builder.installBusinessPack(install2, async () => {});
+    assert.equal(db.store.latticeDecisionTables.length, 1);
+    assert.equal(db.store.latticeAutomationRules.length, 1);
+    assert.equal(db.store.desktopRoutes.filter((r) => r.type === 'flowPage').length, 1);
+    assert.ok(db.store.uiLayouts.some((l) => l.uid === 'ldx-portal-cmms' && l.routePath === '/p/cmms'));
+    assert.ok(db.store.desktopRoutesUiLayouts.some((link) => link.uiLayoutUid === 'ldx-portal-cmms'));
+    assert.ok(db.store.flowModels.some((m) => m.use === 'GridModel'));
+    assert.ok(db.store.flowModels.some((m) => m.use === 'TableBlockModel'));
 
-  // Incoming alarm.triggered domain event evaluates cmms_priority_routing_v1 DMN and creates a CMMS Work Order!
-  const runs = await handleDomainEvent(db, {
-    id: 'evt-alarm-901',
-    type: 'alarm.triggered',
-    organizationId: 'org-a',
-    data: { severity: 'critical', deviceKey: 'freezer-vn-02', assetId: 88, message: 'Compressor overload' },
-  });
-  assert.equal(runs.length, 1);
-  assert.equal(runs[0].status, 'completed');
-  assert.equal(runs[0].dmnResultJson.outputs.workOrderPriority, 'critical');
-  assert.equal(db.store.latticeCustomWorkOrders.length, 1);
-  assert.equal(db.store.latticeCustomWorkOrders[0].priority, 'critical');
-  assert.equal(db.store.latticeCustomWorkOrders[0].assignedRole, 'ldx_manager');
-  assert.equal(db.store.latticeCustomWorkOrders[0].organizationId, 'org-a');
+    const afterCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
+    await builder.listBusinessPacks(afterCtx, async () => {});
+    assert.equal(afterCtx.body.items[0].installed, true);
+
+    const n8nCalls = [];
+    const runOpts = {
+      fetchImpl: async (url, init) => {
+        n8nCalls.push({ url, body: JSON.parse(init.body) });
+        return { ok: true, status: 200, async text() { return '{"ok":true}'; } };
+      },
+      env: { ...process.env, NODE_ENV: 'production' },
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    };
+
+    // Critical alarm.triggered executes all 5 steps (CMMS WO, notify, Twin HITL, AI Triage, n8n)
+    const runs = await handleDomainEvent(db, {
+      id: 'evt-alarm-901',
+      type: 'alarm.triggered',
+      organizationId: 'org-a',
+      data: { severity: 'critical', deviceKey: 'freezer-vn-02', assetId: 88, message: 'Compressor overload' },
+    }, runOpts);
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].status, 'completed');
+    assert.equal(runs[0].dmnResultJson.outputs.workOrderPriority, 'critical');
+    assert.equal(runs[0].stepTracesJson.length, 5);
+    assert.ok(runs[0].stepTracesJson.every((s) => s.status === 'completed'));
+    assert.equal(db.store.latticeCustomWorkOrders.length, 1);
+    const woId = db.store.latticeCustomWorkOrders[0].id;
+    assert.equal(db.store.latticeCustomWorkOrders[0].priority, 'critical');
+    assert.equal(db.store.latticeCustomWorkOrders[0].assignedRole, 'ldx_manager');
+    assert.equal(db.store.latticeCustomWorkOrders[0].organizationId, 'org-a');
+    assert.equal(db.store.latticeAgentProposals[0].targetRecordId, woId);
+    assert.equal(n8nCalls.length, 1);
+    assert.equal(n8nCalls[0].body.workOrderId, woId);
+
+    // Medium severity skips steps 2-4 while completing CMMS WO + role notify
+    const medRuns = await handleDomainEvent(db, {
+      id: 'evt-alarm-902',
+      type: 'alarm.triggered',
+      organizationId: 'org-a',
+      data: { severity: 'medium', deviceKey: 'freezer-vn-02', assetId: 88, message: 'Mild temp drift' },
+    }, { ...runOpts, ignoreCooldown: true });
+    assert.equal(medRuns.length, 1);
+    assert.equal(medRuns[0].status, 'completed');
+    assert.equal(medRuns[0].stepTracesJson[0].status, 'completed');
+    assert.equal(medRuns[0].stepTracesJson[1].status, 'completed');
+    for (const idx of [2, 3, 4]) {
+      assert.equal(medRuns[0].stepTracesJson[idx].status, 'skipped');
+      assert.equal(medRuns[0].stepTracesJson[idx].skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+    }
+    assert.equal(n8nCalls.length, 1);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
 });
 
 test('provisionTenant and listTenants provision isolated org, departments, locations, Ed25519 PKI key, VN SLAs, and ldx_admin user idempotently', async () => {

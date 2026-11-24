@@ -83,10 +83,11 @@ function createMockAcceptanceCaller({
       'dxosVault:save',
       'dxosBroker:provisionDevice',
       'dxosAutomations:saveRule',
+      'dxosAutomations:aiAssist',
       'dxosBuilder:createDomain',
       'dxosBuilder:provisionTenant',
     ]);
-    if (adminMutations.has(resourceAction)) {
+    if (adminMutations.has(resourceAction) || resourceAction === 'dxosAutomations:builderCatalog') {
       if (actorRole === 'anon') return errResp(401, 'NATIVE_LOGIN_REQUIRED');
       if (actorRole === 'employee') return errResp(403, 'FORBIDDEN');
     }
@@ -335,10 +336,79 @@ function createMockAcceptanceCaller({
         runUid: `run_${state.nextId}`,
         status: 'completed',
         dmnResultJson: { tableKey: 'cmms_priority_routing_v1', outputs: { workOrderPriority: wo.priority, assignedRole: 'ldx_manager' } },
-        stepTracesJson: [{ stepIndex: 0, type: 'create_record', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id } }],
+        stepTracesJson: [
+          { stepIndex: 0, type: 'create_record', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id } },
+          { stepIndex: 1, type: 'notify_role', status: 'completed', output: { dispatched: 1 } },
+          { stepIndex: 2, type: 'twin_set_desired', status: 'completed', output: { shadow: { id: 901 }, approvalId: 902 } },
+          { stepIndex: 3, type: 'trigger_ai_triage', status: 'completed', output: { id: 903, target: 'latticeAgentProposals' } },
+        ],
       };
       state.automationRuns.push(run);
       return okResp({ run });
+    }
+    if (resourceAction === 'dxosAutomations:builderCatalog') {
+      const org = query.get('organizationId');
+      return okResp({
+        organizationId: org,
+        eventTypes: [{ type: 'alarm.triggered' }],
+        actionTypes: [{ type: 'create_record' }],
+        dmnTables: [{ key: 'cmms_priority_routing_v1', name: 'CMMS Priority Routing' }],
+        collections: [{ name: 'latticeCustomWorkOrders', fields: [{ name: 'workOrderCode', type: 'string' }, { name: 'priority', type: 'string' }] }],
+        connectors: state.connectors.map(({ secrets, ...safe }) => safe),
+        roles: ['ldx_admin', 'ldx_manager', 'ldx_operator'],
+        blueprints: [
+          { ruleKey: 'auto_cmms_on_coldchain_fault' },
+          { ruleKey: 'auto_mkt_quarantine_response' },
+          { ruleKey: 'auto_sla_breach_escalation' },
+        ],
+      });
+    }
+    if (resourceAction === 'dxosAutomations:testRule') {
+      const sev = String(values.event?.data?.severity || 'high');
+      const isCrit = sev === 'critical';
+      return okResp({
+        simulation: {
+          dmnResultJson: { tableKey: 'cmms_priority_routing_v1', outputs: { workOrderPriority: isCrit ? 'critical' : 'high', assignedRole: isCrit ? 'ldx_manager' : 'ldx_operator' } },
+          stepTracesJson: [
+            { stepIndex: 0, type: 'create_record', status: 'simulated' },
+            { stepIndex: 1, type: 'notify_role', status: 'simulated' },
+            { stepIndex: 2, type: 'twin_set_desired', status: isCrit ? 'simulated' : 'skipped', ...(isCrit ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+            { stepIndex: 3, type: 'trigger_ai_triage', status: isCrit ? 'simulated' : 'skipped', ...(isCrit ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+            { stepIndex: 4, type: 'call_connector', status: isCrit ? 'simulated' : 'skipped', ...(isCrit ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+          ],
+        },
+      });
+    }
+    if (resourceAction === 'dxosAutomations:aiAssist') {
+      if (/ignore previous|users table/i.test(String(values.prompt || ''))) {
+        return errResp(400, 'AI_ASSIST_REFUSED', 'Unsafe prompt rejected');
+      }
+      if (values.mode === 'suggest') {
+        return okResp({ mode: 'suggest', applied: false, suggestions: [{ id: 'add_cooldown_guard', title: 'Add cooldown' }] });
+      }
+      if (values.mode === 'node') {
+        return okResp({
+          mode: 'node',
+          applied: false,
+          draftRule: {
+            ruleKey: 'auto_cmms_on_coldchain_fault',
+            actionsJson: [
+              { type: 'create_record', collection: 'latticeCustomWorkOrders' },
+              { type: 'notify_role', role: '{{dmn.assignedRole}}' },
+              { type: 'twin_set_desired', desiredPatch: { targetTempC: 3.5, fanMode: 'high' } },
+            ],
+          },
+        });
+      }
+      return okResp({
+        mode: 'full',
+        applied: false,
+        draftRule: {
+          ruleKey: 'auto_coldchain_draft',
+          triggerEventType: 'alarm.triggered',
+          actionsJson: [{ type: 'create_record', collection: 'latticeCustomWorkOrders' }, { type: 'notify_role', role: 'ldx_manager' }],
+        },
+      });
     }
     if (resourceAction === 'dxosAutomations:listRuns') {
       const org = query.get('organizationId');
@@ -644,7 +714,15 @@ test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, ma
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('collections:destroy?filterByTk=latticeCustomAcc')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAssets:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeIotDevices:destroy?')));
+  assert.equal(res.checks.automationStudioAndCopilotOk, true);
+  assert.equal(res.automationStudio.blueprintCount, 3);
+  assert.equal(res.automationStudio.criticalSimulatedSteps, 5);
+  assert.equal(res.automationStudio.highSkippedSteps, 3);
+  assert.equal(res.automationStudio.aiNodeTargetTempC, 3.5);
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeCustomWorkOrders:destroy?')));
+  assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeTwinShadows:destroy?')));
+  assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAgentProposals:destroy?')));
+  assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAiApprovalQueue:destroy?')));
 });
 
 test('runBrokerAutomationBuilderAcceptance fails closed on leaked mqttPassword or missing OpenAPI custom paths and still cleans up', async () => {

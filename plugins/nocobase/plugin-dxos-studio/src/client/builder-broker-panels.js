@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { createAutomationStudioPanel } = require('./automation-studio-panel');
+
 const CONNECTOR_TYPES = ['n8n', 'webhook', 'mqtt', 'orion_ld', 'http_api', 'smtp_notify'];
 const AUTH_TYPES = ['bearer', 'hmac', 'basic', 'api_key', 'none'];
 const AUTOMATION_ACTION_TYPES = [
@@ -95,8 +97,8 @@ function statusTone(status) {
   if (['online', 'active', 'ok', 'closed', 'delivered', 'dispatched', 'succeeded', 'completed', 'installed', 'synced', 'valid'].includes(s)) {
     return 'ok';
   }
-  if (['provisioned', 'queued', 'running', 'info', 'half_open'].includes(s)) return 'info';
-  if (['offline', 'pending', 'retry_wait', 'warn', 'warning', 'partial_failed'].includes(s)) return 'warn';
+  if (['provisioned', 'queued', 'running', 'info', 'half_open', 'simulated'].includes(s)) return 'info';
+  if (['offline', 'pending', 'retry_wait', 'warn', 'warning', 'partial_failed', 'partial', 'skipped'].includes(s)) return 'warn';
   if (['revoked', 'open', 'dlq', 'failed', 'error'].includes(s) || s.startsWith('http_4') || s.startsWith('http_5')) return 'danger';
   return 'neutral';
 }
@@ -1015,6 +1017,18 @@ function createBrokerAndEventsPanel(client, React, _antd, app) {
 function createVaultAndAutomationPanel(client, React, _antd, app) {
   const h = React.createElement;
   const S = makeStyles();
+  const AutomationStudioPanel = createAutomationStudioPanel(client, React, _antd, app, {
+    unwrapData,
+    extractError,
+    formatTs,
+    safeJsonParse,
+    statusTone,
+    makeStyles,
+    AUTOMATION_ACTION_TYPES,
+    BUILDER_ROLES,
+    DEFAULT_AUTOMATION_ACTIONS,
+    DEFAULT_SAMPLE_EVENT,
+  });
 
   return function VaultAndAutomationPanel(props = {}) {
     const rt = usePanelRuntime(React, client, app, props);
@@ -1036,18 +1050,9 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
 
     const [rules, setRules] = React.useState([]);
     const [runs, setRuns] = React.useState([]);
+    const [rawCatalog, setRawCatalog] = React.useState(null);
     const [selectedRuleKey, setSelectedRuleKey] = React.useState('');
     const [selectedRun, setSelectedRun] = React.useState(null);
-    const [sampleEventText, setSampleEventText] = React.useState(DEFAULT_SAMPLE_EVENT);
-    const [actionsList, setActionsList] = React.useState(DEFAULT_AUTOMATION_ACTIONS);
-    const [actionsText, setActionsText] = React.useState(JSON.stringify(DEFAULT_AUTOMATION_ACTIONS, null, 2));
-    const [ruleForm, setRuleForm] = React.useState({
-      ruleKey: '',
-      name: '',
-      triggerEventType: 'telemetry.alarm',
-      dmnTableKey: 'cmms_priority_routing_v1',
-      active: true,
-    });
 
     const loadAll = React.useCallback(async (overrideRuleKey) => {
       const clientApi = runtimeRef.api;
@@ -1055,6 +1060,13 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
       const runFilterKey = overrideRuleKey !== undefined ? overrideRuleKey : selectedRuleKey;
       setLoading(true);
       try {
+        const catalogPromise = (async () => {
+          try {
+            return await clientApi.request({ url: 'dxosAutomations:builderCatalog', method: 'get', params: orgPayload, skipNotify: true });
+          } catch {
+            return null;
+          }
+        })();
         const results = await Promise.allSettled([
           clientApi.request({ url: 'dxosVault:list', method: 'get', params: orgPayload, skipNotify: true }),
           clientApi.request({ url: 'dxosAutomations:listRules', method: 'get', params: orgPayload, skipNotify: true }),
@@ -1090,6 +1102,13 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
             });
           }
         }
+        const catalogRes = await catalogPromise;
+        if (catalogRes) {
+          const cd = unwrapData(catalogRes);
+          if (cd && typeof cd === 'object' && Object.keys(cd).length > 0) {
+            setRawCatalog(cd);
+          }
+        }
       } catch (err) {
         reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') });
       } finally {
@@ -1100,21 +1119,6 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
     React.useEffect(() => {
       loadAll();
     }, [loadAll]);
-
-    function updateActions(nextList) {
-      setActionsList(nextList);
-      setActionsText(JSON.stringify(nextList, null, 2));
-    }
-
-    function handleActionsJsonChange(raw) {
-      setActionsText(raw);
-      try {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) setActionsList(parsed);
-      } catch {
-        // Defer validation error until submit
-      }
-    }
 
     function handleSaveConnector(e) {
       e?.preventDefault?.();
@@ -1199,120 +1203,6 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
         await loadAll();
       });
     }
-
-    function handleSaveRule(e) {
-      e?.preventDefault?.();
-      const parsedActions = safeJsonParse(actionsText, 'Actions JSON');
-      if (!parsedActions.ok || !Array.isArray(parsedActions.value)) {
-        reportFeedback({ type: 'error', text: parsedActions.error || 'Actions phải là mảng JSON hợp lệ.' });
-        return;
-      }
-      return runMutation('Không lưu được Automation Rule.', async (clientApi) => {
-        const res = await clientApi.request({
-          url: 'dxosAutomations:saveRule',
-          method: 'post',
-          data: {
-            ...orgPayload,
-            ruleKey: ruleForm.ruleKey.trim(),
-            name: ruleForm.name.trim(),
-            triggerEventType: ruleForm.triggerEventType.trim(),
-            dmnTableKey: ruleForm.dmnTableKey.trim() || null,
-            actionsJson: parsedActions.value,
-            actions: parsedActions.value,
-            active: Boolean(ruleForm.active),
-          },
-        });
-        const d = unwrapData(res);
-        const savedKey = d.rule?.ruleKey || d.ruleKey || ruleForm.ruleKey.trim();
-        reportFeedback({ type: 'success', text: `Đã lưu Automation Rule "${savedKey}".` });
-        await loadAll();
-      });
-    }
-
-    function handleToggleRule(rule) {
-      const isActive = rule.active !== false && rule.enabled !== false;
-      return runMutation('Không bật/tắt được Automation Rule.', async (clientApi) => {
-        await clientApi.request({
-          url: 'dxosAutomations:toggleRule',
-          method: 'post',
-          data: { ...orgPayload, ruleKey: rule.ruleKey, ...(rule.id != null ? { id: rule.id } : {}), active: !isActive },
-        });
-        reportFeedback({ type: 'success', text: `Đã ${isActive ? 'tắt' : 'bật'} rule "${rule.ruleKey}".` });
-        await loadAll();
-      });
-    }
-
-    function handleDeleteRule(rule) {
-      return runMutation('Không xóa được Automation Rule.', async (clientApi) => {
-        await clientApi.request({
-          url: 'dxosAutomations:deleteRule',
-          method: 'post',
-          data: { ...orgPayload, ruleKey: rule.ruleKey, ...(rule.id != null ? { id: rule.id } : {}) },
-        });
-        reportFeedback({ type: 'success', text: `Đã xóa rule "${rule.ruleKey}".` });
-        await loadAll();
-      });
-    }
-
-    function handleRunNow(ruleKey) {
-      const parsedSample = safeJsonParse(sampleEventText, 'Sample Event JSON');
-      if (!parsedSample.ok || !parsedSample.value || typeof parsedSample.value !== 'object' || Array.isArray(parsedSample.value)) {
-        reportFeedback({ type: 'error', text: parsedSample.error || 'Sample Event phải là JSON object hợp lệ.' });
-        return;
-      }
-      return runMutation('Không chạy thử được Automation Rule.', async (clientApi) => {
-        const res = await clientApi.request({
-          url: 'dxosAutomations:runNow',
-          method: 'post',
-          data: {
-            ...orgPayload,
-            ruleKey,
-            sampleEvent: parsedSample.value,
-            event: parsedSample.value,
-          },
-        });
-        const d = unwrapData(res);
-        const runObj = d.run || d;
-        setSelectedRuleKey(ruleKey);
-        if (runObj && (runObj.stepTracesJson || runObj.stepTraces || runObj.runUid || runObj.runId || runObj.id)) {
-          setSelectedRun(runObj);
-        }
-        reportFeedback({ type: 'success', text: `Đã chạy thử rule "${ruleKey}" (${runObj.status || 'completed'}).` });
-        await loadAll(ruleKey);
-      });
-    }
-
-    function handleInspectRuns(ruleKey) {
-      setSelectedRuleKey(ruleKey);
-      return loadAll(ruleKey);
-    }
-
-    function handleReplayRun(run) {
-      const runUid = run.runUid || (typeof run.runId === 'string' && run.runId.startsWith('run_') ? run.runId : undefined);
-      const runId = run.runId ?? run.runUid ?? run.id;
-      return runMutation('Không replay được Automation Rule Run.', async (clientApi) => {
-        const res = await clientApi.request({
-          url: 'dxosAutomations:replayRun',
-          method: 'post',
-          data: {
-            ...orgPayload,
-            runId,
-            ...(runUid ? { runUid } : {}),
-            ...(run.id != null ? { id: run.id } : {}),
-          },
-        });
-        const d = unwrapData(res);
-        const nextRun = d.run || d;
-        if (nextRun && (nextRun.stepTracesJson || nextRun.stepTraces)) setSelectedRun(nextRun);
-        reportFeedback({ type: 'success', text: `Đã phát lại Run #${runId}.` });
-        await loadAll();
-      });
-    }
-
-    const tracesRaw = selectedRun?.stepTracesJson ?? selectedRun?.stepTraces ?? null;
-    const tracesList = Array.isArray(tracesRaw)
-      ? tracesRaw
-      : (typeof tracesRaw === 'string' ? (() => { try { return JSON.parse(tracesRaw); } catch { return []; } })() : []);
 
     return h('div', { 'data-testid': 'dxos-studio-automation-panel', style: S.stack },
       renderLocalFeedback(h, rt.localFeedback),
@@ -1502,271 +1392,24 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
         ),
       ),
 
-      // Section 2: Native Automation Rules + Execution Trace Inspector
-      h('div', { style: S.card },
-        h('div', { style: S.rowBetween },
-          h('div', null,
-            h('h3', { style: { margin: 0, fontSize: 16 } }, 'Native Automation Rules & Execution Trace Inspector'),
-            h('p', { style: { margin: '4px 0 0', fontSize: 12, color: '#64748b' } }, 'Luồng 3 bước Event -> DMN Table -> Actions có chống lặp maxDepth, chạy thử Run Now và kiểm tra Trace / Replay.'),
-          ),
-        ),
-
-        h('form', { 'data-testid': 'dxos-automation-rule-form', onSubmit: handleSaveRule, style: S.subCard },
-          h('div', { style: S.rowWrap },
-            h('span', { style: S.badge('info') }, '1. Event Trigger'),
-            h('span', { style: { fontSize: 12, color: '#64748b' } }, '→'),
-            h('span', { style: S.badge('warn') }, '2. DMN Table'),
-            h('span', { style: { fontSize: 12, color: '#64748b' } }, '→'),
-            h('span', { style: S.badge('ok') }, '3. Actions'),
-          ),
-          h('div', { style: S.grid2 },
-            h('div', null,
-              h('label', { style: S.label }, 'Rule Key'),
-              h('input', {
-                'data-testid': 'dxos-automation-rule-key-input',
-                type: 'text',
-                required: true,
-                placeholder: 'VD: auto_cmms_on_coldchain_fault',
-                value: ruleForm.ruleKey,
-                onChange: (e) => setRuleForm((p) => ({ ...p, ruleKey: e.target.value })),
-                style: S.input,
-              }),
-            ),
-            h('div', null,
-              h('label', { style: S.label }, 'Tên Rule'),
-              h('input', {
-                'data-testid': 'dxos-automation-rule-name-input',
-                type: 'text',
-                required: true,
-                placeholder: 'VD: Tự tạo WO bảo trì khi vượt nhiệt',
-                value: ruleForm.name,
-                onChange: (e) => setRuleForm((p) => ({ ...p, name: e.target.value })),
-                style: S.input,
-              }),
-            ),
-            h('div', null,
-              h('label', { style: S.label }, 'Trigger Event Type'),
-              h('input', {
-                'data-testid': 'dxos-automation-trigger-input',
-                type: 'text',
-                required: true,
-                placeholder: 'telemetry.alarm',
-                value: ruleForm.triggerEventType,
-                onChange: (e) => setRuleForm((p) => ({ ...p, triggerEventType: e.target.value })),
-                style: S.input,
-              }),
-            ),
-            h('div', null,
-              h('label', { style: S.label }, 'DMN Table Key (tùy chọn)'),
-              h('input', {
-                'data-testid': 'dxos-automation-dmn-input',
-                type: 'text',
-                placeholder: 'cmms_priority_routing_v1',
-                value: ruleForm.dmnTableKey,
-                onChange: (e) => setRuleForm((p) => ({ ...p, dmnTableKey: e.target.value })),
-                style: S.input,
-              }),
-            ),
-          ),
-
-          h('div', { 'data-testid': 'dxos-automation-actions-editor', style: { display: 'grid', gap: 6 } },
-            h('div', { style: S.rowBetween },
-              h('span', { style: S.label }, 'Danh sách Actions có cấu trúc'),
-              h('button', {
-                'data-testid': 'dxos-automation-add-action-btn',
-                type: 'button',
-                onClick: () => updateActions([...actionsList, { type: 'notify_role', role: 'ldx_operator', body: '' }]),
-                style: S.btn(false),
-              }, '+ Thêm Action'),
-            ),
-            actionsList.map((act, idx) => h('div', { key: idx, style: { display: 'grid', gridTemplateColumns: '180px 1fr auto', gap: 8, alignItems: 'center' } },
-              h('select', {
-                value: act.type || 'create_record',
-                onChange: (e) => {
-                  const next = actionsList.map((item, i) => (i === idx ? { ...item, type: e.target.value } : item));
-                  updateActions(next);
-                },
-                style: S.input,
-              }, AUTOMATION_ACTION_TYPES.map((t) => h('option', { key: t, value: t }, t))),
-              h('input', {
-                type: 'text',
-                placeholder: 'Tham số nhanh (VD: collection / role / connectorKey)',
-                value: act.collection || act.role || act.roleName || act.connectorKey || act.target || '',
-                onChange: (e) => {
-                  const v = e.target.value;
-                  const next = actionsList.map((item, i) => {
-                    if (i !== idx) return item;
-                    if (item.type === 'notify_role') return { ...item, role: v };
-                    if (item.type === 'call_connector') return { ...item, connectorKey: v };
-                    if (item.type === 'create_record' || item.type === 'update_record') return { ...item, collection: v };
-                    return { ...item, target: v };
-                  });
-                  updateActions(next);
-                },
-                style: S.input,
-              }),
-              h('button', {
-                type: 'button',
-                onClick: () => updateActions(actionsList.filter((_, i) => i !== idx)),
-                style: S.btn(false, true),
-              }, 'Xóa'),
-            )),
-            h('div', null,
-              h('label', { style: S.label }, 'Actions JSON (đồng bộ hai chiều)'),
-              h('textarea', {
-                'data-testid': 'dxos-automation-actions-json',
-                rows: 4,
-                value: actionsText,
-                onChange: (e) => handleActionsJsonChange(e.target.value),
-                style: S.textarea,
-              }),
-            ),
-          ),
-
-          h('div', null,
-            h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Lưu Automation Rule'),
-          ),
-        ),
-
-        h('div', { style: S.subCard },
-          h('label', { style: S.label }, 'Sample Event JSON dùng khi bấm "Run Now"'),
-          h('textarea', {
-            'data-testid': 'dxos-automation-sample-event',
-            rows: 3,
-            value: sampleEventText,
-            onChange: (e) => setSampleEventText(e.target.value),
-            style: S.textarea,
-          }),
-        ),
-
-        h('div', { style: S.tableWrap },
-          h('table', { 'data-testid': 'dxos-automation-rules-table', style: S.table },
-            h('thead', null, h('tr', null, ['Rule Key', 'Tên', 'Event Trigger', 'DMN Table', 'Actions', 'Trạng thái', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
-            h('tbody', null,
-              !rules.length
-                ? h('tr', null, h('td', { colSpan: 7, style: { ...S.td, color: '#64748b' } }, 'Chưa có Automation Rule nào.'))
-                : rules.map((r) => {
-                  const isActive = r.active !== false && r.enabled !== false;
-                  const actCount = Array.isArray(r.actionsJson) ? r.actionsJson.length : (Array.isArray(r.actions) ? r.actions.length : 0);
-                  return h('tr', { key: r.id || r.ruleKey },
-                    h('td', { style: S.td }, h('code', null, r.ruleKey)),
-                    h('td', { style: S.td }, r.name),
-                    h('td', { style: S.td }, h('code', null, r.triggerEventType)),
-                    h('td', { style: S.td }, r.dmnTableKey ? h('code', null, r.dmnTableKey) : '-'),
-                    h('td', { style: S.td }, `${actCount} bước`),
-                    h('td', { style: S.td }, h('span', { style: S.badge(isActive ? 'ok' : 'neutral') }, isActive ? 'active' : 'paused')),
-                    h('td', { style: { ...S.td, display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                      h('button', {
-                        'data-testid': `dxos-automation-run-${r.ruleKey}`,
-                        type: 'button',
-                        disabled: busy,
-                        onClick: () => handleRunNow(r.ruleKey),
-                        style: S.btn(true, false, busy),
-                      }, 'Run Now'),
-                      h('button', {
-                        'data-testid': `dxos-automation-toggle-${r.ruleKey}`,
-                        type: 'button',
-                        disabled: busy,
-                        onClick: () => handleToggleRule(r),
-                        style: S.btn(false, false, busy),
-                      }, isActive ? 'Tạm dừng' : 'Bật'),
-                      h('button', {
-                        'data-testid': `dxos-automation-runs-btn-${r.ruleKey}`,
-                        type: 'button',
-                        disabled: busy,
-                        onClick: () => handleInspectRuns(r.ruleKey),
-                        style: S.btn(false, false, busy),
-                      }, 'Runs'),
-                      h('button', {
-                        type: 'button',
-                        disabled: busy,
-                        onClick: () => {
-                          const loadedActions = Array.isArray(r.actionsJson) ? r.actionsJson : (Array.isArray(r.actions) ? r.actions : []);
-                          setRuleForm({
-                            ruleKey: r.ruleKey || '',
-                            name: r.name || '',
-                            triggerEventType: r.triggerEventType || '',
-                            dmnTableKey: r.dmnTableKey || '',
-                            active: isActive,
-                          });
-                          updateActions(loadedActions);
-                        },
-                        style: S.btn(false, false, busy),
-                      }, 'Nạp sửa'),
-                      h('button', {
-                        'data-testid': `dxos-automation-delete-${r.ruleKey}`,
-                        type: 'button',
-                        disabled: busy,
-                        onClick: () => handleDeleteRule(r),
-                        style: S.btn(false, true, busy),
-                      }, 'Xóa'),
-                    ),
-                  );
-                }),
-            ),
-          ),
-        ),
-
-        h('div', { 'data-testid': 'dxos-automation-runs-panel', style: S.subCard },
-          h('div', { style: S.rowBetween },
-            h('strong', { style: { fontSize: 13 } }, `Execution Runs & Step Traces${selectedRuleKey ? ` (${selectedRuleKey})` : ''}`),
-            h('div', { style: S.rowWrap },
-              selectedRuleKey ? h('button', { type: 'button', onClick: () => handleInspectRuns(''), style: S.btn(false) }, 'Xem tất cả Rules') : null,
-              h('button', { type: 'button', onClick: () => loadAll(), disabled: loading, style: S.btn(false, false, loading) }, 'Làm mới Runs'),
-            ),
-          ),
-          h('div', { style: S.tableWrap },
-            h('table', { 'data-testid': 'dxos-automation-runs-table', style: S.table },
-              h('thead', null, h('tr', null, ['Run ID', 'Rule Key', 'Status', 'Duration', 'Executed At', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
-              h('tbody', null,
-                !runs.length
-                  ? h('tr', null, h('td', { colSpan: 6, style: { ...S.td, color: '#64748b' } }, 'Chưa có lượt chạy Automation nào.'))
-                  : runs.map((run) => {
-                    const runId = run.runUid ?? run.runId ?? run.id;
-                    const duration = run.durationMs ?? run.duration ?? 0;
-                    return h('tr', { key: runId },
-                      h('td', { style: S.td }, h('code', null, String(runId))),
-                      h('td', { style: S.td }, h('code', null, run.ruleKey || '-')),
-                      h('td', { style: S.td }, h('span', { style: S.badge(statusTone(run.status)) }, run.status || 'completed')),
-                      h('td', { style: S.td }, `${duration} ms`),
-                      h('td', { style: S.td }, formatTs(run.startedAt || run.createdAt)),
-                      h('td', { style: { ...S.td, display: 'flex', gap: 6 } },
-                        h('button', {
-                          'data-testid': `dxos-automation-trace-btn-${runId}`,
-                          type: 'button',
-                          onClick: () => setSelectedRun(run),
-                          style: S.btn(false),
-                        }, 'Xem Trace'),
-                        h('button', {
-                          'data-testid': `dxos-automation-replay-${runId}`,
-                          type: 'button',
-                          disabled: busy,
-                          onClick: () => handleReplayRun(run),
-                          style: S.btn(false, false, busy),
-                        }, 'Replay'),
-                      ),
-                    );
-                  }),
-              ),
-            ),
-          ),
-          selectedRun ? h('div', { 'data-testid': 'dxos-automation-trace-inspector', style: { padding: 10, borderRadius: 8, background: '#ffffff', border: '1px solid #cbd5e1', display: 'grid', gap: 6 } },
-            h('div', { style: S.rowBetween },
-              h('strong', { style: { fontSize: 12 } }, `Trace Inspector — Run ${selectedRun.runUid ?? selectedRun.runId ?? selectedRun.id ?? ''} (${selectedRun.durationMs ?? selectedRun.duration ?? 0} ms)`),
-              h('span', { style: S.badge(statusTone(selectedRun.status)) }, selectedRun.status || 'completed'),
-            ),
-            tracesList.length ? h('div', { style: { display: 'grid', gap: 6 } },
-              tracesList.map((step, i) => h('div', { key: i, style: { padding: 8, borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0', fontSize: 12 } },
-                h('div', { style: S.rowBetween },
-                  h('strong', null, `#${(step.stepIndex ?? i) + 1} ${step.stage || step.type || step.name || 'step'}`),
-                  h('span', { style: S.badge(statusTone(step.status || 'ok')) }, `${step.status || 'ok'} · ${step.durationMs ?? 0} ms`),
-                ),
-                h('pre', { style: { margin: '4px 0 0', fontSize: 11, overflowX: 'auto' } }, JSON.stringify(step, null, 2)),
-              )),
-            ) : h('pre', { style: { margin: 0, fontSize: 11, overflowX: 'auto' } }, JSON.stringify(tracesRaw ?? selectedRun, null, 2)),
-          ) : null,
-        ),
-      ),
+      // Section 2: Visual Automation Studio & Inline AI Copilot
+      h(AutomationStudioPanel, {
+        orgPayload,
+        runtimeRef,
+        reportFeedback,
+        busy,
+        runMutation,
+        loading,
+        loadAll,
+        connectors,
+        rules,
+        runs,
+        rawCatalog,
+        selectedRuleKey,
+        setSelectedRuleKey,
+        selectedRun,
+        setSelectedRun,
+      }),
     );
   };
 }
