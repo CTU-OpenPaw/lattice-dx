@@ -744,6 +744,10 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
       await destroyMatchingIds(callActor, 'desktopRoutes', { parentId: cleanup.customPortalPage.routeId });
       await callActor('root', `desktopRoutes:destroy?filterByTk=${encodeURIComponent(cleanup.customPortalPage.routeId)}`, { method: 'POST' }).catch(() => {});
     }
+    if (cleanup.customPortalPage?.layoutUid) {
+      await destroyMatchingIds(callActor, 'desktopRoutesUiLayouts', { uiLayoutUid: cleanup.customPortalPage.layoutUid });
+      await callActor('root', `uiLayouts:destroy?filterByTk=${encodeURIComponent(cleanup.customPortalPage.layoutUid)}`, { method: 'POST' }).catch(() => {});
+    }
     await callActor('root', `collections:destroy?filterByTk=${encodeURIComponent(cleanup.customCollection)}`, { method: 'POST' }).catch(() => {});
   }
 

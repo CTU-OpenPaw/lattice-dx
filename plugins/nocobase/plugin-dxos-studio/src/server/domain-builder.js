@@ -286,15 +286,67 @@ async function attachAndVerifyPgRls(db, collectionName, opts = {}) {
   return { attached, verified };
 }
 
-async function grantDomainRbac(db, collectionName, roleNames) {
-  const rolesToGrant = (Array.isArray(roleNames) && roleNames.length ? roleNames : DEFAULT_DOMAIN_ROLES)
+function buildActionFieldsList(fields) {
+  const baseCols = ['id', 'createdAt', 'updatedAt', 'organizationId'];
+  const extraCols = (Array.isArray(fields) ? fields : [])
+    .map((f) => (f?.type === 'belongsTo' ? String(f.foreignKey || `${f.name}Id`).trim() : String(f?.name || '').trim()))
+    .filter(Boolean);
+  return [...new Set([...baseCols, ...extraCols])];
+}
+
+function createBuilderApplyBlueprint(ctx) {
+  const flowSurfaces = ctx?.app?.resourceManager?.getResource?.('flowSurfaces');
+  const handler = flowSurfaces?.actions?.get?.('applyBlueprint')?.handler || flowSurfaces?.actions?.applyBlueprint;
+  if (typeof handler !== 'function') return null;
+  return async (doc) => {
+    const subCtx = {
+      app: ctx.app,
+      db: ctx.db,
+      state: {
+        currentUser: ctx.state?.currentUser,
+        currentRole: ctx.state?.currentRole,
+        currentRoles: ctx.state?.currentRoles || [ctx.state?.currentRole || 'root'],
+      },
+      getCurrentLocale: ctx.getCurrentLocale?.bind(ctx),
+      i18n: ctx.i18n,
+      action: { actionName: 'applyBlueprint', params: { values: doc } },
+      request: { headers: {} },
+      body: null,
+      throw: (s, m) => {
+        throw fail('BLUEPRINT_ERROR', s, m);
+      },
+    };
+    await handler(subCtx, async () => {});
+    if ((subCtx.status && subCtx.status >= 400) || (Array.isArray(subCtx.body?.errors) && subCtx.body.errors.length)) {
+      const msg = subCtx.body?.errors?.[0]?.message || `flowSurfaces:applyBlueprint failed (${subCtx.status || 400})`;
+      throw fail('BLUEPRINT_ERROR', subCtx.status || 400, msg);
+    }
+    return subCtx.body?.data || subCtx.body || {};
+  };
+}
+
+async function resolveExistingRolesSet(db) {
+  const rolesRepo = db.getRepository?.('roles');
+  if (!rolesRepo || typeof rolesRepo.count !== 'function' || typeof rolesRepo.find !== 'function') return null;
+  const total = await rolesRepo.count({});
+  if (!total) return null;
+  const rows = (await rolesRepo.find({ limit: 500 })) || [];
+  return new Set(rows.map((r) => String(val(r, 'name') || '').trim()).filter(Boolean));
+}
+
+async function grantDomainRbac(db, collectionName, roleNames, fields = [], ctx = null) {
+  const requestedRoles = (Array.isArray(roleNames) && roleNames.length ? roleNames : DEFAULT_DOMAIN_ROLES)
     .map((r) => String(r || '').trim())
     .filter((r) => ROLE_NAME_RE.test(r));
+  const existingRoles = await resolveExistingRolesSet(db);
+  const rolesToGrant = existingRoles ? requestedRoles.filter((r) => existingRoles.has(r)) : requestedRoles;
 
   const dsRolesRepo = db.getRepository?.('dataSourcesRoles');
   const dsResourcesRepo = db.getRepository?.('dataSourcesRolesResources');
   const dsActionsRepo = db.getRepository?.('dataSourcesRolesResourcesActions');
   const legacyResRepo = db.getRepository?.('rolesResources');
+  const viewFields = buildActionFieldsList(fields);
+  const writeFields = viewFields.filter((f) => f !== 'id' && f !== 'createdAt' && f !== 'updatedAt');
   const grantedRoles = [];
 
   for (const roleName of rolesToGrant) {
@@ -305,8 +357,9 @@ async function grantDomainRbac(db, collectionName, roleNames) {
         { roleName, dataSourceKey: 'main' },
       );
     }
+    let resRow = null;
     if (dsResourcesRepo) {
-      await upsertRepoRow(
+      resRow = await upsertRepoRow(
         dsResourcesRepo,
         { roleName, dataSourceKey: 'main', name: collectionName },
         {
@@ -317,28 +370,36 @@ async function grantDomainRbac(db, collectionName, roleNames) {
         },
       );
     } else if (legacyResRepo) {
-      await upsertRepoRow(
+      resRow = await upsertRepoRow(
         legacyResRepo,
         { roleName, name: collectionName },
         { roleName, name: collectionName, usingActionsConfig: true },
       );
     }
-    if (dsActionsRepo) {
+    const rolesResourceId = val(resRow, 'id') ?? null;
+    if (dsActionsRepo && rolesResourceId != null) {
       const actions = DEFAULT_ROLE_ACTIONS[roleName] || ['view', 'list', 'get'];
       for (const actionName of actions) {
+        const actionFields = ['create', 'update'].includes(actionName) ? writeFields : viewFields;
         await upsertRepoRow(
           dsActionsRepo,
-          { roleName, dataSourceKey: 'main', resourceName: collectionName, name: actionName },
+          { rolesResourceId, name: actionName },
           {
-            roleName,
-            dataSourceKey: 'main',
-            resourceName: collectionName,
+            rolesResourceId,
             name: actionName,
+            ...(actionFields.length ? { fields: actionFields } : {}),
           },
         );
       }
     }
     grantedRoles.push(roleName);
+  }
+  if (typeof ctx?.app?.acl?.writeRolesToACL === 'function') {
+    try {
+      await ctx.app.acl.writeRolesToACL();
+    } catch {
+      // Non-fatal: DB ACL rows already persisted
+    }
   }
   return grantedRoles;
 }
@@ -354,7 +415,7 @@ async function upsertFlowModel(flowModelsRepo, spec) {
   return upsertRepoRow(flowModelsRepo, { uid: spec.uid }, spec);
 }
 
-async function upsertPortalPageForDomain(db, { slug, title, collectionName, roleNames }) {
+async function upsertPortalPageForDomain(db, { slug, title, collectionName, roleNames, fields = [], applyBlueprint = null }) {
   const cleanSlug = String(slug || '').trim().toLowerCase().replace(/^\/+p\//, '');
   if (!PORTAL_SLUG_RE.test(cleanSlug)) {
     throw fail('INVALID_PORTAL_SLUG', 400, `portalSlug must match ${PORTAL_SLUG_RE.source}`);
@@ -381,9 +442,7 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
       { uid: layoutUid },
       {
         uid: layoutUid,
-        name: cleanSlug,
         title: portalTitle,
-        type: 'desktop',
         layoutType: 'desktop',
         routeName,
         routePath,
@@ -393,7 +452,117 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
     );
   }
 
+  const requestedGrants = (Array.isArray(roleNames) && roleNames.length ? roleNames : DEFAULT_DOMAIN_ROLES).filter((r) =>
+    ROLE_NAME_RE.test(String(r)),
+  );
+  const existingRoles = await resolveExistingRolesSet(db);
+  const grants = existingRoles ? requestedGrants.filter((r) => existingRoles.has(r)) : requestedGrants;
+
+  const linkAndGrantRoutes = async (routeIds) => {
+    for (const rid of routeIds.filter((id) => id != null)) {
+      if (linksRepo) {
+        await upsertRepoRow(
+          linksRepo,
+          { uiLayoutUid: layoutUid, desktopRouteId: rid },
+          { uiLayoutUid: layoutUid, desktopRouteId: rid },
+        );
+      }
+      if (rolesRoutesRepo) {
+        for (const roleName of grants) {
+          await upsertRepoRow(
+            rolesRoutesRepo,
+            { roleName, desktopRouteId: rid },
+            { roleName, desktopRouteId: rid },
+          );
+        }
+      }
+    }
+  };
+
+  if (typeof applyBlueprint === 'function') {
+    const links = linksRepo && typeof linksRepo.find === 'function'
+      ? (await linksRepo.find({ filter: { uiLayoutUid: layoutUid }, limit: 200 })) || []
+      : [];
+    const linkedRouteIds = new Set(links.map((l) => String(val(l, 'desktopRouteId'))).filter(Boolean));
+    const allRoutes = desktopRoutesRepo && typeof desktopRoutesRepo.find === 'function'
+      ? (await desktopRoutesRepo.find({ limit: 500 })) || []
+      : [];
+    const layoutRoutes = allRoutes.filter((r) => linkedRouteIds.has(String(val(r, 'id'))));
+    let pageRoute = layoutRoutes.find(
+      (r) => ['flowPage', 'page'].includes(val(r, 'type'))
+        && (val(r, 'options')?.collectionName === collectionName || val(r, 'title') === portalTitle),
+    ) || null;
+    let tabSchemaOut = null;
+
+    if (!pageRoute) {
+      const visibleFields = (Array.isArray(fields) ? fields : [])
+        .filter((f) => f && f.name && f.type !== 'json' && f.type !== 'belongsTo')
+        .map((f) => f.name)
+        .slice(0, 6);
+      if (!visibleFields.length) visibleFields.push('organizationId');
+
+      const bpRes = await applyBlueprint({
+        version: '1',
+        mode: 'create',
+        navigation: { layoutUid, item: { title: portalTitle, icon: 'TableOutlined' } },
+        page: { title: portalTitle, displayTitle: true, enableTabs: false },
+        tabs: [{
+          title: portalTitle,
+          blocks: [{
+            key: `${cleanSlug}-${collectionName}`,
+            type: 'table',
+            title: portalTitle,
+            collection: collectionName,
+            fields: visibleFields,
+            settings: { pageSize: 10 },
+            actions: ['filter', 'refresh'],
+          }],
+        }],
+      });
+      tabSchemaOut = bpRes?.target?.tabSchemaUid || null;
+
+      const updatedRoutes = desktopRoutesRepo && typeof desktopRoutesRepo.find === 'function'
+        ? (await desktopRoutesRepo.find({ limit: 500 })) || []
+        : [];
+      const updatedLinks = linksRepo && typeof linksRepo.find === 'function'
+        ? (await linksRepo.find({ filter: { uiLayoutUid: layoutUid }, limit: 200 })) || []
+        : [];
+      const updatedLinkedIds = new Set(updatedLinks.map((l) => String(val(l, 'desktopRouteId'))).filter(Boolean));
+      const targetRouteId = bpRes?.target?.routeId;
+      pageRoute = (targetRouteId != null ? updatedRoutes.find((r) => String(val(r, 'id')) === String(targetRouteId)) : null)
+        || updatedRoutes.find((r) => updatedLinkedIds.has(String(val(r, 'id'))) && ['flowPage', 'page'].includes(val(r, 'type')) && val(r, 'title') === portalTitle)
+        || null;
+    }
+
+    const pageId = val(pageRoute, 'id') ?? null;
+    let tabRoute = null;
+    if (pageId != null && desktopRoutesRepo) {
+      const existingOpts = val(pageRoute, 'options') && typeof val(pageRoute, 'options') === 'object' ? val(pageRoute, 'options') : {};
+      if (existingOpts.collectionName !== collectionName || existingOpts.path !== routePath) {
+        await desktopRoutesRepo.update?.({
+          filterByTk: pageId,
+          values: { options: { ...existingOpts, path: routePath, collectionName } },
+        });
+      }
+      tabRoute = typeof desktopRoutesRepo.findOne === 'function'
+        ? await desktopRoutesRepo.findOne({ filter: { parentId: pageId, type: 'tabs' } })
+        : null;
+      await linkAndGrantRoutes([pageId, val(tabRoute, 'id')]);
+    }
+
+    return {
+      path: routePath,
+      layoutUid,
+      schemaUid: val(pageRoute, 'schemaUid') || schemaUid,
+      tabSchemaUid: val(tabRoute, 'schemaUid') || tabSchemaOut || tabSchemaUid,
+      gridUid: null,
+      blockUid: null,
+      routeId: pageId,
+    };
+  }
+
   let pageRoute = null;
+  let tabRoute = null;
   if (desktopRoutesRepo) {
     pageRoute = await upsertRepoRow(
       desktopRoutesRepo,
@@ -402,7 +571,6 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
         type: 'flowPage',
         title: portalTitle,
         schemaUid,
-        uiLayoutUid: layoutUid,
         enableTabs: false,
         hideInMenu: false,
         hidden: false,
@@ -415,7 +583,7 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
     );
     const pageId = val(pageRoute, 'id') ?? null;
     if (pageId != null) {
-      await upsertRepoRow(
+      tabRoute = await upsertRepoRow(
         desktopRoutesRepo,
         { parentId: pageId, schemaUid: tabSchemaUid },
         {
@@ -423,29 +591,10 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
           type: 'tabs',
           title: portalTitle,
           schemaUid: tabSchemaUid,
-          uiLayoutUid: layoutUid,
           hideInMenu: true,
         },
       );
-      if (linksRepo) {
-        await upsertRepoRow(
-          linksRepo,
-          { uiLayoutUid: layoutUid, desktopRouteId: pageId },
-          { uiLayoutUid: layoutUid, desktopRouteId: pageId },
-        );
-      }
-      if (rolesRoutesRepo) {
-        const grants = (Array.isArray(roleNames) && roleNames.length ? roleNames : DEFAULT_DOMAIN_ROLES).filter((r) =>
-          ROLE_NAME_RE.test(String(r)),
-        );
-        for (const roleName of grants) {
-          await upsertRepoRow(
-            rolesRoutesRepo,
-            { roleName, desktopRouteId: pageId },
-            { roleName, desktopRouteId: pageId },
-          );
-        }
-      }
+      await linkAndGrantRoutes([pageId, val(tabRoute, 'id')]);
     }
   }
 
@@ -541,7 +690,7 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
   };
 }
 
-async function createOrUpdateDomainCollection(db, params) {
+async function createOrUpdateDomainCollection(db, params, opts = {}) {
   const collectionName = String(params.collectionName || '').trim();
   if (!CUSTOM_COLLECTION_RE.test(collectionName)) {
     throw fail('INVALID_COLLECTION_NAME', 400, `collectionName must match ${CUSTOM_COLLECTION_RE.source}`);
@@ -618,7 +767,7 @@ async function createOrUpdateDomainCollection(db, params) {
   }
 
   const rls = await attachAndVerifyPgRls(db, collectionName);
-  const grantedRoles = await grantDomainRbac(db, collectionName, params.roles);
+  const grantedRoles = await grantDomainRbac(db, collectionName, params.roles, sanitizedFields, opts.ctx || null);
 
   let portalPage = null;
   if (params.portalSlug) {
@@ -627,6 +776,8 @@ async function createOrUpdateDomainCollection(db, params) {
       title: params.portalTitle || title,
       collectionName,
       roleNames: grantedRoles,
+      fields: sanitizedFields,
+      applyBlueprint: opts.applyBlueprint || createBuilderApplyBlueprint(opts.ctx),
     });
   }
 
@@ -839,7 +990,10 @@ function createDxosBuilderActions(db, options = {}) {
     async createDomain(ctx, next) {
       const params = readParams(ctx);
       await requireBuilderAdmin(ctx, params, { requireOrg: false, rootOnly: true, patScopes: ['write'] });
-      const domain = await createOrUpdateDomainCollection(db, params);
+      const domain = await createOrUpdateDomainCollection(db, params, {
+        ctx,
+        applyBlueprint: createBuilderApplyBlueprint(ctx),
+      });
       ctx.body = { domain };
       return next();
     },
@@ -908,9 +1062,12 @@ function createDxosBuilderActions(db, options = {}) {
           { name: 'assignedRole', type: 'string', title: 'Assigned Role' },
           { name: 'dueAt', type: 'datetime', title: 'Due At' },
         ],
-        roles: ['ldx_admin', 'ldx_manager', 'ldx_operator', 'ldx_employee'],
+        roles: ['ldx_admin', 'ldx_manager', 'ldx_dispatcher', 'ldx_warehouse', 'ldx_operator', 'ldx_employee'],
         portalSlug: 'cmms',
         portalTitle: 'CMMS Maintenance',
+      }, {
+        ctx,
+        applyBlueprint: createBuilderApplyBlueprint(ctx),
       });
 
       const dmnRepo = db.getRepository?.('latticeDecisionTables');

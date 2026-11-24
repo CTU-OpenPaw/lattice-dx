@@ -300,11 +300,24 @@ test('createDomain validates collection & field specs, verifies PG RLS, creates 
   assert.ok(db.syncCalls.some((s) => s.name === 'latticeCustomInspections'));
   assert.ok(db.store.fields.some((f) => f.collectionName === 'latticeCustomInspections' && f.name === 'organizationId'));
   assert.equal(db.store.dataSourcesRolesResources.length, 3);
+  assert.ok(db.store.dataSourcesRolesResourcesActions.length > 0);
+  for (const act of db.store.dataSourcesRolesResourcesActions) {
+    assert.ok(act.rolesResourceId != null, 'dataSourcesRolesResourcesActions must reference rolesResourceId');
+    assert.equal('roleName' in act, false, 'dataSourcesRolesResourcesActions must NOT carry roleName');
+    assert.equal('dataSourceKey' in act, false, 'dataSourcesRolesResourcesActions must NOT carry dataSourceKey');
+    assert.equal('resourceName' in act, false, 'dataSourcesRolesResourcesActions must NOT carry resourceName');
+    assert.ok(Array.isArray(act.fields) && act.fields.includes('organizationId'));
+  }
   assert.equal(dom.portalPage.path, '/p/inspections');
-  assert.equal(db.store.rolesDesktopRoutes.length, 3);
+  assert.equal(db.store.rolesDesktopRoutes.length, 6);
   // NocoBase 2.2.50 Multi-Portal layout + junction + GridModel hierarchy
-  assert.ok(db.store.uiLayouts.some((l) => l.uid === 'ldx-portal-inspections' && l.routePath === '/p/inspections'));
-  assert.ok(db.store.desktopRoutes.some((r) => r.type === 'flowPage' && r.schemaUid === dom.portalPage.schemaUid));
+  const portalLayout = db.store.uiLayouts.find((l) => l.uid === 'ldx-portal-inspections' && l.routePath === '/p/inspections');
+  assert.ok(portalLayout);
+  assert.equal('name' in portalLayout, false, 'uiLayouts in 2.2.50 must not write non-existent name column');
+  assert.equal('type' in portalLayout, false, 'uiLayouts in 2.2.50 must not write non-existent type column');
+  const pageRouteRow = db.store.desktopRoutes.find((r) => r.type === 'flowPage' && r.schemaUid === dom.portalPage.schemaUid);
+  assert.ok(pageRouteRow);
+  assert.equal('uiLayoutUid' in pageRouteRow, false, 'desktopRoutes in 2.2.50 must link via desktopRoutesUiLayouts');
   assert.ok(db.store.desktopRoutes.some((r) => r.type === 'tabs' && r.parentId === dom.portalPage.routeId));
   assert.ok(db.store.desktopRoutesUiLayouts.some((link) => link.uiLayoutUid === 'ldx-portal-inspections' && link.desktopRouteId === dom.portalPage.routeId));
   assert.ok(db.store.flowModels.some((m) => m.use === 'PageModel' && m.uid === dom.portalPage.schemaUid));
@@ -319,6 +332,112 @@ test('createDomain validates collection & field specs, verifies PG RLS, creates 
   assert.equal(listCtx.body.items[0].collectionName, 'latticeCustomInspections');
   assert.equal(listCtx.body.items[0].rlsProtected, true);
   assert.equal(listCtx.body.items[0].portalPages[0].path, '/p/inspections');
+});
+
+test('createDomain uses NocoBase 2.2.50 flowSurfaces:applyBlueprint idempotently and calls writeRolesToACL when host resource exists', async () => {
+  const db = makeBuilderDb({
+    roles: [
+      { name: 'root' },
+      { name: 'ldx_admin' },
+      { name: 'ldx_manager' },
+      { name: 'ldx_employee' },
+    ],
+    rolesUsers: [{ userId: 1, roleName: 'root' }],
+  });
+  const builder = createDxosBuilderActions(db);
+  const blueprintCalls = [];
+  let aclWrites = 0;
+
+  const hostApp = {
+    acl: {
+      async writeRolesToACL() {
+        aclWrites += 1;
+      },
+    },
+    resourceManager: {
+      getResource(name) {
+        if (name !== 'flowSurfaces') return null;
+        return {
+          actions: {
+            async applyBlueprint(subCtx) {
+              const doc = subCtx.action.params.values;
+              blueprintCalls.push(doc);
+              const route = await db.getRepository('desktopRoutes').create({
+                values: {
+                  type: 'flowPage',
+                  title: doc.page.title,
+                  schemaUid: 'bp-page-uid-1',
+                  enableTabs: false,
+                  hideInMenu: false,
+                  displayTitle: true,
+                },
+              });
+              const tab = await db.getRepository('desktopRoutes').create({
+                values: {
+                  parentId: route.id,
+                  type: 'tabs',
+                  title: doc.page.title,
+                  schemaUid: 'bp-tab-uid-1',
+                  hideInMenu: true,
+                },
+              });
+              await db.getRepository('desktopRoutesUiLayouts').create({
+                values: { uiLayoutUid: doc.navigation.layoutUid, desktopRouteId: route.id },
+              });
+              await db.getRepository('desktopRoutesUiLayouts').create({
+                values: { uiLayoutUid: doc.navigation.layoutUid, desktopRouteId: tab.id },
+              });
+              subCtx.body = {
+                data: { target: { routeId: route.id, tabSchemaUid: 'bp-tab-uid-1' } },
+              };
+            },
+          },
+        };
+      },
+    },
+  };
+
+  const makeLiveCtx = (params) => ({
+    ...makeCtx({ userId: 1, role: 'root', isRoot: true, params }),
+    app: hostApp,
+    db,
+    request: { headers: {} },
+    i18n: null,
+  });
+
+  const c1 = makeLiveCtx({
+    collectionName: 'latticeCustomMeters',
+    title: 'Cold Meters',
+    fields: [{ name: 'meterCode', type: 'string', title: 'Meter', required: true }],
+    roles: ['ldx_admin', 'ldx_manager', 'ldx_operator', 'ldx_employee'],
+    portalSlug: 'meters',
+    portalTitle: 'Cold Meters Portal',
+  });
+  await builder.createDomain(c1, async () => {});
+
+  // Non-existent role (ldx_operator) skipped cleanly against live roles table
+  assert.deepEqual(c1.body.domain.grantedRoles, ['ldx_admin', 'ldx_manager', 'ldx_employee']);
+  assert.equal(blueprintCalls.length, 1);
+  assert.equal(aclWrites, 1);
+  assert.equal(c1.body.domain.portalPage.schemaUid, 'bp-page-uid-1');
+  assert.equal(c1.body.domain.portalPage.tabSchemaUid, 'bp-tab-uid-1');
+
+  const routeRow = db.store.desktopRoutes.find((r) => r.id === c1.body.domain.portalPage.routeId);
+  assert.deepEqual(routeRow.options, { path: '/p/meters', collectionName: 'latticeCustomMeters' });
+  // Both page route and child tabs route granted to all 3 valid roles
+  assert.equal(db.store.rolesDesktopRoutes.length, 6);
+
+  // Repeat call reuses existing FlowPage idempotently without re-invoking applyBlueprint
+  const c2 = makeLiveCtx({
+    collectionName: 'latticeCustomMeters',
+    title: 'Cold Meters',
+    fields: [{ name: 'meterCode', type: 'string', title: 'Meter', required: true }],
+    roles: ['ldx_admin', 'ldx_manager', 'ldx_employee'],
+    portalSlug: 'meters',
+    portalTitle: 'Cold Meters Portal',
+  });
+  await builder.createDomain(c2, async () => {});
+  assert.equal(blueprintCalls.length, 1);
 });
 
 test('installBusinessPack cmms-maintenance is idempotent and wires end-to-end alarm -> DMN -> CMMS Work Order creation', async () => {
