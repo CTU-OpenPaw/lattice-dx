@@ -18,7 +18,7 @@ function createArchitectDrawer(React) {
   ];
 
   const S = {
-    root: { width: 410, minWidth: 340, maxWidth: '100%', height: '100%', overflowY: 'auto', borderLeft: '1px solid #ddd6fe', background: '#ffffff', padding: 12, display: 'flex', flexDirection: 'column', gap: 10, boxSizing: 'border-box' },
+    root: { position: 'absolute', top: 0, right: 0, bottom: 0, width: 400, minWidth: 320, maxWidth: '100%', zIndex: 30, boxShadow: '-8px 0 24px rgba(15, 23, 42, 0.14)', overflowY: 'auto', borderLeft: '1px solid #ddd6fe', background: '#ffffff', padding: 12, display: 'flex', flexDirection: 'column', gap: 10, boxSizing: 'border-box' },
     header: { padding: 10, borderRadius: 8, border: '1px solid #ddd6fe', background: 'linear-gradient(135deg, #f5f3ff 0%, #eff6ff 100%)', display: 'grid', gap: 6 },
     rowBetween: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
     rowWrap: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' },

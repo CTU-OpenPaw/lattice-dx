@@ -74,10 +74,12 @@ function createFlowStudioApp(client, React, _antd, app) {
       try { const p = new URLSearchParams(window?.location?.search || ''); return { org: p.get('organizationId') || '', ruleKey: p.get('ruleKey') || '' }; } catch { return { org: '', ruleKey: '' }; }
     });
     const [discoveredOrgs, setDiscoveredOrgs] = React.useState([]);
+    const [orgProbeDone, setOrgProbeDone] = React.useState(false);
     const [orgOverride, setOrgOverride] = React.useState(null);
     React.useEffect(() => { setOrgOverride(null); }, [props.selectedOrg]);
     const orgList = Array.isArray(props.organizations) && props.organizations.length ? props.organizations : discoveredOrgs;
     const effectiveOrg = String(orgOverride !== null ? orgOverride : (props.selectedOrg || urlInit.org || orgList[0] || '')).trim();
+    const waitOrgProbe = !effectiveOrg && orgOverride === null && !props.selectedOrg && !(Array.isArray(props.organizations) && props.organizations.length) && !orgProbeDone;
     const orgPayload = effectiveOrg ? { organizationId: effectiveOrg } : {};
     const [doc, setDoc] = React.useState(() => freshDoc(effectiveOrg || 1));
     const [data, setData] = React.useState(FRESH.data);
@@ -99,11 +101,7 @@ function createFlowStudioApp(client, React, _antd, app) {
 
     React.useEffect(() => {
       Object.assign(refs, { activeOrg: effectiveOrg, actionEpoch: refs.actionEpoch + 1, loadSeq: refs.loadSeq + 1, initDone: false });
-      setDoc(freshDoc(effectiveOrg || 1));
-      setData(FRESH.data);
-      setRunUi(FRESH.run);
-      setUi(FRESH.ui);
-      setDsl((m) => ({ ...m, open: false, text: '', error: null }));
+      setDoc(freshDoc(effectiveOrg || 1)); setData(FRESH.data); setRunUi(FRESH.run); setUi(FRESH.ui); setDsl((m) => ({ ...m, open: false, text: '', error: null }));
     }, [effectiveOrg]);
 
     const loadAll = React.useCallback(() => {
@@ -115,7 +113,8 @@ function createFlowStudioApp(client, React, _antd, app) {
       const get = (u, ok, err, fin) => cApi.request({ url: u, method: 'get', ...(u.endsWith('listEmployees') ? {} : { params: { ...orgPayload } }), skipNotify: true })
         .then((res) => isFresh() && ok(unwrap(res))).catch((e) => isFresh() && err?.(e)).finally(() => isFresh() && fin?.());
       patchD({ loading: true });
-      if (!props.selectedOrg && !props.organizations?.length && !discoveredOrgs.length) get('dxosStudio:listEmployees', (d) => Array.isArray(d.organizations) && setDiscoveredOrgs(d.organizations));
+      if (!props.selectedOrg && !props.organizations?.length && !discoveredOrgs.length) get('dxosStudio:listEmployees', (d) => Array.isArray(d?.organizations) && d.organizations.length && setDiscoveredOrgs(d.organizations), null, () => setOrgProbeDone(true));
+      if (waitOrgProbe) return;
       get('dxosAutomations:builderCatalog', (d) => patchD({ catalog: d || null }), () => patchD({ catalog: null }));
       get('dxosAutomations:nodeRegistry', (d) => Array.isArray(d.nodeTypes) && patchD({ regTypes: d.nodeTypes }));
       get('dxosAutomations:listRules', (d) => {
@@ -128,7 +127,7 @@ function createFlowStudioApp(client, React, _antd, app) {
         patchD({ runs: nextRuns });
         if (nextRuns.length) setRunUi((s) => (s.selectedRun ? { ...s, selectedRun: nextRuns.find((r) => r.runUid && r.runUid === s.selectedRun.runUid) || s.selectedRun } : { ...s, selectedRun: nextRuns[0], idx: Math.max(0, getRunTraces(nextRuns[0]).length - 1) }));
       });
-    }, [effectiveOrg, Boolean(api?.request)]);
+    }, [effectiveOrg, waitOrgProbe, Boolean(api?.request)]);
 
     React.useEffect(() => { loadAll(); }, [loadAll]);
     React.useEffect(() => {
@@ -302,7 +301,7 @@ function createFlowStudioApp(client, React, _antd, app) {
         nodeTypes.filter((t) => !t.type.startsWith('trigger.')).map((t) => h('button', { key: t.type, type: 'button', 'data-testid': `dxos-flow-insert-node-${t.type}`, onClick: () => insertBetweenEdge(t), style: btnS() }, t.label || t.type)),
         h('button', { 'data-testid': 'dxos-flow-insert-cancel-btn', type: 'button', onClick: () => setUi((u) => ({ ...u, insertEdge: null })), style: btnS(false, true) }, 'Hủy'),
       ) : null,
-      h('div', { style: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' } },
+      h('div', { style: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', position: 'relative' } },
         h(NodePalette, { nodeTypes, onAddNode: addNodeOnly }),
         h(FlowCanvas, {
           graph: doc.graph, nodeTypes, selectedNodeId: doc.selId, onSelectNode: (id) => setDoc((d) => ({ ...d, selId: id })),

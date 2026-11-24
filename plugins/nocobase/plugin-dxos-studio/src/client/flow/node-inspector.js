@@ -15,7 +15,7 @@ function createNodeInspector(React) {
   const TONE_MAP = [[['completed', 'ok', 'succeeded', 'approved'], 'ok'], [['failed', 'error', 'rejected'], 'danger'], [['suspended', 'skipped', 'simulated', 'pending'], 'warn']];
 
   const S = {
-    root: { width: 380, minWidth: 340, maxWidth: '100%', height: '100%', overflowY: 'auto', borderLeft: '1px solid #e2e8f0', background: '#ffffff', padding: 12, display: 'flex', flexDirection: 'column', gap: 10, boxSizing: 'border-box' },
+    root: { width: 340, minWidth: 290, maxWidth: '100%', height: '100%', overflowY: 'auto', borderLeft: '1px solid #e2e8f0', background: '#ffffff', padding: 12, display: 'flex', flexDirection: 'column', gap: 10, boxSizing: 'border-box' },
     card: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 8 },
     rowBetween: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
     rowWrap: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' },

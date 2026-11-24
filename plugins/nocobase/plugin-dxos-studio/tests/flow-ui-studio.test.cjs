@@ -1512,3 +1512,46 @@ test('P2-2: handleArchitect distinguishes 5xx/network errors from policy refusal
   assert.equal(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-architect-drawer')[0]).includes('run-init-1'), false);
   assert.equal(JSON.stringify(tree).includes('old-flow-output'), false);
 });
+
+test('UX polish: pre-org gating waits for listEmployees before automation GETs (with empty-org fallback) and Architect drawer floats as overlay', async () => {
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const nodeTypes = getRegistrySchemas();
+
+  // Case A: listEmployees returns organizations -> ZERO un-scoped dxosAutomations:* requests are sent beforehand
+  const harnessA = createQueuedReactHarness();
+  const mockA = createApiMock({
+    'dxosStudio:listEmployees': async () => ({ items: [], organizations: ['native-ui-lab'], organizationCounts: { 'native-ui-lab': 3 } }),
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints: getBlueprints() }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: [] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+  });
+  const AppA = createFlowStudioApp(mockA.client, harnessA.React, {}, {});
+  let treeA = await harnessA.mountAndFlush(AppA, {});
+  const autoReqsA = mockA.requests.filter((r) => r.url.startsWith('dxosAutomations:'));
+  assert.equal(autoReqsA.length, 4);
+  assert.ok(autoReqsA.every((r) => r.params?.organizationId === 'native-ui-lab'), 'All initial automation GETs must carry resolved organizationId');
+
+  // Verify floating Architect drawer overlay + relative workspace container keep center canvas unobstructed
+  collectNodes(treeA, (n) => n.props?.['data-testid'] === 'dxos-flow-open-architect-btn')[0].props.onClick();
+  treeA = await harnessA.flush(AppA, {});
+  const workspaceRow = collectNodes(treeA, (n) => n.props?.style?.display === 'flex' && n.props?.style?.position === 'relative' && collectNodes(n, (c) => c.props?.['data-testid'] === 'dxos-flow-canvas').length > 0)[0];
+  assert.ok(workspaceRow, 'Workspace row containing FlowCanvas must establish position: relative for overlay drawer');
+  const drawer = collectNodes(treeA, (n) => n.props?.['data-testid'] === 'dxos-flow-architect-drawer')[0];
+  assert.equal(drawer.props.style.position, 'absolute');
+  assert.equal(drawer.props.style.right, 0);
+  assert.equal(drawer.props.style.zIndex, 30);
+
+  // Case B: empty organizations probe still falls through cleanly after probe settles
+  const harnessB = createQueuedReactHarness();
+  const mockB = createApiMock({
+    'dxosStudio:listEmployees': async () => ({ items: [], organizations: [] }),
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints: getBlueprints() }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: [] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+  });
+  const AppB = createFlowStudioApp(mockB.client, harnessB.React, {}, {});
+  await harnessB.mountAndFlush(AppB, {});
+  assert.equal(mockB.requests.filter((r) => r.url.startsWith('dxosAutomations:')).length, 4);
+});
