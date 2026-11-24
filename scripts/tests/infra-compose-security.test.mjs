@@ -369,8 +369,28 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
 
   const initProd = read('infra/config/postgres/init-prod.sh');
   assert.match(initProd, /ON_ERROR_STOP=1/);
-  assert.match(initProd, /NOSUPERUSER\s+NOCREATEDB\s+NOCREATEROLE/);
+  assert.match(initProd, /NOSUPERUSER\s+NOCREATEDB\s+NOCREATEROLE\s+NOINHERIT\s+NOBYPASSRLS/);
   assert.match(initProd, /REVOKE CREATE ON SCHEMA public FROM PUBLIC/);
+
+  const initNocobaseDb = read('infra/config/postgres/init-nocobase-db.sh');
+  assert.equal(initNocobaseDb.includes('\r'), false, 'init-nocobase-db.sh must use LF line endings');
+  assert.match(initNocobaseDb, /@copyright\s*\(C\)\s*2026 CTU-OpenPaw/);
+  assert.match(initNocobaseDb, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(initNocobaseDb, /ON_ERROR_STOP=1/);
+  assert.match(initNocobaseDb, /NOSUPERUSER\s+NOCREATEDB\s+NOCREATEROLE\s+NOINHERIT\s+NOBYPASSRLS/);
+  assert.match(initNocobaseDb, /ALTER DATABASE/);
+  assert.match(initNocobaseDb, /ALTER SCHEMA public OWNER TO/);
+
+  const prodText = read('infra/compose/prod.yml');
+  const nocobaseDbSec = serviceSection(prodText, 'nocobase-db');
+  assert.match(nocobaseDbSec, /002-init-nocobase-db\.sh:ro/);
+  assert.match(nocobaseDbSec, /NOCOBASE_APP_DB_USER:\s*\$\{NOCOBASE_APP_DB_USER:-nocobase_app\}/);
+  const nocobaseSec = serviceSection(prodText, 'nocobase');
+  assert.match(nocobaseSec, /DB_USER:\s*\$\{NOCOBASE_APP_DB_USER:-nocobase_app\}/);
+  assert.match(nocobaseSec, /DB_PASSWORD:\s*\$\{NOCOBASE_APP_DB_PASSWORD:-\$\{NOCOBASE_DB_PASSWORD:\?Set NOCOBASE_DB_PASSWORD\}\}/);
+  const prodEnvEx = read('infra/compose/prod.env.example');
+  assert.match(prodEnvEx, /NOCOBASE_APP_DB_USER=nocobase_app/);
+  assert.match(prodEnvEx, /NOCOBASE_APP_DB_PASSWORD=/);
 
   const pitr = read('infra/config/postgres/pitr.conf');
   assert.match(pitr, /wal_level\s*=\s*replica/);

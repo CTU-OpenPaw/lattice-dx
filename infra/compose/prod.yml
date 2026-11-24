@@ -141,9 +141,12 @@ services:
       POSTGRES_DB: nocobase
       POSTGRES_USER: ${NOCOBASE_DB_USER:?Set NOCOBASE_DB_USER}
       POSTGRES_PASSWORD: ${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}
+      NOCOBASE_APP_DB_USER: ${NOCOBASE_APP_DB_USER:-nocobase_app}
+      NOCOBASE_APP_DB_PASSWORD: ${NOCOBASE_APP_DB_PASSWORD:-${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}}
     volumes:
       - nocobase-db-data:/var/lib/postgresql/data
       - ../config/postgres/init-pgvector.sql:/docker-entrypoint-initdb.d/001-pgvector.sql:ro
+      - ../config/postgres/init-nocobase-db.sh:/docker-entrypoint-initdb.d/002-init-nocobase-db.sh:ro
       - ../config/postgres/pitr.conf:/etc/postgresql/pitr.conf:ro
       - ../config/postgres/pitr-archive.sh:/etc/postgresql/pitr-archive.sh:ro
     networks:
@@ -462,8 +465,8 @@ services:
       DB_HOST: nocobase-db
       DB_PORT: "5432"
       DB_DATABASE: nocobase
-      DB_USER: ${NOCOBASE_DB_USER:?Set NOCOBASE_DB_USER}
-      DB_PASSWORD: ${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}
+      DB_USER: ${NOCOBASE_APP_DB_USER:-nocobase_app}
+      DB_PASSWORD: ${NOCOBASE_APP_DB_PASSWORD:-${NOCOBASE_DB_PASSWORD:?Set NOCOBASE_DB_PASSWORD}}
       TZ: Asia/Ho_Chi_Minh
       PUBSUB_ADAPTER: redis
       PUBSUB_ADAPTER_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379/1

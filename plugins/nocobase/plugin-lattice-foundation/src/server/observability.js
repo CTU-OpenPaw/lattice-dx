@@ -11,6 +11,7 @@
 const { createHash, timingSafeEqual } = require('node:crypto');
 const { buildOpenApiSpec, buildAsyncApiSpec } = require('./openapi-spec');
 const { registerMobilePwaActions } = require('./mobile-pwa');
+const { canUsePgRlsSession, withSystemRlsBypass } = require('./pg-rls');
 
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 const HISTOGRAM_BUCKETS = Object.freeze([
@@ -190,14 +191,17 @@ async function hasQueryableRepo(db, collection) {
   }
 }
 
-async function safeCount(db, collection, filter) {
+async function safeCount(db, collection, filter, transaction) {
   try {
     if (typeof db?.hasCollection === 'function' && !db.hasCollection(collection)) {
       return 0;
     }
     const repo = db?.getRepository?.(collection);
     if (!repo || typeof repo.count !== 'function') return 0;
-    const count = await repo.count(filter ? { filter } : undefined);
+    const opts = filter || transaction
+      ? { ...(filter ? { filter } : {}), ...(transaction ? { transaction } : {}) }
+      : undefined;
+    const count = await repo.count(opts);
     const num = Number(count);
     return Number.isFinite(num) && num >= 0 ? num : 0;
   } catch {
@@ -205,7 +209,7 @@ async function safeCount(db, collection, filter) {
   }
 }
 
-async function collectDbGauges(db) {
+async function collectDbGaugesWithTx(db, transaction = undefined) {
   const [
     aiAuditLogsTotal,
     activeAlarmsTotal,
@@ -216,14 +220,14 @@ async function collectDbGauges(db) {
     hasSubscriptionsRepo,
     ...outboxCounts
   ] = await Promise.all([
-    safeCount(db, 'latticeAiAuditLogs'),
-    safeCount(db, 'latticeIncidentCases', { status: { $in: ['open', 'acknowledged'] } }),
-    safeCount(db, 'latticeNotifications', { readAt: null, active: true }),
-    safeCount(db, 'latticeSlaPolicies', { active: true }),
+    safeCount(db, 'latticeAiAuditLogs', undefined, transaction),
+    safeCount(db, 'latticeIncidentCases', { status: { $in: ['open', 'acknowledged'] } }, transaction),
+    safeCount(db, 'latticeNotifications', { readAt: null, active: true }, transaction),
+    safeCount(db, 'latticeSlaPolicies', { active: true }, transaction),
     hasQueryableRepo(db, 'latticeEventBus'),
     hasQueryableRepo(db, 'latticeWebhookDeliveries'),
     hasQueryableRepo(db, 'latticeWebhookSubscriptions'),
-    ...OUTBOX_STATES.map((state) => safeCount(db, 'latticeContextOutbox', { state })),
+    ...OUTBOX_STATES.map((state) => safeCount(db, 'latticeContextOutbox', { state }, transaction)),
   ]);
 
   const outboxByState = {};
@@ -234,7 +238,7 @@ async function collectDbGauges(db) {
   let eventBusByStatus = null;
   if (hasEventBusRepo) {
     const counts = await Promise.all(
-      EVENT_BUS_STATUSES.map((status) => safeCount(db, 'latticeEventBus', { status })),
+      EVENT_BUS_STATUSES.map((status) => safeCount(db, 'latticeEventBus', { status }, transaction)),
     );
     eventBusByStatus = {};
     EVENT_BUS_STATUSES.forEach((status, idx) => {
@@ -245,7 +249,7 @@ async function collectDbGauges(db) {
   let webhookDeliveriesByStatus = null;
   if (hasDeliveriesRepo) {
     const counts = await Promise.all(
-      WEBHOOK_DELIVERY_STATUSES.map((status) => safeCount(db, 'latticeWebhookDeliveries', { status })),
+      WEBHOOK_DELIVERY_STATUSES.map((status) => safeCount(db, 'latticeWebhookDeliveries', { status }, transaction)),
     );
     webhookDeliveriesByStatus = {};
     WEBHOOK_DELIVERY_STATUSES.forEach((status, idx) => {
@@ -256,7 +260,7 @@ async function collectDbGauges(db) {
   let webhookCircuitsByState = null;
   if (hasSubscriptionsRepo) {
     const counts = await Promise.all(
-      WEBHOOK_CIRCUIT_STATES.map((circuitState) => safeCount(db, 'latticeWebhookSubscriptions', { circuitState })),
+      WEBHOOK_CIRCUIT_STATES.map((circuitState) => safeCount(db, 'latticeWebhookSubscriptions', { circuitState }, transaction)),
     );
     webhookCircuitsByState = {};
     WEBHOOK_CIRCUIT_STATES.forEach((circuitState, idx) => {
@@ -274,6 +278,13 @@ async function collectDbGauges(db) {
     webhook_deliveries_by_status: webhookDeliveriesByStatus,
     webhook_circuits_by_state: webhookCircuitsByState,
   };
+}
+
+async function collectDbGauges(db) {
+  if (canUsePgRlsSession(db)) {
+    return withSystemRlsBypass(db, (transaction) => collectDbGaugesWithTx(db, transaction));
+  }
+  return collectDbGaugesWithTx(db, undefined);
 }
 
 function createMetricsRegistry() {

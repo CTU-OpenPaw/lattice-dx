@@ -248,17 +248,16 @@ function buildRlsPolicySql(tableName, { schema = 'public', policyName = RLS_POLI
   const safePolicy = assertSafeSqlIdentifier(policyName);
   const qualifiedTable = `${safeSchema}.${safeTable}`;
   const predicate = [
-    "current_setting('app.current_org', true) IS NULL",
-    "current_setting('app.current_org', true) = ''",
+    "current_setting('app.rls_bypass', true) = 'on'",
     "current_setting('app.current_org', true) = '*'",
     '"organizationId" = current_setting(\'app.current_org\', true)',
   ].join(' OR ');
 
   return {
-    enableSql: `ALTER TABLE ${qualifiedTable} ENABLE ROW LEVEL SECURITY;`,
+    enableSql: `ALTER TABLE ${qualifiedTable} ENABLE ROW LEVEL SECURITY; ALTER TABLE ${qualifiedTable} FORCE ROW LEVEL SECURITY;`,
     dropSql: `DROP POLICY IF EXISTS ${safePolicy} ON ${qualifiedTable};`,
     createSql: `CREATE POLICY ${safePolicy} ON ${qualifiedTable} AS PERMISSIVE FOR ALL TO PUBLIC USING (${predicate}) WITH CHECK (${predicate});`,
-    disableSql: `ALTER TABLE IF EXISTS ${qualifiedTable} DISABLE ROW LEVEL SECURITY;`,
+    disableSql: `ALTER TABLE IF EXISTS ${qualifiedTable} NO FORCE ROW LEVEL SECURITY; ALTER TABLE IF EXISTS ${qualifiedTable} DISABLE ROW LEVEL SECURITY;`,
   };
 }
 
@@ -325,6 +324,19 @@ async function discoverTenantRlsTables(db, options = {}) {
   return discovered;
 }
 
+function canUsePgRlsSession(db, { requireEnabledFlag = true } = {}) {
+  if (requireEnabledFlag && process.env.DX_PG_RLS_SESSION !== 'true') {
+    return false;
+  }
+  const sequelize = db?.sequelize;
+  return Boolean(
+    sequelize
+    && isPostgresSequelize(sequelize)
+    && typeof sequelize.transaction === 'function'
+    && typeof sequelize.query === 'function',
+  );
+}
+
 async function setTransactionRlsOrg(db, organizationId, transaction) {
   assertValidOrganizationId(organizationId);
   if (!transaction) {
@@ -347,6 +359,26 @@ async function setTransactionRlsOrg(db, organizationId, transaction) {
   return { applied: true, organizationId };
 }
 
+async function setTransactionRlsBypass(db, transaction) {
+  if (!transaction) {
+    throw rlsError('RLS_TRANSACTION_UNAVAILABLE', 500, 'Active transaction is required for PostgreSQL RLS bypass.');
+  }
+  const sequelize = db?.sequelize;
+  if (!sequelize) {
+    throw rlsError('RLS_DB_UNAVAILABLE', 500, 'Database sequelize instance is required for RLS bypass.');
+  }
+  if (!isPostgresSequelize(sequelize)) {
+    return { applied: false, skipped: true };
+  }
+  if (typeof sequelize.query !== 'function') {
+    throw rlsError('RLS_QUERY_UNAVAILABLE', 500, 'sequelize.query is required to apply PostgreSQL RLS bypass.');
+  }
+  await sequelize.query("SELECT set_config('app.rls_bypass', 'on', true)", {
+    transaction,
+  });
+  return { applied: true, systemRlsBypass: true };
+}
+
 async function withTenantRlsContext(db, organizationId, fn) {
   if (typeof fn !== 'function') {
     throw new TypeError('withTenantRlsContext requires a callback function.');
@@ -359,6 +391,24 @@ async function withTenantRlsContext(db, organizationId, fn) {
   return sequelize.transaction(async (transaction) => {
     await setTransactionRlsOrg(db, organizationId, transaction);
     return rlsStore.run({ sequelize, transaction, organizationId }, () => fn(transaction));
+  });
+}
+
+async function withSystemRlsBypass(db, fn) {
+  if (typeof fn !== 'function') {
+    throw new TypeError('withSystemRlsBypass requires a callback function.');
+  }
+  const sequelize = db?.sequelize;
+  if (!sequelize || typeof sequelize.transaction !== 'function') {
+    throw rlsError('RLS_TRANSACTION_UNAVAILABLE', 500, 'sequelize.transaction is required for system RLS bypass.');
+  }
+  const existing = rlsStore.getStore();
+  if (existing?.systemRlsBypass === true && existing.transaction && existing.sequelize === sequelize) {
+    return fn(existing.transaction);
+  }
+  return sequelize.transaction(async (transaction) => {
+    await setTransactionRlsBypass(db, transaction);
+    return rlsStore.run({ sequelize, transaction, systemRlsBypass: true }, () => fn(transaction));
   });
 }
 
@@ -405,6 +455,7 @@ module.exports = {
   assertSafeSqlIdentifier,
   assertValidOrganizationId,
   quoteIdentifier,
+  canUsePgRlsSession,
   getActiveRlsContext,
   installRlsTransactionBridge,
   buildRlsPolicySql,
@@ -413,6 +464,8 @@ module.exports = {
   discoverTenantRlsTables,
   setContextRlsTransaction,
   setTransactionRlsOrg,
+  setTransactionRlsBypass,
   withTenantRlsContext,
+  withSystemRlsBypass,
   runInRlsSavepoint,
 };

@@ -14,6 +14,7 @@ const {
   timingSafeEqual,
 } = require('node:crypto');
 const { resolveNativeActor } = require('./native-scope');
+const { canUsePgRlsSession, getActiveRlsContext, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
 const { val, getRepo, callerRoles } = require('./native-portal-helpers');
 const { assertApiKeyScope, readParams } = require('./paas-api-keys');
 const {
@@ -476,19 +477,32 @@ async function claimDueDeliveries(db, {
   const delModel = db?.getModel?.('latticeWebhookDeliveries');
 
   if (isPg && typeof db?.sequelize?.transaction === 'function') {
+    const withClaimRlsScope = (fn) => {
+      if (!canUsePgRlsSession(db) || getActiveRlsContext()?.transaction) {
+        return db.sequelize.transaction(fn);
+      }
+      return organizationId
+        ? withTenantRlsContext(db, organizationId, fn)
+        : withSystemRlsBypass(db, fn);
+    };
+
     if (staleLockMs > 0) {
       try {
         const cutoff = new Date(nowDate.getTime() - staleLockMs);
-        await db.sequelize.query(
-          'UPDATE "latticeWebhookDeliveries" SET status = \'retry_wait\', "lockedAt" = NULL, "lockedBy" = NULL, "nextAttemptAt" = NOW() WHERE status = \'processing\' AND "lockedAt" IS NOT NULL AND "lockedAt" < :cutoff',
-          { replacements: { cutoff } },
-        );
+        const reclaimSql = 'UPDATE "latticeWebhookDeliveries" SET status = \'retry_wait\', "lockedAt" = NULL, "lockedBy" = NULL, "nextAttemptAt" = NOW() WHERE status = \'processing\' AND "lockedAt" IS NOT NULL AND "lockedAt" < :cutoff';
+        if (canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction) {
+          await (organizationId
+            ? withTenantRlsContext(db, organizationId, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } }))
+            : withSystemRlsBypass(db, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } })));
+        } else {
+          await db.sequelize.query(reclaimSql, { replacements: { cutoff } });
+        }
       } catch {
         // Non-fatal stale lock reclaim
       }
     }
 
-    const sqlRows = await db.sequelize.transaction(async (transaction) => {
+    const sqlRows = await withClaimRlsScope(async (transaction) => {
       const orgClause = organizationId ? 'AND d."organizationId" = :organizationId' : '';
       const raw = await db.sequelize.query(
         `SELECT d.id
@@ -591,46 +605,74 @@ async function dispatchOneDelivery(
   const delOrg = val(delivery, 'organizationId');
   const eventId = val(delivery, 'eventId');
   const subId = Number(val(delivery, 'subscriptionId'));
+  const runScopedDb = (fn) => (!getActiveRlsContext()?.transaction && canUsePgRlsSession(db) && delOrg
+    ? withTenantRlsContext(db, delOrg, fn)
+    : fn(undefined));
 
-  const sub = effectiveSubRepo && typeof effectiveSubRepo.findOne === 'function'
-    ? await effectiveSubRepo.findOne({ filter: { id: subId, organizationId: delOrg } })
-    : null;
+  const prep = await runScopedDb(async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const sub = effectiveSubRepo && typeof effectiveSubRepo.findOne === 'function'
+      ? await effectiveSubRepo.findOne({ filter: { id: subId, organizationId: delOrg }, ...txOpt })
+      : null;
 
-  if (!sub || val(sub, 'organizationId') !== delOrg || val(sub, 'active') === false) {
-    await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
-      status: 'dlq',
-      lastError: 'Webhook subscription missing or inactive',
-      lockedAt: null,
-      lockedBy: null,
-      nextAttemptAt: null,
-    });
-    await syncParentEventStatus(db, delOrg, eventId);
-    return { outcome: 'dlq', processed: true, result: { id: delId, eventId, status: 'dlq', reason: 'SUBSCRIPTION_INACTIVE' } };
-  }
-
-  const circuitState = val(sub, 'circuitState') || 'closed';
-  const openUntilRaw = val(sub, 'circuitOpenUntil');
-  const openUntilMs = openUntilRaw ? new Date(openUntilRaw).getTime() : 0;
-
-  if (circuitState === 'open') {
-    if (Number.isFinite(openUntilMs) && openUntilMs > safeNowMs) {
+    if (!sub || val(sub, 'organizationId') !== delOrg || val(sub, 'active') === false) {
       await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
-        status: Number(val(delivery, 'attempt')) > 0 ? 'retry_wait' : 'pending',
-        nextAttemptAt: new Date(openUntilMs),
+        status: 'dlq',
+        lastError: 'Webhook subscription missing or inactive',
         lockedAt: null,
         lockedBy: null,
-      });
+        nextAttemptAt: null,
+      }, transaction);
+      await syncParentEventStatus(db, delOrg, eventId);
       return {
-        outcome: 'skipped_circuit',
-        processed: false,
-        result: { id: delId, eventId, status: 'skipped_circuit', circuitOpenUntil: new Date(openUntilMs).toISOString() },
+        earlyResult: { outcome: 'dlq', processed: true, result: { id: delId, eventId, status: 'dlq', reason: 'SUBSCRIPTION_INACTIVE' } },
       };
     }
-    await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
-      circuitState: 'half_open',
-    });
+
+    const circuitState = val(sub, 'circuitState') || 'closed';
+    const openUntilRaw = val(sub, 'circuitOpenUntil');
+    const openUntilMs = openUntilRaw ? new Date(openUntilRaw).getTime() : 0;
+
+    if (circuitState === 'open') {
+      if (Number.isFinite(openUntilMs) && openUntilMs > safeNowMs) {
+        await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
+          status: Number(val(delivery, 'attempt')) > 0 ? 'retry_wait' : 'pending',
+          nextAttemptAt: new Date(openUntilMs),
+          lockedAt: null,
+          lockedBy: null,
+        }, transaction);
+        return {
+          earlyResult: {
+            outcome: 'skipped_circuit',
+            processed: false,
+            result: { id: delId, eventId, status: 'skipped_circuit', circuitOpenUntil: new Date(openUntilMs).toISOString() },
+          },
+        };
+      }
+      await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
+        circuitState: 'half_open',
+      }, transaction);
+    }
+
+    let extraHeaders = {};
+    const connectorId = val(sub, 'connectorId');
+    if (connectorId != null) {
+      try {
+        const resolved = await resolveConnectorSecrets(db, delOrg, connectorId, { env });
+        extraHeaders = buildConnectorAuthHeaders(resolved.connector.authType, resolved.secrets);
+      } catch {
+        // Proceed without connector override if connector was removed/inactive
+      }
+    }
+
+    return { sub, circuitState, openUntilMs, extraHeaders };
+  });
+
+  if (prep.earlyResult) {
+    return prep.earlyResult;
   }
 
+  const { sub, circuitState, openUntilMs, extraHeaders } = prep;
   const wasHalfOpen = circuitState === 'half_open' || (circuitState === 'open' && (!Number.isFinite(openUntilMs) || safeNowMs >= openUntilMs));
   const currentAttempt = Number(val(delivery, 'attempt')) || 0;
   const maxAttempts = Math.max(1, Number(val(delivery, 'maxAttempts')) || DEFAULT_MAX_ATTEMPTS);
@@ -656,17 +698,6 @@ async function dispatchOneDelivery(
     const rawBody = JSON.stringify(val(delivery, 'payloadSnapshotJson') || {});
     const webhookId = `msg_${eventId}_${delId ?? nextAttempt}`;
     const timestampSec = String(Math.floor(safeNowMs / 1000));
-
-    let extraHeaders = {};
-    const connectorId = val(sub, 'connectorId');
-    if (connectorId != null) {
-      try {
-        const resolved = await resolveConnectorSecrets(db, delOrg, connectorId, { env });
-        extraHeaders = buildConnectorAuthHeaders(resolved.connector.authType, resolved.secrets);
-      } catch {
-        // Proceed without connector override if connector was removed/inactive
-      }
-    }
 
     const headers = {
       ...extraHeaders,
@@ -711,71 +742,73 @@ async function dispatchOneDelivery(
     errorMessage = String(err?.message || 'Webhook delivery failed').slice(0, 1000);
   }
 
-  if (ok) {
+  return runScopedDb(async (transaction) => {
+    if (ok) {
+      await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
+        attempt: nextAttempt,
+        status: 'delivered',
+        httpStatus,
+        lastError: null,
+        lockedAt: null,
+        lockedBy: null,
+        nextAttemptAt: null,
+        deliveredAt: nowDate,
+      }, transaction);
+      await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
+        failureCount: 0,
+        circuitState: 'closed',
+        circuitOpenUntil: null,
+        lastError: null,
+      }, transaction);
+      await syncParentEventStatus(db, delOrg, eventId);
+      return {
+        outcome: 'delivered',
+        processed: true,
+        result: { id: delId, eventId, status: 'delivered', httpStatus, attempt: nextAttempt },
+      };
+    }
+
+    const isDlq = nextAttempt >= maxAttempts;
+    const nextStatus = isDlq ? 'dlq' : 'retry_wait';
+    const backoffMs = isDlq ? 0 : computeWebhookBackoffMs(nextAttempt, { randomFn });
+    const nextAttemptAt = isDlq ? null : new Date(safeNowMs + backoffMs);
+
     await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
       attempt: nextAttempt,
-      status: 'delivered',
-      httpStatus,
-      lastError: null,
-      lockedAt: null,
-      lockedBy: null,
-      nextAttemptAt: null,
-      deliveredAt: nowDate,
-    });
-    await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
-      failureCount: 0,
-      circuitState: 'closed',
-      circuitOpenUntil: null,
-      lastError: null,
-    });
-    await syncParentEventStatus(db, delOrg, eventId);
-    return {
-      outcome: 'delivered',
-      processed: true,
-      result: { id: delId, eventId, status: 'delivered', httpStatus, attempt: nextAttempt },
-    };
-  }
-
-  const isDlq = nextAttempt >= maxAttempts;
-  const nextStatus = isDlq ? 'dlq' : 'retry_wait';
-  const backoffMs = isDlq ? 0 : computeWebhookBackoffMs(nextAttempt, { randomFn });
-  const nextAttemptAt = isDlq ? null : new Date(safeNowMs + backoffMs);
-
-  await updateRowCompat(effectiveDelRepo, delivery, { id: delId, organizationId: delOrg }, {
-    attempt: nextAttempt,
-    status: nextStatus,
-    httpStatus,
-    lastError: errorMessage,
-    lockedAt: null,
-    lockedBy: null,
-    nextAttemptAt,
-  });
-
-  const nextFailures = (Number(val(sub, 'failureCount')) || 0) + 1;
-  const shouldOpen = wasHalfOpen || nextFailures >= CIRCUIT_FAILURE_THRESHOLD;
-  const nextCircuitState = shouldOpen ? 'open' : 'closed';
-  const nextOpenUntil = shouldOpen ? new Date(safeNowMs + CIRCUIT_COOLDOWN_MS) : null;
-  await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
-    failureCount: nextFailures,
-    circuitState: nextCircuitState,
-    circuitOpenUntil: nextOpenUntil,
-    lastError: errorMessage,
-  });
-
-  await syncParentEventStatus(db, delOrg, eventId);
-  return {
-    outcome: nextStatus,
-    processed: true,
-    result: {
-      id: delId,
-      eventId,
       status: nextStatus,
       httpStatus,
-      attempt: nextAttempt,
+      lastError: errorMessage,
+      lockedAt: null,
+      lockedBy: null,
+      nextAttemptAt,
+    }, transaction);
+
+    const nextFailures = (Number(val(sub, 'failureCount')) || 0) + 1;
+    const shouldOpen = wasHalfOpen || nextFailures >= CIRCUIT_FAILURE_THRESHOLD;
+    const nextCircuitState = shouldOpen ? 'open' : 'closed';
+    const nextOpenUntil = shouldOpen ? new Date(safeNowMs + CIRCUIT_COOLDOWN_MS) : null;
+    await updateRowCompat(effectiveSubRepo, sub, { id: subId, organizationId: delOrg }, {
+      failureCount: nextFailures,
       circuitState: nextCircuitState,
-      nextAttemptAt: nextAttemptAt ? nextAttemptAt.toISOString() : null,
-    },
-  };
+      circuitOpenUntil: nextOpenUntil,
+      lastError: errorMessage,
+    }, transaction);
+
+    await syncParentEventStatus(db, delOrg, eventId);
+    return {
+      outcome: nextStatus,
+      processed: true,
+      result: {
+        id: delId,
+        eventId,
+        status: nextStatus,
+        httpStatus,
+        attempt: nextAttempt,
+        circuitState: nextCircuitState,
+        nextAttemptAt: nextAttemptAt ? nextAttemptAt.toISOString() : null,
+      },
+    };
+  });
 }
 
 async function dispatchDueWebhookDeliveries(

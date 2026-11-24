@@ -9,6 +9,7 @@
 'use strict';
 
 const { resolveNativeActor } = require('./native-scope');
+const { canUsePgRlsSession, getActiveRlsContext, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
 const { isPortalAdmin } = require('./native-portals');
 const { recordChatterEntry } = require('./record-chatter');
 const { dispatchRoleNotifications, resolveNotificationTargetPath, DEDUP_WINDOW_MS } = require('./notification-center');
@@ -299,6 +300,7 @@ async function evaluateCollectionSla(db, collection, options) {
       sort: ['createdAt', 'id'],
       offset,
       limit: pageLimit,
+      ...(options.transaction ? { transaction: options.transaction } : {}),
     })) || [];
     if (!batch.length) break;
 
@@ -330,58 +332,69 @@ async function evaluateCollectionSla(db, collection, options) {
 }
 
 async function evaluateSlaBreaches(db, { organizationId = null, now = new Date(), env = process.env, fetchImpl, dryRun = false, businessHoursOnly = false } = {}) {
-  const nowDate = now instanceof Date ? now : new Date(now);
-  const nowMs = Number.isFinite(nowDate.getTime()) ? nowDate.getTime() : Date.now();
-  const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
+  const runEvaluation = async (transaction) => {
+    const nowDate = now instanceof Date ? now : new Date(now);
+    const nowMs = Number.isFinite(nowDate.getTime()) ? nowDate.getTime() : Date.now();
+    const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
 
-  const policyMap = new Map();
-  const policyRepo = db?.getRepository?.('latticeSlaPolicies');
-  if (policyRepo && typeof policyRepo.find === 'function') {
-    const policies = (await policyRepo.find({
-      filter: { active: true, ...(organizationId ? { organizationId } : {}) },
-      limit: 1000,
-    })) || [];
-    for (const pol of policies) {
-      if (val(pol, 'active') === false) continue;
-      const pOrg = String(val(pol, 'organizationId') || '').trim();
-      const pCol = String(val(pol, 'targetCollection') || '').trim();
-      const pPrio = String(val(pol, 'priority') || 'normal').trim().toLowerCase();
-      if (organizationId && pOrg !== organizationId) continue;
-      if (pOrg && pCol) policyMap.set(`${pOrg}|${pCol}|${pPrio}`, pol);
+    const policyMap = new Map();
+    const policyRepo = db?.getRepository?.('latticeSlaPolicies');
+    if (policyRepo && typeof policyRepo.find === 'function') {
+      const policies = (await policyRepo.find({
+        filter: { active: true, ...(organizationId ? { organizationId } : {}) },
+        limit: 1000,
+        ...(transaction ? { transaction } : {}),
+      })) || [];
+      for (const pol of policies) {
+        if (val(pol, 'active') === false) continue;
+        const pOrg = String(val(pol, 'organizationId') || '').trim();
+        const pCol = String(val(pol, 'targetCollection') || '').trim();
+        const pPrio = String(val(pol, 'priority') || 'normal').trim().toLowerCase();
+        if (organizationId && pOrg !== organizationId) continue;
+        if (pOrg && pCol) policyMap.set(`${pOrg}|${pCol}|${pPrio}`, pol);
+      }
     }
-  }
 
-  let scanned = 0;
-  let warningCount = 0;
-  let breachedCount = 0;
-  let escalatedCount = 0;
-  const items = [];
+    let scanned = 0;
+    let warningCount = 0;
+    let breachedCount = 0;
+    let escalatedCount = 0;
+    const items = [];
 
-  for (const collection of SLA_COLLECTIONS) {
-    const colReport = await evaluateCollectionSla(db, collection, {
-      organizationId,
-      policyMap,
-      nowMs,
-      cutoffMs,
-      dryRun,
-      env,
-      fetchImpl,
-      businessHoursOnly: Boolean(businessHoursOnly),
-    });
-    scanned += colReport.scanned;
-    warningCount += colReport.warningCount;
-    breachedCount += colReport.breachedCount;
-    escalatedCount += colReport.escalatedCount;
-    items.push(...colReport.items);
-  }
+    for (const collection of SLA_COLLECTIONS) {
+      const colReport = await evaluateCollectionSla(db, collection, {
+        organizationId,
+        policyMap,
+        nowMs,
+        cutoffMs,
+        dryRun,
+        env,
+        fetchImpl,
+        businessHoursOnly: Boolean(businessHoursOnly),
+        transaction,
+      });
+      scanned += colReport.scanned;
+      warningCount += colReport.warningCount;
+      breachedCount += colReport.breachedCount;
+      escalatedCount += colReport.escalatedCount;
+      items.push(...colReport.items);
+    }
 
-  return {
-    scanned,
-    warningCount,
-    breachedCount,
-    escalatedCount,
-    items,
+    return {
+      scanned,
+      warningCount,
+      breachedCount,
+      escalatedCount,
+      items,
+    };
   };
+
+  if (canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction) {
+    return organizationId
+      ? withTenantRlsContext(db, organizationId, runEvaluation)
+      : withSystemRlsBypass(db, runEvaluation);
+  }
+  return runEvaluation(getActiveRlsContext()?.transaction);
 }
 
 function serializePolicy(row) {
@@ -455,11 +468,17 @@ function registerSlaEngine(app) {
           return next();
         }
         const filter = organizationId ? { organizationId } : {};
-        const rows = (await repo.find({
+        const runPolicies = (transaction) => repo.find({
           filter,
           sort: ['targetCollection', 'priority', 'id'],
           limit: 200,
-        })) || [];
+          ...(transaction ? { transaction } : {}),
+        });
+        const rows = (canUsePgRlsSession(db)
+          ? await (organizationId
+            ? withTenantRlsContext(db, organizationId, runPolicies)
+            : withSystemRlsBypass(db, runPolicies))
+          : await runPolicies(undefined)) || [];
         ctx.body = {
           organizationId,
           items: rows.map(serializePolicy),
@@ -519,7 +538,6 @@ function registerSlaEngine(app) {
         const repo = db.getRepository('latticeSlaPolicies');
         if (!repo) throw failSla('SLA_REPO_UNAVAILABLE', 503, 'Kho cấu hình SLA chưa sẵn sàng.');
 
-        const existing = await repo.findOne({ filter: { organizationId, targetCollection, priority } });
         const values = {
           organizationId,
           targetCollection,
@@ -531,19 +549,28 @@ function registerSlaEngine(app) {
           active,
         };
 
-        let saved;
-        if (existing) {
-          if (typeof existing.update === 'function') {
-            saved = await existing.update(values);
-          } else if (typeof repo.update === 'function') {
-            const res = await repo.update({ filterByTk: val(existing, 'id'), filter: { organizationId }, values });
-            saved = Array.isArray(res) && res[0] ? res[0] : { ...values, id: val(existing, 'id') };
+        const runSave = async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const existing = await repo.findOne({ filter: { organizationId, targetCollection, priority }, ...txOpt });
+          let saved;
+          if (existing) {
+            if (typeof existing.update === 'function') {
+              saved = transaction ? await existing.update(values, { transaction }) : await existing.update(values);
+            } else if (typeof repo.update === 'function') {
+              const res = await repo.update({ filterByTk: val(existing, 'id'), filter: { organizationId }, values, ...txOpt });
+              saved = Array.isArray(res) && res[0] ? res[0] : { ...values, id: val(existing, 'id') };
+            }
+          } else {
+            saved = await repo.create({ values, ...txOpt });
           }
-        } else {
-          saved = await repo.create({ values });
-        }
+          return saved || values;
+        };
 
-        ctx.body = serializePolicy(saved || values);
+        const saved = canUsePgRlsSession(db)
+          ? await withTenantRlsContext(db, organizationId, runSave)
+          : await runSave(undefined);
+
+        ctx.body = serializePolicy(saved);
         return next();
       },
 

@@ -44,7 +44,7 @@ const {
   registerEventBusListener,
   verifyStandardWebhookSignature,
 }=require('./event-bus');
-const {attachRlsPolicyToTable}=require('./pg-rls');
+const {attachRlsPolicyToTable, canUsePgRlsSession, withSystemRlsBypass}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
     this.db.attachLatticeRlsPolicy = (tableName, txOrOpts) => {
@@ -119,6 +119,10 @@ class LatticeFoundationPlugin extends Plugin {
     if (typeof super.destroy === 'function') await super.destroy();
   }
   async install() {
+    if (canUsePgRlsSession(this.db)) {
+      await withSystemRlsBypass(this.db, (transaction) => seedFoundation(this.db, transaction));
+      return;
+    }
     await this.db.sequelize.transaction((transaction) => seedFoundation(this.db, transaction));
   }
 }

@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 const {retryDelay}=require('./native-context');
+const {canUsePgRlsSession,withSystemRlsBypass,withTenantRlsContext}=require('./pg-rls');
 function brokerConfig(env){
  if(!env.DX_NATIVE_CONTEXT_BROKER_URL)return null;
  const url=new URL(env.DX_NATIVE_CONTEXT_BROKER_URL);
@@ -45,13 +46,15 @@ async function claimOutboxBatch(db,{batchSize=DEFAULT_BATCH_SIZE,eventId,staleLo
  if(reclaimStale&&staleLockMs>0){
   try{
    const cutoff=new Date(Date.now()-staleLockMs);
-   await db.sequelize.query(
-    `UPDATE ${table} SET state='retry',"lockedAt"=NULL,"nextAttemptAt"=NOW() WHERE state='processing' AND "lockedAt" IS NOT NULL AND "lockedAt" < :cutoff`,
-    {replacements:{cutoff}},
-   );
+   const reclaimSql=`UPDATE ${table} SET state='retry',"lockedAt"=NULL,"nextAttemptAt"=NOW() WHERE state='processing' AND "lockedAt" IS NOT NULL AND "lockedAt" < :cutoff`;
+   if(canUsePgRlsSession(db)){
+    await withSystemRlsBypass(db,(transaction)=>db.sequelize.query(reclaimSql,{transaction,replacements:{cutoff}}));
+   }else{
+    await db.sequelize.query(reclaimSql,{replacements:{cutoff}});
+   }
   }catch{}
  }
- return db.sequelize.transaction(async transaction=>{
+ const runClaim=async(transaction)=>{
   // Failed (dead-lettered) rows do NOT block newer events for the same entityId;
   // only in-flight states ('pending','retry','processing') serialize per entity.
   const [rows]=await db.sequelize.query(
@@ -68,7 +71,8 @@ async function claimOutboxBatch(db,{batchSize=DEFAULT_BATCH_SIZE,eventId,staleLo
    claimed.push({id:ref.id,row,event});
   }
   return claimed;
- });
+ };
+ return canUsePgRlsSession(db)?withSystemRlsBypass(db,runClaim):db.sequelize.transaction(runClaim);
 }
 
 async function dispatchBatch(db,base,{fetchImpl=fetch,eventId,batchSize=DEFAULT_BATCH_SIZE,maxAttempts=DEFAULT_MAX_ATTEMPTS,staleLockMs=DEFAULT_STALE_LOCK_MS}={}){
@@ -84,7 +88,7 @@ async function dispatchBatch(db,base,{fetchImpl=fetch,eventId,batchSize=DEFAULT_
    return {item,ok:false,errorCode};
   }
  }));
- return db.sequelize.transaction(async transaction=>{
+ const runCommit=async(transaction)=>{
   const model=db.getModel('latticeContextOutbox');
   const out=[];
   for(const res of deliveries){
@@ -101,7 +105,8 @@ async function dispatchBatch(db,base,{fetchImpl=fetch,eventId,batchSize=DEFAULT_
    }
   }
   return out;
- });
+ };
+ return canUsePgRlsSession(db)?withSystemRlsBypass(db,runCommit):db.sequelize.transaction(runCommit);
 }
 
 async function dispatchOne(db,base,{fetchImpl=fetch,eventId,maxAttempts=DEFAULT_MAX_ATTEMPTS}={}){
@@ -116,14 +121,24 @@ async function replayDeadLetters(db,{organizationId,eventIds,limit=100}={}){
  const where={state:'failed'};
  if(organizationId)where.organizationId=String(organizationId);
  if(Array.isArray(eventIds)&&eventIds.length)where.eventId=eventIds.map(String);
- const rows=(await model.findAll({where,limit:Math.max(1,Math.min(500,Number(limit)||100))}))||[];
- const replayedIds=[];
- for(const row of rows){
-  const eid=typeof row.get==='function'?row.get('eventId'):row.eventId;
-  await row.update({state:'pending',attempts:0,errorCode:null,nextAttemptAt:null,lockedAt:null});
-  if(eid)replayedIds.push(eid);
+ const runReplay=async(transaction)=>{
+  const txOpt=transaction?{transaction}:{};
+  const rows=(await model.findAll({where,limit:Math.max(1,Math.min(500,Number(limit)||100)),...txOpt}))||[];
+  const replayedIds=[];
+  for(const row of rows){
+   const eid=typeof row.get==='function'?row.get('eventId'):row.eventId;
+   const patch={state:'pending',attempts:0,errorCode:null,nextAttemptAt:null,lockedAt:null};
+   await (transaction?row.update(patch,{transaction}):row.update(patch));
+   if(eid)replayedIds.push(eid);
+  }
+  return {replayedCount:replayedIds.length,eventIds:replayedIds};
+ };
+ if(canUsePgRlsSession(db)){
+  return organizationId
+   ?withTenantRlsContext(db,String(organizationId),runReplay)
+   :withSystemRlsBypass(db,runReplay);
  }
- return {replayedCount:replayedIds.length,eventIds:replayedIds};
+ return runReplay(undefined);
 }
 function registerContextResource(app){
  const root=ctx=>{if(ctx.state.currentRole!=='root'||!ctx.state.currentUser)ctx.throw(403,'Native context operations require root.');};

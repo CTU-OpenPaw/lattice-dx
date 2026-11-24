@@ -384,3 +384,59 @@ test('resource guard rewrites self assignee.userId and NocoBase $or preset scope
     { code: 'NATIVE_RELATION_EXPANSION_UNSUPPORTED' },
   );
 });
+
+test('sensitive tenant collections are blocked on non-root charts:queryData and strictly org-scoped on direct CRUD', async () => {
+  const employee = { id: 1, userId: 12, departmentId: 3, organizationId: 'org-a', active: true };
+  const guard = api.createNativeScopeMiddleware(db([employee]), {
+    assets: { name: 'latticeAssets', fields: [] },
+  });
+  const makeCtx = (resourceName, actionName, params = {}, currentRole = 'ldx_employee') => ({
+    state: { currentUser: { id: 12 }, currentRole },
+    action: { resourceName, actionName, params },
+  });
+
+  const sensitiveTables = [
+    'latticeRecordChatter',
+    'latticeContextOutbox',
+    'latticeIntegrationInbox',
+    'latticeAgentProposals',
+    'latticeAiAuditLogs',
+    'latticeAiQuotaUsage',
+    'latticeUiSnapshots',
+    'latticeAiProfiles',
+    'latticeAiApprovalQueue',
+  ];
+
+  for (const table of sensitiveTables) {
+    await assert.rejects(
+      guard(makeCtx('charts', 'queryData', { values: { mode: 'builder', collection: table, filter: {} } }), async () => {}),
+      { code: 'NATIVE_CHART_COLLECTION_FORBIDDEN' },
+    );
+
+    for (const readAction of ['list', 'get', 'count']) {
+      const readCtx = makeCtx(table, readAction, { filter: { organizationId: 'org-b' } });
+      await guard(readCtx, async () => {});
+      assert.deepEqual(readCtx.action.params.filter, {
+        $and: [{ organizationId: 'org-a' }, { organizationId: 'org-b' }],
+      });
+    }
+
+    const updateCtx = makeCtx(table, 'update', { filterByTk: 5, filter: {}, values: { note: 'ok' } });
+    await guard(updateCtx, async () => {});
+    assert.deepEqual(updateCtx.action.params.filter, {
+      $and: [{ organizationId: 'org-a' }, {}],
+    });
+    assert.equal(updateCtx.action.params.values.organizationId, 'org-a');
+
+    await assert.rejects(
+      guard(makeCtx(table, 'update', { filterByTk: 5, values: { organizationId: 'org-b' } }), async () => {}),
+      { code: 'NATIVE_ORGANIZATION_MISMATCH' },
+    );
+
+    const destroyCtx = makeCtx(table, 'destroy', { filterByTk: 5, filter: {} });
+    await guard(destroyCtx, async () => {});
+    assert.deepEqual(destroyCtx.action.params.filter, {
+      $and: [{ organizationId: 'org-a' }, {}],
+    });
+  }
+});

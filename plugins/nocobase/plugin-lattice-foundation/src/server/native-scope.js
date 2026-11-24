@@ -8,7 +8,15 @@
  */
 'use strict';
 
-const { installRlsTransactionBridge, setContextRlsTransaction, setTransactionRlsOrg, withTenantRlsContext } = require('./pg-rls');
+const {
+  installRlsTransactionBridge,
+  getActiveRlsContext,
+  canUsePgRlsSession,
+  setContextRlsTransaction,
+  setTransactionRlsOrg,
+  withTenantRlsContext,
+  withSystemRlsBypass,
+} = require('./pg-rls');
 
 function failure(code, status = 403, message = code) {
   return Object.assign(new Error(message), {code, status});
@@ -34,7 +42,10 @@ const value = (row, key) => typeof row?.get === 'function' ? row.get(key) : row?
 async function resolveNativeActor(db, user, options = {}) {
   const id = value(user, 'id');
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_LOGIN_REQUIRED', 401);
-  const rows = await db.getRepository('latticeEmployees').find({...options,filter:{userId:id},limit:2});
+  const findEmployee = (findOptions) => db.getRepository('latticeEmployees').find({ ...findOptions, filter: { userId: id }, limit: 2 });
+  const rows = !options.transaction && !getActiveRlsContext()?.transaction && canUsePgRlsSession(db)
+    ? await withSystemRlsBypass(db, (transaction) => findEmployee({ ...options, transaction }))
+    : await findEmployee(options);
   if (rows.length > 1) throw failure('NATIVE_MEMBERSHIP_AMBIGUOUS');
   const employee = rows[0];
   if (!employee || value(employee,'active') !== true) throw failure('NATIVE_MEMBERSHIP_REQUIRED');
@@ -45,10 +56,21 @@ async function resolveNativeActor(db, user, options = {}) {
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const IMMUTABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'completed', 'cancelled']);
 const SENSITIVE_FILTER_KEY_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt/i;
+const SENSITIVE_SCOPED_COLLECTIONS = new Set([
+  'latticeRecordChatter',
+  'latticeContextOutbox',
+  'latticeIntegrationInbox',
+  'latticeAgentProposals',
+  'latticeAiAuditLogs',
+  'latticeAiQuotaUsage',
+  'latticeUiSnapshots',
+  'latticeAiProfiles',
+  'latticeAiApprovalQueue',
+]);
 const SENSITIVE_CHART_COLLECTIONS = new Set([
   'users', 'roles', 'dataSourcesRoles', 'dataSourcesRolesResources',
   'authenticators', 'applicationTokens', 'apiKeys', 'sessions',
-  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiApprovalQueue',
+  ...SENSITIVE_SCOPED_COLLECTIONS,
 ]);
 function clampPageLimit(limit) {
   const n = Number(limit);
@@ -153,14 +175,19 @@ function scopeNativeRead(params, actor) {
   if (next.limit != null) next.limit = clampPageLimit(next.limit);
   return next;
 }
-function scopeNativeValues(values, actor) {
-  if (!values || typeof values !== 'object' || Array.isArray(values)) throw failure('NATIVE_VALUES_INVALID',400);
+function scopeNativeValues(values, actor, { allowPlainJson = false } = {}) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) throw failure('NATIVE_VALUES_INVALID', 400);
   if (!actor?.organizationId) throw failure('NATIVE_MEMBERSHIP_REQUIRED');
   for (const [key, entry] of Object.entries(values)) {
-    if (['id','userId','identitySubject'].includes(key) || (entry !== null && typeof entry === 'object')) throw failure('NATIVE_PROTECTED_FIELD');
+    if (['id', 'userId', 'identitySubject', '__proto__', 'constructor', 'prototype'].includes(key)) {
+      throw failure('NATIVE_PROTECTED_FIELD');
+    }
+    if (!allowPlainJson && entry !== null && typeof entry === 'object') {
+      throw failure('NATIVE_PROTECTED_FIELD');
+    }
   }
   if (values.organizationId !== undefined && values.organizationId !== actor.organizationId) throw failure('NATIVE_ORGANIZATION_MISMATCH');
-  return {...values,organizationId:actor.organizationId};
+  return { ...values, organizationId: actor.organizationId };
 }
 async function recordChatterSafe(db, ctx, actor, id, beforeSnapshot, updatedSnapshot) {
   if (!beforeSnapshot || !updatedSnapshot) return;
@@ -260,15 +287,24 @@ function createNativeScopeMiddleware(db, definitions) {
   const schemas = new Map(Object.values(definitions).map(schema=>[schema.name,schema]));
   const read = new Set(['list','get','count']);
   const write = new Set(['create','update','destroy']);
-  const isScopedCollection = (name) => schemas.has(name) || CUSTOM_COLLECTION_RE.test(String(name || ''));
+  const isScopedCollection = (name) => schemas.has(name) || SENSITIVE_SCOPED_COLLECTIONS.has(name) || CUSTOM_COLLECTION_RE.test(String(name || ''));
   return async function nativeScope(ctx,next) {
     const {resourceName,actionName,params} = ctx.action;
     // The host chart action reads the repository directly. Keep its ACL and
     // add the same organization restriction as the collection actions.
-    if (resourceName === 'charts' && actionName === 'queryData' && ctx.state.currentRole !== 'root') {
+    if (resourceName === 'charts' && actionName === 'queryData') {
       const values = params.values || {};
-      if (values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
       const col = String(values.collection || '');
+      if (ctx.state.currentRole === 'root') {
+        if (canUsePgRlsSession(db) && (isScopedCollection(col) || col.startsWith('lattice'))) {
+          return withSystemRlsBypass(db, (transaction) => {
+            setContextRlsTransaction(ctx, transaction);
+            return next();
+          });
+        }
+        return next();
+      }
+      if (values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
       if (!col || SENSITIVE_CHART_COLLECTIONS.has(col) || (!isScopedCollection(col) && !col.startsWith('lattice') && col !== 'workflowManualTasks')) {
         throw failure('NATIVE_CHART_COLLECTION_FORBIDDEN');
       }
@@ -282,7 +318,7 @@ function createNativeScopeMiddleware(db, definitions) {
         ctx.state = ctx.state || {};
         ctx.state.latticeRlsOrg = actor.organizationId;
         params.values = scopeNativeRead(nextValues, actor);
-        if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function') {
+        if (canUsePgRlsSession(db)) {
           return withTenantRlsContext(db, actor.organizationId, (transaction) => {
             setContextRlsTransaction(ctx, transaction);
             return next();
@@ -302,7 +338,15 @@ function createNativeScopeMiddleware(db, definitions) {
       ? () => writeDirectoryRecord(ctx, next)
       : next;
     // Root is the verified host configuration role, not a body/header flag.
-    if (ctx.state.currentRole === 'root') return proceed();
+    if (ctx.state.currentRole === 'root') {
+      if (canUsePgRlsSession(db)) {
+        return withSystemRlsBypass(db, (transaction) => {
+          setContextRlsTransaction(ctx, transaction);
+          return proceed();
+        });
+      }
+      return proceed();
+    }
     const actor = await resolveNativeActor(db,ctx.state.currentUser);
     if (resourceName !== collectionName) throw failure('NATIVE_ASSOCIATION_ACTION_UNSUPPORTED');
     if (!read.has(actionName) && !write.has(actionName)) throw failure('NATIVE_ACTION_UNSUPPORTED');
@@ -330,7 +374,9 @@ function createNativeScopeMiddleware(db, definitions) {
       expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
       ctx.state = ctx.state || {};
       ctx.state.latticeExpectedVersion = expectedVersion;
-      params.values = scopeNativeValues(params.values, actor);
+      params.values = scopeNativeValues(params.values, actor, {
+        allowPlainJson: SENSITIVE_SCOPED_COLLECTIONS.has(collectionName),
+      });
       if (document) {
         if (['status','version','requesterId','assigneeId','decisionReason','submittedAt','submittedBy','cancelledAt','cancelledBy','cancelReason','amendedFromId','amendmentNo'].some(field => Object.hasOwn(params.values, field))) {
           throw failure('NATIVE_DOCUMENT_PROTECTED_FIELD');
@@ -377,7 +423,7 @@ function createNativeScopeMiddleware(db, definitions) {
       return proceed();
     };
 
-    if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function') {
+    if (canUsePgRlsSession(db)) {
       const result = await withTenantRlsContext(db, actor.organizationId, (transaction) => executeScoped(transaction));
       if (typeof result === 'function') {
         try {

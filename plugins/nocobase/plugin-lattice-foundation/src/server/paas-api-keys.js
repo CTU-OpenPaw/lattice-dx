@@ -11,6 +11,7 @@
 const { createHash, randomBytes, timingSafeEqual } = require('node:crypto');
 const { resolveNativeActor } = require('./native-scope');
 const { val, callerRoles, getRepo } = require('./native-portal-helpers');
+const { canUsePgRlsSession, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
 
 const PAT_TOKEN_RE = /^ldx_pat_([0-9a-f]{8})_([0-9a-f]{32})$/;
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
@@ -296,99 +297,109 @@ function createPaasApiKeyAuthMiddleware(db) {
     }
 
     const expectedHash = hashToken(rawToken);
-    const keyRow = await keyRepo.findOne({ filter: { keyHash: expectedHash } });
-    if (!keyRow || !timingSafeEqualHex(String(val(keyRow, 'keyHash') || ''), expectedHash)) {
-      throw failApiKey('API_KEY_INVALID', 401, 'Invalid PaaS API key.');
-    }
-
-    if (val(keyRow, 'active') !== true || val(keyRow, 'revokedAt') != null) {
-      throw failApiKey('API_KEY_REVOKED', 401, 'PaaS API key has been revoked or deactivated.');
-    }
-
-    const expiresAt = val(keyRow, 'expiresAt');
-    if (expiresAt != null) {
-      const expMs = new Date(expiresAt).getTime();
-      if (!Number.isFinite(expMs) || expMs <= Date.now()) {
-        throw failApiKey('API_KEY_EXPIRED', 401, 'PaaS API key has expired.');
+    const verifyPatAuth = async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      const keyRow = await keyRepo.findOne({ filter: { keyHash: expectedHash }, ...txOpt });
+      if (!keyRow || !timingSafeEqualHex(String(val(keyRow, 'keyHash') || ''), expectedHash)) {
+        throw failApiKey('API_KEY_INVALID', 401, 'Invalid PaaS API key.');
       }
-    }
 
-    const userId = Number(val(keyRow, 'userId'));
-    const roleName = String(val(keyRow, 'roleName') || '').trim();
-    const orgId = String(val(keyRow, 'organizationId') || '').trim();
-    if (!Number.isInteger(userId) || userId <= 0 || !roleName || !ORG_ID_RE.test(orgId)) {
-      throw failApiKey('API_KEY_INVALID', 401, 'PaaS API key binding is invalid.');
-    }
-
-    const usersRepo = getRepo(activeDb, 'users');
-    if (!usersRepo || typeof usersRepo.findOne !== 'function') {
-      throw failApiKey('API_KEY_USER_INACTIVE', 401, 'User repository unavailable for API key verification.');
-    }
-    const userRow = await usersRepo.findOne({ filter: { id: userId } });
-    if (!userRow || val(userRow, 'active') === false) {
-      throw failApiKey('API_KEY_USER_INACTIVE', 401, 'API key owner account is inactive or missing.');
-    }
-
-    const ruRepo = getRepo(activeDb, 'rolesUsers');
-    if (ruRepo && typeof ruRepo.find === 'function') {
-      const bindings = (await ruRepo.find({ filter: { userId } })) || [];
-      const hasRole = bindings.some((b) => String(val(b, 'roleName') || '').trim() === roleName);
-      if (!hasRole) {
-        throw failApiKey('API_KEY_ROLE_REVOKED', 401, 'API key role assignment is no longer active.');
+      if (val(keyRow, 'active') !== true || val(keyRow, 'revokedAt') != null) {
+        throw failApiKey('API_KEY_REVOKED', 401, 'PaaS API key has been revoked or deactivated.');
       }
-    }
 
-    if (roleName !== 'root' || val(keyRow, 'employeeId') != null) {
-      const empRepo = getRepo(activeDb, 'latticeEmployees');
-      if (!empRepo || typeof empRepo.findOne !== 'function') {
-        throw failApiKey('API_KEY_MEMBERSHIP_INACTIVE', 401, 'Employee membership repository unavailable.');
+      const expiresAt = val(keyRow, 'expiresAt');
+      if (expiresAt != null) {
+        const expMs = new Date(expiresAt).getTime();
+        if (!Number.isFinite(expMs) || expMs <= Date.now()) {
+          throw failApiKey('API_KEY_EXPIRED', 401, 'PaaS API key has expired.');
+        }
       }
-      const emp = await empRepo.findOne({ filter: { userId, organizationId: orgId, active: true } });
-      if (!emp || val(emp, 'active') !== true || val(emp, 'organizationId') !== orgId) {
-        throw failApiKey('API_KEY_MEMBERSHIP_INACTIVE', 401, 'API key organization membership is inactive.');
-      }
-      if (val(keyRow, 'employeeId') != null && Number(val(emp, 'id')) !== Number(val(keyRow, 'employeeId'))) {
-        throw failApiKey('API_KEY_MEMBERSHIP_INACTIVE', 401, 'API key employee binding mismatch.');
-      }
-    }
 
-    const userPlain = typeof userRow.toJSON === 'function' ? userRow.toJSON() : { ...userRow };
-    ctx.state = ctx.state || {};
-    ctx.state.currentUser = userPlain;
-    ctx.state.currentRole = roleName;
-    ctx.state.currentRoles = [roleName];
-    clampHeaderRole(ctx, roleName);
-    ctx.auth = ctx.auth || {};
-    ctx.auth.user = userPlain;
-    ctx.skipAuthCheck = true;
+      const userId = Number(val(keyRow, 'userId'));
+      const roleName = String(val(keyRow, 'roleName') || '').trim();
+      const orgId = String(val(keyRow, 'organizationId') || '').trim();
+      if (!Number.isInteger(userId) || userId <= 0 || !roleName || !ORG_ID_RE.test(orgId)) {
+        throw failApiKey('API_KEY_INVALID', 401, 'PaaS API key binding is invalid.');
+      }
 
-    const scopes = Array.isArray(val(keyRow, 'scopesJson')) ? val(keyRow, 'scopesJson') : [];
-    ctx.state.latticeApiKey = {
-      id: val(keyRow, 'id'),
-      keyPrefix: val(keyRow, 'keyPrefix'),
-      scopes,
-      roleName,
-      organizationId: orgId,
+      const usersRepo = getRepo(activeDb, 'users');
+      if (!usersRepo || typeof usersRepo.findOne !== 'function') {
+        throw failApiKey('API_KEY_USER_INACTIVE', 401, 'User repository unavailable for API key verification.');
+      }
+      const userRow = await usersRepo.findOne({ filter: { id: userId }, ...txOpt });
+      if (!userRow || val(userRow, 'active') === false) {
+        throw failApiKey('API_KEY_USER_INACTIVE', 401, 'API key owner account is inactive or missing.');
+      }
+
+      const ruRepo = getRepo(activeDb, 'rolesUsers');
+      if (ruRepo && typeof ruRepo.find === 'function') {
+        const bindings = (await ruRepo.find({ filter: { userId }, ...txOpt })) || [];
+        const hasRole = bindings.some((b) => String(val(b, 'roleName') || '').trim() === roleName);
+        if (!hasRole) {
+          throw failApiKey('API_KEY_ROLE_REVOKED', 401, 'API key role assignment is no longer active.');
+        }
+      }
+
+      if (roleName !== 'root' || val(keyRow, 'employeeId') != null) {
+        const empRepo = getRepo(activeDb, 'latticeEmployees');
+        if (!empRepo || typeof empRepo.findOne !== 'function') {
+          throw failApiKey('API_KEY_MEMBERSHIP_INACTIVE', 401, 'Employee membership repository unavailable.');
+        }
+        const emp = await empRepo.findOne({ filter: { userId, organizationId: orgId, active: true }, ...txOpt });
+        if (!emp || val(emp, 'active') !== true || val(emp, 'organizationId') !== orgId) {
+          throw failApiKey('API_KEY_MEMBERSHIP_INACTIVE', 401, 'API key organization membership is inactive.');
+        }
+        if (val(keyRow, 'employeeId') != null && Number(val(emp, 'id')) !== Number(val(keyRow, 'employeeId'))) {
+          throw failApiKey('API_KEY_MEMBERSHIP_INACTIVE', 401, 'API key employee binding mismatch.');
+        }
+      }
+
+      const userPlain = typeof userRow.toJSON === 'function' ? userRow.toJSON() : { ...userRow };
+      ctx.state = ctx.state || {};
+      ctx.state.currentUser = userPlain;
+      ctx.state.currentRole = roleName;
+      ctx.state.currentRoles = [roleName];
+      clampHeaderRole(ctx, roleName);
+      ctx.auth = ctx.auth || {};
+      ctx.auth.user = userPlain;
+      ctx.skipAuthCheck = true;
+
+      const scopes = Array.isArray(val(keyRow, 'scopesJson')) ? val(keyRow, 'scopesJson') : [];
+      ctx.state.latticeApiKey = {
+        id: val(keyRow, 'id'),
+        keyPrefix: val(keyRow, 'keyPrefix'),
+        scopes,
+        roleName,
+        organizationId: orgId,
+      };
+
+      const lastUsedRaw = val(keyRow, 'lastUsedAt');
+      const lastUsedMs = lastUsedRaw ? new Date(lastUsedRaw).getTime() : 0;
+      if (!lastUsedMs || Date.now() - lastUsedMs >= LAST_USED_THROTTLE_MS) {
+        const now = new Date();
+        try {
+          if (typeof keyRow.update === 'function') {
+            await (transaction ? keyRow.update({ lastUsedAt: now }, { transaction }) : keyRow.update({ lastUsedAt: now }));
+          } else if (typeof keyRepo.update === 'function') {
+            await keyRepo.update({
+              filterByTk: val(keyRow, 'id'),
+              filter: { organizationId: orgId },
+              values: { lastUsedAt: now },
+              ...txOpt,
+            });
+          }
+        } catch {
+          // Non-fatal telemetry timestamp update
+        }
+      }
+
+      return scopes;
     };
 
-    const lastUsedRaw = val(keyRow, 'lastUsedAt');
-    const lastUsedMs = lastUsedRaw ? new Date(lastUsedRaw).getTime() : 0;
-    if (!lastUsedMs || Date.now() - lastUsedMs >= LAST_USED_THROTTLE_MS) {
-      const now = new Date();
-      try {
-        if (typeof keyRow.update === 'function') {
-          await keyRow.update({ lastUsedAt: now });
-        } else if (typeof keyRepo.update === 'function') {
-          await keyRepo.update({
-            filterByTk: val(keyRow, 'id'),
-            filter: { organizationId: orgId },
-            values: { lastUsedAt: now },
-          });
-        }
-      } catch {
-        // Non-fatal telemetry timestamp update
-      }
-    }
+    const scopes = canUsePgRlsSession(activeDb)
+      ? await withSystemRlsBypass(activeDb, verifyPatAuth)
+      : await verifyPatAuth(undefined);
 
     const method = String(ctx.method || 'GET').trim().toUpperCase();
     const isReadOnlyPat = scopes.length === 0 || scopes.every((s) => s === 'read');
@@ -474,7 +485,14 @@ async function resolveIssueTarget({ db, callerUserId, callerRolesVerified, isRoo
   if (requestedRole !== 'root' || !isRoot) {
     const empRepo = getRepo(db, 'latticeEmployees');
     if (empRepo && typeof empRepo.find === 'function') {
-      const empRows = (await empRepo.find({ filter: { userId: targetUserId, active: true }, limit: 2 })) || [];
+      const findTargetEmp = (transaction) => empRepo.find({
+        filter: { userId: targetUserId, active: true },
+        limit: 2,
+        ...(transaction ? { transaction } : {}),
+      });
+      const empRows = (canUsePgRlsSession(db)
+        ? await withSystemRlsBypass(db, findTargetEmp)
+        : await findTargetEmp(undefined)) || [];
       if (empRows.length > 1) {
         throw failApiKey('NATIVE_MEMBERSHIP_AMBIGUOUS', 403, 'Ambiguous active employee membership.');
       }
@@ -542,37 +560,48 @@ function registerPaasApiKeys(app) {
         const isRoot = callerRolesVerified.includes('root');
         const isAdmin = isRoot || (await isAdminByRoles(db, callerRolesVerified));
 
-        const resolved = await resolveIssueTarget({
-          db,
-          callerUserId,
-          callerRolesVerified,
-          isRoot,
-          isAdmin,
-          params,
-        });
+        const issueKeyInTx = async (transaction) => {
+          const resolved = await resolveIssueTarget({
+            db,
+            callerUserId,
+            callerRolesVerified,
+            isRoot,
+            isAdmin,
+            params,
+          });
 
-        const keyRepo = getRepo(db, 'latticeApiKeys');
-        if (!keyRepo || typeof keyRepo.create !== 'function') {
-          throw failApiKey('API_KEY_REPO_UNAVAILABLE', 503, 'latticeApiKeys repository is unavailable.');
-        }
+          const keyRepo = getRepo(db, 'latticeApiKeys');
+          if (!keyRepo || typeof keyRepo.create !== 'function') {
+            throw failApiKey('API_KEY_REPO_UNAVAILABLE', 503, 'latticeApiKeys repository is unavailable.');
+          }
 
-        const { token, keyPrefix } = generatePatToken();
-        const keyHash = hashToken(token);
-        const created = await keyRepo.create({
-          values: {
-            organizationId: resolved.organizationId,
-            name,
-            keyPrefix,
-            keyHash,
-            userId: resolved.userId,
-            employeeId: resolved.employeeId,
-            roleName: resolved.roleName,
-            scopesJson: scopes,
-            expiresAt,
-            createdByUserId: Number(callerUserId),
-            active: true,
-          },
-        });
+          const { token, keyPrefix } = generatePatToken();
+          const keyHash = hashToken(token);
+          const createKey = (createTx) => keyRepo.create({
+            values: {
+              organizationId: resolved.organizationId,
+              name,
+              keyPrefix,
+              keyHash,
+              userId: resolved.userId,
+              employeeId: resolved.employeeId,
+              roleName: resolved.roleName,
+              scopesJson: scopes,
+              expiresAt,
+              createdByUserId: Number(callerUserId),
+              active: true,
+            },
+            ...(createTx ? { transaction: createTx } : {}),
+          });
+          const created = !transaction && canUsePgRlsSession(db)
+            ? await withTenantRlsContext(db, resolved.organizationId, createKey)
+            : await createKey(transaction);
+          return { created, token };
+        };
+
+        const { created, token } = isRoot && canUsePgRlsSession(db)
+          ? await withSystemRlsBypass(db, issueKeyInTx)
+          : await issueKeyInTx(undefined);
 
         ctx.body = {
           ...serializeApiKey(created),
@@ -615,7 +644,17 @@ function registerPaasApiKeys(app) {
           return;
         }
         const limit = Math.max(1, Math.min(200, Math.floor(Number(params.limit) || 50)));
-        const rows = (await keyRepo.find({ filter, sort: ['-id'], limit })) || [];
+        const runList = (transaction) => keyRepo.find({
+          filter,
+          sort: ['-id'],
+          limit,
+          ...(transaction ? { transaction } : {}),
+        });
+        const rows = (canUsePgRlsSession(db)
+          ? await (isRoot
+            ? withSystemRlsBypass(db, runList)
+            : withTenantRlsContext(db, organizationId, runList))
+          : await runList(undefined)) || [];
         ctx.body = {
           organizationId,
           items: rows.map(serializeApiKey),
@@ -653,24 +692,33 @@ function registerPaasApiKeys(app) {
         }
 
         const filter = organizationId ? { id, organizationId } : { id };
-        const row = await keyRepo.findOne({ filter });
-        if (!row || (organizationId && val(row, 'organizationId') !== organizationId)) {
-          throw failApiKey('API_KEY_NOT_FOUND', 404, 'API key not found.');
-        }
-        if (!isAdmin && Number(val(row, 'userId')) !== Number(callerUserId)) {
-          throw failApiKey('API_KEY_FORBIDDEN', 403, 'Cannot revoke another user API key.');
-        }
+        const runRevoke = async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const row = await keyRepo.findOne({ filter, ...txOpt });
+          if (!row || (organizationId && val(row, 'organizationId') !== organizationId)) {
+            throw failApiKey('API_KEY_NOT_FOUND', 404, 'API key not found.');
+          }
+          if (!isAdmin && Number(val(row, 'userId')) !== Number(callerUserId)) {
+            throw failApiKey('API_KEY_FORBIDDEN', 403, 'Cannot revoke another user API key.');
+          }
 
-        const revokedAt = val(row, 'revokedAt') || new Date();
-        const revokedBy = String(val(ctx.state.currentUser, 'username') || callerUserId).slice(0, 120);
-        const patch = { active: false, revokedAt, revokedBy };
-        let updated = row;
-        if (typeof row.update === 'function') {
-          updated = await row.update(patch);
-        } else if (typeof keyRepo.update === 'function') {
-          const res = await keyRepo.update({ filterByTk: id, filter, values: patch });
-          if (Array.isArray(res) && res[0]) updated = res[0];
-        }
+          const revokedAt = val(row, 'revokedAt') || new Date();
+          const revokedBy = String(val(ctx.state.currentUser, 'username') || callerUserId).slice(0, 120);
+          const patch = { active: false, revokedAt, revokedBy };
+          let updated = row;
+          if (typeof row.update === 'function') {
+            updated = transaction ? await row.update(patch, { transaction }) : await row.update(patch);
+          } else if (typeof keyRepo.update === 'function') {
+            const res = await keyRepo.update({ filterByTk: id, filter, values: patch, ...txOpt });
+            if (Array.isArray(res) && res[0]) updated = res[0];
+          }
+          return { updated, revokedAt, revokedBy };
+        };
+        const { updated, revokedAt, revokedBy } = canUsePgRlsSession(db)
+          ? await (isRoot
+            ? withSystemRlsBypass(db, runRevoke)
+            : withTenantRlsContext(db, organizationId, runRevoke))
+          : await runRevoke(undefined);
 
         ctx.body = {
           ...serializeApiKey(updated),

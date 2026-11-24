@@ -107,6 +107,22 @@ test('pg-rls defines all 42 tenant-scoped tables, validates identifiers strictly
   // setTransactionRlsOrg fails closed when transaction is missing
   await assert.rejects(() => pgRls.setTransactionRlsOrg(pgDb, 'org-alpha_01', null), { code: 'RLS_TRANSACTION_UNAVAILABLE' });
 
+  // withSystemRlsBypass sets app.rls_bypass='on' inside a transaction and rejects invalid inputs
+  assert.equal(typeof pgRls.withSystemRlsBypass, 'function');
+  await assert.rejects(() => pgRls.withSystemRlsBypass(pgDb, null), TypeError);
+  await assert.rejects(() => pgRls.withSystemRlsBypass({}, async () => 'nope'), { code: 'RLS_TRANSACTION_UNAVAILABLE' });
+
+  queries.length = 0;
+  const bypassOut = await pgRls.withSystemRlsBypass(pgDb, async (tx) => {
+    assert.equal(tx, fakeTx);
+    assert.equal(pgRls.getActiveRlsContext()?.systemRlsBypass, true);
+    return 'bypass-ok';
+  });
+  assert.equal(bypassOut, 'bypass-ok');
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+  assert.equal(queries[0].opts.transaction, fakeTx);
+
   // Non-postgres dialect skips set_config cleanly while running transaction callback
   const sqliteQueries = [];
   const sqliteDb = {
@@ -118,6 +134,8 @@ test('pg-rls defines all 42 tenant-scoped tables, validates identifiers strictly
   };
   const sqliteOut = await pgRls.withTenantRlsContext(sqliteDb, 'org-alpha_01', async () => 'ok');
   assert.equal(sqliteOut, 'ok');
+  const sqliteBypassOut = await pgRls.withSystemRlsBypass(sqliteDb, async () => 'bypass-sqlite-ok');
+  assert.equal(sqliteBypassOut, 'bypass-sqlite-ok');
   assert.equal(sqliteQueries.length, 0);
 });
 
@@ -221,7 +239,8 @@ test('installRlsTransactionBridge injects active AsyncLocalStorage transaction i
     await guard(ctx, async () => {
       await fakeDb.getRepository('latticeOrders').find({ filter: {} });
     });
-    assert.equal(seqCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.equal(seqCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(seqCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
     assert.equal(repoCalls.find((c) => c.method === 'assetFindOne').opts.transaction, fakeTx);
     assert.equal(repoCalls.find((c) => c.method === 'deptFindOne').opts.transaction, fakeTx);
     assert.equal(repoCalls.find((c) => c.method === 'find').opts.transaction, fakeTx);
@@ -231,12 +250,19 @@ test('installRlsTransactionBridge injects active AsyncLocalStorage transaction i
   }
 });
 
-test('attachRlsPolicyToTable and migration 20261123000600 emit valid permissive PostgreSQL RLS DDL and reversible down()', async () => {
+test('attachRlsPolicyToTable and migrations 20261123000600 & 20261127000100 emit fail-closed FORCE PostgreSQL RLS DDL and OAuth2 connector columns', async () => {
   await withMockedNocobase(async () => {
     const pgRls = require('../src/server/pg-rls');
     const migPath = require.resolve('../src/server/migrations/20261123000600-postgresql-rls-policies');
     delete require.cache[migPath];
     const Migration = require('../src/server/migrations/20261123000600-postgresql-rls-policies');
+
+    const policySql = pgRls.buildRlsPolicySql('latticeOrders');
+    assert.match(policySql.enableSql, /ENABLE ROW LEVEL SECURITY/);
+    assert.match(policySql.enableSql, /FORCE ROW LEVEL SECURITY/);
+    assert.match(policySql.createSql, /current_setting\('app\.rls_bypass', true\) = 'on'/);
+    assert.equal(policySql.createSql.includes('IS NULL'), false, 'RLS policy must fail closed (no IS NULL)');
+    assert.equal(policySql.createSql.includes("= ''"), false, 'RLS policy must fail closed (no empty string bypass)');
 
     const ddl = [];
     const fakeTx = { id: 'tx-mig' };
@@ -261,10 +287,12 @@ test('attachRlsPolicyToTable and migration 20261123000600 emit valid permissive 
     const single = await pgRls.attachRlsPolicyToTable(fakeDb, 'latticeOrders', { transaction: fakeTx });
     assert.equal(single.applied, true);
     assert.match(ddl[0].sql, /ALTER TABLE public\."latticeOrders" ENABLE ROW LEVEL SECURITY/);
+    assert.match(ddl[0].sql, /ALTER TABLE public\."latticeOrders" FORCE ROW LEVEL SECURITY/);
     assert.match(ddl[1].sql, /DROP POLICY IF EXISTS lattice_tenant_isolation ON public\."latticeOrders"/);
     assert.match(ddl[2].sql, /CREATE POLICY lattice_tenant_isolation ON public\."latticeOrders"/);
     assert.match(ddl[2].sql, /AS PERMISSIVE FOR ALL TO PUBLIC/);
-    assert.match(ddl[2].sql, /current_setting\('app\.current_org', true\) IS NULL/);
+    assert.match(ddl[2].sql, /current_setting\('app\.rls_bypass', true\) = 'on'/);
+    assert.equal(ddl[2].sql.includes('IS NULL'), false);
     assert.match(ddl[2].sql, /"organizationId" = current_setting\('app\.current_org', true\)/);
     assert.match(ddl[2].sql, /WITH CHECK \(/);
 
@@ -276,6 +304,7 @@ test('attachRlsPolicyToTable and migration 20261123000600 emit valid permissive 
     const joinedUp = ddl.map((d) => d.sql).join('\n');
     assert.match(joinedUp, /information_schema\.columns/);
     assert.match(joinedUp, /ALTER TABLE public\."latticeRequests" ENABLE ROW LEVEL SECURITY/);
+    assert.match(joinedUp, /ALTER TABLE public\."latticeRequests" FORCE ROW LEVEL SECURITY/);
     assert.match(joinedUp, /ALTER TABLE public\."latticeNotifications" ENABLE ROW LEVEL SECURITY/);
     assert.match(joinedUp, /ALTER TABLE public\."latticeCustomColdAudits" ENABLE ROW LEVEL SECURITY/);
     assert.equal(joinedUp.includes('"latticeAssets"'), false, 'must not alter unsynced tables absent from information_schema.columns');
@@ -295,6 +324,48 @@ test('attachRlsPolicyToTable and migration 20261123000600 emit valid permissive 
     });
     await sqliteMigration.up();
     await sqliteMigration.down();
+
+    // Migration 20261127000100 re-attaches FORCE RLS and adds OAuth2/n8n columns on latticeConnectors reversibly
+    const forceMigPath = require.resolve('../src/server/migrations/20261127000100-force-rls-and-oauth2-connectors');
+    delete require.cache[forceMigPath];
+    const ForceRlsMigration = require('../src/server/migrations/20261127000100-force-rls-and-oauth2-connectors');
+    const forceMig = new ForceRlsMigration({ db: fakeDb });
+    assert.equal(forceMig.on, 'afterSync');
+
+    ddl.length = 0;
+    await forceMig.up();
+    const forceUpSql = ddl.map((d) => d.sql).join('\n');
+    assert.match(forceUpSql, /FORCE ROW LEVEL SECURITY/);
+    for (const col of [
+      'appType',
+      'capabilitiesJson',
+      'oauthConfigJson',
+      'oauthAccessTokenEnc',
+      'oauthRefreshTokenEnc',
+      'oauthTokenExpiresAt',
+      'oauthScope',
+      'oauthStateNonce',
+      'n8nCredentialId',
+    ]) {
+      assert.match(forceUpSql, new RegExp(`ALTER TABLE IF EXISTS "latticeConnectors" ADD COLUMN IF NOT EXISTS "${col}"`));
+    }
+
+    ddl.length = 0;
+    await forceMig.down();
+    const forceDownSql = ddl.map((d) => d.sql).join('\n');
+    for (const col of [
+      'appType',
+      'capabilitiesJson',
+      'oauthConfigJson',
+      'oauthAccessTokenEnc',
+      'oauthRefreshTokenEnc',
+      'oauthTokenExpiresAt',
+      'oauthScope',
+      'oauthStateNonce',
+      'n8nCredentialId',
+    ]) {
+      assert.match(forceDownSql, new RegExp(`ALTER TABLE IF EXISTS "latticeConnectors" DROP COLUMN IF EXISTS "${col}"`));
+    }
   });
 });
 
@@ -345,16 +416,18 @@ test('native-scope sets ctx.state.latticeRlsOrg and executes withTenantRlsContex
     assert.equal(Object.getOwnPropertyDescriptor(ctxOn.state, 'latticeRlsTransaction').enumerable, false);
     assert.equal(stateSerialized.latticeRlsOrg, 'org-a');
     assert.equal('latticeRlsTransaction' in stateSerialized, false);
-    assert.equal(sqlCalls.length, 1);
-    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
-    assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });
+    assert.equal(sqlCalls.length, 2);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(sqlCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(sqlCalls[1].opts.replacements, { orgId: 'org-a' });
 
-    // Root bypasses actor resolution and does not lock tenant RLS org
+    // Root uses explicit system RLS bypass without locking a tenant org
     sqlCalls.length = 0;
     const rootCtx = { state: { currentUser: { id: 1 }, currentRole: 'root' }, action: { resourceName: 'latticeAssets', actionName: 'list', params: {} } };
     await guard(rootCtx, async () => {});
     assert.equal(rootCtx.state.latticeRlsOrg, undefined);
-    assert.equal(sqlCalls.length, 0);
+    assert.equal(sqlCalls.length, 1);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
 
     // charts:queryData & updateScopedDocument also bind app.current_org when DX_PG_RLS_SESSION=true
     sqlCalls.length = 0;
@@ -364,8 +437,10 @@ test('native-scope sets ctx.state.latticeRlsOrg and executes withTenantRlsContex
     };
     await guard(chartCtx, async () => {});
     assert.equal(chartCtx.state.latticeRlsOrg, 'org-a');
-    assert.equal(sqlCalls.length, 1);
-    assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });
+    assert.equal(sqlCalls.length, 2);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(sqlCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(sqlCalls[1].opts.replacements, { orgId: 'org-a' });
 
     const { updateScopedDocument } = require('../src/server/native-scope');
     sqlCalls.length = 0;
@@ -1024,4 +1099,135 @@ test('runInRlsSavepoint isolates SQL failures inside active PostgreSQL RLS trans
   const spSqlite = await pgRls.withTenantRlsContext(sqliteDb, 'org-sp-2', () => pgRls.runInRlsSavepoint(sqliteDb, async () => 'sqlite-ok'));
   assert.equal(spSqlite, 'sqlite-ok');
   assert.equal(sqliteLog.length, 0);
+});
+
+test('system/auth/observability/bootstrap helpers execute inside withSystemRlsBypass when DX_PG_RLS_SESSION=true', async () => {
+  const { createHash } = require('node:crypto');
+  const { collectDbGauges } = require('../src/server/observability');
+  const { createPaasApiKeyAuthMiddleware } = require('../src/server/paas-api-keys');
+  const { seedFoundation } = require('../src/server/seed');
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+
+  const rawPat = 'ldx_pat_12345678_1234567890abcdef1234567890abcdef';
+  const keyHash = createHash('sha256').update(rawPat, 'utf8').digest('hex');
+
+  const sqlLog = [];
+  const fakeTx = { id: 'tx-sys-bypass' };
+  const seenCountTxs = [];
+  const seenPatFindTxs = [];
+  const seenSeedTxs = [];
+
+  const db = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => cb(fakeTx),
+      query: async (sql, opts) => {
+        sqlLog.push({ sql, opts });
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeApiKeys') {
+        return {
+          findOne: async (opts) => {
+            seenPatFindTxs.push(opts?.transaction || null);
+            return {
+              id: 7,
+              organizationId: 'org-a',
+              keyPrefix: 'ldx_pat_12345678',
+              keyHash,
+              userId: 12,
+              employeeId: 1,
+              roleName: 'ldx_admin',
+              scopesJson: ['read'],
+              active: true,
+              revokedAt: null,
+              expiresAt: null,
+              lastUsedAt: new Date(),
+            };
+          },
+        };
+      }
+      if (name === 'users') {
+        return { findOne: async () => ({ id: 12, active: true }) };
+      }
+      if (name === 'rolesUsers') {
+        return { find: async () => [{ userId: 12, roleName: 'ldx_admin' }] };
+      }
+      if (name === 'latticeEmployees') {
+        return {
+          findOne: async (opts) => {
+            if (opts?.filter?.code) {
+              seenSeedTxs.push(opts?.transaction || null);
+              return null;
+            }
+            seenPatFindTxs.push(opts?.transaction || null);
+            return { id: 1, userId: 12, organizationId: 'org-a', active: true };
+          },
+          create: async (opts) => {
+            seenSeedTxs.push(opts?.transaction || null);
+            return { get: () => 1 };
+          },
+        };
+      }
+      if (['latticeDepartments', 'latticeLocations', 'latticeAssets'].includes(name)) {
+        return {
+          findOne: async (opts) => {
+            seenSeedTxs.push(opts?.transaction || null);
+            return null;
+          },
+          create: async (opts) => {
+            seenSeedTxs.push(opts?.transaction || null);
+            return { get: (k) => (k === 'id' ? 1 : 'org-a') };
+          },
+        };
+      }
+      return {
+        count: async (opts) => {
+          seenCountTxs.push(opts?.transaction || null);
+          return 3;
+        },
+      };
+    },
+  };
+
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+
+    // 1. collectDbGauges sets app.rls_bypass='on' and passes transaction to repo.count
+    sqlLog.length = 0;
+    const gauges = await collectDbGauges(db);
+    assert.equal(gauges.ai_audit_logs_total, 3);
+    assert.ok(sqlLog.some((e) => e.sql === "SELECT set_config('app.rls_bypass', 'on', true)" && e.opts?.transaction === fakeTx));
+    assert.ok(seenCountTxs.length > 0 && seenCountTxs.every((tx) => tx === fakeTx));
+
+    // 2. PaaS API key auth middleware looks up key & employee under app.rls_bypass='on' before calling next()
+    sqlLog.length = 0;
+    const patMw = createPaasApiKeyAuthMiddleware(db);
+    const patCtx = {
+      method: 'GET',
+      headers: { 'x-lattice-api-key': rawPat },
+      request: { headers: { 'x-lattice-api-key': rawPat } },
+      state: {},
+      action: { resourceName: 'latticeAssets', actionName: 'list' },
+    };
+    let activeCtxDuringNext = null;
+    const pgRls = require('../src/server/pg-rls');
+    await patMw(patCtx, async () => {
+      activeCtxDuringNext = pgRls.getActiveRlsContext();
+    });
+    assert.equal(patCtx.state.currentUser.id, 12);
+    assert.equal(activeCtxDuringNext, null, 'PaaS auth must exit system bypass before running downstream next()');
+    assert.ok(sqlLog.some((e) => e.sql === "SELECT set_config('app.rls_bypass', 'on', true)" && e.opts?.transaction === fakeTx));
+    assert.ok(seenPatFindTxs.length >= 2 && seenPatFindTxs.every((tx) => tx === fakeTx));
+
+    // 3. seedFoundation sets app.rls_bypass='on' when invoked with a PG transaction
+    sqlLog.length = 0;
+    await seedFoundation(db, fakeTx);
+    assert.ok(sqlLog.some((e) => e.sql === "SELECT set_config('app.rls_bypass', 'on', true)" && e.opts?.transaction === fakeTx));
+    assert.ok(seenSeedTxs.length > 0 && seenSeedTxs.every((tx) => tx === fakeTx));
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
 });

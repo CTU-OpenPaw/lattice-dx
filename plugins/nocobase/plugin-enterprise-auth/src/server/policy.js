@@ -184,13 +184,31 @@ async function consumeBound(cache,locks,prefix,key,binding){
     await cache.del(cacheKey);return entry;
   },10000);
 }
+function canUseEnterpriseRlsBypass(db){
+  if(process.env.DX_PG_RLS_SESSION!=='true')return false;
+  const seq=db?.sequelize;
+  if(!seq||typeof seq.transaction!=='function'||typeof seq.query!=='function')return false;
+  if(typeof seq.getDialect==='function'&&seq.getDialect()!=='postgres')return false;
+  return true;
+}
+async function withOptionalSystemRlsBypass(db,fn){
+  if(!canUseEnterpriseRlsBypass(db))return fn(undefined);
+  return db.sequelize.transaction(async(transaction)=>{
+    await db.sequelize.query("SELECT set_config('app.rls_bypass', 'on', true)",{transaction});
+    return fn(transaction);
+  });
+}
 async function resolveMappedUser(db,authenticator,subject,issuer){
   if(typeof subject!=='string'||!subject||subject.length>255)throw denied();
   const links=await db.getRepository('usersAuthenticators').find({filter:{authenticator,uuid:subject},limit:2});
   if(links.length!==1||!issuer||links[0].meta?.issuer!==issuer)throw denied();
   const userId=links[0].userId;
   const users=await db.getRepository('users').find({filter:{id:userId},limit:2});
-  const employees=await db.getRepository('latticeEmployees').find({filter:{userId,active:true},limit:2});
+  const employees=await withOptionalSystemRlsBypass(db,(transaction)=>db.getRepository('latticeEmployees').find({
+    filter:{userId,active:true},
+    limit:2,
+    ...(transaction?{transaction}:{}),
+  }));
   if(users.length!==1||employees.length!==1||!employees[0].organizationId)throw denied();
   return users[0];
 }
@@ -199,6 +217,7 @@ module.exports={
   deploymentConfig,
   safeReturnTo,
   consumeBound,
+  withOptionalSystemRlsBypass,
   resolveMappedUser,
   resolveCacheOptions,
   validateLogoutTokenClaims,
