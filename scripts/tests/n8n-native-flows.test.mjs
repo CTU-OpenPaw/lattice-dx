@@ -564,12 +564,39 @@ test('epod-partner-sync: attestation builder maps ePOD & voucher targets to dxos
   assert.equal(responseBody.merkleRoot, 'abc123');
 });
 
-test('enterprise-compliance-orchestrator: 13-node graph validates HMAC, risk tiers, PKI normalization, partner dossier, and fan-in aggregation', () => {
+test('enterprise-compliance-orchestrator: 17-node 4-system graph validates HMAC, risk tiers, PKI, Orion-LD, MQTT edge interlock, partner dossier, and fan-in aggregation', () => {
   const { raw, workflow } = loadWorkflow(ENT_COMPLIANCE_PATH);
-  assert.equal(workflow.nodes.length, 13);
+  assert.equal(workflow.nodes.length, 17);
   assert.equal(workflow.active, false);
+  assert.equal(workflow.settings?.saveDataSuccessExecution, 'none');
   assert.equal(SECRET_TOKEN_RE.test(raw), false);
   assert.equal(workflow.meta?.spdx, 'SPDX-License-Identifier: Apache-2.0');
+
+  for (const httpNodeName of [
+    'Sign Document in NocoBase Ledger',
+    'Upsert Digital Twin in Orion-LD',
+    'Dispatch Edge Interlock (Node-RED MQTT)',
+    'Trigger NocoBase Escalation',
+  ]) {
+    const httpNode = getNode(workflow, httpNodeName);
+    assert.equal(httpNode.type, 'n8n-nodes-base.httpRequest');
+    assert.equal(httpNode.onError, 'continueErrorOutput');
+    assert.equal(httpNode.retryOnFail, false);
+    assert.equal(httpNode.parameters?.options?.redirect?.redirect?.followRedirects, false);
+    assert.ok(String(httpNode.parameters?.url || '').includes('$env.'));
+  }
+
+  const orionHttp = getNode(workflow, 'Upsert Digital Twin in Orion-LD');
+  assert.equal(
+    evalN8nExpr(orionHttp.parameters.url, { $env: {} }),
+    'http://orion-ld:1026/ngsi-ld/v1/entityOperations/upsert?options=update',
+  );
+  const edgeHttp = getNode(workflow, 'Dispatch Edge Interlock (Node-RED MQTT)');
+  assert.equal(
+    evalN8nExpr(edgeHttp.parameters.url, { $env: {} }),
+    'http://nodered:1880/twin/command',
+  );
+  assert.equal(getNode(workflow, 'Merge Critical Branches').parameters?.numberInputs, 4);
 
   const verifyFn = compileCodeNode(workflow, 'Verify Standard Webhook');
   const secret = `whsec_${randomBytes(32).toString('base64')}`;
@@ -589,18 +616,40 @@ test('enterprise-compliance-orchestrator: 13-node graph validates HMAC, risk tie
       body: {
         organizationId: 'org-ent',
         type: 'record.latticeRequests.create',
-        data: { id: 7, code: 'REQ-ENT-7', amount: 125000000, severity: 'critical', temperatureC: -8, slaOverdueMinutes: 45, items: [{ sku: 'A', value: 60 }, { sku: 'B', value: 40 }] },
+        data: { id: 7, assetId: 4, code: 'REQ-ENT-7', amount: 125000000, severity: 'critical', temperatureC: -8, slaOverdueMinutes: 45, items: [{ sku: 'A', value: 60 }, { sku: 'B', value: 40 }] },
       },
     },
   });
   assert.equal(crit.tier, 'critical');
   assert.equal(crit.riskScore, 100);
   assert.equal(crit.signDocumentPayload.targetRecordId, 7);
+  assert.equal(crit.orionEntityId, 'urn:ngsi-ld:ComplianceAlert:org-ent:REQ-ENT-7');
+  assert.equal(crit.edgeInterlockPayload.assetId, 4);
 
   const normPkiFn = compileCodeNode(workflow, 'Normalize PKI Attestation');
   const pkiItem = runCode(normPkiFn, { json: { body: { data: { signed: true, keyId: 'ed25519-k1', merkleRoot: 'mrk-999' } } } });
   assert.equal(pkiItem.signed, true);
   assert.equal(pkiItem.merkleRoot, 'mrk-999');
+
+  const normOrionNode = getNode(workflow, 'Normalize Orion-LD Sync');
+  const normOrionFn = new Function('$input', '$', 'require', normOrionNode.parameters.jsCode);
+  const orionItem = normOrionFn(
+    { first: () => ({ json: { statusCode: 201 } }) },
+    () => ({ first: () => ({ json: crit }) }),
+    requireFromTest,
+  )[0].json;
+  assert.equal(orionItem.synced, true);
+  assert.equal(orionItem.entityId, 'urn:ngsi-ld:ComplianceAlert:org-ent:REQ-ENT-7');
+
+  const normEdgeNode = getNode(workflow, 'Normalize Edge Interlock');
+  const normEdgeFn = new Function('$input', '$', 'require', normEdgeNode.parameters.jsCode);
+  const edgeItem = normEdgeFn(
+    { first: () => ({ json: { statusCode: 202, body: { commandId: crit.edgeInterlockPayload.commandId } } }) },
+    () => ({ first: () => ({ json: crit }) }),
+    requireFromTest,
+  )[0].json;
+  assert.equal(edgeItem.dispatched, true);
+  assert.equal(edgeItem.mqttTopic, 'latticedx/org-ent/4/command');
 
   const dossierFn = compileCodeNode(workflow, 'Build Partner & Regulatory Dossier');
   const dossierItem = runCode(dossierFn, { json: crit });
@@ -610,15 +659,23 @@ test('enterprise-compliance-orchestrator: 13-node graph validates HMAC, risk tie
   const aggNode = getNode(workflow, 'Aggregate Orchestration Receipt');
   const aggFn = new Function('$input', '$', '$execution', aggNode.parameters.jsCode);
   const aggOut = aggFn(
-    { all: () => [{ json: pkiItem }, { json: dossierItem }] },
+    { all: () => [{ json: pkiItem }, { json: orionItem }, { json: edgeItem }, { json: dossierItem }] },
     (name) => {
       assert.equal(name, 'Score Risk & Batch Compliance');
       return { first: () => ({ json: crit }) };
     },
-    { id: 'exec-live-13' },
+    { id: 'exec-live-17' },
   );
   assert.equal(aggOut[0].json.ok, true);
-  assert.equal(aggOut[0].json.n8nExecutionId, 'exec-live-13');
+  assert.equal(aggOut[0].json.n8nExecutionId, 'exec-live-17');
+  assert.deepEqual(aggOut[0].json.systemsOrchestrated, [
+    'nocobase-pki-ledger',
+    'fiware-orion-ld',
+    'nodered-mqtt-edge',
+    'partner-regulatory-dossier',
+  ]);
   assert.equal(aggOut[0].json.pkiAttestation.merkleRoot, 'mrk-999');
+  assert.equal(aggOut[0].json.digitalTwinSync.synced, true);
+  assert.equal(aggOut[0].json.edgeInterlock.dispatched, true);
   assert.equal(aggOut[0].json.partnerDispatch.itemCount, 2);
 });

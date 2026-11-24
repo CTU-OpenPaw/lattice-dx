@@ -19,7 +19,7 @@
         0,
         0
       ],
-      "notes": "SPDX-License-Identifier: Apache-2.0 — Receives LatticeFlow v2 / external partner compliance events and orchestrates risk scoring, PKI ledger attestation, partner dossier synthesis, and escalation callbacks.",
+      "notes": "SPDX-License-Identifier: Apache-2.0 — Receives LatticeFlow v2 / external partner compliance events and orchestrates risk scoring, PKI ledger attestation, FIWARE Orion-LD Digital Twin upsert, Node-RED/MQTT physical interlock, and partner dossier fan-out.",
       "parameters": {
         "httpMethod": "POST",
         "path": "latticedx/v1/enterprise-compliance-orchestrator",
@@ -84,7 +84,7 @@
       "typeVersion": 1.5,
       "position": [
         720,
-        220
+        380
       ],
       "parameters": {
         "respondWith": "json",
@@ -104,7 +104,7 @@
         -60
       ],
       "parameters": {
-        "jsCode": "const crypto = require('crypto');\n\nconst inp = $input.first().json || {};\nconst body = inp.body && typeof inp.body === 'object' && !Array.isArray(inp.body) ? inp.body : {};\nconst data = body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : {};\nconst organizationId = String(data.organizationId || body.organizationId || body.organizationid || '').trim();\n\nif (!organizationId) {\n  return [{ json: { invalidPayload: true, statusCode: 400, error: 'ORGANIZATION_ID_REQUIRED', tier: 'invalid', riskScore: 0, complianceFlags: [] } }];\n}\n\nconst eventType = String(body.type || body.eventType || 'compliance.evaluation').trim();\nconst code = String(data.code || body.code || body.subject || 'COMP-01').trim();\nconst rawAmount = Number(data.amount ?? body.amount ?? 0);\nconst amount = Number.isFinite(rawAmount) ? rawAmount : 0;\nconst rawSla = Number(data.slaOverdueMinutes ?? body.slaOverdueMinutes ?? 0);\nconst slaOverdueMinutes = Number.isFinite(rawSla) ? rawSla : 0;\nconst severity = String(data.severity || body.severity || 'normal').trim().toLowerCase();\nconst items = Array.isArray(data.items) ? data.items : (Array.isArray(body.items) ? body.items : []);\nconst rawTemp = data.temperatureC ?? body.temperatureC;\nconst temperatureC = rawTemp !== undefined && rawTemp !== null && rawTemp !== '' && Number.isFinite(Number(rawTemp)) ? Number(rawTemp) : null;\n\nlet riskScore = 10;\nconst flags = [];\nif (amount >= 50000000) { riskScore += 35; flags.push('HIGH_VALUE_THRESHOLD'); }\nelse if (amount >= 15000000) { riskScore += 18; flags.push('MID_VALUE_REVIEW'); }\nif (severity === 'critical') { riskScore += 30; flags.push('CRITICAL_SEVERITY'); }\nelse if (severity === 'high' || severity === 'urgent') { riskScore += 20; flags.push('HIGH_SEVERITY'); }\nif (slaOverdueMinutes >= 30) { riskScore += 20; flags.push('SLA_CRITICAL_OVERDUE'); }\nelse if (slaOverdueMinutes > 0) { riskScore += 10; flags.push('SLA_WARNING'); }\nif (temperatureC !== null && temperatureC > -12) { riskScore += 20; flags.push('THERMAL_EXCURSION'); }\nif (items.length >= 2) { riskScore += 10; flags.push('MULTI_LINE_BATCH'); }\nriskScore = Math.min(100, riskScore);\n\nconst tier = riskScore >= 75 ? 'critical' : (riskScore >= 40 ? 'escalated' : 'standard');\nconst idempotencyKey = crypto.createHash('sha256').update(`${organizationId}|${eventType}|${code}|${amount}|${items.length}`).digest('hex').slice(0, 24);\n\nconst allowedCollections = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets', 'latticeAssets', 'latticeParaDocuments', 'latticeIncidentCases']);\nconst rawCol = String(data.targetCollection || body.targetCollection || 'latticeRequests').trim();\nconst targetCollection = allowedCollections.has(rawCol) ? rawCol : 'latticeRequests';\nconst rawRecId = Number(data.targetRecordId ?? body.targetRecordId ?? data.id ?? body.id ?? 1);\nconst targetRecordId = Number.isInteger(rawRecId) && rawRecId > 0 ? rawRecId : 1;\n\nreturn [{\n  json: {\n    invalidPayload: false,\n    statusCode: 200,\n    organizationId,\n    eventType,\n    code,\n    amount,\n    severity,\n    slaOverdueMinutes,\n    temperatureC,\n    itemsProcessed: items.length,\n    items,\n    riskScore,\n    tier,\n    complianceFlags: flags,\n    idempotencyKey,\n    signDocumentPayload: {\n      organizationId,\n      targetCollection,\n      targetRecordId,\n      reason: `n8n compliance ${tier} (${riskScore}/100) doc=${code} key=${idempotencyKey}`.slice(0, 255),\n    },\n    escalationPayload: {\n      organizationId,\n      ruleKey: 'auto_sla_breach_escalation',\n      source: 'n8n:enterprise-compliance-orchestrator',\n      data: {\n        code,\n        tier,\n        riskScore,\n        complianceFlags: flags,\n        priority: severity === 'critical' ? 'high' : 'high',\n        severity,\n      },\n    },\n  },\n}];"
+        "jsCode": "const crypto = require('crypto');\n\nconst inp = $input.first().json || {};\nconst body = inp.body && typeof inp.body === 'object' && !Array.isArray(inp.body) ? inp.body : {};\nconst data = body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : {};\nconst organizationId = String(data.organizationId || body.organizationId || body.organizationid || '').trim();\n\nif (!organizationId) {\n  return [{ json: { invalidPayload: true, statusCode: 400, error: 'ORGANIZATION_ID_REQUIRED', tier: 'invalid', riskScore: 0, complianceFlags: [] } }];\n}\n\nconst eventType = String(body.type || body.eventType || 'compliance.evaluation').trim();\nconst code = String(data.code || body.code || body.subject || 'COMP-01').trim();\nconst safeCode = code.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64) || 'COMP-01';\nconst rawAmount = Number(data.amount ?? body.amount ?? 0);\nconst amount = Number.isFinite(rawAmount) ? rawAmount : 0;\nconst rawSla = Number(data.slaOverdueMinutes ?? body.slaOverdueMinutes ?? 0);\nconst slaOverdueMinutes = Number.isFinite(rawSla) ? rawSla : 0;\nconst severity = String(data.severity || body.severity || 'normal').trim().toLowerCase();\nconst items = Array.isArray(data.items) ? data.items : (Array.isArray(body.items) ? body.items : []);\nconst rawTemp = data.temperatureC ?? body.temperatureC;\nconst temperatureC = rawTemp !== undefined && rawTemp !== null && rawTemp !== '' && Number.isFinite(Number(rawTemp)) ? Number(rawTemp) : null;\n\nlet riskScore = 10;\nconst flags = [];\nif (amount >= 50000000) { riskScore += 35; flags.push('HIGH_VALUE_THRESHOLD'); }\nelse if (amount >= 15000000) { riskScore += 18; flags.push('MID_VALUE_REVIEW'); }\nif (severity === 'critical') { riskScore += 30; flags.push('CRITICAL_SEVERITY'); }\nelse if (severity === 'high' || severity === 'urgent') { riskScore += 20; flags.push('HIGH_SEVERITY'); }\nif (slaOverdueMinutes >= 30) { riskScore += 20; flags.push('SLA_CRITICAL_OVERDUE'); }\nelse if (slaOverdueMinutes > 0) { riskScore += 10; flags.push('SLA_WARNING'); }\nif (temperatureC !== null && temperatureC > -12) { riskScore += 20; flags.push('THERMAL_EXCURSION'); }\nif (items.length >= 2) { riskScore += 10; flags.push('MULTI_LINE_BATCH'); }\nriskScore = Math.min(100, riskScore);\n\nconst tier = riskScore >= 75 ? 'critical' : (riskScore >= 40 ? 'escalated' : 'standard');\nconst idempotencyKey = crypto.createHash('sha256').update(`${organizationId}|${eventType}|${code}|${amount}|${items.length}`).digest('hex').slice(0, 24);\n\nconst allowedCollections = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets', 'latticeAssets', 'latticeParaDocuments', 'latticeIncidentCases']);\nconst rawCol = String(data.targetCollection || body.targetCollection || 'latticeRequests').trim();\nconst targetCollection = allowedCollections.has(rawCol) ? rawCol : 'latticeRequests';\nconst rawRecId = Number(data.targetRecordId ?? body.targetRecordId ?? data.id ?? body.id ?? 1);\nconst targetRecordId = Number.isInteger(rawRecId) && rawRecId > 0 ? rawRecId : 1;\nconst rawAssetId = Number(data.assetId ?? body.assetId ?? 1);\nconst assetId = Number.isInteger(rawAssetId) && rawAssetId > 0 ? rawAssetId : 1;\nconst observedAt = new Date().toISOString();\n\nconst orionEntityId = `urn:ngsi-ld:ComplianceAlert:${organizationId}:${safeCode}`;\nconst orionEntityPayload = {\n  id: orionEntityId,\n  type: 'https://latticedx.example/ns/ComplianceAlert',\n  'https://latticedx.example/ns/code': { type: 'Property', value: code, observedAt },\n  'https://latticedx.example/ns/tier': { type: 'Property', value: tier, observedAt },\n  'https://latticedx.example/ns/riskScore': { type: 'Property', value: riskScore, observedAt },\n  'https://latticedx.example/ns/severity': { type: 'Property', value: severity, observedAt },\n  'https://latticedx.example/ns/amount': { type: 'Property', value: amount, observedAt },\n  ...(temperatureC !== null ? { temperature: { type: 'Property', value: temperatureC, unitCode: 'CEL', observedAt } } : {}),\n  'https://latticedx.example/ns/complianceFlags': { type: 'Property', value: flags, observedAt },\n  'https://latticedx.example/ns/idempotencyKey': { type: 'Property', value: idempotencyKey, observedAt },\n};\n\nconst edgeInterlockPayload = {\n  organizationId,\n  assetId,\n  commandId: `interlock-${idempotencyKey.slice(0, 16)}`,\n  desired: {\n    emergencyQuarantineLock: true,\n    setpointC: -18,\n    alarmRelay: 'ON',\n    reason: `n8n_critical_compliance_${safeCode}`.slice(0, 120),\n    riskScore,\n  },\n};\n\nreturn [{\n  json: {\n    invalidPayload: false,\n    statusCode: 200,\n    organizationId,\n    eventType,\n    code,\n    amount,\n    severity,\n    slaOverdueMinutes,\n    temperatureC,\n    itemsProcessed: items.length,\n    items,\n    riskScore,\n    tier,\n    complianceFlags: flags,\n    idempotencyKey,\n    orionEntityId,\n    orionEntityPayload,\n    edgeInterlockPayload,\n    signDocumentPayload: {\n      organizationId,\n      targetCollection,\n      targetRecordId,\n      reason: `n8n compliance ${tier} (${riskScore}/100) doc=${code} key=${idempotencyKey}`.slice(0, 255),\n    },\n    escalationPayload: {\n      organizationId,\n      ruleKey: 'auto_sla_breach_escalation',\n      source: 'n8n:enterprise-compliance-orchestrator',\n      data: {\n        code,\n        tier,\n        riskScore,\n        complianceFlags: flags,\n        priority: 'high',\n        severity,\n      },\n    },\n  },\n}];"
       }
     },
     {
@@ -182,7 +182,7 @@
       "typeVersion": 4.5,
       "position": [
         1220,
-        -260
+        -420
       ],
       "onError": "continueErrorOutput",
       "retryOnFail": false,
@@ -229,11 +229,133 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1460,
-        -260
+        1480,
+        -420
       ],
       "parameters": {
         "jsCode": "const raw = $input.first().json || {};\nconst payload = (raw.body && raw.body.data && typeof raw.body.data === 'object') ? raw.body.data : (raw.body && typeof raw.body === 'object' ? raw.body : raw);\nconst signed = Boolean(payload && (payload.signed || payload.merkleRoot || (payload.entry && payload.entry.merkleRoot)));\nreturn [{\n  json: {\n    kind: 'pki',\n    signed,\n    keyId: payload.keyId || (payload.entry && payload.entry.keyId) || null,\n    merkleRoot: payload.merkleRoot || (payload.entry && payload.entry.merkleRoot) || null,\n    entryHash: (payload.entry && payload.entry.entryHash) || payload.entryHash || null,\n    error: signed ? null : String((raw.error && raw.error.message) || raw.message || payload.message || 'LEDGER_SIGN_UNAVAILABLE'),\n  },\n}];"
+      }
+    },
+    {
+      "id": "dxos-ent-orion-upsert",
+      "name": "Upsert Digital Twin in Orion-LD",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1220,
+        -180
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": false,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DX_ORION_URL || 'http://orion-ld:1026').replace(/\\/+$/, '') + '/ngsi-ld/v1/entityOperations/upsert?options=update' }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "NGSILD-Tenant",
+              "value": "={{ $json.organizationId }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ [$json.orionEntityPayload] }}",
+        "options": {
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "dxos-ent-norm-orion",
+      "name": "Normalize Orion-LD Sync",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1480,
+        -180
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json || {};\nconst score = $('Score Risk & Batch Compliance').first().json || {};\nconst statusCode = Number(raw.statusCode || raw.status || 0);\nconst synced = !raw.error && [200, 201, 204].includes(statusCode);\nreturn [{\n  json: {\n    kind: 'orion_ld',\n    synced,\n    statusCode: statusCode || null,\n    broker: 'fiware-orion-ld',\n    entityId: score.orionEntityId || null,\n    tenant: score.organizationId || null,\n    error: synced ? null : String((raw.error && raw.error.message) || raw.message || (raw.body && raw.body.detail) || 'ORION_LD_UNAVAILABLE'),\n  },\n}];"
+      }
+    },
+    {
+      "id": "dxos-ent-edge-interlock",
+      "name": "Dispatch Edge Interlock (Node-RED MQTT)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1220,
+        60
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": false,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.DX_TWIN_DOWNLINK_URL || 'http://nodered:1880/twin/command' }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Lattice-Edge-Token",
+              "value": "={{ $env.DX_IIOT_INGEST_TOKEN || '' }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.edgeInterlockPayload }}",
+        "options": {
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "dxos-ent-norm-edge",
+      "name": "Normalize Edge Interlock",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1480,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json || {};\nconst score = $('Score Risk & Batch Compliance').first().json || {};\nconst payload = (raw.body && typeof raw.body === 'object') ? raw.body : raw;\nconst statusCode = Number(raw.statusCode || raw.status || 0);\nconst edgeCfg = score.edgeInterlockPayload || {};\nconst dispatched = !raw.error && ([200, 202].includes(statusCode) || Boolean(payload && payload.commandId));\nreturn [{\n  json: {\n    kind: 'edge_interlock',\n    dispatched,\n    statusCode: statusCode || null,\n    broker: 'nodered-mosquitto-mqtt',\n    mqttTopic: `latticedx/${score.organizationId || 'org'}/${edgeCfg.assetId || 1}/command`,\n    commandId: (payload && payload.commandId) || edgeCfg.commandId || null,\n    desired: (payload && payload.desired) || edgeCfg.desired || null,\n    error: dispatched ? null : String((raw.error && raw.error.message) || raw.message || (payload && payload.message) || 'EDGE_INTERLOCK_UNAVAILABLE'),\n  },\n}];"
       }
     },
     {
@@ -242,8 +364,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1340,
-        -60
+        1350,
+        300
       ],
       "parameters": {
         "jsCode": "const crypto = require('crypto');\nconst s = $input.first().json || {};\nconst lineTotal = Array.isArray(s.items) ? s.items.reduce((acc, it) => acc + (Number(it && (it.value ?? it.qty)) || 0), 0) : 0;\nconst manifestDigest = crypto.createHash('sha256').update(JSON.stringify({ key: s.idempotencyKey, flags: s.complianceFlags || [], items: s.items || [] })).digest('hex').slice(0, 16);\nreturn [{\n  json: {\n    kind: 'partner_dossier',\n    manifestDigest,\n    itemCount: Array.isArray(s.items) ? s.items.length : 0,\n    lineTotal,\n    dispatchedChannels: ['regulatory-audit-log', 'partner-gateway-queue'],\n    slaResponseDeadline: new Date(Date.now() + 2 * 3600 * 1000).toISOString(),\n  },\n}];"
@@ -255,11 +377,12 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.1,
       "position": [
-        1700,
-        -160
+        1760,
+        -80
       ],
       "parameters": {
         "mode": "append",
+        "numberInputs": 4,
         "options": {}
       }
     },
@@ -269,8 +392,8 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1340,
-        120
+        1350,
+        520
       ],
       "onError": "continueErrorOutput",
       "retryOnFail": false,
@@ -317,12 +440,12 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1960,
-        40
+        2020,
+        140
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const score = $('Score Risk & Batch Compliance').first().json || {};\nif (score.invalidPayload) {\n  return [{ json: { ok: false, workflow: 'enterprise-compliance-orchestrator', statusCode: score.statusCode || 400, error: score.error || 'INVALID_PAYLOAD' } }];\n}\nconst allItems = $input.all().map((it) => it.json || {});\nconst pki = allItems.find((x) => x.kind === 'pki') || null;\nconst dossier = allItems.find((x) => x.kind === 'partner_dossier') || null;\nlet escalationResult = null;\nif (score.tier === 'escalated') {\n  const escRaw = allItems[0] || {};\n  const escPayload = (escRaw.body && escRaw.body.data && typeof escRaw.body.data === 'object') ? escRaw.body.data : (escRaw.body && typeof escRaw.body === 'object' ? escRaw.body : escRaw);\n  const runObj = (escPayload && escPayload.run) || escPayload || {};\n  escalationResult = {\n    dispatched: !escRaw.error,\n    runUid: runObj.runUid || null,\n    status: runObj.status || (escRaw.error ? 'failed' : 'triggered'),\n    error: escRaw.error ? String(escRaw.error.message || escRaw.message || 'ESCALATION_FAILED') : null,\n  };\n}\nlet execId = 'local';\ntry { execId = String($execution.id || 'local'); } catch {}\nreturn [{\n  json: {\n    ok: true,\n    statusCode: 200,\n    workflow: 'enterprise-compliance-orchestrator',\n    n8nExecutionId: execId,\n    idempotencyKey: score.idempotencyKey,\n    organizationId: score.organizationId,\n    eventType: score.eventType,\n    code: score.code,\n    tier: score.tier,\n    riskScore: score.riskScore,\n    complianceFlags: score.complianceFlags || [],\n    itemsProcessed: score.itemsProcessed || 0,\n    pkiAttestation: pki ? { signed: Boolean(pki.signed), keyId: pki.keyId || null, merkleRoot: pki.merkleRoot || null, entryHash: pki.entryHash || null, error: pki.error || null } : null,\n    partnerDispatch: dossier ? { manifestDigest: dossier.manifestDigest, itemCount: dossier.itemCount, lineTotal: dossier.lineTotal, dispatchedChannels: dossier.dispatchedChannels, slaResponseDeadline: dossier.slaResponseDeadline } : null,\n    escalationResult,\n    orchestratedAt: new Date().toISOString(),\n  },\n}];"
+        "jsCode": "const score = $('Score Risk & Batch Compliance').first().json || {};\nif (score.invalidPayload) {\n  return [{ json: { ok: false, workflow: 'enterprise-compliance-orchestrator', statusCode: score.statusCode || 400, error: score.error || 'INVALID_PAYLOAD' } }];\n}\nconst allItems = $input.all().map((it) => it.json || {});\nconst pki = allItems.find((x) => x.kind === 'pki') || null;\nconst orion = allItems.find((x) => x.kind === 'orion_ld') || null;\nconst edge = allItems.find((x) => x.kind === 'edge_interlock') || null;\nconst dossier = allItems.find((x) => x.kind === 'partner_dossier') || null;\nlet escalationResult = null;\nif (score.tier === 'escalated') {\n  const escRaw = allItems[0] || {};\n  const escPayload = (escRaw.body && escRaw.body.data && typeof escRaw.body.data === 'object') ? escRaw.body.data : (escRaw.body && typeof escRaw.body === 'object' ? escRaw.body : escRaw);\n  const runObj = (escPayload && escPayload.run) || escPayload || {};\n  escalationResult = {\n    dispatched: !escRaw.error,\n    runUid: runObj.runUid || null,\n    status: runObj.status || (escRaw.error ? 'failed' : 'triggered'),\n    error: escRaw.error ? String(escRaw.error.message || escRaw.message || 'ESCALATION_FAILED') : null,\n  };\n}\nconst systemsOrchestrated = [];\nif (pki) systemsOrchestrated.push('nocobase-pki-ledger');\nif (orion) systemsOrchestrated.push('fiware-orion-ld');\nif (edge) systemsOrchestrated.push('nodered-mqtt-edge');\nif (dossier) systemsOrchestrated.push('partner-regulatory-dossier');\nif (escalationResult) systemsOrchestrated.push('nocobase-sla-escalation');\nlet execId = 'local';\ntry { execId = String($execution.id || 'local'); } catch {}\nreturn [{\n  json: {\n    ok: true,\n    statusCode: 200,\n    workflow: 'enterprise-compliance-orchestrator',\n    n8nExecutionId: execId,\n    idempotencyKey: score.idempotencyKey,\n    organizationId: score.organizationId,\n    eventType: score.eventType,\n    code: score.code,\n    tier: score.tier,\n    riskScore: score.riskScore,\n    complianceFlags: score.complianceFlags || [],\n    itemsProcessed: score.itemsProcessed || 0,\n    systemsOrchestrated,\n    pkiAttestation: pki ? { signed: Boolean(pki.signed), keyId: pki.keyId || null, merkleRoot: pki.merkleRoot || null, entryHash: pki.entryHash || null, error: pki.error || null } : null,\n    digitalTwinSync: orion ? { synced: Boolean(orion.synced), statusCode: orion.statusCode || null, broker: orion.broker, entityId: orion.entityId || null, error: orion.error || null } : null,\n    edgeInterlock: edge ? { dispatched: Boolean(edge.dispatched), statusCode: edge.statusCode || null, broker: edge.broker, mqttTopic: edge.mqttTopic || null, commandId: edge.commandId || null, desired: edge.desired || null, error: edge.error || null } : null,\n    partnerDispatch: dossier ? { manifestDigest: dossier.manifestDigest, itemCount: dossier.itemCount, lineTotal: dossier.lineTotal, dispatchedChannels: dossier.dispatchedChannels, slaResponseDeadline: dossier.slaResponseDeadline } : null,\n    escalationResult,\n    orchestratedAt: new Date().toISOString(),\n  },\n}];"
       }
     },
     {
@@ -331,8 +454,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        2220,
-        40
+        2280,
+        140
       ],
       "parameters": {
         "respondWith": "json",
@@ -404,6 +527,16 @@
             "index": 0
           },
           {
+            "node": "Upsert Digital Twin in Orion-LD",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Dispatch Edge Interlock (Node-RED MQTT)",
+            "type": "main",
+            "index": 0
+          },
+          {
             "node": "Build Partner & Regulatory Dossier",
             "type": "main",
             "index": 0
@@ -454,13 +587,71 @@
         ]
       ]
     },
-    "Build Partner & Regulatory Dossier": {
+    "Upsert Digital Twin in Orion-LD": {
+      "main": [
+        [
+          {
+            "node": "Normalize Orion-LD Sync",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize Orion-LD Sync",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Orion-LD Sync": {
       "main": [
         [
           {
             "node": "Merge Critical Branches",
             "type": "main",
             "index": 1
+          }
+        ]
+      ]
+    },
+    "Dispatch Edge Interlock (Node-RED MQTT)": {
+      "main": [
+        [
+          {
+            "node": "Normalize Edge Interlock",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Normalize Edge Interlock",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Edge Interlock": {
+      "main": [
+        [
+          {
+            "node": "Merge Critical Branches",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Build Partner & Regulatory Dossier": {
+      "main": [
+        [
+          {
+            "node": "Merge Critical Branches",
+            "type": "main",
+            "index": 3
           }
         ]
       ]

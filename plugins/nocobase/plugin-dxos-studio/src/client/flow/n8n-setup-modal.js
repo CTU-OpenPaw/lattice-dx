@@ -12,10 +12,10 @@ const N8N_WEBHOOK_PRESETS = Object.freeze([
   {
     key: 'enterprise-compliance-orchestrator',
     connectorKey: 'n8n-enterprise-orchestrator',
-    name: 'Enterprise Multi-System Compliance & PKI Orchestrator (13 nodes)',
+    name: 'Enterprise Multi-System Compliance & PKI Orchestrator (17 nodes · 4 hệ thống)',
     path: '/webhook/latticedx/v1/enterprise-compliance-orchestrator',
     blueprintKey: 'auto_enterprise_n8n_compliance',
-    description: 'HMAC-SHA256 + chấm điểm rủi ro đa yếu tố + Switch 3 nhánh + ký sổ cái PKI song song với Partner Dossier + Merge.',
+    description: 'HMAC-SHA256 + Switch 3 nhánh + song song 4 hệ thống: NocoBase PKI, FIWARE Orion-LD, Node-RED/MQTT Interlock & Partner Dossier.',
   },
   {
     key: 'alert-orchestrator',
