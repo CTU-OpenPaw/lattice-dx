@@ -484,9 +484,10 @@ test('para-scope rewrites self owner.userId filters, rejects foreign/other dotte
     assert.equal(stateJson.latticeRlsOrg, 'org-a');
     assert.equal('latticeRlsTransaction' in stateJson, false);
     assert.equal(rlsUpdateCtx.state.latticeRlsOrg, 'org-a');
-    assert.equal(sqlCalls.length, 1);
-    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
-    assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });
+    assert.equal(sqlCalls.length, 2);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(sqlCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(sqlCalls[1].opts.replacements, { orgId: 'org-a' });
     assert.ok(repoTxCalls.length >= 2 && repoTxCalls.every((c) => c.transaction === fakeTx));
 
     sqlCalls.length = 0;
@@ -497,7 +498,9 @@ test('para-scope rewrites self owner.userId filters, rejects foreign/other dotte
     };
     await mw(rlsChartCtx, async () => { chartSeenTx = rlsChartCtx.state.latticeRlsTransaction; });
     assert.equal(chartSeenTx, fakeTx);
-    assert.equal(sqlCalls.length, 1);
+    assert.equal(sqlCalls.length, 2);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(sqlCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
 
     // 3. Standalone fallback when pg-rls module is absent
     const paraScopePath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/para-scope.js'));
@@ -689,8 +692,9 @@ test('DxosParaPlugin registers dxosParaScope before latticeNativeScope and compo
     assert.equal(handlerRan, true);
     assert.equal(seenTx, fakeTx);
     assert.equal(okCtx.state.latticeRlsOrg, 'org-a');
-    assert.equal(sqlCalls.length, 1);
-    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.equal(sqlCalls.length, 2);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(sqlCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
     assert.deepEqual(okCtx.action.params.values.filter, {
       $and: [
         { organizationId: 'org-a' },
@@ -750,5 +754,319 @@ test('DxosParaPlugin registers dxosParaScope before latticeNativeScope and compo
     Module._load = origLoad;
     delete require.cache[paraIndexPath];
     delete require.cache[foundationIndexPath];
+  }
+});
+
+test('Waves 1-4 remediation: plugin-dxos-para enforces PG FORCE RLS on resolveParaActor, summary, hybridSearch, reindex, indexHealth, and afterCommit hooks while keeping fetch outside TX', async () => {
+  const Module = require('node:module');
+  const paraIndexPath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+  const origLoad = Module._load;
+  class MockPlugin {
+    constructor(app, options = {}) {
+      this.app = app;
+      this.db = app?.db;
+      this.options = options;
+    }
+  }
+  Module._load = function mockedNocobase(request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin };
+    return origLoad.call(this, request, parent, isMain);
+  };
+
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const { resolveParaActor } = require(path.join(PLUGIN_ROOT, 'src/server/para-scope.js'));
+    const { createParaActions, syncDocumentChunks } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+    const DxosParaPlugin = require(paraIndexPath);
+
+    const openTxs = new Set();
+    const txStates = new Map();
+    const txAbortState = new Map();
+    let txSeq = 0;
+
+    const employees = [
+      { id: 11, userId: 101, organizationId: 'org-a', departmentId: 3, active: true },
+      { id: 22, userId: 202, organizationId: 'org-b', departmentId: 9, active: true },
+    ];
+    const departments = [
+      { id: 3, organizationId: 'org-a', active: true },
+    ];
+    const docs = [
+      {
+        id: 50,
+        code: 'SOP-COLD-50',
+        title: 'Quy trình kho lạnh 2-8C',
+        organizationId: 'org-a',
+        ownerId: 11,
+        paraSpace: 'resources',
+        summary: 'Hướng dẫn xử lý cảnh báo nhiệt độ kho lạnh',
+        contentMarkdown: 'Kiểm tra máy phát điện và ghi nhận nhật ký kho lạnh.',
+        tags: 'coldchain',
+        active: true,
+      },
+      {
+        id: 60,
+        code: 'SOP-B-60',
+        title: 'Tài liệu Org B',
+        organizationId: 'org-b',
+        ownerId: 22,
+        paraSpace: 'projects',
+        summary: 'Mật Org B',
+        active: true,
+      },
+    ];
+    const chunks = [];
+    let nextChunkId = 1;
+    const pgvectorUpdates = [];
+    const fetchObservations = [];
+
+    const assertRls = (table, tx, { requireBypass = false, targetOrg = null } = {}) => {
+      if (!tx || !openTxs.has(tx)) {
+        throw new Error(`FORCE RLS violation on ${table}: query executed outside active transaction`);
+      }
+      if (txAbortState.get(tx)) {
+        throw Object.assign(new Error(`25P02 aborted transaction on ${table}`), { code: '25P02' });
+      }
+      const st = txStates.get(tx) || {};
+      if (st.bypass === 'on') return;
+      if (!requireBypass && targetOrg && st.org === targetOrg) return;
+      throw new Error(`FORCE RLS violation on ${table}: org=${st.org || 'none'} bypass=${st.bypass || 'off'} expectedOrg=${targetOrg || 'bypass'}`);
+    };
+
+    const wrapRow = (row) => (row ? {
+      ...row,
+      get: (k) => row[k],
+      toJSON: () => ({ ...row }),
+      update: async (patch, opts = {}) => {
+        assertRls('latticeParaDocuments', opts?.transaction, { targetOrg: row.organizationId });
+        Object.assign(row, patch);
+        return wrapRow(row);
+      },
+    } : null);
+
+    const dbListeners = new Map();
+    const db = {
+      on(ev, fn) {
+        if (!dbListeners.has(ev)) dbListeners.set(ev, []);
+        dbListeners.get(ev).push(fn);
+      },
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (cb) => {
+          const tx = { id: `tx-para-force-${++txSeq}` };
+          openTxs.add(tx);
+          txStates.set(tx, { org: '', bypass: '', savepoints: [] });
+          txAbortState.set(tx, false);
+          try {
+            return await cb(tx);
+          } finally {
+            openTxs.delete(tx);
+            txStates.delete(tx);
+            txAbortState.delete(tx);
+          }
+        },
+        query: async (sql, opts = {}) => {
+          const text = String(sql);
+          const tx = opts?.transaction;
+          if (text.includes("set_config('app.current_org'") && tx && txStates.has(tx)) {
+            txStates.get(tx).org = opts?.replacements?.orgId || '';
+            return [[]];
+          }
+          if (text.includes("set_config('app.rls_bypass', 'on'") && tx && txStates.has(tx)) {
+            txStates.get(tx).bypass = 'on';
+            return [[]];
+          }
+          if (text.startsWith('SAVEPOINT ') && tx && txStates.has(tx)) {
+            txStates.get(tx).savepoints.push(txAbortState.get(tx));
+            return [[]];
+          }
+          if (text.startsWith('ROLLBACK TO SAVEPOINT ') && tx && txStates.has(tx)) {
+            const prevAbort = txStates.get(tx).savepoints.pop();
+            txAbortState.set(tx, Boolean(prevAbort));
+            return [[]];
+          }
+          if (text.startsWith('RELEASE SAVEPOINT ') && tx && txStates.has(tx)) {
+            txStates.get(tx).savepoints.pop();
+            return [[]];
+          }
+          if (text.includes('latticeParaChunks')) {
+            assertRls('latticeParaChunks', tx, { targetOrg: opts?.replacements?.org || null });
+            if (text.includes('<=>')) {
+              if (tx) txAbortState.set(tx, true);
+              throw Object.assign(new Error('column "embedding" does not exist'), { code: '42703' });
+            }
+            if (text.startsWith('UPDATE "latticeParaChunks"')) {
+              pgvectorUpdates.push({ id: opts?.replacements?.id, org: opts?.replacements?.org, tx });
+              return [[]];
+            }
+          }
+          if (text.includes('latticeParaDocuments')) {
+            assertRls('latticeParaDocuments', tx, { targetOrg: opts?.replacements?.org || null });
+          }
+          if (text.includes('pg_extension')) {
+            if (!tx || !openTxs.has(tx)) throw new Error('pg_extension probe expected inside RLS TX');
+            return [[{ present: 1 }]];
+          }
+          return [[]];
+        },
+      },
+      getRepository(name) {
+        if (name === 'latticeEmployees') {
+          return {
+            find: async ({ filter, transaction } = {}) => {
+              assertRls('latticeEmployees', transaction, { requireBypass: true });
+              const list = filter?.userId != null
+                ? employees.filter((e) => Number(e.userId) === Number(filter.userId))
+                : employees;
+              return list.map(wrapRow);
+            },
+          };
+        }
+        if (name === 'latticeDepartments') {
+          return {
+            find: async ({ transaction } = {}) => {
+              assertRls('latticeDepartments', transaction, { requireBypass: true });
+              return departments.map(wrapRow);
+            },
+          };
+        }
+        if (name === 'latticeParaDocuments') {
+          return {
+            find: async ({ filter = {}, transaction } = {}) => {
+              assertRls('latticeParaDocuments', transaction, { targetOrg: filter.organizationId || null });
+              return docs
+                .filter((d) => (!filter.organizationId || d.organizationId === filter.organizationId) && (filter.active === undefined || d.active === filter.active))
+                .map(wrapRow);
+            },
+            findOne: async ({ filter = {}, transaction } = {}) => {
+              assertRls('latticeParaDocuments', transaction, { targetOrg: filter.organizationId || null });
+              const hit = docs.find((d) => (filter.id == null || Number(d.id) === Number(filter.id)) && (!filter.organizationId || d.organizationId === filter.organizationId)) || null;
+              return wrapRow(hit);
+            },
+            count: async ({ filter = {}, transaction } = {}) => {
+              assertRls('latticeParaDocuments', transaction, { targetOrg: filter.organizationId || null });
+              return docs.filter((d) => (!filter.organizationId || d.organizationId === filter.organizationId) && (!filter.paraSpace || d.paraSpace === filter.paraSpace) && (filter.active === undefined || d.active === filter.active)).length;
+            },
+          };
+        }
+        if (name === 'latticeParaChunks') {
+          return {
+            find: async ({ filter = {}, transaction } = {}) => {
+              assertRls('latticeParaChunks', transaction, { targetOrg: filter.organizationId || null });
+              return chunks
+                .filter((c) => (!filter.organizationId || c.organizationId === filter.organizationId)
+                  && (filter.documentId == null || Number(c.documentId) === Number(filter.documentId))
+                  && (!filter.sourceType || c.sourceType === filter.sourceType)
+                  && (!filter.paraSpace || c.paraSpace === filter.paraSpace)
+                  && (filter.active === undefined || c.active === filter.active))
+                .map(wrapRow);
+            },
+            create: async ({ values, transaction }) => {
+              assertRls('latticeParaChunks', transaction, { targetOrg: values.organizationId });
+              const row = { id: nextChunkId++, ...values };
+              chunks.push(row);
+              return wrapRow(row);
+            },
+            destroy: async ({ filter = {}, transaction } = {}) => {
+              assertRls('latticeParaChunks', transaction, { targetOrg: filter.organizationId || null });
+              let removed = 0;
+              for (let i = chunks.length - 1; i >= 0; i -= 1) {
+                const c = chunks[i];
+                if ((!filter.organizationId || c.organizationId === filter.organizationId) && (filter.documentId == null || Number(c.documentId) === Number(filter.documentId))) {
+                  chunks.splice(i, 1);
+                  removed += 1;
+                }
+              }
+              return removed;
+            },
+          };
+        }
+        if (name === 'rolesUsers') {
+          return { find: async ({ filter }) => [{ userId: filter.userId, roleName: filter.userId === 1 ? 'root' : 'ldx_manager' }] };
+        }
+        return null;
+      },
+    };
+
+    // 1. resolveParaActor uses withSystemRlsBypass
+    const actor = await resolveParaActor(db, { id: 101 });
+    assert.equal(actor.organizationId, 'org-a');
+    assert.equal(actor.employeeId, 11);
+
+    const mockFetch = async (url, init) => {
+      const body = JSON.parse(String(init?.body || '{}'));
+      fetchObservations.push({ url, openTxCountDuringHttp: openTxs.size, inputCount: Array.isArray(body.input) ? body.input.length : 1 });
+      assert.equal(openTxs.size, 0, 'Embedding HTTP fetch must execute strictly outside any DB transaction');
+      const inputs = Array.isArray(body.input) ? body.input : [body.input];
+      return {
+        ok: true,
+        json: async () => ({
+          model: 'text-embedding-3-small',
+          data: inputs.map((_, index) => ({ index, embedding: new Array(1536).fill(0.02) })),
+        }),
+      };
+    };
+
+    const actions = createParaActions(db, {
+      env: { DXOS_EMBEDDING_URL: 'https://embed.internal.test/v1/embeddings' },
+      fetchImpl: mockFetch,
+    });
+
+    // 2. summary (employee + root)
+    const sumUserCtx = { method: 'GET', state: { currentRole: 'ldx_manager', currentUser: { id: 101 } }, action: { params: {} }, throw(s, m) { throw Object.assign(new Error(m), { status: s }); } };
+    await actions.summary(sumUserCtx, async () => {});
+    assert.equal(sumUserCtx.body.total, 1);
+
+    const sumRootCtx = { method: 'GET', state: { currentRole: 'root', currentUser: { id: 1 } }, action: { params: {} }, throw(s, m) { throw Object.assign(new Error(m), { status: s }); } };
+    await actions.summary(sumRootCtx, async () => {});
+    assert.equal(sumRootCtx.body.total, 2);
+
+    // 3. reindex & syncDocumentChunks (fetch outside TX, chunk destroy/create + pgvector UPDATE inside tenant RLS TX)
+    const reindexCtx = { method: 'POST', state: { currentRole: 'ldx_manager', currentUser: { id: 101 } }, action: { params: { documentId: 50 } }, throw(s, m) { throw Object.assign(new Error(m), { status: s }); } };
+    await actions.reindex(reindexCtx, async () => {});
+    assert.equal(reindexCtx.body.documentsProcessed, 1);
+    assert.ok(reindexCtx.body.chunksIndexed >= 1);
+    assert.ok(pgvectorUpdates.length >= 1 && pgvectorUpdates.every((u) => u.org === 'org-a' && u.tx));
+
+    // 4. hybridSearch (neural fetch outside TX; failed pgvector <=> isolated in SAVEPOINT without 25P02 poisoning)
+    const searchCtx = { method: 'GET', state: { currentRole: 'ldx_manager', currentUser: { id: 101 } }, action: { params: { query: 'nhiệt độ kho lạnh' } }, throw(s, m) { throw Object.assign(new Error(m), { status: s }); } };
+    await actions.hybridSearch(searchCtx, async () => {});
+    assert.ok(searchCtx.body.items.length >= 1);
+    assert.ok(searchCtx.body.items.every((it) => it.organizationId === 'org-a'));
+
+    // 5. indexHealth under FORCE RLS
+    const healthCtx = { method: 'GET', state: { currentRole: 'ldx_manager', currentUser: { id: 101 } }, action: { params: {} }, throw(s, m) { throw Object.assign(new Error(m), { status: s }); } };
+    await actions.indexHealth(healthCtx, async () => {});
+    assert.equal(healthCtx.body.documentsCount, 1);
+    assert.ok(healthCtx.body.chunksCount >= 1);
+    assert.equal(healthCtx.body.pgvectorAvailable, true);
+
+    // 6. afterCommit hooks registered by DxosParaPlugin work under FORCE RLS
+    const app = {
+      db,
+      resourceManager: { use() {}, define() {} },
+      acl: { allow() {} },
+      logger: { error() {}, warn() {}, info() {} },
+    };
+    await new DxosParaPlugin(app).load();
+    const afterCreateFn = dbListeners.get('latticeParaDocuments.afterCreate')[0];
+    const afterDestroyFn = dbListeners.get('latticeParaDocuments.afterDestroy')[0];
+    const afterCommitQueue = [];
+    const hookTx = { afterCommit: (fn) => afterCommitQueue.push(fn) };
+    afterCreateFn(wrapRow(docs[0]), { transaction: hookTx });
+    for (const fn of afterCommitQueue.splice(0)) await fn();
+    assert.ok(chunks.some((c) => c.documentId === 50 && c.organizationId === 'org-a'));
+
+    afterDestroyFn(wrapRow(docs[0]), { transaction: hookTx });
+    for (const fn of afterCommitQueue.splice(0)) await fn();
+    assert.equal(chunks.filter((c) => c.documentId === 50).length, 0);
+
+    assert.ok(fetchObservations.length >= 2 && fetchObservations.every((f) => f.openTxCountDuringHttp === 0));
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+    Module._load = origLoad;
+    delete require.cache[paraIndexPath];
   }
 });

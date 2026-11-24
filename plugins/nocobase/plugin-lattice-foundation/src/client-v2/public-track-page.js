@@ -92,7 +92,6 @@ function projectZeroPiiPayload(raw) {
       seq: raw.ledgerVerification.seq ?? null,
       keyId: String(raw.ledgerVerification.keyId || ''),
       verifiedFormat: Boolean(raw.ledgerVerification.verifiedFormat),
-      ...(raw.ledgerVerification.signatureBase64 ? { signatureBase64: String(raw.ledgerVerification.signatureBase64) } : {}),
     }
     : null;
   return {
@@ -200,6 +199,10 @@ function createPublicTrackPage(client, React, app) {
     }, [effectiveCode, effectiveToken]);
 
     async function handleVerifySignature() {
+      if (!trackData?.trackingCode || !effectiveToken) {
+        setVerifyError('Thiếu mã vận đơn hoặc mã xác thực để kiểm định chữ ký.');
+        return;
+      }
       if (!trackData?.ledgerVerification?.keyId) {
         setVerifyError('Chứng từ chưa có thông tin khóa Ed25519 để kiểm định.');
         return;
@@ -208,31 +211,25 @@ function createPublicTrackPage(client, React, app) {
       setVerifyError('');
       setVerifyResult(null);
       try {
-        const res = await callEndpoint('dxosLedger:verifySignature', {
+        const res = await callEndpoint('dxosWms:verifyTrackSignature', {
           method: 'POST',
           data: {
-            keyId: trackData.ledgerVerification.keyId,
-            signatureBase64: trackData.ledgerVerification.signatureBase64 || 'verify-public-track',
-            payload: {
-              trackingCode: trackData.trackingCode,
-              status: trackData.status,
-              deliveredAt: trackData.deliveredAt,
-              seq: trackData.ledgerVerification.seq,
-            },
+            code: trackData.trackingCode,
+            token: effectiveToken,
           },
         });
+        const verified = Boolean(res?.verified);
         setVerifyResult({
-          valid: Boolean(res?.valid),
-          keyId: String(res?.keyId || trackData.ledgerVerification.keyId),
-          fingerprintSha256: String(res?.fingerprintSha256 || ''),
+          verified,
+          ledgerSeq: res?.ledgerSeq ?? res?.seq ?? trackData.ledgerVerification.seq ?? null,
+          entryHash: String(res?.entryHash || ''),
+          keyId: String(res?.keyId || trackData.ledgerVerification.keyId || ''),
+          publicKeyFingerprint: String(res?.publicKeyFingerprint || ''),
+          reason: res?.reason ? String(res.reason) : '',
         });
       } catch (err) {
         const info = extractApiError(err, 'Không thể kiểm định chữ ký Ed25519.');
-        if (info.status === 401 || info.status === 403) {
-          setVerifyError('Kiểm định trực tuyến yêu cầu phiên đăng nhập nội bộ; định dạng chữ ký Ed25519 trên vận đơn đã được ghi nhận.');
-        } else {
-          setVerifyError(info.message);
-        }
+        setVerifyError(info.message);
       } finally {
         setVerifying(false);
       }
@@ -325,11 +322,22 @@ function createPublicTrackPage(client, React, app) {
                 marginTop: 12,
                 padding: 12,
                 borderRadius: 8,
-                background: verifyResult.valid ? '#dcfce7' : '#fee2e2',
-                color: verifyResult.valid ? '#166534' : '#991b1b',
+                background: verifyResult.verified ? '#dcfce7' : '#fee2e2',
+                color: verifyResult.verified ? '#166534' : '#991b1b',
               },
             },
-            `${verifyResult.valid ? 'Chữ ký Ed25519 hợp lệ' : 'Chữ ký không khớp'} · Key: ${verifyResult.keyId}${verifyResult.fingerprintSha256 ? ` · SHA-256: ${verifyResult.fingerprintSha256}` : ''}`,
+            h('div', { style: { fontWeight: 600 } },
+              `${verifyResult.verified ? 'Chữ ký Ed25519 hợp lệ' : 'Chữ ký Ed25519 không hợp lệ'}${verifyResult.ledgerSeq != null ? ` · Seq #${verifyResult.ledgerSeq}` : ''} · Key: ${verifyResult.keyId || '—'}`,
+            ),
+            verifyResult.publicKeyFingerprint
+              ? h('div', { style: { fontSize: 12, marginTop: 4, fontFamily: 'monospace', wordBreak: 'break-all' } }, `Fingerprint: ${verifyResult.publicKeyFingerprint}`)
+              : null,
+            verifyResult.entryHash
+              ? h('div', { style: { fontSize: 12, marginTop: 2, fontFamily: 'monospace', wordBreak: 'break-all' } }, `Entry Hash: ${verifyResult.entryHash}`)
+              : null,
+            verifyResult.reason
+              ? h('div', { style: { fontSize: 12, marginTop: 4 } }, `Lý do: ${verifyResult.reason}`)
+              : null,
             )
             : null,
           verifyError

@@ -146,7 +146,7 @@ test('public-track-page parses /v/track/:code & /track/:code safely, rejects tra
   );
 });
 
-test('PublicTrackPage renders zero-PII shipment status via dxosWms:publicTrack and executes live dxosLedger:verifySignature', async () => {
+test('PublicTrackPage renders zero-PII shipment status via dxosWms:publicTrack and executes live dxosWms:verifyTrackSignature', async () => {
   const { createPublicTrackPage } = require('../src/client-v2/public-track-page');
 
   // Factory must not invoke React hooks or createElement during creation
@@ -154,6 +154,7 @@ test('PublicTrackPage renders zero-PII shipment status via dxosWms:publicTrack a
 
   const fakeReact = createFakeReact();
   const requests = [];
+  let verifyResponseMode = 'valid';
   const mockApi = {
     async request(req) {
       requests.push(req);
@@ -174,13 +175,35 @@ test('PublicTrackPage renders zero-PII shipment status via dxosWms:publicTrack a
           },
         };
       }
-      if (req.url === 'dxosLedger:verifySignature') {
+      if (req.url === 'dxosWms:verifyTrackSignature') {
+        if (verifyResponseMode === 'invalid') {
+          return {
+            data: {
+              data: {
+                verified: false,
+                ledgerSeq: 42,
+                entryHash: 'hash_tampered_0001',
+                keyId: 'ed25519-org-a-v1',
+                publicKeyFingerprint: 'fp_1234567890abcdef',
+                reason: 'LEDGER_SIGNATURE_MISMATCH',
+              },
+            },
+          };
+        }
+        if (verifyResponseMode === 'unauthorized') {
+          throw Object.assign(new Error('Unauthorized'), {
+            response: { status: 401, data: { errors: [{ message: 'Mã theo dõi không hợp lệ.' }] } },
+          });
+        }
         return {
           data: {
             data: {
-              valid: true,
+              verified: true,
+              seq: 42,
+              entryHash: 'sha256_entry_deadbeef0042',
               keyId: 'ed25519-org-a-v1',
-              fingerprintSha256: 'fp_1234567890abcdef',
+              publicKeyFingerprint: 'fp_1234567890abcdef',
+              reason: '',
             },
           },
         };
@@ -218,7 +241,7 @@ test('PublicTrackPage renders zero-PII shipment status via dxosWms:publicTrack a
     assert.equal(JSON.stringify(tree).includes(forbidden), false);
   }
 
-  // Click live Ed25519 verifySignature button
+  // Click live Ed25519 verification button -> must call public dxosWms:verifyTrackSignature (never dxosLedger:verifySignature)
   const verifyBtn = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-verify-btn');
   assert.ok(verifyBtn);
   await verifyBtn.props.onClick();
@@ -227,9 +250,47 @@ test('PublicTrackPage renders zero-PII shipment status via dxosWms:publicTrack a
     trackingCode: 'LDX-TRK-88',
     token: 'ldx_trk_valid_88',
   });
-  assert.ok(requests.some((r) => r.url === 'dxosLedger:verifySignature'));
+  const verifyReq = requests.find((r) => r.url === 'dxosWms:verifyTrackSignature');
+  assert.ok(verifyReq);
+  assert.equal(verifyReq.method, 'POST');
+  assert.deepEqual(verifyReq.data, { code: 'LDX-TRK-88', token: 'ldx_trk_valid_88' });
+  assert.equal(requests.some((r) => r.url === 'dxosLedger:verifySignature'), false);
+  assert.equal(JSON.stringify(requests).includes('verify-public-track'), false);
+
   const verifyRes = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-verify-result');
-  assert.ok(verifyRes && collectText(verifyRes).includes('ed25519-org-a-v1'));
+  const verifyResText = collectText(verifyRes);
+  assert.ok(verifyResText.includes('Chữ ký Ed25519 hợp lệ'));
+  assert.ok(verifyResText.includes('Seq #42'));
+  assert.ok(verifyResText.includes('ed25519-org-a-v1'));
+  assert.ok(verifyResText.includes('fp_1234567890abcdef'));
+  assert.ok(verifyResText.includes('sha256_entry_deadbeef0042'));
+
+  // Tampered / failed verification displays verified=false + reason
+  verifyResponseMode = 'invalid';
+  const verifyBtn2 = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-verify-btn');
+  await verifyBtn2.props.onClick();
+  tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    trackingCode: 'LDX-TRK-88',
+    token: 'ldx_trk_valid_88',
+  });
+  const invalidRes = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-verify-result');
+  const invalidText = collectText(invalidRes);
+  assert.ok(invalidText.includes('Chữ ký Ed25519 không hợp lệ'));
+  assert.ok(invalidText.includes('LEDGER_SIGNATURE_MISMATCH'));
+  assert.ok(invalidText.includes('hash_tampered_0001'));
+
+  // Unauthorized token error surfaces clean message
+  verifyResponseMode = 'unauthorized';
+  const verifyBtn3 = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-verify-btn');
+  await verifyBtn3.props.onClick();
+  tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    trackingCode: 'LDX-TRK-88',
+    token: 'ldx_trk_valid_88',
+  });
+  const errBox = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-verify-error');
+  assert.ok(errBox && collectText(errBox).includes('Mã theo dõi không hợp lệ.'));
 });
 
 test('dist/client-v2/index.js & dist/client/index.js mount /mobile, /mobile/*, and /track/:code cleanly without route collisions or extra externals', async () => {

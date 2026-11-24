@@ -301,7 +301,11 @@ async function resolveTenantActor(db, ctx, {
       organizationId = rawOrg;
     } else {
       const empRepo = db?.getRepository?.('latticeEmployees');
-      const rows = empRepo?.find ? (await empRepo.find({ filter: { userId: String(userId) }, limit: 2 })) || [] : [];
+      const rows = empRepo?.find
+        ? (await runWithSystemRlsBypass(db, (transaction) => (
+          empRepo.find({ filter: { userId: String(userId) }, limit: 2, ...(transaction ? { transaction } : {}) })
+        ), foundation)) || []
+        : [];
       if (rows.length === 1 && val(rows[0], 'active') === true) {
         organizationId = val(rows[0], 'organizationId');
       }
@@ -316,7 +320,7 @@ async function resolveTenantActor(db, ctx, {
     };
   }
 
-  const actor = await resolveServiceActor(db, ctx.state.currentUser);
+  const actor = await runWithSystemRlsBypass(db, (transaction) => resolveServiceActor(db, ctx.state.currentUser, { transaction }), foundation);
   if (requestedOrgId != null && String(requestedOrgId).trim() !== '' && String(requestedOrgId).trim() !== actor.organizationId) {
     throw fail('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không được truy cập dữ liệu của tổ chức khác.');
   }
@@ -385,6 +389,18 @@ async function runWithOptionalRls(db, organizationId, fn, foundation = defaultFo
       return fn(active.transaction);
     }
     return pgRls.withTenantRlsContext(db, organizationId, (transaction) => fn(transaction));
+  }
+  return fn(null);
+}
+
+async function runWithSystemRlsBypass(db, fn, foundation = defaultFoundation) {
+  const pgRls = foundation?.pgRls;
+  if (
+    typeof pgRls?.canUsePgRlsSession === 'function'
+    && pgRls.canUsePgRlsSession(db)
+    && typeof pgRls.withSystemRlsBypass === 'function'
+  ) {
+    return pgRls.withSystemRlsBypass(db, (transaction) => fn(transaction));
   }
   return fn(null);
 }
@@ -499,6 +515,7 @@ module.exports = {
   resolveTenantActor,
   appendAuditLedger,
   runWithOptionalRls,
+  runWithSystemRlsBypass,
   runInTx,
   saveRow,
   clampPageLimit,

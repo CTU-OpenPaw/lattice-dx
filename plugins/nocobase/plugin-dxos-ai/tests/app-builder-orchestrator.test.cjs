@@ -442,3 +442,150 @@ test('dxos_provision_role_workspace exposes build_enterprise_app and verify_app 
   });
   assert.equal(verified.ok, true);
 });
+
+
+test('RLS Remediation (Findings 2b & 4): app-builder-orchestrator wraps latticeUiSnapshots (with organizationId), latticeAiProfiles, latticeAiAuditLogs, and resolveN8nClientForVerify in PG RLS context', async () => {
+  const { orchestrateEnterpriseAppBuild } = require('../src/server/app-builder-orchestrator');
+  const { db, ctx, store } = makeOrchestratorHarness({ dialect: 'postgres', pgRlsActive: true });
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+
+  // Seed n8n connector so resolveN8nClientForVerify exercises latticeConnectors under PG RLS
+  const vault = require('../../plugin-lattice-foundation/src/server/connector-vault');
+  const vaultEnv = { NODE_ENV: 'test', DX_VAULT_MASTER_KEY: 'orch-rls-vault-master-key-32bytes', DX_ALLOW_INTERNAL_CONNECTORS: 'true' };
+  store.latticeConnectors.push({
+    id: 50,
+    organizationId: 'native-ui-lab',
+    connectorKey: 'n8n-orch',
+    connectorType: 'n8n',
+    appType: 'n8n_api',
+    baseUrl: 'http://n8n:5678',
+    authType: 'api_key',
+    encryptedSecretsJson: vault.encryptVaultSecrets({ apiKey: 'orch-n8n-key' }, vaultEnv),
+    active: true,
+  });
+
+  // Make flowSurfaces omit GridModel so capturePageSnapshot returns null -> triggers fallback latticeUiSnapshots.create path!
+  const origGetResource = ctx.app.resourceManager.getResource;
+  ctx.app.resourceManager.getResource = (resName) => {
+    if (resName === 'flowSurfaces') {
+      const origRes = origGetResource(resName);
+      return {
+        actions: {
+          get: () => ({
+            handler: async (subCtx) => {
+              await origRes.actions.get().handler(subCtx);
+              // Keep grid for repair/later check only after initial pre-snap check? No, leave grid intact after portal step;
+              // Initial pre-build snapshot runs BEFORE ensurePortalAndBlocks, when grid does not exist yet!
+            },
+          }),
+        },
+      };
+    }
+    return origGetResource(resName);
+  };
+
+  const txOrgMap = new WeakMap();
+  let activeTxCount = 0;
+  let txSeq = 0;
+  const origQuery = db.sequelize.query.bind(db.sequelize);
+  db.sequelize.transaction = async (fn) => {
+    const tx = { id: `tx-orch-rls-${++txSeq}` };
+    txOrgMap.set(tx, { bypass: false, org: '' });
+    activeTxCount += 1;
+    try {
+      return await fn(tx);
+    } finally {
+      activeTxCount -= 1;
+    }
+  };
+  db.sequelize.query = async (sql, opts = {}) => {
+    const text = String(sql);
+    const st = opts.transaction ? txOrgMap.get(opts.transaction) : null;
+    if (st && text.includes("set_config('app.rls_bypass', 'on'")) st.bypass = true;
+    if (st && text.includes("set_config('app.current_org'")) st.org = opts?.replacements?.orgId || '';
+    return origQuery(sql, opts);
+  };
+
+  const rlsEnforced = new Set(['latticeAiProfiles', 'latticeAiAuditLogs', 'latticeUiSnapshots', 'latticeConnectors', 'latticeDecisionTables', 'latticeAutomationRules']);
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!rlsEnforced.has(name) || !repo) return repo;
+    const assertTx = (transaction, rowOrg) => {
+      if (process.env.DX_PG_RLS_SESSION !== 'true') return true;
+      const st = transaction ? txOrgMap.get(transaction) : null;
+      if (!st) return false;
+      if (st.bypass) return true;
+      return Boolean(st.org && (!rowOrg || rowOrg === st.org));
+    };
+    return {
+      ...repo,
+      find: async (args = {}) => {
+        if (!assertTx(args.transaction)) return [];
+        const rows = await repo.find(args);
+        const st = args.transaction ? txOrgMap.get(args.transaction) : null;
+        return st?.bypass ? rows : rows.filter((r) => r.organizationId === st?.org);
+      },
+      findOne: async (args = {}) => {
+        if (!assertTx(args.transaction)) return null;
+        const row = await repo.findOne(args);
+        const st = args.transaction ? txOrgMap.get(args.transaction) : null;
+        return row && (st?.bypass || row.organizationId === st?.org) ? row : null;
+      },
+      create: async (args = {}) => {
+        if (!assertTx(args.transaction, args.values?.organizationId)) {
+          throw new Error(`RLS VIOLATION on ${name}.create`);
+        }
+        return repo.create(args);
+      },
+    };
+  };
+
+  let fetchInsideTx = false;
+  const mockFetch = async (url, init = {}) => {
+    if (activeTxCount > 0) fetchInsideTx = true;
+    const pathname = new URL(url).pathname;
+    if (pathname === '/api/v1/workflows' && init.method === 'POST') {
+      return { ok: true, status: 201, text: async () => JSON.stringify({ id: 'wf-orch-rls-1', active: false }) };
+    }
+    if (pathname === '/api/v1/workflows/wf-orch-rls-1/activate') {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'wf-orch-rls-1', active: true }) };
+    }
+    if (pathname === '/api/v1/workflows/wf-orch-rls-1') {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'wf-orch-rls-1', active: true }) };
+    }
+    return { ok: false, status: 404, text: async () => '{}' };
+  };
+
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_PG_RLS_SESSION = 'true';
+  process.env.DX_VAULT_MASTER_KEY = vaultEnv.DX_VAULT_MASTER_KEY;
+  try {
+    const res = await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+      portalSlug: 'cold-assets',
+      pageTitle: 'Trang Kiểm Thử RLS',
+      roleTitle: 'Kỹ sư RLS',
+      collectionName: 'latticeCustomRlsCheck',
+      fields: [{ name: 'sensorTag', type: 'string', title: 'Mã cảm biến' }],
+      n8nWorkflow: { name: 'Orch RLS WF', nodes: [], connections: {} },
+    }, {
+      env: vaultEnv,
+      fetchImpl: mockFetch,
+    });
+
+    assert.equal(res.built, true);
+    assert.equal(res.ok, true);
+    assert.equal(fetchInsideTx, false, 'Outbound n8n fetch must stay outside DB transactions');
+    assert.ok(store.latticeUiSnapshots.length >= 1);
+    assert.equal(store.latticeUiSnapshots[0].organizationId, 'native-ui-lab');
+    assert.ok(store.latticeAiProfiles.some((p) => p.organizationId === 'native-ui-lab'));
+    assert.ok(store.latticeAiAuditLogs.some((l) => l.organizationId === 'native-ui-lab' && l.channel === 'app-builder'));
+    assert.ok(db.sqlCalls.some((c) => c.sql.includes("set_config('app.current_org'") && c.opts?.replacements?.orgId === 'native-ui-lab'));
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});

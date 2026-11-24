@@ -40,6 +40,11 @@ function loadPgRls() {
 
 const pgRls = loadPgRls();
 const withTenantRlsContext = pgRls?.withTenantRlsContext || null;
+const withSystemRlsBypass = pgRls?.withSystemRlsBypass || null;
+const canUsePgRlsSession = pgRls?.canUsePgRlsSession || null;
+const getActiveRlsContext = pgRls?.getActiveRlsContext || null;
+const setTransactionRlsBypass = pgRls?.setTransactionRlsBypass || null;
+const runInRlsSavepoint = pgRls?.runInRlsSavepoint || null;
 const installRlsTransactionBridge = pgRls?.installRlsTransactionBridge || null;
 const setContextRlsTransaction = pgRls?.setContextRlsTransaction || ((ctx, transaction) => {
   if (!ctx || !transaction) return;
@@ -51,6 +56,43 @@ const setContextRlsTransaction = pgRls?.setContextRlsTransaction || ((ctx, trans
     enumerable: false,
   });
 });
+
+function shouldUseParaPgRls(db) {
+  if (typeof canUsePgRlsSession === 'function') {
+    return canUsePgRlsSession(db);
+  }
+  return process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function';
+}
+
+async function runParaRlsOp(db, organizationId, fn) {
+  if (typeof fn !== 'function') {
+    throw new TypeError('runParaRlsOp requires a callback function.');
+  }
+  if (!shouldUseParaPgRls(db)) {
+    return fn(undefined);
+  }
+  const active = typeof getActiveRlsContext === 'function' ? getActiveRlsContext() : null;
+  if (active?.transaction && active.sequelize === db?.sequelize) {
+    if (active.systemRlsBypass === true || (organizationId && active.organizationId === organizationId)) {
+      return fn(active.transaction);
+    }
+  }
+  if (organizationId && typeof withTenantRlsContext === 'function') {
+    return withTenantRlsContext(db, String(organizationId), (transaction) => fn(transaction));
+  }
+  if (typeof withSystemRlsBypass === 'function') {
+    return withSystemRlsBypass(db, (transaction) => fn(transaction));
+  }
+  return fn(undefined);
+}
+
+async function runParaSavepoint(db, fn) {
+  if (typeof runInRlsSavepoint === 'function') {
+    return runInRlsSavepoint(db, fn);
+  }
+  const active = typeof getActiveRlsContext === 'function' ? getActiveRlsContext() : null;
+  return fn(active?.transaction || null);
+}
 
 function failure(code, status = 403, message = code) {
   return Object.assign(new Error(message), { code, status });
@@ -183,7 +225,35 @@ async function resolveParaActor(db, user, options = {}) {
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_LOGIN_REQUIRED', 401);
   const empRepo = db?.getRepository?.('latticeEmployees');
   if (!empRepo || typeof empRepo.find !== 'function') throw failure('NATIVE_MEMBERSHIP_REQUIRED');
-  const rows = (await empRepo.find({ ...options, filter: { userId: id }, limit: 2 })) || [];
+  const findEmployee = (findOptions) => empRepo.find({ ...findOptions, filter: { userId: id }, limit: 2 });
+  const useRls = shouldUseParaPgRls(db);
+  const activeCtx = typeof getActiveRlsContext === 'function' ? getActiveRlsContext() : null;
+  let rows;
+  if (!options.transaction && (!activeCtx?.transaction || activeCtx.systemRlsBypass !== true) && useRls && typeof withSystemRlsBypass === 'function') {
+    rows = (await withSystemRlsBypass(db, (transaction) => findEmployee({ ...options, transaction }))) || [];
+  } else if (options.transaction && !activeCtx?.transaction && useRls && typeof setTransactionRlsBypass === 'function') {
+    const prevRaw = await db.sequelize.query("SELECT current_setting('app.rls_bypass', true) AS prev", {
+      transaction: options.transaction,
+    });
+    const prevBypass = prevRaw?.[0]?.[0]?.prev ?? '';
+    if (prevBypass !== 'on') {
+      await setTransactionRlsBypass(db, options.transaction);
+    }
+    try {
+      rows = (await findEmployee(options)) || [];
+    } finally {
+      if (prevBypass !== 'on') {
+        await db.sequelize.query("SELECT set_config('app.rls_bypass', :prev, true)", {
+          replacements: { prev: prevBypass },
+          transaction: options.transaction,
+        }).catch(() => {});
+      }
+    }
+  } else if (!options.transaction && activeCtx?.transaction && activeCtx.systemRlsBypass === true) {
+    rows = (await findEmployee({ ...options, transaction: activeCtx.transaction })) || [];
+  } else {
+    rows = (await findEmployee(options)) || [];
+  }
   if (rows.length > 1) throw failure('NATIVE_MEMBERSHIP_AMBIGUOUS');
   const employee = rows[0];
   if (!employee || val(employee, 'active') !== true) throw failure('NATIVE_MEMBERSHIP_REQUIRED');
@@ -337,4 +407,10 @@ function createParaScopeMiddleware(db) {
   };
 }
 
-module.exports = { resolveParaActor, createParaScopeMiddleware };
+module.exports = {
+  resolveParaActor,
+  createParaScopeMiddleware,
+  shouldUseParaPgRls,
+  runParaRlsOp,
+  runParaSavepoint,
+};

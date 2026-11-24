@@ -193,12 +193,12 @@ function sanitizeSafeFilter(node, options = {}, depth = 0) {
   return out;
 }
 
-async function resolveServiceActor(db, user) {
+async function resolveServiceActor(db, user, options = {}) {
   const id = val(user, 'id');
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_LOGIN_REQUIRED', 401);
   const empRepo = db?.getRepository?.('latticeEmployees');
   if (!empRepo || typeof empRepo.find !== 'function') throw failure('NATIVE_MEMBERSHIP_REQUIRED');
-  const rows = (await empRepo.find({ filter: { userId: id }, limit: 2 })) || [];
+  const rows = (await empRepo.find({ filter: { userId: id }, limit: 2, ...(options.transaction ? { transaction: options.transaction } : {}) })) || [];
   if (rows.length > 1) throw failure('NATIVE_MEMBERSHIP_AMBIGUOUS');
   const emp = rows[0];
   if (!emp || val(emp, 'active') !== true) throw failure('NATIVE_MEMBERSHIP_REQUIRED');

@@ -1883,3 +1883,312 @@ test('Task 1 remediation: dispatchOneDelivery isolates syncParentEventStatus fro
     else process.env.DX_PG_RLS_SESSION = prevFlag;
   }
 });
+
+test('Waves 1-4 remediation: dxosVault HTTP handlers, split-TX oauthCallback, and normalized single-flight refresh enforce PG FORCE RLS & keep HTTP outside TX', async () => {
+  const {
+    oauthStart,
+    oauthCallback,
+    getFreshConnectorToken,
+    registerConnectorVault,
+    decryptSecretText,
+  } = require('../src/server/connector-vault');
+
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+  const vaultEnv = {
+    NODE_ENV: 'production',
+    DX_VAULT_MASTER_KEY: 'rls-vault-test-key-2026',
+    DX_ALLOW_INTERNAL_CONNECTORS: 'true',
+  };
+
+  const openTxs = new Set();
+  let txCounter = 0;
+  const txStates = new Map();
+  const rows = [];
+  let nextConnId = 1;
+  const employees = [
+    { id: 100, userId: 10, organizationId: 'org-a', departmentId: 1, active: true },
+  ];
+  const roles = [{ name: 'root', allowAll: true }, { name: 'ldx_admin', allowConfigure: true }];
+  const rolesUsers = [{ userId: 1, roleName: 'root' }, { userId: 10, roleName: 'ldx_admin' }];
+
+  const assertRls = (tableName, tx, expectedOrg = null, { requireBypassForAll = false } = {}) => {
+    if (!tx || !openTxs.has(tx)) {
+      throw new Error(`FORCE RLS violation on ${tableName}: missing active transaction`);
+    }
+    const st = txStates.get(tx) || {};
+    if (st.bypass === 'on') return;
+    if (!requireBypassForAll && expectedOrg && st.org === expectedOrg) return;
+    throw new Error(`FORCE RLS violation on ${tableName}: org=${st.org || 'none'} bypass=${st.bypass || 'off'}`);
+  };
+
+  const matchFilter = (row, filter = {}) => Object.entries(filter || {}).every(([k, v]) => row[k] === v);
+  const wrapConn = (row) => (row ? {
+    ...row,
+    get: (k) => row[k],
+    update: async (patch, opts = {}) => {
+      assertRls('latticeConnectors', opts?.transaction, row.organizationId);
+      Object.assign(row, patch);
+      return wrapConn(row);
+    },
+    destroy: async (opts = {}) => {
+      assertRls('latticeConnectors', opts?.transaction, row.organizationId);
+      const idx = rows.indexOf(row);
+      if (idx >= 0) rows.splice(idx, 1);
+      return 1;
+    },
+  } : null);
+
+  const db = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => {
+        const tx = { id: `tx-rls-vault-${++txCounter}`, LOCK: { UPDATE: 'UPDATE' } };
+        openTxs.add(tx);
+        txStates.set(tx, { org: '', bypass: '' });
+        try {
+          return await cb(tx);
+        } finally {
+          openTxs.delete(tx);
+          txStates.delete(tx);
+        }
+      },
+      query: async (sql, opts = {}) => {
+        const text = String(sql);
+        const tx = opts?.transaction;
+        if (text.includes("set_config('app.current_org'") && tx && txStates.has(tx)) {
+          txStates.get(tx).org = opts?.replacements?.orgId || '';
+        }
+        if (text.includes("set_config('app.rls_bypass', 'on'") && tx && txStates.has(tx)) {
+          txStates.get(tx).bypass = 'on';
+        }
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'roles') return { find: async ({ filter }) => roles.filter((r) => !filter?.name?.$in || filter.name.$in.includes(r.name)) };
+      if (name === 'rolesUsers') return { find: async ({ filter }) => rolesUsers.filter((r) => Number(r.userId) === Number(filter?.userId)) };
+      if (name === 'latticeEmployees') {
+        return {
+          find: async ({ filter, transaction } = {}) => {
+            assertRls('latticeEmployees', transaction, null, { requireBypassForAll: true });
+            return employees.filter((e) => Number(e.userId) === Number(filter?.userId)).map((e) => ({ ...e, get: (k) => e[k] }));
+          },
+        };
+      }
+      if (name === 'latticeConnectors') {
+        return {
+          find: async ({ filter = {}, transaction } = {}) => {
+            assertRls('latticeConnectors', transaction, filter.organizationId || null, { requireBypassForAll: !filter.organizationId });
+            return rows.filter((r) => matchFilter(r, filter)).map(wrapConn);
+          },
+          findOne: async ({ filter = {}, transaction } = {}) => {
+            assertRls('latticeConnectors', transaction, filter.organizationId || null);
+            const found = rows.find((r) => matchFilter(r, filter)) || null;
+            return wrapConn(found);
+          },
+          create: async ({ values, transaction }) => {
+            assertRls('latticeConnectors', transaction, values.organizationId);
+            const created = { id: nextConnId++, ...values };
+            rows.push(created);
+            return wrapConn(created);
+          },
+          update: async ({ filterByTk, filter = {}, values, transaction }) => {
+            assertRls('latticeConnectors', transaction, filter.organizationId || null);
+            const matched = rows.filter((r) => (filterByTk == null || r.id === filterByTk) && matchFilter(r, filter));
+            for (const m of matched) Object.assign(m, values);
+            return matched.map(wrapConn);
+          },
+          destroy: async ({ filter = {}, transaction }) => {
+            assertRls('latticeConnectors', transaction, filter.organizationId || null);
+            let n = 0;
+            for (let i = rows.length - 1; i >= 0; i -= 1) {
+              if (matchFilter(rows[i], filter)) {
+                rows.splice(i, 1);
+                n += 1;
+              }
+            }
+            return n;
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const probeEvents = [];
+    const resources = new Map();
+    const app = {
+      db,
+      resourceManager: { define(def) { resources.set(def.name, def.actions); }, use() {} },
+      acl: { allow() {} },
+    };
+    registerConnectorVault(app, {
+      env: vaultEnv,
+      fetchImpl: async (url) => {
+        probeEvents.push({ url, openTxCountDuringHttp: openTxs.size });
+        assert.equal(openTxs.size, 0, 'probeConnectorEndpoint fetch must run strictly outside any DB transaction');
+        return { ok: true, status: 200, body: { cancel: async () => {} } };
+      },
+    });
+    const vault = resources.get('dxosVault');
+
+    // 1. save (both findConnectorInOrg pre-check and write), list, rotateSecret, testConnection, delete under FORCE RLS
+    const saveCtx = makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { connectorKey: 'rls-n8n', name: 'RLS n8n', connectorType: 'n8n', baseUrl: 'http://n8n:5678', authType: 'bearer', secrets: { token: 't1' } } },
+    });
+    await vault.save(saveCtx, async () => {});
+    assert.equal(saveCtx.body.connectorKey, 'rls-n8n');
+
+    // Update existing via save -> pre-check findConnectorInOrg must succeed inside RLS TX
+    const updateCtx = makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { connectorKey: 'rls-n8n', name: 'RLS n8n v2', connectorType: 'n8n', baseUrl: 'http://n8n:5678', authType: 'bearer', secrets: { token: 't2' } } },
+    });
+    await vault.save(updateCtx, async () => {});
+    assert.equal(updateCtx.body.secretVersion, 2);
+
+    const listTenantCtx = makeHttpCtx({ method: 'GET', state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' } });
+    await vault.list(listTenantCtx, async () => {});
+    assert.equal(listTenantCtx.body.items.length, 1);
+
+    const listRootAllCtx = makeHttpCtx({ method: 'GET', state: { currentUser: { id: 1 }, currentRole: 'root' } });
+    await vault.list(listRootAllCtx, async () => {});
+    assert.equal(listRootAllCtx.body.items.length, 1);
+
+    const rotCtx = makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { connectorKey: 'rls-n8n', secrets: { token: 't3' } } },
+    });
+    await vault.rotateSecret(rotCtx, async () => {});
+    assert.equal(rotCtx.body.secretVersion, 3);
+
+    const testCtx = makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { connectorKey: 'rls-n8n' } },
+    });
+    await vault.testConnection(testCtx, async () => {});
+    assert.equal(testCtx.body.ok, true);
+    assert.equal(probeEvents.length, 1);
+    assert.equal(probeEvents[0].openTxCountDuringHttp, 0);
+    assert.equal(rows[0].lastTestStatus, 'ok');
+
+    const delCtx = makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' },
+      params: { values: { connectorKey: 'rls-n8n' } },
+    });
+    await vault.delete(delCtx, async () => {});
+    assert.equal(delCtx.body.deleted, true);
+    assert.equal(rows.length, 0);
+
+    // 2. oauthCallback split TX: TX1 consumes nonce, outbound fetch runs with openTxs.size === 0, TX2 saves tokens
+    const nowEpochMs = 1_800_000_000_000;
+    const startRes = await oauthStart(db, {
+      organizationId: 'org-a',
+      connectorKey: 'gmail-rls',
+      name: 'Gmail RLS',
+      appType: 'gmail_oauth2',
+      clientId: 'cid-rls',
+      clientSecret: 'csec-rls',
+      redirectUri: 'https://app.latticedx.example.com/api/dxosVault:oauthCallback',
+    }, { env: vaultEnv, nowMs: nowEpochMs });
+
+    const oauthFetchObservations = [];
+    const txCountBeforeCb = txCounter;
+    const cbRes = await oauthCallback(db, {
+      organizationId: 'org-a',
+      connectorKey: 'gmail-rls',
+      code: 'code-rls-1',
+      state: startRes.state,
+    }, {
+      env: vaultEnv,
+      nowMs: nowEpochMs,
+      lookupImpl: async () => [{ address: '142.250.190.10', family: 4 }],
+      fetchImpl: async (url) => {
+        oauthFetchObservations.push({
+          url,
+          openTxCountDuringHttp: openTxs.size,
+          nonceAlreadyCleared: rows[0].oauthStateNonce === null,
+        });
+        assert.equal(openTxs.size, 0, 'oauthCallback fetchImpl must NOT run inside an open DB transaction');
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            access_token: 'ya29.rls-access',
+            refresh_token: '1//rls-refresh',
+            expires_in: 300,
+          }),
+        };
+      },
+    });
+    assert.equal(cbRes.connected, true);
+    assert.equal(oauthFetchObservations.length, 1);
+    assert.equal(oauthFetchObservations[0].openTxCountDuringHttp, 0);
+    assert.equal(oauthFetchObservations[0].nonceAlreadyCleared, true);
+    assert.equal(txCounter - txCountBeforeCb, 2, 'oauthCallback must execute two short DB transactions (TX1 nonce consume, TX2 token save)');
+    assert.equal(decryptSecretText(rows[0].oauthAccessTokenEnc, vaultEnv), 'ya29.rls-access');
+
+    // 3. Single-flight key normalization: concurrent calls mixing id (number/string) & connectorKey (lower/upper) trigger ONLY 1 HTTP refresh
+    let refreshFetches = 0;
+    let releaseRefresh;
+    const gate = new Promise((r) => { releaseRefresh = r; });
+    const nearExpiry = nowEpochMs + 200 * 1000; // 100s left < 180s buffer
+    const connRowId = rows[0].id;
+    const mixedPromises = [
+      getFreshConnectorToken(db, connRowId, {
+        organizationId: 'org-a',
+        env: vaultEnv,
+        nowMs: nearExpiry,
+        lookupImpl: async () => [{ address: '142.250.190.10', family: 4 }],
+        fetchImpl: async () => {
+          refreshFetches += 1;
+          assert.equal(openTxs.size, 0);
+          await gate;
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ access_token: 'ya29.shared-flight', refresh_token: '1//rot-2', expires_in: 3600 }),
+          };
+        },
+      }),
+      getFreshConnectorToken(db, 'gmail-rls', {
+        organizationId: 'org-a',
+        env: vaultEnv,
+        nowMs: nearExpiry,
+        lookupImpl: async () => [{ address: '142.250.190.10', family: 4 }],
+        fetchImpl: async () => { refreshFetches += 1; throw new Error('duplicate refresh for connectorKey'); },
+      }),
+      getFreshConnectorToken(db, 'GMAIL-RLS', {
+        organizationId: 'org-a',
+        env: vaultEnv,
+        nowMs: nearExpiry,
+        lookupImpl: async () => [{ address: '142.250.190.10', family: 4 }],
+        fetchImpl: async () => { refreshFetches += 1; throw new Error('duplicate refresh for uppercase connectorKey'); },
+      }),
+      getFreshConnectorToken(db, String(connRowId), {
+        env: vaultEnv,
+        nowMs: nearExpiry,
+        lookupImpl: async () => [{ address: '142.250.190.10', family: 4 }],
+        fetchImpl: async () => { refreshFetches += 1; throw new Error('duplicate refresh for string id'); },
+      }),
+    ];
+    await new Promise((r) => setTimeout(r, 20));
+    releaseRefresh();
+    const mixedResults = await Promise.all(mixedPromises);
+    assert.equal(refreshFetches, 1);
+    for (const r of mixedResults) {
+      assert.equal(r.accessToken, 'ya29.shared-flight');
+    }
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
+});

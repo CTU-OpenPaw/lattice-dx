@@ -10,7 +10,7 @@
 
 const { Plugin } = require('@nocobase/server');
 const { validateParaDocument } = require('./schema');
-const { createParaScopeMiddleware } = require('./para-scope');
+const { createParaScopeMiddleware, runParaRlsOp } = require('./para-scope');
 const { createParaActions, syncDocumentChunks } = require('./para-resource');
 
 const readVal = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
@@ -136,7 +136,10 @@ class DxosParaPlugin extends Plugin {
       if (!chunkRepo || typeof chunkRepo.destroy !== 'function' || documentId == null || !organizationId) return;
       runAfterCommit(
         options,
-        () => chunkRepo.destroy({ filter: { documentId, organizationId } }),
+        () => runParaRlsOp(this.db, organizationId, (transaction) => chunkRepo.destroy({
+          filter: { documentId, organizationId },
+          ...(transaction ? { transaction } : {}),
+        })),
         {
           operation: 'destroyDocumentChunks',
           documentId,

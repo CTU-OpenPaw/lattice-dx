@@ -137,7 +137,7 @@ class DxosStudioPlugin extends Plugin {
       ['orderLines', 'saveOrderLine', 'receiveStock', 'lots', 'allocateFefo', 'issueStock', 'holdLotByMkt', 'epodCapture', 'printVoucher'],
       'loggedIn',
     );
-    this.app.acl.allow('dxosWms', ['publicTrack'], 'public');
+    this.app.acl.allow('dxosWms', ['publicTrack', 'verifyTrackSignature'], 'public');
     this.app.acl.allow('dxosDmn', ['listTables', 'saveTable', 'evaluate'], 'loggedIn');
     this.app.acl.allow('dxosDelegations', ['list', 'create', 'revoke', 'activeForUser'], 'loggedIn');
     this.app.acl.allow('dxosAutomations', ['webhookIngress'], 'public');

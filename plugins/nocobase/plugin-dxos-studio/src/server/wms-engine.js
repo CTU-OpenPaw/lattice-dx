@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { randomBytes } = require('node:crypto');
+const { createPublicKey, randomBytes, verify } = require('node:crypto');
 const {
   ORG_ID_RE,
   val,
@@ -30,6 +30,7 @@ const {
   resolveTenantActor,
   appendAuditLedger,
   runWithOptionalRls,
+  runWithSystemRlsBypass,
   runInTx,
   saveRow,
 } = require('./wms-dmn-shared');
@@ -473,6 +474,145 @@ function buildPrintableVoucherHtml({ documentType, organizationId, order, orderL
   </footer>
 </body>
 </html>`;
+}
+
+async function loadPublicTrackRecord(db, trackingCode, providedHash) {
+  const epodRepo = db.getRepository?.('latticeEpodRecords');
+  return runWithSystemRlsBypass(db, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const row = epodRepo?.findOne ? await epodRepo.findOne({ filter: { trackingCode }, ...txOpt }) : null;
+    const expectedHash = row ? String(val(row, 'trackingTokenHash') || '') : DUMMY_HASH_HEX;
+    const validToken = Boolean(row) && timingSafeEqualHex(expectedHash, providedHash);
+    if (!validToken) {
+      return { row: null, validToken: false, ledgerEntry: null, pkiKeyRow: null };
+    }
+    const orgId = val(row, 'organizationId');
+    const seqVal = val(row, 'ledgerSeq');
+    const epodUid = val(row, 'epodUid');
+    const ledgerRepo = db.getRepository?.('latticeCryptoLedger');
+    let ledgerEntry = null;
+    if (ledgerRepo && orgId) {
+      if (seqVal != null) {
+        if (typeof ledgerRepo.findOne === 'function') {
+          ledgerEntry = await ledgerRepo.findOne({ filter: { organizationId: orgId, seq: Number(seqVal) }, ...txOpt });
+        } else if (typeof ledgerRepo.find === 'function') {
+          ledgerEntry = ((await ledgerRepo.find({ filter: { organizationId: orgId, seq: Number(seqVal) }, limit: 1, ...txOpt })) || [])[0] || null;
+        }
+      }
+      if (!ledgerEntry && epodUid) {
+        const fallbackFilter = { organizationId: orgId, targetCollection: 'latticeEpodRecords', targetRecordId: String(epodUid) };
+        if (typeof ledgerRepo.findOne === 'function') {
+          ledgerEntry = await ledgerRepo.findOne({ filter: fallbackFilter, ...txOpt });
+        } else if (typeof ledgerRepo.find === 'function') {
+          ledgerEntry = ((await ledgerRepo.find({ filter: fallbackFilter, limit: 1, ...txOpt })) || [])[0] || null;
+        }
+      }
+    }
+    const effectiveKeyId = val(ledgerEntry, 'keyId') || val(row, 'keyId');
+    const pkiRepo = db.getRepository?.('latticePkiKeys');
+    let pkiKeyRow = null;
+    if (pkiRepo && orgId && effectiveKeyId) {
+      if (typeof pkiRepo.findOne === 'function') {
+        pkiKeyRow = await pkiRepo.findOne({ filter: { organizationId: orgId, keyId: effectiveKeyId }, ...txOpt });
+      } else if (typeof pkiRepo.find === 'function') {
+        pkiKeyRow = ((await pkiRepo.find({ filter: { organizationId: orgId, keyId: effectiveKeyId }, limit: 1, ...txOpt })) || [])[0] || null;
+      }
+    }
+    return { row, validToken: true, ledgerEntry, pkiKeyRow };
+  }, foundation);
+}
+
+function verifyEpodLedgerSignature({ epodRow, ledgerEntry, pkiKeyRow }) {
+  const orgId = String(val(epodRow, 'organizationId') || '').trim();
+  const rawSeq = val(epodRow, 'ledgerSeq') ?? val(ledgerEntry, 'seq');
+  const seq = rawSeq != null && Number.isFinite(Number(rawSeq)) ? Number(rawSeq) : null;
+  const epodKeyId = val(epodRow, 'keyId') || null;
+  const ledgerKeyId = val(ledgerEntry, 'keyId') || null;
+  const keyId = ledgerKeyId || epodKeyId || null;
+  const entryHash = ledgerEntry && val(ledgerEntry, 'entryHash') ? String(val(ledgerEntry, 'entryHash')) : null;
+  const merkleRoot = ledgerEntry && val(ledgerEntry, 'merkleRoot') ? String(val(ledgerEntry, 'merkleRoot')) : null;
+  const publicKeyFingerprint = pkiKeyRow && val(pkiKeyRow, 'fingerprintSha256')
+    ? String(val(pkiKeyRow, 'fingerprintSha256'))
+    : null;
+  const publicKeyPem = pkiKeyRow && val(pkiKeyRow, 'publicKeyPem') ? String(val(pkiKeyRow, 'publicKeyPem')) : null;
+  const ledgerSig = ledgerEntry && val(ledgerEntry, 'signatureBase64') ? String(val(ledgerEntry, 'signatureBase64')).trim() : '';
+  const epodSig = epodRow && val(epodRow, 'ledgerSignatureBase64') ? String(val(epodRow, 'ledgerSignatureBase64')).trim() : '';
+
+  let verified = false;
+  let reason = '';
+  if (!orgId || seq == null || !Number.isInteger(seq)) {
+    reason = 'LEDGER_SEQ_MISSING';
+  } else if (!ledgerEntry) {
+    reason = 'LEDGER_ENTRY_MISSING';
+  } else if (!pkiKeyRow) {
+    reason = 'PKI_KEY_MISSING';
+  } else if (val(pkiKeyRow, 'active') === false) {
+    reason = 'PKI_KEY_INACTIVE';
+  } else if (
+    String(val(ledgerEntry, 'organizationId') || '').trim() !== orgId
+    || String(val(pkiKeyRow, 'organizationId') || '').trim() !== orgId
+  ) {
+    reason = 'LEDGER_ORG_MISMATCH';
+  } else if (epodKeyId && ledgerKeyId && epodKeyId !== ledgerKeyId) {
+    reason = 'LEDGER_KEY_MISMATCH';
+  } else if (epodSig && ledgerSig && epodSig !== ledgerSig) {
+    reason = 'EPOD_SIGNATURE_MISMATCH';
+  } else if (!entryHash) {
+    reason = 'LEDGER_ENTRY_HASH_MISSING';
+  } else if (!ledgerSig) {
+    reason = 'LEDGER_SIGNATURE_MISSING';
+  } else if (!publicKeyPem) {
+    reason = 'PKI_PUBLIC_KEY_MISSING';
+  } else {
+    let entryIntegrityOk = true;
+    const eventType = val(ledgerEntry, 'eventType');
+    const targetCollection = val(ledgerEntry, 'targetCollection');
+    const targetRecordId = val(ledgerEntry, 'targetRecordId');
+    const payloadHash = val(ledgerEntry, 'payloadHash');
+    const prevHash = val(ledgerEntry, 'prevHash');
+    const recordedRaw = val(ledgerEntry, 'recordedAt');
+    if (eventType && targetCollection && targetRecordId != null && payloadHash && prevHash && recordedRaw) {
+      const recordedMs = new Date(recordedRaw).getTime();
+      if (!Number.isFinite(recordedMs)) {
+        entryIntegrityOk = false;
+        reason = 'LEDGER_ENTRY_TIMESTAMP_INVALID';
+      } else {
+        const recomputedEntryHash = sha256Hex(
+          `${orgId}|${seq}|${String(eventType)}|${String(targetCollection)}|${String(targetRecordId)}|${String(payloadHash)}|${String(prevHash)}|${new Date(recordedMs).toISOString()}`,
+        );
+        if (recomputedEntryHash !== entryHash) {
+          entryIntegrityOk = false;
+          reason = 'LEDGER_ENTRY_HASH_MISMATCH';
+        }
+      }
+    }
+    if (entryIntegrityOk) {
+      try {
+        const canonicalPayload = `${orgId}|${seq}|${entryHash}`;
+        const pubKey = createPublicKey(publicKeyPem);
+        verified = verify(
+          null,
+          Buffer.from(canonicalPayload, 'utf8'),
+          pubKey,
+          Buffer.from(ledgerSig, 'base64'),
+        );
+        if (!verified) reason = 'LEDGER_SIGNATURE_MISMATCH';
+      } catch {
+        verified = false;
+        reason = 'LEDGER_SIGNATURE_MISMATCH';
+      }
+    }
+  }
+
+  return {
+    verified,
+    seq,
+    entryHash,
+    keyId,
+    publicKeyFingerprint,
+    merkleRoot,
+    reason,
+  };
 }
 
 function createDxosWmsActions(db) {
@@ -1293,7 +1433,9 @@ function createDxosWmsActions(db) {
     publicTrack: async (ctx, next) => {
       if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
       const params = readParams(ctx);
-      const trackingCode = typeof params.trackingCode === 'string' ? params.trackingCode.trim() : '';
+      const rawCode = [params.trackingCode, params.code, params.filterByTk]
+        .find((v) => (typeof v === 'string' && v.trim() !== '') || (typeof v === 'number' && Number.isFinite(v)));
+      const trackingCode = rawCode !== undefined ? String(rawCode).trim() : '';
       const rawToken = params.token ?? params.trackingToken;
       const token = typeof rawToken === 'string' ? rawToken.trim() : '';
       const providedHash = sha256Hex(token || 'missing');
@@ -1303,10 +1445,7 @@ function createDxosWmsActions(db) {
         throw fail('TRACKING_UNAUTHORIZED', 401, 'Mã vận đơn hoặc mã xác thực theo dõi không hợp lệ.');
       }
 
-      const epodRepo = db.getRepository?.('latticeEpodRecords');
-      const row = epodRepo?.findOne ? await epodRepo.findOne({ filter: { trackingCode } }) : null;
-      const expectedHash = row ? String(val(row, 'trackingTokenHash') || '') : DUMMY_HASH_HEX;
-      const validToken = Boolean(row) && timingSafeEqualHex(expectedHash, providedHash);
+      const { row, validToken, ledgerEntry, pkiKeyRow } = await loadPublicTrackRecord(db, trackingCode, providedHash);
       if (!validToken) {
         throw fail('TRACKING_UNAUTHORIZED', 401, 'Mã vận đơn hoặc mã xác thực theo dõi không hợp lệ.');
       }
@@ -1314,6 +1453,7 @@ function createDxosWmsActions(db) {
       const deliveredRaw = val(row, 'deliveredAt');
       const deliveredAt = deliveredRaw instanceof Date ? deliveredRaw.toISOString() : String(deliveredRaw || '');
       const tempRaw = val(row, 'tempSummaryJson');
+      const sigSummary = verifyEpodLedgerSignature({ epodRow: row, ledgerEntry, pkiKeyRow });
       ctx.body = {
         trackingCode: val(row, 'trackingCode'),
         status: val(row, 'status') || 'delivered',
@@ -1324,10 +1464,46 @@ function createDxosWmsActions(db) {
           inRange: typeof tempRaw?.inRange === 'boolean' ? tempRaw.inRange : null,
         },
         ledgerVerification: {
-          seq: val(row, 'ledgerSeq') != null ? Number(val(row, 'ledgerSeq')) : null,
-          keyId: val(row, 'keyId') || null,
-          verifiedFormat: Boolean(val(row, 'ledgerSeq') != null && val(row, 'keyId') && val(row, 'ledgerSignatureBase64')),
+          seq: sigSummary.seq,
+          keyId: sigSummary.keyId,
+          verifiedFormat: Boolean(val(row, 'ledgerSeq') != null && val(row, 'keyId') && (val(row, 'ledgerSignatureBase64') || val(ledgerEntry, 'signatureBase64'))),
+          verified: sigSummary.verified,
+          merkleRoot: sigSummary.merkleRoot,
         },
+      };
+      return next();
+    },
+
+    verifyTrackSignature: async (ctx, next) => {
+      if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
+      const params = readParams(ctx);
+      const rawCode = [params.trackingCode, params.code, params.filterByTk]
+        .find((v) => (typeof v === 'string' && v.trim() !== '') || (typeof v === 'number' && Number.isFinite(v)));
+      const trackingCode = rawCode !== undefined ? String(rawCode).trim() : '';
+      const rawToken = params.token ?? params.trackingToken;
+      const token = typeof rawToken === 'string' ? rawToken.trim() : '';
+      const providedHash = sha256Hex(token || 'missing');
+
+      if (!trackingCode || !token) {
+        timingSafeEqualHex(DUMMY_HASH_HEX, providedHash);
+        throw fail('TRACKING_UNAUTHORIZED', 401, 'Mã vận đơn hoặc mã xác thực theo dõi không hợp lệ.');
+      }
+
+      const { row, validToken, ledgerEntry, pkiKeyRow } = await loadPublicTrackRecord(db, trackingCode, providedHash);
+      if (!validToken) {
+        throw fail('TRACKING_UNAUTHORIZED', 401, 'Mã vận đơn hoặc mã xác thực theo dõi không hợp lệ.');
+      }
+
+      const sigSummary = verifyEpodLedgerSignature({ epodRow: row, ledgerEntry, pkiKeyRow });
+      ctx.body = {
+        verified: sigSummary.verified,
+        seq: sigSummary.seq,
+        ledgerSeq: sigSummary.seq,
+        entryHash: sigSummary.entryHash,
+        keyId: sigSummary.keyId,
+        publicKeyFingerprint: sigSummary.publicKeyFingerprint,
+        reason: sigSummary.reason,
+        verifiedAt: new Date().toISOString(),
       };
       return next();
     },

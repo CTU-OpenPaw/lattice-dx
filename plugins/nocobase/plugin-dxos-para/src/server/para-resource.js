@@ -10,7 +10,12 @@
 
 const path = require('node:path');
 const { PARA_SPACES } = require('./schema');
-const { resolveParaActor } = require('./para-scope');
+const {
+  resolveParaActor,
+  shouldUseParaPgRls,
+  runParaRlsOp,
+  runParaSavepoint,
+} = require('./para-scope');
 const {
   executeHybridSearch,
   computeNeuralEmbeddingsBatch,
@@ -97,13 +102,19 @@ function decodeBase64Payload(rawBase64Input, { maxBytes = MAX_UPLOAD_BYTES } = {
   return buffer;
 }
 
-async function findScopedParaDocument(db, documentId, organizationId = null) {
+async function findScopedParaDocument(db, documentId, organizationId = null, options = {}) {
   const docRepo = db?.getRepository?.('latticeParaDocuments');
   if (!docRepo) return null;
   const docFilter = { id: Number(documentId), ...(organizationId ? { organizationId } : {}) };
-  const doc = typeof docRepo.findOne === 'function'
-    ? await docRepo.findOne({ filter: docFilter })
-    : ((await docRepo.find({ filter: docFilter, limit: 1 })) || [])[0] || null;
+  const queryDoc = (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    return typeof docRepo.findOne === 'function'
+      ? docRepo.findOne({ filter: docFilter, ...txOpt })
+      : docRepo.find({ filter: docFilter, limit: 1, ...txOpt }).then((rows) => (rows || [])[0] || null);
+  };
+  const doc = options.transaction
+    ? await queryDoc(options.transaction)
+    : await runParaRlsOp(db, organizationId, queryDoc);
   if (!doc) return null;
   if (organizationId && val(doc, 'organizationId') !== organizationId) return null;
   return doc;
@@ -246,6 +257,13 @@ async function withOptionalTransaction(db, fn) {
   return fn(undefined);
 }
 
+async function runParaDbWithOptionalTx(db, organizationId, fn) {
+  if (shouldUseParaPgRls(db)) {
+    return runParaRlsOp(db, organizationId, fn);
+  }
+  return withOptionalTransaction(db, fn);
+}
+
 /**
  * Synchronize chunked text and embeddings into `latticeParaChunks` for a P.A.R.A. document.
  *
@@ -277,7 +295,7 @@ async function syncDocumentChunks(db, docRow, {
 
   const active = val(docRow, 'active') !== false;
   if (!active) {
-    await withOptionalTransaction(db, async (transaction) => {
+    await runParaDbWithOptionalTx(db, organizationId, async (transaction) => {
       if (typeof chunkRepo.destroy === 'function') {
         await chunkRepo.destroy({ filter: { documentId, organizationId }, ...(transaction ? { transaction } : {}) });
       }
@@ -303,11 +321,12 @@ async function syncDocumentChunks(db, docRow, {
     attachmentChunks = chunkDocumentText(explicitAttachment, { chunkSize, overlap, title: attTitle })
       .map((c) => ({ ...c, sourceType: 'attachment' }));
   } else if (typeof chunkRepo.find === 'function') {
-    const existingRows = (await chunkRepo.find({
+    const existingRows = (await runParaRlsOp(db, organizationId, (transaction) => chunkRepo.find({
       filter: { documentId, organizationId, sourceType: 'attachment', active: true },
       limit: 500,
       sort: ['chunkIndex'],
-    })) || [];
+      ...(transaction ? { transaction } : {}),
+    }))) || [];
     attachmentChunks = existingRows
       .filter((r) => (
         Number(val(r, 'documentId')) === Number(documentId)
@@ -329,13 +348,14 @@ async function syncDocumentChunks(db, docRow, {
   const chunks = [...docChunks, ...attachmentChunks].map((c, idx) => ({ ...c, chunkIndex: idx }));
 
   const embInputs = chunks.map((chunk) => [code, title, chunk.sectionTitle, tags, chunk.content].filter(Boolean).join('\n'));
+  // Outbound batched embedding fetch runs strictly outside any DB transaction.
   const embeddings = chunks.length
     ? await computeNeuralEmbeddingsBatch(embInputs, { env, fetchImpl })
     : [];
   const prepared = chunks.map((chunk, idx) => ({ chunk, emb: embeddings[idx] }));
 
   const createdRows = [];
-  await withOptionalTransaction(db, async (transaction) => {
+  await runParaDbWithOptionalTx(db, organizationId, async (transaction) => {
     if (typeof chunkRepo.destroy === 'function') {
       await chunkRepo.destroy({ filter: { documentId, organizationId }, ...(transaction ? { transaction } : {}) });
     }
@@ -367,21 +387,35 @@ async function syncDocumentChunks(db, docRow, {
     }
   });
 
-  // Update pgvector column outside the main transaction so plain Postgres never aborts chunk creation
-  if (typeof db?.sequelize?.query === 'function') {
-    for (const { row, emb } of createdRows) {
-      const cid = val(row, 'id');
-      if (cid == null || emb.engine !== 'neural' || !Number.isInteger(emb.dim) || emb.dim < 8 || emb.dim > 8192) continue;
-      if (!Array.isArray(emb.vector) || emb.vector.length !== emb.dim || !emb.vector.every(Number.isFinite)) continue;
-      try {
-        const vecLiteral = `[${emb.vector.map((n) => Number(n)).join(',')}]`;
-        await db.sequelize.query(
-          'UPDATE "latticeParaChunks" SET embedding = CAST(:vec AS vector) WHERE id = :id AND "organizationId" = :org;',
-          { replacements: { vec: vecLiteral, id: cid, org: organizationId } },
-        );
-      } catch {
-        // Plain Postgres without pgvector column or pre-migration fixed vector(1536): keep JSONB vector only
-      }
+  // Update pgvector column outside the main transaction so plain Postgres never aborts chunk creation.
+  // Wrap in tenant RLS context so FORCE ROW LEVEL SECURITY permits the UPDATE on latticeParaChunks.
+  const neuralRowsToUpdate = createdRows.filter(({ row, emb }) => (
+    val(row, 'id') != null
+    && emb.engine === 'neural'
+    && Number.isInteger(emb.dim)
+    && emb.dim >= 8
+    && emb.dim <= 8192
+    && Array.isArray(emb.vector)
+    && emb.vector.length === emb.dim
+    && emb.vector.every(Number.isFinite)
+  ));
+  if (typeof db?.sequelize?.query === 'function' && neuralRowsToUpdate.length > 0) {
+    try {
+      await runParaRlsOp(db, organizationId, async (transaction) => {
+        for (const { row, emb } of neuralRowsToUpdate) {
+          const cid = val(row, 'id');
+          const vecLiteral = `[${emb.vector.map((n) => Number(n)).join(',')}]`;
+          await db.sequelize.query(
+            'UPDATE "latticeParaChunks" SET embedding = CAST(:vec AS vector) WHERE id = :id AND "organizationId" = :org;',
+            {
+              replacements: { vec: vecLiteral, id: cid, org: organizationId },
+              ...(transaction ? { transaction } : {}),
+            },
+          );
+        }
+      });
+    } catch {
+      // Plain Postgres without pgvector column or pre-migration fixed vector(1536): keep JSONB vector only
     }
   }
 
@@ -420,13 +454,17 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         }
         const counts = new Map();
         const empRepo = db.getRepository('latticeEmployees');
-        const empRows = empRepo ? await empRepo.find({ filter: { active: true }, fields: ['organizationId'], limit: 500 }) : [];
+        const deptRepo = db.getRepository('latticeDepartments');
+        const { empRows, deptRows } = await runParaRlsOp(db, null, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const emps = empRepo ? await empRepo.find({ filter: { active: true }, fields: ['organizationId'], limit: 500, ...txOpt }) : [];
+          const depts = deptRepo ? await deptRepo.find({ filter: { active: true }, fields: ['organizationId'], limit: 200, ...txOpt }) : [];
+          return { empRows: emps, deptRows: depts };
+        });
         for (const r of Array.isArray(empRows) ? empRows : []) {
           const oid = val(r, 'organizationId');
           if (oid) counts.set(oid, (counts.get(oid) || 0) + 1);
         }
-        const deptRepo = db.getRepository('latticeDepartments');
-        const deptRows = deptRepo ? await deptRepo.find({ filter: { active: true }, fields: ['organizationId'], limit: 200 }) : [];
         for (const r of Array.isArray(deptRows) ? deptRows : []) {
           const oid = val(r, 'organizationId');
           if (oid && !counts.has(oid)) counts.set(oid, 0);
@@ -442,14 +480,23 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
       const filter = { active: true, ...(organizationId ? { organizationId } : {}) };
       const spaces = Object.fromEntries(PARA_SPACES.map((space) => [space, 0]));
       if (repo && typeof repo.count === 'function') {
-        const counts = await Promise.all(
-          PARA_SPACES.map((space) => repo.count({ filter: { ...filter, paraSpace: space } })),
-        );
+        const counts = await runParaRlsOp(db, organizationId, (transaction) => Promise.all(
+          PARA_SPACES.map((space) => repo.count({
+            filter: { ...filter, paraSpace: space },
+            ...(transaction ? { transaction } : {}),
+          })),
+        ));
         PARA_SPACES.forEach((space, idx) => {
           spaces[space] = Number(counts[idx]) || 0;
         });
       } else {
-        const rows = repo ? await repo.find({ filter, fields: ['id', 'paraSpace', 'active', 'organizationId'] }) : [];
+        const rows = repo
+          ? await runParaRlsOp(db, organizationId, (transaction) => repo.find({
+              filter,
+              fields: ['id', 'paraSpace', 'active', 'organizationId'],
+              ...(transaction ? { transaction } : {}),
+            }))
+          : [];
         for (const row of Array.isArray(rows) ? rows : []) {
           if (val(row, 'active') === false) continue;
           const space = val(row, 'paraSpace') || 'projects';
@@ -553,11 +600,12 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         if (!found) throw failAction('PARA_DOCUMENT_NOT_FOUND', 404, 'Không tìm thấy tài liệu P.A.R.A.');
         docs = [found];
       } else {
-        docs = (await docRepo.find({
+        docs = (await runParaRlsOp(db, organizationId, (transaction) => docRepo.find({
           filter: { active: true, ...(organizationId ? { organizationId } : {}) },
           limit: 500,
           sort: ['id'],
-        })) || [];
+          ...(transaction ? { transaction } : {}),
+        }))) || [];
       }
 
       let chunksIndexed = 0;
@@ -633,7 +681,10 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
       });
       if (!val(doc, 'summary') && typeof doc?.update === 'function') {
         try {
-          await doc.update({ summary: extracted.text.slice(0, 300) }, { context: { skipParaChunkSync: true } });
+          await runParaRlsOp(db, val(doc, 'organizationId'), (transaction) => doc.update(
+            { summary: extracted.text.slice(0, 300) },
+            { context: { skipParaChunkSync: true }, ...(transaction ? { transaction } : {}) },
+          ));
         } catch {
           // Best-effort summary update
         }
@@ -731,11 +782,12 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
 
         const chunkRepo = db?.getRepository?.('latticeParaChunks');
         if (chunkRepo && typeof chunkRepo.find === 'function') {
-          const attRows = (await chunkRepo.find({
+          const attRows = (await runParaRlsOp(db, docOrg, (transaction) => chunkRepo.find({
             filter: { documentId: docId, organizationId: docOrg, sourceType: 'attachment', active: true },
             limit: 500,
             sort: ['chunkIndex'],
-          })) || [];
+            ...(transaction ? { transaction } : {}),
+          }))) || [];
           for (const row of attRows) {
             if (val(row, 'organizationId') === docOrg && Number(val(row, 'documentId')) === Number(docId)) {
               const content = String(val(row, 'content') || '').trim();
@@ -801,21 +853,40 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
       const docFilter = { active: true, ...(organizationId ? { organizationId } : {}) };
       const chunkFilter = { active: true, ...(organizationId ? { organizationId } : {}) };
 
-      let documentsCount = 0;
-      if (docRepo && typeof docRepo.count === 'function') {
-        documentsCount = Number(await docRepo.count({ filter: docFilter })) || 0;
-      } else if (docRepo && typeof docRepo.find === 'function') {
-        const rows = (await docRepo.find({ filter: docFilter, fields: ['id', 'organizationId', 'active'], limit: 1000 })) || [];
-        documentsCount = rows.filter((r) => val(r, 'active') !== false && (!organizationId || val(r, 'organizationId') === organizationId)).length;
-      }
+      const { documentsCount, rawChunks, pgvectorAvailable } = await runParaRlsOp(db, organizationId, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        let docsCnt = 0;
+        if (docRepo && typeof docRepo.count === 'function') {
+          docsCnt = Number(await docRepo.count({ filter: docFilter, ...txOpt })) || 0;
+        } else if (docRepo && typeof docRepo.find === 'function') {
+          const rows = (await docRepo.find({ filter: docFilter, fields: ['id', 'organizationId', 'active'], limit: 1000, ...txOpt })) || [];
+          docsCnt = rows.filter((r) => val(r, 'active') !== false && (!organizationId || val(r, 'organizationId') === organizationId)).length;
+        }
 
-      const rawChunks = chunkRepo && typeof chunkRepo.find === 'function'
-        ? ((await chunkRepo.find({
-            filter: chunkFilter,
-            fields: ['id', 'organizationId', 'embeddingEngine', 'embeddingDim', 'active'],
-            limit: 5000,
-          })) || [])
-        : [];
+        const chunks = chunkRepo && typeof chunkRepo.find === 'function'
+          ? ((await chunkRepo.find({
+              filter: chunkFilter,
+              fields: ['id', 'organizationId', 'embeddingEngine', 'embeddingDim', 'active'],
+              limit: 5000,
+              ...txOpt,
+            })) || [])
+          : [];
+
+        let hasPgvector = false;
+        if (typeof db?.sequelize?.query === 'function') {
+          try {
+            const [extRows] = await runParaSavepoint(db, (spTx) => db.sequelize.query(
+              "SELECT 1 AS present FROM pg_extension WHERE extname = 'vector' LIMIT 1;",
+              (spTx || transaction) ? { transaction: spTx || transaction } : undefined,
+            ));
+            hasPgvector = Array.isArray(extRows) && extRows.length > 0;
+          } catch {
+            hasPgvector = false;
+          }
+        }
+
+        return { documentsCount: docsCnt, rawChunks: chunks, pgvectorAvailable: hasPgvector };
+      });
       const activeChunks = rawChunks.filter(
         (c) => val(c, 'active') !== false && (!organizationId || val(c, 'organizationId') === organizationId),
       );
@@ -825,16 +896,6 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         if (val(chunk, 'embeddingEngine') === 'neural') neuralChunks += 1;
         const dim = Number(val(chunk, 'embeddingDim'));
         if (Number.isInteger(dim) && dim > 0) dimSet.add(dim);
-      }
-
-      let pgvectorAvailable = false;
-      if (typeof db?.sequelize?.query === 'function') {
-        try {
-          const [extRows] = await db.sequelize.query("SELECT 1 AS present FROM pg_extension WHERE extname = 'vector' LIMIT 1;");
-          pgvectorAvailable = Array.isArray(extRows) && extRows.length > 0;
-        } catch {
-          pgvectorAvailable = false;
-        }
       }
 
       const allFailures = typeof getIndexingFailures === 'function' ? (getIndexingFailures() || []) : [];

@@ -33,6 +33,21 @@ const getIntMod = () => loadCrossModule('@latticedx/plugin-dxos-studio', 'plugin
 const getSecMod = () => loadCrossModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'flow/security-helpers');
 const getN8nApiClientMod = () => loadCrossModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'n8n-api-client');
 
+async function withOptionalTenantRls(db, organizationId, fn) {
+  const pgRls = getPgRlsMod();
+  if (
+    pgRls
+    && typeof pgRls.canUsePgRlsSession === 'function'
+    && pgRls.canUsePgRlsSession(db)
+    && !pgRls.getActiveRlsContext?.()?.transaction
+    && organizationId
+    && typeof pgRls.withTenantRlsContext === 'function'
+  ) {
+    return pgRls.withTenantRlsContext(db, organizationId, fn);
+  }
+  return fn(null);
+}
+
 function sanitizeKey(raw) {
   const clean = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
   return /^[a-z0-9](?:[a-z0-9_-]{0,62}[a-z0-9])?$/.test(clean) ? clean : '';
@@ -57,7 +72,9 @@ async function resolveTargetConnector(db, organizationId, rawKey, failTool) {
     if (typeof rawKey === 'string' && rawKey.trim()) {
       throw failTool('CONNECTOR_KEY_INVALID', 400, 'connectorKey không hợp lệ.');
     }
-    const rows = (await repo.find({ filter: { organizationId, active: true }, sort: ['id'], limit: 50 })) || [];
+    const rows = (await withOptionalTenantRls(db, organizationId, (transaction) => (
+      repo.find({ filter: { organizationId, active: true }, sort: ['id'], limit: 50, ...(transaction ? { transaction } : {}) })
+    ))) || [];
     const n8nRow = rows.find((r) => String(r?.connectorType || r?.get?.('connectorType') || '').toLowerCase() === 'n8n');
     key = sanitizeKey(n8nRow?.connectorKey || n8nRow?.get?.('connectorKey') || '');
     if (!key) throw failTool('CONNECTOR_NOT_FOUND', 404, 'Chưa tìm thấy connector n8n nào đang kích hoạt trong tổ chức.');
@@ -85,7 +102,9 @@ async function runListConnectors(ctx, db, actor, args, deps) {
     throw failTool('VAULT_UNAVAILABLE', 503, 'Repository latticeConnectors chưa sẵn sàng.');
   }
   const vaultMod = getVaultMod();
-  const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, sort: ['id'], limit: 100 })) || [];
+  const rows = (await withOptionalTenantRls(db, actor.organizationId, (transaction) => (
+    repo.find({ filter: { organizationId: actor.organizationId }, sort: ['id'], limit: 100, ...(transaction ? { transaction } : {}) })
+  ))) || [];
   const items = rows
     .filter((r) => val(r, 'organizationId') === actor.organizationId && (!connType || String(val(r, 'connectorType') || '').toLowerCase() === connType))
     .map((r) => (typeof vaultMod?.serializeConnector === 'function' ? vaultMod.serializeConnector(r) : {
@@ -223,7 +242,9 @@ async function resolveOrgN8nApiClient(ctx, db, actor, args, deps) {
   }
 
   if (repo && typeof repo.find === 'function') {
-    const rows = (await repo.find({ filter: { organizationId: actor.organizationId, active: true }, sort: ['id'], limit: 100 })) || [];
+    const rows = (await withOptionalTenantRls(db, actor.organizationId, (transaction) => (
+      repo.find({ filter: { organizationId: actor.organizationId, active: true }, sort: ['id'], limit: 100, ...(transaction ? { transaction } : {}) })
+    ))) || [];
     const n8nRows = rows.filter((r) => {
       if (val(r, 'organizationId') !== actor.organizationId) return false;
       const cType = String(val(r, 'connectorType') || '').toLowerCase();

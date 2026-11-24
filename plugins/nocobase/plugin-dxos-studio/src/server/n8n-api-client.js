@@ -18,6 +18,7 @@ const {
   readParams,
   resolveTenantActor,
   resolveVerifiedRoles,
+  runWithOptionalRls,
   val,
 } = require('./wms-dmn-shared');
 
@@ -494,7 +495,17 @@ function createN8nRouteHandlers(db, options = {}) {
     let connectorKey = typeof params.connectorKey === 'string' ? params.connectorKey.trim().toLowerCase() : '';
 
     if (repo && typeof repo.find === 'function') {
-      const rows = (await repo.find({ filter: { organizationId, active: true }, sort: ['id'], limit: 100 })) || [];
+      const rows = (await runWithOptionalRls(
+        db,
+        organizationId,
+        (transaction) => repo.find({
+          filter: { organizationId, active: true },
+          sort: ['id'],
+          limit: 100,
+          ...(transaction ? { transaction } : {}),
+        }),
+        foundation,
+      )) || [];
       const n8nRows = rows.filter((r) => {
         if (val(r, 'organizationId') !== organizationId) return false;
         const cType = String(val(r, 'connectorType') || '').toLowerCase();
@@ -556,7 +567,17 @@ function createN8nRouteHandlers(db, options = {}) {
       const catalog = Array.isArray(vaultMod?.APP_CONNECTOR_CATALOG) ? vaultMod.APP_CONNECTOR_CATALOG : [];
       const repo = db?.getRepository?.('latticeConnectors');
       const rows = repo && typeof repo.find === 'function'
-        ? (await repo.find({ filter: { organizationId }, sort: ['id'], limit: 200 })) || []
+        ? (await runWithOptionalRls(
+          db,
+          organizationId,
+          (transaction) => repo.find({
+            filter: { organizationId },
+            sort: ['id'],
+            limit: 200,
+            ...(transaction ? { transaction } : {}),
+          }),
+          foundation,
+        )) || []
         : [];
       const configuredByApp = new Map();
       for (const r of rows) {

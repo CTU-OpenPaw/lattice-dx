@@ -917,7 +917,7 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
   };
 
   // Build tiny stateful React harness supporting useState, useEffect, useMemo, useCallback, useRef
-  const makeHarness = (requestImpl) => {
+  const makeHarness = (requestImpl, appOverride = {}) => {
     const stateSlots = [];
     const refSlots = [];
     const effectSlots = [];
@@ -968,7 +968,7 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
       },
     };
 
-    const Page = createDxosAiStudioPage({ useAPIClient: () => stableApi }, React, {}, {});
+    const Page = createDxosAiStudioPage({ useAPIClient: () => stableApi }, React, {}, appOverride);
     const render = () => {
       stateIdx = 0;
       refIdx = 0;
@@ -997,7 +997,7 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
       return new Promise((resolve) => { deferredResolvers.push({ org: req.params?.organizationId, resolve }); });
     }
     return Promise.resolve({ data: { data: {} } });
-  });
+  }, { defaultOrganizationId: 'native-ui-lab' });
 
   let tree5 = harness5.render();
   const tab5Btn = findAll(tree5, (n) => n.type === 'button' && n.children?.includes('5. Hạn mức & Chi phí AI'))[0];

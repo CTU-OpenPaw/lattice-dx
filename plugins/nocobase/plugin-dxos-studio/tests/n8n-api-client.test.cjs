@@ -427,3 +427,117 @@ test('createN8nRouteHandlers exposes dxosN8n actions, enforces root/admin/ldx_ad
     assert.equal(res.status, 'present', `${rel} missing valid SPDX header`);
   }
 });
+
+
+test('RLS Remediation (Finding 2b): resolveOrgN8nClient and appCatalog wrap latticeConnectors in PG RLS context and keep fetch outside TX', async () => {
+  const { createN8nRouteHandlers } = require('../src/server/n8n-api-client');
+  const vault = require('../../plugin-lattice-foundation/src/server/connector-vault');
+  const { db, connectors } = makeN8nTestDb();
+
+  const vaultKeyEnv = {
+    NODE_ENV: 'production',
+    DX_VAULT_MASTER_KEY: 'n8n-rls-test-vault-key',
+    DX_ALLOW_INTERNAL_CONNECTORS: 'true',
+  };
+  connectors.push({
+    id: 10,
+    organizationId: 'org-a',
+    connectorKey: 'n8n-primary',
+    name: 'Primary n8n',
+    connectorType: 'n8n',
+    appType: 'n8n_api',
+    baseUrl: 'http://n8n:5678',
+    authType: 'api_key',
+    encryptedSecretsJson: vault.encryptVaultSecrets({ apiKey: 'org-a-n8n-rls-key' }, vaultKeyEnv),
+    secretVersion: 1,
+    active: true,
+  });
+
+  const txOrgMap = new WeakMap();
+  let activeTxCount = 0;
+  const sqlLog = [];
+  let txCounter = 0;
+  db.sequelize = {
+    getDialect: () => 'postgres',
+    transaction: async (fn) => {
+      const tx = { id: `tx-n8n-rls-${++txCounter}` };
+      txOrgMap.set(tx, '');
+      activeTxCount += 1;
+      try {
+        return await fn(tx);
+      } finally {
+        activeTxCount -= 1;
+      }
+    },
+    query: async (sql, opts = {}) => {
+      const text = String(sql);
+      sqlLog.push({ sql: text, opts });
+      if (opts.transaction && text.includes("set_config('app.current_org'")) {
+        txOrgMap.set(opts.transaction, opts?.replacements?.orgId || '');
+      }
+      return [[]];
+    },
+  };
+
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (name !== 'latticeConnectors' || !repo) return repo;
+    return {
+      ...repo,
+      find: async (args = {}) => {
+        if (process.env.DX_PG_RLS_SESSION === 'true') {
+          const org = args.transaction ? txOrgMap.get(args.transaction) : '';
+          if (!org) return [];
+          const rows = await repo.find(args);
+          return rows.filter((r) => r.organizationId === org);
+        }
+        return repo.find(args);
+      },
+      findOne: async (args = {}) => {
+        if (process.env.DX_PG_RLS_SESSION === 'true') {
+          const org = args.transaction ? txOrgMap.get(args.transaction) : '';
+          if (!org) return null;
+          const row = await repo.findOne(args);
+          return row && row.organizationId === org ? row : null;
+        }
+        return repo.findOne(args);
+      },
+    };
+  };
+
+  let fetchInsideTx = false;
+  const { actions } = createN8nRouteHandlers(db, {
+    env: vaultKeyEnv,
+    fetchImpl: async (url) => {
+      if (activeTxCount > 0) fetchInsideTx = true;
+      const pathname = new URL(url).pathname;
+      if (pathname === '/healthz') return { ok: true, status: 200, text: async () => '{"status":"ok"}' };
+      if (pathname === '/api/v1/workflows') return { ok: true, status: 200, text: async () => JSON.stringify({ data: [{ id: 'wf-rls-1', active: true }] }) };
+      return { ok: false, status: 404, text: async () => '{}' };
+    },
+  });
+
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  process.env.DX_PG_RLS_SESSION = 'true';
+  try {
+    // 1. appCatalog reads latticeConnectors under withTenantRlsContext and reports configuredCount=1
+    sqlLog.length = 0;
+    const catCtx = makeCtx({ method: 'GET', state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' } });
+    await actions.appCatalog(catCtx, async () => {});
+    const n8nItem = catCtx.body.items.find((i) => i.appType === 'n8n_api');
+    assert.equal(n8nItem?.configuredCount, 1);
+    assert.ok(sqlLog.some((c) => c.sql.includes("set_config('app.current_org'") && c.opts?.replacements?.orgId === 'org-a'));
+
+    // 2. workflows -> resolveOrgN8nClient resolves connector under RLS TX, and fetch executes OUTSIDE TX
+    sqlLog.length = 0;
+    const wfCtx = makeCtx({ method: 'GET', state: { currentUser: { id: 10 }, currentRole: 'ldx_admin' } });
+    await actions.workflows(wfCtx, async () => {});
+    assert.equal(wfCtx.body.data[0].id, 'wf-rls-1');
+    assert.ok(sqlLog.some((c) => c.sql.includes("set_config('app.current_org'") && c.opts?.replacements?.orgId === 'org-a'));
+    assert.equal(fetchInsideTx, false, 'Outbound n8n HTTP fetch must never execute inside an open DB transaction');
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+  }
+});

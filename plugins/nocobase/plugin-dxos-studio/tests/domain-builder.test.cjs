@@ -986,16 +986,19 @@ test('Builder RBAC/PAT scope enforcement, latticeOrganizations direct CRUD guard
     );
   }
 
-  // 5. Fallback PG RLS policy in domain-builder uses exact app.current_org GUC predicate
+  // 5. Fallback PG RLS policy in domain-builder uses fail-closed FORCE ROW LEVEL SECURITY matching pg-rls.js
   const fallbackDb = makeBuilderDb();
   fallbackDb.attachLatticeRlsPolicy = undefined;
   const rlsResult = await attachAndVerifyPgRls(fallbackDb, 'latticeCustomCheck', { pgRls: null });
   assert.equal(rlsResult.attached, true);
   assert.equal(rlsResult.verified, true);
   const policySql = fallbackDb.queries.map((q) => q.sql).join('\n');
-  assert.match(policySql, /current_setting\('app\.current_org', true\)/);
+  assert.match(policySql, /ENABLE ROW LEVEL SECURITY/);
+  assert.match(policySql, /FORCE ROW LEVEL SECURITY/);
+  assert.match(policySql, /current_setting\('app\.rls_bypass', true\) = 'on'/);
+  assert.match(policySql, /nullif\(current_setting\('app\.current_org', true\), ''\)/);
   assert.doesNotMatch(policySql, /app\.organization_id/);
-  assert.match(policySql, /IS NULL OR .* = '' OR .* = '\*'/);
+  assert.doesNotMatch(policySql, /current_setting\('app\.current_org', true\) IS NULL/);
 
   // 6. Production PKI master key fails closed when no key material configured
   await assert.rejects(
@@ -1207,5 +1210,163 @@ test('Task 16: domain-builder grants RBAC and portal routes to custom non-ldx_ r
   assert.ok(db.store.rolesDesktopRoutes.some((g) => g.roleName === 'ops_manager'));
   for (const blocked of ['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector', 'r_dyn_01']) {
     assert.equal(db.store.rolesDesktopRoutes.some((g) => g.roleName === blocked), false);
+  }
+});
+
+
+test('RLS Remediation (Finding 4): installBusinessPack, listBusinessPacks, listTenants, and provisionTenant wrap FORCE RLS tables cleanly', async () => {
+  const db = makeBuilderDb({
+    latticeOrganizations: [{ id: 1, organizationId: 'org-a', name: 'Org A', active: true }],
+    latticeEmployees: [
+      { id: 10, userId: 20, organizationId: 'org-a', active: true },
+      { id: 11, userId: 50, organizationId: 'org-other', active: true },
+    ],
+    roles: [
+      { name: 'root', allowConfigure: true, snippets: ['*'] },
+      { name: 'ldx_admin', allowConfigure: true, snippets: ['ui.*'] },
+      { name: 'ldx_manager', allowConfigure: false, snippets: [] },
+      { name: 'ldx_operator', allowConfigure: false, snippets: [] },
+      { name: 'ldx_employee', allowConfigure: false, snippets: [] },
+    ],
+    rolesUsers: [
+      { userId: 1, roleName: 'root' },
+      { userId: 20, roleName: 'ldx_admin' },
+    ],
+    users: [
+      { id: 1, username: 'root' },
+      { id: 50, username: 'other_org_user', email: 'other@org-other.local' },
+    ],
+  });
+
+  const txStateMap = new WeakMap();
+  const rlsSqlLog = [];
+  let txSeq = 0;
+  const origQuery = db.sequelize.query.bind(db.sequelize);
+  db.sequelize.transaction = async (fn) => {
+    const tx = { id: `tx-builder-rls-${++txSeq}` };
+    txStateMap.set(tx, { bypass: false, org: '' });
+    return fn(tx);
+  };
+  db.sequelize.query = async (sql, opts = {}) => {
+    const text = String(sql);
+    rlsSqlLog.push({ sql: text, opts });
+    const st = opts.transaction ? txStateMap.get(opts.transaction) : null;
+    if (st && text.includes("set_config('app.rls_bypass', 'on'")) st.bypass = true;
+    if (st && text.includes("set_config('app.current_org'")) st.org = opts?.replacements?.orgId || '';
+    return origQuery(sql, opts);
+  };
+
+  const rlsTables = new Set([
+    'latticeDecisionTables',
+    'latticeAutomationRules',
+    'latticeDepartments',
+    'latticeLocations',
+    'latticeEmployees',
+    'latticePkiKeys',
+    'latticeSlaPolicies',
+  ]);
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!rlsTables.has(name) || !repo) return repo;
+    const allowed = (row, transaction) => {
+      if (process.env.DX_PG_RLS_SESSION !== 'true') return true;
+      const st = transaction ? txStateMap.get(transaction) : null;
+      if (!st) return false;
+      return st.bypass === true || (st.org && row.organizationId === st.org);
+    };
+    return {
+      ...repo,
+      find: async (args = {}) => (await repo.find(args)).filter((r) => allowed(r, args.transaction)),
+      findOne: async (args = {}) => {
+        const rows = await repo.find({ ...args, limit: 500 });
+        return rows.find((r) => allowed(r, args.transaction)) || null;
+      },
+      create: async (args = {}) => {
+        if (!allowed(args.values || {}, args.transaction)) {
+          throw new Error(`RLS VIOLATION on ${name}.create`);
+        }
+        return repo.create(args);
+      },
+      update: async (args = {}) => {
+        if (process.env.DX_PG_RLS_SESSION === 'true') {
+          const st = args.transaction ? txStateMap.get(args.transaction) : null;
+          if (!st || (!st.bypass && !st.org)) throw new Error(`RLS VIOLATION on ${name}.update`);
+        }
+        return repo.update(args);
+      },
+    };
+  };
+
+  const builder = createDxosBuilderActions(db);
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_PG_RLS_SESSION = 'true';
+  process.env.DX_VAULT_MASTER_KEY = 'builder-rls-test-master-key-32bytes';
+  try {
+    // 1. installBusinessPack + listBusinessPacks under DX_PG_RLS_SESSION=true
+    rlsSqlLog.length = 0;
+    const installCtx = makeCtx({
+      userId: 1,
+      role: 'root',
+      isRoot: true,
+      params: { packKey: 'cmms-maintenance', organizationId: 'org-a' },
+    });
+    await builder.installBusinessPack(installCtx, async () => {});
+    assert.equal(installCtx.body.installed, true);
+    assert.ok(rlsSqlLog.some((c) => c.sql.includes("set_config('app.current_org'") && c.opts?.replacements?.orgId === 'org-a'));
+
+    rlsSqlLog.length = 0;
+    const listPacksCtx = makeCtx({ userId: 20, role: 'ldx_admin', organizationId: 'org-a', params: {} });
+    await builder.listBusinessPacks(listPacksCtx, async () => {});
+    const cmmsPack = listPacksCtx.body.items.find((p) => p.packKey === 'cmms-maintenance');
+    assert.equal(cmmsPack?.installed, true);
+    assert.ok(rlsSqlLog.some((c) => c.sql.includes("set_config('app.current_org'") && c.opts?.replacements?.orgId === 'org-a'));
+
+    // 2. provisionTenant + cross-org hijack detection under withSystemRlsBypass
+    rlsSqlLog.length = 0;
+    const provCtx = makeCtx({
+      userId: 1,
+      role: 'root',
+      isRoot: true,
+      params: {
+        organizationId: 'org-new-rls',
+        name: 'New RLS Tenant',
+        adminUsername: 'new_rls_admin',
+      },
+    });
+    await builder.provisionTenant(provCtx, async () => {});
+    assert.equal(provCtx.body.provisioned, true);
+    assert.equal(provCtx.body.departmentsCount, 2);
+    assert.equal(provCtx.body.slaCount, 4);
+    assert.ok(rlsSqlLog.some((c) => c.sql.includes("set_config('app.current_org'") && c.opts?.replacements?.orgId === 'org-new-rls'));
+    assert.ok(rlsSqlLog.some((c) => c.sql.includes("set_config('app.rls_bypass', 'on'")));
+
+    // Cross-org existing user MUST still be detected via withSystemRlsBypass (not hidden by tenant RLS)
+    await assert.rejects(
+      () => builder.provisionTenant(makeCtx({
+        userId: 1,
+        role: 'root',
+        isRoot: true,
+        params: { organizationId: 'org-new-rls', name: 'New RLS Tenant', adminUsername: 'other_org_user' },
+      }), async () => {}),
+      (err) => err.status === 403 && err.code === 'USER_ORG_CONFLICT',
+    );
+
+    // 3. listTenants as root uses withSystemRlsBypass and sees counts for both orgs
+    rlsSqlLog.length = 0;
+    const listTenantsCtx = makeCtx({ userId: 1, role: 'root', isRoot: true, params: {} });
+    await builder.listTenants(listTenantsCtx, async () => {});
+    assert.ok(rlsSqlLog.some((c) => c.sql.includes("set_config('app.rls_bypass', 'on'")));
+    const newTenantSummary = listTenantsCtx.body.items.find((t) => t.organizationId === 'org-new-rls');
+    assert.equal(newTenantSummary?.departmentCount, 2);
+    assert.equal(newTenantSummary?.employeeCount, 1);
+    assert.equal(newTenantSummary?.slaCount, 4);
+    assert.ok(newTenantSummary?.activePkiKey?.keyId);
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
 });

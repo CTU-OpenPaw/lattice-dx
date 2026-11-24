@@ -242,8 +242,8 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const [draft, setDraft] = React.useState(() => createEmptyProfileDraft(resolveStudioDefaultOrg({ app })));
     const [mcpText, setMcpText] = React.useState(() => JSON.stringify(createEmptyProfileDraft().mcpServers, null, 2));
     const [promptsText, setPromptsText] = React.useState(() => JSON.stringify(createEmptyProfileDraft().quickPrompts, null, 2));
-    const [quotaOrg, setQuotaOrg] = React.useState(() => resolveStudioDefaultOrg({ app }) || 'native-ui-lab');
-    const [quotaOrgDraft, setQuotaOrgDraft] = React.useState(() => resolveStudioDefaultOrg({ app }) || 'native-ui-lab');
+    const [quotaOrg, setQuotaOrg] = React.useState(() => resolveStudioDefaultOrg({ app }) || '');
+    const [quotaOrgDraft, setQuotaOrgDraft] = React.useState(() => resolveStudioDefaultOrg({ app }) || '');
     const [quotaSummary, setQuotaSummary] = React.useState(null);
     const [quotaLoading, setQuotaLoading] = React.useState(false);
     const [customModelMode, setCustomModelMode] = React.useState(false);

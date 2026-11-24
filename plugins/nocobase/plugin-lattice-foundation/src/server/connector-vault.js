@@ -1061,13 +1061,14 @@ async function oauthCallback(db, params = {}, options = {}) {
   const isMockFetch = typeof options.fetchImpl === 'function' && options.fetchImpl !== globalThis.fetch;
   const skipDnsCheck = isMockFetch && typeof lookupImpl !== 'function' && !options.enforceDnsInMock;
 
-  return runVaultDbOp(db, orgId, async (transaction) => {
+  const tx1 = await runVaultDbOp(db, orgId, async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
+    const lockOpt = transaction?.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {};
     let row = null;
     if (params.id != null || params.filterByTk != null || params.connectorKey) {
-      row = await findConnectorInOrg(repo, orgId, params, transaction);
+      row = await findConnectorInOrg(repo, orgId, params, transaction, { lock: true });
     } else {
-      row = await repo.findOne({ filter: { organizationId: orgId, oauthStateNonce: state }, ...txOpt });
+      row = await repo.findOne({ filter: { organizationId: orgId, oauthStateNonce: state }, ...txOpt, ...lockOpt });
     }
     if (!row || val(row, 'organizationId') !== orgId) {
       throw failVault('CONNECTOR_NOT_FOUND', 404, 'OAuth2 connector not found in organization scope.');
@@ -1089,87 +1090,111 @@ async function oauthCallback(db, params = {}, options = {}) {
     }
 
     const oauthCfg = sanitizeOauthConfigForStorage(val(row, 'oauthConfigJson')) || {};
-    const tokenUrl = await assertSafeConnectorUrlAsync(oauthCfg.tokenUrl, {
-      connectorType: 'http_api',
-      env,
-      allowInternal,
-      lookupImpl,
-      skipDnsCheck,
-    });
-    if (typeof fetchImpl !== 'function') {
-      throw failVault('OAUTH_FETCH_UNAVAILABLE', 503, 'HTTP fetch implementation unavailable for OAuth2 exchange.');
-    }
-
-    const formBody = new URLSearchParams();
-    formBody.set('grant_type', 'authorization_code');
-    formBody.set('code', code);
-    formBody.set('redirect_uri', String(params.redirectUri || pkceMeta.redirectUri || oauthCfg.redirectUri || ''));
-    formBody.set('client_id', String(oauthCfg.clientId || ''));
-    formBody.set('code_verifier', String(pkceMeta.codeVerifier));
-    if (secrets.clientSecret) {
-      formBody.set('client_secret', String(secrets.clientSecret));
-    }
-
-    const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-      ? AbortSignal.timeout(10000)
-      : undefined;
-    let response;
-    try {
-      response = await fetchImpl(tokenUrl, {
-        method: 'POST',
-        redirect: 'error',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: formBody.toString(),
-        ...(signal ? { signal } : {}),
-      });
-    } catch (err) {
-      throw failVault('OAUTH_TOKEN_EXCHANGE_FAILED', 502, `OAuth2 token exchange error: ${err?.message || 'request failed'}`);
-    }
-
-    const tokenData = await parseTokenEndpointResponse(response);
-    if (!response?.ok || !tokenData?.access_token) {
-      throw failVault(
-        'OAUTH_TOKEN_EXCHANGE_FAILED',
-        502,
-        `OAuth2 token endpoint returned HTTP ${response?.status || 'unknown'}: ${tokenData?.error_description || tokenData?.error || 'missing access_token'}`,
-      );
-    }
-
-    const oauthAccessTokenEnc = encryptSecretText(String(tokenData.access_token), env);
-    const oauthRefreshTokenEnc = tokenData.refresh_token
-      ? encryptSecretText(String(tokenData.refresh_token), env)
-      : (val(row, 'oauthRefreshTokenEnc') || null);
-    const expiresInSec = Number(tokenData.expires_in);
-    const oauthTokenExpiresAt = Number.isFinite(expiresInSec) && expiresInSec > 0
-      ? new Date(nowMs + expiresInSec * 1000)
-      : null;
-    const oauthScope = tokenData.scope ? String(tokenData.scope).trim() : (val(row, 'oauthScope') || null);
-
     const remainingSecrets = { ...secrets };
     delete remainingSecrets._oauthPkce;
     const encryptedSecretsJson = Object.keys(remainingSecrets).length > 0
       ? encryptVaultSecrets(remainingSecrets, env)
       : null;
 
-    const updated = await saveConnectorRowValues(repo, row, orgId, {
-      oauthAccessTokenEnc,
-      oauthRefreshTokenEnc,
-      oauthTokenExpiresAt,
-      oauthScope,
+    // Atomically consume the one-time state nonce and PKCE verifier in TX1 before outbound HTTP.
+    await saveConnectorRowValues(repo, row, orgId, {
       oauthStateNonce: null,
       encryptedSecretsJson,
     }, transaction);
 
     return {
-      ...serializeConnector(updated, { env }),
-      connected: true,
-      hasAccessToken: true,
-      hasRefreshToken: Boolean(oauthRefreshTokenEnc),
+      rowId: val(row, 'id') ?? null,
+      connectorKey: val(row, 'connectorKey') || '',
+      nowMs,
+      oauthCfg,
+      pkceMeta,
+      clientSecret: secrets.clientSecret ? String(secrets.clientSecret) : null,
+      existingRefreshTokenEnc: val(row, 'oauthRefreshTokenEnc') || null,
+      existingOauthScope: val(row, 'oauthScope') || null,
+      fallbackRow: row,
     };
   });
+
+  // Outbound token exchange runs strictly outside any DB transaction.
+  const tokenUrl = await assertSafeConnectorUrlAsync(tx1.oauthCfg.tokenUrl, {
+    connectorType: 'http_api',
+    env,
+    allowInternal,
+    lookupImpl,
+    skipDnsCheck,
+  });
+  if (typeof fetchImpl !== 'function') {
+    throw failVault('OAUTH_FETCH_UNAVAILABLE', 503, 'HTTP fetch implementation unavailable for OAuth2 exchange.');
+  }
+
+  const formBody = new URLSearchParams();
+  formBody.set('grant_type', 'authorization_code');
+  formBody.set('code', code);
+  formBody.set('redirect_uri', String(params.redirectUri || tx1.pkceMeta.redirectUri || tx1.oauthCfg.redirectUri || ''));
+  formBody.set('client_id', String(tx1.oauthCfg.clientId || ''));
+  formBody.set('code_verifier', String(tx1.pkceMeta.codeVerifier));
+  if (tx1.clientSecret) {
+    formBody.set('client_secret', tx1.clientSecret);
+  }
+
+  const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(10000)
+    : undefined;
+  let response;
+  try {
+    response = await fetchImpl(tokenUrl, {
+      method: 'POST',
+      redirect: 'error',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: formBody.toString(),
+      ...(signal ? { signal } : {}),
+    });
+  } catch (err) {
+    throw failVault('OAUTH_TOKEN_EXCHANGE_FAILED', 502, `OAuth2 token exchange error: ${err?.message || 'request failed'}`);
+  }
+
+  const tokenData = await parseTokenEndpointResponse(response);
+  if (!response?.ok || !tokenData?.access_token) {
+    throw failVault(
+      'OAUTH_TOKEN_EXCHANGE_FAILED',
+      502,
+      `OAuth2 token endpoint returned HTTP ${response?.status || 'unknown'}: ${tokenData?.error_description || tokenData?.error || 'missing access_token'}`,
+    );
+  }
+
+  const oauthAccessTokenEnc = encryptSecretText(String(tokenData.access_token), env);
+  const oauthRefreshTokenEnc = tokenData.refresh_token
+    ? encryptSecretText(String(tokenData.refresh_token), env)
+    : tx1.existingRefreshTokenEnc;
+  const expiresInSec = Number(tokenData.expires_in);
+  const oauthTokenExpiresAt = Number.isFinite(expiresInSec) && expiresInSec > 0
+    ? new Date(tx1.nowMs + expiresInSec * 1000)
+    : null;
+  const oauthScope = tokenData.scope ? String(tokenData.scope).trim() : tx1.existingOauthScope;
+
+  const updated = await runVaultDbOp(db, orgId, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const refFilter = tx1.rowId != null
+      ? { organizationId: orgId, id: tx1.rowId }
+      : { organizationId: orgId, connectorKey: tx1.connectorKey };
+    const targetRow = (await repo.findOne({ filter: refFilter, ...txOpt })) || tx1.fallbackRow;
+    return saveConnectorRowValues(repo, targetRow, orgId, {
+      oauthAccessTokenEnc,
+      oauthRefreshTokenEnc,
+      oauthTokenExpiresAt,
+      oauthScope,
+    }, transaction);
+  });
+
+  return {
+    ...serializeConnector(updated, { env }),
+    connected: true,
+    hasAccessToken: true,
+    hasRefreshToken: Boolean(oauthRefreshTokenEnc),
+  };
 }
 
 function getDbRefreshFlightMap(db) {
@@ -1191,11 +1216,6 @@ async function getFreshConnectorToken(db, connectorId, deps = {}) {
   if (!refStr) {
     throw failVault('CONNECTOR_REF_REQUIRED', 400, 'connectorId or connectorKey is required.');
   }
-  const flightKey = `${orgScope}:${refStr}`;
-  const existingFlight = flightMap.get(flightKey);
-  if (existingFlight) {
-    return existingFlight;
-  }
 
   const env = deps.env || process.env;
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
@@ -1205,56 +1225,65 @@ async function getFreshConnectorToken(db, connectorId, deps = {}) {
     : OAUTH_REFRESH_BUFFER_SEC_DEFAULT;
   const bufferMs = bufferSec * 1000;
 
+  const repo = getRepo(db, 'latticeConnectors');
+  if (!repo || typeof repo.findOne !== 'function') {
+    throw failVault('CONNECTOR_REPO_UNAVAILABLE', 503, 'latticeConnectors repository is unavailable.');
+  }
+
+  const filter = /^[1-9]\d*$/.test(refStr)
+    ? (orgScope ? { id: Number(refStr), organizationId: orgScope } : { id: Number(refStr) })
+    : (() => {
+        if (!ORG_ID_RE.test(orgScope)) {
+          throw failVault('VAULT_ORG_REQUIRED', 400, 'organizationId is required when resolving by connectorKey.');
+        }
+        return { organizationId: orgScope, connectorKey: refStr.toLowerCase() };
+      })();
+
+  const initialRow = await runVaultDbOp(db, orgScope || null, (transaction) => repo.findOne({
+    filter,
+    ...(transaction ? { transaction } : {}),
+  }));
+  if (!initialRow || (orgScope && val(initialRow, 'organizationId') !== orgScope)) {
+    throw failVault('CONNECTOR_NOT_FOUND', 404, 'OAuth2 connector not found.');
+  }
+  if (!deps.allowInactive && val(initialRow, 'active') === false) {
+    throw failVault('CONNECTOR_INACTIVE', 403, 'Connector is inactive.');
+  }
+
+  const rowOrgId = String(val(initialRow, 'organizationId') || '');
+  const rowId = val(initialRow, 'id');
+  const rowConnectorKey = String(val(initialRow, 'connectorKey') || '').trim().toLowerCase();
+  const nowMs = Number.isFinite(Number(deps.nowMs)) ? Number(deps.nowMs) : Date.now();
+  const accessEnc = val(initialRow, 'oauthAccessTokenEnc');
+  const expiresRaw = val(initialRow, 'oauthTokenExpiresAt');
+  const expiresMs = expiresRaw ? new Date(expiresRaw).getTime() : null;
+
+  const hasValidCachedToken = Boolean(accessEnc && String(accessEnc).trim())
+    && (expiresMs === null || (Number.isFinite(expiresMs) && expiresMs - nowMs > bufferMs));
+
+  if (hasValidCachedToken) {
+    const accessToken = decryptSecretText(accessEnc, env);
+    return {
+      connectorId: rowId ?? refStr,
+      connectorKey: val(initialRow, 'connectorKey') || '',
+      organizationId: rowOrgId,
+      accessToken,
+      tokenType: 'Bearer',
+      refreshed: false,
+      expiresAt: expiresMs !== null ? new Date(expiresMs).toISOString() : null,
+      scope: val(initialRow, 'oauthScope') || null,
+    };
+  }
+
+  const flightKey = rowId != null
+    ? `${rowOrgId}:id:${rowId}`
+    : `${rowOrgId}:key:${rowConnectorKey || refStr.toLowerCase()}`;
+  const existingFlight = flightMap.get(flightKey);
+  if (existingFlight) {
+    return existingFlight;
+  }
+
   const flightPromise = (async () => {
-    const repo = getRepo(db, 'latticeConnectors');
-    if (!repo || typeof repo.findOne !== 'function') {
-      throw failVault('CONNECTOR_REPO_UNAVAILABLE', 503, 'latticeConnectors repository is unavailable.');
-    }
-
-    const filter = /^[1-9]\d*$/.test(refStr)
-      ? (orgScope ? { id: Number(refStr), organizationId: orgScope } : { id: Number(refStr) })
-      : (() => {
-          if (!ORG_ID_RE.test(orgScope)) {
-            throw failVault('VAULT_ORG_REQUIRED', 400, 'organizationId is required when resolving by connectorKey.');
-          }
-          return { organizationId: orgScope, connectorKey: refStr.toLowerCase() };
-        })();
-
-    const initialRow = await runVaultDbOp(db, orgScope || null, (transaction) => repo.findOne({
-      filter,
-      ...(transaction ? { transaction } : {}),
-    }));
-    if (!initialRow || (orgScope && val(initialRow, 'organizationId') !== orgScope)) {
-      throw failVault('CONNECTOR_NOT_FOUND', 404, 'OAuth2 connector not found.');
-    }
-    if (!deps.allowInactive && val(initialRow, 'active') === false) {
-      throw failVault('CONNECTOR_INACTIVE', 403, 'Connector is inactive.');
-    }
-
-    const rowOrgId = String(val(initialRow, 'organizationId') || '');
-    const rowId = val(initialRow, 'id');
-    const nowMs = Number.isFinite(Number(deps.nowMs)) ? Number(deps.nowMs) : Date.now();
-    const accessEnc = val(initialRow, 'oauthAccessTokenEnc');
-    const expiresRaw = val(initialRow, 'oauthTokenExpiresAt');
-    const expiresMs = expiresRaw ? new Date(expiresRaw).getTime() : null;
-
-    const hasValidCachedToken = Boolean(accessEnc && String(accessEnc).trim())
-      && (expiresMs === null || (Number.isFinite(expiresMs) && expiresMs - nowMs > bufferMs));
-
-    if (hasValidCachedToken) {
-      const accessToken = decryptSecretText(accessEnc, env);
-      return {
-        connectorId: rowId ?? refStr,
-        connectorKey: val(initialRow, 'connectorKey') || '',
-        organizationId: rowOrgId,
-        accessToken,
-        tokenType: 'Bearer',
-        refreshed: false,
-        expiresAt: expiresMs !== null ? new Date(expiresMs).toISOString() : null,
-        scope: val(initialRow, 'oauthScope') || null,
-      };
-    }
-
     const refreshEnc = val(initialRow, 'oauthRefreshTokenEnc');
     if (!refreshEnc || !String(refreshEnc).trim()) {
       throw failVault('OAUTH_REFRESH_TOKEN_MISSING', 401, 'OAuth2 access token expired and no refresh token is available.');
@@ -1575,16 +1604,17 @@ async function probeConnectorEndpoint(
   }
 }
 
-async function findConnectorInOrg(repo, organizationId, params, transaction) {
+async function findConnectorInOrg(repo, organizationId, params, transaction, options = {}) {
   const txOpt = transaction ? { transaction } : {};
+  const lockOpt = options.lock && transaction?.LOCK?.UPDATE ? { lock: transaction.LOCK.UPDATE } : {};
   const id = Number(params.id ?? params.filterByTk);
   const connectorKey = typeof params.connectorKey === 'string' ? params.connectorKey.trim().toLowerCase() : '';
   if (Number.isInteger(id) && id > 0) {
-    const row = await repo.findOne({ filter: { id, organizationId }, ...txOpt });
+    const row = await repo.findOne({ filter: { id, organizationId }, ...txOpt, ...lockOpt });
     return row && val(row, 'organizationId') === organizationId ? row : null;
   }
   if (connectorKey) {
-    const row = await repo.findOne({ filter: { organizationId, connectorKey }, ...txOpt });
+    const row = await repo.findOne({ filter: { organizationId, connectorKey }, ...txOpt, ...lockOpt });
     return row && val(row, 'organizationId') === organizationId ? row : null;
   }
   return null;
@@ -1640,7 +1670,12 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
           filter.active = params.active === true || params.active === 'true';
         }
         const limit = Math.max(1, Math.min(200, Math.floor(Number(params.limit) || 100)));
-        const rows = (await repo.find({ filter, sort: ['id'], limit })) || [];
+        const rows = (await runVaultDbOp(db, scope.organizationId, (transaction) => repo.find({
+          filter,
+          sort: ['id'],
+          limit,
+          ...(transaction ? { transaction } : {}),
+        }))) || [];
         const items = rows
           .filter((r) => !scope.organizationId || val(r, 'organizationId') === scope.organizationId)
           .map((r) => serializeConnector(r, { env }));
@@ -1692,49 +1727,50 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
           throw failVault('CONNECTOR_URL_UNSAFE', 400, 'baseUrl is required for this connectorType.');
         }
 
-        const existing = await findConnectorInOrg(repo, scope.organizationId, {
-          id: params.id ?? params.filterByTk,
-          connectorKey,
-        });
-
-        let encryptedSecretsJson = existing ? val(existing, 'encryptedSecretsJson') || null : null;
-        let secretVersion = existing ? (Number(val(existing, 'secretVersion')) || 1) : 1;
-        if (params.secrets !== undefined) {
-          const cleanSecrets = sanitizeSecretsObject(params.secrets);
-          encryptedSecretsJson = Object.keys(cleanSecrets).length > 0
-            ? encryptVaultSecrets(cleanSecrets, env)
-            : null;
-          if (existing) secretVersion += 1;
-        }
-
-        const values = {
-          organizationId: scope.organizationId,
-          connectorKey,
-          name,
-          connectorType,
-          appType: rawAppType !== undefined ? (rawAppType || null) : (existing ? val(existing, 'appType') || null : null),
-          capabilitiesJson: params.capabilitiesJson !== undefined
-            ? sanitizeJsonValue(params.capabilitiesJson)
-            : (existing ? val(existing, 'capabilitiesJson') || null : (catalogEntry?.capabilities ? [...catalogEntry.capabilities] : null)),
-          oauthConfigJson: params.oauthConfigJson !== undefined
-            ? sanitizeOauthConfigForStorage(params.oauthConfigJson)
-            : (existing ? val(existing, 'oauthConfigJson') || null : null),
-          n8nCredentialId: params.n8nCredentialId !== undefined
-            ? (params.n8nCredentialId ? String(params.n8nCredentialId).trim().slice(0, 128) : null)
-            : (existing ? val(existing, 'n8nCredentialId') || null : null),
-          baseUrl,
-          authType,
-          encryptedSecretsJson,
-          secretVersion,
-          active: params.active === undefined ? (existing ? val(existing, 'active') !== false : true) : Boolean(params.active),
-        };
-
         let saved;
+        let fallbackValues;
         await runVaultDbOp(db, scope.organizationId, async (transaction) => {
-          saved = await saveConnectorRowValues(repo, existing, scope.organizationId, values, transaction);
+          const existing = await findConnectorInOrg(repo, scope.organizationId, {
+            id: params.id ?? params.filterByTk,
+            connectorKey,
+          }, transaction);
+
+          let encryptedSecretsJson = existing ? val(existing, 'encryptedSecretsJson') || null : null;
+          let secretVersion = existing ? (Number(val(existing, 'secretVersion')) || 1) : 1;
+          if (params.secrets !== undefined) {
+            const cleanSecrets = sanitizeSecretsObject(params.secrets);
+            encryptedSecretsJson = Object.keys(cleanSecrets).length > 0
+              ? encryptVaultSecrets(cleanSecrets, env)
+              : null;
+            if (existing) secretVersion += 1;
+          }
+
+          fallbackValues = {
+            organizationId: scope.organizationId,
+            connectorKey,
+            name,
+            connectorType,
+            appType: rawAppType !== undefined ? (rawAppType || null) : (existing ? val(existing, 'appType') || null : null),
+            capabilitiesJson: params.capabilitiesJson !== undefined
+              ? sanitizeJsonValue(params.capabilitiesJson)
+              : (existing ? val(existing, 'capabilitiesJson') || null : (catalogEntry?.capabilities ? [...catalogEntry.capabilities] : null)),
+            oauthConfigJson: params.oauthConfigJson !== undefined
+              ? sanitizeOauthConfigForStorage(params.oauthConfigJson)
+              : (existing ? val(existing, 'oauthConfigJson') || null : null),
+            n8nCredentialId: params.n8nCredentialId !== undefined
+              ? (params.n8nCredentialId ? String(params.n8nCredentialId).trim().slice(0, 128) : null)
+              : (existing ? val(existing, 'n8nCredentialId') || null : null),
+            baseUrl,
+            authType,
+            encryptedSecretsJson,
+            secretVersion,
+            active: params.active === undefined ? (existing ? val(existing, 'active') !== false : true) : Boolean(params.active),
+          };
+
+          saved = await saveConnectorRowValues(repo, existing, scope.organizationId, fallbackValues, transaction);
         });
 
-        ctx.body = serializeConnector(saved || values, { env });
+        ctx.body = serializeConnector(saved || fallbackValues, { env });
         if (next) return next();
       },
 
@@ -1749,28 +1785,34 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
 
         const repo = getRepo(db, 'latticeConnectors');
         if (!repo) throw failVault('CONNECTOR_REPO_UNAVAILABLE', 503, 'latticeConnectors repository is unavailable.');
-        const row = await findConnectorInOrg(repo, scope.organizationId, params);
-        if (!row) throw failVault('CONNECTOR_NOT_FOUND', 404, 'Connector not found.');
 
-        const cleanSecrets = sanitizeSecretsObject(params.secrets);
-        if (Object.keys(cleanSecrets).length === 0) {
-          throw failVault('VAULT_SECRETS_REQUIRED', 400, 'Non-empty secrets object is required to rotate secret.');
-        }
-        const encryptedSecretsJson = encryptVaultSecrets(cleanSecrets, env);
-        const nextVersion = (Number(val(row, 'secretVersion')) || 1) + 1;
-        const patch = { encryptedSecretsJson, secretVersion: nextVersion };
+        const updated = await runVaultDbOp(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const row = await findConnectorInOrg(repo, scope.organizationId, params, transaction);
+          if (!row) throw failVault('CONNECTOR_NOT_FOUND', 404, 'Connector not found.');
 
-        let updated = row;
-        if (typeof row.update === 'function') {
-          updated = await row.update(patch);
-        } else if (typeof repo.update === 'function') {
-          const res = await repo.update({
-            filterByTk: val(row, 'id'),
-            filter: { organizationId: scope.organizationId },
-            values: patch,
-          });
-          if (Array.isArray(res) && res[0]) updated = res[0];
-        }
+          const cleanSecrets = sanitizeSecretsObject(params.secrets);
+          if (Object.keys(cleanSecrets).length === 0) {
+            throw failVault('VAULT_SECRETS_REQUIRED', 400, 'Non-empty secrets object is required to rotate secret.');
+          }
+          const encryptedSecretsJson = encryptVaultSecrets(cleanSecrets, env);
+          const nextVersion = (Number(val(row, 'secretVersion')) || 1) + 1;
+          const patch = { encryptedSecretsJson, secretVersion: nextVersion };
+
+          if (typeof row.update === 'function') {
+            return transaction ? row.update(patch, { transaction }) : row.update(patch);
+          }
+          if (typeof repo.update === 'function') {
+            const res = await repo.update({
+              filterByTk: val(row, 'id'),
+              filter: { organizationId: scope.organizationId },
+              values: patch,
+              ...txOpt,
+            });
+            if (Array.isArray(res) && res[0]) return res[0];
+          }
+          return row;
+        });
 
         ctx.body = serializeConnector(updated, { env });
         if (next) return next();
@@ -1787,17 +1829,23 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
 
         const repo = getRepo(db, 'latticeConnectors');
         if (!repo) throw failVault('CONNECTOR_REPO_UNAVAILABLE', 503, 'latticeConnectors repository is unavailable.');
-        const row = await findConnectorInOrg(repo, scope.organizationId, params);
-        if (!row) throw failVault('CONNECTOR_NOT_FOUND', 404, 'Connector not found.');
 
-        const id = val(row, 'id');
-        const connectorKey = val(row, 'connectorKey');
-        if (typeof repo.destroy === 'function') {
-          await repo.destroy({ filter: { id, organizationId: scope.organizationId } });
-        } else if (typeof row.destroy === 'function') {
-          await row.destroy();
-        }
-        ctx.body = { deleted: true, id, connectorKey };
+        const deleted = await runVaultDbOp(db, scope.organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const row = await findConnectorInOrg(repo, scope.organizationId, params, transaction);
+          if (!row) throw failVault('CONNECTOR_NOT_FOUND', 404, 'Connector not found.');
+
+          const id = val(row, 'id');
+          const connectorKey = val(row, 'connectorKey');
+          if (typeof repo.destroy === 'function') {
+            await repo.destroy({ filter: { id, organizationId: scope.organizationId }, ...txOpt });
+          } else if (typeof row.destroy === 'function') {
+            await (transaction ? row.destroy({ transaction }) : row.destroy());
+          }
+          return { deleted: true, id, connectorKey };
+        });
+
+        ctx.body = deleted;
         if (next) return next();
       },
 
@@ -1811,7 +1859,9 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
         }
 
         const repo = getRepo(db, 'latticeConnectors');
-        const row = repo ? await findConnectorInOrg(repo, scope.organizationId, params) : null;
+        const row = repo
+          ? await runVaultDbOp(db, scope.organizationId, (transaction) => findConnectorInOrg(repo, scope.organizationId, params, transaction))
+          : null;
         if ((params.id != null || params.filterByTk != null || params.connectorKey) && !row) {
           throw failVault('CONNECTOR_NOT_FOUND', 404, 'Connector not found.');
         }
@@ -1825,6 +1875,7 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
           ? decryptVaultSecrets(val(row, 'encryptedSecretsJson'), env)
           : sanitizeSecretsObject(params.secrets);
 
+        // Outbound probe runs strictly outside any DB transaction.
         const allowInternal = resolveAllowInternalConnectorHosts({ isRoot: scope.isRoot, env });
         const result = await probeConnectorEndpoint(
           { connectorType, baseUrl, authType, secrets },
@@ -1835,15 +1886,19 @@ function registerConnectorVault(app, { env = process.env, fetchImpl, tcpProbeImp
         const testStatus = result.ok ? 'ok' : (result.statusCode ? `http_${result.statusCode}` : 'error');
         if (row) {
           const patch = { lastTestedAt: testedAt, lastTestStatus: testStatus };
-          if (typeof row.update === 'function') {
-            await row.update(patch);
-          } else if (typeof repo?.update === 'function') {
-            await repo.update({
-              filterByTk: val(row, 'id'),
-              filter: { organizationId: scope.organizationId },
-              values: patch,
-            });
-          }
+          await runVaultDbOp(db, scope.organizationId, async (transaction) => {
+            const txOpt = transaction ? { transaction } : {};
+            if (typeof row.update === 'function') {
+              await (transaction ? row.update(patch, { transaction }) : row.update(patch));
+            } else if (typeof repo?.update === 'function') {
+              await repo.update({
+                filterByTk: val(row, 'id'),
+                filter: { organizationId: scope.organizationId },
+                values: patch,
+                ...txOpt,
+              });
+            }
+          });
         }
 
         ctx.body = {

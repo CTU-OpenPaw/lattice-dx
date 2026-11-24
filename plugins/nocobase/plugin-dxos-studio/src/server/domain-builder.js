@@ -28,6 +28,8 @@ const {
   readParams,
   resolveTenantActor,
   resolveVerifiedRoles,
+  runWithOptionalRls,
+  runWithSystemRlsBypass,
   toPlain,
   val,
 } = require('./wms-dmn-shared');
@@ -451,9 +453,10 @@ function sanitizeFields(rawFields) {
   return sanitized;
 }
 
-async function upsertRepoRow(repo, filter, values) {
+async function upsertRepoRow(repo, filter, values, transaction = null) {
   if (!repo) return null;
-  const existing = typeof repo.findOne === 'function' ? await repo.findOne({ filter }) : null;
+  const txOpt = transaction ? { transaction } : {};
+  const existing = typeof repo.findOne === 'function' ? await repo.findOne({ filter, ...txOpt }) : null;
   if (existing) {
     if (typeof repo.update === 'function') {
       const existingId = val(existing, 'id');
@@ -461,12 +464,13 @@ async function upsertRepoRow(repo, filter, values) {
         ...(existingId != null ? { filterByTk: existingId } : {}),
         filter,
         values,
+        ...txOpt,
       });
     }
-    return (typeof repo.findOne === 'function' ? await repo.findOne({ filter }) : null) || existing;
+    return (typeof repo.findOne === 'function' ? await repo.findOne({ filter, ...txOpt }) : null) || existing;
   }
   if (typeof repo.create === 'function') {
-    return repo.create({ values });
+    return repo.create({ values, ...txOpt });
   }
   return null;
 }
@@ -489,12 +493,11 @@ async function attachAndVerifyPgRls(db, collectionName, opts = {}) {
           throw fail('INVALID_COLLECTION_NAME', 400, 'Invalid collectionName for RLS policy');
         }
         const predicate = [
-          "current_setting('app.current_org', true) IS NULL",
-          "current_setting('app.current_org', true) = ''",
+          "current_setting('app.rls_bypass', true) = 'on'",
           "current_setting('app.current_org', true) = '*'",
-          '"organizationId" = current_setting(\'app.current_org\', true)',
+          '"organizationId" = nullif(current_setting(\'app.current_org\', true), \'\')',
         ].join(' OR ');
-        await db.sequelize.query(`ALTER TABLE "${safeTable}" ENABLE ROW LEVEL SECURITY`);
+        await db.sequelize.query(`ALTER TABLE "${safeTable}" ENABLE ROW LEVEL SECURITY; ALTER TABLE "${safeTable}" FORCE ROW LEVEL SECURITY;`);
         await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${safeTable}"`);
         await db.sequelize.query(
           `CREATE POLICY "lattice_tenant_isolation" ON "${safeTable}" AS PERMISSIVE FOR ALL TO PUBLIC USING (${predicate}) WITH CHECK (${predicate})`,
@@ -508,16 +511,16 @@ async function attachAndVerifyPgRls(db, collectionName, opts = {}) {
   const dialect = typeof db?.sequelize?.getDialect === 'function' ? db.sequelize.getDialect() : null;
   if (dialect === 'postgres' && typeof db?.sequelize?.query === 'function') {
     const res = await db.sequelize.query(
-      'SELECT c.relrowsecurity AS rls_enabled FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relname = :tableName LIMIT 1',
+      'SELECT c.relrowsecurity AS rls_enabled, c.relforcerowsecurity AS rls_forced FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = current_schema() AND c.relname = :tableName LIMIT 1',
       { replacements: { tableName: collectionName } },
     );
     const rows = Array.isArray(res) && Array.isArray(res[0]) ? res[0] : Array.isArray(res) ? res : [];
     if (rows.length > 0) {
       const row = rows[0];
-      if (row && row.rls_enabled === false) {
+      if (row && (row.rls_enabled === false || row.rls_forced === false)) {
         throw fail('PG_RLS_VERIFICATION_FAILED', 500, `PostgreSQL RLS could not be verified on ${collectionName}`);
       }
-      if (row && row.rls_enabled === true) {
+      if (row && row.rls_enabled === true && row.rls_forced !== false) {
         verified = true;
       }
     }
@@ -1080,7 +1083,7 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
   };
 }
 
-async function generateOrEnsureOrgPkiKey(db, organizationId, env) {
+async function generateOrEnsureOrgPkiKey(db, organizationId, env, opts = {}) {
   const effectiveEnv = env && typeof env === 'object' && env.env && typeof env.env === 'object'
     ? env.env
     : env || process.env;
@@ -1108,7 +1111,10 @@ async function generateOrEnsureOrgPkiKey(db, organizationId, env) {
   const pkiLedger = loadFoundationModule('pki-ledger');
   if (pkiLedger && typeof pkiLedger.ensureOrgSigningKey === 'function') {
     try {
-      const res = await pkiLedger.ensureOrgSigningKey(db, organizationId, { env: ledgerEnv });
+      const res = await pkiLedger.ensureOrgSigningKey(db, organizationId, {
+        env: ledgerEnv,
+        ...(opts.transaction ? { transaction: opts.transaction } : {}),
+      });
       if (res) return toPlain(res);
     } catch (err) {
       if (
@@ -1124,35 +1130,41 @@ async function generateOrEnsureOrgPkiKey(db, organizationId, env) {
 
   const pkiRepo = db.getRepository?.('latticePkiKeys');
   if (!pkiRepo) return null;
-  const existing = await pkiRepo.findOne({ filter: { organizationId, active: true } });
-  if (existing) return toPlain(existing);
+  const runKeyOp = async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const existing = await pkiRepo.findOne({ filter: { organizationId, active: true }, ...txOpt });
+    if (existing) return toPlain(existing);
 
-  const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
-  const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
-  const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
-  const spkiDer = publicKey.export({ type: 'spki', format: 'der' });
-  const fingerprintSha256 = crypto.createHash('sha256').update(spkiDer).digest('hex');
-  const keyMaterial = rawSecret || 'lattice-dev-fallback-key';
-  const aesKey = crypto.createHash('sha256').update(keyMaterial).digest();
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
-  const encrypted = Buffer.concat([cipher.update(privateKeyPem, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  const encryptedPrivateKey = `${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
-  const keyId = `ed25519-${fingerprintSha256.slice(0, 16)}`;
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' }).toString();
+    const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }).toString();
+    const spkiDer = publicKey.export({ type: 'spki', format: 'der' });
+    const fingerprintSha256 = crypto.createHash('sha256').update(spkiDer).digest('hex');
+    const keyMaterial = rawSecret || 'lattice-dev-fallback-key';
+    const aesKey = crypto.createHash('sha256').update(keyMaterial).digest();
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', aesKey, iv);
+    const encrypted = Buffer.concat([cipher.update(privateKeyPem, 'utf8'), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const encryptedPrivateKey = `${iv.toString('hex')}:${tag.toString('hex')}:${encrypted.toString('hex')}`;
+    const keyId = `ed25519-${fingerprintSha256.slice(0, 16)}`;
 
-  const created = await pkiRepo.create({
-    values: {
-      organizationId,
-      keyId,
-      algorithm: 'Ed25519',
-      publicKeyPem,
-      encryptedPrivateKey,
-      fingerprintSha256,
-      active: true,
-    },
-  });
-  return toPlain(created);
+    const created = await pkiRepo.create({
+      values: {
+        organizationId,
+        keyId,
+        algorithm: 'Ed25519',
+        publicKeyPem,
+        encryptedPrivateKey,
+        fingerprintSha256,
+        active: true,
+      },
+      ...txOpt,
+    });
+    return toPlain(created);
+  };
+  if (opts.transaction) return runKeyOp(opts.transaction);
+  return runWithOptionalRls(db, organizationId, runKeyOp);
 }
 
 function assertBuilderPatScope(ctx, requiredScopes, foundation) {
@@ -1294,23 +1306,38 @@ function createDxosBuilderActions(db, options = {}) {
       const dmnRepo = db.getRepository?.('latticeDecisionTables');
       const rulesRepo = db.getRepository?.('latticeAutomationRules');
 
-      const items = [];
+      const collectionMatches = new Map();
       for (const pack of BUSINESS_PACK_CATALOG) {
         const hasCollection =
           (colsRepo ? Boolean(await colsRepo.findOne({ filter: { name: pack.components.collection } })) : false) ||
           Boolean(db.getCollection?.(pack.components.collection));
-        const hasDmn = dmnRepo
-          ? Boolean(await dmnRepo.findOne({ filter: { organizationId, tableKey: pack.components.dmnTableKey } }))
-          : false;
-        const hasRule = rulesRepo
-          ? Boolean(await rulesRepo.findOne({ filter: { organizationId, ruleKey: pack.components.automationRuleKey } }))
-          : false;
-
-        items.push({
-          ...pack,
-          installed: Boolean(hasCollection && hasDmn && hasRule),
-        });
+        collectionMatches.set(pack.packKey, hasCollection);
       }
+
+      const runPackRls = (fn) => (
+        organizationId
+          ? runWithOptionalRls(db, organizationId, fn, foundation)
+          : runWithSystemRlsBypass(db, fn, foundation)
+      );
+      const items = await runPackRls(async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const out = [];
+        for (const pack of BUSINESS_PACK_CATALOG) {
+          const hasCollection = collectionMatches.get(pack.packKey) === true;
+          const hasDmn = dmnRepo
+            ? Boolean(await dmnRepo.findOne({ filter: { organizationId, tableKey: pack.components.dmnTableKey }, ...txOpt }))
+            : false;
+          const hasRule = rulesRepo
+            ? Boolean(await rulesRepo.findOne({ filter: { organizationId, ruleKey: pack.components.automationRuleKey }, ...txOpt }))
+            : false;
+
+          out.push({
+            ...pack,
+            installed: Boolean(hasCollection && hasDmn && hasRule),
+          });
+        }
+        return out;
+      });
       ctx.body = { items };
       return next();
     },
@@ -1432,10 +1459,6 @@ function createDxosBuilderActions(db, options = {}) {
             },
           ],
         };
-        const dmnRow = dmnRepo
-          ? await upsertRepoRow(dmnRepo, { organizationId, tableKey: 'coldchain_settlement_policy_v1' }, dmnValues)
-          : dmnValues;
-
         const rulesRepo = db.getRepository?.('latticeAutomationRules');
         const ruleKey = 'auto_coldchain_partner_settlement';
         if (!RULE_KEY_RE.test(ruleKey)) throw fail('INVALID_PACK_RULE', 500, 'Invalid pack rule key');
@@ -1459,9 +1482,15 @@ function createDxosBuilderActions(db, options = {}) {
           active: true,
           createdBy: actor?.username ? String(actor.username) : null,
         };
-        const ruleRow = rulesRepo
-          ? await upsertRepoRow(rulesRepo, { organizationId, ruleKey }, ruleValues)
-          : ruleValues;
+        const { dmnRow, ruleRow } = await runWithOptionalRls(db, organizationId, async (transaction) => {
+          const savedDmn = dmnRepo
+            ? await upsertRepoRow(dmnRepo, { organizationId, tableKey: 'coldchain_settlement_policy_v1' }, dmnValues, transaction)
+            : dmnValues;
+          const savedRule = rulesRepo
+            ? await upsertRepoRow(rulesRepo, { organizationId, ruleKey }, ruleValues, transaction)
+            : ruleValues;
+          return { dmnRow: savedDmn, ruleRow: savedRule };
+        }, foundation);
 
         ctx.body = {
           installed: true,
@@ -1550,10 +1579,6 @@ function createDxosBuilderActions(db, options = {}) {
           },
         ],
       };
-      const dmnRow = dmnRepo
-        ? await upsertRepoRow(dmnRepo, { organizationId, tableKey: 'cmms_priority_routing_v1' }, dmnValues)
-        : dmnValues;
-
       const rulesRepo = db.getRepository?.('latticeAutomationRules');
       const ruleKey = 'auto_cmms_on_coldchain_fault';
       if (!RULE_KEY_RE.test(ruleKey)) throw fail('INVALID_PACK_RULE', 500, 'Invalid pack rule key');
@@ -1578,9 +1603,15 @@ function createDxosBuilderActions(db, options = {}) {
         active: true,
         createdBy: actor?.username ? String(actor.username) : null,
       };
-      const ruleRow = rulesRepo
-        ? await upsertRepoRow(rulesRepo, { organizationId, ruleKey }, ruleValues)
-        : ruleValues;
+      const { dmnRow, ruleRow } = await runWithOptionalRls(db, organizationId, async (transaction) => {
+        const savedDmn = dmnRepo
+          ? await upsertRepoRow(dmnRepo, { organizationId, tableKey: 'cmms_priority_routing_v1' }, dmnValues, transaction)
+          : dmnValues;
+        const savedRule = rulesRepo
+          ? await upsertRepoRow(rulesRepo, { organizationId, ruleKey }, ruleValues, transaction)
+          : ruleValues;
+        return { dmnRow: savedDmn, ruleRow: savedRule };
+      }, foundation);
 
       ctx.body = {
         installed: true,
@@ -1615,31 +1646,40 @@ function createDxosBuilderActions(db, options = {}) {
         );
       }
 
-      const items = [];
-      for (const row of Array.isArray(orgRows) ? orgRows : []) {
-        const plain = toPlain(row);
-        const orgId = plain.organizationId;
-        const depts = deptRepo ? await deptRepo.find({ filter: { organizationId: orgId }, limit: 200 }) : [];
-        const emps = empRepo ? await empRepo.find({ filter: { organizationId: orgId }, limit: 500 }) : [];
-        const pki = pkiRepo ? await pkiRepo.findOne({ filter: { organizationId: orgId, active: true } }) : null;
-        const slas = slaRepo ? await slaRepo.find({ filter: { organizationId: orgId }, limit: 200 }) : [];
+      const runTenantsRls = (fn) => (
+        isRoot
+          ? runWithSystemRlsBypass(db, fn, foundation)
+          : runWithOptionalRls(db, organizationId, fn, foundation)
+      );
+      const items = await runTenantsRls(async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const out = [];
+        for (const row of Array.isArray(orgRows) ? orgRows : []) {
+          const plain = toPlain(row);
+          const orgId = plain.organizationId;
+          const depts = deptRepo ? await deptRepo.find({ filter: { organizationId: orgId }, limit: 200, ...txOpt }) : [];
+          const emps = empRepo ? await empRepo.find({ filter: { organizationId: orgId }, limit: 500, ...txOpt }) : [];
+          const pki = pkiRepo ? await pkiRepo.findOne({ filter: { organizationId: orgId, active: true }, ...txOpt }) : null;
+          const slas = slaRepo ? await slaRepo.find({ filter: { organizationId: orgId }, limit: 200, ...txOpt }) : [];
 
-        const pkiActive = pki ? val(pki, 'active') !== false && val(pki, 'status') !== 'inactive' : false;
-        items.push({
-          ...plain,
-          departmentCount: Array.isArray(depts) ? depts.length : 0,
-          employeeCount: Array.isArray(emps) ? emps.length : 0,
-          activePkiKey: pki
-            ? {
-                keyId: val(pki, 'keyId'),
-                algorithm: val(pki, 'algorithm'),
-                active: pkiActive,
-                status: val(pki, 'status') || (pkiActive ? 'active' : 'inactive'),
-              }
-            : null,
-          slaCount: Array.isArray(slas) ? slas.length : 0,
-        });
-      }
+          const pkiActive = pki ? val(pki, 'active') !== false && val(pki, 'status') !== 'inactive' : false;
+          out.push({
+            ...plain,
+            departmentCount: Array.isArray(depts) ? depts.length : 0,
+            employeeCount: Array.isArray(emps) ? emps.length : 0,
+            activePkiKey: pki
+              ? {
+                  keyId: val(pki, 'keyId'),
+                  algorithm: val(pki, 'algorithm'),
+                  active: pkiActive,
+                  status: val(pki, 'status') || (pkiActive ? 'active' : 'inactive'),
+                }
+              : null,
+            slaCount: Array.isArray(slas) ? slas.length : 0,
+          });
+        }
+        return out;
+      });
       ctx.body = { items };
       return next();
     },
@@ -1659,236 +1699,248 @@ function createDxosBuilderActions(db, options = {}) {
       const locRepo = db.getRepository?.('latticeLocations');
       const slaRepo = db.getRepository?.('latticeSlaPolicies');
 
-      const orgRow = orgRepo
-        ? await upsertRepoRow(
-            orgRepo,
-            { organizationId },
-            { organizationId, name, region, status: 'active', active: true },
-          )
-        : { organizationId, name, region, status: 'active', active: true };
+      const { orgRow, departments, locations, pkiKey, slas } = await runWithOptionalRls(db, organizationId, async (transaction) => {
+        const savedOrg = orgRepo
+          ? await upsertRepoRow(
+              orgRepo,
+              { organizationId },
+              { organizationId, name, region, status: 'active', active: true },
+              transaction,
+            )
+          : { organizationId, name, region, status: 'active', active: true };
 
-      const departments = [];
-      if (deptRepo) {
-        const defaultDepts = [
-          { code: 'ops', name: 'Operations', organizationId, active: true },
-          { code: 'maint', name: 'Maintenance & Cold-Chain', organizationId, active: true },
-        ];
-        for (const dept of defaultDepts) {
-          departments.push(toPlain(await upsertRepoRow(deptRepo, { organizationId, code: dept.code }, dept)));
+        const savedDepts = [];
+        if (deptRepo) {
+          const defaultDepts = [
+            { code: 'ops', name: 'Operations', organizationId, active: true },
+            { code: 'maint', name: 'Maintenance & Cold-Chain', organizationId, active: true },
+          ];
+          for (const dept of defaultDepts) {
+            savedDepts.push(toPlain(await upsertRepoRow(deptRepo, { organizationId, code: dept.code }, dept, transaction)));
+          }
         }
-      }
 
-      const locations = [];
-      if (locRepo) {
-        const primaryDeptId = departments[0]?.id ?? null;
-        const defaultLocs = [
-          {
-            code: 'hq',
-            name: `${name} HQ`,
-            organizationId,
-            kind: 'headquarters',
-            departmentId: primaryDeptId,
-            active: true,
-          },
-        ];
-        for (const loc of defaultLocs) {
-          locations.push(toPlain(await upsertRepoRow(locRepo, { organizationId, code: loc.code }, loc)));
+        const savedLocs = [];
+        if (locRepo) {
+          const primaryDeptId = savedDepts[0]?.id ?? null;
+          const defaultLocs = [
+            {
+              code: 'hq',
+              name: `${name} HQ`,
+              organizationId,
+              kind: 'headquarters',
+              departmentId: primaryDeptId,
+              active: true,
+            },
+          ];
+          for (const loc of defaultLocs) {
+            savedLocs.push(toPlain(await upsertRepoRow(locRepo, { organizationId, code: loc.code }, loc, transaction)));
+          }
         }
-      }
 
-      const pkiKey = await generateOrEnsureOrgPkiKey(db, organizationId, options.env);
+        const savedPkiKey = await generateOrEnsureOrgPkiKey(db, organizationId, options.env, { transaction });
 
-      const slas = [];
-      if (slaRepo) {
-        const defaultSlas = [
-          {
-            organizationId,
-            targetCollection: 'latticeServiceTickets',
-            priority: 'urgent',
-            warnAfterMinutes: 60,
-            breachAfterMinutes: 240,
-            escalateToRole: 'ldx_manager',
-            notifyChannels: ['in_app'],
-            active: true,
-          },
-          {
-            organizationId,
-            targetCollection: 'latticeServiceTickets',
-            priority: 'high',
-            warnAfterMinutes: 120,
-            breachAfterMinutes: 480,
-            escalateToRole: 'ldx_manager',
-            notifyChannels: ['in_app'],
-            active: true,
-          },
-          {
-            organizationId,
-            targetCollection: 'latticeServiceTickets',
-            priority: 'normal',
-            warnAfterMinutes: 480,
-            breachAfterMinutes: 1440,
-            escalateToRole: 'ldx_admin',
-            notifyChannels: ['in_app'],
-            active: true,
-          },
-          {
-            organizationId,
-            targetCollection: 'latticeIncidentCases',
-            priority: 'critical',
-            warnAfterMinutes: 15,
-            breachAfterMinutes: 60,
-            escalateToRole: 'ldx_admin',
-            notifyChannels: ['in_app'],
-            active: true,
-          },
-        ];
-        for (const sla of defaultSlas) {
-          slas.push(
-            toPlain(
-              await upsertRepoRow(
-                slaRepo,
-                {
-                  organizationId: sla.organizationId,
-                  targetCollection: sla.targetCollection,
-                  priority: sla.priority,
-                },
-                sla,
+        const savedSlas = [];
+        if (slaRepo) {
+          const defaultSlas = [
+            {
+              organizationId,
+              targetCollection: 'latticeServiceTickets',
+              priority: 'urgent',
+              warnAfterMinutes: 60,
+              breachAfterMinutes: 240,
+              escalateToRole: 'ldx_manager',
+              notifyChannels: ['in_app'],
+              active: true,
+            },
+            {
+              organizationId,
+              targetCollection: 'latticeServiceTickets',
+              priority: 'high',
+              warnAfterMinutes: 120,
+              breachAfterMinutes: 480,
+              escalateToRole: 'ldx_manager',
+              notifyChannels: ['in_app'],
+              active: true,
+            },
+            {
+              organizationId,
+              targetCollection: 'latticeServiceTickets',
+              priority: 'normal',
+              warnAfterMinutes: 480,
+              breachAfterMinutes: 1440,
+              escalateToRole: 'ldx_admin',
+              notifyChannels: ['in_app'],
+              active: true,
+            },
+            {
+              organizationId,
+              targetCollection: 'latticeIncidentCases',
+              priority: 'critical',
+              warnAfterMinutes: 15,
+              breachAfterMinutes: 60,
+              escalateToRole: 'ldx_admin',
+              notifyChannels: ['in_app'],
+              active: true,
+            },
+          ];
+          for (const sla of defaultSlas) {
+            savedSlas.push(
+              toPlain(
+                await upsertRepoRow(
+                  slaRepo,
+                  {
+                    organizationId: sla.organizationId,
+                    targetCollection: sla.targetCollection,
+                    priority: sla.priority,
+                  },
+                  sla,
+                  transaction,
+                ),
               ),
-            ),
-          );
+            );
+          }
         }
-      }
+
+        return { orgRow: savedOrg, departments: savedDepts, locations: savedLocs, pkiKey: savedPkiKey, slas: savedSlas };
+      }, foundation);
 
       let adminAccount = null;
       const adminUsername = params.adminUsername ? String(params.adminUsername).trim() : '';
       const adminEmail = params.adminEmail ? String(params.adminEmail).trim() : '';
       if (adminUsername || adminEmail) {
-        const usersRepo = db.getRepository?.('users');
-        const rolesUsersRepo = db.getRepository?.('rolesUsers');
-        const empRepo = db.getRepository?.('latticeEmployees');
-        const resolvedUsername = adminUsername || (adminEmail.includes('@') ? adminEmail.split('@')[0] : adminEmail);
-        const resolvedEmail = adminEmail || `${resolvedUsername}@${organizationId}.local`;
-        let userRow = null;
-        let createdNewUser = false;
-        let generatedTempPassword = null;
+        adminAccount = await runWithSystemRlsBypass(db, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const usersRepo = db.getRepository?.('users');
+          const rolesUsersRepo = db.getRepository?.('rolesUsers');
+          const empRepo = db.getRepository?.('latticeEmployees');
+          const resolvedUsername = adminUsername || (adminEmail.includes('@') ? adminEmail.split('@')[0] : adminEmail);
+          const resolvedEmail = adminEmail || `${resolvedUsername}@${organizationId}.local`;
+          let userRow = null;
+          let createdNewUser = false;
+          let generatedTempPassword = null;
 
-        if (usersRepo) {
-          const byUsername = adminUsername ? await usersRepo.findOne({ filter: { username: adminUsername } }) : null;
-          const byEmail = adminEmail ? await usersRepo.findOne({ filter: { email: adminEmail } }) : null;
-          if (byUsername && byEmail && val(byUsername, 'id') !== val(byEmail, 'id')) {
-            throw fail('USER_ORG_CONFLICT', 403, 'adminUsername and adminEmail resolve to different existing users');
-          }
-          userRow = byUsername || byEmail || null;
-          if (!userRow && resolvedUsername && resolvedUsername !== adminUsername) {
-            userRow = await usersRepo.findOne({ filter: { username: resolvedUsername } });
-          }
-          if (!userRow && resolvedEmail && resolvedEmail !== adminEmail) {
-            userRow = await usersRepo.findOne({ filter: { email: resolvedEmail } });
-          }
-
-          if (userRow) {
-            const existingUserId = val(userRow, 'id');
-            const legacyUserOrg = val(userRow, 'organizationId');
-            if (legacyUserOrg && legacyUserOrg !== organizationId) {
-              throw fail('USER_ORG_CONFLICT', 403, `User "${val(userRow, 'username') || resolvedUsername}" belongs to another organization`);
+          if (usersRepo) {
+            const byUsername = adminUsername ? await usersRepo.findOne({ filter: { username: adminUsername }, ...txOpt }) : null;
+            const byEmail = adminEmail ? await usersRepo.findOne({ filter: { email: adminEmail }, ...txOpt }) : null;
+            if (byUsername && byEmail && val(byUsername, 'id') !== val(byEmail, 'id')) {
+              throw fail('USER_ORG_CONFLICT', 403, 'adminUsername and adminEmail resolve to different existing users');
             }
-            if (rolesUsersRepo && existingUserId != null) {
-              let roleBindings = [];
-              if (typeof rolesUsersRepo.find === 'function') {
-                roleBindings = (await rolesUsersRepo.find({ filter: { userId: existingUserId } })) || [];
-              } else if (typeof rolesUsersRepo.findOne === 'function') {
-                const rootRow = await rolesUsersRepo.findOne({ filter: { userId: existingUserId, roleName: 'root' } });
-                const adminRow = await rolesUsersRepo.findOne({ filter: { userId: existingUserId, roleName: 'admin' } });
-                roleBindings = [rootRow, adminRow].filter(Boolean);
+            userRow = byUsername || byEmail || null;
+            if (!userRow && resolvedUsername && resolvedUsername !== adminUsername) {
+              userRow = await usersRepo.findOne({ filter: { username: resolvedUsername }, ...txOpt });
+            }
+            if (!userRow && resolvedEmail && resolvedEmail !== adminEmail) {
+              userRow = await usersRepo.findOne({ filter: { email: resolvedEmail }, ...txOpt });
+            }
+
+            if (userRow) {
+              const existingUserId = val(userRow, 'id');
+              const legacyUserOrg = val(userRow, 'organizationId');
+              if (legacyUserOrg && legacyUserOrg !== organizationId) {
+                throw fail('USER_ORG_CONFLICT', 403, `User "${val(userRow, 'username') || resolvedUsername}" belongs to another organization`);
               }
-              const holdsPrivilegedRole = roleBindings.some((ru) => {
-                const rUserId = val(ru, 'userId');
-                if (rUserId != null && String(rUserId) !== String(existingUserId)) return false;
-                const rName = String(val(ru, 'roleName') || '').trim().toLowerCase();
-                return rName === 'root' || rName === 'admin';
-              });
-              if (holdsPrivilegedRole) {
+              if (rolesUsersRepo && existingUserId != null) {
+                let roleBindings = [];
+                if (typeof rolesUsersRepo.find === 'function') {
+                  roleBindings = (await rolesUsersRepo.find({ filter: { userId: existingUserId }, ...txOpt })) || [];
+                } else if (typeof rolesUsersRepo.findOne === 'function') {
+                  const rootRow = await rolesUsersRepo.findOne({ filter: { userId: existingUserId, roleName: 'root' }, ...txOpt });
+                  const adminRow = await rolesUsersRepo.findOne({ filter: { userId: existingUserId, roleName: 'admin' }, ...txOpt });
+                  roleBindings = [rootRow, adminRow].filter(Boolean);
+                }
+                const holdsPrivilegedRole = roleBindings.some((ru) => {
+                  const rUserId = val(ru, 'userId');
+                  if (rUserId != null && String(rUserId) !== String(existingUserId)) return false;
+                  const rName = String(val(ru, 'roleName') || '').trim().toLowerCase();
+                  return rName === 'root' || rName === 'admin';
+                });
+                if (holdsPrivilegedRole) {
+                  throw fail(
+                    'USER_ORG_CONFLICT',
+                    403,
+                    `Privileged user "${val(userRow, 'username') || resolvedUsername}" cannot be attached to tenant "${organizationId}"`,
+                  );
+                }
+              }
+              if (!empRepo || typeof empRepo.find !== 'function') {
                 throw fail(
                   'USER_ORG_CONFLICT',
                   403,
-                  `Privileged user "${val(userRow, 'username') || resolvedUsername}" cannot be attached to tenant "${organizationId}"`,
+                  `Cannot verify organization membership for existing user "${val(userRow, 'username') || resolvedUsername}"`,
                 );
               }
-            }
-            if (!empRepo || typeof empRepo.find !== 'function') {
-              throw fail(
-                'USER_ORG_CONFLICT',
-                403,
-                `Cannot verify organization membership for existing user "${val(userRow, 'username') || resolvedUsername}"`,
-              );
-            }
-            const empRows = (await empRepo.find({ filter: { userId: existingUserId }, limit: 100 })) || [];
-            const ownedRows = empRows.filter((e) => {
-              const eUserId = val(e, 'userId');
-              return eUserId == null || String(eUserId) === String(existingUserId);
-            });
-            if (ownedRows.length === 0 || ownedRows.some((e) => val(e, 'organizationId') !== organizationId)) {
-              throw fail(
-                'USER_ORG_CONFLICT',
-                403,
-                `User "${val(userRow, 'username') || resolvedUsername}" belongs to another organization or lacks membership in "${organizationId}"`,
-              );
-            }
-          } else {
-            const hasExplicitPassword =
-              params.adminPassword !== undefined && params.adminPassword !== null && String(params.adminPassword) !== '';
-            const rawPwd = hasExplicitPassword
-              ? String(params.adminPassword)
-              : crypto.randomBytes(18).toString('base64url');
-            userRow = await usersRepo.create({
-              values: {
-                username: resolvedUsername,
-                email: resolvedEmail,
-                nickname: params.adminNickname || resolvedUsername || 'Tenant Admin',
-                password: rawPwd,
-                roles: ['ldx_admin'],
-              },
-            });
-            createdNewUser = true;
-            if (!hasExplicitPassword) {
-              generatedTempPassword = rawPwd;
+              const empRows = (await empRepo.find({ filter: { userId: existingUserId }, limit: 100, ...txOpt })) || [];
+              const ownedRows = empRows.filter((e) => {
+                const eUserId = val(e, 'userId');
+                return eUserId == null || String(eUserId) === String(existingUserId);
+              });
+              if (ownedRows.length === 0 || ownedRows.some((e) => val(e, 'organizationId') !== organizationId)) {
+                throw fail(
+                  'USER_ORG_CONFLICT',
+                  403,
+                  `User "${val(userRow, 'username') || resolvedUsername}" belongs to another organization or lacks membership in "${organizationId}"`,
+                );
+              }
+            } else {
+              const hasExplicitPassword =
+                params.adminPassword !== undefined && params.adminPassword !== null && String(params.adminPassword) !== '';
+              const rawPwd = hasExplicitPassword
+                ? String(params.adminPassword)
+                : crypto.randomBytes(18).toString('base64url');
+              userRow = await usersRepo.create({
+                values: {
+                  username: resolvedUsername,
+                  email: resolvedEmail,
+                  nickname: params.adminNickname || resolvedUsername || 'Tenant Admin',
+                  password: rawPwd,
+                  roles: ['ldx_admin'],
+                },
+                ...txOpt,
+              });
+              createdNewUser = true;
+              if (!hasExplicitPassword) {
+                generatedTempPassword = rawPwd;
+              }
             }
           }
-        }
 
-        const userId = val(userRow, 'id') ?? null;
-        if (rolesUsersRepo && userId != null) {
-          await upsertRepoRow(
-            rolesUsersRepo,
-            { roleName: 'ldx_admin', userId },
-            { roleName: 'ldx_admin', userId },
-          );
-        }
-        let employeeRow = null;
-        if (empRepo) {
-          const empCode = `emp_admin_${organizationId}`;
-          employeeRow = await upsertRepoRow(
-            empRepo,
-            { organizationId, code: empCode },
-            {
-              organizationId,
-              code: empCode,
-              name: params.adminNickname || resolvedUsername || 'Tenant Admin',
-              email: resolvedEmail,
-              userId,
-              departmentId: departments[0]?.id ?? null,
-              active: true,
-            },
-          );
-        }
-        adminAccount = {
-          userId,
-          username: val(userRow, 'username') || resolvedUsername,
-          email: val(userRow, 'email') || resolvedEmail,
-          role: 'ldx_admin',
-          employeeId: val(employeeRow, 'id') ?? null,
-          ...(createdNewUser && generatedTempPassword ? { tempPassword: generatedTempPassword } : {}),
-        };
+          const userId = val(userRow, 'id') ?? null;
+          if (rolesUsersRepo && userId != null) {
+            await upsertRepoRow(
+              rolesUsersRepo,
+              { roleName: 'ldx_admin', userId },
+              { roleName: 'ldx_admin', userId },
+              transaction,
+            );
+          }
+          let employeeRow = null;
+          if (empRepo) {
+            const empCode = `emp_admin_${organizationId}`;
+            employeeRow = await upsertRepoRow(
+              empRepo,
+              { organizationId, code: empCode },
+              {
+                organizationId,
+                code: empCode,
+                name: params.adminNickname || resolvedUsername || 'Tenant Admin',
+                email: resolvedEmail,
+                userId,
+                departmentId: departments[0]?.id ?? null,
+                active: true,
+              },
+              transaction,
+            );
+          }
+          return {
+            userId,
+            username: val(userRow, 'username') || resolvedUsername,
+            email: val(userRow, 'email') || resolvedEmail,
+            role: 'ldx_admin',
+            employeeId: val(employeeRow, 'id') ?? null,
+            ...(createdNewUser && generatedTempPassword ? { tempPassword: generatedTempPassword } : {}),
+          };
+        }, foundation);
       }
 
       ctx.body = {

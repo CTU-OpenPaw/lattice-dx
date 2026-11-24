@@ -856,7 +856,7 @@ test('Plugin registration mounts dxosWms, dxosDmn, dxosDelegations, publicTrack 
     }
     const pubTrackAcl = aclGrants.find((g) => g.res === 'dxosWms' && g.role === 'public');
     assert.ok(pubTrackAcl);
-    assert.deepEqual(pubTrackAcl.actions, ['publicTrack']);
+    assert.deepEqual(pubTrackAcl.actions, ['publicTrack', 'verifyTrackSignature']);
 
     const wmsGuard = registeredMiddlewares.find((m) => m.opts?.tag === 'dxosWmsDmnScope');
     const nativeEntry = registeredMiddlewares.find((m) => m.opts?.tag === 'latticeNativeScope');
@@ -1805,4 +1805,212 @@ test('Task 14b: printVoucher embeds ISO QR SVG + ePOD signature/photo, and epodC
   assert.ok(logisticsSpec);
   const wmsOps = logisticsSpec.blocks.find((b) => b.use === 'DxosWmsOpsBlockModel');
   assert.ok(wmsOps, 'OVERVIEW_SPECS logistics must attach DxosWmsOpsBlockModel');
+});
+
+
+test('RLS Remediation (Findings 1 & 6): publicTrack & verifyTrackSignature enforce withSystemRlsBypass and genuine Ed25519 verification with zero PII', async () => {
+  const { createDxosWmsActions } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const { appendLedgerEntry } = require(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/pki-ledger.js'));
+
+  const harness = makeTestHarness({
+    employees: [{ id: 15, userId: 150, organizationId: 'org-rls', active: true }],
+    roles: [{ name: 'ldx_driver', allowConfigure: false, snippets: [] }],
+    rolesUsers: [{ userId: 150, roleName: 'ldx_driver' }],
+    orders: [{ id: 910, organizationId: 'org-rls', code: 'ORD-RLS-910', name: 'Vaccine RLS', status: 'in_transit' }],
+  });
+  harness.orderLines.push({
+    id: 911,
+    organizationId: 'org-rls',
+    orderId: 910,
+    orderCode: 'ORD-RLS-910',
+    lineNo: 1,
+    sku: 'VAC-RLS',
+    productName: 'Cold Vaccine',
+    requestedQty: 5,
+    allocatedQty: 5,
+    status: 'issued',
+  });
+
+  // Wire fail-closed Postgres RLS simulator on TENANT_RLS_TABLES
+  const txStateMap = new WeakMap();
+  const rlsSqlLog = [];
+  let txSeq = 1;
+  harness.db.sequelize = {
+    getDialect: () => 'postgres',
+    transaction: async (fn) => {
+      const tx = { id: `tx-pg-rls-${txSeq++}` };
+      txStateMap.set(tx, { bypass: false, org: '' });
+      return fn(tx);
+    },
+    query: async (sql, opts = {}) => {
+      const text = String(sql);
+      rlsSqlLog.push({ sql: text, opts });
+      const state = opts.transaction ? txStateMap.get(opts.transaction) : null;
+      if (state && text.includes("set_config('app.rls_bypass', 'on'")) {
+        state.bypass = true;
+      }
+      if (state && text.includes("set_config('app.current_org'")) {
+        state.org = opts?.replacements?.orgId || '';
+      }
+      return [[]];
+    },
+  };
+
+  const origGetRepo = harness.db.getRepository.bind(harness.db);
+  const rlsEnforcedTables = new Set(['latticeEpodRecords', 'latticeCryptoLedger', 'latticePkiKeys']);
+  harness.db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!repo || !rlsEnforcedTables.has(name)) return repo;
+    const isVisible = (row, transaction) => {
+      if (process.env.DX_PG_RLS_SESSION !== 'true') return true;
+      const state = transaction ? txStateMap.get(transaction) : null;
+      if (!state) return false;
+      return state.bypass === true || (state.org && row.organizationId === state.org);
+    };
+    return {
+      ...repo,
+      find: async (args = {}) => {
+        const rows = await repo.find(args);
+        return rows.filter((r) => isVisible(r, args.transaction));
+      },
+      findOne: async (args = {}) => {
+        const rows = await repo.find({ ...args, limit: undefined });
+        const hit = rows.find((r) => isVisible(r, args.transaction));
+        return hit || null;
+      },
+    };
+  };
+
+  const wms = createDxosWmsActions(harness.db);
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  process.env.DX_PG_RLS_SESSION = 'true';
+  try {
+    // Seed ePOD + real Ed25519 ledger entry + PKI key under tenant RLS
+    const capCtx = {
+      method: 'POST',
+      state: { currentUser: { id: 150, username: 'drv-rls' }, currentRole: 'ldx_driver' },
+      can: () => true,
+      action: {
+        params: {
+          values: {
+            orderId: 910,
+            recipientName: 'Tran Van Secret',
+            recipientPhone: '0911222333',
+            deliveredQty: 5,
+            gpsLat: 10.77,
+            gpsLng: 106.69,
+            signatureDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
+            tempSummary: { mktCelsius: 3.9, inRange: true },
+          },
+        },
+      },
+    };
+    await wms.epodCapture(capCtx, async () => {});
+    const { trackingCode, trackingToken } = capCtx.body;
+    assert.ok(harness.ledgerEntries.length >= 1);
+    assert.ok(harness.pkiKeys.length >= 1);
+
+    // 1. publicTrack works under fail-closed PG FORCE RLS via withSystemRlsBypass & returns zero PII
+    rlsSqlLog.length = 0;
+    const trackCtx = {
+      method: 'GET',
+      state: {},
+      action: { params: { trackingCode, token: trackingToken } },
+    };
+    await wms.publicTrack(trackCtx, async () => {});
+    assert.ok(rlsSqlLog.some((c) => c.sql.includes("set_config('app.rls_bypass', 'on'")), 'publicTrack must set app.rls_bypass=on');
+    assert.equal(trackCtx.body.trackingCode, trackingCode);
+    assert.equal(trackCtx.body.ledgerVerification.verified, true);
+    assert.equal(trackCtx.body.ledgerVerification.verifiedFormat, true);
+    assert.equal(JSON.stringify(trackCtx.body).includes('org-rls'), false);
+    assert.equal(JSON.stringify(trackCtx.body).includes('Tran Van Secret'), false);
+    assert.equal(JSON.stringify(trackCtx.body).includes('0911222333'), false);
+
+    // 2. verifyTrackSignature performs genuine Ed25519 verification under withSystemRlsBypass with ZERO PII
+    rlsSqlLog.length = 0;
+    const verifyCtx = {
+      method: 'POST',
+      state: {},
+      action: { params: { trackingCode, token: trackingToken } },
+    };
+    await wms.verifyTrackSignature(verifyCtx, async () => {});
+    assert.ok(rlsSqlLog.some((c) => c.sql.includes("set_config('app.rls_bypass', 'on'")), 'verifyTrackSignature must set app.rls_bypass=on');
+    assert.equal(verifyCtx.body.verified, true);
+    assert.equal(verifyCtx.body.seq, capCtx.body.epod.ledgerSeq);
+    assert.equal(verifyCtx.body.ledgerSeq, capCtx.body.epod.ledgerSeq);
+    assert.equal(verifyCtx.body.reason, '');
+    assert.equal(verifyCtx.body.keyId, capCtx.body.epod.keyId);
+    assert.equal(verifyCtx.body.entryHash, harness.ledgerEntries[0].entryHash);
+    assert.equal(verifyCtx.body.publicKeyFingerprint, harness.pkiKeys[0].fingerprintSha256);
+    assert.ok(verifyCtx.body.verifiedAt);
+    const verifyJson = JSON.stringify(verifyCtx.body);
+    for (const pii of ['org-rls', 'Tran Van Secret', '0911222333', 'drv-rls', '10.77', '106.69', 'encryptedPrivateKey', 'trackingTokenHash']) {
+      assert.equal(verifyJson.includes(pii), false, `verifyTrackSignature leaked PII/secret: ${pii}`);
+    }
+
+    // 2b. Contract alignment with public-track-page.js: accepts { values: { code, token } }, filterByTk, and query params
+    const verifyByCodeValuesCtx = {
+      method: 'POST',
+      state: {},
+      action: { params: { values: { code: trackingCode, token: trackingToken } } },
+    };
+    await wms.verifyTrackSignature(verifyByCodeValuesCtx, async () => {});
+    assert.equal(verifyByCodeValuesCtx.body.verified, true);
+    assert.equal(verifyByCodeValuesCtx.body.ledgerSeq, capCtx.body.epod.ledgerSeq);
+
+    const verifyByFilterTkCtx = {
+      method: 'GET',
+      state: {},
+      query: { token: trackingToken },
+      action: { params: { filterByTk: trackingCode } },
+    };
+    await wms.verifyTrackSignature(verifyByFilterTkCtx, async () => {});
+    assert.equal(verifyByFilterTkCtx.body.verified, true);
+    assert.equal(verifyByFilterTkCtx.body.seq, capCtx.body.epod.ledgerSeq);
+
+    // 3. Invalid token rejects 401 TRACKING_UNAUTHORIZED
+    await assert.rejects(
+      () => wms.verifyTrackSignature({ method: 'GET', state: {}, action: { params: { trackingCode, token: 'wrong-token' } } }, async () => {}),
+      (err) => err.status === 401 && err.code === 'TRACKING_UNAUTHORIZED',
+    );
+
+    // 4. Tampered ledger entryHash or signature yields verified: false + machine-readable reason (not hardcoded true!)
+    const origSig = harness.ledgerEntries[0].signatureBase64;
+    const origEpodSig = harness.epodRecords[0].ledgerSignatureBase64;
+    harness.ledgerEntries[0].signatureBase64 = Buffer.from('tampered-ed25519-sig').toString('base64');
+    const tamperedCtx = {
+      method: 'GET',
+      state: {},
+      action: { params: { trackingCode, token: trackingToken } },
+    };
+    await wms.verifyTrackSignature(tamperedCtx, async () => {});
+    assert.equal(tamperedCtx.body.verified, false);
+    assert.equal(tamperedCtx.body.reason, 'EPOD_SIGNATURE_MISMATCH');
+
+    // When both ePOD copy and ledger signature are tampered to an invalid signature, Ed25519 verify fails with LEDGER_SIGNATURE_MISMATCH
+    harness.epodRecords[0].ledgerSignatureBase64 = harness.ledgerEntries[0].signatureBase64;
+    const tamperedBothCtx = {
+      method: 'GET',
+      state: {},
+      action: { params: { trackingCode, token: trackingToken } },
+    };
+    await wms.verifyTrackSignature(tamperedBothCtx, async () => {});
+    assert.equal(tamperedBothCtx.body.verified, false);
+    assert.equal(tamperedBothCtx.body.reason, 'LEDGER_SIGNATURE_MISMATCH');
+    harness.epodRecords[0].ledgerSignatureBase64 = origEpodSig;
+    harness.ledgerEntries[0].signatureBase64 = origSig;
+
+    // Also test cross-org ledger mismatch returns verified: false
+    await appendLedgerEntry(harness.db, {
+      organizationId: 'org-rls',
+      eventType: 'wms.extra',
+      targetCollection: 'latticeOrders',
+      targetRecordId: '910',
+      actor: { userId: '150', username: 'drv-rls' },
+      payload: { ok: true },
+    });
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+  }
 });

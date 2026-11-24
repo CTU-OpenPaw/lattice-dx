@@ -596,12 +596,13 @@ async function recordAiAuditLog(db, entry = {}) {
     errorCode: entry.errorCode ? String(entry.errorCode).slice(0, 80) : null,
     resultSummary: redactedResult.text ? redactedResult.text.slice(0, 1000) : null,
   };
+  const txOpt = entry.transaction ? { transaction: entry.transaction } : {};
   try {
-    return await repo.create({ values: baseValues });
+    return await repo.create({ values: baseValues, ...txOpt });
   } catch {
     try {
       const { totalTokens: _tt, tokenSource: _ts, ...legacyValues } = baseValues;
-      return await repo.create({ values: legacyValues });
+      return await repo.create({ values: legacyValues, ...txOpt });
     } catch {
       return null;
     }

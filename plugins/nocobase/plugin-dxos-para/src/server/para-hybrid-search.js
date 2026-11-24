@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { runParaRlsOp, runParaSavepoint } = require('./para-scope');
+
 const EMBEDDING_DIM = 256;
 const DEFAULT_NEURAL_EMBEDDING_DIM = 1536;
 const MAX_EMBEDDING_BATCH_SIZE = 16;
@@ -547,8 +549,9 @@ function rankHybridDocuments(query, docs = [], { limit = 10, k = 60 } = {}) {
   return scoreRrfEntries(enriched, queryNorm, cap, k);
 }
 
-async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, queryRaw, queryEmb }) {
+async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, queryRaw, queryEmb, transaction = undefined }) {
   const chunkRepo = db?.getRepository?.('latticeParaChunks');
+  const txOpt = transaction ? { transaction } : {};
   const byKey = new Map();
   const keyFor = (row) => {
     const rid = readField(row, 'id', null);
@@ -582,7 +585,7 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
     ) {
       try {
         const vecLiteral = `[${queryEmb.vector.map((n) => Number(n)).join(',')}]`;
-        const [vecRows] = await db.sequelize.query(
+        const [vecRows] = await runParaSavepoint(db, (spTx) => db.sequelize.query(
           `SELECT id, "documentId", "organizationId", code, title, "paraSpace",
                   "chunkIndex", "sectionTitle", "pageNumber", content, "tokenCount",
                   "embeddingModel", "embeddingEngine", "embeddingDim", "embeddingJson",
@@ -595,8 +598,11 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
              AND (:paraSpace::text IS NULL OR "paraSpace" = :paraSpace)
            ORDER BY embedding <=> CAST(:vec AS vector) ASC
            LIMIT 200`,
-          { replacements: { vec: vecLiteral, dim: queryEmb.dim, org: organizationId || null, paraSpace: paraSpace || null } },
-        );
+          {
+            replacements: { vec: vecLiteral, dim: queryEmb.dim, org: organizationId || null, paraSpace: paraSpace || null },
+            ...((spTx || transaction) ? { transaction: spTx || transaction } : {}),
+          },
+        ));
         if (Array.isArray(vecRows)) {
           for (const r of vecRows) mergeRow(r);
         }
@@ -607,7 +613,7 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
 
     try {
       const qRaw = String(queryRaw || queryNorm || '').trim().toLowerCase();
-      const [tsRows] = await db.sequelize.query(
+      const [tsRows] = await runParaSavepoint(db, (spTx) => db.sequelize.query(
         `SELECT id, "documentId", "organizationId", code, title, "paraSpace",
                 "chunkIndex", "sectionTitle", "pageNumber", content, "tokenCount",
                 "embeddingModel", "embeddingEngine", "embeddingDim", "embeddingJson",
@@ -619,8 +625,11 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
            AND ("searchVector" @@ plainto_tsquery('simple', :qNorm) OR "searchVector" @@ plainto_tsquery('simple', :qRaw))
          ORDER BY "pgTsRank" DESC
          LIMIT 200`,
-        { replacements: { qNorm: queryNorm, qRaw, org: organizationId || null, paraSpace: paraSpace || null } },
-      );
+        {
+          replacements: { qNorm: queryNorm, qRaw, org: organizationId || null, paraSpace: paraSpace || null },
+          ...((spTx || transaction) ? { transaction: spTx || transaction } : {}),
+        },
+      ));
       if (Array.isArray(tsRows)) {
         for (const r of tsRows) mergeRow(r);
       }
@@ -635,7 +644,7 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
       ...(organizationId ? { organizationId } : {}),
       ...(paraSpace ? { paraSpace } : {}),
     };
-    const ormRows = (await chunkRepo.find({ filter: chunkFilter, limit: 500, sort: ['documentId', 'chunkIndex'] })) || [];
+    const ormRows = (await chunkRepo.find({ filter: chunkFilter, limit: 500, sort: ['documentId', 'chunkIndex'], ...txOpt })) || [];
     for (const r of ormRows) mergeRow(r);
   }
 
@@ -658,6 +667,7 @@ async function executeHybridSearch(db, {
   const queryRaw = String(query || '').trim().toLowerCase();
   const queryNorm = normalizeSearchText(query);
   const queryTokens = tokenizeVietnamese(query);
+  // Outbound neural embedding request runs strictly outside any DB transaction.
   const queryEmb = queryNorm
     ? await computeNeuralEmbedding(query, { env, fetchImpl })
     : deterministicFallbackResult('');
@@ -665,38 +675,53 @@ async function executeHybridSearch(db, {
     ? queryEmb.vector
     : computeDeterministicEmbedding(queryNorm);
 
-  const chunkRows = await fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, queryRaw, queryEmb });
-  const docFilter = {
-    active: true,
-    ...(organizationId ? { organizationId } : {}),
-    ...(paraSpace ? { paraSpace } : {}),
-  };
-  const rawDocRows = docRepo && typeof docRepo.find === 'function'
-    ? ((await docRepo.find({ filter: docFilter, limit: 500, sort: ['-id'] })) || [])
-    : [];
-  const docRows = rawDocRows.filter((d) => (
-    (!organizationId || readField(d, 'organizationId', null) === organizationId)
-    && (!paraSpace || readField(d, 'paraSpace', null) === paraSpace)
-    && readField(d, 'active', true) !== false
-  ));
+  const { chunkRows, docRows } = await runParaRlsOp(db, organizationId, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const fetchedChunks = await fetchChunkCandidates(db, {
+      organizationId,
+      paraSpace,
+      queryNorm,
+      queryRaw,
+      queryEmb,
+      transaction,
+    });
+    const docFilter = {
+      active: true,
+      ...(organizationId ? { organizationId } : {}),
+      ...(paraSpace ? { paraSpace } : {}),
+    };
+    const rawDocRows = docRepo && typeof docRepo.find === 'function'
+      ? ((await docRepo.find({ filter: docFilter, limit: 500, sort: ['-id'], ...txOpt })) || [])
+      : [];
+    const filteredDocs = rawDocRows.filter((d) => (
+      (!organizationId || readField(d, 'organizationId', null) === organizationId)
+      && (!paraSpace || readField(d, 'paraSpace', null) === paraSpace)
+      && readField(d, 'active', true) !== false
+    ));
 
-  if (db?.sequelize?.query && queryNorm && docRows.length) {
-    try {
-      const [tsRows] = await db.sequelize.query(
-        'SELECT id, ts_rank_cd("searchVector", plainto_tsquery(\'simple\', :q)) AS rank FROM "latticeParaDocuments" WHERE active = true AND (:org::text IS NULL OR "organizationId" = :org) AND "searchVector" @@ plainto_tsquery(\'simple\', :q) LIMIT 100',
-        { replacements: { q: queryNorm, org: organizationId || null } },
-      );
-      if (Array.isArray(tsRows) && tsRows.length) {
-        const boostMap = new Map(tsRows.map((r) => [String(r.id), Number(r.rank) || 0]));
-        for (const r of docRows) {
-          const rid = String(readField(r, 'id', ''));
-          if (boostMap.has(rid)) r._pgTsRank = boostMap.get(rid);
+    if (db?.sequelize?.query && queryNorm && filteredDocs.length) {
+      try {
+        const [tsRows] = await runParaSavepoint(db, (spTx) => db.sequelize.query(
+          'SELECT id, ts_rank_cd("searchVector", plainto_tsquery(\'simple\', :q)) AS rank FROM "latticeParaDocuments" WHERE active = true AND (:org::text IS NULL OR "organizationId" = :org) AND "searchVector" @@ plainto_tsquery(\'simple\', :q) LIMIT 100',
+          {
+            replacements: { q: queryNorm, org: organizationId || null },
+            ...((spTx || transaction) ? { transaction: spTx || transaction } : {}),
+          },
+        ));
+        if (Array.isArray(tsRows) && tsRows.length) {
+          const boostMap = new Map(tsRows.map((r) => [String(r.id), Number(r.rank) || 0]));
+          for (const r of filteredDocs) {
+            const rid = String(readField(r, 'id', ''));
+            if (boostMap.has(rid)) r._pgTsRank = boostMap.get(rid);
+          }
         }
+      } catch {
+        // Fall back transparently to JS RRF when running on unit mocks or pre-migration DB
       }
-    } catch {
-      // Fall back transparently to JS RRF when running on unit mocks or pre-migration DB
     }
-  }
+
+    return { chunkRows: fetchedChunks, docRows: filteredDocs };
+  });
 
   const docById = new Map();
   for (const d of docRows) {

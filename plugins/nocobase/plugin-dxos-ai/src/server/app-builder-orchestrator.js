@@ -595,9 +595,12 @@ async function ensureAiAssistant(db, actor, { roleName, roleTitle, portalSlug, p
   const validated = enforceProfileRoleLock(validateAiProfilePayload(rawProfile, { adminToolNames: adminTools }), adminTools);
   const profRepo = db?.getRepository?.('latticeAiProfiles');
   if (profRepo) {
-    const ex = await profRepo.findOne({ filter: { username: validated.username } });
-    if (ex && typeof ex.update === 'function') await ex.update(validated);
-    else await profRepo.create({ values: validated });
+    await withOptionalTenantRls(db, actor.organizationId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      const ex = await profRepo.findOne({ filter: { username: validated.username }, ...txOpt });
+      if (ex && typeof ex.update === 'function') await ex.update(validated, txOpt);
+      else await profRepo.create({ values: validated, ...txOpt });
+    });
   }
   await syncProfileToNocobaseAi(db, validated, { adminToolNames: adminTools });
   return validated.username;
@@ -721,7 +724,14 @@ async function resolveN8nClientForVerify(ctx, db, actor, deps = {}) {
   let baseUrl = '';
   let apiKey = '';
   if (repo && typeof repo.find === 'function') {
-    const rows = (await repo.find({ filter: { organizationId: actor.organizationId, active: true }, sort: ['id'], limit: 50 })) || [];
+    const rows = (await withOptionalTenantRls(db, actor.organizationId, (transaction) => (
+      repo.find({
+        filter: { organizationId: actor.organizationId, active: true },
+        sort: ['id'],
+        limit: 50,
+        ...(transaction ? { transaction } : {}),
+      })
+    ))) || [];
     const picked = rows.find((r) => val(r, 'organizationId') === actor.organizationId && (String(val(r, 'appType') || '').toLowerCase() === 'n8n_api' || String(val(r, 'connectorType') || '').toLowerCase() === 'n8n'));
     if (picked && typeof vaultMod?.resolveConnectorSecrets === 'function') {
       const resolved = await vaultMod.resolveConnectorSecrets(db, actor.organizationId, val(picked, 'connectorKey'), { env });
@@ -1101,8 +1111,9 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
   if (!preSnap) {
     const snapRepo = db?.getRepository?.('latticeUiSnapshots');
     if (snapRepo && typeof snapRepo.create === 'function') {
-      await snapRepo.create({
+      await withOptionalTenantRls(db, organizationId, (transaction) => snapRepo.create({
         values: {
+          organizationId,
           snapshotUid: preBuildSnapshotUid,
           portalSlug,
           pageTitle,
@@ -1111,7 +1122,8 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
           layoutState: {},
           blocks: [],
         },
-      });
+        ...(transaction ? { transaction } : {}),
+      }));
     }
   }
 
@@ -1235,7 +1247,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     pageTitle,
     message: `App Builder đã dựng phân hệ "${pageTitle}" (${verification.ok ? 'PASS' : 'NEEDS_REVIEW'})`,
   });
-  await recordAiAuditLog(db, {
+  await withOptionalTenantRls(db, organizationId, (transaction) => recordAiAuditLog(db, {
     actorUserId: actor.userId,
     actorUsername: actor.username,
     organizationId,
@@ -1245,7 +1257,8 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     argsSummary: { operation: 'build_enterprise_app', collectionName, portalSlug, roleName },
     status: verification.ok ? 'allowed' : 'degraded',
     resultSummary: `Built ${collectionName} on /p/${portalSlug} (ok=${verification.ok}, healRounds=${healRounds})`,
-  });
+    ...(transaction ? { transaction } : {}),
+  }));
 
   return {
     built: true,
