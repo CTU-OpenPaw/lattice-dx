@@ -804,6 +804,92 @@ test('Solution Bundle v3 governance supports automationRules & secret-free webho
   assert.equal(targetDb.store.latticeWebhookSubscriptions[0].encryptedSigningSecret, 'preserve-me-encrypted');
 });
 
+test('createOrUpdateDomainCollection avoids PG RLS alter conflict on idempotent sync and restores RLS around column evolution', async () => {
+  const db = makeBuilderDb({
+    rolesUsers: [{ userId: 1, roleName: 'root' }],
+  });
+  let existingColumnRows = [
+    { column_name: 'id' },
+    { column_name: 'createdAt' },
+    { column_name: 'updatedAt' },
+    { column_name: 'organizationId' },
+    { column_name: 'sensorCode' },
+  ];
+  let failNextAlter = false;
+  const origQuery = db.sequelize.query.bind(db.sequelize);
+  db.sequelize.query = async (sql, opts) => {
+    const text = String(sql);
+    await origQuery(sql, opts);
+    if (text.includes('FROM information_schema.columns')) {
+      return [existingColumnRows, []];
+    }
+    if (text.includes('FROM pg_class')) {
+      return [[{ rls_enabled: true }], []];
+    }
+    return [[], []];
+  };
+  const origCollection = db.collection.bind(db);
+  db.collection = (def) => {
+    const col = origCollection(def);
+    return {
+      ...col,
+      async sync(opts) {
+        await col.sync(opts);
+        if (opts?.alter && failNextAlter) {
+          throw new Error('simulated sync failure');
+        }
+      },
+    };
+  };
+
+  const builder = createDxosBuilderActions(db);
+  await builder.createDomain(makeCtx({
+    userId: 1,
+    role: 'root',
+    isRoot: true,
+    params: {
+      collectionName: 'latticeCustomIdempSensors',
+      fields: [{ name: 'sensorCode', type: 'string', required: true }],
+    },
+  }), async () => {});
+
+  const firstColSync = db.syncCalls.find((s) => s.name === 'latticeCustomIdempSensors');
+  assert.equal(firstColSync.opts, undefined, 'Existing matching PG table must sync without alter: true');
+  assert.equal(
+    db.queries.some((q) => q.sql.includes('DROP POLICY')),
+    false,
+    'Idempotent domain re-run must not drop existing RLS policy',
+  );
+
+  // Add a new field while simulating sync failure -> DROP POLICY precedes alter and finally restores RLS
+  db.syncCalls.length = 0;
+  db.queries.length = 0;
+  db.rlsAttached.length = 0;
+  existingColumnRows = [{ column_name: 'id' }, { column_name: 'organizationId' }, { column_name: 'sensorCode' }];
+  failNextAlter = true;
+
+  await assert.rejects(
+    () => builder.createDomain(makeCtx({
+      userId: 1,
+      role: 'root',
+      isRoot: true,
+      params: {
+        collectionName: 'latticeCustomIdempSensors',
+        fields: [
+          { name: 'sensorCode', type: 'string', required: true },
+          { name: 'tempC', type: 'float' },
+        ],
+      },
+    }), async () => {}),
+    /simulated sync failure/,
+  );
+
+  const dropIdx = db.queries.findIndex((q) => q.sql.includes('DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "latticeCustomIdempSensors"'));
+  assert.ok(dropIdx >= 0, 'Missing column evolution must drop policy before alter sync');
+  assert.ok(db.syncCalls.some((s) => s.name === 'latticeCustomIdempSensors' && s.opts?.alter === true));
+  assert.ok(db.rlsAttached.includes('latticeCustomIdempSensors'), 'finally guard must re-attach RLS even when sync throws');
+});
+
 test('all new builder server & test files satisfy CTU-OpenPaw SPDX header check', async () => {
   const { addSourceHeader } = await import('../../../../scripts/source-headers.mjs');
   const files = [

@@ -740,6 +740,17 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
   }
 
   const indexName = buildSafePgIndexName(collectionName, 'org');
+  const isPgWithQuery = Boolean(
+    db?.sequelize
+    && typeof db.sequelize.query === 'function'
+    && (typeof db.sequelize.getDialect !== 'function' || db.sequelize.getDialect() === 'postgres'),
+  );
+  const expectedColumns = [
+    'organizationId',
+    ...sanitizedFields.map((f) => (f.type === 'belongsTo' ? String(f.foreignKey || `${f.name}Id`).trim() : f.name)),
+  ];
+
+  let rlsDroppedForAlter = false;
   if (typeof db.collection === 'function') {
     const registered = db.collection({
       name: collectionName,
@@ -750,20 +761,41 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
       indexes: [{ name: indexName, fields: ['organizationId'] }],
     });
     if (registered && typeof registered.sync === 'function') {
-      await registered.sync({ alter: true });
+      let existingCols = new Set();
+      if (isPgWithQuery) {
+        const colRes = await db.sequelize.query(
+          'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = :tableName',
+          { replacements: { tableName: collectionName } },
+        ).catch(() => [[], []]);
+        const colRows = Array.isArray(colRes) && Array.isArray(colRes[0]) ? colRes[0] : Array.isArray(colRes) ? colRes : [];
+        existingCols = new Set(colRows.map((row) => String(row?.column_name || '').trim()).filter(Boolean));
+      }
+
+      if (existingCols.size === 0) {
+        await registered.sync({ alter: true });
+      } else if (expectedColumns.every((col) => existingCols.has(col))) {
+        await registered.sync();
+      } else {
+        // Keep RLS enabled (fail-closed) and temporarily drop only the policy referencing organizationId during column DDL.
+        await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${collectionName}"`);
+        rlsDroppedForAlter = true;
+        try {
+          await registered.sync({ alter: true });
+        } finally {
+          await attachAndVerifyPgRls(db, collectionName);
+          rlsDroppedForAlter = false;
+        }
+      }
     }
   }
-  if (typeof db.sync === 'function') {
+  if (typeof db.sync === 'function' && !rlsDroppedForAlter) {
     await db.sync();
   }
 
-  if (db?.sequelize && typeof db.sequelize.query === 'function') {
-    const dialect = typeof db.sequelize.getDialect === 'function' ? db.sequelize.getDialect() : 'postgres';
-    if (dialect === 'postgres') {
-      await db.sequelize.query(
-        `CREATE INDEX IF NOT EXISTS "${indexName}" ON "${collectionName}" ("organizationId")`,
-      ).catch(() => {});
-    }
+  if (isPgWithQuery) {
+    await db.sequelize.query(
+      `CREATE INDEX IF NOT EXISTS "${indexName}" ON "${collectionName}" ("organizationId")`,
+    ).catch(() => {});
   }
 
   const rls = await attachAndVerifyPgRls(db, collectionName);
