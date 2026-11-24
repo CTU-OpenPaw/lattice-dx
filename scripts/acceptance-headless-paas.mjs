@@ -653,7 +653,7 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
         ? runListRes.data
         : (Array.isArray(runListRes?.data?.items) ? runListRes.data.items : []);
       for (const row of runRows) {
-        if (row?.id != null && JSON.stringify({ eventPayloadJson: row.eventPayloadJson, resultJson: row.resultJson }).includes(cleanupIds.mktLotCode)) {
+        if (row?.id != null && JSON.stringify(row).includes(cleanupIds.mktLotCode)) {
           await callActor('root', `latticeAutomationRuns:destroy?filterByTk=${row.id}`, { method: 'POST' }).catch(() => {});
         }
       }
