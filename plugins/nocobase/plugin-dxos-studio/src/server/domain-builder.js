@@ -16,13 +16,7 @@ const {
   ALLOWLISTED_BUSINESS_COLLECTIONS,
 } = require('./automation-engine');
 const { getFlowBlueprint } = require('./flow/blueprints');
-const { buildTriggerIndex } = require('./flow/schema');
-let AUTOMATION_BLUEPRINTS = [];
-try {
-  ({ AUTOMATION_BLUEPRINTS = [] } = require('./automation-copilot'));
-} catch {
-  AUTOMATION_BLUEPRINTS = [];
-}
+const { buildTriggerIndex, graphV2SummaryToV1Compat } = require('./flow/schema');
 const {
   ORG_ID_RE,
   assertPatScope,
@@ -54,6 +48,66 @@ const ALLOWED_FIELD_TYPES = new Set([
   'belongsTo',
 ]);
 const ADMIN_ROLES = new Set(['ldx_admin', 'root', 'admin']);
+
+function replaceStepNodeRefs(value, nodeIndexById) {
+  if (typeof value === 'string') {
+    let out = value;
+    for (const [nodeId, idx] of nodeIndexById.entries()) {
+      out = out.split(`{{steps.${nodeId}.`).join(`{{steps.${idx}.`);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) return value.map((item) => replaceStepNodeRefs(item, nodeIndexById));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = replaceStepNodeRefs(v, nodeIndexById);
+    return out;
+  }
+  return value;
+}
+
+function projectBlueprintToV1Actions(flowBlueprint) {
+  if (!flowBlueprint?.graphJson?.nodes?.length) return [];
+  const compat = graphV2SummaryToV1Compat(flowBlueprint);
+  const actions = Array.isArray(compat.actionsJson) ? compat.actionsJson : [];
+  const { nodes = [], edges = [] } = flowBlueprint.graphJson;
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const v1MappedTypes = new Set(['data.create', 'data.update', 'notify.send', 'integration.http', 'iot.twin_command', 'ai.agent']);
+  const actionNodes = nodes
+    .filter((n) => v1MappedTypes.has(n.type))
+    .sort((a, b) => Number(a.config?.stepIndex ?? 9999) - Number(b.config?.stepIndex ?? 9999));
+  const nodeIndexById = new Map(actionNodes.map((n, idx) => [n.id, idx]));
+
+  const findBranchGuard = (startId) => {
+    const visited = new Set();
+    const queue = [startId];
+    while (queue.length) {
+      const id = queue.shift();
+      if (visited.has(id)) continue;
+      visited.add(id);
+      for (const edge of edges.filter((e) => e.target === id)) {
+        const src = nodeMap.get(edge.source);
+        if (!src) continue;
+        if (src.type === 'control.if' && edge.sourceHandle === 'true' && src.config?.condition) {
+          const c = src.config.condition;
+          const when = typeof c.field === 'string' && (c.op === 'eq' || c.op === '$eq') && c.value !== undefined
+            ? { [c.field]: c.value }
+            : structuredClone(c);
+          return { when, branchLabel: edge.label || src.config?.branchLabel || null };
+        }
+        if (src.type === 'control.parallel') queue.push(src.id);
+      }
+    }
+    return null;
+  };
+
+  return actions.map((act, idx) => {
+    const node = actionNodes[idx];
+    const guard = node ? findBranchGuard(node.id) : null;
+    const enriched = guard && !act.when ? { ...act, when: guard.when, branchLabel: guard.branchLabel ?? act.branchLabel ?? null } : act;
+    return replaceStepNodeRefs(enriched, nodeIndexById);
+  });
+}
 const DEFAULT_DOMAIN_ROLES = ['ldx_admin', 'ldx_manager', 'ldx_operator', 'ldx_employee'];
 const DEFAULT_ROLE_ACTIONS = Object.freeze({
   ldx_admin: ['view', 'list', 'get', 'create', 'update', 'destroy'],
@@ -1172,24 +1226,23 @@ function createDxosBuilderActions(db, options = {}) {
       const ruleKey = 'auto_cmms_on_coldchain_fault';
       if (!RULE_KEY_RE.test(ruleKey)) throw fail('INVALID_PACK_RULE', 500, 'Invalid pack rule key');
       const flowBlueprint = getFlowBlueprint(ruleKey);
-      const cmmsBlueprint = AUTOMATION_BLUEPRINTS.find((b) => b.ruleKey === ruleKey);
+      const compatActions = projectBlueprintToV1Actions(flowBlueprint);
       const ruleValues = {
         organizationId,
         ruleKey,
-        name: flowBlueprint?.name || cmmsBlueprint?.name || 'Auto Create CMMS Work Order on Cold-Chain Alarm',
+        name: flowBlueprint?.name || 'Auto Create CMMS Work Order on Cold-Chain Alarm',
         description:
           flowBlueprint?.description ||
-          cmmsBlueprint?.description ||
           'Evaluates cmms_priority_routing_v1 DMN and creates a CMMS work order plus notifies the assigned role.',
-        triggerEventType: flowBlueprint?.triggerEventType || cmmsBlueprint?.triggerEventType || 'alarm.triggered,device.offline',
-        filterJson: cmmsBlueprint?.filterJson ?? null,
-        dmnTableKey: flowBlueprint?.dmnTableKey || cmmsBlueprint?.dmnTableKey || 'cmms_priority_routing_v1',
-        actionsJson: structuredClone(cmmsBlueprint?.actionsJson || []),
+        triggerEventType: flowBlueprint?.triggerEventType || 'alarm.triggered,device.offline',
+        filterJson: null,
+        dmnTableKey: flowBlueprint?.dmnTableKey || 'cmms_priority_routing_v1',
+        actionsJson: compatActions,
         draftGraphJson: flowBlueprint?.graphJson ? structuredClone(flowBlueprint.graphJson) : null,
         triggerIndexJson: flowBlueprint?.graphJson ? buildTriggerIndex(flowBlueprint.graphJson, flowBlueprint) : [],
         schemaVersion: 1,
-        maxDepth: flowBlueprint?.maxDepth ?? cmmsBlueprint?.maxDepth ?? 8,
-        cooldownSec: flowBlueprint?.cooldownSec ?? cmmsBlueprint?.cooldownSec ?? 60,
+        maxDepth: flowBlueprint?.maxDepth ?? 8,
+        cooldownSec: flowBlueprint?.cooldownSec ?? 60,
         active: true,
         createdBy: actor?.username ? String(actor.username) : null,
       };

@@ -52,7 +52,7 @@ test('parseVietnameseNaturalIntent handles thresholds, widgets, roles, alarms, a
   assert.equal(injection.refused, true);
 });
 
-test('parseVietnameseNaturalIntent routes Automation Copilot intents accurately and blocks non-admins', () => {
+test('parseVietnameseNaturalIntent routes DX-OS Flow Architect intents accurately and blocks non-admins', () => {
   const {
     parseVietnameseNaturalIntent,
     extractAutomationRuleKey,
@@ -129,12 +129,88 @@ test('parseVietnameseNaturalIntent routes Automation Copilot intents accurately 
   assert.equal(tempAndHumiditySim.args.operation, 'testAutomation');
   assert.equal(tempAndHumiditySim.args.sampleEvent.tempC, -15);
   assert.equal(tempAndHumiditySim.args.sampleEvent.humidity, 90);
+
+  // Wave 10 Flow Architect: DAG / HITL resume / Cron / Webhook / AI LLM / fix_error / testNode
+  const resumeApprove = parseVietnameseNaturalIntent('Phê duyệt run run_hitl_001 để tiếp tục flow mua sắm', { isAdmin: true, portalSlug: 'procurement' });
+  assert.equal(resumeApprove.refused, false);
+  assert.equal(resumeApprove.toolName, 'dxos_configure_workflow');
+  assert.equal(resumeApprove.args.operation, 'resumeAutomation');
+  assert.equal(resumeApprove.args.runUid, 'run_hitl_001');
+  assert.equal(resumeApprove.args.decision, 'approved');
+
+  const resumeReject = parseVietnameseNaturalIntent('Từ chối run run_hitl_002 vì vượt ngân sách quý', { isAdmin: true, portalSlug: 'procurement' });
+  assert.equal(resumeReject.refused, false);
+  assert.equal(resumeReject.toolName, 'dxos_configure_workflow');
+  assert.equal(resumeReject.args.operation, 'resumeAutomation');
+  assert.equal(resumeReject.args.runUid, 'run_hitl_002');
+  assert.equal(resumeReject.args.decision, 'rejected');
+
+  const empResumeDenied = parseVietnameseNaturalIntent('Duyệt run run_hitl_001 giúp tôi', { isAdmin: false, portalSlug: 'procurement' });
+  assert.equal(empResumeDenied.refused, true);
+  assert.equal(empResumeDenied.toolName, null);
+
+  const fixErr = parseVietnameseNaturalIntent('Fix lỗi flow auto_sla_breach_escalation cho lần chạy run_fail_77', { isAdmin: true, portalSlug: 'services' });
+  assert.equal(fixErr.refused, false);
+  assert.equal(fixErr.toolName, 'dxos_configure_workflow');
+  assert.equal(fixErr.args.operation, 'patchAutomation');
+  assert.equal(fixErr.args.mode, 'fix_error');
+  assert.equal(fixErr.args.ruleKey, 'auto_sla_breach_escalation');
+  assert.equal(fixErr.args.runTrace?.runUid, 'run_fail_77');
+
+  const empFixDenied = parseVietnameseNaturalIntent('Sửa lỗi lần chạy flow auto_sla_breach_escalation', { isAdmin: false, portalSlug: 'services' });
+  assert.equal(empFixDenied.refused, true);
+  assert.equal(empFixDenied.toolName, null);
+
+  const cronDraft = parseVietnameseNaturalIntent('Mỗi sáng 8h chạy định kỳ cron dùng LLM tóm tắt sự cố gửi ldx_manager', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(cronDraft.refused, false);
+  assert.equal(cronDraft.toolName, 'dxos_configure_workflow');
+  assert.equal(cronDraft.args.operation, 'draftAutomation');
+
+  const webhookDraft = parseVietnameseNaturalIntent('Nhận inbound webhook đồng bộ đơn hàng rồi rẽ nhánh song song thông báo ldx_operator', { isAdmin: true, portalSlug: 'logistics' });
+  assert.equal(webhookDraft.refused, false);
+  assert.equal(webhookDraft.toolName, 'dxos_configure_workflow');
+  assert.equal(webhookDraft.args.operation, 'draftAutomation');
+
+  const aiNodePatch = parseVietnameseNaturalIntent('Gắn node AI tóm tắt vào flow auto_sla_breach_escalation', { isAdmin: true, portalSlug: 'services' });
+  assert.equal(aiNodePatch.refused, false);
+  assert.equal(aiNodePatch.toolName, 'dxos_configure_workflow');
+  assert.equal(aiNodePatch.args.operation, 'patchAutomation');
+  assert.equal(aiNodePatch.args.ruleKey, 'auto_sla_breach_escalation');
+
+  const testNode = parseVietnameseNaturalIntent('Chạy thử node if_over_50m của rule auto_procurement_hitl_approval', { isAdmin: true, portalSlug: 'procurement' });
+  assert.equal(testNode.refused, false);
+  assert.equal(testNode.toolName, 'dxos_configure_workflow');
+  assert.equal(testNode.args.operation, 'testAutomation');
+  assert.equal(testNode.args.nodeId, 'if_over_50m');
+  assert.equal(testNode.args.ruleKey, 'auto_procurement_hitl_approval');
+
+  const diacriticFlow = parseVietnameseNaturalIntent('Vá luồng custom_flow_1 đổi cooldown thành 90 giây', { isAdmin: true, portalSlug: 'services' });
+  assert.equal(diacriticFlow.refused, false);
+  assert.equal(diacriticFlow.toolName, 'dxos_configure_workflow');
+  assert.equal(diacriticFlow.args.operation, 'patchAutomation');
+  assert.equal(diacriticFlow.args.ruleKey, 'custom_flow_1');
 });
 
-test('Vietnamese Natural-Language 72-case Eval Suite achieves >= 95% pass rate via eval-vietnamese-nl-agent.mjs', async () => {
+test('Vietnamese Natural-Language 80-case Eval Suite achieves 100% pass rate with zero legacy category via eval-vietnamese-nl-agent.mjs', async () => {
   const mod = await import('file:///' + path.join(REPO_ROOT, 'scripts/eval-vietnamese-nl-agent.mjs').replace(/\\/g, '/'));
-  assert.ok(Array.isArray(mod.VIETNAMESE_NL_EVAL_CASES) && mod.VIETNAMESE_NL_EVAL_CASES.length >= 72);
+  const legacyCategory = ['automation', ['co', 'pilot'].join('')].join('-');
+  assert.ok(Array.isArray(mod.VIETNAMESE_NL_EVAL_CASES) && mod.VIETNAMESE_NL_EVAL_CASES.length >= 80);
+  assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.category === legacyCategory), false);
+  assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.category === 'automation-architect'), true);
   const report = mod.runVietnameseNlEval();
-  assert.ok(report.total >= 72, `Expected >=72 eval cases, got ${report.total}`);
-  assert.ok(report.passRate >= 95, `Vietnamese NL eval passRate ${report.passRate}% < 95%; failures=${JSON.stringify(report.failures)}`);
+  assert.ok(report.total >= 80, `Expected >=80 eval cases, got ${report.total}`);
+  assert.equal(report.passRate, 100, `Vietnamese NL eval passRate ${report.passRate}% != 100%; failures=${JSON.stringify(report.failures)}`);
+
+  const { STARTER_AI_BLUEPRINTS } = require(path.join(PLUGIN_ROOT, 'src/server/ai-schemas.js'));
+  const bannedRe = new RegExp(['co', 'pilot'].join(''), 'i');
+  const architectBp = STARTER_AI_BLUEPRINTS.find((b) => b.username === 'dxos-architect');
+  assert.ok(architectBp);
+  assert.equal(bannedRe.test(architectBp.bio), false);
+  assert.equal(bannedRe.test(architectBp.systemPrompt), false);
+  assert.match(architectBp.systemPrompt, /resumeAutomation/);
+  assert.match(architectBp.systemPrompt, /LatticeFlow v2/);
+  for (const uname of ['dxos-coordinator', 'dxos-ops', 'dxos-logistics', 'dxos-workspace']) {
+    const bp = STARTER_AI_BLUEPRINTS.find((b) => b.username === uname);
+    assert.ok(bp && bp.toolPermissions?.dxos_my_tasks_copilot, `dxos_my_tasks_copilot must remain intact on ${uname}`);
+  }
 });

@@ -140,7 +140,7 @@ function inferPortalFromUtterance(utterance, fallback = 'services') {
 }
 
 function detectUnsafeOrInjection(n) {
-  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*(?:huong dan|kiem tra|quyen|rbac|acl|phe duyet|hitl|bao mat)|ignore\s+(?:all\s+)?previous|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|phe duyet|bao mat)|vuot\s+quyen|vo\s+hieu\s+hoa\s+(?:audit|nhat\s+ky|rls|bao\s+mat)|in\s+ra\s+[^\n]{0,40}?(?:mat\s+khau|api\s*key|token|bi\s+mat|secret|credential|private\s*key)|tiet\s+lo\s+[^\n]{0,40}?(?:mat\s+khau|bi\s+mat|token|api\s*key|secret|private\s*key|credential)|doc\s+(?:bien\s+moi\s+truong|\.env|process\.env)|xuat\s+toan\s+bo\s+(?:api\s*key|token|mat\s+khau|bang\s+users|du\s+lieu)|(?:xem|doc|xuat|lay)\s+(?:toan\s+bo\s+)?(?:du\s+lieu|don\s+hang|lo\s+hang|su\s+co|tai\s+lieu|bang)[^\n]{0,30}?(?:to\s+chuc|cong\s+ty|tenant|org)\s+khac|xem\s+luong\s+toan\s+cong\s+ty|cross[\s-]?tenant|tu\s+(?:phe\s+duyet|duyet)\s+(?:yeu\s+cau|don|phieu|ho\s+so)\s+(?:cua\s+)?(?:chinh\s+minh|toi)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong))/;
+  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*(?:huong dan|kiem tra|quyen|rbac|acl|phe duyet|hitl|bao mat)|bo qua\s+(?:buoc\s+)?(?:kiem\s+tra\s+)?(?:quyen\s+)?hitl|ignore\s+(?:all\s+)?previous|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|phe duyet|bao mat)|vuot\s+quyen|vo\s+hieu\s+hoa\s+(?:audit|nhat\s+ky|rls|bao\s+mat|hitl|phe\s+duyet)|in\s+ra\s+[^\n]{0,40}?(?:mat\s+khau|api\s*key|token|bi\s+mat|secret|credential|private\s*key)|tiet\s+lo\s+[^\n]{0,40}?(?:mat\s+khau|bi\s+mat|token|api\s*key|secret|private\s*key|credential)|doc\s+(?:bien\s+moi\s+truong|\.env|process\.env)|xuat\s+toan\s+bo\s+(?:api\s*key|token|mat\s+khau|secret(?:\s*key)?|bang\s+users|du\s+lieu)|(?:xem|doc|xuat|lay)\s+(?:toan\s+bo\s+)?(?:du\s+lieu|don\s+hang|lo\s+hang|su\s+co|tai\s+lieu|bang)[^\n]{0,30}?(?:to\s+chuc|cong\s+ty|tenant|org)\s+khac|(?:doc|xem|sua|xoa|tao|ghi|cap\s+nhat|truy\s+cap)\s+(?:bang|table|collection)?\s*(?:latticeconnectors|latticeapikeys|latticepkikeys|latticecryptoledger|latticeautomationrules|latticeautomationruns|rolesusers)\b|xem\s+luong\s+toan\s+cong\s+ty|cross[\s-]?tenant|tu\s+(?:phe\s+duyet|duyet)\s+(?:yeu\s+cau|don|phieu|ho\s+so|run)\s+(?:cua\s+)?(?:chinh\s+minh|toi)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong)|__proto__|constructor\s*\.\s*prototype|\beval\s*\(|\bnew\s+Function\s*\()/;
   if (promptInjection.test(n)) {
     return {
       refused: true,
@@ -193,13 +193,33 @@ function extractGraphImpactArgs(raw, n) {
 }
 
 function extractAutomationRuleKey(raw) {
-  const text = String(raw || '').trim();
-  const explicit = text.match(/\bruleKey\s*[:=]\s*([a-z0-9][a-z0-9_-]{1,62})\b/i);
+  const clean = stripDiacritics(raw).trim();
+  const explicit = clean.match(/\bruleKey\s*[:=]\s*([a-z0-9][a-z0-9_-]{1,62})\b/i);
   if (explicit && explicit[1]) return explicit[1].toLowerCase();
-  const autoKey = text.match(/\b(auto_[a-z0-9][a-z0-9_-]{1,60})\b/i);
+  const autoKey = clean.match(/\b(auto_[a-z0-9][a-z0-9_-]{1,60})\b/i);
   if (autoKey && autoKey[1]) return autoKey[1].toLowerCase();
-  const ruleNamed = text.match(/\b(?:rule|luat|automation)\s+([a-z0-9]+(?:_[a-z0-9-]+)+)\b/i);
+  const ruleNamed = clean.match(/\b(?:rule|luat|automation|flow|luong)\s+([a-z0-9]+(?:_[a-z0-9-]+)+)\b/i);
   if (ruleNamed && ruleNamed[1]) return ruleNamed[1].toLowerCase();
+  return null;
+}
+
+function extractAutomationRunUid(raw) {
+  const clean = stripDiacritics(raw).trim();
+  const explicit = clean.match(/\brunUid\s*[:=]\s*([a-zA-Z0-9_-]{3,80})\b/i);
+  if (explicit && explicit[1]) return explicit[1];
+  const runPrefixed = clean.match(/\b(run_[a-zA-Z0-9_-]{2,76})\b/i);
+  if (runPrefixed && runPrefixed[1]) return runPrefixed[1];
+  const afterVerb = clean.match(/\b(?:phe\s+duyet|duyet|tu\s+choi|resume|tiep\s+tuc)\s+(?:run|luot\s+chay|phien\s+chay)\s+([a-zA-Z0-9_-]{3,80})\b/i);
+  if (afterVerb && afterVerb[1]) return afterVerb[1];
+  return null;
+}
+
+function extractAutomationNodeId(raw) {
+  const clean = stripDiacritics(raw).trim();
+  const explicit = clean.match(/\bnodeId\s*[:=]\s*([a-zA-Z0-9_.-]{2,80})\b/i);
+  if (explicit && explicit[1]) return explicit[1];
+  const afterNode = clean.match(/\b(?:chay\s+thu|test|kiem\s+thu|sua|doi|cap\s+nhat)\s+node\s+(?!ai\b|llm\b|phe\s+duyet\b|approval\b)([a-zA-Z][a-zA-Z0-9_.-]{1,60})\b/i);
+  if (afterNode && afterNode[1]) return afterNode[1];
   return null;
 }
 
@@ -212,10 +232,12 @@ function extractAutomationTargetNode(raw, nInput) {
     const idx = Number(buoc[1]);
     return `step:${idx >= 1 ? idx - 1 : 0}`;
   }
+  const explicitNode = extractAutomationNodeId(raw);
+  if (explicitNode) return explicitNode;
   if (/(?:cooldown|chong lap|gian cach)/.test(n)) return 'cooldown';
   if (/(?:\bdmn\b|bang quyet dinh)/.test(n)) return 'dmn';
   if (/(?:\btrigger\b|su kien kich hoat)/.test(n)) return 'trigger';
-  if (/(?:them|bo sung)\s+(?:[^\n]{0,20}\s)?buoc\b/.test(n)) return 'actions';
+  if (/(?:them|bo sung|gan)\s+(?:[^\n]{0,20}\s)?(?:buoc|node)\b/.test(n)) return 'actions';
   if (/(?:bo loc|\bfilter\b|dieu kien|nguong|nhanh)/.test(n)) return 'filter';
   return null;
 }
@@ -313,19 +335,81 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
 
   const isGraphImpact = GRAPH_IMPACT_RE.test(n);
 
-  // 3.5. Native Automation Copilot (Suggest / Test / Patch / Draft) — Admin only
-  const hasAutomationTopic = !isGraphImpact && /(?:automation|luong tu dong|tu dong hoa|rule tu dong|quy trinh tu dong|\bauto_[a-z0-9][a-z0-9_-]*\b|(?:toi\s+uu|sua|cap\s+nhat|chay\s+thu|mo\s+phong)\s+rule\b)/.test(n);
+  // 3.5. DX-OS Flow Architect (Suggest / Test / Patch / Draft / Resume / Fix Error) — Admin only
+  const runUid = extractAutomationRunUid(raw);
+  const preExtractedRuleKey = extractAutomationRuleKey(raw);
+  const hasFixErrorSignal = /(?:sua\s+loi\s+(?:lan\s+chay|flow|automation|rule|luong)|fix\s+loi\s+(?:flow|automation|rule|lan\s+chay|luong)|khac\s+phuc\s+loi\s+(?:lan\s+chay|flow|automation|luong))/.test(n);
+  const hasResumeSignal = !hasFixErrorSignal && (
+    Boolean(runUid && /(phe\s+duyet|duyet|tu\s+choi|approve|approved|reject|rejected|resume|tiep\s+tuc)/.test(n))
+    || /(?:phe\s+duyet|duyet|tu\s+choi)\s+(?:run|luot\s+chay|phien\s+chay)\b|\bresume\s+(?:run|flow|automation)\b/.test(n)
+  );
+  const hasAutomationTopic = !isGraphImpact && (
+    hasResumeSignal
+    || hasFixErrorSignal
+    || Boolean(preExtractedRuleKey)
+    || /(?:automation|luong\s+tu\s+dong|tu\s+dong\s+hoa|rule\s+tu\s+dong|quy\s+trinh\s+tu\s+dong|\bauto_[a-z0-9][a-z0-9_-]*\b|(?:toi\s+uu|va|sua|doi|cap\s+nhat|chay\s+thu|mo\s+phong|test)\s+(?:rule|luat|luong|flow|node)\b|\bflow\b|\bdag\b|\bnode\s+(?:ai|llm)\b|\bcron\b|dinh\s+ky\s+cron|moi\s+sang\s+\d+h|inbound\s+webhook|(?:nhan|tao|dung|thiet\s+ke|cau\s+hinh)\s+(?:inbound\s+)?webhook|re\s+nhanh\s+song\s+song|dung\s+llm\s+tom\s+tat)/.test(n)
+  );
   if (hasAutomationTopic) {
-    const ruleKey = extractAutomationRuleKey(raw);
-    const isSuggest = /(goi y toi uu|de xuat cai tien|toi uu(?:\s+(?:automation|rule|luong))?|phan tich\s+(?:automation|rule|luong)|kiem tra\s+(?:automation|rule|luong))/.test(n);
-    const isTest = /(mo phong|dry[\s-]?run|chay thu)/.test(n);
-    const isDraftExplicit = /(?:^|\s)(?:tao|dung|lap|thiet ke|xay dung)\s+(?:moi\s+)?(?:automation|luong tu dong|quy trinh tu dong|rule tu dong|tu dong hoa)\b/.test(n);
-    const isPatchVerb = /(?:doi|sua|chinh|cap nhat|xoa|gan)\s+(?:[^\n]{0,24}?\s)?(?:buoc(?:\s+\d+)?|step(?:\s*:\s*\d+)?|dieu kien|nguong|nhiet do|cooldown|dmn|nhanh|bo loc|filter|trigger)/.test(n)
-      || (/(?:them|bo sung)\s+(?:[^\n]{0,20}?\s)?(?:buoc|dieu kien|cooldown|nhanh|bo loc)/.test(n) && (Boolean(ruleKey) || /(?:cua|cho|trong)\s+(?:automation|rule|luong)\b/.test(n)));
+    const ruleKey = preExtractedRuleKey;
+    const nodeId = extractAutomationNodeId(raw);
+    const isList = /(?:liet\s+ke|xem\s+danh\s+sach)\s+(?:cac\s+)?(?:automation|flow|luong\s+tu\s+dong|rule\s+tu\s+dong)/.test(n);
+    const isSuggest = /(goi y toi uu|de xuat cai tien|toi uu(?:\s+(?:automation|rule|luong|flow|dag))?|phan tich\s+(?:automation|rule|luong|flow|dag)|kiem tra\s+(?:automation|rule|luong|flow|dag))/.test(n);
+    const isTest = /(mo phong|dry[\s-]?run|chay thu|test\s+node|kiem\s+thu\s+node)/.test(n);
+    const isDraftExplicit = /(?:^|\s)(?:tao|dung|lap|thiet ke|xay dung)\s+(?:moi\s+)?(?:automation|flow|dag|luong tu dong|quy trinh tu dong|rule tu dong|tu dong hoa|lich\s+(?:chay\s+)?cron)\b/.test(n);
+    const isPatchVerb = /(?:doi|sua|va|chinh|cap nhat|xoa|gan)\s+(?:[^\n]{0,24}?\s)?(?:buoc(?:\s+\d+)?|step(?:\s*:\s*\d+)?|node(?:\s+[a-z0-9_.-]+)?|dieu kien|nguong|nhiet do|cooldown|dmn|nhanh|bo loc|filter|trigger)/.test(n)
+      || (/(?:them|bo sung|gan)\s+(?:[^\n]{0,20}?\s)?(?:buoc|node|dieu kien|cooldown|nhanh|bo loc)/.test(n) && (Boolean(ruleKey) || /(?:cua|cho|trong|vao)\s+(?:automation|rule|luong|flow)\b/.test(n)));
     const isPatch = isPatchVerb && (!isDraftExplicit || Boolean(ruleKey));
 
+    if (hasFixErrorSignal) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      const targetNode = extractAutomationTargetNode(raw, n);
+      return {
+        intent: 'AUTOMATION_FIX_ERROR',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'patchAutomation',
+          mode: 'fix_error',
+          ...(ruleKey ? { ruleKey } : {}),
+          ...(runUid ? { runTrace: { runUid } } : {}),
+          ...(targetNode ? { targetNode } : {}),
+          goal: raw,
+          apply: false,
+        },
+      };
+    }
+
+    if (hasResumeSignal) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      const decision = /(tu\s+choi|reject|rejected|khong\s+duyet)/.test(n) ? 'rejected' : 'approved';
+      return {
+        intent: 'AUTOMATION_RESUME',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'resumeAutomation',
+          ...(runUid ? { runUid } : {}),
+          decision,
+          payload: { note: raw },
+        },
+      };
+    }
+
+    if (isList && !isDraftExplicit && !isPatch && !isSuggest && !isTest) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      return {
+        intent: 'AUTOMATION_LIST',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: { operation: 'listAutomations' },
+      };
+    }
+
     if (isSuggest) {
-      const denied = requireAdminOrRefuse('automation_copilot');
+      const denied = requireAdminOrRefuse('automation_architect');
       if (denied) return denied;
       return {
         intent: 'AUTOMATION_SUGGEST',
@@ -339,8 +423,8 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
       };
     }
 
-    if (isTest) {
-      const denied = requireAdminOrRefuse('automation_copilot');
+    if (isTest && !isDraftExplicit) {
+      const denied = requireAdminOrRefuse('automation_architect');
       if (denied) return denied;
       return {
         intent: 'AUTOMATION_TEST',
@@ -349,6 +433,7 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
         args: {
           operation: 'testAutomation',
           ...(ruleKey ? { ruleKey } : {}),
+          ...(nodeId ? { nodeId } : {}),
           sampleEvent: extractAutomationSampleEvent(raw, n),
           goal: raw,
         },
@@ -356,7 +441,7 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     }
 
     if (isPatch) {
-      const denied = requireAdminOrRefuse('automation_copilot');
+      const denied = requireAdminOrRefuse('automation_architect');
       if (denied) return denied;
       const targetNode = extractAutomationTargetNode(raw, n);
       return {
@@ -366,6 +451,7 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
         args: {
           operation: 'patchAutomation',
           ...(ruleKey ? { ruleKey } : {}),
+          ...(nodeId ? { nodeId } : {}),
           ...(targetNode ? { targetNode } : {}),
           goal: raw,
           apply: false,
@@ -373,8 +459,12 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
       };
     }
 
-    if (isDraftExplicit || /(?:\btao\b|\bdung\b|\blap\b|\bthiet ke\b).*(?:automation|luong tu dong|tu dong hoa|rule tu dong)/.test(n)) {
-      const denied = requireAdminOrRefuse('automation_copilot');
+    if (
+      isDraftExplicit
+      || /(?:\btao\b|\bdung\b|\blap\b|\bthiet ke\b|\bnhan\b).*(?:automation|luong tu dong|tu dong hoa|rule tu dong|\bflow\b|\bdag\b|webhook|cron)/.test(n)
+      || /\bcron\b|dinh\s+ky\s+cron|moi\s+sang\s+\d+h|inbound\s+webhook|dung\s+llm\s+tom\s+tat/.test(n)
+    ) {
+      const denied = requireAdminOrRefuse('automation_architect');
       if (denied) return denied;
       return {
         intent: 'AUTOMATION_DRAFT',
@@ -490,6 +580,8 @@ module.exports = {
   extractVietnameseRoleTitle,
   extractVietnameseLockedFields,
   extractAutomationRuleKey,
+  extractAutomationRunUid,
+  extractAutomationNodeId,
   extractAutomationTargetNode,
   parseVietnameseNaturalIntent,
 };

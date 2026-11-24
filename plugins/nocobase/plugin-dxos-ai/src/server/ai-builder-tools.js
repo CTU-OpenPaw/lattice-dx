@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { createHash } = require('node:crypto');
+const { createHash, timingSafeEqual } = require('node:crypto');
 const path = require('node:path');
 const {
   LDX_ROLE_RE,
@@ -210,6 +210,252 @@ function isAllowlistedAutomationCollection(collectionName) {
   return AUTOMATION_CUSTOM_COLLECTION_RE.test(name);
 }
 
+function ipv4OctetsFromInt(num) {
+  if (!Number.isInteger(num) || num < 0 || num > 0xffffffff) return null;
+  return [(num >>> 24) & 255, (num >>> 16) & 255, (num >>> 8) & 255, num & 255];
+}
+
+function parseIpv4Part(part) {
+  if (!part) return null;
+  if (/^0x[0-9a-f]+$/i.test(part)) return Number.parseInt(part.slice(2), 16);
+  if (/^0[0-7]+$/.test(part) && part.length > 1) return Number.parseInt(part.slice(1), 8);
+  if (/^\d+$/.test(part)) return Number.parseInt(part, 10);
+  return null;
+}
+
+function parseIpv4Octets(host) {
+  const clean = String(host || '').trim().toLowerCase();
+  if (!clean) return null;
+  if (/^(?:0x[0-9a-f]+|0[0-7]+|\d+)$/i.test(clean)) {
+    return ipv4OctetsFromInt(parseIpv4Part(clean));
+  }
+  const parts = clean.split('.');
+  if (parts.length < 2 || parts.length > 4) return null;
+  const nums = parts.map(parseIpv4Part);
+  if (nums.some((n) => n === null || n < 0)) return null;
+  if (parts.length === 4) {
+    return nums.every((n) => n <= 255) ? nums : null;
+  }
+  for (let i = 0; i < nums.length - 1; i += 1) {
+    if (nums[i] > 255) return null;
+  }
+  const tail = nums[nums.length - 1];
+  const tailMax = parts.length === 2 ? 0xffffff : 0xffff;
+  if (tail > tailMax) return null;
+  if (parts.length === 2) return [nums[0], (tail >>> 16) & 255, (tail >>> 8) & 255, tail & 255];
+  return [nums[0], nums[1], (tail >>> 8) & 255, tail & 255];
+}
+
+function isPrivateOrMetadataIpv4Octets(octets) {
+  if (!Array.isArray(octets) || octets.length !== 4) return false;
+  const [a, b] = octets;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
+function isUnsafeIpv6Host(host) {
+  const bare = String(host || '').split('%')[0].toLowerCase().replace(/^\[|\]$/g, '');
+  if (!bare.includes(':')) return false;
+  if (bare === '::' || bare === '::1' || bare === '0:0:0:0:0:0:0:1') return true;
+  if (/^f[cd][0-9a-f]{0,2}:/.test(bare)) return true;
+  if (/^fe[89ab][0-9a-f]?:/.test(bare)) return true;
+  const v4DotMatch = bare.match(/^(?:::ffff:|(?:0+:){5}ffff:|::)(\d+\.\d+\.\d+\.\d+)$/);
+  if (v4DotMatch) return isPrivateOrMetadataIpv4Octets(parseIpv4Octets(v4DotMatch[1]));
+  const v4HexMatch = bare.match(/^(?:::ffff:|(?:0+:){5}ffff:)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (v4HexMatch) {
+    const hi = Number.parseInt(v4HexMatch[1], 16);
+    const lo = Number.parseInt(v4HexMatch[2], 16);
+    return isPrivateOrMetadataIpv4Octets([(hi >>> 8) & 255, hi & 255, (lo >>> 8) & 255, lo & 255]);
+  }
+  return false;
+}
+
+function isUnsafeMetadataHost(host) {
+  const clean = String(host || '').trim().toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!clean) return false;
+  if (
+    clean === 'localhost'
+    || clean.endsWith('.localhost')
+    || clean === 'internal'
+    || clean.endsWith('.internal')
+    || clean === 'instance-data'
+    || clean.startsWith('instance-data.')
+    || clean === 'metadata.azure.com'
+    || clean.endsWith('.metadata.azure.com')
+    || clean === 'metadata.google.internal'
+    || clean === 'metadata.aws.internal'
+    || clean === 'metadata'
+  ) {
+    return true;
+  }
+  if (isUnsafeIpv6Host(clean)) return true;
+  const octets = parseIpv4Octets(clean);
+  if (octets && isPrivateOrMetadataIpv4Octets(octets)) return true;
+  return false;
+}
+
+function isUnsafeMetadataUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
+  const trimmed = rawUrl.trim();
+  const lower = trimmed.toLowerCase();
+  if ((lower.startsWith('/') && !lower.startsWith('//')) || (lower.startsWith('{{') && lower.endsWith('}}') && !lower.slice(2, -2).includes('{{'))) {
+    return false;
+  }
+  if ([
+    '169.254.',
+    'metadata.google.internal',
+    'metadata.azure.com',
+    'metadata.aws.internal',
+    'instance-data',
+    'fd00:ec2::254',
+    '0xa9fea9fe',
+    '2852039166',
+    'a9fe:a9fe',
+  ].some((p) => lower.includes(p))) {
+    return true;
+  }
+  const hasExplicitSchemeOrProtoRel = /^(?:[a-z][a-z0-9+.-]*:|\/\/)/.test(lower);
+  if (!hasExplicitSchemeOrProtoRel && /^\d+$/.test(lower) && Number(lower) < 16777216) {
+    return false;
+  }
+  const candidate = lower.startsWith('//')
+    ? `http:${lower}`
+    : (hasExplicitSchemeOrProtoRel ? lower : (lower.includes(':') && !lower.includes('.') && !lower.startsWith('[') ? `http://[${lower}]` : `http://${lower}`));
+  try {
+    const parsed = new URL(candidate);
+    if (isUnsafeMetadataHost(parsed.hostname)) return true;
+  } catch {
+    const bareHost = lower.replace(/^(?:[a-z][a-z0-9+.-]*:)?\/\//, '').split(/[/?#]/)[0].split('@').pop();
+    if (isUnsafeMetadataHost(bareHost)) return true;
+  }
+  return false;
+}
+
+function scrubGraphNodePayloads(rawGraph, protectedCollections) {
+  const clean = sanitizeAutomationValue(rawGraph);
+  if (!isPlainObject(clean)) return clean;
+  if (Array.isArray(clean.nodes)) {
+    for (const node of clean.nodes) {
+      if (!isPlainObject(node) || !isPlainObject(node.config)) continue;
+      if (node.type === 'data.create' || node.type === 'data.update') {
+        const targetCol = String(node.config.collection || node.config.targetCollection || '').trim();
+        const isSafeTpl = targetCol.startsWith('{{') && targetCol.endsWith('}}') && !hasUnsafeAutomationTemplate(targetCol);
+        if (targetCol && !isSafeTpl && (protectedCollections?.has(targetCol) || !isAllowlistedAutomationCollection(targetCol))) {
+          continue;
+        }
+        for (const payloadKey of ['values', 'data', 'patch', 'payload']) {
+          if (!isPlainObject(node.config[payloadKey])) continue;
+          delete node.config[payloadKey].id;
+          delete node.config[payloadKey].organizationId;
+          if (AUTOMATION_CORE_VOUCHERS.has(targetCol)) {
+            for (const f of AUTOMATION_PROTECTED_VOUCHER_FIELDS) {
+              delete node.config[payloadKey][f];
+            }
+          }
+        }
+      }
+    }
+  }
+  return clean;
+}
+
+function validateFlowGraphInput(rawGraph, failTool, protectedCollections, { requireTrigger = true } = {}) {
+  if (!isPlainObject(rawGraph) || !Array.isArray(rawGraph.nodes)) {
+    throw failTool('AUTOMATION_RULE_INVALID', 400, 'graphJson phải là đối tượng Graph v2 hợp lệ có mảng nodes.');
+  }
+  if (hasForbiddenProtoKeys(rawGraph) || hasUnsafeAutomationTemplate(rawGraph)) {
+    throw failTool('AUTOMATION_AI_REFUSED', 400, 'graphJson chứa khóa đối tượng bị cấm hoặc biểu thức template không an toàn.');
+  }
+  const cleanGraph = scrubGraphNodePayloads(rawGraph, protectedCollections);
+
+  for (const node of cleanGraph.nodes) {
+    if (!isPlainObject(node)) {
+      throw failTool('AUTOMATION_RULE_INVALID', 400, 'Phần tử node trong graphJson không hợp lệ.');
+    }
+    const cfg = isPlainObject(node.config) ? node.config : {};
+    if (['data.create', 'data.update', 'data.query', 'ai.agent'].includes(node.type)) {
+      const rawCol = node.type === 'ai.agent' ? (cfg.targetCollection || cfg.collection || '') : (cfg.collection || cfg.targetCollection || '');
+      const col = String(rawCol || '').trim();
+      if (col) {
+        const isSafeTpl = (col.includes('{') || col.includes('}')) ? (col.startsWith('{{') && col.endsWith('}}') && !hasUnsafeAutomationTemplate(col)) : false;
+        if (!isSafeTpl && (protectedCollections?.has(col) || !isAllowlistedAutomationCollection(col))) {
+          throw failTool('AUTOMATION_AI_REFUSED', 400, `Bảng đích "${col}" không được phép thao tác trong Flow Graph.`);
+        }
+      }
+    }
+    if (['integration.http', 'ai.llm', 'iot.twin_command'].includes(node.type)) {
+      for (const k of ['url', 'path', 'baseUrl', 'baseURL', 'endpoint', 'downlinkUrl', 'webhookUrl', 'callbackUrl']) {
+        if (isUnsafeMetadataUrl(cfg[k])) {
+          throw failTool('AUTOMATION_AI_REFUSED', 400, `URL không an toàn trong ${node.type}.${k}.`);
+        }
+      }
+    }
+  }
+
+  const validatorMod = loadStudioFlowValidator();
+  const registryMod = loadStudioFlowRegistry();
+  if (validatorMod && typeof validatorMod.validateFlowGraph === 'function') {
+    const nodeRegistry = typeof registryMod?.createDefaultRegistry === 'function' ? registryMod.createDefaultRegistry() : null;
+    const check = validatorMod.validateFlowGraph(cleanGraph, {
+      nodeRegistry,
+      systemProtectedCollections: protectedCollections,
+      requireTrigger,
+    });
+    if (!check.ok) {
+      const firstErr = check.errors[0] || {};
+      const isSecurityErr = ['TARGET_COLLECTION_FORBIDDEN', 'UNSAFE_TEMPLATE_EXPRESSION', 'CONNECTOR_URL_UNSAFE'].includes(firstErr.code);
+      throw failTool(isSecurityErr ? 'AUTOMATION_AI_REFUSED' : 'AUTOMATION_RULE_INVALID', 400, firstErr.message || 'Flow Graph v2 không hợp lệ.');
+    }
+    return check.graph;
+  }
+
+  // Isolated fallback graph validation when flow/validator is unavailable
+  const ids = new Set();
+  let triggerCount = 0;
+  for (const node of cleanGraph.nodes) {
+    const nid = String(node.id || '').trim();
+    if (!nid || ids.has(nid)) {
+      throw failTool('AUTOMATION_RULE_INVALID', 400, `Node id không hợp lệ hoặc bị trùng: "${nid || '(empty)'}".`);
+    }
+    ids.add(nid);
+    if (String(node.type || '').startsWith('trigger.')) triggerCount += 1;
+  }
+  if (requireTrigger ? triggerCount !== 1 : triggerCount > 1) {
+    throw failTool('AUTOMATION_RULE_INVALID', 400, requireTrigger ? 'Flow Graph v2 cần đúng 1 node trigger.*.' : 'Flow Graph v2 chỉ cho phép tối đa 1 node trigger.*.');
+  }
+  const edges = Array.isArray(cleanGraph.edges) ? cleanGraph.edges : [];
+  const inDeg = new Map([...ids].map((id) => [id, 0]));
+  const adj = new Map([...ids].map((id) => [id, []]));
+  for (const edge of edges) {
+    if (!isPlainObject(edge) || !ids.has(edge.source) || !ids.has(edge.target) || edge.source === edge.target) {
+      throw failTool('AUTOMATION_RULE_INVALID', 400, 'Cạnh (edge) trong Flow Graph v2 không hợp lệ hoặc tự lặp.');
+    }
+    adj.get(edge.source).push(edge.target);
+    inDeg.set(edge.target, inDeg.get(edge.target) + 1);
+  }
+  const q = [...inDeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
+  let visited = 0;
+  for (let i = 0; i < q.length; i += 1) {
+    visited += 1;
+    for (const nxt of adj.get(q[i]) || []) {
+      const nd = inDeg.get(nxt) - 1;
+      inDeg.set(nxt, nd);
+      if (nd === 0) q.push(nxt);
+    }
+  }
+  if (visited < ids.size) {
+    throw failTool('AUTOMATION_RULE_INVALID', 400, 'Flow Graph v2 chứa vòng lặp (cycle).');
+  }
+  const schemaMod = loadStudioFlowSchema();
+  return typeof schemaMod?.normalizeGraph === 'function'
+    ? schemaMod.normalizeGraph(cleanGraph)
+    : { version: 2, nodes: cleanGraph.nodes, edges, viewport: cleanGraph.viewport || { x: 0, y: 0, zoom: 1 }, settings: cleanGraph.settings || { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 8, timeoutMs: 30000 } };
+}
+
 function assertSafeAutomationInput(goalText, ruleObj, args, failTool, protectedCollections) {
   const normGoal = stripDiacriticsSimple(goalText).toLowerCase().replace(/\s+/g, ' ').trim();
   if (normGoal) {
@@ -226,12 +472,41 @@ function assertSafeAutomationInput(goalText, ruleObj, args, failTool, protectedC
       throw failTool('AUTOMATION_AI_REFUSED', 400, `Collection "${col}" không nằm trong danh sách cho phép của Automation.`);
     }
   }
-  if (hasForbiddenProtoKeys(ruleObj) || hasForbiddenProtoKeys(args?.sampleEvent) || hasForbiddenProtoKeys(args?.config) || hasForbiddenProtoKeys(args?.configPatch)) {
+  if (
+    hasForbiddenProtoKeys(ruleObj)
+    || hasForbiddenProtoKeys(args?.sampleEvent)
+    || hasForbiddenProtoKeys(args?.config)
+    || hasForbiddenProtoKeys(args?.configPatch)
+    || hasForbiddenProtoKeys(args?.graphJson)
+    || hasForbiddenProtoKeys(args?.graph)
+    || hasForbiddenProtoKeys(args?.pinnedInputs)
+    || hasForbiddenProtoKeys(args?.payload)
+    || hasForbiddenProtoKeys(args?.runTrace)
+  ) {
     throw failTool('AUTOMATION_AI_REFUSED', 400, 'Phát hiện khóa đối tượng bị cấm (__proto__, constructor, prototype).');
+  }
+  if (
+    hasUnsafeAutomationTemplate(args?.graphJson)
+    || hasUnsafeAutomationTemplate(args?.graph)
+    || hasUnsafeAutomationTemplate(args?.pinnedInputs)
+    || hasUnsafeAutomationTemplate(args?.payload)
+    || hasUnsafeAutomationTemplate(args?.runTrace)
+  ) {
+    throw failTool('AUTOMATION_AI_REFUSED', 400, 'Dữ liệu Graph v2 hoặc tham số chứa biểu thức template không an toàn.');
+  }
+  const rawArgGraph = isPlainObject(args?.graphJson) ? args.graphJson : (isPlainObject(args?.graph) ? args.graph : null);
+  if (rawArgGraph) {
+    validateFlowGraphInput(rawArgGraph, failTool, protectedCollections, { requireTrigger: false });
   }
   if (isPlainObject(ruleObj)) {
     if (ruleObj.filterJson !== undefined && ruleObj.filterJson !== null && hasUnsafeAutomationTemplate(ruleObj.filterJson)) {
       throw failTool('AUTOMATION_AI_REFUSED', 400, 'filterJson chứa biểu thức template không an toàn.');
+    }
+    if (isPlainObject(ruleObj.graphJson)) {
+      validateFlowGraphInput(ruleObj.graphJson, failTool, protectedCollections, { requireTrigger: false });
+    }
+    if (isPlainObject(ruleObj.draftGraphJson)) {
+      validateFlowGraphInput(ruleObj.draftGraphJson, failTool, protectedCollections, { requireTrigger: false });
     }
     const actions = Array.isArray(ruleObj.actionsJson) ? ruleObj.actionsJson : [];
     for (let i = 0; i < actions.length; i += 1) {
@@ -293,10 +568,38 @@ function loadStudioAutomationEngine() {
 }
 
 /**
- * Load @latticedx/plugin-dxos-studio automation-copilot cleanly, rethrowing transitive errors.
+ * Load @latticedx/plugin-dxos-studio flow/architect cleanly, rethrowing transitive errors.
  */
-function loadStudioAutomationCopilot() {
-  return loadStudioModule('automation-copilot');
+function loadStudioFlowArchitect() {
+  return loadStudioModule('flow/architect');
+}
+
+/**
+ * Load @latticedx/plugin-dxos-studio flow/schema cleanly, rethrowing transitive errors.
+ */
+function loadStudioFlowSchema() {
+  return loadStudioModule('flow/schema');
+}
+
+/**
+ * Load @latticedx/plugin-dxos-studio flow/executor cleanly, rethrowing transitive errors.
+ */
+function loadStudioFlowExecutor() {
+  return loadStudioModule('flow/executor');
+}
+
+/**
+ * Load @latticedx/plugin-dxos-studio flow/validator cleanly, rethrowing transitive errors.
+ */
+function loadStudioFlowValidator() {
+  return loadStudioModule('flow/validator');
+}
+
+/**
+ * Load @latticedx/plugin-dxos-studio flow/registry cleanly, rethrowing transitive errors.
+ */
+function loadStudioFlowRegistry() {
+  return loadStudioModule('flow/registry');
 }
 
 function hasResourceAction(hasRes, ctx, resourceName, actionName) {
@@ -468,6 +771,8 @@ async function runListAutomations(ctx, db, actor, args, deps) {
       || (id != null && Object.hasOwn(runSummary.byRuleKey, `id:${id}`) ? runSummary.byRuleKey[`id:${id}`] : null);
     const rawActions = val(r, 'actionsJson') ?? val(r, 'actions');
     const actions = Array.isArray(rawActions) ? rawActions : [];
+    const graphJson = val(r, 'graphJson');
+    const schemaVersion = Number(val(r, 'schemaVersion')) || (isPlainObject(graphJson) && Array.isArray(graphJson.nodes) ? 2 : 1);
     return {
       id,
       ruleKey: rk,
@@ -478,7 +783,10 @@ async function runListAutomations(ctx, db, actor, args, deps) {
       dmnTableKey: val(r, 'dmnTableKey') || null,
       active: val(r, 'active') !== undefined ? Boolean(val(r, 'active')) : (val(r, 'enabled') !== false),
       maxDepth: Number(val(r, 'maxDepth')) || 8,
+      schemaVersion,
       actionCount: actions.length,
+      nodeCount: Array.isArray(graphJson?.nodes) ? graphJson.nodes.length : actions.length,
+      hasGraphV2: Boolean(Array.isArray(graphJson?.nodes) && graphJson.nodes.length),
       runSummary: stats || {
         totalRuns: 0,
         succeededRuns: 0,
@@ -617,6 +925,40 @@ async function runAutomationExecution(ctx, db, actor, args, deps) {
     return { run };
   }
 
+  const flowExecMod = loadStudioFlowExecutor();
+  if (flowExecMod && typeof flowExecMod.executeFlowGraph === 'function') {
+    const rulesRepo = db?.getRepository?.('latticeAutomationRules');
+    if (rulesRepo && typeof rulesRepo.findOne === 'function') {
+      const filter = ruleKey
+        ? { organizationId: actor.organizationId, ruleKey }
+        : { organizationId: actor.organizationId, id: ruleId };
+      const ruleRow = await rulesRepo.findOne({ filter });
+      if (ruleRow && val(ruleRow, 'organizationId') === actor.organizationId && (Number(val(ruleRow, 'schemaVersion')) === 2 || isPlainObject(val(ruleRow, 'graphJson')))) {
+        const eventPayload = isEnvelope
+          ? { ...sampleEvent, organizationId: actor.organizationId }
+          : {
+              type: val(ruleRow, 'triggerEventType') || 'manual.trigger',
+              source: 'dxos-ai:dxos_configure_workflow',
+              depth: 0,
+              organizationId: actor.organizationId,
+              data: sampleEvent,
+            };
+        const run = await flowExecMod.executeFlowGraph(db, ruleRow, eventPayload, {
+          app: ctx?.app || db?.app,
+          actor: {
+            id: actor.userId,
+            userId: actor.userId,
+            employeeId: actor.employeeId,
+            username: actor.username,
+            organizationId: actor.organizationId,
+          },
+          ignoreCooldown: true,
+        });
+        return { run };
+      }
+    }
+  }
+
   throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ Automation Engine (dxosAutomations) chưa sẵn sàng.');
 }
 
@@ -629,6 +971,11 @@ function toPlainAutomationRule(row, val) {
   if (!row) return null;
   const base = typeof row.toJSON === 'function' ? row.toJSON() : row;
   const actionsRaw = val(row, 'actionsJson') ?? base.actionsJson ?? base.actions;
+  const graphRaw = val(row, 'graphJson') ?? base.graphJson ?? null;
+  const draftGraphRaw = val(row, 'draftGraphJson') ?? base.draftGraphJson ?? null;
+  const triggerIndexRaw = val(row, 'triggerIndexJson') ?? base.triggerIndexJson ?? null;
+  const rawSchemaVersion = val(row, 'schemaVersion') ?? base.schemaVersion;
+  const schemaVersion = rawSchemaVersion != null ? Number(rawSchemaVersion) : (isPlainObject(graphRaw) ? 2 : 1);
   return sanitizeAutomationValue({
     id: val(row, 'id') ?? base.id ?? null,
     organizationId: val(row, 'organizationId') ?? base.organizationId ?? null,
@@ -642,6 +989,10 @@ function toPlainAutomationRule(row, val) {
     maxDepth: Number(val(row, 'maxDepth') ?? base.maxDepth ?? 8) || 8,
     cooldownSec: Number(val(row, 'cooldownSec') ?? base.cooldownSec ?? 0) || 0,
     active: val(row, 'active') !== undefined ? Boolean(val(row, 'active')) : (base.active !== false),
+    ...(schemaVersion === 2 || isPlainObject(graphRaw) || isPlainObject(draftGraphRaw) ? { schemaVersion } : {}),
+    ...(isPlainObject(graphRaw) ? { graphJson: clonePlain(graphRaw) } : {}),
+    ...(isPlainObject(draftGraphRaw) ? { draftGraphJson: clonePlain(draftGraphRaw) } : {}),
+    ...(Array.isArray(triggerIndexRaw) ? { triggerIndexJson: clonePlain(triggerIndexRaw) } : {}),
   });
 }
 
@@ -816,6 +1167,31 @@ function interpolateLocal(value, context) {
   return value;
 }
 
+function buildFallbackTriggerIndex(graph) {
+  const triggers = (Array.isArray(graph?.nodes) ? graph.nodes : []).filter((n) => String(n?.type || '').startsWith('trigger.'));
+  return triggers.map((n, idx) => {
+    const cfg = isPlainObject(n.config) ? n.config : {};
+    const triggerType = String(n.type || '').slice(8) || 'event';
+    const collection = cfg.collection ? String(cfg.collection).trim() : null;
+    const operation = triggerType === 'record' ? String(cfg.operation || 'create').trim() : null;
+    const eventType = cfg.eventType || cfg.pattern
+      ? String(cfg.eventType || cfg.pattern).trim()
+      : (triggerType === 'record' && collection ? `record.${collection}.${operation}`
+        : triggerType === 'schedule' ? 'schedule.cron'
+          : triggerType === 'webhook' ? 'webhook.inbound'
+            : triggerType === 'manual' ? 'manual.trigger' : '*');
+    return {
+      nodeId: String(n.id || `trigger_${idx + 1}`),
+      triggerType,
+      eventType,
+      collection,
+      operation,
+      cron: cfg.cron ? String(cfg.cron).trim() : null,
+      webhookPath: cfg.webhookPath || cfg.path ? String(cfg.webhookPath || cfg.path).trim() : null,
+    };
+  });
+}
+
 function validateAndNormalizeRule(rawRule, failTool, protectedCollections) {
   if (!isPlainObject(rawRule)) {
     throw failTool('AUTOMATION_RULE_INVALID', 400, 'Cấu hình rule phải là đối tượng JSON hợp lệ.');
@@ -829,6 +1205,25 @@ function validateAndNormalizeRule(rawRule, failTool, protectedCollections) {
   if (!name) {
     throw failTool('AUTOMATION_RULE_NAME_REQUIRED', 400, 'Rule automation cần có tên (name).');
   }
+  const schemaMod = loadStudioFlowSchema();
+  const hasGraphJson = isPlainObject(clean.graphJson) && Array.isArray(clean.graphJson.nodes);
+  const hasDraftGraphJson = isPlainObject(clean.draftGraphJson) && Array.isArray(clean.draftGraphJson.nodes);
+  const isV2 = Number(clean.schemaVersion) === 2 || hasGraphJson || hasDraftGraphJson;
+
+  let normalizedGraph = null;
+  let normalizedDraftGraph = null;
+  if (hasGraphJson) {
+    normalizedGraph = validateFlowGraphInput(clean.graphJson, failTool, protectedCollections, { requireTrigger: true });
+  }
+  if (hasDraftGraphJson) {
+    normalizedDraftGraph = validateFlowGraphInput(clean.draftGraphJson, failTool, protectedCollections, { requireTrigger: false });
+  }
+
+  const activeGraph = normalizedGraph || normalizedDraftGraph;
+  const compat = activeGraph && typeof schemaMod?.graphV2SummaryToV1Compat === 'function'
+    ? schemaMod.graphV2SummaryToV1Compat({ ...clean, graphJson: activeGraph })
+    : null;
+
   const actionsJson = Array.isArray(clean.actionsJson) ? clean.actionsJson : [];
   for (let i = 0; i < actionsJson.length; i += 1) {
     const act = actionsJson[i];
@@ -855,28 +1250,44 @@ function validateAndNormalizeRule(rawRule, failTool, protectedCollections) {
       }
     }
   }
-  if (clean.filterJson !== undefined && clean.filterJson !== null && hasUnsafeAutomationTemplate(clean.filterJson)) {
+  const effectiveFilter = clean.filterJson !== undefined ? clean.filterJson : (compat?.filterJson ?? null);
+  if (effectiveFilter !== undefined && effectiveFilter !== null && hasUnsafeAutomationTemplate(effectiveFilter)) {
     throw failTool('AUTOMATION_AI_REFUSED', 400, 'filterJson chứa template hoặc khóa bị cấm.');
   }
-  const maxDepth = clean.maxDepth === undefined || clean.maxDepth === null ? 8 : Number(clean.maxDepth);
-  if (!Number.isInteger(maxDepth) || maxDepth < 1 || maxDepth > 8) {
+  const rawMaxDepth = clean.maxDepth === undefined || clean.maxDepth === null ? (compat?.maxDepth ?? 8) : Number(clean.maxDepth);
+  if (!Number.isInteger(rawMaxDepth) || rawMaxDepth < 1 || rawMaxDepth > 8) {
     throw failTool('AUTOMATION_RULE_INVALID', 400, 'maxDepth phải là số nguyên từ 1 đến 8.');
   }
-  const cooldownSec = clean.cooldownSec === undefined || clean.cooldownSec === null ? 0 : Number(clean.cooldownSec);
-  if (!Number.isInteger(cooldownSec) || cooldownSec < 0) {
+  const rawCooldown = clean.cooldownSec === undefined || clean.cooldownSec === null ? (compat?.cooldownSec ?? 0) : Number(clean.cooldownSec);
+  if (!Number.isInteger(rawCooldown) || rawCooldown < 0) {
     throw failTool('AUTOMATION_RULE_INVALID', 400, 'cooldownSec phải là số nguyên >= 0.');
   }
+
+  const finalActions = actionsJson.length > 0 ? clonePlain(actionsJson) : (Array.isArray(compat?.actionsJson) ? clonePlain(compat.actionsJson) : []);
+  const triggerIndexJson = activeGraph
+    ? (typeof schemaMod?.buildTriggerIndex === 'function' ? schemaMod.buildTriggerIndex(activeGraph, clean) : buildFallbackTriggerIndex(activeGraph))
+    : undefined;
+  const triggerEventType = clean.triggerEventType !== undefined
+    ? (String(clean.triggerEventType || '*').trim() || '*')
+    : (compat?.triggerEventType || triggerIndexJson?.[0]?.eventType || '*');
+
   return {
     ruleKey,
     name,
     description: clean.description ? String(clean.description) : null,
-    triggerEventType: String(clean.triggerEventType || '*').trim() || '*',
-    filterJson: clean.filterJson ? clonePlain(clean.filterJson) : null,
-    dmnTableKey: clean.dmnTableKey ? String(clean.dmnTableKey).trim() : null,
-    actionsJson: clonePlain(actionsJson),
-    maxDepth,
-    cooldownSec,
+    triggerEventType,
+    filterJson: effectiveFilter ? clonePlain(effectiveFilter) : null,
+    dmnTableKey: clean.dmnTableKey !== undefined
+      ? (clean.dmnTableKey ? String(clean.dmnTableKey).trim() : null)
+      : (compat?.dmnTableKey || null),
+    actionsJson: finalActions,
+    maxDepth: rawMaxDepth,
+    cooldownSec: rawCooldown,
     active: clean.active === undefined ? true : Boolean(clean.active),
+    ...(isV2 ? { schemaVersion: 2 } : {}),
+    ...(normalizedGraph ? { graphJson: clonePlain(normalizedGraph) } : {}),
+    ...(normalizedDraftGraph ? { draftGraphJson: clonePlain(normalizedDraftGraph) } : {}),
+    ...(triggerIndexJson ? { triggerIndexJson } : {}),
   };
 }
 
@@ -1062,6 +1473,28 @@ async function simulateRuleDryRun(ctx, db, actor, ruleObj, sampleEvent, deps) {
     }, deps);
     if (delegated.ok) {
       simulation = delegated.result?.simulation || delegated.result;
+    }
+  }
+  if (!simulation) {
+    const isV2Rule = Number(ruleObj?.schemaVersion) === 2 || (isPlainObject(ruleObj?.graphJson) && Array.isArray(ruleObj.graphJson.nodes));
+    const flowExecMod = isV2Rule ? loadStudioFlowExecutor() : null;
+    if (flowExecMod && typeof flowExecMod.dryRunFlowGraph === 'function') {
+      simulation = await flowExecMod.dryRunFlowGraph(
+        db,
+        { ...ruleObj, organizationId: actor.organizationId },
+        eventEnvelope,
+        {
+          app: ctx?.app || db?.app,
+          actor: {
+            id: actor.userId,
+            userId: actor.userId,
+            employeeId: actor.employeeId,
+            username: actor.username,
+            organizationId: actor.organizationId,
+          },
+          ignoreCooldown: true,
+        },
+      );
     }
   }
   if (!simulation) {
@@ -1357,7 +1790,8 @@ function inferPatchTargetNode(goalText, explicitTarget, { cfgPatch = null, expli
 
 function buildSuggestionsForRule(ruleObj, runStats) {
   const suggestions = [];
-  if (!ruleObj.cooldownSec || ruleObj.cooldownSec === 0) {
+  const effectiveCooldown = Number(ruleObj.cooldownSec ?? ruleObj.graphJson?.settings?.cooldownSec ?? 0);
+  if (!effectiveCooldown || effectiveCooldown === 0) {
     suggestions.push({
       id: 'add_cooldown',
       priority: 'high',
@@ -1367,7 +1801,9 @@ function buildSuggestionsForRule(ruleObj, runStats) {
       patch: { cooldownSec: 120 },
     });
   }
-  if (!ruleObj.filterJson) {
+  const hasGraphGuard = Array.isArray(ruleObj.graphJson?.nodes)
+    && ruleObj.graphJson.nodes.some((n) => n?.type === 'control.if' && (n.id === 'filter_1' || n.config?.isRuleFilter));
+  if (!ruleObj.filterJson && !hasGraphGuard) {
     suggestions.push({
       id: 'add_guard_filter',
       priority: 'medium',
@@ -1413,6 +1849,7 @@ function buildSuggestionsForRule(ruleObj, runStats) {
 
 function applyTopSuggestionsDraft(ruleObj, suggestions) {
   const draft = clonePlain(ruleObj);
+  const hadFilterBefore = Boolean(ruleObj?.filterJson);
   for (const sug of suggestions) {
     if (sug.id === 'add_cooldown' && (!draft.cooldownSec || draft.cooldownSec === 0)) {
       draft.cooldownSec = sug.patch.cooldownSec;
@@ -1426,84 +1863,159 @@ function applyTopSuggestionsDraft(ruleObj, suggestions) {
       }
     }
   }
+  const isV2Draft = Number(draft.schemaVersion) === 2 || (isPlainObject(draft.graphJson) && Array.isArray(draft.graphJson.nodes));
+  if (isV2Draft) {
+    const schemaMod = loadStudioFlowSchema();
+    if (isPlainObject(draft.graphJson) && Array.isArray(draft.graphJson.nodes)) {
+      const nextGraph = clonePlain(draft.graphJson);
+      nextGraph.settings = {
+        ...(isPlainObject(nextGraph.settings) ? nextGraph.settings : {}),
+        cooldownSec: Number(draft.cooldownSec ?? nextGraph.settings?.cooldownSec ?? 0),
+        maxDepth: Number(draft.maxDepth ?? nextGraph.settings?.maxDepth ?? 8),
+      };
+      if (!hadFilterBefore && isPlainObject(draft.filterJson) && !nextGraph.nodes.some((n) => n?.type === 'control.if' && (n.id === 'filter_1' || n.config?.isRuleFilter))) {
+        const trigNode = nextGraph.nodes.find((n) => String(n?.type || '').startsWith('trigger.'));
+        nextGraph.nodes.push({
+          id: 'filter_1',
+          type: 'control.if',
+          label: 'Rule Filter',
+          position: { x: (trigNode?.position?.x ?? 80) + 220, y: trigNode?.position?.y ?? 160 },
+          config: { condition: clonePlain(draft.filterJson), isRuleFilter: true },
+        });
+        if (!Array.isArray(nextGraph.edges)) nextGraph.edges = [];
+        if (trigNode) {
+          for (const edge of nextGraph.edges) {
+            if (edge && edge.source === trigNode.id && (edge.sourceHandle || 'main') === 'main') {
+              edge.source = 'filter_1';
+              edge.sourceHandle = 'true';
+            }
+          }
+          nextGraph.edges.unshift({
+            id: `edge_filter_${nextGraph.edges.length + 1}`,
+            source: trigNode.id,
+            sourceHandle: 'main',
+            target: 'filter_1',
+            targetHandle: 'in',
+          });
+        }
+      }
+      draft.graphJson = typeof schemaMod?.normalizeGraph === 'function' ? schemaMod.normalizeGraph(nextGraph) : nextGraph;
+    } else if (typeof schemaMod?.v1RuleToGraphV2 === 'function') {
+      draft.graphJson = schemaMod.v1RuleToGraphV2(draft);
+    }
+  }
   return draft;
 }
 
-function extractCopilotResult(res, failTool) {
+function extractArchitectResult(res, failTool) {
   if (res && (res.refused === true || res.ok === false)) {
-    throw failTool('AUTOMATION_AI_REFUSED', 400, res.error || res.reason || 'Yêu cầu Automation Copilot bị từ chối.');
+    throw failTool('AUTOMATION_AI_REFUSED', 400, res.error || res.reason || 'Yêu cầu DX-OS Flow Architect bị từ chối.');
   }
   return res || {};
 }
 
-async function callStudioCopilotIfAvailable(ctx, db, actor, mode, payload, deps) {
+const V1_SEMANTIC_TARGETS = new Set(['cooldown', 'guard', 'filter', 'dmn', 'actions', 'step:new']);
+
+function isLegacyV1NodePatch(mode, payload) {
+  if (mode !== 'node') return false;
+  const hasGraph = isPlainObject(payload.graph) && Array.isArray(payload.graph.nodes)
+    || isPlainObject(payload.rule?.graphJson) && Array.isArray(payload.rule.graphJson.nodes)
+    || Number(payload.rule?.schemaVersion) === 2;
+  if (hasGraph) return false;
+  const target = String(payload.targetNode || payload.nodeId || '').trim().toLowerCase();
+  return V1_SEMANTIC_TARGETS.has(target) || /^(?:step|action):\d+$/.test(target);
+}
+
+async function callFlowArchitectIfAvailable(ctx, db, actor, mode, payload, deps) {
   const { failTool, hasRes } = deps;
-  const copilotTargetNode = payload.targetNode === 'cooldown' || payload.targetNode === 'guard'
+  const rawTarget = payload.nodeId || payload.targetNodeId || payload.targetNode;
+  const architectTargetNode = rawTarget === 'cooldown' || rawTarget === 'guard'
     ? 'trigger'
-    : (payload.targetNode === 'actions' || payload.targetNode === 'step:new'
+    : (rawTarget === 'actions' || rawTarget === 'step:new'
       ? 'step:append'
-      : payload.targetNode);
-  const copilotPayload = {
+      : rawTarget);
+  const architectPayload = {
     ...payload,
-    ...(copilotTargetNode ? { targetNode: copilotTargetNode, target: copilotTargetNode } : {}),
+    ...(architectTargetNode ? { targetNode: architectTargetNode, target: architectTargetNode, targetNodeId: architectTargetNode } : {}),
   };
+  const requiresGraphV2 = Boolean(
+    payload.graph
+    || payload.graphJson
+    || payload.nodeId
+    || Number(payload.rule?.schemaVersion) === 2
+    || mode === 'fix_error',
+  );
 
   if (hasResourceAction(hasRes, ctx, 'dxosAutomations', 'aiAssist')) {
     try {
       const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'aiAssist', {
-        ...copilotPayload,
+        ...architectPayload,
         mode,
         organizationId: actor.organizationId,
-        values: { ...copilotPayload, mode, organizationId: actor.organizationId },
+        values: { ...architectPayload, mode, organizationId: actor.organizationId },
         method: 'POST',
       }, deps);
       if (delegated.ok) {
-        return { source: 'resource', data: extractCopilotResult(delegated.result, failTool) };
+        const data = extractArchitectResult(delegated.result, failTool);
+        const hasGraphV2Shape = Boolean(
+          (isPlainObject(data?.draftGraph) && Array.isArray(data.draftGraph.nodes))
+          || (isPlainObject(data?.draftRule?.graphJson) && Array.isArray(data.draftRule.graphJson.nodes))
+          || (isPlainObject(data?.graph) && Array.isArray(data.graph.nodes))
+          || (isPlainObject(data?.rule?.graphJson) && Array.isArray(data.rule.graphJson.nodes)),
+        );
+        if (!(requiresGraphV2 && mode !== 'suggest' && !hasGraphV2Shape && loadStudioFlowArchitect())) {
+          return { source: 'resource', data };
+        }
       }
     } catch (err) {
-      if (err?.code === 'AUTOMATION_AI_REFUSED' || err?.code === 'AI_ASSIST_REFUSED') {
+      const errMsg = String(err?.message || '');
+      const isSecurityRefusal = err?.code === 'AUTOMATION_AI_REFUSED'
+        || err?.code === 'AI_ASSIST_REFUSED'
+        || err?.code === 'TARGET_COLLECTION_FORBIDDEN'
+        || err?.code === 'CONNECTOR_URL_UNSAFE'
+        || err?.code === 'UNSAFE_TEMPLATE_EXPRESSION'
+        || (err?.status === 400 && /refus|unsafe|inject|system|forbidden|proto|ssrf|template/i.test(errMsg));
+      if (err?.code === 'AUTOMATION_AI_REFUSED' || err?.code === 'AI_ASSIST_REFUSED' || isSecurityRefusal) {
         throw failTool('AUTOMATION_AI_REFUSED', 400, err.message);
       }
-      if (err?.status === 400 && /refus|unsafe|inject|system|forbidden|proto/i.test(String(err.message || ''))) {
-        throw failTool('AUTOMATION_AI_REFUSED', 400, err.message);
+      if (
+        loadStudioFlowArchitect()
+        && (
+          (mode === 'fix_error' && /Unsupported aiAssist mode/i.test(errMsg))
+          || (requiresGraphV2 && /Unknown target node|Unsupported aiAssist mode|not found/i.test(errMsg))
+        )
+      ) {
+        // Fall through to local flow/architect for Graph v2 / fix_error support
+      } else {
+        throw err;
       }
-      throw err;
     }
   }
 
-  const copilotMod = loadStudioAutomationCopilot();
-  if (!copilotMod) return null;
-  const fn = copilotMod.runAutomationAiAssist
-    || copilotMod.assistAutomationRule
-    || copilotMod.generateAutomationAssist
-    || copilotMod.aiAssistAutomation
-    || copilotMod.assistAutomation
-    || copilotMod.aiAssist;
-  if (typeof fn !== 'function') return null;
+  if (isLegacyV1NodePatch(mode, payload)) {
+    return null;
+  }
+
+  const archMod = loadStudioFlowArchitect();
+  if (!archMod || typeof archMod.runFlowArchitect !== 'function') return null;
 
   try {
-    let res;
-    if (typeof copilotMod.buildAutomationBuilderCatalog === 'function' || fn.length <= 1) {
-      const catalog = typeof copilotMod.buildAutomationBuilderCatalog === 'function'
-        ? await copilotMod.buildAutomationBuilderCatalog(db, actor.organizationId)
-        : undefined;
-      res = await fn({
-        mode,
-        prompt: copilotPayload.prompt || copilotPayload.goal,
-        rule: copilotPayload.rule,
-        targetNode: copilotTargetNode,
-        catalog,
-      });
-    } else {
-      res = await fn(db, {
-        ...copilotPayload,
-        mode,
-        organizationId: actor.organizationId,
-        actor,
-        ctx,
-      });
-    }
-    return { source: 'module', data: extractCopilotResult(res, failTool) };
+    const res = await archMod.runFlowArchitect({
+      db,
+      env: process.env,
+      mode,
+      prompt: architectPayload.prompt || architectPayload.goal || '',
+      rule: architectPayload.rule,
+      graph: architectPayload.graph || architectPayload.graphJson,
+      targetNodeId: payload.nodeId || payload.targetNodeId || architectTargetNode,
+      targetNode: architectTargetNode,
+      runTrace: architectPayload.runTrace,
+      organizationId: actor.organizationId,
+      sampleEvent: architectPayload.sampleEvent,
+      dryRunRunner: mode === 'suggest' ? false : undefined,
+      allowFallbackOnNetworkError: true,
+    });
+    return { source: 'module', data: extractArchitectResult(res, failTool) };
   } catch (err) {
     if (err?.code === 'AUTOMATION_AI_REFUSED') throw err;
     if (err?.status === 400 && /refus|unsafe|inject|system|forbidden|proto/i.test(String(err.message || ''))) {
@@ -1523,6 +2035,7 @@ async function runSuggestAutomation(ctx, db, actor, args, deps) {
   const shouldApply = Boolean(args.apply && !args.dryRun);
   assertSafeAutomationInput(goalText, args.rule, args, failTool, SYSTEM_PROTECTED_COLLECTIONS);
 
+  const inputGraph = isPlainObject(args.graphJson) ? args.graphJson : (isPlainObject(args.graph) ? args.graph : null);
   let targetRule = isPlainObject(args.rule)
     ? validateAndNormalizeRule(args.rule, failTool, SYSTEM_PROTECTED_COLLECTIONS)
     : null;
@@ -1531,20 +2044,25 @@ async function runSuggestAutomation(ctx, db, actor, args, deps) {
     if (!targetRule) targetRule = loadedRule;
   }
 
-  const copilotHit = await callStudioCopilotIfAvailable(ctx, db, actor, 'suggest', {
+  const architectHit = await callFlowArchitectIfAvailable(ctx, db, actor, 'suggest', {
     prompt: goalText,
     goal: goalText,
     ...(ruleKey ? { ruleKey } : {}),
     ...(targetRule ? { rule: targetRule, currentRule: targetRule } : {}),
+    ...(inputGraph ? { graph: inputGraph, graphJson: inputGraph } : {}),
     apply: shouldApply,
   }, deps);
 
-  if (copilotHit) {
-    const data = copilotHit.data;
+  if (architectHit) {
+    const data = architectHit.data;
     let draftRule = data.draftRule || data.previewRule || data.rule || null;
+    if (draftRule && targetRule?.ruleKey && (ruleKey || (isPlainObject(args.rule) && (args.rule.ruleKey || args.rule.automationCode))) && !args.newRuleKey && !args.targetRuleKey) {
+      draftRule = { ...draftRule, ruleKey: targetRule.ruleKey };
+    }
     if (draftRule) {
       draftRule = validateAndNormalizeRule(draftRule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
     }
+    const draftGraph = data.draftGraph || draftRule?.graphJson || null;
     let applied = Boolean(data.applied || data.saved || data.savedRule);
     if (shouldApply && !applied && draftRule) {
       draftRule = await saveTenantAutomationRule(ctx, db, actor, draftRule, deps);
@@ -1556,14 +2074,18 @@ async function runSuggestAutomation(ctx, db, actor, args, deps) {
       ruleKey: draftRule?.ruleKey || targetRule?.ruleKey || ruleKey,
       applied,
       ...(args.dryRun ? { dryRun: true } : {}),
+      ...(data.modeUsed ? { modeUsed: data.modeUsed } : {}),
+      ...(data.repairAttempts !== undefined ? { repairAttempts: data.repairAttempts } : {}),
       suggestions: Array.isArray(data.suggestions) ? data.suggestions : [],
       summary: data.summary || 'Đã phân tích rule và đề xuất tối ưu.',
+      ...(draftGraph ? { draftGraph } : {}),
+      ...(data.graphDiff ? { graphDiff: data.graphDiff } : {}),
       ...(draftRule ? { draftRule } : {}),
       ...(data.savedRule ? { rule: data.savedRule } : {}),
     };
   }
 
-  if (!targetRule) {
+  if (!targetRule && !inputGraph) {
     const rulesRepo = db?.getRepository?.('latticeAutomationRules');
     const rows = rulesRepo?.find
       ? ((await rulesRepo.find({ filter: { organizationId: actor.organizationId }, sort: ['id'], limit: 20 })) || [])
@@ -1572,6 +2094,19 @@ async function runSuggestAutomation(ctx, db, actor, args, deps) {
     if (scoped.length) {
       targetRule = toPlainAutomationRule(scoped[0], val);
     }
+  }
+
+  if (!targetRule && inputGraph) {
+    const validatedG = validateFlowGraphInput(inputGraph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: false });
+    targetRule = {
+      ruleKey: ruleKey || 'flow_draft',
+      name: args.title || 'Graph v2 Flow',
+      schemaVersion: 2,
+      graphJson: validatedG,
+      cooldownSec: validatedG.settings?.cooldownSec ?? 0,
+      maxDepth: validatedG.settings?.maxDepth ?? 8,
+      actionsJson: [],
+    };
   }
 
   if (!targetRule) {
@@ -1587,7 +2122,7 @@ async function runSuggestAutomation(ctx, db, actor, args, deps) {
           priority: 'medium',
           targetNode: 'trigger',
           title: 'Khởi tạo automation rule đầu tiên cho tổ chức',
-          description: 'Dùng draftAutomation hoặc blueprint Chuỗi lạnh CMMS để tạo rule có DMN và cooldown.',
+          description: 'Dùng draftAutomation để dựng Graph v2 DAG có điều kiện, phê duyệt HITL và cooldown.',
         },
       ],
       summary: 'Chưa có automation rule nào trong tổ chức để phân tích.',
@@ -1609,50 +2144,67 @@ async function runSuggestAutomation(ctx, db, actor, args, deps) {
   return {
     operation: 'suggestAutomation',
     organizationId: actor.organizationId,
-    ruleKey: targetRule.ruleKey || ruleKey,
+    ruleKey: draftRule?.ruleKey || targetRule.ruleKey || ruleKey,
     applied,
     ...(args.dryRun ? { dryRun: true } : {}),
     suggestions,
     summary: suggestions.length
       ? `Phát hiện ${suggestions.length} điểm có thể tối ưu cho rule "${targetRule.ruleKey || targetRule.name}".`
       : `Rule "${targetRule.ruleKey || targetRule.name}" đã đạt chuẩn guard, cooldown và phân nhánh.`,
+    ...(draftRule?.graphJson ? { draftGraph: draftRule.graphJson } : {}),
     draftRule,
   };
 }
 
 /**
- * Draft a full branching automation rule from natural language and preview via dry-run simulation.
+ * Draft a full branching LatticeFlow v2 DAG / automation rule from natural language and preview via dry-run simulation.
  */
 async function runDraftAutomation(ctx, db, actor, args, deps) {
   const { val, failTool, SYSTEM_PROTECTED_COLLECTIONS } = deps;
   const goalText = String(args.goal || args.prompt || '').trim();
   const shouldApply = Boolean(args.apply && !args.dryRun);
-  if (!goalText && !isPlainObject(args.rule)) {
-    throw failTool('AUTOMATION_GOAL_REQUIRED', 400, 'Cần mô tả mục tiêu (goal/prompt) hoặc rule để phác thảo automation.');
+  const inputGraph = isPlainObject(args.graphJson) ? args.graphJson : (isPlainObject(args.graph) ? args.graph : null);
+  if (!goalText && !isPlainObject(args.rule) && !inputGraph) {
+    throw failTool('AUTOMATION_GOAL_REQUIRED', 400, 'Cần mô tả mục tiêu (goal/prompt), rule hoặc graphJson để phác thảo automation.');
   }
   assertSafeAutomationInput(goalText, args.rule, args, failTool, SYSTEM_PROTECTED_COLLECTIONS);
 
-  const copilotHit = goalText
-    ? await callStudioCopilotIfAvailable(ctx, db, actor, 'full', {
+  const requestedMode = args.mode === 'fix_error' ? 'fix_error' : 'full';
+  const architectHit = goalText || requestedMode === 'fix_error'
+    ? await callFlowArchitectIfAvailable(ctx, db, actor, requestedMode, {
         prompt: goalText,
         goal: goalText,
         ...(args.ruleKey ? { ruleKey: args.ruleKey } : {}),
         ...(isPlainObject(args.rule) ? { rule: sanitizeAutomationValue(args.rule) } : {}),
+        ...(inputGraph ? { graph: sanitizeAutomationValue(inputGraph), graphJson: sanitizeAutomationValue(inputGraph) } : {}),
+        ...(isPlainObject(args.runTrace) ? { runTrace: sanitizeAutomationValue(args.runTrace) } : {}),
         ...(isPlainObject(args.sampleEvent) ? { sampleEvent: sanitizeAutomationValue(args.sampleEvent) } : {}),
         apply: shouldApply,
       }, deps)
     : null;
 
   let draftRule = null;
+  let draftGraph = null;
+  let graphDiff = null;
+  let modeUsed;
+  let repairAttempts;
+  let suggestions;
+  let dryRunPreview = null;
   let simulation = null;
   let applied = false;
   let summary = null;
 
   let savedRule = null;
-  if (copilotHit) {
-    const data = copilotHit.data;
+  if (architectHit) {
+    const data = architectHit.data;
     draftRule = data.draftRule || data.previewRule || data.rule || null;
-    simulation = data.simulation || null;
+    draftGraph = data.draftGraph || draftRule?.graphJson || null;
+    graphDiff = data.graphDiff || null;
+    modeUsed = data.modeUsed;
+    repairAttempts = data.repairAttempts;
+    suggestions = Array.isArray(data.suggestions) ? data.suggestions : undefined;
+    dryRunPreview = data.dryRunPreview || null;
+    simulation = data.simulation || data.dryRunPreview || null;
     applied = Boolean(data.applied || data.saved || data.savedRule);
     savedRule = data.savedRule || null;
     summary = data.summary || null;
@@ -1662,11 +2214,24 @@ async function runDraftAutomation(ctx, db, actor, args, deps) {
   }
 
   if (!draftRule) {
-    draftRule = isPlainObject(args.rule)
-      ? validateAndNormalizeRule(args.rule, failTool, SYSTEM_PROTECTED_COLLECTIONS)
-      : await draftRuleFromGoal(db, actor, args, val);
+    if (isPlainObject(args.rule)) {
+      draftRule = validateAndNormalizeRule(args.rule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+    } else if (inputGraph) {
+      const normalizedG = validateFlowGraphInput(inputGraph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: true });
+      draftRule = validateAndNormalizeRule({
+        ruleKey: args.ruleKey || buildSlugRuleKey(goalText || 'flow_v2', 'auto'),
+        name: args.title || 'LatticeFlow v2 Draft',
+        schemaVersion: 2,
+        graphJson: normalizedG,
+      }, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+    } else {
+      draftRule = await draftRuleFromGoal(db, actor, args, val);
+    }
   } else {
     draftRule = validateAndNormalizeRule(draftRule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+  }
+  if (!draftGraph && isPlainObject(draftRule.graphJson)) {
+    draftGraph = draftRule.graphJson;
   }
 
   const sampleEvent = isPlainObject(args.sampleEvent)
@@ -1695,16 +2260,60 @@ async function runDraftAutomation(ctx, db, actor, args, deps) {
     organizationId: actor.organizationId,
     applied,
     ...(args.dryRun ? { dryRun: true } : {}),
+    ...(modeUsed !== undefined ? { modeUsed } : {}),
+    ...(repairAttempts !== undefined ? { repairAttempts } : {}),
     draftRule,
+    ...(draftGraph ? { draftGraph } : {}),
+    ...(graphDiff ? { graphDiff } : {}),
+    ...(suggestions ? { suggestions } : {}),
     ...(savedRule ? { rule: savedRule } : {}),
     sampleEvent,
     simulation,
-    summary: summary || `Đã phác thảo rule "${draftRule.ruleKey}" (${draftRule.actionsJson.length} bước) và mô phỏng dry-run.`,
+    ...(dryRunPreview ? { dryRunPreview } : {}),
+    summary: summary || `Đã phác thảo rule "${draftRule.ruleKey}" (${draftGraph?.nodes?.length || draftRule.actionsJson.length} thành phần) và mô phỏng dry-run.`,
   };
 }
 
+function applyLocalGraphFixError(baseGraph, runTrace, failTool, protectedCollections) {
+  const cleanGraph = validateFlowGraphInput(baseGraph, failTool, protectedCollections, { requireTrigger: true });
+  const states = isPlainObject(runTrace?.nodeStatesJson) ? runTrace.nodeStatesJson : {};
+  const badEntry = Object.entries(states).find(([, st]) => ['failed', 'error'].includes(String(st?.status || '').toLowerCase()));
+  const failedId = String(runTrace?.failedNodeId || badEntry?.[0] || '').trim();
+  const target = cleanGraph.nodes.find((n) => n.id === failedId) || cleanGraph.nodes.find((n) => !String(n.type || '').startsWith('trigger.'));
+  if (!target) {
+    throw failTool('AUTOMATION_TARGET_NODE_NOT_FOUND', 404, 'Không tìm thấy node lỗi có thể tự sửa trong flow.');
+  }
+  target.continueOnFail = true;
+  if (target.type === 'data.update' && !target.config?.recordId && !Object.keys(target.config?.filter || {}).length) {
+    target.config = { ...(target.config || {}), recordId: '{{data.id}}', filter: { id: '{{data.id}}' } };
+  }
+  if (['integration.http', 'ai.llm'].includes(target.type)) {
+    target.timeoutMs = target.timeoutMs || 10000;
+  }
+  if (!cleanGraph.edges.some((e) => e.source === target.id && e.sourceHandle === 'error')) {
+    const errId = `err_notify_${target.id}`;
+    cleanGraph.nodes.push({
+      id: errId,
+      type: 'notify.send',
+      label: 'Error Recovery Alert',
+      position: { x: (target.position?.x || 300) + 240, y: (target.position?.y || 160) + 140 },
+      config: { roleNames: ['ldx_operator'], severity: 'critical', title: `Recovered failure on ${target.id}` },
+      continueOnFail: false,
+    });
+    cleanGraph.edges.push({
+      id: `e_err_${target.id}`,
+      source: target.id,
+      sourceHandle: 'error',
+      target: errId,
+      targetHandle: 'in',
+      label: 'error',
+    });
+  }
+  return { graph: cleanGraph, targetNodeId: target.id };
+}
+
 /**
- * Surgically patch a specific part of an automation rule (trigger, filter, dmn, cooldown, or step:<idx>).
+ * Surgically patch a specific part of an automation rule or Graph v2 DAG (including fix_error mode).
  */
 async function runPatchAutomation(ctx, db, actor, args, deps) {
   const { val, failTool, SYSTEM_PROTECTED_COLLECTIONS } = deps;
@@ -1722,41 +2331,383 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
   const explicitTrigger = typeof args.triggerEventType === 'string' && args.triggerEventType.trim()
     ? args.triggerEventType.trim()
     : null;
+  const inputGraph = isPlainObject(args.graphJson) ? args.graphJson : (isPlainObject(args.graph) ? args.graph : null);
+  const isFixError = String(args.mode || '').trim().toLowerCase() === 'fix_error' || isPlainObject(args.runTrace);
 
-  if (!isPlainObject(args.rule) && !ruleKey) {
-    throw failTool('AUTOMATION_RULE_KEY_REQUIRED', 400, 'Cần ruleKey hoặc rule để vá (patch) automation.');
+  let hydratedRunTrace = isPlainObject(args.runTrace) ? sanitizeAutomationValue(args.runTrace) : null;
+  let hydratedRuleKey = ruleKey;
+  if (isFixError && hydratedRunTrace?.runUid && (!hydratedRunTrace.nodeStatesJson || (!hydratedRuleKey && !isPlainObject(args.rule) && !inputGraph))) {
+    const runsRepo = db?.getRepository?.('latticeAutomationRuns');
+    if (runsRepo && typeof runsRepo.findOne === 'function') {
+      const runRow = await runsRepo.findOne({ filter: { organizationId: actor.organizationId, runUid: String(hydratedRunTrace.runUid).trim() } });
+      if (runRow && val(runRow, 'organizationId') === actor.organizationId) {
+        if (!hydratedRuleKey && val(runRow, 'ruleKey')) hydratedRuleKey = String(val(runRow, 'ruleKey')).trim();
+        hydratedRunTrace = {
+          runUid: val(runRow, 'runUid') || hydratedRunTrace.runUid,
+          status: val(runRow, 'status') || hydratedRunTrace.status || 'failed',
+          errorMessage: val(runRow, 'errorMessage') || hydratedRunTrace.errorMessage || '',
+          nodeStatesJson: val(runRow, 'nodeStatesJson') || hydratedRunTrace.nodeStatesJson || {},
+          stepTracesJson: val(runRow, 'stepTracesJson') || hydratedRunTrace.stepTracesJson || [],
+          ...hydratedRunTrace,
+        };
+      }
+    }
+  }
+
+  if (!isPlainObject(args.rule) && !hydratedRuleKey && !inputGraph) {
+    throw failTool('AUTOMATION_RULE_KEY_REQUIRED', 400, 'Cần ruleKey, rule hoặc graphJson để vá (patch) automation.');
   }
   let baseRule = null;
   if (isPlainObject(args.rule)) {
     baseRule = validateAndNormalizeRule(args.rule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
-  } else {
-    baseRule = await loadTenantAutomationRule(db, actor.organizationId, ruleKey, val, failTool);
+  } else if (hydratedRuleKey) {
+    baseRule = await loadTenantAutomationRule(db, actor.organizationId, hydratedRuleKey, val, failTool);
+  } else if (inputGraph) {
+    const validatedG = validateFlowGraphInput(inputGraph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: true });
+    baseRule = validateAndNormalizeRule({
+      ruleKey: hydratedRuleKey || inputGraph.ruleKey || 'flow_v2_patch',
+      name: args.title || 'LatticeFlow v2 Flow',
+      schemaVersion: 2,
+      graphJson: validatedG,
+    }, failTool, SYSTEM_PROTECTED_COLLECTIONS);
   }
 
-  const resolvedTarget = inferPatchTargetNode(goalText, args.targetNode, { cfgPatch, explicitTrigger });
-  const shouldUseLocalPatcher = Boolean(cfgPatch || explicitTrigger);
-  const copilotTargetNode = resolvedTarget === 'actions' || resolvedTarget === 'step:new'
-    ? 'step:append'
-    : resolvedTarget;
+  const hasExplicitRuleKey = Boolean(
+    hydratedRuleKey
+    || (isPlainObject(args.rule) && (args.rule.ruleKey || args.rule.automationCode))
+    || (isPlainObject(inputGraph) && inputGraph.ruleKey),
+  );
+  const pinnedRuleKey = !args.newRuleKey && !args.targetRuleKey && hasExplicitRuleKey && baseRule?.ruleKey
+    ? baseRule.ruleKey
+    : null;
 
-  const copilotHit = !shouldUseLocalPatcher
-    ? await callStudioCopilotIfAvailable(ctx, db, actor, 'node', {
+  const effectiveGraph = inputGraph
+    ? validateFlowGraphInput(inputGraph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: false })
+    : (isPlainObject(baseRule?.graphJson) && Array.isArray(baseRule.graphJson.nodes) ? baseRule.graphJson : null);
+
+  if (isFixError) {
+    const fixHit = await callFlowArchitectIfAvailable(ctx, db, actor, 'fix_error', {
+      prompt: goalText,
+      goal: goalText,
+      ruleKey: baseRule?.ruleKey || hydratedRuleKey,
+      ...(baseRule ? { rule: baseRule, currentRule: baseRule } : {}),
+      ...(effectiveGraph ? { graph: effectiveGraph, graphJson: effectiveGraph } : {}),
+      runTrace: hydratedRunTrace || {},
+      apply: shouldApply,
+    }, deps);
+
+    let draftRule;
+    let draftGraph;
+    let graphDiff = null;
+    let modeUsed;
+    let repairAttempts;
+    let diffSummary;
+    let applied = false;
+    let savedRule = null;
+
+    if (fixHit) {
+      const data = fixHit.data;
+      draftRule = data.draftRule || data.previewRule || data.rule || baseRule;
+      if (draftRule && pinnedRuleKey) draftRule = { ...draftRule, ruleKey: pinnedRuleKey };
+      if (draftRule) draftRule = validateAndNormalizeRule(draftRule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+      draftGraph = data.draftGraph || draftRule?.graphJson || null;
+      graphDiff = data.graphDiff || null;
+      modeUsed = data.modeUsed;
+      repairAttempts = data.repairAttempts;
+      applied = Boolean(data.applied || data.saved || data.savedRule);
+      savedRule = data.savedRule || null;
+      diffSummary = data.summary || `Đã sửa lỗi flow "${draftRule?.ruleKey || hydratedRuleKey || 'graph'}".`;
+    } else {
+      const schemaMod = loadStudioFlowSchema();
+      const targetGraph = effectiveGraph || (typeof schemaMod?.v1RuleToGraphV2 === 'function' ? schemaMod.v1RuleToGraphV2(baseRule) : null);
+      if (!targetGraph) {
+        throw failTool('AUTOMATION_RULE_INVALID', 400, 'Không có graphJson để sửa lỗi lần chạy.');
+      }
+      const repaired = applyLocalGraphFixError(targetGraph, hydratedRunTrace, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+      draftGraph = repaired.graph;
+      draftRule = validateAndNormalizeRule({
+        ...(baseRule || { ruleKey: 'flow_v2_repaired', name: 'Repaired Flow' }),
+        schemaVersion: 2,
+        graphJson: draftGraph,
+      }, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+      diffSummary = `Đã sửa lỗi node "${repaired.targetNodeId}" và gắn nhánh error recovery.`;
+    }
+
+    if (shouldApply && !applied && draftRule) {
+      savedRule = await saveTenantAutomationRule(ctx, db, actor, draftRule, deps);
+      applied = true;
+    }
+
+    return {
+      operation: 'patchAutomation',
+      mode: 'fix_error',
+      organizationId: actor.organizationId,
+      ruleKey: draftRule?.ruleKey || hydratedRuleKey,
+      applied,
+      ...(args.dryRun ? { dryRun: true } : {}),
+      ...(modeUsed !== undefined ? { modeUsed } : {}),
+      ...(repairAttempts !== undefined ? { repairAttempts } : {}),
+      patch: { mode: 'fix_error', ...(hydratedRunTrace?.runUid ? { runUid: hydratedRunTrace.runUid } : {}) },
+      diffSummary,
+      ...(draftGraph ? { draftGraph } : {}),
+      ...(graphDiff ? { graphDiff } : {}),
+      ...(draftRule ? { draftRule } : {}),
+      ...(savedRule ? { rule: savedRule } : {}),
+    };
+  }
+
+  const explicitTarget = args.nodeId || args.targetNode;
+  const resolvedTarget = inferPatchTargetNode(goalText, explicitTarget, { cfgPatch, explicitTrigger });
+  const resolvedGraphNodeId = effectiveGraph && !args.nodeId
+    ? (
+      resolvedTarget === 'filter'
+        ? (effectiveGraph.nodes.find((n) => n.type === 'control.if' && (n.id === 'filter_1' || n.config?.isRuleFilter))?.id
+          || effectiveGraph.nodes.find((n) => n.type === 'control.if')?.id
+          || null)
+        : (resolvedTarget === 'dmn'
+          ? (effectiveGraph.nodes.find((n) => n.type === 'logic.dmn')?.id || null)
+          : null)
+    )
+    : null;
+  const effectiveNodeId = args.nodeId ? String(args.nodeId).trim() : resolvedGraphNodeId;
+
+  if (effectiveGraph && !args.nodeId && (resolvedTarget === 'actions' || resolvedTarget === 'step:new')) {
+    const archMod = loadStudioFlowArchitect();
+    const nGoalV2 = stripDiacriticsSimple(goalText).toLowerCase().replace(/\s+/g, ' ').trim();
+    const explicitType = isPlainObject(cfgPatch) ? String(cfgPatch.type || cfgPatch.nodeType || '').trim() : '';
+    let appendType;
+    let appendLabel;
+    let appendConfig;
+    if (explicitType) {
+      appendType = explicitType;
+      appendLabel = cfgPatch.label ? String(cfgPatch.label) : explicitType;
+      const { type: _t, nodeType: _nt, label: _lb, ...restCfg } = cfgPatch;
+      appendConfig = isPlainObject(cfgPatch.config) ? clonePlain(cfgPatch.config) : clonePlain(restCfg);
+    } else if (/\b(?:ai|llm|triage)\b|tom tat|summarize/.test(nGoalV2)) {
+      appendType = 'ai.llm';
+      appendLabel = 'AI Summary';
+      appendConfig = {
+        systemPrompt: 'Summarize event context cleanly in JSON.',
+        userPrompt: '{{data}}',
+        responseFormat: 'json',
+        fallbackOutput: { summary: goalText.slice(0, 140) || 'AI Summary' },
+        ...(cfgPatch || {}),
+      };
+    } else if (/\b(?:webhook|http|connector)\b|dong bo|sync/.test(nGoalV2)) {
+      appendType = 'integration.http';
+      appendLabel = 'HTTP Integration';
+      appendConfig = {
+        connectorKey: cfgPatch?.connectorKey || '',
+        method: cfgPatch?.method || 'POST',
+        path: cfgPatch?.path || '/sync',
+        body: cfgPatch?.body || { eventType: '{{type}}', data: '{{data}}' },
+        ...(cfgPatch || {}),
+      };
+    } else if (/\b(?:tao|create|ticket|work\s*order|phieu)\b/.test(nGoalV2)) {
+      appendType = 'data.create';
+      appendLabel = 'Create Record';
+      appendConfig = {
+        collection: cfgPatch?.collection || (nGoalV2.includes('ticket') ? 'latticeServiceTickets' : 'latticeCustomWorkOrders'),
+        values: cfgPatch?.values || { title: '{{data.deviceKey}}' },
+        ...(cfgPatch || {}),
+      };
+    } else {
+      const roleMatch = goalText.match(/\b(ldx_[a-z0-9_]{2,40})\b/i);
+      const roleName = roleMatch ? roleMatch[1] : (/manager|quan ly|giam doc/.test(nGoalV2) ? 'ldx_manager' : 'ldx_operator');
+      appendType = 'notify.send';
+      appendLabel = 'Notify';
+      appendConfig = {
+        roleNames: [roleName],
+        severity: 'warning',
+        title: goalText.slice(0, 120) || 'Automation Notice',
+        ...(cfgPatch || {}),
+      };
+    }
+    const existingIds = new Set(effectiveGraph.nodes.map((n) => n.id));
+    const idBase = appendType.split('.')[1] || 'step';
+    let seq = effectiveGraph.nodes.length + 1;
+    let newNodeId = `${idBase}_${seq}`;
+    while (existingIds.has(newNodeId)) {
+      seq += 1;
+      newNodeId = `${idBase}_${seq}`;
+    }
+    const concreteNode = { id: newNodeId, type: appendType, label: appendLabel, config: appendConfig };
+    const edgesList = Array.isArray(effectiveGraph.edges) ? effectiveGraph.edges : [];
+    const outgoingSources = new Set(edgesList.map((e) => e.source));
+    const nonTriggerNodes = effectiveGraph.nodes.filter((n) => !String(n.type || '').startsWith('trigger.'));
+    const leafNonTrigger = [...nonTriggerNodes].reverse().find((n) => !outgoingSources.has(n.id));
+    const tailNode = leafNonTrigger
+      || nonTriggerNodes[nonTriggerNodes.length - 1]
+      || effectiveGraph.nodes.find((n) => String(n.type || '').startsWith('trigger.'))
+      || effectiveGraph.nodes[effectiveGraph.nodes.length - 1]
+      || null;
+    const tailPort = tailNode?.type === 'control.if'
+      ? 'true'
+      : (tailNode?.type === 'control.approval' ? 'approved' : (tailNode?.type === 'control.loop' ? 'item' : 'main'));
+    const ops = [{ op: 'add_node', node: concreteNode }];
+    if (tailNode) {
+      ops.push({ op: 'connect_edge', edge: { source: tailNode.id, sourceHandle: tailPort, target: concreteNode.id, targetHandle: 'in' } });
+    }
+    let nextGraph;
+    let graphDiff = null;
+    if (archMod && typeof archMod.applyGraphOperations === 'function') {
+      const appliedOps = archMod.applyGraphOperations(effectiveGraph, ops);
+      nextGraph = validateFlowGraphInput(appliedOps.graph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: true });
+      graphDiff = appliedOps.graphDiff;
+    } else {
+      nextGraph = clonePlain(effectiveGraph);
+      nextGraph.nodes.push(concreteNode);
+      if (!Array.isArray(nextGraph.edges)) nextGraph.edges = [];
+      if (tailNode) {
+        nextGraph.edges.push({ id: `edge_${nextGraph.edges.length + 1}`, source: tailNode.id, sourceHandle: tailPort, target: concreteNode.id, targetHandle: 'in' });
+      }
+      nextGraph = validateFlowGraphInput(nextGraph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: true });
+    }
+    const validatedDraft = validateAndNormalizeRule({ ...baseRule, schemaVersion: 2, graphJson: nextGraph }, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+    let savedRule = null;
+    let applied = false;
+    if (shouldApply) {
+      savedRule = await saveTenantAutomationRule(ctx, db, actor, validatedDraft, deps);
+      applied = true;
+    }
+    return {
+      operation: 'patchAutomation',
+      organizationId: actor.organizationId,
+      ruleKey: validatedDraft.ruleKey,
+      targetNode: concreteNode.id,
+      nodeId: concreteNode.id,
+      applied,
+      ...(args.dryRun ? { dryRun: true } : {}),
+      patch: { op: 'add_node', nodeId: concreteNode.id, nodeType: concreteNode.type, connectedFrom: tailNode?.id || null },
+      diffSummary: `Đã gắn thêm node "${concreteNode.id}" (${concreteNode.type}) vào Graph v2.`,
+      draftGraph: nextGraph,
+      ...(graphDiff ? { graphDiff } : {}),
+      draftRule: validatedDraft,
+      ...(savedRule ? { rule: savedRule } : {}),
+    };
+  }
+
+  if (effectiveGraph && !args.nodeId && (resolvedTarget === 'cooldown' || resolvedTarget === 'guard')) {
+    const archMod = loadStudioFlowArchitect();
+    const prevCooldown = Number(baseRule?.cooldownSec ?? effectiveGraph.settings?.cooldownSec ?? 0);
+    const extracted = extractCooldownSeconds(goalText);
+    const rawCooldown = cfgPatch?.cooldownSec !== undefined
+      ? Number(cfgPatch.cooldownSec)
+      : (extracted !== null ? extracted : (prevCooldown > 0 ? prevCooldown : 120));
+    const finalCooldown = Math.max(0, Math.round(rawCooldown));
+    const nextSettings = {
+      cooldownSec: finalCooldown,
+      ...(cfgPatch?.maxDepth !== undefined ? { maxDepth: Number(cfgPatch.maxDepth) } : {}),
+    };
+    let nextGraph;
+    let graphDiff = null;
+    if (archMod && typeof archMod.applyGraphOperations === 'function') {
+      const appliedOps = archMod.applyGraphOperations(effectiveGraph, [{ op: 'update_settings', settings: nextSettings }]);
+      nextGraph = validateFlowGraphInput(appliedOps.graph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: true });
+      graphDiff = appliedOps.graphDiff;
+    } else {
+      nextGraph = clonePlain(effectiveGraph);
+      nextGraph.settings = { ...(isPlainObject(nextGraph.settings) ? nextGraph.settings : {}), ...nextSettings };
+      nextGraph = validateFlowGraphInput(nextGraph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: true });
+    }
+    const validatedDraft = validateAndNormalizeRule({
+      ...baseRule,
+      cooldownSec: finalCooldown,
+      ...(cfgPatch?.maxDepth !== undefined ? { maxDepth: Number(cfgPatch.maxDepth) } : {}),
+      ...(cfgPatch?.active !== undefined ? { active: Boolean(cfgPatch.active) } : {}),
+      schemaVersion: 2,
+      graphJson: nextGraph,
+    }, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+    let savedRule = null;
+    let applied = false;
+    if (shouldApply) {
+      savedRule = await saveTenantAutomationRule(ctx, db, actor, validatedDraft, deps);
+      applied = true;
+    }
+    return {
+      operation: 'patchAutomation',
+      organizationId: actor.organizationId,
+      ruleKey: validatedDraft.ruleKey,
+      targetNode: 'cooldown',
+      applied,
+      ...(args.dryRun ? { dryRun: true } : {}),
+      patch: { cooldownSec: finalCooldown },
+      diffSummary: `Cập nhật cooldownSec: ${prevCooldown}s -> ${finalCooldown}s trên Graph v2.`,
+      draftGraph: nextGraph,
+      ...(graphDiff ? { graphDiff } : {}),
+      draftRule: validatedDraft,
+      ...(savedRule ? { rule: savedRule } : {}),
+    };
+  }
+
+  const isGraphNodePatch = Boolean(effectiveGraph && cfgPatch && effectiveNodeId && effectiveGraph.nodes.some((n) => n.id === effectiveNodeId));
+  const shouldUseLocalPatcher = Boolean((cfgPatch && !isGraphNodePatch) || explicitTrigger);
+  const architectTargetNode = effectiveNodeId
+    || (resolvedTarget === 'actions' || resolvedTarget === 'step:new' ? 'step:append' : resolvedTarget);
+
+  if (isGraphNodePatch) {
+    const archMod = loadStudioFlowArchitect();
+    const targetNodeId = effectiveNodeId;
+    let nextGraph;
+    let graphDiff = null;
+    if (archMod && typeof archMod.applyGraphOperations === 'function') {
+      const appliedOps = archMod.applyGraphOperations(effectiveGraph, [{ op: 'update_node', nodeId: targetNodeId, configPatch: cfgPatch }]);
+      nextGraph = validateFlowGraphInput(appliedOps.graph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: true });
+      graphDiff = appliedOps.graphDiff;
+    } else {
+      nextGraph = clonePlain(effectiveGraph);
+      const tNode = nextGraph.nodes.find((n) => n.id === targetNodeId);
+      if (tNode) tNode.config = { ...(tNode.config || {}), ...cfgPatch };
+      nextGraph = validateFlowGraphInput(nextGraph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: true });
+    }
+    const validatedDraft = validateAndNormalizeRule({ ...baseRule, schemaVersion: 2, graphJson: nextGraph }, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+    let savedRule = null;
+    let applied = false;
+    if (shouldApply) {
+      savedRule = await saveTenantAutomationRule(ctx, db, actor, validatedDraft, deps);
+      applied = true;
+    }
+    return {
+      operation: 'patchAutomation',
+      organizationId: actor.organizationId,
+      ruleKey: validatedDraft.ruleKey,
+      targetNode: targetNodeId,
+      nodeId: targetNodeId,
+      applied,
+      ...(args.dryRun ? { dryRun: true } : {}),
+      patch: { nodeId: targetNodeId, configPatch: cfgPatch },
+      diffSummary: `Đã cập nhật cấu hình node "${targetNodeId}" trên Graph v2.`,
+      draftGraph: nextGraph,
+      ...(graphDiff ? { graphDiff } : {}),
+      draftRule: validatedDraft,
+      ...(savedRule ? { rule: savedRule } : {}),
+    };
+  }
+
+  const architectHit = !shouldUseLocalPatcher
+    ? await callFlowArchitectIfAvailable(ctx, db, actor, 'node', {
         prompt: goalText,
         goal: goalText,
-        ruleKey: baseRule?.ruleKey || ruleKey,
-        targetNode: copilotTargetNode,
-        target: copilotTargetNode,
+        ruleKey: baseRule?.ruleKey || hydratedRuleKey,
+        ...(effectiveNodeId ? { nodeId: effectiveNodeId } : {}),
+        targetNode: architectTargetNode,
+        target: architectTargetNode,
         ...(baseRule ? { rule: baseRule, currentRule: baseRule } : {}),
+        ...(effectiveGraph ? { graph: effectiveGraph, graphJson: effectiveGraph } : {}),
         apply: shouldApply,
       }, deps)
     : null;
 
-  if (copilotHit) {
-    const data = copilotHit.data;
+  if (architectHit) {
+    const data = architectHit.data;
     let draftRule = data.draftRule || data.previewRule || data.rule || baseRule;
+    if (draftRule && pinnedRuleKey) {
+      draftRule = { ...draftRule, ruleKey: pinnedRuleKey };
+    }
     if (draftRule) {
       draftRule = validateAndNormalizeRule(draftRule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
     }
+    const draftGraph = data.draftGraph || draftRule?.graphJson || null;
     let applied = Boolean(data.applied || data.saved || data.savedRule);
     let savedRule = data.savedRule || null;
     if (shouldApply && !applied && draftRule) {
@@ -1765,23 +2716,27 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
     }
     const summaryText = Array.isArray(data.diffSummary)
       ? data.diffSummary.join('; ')
-      : (data.diffSummary || data.summary || `Đã vá node ${resolvedTarget} của rule "${draftRule?.ruleKey || ruleKey}".`);
+      : (data.diffSummary || data.summary || `Đã vá node ${resolvedTarget} của rule "${draftRule?.ruleKey || hydratedRuleKey}".`);
     return {
       operation: 'patchAutomation',
       organizationId: actor.organizationId,
-      ruleKey: draftRule?.ruleKey || ruleKey,
+      ruleKey: draftRule?.ruleKey || hydratedRuleKey,
       targetNode: resolvedTarget === 'cooldown' ? 'cooldown' : (data.targetNode || resolvedTarget),
       applied,
       ...(args.dryRun ? { dryRun: true } : {}),
+      ...(data.modeUsed !== undefined ? { modeUsed: data.modeUsed } : {}),
+      ...(data.repairAttempts !== undefined ? { repairAttempts: data.repairAttempts } : {}),
       patch: data.patch || { targetNode: resolvedTarget },
       diffSummary: summaryText,
+      ...(draftGraph ? { draftGraph } : {}),
+      ...(data.graphDiff ? { graphDiff: data.graphDiff } : {}),
       ...(draftRule ? { draftRule } : {}),
       ...(savedRule ? { rule: savedRule } : {}),
     };
   }
 
   if (!baseRule) {
-    baseRule = await loadTenantAutomationRule(db, actor.organizationId, ruleKey, val, failTool);
+    baseRule = await loadTenantAutomationRule(db, actor.organizationId, hydratedRuleKey, val, failTool);
   }
 
   const nextRule = clonePlain(baseRule);
@@ -1951,12 +2906,13 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
 }
 
 /**
- * Validate and upsert an automation rule scoped to actor.organizationId.
+ * Validate and upsert an automation rule (v1 or Graph v2) scoped to actor.organizationId.
  */
 async function runSaveAutomation(ctx, db, actor, args, deps) {
   const { failTool, SYSTEM_PROTECTED_COLLECTIONS } = deps;
   const rawCandidate = isPlainObject(args.rule) ? args.rule : (isPlainObject(args.config) ? args.config : null);
   assertSafeAutomationInput(String(args.goal || args.prompt || ''), rawCandidate, args, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+  const inputGraph = isPlainObject(args.graphJson) ? args.graphJson : (isPlainObject(args.graph) ? args.graph : null);
   const candidate = isPlainObject(args.rule)
     ? sanitizeAutomationValue(args.rule)
     : {
@@ -1964,6 +2920,8 @@ async function runSaveAutomation(ctx, db, actor, args, deps) {
         ...(args.ruleKey ? { ruleKey: args.ruleKey } : {}),
         ...(args.title ? { name: args.title } : {}),
         ...(args.triggerEventType ? { triggerEventType: args.triggerEventType } : {}),
+        ...(args.schemaVersion != null ? { schemaVersion: args.schemaVersion } : {}),
+        ...(inputGraph ? { graphJson: sanitizeAutomationValue(inputGraph), schemaVersion: 2 } : {}),
         ...(args.enabled !== undefined ? { active: args.enabled } : {}),
       };
   const validated = validateAndNormalizeRule(candidate, failTool, SYSTEM_PROTECTED_COLLECTIONS);
@@ -1988,19 +2946,38 @@ async function runSaveAutomation(ctx, db, actor, args, deps) {
 }
 
 /**
- * Simulate an automation rule (including per-step `when` branches) against sampleEvent without mutating state.
+ * Simulate an automation rule / Graph v2 DAG or test a single Graph v2 node without mutating state.
  */
 async function runTestAutomation(ctx, db, actor, args, deps) {
-  const { val, failTool, SYSTEM_PROTECTED_COLLECTIONS } = deps;
+  const { val, failTool, hasRes, SYSTEM_PROTECTED_COLLECTIONS } = deps;
   const ruleKey = typeof args.ruleKey === 'string' ? args.ruleKey.trim() : '';
   const goalText = String(args.goal || args.prompt || '').trim();
+  const inputGraph = isPlainObject(args.graphJson) ? args.graphJson : (isPlainObject(args.graph) ? args.graph : null);
   assertSafeAutomationInput(goalText, args.rule, args, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+
+  const validatedInputGraph = inputGraph
+    ? validateFlowGraphInput(inputGraph, failTool, SYSTEM_PROTECTED_COLLECTIONS, { requireTrigger: !args.nodeId })
+    : null;
 
   let ruleObj = null;
   if (isPlainObject(args.rule)) {
     ruleObj = validateAndNormalizeRule(args.rule, failTool, SYSTEM_PROTECTED_COLLECTIONS);
+    if (validatedInputGraph) {
+      ruleObj = { ...ruleObj, schemaVersion: 2, graphJson: validatedInputGraph };
+    }
   } else if (ruleKey) {
     ruleObj = await loadTenantAutomationRule(db, actor.organizationId, ruleKey, val, failTool);
+    if (validatedInputGraph) {
+      ruleObj = { ...ruleObj, schemaVersion: 2, graphJson: validatedInputGraph };
+    }
+  } else if (validatedInputGraph) {
+    ruleObj = {
+      ruleKey: inputGraph.ruleKey || 'inline_flow',
+      name: args.title || 'Inline Graph v2',
+      schemaVersion: 2,
+      graphJson: validatedInputGraph,
+      actionsJson: [],
+    };
   } else if (args.workflowId != null && Number.isInteger(Number(args.workflowId)) && Number(args.workflowId) > 0) {
     const rulesRepo = db?.getRepository?.('latticeAutomationRules');
     if (!rulesRepo || typeof rulesRepo.findOne !== 'function') {
@@ -2011,8 +2988,79 @@ async function runTestAutomation(ctx, db, actor, args, deps) {
       throw failTool('AUTOMATION_RULE_NOT_FOUND', 404, `Không tìm thấy automation rule #${args.workflowId} trong phạm vi tổ chức.`);
     }
     ruleObj = toPlainAutomationRule(row, val);
+    if (validatedInputGraph) {
+      ruleObj = { ...ruleObj, schemaVersion: 2, graphJson: validatedInputGraph };
+    }
   } else {
-    throw failTool('AUTOMATION_RULE_KEY_REQUIRED', 400, 'Cần ruleKey, workflowId hoặc rule để chạy mô phỏng dry-run.');
+    throw failTool('AUTOMATION_RULE_KEY_REQUIRED', 400, 'Cần ruleKey, workflowId, rule hoặc graphJson để chạy mô phỏng dry-run.');
+  }
+
+  const nodeId = typeof args.nodeId === 'string' && args.nodeId.trim() ? args.nodeId.trim() : null;
+  if (nodeId) {
+    const pinnedInputs = isPlainObject(args.pinnedInputs)
+      ? sanitizeAutomationValue(args.pinnedInputs)
+      : (isPlainObject(args.sampleEvent) ? sanitizeAutomationValue(args.sampleEvent) : {});
+    let targetGraph = validatedInputGraph
+      || (isPlainObject(ruleObj?.graphJson) && Array.isArray(ruleObj.graphJson.nodes) ? ruleObj.graphJson : null)
+      || (isPlainObject(ruleObj?.graph) && Array.isArray(ruleObj.graph.nodes) ? ruleObj.graph : null);
+    if (!targetGraph && ruleObj) {
+      const schemaMod = loadStudioFlowSchema();
+      if (typeof schemaMod?.v1RuleToGraphV2 === 'function') {
+        targetGraph = schemaMod.v1RuleToGraphV2(ruleObj);
+      }
+    }
+    if (hasResourceAction(hasRes, ctx, 'dxosAutomations', 'testNode')) {
+      const testNodeParams = {
+        organizationId: actor.organizationId,
+        nodeId,
+        ...(targetGraph ? { graph: targetGraph } : {}),
+        ...(ruleObj ? { rule: ruleObj } : {}),
+        ...(ruleObj?.ruleKey ? { ruleKey: ruleObj.ruleKey } : {}),
+        pinnedInputs,
+        dryRun: true,
+      };
+      const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'testNode', {
+        ...testNodeParams,
+        values: testNodeParams,
+        method: 'POST',
+      }, deps);
+      if (delegated.ok) {
+        const res = delegated.result?.result || delegated.result || {};
+        return {
+          dryRun: true,
+          operation: 'testAutomation',
+          organizationId: actor.organizationId,
+          ruleKey: ruleObj?.ruleKey || null,
+          ...res,
+        };
+      }
+    }
+    const execMod = loadStudioFlowExecutor();
+    if (execMod && typeof execMod.testSingleFlowNode === 'function') {
+      const res = await execMod.testSingleFlowNode(db, {
+        graph: targetGraph,
+        rule: ruleObj,
+        nodeId,
+        pinnedInputs,
+        organizationId: actor.organizationId,
+        actor: {
+          id: actor.userId,
+          userId: actor.userId,
+          employeeId: actor.employeeId,
+          username: actor.username,
+          organizationId: actor.organizationId,
+        },
+        options: { app: ctx?.app || db?.app, dryRun: true },
+      });
+      return {
+        dryRun: true,
+        operation: 'testAutomation',
+        organizationId: actor.organizationId,
+        ruleKey: ruleObj?.ruleKey || null,
+        ...res,
+      };
+    }
+    throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ kiểm thử từng node (dxosAutomations:testNode / flow/executor) chưa sẵn sàng.');
   }
 
   const sampleEvent = isPlainObject(args.sampleEvent)
@@ -2027,11 +3075,150 @@ async function runTestAutomation(ctx, db, actor, args, deps) {
     ruleKey: ruleObj.ruleKey || null,
     matched: Boolean(simulation?.matched),
     status: simulation?.status || 'completed',
+    ...(simulation?.graphVersion ? { graphVersion: simulation.graphVersion } : {}),
+    ...(simulation?.nodeStatesJson ? { nodeStatesJson: simulation.nodeStatesJson } : {}),
     stepTraces,
     executedSteps,
     skippedSteps,
     simulation,
   };
+}
+
+/**
+ * Resume a suspended HITL / delay LatticeFlow v2 automation run cleanly with tenant isolation.
+ */
+async function runResumeAutomation(ctx, db, actor, args, deps) {
+  const { val, failTool, hasRes } = deps;
+  const runUid = typeof args.runUid === 'string' ? args.runUid.trim() : '';
+  if (!runUid) {
+    throw failTool('AUTOMATION_RUN_UID_REQUIRED', 400, 'Cần runUid để tiếp tục lượt chạy automation đang tạm dừng.');
+  }
+  const decision = String(args.decision || 'approved').trim().toLowerCase();
+  if (!['approved', 'rejected'].includes(decision)) {
+    throw failTool('AUTOMATION_DECISION_INVALID', 400, 'decision phải là "approved" hoặc "rejected".');
+  }
+  if (hasForbiddenProtoKeys(args.payload) || hasUnsafeAutomationTemplate(args.payload)) {
+    throw failTool('AUTOMATION_AI_REFUSED', 400, 'payload chứa khóa hoặc biểu thức template không an toàn.');
+  }
+  const payload = isPlainObject(args.payload) ? sanitizeAutomationValue(args.payload) : {};
+  const hasResumeTokenArg = args.resumeToken !== undefined && args.resumeToken !== null;
+  const resumeToken = typeof args.resumeToken === 'string' && args.resumeToken.trim() ? args.resumeToken.trim() : undefined;
+  if (hasResumeTokenArg && !resumeToken) {
+    throw failTool('INVALID_RESUME_TOKEN', 403, 'Token tiếp tục (resumeToken) không hợp lệ hoặc bị trống.');
+  }
+
+  if (args.dryRun) {
+    const runsRepo = db?.getRepository?.('latticeAutomationRuns');
+    let previewRun = null;
+    if (runsRepo && typeof runsRepo.findOne === 'function') {
+      const ownRow = await runsRepo.findOne({ filter: { organizationId: actor.organizationId, runUid } });
+      if (!ownRow) {
+        const crossRow = await runsRepo.findOne({ filter: { runUid } });
+        if (crossRow) {
+          throw failTool('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không được phép truy cập lượt chạy thuộc tổ chức khác.');
+        }
+        throw failTool('RUN_NOT_FOUND', 404, `Không tìm thấy automation run "${runUid}" trong phạm vi tổ chức.`);
+      }
+      if (val(ownRow, 'organizationId') !== actor.organizationId) {
+        throw failTool('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không được phép truy cập lượt chạy thuộc tổ chức khác.');
+      }
+      const currentStatus = val(ownRow, 'status') || null;
+      if (currentStatus !== 'suspended') {
+        throw failTool('RUN_ALREADY_RESUMED', 409, `Lượt chạy "${runUid}" đang ở trạng thái "${currentStatus || 'unknown'}", không thể resume.`);
+      }
+      if (hasResumeTokenArg) {
+        const expectedHash = val(ownRow, 'resumeTokenHash') ? String(val(ownRow, 'resumeTokenHash')).trim() : '';
+        const expectedPlain = val(ownRow, 'resumeToken') ? String(val(ownRow, 'resumeToken')).trim() : '';
+        let tokenMatched = false;
+        if (expectedHash && /^[0-9a-f]{64}$/i.test(expectedHash)) {
+          const actualDigest = createHash('sha256').update(String(resumeToken)).digest();
+          const expectedDigest = Buffer.from(expectedHash, 'hex');
+          tokenMatched = actualDigest.length === expectedDigest.length && timingSafeEqual(actualDigest, expectedDigest);
+        } else if (expectedPlain) {
+          const actualDigest = createHash('sha256').update(String(resumeToken)).digest();
+          const expectedDigest = createHash('sha256').update(expectedPlain).digest();
+          tokenMatched = timingSafeEqual(actualDigest, expectedDigest);
+        }
+        if (!tokenMatched) {
+          throw failTool('INVALID_RESUME_TOKEN', 403, 'Token tiếp tục (resumeToken) không khớp hoặc không hợp lệ.');
+        }
+      }
+      previewRun = {
+        runUid: val(ownRow, 'runUid') || runUid,
+        ruleKey: val(ownRow, 'ruleKey') || null,
+        currentStatus,
+        suspendedNodeId: val(ownRow, 'suspendedNodeId') || null,
+      };
+    }
+    return {
+      dryRun: true,
+      applied: false,
+      operation: 'resumeAutomation',
+      organizationId: actor.organizationId,
+      runUid,
+      decision,
+      payload,
+      ...(previewRun ? { previewRun } : {}),
+    };
+  }
+
+  if (hasResourceAction(hasRes, ctx, 'dxosAutomations', 'resumeRun')) {
+    const resumeParams = {
+      organizationId: actor.organizationId,
+      runUid,
+      decision,
+      payload,
+      ...(resumeToken ? { resumeToken } : {}),
+    };
+    const delegated = await invokeDxosAutomationsAction(ctx, db, actor, 'resumeRun', {
+      ...resumeParams,
+      values: resumeParams,
+      method: 'POST',
+    }, deps);
+    if (delegated.ok) {
+      const run = delegated.result?.run || delegated.result;
+      return {
+        operation: 'resumeAutomation',
+        applied: true,
+        organizationId: actor.organizationId,
+        runUid,
+        decision,
+        status: run?.status || 'completed',
+        run,
+      };
+    }
+  }
+
+  const execMod = loadStudioFlowExecutor();
+  if (execMod && typeof execMod.resumeFlowRun === 'function') {
+    const run = await execMod.resumeFlowRun(db, {
+      organizationId: actor.organizationId,
+      runUid,
+      decision,
+      payload,
+      resumeToken,
+      actor: {
+        id: actor.userId,
+        userId: actor.userId,
+        employeeId: actor.employeeId,
+        username: actor.username,
+        organizationId: actor.organizationId,
+      },
+      dryRun: false,
+      options: { app: ctx?.app || db?.app },
+    });
+    return {
+      operation: 'resumeAutomation',
+      applied: true,
+      organizationId: actor.organizationId,
+      runUid,
+      decision,
+      status: run?.status || 'completed',
+      run,
+    };
+  }
+
+  throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ tiếp tục HITL (dxosAutomations:resumeRun / flow/executor) chưa sẵn sàng.');
 }
 
 function createBuilderTools(deps) {
@@ -2866,10 +4053,18 @@ function createBuilderTools(deps) {
       name: 'dxos_configure_workflow',
       adminOnly: true,
       defaultPermission: 'ASK',
-      introduction: { title: 'Kỹ sư Workflow & Automation Copilot', about: 'Đọc/chỉnh đồ thị workflow, liệt kê/chạy và gợi ý tối ưu, thiết kế trọn luồng, vá từng node, mô phỏng rẽ nhánh và lưu Native Automations.' },
-      description: 'Inspect workflow flow_nodes graphs, update node configs, add nodes, build custom collection workflows, toggle enabled state, and list, run, suggest, draft, patch, save, or dry-run test native DMN automations (Admin only).',
+      introduction: { title: 'Kỹ sư Workflow & DX-OS Flow Architect', about: 'Đọc/chỉnh đồ thị workflow, liệt kê/chạy, thiết kế LatticeFlow v2 DAG đa nhánh, vá node hoặc sửa lỗi fix_error, gợi ý tối ưu, mô phỏng node/flow, lưu và phê duyệt resume HITL.' },
+      description: 'Inspect workflow flow_nodes graphs, update node configs, add nodes, build custom collection workflows, toggle enabled state, and list, run, suggest, draft, patch, save, test (flow or single node), or resume HITL LatticeFlow v2 / native automations (Admin only).',
+      prepareArgs(raw) {
+        if (!isPlainObject(raw)) return raw;
+        const next = { ...raw };
+        if (typeof next.nodeId === 'number' && Number.isInteger(next.nodeId)) {
+          next.nodeId = String(next.nodeId);
+        }
+        return next;
+      },
       schema: {
-        description: 'Workflow graph engineering and Native Automation operation.',
+        description: 'Workflow graph engineering and LatticeFlow v2 / Native Automation operation.',
         properties: {
           operation: {
             type: 'string',
@@ -2887,6 +4082,7 @@ function createBuilderTools(deps) {
               'patchAutomation',
               'saveAutomation',
               'testAutomation',
+              'resumeAutomation',
             ],
           },
           workflowId: { type: 'integer' },
@@ -2894,7 +4090,7 @@ function createBuilderTools(deps) {
           title: { type: 'string', maxLength: 120 },
           collectionName: { type: 'string', maxLength: 60 },
           triggerMode: { type: 'integer', default: 1 },
-          nodeId: { type: 'integer' },
+          nodeId: { type: 'string', maxLength: 80, description: 'Graph v2 node ID (string) or legacy flow_nodes numeric ID.' },
           nodeKey: { type: 'string', maxLength: 60 },
           nodeType: { type: 'string', enum: ALLOWED_WORKFLOW_NODE_TYPES },
           upstreamNodeId: { type: 'integer' },
@@ -2912,6 +4108,16 @@ function createBuilderTools(deps) {
           prompt: { type: 'string', maxLength: 1000 },
           targetNode: { type: 'string', maxLength: 80 },
           rule: { type: 'object' },
+          graphJson: { type: 'object', description: 'LatticeFlow v2 DAG graph object ({ version: 2, nodes, edges, settings }).' },
+          graph: { type: 'object', description: 'Alias for graphJson in Flow Architect operations.' },
+          schemaVersion: { type: 'integer', description: 'Automation schema version (1 for legacy actionsJson, 2 for Graph v2 DAG).' },
+          pinnedInputs: { type: 'object', description: 'Pinned inputs ({ data, steps, nodes, dmn, loop }) for single-node testAutomation.' },
+          runTrace: { type: 'object', description: 'Failed run trace for patchAutomation / draftAutomation fix_error mode.' },
+          mode: { type: 'string', enum: ['full', 'node', 'suggest', 'fix_error'], description: 'Optional Flow Architect mode override.' },
+          runUid: { type: 'string', maxLength: 80, description: 'Suspended automation run UID for resumeAutomation.' },
+          decision: { type: 'string', enum: ['approved', 'rejected'], description: 'Human-in-the-loop (HITL) decision for resumeAutomation.' },
+          payload: { type: 'object', description: 'Optional decision payload or note for resumeAutomation.' },
+          resumeToken: { type: 'string', maxLength: 128, description: 'Optional resume token for resumeAutomation.' },
           apply: { type: 'boolean', default: false },
           dryRun: { type: 'boolean', default: false },
         },
@@ -2947,6 +4153,9 @@ function createBuilderTools(deps) {
         if (args.operation === 'testAutomation') {
           return runTestAutomation(ctx, db, actor, args, automationDeps);
         }
+        if (args.operation === 'resumeAutomation') {
+          return runResumeAutomation(ctx, db, actor, args, automationDeps);
+        }
 
         const wfRepo = db.getRepository('workflows');
         const nodeRepo = db.getRepository('flow_nodes');
@@ -2981,7 +4190,8 @@ function createBuilderTools(deps) {
         }
 
         if (args.operation === 'updateNodeConfig') {
-          let node = args.nodeId ? await nodeRepo.findOne({ filterByTk: args.nodeId }) : null;
+          const numericNodeId = args.nodeId != null && /^\d+$/.test(String(args.nodeId).trim()) ? Number(args.nodeId) : args.nodeId;
+          let node = numericNodeId ? await nodeRepo.findOne({ filterByTk: numericNodeId }) : null;
           if (!node && args.workflowId && args.nodeKey) {
             node = await nodeRepo.findOne({ filter: { workflowId: args.workflowId, key: args.nodeKey } });
           }

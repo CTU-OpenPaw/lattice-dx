@@ -637,9 +637,12 @@ test('17-tool registry invariant (adminMcpToolsListed17 === 17) holds after Nati
     'patchAutomation',
     'saveAutomation',
     'testAutomation',
+    'resumeAutomation',
   ]) {
     assert.equal(wfToolMeta.inputSchema.properties.operation.enum.includes(expectedOp), true, `Missing operation ${expectedOp}`);
   }
+  const bannedTermRe = new RegExp(['co', 'pilot'].join(''), 'i');
+  assert.equal(bannedTermRe.test(wfToolMeta.description), false, 'dxos_configure_workflow description must not contain banned branding');
   assert.equal(wfToolMeta.inputSchema.properties.ruleKey.type, 'string');
   assert.equal(wfToolMeta.inputSchema.properties.sampleEvent.type, 'object');
   assert.equal(wfToolMeta.inputSchema.properties.triggerEventType.type, 'string');
@@ -649,6 +652,17 @@ test('17-tool registry invariant (adminMcpToolsListed17 === 17) holds after Nati
   assert.equal(wfToolMeta.inputSchema.properties.targetNode.type, 'string');
   assert.equal(wfToolMeta.inputSchema.properties.rule.type, 'object');
   assert.equal(wfToolMeta.inputSchema.properties.apply.type, 'boolean');
+  assert.equal(wfToolMeta.inputSchema.properties.graphJson.type, 'object');
+  assert.equal(wfToolMeta.inputSchema.properties.graph.type, 'object');
+  assert.equal(wfToolMeta.inputSchema.properties.schemaVersion.type, 'integer');
+  assert.equal(wfToolMeta.inputSchema.properties.nodeId.type, 'string');
+  assert.equal(wfToolMeta.inputSchema.properties.pinnedInputs.type, 'object');
+  assert.equal(wfToolMeta.inputSchema.properties.runTrace.type, 'object');
+  assert.equal(wfToolMeta.inputSchema.properties.mode.type, 'string');
+  assert.equal(wfToolMeta.inputSchema.properties.runUid.type, 'string');
+  assert.equal(wfToolMeta.inputSchema.properties.decision.type, 'string');
+  assert.equal(wfToolMeta.inputSchema.properties.payload.type, 'object');
+  assert.equal(wfToolMeta.inputSchema.properties.resumeToken.type, 'string');
 
   const empListCtx = {
     path: '/api/dxos-mcp',
@@ -972,9 +986,9 @@ test('dxos_configure_workflow runAutomation handles missing ruleKey, dryRun, liv
     () => wfTool.invoke(empCtx, { operation: 'runAutomation', ruleKey: 'auto_cmms_on_coldchain_fault' }),
     (err) => err.status === 403 && err.code === 'DXOS_ADMIN_REQUIRED',
   );
-  for (const op of ['suggestAutomation', 'draftAutomation', 'patchAutomation', 'saveAutomation', 'testAutomation']) {
+  for (const op of ['suggestAutomation', 'draftAutomation', 'patchAutomation', 'saveAutomation', 'testAutomation', 'resumeAutomation']) {
     await assert.rejects(
-      () => wfTool.invoke(empCtx, { operation: op, ruleKey: 'auto_cmms_on_coldchain_fault', goal: 'test' }),
+      () => wfTool.invoke(empCtx, { operation: op, ruleKey: 'auto_cmms_on_coldchain_fault', runUid: 'run_1', goal: 'test' }),
       (err) => err.status === 403 && err.code === 'DXOS_ADMIN_REQUIRED',
     );
   }
@@ -1085,6 +1099,28 @@ test('dxos_configure_workflow supports suggestAutomation, draftAutomation, patch
                 },
               };
             }
+            if (actionName === 'testNode') {
+              return {
+                handler: async (subCtx) => {
+                  const v = subCtx.action.params.values;
+                  resCalls.push({ action: 'testNode', nodeId: v.nodeId, ruleKey: v.ruleKey });
+                  subCtx.body = {
+                    result: { ok: true, nodeId: v.nodeId, status: 'completed', nextPort: 'true', output: { passed: true } },
+                  };
+                },
+              };
+            }
+            if (actionName === 'resumeRun') {
+              return {
+                handler: async (subCtx) => {
+                  const v = subCtx.action.params.values;
+                  resCalls.push({ action: 'resumeRun', runUid: v.runUid, decision: v.decision });
+                  subCtx.body = {
+                    run: { runUid: v.runUid, status: v.decision === 'rejected' ? 'completed' : 'completed', decision: v.decision },
+                  };
+                },
+              };
+            }
             return null;
           },
         },
@@ -1125,30 +1161,79 @@ test('dxos_configure_workflow supports suggestAutomation, draftAutomation, patch
   assert.equal(delTest.skippedSteps.length, 1);
   assert.equal(resCalls.some((c) => c.action === 'aiAssist'), true);
 
-  // 2. Copilot module delegation & refusal on { refused: true }
+  const delNodeTest = await wfTool.invoke(ctx, {
+    operation: 'testAutomation',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    nodeId: 'if_1',
+    pinnedInputs: { data: { tempC: -5 } },
+  });
+  assert.equal(delNodeTest.dryRun, true);
+  assert.equal(delNodeTest.nodeId, 'if_1');
+  assert.equal(delNodeTest.nextPort, 'true');
+  assert.equal(resCalls.some((c) => c.action === 'testNode' && c.nodeId === 'if_1'), true);
+
+  await assert.rejects(
+    () => wfTool.invoke(ctx, { operation: 'resumeAutomation', decision: 'approved' }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_RUN_UID_REQUIRED',
+  );
+  await assert.rejects(
+    () => wfTool.invoke(ctx, { operation: 'resumeAutomation', runUid: 'run_del_1', decision: 'approved', payload: JSON.parse('{"__proto__":{"polluted":true}}') }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+  );
+  const delResume = await wfTool.invoke(ctx, {
+    operation: 'resumeAutomation',
+    runUid: 'run_del_1',
+    decision: 'rejected',
+    payload: { note: 'Budget rejected via delegation' },
+  });
+  assert.equal(delResume.applied, true);
+  assert.equal(delResume.decision, 'rejected');
+  assert.equal(delResume.status, 'completed');
+  assert.equal(resCalls.some((c) => c.action === 'resumeRun' && c.runUid === 'run_del_1' && c.decision === 'rejected'), true);
+
+  // 2. Flow Architect module delegation (flow/architect) & refusal on { refused: true }
   const noResCtx = {
     ...ctx,
     app: { ...ctx.app, resourceManager: { getResource: () => null } },
   };
   Module._load = function (request, parent, isMain) {
-    if (String(request).includes('automation-copilot')) {
+    if (String(request).includes('flow/architect')) {
       return {
-        runAutomationAiAssist: async (_db, opts) => {
-          if (opts.prompt.includes('refuse_from_copilot')) {
-            return { refused: true, error: 'Copilot rejected unsafe directive' };
+        runFlowArchitect: async (opts) => {
+          if (String(opts.prompt || '').includes('refuse_from_architect')) {
+            return { ok: false, refused: true, error: 'Flow Architect rejected unsafe directive' };
           }
+          const draftGraph = {
+            version: 2,
+            nodes: [
+              { id: 'trig_1', type: 'trigger.event', label: 'Event', position: { x: 80, y: 160 }, config: { eventType: 'alarm.triggered' } },
+              { id: 'n_1', type: 'notify.send', label: 'Notify', position: { x: 360, y: 160 }, config: { roleNames: ['ldx_manager'], title: 'OK' } },
+            ],
+            edges: [{ id: 'e_1', source: 'trig_1', sourceHandle: 'main', target: 'n_1', targetHandle: 'in' }],
+          };
           return {
+            ok: true,
+            refused: false,
+            mode: opts.mode || 'full',
+            modeUsed: 'llm',
+            repairAttempts: 1,
+            summary: 'Synthesized via Flow Architect',
+            graphDiff: { addedNodes: [{ id: 'trig_1' }, { id: 'n_1' }], updatedNodes: [], removedNodes: [], addedEdges: [{ id: 'e_1' }], removedEdges: [] },
+            draftGraph,
             draftRule: {
-              ruleKey: 'auto_from_copilot',
-              name: 'From Copilot',
+              schemaVersion: 2,
+              ruleKey: 'auto_from_architect',
+              name: 'From Flow Architect',
               triggerEventType: 'alarm.triggered',
+              graphJson: draftGraph,
               actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'OK' }],
             },
+            dryRunPreview: { status: 'completed', matched: true, graphVersion: 2, stepTracesJson: [] },
           };
         },
       };
     }
-    if (String(request).includes('automation-engine')) {
+    if (String(request).includes('flow/schema') || String(request).includes('flow/executor') || String(request).includes('flow/validator') || String(request).includes('automation-engine')) {
       const err = new Error(`Cannot find module '${request}'`);
       err.code = 'MODULE_NOT_FOUND';
       throw err;
@@ -1157,11 +1242,16 @@ test('dxos_configure_workflow supports suggestAutomation, draftAutomation, patch
   };
   try {
     await assert.rejects(
-      () => wfTool.invoke(noResCtx, { operation: 'draftAutomation', goal: 'refuse_from_copilot' }),
+      () => wfTool.invoke(noResCtx, { operation: 'draftAutomation', goal: 'refuse_from_architect' }),
       (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
     );
     const modDraft = await wfTool.invoke(noResCtx, { operation: 'draftAutomation', goal: 'Tạo automation báo động kho lạnh' });
-    assert.equal(modDraft.draftRule.ruleKey, 'auto_from_copilot');
+    assert.equal(modDraft.draftRule.ruleKey, 'auto_from_architect');
+    assert.equal(modDraft.draftRule.schemaVersion, 2);
+    assert.equal(modDraft.draftGraph.version, 2);
+    assert.equal(modDraft.graphDiff.addedNodes.length, 2);
+    assert.equal(modDraft.modeUsed, 'llm');
+    assert.equal(modDraft.repairAttempts, 1);
     assert.equal(modDraft.applied, false);
   } finally {
     Module._load = origLoad;
@@ -1169,7 +1259,13 @@ test('dxos_configure_workflow supports suggestAutomation, draftAutomation, patch
 
   // 3. Isolated fallback (no dxosAutomations, no studio modules)
   Module._load = function (request, parent, isMain) {
-    if (String(request).includes('automation-copilot') || String(request).includes('automation-engine')) {
+    if (
+      String(request).includes('flow/architect')
+      || String(request).includes('flow/schema')
+      || String(request).includes('flow/executor')
+      || String(request).includes('flow/validator')
+      || String(request).includes('automation-engine')
+    ) {
       const err = new Error(`Cannot find module '${request}'`);
       err.code = 'MODULE_NOT_FOUND';
       throw err;
@@ -1304,16 +1400,21 @@ test('dxos_configure_workflow supports suggestAutomation, draftAutomation, patch
   }
 });
 
-test('dxos_configure_workflow integrates end-to-end with real plugin-dxos-studio automation-copilot & automation-engine', async () => {
+test('dxos_configure_workflow integrates end-to-end with real plugin-dxos-studio flow/architect, flow/schema, flow/executor & automation-engine', async () => {
   const { db, ctx, byName } = makeBuilderHarness();
   const wfTool = byName.get('dxos_configure_workflow');
   const noResCtx = {
     ...ctx,
     app: { ...ctx.app, resourceManager: { getResource: () => null } },
   };
+  const bannedTermRe = new RegExp(['co', 'pilot'].join(''), 'i');
 
   delete db.store.workflows;
   delete db.store.flow_nodes;
+  db.store.latticeNotifications = [];
+  db.store.latticeRequests = [
+    { id: 42, organizationId: 'native-ui-lab', code: 'REQ-42', name: 'Server Upgrade', amount: 80000000, status: 'draft' },
+  ];
   db.store.latticeAutomationRules = [
     {
       id: 1,
@@ -1342,16 +1443,84 @@ test('dxos_configure_workflow integrates end-to-end with real plugin-dxos-studio
   assert.equal(sug.applied, false);
   assert.equal(Array.isArray(sug.suggestions) && sug.suggestions.length >= 1, true);
   assert.equal(sug.suggestions.some((s) => s.id === 'add_cooldown_guard'), true);
+  assert.equal(bannedTermRe.test(JSON.stringify(sug)), false);
 
+  // Graph v2 draftAutomation via flow/architect (offline-fallback + dryRunPreview + zero banned terms)
   const drafted = await wfTool.invoke(noResCtx, {
     operation: 'draftAutomation',
-    goal: 'Tạo automation khi kho lạnh gặp sự cố hoặc mất điện thì mở phiếu bảo trì CMMS và cảnh báo quản lý',
+    goal: 'Khi tạo bản ghi trên latticeRequests nếu data.amount > 50000000 thì phê duyệt ldx_manager rồi thông báo ldx_operator',
     apply: false,
   });
   assert.equal(drafted.applied, false);
-  assert.equal(Array.isArray(drafted.draftRule?.actionsJson) && drafted.draftRule.actionsJson.length >= 3, true);
-  assert.equal(drafted.simulation?.matched, true);
+  assert.equal(drafted.modeUsed, 'offline-fallback');
+  assert.equal(drafted.repairAttempts, 0);
+  assert.equal(drafted.draftGraph.version, 2);
+  assert.equal(drafted.draftRule.schemaVersion, 2);
+  assert.equal(drafted.draftGraph.nodes[0].type, 'trigger.record');
+  assert.equal(drafted.draftGraph.nodes.some((n) => n.type === 'control.if'), true);
+  assert.equal(drafted.draftGraph.nodes.some((n) => n.type === 'control.approval'), true);
+  assert.equal(drafted.graphDiff.addedNodes.length >= 4, true);
+  assert.equal(drafted.dryRunPreview.status, 'completed');
+  assert.equal(bannedTermRe.test(JSON.stringify(drafted)), false);
 
+  // Graph v2 patchAutomation (node mode targeting control.if by nodeId)
+  const ifNode = drafted.draftGraph.nodes.find((n) => n.type === 'control.if');
+  const patchedNode = await wfTool.invoke(noResCtx, {
+    operation: 'patchAutomation',
+    rule: drafted.draftRule,
+    graph: drafted.draftGraph,
+    nodeId: ifNode.id,
+    goal: 'Đổi ngưỡng thành > 75000000',
+    apply: false,
+  });
+  assert.equal(patchedNode.applied, false);
+  assert.equal(patchedNode.modeUsed, 'offline-fallback');
+  assert.equal(patchedNode.draftGraph.nodes.find((n) => n.id === ifNode.id).config.condition.value, 75000000);
+  assert.equal(bannedTermRe.test(JSON.stringify(patchedNode)), false);
+
+  // Graph v2 patchAutomation with explicit nodeId + configPatch uses applyGraphOperations
+  const patchedConfigGraph = await wfTool.invoke(noResCtx, {
+    operation: 'patchAutomation',
+    rule: drafted.draftRule,
+    graph: drafted.draftGraph,
+    nodeId: ifNode.id,
+    configPatch: { condition: { field: 'data.amount', op: 'gte', value: 120000000 } },
+    apply: false,
+  });
+  assert.equal(patchedConfigGraph.applied, false);
+  assert.equal(patchedConfigGraph.nodeId, ifNode.id);
+  assert.equal(patchedConfigGraph.draftGraph.nodes.find((n) => n.id === ifNode.id).config.condition.value, 120000000);
+  assert.ok(patchedConfigGraph.graphDiff);
+
+  // Graph v2 fix_error mode via flow/architect
+  const brokenGraph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.manual', label: 'Manual', config: {} },
+      { id: 'u1', type: 'data.update', label: 'Update Ticket', config: { collection: 'latticeServiceTickets', values: { priority: 'high' } } },
+    ],
+    edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'u1', targetHandle: 'in' }],
+  };
+  const fixedErr = await wfTool.invoke(noResCtx, {
+    operation: 'patchAutomation',
+    mode: 'fix_error',
+    graph: brokenGraph,
+    runTrace: {
+      runUid: 'run_fail_v2',
+      status: 'failed',
+      errorMessage: 'DATA_UPDATE_FILTER_REQUIRED',
+      nodeStatesJson: { t1: { status: 'completed' }, u1: { status: 'failed', error: 'DATA_UPDATE_FILTER_REQUIRED' } },
+    },
+    apply: false,
+  });
+  assert.equal(fixedErr.applied, false);
+  assert.equal(fixedErr.mode, 'fix_error');
+  assert.equal(fixedErr.modeUsed, 'offline-fallback');
+  const repairedU1 = fixedErr.draftGraph.nodes.find((n) => n.id === 'u1');
+  assert.ok(repairedU1.config.recordId || (repairedU1.config.filter && Object.keys(repairedU1.config.filter).length > 0));
+  assert.equal(fixedErr.draftGraph.edges.some((e) => e.source === 'u1' && e.sourceHandle === 'error'), true);
+
+  // Legacy v1 surgical patchAutomation still works cleanly with real studio modules loaded
   const patchedStep = await wfTool.invoke(noResCtx, {
     operation: 'patchAutomation',
     ruleKey: 'auto_cmms_on_coldchain_fault',
@@ -1374,6 +1543,93 @@ test('dxos_configure_workflow integrates end-to-end with real plugin-dxos-studio
   assert.equal(patchedCooldown.targetNode, 'cooldown');
   assert.equal(db.store.latticeAutomationRules[0].cooldownSec, 180);
 
+  // saveAutomation persists Graph v2 rule with schemaVersion: 2 & triggerIndexJson
+  const hitlGraph = {
+    version: 2,
+    nodes: [
+      { id: 'trig_req', type: 'trigger.record', label: 'On Request', config: { collection: 'latticeRequests', operation: 'create' } },
+      { id: 'if_amt', type: 'control.if', label: 'Amount > 50M', config: { condition: { field: 'data.amount', op: 'gt', value: 50000000 } } },
+      { id: 'app_mgr', type: 'control.approval', label: 'Manager Approval', config: { approverRole: 'ldx_manager', title: 'Approve {{data.code}}', riskLevel: 'high', ttlHours: 24 } },
+      { id: 'upd_req', type: 'data.update', label: 'Mark Approved', config: { collection: 'latticeRequests', recordId: '{{data.id}}', filter: { id: '{{data.id}}' }, values: { priority: 'approved_budget' } } },
+      { id: 'not_ok', type: 'notify.send', label: 'Notify Op', config: { roleNames: ['ldx_operator'], severity: 'info', title: 'Approved {{data.code}}' } },
+    ],
+    edges: [
+      { id: 'e1', source: 'trig_req', sourceHandle: 'main', target: 'if_amt', targetHandle: 'in' },
+      { id: 'e2', source: 'if_amt', sourceHandle: 'true', target: 'app_mgr', targetHandle: 'in' },
+      { id: 'e3', source: 'app_mgr', sourceHandle: 'approved', target: 'upd_req', targetHandle: 'in' },
+      { id: 'e4', source: 'upd_req', sourceHandle: 'main', target: 'not_ok', targetHandle: 'in' },
+    ],
+  };
+  const savedV2 = await wfTool.invoke(noResCtx, {
+    operation: 'saveAutomation',
+    rule: { ruleKey: 'auto_hitl_proc_v2', name: 'HITL Procurement v2', schemaVersion: 2, graphJson: hitlGraph },
+  });
+  assert.equal(savedV2.saved, true);
+  assert.equal(savedV2.rule.schemaVersion, 2);
+  assert.equal(savedV2.rule.graphJson.version, 2);
+  assert.equal(savedV2.rule.triggerIndexJson[0].collection, 'latticeRequests');
+
+  // Single-node testAutomation via flow/executor.testSingleFlowNode
+  const nodeTest = await wfTool.invoke(noResCtx, {
+    operation: 'testAutomation',
+    ruleKey: 'auto_hitl_proc_v2',
+    nodeId: 'if_amt',
+    pinnedInputs: { data: { amount: 80000000 } },
+  });
+  assert.equal(nodeTest.dryRun, true);
+  assert.equal(nodeTest.ok, true);
+  assert.equal(nodeTest.nodeId, 'if_amt');
+  assert.equal(nodeTest.nextPort, 'true');
+
+  // Full HITL suspend + resumeAutomation end-to-end with flow/executor
+  const { executeFlowGraph } = require('../../plugin-dxos-studio/src/server/flow/executor');
+  const suspendedRun = await executeFlowGraph(
+    db,
+    db.store.latticeAutomationRules.find((r) => r.ruleKey === 'auto_hitl_proc_v2'),
+    { type: 'record.latticeRequests.create', organizationId: 'native-ui-lab', data: { id: 42, code: 'REQ-42', amount: 80000000 } },
+  );
+  assert.equal(suspendedRun.status, 'suspended');
+  assert.ok(suspendedRun.runUid);
+  assert.ok(suspendedRun.resumeToken);
+
+  const resumeDry = await wfTool.invoke(noResCtx, {
+    operation: 'resumeAutomation',
+    runUid: suspendedRun.runUid,
+    decision: 'approved',
+    dryRun: true,
+  });
+  assert.equal(resumeDry.dryRun, true);
+  assert.equal(resumeDry.applied, false);
+  assert.equal(db.store.latticeAutomationRuns.find((r) => r.runUid === suspendedRun.runUid).status, 'suspended');
+
+  const resumed = await wfTool.invoke(noResCtx, {
+    operation: 'resumeAutomation',
+    runUid: suspendedRun.runUid,
+    decision: 'approved',
+    resumeToken: suspendedRun.resumeToken,
+    payload: { note: 'Approved by admin' },
+  });
+  assert.equal(resumed.operation, 'resumeAutomation');
+  assert.equal(resumed.applied, true);
+  assert.equal(resumed.decision, 'approved');
+  assert.equal(resumed.status, 'completed');
+  assert.equal(db.store.latticeRequests[0].priority, 'approved_budget');
+  assert.equal(bannedTermRe.test(JSON.stringify(resumed)), false);
+
+  // Foreign-org run resume blocked
+  db.store.latticeAutomationRuns.push({
+    id: 999,
+    organizationId: 'foreign-org-b',
+    ruleKey: 'auto_hitl_proc_v2',
+    runUid: 'run_foreign_1',
+    status: 'suspended',
+    suspendedNodeId: 'app_mgr',
+  });
+  await assert.rejects(
+    () => wfTool.invoke(noResCtx, { operation: 'resumeAutomation', runUid: 'run_foreign_1', decision: 'approved' }),
+    (err) => err.status === 403 || err.status === 404,
+  );
+
   const simSkipped = await wfTool.invoke(noResCtx, {
     operation: 'testAutomation',
     ruleKey: 'auto_cmms_on_coldchain_fault',
@@ -1387,6 +1643,10 @@ test('dxos_configure_workflow integrates end-to-end with real plugin-dxos-studio
 
   await assert.rejects(
     () => wfTool.invoke(noResCtx, { operation: 'draftAutomation', goal: 'Create automation writing into users table' }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+  );
+  await assert.rejects(
+    () => wfTool.invoke(noResCtx, { operation: 'saveAutomation', rule: { ruleKey: 'auto_bad_v2', name: 'Bad v2', schemaVersion: 2, graphJson: { version: 2, nodes: [{ id: 't', type: 'trigger.manual', config: {} }, { id: 'd', type: 'data.create', config: { collection: 'users', values: {} } }], edges: [{ id: 'e', source: 't', sourceHandle: 'main', target: 'd', targetHandle: 'in' }] } } }),
     (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
   );
 });
@@ -1470,7 +1730,7 @@ test('R2 P1 #1/#2/#3 and P2 #1/#2/#3 regressions for dxos_configure_workflow & d
   assert.equal(runFlatRoot.run.triggerEventType, 'alarm.triggered');
 
   // 2. R2 P1 #2: verified non-root isStudioAdmin (no root role, no latticeEmployees row) catches ONLY NATIVE_MEMBERSHIP_REQUIRED
-  // and falls back cleanly to verified tenant-scoped local copilot/engine across all 7 operations
+  // and falls back cleanly to verified tenant-scoped local architect/engine across all operations
   const nonRootAdminCtx = mountRealStudio({
     ...ctx,
     headers: {},
@@ -1785,7 +2045,13 @@ test('R2 P1 #1/#2/#3 and P2 #1/#2/#3 regressions for dxos_configure_workflow & d
     app: { ...nonRootAdminCtx.app, resourceManager: { getResource: () => null } },
   };
   Module._load = function (request, parent, isMain) {
-    if (String(request).includes('automation-copilot') || String(request).includes('automation-engine')) {
+    if (
+      String(request).includes('flow/architect')
+      || String(request).includes('flow/schema')
+      || String(request).includes('flow/executor')
+      || String(request).includes('flow/validator')
+      || String(request).includes('automation-engine')
+    ) {
       const err = new Error(`Cannot find module '${request}'`);
       err.code = 'MODULE_NOT_FOUND';
       throw err;
@@ -1828,4 +2094,687 @@ test('R2 P1 #1/#2/#3 and P2 #1/#2/#3 regressions for dxos_configure_workflow & d
   } finally {
     Module._load = origLoad;
   }
+});
+
+test('W2-B Fix Round 1 regressions: patchAutomation ruleKey pinning, v1 nodeId testNode conversion, SSRF guard & suggestAutomation Graph v2 sync', async (t) => {
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  const { db, ctx, byName } = makeBuilderHarness();
+  const wfTool = byName.get('dxos_configure_workflow');
+  const noResCtx = {
+    ...ctx,
+    app: { ...ctx.app, resourceManager: { getResource: () => null } },
+  };
+
+  delete db.store.workflows;
+  delete db.store.flow_nodes;
+  db.store.latticeNotifications = [];
+  db.store.latticeAutomationRuns = [
+    {
+      id: 501,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      runUid: 'run_err_fix_1',
+      status: 'failed',
+      errorMessage: 'Downstream node step_0 failed',
+      nodeStatesJson: { step_0: { status: 'failed', error: 'Validation failed' } },
+      stepTracesJson: [{ stepIndex: 0, nodeId: 'step_0', status: 'failed', error: 'Validation failed' }],
+    },
+  ];
+  db.store.latticeAutomationRules = [
+    {
+      id: 1,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_cmms_on_coldchain_fault',
+      name: 'CMMS Coldchain Auto-Ticket',
+      triggerEventType: 'alarm.triggered',
+      filterJson: { field: 'tempC', op: 'gt', value: -15 },
+      cooldownSec: 0,
+      maxDepth: 6,
+      active: true,
+      actionsJson: [
+        { type: 'create_record', label: 'Mở phiếu CMMS', collection: 'latticeCustomWorkOrders', values: { title: '{{data.deviceKey}}' } },
+        { type: 'notify_role', label: 'Báo quản lý', role: 'ldx_manager', title: 'Alert {{data.deviceKey}}' },
+      ],
+    },
+    {
+      id: 2,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_v2_suggest_sync',
+      name: 'V2 Suggest Sync Rule',
+      schemaVersion: 2,
+      triggerEventType: 'alarm.triggered',
+      filterJson: null,
+      cooldownSec: 0,
+      maxDepth: 6,
+      active: true,
+      actionsJson: [{ type: 'notify_role', label: 'Notify', role: 'ldx_manager', title: 'Hi {{data.deviceKey}}' }],
+      graphJson: {
+        version: 2,
+        nodes: [
+          { id: 'trigger_1', type: 'trigger.event', label: 'Event Trigger', config: { eventType: 'alarm.triggered' } },
+          { id: 'step_0', type: 'notify.send', label: 'Notify', config: { roleNames: ['ldx_manager'], severity: 'warning', title: 'Hi {{data.deviceKey}}' } },
+        ],
+        edges: [
+          { id: 'e1', source: 'trigger_1', sourceHandle: 'main', target: 'step_0', targetHandle: 'in' },
+        ],
+        settings: { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 6, timeoutMs: 30000 },
+      },
+    },
+  ];
+
+  await t.test('1. patchAutomation pins explicit baseRule.ruleKey even if flow/architect emits fresh auto_* ruleKey', async () => {
+    Module._load = function (request, parent, isMain) {
+      if (String(request).includes('flow/architect')) {
+        return {
+          runFlowArchitect: async () => ({
+            ok: true,
+            modeUsed: 'llm',
+            repairAttempts: 0,
+            summary: 'Generated patched rule with fresh key',
+            draftRule: {
+              ruleKey: 'auto_fresh_generated_999',
+              name: 'Patched Rule',
+              schemaVersion: 2,
+              graphJson: {
+                version: 2,
+                nodes: [
+                  { id: 'trigger_1', type: 'trigger.event', label: 'Alarm', config: { eventType: 'alarm.triggered' } },
+                  { id: 'step_0', type: 'notify.send', label: 'Notify', config: { roleNames: ['ldx_manager'], title: 'Updated' } },
+                ],
+                edges: [{ id: 'e1', source: 'trigger_1', sourceHandle: 'main', target: 'step_0', targetHandle: 'in' }],
+                settings: { errorPolicy: 'stop', cooldownSec: 90, maxDepth: 6 },
+              },
+            },
+          }),
+        };
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    try {
+      const patchedNode = await wfTool.invoke(noResCtx, {
+        operation: 'patchAutomation',
+        ruleKey: 'auto_v2_suggest_sync',
+        nodeId: 'step_0',
+        goal: 'Đổi tiêu đề thông báo ở bước 0',
+        apply: true,
+      });
+      assert.equal(patchedNode.ruleKey, 'auto_v2_suggest_sync');
+      assert.equal(patchedNode.draftRule.ruleKey, 'auto_v2_suggest_sync');
+      assert.equal(patchedNode.rule.ruleKey, 'auto_v2_suggest_sync');
+      assert.equal(db.store.latticeAutomationRules.filter((r) => r.ruleKey === 'auto_fresh_generated_999').length, 0);
+
+      const patchedFix = await wfTool.invoke(noResCtx, {
+        operation: 'patchAutomation',
+        mode: 'fix_error',
+        runTrace: { runUid: 'run_err_fix_1', errorMessage: 'Validation failed' },
+        rule: {
+          ruleKey: 'auto_explicit_inline_rule',
+          name: 'Explicit Inline Rule',
+          triggerEventType: 'alarm.triggered',
+          actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'Alert' }],
+        },
+        goal: 'Sửa lỗi validation',
+        apply: false,
+      });
+      assert.equal(patchedFix.ruleKey, 'auto_explicit_inline_rule');
+      assert.equal(patchedFix.draftRule.ruleKey, 'auto_explicit_inline_rule');
+    } finally {
+      Module._load = origLoad;
+    }
+  });
+
+  await t.test('2. testAutomation with args.nodeId converts v1 actionsJson-only rule via v1RuleToGraphV2', async () => {
+    const capturedTestNodeGraphs = [];
+    const spyTestNodeCtx = {
+      ...ctx,
+      app: {
+        ...ctx.app,
+        resourceManager: {
+          isDefined: (n) => n === 'dxosAutomations',
+          getResource: (n) => (n === 'dxosAutomations' ? {
+            actions: {
+              get: (actName) => (actName === 'testNode' ? {
+                handler: async (subCtx) => {
+                  capturedTestNodeGraphs.push(subCtx.action.params.values?.graph ?? subCtx.action.params.graph);
+                  subCtx.body = { ok: true, nodeId: subCtx.action.params.values?.nodeId, status: 'completed', nextPort: 'main' };
+                },
+              } : null),
+            },
+          } : null),
+        },
+      },
+    };
+    const v1SpyNodeTest = await wfTool.invoke(spyTestNodeCtx, {
+      operation: 'testAutomation',
+      nodeId: 'step_1',
+      pinnedInputs: { data: { deviceKey: 'COLD-V1-SPY' } },
+      rule: {
+        ruleKey: 'auto_v1_actions_only',
+        name: 'V1 Actions Only',
+        triggerEventType: 'alarm.triggered',
+        actionsJson: [
+          { type: 'create_record', collection: 'latticeCustomWorkOrders', values: { title: '{{data.deviceKey}}' } },
+          { type: 'notify_role', role: 'ldx_manager', title: 'Alert {{data.deviceKey}}' },
+        ],
+      },
+    });
+    assert.equal(v1SpyNodeTest.ok, true);
+    assert.equal(capturedTestNodeGraphs.length, 1);
+    assert.equal(capturedTestNodeGraphs[0]?.version, 2);
+    assert.equal(capturedTestNodeGraphs[0]?.nodes?.some((n) => n.id === 'step_1' && n.type === 'notify.send'), true);
+
+    const realExecutor = require('../../plugin-dxos-studio/src/server/flow/executor');
+    const seenExecutorArgs = [];
+    Module._load = function (request, parent, isMain) {
+      if (String(request).includes('flow/executor')) {
+        return {
+          ...realExecutor,
+          testSingleFlowNode: async (dbArg, paramsArg) => {
+            seenExecutorArgs.push(paramsArg);
+            return realExecutor.testSingleFlowNode(dbArg, paramsArg);
+          },
+        };
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    try {
+      const v1ExecNodeTest = await wfTool.invoke(noResCtx, {
+        operation: 'testAutomation',
+        nodeId: 'step_1',
+        pinnedInputs: { data: { deviceKey: 'COLD-V1-EXEC' } },
+        rule: {
+          ruleKey: 'auto_v1_actions_only_exec',
+          name: 'V1 Actions Only Exec',
+          triggerEventType: 'alarm.triggered',
+          actionsJson: [
+            { type: 'create_record', collection: 'latticeCustomWorkOrders', values: { title: '{{data.deviceKey}}' } },
+            { type: 'notify_role', role: 'ldx_manager', title: 'Alert {{data.deviceKey}}' },
+          ],
+        },
+      });
+      assert.equal(v1ExecNodeTest.dryRun, true);
+      assert.equal(v1ExecNodeTest.ok, true);
+      assert.equal(v1ExecNodeTest.nodeId, 'step_1');
+      assert.equal(v1ExecNodeTest.status, 'completed');
+      assert.equal(seenExecutorArgs.length, 1);
+      assert.equal(seenExecutorArgs[0].graph?.version, 2);
+      assert.equal(seenExecutorArgs[0].graph?.nodes?.some((n) => n.id === 'step_1'), true);
+    } finally {
+      Module._load = origLoad;
+    }
+  });
+
+  await t.test('3a. validateFlowGraphInput static SSRF fallback rejects metadata/private hosts incl. iot.twin_command downlinkUrl', async () => {
+    Module._load = function (request, parent, isMain) {
+      if (String(request).includes('flow/validator')) {
+        const err = new Error(`Cannot find module '${request}'`);
+        err.code = 'MODULE_NOT_FOUND';
+        throw err;
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    try {
+      const ssrfCases = [
+        ['iot.twin_command', 'downlinkUrl', 'http://169.254.169.254/latest/meta-data'],
+        ['iot.twin_command', 'downlinkUrl', 'http://[fd00:ec2::254]/latest'],
+        ['iot.twin_command', 'downlinkUrl', 'http://[::ffff:169.254.169.254]/latest'],
+        ['iot.twin_command', 'downlinkUrl', 'http://[0:0:0:0:0:ffff:a9fe:a9fe]/latest'],
+        ['integration.http', 'url', 'http://0xa9fea9fe/latest'],
+        ['integration.http', 'url', 'http://2852039166/latest'],
+        ['integration.http', 'url', 'http://0251.0376.0251.0376/latest'],
+        ['integration.http', 'url', 'http://2130706433/admin'],
+        ['integration.http', 'url', 'http://127.0.0.1:8080/internal'],
+        ['integration.http', 'url', 'http://10.0.0.5/secret'],
+        ['integration.http', 'url', 'http://192.168.1.50/router'],
+        ['ai.llm', 'baseURL', 'http://metadata.google.internal/computeMetadata/v1'],
+        ['ai.llm', 'baseUrl', 'http://metadata.azure.com/metadata/instance'],
+        ['ai.llm', 'endpoint', 'http://metadata.aws.internal/2021-01-01/'],
+        ['ai.llm', 'url', 'http://instance-data/latest/meta-data'],
+        ['integration.http', 'url', 'https://consul.service.internal/v1/kv'],
+        ['iot.twin_command', 'downlinkUrl', '//169.254.169.254/latest'],
+      ];
+      for (const [nodeType, fieldKey, badUrl] of ssrfCases) {
+        await assert.rejects(
+          () => wfTool.invoke(noResCtx, {
+            operation: 'saveAutomation',
+            dryRun: true,
+            rule: {
+              ruleKey: 'auto_ssrf_probe',
+              name: 'SSRF Probe',
+              schemaVersion: 2,
+              graphJson: {
+                version: 2,
+                nodes: [
+                  { id: 't1', type: 'trigger.manual', label: 'Trigger', config: {} },
+                  { id: 'n1', type: nodeType, label: 'Sink', config: { [fieldKey]: badUrl } },
+                ],
+                edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1', targetHandle: 'in' }],
+              },
+            },
+          }),
+          (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+          `Expected ${nodeType}.${fieldKey}=${badUrl} to be rejected`,
+        );
+      }
+
+      const safeSaveDry = await wfTool.invoke(noResCtx, {
+        operation: 'saveAutomation',
+        dryRun: true,
+        rule: {
+          ruleKey: 'auto_safe_twin_url',
+          name: 'Safe Twin URL',
+          schemaVersion: 2,
+          graphJson: {
+            version: 2,
+            nodes: [
+              { id: 't1', type: 'trigger.manual', label: 'Trigger', config: {} },
+              { id: 'n1', type: 'iot.twin_command', label: 'Command', config: { downlinkUrl: 'https://iot.partner-gateway.com/v1/commands', assetEntityId: 'urn:ngsi-ld:Asset:A1', desiredPatch: { temp: -18 } } },
+              { id: 'n2', type: 'integration.http', label: 'Webhook', config: { path: '/api/v1/notify', url: 'https://api.example.com/webhooks/dxos' } },
+            ],
+            edges: [
+              { id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1', targetHandle: 'in' },
+              { id: 'e2', source: 'n1', sourceHandle: 'main', target: 'n2', targetHandle: 'in' },
+            ],
+          },
+        },
+      });
+      assert.equal(safeSaveDry.dryRun, true);
+    } finally {
+      Module._load = origLoad;
+    }
+  });
+
+  await t.test('3b. applyTopSuggestionsDraft in suggestAutomation offline fallback syncs draft.graphJson for schemaVersion 2', async () => {
+    // Re-seed clean rule 2 without previous apply side effects
+    const r2 = db.store.latticeAutomationRules.find((r) => r.ruleKey === 'auto_v2_suggest_sync');
+    r2.cooldownSec = 0;
+    r2.filterJson = null;
+    r2.graphJson.settings.cooldownSec = 0;
+
+    Module._load = function (request, parent, isMain) {
+      if (String(request).includes('flow/architect')) {
+        const err = new Error(`Cannot find module '${request}'`);
+        err.code = 'MODULE_NOT_FOUND';
+        throw err;
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    try {
+      const sugV2 = await wfTool.invoke(noResCtx, {
+        operation: 'suggestAutomation',
+        ruleKey: 'auto_v2_suggest_sync',
+        apply: false,
+      });
+      assert.equal(sugV2.applied, false);
+      assert.equal(sugV2.draftRule.schemaVersion, 2);
+      assert.equal(sugV2.draftRule.cooldownSec, 120);
+      assert.equal(sugV2.draftRule.graphJson.settings.cooldownSec, 120);
+      assert.equal(sugV2.draftGraph.settings.cooldownSec, 120);
+      assert.equal(sugV2.draftRule.graphJson.nodes.some((n) => n.type === 'control.if' && n.config?.isRuleFilter === true), true);
+    } finally {
+      Module._load = origLoad;
+    }
+  });
+});
+
+test('W2-B Fix Round 2 regressions: Graph v2 NL patching, aiAssist Graph v2 guard, testAutomation ruleKey+graph overlay, resumeAutomation dryRun parity', async (t) => {
+  const { createHash } = require('node:crypto');
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  const { db, ctx, byName } = makeBuilderHarness();
+  const wfTool = byName.get('dxos_configure_workflow');
+  const noResCtx = {
+    ...ctx,
+    app: { ...ctx.app, resourceManager: { getResource: () => null } },
+  };
+
+  delete db.store.workflows;
+  delete db.store.flow_nodes;
+  db.store.latticeNotifications = [];
+  db.store.latticeAutomationRules = [
+    {
+      id: 10,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_sla_breach_escalation',
+      name: 'SLA Breach Escalation v2',
+      schemaVersion: 2,
+      triggerEventType: 'sla.breached',
+      dmnTableKey: 'sla_matrix_v1',
+      cooldownSec: 0,
+      maxDepth: 6,
+      active: true,
+      graphJson: {
+        version: 2,
+        nodes: [
+          { id: 'trigger_1', type: 'trigger.event', label: 'On SLA Breach', config: { eventType: 'sla.breached' } },
+          { id: 'filter_1', type: 'control.if', label: 'Filter Severity', config: { condition: { field: 'data.tempC', op: 'gt', value: -15 }, isRuleFilter: true } },
+          { id: 'dmn_1', type: 'logic.dmn', label: 'DMN Matrix', config: { tableKey: 'sla_matrix_v1' } },
+          { id: 'step_0', type: 'notify.send', label: 'Notify Ops', config: { roleNames: ['ldx_operator'], severity: 'warning', title: 'SLA {{data.code}}' } },
+        ],
+        edges: [
+          { id: 'e1', source: 'trigger_1', sourceHandle: 'main', target: 'filter_1', targetHandle: 'in' },
+          { id: 'e2', source: 'filter_1', sourceHandle: 'true', target: 'dmn_1', targetHandle: 'in' },
+          { id: 'e3', source: 'dmn_1', sourceHandle: 'main', target: 'step_0', targetHandle: 'in' },
+        ],
+        settings: { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 6, timeoutMs: 30000 },
+      },
+      actionsJson: [],
+    },
+    {
+      id: 11,
+      organizationId: 'foreign-org-b',
+      ruleKey: 'foreign_org_rule',
+      name: 'Foreign Org Rule',
+      schemaVersion: 2,
+      triggerEventType: 'alarm.triggered',
+      graphJson: {
+        version: 2,
+        nodes: [{ id: 't1', type: 'trigger.manual', label: 'Trigger', config: {} }],
+        edges: [],
+      },
+    },
+  ];
+
+  const validToken = 'resume-secret-token-42';
+  const validTokenHash = createHash('sha256').update(validToken).digest('hex');
+  db.store.latticeAutomationRuns = [
+    {
+      id: 701,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_sla_breach_escalation',
+      runUid: 'run_dry_susp_1',
+      status: 'suspended',
+      suspendedNodeId: 'approval_1',
+      resumeTokenHash: validTokenHash,
+    },
+    {
+      id: 702,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_sla_breach_escalation',
+      runUid: 'run_dry_done_2',
+      status: 'completed',
+      resumeTokenHash: validTokenHash,
+    },
+    {
+      id: 703,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_sla_breach_escalation',
+      runUid: 'run_dry_nohash_3',
+      status: 'suspended',
+      suspendedNodeId: 'approval_1',
+    },
+    {
+      id: 704,
+      organizationId: 'foreign-org-b',
+      ruleKey: 'foreign_org_rule',
+      runUid: 'run_dry_foreign_4',
+      status: 'suspended',
+      resumeTokenHash: validTokenHash,
+    },
+  ];
+
+  await t.test('1. Graph v2 actions/step:new/cooldown/filter/dmn NL patching works against existing Graph v2 rule', async () => {
+    const appendAi = await wfTool.invoke(noResCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_sla_breach_escalation',
+      targetNode: 'actions',
+      goal: 'Gắn node AI tóm tắt vào flow auto_sla_breach_escalation',
+      apply: false,
+    });
+    assert.equal(appendAi.ruleKey, 'auto_sla_breach_escalation');
+    assert.equal(appendAi.draftRule.schemaVersion, 2);
+    assert.equal(appendAi.draftGraph.nodes.some((n) => n.type === 'ai.llm'), true);
+    const addedAiNode = appendAi.draftGraph.nodes.find((n) => n.type === 'ai.llm');
+    assert.equal(appendAi.draftGraph.edges.some((e) => e.source === 'step_0' && e.target === addedAiNode.id), true);
+
+    const appendWebhook = await wfTool.invoke(noResCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_sla_breach_escalation',
+      targetNode: 'step:new',
+      goal: 'Thêm bước gửi webhook đồng bộ sang ERP',
+      apply: false,
+    });
+    assert.equal(appendWebhook.draftGraph.nodes.some((n) => n.type === 'integration.http'), true);
+
+    const patchCooldown = await wfTool.invoke(noResCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_sla_breach_escalation',
+      targetNode: 'cooldown',
+      goal: 'Đặt cooldown chống lặp 180 giây',
+      apply: true,
+    });
+    assert.equal(patchCooldown.applied, true);
+    assert.equal(patchCooldown.draftGraph.settings.cooldownSec, 180);
+    assert.equal(patchCooldown.draftRule.cooldownSec, 180);
+    assert.equal(patchCooldown.rule.graphJson.settings.cooldownSec, 180);
+
+    const patchFilter = await wfTool.invoke(noResCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_sla_breach_escalation',
+      targetNode: 'filter',
+      goal: 'Đổi ngưỡng nhiệt độ điều kiện > -5 độ',
+      apply: false,
+    });
+    const patchedFilterNode = patchFilter.draftGraph.nodes.find((n) => n.id === 'filter_1');
+    assert.equal(patchedFilterNode?.config?.condition?.value, -5);
+
+    const patchDmn = await wfTool.invoke(noResCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_sla_breach_escalation',
+      targetNode: 'dmn',
+      goal: 'Cập nhật bảng DMN sla_matrix_v2',
+      apply: false,
+    });
+    assert.equal(patchDmn.draftGraph.nodes.some((n) => n.id === 'dmn_1'), true);
+  });
+
+  await t.test('2. callFlowArchitectIfAvailable falls through to flow/architect on legacy/unknown-node aiAssist for Graph v2, without swallowing security refusals', async () => {
+    let aiAssistMode = 'legacy_v1_shape';
+    const delegatedCtx = {
+      ...ctx,
+      app: {
+        ...ctx.app,
+        resourceManager: {
+          isDefined: (n) => n === 'dxosAutomations',
+          getResource: (n) => (n === 'dxosAutomations' ? {
+            actions: {
+              get: (actName) => (actName === 'aiAssist' ? {
+                handler: async (subCtx) => {
+                  if (aiAssistMode === 'legacy_v1_shape') {
+                    subCtx.body = {
+                      ok: true,
+                      draftRule: {
+                        ruleKey: 'auto_sla_breach_escalation',
+                        name: 'Legacy Fallback',
+                        triggerEventType: 'sla.breached',
+                        actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'Legacy' }],
+                      },
+                    };
+                    return;
+                  }
+                  if (aiAssistMode === 'unknown_target_node') {
+                    const err = new Error('Unknown target node "filter_1"');
+                    err.status = 400;
+                    throw err;
+                  }
+                  if (aiAssistMode === 'security_refusal') {
+                    const err = new Error('Unsafe URL blocked by SSRF policy');
+                    err.status = 400;
+                    err.code = 'AUTOMATION_AI_REFUSED';
+                    throw err;
+                  }
+                },
+              } : null),
+            },
+          } : null),
+        },
+      },
+    };
+
+    const viaLegacyFallback = await wfTool.invoke(delegatedCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_sla_breach_escalation',
+      nodeId: 'filter_1',
+      goal: 'Đổi ngưỡng > -2',
+      apply: false,
+    });
+    assert.equal(viaLegacyFallback.draftRule.schemaVersion, 2);
+    assert.equal(viaLegacyFallback.draftGraph.nodes.find((n) => n.id === 'filter_1')?.config?.condition?.value, -2);
+
+    aiAssistMode = 'unknown_target_node';
+    const viaUnknownFallthrough = await wfTool.invoke(delegatedCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_sla_breach_escalation',
+      nodeId: 'filter_1',
+      goal: 'Đổi ngưỡng > 12',
+      apply: false,
+    });
+    assert.equal(viaUnknownFallthrough.draftRule.schemaVersion, 2);
+    assert.equal(viaUnknownFallthrough.draftGraph.nodes.find((n) => n.id === 'filter_1')?.config?.condition?.value, 12);
+
+    aiAssistMode = 'security_refusal';
+    await assert.rejects(
+      () => wfTool.invoke(delegatedCtx, {
+        operation: 'patchAutomation',
+        ruleKey: 'auto_sla_breach_escalation',
+        nodeId: 'filter_1',
+        goal: 'Sửa ngưỡng',
+        apply: false,
+      }),
+      (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+    );
+  });
+
+  await t.test('3. testAutomation loads ruleKey for tenant check, overlays validated inputGraph, and validates inputGraph on nodeId', async () => {
+    const unsavedEditedGraph = {
+      version: 2,
+      nodes: [
+        { id: 'trigger_1', type: 'trigger.event', label: 'Trigger', config: { eventType: 'sla.breached' } },
+        { id: 'step_unsaved', type: 'notify.send', label: 'Unsaved Canvas Step', config: { roleNames: ['ldx_manager'], severity: 'critical', title: 'Canvas Edit {{data.code}}' } },
+      ],
+      edges: [
+        { id: 'e1', source: 'trigger_1', sourceHandle: 'main', target: 'step_unsaved', targetHandle: 'in' },
+      ],
+    };
+    const canvasOverlayTest = await wfTool.invoke(noResCtx, {
+      operation: 'testAutomation',
+      ruleKey: 'auto_sla_breach_escalation',
+      graphJson: unsavedEditedGraph,
+      sampleEvent: { type: 'sla.breached', data: { code: 'SLA-99' } },
+    });
+    assert.equal(canvasOverlayTest.dryRun, true);
+    assert.equal(canvasOverlayTest.ruleKey, 'auto_sla_breach_escalation');
+    assert.equal(Boolean(canvasOverlayTest.nodeStatesJson?.step_unsaved), true);
+    assert.equal(canvasOverlayTest.nodeStatesJson?.step_0, undefined);
+
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'testAutomation',
+        ruleKey: 'foreign_org_rule',
+        graphJson: unsavedEditedGraph,
+      }),
+      (err) => err.status === 404 && err.code === 'AUTOMATION_RULE_NOT_FOUND',
+    );
+
+    const ssrfNodeTestGraph = {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', label: 'Trigger', config: {} },
+        { id: 'http_ssrf', type: 'integration.http', label: 'Bad HTTP', config: { url: 'http://169.254.169.254/latest/meta-data' } },
+      ],
+      edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'http_ssrf', targetHandle: 'in' }],
+    };
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'testAutomation',
+        rule: {
+          ruleKey: 'auto_safe_inline',
+          name: 'Safe Inline Rule',
+          triggerEventType: 'manual.trigger',
+          actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'Ok' }],
+        },
+        graphJson: ssrfNodeTestGraph,
+        nodeId: 'http_ssrf',
+      }),
+      (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+    );
+  });
+
+  await t.test('4. resumeAutomation dryRun enforces org parity, status === suspended, and timingSafeEqual token verification', async () => {
+    const dryOk = await wfTool.invoke(noResCtx, {
+      operation: 'resumeAutomation',
+      runUid: 'run_dry_susp_1',
+      decision: 'approved',
+      resumeToken: validToken,
+      dryRun: true,
+    });
+    assert.equal(dryOk.dryRun, true);
+    assert.equal(dryOk.applied, false);
+    assert.equal(dryOk.previewRun.currentStatus, 'suspended');
+
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'resumeAutomation',
+        runUid: 'run_dry_done_2',
+        decision: 'approved',
+        resumeToken: validToken,
+        dryRun: true,
+      }),
+      (err) => err.status === 409 && err.code === 'RUN_ALREADY_RESUMED',
+    );
+
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'resumeAutomation',
+        runUid: 'run_dry_susp_1',
+        decision: 'approved',
+        resumeToken: 'wrong-token-value',
+        dryRun: true,
+      }),
+      (err) => err.status === 403 && err.code === 'INVALID_RESUME_TOKEN',
+    );
+
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'resumeAutomation',
+        runUid: 'run_dry_nohash_3',
+        decision: 'approved',
+        resumeToken: validToken,
+        dryRun: true,
+      }),
+      (err) => err.status === 403 && err.code === 'INVALID_RESUME_TOKEN',
+    );
+
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'resumeAutomation',
+        runUid: 'run_dry_foreign_4',
+        decision: 'approved',
+        dryRun: true,
+      }),
+      (err) => err.status === 403 && err.code === 'NATIVE_ORGANIZATION_MISMATCH',
+    );
+
+    // Even if a broken mock repo ignores org filter in findOne and returns foreign row directly:
+    const leakyDb = {
+      ...db,
+      getRepository: (name) => {
+        if (name !== 'latticeAutomationRuns') return db.getRepository(name);
+        return {
+          findOne: async () => db.store.latticeAutomationRuns.find((r) => r.runUid === 'run_dry_foreign_4'),
+        };
+      },
+    };
+    const leakyCtx = { ...noResCtx, db: leakyDb };
+    await assert.rejects(
+      () => wfTool.invoke(leakyCtx, {
+        operation: 'resumeAutomation',
+        runUid: 'run_dry_foreign_4',
+        decision: 'approved',
+        dryRun: true,
+      }),
+      (err) => err.status === 403 && err.code === 'NATIVE_ORGANIZATION_MISMATCH',
+    );
+  });
 });

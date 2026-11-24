@@ -13,20 +13,28 @@ const path = require('path');
 const { evaluateDecisionTable } = require('./dmn-engine');
 const { SYSTEM_PROTECTED_COLLECTIONS } = require('./solution-bundle');
 const {
+  ALLOWLISTED_BUSINESS_COLLECTIONS,
   BLOCKED_PROTO_KEYS,
+  CUSTOM_COLLECTION_RE,
   MAX_HARD_DEPTH,
   RULE_KEY_RE,
-  VALID_ACTION_TYPES,
-  buildAutomationBuilderCatalog,
-  hasUnsafeTemplateSyntax,
-  runAutomationAiAssist,
-  validateFilterStructure,
-} = require('./automation-copilot');
-const {
   buildTriggerIndex,
+  cloneSafe,
   graphV2SummaryToV1Compat,
+  normalizeGraph,
+  v1RuleToGraphV2,
 } = require('./flow/schema');
-const { validateFlowGraph } = require('./flow/validator');
+const {
+  assertSafeFlowTemplate,
+  hasUnsafeTemplateSyntax,
+  validateFilterStructure,
+  validateFlowGraph,
+} = require('./flow/validator');
+const {
+  applyGraphOperations,
+  buildFlowStudioCatalog,
+  runFlowArchitect,
+} = require('./flow/architect');
 const flowRegistry = require('./flow/registry');
 const getFlowExecutor = () => require('./flow/executor');
 const {
@@ -45,7 +53,14 @@ const {
 } = require('./wms-dmn-shared');
 
 const AUTOMATION_COLLECTIONS = Object.freeze(['latticeAutomationRules', 'latticeAutomationRuns']);
-const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
+const VALID_ACTION_TYPES = new Set([
+  'create_record',
+  'update_record',
+  'notify_role',
+  'call_connector',
+  'twin_set_desired',
+  'trigger_ai_triage',
+]);
 const MUTATING_ROLES = new Set(['ldx_admin', 'ldx_manager', 'root', 'admin']);
 const CORE_VOUCHER_COLLECTIONS = new Set([
   'latticeRequests',
@@ -63,17 +78,6 @@ const PROTECTED_VOUCHER_FIELDS = new Set([
   'cancelledAt',
   'cancelledBy',
   'cancelReason',
-]);
-const ALLOWLISTED_BUSINESS_COLLECTIONS = new Set([
-  'latticeRequests',
-  'latticeOrders',
-  'latticeOrderLines',
-  'latticeServiceTickets',
-  'latticeParaDocuments',
-  'latticeIncidentCases',
-  'latticeLocations',
-  'latticeAssets',
-  'latticeAgentProposals',
 ]);
 const SENSITIVE_TARGET_COLLECTIONS = new Set([
   'latticePkiKeys',
@@ -504,9 +508,7 @@ function validateRulePayload(payload) {
     if (!isPlainObject(act) || !VALID_ACTION_TYPES.has(String(act.type || '').trim())) {
       throw fail('INVALID_ACTION_TYPE', 400, `actionsJson[${i}].type must be a valid automation action`);
     }
-    if (hasUnsafeTemplateSyntax(act)) {
-      throw fail('UNSAFE_TEMPLATE_EXPRESSION', 400, `actionsJson[${i}] contains unsafe template or prototype key`);
-    }
+    assertSafeFlowTemplate(act, `actionsJson[${i}]`);
     if (act.when !== undefined && act.when !== null) {
       if (!isPlainObject(act.when)) {
         throw fail('INVALID_ACTION_CONDITION', 400, `actionsJson[${i}].when must be a plain object or null`);
@@ -1560,6 +1562,123 @@ function registerRecordTriggerHooks(app, db, options = {}) {
   };
 }
 
+function appendStepViaFlowGraph({ targetRule, targetGraph, prompt, sampleEvent }) {
+  const rawG = isPlainObject(targetGraph) && Array.isArray(targetGraph.nodes)
+    ? targetGraph
+    : isPlainObject(targetRule?.graphJson) && Array.isArray(targetRule.graphJson.nodes)
+      ? targetRule.graphJson
+      : isPlainObject(targetRule?.draftGraphJson) && Array.isArray(targetRule.draftGraphJson.nodes)
+        ? targetRule.draftGraphJson
+        : null;
+  const baseGraph = rawG ? normalizeGraph(cloneSafe(rawG)) : isPlainObject(targetRule) ? v1RuleToGraphV2(targetRule) : null;
+  if (!baseGraph?.nodes?.length) return null;
+
+  const sourcesWithOut = new Set(baseGraph.edges.map((e) => e.source));
+  const tailNode = [...baseGraph.nodes].reverse().find((n) => !String(n.type || '').startsWith('trigger.') && !sourcesWithOut.has(n.id))
+    || baseGraph.nodes[baseGraph.nodes.length - 1];
+  const tailPort = tailNode.type === 'control.if'
+    ? 'true'
+    : tailNode.type === 'control.approval'
+      ? 'approved'
+      : tailNode.type === 'control.loop'
+        ? 'done'
+        : 'main';
+
+  let stepIdx = baseGraph.nodes.filter((n) => /^step_\d+$/.test(n.id) || Number.isInteger(n.config?.stepIndex)).length;
+  while (baseGraph.nodes.some((n) => n.id === `step_${stepIdx}`)) stepIdx += 1;
+  const newId = `step_${stepIdx}`;
+  const cleanPrompt = String(prompt || '').trim();
+  const normPrompt = cleanPrompt.normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[đĐ]/g, 'd').toLowerCase();
+  const roleMatch = cleanPrompt.match(/\bldx_[a-z0-9_]{2,40}\b/i);
+  const pickedRole = roleMatch ? roleMatch[0].toLowerCase() : 'ldx_operator';
+
+  let newNode;
+  if (/\btriage\b|\bai\b|\bproposal\b/.test(normPrompt)) {
+    newNode = {
+      id: newId,
+      type: 'ai.agent',
+      label: 'AI Triage',
+      config: {
+        stepIndex: stepIdx,
+        targetCollection: 'latticeAssets',
+        severity: 'high',
+        recommendation: cleanPrompt.slice(0, 160) || 'AI triage proposal',
+      },
+    };
+  } else if (/\bupdate\b|cap nhat/.test(normPrompt)) {
+    newNode = {
+      id: newId,
+      type: 'data.update',
+      label: 'Update Record',
+      config: {
+        stepIndex: stepIdx,
+        collection: 'latticeServiceTickets',
+        recordId: '{{data.id}}',
+        filter: { id: '{{data.id}}' },
+        values: { status: 'processed' },
+      },
+    };
+  } else if (/\bcreate\b|\btao\b/.test(normPrompt)) {
+    newNode = {
+      id: newId,
+      type: 'data.create',
+      label: 'Create Record',
+      config: {
+        stepIndex: stepIdx,
+        collection: 'latticeServiceTickets',
+        values: { code: 'FLOW-{{id}}', name: cleanPrompt.slice(0, 80) || 'Flow Record' },
+      },
+    };
+  } else {
+    newNode = {
+      id: newId,
+      type: 'notify.send',
+      label: `Notify ${pickedRole}`,
+      config: {
+        stepIndex: stepIdx,
+        roleNames: [pickedRole],
+        severity: 'info',
+        title: cleanPrompt.slice(0, 120) || 'Flow Notification',
+      },
+    };
+  }
+
+  const applied = applyGraphOperations(baseGraph, [
+    { op: 'add_node', node: newNode },
+    { op: 'connect_edge', edge: { source: tailNode.id, sourceHandle: tailPort, target: newId, targetHandle: 'in' } },
+  ]);
+  const check = validateFlowGraph(applied.graph, { nodeRegistry: flowRegistry, requireTrigger: true });
+  if (!check.ok) return null;
+
+  const trigIdx = buildTriggerIndex(applied.graph, targetRule);
+  const compat = graphV2SummaryToV1Compat({ ...(isPlainObject(targetRule) ? targetRule : {}), graphJson: applied.graph });
+  const draftRule = {
+    schemaVersion: 2,
+    ruleKey: String(targetRule?.ruleKey || 'flow_rule').trim(),
+    name: String(targetRule?.name || 'Automated Flow').trim().slice(0, 120),
+    description: targetRule?.description ? String(targetRule.description) : 'DX-OS Flow Architect draft',
+    triggerEventType: compat.triggerEventType || trigIdx[0]?.eventType || '*',
+    triggerIndexJson: trigIdx,
+    graphJson: applied.graph,
+    ...compat,
+    active: targetRule?.active !== undefined ? Boolean(targetRule.active) : true,
+  };
+  return {
+    ok: true,
+    refused: false,
+    mode: 'node',
+    modeUsed: 'offline-fallback',
+    repairAttempts: 0,
+    targetNode: 'step:append',
+    summary: `Appended node "${newId}" (${newNode.type}) to flow.`,
+    graphDiff: applied.graphDiff,
+    draftGraph: applied.graph,
+    draftRule,
+    sampleEvent: isPlainObject(sampleEvent) ? cloneSafe(sampleEvent) : null,
+    suggestions: [],
+  };
+}
+
 function createDxosAutomationsActions(db, options = {}) {
   const foundation = options.foundation || loadFoundationSet();
 
@@ -1855,7 +1974,7 @@ function createDxosAutomationsActions(db, options = {}) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
-      ctx.body = await buildAutomationBuilderCatalog(db, organizationId);
+      ctx.body = await buildFlowStudioCatalog(db, organizationId, { env: options.env || process.env });
       return next();
     },
 
@@ -1866,27 +1985,67 @@ function createDxosAutomationsActions(db, options = {}) {
         allowedPatScopes: ['write', 'ai', 'iot'],
       });
       const rulesRepo = db.getRepository('latticeAutomationRules');
+      const runsRepo = db.getRepository('latticeAutomationRuns');
+      const requestedMode = String(params.mode || '').trim().toLowerCase();
       let targetRule = params.rule !== undefined ? params.rule : null;
+      const targetGraph = params.graph !== undefined ? params.graph : params.graphJson;
       const requestedRuleKey = String(params.ruleKey || params.automationCode || '').trim();
       if (targetRule === null && requestedRuleKey && rulesRepo) {
         const found = await rulesRepo.findOne({ filter: { organizationId, ruleKey: requestedRuleKey } });
         if (found) {
           targetRule = toPlain(found);
-        } else if (String(params.mode || '').trim().toLowerCase() === 'node') {
+        } else if (requestedMode === 'node') {
           throw fail('RULE_NOT_FOUND', 404, `Automation rule ${requestedRuleKey} not found`);
         }
       }
 
-      const catalog = await buildAutomationBuilderCatalog(db, organizationId);
-      const result = runAutomationAiAssist({
+      let runTrace = params.runTrace !== undefined ? params.runTrace : null;
+      const requestedRunUid = String(params.runUid || (isPlainObject(runTrace) ? runTrace.runUid : '') || '').trim();
+      if ((runTrace === null || (isPlainObject(runTrace) && !runTrace.nodeStatesJson && !runTrace.stepTracesJson)) && requestedRunUid) {
+        const foundRun = runsRepo ? await runsRepo.findOne({ filter: { organizationId, runUid: requestedRunUid } }) : null;
+        if (!foundRun) {
+          throw fail('RUN_NOT_FOUND', 404, `Automation run ${requestedRunUid} not found`);
+        }
+        const plainRun = toPlain(foundRun);
+        runTrace = isPlainObject(runTrace) ? { ...plainRun, ...runTrace } : plainRun;
+      }
+      if (targetRule === null && !isPlainObject(targetGraph) && runTrace?.ruleKey && rulesRepo) {
+        const traceRule = await rulesRepo.findOne({ filter: { organizationId, ruleKey: String(runTrace.ruleKey).trim() } });
+        if (traceRule) targetRule = toPlain(traceRule);
+      }
+
+      const rawTarget = String(params.targetNodeId || params.targetNode || '').trim();
+      let result = await runFlowArchitect({
+        db,
+        env: options.env || process.env,
         mode: params.mode,
         prompt: params.prompt,
         rule: targetRule,
+        graph: targetGraph,
+        targetNodeId: params.targetNodeId,
         targetNode: params.targetNode,
-        catalog,
+        runTrace,
+        organizationId,
+        fetchImpl: options.fetchImpl,
+        lookupImpl: options.lookupImpl,
+        ...(params.sampleEvent !== undefined ? { sampleEvent: params.sampleEvent } : {}),
       });
+      if (
+        result?.refused
+        && requestedMode === 'node'
+        && ['step:append', 'actions', 'step:new'].includes(rawTarget.toLowerCase())
+        && /Target node "(?:step:append|actions|step:new)" not found/i.test(String(result.error || ''))
+      ) {
+        const appended = appendStepViaFlowGraph({
+          targetRule,
+          targetGraph,
+          prompt: params.prompt,
+          sampleEvent: params.sampleEvent,
+        });
+        if (appended) result = appended;
+      }
       if (result?.refused) {
-        throw fail('AI_ASSIST_REFUSED', 400, result.error || 'AI assist request refused');
+        throw fail('AI_ASSIST_REFUSED', 400, result.error || 'Flow Architect request refused');
       }
 
       if (params.apply === true && result.draftRule) {
