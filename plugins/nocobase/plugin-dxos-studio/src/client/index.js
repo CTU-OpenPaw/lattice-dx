@@ -26,8 +26,9 @@
       const api = useApi();
       const [selectedOrg, setSelectedOrg] = React.useState('');
       const [organizations, setOrganizations] = React.useState([]);
+      const [orgReady, setOrgReady] = React.useState(false);
       React.useEffect(() => {
-        if (!api?.request) return;
+        if (!api?.request) { setOrgReady(true); return; }
         api.request({ url: 'dxosStudio:listEmployees', method: 'get', skipNotify: true })
           .then((res) => {
             const orgs = res?.data?.data?.organizations || res?.data?.organizations || [];
@@ -36,11 +37,14 @@
               setSelectedOrg((cur) => cur || orgs[0]);
             }
           })
-          .catch(() => {});
+          .catch(() => {})
+          .finally(() => setOrgReady(true));
       }, [Boolean(api?.request)]);
       const openRoute = (p) => { if (app?.router?.navigate) app.router.navigate(p); else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(p) || p); };
       return h('div', { 'data-testid': 'dxos-workflow-connectors-tab', style: { padding: 14, background: '#f8fafc', minHeight: 520 } },
-        h(VaultAndAutomationPanel, { api, selectedOrg, organizations, openRoute }),
+        orgReady
+          ? h(VaultAndAutomationPanel, { api, selectedOrg, organizations, openRoute })
+          : h('div', { style: { padding: 20, fontSize: 13, color: '#64748b' } }, 'Đang tải danh sách tổ chức & Vault…'),
       );
     };
   }

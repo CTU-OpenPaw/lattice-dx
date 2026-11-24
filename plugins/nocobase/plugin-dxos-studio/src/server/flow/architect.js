@@ -168,7 +168,12 @@ function synthesizeOfflineFallback({ mode, prompt, baseGraph, targetNodeId, trac
   const pNorm = stripAccents(prompt);
   const pickCol = catalog.collections.find((c) => pNorm.includes(c.name.toLowerCase()))?.name || catalog.collections[0]?.name || 'latticeServiceTickets';
   const pickRole = catalog.roles.find((r) => pNorm.includes(r.toLowerCase())) || (/manager|giam doc|quan ly/.test(pNorm) ? 'ldx_manager' : 'ldx_operator');
-  const pickConn = catalog.connectors.find((c) => pNorm.includes(c.connectorKey.toLowerCase()))?.connectorKey || (/\bn8n\b/.test(pNorm) ? catalog.connectors.find((c) => c.connectorType === 'n8n')?.connectorKey : '') || catalog.connectors[0]?.connectorKey || '';
+  const pickConn = catalog.connectors.find((c) => pNorm.includes(c.connectorKey.toLowerCase()))?.connectorKey
+    || (/\bn8n\b/.test(pNorm) ? (
+      (/enterprise|compliance|tuan thu|pki|giam doc/.test(pNorm) && catalog.connectors.find((c) => c.connectorType === 'n8n' && /enterprise|compliance/.test(String(c.connectorKey || ''))))?.connectorKey
+      || catalog.connectors.find((c) => c.connectorType === 'n8n')?.connectorKey
+    ) : '')
+    || catalog.connectors[0]?.connectorKey || '';
   const pickDmn = catalog.dmnTables.find((t) => pNorm.includes(t.tableKey.toLowerCase()) || (t.name && pNorm.includes(stripAccents(t.name))))?.tableKey || null;
   const fbBase = baseGraph || normalizeGraph({ version: 2, nodes: [{ id: 'trig_1', type: 'trigger.manual', label: 'Manual Trigger', config: {} }], edges: [] });
 
