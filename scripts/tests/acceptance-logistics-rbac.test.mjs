@@ -92,7 +92,19 @@ test('runLogisticsAndRbacAcceptance runs 5 stages, 2nd domain, negative checks, 
     }
     if (path === 'dxosStudio:installWorkflow') {
       if (actorRole === 'employee') return { ok: false, status: 403, data: {} };
-      return { ok: true, status: 200, data: { workflowId: values.templateKey === 'logistics-5step' ? 501 : 502, existed: false } };
+      assert.equal(values.enabled, true, 'installWorkflow must request enabled: true');
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          workflowId: values.templateKey === 'logistics-5step' ? 501 : 502,
+          existed: values.templateKey === 'internal-service',
+          enabled: values.templateKey === 'logistics-5step',
+        },
+      };
+    }
+    if (path.startsWith('workflows:update')) {
+      return { ok: true, status: 200, data: { enabled: values.enabled } };
     }
     if (path === 'dxosStudio:readiness' || path === 'dxosStudio:composePortals') {
       return { ok: false, status: 403, data: {} };

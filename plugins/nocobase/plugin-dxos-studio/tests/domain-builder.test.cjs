@@ -298,6 +298,9 @@ test('createDomain validates collection & field specs, verifies PG RLS, creates 
   assert.equal(dom.rls.verified, true);
   assert.ok(db.rlsAttached.includes('latticeCustomInspections'));
   assert.ok(db.syncCalls.some((s) => s.name === 'latticeCustomInspections'));
+  assert.equal(db.collections.get('latticeCustomInspections')?.loadedFromCollectionManager, true);
+  assert.equal(db.collections.get('latticeCustomInspections')?.title, 'Cold-Chain Inspections');
+  assert.notEqual(db.collections.get('latticeCustomInspections')?.uiManageable, true);
   assert.ok(db.store.fields.some((f) => f.collectionName === 'latticeCustomInspections' && f.name === 'organizationId'));
   assert.equal(db.store.dataSourcesRolesResources.length, 3);
   assert.ok(db.store.dataSourcesRolesResourcesActions.length > 0);

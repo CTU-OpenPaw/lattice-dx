@@ -702,6 +702,8 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
   const sanitizedFields = sanitizeFields(params.fields);
   const title = String(params.title || collectionName).trim();
   const description = params.description ? String(params.description).trim() : null;
+  const firstStringField = sanitizedFields.find((f) => f && f.name && ['string', 'text'].includes(f.type));
+  const titleField = firstStringField ? firstStringField.name : null;
   const fullFieldsSpec = [
     { name: 'organizationId', type: 'string', allowNull: false, index: true },
     ...sanitizedFields.map(mapFieldSpecToNocoBase),
@@ -722,6 +724,7 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
         updatedAt: true,
         autoGenId: true,
         logging: true,
+        ...(titleField ? { titleField } : {}),
       },
     );
   }
@@ -751,9 +754,16 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
   ];
 
   let rlsDroppedForAlter = false;
+  let registered = null;
   if (typeof db.collection === 'function') {
-    const registered = db.collection({
+    registered = db.collection({
       name: collectionName,
+      title,
+      description,
+      autoGenId: true,
+      logging: true,
+      loadedFromCollectionManager: true,
+      ...(titleField ? { titleField } : {}),
       timestamps: true,
       createdAt: true,
       updatedAt: true,
@@ -790,6 +800,9 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
   }
   if (typeof db.sync === 'function' && !rlsDroppedForAlter) {
     await db.sync();
+  }
+  if (registered && typeof db.emitAsync === 'function') {
+    await db.emitAsync('collection:loaded', { collection: registered }).catch(() => {});
   }
 
   if (isPgWithQuery) {
