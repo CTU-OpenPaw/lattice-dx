@@ -10,17 +10,27 @@ Original first-party code under apps/, packages/, plugins/nocobase/, scripts/,
 infra/, solutions/, and tests/ is distributed under the Apache License,
 Version 2.0 (see LICENSE and NOTICE).
 
-Upstream NocoBase source code referenced in submodule upstream/nocobase is NOT
-modified, bundled into pnpm workspace builds, or redistributed inside release
-tarballs. First-party plugins declare "nocobase": { "sdkProvidedByHost": true },
-invoke host SDK APIs at runtime, and preserve NocoBase Clause 5.2 attribution
-("Powered by NocoBase", "v2.2.50", "https://www.nocobase.com", "License settings").
+Pure-OSI Source Repository & External Host Runtime Boundary:
+100% of the LatticeDX Git repository (https://github.com/CTU-OpenPaw/lattice-dx)
+and the latticedx-1.0.0-src.tar.gz release archive consists strictly of
+OSI-approved source code (Apache-2.0 first-party code + OSI-compatible npm
+dependencies), with ZERO upstream/nocobase Git submodule and ZERO .gitmodules.
+Host NocoBase runtime (nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777)
+is loaded strictly at runtime as an external OCI container outside the Git
+repository and is NOT modified, bundled into pnpm workspace builds, or
+redistributed inside release tarballs. First-party plugins declare
+"nocobase": { "sdkProvidedByHost": true }, invoke host SDK APIs at runtime,
+and preserve NocoBase Clause 5.2 attribution ("Powered by NocoBase", "v2.2.50",
+"https://www.nocobase.com", "License settings").
 
 OSS License Purity Guarantee:
 LatticeDX v1.0.0 strictly prohibits BSL-1.1 / Business Source License software
 (including ThingsBoard and EMQX) across workspace code, lockfiles, and OCI
 containers, enforced deterministically by scripts/generate-sbom.mjs and
-scripts/verify-pof-readiness.mjs against docs/sbom-cyclonedx.json.
+scripts/verify-pof-readiness.mjs against docs/sbom-cyclonedx.json. Optional
+external integration services such as n8n (n8nio/n8n:2.48.1) run strictly as
+standalone external OCI containers and are never part of LatticeDX's core
+automation engine.
 
 ================================================================================
 First-Party LatticeDX NocoBase Plugins (Apache-2.0, sdkProvidedByHost: true)
@@ -78,7 +88,7 @@ adorsys/keycloak-config-cli          | 6.5.1-26   | Apache-2.0                  
 Apache APISIX                        | 3.19.0     | Apache-2.0                                                              | Zero-Trust API Gateway OCI container | https://github.com/apache/apisix
 FIWARE Orion-LD                      | 1.12.0     | AGPL-3.0-only                                                           | NGSI-LD Context Broker OCI container (HTTP) | https://github.com/FIWARE/context.Orion-LD
 MongoDB                              | 8.0        | SSPL-1.0                                                                | Backing DB container for FIWARE Orion-LD | https://github.com/mongodb/mongo
-n8n                                  | 2.48.1     | Sustainable Use License                                                 | Standalone workflow automation container | https://github.com/n8n-io/n8n
+n8n                                  | 2.48.1     | Sustainable Use License                                                 | Optional standalone external integration container (not core engine) | https://github.com/n8n-io/n8n
 ClamAV                               | 1.5.5      | GPL-2.0-only                                                            | Standalone antivirus scanner daemon (TCP) | https://github.com/Cisco-Talos/clamav
 Eclipse Mosquitto                    | 2.0.21     | EPL-2.0 OR BSD-3-Clause                                                 | OSI-clean IIoT MQTT broker (Dynamic Security + LWT) OCI container | https://github.com/eclipse-mosquitto/mosquitto
 Node-RED                             | 4.0.9      | Apache-2.0                                                              | IIoT edge normalizer, LWT bridge & Twin downlink OCI container | https://github.com/node-red/node-red

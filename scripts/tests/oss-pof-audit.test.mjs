@@ -115,9 +115,9 @@ test('planTarball rejects non-.tar.gz archive extensions such as .zip', t => {
   assert.equal(plan.sha256Path, `${plan.tarballPath}.sha256`);
 });
 
-test('assertTarballEntries rejects node_modules, .env, .git, missing COPYRIGHT.txt, and bundled upstream files', () => {
+test('assertTarballEntries rejects node_modules, .env, .git, .gitmodules, missing COPYRIGHT.txt, and any upstream files', () => {
   const base = ['latticedx-0.1.0/LICENSE', 'latticedx-0.1.0/NOTICE', 'latticedx-0.1.0/COPYRIGHT.txt', 'latticedx-0.1.0/README.md', 'latticedx-0.1.0/CHANGELOG.md', 'latticedx-0.1.0/docs/build-from-source.md'];
-  assert.doesNotThrow(() => assertTarballEntries([...base, 'latticedx-0.1.0/upstream/nocobase/'], { prefix: 'latticedx-0.1.0/' }));
+  assert.doesNotThrow(() => assertTarballEntries(base, { prefix: 'latticedx-0.1.0/' }));
   assert.throws(
     () => assertTarballEntries(base.filter(e => !e.endsWith('/COPYRIGHT.txt')), { prefix: 'latticedx-0.1.0/' }),
     /COPYRIGHT\.txt/,
@@ -126,7 +126,9 @@ test('assertTarballEntries rejects node_modules, .env, .git, missing COPYRIGHT.t
     'latticedx-0.1.0/node_modules/pkg/index.js',
     'latticedx-0.1.0/.env',
     'latticedx-0.1.0/.git/HEAD',
+    'latticedx-0.1.0/upstream/nocobase/',
     'latticedx-0.1.0/upstream/nocobase/package.json',
+    'latticedx-0.1.0/.gitmodules',
   ]) {
     assert.throws(() => assertTarballEntries([...base, forbidden], { prefix: 'latticedx-0.1.0/' }), /forbidden/);
   }
@@ -144,13 +146,40 @@ test('buildOssReleaseTarball generates verified .tar.gz and .sha256 sidecar from
 test('runPofAudit passes in an extracted release directory without .git', t => {
   const dir = createCompliantFixtureFiles();
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  mkdirSync(join(dir, 'upstream/nocobase'), { recursive: true });
   const report = runPofAudit({ rootDir: dir });
   assert.equal(report.result, 'PASS', JSON.stringify(report.checks));
   assert.ok(report.checks.every(check => check.passed), JSON.stringify(report.checks));
 });
 
-test('runPofAudit in a non-git directory detects missing SPDX, .env secrets, and bundled upstream files', t => {
+test('runPofAudit in a git repo fails when .gitmodules or upstream/ entries are tracked or present', t => {
+  const dirGitmodules = createCompliantFixtureRepo();
+  t.after(() => rmSync(dirGitmodules, { recursive: true, force: true }));
+  writeFileSync(join(dirGitmodules, '.gitmodules'), '[submodule "upstream/nocobase"]\n\tpath = upstream/nocobase\n', 'utf8');
+  execFileSync('git', ['add', '.gitmodules'], { cwd: dirGitmodules, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'add gitmodules'], { cwd: dirGitmodules, stdio: 'ignore' });
+  const gmReport = runPofAudit({ rootDir: dirGitmodules });
+  assert.equal(gmReport.result, 'FAIL');
+  assert.equal(gmReport.checks.find(c => c.id === 'upstream-clean')?.passed, false);
+
+  const dirUpstreamFile = createCompliantFixtureRepo();
+  t.after(() => rmSync(dirUpstreamFile, { recursive: true, force: true }));
+  mkdirSync(join(dirUpstreamFile, 'upstream/nocobase'), { recursive: true });
+  writeFileSync(join(dirUpstreamFile, 'upstream/nocobase/README.md'), '# Upstream\n', 'utf8');
+  execFileSync('git', ['add', 'upstream/nocobase/README.md'], { cwd: dirUpstreamFile, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'track upstream file'], { cwd: dirUpstreamFile, stdio: 'ignore' });
+  const upReport = runPofAudit({ rootDir: dirUpstreamFile });
+  assert.equal(upReport.result, 'FAIL');
+  assert.equal(upReport.checks.find(c => c.id === 'upstream-clean')?.passed, false);
+
+  const dirEmptyUpstream = createCompliantFixtureRepo();
+  t.after(() => rmSync(dirEmptyUpstream, { recursive: true, force: true }));
+  mkdirSync(join(dirEmptyUpstream, 'upstream/nocobase'), { recursive: true });
+  const emptyUpReport = runPofAudit({ rootDir: dirEmptyUpstream });
+  assert.equal(emptyUpReport.result, 'FAIL');
+  assert.equal(emptyUpReport.checks.find(c => c.id === 'upstream-clean')?.passed, false);
+});
+
+test('runPofAudit in a non-git directory detects missing SPDX, .env secrets, .gitmodules, and any upstream remnants', t => {
   const dir = createCompliantFixtureFiles();
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   mkdirSync(join(dir, 'upstream/nocobase'), { recursive: true });
@@ -171,6 +200,20 @@ test('runPofAudit in a non-git directory detects missing SPDX, .env secrets, and
   const nmReport = runPofAudit({ rootDir: nmDir });
   assert.equal(nmReport.result, 'FAIL');
   assert.equal(nmReport.checks.find(c => c.id === 'upstream-clean').passed, false);
+
+  const emptyDir = createCompliantFixtureFiles();
+  t.after(() => rmSync(emptyDir, { recursive: true, force: true }));
+  mkdirSync(join(emptyDir, 'upstream/nocobase'), { recursive: true });
+  const emptyReport = runPofAudit({ rootDir: emptyDir });
+  assert.equal(emptyReport.result, 'FAIL');
+  assert.equal(emptyReport.checks.find(c => c.id === 'upstream-clean')?.passed, false);
+
+  const gmDir = createCompliantFixtureFiles();
+  t.after(() => rmSync(gmDir, { recursive: true, force: true }));
+  writeFileSync(join(gmDir, '.gitmodules'), '[submodule "upstream/nocobase"]\n', 'utf8');
+  const gmReport = runPofAudit({ rootDir: gmDir });
+  assert.equal(gmReport.result, 'FAIL');
+  assert.equal(gmReport.checks.find(c => c.id === 'upstream-clean')?.passed, false);
 });
 
 test('planTarball rejects unsafe git refs and buildOssReleaseTarball leaves no corrupt file on failure', t => {

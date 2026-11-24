@@ -176,24 +176,34 @@ function checkComposeDigests(rootDir) {
 }
 
 function checkUpstreamClean(rootDir, trackedFiles, { isGit = true } = {}) {
-  if (!isGit) {
-    const bundledUpstream = trackedFiles.filter(
-      f => /^upstream\/nocobase\/.+/.test(f) || (f.startsWith('upstream/') && /(^|\/)node_modules(\/|$)/.test(f)),
-    );
-    return {
-      id: 'upstream-clean',
-      passed: bundledUpstream.length === 0,
-      details: bundledUpstream.length
-        ? `Bundled upstream source or node_modules found: ${bundledUpstream.slice(0, 5).join(', ')}`
-        : 'No bundled upstream/nocobase source files or upstream node_modules found (archive mode)',
-    };
-  }
   const issues = [];
-  const dirtyUpstream = listLines(runGit(rootDir, ['status', '--porcelain', '--', 'upstream']));
-  if (dirtyUpstream.length) issues.push(`Dirty upstream entries: ${dirtyUpstream.join(', ')}`);
-  const bundledUpstreamNodeModules = trackedFiles.filter(f => f.startsWith('upstream/') && /(^|\/)node_modules(\/|$)/.test(f));
-  if (bundledUpstreamNodeModules.length) issues.push(`Tracked upstream node_modules: ${bundledUpstreamNodeModules.join(', ')}`);
-  return { id: 'upstream-clean', passed: issues.length === 0, details: issues.length ? issues.join('; ') : 'upstream/ submodule is clean with zero tracked node_modules' };
+  const forbiddenEntries = trackedFiles.filter(
+    f => f === '.gitmodules' || f === 'upstream' || f.startsWith('upstream/'),
+  );
+  if (forbiddenEntries.length) {
+    issues.push(`Forbidden .gitmodules or upstream/ entries: ${forbiddenEntries.slice(0, 5).join(', ')}`);
+  }
+  if (existsSync(join(rootDir, '.gitmodules'))) {
+    issues.push('Forbidden .gitmodules file present');
+  }
+  if (existsSync(join(rootDir, 'upstream/nocobase'))) {
+    issues.push('Forbidden upstream/nocobase directory present');
+  } else if (!isGit && existsSync(join(rootDir, 'upstream'))) {
+    issues.push('Forbidden upstream directory present');
+  }
+  if (isGit) {
+    const dirtyUpstream = listLines(runGit(rootDir, ['status', '--porcelain', '--', 'upstream']));
+    if (dirtyUpstream.length) issues.push(`Dirty upstream entries: ${dirtyUpstream.join(', ')}`);
+    const trackedUpstream = listLines(runGit(rootDir, ['ls-files', 'upstream', '.gitmodules']));
+    if (trackedUpstream.length) issues.push(`Tracked upstream/.gitmodules entries: ${trackedUpstream.join(', ')}`);
+  }
+  return {
+    id: 'upstream-clean',
+    passed: issues.length === 0,
+    details: issues.length
+      ? issues.join('; ')
+      : `No .gitmodules or upstream/ submodule/source entries present (${isGit ? 'git' : 'archive'} mode)`,
+  };
 }
 
 function checkNoSecrets(rootDir, trackedFiles, repoFiles) {
