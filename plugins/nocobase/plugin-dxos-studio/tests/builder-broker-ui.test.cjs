@@ -1047,3 +1047,24 @@ test('studio-settings initializes tab from URL ?tab= query param safely and fall
     else globalThis.window = origWindow;
   }
 });
+
+test('VaultAndAutomationPanel skips dxosAutomations:listRules and listRuns while selectedOrg is empty and fetches once resolved', async () => {
+  const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
+  const harness = createQueuedReactHarness();
+  const { client, requests } = createApiMock({
+    'dxosVault:list': async () => ({ items: [] }),
+    'dxosAutomations:listRules': async (req) => ({ items: [{ id: 1, ruleKey: `r_${req.params.organizationId}`, name: 'R', triggerEventType: 'alarm.triggered', active: true }] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+  });
+
+  const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
+  await harness.mountAndFlush(VaultAndAutomationPanel, { selectedOrg: '' });
+  assert.equal(requests.some((r) => r.url === 'dxosVault:list'), true);
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:listRules'), false, 'Must NOT call listRules when selectedOrg is empty');
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:listRuns'), false, 'Must NOT call listRuns when selectedOrg is empty');
+
+  const tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:listRules' && r.params?.organizationId === 'org-a'), true);
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:listRuns' && r.params?.organizationId === 'org-a'), true);
+  assert.equal(JSON.stringify(tree).includes('r_org-a'), true);
+});

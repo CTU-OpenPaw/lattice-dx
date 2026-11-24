@@ -1079,6 +1079,7 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
       const clientApi = runtimeRef.api;
       if (!clientApi?.request) return;
       const seq = (loadSeqRef.current += 1);
+      const reqOrg = effectiveOrg;
       const reqOrgPayload = { ...orgPayload };
       setLoading(true);
       let pendingCount = 3;
@@ -1090,11 +1091,15 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
         .then((res) => { if (seq === loadSeqRef.current) setConnectors(Array.isArray(unwrapData(res).items) ? unwrapData(res).items : []); })
         .catch((err) => { if (seq === loadSeqRef.current) reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') }); })
         .finally(done);
-      clientApi.request({ url: 'dxosAutomations:listRules', method: 'get', params: reqOrgPayload, skipNotify: true })
+      (reqOrg
+        ? clientApi.request({ url: 'dxosAutomations:listRules', method: 'get', params: reqOrgPayload, skipNotify: true })
+        : Promise.resolve({ data: { data: { items: [] } } }))
         .then((res) => { if (seq === loadSeqRef.current) setRules(Array.isArray(unwrapData(res).items) ? unwrapData(res).items : []); })
         .catch((err) => { if (seq === loadSeqRef.current) reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') }); })
         .finally(done);
-      clientApi.request({ url: 'dxosAutomations:listRuns', method: 'get', params: reqOrgPayload, skipNotify: true })
+      (reqOrg
+        ? clientApi.request({ url: 'dxosAutomations:listRuns', method: 'get', params: reqOrgPayload, skipNotify: true })
+        : Promise.resolve({ data: { data: { items: [] } } }))
         .then((res) => { if (seq === loadSeqRef.current) setRuns(Array.isArray(unwrapData(res).items) ? unwrapData(res).items : []); })
         .catch((err) => { if (seq === loadSeqRef.current) reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Vault & Automation.') }); })
         .finally(done);

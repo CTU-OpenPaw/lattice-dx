@@ -1570,9 +1570,10 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
     assert.equal(adminHarness.getStates()[4], null, 'Flow Studio SSE must NOT set pendingUpdate reload banner');
     assert.equal(JSON.stringify(adminTree).includes('dxos-surface-update-banner'), false);
 
-    // Clicking floating button on Flow Studio injects live __LATTICEDX_FLOW_CONTEXT__
+    // Clicking floating button on Flow Studio injects live __LATTICEDX_FLOW_CONTEXT__ and stacks above built-in plugin-ai button
     const adminBtn = findBtn(adminTree);
     assert.ok(adminBtn, 'Admin on Flow Studio must see single floating AI chat button');
+    assert.equal(adminBtn.props.style.zIndex, 1052, 'Flow Studio launcher must sit above built-in plugin-ai zIndex 1050');
     await adminBtn.props.onClick({ stopPropagation() {} });
     assert.equal(triggeredAdmin.length, 1);
     assert.equal(triggeredAdmin[0].aiEmployee, 'dxos-architect');
@@ -1623,6 +1624,9 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
     portalHarness.render(PortalLauncher);
     await new Promise((r) => setTimeout(r, 20));
     const portalTree = portalHarness.render(PortalLauncher);
+    const portalBtn = findBtn(portalTree);
+    assert.ok(portalBtn, 'Portal launcher button must render on /p/services');
+    assert.equal(portalBtn.props.style.zIndex, 1050, 'Portal launcher keeps standard 1050 zIndex');
     assert.equal(portalEvents.some((e) => e.type === 'latticedx:surface-updated'), true);
     assert.equal(JSON.stringify(portalTree).includes('dxos-surface-update-banner'), true);
     portalHarness.cleanup();

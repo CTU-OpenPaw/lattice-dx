@@ -289,7 +289,9 @@ test('src/client/index.js registers workflow.automation under Workflow, preserve
   await plugin.load();
 
   const byKey = Object.fromEntries(added.map((x) => [x.key, x.opts]));
-  assert.equal(byKey['dxos-flow-studio'], undefined, 'Must NOT register standalone dxos-flow-studio sidebar item');
+  assert.equal(byKey['dxos-flow-studio']?.hidden, true, 'Must hide legacy dxos-flow-studio sidebar item');
+  assert.equal(byKey['dxos-flow-studio']?.link, '/admin/settings/workflow/automation');
+  assert.equal(byKey['dxos-flow-studio']?.aclSnippet, 'pm');
   assert.ok(byKey['dxos-studio'], 'Must keep dxos-studio route');
   assert.equal(byKey['dxos-studio'].aclSnippet, 'pm');
   assert.ok(byKey['workflow.automation'], 'Must register workflow.automation under Workflow');
@@ -298,11 +300,7 @@ test('src/client/index.js registers workflow.automation under Workflow, preserve
   assert.equal(byKey['workflow.automation'].aclSnippet, 'pm');
   assert.equal(byKey['workflow.automation'].sort, 20);
   assert.equal(typeof byKey['workflow.automation'].Component, 'function');
-
-  const aliasRoute = routesAdded.find((r) => r.name === 'admin.settings.dxos-flow-studio');
-  assert.ok(aliasRoute, 'Must register backward-compatible router alias');
-  assert.equal(aliasRoute.opts.path, '/admin/settings/dxos-flow-studio');
-  assert.equal(aliasRoute.opts.Component, byKey['workflow.automation'].Component);
+  assert.equal(byKey['dxos-flow-studio'].Component, byKey['workflow.automation'].Component);
 
   const flowTree = await harness.mountAndFlush(byKey['workflow.automation'].Component, {});
   assert.equal(flowTree.props['data-testid'], 'dxos-flow-studio-app');
@@ -1082,4 +1080,65 @@ test('UX polish: pre-org gating waits for listEmployees before automation GETs (
   const AppB = createFlowStudioApp(mockB.client, harnessB.React, {}, {});
   await harnessB.mountAndFlush(AppB, {});
   assert.equal(mockB.requests.filter((r) => r.url.startsWith('dxosAutomations:')).length, 4);
+});
+
+test('registerStudioSettings promotes NocoBase workflow leaf to Outlet tabs and hides legacy dxos-flow-studio alias cleanly', () => {
+  const { registerStudioSettings } = require(path.join(PLUGIN_ROOT, 'src/client/index.js'));
+  function FakeOutlet() {}
+  function FakeBuiltInWorkflowTable() {}
+  function FakeStudioPage() {}
+  function FakeFlowPage() {}
+
+  const addCalls = [];
+  const routes = {};
+  const settings = {};
+  const psm = {
+    settings,
+    getSetting: (name) => settings[name],
+    add(name, opts) {
+      addCalls.push({ name, opts: { ...opts }, hasOwnComponent: Object.prototype.hasOwnProperty.call(opts, 'Component') });
+      settings[name] = { ...settings[name], Component: FakeOutlet, ...opts, name, topLevelName: opts.topLevelName || name.split('.')[0] };
+      if (name.includes('.')) {
+        const [parent, child] = name.split('.');
+        settings[parent] = settings[parent] || {};
+        settings[parent].children = settings[parent].children || {};
+        settings[parent].children[child] = settings[name];
+      }
+      routes[`admin.settings.${name}`] = { path: `/admin/settings/${name.replaceAll('.', '/')}`, Component: settings[name].Component };
+    },
+  };
+
+  psm.add('workflow', {
+    title: 'Workflow',
+    icon: 'PartitionOutlined',
+    isPinned: true,
+    Component: FakeBuiltInWorkflowTable,
+    sort: 300,
+    aclSnippet: 'pm.workflow.workflows',
+  });
+
+  const mockApp = { pluginSettingsManager: psm };
+  registerStudioSettings(mockApp, FakeStudioPage, FakeFlowPage);
+
+  const promoteCall = addCalls.filter((c) => c.name === 'workflow').at(-1);
+  assert.equal(promoteCall.hasOwnComponent, false, 'Parent workflow registration must omit Component so Outlet takes over');
+  assert.equal(settings.workflow.Component, FakeOutlet);
+  assert.equal(settings.workflow.componentLoader, undefined);
+  assert.equal(routes['admin.settings.workflow'].Component, FakeOutlet);
+
+  assert.equal(settings['workflow.workflows'].Component, FakeBuiltInWorkflowTable);
+  assert.equal(settings['workflow.workflows'].sort, 10);
+  assert.equal(settings['workflow.workflows'].isPinned, undefined);
+
+  assert.equal(settings['workflow.automation'].Component, FakeFlowPage);
+  assert.equal(settings['workflow.automation'].sort, 20);
+  assert.equal(settings['workflow.automation'].aclSnippet, 'pm');
+
+  assert.equal(settings['dxos-flow-studio'].hidden, true);
+  assert.equal(settings['dxos-flow-studio'].link, '/admin/settings/workflow/automation');
+
+  // Calling registerStudioSettings a second time must be idempotent and never overwrite workflow.workflows with Outlet
+  registerStudioSettings(mockApp, FakeStudioPage, FakeFlowPage);
+  assert.equal(settings['workflow.workflows'].Component, FakeBuiltInWorkflowTable);
+  assert.equal(settings.workflow.Component, FakeOutlet);
 });

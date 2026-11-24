@@ -488,7 +488,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
           }
         },
         style: {
-          zIndex: 1050,
+          zIndex: onFlowStudio ? 1052 : 1050,
           position: 'fixed',
           bottom: 42,
           insetInlineEnd: -8,

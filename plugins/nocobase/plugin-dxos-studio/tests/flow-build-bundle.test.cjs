@@ -218,14 +218,15 @@ test('dist/client/index.js loads cleanly via CJS without react-dom installed AND
     },
   });
   await pluginInstance.load();
-  assert.equal(registered['dxos-flow-studio'], undefined, 'Standalone dxos-flow-studio settings entry must be retired');
+  assert.equal(registered['dxos-flow-studio']?.hidden, true, 'Legacy dxos-flow-studio entry must be hidden from sidebar');
+  assert.equal(registered['dxos-flow-studio']?.link, '/admin/settings/workflow/automation');
+  assert.equal(registered['dxos-flow-studio']?.aclSnippet, 'pm');
   assert.equal(typeof registered['workflow.automation']?.Component, 'function');
   assert.equal(registered['workflow.automation']?.title, 'Workflow Automation');
   assert.equal(registered['workflow.automation']?.icon, 'ApartmentOutlined');
   assert.equal(registered['workflow.automation']?.aclSnippet, 'pm');
   assert.equal(registered['workflow.automation']?.sort, 20);
-  assert.equal(routerAdded['admin.settings.dxos-flow-studio']?.path, '/admin/settings/dxos-flow-studio');
-  assert.equal(routerAdded['admin.settings.dxos-flow-studio']?.Component, registered['workflow.automation'].Component);
+  assert.equal(registered['dxos-flow-studio']?.Component, registered['workflow.automation'].Component);
   assert.equal(typeof registered['dxos-studio']?.Component, 'function');
   assert.equal(registered['dxos-studio']?.aclSnippet, 'pm');
 
