@@ -1674,6 +1674,91 @@ test('Whole-Delta P1 & P2 regressions: ALS depth, webhook rawBody/connectorType,
       rlsQueries.length = 0;
       await tickDueDelayedRuns(rlsDb);
       assert.ok(rlsQueries.some((q) => q.sql.includes("set_config('app.current_org'") && q.org === 'org-rls'));
+
+      // 8. SAVEPOINT isolation + sequential batching under active PG RLS transaction:
+      //    If a node fails SQL (e.g. data.update or raw SQL error), ROLLBACK TO SAVEPOINT recovers outer tx so finalizeDagRun still commits,
+      //    and parallel ready branches run sequentially on the shared PG RLS connection.
+      const prevErrorNode = executorMod;
+      assert.ok(prevErrorNode);
+      let pgTxAborted = false;
+      const spLog = [];
+      const orderLog = [];
+      const spDb = makeFlowDb({
+        latticeAutomationRules: [
+          {
+            organizationId: 'org-sp',
+            ruleKey: 'sp_recovery_flow',
+            name: 'Savepoint Recovery Flow',
+            schemaVersion: 2,
+            active: true,
+            graphJson: {
+              version: 2,
+              nodes: [
+                { id: 't1', type: 'trigger.manual', config: {} },
+                { id: 'b1', type: 'data.query', config: { collection: 'latticeRequests', filter: { code: 'SQL_FAIL' } } },
+                { id: 'b2', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'SP-02', name: 'Parallel branch 2' } } },
+              ],
+              edges: [
+                { id: 'e1', source: 't1', target: 'b1' },
+                { id: 'e2', source: 't1', target: 'b2' },
+              ],
+            },
+          },
+        ],
+      });
+      const baseGetRepo = spDb.getRepository.bind(spDb);
+      spDb.getRepository = (col) => {
+        const repo = baseGetRepo(col);
+        return {
+          ...repo,
+          async find(args) {
+            if (col === 'latticeRequests' && args?.filter?.code === 'SQL_FAIL') {
+              orderLog.push('b1:start');
+              await new Promise((r) => setTimeout(r, 12));
+              orderLog.push('b1:end');
+              pgTxAborted = true;
+              throw new Error('invalid input syntax for type bigint: ""');
+            }
+            if (pgTxAborted) throw new Error('current transaction is aborted, commands ignored until end of transaction block');
+            return repo.find(args);
+          },
+          async create(args) {
+            if (col === 'latticeServiceTickets') {
+              orderLog.push('b2:start');
+              await new Promise((r) => setTimeout(r, 8));
+              orderLog.push('b2:end');
+            }
+            if (pgTxAborted) throw new Error('current transaction is aborted, commands ignored until end of transaction block');
+            return repo.create(args);
+          },
+          async update(args) {
+            if (pgTxAborted) throw new Error('current transaction is aborted, commands ignored until end of transaction block');
+            return repo.update(args);
+          },
+        };
+      };
+      spDb.sequelize = {
+        getDialect: () => 'postgres',
+        async transaction(fn) { pgTxAborted = false; return fn({ id: 'tx-sp-exec' }); },
+        async query(sql) {
+          const text = String(sql);
+          spLog.push(text);
+          if (text.startsWith('ROLLBACK TO SAVEPOINT ')) pgTxAborted = false;
+          return [[], { rowCount: 1 }];
+        },
+      };
+      const spRun = await executeFlowGraph(
+        spDb,
+        spDb.store.latticeAutomationRules[0],
+        { organizationId: 'org-sp', data: { hello: 1 } },
+        { organizationId: 'org-sp' },
+      );
+      assert.equal(spRun.status, 'partial');
+      assert.equal(pgTxAborted, false, 'Outer RLS transaction must recover cleanly after node SAVEPOINT rollback');
+      assert.ok(spLog.some((s) => /^SAVEPOINT "ldx_sp_\d+"$/.test(s)));
+      assert.ok(spLog.some((s) => /^ROLLBACK TO SAVEPOINT "ldx_sp_\d+"$/.test(s)));
+      assert.equal(spDb.store.latticeAutomationRuns.find((r) => r.runUid === spRun.runUid)?.status, 'partial');
+      assert.deepEqual(orderLog, ['b1:start', 'b1:end', 'b2:start', 'b2:end']);
     } finally {
       if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
       else process.env.DX_PG_RLS_SESSION = prevRls;

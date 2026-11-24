@@ -26,6 +26,7 @@ const REPO_SINGLE_ARG_METHODS = Object.freeze([
 ]);
 
 const rlsStore = new AsyncLocalStorage();
+let savepointSeq = 0;
 
 const TENANT_RLS_TABLES = Object.freeze([
   'latticeRequests',
@@ -361,6 +362,28 @@ async function withTenantRlsContext(db, organizationId, fn) {
   });
 }
 
+async function runInRlsSavepoint(db, fn) {
+  if (typeof fn !== 'function') {
+    throw new TypeError('runInRlsSavepoint requires a callback function.');
+  }
+  const store = rlsStore.getStore();
+  const sequelize = store?.sequelize || db?.sequelize;
+  if (!store?.transaction || !sequelize || !isPostgresSequelize(sequelize) || typeof sequelize.query !== 'function') {
+    return fn(store?.transaction || null);
+  }
+  const spName = `ldx_sp_${++savepointSeq}`;
+  await sequelize.query(`SAVEPOINT "${spName}"`, { transaction: store.transaction });
+  try {
+    const result = await fn(store.transaction);
+    await sequelize.query(`RELEASE SAVEPOINT "${spName}"`, { transaction: store.transaction });
+    return result;
+  } catch (err) {
+    await sequelize.query(`ROLLBACK TO SAVEPOINT "${spName}"`, { transaction: store.transaction }).catch(() => {});
+    await sequelize.query(`RELEASE SAVEPOINT "${spName}"`, { transaction: store.transaction }).catch(() => {});
+    throw err;
+  }
+}
+
 // Non-enumerable so NocoBase 2.2.50 createContextVariablesScope (JSON.stringify(ctx.state)) skips the Sequelize Transaction graph.
 function setContextRlsTransaction(ctx, transaction) {
   if (!ctx || !transaction) return;
@@ -391,4 +414,5 @@ module.exports = {
   setContextRlsTransaction,
   setTransactionRlsOrg,
   withTenantRlsContext,
+  runInRlsSavepoint,
 };

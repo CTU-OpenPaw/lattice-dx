@@ -482,11 +482,29 @@ test('data nodes enforce organization isolation, voucher field protection, and b
   assert.equal(cRes.output.record.version, undefined);
   assert.equal(cRes.output.record.code, 'R3');
 
-  // data.update enforces org isolation and requires non-empty filter
+  // data.update enforces org isolation, requires non-empty filter, and rejects empty target id before SQL
   await assert.rejects(
     () => updateNode.execute({ config: { collection: 'latticeRequests', filter: {}, values: { name: 'X' } }, context: { organizationId: 'org-a' }, db }),
     /non-empty filter/i,
   );
+  let findCalledOnEmptyId = false;
+  const guardDb = {
+    getRepository: () => ({
+      async find() { findCalledOnEmptyId = true; return []; },
+      async update() { return []; },
+    }),
+  };
+  for (const badId of ['', '   ', null, undefined]) {
+    await assert.rejects(
+      () => updateNode.execute({
+        config: { collection: 'latticeRequests', filter: { id: badId }, values: { name: 'X' } },
+        context: { organizationId: 'org-a' },
+        db: guardDb,
+      }),
+      (err) => err.code === 'DATA_UPDATE_TARGET_ID_EMPTY' && err.status === 400,
+    );
+  }
+  assert.equal(findCalledOnEmptyId, false, 'Empty/null id must fail before hitting SQL repository');
   const uRes = await updateNode.execute({
     config: { collection: 'latticeRequests', filter: { code: 'R2' }, values: { name: 'Hijacked', organizationId: 'org-evil' } },
     context: { organizationId: 'org-a' },

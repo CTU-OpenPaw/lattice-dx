@@ -179,6 +179,9 @@ const dataNodes = [
       if (!isPlainObject(rawFilter) || !Object.keys(rawFilter).length) {
         throw fail('DATA_UPDATE_FILTER_REQUIRED', 400, 'data.update requires a non-empty filter or recordId');
       }
+      if (Object.hasOwn(rawFilter, 'id') && (rawFilter.id === null || rawFilter.id === undefined || (typeof rawFilter.id === 'string' && rawFilter.id.trim() === ''))) {
+        throw fail('DATA_UPDATE_TARGET_ID_EMPTY', 400, 'data.update requires a non-empty target id');
+      }
       const scopedFilter = { ...sanitizePlainObject(sanitizeDirectFilter(rawFilter)), organizationId: orgId };
       const values = sanWrite(collection, interp(cfg.values ?? cfg.patch ?? cfg.data ?? {}, evalCtx));
       if (options?.dryRun) {

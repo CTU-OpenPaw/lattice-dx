@@ -41,6 +41,14 @@ async function runAutomationWithRls(db, organizationId, fn) {
   }
   return fn(null);
 }
+const runNodeInRlsSavepoint = (db, fn) => (typeof defaultFoundation?.pgRls?.runInRlsSavepoint === 'function' ? defaultFoundation.pgRls.runInRlsSavepoint(db, fn) : fn(null));
+async function runRlsAwareBatch(db, items, fn) {
+  if (!Array.isArray(items) || !items.length) return [];
+  if (items.length === 1 || defaultFoundation?.pgRls?.getActiveRlsContext?.()?.transaction) {
+    const out = []; for (const item of items) out.push(await fn(item)); return out;
+  }
+  return Promise.all(items.map(fn));
+}
 
 /** Enforces caller organizationId precedence and rejects cross-tenant mismatches with 403. */
 function resolveTrustedOrgId(trustedOrg, untrustedOrg, message = 'Organization mismatch') {
@@ -200,7 +208,7 @@ function scrubAndCapHttpBody(rawBody, secrets, maxBytes = MAX_HTTP_RESPONSE_BYTE
 }
 
 module.exports = {
-  MAX_HTTP_RESPONSE_BYTES, SENSITIVE_KEY_RE, getOrmTriggerDepth, runWithOrmDepth, runAutomationWithRls, resolveTrustedOrgId,
+  MAX_HTTP_RESPONSE_BYTES, SENSITIVE_KEY_RE, getOrmTriggerDepth, runWithOrmDepth, runAutomationWithRls, runNodeInRlsSavepoint, runRlsAwareBatch, resolveTrustedOrgId,
   extractRawAuthorityHost, isNonCanonicalHost, isPrivateOrMetaIpv4, isBlockedIpv6, isMetadataTarget, isUnsafeStaticUrl,
   redactJsonQuotedSecrets, sanitizeOutgoingHeaders, scrubAndCapHttpBody,
 };

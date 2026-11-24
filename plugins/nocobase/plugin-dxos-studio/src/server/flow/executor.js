@@ -13,7 +13,7 @@ const { fail, loadFoundationModule, sha256Hex, timingSafeEqualHex, toPlain, val 
 const { MAX_HARD_DEPTH, buildTriggerIndex, cloneSafe, isPlainObject, normalizeGraph, v1RuleToGraphV2 } = require('./schema');
 const { validateFlowGraph } = require('./validator');
 const { claimSuspendedRun, createRunRecord, generateResumeToken, hashResumeToken, suspendRun } = require('./durable-store');
-const { getOrmTriggerDepth, resolveTrustedOrgId, runAutomationWithRls, runWithOrmDepth } = require('./security-helpers');
+const { getOrmTriggerDepth, resolveTrustedOrgId, runAutomationWithRls, runNodeInRlsSavepoint, runRlsAwareBatch, runWithOrmDepth } = require('./security-helpers');
 const registry = require('./registry');
 
 const getEngine = () => require('../automation-engine');
@@ -55,7 +55,7 @@ async function runSingleNode({ node, nodeInput, reg, execState, db, app, options
   if (!def) throw fail('FLOW_UNKNOWN_NODE_TYPE', 400, `Unknown node type "${node.type}"`);
   const nodeOpts = node.type === 'iot.twin_command' && !options?.digitalTwin ? { ...options, digitalTwin: helpers.loadCrossPluginModules(app, options).digitalTwinMod } : options;
   try {
-    const res = await def.execute({ node, config: node.config, input: nodeInput, context: resolveFlowContext(node, nodeInput, execState), db, app, options: nodeOpts, helpers });
+    const res = await runNodeInRlsSavepoint(db, () => def.execute({ node, config: node.config, input: nodeInput, context: resolveFlowContext(node, nodeInput, execState), db, app, options: nodeOpts, helpers }));
     const durationMs = Math.max(0, Date.now() - t0);
     if (res?.error) { recordNodeOutput(execState, node, res.output ?? null, 'failed', String(res.error)); return { ok: false, node, output: res.output ?? null, error: String(res.error), durationMs, loopMeta }; }
     if (res?.suspend && !options.dryRun) { recordNodeOutput(execState, node, res.output ?? null, 'suspended'); return { ok: true, suspend: res.suspend, node, output: res.output ?? null, durationMs, loopMeta }; }
@@ -86,7 +86,7 @@ async function traverseDag({ graph, subTopo, nodeMap, edges, initialInputs, exec
       } else toRun.push({ node, nodeInput: actIn[0].output });
     }
     if (!toRun.length) continue;
-    for (const r of await Promise.all(toRun.map(({ node, nodeInput }) => runSingleNode({ node, nodeInput, reg, execState, db, app, options, helpers, loopMeta })))) {
+    for (const r of await runRlsAwareBatch(db, toRun, ({ node, nodeInput }) => runSingleNode({ node, nodeInput, reg, execState, db, app, options, helpers, loopMeta }))) {
       const n = r.node; settled.add(n.id);
       stepTracesJson.push({ nodeId: n.id, type: n.type, label: n.label, status: r.suspend ? 'suspended' : (r.ok ? 'completed' : 'failed'), output: r.output, error: r.error || null, durationMs: r.durationMs, ...(options.dryRun ? { simulated: true } : {}), ...(loopMeta ? { loopNodeId: loopMeta.nodeId, loopIteration: loopMeta.index } : {}) });
       if (r.suspend) { localStatuses.set(n.id, 'suspended'); nodeStatesJson[n.id] = { status: 'suspended', output: r.output, suspend: r.suspend, durationMs: r.durationMs }; suspended = { node: n, suspend: r.suspend, output: r.output }; }
@@ -213,7 +213,7 @@ async function testSingleFlowNode(db, { graph, rule, nodeId, pinnedInputs = {}, 
   const helpers = buildNodeHelpers(db, options.app || db?.app, scopedOpts, execState);
   return runAutomationWithRls(db, orgId, async () => {
     try {
-      const res = await reg.getNodeType(target.type).execute({ node: target, config: target.config, input: nodeInput, context: execState, db, app: options.app || db?.app, options: scopedOpts, helpers });
+      const res = await runNodeInRlsSavepoint(db, () => reg.getNodeType(target.type).execute({ node: target, config: target.config, input: nodeInput, context: execState, db, app: options.app || db?.app, options: scopedOpts, helpers }));
       return { ok: !res?.error, nodeId: target.id, status: res?.error ? 'failed' : 'completed', input: nodeInput, output: res?.output ?? null, nextPort: res?.nextPort || 'main', durationMs: Math.max(0, Date.now() - t0), error: res?.error || null };
     } catch (err) {
       if (err?.status && err.status < 500 && err?.code) throw err;

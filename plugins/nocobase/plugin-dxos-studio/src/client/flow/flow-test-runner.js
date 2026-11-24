@@ -51,8 +51,8 @@ function buildScenarioPresets(rule, graph) {
     if ((op === 'gt' || op === 'gte') && Number.isFinite(numVal)) {
       const highVal = numVal >= 1000 ? numVal * 2 + 20000000 : numVal + 10;
       const lowVal = Math.max(0, Math.floor(numVal / 3));
-      presets.push({ key: `if_hit_${fieldName}`, label: `Nhánh HITL (${fieldName} > ${numVal.toLocaleString('en-US')})`, event: { type: evtType, data: { [fieldName]: highVal, title: 'Đề xuất vượt ngưỡng phê duyệt' } } });
-      presets.push({ key: `if_std_${fieldName}`, label: `Nhánh tiêu chuẩn (${fieldName} <= ${numVal.toLocaleString('en-US')})`, event: { type: evtType, data: { [fieldName]: lowVal, title: 'Đề xuất tiêu chuẩn' } } });
+      presets.push({ key: `if_hit_${fieldName}`, label: `Nhánh HITL (${fieldName} > ${numVal.toLocaleString('en-US')})`, event: { type: evtType, data: { id: 1, code: 'REQ-HITL-01', [fieldName]: highVal, title: 'Đề xuất vượt ngưỡng phê duyệt' } } });
+      presets.push({ key: `if_std_${fieldName}`, label: `Nhánh tiêu chuẩn (${fieldName} <= ${numVal.toLocaleString('en-US')})`, event: { type: evtType, data: { id: 1, code: 'REQ-STD-01', [fieldName]: lowVal, title: 'Đề xuất tiêu chuẩn' } } });
       break;
     }
     if (op === 'eq' && cmpVal !== undefined && fieldName) {

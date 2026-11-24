@@ -953,3 +953,75 @@ test('LatticeFoundationPlugin.load wires observability resource & middleware whi
     assert.equal(queryOptsCalls.every((o) => o === undefined), true);
   });
 });
+
+test('runInRlsSavepoint isolates SQL failures inside active PostgreSQL RLS transactions and passes through otherwise', async () => {
+  const pgRls = require('../src/server/pg-rls');
+  const sqlLog = [];
+  let aborted = false;
+  const fakeTx = { id: 'tx-sp-1' };
+  const pgDb = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => {
+        aborted = false;
+        return cb(fakeTx);
+      },
+      query: async (sql, opts) => {
+        const text = String(sql);
+        sqlLog.push({ text, tx: opts?.transaction });
+        if (text.startsWith('ROLLBACK TO SAVEPOINT ')) {
+          aborted = false;
+        } else if (aborted) {
+          throw new Error('current transaction is aborted, commands ignored until end of transaction block');
+        }
+        return [[]];
+      },
+    },
+  };
+
+  // Outside RLS tx -> pass-through without issuing SAVEPOINT
+  const outside = await pgRls.runInRlsSavepoint(pgDb, async (tx) => {
+    assert.equal(tx, null);
+    return 'plain';
+  });
+  assert.equal(outside, 'plain');
+  assert.equal(sqlLog.length, 0);
+
+  // Inside PG RLS tx -> SAVEPOINT + RELEASE on success; ROLLBACK TO SAVEPOINT + RELEASE on error leaving outer tx healthy
+  await pgRls.withTenantRlsContext(pgDb, 'org-sp-1', async () => {
+    const okVal = await pgRls.runInRlsSavepoint(pgDb, async (tx) => {
+      assert.equal(tx, fakeTx);
+      return 99;
+    });
+    assert.equal(okVal, 99);
+
+    await assert.rejects(
+      () => pgRls.runInRlsSavepoint(pgDb, async () => {
+        aborted = true;
+        throw Object.assign(new Error('invalid input syntax for type bigint: ""'), { code: '22P02' });
+      }),
+      { code: '22P02' },
+    );
+
+    // Outer tx must still accept queries after savepoint rollback!
+    await pgDb.sequelize.query('SELECT 1', { transaction: fakeTx });
+  });
+
+  assert.ok(sqlLog.some((e) => /^SAVEPOINT "ldx_sp_\d+"$/.test(e.text)));
+  assert.ok(sqlLog.some((e) => /^ROLLBACK TO SAVEPOINT "ldx_sp_\d+"$/.test(e.text)));
+  assert.ok(sqlLog.some((e) => /^RELEASE SAVEPOINT "ldx_sp_\d+"$/.test(e.text)));
+  assert.equal(sqlLog.at(-1).text, 'SELECT 1');
+
+  // Non-postgres dialect passes through cleanly even inside RLS transaction
+  const sqliteLog = [];
+  const sqliteDb = {
+    sequelize: {
+      getDialect: () => 'sqlite',
+      transaction: async (cb) => cb(fakeTx),
+      query: async (sql) => { sqliteLog.push(sql); return [[]]; },
+    },
+  };
+  const spSqlite = await pgRls.withTenantRlsContext(sqliteDb, 'org-sp-2', () => pgRls.runInRlsSavepoint(sqliteDb, async () => 'sqlite-ok'));
+  assert.equal(spSqlite, 'sqlite-ok');
+  assert.equal(sqliteLog.length, 0);
+});
