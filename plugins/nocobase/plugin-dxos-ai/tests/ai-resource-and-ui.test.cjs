@@ -1299,3 +1299,338 @@ test('Wave 4B: Legacy DB profile toolPermissions backward compatibility normaliz
   assert.equal(migratedRow.toolPermissions.dxos_my_workflow_tasks, 'ALLOW');
   assert.equal(Object.hasOwn(migratedRow.toolPermissions, legacyToolKey), false);
 });
+
+test('Flow Studio native agent launcher: path matching, sanitized flowContext, SSE flow-updated sync without banner, and non-admin safety', async () => {
+  const {
+    isFlowStudioPath,
+    readFlowStudioContext,
+    pickDefaultPortalEmployee,
+    buildHiddenPageSystemContext,
+    openNativePortalChat,
+    createPortalAgentLauncher,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+
+  // 1. Path matching (both nested Workflow route and alias route, case-insensitive, strips ?/#)
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/automation'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/automation/'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/automation/rule-123?organizationId=org-a#canvas'), true);
+  assert.equal(isFlowStudioPath('/ADMIN/Settings/Workflow/Automation'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/dxos-flow-studio'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/dxos-flow-studio/editor?ruleKey=auto_1'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/automation-extra'), false);
+  assert.equal(isFlowStudioPath('/admin/settings/dxos-flow-studio-v2'), false);
+  assert.equal(isFlowStudioPath('/admin/settings/dxos-ai'), false);
+  assert.equal(isFlowStudioPath('/p/services'), false);
+  assert.equal(isFlowStudioPath(''), false);
+
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origCustomEvent = global.CustomEvent;
+  const origMutationObserver = global.MutationObserver;
+  try {
+    // 2. readFlowStudioContext validates presence and strips injection characters / bounds <= 120
+    global.window = { location: { pathname: '/admin/settings/workflow/automation' } };
+    assert.equal(readFlowStudioContext(), null);
+    global.window.__LATTICEDX_FLOW_CONTEXT__ = ['not-an-object'];
+    assert.equal(readFlowStudioContext(), null);
+    global.window.__LATTICEDX_FLOW_CONTEXT__ = { ruleName: 'Missing keys' };
+    assert.equal(readFlowStudioContext(), null);
+    global.window.__LATTICEDX_FLOW_CONTEXT__ = { nodeCount: 0 };
+    assert.deepEqual(readFlowStudioContext(), {
+      organizationId: '',
+      ruleKey: '',
+      ruleName: '',
+      view: '',
+      selectedNodeId: '',
+      selectedNodeType: '',
+      selectedNodeLabel: '',
+      selectedRunUid: '',
+      selectedRunStatus: '',
+      nodeCount: 0,
+      nodeSummary: '',
+    });
+
+    global.window.__LATTICEDX_FLOW_CONTEXT__ = {
+      organizationId: 'native-ui-lab\n\r\t\0<script>',
+      ruleKey: 'auto_coldchain_alert',
+      ruleName: 'Cảnh báo\n<img src=x> ' + 'X'.repeat(160),
+      view: 'editor',
+      selectedNodeId: 'cond_1',
+      selectedNodeType: 'control.if',
+      selectedNodeLabel: 'Kiểm tra\t<tag>',
+      selectedRunUid: 'run_42',
+      selectedRunStatus: 'suspended',
+      nodeCount: 4,
+      nodeSummary: 'trig_1(trigger.event)\ncond_1(control.if)\tstep_1(notify.send) ' + 'N'.repeat(150),
+    };
+    const sanitizedCtx = readFlowStudioContext();
+    assert.ok(sanitizedCtx);
+    assert.equal(sanitizedCtx.organizationId, 'native-ui-lab script');
+    assert.equal(sanitizedCtx.ruleKey, 'auto_coldchain_alert');
+    assert.equal(sanitizedCtx.nodeCount, 4);
+    for (const key of ['organizationId', 'ruleKey', 'ruleName', 'view', 'selectedNodeId', 'selectedNodeType', 'selectedNodeLabel', 'selectedRunUid', 'selectedRunStatus', 'nodeSummary']) {
+      assert.equal(/[\r\n\t\0<>]/.test(sanitizedCtx[key]), false, `${key} must strip control/tag chars`);
+      assert.ok(sanitizedCtx[key].length <= 120, `${key} length must be <= 120`);
+    }
+
+    // 3. buildHiddenPageSystemContext + openNativePortalChat inject flowContext cleanly
+    const plainPortalCtx = buildHiddenPageSystemContext({ portalSlug: 'services', pageTitle: 'Dịch vụ', pathname: '/p/services' });
+    assert.equal(plainPortalCtx.includes('Ngữ cảnh Workflow Automation Studio'), false);
+
+    const flowSysMsg = buildHiddenPageSystemContext({
+      portalSlug: '',
+      pageTitle: 'Workflow Automation',
+      pathname: '/admin/settings/workflow/automation',
+      flowContext: sanitizedCtx,
+    });
+    assert.ok(flowSysMsg.includes('[Ngữ cảnh Workflow Automation Studio:'));
+    assert.ok(flowSysMsg.includes('organizationId="native-ui-lab script"'));
+    assert.ok(flowSysMsg.includes('ruleKey="auto_coldchain_alert"'));
+    assert.ok(flowSysMsg.includes('nodeCount=4'));
+    assert.ok(flowSysMsg.includes('selectedNodeId="cond_1"'));
+    assert.ok(flowSysMsg.includes('selectedRunUid="run_42"'));
+    assert.ok(flowSysMsg.includes('Danh sách node hiện tại:'));
+    assert.ok(flowSysMsg.includes('dxos_configure_workflow'));
+
+    const triggered = [];
+    const mockApp = {
+      flowEngine: { context: { ai: { async triggerTask(payload) { triggered.push(payload); } } } },
+    };
+    const opened = await openNativePortalChat(mockApp, {
+      employee: { username: 'dxos-architect' },
+      portalSlug: '',
+      pageTitle: 'Workflow Automation',
+      pathname: '/admin/settings/workflow/automation',
+      flowContext: sanitizedCtx,
+    });
+    assert.equal(opened.opened, true);
+    assert.equal(triggered[0].aiEmployee, 'dxos-architect');
+    assert.ok(triggered[0].tasks[0].message.system.includes('auto_coldchain_alert'));
+
+    // 4. Non-admin safety: pickDefaultPortalEmployee never picks dxos-architect when isAdmin=false,
+    //    and DxosPortalAgentProvider clears non-admin employees & hides button on Flow Studio routes
+    assert.equal(pickDefaultPortalEmployee([{ username: 'dxos-architect' }], false), null);
+    assert.equal(pickDefaultPortalEmployee([{ username: 'dxos-architect' }, { username: 'dxos-workspace' }], false).username, 'dxos-workspace');
+
+    const findBtn = (node) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.props?.['data-testid'] === 'dxos-portal-ai-float-btn') return node;
+      const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+      for (const k of kids) {
+        const hit = findBtn(k);
+        if (hit) return hit;
+      }
+      return null;
+    };
+
+    const makeStatefulReact = () => {
+      const stateSlots = [];
+      const effectSlots = [];
+      let sIdx = 0;
+      let eIdx = 0;
+      const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, i) => d !== prev[i]);
+      const React = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => {
+          const i = sIdx++;
+          if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+          return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+        },
+        useEffect: (fn, deps) => {
+          const i = eIdx++;
+          effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+        },
+      };
+      const cleanups = [];
+      const render = (Comp) => {
+        sIdx = 0;
+        eIdx = 0;
+        const tree = Comp({ children: 'studio-body' });
+        for (const eff of effectSlots) {
+          if (eff.changed) {
+            eff.changed = false;
+            const cln = eff.fn();
+            if (typeof cln === 'function') cleanups.push(cln);
+          }
+        }
+        return tree;
+      };
+      return { React, render, getStates: () => stateSlots, cleanup: () => cleanups.forEach((fn) => fn()) };
+    };
+
+    class FakeCustomEvent {
+      constructor(type, init = {}) {
+        this.type = type;
+        this.detail = init.detail;
+      }
+    }
+    global.CustomEvent = FakeCustomEvent;
+
+    // 4a. Non-admin on /admin/settings/workflow/automation -> portalAgents returns isAdmin=false -> zero float button
+    const nonAdminApiCalls = [];
+    const dispatchedNonAdmin = [];
+    global.window = {
+      location: { pathname: '/admin/settings/workflow/automation' },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: (ev) => dispatchedNonAdmin.push(ev),
+    };
+    global.document = { visibilityState: 'hidden', title: 'Workflow Automation', querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+    const nonAdminHarness = makeStatefulReact();
+    const NonAdminLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        request: async (req) => {
+          nonAdminApiCalls.push(req);
+          return { data: { data: { isAdmin: false, employees: [{ username: 'dxos-workspace', nickname: 'Workspace' }] } } };
+        },
+      }),
+    }, nonAdminHarness.React, {}, mockApp);
+    nonAdminHarness.render(NonAdminLauncher);
+    await new Promise((r) => setTimeout(r, 15));
+    const nonAdminTree = nonAdminHarness.render(NonAdminLauncher);
+    assert.equal(nonAdminApiCalls.some((r) => r.url === 'dxosAi:portalAgents' && r.params?.portalSlug === 'services'), true);
+    assert.equal(findBtn(nonAdminTree), null, 'Non-admin must NOT get a Flow Studio floating chat button');
+    nonAdminHarness.cleanup();
+
+    // 5. Admin on /admin/settings/dxos-flow-studio -> connects SSE to portalSlug=flow-studio,
+    //    ignores initial snapshot, dispatches latticedx:flow-updated on update WITHOUT pendingUpdate banner,
+    //    passes readFlowStudioContext() on float button click, and MutationObserver ignores own button
+    const dispatchedEvents = [];
+    const fetchUrls = [];
+    const observerCallbacks = [];
+    global.MutationObserver = class {
+      constructor(cb) { observerCallbacks.push(cb); }
+      observe() {}
+      disconnect() {}
+    };
+    global.window = {
+      location: { pathname: '/admin/settings/dxos-flow-studio' },
+      __LATTICEDX_FLOW_CONTEXT__: { organizationId: 'native-ui-lab', ruleKey: 'auto_1', nodeCount: 2, view: 'editor' },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: (ev) => dispatchedEvents.push(ev),
+    };
+    global.document = {
+      visibilityState: 'visible',
+      title: 'Workflow Automation',
+      body: {},
+      querySelector: () => null,
+      addEventListener() {},
+      removeEventListener() {},
+    };
+
+    const encoder = new TextEncoder();
+    const sseChunks = [
+      'event: snapshot\ndata: {"portalSlug":"flow-studio","revision":1,"blockCount":0,"layoutSignature":""}\n\n',
+      'event: update\ndata: {"portalSlug":"flow-studio","type":"flow-updated","revision":1795515200000,"organizationId":"native-ui-lab","operation":"draftAutomation","ruleKey":"auto_1","applied":false,"message":"Đã phác thảo flow"}\n\n',
+    ];
+    let chunkIdx = 0;
+    global.fetch = async (url) => {
+      fetchUrls.push(url);
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (chunkIdx < sseChunks.length) {
+                return { done: false, value: encoder.encode(sseChunks[chunkIdx++]) };
+              }
+              return { done: true };
+            },
+          }),
+        },
+      };
+    };
+
+    const triggeredAdmin = [];
+    const adminMockApp = {
+      flowEngine: { context: { ai: { async triggerTask(payload) { triggeredAdmin.push(payload); } } } },
+    };
+    const adminHarness = makeStatefulReact();
+    const AdminLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        getBaseURL: () => '/api/',
+        request: async () => ({
+          data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect', nickname: 'Kiến trúc sư' }] } },
+        }),
+      }),
+    }, adminHarness.React, {}, adminMockApp);
+
+    adminHarness.render(AdminLauncher);
+    await new Promise((r) => setTimeout(r, 20));
+    const adminTree = adminHarness.render(AdminLauncher);
+
+    assert.equal(fetchUrls.some((u) => u.includes('dxosAi:surfaceEvents?portalSlug=flow-studio')), true);
+    assert.equal(dispatchedEvents.length, 1, 'Initial snapshot must not dispatch; only update frame dispatches');
+    assert.equal(dispatchedEvents[0].type, 'latticedx:flow-updated');
+    assert.equal(dispatchedEvents[0].detail.ruleKey, 'auto_1');
+    assert.equal(dispatchedEvents[0].detail.operation, 'draftAutomation');
+    assert.equal(adminHarness.getStates()[4], null, 'Flow Studio SSE must NOT set pendingUpdate reload banner');
+    assert.equal(JSON.stringify(adminTree).includes('dxos-surface-update-banner'), false);
+
+    // Clicking floating button on Flow Studio injects live __LATTICEDX_FLOW_CONTEXT__
+    const adminBtn = findBtn(adminTree);
+    assert.ok(adminBtn, 'Admin on Flow Studio must see single floating AI chat button');
+    await adminBtn.props.onClick({ stopPropagation() {} });
+    assert.equal(triggeredAdmin.length, 1);
+    assert.equal(triggeredAdmin[0].aiEmployee, 'dxos-architect');
+    assert.ok(triggeredAdmin[0].tasks[0].message.system.includes('ruleKey="auto_1"'));
+
+    // MutationObserver ignores mutations inside dxos-portal-ai-float-btn cleanly
+    assert.ok(observerCallbacks.length >= 1);
+    global.window.location.pathname = '/admin/settings/other';
+    observerCallbacks[0]([{
+      target: {
+        closest: (sel) => (sel.includes('dxos-portal-ai-float-btn') ? { dataset: {} } : null),
+      },
+    }]);
+    assert.equal(adminHarness.getStates()[0], '/admin/settings/dxos-flow-studio', 'Own float button mutation must be ignored');
+
+    adminHarness.cleanup();
+
+    // 6. Normal /p/services portal SSE still dispatches latticedx:surface-updated and shows reload banner
+    const portalEvents = [];
+    let pChunkIdx = 0;
+    const portalChunks = [
+      'event: snapshot\ndata: {"portalSlug":"services","revision":1,"blockCount":2,"layoutSignature":"a,b"}\n\n',
+      'event: update\ndata: {"portalSlug":"services","revision":2,"blockCount":3,"layoutSignature":"a,b,c","message":"Đã thêm khối mới"}\n\n',
+    ];
+    global.window = {
+      location: { pathname: '/p/services' },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: (ev) => portalEvents.push(ev),
+    };
+    global.fetch = async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => (pChunkIdx < portalChunks.length
+            ? { done: false, value: encoder.encode(portalChunks[pChunkIdx++]) }
+            : { done: true }),
+        }),
+      },
+    });
+    const portalHarness = makeStatefulReact();
+    const PortalLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        getBaseURL: () => '/api/',
+        request: async () => ({ data: { data: { isAdmin: false, employees: [{ username: 'dxos-workspace' }] } } }),
+      }),
+    }, portalHarness.React, {}, mockApp);
+    portalHarness.render(PortalLauncher);
+    await new Promise((r) => setTimeout(r, 20));
+    const portalTree = portalHarness.render(PortalLauncher);
+    assert.equal(portalEvents.some((e) => e.type === 'latticedx:surface-updated'), true);
+    assert.equal(JSON.stringify(portalTree).includes('dxos-surface-update-banner'), true);
+    portalHarness.cleanup();
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.CustomEvent = origCustomEvent;
+    global.MutationObserver = origMutationObserver;
+  }
+});

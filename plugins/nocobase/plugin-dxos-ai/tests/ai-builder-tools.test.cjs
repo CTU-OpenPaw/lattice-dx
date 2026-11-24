@@ -2905,3 +2905,277 @@ test('Wave 4B security regressions: linear O(n) template scanner, uniform expres
     (err) => err.status === 503 && err.code === 'AUTOMATION_ENGINE_UNAVAILABLE',
   );
 });
+
+test('dxos_configure_workflow emits monotonic flow-studio SSE events across draft/patch/save/test/run/resume with strict secret & resumeToken scrubbing', async () => {
+  const { createHash } = require('node:crypto');
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  const { subscribeSurfaceEvents } = require('../src/server/surface-events');
+  const builderMod = require('../src/server/ai-builder-tools');
+  const { scrubFlowSyncPayload } = builderMod;
+
+  // 1. Direct scrubFlowSyncPayload unit assertions
+  const scrubbed = scrubFlowSyncPayload({
+    ruleKey: 'auto_scrub',
+    resumeToken: 'raw-resume-token',
+    resumeTokenHash: 'hash-abc',
+    apiKey: 'sk-live-secret',
+    secret: 'top-secret',
+    secrets: { webhookSecret: 'whsec_123' },
+    password: 'pw',
+    token: 'tok',
+    nested: {
+      authorization: 'Bearer xyz',
+      secretHeader: 'X-Lattice-Signature-256',
+      promptTokens: 42,
+      config: { url: 'https://example.com', api_key: 'bad', webhookPath: '/hooks/in' },
+    },
+    steps: [{ stepId: 's1', token: 'drop-me', output: { ok: true, accessToken: 'drop-me-2' } }],
+  });
+  assert.equal(scrubbed.ruleKey, 'auto_scrub');
+  assert.equal('resumeToken' in scrubbed, false);
+  assert.equal('resumeTokenHash' in scrubbed, false);
+  assert.equal('apiKey' in scrubbed, false);
+  assert.equal('secret' in scrubbed, false);
+  assert.equal('secrets' in scrubbed, false);
+  assert.equal('password' in scrubbed, false);
+  assert.equal('token' in scrubbed, false);
+  assert.equal('authorization' in scrubbed.nested, false);
+  assert.equal('api_key' in scrubbed.nested.config, false);
+  assert.equal(scrubbed.nested.secretHeader, 'X-Lattice-Signature-256');
+  assert.equal(scrubbed.nested.promptTokens, 42);
+  assert.equal(scrubbed.nested.config.webhookPath, '/hooks/in');
+  assert.equal('token' in scrubbed.steps[0], false);
+  assert.equal('accessToken' in scrubbed.steps[0].output, false);
+  assert.equal(scrubbed.steps[0].output.ok, true);
+
+  const { db, ctx, byName } = makeBuilderHarness();
+  const wfTool = byName.get('dxos_configure_workflow');
+  const validToken = 'resume-sync-token-99';
+  const validTokenHash = createHash('sha256').update(validToken).digest('hex');
+
+  delete db.store.workflows;
+  delete db.store.flow_nodes;
+  db.store.latticeAutomationRules = [];
+  db.store.latticeAutomationRuns = [
+    {
+      id: 801,
+      organizationId: 'native-ui-lab',
+      ruleKey: 'auto_sse_flow',
+      runUid: 'run_sse_susp_1',
+      status: 'suspended',
+      suspendedNodeId: 'approval_1',
+      resumeTokenHash: validTokenHash,
+    },
+  ];
+
+  const published = [];
+  const unsubscribe = subscribeSurfaceEvents('flow-studio', (ev) => published.push(ev));
+
+  const sseCtx = {
+    ...ctx,
+    app: {
+      ...ctx.app,
+      resourceManager: {
+        isDefined: (n) => n === 'dxosAutomations',
+        getResource: (n) => (n === 'dxosAutomations' ? {
+          actions: {
+            get: (actName) => {
+              if (actName === 'saveRule') {
+                return {
+                  handler: async (subCtx) => {
+                    const orgId = subCtx.action.params.organizationId || 'native-ui-lab';
+                    const rule = { organizationId: orgId, ...(subCtx.action.params.rule || subCtx.action.params.values?.rule) };
+                    const idx = db.store.latticeAutomationRules.findIndex((r) => r.ruleKey === rule.ruleKey);
+                    if (idx >= 0) db.store.latticeAutomationRules[idx] = { ...db.store.latticeAutomationRules[idx], ...rule };
+                    else db.store.latticeAutomationRules.push({ id: db.store.latticeAutomationRules.length + 1, ...rule });
+                    subCtx.body = { rule: { ...rule, secrets: { internalKey: 'must-scrub' } } };
+                  },
+                };
+              }
+              if (actName === 'runNow') {
+                return {
+                  handler: async (subCtx) => {
+                    subCtx.body = {
+                      run: {
+                        runUid: 'run_live_1',
+                        ruleKey: subCtx.action.params.ruleKey,
+                        status: 'suspended',
+                        resumeToken: 'secret-resume-tok-1',
+                        resumeTokenHash: 'secret-hash-1',
+                        apiKey: 'sk-run-secret',
+                        secrets: { webhookSecret: 'wh-1' },
+                      },
+                    };
+                  },
+                };
+              }
+              if (actName === 'resumeRun') {
+                return {
+                  handler: async (subCtx) => {
+                    subCtx.body = {
+                      run: {
+                        runUid: subCtx.action.params.runUid,
+                        ruleKey: 'auto_sse_flow',
+                        status: 'completed',
+                        decision: subCtx.action.params.decision,
+                        resumeToken: 'secret-resume-tok-2',
+                        resumeTokenHash: 'secret-hash-2',
+                        password: 'hidden-password',
+                        token: 'hidden-token',
+                      },
+                    };
+                  },
+                };
+              }
+              return null;
+            },
+          },
+        } : null),
+      },
+    },
+  };
+
+  try {
+    // 2. draftAutomation (preview apply=false) -> emits flow-updated with applied=false
+    const draftRes = await wfTool.invoke(sseCtx, {
+      operation: 'draftAutomation',
+      ruleKey: 'auto_sse_flow',
+      goal: 'Khi nhiệt độ cao hơn -10 độ thì gửi cảnh báo cho quản lý',
+      apply: false,
+    });
+    const draftEv = published[published.length - 1];
+    assert.equal(draftEv.portalSlug, 'flow-studio');
+    assert.equal(draftEv.type, 'flow-updated');
+    assert.equal(draftEv.organizationId, 'native-ui-lab');
+    assert.equal(draftEv.operation, 'draftAutomation');
+    assert.equal(draftEv.ruleKey, draftRes.draftRule.ruleKey);
+    assert.ok(draftEv.ruleKey);
+    assert.equal(draftEv.applied, false);
+    assert.ok(draftEv.draftRule);
+    assert.ok(draftEv.simulation);
+
+    // 3. saveAutomation (dryRun=true) -> must NOT emit; dryRun=false -> emits applied=true & scrubbed
+    const countBeforeSaveDry = published.length;
+    await wfTool.invoke(sseCtx, {
+      operation: 'saveAutomation',
+      dryRun: true,
+      rule: {
+        ruleKey: 'auto_sse_flow',
+        name: 'SSE Sync Flow',
+        schemaVersion: 2,
+        graphJson: {
+          version: 2,
+          nodes: [
+            { id: 't1', type: 'trigger.event', label: 'Trigger', config: { eventType: 'alarm.triggered' } },
+            { id: 'n1', type: 'notify.send', label: 'Notify', config: { roleNames: ['ldx_manager'], title: 'Alert' } },
+          ],
+          edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1', targetHandle: 'in' }],
+        },
+      },
+    });
+    assert.equal(published.length, countBeforeSaveDry, 'saveAutomation dryRun must not publish flow-studio update');
+
+    await wfTool.invoke(sseCtx, {
+      operation: 'saveAutomation',
+      dryRun: false,
+      rule: {
+        ruleKey: 'auto_sse_flow',
+        name: 'SSE Sync Flow',
+        schemaVersion: 2,
+        graphJson: {
+          version: 2,
+          nodes: [
+            { id: 't1', type: 'trigger.event', label: 'Trigger', config: { eventType: 'alarm.triggered' } },
+            { id: 'n1', type: 'notify.send', label: 'Notify', config: { roleNames: ['ldx_manager'], title: 'Alert' } },
+          ],
+          edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1', targetHandle: 'in' }],
+        },
+      },
+    });
+    const saveEv = published[published.length - 1];
+    assert.equal(saveEv.operation, 'saveAutomation');
+    assert.equal(saveEv.ruleKey, 'auto_sse_flow');
+    assert.equal(saveEv.applied, true);
+    assert.ok(saveEv.draftGraph);
+    assert.equal('secrets' in saveEv.draftRule, false);
+
+    // 4. patchAutomation (Graph v2 update node preview) -> emits patchAutomation
+    await wfTool.invoke(sseCtx, {
+      operation: 'patchAutomation',
+      ruleKey: 'auto_sse_flow',
+      nodeId: 'n1',
+      configPatch: { title: 'Updated Alert' },
+      apply: false,
+    });
+    const patchEv = published[published.length - 1];
+    assert.equal(patchEv.operation, 'patchAutomation');
+    assert.equal(patchEv.ruleKey, 'auto_sse_flow');
+    assert.equal(patchEv.applied, false);
+    assert.equal(patchEv.draftGraph.nodes.find((n) => n.id === 'n1').config.title, 'Updated Alert');
+
+    // 5. testAutomation -> emits applied=false with simulation
+    await wfTool.invoke(sseCtx, {
+      operation: 'testAutomation',
+      ruleKey: 'auto_sse_flow',
+      sampleEvent: { type: 'alarm.triggered', data: { tempC: -5 } },
+    });
+    const testEv = published[published.length - 1];
+    assert.equal(testEv.operation, 'testAutomation');
+    assert.equal(testEv.ruleKey, 'auto_sse_flow');
+    assert.equal(testEv.applied, false);
+    assert.ok(testEv.simulation);
+
+    // 6. runAutomation (dryRun=true skipped, live emits with scrubbed resumeToken/secrets)
+    const countBeforeRunDry = published.length;
+    await wfTool.invoke(sseCtx, { operation: 'runAutomation', ruleKey: 'auto_sse_flow', dryRun: true });
+    assert.equal(published.length, countBeforeRunDry, 'runAutomation dryRun must not publish');
+
+    await wfTool.invoke(sseCtx, { operation: 'runAutomation', ruleKey: 'auto_sse_flow', sampleEvent: { data: { tempC: -5 } } });
+    const runEv = published[published.length - 1];
+    assert.equal(runEv.operation, 'runAutomation');
+    assert.equal(runEv.ruleKey, 'auto_sse_flow');
+    assert.equal(runEv.applied, true);
+    assert.equal(runEv.run.status, 'suspended');
+    assert.equal('resumeToken' in runEv.run, false);
+    assert.equal('resumeTokenHash' in runEv.run, false);
+    assert.equal('apiKey' in runEv.run, false);
+    assert.equal('secrets' in runEv.run, false);
+
+    // 7. resumeAutomation (dryRun=true skipped, live emits with scrubbed resumeToken/password/token)
+    const countBeforeResumeDry = published.length;
+    await wfTool.invoke(sseCtx, {
+      operation: 'resumeAutomation',
+      runUid: 'run_sse_susp_1',
+      decision: 'approved',
+      resumeToken: validToken,
+      dryRun: true,
+    });
+    assert.equal(published.length, countBeforeResumeDry, 'resumeAutomation dryRun must not publish');
+
+    await wfTool.invoke(sseCtx, {
+      operation: 'resumeAutomation',
+      runUid: 'run_sse_susp_1',
+      decision: 'approved',
+      resumeToken: validToken,
+    });
+    const resumeEv = published[published.length - 1];
+    assert.equal(resumeEv.operation, 'resumeAutomation');
+    assert.equal(resumeEv.ruleKey, 'auto_sse_flow');
+    assert.equal(resumeEv.applied, true);
+    assert.equal(resumeEv.run.status, 'completed');
+    assert.equal('resumeToken' in resumeEv.run, false);
+    assert.equal('resumeTokenHash' in resumeEv.run, false);
+    assert.equal('password' in resumeEv.run, false);
+    assert.equal('token' in resumeEv.run, false);
+
+    // 8. Revisions strictly monotonically increasing across all published events
+    assert.equal(published.length, 6);
+    for (let i = 1; i < published.length; i += 1) {
+      assert.ok(published[i].revision > published[i - 1].revision, 'Flow sync revisions must be strictly monotonic');
+    }
+  } finally {
+    unsubscribe();
+    Module._load = origLoad;
+  }
+});

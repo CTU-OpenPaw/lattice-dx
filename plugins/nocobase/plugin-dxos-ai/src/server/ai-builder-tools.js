@@ -29,6 +29,7 @@ const {
   capturePageSnapshot,
   bumpSurfaceRevision,
 } = require('./ai-surface-creative-tools');
+const { publishSurfaceUpdate } = require('./surface-events');
 
 const ALLOWED_WORKFLOW_NODE_TYPES = ['condition', 'manual', 'update', 'create', 'query', 'calculation', 'output', 'parallel', 'delay'];
 const FIELD_INTERFACE_MAP = {
@@ -169,6 +170,107 @@ function sanitizeAutomationValue(value, seen = new WeakSet()) {
     out[key] = sanitizeAutomationValue(value[key], seen);
   }
   return out;
+}
+
+let lastFlowSyncRevision = 0;
+
+function nextFlowSyncRevision() {
+  const n = Math.max(lastFlowSyncRevision + 1, Date.now());
+  lastFlowSyncRevision = n;
+  return n;
+}
+
+const FLOW_SYNC_SENSITIVE_KEYS = new Set([
+  'resumetoken',
+  'resumetokenhash',
+  'apikey',
+  'api_key',
+  'secret',
+  'secrets',
+  'secretkey',
+  'secret_key',
+  'encryptedsecrets',
+  'encryptedsecretsjson',
+  'password',
+  'passphrase',
+  'token',
+  'accesstoken',
+  'access_token',
+  'refreshtoken',
+  'refresh_token',
+  'clientsecret',
+  'client_secret',
+  'privatekey',
+  'private_key',
+  'authorization',
+  'bearer',
+  'cookie',
+  'credential',
+  'credentials',
+  'jwt',
+  'webhooksecret',
+  'webhook_secret',
+]);
+const FLOW_SYNC_SENSITIVE_KEY_RE = /(?:secret(?:[_-]?(?:key|value))?|token(?:hash)?|password|api[_-]?key|private[_-]?key|passphrase|authorization|credential)$/i;
+
+function isFlowSyncSensitiveKey(key) {
+  const lower = String(key || '').toLowerCase();
+  if (!lower) return false;
+  if (FLOW_SYNC_SENSITIVE_KEYS.has(lower)) return true;
+  if (lower === 'secretheader' || lower === 'prompttokens' || lower === 'completiontokens' || lower === 'totaltokens') {
+    return false;
+  }
+  return FLOW_SYNC_SENSITIVE_KEY_RE.test(lower);
+}
+
+function scrubFlowSyncPayload(value, seen = new WeakSet()) {
+  if (value === null || value === undefined || typeof value !== 'object') return value;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+  if (value instanceof Date) return new Date(value.getTime());
+  if (Array.isArray(value)) return value.map((item) => scrubFlowSyncPayload(item, seen));
+  const plain = typeof value.toJSON === 'function' ? value.toJSON() : value;
+  if (!plain || typeof plain !== 'object') return plain;
+  if (plain !== value) {
+    if (seen.has(plain)) return undefined;
+    seen.add(plain);
+  }
+  const out = {};
+  for (const key of Object.keys(plain)) {
+    if (FORBIDDEN_AUTOMATION_KEYS.has(key) || isFlowSyncSensitiveKey(key)) continue;
+    out[key] = scrubFlowSyncPayload(plain[key], seen);
+  }
+  return out;
+}
+
+function publishFlowStudioUpdate(actor, detail = {}) {
+  if (!actor?.organizationId) return;
+  publishSurfaceUpdate('flow-studio', {
+    revision: nextFlowSyncRevision(),
+    type: 'flow-updated',
+    organizationId: String(actor.organizationId),
+    operation: detail.operation || '',
+    ruleKey: detail.ruleKey || null,
+    applied: Boolean(detail.applied),
+    ...(detail.draftRule ? { draftRule: scrubFlowSyncPayload(detail.draftRule) } : {}),
+    ...(detail.draftGraph ? { draftGraph: scrubFlowSyncPayload(detail.draftGraph) } : {}),
+    ...(detail.simulation ? { simulation: scrubFlowSyncPayload(detail.simulation) } : {}),
+    ...(detail.run ? { run: scrubFlowSyncPayload(detail.run) } : {}),
+    message: String(detail.message || '').slice(0, 240),
+  });
+}
+
+function publishPatchAutomationUpdate(actor, result) {
+  const effectiveRule = result.rule || result.draftRule || null;
+  publishFlowStudioUpdate(actor, {
+    operation: 'patchAutomation',
+    ruleKey: result.ruleKey || effectiveRule?.ruleKey || null,
+    applied: result.applied,
+    draftRule: effectiveRule,
+    draftGraph: effectiveRule?.graphJson || result.draftGraph || null,
+    message: result.diffSummary || 'Đã cập nhật node qua AI Architect.',
+  });
+  return result;
 }
 
 function hasForbiddenProtoKeys(value, seen = new WeakSet()) {
@@ -900,7 +1002,17 @@ async function runAutomationExecution(ctx, db, actor, args, deps) {
       values: runParams,
       method: 'POST',
     }, deps);
-    if (delegated.ok) return delegated.result;
+    if (delegated.ok) {
+      const res = delegated.result;
+      publishFlowStudioUpdate(actor, {
+        operation: 'runAutomation',
+        ruleKey: res?.run?.ruleKey || res?.ruleKey || ruleKey || null,
+        applied: true,
+        run: res?.run || res,
+        message: 'Đã thực thi workflow.',
+      });
+      return res;
+    }
   }
 
   const engineMod = loadStudioAutomationEngine();
@@ -910,7 +1022,7 @@ async function runAutomationExecution(ctx, db, actor, args, deps) {
       : (typeof engineMod.runAutomationNow === 'function' ? engineMod.runAutomationNow : null)
   );
   if (runFn) {
-    return runFn(db, {
+    const res = await runFn(db, {
       organizationId: actor.organizationId,
       ...(ruleKey ? { ruleKey } : {}),
       ...(ruleId != null ? { id: ruleId, ruleId } : {}),
@@ -918,6 +1030,14 @@ async function runAutomationExecution(ctx, db, actor, args, deps) {
       actor,
       ctx,
     });
+    publishFlowStudioUpdate(actor, {
+      operation: 'runAutomation',
+      ruleKey: res?.run?.ruleKey || res?.ruleKey || ruleKey || null,
+      applied: true,
+      run: res?.run || res,
+      message: 'Đã thực thi workflow.',
+    });
+    return res;
   }
 
   if (engineMod && typeof engineMod.executeRuleAgainstEvent === 'function') {
@@ -952,6 +1072,13 @@ async function runAutomationExecution(ctx, db, actor, args, deps) {
       },
       ignoreCooldown: true,
     });
+    publishFlowStudioUpdate(actor, {
+      operation: 'runAutomation',
+      ruleKey: run?.ruleKey || ruleKey || val(ruleRow, 'ruleKey') || null,
+      applied: true,
+      run,
+      message: 'Đã thực thi workflow.',
+    });
     return { run };
   }
 
@@ -983,6 +1110,13 @@ async function runAutomationExecution(ctx, db, actor, args, deps) {
             organizationId: actor.organizationId,
           },
           ignoreCooldown: true,
+        });
+        publishFlowStudioUpdate(actor, {
+          operation: 'runAutomation',
+          ruleKey: run?.ruleKey || ruleKey || val(ruleRow, 'ruleKey') || null,
+          applied: true,
+          run,
+          message: 'Đã thực thi workflow.',
         });
         return { run };
       }
@@ -2309,7 +2443,7 @@ async function runDraftAutomation(ctx, db, actor, args, deps) {
     applied = true;
   }
 
-  return {
+  const result = {
     operation: 'draftAutomation',
     organizationId: actor.organizationId,
     applied,
@@ -2326,6 +2460,16 @@ async function runDraftAutomation(ctx, db, actor, args, deps) {
     ...(dryRunPreview ? { dryRunPreview } : {}),
     summary: summary || `Đã phác thảo rule "${draftRule.ruleKey}" (${draftGraph?.nodes?.length || draftRule.actionsJson.length} thành phần) và mô phỏng dry-run.`,
   };
+  publishFlowStudioUpdate(actor, {
+    operation: 'draftAutomation',
+    ruleKey: draftRule.ruleKey,
+    applied,
+    draftRule: savedRule || draftRule,
+    draftGraph,
+    simulation,
+    message: result.summary,
+  });
+  return result;
 }
 
 function applyLocalGraphFixError(baseGraph, runTrace, failTool, protectedCollections) {
@@ -2492,7 +2636,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       applied = true;
     }
 
-    return {
+    return publishPatchAutomationUpdate(actor, {
       operation: 'patchAutomation',
       mode: 'fix_error',
       organizationId: actor.organizationId,
@@ -2507,7 +2651,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       ...(graphDiff ? { graphDiff } : {}),
       ...(draftRule ? { draftRule } : {}),
       ...(savedRule ? { rule: savedRule } : {}),
-    };
+    });
   }
 
   const explicitTarget = args.nodeId || args.targetNode;
@@ -2624,7 +2768,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       savedRule = await saveTenantAutomationRule(ctx, db, actor, validatedDraft, deps);
       applied = true;
     }
-    return {
+    return publishPatchAutomationUpdate(actor, {
       operation: 'patchAutomation',
       organizationId: actor.organizationId,
       ruleKey: validatedDraft.ruleKey,
@@ -2638,7 +2782,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       ...(graphDiff ? { graphDiff } : {}),
       draftRule: validatedDraft,
       ...(savedRule ? { rule: savedRule } : {}),
-    };
+    });
   }
 
   if (effectiveGraph && !args.nodeId && (resolvedTarget === 'cooldown' || resolvedTarget === 'guard')) {
@@ -2678,7 +2822,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       savedRule = await saveTenantAutomationRule(ctx, db, actor, validatedDraft, deps);
       applied = true;
     }
-    return {
+    return publishPatchAutomationUpdate(actor, {
       operation: 'patchAutomation',
       organizationId: actor.organizationId,
       ruleKey: validatedDraft.ruleKey,
@@ -2691,7 +2835,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       ...(graphDiff ? { graphDiff } : {}),
       draftRule: validatedDraft,
       ...(savedRule ? { rule: savedRule } : {}),
-    };
+    });
   }
 
   const isGraphNodePatch = Boolean(effectiveGraph && cfgPatch && effectiveNodeId && effectiveGraph.nodes.some((n) => n.id === effectiveNodeId));
@@ -2721,7 +2865,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       savedRule = await saveTenantAutomationRule(ctx, db, actor, validatedDraft, deps);
       applied = true;
     }
-    return {
+    return publishPatchAutomationUpdate(actor, {
       operation: 'patchAutomation',
       organizationId: actor.organizationId,
       ruleKey: validatedDraft.ruleKey,
@@ -2735,7 +2879,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       ...(graphDiff ? { graphDiff } : {}),
       draftRule: validatedDraft,
       ...(savedRule ? { rule: savedRule } : {}),
-    };
+    });
   }
 
   const architectHit = !shouldUseLocalPatcher
@@ -2771,7 +2915,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
     const summaryText = Array.isArray(data.diffSummary)
       ? data.diffSummary.join('; ')
       : (data.diffSummary || data.summary || `Đã vá node ${resolvedTarget} của rule "${draftRule?.ruleKey || hydratedRuleKey}".`);
-    return {
+    return publishPatchAutomationUpdate(actor, {
       operation: 'patchAutomation',
       organizationId: actor.organizationId,
       ruleKey: draftRule?.ruleKey || hydratedRuleKey,
@@ -2786,7 +2930,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
       ...(data.graphDiff ? { graphDiff: data.graphDiff } : {}),
       ...(draftRule ? { draftRule } : {}),
       ...(savedRule ? { rule: savedRule } : {}),
-    };
+    });
   }
 
   if (!baseRule) {
@@ -2945,7 +3089,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
     applied = true;
   }
 
-  return {
+  return publishPatchAutomationUpdate(actor, {
     operation: 'patchAutomation',
     organizationId: actor.organizationId,
     ruleKey: validatedDraft.ruleKey,
@@ -2956,7 +3100,7 @@ async function runPatchAutomation(ctx, db, actor, args, deps) {
     diffSummary,
     draftRule: validatedDraft,
     ...(savedRule ? { rule: savedRule } : {}),
-  };
+  });
 }
 
 /**
@@ -2990,6 +3134,14 @@ async function runSaveAutomation(ctx, db, actor, args, deps) {
     };
   }
   const saved = await saveTenantAutomationRule(ctx, db, actor, validated, deps);
+  publishFlowStudioUpdate(actor, {
+    operation: 'saveAutomation',
+    ruleKey: saved?.ruleKey || validated.ruleKey,
+    applied: true,
+    draftRule: saved,
+    draftGraph: saved?.graphJson || null,
+    message: 'Đã lưu workflow.',
+  });
   return {
     applied: true,
     saved: true,
@@ -3080,6 +3232,13 @@ async function runTestAutomation(ctx, db, actor, args, deps) {
       }, deps);
       if (delegated.ok) {
         const res = delegated.result?.result || delegated.result || {};
+        publishFlowStudioUpdate(actor, {
+          operation: 'testAutomation',
+          ruleKey: ruleObj?.ruleKey || ruleKey || null,
+          applied: false,
+          simulation: res,
+          message: 'Đã chạy mô phỏng workflow.',
+        });
         return {
           dryRun: true,
           operation: 'testAutomation',
@@ -3106,6 +3265,13 @@ async function runTestAutomation(ctx, db, actor, args, deps) {
         },
         options: { app: ctx?.app || db?.app, dryRun: true },
       });
+      publishFlowStudioUpdate(actor, {
+        operation: 'testAutomation',
+        ruleKey: ruleObj?.ruleKey || ruleKey || null,
+        applied: false,
+        simulation: res,
+        message: 'Đã chạy mô phỏng workflow.',
+      });
       return {
         dryRun: true,
         operation: 'testAutomation',
@@ -3121,7 +3287,15 @@ async function runTestAutomation(ctx, db, actor, args, deps) {
     ? sanitizeAutomationValue(args.sampleEvent)
     : (isPlainObject(args.config) ? sanitizeAutomationValue(args.config) : buildDefaultSampleEventForRule(ruleObj));
 
-  const { simulation, stepTraces, executedSteps, skippedSteps } = await simulateRuleDryRun(ctx, db, actor, ruleObj, sampleEvent, deps);
+  const simResult = await simulateRuleDryRun(ctx, db, actor, ruleObj, sampleEvent, deps);
+  const { simulation, stepTraces, executedSteps, skippedSteps } = simResult;
+  publishFlowStudioUpdate(actor, {
+    operation: 'testAutomation',
+    ruleKey: ruleObj?.ruleKey || ruleKey || null,
+    applied: false,
+    simulation: simResult?.simulation || simResult?.result || simResult,
+    message: 'Đã chạy mô phỏng workflow.',
+  });
   return {
     dryRun: true,
     operation: 'testAutomation',
@@ -3231,7 +3405,7 @@ async function runResumeAutomation(ctx, db, actor, args, deps) {
     }, deps);
     if (delegated.ok) {
       const run = delegated.result?.run || delegated.result;
-      return {
+      const resumed = {
         operation: 'resumeAutomation',
         applied: true,
         organizationId: actor.organizationId,
@@ -3240,6 +3414,14 @@ async function runResumeAutomation(ctx, db, actor, args, deps) {
         status: run?.status || 'completed',
         run,
       };
+      publishFlowStudioUpdate(actor, {
+        operation: 'resumeAutomation',
+        ruleKey: resumed?.run?.ruleKey || null,
+        applied: true,
+        run: resumed?.run || resumed,
+        message: 'Đã xử lý phê duyệt HITL.',
+      });
+      return resumed;
     }
   }
 
@@ -3261,7 +3443,7 @@ async function runResumeAutomation(ctx, db, actor, args, deps) {
       dryRun: false,
       options: { app: ctx?.app || db?.app },
     });
-    return {
+    const resumed = {
       operation: 'resumeAutomation',
       applied: true,
       organizationId: actor.organizationId,
@@ -3270,6 +3452,14 @@ async function runResumeAutomation(ctx, db, actor, args, deps) {
       status: run?.status || 'completed',
       run,
     };
+    publishFlowStudioUpdate(actor, {
+      operation: 'resumeAutomation',
+      ruleKey: resumed?.run?.ruleKey || null,
+      applied: true,
+      run: resumed?.run || resumed,
+      message: 'Đã xử lý phê duyệt HITL.',
+    });
+    return resumed;
   }
 
   throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ tiếp tục HITL (dxosAutomations:resumeRun / flow/executor) chưa sẵn sàng.');
@@ -4399,4 +4589,4 @@ function createBuilderTools(deps) {
   ];
 }
 
-module.exports = { createBuilderTools, hasUnsafeAutomationTemplate, interpolateLocal };
+module.exports = { createBuilderTools, hasUnsafeAutomationTemplate, interpolateLocal, scrubFlowSyncPayload };

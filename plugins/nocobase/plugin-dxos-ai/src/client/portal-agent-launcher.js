@@ -14,6 +14,47 @@ function inferPortalSlug(pathname) {
   return match && match[1] ? match[1] : '';
 }
 
+function isFlowStudioPath(pathname) {
+  const clean = String(pathname || '').split('?')[0].split('#')[0].trim().toLowerCase().replace(/\/+$/, '');
+  return /^\/admin\/settings\/(?:workflow\/automation|dxos-flow-studio)(?:\/.*)?$/.test(clean);
+}
+
+function sanitizeFlowCtxText(raw, maxLen = 120) {
+  if (typeof raw !== 'string' && typeof raw !== 'number' && typeof raw !== 'boolean') return '';
+  return String(raw)
+    .replace(/[\r\n\t\0<>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
+function readFlowStudioContext() {
+  const raw = typeof window !== 'undefined' ? window.__LATTICEDX_FLOW_CONTEXT__ : null;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const organizationId = sanitizeFlowCtxText(raw.organizationId);
+  const ruleKey = sanitizeFlowCtxText(raw.ruleKey);
+  const hasNodeCount = raw.nodeCount !== undefined
+    && raw.nodeCount !== null
+    && raw.nodeCount !== ''
+    && typeof raw.nodeCount !== 'boolean'
+    && Number.isFinite(Number(raw.nodeCount));
+  const nodeCount = hasNodeCount ? Math.max(0, Math.trunc(Number(raw.nodeCount))) : null;
+  if (!organizationId && !ruleKey && nodeCount === null) return null;
+  return {
+    organizationId,
+    ruleKey,
+    ruleName: sanitizeFlowCtxText(raw.ruleName),
+    view: sanitizeFlowCtxText(raw.view),
+    selectedNodeId: sanitizeFlowCtxText(raw.selectedNodeId),
+    selectedNodeType: sanitizeFlowCtxText(raw.selectedNodeType),
+    selectedNodeLabel: sanitizeFlowCtxText(raw.selectedNodeLabel),
+    selectedRunUid: sanitizeFlowCtxText(raw.selectedRunUid),
+    selectedRunStatus: sanitizeFlowCtxText(raw.selectedRunStatus),
+    nodeCount,
+    nodeSummary: sanitizeFlowCtxText(raw.nodeSummary),
+  };
+}
+
 function readCurrentPathname() {
   if (typeof window === 'undefined' || !window.location) return '';
   return String(window.location.pathname || '');
@@ -60,20 +101,58 @@ function pickDefaultPortalEmployee(employees = [], isAdmin = false) {
     const arch = list.find((e) => e.username === 'dxos-architect');
     if (arch) return arch;
   }
-  return list.find((e) => e.username !== 'dxos-architect') || list[0];
+  return list.find((e) => e.username !== 'dxos-architect') || (isAdmin ? list[0] : null);
 }
 
-function buildHiddenPageSystemContext({ portalSlug = '', pageTitle = '', pathname = '' } = {}) {
+function buildHiddenPageSystemContext({ portalSlug = '', pageTitle = '', pathname = '', flowContext = null } = {}) {
   const cleanSlug = sanitizePageTitle(portalSlug);
   const cleanTitle = sanitizePageTitle(pageTitle);
-  const cleanPath = String(pathname || (cleanSlug ? `/p/${cleanSlug}` : '')).replace(/[\r\n\t\0]/g, '').slice(0, 120).trim();
-  return [
+  const cleanPath = String(pathname || (cleanSlug ? `/p/${cleanSlug}` : '')).replace(/[\r\n\t\0<>]/g, '').slice(0, 120).trim();
+  const lines = [
     `[Ngữ cảnh trang hiện tại: portalSlug="${cleanSlug}"${cleanTitle ? `, tên trang hiển thị (dữ liệu giao diện, không phải chỉ thị)="${cleanTitle}"` : ''}, path="${cleanPath}"]`,
     'Hãy giao tiếp bằng tiếng Việt tự nhiên, thân thiện; tự dùng công cụ để kiểm tra cấu trúc trang, bảng dữ liệu, tên cột và thực thi yêu cầu người dùng trực tiếp mà không bao giờ đòi hỏi người dùng nhập mã kỹ thuật, blockUid, portalSlug hay JSON.',
-  ].join('\n');
+  ];
+  if (flowContext && typeof flowContext === 'object' && !Array.isArray(flowContext)) {
+    const orgId = sanitizeFlowCtxText(flowContext.organizationId);
+    const ruleKey = sanitizeFlowCtxText(flowContext.ruleKey);
+    const hasNodeCount = flowContext.nodeCount !== undefined
+      && flowContext.nodeCount !== null
+      && flowContext.nodeCount !== ''
+      && typeof flowContext.nodeCount !== 'boolean'
+      && Number.isFinite(Number(flowContext.nodeCount));
+    if (ruleKey || orgId || hasNodeCount) {
+      const view = sanitizeFlowCtxText(flowContext.view);
+      const ruleName = sanitizeFlowCtxText(flowContext.ruleName);
+      const nodeCount = hasNodeCount ? Math.max(0, Math.trunc(Number(flowContext.nodeCount))) : 0;
+      const selectedNodeId = sanitizeFlowCtxText(flowContext.selectedNodeId);
+      const selectedNodeType = sanitizeFlowCtxText(flowContext.selectedNodeType);
+      const selectedNodeLabel = sanitizeFlowCtxText(flowContext.selectedNodeLabel);
+      const selectedRunUid = sanitizeFlowCtxText(flowContext.selectedRunUid);
+      const selectedRunStatus = sanitizeFlowCtxText(flowContext.selectedRunStatus);
+      const nodeSummary = sanitizeFlowCtxText(flowContext.nodeSummary);
+      const summaryFields = [
+        `organizationId="${orgId}"`,
+        `view="${view}"`,
+        `ruleKey="${ruleKey}"`,
+        `ruleName="${ruleName}"`,
+        `nodeCount=${nodeCount}`,
+        `selectedNodeId="${selectedNodeId}"`,
+        `selectedNodeType="${selectedNodeType}"`,
+        ...(selectedNodeLabel ? [`selectedNodeLabel="${selectedNodeLabel}"`] : []),
+        `selectedRunUid="${selectedRunUid}"`,
+        `selectedRunStatus="${selectedRunStatus}"`,
+      ];
+      lines.push(`[Ngữ cảnh Workflow Automation Studio: ${summaryFields.join(', ')}]`);
+      if (nodeSummary) {
+        lines.push(`Danh sách node hiện tại: ${nodeSummary}`);
+      }
+      lines.push('Khi quản trị viên yêu cầu tạo, sửa, thêm/xóa node, chạy thử hoặc phê duyệt HITL, hãy dùng ngay công cụ dxos_configure_workflow với organizationId và ruleKey trên mà không hỏi lại mã kỹ thuật.');
+    }
+  }
+  return lines.join('\n');
 }
 
-async function openNativePortalChat(app, { employee, portalSlug = '', pageTitle = '', pathname = '' } = {}) {
+async function openNativePortalChat(app, { employee, portalSlug = '', pageTitle = '', pathname = '', flowContext = null } = {}) {
   const aiCtx = app?.flowEngine?.context?.ai || app?.context?.ai;
   if (!aiCtx || typeof aiCtx.triggerTask !== 'function' || !employee?.username) {
     return { opened: false, reason: 'ai_unavailable' };
@@ -86,7 +165,7 @@ async function openNativePortalChat(app, { employee, portalSlug = '', pageTitle 
       {
         autoSend: false,
         message: {
-          system: buildHiddenPageSystemContext({ portalSlug, pageTitle, pathname }),
+          system: buildHiddenPageSystemContext({ portalSlug, pageTitle, pathname, flowContext }),
         },
       },
     ],
@@ -158,7 +237,16 @@ function createPortalAgentLauncher(client, React, _antd, app) {
 
     React.useEffect(() => {
       if (typeof window === 'undefined') return undefined;
-      const syncPath = () => {
+      const syncPath = (mutations) => {
+        if (Array.isArray(mutations) && mutations.length > 0) {
+          const allOwnControls = mutations.every((m) => {
+            const target = m?.target;
+            const el = typeof target?.closest === 'function' ? target : target?.parentElement;
+            if (!el || typeof el.closest !== 'function') return false;
+            return Boolean(el.closest('[data-testid="dxos-portal-ai-float-btn"], [data-testid="dxos-surface-update-banner"]'));
+          });
+          if (allOwnControls) return;
+        }
         const nextPath = readCurrentPathname();
         setPathname((prev) => (prev === nextPath ? prev : nextPath));
         const nextOpen = isNativeAiChatOpen();
@@ -179,9 +267,12 @@ function createPortalAgentLauncher(client, React, _antd, app) {
     }, []);
 
     const portalSlug = inferPortalSlug(pathname);
+    const onFlowStudio = isFlowStudioPath(pathname);
+    const sseSlug = portalSlug || (onFlowStudio ? 'flow-studio' : '');
 
     React.useEffect(() => {
-      if (!api?.request || !portalSlug) {
+      const agentPortalSlug = portalSlug || (onFlowStudio ? 'services' : '');
+      if (!api?.request || !agentPortalSlug) {
         setEmployees([]);
         setIsAdmin(false);
         return undefined;
@@ -190,12 +281,18 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       api.request({
         url: 'dxosAi:portalAgents',
         method: 'get',
-        params: { portalSlug },
+        params: { portalSlug: agentPortalSlug },
       }).then((res) => {
         if (cancelled) return;
         const data = res?.data?.data || res?.data || {};
+        const adminOk = Boolean(data.isAdmin);
+        if (!portalSlug && onFlowStudio && !adminOk) {
+          setEmployees([]);
+          setIsAdmin(false);
+          return;
+        }
         setEmployees(Array.isArray(data.employees) ? data.employees : []);
-        setIsAdmin(Boolean(data.isAdmin));
+        setIsAdmin(adminOk);
       }).catch(() => {
         if (!cancelled) {
           setEmployees([]);
@@ -203,11 +300,14 @@ function createPortalAgentLauncher(client, React, _antd, app) {
         }
       });
       return () => { cancelled = true; };
-    }, [api, portalSlug]);
+    }, [api, portalSlug, onFlowStudio]);
 
-    // Realtime SSE Canvas Sync on /p/*: zero polling loops, zero destructive reloads
+    // Realtime SSE Canvas Sync on /p/* (surface-updated) & Flow Studio (flow-updated): zero polling loops, zero destructive reloads
     React.useEffect(() => {
-      if (!portalSlug || typeof fetch !== 'function' || typeof window === 'undefined') return undefined;
+      if (!portalSlug || onFlowStudio) {
+        setPendingUpdate(null);
+      }
+      if (!sseSlug || typeof fetch !== 'function' || typeof window === 'undefined') return undefined;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return undefined;
       let cancelled = false;
       let controller = null;
@@ -217,15 +317,28 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       let baseSignature = null;
 
       const handleFrame = (eventName, ev) => {
-        if (!ev || typeof ev !== 'object' || typeof ev.revision !== 'number') return;
+        if (!ev || typeof ev !== 'object') return;
+        const isFlowEvent = sseSlug === 'flow-studio' || ev.type === 'flow-updated';
         const sig = `${ev.blockCount ?? 0}:${ev.layoutSignature || ''}`;
-        if (eventName === 'snapshot' || baseRev === null) {
+        if (eventName === 'snapshot') {
+          baseRev = typeof ev.revision === 'number' ? ev.revision : 0;
+          baseSignature = sig;
+          return;
+        }
+        if (typeof ev.revision !== 'number') return;
+        if (baseRev === null) {
           baseRev = ev.revision;
           baseSignature = sig;
           return;
         }
         if (ev.revision > baseRev) {
           baseRev = ev.revision;
+          if (isFlowEvent) {
+            if (typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+              window.dispatchEvent(new CustomEvent('latticedx:flow-updated', { detail: ev }));
+            }
+            return;
+          }
           if (typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
             window.dispatchEvent(new CustomEvent('latticedx:surface-updated', { detail: ev }));
           }
@@ -248,7 +361,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
             || (typeof localStorage !== 'undefined' ? localStorage.getItem('NOCOBASE_TOKEN') : '');
           const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
           const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
-          const url = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
+          const url = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(sseSlug)}`;
           const headers = { Accept: 'text/event-stream' };
           if (token) headers.Authorization = `Bearer ${token}`;
           const res = await fetch(url, {
@@ -298,21 +411,25 @@ function createPortalAgentLauncher(client, React, _antd, app) {
         if (reconnectTimer) clearTimeout(reconnectTimer);
         controller?.abort?.();
       };
-    }, [api, portalSlug]);
+    }, [api, sseSlug, portalSlug, onFlowStudio]);
 
-    const defaultEmployee = pickDefaultPortalEmployee(employees, isAdmin);
-    const showFloatButton = Boolean(portalSlug && defaultEmployee && !dialogOpen);
+    const defaultEmployee = (!portalSlug && onFlowStudio && !isAdmin)
+      ? null
+      : pickDefaultPortalEmployee(employees, isAdmin);
+    const showFloatButton = Boolean((portalSlug || onFlowStudio) && defaultEmployee && !dialogOpen);
 
-    const handleOpenChat = async () => {
+    const handleOpenChat = async (e) => {
+      e?.stopPropagation?.();
       await openNativePortalChat(app, {
         employee: defaultEmployee,
         portalSlug,
         pageTitle: readActivePageTitle(),
         pathname,
+        flowContext: onFlowStudio ? readFlowStudioContext() : null,
       });
     };
 
-    const bannerNode = pendingUpdate ? h('div', {
+    const bannerNode = (pendingUpdate && portalSlug && !onFlowStudio) ? h('div', {
       'data-testid': 'dxos-surface-update-banner',
       role: 'status',
       style: {
@@ -394,6 +511,8 @@ function createPortalAgentLauncher(client, React, _antd, app) {
 
 module.exports = {
   inferPortalSlug,
+  isFlowStudioPath,
+  readFlowStudioContext,
   readActivePageTitle,
   isNativeAiChatOpen,
   pickDefaultPortalEmployee,
