@@ -1,5 +1,5 @@
 {
-  "name": "LatticeDX v1.0 Enterprise Multi-System Compliance & PKI Orchestrator",
+  "name": "LatticeDX v1.0 Enterprise Cold-Chain Incident-to-Partner Settlement & Compliance Orchestrator",
   "active": false,
   "meta": {
     "author": "CTU-OpenPaw",
@@ -19,7 +19,7 @@
         0,
         0
       ],
-      "notes": "SPDX-License-Identifier: Apache-2.0 — Receives LatticeFlow v2 / external partner compliance events and orchestrates risk scoring, PKI ledger attestation, FIWARE Orion-LD Digital Twin upsert, Node-RED/MQTT physical interlock, and partner dossier fan-out.",
+      "notes": "SPDX-License-Identifier: Apache-2.0 — Receives LatticeFlow v2 / cold-chain incident & settlement events, evaluates DMN policy, orchestrates PKI Ledger, Orion-LD, Node-RED MQTT, and 5 real external apps (Telegram, Email SMTP, Google Sheets, Slack, GitHub).",
       "parameters": {
         "httpMethod": "POST",
         "path": "latticedx/v1/enterprise-compliance-orchestrator",
@@ -84,7 +84,7 @@
       "typeVersion": 1.5,
       "position": [
         720,
-        380
+        420
       ],
       "parameters": {
         "respondWith": "json",
@@ -104,7 +104,70 @@
         -60
       ],
       "parameters": {
-        "jsCode": "const crypto = require('crypto');\n\nconst inp = $input.first().json || {};\nconst body = inp.body && typeof inp.body === 'object' && !Array.isArray(inp.body) ? inp.body : {};\nconst data = body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : {};\nconst organizationId = String(data.organizationId || body.organizationId || body.organizationid || '').trim();\n\nif (!organizationId) {\n  return [{ json: { invalidPayload: true, statusCode: 400, error: 'ORGANIZATION_ID_REQUIRED', tier: 'invalid', riskScore: 0, complianceFlags: [] } }];\n}\n\nconst eventType = String(body.type || body.eventType || 'compliance.evaluation').trim();\nconst code = String(data.code || body.code || body.subject || 'COMP-01').trim();\nconst safeCode = code.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64) || 'COMP-01';\nconst rawAmount = Number(data.amount ?? body.amount ?? 0);\nconst amount = Number.isFinite(rawAmount) ? rawAmount : 0;\nconst rawSla = Number(data.slaOverdueMinutes ?? body.slaOverdueMinutes ?? 0);\nconst slaOverdueMinutes = Number.isFinite(rawSla) ? rawSla : 0;\nconst severity = String(data.severity || body.severity || 'normal').trim().toLowerCase();\nconst items = Array.isArray(data.items) ? data.items : (Array.isArray(body.items) ? body.items : []);\nconst rawTemp = data.temperatureC ?? body.temperatureC;\nconst temperatureC = rawTemp !== undefined && rawTemp !== null && rawTemp !== '' && Number.isFinite(Number(rawTemp)) ? Number(rawTemp) : null;\n\nlet riskScore = 10;\nconst flags = [];\nif (amount >= 50000000) { riskScore += 35; flags.push('HIGH_VALUE_THRESHOLD'); }\nelse if (amount >= 15000000) { riskScore += 18; flags.push('MID_VALUE_REVIEW'); }\nif (severity === 'critical') { riskScore += 30; flags.push('CRITICAL_SEVERITY'); }\nelse if (severity === 'high' || severity === 'urgent') { riskScore += 20; flags.push('HIGH_SEVERITY'); }\nif (slaOverdueMinutes >= 30) { riskScore += 20; flags.push('SLA_CRITICAL_OVERDUE'); }\nelse if (slaOverdueMinutes > 0) { riskScore += 10; flags.push('SLA_WARNING'); }\nif (temperatureC !== null && temperatureC > -12) { riskScore += 20; flags.push('THERMAL_EXCURSION'); }\nif (items.length >= 2) { riskScore += 10; flags.push('MULTI_LINE_BATCH'); }\nriskScore = Math.min(100, riskScore);\n\nconst tier = riskScore >= 75 ? 'critical' : (riskScore >= 40 ? 'escalated' : 'standard');\nconst idempotencyKey = crypto.createHash('sha256').update(`${organizationId}|${eventType}|${code}|${amount}|${items.length}`).digest('hex').slice(0, 24);\n\nconst allowedCollections = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets', 'latticeAssets', 'latticeParaDocuments', 'latticeIncidentCases']);\nconst rawCol = String(data.targetCollection || body.targetCollection || 'latticeRequests').trim();\nconst targetCollection = allowedCollections.has(rawCol) ? rawCol : 'latticeRequests';\nconst rawRecId = Number(data.targetRecordId ?? body.targetRecordId ?? data.id ?? body.id ?? 1);\nconst targetRecordId = Number.isInteger(rawRecId) && rawRecId > 0 ? rawRecId : 1;\nconst rawAssetId = Number(data.assetId ?? body.assetId ?? 1);\nconst assetId = Number.isInteger(rawAssetId) && rawAssetId > 0 ? rawAssetId : 1;\nconst observedAt = new Date().toISOString();\n\nconst orionEntityId = `urn:ngsi-ld:ComplianceAlert:${organizationId}:${safeCode}`;\nconst orionEntityPayload = {\n  id: orionEntityId,\n  type: 'https://latticedx.example/ns/ComplianceAlert',\n  'https://latticedx.example/ns/code': { type: 'Property', value: code, observedAt },\n  'https://latticedx.example/ns/tier': { type: 'Property', value: tier, observedAt },\n  'https://latticedx.example/ns/riskScore': { type: 'Property', value: riskScore, observedAt },\n  'https://latticedx.example/ns/severity': { type: 'Property', value: severity, observedAt },\n  'https://latticedx.example/ns/amount': { type: 'Property', value: amount, observedAt },\n  ...(temperatureC !== null ? { temperature: { type: 'Property', value: temperatureC, unitCode: 'CEL', observedAt } } : {}),\n  'https://latticedx.example/ns/complianceFlags': { type: 'Property', value: flags, observedAt },\n  'https://latticedx.example/ns/idempotencyKey': { type: 'Property', value: idempotencyKey, observedAt },\n};\n\nconst edgeInterlockPayload = {\n  organizationId,\n  assetId,\n  commandId: `interlock-${idempotencyKey.slice(0, 16)}`,\n  desired: {\n    emergencyQuarantineLock: true,\n    setpointC: -18,\n    alarmRelay: 'ON',\n    reason: `n8n_critical_compliance_${safeCode}`.slice(0, 120),\n    riskScore,\n  },\n};\n\nreturn [{\n  json: {\n    invalidPayload: false,\n    statusCode: 200,\n    organizationId,\n    eventType,\n    code,\n    amount,\n    severity,\n    slaOverdueMinutes,\n    temperatureC,\n    itemsProcessed: items.length,\n    items,\n    riskScore,\n    tier,\n    complianceFlags: flags,\n    idempotencyKey,\n    orionEntityId,\n    orionEntityPayload,\n    edgeInterlockPayload,\n    signDocumentPayload: {\n      organizationId,\n      targetCollection,\n      targetRecordId,\n      reason: `n8n compliance ${tier} (${riskScore}/100) doc=${code} key=${idempotencyKey}`.slice(0, 255),\n    },\n    escalationPayload: {\n      organizationId,\n      ruleKey: 'auto_sla_breach_escalation',\n      source: 'n8n:enterprise-compliance-orchestrator',\n      data: {\n        code,\n        tier,\n        riskScore,\n        complianceFlags: flags,\n        priority: 'high',\n        severity,\n      },\n    },\n  },\n}];"
+        "jsCode": "const crypto = require('crypto');\n\nconst inp = $input.first().json || {};\nconst body = inp.body && typeof inp.body === 'object' && !Array.isArray(inp.body) ? inp.body : {};\nconst data = body.data && typeof body.data === 'object' && !Array.isArray(body.data) ? body.data : {};\nconst organizationId = String(data.organizationId || body.organizationId || body.organizationid || '').trim();\n\nif (!organizationId) {\n  return [{ json: { invalidPayload: true, statusCode: 400, error: 'ORGANIZATION_ID_REQUIRED', tier: 'invalid', riskScore: 0, complianceFlags: [] } }];\n}\n\nconst eventType = String(body.type || body.eventType || 'compliance.evaluation').trim();\nconst code = String(data.code || body.code || body.subject || 'COMP-01').trim();\nconst safeCode = code.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 64) || 'COMP-01';\nconst rawAmount = Number(data.amount ?? body.amount ?? 0);\nconst amount = Number.isFinite(rawAmount) ? rawAmount : 0;\nconst rawSla = Number(data.slaOverdueMinutes ?? body.slaOverdueMinutes ?? 0);\nconst slaOverdueMinutes = Number.isFinite(rawSla) ? rawSla : 0;\nconst severity = String(data.severity || body.severity || 'normal').trim().toLowerCase();\nconst items = Array.isArray(data.items) ? data.items : (Array.isArray(body.items) ? body.items : []);\nconst rawTemp = data.temperatureC ?? body.temperatureC;\nconst temperatureC = rawTemp !== undefined && rawTemp !== null && rawTemp !== '' && Number.isFinite(Number(rawTemp)) ? Number(rawTemp) : null;\nconst partnerCode = String(data.partnerCode || body.partnerCode || 'partner-coldchain').trim().slice(0, 64);\nconst partnerEmail = String(data.partnerEmail || body.partnerEmail || '').trim();\nconst lotCode = String(data.lotCode || body.lotCode || '').trim();\n\nlet riskScore = 10;\nconst flags = [];\nif (amount >= 50000000) { riskScore += 35; flags.push('HIGH_VALUE_THRESHOLD'); }\nelse if (amount >= 15000000) { riskScore += 18; flags.push('MID_VALUE_REVIEW'); }\nif (severity === 'critical') { riskScore += 30; flags.push('CRITICAL_SEVERITY'); }\nelse if (severity === 'high' || severity === 'urgent') { riskScore += 20; flags.push('HIGH_SEVERITY'); }\nif (slaOverdueMinutes >= 30) { riskScore += 20; flags.push('SLA_CRITICAL_OVERDUE'); }\nelse if (slaOverdueMinutes > 0) { riskScore += 10; flags.push('SLA_WARNING'); }\nif (temperatureC !== null && temperatureC > -12) { riskScore += 20; flags.push('THERMAL_EXCURSION'); }\nif (items.length >= 2) { riskScore += 10; flags.push('MULTI_LINE_BATCH'); }\nriskScore = Math.min(100, riskScore);\n\nconst tier = riskScore >= 75 ? 'critical' : (riskScore >= 40 ? 'escalated' : 'standard');\nconst settlementRatePct = tier === 'critical' ? 85 : (tier === 'escalated' ? 40 : 0);\nconst settlementEstimateVnd = Math.round(amount * (settlementRatePct / 100));\nconst partnerClaimRequired = tier === 'critical' || (tier === 'escalated' && flags.includes('THERMAL_EXCURSION'));\nconst idempotencyKey = crypto.createHash('sha256').update(`${organizationId}|${eventType}|${code}|${amount}|${items.length}`).digest('hex').slice(0, 24);\n\nconst allowedCollections = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets', 'latticeAssets', 'latticeParaDocuments', 'latticeIncidentCases', 'latticeCustomPartnerClaims']);\nconst rawCol = String(data.targetCollection || body.targetCollection || 'latticeRequests').trim();\nconst targetCollection = allowedCollections.has(rawCol) ? rawCol : 'latticeRequests';\nconst rawRecId = Number(data.targetRecordId ?? body.targetRecordId ?? data.id ?? body.id ?? 1);\nconst targetRecordId = Number.isInteger(rawRecId) && rawRecId > 0 ? rawRecId : 1;\nconst rawAssetId = Number(data.assetId ?? body.assetId ?? 1);\nconst assetId = Number.isInteger(rawAssetId) && rawAssetId > 0 ? rawAssetId : 1;\nconst observedAt = new Date().toISOString();\n\nconst orionEntityId = `urn:ngsi-ld:ComplianceAlert:${organizationId}:${safeCode}`;\nconst orionEntityPayload = {\n  id: orionEntityId,\n  type: 'https://latticedx.example/ns/ComplianceAlert',\n  'https://latticedx.example/ns/code': { type: 'Property', value: code, observedAt },\n  'https://latticedx.example/ns/tier': { type: 'Property', value: tier, observedAt },\n  'https://latticedx.example/ns/riskScore': { type: 'Property', value: riskScore, observedAt },\n  'https://latticedx.example/ns/severity': { type: 'Property', value: severity, observedAt },\n  'https://latticedx.example/ns/amount': { type: 'Property', value: amount, observedAt },\n  ...(temperatureC !== null ? { temperature: { type: 'Property', value: temperatureC, unitCode: 'CEL', observedAt } } : {}),\n  'https://latticedx.example/ns/complianceFlags': { type: 'Property', value: flags, observedAt },\n  'https://latticedx.example/ns/idempotencyKey': { type: 'Property', value: idempotencyKey, observedAt },\n};\n\nconst edgeInterlockPayload = {\n  organizationId,\n  assetId,\n  commandId: `interlock-${idempotencyKey.slice(0, 16)}`,\n  desired: {\n    emergencyQuarantineLock: true,\n    setpointC: -18,\n    alarmRelay: 'ON',\n    reason: `n8n_critical_compliance_${safeCode}`.slice(0, 120),\n    riskScore,\n  },\n};\n\nreturn [{\n  json: {\n    invalidPayload: false,\n    statusCode: 200,\n    organizationId,\n    eventType,\n    code,\n    amount,\n    severity,\n    slaOverdueMinutes,\n    temperatureC,\n    partnerCode,\n    partnerEmail,\n    lotCode,\n    itemsProcessed: items.length,\n    items,\n    riskScore,\n    tier,\n    settlementRatePct,\n    settlementEstimateVnd,\n    partnerClaimRequired,\n    complianceFlags: flags,\n    idempotencyKey,\n    targetCollection,\n    targetRecordId,\n    orionEntityId,\n    orionEntityPayload,\n    edgeInterlockPayload,\n    dmnEvaluatePayload: {\n      organizationId,\n      tableKey: 'coldchain_settlement_policy_v1',\n      facts: {\n        tier,\n        riskScore,\n        severity,\n        amount,\n        temperatureC: temperatureC ?? -18,\n        slaOverdueMinutes,\n        partnerCode,\n      },\n    },\n    signDocumentPayload: {\n      organizationId,\n      targetCollection,\n      targetRecordId,\n      reason: `n8n compliance ${tier} (${riskScore}/100) doc=${code} key=${idempotencyKey}`.slice(0, 255),\n    },\n    escalationPayload: {\n      organizationId,\n      ruleKey: 'auto_sla_breach_escalation',\n      source: 'n8n:enterprise-compliance-orchestrator',\n      data: {\n        code,\n        tier,\n        riskScore,\n        settlementEstimateVnd,\n        complianceFlags: flags,\n        priority: 'high',\n        severity,\n      },\n    },\n  },\n}];"
+      }
+    },
+    {
+      "id": "dxos-ent-eval-dmn",
+      "name": "Evaluate Settlement DMN Policy",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        -60
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DX_NOCOBASE_BASE_URL || 'http://nocobase').replace(/\\/+$/, '') + '/api/dxosDmn:evaluate' }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($env.DX_NOCOBASE_PAT || '') }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.dmnEvaluatePayload }}",
+        "options": {
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "dxos-ent-merge-dmn",
+      "name": "Merge Risk & DMN Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        -60
+      ],
+      "parameters": {
+        "jsCode": "const score = $('Score Risk & Batch Compliance').first().json || {};\nif (score.invalidPayload) {\n  return [{ json: score }];\n}\n\nconst dmnRaw = $input.first().json || {};\nconst dmnBody = (dmnRaw.body && dmnRaw.body.data && typeof dmnRaw.body.data === 'object') ? dmnRaw.body.data : (dmnRaw.body && typeof dmnRaw.body === 'object' ? dmnRaw.body : dmnRaw);\nconst dmnMatched = !dmnRaw.error && Boolean(dmnBody && dmnBody.matched && dmnBody.decision);\nconst decision = dmnMatched && typeof dmnBody.decision === 'object' ? dmnBody.decision : {};\n\nconst tier = ['critical', 'escalated', 'standard'].includes(String(decision.settlementTier || decision.tier || '').toLowerCase())\n  ? String(decision.settlementTier || decision.tier).toLowerCase()\n  : score.tier;\nconst rawRate = Number(decision.settlementRatePct);\nconst settlementRatePct = Number.isFinite(rawRate) && rawRate >= 0 && rawRate <= 100 ? rawRate : score.settlementRatePct;\nconst settlementEstimateVnd = Math.round((Number(score.amount) || 0) * (settlementRatePct / 100));\nconst partnerClaimRequired = typeof decision.approveClaim === 'boolean' ? decision.approveClaim : score.partnerClaimRequired;\nconst observedAt = new Date().toISOString();\n\nconst callbackTokenHint = `approve_claim:${score.organizationId}:${score.targetCollection}:${score.targetRecordId}`;\nconst telegramMessage = [\n  `🚨 [LatticeDX Cold-Chain Settlement] ${score.code}`,\n  `Org: ${score.organizationId} · Tier: ${tier.toUpperCase()} (${score.riskScore}/100)`,\n  `Partner: ${score.partnerCode} · Lot: ${score.lotCode || 'N/A'}`,\n  `Temp: ${score.temperatureC ?? 'N/A'}°C · SLA Overdue: ${score.slaOverdueMinutes}m`,\n  `Settlement Estimate: ${settlementEstimateVnd} VND (${settlementRatePct}%)`,\n  `2-Way Callback Action: ${callbackTokenHint}`,\n].join('\\n');\n\nconst emailSubject = `[LatticeDX Settlement][${tier.toUpperCase()}] Incident ${score.code} — ${score.partnerCode}`;\nconst emailBody = [\n  `Cold-Chain Incident & Partner Settlement Notice for ${score.code}`,\n  `Organization: ${score.organizationId}`,\n  `Tier / Risk Score: ${tier} (${score.riskScore}/100)`,\n  `Flags: ${(score.complianceFlags || []).join(', ') || 'NONE'}`,\n  `Partner: ${score.partnerCode}`,\n  `Estimated Settlement: ${settlementEstimateVnd} VND (${settlementRatePct}%)`,\n  `Idempotency Key: ${score.idempotencyKey}`,\n  `Callback Reference: ${callbackTokenHint}`,\n].join('\\n');\n\nconst slackMessage = `:rotating_light: *LatticeDX Cold-Chain Incident* \\`${score.code}\\` (${tier.toUpperCase()}, ${score.riskScore}/100) | Org: \\`${score.organizationId}\\` | Partner: \\`${score.partnerCode}\\` | Settlement: *${settlementEstimateVnd} VND* (${settlementRatePct}%)`;\n\nconst githubIssueTitle = `[ColdChain-Settlement][${tier.toUpperCase()}] ${score.code} (${score.organizationId})`;\nconst githubIssueBody = [\n  `### Cold-Chain Incident-to-Partner Settlement Audit`,\n  `- **Code**: ${score.code}`,\n  `- **Organization**: ${score.organizationId}`,\n  `- **Partner**: ${score.partnerCode}`,\n  `- **Tier / Risk**: ${tier} (${score.riskScore}/100)`,\n  `- **Temperature**: ${score.temperatureC ?? 'N/A'} °C`,\n  `- **Settlement Estimate**: ${settlementEstimateVnd} VND (${settlementRatePct}%)`,\n  `- **Orion-LD Entity**: ${score.orionEntityId}`,\n  `- **Idempotency Key**: ${score.idempotencyKey}`,\n  `- **Recorded At**: ${observedAt}`,\n].join('\\n');\n\nconst googleSheetRow = {\n  timestamp: observedAt,\n  organizationId: score.organizationId,\n  code: score.code,\n  partnerCode: score.partnerCode,\n  lotCode: score.lotCode || 'N/A',\n  tier,\n  riskScore: score.riskScore,\n  settlementRatePct,\n  settlementEstimateVnd,\n  temperatureC: score.temperatureC,\n  idempotencyKey: score.idempotencyKey,\n};\n\nreturn [{\n  json: {\n    ...score,\n    tier,\n    dmnMatched,\n    dmnDecision: decision,\n    settlementRatePct,\n    settlementEstimateVnd,\n    partnerClaimRequired,\n    telegramMessage,\n    emailSubject,\n    emailBody,\n    slackMessage,\n    githubIssueTitle,\n    githubIssueBody,\n    googleSheetRow,\n  },\n}];"
       }
     },
     {
@@ -113,7 +176,7 @@
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3.2,
       "position": [
-        960,
+        1440,
         -60
       ],
       "parameters": {
@@ -181,11 +244,13 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1220,
-        -420
+        1720,
+        -560
       ],
       "onError": "continueErrorOutput",
-      "retryOnFail": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
       "parameters": {
         "method": "POST",
         "url": "={{ ($env.DX_NOCOBASE_BASE_URL || 'http://nocobase').replace(/\\/+$/, '') + '/api/dxosLedger:signDocument' }}",
@@ -229,8 +294,8 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1480,
-        -420
+        1980,
+        -560
       ],
       "parameters": {
         "jsCode": "const raw = $input.first().json || {};\nconst payload = (raw.body && raw.body.data && typeof raw.body.data === 'object') ? raw.body.data : (raw.body && typeof raw.body === 'object' ? raw.body : raw);\nconst signed = Boolean(payload && (payload.signed || payload.merkleRoot || (payload.entry && payload.entry.merkleRoot)));\nreturn [{\n  json: {\n    kind: 'pki',\n    signed,\n    keyId: payload.keyId || (payload.entry && payload.entry.keyId) || null,\n    merkleRoot: payload.merkleRoot || (payload.entry && payload.entry.merkleRoot) || null,\n    entryHash: (payload.entry && payload.entry.entryHash) || payload.entryHash || null,\n    error: signed ? null : String((raw.error && raw.error.message) || raw.message || payload.message || 'LEDGER_SIGN_UNAVAILABLE'),\n  },\n}];"
@@ -242,11 +307,13 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1220,
-        -180
+        1720,
+        -360
       ],
       "onError": "continueErrorOutput",
-      "retryOnFail": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
       "parameters": {
         "method": "POST",
         "url": "={{ ($env.DX_ORION_URL || 'http://orion-ld:1026').replace(/\\/+$/, '') + '/ngsi-ld/v1/entityOperations/upsert?options=update' }}",
@@ -290,11 +357,11 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1480,
-        -180
+        1980,
+        -360
       ],
       "parameters": {
-        "jsCode": "const raw = $input.first().json || {};\nconst score = $('Score Risk & Batch Compliance').first().json || {};\nconst statusCode = Number(raw.statusCode || raw.status || 0);\nconst synced = !raw.error && [200, 201, 204].includes(statusCode);\nreturn [{\n  json: {\n    kind: 'orion_ld',\n    synced,\n    statusCode: statusCode || null,\n    broker: 'fiware-orion-ld',\n    entityId: score.orionEntityId || null,\n    tenant: score.organizationId || null,\n    error: synced ? null : String((raw.error && raw.error.message) || raw.message || (raw.body && raw.body.detail) || 'ORION_LD_UNAVAILABLE'),\n  },\n}];"
+        "jsCode": "const raw = $input.first().json || {};\nconst score = $('Merge Risk & DMN Decision').first().json || {};\nconst statusCode = Number(raw.statusCode || raw.status || 0);\nconst synced = !raw.error && [200, 201, 204].includes(statusCode);\nreturn [{\n  json: {\n    kind: 'orion_ld',\n    synced,\n    statusCode: statusCode || null,\n    broker: 'fiware-orion-ld',\n    entityId: score.orionEntityId || null,\n    tenant: score.organizationId || null,\n    error: synced ? null : String((raw.error && raw.error.message) || raw.message || (raw.body && raw.body.detail) || 'ORION_LD_UNAVAILABLE'),\n  },\n}];"
       }
     },
     {
@@ -303,11 +370,13 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1220,
-        60
+        1720,
+        -160
       ],
       "onError": "continueErrorOutput",
-      "retryOnFail": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
       "parameters": {
         "method": "POST",
         "url": "={{ $env.DX_TWIN_DOWNLINK_URL || 'http://nodered:1880/twin/command' }}",
@@ -351,11 +420,11 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1480,
-        60
+        1980,
+        -160
       ],
       "parameters": {
-        "jsCode": "const raw = $input.first().json || {};\nconst score = $('Score Risk & Batch Compliance').first().json || {};\nconst payload = (raw.body && typeof raw.body === 'object') ? raw.body : raw;\nconst statusCode = Number(raw.statusCode || raw.status || 0);\nconst edgeCfg = score.edgeInterlockPayload || {};\nconst dispatched = !raw.error && ([200, 202].includes(statusCode) || Boolean(payload && payload.commandId));\nreturn [{\n  json: {\n    kind: 'edge_interlock',\n    dispatched,\n    statusCode: statusCode || null,\n    broker: 'nodered-mosquitto-mqtt',\n    mqttTopic: `latticedx/${score.organizationId || 'org'}/${edgeCfg.assetId || 1}/command`,\n    commandId: (payload && payload.commandId) || edgeCfg.commandId || null,\n    desired: (payload && payload.desired) || edgeCfg.desired || null,\n    error: dispatched ? null : String((raw.error && raw.error.message) || raw.message || (payload && payload.message) || 'EDGE_INTERLOCK_UNAVAILABLE'),\n  },\n}];"
+        "jsCode": "const raw = $input.first().json || {};\nconst score = $('Merge Risk & DMN Decision').first().json || {};\nconst payload = (raw.body && typeof raw.body === 'object') ? raw.body : raw;\nconst statusCode = Number(raw.statusCode || raw.status || 0);\nconst edgeCfg = score.edgeInterlockPayload || {};\nconst dispatched = !raw.error && ([200, 202].includes(statusCode) || Boolean(payload && payload.commandId));\nreturn [{\n  json: {\n    kind: 'edge_interlock',\n    dispatched,\n    statusCode: statusCode || null,\n    broker: 'nodered-mosquitto-mqtt',\n    mqttTopic: `latticedx/${score.organizationId || 'org'}/${edgeCfg.assetId || 1}/command`,\n    commandId: (payload && payload.commandId) || edgeCfg.commandId || null,\n    desired: (payload && payload.desired) || edgeCfg.desired || null,\n    error: dispatched ? null : String((raw.error && raw.error.message) || raw.message || (payload && payload.message) || 'EDGE_INTERLOCK_UNAVAILABLE'),\n  },\n}];"
       }
     },
     {
@@ -364,11 +433,213 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        1350,
-        300
+        1850,
+        40
       ],
       "parameters": {
-        "jsCode": "const crypto = require('crypto');\nconst s = $input.first().json || {};\nconst lineTotal = Array.isArray(s.items) ? s.items.reduce((acc, it) => acc + (Number(it && (it.value ?? it.qty)) || 0), 0) : 0;\nconst manifestDigest = crypto.createHash('sha256').update(JSON.stringify({ key: s.idempotencyKey, flags: s.complianceFlags || [], items: s.items || [] })).digest('hex').slice(0, 16);\nreturn [{\n  json: {\n    kind: 'partner_dossier',\n    manifestDigest,\n    itemCount: Array.isArray(s.items) ? s.items.length : 0,\n    lineTotal,\n    dispatchedChannels: ['regulatory-audit-log', 'partner-gateway-queue'],\n    slaResponseDeadline: new Date(Date.now() + 2 * 3600 * 1000).toISOString(),\n  },\n}];"
+        "jsCode": "const crypto = require('crypto');\nconst s = $input.first().json || {};\nconst lineTotal = Array.isArray(s.items) ? s.items.reduce((acc, it) => acc + (Number(it && (it.value ?? it.qty)) || 0), 0) : 0;\nconst manifestDigest = crypto.createHash('sha256').update(JSON.stringify({ key: s.idempotencyKey, flags: s.complianceFlags || [], items: s.items || [], settlementEstimateVnd: s.settlementEstimateVnd || 0 })).digest('hex').slice(0, 16);\nreturn [{\n  json: {\n    kind: 'partner_dossier',\n    manifestDigest,\n    itemCount: Array.isArray(s.items) ? s.items.length : 0,\n    lineTotal,\n    settlementEstimateVnd: Number(s.settlementEstimateVnd) || 0,\n    dispatchedChannels: ['regulatory-audit-log', 'partner-gateway-queue', 'external-apps-2way'],\n    slaResponseDeadline: new Date(Date.now() + 2 * 3600 * 1000).toISOString(),\n  },\n}];"
+      }
+    },
+    {
+      "id": "dxos-ent-ext-telegram",
+      "name": "Notify Ops via Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1720,
+        220
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "telegramApi": {
+          "name": "LatticeDX Telegram Bot"
+        }
+      },
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $env.DX_TELEGRAM_CHAT_ID || '' }}",
+        "text": "={{ $json.telegramMessage }}",
+        "additionalFields": {
+          "disable_web_page_preview": true
+        }
+      }
+    },
+    {
+      "id": "dxos-ent-ext-email",
+      "name": "Send Partner Settlement Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1720,
+        380
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "smtp": {
+          "name": "LatticeDX SMTP"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $env.DX_SMTP_FROM || 'alerts@latticedx.example.com' }}",
+        "toEmail": "={{ $json.partnerEmail || $env.DX_PARTNER_SETTLEMENT_EMAIL || 'settlement@partner.example.com' }}",
+        "subject": "={{ $json.emailSubject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.emailBody }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "dxos-ent-ext-sheets",
+      "name": "Append Partner Ledger (Google Sheets)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1720,
+        540
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "LatticeDX Google Sheets OAuth2"
+        }
+      },
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $env.DX_GOOGLE_SHEET_ID || '' }}"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $env.DX_GOOGLE_SHEET_TAB || 'ColdChainSettlements' }}"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $json.googleSheetRow.timestamp }}",
+            "organizationId": "={{ $json.googleSheetRow.organizationId }}",
+            "code": "={{ $json.googleSheetRow.code }}",
+            "partnerCode": "={{ $json.googleSheetRow.partnerCode }}",
+            "lotCode": "={{ $json.googleSheetRow.lotCode }}",
+            "tier": "={{ $json.googleSheetRow.tier }}",
+            "riskScore": "={{ $json.googleSheetRow.riskScore }}",
+            "settlementEstimateVnd": "={{ $json.googleSheetRow.settlementEstimateVnd }}",
+            "idempotencyKey": "={{ $json.googleSheetRow.idempotencyKey }}"
+          }
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "dxos-ent-ext-slack",
+      "name": "Post Incident Alert to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1720,
+        700
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "slackOAuth2Api": {
+          "name": "LatticeDX Slack OAuth2"
+        }
+      },
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $env.DX_SLACK_CHANNEL || '#coldchain-incidents' }}"
+        },
+        "text": "={{ $json.slackMessage }}",
+        "otherOptions": {}
+      }
+    },
+    {
+      "id": "dxos-ent-ext-github",
+      "name": "Create Audit Issue in GitHub",
+      "type": "n8n-nodes-base.github",
+      "typeVersion": 1.1,
+      "position": [
+        1720,
+        860
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "githubApi": {
+          "name": "LatticeDX GitHub Token"
+        }
+      },
+      "parameters": {
+        "resource": "issue",
+        "operation": "create",
+        "owner": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $env.DX_GITHUB_OWNER || 'latticedx-ops' }}"
+        },
+        "repository": {
+          "__rl": true,
+          "mode": "name",
+          "value": "={{ $env.DX_GITHUB_REPO || 'coldchain-audit-log' }}"
+        },
+        "title": "={{ $json.githubIssueTitle }}",
+        "body": "={{ $json.githubIssueBody }}",
+        "labels": [
+          "coldchain-incident",
+          "partner-settlement"
+        ]
+      }
+    },
+    {
+      "id": "dxos-ent-merge-ext",
+      "name": "Merge External App Dispatches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        2000,
+        540
+      ],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 5,
+        "options": {}
+      }
+    },
+    {
+      "id": "dxos-ent-norm-ext",
+      "name": "Normalize External App Dispatches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2240,
+        540
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const score = $('Merge Risk & DMN Decision').first().json || {};\nconst items = $input.all().map((it) => it.json || {});\nconst channelNames = ['telegram', 'email_smtp', 'google_sheets', 'slack', 'github'];\nconst channels = items.map((entry, idx) => {\n  const channel = channelNames[idx] || `external_${idx}`;\n  const failed = Boolean(entry && entry.error);\n  return {\n    channel,\n    ok: !failed,\n    error: failed ? String((entry.error && entry.error.message) || entry.error || 'EXTERNAL_APP_ERROR') : null,\n  };\n});\nconst succeededCount = channels.filter((c) => c.ok).length;\nreturn [{\n  json: {\n    kind: 'external_apps',\n    totalChannels: channels.length,\n    succeededCount,\n    degradedCount: channels.length - succeededCount,\n    channels,\n    settlementEstimateVnd: Number(score.settlementEstimateVnd) || 0,\n  },\n}];"
       }
     },
     {
@@ -377,12 +648,12 @@
       "type": "n8n-nodes-base.merge",
       "typeVersion": 3.1,
       "position": [
-        1760,
-        -80
+        2480,
+        -60
       ],
       "parameters": {
         "mode": "append",
-        "numberInputs": 4,
+        "numberInputs": 5,
         "options": {}
       }
     },
@@ -392,11 +663,13 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.5,
       "position": [
-        1350,
-        520
+        1850,
+        1080
       ],
       "onError": "continueErrorOutput",
-      "retryOnFail": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
       "parameters": {
         "method": "POST",
         "url": "={{ ($env.DX_NOCOBASE_BASE_URL || 'http://nocobase').replace(/\\/+$/, '') + '/api/dxosAutomations:runNow' }}",
@@ -440,12 +713,12 @@
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [
-        2020,
-        140
+        2740,
+        180
       ],
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const score = $('Score Risk & Batch Compliance').first().json || {};\nif (score.invalidPayload) {\n  return [{ json: { ok: false, workflow: 'enterprise-compliance-orchestrator', statusCode: score.statusCode || 400, error: score.error || 'INVALID_PAYLOAD' } }];\n}\nconst allItems = $input.all().map((it) => it.json || {});\nconst pki = allItems.find((x) => x.kind === 'pki') || null;\nconst orion = allItems.find((x) => x.kind === 'orion_ld') || null;\nconst edge = allItems.find((x) => x.kind === 'edge_interlock') || null;\nconst dossier = allItems.find((x) => x.kind === 'partner_dossier') || null;\nlet escalationResult = null;\nif (score.tier === 'escalated') {\n  const escRaw = allItems[0] || {};\n  const escPayload = (escRaw.body && escRaw.body.data && typeof escRaw.body.data === 'object') ? escRaw.body.data : (escRaw.body && typeof escRaw.body === 'object' ? escRaw.body : escRaw);\n  const runObj = (escPayload && escPayload.run) || escPayload || {};\n  escalationResult = {\n    dispatched: !escRaw.error,\n    runUid: runObj.runUid || null,\n    status: runObj.status || (escRaw.error ? 'failed' : 'triggered'),\n    error: escRaw.error ? String(escRaw.error.message || escRaw.message || 'ESCALATION_FAILED') : null,\n  };\n}\nconst systemsOrchestrated = [];\nif (pki) systemsOrchestrated.push('nocobase-pki-ledger');\nif (orion) systemsOrchestrated.push('fiware-orion-ld');\nif (edge) systemsOrchestrated.push('nodered-mqtt-edge');\nif (dossier) systemsOrchestrated.push('partner-regulatory-dossier');\nif (escalationResult) systemsOrchestrated.push('nocobase-sla-escalation');\nlet execId = 'local';\ntry { execId = String($execution.id || 'local'); } catch {}\nreturn [{\n  json: {\n    ok: true,\n    statusCode: 200,\n    workflow: 'enterprise-compliance-orchestrator',\n    n8nExecutionId: execId,\n    idempotencyKey: score.idempotencyKey,\n    organizationId: score.organizationId,\n    eventType: score.eventType,\n    code: score.code,\n    tier: score.tier,\n    riskScore: score.riskScore,\n    complianceFlags: score.complianceFlags || [],\n    itemsProcessed: score.itemsProcessed || 0,\n    systemsOrchestrated,\n    pkiAttestation: pki ? { signed: Boolean(pki.signed), keyId: pki.keyId || null, merkleRoot: pki.merkleRoot || null, entryHash: pki.entryHash || null, error: pki.error || null } : null,\n    digitalTwinSync: orion ? { synced: Boolean(orion.synced), statusCode: orion.statusCode || null, broker: orion.broker, entityId: orion.entityId || null, error: orion.error || null } : null,\n    edgeInterlock: edge ? { dispatched: Boolean(edge.dispatched), statusCode: edge.statusCode || null, broker: edge.broker, mqttTopic: edge.mqttTopic || null, commandId: edge.commandId || null, desired: edge.desired || null, error: edge.error || null } : null,\n    partnerDispatch: dossier ? { manifestDigest: dossier.manifestDigest, itemCount: dossier.itemCount, lineTotal: dossier.lineTotal, dispatchedChannels: dossier.dispatchedChannels, slaResponseDeadline: dossier.slaResponseDeadline } : null,\n    escalationResult,\n    orchestratedAt: new Date().toISOString(),\n  },\n}];"
+        "jsCode": "const score = $('Merge Risk & DMN Decision').first().json || {};\nif (score.invalidPayload) {\n  return [{ json: { ok: false, workflow: 'enterprise-compliance-orchestrator', statusCode: score.statusCode || 400, error: score.error || 'INVALID_PAYLOAD' } }];\n}\nconst allItems = $input.all().map((it) => it.json || {});\nconst pki = allItems.find((x) => x.kind === 'pki') || null;\nconst orion = allItems.find((x) => x.kind === 'orion_ld') || null;\nconst edge = allItems.find((x) => x.kind === 'edge_interlock') || null;\nconst dossier = allItems.find((x) => x.kind === 'partner_dossier') || null;\nconst extApps = allItems.find((x) => x.kind === 'external_apps') || null;\nlet escalationResult = null;\nif (score.tier === 'escalated') {\n  const escRaw = allItems[0] || {};\n  const escPayload = (escRaw.body && escRaw.body.data && typeof escRaw.body.data === 'object') ? escRaw.body.data : (escRaw.body && typeof escRaw.body === 'object' ? escRaw.body : escRaw);\n  const runObj = (escPayload && escPayload.run) || escPayload || {};\n  escalationResult = {\n    dispatched: !escRaw.error,\n    runUid: runObj.runUid || null,\n    status: runObj.status || (escRaw.error ? 'failed' : 'triggered'),\n    error: escRaw.error ? String(escRaw.error.message || escRaw.message || 'ESCALATION_FAILED') : null,\n  };\n}\nconst systemsOrchestrated = [];\nif (pki) systemsOrchestrated.push('nocobase-pki-ledger');\nif (orion) systemsOrchestrated.push('fiware-orion-ld');\nif (edge) systemsOrchestrated.push('nodered-mqtt-edge');\nif (dossier) systemsOrchestrated.push('partner-regulatory-dossier');\nif (extApps) systemsOrchestrated.push('external-apps-fanout');\nif (escalationResult) systemsOrchestrated.push('nocobase-sla-escalation');\nlet execId = 'local';\ntry { execId = String($execution.id || 'local'); } catch {}\nreturn [{\n  json: {\n    ok: true,\n    statusCode: 200,\n    workflow: 'enterprise-compliance-orchestrator',\n    n8nExecutionId: execId,\n    idempotencyKey: score.idempotencyKey,\n    organizationId: score.organizationId,\n    eventType: score.eventType,\n    code: score.code,\n    tier: score.tier,\n    riskScore: score.riskScore,\n    dmnMatched: Boolean(score.dmnMatched),\n    complianceFlags: score.complianceFlags || [],\n    itemsProcessed: score.itemsProcessed || 0,\n    systemsOrchestrated,\n    settlementSummary: {\n      partnerCode: score.partnerCode,\n      partnerClaimRequired: Boolean(score.partnerClaimRequired),\n      settlementRatePct: score.settlementRatePct || 0,\n      settlementEstimateVnd: score.settlementEstimateVnd || 0,\n    },\n    pkiAttestation: pki ? { signed: Boolean(pki.signed), keyId: pki.keyId || null, merkleRoot: pki.merkleRoot || null, entryHash: pki.entryHash || null, error: pki.error || null } : null,\n    digitalTwinSync: orion ? { synced: Boolean(orion.synced), statusCode: orion.statusCode || null, broker: orion.broker, entityId: orion.entityId || null, error: orion.error || null } : null,\n    edgeInterlock: edge ? { dispatched: Boolean(edge.dispatched), statusCode: edge.statusCode || null, broker: edge.broker, mqttTopic: edge.mqttTopic || null, commandId: edge.commandId || null, desired: edge.desired || null, error: edge.error || null } : null,\n    partnerDispatch: dossier ? { manifestDigest: dossier.manifestDigest, itemCount: dossier.itemCount, lineTotal: dossier.lineTotal, dispatchedChannels: dossier.dispatchedChannels, slaResponseDeadline: dossier.slaResponseDeadline } : null,\n    externalAppsDispatched: extApps ? { totalChannels: extApps.totalChannels, succeededCount: extApps.succeededCount, degradedCount: extApps.degradedCount, channels: extApps.channels } : null,\n    escalationResult,\n    orchestratedAt: new Date().toISOString(),\n  },\n}];"
       }
     },
     {
@@ -454,8 +727,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        2280,
-        140
+        3000,
+        180
       ],
       "parameters": {
         "respondWith": "json",
@@ -511,6 +784,35 @@
       "main": [
         [
           {
+            "node": "Evaluate Settlement DMN Policy",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate Settlement DMN Policy": {
+      "main": [
+        [
+          {
+            "node": "Merge Risk & DMN Decision",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Risk & DMN Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Risk & DMN Decision": {
+      "main": [
+        [
+          {
             "node": "Route by Compliance Tier",
             "type": "main",
             "index": 0
@@ -538,6 +840,31 @@
           },
           {
             "node": "Build Partner & Regulatory Dossier",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notify Ops via Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Partner Settlement Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Append Partner Ledger (Google Sheets)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Post Incident Alert to Slack",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Create Audit Issue in GitHub",
             "type": "main",
             "index": 0
           }
@@ -656,6 +983,118 @@
         ]
       ]
     },
+    "Notify Ops via Telegram": {
+      "main": [
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Partner Settlement Email": {
+      "main": [
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Append Partner Ledger (Google Sheets)": {
+      "main": [
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 2
+          }
+        ],
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Post Incident Alert to Slack": {
+      "main": [
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 3
+          }
+        ],
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Create Audit Issue in GitHub": {
+      "main": [
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 4
+          }
+        ],
+        [
+          {
+            "node": "Merge External App Dispatches",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "Merge External App Dispatches": {
+      "main": [
+        [
+          {
+            "node": "Normalize External App Dispatches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize External App Dispatches": {
+      "main": [
+        [
+          {
+            "node": "Merge Critical Branches",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
     "Merge Critical Branches": {
       "main": [
         [
@@ -699,10 +1138,11 @@
   },
   "settings": {
     "executionOrder": "v1",
-    "saveDataSuccessExecution": "none",
-    "saveDataErrorExecution": "none",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "errorWorkflow": "dxos-enterprise-error-handler",
     "saveManualExecutions": false,
-    "executionTimeout": 30
+    "executionTimeout": 60
   },
   "pinData": {}
 }

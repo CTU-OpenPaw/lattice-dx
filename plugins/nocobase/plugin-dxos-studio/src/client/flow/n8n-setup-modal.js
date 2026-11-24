@@ -12,10 +12,10 @@ const N8N_WEBHOOK_PRESETS = Object.freeze([
   {
     key: 'enterprise-compliance-orchestrator',
     connectorKey: 'n8n-enterprise-orchestrator',
-    name: 'Enterprise Multi-System Compliance & PKI Orchestrator (17 nodes · 4 hệ thống)',
+    name: 'Enterprise Multi-System Compliance & PKI Orchestrator (26 nodes · 4 hệ thống · 5 External Apps)',
     path: '/webhook/latticedx/v1/enterprise-compliance-orchestrator',
     blueprintKey: 'auto_enterprise_n8n_compliance',
-    description: 'HMAC-SHA256 + Switch 3 nhánh + song song 4 hệ thống: NocoBase PKI, FIWARE Orion-LD, Node-RED/MQTT Interlock & Partner Dossier.',
+    description: 'HMAC-SHA256 + Switch 3 nhánh + song song NocoBase PKI, Orion-LD, Node-RED/MQTT, Partner Dossier và Telegram/Email/Sheets/Slack/GitHub.',
   },
   {
     key: 'alert-orchestrator',
@@ -78,6 +78,7 @@ function createN8nSetupModal(React) {
   return function N8nSetupModal(props = {}) {
     const { open = false, api = null, organizationId = '', selectedNode = null, onClose, onConnectorsChanged, onApplyToSelectedNode, onOpenEnterpriseBlueprint } = props;
     const [connectors, setConnectors] = React.useState([]);
+    const [liveWorkflows, setLiveWorkflows] = React.useState([]);
     const [loading, setLoading] = React.useState(false);
     const [busy, setBusy] = React.useState(false);
     const [status, setStatus] = React.useState(null);
@@ -91,11 +92,22 @@ function createN8nSetupModal(React) {
       if (!cApi?.request || !organizationId) return;
       setLoading(true);
       try {
-        const res = await cApi.request({ url: 'dxosVault:list', method: 'get', params: { organizationId }, skipNotify: true });
-        const items = res?.data?.data?.items || res?.data?.items || [];
-        setConnectors(Array.isArray(items) ? items : []);
-      } catch (err) {
-        setStatus({ type: 'error', text: err?.message || 'Không tải được danh sách connector.' });
+        const [vaultRes, wfRes] = await Promise.allSettled([
+          cApi.request({ url: 'dxosVault:list', method: 'get', params: { organizationId }, skipNotify: true }),
+          cApi.request({ url: 'dxosN8n:workflows', method: 'get', params: { organizationId, limit: 20 }, skipNotify: true }),
+        ]);
+        if (vaultRes.status === 'fulfilled') {
+          const items = vaultRes.value?.data?.data?.items || vaultRes.value?.data?.items || [];
+          setConnectors(Array.isArray(items) ? items : []);
+        } else {
+          setStatus({ type: 'error', text: vaultRes.reason?.message || 'Không tải được danh sách connector.' });
+        }
+        if (wfRes.status === 'fulfilled') {
+          const wfs = wfRes.value?.data?.data?.data || wfRes.value?.data?.data || wfRes.value?.data?.items || [];
+          setLiveWorkflows(Array.isArray(wfs) ? wfs : []);
+        } else {
+          setLiveWorkflows([]);
+        }
       } finally {
         setLoading(false);
       }
@@ -218,6 +230,16 @@ function createN8nSetupModal(React) {
             ),
             canAttachNode ? h('button', { type: 'button', 'data-testid': `dxos-n8n-apply-preset-${idx}`, onClick: () => { onApplyToSelectedNode?.(p); onClose?.(); }, style: BTN('act') }, 'Gắn vào node đang chọn') : null,
           )),
+        ),
+
+        h('div', { 'data-testid': 'dxos-n8n-modal-live-workflows', style: { display: 'grid', gap: 6 } },
+          h('strong', { style: { fontSize: 12, color: '#0F172A' } }, `4. Stock n8n Workflows đang chạy (${liveWorkflows.length})`),
+          !liveWorkflows.length
+            ? h('span', { style: { fontSize: 11, color: '#64748B' } }, 'Chưa lấy được danh sách live workflows từ Stock n8n REST API v1 (kiểm tra connector n8n_api trong Connectors & n8n).')
+            : liveWorkflows.slice(0, 8).map((wf) => h('div', { key: wf.id || wf.name, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#FFFFFF', fontSize: 12 } },
+              h('span', null, h('strong', null, wf.name || wf.id), ` (${wf.active ? 'active' : 'paused'})`),
+              h('a', { href: `${editorUrl}/workflow/${encodeURIComponent(String(wf.id || ''))}`, target: '_blank', rel: 'noopener noreferrer', style: { fontSize: 11, color: '#1D4ED8', fontWeight: 600, textDecoration: 'none' } }, 'Mở Editor ↗'),
+            )),
         ),
       ),
     );

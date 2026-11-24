@@ -20,8 +20,15 @@ const requireFromTest = createRequire(import.meta.url);
 const COLDCHAIN_PATH = join(ROOT, 'infra/config/n8n/dxos-coldchain-alert-orchestrator.json');
 const EPOD_PATH = join(ROOT, 'infra/config/n8n/dxos-epod-partner-sync.json');
 const ENT_COMPLIANCE_PATH = join(ROOT, 'infra/config/n8n/dxos-enterprise-compliance-orchestrator.json');
+const ENT_ERROR_HANDLER_PATH = join(ROOT, 'infra/config/n8n/dxos-enterprise-error-handler.json');
+const EXTERNAL_CALLBACK_PATH = join(ROOT, 'infra/config/n8n/dxos-external-app-inbound-callback.json');
+const ENT_BLUEPRINT_PATH = join(
+  ROOT,
+  'plugins/nocobase/plugin-dxos-studio/src/server/flow/blueprints/enterprise-n8n-compliance.json',
+);
 
 const SECRET_TOKEN_RE = /(?:ldx_pat_[0-9a-f]{8}_[0-9a-f]{32}|whsec_[A-Za-z0-9+/=]{12,}|sk-(?:proj-|live-|test-)?[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{20,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)/;
+const FORBIDDEN_LEGACY_ASSISTANT_RE = new RegExp(`\\b${['co', 'pilot'].join('')}\\b`, 'i');
 
 function loadWorkflow(path) {
   const raw = readFileSync(path, 'utf8');
@@ -98,7 +105,8 @@ for (const spec of WORKFLOW_SPECS) {
     assert.deepEqual(workflow.pinData, {});
     assert.equal(workflow.settings?.executionOrder, 'v1');
     assert.equal(workflow.settings?.saveDataSuccessExecution, 'none');
-    assert.equal(workflow.settings?.saveDataErrorExecution, 'none');
+    assert.equal(workflow.settings?.saveDataErrorExecution, 'all');
+    assert.equal(workflow.settings?.errorWorkflow, 'dxos-enterprise-error-handler');
     assert.equal(workflow.settings?.saveManualExecutions, false);
 
     assert.equal(workflow.meta?.author, 'CTU-OpenPaw');
@@ -149,7 +157,8 @@ for (const spec of WORKFLOW_SPECS) {
     assert.equal(httpNode.type, 'n8n-nodes-base.httpRequest');
     assert.equal(httpNode.parameters?.method, 'POST');
     assert.equal(httpNode.onError, 'continueErrorOutput');
-    assert.equal(httpNode.retryOnFail, false);
+    assert.equal(httpNode.retryOnFail, true);
+    assert.equal(httpNode.maxTries, 3);
     assert.equal(httpNode.parameters?.options?.redirect?.redirect?.followRedirects, false);
 
     const urlExpr = httpNode.parameters?.url;
@@ -564,28 +573,103 @@ test('epod-partner-sync: attestation builder maps ePOD & voucher targets to dxos
   assert.equal(responseBody.merkleRoot, 'abc123');
 });
 
-test('enterprise-compliance-orchestrator: 17-node 4-system graph validates HMAC, risk tiers, PKI, Orion-LD, MQTT edge interlock, partner dossier, and fan-in aggregation', () => {
-  const { raw, workflow } = loadWorkflow(ENT_COMPLIANCE_PATH);
-  assert.equal(workflow.nodes.length, 17);
-  assert.equal(workflow.active, false);
-  assert.equal(workflow.settings?.saveDataSuccessExecution, 'none');
-  assert.equal(SECRET_TOKEN_RE.test(raw), false);
-  assert.equal(workflow.meta?.spdx, 'SPDX-License-Identifier: Apache-2.0');
+function assertStockN8nGraphIntegrity(raw, workflow, label) {
+  assert.equal(workflow.active, false, `${label} must be inactive on export`);
+  assert.deepEqual(workflow.pinData, {}, `${label} pinData must be empty`);
+  assert.equal(workflow.settings?.executionOrder, 'v1', `${label} executionOrder must be v1`);
+  assert.equal(workflow.meta?.author, 'CTU-OpenPaw', `${label} meta.author`);
+  assert.equal(workflow.meta?.license, 'Apache-2.0', `${label} meta.license`);
+  assert.equal(workflow.meta?.spdx, 'SPDX-License-Identifier: Apache-2.0', `${label} meta.spdx`);
+  assert.equal(SECRET_TOKEN_RE.test(raw), false, `${label} must contain zero hardcoded secrets`);
+  assert.equal(FORBIDDEN_LEGACY_ASSISTANT_RE.test(raw), false, `${label} must contain zero forbidden legacy assistant strings`);
+  assert.doesNotMatch(
+    raw,
+    /http:\/\/gateway|http:\/\/api:|\/v1\/workflows|\/v1\/chat\/completions|\/v1\/integrations/,
+    `${label} must not reference legacy /v1/ endpoints`,
+  );
 
-  for (const httpNodeName of [
+  assert.ok(Array.isArray(workflow.nodes) && workflow.nodes.length > 0);
+  const nodeNames = new Set();
+  const nodeIds = new Set();
+  for (const node of workflow.nodes) {
+    assert.ok(typeof node.id === 'string' && node.id.length > 0);
+    assert.ok(!nodeIds.has(node.id), `${label}: duplicate node id ${node.id}`);
+    nodeIds.add(node.id);
+    assert.ok(typeof node.name === 'string' && node.name.length > 0);
+    assert.ok(!nodeNames.has(node.name), `${label}: duplicate node name ${node.name}`);
+    nodeNames.add(node.name);
+    assert.match(node.type, /^n8n-nodes-base\./, `${label}: node ${node.name} must use stock n8n-nodes-base.*`);
+    assert.equal(typeof node.typeVersion, 'number', `${label}: node ${node.name} typeVersion must be numeric`);
+    assert.ok(Array.isArray(node.position) && node.position.length === 2, `${label}: node ${node.name} position`);
+    for (const cred of Object.values(node.credentials ?? {})) {
+      assert.equal(cred.id, undefined, `${label}: credential IDs must never be exported into Git (${node.name})`);
+    }
+  }
+
+  for (const [sourceName, outputMap] of Object.entries(workflow.connections ?? {})) {
+    assert.ok(nodeNames.has(sourceName), `${label}: connection source missing: ${sourceName}`);
+    for (const branchList of outputMap.main ?? []) {
+      for (const edge of branchList) {
+        assert.ok(nodeNames.has(edge.node), `${label}: connection target missing: ${edge.node}`);
+      }
+    }
+  }
+}
+
+test('enterprise-compliance-orchestrator: flagship >=22-node 2-way Cold-Chain Settlement & External-App graph validates HMAC, DMN, PKI, Orion-LD, MQTT, Telegram/SMTP/Sheets/Slack/GitHub, retries, and errorWorkflow', () => {
+  const { raw, workflow } = loadWorkflow(ENT_COMPLIANCE_PATH);
+  assertStockN8nGraphIntegrity(raw, workflow, 'enterprise-compliance-orchestrator');
+
+  assert.ok(workflow.nodes.length >= 22, `Expected >= 22 nodes, got ${workflow.nodes.length}`);
+  assert.equal(workflow.settings?.saveDataErrorExecution, 'all');
+  assert.equal(workflow.settings?.errorWorkflow, 'dxos-enterprise-error-handler');
+
+  const nodeTypes = new Set(workflow.nodes.map((n) => n.type));
+  for (const requiredType of [
+    'n8n-nodes-base.webhook',
+    'n8n-nodes-base.code',
+    'n8n-nodes-base.if',
+    'n8n-nodes-base.switch',
+    'n8n-nodes-base.httpRequest',
+    'n8n-nodes-base.merge',
+    'n8n-nodes-base.respondToWebhook',
+    'n8n-nodes-base.telegram',
+    'n8n-nodes-base.emailSend',
+    'n8n-nodes-base.googleSheets',
+    'n8n-nodes-base.slack',
+    'n8n-nodes-base.github',
+  ]) {
+    assert.ok(nodeTypes.has(requiredType), `Missing required Stock n8n node type: ${requiredType}`);
+  }
+
+  const externalNodes = [
+    'Evaluate Settlement DMN Policy',
     'Sign Document in NocoBase Ledger',
     'Upsert Digital Twin in Orion-LD',
     'Dispatch Edge Interlock (Node-RED MQTT)',
     'Trigger NocoBase Escalation',
-  ]) {
-    const httpNode = getNode(workflow, httpNodeName);
-    assert.equal(httpNode.type, 'n8n-nodes-base.httpRequest');
-    assert.equal(httpNode.onError, 'continueErrorOutput');
-    assert.equal(httpNode.retryOnFail, false);
-    assert.equal(httpNode.parameters?.options?.redirect?.redirect?.followRedirects, false);
-    assert.ok(String(httpNode.parameters?.url || '').includes('$env.'));
+    'Notify Ops via Telegram',
+    'Send Partner Settlement Email',
+    'Append Partner Ledger (Google Sheets)',
+    'Post Incident Alert to Slack',
+    'Create Audit Issue in GitHub',
+  ];
+  for (const nodeName of externalNodes) {
+    const node = getNode(workflow, nodeName);
+    assert.equal(node.onError, 'continueErrorOutput', `${nodeName} must continueErrorOutput`);
+    assert.equal(node.retryOnFail, true, `${nodeName} must enable retryOnFail`);
+    assert.ok(Number(node.maxTries) >= 2, `${nodeName} must configure maxTries >= 2`);
+    if (node.type === 'n8n-nodes-base.httpRequest') {
+      assert.equal(node.parameters?.options?.redirect?.redirect?.followRedirects, false);
+      assert.ok(String(node.parameters?.url || '').includes('$env.'));
+    }
   }
 
+  const dmnHttp = getNode(workflow, 'Evaluate Settlement DMN Policy');
+  assert.equal(
+    evalN8nExpr(dmnHttp.parameters.url, { $env: {} }),
+    'http://nocobase/api/dxosDmn:evaluate',
+  );
   const orionHttp = getNode(workflow, 'Upsert Digital Twin in Orion-LD');
   assert.equal(
     evalN8nExpr(orionHttp.parameters.url, { $env: {} }),
@@ -596,7 +680,8 @@ test('enterprise-compliance-orchestrator: 17-node 4-system graph validates HMAC,
     evalN8nExpr(edgeHttp.parameters.url, { $env: {} }),
     'http://nodered:1880/twin/command',
   );
-  assert.equal(getNode(workflow, 'Merge Critical Branches').parameters?.numberInputs, 4);
+  assert.equal(getNode(workflow, 'Merge Critical Branches').parameters?.numberInputs, 5);
+  assert.equal(getNode(workflow, 'Merge External App Dispatches').parameters?.numberInputs, 5);
 
   const verifyFn = compileCodeNode(workflow, 'Verify Standard Webhook');
   const secret = `whsec_${randomBytes(32).toString('base64')}`;
@@ -616,15 +701,49 @@ test('enterprise-compliance-orchestrator: 17-node 4-system graph validates HMAC,
       body: {
         organizationId: 'org-ent',
         type: 'record.latticeRequests.create',
-        data: { id: 7, assetId: 4, code: 'REQ-ENT-7', amount: 125000000, severity: 'critical', temperatureC: -8, slaOverdueMinutes: 45, items: [{ sku: 'A', value: 60 }, { sku: 'B', value: 40 }] },
+        data: {
+          id: 7,
+          assetId: 4,
+          code: 'REQ-ENT-7',
+          amount: 125000000,
+          severity: 'critical',
+          temperatureC: -8,
+          slaOverdueMinutes: 45,
+          partnerCode: 'vnpost-cold',
+          partnerEmail: 'claims@vnpost-cold.example.com',
+          lotCode: 'LOT-VAC-2026-09',
+          items: [{ sku: 'A', value: 60000000 }, { sku: 'B', value: 65000000 }],
+        },
       },
     },
   });
   assert.equal(crit.tier, 'critical');
   assert.equal(crit.riskScore, 100);
+  assert.equal(crit.partnerClaimRequired, true);
+  assert.ok(crit.settlementEstimateVnd > 0);
   assert.equal(crit.signDocumentPayload.targetRecordId, 7);
   assert.equal(crit.orionEntityId, 'urn:ngsi-ld:ComplianceAlert:org-ent:REQ-ENT-7');
   assert.equal(crit.edgeInterlockPayload.assetId, 4);
+  assert.equal(crit.dmnEvaluatePayload.tableKey, 'coldchain_settlement_policy_v1');
+
+  const mergeDmnNode = getNode(workflow, 'Merge Risk & DMN Decision');
+  const mergeDmnFn = new Function('$input', '$', 'require', mergeDmnNode.parameters.jsCode);
+  const mergedDecision = mergeDmnFn(
+    { first: () => ({ json: { body: { data: { matched: true, decision: { settlementTier: 'critical', settlementRatePct: 80, approveClaim: true } } } } }) },
+    (name) => {
+      assert.equal(name, 'Score Risk & Batch Compliance');
+      return { first: () => ({ json: crit }) };
+    },
+    requireFromTest,
+  )[0].json;
+  assert.equal(mergedDecision.dmnMatched, true);
+  assert.equal(mergedDecision.settlementRatePct, 80);
+  assert.equal(mergedDecision.settlementEstimateVnd, 100000000);
+  assert.ok(mergedDecision.telegramMessage.includes('REQ-ENT-7'));
+  assert.ok(mergedDecision.emailSubject.includes('REQ-ENT-7'));
+  assert.ok(mergedDecision.slackMessage.includes('REQ-ENT-7'));
+  assert.ok(mergedDecision.githubIssueTitle.includes('REQ-ENT-7'));
+  assert.equal(mergedDecision.googleSheetRow.code, 'REQ-ENT-7');
 
   const normPkiFn = compileCodeNode(workflow, 'Normalize PKI Attestation');
   const pkiItem = runCode(normPkiFn, { json: { body: { data: { signed: true, keyId: 'ed25519-k1', merkleRoot: 'mrk-999' } } } });
@@ -635,7 +754,7 @@ test('enterprise-compliance-orchestrator: 17-node 4-system graph validates HMAC,
   const normOrionFn = new Function('$input', '$', 'require', normOrionNode.parameters.jsCode);
   const orionItem = normOrionFn(
     { first: () => ({ json: { statusCode: 201 } }) },
-    () => ({ first: () => ({ json: crit }) }),
+    () => ({ first: () => ({ json: mergedDecision }) }),
     requireFromTest,
   )[0].json;
   assert.equal(orionItem.synced, true);
@@ -644,38 +763,295 @@ test('enterprise-compliance-orchestrator: 17-node 4-system graph validates HMAC,
   const normEdgeNode = getNode(workflow, 'Normalize Edge Interlock');
   const normEdgeFn = new Function('$input', '$', 'require', normEdgeNode.parameters.jsCode);
   const edgeItem = normEdgeFn(
-    { first: () => ({ json: { statusCode: 202, body: { commandId: crit.edgeInterlockPayload.commandId } } }) },
-    () => ({ first: () => ({ json: crit }) }),
+    { first: () => ({ json: { statusCode: 202, body: { commandId: mergedDecision.edgeInterlockPayload.commandId } } }) },
+    () => ({ first: () => ({ json: mergedDecision }) }),
     requireFromTest,
   )[0].json;
   assert.equal(edgeItem.dispatched, true);
   assert.equal(edgeItem.mqttTopic, 'latticedx/org-ent/4/command');
 
   const dossierFn = compileCodeNode(workflow, 'Build Partner & Regulatory Dossier');
-  const dossierItem = runCode(dossierFn, { json: crit });
+  const dossierItem = runCode(dossierFn, { json: mergedDecision });
   assert.equal(dossierItem.kind, 'partner_dossier');
   assert.equal(dossierItem.itemCount, 2);
+
+  const normExtNode = getNode(workflow, 'Normalize External App Dispatches');
+  const normExtFn = new Function('$input', '$', 'require', normExtNode.parameters.jsCode);
+  const extItem = normExtFn(
+    {
+      all: () => [
+        { json: { ok: true, result: { message_id: 701 } } },
+        { json: { accepted: ['claims@vnpost-cold.example.com'], messageId: '<smtp-1@latticedx>' } },
+        { json: { updates: { updatedRows: 1 } } },
+        { json: { ok: true, ts: '1732460000.0001' } },
+        { json: { error: { message: 'GITHUB_TOKEN_NOT_CONFIGURED' } } },
+      ],
+    },
+    () => ({ first: () => ({ json: mergedDecision }) }),
+    requireFromTest,
+  )[0].json;
+  assert.equal(extItem.kind, 'external_apps');
+  assert.equal(extItem.totalChannels, 5);
+  assert.equal(extItem.succeededCount, 4);
+  assert.equal(extItem.degradedCount, 1);
 
   const aggNode = getNode(workflow, 'Aggregate Orchestration Receipt');
   const aggFn = new Function('$input', '$', '$execution', aggNode.parameters.jsCode);
   const aggOut = aggFn(
-    { all: () => [{ json: pkiItem }, { json: orionItem }, { json: edgeItem }, { json: dossierItem }] },
+    { all: () => [{ json: pkiItem }, { json: orionItem }, { json: edgeItem }, { json: dossierItem }, { json: extItem }] },
     (name) => {
-      assert.equal(name, 'Score Risk & Batch Compliance');
-      return { first: () => ({ json: crit }) };
+      assert.equal(name, 'Merge Risk & DMN Decision');
+      return { first: () => ({ json: mergedDecision }) };
     },
-    { id: 'exec-live-17' },
+    { id: 'exec-live-26' },
   );
   assert.equal(aggOut[0].json.ok, true);
-  assert.equal(aggOut[0].json.n8nExecutionId, 'exec-live-17');
+  assert.equal(aggOut[0].json.n8nExecutionId, 'exec-live-26');
   assert.deepEqual(aggOut[0].json.systemsOrchestrated, [
     'nocobase-pki-ledger',
     'fiware-orion-ld',
     'nodered-mqtt-edge',
     'partner-regulatory-dossier',
+    'external-apps-fanout',
   ]);
   assert.equal(aggOut[0].json.pkiAttestation.merkleRoot, 'mrk-999');
   assert.equal(aggOut[0].json.digitalTwinSync.synced, true);
   assert.equal(aggOut[0].json.edgeInterlock.dispatched, true);
   assert.equal(aggOut[0].json.partnerDispatch.itemCount, 2);
+  assert.equal(aggOut[0].json.externalAppsDispatched.succeededCount, 4);
+  assert.equal(aggOut[0].json.settlementSummary.settlementEstimateVnd, 100000000);
+});
+
+test('enterprise-error-handler: starts with errorTrigger, scrubs secrets, notifies ops, and logs incident event back to NocoBase', () => {
+  const { raw, workflow } = loadWorkflow(ENT_ERROR_HANDLER_PATH);
+  assertStockN8nGraphIntegrity(raw, workflow, 'enterprise-error-handler');
+  assert.equal(workflow.settings?.saveDataErrorExecution, 'all');
+
+  const triggerNode = workflow.nodes[0];
+  assert.equal(triggerNode.type, 'n8n-nodes-base.errorTrigger');
+
+  const httpNode = getNode(workflow, 'Log Error Event to NocoBase');
+  assert.equal(httpNode.type, 'n8n-nodes-base.httpRequest');
+  assert.equal(httpNode.parameters?.method, 'POST');
+  assert.equal(httpNode.retryOnFail, true);
+  assert.ok(Number(httpNode.maxTries) >= 2);
+  assert.equal(httpNode.onError, 'continueErrorOutput');
+  assert.equal(
+    evalN8nExpr(httpNode.parameters.url, { $env: {} }),
+    'http://nocobase/api/dxosEvents:publish',
+  );
+  const headers = httpNode.parameters?.headerParameters?.parameters ?? [];
+  const authHeader = headers.find((h) => h.name === 'Authorization');
+  assert.ok(authHeader?.value?.includes('$env.DX_NOCOBASE_PAT'));
+  assert.equal(
+    evalN8nExpr(authHeader.value, { $env: { DX_NOCOBASE_PAT: 'ldx_pat_12345678_abcdef' } }),
+    'Bearer ldx_pat_12345678_abcdef',
+  );
+
+  const tgNode = getNode(workflow, 'Notify Ops on Error (Telegram)');
+  assert.equal(tgNode.type, 'n8n-nodes-base.telegram');
+  assert.equal(tgNode.retryOnFail, true);
+  const mailNode = getNode(workflow, 'Send Error Alert Email');
+  assert.equal(mailNode.type, 'n8n-nodes-base.emailSend');
+  assert.equal(mailNode.retryOnFail, true);
+
+  const formatFn = compileCodeNode(workflow, 'Format Error Incident Payload');
+  const formatted = runCode(formatFn, {
+    json: {
+      execution: {
+        id: 'exec-err-99',
+        url: 'http://n8n:5678/execution/exec-err-99',
+        lastNodeExecuted: 'Append Partner Ledger (Google Sheets)',
+        error: {
+          message: 'Request failed with Bearer ldx_pat_aaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        },
+      },
+      workflow: {
+        id: 'wf-ent-1',
+        name: 'LatticeDX v1.0 Enterprise Multi-System Compliance & Partner Settlement Orchestrator',
+      },
+    },
+    env: { DX_DEFAULT_ORG_ID: 'org-ent' },
+  });
+  assert.equal(formatted.organizationId, 'org-ent');
+  assert.equal(formatted.nocobaseEventPayload.type, 'automation.n8n_failed');
+  assert.equal(formatted.nocobaseEventPayload.organizationId, 'org-ent');
+  assert.equal(
+    formatted.nocobaseEventPayload.data.errorMessage.includes('ldx_pat_'),
+    false,
+    'Sensitive PAT tokens must be redacted from error payloads',
+  );
+  assert.ok(formatted.telegramMessage.includes('exec-err-99'));
+  assert.ok(formatted.emailSubject.includes('exec-err-99'));
+});
+
+test('external-app-inbound-callback: verifies multi-provider signatures fail-closed and updates NocoBase status via ldx_pat_* bearer auth', () => {
+  const { raw, workflow } = loadWorkflow(EXTERNAL_CALLBACK_PATH);
+  assertStockN8nGraphIntegrity(raw, workflow, 'external-app-inbound-callback');
+  assert.equal(workflow.settings?.saveDataErrorExecution, 'all');
+  assert.equal(workflow.settings?.errorWorkflow, 'dxos-enterprise-error-handler');
+
+  const webhookNode = getNode(workflow, 'Receive External App Callback');
+  assert.equal(webhookNode.type, 'n8n-nodes-base.webhook');
+  assert.equal(webhookNode.parameters?.httpMethod, 'POST');
+  assert.equal(webhookNode.parameters?.path, 'latticedx/v1/external-app-callback');
+  assert.equal(webhookNode.parameters?.responseMode, 'responseNode');
+
+  const updateHttp = getNode(workflow, 'Update Record Status in NocoBase');
+  assert.equal(updateHttp.type, 'n8n-nodes-base.httpRequest');
+  assert.equal(updateHttp.parameters?.method, 'POST');
+  assert.equal(updateHttp.retryOnFail, true);
+  assert.ok(Number(updateHttp.maxTries) >= 2);
+  assert.equal(updateHttp.onError, 'continueErrorOutput');
+  assert.equal(
+    evalN8nExpr(updateHttp.parameters.url, {
+      $env: {},
+      $json: { targetCollection: 'latticeCustomPartnerClaims', targetRecordId: 42 },
+    }),
+    'http://nocobase/api/latticeCustomPartnerClaims:update?filterByTk=42',
+  );
+  const authHdr = (updateHttp.parameters?.headerParameters?.parameters ?? []).find((h) => h.name === 'Authorization');
+  assert.ok(authHdr?.value?.includes('$env.DX_NOCOBASE_PAT'));
+  assert.equal(
+    evalN8nExpr(authHdr.value, { $env: { DX_NOCOBASE_PAT: 'ldx_pat_deadbeef_0123456789abcdef0123456789abcdef' } }),
+    'Bearer ldx_pat_deadbeef_0123456789abcdef0123456789abcdef',
+  );
+
+  const eventHttp = getNode(workflow, 'Publish Callback Event to NocoBase');
+  assert.equal(eventHttp.type, 'n8n-nodes-base.httpRequest');
+  assert.equal(eventHttp.retryOnFail, true);
+  assert.equal(
+    evalN8nExpr(eventHttp.parameters.url, { $env: {} }),
+    'http://nocobase/api/dxosEvents:publish',
+  );
+
+  const verifyFn = compileCodeNode(workflow, 'Verify Inbound Callback Signature');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const partnerBody = {
+    organizationId: 'org-ent',
+    sourceApp: 'partner_webhook',
+    targetCollection: 'latticeCustomPartnerClaims',
+    targetRecordId: 42,
+    decision: 'settled',
+    settlementAmountVnd: 100000000,
+    partnerReference: 'PARTNER-ACK-77',
+  };
+  const partnerRaw = JSON.stringify(partnerBody);
+  const whSecret = 'inbound-wh-secret-2026';
+  const whSig = signStandardWebhook({ webhookId: 'cb_1', timestampSec: nowSec, rawBody: partnerRaw, secret: whSecret });
+  const okPartner = runCode(verifyFn, {
+    json: {
+      headers: {
+        'webhook-id': 'cb_1',
+        'webhook-timestamp': String(nowSec),
+        'webhook-signature': whSig,
+      },
+      rawBody: partnerRaw,
+      body: partnerBody,
+    },
+    env: { DX_WEBHOOK_SECRET: whSecret },
+  });
+  assert.equal(okPartner.authenticated, true);
+  assert.equal(okPartner.authScheme, 'standard_webhooks');
+
+  const tgBody = {
+    callback_query: {
+      id: 'tg_cb_1',
+      from: { username: 'ops_director' },
+      data: 'approve_claim:org-ent:latticeCustomPartnerClaims:42',
+    },
+  };
+  const okTg = runCode(verifyFn, {
+    json: {
+      headers: { 'x-telegram-bot-api-secret-token': 'tg-secret-token-2026' },
+      body: tgBody,
+    },
+    env: { DX_TELEGRAM_WEBHOOK_SECRET: 'tg-secret-token-2026' },
+  });
+  assert.equal(okTg.authenticated, true);
+  assert.equal(okTg.authScheme, 'telegram_secret_token');
+
+  const slackSecret = 'slack-signing-secret-2026';
+  const slackRaw = JSON.stringify({
+    organizationId: 'org-ent',
+    targetCollection: 'latticeIncidentCases',
+    targetRecordId: 9,
+    decision: 'acknowledged',
+    sourceApp: 'slack',
+  });
+  const slackSig = `v0=${createHmac('sha256', slackSecret).update(`v0:${nowSec}:${slackRaw}`, 'utf8').digest('hex')}`;
+  const okSlack = runCode(verifyFn, {
+    json: {
+      headers: { 'x-slack-request-timestamp': String(nowSec), 'x-slack-signature': slackSig },
+      rawBody: slackRaw,
+    },
+    env: { DX_SLACK_SIGNING_SECRET: slackSecret },
+  });
+  assert.equal(okSlack.authenticated, true);
+  assert.equal(okSlack.authScheme, 'slack_v0');
+
+  const rejected = runCode(verifyFn, {
+    json: {
+      headers: { 'x-telegram-bot-api-secret-token': 'wrong-token' },
+      body: tgBody,
+    },
+    env: { DX_TELEGRAM_WEBHOOK_SECRET: 'tg-secret-token-2026' },
+  });
+  assert.equal(rejected.authenticated, false);
+  assert.equal(rejected.statusCode, 401);
+
+  const normalizeFn = compileCodeNode(workflow, 'Normalize Inbound Action & Target');
+  const normPartner = runCode(normalizeFn, {
+    json: { authenticated: true, authScheme: 'standard_webhooks', body: partnerBody },
+  });
+  assert.equal(normPartner.valid, true);
+  assert.equal(normPartner.targetCollection, 'latticeCustomPartnerClaims');
+  assert.equal(normPartner.targetRecordId, 42);
+  assert.equal(normPartner.updatePayload.status, 'settled');
+  assert.equal(normPartner.updatePayload.settlementStatus, 'settled');
+  assert.equal(normPartner.eventPublishPayload.type, 'partner.settlement_callback');
+
+  const normTg = runCode(normalizeFn, {
+    json: { authenticated: true, authScheme: 'telegram_secret_token', body: tgBody },
+  });
+  assert.equal(normTg.valid, true);
+  assert.equal(normTg.sourceApp, 'telegram');
+  assert.equal(normTg.organizationId, 'org-ent');
+  assert.equal(normTg.targetCollection, 'latticeCustomPartnerClaims');
+  assert.equal(normTg.targetRecordId, 42);
+  assert.equal(normTg.updatePayload.status, 'approved');
+
+  const badTarget = runCode(normalizeFn, {
+    json: {
+      authenticated: true,
+      authScheme: 'standard_webhooks',
+      body: { organizationId: 'org-ent', targetCollection: 'users', targetRecordId: 1, decision: 'approved' },
+    },
+  });
+  assert.equal(badTarget.valid, false);
+  assert.equal(badTarget.statusCode, 400);
+});
+
+test('enterprise-n8n-compliance blueprint in plugin-dxos-studio aligns with the >=22-node Cold-Chain Settlement orchestrator and passes validateFlowGraph', () => {
+  const raw = readFileSync(ENT_BLUEPRINT_PATH, 'utf8');
+  assert.equal(FORBIDDEN_LEGACY_ASSISTANT_RE.test(raw), false);
+  assert.equal(/17[- ]node/i.test(raw), false, 'Blueprint must no longer reference stale 17-node count');
+  const bp = JSON.parse(raw);
+  assert.equal(bp.blueprintKey, 'auto_enterprise_n8n_compliance');
+  assert.equal(bp.ruleKey, 'auto_enterprise_n8n_compliance');
+
+  const n8nNode = bp.graphJson.nodes.find((n) => n.id === 'call_n8n_orchestrator');
+  assert.ok(n8nNode);
+  assert.equal(n8nNode.type, 'integration.http');
+  assert.equal(n8nNode.config.connectorKey, 'n8n-enterprise-orchestrator');
+  assert.equal(n8nNode.config.path, '/webhook/latticedx/v1/enterprise-compliance-orchestrator');
+
+  const { validateFlowGraph } = requireFromTest(
+    join(ROOT, 'plugins/nocobase/plugin-dxos-studio/src/server/flow/validator.js'),
+  );
+  const flowRegistry = requireFromTest(
+    join(ROOT, 'plugins/nocobase/plugin-dxos-studio/src/server/flow/registry.js'),
+  );
+  const validation = validateFlowGraph(bp.graphJson, { nodeRegistry: flowRegistry });
+  assert.equal(validation.ok, true, `Blueprint graphJson invalid: ${JSON.stringify(validation.errors)}`);
 });

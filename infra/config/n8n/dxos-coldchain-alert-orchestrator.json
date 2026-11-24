@@ -151,7 +151,9 @@
         -160
       ],
       "onError": "continueErrorOutput",
-      "retryOnFail": false,
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
       "parameters": {
         "method": "POST",
         "url": "={{ ($env.DX_NOCOBASE_BASE_URL || 'http://nocobase').replace(/\\/+$/, '') + '/api/dxosAutomations:runNow' }}",
@@ -333,7 +335,8 @@
   "settings": {
     "executionOrder": "v1",
     "saveDataSuccessExecution": "none",
-    "saveDataErrorExecution": "none",
+    "saveDataErrorExecution": "all",
+    "errorWorkflow": "dxos-enterprise-error-handler",
     "saveManualExecutions": false,
     "executionTimeout": 30
   },

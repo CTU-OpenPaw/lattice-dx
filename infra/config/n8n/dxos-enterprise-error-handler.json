@@ -1,0 +1,279 @@
+{
+  "name": "LatticeDX v1.0 Enterprise n8n Error Handler & Incident Logger",
+  "active": false,
+  "meta": {
+    "author": "CTU-OpenPaw",
+    "copyright": "(C) 2026 CTU-OpenPaw",
+    "license": "Apache-2.0",
+    "spdx": "SPDX-License-Identifier: Apache-2.0",
+    "templateCredsSetupCompleted": false
+  },
+  "nodes": [
+    {
+      "id": "dxos-err-trigger",
+      "name": "On Workflow Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "SPDX-License-Identifier: Apache-2.0 — Captures unhandled execution errors across LatticeDX Stock n8n workflows, scrubs credentials, alerts operators, and logs automation.n8n_failed back to NocoBase.",
+      "parameters": {}
+    },
+    {
+      "id": "dxos-err-format",
+      "name": "Format Error Incident Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const raw = $input.first().json || {};\nconst execObj = raw.execution && typeof raw.execution === 'object' ? raw.execution : {};\nconst wfObj = raw.workflow && typeof raw.workflow === 'object' ? raw.workflow : {};\nconst errObj = execObj.error && typeof execObj.error === 'object' ? execObj.error : {};\n\nfunction scrubSecrets(inputText) {\n  return String(inputText || 'Unknown n8n execution error')\n    .replace(/Bearer\\s+[A-Za-z0-9._\\-]{8,}/gi, 'Bearer [REDACTED]')\n    .replace(/ldx_pat_[0-9a-f]{8}_[0-9a-f]{32}/gi, '[REDACTED_PAT]')\n    .replace(/whsec_[A-Za-z0-9+\\/=]{8,}/g, '[REDACTED_WHSEC]')\n    .replace(/sk-(?:proj-|live-|test-)?[A-Za-z0-9]{16,}/g, '[REDACTED_KEY]')\n    .replace(/ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}/g, '[REDACTED_GH]')\n    .replace(/xox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED_SLACK]')\n    .slice(0, 1000);\n}\n\nconst envOrg = String(($env && ($env.DX_DEFAULT_ORG_ID || $env.DX_ORG_ID)) || 'native-ui-lab').trim();\nconst rawOrg = String(raw.organizationId || envOrg || 'native-ui-lab').trim();\nconst organizationId = /^[a-zA-Z0-9_-]{1,80}$/.test(rawOrg) ? rawOrg : 'native-ui-lab';\n\nconst workflowId = String(wfObj.id || 'unknown-workflow').slice(0, 120);\nconst workflowName = String(wfObj.name || 'LatticeDX n8n Workflow').slice(0, 200);\nconst executionId = String(execObj.id || 'unknown-exec').slice(0, 120);\nconst executionUrl = String(execObj.url || '').slice(0, 300);\nconst lastNodeExecuted = String(execObj.lastNodeExecuted || 'unknown-node').slice(0, 160);\nconst errorMessage = scrubSecrets(errObj.message || raw.message || 'Unhandled n8n workflow error');\nconst errorStack = scrubSecrets(errObj.stack || '').slice(0, 600);\nconst occurredAt = new Date().toISOString();\n\nconst telegramMessage = [\n  '🚨 [LatticeDX n8n Error Alert]',\n  'Workflow: ' + workflowName,\n  'Execution: #' + executionId,\n  'Node: ' + lastNodeExecuted,\n  'Org: ' + organizationId,\n  'Error: ' + errorMessage.slice(0, 300),\n].join('\\n');\n\nconst emailSubject = `[LatticeDX][n8n Error] ${workflowName} (#${executionId})`;\nconst emailBody = [\n  'LatticeDX n8n workflow failure detected.',\n  `Workflow: ${workflowName} (${workflowId})`,\n  `Execution ID: ${executionId}`,\n  executionUrl ? `Execution URL: ${executionUrl}` : null,\n  `Last Node Executed: ${lastNodeExecuted}`,\n  `Organization: ${organizationId}`,\n  `Occurred At: ${occurredAt}`,\n  `Error: ${errorMessage}`,\n].filter(Boolean).join('\\n');\n\nreturn [{\n  json: {\n    organizationId,\n    workflowId,\n    workflowName,\n    executionId,\n    executionUrl,\n    lastNodeExecuted,\n    errorMessage,\n    occurredAt,\n    telegramMessage,\n    emailSubject,\n    emailBody,\n    nocobaseEventPayload: {\n      organizationId,\n      type: 'automation.n8n_failed',\n      source: 'n8n:dxos-enterprise-error-handler',\n      subject: `${workflowName}:${executionId}`.slice(0, 120),\n      data: {\n        workflowId,\n        workflowName,\n        executionId,\n        executionUrl: executionUrl || null,\n        lastNodeExecuted,\n        errorMessage,\n        errorStack: errorStack || null,\n        severity: 'critical',\n        occurredAt,\n      },\n    },\n  },\n}];"
+      }
+    },
+    {
+      "id": "dxos-err-http-nocobase",
+      "name": "Log Error Event to NocoBase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        560,
+        -160
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DX_NOCOBASE_BASE_URL || 'http://nocobase').replace(/\\/+$/, '') + '/api/dxosEvents:publish' }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($env.DX_NOCOBASE_PAT || '') }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.nocobaseEventPayload }}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "dxos-err-telegram",
+      "name": "Notify Ops on Error (Telegram)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        560,
+        20
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "telegramApi": {
+          "name": "LatticeDX Telegram Bot"
+        }
+      },
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "={{ $env.DX_TELEGRAM_CHAT_ID || '' }}",
+        "text": "={{ $json.telegramMessage }}",
+        "additionalFields": {
+          "disable_web_page_preview": true
+        }
+      }
+    },
+    {
+      "id": "dxos-err-email",
+      "name": "Send Error Alert Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        560,
+        200
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "credentials": {
+        "smtp": {
+          "name": "LatticeDX SMTP"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $env.DX_SMTP_FROM || 'alerts@latticedx.example.com' }}",
+        "toEmail": "={{ $env.DX_OPS_ALERT_EMAIL || 'ops@latticedx.example.com' }}",
+        "subject": "={{ $json.emailSubject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.emailBody }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "dxos-err-merge",
+      "name": "Merge Error Dispatch Results",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [
+        860,
+        20
+      ],
+      "parameters": {
+        "mode": "append",
+        "numberInputs": 3,
+        "options": {}
+      }
+    },
+    {
+      "id": "dxos-err-summary",
+      "name": "Summarize Error Handling",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        20
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const ctx = $('Format Error Incident Payload').first().json || {};\nconst results = $input.all().map((it) => it.json || {});\nconst failures = results.filter((r) => Boolean(r.error)).length;\nreturn [{\n  json: {\n    ok: true,\n    handled: true,\n    organizationId: ctx.organizationId,\n    workflowId: ctx.workflowId,\n    executionId: ctx.executionId,\n    channelsAttempted: results.length,\n    channelsDegraded: failures,\n    handledAt: new Date().toISOString(),\n  },\n}];"
+      }
+    }
+  ],
+  "connections": {
+    "On Workflow Error": {
+      "main": [
+        [
+          {
+            "node": "Format Error Incident Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Error Incident Payload": {
+      "main": [
+        [
+          {
+            "node": "Log Error Event to NocoBase",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Notify Ops on Error (Telegram)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Error Alert Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Error Event to NocoBase": {
+      "main": [
+        [
+          {
+            "node": "Merge Error Dispatch Results",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Error Dispatch Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify Ops on Error (Telegram)": {
+      "main": [
+        [
+          {
+            "node": "Merge Error Dispatch Results",
+            "type": "main",
+            "index": 1
+          }
+        ],
+        [
+          {
+            "node": "Merge Error Dispatch Results",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Send Error Alert Email": {
+      "main": [
+        [
+          {
+            "node": "Merge Error Dispatch Results",
+            "type": "main",
+            "index": 2
+          }
+        ],
+        [
+          {
+            "node": "Merge Error Dispatch Results",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Merge Error Dispatch Results": {
+      "main": [
+        [
+          {
+            "node": "Summarize Error Handling",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "saveManualExecutions": false,
+    "executionTimeout": 30
+  },
+  "pinData": {}
+}

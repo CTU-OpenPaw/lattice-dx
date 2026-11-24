@@ -28,6 +28,7 @@ const {
 } = require('./automation-engine');
 const { tickFlowScheduler } = require('./flow/cron');
 const { createDxosBuilderActions } = require('./domain-builder');
+const { createN8nRouteHandlers } = require('./n8n-api-client');
 const { fail, readParams, resolveVerifiedRoles } = require('./wms-dmn-shared');
 
 function createOrganizationDirectGuardMiddleware(db) {
@@ -124,6 +125,8 @@ class DxosStudioPlugin extends Plugin {
       name: 'dxosBuilder',
       actions: createDxosBuilderActions(this.db),
     });
+    const n8nRoutes = createN8nRouteHandlers(this.db, { app: this.app });
+    this.app.resourceManager.define(n8nRoutes.resourceDef);
 
     this.app.acl.registerSnippet({
       name: 'pm.dxosStudio',
@@ -152,14 +155,20 @@ class DxosStudioPlugin extends Plugin {
       ['listDomains', 'createDomain', 'listBusinessPacks', 'installBusinessPack', 'listTenants', 'provisionTenant'],
       'loggedIn',
     );
+    this.app.acl.allow(
+      n8nRoutes.aclAllow.resource,
+      n8nRoutes.aclAllow.actions,
+      n8nRoutes.aclAllow.scope,
+    );
 
     this.stopAutomationListener();
     this._automationListenerHandle = registerAutomationEventListener(this.app, this.db);
     this._recordHooksHandle = registerRecordTriggerHooks(this.app, this.db);
-    const delayTickMs = Number(process.env.DX_FLOW_DELAY_TICK_MS || 0);
+    const rawTickMs = process.env.DX_FLOW_DELAY_TICK_MS;
+    const delayTickMs = rawTickMs === undefined || rawTickMs === '' ? 15000 : Number(rawTickMs);
     if (Number.isFinite(delayTickMs) && delayTickMs >= 100) {
       this._delayTicker = setInterval(() => {
-        tickDueDelayedRuns(this.db, { app: this.app }).catch(() => {});
+        tickFlowScheduler(this.db, { app: this.app }).catch(() => {});
       }, delayTickMs);
       if (typeof this._delayTicker.unref === 'function') this._delayTicker.unref();
     }

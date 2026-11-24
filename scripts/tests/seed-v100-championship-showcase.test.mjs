@@ -77,6 +77,7 @@ function createMockShowcaseServer({
     automationRules: [...initialAutomationRules],
     automationRuns: [...initialAutomationRuns],
     workOrders: [],
+    partnerClaims: [],
     connectors: [],
     iotDevices: [],
     webhookSubscriptions: [],
@@ -239,14 +240,21 @@ function createMockShowcaseServer({
       return jsonResp(snap);
     }
     if (parsedUrl.pathname === '/api/dxosBuilder:listBusinessPacks') {
-      const hasCol = state.domains.some((d) => d.collectionName === 'latticeCustomWorkOrders');
-      const hasDmn = state.dmnTables.some((t) => t.tableKey === 'cmms_priority_routing_v1');
-      const hasRule = state.automationRules.some((r) => r.ruleKey === 'auto_cmms_on_coldchain_fault');
+      const hasCmmsCol = state.domains.some((d) => d.collectionName === 'latticeCustomWorkOrders');
+      const hasCmmsDmn = state.dmnTables.some((t) => t.tableKey === 'cmms_priority_routing_v1');
+      const hasCmmsRule = state.automationRules.some((r) => r.ruleKey === 'auto_cmms_on_coldchain_fault');
+      const hasSettleCol = state.domains.some((d) => d.collectionName === 'latticeCustomPartnerClaims');
+      const hasSettleDmn = state.dmnTables.some((t) => t.tableKey === 'coldchain_settlement_policy_v1');
+      const hasSettleRule = state.automationRules.some((r) => r.ruleKey === 'auto_coldchain_partner_settlement');
       return jsonResp({
         items: [
           {
             packKey: 'cmms-maintenance',
-            installed: Boolean(hasCol && hasDmn && hasRule),
+            installed: Boolean(hasCmmsCol && hasCmmsDmn && hasCmmsRule),
+          },
+          {
+            packKey: 'coldchain-partner-settlement',
+            installed: Boolean(hasSettleCol && hasSettleDmn && hasSettleRule),
           },
         ],
       });
@@ -255,49 +263,90 @@ function createMockShowcaseServer({
       return jsonResp({ items: state.domains });
     }
     if (parsedUrl.pathname === '/api/dxosBuilder:installBusinessPack') {
-      if (body.packKey !== 'cmms-maintenance') {
-        return errorResp(400, 'UNKNOWN_BUSINESS_PACK', 'Unsupported pack');
-      }
-      if (!state.domains.some((d) => d.collectionName === 'latticeCustomWorkOrders')) {
-        state.domains.push({
-          collectionName: 'latticeCustomWorkOrders',
-          rlsProtected: true,
-          portalPages: omitCmmsPortalOnDomain ? [] : [{ path: '/p/cmms', title: 'CMMS Maintenance' }],
-        });
-      } else if (!omitCmmsPortalOnDomain) {
-        const existingDom = state.domains.find((d) => d.collectionName === 'latticeCustomWorkOrders');
-        existingDom.portalPages = [{ path: '/p/cmms', title: 'CMMS Maintenance' }];
-      }
-      if (!state.dmnTables.some((t) => t.tableKey === 'cmms_priority_routing_v1')) {
-        state.dmnTables.push({ id: ++state.nextId, organizationId: body.organizationId, tableKey: 'cmms_priority_routing_v1' });
-      }
-      if (!state.automationRules.some((r) => r.ruleKey === 'auto_cmms_on_coldchain_fault')) {
-        state.automationRules.push({
-          id: ++state.nextId,
+      if (body.packKey === 'cmms-maintenance') {
+        if (!state.domains.some((d) => d.collectionName === 'latticeCustomWorkOrders')) {
+          state.domains.push({
+            collectionName: 'latticeCustomWorkOrders',
+            rlsProtected: true,
+            portalPages: omitCmmsPortalOnDomain ? [] : [{ path: '/p/cmms', title: 'CMMS Maintenance' }],
+          });
+        } else if (!omitCmmsPortalOnDomain) {
+          const existingDom = state.domains.find((d) => d.collectionName === 'latticeCustomWorkOrders');
+          existingDom.portalPages = [{ path: '/p/cmms', title: 'CMMS Maintenance' }];
+        }
+        if (!state.dmnTables.some((t) => t.tableKey === 'cmms_priority_routing_v1')) {
+          state.dmnTables.push({ id: ++state.nextId, organizationId: body.organizationId, tableKey: 'cmms_priority_routing_v1' });
+        }
+        if (!state.automationRules.some((r) => r.ruleKey === 'auto_cmms_on_coldchain_fault')) {
+          state.automationRules.push({
+            id: ++state.nextId,
+            organizationId: body.organizationId,
+            ruleKey: 'auto_cmms_on_coldchain_fault',
+            schemaVersion: 1,
+            triggerEventType: 'alarm.triggered,device.offline',
+            dmnTableKey: 'cmms_priority_routing_v1',
+            cooldownSec: 60,
+            maxDepth: 8,
+            active: true,
+            actionsJson: [{ type: 'create_record' }, { type: 'notify_role' }],
+            graphJson: null,
+          });
+        }
+        return jsonResp({
+          installed: true,
+          packKey: 'cmms-maintenance',
           organizationId: body.organizationId,
-          ruleKey: 'auto_cmms_on_coldchain_fault',
-          schemaVersion: 1,
-          triggerEventType: 'alarm.triggered,device.offline',
-          dmnTableKey: 'cmms_priority_routing_v1',
-          cooldownSec: 60,
-          maxDepth: 8,
-          active: true,
-          actionsJson: [{ type: 'create_record' }, { type: 'notify_role' }],
-          graphJson: null,
+          domain: {
+            collectionName: 'latticeCustomWorkOrders',
+            rls: { attached: true, verified: true },
+            portalPage: { path: '/p/cmms' },
+          },
+          dmnTable: { tableKey: 'cmms_priority_routing_v1' },
+          automationRule: { ruleKey: 'auto_cmms_on_coldchain_fault' },
         });
       }
-      return jsonResp({
-        installed: true,
-        packKey: 'cmms-maintenance',
-        organizationId: body.organizationId,
-        domain: {
-          collectionName: 'latticeCustomWorkOrders',
-          rls: { attached: true, verified: true },
-          portalPage: { path: '/p/cmms' },
-        },
-        dmnTable: { tableKey: 'cmms_priority_routing_v1' },
-        automationRule: { ruleKey: 'auto_cmms_on_coldchain_fault' },
-      });
+      if (body.packKey === 'coldchain-partner-settlement') {
+        if (!state.domains.some((d) => d.collectionName === 'latticeCustomPartnerClaims')) {
+          state.domains.push({
+            collectionName: 'latticeCustomPartnerClaims',
+            rlsProtected: true,
+            portalPages: [{ path: '/p/partner-claims', title: 'Partner Settlement Claims' }],
+          });
+        } else {
+          const existingDom = state.domains.find((d) => d.collectionName === 'latticeCustomPartnerClaims');
+          existingDom.portalPages = [{ path: '/p/partner-claims', title: 'Partner Settlement Claims' }];
+        }
+        if (!state.dmnTables.some((t) => t.tableKey === 'coldchain_settlement_policy_v1')) {
+          state.dmnTables.push({ id: ++state.nextId, organizationId: body.organizationId, tableKey: 'coldchain_settlement_policy_v1' });
+        }
+        if (!state.automationRules.some((r) => r.ruleKey === 'auto_coldchain_partner_settlement')) {
+          state.automationRules.push({
+            id: ++state.nextId,
+            organizationId: body.organizationId,
+            ruleKey: 'auto_coldchain_partner_settlement',
+            schemaVersion: 2,
+            triggerEventType: 'coldchain.settlement_requested,lot.held_mkt',
+            dmnTableKey: 'coldchain_settlement_policy_v1',
+            cooldownSec: 0,
+            maxDepth: 8,
+            active: true,
+            graphJson: { version: 2, nodes: [{ id: 't1' }, { id: 'd1' }, { id: 'i1' }, { id: 'c1' }, { id: 'h1' }], edges: [{ id: 'e1' }, { id: 'e2' }, { id: 'e3' }, { id: 'e4' }] },
+          });
+        }
+        return jsonResp({
+          installed: true,
+          packKey: 'coldchain-partner-settlement',
+          organizationId: body.organizationId,
+          domain: {
+            collectionName: 'latticeCustomPartnerClaims',
+            rls: { attached: true, verified: true },
+            portalPage: { path: '/p/partner-claims' },
+          },
+          dmnTable: { tableKey: 'coldchain_settlement_policy_v1' },
+          automationRule: { ruleKey: 'auto_coldchain_partner_settlement', schemaVersion: 2 },
+        });
+      }
+      return errorResp(400, 'UNKNOWN_BUSINESS_PACK', 'Unsupported pack');
     }
     if (parsedUrl.pathname === '/api/dxosAutomations:listRules') {
       const org = parsedUrl.searchParams.get('organizationId');
@@ -347,6 +396,19 @@ function createMockShowcaseServer({
       return jsonResp(
         state.workOrders.filter((w) => !f.organizationId || w.organizationId === f.organizationId),
       );
+    }
+    if (parsedUrl.pathname === '/api/latticeCustomPartnerClaims:list') {
+      const f = JSON.parse(parsedUrl.searchParams.get('filter') || '{}');
+      return jsonResp(
+        state.partnerClaims.filter(
+          (c) => (!f.organizationId || c.organizationId === f.organizationId) && (!f.claimCode || c.claimCode === f.claimCode),
+        ),
+      );
+    }
+    if (parsedUrl.pathname === '/api/latticeCustomPartnerClaims:create') {
+      const row = { id: ++state.nextId, ...body };
+      state.partnerClaims.push(row);
+      return jsonResp(row);
     }
     if (parsedUrl.pathname === '/api/dxosAutomations:runNow') {
       const savedRule = state.automationRules.find(
@@ -579,6 +641,13 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(first.cmmsPack.dmnTableKey, 'cmms_priority_routing_v1');
   assert.equal(first.cmmsPack.automationRuleKey, 'auto_cmms_on_coldchain_fault');
   assert.equal(first.cmmsPack.portalPath, '/p/cmms');
+  assert.equal(first.settlementPack.seeded, true);
+  assert.equal(first.settlementPack.collectionName, 'latticeCustomPartnerClaims');
+  assert.equal(first.settlementPack.dmnTableKey, 'coldchain_settlement_policy_v1');
+  assert.equal(first.settlementPack.automationRuleKey, 'auto_coldchain_partner_settlement');
+  assert.equal(first.settlementPack.portalPath, '/p/partner-claims');
+  assert.equal(first.settlementClaim.seeded, true);
+  assert.equal(first.settlementClaim.claimCode, 'CLM-V100-001');
   assert.deepEqual(first.automationShowcase.ruleKeys, [
     'auto_cmms_on_coldchain_fault',
     'auto_mkt_quarantine_response',
@@ -586,6 +655,7 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
     'auto_procurement_hitl_approval',
     'auto_scheduled_ai_digest',
     'auto_partner_webhook_sync',
+    'auto_enterprise_n8n_compliance',
   ]);
   assert.equal(first.automationShowcase.schemaVersion, 2);
   assert.deepEqual(first.automationShowcase.upgradedRules, ['auto_cmms_on_coldchain_fault']);
@@ -595,8 +665,9 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
     'auto_procurement_hitl_approval',
     'auto_scheduled_ai_digest',
     'auto_partner_webhook_sync',
+    'auto_enterprise_n8n_compliance',
   ]);
-  assert.equal(state.automationRules.length, 6);
+  assert.equal(state.automationRules.length, 8);
   for (const savedRule of state.automationRules) {
     assert.equal(savedRule.schemaVersion, 2, `Expected Graph v2 schemaVersion=2 for ${savedRule.ruleKey}`);
     assert.equal(savedRule.graphJson?.version, 2, `Expected graphJson.version=2 for ${savedRule.ruleKey}`);
@@ -609,9 +680,13 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(first.connectorVault.seeded, true);
   assert.equal(first.connectorVault.connectorKey, 'n8n-coldchain-orchestrator');
   assert.equal(first.connectorVault.hasSecrets, true);
-  assert.equal(state.connectors.length, 1);
+  assert.equal(first.enterpriseConnectorVault.seeded, true);
+  assert.equal(first.enterpriseConnectorVault.connectorKey, 'n8n-enterprise-orchestrator');
+  assert.equal(first.enterpriseConnectorVault.hasSecrets, true);
+  assert.equal(state.connectors.length, 2);
   assert.deepEqual(Object.keys(state.connectors[0].secrets), ['secret']);
   assert.equal(state.connectors[0].secrets.secret, 'demo-showcase-webhook-secret-2026');
+  assert.equal(state.connectors[1].secrets.secret, 'demo-showcase-webhook-secret-2026');
   assert.equal(first.mqttDevice.seeded, true);
   assert.equal(first.mqttDevice.deviceKey, 'cold-truck-ct-01');
   assert.equal(first.mqttDevice.mqttPasswordProvisioned, true);
@@ -619,6 +694,9 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(first.webhookSubscription.seeded, true);
   assert.equal(first.webhookSubscription.subscriptionKey, 'n8n-coldchain-alerts');
   assert.equal(first.webhookSubscription.hasSigningSecret, true);
+  assert.equal(first.enterpriseWebhookSubscription.seeded, true);
+  assert.equal(first.enterpriseWebhookSubscription.subscriptionKey, 'n8n-enterprise-compliance');
+  assert.equal(first.enterpriseWebhookSubscription.hasSigningSecret, true);
 
   const vaultSaveCallIdx = state.calls.indexOf('/api/dxosVault:save');
   const devProvisionCallIdx = state.calls.indexOf('/api/dxosBroker:provisionDevice');
@@ -651,33 +729,41 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(second.pkiSnapshot.frozenNow, false);
   assert.equal(second.cmmsPack.seeded, false);
   assert.equal(second.cmmsPack.alreadyInstalled, true);
+  assert.equal(second.settlementPack.seeded, false);
+  assert.equal(second.settlementPack.alreadyInstalled, true);
+  assert.equal(second.settlementClaim.seeded, false);
   assert.equal(second.connectorVault.seeded, false);
   assert.equal(second.connectorVault.hasSecrets, true);
+  assert.equal(second.enterpriseConnectorVault.seeded, false);
+  assert.equal(second.enterpriseConnectorVault.hasSecrets, true);
   assert.equal(second.mqttDevice.seeded, false);
   assert.equal(second.mqttDevice.mqttPasswordProvisioned, false);
   assert.equal(second.mqttDevice.mqttPassword, undefined);
   assert.equal(second.webhookSubscription.seeded, false);
   assert.equal(second.webhookSubscription.hasSigningSecret, true);
+  assert.equal(second.enterpriseWebhookSubscription.seeded, false);
+  assert.equal(second.enterpriseWebhookSubscription.hasSigningSecret, true);
   assert.equal(state.locations.length, 3);
   assert.equal(state.assets.length, 3);
   assert.equal(state.orders.length, 1);
   assert.equal(state.orderLines.length, 2);
   assert.equal(state.lots.length, 4);
-  assert.equal(state.dmnTables.length, 2);
+  assert.equal(state.dmnTables.length, 3);
   assert.equal(state.delegations.length, 1);
   assert.equal(state.ledgerEntries.length, 1);
   assert.equal(state.snapshots.length, 1);
-  assert.equal(state.domains.length, 1);
-  assert.equal(state.automationRules.length, 6);
+  assert.equal(state.domains.length, 2);
+  assert.equal(state.automationRules.length, 8);
   assert.deepEqual(second.automationShowcase.createdRules, []);
   assert.deepEqual(second.automationShowcase.upgradedRules, []);
-  assert.equal(second.automationShowcase.reusedRules.length, 6);
+  assert.equal(second.automationShowcase.reusedRules.length, 7);
   assert.equal(second.automationShowcase.initialRunTriggered, false);
   assert.equal(state.automationRuns.length, 1);
   assert.equal(state.workOrders.length, 1);
-  assert.equal(state.connectors.length, 1);
+  assert.equal(state.partnerClaims.length, 1);
+  assert.equal(state.connectors.length, 2);
   assert.equal(state.iotDevices.length, 1);
-  assert.equal(state.webhookSubscriptions.length, 1);
+  assert.equal(state.webhookSubscriptions.length, 2);
 
   const secondJson = JSON.stringify(second);
   assert.equal(secondJson.includes('demo-showcase-webhook-secret-2026'), false);
@@ -698,11 +784,11 @@ test('runV100ChampionshipShowcaseSeed repairs CMMS pack if /p/cmms portal page i
   const second = await runV100ChampionshipShowcaseSeed(options, mockFetch);
   // Because /p/cmms was omitted from listDomains in this fixture, seedCmmsBusinessPack triggers idempotent reinstall without duplicating records
   assert.equal(second.cmmsPack.seeded, true);
-  assert.equal(state.domains.length, 1);
-  assert.equal(state.automationRules.length, 6);
+  assert.equal(state.domains.length, 2);
+  assert.equal(state.automationRules.length, 8);
   assert.deepEqual(second.automationShowcase.createdRules, []);
   assert.deepEqual(second.automationShowcase.upgradedRules, []);
-  assert.equal(second.automationShowcase.reusedRules.length, 6);
+  assert.equal(second.automationShowcase.reusedRules.length, 7);
   assert.equal(second.automationShowcase.initialRunTriggered, false);
   assert.equal(state.automationRuns.length, 1);
   assert.equal(state.workOrders.length, 1);
@@ -753,6 +839,7 @@ test('runV100ChampionshipShowcaseSeed upgrades legacy v1 rules to Graph v2 and s
     'auto_procurement_hitl_approval',
     'auto_scheduled_ai_digest',
     'auto_partner_webhook_sync',
+    'auto_enterprise_n8n_compliance',
   ]);
   assert.equal(first.automationShowcase.initialRunTriggered, false);
   assert.equal(state.automationRuns.length, 1);
@@ -761,9 +848,9 @@ test('runV100ChampionshipShowcaseSeed upgrades legacy v1 rules to Graph v2 and s
   const second = await runV100ChampionshipShowcaseSeed(options, mockFetch);
   assert.deepEqual(second.automationShowcase.createdRules, []);
   assert.deepEqual(second.automationShowcase.upgradedRules, []);
-  assert.equal(second.automationShowcase.reusedRules.length, 6);
+  assert.equal(second.automationShowcase.reusedRules.length, 7);
   assert.equal(second.automationShowcase.initialRunTriggered, false);
-  assert.equal(state.automationRules.length, 6);
+  assert.equal(state.automationRules.length, 8);
   assert.equal(state.automationRuns.length, 1);
 });
 

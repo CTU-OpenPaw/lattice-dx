@@ -113,6 +113,17 @@ const API_OPERATIONS = Object.freeze([
   ['/api/dxosStudio:solutionBundleImport', 'post', 'DX-OS Studio', 'Import a validated solution bundle', false],
   ['/api/dxosStudio:solutionBundleRollback', 'post', 'DX-OS Studio', 'Rollback last imported solution bundle', false],
 
+  ['/api/dxosN8n:status', 'get', 'Stock n8n Integration', 'Check stock n8n connector health and API readiness', false],
+  ['/api/dxosN8n:appCatalog', 'get', 'Stock n8n Integration', 'List curated external app connector catalog with organization configuration counts', false],
+  ['/api/dxosN8n:workflows', 'get', 'Stock n8n Integration', 'List stock n8n workflows for organization', false],
+  ['/api/dxosN8n:getWorkflow', 'get', 'Stock n8n Integration', 'Get a single stock n8n workflow definition', false],
+  ['/api/dxosN8n:createWorkflow', 'post', 'Stock n8n Integration', 'Create a workflow in stock n8n via API', false],
+  ['/api/dxosN8n:updateWorkflow', 'post', 'Stock n8n Integration', 'Update an existing stock n8n workflow via API', false],
+  ['/api/dxosN8n:activateWorkflow', 'post', 'Stock n8n Integration', 'Activate or deactivate a stock n8n workflow', false],
+  ['/api/dxosN8n:executions', 'get', 'Stock n8n Integration', 'List stock n8n workflow executions', false],
+  ['/api/dxosN8n:retryExecution', 'post', 'Stock n8n Integration', 'Retry a failed stock n8n execution', false],
+  ['/api/dxosN8n:syncCredential', 'post', 'Stock n8n Integration', 'Sync encrypted vault connector credentials into stock n8n', false],
+
   ['/api/dxosAi:listProfiles', 'get', 'AI Workforce & MCP', 'List organization AI employee profiles', false],
   ['/api/dxosAi:saveProfile', 'post', 'AI Workforce & MCP', 'Create or update an AI employee profile', false],
   ['/api/dxosAi:deleteProfile', 'post', 'AI Workforce & MCP', 'Delete an AI employee profile', false],

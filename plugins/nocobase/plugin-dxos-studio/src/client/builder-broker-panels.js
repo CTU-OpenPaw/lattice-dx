@@ -1049,27 +1049,12 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
 
     const [loading, setLoading] = React.useState(false);
     const [connectors, setConnectors] = React.useState([]);
-    const [testResult, setTestResult] = React.useState(null);
-    const [rotateTargetKey, setRotateTargetKey] = React.useState('');
-    const [rotateSecretText, setRotateSecretText] = React.useState('');
-    const [vaultForm, setVaultForm] = React.useState({
-      connectorKey: '',
-      name: '',
-      connectorType: 'n8n',
-      baseUrl: '',
-      authType: 'bearer',
-      secretsText: '',
-    });
-
     const [rules, setRules] = React.useState([]);
     const [runs, setRuns] = React.useState([]);
     const [loadSeqRef] = React.useState(() => ({ current: 0 }));
 
     React.useEffect(() => {
       loadSeqRef.current += 1;
-      setTestResult(null);
-      setRotateTargetKey('');
-      setRotateSecretText('');
       setConnectors([]);
       setRules([]);
       setRuns([]);
@@ -1109,276 +1094,47 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
       loadAll();
     }, [loadAll]);
 
-    function handleSaveConnector(e) {
-      e?.preventDefault?.();
-      const parsedSecrets = parseVaultSecretsInput(vaultForm.secretsText, vaultForm.authType);
-      if (parsedSecrets.error) {
-        reportFeedback({ type: 'error', text: parsedSecrets.error });
-        return;
-      }
-      return runMutation('Không lưu được Connector.', async (clientApi) => {
-        const res = await clientApi.request({
-          url: 'dxosVault:save',
-          method: 'post',
-          data: {
-            ...orgPayload,
-            connectorKey: vaultForm.connectorKey.trim(),
-            name: vaultForm.name.trim(),
-            connectorType: vaultForm.connectorType,
-            baseUrl: vaultForm.baseUrl.trim(),
-            authType: vaultForm.authType,
-            ...(parsedSecrets.provided ? { secrets: parsedSecrets.value } : {}),
-          },
-        });
-        const d = unwrapData(res);
-        // Never retain raw plaintext secret in UI state after saving
-        setVaultForm((p) => ({ ...p, secretsText: '' }));
-        reportFeedback({ type: 'success', text: `Đã lưu Connector "${d.connectorKey || vaultForm.connectorKey}" (Secret v${d.secretVersion || 1}).` });
-        await loadAll();
-      });
-    }
-
-    function handleTestConnection(connector) {
-      return runMutation('Kiểm tra kết nối thất bại.', async (clientApi) => {
-        const res = await clientApi.request({
-          url: 'dxosVault:testConnection',
-          method: 'post',
-          data: { ...orgPayload, connectorKey: connector.connectorKey },
-        });
-        const d = unwrapData(res);
-        setTestResult(d);
-        reportFeedback({
-          type: d.ok ? 'success' : 'error',
-          text: `Test "${connector.connectorKey}": ${d.ok ? 'Thành công' : 'Thất bại'} (${d.message || d.lastTestStatus || ''}).`,
-        });
-        await loadAll();
-      });
-    }
-
-    function handleRotateSecret(e) {
-      e?.preventDefault?.();
-      const targetConnector = connectors.find((c) => c.connectorKey === rotateTargetKey);
-      const parsed = parseVaultSecretsInput(rotateSecretText, targetConnector?.authType || 'bearer');
-      if (parsed.error) {
-        reportFeedback({ type: 'error', text: parsed.error });
-        return;
-      }
-      if (!parsed.provided) {
-        reportFeedback({ type: 'error', text: 'Vui lòng nhập secret mới để xoay vòng.' });
-        return;
-      }
-      return runMutation('Không xoay vòng được secret.', async (clientApi) => {
-        const res = await clientApi.request({
-          url: 'dxosVault:rotateSecret',
-          method: 'post',
-          data: { ...orgPayload, connectorKey: rotateTargetKey, secrets: parsed.value },
-        });
-        const d = unwrapData(res);
-        setRotateSecretText('');
-        setRotateTargetKey('');
-        reportFeedback({ type: 'success', text: `Đã xoay vòng secret cho "${d.connectorKey || rotateTargetKey}" lên v${d.secretVersion || 2}.` });
-        await loadAll();
-      });
-    }
-
-    function handleDeleteConnector(connector) {
-      return runMutation('Không xóa được Connector.', async (clientApi) => {
-        await clientApi.request({
-          url: 'dxosVault:delete',
-          method: 'post',
-          data: { ...orgPayload, connectorKey: connector.connectorKey },
-        });
-        reportFeedback({ type: 'success', text: `Đã xóa Connector "${connector.connectorKey}".` });
-        await loadAll();
-      });
-    }
+    const oauthCount = connectors.filter((c) => c.oauthConnected).length;
+    const n8nSyncedCount = connectors.filter((c) => Boolean(c.n8nCredentialId)).length;
 
     return h('div', { 'data-testid': 'dxos-studio-automation-panel', style: S.stack },
       renderLocalFeedback(h, rt.localFeedback),
       renderOrgScopeBar(h, S, props.selectedOrg, rt.organizations, rt.orgInputValue, rt.setOrgOverride, 'dxos-automation'),
 
-      // Section 1: Connector & Secrets Vault
-      h('div', { style: S.card },
+      // Section 1: Deduplicated Connectors & n8n Summary Card (full wizard & live n8n live in Workflow -> Connectors & n8n)
+      h('div', { 'data-testid': 'dxos-vault-summary-card', style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
-            h('h3', { style: { margin: 0, fontSize: 16 } }, 'Connector & Secrets Vault (AES-256-GCM)'),
-            h('p', { style: { margin: '4px 0 0', fontSize: 12, color: '#64748b' } }, 'Quản lý kết nối n8n, Webhook, MQTT, Orion-LD, HTTP API, SMTP. Secret được mã hóa tại DB và không bao giờ hiển thị lại sau khi lưu.'),
-          ),
-          h('button', { type: 'button', onClick: () => loadAll(), disabled: loading, style: S.btn(false, false, loading) }, loading ? 'Đang tải…' : 'Làm mới'),
-        ),
-
-        testResult ? h('div', {
-          'data-testid': 'dxos-vault-test-result',
-          role: 'status',
-          style: {
-            padding: 10,
-            borderRadius: 8,
-            fontSize: 12,
-            background: testResult.ok ? '#f0fdf4' : '#fef2f2',
-            border: `1px solid ${testResult.ok ? '#bbf7d0' : '#fecaca'}`,
-            color: testResult.ok ? '#166534' : '#991b1b',
-          },
-        }, `Kiểm tra "${testResult.connectorKey || ''}": ${testResult.ok ? 'OK' : 'FAILED'} · HTTP ${testResult.statusCode ?? '-'} · ${testResult.latencyMs ?? 0}ms · ${testResult.message || ''}`) : null,
-
-        h('form', { 'data-testid': 'dxos-vault-save-form', onSubmit: handleSaveConnector, style: S.subCard },
-          h('div', { style: { fontSize: 13, fontWeight: 700 } }, 'Tạo / Cập nhật Connector'),
-          h('div', { style: S.grid3 },
-            h('div', null,
-              h('label', { style: S.label }, 'Connector Key'),
-              h('input', {
-                'data-testid': 'dxos-vault-key-input',
-                type: 'text',
-                required: true,
-                placeholder: 'VD: n8n-primary',
-                value: vaultForm.connectorKey,
-                onChange: (e) => setVaultForm((p) => ({ ...p, connectorKey: e.target.value })),
-                style: S.input,
-              }),
-            ),
-            h('div', null,
-              h('label', { style: S.label }, 'Tên Connector'),
-              h('input', {
-                'data-testid': 'dxos-vault-name-input',
-                type: 'text',
-                required: true,
-                placeholder: 'VD: n8n Workflow Server',
-                value: vaultForm.name,
-                onChange: (e) => setVaultForm((p) => ({ ...p, name: e.target.value })),
-                style: S.input,
-              }),
-            ),
-            h('div', null,
-              h('label', { style: S.label }, 'Loại Connector'),
-              h('select', {
-                'data-testid': 'dxos-vault-type-select',
-                value: vaultForm.connectorType,
-                onChange: (e) => setVaultForm((p) => ({ ...p, connectorType: e.target.value })),
-                style: S.input,
-              }, CONNECTOR_TYPES.map((t) => h('option', { key: t, value: t }, t))),
-            ),
-            h('div', null,
-              h('label', { style: S.label }, 'Base URL'),
-              h('input', {
-                'data-testid': 'dxos-vault-url-input',
-                type: 'text',
-                required: vaultForm.connectorType !== 'smtp_notify',
-                placeholder: 'http://n8n:5678',
-                value: vaultForm.baseUrl,
-                onChange: (e) => setVaultForm((p) => ({ ...p, baseUrl: e.target.value })),
-                style: S.input,
-              }),
-            ),
-            h('div', null,
-              h('label', { style: S.label }, 'Auth Type'),
-              h('select', {
-                'data-testid': 'dxos-vault-authtype-select',
-                value: vaultForm.authType,
-                onChange: (e) => setVaultForm((p) => ({ ...p, authType: e.target.value })),
-                style: S.input,
-              }, AUTH_TYPES.map((a) => h('option', { key: a, value: a }, a))),
-            ),
-            h('div', null,
-              h('label', { style: S.label }, 'Secrets (ẩn sau khi lưu — JSON hoặc token)'),
-              h('input', {
-                'data-testid': 'dxos-vault-secrets-input',
-                type: 'password',
-                placeholder: '{"token":"..."} hoặc token thô',
-                value: vaultForm.secretsText,
-                onChange: (e) => setVaultForm((p) => ({ ...p, secretsText: e.target.value })),
-                style: S.input,
-              }),
-            ),
-          ),
-          h('div', null,
-            h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Lưu Connector vào Vault'),
-          ),
-        ),
-
-        rotateTargetKey ? h('form', {
-          'data-testid': 'dxos-vault-rotate-form',
-          onSubmit: handleRotateSecret,
-          style: { ...S.subCard, border: '1px solid #93c5fd', background: '#eff6ff' },
-        },
-          h('div', { style: S.rowBetween },
-            h('strong', { style: { fontSize: 13 } }, `Xoay vòng Secret cho "${rotateTargetKey}"`),
-            h('button', { type: 'button', onClick: () => { setRotateTargetKey(''); setRotateSecretText(''); }, style: S.btn(false) }, 'Hủy'),
+            h('h3', { style: { margin: 0, fontSize: 16 } }, 'Connected Apps, Secrets Vault & Stock n8n Hub'),
+            h('p', { style: { margin: '4px 0 0', fontSize: 12, color: '#64748b' } }, 'Cấu hình App ngoài (Telegram, SMTP/Gmail, Sheets, Slack, GitHub, S3), OAuth2 PKCE và quản trị Stock n8n được hợp nhất tại trang 1 cửa Workflow -> Connectors & n8n.'),
           ),
           h('div', { style: S.rowWrap },
-            h('input', {
-              'data-testid': 'dxos-vault-rotate-input',
-              type: 'password',
-              required: true,
-              placeholder: 'Nhập JSON secret mới (VD: {"token":"new-secret"}) hoặc token thô',
-              value: rotateSecretText,
-              onChange: (e) => setRotateSecretText(e.target.value),
-              style: { ...S.input, flex: '1 1 280px' },
-            }),
-            h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Xác nhận Rotate Secret'),
-          ),
-        ) : null,
-
-        h('div', { style: S.tableWrap },
-          h('table', { 'data-testid': 'dxos-vault-table', style: S.table },
-            h('thead', null, h('tr', null, ['Key', 'Tên', 'Loại', 'Base URL', 'Auth', 'Trạng thái Secret', 'Ver', 'Last Test', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
-            h('tbody', null,
-              !connectors.length
-                ? h('tr', null, h('td', { colSpan: 9, style: { ...S.td, color: '#64748b' } }, 'Chưa có Connector nào trong Vault.'))
-                : connectors.map((c) => h('tr', { key: c.id || c.connectorKey },
-                  h('td', { style: S.td }, h('code', null, c.connectorKey)),
-                  h('td', { style: S.td }, c.name),
-                  h('td', { style: S.td }, h('span', { style: S.badge('info') }, c.connectorType)),
-                  h('td', { style: S.td }, h('code', null, c.baseUrl || '-')),
-                  h('td', { style: S.td }, c.authType || 'none'),
-                  h('td', { style: S.td },
-                    h('span', { style: S.badge(c.hasSecrets ? 'ok' : 'neutral') }, c.hasSecrets ? `Đã mã hóa (${(c.secretKeys || []).join(', ') || 'sealed'})` : 'Chưa có secret'),
-                  ),
-                  h('td', { style: S.td }, `v${c.secretVersion || 1}`),
-                  h('td', { style: S.td },
-                    c.lastTestStatus
-                      ? h('span', { style: S.badge(statusTone(c.lastTestStatus)) }, c.lastTestStatus)
-                      : h('span', { style: { color: '#94a3b8' } }, '-'),
-                  ),
-                  h('td', { style: { ...S.td, display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                    h('button', {
-                      'data-testid': `dxos-vault-test-${c.connectorKey}`,
-                      type: 'button',
-                      disabled: busy,
-                      onClick: () => handleTestConnection(c),
-                      style: S.btn(false, false, busy),
-                    }, 'Test Connection'),
-                    h('button', {
-                      'data-testid': `dxos-vault-rotate-open-${c.connectorKey}`,
-                      type: 'button',
-                      disabled: busy,
-                      onClick: () => { setRotateTargetKey(c.connectorKey); setRotateSecretText(''); },
-                      style: S.btn(false, false, busy),
-                    }, 'Rotate Secret'),
-                    h('button', {
-                      'data-testid': `dxos-vault-edit-${c.connectorKey}`,
-                      type: 'button',
-                      disabled: busy,
-                      onClick: () => setVaultForm({
-                        connectorKey: c.connectorKey,
-                        name: c.name || '',
-                        connectorType: c.connectorType || 'n8n',
-                        baseUrl: c.baseUrl || '',
-                        authType: c.authType || 'bearer',
-                        secretsText: '',
-                      }),
-                      style: S.btn(false, false, busy),
-                    }, 'Nạp sửa'),
-                    h('button', {
-                      'data-testid': `dxos-vault-delete-${c.connectorKey}`,
-                      type: 'button',
-                      disabled: busy,
-                      onClick: () => handleDeleteConnector(c),
-                      style: S.btn(false, true, busy),
-                    }, 'Xóa'),
-                  ),
-                )),
-            ),
+            h('button', { type: 'button', onClick: () => loadAll(), disabled: loading, style: S.btn(false, false, loading) }, loading ? 'Đang tải…' : 'Làm mới'),
+            h('button', {
+              'data-testid': 'dxos-open-connectors-hub-btn',
+              type: 'button',
+              onClick: () => openRoute('/admin/settings/workflow/connectors'),
+              style: S.btn(true),
+            }, 'Mở Connected Apps & n8n Hub ↗'),
           ),
         ),
+        h('div', { style: S.kpiGrid },
+          [
+            ['Tổng Connectors (Vault)', connectors.length],
+            ['OAuth2 Đã nối', oauthCount],
+            ['Đã đồng bộ sang n8n', n8nSyncedCount],
+          ].map(([label, count]) => h('div', { key: label, style: S.kpiBox },
+            h('div', { style: { fontSize: 11, color: '#64748b' } }, label),
+            h('div', { style: { fontSize: 18, fontWeight: 700, color: '#0f172a', marginTop: 2 } }, count),
+          )),
+        ),
+        connectors.length
+          ? h('div', { style: S.rowWrap },
+            connectors.slice(0, 12).map((c) => h('span', { key: c.id || c.connectorKey, style: S.badge(c.lastTestStatus === 'ok' || c.oauthConnected ? 'ok' : 'info') },
+              `${c.connectorKey}${c.appType ? ` (${c.appType})` : ''}${c.n8nCredentialId ? ' · n8n✓' : ''}`,
+            )),
+          )
+          : h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Chưa có Connector nào trong Vault. Nhấn "Mở Connected Apps & n8n Hub ↗" để thiết lập.'),
       ),
 
       // Section 2: Slim LatticeFlow v2 Automation Summary & Studio Launcher

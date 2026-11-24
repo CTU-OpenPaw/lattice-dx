@@ -629,7 +629,7 @@ test('all 6 action handlers, secret-free stepTracesJson, twin HITL gating, runNo
   }
 });
 
-test('DxosStudioPlugin registers event listener on load, fires on WMS lot.held_mkt & epod.signed, and unsubscribes on unload', async () => {
+test('DxosStudioPlugin registers event listener on load, fires on WMS lot.held_mkt & epod.captured, and unsubscribes on unload', async () => {
   const db = makeInMemoryDb({
     latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
     roles: [{ name: 'ldx_admin', allowAll: true }],
@@ -656,10 +656,10 @@ test('DxosStudioPlugin registers event listener on load, fires on WMS lot.held_m
       },
       {
         organizationId: 'org-a',
-        ruleKey: 'on_epod_signed',
-        name: 'On ePOD Signed',
-        triggerEventType: 'epod.signed',
-        actionsJson: [{ type: 'create_record', collection: 'latticeServiceTickets', values: { title: 'Signed {{data.epodUid}}' } }],
+        ruleKey: 'on_epod_captured',
+        name: 'On ePOD Captured',
+        triggerEventType: 'epod.captured',
+        actionsJson: [{ type: 'create_record', collection: 'latticeServiceTickets', values: { title: 'Captured {{data.epodUid}}' } }],
         maxDepth: 8,
         cooldownSec: 0,
         active: true,
@@ -690,6 +690,22 @@ test('DxosStudioPlugin registers event listener on load, fires on WMS lot.held_m
   try {
     assert.ok(definedResources.dxosAutomations);
     assert.ok(definedResources.dxosBuilder);
+    assert.ok(definedResources.dxosN8n, 'DxosStudioPlugin must mount dxosN8n resource');
+    for (const n8nAct of [
+      'status',
+      'appCatalog',
+      'workflows',
+      'getWorkflow',
+      'createWorkflow',
+      'updateWorkflow',
+      'activateWorkflow',
+      'executions',
+      'retryExecution',
+      'syncCredential',
+    ]) {
+      assert.equal(typeof definedResources.dxosN8n.actions?.[n8nAct], 'function', `dxosN8n missing action ${n8nAct}`);
+      assert.ok(aclAllowed.dxosN8n?.includes(n8nAct), `dxosN8n ACL missing action ${n8nAct}`);
+    }
     assert.ok(aclAllowed.dxosAutomations?.includes('builderCatalog'));
     assert.ok(aclAllowed.dxosAutomations?.includes('aiAssist'));
 
@@ -723,7 +739,7 @@ test('DxosStudioPlugin registers event listener on load, fires on WMS lot.held_m
     assert.equal(db.store.latticeAutomationRuns.length, 2);
     assert.deepEqual(
       db.store.latticeAutomationRuns.map((r) => r.triggerEventType),
-      ['lot.held_mkt', 'epod.signed'],
+      ['lot.held_mkt', 'epod.captured'],
     );
     assert.equal(db.store.latticeServiceTickets.length, 2);
 
@@ -920,7 +936,7 @@ test('Security fixes: migration tx/app.current_org RLS, latticeApiKey PAT scope,
   // 4. whsec_ base64 HMAC decoding matches Standard Webhooks key bytes
   const rawKey = crypto.randomBytes(32);
   const whsec = `whsec_${rawKey.toString('base64')}`;
-  const bodyStr = JSON.stringify({ event: 'epod.signed' });
+  const bodyStr = JSON.stringify({ event: 'epod.captured' });
   const hmacHeaders = buildHmacHeaders(bodyStr, { secret: whsec });
   const expectedB64 = crypto
     .createHmac('sha256', rawKey)
@@ -2127,7 +2143,7 @@ test('R1 & R2 security and flow architect regressions: ReDoS, matchesFilter fail
   });
   for (const prompt of [
     'Khi voucher.submitted tạo bản ghi trên latticeIncidentCases',
-    'Khi epod.signed tạo phiếu trên latticeServiceTickets',
+    'Khi epod.captured tạo phiếu trên latticeServiceTickets',
     'Khi voucher.submitted tạo bản ghi trên latticeCustomWorkOrders theo bảng cmms_priority_routing_v1',
     'Khi tạo bản ghi trên latticeCustomSensors thông báo ldx_operator',
   ]) {
@@ -2413,4 +2429,43 @@ test('Whole-Delta P1 & P2 regressions in automation-engine: getSafePath, validat
     if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
     else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
+});
+
+test('automation-engine call_connector injects fresh OAuth2 Bearer token via getFreshConnectorToken', async () => {
+  const seenAuthHeaders = [];
+  const db = makeInMemoryDb({
+    latticeAutomationRuns: [],
+  });
+  const ruleRow = {
+    id: 77,
+    organizationId: 'org-a',
+    ruleKey: 'oauth2_call_rule',
+    name: 'OAuth2 Connector Rule',
+    triggerEventType: 'manual.oauth',
+    actionsJson: [
+      { type: 'call_connector', connectorKey: 'gmail-ops', method: 'POST', path: '/gmail/v1/users/me/messages/send', body: { ok: true } },
+    ],
+    active: true,
+  };
+  const mockVault = {
+    resolveConnectorSecrets: async () => ({
+      connector: { id: 9, organizationId: 'org-a', connectorKey: 'gmail-ops', connectorType: 'http_api', authType: 'oauth2', baseUrl: 'https://gmail.googleapis.com' },
+      secrets: { clientId: 'cid-1', clientSecret: 'csec-1' },
+    }),
+    getFreshConnectorToken: async () => ({ accessToken: 'ya29.fresh-oauth-token-123' }),
+    assertSafeConnectorUrl: (u) => u,
+    assertSafeConnectorUrlAsync: async (u) => u,
+    buildConnectorAuthHeaders: () => ({}),
+  };
+  const run = await executeRuleAgainstEvent(db, ruleRow, { type: 'manual.oauth', data: {} }, {
+    organizationId: 'org-a',
+    connectorVault: mockVault,
+    fetchImpl: async (_url, init) => {
+      seenAuthHeaders.push(init.headers.Authorization);
+      return { ok: true, status: 200, text: async () => '{}' };
+    },
+  });
+  assert.equal(run.status, 'completed');
+  assert.deepEqual(seenAuthHeaders, ['Bearer ya29.fresh-oauth-token-123']);
+  assert.equal(JSON.stringify(run).includes('ya29.fresh-oauth-token-123'), false);
 });

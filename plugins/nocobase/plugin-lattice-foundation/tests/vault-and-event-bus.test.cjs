@@ -343,6 +343,7 @@ test('connector-vault enforces AES-256-GCM encryption, production fail-closed ke
     assertSafeConnectorUrl,
     resolveConnectorSecrets,
     registerConnectorVault,
+    defaultTcpProbe,
   } = require('../src/server/connector-vault');
 
   // 1. AES-256-GCM encryption/decryption & fail-closed in production
@@ -391,14 +392,21 @@ test('connector-vault enforces AES-256-GCM encryption, production fail-closed ke
     'http://n8n:5678/webhook/coldchain',
     'http://orion-ld:1026/ngsi-ld/v1/entities',
     'http://nodered:1880/health',
-    'http://nocobase:13000/api/dxos:health',
-    'http://localhost:5678/webhook-test',
-    'http://127.0.0.1:8088/hook',
     'https://hooks.example.org/events',
   ]) {
     assert.ok(assertSafeConnectorUrl(safeUrl), `Expected allowlisted/safe URL ${safeUrl}`);
   }
   assert.ok(assertSafeConnectorUrl('mqtt://mosquitto:1883', { connectorType: 'mqtt' }));
+  for (const loopbackUrl of [
+    'http://localhost:5678/webhook-test',
+    'http://127.0.0.1:8088/hook',
+  ]) {
+    assert.throws(
+      () => assertSafeConnectorUrl(loopbackUrl),
+      (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+      `Expected loopback SSRF block for ${loopbackUrl}`,
+    );
+  }
 
   // 3. Spin up real ephemeral local TCP server to verify genuine node:net MQTT probe
   const tcpServer = net.createServer((sock) => sock.end());
@@ -421,6 +429,7 @@ test('connector-vault enforces AES-256-GCM encryption, production fail-closed ke
 
     registerConnectorVault(app, {
       env: { DX_VAULT_MASTER_KEY: 'test-vault-key-2026' },
+      tcpProbeImpl: (host, port, timeoutMs) => defaultTcpProbe(host === 'mosquitto' ? '127.0.0.1' : host, port, timeoutMs),
       fetchImpl: async (url, init) => {
         fetchCalls.push({ url, method: init?.method, headers: init?.headers, redirect: init?.redirect, hasSignal: Boolean(init?.signal) });
         if (init?.method === 'HEAD') return { ok: false, status: 405, body: { cancel: async () => {} } };
@@ -526,7 +535,7 @@ test('connector-vault enforces AES-256-GCM encryption, production fail-closed ke
           connectorKey: 'mqtt-local',
           name: 'Local Mosquitto',
           connectorType: 'mqtt',
-          baseUrl: `mqtt://127.0.0.1:${tcpPort}`,
+          baseUrl: `mqtt://mosquitto:${tcpPort}`,
           authType: 'basic',
           secrets: { username: 'edge', password: 'pw' },
         },
@@ -1180,9 +1189,6 @@ test('Whole-Delta security regression: whsec_ base64, IPv6/numeric/single-label 
     'http://orion-ld:1026/ngsi-ld/v1/entities',
     'mqtt://mosquitto:1883',
     'http://nodered:1880/health',
-    'http://nocobase:13000/api/dxos:health',
-    'http://localhost:5678/hook',
-    'http://127.0.0.1:8088/hook',
   ]) {
     const connectorType = internalUrl.startsWith('mqtt:') ? 'mqtt' : 'http_api';
     assert.throws(
@@ -1480,6 +1486,283 @@ test('Whole-Delta security regression: whsec_ base64, IPv6/numeric/single-label 
     const patEvList = await invokeWithPat(readToken, 'dxosEvents', act, 'GET');
     assert.ok(Array.isArray(patEvList.body.items));
   }
+});
+
+test('Task 6a: APP_CONNECTOR_CATALOG, OAuth2 PKCE S256 oauthStart/oauthCallback, single-flight getFreshConnectorToken (180s buffer), and strict internal allowlist', async () => {
+  const {
+    APP_CONNECTOR_CATALOG,
+    assertSafeConnectorUrl,
+    oauthStart,
+    oauthCallback,
+    getFreshConnectorToken,
+    registerConnectorVault,
+    decryptSecretText,
+  } = require('../src/server/connector-vault');
+
+  // 1. APP_CONNECTOR_CATALOG covers all 11 enterprise app connectors
+  assert.ok(Array.isArray(APP_CONNECTOR_CATALOG));
+  const appTypes = new Set(APP_CONNECTOR_CATALOG.map((entry) => entry.appType));
+  for (const requiredApp of [
+    'telegram',
+    'email_smtp',
+    'gmail_oauth2',
+    'google_sheets_oauth2',
+    'slack',
+    'discord',
+    'teams',
+    'github',
+    'rustfs_s3',
+    'n8n_api',
+    'partner_webhook',
+  ]) {
+    assert.ok(appTypes.has(requiredApp), `Missing APP_CONNECTOR_CATALOG entry for ${requiredApp}`);
+  }
+
+  // 2. Strict internal-service allowlist: DX_ALLOW_INTERNAL_CONNECTORS=true + DX_INTERNAL_SERVICE_HOSTS
+  const strictEnv = { NODE_ENV: 'production', DX_ALLOW_INTERNAL_CONNECTORS: 'true' };
+  for (const allowedInternal of [
+    'http://n8n:5678/api/v1/workflows',
+    'http://orion-ld:1026/ngsi-ld/v1/entities',
+    'http://nodered:1880/flows',
+    'mqtt://mosquitto:1883',
+  ]) {
+    const cType = allowedInternal.startsWith('mqtt:') ? 'mqtt' : 'http_api';
+    assert.ok(assertSafeConnectorUrl(allowedInternal, { connectorType: cType, env: strictEnv }));
+  }
+
+  // Custom DX_INTERNAL_SERVICE_HOSTS restricts to configured services only
+  const customHostEnv = {
+    NODE_ENV: 'production',
+    DX_ALLOW_INTERNAL_CONNECTORS: 'true',
+    DX_INTERNAL_SERVICE_HOSTS: 'n8n,orion-ld',
+  };
+  assert.ok(assertSafeConnectorUrl('http://n8n:5678/healthz', { env: customHostEnv }));
+  assert.throws(
+    () => assertSafeConnectorUrl('http://nodered:1880/health', { env: customHostEnv }),
+    (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+  );
+
+  // Strictly blocks metadata, link-local, loopback, and arbitrary RFC1918 even when DX_ALLOW_INTERNAL_CONNECTORS=true
+  // (and even if misconfigured into DX_INTERNAL_SERVICE_HOSTS)
+  const poisonedEnv = {
+    NODE_ENV: 'production',
+    DX_ALLOW_INTERNAL_CONNECTORS: 'true',
+    DX_INTERNAL_SERVICE_HOSTS: 'n8n,169.254.169.254,169.254.10.20,127.0.0.1,localhost,::1,10.0.0.1,172.16.0.5,192.168.1.50',
+  };
+  for (const blockedUrl of [
+    'http://169.254.169.254/latest/meta-data/',
+    'http://169.254.10.20/link-local',
+    'http://[fe80::1]/link-local6',
+    'http://127.0.0.1:8080/admin',
+    'http://localhost:5678/admin',
+    'http://[::1]:5678/admin',
+    'http://10.0.0.1/internal',
+    'http://172.16.0.5/internal',
+    'http://192.168.1.50/internal',
+  ]) {
+    assert.throws(
+      () => assertSafeConnectorUrl(blockedUrl, { env: strictEnv }),
+      (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+      `Expected strictEnv block for ${blockedUrl}`,
+    );
+    assert.throws(
+      () => assertSafeConnectorUrl(blockedUrl, { env: poisonedEnv }),
+      (err) => err.code === 'CONNECTOR_URL_UNSAFE' && err.status === 400,
+      `Expected poisonedEnv block for ${blockedUrl}`,
+    );
+  }
+
+  // 3. OAuth2 PKCE S256 (oauthStart -> oauthCallback -> encrypted tokens -> single-flight refresh)
+  const { db, connectors, sqlCalls } = makeInMemoryVaultEventDb({ dialect: 'postgres' });
+  const oauthEnv = { NODE_ENV: 'production', DX_VAULT_MASTER_KEY: 'oauth2-pkce-vault-master-key-2026' };
+  const nowEpochMs = 1_800_000_000_000;
+
+  const startRes = await oauthStart(db, {
+    organizationId: 'org-a',
+    connectorKey: 'gmail-ops',
+    name: 'Operations Gmail',
+    appType: 'gmail_oauth2',
+    clientId: 'google-client-id-1',
+    clientSecret: 'google-client-secret-top',
+    redirectUri: 'https://app.latticedx.example.com/api/dxosVault:oauthCallback',
+    scopes: ['https://www.googleapis.com/auth/gmail.send'],
+  }, { env: oauthEnv, nowMs: nowEpochMs });
+
+  assert.equal(startRes.connectorKey, 'gmail-ops');
+  assert.equal(startRes.codeChallengeMethod, 'S256');
+  assert.ok(startRes.state && startRes.state.length >= 32);
+  assert.ok(startRes.codeChallenge);
+  assert.equal(startRes.codeVerifier, undefined, 'codeVerifier must never leak in oauthStart response');
+  assert.equal(JSON.stringify(startRes).includes('google-client-secret-top'), false);
+
+  const authUrl = new URL(startRes.authorizeUrl);
+  assert.equal(authUrl.searchParams.get('response_type'), 'code');
+  assert.equal(authUrl.searchParams.get('client_id'), 'google-client-id-1');
+  assert.equal(authUrl.searchParams.get('state'), startRes.state);
+  assert.equal(authUrl.searchParams.get('code_challenge'), startRes.codeChallenge);
+  assert.equal(authUrl.searchParams.get('code_challenge_method'), 'S256');
+
+  assert.equal(connectors.length, 1);
+  assert.equal(connectors[0].appType, 'gmail_oauth2');
+  assert.equal(connectors[0].oauthStateNonce, startRes.state);
+
+  // CSRF state mismatch rejected 400 OAUTH_STATE_MISMATCH
+  await assert.rejects(
+    () => oauthCallback(db, {
+      organizationId: 'org-a',
+      connectorKey: 'gmail-ops',
+      code: 'auth-code-123',
+      state: 'tampered-wrong-state',
+    }, { env: oauthEnv, fetchImpl: async () => { throw new Error('must not call token endpoint on CSRF mismatch'); } }),
+    (err) => err.status === 400 && err.code === 'OAUTH_STATE_MISMATCH',
+  );
+
+  // Valid oauthCallback exchanges code + PKCE code_verifier & encrypts access/refresh tokens with AES-256-GCM
+  const tokenExchangeCalls = [];
+  const cbRes = await oauthCallback(db, {
+    organizationId: 'org-a',
+    connectorKey: 'gmail-ops',
+    code: 'auth-code-123',
+    state: startRes.state,
+  }, {
+    env: oauthEnv,
+    nowMs: nowEpochMs,
+    lookupImpl: async () => [{ address: '142.250.190.10', family: 4 }],
+    fetchImpl: async (url, init) => {
+      tokenExchangeCalls.push({ url, method: init?.method, body: String(init?.body || ''), redirect: init?.redirect });
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          access_token: 'ya29.initial-access-token',
+          refresh_token: '1//initial-refresh-token',
+          expires_in: 3600,
+          token_type: 'Bearer',
+          scope: 'https://www.googleapis.com/auth/gmail.send',
+        }),
+      };
+    },
+  });
+
+  assert.equal(cbRes.connected, true);
+  assert.equal(cbRes.hasAccessToken, true);
+  assert.equal(cbRes.hasRefreshToken, true);
+  assert.equal(JSON.stringify(cbRes).includes('ya29.initial-access-token'), false);
+  assert.equal(JSON.stringify(cbRes).includes('1//initial-refresh-token'), false);
+  assert.equal(tokenExchangeCalls.length, 1);
+  assert.equal(tokenExchangeCalls[0].redirect, 'error');
+
+  const exchangedParams = new URLSearchParams(tokenExchangeCalls[0].body);
+  assert.equal(exchangedParams.get('grant_type'), 'authorization_code');
+  assert.equal(exchangedParams.get('code'), 'auth-code-123');
+  assert.equal(exchangedParams.get('client_secret'), 'google-client-secret-top');
+  const sentVerifier = exchangedParams.get('code_verifier');
+  assert.ok(sentVerifier && sentVerifier.length >= 43);
+  const expectedChallenge = crypto.createHash('sha256').update(sentVerifier, 'ascii').digest('base64url');
+  assert.equal(expectedChallenge, startRes.codeChallenge);
+
+  // One-time state nonce cleared & tokens encrypted in AES-256-GCM format
+  assert.equal(connectors[0].oauthStateNonce, null);
+  assert.equal(connectors[0].oauthAccessTokenEnc.includes('ya29.initial-access-token'), false);
+  assert.equal(connectors[0].oauthRefreshTokenEnc.includes('1//initial-refresh-token'), false);
+  assert.equal(decryptSecretText(connectors[0].oauthAccessTokenEnc, oauthEnv), 'ya29.initial-access-token');
+  assert.equal(decryptSecretText(connectors[0].oauthRefreshTokenEnc, oauthEnv), '1//initial-refresh-token');
+
+  // Replay of same state nonce fails
+  await assert.rejects(
+    () => oauthCallback(db, {
+      organizationId: 'org-a',
+      connectorKey: 'gmail-ops',
+      code: 'auth-code-123',
+      state: startRes.state,
+    }, { env: oauthEnv }),
+    (err) => err.status === 400 && err.code === 'OAUTH_STATE_MISMATCH',
+  );
+
+  // 4. getFreshConnectorToken: valid token (>180s left) returns cached token with 0 HTTP calls
+  let refreshCallCount = 0;
+  const freshNoRefresh = await getFreshConnectorToken(db, connectors[0].id, {
+    env: oauthEnv,
+    nowMs: nowEpochMs + 1000 * 1000, // 2600s left > 180s
+    fetchImpl: async () => {
+      refreshCallCount += 1;
+      throw new Error('should not refresh when >180s remaining');
+    },
+  });
+  assert.equal(freshNoRefresh.accessToken, 'ya29.initial-access-token');
+  assert.equal(freshNoRefresh.refreshed, false);
+  assert.equal(refreshCallCount, 0);
+
+  // Within 180s early-refresh buffer (120s left) + 5 concurrent callers -> ONLY 1 upstream refresh HTTP call!
+  let resolveRefreshFetch;
+  const refreshGate = new Promise((r) => { resolveRefreshFetch = r; });
+  const refreshBodies = [];
+  const nearExpiryNowMs = nowEpochMs + (3600 - 120) * 1000;
+  const prevRlsFlag = process.env.DX_PG_RLS_SESSION;
+  process.env.DX_PG_RLS_SESSION = 'true';
+  try {
+    const concurrentPromises = Array.from({ length: 5 }, () => getFreshConnectorToken(db, connectors[0].id, {
+      env: oauthEnv,
+      nowMs: nearExpiryNowMs,
+      lookupImpl: async () => [{ address: '142.250.190.10', family: 4 }],
+      fetchImpl: async (url, init) => {
+        refreshCallCount += 1;
+        refreshBodies.push({ url, body: String(init?.body || ''), redirect: init?.redirect });
+        await refreshGate;
+        return {
+          ok: true,
+          status: 200,
+          text: async () => JSON.stringify({
+            access_token: 'ya29.refreshed-single-flight-token',
+            refresh_token: '1//rotated-refresh-token',
+            expires_in: 3600,
+            token_type: 'Bearer',
+          }),
+        };
+      },
+    }));
+
+    // Let microtasks enter flight, then release upstream response
+    await new Promise((r) => setTimeout(r, 15));
+    resolveRefreshFetch();
+    const results = await Promise.all(concurrentPromises);
+
+    assert.equal(refreshCallCount, 1, 'Single-flight lock must trigger ONLY 1 upstream refresh HTTP call for 5 concurrent callers');
+    for (const r of results) {
+      assert.equal(r.accessToken, 'ya29.refreshed-single-flight-token');
+    }
+    const refreshParams = new URLSearchParams(refreshBodies[0].body);
+    assert.equal(refreshParams.get('grant_type'), 'refresh_token');
+    assert.equal(refreshParams.get('refresh_token'), '1//initial-refresh-token');
+    assert.equal(decryptSecretText(connectors[0].oauthAccessTokenEnc, oauthEnv), 'ya29.refreshed-single-flight-token');
+    assert.equal(decryptSecretText(connectors[0].oauthRefreshTokenEnc, oauthEnv), '1//rotated-refresh-token');
+    assert.ok(sqlCalls.some((q) => /set_config\('app\.(?:rls_bypass|current_org)'/.test(q.sql)), 'PG RLS session context must be applied');
+  } finally {
+    if (prevRlsFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRlsFlag;
+  }
+
+  // 5. dxosVault resource actions expose oauthStart, oauthCallback, appCatalog and enforce admin RBAC
+  const resources = new Map();
+  const app = {
+    db,
+    resourceManager: { define(def) { resources.set(def.name, def.actions); }, use() {} },
+    acl: { allow() {} },
+  };
+  registerConnectorVault(app, { env: oauthEnv });
+  const vaultActions = resources.get('dxosVault');
+  assert.equal(typeof vaultActions.appCatalog, 'function');
+  assert.equal(typeof vaultActions.oauthStart, 'function');
+  assert.equal(typeof vaultActions.oauthCallback, 'function');
+
+  await assert.rejects(
+    () => vaultActions.oauthStart(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
+      params: { values: { connectorKey: 'gmail-ops', appType: 'gmail_oauth2', clientId: 'c1', redirectUri: 'https://app.latticedx.example.com/cb' } },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'VAULT_ADMIN_REQUIRED',
+  );
 });
 
 test('Task 1 remediation: dispatchOneDelivery isolates syncParentEventStatus from write TX and forwards transaction explicitly', async () => {

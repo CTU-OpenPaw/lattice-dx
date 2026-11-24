@@ -219,9 +219,11 @@ test('flow/* modules obey strict per-file line limits, SPDX header, zero forbidd
   assert.ok(flowFiles.includes('flow-list-view.js'), 'flow-list-view.js must exist');
   assert.ok(flowFiles.includes('flow-studio-app.js'), 'flow-studio-app.js must exist');
   assert.ok(flowFiles.includes('flow-dsl.js'), 'flow-dsl.js must exist');
-  assert.equal(flowFiles.length, 12, 'flow/ directory must contain vendor-shims + modular UI/validation/runner/n8n files');
+  assert.ok(flowFiles.includes('connected-apps-panel.js'), 'connected-apps-panel.js must exist');
+  assert.equal(flowFiles.length, 13, 'flow/ directory must contain vendor-shims + modular UI/validation/runner/n8n/connected-apps files');
 
   const budgets = {
+    'connected-apps-panel.js': 380,
     'flow-list-view.js': 280,
     'flow-studio-helpers.js': 220,
     'flow-test-runner.js': 200,
@@ -317,6 +319,11 @@ test('src/client/index.js registers workflow.automation under Workflow, preserve
   assert.equal(flowTree.props['data-testid'], 'dxos-flow-studio-app');
   assert.equal(flowTree.props.style.height, 'calc(100vh - 196px)');
   assert.equal(collectNodes(flowTree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-view').length, 1);
+
+  const connTree = await harness.mountAndFlush(byKey['workflow.connectors'].Component, {});
+  assert.equal(connTree.props['data-testid'], 'dxos-workflow-connectors-tab');
+  assert.equal(collectNodes(connTree, (n) => n.props?.['data-testid'] === 'dxos-connected-apps-panel').length, 1);
+  assert.equal(collectNodes(connTree, (n) => n.props?.['data-testid'] === 'dxos-vault-save-form').length, 0);
 });
 
 test('Screen 1 FlowListView supports search, active/paused/HITL filters, HITL callout, 6 Blueprints gallery, 1-click n8n/Broker links, and List <-> Editor navigation', async () => {
@@ -1326,11 +1333,13 @@ test('Round 2 Leaf + quick-append, validation badge/pill click-to-focus, AI dism
   }
 });
 
-test('N8nSetupModal saves & tests n8n service directly in Workflow Automation, refreshes catalog, and applies webhook presets to integration.http', async () => {
+test('N8nSetupModal saves & tests n8n service directly in Workflow Automation, loads live dxosN8n:workflows, shows 26-node orchestrator label, and applies webhook presets to integration.http', async () => {
   const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
-  const { resolveN8nEditorUrl } = require(path.join(PLUGIN_ROOT, 'src/client/flow/n8n-setup-modal.js'));
+  const { N8N_WEBHOOK_PRESETS, resolveN8nEditorUrl } = require(path.join(PLUGIN_ROOT, 'src/client/flow/n8n-setup-modal.js'));
   assert.equal(resolveN8nEditorUrl('http://n8n:5678'), 'http://localhost:5678');
   assert.equal(resolveN8nEditorUrl('https://n8n.example.org/hook'), 'https://n8n.example.org');
+  assert.ok(N8N_WEBHOOK_PRESETS[0].name.includes('26 nodes'), 'Enterprise orchestrator preset must reflect 26 nodes');
+  assert.equal(N8N_WEBHOOK_PRESETS[0].name.includes('17 nodes'), false, 'Stale 17 nodes label must be removed');
 
   const harness = createQueuedReactHarness();
   const nodeTypes = getRegistrySchemas();
@@ -1342,6 +1351,7 @@ test('N8nSetupModal saves & tests n8n service directly in Workflow Automation, r
     'dxosAutomations:listRules': async () => ({ items: [] }),
     'dxosAutomations:listRuns': async () => ({ items: [] }),
     'dxosVault:list': async () => ({ items: vaultConnectors }),
+    'dxosN8n:workflows': async () => ({ data: [{ id: 'wf-live-26', name: 'Enterprise 26-Node Orchestrator', active: true }] }),
     'dxosVault:save': async (req) => {
       const saved = { id: 1, ...req.data, hasSecrets: Boolean(req.data.secrets), lastTestStatus: null };
       delete saved.secrets;
@@ -1359,6 +1369,10 @@ test('N8nSetupModal saves & tests n8n service directly in Workflow Automation, r
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-setup-modal').length, 1);
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-open-editor-link')[0].props.href, 'http://localhost:5678');
+  assert.ok(requests.some((r) => r.url === 'dxosN8n:workflows'), 'N8nSetupModal must fetch live dxosN8n:workflows');
+  const liveWfSection = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-modal-live-workflows')[0];
+  assert.ok(liveWfSection && textOf(liveWfSection).includes('Enterprise 26-Node Orchestrator'));
+  assert.equal(collectNodes(tree, (n) => n.type === 'iframe').length, 0, 'Must never iframe-embed n8n');
 
   // Fill secret & save connector
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-secret-input')[0].props.onChange({ target: { value: 'whsec_test_123' } });
@@ -1384,4 +1398,134 @@ test('N8nSetupModal saves & tests n8n service directly in Workflow Automation, r
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-open-n8n-from-inspector').length, 1);
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-n8n-path-picker').length, 1);
+});
+
+test('ConnectedAppsPanel renders 11 App Catalog cards, capability badges, OAuth2/Token connect modal, Kiểm tra & Đồng bộ sang n8n, Live Workflows/Executions + Retry, and external n8n Editor link without iframe', async () => {
+  const { createConnectedAppsPanel } = require(path.join(PLUGIN_ROOT, 'src/client/flow/connected-apps-panel.js'));
+  const harness = createQueuedReactHarness();
+  const appTypes = [
+    'telegram', 'email_smtp', 'gmail_oauth2', 'google_sheets_oauth2',
+    'slack', 'discord', 'teams', 'github', 'rustfs_s3', 'n8n_api', 'partner_webhook',
+  ];
+  const catalogItems = appTypes.map((appType) => ({
+    appType,
+    name: `App ${appType}`,
+    category: appType === 'n8n_api' ? 'orchestration' : 'messaging',
+    connectorType: appType === 'n8n_api' ? 'n8n' : 'http_api',
+    authTypes: appType.includes('oauth2') || ['slack', 'teams', 'github'].includes(appType) ? ['oauth2', 'bearer'] : ['api_key', 'bearer'],
+    defaultAuthType: appType.includes('oauth2') ? 'oauth2' : 'api_key',
+    defaultBaseUrl: appType === 'n8n_api' ? 'http://n8n:5678' : `https://api.${appType}.example.com`,
+    capabilities: ['sendMessage', 'syncData'],
+    secretFields: appType.includes('oauth2') ? ['clientId', 'clientSecret'] : ['apiKey'],
+    configuredCount: appType === 'telegram' ? 1 : 0,
+  }));
+  let connectors = [
+    { id: 1, connectorKey: 'tg-ops', name: 'Telegram Ops', connectorType: 'http_api', appType: 'telegram', baseUrl: 'https://api.telegram.org', authType: 'api_key', hasSecrets: true, secretKeys: ['botToken'], secretVersion: 1, lastTestStatus: 'ok', n8nCredentialId: null },
+  ];
+  let workflows = [
+    { id: 'wf-26', name: 'Enterprise 26-Node Cold-Chain Orchestrator', active: false, nodes: [{ id: '1' }] },
+  ];
+  let executions = [
+    { id: 'exec-500', workflowId: 'wf-26', status: 'error', startedAt: '2026-11-24T12:00:00.000Z' },
+  ];
+
+  const { client, requests } = createApiMock({
+    'dxosN8n:appCatalog': async () => ({ organizationId: 'org-a', items: catalogItems }),
+    'dxosN8n:status': async () => ({ ok: true, healthzOk: true, apiOk: true, baseUrl: 'http://n8n:5678', latencyMs: 12 }),
+    'dxosN8n:workflows': async () => ({ data: workflows }),
+    'dxosN8n:activateWorkflow': async (req) => {
+      workflows = workflows.map((w) => (w.id === req.data.workflowId ? { ...w, active: req.data.active } : w));
+      return { id: req.data.workflowId, active: req.data.active };
+    },
+    'dxosN8n:executions': async () => ({ data: executions }),
+    'dxosN8n:retryExecution': async (req) => {
+      executions = [{ id: 'exec-501', workflowId: 'wf-26', status: 'success', retriedFrom: req.data.executionId }, ...executions];
+      return { id: 'exec-501', retriedFrom: req.data.executionId };
+    },
+    'dxosN8n:syncCredential': async (req) => {
+      connectors = connectors.map((c) => (c.connectorKey === req.data.connectorKey ? { ...c, n8nCredentialId: 'cred-n8n-88' } : c));
+      return { synced: true, n8nCredentialId: 'cred-n8n-88', connectorKey: req.data.connectorKey };
+    },
+    'dxosVault:list': async () => ({ items: connectors }),
+    'dxosVault:save': async (req) => {
+      const saved = { id: 2, ...req.data, hasSecrets: Boolean(req.data.secrets), secretKeys: req.data.secrets ? Object.keys(req.data.secrets) : [], secretVersion: 1 };
+      delete saved.secrets;
+      connectors = [saved, ...connectors];
+      return saved;
+    },
+    'dxosVault:testConnection': async (req) => ({ ok: true, statusCode: 200, latencyMs: 9, connectorKey: req.data.connectorKey, message: 'OK' }),
+    'dxosVault:oauthStart': async (req) => ({
+      connectorKey: req.data.connectorKey,
+      state: 'oauth-state-nonce-1',
+      authorizeUrl: 'https://accounts.google.com/o/oauth2/v2/auth?state=oauth-state-nonce-1',
+    }),
+    'dxosVault:oauthCallback': async (req) => ({
+      connectorKey: req.data.connectorKey,
+      oauthConnected: true,
+      oauthScope: 'https://www.googleapis.com/auth/gmail.send',
+    }),
+  });
+
+  const ConnectedAppsPanel = createConnectedAppsPanel(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+
+  // 1. All 11 App Catalog cards + capability badges + external n8n link (NO iframe)
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-connected-apps-panel').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.type === 'iframe').length, 0);
+  for (const appType of appTypes) {
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-app-card-${appType}`).length, 1, `Missing app card ${appType}`);
+  }
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-cap-telegram-sendMessage').length, 1);
+  const editorLink = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-open-editor-link')[0];
+  assert.ok(editorLink && editorLink.props.target === '_blank');
+
+  // 2. OAuth2 Connect Wizard Modal (gmail_oauth2) -> oauthStart + oauthCallback
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-connect-gmail_oauth2')[0].props.onClick();
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-connect-modal').length, 1);
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-oauth-clientid-input')[0].props.onChange({ target: { value: 'google-client-123' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-oauth-secret-input')[0].props.onChange({ target: { value: 'google-secret-xyz' } });
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-oauth-start-btn')[0].props.onClick();
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosVault:oauthStart' && r.data.appType === 'gmail_oauth2'));
+  assert.equal(JSON.stringify(tree).includes('google-secret-xyz'), false, 'Client secret must be cleared after oauthStart');
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-oauth-authorize-link').length, 1);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-oauth-code-input')[0].props.onChange({ target: { value: 'auth-code-999' } });
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-oauth-callback-btn')[0].props.onClick();
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosVault:oauthCallback' && r.data.code === 'auth-code-999'));
+
+  // 3. Token Connect Wizard Modal (discord) -> dxosVault:save without retaining secret
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-connect-discord')[0].props.onClick();
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-secret-input')[0].props.onChange({ target: { value: 'discord-tok-secret-555' } });
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-save-form')[0].props.onSubmit({ preventDefault() {} });
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosVault:save' && r.data.appType === 'discord'));
+  assert.equal(JSON.stringify(tree).includes('discord-tok-secret-555'), false);
+
+  // 4. Test connection (Kiểm tra) & Sync to n8n (Đồng bộ sang n8n)
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-test-tg-ops')[0].props.onClick();
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosVault:testConnection' && r.data.connectorKey === 'tg-ops'));
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-test-result').length, 1);
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-sync-n8n-tg-ops')[0].props.onClick();
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosN8n:syncCredential' && r.data.connectorKey === 'tg-ops'));
+  assert.ok(JSON.stringify(tree).includes('cred-n8n-88'));
+
+  // 5. Live Workflows toggle & Executions Retry
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-workflows-table').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-executions-table').length, 1);
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-wf-toggle-wf-26')[0].props.onClick();
+  assert.ok(requests.some((r) => r.url === 'dxosN8n:activateWorkflow' && r.data.workflowId === 'wf-26' && r.data.active === true));
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-n8n-exec-retry-exec-500')[0].props.onClick();
+  tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosN8n:retryExecution' && r.data.executionId === 'exec-500'));
+  assert.ok(JSON.stringify(tree).includes('exec-501'));
 });

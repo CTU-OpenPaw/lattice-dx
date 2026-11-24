@@ -463,7 +463,7 @@ test('Tab 7 (BrokerAndEventsPanel): provisions MQTT device with one-time passwor
   assert.ok(requests.some((r) => r.url === 'dxosEvents:replayDlq' && Array.isArray(r.data.deliveryIds) && r.data.deliveryIds[0] === 77));
 });
 
-test('Tab 8 (VaultAndAutomationPanel): saves/tests/rotates secrets without leaking plaintext, launches Flow Studio, and runs rule quick-actions', async () => {
+test('Tab 8 (VaultAndAutomationPanel): deduplicates Connector setup into summary card + deep-link to Workflow -> Connectors & n8n, launches Flow Studio, and runs rule quick-actions', async () => {
   const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
   const harness = createReactHarness();
   const openedRoutes = [];
@@ -473,12 +473,14 @@ test('Tab 8 (VaultAndAutomationPanel): saves/tests/rotates secrets without leaki
       connectorKey: 'n8n-prod',
       name: 'n8n Server',
       connectorType: 'n8n',
+      appType: 'n8n_api',
       baseUrl: 'http://n8n:5678',
       authType: 'bearer',
       hasSecrets: true,
       secretKeys: ['token'],
       secretVersion: 1,
       lastTestStatus: 'ok',
+      n8nCredentialId: 'cred-1',
     },
   ];
   let rules = [
@@ -507,38 +509,6 @@ test('Tab 8 (VaultAndAutomationPanel): saves/tests/rotates secrets without leaki
 
   const { client, requests } = createApiMock({
     'dxosVault:list': async () => ({ items: connectors }),
-    'dxosVault:save': async (req) => {
-      const saved = {
-        id: 2,
-        connectorKey: req.data.connectorKey,
-        name: req.data.name,
-        connectorType: req.data.connectorType,
-        baseUrl: req.data.baseUrl,
-        authType: req.data.authType,
-        hasSecrets: Boolean(req.data.secrets),
-        secretKeys: req.data.secrets ? Object.keys(req.data.secrets) : [],
-        secretVersion: 1,
-        lastTestStatus: null,
-      };
-      connectors = [saved, ...connectors];
-      return saved;
-    },
-    'dxosVault:testConnection': async (req) => ({
-      ok: true,
-      statusCode: 200,
-      latencyMs: 14,
-      message: 'Endpoint reachable',
-      connectorKey: req.data.connectorKey,
-      lastTestStatus: 'ok',
-    }),
-    'dxosVault:rotateSecret': async (req) => {
-      connectors = connectors.map((c) => (c.connectorKey === req.data.connectorKey ? { ...c, secretVersion: c.secretVersion + 1 } : c));
-      return connectors.find((c) => c.connectorKey === req.data.connectorKey);
-    },
-    'dxosVault:delete': async (req) => {
-      connectors = connectors.filter((c) => c.connectorKey !== req.data.connectorKey);
-      return { deleted: true, connectorKey: req.data.connectorKey };
-    },
     'dxosAutomations:listRules': async () => ({ items: rules }),
     'dxosAutomations:toggleRule': async (req) => {
       rules = rules.map((r) => (r.ruleKey === req.data.ruleKey ? { ...r, active: req.data.active } : r));
@@ -570,45 +540,25 @@ test('Tab 8 (VaultAndAutomationPanel): saves/tests/rotates secrets without leaki
     openRoute: (p) => openedRoutes.push(p),
   });
 
-  // Save connector with secret -> clears secret input immediately and never renders plaintext secret
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-key-input')[0].props.onChange({ target: { value: 'erp-webhook' } });
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-name-input')[0].props.onChange({ target: { value: 'ERP Webhook' } });
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-url-input')[0].props.onChange({ target: { value: 'https://erp.example.com/hook' } });
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-secrets-input')[0].props.onChange({ target: { value: '{"token":"super-secret-xyz-123"}' } });
-  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', openRoute: (p) => openedRoutes.push(p) });
-  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-save-form')[0].props.onSubmit({ preventDefault() {} });
-  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', openRoute: (p) => openedRoutes.push(p) });
+  // Deduplication check: NO duplicate connector setup/rotate forms in Studio Tab 8
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-save-form').length, 0, 'Tab 8 must NOT duplicate Connector setup form');
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-form').length, 0, 'Tab 8 must NOT duplicate Rotate form');
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-table').length, 0, 'Tab 8 must NOT duplicate full Connector table');
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-summary-card').length, 1, 'Tab 8 must keep Connectors summary card');
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-summary-card')[0]).includes('n8n-prod'));
 
-  const saveVaultReq = requests.find((r) => r.url === 'dxosVault:save');
-  assert.ok(saveVaultReq);
-  assert.deepEqual(saveVaultReq.data.secrets, { token: 'super-secret-xyz-123' });
-  assert.equal(JSON.stringify(tree).includes('super-secret-xyz-123'), false, 'Saved plaintext secret must never remain in UI state/DOM');
-
-  // Test Connection
-  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-test-n8n-prod')[0].props.onClick();
-  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', openRoute: (p) => openedRoutes.push(p) });
-  assert.ok(requests.some((r) => r.url === 'dxosVault:testConnection' && r.data.connectorKey === 'n8n-prod'));
-  const testBanner = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-test-result')[0];
-  assert.ok(testBanner && textOf(testBanner).includes('Endpoint reachable'));
-
-  // Rotate Secret
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-open-n8n-prod')[0].props.onClick();
-  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', openRoute: (p) => openedRoutes.push(p) });
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-input')[0].props.onChange({ target: { value: 'rotated-tok-999' } });
-  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', openRoute: (p) => openedRoutes.push(p) });
-  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-form')[0].props.onSubmit({ preventDefault() {} });
-  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', openRoute: (p) => openedRoutes.push(p) });
-  assert.ok(requests.some((r) => r.url === 'dxosVault:rotateSecret' && r.data.connectorKey === 'n8n-prod' && r.data.secrets.token === 'rotated-tok-999'));
-  assert.equal(JSON.stringify(tree).includes('rotated-tok-999'), false);
+  // Deep-link button to Workflow -> Connectors & n8n
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-open-connectors-hub-btn')[0].props.onClick();
+  assert.equal(openedRoutes[0], '/admin/settings/workflow/connectors');
 
   // Slim Automation Summary & Full-Screen LatticeFlow Studio Launcher
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-summary-card').length, 1);
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-open-flow-studio-btn')[0].props.onClick();
-  assert.equal(openedRoutes[0], '/admin/settings/workflow/automation');
+  assert.equal(openedRoutes[1], '/admin/settings/workflow/automation');
 
-  // Rule quick-actions: Open in Studio, Run Now, Toggle, Delete, Replay Run & Delete Vault Connector
+  // Rule quick-actions: Open in Studio, Run Now, Toggle, Delete, Replay Run
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-open-studio-auto_cmms_on_coldchain_fault')[0].props.onClick();
-  assert.ok(openedRoutes[1].startsWith('/admin/settings/workflow/automation?ruleKey=auto_cmms_on_coldchain_fault'));
+  assert.ok(openedRoutes[2].startsWith('/admin/settings/workflow/automation?ruleKey=auto_cmms_on_coldchain_fault'));
 
   await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-run-auto_cmms_on_coldchain_fault')[0].props.onClick();
   tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', openRoute: (p) => openedRoutes.push(p) });
@@ -626,8 +576,6 @@ test('Tab 8 (VaultAndAutomationPanel): saves/tests/rotates secrets without leaki
   assert.ok(requests.some((r) => r.url === 'dxosAutomations:toggleRule' && r.data.ruleKey === 'auto_cmms_on_coldchain_fault'));
   await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-delete-auto_cmms_on_coldchain_fault')[0].props.onClick();
   assert.ok(requests.some((r) => r.url === 'dxosAutomations:deleteRule' && r.data.ruleKey === 'auto_cmms_on_coldchain_fault'));
-  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-delete-n8n-prod')[0].props.onClick();
-  assert.ok(requests.some((r) => r.url === 'dxosVault:delete' && r.data.connectorKey === 'n8n-prod'));
 });
 
 test('Tab 9 (DomainBuilderAndTenantsPanel): creates latticeCustom* domain, installs CMMS pack, provisions tenant without retaining password', async () => {
@@ -767,15 +715,21 @@ test('error handling and client-side validation surface errors without calling A
   });
   assert.ok(feedbackCalls.some((f) => f && f.type === 'error' && f.text.includes('Vault DB error 503')));
 
-  // Malformed Vault Secrets JSON blocks dxosVault:save API call
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-key-input')[0].props.onChange({ target: { value: 'bad-vault' } });
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-name-input')[0].props.onChange({ target: { value: 'Bad Vault' } });
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-url-input')[0].props.onChange({ target: { value: 'https://example.com' } });
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-secrets-input')[0].props.onChange({ target: { value: '{broken' } });
-  tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', setFeedback: (fb) => feedbackCalls.push(fb) });
-  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-save-form')[0].props.onSubmit({ preventDefault() {} });
+  // Malformed Vault Secrets JSON in ConnectedAppsPanel blocks dxosVault:save API call
+  const { createConnectedAppsPanel } = require(path.join(PLUGIN_ROOT, 'src/client/flow/connected-apps-panel.js'));
+  const ConnectedAppsPanel = createConnectedAppsPanel(client, harness.React, {}, {});
+  const appFeedback = [];
+  let appTree = await harness.mountAndFlush(ConnectedAppsPanel, {
+    selectedOrg: 'org-a',
+    setFeedback: (fb) => appFeedback.push(fb),
+  });
+  collectNodes(appTree, (n) => n.props?.['data-testid'] === 'dxos-app-connect-telegram')[0].props.onClick();
+  appTree = harness.render(ConnectedAppsPanel, { selectedOrg: 'org-a', setFeedback: (fb) => appFeedback.push(fb) });
+  collectNodes(appTree, (n) => n.props?.['data-testid'] === 'dxos-app-secret-input')[0].props.onChange({ target: { value: '{broken' } });
+  appTree = harness.render(ConnectedAppsPanel, { selectedOrg: 'org-a', setFeedback: (fb) => appFeedback.push(fb) });
+  await collectNodes(appTree, (n) => n.props?.['data-testid'] === 'dxos-app-save-form')[0].props.onSubmit({ preventDefault() {} });
   assert.equal(requests.some((r) => r.url === 'dxosVault:save'), false);
-  assert.ok(feedbackCalls.some((f) => f && f.type === 'error' && f.text.includes('JSON')));
+  assert.ok(appFeedback.some((f) => f && f.type === 'error' && f.text.includes('JSON')));
 
   // Invalid non-latticeCustom collectionName blocks createDomain API call
   const builderFeedback = [];
@@ -954,13 +908,6 @@ test('Tab 8 (VaultAndAutomationPanel): org-switch clears stale Vault/Automation 
         ? [{ id: 1, connectorKey: 'n8n-org-a', name: 'n8n Org A', connectorType: 'n8n', authType: 'bearer', hasSecrets: true }]
         : [{ id: 2, connectorKey: 'n8n-org-b', name: 'n8n Org B', connectorType: 'n8n', authType: 'bearer', hasSecrets: true }],
     }),
-    'dxosVault:testConnection': async (req) => ({
-      ok: true,
-      statusCode: 200,
-      latencyMs: 9,
-      message: 'Org A reachable',
-      connectorKey: req.data.connectorKey,
-    }),
     'dxosAutomations:listRules': async (req) => ({
       items: req.params.organizationId === 'org-a'
         ? [{ id: 101, ruleKey: 'rule_org_a', name: 'Rule Org A', triggerEventType: 'alarm.triggered', schemaVersion: 2, active: true }]
@@ -982,19 +929,12 @@ test('Tab 8 (VaultAndAutomationPanel): org-switch clears stale Vault/Automation 
   const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
   let tree = await harness.mountAndFlush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
   assert.ok(JSON.stringify(tree).includes('rule_org_a'));
-
-  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-test-n8n-org-a')[0].props.onClick();
-  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
-  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-test-result').length, 1);
-
-  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-open-n8n-org-a')[0].props.onClick();
-  tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-a' });
-  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-form').length, 1);
+  assert.ok(JSON.stringify(tree).includes('n8n-org-a'));
 
   // Switch to org-b BEFORE org-a runs response resolves
   tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-b' });
-  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-test-result').length, 0);
-  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-vault-rotate-form').length, 0);
+  assert.equal(JSON.stringify(tree).includes('n8n-org-a'), false);
+  assert.ok(JSON.stringify(tree).includes('n8n-org-b'));
   assert.ok(JSON.stringify(tree).includes('rule_org_b'));
   assert.ok(JSON.stringify(tree).includes('run-org-b-902'));
 

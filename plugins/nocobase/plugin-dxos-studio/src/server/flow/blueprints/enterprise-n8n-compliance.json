@@ -1,11 +1,11 @@
 {
   "blueprintKey": "auto_enterprise_n8n_compliance",
   "ruleKey": "auto_enterprise_n8n_compliance",
-  "name": "Điều phối Tuân thủ & Ký sổ cái PKI qua n8n (Enterprise)",
-  "description": "Khi tạo bản ghi trên latticeRequests > 10.000.000 VNĐ, đẩy payload sang dịch vụ n8n thật (n8n-enterprise-orchestrator) để chấm điểm rủi ro 17 node, fan-out song song 4 hệ thống (NocoBase PKI Ed25519/Merkle, FIWARE Orion-LD Digital Twin, Node-RED/MQTT Interlock, Partner Dossier) và phản hồi kết quả về LatticeFlow v2.",
+  "name": "Điều phối Cold-Chain Settlement, PKI & App Ngoài 2 Chiều qua n8n (Enterprise 26 Nodes)",
+  "description": "Khi tạo bản ghi trên latticeRequests > 10.000.000 VNĐ, đẩy payload sang Stock n8n (n8n-enterprise-orchestrator) để xác thực HMAC, đánh giá DMN Settlement, fan-out song song nội bộ (NocoBase PKI Ed25519/Merkle, FIWARE Orion-LD Digital Twin, Node-RED/MQTT Interlock, Partner Dossier) và 5 ứng dụng ngoài (Telegram, Email SMTP, Google Sheets, Slack, GitHub) kèm Error Trigger + Inbound Callback 2 chiều.",
   "category": "n8n-orchestration",
   "triggerEventType": "record.latticeRequests.create",
-  "dmnTableKey": null,
+  "dmnTableKey": "coldchain_settlement_policy_v1",
   "cooldownSec": 0,
   "maxDepth": 8,
   "active": true,
@@ -18,8 +18,11 @@
       "code": "REQ-COMP-01",
       "amount": 125000000,
       "severity": "critical",
-      "temperatureC": -9.5,
+      "temperatureC": -8.5,
       "slaOverdueMinutes": 45,
+      "partnerCode": "vnpost-cold",
+      "partnerEmail": "claims@vnpost-cold.example.com",
+      "lotCode": "LOT-VAC-2026-09",
       "items": [
         { "sku": "LOT-A1", "qty": 40, "value": 75000000 },
         { "sku": "LOT-B2", "qty": 25, "value": 50000000 }
@@ -56,7 +59,7 @@
       {
         "id": "call_n8n_orchestrator",
         "type": "integration.http",
-        "label": "Điều phối 17-node 4 hệ thống (n8n)",
+        "label": "Điều phối 26-node Settlement & App Ngoài (n8n)",
         "position": { "x": 640, "y": 140 },
         "timeoutMs": 15000,
         "config": {
@@ -74,6 +77,9 @@
             "severity": "{{data.severity}}",
             "temperatureC": "{{data.temperatureC}}",
             "slaOverdueMinutes": "{{data.slaOverdueMinutes}}",
+            "partnerCode": "{{data.partnerCode}}",
+            "partnerEmail": "{{data.partnerEmail}}",
+            "lotCode": "{{data.lotCode}}",
             "items": "{{data.items}}"
           }
         }
@@ -94,14 +100,14 @@
       {
         "id": "notify_critical_director",
         "type": "notify.send",
-        "label": "Báo Giám đốc (PKI Merkle Signed)",
+        "label": "Báo Giám đốc (PKI + App Ngoài + Settlement)",
         "position": { "x": 1280, "y": 60 },
         "config": {
           "roleNames": ["ldx_manager"],
           "severity": "critical",
           "category": "approval",
-          "title": "n8n PKI Critical ({{steps.call_n8n_orchestrator.output.response.riskScore}}/100)",
-          "body": "n8n Exec #{{steps.call_n8n_orchestrator.output.response.n8nExecutionId}} · Merkle: {{steps.call_n8n_orchestrator.output.response.pkiAttestation.merkleRoot}} · Twin: {{steps.call_n8n_orchestrator.output.response.digitalTwinSync.entityId}} · MQTT: {{steps.call_n8n_orchestrator.output.response.edgeInterlock.mqttTopic}}"
+          "title": "n8n Settlement Critical ({{steps.call_n8n_orchestrator.output.response.riskScore}}/100)",
+          "body": "n8n Exec #{{steps.call_n8n_orchestrator.output.response.n8nExecutionId}} · Settlement: {{steps.call_n8n_orchestrator.output.response.settlementSummary.settlementEstimateVnd}} VNĐ · Merkle: {{steps.call_n8n_orchestrator.output.response.pkiAttestation.merkleRoot}} · Twin: {{steps.call_n8n_orchestrator.output.response.digitalTwinSync.entityId}} · MQTT: {{steps.call_n8n_orchestrator.output.response.edgeInterlock.mqttTopic}} · Apps: {{steps.call_n8n_orchestrator.output.response.externalAppsDispatched.succeededCount}}/{{steps.call_n8n_orchestrator.output.response.externalAppsDispatched.totalChannels}}"
         }
       },
       {

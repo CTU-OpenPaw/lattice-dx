@@ -16,11 +16,11 @@
   'use strict';
   const { createDxosStudioSettingsPage } = require('./studio-settings');
   const { createFlowStudioApp } = require('./flow/flow-studio-app');
-  const { createBuilderBrokerPanels } = require('./builder-broker-panels');
+  const { createConnectedAppsPanel } = require('./flow/connected-apps-panel');
 
   function createWorkflowConnectorsPage(app) {
     const h = React.createElement;
-    const { VaultAndAutomationPanel } = createBuilderBrokerPanels(client, React, antd, app);
+    const ConnectedAppsPanel = createConnectedAppsPanel(client, React, antd, app);
     const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
     return function WorkflowConnectorsPage() {
       const api = useApi();
@@ -43,8 +43,8 @@
       const openRoute = (p) => { if (app?.router?.navigate) app.router.navigate(p); else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(p) || p); };
       return h('div', { 'data-testid': 'dxos-workflow-connectors-tab', style: { padding: 14, background: '#f8fafc', minHeight: 520 } },
         orgReady
-          ? h(VaultAndAutomationPanel, { api, selectedOrg, organizations, openRoute })
-          : h('div', { style: { padding: 20, fontSize: 13, color: '#64748b' } }, 'Đang tải danh sách tổ chức & Vault…'),
+          ? h(ConnectedAppsPanel, { api, selectedOrg, organizations, openRoute })
+          : h('div', { style: { padding: 20, fontSize: 13, color: '#64748b' } }, 'Đang tải danh sách tổ chức & Connected Apps…'),
       );
     };
   }

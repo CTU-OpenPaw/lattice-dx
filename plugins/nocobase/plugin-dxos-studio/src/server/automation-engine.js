@@ -46,6 +46,7 @@ const {
 const getFlowExecutor = () => require('./flow/executor');
 const { computeNextCronRun, extractScheduleConfigFromRule, parseCronExpression } = require('./flow/cron');
 const { resolveEffectiveDelegatedRoles } = require('./delegation-engine');
+const { createDxosN8nActions, createN8nRouteHandlers } = require('./n8n-api-client');
 const {
   assertPatScope,
   clampPageLimit,
@@ -981,10 +982,25 @@ async function executeActionStep({
         throw new Error(`Unsupported HTTP method: ${method}`);
       }
       const customHeaders = isPlainObject(action.headers) ? interpolateTemplate(action.headers, eventContext) : {};
-      const authHeaders =
-        typeof vaultMod.buildConnectorAuthHeaders === 'function'
+      let oauthBearerHeaders = {};
+      const scrubTargets = { ...(isPlainObject(secrets) ? secrets : {}) };
+      if (String(connector.authType || '').toLowerCase() === 'oauth2' && typeof vaultMod.getFreshConnectorToken === 'function') {
+        const fresh = await vaultMod.getFreshConnectorToken(db, connector.id ?? connectorKey, {
+          organizationId,
+          env: options.env,
+          fetchImpl: options.fetchImpl,
+          lookupImpl: options.lookupImpl,
+        });
+        if (fresh?.accessToken) {
+          oauthBearerHeaders = { Authorization: `Bearer ${fresh.accessToken}` };
+          scrubTargets.oauthAccessToken = fresh.accessToken;
+        }
+      }
+      const authHeaders = Object.keys(oauthBearerHeaders).length > 0
+        ? oauthBearerHeaders
+        : (typeof vaultMod.buildConnectorAuthHeaders === 'function'
           ? vaultMod.buildConnectorAuthHeaders(connector.authType, secrets)
-          : buildFallbackAuthHeaders(connector.authType, secrets);
+          : buildFallbackAuthHeaders(connector.authType, secrets));
       const bodyPayload =
         method === 'GET' || method === 'DELETE'
           ? undefined
@@ -1015,7 +1031,7 @@ async function executeActionStep({
           signal: controller.signal,
         });
       } catch (err) {
-        throw new Error(scrubSecrets(err?.message || 'Connector HTTP request failed', secrets));
+        throw new Error(scrubSecrets(err?.message || 'Connector HTTP request failed', scrubTargets));
       } finally {
         clearTimeout(timeoutId);
       }
@@ -2257,6 +2273,8 @@ module.exports = {
   buildHmacHeaders,
   createAutomationDirectGuardMiddleware,
   createDxosAutomationsActions,
+  createDxosN8nActions,
+  createN8nRouteHandlers,
   executeRuleAgainstEvent,
   getSafePath,
   handleDomainEvent,

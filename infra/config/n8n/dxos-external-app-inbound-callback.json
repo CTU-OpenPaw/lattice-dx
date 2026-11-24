@@ -1,0 +1,419 @@
+{
+  "name": "LatticeDX v1.0 External App Inbound Callback & Settlement Sync",
+  "active": false,
+  "meta": {
+    "author": "CTU-OpenPaw",
+    "copyright": "(C) 2026 CTU-OpenPaw",
+    "license": "Apache-2.0",
+    "spdx": "SPDX-License-Identifier: Apache-2.0",
+    "templateCredsSetupCompleted": false
+  },
+  "nodes": [
+    {
+      "id": "dxos-cb-webhook",
+      "webhookId": "latticedx-v1-external-app-callback",
+      "name": "Receive External App Callback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "notes": "SPDX-License-Identifier: Apache-2.0 — Receives authenticated 2-way callbacks from Telegram, Slack, GitHub, and Partner Settlement gateways and updates claim/incident/settlement status in NocoBase via ldx_pat_*.",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "latticedx/v1/external-app-callback",
+        "authentication": "none",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      }
+    },
+    {
+      "id": "dxos-cb-verify-sig",
+      "name": "Verify Inbound Callback Signature",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst item = $input.first();\nconst request = (item && item.json) || {};\nconst headers = request.headers && typeof request.headers === 'object' ? request.headers : {};\n\nfunction getHeader(name) {\n  const target = String(name).toLowerCase();\n  for (const [key, value] of Object.entries(headers)) {\n    if (String(key).toLowerCase() === target) {\n      if (Array.isArray(value)) return typeof value[0] === 'string' ? value[0].trim() : '';\n      return typeof value === 'string' ? value.trim() : '';\n    }\n  }\n  return '';\n}\n\nfunction reject(code, message, statusCode = 401) {\n  return [{ json: { authenticated: false, statusCode, code, error: message } }];\n}\n\nfunction safeEqualUtf8(a, b) {\n  const bufA = Buffer.from(String(a || ''), 'utf8');\n  const bufB = Buffer.from(String(b || ''), 'utf8');\n  return bufA.length > 0 && bufA.length === bufB.length && crypto.timingSafeEqual(bufA, bufB);\n}\n\nlet rawBody = '';\nconst binaryEntry = item && item.binary && item.binary.data;\nconst hasInlineBinary = Boolean(binaryEntry && typeof binaryEntry.data === 'string' && binaryEntry.data.length > 0 && !binaryEntry.id);\nif (typeof request.rawBody === 'string') rawBody = request.rawBody;\nelse if (Buffer.isBuffer(request.rawBody)) rawBody = request.rawBody.toString('utf8');\nelse if (hasInlineBinary) rawBody = Buffer.from(binaryEntry.data, 'base64').toString('utf8');\nelse if (typeof request.body === 'string') rawBody = request.body;\nelse if (request.body !== undefined) rawBody = JSON.stringify(request.body);\n\nlet authScheme = null;\nconst webhookId = getHeader('webhook-id');\nconst webhookTs = getHeader('webhook-timestamp');\nconst webhookSig = getHeader('webhook-signature');\nconst slackSig = getHeader('x-slack-signature');\nconst slackTs = getHeader('x-slack-request-timestamp');\nconst githubSig = getHeader('x-hub-signature-256');\nconst telegramSecretHdr = getHeader('x-telegram-bot-api-secret-token');\nconst latticeSig = getHeader('x-lattice-signature-256');\n\nif (webhookId && webhookTs && webhookSig) {\n  const rawSecret = String(($env && $env.DX_WEBHOOK_SECRET) || '').trim();\n  if (!rawSecret) return reject('CALLBACK_SECRET_NOT_CONFIGURED', 'DX_WEBHOOK_SECRET is not configured.');\n  if (!/^\\d{1,12}$/.test(webhookTs)) return reject('CALLBACK_TIMESTAMP_INVALID', 'Invalid webhook-timestamp.');\n  const tsSec = Number(webhookTs);\n  if (Math.abs(Math.floor(Date.now() / 1000) - tsSec) > 300) {\n    return reject('CALLBACK_TIMESTAMP_EXPIRED', 'Webhook timestamp expired.');\n  }\n  const keyBytes = rawSecret.startsWith('whsec_') ? Buffer.from(rawSecret.slice(6), 'base64') : Buffer.from(rawSecret, 'utf8');\n  const expected = crypto.createHmac('sha256', keyBytes).update(`${webhookId}.${webhookTs}.${rawBody}`, 'utf8').digest('base64');\n  const ok = webhookSig.split(/\\s+/).some((tok) => tok.startsWith('v1,') && safeEqualUtf8(tok.slice(3), expected));\n  if (!ok) return reject('CALLBACK_SIGNATURE_INVALID', 'Standard Webhooks HMAC verification failed.');\n  authScheme = 'standard_webhooks';\n} else if (slackSig && slackTs) {\n  const slackSecret = String(($env && $env.DX_SLACK_SIGNING_SECRET) || '').trim();\n  if (!slackSecret) return reject('CALLBACK_SECRET_NOT_CONFIGURED', 'DX_SLACK_SIGNING_SECRET is not configured.');\n  if (!/^\\d{1,12}$/.test(slackTs)) return reject('CALLBACK_TIMESTAMP_INVALID', 'Invalid x-slack-request-timestamp.');\n  if (Math.abs(Math.floor(Date.now() / 1000) - Number(slackTs)) > 300) {\n    return reject('CALLBACK_TIMESTAMP_EXPIRED', 'Slack timestamp expired.');\n  }\n  const expected = 'v0=' + crypto.createHmac('sha256', slackSecret).update(`v0:${slackTs}:${rawBody}`, 'utf8').digest('hex');\n  if (!safeEqualUtf8(slackSig, expected)) return reject('CALLBACK_SIGNATURE_INVALID', 'Slack signature verification failed.');\n  authScheme = 'slack_v0';\n} else if (githubSig) {\n  const ghSecret = String(($env && $env.DX_GITHUB_WEBHOOK_SECRET) || '').trim();\n  if (!ghSecret) return reject('CALLBACK_SECRET_NOT_CONFIGURED', 'DX_GITHUB_WEBHOOK_SECRET is not configured.');\n  const expected = 'sha256=' + crypto.createHmac('sha256', ghSecret).update(rawBody, 'utf8').digest('hex');\n  if (!safeEqualUtf8(githubSig, expected)) return reject('CALLBACK_SIGNATURE_INVALID', 'GitHub signature verification failed.');\n  authScheme = 'github_sha256';\n} else if (telegramSecretHdr) {\n  const tgSecret = String(($env && $env.DX_TELEGRAM_WEBHOOK_SECRET) || '').trim();\n  if (!tgSecret) return reject('CALLBACK_SECRET_NOT_CONFIGURED', 'DX_TELEGRAM_WEBHOOK_SECRET is not configured.');\n  if (!safeEqualUtf8(telegramSecretHdr, tgSecret)) return reject('CALLBACK_SIGNATURE_INVALID', 'Telegram secret token mismatch.');\n  authScheme = 'telegram_secret_token';\n} else if (latticeSig) {\n  const rawSecret = String(($env && $env.DX_WEBHOOK_SECRET) || '').trim();\n  if (!rawSecret) return reject('CALLBACK_SECRET_NOT_CONFIGURED', 'DX_WEBHOOK_SECRET is not configured.');\n  const expected = 'sha256=' + crypto.createHmac('sha256', rawSecret).update(rawBody, 'utf8').digest('hex');\n  if (!safeEqualUtf8(latticeSig, expected)) return reject('CALLBACK_SIGNATURE_INVALID', 'Lattice SHA-256 signature verification failed.');\n  authScheme = 'lattice_sha256';\n} else {\n  return reject('CALLBACK_HEADERS_MISSING', 'Missing inbound callback authentication signature headers.');\n}\n\nlet parsedBody = request.body;\nif (typeof parsedBody === 'string') {\n  try { parsedBody = JSON.parse(parsedBody); } catch { return reject('CALLBACK_BODY_INVALID', 'Callback body must be valid JSON.', 400); }\n} else if (parsedBody === undefined && rawBody) {\n  try { parsedBody = JSON.parse(rawBody); } catch { return reject('CALLBACK_BODY_INVALID', 'Callback body must be valid JSON.', 400); }\n}\nif (!parsedBody || typeof parsedBody !== 'object' || Array.isArray(parsedBody)) {\n  return reject('CALLBACK_BODY_INVALID', 'Callback body must be a JSON object.', 400);\n}\n\nreturn [{\n  json: {\n    authenticated: true,\n    authScheme,\n    body: parsedBody,\n  },\n}];"
+      }
+    },
+    {
+      "id": "dxos-cb-auth-if",
+      "name": "Callback Authenticated?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        520,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "dxos-cb-auth-true",
+              "leftValue": "={{ $json.authenticated }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "dxos-cb-respond-401",
+      "name": "Respond Callback Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        780,
+        240
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, workflow: 'external-app-inbound-callback', error: $json.code || 'CALLBACK_UNAUTHORIZED', message: $json.error || 'Unauthorized inbound callback.' } }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode || 401 }}"
+        }
+      }
+    },
+    {
+      "id": "dxos-cb-normalize",
+      "name": "Normalize Inbound Action & Target",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        -60
+      ],
+      "parameters": {
+        "jsCode": "const inp = $input.first().json || {};\nconst authScheme = String(inp.authScheme || 'unknown');\nlet payload = inp.body && typeof inp.body === 'object' ? inp.body : {};\n\n// Handle Slack interactive payload wrapper\nif (typeof payload.payload === 'string') {\n  try { payload = JSON.parse(payload.payload); } catch {}\n}\n\nconst ALLOWLISTED_COLLECTIONS = new Set([\n  'latticeCustomPartnerClaims',\n  'latticeIncidentCases',\n  'latticeOrders',\n  'latticeRequests',\n  'latticeServiceTickets',\n]);\n\nconst DECISION_MAP = {\n  approved: { status: 'approved', settlementStatus: 'approved' },\n  approve: { status: 'approved', settlementStatus: 'approved' },\n  approve_claim: { status: 'approved', settlementStatus: 'approved' },\n  settled: { status: 'settled', settlementStatus: 'settled' },\n  settle: { status: 'settled', settlementStatus: 'settled' },\n  settle_claim: { status: 'settled', settlementStatus: 'settled' },\n  acknowledged: { status: 'acknowledged', settlementStatus: 'in_review' },\n  ack: { status: 'acknowledged', settlementStatus: 'in_review' },\n  ack_incident: { status: 'acknowledged', settlementStatus: 'in_review' },\n  rejected: { status: 'rejected', settlementStatus: 'rejected' },\n  reject: { status: 'rejected', settlementStatus: 'rejected' },\n  reject_claim: { status: 'rejected', settlementStatus: 'rejected' },\n  disputed: { status: 'disputed', settlementStatus: 'disputed' },\n  resolved: { status: 'resolved', settlementStatus: 'settled' },\n};\n\nlet sourceApp = String(payload.sourceApp || '').trim().toLowerCase();\nlet organizationId = String(payload.organizationId || (payload.data && payload.data.organizationId) || '').trim();\nlet targetCollection = String(payload.targetCollection || (payload.data && payload.data.targetCollection) || '').trim();\nlet rawRecordId = payload.targetRecordId ?? (payload.data && payload.data.targetRecordId);\nlet rawDecision = String(payload.decision || payload.action || (payload.data && payload.data.decision) || '').trim().toLowerCase();\nlet actorRef = String(payload.actor || payload.partnerActor || '').trim();\nlet partnerReference = String(payload.partnerReference || payload.reference || '').trim() || null;\nlet note = String(payload.note || payload.resolutionNote || '').trim();\n\n// Telegram callback_query format: \"<decision>:<orgId>:<collection>:<recordId>\"\nif (payload.callback_query && typeof payload.callback_query === 'object') {\n  sourceApp = sourceApp || 'telegram';\n  const cq = payload.callback_query;\n  actorRef = actorRef || String((cq.from && (cq.from.username || cq.from.id)) || 'telegram-user');\n  const parts = String(cq.data || '').split(':');\n  if (parts.length >= 4) {\n    rawDecision = rawDecision || String(parts[0] || '').trim().toLowerCase();\n    organizationId = organizationId || String(parts[1] || '').trim();\n    targetCollection = targetCollection || String(parts[2] || '').trim();\n    rawRecordId = rawRecordId ?? parts[3];\n  }\n}\n\n// Slack interactive action value format: \"<decision>:<orgId>:<collection>:<recordId>\"\nif (Array.isArray(payload.actions) && payload.actions.length > 0) {\n  sourceApp = sourceApp || 'slack';\n  const act = payload.actions[0] || {};\n  actorRef = actorRef || String((payload.user && (payload.user.username || payload.user.id)) || 'slack-user');\n  const parts = String(act.value || act.action_id || '').split(':');\n  if (parts.length >= 4) {\n    rawDecision = rawDecision || String(parts[0] || '').trim().toLowerCase();\n    organizationId = organizationId || String(parts[1] || '').trim();\n    targetCollection = targetCollection || String(parts[2] || '').trim();\n    rawRecordId = rawRecordId ?? parts[3];\n  }\n}\n\n// GitHub issue close event\nif (payload.issue && typeof payload.issue === 'object') {\n  sourceApp = sourceApp || 'github';\n  actorRef = actorRef || String((payload.sender && payload.sender.login) || 'github-webhook');\n  if (String(payload.action || '').toLowerCase() === 'closed') {\n    rawDecision = rawDecision || 'resolved';\n  }\n  partnerReference = partnerReference || `GH-${payload.issue.number || ''}`;\n}\n\nif (!sourceApp) {\n  sourceApp = authScheme === 'slack_v0' ? 'slack' : (authScheme === 'github_sha256' ? 'github' : (authScheme === 'telegram_secret_token' ? 'telegram' : 'partner_webhook'));\n}\n\nconst targetRecordId = Number(rawRecordId);\nconst mapped = DECISION_MAP[rawDecision];\nconst validOrg = /^[a-zA-Z0-9_-]{1,80}$/.test(organizationId);\n\nif (!validOrg || !ALLOWLISTED_COLLECTIONS.has(targetCollection) || !Number.isInteger(targetRecordId) || targetRecordId <= 0 || !mapped) {\n  return [{\n    json: {\n      valid: false,\n      statusCode: 400,\n      error: 'CALLBACK_PAYLOAD_INVALID',\n      message: 'organizationId, allowlisted targetCollection, positive targetRecordId, and valid decision are required.',\n    },\n  }];\n}\n\nconst rawSettlement = Number(payload.settlementAmountVnd ?? (payload.data && payload.data.settlementAmountVnd));\nconst settlementAmountVnd = Number.isFinite(rawSettlement) && rawSettlement >= 0 ? rawSettlement : null;\nconst decidedAt = new Date().toISOString();\n\nconst updatePayload = {\n  status: mapped.status,\n  resolutionNote: (note || `2-way ${sourceApp} callback (${rawDecision}) by ${actorRef || sourceApp}`).slice(0, 500),\n  ...(targetCollection === 'latticeCustomPartnerClaims' ? {\n    settlementStatus: mapped.settlementStatus,\n    externalAppSource: sourceApp,\n    partnerDecisionAt: decidedAt,\n    ...(partnerReference ? { partnerReference } : {}),\n    ...(settlementAmountVnd !== null ? { settlementAmountVnd } : {}),\n  } : {}),\n  ...(targetCollection === 'latticeIncidentCases' && mapped.status === 'acknowledged' ? {\n    acknowledgedAt: decidedAt,\n    acknowledgedBy: (actorRef || sourceApp).slice(0, 120),\n  } : {}),\n  ...(targetCollection === 'latticeIncidentCases' && mapped.status === 'resolved' ? {\n    clearedAt: decidedAt,\n    clearedBy: (actorRef || sourceApp).slice(0, 120),\n  } : {}),\n};\n\nreturn [{\n  json: {\n    valid: true,\n    statusCode: 200,\n    authScheme,\n    sourceApp,\n    organizationId,\n    targetCollection,\n    targetRecordId,\n    decision: rawDecision,\n    mappedStatus: mapped.status,\n    settlementStatus: mapped.settlementStatus,\n    partnerReference,\n    settlementAmountVnd,\n    actorRef: actorRef || sourceApp,\n    decidedAt,\n    updatePayload,\n    eventPublishPayload: {\n      organizationId,\n      type: 'partner.settlement_callback',\n      source: `n8n:external-app-callback:${sourceApp}`,\n      subject: `${targetCollection}:${targetRecordId}`,\n      data: {\n        organizationId,\n        sourceApp,\n        authScheme,\n        targetCollection,\n        targetRecordId,\n        decision: rawDecision,\n        mappedStatus: mapped.status,\n        settlementStatus: mapped.settlementStatus,\n        partnerReference,\n        settlementAmountVnd,\n        actorRef: actorRef || sourceApp,\n        decidedAt,\n      },\n    },\n  },\n}];"
+      }
+    },
+    {
+      "id": "dxos-cb-valid-if",
+      "name": "Callback Payload Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1040,
+        -60
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "dxos-cb-valid-true",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "dxos-cb-respond-400",
+      "name": "Respond Callback Bad Request",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1300,
+        140
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { ok: false, workflow: 'external-app-inbound-callback', error: $json.error || 'CALLBACK_PAYLOAD_INVALID', message: $json.message || 'Invalid inbound callback payload.' } }}",
+        "options": {
+          "responseCode": 400
+        }
+      }
+    },
+    {
+      "id": "dxos-cb-update-nocobase",
+      "name": "Update Record Status in NocoBase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1300,
+        -120
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DX_NOCOBASE_BASE_URL || 'http://nocobase').replace(/\\/+$/, '') + '/api/' + $json.targetCollection + ':update?filterByTk=' + $json.targetRecordId }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($env.DX_NOCOBASE_PAT || '') }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.updatePayload }}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "dxos-cb-publish-event",
+      "name": "Publish Callback Event to NocoBase",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1580,
+        -120
+      ],
+      "onError": "continueErrorOutput",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 1000,
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.DX_NOCOBASE_BASE_URL || 'http://nocobase').replace(/\\/+$/, '') + '/api/dxosEvents:publish' }}",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + ($env.DX_NOCOBASE_PAT || '') }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $('Normalize Inbound Action & Target').first().json.eventPublishPayload }}",
+        "options": {
+          "timeout": 15000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": false
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": false,
+              "responseFormat": "json"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "dxos-cb-receipt",
+      "name": "Build Callback Receipt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1860,
+        -120
+      ],
+      "parameters": {
+        "jsCode": "const norm = $('Normalize Inbound Action & Target').first().json || {};\nconst upd = $('Update Record Status in NocoBase').first().json || {};\nconst evt = $input.first().json || {};\nconst recordUpdated = !upd.error && [200, 201, 204].includes(Number(upd.statusCode || 200));\nconst eventPublished = !evt.error && [200, 201, 202].includes(Number(evt.statusCode || 200));\nreturn [{\n  json: {\n    ok: recordUpdated,\n    statusCode: recordUpdated ? 200 : 502,\n    workflow: 'external-app-inbound-callback',\n    authScheme: norm.authScheme,\n    sourceApp: norm.sourceApp,\n    organizationId: norm.organizationId,\n    targetCollection: norm.targetCollection,\n    targetRecordId: norm.targetRecordId,\n    decision: norm.decision,\n    mappedStatus: norm.mappedStatus,\n    settlementStatus: norm.settlementStatus,\n    recordUpdated,\n    eventPublished,\n    processedAt: new Date().toISOString(),\n  },\n}];"
+      }
+    },
+    {
+      "id": "dxos-cb-respond-200",
+      "name": "Respond Callback Receipt",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        2120,
+        -120
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {
+          "responseCode": "={{ $json.statusCode || 200 }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Receive External App Callback": {
+      "main": [
+        [
+          {
+            "node": "Verify Inbound Callback Signature",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Inbound Callback Signature": {
+      "main": [
+        [
+          {
+            "node": "Callback Authenticated?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Callback Authenticated?": {
+      "main": [
+        [
+          {
+            "node": "Normalize Inbound Action & Target",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Callback Unauthorized",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Inbound Action & Target": {
+      "main": [
+        [
+          {
+            "node": "Callback Payload Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Callback Payload Valid?": {
+      "main": [
+        [
+          {
+            "node": "Update Record Status in NocoBase",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Callback Bad Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Record Status in NocoBase": {
+      "main": [
+        [
+          {
+            "node": "Publish Callback Event to NocoBase",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Publish Callback Event to NocoBase",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Publish Callback Event to NocoBase": {
+      "main": [
+        [
+          {
+            "node": "Build Callback Receipt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Callback Receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Callback Receipt": {
+      "main": [
+        [
+          {
+            "node": "Respond Callback Receipt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "errorWorkflow": "dxos-enterprise-error-handler",
+    "saveManualExecutions": false,
+    "executionTimeout": 30
+  },
+  "pinData": {}
+}

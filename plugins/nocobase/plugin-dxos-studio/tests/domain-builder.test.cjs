@@ -15,6 +15,7 @@ const Module = require('node:module');
 const path = require('node:path');
 
 const {
+  BUSINESS_PACK_CATALOG,
   attachAndVerifyPgRls,
   createDxosBuilderActions,
   buildSafePgIndexName,
@@ -579,6 +580,205 @@ test('installBusinessPack cmms-maintenance is idempotent and wires end-to-end 5-
   }
 });
 
+test('installBusinessPack coldchain-partner-settlement provisions latticeCustomPartnerClaims + RLS, DMN settlement policy, LatticeFlow v2 rule, and /p/partner-claims idempotently', async () => {
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+
+  try {
+    assert.ok(
+      Array.isArray(BUSINESS_PACK_CATALOG) && BUSINESS_PACK_CATALOG.some((p) => p.packKey === 'coldchain-partner-settlement'),
+      'BUSINESS_PACK_CATALOG must include coldchain-partner-settlement',
+    );
+
+    const db = makeBuilderDb({
+      latticeEmployees: [
+        { userId: 20, organizationId: 'org-a', active: true },
+        { userId: 21, organizationId: 'org-a', active: true },
+      ],
+      rolesUsers: [
+        { userId: 1, roleName: 'root' },
+        { userId: 20, roleName: 'ldx_admin' },
+        { userId: 21, roleName: 'ldx_manager' },
+      ],
+      latticeAssets: [
+        { id: 88, organizationId: 'org-a', code: 'FREEZER-VN-02', name: 'Freezer VN 02', status: 'active' },
+      ],
+      latticeConnectors: [
+        {
+          organizationId: 'org-a',
+          connectorKey: 'n8n-enterprise-orchestrator',
+          name: 'n8n Enterprise Orchestrator',
+          connectorType: 'n8n',
+          baseUrl: 'https://n8n.example.com',
+          authType: 'hmac',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ secret: 'n8n-ent-hmac-secret-unit' }, process.env),
+          active: true,
+        },
+      ],
+    });
+    const builder = createDxosBuilderActions(db);
+
+    const beforeCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
+    await builder.listBusinessPacks(beforeCtx, async () => {});
+    const beforePack = beforeCtx.body.items.find((p) => p.packKey === 'coldchain-partner-settlement');
+    assert.ok(beforePack, 'listBusinessPacks must return coldchain-partner-settlement');
+    assert.equal(beforePack.installed, false);
+
+    // Non-root ldx_admin cannot install business pack
+    await assert.rejects(
+      () => builder.installBusinessPack(
+        makeCtx({ userId: 20, role: 'ldx_admin', params: { packKey: 'coldchain-partner-settlement', organizationId: 'org-a' } }),
+        async () => {},
+      ),
+      (err) => err.status === 403 && err.code === 'ROOT_ADMIN_REQUIRED',
+    );
+
+    // First install + repeat install by verified root (idempotency)
+    const install1 = makeCtx({
+      userId: 1,
+      role: 'root',
+      isRoot: true,
+      params: { packKey: 'coldchain-partner-settlement', organizationId: 'org-a' },
+    });
+    await builder.installBusinessPack(install1, async () => {});
+    assert.equal(install1.body.installed, true);
+    assert.equal(install1.body.packKey, 'coldchain-partner-settlement');
+    assert.equal(install1.body.domain.collectionName, 'latticeCustomPartnerClaims');
+    assert.equal(install1.body.domain.rls.attached, true);
+    assert.equal(install1.body.domain.rls.verified, true);
+    assert.ok(db.rlsAttached.includes('latticeCustomPartnerClaims'));
+    assert.equal(install1.body.domain.portalPage.path, '/p/partner-claims');
+    assert.equal(install1.body.dmnTable.tableKey, 'coldchain_settlement_policy_v1');
+    assert.equal(install1.body.automationRule.ruleKey, 'auto_coldchain_partner_settlement');
+    assert.equal(install1.body.automationRule.schemaVersion, 2);
+    assert.equal(install1.body.automationRule.graphJson?.version, 2);
+
+    // Verify fields match Task 8 inbound callback & orchestrator contract
+    const fieldNames = new Set(
+      db.store.fields.filter((f) => f.collectionName === 'latticeCustomPartnerClaims').map((f) => f.name),
+    );
+    for (const requiredField of [
+      'organizationId',
+      'claimCode',
+      'partnerCode',
+      'status',
+      'settlementStatus',
+      'settlementTier',
+      'settlementAmountVnd',
+      'settlementRatePct',
+      'externalAppSource',
+      'partnerDecisionAt',
+      'partnerReference',
+      'resolutionNote',
+    ]) {
+      assert.ok(fieldNames.has(requiredField), `Missing field "${requiredField}" on latticeCustomPartnerClaims`);
+    }
+
+    // Validate LatticeFlow v2 DAG using real validator + registry
+    const { validateFlowGraph } = require('../src/server/flow/validator');
+    const flowRegistry = require('../src/server/flow/registry');
+    const graphValidation = validateFlowGraph(install1.body.automationRule.graphJson, { nodeRegistry: flowRegistry });
+    assert.equal(graphValidation.ok, true, `Graph v2 validation failed: ${JSON.stringify(graphValidation.errors)}`);
+    const n8nNode = install1.body.automationRule.graphJson.nodes.find((n) => n.type === 'integration.http');
+    assert.ok(n8nNode, 'LatticeFlow v2 rule must include integration.http node');
+    assert.equal(n8nNode.config.connectorKey, 'n8n-enterprise-orchestrator');
+    assert.equal(n8nNode.config.path, '/webhook/latticedx/v1/enterprise-compliance-orchestrator');
+
+    // Idempotent second install
+    const install2 = makeCtx({
+      userId: 1,
+      role: 'root',
+      isRoot: true,
+      params: { packKey: 'coldchain-partner-settlement', organizationId: 'org-a' },
+    });
+    await builder.installBusinessPack(install2, async () => {});
+    assert.equal(db.store.latticeDecisionTables.filter((t) => t.tableKey === 'coldchain_settlement_policy_v1').length, 1);
+    assert.equal(db.store.latticeAutomationRules.filter((r) => r.ruleKey === 'auto_coldchain_partner_settlement').length, 1);
+    assert.equal(db.store.desktopRoutes.filter((r) => r.type === 'flowPage').length, 1);
+    assert.ok(db.store.uiLayouts.some((l) => l.uid === 'ldx-portal-partner-claims' && l.routePath === '/p/partner-claims'));
+
+    const afterCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
+    await builder.listBusinessPacks(afterCtx, async () => {});
+    assert.equal(afterCtx.body.items.find((p) => p.packKey === 'coldchain-partner-settlement')?.installed, true);
+
+    // End-to-end LatticeFlow v2 execution: DMN -> create claim -> dispatch 26-node n8n -> notify
+    const n8nCalls = [];
+    const runOpts = {
+      fetchImpl: async (url, init) => {
+        n8nCalls.push({ url, body: JSON.parse(init.body) });
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({ ok: true, n8nExecutionId: 'exec-99', tier: 'critical' });
+          },
+        };
+      },
+      env: { ...process.env, NODE_ENV: 'production' },
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    };
+
+    const critRuns = await handleDomainEvent(db, {
+      id: 'evt-settle-901',
+      type: 'coldchain.settlement_requested',
+      organizationId: 'org-a',
+      data: {
+        severity: 'critical',
+        temperatureC: -8.5,
+        amount: 125000000,
+        riskScore: 100,
+        slaOverdueMinutes: 45,
+        partnerCode: 'vnpost-cold',
+        partnerEmail: 'claims@vnpost-cold.example.com',
+        lotCode: 'LOT-VAC-2026-09',
+        assetId: 88,
+      },
+    }, runOpts);
+    assert.equal(critRuns.length, 1);
+    assert.equal(critRuns[0].status, 'completed');
+    assert.equal(critRuns[0].graphVersion, 2);
+    assert.equal(critRuns[0].dmnResultJson?.outputs?.settlementTier, 'critical');
+    assert.equal(critRuns[0].dmnResultJson?.outputs?.settlementRatePct, 85);
+    assert.equal(critRuns[0].dmnResultJson?.outputs?.approveClaim, true);
+    assert.equal(db.store.latticeCustomPartnerClaims.length, 1);
+    const claim = db.store.latticeCustomPartnerClaims[0];
+    assert.equal(claim.organizationId, 'org-a');
+    assert.equal(claim.partnerCode, 'vnpost-cold');
+    assert.equal(claim.status, 'open');
+    assert.equal(claim.settlementStatus, 'pending');
+    assert.equal(claim.settlementTier, 'critical');
+    assert.equal(claim.settlementRatePct, 85);
+    assert.equal(claim.settlementAmountVnd, 106250000);
+    assert.equal(n8nCalls.length, 1);
+    assert.equal(n8nCalls[0].url, 'https://n8n.example.com/webhook/latticedx/v1/enterprise-compliance-orchestrator');
+    assert.equal(n8nCalls[0].body.targetCollection, 'latticeCustomPartnerClaims');
+    assert.equal(n8nCalls[0].body.targetRecordId, claim.id);
+
+    // Low-risk event skips claim creation & n8n dispatch
+    const stdRuns = await handleDomainEvent(db, {
+      id: 'evt-settle-902',
+      type: 'coldchain.settlement_requested',
+      organizationId: 'org-a',
+      data: {
+        severity: 'low',
+        temperatureC: -18.5,
+        amount: 5000000,
+        riskScore: 10,
+        slaOverdueMinutes: 0,
+        partnerCode: 'vnpost-cold',
+      },
+    }, { ...runOpts, ignoreCooldown: true });
+    assert.equal(stdRuns.length, 1);
+    assert.equal(stdRuns[0].status, 'completed');
+    assert.equal(stdRuns[0].dmnResultJson?.outputs?.approveClaim, false);
+    assert.equal(db.store.latticeCustomPartnerClaims.length, 1);
+    assert.equal(n8nCalls.length, 1);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
 test('provisionTenant and listTenants provision isolated org, departments, locations, Ed25519 PKI key, VN SLAs, and ldx_admin user idempotently', async () => {
   const db = makeBuilderDb({
     rolesUsers: [{ userId: 1, roleName: 'root' }],
@@ -824,7 +1024,7 @@ test('Solution Bundle v3 governance supports automationRules & secret-free webho
         subscriptionKey: 'erp_sync',
         name: 'ERP Sync Hook',
         targetUrl: 'https://erp.example.com/webhooks',
-        eventPattern: 'epod.signed',
+        eventPattern: 'epod.captured',
         encryptedSigningSecret: 'aesgcm:super-secret-iv-tag-cipher',
         signingSecret: 'whsec_plain_should_never_leak',
         active: true,
@@ -861,7 +1061,7 @@ test('Solution Bundle v3 governance supports automationRules & secret-free webho
         subscriptionKey: 'erp_sync',
         name: 'Old Name',
         targetUrl: 'https://erp.example.com/old',
-        eventPattern: 'epod.signed',
+        eventPattern: 'epod.captured',
         encryptedSigningSecret: 'preserve-me-encrypted',
         active: true,
       },
@@ -976,5 +1176,36 @@ test('all new builder server & test files satisfy CTU-OpenPaw SPDX header check'
     const src = fs.readFileSync(path.join(rootDir, rel), 'utf8');
     const res = addSourceHeader(src, rel);
     assert.equal(res.status, 'present', `Missing or malformed SPDX header in ${rel}`);
+  }
+});
+
+test('Task 16: domain-builder grants RBAC and portal routes to custom non-ldx_ role ops_manager while excluding reserved roles', async () => {
+  const { createOrUpdateDomainCollection } = require('../src/server/domain-builder');
+  const db = makeBuilderDb({
+    roles: [
+      { name: 'root' },
+      { name: 'admin' },
+      { name: 'anonymous' },
+      { name: 'member' },
+      { name: 'ldx_sysadmin' },
+      { name: 'ldx_connector' },
+      { name: 'r_dyn_01' },
+      { name: 'ops_manager' },
+    ],
+  });
+
+  const domain = await createOrUpdateDomainCollection(db, {
+    collectionName: 'latticeCustomOpsAudits',
+    title: 'Ops Audits',
+    fields: [{ name: 'code', type: 'string', required: true }],
+    roles: ['ops_manager', 'root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector', 'r_dyn_01'],
+    portalSlug: 'ops-audits',
+  });
+
+  assert.deepEqual(domain.grantedRoles, ['ops_manager']);
+  assert.ok(db.store.dataSourcesRolesResources.some((r) => r.roleName === 'ops_manager' && r.name === 'latticeCustomOpsAudits'));
+  assert.ok(db.store.rolesDesktopRoutes.some((g) => g.roleName === 'ops_manager'));
+  for (const blocked of ['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector', 'r_dyn_01']) {
+    assert.equal(db.store.rolesDesktopRoutes.some((g) => g.roleName === blocked), false);
   }
 });

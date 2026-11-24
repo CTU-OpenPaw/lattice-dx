@@ -641,6 +641,108 @@ async function seedCmmsBusinessPack(api, organizationId) {
   };
 }
 
+async function seedPartnerSettlementBusinessPack(api, organizationId) {
+  const packs = unwrapList(
+    await api(`dxosBuilder:listBusinessPacks?organizationId=${encodeURIComponent(organizationId)}`),
+  );
+  const settlementPack = packs.find((p) => p?.packKey === 'coldchain-partner-settlement');
+
+  const domains = unwrapList(await api('dxosBuilder:listDomains'));
+  const claimsDomain = domains.find((d) => d?.collectionName === 'latticeCustomPartnerClaims');
+  const hasPartnerClaimsPortal = Boolean(
+    claimsDomain
+    && Array.isArray(claimsDomain.portalPages)
+    && claimsDomain.portalPages.some((p) => p?.path === '/p/partner-claims'),
+  );
+
+  if (settlementPack?.installed === true && hasPartnerClaimsPortal) {
+    return {
+      seeded: false,
+      alreadyInstalled: true,
+      packKey: 'coldchain-partner-settlement',
+      collectionName: 'latticeCustomPartnerClaims',
+      dmnTableKey: 'coldchain_settlement_policy_v1',
+      automationRuleKey: 'auto_coldchain_partner_settlement',
+      portalPath: '/p/partner-claims',
+    };
+  }
+
+  const installed = await api('dxosBuilder:installBusinessPack', {
+    method: 'POST',
+    values: {
+      organizationId,
+      packKey: 'coldchain-partner-settlement',
+    },
+  });
+
+  if (
+    installed?.installed !== true
+    || installed?.domain?.collectionName !== 'latticeCustomPartnerClaims'
+    || installed?.dmnTable?.tableKey !== 'coldchain_settlement_policy_v1'
+    || installed?.automationRule?.ruleKey !== 'auto_coldchain_partner_settlement'
+    || installed?.domain?.portalPage?.path !== '/p/partner-claims'
+  ) {
+    throw new Error('dxosBuilder:installBusinessPack(coldchain-partner-settlement) returned incomplete pack state');
+  }
+
+  return {
+    seeded: true,
+    alreadyInstalled: false,
+    packKey: 'coldchain-partner-settlement',
+    collectionName: installed.domain.collectionName,
+    dmnTableKey: installed.dmnTable.tableKey,
+    automationRuleKey: installed.automationRule.ruleKey,
+    portalPath: installed.domain.portalPage.path,
+  };
+}
+
+async function seedPartnerSettlementClaim(api, organizationId, assets) {
+  const claimCode = 'CLM-V100-001';
+  const filter = encodeURIComponent(JSON.stringify({ organizationId, claimCode }));
+  const existing = unwrapList(
+    await api(`latticeCustomPartnerClaims:list?filter=${filter}&pageSize=5`),
+  );
+  if (existing.length > 0) {
+    return {
+      seeded: false,
+      id: existing[0]?.id ?? null,
+      claimCode,
+      status: existing[0]?.status || 'open',
+      settlementStatus: existing[0]?.settlementStatus || 'pending',
+    };
+  }
+
+  const chillerAsset = assets?.assetsByCode?.['COLD-CHILLER-CT-01'] || null;
+  const created = await api('latticeCustomPartnerClaims:create', {
+    method: 'POST',
+    values: {
+      organizationId,
+      claimCode,
+      partnerCode: 'vnpost-cold',
+      partnerEmail: 'claims@vnpost-cold.example.com',
+      lotCode: 'LOT-V100-MKT-HOLD',
+      ...(chillerAsset?.id != null ? { assetId: chillerAsset.id } : {}),
+      severity: 'critical',
+      riskScore: 100,
+      settlementTier: 'critical',
+      settlementRatePct: 85,
+      claimAmountVnd: 125000000,
+      settlementAmountVnd: 106250000,
+      status: 'open',
+      settlementStatus: 'pending',
+      resolutionNote: '[v1.0.0] Hồ sơ bồi hoàn chuỗi lạnh chờ phản hồi 2 chiều từ n8n External Apps.',
+    },
+  });
+
+  return {
+    seeded: true,
+    id: created?.id ?? null,
+    claimCode: created?.claimCode || claimCode,
+    status: created?.status || 'open',
+    settlementStatus: created?.settlementStatus || 'pending',
+  };
+}
+
 const BLUEPRINTS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
   '../plugins/nocobase/plugin-dxos-studio/src/server/flow/blueprints',
@@ -652,6 +754,7 @@ const FLAGSHIP_BLUEPRINT_FILES = [
   'procurement-hitl-approval.json',
   'scheduled-ai-digest.json',
   'partner-webhook-sync.json',
+  'enterprise-n8n-compliance.json',
 ];
 
 function loadFlagshipGraphV2Blueprints() {
@@ -884,6 +987,49 @@ async function seedConnectorVault(api, organizationId) {
   };
 }
 
+async function seedEnterpriseConnectorVault(api, organizationId) {
+  const connectorKey = 'n8n-enterprise-orchestrator';
+  const listed = unwrapList(
+    await api(`dxosVault:list?organizationId=${encodeURIComponent(organizationId)}&limit=200`),
+  );
+  const existing = listed.find((c) => c?.connectorKey === connectorKey);
+  if (existing) {
+    return {
+      seeded: false,
+      id: existing.id ?? null,
+      connectorKey,
+      connectorType: existing.connectorType || 'n8n',
+      authType: existing.authType || 'hmac',
+      hasSecrets: Boolean(existing.hasSecrets),
+    };
+  }
+
+  const webhookSecret = process.env.DX_WEBHOOK_SECRET || DEFAULT_SHOWCASE_WEBHOOK_SECRET;
+  const saved = await api('dxosVault:save', {
+    method: 'POST',
+    values: {
+      organizationId,
+      connectorKey,
+      name: 'n8n Enterprise 26-Node Compliance & Settlement Orchestrator',
+      connectorType: 'n8n',
+      baseUrl: 'http://n8n:5678',
+      authType: 'hmac',
+      secrets: {
+        secret: webhookSecret,
+      },
+    },
+  });
+
+  return {
+    seeded: true,
+    id: saved?.id ?? null,
+    connectorKey: saved?.connectorKey || connectorKey,
+    connectorType: saved?.connectorType || 'n8n',
+    authType: saved?.authType || 'hmac',
+    hasSecrets: Boolean(saved?.hasSecrets ?? true),
+  };
+}
+
 async function seedMqttDevice(api, organizationId, linkedAsset) {
   const deviceKey = 'cold-truck-ct-01';
   const listed = unwrapList(
@@ -971,6 +1117,47 @@ async function seedWebhookSubscription(api, organizationId) {
   };
 }
 
+async function seedEnterpriseWebhookSubscription(api, organizationId) {
+  const subscriptionKey = 'n8n-enterprise-compliance';
+  const listed = unwrapList(
+    await api(`dxosEvents:listSubscriptions?organizationId=${encodeURIComponent(organizationId)}&limit=200`),
+  );
+  const existing = listed.find((s) => s?.subscriptionKey === subscriptionKey);
+  if (existing) {
+    return {
+      seeded: false,
+      id: existing.id ?? null,
+      subscriptionKey,
+      eventPattern: existing.eventPattern || 'coldchain.settlement_requested',
+      hasSigningSecret: Boolean(existing.hasSigningSecret),
+      active: existing.active !== false,
+    };
+  }
+
+  const signingSecret = process.env.DX_WEBHOOK_SECRET || DEFAULT_SHOWCASE_WEBHOOK_SECRET;
+  const saved = await api('dxosEvents:saveSubscription', {
+    method: 'POST',
+    values: {
+      organizationId,
+      subscriptionKey,
+      name: 'Điều phối 26-Node Settlement & External Apps qua n8n',
+      targetUrl: 'http://n8n:5678/webhook/latticedx/v1/enterprise-compliance-orchestrator',
+      eventPattern: 'coldchain.settlement_requested',
+      signingSecret,
+      active: true,
+    },
+  });
+
+  return {
+    seeded: true,
+    id: saved?.id ?? null,
+    subscriptionKey: saved?.subscriptionKey || subscriptionKey,
+    eventPattern: saved?.eventPattern || 'coldchain.settlement_requested',
+    hasSigningSecret: Boolean(saved?.hasSigningSecret ?? true),
+    active: saved?.active !== false,
+  };
+}
+
 export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch) {
   const api = await createSeederClient(options, fetchImpl);
   const { organizationId } = options;
@@ -984,7 +1171,10 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
   const delegation = await seedDelegationSample(api, organizationId, ctx);
   const pkiSnapshot = await seedPkiAndColdSnapshot(api, organizationId, wms.orderId);
   const cmmsPack = await seedCmmsBusinessPack(api, organizationId);
+  const settlementPack = await seedPartnerSettlementBusinessPack(api, organizationId);
+  const settlementClaim = await seedPartnerSettlementClaim(api, organizationId, assets);
   const connectorVault = await seedConnectorVault(api, organizationId);
+  const enterpriseConnectorVault = await seedEnterpriseConnectorVault(api, organizationId);
   const mqttDevice = await seedMqttDevice(
     api,
     organizationId,
@@ -992,6 +1182,7 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
   );
   const automationShowcase = await seedFlagshipAutomationRules(api, organizationId, assets);
   const webhookSubscription = await seedWebhookSubscription(api, organizationId);
+  const enterpriseWebhookSubscription = await seedEnterpriseWebhookSubscription(api, organizationId);
 
   const paraReindex = await api('latticePara:reindex', {
     method: 'POST',
@@ -1018,10 +1209,14 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
     delegation,
     pkiSnapshot,
     cmmsPack,
+    settlementPack,
+    settlementClaim,
     automationShowcase,
     connectorVault,
+    enterpriseConnectorVault,
     mqttDevice,
     webhookSubscription,
+    enterpriseWebhookSubscription,
     paraReindex,
     triage,
     portals,
