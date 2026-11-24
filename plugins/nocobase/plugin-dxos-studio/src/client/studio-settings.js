@@ -11,6 +11,28 @@
 const { createDxosGovernanceConsoles, GOVERNANCE_SECTIONS } = require('./governance-consoles');
 const { createBuilderBrokerPanels, parseJsonSafe } = require('./builder-broker-panels');
 
+const VALID_STUDIO_TABS = new Set([
+  'workflows',
+  'portals',
+  'plugins',
+  'pof',
+  'outbox',
+  'gitops',
+  'broker',
+  'automation',
+  'builder',
+]);
+
+function readInitialStudioTab() {
+  try {
+    const search = typeof window !== 'undefined' && window.location ? window.location.search : '';
+    const raw = new URLSearchParams(search || '').get('tab') || '';
+    return VALID_STUDIO_TABS.has(raw) ? raw : 'workflows';
+  } catch {
+    return 'workflows';
+  }
+}
+
 function createDxosStudioSettingsPage(client, React, antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
@@ -29,7 +51,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
   return function DxosStudioSettingsPage() {
     const api = useApi();
-    const [tab, setTab] = React.useState('workflows');
+    const [tab, setTab] = React.useState(readInitialStudioTab);
     const [loading, setLoading] = React.useState(true);
     const [templates, setTemplates] = React.useState([]);
     const [employees, setEmployees] = React.useState([]);

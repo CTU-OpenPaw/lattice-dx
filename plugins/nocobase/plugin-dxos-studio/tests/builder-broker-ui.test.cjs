@@ -604,11 +604,11 @@ test('Tab 8 (VaultAndAutomationPanel): saves/tests/rotates secrets without leaki
   // Slim Automation Summary & Full-Screen LatticeFlow Studio Launcher
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-summary-card').length, 1);
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-open-flow-studio-btn')[0].props.onClick();
-  assert.equal(openedRoutes[0], '/admin/settings/dxos-flow-studio');
+  assert.equal(openedRoutes[0], '/admin/settings/workflow/automation');
 
   // Rule quick-actions: Open in Studio, Run Now, Toggle, Delete, Replay Run & Delete Vault Connector
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-open-studio-auto_cmms_on_coldchain_fault')[0].props.onClick();
-  assert.ok(openedRoutes[1].startsWith('/admin/settings/dxos-flow-studio'));
+  assert.ok(openedRoutes[1].startsWith('/admin/settings/workflow/automation?ruleKey=auto_cmms_on_coldchain_fault'));
 
   await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-automation-run-auto_cmms_on_coldchain_fault')[0].props.onClick();
   tree = harness.render(VaultAndAutomationPanel, { selectedOrg: 'org-a', openRoute: (p) => openedRoutes.push(p) });
@@ -1004,4 +1004,46 @@ test('Tab 8 (VaultAndAutomationPanel): org-switch clears stale Vault/Automation 
   tree = await harness.flush(VaultAndAutomationPanel, { selectedOrg: 'org-b' });
   assert.equal(JSON.stringify(tree).includes('stale-org-a-run'), false, 'Stale org-a response must never overwrite org-b runs');
   assert.ok(requests.some((r) => r.url === 'dxosAutomations:listRules' && r.params?.organizationId === 'org-b'));
+});
+
+test('studio-settings initializes tab from URL ?tab= query param safely and falls back to workflows on invalid values', async () => {
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  const { client } = createApiMock({
+    'dxosStudio:listTemplates': async () => ({ items: [] }),
+    'dxosStudio:listEmployees': async () => ({ items: [], organizations: ['org-a'], organizationCounts: { 'org-a': 1 } }),
+    'dxosStudio:readiness': async () => ({ plugins: [] }),
+    'dxosVault:list': async () => ({ items: [] }),
+    'dxosAutomations:listRules': async () => ({ items: [] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosBroker:listDevices': async () => ({ items: [] }),
+    'dxosBroker:orionEntities': async () => ({ orionReachable: false, matched: [], orionOnly: [], localOnly: [] }),
+    'dxosBroker:orionListSubscriptions': async () => ({ items: [] }),
+    'dxosEvents:listEvents': async () => ({ items: [] }),
+    'dxosEvents:listSubscriptions': async () => ({ items: [] }),
+    'dxosEvents:listDeliveries': async () => ({ items: [] }),
+  });
+
+  const origWindow = globalThis.window;
+  try {
+    for (const [search, expectedPanelTestId] of [
+      ['?tab=automation', 'dxos-studio-automation-panel'],
+      ['?tab=broker', 'dxos-studio-broker-panel'],
+    ]) {
+      globalThis.window = { location: { search } };
+      const harness = createReactHarness();
+      const Page = createDxosStudioSettingsPage(client, harness.React, {}, {});
+      const tree = await harness.mountAndFlush(Page);
+      assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === expectedPanelTestId).length, 1);
+    }
+
+    globalThis.window = { location: { search: '?tab=invalid_evil_tab' } };
+    const harnessInvalid = createReactHarness();
+    const PageInvalid = createDxosStudioSettingsPage(client, harnessInvalid.React, {}, {});
+    const invalidTree = await harnessInvalid.mountAndFlush(PageInvalid);
+    const wfTab = collectNodes(invalidTree, (n) => n.props?.['data-testid'] === 'dxos-studio-tab-workflows')[0];
+    assert.equal(wfTab.props['aria-selected'], true);
+  } finally {
+    if (origWindow === undefined) delete globalThis.window;
+    else globalThis.window = origWindow;
+  }
 });

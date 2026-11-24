@@ -1386,7 +1386,7 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
           h('button', {
             'data-testid': 'dxos-open-flow-studio-btn',
             type: 'button',
-            onClick: () => openRoute('/admin/settings/dxos-flow-studio'),
+            onClick: () => openRoute('/admin/settings/workflow/automation'),
             style: S.btn(true),
           }, 'Mở Full-Screen LatticeFlow Studio ↗'),
         ),
@@ -1417,7 +1417,7 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
                     h('button', {
                       'data-testid': `dxos-automation-open-studio-${r.ruleKey}`,
                       type: 'button',
-                      onClick: () => openRoute(`/admin/settings/dxos-flow-studio?ruleKey=${encodeURIComponent(r.ruleKey)}`),
+                      onClick: () => openRoute(`/admin/settings/workflow/automation?ruleKey=${encodeURIComponent(r.ruleKey)}`),
                       style: S.btn(false),
                     }, 'Mở trong Studio ↗'),
                     h('button', {

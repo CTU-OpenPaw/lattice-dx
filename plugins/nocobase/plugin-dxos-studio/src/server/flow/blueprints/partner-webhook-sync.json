@@ -99,7 +99,7 @@
           "severity": "critical",
           "title": "Lỗi đồng bộ Webhook đối tác ({{data.partnerCode}})",
           "body": "Đồng bộ phần tử #{{loop.index}} lô {{data.batchId}} qua erp-webhook-sync thất bại: {{steps.http_erp_sync.error}}",
-          "targetPath": "/admin/settings/dxos-flow-studio"
+          "targetPath": "/admin/settings/workflow/automation"
         }
       },
       {
@@ -113,7 +113,7 @@
           "severity": "info",
           "title": "Hoàn tất đồng bộ Webhook đối tác ({{data.partnerCode}})",
           "body": "Đã hoàn tất xử lý lô {{data.batchId}} qua connector erp-webhook-sync.",
-          "targetPath": "/admin/settings/dxos-flow-studio"
+          "targetPath": "/admin/settings/workflow/automation"
         }
       }
     ],

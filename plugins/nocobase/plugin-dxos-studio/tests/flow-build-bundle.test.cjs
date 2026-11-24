@@ -208,14 +208,24 @@ test('dist/client/index.js loads cleanly via CJS without react-dom installed AND
   assert.equal(loadedMod.__esModule, true);
   assert.equal(typeof loadedMod.default, 'function');
   const registered = {};
+  const routerAdded = {};
   const pluginInstance = new loadedMod.default({
     pluginSettingsManager: {
       add(name, opts) { registered[name] = opts; },
     },
+    router: {
+      add(name, opts) { routerAdded[name] = opts; },
+    },
   });
   await pluginInstance.load();
-  assert.equal(typeof registered['dxos-flow-studio']?.Component, 'function');
-  assert.equal(registered['dxos-flow-studio']?.aclSnippet, 'pm');
+  assert.equal(registered['dxos-flow-studio'], undefined, 'Standalone dxos-flow-studio settings entry must be retired');
+  assert.equal(typeof registered['workflow.automation']?.Component, 'function');
+  assert.equal(registered['workflow.automation']?.title, 'Workflow Automation');
+  assert.equal(registered['workflow.automation']?.icon, 'ApartmentOutlined');
+  assert.equal(registered['workflow.automation']?.aclSnippet, 'pm');
+  assert.equal(registered['workflow.automation']?.sort, 20);
+  assert.equal(routerAdded['admin.settings.dxos-flow-studio']?.path, '/admin/settings/dxos-flow-studio');
+  assert.equal(routerAdded['admin.settings.dxos-flow-studio']?.Component, registered['workflow.automation'].Component);
   assert.equal(typeof registered['dxos-studio']?.Component, 'function');
   assert.equal(registered['dxos-studio']?.aclSnippet, 'pm');
 

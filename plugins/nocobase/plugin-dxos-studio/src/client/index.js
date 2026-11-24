@@ -22,17 +22,24 @@
       const Page = createDxosStudioSettingsPage(client, React, antd, this.app);
       const FlowPage = createFlowStudioApp(client, React, antd, this.app);
       if (this.app?.pluginSettingsManager && typeof this.app.pluginSettingsManager.add === 'function') {
-        this.app.pluginSettingsManager.add('dxos-flow-studio', {
-          title: 'DX-OS Flow Studio',
+        this.app.pluginSettingsManager.add('workflow.automation', {
+          title: 'Workflow Automation',
           icon: 'ApartmentOutlined',
           Component: FlowPage,
           aclSnippet: 'pm',
+          sort: 20,
         });
         this.app.pluginSettingsManager.add('dxos-studio', {
           title: 'DX-OS Studio',
           icon: 'ControlOutlined',
           Component: Page,
           aclSnippet: 'pm',
+        });
+      }
+      if (this.app?.router && typeof this.app.router.add === 'function') {
+        this.app.router.add('admin.settings.dxos-flow-studio', {
+          path: '/admin/settings/dxos-flow-studio',
+          Component: FlowPage,
         });
       }
     }

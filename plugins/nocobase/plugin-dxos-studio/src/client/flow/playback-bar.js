@@ -22,39 +22,22 @@ function statusBadgeStyle(status) {
   const s = String(status || '').toLowerCase();
   const tone = STATUS_BADGE_MAP[s] || STATUS_BADGE_MAP.skipped;
   return {
-    fontSize: 11,
-    fontWeight: 700,
-    padding: '2px 8px',
-    borderRadius: 999,
-    background: tone.bg,
-    color: tone.color,
-    border: `1px solid ${tone.border}`,
-    whiteSpace: 'nowrap',
+    fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999,
+    background: tone.bg, color: tone.color, border: `1px solid ${tone.border}`, whiteSpace: 'nowrap',
   };
 }
 
 function vcrButtonStyle(disabled, primary = false) {
   if (disabled) {
     return {
-      padding: '5px 10px',
-      borderRadius: 6,
-      border: '1px solid #cbd5e1',
-      background: '#e2e8f0',
-      color: '#94a3b8',
-      fontSize: 12,
-      fontWeight: 600,
-      cursor: 'not-allowed',
+      padding: '4px 9px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#e2e8f0',
+      color: '#94a3b8', fontSize: 12, fontWeight: 600, cursor: 'not-allowed',
     };
   }
   return {
-    padding: '5px 10px',
-    borderRadius: 6,
-    border: `1px solid ${primary ? '#1677ff' : '#cbd5e1'}`,
-    background: primary ? '#1677ff' : '#ffffff',
-    color: primary ? '#ffffff' : '#0f172a',
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: 'pointer',
+    padding: '4px 9px', borderRadius: 6, border: `1px solid ${primary ? '#2563EB' : '#cbd5e1'}`,
+    background: primary ? '#2563EB' : '#ffffff', color: primary ? '#ffffff' : '#0f172a',
+    fontSize: 12, fontWeight: 600, cursor: 'pointer',
   };
 }
 
@@ -63,18 +46,19 @@ function createPlaybackBar(React) {
 
   return function PlaybackBar(props = {}) {
     const {
-      runs,
-      selectedRun,
-      onSelectRun,
-      playbackIndex,
-      onStepChange,
-      playing,
-      onTogglePlay,
-      onDryRun,
-      onResumeApproval,
-      resumeBusy,
-      dryRunBusy,
+      runs, selectedRun, onSelectRun, playbackIndex, onStepChange,
+      playing, onTogglePlay, onResumeApproval, resumeBusy, autoExpandSeq = 0,
     } = props;
+
+    const [expanded, setExpanded] = React.useState(() => Boolean(autoExpandSeq > 0));
+    const [seqRef] = React.useState(() => ({ val: autoExpandSeq || 0 }));
+
+    React.useEffect(() => {
+      if (autoExpandSeq && autoExpandSeq !== seqRef.val) {
+        seqRef.val = autoExpandSeq;
+        setExpanded(true);
+      }
+    }, [autoExpandSeq]);
 
     const runOptions = React.useMemo(() => {
       const list = Array.isArray(runs) ? runs.filter(Boolean) : [];
@@ -114,177 +98,125 @@ function createPlaybackBar(React) {
       onSelectRun(found || uid);
     }
 
-    return h('div', {
-      'data-testid': 'dxos-flow-playback-bar',
+    const hitlBanner = isSuspended ? h('div', {
+      'data-testid': 'dxos-flow-hitl-banner',
       style: {
-        borderTop: '1px solid #cbd5e1',
-        background: '#ffffff',
-        padding: '8px 14px',
-        display: 'grid',
-        gap: 8,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10,
+        padding: '8px 12px', borderRadius: 8, border: '1px solid #fcd34d', background: '#fffbeb',
       },
     },
-      isSuspended ? h('div', {
-        'data-testid': 'dxos-flow-hitl-banner',
-        style: {
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: 10,
-          padding: '8px 12px',
-          borderRadius: 8,
-          border: '1px solid #fcd34d',
-          background: '#fffbeb',
-        },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: '#78350f' } },
+        h('strong', null, 'HITL Approval Gate'),
+        h('span', null, `Run ${selectedRun.runUid || ''} đang tạm dừng tại node "${selectedRun.suspendedNodeId || 'approval'}"`),
+        suspendedState?.approverRole ? h('span', { style: statusBadgeStyle('suspended') }, `Role: ${suspendedState.approverRole}`) : null,
+        suspendedState?.title ? h('span', null, `· ${suspendedState.title}`) : null,
+      ),
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+        h('button', {
+          type: 'button',
+          'data-testid': 'dxos-flow-hitl-approve-btn',
+          disabled: Boolean(resumeBusy),
+          onClick: () => { if (typeof onResumeApproval === 'function') onResumeApproval(selectedRun.runUid, 'approved'); },
+          style: resumeBusy ? vcrButtonStyle(true) : { padding: '5px 12px', borderRadius: 6, border: '1px solid #16a34a', background: '#16a34a', color: '#ffffff', fontSize: 12, fontWeight: 700, cursor: 'pointer' },
+        }, 'Approve'),
+        h('button', {
+          type: 'button',
+          'data-testid': 'dxos-flow-hitl-reject-btn',
+          disabled: Boolean(resumeBusy),
+          onClick: () => { if (typeof onResumeApproval === 'function') onResumeApproval(selectedRun.runUid, 'rejected'); },
+          style: resumeBusy ? vcrButtonStyle(true) : { padding: '5px 12px', borderRadius: 6, border: '1px solid #dc2626', background: '#ffffff', color: '#dc2626', fontSize: 12, fontWeight: 700, cursor: 'pointer' },
+        }, 'Reject'),
+      ),
+    ) : null;
+
+    const toggleBtn = h('button', {
+      type: 'button',
+      'data-testid': 'dxos-flow-toggle-trace-btn',
+      'aria-expanded': expanded,
+      onClick: () => setExpanded((v) => !v),
+      style: {
+        display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 9px', borderRadius: 6,
+        border: '1px solid #e2e8f0', background: expanded ? '#eff6ff' : '#f8fafc',
+        color: expanded ? '#1d4ed8' : '#0f172a', fontSize: 12, fontWeight: 600, cursor: 'pointer',
       },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: '#78350f' } },
-          h('strong', null, 'HITL Approval Gate'),
-          h('span', null, `Run ${selectedRun.runUid || ''} đang tạm dừng tại node "${selectedRun.suspendedNodeId || 'approval'}"`),
-          suspendedState?.approverRole ? h('span', { style: statusBadgeStyle('suspended') }, `Role: ${suspendedState.approverRole}`) : null,
-          suspendedState?.title ? h('span', null, `· ${suspendedState.title}`) : null,
-        ),
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-          h('button', {
-            type: 'button',
-            'data-testid': 'dxos-flow-hitl-approve-btn',
-            disabled: Boolean(resumeBusy),
-            onClick: () => {
-              if (typeof onResumeApproval === 'function') onResumeApproval(selectedRun.runUid, 'approved');
-            },
-            style: resumeBusy
-              ? vcrButtonStyle(true)
-              : { padding: '5px 12px', borderRadius: 6, border: '1px solid #16a34a', background: '#16a34a', color: '#ffffff', fontSize: 12, fontWeight: 700, cursor: 'pointer' },
-          }, 'Approve'),
-          h('button', {
-            type: 'button',
-            'data-testid': 'dxos-flow-hitl-reject-btn',
-            disabled: Boolean(resumeBusy),
-            onClick: () => {
-              if (typeof onResumeApproval === 'function') onResumeApproval(selectedRun.runUid, 'rejected');
-            },
-            style: resumeBusy
-              ? vcrButtonStyle(true)
-              : { padding: '5px 12px', borderRadius: 6, border: '1px solid #dc2626', background: '#ffffff', color: '#dc2626', fontSize: 12, fontWeight: 700, cursor: 'pointer' },
-          }, 'Reject'),
-        ),
-      ) : null,
+    }, `${expanded ? '▾' : '▸'} Lịch sử chạy & Trace (${runOptions.length})`);
 
-      h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 } },
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-          h('button', {
-            type: 'button',
-            'data-testid': 'dxos-flow-dryrun-btn',
-            disabled: Boolean(dryRunBusy),
-            onClick: () => { if (typeof onDryRun === 'function') onDryRun(); },
-            style: vcrButtonStyle(Boolean(dryRunBusy), true),
-          }, 'Dry-Run'),
-          h('select', {
-            'data-testid': 'dxos-flow-run-selector',
-            value: String(selectedRun?.runUid || selectedRun?.id || ''),
-            onChange: handleRunSelect,
-            style: {
-              padding: '5px 10px',
-              borderRadius: 6,
-              border: '1px solid #cbd5e1',
-              background: '#f8fafc',
-              fontSize: 12,
-              color: '#0f172a',
-              minWidth: 210,
-            },
-          },
-            h('option', { value: '' }, '-- Chọn Run / Trace --'),
-            runOptions.map((r) => {
-              const uid = String(r.runUid || r.id || '');
-              return h('option', { key: uid, value: uid }, `${uid} · ${r.status || 'completed'} (${r.durationMs ?? 0}ms)`);
-            }),
+    return h('div', {
+      'data-testid': 'dxos-flow-playback-bar',
+      style: { borderTop: '1px solid #cbd5e1', background: '#ffffff', padding: expanded ? '8px 14px' : '5px 14px', minHeight: 38, boxSizing: 'border-box', display: 'grid', gap: 8 },
+    },
+      hitlBanner,
+      !expanded
+        ? h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, minHeight: 28 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            toggleBtn,
+            selectedRun ? h('span', { style: statusBadgeStyle(selectedRun.status) }, `${selectedRun.status || 'completed'} · ${selectedRun.durationMs ?? 0}ms`) : h('span', { style: { fontSize: 11, color: '#64748b' } }, 'Chưa có trace · Nhấn "▶ Chạy thử" để mô phỏng'),
           ),
-        ),
-
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 4 } },
-          h('button', {
-            type: 'button',
-            'data-testid': 'dxos-flow-vcr-first-btn',
-            disabled: !canPrev,
-            onClick: () => { if (typeof onStepChange === 'function') onStepChange(0); },
-            style: vcrButtonStyle(!canPrev),
-          }, '|<'),
-          h('button', {
-            type: 'button',
-            'data-testid': 'dxos-flow-vcr-prev-btn',
-            disabled: !canPrev,
-            onClick: () => { if (typeof onStepChange === 'function') onStepChange(Math.max(0, activeIdx - 1)); },
-            style: vcrButtonStyle(!canPrev),
-          }, '<'),
-          h('button', {
+          canPlay ? h('button', {
             type: 'button',
             'data-testid': 'dxos-flow-vcr-play-btn',
-            disabled: !canPlay,
             onClick: () => { if (typeof onTogglePlay === 'function') onTogglePlay(); },
-            style: vcrButtonStyle(!canPlay, Boolean(playing)),
-          }, playing ? 'Pause' : 'Play'),
-          h('button', {
-            type: 'button',
-            'data-testid': 'dxos-flow-vcr-next-btn',
-            disabled: !canNext,
-            onClick: () => { if (typeof onStepChange === 'function') onStepChange(Math.min(traces.length - 1, activeIdx + 1)); },
-            style: vcrButtonStyle(!canNext),
-          }, '>'),
-          h('button', {
-            type: 'button',
-            'data-testid': 'dxos-flow-vcr-last-btn',
-            disabled: !canNext,
-            onClick: () => { if (typeof onStepChange === 'function') onStepChange(traces.length - 1); },
-            style: vcrButtonStyle(!canNext),
-          }, '>|'),
+            style: vcrButtonStyle(false, Boolean(playing)),
+          }, playing ? 'Pause' : 'Play') : null,
+        )
+        : h(React.Fragment, null,
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 } },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              toggleBtn,
+              h('select', {
+                'data-testid': 'dxos-flow-run-selector',
+                value: String(selectedRun?.runUid || selectedRun?.id || ''),
+                onChange: handleRunSelect,
+                style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc', fontSize: 12, color: '#0f172a', minWidth: 210 },
+              },
+                h('option', { value: '' }, '-- Chọn Run / Trace --'),
+                runOptions.map((r) => {
+                  const uid = String(r.runUid || r.id || '');
+                  return h('option', { key: uid, value: uid }, `${uid} · ${r.status || 'completed'} (${r.durationMs ?? 0}ms)`);
+                }),
+              ),
+            ),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 4 } },
+              h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-first-btn', disabled: !canPrev, onClick: () => onStepChange?.(0), style: vcrButtonStyle(!canPrev) }, '|<'),
+              h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-prev-btn', disabled: !canPrev, onClick: () => onStepChange?.(Math.max(0, activeIdx - 1)), style: vcrButtonStyle(!canPrev) }, '<'),
+              h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-play-btn', disabled: !canPlay, onClick: () => onTogglePlay?.(), style: vcrButtonStyle(!canPlay, Boolean(playing)) }, playing ? 'Pause' : 'Play'),
+              h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-next-btn', disabled: !canNext, onClick: () => onStepChange?.(Math.min(traces.length - 1, activeIdx + 1)), style: vcrButtonStyle(!canNext) }, '>'),
+              h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-last-btn', disabled: !canNext, onClick: () => onStepChange?.(traces.length - 1), style: vcrButtonStyle(!canNext) }, '>|'),
+            ),
+            h('div', { 'data-testid': 'dxos-flow-step-badge', style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: '#334155' } },
+              currentTrace
+                ? h(React.Fragment, null,
+                  h('strong', null, `Step ${activeIdx + 1}/${traces.length}`),
+                  h('span', null, currentTrace.label || currentTrace.nodeId || currentTrace.type || '-'),
+                  h('span', { style: statusBadgeStyle(currentTrace.status) }, currentTrace.status || 'completed'),
+                  h('span', { style: { fontFamily: 'monospace', fontSize: 11, color: '#64748b' } }, `${currentTrace.durationMs ?? 0}ms`),
+                )
+                : selectedRun
+                  ? h(React.Fragment, null,
+                    h('span', { style: statusBadgeStyle(selectedRun.status) }, selectedRun.status || 'completed'),
+                    h('span', { style: { fontFamily: 'monospace', fontSize: 11, color: '#64748b' } }, `${selectedRun.durationMs ?? 0}ms`),
+                  )
+                  : h('span', { style: { color: '#64748b' } }, 'Chưa có trace · Nhấn "▶ Chạy thử" để mô phỏng'),
+            ),
+          ),
+          traces.length > 0 ? h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } },
+            traces.map((t, idx) => {
+              const active = idx === activeIdx;
+              return h('button', {
+                key: `${t.nodeId || t.type || 'step'}-${idx}`,
+                type: 'button',
+                'data-testid': `dxos-flow-step-chip-${idx}`,
+                onClick: () => onStepChange?.(idx),
+                style: {
+                  padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: active ? 700 : 500, cursor: 'pointer',
+                  border: `1px solid ${active ? '#2563EB' : '#cbd5e1'}`, background: active ? '#dbeafe' : '#f8fafc', color: active ? '#1d4ed8' : '#475569',
+                },
+              }, `${idx + 1}. ${t.nodeId || t.label || t.type} (${t.durationMs ?? 0}ms)`);
+            }),
+          ) : null,
         ),
-
-        h('div', {
-          'data-testid': 'dxos-flow-step-badge',
-          style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: '#334155' },
-        },
-          currentTrace
-            ? h(React.Fragment, null,
-              h('strong', null, `Step ${activeIdx + 1}/${traces.length}`),
-              h('span', null, currentTrace.label || currentTrace.nodeId || currentTrace.type || '-'),
-              h('span', { style: statusBadgeStyle(currentTrace.status) }, currentTrace.status || 'completed'),
-              h('span', { style: { fontFamily: 'monospace', fontSize: 11, color: '#64748b' } }, `${currentTrace.durationMs ?? 0}ms`),
-            )
-            : selectedRun
-              ? h(React.Fragment, null,
-                h('span', { style: statusBadgeStyle(selectedRun.status) }, selectedRun.status || 'completed'),
-                h('span', { style: { fontFamily: 'monospace', fontSize: 11, color: '#64748b' } }, `${selectedRun.durationMs ?? 0}ms`),
-              )
-              : h('span', { style: { color: '#64748b' } }, 'Chưa có trace · Nhấn Dry-Run để mô phỏng'),
-        ),
-      ),
-
-      traces.length > 0 ? h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } },
-        traces.map((t, idx) => {
-          const active = idx === activeIdx;
-          return h('button', {
-            key: `${t.nodeId || t.type || 'step'}-${idx}`,
-            type: 'button',
-            'data-testid': `dxos-flow-step-chip-${idx}`,
-            onClick: () => { if (typeof onStepChange === 'function') onStepChange(idx); },
-            style: {
-              padding: '2px 8px',
-              borderRadius: 999,
-              fontSize: 11,
-              fontWeight: active ? 700 : 500,
-              border: `1px solid ${active ? '#1677ff' : '#cbd5e1'}`,
-              background: active ? '#dbeafe' : '#f8fafc',
-              color: active ? '#1d4ed8' : '#475569',
-              cursor: 'pointer',
-            },
-          }, `${idx + 1}. ${t.nodeId || t.label || t.type} (${t.durationMs ?? 0}ms)`);
-        }),
-      ) : null,
     );
   };
 }
 
-module.exports = {
-  createPlaybackBar,
-  statusBadgeStyle,
-};
+module.exports = { createPlaybackBar, statusBadgeStyle };
