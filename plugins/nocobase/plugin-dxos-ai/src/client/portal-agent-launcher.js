@@ -146,7 +146,7 @@ function buildHiddenPageSystemContext({ portalSlug = '', pageTitle = '', pathnam
       if (nodeSummary) {
         lines.push(`Danh sách node hiện tại: ${nodeSummary}`);
       }
-      lines.push('Khi quản trị viên yêu cầu tạo, sửa, thêm/xóa node, chạy thử hoặc phê duyệt HITL, hãy dùng ngay công cụ dxos_configure_workflow với organizationId và ruleKey trên mà không hỏi lại mã kỹ thuật.');
+      lines.push('Khi quản trị viên yêu cầu tạo, sửa, thêm/xóa node, chạy thử hoặc phê duyệt HITL, hãy dùng ngay công cụ dxos_configure_workflow với ruleKey trên mà không truyền organizationId (hệ thống tự xác thực theo phiên đăng nhập) và không hỏi lại mã kỹ thuật.');
     }
   }
   return lines.join('\n');
