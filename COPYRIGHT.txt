@@ -42,8 +42,8 @@ Name                                | Version | License    | Purpose | Path
 @latticedx/plugin-enterprise-auth   | 1.0.0   | Apache-2.0 | Keycloak OIDC + PKCE, Valkey 8.1 (Redis-compatible) session cache, Backchannel Logout, 2-way role sync | plugins/nocobase/plugin-enterprise-auth
 @latticedx/plugin-dxos-para         | 1.0.0   | Apache-2.0 | [H] P.A.R.A. knowledge vault (latticeParaDocuments/Chunks), pgvector HNSW RRF search, Office XLSX/PPTX/PDF/DOCX extractor & OCR Form Autofill | plugins/nocobase/plugin-dxos-para
 @latticedx/plugin-dxos-blocks       | 1.0.0   | Apache-2.0 | [H][P][D][I] 10 Native v2 BlockModels (incl. WebGIS & Kanban/Schedule), 2-Way Digital Twin Shadow, Mosquitto DynSec + LWT & Orion-LD 2-Way Broker Control (dxosBroker), 2-Phase Bulk Import, IIoT telemetryIngest & Alarms, Governed Export, Chatter & Ctrl+K | plugins/nocobase/plugin-dxos-blocks
-@latticedx/plugin-dxos-studio       | 1.0.0   | Apache-2.0 | [P][H][D] DX-OS Admin Studio (9 tabs + 6 v1.0 Governance Consoles), OMS/WMS/FEFO/ePOD, DMN Engine, Delegations, Native Automation Engine (dxosAutomations), Visual Domain Builder + 1-Click CMMS Pack + 1-Click Tenant Provisioning (dxosBuilder), 4 Poka-yoke workflows, Outbox/DLQ, GitOps Solution Bundle v3 | plugins/nocobase/plugin-dxos-studio
-@latticedx/plugin-dxos-ai           | 1.0.0   | Apache-2.0 | [I][P][D][H] AI Workforce, 17 Unified AI Tools (incl. dxos_configure_workflow for Native Automations), Proactive Incident Triage, HITL Approval Queue, Persistent Quota + PII Redaction, 2-Way MCP Gateway & Prompts | plugins/nocobase/plugin-dxos-ai
+@latticedx/plugin-dxos-studio       | 1.0.0   | Apache-2.0 | [P][H][D] DX-OS Admin Studio (9 tabs + 6 v1.0 Governance Consoles) & Full-Screen LatticeFlow v2 DAG Studio (/admin/settings/dxos-flow-studio: 24 node types/6 categories, durable Pause/Resume HITL, cron/webhook triggers), OMS/WMS/FEFO/ePOD, DMN Engine, Delegations, Visual Domain Builder + 1-Click CMMS Pack + 1-Click Tenant Provisioning, 4 Poka-yoke workflows, Outbox/DLQ, GitOps Bundle v3 (devDeps @xyflow/react + @dagrejs/dagre MIT bundled at build time via esbuild; host React/Antd/NocoBase external) | plugins/nocobase/plugin-dxos-studio
+@latticedx/plugin-dxos-ai           | 1.0.0   | Apache-2.0 | [I][P][D][H] AI Workforce, 17 Unified AI Tools (incl. dxos_configure_workflow for LatticeFlow v2 & Real LLM DX-OS Flow Architect), Proactive Incident Triage, HITL Approval Queue, Persistent Quota + PII Redaction, 2-Way MCP Gateway & Prompts | plugins/nocobase/plugin-dxos-ai
 
 ================================================================================
 First-Party Workspace Applications & Shared Packages (Apache-2.0)
@@ -62,8 +62,9 @@ Third-Party Dependencies, Host Runtime & External OCI Services
 ================================================================================
 Full license notices and CycloneDX 1.5 machine-readable SBOM remain with their
 respective upstream projects (see LICENSE, NOTICE, docs/third-party.md,
-docs/dependency-inventory.md, and docs/sbom-cyclonedx.json — 208 components:
-workspace=12, npm=177, oci=19, 207/208 with resolved licenses via pnpm release:sbom):
+docs/dependency-inventory.md, and docs/sbom-cyclonedx.json — 233 components:
+workspace=12, npm=202, oci=19, 232/233 with resolved licenses via pnpm release:sbom;
+only macOS-optional fsevents@2.3.3 unresolved on Windows):
 
 Name                                 | Version    | License / SPDX                                                          | Description | Url
 -------------------------------------|------------|-------------------------------------------------------------------------|-------------|---------------------------------------------
@@ -77,7 +78,9 @@ oauth4webapi                         | 3.8.8      | MIT                         
 TypeScript                           | 7.0.2      | Apache-2.0                                                              | Static type checker and compiler | https://github.com/microsoft/TypeScript
 Vitest                               | 5.0.3      | MIT                                                                     | Workspace unit & integration test runner | https://github.com/vitest-dev/vitest
 tsx                                  | 4.23.15    | MIT                                                                     | TypeScript runner for Node backend services | https://github.com/privatenumber/tsx
-esbuild                              | 0.28.2     | MIT                                                                     | Plugin & runtime bundler | https://github.com/evanw/esbuild
+esbuild                              | 0.28.2     | MIT                                                                     | Plugin & runtime bundler (devDependencies) | https://github.com/evanw/esbuild
+@xyflow/react                        | 12.12.1    | MIT                                                                     | DAG canvas UI bundled in plugin-dxos-studio devDependencies (host React/Antd external) | https://github.com/xyflow/xyflow
+@dagrejs/dagre                       | 3.1.3      | MIT                                                                     | Directed graph auto-layout bundled in plugin-dxos-studio devDependencies | https://github.com/dagrejs/dagre
 PostgreSQL                           | 16.16      | PostgreSQL                                                              | Relational database OCI container | https://www.postgresql.org/about/licence/
 pgvector (PG16)                      | 0.8.1      | PostgreSQL                                                              | HNSW vector extension OCI container | https://github.com/pgvector/pgvector
 Valkey                               | 8.1        | BSD-3-Clause                                                            | Pure-OSI Redis-compatible cache/pubsub/rate-limit OCI container | https://github.com/valkey-io/valkey

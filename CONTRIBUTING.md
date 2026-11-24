@@ -18,9 +18,9 @@ pnpm install --frozen-lockfile
 - Đặt server độc lập vào `apps/`, thư viện dùng chung vào `packages/` và extension NocoBase vào `plugins/nocobase/`.
 - Giữ tệp mã nguồn gọn, phân tách trách nhiệm rõ ràng (**khuyến nghị dưới 300 dòng/tệp** cho mã mới).
 - Không import trực tiếp mã nội bộ của app khác trong production; giao tiếp qua public exports của `@dx/contracts` hoặc HTTP/REST API.
-- Bắt buộc gắn header `SPDX-License-Identifier: Apache-2.0` theo chuẩn CTU-OpenPaw cho mọi tệp mã nguồn gốc có hỗ trợ comment (`.ts`, `.tsx`, `.js`, `.jsx`, `.cjs`, `.mjs`, `.yml`, `Dockerfile`). Không chỉnh sửa tệp tự sinh `apps/web/next-env.d.ts` và tuyệt đối **không sửa mã hay license trong `upstream/nocobase/`**.
+- Bắt buộc gắn header `SPDX-License-Identifier: Apache-2.0` theo chuẩn CTU-OpenPaw cho mọi tệp mã nguồn gốc có hỗ trợ comment (`.ts`, `.tsx`, `.js`, `.jsx`, `.cjs`, `.mjs`, `.yml`, `Dockerfile`). Không chỉnh sửa tệp tự sinh `apps/web/next-env.d.ts`. Kho mã nguồn Git thuần chuẩn OSI hoàn toàn không chứa `upstream/nocobase/` hay `.gitmodules` (host `nocobase/nocobase:2.2.50` chỉ chạy bên ngoài dưới dạng OCI container) — tuyệt đối không đưa mã nguồn upstream NocoBase vào kho hoặc build workspace.
 - Không thêm dependency mới khi chưa kiểm tra tương thích giấy phép và cập nhật `docs/dependency-inventory.md` + `NOTICE`.
-- Không commit `.env`, token, khóa bí mật (`*.pem`, `*.key`), dữ liệu thật hoặc bản build/checkout lọt vào `upstream/`.
+- Không commit `.env`, token, khóa bí mật (`*.pem`, `*.key`), dữ liệu thật hoặc bản build/checkout chứa `upstream/` hay tệp ngoài chuẩn OSI.
 
 ## 3. Theo dõi lỗi & Quy trình Pull Request
 - Kho mã chính thức: **https://github.com/CTU-OpenPaw/lattice-dx**
@@ -31,7 +31,7 @@ pnpm install --frozen-lockfile
 
 ## 4. Checklist bắt buộc trước khi gửi PR
 1. Chạy `pnpm check` (`typecheck`, `vitest`, `build`) — tất cả phải đạt.
-2. Chạy `node scripts/source-headers.mjs --check` và `pnpm pof:check` để xác minh header `@copyright (C) 2026 CTU-OpenPaw` + SPDX, cấu trúc [`COPYRIGHT.txt`](COPYRIGHT.txt) / [`NOTICE`](NOTICE), cô lập 6 plugin NocoBase (gồm `LICENSE` + `README.md`) và khóa digest `@sha256:` của Compose.
-3. Nếu sửa plugin NocoBase hoặc scripts PoF/demo, chạy `node --test plugins/nocobase/action-bridge/tests/*.test.cjs plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/plugin-enterprise-auth/tests/*.test.cjs plugins/nocobase/plugin-dxos-para/tests/*.test.cjs plugins/nocobase/plugin-dxos-blocks/tests/*.test.cjs plugins/nocobase/plugin-dxos-studio/tests/*.test.cjs scripts/tests/*.test.mjs`.
+2. Chạy `node scripts/source-headers.mjs --check` và `pnpm pof:check` để xác minh header `@copyright (C) 2026 CTU-OpenPaw` + SPDX, cấu trúc [`COPYRIGHT.txt`](COPYRIGHT.txt) / [`NOTICE`](NOTICE), cô lập 7 plugin NocoBase (gồm `LICENSE` + `README.md`), khóa digest `@sha256:` của Compose và sạch `upstream-clean`.
+3. Nếu sửa plugin NocoBase hoặc scripts PoF/demo, chạy `node --test plugins/nocobase/action-bridge/tests/*.test.cjs plugins/nocobase/plugin-lattice-foundation/tests/*.test.cjs plugins/nocobase/plugin-enterprise-auth/tests/*.test.cjs plugins/nocobase/plugin-dxos-para/tests/*.test.cjs plugins/nocobase/plugin-dxos-blocks/tests/*.test.cjs plugins/nocobase/plugin-dxos-studio/tests/*.test.cjs plugins/nocobase/plugin-dxos-ai/tests/*.test.cjs scripts/tests/*.test.mjs tests/nocobase-externals.test.mjs`.
 4. Nếu sửa `infra/compose/*.yml`, kiểm tra lại mọi image mới đều pin `@sha256:` và xác thực bằng `docker compose -f <file> config --quiet` cùng `pnpm test:infra` khi Docker sẵn sàng.
 5. Tự rà soát `git diff` để bảo đảm không còn `TODO` chưa giải quyết, log debug hoặc thông tin nhạy cảm.

@@ -96,7 +96,7 @@ node scripts/generate-sbom.mjs --check
 pnpm release:tarball
 ```
 
-Giải nén `output/release/latticedx-1.0.0-src.tar.gz` sang thư mục tạm ngoài workspace (không có `.git/`), kiểm tra `COPYRIGHT.txt`, `NOTICE`, `LICENSE`, `docs/sbom-cyclonedx.json` (`209` thành phần) và chạy lại:
+Giải nén `output/release/latticedx-1.0.0-src.tar.gz` sang thư mục tạm ngoài workspace (không có `.git/`), kiểm tra `COPYRIGHT.txt`, `NOTICE`, `LICENSE`, `docs/sbom-cyclonedx.json` (`233` thành phần) và chạy lại:
 
 ```sh
 pnpm install --frozen-lockfile

@@ -31,9 +31,9 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
   - **Đội ngũ Logistics 5 bước:** `native.lab.manager@example.invalid`, `native.lab.worker@example.invalid`, `native.lab.dispatcher@example.invalid`, `native.lab.driver@example.invalid` (mật khẩu chung `NativeLab-2026!`)
 - **Các Tab Trình duyệt Chuẩn bị sẵn:**
   1. `http://localhost:13014/admin/settings/dxos-ai` (Trung tâm 6 Phân hệ, AI Workforce & HITL)
-  2. `http://localhost:13014/admin/settings/dxos-studio` (Control Studio **9 Tabs**, 6 Governance Consoles & GitOps Bundle v3)
+  2. `http://localhost:13014/admin/settings/dxos-studio` (Control Studio **9 Tabs**, 6 Governance Consoles & GitOps Bundle v3) & `http://localhost:13014/admin/settings/dxos-flow-studio` (LatticeFlow v2 Full-Screen DAG Studio — 24 node types, HITL Pause/Resume & **DX-OS Flow Architect**)
   3. `http://localhost:13014/p/logistics` (Logistics 5 bước, Kanban/Schedule, PKI & Printable Voucher)
-  4. `http://localhost:13014/p/incidents` (WebGIS Chuỗi lạnh, IIoT Digital Twin & GraphRAG Copilot)
+  4. `http://localhost:13014/p/incidents` (WebGIS Chuỗi lạnh, IIoT Digital Twin & GraphRAG Enterprise Agent)
   5. `http://localhost:13014/p/cmms` (CMMS Bảo trì Thiết bị — `latticeCustomWorkOrders` từ Business Pack 1-nhấp)
   6. `http://localhost:13014/v/mobile` (Mobile Field PWA ngoại tuyến)
 
@@ -86,7 +86,7 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
      pnpm release:sbom -- --check
      pnpm pof:check
      ```
-     - Nêu rõ: **8 suite Headless PaaS PASS**; `/api/dxos:openapi` phản chiếu sống cả `latticeCustomWorkOrders`; **SBOM CycloneDX 1.5** (`208` components: `workspace=12, npm=177, oci=19`, 0 BSL-1.1); **PoF `PASS`**.
+     - Nêu rõ: **8 suite Headless PaaS PASS**; `/api/dxos:openapi` phản chiếu sống cả `latticeCustomWorkOrders`; **SBOM CycloneDX 1.5** (`233` components: `workspace=12, npm=202, oci=19`, `232/233` resolved — chỉ `fsevents@2.3.3` macOS-optional trên Windows, 0 BSL-1.1); **PoF `PASS`**.
 
 ### 13:15 – 15:00 · Chứng minh Negative RBAC (`403`) & Kết luận
 - **Màn hình:** Đăng xuất `admin@nocobase.com` -> đăng nhập **`native.lab.employee@example.invalid` / `NativeLab-2026!`**.
@@ -107,7 +107,7 @@ pnpm pof:check
 pnpm release:sbom -- --check
 node --test scripts/tests/oss-pof-audit.test.mjs scripts/tests/generate-sbom.test.mjs scripts/tests/infra-compose-security.test.mjs
 
-# 2. Chứng minh AI Intent Router + Security Refusal + GraphRAG offline (64/64 ca)
+# 2. Chứng minh AI Intent Router + Security Refusal + GraphRAG + Flow Architect offline (80/80 ca)
 node scripts/eval-vietnamese-nl-agent.mjs --min-pass=95
 
 # 3. Chứng minh toàn bộ unit & integration tests của 7 plugin (không cần LLM API key)
@@ -123,7 +123,7 @@ pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014
 ## 3. Ngân hàng Trả lời Phản biện Giám khảo (Q&A Defense Points)
 
 1. **Hỏi: Dùng NocoBase làm nền tảng thì có vi phạm bản quyền hoặc bị phụ thuộc (vendor lock-in) không?**
-   - **Đáp:** Không. Toàn bộ mã nguồn của nhóm đặt trong 7 plugin `Apache-2.0` độc lập với `"sdkProvidedByHost": true` — không sửa một dòng nào trong `upstream/nocobase`, loại trừ hoàn toàn khỏi workspace build và `latticedx-1.0.0-src.tar.gz`, đồng thời bảo toàn tuyệt đối **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`). Lõi nghiệp vụ, hợp đồng `@dx/contracts`, Headless API (`apps/api`, `dxosApiKeys`, `dxosLedger`, `dxosDataGov`, `dxosWms`, `dxosDmn`) chạy độc lập qua OpenAPI 3.1 / AsyncAPI 3.0 / MCP mà không khóa chặt vào UI.
+   - **Đáp:** Không. Toàn bộ mã nguồn của nhóm đặt trong 7 plugin `Apache-2.0` độc lập với `"sdkProvidedByHost": true` — kho mã nguồn Git và `latticedx-1.0.0-src.tar.gz` là **100% thuần chuẩn OSI**, hoàn toàn không chứa Git submodule `upstream/nocobase` hay `.gitmodules` (host `nocobase/nocobase:2.2.50` chỉ được nạp độc lập lúc chạy dưới dạng OCI container bên ngoài kho Git), đồng thời bảo toàn tuyệt đối **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`). Lõi nghiệp vụ, hợp đồng `@dx/contracts`, Headless API (`apps/api`, `dxosApiKeys`, `dxosLedger`, `dxosDataGov`, `dxosWms`, `dxosDmn`) chạy độc lập qua OpenAPI 3.1 / AsyncAPI 3.0 / MCP mà không khóa chặt vào UI.
 2. **Hỏi: Tại sao hệ thống không dùng ThingsBoard, EMQX hay các dịch vụ cache nguồn hạn chế cho phần IIoT và session/rate-limit?**
    - **Đáp:** ThingsBoard (bản mới), EMQX Enterprise và các bản cache nguồn đóng/hạn chế không đạt chuẩn OSI. Để bảo đảm **100% Pure-OSI License Purity**, CTU-OpenPaw sử dụng **Valkey `8.1` (`valkey/valkey:8.1-alpine`, `BSD-3-Clause`, tương thích giao thức `PUBSUB_ADAPTER=redis`)**, **Eclipse Mosquitto `2.0.21` Dynamic Security (`EPL-2.0 OR BSD-3-Clause`)**, **Node-RED `4.0.9` (`Apache-2.0`)**, lưu chuỗi thời gian IIoT trực tiếp trên **PostgreSQL `16` (`latticeTelemetryPoints`, không cần container `timescaledb` tách rời)**, cùng **Prometheus `v3.3.0` (`Apache-2.0`)** và **OTel Collector `0.123.0` (`Apache-2.0`)**, có `scripts/generate-sbom.mjs` tự động chặn cứng từ khóa `BSL-1.1`/`thingsboard`/`emqx`.
 3. **Hỏi: Nếu một lập trình viên quên lọc `organizationId` ở tầng plugin thì dữ liệu đa công ty có rò rỉ không?**

@@ -1,7 +1,7 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:a90938f2-ee58-44a0-8455-53d75fa2b3ec",
+  "serialNumber": "urn:uuid:d91a57b8-fea8-4680-8201-ee4c12253181",
   "version": 1,
   "metadata": {
     "tools": {
@@ -29,6 +29,66 @@
     }
   },
   "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40dagrejs/dagre@3.1.3",
+      "name": "@dagrejs/dagre",
+      "version": "3.1.3",
+      "purl": "pkg:npm/%40dagrejs/dagre@3.1.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5f86944f0391799bed85a6563951ea949e76fd976164510ce3e2e1fee4785e8a1448b13aa7bd5b732ecc3c6cd89cd51c361fa78fe8bfa8942908c21d4274a6ae"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40dagrejs/graphlib@4.0.6",
+      "name": "@dagrejs/graphlib",
+      "version": "4.0.6",
+      "purl": "pkg:npm/%40dagrejs/graphlib@4.0.6",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "1e3bfb85b7e648130fe27557305b7882eb2a5961e0850174a8d4f8579287a3825ab6f77ed8be551ca1679c88d756e0e7687211cfb66e1d29e57f446e6643b058"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
     {
       "type": "application",
       "bom-ref": "pkg:npm/%40dx/agent-worker@1.0.0",
@@ -1206,7 +1266,7 @@
       "name": "@latticedx/plugin-dxos-ai",
       "version": "1.0.0",
       "purl": "pkg:npm/%40latticedx/plugin-dxos-ai@1.0.0",
-      "description": "Admin-configurable AI Employee workforce, NocoBase Admin Builder tools, cross-department workflow copilot, 6-plane Enterprise OS topology, and two-way Streamable HTTP MCP gateway.",
+      "description": "Admin-configurable AI Employee workforce, NocoBase Admin Builder tools, cross-department workflow agent, 6-plane Enterprise OS topology, and two-way Streamable HTTP MCP gateway.",
       "licenses": [
         {
           "license": {
@@ -1925,6 +1985,186 @@
         {
           "alg": "SHA-512",
           "content": "330e79f28780f5f15bbfae7fcb8987b570ecf5b3e714c6402ff8f174f154a4e1c72175fdd667201076d2e4b6a1afea7064547c03b19095e456788e9c1850b650"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/d3-color@3.1.3",
+      "name": "@types/d3-color",
+      "version": "3.1.3",
+      "purl": "pkg:npm/%40types/d3-color@3.1.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "88ef74b1cb61f5601b9a0bfba20a2ae7b3bd6292a61416e6a04a021c3076c4c058d3efca56ba806820f2084d7a754b2978ebc8c4515123ed2c12da83ab2d9be0"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/d3-drag@3.0.7",
+      "name": "@types/d3-drag",
+      "version": "3.0.7",
+      "purl": "pkg:npm/%40types/d3-drag@3.0.7",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "1c4de354a97353d01a31accdb9fa28449e59a5698b22873dd00dfb594d893267aadbcc35150a8266cc07677c51f92bb161fb731eae9653a2891efab12b34f1c5"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/d3-interpolate@3.0.4",
+      "name": "@types/d3-interpolate",
+      "version": "3.0.4",
+      "purl": "pkg:npm/%40types/d3-interpolate@3.0.4",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "9a02cf11396ba55575611248825af8133e3b83b6318e5d658fb60ab223026f6ed5247f56f0d54ce816fd77c924a46fee0104b90266c0e3cab6200a2528aa3530"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/d3-selection@3.0.12",
+      "name": "@types/d3-selection",
+      "version": "3.0.12",
+      "purl": "pkg:npm/%40types/d3-selection@3.0.12",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "41efca5988448882311acec7ac002331f4a1c4a95dc75f5226daf9ceee777f769f3ec759373ec71ed7532d7a3f92a7a258d5d5c9c236e244a77f3058913ce983"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/d3-transition@3.0.9",
+      "name": "@types/d3-transition",
+      "version": "3.0.9",
+      "purl": "pkg:npm/%40types/d3-transition@3.0.9",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b994b9b217f1ccedeb1a5bb4702ddb8e63052ac5eff9299965c829d0a0f6dadb38b865e9e445581b3bbfd1877065e2a675d85c01c718b511092a43df5e466e0a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/d3-zoom@3.0.9",
+      "name": "@types/d3-zoom",
+      "version": "3.0.9",
+      "purl": "pkg:npm/%40types/d3-zoom@3.0.9",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d2c135e34e970582468aa0f702eb1397d66a0bfff69885e2c79d6d6e89b6e600c203cae2e319d2660dbc09a484f12ae5e850a5a8005429fb27d2a82181d7a930"
         }
       ],
       "licenses": [
@@ -2727,6 +2967,66 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/%40xyflow/react@12.12.1",
+      "name": "@xyflow/react",
+      "version": "12.12.1",
+      "purl": "pkg:npm/%40xyflow/react@12.12.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "838d4e1e63fe18be700c140aa6062df0017a4650780ab001b624ad5e108ca9d22d2ba80f752a6cb8393c57462d772bc8bcc3d38c326f92e2e4cf425b498bb90b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40xyflow/system@0.0.84",
+      "name": "@xyflow/system",
+      "version": "0.0.84",
+      "purl": "pkg:npm/%40xyflow/system@0.0.84",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "f7acdf1858c7de86774f4311747e202744a55ee088c5b06e1d57af678c6bcb9513c6a8f38edd35d3e2d1761a2581ea6aee386b71acf524db73ac44ec7309e410"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/abstract-logging@2.0.1",
       "name": "abstract-logging",
       "version": "2.0.1",
@@ -2937,6 +3237,36 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/classcat@5.0.5",
+      "name": "classcat",
+      "version": "5.0.5",
+      "purl": "pkg:npm/classcat@5.0.5",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "2616544fb245710cbf1335bad3993f92d1ed9dca28f6f9f25bfd86b29358c0594dd42fd69a3b95ff1b52d387bd48e90bdac4ddc3454067650609c43d951ea9eb"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/cookie@1.1.1",
       "name": "cookie",
       "version": "1.1.1",
@@ -2951,6 +3281,276 @@
         {
           "license": {
             "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-color@3.1.1",
+      "name": "d3-color",
+      "version": "3.1.1",
+      "purl": "pkg:npm/d3-color@3.1.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "95f69bf31d018f450eed236c63c75949b34803a8a96e41375f4346f67aa30aee827c21d9b1eb839ce48963b86274aae3a4ffbe8b5336a93f8594074f29846294"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-dispatch@3.0.2",
+      "name": "d3-dispatch",
+      "version": "3.0.2",
+      "purl": "pkg:npm/d3-dispatch@3.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b00cc7e18e27b0ba3c792ab0e632a266df8b536c1998bfea4be3a4c501a38706b307f0fb4d8df847f40ad5eb217c6afb71910aca6299fc769e9bb9be96ef7c4a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-drag@3.0.1",
+      "name": "d3-drag",
+      "version": "3.0.1",
+      "purl": "pkg:npm/d3-drag@3.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "3967a86b20aaf09ebd854223bcbf8c6fa43a39a8ff7f21d5e57697072114006f8952321f4c60e7937a86a5c5eb0f756643705257de9f71b33a7eaabb0b4b5b3c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-ease@3.0.2",
+      "name": "d3-ease",
+      "version": "3.0.2",
+      "purl": "pkg:npm/d3-ease@3.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "079ce72aa466291380378a07590e745bfaa2b158c0f465e1d9632c54a745569e03c5699caceb307aa81439456cbf9b61f7a930699968914e92955e09de06a4d7"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-interpolate@3.0.2",
+      "name": "d3-interpolate",
+      "version": "3.0.2",
+      "purl": "pkg:npm/d3-interpolate@3.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "211cc653ad83b7186fb2749358c408767a19ea003e0425b00689f510923a4a3a0de7de7bf7d6facff4110735df16113c8aea543e9df4e36c81368d124cfaa7cd"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-selection@3.0.1",
+      "name": "d3-selection",
+      "version": "3.0.1",
+      "purl": "pkg:npm/d3-selection@3.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "38349fdf9bea0ab9427e9ee1ae6d1e663bcea2c4974982e3aaf22584c055f6af553b1ec40491baa5cfae5c1b30119349802189faa9ca61c5aeb5b6432317bf5e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-timer@3.0.2",
+      "name": "d3-timer",
+      "version": "3.0.2",
+      "purl": "pkg:npm/d3-timer@3.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d489756a58aba15484aebbf96ae951071018fbbf839daa0b21619dd42e92b014d60dea1b5a23ff57af6fc1bf2f4fa69b47590ac1a35ed75f7aa66690d5f2bdd0"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-transition@3.0.2",
+      "name": "d3-transition",
+      "version": "3.0.2",
+      "purl": "pkg:npm/d3-transition@3.0.2",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "45c8c2b1d160c85a0307e4172c2e66eb46644cdd24f731fea2fa0b9537499c34b501b7db72ea3088ce2908a49339c94d89b4b87f827871bbf69bb3bbcbc35339"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/d3-zoom@3.0.1",
+      "name": "d3-zoom",
+      "version": "3.0.1",
+      "purl": "pkg:npm/d3-zoom@3.0.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "91f8c3dc10d0bbf14e6ada59e8974c4b22280f04f1229236f724932362796650da1f559bb8919027643da099164c46445bdf23ea275ece8a26483dc29f6cf08b"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
           }
         }
       ],
@@ -4820,6 +5420,66 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/react-dom@19.3.1",
+      "name": "react-dom",
+      "version": "19.3.1",
+      "purl": "pkg:npm/react-dom@19.3.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "6346c0473e77961102d4d302012b34fe3f9f681ff3aaddd1f21a6f8357bcfbad59549e142f451d0b87016d77d931c22e86b7e07882d32def9978109abd03ed29"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/react@19.3.1",
+      "name": "react",
+      "version": "19.3.1",
+      "purl": "pkg:npm/react@19.3.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "40d85676dee7ae05565901b9f10b86b004778efdc76dee266f8bf3ef0d9cb271dabdc89926075ad423cd6a5745e9e571bfdd2e7778d45e92a51cbebd80edfccb"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/real-require@1.0.0",
       "name": "real-require",
       "version": "1.0.0",
@@ -5038,6 +5698,36 @@
         {
           "alg": "SHA-512",
           "content": "6f7ae9a532a6f53f8fb1508110e511e3a19623b7dd3acd3454a675fbd7351160da0ccbe341cead530b85c88a6b806813716a151d22ab53c1f7d591c0d9ed111c"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/scheduler@0.28.0",
+      "name": "scheduler",
+      "version": "0.28.0",
+      "purl": "pkg:npm/scheduler@0.28.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "8eea2b7c2988908c3cb53fa9e415d29ba3c98d017fc9c11898acb3511088b7f45a64884bf8fba56d0f58bb6cf51dd3890dda834e5c40d7ec4a0661d726c73303"
         }
       ],
       "licenses": [
@@ -5510,6 +6200,36 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/use-sync-external-store@1.7.0",
+      "name": "use-sync-external-store",
+      "version": "1.7.0",
+      "purl": "pkg:npm/use-sync-external-store@1.7.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e8bf847a280731085d6883cd20550ac1f5894b058543c8096c9d832ceb39b0321e813c11f5f471be7337b9c8872a3219845cfe280bf67a6856311bc398c718f0"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/vite@8.3.2",
       "name": "vite",
       "version": "8.3.2",
@@ -5608,6 +6328,36 @@
         {
           "alg": "SHA-512",
           "content": "2ca614d620172575200179fd5118e2bbe3168725171ecbdfa7b99cb989bd75250a2b4fc28edad4c050310fcdbf98259bb4bb068c521a774c08b28778ceb4c011"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/zustand@4.5.7",
+      "name": "zustand",
+      "version": "4.5.7",
+      "purl": "pkg:npm/zustand@4.5.7",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "087394cbb9aede56c3ea8e8b24b7e59698e4ce11d7481957f01f7ea8f75d52c21f785e52fd4679ab49260ac9d1a93d541c54197213450c3ccc6d0b2e7ac1d697"
         }
       ],
       "licenses": [
@@ -6277,6 +7027,8 @@
     {
       "ref": "pkg:npm/lattice-dx@1.0.0",
       "dependsOn": [
+        "pkg:npm/%40dagrejs/dagre@3.1.3",
+        "pkg:npm/%40dagrejs/graphlib@4.0.6",
         "pkg:npm/%40dx/agent-worker@1.0.0",
         "pkg:npm/%40dx/api@1.0.0",
         "pkg:npm/%40dx/contracts@1.0.0",
@@ -6343,6 +7095,12 @@
         "pkg:npm/%40rolldown/binding-win32-x64-msvc@1.2.12",
         "pkg:npm/%40rolldown/pluginutils@1.0.1",
         "pkg:npm/%40types/chai@5.2.3",
+        "pkg:npm/%40types/d3-color@3.1.3",
+        "pkg:npm/%40types/d3-drag@3.0.7",
+        "pkg:npm/%40types/d3-interpolate@3.0.4",
+        "pkg:npm/%40types/d3-selection@3.0.12",
+        "pkg:npm/%40types/d3-transition@3.0.9",
+        "pkg:npm/%40types/d3-zoom@3.0.9",
         "pkg:npm/%40types/deep-eql@4.0.2",
         "pkg:npm/%40types/estree@1.0.9",
         "pkg:npm/%40types/node@26.6.4",
@@ -6369,6 +7127,8 @@
         "pkg:npm/%40typescript/typescript-win32-x64@7.0.2",
         "pkg:npm/%40vitest/mocker@5.0.3",
         "pkg:npm/%40vitest/spy@5.0.3",
+        "pkg:npm/%40xyflow/react@12.12.1",
+        "pkg:npm/%40xyflow/system@0.0.84",
         "pkg:npm/abstract-logging@2.0.1",
         "pkg:npm/ajv-formats@3.0.1",
         "pkg:npm/ajv@8.20.0",
@@ -6376,7 +7136,17 @@
         "pkg:npm/atomic-sleep@1.0.0",
         "pkg:npm/avvio@9.3.0",
         "pkg:npm/chai@6.3.0",
+        "pkg:npm/classcat@5.0.5",
         "pkg:npm/cookie@1.1.1",
+        "pkg:npm/d3-color@3.1.1",
+        "pkg:npm/d3-dispatch@3.0.2",
+        "pkg:npm/d3-drag@3.0.1",
+        "pkg:npm/d3-ease@3.0.2",
+        "pkg:npm/d3-interpolate@3.0.2",
+        "pkg:npm/d3-selection@3.0.1",
+        "pkg:npm/d3-timer@3.0.2",
+        "pkg:npm/d3-transition@3.0.2",
+        "pkg:npm/d3-zoom@3.0.1",
         "pkg:npm/dequal@2.0.3",
         "pkg:npm/detect-libc@2.1.2",
         "pkg:npm/es-module-lexer@2.3.2",
@@ -6439,6 +7209,8 @@
         "pkg:npm/process-warning@4.0.1",
         "pkg:npm/process-warning@5.1.0",
         "pkg:npm/quick-format-unescaped@4.0.4",
+        "pkg:npm/react-dom@19.3.1",
+        "pkg:npm/react@19.3.1",
         "pkg:npm/real-require@1.0.0",
         "pkg:npm/require-from-string@2.0.2",
         "pkg:npm/ret@0.5.0",
@@ -6447,6 +7219,7 @@
         "pkg:npm/rolldown@1.2.12",
         "pkg:npm/safe-regex2@5.1.1",
         "pkg:npm/safe-stable-stringify@2.5.0",
+        "pkg:npm/scheduler@0.28.0",
         "pkg:npm/secure-json-parse@4.1.0",
         "pkg:npm/semver@7.8.5",
         "pkg:npm/set-cookie-parser@2.7.2",
@@ -6462,10 +7235,12 @@
         "pkg:npm/tsx@4.23.15",
         "pkg:npm/typescript@7.0.2",
         "pkg:npm/undici-types@8.9.0",
+        "pkg:npm/use-sync-external-store@1.7.0",
         "pkg:npm/vite@8.3.2",
         "pkg:npm/vitest@5.0.3",
         "pkg:npm/why-is-node-running@3.2.1",
         "pkg:npm/xtend@4.0.2",
+        "pkg:npm/zustand@4.5.7",
         "pkg:oci/apisix@sha256%3A9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141?repository_url=apache%2Fapisix&tag=3.19.0-debian",
         "pkg:oci/caddy@sha256%3A4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d?repository_url=caddy&tag=2.10-alpine",
         "pkg:oci/clamav@sha256%3A12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8?repository_url=clamav%2Fclamav&tag=1.5.5",
@@ -6486,6 +7261,14 @@
         "pkg:oci/rustfs@sha256%3Aee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a?repository_url=rustfs%2Frustfs&tag=1.0.6",
         "pkg:oci/valkey@sha256%3A9971099af41c36e887aabdfe22b80c0fe45df949163dfc9cb434febc57cfc3fc?repository_url=valkey%2Fvalkey&tag=8.1-alpine"
       ]
+    },
+    {
+      "ref": "pkg:npm/%40dagrejs/dagre@3.1.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40dagrejs/graphlib@4.0.6",
+      "dependsOn": []
     },
     {
       "ref": "pkg:npm/%40dx/agent-worker@1.0.0",
@@ -6752,6 +7535,30 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/%40types/d3-color@3.1.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/d3-drag@3.0.7",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/d3-interpolate@3.0.4",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/d3-selection@3.0.12",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/d3-transition@3.0.9",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/d3-zoom@3.0.9",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/%40types/deep-eql@4.0.2",
       "dependsOn": []
     },
@@ -6856,6 +7663,14 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/%40xyflow/react@12.12.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40xyflow/system@0.0.84",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/abstract-logging@2.0.1",
       "dependsOn": []
     },
@@ -6884,7 +7699,47 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/classcat@5.0.5",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/cookie@1.1.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-color@3.1.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-dispatch@3.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-drag@3.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-ease@3.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-interpolate@3.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-selection@3.0.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-timer@3.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-transition@3.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/d3-zoom@3.0.1",
       "dependsOn": []
     },
     {
@@ -7136,6 +7991,14 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/react-dom@19.3.1",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/react@19.3.1",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/real-require@1.0.0",
       "dependsOn": []
     },
@@ -7165,6 +8028,10 @@
     },
     {
       "ref": "pkg:npm/safe-stable-stringify@2.5.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/scheduler@0.28.0",
       "dependsOn": []
     },
     {
@@ -7228,6 +8095,10 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/use-sync-external-store@1.7.0",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/vite@8.3.2",
       "dependsOn": []
     },
@@ -7241,6 +8112,10 @@
     },
     {
       "ref": "pkg:npm/xtend@4.0.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/zustand@4.5.7",
       "dependsOn": []
     },
     {

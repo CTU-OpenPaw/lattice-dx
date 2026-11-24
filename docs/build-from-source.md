@@ -26,7 +26,7 @@ cd latticedx-1.0.0
 git clone https://github.com/CTU-OpenPaw/lattice-dx.git
 cd lattice-dx
 ```
-> Submodule `upstream/nocobase` (commit `5b47bec116c52239348c09d360e4bd2649c99efc`) chỉ dùng để khảo sát mã nguồn tham chiếu (`git submodule update --init --recursive`) và **không cần thiết** để build LatticeDX hoặc 7 plugin NocoBase.
+> **Kho mã nguồn 100% thuần chuẩn OSI:** Kho Git chính thức và gói phát hành `latticedx-1.0.0-src.tar.gz` **không chứa submodule `upstream/nocobase` hay tệp `.gitmodules`** (không cần bước `git submodule`); runtime host `nocobase/nocobase:2.2.50` chỉ được nạp độc lập lúc chạy dưới dạng OCI container bên ngoài kho Git.
 
 ## 3. Cấu hình biến môi trường trước khi build
 
@@ -49,7 +49,7 @@ pnpm check
 
 Lệnh `pnpm check` thực thi tuần tự ba bước kiểm chứng từ nguồn:
 1. `pnpm typecheck`: Kiểm tra kiểu TypeScript cho toàn bộ workspace và `solutions/logistics/tsconfig.json`.
-2. `pnpm test`: Chạy bộ kiểm thử Vitest (`tests/**/*.test.ts`, `apps/*/src/**/*.test.ts`, `packages/*/src/**/*.test.ts`, `plugins/nocobase/*/*.test.ts`, loại trừ `upstream/**`).
+2. `pnpm test`: Chạy bộ kiểm thử Vitest (`tests/**/*.test.ts`, `apps/*/src/**/*.test.ts`, `packages/*/src/**/*.test.ts`).
 3. `pnpm build`: Biên dịch mã TypeScript của `@dx/contracts`, `@dx/api`, `@dx/agent-worker` và `@dx/file-scanner`.
 
 ## 5. Build & Kiểm thử bảy Plugin NocoBase của nhóm (`1.0.0`)
@@ -69,7 +69,7 @@ node plugins/nocobase/plugin-dxos-blocks/build.mjs
 node plugins/nocobase/plugin-dxos-studio/build.mjs
 node plugins/nocobase/plugin-dxos-ai/build.mjs
 
-# 3. Chạy kiểm thử đơn vị của 7 plugin + scripts PoF/demo + externals + đánh giá 64 ca tiếng Việt tự nhiên
+# 3. Chạy kiểm thử đơn vị của 7 plugin + scripts PoF/demo + externals + đánh giá 80 ca tiếng Việt tự nhiên
 node --test plugins/nocobase/*/tests/*.test.cjs scripts/tests/*.test.mjs tests/nocobase-externals.test.mjs
 node scripts/eval-vietnamese-nl-agent.mjs --min-pass=95
 ```
@@ -85,9 +85,9 @@ node scripts/generate-sbom.mjs --check
 pnpm release:tarball
 ```
 
-- `pnpm pof:check` chạy được cả trên bản checkout Git lẫn trong thư mục giải nén từ gói `.tar.gz` (không cần `.git/`), để tự động kiểm tra SPDX headers, tài liệu quản trị (`COPYRIGHT.txt`, `NOTICE`, `LICENSE`, `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`), cô lập 7 plugin NocoBase (kèm `LICENSE` + `README.md` riêng + `Clause 5.2`), digest `@sha256:` trong Compose, trạng thái `upstream/` và không lộ secret.
-- `pnpm release:sbom` / `node scripts/generate-sbom.mjs --check` tạo và đối chiếu hồ sơ CycloneDX 1.5 [`docs/sbom-cyclonedx.json`](sbom-cyclonedx.json) (`209` thành phần: `workspace=12, npm=177, oci=20`), đồng thời chặn cứng giấy phép `BSL-1.1` và các công nghệ bị loại trừ (`thingsboard`, `emqx`).
-- `pnpm release:tarball` tạo gói phát hành `output/release/latticedx-1.0.0-src.tar.gz` kèm `latticedx-1.0.0-src.tar.gz.sha256` từ `HEAD` đã commit trên checkout Git (không bao gồm `node_modules/`, `output/`, `.env`, `.git/` hay source `upstream/nocobase/`).
+- `pnpm pof:check` chạy được cả trên bản checkout Git lẫn trong thư mục giải nén từ gói `.tar.gz` (không cần `.git/`), để tự động kiểm tra SPDX headers, tài liệu quản trị (`COPYRIGHT.txt`, `NOTICE`, `LICENSE`, `README.md`, `CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`), cô lập 7 plugin NocoBase (kèm `LICENSE` + `README.md` riêng + `Clause 5.2`), digest `@sha256:` trong Compose, xác minh `upstream-clean` (không có `.gitmodules` hay `upstream/`) và không lộ secret.
+- `pnpm release:sbom` / `node scripts/generate-sbom.mjs --check` tạo và đối chiếu hồ sơ CycloneDX 1.5 [`docs/sbom-cyclonedx.json`](sbom-cyclonedx.json) (`233` thành phần: `workspace=12, npm=202, oci=19`, trong đó `232/233` có giấy phép đã phân giải — duy nhất `fsevents@2.3.3` là tùy chọn macOS không cài trên Windows), đồng thời chặn cứng giấy phép `BSL-1.1` và các công nghệ bị loại trừ (`thingsboard`, `emqx`).
+- `pnpm release:tarball` tạo gói phát hành `output/release/latticedx-1.0.0-src.tar.gz` kèm `latticedx-1.0.0-src.tar.gz.sha256` từ `HEAD` đã commit trên checkout Git (không bao gồm `node_modules/`, `output/`, `.env`, `.git/`, `.gitmodules` hay bất kỳ mã nguồn upstream NocoBase nào).
 
 ## 7. Nghiệm thu Runtime Sạch & Phân tách Mã nguồn vs Dịch vụ OCI
 
@@ -108,4 +108,4 @@ pnpm acceptance:logistics-rbac -- "<path-to-report.json>"
 | --- | --- | --- |
 | **Mã nguồn LatticeDX** (`apps/`, `packages/`, `plugins/nocobase/`, `solutions/`, `scripts/`) | Biên dịch trực tiếp từ mã nguồn bằng Node 24 + pnpm 10.23.0 | Mục 4–5 ở trên |
 | **Khởi tạo môi trường Native sạch từ source commit** | Xuất `HEAD`, dựng DB trắng 0 bảng, cài và nghiệm thu 7 plugin `1.0.0` | [native-clean-install.md](native-clean-install.md) · [DEMO_PACK.md](DEMO_PACK.md) |
-| **Dịch vụ hạ tầng OCI bên ngoài (`20` images khóa `@sha256:`)** (`PostgreSQL 16.16`, `pgvector 0.8.1`, `Redis 7.4`, `RustFS 1.0.6`, `Caddy 2.10`, `Keycloak 26.8.2`, `keycloak-config-cli 6.5.1-26`, `APISIX 3.19.0`, `ClamAV 1.5.5`, `NocoBase 2.2.50`, `Orion-LD 1.12.0`, `MongoDB 8.0`, `n8n 2.48.1`, `Mosquitto 2.0.21`, `Node-RED 4.0.9`, `TimescaleDB OSS 2.19.3`, `OTel Collector 0.123.0`, `Prometheus v3.3.0`, `Grafana OSS 11.5.8`, `Gotenberg 8.20.1`) | Kéo container image khóa digest `@sha256:` qua `infra/compose/*.yml`; tương tác qua SQL/HTTP/MQTT/TCP | [third-party.md](third-party.md), [`COPYRIGHT.txt`](../COPYRIGHT.txt), [`NOTICE`](../NOTICE), [`sbom-cyclonedx.json`](sbom-cyclonedx.json) |
+| **Dịch vụ hạ tầng OCI bên ngoài (`19` images khóa `@sha256:`)** (`PostgreSQL 16.16`, `pgvector 0.8.1`, `Valkey 8.1`, `RustFS 1.0.6`, `Caddy 2.10`, `Keycloak 26.8.2`, `keycloak-config-cli 6.5.1-26`, `APISIX 3.19.0`, `ClamAV 1.5.5`, `NocoBase 2.2.50`, `Orion-LD 1.12.0`, `MongoDB 8.0`, `n8n 2.48.1` tùy chọn, `Mosquitto 2.0.21`, `Node-RED 4.0.9`, `OTel Collector 0.123.0`, `Prometheus v3.3.0`, `Grafana OSS 11.5.8`, `Gotenberg 8.20.1`) | Kéo container image khóa digest `@sha256:` qua `infra/compose/*.yml`; tương tác qua SQL/HTTP/MQTT/TCP | [third-party.md](third-party.md), [`COPYRIGHT.txt`](../COPYRIGHT.txt), [`NOTICE`](../NOTICE), [`sbom-cyclonedx.json`](sbom-cyclonedx.json) |
