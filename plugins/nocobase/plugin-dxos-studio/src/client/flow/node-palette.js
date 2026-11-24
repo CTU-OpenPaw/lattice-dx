@@ -35,18 +35,24 @@ function createNodePalette(React) {
   const h = React.createElement;
 
   return function NodePalette(props = {}) {
-    const { nodeTypes, onAddNode, insertEdge = null, onInsertNode, onCancelInsert, open, onToggleOpen } = props;
+    const { nodeTypes, onAddNode, insertEdge = null, onInsertNode, onCancelInsert, appendSource = null, onAppendNode, onCancelAppend, open, onToggleOpen } = props;
     const [internalOpen, setInternalOpen] = React.useState(false);
     const [search, setSearch] = React.useState('');
     const [collapsed, setCollapsed] = React.useState({});
+    const [searchEl, setSearchEl] = React.useState(null);
 
     const isControlled = typeof open === 'boolean';
     const isOpen = isControlled ? open : internalOpen;
-    const showPanel = isOpen || Boolean(insertEdge);
+    const targetingEdgeOrNode = Boolean(insertEdge || appendSource);
+    const showPanel = isOpen || targetingEdgeOrNode;
     const setOpen = (next) => {
       if (!isControlled) setInternalOpen(next);
       onToggleOpen?.(next);
     };
+
+    React.useEffect(() => {
+      if (showPanel && searchEl && typeof searchEl.focus === 'function') searchEl.focus();
+    }, [showPanel, searchEl]);
 
     const safeNodes = Array.isArray(nodeTypes) ? nodeTypes : [];
     const normalizedQuery = String(search || '').trim().toLowerCase();
@@ -55,7 +61,7 @@ function createNodePalette(React) {
       const buckets = new Map(PALETTE_GROUPS.map((g) => [g.key, []]));
       for (const schema of safeNodes) {
         if (!schema || !schema.type) continue;
-        if (insertEdge && String(schema.type).startsWith('trigger.')) continue;
+        if (targetingEdgeOrNode && String(schema.type).startsWith('trigger.')) continue;
         const gKey = resolveGroupKey(schema.category, schema.type);
         const target = buckets.get(gKey) || buckets.get('integration');
         if (!normalizedQuery) {
@@ -66,13 +72,13 @@ function createNodePalette(React) {
         if (hay.includes(normalizedQuery)) target.push(schema);
       }
       return PALETTE_GROUPS
-        .filter((g) => !(insertEdge && g.key === 'trigger'))
+        .filter((g) => !(targetingEdgeOrNode && g.key === 'trigger'))
         .map((g) => ({ ...g, items: buckets.get(g.key) || [] }));
-    }, [safeNodes, normalizedQuery, Boolean(insertEdge)]);
+    }, [safeNodes, normalizedQuery, targetingEdgeOrNode]);
 
     const quickNodes = React.useMemo(
-      () => (insertEdge ? QUICK_INSERT_TYPES.map((t) => safeNodes.find((s) => s?.type === t)).filter(Boolean) : []),
-      [safeNodes, Boolean(insertEdge)],
+      () => (targetingEdgeOrNode ? QUICK_INSERT_TYPES.map((t) => safeNodes.find((s) => s?.type === t)).filter(Boolean) : []),
+      [safeNodes, targetingEdgeOrNode],
     );
     const totalVisible = grouped.reduce((sum, g) => sum + g.items.length, 0);
 
@@ -90,6 +96,7 @@ function createNodePalette(React) {
 
     function handlePickNode(schema) {
       if (insertEdge && typeof onInsertNode === 'function') onInsertNode(schema);
+      else if (appendSource && typeof onAppendNode === 'function') onAppendNode(schema);
       else if (typeof onAddNode === 'function') onAddNode(schema);
     }
 
@@ -120,28 +127,28 @@ function createNodePalette(React) {
     },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 } },
         h('strong', { style: { fontSize: 13, color: '#0F172A' } },
-          insertEdge ? `Chèn giữa nhánh ${insertEdge.source} → ${insertEdge.target}` : 'Thư viện Node'),
+          insertEdge ? `Chèn giữa nhánh ${insertEdge.source} → ${insertEdge.target}` : appendSource ? `Nối tiếp sau: ${appendSource.label || appendSource.nodeId}` : 'Thư viện Node'),
         h('div', { style: { display: 'inline-flex', alignItems: 'center', gap: 6 } },
           h('span', { style: { fontSize: 11, fontWeight: 600, padding: '2px 7px', borderRadius: 999, background: '#F1F5F9', color: '#475569' } }, `${safeNodes.length}`),
           h('button', {
             type: 'button',
             'data-testid': 'dxos-flow-palette-close-btn',
             title: 'Đóng thư viện Node',
-            onClick: () => { setOpen(false); onCancelInsert?.(); },
+            onClick: () => { setOpen(false); onCancelInsert?.(); onCancelAppend?.(); },
             style: { width: 24, height: 24, borderRadius: 6, border: '1px solid #E2E8F0', background: '#F8FAFC', color: '#475569', fontSize: 14, fontWeight: 700, cursor: 'pointer', lineHeight: '20px', padding: 0 },
           }, '×'),
         ),
       ),
-      insertEdge ? h('div', {
-        'data-testid': 'dxos-flow-insert-picker',
+      targetingEdgeOrNode ? h('div', {
+        'data-testid': insertEdge ? 'dxos-flow-insert-picker' : 'dxos-flow-append-picker',
         style: { padding: 8, borderRadius: 8, border: '1px solid #BFDBFE', background: '#EFF6FF', display: 'grid', gap: 6, fontSize: 11 },
       },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 } },
-          h('span', { style: { fontWeight: 700, color: '#1E40AF' } }, `${insertEdge.source} → ${insertEdge.target}`),
+          h('span', { style: { fontWeight: 700, color: '#1E40AF' } }, insertEdge ? `${insertEdge.source} → ${insertEdge.target}` : `${appendSource.label || appendSource.nodeId} [${appendSource.sourceHandle || 'main'}] →`),
           h('button', {
-            'data-testid': 'dxos-flow-insert-cancel-btn',
+            'data-testid': insertEdge ? 'dxos-flow-insert-cancel-btn' : 'dxos-flow-append-cancel-btn',
             type: 'button',
-            onClick: () => onCancelInsert?.(),
+            onClick: () => { onCancelInsert?.(); onCancelAppend?.(); },
             style: { padding: '2px 7px', borderRadius: 6, border: '1px solid #FCA5A5', background: '#FFFFFF', color: '#B91C1C', fontSize: 11, fontWeight: 600, cursor: 'pointer' },
           }, 'Hủy'),
         ),
@@ -149,13 +156,14 @@ function createNodePalette(React) {
           quickNodes.map((t) => h('button', {
             key: t.type,
             type: 'button',
-            'data-testid': `dxos-flow-insert-node-${t.type}`,
+            'data-testid': insertEdge ? `dxos-flow-insert-node-${t.type}` : `dxos-flow-append-node-${t.type}`,
             onClick: () => handlePickNode(t),
             style: { padding: '3px 7px', borderRadius: 6, border: '1px solid #93C5FD', background: '#FFFFFF', color: '#1D4ED8', fontSize: 11, fontWeight: 600, cursor: 'pointer' },
           }, `+ ${t.label || t.type}`)),
         ) : null,
       ) : null,
       h('input', {
+        ref: setSearchEl,
         'data-testid': 'dxos-flow-palette-search',
         type: 'search',
         value: search,

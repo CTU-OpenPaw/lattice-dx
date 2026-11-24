@@ -89,6 +89,7 @@ function createNodeInspector(React) {
       rule = null, graph = null, selectedNode = null, nodeSchema = null, catalog = {},
       onUpdateNode, onDeleteNode, onCloseInspector, onTestNode,
       testOutput = null, testBusy = false, activeTrace = null, externalTab = null, externalTabSeq = 0,
+      nodeValidationIssues = [],
     } = props;
     const node = React.useMemo(() => (!selectedNode ? null : typeof selectedNode === 'string' ? (graph?.nodes || []).find((n) => n.id === selectedNode) || null : selectedNode), [selectedNode, graph]);
     const schema = React.useMemo(() => nodeSchema || (node?.type ? (catalog?.nodeTypes || []).find((t) => t.type === node.type) || null : null), [nodeSchema, node, catalog]);
@@ -138,13 +139,18 @@ function createNodeInspector(React) {
     const activeField = (activeFieldState.scopeKey === scopeKey && (activeFieldState.name === '__raw__' || fields.some((f) => f.name === activeFieldState.name))) ? activeFieldState.name : defaultField;
     const setActiveField = (name) => setActiveFieldState({ scopeKey, name });
     const bufActive = Boolean(scopeKey && jsonBuf.scopeKey === scopeKey && jsonBuf.configSig === configSig);
-    const currentJsonFieldText = (name, fallbackVal) => (bufActive && jsonBuf.entries[name] ? jsonBuf.entries[name].text : formatJson(nodeCfg[name] !== undefined ? nodeCfg[name] : fallbackVal, {}));
+    const currentJsonFieldText = (name, fallbackVal) => {
+      if (bufActive && jsonBuf.entries[name]) return jsonBuf.entries[name].text;
+      const rawVal = nodeCfg[name] !== undefined ? nodeCfg[name] : fallbackVal;
+      return (rawVal === null || rawVal === undefined) ? '' : formatJson(rawVal, {});
+    };
     const currentRawText = () => (bufActive && jsonBuf.raw ? jsonBuf.raw.text : configSig);
     const updateConfigField = (name, nextVal) => node && onUpdateNode?.(node.id, { config: { ...nodeCfg, [name]: nextVal } });
 
     function updateJsonFieldText(name, text) {
       if (!nodeId) return;
-      const parsed = safeParseJson(text);
+      const trimmed = String(text || '').trim();
+      const parsed = trimmed === '' ? { ok: true, value: null } : safeParseJson(text);
       const nextSig = parsed.ok ? formatJson({ ...nodeCfg, [name]: parsed.value }, {}) : configSig;
       setJsonBuf((prev) => {
         const same = prev.scopeKey === scopeKey && prev.configSig === configSig;
@@ -200,7 +206,7 @@ function createNodeInspector(React) {
         const onRolePick = (r) => r && updateConfigField('roleNames', Array.isArray(val) && val.includes(r) ? val : [...(Array.isArray(val) ? val : []), r]);
         return h('div', { style: S.grid(4) },
           f.name === 'roleNames' && safeRoles.length ? h('select', { 'data-testid': 'dxos-flow-field-roleNames-picker', value: '', style: S.input, onChange: (e) => onRolePick(e?.target?.value) }, h('option', { value: '' }, '+ Add role from catalog...'), safeRoles.map((r) => h('option', { key: r, value: r }, r))) : null,
-          h('textarea', { ...base, rows: 3, value: currentJsonFieldText(f.name, schema?.defaultConfig?.[f.name]), style: S.textarea, onChange: (e) => updateJsonFieldText(f.name, e?.target?.value ?? '') }),
+          h('textarea', { ...base, rows: 3, placeholder: '{} (tùy chọn)', value: currentJsonFieldText(f.name, schema?.defaultConfig?.[f.name]), style: S.textarea, onChange: (e) => updateJsonFieldText(f.name, e?.target?.value ?? '') }),
           err ? h('span', { style: S.err(10) }, err) : null);
       }
       return h('div', { style: S.grid(4) },
@@ -224,6 +230,9 @@ function createNodeInspector(React) {
         [['config', 'Config'], ['input', 'Input / Pin'], ['output', 'Output']].map(([key, lbl]) => h('button', { key, role: 'tab', type: 'button', 'aria-selected': tab === key, 'data-testid': `dxos-flow-inspector-tab-${key}`, onClick: () => setTab(key), style: S.tab(tab === key) }, lbl)),
       ),
       tab === 'config' ? h('div', { style: S.grid(8) },
+        Array.isArray(nodeValidationIssues) && nodeValidationIssues.length
+          ? h('div', { 'data-testid': 'dxos-flow-inspector-validation', style: { padding: '7px 9px', borderRadius: 8, background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', fontSize: 11, display: 'grid', gap: 2 } }, nodeValidationIssues.map((it, idx) => h('span', { key: idx }, `⚠ ${it.message}`)))
+          : null,
         h('div', { style: S.rowBetween },
           h('span', { style: { fontSize: 11, fontWeight: 600, color: '#475569' } }, `Parameters (${fields.length})`),
           h('button', { 'data-testid': 'dxos-flow-var-picker-btn', type: 'button', onClick: () => setVarPickerOpen((p) => !p), style: S.btn(varPickerOpen, false, false) }, '{ } Variables'),

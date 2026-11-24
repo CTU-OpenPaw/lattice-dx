@@ -47,7 +47,7 @@ function createPlaybackBar(React) {
   return function PlaybackBar(props = {}) {
     const {
       runs, selectedRun, onSelectRun, playbackIndex, onStepChange,
-      playing, onTogglePlay, onResumeApproval, resumeBusy, autoExpandSeq = 0,
+      playing, onTogglePlay, onResumeApproval, resumeBusy, autoExpandSeq = 0, onFocusNode,
     } = props;
 
     const [expanded, setExpanded] = React.useState(() => Boolean(autoExpandSeq > 0));
@@ -206,7 +206,7 @@ function createPlaybackBar(React) {
                 key: `${t.nodeId || t.type || 'step'}-${idx}`,
                 type: 'button',
                 'data-testid': `dxos-flow-step-chip-${idx}`,
-                onClick: () => onStepChange?.(idx),
+                onClick: () => { onStepChange?.(idx); if (t.nodeId) onFocusNode?.(t.nodeId); },
                 style: {
                   padding: '2px 8px', borderRadius: 999, fontSize: 11, fontWeight: active ? 700 : 500, cursor: 'pointer',
                   border: `1px solid ${active ? '#2563EB' : '#cbd5e1'}`, background: active ? '#dbeafe' : '#f8fafc', color: active ? '#1d4ed8' : '#475569',

@@ -104,17 +104,36 @@ function createFlowCanvas(React, vendor = {}) {
       graph, nodeTypes, selectedNodeId, onSelectNode, onConnectNodes, onNodesChangeGraph, onInsertBetweenEdge,
       runOverlay, onAutoLayout, onDropNode, onAddNode, onQuickTestNode, onDuplicateNode, onDeleteNode,
       canUndo = false, canRedo = false, onUndo, onRedo, xyflowOverride,
+      validationByNodeId = {}, onAppendFromNode, focusNodeId = null, focusSeq = 0,
     } = props;
 
     const [rfInstance, setRfInstance] = React.useState(null);
     const [showMiniMap, setShowMiniMap] = React.useState(false);
+    const [containerEl, setContainerEl] = React.useState(null);
     const [handlersRef] = React.useState(() => ({}));
-    Object.assign(handlersRef, { onSelectNode, onInsertBetweenEdge, onQuickTestNode, onDuplicateNode, onDeleteNode });
+    Object.assign(handlersRef, { onSelectNode, onInsertBetweenEdge, onQuickTestNode, onDuplicateNode, onDeleteNode, onAppendFromNode });
 
     React.useEffect(() => {
       if (typeof vendor?.injectFlowStudioCss === 'function') vendor.injectFlowStudioCss();
       else if (typeof vendor?.injectFlowCss === 'function') vendor.injectFlowCss();
     }, []);
+
+    React.useEffect(() => {
+      if (!rfInstance || !containerEl || typeof ResizeObserver !== 'function') return undefined;
+      let timer = null;
+      const ro = new ResizeObserver(() => {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { rfInstance.fitView?.({ padding: 0.2, maxZoom: 1, duration: 180 }); }, 160);
+      });
+      ro.observe(containerEl);
+      return () => { if (timer) clearTimeout(timer); ro.disconnect(); };
+    }, [rfInstance, containerEl]);
+
+    React.useEffect(() => {
+      if (rfInstance && focusSeq && focusNodeId && typeof rfInstance.fitView === 'function') {
+        rfInstance.fitView({ nodes: [{ id: focusNodeId }], padding: 0.45, maxZoom: 1.05, duration: 220 });
+      }
+    }, [rfInstance, focusSeq, focusNodeId]);
 
     const resetDrag = () => { handlersRef.dragPending = false; handlersRef.dragStartGraph = null; handlersRef.expectedDragGraph = null; };
     const applyPos = (nodes, posMap) => (posMap.size ? nodes.map((n) => (posMap.has(n.id) ? { ...n, position: { x: Number(posMap.get(n.id).x), y: Number(posMap.get(n.id).y) } } : n)) : nodes);
@@ -149,11 +168,12 @@ function createFlowCanvas(React, vendor = {}) {
           node: n, label: n.label || schema?.label || n.type || n.id, nodeType: n.type, category,
           color: schema?.color || catMeta.color, preview: summarizeNodeConfig(n),
           trace: nodeStates[n.id] || null, selected: isSelected, isPlaybackCurrent: activeNodeId === n.id,
+          issues: Array.isArray(validationByNodeId?.[n.id]) ? validationByNodeId[n.id] : null,
           inputs: Array.isArray(schema?.inputs) ? schema.inputs : ports.inputs,
           outputs: Array.isArray(schema?.outputs) && schema.outputs.length ? schema.outputs : ports.outputs,
         },
       };
-    }), [safeNodes, schemaByType, nodeStates, selectedNodeId, activeNodeId]);
+    }), [safeNodes, schemaByType, nodeStates, selectedNodeId, activeNodeId, validationByNodeId]);
 
     const rfEdges = React.useMemo(() => safeEdges.map((e, idx) => {
       const strokeColor = getEdgeColor(e.sourceHandle);
@@ -170,7 +190,9 @@ function createFlowCanvas(React, vendor = {}) {
         const catMeta = CATEGORY_META[d.category] || CATEGORY_META.integration;
         const isSel = Boolean(d.selected || nodeProps?.selected);
         const stripe = d.color || catMeta.color;
-        const borderCol = (d.isPlaybackCurrent || isSel) ? '#2563EB' : (tStyle?.border || '#E2E8F0');
+        const issues = Array.isArray(d.issues) ? d.issues : [];
+        const hasErr = issues.some((x) => x?.severity === 'error');
+        const borderCol = (d.isPlaybackCurrent || isSel) ? '#2563EB' : (hasErr ? '#DC2626' : (tStyle?.border || '#E2E8F0'));
         const outputs = Array.isArray(d.outputs) && d.outputs.length ? d.outputs : ['main'];
         const inputs = Array.isArray(d.inputs) ? d.inputs : [];
         const miniBtn = (col) => ({ padding: '3px 7px', borderRadius: 6, border: 'none', background: 'transparent', color: col, fontSize: 11, fontWeight: 600, cursor: 'pointer' });
@@ -179,6 +201,8 @@ function createFlowCanvas(React, vendor = {}) {
           onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onSelectNode?.(nodeId); },
           style: { minWidth: 224, maxWidth: 268, padding: '10px 12px', borderRadius: 12, background: tStyle?.bg || '#FFFFFF', border: `1.5px ${traceStatus === 'skipped' && !isSel ? 'dashed' : 'solid'} ${borderCol}`, borderLeft: `4px solid ${stripe}`, boxShadow: (isSel || d.isPlaybackCurrent) ? '0 0 0 3px rgba(37,99,235,0.16), 0 8px 20px rgba(15,23,42,0.08)' : '0 2px 6px rgba(15,23,42,0.05)', cursor: 'pointer', position: 'relative', display: 'grid', gap: 6, fontSize: 12 },
         },
+          issues.length ? h('span', { 'data-testid': `dxos-node-val-badge-${nodeId}`, title: issues.map((x) => x.message).join(' · '), style: { position: 'absolute', top: -8, right: -8, zIndex: 20, minWidth: 18, height: 18, padding: '0 5px', borderRadius: 999, background: hasErr ? '#DC2626' : '#D97706', color: '#FFFFFF', fontSize: 10, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 6px rgba(15,23,42,0.18)' } }, hasErr ? `!${issues.length}` : `${issues.length}`) : null,
+          h('button', { type: 'button', className: 'nodrag nopan', 'data-testid': `dxos-node-append-${nodeId}`, title: 'Thêm node nối tiếp', onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onAppendFromNode?.(nodeId, outputs[0] || 'main'); }, style: { position: 'absolute', right: -11, top: '50%', transform: 'translateY(-50%)', zIndex: 22, width: 20, height: 20, borderRadius: 999, border: '1px solid #2563EB', background: '#FFFFFF', color: '#2563EB', fontSize: 13, fontWeight: 700, lineHeight: '16px', padding: 0, cursor: 'pointer', boxShadow: '0 2px 6px rgba(37,99,235,0.22)' } }, '+'),
           isSel ? h('div', { className: 'nodrag nopan', 'data-testid': `dxos-flow-node-mini-toolbar-${nodeId}`, style: { position: 'absolute', top: -36, left: '50%', transform: 'translateX(-50%)', zIndex: 25, display: 'inline-flex', alignItems: 'center', gap: 2, padding: '3px 6px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#FFFFFF', boxShadow: '0 6px 16px rgba(15,23,42,0.12)', whiteSpace: 'nowrap' } },
             h('button', { type: 'button', 'data-testid': `dxos-flow-node-quick-test-${nodeId}`, onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onQuickTestNode?.(nodeId); }, style: miniBtn('#2563EB') }, '▶ Test'),
             h('button', { type: 'button', 'data-testid': `dxos-flow-node-quick-dup-${nodeId}`, onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onDuplicateNode?.(nodeId); }, style: miniBtn('#334155') }, '⎘ Nhân bản'),
@@ -254,10 +278,11 @@ function createFlowCanvas(React, vendor = {}) {
 
     const sep = h('span', { style: { width: 1, height: 18, background: '#E2E8F0', margin: '0 2px' } });
     return h('div', {
+      ref: setContainerEl,
       'data-testid': 'dxos-flow-canvas',
       onDragOver: (evt) => { evt?.preventDefault?.(); if (evt?.dataTransfer) evt.dataTransfer.dropEffect = 'copy'; },
       onDrop: handleDrop,
-      style: { flex: 1, height: '100%', minHeight: 540, position: 'relative', background: '#F8FAFC', overflow: 'hidden' },
+      style: { flex: 1, height: '100%', minHeight: 420, position: 'relative', background: '#F8FAFC', overflow: 'hidden' },
     },
       ReactFlowComp
         ? h(ReactFlowComp, {

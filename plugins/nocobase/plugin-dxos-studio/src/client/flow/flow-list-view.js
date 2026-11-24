@@ -33,6 +33,7 @@ function createFlowListView(React) {
       rules = [], runs = [], blueprints = [], loading = false, runBusy = false,
       effectiveOrg = '', orgList = [], onOrgChange, bpOpen = false, onToggleBlueprints,
       onLoadBlueprint, onOpenRule, onRunNow, onNewFlow, onOpenAiArchitect, onOpenRoute,
+      onToggleRuleActive, onDuplicateRule,
     } = props;
     const [search, setSearch] = React.useState('');
     const [filter, setFilter] = React.useState('all');
@@ -40,6 +41,12 @@ function createFlowListView(React) {
     const safeRules = Array.isArray(rules) ? rules : [];
     const safeRuns = Array.isArray(runs) ? runs : [];
     const safeBlueprints = Array.isArray(blueprints) ? blueprints : [];
+    const activeCount = React.useMemo(() => safeRules.filter((r) => r && r.active !== false).length, [safeRules]);
+    const successRate = React.useMemo(() => {
+      if (!safeRuns.length) return '100%';
+      const ok = safeRuns.filter((r) => ['completed', 'simulated'].includes(String(r?.status || '').toLowerCase())).length;
+      return `${Math.round((ok / safeRuns.length) * 100)}%`;
+    }, [safeRuns]);
     const suspendedRuns = React.useMemo(() => safeRuns.filter((run) => String(run?.status || '').toLowerCase() === 'suspended'), [safeRuns]);
     const suspendedRuleKeys = React.useMemo(() => new Set(suspendedRuns.map((run) => run.ruleKey).filter(Boolean)), [suspendedRuns]);
     const latestRunByRule = React.useMemo(() => {
@@ -72,6 +79,24 @@ function createFlowListView(React) {
           h('button', { 'data-testid': 'dxos-flow-blueprints-btn', type: 'button', onClick: () => onToggleBlueprints?.(), style: S.btn(bpOpen ? 'active' : 'ghost') }, `Mẫu sẵn có (${safeBlueprints.length})`),
           h('button', { 'data-testid': 'dxos-flow-new-btn', type: 'button', onClick: () => onNewFlow?.(), style: S.btn('primary') }, '+ Tạo luồng mới'),
         ),
+      ),
+
+      h('div', { 'data-testid': 'dxos-flow-kpi-strip', style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(155px, 1fr))', gap: 10 } },
+        [
+          ['Tổng quy trình', String(safeRules.length), '#0F172A', () => setFilter('all')],
+          ['Đang bật', String(activeCount), '#047857', () => setFilter('active')],
+          ['Chờ duyệt HITL', String(suspendedRuns.length), suspendedRuns.length ? '#B45309' : '#475569', () => setFilter('hitl')],
+          ['Tỷ lệ chạy thành công', successRate, '#1D4ED8', null],
+        ].map(([lbl, val, col, onClick], i) => h('div', {
+          key: i,
+          role: onClick ? 'button' : undefined,
+          tabIndex: onClick ? 0 : undefined,
+          onClick: onClick || undefined,
+          style: { padding: '10px 14px', borderRadius: 10, background: '#FFFFFF', border: '1px solid #E2E8F0', cursor: onClick ? 'pointer' : 'default', display: 'grid', gap: 2 },
+        },
+          h('span', { style: { fontSize: 11, color: '#64748B', fontWeight: 600 } }, lbl),
+          h('strong', { style: { fontSize: 18, color: col, letterSpacing: '-0.02em' } }, val),
+        )),
       ),
 
       h('div', { style: S.bar },
@@ -150,8 +175,10 @@ function createFlowListView(React) {
                   ),
                 ),
                 h('div', { style: S.row },
-                  h('button', { 'data-testid': `dxos-flow-edit-${r.ruleKey}`, type: 'button', onClick: () => onOpenRule?.(r.ruleKey), style: S.btn('primary') }, 'Mở Canvas'),
+                  h('button', { 'data-testid': `dxos-flow-toggle-active-${r.ruleKey}`, type: 'button', onClick: () => onToggleRuleActive?.(r), style: S.btn(isActive ? 'active' : 'ghost') }, isActive ? 'Tạm dừng' : 'Kích hoạt'),
+                  h('button', { 'data-testid': `dxos-flow-dup-rule-${r.ruleKey}`, type: 'button', onClick: () => onDuplicateRule?.(r), style: S.btn('ghost') }, 'Nhân bản'),
                   h('button', { 'data-testid': `dxos-flow-list-run-${r.ruleKey}`, type: 'button', disabled: Boolean(runBusy), onClick: () => onRunNow?.(r), style: S.btn('ghost', Boolean(runBusy)) }, '▶ Chạy'),
+                  h('button', { 'data-testid': `dxos-flow-edit-${r.ruleKey}`, type: 'button', onClick: () => onOpenRule?.(r.ruleKey), style: S.btn('primary') }, 'Mở Canvas'),
                 ),
               );
             }),

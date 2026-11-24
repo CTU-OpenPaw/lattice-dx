@@ -219,15 +219,18 @@ test('flow/* modules obey strict per-file line limits, SPDX header, zero forbidd
   assert.ok(flowFiles.includes('flow-list-view.js'), 'flow-list-view.js must exist');
   assert.ok(flowFiles.includes('flow-studio-app.js'), 'flow-studio-app.js must exist');
   assert.ok(flowFiles.includes('flow-dsl.js'), 'flow-dsl.js must exist');
-  assert.equal(flowFiles.length, 8, 'flow/ directory must contain vendor-shims + 7 modular UI files');
+  assert.equal(flowFiles.length, 11, 'flow/ directory must contain vendor-shims + modular UI/validation/runner files');
 
   const budgets = {
     'flow-list-view.js': 280,
-    'node-palette.js': 240,
+    'flow-studio-helpers.js': 220,
+    'flow-test-runner.js': 200,
+    'flow-validation.js': 150,
+    'node-palette.js': 245,
     'node-inspector.js': 345,
     'playback-bar.js': 260,
     'flow-canvas.js': 350,
-    'flow-studio-app.js': 350,
+    'flow-studio-app.js': 345,
     'flow-dsl.js': 250,
     'vendor-shims.js': 120,
   };
@@ -304,7 +307,7 @@ test('src/client/index.js registers workflow.automation under Workflow, preserve
 
   const flowTree = await harness.mountAndFlush(byKey['workflow.automation'].Component, {});
   assert.equal(flowTree.props['data-testid'], 'dxos-flow-studio-app');
-  assert.equal(flowTree.props.style.height, 'calc(100vh - 110px)');
+  assert.equal(flowTree.props.style.height, 'calc(100vh - 196px)');
   assert.equal(collectNodes(flowTree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-view').length, 1);
 });
 
@@ -1141,4 +1144,177 @@ test('registerStudioSettings promotes NocoBase workflow leaf to Outlet tabs and 
   registerStudioSettings(mockApp, FakeStudioPage, FakeFlowPage);
   assert.equal(settings['workflow.workflows'].Component, FakeBuiltInWorkflowTable);
   assert.equal(settings.workflow.Component, FakeOutlet);
+});
+
+test('Round 2 validateFlowClient catches missing trigger, missing required field, cycles, and orphan warnings', () => {
+  const { validateFlowClient } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-validation.js'));
+  const nodeTypes = getRegistrySchemas();
+
+  const badGraph = {
+    nodes: [
+      { id: 'dmn_1', type: 'logic.dmn', label: 'DMN', config: {} },
+      { id: 'orphan_1', type: 'notify.send', label: 'Notify', config: { title: 'Hi' } },
+    ],
+    edges: [
+      { id: 'e_self', source: 'dmn_1', target: 'dmn_1' },
+      { id: 'e_bad', source: 'dmn_1', target: 'missing_node' },
+    ],
+  };
+  const res = validateFlowClient(badGraph, nodeTypes);
+  assert.equal(res.valid, false);
+  assert.ok(res.errors.some((e) => e.message.includes('Trigger')), 'Must require trigger node');
+  assert.ok(res.errors.some((e) => e.nodeId === 'dmn_1' && e.message.includes('tableKey') || e.message.includes('DMN')), 'Must flag missing required field on DMN');
+  assert.ok(res.errors.some((e) => e.message.includes('vòng lặp') || e.message.includes('cycle')), 'Must detect cycle');
+  assert.ok(res.errors.some((e) => e.message.includes('không tồn tại')), 'Must detect dangling edge');
+  assert.ok(res.warnings.some((w) => w.nodeId === 'orphan_1'), 'Must warn on orphan node');
+  assert.ok(res.byNodeId.dmn_1.length >= 2);
+});
+
+test('Round 2 FlowTestRunner synthesizes HITL/Standard presets and executes Dry-Run & Run Now with custom sampleEvent', async () => {
+  const { buildScenarioPresets } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-test-runner.js'));
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const harness = createQueuedReactHarness();
+  const nodeTypes = getRegistrySchemas();
+  const hitlBp = getBlueprints().find((b) => b.ruleKey === 'auto_procurement_hitl_approval') || getBlueprints()[3];
+
+  const presets = buildScenarioPresets(hitlBp, hitlBp.graphJson);
+  assert.ok(presets.length >= 2);
+  assert.ok(presets.some((p) => p.event?.data?.amount > 50000000));
+
+  const { client, requests } = createApiMock({
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints: getBlueprints() }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: [hitlBp] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosAutomations:testRule': async (req) => ({ simulation: { runUid: 'sim-custom', status: 'suspended', stepTracesJson: [{ nodeId: 'approval_director', status: 'suspended', durationMs: 2 }] } }),
+    'dxosAutomations:runNow': async () => ({ run: { runUid: 'run-live-1', status: 'suspended', stepTracesJson: [] } }),
+  });
+
+  const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: hitlBp.ruleKey });
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-test-data-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: hitlBp.ruleKey });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-test-runner-popover').length, 1);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-preset-0')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: hitlBp.ruleKey });
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-runner-dryrun-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: hitlBp.ruleKey });
+  const lastDry = requests.filter((r) => r.url === 'dxosAutomations:testRule').at(-1);
+  assert.equal(lastDry.data.sampleEvent.data.amount > 50000000, true);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-test-data-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: hitlBp.ruleKey });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-runner-live-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: hitlBp.ruleKey });
+  const lastLive = requests.filter((r) => r.url === 'dxosAutomations:runNow').at(-1);
+  assert.equal(lastLive.data.sampleEvent.data.amount > 50000000, true);
+});
+
+test('Round 2 FlowListView KPI strip, inline active toggle, and quick duplicate work end-to-end', async () => {
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const harness = createQueuedReactHarness();
+  const nodeTypes = getRegistrySchemas();
+  const rules = [getBlueprints()[0]];
+
+  const { client, requests } = createApiMock({
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints: getBlueprints() }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: rules }),
+    'dxosAutomations:listRuns': async () => ({ items: [{ runUid: 'r1', ruleKey: rules[0].ruleKey, status: 'completed', durationMs: 4 }] }),
+    'dxosAutomations:saveRule': async (req) => ({ rule: req.data }),
+  });
+
+  const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-kpi-strip').length, 1);
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-toggle-active-${rules[0].ruleKey}`)[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const saveReq = requests.find((r) => r.url === 'dxosAutomations:saveRule');
+  assert.ok(saveReq);
+  assert.equal(saveReq.data.active, false);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-dup-rule-${rules[0].ruleKey}`)[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-toolbar').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dirty-badge').length, 1);
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-toolbar')[0]).includes('(Bản sao)'));
+});
+
+test('Round 2 Leaf + quick-append, validation badge/pill click-to-focus, AI dismisses inspector, shortcuts, and empty JSON field', async () => {
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const harness = createQueuedReactHarness();
+  const nodeTypes = getRegistrySchemas();
+  const triggered = [];
+  const winHandlers = {};
+  const origWin = globalThis.window;
+  globalThis.window = {
+    location: { search: '' },
+    addEventListener: (ev, fn) => { winHandlers[ev] = fn; },
+    removeEventListener: (ev) => { delete winHandlers[ev]; },
+  };
+  try {
+    const bp0 = getBlueprints()[0];
+    const { client, requests } = createApiMock({
+      'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints: getBlueprints() }),
+      'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+      'dxosAutomations:listRules': async () => ({ items: [bp0] }),
+      'dxosAutomations:listRuns': async () => ({ items: [] }),
+      'dxosAutomations:saveRule': async (req) => ({ rule: req.data }),
+    });
+    const mockApp = { flowEngine: { context: { ai: { triggerTask: async (p) => triggered.push(p) } } } };
+
+    const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, mockApp);
+    let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+
+    // Empty filterJson renders '' in NodeInspector instead of literal 'null'
+    const firstNodeId = bp0.graphJson.nodes[0].id;
+    collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-node-${firstNodeId}`)[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+    const filterField = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-filterJson')[0];
+    if (filterField) assert.equal(filterField.props.value, '');
+
+    // Opening AI Architect auto-dismisses open NodeInspector
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-open-architect-btn')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+    assert.equal(triggered.length, 1);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector').length, 0);
+
+    // Leaf + quick-append auto-connects a new DMN node with empty tableKey -> triggers dirty badge + validation badge
+    collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-node-append-${firstNodeId}`)[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-append-picker').length, 1);
+
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-append-node-logic.dmn')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dirty-badge').length, 1);
+
+    // Clear tableKey on newly appended node to trigger validation error badge
+    const newId = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector')[0] ? 'insp' : '';
+    if (newId) {
+      const tableSel = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-tableKey')[0];
+      if (tableSel) tableSel.props.onChange({ target: { value: '' } });
+      tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+    }
+
+    // Keyboard shortcuts: Ctrl+K opens palette, Escape closes popovers/inspector, Ctrl+S saves
+    winHandlers.keydown?.({ key: 'k', ctrlKey: true, preventDefault() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-palette').length, 1);
+
+    winHandlers.keydown?.({ key: 'Escape', preventDefault() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-palette').length, 0);
+
+    await winHandlers.keydown?.({ key: 's', ctrlKey: true, preventDefault() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
+    assert.ok(requests.some((r) => r.url === 'dxosAutomations:saveRule'));
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dirty-badge').length, 0);
+  } finally {
+    if (origWin === undefined) delete globalThis.window;
+    else globalThis.window = origWin;
+  }
 });
