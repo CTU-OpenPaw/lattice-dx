@@ -103,6 +103,8 @@ function createMockAcceptanceCaller({
     approvalQueue: [],
     twinShadows: [],
     proposals: [],
+    partnerClaims: [],
+    oauthStates: new Map(),
     domains: new Map(),
     customRecords: new Map(),
     tenants: [],
@@ -153,12 +155,15 @@ function createMockAcceptanceCaller({
       'dxosAutomations:resumeRun',
       'dxosBuilder:createDomain',
       'dxosBuilder:provisionTenant',
+      'dxosVault:oauthStart',
     ]);
     if (
       adminMutations.has(resourceAction)
       || resourceAction === 'dxosAutomations:builderCatalog'
       || resourceAction === 'dxosAutomations:nodeRegistry'
       || resourceAction === 'dxosAutomations:testNode'
+      || resourceAction === 'dxosN8n:status'
+      || resourceAction === 'dxosN8n:appCatalog'
     ) {
       if (actorRole === 'anon') return errResp(401, 'NATIVE_LOGIN_REQUIRED');
       if (actorRole === 'employee' && resourceAction !== 'dxosAutomations:nodeRegistry') {
@@ -249,8 +254,31 @@ function createMockAcceptanceCaller({
       return okResp({ deleted: true, id: removed.id, connectorKey: removed.connectorKey });
     }
 
-    // 3. CMMS Pack, Assets, Broker DynSec, LWT, Automations
+    // 3. CMMS Pack, Partner Settlement Pack, Assets, Broker DynSec, LWT, Automations
     if (resourceAction === 'dxosBuilder:installBusinessPack') {
+      if (values.packKey === 'coldchain-partner-settlement') {
+        const rule = {
+          id: ++state.nextId,
+          organizationId: values.organizationId,
+          ruleKey: 'auto_coldchain_partner_settlement',
+          schemaVersion: 2,
+          active: true,
+        };
+        if (!state.automationRules.some((r) => r.ruleKey === rule.ruleKey)) {
+          state.automationRules.push(rule);
+        }
+        return okResp({
+          installed: true,
+          packKey: values.packKey,
+          organizationId: values.organizationId,
+          domain: {
+            collectionName: 'latticeCustomPartnerClaims',
+            portalPage: { path: '/p/partner-claims' },
+          },
+          dmnTable: { tableKey: 'coldchain_settlement_policy_v1' },
+          automationRule: rule,
+        });
+      }
       assert.equal(values.packKey, 'cmms-maintenance');
       state.domains.set('latticeCustomWorkOrders', {
         collectionName: 'latticeCustomWorkOrders',
@@ -477,14 +505,16 @@ function createMockAcceptanceCaller({
       const approvalNode = savedRule?.graphJson?.nodes?.find((n) => n.type === 'control.approval');
       if (approvalNode) {
         const approvalId = ++state.nextId;
+        const resumeToken = `mock-resume-token-${++state.nextId}`;
+        const runUid = `run_${++state.nextId}`;
         state.approvalQueue.push({
           id: approvalId,
           organizationId: values.organizationId,
           status: 'pending',
+          toolName: 'latticeflow.approval',
+          proposedArgs: { organizationId: values.organizationId, runUid },
           title: approvalNode.config?.title || 'Approval Required',
         });
-        const resumeToken = `mock-resume-token-${++state.nextId}`;
-        const runUid = `run_${++state.nextId}`;
         const trigNode = savedRule.graphJson.nodes.find((n) => String(n.type || '').startsWith('trigger.'));
         const nodeStatesJson = {
           ...(trigNode ? { [trigNode.id]: { status: 'completed', output: { data: values.event?.data || values.data || {} } } } : {}),
@@ -701,6 +731,18 @@ function createMockAcceptanceCaller({
       const savedRule = state.automationRules.find(
         (r) => r.organizationId === values.organizationId && r.ruleKey === targetRuleKey,
       );
+      if (targetRuleKey === 'auto_coldchain_partner_settlement') {
+        return okResp({
+          ok: true,
+          simulation: {
+            graphVersion: 2,
+            status: 'completed',
+            dmnResultJson: { tableKey: 'coldchain_settlement_policy_v1', outputs: { settlementTier: 'critical', settlementRatePct: 85 } },
+            nodeStatesJson: { trig_claim: { status: 'completed' }, dmn_policy: { status: 'completed' } },
+            stepTracesJson: [{ nodeId: 'trig_claim', type: 'trigger.event', status: 'completed', simulated: true }],
+          },
+        });
+      }
       if (targetRuleKey === 'auto_sla_breach_escalation') {
         const useV1 = savedRule && !savedRule.graphJson;
         const evType = String(values.event?.type || 'sla.breached');
@@ -951,6 +993,132 @@ function createMockAcceptanceCaller({
         return okResp({ ok: true, refused: false, mode: 'full', modeUsed: 'offline-fallback', applied: true, draftGraph: graphJson, draftRule, savedRule });
       }
       return okResp({ ok: true, refused: false, mode: 'full', modeUsed: 'offline-fallback', applied: false, draftGraph: graphJson, draftRule });
+    }
+    if (resourceAction === 'dxosAutomations:listRules') {
+      const org = query.get('organizationId');
+      return okResp({
+        items: state.automationRules.filter((r) => !org || r.organizationId === org),
+      });
+    }
+    if (resourceAction === 'dxosAi:listApprovals') {
+      const org = query.get('organizationId');
+      const status = query.get('status');
+      return okResp({
+        items: state.approvalQueue.filter(
+          (q) => (!org || q.organizationId === org) && (!status || q.status === status),
+        ),
+      });
+    }
+    if (resourceAction === 'dxosAi:approveAction') {
+      const approval = state.approvalQueue.find(
+        (q) => Number(q.id) === Number(values.approvalId) && q.organizationId === values.organizationId,
+      );
+      if (!approval) return errResp(404, 'APPROVAL_NOT_FOUND');
+      approval.status = 'approved';
+      const existing = state.automationRuns.find(
+        (r) => Number(r.approvalId) === Number(approval.id) && r.organizationId === values.organizationId,
+      );
+      if (existing) {
+        const ticket = {
+          id: ++state.nextId,
+          organizationId: values.organizationId,
+          code: `HITL-Q-${existing.runUid}`,
+          name: `Queue Approved ${existing.runUid}`,
+          serviceType: 'facilities',
+          priority: 'high',
+          status: 'draft',
+        };
+        state.serviceTickets.push(ticket);
+        existing.status = 'completed';
+        existing.suspendedNodeId = null;
+        existing.resumeTokenHash = null;
+        existing.nodeStatesJson = {
+          ...(existing.nodeStatesJson || {}),
+          create_ticket: { status: 'completed', output: { collection: 'latticeServiceTickets', id: ticket.id, record: ticket } },
+        };
+        existing.stepTracesJson = [
+          ...(existing.stepTracesJson || []),
+          { nodeId: 'create_ticket', type: 'data.create', status: 'completed', output: { collection: 'latticeServiceTickets', id: ticket.id, record: ticket } },
+        ];
+      }
+      return okResp({
+        approval,
+        status: 'approved',
+        result: existing ? { run: existing } : null,
+      });
+    }
+    if (resourceAction === 'dxosN8n:appCatalog' || resourceAction === 'dxosVault:appCatalog') {
+      const items = [
+        'n8n_api', 'gmail_oauth2', 'google_sheets', 'google_drive', 'slack',
+        'telegram', 'github', 'jira', 'discord', 'hubspot', 'webhook_generic',
+      ].map((appType) => ({ appType, name: appType }));
+      return okResp({ organizationId: query.get('organizationId'), items });
+    }
+    if (resourceAction === 'dxosVault:oauthStart') {
+      const oauthState = `state-${++state.nextId}`;
+      const codeChallenge = sha256Hex(`verifier-${oauthState}`);
+      state.oauthStates.set(values.connectorKey, oauthState);
+      state.connectors = state.connectors.filter(
+        (c) => !(c.organizationId === values.organizationId && c.connectorKey === values.connectorKey),
+      );
+      state.connectors.push({
+        id: ++state.nextId,
+        organizationId: values.organizationId,
+        connectorKey: values.connectorKey,
+        name: values.connectorKey,
+        connectorType: 'oauth2',
+        authType: 'oauth2_pkce',
+        secrets: { clientSecret: values.clientSecret },
+      });
+      return okResp({
+        ok: true,
+        connectorKey: values.connectorKey,
+        state: oauthState,
+        codeChallenge,
+        codeChallengeMethod: 'S256',
+        redirectUri: values.redirectUri,
+        authorizeUrl: `https://accounts.example.test/o/oauth2/v2/auth?state=${oauthState}&code_challenge=${codeChallenge}&code_challenge_method=S256`,
+      });
+    }
+    if (resourceAction === 'dxosVault:oauthCallback') {
+      const expected = state.oauthStates.get(values.connectorKey);
+      if (!expected || values.state !== expected) {
+        return errResp(400, 'OAUTH_STATE_MISMATCH', 'Invalid OAuth2 state');
+      }
+      return okResp({ ok: true, connected: true });
+    }
+    if (resourceAction === 'dxosN8n:status') {
+      return okResp({
+        organizationId: query.get('organizationId'),
+        ok: true,
+        healthzOk: true,
+        apiOk: true,
+        hasApiKey: true,
+      });
+    }
+    if (resourceAction === 'dxosN8n:workflows') {
+      return okResp({
+        data: [{ id: 'n8n_orch_26', name: 'dxos-enterprise-compliance-orchestrator', active: true }],
+      });
+    }
+    if (resourceAction === 'dxosN8n:executions') {
+      return okResp({
+        data: [{ id: 'exec_v100_1', status: 'success' }],
+      });
+    }
+    if (resourceAction === 'latticeCustomPartnerClaims:list') {
+      return okResp(state.partnerClaims);
+    }
+    if (resourceAction === 'latticeCustomPartnerClaims:create') {
+      const row = { id: ++state.nextId, ...values };
+      state.partnerClaims.push(row);
+      return okResp(row);
+    }
+    if (resourceAction === 'latticeCustomPartnerClaims:destroy') {
+      state.destroyedPaths.push(path);
+      const id = Number(query.get('filterByTk'));
+      state.partnerClaims = state.partnerClaims.filter((c) => Number(c.id) !== id);
+      return okResp({ ok: true });
     }
     if (resourceAction === 'dxosAutomations:listRuns') {
       const org = query.get('organizationId');
@@ -1305,6 +1473,7 @@ test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, ma
   const summaryText = JSON.stringify(res);
   assert.equal(summaryText.includes('acc-vault-v1-'), false);
   assert.equal(summaryText.includes('acc-vault-v2-'), false);
+  assert.equal(summaryText.includes('acc-oauth-sec-'), false);
   assert.equal(summaryText.includes('acc-whsec-'), false);
   assert.equal(summaryText.includes('acc-inwh-'), false);
   assert.equal(summaryText.includes('mock-resume-token-'), false);
@@ -1317,6 +1486,7 @@ test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, ma
   assert.equal(state.subscriptions.length, 0);
   assert.equal(state.serviceTickets.length, 0);
   assert.equal(state.approvalQueue.length, 0);
+  assert.equal(state.partnerClaims.length, 0);
   assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_')), false);
   assert.deepEqual(state.automationRuns.map((r) => r.id), [50]);
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAutomationRuns:destroy?')));
@@ -1345,6 +1515,17 @@ test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, ma
   assert.equal(res.automationStudio.hitlBadTokenRejectedStatus, 403);
   assert.equal(res.automationStudio.hitlResumedStatus, 'completed');
   assert.equal(res.automationStudio.hitlReplayRejectedStatus, 409);
+  assert.equal(res.automationStudio.hitlQueueApprovalStatus, 'approved');
+  assert.equal(res.automationStudio.hitlQueueResumedStatus, 'completed');
+  assert.equal(res.checks.n8nRestV1AndOauthPkceOk, true);
+  assert.equal(res.n8nAndOauthPkce.appCatalogCount, 11);
+  assert.equal(res.n8nAndOauthPkce.oauthPkceChallengeMethod, 'S256');
+  assert.equal(res.n8nAndOauthPkce.oauthBadStateStatus, 400);
+  assert.equal(res.n8nAndOauthPkce.liveN8nConfigured, true);
+  assert.equal(res.checks.enterpriseComplianceAndPartnerSettlementOk, true);
+  assert.ok(res.enterpriseCompliance.orchestratorNodeCount >= 26);
+  assert.equal(res.enterpriseCompliance.partnerClaimsCollection, 'latticeCustomPartnerClaims');
+  assert.equal(res.enterpriseCompliance.partnerSettlementDmnKey, 'coldchain_settlement_policy_v1');
   assert.equal(res.automationStudio.webhookInvalidSigStatus, 401);
   assert.equal(res.automationStudio.webhookValidSigStatus, 200);
   assert.equal(res.automationStudio.aiFixErrorRepaired, true);

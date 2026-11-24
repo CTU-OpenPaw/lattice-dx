@@ -10,10 +10,11 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertSafeLabOrigin } from './setup-native-multi-portal-demo.mjs';
 
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_ORG = 'native-ui-lab';
 const DEMO_PASS = process.env.NATIVE_DEMO_PASSWORD ?? 'NativeLab-2026!';
 
@@ -158,6 +159,14 @@ async function verifyRbacNegativeChecks(callActor, organizationId, suffix) {
       organizationId,
       name: `Blocked Tenant ${suffix}`,
     }],
+    ['dxosVault:oauthStart', {
+      organizationId,
+      connectorKey: `blocked-oauth-${lower}`,
+      appType: 'gmail_oauth2',
+      clientId: 'blocked-client',
+      clientSecret: 'blocked-secret',
+      redirectUri: 'http://127.0.0.1:13014/api/dxosVault:oauthCallback',
+    }],
   ];
 
   for (const [endpoint, values] of protectedCalls) {
@@ -168,10 +177,16 @@ async function verifyRbacNegativeChecks(callActor, organizationId, suffix) {
     assert.equal(empRes.status, 403, `Expected 403 for employee ${endpoint}, got ${empRes.status}`);
   }
 
-  const unauthCat = await callActor('anon', `dxosAutomations:builderCatalog?organizationId=${encodeURIComponent(organizationId)}`);
-  assert.equal(unauthCat.status, 401, `Expected 401 for unauthenticated dxosAutomations:builderCatalog, got ${unauthCat.status}`);
-  const empCat = await callActor('employee', `dxosAutomations:builderCatalog?organizationId=${encodeURIComponent(organizationId)}`);
-  assert.equal(empCat.status, 403, `Expected 403 for employee dxosAutomations:builderCatalog, got ${empCat.status}`);
+  for (const getEndpoint of [
+    `dxosAutomations:builderCatalog?organizationId=${encodeURIComponent(organizationId)}`,
+    `dxosN8n:status?organizationId=${encodeURIComponent(organizationId)}`,
+    `dxosN8n:appCatalog?organizationId=${encodeURIComponent(organizationId)}`,
+  ]) {
+    const unauthGet = await callActor('anon', getEndpoint);
+    assert.equal(unauthGet.status, 401, `Expected 401 for unauthenticated ${getEndpoint}, got ${unauthGet.status}`);
+    const empGet = await callActor('employee', getEndpoint);
+    assert.equal(empGet.status, 403, `Expected 403 for employee ${getEndpoint}, got ${empGet.status}`);
+  }
 }
 
 async function verifyConnectorVaultLifecycle(callActor, okActor, organizationId, suffix, cleanup) {
@@ -1292,6 +1307,50 @@ async function verifyAutomationStudioAndArchitect(callActor, okActor, organizati
   });
   assert.equal(replayResumeRes.status, 409, `Expected 409 on replay resumeRun, got ${replayResumeRes.status}`);
 
+  // 5b. HITL Resolution via Unified AI Approval Queue (latticeflow.approval)
+  const hitlQueueStartRes = await okActor('root', 'dxosAutomations:runNow', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ruleKey: hitlRuleKey,
+      event: { type: 'manual.trigger', data: { code: `${suffix}-Q` } },
+    },
+  });
+  const hitlQueueRun = hitlQueueStartRes.data?.run || {};
+  if (cleanup) {
+    if (hitlQueueRun.runUid) cleanup.tempRunUids.push(hitlQueueRun.runUid);
+    if (hitlQueueRun.approvalId != null) cleanup.approvalQueueIds.push(hitlQueueRun.approvalId);
+  }
+  assert.equal(hitlQueueRun.status, 'suspended', `Expected 2nd HITL run suspended, got ${hitlQueueRun.status}`);
+  assert.ok(hitlQueueRun.approvalId != null, 'Suspended HITL run missing unified approvalId');
+
+  const pendingApprovalsRes = await okActor(
+    'root',
+    `dxosAi:listApprovals?organizationId=${encodeURIComponent(organizationId)}&status=pending&limit=50`,
+  );
+  const pendingItems = unwrapList(pendingApprovalsRes.data);
+  const queuedApproval = pendingItems.find(
+    (item) => Number(item?.id) === Number(hitlQueueRun.approvalId) && item?.toolName === 'latticeflow.approval',
+  );
+  assert.ok(queuedApproval, 'latticeflow.approval request missing from dxosAi:listApprovals pending queue');
+
+  const queueApproveRes = await okActor('root', 'dxosAi:approveAction', {
+    method: 'POST',
+    values: {
+      organizationId,
+      approvalId: hitlQueueRun.approvalId,
+      note: 'Approved via unified latticeflow.approval queue',
+    },
+  });
+  assert.equal(queueApproveRes.data?.status, 'approved', 'dxosAi:approveAction must approve latticeflow.approval row');
+  const queueResumedRun = queueApproveRes.data?.result?.run || {};
+  assert.equal(queueResumedRun.status, 'completed', `Expected queue-approved HITL run completed, got ${queueResumedRun.status}`);
+  const queuedTicketId = queueResumedRun.nodeStatesJson?.create_ticket?.output?.id
+    ?? queueResumedRun.stepTracesJson?.find((t) => t?.nodeId === 'create_ticket')?.output?.id;
+  if (queuedTicketId != null && cleanup) {
+    cleanup.serviceTicketIds.push(queuedTicketId);
+  }
+
   // 6. Inbound webhook ingress HMAC verification
   const whRuleKey = `acc_wh_${lower}`;
   const whConnectorKey = `webhook-acc-${lower}`;
@@ -1497,6 +1556,8 @@ async function verifyAutomationStudioAndArchitect(callActor, okActor, organizati
     hitlBadTokenRejectedStatus: badTokenResumeRes.status,
     hitlResumedStatus: resumedRun.status,
     hitlReplayRejectedStatus: replayResumeRes.status,
+    hitlQueueApprovalStatus: queueApproveRes.data?.status ?? null,
+    hitlQueueResumedStatus: queueResumedRun.status ?? null,
     webhookInvalidSigStatus: badWhRes.status,
     webhookValidSigStatus: validWhRes.status,
     aiFixErrorRepaired: Boolean(repairedU1?.continueOnFail),
@@ -1504,6 +1565,200 @@ async function verifyAutomationStudioAndArchitect(callActor, okActor, organizati
     aiAppliedTempRuleKey: aiTempRuleKey,
     aiAppliedThresholdValue: reloadedIfNode?.config?.condition?.value ?? null,
     aiInjectionRejectedStatus: injectRes.status,
+  };
+}
+
+async function verifyN8nRestV1AndOauthPkce(callActor, okActor, organizationId, suffix, cleanup) {
+  const lower = suffix.toLowerCase();
+  const oauthConnectorKey = `acc-oauth-${lower}`;
+  const oauthSecret = `acc-oauth-sec-${suffix}`;
+  if (cleanup) cleanup.extraConnectorKeys.push(oauthConnectorKey);
+
+  const n8nCatalogRes = await okActor(
+    'root',
+    `dxosN8n:appCatalog?organizationId=${encodeURIComponent(organizationId)}`,
+  );
+  const n8nApps = Array.isArray(n8nCatalogRes.data?.items) ? n8nCatalogRes.data.items : [];
+  assert.ok(n8nApps.length >= 11, `Expected >= 11 dxosN8n appCatalog connectors, got ${n8nApps.length}`);
+  const appKeys = new Set(n8nApps.map((item) => item?.appType));
+  for (const requiredKey of ['n8n_api', 'gmail_oauth2', 'telegram', 'slack', 'github']) {
+    assert.ok(appKeys.has(requiredKey), `dxosN8n:appCatalog missing required connector ${requiredKey}`);
+  }
+
+  const vaultCatalogRes = await okActor(
+    'root',
+    `dxosVault:appCatalog?organizationId=${encodeURIComponent(organizationId)}`,
+  );
+  const vaultApps = Array.isArray(vaultCatalogRes.data?.items) ? vaultCatalogRes.data.items : [];
+  assert.ok(vaultApps.length >= 11, `Expected >= 11 dxosVault appCatalog connectors, got ${vaultApps.length}`);
+
+  const oauthStartRes = await okActor('root', 'dxosVault:oauthStart', {
+    method: 'POST',
+    values: {
+      organizationId,
+      connectorKey: oauthConnectorKey,
+      appType: 'gmail_oauth2',
+      clientId: `acc-client-${lower}`,
+      clientSecret: oauthSecret,
+      redirectUri: 'http://127.0.0.1:13014/api/dxosVault:oauthCallback',
+    },
+  });
+  assert.equal(oauthStartRes.data?.ok, true, 'dxosVault:oauthStart must return ok=true');
+  assert.equal(oauthStartRes.data?.codeChallengeMethod, 'S256', 'dxosVault:oauthStart must enforce PKCE S256');
+  assert.ok(typeof oauthStartRes.data?.state === 'string' && oauthStartRes.data.state.length >= 8, 'Missing PKCE state');
+  assert.ok(
+    typeof oauthStartRes.data?.codeChallenge === 'string' && oauthStartRes.data.codeChallenge.length >= 20,
+    'Missing PKCE codeChallenge',
+  );
+  assert.ok(
+    String(oauthStartRes.data?.authorizeUrl || '').includes('code_challenge_method=S256'),
+    'authorizeUrl must include code_challenge_method=S256',
+  );
+
+  const badStateCallbackRes = await callActor('root', 'dxosVault:oauthCallback', {
+    method: 'POST',
+    values: {
+      organizationId,
+      connectorKey: oauthConnectorKey,
+      code: 'acc-invalid-code',
+      state: `forged-state-${lower}`,
+    },
+  });
+  assert.equal(
+    badStateCallbackRes.status,
+    400,
+    `Expected 400 OAUTH_STATE_MISMATCH on forged oauthCallback state, got ${badStateCallbackRes.status}`,
+  );
+
+  const listVaultRes = await okActor('root', `dxosVault:list?organizationId=${encodeURIComponent(organizationId)}`);
+  assert.ok(!JSON.stringify(listVaultRes.data).includes(oauthSecret), 'Raw OAuth clientSecret leaked in dxosVault:list');
+
+  const n8nStatusRes = await callActor('root', `dxosN8n:status?organizationId=${encodeURIComponent(organizationId)}`);
+  if (n8nStatusRes.status === 404 && process.env.DX_REQUIRE_N8N !== '1') {
+    return {
+      appCatalogCount: n8nApps.length,
+      vaultCatalogCount: vaultApps.length,
+      oauthPkceChallengeMethod: oauthStartRes.data.codeChallengeMethod,
+      oauthBadStateStatus: badStateCallbackRes.status,
+      liveN8nConfigured: false,
+      n8nWorkflowCount: null,
+      n8nExecutionCount: null,
+    };
+  }
+  assert.equal(n8nStatusRes.status, 200, `dxosN8n:status failed: ${n8nStatusRes.status} ${JSON.stringify(n8nStatusRes.data)}`);
+  const wfRes = await okActor('root', `dxosN8n:workflows?organizationId=${encodeURIComponent(organizationId)}&limit=50`);
+  const workflows = Array.isArray(wfRes.data?.data) ? wfRes.data.data : [];
+  const execRes = await okActor('root', `dxosN8n:executions?organizationId=${encodeURIComponent(organizationId)}&limit=20`);
+  const executions = Array.isArray(execRes.data?.data) ? execRes.data.data : [];
+
+  return {
+    appCatalogCount: n8nApps.length,
+    vaultCatalogCount: vaultApps.length,
+    oauthPkceChallengeMethod: oauthStartRes.data.codeChallengeMethod,
+    oauthBadStateStatus: badStateCallbackRes.status,
+    liveN8nConfigured: true,
+    n8nApiOk: Boolean(n8nStatusRes.data?.apiOk ?? n8nStatusRes.data?.ok),
+    n8nWorkflowCount: workflows.length,
+    n8nExecutionCount: executions.length,
+  };
+}
+
+async function verifyEnterpriseOrchestratorAndPartnerSettlement(callActor, okActor, organizationId, suffix, cleanup) {
+  const [orchRaw, errRaw, inboundRaw] = await Promise.all([
+    readFile(resolve(REPO_ROOT, 'infra/config/n8n/dxos-enterprise-compliance-orchestrator.json'), 'utf8'),
+    readFile(resolve(REPO_ROOT, 'infra/config/n8n/dxos-enterprise-error-handler.json'), 'utf8'),
+    readFile(resolve(REPO_ROOT, 'infra/config/n8n/dxos-external-app-inbound-callback.json'), 'utf8'),
+  ]);
+  const orchJson = JSON.parse(orchRaw);
+  const errJson = JSON.parse(errRaw);
+  const inboundJson = JSON.parse(inboundRaw);
+  const orchNodeCount = Array.isArray(orchJson?.nodes) ? orchJson.nodes.length : 0;
+  assert.ok(orchNodeCount >= 26, `Expected >= 26 nodes in dxos-enterprise-compliance-orchestrator.json, got ${orchNodeCount}`);
+  assert.ok(
+    Array.isArray(errJson?.nodes) && errJson.nodes.some((n) => String(n?.type || '').includes('errorTrigger')),
+    'dxos-enterprise-error-handler.json missing errorTrigger node',
+  );
+  assert.ok(
+    JSON.stringify(inboundJson).includes('external-app-callback'),
+    'dxos-external-app-inbound-callback.json missing external-app-callback webhook path',
+  );
+
+  const packRes = await okActor('root', 'dxosBuilder:installBusinessPack', {
+    method: 'POST',
+    values: {
+      organizationId,
+      packKey: 'coldchain-partner-settlement',
+    },
+  });
+  assert.equal(packRes.data?.installed, true, 'coldchain-partner-settlement installBusinessPack must return installed=true');
+  assert.equal(packRes.data?.domain?.collectionName, 'latticeCustomPartnerClaims');
+  assert.equal(packRes.data?.dmnTable?.tableKey, 'coldchain_settlement_policy_v1');
+  assert.equal(packRes.data?.automationRule?.ruleKey, 'auto_coldchain_partner_settlement');
+
+  const seededClaimRes = await okActor(
+    'root',
+    `latticeCustomPartnerClaims:list?filter=${encodeURIComponent(JSON.stringify({ organizationId, claimCode: 'CLM-V100-001' }))}&pageSize=5`,
+  );
+  const seededClaims = unwrapList(seededClaimRes.data);
+
+  const tempClaimCode = `CLM-ACC-${suffix}`;
+  const tempClaimRes = await okActor('root', 'latticeCustomPartnerClaims:create', {
+    method: 'POST',
+    values: {
+      organizationId,
+      claimCode: tempClaimCode,
+      partnerName: `Acceptance ColdChain Partner ${suffix}`,
+      severity: 'critical',
+      temperatureC: -7.5,
+      riskScore: 86,
+      amount: 24500000,
+      settlementTier: 'critical',
+      settlementRatePct: 85,
+      status: 'submitted',
+    },
+  });
+  const createdClaimId = tempClaimRes.data?.id ?? null;
+  assert.ok(createdClaimId != null, 'Failed to create temporary partner claim on latticeCustomPartnerClaims');
+  if (cleanup) cleanup.partnerClaimIds.push(createdClaimId);
+
+  const testSettlementRes = await okActor('root', 'dxosAutomations:testRule', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ruleKey: 'auto_coldchain_partner_settlement',
+      dryRun: true,
+      event: {
+        type: 'coldchain.settlement_requested',
+        subject: tempClaimCode,
+        data: {
+          claimCode: tempClaimCode,
+          severity: 'critical',
+          temperatureC: -7.5,
+          riskScore: 86,
+          amount: 24500000,
+          slaOverdueMinutes: 30,
+        },
+      },
+    },
+  });
+  assert.ok(
+    testSettlementRes.data?.simulation?.status === 'completed' || testSettlementRes.data?.ok === true,
+    'auto_coldchain_partner_settlement dry-run testRule must succeed',
+  );
+
+  const rulesListRes = await okActor('root', `dxosAutomations:listRules?organizationId=${encodeURIComponent(organizationId)}&limit=100`);
+  const hasComplianceRule = unwrapList(rulesListRes.data).some((r) => r?.ruleKey === 'auto_enterprise_n8n_compliance');
+
+  return {
+    orchestratorNodeCount: orchNodeCount,
+    errorHandlerNodeCount: Array.isArray(errJson?.nodes) ? errJson.nodes.length : 0,
+    inboundCallbackNodeCount: Array.isArray(inboundJson?.nodes) ? inboundJson.nodes.length : 0,
+    hasSeededEnterpriseComplianceRule: hasComplianceRule,
+    partnerClaimsCollection: packRes.data?.domain?.collectionName,
+    partnerSettlementDmnKey: packRes.data?.dmnTable?.tableKey,
+    seededClaimV100Present: seededClaims.some((c) => c?.claimCode === 'CLM-V100-001'),
+    tempClaimCreatedId: createdClaimId,
+    settlementDryRunStatus: testSettlementRes.data?.simulation?.status ?? 'ok',
   };
 }
 
@@ -1659,6 +1914,9 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
   for (const twId of twinShadowIdSet) {
     await callActor('root', `latticeTwinShadows:destroy?filterByTk=${encodeURIComponent(twId)}`, { method: 'POST' }).catch(() => {});
   }
+  for (const claimId of new Set((cleanup.partnerClaimIds || []).filter((id) => id != null))) {
+    await callActor('root', `latticeCustomPartnerClaims:destroy?filterByTk=${encodeURIComponent(claimId)}`, { method: 'POST' }).catch(() => {});
+  }
 
   if (cleanup.deviceKey) {
     await callActor('root', 'dxosBroker:revokeDevice', {
@@ -1730,6 +1988,7 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
     proposalIds: [],
     approvalQueueIds: [],
     twinShadowIds: [],
+    partnerClaimIds: [],
     customCollection: null,
     customPortalPage: null,
     customRecordIds: [],
@@ -1743,6 +2002,8 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
     connectorVaultLifecycleOk: false,
     mqttDynSecLwtAutomationCmmsOk: false,
     automationStudioAndArchitectOk: false,
+    n8nRestV1AndOauthPkceOk: false,
+    enterpriseComplianceAndPartnerSettlementOk: false,
     webhooksHmacCircuitDlqOk: false,
     domainBuilderOpenApiRlsOk: false,
     tenantProvisioningIdempotentOk: false,
@@ -1761,6 +2022,18 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
     const automationStudioSummary = await verifyAutomationStudioAndArchitect(callActor, okActor, organizationId, suffix, cleanup);
     checks.automationStudioAndArchitectOk = true;
 
+    const n8nOauthSummary = await verifyN8nRestV1AndOauthPkce(callActor, okActor, organizationId, suffix, cleanup);
+    checks.n8nRestV1AndOauthPkceOk = true;
+
+    const enterpriseComplianceSummary = await verifyEnterpriseOrchestratorAndPartnerSettlement(
+      callActor,
+      okActor,
+      organizationId,
+      suffix,
+      cleanup,
+    );
+    checks.enterpriseComplianceAndPartnerSettlementOk = true;
+
     const webhooksSummary = await verifyWebhooksHmacCircuitDlq(callActor, okActor, organizationId, suffix, cleanup);
     checks.webhooksHmacCircuitDlqOk = true;
 
@@ -1778,6 +2051,8 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
       vault: vaultSummary,
       brokerAutomation: brokerAutomationSummary,
       automationStudio: automationStudioSummary,
+      n8nAndOauthPkce: n8nOauthSummary,
+      enterpriseCompliance: enterpriseComplianceSummary,
       webhooks: webhooksSummary,
       domainBuilder: domainBuilderSummary,
       tenant: tenantSummary,

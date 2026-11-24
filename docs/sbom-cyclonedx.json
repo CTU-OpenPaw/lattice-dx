@@ -1,7 +1,7 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:d91a57b8-fea8-4680-8201-ee4c12253181",
+  "serialNumber": "urn:uuid:3d106db0-464d-46bc-8290-dd0a41cfc960",
   "version": 1,
   "metadata": {
     "tools": {
@@ -1437,6 +1437,274 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/%40mapbox/jsonlint-lines-primitives@2.0.3",
+      "name": "@mapbox/jsonlint-lines-primitives",
+      "version": "2.0.3",
+      "purl": "pkg:npm/%40mapbox/jsonlint-lines-primitives@2.0.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "d12125695d2e331127c73061857f564ee3f251e32c00dfd24b48b5ead8ee6dae3f9a2a3adcc1bd9218c2d5ad090223c65c0c2fc26e147c725444237b9f2b9d42"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40mapbox/point-geometry@1.1.0",
+      "name": "@mapbox/point-geometry",
+      "version": "1.1.0",
+      "purl": "pkg:npm/%40mapbox/point-geometry@1.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "606701cf5720e004d70c233fef52fdc6f7a1e1dca77c699c2c3aae7d1fa7410cb77cac2c019b1677fc78eb6d7feae25a781f66c0e1c4ea13de0e05f3f6e56251"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40mapbox/tiny-sdf@2.3.0",
+      "name": "@mapbox/tiny-sdf",
+      "version": "2.3.0",
+      "purl": "pkg:npm/%40mapbox/tiny-sdf@2.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "801bdc34304107ae9b81062f9da27a264f9509a32656ae7e2194769163e2b13f3c67cb3490142dea17d58bc420456f15a60d14599cc1038652cb31c70be55e44"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40mapbox/unitbezier@1.0.0",
+      "name": "@mapbox/unitbezier",
+      "version": "1.0.0",
+      "purl": "pkg:npm/%40mapbox/unitbezier@1.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7ea779d797e306600d2861ac436f3a1365af8ff5ef0c5a46cf0271ab8088ea3310b9ee8ecb4e2e08aa7e256285d34c514e693a704bb58cf27da77c6a1fc616a9"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-2-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40mapbox/vector-tile@3.0.0",
+      "name": "@mapbox/vector-tile",
+      "version": "3.0.0",
+      "purl": "pkg:npm/%40mapbox/vector-tile@3.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "41fd744b5b881cc936d2b8bf215067a52f9eb1412455a4791dfb66cfcf234c89eba665a03c625f3dedcb5638e513beedacbc7cb47eaa8d31bbb961fd848abfd1"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40maplibre/geojson-vt@6.3.3",
+      "name": "@maplibre/geojson-vt",
+      "version": "6.3.3",
+      "purl": "pkg:npm/%40maplibre/geojson-vt@6.3.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "b1f7ed378df6e9fa13eee7b1d1a3748eaafebeafe57e07937c048e77e92f754774b8c3088176433dd9ed09acca14a29cc4f1f4d3634f0b2e23dfdea979a9d60a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40maplibre/maplibre-gl-style-spec@26.9.0",
+      "name": "@maplibre/maplibre-gl-style-spec",
+      "version": "26.9.0",
+      "purl": "pkg:npm/%40maplibre/maplibre-gl-style-spec@26.9.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "71064ada51b777a239163ae23d90a0271fcb8953295aaa1589b17e720a769a443f3f804818eb2b0375acbcbc35c01dbc43d254f6fd9f6a9b1050951b8e3c1aea"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40maplibre/mlt@1.3.0",
+      "name": "@maplibre/mlt",
+      "version": "1.3.0",
+      "purl": "pkg:npm/%40maplibre/mlt@1.3.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "eccd8eec004cf343a2f173e47e4ae3281f263812311a8560900e7632ee11316a01bef31d6a0439db6f96c5562e8d9b0ca6a22bdc1a73ad36d7ae6e24f250b309"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "(MIT OR Apache-2.0)"
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40maplibre/vt-pbf@4.3.3",
+      "name": "@maplibre/vt-pbf",
+      "version": "4.3.3",
+      "purl": "pkg:npm/%40maplibre/vt-pbf@4.3.3",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7447b95d477ae1141bc4dc72d8ecc89099f03435a35664978c277403bccb8ab9bb409fd659b9ad0c52247ec88ce32b7572996acc6ea84a2bd161e5b1d52335ca"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/%40oxc-project/types@0.152.0",
       "name": "@oxc-project/types",
       "version": "0.152.0",
@@ -2225,6 +2493,36 @@
         {
           "alg": "SHA-512",
           "content": "1a174f832d5e978fc898fd395f4e54c38730dbf33ddc10949a712f599352b650b310a304e05924f98a680393a21cd426a12ec269f6fc5dadcfc9af26d50af37a"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40types/geojson@7946.0.16",
+      "name": "@types/geojson",
+      "version": "7946.0.16",
+      "purl": "pkg:npm/%40types/geojson@7946.0.16",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "e82f27a96babde3f7c53afa55c37d351621f82f654f84ba6be91ca7188ee8ca1fbc286322e3dac5267dfd2d461aea33b068854c3b3f3dd90758e3da05bd16f9a"
         }
       ],
       "licenses": [
@@ -3207,6 +3505,36 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/bidi-js@1.1.0",
+      "name": "bidi-js",
+      "version": "1.1.0",
+      "purl": "pkg:npm/bidi-js@1.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7d7d4e9e4d2d7553c2ee86cf581e446c9d73ecd5612eae26db164bab6617064c7331720646934c53cf27d043e05ac78a975d89ef35eceeaac3c4f2b8b11b367e"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/chai@6.3.0",
       "name": "chai",
       "version": "6.3.0",
@@ -3611,6 +3939,36 @@
         {
           "license": {
             "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/earcut@3.2.4",
+      "name": "earcut",
+      "version": "3.2.4",
+      "purl": "pkg:npm/earcut@3.2.4",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "14773ac8da674ce441d2d339926674de20f6983b8d6a40c4da5bdfe07c355e47f1b441c81958b4d41fc6a944b0c7e35c0b55868e27407e94d7cde00bb4fb5fa6"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
           }
         }
       ],
@@ -4070,6 +4428,36 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/gl-matrix@3.4.4",
+      "name": "gl-matrix",
+      "version": "3.4.4",
+      "purl": "pkg:npm/gl-matrix@3.4.4",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "95ab529f20cdb7ff3361407a54827a3c28768c18c95fa8270eca0267b2f25bb1a4aab0f9d445b06bda82a068b18fc62a06d11340aff163b3a6a5317cc73d4375"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/ipaddr.js@2.5.0",
       "name": "ipaddr.js",
       "version": "2.5.0",
@@ -4204,6 +4592,66 @@
         {
           "license": {
             "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/json-stringify-pretty-compact@4.0.0",
+      "name": "json-stringify-pretty-compact",
+      "version": "4.0.0",
+      "purl": "pkg:npm/json-stringify-pretty-compact@4.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "dc2359d839eba41c86f4daa3e97a3cbea6e34f817a37eb5be066f6f04480663619e72aaf99ce7a27efe4b88c2468030ec9b953421516ecfc4c9146fc437e8ddd"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/kdbush@4.1.0",
+      "name": "kdbush",
+      "version": "4.1.0",
+      "purl": "pkg:npm/kdbush@4.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "7bdbeeaf3ad7250ac55fa724a473f76ef8f997ef429d8ce4c43367350d61d904ea756b1400981788a74635c39ad4463ce5d53c29b43ecff15d41d07b3fef727d"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
           }
         }
       ],
@@ -4640,6 +5088,96 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/maplibre-gl@6.19.0",
+      "name": "maplibre-gl",
+      "version": "6.19.0",
+      "purl": "pkg:npm/maplibre-gl@6.19.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "ddb3ab9df75d820518b9d2c6245b1816faae954caf4b1cb8890cddfee51123b66181811989f752ac40ae8d14a085a0a973ebff66c148d18e99b064a2944b44fb"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/minimist@1.2.8",
+      "name": "minimist",
+      "version": "1.2.8",
+      "purl": "pkg:npm/minimist@1.2.8",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "db2c8047ca8190ddd8ba17896a7529582e54ddb6f9a2c0f2c0d07c4730d5943c031dba1c009bdeaaa8f5bbcf92543ee39164f8cafb070a95aaa96a80c5bd3308"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/murmurhash-js@1.0.0",
+      "name": "murmurhash-js",
+      "version": "1.0.0",
+      "purl": "pkg:npm/murmurhash-js@1.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "4ef9a436192ff3272dd125414b2fa8f306335e3138673dcf09eb1b7ecf078825d775c4eea1c02916fd7551694d156298b0fda892aae16fb24d9529bd22706123"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/nanoid@3.3.20",
       "name": "nanoid",
       "version": "3.3.20",
@@ -4785,6 +5323,36 @@
         {
           "name": "latticedx:lockSources",
           "value": "plugins/nocobase/plugin-enterprise-auth/package-lock.json,pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/pbf@5.2.0",
+      "name": "pbf",
+      "version": "5.2.0",
+      "purl": "pkg:npm/pbf@5.2.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "47a629b5a459974b7d4953ba32596ccd8ab522468e41ac33a6b9dd9af43112816bb6f5fb7d3fa83483e8543d79d8d3a59662d6102dd3871cd44ea057d76ab915"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
         }
       ]
     },
@@ -5330,6 +5898,36 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/potpack@2.1.0",
+      "name": "potpack",
+      "version": "2.1.0",
+      "purl": "pkg:npm/potpack@2.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "a5c6928507354a1ab4cbe13b1aa26abd98fc0d3b61595d4a78719d8b467a2008a7d8e8b72672c239fc270a8f38a9cf87029e76c13f672bd1fb140269e5ae3819"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/process-warning@4.0.1",
       "name": "process-warning",
       "version": "4.0.1",
@@ -5390,6 +5988,36 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/protocol-buffers-schema@3.6.1",
+      "name": "protocol-buffers-schema",
+      "version": "3.6.1",
+      "purl": "pkg:npm/protocol-buffers-schema@3.6.1",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "546d8aeb7220922bfda7bead93596295ccc42b5713fa40a32ad91d870d5d41957793721725b777a3a1e8f1bf732596874a74f684a7b823e39b997f70ea6e5299"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/quick-format-unescaped@4.0.4",
       "name": "quick-format-unescaped",
       "version": "4.0.4",
@@ -5404,6 +6032,36 @@
         {
           "license": {
             "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/quickselect@3.0.0",
+      "name": "quickselect",
+      "version": "3.0.0",
+      "purl": "pkg:npm/quickselect@3.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "5dd8d402b6cae019b97cb2ef966e4aa5314e88e4e181f5962386b10190d683813fd2629d67223db4d11f76cdbba828b5cdefefc13475ea4be6986851adaddcda"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
           }
         }
       ],
@@ -6080,6 +6738,36 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/tinyqueue@3.0.0",
+      "name": "tinyqueue",
+      "version": "3.0.0",
+      "purl": "pkg:npm/tinyqueue@3.0.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "8116bd830614dc40a6418bf796c96db39871b886bdd2f79a11cc4362ebb740638800433698e664547a78f00349baed42511b51747294058e4b9b5b4757eb03e2"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/toad-cache@3.7.4",
       "name": "toad-cache",
       "version": "3.7.4",
@@ -6358,6 +7046,36 @@
         {
           "alg": "SHA-512",
           "content": "087394cbb9aede56c3ea8e8b24b7e59698e4ce11d7481957f01f7ea8f75d52c21f785e52fd4679ab49260ac9d1a93d541c54197213450c3ccc6d0b2e7ac1d697"
+        }
+      ],
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "latticedx:category",
+          "value": "npm-dependency"
+        },
+        {
+          "name": "latticedx:lockSources",
+          "value": "pnpm-lock.yaml"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/zustand@5.1.0",
+      "name": "zustand",
+      "version": "5.1.0",
+      "purl": "pkg:npm/zustand@5.1.0",
+      "hashes": [
+        {
+          "alg": "SHA-512",
+          "content": "72225994fe3c3353d341b550abcd421951711d32e964dac58caab08ed094df8016b974d94ff8eb177a7df9f23ce027f579208c2daa71a81cbf48d4dfc0e06ea8"
         }
       ],
       "licenses": [
@@ -7076,6 +7794,15 @@
         "pkg:npm/%40latticedx/plugin-enterprise-auth@1.0.0",
         "pkg:npm/%40latticedx/plugin-lattice-foundation@1.0.0",
         "pkg:npm/%40latticedx/uc1-procurement@1.0.0",
+        "pkg:npm/%40mapbox/jsonlint-lines-primitives@2.0.3",
+        "pkg:npm/%40mapbox/point-geometry@1.1.0",
+        "pkg:npm/%40mapbox/tiny-sdf@2.3.0",
+        "pkg:npm/%40mapbox/unitbezier@1.0.0",
+        "pkg:npm/%40mapbox/vector-tile@3.0.0",
+        "pkg:npm/%40maplibre/geojson-vt@6.3.3",
+        "pkg:npm/%40maplibre/maplibre-gl-style-spec@26.9.0",
+        "pkg:npm/%40maplibre/mlt@1.3.0",
+        "pkg:npm/%40maplibre/vt-pbf@4.3.3",
         "pkg:npm/%40oxc-project/types@0.152.0",
         "pkg:npm/%40pinojs/redact@0.4.0",
         "pkg:npm/%40rolldown/binding-android-arm-eabi@1.2.12",
@@ -7103,6 +7830,7 @@
         "pkg:npm/%40types/d3-zoom@3.0.9",
         "pkg:npm/%40types/deep-eql@4.0.2",
         "pkg:npm/%40types/estree@1.0.9",
+        "pkg:npm/%40types/geojson@7946.0.16",
         "pkg:npm/%40types/node@26.6.4",
         "pkg:npm/%40types/pg@8.23.1",
         "pkg:npm/%40typescript/typescript-aix-ppc64@7.0.2",
@@ -7135,6 +7863,7 @@
         "pkg:npm/assertion-error@2.0.1",
         "pkg:npm/atomic-sleep@1.0.0",
         "pkg:npm/avvio@9.3.0",
+        "pkg:npm/bidi-js@1.1.0",
         "pkg:npm/chai@6.3.0",
         "pkg:npm/classcat@5.0.5",
         "pkg:npm/cookie@1.1.1",
@@ -7149,6 +7878,7 @@
         "pkg:npm/d3-zoom@3.0.1",
         "pkg:npm/dequal@2.0.3",
         "pkg:npm/detect-libc@2.1.2",
+        "pkg:npm/earcut@3.2.4",
         "pkg:npm/es-module-lexer@2.3.2",
         "pkg:npm/esbuild@0.28.2",
         "pkg:npm/estree-walker@3.0.3",
@@ -7164,11 +7894,14 @@
         "pkg:npm/fdir@6.5.0",
         "pkg:npm/find-my-way@9.10.2",
         "pkg:npm/fsevents@2.3.3",
+        "pkg:npm/gl-matrix@3.4.4",
         "pkg:npm/ipaddr.js@2.5.0",
         "pkg:npm/jose@6.2.12",
         "pkg:npm/jose@6.2.15",
         "pkg:npm/json-schema-ref-resolver@3.0.0",
         "pkg:npm/json-schema-traverse@1.0.0",
+        "pkg:npm/json-stringify-pretty-compact@4.0.0",
+        "pkg:npm/kdbush@4.1.0",
         "pkg:npm/light-my-request@6.6.0",
         "pkg:npm/lightningcss-android-arm64@1.33.0",
         "pkg:npm/lightningcss-darwin-arm64@1.33.0",
@@ -7183,11 +7916,15 @@
         "pkg:npm/lightningcss-win32-x64-msvc@1.33.0",
         "pkg:npm/lightningcss@1.33.0",
         "pkg:npm/magic-string@1.4.3",
+        "pkg:npm/maplibre-gl@6.19.0",
+        "pkg:npm/minimist@1.2.8",
+        "pkg:npm/murmurhash-js@1.0.0",
         "pkg:npm/nanoid@3.3.20",
         "pkg:npm/oauth4webapi@3.8.8",
         "pkg:npm/obug@2.2.1",
         "pkg:npm/on-exit-leak-free@2.1.2",
         "pkg:npm/openid-client@6.8.9",
+        "pkg:npm/pbf@5.2.0",
         "pkg:npm/pg-cloudflare@1.4.1",
         "pkg:npm/pg-connection-string@2.14.1",
         "pkg:npm/pg-int8@1.0.1",
@@ -7206,9 +7943,12 @@
         "pkg:npm/postgres-bytea@1.0.1",
         "pkg:npm/postgres-date@1.0.7",
         "pkg:npm/postgres-interval@1.2.0",
+        "pkg:npm/potpack@2.1.0",
         "pkg:npm/process-warning@4.0.1",
         "pkg:npm/process-warning@5.1.0",
+        "pkg:npm/protocol-buffers-schema@3.6.1",
         "pkg:npm/quick-format-unescaped@4.0.4",
+        "pkg:npm/quickselect@3.0.0",
         "pkg:npm/react-dom@19.3.1",
         "pkg:npm/react@19.3.1",
         "pkg:npm/real-require@1.0.0",
@@ -7231,6 +7971,7 @@
         "pkg:npm/tinybench@6.2.0",
         "pkg:npm/tinyexec@1.3.1",
         "pkg:npm/tinyglobby@0.2.17",
+        "pkg:npm/tinyqueue@3.0.0",
         "pkg:npm/toad-cache@3.7.4",
         "pkg:npm/tsx@4.23.15",
         "pkg:npm/typescript@7.0.2",
@@ -7241,6 +7982,7 @@
         "pkg:npm/why-is-node-running@3.2.1",
         "pkg:npm/xtend@4.0.2",
         "pkg:npm/zustand@4.5.7",
+        "pkg:npm/zustand@5.1.0",
         "pkg:oci/apisix@sha256%3A9a7e45dc943fbf10ec916d1232bae4cda9302ae28a4696cfb83c2da01d261141?repository_url=apache%2Fapisix&tag=3.19.0-debian",
         "pkg:oci/caddy@sha256%3A4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d?repository_url=caddy&tag=2.10-alpine",
         "pkg:oci/clamav@sha256%3A12177441d1b40cef3c47b44c4090d59d4babc4c67bedd5af0fa315e603aa6dd8?repository_url=clamav%2Fclamav&tag=1.5.5",
@@ -7459,6 +8201,42 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/%40mapbox/jsonlint-lines-primitives@2.0.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40mapbox/point-geometry@1.1.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40mapbox/tiny-sdf@2.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40mapbox/unitbezier@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40mapbox/vector-tile@3.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40maplibre/geojson-vt@6.3.3",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40maplibre/maplibre-gl-style-spec@26.9.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40maplibre/mlt@1.3.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40maplibre/vt-pbf@4.3.3",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/%40oxc-project/types@0.152.0",
       "dependsOn": []
     },
@@ -7564,6 +8342,10 @@
     },
     {
       "ref": "pkg:npm/%40types/estree@1.0.9",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/%40types/geojson@7946.0.16",
       "dependsOn": []
     },
     {
@@ -7695,6 +8477,10 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/bidi-js@1.1.0",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/chai@6.3.0",
       "dependsOn": []
     },
@@ -7748,6 +8534,10 @@
     },
     {
       "ref": "pkg:npm/detect-libc@2.1.2",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/earcut@3.2.4",
       "dependsOn": []
     },
     {
@@ -7811,6 +8601,10 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/gl-matrix@3.4.4",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/ipaddr.js@2.5.0",
       "dependsOn": []
     },
@@ -7828,6 +8622,14 @@
     },
     {
       "ref": "pkg:npm/json-schema-traverse@1.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/json-stringify-pretty-compact@4.0.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/kdbush@4.1.0",
       "dependsOn": []
     },
     {
@@ -7887,6 +8689,18 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/maplibre-gl@6.19.0",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/minimist@1.2.8",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/murmurhash-js@1.0.0",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/nanoid@3.3.20",
       "dependsOn": []
     },
@@ -7904,6 +8718,10 @@
     },
     {
       "ref": "pkg:npm/openid-client@6.8.9",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/pbf@5.2.0",
       "dependsOn": []
     },
     {
@@ -7979,6 +8797,10 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/potpack@2.1.0",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/process-warning@4.0.1",
       "dependsOn": []
     },
@@ -7987,7 +8809,15 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/protocol-buffers-schema@3.6.1",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/quick-format-unescaped@4.0.4",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/quickselect@3.0.0",
       "dependsOn": []
     },
     {
@@ -8079,6 +8909,10 @@
       "dependsOn": []
     },
     {
+      "ref": "pkg:npm/tinyqueue@3.0.0",
+      "dependsOn": []
+    },
+    {
       "ref": "pkg:npm/toad-cache@3.7.4",
       "dependsOn": []
     },
@@ -8116,6 +8950,10 @@
     },
     {
       "ref": "pkg:npm/zustand@4.5.7",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:npm/zustand@5.1.0",
       "dependsOn": []
     },
     {

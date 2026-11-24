@@ -15,6 +15,130 @@ import { assertSafeLabOrigin } from './setup-native-multi-portal-demo.mjs';
 
 const DEFAULT_ORG = 'native-ui-lab';
 const DEMO_PASS = process.env.NATIVE_DEMO_PASSWORD ?? 'NativeLab-2026!';
+const SAMPLE_EVIDENCE_PHOTO = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+export async function enforceDelegations(callActor, okActor, { organizationId, suffix, cleanupIds }) {
+  const delegOrderRes = await okActor('root', 'latticeOrders:create', {
+    method: 'POST',
+    values: {
+      code: `ORD-DLG-${suffix}`,
+      name: `Đơn kiểm chứng Ủy quyền ${suffix}`,
+      organizationId,
+      customer: 'Mekong Delegation Audit',
+      origin: 'Kho lạnh Cần Thơ',
+      destination: 'Kho lạnh TP.HCM',
+      quantity: 2,
+      category: 'cold-chain',
+      status: 'draft',
+    },
+  });
+  const delegOrder = delegOrderRes.data || {};
+  assert.ok(delegOrder.id, 'Failed to create temporary delegation order');
+  cleanupIds.delegOrderId = delegOrder.id;
+
+  const preSubmitBlocked = await callActor('employee', 'latticeVoucher:submit', {
+    method: 'POST',
+    values: { collection: 'latticeOrders', id: delegOrder.id },
+  });
+  assert.equal(
+    preSubmitBlocked.status,
+    403,
+    `Expected 403 before delegation for employee latticeVoucher:submit, got ${preSubmitBlocked.status}`,
+  );
+
+  const escalatedDelegation = await callActor('employee', 'dxosDelegations:create', {
+    method: 'POST',
+    values: {
+      organizationId,
+      delegateUserId: 1,
+      roleName: 'ldx_admin',
+      startsAt: new Date(Date.now() - 60_000).toISOString(),
+      endsAt: new Date(Date.now() + 3600_000).toISOString(),
+      reason: 'Blocked admin escalation',
+    },
+  });
+  assert.equal(
+    escalatedDelegation.status,
+    403,
+    `Expected 403 on ldx_admin delegation escalation, got ${escalatedDelegation.status}`,
+  );
+
+  const empCheckRes = await callActor('employee', 'auth:check');
+  const delegateUserId = Number(empCheckRes.data?.id);
+  const empListRes = await okActor(
+    'root',
+    `latticeEmployees:list?filter=${encodeURIComponent(JSON.stringify({ organizationId, active: true }))}&pageSize=50`,
+  );
+  const empRows = Array.isArray(empListRes.data)
+    ? empListRes.data
+    : (Array.isArray(empListRes.data?.items) ? empListRes.data.items : []);
+  const delegatorEmp = empRows.find(
+    (e) => Number(e?.userId) > 0 && Number(e?.userId) !== delegateUserId,
+  );
+  const delegatorUserId = Number(delegatorEmp?.userId);
+  assert.ok(
+    Number.isInteger(delegateUserId) && delegateUserId > 0 && Number.isInteger(delegatorUserId) && delegatorUserId > 0,
+    'Unable to resolve active delegatorUserId and delegateUserId for enforceDelegations',
+  );
+
+  const createDlgRes = await okActor('root', 'dxosDelegations:create', {
+    method: 'POST',
+    values: {
+      organizationId,
+      delegatorUserId,
+      delegateUserId,
+      roleName: 'ldx_manager',
+      scopeCollection: 'latticeOrders',
+      reason: `Headless PaaS active delegation enforcement ${suffix}`,
+      startsAt: new Date(Date.now() - 60_000).toISOString(),
+      endsAt: new Date(Date.now() + 3600_000).toISOString(),
+    },
+  });
+  const delegation = createDlgRes.data?.delegation || {};
+  assert.ok(delegation.id && delegation.delegationUid, 'dxosDelegations:create missing delegation id/uid');
+  cleanupIds.delegationId = delegation.id;
+
+  const activeDlgRes = await okActor(
+    'employee',
+    `dxosDelegations:activeForUser?organizationId=${encodeURIComponent(organizationId)}`,
+  );
+  assert.ok(
+    Array.isArray(activeDlgRes.data?.roles) && activeDlgRes.data.roles.includes('ldx_manager'),
+    'dxosDelegations:activeForUser missing active ldx_manager role',
+  );
+  assert.ok(
+    Array.isArray(activeDlgRes.data?.items)
+      && activeDlgRes.data.items.some((d) => d.delegationUid === delegation.delegationUid && d.scopeCollection === 'latticeOrders'),
+    'dxosDelegations:activeForUser missing scoped delegation record',
+  );
+
+  const delegatedSubmitRes = await okActor('employee', 'latticeVoucher:submit', {
+    method: 'POST',
+    values: { collection: 'latticeOrders', id: delegOrder.id },
+  });
+  assert.equal(delegatedSubmitRes.data?.status, 'submitted', 'Delegated employee could not submit order voucher');
+
+  const revokeDlgRes = await okActor('root', 'dxosDelegations:revoke', {
+    method: 'POST',
+    values: { organizationId, id: delegation.id },
+  });
+  assert.equal(revokeDlgRes.data?.delegation?.status, 'revoked');
+
+  const afterRevokeRes = await okActor(
+    'employee',
+    `dxosDelegations:activeForUser?organizationId=${encodeURIComponent(organizationId)}`,
+  );
+  assert.equal(
+    (afterRevokeRes.data?.items || []).some((d) => d.delegationUid === delegation.delegationUid),
+    false,
+    'Revoked delegation still active in activeForUser',
+  );
+
+  return {
+    delegationUid: delegation.delegationUid,
+    delegOrderId: delegOrder.id,
+  };
+}
 
 export function parseHeadlessAcceptanceArgs(argv) {
   let origin = null;
@@ -119,6 +243,8 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     frozenSnapshotId: null,
     frozenSnapshotUid: null,
     orderId: null,
+    delegOrderId: null,
+    delegationId: null,
     orderLineId: null,
     lotIds: [],
     mktLotCode: null,
@@ -136,6 +262,7 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     dataGovernanceColdSnapshotAndLineageOk: false,
     wmsTmsEpodAndPublicTrackOk: false,
     dmnAndDelegationOk: false,
+    delegationEnforcementOk: false,
     digitalTwinHitlGateOk: false,
     autofillTriageAndBundleOk: false,
   };
@@ -412,6 +539,7 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
         gpsLat: 10.0452,
         gpsLng: 105.7469,
         signatureDataUrl: 'data:image/png;base64,iVBORw0KGgo=',
+        evidencePhotoDataUrl: SAMPLE_EVIDENCE_PHOTO,
         tempSummary: { mktCelsius: 4.1, inRange: true },
       },
     });
@@ -426,9 +554,15 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
         documentType: 'epod',
         epodUid: epodData.epod?.epodUid,
         orderCode: tempOrder.code,
+        trackingToken: epodData.trackingToken,
       },
     });
     assert.ok(typeof voucherRes.data?.html === 'string' && voucherRes.data.html.length > 0);
+    assert.ok(voucherRes.data.html.includes('<svg'), 'printVoucher HTML missing ISO/IEC 18004 QR <svg>');
+    assert.ok(
+      voucherRes.data.html.includes('epod-photo-img') && voucherRes.data.html.includes(SAMPLE_EVIDENCE_PHOTO),
+      'printVoucher HTML missing embedded evidencePhotoDataUrl',
+    );
     assert.ok(typeof voucherRes.data?.qrVerificationHash === 'string' && voucherRes.data.qrVerificationHash.length > 0);
 
     const badTrack = await callActor('anon', `dxosWms:publicTrack?trackingCode=MISSING-${suffix}&token=invalid`);
@@ -447,6 +581,25 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     assert.ok(!serializedTrack.includes('0912345678'), 'publicTrack leaked phone PII');
     assert.equal(goodTrack.data?.signatureDataUrl, undefined, 'publicTrack leaked signatureDataUrl');
     assert.equal(goodTrack.data?.trackingTokenHash, undefined, 'publicTrack leaked trackingTokenHash');
+
+    const badVerifyTrack = await callActor('anon', `dxosWms:verifyTrackSignature?trackingCode=MISSING-${suffix}&token=invalid`);
+    assert.ok(
+      [400, 401, 404].includes(badVerifyTrack.status),
+      `Expected fail-closed 400/401/404 on invalid verifyTrackSignature, got ${badVerifyTrack.status}`,
+    );
+
+    const goodVerifyTrack = await okActor(
+      'anon',
+      `dxosWms:verifyTrackSignature?trackingCode=${encodeURIComponent(epodData.trackingCode)}&token=${encodeURIComponent(epodData.trackingToken)}`,
+    );
+    assert.equal(goodVerifyTrack.data?.verified, true, 'verifyTrackSignature expected verified=true');
+    assert.ok(goodVerifyTrack.data?.seq != null, 'verifyTrackSignature missing ledger seq');
+    assert.ok(typeof goodVerifyTrack.data?.keyId === 'string' && goodVerifyTrack.data.keyId.length > 0, 'verifyTrackSignature missing keyId');
+    assert.ok(typeof goodVerifyTrack.data?.entryHash === 'string' && goodVerifyTrack.data.entryHash.length > 0, 'verifyTrackSignature missing entryHash');
+    assert.ok(typeof goodVerifyTrack.data?.publicKeyFingerprint === 'string' && goodVerifyTrack.data.publicKeyFingerprint.length > 0, 'verifyTrackSignature missing publicKeyFingerprint');
+    const serializedVerify = JSON.stringify(goodVerifyTrack.data);
+    assert.ok(!serializedVerify.includes('Nguyen Van Test PII'), 'verifyTrackSignature leaked recipientName PII');
+    assert.ok(!serializedVerify.includes('0912345678'), 'verifyTrackSignature leaked phone PII');
     checks.wmsTmsEpodAndPublicTrackOk = true;
 
     // 6. DMN Decision Table + Delegations
@@ -486,6 +639,14 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     const delegationsRes = await okActor('root', `dxosDelegations:list?organizationId=${encodeURIComponent(organizationId)}`);
     assert.ok(Array.isArray(delegationsRes.data?.items));
     checks.dmnAndDelegationOk = true;
+
+    const delegationEnforcement = await enforceDelegations(callActor, okActor, {
+      organizationId,
+      suffix,
+      cleanupIds,
+    });
+    assert.ok(delegationEnforcement.delegationUid, 'enforceDelegations did not return delegationUid');
+    checks.delegationEnforcementOk = true;
 
     // 7. Two-way Digital Twin HITL delta > 2.0C gate
     const tempAssetRes = await okActor('root', 'latticeAssets:create', {
@@ -657,6 +818,12 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
           await callActor('root', `latticeAutomationRuns:destroy?filterByTk=${row.id}`, { method: 'POST' }).catch(() => {});
         }
       }
+    }
+    if (cleanupIds.delegationId) {
+      await callActor('root', `latticeDelegations:destroy?filterByTk=${cleanupIds.delegationId}`, { method: 'POST' }).catch(() => {});
+    }
+    if (cleanupIds.delegOrderId) {
+      await callActor('root', `latticeOrders:destroy?filterByTk=${cleanupIds.delegOrderId}`, { method: 'POST' }).catch(() => {});
     }
     if (cleanupIds.orderId) {
       await callActor('root', `latticeOrders:destroy?filterByTk=${cleanupIds.orderId}`, { method: 'POST' }).catch(() => {});

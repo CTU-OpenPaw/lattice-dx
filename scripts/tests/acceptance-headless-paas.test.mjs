@@ -62,6 +62,9 @@ function createMockHeadlessCaller({
   const destroyed = [];
   const revokedPatTokens = new Set();
   const issuedPatToken = 'ldx_pat_a1b2c3d4_0123456789abcdef0123456789abcdef';
+  let lastEvidencePhoto = '';
+  let nextOrderId = 500;
+  let activeDelegation = null;
 
   const callActor = async (actorRole, path, opts = {}) => {
     calls.push({ actorRole, path, opts });
@@ -113,7 +116,21 @@ function createMockHeadlessCaller({
     }
 
     if (resourceAction === 'latticeOrders:create') {
-      return { ok: true, status: 200, data: { id: 501, code: opts.values?.code } };
+      nextOrderId += 1;
+      return { ok: true, status: 200, data: { id: nextOrderId, code: opts.values?.code, status: opts.values?.status || 'draft' } };
+    }
+    if (resourceAction === 'auth:check') {
+      return { ok: true, status: 200, data: { id: actorRole === 'employee' ? 202 : 101, username: actorRole } };
+    }
+    if (resourceAction === 'latticeEmployees:list') {
+      return {
+        ok: true,
+        status: 200,
+        data: [
+          { id: 1, userId: 101, organizationId: 'native-ui-lab', active: true },
+          { id: 2, userId: 202, organizationId: 'native-ui-lab', active: true },
+        ],
+      };
     }
     if (resourceAction === 'dxosLedger:signDocument') {
       return { ok: true, status: 200, data: { signed: true, signatureBase64: 'sig==', merkleRoot: 'root123' } };
@@ -188,6 +205,7 @@ function createMockHeadlessCaller({
       return { ok: true, status: 200, data: { held: true, lotStatus: 'hold_mkt', mktCelsius: 13.3 } };
     }
     if (resourceAction === 'dxosWms:epodCapture') {
+      lastEvidencePhoto = String(opts.values?.evidencePhotoDataUrl || '');
       return {
         ok: true,
         status: 200,
@@ -195,7 +213,12 @@ function createMockHeadlessCaller({
       };
     }
     if (resourceAction === 'dxosWms:printVoucher') {
-      return { ok: true, status: 200, data: { html: '<html>EPOD</html>', qrVerificationHash: 'qr-hash' } };
+      const photoHtml = lastEvidencePhoto ? `<img class="epod-photo-img" src="${lastEvidencePhoto}" />` : '';
+      return {
+        ok: true,
+        status: 200,
+        data: { html: `<html><svg viewBox="0 0 29 29"></svg>EPOD${photoHtml}</html>`, qrVerificationHash: 'qr-hash' },
+      };
     }
     if (resourceAction === 'dxosWms:publicTrack') {
       if (query.includes('MISSING-')) {
@@ -205,6 +228,24 @@ function createMockHeadlessCaller({
         ok: true,
         status: 200,
         data: { trackingCode: 'TRK-901', status: 'delivered', orderCode: 'ORD-PAAS-1' },
+      };
+    }
+    if (resourceAction === 'dxosWms:verifyTrackSignature') {
+      if (query.includes('MISSING-')) {
+        return { ok: false, status: 401, data: { code: 'TRACKING_UNAUTHORIZED' } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          verified: true,
+          seq: 1,
+          ledgerSeq: 1,
+          entryHash: 'a'.repeat(64),
+          keyId: 'ed25519-key-1',
+          publicKeyFingerprint: 'b'.repeat(64),
+          reason: '',
+        },
       };
     }
 
@@ -219,7 +260,44 @@ function createMockHeadlessCaller({
       return { ok: true, status: 200, data: { items: [{ id: 1001, tableKey: created }] } };
     }
     if (resourceAction === 'dxosDelegations:list') {
-      return { ok: true, status: 200, data: { items: [] } };
+      return { ok: true, status: 200, data: { items: activeDelegation ? [activeDelegation] : [] } };
+    }
+    if (resourceAction === 'dxosDelegations:create') {
+      if (actorRole === 'employee' && opts.values?.roleName === 'ldx_admin') {
+        return { ok: false, status: 403, data: { code: 'DELEGATION_ESCALATION_FORBIDDEN' } };
+      }
+      activeDelegation = {
+        id: 1701,
+        delegationUid: 'DLG-MOCK-1701',
+        organizationId: opts.values?.organizationId,
+        delegatorUserId: opts.values?.delegatorUserId,
+        delegateUserId: opts.values?.delegateUserId,
+        roleName: opts.values?.roleName,
+        scopeCollection: opts.values?.scopeCollection || null,
+        status: 'active',
+        active: true,
+      };
+      return { ok: true, status: 200, data: { delegation: activeDelegation } };
+    }
+    if (resourceAction === 'dxosDelegations:activeForUser') {
+      const activeItems = activeDelegation && activeDelegation.status === 'active' ? [activeDelegation] : [];
+      return {
+        ok: true,
+        status: 200,
+        data: { items: activeItems, roles: activeItems.map((d) => d.roleName) },
+      };
+    }
+    if (resourceAction === 'dxosDelegations:revoke') {
+      if (activeDelegation) {
+        activeDelegation = { ...activeDelegation, status: 'revoked', active: false };
+      }
+      return { ok: true, status: 200, data: { delegation: activeDelegation } };
+    }
+    if (resourceAction === 'latticeVoucher:submit') {
+      if (actorRole === 'employee' && !(activeDelegation && activeDelegation.status === 'active')) {
+        return { ok: false, status: 403, data: { code: 'VOUCHER_FORBIDDEN' } };
+      }
+      return { ok: true, status: 200, data: { id: opts.values?.id, status: 'submitted', version: 2 } };
     }
 
     if (resourceAction === 'latticeAssets:create') {
@@ -339,6 +417,8 @@ test('runHeadlessPaaSAcceptance verifies all 8 PaaS checks and cleans up tempora
   assert.equal(calls.some((c) => c.path.includes('latticeStockAllocations')), false);
   assert.ok(destroyed.some((p) => p.includes('latticeFrozenSnapshots:destroy?filterByTk=1401')));
   assert.ok(destroyed.some((p) => p.includes('latticeOrders:destroy?filterByTk=501')));
+  assert.ok(destroyed.some((p) => p.includes('latticeOrders:destroy?filterByTk=502')));
+  assert.ok(destroyed.some((p) => p.includes('latticeDelegations:destroy?filterByTk=1701')));
   assert.ok(destroyed.some((p) => p.includes('latticeAssets:destroy?filterByTk=1101')));
   assert.ok(destroyed.some((p) => p.includes('latticeAiApprovalQueue:destroy?filterByTk=1301')));
   assert.ok(destroyed.some((p) => p.includes('latticeIncidentCases:destroy?filterByTk=1501')));

@@ -52,8 +52,15 @@ export function parseAiMcpAcceptanceArgs(argv) {
 }
 
 export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
+  const organizationId = 'native-ui-lab';
   const suffix = Date.now().toString(36).slice(-5);
   const customUsername = `dxos-e2e-custom-${suffix}`;
+  const tempDmnKey = `acc_mcp_dmn_${suffix}`;
+  const tempHitlRuleKey = `acc_mcp_hitl_${suffix}`;
+  let tempHitlRunUid = null;
+  let tempHitlRunId = null;
+  let tempHitlApprovalId = null;
+  let createdHitlRule = false;
   const checks = {
     unauthenticatedMcp401: false,
     employeeBuilderToolsHidden: false,
@@ -74,6 +81,9 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     adminCreativeBlockDryRunOk: false,
     adminSnapshotListOk: false,
     adminProvisionRoleWorkspaceDryRunOk: false,
+    adminAppBuilderDryRunAndVerifyOk: false,
+    adminConfigureWorkflowDmnAndN8nOk: false,
+    hitlLatticeFlowApprovalResolvedOk: false,
     employeeCrossDeptRadarOk: false,
     adminMcpTopologyResource6Planes: false,
     itOtMcp4Tools: false,
@@ -247,6 +257,230 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     assert.equal(provRootDeny.json?.error?.code, -32003);
     checks.adminProvisionRoleWorkspaceDryRunOk = true;
 
+    // 3a-1. App Builder Orchestrator (build_enterprise_app dryRun + verify_app + employee 403)
+    const empBuildDeny = await rpcRequest('employee', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 32,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_provision_role_workspace',
+        arguments: {
+          operation: 'build_enterprise_app',
+          collectionName: 'latticeCustomBlockedMcp',
+          portalSlug: 'services',
+          dryRun: true,
+        },
+      },
+    });
+    assert.equal(empBuildDeny.json?.error?.code, -32003, 'Expected -32003 for employee build_enterprise_app');
+
+    const buildDryCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 33,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_provision_role_workspace',
+        arguments: {
+          operation: 'build_enterprise_app',
+          collectionName: `latticeCustomAppEval${suffix.replace(/[^a-zA-Z0-9]/g, '')}`,
+          portalSlug: 'services',
+          pageTitle: `MCP App Builder ${suffix}`,
+          fields: [{ name: 'lotRef', type: 'string', title: 'Lot Ref' }],
+          blocks: [{ blockUse: 'DxosWmsOpsBlockModel', title: 'WMS Ops' }],
+          dryRun: true,
+        },
+      },
+    });
+    assert.equal(buildDryCall.json?.result?.isError, false);
+    const buildDryJson = JSON.parse(buildDryCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(buildDryJson.dryRun, true);
+    assert.ok(buildDryJson.planned?.collectionName, 'build_enterprise_app dryRun missing planned.collectionName');
+
+    const verifyAppCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 34,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_provision_role_workspace',
+        arguments: {
+          operation: 'verify_app',
+          collectionName: 'latticeOrders',
+          portalSlug: 'logistics',
+        },
+      },
+    });
+    assert.equal(verifyAppCall.json?.result?.isError, false);
+    const verifyAppJson = JSON.parse(verifyAppCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(typeof verifyAppJson.ok, 'boolean');
+    assert.ok(Array.isArray(verifyAppJson.checks) && verifyAppJson.checks.length >= 1, 'verify_app missing checks array');
+    checks.adminAppBuilderDryRunAndVerifyOk = true;
+
+    // 3a-2. dxos_configure_workflow (DMN tables + Stock n8n REST API v1 + connected apps)
+    const dmnListCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 35,
+      method: 'tools/call',
+      params: { name: 'dxos_configure_workflow', arguments: { operation: 'dmn_list_tables' } },
+    });
+    assert.equal(dmnListCall.json?.result?.isError, false);
+    const dmnListJson = JSON.parse(dmnListCall.json?.result?.content?.[0]?.text || '{}');
+    assert.ok(Array.isArray(dmnListJson.tables || dmnListJson.items), 'dmn_list_tables missing tables/items');
+
+    const dmnSaveCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 36,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_configure_workflow',
+        arguments: {
+          operation: 'dmn_save_table',
+          tableKey: tempDmnKey,
+          name: `MCP DMN ${suffix}`,
+          hitPolicy: 'FIRST',
+          inputsJson: [{ name: 'tempC', type: 'number' }],
+          outputsJson: [{ name: 'action', type: 'string' }],
+          rulesJson: [
+            { when: { tempC: { op: 'gt', value: 8 } }, then: { action: 'quarantine' } },
+            { when: { tempC: '*' }, then: { action: 'normal' } },
+          ],
+        },
+      },
+    });
+    assert.equal(dmnSaveCall.json?.result?.isError, false);
+
+    const dmnEvalCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 37,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_configure_workflow',
+        arguments: { operation: 'dmn_evaluate', tableKey: tempDmnKey, context: { tempC: 11 } },
+      },
+    });
+    assert.equal(dmnEvalCall.json?.result?.isError, false);
+    const dmnEvalJson = JSON.parse(dmnEvalCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(dmnEvalJson.matched, true);
+    assert.equal(dmnEvalJson.result?.action, 'quarantine');
+
+    const appsListCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 38,
+      method: 'tools/call',
+      params: { name: 'dxos_configure_workflow', arguments: { operation: 'list_connected_apps' } },
+    });
+    assert.equal(appsListCall.json?.result?.isError, false);
+    const appsListJson = JSON.parse(appsListCall.json?.result?.content?.[0]?.text || '{}');
+    assert.ok(Array.isArray(appsListJson.items) && appsListJson.items.length >= 1, 'list_connected_apps missing items');
+
+    const n8nDryCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 39,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_configure_workflow',
+        arguments: {
+          operation: 'create_n8n_workflow',
+          dryRun: true,
+          workflow: { name: `MCP Dry n8n ${suffix}`, nodes: [], connections: {} },
+        },
+      },
+    });
+    assert.equal(n8nDryCall.json?.result?.isError, false);
+    const n8nDryJson = JSON.parse(n8nDryCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(n8nDryJson.dryRun, true);
+
+    const n8nListCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 40,
+      method: 'tools/call',
+      params: { name: 'dxos_configure_workflow', arguments: { operation: 'list_n8n_workflows', limit: 5 } },
+    });
+    if (n8nListCall.json?.result?.isError === true) {
+      const errText = String(n8nListCall.json?.result?.content?.[0]?.text || '');
+      const n8nNotConfigured = /N8N_CONNECTOR_NOT_CONFIGURED|Chưa cấu hình connector n8n|No active n8n API connector/i.test(errText);
+      assert.ok(
+        n8nNotConfigured && process.env.DX_REQUIRE_N8N !== '1',
+        `list_n8n_workflows failed unexpectedly: ${errText}`,
+      );
+    } else {
+      assert.equal(n8nListCall.json?.result?.isError, false);
+    }
+    checks.adminConfigureWorkflowDmnAndN8nOk = true;
+
+    // 3a-3. latticeflow.approval HITL queue resolution via dxosAi:listApprovals + dxosAi:approveAction
+    const saveHitlRuleRes = await callActor('root', 'dxosAutomations:saveRule', {
+      method: 'POST',
+      values: {
+        organizationId,
+        schemaVersion: 2,
+        ruleKey: tempHitlRuleKey,
+        name: `MCP HITL Queue Rule ${suffix}`,
+        triggerEventType: 'manual.trigger',
+        cooldownSec: 0,
+        maxDepth: 8,
+        active: true,
+        graphJson: {
+          version: 2,
+          nodes: [
+            { id: 'trig_1', type: 'trigger.manual', label: 'Manual', config: {} },
+            {
+              id: 'hitl_gate',
+              type: 'control.approval',
+              label: 'Approval Gate',
+              config: { approverRole: 'ldx_manager', title: `MCP HITL ${suffix}`, summary: 'Approve MCP HITL check', riskLevel: 'medium' },
+            },
+            {
+              id: 'notify_done',
+              type: 'notify.send',
+              label: 'Done',
+              config: { roleNames: ['ldx_operator'], severity: 'info', title: `HITL done ${suffix}` },
+            },
+          ],
+          edges: [
+            { id: 'e1', source: 'trig_1', sourceHandle: 'main', target: 'hitl_gate', targetHandle: 'in' },
+            { id: 'e2', source: 'hitl_gate', sourceHandle: 'approved', target: 'notify_done', targetHandle: 'in', label: 'approved' },
+          ],
+          settings: { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 8, timeoutMs: 30000 },
+        },
+      },
+    });
+    assert.ok(saveHitlRuleRes.ok && saveHitlRuleRes.status < 300, `dxosAutomations:saveRule failed: ${JSON.stringify(saveHitlRuleRes.data)}`);
+    createdHitlRule = true;
+
+    const hitlRunRes = await callActor('root', 'dxosAutomations:runNow', {
+      method: 'POST',
+      values: { organizationId, ruleKey: tempHitlRuleKey, event: { type: 'manual.trigger', data: { code: suffix } } },
+    });
+    assert.ok(hitlRunRes.ok && hitlRunRes.status < 300, `dxosAutomations:runNow failed: ${JSON.stringify(hitlRunRes.data)}`);
+    const hitlRun = hitlRunRes.data?.run || {};
+    tempHitlRunUid = hitlRun.runUid || null;
+    tempHitlRunId = hitlRun.id ?? null;
+    tempHitlApprovalId = hitlRun.approvalId ?? null;
+    assert.equal(hitlRun.status, 'suspended', `Expected suspended HITL run, got ${hitlRun.status}`);
+    assert.ok(tempHitlApprovalId != null, 'Suspended HITL run missing approvalId');
+
+    const pendingApprovalsRes = await callActor('root', `dxosAi:listApprovals?organizationId=${encodeURIComponent(organizationId)}&status=pending&limit=50`);
+    assert.ok(pendingApprovalsRes.ok && pendingApprovalsRes.status < 300);
+    const pendingItem = (pendingApprovalsRes.data?.items || []).find((q) => Number(q?.id) === Number(tempHitlApprovalId));
+    assert.ok(pendingItem, 'latticeflow.approval item missing from dxosAi:listApprovals');
+    assert.equal(pendingItem.toolName, 'latticeflow.approval');
+    assert.equal(pendingItem.targetCollection, 'latticeAutomationRuns');
+
+    const approveHitlRes = await callActor('root', 'dxosAi:approveAction', {
+      method: 'POST',
+      values: { approvalId: tempHitlApprovalId, note: 'Approved by MCP E2E acceptance' },
+    });
+    assert.ok(approveHitlRes.ok && approveHitlRes.status < 300, `dxosAi:approveAction failed: ${JSON.stringify(approveHitlRes.data)}`);
+    assert.equal(approveHitlRes.data?.status, 'approved');
+    const resolvedFlowStatus = approveHitlRes.data?.executionResult?.status || approveHitlRes.data?.flowRun?.status;
+    if (resolvedFlowStatus) {
+      assert.equal(resolvedFlowStatus, 'completed');
+    } else if (tempHitlRunUid) {
+      const traceRes = await callActor('root', `dxosAutomations:getRunTrace?organizationId=${encodeURIComponent(organizationId)}&runUid=${encodeURIComponent(tempHitlRunUid)}`);
+      assert.ok(traceRes.ok && traceRes.data?.run?.status === 'completed');
+    }
+    checks.hitlLatticeFlowApprovalResolvedOk = true;
+
     const empRadar = await rpcRequest('employee', '/api/dxos-mcp', {
       jsonrpc: '2.0',
       id: 20,
@@ -363,6 +597,39 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
   } finally {
     const delRes = await callActor('root', 'dxosAi:deleteProfile', { method: 'POST', values: { username: customUsername } }).catch(() => ({ ok: false }));
     if (delRes?.ok) checks.customAiLifecycleCleanedUp = true;
+
+    if (tempHitlApprovalId != null) {
+      await callActor('root', `latticeAiApprovalQueue:destroy?filterByTk=${encodeURIComponent(tempHitlApprovalId)}`, { method: 'POST' }).catch(() => {});
+    }
+    if (tempHitlRunId != null) {
+      await callActor('root', `latticeAutomationRuns:destroy?filterByTk=${encodeURIComponent(tempHitlRunId)}`, { method: 'POST' }).catch(() => {});
+    } else if (tempHitlRunUid) {
+      const runsRes = await callActor(
+        'root',
+        `latticeAutomationRuns:list?filter=${encodeURIComponent(JSON.stringify({ organizationId, runUid: tempHitlRunUid }))}&pageSize=5`,
+      ).catch(() => null);
+      const runs = Array.isArray(runsRes?.data) ? runsRes.data : (Array.isArray(runsRes?.data?.items) ? runsRes.data.items : []);
+      for (const r of runs) {
+        if (r?.id != null) {
+          await callActor('root', `latticeAutomationRuns:destroy?filterByTk=${encodeURIComponent(r.id)}`, { method: 'POST' }).catch(() => {});
+        }
+      }
+    }
+    if (createdHitlRule) {
+      await callActor('root', 'dxosAutomations:deleteRule', { method: 'POST', values: { organizationId, ruleKey: tempHitlRuleKey } }).catch(() => {});
+    }
+    const dmnListCleanup = await callActor(
+      'root',
+      `latticeDecisionTables:list?filter=${encodeURIComponent(JSON.stringify({ organizationId, tableKey: tempDmnKey }))}&pageSize=5`,
+    ).catch(() => null);
+    const dmnRows = Array.isArray(dmnListCleanup?.data)
+      ? dmnListCleanup.data
+      : (Array.isArray(dmnListCleanup?.data?.items) ? dmnListCleanup.data.items : []);
+    for (const row of dmnRows) {
+      if (row?.id != null) {
+        await callActor('root', `latticeDecisionTables:destroy?filterByTk=${encodeURIComponent(row.id)}`, { method: 'POST' }).catch(() => {});
+      }
+    }
   }
 
   const auditRes = await callActor('root', 'dxosAi:auditLogs?pageSize=20');

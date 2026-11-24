@@ -32,10 +32,10 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
 - **Các Tab Trình duyệt Chuẩn bị sẵn:**
   1. `http://localhost:13014/admin/settings/dxos-ai` (Trung tâm 6 Phân hệ, AI Workforce & HITL)
   2. `http://localhost:13014/admin/settings/dxos-studio` (Control Studio **9 Tabs**, 6 Governance Consoles & GitOps Bundle v3) & `http://localhost:13014/admin/settings/workflow/automation` (**Workflow -> Workflow Automation**: LatticeFlow v2 Canvas-First Studio — 24 node types, HITL Pause/Resume & **Agent Chat gốc `dxos-architect`** đồng bộ SSE)
-  3. `http://localhost:13014/p/logistics` (Logistics 5 bước, Kanban/Schedule, PKI & Printable Voucher)
-  4. `http://localhost:13014/p/incidents` (WebGIS Chuỗi lạnh, IIoT Digital Twin & GraphRAG Enterprise Agent)
-  5. `http://localhost:13014/p/cmms` (CMMS Bảo trì Thiết bị — `latticeCustomWorkOrders` từ Business Pack 1-nhấp)
-  6. `http://localhost:13014/v/mobile` (Mobile Field PWA ngoại tuyến)
+  3. `http://localhost:13014/p/logistics` (Logistics 5 bước, **`DxosWmsOpsBlockModel`**, Kanban/Schedule, PKI, In chứng từ **QR ISO SVG** & `/v/track/:code` Ed25519)
+  4. `http://localhost:13014/p/incidents` (**WebGIS MapLibre**, IIoT Digital Twin & GraphRAG Enterprise Agent)
+  5. `http://localhost:13014/p/cmms` & `http://localhost:13014/p/partner-claims` (CMMS & Partner Settlement `CLM-V100-001` từ Business Packs 1-nhấp)
+  6. `http://localhost:13014/v/mobile` (Mobile Field PWA **IndexedDB outbox + camera ảnh ePOD**)
 
 ---
 
@@ -51,10 +51,10 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
 ### 1:45 – 4:15 · Plug-and-Play Chuỗi lạnh OMS/WMS/FEFO/ePOD, Ed25519 PKI & DMN
 - **Màn hình:** `/p/logistics` -> `/admin/settings/dxos-studio` (thanh `Quản trị DX-OS v1.0:`).
 - **Thao tác & Thông điệp:**
-  1. Trên **`/p/logistics`**, giới thiệu **`DxosKanbanScheduleBlockModel`** (vận đơn `ORD-V100-001` Cần Thơ -> TP.HCM, chuyển nhanh Lịch 7 ngày) và **`DxosRecordWorkbenchBlockModel`**: bấm xác minh **Ed25519 PKI & Merkle Ledger** (`dxosLedger:verify`), mở ngăn **Phả hệ dữ liệu (Lineage)** (`dxosDataGov:lineageTrace`), và **In chứng từ** QR an toàn (`<iframe sandbox="" srcDoc>`).
+  1. Trên **`/p/logistics`**, giới thiệu **`DxosKanbanScheduleBlockModel`** (vận đơn `ORD-V100-001` Cần Thơ -> TP.HCM, chuyển nhanh Lịch 7 ngày), **`DxosWmsOpsBlockModel`** (tác vụ FEFO/MKT/2-phase bulk import trực tiếp trên `/p/logistics`), và **`DxosRecordWorkbenchBlockModel`**: bấm xác minh **Ed25519 PKI & Merkle Ledger** (`dxosLedger:verify`), mở ngăn **Phả hệ dữ liệu (Lineage)** (`dxosDataGov:lineageTrace`), và **In chứng từ QR ISO/IEC 18004 SVG** an toàn (`<iframe sandbox="" srcDoc>`) kèm link tra cứu công khai **`/v/track/:code`** (`dxosWms:verifyTrackSignature` không PII).
   2. Chuyển sang **`/admin/settings/dxos-studio`** thanh **`Quản trị DX-OS v1.0:`**:
      - Console **`Kho FEFO & ePOD`**: chỉ lô `LOT-V100-FEFO-A` đã phân bổ FEFO và lô `LOT-V100-MKT-HOLD` bị khóa bởi **Arrhenius MKT**.
-     - Console **`Bảng Quyết định DMN`**: đánh giá bảng `cold_chain_approval_v1` (`maxTempC: 9.5` -> `quality_hold_director`, SLA 15 phút, zero-`eval`).
+     - Console **`Bảng Quyết định DMN`**: trình diễn **Visual Interactive DMN** & đánh giá bảng `cold_chain_approval_v1` (`maxTempC: 9.5` -> `quality_hold_director`, SLA 15 phút, zero-`eval`).
 
 ### 4:15 – 8:45 · Closed-Loop Cold-Chain: LWT/Alarm -> Event Bus -> Native Automation + DMN -> CMMS (`/p/cmms`) + Live 2-Way `n8n` & Digital Twin HITL
 - **Màn hình:** `/p/incidents` -> `/admin/settings/dxos-studio` (Tabs `7`, `8`) -> `/p/cmms` -> `PortalAgentLauncher` -> `/admin/settings/dxos-ai` (Tab `6. Duyệt AI (HITL)`).
@@ -62,9 +62,9 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
   1. Trên **`/p/incidents`**, chỉ **`DxosWebGisBlockModel`** (`COLD-CHILLER-CT-01`, `REEFER-TRUCK-HCM-02`, `COLD-HUB-DN-03`) và **`DxosContextTelemetryBlockModel`** (nhiệt độ cảnh báo `8.9°C > 8°C`).
   2. Chuyển **`/admin/settings/dxos-studio`**:
      - **Tab `7. Broker & Sự kiện`**: chỉ thiết bị đã cấp phát **Mosquitto DynSec** (`$CONTROL/dynamic-security/v1`, `allow_anonymous false`, ACL `latticedx/<orgId>/<deviceKey>/*`) & đồng bộ 2 chiều **FIWARE Orion-LD** (`/ngsi-ld/v1/subscriptions` đẩy về `dxosBroker:orionNotify` -> `latticeTelemetryPoints` + `orion.notification`). Kích hoạt hoặc chỉ sự kiện **`DEATH` LWT (`device.offline`) / `alarm.triggered`** đi qua **Unified CloudEvents 1.0 + Standard Webhooks (`dxosEvents`)** (PG Outbox `SKIP LOCKED`, chữ ký HMAC `webhook-id`/`webhook-timestamp`/`webhook-signature`, backoff + jitter, Circuit Breaker 5 lỗi/120s, DLQ Replay).
-     - **Tab `8. Vault & Automation`**: chỉ **Connector & Secrets Vault (`dxosVault`, AES-256-GCM + SSRF allowlist + `testConnection`)** và **Native Automation Engine (`dxosAutomations`)**: rule `auto_cmms_on_coldchain_fault` nhận sự kiện `alarm.triggered` -> đánh giá DMN `cmms_priority_routing_v1` -> chạy chuỗi actions (ghi nhận `stepTracesJson` có `replayRun`, chống lặp `maxDepth: 8`).
-  3. Mở **`/p/cmms`** (từ gói **1-Click `cmms-maintenance`**): chỉ **CMMS Work Order mới** vừa tự tạo trên `latticeCustomWorkOrders` kèm mức độ ưu tiên & vai trò từ DMN, đồng thời chỉ **Live 2-Way `n8n`** (`dxos-coldchain-alert-orchestrator.json` & `dxos-epod-partner-sync.json`) xác thực chữ ký Standard Webhooks HMAC-SHA256 và gọi ngược `:13014` bằng token phạm vi `ldx_pat_*` (`dxosAutomations:runNow` / `dxosLedger:signDocument`).
-  4. Quay lại **`/p/incidents`** -> mở **1 nút Agent nổi duy nhất (`PortalAgentLauncher`)**:
+     - **Tab `8. Vault & Automation`**: chỉ **Connector & Secrets Vault (`dxosVault`, AES-256-GCM + OAuth2 PKCE S256 & single-flight refresh cho 11 app + SSRF allowlist + `testConnection`)**, **Stock `n8n` Public REST API v1 (`dxosN8n`, `ConnectedAppsPanel`/`N8nSetupModal`)** và **Native Automation Engine (`dxosAutomations`)**: rule `auto_cmms_on_coldchain_fault` nhận sự kiện `alarm.triggered` -> đánh giá DMN `cmms_priority_routing_v1` -> chạy chuỗi actions (gọi `ai.agent` LLM thật, ghi nhận `stepTracesJson` có `replayRun`, chống lặp `maxDepth: 8`).
+  3. Mở **`/p/cmms`** (`cmms-maintenance`) & **`/p/partner-claims`** (từ gói **1-Click `coldchain-partner-settlement`**, mẫu `CLM-V100-001`): chỉ **CMMS Work Order mới** và luồng **`dxos-enterprise-compliance-orchestrator.json` (`26` node)** + Error Trigger trên `n8n` xác thực HMAC-SHA256 và gọi ngược `:13014` via `dxos-external-app-inbound-callback.json` bằng token `ldx_pat_*` (`dxosAutomations:runNow` / `dxosLedger:signDocument`).
+  4. Quay lại **`/p/incidents`** -> chỉ **Chuông Thông báo SSE Topbar** & mở **1 nút Agent nổi duy nhất (`PortalAgentLauncher`)** (hoặc **App Builder Agent** `dxos_provision_role_workspace` dựng + `verify_app` tự sửa 2 vòng):
      > *"Phân tích ảnh hưởng dây chuyền nếu kho lạnh COLD-CHILLER-CT-01 gặp sự cố quá nhiệt trên toàn bộ chuỗi"*
      - Hệ thống gọi **`#16 dxos_graph_impact_analysis`** (cùng `#17 dxos_alarm_action` và `dxos_configure_workflow` hỗ trợ `listAutomations`/`runAutomation`), rồi vào **`/admin/settings/dxos-ai` -> Tab `6. Duyệt AI (HITL)`** bấm `dxosAi:triageScan` và giải thích cơ chế **HITL Digital Twin gate** (mọi thay đổi setpoint lệch `|delta| > 2.0°C` buộc người có quyền ACL duyệt `dxosAi:approveAction` mới đẩy MQTT downlink qua Node-RED).
 
@@ -72,7 +72,7 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
 - **Màn hình:** `/admin/settings/dxos-studio` (Tab `9. Domain Builder & Tenant`) -> `/v/mobile` -> `/p/services`.
 - **Thao tác & Thông điệp:**
   1. Trên **Tab `9. Domain Builder & Tenant`**: tạo nhanh một thực thể nghiệp vụ động `latticeCustom*` (hoặc trình diễn `cmms-maintenance` vừa cài) -> nhấn mạnh hệ thống tự tạo bảng + gắn **PostgreSQL RLS**, tự cập nhật đặc tả sống **`/api/dxos:openapi`**, cấp RBAC theo vai trò và sinh trang `/p/*`; chỉ tiếp nút **1-Click `provisionTenant` (`dxosBuilder:provisionTenant`)** khởi tạo trọn bộ tổ chức mới + Ed25519 key + SLA mặc định + tài khoản `ldx_admin`.
-  2. Mở **`/v/mobile`** (viewport `390px`): chỉ Service Worker `/api/dxos:sw.js` giữ bất biến `NetworkOnly` cho `/api/*` và hàng đợi ngoại tuyến cho `epodCapture` / `twinSetDesired`. Lướt nhanh `/p/services` (`DxosParaVaultBlockModel` + OCR Form Autofill `latticePara:extractFormFields`).
+  2. Mở **`/v/mobile`** (viewport `390px`): chỉ Service Worker `/api/dxos:sw.js` giữ bất biến `NetworkOnly` cho `/api/*` và **IndexedDB outbox (`mobile-offline-db.js`) + camera ảnh ePOD 512KB + QR fallback** cho `epodCapture` / `twinSetDesired`. Lướt nhanh `/p/services` (`DxosParaVaultBlockModel` + giải mã PDF `ToUnicode` CMap + OCR Form Autofill) và `/admin/settings/dxos-para`.
 
 ### 10:45 – 13:15 · Headless PaaS, GitOps Solution Bundle v3 & PoF / SBOM
 - **Màn hình:** `/admin/settings/dxos-studio` (Tab `6. GitOps Bundle`) + Terminal.
@@ -83,10 +83,12 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
      curl -s http://localhost:13014/api/dxos:health
      curl -s http://localhost:13014/api/dxos:openapi | head -n 30
      pnpm acceptance:headless-paas -- --origin=http://localhost:13014
+     pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014
+     pnpm acceptance:broker-automation -- --origin=http://localhost:13014
      pnpm release:sbom -- --check
      pnpm pof:check
      ```
-     - Nêu rõ: **8 suite Headless PaaS PASS**; `/api/dxos:openapi` phản chiếu sống cả `latticeCustomWorkOrders`; **SBOM CycloneDX 1.5** (`233` components: `workspace=12, npm=202, oci=19`, `232/233` resolved — chỉ `fsevents@2.3.3` macOS-optional trên Windows, 0 BSL-1.1); **PoF `PASS`**.
+     - Nêu rõ: **Headless PaaS (QR SVG + Ed25519 + Delegation), AI/MCP (17 Tools + App Builder + HITL) & Broker/n8n/PKCE PASS**; `/api/dxos:openapi` phản chiếu sống cả `latticeCustomWorkOrders` & `latticeCustomPartnerClaims`; **SBOM CycloneDX 1.5** (`257` components: `workspace=12, npm=226, oci=19`, `256/257` resolved — chỉ `fsevents@2.3.3` macOS-optional trên Windows, 0 BSL-1.1); **PoF `PASS`**.
 
 ### 13:15 – 15:00 · Chứng minh Negative RBAC (`403`) & Kết luận
 - **Màn hình:** Đăng xuất `admin@nocobase.com` -> đăng nhập **`native.lab.employee@example.invalid` / `NativeLab-2026!`**.
@@ -107,7 +109,7 @@ pnpm pof:check
 pnpm release:sbom -- --check
 node --test scripts/tests/oss-pof-audit.test.mjs scripts/tests/generate-sbom.test.mjs scripts/tests/infra-compose-security.test.mjs
 
-# 2. Chứng minh AI Intent Router + Security Refusal + GraphRAG + Flow Architect offline (80/80 ca)
+# 2. Chứng minh AI Intent Router + App Builder + Security Refusal + GraphRAG + Flow Architect offline (112/112 ca)
 node scripts/eval-vietnamese-nl-agent.mjs --min-pass=95
 
 # 3. Chứng minh toàn bộ unit & integration tests của 7 plugin (không cần LLM API key)
@@ -127,7 +129,7 @@ pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014
 2. **Hỏi: Tại sao hệ thống không dùng ThingsBoard, EMQX hay các dịch vụ cache nguồn hạn chế cho phần IIoT và session/rate-limit?**
    - **Đáp:** ThingsBoard (bản mới), EMQX Enterprise và các bản cache nguồn đóng/hạn chế không đạt chuẩn OSI. Để bảo đảm **100% Pure-OSI License Purity**, CTU-OpenPaw sử dụng **Valkey `8.1` (`valkey/valkey:8.1-alpine`, `BSD-3-Clause`, tương thích giao thức `PUBSUB_ADAPTER=redis`)**, **Eclipse Mosquitto `2.0.21` Dynamic Security (`EPL-2.0 OR BSD-3-Clause`)**, **Node-RED `4.0.9` (`Apache-2.0`)**, lưu chuỗi thời gian IIoT trực tiếp trên **PostgreSQL `16` (`latticeTelemetryPoints`, không cần container `timescaledb` tách rời)**, cùng **Prometheus `v3.3.0` (`Apache-2.0`)** và **OTel Collector `0.123.0` (`Apache-2.0`)**, có `scripts/generate-sbom.mjs` tự động chặn cứng từ khóa `BSL-1.1`/`thingsboard`/`emqx`.
 3. **Hỏi: Nếu một lập trình viên quên lọc `organizationId` ở tầng plugin thì dữ liệu đa công ty có rò rỉ không?**
-   - **Đáp:** Hệ thống áp dụng **phòng thủ nhiều tầng (Defense-in-Depth)**: ngoài middleware scope `before: 'latticeNativeScope'` ở tầng ứng dụng, PostgreSQL bật **Row-Level Security (`lattice_tenant_isolation`) trên cả 42 bảng `lattice*` + mọi bảng động `latticeCustom*`** (`pg-rls.js` + `AsyncLocalStorage` transaction bridge với `set_config('app.current_org', ..., true)` và kiểm chứng `pg_class.relrowsecurity` trong `domain-builder.js`), chặn triệt để rò rỉ chéo tổ chức ngay tại tầng CSDL.
+   - **Đáp:** Hệ thống áp dụng **phòng thủ nhiều tầng (Defense-in-Depth)**: ngoài middleware scope `before: 'latticeNativeScope'` ở tầng ứng dụng, PostgreSQL chạy qua vai trò không đặc quyền superuser **`nocobase_app`** và bật **`FORCE ROW LEVEL SECURITY` (`lattice_tenant_isolation`, `20261127000100`) trên cả 42 bảng `lattice*` + mọi bảng động `latticeCustom*`** (`pg-rls.js` + `AsyncLocalStorage` transaction bridge với `set_config('app.current_org', ..., true)` fail-closed và kiểm chứng `pg_class.relrowsecurity` trong `domain-builder.js`), chặn triệt để rò rỉ chéo tổ chức ngay tại tầng CSDL.
 4. **Hỏi: AI Agent có thể tự ý sửa nhiệt độ kho lạnh hay tự phê duyệt đơn hàng do ảo giác (hallucination) không?**
    - **Đáp:** Không thể. Mọi tool ghi/điều khiển (`dxos_execute_record_action`, `dxos_alarm_action`, `dxos_twin_set_desired`, `dxos_wms_hold_lot`) bị khóa sau **Hàng chờ HITL (`latticeAiApprovalQueue`)** và kiểm tra chống tự duyệt (`requesterUserId !== approver`). Riêng Digital Twin tự động chặn cứng mọi thay đổi setpoint lệch **`> 2.0°C`** để bắt buộc con người có quyền ACL xác nhận trước khi Node-RED phát lệnh MQTT downlink. Mọi tham số và đầu ra đều qua bộ che PII Việt Nam và kiểm soát hạn mức PostgreSQL.
 5. **Hỏi: Tài xế mất sóng 4G trong hầm kho lạnh thì thao tác ePOD trên `/v/mobile` xử lý thế nào?**

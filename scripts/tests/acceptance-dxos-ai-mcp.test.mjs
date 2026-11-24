@@ -23,9 +23,15 @@ test('parseAiMcpAcceptanceArgs rejects unsafe origins and parses valid origin', 
 test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI lifecycle, RBAC negative checks, and cleanup', async () => {
   let savedUsername = null;
   let deletedCustom = false;
+  const dmnTables = [];
+  let savedHitlRule = null;
+  let hitlRun = null;
+  const approvalQueue = [];
+  const destroyed = [];
 
   const callActor = async (role, path, opts = {}) => {
-    const clean = path.split('?')[0];
+    const [clean, qStr = ''] = path.split('?');
+    const query = new URLSearchParams(qStr);
     if (clean === 'dxosAi:enterpriseTopology') {
       if (role !== 'root') return { ok: false, status: 403, data: { errors: [{ code: 'DXOS_ADMIN_REQUIRED' }] } };
       return { ok: true, status: 200, data: { planes: new Array(6).fill({}).map((_, i) => ({ order: i + 1 })), clause52Preserved: true } };
@@ -45,6 +51,45 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
     }
     if (clean === 'dxosAi:auditLogs') {
       return { ok: true, status: 200, data: { items: [{ id: 1, toolName: 'dxos_inspect_architecture', status: 'allowed' }] } };
+    }
+    if (clean === 'dxosAutomations:saveRule') {
+      savedHitlRule = opts.values;
+      return { ok: true, status: 200, data: { rule: savedHitlRule } };
+    }
+    if (clean === 'dxosAutomations:runNow') {
+      const appId = 901;
+      approvalQueue.push({
+        id: appId,
+        organizationId: opts.values?.organizationId,
+        toolName: 'latticeflow.approval',
+        targetCollection: 'latticeAutomationRuns',
+        status: 'pending',
+        proposedArgs: { runUid: 'run_mcp_hitl_1', nodeId: 'hitl_gate', approverRole: 'ldx_manager' },
+      });
+      hitlRun = { id: 801, runUid: 'run_mcp_hitl_1', status: 'suspended', approvalId: appId };
+      return { ok: true, status: 200, data: { run: hitlRun } };
+    }
+    if (clean === 'dxosAutomations:deleteRule') {
+      savedHitlRule = null;
+      return { ok: true, status: 200, data: { deleted: true } };
+    }
+    if (clean === 'dxosAi:listApprovals') {
+      const status = query.get('status') || 'pending';
+      return { ok: true, status: 200, data: { items: approvalQueue.filter((q) => q.status === status) } };
+    }
+    if (clean === 'dxosAi:approveAction') {
+      const q = approvalQueue.find((item) => Number(item.id) === Number(opts.values?.approvalId));
+      if (!q) return { ok: false, status: 404, data: {} };
+      q.status = 'approved';
+      if (hitlRun) hitlRun.status = 'completed';
+      return { ok: true, status: 200, data: { id: q.id, status: 'approved', executionResult: { status: 'completed', runUid: hitlRun?.runUid } } };
+    }
+    if (clean === 'latticeDecisionTables:list') {
+      return { ok: true, status: 200, data: dmnTables };
+    }
+    if (clean.endsWith(':destroy')) {
+      destroyed.push(path);
+      return { ok: true, status: 200, data: { ok: true } };
     }
     return { ok: false, status: 404, data: {} };
   };
@@ -85,15 +130,36 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
         return { status: 200, json: { result: { tools } } };
       }
       if (rpcBody.method === 'tools/call') {
-        if (role !== 'root' && rpcBody.params?.name === 'dxos_compose_page_blocks') {
+        const toolName = rpcBody.params?.name;
+        const toolArgs = rpcBody.params?.arguments || {};
+        if (role !== 'root' && (toolName === 'dxos_compose_page_blocks' || toolName === 'dxos_provision_role_workspace')) {
           return { status: 200, json: { error: { code: -32003, message: 'Forbidden' } } };
         }
-        if ((rpcBody.params?.name === 'dxos_manage_rbac_permissions' || rpcBody.params?.name === 'dxos_provision_role_workspace') && rpcBody.params?.arguments?.roleName === 'root') {
+        if ((toolName === 'dxos_manage_rbac_permissions' || toolName === 'dxos_provision_role_workspace') && toolArgs.roleName === 'root') {
           return { status: 200, json: { error: { code: -32003, message: 'Forbidden role target' } } };
+        }
+        let payload = { dryRun: true, planes: 6, activeWorkflows: [{ id: 1 }] };
+        if (toolName === 'dxos_provision_role_workspace' && toolArgs.operation === 'build_enterprise_app') {
+          payload = { dryRun: true, built: false, planned: { collectionName: toolArgs.collectionName, portalSlug: toolArgs.portalSlug } };
+        } else if (toolName === 'dxos_provision_role_workspace' && toolArgs.operation === 'verify_app') {
+          payload = { ok: true, passedCount: 3, totalCount: 3, checks: [{ id: 'collection_schema', ok: true }] };
+        } else if (toolName === 'dxos_configure_workflow' && toolArgs.operation === 'dmn_list_tables') {
+          payload = { tables: dmnTables, items: dmnTables };
+        } else if (toolName === 'dxos_configure_workflow' && toolArgs.operation === 'dmn_save_table') {
+          dmnTables.push({ id: 701, tableKey: toolArgs.tableKey });
+          payload = { applied: true, table: { id: 701, tableKey: toolArgs.tableKey } };
+        } else if (toolName === 'dxos_configure_workflow' && toolArgs.operation === 'dmn_evaluate') {
+          payload = { matched: true, result: { action: 'quarantine' } };
+        } else if (toolName === 'dxos_configure_workflow' && toolArgs.operation === 'list_connected_apps') {
+          payload = { items: [{ appType: 'n8n_api', name: 'Stock n8n Public REST API v1' }] };
+        } else if (toolName === 'dxos_configure_workflow' && toolArgs.operation === 'create_n8n_workflow') {
+          payload = { operation: 'create_n8n_workflow', dryRun: true };
+        } else if (toolName === 'dxos_configure_workflow' && toolArgs.operation === 'list_n8n_workflows') {
+          payload = { operation: 'list_n8n_workflows', data: [{ id: 'wf-1', name: '26-node orchestrator', active: true }] };
         }
         return {
           status: 200,
-          json: { result: { isError: false, content: [{ type: 'text', text: JSON.stringify({ dryRun: true, planes: 6, activeWorkflows: [{ id: 1 }] }) }] } },
+          json: { result: { isError: false, content: [{ type: 'text', text: JSON.stringify(payload) }] } },
         };
       }
       if (rpcBody.method === 'resources/read') {
@@ -178,8 +244,14 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
   assert.equal(report.checks.mcpResourceTemplatesListOk, true);
   assert.equal(report.checks.adminCreativeBlockDryRunOk, true);
   assert.equal(report.checks.adminProvisionRoleWorkspaceDryRunOk, true);
+  assert.equal(report.checks.adminAppBuilderDryRunAndVerifyOk, true);
+  assert.equal(report.checks.adminConfigureWorkflowDmnAndN8nOk, true);
+  assert.equal(report.checks.hitlLatticeFlowApprovalResolvedOk, true);
   assert.equal(report.checks.adminMcpDryRunCompose, true);
   assert.equal(report.checks.itOtMcpHealthOk, true);
   assert.equal(report.checks.customAiLifecycleCleanedUp, true);
   assert.equal(deletedCustom, true);
+  assert.ok(destroyed.some((p) => p.includes('latticeAiApprovalQueue:destroy?filterByTk=901')));
+  assert.ok(destroyed.some((p) => p.includes('latticeAutomationRuns:destroy?filterByTk=801')));
+  assert.ok(destroyed.some((p) => p.includes('latticeDecisionTables:destroy?filterByTk=701')));
 });
