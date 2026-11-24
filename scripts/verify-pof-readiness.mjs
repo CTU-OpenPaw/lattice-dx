@@ -175,13 +175,17 @@ function checkComposeDigests(rootDir) {
   return { id: 'compose-digests', passed: unpinned.length === 0, details: unpinned.length ? `Unpinned image(s): ${unpinned.join('; ')}` : 'All infra/compose/*.yml images are pinned with @sha256 digests' };
 }
 
-function checkUpstreamClean(rootDir, trackedFiles, { isGit = true } = {}) {
+function checkUpstreamClean(rootDir, trackedFiles, { isGit = true, repoFiles = trackedFiles } = {}) {
   const issues = [];
-  const forbiddenEntries = trackedFiles.filter(
-    f => f === '.gitmodules' || f === 'upstream' || f.startsWith('upstream/'),
+  const isForbiddenUpstreamOrGitmodules = f => (
+    f === '.gitmodules' || f.endsWith('/.gitmodules') || f === 'upstream' || f.startsWith('upstream/')
   );
-  if (forbiddenEntries.length) {
-    issues.push(`Forbidden .gitmodules or upstream/ entries: ${forbiddenEntries.slice(0, 5).join(', ')}`);
+  const forbiddenSet = new Set([
+    ...trackedFiles.filter(isForbiddenUpstreamOrGitmodules),
+    ...repoFiles.filter(isForbiddenUpstreamOrGitmodules),
+  ]);
+  if (forbiddenSet.size > 0) {
+    issues.push(`Forbidden .gitmodules or upstream/ entries: ${[...forbiddenSet].slice(0, 5).join(', ')}`);
   }
   if (existsSync(join(rootDir, '.gitmodules'))) {
     issues.push('Forbidden .gitmodules file present');
@@ -194,7 +198,7 @@ function checkUpstreamClean(rootDir, trackedFiles, { isGit = true } = {}) {
   if (isGit) {
     const dirtyUpstream = listLines(runGit(rootDir, ['status', '--porcelain', '--', 'upstream']));
     if (dirtyUpstream.length) issues.push(`Dirty upstream entries: ${dirtyUpstream.join(', ')}`);
-    const trackedUpstream = listLines(runGit(rootDir, ['ls-files', 'upstream', '.gitmodules']));
+    const trackedUpstream = listLines(runGit(rootDir, ['ls-files', 'upstream', '.gitmodules', ':(glob)**/.gitmodules']));
     if (trackedUpstream.length) issues.push(`Tracked upstream/.gitmodules entries: ${trackedUpstream.join(', ')}`);
   }
   return {
@@ -238,7 +242,7 @@ export function runPofAudit({ rootDir = resolve(fileURLToPath(import.meta.url), 
     checkGovernanceFiles(rootDir),
     checkPluginIsolation(rootDir),
     checkComposeDigests(rootDir),
-    checkUpstreamClean(rootDir, trackedFiles, { isGit }),
+    checkUpstreamClean(rootDir, trackedFiles, { isGit, repoFiles }),
     checkNoSecrets(rootDir, trackedFiles, repoFiles),
   ];
   return { result: checks.every(c => c.passed) ? 'PASS' : 'FAIL', checks };

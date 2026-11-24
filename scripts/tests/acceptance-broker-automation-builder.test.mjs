@@ -8,6 +8,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash, createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -20,6 +21,58 @@ import { addSourceHeader } from '../source-headers.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, '../..');
+const BLUEPRINTS_DIR = join(REPO_ROOT, 'plugins/nocobase/plugin-dxos-studio/src/server/flow/blueprints');
+const MOCK_BLUEPRINTS = [
+  'coldchain-emergency.json',
+  'mkt-quarantine.json',
+  'sla-escalation.json',
+  'procurement-hitl-approval.json',
+  'scheduled-ai-digest.json',
+  'partner-webhook-sync.json',
+].map((file) => JSON.parse(readFileSync(join(BLUEPRINTS_DIR, file), 'utf8')));
+
+const MOCK_NODE_TYPES = [
+  ['trigger.event', 'trigger'],
+  ['trigger.record', 'trigger'],
+  ['trigger.schedule', 'trigger'],
+  ['trigger.webhook', 'trigger'],
+  ['trigger.manual', 'trigger'],
+  ['control.if', 'control'],
+  ['control.switch', 'control'],
+  ['control.parallel', 'control'],
+  ['control.merge', 'control'],
+  ['control.loop', 'control'],
+  ['control.delay', 'control'],
+  ['control.approval', 'control'],
+  ['control.subflow', 'control'],
+  ['data.query', 'data'],
+  ['data.create', 'data'],
+  ['data.update', 'data'],
+  ['logic.dmn', 'logic'],
+  ['logic.transform', 'logic'],
+  ['ai.llm', 'ai'],
+  ['ai.agent', 'ai'],
+  ['integration.http', 'integration'],
+  ['iot.twin_command', 'integration'],
+  ['notify.send', 'integration'],
+  ['event.emit', 'integration'],
+].map(([type, category]) => ({
+  type,
+  category,
+  label: type,
+  inputs: category === 'trigger' ? [] : ['in'],
+  outputs: type === 'control.if'
+    ? ['true', 'false', 'error']
+    : type === 'control.approval'
+      ? ['approved', 'rejected', 'error']
+      : type === 'control.loop'
+        ? ['item', 'done', 'error']
+        : category === 'trigger'
+          ? ['main']
+          : ['main', 'error'],
+}));
+
+const sha256Hex = (s) => createHash('sha256').update(String(s ?? ''), 'utf8').digest('hex');
 
 function createMockAcceptanceCaller({
   leakMqttPasswordInList = false,
@@ -27,6 +80,9 @@ function createMockAcceptanceCaller({
   failStep = null,
   skipCmmsCoreStep = false,
   missingConnectorOnStep4 = false,
+  shrinkNodeRegistry = false,
+  forceReplayResumeOk = false,
+  forceBadWebhookAccept = false,
   initialAutomationRuns = [],
   initialAutomationRules = [],
 } = {}) {
@@ -43,6 +99,10 @@ function createMockAcceptanceCaller({
     automationRules: [...initialAutomationRules],
     automationRuns: [...initialAutomationRuns],
     workOrders: [],
+    serviceTickets: [],
+    approvalQueue: [],
+    twinShadows: [],
+    proposals: [],
     domains: new Map(),
     customRecords: new Map(),
     tenants: [],
@@ -85,15 +145,25 @@ function createMockAcceptanceCaller({
     // RBAC negative check endpoints
     const adminMutations = new Set([
       'dxosVault:save',
+      'dxosVault:delete',
       'dxosBroker:provisionDevice',
       'dxosAutomations:saveRule',
+      'dxosAutomations:deleteRule',
       'dxosAutomations:aiAssist',
+      'dxosAutomations:resumeRun',
       'dxosBuilder:createDomain',
       'dxosBuilder:provisionTenant',
     ]);
-    if (adminMutations.has(resourceAction) || resourceAction === 'dxosAutomations:builderCatalog') {
+    if (
+      adminMutations.has(resourceAction)
+      || resourceAction === 'dxosAutomations:builderCatalog'
+      || resourceAction === 'dxosAutomations:nodeRegistry'
+      || resourceAction === 'dxosAutomations:testNode'
+    ) {
       if (actorRole === 'anon') return errResp(401, 'NATIVE_LOGIN_REQUIRED');
-      if (actorRole === 'employee') return errResp(403, 'FORBIDDEN');
+      if (actorRole === 'employee' && resourceAction !== 'dxosAutomations:nodeRegistry') {
+        return errResp(403, 'FORBIDDEN');
+      }
     }
 
     // Direct CRUD guard for latticeConnectors
@@ -339,7 +409,110 @@ function createMockAcceptanceCaller({
       const { mqttPassword, ...safeDev } = dev;
       return okResp({ device: safeDev, previousStatus: 'provisioned', transitionedToOffline: true, incident });
     }
+    if (resourceAction === 'dxosAutomations:nodeRegistry') {
+      const nodeTypes = shrinkNodeRegistry ? MOCK_NODE_TYPES.slice(0, 12) : MOCK_NODE_TYPES;
+      return okResp({ nodeTypes });
+    }
+    if (resourceAction === 'dxosAutomations:testNode') {
+      let graph = values.graph || values.graphJson || values.rule?.graphJson || null;
+      if (!graph && values.ruleKey) {
+        const found = state.automationRules.find(
+          (r) => r.organizationId === values.organizationId && r.ruleKey === values.ruleKey,
+        );
+        if (!found) return errResp(404, 'RULE_NOT_FOUND');
+        graph = found.graphJson;
+      }
+      const target = graph?.nodes?.find((n) => n.id === values.nodeId);
+      if (!target) return errResp(404, 'FLOW_NODE_NOT_FOUND');
+      const pinData = values.pinnedInputs?.data || values.pinnedInputs || {};
+      if (target.type === 'control.if') {
+        const cond = target.config?.condition || {};
+        const fieldName = String(cond.field || '').replace(/^data\./, '');
+        const actual = pinData[fieldName];
+        const matched = cond.op === 'gt' ? Number(actual) > Number(cond.value) : actual === cond.value;
+        return okResp({
+          result: {
+            ok: true,
+            nodeId: target.id,
+            status: 'completed',
+            input: pinData,
+            output: { matched, condition: cond },
+            nextPort: matched ? 'true' : 'false',
+            durationMs: 1,
+            error: null,
+          },
+        });
+      }
+      if (target.type === 'data.create') {
+        return okResp({
+          result: {
+            ok: true,
+            nodeId: target.id,
+            status: 'completed',
+            input: pinData,
+            output: { collection: target.config?.collection, id: null, record: target.config?.values || {}, simulated: true },
+            nextPort: 'main',
+            durationMs: 1,
+            error: null,
+          },
+        });
+      }
+      return okResp({
+        result: {
+          ok: true,
+          nodeId: target.id,
+          status: 'completed',
+          input: pinData,
+          output: { simulated: true },
+          nextPort: 'main',
+          durationMs: 1,
+          error: null,
+        },
+      });
+    }
     if (resourceAction === 'dxosAutomations:runNow') {
+      const savedRule = state.automationRules.find(
+        (r) => r.organizationId === values.organizationId && r.ruleKey === values.ruleKey,
+      );
+      const approvalNode = savedRule?.graphJson?.nodes?.find((n) => n.type === 'control.approval');
+      if (approvalNode) {
+        const approvalId = ++state.nextId;
+        state.approvalQueue.push({
+          id: approvalId,
+          organizationId: values.organizationId,
+          status: 'pending',
+          title: approvalNode.config?.title || 'Approval Required',
+        });
+        const resumeToken = `mock-resume-token-${++state.nextId}`;
+        const runUid = `run_${++state.nextId}`;
+        const trigNode = savedRule.graphJson.nodes.find((n) => String(n.type || '').startsWith('trigger.'));
+        const nodeStatesJson = {
+          ...(trigNode ? { [trigNode.id]: { status: 'completed', output: { data: values.event?.data || values.data || {} } } } : {}),
+          [approvalNode.id]: { status: 'suspended', output: { approvalId, status: 'pending' }, suspend: { kind: 'approval', approvalId } },
+        };
+        const stepTracesJson = [
+          ...(trigNode ? [{ nodeId: trigNode.id, type: trigNode.type, label: trigNode.label, status: 'completed', output: { data: values.event?.data || values.data || {} } }] : []),
+          { nodeId: approvalNode.id, type: approvalNode.type, label: approvalNode.label, status: 'suspended', output: { approvalId, status: 'pending' } },
+        ];
+        const runRecord = {
+          id: ++state.nextId,
+          organizationId: values.organizationId,
+          ruleKey: values.ruleKey,
+          runUid,
+          status: 'suspended',
+          graphVersion: 2,
+          suspendedNodeId: approvalNode.id,
+          approvalId,
+          resumeTokenHash: sha256Hex(resumeToken),
+          triggerPayloadJson: { event: values.event || { type: 'manual.trigger', data: values.data || {} }, data: values.event?.data || values.data || {} },
+          nodeStatesJson,
+          stepTracesJson,
+        };
+        state.automationRuns.push(runRecord);
+        const { resumeTokenHash: _hiddenHash, ...publicRun } = runRecord;
+        return okResp({ run: { ...publicRun, resumeToken } });
+      }
+
       const wo = {
         id: ++state.nextId,
         organizationId: values.organizationId,
@@ -350,31 +523,52 @@ function createMockAcceptanceCaller({
         status: 'open',
       };
       state.workOrders.push(wo);
-      const stepTraces = [
-        { stepIndex: 0, type: 'create_record', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id, record: wo } },
-        { stepIndex: 1, type: 'notify_role', status: 'completed', output: { dispatched: 1 } },
-        {
-          stepIndex: 2,
-          type: 'twin_set_desired',
-          status: skipCmmsCoreStep ? 'skipped' : 'completed',
-          ...(skipCmmsCoreStep ? { skipReason: 'BRANCH_CONDITION_NOT_MATCHED', output: null } : { output: { shadow: { id: 901, assetId: wo.assetId }, approvalId: 902 } }),
-        },
-        { stepIndex: 3, type: 'trigger_ai_triage', status: 'completed', output: { id: 903, target: 'latticeAgentProposals' } },
-        {
-          stepIndex: 4,
-          type: 'call_connector',
-          status: missingConnectorOnStep4 ? 'failed' : 'completed',
-          ...(missingConnectorOnStep4
-            ? { output: null, error: 'CONNECTOR_NOT_FOUND: n8n-coldchain-orchestrator' }
-            : { output: { connectorKey: 'n8n-coldchain-orchestrator', status: 200, ok: true } }),
-        },
-      ];
+      const isCmmsV2 = savedRule?.graphJson?.nodes?.length > 0;
+      const stepTraces = isCmmsV2
+        ? [
+            { nodeId: 'trig_coldchain', type: 'trigger.event', status: 'completed', output: { data: values.data || {} } },
+            { nodeId: 'dmn_priority', type: 'logic.dmn', status: 'completed', output: { outputs: { workOrderPriority: wo.priority } } },
+            { nodeId: 'create_work_order', type: 'data.create', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id, record: wo } },
+            { nodeId: 'notify_assigned', type: 'notify.send', status: 'completed', output: { dispatched: 1 } },
+            { nodeId: 'if_critical', type: 'control.if', status: 'completed', output: { matched: true } },
+            { nodeId: 'parallel_critical', type: 'control.parallel', status: 'completed', output: { fannedOut: true } },
+            { nodeId: 'twin_cool_down', type: 'iot.twin_command', status: 'completed', output: { shadow: { id: 901, assetId: wo.assetId }, approvalId: 902 } },
+            { nodeId: 'ai_triage_wo', type: 'ai.agent', status: 'completed', output: { id: 903, target: 'latticeAgentProposals' } },
+            {
+              nodeId: 'http_n8n_dispatch',
+              type: 'integration.http',
+              status: missingConnectorOnStep4 ? 'failed' : 'completed',
+              ...(missingConnectorOnStep4
+                ? { output: null, error: 'CONNECTOR_NOT_FOUND: n8n-coldchain-orchestrator' }
+                : { output: { connectorKey: 'n8n-coldchain-orchestrator', status: 200, ok: true } }),
+            },
+          ]
+        : [
+            { stepIndex: 0, type: 'create_record', status: 'completed', output: { collection: 'latticeCustomWorkOrders', id: wo.id, record: wo } },
+            { stepIndex: 1, type: 'notify_role', status: 'completed', output: { dispatched: 1 } },
+            {
+              stepIndex: 2,
+              type: 'twin_set_desired',
+              status: skipCmmsCoreStep ? 'skipped' : 'completed',
+              ...(skipCmmsCoreStep ? { skipReason: 'BRANCH_CONDITION_NOT_MATCHED', output: null } : { output: { shadow: { id: 901, assetId: wo.assetId }, approvalId: 902 } }),
+            },
+            { stepIndex: 3, type: 'trigger_ai_triage', status: 'completed', output: { id: 903, target: 'latticeAgentProposals' } },
+            {
+              stepIndex: 4,
+              type: 'call_connector',
+              status: missingConnectorOnStep4 ? 'failed' : 'completed',
+              ...(missingConnectorOnStep4
+                ? { output: null, error: 'CONNECTOR_NOT_FOUND: n8n-coldchain-orchestrator' }
+                : { output: { connectorKey: 'n8n-coldchain-orchestrator', status: 200, ok: true } }),
+            },
+          ];
       const run = {
         id: ++state.nextId,
         organizationId: values.organizationId,
         ruleKey: values.ruleKey,
         runUid: `run_${state.nextId}`,
         subject: values.subject ?? values.data?.deviceKey ?? '',
+        ...(isCmmsV2 ? { graphVersion: 2 } : {}),
         status: missingConnectorOnStep4 ? 'partial' : 'completed',
         dmnResultJson: { tableKey: 'cmms_priority_routing_v1', outputs: { workOrderPriority: wo.priority, assignedRole: 'ldx_manager' } },
         stepTracesJson: stepTraces,
@@ -382,62 +576,268 @@ function createMockAcceptanceCaller({
       state.automationRuns.push(run);
       return okResp({ run });
     }
+    if (resourceAction === 'dxosAutomations:resumeRun') {
+      const existing = state.automationRuns.find((r) => r.runUid === values.runUid);
+      if (!existing) return errResp(404, 'RUN_NOT_FOUND', `Automation run ${values.runUid} not found`);
+      if (existing.organizationId !== values.organizationId) {
+        return errResp(403, 'NATIVE_ORGANIZATION_MISMATCH', 'Run belongs to another organization');
+      }
+      if (existing.status !== 'suspended' && !forceReplayResumeOk) {
+        return errResp(409, 'RUN_ALREADY_RESUMED', `Run status is "${existing.status}", expected "suspended"`);
+      }
+      if (values.resumeToken !== undefined && sha256Hex(values.resumeToken) !== existing.resumeTokenHash) {
+        return errResp(403, 'INVALID_RESUME_TOKEN', 'Invalid or missing resume token');
+      }
+      const decision = String(values.decision || 'approved').toLowerCase() === 'rejected' ? 'rejected' : 'approved';
+      const qItem = state.approvalQueue.find((q) => q.id === existing.approvalId);
+      if (qItem) qItem.status = decision;
+
+      const rule = state.automationRules.find(
+        (r) => r.organizationId === existing.organizationId && r.ruleKey === existing.ruleKey,
+      );
+      const nextNodeStates = { ...(existing.nodeStatesJson || {}) };
+      const nextTraces = [...(existing.stepTracesJson || [])];
+      nextNodeStates[existing.suspendedNodeId] = { status: 'completed', nextPort: decision, output: { status: decision, decision } };
+      const apTrace = nextTraces.find((t) => t.nodeId === existing.suspendedNodeId);
+      if (apTrace) apTrace.status = 'completed';
+
+      if (decision === 'approved') {
+        const createNode = rule?.graphJson?.nodes?.find((n) => n.type === 'data.create');
+        if (createNode && createNode.config?.collection === 'latticeServiceTickets') {
+          const ticket = {
+            id: ++state.nextId,
+            organizationId: existing.organizationId,
+            code: `HITL-${existing.triggerPayloadJson?.data?.code || existing.runUid}`,
+            name: `Approved ${existing.triggerPayloadJson?.data?.code || existing.runUid}`,
+            serviceType: 'facilities',
+            priority: 'high',
+            status: 'draft',
+          };
+          state.serviceTickets.push(ticket);
+          nextNodeStates[createNode.id] = {
+            status: 'completed',
+            output: { collection: 'latticeServiceTickets', id: ticket.id, record: ticket },
+          };
+          nextTraces.push({
+            nodeId: createNode.id,
+            type: 'data.create',
+            label: createNode.label,
+            status: 'completed',
+            output: { collection: 'latticeServiceTickets', id: ticket.id, record: ticket },
+          });
+        }
+        const okNotify = rule?.graphJson?.nodes?.find((n) => n.id === 'notify_ok');
+        if (okNotify) {
+          nextNodeStates[okNotify.id] = { status: 'completed', output: { dispatched: 1 } };
+          nextTraces.push({ nodeId: okNotify.id, type: 'notify.send', status: 'completed', output: { dispatched: 1 } });
+        }
+        const rejNotify = rule?.graphJson?.nodes?.find((n) => n.id === 'notify_rej');
+        if (rejNotify) {
+          nextNodeStates[rejNotify.id] = { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' };
+        }
+      }
+
+      existing.status = 'completed';
+      existing.suspendedNodeId = null;
+      existing.resumeTokenHash = null;
+      existing.nodeStatesJson = nextNodeStates;
+      existing.stepTracesJson = nextTraces;
+      return okResp({ run: existing });
+    }
+    if (resourceAction === 'dxosAutomations:getRunTrace') {
+      const runUid = query.get('runUid');
+      const org = query.get('organizationId');
+      const found = state.automationRuns.find((r) => r.runUid === runUid && (!org || r.organizationId === org));
+      return found ? okResp({ run: found }) : errResp(404, 'RUN_NOT_FOUND');
+    }
+    if (resourceAction === 'dxosAutomations:webhookIngress') {
+      const org = query.get('organizationId') || values.organizationId;
+      const rKey = query.get('ruleKey') || values.ruleKey;
+      const rule = state.automationRules.find((r) => r.organizationId === org && r.ruleKey === rKey && r.active !== false);
+      if (!rule) return errResp(404, 'RULE_NOT_FOUND');
+      const trig = rule.graphJson?.nodes?.find((n) => n.type === 'trigger.webhook');
+      if (!trig) return errResp(400, 'WEBHOOK_TRIGGER_NOT_CONFIGURED');
+      const conn = state.connectors.find(
+        (c) => c.organizationId === org && (c.connectorKey === trig.config?.secretConnectorKey || c.connectorKey === `webhook-${rKey}`),
+      );
+      const secret = conn?.secrets?.webhookSecret || conn?.secrets?.secret || trig.config?.secret || '';
+      if (!secret) return errResp(401, 'WEBHOOK_SIGNATURE_INVALID');
+      const hdrs = opts.headers || {};
+      const sigKey = Object.keys(hdrs).find((k) => k.toLowerCase() === 'x-lattice-signature-256');
+      const sigVal = sigKey ? String(hdrs[sigKey]) : '';
+      const providedHex = sigVal.startsWith('sha256=') ? sigVal.slice(7).trim() : sigVal.trim();
+      const expectedHex = createHmac('sha256', secret).update(JSON.stringify(values), 'utf8').digest('hex');
+      if (!forceBadWebhookAccept && providedHex !== expectedHex) {
+        return errResp(401, 'WEBHOOK_SIGNATURE_INVALID', 'Invalid webhook HMAC signature');
+      }
+      const runUid = `run_${++state.nextId}`;
+      state.automationRuns.push({
+        id: state.nextId,
+        organizationId: org,
+        ruleKey: rKey,
+        runUid,
+        status: 'completed',
+        graphVersion: 2,
+        stepTracesJson: [{ nodeId: trig.id, type: 'trigger.webhook', status: 'completed' }],
+      });
+      return okResp({ ok: true, run: { runUid, status: 'completed' } });
+    }
     if (resourceAction === 'dxosAutomations:builderCatalog') {
       const org = query.get('organizationId');
       return okResp({
         organizationId: org,
+        nodeTypes: MOCK_NODE_TYPES,
         eventTypes: [{ type: 'alarm.triggered' }, { type: 'sla.warning' }, { type: 'sla.breached' }],
         actionTypes: [{ type: 'create_record' }, { type: 'notify_role' }],
         dmnTables: [{ key: 'cmms_priority_routing_v1', name: 'CMMS Priority Routing' }],
         collections: [{ name: 'latticeCustomWorkOrders', fields: [{ name: 'workOrderCode', type: 'string' }, { name: 'priority', type: 'string' }] }],
         connectors: state.connectors.map(({ secrets, ...safe }) => safe),
         roles: ['ldx_admin', 'ldx_manager', 'ldx_operator', 'ldx_dispatcher'],
-        blueprints: [
-          { ruleKey: 'auto_cmms_on_coldchain_fault' },
-          { ruleKey: 'auto_mkt_quarantine_response' },
-          {
-            ruleKey: 'auto_sla_breach_escalation',
-            name: 'Leo thang Cảnh báo & Vi phạm SLA (3 bước rẽ nhánh)',
-            triggerEventType: 'sla.warning,sla.breached',
-            filterJson: null,
-            dmnTableKey: null,
-            cooldownSec: 120,
-            maxDepth: 8,
-            active: true,
-            actionsJson: [
-              { type: 'notify_role', when: { 'event.type': 'sla.warning' }, role: 'ldx_dispatcher' },
-              { type: 'create_record', when: { 'event.type': 'sla.breached' }, collection: 'latticeServiceTickets', values: { code: 'SLA-{{id}}' } },
-              { type: 'notify_role', when: { 'event.type': 'sla.breached' }, role: 'ldx_manager' },
-            ],
-          },
-        ],
+        blueprints: MOCK_BLUEPRINTS,
       });
     }
     if (resourceAction === 'dxosAutomations:testRule') {
       const targetRuleKey = values.rule?.ruleKey || values.ruleKey;
+      const savedRule = state.automationRules.find(
+        (r) => r.organizationId === values.organizationId && r.ruleKey === targetRuleKey,
+      );
       if (targetRuleKey === 'auto_sla_breach_escalation') {
+        const useV1 = savedRule && !savedRule.graphJson;
         const evType = String(values.event?.type || 'sla.breached');
         const isWarn = evType === 'sla.warning';
         const isBreach = evType === 'sla.breached';
+        if (useV1) {
+          return okResp({
+            simulation: {
+              dmnResultJson: null,
+              stepTracesJson: [
+                { stepIndex: 0, type: 'notify_role', status: isWarn ? 'simulated' : 'skipped', ...(isWarn ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+                { stepIndex: 1, type: 'create_record', status: isBreach ? 'simulated' : 'skipped', ...(isBreach ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+                { stepIndex: 2, type: 'notify_role', status: isBreach ? 'simulated' : 'skipped', ...(isBreach ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
+              ],
+            },
+          });
+        }
         return okResp({
           simulation: {
+            graphVersion: 2,
             dmnResultJson: null,
-            stepTracesJson: [
-              { stepIndex: 0, type: 'notify_role', status: isWarn ? 'simulated' : 'skipped', ...(isWarn ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
-              { stepIndex: 1, type: 'create_record', status: isBreach ? 'simulated' : 'skipped', ...(isBreach ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
-              { stepIndex: 2, type: 'notify_role', status: isBreach ? 'simulated' : 'skipped', ...(isBreach ? {} : { skipReason: 'BRANCH_CONDITION_NOT_MATCHED' }) },
-            ],
+            nodeStatesJson: isWarn
+              ? {
+                  trig_sla: { status: 'completed' },
+                  switch_sla_event: { status: 'completed', nextPort: 'case_0' },
+                  notify_dispatcher_warn: { status: 'completed' },
+                  create_sla_ticket: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                  notify_manager_breach: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                }
+              : {
+                  trig_sla: { status: 'completed' },
+                  switch_sla_event: { status: 'completed', nextPort: 'case_1' },
+                  notify_dispatcher_warn: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                  create_sla_ticket: { status: 'completed' },
+                  notify_manager_breach: { status: 'completed' },
+                },
+            stepTracesJson: isWarn
+              ? [
+                  { nodeId: 'trig_sla', type: 'trigger.event', status: 'completed', simulated: true },
+                  { nodeId: 'switch_sla_event', type: 'control.switch', status: 'completed', simulated: true },
+                  { nodeId: 'notify_dispatcher_warn', type: 'notify.send', status: 'completed', simulated: true },
+                ]
+              : [
+                  { nodeId: 'trig_sla', type: 'trigger.event', status: 'completed', simulated: true },
+                  { nodeId: 'switch_sla_event', type: 'control.switch', status: 'completed', simulated: true },
+                  { nodeId: 'create_sla_ticket', type: 'data.create', status: 'completed', simulated: true },
+                  { nodeId: 'notify_manager_breach', type: 'notify.send', status: 'completed', simulated: true },
+                ],
           },
         });
       }
       if (!values.rule && targetRuleKey !== 'auto_cmms_on_coldchain_fault') {
-        const found = state.automationRules.find(
-          (r) => r.organizationId === values.organizationId && r.ruleKey === targetRuleKey,
-        );
-        if (!found) return errResp(404, 'RULE_NOT_FOUND', `Automation rule ${targetRuleKey} not found`);
+        if (!savedRule) return errResp(404, 'RULE_NOT_FOUND', `Automation rule ${targetRuleKey} not found`);
+        const loopNode = savedRule.graphJson?.nodes?.find((n) => n.type === 'control.loop');
+        const ifNode = savedRule.graphJson?.nodes?.find((n) => n.type === 'control.if');
+        if (loopNode && ifNode) {
+          const exceeded = values.event?.data?.thresholdExceeded === true;
+          const items = Array.isArray(values.event?.data?.items) ? values.event.data.items : [];
+          if (exceeded) {
+            return okResp({
+              simulation: {
+                graphVersion: 2,
+                status: 'completed',
+                nodeStatesJson: {
+                  trig_1: { status: 'completed' },
+                  if_check: { status: 'completed', nextPort: 'true' },
+                  loop_items: { status: 'completed', output: { count: items.length, results: items } },
+                  xform_item: { status: 'completed' },
+                  notify_done: { status: 'completed' },
+                  notify_skip: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                },
+                stepTracesJson: [
+                  { nodeId: 'trig_1', type: 'trigger.event', status: 'completed', simulated: true },
+                  { nodeId: 'if_check', type: 'control.if', status: 'completed', simulated: true, output: { matched: true } },
+                  { nodeId: 'loop_items', type: 'control.loop', status: 'completed', simulated: true, output: { count: items.length, results: items } },
+                  ...items.map((item, idx) => ({ nodeId: 'xform_item', type: 'logic.transform', status: 'completed', simulated: true, loopNodeId: 'loop_items', loopIteration: idx, output: item })),
+                  { nodeId: 'notify_done', type: 'notify.send', status: 'completed', simulated: true },
+                ],
+              },
+            });
+          }
+          return okResp({
+            simulation: {
+              graphVersion: 2,
+              status: 'completed',
+              nodeStatesJson: {
+                trig_1: { status: 'completed' },
+                if_check: { status: 'completed', nextPort: 'false' },
+                loop_items: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                xform_item: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                notify_done: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                notify_skip: { status: 'completed' },
+              },
+              stepTracesJson: [
+                { nodeId: 'trig_1', type: 'trigger.event', status: 'completed', simulated: true },
+                { nodeId: 'if_check', type: 'control.if', status: 'completed', simulated: true, output: { matched: false } },
+                { nodeId: 'notify_skip', type: 'notify.send', status: 'completed', simulated: true },
+              ],
+            },
+          });
+        }
+        return okResp({
+          simulation: {
+            graphVersion: 2,
+            status: 'completed',
+            nodeStatesJson: Object.fromEntries((savedRule.graphJson?.nodes || []).map((n) => [n.id, { status: 'completed' }])),
+            stepTracesJson: (savedRule.graphJson?.nodes || []).map((n) => ({ nodeId: n.id, type: n.type, status: 'completed', simulated: true })),
+          },
+        });
       }
       const sev = String(values.event?.data?.severity || 'high');
       const isCrit = sev === 'critical';
+      if (savedRule?.graphJson?.nodes?.length > 0) {
+        return okResp({
+          simulation: {
+            graphVersion: 2,
+            dmnResultJson: { tableKey: 'cmms_priority_routing_v1', outputs: { workOrderPriority: isCrit ? 'critical' : 'high', assignedRole: isCrit ? 'ldx_manager' : 'ldx_operator' } },
+            nodeStatesJson: isCrit
+              ? Object.fromEntries(savedRule.graphJson.nodes.map((n) => [n.id, { status: 'completed' }]))
+              : {
+                  trig_coldchain: { status: 'completed' },
+                  dmn_priority: { status: 'completed' },
+                  create_work_order: { status: 'completed' },
+                  notify_assigned: { status: 'completed' },
+                  if_critical: { status: 'completed', nextPort: 'false' },
+                  parallel_critical: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                  twin_cool_down: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                  ai_triage_wo: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                  http_n8n_dispatch: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+                },
+            stepTracesJson: (isCrit
+              ? savedRule.graphJson.nodes
+              : savedRule.graphJson.nodes.slice(0, 5)
+            ).map((n) => ({ nodeId: n.id, type: n.type, status: 'completed', simulated: true })),
+          },
+        });
+      }
       return okResp({
         simulation: {
           dmnResultJson: { tableKey: 'cmms_priority_routing_v1', outputs: { workOrderPriority: isCrit ? 'critical' : 'high', assignedRole: isCrit ? 'ldx_manager' : 'ldx_operator' } },
@@ -456,7 +856,14 @@ function createMockAcceptanceCaller({
         return errResp(400, 'AI_ASSIST_REFUSED', 'Unsafe prompt rejected');
       }
       if (values.mode === 'suggest') {
-        return okResp({ mode: 'suggest', applied: false, suggestions: [{ id: 'add_cooldown_guard', title: 'Add cooldown' }] });
+        return okResp({
+          ok: true,
+          refused: false,
+          mode: 'suggest',
+          modeUsed: 'offline-fallback',
+          applied: false,
+          suggestions: [{ id: 'add_cooldown_guard', title: 'Add cooldown' }, { id: 'add_error_branch', title: 'Add error branch' }],
+        });
       }
       const upsertMockRule = (draftRule) => {
         const idx = state.automationRules.findIndex(
@@ -471,6 +878,18 @@ function createMockAcceptanceCaller({
         else state.automationRules.push(saved);
         return saved;
       };
+      if (values.mode === 'fix_error') {
+        const g = JSON.parse(JSON.stringify(values.graph || values.rule?.graphJson || {}));
+        const failedId = Object.entries(values.runTrace?.nodeStatesJson || {}).find(([, s]) => s?.status === 'failed')?.[0];
+        const target = (g.nodes || []).find((n) => n.id === failedId) || (g.nodes || [])[1];
+        if (!target) return errResp(400, 'AI_ASSIST_REFUSED', 'No repairable node');
+        target.continueOnFail = true;
+        target.config = { ...(target.config || {}), recordId: '{{data.id}}', filter: { id: '{{data.id}}' } };
+        g.nodes.push({ id: `err_notify_${target.id}`, type: 'notify.send', label: 'Error Alert', config: { roleNames: ['ldx_operator'], severity: 'critical', title: 'Recovered' } });
+        g.edges = g.edges || [];
+        g.edges.push({ id: `e_err_${target.id}`, source: target.id, sourceHandle: 'error', target: `err_notify_${target.id}`, targetHandle: 'in' });
+        return okResp({ ok: true, refused: false, mode: 'fix_error', modeUsed: 'offline-fallback', applied: false, draftGraph: g });
+      }
       if (values.mode === 'node') {
         let baseRule = values.rule || null;
         if (!baseRule && values.ruleKey) {
@@ -479,55 +898,59 @@ function createMockAcceptanceCaller({
           );
           if (!baseRule) return errResp(404, 'RULE_NOT_FOUND', `Automation rule ${values.ruleKey} not found`);
         }
-        const cooldownMatch = String(values.prompt || '').match(/cooldown\s*(\d+)/i);
-        const targetTempMatch = String(values.prompt || '').match(/(-?\d+(?:\.\d+)?)\s*(?:độ|do\b)/i);
-        const cloned = JSON.parse(JSON.stringify(baseRule || {
-          ruleKey: 'auto_cmms_on_coldchain_fault',
-          name: 'CMMS Fault Rule',
-          triggerEventType: 'alarm.triggered',
-          cooldownSec: 60,
-          actionsJson: [
-            { type: 'create_record', collection: 'latticeCustomWorkOrders' },
-            { type: 'notify_role', role: '{{dmn.assignedRole}}' },
-            { type: 'twin_set_desired', desiredPatch: { targetTempC: 4.0, fanMode: 'high' } },
-          ],
-        }));
-        if (cooldownMatch && values.targetNode === 'trigger') {
-          cloned.cooldownSec = Number(cooldownMatch[1]);
-        }
-        if (targetTempMatch && cloned.actionsJson?.[2]?.type === 'twin_set_desired') {
-          cloned.actionsJson[2].desiredPatch = {
-            ...(cloned.actionsJson[2].desiredPatch || {}),
-            targetTempC: Number(targetTempMatch[1]),
-          };
+        const cloned = JSON.parse(JSON.stringify(baseRule));
+        const targetId = String(values.targetNodeId || values.targetNode || '').trim();
+        const node = cloned.graphJson?.nodes?.find((n) => n.id === targetId || (targetId === 'trigger' && String(n.type || '').startsWith('trigger.')));
+        if (!node) return errResp(400, 'AI_ASSIST_REFUSED', `Target node "${targetId}" not found.`);
+        const numMatch = String(values.prompt || '').match(/(-?\d+(?:\.\d+)?)/);
+        const roleMatch = String(values.prompt || '').match(/\bldx_[a-z0-9_]+\b/i);
+        if (node.type === 'control.if' && numMatch) {
+          node.config.condition = { ...(node.config.condition || { field: 'data.value', op: 'gt' }), value: Number(numMatch[1]) };
+        } else if (node.type === 'notify.send' && roleMatch) {
+          node.config.roleNames = [roleMatch[0].toLowerCase()];
         }
         if (values.apply === true) {
           const savedRule = upsertMockRule(cloned);
-          return okResp({ mode: 'node', applied: true, draftRule: cloned, savedRule });
+          return okResp({ ok: true, refused: false, mode: 'node', modeUsed: 'offline-fallback', applied: true, draftGraph: cloned.graphJson, draftRule: cloned, savedRule });
         }
-        return okResp({ mode: 'node', applied: false, draftRule: cloned });
+        return okResp({ ok: true, refused: false, mode: 'node', modeUsed: 'offline-fallback', applied: false, draftGraph: cloned.graphJson, draftRule: cloned });
       }
-      const targetTempMatch = String(values.prompt || '').match(/(-?\d+(?:\.\d+)?)\s*(?:độ|do\b)/i);
-      const targetTempC = targetTempMatch ? Number(targetTempMatch[1]) : 4.0;
+      const numMatch = String(values.prompt || '').match(/(-?\d+(?:\.\d+)?)/);
+      const thresholdVal = numMatch ? Number(numMatch[1]) : 8;
+      const graphJson = {
+        version: 2,
+        nodes: [
+          { id: 'trig_1', type: 'trigger.event', label: 'Event Trigger', config: { eventType: 'alarm.triggered' } },
+          { id: 'if_1', type: 'control.if', label: 'Evaluate Condition', config: { condition: { field: 'data.temperature', op: 'gt', value: thresholdVal } } },
+          { id: 'crt_1', type: 'data.create', label: 'Create Ticket', config: { collection: 'latticeServiceTickets', values: { code: 'FLOW-{{id}}' } } },
+          { id: 'notify_1', type: 'notify.send', label: 'Notify Manager', config: { roleNames: ['ldx_manager'], severity: 'info', title: 'Alert' } },
+        ],
+        edges: [
+          { id: 'e1', source: 'trig_1', sourceHandle: 'main', target: 'if_1', targetHandle: 'in' },
+          { id: 'e2', source: 'if_1', sourceHandle: 'true', target: 'crt_1', targetHandle: 'in' },
+          { id: 'e3', source: 'crt_1', sourceHandle: 'main', target: 'notify_1', targetHandle: 'in' },
+        ],
+        settings: { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 8, timeoutMs: 30000 },
+      };
       const draftRule = {
-        ruleKey: values.rule?.ruleKey || 'auto_coldchain_draft',
-        name: 'AI Cold-Chain Draft Rule',
-        triggerEventType: 'alarm.triggered,device.offline',
-        dmnTableKey: 'cmms_priority_routing_v1',
-        cooldownSec: 60,
+        schemaVersion: 2,
+        ruleKey: values.rule?.ruleKey || 'auto_architect_draft',
+        name: 'DX-OS Flow Architect Draft',
+        triggerEventType: 'alarm.triggered',
+        cooldownSec: 0,
         maxDepth: 8,
         active: true,
+        graphJson,
         actionsJson: [
-          { type: 'create_record', collection: 'latticeCustomWorkOrders' },
+          { type: 'create_record', collection: 'latticeServiceTickets' },
           { type: 'notify_role', role: 'ldx_manager' },
-          { type: 'twin_set_desired', when: { 'dmn.workOrderPriority': 'critical' }, desiredPatch: { targetTempC, fanMode: 'high' } },
         ],
       };
       if (values.apply === true) {
         const savedRule = upsertMockRule(draftRule);
-        return okResp({ mode: 'full', applied: true, draftRule, savedRule });
+        return okResp({ ok: true, refused: false, mode: 'full', modeUsed: 'offline-fallback', applied: true, draftGraph: graphJson, draftRule, savedRule });
       }
-      return okResp({ mode: 'full', applied: false, draftRule });
+      return okResp({ ok: true, refused: false, mode: 'full', modeUsed: 'offline-fallback', applied: false, draftGraph: graphJson, draftRule });
     }
     if (resourceAction === 'dxosAutomations:listRuns') {
       const org = query.get('organizationId');
@@ -550,6 +973,31 @@ function createMockAcceptanceCaller({
       state.automationRuns = state.automationRuns.filter((r) => Number(r.id) !== id);
       return okResp({ ok: true });
     }
+    if (resourceAction === 'latticeServiceTickets:get') {
+      const id = Number(query.get('filterByTk'));
+      const t = state.serviceTickets.find((x) => x.id === id);
+      return t ? okResp(t) : errResp(404, 'NOT_FOUND');
+    }
+    if (resourceAction === 'latticeServiceTickets:list') {
+      const f = JSON.parse(query.get('filter') || '{}');
+      return okResp(state.serviceTickets.filter((t) => (!f.organizationId || t.organizationId === f.organizationId)));
+    }
+    if (resourceAction === 'latticeServiceTickets:destroy') {
+      state.destroyedPaths.push(path);
+      const id = Number(query.get('filterByTk'));
+      state.serviceTickets = state.serviceTickets.filter((t) => Number(t.id) !== id);
+      return okResp({ ok: true });
+    }
+    if (resourceAction === 'latticeAiApprovalQueue:list') {
+      const f = JSON.parse(query.get('filter') || '{}');
+      return okResp(state.approvalQueue.filter((q) => (!f.organizationId || q.organizationId === f.organizationId)));
+    }
+    if (resourceAction === 'latticeAiApprovalQueue:destroy') {
+      state.destroyedPaths.push(path);
+      const id = Number(query.get('filterByTk'));
+      state.approvalQueue = state.approvalQueue.filter((q) => Number(q.id) !== id);
+      return okResp({ ok: true });
+    }
     if (resourceAction === 'latticeCustomWorkOrders:get') {
       const id = Number(query.get('filterByTk'));
       const wo = state.workOrders.find((w) => w.id === id);
@@ -558,6 +1006,12 @@ function createMockAcceptanceCaller({
     if (resourceAction === 'latticeCustomWorkOrders:list') {
       const f = JSON.parse(query.get('filter') || '{}');
       return okResp(state.workOrders.filter((w) => (!f.assetId || w.assetId === f.assetId)));
+    }
+    if (resourceAction === 'latticeCustomWorkOrders:destroy') {
+      state.destroyedPaths.push(path);
+      const id = Number(query.get('filterByTk'));
+      state.workOrders = state.workOrders.filter((w) => Number(w.id) !== id);
+      return okResp({ ok: true });
     }
 
     // 4. Webhooks & Circuit Breaker / DLQ
@@ -847,11 +1301,13 @@ test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, ma
     assert.equal(passed, true, `Acceptance check ${name} did not pass`);
   }
 
-  // Zero secret leaks in summary
+  // Zero secret leaks in summary (including HITL resumeToken and inbound webhook secret)
   const summaryText = JSON.stringify(res);
   assert.equal(summaryText.includes('acc-vault-v1-'), false);
   assert.equal(summaryText.includes('acc-vault-v2-'), false);
   assert.equal(summaryText.includes('acc-whsec-'), false);
+  assert.equal(summaryText.includes('acc-inwh-'), false);
+  assert.equal(summaryText.includes('mock-resume-token-'), false);
   for (const pwd of state.provisionedPasswords) {
     assert.equal(summaryText.includes(pwd), false, 'Acceptance summary leaked mqttPassword');
   }
@@ -859,22 +1315,43 @@ test('runBrokerAutomationBuilderAcceptance verifies all 6 closed-loop checks, ma
   // Temporary entities cleaned up (showcase run preserved)
   assert.equal(state.connectors.length, 0);
   assert.equal(state.subscriptions.length, 0);
-  assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_lwt_wo_')), false);
-  assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_ai_temp_')), false);
+  assert.equal(state.serviceTickets.length, 0);
+  assert.equal(state.approvalQueue.length, 0);
+  assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_')), false);
   assert.deepEqual(state.automationRuns.map((r) => r.id), [50]);
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAutomationRuns:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('collections:destroy?filterByTk=latticeCustomAcc')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAssets:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeIotDevices:destroy?')));
-  assert.equal(res.checks.automationStudioAndCopilotOk, true);
-  assert.equal(res.automationStudio.blueprintCount, 3);
+  assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeServiceTickets:destroy?')));
+  assert.equal(res.checks.automationStudioAndArchitectOk, true);
+  assert.equal(Object.hasOwn(res.checks, `automationStudioAnd${['Co', 'pilot'].join('')}Ok`), false);
+  assert.ok(res.automationStudio.nodeRegistryCount >= 24);
+  assert.deepEqual(
+    res.automationStudio.nodeRegistryCategories.sort(),
+    ['ai', 'control', 'data', 'integration', 'logic', 'trigger'],
+  );
+  assert.ok(res.automationStudio.blueprintCount >= 6);
   assert.equal(res.automationStudio.criticalSimulatedSteps, 5);
   assert.equal(res.automationStudio.highSkippedSteps, 3);
-  assert.equal(res.automationStudio.slaWarningSimulatedSteps, 1);
-  assert.equal(res.automationStudio.slaBreachedSimulatedSteps, 2);
-  assert.equal(res.automationStudio.aiNodeTargetTempC, 3.5);
+  assert.equal(res.automationStudio.slaWarningSimulatedSteps, 3);
+  assert.equal(res.automationStudio.slaBreachedSimulatedSteps, 4);
+  assert.equal(res.automationStudio.dagLoopIterations, 2);
+  assert.equal(res.automationStudio.dagLoopFalseBranchSkipped, true);
+  assert.equal(res.automationStudio.testNodeOk, true);
+  assert.equal(res.automationStudio.testNodeNextPort, 'true');
+  assert.equal(res.automationStudio.hitlPausedStatus, 'suspended');
+  assert.ok([403, 404].includes(res.automationStudio.hitlCrossOrgRejectedStatus));
+  assert.equal(res.automationStudio.hitlBadTokenRejectedStatus, 403);
+  assert.equal(res.automationStudio.hitlResumedStatus, 'completed');
+  assert.equal(res.automationStudio.hitlReplayRejectedStatus, 409);
+  assert.equal(res.automationStudio.webhookInvalidSigStatus, 401);
+  assert.equal(res.automationStudio.webhookValidSigStatus, 200);
+  assert.equal(res.automationStudio.aiFixErrorRepaired, true);
+  assert.ok(res.automationStudio.aiSuggestCount >= 1);
   assert.match(res.automationStudio.aiAppliedTempRuleKey, /^acc_ai_temp_/);
-  assert.equal(res.automationStudio.aiAppliedCooldownSec, 180);
+  assert.equal(res.automationStudio.aiAppliedThresholdValue, 12);
+  assert.equal(res.automationStudio.aiInjectionRejectedStatus, 400);
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeCustomWorkOrders:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeTwinShadows:destroy?')));
   assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAgentProposals:destroy?')));
@@ -893,7 +1370,7 @@ test('runBrokerAutomationBuilderAcceptance tolerates partial step 4 call_connect
     /twin_set_desired.*status === 'completed'/,
   );
   assert.equal(skippedCoreMock.state.automationRuns.length, 0);
-  assert.equal(skippedCoreMock.state.automationRules.some((r) => r.ruleKey.startsWith('acc_lwt_wo_')), false);
+  assert.equal(skippedCoreMock.state.automationRules.some((r) => r.ruleKey.startsWith('acc_')), false);
 });
 
 test('runBrokerAutomationBuilderAcceptance uses saved auto_sla_breach_escalation ruleKey when present and cleans up aiTempRuleKey runs', async () => {
@@ -930,14 +1407,40 @@ test('runBrokerAutomationBuilderAcceptance uses saved auto_sla_breach_escalation
   const res = await runBrokerAutomationBuilderAcceptance(wrappedCallActor, { organizationId: 'native-ui-lab' });
   assert.equal(res.status, 'PASS');
   assert.equal(state.automationRuns.length, 0);
-  assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_ai_temp_')), false);
+  assert.equal(state.automationRules.some((r) => r.ruleKey.startsWith('acc_')), false);
   const slaTestCall = state.calls.find(
     (c) => c.path === 'dxosAutomations:testRule' && c.opts?.values?.ruleKey === 'auto_sla_breach_escalation',
   );
   assert.ok(slaTestCall, 'Expected testRule to use ruleKey=auto_sla_breach_escalation when rule is already saved');
 });
 
-test('runBrokerAutomationBuilderAcceptance fails closed on leaked mqttPassword or missing OpenAPI custom paths and still cleans up', async () => {
+test('runBrokerAutomationBuilderAcceptance fails closed on shrunk nodeRegistry, replay resume acceptance, bad webhook HMAC acceptance, leaked mqttPassword, or missing OpenAPI custom paths and still cleans up', async () => {
+  const shrunkRegMock = createMockAcceptanceCaller({ shrinkNodeRegistry: true });
+  await assert.rejects(
+    () => runBrokerAutomationBuilderAcceptance(shrunkRegMock.callActor, { organizationId: 'native-ui-lab' }),
+    /nodeRegistry/i,
+  );
+  assert.equal(shrunkRegMock.state.automationRuns.length, 0);
+  assert.equal(shrunkRegMock.state.automationRules.some((r) => r.ruleKey.startsWith('acc_')), false);
+
+  const replayMock = createMockAcceptanceCaller({ forceReplayResumeOk: true });
+  await assert.rejects(
+    () => runBrokerAutomationBuilderAcceptance(replayMock.callActor, { organizationId: 'native-ui-lab' }),
+    /409/,
+  );
+  assert.equal(replayMock.state.automationRuns.length, 0);
+  assert.equal(replayMock.state.serviceTickets.length, 0);
+  assert.equal(replayMock.state.approvalQueue.length, 0);
+  assert.equal(replayMock.state.automationRules.some((r) => r.ruleKey.startsWith('acc_')), false);
+
+  const badWebhookMock = createMockAcceptanceCaller({ forceBadWebhookAccept: true });
+  await assert.rejects(
+    () => runBrokerAutomationBuilderAcceptance(badWebhookMock.callActor, { organizationId: 'native-ui-lab' }),
+    /401/,
+  );
+  assert.equal(badWebhookMock.state.connectors.length, 0);
+  assert.equal(badWebhookMock.state.automationRules.some((r) => r.ruleKey.startsWith('acc_')), false);
+
   const leakyMock = createMockAcceptanceCaller({ leakMqttPasswordInList: true });
   await assert.rejects(
     () => runBrokerAutomationBuilderAcceptance(leakyMock.callActor, { organizationId: 'native-ui-lab' }),
@@ -954,7 +1457,33 @@ test('runBrokerAutomationBuilderAcceptance fails closed on leaked mqttPassword o
   assert.ok(missingOpenApiMock.state.destroyedPaths.some((p) => p.startsWith('collections:destroy?')));
 });
 
-test('acceptance script and test carry compliant CTU-OpenPaw SPDX headers', () => {
+test('runBrokerAutomationBuilderAcceptance succeeds and cleans up when auto_cmms_on_coldchain_fault is pre-seeded as Graph v2', async () => {
+  const coldBp = MOCK_BLUEPRINTS.find((b) => b.ruleKey === 'auto_cmms_on_coldchain_fault');
+  const { callActor, state } = createMockAcceptanceCaller({
+    initialAutomationRules: [
+      {
+        id: 41,
+        organizationId: 'native-ui-lab',
+        ...coldBp,
+        schemaVersion: 2,
+      },
+    ],
+  });
+  const res = await runBrokerAutomationBuilderAcceptance(callActor, { organizationId: 'native-ui-lab' });
+  assert.equal(res.status, 'PASS');
+  assert.equal(res.checks.automationStudioAndArchitectOk, true);
+  assert.equal(res.automationStudio.criticalSimulatedSteps, 9);
+  assert.equal(res.automationStudio.highSkippedSteps, 4);
+  assert.equal(state.automationRuns.length, 0);
+  assert.equal(state.workOrders.length, 0);
+  assert.equal(state.serviceTickets.length, 0);
+  assert.equal(state.approvalQueue.length, 0);
+  assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeTwinShadows:destroy?')));
+  assert.ok(state.destroyedPaths.some((p) => p.startsWith('latticeAgentProposals:destroy?')));
+});
+
+test('acceptance script and test carry compliant CTU-OpenPaw SPDX headers and zero legacy Wave 9 branding', () => {
+  const bannedBrandRe = new RegExp(['co', 'pilot'].join(''), 'i');
   for (const rel of [
     'scripts/acceptance-broker-automation-builder.mjs',
     'scripts/tests/acceptance-broker-automation-builder.test.mjs',
@@ -964,5 +1493,8 @@ test('acceptance script and test carry compliant CTU-OpenPaw SPDX headers', () =
     const src = readFileSync(join(REPO_ROOT, rel), 'utf8');
     const res = addSourceHeader(src, rel);
     assert.equal(res.status, 'present', `SPDX header check failed for ${rel}: ${res.status}`);
+    if (rel.includes('acceptance-broker-automation-builder')) {
+      assert.equal(bannedBrandRe.test(src), false, `Legacy branding must not appear in ${rel}`);
+    }
   }
 });

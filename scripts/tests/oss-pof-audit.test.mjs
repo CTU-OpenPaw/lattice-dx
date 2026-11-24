@@ -216,6 +216,40 @@ test('runPofAudit in a non-git directory detects missing SPDX, .env secrets, .gi
   assert.equal(gmReport.checks.find(c => c.id === 'upstream-clean')?.passed, false);
 });
 
+test('runPofAudit catches nested .gitmodules (e.g. packages/foo/.gitmodules) in git and archive modes', t => {
+  const trackedNestedDir = createCompliantFixtureRepo();
+  t.after(() => rmSync(trackedNestedDir, { recursive: true, force: true }));
+  mkdirSync(join(trackedNestedDir, 'packages/foo'), { recursive: true });
+  writeFileSync(join(trackedNestedDir, 'packages/foo/.gitmodules'), '[submodule "bar"]\n\tpath = bar\n', 'utf8');
+  execFileSync('git', ['add', 'packages/foo/.gitmodules'], { cwd: trackedNestedDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'add nested gitmodules'], { cwd: trackedNestedDir, stdio: 'ignore' });
+  const trackedReport = runPofAudit({ rootDir: trackedNestedDir });
+  assert.equal(trackedReport.result, 'FAIL');
+  const trackedCheck = trackedReport.checks.find(c => c.id === 'upstream-clean');
+  assert.equal(trackedCheck?.passed, false);
+  assert.match(trackedCheck?.details ?? '', /packages\/foo\/\.gitmodules/);
+
+  const untrackedNestedDir = createCompliantFixtureRepo();
+  t.after(() => rmSync(untrackedNestedDir, { recursive: true, force: true }));
+  mkdirSync(join(untrackedNestedDir, 'packages/foo'), { recursive: true });
+  writeFileSync(join(untrackedNestedDir, 'packages/foo/.gitmodules'), '[submodule "bar"]\n\tpath = bar\n', 'utf8');
+  const untrackedReport = runPofAudit({ rootDir: untrackedNestedDir });
+  assert.equal(untrackedReport.result, 'FAIL');
+  const untrackedCheck = untrackedReport.checks.find(c => c.id === 'upstream-clean');
+  assert.equal(untrackedCheck?.passed, false);
+  assert.match(untrackedCheck?.details ?? '', /packages\/foo\/\.gitmodules/);
+
+  const archiveNestedDir = createCompliantFixtureFiles();
+  t.after(() => rmSync(archiveNestedDir, { recursive: true, force: true }));
+  mkdirSync(join(archiveNestedDir, 'packages/foo'), { recursive: true });
+  writeFileSync(join(archiveNestedDir, 'packages/foo/.gitmodules'), '[submodule "bar"]\n\tpath = bar\n', 'utf8');
+  const archiveReport = runPofAudit({ rootDir: archiveNestedDir });
+  assert.equal(archiveReport.result, 'FAIL');
+  const archiveCheck = archiveReport.checks.find(c => c.id === 'upstream-clean');
+  assert.equal(archiveCheck?.passed, false);
+  assert.match(archiveCheck?.details ?? '', /packages\/foo\/\.gitmodules/);
+});
+
 test('planTarball rejects unsafe git refs and buildOssReleaseTarball leaves no corrupt file on failure', t => {
   const dir = createCompliantFixtureRepo();
   t.after(() => rmSync(dir, { recursive: true, force: true }));

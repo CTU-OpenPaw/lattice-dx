@@ -7,7 +7,8 @@
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
-import { resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assertLoopbackOrigin,
@@ -640,218 +641,97 @@ async function seedCmmsBusinessPack(api, organizationId) {
   };
 }
 
-const FLAGSHIP_COLDCHAIN_BLUEPRINT = {
-  ruleKey: 'auto_cmms_on_coldchain_fault',
-  name: 'Ứng cứu khẩn Chuỗi lạnh & Bảo trì CMMS (5 bước rẽ nhánh)',
-  description:
-    'Đánh giá bảng quyết định cmms_priority_routing_v1, tự tạo phiếu bảo trì CMMS, báo vai trò phụ trách và rẽ nhánh khi ưu tiên = critical để hạ nhiệt Digital Twin (HITL), chạy AI Triage và đẩy điều phối sang n8n.',
-  triggerEventType: 'alarm.triggered,device.offline',
-  filterJson: null,
-  dmnTableKey: 'cmms_priority_routing_v1',
-  cooldownSec: 60,
-  maxDepth: 8,
-  active: true,
-  actionsJson: [
-    {
-      type: 'create_record',
-      label: 'Tạo phiếu bảo trì CMMS',
-      branchLabel: null,
-      when: null,
-      collection: 'latticeCustomWorkOrders',
-      values: {
-        workOrderCode: 'WO-{{id}}',
-        title: 'Cold-Chain Fault: {{data.deviceKey}}',
-        assetId: '{{data.assetId}}',
-        deviceKey: '{{data.deviceKey}}',
-        priority: '{{dmn.workOrderPriority}}',
-        status: 'open',
-        faultSummary: '{{data.message}}',
-        assignedRole: '{{dmn.assignedRole}}',
-      },
-    },
-    {
-      type: 'notify_role',
-      label: 'Thông báo vai trò phụ trách',
-      branchLabel: null,
-      when: null,
-      role: '{{dmn.assignedRole}}',
-      category: 'cmms',
-      severity: 'warning',
-      title: 'CMMS Work Order ({{dmn.workOrderPriority}})',
-      body: 'Tự tạo phiếu #{{steps.0.id}} cho {{data.deviceKey}}',
-      targetCollection: 'latticeCustomWorkOrders',
-      targetPath: '/p/cmms',
-    },
-    {
-      type: 'twin_set_desired',
-      label: 'Hạ nhiệt khẩn Digital Twin (HITL)',
-      branchLabel: 'Khi ưu tiên = critical',
-      when: { 'dmn.workOrderPriority': 'critical' },
-      assetId: '{{data.assetId}}',
-      assetEntityId: '{{data.assetEntityId}}',
-      desiredPatch: { targetTempC: 4.0, fanMode: 'high' },
-    },
-    {
-      type: 'trigger_ai_triage',
-      label: 'Phân tích sự cố bằng AI Triage',
-      branchLabel: 'Khi ưu tiên = critical',
-      when: { 'dmn.workOrderPriority': 'critical' },
-      targetCollection: 'latticeCustomWorkOrders',
-      targetRecordId: '{{steps.0.id}}',
-      severity: 'critical',
-      recommendation:
-        'Sự cố chuỗi lạnh nghiêm trọng trên {{data.deviceKey}}: kiểm tra máy nén, xác nhận lệnh hạ nhiệt 4°C và xử lý phiếu CMMS #{{steps.0.id}}.',
-    },
-    {
-      type: 'call_connector',
-      label: 'Đẩy điều phối sang n8n',
-      branchLabel: 'Khi ưu tiên = critical',
-      when: { 'dmn.workOrderPriority': 'critical' },
-      connectorKey: 'n8n-coldchain-orchestrator',
-      method: 'POST',
-      body: {
-        eventType: '{{type}}',
-        deviceKey: '{{data.deviceKey}}',
-        workOrderId: '{{steps.0.id}}',
-        priority: '{{dmn.workOrderPriority}}',
-        assignedRole: '{{dmn.assignedRole}}',
-        slaHours: '{{dmn.slaHours}}',
-      },
-    },
-  ],
-};
-
-const FLAGSHIP_ADDITIONAL_BLUEPRINTS = [
-  {
-    ruleKey: 'auto_mkt_quarantine_response',
-    name: 'Cách ly Lô Vắc-xin vượt MKT & Đồng bộ Đối tác (4 bước)',
-    description:
-      'Tự động mở hồ sơ sự cố khi lô vắc-xin bị hold MKT, chạy AI Triage gắn với hồ sơ sự cố, rẽ nhánh cấp Giám đốc Chất lượng sang n8n và thông báo ldx_manager.',
-    triggerEventType: 'lot.held_mkt',
-    filterJson: null,
-    dmnTableKey: 'cold_chain_approval_v1',
-    cooldownSec: 60,
-    maxDepth: 8,
-    active: true,
-    actionsJson: [
-      {
-        type: 'create_record',
-        label: 'Mở hồ sơ sự cố cách ly MKT',
-        branchLabel: null,
-        when: null,
-        collection: 'latticeIncidentCases',
-        values: {
-          code: 'MKT-{{id}}',
-          name: 'Cách ly lô vượt MKT: {{data.lotCode}}',
-          runId: 'mkt-{{id}}',
-          assetEntityId: 'lot:{{data.lotCode}}',
-          handlerId: 'ldx_manager',
-          severity: 'critical',
-          status: 'open',
-          proposal:
-            'Lô {{data.lotCode}} có MKT={{data.mktCelsius}}°C vượt ngưỡng {{data.thresholdCelsius}}°C (cấp duyệt: {{dmn.approvalTier}}).',
-        },
-      },
-      {
-        type: 'trigger_ai_triage',
-        label: 'AI Triage đánh giá hồ sơ cách ly',
-        branchLabel: null,
-        when: null,
-        targetCollection: 'latticeIncidentCases',
-        targetRecordId: '{{steps.0.id}}',
-        severity: 'high',
-        recommendation:
-          'Đánh giá sai lệch MKT cho lô {{data.lotCode}} ({{data.mktCelsius}}°C) gắn với sự cố #{{steps.0.id}}, phê duyệt cấp {{dmn.approvalTier}} trong {{dmn.slaMinutes}} phút.',
-      },
-      {
-        type: 'call_connector',
-        label: 'Đồng bộ n8n Giám đốc Chất lượng',
-        branchLabel: 'Cấp Giám đốc Chất lượng',
-        when: { 'dmn.approvalTier': 'quality_hold_director' },
-        connectorKey: 'n8n-coldchain-orchestrator',
-        method: 'POST',
-        body: {
-          eventType: '{{type}}',
-          lotCode: '{{data.lotCode}}',
-          mktCelsius: '{{data.mktCelsius}}',
-          incidentId: '{{steps.0.id}}',
-          approvalTier: '{{dmn.approvalTier}}',
-          slaMinutes: '{{dmn.slaMinutes}}',
-        },
-      },
-      {
-        type: 'notify_role',
-        label: 'Thông báo Quản lý Chuỗi lạnh',
-        branchLabel: null,
-        when: null,
-        role: 'ldx_manager',
-        category: 'wms',
-        severity: 'critical',
-        title: 'Cách ly lô MKT: {{data.lotCode}} ({{dmn.approvalTier}})',
-        body: 'Đã mở hồ sơ sự cố #{{steps.0.id}} cho lô {{data.lotCode}} (MKT {{data.mktCelsius}}°C).',
-        targetCollection: 'latticeIncidentCases',
-        targetRecordId: '{{steps.0.id}}',
-        targetPath: '/p/wms',
-      },
-    ],
-  },
-  {
-    ruleKey: 'auto_sla_breach_escalation',
-    name: 'Leo thang Cảnh báo & Vi phạm SLA (3 bước rẽ nhánh)',
-    description:
-      'Phân nhánh theo sla.warning (nhắc ldx_dispatcher) và sla.breached (tạo phiếu dịch vụ khẩn trên latticeServiceTickets và leo thang ldx_manager).',
-    triggerEventType: 'sla.warning,sla.breached',
-    filterJson: null,
-    dmnTableKey: null,
-    cooldownSec: 120,
-    maxDepth: 8,
-    active: true,
-    actionsJson: [
-      {
-        type: 'notify_role',
-        label: 'Nhắc điều phối viên sắp trễ SLA',
-        branchLabel: 'Khi sla.warning',
-        when: { 'event.type': 'sla.warning' },
-        role: 'ldx_dispatcher',
-        category: 'sla',
-        severity: 'warning',
-        title: 'Cảnh báo sắp chạm ngưỡng SLA ({{data.code}})',
-        body: 'Bản ghi {{data.targetCollection}} #{{data.recordId}} còn {{data.remainingMinutes}} phút trước hạn SLA.',
-        targetCollection: '{{data.targetCollection}}',
-        targetRecordId: '{{data.recordId}}',
-        targetPath: '/p/services',
-      },
-      {
-        type: 'create_record',
-        label: 'Tạo phiếu xử lý vi phạm SLA',
-        branchLabel: 'Khi sla.breached',
-        when: { 'event.type': 'sla.breached' },
-        collection: 'latticeServiceTickets',
-        values: {
-          code: 'SLA-{{id}}',
-          name: 'Vi phạm SLA: {{data.code}}',
-          serviceType: 'facilities',
-          priority: 'high',
-          description: 'Quá hạn SLA {{data.overdueMinutes}} phút trên {{data.targetCollection}} #{{data.recordId}}.',
-        },
-      },
-      {
-        type: 'notify_role',
-        label: 'Leo thang Quản lý khi vi phạm SLA',
-        branchLabel: 'Khi sla.breached',
-        when: { 'event.type': 'sla.breached' },
-        role: 'ldx_manager',
-        category: 'sla',
-        severity: 'critical',
-        title: 'Leo thang SLA quá hạn: {{data.code}}',
-        body: 'Đã tạo phiếu khẩn #{{steps.1.id}} do quá hạn SLA trên {{data.targetCollection}} #{{data.recordId}}.',
-        targetCollection: 'latticeServiceTickets',
-        targetRecordId: '{{steps.1.id}}',
-        targetPath: '/p/services',
-      },
-    ],
-  },
+const BLUEPRINTS_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '../plugins/nocobase/plugin-dxos-studio/src/server/flow/blueprints',
+);
+const FLAGSHIP_BLUEPRINT_FILES = [
+  'coldchain-emergency.json',
+  'mkt-quarantine.json',
+  'sla-escalation.json',
+  'procurement-hitl-approval.json',
+  'scheduled-ai-digest.json',
+  'partner-webhook-sync.json',
 ];
+
+function loadFlagshipGraphV2Blueprints() {
+  return FLAGSHIP_BLUEPRINT_FILES.map((file) =>
+    JSON.parse(readFileSync(join(BLUEPRINTS_DIR, file), 'utf8')),
+  );
+}
+
+const FLAGSHIP_GRAPH_V2_BLUEPRINTS = loadFlagshipGraphV2Blueprints();
+
+function isRuleMatchingGraphV2Blueprint(existing, blueprint) {
+  if (!existing || Number(existing.schemaVersion) !== 2 || existing.active === false) {
+    return false;
+  }
+  if (String(existing.triggerEventType || '').trim() !== String(blueprint.triggerEventType || '').trim()) {
+    return false;
+  }
+  if ((existing.dmnTableKey || null) !== (blueprint.dmnTableKey || null)) {
+    return false;
+  }
+  if (Number(existing.cooldownSec ?? 0) !== Number(blueprint.cooldownSec ?? 0)) {
+    return false;
+  }
+  if (Number(existing.maxDepth ?? 8) !== Number(blueprint.maxDepth ?? 8)) {
+    return false;
+  }
+
+  const g = existing.graphJson;
+  const bpG = blueprint.graphJson;
+  if (!g || Number(g.version) !== 2 || !Array.isArray(g.nodes) || !Array.isArray(g.edges)) {
+    return false;
+  }
+  if (g.nodes.length !== bpG.nodes.length || g.edges.length !== bpG.edges.length) {
+    return false;
+  }
+
+  const existingNodesSig = g.nodes.map((n) => `${n?.id}:${n?.type}`).join('|');
+  const bpNodesSig = bpG.nodes.map((n) => `${n?.id}:${n?.type}`).join('|');
+  if (existingNodesSig !== bpNodesSig) {
+    return false;
+  }
+
+  const existingEdgeSet = new Set(
+    g.edges.map((e) => `${e?.source}|${e?.sourceHandle || 'main'}|${e?.target}|${e?.targetHandle || 'in'}`),
+  );
+  for (const e of bpG.edges) {
+    const key = `${e.source}|${e.sourceHandle || 'main'}|${e.target}|${e.targetHandle || 'in'}`;
+    if (!existingEdgeSet.has(key)) return false;
+  }
+
+  const gSet = g.settings || {};
+  const bpSet = bpG.settings || {};
+  if (gSet.errorPolicy && bpSet.errorPolicy && gSet.errorPolicy !== bpSet.errorPolicy) {
+    return false;
+  }
+  if (gSet.cooldownSec !== undefined && Number(gSet.cooldownSec) !== Number(bpSet.cooldownSec ?? 0)) {
+    return false;
+  }
+  if (gSet.maxDepth !== undefined && Number(gSet.maxDepth) !== Number(bpSet.maxDepth ?? 8)) {
+    return false;
+  }
+  return true;
+}
+
+function buildGraphV2RulePayload(organizationId, blueprint) {
+  return {
+    organizationId,
+    schemaVersion: 2,
+    ruleKey: blueprint.ruleKey,
+    name: blueprint.name,
+    description: blueprint.description ?? null,
+    triggerEventType: blueprint.triggerEventType,
+    filterJson: blueprint.filterJson ?? null,
+    dmnTableKey: blueprint.dmnTableKey ?? null,
+    cooldownSec: blueprint.cooldownSec ?? 0,
+    maxDepth: blueprint.maxDepth ?? 8,
+    active: blueprint.active !== false,
+    graphJson: structuredClone(blueprint.graphJson),
+  };
+}
 
 async function seedFlagshipAutomationRules(api, organizationId, assets) {
   const existingRules = unwrapList(
@@ -863,31 +743,20 @@ async function seedFlagshipAutomationRules(api, organizationId, assets) {
   const upgradedRules = [];
   const reusedRules = [];
 
-  const existingColdChain = byKey.get(FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey);
-  const isLegacyNonBranchingColdChain = Boolean(
-    existingColdChain
-    && Array.isArray(existingColdChain.actionsJson)
-    && existingColdChain.actionsJson.length <= 2
-    && !existingColdChain.actionsJson.some((step) => step && step.when),
-  );
-  if (!existingColdChain || isLegacyNonBranchingColdChain) {
-    await api('dxosAutomations:saveRule', {
-      method: 'POST',
-      values: { organizationId, ...FLAGSHIP_COLDCHAIN_BLUEPRINT },
-    });
-    if (isLegacyNonBranchingColdChain) upgradedRules.push(FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey);
-    else createdRules.push(FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey);
-  } else {
-    reusedRules.push(FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey);
-  }
-
-  for (const blueprint of FLAGSHIP_ADDITIONAL_BLUEPRINTS) {
-    if (!byKey.has(blueprint.ruleKey)) {
+  for (const blueprint of FLAGSHIP_GRAPH_V2_BLUEPRINTS) {
+    const existing = byKey.get(blueprint.ruleKey);
+    if (!existing) {
       await api('dxosAutomations:saveRule', {
         method: 'POST',
-        values: { organizationId, ...blueprint },
+        values: buildGraphV2RulePayload(organizationId, blueprint),
       });
       createdRules.push(blueprint.ruleKey);
+    } else if (!isRuleMatchingGraphV2Blueprint(existing, blueprint)) {
+      await api('dxosAutomations:saveRule', {
+        method: 'POST',
+        values: buildGraphV2RulePayload(organizationId, blueprint),
+      });
+      upgradedRules.push(blueprint.ruleKey);
     } else {
       reusedRules.push(blueprint.ruleKey);
     }
@@ -907,8 +776,19 @@ async function seedFlagshipAutomationRules(api, organizationId, assets) {
     workOrdersListError = err?.message || String(err);
   }
 
+  let existingRuns = [];
+  try {
+    existingRuns = unwrapList(
+      await api(
+        `dxosAutomations:listRuns?organizationId=${encodeURIComponent(organizationId)}&ruleKey=auto_cmms_on_coldchain_fault&limit=5`,
+      ),
+    );
+  } catch {
+    existingRuns = [];
+  }
+
   let initialRun = null;
-  if (workOrdersCheckSucceeded && existingWorkOrders.length === 0) {
+  if (workOrdersCheckSucceeded && existingWorkOrders.length === 0 && existingRuns.length === 0) {
     const faultData = {
       severity: 'high',
       deviceKey: 'cold-truck-ct-01',
@@ -938,21 +818,26 @@ async function seedFlagshipAutomationRules(api, organizationId, assets) {
   }
 
   const stepTraces = Array.isArray(initialRun?.stepTracesJson) ? initialRun.stepTracesJson : [];
+  const nodeStates = initialRun?.nodeStatesJson && typeof initialRun.nodeStatesJson === 'object'
+    ? Object.values(initialRun.nodeStatesJson)
+    : [];
+  const skippedFromTraces = stepTraces.filter((s) => s?.status === 'skipped').length;
+  const skippedFromNodes = nodeStates.filter((s) => s?.status === 'skipped').length;
+
   return {
-    ruleKeys: [
-      FLAGSHIP_COLDCHAIN_BLUEPRINT.ruleKey,
-      ...FLAGSHIP_ADDITIONAL_BLUEPRINTS.map((b) => b.ruleKey),
-    ],
+    schemaVersion: 2,
+    ruleKeys: FLAGSHIP_GRAPH_V2_BLUEPRINTS.map((b) => b.ruleKey),
     createdRules,
     upgradedRules,
     reusedRules,
     existingWorkOrdersCount: existingWorkOrders.length,
+    existingRunsCount: existingRuns.length,
     ...(workOrdersListError ? { workOrdersListError } : {}),
     initialRunTriggered: Boolean(initialRun),
     initialRunUid: initialRun?.runUid ?? null,
     initialRunStatus: initialRun?.status ?? null,
     initialRunStepsCompleted: stepTraces.filter((s) => s?.status === 'completed').length,
-    initialRunStepsSkipped: stepTraces.filter((s) => s?.status === 'skipped').length,
+    initialRunStepsSkipped: skippedFromTraces > 0 ? skippedFromTraces : skippedFromNodes,
   };
 }
 

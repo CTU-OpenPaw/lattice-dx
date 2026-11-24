@@ -55,6 +55,8 @@ function validateTwinPatch(desiredPatch) {
 function createMockShowcaseServer({
   initialLedgerEntries = [],
   initialSnapshots = [],
+  initialAutomationRules = [],
+  initialAutomationRuns = [],
   delegationCreateError = null,
   omitCmmsPortalOnDomain = false,
 } = {}) {
@@ -72,8 +74,8 @@ function createMockShowcaseServer({
     ledgerEntries: [...initialLedgerEntries],
     snapshots: [...initialSnapshots],
     domains: [],
-    automationRules: [],
-    automationRuns: [],
+    automationRules: [...initialAutomationRules],
+    automationRuns: [...initialAutomationRuns],
     workOrders: [],
     connectors: [],
     iotDevices: [],
@@ -270,7 +272,19 @@ function createMockShowcaseServer({
         state.dmnTables.push({ id: ++state.nextId, organizationId: body.organizationId, tableKey: 'cmms_priority_routing_v1' });
       }
       if (!state.automationRules.some((r) => r.ruleKey === 'auto_cmms_on_coldchain_fault')) {
-        state.automationRules.push({ id: ++state.nextId, organizationId: body.organizationId, ruleKey: 'auto_cmms_on_coldchain_fault' });
+        state.automationRules.push({
+          id: ++state.nextId,
+          organizationId: body.organizationId,
+          ruleKey: 'auto_cmms_on_coldchain_fault',
+          schemaVersion: 1,
+          triggerEventType: 'alarm.triggered,device.offline',
+          dmnTableKey: 'cmms_priority_routing_v1',
+          cooldownSec: 60,
+          maxDepth: 8,
+          active: true,
+          actionsJson: [{ type: 'create_record' }, { type: 'notify_role' }],
+          graphJson: null,
+        });
       }
       return jsonResp({
         installed: true,
@@ -291,13 +305,38 @@ function createMockShowcaseServer({
         items: state.automationRules.filter((r) => !org || r.organizationId === org),
       });
     }
+    if (parsedUrl.pathname === '/api/dxosAutomations:listRuns') {
+      const org = parsedUrl.searchParams.get('organizationId');
+      const rKey = parsedUrl.searchParams.get('ruleKey');
+      return jsonResp({
+        items: state.automationRuns.filter((r) => (!org || r.organizationId === org) && (!rKey || r.ruleKey === rKey)),
+      });
+    }
     if (parsedUrl.pathname === '/api/dxosAutomations:saveRule') {
       const idx = state.automationRules.findIndex(
         (r) => r.organizationId === body.organizationId && r.ruleKey === body.ruleKey,
       );
+      const rawGraph = body.graphJson && typeof body.graphJson === 'object' ? structuredClone(body.graphJson) : null;
+      const normalizedGraph = rawGraph
+        ? {
+            version: 2,
+            nodes: (rawGraph.nodes || []).map((n) => ({ continueOnFail: false, ...n })),
+            edges: (rawGraph.edges || []).map((e) => ({ label: null, ...e })),
+            viewport: rawGraph.viewport || { x: 0, y: 0, zoom: 1 },
+            settings: {
+              errorPolicy: rawGraph.settings?.errorPolicy || 'stop',
+              cooldownSec: rawGraph.settings?.cooldownSec ?? body.cooldownSec ?? 0,
+              maxDepth: rawGraph.settings?.maxDepth ?? body.maxDepth ?? 8,
+              timeoutMs: rawGraph.settings?.timeoutMs ?? 30000,
+            },
+          }
+        : null;
       const entry = {
         id: idx >= 0 ? state.automationRules[idx].id : ++state.nextId,
         ...body,
+        schemaVersion: Number(body.schemaVersion) === 2 || normalizedGraph ? 2 : 1,
+        ...(normalizedGraph ? { graphJson: normalizedGraph } : {}),
+        active: body.active !== false,
       };
       if (idx >= 0) state.automationRules[idx] = entry;
       else state.automationRules.push(entry);
@@ -310,6 +349,9 @@ function createMockShowcaseServer({
       );
     }
     if (parsedUrl.pathname === '/api/dxosAutomations:runNow') {
+      const savedRule = state.automationRules.find(
+        (r) => r.organizationId === body.organizationId && r.ruleKey === body.ruleKey,
+      );
       const wo = {
         id: ++state.nextId,
         organizationId: body.organizationId,
@@ -319,20 +361,48 @@ function createMockShowcaseServer({
         status: 'open',
       };
       state.workOrders.push(wo);
-      const run = {
-        id: ++state.nextId,
-        organizationId: body.organizationId,
-        ruleKey: body.ruleKey,
-        runUid: `run_${state.nextId}`,
-        status: 'completed',
-        stepTracesJson: [
-          { stepIndex: 0, type: 'create_record', status: 'completed', output: { id: wo.id } },
-          { stepIndex: 1, type: 'notify_role', status: 'completed', output: { dispatched: 1 } },
-          { stepIndex: 2, type: 'twin_set_desired', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
-          { stepIndex: 3, type: 'trigger_ai_triage', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
-          { stepIndex: 4, type: 'call_connector', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
-        ],
-      };
+      const isGraphV2 = Number(savedRule?.schemaVersion) === 2 && savedRule?.graphJson;
+      const run = isGraphV2
+        ? {
+            id: ++state.nextId,
+            organizationId: body.organizationId,
+            ruleKey: body.ruleKey,
+            runUid: `run_${state.nextId}`,
+            status: 'completed',
+            graphVersion: 2,
+            nodeStatesJson: {
+              trig_coldchain: { status: 'completed' },
+              dmn_priority: { status: 'completed' },
+              create_work_order: { status: 'completed', output: { id: wo.id } },
+              notify_assigned: { status: 'completed', output: { dispatched: 1 } },
+              if_critical: { status: 'completed', nextPort: 'false' },
+              parallel_critical: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+              twin_cool_down: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+              ai_triage_wo: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+              http_n8n_dispatch: { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' },
+            },
+            stepTracesJson: [
+              { nodeId: 'trig_coldchain', type: 'trigger.event', status: 'completed' },
+              { nodeId: 'dmn_priority', type: 'logic.dmn', status: 'completed' },
+              { nodeId: 'create_work_order', type: 'data.create', status: 'completed', output: { id: wo.id } },
+              { nodeId: 'notify_assigned', type: 'notify.send', status: 'completed', output: { dispatched: 1 } },
+              { nodeId: 'if_critical', type: 'control.if', status: 'completed', output: { matched: false } },
+            ],
+          }
+        : {
+            id: ++state.nextId,
+            organizationId: body.organizationId,
+            ruleKey: body.ruleKey,
+            runUid: `run_${state.nextId}`,
+            status: 'completed',
+            stepTracesJson: [
+              { stepIndex: 0, type: 'create_record', status: 'completed', output: { id: wo.id } },
+              { stepIndex: 1, type: 'notify_role', status: 'completed', output: { dispatched: 1 } },
+              { stepIndex: 2, type: 'twin_set_desired', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
+              { stepIndex: 3, type: 'trigger_ai_triage', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
+              { stepIndex: 4, type: 'call_connector', status: 'skipped', skipReason: 'BRANCH_CONDITION_NOT_MATCHED' },
+            ],
+          };
       state.automationRuns.push(run);
       return jsonResp({ run });
     }
@@ -513,10 +583,29 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
     'auto_cmms_on_coldchain_fault',
     'auto_mkt_quarantine_response',
     'auto_sla_breach_escalation',
+    'auto_procurement_hitl_approval',
+    'auto_scheduled_ai_digest',
+    'auto_partner_webhook_sync',
   ]);
+  assert.equal(first.automationShowcase.schemaVersion, 2);
+  assert.deepEqual(first.automationShowcase.upgradedRules, ['auto_cmms_on_coldchain_fault']);
+  assert.deepEqual(first.automationShowcase.createdRules, [
+    'auto_mkt_quarantine_response',
+    'auto_sla_breach_escalation',
+    'auto_procurement_hitl_approval',
+    'auto_scheduled_ai_digest',
+    'auto_partner_webhook_sync',
+  ]);
+  assert.equal(state.automationRules.length, 6);
+  for (const savedRule of state.automationRules) {
+    assert.equal(savedRule.schemaVersion, 2, `Expected Graph v2 schemaVersion=2 for ${savedRule.ruleKey}`);
+    assert.equal(savedRule.graphJson?.version, 2, `Expected graphJson.version=2 for ${savedRule.ruleKey}`);
+    assert.ok(Array.isArray(savedRule.graphJson?.nodes) && savedRule.graphJson.nodes.length >= 5, `Expected >=5 nodes for ${savedRule.ruleKey}`);
+    assert.ok(Array.isArray(savedRule.graphJson?.edges) && savedRule.graphJson.edges.length >= 4, `Expected >=4 edges for ${savedRule.ruleKey}`);
+  }
   assert.equal(first.automationShowcase.initialRunTriggered, true);
-  assert.equal(first.automationShowcase.initialRunStepsCompleted, 2);
-  assert.equal(first.automationShowcase.initialRunStepsSkipped, 3);
+  assert.equal(first.automationShowcase.initialRunStepsCompleted, 5);
+  assert.equal(first.automationShowcase.initialRunStepsSkipped, 4);
   assert.equal(first.connectorVault.seeded, true);
   assert.equal(first.connectorVault.connectorKey, 'n8n-coldchain-orchestrator');
   assert.equal(first.connectorVault.hasSecrets, true);
@@ -579,9 +668,12 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(state.ledgerEntries.length, 1);
   assert.equal(state.snapshots.length, 1);
   assert.equal(state.domains.length, 1);
-  assert.equal(state.automationRules.length, 3);
-  assert.equal(second.automationShowcase.createdRules.length, 0);
+  assert.equal(state.automationRules.length, 6);
+  assert.deepEqual(second.automationShowcase.createdRules, []);
+  assert.deepEqual(second.automationShowcase.upgradedRules, []);
+  assert.equal(second.automationShowcase.reusedRules.length, 6);
   assert.equal(second.automationShowcase.initialRunTriggered, false);
+  assert.equal(state.automationRuns.length, 1);
   assert.equal(state.workOrders.length, 1);
   assert.equal(state.connectors.length, 1);
   assert.equal(state.iotDevices.length, 1);
@@ -607,10 +699,72 @@ test('runV100ChampionshipShowcaseSeed repairs CMMS pack if /p/cmms portal page i
   // Because /p/cmms was omitted from listDomains in this fixture, seedCmmsBusinessPack triggers idempotent reinstall without duplicating records
   assert.equal(second.cmmsPack.seeded, true);
   assert.equal(state.domains.length, 1);
-  assert.equal(state.automationRules.length, 3);
-  assert.equal(second.automationShowcase.createdRules.length, 0);
+  assert.equal(state.automationRules.length, 6);
+  assert.deepEqual(second.automationShowcase.createdRules, []);
+  assert.deepEqual(second.automationShowcase.upgradedRules, []);
+  assert.equal(second.automationShowcase.reusedRules.length, 6);
   assert.equal(second.automationShowcase.initialRunTriggered, false);
+  assert.equal(state.automationRuns.length, 1);
   assert.equal(state.workOrders.length, 1);
+});
+
+test('runV100ChampionshipShowcaseSeed upgrades legacy v1 rules to Graph v2 and skips demo run if run already exists', async () => {
+  const legacyRules = [
+    'auto_cmms_on_coldchain_fault',
+    'auto_mkt_quarantine_response',
+    'auto_sla_breach_escalation',
+  ].map((ruleKey, i) => ({
+    id: i + 1,
+    organizationId: 'native-ui-lab',
+    ruleKey,
+    schemaVersion: 1,
+    triggerEventType: 'alarm.triggered',
+    cooldownSec: 60,
+    maxDepth: 8,
+    active: true,
+    actionsJson: [{ type: 'create_record' }],
+    graphJson: null,
+  }));
+  const existingRun = {
+    id: 90,
+    organizationId: 'native-ui-lab',
+    ruleKey: 'auto_cmms_on_coldchain_fault',
+    runUid: 'run_existing_90',
+    status: 'completed',
+  };
+  const { state, mockFetch } = createMockShowcaseServer({
+    initialAutomationRules: legacyRules,
+    initialAutomationRuns: [existingRun],
+  });
+  const options = {
+    origin: 'http://localhost:13014',
+    organizationId: 'native-ui-lab',
+    token: 'tok-root',
+  };
+
+  const first = await runV100ChampionshipShowcaseSeed(options, mockFetch);
+  assert.equal(first.result, 'PASS');
+  assert.deepEqual(first.automationShowcase.upgradedRules, [
+    'auto_cmms_on_coldchain_fault',
+    'auto_mkt_quarantine_response',
+    'auto_sla_breach_escalation',
+  ]);
+  assert.deepEqual(first.automationShowcase.createdRules, [
+    'auto_procurement_hitl_approval',
+    'auto_scheduled_ai_digest',
+    'auto_partner_webhook_sync',
+  ]);
+  assert.equal(first.automationShowcase.initialRunTriggered, false);
+  assert.equal(state.automationRuns.length, 1);
+  assert.equal(state.workOrders.length, 0);
+
+  const second = await runV100ChampionshipShowcaseSeed(options, mockFetch);
+  assert.deepEqual(second.automationShowcase.createdRules, []);
+  assert.deepEqual(second.automationShowcase.upgradedRules, []);
+  assert.equal(second.automationShowcase.reusedRules.length, 6);
+  assert.equal(second.automationShowcase.initialRunTriggered, false);
+  assert.equal(state.automationRules.length, 6);
+  assert.equal(state.automationRuns.length, 1);
 });
 
 test('runV100ChampionshipShowcaseSeed paginates ledger/snapshots beyond 100 entries and filters snapshots strictly by latticeOrders', async () => {

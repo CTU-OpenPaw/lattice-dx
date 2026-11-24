@@ -8,6 +8,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -406,52 +407,72 @@ async function verifyMqttLwtAutomationCmms(callActor, okActor, organizationId, s
   );
   assert.equal(cmmsRun?.dmnResultJson?.outputs?.workOrderPriority, 'critical');
   const traces = Array.isArray(cmmsRun?.stepTracesJson) ? cmmsRun.stepTracesJson : [];
-  const requiredCoreSteps = [
-    { index: 0, type: 'create_record' },
-    { index: 1, type: 'notify_role' },
-    { index: 2, type: 'twin_set_desired' },
-    { index: 3, type: 'trigger_ai_triage' },
-  ];
-  for (const expected of requiredCoreSteps) {
-    const step = traces.find((s) => s?.stepIndex === expected.index) ?? traces[expected.index];
-    assert.ok(step, `Missing step ${expected.index} (${expected.type}) in auto_cmms_on_coldchain_fault stepTracesJson`);
-    assert.equal(step.type, expected.type, `Expected step ${expected.index} type=${expected.type}, got ${step.type}`);
-    assert.equal(
-      step.status,
-      'completed',
-      `Expected step ${expected.index} (${expected.type}) status === 'completed', got ${step.status}: ${step.error || step.skipReason || ''}`,
-    );
-  }
-  const optionalConnectorStep = traces.find((s) => s?.stepIndex === 4) ?? traces[4];
-  if (optionalConnectorStep) {
-    assert.equal(
-      optionalConnectorStep.type,
-      'call_connector',
-      `Expected optional step 4 type=call_connector, got ${optionalConnectorStep.type}`,
-    );
-    assert.ok(
-      ['completed', 'failed'].includes(optionalConnectorStep.status),
-      `Expected optional step 4 (call_connector) status completed or failed, got ${optionalConnectorStep.status}`,
-    );
+  const isGraphV2Run = cmmsRun?.graphVersion === 2 || traces.some((s) => Boolean(s?.nodeId));
+  if (isGraphV2Run) {
+    for (const expectedType of ['logic.dmn', 'data.create', 'notify.send', 'control.if', 'control.parallel', 'iot.twin_command', 'ai.agent']) {
+      const step = traces.find((s) => s?.type === expectedType);
+      assert.ok(step, `Missing node (${expectedType}) in Graph v2 auto_cmms_on_coldchain_fault stepTracesJson`);
+      assert.equal(
+        step.status,
+        'completed',
+        `Expected ${expectedType} status === 'completed', got ${step.status}: ${step.error || ''}`,
+      );
+    }
+    const optionalHttp = traces.find((s) => s?.type === 'integration.http');
+    if (optionalHttp) {
+      assert.ok(
+        ['completed', 'failed'].includes(optionalHttp.status),
+        `Expected optional integration.http status completed or failed, got ${optionalHttp.status}`,
+      );
+    }
+  } else {
+    const requiredCoreSteps = [
+      { index: 0, type: 'create_record' },
+      { index: 1, type: 'notify_role' },
+      { index: 2, type: 'twin_set_desired' },
+      { index: 3, type: 'trigger_ai_triage' },
+    ];
+    for (const expected of requiredCoreSteps) {
+      const step = traces.find((s) => s?.stepIndex === expected.index) ?? traces[expected.index];
+      assert.ok(step, `Missing step ${expected.index} (${expected.type}) in auto_cmms_on_coldchain_fault stepTracesJson`);
+      assert.equal(step.type, expected.type, `Expected step ${expected.index} type=${expected.type}, got ${step.type}`);
+      assert.equal(
+        step.status,
+        'completed',
+        `Expected step ${expected.index} (${expected.type}) status === 'completed', got ${step.status}: ${step.error || step.skipReason || ''}`,
+      );
+    }
+    const optionalConnectorStep = traces.find((s) => s?.stepIndex === 4) ?? traces[4];
+    if (optionalConnectorStep) {
+      assert.equal(
+        optionalConnectorStep.type,
+        'call_connector',
+        `Expected optional step 4 type=call_connector, got ${optionalConnectorStep.type}`,
+      );
+      assert.ok(
+        ['completed', 'failed'].includes(optionalConnectorStep.status),
+        `Expected optional step 4 (call_connector) status completed or failed, got ${optionalConnectorStep.status}`,
+      );
+    }
   }
   for (const step of traces) {
-    if (step?.type === 'create_record' && step?.output?.collection === 'latticeCustomWorkOrders' && step?.output?.id != null) {
+    if (['create_record', 'data.create'].includes(step?.type) && step?.output?.collection === 'latticeCustomWorkOrders' && step?.output?.id != null) {
       cleanup.workOrderIds.push(step.output.id);
     }
-    if (step?.type === 'trigger_ai_triage' && step?.output?.id != null) {
+    if (['trigger_ai_triage', 'ai.agent'].includes(step?.type) && step?.output?.id != null) {
       if (step.output.target === 'latticeAiApprovalQueue') cleanup.approvalQueueIds.push(step.output.id);
       else cleanup.proposalIds.push(step.output.id);
     }
-    if (step?.type === 'twin_set_desired') {
+    if (['twin_set_desired', 'iot.twin_command'].includes(step?.type)) {
       if (step?.output?.shadow?.id != null) cleanup.twinShadowIds.push(step.output.shadow.id);
       if (step?.output?.approvalId != null) cleanup.approvalQueueIds.push(step.output.approvalId);
     }
-    if (step?.status === 'failed' && step?.type !== 'call_connector') {
+    if (step?.status === 'failed' && !['call_connector', 'integration.http'].includes(step?.type)) {
       assert.fail(`Unexpected failure in ${step.type}: ${step.error}`);
     }
   }
   const createdStep = traces.find(
-    (s) => s?.type === 'create_record' && s?.output?.collection === 'latticeCustomWorkOrders',
+    (s) => ['create_record', 'data.create'].includes(s?.type) && s?.output?.collection === 'latticeCustomWorkOrders',
   );
   const workOrderId = createdStep?.output?.id;
   assert.ok(workOrderId, 'auto_cmms_on_coldchain_fault runNow did not create latticeCustomWorkOrders record');
@@ -727,11 +748,195 @@ async function verifyTenantProvisioning(callActor, okActor, suffix, cleanup) {
   return { subOrgId, keyId: prov1.data.pkiKey.keyId, adminUsername };
 }
 
-async function verifyAutomationStudioAndCopilot(callActor, okActor, organizationId, suffix = 'TEST', cleanup = null) {
+function buildTempDagLoopRule(ruleKey) {
+  return {
+    schemaVersion: 2,
+    ruleKey,
+    name: `Acceptance DAG Loop (${ruleKey})`,
+    triggerEventType: 'acc.dag.test',
+    cooldownSec: 0,
+    maxDepth: 8,
+    active: true,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 'trig_1', type: 'trigger.event', label: 'Event Trigger', config: { eventType: 'acc.dag.test' } },
+        {
+          id: 'if_check',
+          type: 'control.if',
+          label: 'Threshold Exceeded?',
+          config: { condition: { field: 'data.thresholdExceeded', op: 'eq', value: true } },
+        },
+        {
+          id: 'loop_items',
+          type: 'control.loop',
+          label: 'Iterate Items',
+          config: { itemsPath: 'data.items', maxIterations: 20 },
+        },
+        {
+          id: 'xform_item',
+          type: 'logic.transform',
+          label: 'Normalize Item',
+          config: {
+            operations: [
+              { op: 'set', target: 'processed', value: true },
+              { op: 'template', target: 'itemCode', expr: '{{loop.item.code}}' },
+            ],
+          },
+        },
+        {
+          id: 'notify_done',
+          type: 'notify.send',
+          label: 'Notify Loop Done',
+          config: { roleNames: ['ldx_operator'], severity: 'info', title: 'Loop done {{data.batchId}}' },
+        },
+        {
+          id: 'notify_skip',
+          type: 'notify.send',
+          label: 'Notify Within Threshold',
+          config: { roleNames: ['ldx_operator'], severity: 'info', title: 'Threshold ok' },
+        },
+      ],
+      edges: [
+        { id: 'e_1', source: 'trig_1', sourceHandle: 'main', target: 'if_check', targetHandle: 'in' },
+        { id: 'e_2', source: 'if_check', sourceHandle: 'true', target: 'loop_items', targetHandle: 'in', label: 'true' },
+        { id: 'e_3', source: 'loop_items', sourceHandle: 'item', target: 'xform_item', targetHandle: 'in', label: 'item' },
+        { id: 'e_4', source: 'loop_items', sourceHandle: 'done', target: 'notify_done', targetHandle: 'in', label: 'done' },
+        { id: 'e_5', source: 'if_check', sourceHandle: 'false', target: 'notify_skip', targetHandle: 'in', label: 'false' },
+      ],
+      settings: { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 8, timeoutMs: 30000 },
+    },
+  };
+}
+
+function buildTempHitlRule(ruleKey) {
+  return {
+    schemaVersion: 2,
+    ruleKey,
+    name: `Acceptance HITL Approval (${ruleKey})`,
+    triggerEventType: 'manual.trigger',
+    cooldownSec: 0,
+    maxDepth: 8,
+    active: true,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 'trig_hitl', type: 'trigger.manual', label: 'Manual Trigger', config: {} },
+        {
+          id: 'approval_gate',
+          type: 'control.approval',
+          label: 'Manager Approval',
+          config: {
+            approverRole: 'ldx_manager',
+            title: 'Acceptance HITL {{data.code}}',
+            summary: 'Verify durable Pause/Resume',
+            riskLevel: 'high',
+            ttlHours: 24,
+          },
+        },
+        {
+          id: 'create_ticket',
+          type: 'data.create',
+          label: 'Create Approved Ticket',
+          config: {
+            collection: 'latticeServiceTickets',
+            values: {
+              code: 'HITL-{{data.code}}',
+              name: 'Approved {{data.code}}',
+              serviceType: 'facilities',
+              priority: 'high',
+              description: 'Created by durable HITL resume',
+            },
+          },
+        },
+        {
+          id: 'notify_ok',
+          type: 'notify.send',
+          label: 'Notify Approved',
+          config: { roleNames: ['ldx_operator'], severity: 'info', title: 'HITL approved {{data.code}}' },
+        },
+        {
+          id: 'notify_rej',
+          type: 'notify.send',
+          label: 'Notify Rejected',
+          config: { roleNames: ['ldx_employee'], severity: 'warning', title: 'HITL rejected {{data.code}}' },
+        },
+      ],
+      edges: [
+        { id: 'eh_1', source: 'trig_hitl', sourceHandle: 'main', target: 'approval_gate', targetHandle: 'in' },
+        { id: 'eh_2', source: 'approval_gate', sourceHandle: 'approved', target: 'create_ticket', targetHandle: 'in', label: 'approved' },
+        { id: 'eh_3', source: 'create_ticket', sourceHandle: 'main', target: 'notify_ok', targetHandle: 'in' },
+        { id: 'eh_4', source: 'approval_gate', sourceHandle: 'rejected', target: 'notify_rej', targetHandle: 'in', label: 'rejected' },
+      ],
+      settings: { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 8, timeoutMs: 30000 },
+    },
+  };
+}
+
+function buildTempWebhookRule(ruleKey, webhookPath, secretConnectorKey) {
+  return {
+    schemaVersion: 2,
+    ruleKey,
+    name: `Acceptance Webhook (${ruleKey})`,
+    triggerEventType: 'webhook.inbound',
+    cooldownSec: 0,
+    maxDepth: 8,
+    active: true,
+    graphJson: {
+      version: 2,
+      nodes: [
+        {
+          id: 'trig_wh',
+          type: 'trigger.webhook',
+          label: 'Inbound Webhook',
+          config: {
+            webhookPath,
+            authMode: 'hmac',
+            secretHeader: 'X-Lattice-Signature-256',
+            secretConnectorKey,
+          },
+        },
+        {
+          id: 'xform_wh',
+          type: 'logic.transform',
+          label: 'Transform Webhook Payload',
+          config: {
+            operations: [
+              { op: 'set', target: 'received', value: true },
+              { op: 'set', target: 'batchId', source: 'data.batchId' },
+            ],
+          },
+        },
+      ],
+      edges: [
+        { id: 'ew_1', source: 'trig_wh', sourceHandle: 'main', target: 'xform_wh', targetHandle: 'in' },
+      ],
+      settings: { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 8, timeoutMs: 30000 },
+    },
+  };
+}
+
+function assertNodeTraceOrState(sim, nodeId, expectedStatus) {
+  const traces = sim?.stepTracesJson || [];
+  const trace = traces.find((t) => t?.nodeId === nodeId);
+  const state = sim?.nodeStatesJson?.[nodeId];
+  const actualStatus = trace?.status ?? state?.status;
+  assert.equal(actualStatus, expectedStatus, `Expected node "${nodeId}" status === "${expectedStatus}", got "${actualStatus}"`);
+}
+
+async function verifyAutomationStudioAndArchitect(callActor, okActor, organizationId, suffix = 'TEST', cleanup = null) {
+  const lower = String(suffix).toLowerCase();
   const catRes = await okActor('root', `dxosAutomations:builderCatalog?organizationId=${encodeURIComponent(organizationId)}`);
   const cat = catRes.data || {};
-  assert.ok(Array.isArray(cat.blueprints) && cat.blueprints.length >= 3, 'builderCatalog missing 3 enterprise blueprints');
-  for (const key of ['auto_cmms_on_coldchain_fault', 'auto_mkt_quarantine_response', 'auto_sla_breach_escalation']) {
+  assert.ok(Array.isArray(cat.blueprints) && cat.blueprints.length >= 6, 'builderCatalog missing 6 enterprise blueprints');
+  for (const key of [
+    'auto_cmms_on_coldchain_fault',
+    'auto_mkt_quarantine_response',
+    'auto_sla_breach_escalation',
+    'auto_procurement_hitl_approval',
+    'auto_scheduled_ai_digest',
+    'auto_partner_webhook_sync',
+  ]) {
     assert.ok(cat.blueprints.some((b) => b?.ruleKey === key), `builderCatalog missing blueprint ${key}`);
   }
   const woCol = (cat.collections || []).find((c) => c?.name === 'latticeCustomWorkOrders');
@@ -739,6 +944,19 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
   assert.ok((cat.dmnTables || []).some((d) => d?.key === 'cmms_priority_routing_v1'), 'builderCatalog missing cmms_priority_routing_v1');
   assert.equal(catRes.rawText.includes('encryptedSecretsJson'), false, 'builderCatalog exposed encryptedSecretsJson');
 
+  // 1. Node Registry (>= 24 built-in node types across 6 categories)
+  const regRes = await okActor('root', `dxosAutomations:nodeRegistry?organizationId=${encodeURIComponent(organizationId)}`);
+  const nodeTypes = Array.isArray(regRes.data?.nodeTypes) ? regRes.data.nodeTypes : [];
+  assert.ok(nodeTypes.length >= 24, `dxosAutomations:nodeRegistry expected >= 24 node types, got ${nodeTypes.length}`);
+  const regCategories = [...new Set(nodeTypes.map((n) => n?.category).filter(Boolean))];
+  for (const reqCat of ['trigger', 'control', 'data', 'logic', 'ai', 'integration']) {
+    assert.ok(regCategories.includes(reqCat), `dxosAutomations:nodeRegistry missing category ${reqCat}`);
+  }
+  for (const reqType of ['trigger.event', 'trigger.webhook', 'control.if', 'control.loop', 'control.approval', 'data.create', 'logic.dmn', 'logic.transform', 'ai.llm', 'integration.http']) {
+    assert.ok(nodeTypes.some((n) => n?.type === reqType), `dxosAutomations:nodeRegistry missing node type ${reqType}`);
+  }
+
+  // 2. Blueprint dry-run simulations (coldchain & SLA) supporting both Graph v2 & v1 compat
   const critSimRes = await okActor('root', 'dxosAutomations:testRule', {
     method: 'POST',
     values: {
@@ -753,8 +971,18 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
   const critSim = critSimRes.data?.simulation || {};
   assert.equal(critSim.dmnResultJson?.outputs?.workOrderPriority, 'critical');
   const critTraces = critSim.stepTracesJson || [];
-  assert.equal(critTraces.length, 5, 'Expected 5 step traces for auto_cmms_on_coldchain_fault');
-  assert.equal(critTraces.filter((s) => s?.status === 'simulated').length, 5, 'Expected all 5 steps simulated when severity=critical');
+  const critIsV2 = critSim.graphVersion === 2 || critTraces.some((s) => Boolean(s?.nodeId));
+  let criticalSimulatedSteps;
+  if (critIsV2) {
+    for (const nodeId of ['trig_coldchain', 'dmn_priority', 'create_work_order', 'notify_assigned', 'if_critical', 'parallel_critical', 'twin_cool_down', 'ai_triage_wo']) {
+      assertNodeTraceOrState(critSim, nodeId, 'completed');
+    }
+    criticalSimulatedSteps = critTraces.filter((s) => s?.status === 'completed').length;
+  } else {
+    assert.equal(critTraces.length, 5, 'Expected 5 step traces for auto_cmms_on_coldchain_fault');
+    assert.equal(critTraces.filter((s) => s?.status === 'simulated').length, 5, 'Expected all 5 steps simulated when severity=critical');
+    criticalSimulatedSteps = critTraces.filter((s) => s?.status === 'simulated').length;
+  }
 
   const highSimRes = await okActor('root', 'dxosAutomations:testRule', {
     method: 'POST',
@@ -770,12 +998,25 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
   const highSim = highSimRes.data?.simulation || {};
   assert.equal(highSim.dmnResultJson?.outputs?.workOrderPriority, 'high');
   const highTraces = highSim.stepTracesJson || [];
-  assert.equal(highTraces.length, 5);
-  assert.equal(highTraces[0]?.status, 'simulated');
-  assert.equal(highTraces[1]?.status, 'simulated');
-  for (const idx of [2, 3, 4]) {
-    assert.equal(highTraces[idx]?.status, 'skipped', `Expected step ${idx} skipped when severity=high`);
-    assert.equal(highTraces[idx]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+  const highIsV2 = highSim.graphVersion === 2 || highTraces.some((s) => Boolean(s?.nodeId));
+  let highSkippedSteps;
+  if (highIsV2) {
+    for (const nodeId of ['trig_coldchain', 'dmn_priority', 'create_work_order', 'notify_assigned', 'if_critical']) {
+      assertNodeTraceOrState(highSim, nodeId, 'completed');
+    }
+    for (const nodeId of ['parallel_critical', 'twin_cool_down', 'ai_triage_wo', 'http_n8n_dispatch']) {
+      assertNodeTraceOrState(highSim, nodeId, 'skipped');
+    }
+    highSkippedSteps = Object.values(highSim.nodeStatesJson || {}).filter((s) => s?.status === 'skipped').length;
+  } else {
+    assert.equal(highTraces.length, 5);
+    assert.equal(highTraces[0]?.status, 'simulated');
+    assert.equal(highTraces[1]?.status, 'simulated');
+    for (const idx of [2, 3, 4]) {
+      assert.equal(highTraces[idx]?.status, 'skipped', `Expected step ${idx} skipped when severity=high`);
+      assert.equal(highTraces[idx]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+    }
+    highSkippedSteps = highTraces.filter((s) => s?.status === 'skipped').length;
   }
 
   const existingRulesRes = await okActor(
@@ -808,13 +1049,26 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
       },
     },
   });
-  const slaWarnTraces = slaWarnRes.data?.simulation?.stepTracesJson || [];
-  assert.equal(slaWarnTraces.length, 3, 'Expected 3 step traces for auto_sla_breach_escalation (sla.warning)');
-  assert.equal(slaWarnTraces[0]?.type, 'notify_role');
-  assert.equal(slaWarnTraces[0]?.status, 'simulated', 'Expected step 0 (notify_role) simulated for sla.warning');
-  for (const idx of [1, 2]) {
-    assert.equal(slaWarnTraces[idx]?.status, 'skipped', `Expected step ${idx} skipped for sla.warning`);
-    assert.equal(slaWarnTraces[idx]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+  const slaWarnSim = slaWarnRes.data?.simulation || {};
+  const slaWarnTraces = slaWarnSim.stepTracesJson || [];
+  const slaWarnIsV2 = slaWarnSim.graphVersion === 2 || slaWarnTraces.some((s) => Boolean(s?.nodeId));
+  let slaWarningSimulatedSteps;
+  if (slaWarnIsV2) {
+    assertNodeTraceOrState(slaWarnSim, 'trig_sla', 'completed');
+    assertNodeTraceOrState(slaWarnSim, 'switch_sla_event', 'completed');
+    assertNodeTraceOrState(slaWarnSim, 'notify_dispatcher_warn', 'completed');
+    assertNodeTraceOrState(slaWarnSim, 'create_sla_ticket', 'skipped');
+    assertNodeTraceOrState(slaWarnSim, 'notify_manager_breach', 'skipped');
+    slaWarningSimulatedSteps = slaWarnTraces.filter((s) => s?.status === 'completed').length;
+  } else {
+    assert.equal(slaWarnTraces.length, 3, 'Expected 3 step traces for auto_sla_breach_escalation (sla.warning)');
+    assert.equal(slaWarnTraces[0]?.type, 'notify_role');
+    assert.equal(slaWarnTraces[0]?.status, 'simulated', 'Expected step 0 (notify_role) simulated for sla.warning');
+    for (const idx of [1, 2]) {
+      assert.equal(slaWarnTraces[idx]?.status, 'skipped', `Expected step ${idx} skipped for sla.warning`);
+      assert.equal(slaWarnTraces[idx]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+    }
+    slaWarningSimulatedSteps = slaWarnTraces.filter((s) => s?.status === 'simulated').length;
   }
 
   const slaBreachRes = await okActor('root', 'dxosAutomations:testRule', {
@@ -837,51 +1091,290 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
       },
     },
   });
-  const slaBreachTraces = slaBreachRes.data?.simulation?.stepTracesJson || [];
-  assert.equal(slaBreachTraces.length, 3, 'Expected 3 step traces for auto_sla_breach_escalation (sla.breached)');
-  assert.equal(slaBreachTraces[0]?.status, 'skipped', 'Expected step 0 skipped for sla.breached');
-  assert.equal(slaBreachTraces[0]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
-  assert.equal(slaBreachTraces[1]?.type, 'create_record');
-  assert.equal(slaBreachTraces[1]?.status, 'simulated', 'Expected step 1 (create_record) simulated for sla.breached');
-  assert.equal(slaBreachTraces[2]?.type, 'notify_role');
-  assert.equal(slaBreachTraces[2]?.status, 'simulated', 'Expected step 2 (notify_role) simulated for sla.breached');
+  const slaBreachSim = slaBreachRes.data?.simulation || {};
+  const slaBreachTraces = slaBreachSim.stepTracesJson || [];
+  const slaBreachIsV2 = slaBreachSim.graphVersion === 2 || slaBreachTraces.some((s) => Boolean(s?.nodeId));
+  let slaBreachedSimulatedSteps;
+  if (slaBreachIsV2) {
+    assertNodeTraceOrState(slaBreachSim, 'trig_sla', 'completed');
+    assertNodeTraceOrState(slaBreachSim, 'switch_sla_event', 'completed');
+    assertNodeTraceOrState(slaBreachSim, 'create_sla_ticket', 'completed');
+    assertNodeTraceOrState(slaBreachSim, 'notify_manager_breach', 'completed');
+    assertNodeTraceOrState(slaBreachSim, 'notify_dispatcher_warn', 'skipped');
+    slaBreachedSimulatedSteps = slaBreachTraces.filter((s) => s?.status === 'completed').length;
+  } else {
+    assert.equal(slaBreachTraces.length, 3, 'Expected 3 step traces for auto_sla_breach_escalation (sla.breached)');
+    assert.equal(slaBreachTraces[0]?.status, 'skipped', 'Expected step 0 skipped for sla.breached');
+    assert.equal(slaBreachTraces[0]?.skipReason, 'BRANCH_CONDITION_NOT_MATCHED');
+    assert.equal(slaBreachTraces[1]?.type, 'create_record');
+    assert.equal(slaBreachTraces[1]?.status, 'simulated', 'Expected step 1 (create_record) simulated for sla.breached');
+    assert.equal(slaBreachTraces[2]?.type, 'notify_role');
+    assert.equal(slaBreachTraces[2]?.status, 'simulated', 'Expected step 2 (notify_role) simulated for sla.breached');
+    slaBreachedSimulatedSteps = slaBreachTraces.filter((s) => s?.status === 'simulated').length;
+  }
 
+  // 3. Graph v2 DAG branching (control.if) + loop (control.loop) saveRule + testRule dryRun
+  const dagRuleKey = `acc_dag_loop_${lower}`;
+  if (cleanup) cleanup.tempRuleKeys.push(dagRuleKey);
+  const saveDagRes = await okActor('root', 'dxosAutomations:saveRule', {
+    method: 'POST',
+    values: { organizationId, ...buildTempDagLoopRule(dagRuleKey) },
+  });
+  assert.equal(saveDagRes.data?.rule?.ruleKey, dagRuleKey);
+  assert.equal(saveDagRes.data?.rule?.schemaVersion, 2);
+
+  const dagTrueRes = await okActor('root', 'dxosAutomations:testRule', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ruleKey: dagRuleKey,
+      event: {
+        type: 'acc.dag.test',
+        data: { thresholdExceeded: true, batchId: `BATCH-${suffix}`, items: [{ code: 'IT-1' }, { code: 'IT-2' }] },
+      },
+    },
+  });
+  const dagTrueSim = dagTrueRes.data?.simulation || {};
+  assertNodeTraceOrState(dagTrueSim, 'if_check', 'completed');
+  assertNodeTraceOrState(dagTrueSim, 'loop_items', 'completed');
+  assertNodeTraceOrState(dagTrueSim, 'notify_done', 'completed');
+  assertNodeTraceOrState(dagTrueSim, 'notify_skip', 'skipped');
+  const loopItemTraces = (dagTrueSim.stepTracesJson || []).filter((t) => t?.nodeId === 'xform_item' && t?.status === 'completed');
+  assert.equal(loopItemTraces.length, 2, `Expected 2 loop item iterations in xform_item, got ${loopItemTraces.length}`);
+
+  const dagFalseRes = await okActor('root', 'dxosAutomations:testRule', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ruleKey: dagRuleKey,
+      event: {
+        type: 'acc.dag.test',
+        data: { thresholdExceeded: false, batchId: `BATCH-${suffix}`, items: [] },
+      },
+    },
+  });
+  const dagFalseSim = dagFalseRes.data?.simulation || {};
+  assertNodeTraceOrState(dagFalseSim, 'if_check', 'completed');
+  assertNodeTraceOrState(dagFalseSim, 'notify_skip', 'completed');
+  assertNodeTraceOrState(dagFalseSim, 'loop_items', 'skipped');
+  assertNodeTraceOrState(dagFalseSim, 'notify_done', 'skipped');
+
+  // 4. Single-node testNode with pinnedInputs without mutating DB
+  const testNodeIfRes = await okActor('root', 'dxosAutomations:testNode', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ruleKey: dagRuleKey,
+      nodeId: 'if_check',
+      pinnedInputs: { data: { thresholdExceeded: true } },
+    },
+  });
+  const testNodeIf = testNodeIfRes.data?.result || {};
+  assert.equal(testNodeIf.ok, true, 'testNode(if_check) must succeed');
+  assert.equal(testNodeIf.status, 'completed');
+  assert.equal(testNodeIf.nextPort, 'true');
+  assert.equal(testNodeIf.output?.matched, true);
+
+  const dryTicketCode = `DRY-NODE-${suffix}`;
+  const testNodeCreateRes = await okActor('root', 'dxosAutomations:testNode', {
+    method: 'POST',
+    values: {
+      organizationId,
+      graph: {
+        version: 2,
+        nodes: [
+          {
+            id: 'sim_create',
+            type: 'data.create',
+            label: 'Dry Ticket Create',
+            config: {
+              collection: 'latticeServiceTickets',
+              values: { code: dryTicketCode, name: 'Dry Run Only', serviceType: 'facilities', priority: 'low' },
+            },
+          },
+        ],
+        edges: [],
+      },
+      nodeId: 'sim_create',
+      pinnedInputs: { data: { ok: true } },
+    },
+  });
+  assert.equal(testNodeCreateRes.data?.result?.ok, true);
+  assert.equal(testNodeCreateRes.data?.result?.nextPort, 'main');
+  assert.equal(testNodeCreateRes.data?.result?.output?.simulated, true);
+  const dryCheckList = await okActor(
+    'root',
+    `latticeServiceTickets:list?filter=${encodeURIComponent(JSON.stringify({ organizationId, code: dryTicketCode }))}&pageSize=5`,
+  );
+  assert.equal(unwrapList(dryCheckList.data).length, 0, 'testNode(data.create) must not mutate database');
+
+  // 5. Durable HITL Pause/Resume + negative cross-org/token/replay guards
+  const hitlRuleKey = `acc_hitl_${lower}`;
+  if (cleanup) cleanup.tempRuleKeys.push(hitlRuleKey);
+  await okActor('root', 'dxosAutomations:saveRule', {
+    method: 'POST',
+    values: { organizationId, ...buildTempHitlRule(hitlRuleKey) },
+  });
+
+  const hitlStartRes = await okActor('root', 'dxosAutomations:runNow', {
+    method: 'POST',
+    values: {
+      organizationId,
+      ruleKey: hitlRuleKey,
+      event: { type: 'manual.trigger', data: { code: suffix } },
+    },
+  });
+  const hitlRun = hitlStartRes.data?.run || {};
+  if (cleanup) {
+    if (hitlRun.runUid) cleanup.tempRunUids.push(hitlRun.runUid);
+    if (hitlRun.approvalId != null) cleanup.approvalQueueIds.push(hitlRun.approvalId);
+  }
+  assert.equal(hitlRun.status, 'suspended', `Expected HITL run status === 'suspended', got ${hitlRun.status}`);
+  assert.ok(typeof hitlRun.runUid === 'string' && hitlRun.runUid.length > 0, 'Suspended HITL run missing runUid');
+  assert.ok(typeof hitlRun.resumeToken === 'string' && hitlRun.resumeToken.length > 0, 'Suspended HITL run missing resumeToken');
+  assert.equal(hitlRun.suspendedNodeId, 'approval_gate');
+
+  const crossOrgResumeRes = await callActor('root', 'dxosAutomations:resumeRun', {
+    method: 'POST',
+    values: {
+      organizationId: `acc-cross-${lower}`,
+      runUid: hitlRun.runUid,
+      decision: 'approved',
+      resumeToken: hitlRun.resumeToken,
+    },
+  });
+  assert.ok(
+    [403, 404].includes(crossOrgResumeRes.status),
+    `Expected 403/404 for cross-org resumeRun, got ${crossOrgResumeRes.status}`,
+  );
+
+  const badTokenResumeRes = await callActor('root', 'dxosAutomations:resumeRun', {
+    method: 'POST',
+    values: {
+      organizationId,
+      runUid: hitlRun.runUid,
+      decision: 'approved',
+      resumeToken: 'invalid-resume-token-0000',
+    },
+  });
+  assert.equal(badTokenResumeRes.status, 403, `Expected 403 for invalid resumeToken, got ${badTokenResumeRes.status}`);
+
+  const legitResumeRes = await okActor('root', 'dxosAutomations:resumeRun', {
+    method: 'POST',
+    values: {
+      organizationId,
+      runUid: hitlRun.runUid,
+      decision: 'approved',
+      resumeToken: hitlRun.resumeToken,
+      payload: { note: 'Approved by automated acceptance' },
+    },
+  });
+  const resumedRun = legitResumeRes.data?.run || {};
+  assert.equal(resumedRun.status, 'completed', `Expected resumed HITL run completed, got ${resumedRun.status}`);
+  assertNodeTraceOrState(resumedRun, 'create_ticket', 'completed');
+  assertNodeTraceOrState(resumedRun, 'notify_ok', 'completed');
+  assertNodeTraceOrState(resumedRun, 'notify_rej', 'skipped');
+  const createdTicketId = resumedRun.nodeStatesJson?.create_ticket?.output?.id
+    ?? resumedRun.stepTracesJson?.find((t) => t?.nodeId === 'create_ticket')?.output?.id;
+  assert.ok(createdTicketId != null, 'Resumed HITL downstream create_ticket did not return ticket id');
+  if (cleanup) cleanup.serviceTicketIds.push(createdTicketId);
+  const fetchedTicket = await okActor('root', `latticeServiceTickets:get?filterByTk=${encodeURIComponent(createdTicketId)}`);
+  assert.equal(fetchedTicket.data?.organizationId, organizationId);
+
+  const replayResumeRes = await callActor('root', 'dxosAutomations:resumeRun', {
+    method: 'POST',
+    values: {
+      organizationId,
+      runUid: hitlRun.runUid,
+      decision: 'approved',
+      resumeToken: hitlRun.resumeToken,
+    },
+  });
+  assert.equal(replayResumeRes.status, 409, `Expected 409 on replay resumeRun, got ${replayResumeRes.status}`);
+
+  // 6. Inbound webhook ingress HMAC verification
+  const whRuleKey = `acc_wh_${lower}`;
+  const whConnectorKey = `webhook-acc-${lower}`;
+  const whSecret = `acc-inwh-${suffix}`;
+  if (cleanup) {
+    cleanup.extraConnectorKeys.push(whConnectorKey);
+    cleanup.tempRuleKeys.push(whRuleKey);
+  }
+  await okActor('root', 'dxosVault:save', {
+    method: 'POST',
+    values: {
+      organizationId,
+      connectorKey: whConnectorKey,
+      name: `Acceptance Inbound Webhook Secret ${suffix}`,
+      connectorType: 'webhook',
+      baseUrl: 'http://127.0.0.1/api/dxos:health',
+      authType: 'hmac',
+      secrets: { webhookSecret: whSecret },
+    },
+  });
+  await okActor('root', 'dxosAutomations:saveRule', {
+    method: 'POST',
+    values: { organizationId, ...buildTempWebhookRule(whRuleKey, `acc-wh-${lower}`, whConnectorKey) },
+  });
+
+  const whPayload = { batchId: `WH-${suffix}`, source: 'acc-test' };
+  const whPath = `dxosAutomations:webhookIngress?organizationId=${encodeURIComponent(organizationId)}&ruleKey=${encodeURIComponent(whRuleKey)}`;
+  const badWhRes = await callActor('anon', whPath, {
+    method: 'POST',
+    headers: { 'X-Lattice-Signature-256': `sha256=${'0'.repeat(64)}` },
+    values: whPayload,
+  });
+  assert.equal(badWhRes.status, 401, `Expected 401 for invalid webhookIngress HMAC, got ${badWhRes.status}`);
+
+  const validHmac = createHmac('sha256', whSecret).update(JSON.stringify(whPayload), 'utf8').digest('hex');
+  const validWhRes = await okActor('anon', whPath, {
+    method: 'POST',
+    headers: { 'X-Lattice-Signature-256': `sha256=${validHmac}` },
+    values: whPayload,
+  });
+  assert.equal(validWhRes.data?.ok, true);
+  assert.equal(validWhRes.data?.run?.status, 'completed');
+  if (cleanup && validWhRes.data?.run?.runUid) {
+    cleanup.tempRunUids.push(validWhRes.data.run.runUid);
+  }
+
+  // 7. DX-OS Flow Architect (aiAssist: suggest, node, full, fix_error, apply: true, injection 400 refusal)
   const suggestRes = await okActor('root', 'dxosAutomations:aiAssist', {
     method: 'POST',
-    values: { organizationId, mode: 'suggest', ruleKey: 'auto_cmms_on_coldchain_fault', apply: false },
+    values: { organizationId, mode: 'suggest', ruleKey: dagRuleKey, apply: false },
   });
-  assert.ok(Array.isArray(suggestRes.data?.suggestions), 'aiAssist(suggest) must return suggestions array');
+  assert.ok(Array.isArray(suggestRes.data?.suggestions) && suggestRes.data.suggestions.length >= 1, 'aiAssist(suggest) must return suggestions');
 
   const nodeRes = await okActor('root', 'dxosAutomations:aiAssist', {
     method: 'POST',
     values: {
       organizationId,
       mode: 'node',
-      ruleKey: 'auto_cmms_on_coldchain_fault',
-      targetNode: 'step:2',
-      prompt: 'Đổi nhiệt độ mục tiêu thành 3.5 độ',
+      ruleKey: dagRuleKey,
+      targetNodeId: 'notify_done',
+      prompt: 'Đổi vai trò thông báo sang ldx_manager',
       apply: false,
     },
   });
   assert.equal(nodeRes.data?.applied, false);
-  assert.equal(nodeRes.data?.draftRule?.actionsJson?.[2]?.desiredPatch?.targetTempC, 3.5);
-  assert.equal(nodeRes.data?.draftRule?.actionsJson?.[0]?.collection, 'latticeCustomWorkOrders');
+  const previewNotifyNode = nodeRes.data?.draftGraph?.nodes?.find((n) => n?.id === 'notify_done');
+  assert.ok(previewNotifyNode?.config?.roleNames?.includes('ldx_manager'), 'aiAssist(node) failed to update notify_done roleNames');
 
   const fullRes = await okActor('root', 'dxosAutomations:aiAssist', {
     method: 'POST',
     values: {
       organizationId,
       mode: 'full',
-      prompt: 'Khi có cảnh báo kho lạnh nghiêm trọng, tạo phiếu bảo trì CMMS và nếu critical thì hạ nhiệt 4 độ rồi gửi n8n',
+      prompt: 'Khi có sự kiện alarm.triggered nếu data.temperature > 8 thì tạo phiếu trên latticeServiceTickets và thông báo ldx_manager',
       apply: false,
     },
   });
   assert.equal(fullRes.data?.applied, false);
-  assert.ok(fullRes.data?.draftRule?.ruleKey && Array.isArray(fullRes.data?.draftRule?.actionsJson));
-  assert.ok(fullRes.data.draftRule.actionsJson.length >= 2);
+  assert.equal(fullRes.data?.draftRule?.schemaVersion, 2);
+  assert.ok(Array.isArray(fullRes.data?.draftRule?.graphJson?.nodes) && fullRes.data.draftRule.graphJson.nodes.length >= 2);
 
-  const aiTempRuleKey = `acc_ai_temp_${String(suffix).toLowerCase()}`;
-  if (cleanup) cleanup.aiTempRuleKey = aiTempRuleKey;
+  const aiTempRuleKey = `acc_ai_temp_${lower}`;
+  if (cleanup) cleanup.tempRuleKeys.push(aiTempRuleKey);
 
   const aiApplyFullRes = await okActor('root', 'dxosAutomations:aiAssist', {
     method: 'POST',
@@ -890,23 +1383,16 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
       mode: 'full',
       ruleKey: aiTempRuleKey,
       rule: { ruleKey: aiTempRuleKey },
-      prompt: 'Khi có cảnh báo kho lạnh nghiêm trọng, tạo phiếu bảo trì CMMS và nếu critical thì hạ nhiệt 3.5 độ',
+      prompt: 'Khi có sự kiện alarm.triggered nếu data.temperature > 8 thì tạo phiếu trên latticeServiceTickets và thông báo ldx_manager',
       apply: true,
     },
   });
   assert.equal(aiApplyFullRes.data?.applied, true, 'aiAssist(full, apply=true) must return applied=true');
   assert.equal(aiApplyFullRes.data?.savedRule?.ruleKey, aiTempRuleKey, 'aiAssist(full, apply=true) savedRule.ruleKey mismatch');
+  assert.equal(aiApplyFullRes.data?.savedRule?.schemaVersion, 2);
 
-  const listAfterApplyRes = await okActor(
-    'root',
-    `dxosAutomations:listRules?organizationId=${encodeURIComponent(organizationId)}&limit=200`,
-  );
-  const persistedTempRule = unwrapList(listAfterApplyRes.data).find((r) => r?.ruleKey === aiTempRuleKey);
-  assert.ok(persistedTempRule, `Applied temporary rule ${aiTempRuleKey} missing from dxosAutomations:listRules`);
-  assert.equal(
-    persistedTempRule.actionsJson?.find((a) => a?.type === 'twin_set_desired')?.desiredPatch?.targetTempC,
-    3.5,
-  );
+  const appliedIfNode = (aiApplyFullRes.data?.savedRule?.graphJson?.nodes || []).find((n) => n?.type === 'control.if');
+  assert.ok(appliedIfNode, 'Applied AI Graph v2 rule missing control.if node');
 
   const aiApplyNodeRes = await okActor('root', 'dxosAutomations:aiAssist', {
     method: 'POST',
@@ -914,14 +1400,13 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
       organizationId,
       mode: 'node',
       ruleKey: aiTempRuleKey,
-      targetNode: 'trigger',
-      prompt: 'Đặt cooldown 180 giây',
+      targetNodeId: appliedIfNode.id,
+      prompt: 'Đổi ngưỡng thành > 12',
       apply: true,
     },
   });
   assert.equal(aiApplyNodeRes.data?.applied, true, 'aiAssist(node, apply=true) must return applied=true');
   assert.equal(aiApplyNodeRes.data?.savedRule?.ruleKey, aiTempRuleKey);
-  assert.equal(aiApplyNodeRes.data?.savedRule?.cooldownSec, 180);
 
   const reloadedRulesRes = await okActor(
     'root',
@@ -929,7 +1414,8 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
   );
   const reloadedTempRule = unwrapList(reloadedRulesRes.data).find((r) => r?.ruleKey === aiTempRuleKey);
   assert.ok(reloadedTempRule, `Reloaded temporary rule ${aiTempRuleKey} missing from dxosAutomations:listRules`);
-  assert.equal(reloadedTempRule.cooldownSec, 180, 'Expected cooldownSec=180 on reloaded temporary rule');
+  const reloadedIfNode = (reloadedTempRule.graphJson?.nodes || []).find((n) => n?.id === appliedIfNode.id);
+  assert.equal(reloadedIfNode?.config?.condition?.value, 12, 'Expected reloaded Graph v2 threshold === 12');
 
   const tempRuleTestRes = await okActor('root', 'dxosAutomations:testRule', {
     method: 'POST',
@@ -938,7 +1424,7 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
       ruleKey: aiTempRuleKey,
       event: {
         type: 'alarm.triggered',
-        data: { severity: 'critical', deviceKey: 'probe-ct-01', assetId: 1, temperature: 11.2, message: 'Temp rule dry run' },
+        data: { temperature: 15, code: `AI-${suffix}`, message: 'Temp rule dry run' },
       },
     },
   });
@@ -946,6 +1432,42 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
     Array.isArray(tempRuleTestRes.data?.simulation?.stepTracesJson)
     && tempRuleTestRes.data.simulation.stepTracesJson.length >= 2,
     'Expected persisted temporary rule to simulate cleanly via dxosAutomations:testRule',
+  );
+
+  const fixErrRes = await okActor('root', 'dxosAutomations:aiAssist', {
+    method: 'POST',
+    values: {
+      organizationId,
+      mode: 'fix_error',
+      graph: {
+        version: 2,
+        nodes: [
+          { id: 't1', type: 'trigger.manual', label: 'Manual', config: {} },
+          { id: 'u1', type: 'data.update', label: 'Update Ticket', config: { collection: 'latticeServiceTickets', values: { status: 'escalated' } } },
+        ],
+        edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'u1', targetHandle: 'in' }],
+      },
+      runTrace: {
+        runUid: `run_fix_${lower}`,
+        status: 'failed',
+        nodeStatesJson: {
+          t1: { status: 'completed' },
+          u1: { status: 'failed', error: 'DATA_UPDATE_FILTER_REQUIRED' },
+        },
+      },
+      apply: false,
+    },
+  });
+  const repairedU1 = (fixErrRes.data?.draftGraph?.nodes || []).find((n) => n?.id === 'u1');
+  assert.equal(repairedU1?.continueOnFail, true, 'aiAssist(fix_error) must enable continueOnFail on failed node');
+  assert.ok(
+    repairedU1?.config?.recordId || (repairedU1?.config?.filter && Object.keys(repairedU1.config.filter).length > 0),
+    'aiAssist(fix_error) must repair missing filter/recordId',
+  );
+  assert.equal(
+    (fixErrRes.data?.draftGraph?.edges || []).some((e) => e?.source === 'u1' && e?.sourceHandle === 'error'),
+    true,
+    'aiAssist(fix_error) must attach an error branch edge',
   );
 
   const injectRes = await callActor('root', 'dxosAutomations:aiAssist', {
@@ -959,15 +1481,29 @@ async function verifyAutomationStudioAndCopilot(callActor, okActor, organization
   assert.equal(injectRes.status, 400, `Expected 400 on prompt injection aiAssist, got ${injectRes.status}`);
 
   return {
+    nodeRegistryCount: nodeTypes.length,
+    nodeRegistryCategories: regCategories,
     blueprintCount: cat.blueprints.length,
-    criticalSimulatedSteps: critTraces.filter((s) => s?.status === 'simulated').length,
-    highSkippedSteps: highTraces.filter((s) => s?.status === 'skipped').length,
-    slaWarningSimulatedSteps: slaWarnTraces.filter((s) => s?.status === 'simulated').length,
-    slaBreachedSimulatedSteps: slaBreachTraces.filter((s) => s?.status === 'simulated').length,
-    aiNodeTargetTempC: nodeRes.data?.draftRule?.actionsJson?.[2]?.desiredPatch?.targetTempC ?? null,
+    criticalSimulatedSteps,
+    highSkippedSteps,
+    slaWarningSimulatedSteps,
+    slaBreachedSimulatedSteps,
+    dagLoopIterations: loopItemTraces.length,
+    dagLoopFalseBranchSkipped: dagFalseSim.nodeStatesJson?.loop_items?.status === 'skipped',
+    testNodeOk: Boolean(testNodeIf.ok),
+    testNodeNextPort: testNodeIf.nextPort,
+    hitlPausedStatus: hitlRun.status,
+    hitlCrossOrgRejectedStatus: crossOrgResumeRes.status,
+    hitlBadTokenRejectedStatus: badTokenResumeRes.status,
+    hitlResumedStatus: resumedRun.status,
+    hitlReplayRejectedStatus: replayResumeRes.status,
+    webhookInvalidSigStatus: badWhRes.status,
+    webhookValidSigStatus: validWhRes.status,
+    aiFixErrorRepaired: Boolean(repairedU1?.continueOnFail),
     aiSuggestCount: suggestRes.data?.suggestions?.length ?? 0,
     aiAppliedTempRuleKey: aiTempRuleKey,
-    aiAppliedCooldownSec: reloadedTempRule.cooldownSec,
+    aiAppliedThresholdValue: reloadedIfNode?.config?.condition?.value ?? null,
+    aiInjectionRejectedStatus: injectRes.status,
   };
 }
 
@@ -982,10 +1518,14 @@ async function destroyMatchingIds(callActor, collection, filter, matchFn = null)
 }
 
 async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
-  if (cleanup.connectorKey) {
+  const connectorKeysToDelete = [
+    ...(cleanup.connectorKey ? [cleanup.connectorKey] : []),
+    ...cleanup.extraConnectorKeys,
+  ];
+  for (const cKey of connectorKeysToDelete) {
     await callActor('root', 'dxosVault:delete', {
       method: 'POST',
-      values: { organizationId, connectorKey: cleanup.connectorKey },
+      values: { organizationId, connectorKey: cKey },
     }).catch(() => {});
   }
   if (cleanup.subscriptionKey) {
@@ -1005,6 +1545,7 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
   const proposalIdSet = new Set(cleanup.proposalIds.filter((id) => id != null));
   const approvalQueueIdSet = new Set(cleanup.approvalQueueIds.filter((id) => id != null));
   const twinShadowIdSet = new Set(cleanup.twinShadowIds.filter((id) => id != null));
+  const serviceTicketIdSet = new Set(cleanup.serviceTicketIds.filter((id) => id != null));
 
   if (cleanup.assetId) {
     const woRes = await callActor(
@@ -1016,26 +1557,38 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
     }
   }
 
-  if (cleanup.lwtRuleKey) {
-    await destroyMatchingIds(callActor, 'latticeAutomationRuns', {
-      organizationId,
-      ruleKey: cleanup.lwtRuleKey,
-    });
+  const ruleKeysToDelete = [
+    ...(cleanup.lwtRuleKey ? [cleanup.lwtRuleKey] : []),
+    ...cleanup.tempRuleKeys,
+  ];
+  for (const rKey of new Set(ruleKeysToDelete)) {
+    await destroyMatchingIds(
+      callActor,
+      'latticeAutomationRuns',
+      { organizationId, ruleKey: rKey },
+      (row) => {
+        if (row?.approvalId != null) approvalQueueIdSet.add(row.approvalId);
+        for (const step of Array.isArray(row?.stepTracesJson) ? row.stepTracesJson : []) {
+          if (step?.output?.collection === 'latticeServiceTickets' && step?.output?.id != null) {
+            serviceTicketIdSet.add(step.output.id);
+          }
+          if (step?.output?.collection === 'latticeCustomWorkOrders' && step?.output?.id != null) {
+            woIdSet.add(step.output.id);
+          }
+        }
+        return true;
+      },
+    );
     await callActor('root', 'dxosAutomations:deleteRule', {
       method: 'POST',
-      values: { organizationId, ruleKey: cleanup.lwtRuleKey },
+      values: { organizationId, ruleKey: rKey },
     }).catch(() => {});
   }
-  if (cleanup.aiTempRuleKey) {
-    await destroyMatchingIds(callActor, 'latticeAutomationRuns', {
-      organizationId,
-      ruleKey: cleanup.aiTempRuleKey,
-    });
-    await callActor('root', 'dxosAutomations:deleteRule', {
-      method: 'POST',
-      values: { organizationId, ruleKey: cleanup.aiTempRuleKey },
-    }).catch(() => {});
+
+  for (const runUid of new Set(cleanup.tempRunUids.filter(Boolean))) {
+    await destroyMatchingIds(callActor, 'latticeAutomationRuns', { organizationId, runUid });
   }
+
   if (
     cleanup.cmmsRunId != null
     || cleanup.cmmsRunUid
@@ -1070,14 +1623,14 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
         );
         if (matched) {
           for (const step of runTraces) {
-            if (step?.type === 'create_record' && step?.output?.collection === 'latticeCustomWorkOrders' && step?.output?.id != null) {
+            if (['create_record', 'data.create'].includes(step?.type) && step?.output?.collection === 'latticeCustomWorkOrders' && step?.output?.id != null) {
               woIdSet.add(step.output.id);
             }
-            if (step?.type === 'trigger_ai_triage' && step?.output?.id != null) {
+            if (['trigger_ai_triage', 'ai.agent'].includes(step?.type) && step?.output?.id != null) {
               if (step.output.target === 'latticeAiApprovalQueue') approvalQueueIdSet.add(step.output.id);
               else proposalIdSet.add(step.output.id);
             }
-            if (step?.type === 'twin_set_desired') {
+            if (['twin_set_desired', 'iot.twin_command'].includes(step?.type)) {
               if (step?.output?.shadow?.id != null) twinShadowIdSet.add(step.output.shadow.id);
               if (step?.output?.approvalId != null) approvalQueueIdSet.add(step.output.approvalId);
             }
@@ -1088,10 +1641,12 @@ async function cleanupAcceptanceResources(callActor, organizationId, cleanup) {
     );
   }
 
+  for (const ticketId of serviceTicketIdSet) {
+    await callActor('root', `latticeServiceTickets:destroy?filterByTk=${encodeURIComponent(ticketId)}`, { method: 'POST' }).catch(() => {});
+  }
   for (const woId of woIdSet) {
     await callActor('root', `latticeCustomWorkOrders:destroy?filterByTk=${encodeURIComponent(woId)}`, { method: 'POST' }).catch(() => {});
   }
-
   for (const incId of cleanup.incidentIds) {
     await callActor('root', `latticeIncidentCases:destroy?filterByTk=${encodeURIComponent(incId)}`, { method: 'POST' }).catch(() => {});
   }
@@ -1157,10 +1712,12 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
   const suffix = Date.now().toString(36).slice(-6).toUpperCase().replace(/[^A-Z0-9]/g, 'X');
   const cleanup = {
     connectorKey: null,
+    extraConnectorKeys: [],
     subscriptionKey: null,
     subscriptionId: null,
     lwtRuleKey: null,
-    aiTempRuleKey: null,
+    tempRuleKeys: [],
+    tempRunUids: [],
     offlineEventId: null,
     cmmsRunUid: null,
     cmmsRunId: null,
@@ -1169,6 +1726,7 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
     deviceKey: null,
     incidentIds: [],
     workOrderIds: [],
+    serviceTicketIds: [],
     proposalIds: [],
     approvalQueueIds: [],
     twinShadowIds: [],
@@ -1184,7 +1742,7 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
     rbacNegativeChecksOk: false,
     connectorVaultLifecycleOk: false,
     mqttDynSecLwtAutomationCmmsOk: false,
-    automationStudioAndCopilotOk: false,
+    automationStudioAndArchitectOk: false,
     webhooksHmacCircuitDlqOk: false,
     domainBuilderOpenApiRlsOk: false,
     tenantProvisioningIdempotentOk: false,
@@ -1200,8 +1758,8 @@ export async function runBrokerAutomationBuilderAcceptance(callActor, { organiza
     const brokerAutomationSummary = await verifyMqttLwtAutomationCmms(callActor, okActor, organizationId, suffix, cleanup);
     checks.mqttDynSecLwtAutomationCmmsOk = true;
 
-    const automationStudioSummary = await verifyAutomationStudioAndCopilot(callActor, okActor, organizationId, suffix, cleanup);
-    checks.automationStudioAndCopilotOk = true;
+    const automationStudioSummary = await verifyAutomationStudioAndArchitect(callActor, okActor, organizationId, suffix, cleanup);
+    checks.automationStudioAndArchitectOk = true;
 
     const webhooksSummary = await verifyWebhooksHmacCircuitDlq(callActor, okActor, organizationId, suffix, cleanup);
     checks.webhooksHmacCircuitDlqOk = true;
