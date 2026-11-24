@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { installRlsTransactionBridge, setTransactionRlsOrg, withTenantRlsContext } = require('./pg-rls');
+const { installRlsTransactionBridge, setContextRlsTransaction, setTransactionRlsOrg, withTenantRlsContext } = require('./pg-rls');
 
 function failure(code, status = 403, message = code) {
   return Object.assign(new Error(message), {code, status});
@@ -284,7 +284,7 @@ function createNativeScopeMiddleware(db, definitions) {
         params.values = scopeNativeRead(nextValues, actor);
         if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function') {
           return withTenantRlsContext(db, actor.organizationId, (transaction) => {
-            ctx.state.latticeRlsTransaction = transaction;
+            setContextRlsTransaction(ctx, transaction);
             return next();
           });
         }
@@ -370,7 +370,7 @@ function createNativeScopeMiddleware(db, definitions) {
       ctx.state = ctx.state || {};
       ctx.state.latticeNativeActor = actor;
       ctx.state.latticeRlsOrg = actor.organizationId;
-      if (transaction) ctx.state.latticeRlsTransaction = transaction;
+      if (transaction) setContextRlsTransaction(ctx, transaction);
       if (document && actionName === 'update') {
         return updateScopedDocument(db, ctx, actor, transaction ? { transaction, deferChatter: true } : {});
       }

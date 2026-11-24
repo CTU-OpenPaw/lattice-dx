@@ -330,11 +330,21 @@ test('native-scope sets ctx.state.latticeRlsOrg and executes withTenantRlsContex
     assert.equal(sqlCalls.length, 0);
 
     process.env.DX_PG_RLS_SESSION = 'true';
+    const circularSeq = {};
+    circularSeq.dialect = { sequelize: circularSeq };
+    fakeTx.sequelize = circularSeq;
     const ctxOn = { state: { currentUser: { id: 12 }, currentRole: 'ldx_employee' }, action: { resourceName: 'latticeAssets', actionName: 'list', params: {} } };
     let sawTxInsideNext = null;
-    await guard(ctxOn, async () => { sawTxInsideNext = ctxOn.state.latticeRlsTransaction; });
+    let stateSerialized = null;
+    await guard(ctxOn, async () => {
+      sawTxInsideNext = ctxOn.state.latticeRlsTransaction;
+      stateSerialized = JSON.parse(JSON.stringify(ctxOn.state));
+    });
     assert.equal(ctxOn.state.latticeRlsOrg, 'org-a');
     assert.equal(sawTxInsideNext, fakeTx);
+    assert.equal(Object.getOwnPropertyDescriptor(ctxOn.state, 'latticeRlsTransaction').enumerable, false);
+    assert.equal(stateSerialized.latticeRlsOrg, 'org-a');
+    assert.equal('latticeRlsTransaction' in stateSerialized, false);
     assert.equal(sqlCalls.length, 1);
     assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
     assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });

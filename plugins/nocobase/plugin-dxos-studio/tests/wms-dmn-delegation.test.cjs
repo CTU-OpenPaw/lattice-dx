@@ -900,7 +900,9 @@ test('Plugin registration mounts dxosWms, dxosDmn, dxosDelegations, publicTrack 
 
     // DX_PG_RLS_SESSION=true wraps direct queries and charts in PG RLS transaction
     const prevRls = process.env.DX_PG_RLS_SESSION;
-    const fakeTx = { id: 'tx-wms-rls' };
+    const circularSeq = {};
+    circularSeq.dialect = { sequelize: circularSeq };
+    const fakeTx = { id: 'tx-wms-rls', sequelize: circularSeq };
     const sqlCalls = [];
     harness.db.sequelize = {
       getDialect: () => 'postgres',
@@ -910,12 +912,19 @@ test('Plugin registration mounts dxosWms, dxosDmn, dxosDelegations, publicTrack 
     try {
       process.env.DX_PG_RLS_SESSION = 'true';
       let seenTx = null;
+      let serializedState = null;
       const rlsCtx = {
         state: { currentUser: { id: 100 }, currentRole: 'ldx_warehouse' },
         action: { resourceName: 'latticeStockLots', actionName: 'list', params: {} },
       };
-      await wmsGuard.fn(rlsCtx, async () => { seenTx = rlsCtx.state.latticeRlsTransaction; });
+      await wmsGuard.fn(rlsCtx, async () => {
+        seenTx = rlsCtx.state.latticeRlsTransaction;
+        serializedState = JSON.parse(JSON.stringify(rlsCtx.state));
+      });
       assert.equal(seenTx, fakeTx);
+      assert.equal(Object.getOwnPropertyDescriptor(rlsCtx.state, 'latticeRlsTransaction').enumerable, false);
+      assert.equal(serializedState.latticeRlsOrg, 'org-a');
+      assert.equal('latticeRlsTransaction' in serializedState, false);
       assert.equal(sqlCalls.length, 1);
       assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
       assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });

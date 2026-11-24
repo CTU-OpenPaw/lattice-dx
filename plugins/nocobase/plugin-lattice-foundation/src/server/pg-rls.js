@@ -361,6 +361,18 @@ async function withTenantRlsContext(db, organizationId, fn) {
   });
 }
 
+// Non-enumerable so NocoBase 2.2.50 createContextVariablesScope (JSON.stringify(ctx.state)) skips the Sequelize Transaction graph.
+function setContextRlsTransaction(ctx, transaction) {
+  if (!ctx || !transaction) return;
+  ctx.state = ctx.state || {};
+  Object.defineProperty(ctx.state, 'latticeRlsTransaction', {
+    value: transaction,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
 module.exports = {
   IDENTIFIER_RE,
   ORG_ID_RE,
@@ -376,6 +388,7 @@ module.exports = {
   attachRlsPolicyToTable,
   detachRlsPolicyFromTable,
   discoverTenantRlsTables,
+  setContextRlsTransaction,
   setTransactionRlsOrg,
   withTenantRlsContext,
 };

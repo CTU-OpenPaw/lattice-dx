@@ -41,6 +41,16 @@ function loadPgRls() {
 const pgRls = loadPgRls();
 const withTenantRlsContext = pgRls?.withTenantRlsContext || null;
 const installRlsTransactionBridge = pgRls?.installRlsTransactionBridge || null;
+const setContextRlsTransaction = pgRls?.setContextRlsTransaction || ((ctx, transaction) => {
+  if (!ctx || !transaction) return;
+  ctx.state = ctx.state || {};
+  Object.defineProperty(ctx.state, 'latticeRlsTransaction', {
+    value: transaction,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+});
 
 function failure(code, status = 403, message = code) {
   return Object.assign(new Error(message), { code, status });
@@ -218,7 +228,7 @@ function createParaScopeMiddleware(db) {
         ctx.state.latticeRlsOrg = actor.organizationId;
         if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function' && typeof withTenantRlsContext === 'function') {
           return withTenantRlsContext(db, actor.organizationId, (transaction) => {
-            ctx.state.latticeRlsTransaction = transaction;
+            setContextRlsTransaction(ctx, transaction);
             return next();
           });
         }
@@ -316,7 +326,7 @@ function createParaScopeMiddleware(db) {
       ctx.state = ctx.state || {};
       ctx.state.latticeNativeActor = actor;
       ctx.state.latticeRlsOrg = actor.organizationId;
-      if (transaction) ctx.state.latticeRlsTransaction = transaction;
+      if (transaction) setContextRlsTransaction(ctx, transaction);
       return next();
     };
 

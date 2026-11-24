@@ -19,6 +19,21 @@ const {
   assertSafeDirectSort,
 } = require('./wms-dmn-shared');
 
+function attachRlsTxNonEnumerable(ctx, transaction, foundation) {
+  if (!ctx || !transaction) return;
+  if (typeof foundation?.pgRls?.setContextRlsTransaction === 'function') {
+    foundation.pgRls.setContextRlsTransaction(ctx, transaction);
+    return;
+  }
+  ctx.state = ctx.state || {};
+  Object.defineProperty(ctx.state, 'latticeRlsTransaction', {
+    value: transaction,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+}
+
 const WMS_DMN_COLLECTIONS = new Set([
   'latticeOrderLines',
   'latticeStockLots',
@@ -170,7 +185,7 @@ function createWmsDmnDirectGuardMiddleware(db, foundation = defaultFoundation) {
       ctx.state.latticeNativeActor = actor;
       ctx.state.latticeRlsOrg = actor.organizationId;
       return runWithOptionalRls(db, actor.organizationId, async (transaction) => {
-        if (transaction) ctx.state.latticeRlsTransaction = transaction;
+        attachRlsTxNonEnumerable(ctx, transaction, foundation);
         await next();
         if (isEpodChart) stripEpodSecretsFromBody(ctx);
       }, foundation);
@@ -223,7 +238,7 @@ function createWmsDmnDirectGuardMiddleware(db, foundation = defaultFoundation) {
     ctx.state.latticeRlsOrg = actor.organizationId;
 
     return runWithOptionalRls(db, actor.organizationId, async (transaction) => {
-      if (transaction) ctx.state.latticeRlsTransaction = transaction;
+      attachRlsTxNonEnumerable(ctx, transaction, foundation);
       await next();
       if (collectionName === 'latticeEpodRecords') stripEpodSecretsFromBody(ctx);
     }, foundation);

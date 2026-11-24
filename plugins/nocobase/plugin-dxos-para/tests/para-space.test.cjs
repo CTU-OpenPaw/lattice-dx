@@ -464,15 +464,25 @@ test('para-scope rewrites self owner.userId filters, rejects foreign/other dotte
 
     // 2. DX_PG_RLS_SESSION=true wraps latticeParaDocuments & charts:queryData in withTenantRlsContext
     process.env.DX_PG_RLS_SESSION = 'true';
+    const circularSeq = {};
+    circularSeq.dialect = { sequelize: circularSeq };
+    fakeTx.sequelize = circularSeq;
     sqlCalls.length = 0;
     repoTxCalls.length = 0;
     let seenTx = null;
+    let stateJson = null;
     const rlsUpdateCtx = {
       state: { currentRole: 'ldx_employee', currentUser: { id: 101 } },
       action: { resourceName: 'latticeParaDocuments', actionName: 'update', params: { filterByTk: 50, values: { title: 'RLS Doc', departmentId: 3 } } },
     };
-    await mw(rlsUpdateCtx, async () => { seenTx = rlsUpdateCtx.state.latticeRlsTransaction; });
+    await mw(rlsUpdateCtx, async () => {
+      seenTx = rlsUpdateCtx.state.latticeRlsTransaction;
+      stateJson = JSON.parse(JSON.stringify(rlsUpdateCtx.state));
+    });
     assert.equal(seenTx, fakeTx);
+    assert.equal(Object.getOwnPropertyDescriptor(rlsUpdateCtx.state, 'latticeRlsTransaction').enumerable, false);
+    assert.equal(stateJson.latticeRlsOrg, 'org-a');
+    assert.equal('latticeRlsTransaction' in stateJson, false);
     assert.equal(rlsUpdateCtx.state.latticeRlsOrg, 'org-a');
     assert.equal(sqlCalls.length, 1);
     assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
