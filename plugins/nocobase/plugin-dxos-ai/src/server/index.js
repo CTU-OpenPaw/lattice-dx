@@ -17,6 +17,7 @@ const { createMcpGatewayMiddleware } = require('./mcp-gateway');
 const { createDxosAiActions } = require('./ai-resource');
 const { attachAppPubSub } = require('./surface-events');
 const { startProactiveTriageScheduler } = require('./proactive-triage');
+const { runWithSystemRlsBypass } = require('./ai-rls');
 
 class DxosAiPlugin extends Plugin {
   async load() {
@@ -60,7 +61,7 @@ class DxosAiPlugin extends Plugin {
         const profRepo = this.db?.getRepository?.('latticeAiProfiles');
         const joinRepo = this.db?.getRepository?.('rolesAiEmployees');
         if (!profRepo || !joinRepo || typeof joinRepo.destroy !== 'function') return;
-        const builderRows = (await profRepo.find({ filter: { isAdminBuilder: true }, transaction })) || [];
+        const builderRows = (await runWithSystemRlsBypass(this.db, () => profRepo.find({ filter: { isAdminBuilder: true } }))) || [];
         const builderNames = builderRows.map((p) => val(p, 'username')).filter(Boolean);
         if (builderNames.length) {
           await joinRepo.destroy({ filter: { aiEmployee: { $in: builderNames }, roleName }, transaction });

@@ -53,6 +53,7 @@ const {
 const { createSurfaceEventsHandler, publishSurfaceUpdate } = require('./surface-events');
 const { getQuotaSummaryPersistent } = require('./ai-governance');
 const { runProactiveIncidentTriage } = require('./proactive-triage');
+const { runWithTenantRls, runWithSystemRlsBypass, runInRlsSavepoint } = require('./ai-rls');
 
 const TRIAGE_SCAN_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_dispatcher']);
 const SUPPORTED_HITL_TOOLS = new Set([
@@ -775,14 +776,15 @@ async function upsertAndSyncProfile(db, input, { actorUser, defaultOrigin, defau
   let savedRow = locked;
 
   if (profileRepo) {
-    const existing = await profileRepo.findOne({ filter: { username: locked.username } });
-    const nextVersion = existing ? (Number(val(existing, 'version')) || 1) + 1 : locked.version;
-    const recordValues = { ...locked, version: nextVersion };
-    if (existing && typeof existing.update === 'function') {
-      savedRow = await existing.update(recordValues);
-    } else {
-      savedRow = await profileRepo.create({ values: recordValues });
-    }
+    savedRow = await runWithTenantRls(db, locked.organizationId, async () => {
+      const existing = await profileRepo.findOne({ filter: { username: locked.username } });
+      const nextVersion = existing ? (Number(val(existing, 'version')) || 1) + 1 : locked.version;
+      const recordValues = { ...locked, version: nextVersion };
+      if (existing && typeof existing.update === 'function') {
+        return existing.update(recordValues);
+      }
+      return profileRepo.create({ values: recordValues });
+    });
   }
 
   const normalized = serializeProfile(savedRow, resolvedDefaultOrg) || locked;
@@ -815,45 +817,47 @@ async function upsertAndSyncProfile(db, input, { actorUser, defaultOrigin, defau
 
 async function computeAllTimeAuditTotals(targetDb, organizationId) {
   const empty = { records: 0, promptTokens: 0, completionTokens: 0, estimatedCostUsd: 0, piiRedactedCount: 0 };
-  if (typeof targetDb?.sequelize?.query === 'function') {
-    try {
-      const [rows] = await targetDb.sequelize.query(
-        `SELECT COUNT(*)::int AS records,
-                COALESCE(SUM("promptTokens"), 0)::bigint AS "promptTokens",
-                COALESCE(SUM("completionTokens"), 0)::bigint AS "completionTokens",
-                COALESCE(SUM("estimatedCostUsd"), 0)::double precision AS "estimatedCostUsd",
-                COALESCE(SUM("piiRedactedCount"), 0)::int AS "piiRedactedCount"
-         FROM "latticeAiAuditLogs"
-         WHERE "organizationId" = :organizationId;`,
-        { replacements: { organizationId } },
-      );
-      if (Array.isArray(rows) && rows[0]) {
-        const r = rows[0];
-        return {
-          records: Number(r.records) || 0,
-          promptTokens: Number(r.promptTokens) || 0,
-          completionTokens: Number(r.completionTokens) || 0,
-          estimatedCostUsd: Number((Number(r.estimatedCostUsd) || 0).toFixed(6)),
-          piiRedactedCount: Number(r.piiRedactedCount) || 0,
-        };
+  return runWithTenantRls(targetDb, organizationId, async () => {
+    if (typeof targetDb?.sequelize?.query === 'function') {
+      try {
+        const [rows] = await runInRlsSavepoint(targetDb, () => targetDb.sequelize.query(
+          `SELECT COUNT(*)::int AS records,
+                  COALESCE(SUM("promptTokens"), 0)::bigint AS "promptTokens",
+                  COALESCE(SUM("completionTokens"), 0)::bigint AS "completionTokens",
+                  COALESCE(SUM("estimatedCostUsd"), 0)::double precision AS "estimatedCostUsd",
+                  COALESCE(SUM("piiRedactedCount"), 0)::int AS "piiRedactedCount"
+           FROM "latticeAiAuditLogs"
+           WHERE "organizationId" = :organizationId;`,
+          { replacements: { organizationId } },
+        ));
+        if (Array.isArray(rows) && rows[0]) {
+          const r = rows[0];
+          return {
+            records: Number(r.records) || 0,
+            promptTokens: Number(r.promptTokens) || 0,
+            completionTokens: Number(r.completionTokens) || 0,
+            estimatedCostUsd: Number((Number(r.estimatedCostUsd) || 0).toFixed(6)),
+            piiRedactedCount: Number(r.piiRedactedCount) || 0,
+          };
+        }
+      } catch {
+        // Fallback to repository scan in mock harnesses
       }
-    } catch {
-      // Fallback to repository scan in mock harnesses
     }
-  }
-  const repo = targetDb?.getRepository?.('latticeAiAuditLogs');
-  if (!repo || typeof repo.find !== 'function') return empty;
-  const rows = (await repo.find({ filter: { organizationId }, sort: ['-id'], limit: 5000 })) || [];
-  const totals = { ...empty };
-  for (const r of rows) {
-    totals.records += 1;
-    totals.promptTokens += Number(val(r, 'promptTokens')) || 0;
-    totals.completionTokens += Number(val(r, 'completionTokens')) || 0;
-    totals.estimatedCostUsd += Number(val(r, 'estimatedCostUsd')) || 0;
-    totals.piiRedactedCount += Number(val(r, 'piiRedactedCount')) || 0;
-  }
-  totals.estimatedCostUsd = Number(totals.estimatedCostUsd.toFixed(6));
-  return totals;
+    const repo = targetDb?.getRepository?.('latticeAiAuditLogs');
+    if (!repo || typeof repo.find !== 'function') return empty;
+    const rows = (await repo.find({ filter: { organizationId }, sort: ['-id'], limit: 5000 })) || [];
+    const totals = { ...empty };
+    for (const r of rows) {
+      totals.records += 1;
+      totals.promptTokens += Number(val(r, 'promptTokens')) || 0;
+      totals.completionTokens += Number(val(r, 'completionTokens')) || 0;
+      totals.estimatedCostUsd += Number(val(r, 'estimatedCostUsd')) || 0;
+      totals.piiRedactedCount += Number(val(r, 'piiRedactedCount')) || 0;
+    }
+    totals.estimatedCostUsd = Number(totals.estimatedCostUsd.toFixed(6));
+    return totals;
+  });
 }
 
 function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
@@ -972,12 +976,15 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
     const queueRepo = targetDb?.getRepository?.('latticeAiApprovalQueue');
     const numericId = Number(approvalId);
     if (queueRepo && typeof queueRepo.findOne === 'function' && Number.isInteger(numericId) && numericId > 0) {
-      const found = await queueRepo.findOne({
+      const findPeek = () => queueRepo.findOne({
         filter: {
           id: numericId,
           ...(!isRootActor(baseActor) && baseActor.organizationId ? { organizationId: baseActor.organizationId } : {}),
         },
       });
+      const found = isRootActor(baseActor) || !baseActor.organizationId
+        ? await runWithSystemRlsBypass(targetDb, findPeek)
+        : await runWithTenantRls(targetDb, baseActor.organizationId, findPeek);
       if (found) {
         peekRow = {
           id: val(found, 'id'),
@@ -1049,7 +1056,10 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
       const defaultOrg = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env });
       const repo = targetDb?.getRepository?.('latticeAiProfiles');
-      const rows = repo ? (await repo.find({ sort: ['username'] })) || [] : [];
+      const runList = () => (repo ? repo.find({ sort: ['username'] }) : []);
+      const rows = (actorScope?.isRoot || !actorScope?.organizationId
+        ? await runWithSystemRlsBypass(targetDb, runList)
+        : await runWithTenantRls(targetDb, actorScope.organizationId, runList)) || [];
       const orgRepo = targetDb?.getRepository?.('latticeOrganizations');
       let organizations = [];
       if (orgRepo && typeof orgRepo.find === 'function') {
@@ -1098,16 +1108,18 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         throw failTool('AI_USERNAME_REQUIRED', 400, 'Cần username của AI Employee để xóa.');
       }
 
-      for (const [repoName, filter] of [
-        ['latticeAiProfiles', { username }],
-        ['aiEmployees', { username }],
-        ['rolesAiEmployees', { aiEmployee: username }],
-      ]) {
-        const repo = targetDb?.getRepository?.(repoName);
-        if (repo && typeof repo.destroy === 'function') {
-          await repo.destroy({ filter });
+      await runWithSystemRlsBypass(targetDb, async () => {
+        for (const [repoName, filter] of [
+          ['latticeAiProfiles', { username }],
+          ['aiEmployees', { username }],
+          ['rolesAiEmployees', { aiEmployee: username }],
+        ]) {
+          const repo = targetDb?.getRepository?.(repoName);
+          if (repo && typeof repo.destroy === 'function') {
+            await repo.destroy({ filter });
+          }
         }
-      }
+      });
 
       await recordAiAuditLog(targetDb, {
         actorUserId: val(actorUser, 'id') ?? null,
@@ -1131,37 +1143,40 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const defaultOrg = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env, fallback: 'default' });
       const defaultOrigin = env?.NOCOBASE_INTERNAL_URL;
 
-      const profiles = [];
-      for (const bp of STARTER_AI_BLUEPRINTS) {
-        const res = await upsertAndSyncProfile(targetDb, { ...bp, organizationId: bp.organizationId || defaultOrg }, {
-          actorUser,
-          defaultOrigin,
-          defaultOrganizationId: defaultOrg,
-          auditToolName: null,
-        });
-        profiles.push(res.profile.username);
-      }
+      const profiles = await runWithSystemRlsBypass(targetDb, async () => {
+        const synced = [];
+        for (const bp of STARTER_AI_BLUEPRINTS) {
+          const res = await upsertAndSyncProfile(targetDb, { ...bp, organizationId: bp.organizationId || defaultOrg }, {
+            actorUser,
+            defaultOrigin,
+            defaultOrganizationId: defaultOrg,
+            auditToolName: null,
+          });
+          synced.push(res.profile.username);
+        }
 
-      const profRepo = targetDb?.getRepository?.('latticeAiProfiles');
-      if (profRepo && typeof profRepo.find === 'function') {
-        const existingRows = (await profRepo.find({ limit: 500 })) || [];
-        const starterSet = new Set(STARTER_AI_BLUEPRINTS.map((b) => b.username));
-        for (const row of existingRows) {
-          const uname = String(val(row, 'username') || '').trim().toLowerCase();
-          if (!uname || starterSet.has(uname)) continue;
-          const rawPerms = val(row, 'toolPermissions') ?? val(row, 'toolPermissionsJson');
-          const hasLegacyKey = rawPerms && typeof rawPerms === 'object' && Object.prototype.hasOwnProperty.call(rawPerms, LEGACY_WORKFLOW_TASKS_TOOL);
-          const hasLegacyCol = val(row, 'toolPermissionsJson') !== undefined;
-          if (hasLegacyKey || hasLegacyCol) {
-            await upsertAndSyncProfile(targetDb, serializeProfile(row, defaultOrg), {
-              actorUser,
-              defaultOrigin,
-              defaultOrganizationId: defaultOrg,
-              auditToolName: null,
-            });
+        const profRepo = targetDb?.getRepository?.('latticeAiProfiles');
+        if (profRepo && typeof profRepo.find === 'function') {
+          const existingRows = (await profRepo.find({ limit: 500 })) || [];
+          const starterSet = new Set(STARTER_AI_BLUEPRINTS.map((b) => b.username));
+          for (const row of existingRows) {
+            const uname = String(val(row, 'username') || '').trim().toLowerCase();
+            if (!uname || starterSet.has(uname)) continue;
+            const rawPerms = val(row, 'toolPermissions') ?? val(row, 'toolPermissionsJson');
+            const hasLegacyKey = rawPerms && typeof rawPerms === 'object' && Object.prototype.hasOwnProperty.call(rawPerms, LEGACY_WORKFLOW_TASKS_TOOL);
+            const hasLegacyCol = val(row, 'toolPermissionsJson') !== undefined;
+            if (hasLegacyKey || hasLegacyCol) {
+              await upsertAndSyncProfile(targetDb, serializeProfile(row, defaultOrg), {
+                actorUser,
+                defaultOrigin,
+                defaultOrganizationId: defaultOrg,
+                auditToolName: null,
+              });
+            }
           }
         }
-      }
+        return synced;
+      });
 
       const llm = await ensureLocalLlmServiceRecord(targetDb, env);
       await recordAiAuditLog(targetDb, {
@@ -1192,11 +1207,15 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
 
       const roleNames = await resolveCallerRoleNames(ctx, targetDb, userId);
       const callerIsAdmin = await isStudioAdmin(ctx, targetDb);
+      const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
       const payload = readActionPayload(ctx);
       const portalSlug = String(ctx?.action?.params?.portalSlug || payload.portalSlug || '').trim().toLowerCase();
 
       const repo = targetDb?.getRepository?.('latticeAiProfiles');
-      const rows = repo ? (await repo.find({ filter: { enabled: true }, sort: ['username'] })) || [] : [];
+      const runFind = () => (repo ? repo.find({ filter: { enabled: true }, sort: ['username'] }) : []);
+      const rows = (actorScope && !actorScope.isRoot && actorScope.organizationId
+        ? await runWithTenantRls(targetDb, actorScope.organizationId, runFind)
+        : await runWithSystemRlsBypass(targetDb, runFind)) || [];
       const adminToolSet = new Set(ADMIN_BUILDER_TOOL_NAMES);
 
       const employees = rows
@@ -1240,6 +1259,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
 
     async auditLogs(ctx, next) {
       const targetDb = await requireAdmin(ctx);
+      const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
       const params = ctx?.action?.params || {};
       const filter = {};
       if (params.channel) filter.channel = String(params.channel).trim();
@@ -1248,7 +1268,10 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const limit = Math.max(1, Math.min(200, Number(params.pageSize || params.limit) || 50));
 
       const repo = targetDb?.getRepository?.('latticeAiAuditLogs');
-      const rows = repo ? (await repo.find({ filter, sort: ['-id'], limit })) || [] : [];
+      const runFind = () => (repo ? repo.find({ filter, sort: ['-id'], limit }) : []);
+      const rows = (actorScope && !actorScope.isRoot && actorScope.organizationId
+        ? await runWithTenantRls(targetDb, actorScope.organizationId, runFind)
+        : await runWithSystemRlsBypass(targetDb, runFind)) || [];
       ctx.body = { items: rows.map(serializeAuditLog) };
       if (typeof next === 'function') await next();
     },
@@ -1275,7 +1298,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
 
     async enterpriseTopology(ctx, next) {
       const targetDb = await requireAdmin(ctx);
-      ctx.body = await buildEnterpriseTopology(targetDb, env, fetchImpl, ctx?.app);
+      ctx.body = await runWithSystemRlsBypass(targetDb, () => buildEnterpriseTopology(targetDb, env, fetchImpl, ctx?.app));
       if (typeof next === 'function') await next();
     },
 

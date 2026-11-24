@@ -695,19 +695,32 @@ async function callLlmJson({
     ...(systemPrompt ? [{ role: 'system', content: String(systemPrompt) }] : []),
     { role: 'user', content: redactedInput ?? {} },
   ];
-  const res = await llmClient.callConfiguredLlm({
-    db,
-    env,
-    messages,
-    model,
-    temperature,
-    maxTokens,
-    responseFormat: 'json',
-    timeoutMs,
-    fetchImpl,
-    lookupImpl,
-    connectorVault,
-  });
+  let res = null;
+  try {
+    res = await llmClient.callConfiguredLlm({
+      db,
+      env,
+      messages,
+      model,
+      temperature,
+      maxTokens,
+      responseFormat: 'json',
+      timeoutMs,
+      fetchImpl,
+      lookupImpl,
+      connectorVault,
+    });
+  } catch (err) {
+    const promptTokens = estimateTokens(redactedInput);
+    return {
+      ok: false,
+      mode: 'offline_fallback',
+      data: null,
+      reason: err?.message || 'LLM unconfigured or blocked',
+      usage: { promptTokens, completionTokens: 1, totalTokens: promptTokens + 1 },
+      tokenSource: 'estimated',
+    };
+  }
   if (res?.ok && res.parsedJson && typeof res.parsedJson === 'object' && !Array.isArray(res.parsedJson)) {
     const norm = normalizeTokenUsage(
       res.usage ? { usage: res.usage } : { promptTokens: estimateTokens(redactedInput), completionTokens: estimateTokens(res.content), tokenSource: 'estimated' },

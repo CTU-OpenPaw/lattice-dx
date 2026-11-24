@@ -2154,6 +2154,7 @@ function createDxosAutomationsActions(db, options = {}) {
           organizationId,
           fetchImpl: options.fetchImpl,
           lookupImpl: options.lookupImpl,
+          allowFallbackOnNetworkError: params.allowFallbackOnNetworkError !== false,
           ...(params.sampleEvent !== undefined ? { sampleEvent: params.sampleEvent } : {}),
         });
         if (

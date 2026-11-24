@@ -201,7 +201,7 @@ async function verifyConnectorVaultLifecycle(callActor, okActor, organizationId,
       connectorKey,
       name: `Acceptance Connector ${suffix}`,
       connectorType: 'http_api',
-      baseUrl: 'http://127.0.0.1/api/dxos:health',
+      baseUrl: 'http://orion-ld:1026/version',
       authType: 'bearer',
       secrets: { token: initialSecret },
     },
@@ -521,7 +521,7 @@ async function verifyWebhooksHmacCircuitDlq(callActor, okActor, organizationId, 
       organizationId,
       subscriptionKey,
       name: `Acceptance Webhook ${suffix}`,
-      targetUrl: 'http://127.0.0.1:59999/acc-webhook-sink',
+      targetUrl: 'http://orion-ld:59999/acc-webhook-sink',
       eventPattern: `acc.wh.${suffix.toLowerCase()}.*`,
       signingSecret,
       active: true,
@@ -1342,8 +1342,8 @@ async function verifyAutomationStudioAndArchitect(callActor, okActor, organizati
       note: 'Approved via unified latticeflow.approval queue',
     },
   });
-  assert.equal(queueApproveRes.data?.status, 'approved', 'dxosAi:approveAction must approve latticeflow.approval row');
-  const queueResumedRun = queueApproveRes.data?.result?.run || {};
+  assert.ok(['approved', 'executed'].includes(queueApproveRes.data?.status), 'dxosAi:approveAction must approve/execute latticeflow.approval row');
+  const queueResumedRun = queueApproveRes.data?.executionResult?.run || queueApproveRes.data?.executionResult || queueApproveRes.data?.result?.run || {};
   assert.equal(queueResumedRun.status, 'completed', `Expected queue-approved HITL run completed, got ${queueResumedRun.status}`);
   const queuedTicketId = queueResumedRun.nodeStatesJson?.create_ticket?.output?.id
     ?? queueResumedRun.stepTracesJson?.find((t) => t?.nodeId === 'create_ticket')?.output?.id;
@@ -1366,7 +1366,7 @@ async function verifyAutomationStudioAndArchitect(callActor, okActor, organizati
       connectorKey: whConnectorKey,
       name: `Acceptance Inbound Webhook Secret ${suffix}`,
       connectorType: 'webhook',
-      baseUrl: 'http://127.0.0.1/api/dxos:health',
+      baseUrl: 'http://orion-ld:1026/version',
       authType: 'hmac',
       secrets: { webhookSecret: whSecret },
     },
@@ -1707,6 +1707,7 @@ async function verifyEnterpriseOrchestratorAndPartnerSettlement(callActor, okAct
     values: {
       organizationId,
       claimCode: tempClaimCode,
+      partnerCode: `acc-partner-${String(suffix).toLowerCase()}`,
       partnerName: `Acceptance ColdChain Partner ${suffix}`,
       severity: 'critical',
       temperatureC: -7.5,
@@ -1714,6 +1715,7 @@ async function verifyEnterpriseOrchestratorAndPartnerSettlement(callActor, okAct
       amount: 24500000,
       settlementTier: 'critical',
       settlementRatePct: 85,
+      settlementStatus: 'pending',
       status: 'submitted',
     },
   });

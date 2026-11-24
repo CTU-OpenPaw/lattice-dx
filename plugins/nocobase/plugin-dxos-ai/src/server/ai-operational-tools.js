@@ -22,6 +22,7 @@ const {
   enqueueAiApproval,
 } = require('./ai-hitl');
 const { redactPiiText: defaultRedactPiiText } = require('./ai-governance');
+const { runInRlsSavepoint } = require('./ai-rls');
 
 const DEFAULT_SYSTEM_PROTECTED = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
@@ -948,7 +949,7 @@ async function analyzeGraphImpact(db, actor, args, deps) {
       const codeFields = COLLECTION_CODE_FIELDS[colName] || ['code'];
       for (const field of codeFields) {
         try {
-          const hit = await findOneByFilter(repo, { organizationId: actor.organizationId, [field]: codeStr });
+          const hit = await runInRlsSavepoint(db, () => findOneByFilter(repo, { organizationId: actor.organizationId, [field]: codeStr }));
           if (hit) return hit;
         } catch {
           // Skip field if not present in a custom or mock schema

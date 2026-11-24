@@ -747,6 +747,21 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
         .slice(0, 6);
       if (!visibleFields.length) visibleFields.push('organizationId');
 
+      const allPopupFields = Array.from(
+        new Set([
+          ...visibleFields,
+          ...(Array.isArray(fields) ? fields.filter((f) => f && f.name && f.type !== 'belongsTo').map((f) => f.name) : []),
+          'organizationId',
+        ]),
+      );
+      const fieldGroups = [];
+      for (let i = 0; i < allPopupFields.length; i += 8) {
+        fieldGroups.push({
+          title: i === 0 ? 'Thông tin chính' : `Chi tiết ${Math.floor(i / 8) + 1}`,
+          fields: allPopupFields.slice(i, i + 8),
+        });
+      }
+
       const bpRes = await applyBlueprint({
         version: '1',
         mode: 'create',
@@ -764,6 +779,7 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
             actions: ['filter', 'refresh'],
           }],
         }],
+        ...(allPopupFields.length > 8 ? { defaults: { collections: { [collectionName]: { fieldGroups } } } } : {}),
       });
       tabSchemaOut = bpRes?.target?.tabSchemaUid || null;
 

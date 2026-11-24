@@ -471,8 +471,8 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
       values: { approvalId: tempHitlApprovalId, note: 'Approved by MCP E2E acceptance' },
     });
     assert.ok(approveHitlRes.ok && approveHitlRes.status < 300, `dxosAi:approveAction failed: ${JSON.stringify(approveHitlRes.data)}`);
-    assert.equal(approveHitlRes.data?.status, 'approved');
-    const resolvedFlowStatus = approveHitlRes.data?.executionResult?.status || approveHitlRes.data?.flowRun?.status;
+    assert.ok(['approved', 'executed'].includes(approveHitlRes.data?.status), `Expected approved/executed HITL status, got ${approveHitlRes.data?.status}`);
+    const resolvedFlowStatus = approveHitlRes.data?.executionResult?.run?.status || approveHitlRes.data?.executionResult?.status || approveHitlRes.data?.flowRun?.status;
     if (resolvedFlowStatus) {
       assert.equal(resolvedFlowStatus, 'completed');
     } else if (tempHitlRunUid) {

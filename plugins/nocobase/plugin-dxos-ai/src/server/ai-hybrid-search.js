@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { runInRlsSavepoint } = require('./ai-rls');
+
 const EMBEDDING_DIM = 256;
 const STOP_WORDS = new Set(['va', 'cua', 'cho', 'trong', 'voi', 'cac', 'nhung', 'mot', 'tai', 've', 'la', 'co', 'khong', 'duoc', 'bi']);
 
@@ -225,7 +227,7 @@ async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, ta
     LIMIT :limit`;
 
   try {
-    const res = await db.sequelize.query(sql, { replacements });
+    const res = await runInRlsSavepoint(db, () => db.sequelize.query(sql, { replacements }));
     const rows = Array.isArray(res) && Array.isArray(res[0]) ? res[0] : (Array.isArray(res) ? res : []);
     const read = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
     return rows.filter((row) => {

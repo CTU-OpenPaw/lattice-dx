@@ -10,6 +10,7 @@
 
 const { defineToolSchema } = require('./schema-helper');
 const { recordAiAuditLog, redactAuditText, normalizeToolPermissionsMap, resolveDefaultOrganizationId } = require('./ai-schemas');
+const { runWithTenantRls, runWithSystemRlsBypass } = require('./ai-rls');
 const {
   redactPiiText,
   redactPiiDeep,
@@ -146,7 +147,7 @@ async function resolveActorScope(ctx, db, { defaultFallback = 'native-ui-lab' } 
   const empRepo = targetDb?.getRepository?.('latticeEmployees');
   let employee = null;
   if (empRepo) {
-    const rows = (await empRepo.find({ filter: { userId, active: true }, limit: 1 })) || [];
+    const rows = (await runWithSystemRlsBypass(targetDb, () => empRepo.find({ filter: { userId, active: true }, limit: 1 }))) || [];
     employee = rows[0] || null;
   }
   if (!isAdmin && (!employee || !val(employee, 'organizationId'))) {
@@ -263,7 +264,7 @@ function createAuditedTool(spec) {
         if (aiEmployeeName && !isHitlApprovedReplay) {
           const profRepo = db?.getRepository?.('latticeAiProfiles');
           if (profRepo && typeof profRepo.findOne === 'function') {
-            const profile = await profRepo.findOne({ filter: { username: aiEmployeeName } });
+            const profile = await runWithTenantRls(db, actor.organizationId, () => profRepo.findOne({ filter: { username: aiEmployeeName } }));
             const matchedUsername = String(val(profile, 'username') || '').trim().toLowerCase();
             if (profile && (!matchedUsername || matchedUsername === aiEmployeeName)) {
               if (val(profile, 'enabled') === false) {
@@ -294,7 +295,11 @@ function createAuditedTool(spec) {
         const preparedArgs = typeof spec.prepareArgs === 'function' ? spec.prepareArgs(normalizedRawArgs) : normalizedRawArgs;
         const checked = schemaHelper.validate(preparedArgs);
         if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
-        const result = await spec.run(ctx, db, actor, checked.value);
+        const skipOuterTx = spec.name === 'dxos_provision_role_workspace'
+          && (checked.value?.operation === 'build_enterprise_app' || checked.value?.operation === 'verify_app');
+        const result = skipOuterTx
+          ? await spec.run(ctx, db, actor, checked.value)
+          : await runWithTenantRls(db, actor.organizationId, () => spec.run(ctx, db, actor, checked.value));
         const estCompletion = estimateTokens(result);
         const providerUsage = result?.usage || result?._llmUsage || ctx?.state?.dxosLlmUsage || null;
         const usageInfo = normalizeTokenUsage(

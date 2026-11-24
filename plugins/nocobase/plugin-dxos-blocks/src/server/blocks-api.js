@@ -28,6 +28,7 @@ const {
   runBulkImportDryRun,
   commitBulkImport,
 } = require('./bulk-import');
+const { runWithOptionalRls } = require('./blocks-rls');
 
 const ALLOWED_PROPOSAL_COLLECTIONS = new Set([
   'latticeAssets',
@@ -211,7 +212,9 @@ async function resolveNativeEmployee(db, user) {
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw fail('NATIVE_LOGIN_REQUIRED', 401);
   const repo = db.getRepository('latticeEmployees');
   if (!repo) throw fail('NATIVE_MEMBERSHIP_REQUIRED', 403);
-  const rows = await repo.find({ filter: { userId: id }, limit: 2 });
+  const rows = await runWithOptionalRls(db, null, (transaction) =>
+    repo.find({ filter: { userId: id }, limit: 2, ...(transaction ? { transaction } : {}) }),
+  );
   if (rows.length > 1) throw fail('NATIVE_MEMBERSHIP_AMBIGUOUS', 403);
   const emp = rows[0];
   if (!emp || val(emp, 'active') !== true) throw fail('NATIVE_MEMBERSHIP_REQUIRED', 403);
@@ -364,15 +367,6 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       if (input.targetRecordId !== undefined && input.targetRecordId !== null && input.targetRecordId !== '') {
         if (!/^[1-9]\d{0,18}$/.test(String(input.targetRecordId))) throw fail('DXOS_INVALID_RECORD_ID', 400);
         targetRecordId = Number(input.targetRecordId);
-        if (!isRoot) {
-          const targetRow = await db.getRepository(targetCollection)?.findOne({
-            filter: { id: targetRecordId, organizationId: actor.organizationId },
-          });
-          if (!targetRow) throw fail('DXOS_RECORD_NOT_FOUND', 404);
-          if (enforceOwnScope && !isRecordOwnedByActor(targetRow, actor)) {
-            throw fail('DXOS_ACL_DENIED', 403);
-          }
-        }
       }
 
       const rawPageSize = Number(input.pageSize);
@@ -383,52 +377,63 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         organizationId = input.organizationId.trim();
       }
 
-      const repo = db.getRepository('latticeAgentProposals');
-      if (!repo) {
-        ctx.body = { items: [], total: 0, collection: targetCollection, preview: isRoot };
-        return next();
-      }
-
-      const filter = {
-        targetCollection,
-        ...(organizationId ? { organizationId } : {}),
-        ...(targetRecordId !== undefined ? { targetRecordId } : {}),
-        ...(state !== 'all' ? { state } : {}),
-      };
-      let rows = await repo.find({ filter, limit: enforceOwnScope ? 100 : pageSize, sort: ['-id'] });
-      rows = Array.isArray(rows) ? rows : [];
-      let total = typeof repo.count === 'function' && !enforceOwnScope ? await repo.count({ filter }) : rows.length;
-      if (enforceOwnScope && rows.length) {
-        const recordIds = [...new Set(rows.map((r) => val(r, 'targetRecordId')).filter((id) => id != null))];
-        const targetRepo = db.getRepository(targetCollection);
-        if (!targetRepo || !recordIds.length) {
-          rows = [];
-        } else {
-          const ownedRows = (await targetRepo.find({
-            filter: { id: { $in: recordIds }, organizationId: actor.organizationId },
-            limit: recordIds.length,
-          })) || [];
-          const ownedIds = new Set(ownedRows.filter((r) => isRecordOwnedByActor(r, actor)).map((r) => String(val(r, 'id'))));
-          rows = rows.filter((r) => ownedIds.has(String(val(r, 'targetRecordId'))));
+      ctx.body = await runWithOptionalRls(db, organizationId || null, async () => {
+        if (targetRecordId !== undefined && !isRoot) {
+          const targetRow = await db.getRepository(targetCollection)?.findOne({
+            filter: { id: targetRecordId, organizationId: actor.organizationId },
+          });
+          if (!targetRow) throw fail('DXOS_RECORD_NOT_FOUND', 404);
+          if (enforceOwnScope && !isRecordOwnedByActor(targetRow, actor)) {
+            throw fail('DXOS_ACL_DENIED', 403);
+          }
         }
-        total = rows.length;
-        rows = rows.slice(0, pageSize);
-      }
-      ctx.body = {
-        items: (Array.isArray(rows) ? rows : []).map((row) => ({
-          id: val(row, 'id'),
-          targetCollection: val(row, 'targetCollection'),
-          targetRecordId: val(row, 'targetRecordId'),
-          organizationId: val(row, 'organizationId'),
-          state: val(row, 'state'),
-          recommendation: val(row, 'recommendation'),
-          evidence: Array.isArray(val(row, 'evidence')) ? val(row, 'evidence') : [],
-          createdAt: val(row, 'createdAt'),
-        })),
-        total,
-        collection: targetCollection,
-        preview: isRoot,
-      };
+
+        const repo = db.getRepository('latticeAgentProposals');
+        if (!repo) {
+          return { items: [], total: 0, collection: targetCollection, preview: isRoot };
+        }
+
+        const filter = {
+          targetCollection,
+          ...(organizationId ? { organizationId } : {}),
+          ...(targetRecordId !== undefined ? { targetRecordId } : {}),
+          ...(state !== 'all' ? { state } : {}),
+        };
+        let rows = await repo.find({ filter, limit: enforceOwnScope ? 100 : pageSize, sort: ['-id'] });
+        rows = Array.isArray(rows) ? rows : [];
+        let total = typeof repo.count === 'function' && !enforceOwnScope ? await repo.count({ filter }) : rows.length;
+        if (enforceOwnScope && rows.length) {
+          const recordIds = [...new Set(rows.map((r) => val(r, 'targetRecordId')).filter((id) => id != null))];
+          const targetRepo = db.getRepository(targetCollection);
+          if (!targetRepo || !recordIds.length) {
+            rows = [];
+          } else {
+            const ownedRows = (await targetRepo.find({
+              filter: { id: { $in: recordIds }, organizationId: actor.organizationId },
+              limit: recordIds.length,
+            })) || [];
+            const ownedIds = new Set(ownedRows.filter((r) => isRecordOwnedByActor(r, actor)).map((r) => String(val(r, 'id'))));
+            rows = rows.filter((r) => ownedIds.has(String(val(r, 'targetRecordId'))));
+          }
+          total = rows.length;
+          rows = rows.slice(0, pageSize);
+        }
+        return {
+          items: (Array.isArray(rows) ? rows : []).map((row) => ({
+            id: val(row, 'id'),
+            targetCollection: val(row, 'targetCollection'),
+            targetRecordId: val(row, 'targetRecordId'),
+            organizationId: val(row, 'organizationId'),
+            state: val(row, 'state'),
+            recommendation: val(row, 'recommendation'),
+            evidence: Array.isArray(val(row, 'evidence')) ? val(row, 'evidence') : [],
+            createdAt: val(row, 'createdAt'),
+          })),
+          total,
+          collection: targetCollection,
+          preview: isRoot,
+        };
+      });
       return next();
     },
 
@@ -463,53 +468,57 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         requestedOrg = input.organizationId.trim();
       }
 
-      const assetRepo = db.getRepository('latticeAssets');
-      let assetRow = null;
-      if (assetRepo) {
-        if (lookupId !== undefined) {
-          assetRow = await assetRepo.findOne({ filter: { id: lookupId, ...(requestedOrg ? { organizationId: requestedOrg } : {}) } });
-          if (!assetRow) throw fail('DXOS_ASSET_NOT_FOUND', 404);
-        } else if (lookupCode) {
-          assetRow = await assetRepo.findOne({ filter: { code: lookupCode, ...(requestedOrg ? { organizationId: requestedOrg } : {}) } });
-          if (!assetRow) throw fail('DXOS_ASSET_NOT_FOUND', 404);
-        } else {
-          const list = await assetRepo.find({ filter: requestedOrg ? { organizationId: requestedOrg } : {}, limit: 1, sort: ['-id'] });
-          assetRow = Array.isArray(list) ? list[0] || null : null;
-        }
-      }
-
-      const asset = assetRow
-        ? {
-            id: val(assetRow, 'id'),
-            code: val(assetRow, 'code'),
-            name: val(assetRow, 'name'),
-            status: val(assetRow, 'status'),
-            organizationId: val(assetRow, 'organizationId'),
-            entityId: `urn:ngsi-ld:Asset:${val(assetRow, 'organizationId')}:native:${val(assetRow, 'id')}`,
-          }
-        : null;
-
-      const outboxRepo = db.getRepository('latticeContextOutbox');
-      const syncSummary = { pending: 0, retry: 0, delivered: 0, failed: 0, lastDeliveredAt: null };
-      let lastDeliveredTs = -Infinity;
-      const targetOrg = asset?.organizationId || requestedOrg;
-      if (outboxRepo && (targetOrg || isRoot)) {
-        const outboxFilter = {
-          ...(targetOrg ? { organizationId: targetOrg } : {}),
-          ...(asset ? { collectionName: 'latticeAssets', recordId: asset.id } : {}),
-        };
-        const outboxRows = await outboxRepo.find({ filter: outboxFilter, limit: 100 });
-        for (const row of Array.isArray(outboxRows) ? outboxRows : []) {
-          const st = val(row, 'state');
-          if (Object.hasOwn(syncSummary, st)) syncSummary[st] += 1;
-          const del = val(row, 'deliveredAt');
-          const ts = del ? Date.parse(String(del)) : NaN;
-          if (del && ((Number.isFinite(ts) && ts > lastDeliveredTs) || (!Number.isFinite(lastDeliveredTs) && !syncSummary.lastDeliveredAt))) {
-            if (Number.isFinite(ts)) lastDeliveredTs = ts;
-            syncSummary.lastDeliveredAt = del;
+      const { asset, syncSummary } = await runWithOptionalRls(db, requestedOrg || null, async () => {
+        const assetRepo = db.getRepository('latticeAssets');
+        let assetRow = null;
+        if (assetRepo) {
+          if (lookupId !== undefined) {
+            assetRow = await assetRepo.findOne({ filter: { id: lookupId, ...(requestedOrg ? { organizationId: requestedOrg } : {}) } });
+            if (!assetRow) throw fail('DXOS_ASSET_NOT_FOUND', 404);
+          } else if (lookupCode) {
+            assetRow = await assetRepo.findOne({ filter: { code: lookupCode, ...(requestedOrg ? { organizationId: requestedOrg } : {}) } });
+            if (!assetRow) throw fail('DXOS_ASSET_NOT_FOUND', 404);
+          } else {
+            const list = await assetRepo.find({ filter: requestedOrg ? { organizationId: requestedOrg } : {}, limit: 1, sort: ['-id'] });
+            assetRow = Array.isArray(list) ? list[0] || null : null;
           }
         }
-      }
+
+        const resolvedAsset = assetRow
+          ? {
+              id: val(assetRow, 'id'),
+              code: val(assetRow, 'code'),
+              name: val(assetRow, 'name'),
+              status: val(assetRow, 'status'),
+              organizationId: val(assetRow, 'organizationId'),
+              entityId: `urn:ngsi-ld:Asset:${val(assetRow, 'organizationId')}:native:${val(assetRow, 'id')}`,
+            }
+          : null;
+
+        const outboxRepo = db.getRepository('latticeContextOutbox');
+        const summary = { pending: 0, retry: 0, delivered: 0, failed: 0, lastDeliveredAt: null };
+        let lastDeliveredTs = -Infinity;
+        const targetOrg = resolvedAsset?.organizationId || requestedOrg;
+        if (outboxRepo && (targetOrg || isRoot)) {
+          const outboxFilter = {
+            ...(targetOrg ? { organizationId: targetOrg } : {}),
+            ...(resolvedAsset ? { collectionName: 'latticeAssets', recordId: resolvedAsset.id } : {}),
+          };
+          const outboxRows = await outboxRepo.find({ filter: outboxFilter, limit: 100 });
+          for (const row of Array.isArray(outboxRows) ? outboxRows : []) {
+            const st = val(row, 'state');
+            if (Object.hasOwn(summary, st)) summary[st] += 1;
+            const del = val(row, 'deliveredAt');
+            const ts = del ? Date.parse(String(del)) : NaN;
+            if (del && ((Number.isFinite(ts) && ts > lastDeliveredTs) || (!Number.isFinite(lastDeliveredTs) && !summary.lastDeliveredAt))) {
+              if (Number.isFinite(ts)) lastDeliveredTs = ts;
+              summary.lastDeliveredAt = del;
+            }
+          }
+        }
+
+        return { asset: resolvedAsset, syncSummary: summary };
+      });
 
       let brokerStatus = brokerOrigin ? 'unconfigured' : 'unconfigured';
       let telemetry = null;
@@ -563,14 +572,6 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         lookupId = Number(input.assetId);
       }
 
-      if (!assetEntityId && lookupId != null) {
-        const asset = await db.getRepository('latticeAssets')?.findOne({
-          filter: { id: lookupId, ...(requestedOrg ? { organizationId: requestedOrg } : {}) },
-        });
-        if (!asset) throw fail('DXOS_ASSET_NOT_FOUND', 404);
-        requestedOrg = val(asset, 'organizationId');
-        assetEntityId = `urn:ngsi-ld:Asset:${requestedOrg}:native:${val(asset, 'id')}`;
-      }
       if (isRoot && !requestedOrg && typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim())) {
         requestedOrg = input.organizationId.trim();
       }
@@ -579,13 +580,25 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const bucketMinutes = parseOptionalNumber(input.bucketMinutes, 'DXOS_INVALID_BUCKET_MINUTES', { min: 0 });
       const limit = parseOptionalNumber(input.limit, 'DXOS_INVALID_LIMIT', { min: 1 });
 
-      const series = await queryTelemetryTimeSeries(db, {
-        organizationId: requestedOrg,
-        assetEntityId,
-        attribute: typeof input.attribute === 'string' ? input.attribute.trim() : '',
-        ...(windowHours !== undefined ? { windowHours } : {}),
-        ...(bucketMinutes !== undefined ? { bucketMinutes } : {}),
-        limit: limit ?? 100,
+      const series = await runWithOptionalRls(db, requestedOrg || null, async () => {
+        let resolvedOrg = requestedOrg;
+        let resolvedEntityId = assetEntityId;
+        if (!resolvedEntityId && lookupId != null) {
+          const asset = await db.getRepository('latticeAssets')?.findOne({
+            filter: { id: lookupId, ...(resolvedOrg ? { organizationId: resolvedOrg } : {}) },
+          });
+          if (!asset) throw fail('DXOS_ASSET_NOT_FOUND', 404);
+          resolvedOrg = val(asset, 'organizationId');
+          resolvedEntityId = `urn:ngsi-ld:Asset:${resolvedOrg}:native:${val(asset, 'id')}`;
+        }
+        return queryTelemetryTimeSeries(db, {
+          organizationId: resolvedOrg,
+          assetEntityId: resolvedEntityId,
+          attribute: typeof input.attribute === 'string' ? input.attribute.trim() : '',
+          ...(windowHours !== undefined ? { windowHours } : {}),
+          ...(bucketMinutes !== undefined ? { bucketMinutes } : {}),
+          limit: limit ?? 100,
+        });
       });
       ctx.body = { ...series, preview: isRoot };
       return next();
@@ -606,18 +619,20 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         assetEntityId = `urn:ngsi-ld:Asset:${auth.organizationId}:native:${assetId}`;
       }
 
-      ctx.body = await ingestTelemetryPoint(db, {
-        organizationId: auth.organizationId,
-        assetId,
-        assetEntityId,
-        metricName: input.metricName !== undefined ? input.metricName : input.attribute,
-        numericValue: input.numericValue !== undefined ? input.numericValue : input.value,
-        unit: input.unit,
-        quality: input.quality,
-        sourceProtocol: input.sourceProtocol,
-        observedAt: input.observedAt,
-        app: ctx?.app,
-      });
+      ctx.body = await runWithOptionalRls(db, auth.organizationId, () =>
+        ingestTelemetryPoint(db, {
+          organizationId: auth.organizationId,
+          assetId,
+          assetEntityId,
+          metricName: input.metricName !== undefined ? input.metricName : input.attribute,
+          numericValue: input.numericValue !== undefined ? input.numericValue : input.value,
+          unit: input.unit,
+          quality: input.quality,
+          sourceProtocol: input.sourceProtocol,
+          observedAt: input.observedAt,
+          app: ctx?.app,
+        }),
+      );
       return next();
     },
 
@@ -636,12 +651,15 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
           const urnMatch = URN_RE.exec(assetEntityId);
           if (urnMatch) orgId = urnMatch[1];
         }
-        if (!orgId && assetId != null) {
+      }
+
+      ctx.body = await runWithOptionalRls(db, orgId || null, async () => {
+        if (isRoot && !orgId && assetId != null) {
           const assetRow = await db.getRepository?.('latticeAssets')?.findOne?.({ filter: { id: assetId } });
           const assetOrg = String(val(assetRow, 'organizationId') || '').trim();
           if (ORG_ID_RE.test(assetOrg)) orgId = assetOrg;
         }
-        if (!orgId) {
+        if (isRoot && !orgId) {
           const orgRepo = db.getRepository?.('latticeOrganizations');
           if (orgRepo) {
             let orgRow = null;
@@ -658,21 +676,21 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         if (!orgId) {
           throw fail('ORG_REQUIRED', 400, 'Cần organizationId hợp lệ để ghi nhận cảnh báo.');
         }
-      }
 
-      if (!assetEntityId && assetId != null) {
-        assetEntityId = `urn:ngsi-ld:Asset:${orgId}:native:${assetId}`;
-      }
-      ctx.body = await ingestOrDeduplicateAlarm(db, {
-        organizationId: orgId,
-        assetId,
-        assetEntityId,
-        ruleCode: String(input.ruleCode || 'IOT-RULE').trim(),
-        attribute: String(input.attribute || 'temperature').trim(),
-        severity: String(input.severity || 'medium').trim(),
-        summary: String(input.summary || '').trim(),
-        handlerId: actor?.employeeId ? String(actor.employeeId) : String(input.handlerId || 'root'),
-        app: ctx?.app,
+        if (!assetEntityId && assetId != null) {
+          assetEntityId = `urn:ngsi-ld:Asset:${orgId}:native:${assetId}`;
+        }
+        return ingestOrDeduplicateAlarm(db, {
+          organizationId: orgId,
+          assetId,
+          assetEntityId,
+          ruleCode: String(input.ruleCode || 'IOT-RULE').trim(),
+          attribute: String(input.attribute || 'temperature').trim(),
+          severity: String(input.severity || 'medium').trim(),
+          summary: String(input.summary || '').trim(),
+          handlerId: actor?.employeeId ? String(actor.employeeId) : String(input.handlerId || 'root'),
+          app: ctx?.app,
+        });
       });
       return next();
     },
@@ -684,12 +702,15 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const id = Number(input.id);
       if (!Number.isInteger(id) || id <= 0) throw fail('ALARM_ID_REQUIRED', 400, 'Cần mã id cảnh báo hợp lệ.');
       const actorName = val(ctx.state?.currentUser, 'username') || (actor ? `user-${actor.userId}` : 'root');
-      ctx.body = await acknowledgeAlarm(db, {
-        id,
-        organizationId: isRoot ? null : actor.organizationId,
-        actorName,
-        note: String(input.note || '').trim(),
-      });
+      const orgScope = isRoot ? null : actor.organizationId;
+      ctx.body = await runWithOptionalRls(db, orgScope, () =>
+        acknowledgeAlarm(db, {
+          id,
+          organizationId: orgScope,
+          actorName,
+          note: String(input.note || '').trim(),
+        }),
+      );
       return next();
     },
 
@@ -700,12 +721,15 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const id = Number(input.id);
       if (!Number.isInteger(id) || id <= 0) throw fail('ALARM_ID_REQUIRED', 400, 'Cần mã id cảnh báo hợp lệ.');
       const actorName = val(ctx.state?.currentUser, 'username') || (actor ? `user-${actor.userId}` : 'root');
-      ctx.body = await clearAlarm(db, {
-        id,
-        organizationId: isRoot ? null : actor.organizationId,
-        actorName,
-        closeNote: String(input.closeNote || input.note || '').trim(),
-      });
+      const orgScope = isRoot ? null : actor.organizationId;
+      ctx.body = await runWithOptionalRls(db, orgScope, () =>
+        clearAlarm(db, {
+          id,
+          organizationId: orgScope,
+          actorName,
+          closeNote: String(input.closeNote || input.note || '').trim(),
+        }),
+      );
       return next();
     },
 
@@ -714,7 +738,12 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const input = readParams(ctx);
       const collection = String(input.collection || '').trim();
       const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'view' });
-      const result = await executeGovernedExport(db, ctx, input, { isRoot, actor, fetchImpl });
+      const orgScope = isRoot
+        ? (typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim()) ? input.organizationId.trim() : null)
+        : actor.organizationId;
+      const result = await runWithOptionalRls(db, orgScope, () =>
+        executeGovernedExport(db, ctx, input, { isRoot, actor, fetchImpl }),
+      );
       const isDownload = input.download === true || input.download === '1' || input.download === 'true';
       if (typeof ctx.set === 'function') {
         ctx.set('X-Lattice-Export-Columns', result.columns.join(','));
@@ -763,65 +792,68 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
       const BATCH_SIZE = 200;
       const MAX_SCAN = 2000;
-      const buckets = [];
-      for (const spec of GLOBAL_SEARCH_SPECS) {
-        if (!isRoot && !(await hasViewPermission(db, ctx, spec.collection, 'view'))) continue;
-        const repo = db?.getRepository?.(spec.collection);
-        if (!repo) continue;
-        const enforceOwnScope = !isRoot && OWN_SCOPED_COLLECTIONS.has(spec.collection) && !ORG_WIDE_PROPOSAL_ROLES.has(activeRole);
-        const ownerClauses = enforceOwnScope ? buildOwnerFilterClauses(db, spec.collection, actor) : [];
-        let filter = organizationId ? { organizationId } : {};
-        if (ownerClauses.length) {
-          filter = organizationId
-            ? { $and: [{ organizationId }, { $or: ownerClauses }] }
-            : { $or: ownerClauses };
-        }
-
-        const matched = [];
-        const seenIds = new Set();
-        for (let offset = 0; offset < MAX_SCAN && matched.length < limit; offset += BATCH_SIZE) {
-          const rows = (await repo.find({
-            filter,
-            limit: BATCH_SIZE,
-            offset,
-            sort: ['-id'],
-          })) || [];
-          if (!Array.isArray(rows) || !rows.length) break;
-
-          let unseenCount = 0;
-          for (const row of rows) {
-            const id = val(row, 'id');
-            const idKey = id != null ? String(id) : null;
-            if (idKey !== null) {
-              if (seenIds.has(idKey)) continue;
-              seenIds.add(idKey);
-            }
-            unseenCount += 1;
-
-            if (organizationId && val(row, 'organizationId') !== organizationId) continue;
-            if (enforceOwnScope && !isRecordOwnedByActor(row, actor)) continue;
-            const code = String(val(row, 'code') || '').trim();
-            const title = String(val(row, 'title') || val(row, 'name') || code || '').trim();
-            const desc = String(val(row, 'description') || val(row, 'summary') || '').trim();
-            const hay = foldSearchVi(`${code} ${title} ${desc}`);
-            if (!tokens.every((t) => hay.includes(t))) continue;
-            matched.push({
-              collection: spec.collection,
-              id,
-              code,
-              title: title || `#${id}`,
-              status: String(val(row, 'status') || ''),
-              category: spec.category,
-              path: spec.collection === 'latticeParaDocuments' && id != null
-                ? `/p/services?paraDocId=${encodeURIComponent(String(id))}`
-                : spec.path,
-            });
-            if (matched.length >= limit) break;
+      const buckets = await runWithOptionalRls(db, organizationId || null, async () => {
+        const out = [];
+        for (const spec of GLOBAL_SEARCH_SPECS) {
+          if (!isRoot && !(await hasViewPermission(db, ctx, spec.collection, 'view'))) continue;
+          const repo = db?.getRepository?.(spec.collection);
+          if (!repo) continue;
+          const enforceOwnScope = !isRoot && OWN_SCOPED_COLLECTIONS.has(spec.collection) && !ORG_WIDE_PROPOSAL_ROLES.has(activeRole);
+          const ownerClauses = enforceOwnScope ? buildOwnerFilterClauses(db, spec.collection, actor) : [];
+          let filter = organizationId ? { organizationId } : {};
+          if (ownerClauses.length) {
+            filter = organizationId
+              ? { $and: [{ organizationId }, { $or: ownerClauses }] }
+              : { $or: ownerClauses };
           }
-          if (rows.length < BATCH_SIZE || unseenCount === 0) break;
+
+          const matched = [];
+          const seenIds = new Set();
+          for (let offset = 0; offset < MAX_SCAN && matched.length < limit; offset += BATCH_SIZE) {
+            const rows = (await repo.find({
+              filter,
+              limit: BATCH_SIZE,
+              offset,
+              sort: ['-id'],
+            })) || [];
+            if (!Array.isArray(rows) || !rows.length) break;
+
+            let unseenCount = 0;
+            for (const row of rows) {
+              const id = val(row, 'id');
+              const idKey = id != null ? String(id) : null;
+              if (idKey !== null) {
+                if (seenIds.has(idKey)) continue;
+                seenIds.add(idKey);
+              }
+              unseenCount += 1;
+
+              if (organizationId && val(row, 'organizationId') !== organizationId) continue;
+              if (enforceOwnScope && !isRecordOwnedByActor(row, actor)) continue;
+              const code = String(val(row, 'code') || '').trim();
+              const title = String(val(row, 'title') || val(row, 'name') || code || '').trim();
+              const desc = String(val(row, 'description') || val(row, 'summary') || '').trim();
+              const hay = foldSearchVi(`${code} ${title} ${desc}`);
+              if (!tokens.every((t) => hay.includes(t))) continue;
+              matched.push({
+                collection: spec.collection,
+                id,
+                code,
+                title: title || `#${id}`,
+                status: String(val(row, 'status') || ''),
+                category: spec.category,
+                path: spec.collection === 'latticeParaDocuments' && id != null
+                  ? `/p/services?paraDocId=${encodeURIComponent(String(id))}`
+                  : spec.path,
+              });
+              if (matched.length >= limit) break;
+            }
+            if (rows.length < BATCH_SIZE || unseenCount === 0) break;
+          }
+          if (matched.length) out.push(matched);
         }
-        if (matched.length) buckets.push(matched);
-      }
+        return out;
+      });
 
       const items = [];
       let round = 0;
@@ -914,13 +946,15 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       }
       const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'create' });
       const organizationId = resolveScopedOrganizationId(isRoot, actor, input);
-      ctx.body = await runBulkImportDryRun(db, {
-        organizationId,
-        collection,
-        format: input.format,
-        content: input.content,
-        rows: input.rows,
-      });
+      ctx.body = await runWithOptionalRls(db, organizationId, () =>
+        runBulkImportDryRun(db, {
+          organizationId,
+          collection,
+          format: input.format,
+          content: input.content,
+          rows: input.rows,
+        }),
+      );
       return next();
     },
 
@@ -937,18 +971,20 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'create' });
       const organizationId = resolveScopedOrganizationId(isRoot, actor, input);
       const actorName = val(ctx.state?.currentUser, 'username') || (actor ? `user-${actor.userId}` : 'root');
-      ctx.body = await commitBulkImport(db, {
-        organizationId,
-        collection,
-        format: input.format,
-        content: input.content,
-        rows: input.rows,
-        previewToken: input.previewToken,
-        actor: {
-          userId: actor?.userId || val(ctx.state?.currentUser, 'id'),
-          username: actorName,
-        },
-      });
+      ctx.body = await runWithOptionalRls(db, organizationId, () =>
+        commitBulkImport(db, {
+          organizationId,
+          collection,
+          format: input.format,
+          content: input.content,
+          rows: input.rows,
+          previewToken: input.previewToken,
+          actor: {
+            userId: actor?.userId || val(ctx.state?.currentUser, 'id'),
+            username: actorName,
+          },
+        }),
+      );
       return next();
     },
   };

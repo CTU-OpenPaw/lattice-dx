@@ -9,6 +9,7 @@
 'use strict';
 
 const { redactPiiText, redactPiiDeep, replaceSecretKvPairs, normalizeTokenUsage } = require('./ai-governance');
+const { runWithTenantRls, runWithSystemRlsBypass, runInRlsSavepoint } = require('./ai-rls');
 
 const LEGACY_WORKFLOW_TASKS_TOOL = ['dxos_my_tasks_co', 'pilot'].join('');
 const CANONICAL_WORKFLOW_TASKS_TOOL = 'dxos_my_workflow_tasks';
@@ -597,16 +598,25 @@ async function recordAiAuditLog(db, entry = {}) {
     resultSummary: redactedResult.text ? redactedResult.text.slice(0, 1000) : null,
   };
   const txOpt = entry.transaction ? { transaction: entry.transaction } : {};
-  try {
-    return await repo.create({ values: baseValues, ...txOpt });
-  } catch {
+  const runWrite = () => runInRlsSavepoint(db, async () => {
     try {
-      const { totalTokens: _tt, tokenSource: _ts, ...legacyValues } = baseValues;
-      return await repo.create({ values: legacyValues, ...txOpt });
+      return await repo.create({ values: baseValues, ...txOpt });
     } catch {
-      return null;
+      return runInRlsSavepoint(db, async () => {
+        try {
+          const { totalTokens: _tt, tokenSource: _ts, ...legacyValues } = baseValues;
+          return await repo.create({ values: legacyValues, ...txOpt });
+        } catch {
+          return null;
+        }
+      });
     }
+  });
+  if (entry.transaction) {
+    return runWrite();
   }
+  const org = baseValues.organizationId;
+  return org ? runWithTenantRls(db, org, runWrite) : runWithSystemRlsBypass(db, runWrite);
 }
 
 module.exports = {

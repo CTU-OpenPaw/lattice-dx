@@ -21,6 +21,7 @@ const { buildEnterpriseTopology } = require('./mcp-itot-tools');
 const { recordAiAuditLog } = require('./ai-schemas');
 const { redactPiiText, redactPiiDeep } = require('./ai-governance');
 const { analyzeGraphImpact } = require('./ai-operational-tools');
+const { runWithTenantRls, runWithSystemRlsBypass } = require('./ai-rls');
 
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-03-26', '2024-11-05'];
 const ORG_ALARMS_URI_RE = /^dxos:\/\/org\/([a-zA-Z0-9_-]{1,80})\/alarms\/active$/;
@@ -197,7 +198,7 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
       ...(ctx.state || {}),
       currentUser: authState.currentUser,
       currentRoles: authState.currentRoles || [],
-      currentRole: authState.currentRoles?.[0] || null,
+      currentRole: authState.currentRoles?.includes('root') ? 'root' : (authState.currentRoles?.[0] || null),
       dxosAuditChannel: channel,
     };
 
@@ -417,7 +418,11 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
 
         if (alarmsMatch) {
           const effectiveActor = actor.isRoot ? { ...actor, organizationId: uriOrgId } : actor;
-          const { allowedCollections, ownOnlySet } = await resolveReadablePolicies(activeDb, effectiveActor, ['latticeIncidentCases']);
+          const { allowedCollections, ownOnlySet } = await runWithTenantRls(
+            activeDb,
+            uriOrgId,
+            () => resolveReadablePolicies(activeDb, effectiveActor, ['latticeIncidentCases']),
+          );
           if (!allowedCollections.includes('latticeIncidentCases')) {
             await recordAiAuditLog(activeDb, {
               actorUserId: authState.currentUser.id,
@@ -435,7 +440,9 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
             return;
           }
           const repo = activeDb?.getRepository?.('latticeIncidentCases');
-          const rows = repo ? ((await repo.find({ filter: { organizationId: uriOrgId }, sort: ['-id'], limit: 50 })) || []) : [];
+          const rows = repo
+            ? ((await runWithTenantRls(activeDb, uriOrgId, () => repo.find({ filter: { organizationId: uriOrgId }, sort: ['-id'], limit: 50 }))) || [])
+            : [];
           const isOwn = ownOnlySet.has('latticeIncidentCases');
           const alarms = rows
             .filter((r) => (
@@ -485,11 +492,15 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
           ? { recordId: decodedRecordId }
           : { recordCode: decodedRecordId };
         try {
-          const graphResult = await analyzeGraphImpact(
+          const graphResult = await runWithTenantRls(
             activeDb,
-            effectiveActor,
-            { collection, ...targetArg, maxDepth: 2 },
-            { val, failTool, resolveReadablePolicies, isRowVisibleToActor, SYSTEM_PROTECTED_COLLECTIONS, redactPiiText },
+            uriOrgId,
+            () => analyzeGraphImpact(
+              activeDb,
+              effectiveActor,
+              { collection, ...targetArg, maxDepth: 2 },
+              { val, failTool, resolveReadablePolicies, isRowVisibleToActor, SYSTEM_PROTECTED_COLLECTIONS, redactPiiText },
+            ),
           );
           ctx.status = 200;
           ctx.body = {
@@ -530,7 +541,10 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
           ctx.body = { jsonrpc: '2.0', id: reqId, error: { code: -32003, message: 'Administrator access required for infrastructure resources.' } };
           return;
         }
-        const topology = await buildEnterpriseTopology(activeDb, env, fetchImpl, app || ctx?.app);
+        const topology = await runWithSystemRlsBypass(
+          activeDb,
+          () => buildEnterpriseTopology(activeDb, env, fetchImpl, app || ctx?.app),
+        );
         const data = uri === 'dxos://itot/health' ? topology.planes.filter((p) => ['itOtDigitalTwin', 'integrationEventBus'].includes(p.key)) : topology;
         ctx.status = 200;
         ctx.body = { jsonrpc: '2.0', id: reqId, result: { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(data) }] } };

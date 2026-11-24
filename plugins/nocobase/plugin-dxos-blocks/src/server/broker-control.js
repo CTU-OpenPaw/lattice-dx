@@ -14,6 +14,7 @@ const dns = require('node:dns');
 const { randomBytes, timingSafeEqual } = require('node:crypto');
 const { ingestTelemetryPoint, ingestOrDeduplicateAlarm } = require('./alarm-engine');
 const { emitDomainEventSafely, resolvePublishDomainEvent } = require('./domain-events');
+const { runWithOptionalRls } = require('./blocks-rls');
 
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const DEVICE_KEY_RE = /^[a-zA-Z0-9_.-]{1,64}$/;
@@ -708,7 +709,9 @@ async function resolveNativeEmployee(db, user) {
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw failBroker('NATIVE_LOGIN_REQUIRED', 401);
   const repo = db?.getRepository?.('latticeEmployees');
   if (!repo) throw failBroker('NATIVE_MEMBERSHIP_REQUIRED', 403);
-  const rows = await repo.find({ filter: { userId: id }, limit: 2 });
+  const rows = await runWithOptionalRls(db, null, (transaction) =>
+    repo.find({ filter: { userId: id }, limit: 2, ...(transaction ? { transaction } : {}) }),
+  );
   if (rows.length > 1) throw failBroker('NATIVE_MEMBERSHIP_AMBIGUOUS', 403);
   const emp = rows[0];
   if (!emp || val(emp, 'active') !== true) throw failBroker('NATIVE_MEMBERSHIP_REQUIRED', 403);
@@ -1208,9 +1211,12 @@ function createDxosBrokerActions(db, {
         ...(organizationId ? { organizationId } : {}),
         ...(statusFilter ? { status: statusFilter } : {}),
       };
-      const rows = (await repo.find({ filter, limit, sort: ['-id'] })) || [];
-      const filtered = rows.filter((r) => (!organizationId || val(r, 'organizationId') === organizationId) && (!statusFilter || val(r, 'status') === statusFilter));
-      const total = typeof repo.count === 'function' ? await repo.count({ filter }) : filtered.length;
+      const { filtered, total } = await runWithOptionalRls(db, organizationId || null, async () => {
+        const rows = (await repo.find({ filter, limit, sort: ['-id'] })) || [];
+        const matched = rows.filter((r) => (!organizationId || val(r, 'organizationId') === organizationId) && (!statusFilter || val(r, 'status') === statusFilter));
+        const count = typeof repo.count === 'function' ? await repo.count({ filter }) : matched.length;
+        return { filtered: matched, total: count };
+      });
       ctx.body = {
         items: filtered.map(serializeDevice),
         total,
@@ -1261,26 +1267,29 @@ function createDxosBrokerActions(db, {
         assetEntityId = `urn:ngsi-ld:Asset:${organizationId}:native:${assetId}`;
       }
 
-      if (assetId != null) {
-        const assetRepo = db?.getRepository?.('latticeAssets');
-        if (assetRepo && typeof assetRepo.findOne === 'function') {
-          const assetRow = await assetRepo.findOne({ filter: { id: assetId, organizationId } });
-          if (!assetRow || (val(assetRow, 'organizationId') && val(assetRow, 'organizationId') !== organizationId)) {
-            throw failBroker('DXOS_ASSET_NOT_FOUND', 404, 'Không tìm thấy tài sản gắn với thiết bị trong tổ chức.');
-          }
-        }
-      }
-
       const deviceRepo = db?.getRepository?.('latticeIotDevices');
       if (!deviceRepo || typeof deviceRepo.create !== 'function') {
         throw failBroker('BROKER_REPO_UNAVAILABLE', 503, 'Kho thiết bị IoT chưa sẵn sàng.');
       }
-      const existing = typeof deviceRepo.findOne === 'function'
-        ? await deviceRepo.findOne({ filter: { organizationId, deviceKey } })
-        : ((await deviceRepo.find({ filter: { organizationId, deviceKey }, limit: 1 })) || [])[0] || null;
-      if (existing) {
-        throw failBroker('BROKER_DEVICE_EXISTS', 409, `Thiết bị "${deviceKey}" đã tồn tại trong tổ chức.`);
-      }
+
+      await runWithOptionalRls(db, organizationId, async () => {
+        if (assetId != null) {
+          const assetRepo = db?.getRepository?.('latticeAssets');
+          if (assetRepo && typeof assetRepo.findOne === 'function') {
+            const assetRow = await assetRepo.findOne({ filter: { id: assetId, organizationId } });
+            if (!assetRow || (val(assetRow, 'organizationId') && val(assetRow, 'organizationId') !== organizationId)) {
+              throw failBroker('DXOS_ASSET_NOT_FOUND', 404, 'Không tìm thấy tài sản gắn với thiết bị trong tổ chức.');
+            }
+          }
+        }
+
+        const existing = typeof deviceRepo.findOne === 'function'
+          ? await deviceRepo.findOne({ filter: { organizationId, deviceKey } })
+          : ((await deviceRepo.find({ filter: { organizationId, deviceKey }, limit: 1 })) || [])[0] || null;
+        if (existing) {
+          throw failBroker('BROKER_DEVICE_EXISTS', 409, `Thiết bị "${deviceKey}" đã tồn tại trong tổ chức.`);
+        }
+      });
 
       const topicPrefix = `latticedx/${organizationId}/${deviceKey}`;
       const mqttUsername = `ldx_${organizationId}_${deviceKey}`.slice(0, 160);
@@ -1331,28 +1340,30 @@ function createDxosBrokerActions(db, {
       delete userMeta.mqttPassword;
       delete userMeta.password;
 
-      const created = await deviceRepo.create({
-        values: {
-          organizationId,
-          deviceKey,
-          name,
-          mqttUsername,
-          mqttClientId: rawClientId,
-          ...(assetId != null ? { assetId } : {}),
-          ...(assetEntityId ? { assetEntityId } : {}),
-          topicPrefix,
-          status: 'provisioned',
-          lastSeenAt: null,
-          lastReason: null,
-          metadataJson: {
-            ...userMeta,
-            roleName,
-            brokerSynced,
-            provisionedBy: actorName,
-            provisionedAt: new Date().toISOString(),
+      const created = await runWithOptionalRls(db, organizationId, () =>
+        deviceRepo.create({
+          values: {
+            organizationId,
+            deviceKey,
+            name,
+            mqttUsername,
+            mqttClientId: rawClientId,
+            ...(assetId != null ? { assetId } : {}),
+            ...(assetEntityId ? { assetEntityId } : {}),
+            topicPrefix,
+            status: 'provisioned',
+            lastSeenAt: null,
+            lastReason: null,
+            metadataJson: {
+              ...userMeta,
+              roleName,
+              brokerSynced,
+              provisionedBy: actorName,
+              provisionedAt: new Date().toISOString(),
+            },
           },
-        },
-      });
+        }),
+      );
 
       const device = serializeDevice(created);
       await emitDomainEventSafely(
@@ -1397,7 +1408,7 @@ function createDxosBrokerActions(db, {
       });
 
       const deviceRepo = db?.getRepository?.('latticeIotDevices');
-      const row = await findDeviceRow(deviceRepo, scopedOrg, input);
+      const row = await runWithOptionalRls(db, scopedOrg || null, () => findDeviceRow(deviceRepo, scopedOrg, input));
       const organizationId = scopedOrg || val(row, 'organizationId');
       const deviceKey = val(row, 'deviceKey');
       const mqttUsername = val(row, 'mqttUsername');
@@ -1442,15 +1453,17 @@ function createDxosBrokerActions(db, {
       delete nextMeta.mqttPassword;
       delete nextMeta.password;
 
-      const updated = await saveRow(
-        deviceRepo,
-        row,
-        {
-          status: 'revoked',
-          lastReason: reason,
-          metadataJson: nextMeta,
-        },
-        organizationId,
+      const updated = await runWithOptionalRls(db, organizationId, () =>
+        saveRow(
+          deviceRepo,
+          row,
+          {
+            status: 'revoked',
+            lastReason: reason,
+            metadataJson: nextMeta,
+          },
+          organizationId,
+        ),
       );
 
       const device = serializeDevice(updated);
@@ -1505,86 +1518,99 @@ function createDxosBrokerActions(db, {
       }
 
       const deviceRepo = db?.getRepository?.('latticeIotDevices');
-      const row = await findDeviceRow(deviceRepo, auth.organizationId, { deviceKey });
-      const prevStatus = String(val(row, 'status') || 'provisioned').toLowerCase();
-      if (prevStatus === 'revoked') {
-        throw failBroker('BROKER_DEVICE_REVOKED', 403, 'Thiết bị đã bị thu hồi.');
-      }
-
-      const reason = typeof input.reason === 'string' && input.reason.trim()
-        ? input.reason.trim().slice(0, 200)
-        : (normalizedStatus === 'offline' ? 'mqtt_lwt_disconnect' : 'mqtt_birth_connected');
-      const transitionedToOffline = normalizedStatus === 'offline' && prevStatus !== 'offline';
-
-      const updated = await saveRow(
-        deviceRepo,
-        row,
-        {
-          status: normalizedStatus,
-          lastSeenAt: observedAt,
-          lastReason: reason,
-        },
-        auth.organizationId,
-      );
-
-      const device = serializeDevice(updated);
-      let incident = null;
-
-      if (transitionedToOffline) {
-        const matchedAssetId = device.assetId ?? null;
-        let matchedEntityId = String(device.assetEntityId || '').trim();
-        if (!matchedEntityId && matchedAssetId != null) {
-          matchedEntityId = `urn:ngsi-ld:Asset:${auth.organizationId}:native:${matchedAssetId}`;
+      const { device, previousStatus, transitionedToOffline, incident } = await runWithOptionalRls(db, auth.organizationId, async () => {
+        const row = await findDeviceRow(deviceRepo, auth.organizationId, { deviceKey });
+        const prevStatus = String(val(row, 'status') || 'provisioned').toLowerCase();
+        if (prevStatus === 'revoked') {
+          throw failBroker('BROKER_DEVICE_REVOKED', 403, 'Thiết bị đã bị thu hồi.');
         }
 
-        if (matchedEntityId) {
-          const incidentRepo = db?.getRepository?.('latticeIncidentCases');
-          if (incidentRepo) {
-            incident = await ingestOrDeduplicateAlarm(db, {
-              organizationId: auth.organizationId,
-              assetId: matchedAssetId,
-              assetEntityId: matchedEntityId,
-              ruleCode: 'MQTT-LWT-OFFLINE',
-              attribute: 'connectivity',
-              severity: 'high',
-              summary: `Thiết bị IoT ${device.name || deviceKey} mất kết nối MQTT (${reason})`.slice(0, 500),
-              handlerId: 'unassigned',
-              metricName: 'connectivity',
-              numericValue: 0,
-              app: ctx?.app,
-              publishDomainEvent: resolvePublishDomainEvent(db, ctx)?.fn,
-            });
+        const reason = typeof input.reason === 'string' && input.reason.trim()
+          ? input.reason.trim().slice(0, 200)
+          : (normalizedStatus === 'offline' ? 'mqtt_lwt_disconnect' : 'mqtt_birth_connected');
+        const toOffline = normalizedStatus === 'offline' && prevStatus !== 'offline';
+
+        const updated = await saveRow(
+          deviceRepo,
+          row,
+          {
+            status: normalizedStatus,
+            lastSeenAt: observedAt,
+            lastReason: reason,
+          },
+          auth.organizationId,
+        );
+
+        const dev = serializeDevice(updated);
+        let inc = null;
+
+        if (toOffline) {
+          const matchedAssetId = dev.assetId ?? null;
+          let matchedEntityId = String(dev.assetEntityId || '').trim();
+          if (!matchedEntityId && matchedAssetId != null) {
+            matchedEntityId = `urn:ngsi-ld:Asset:${auth.organizationId}:native:${matchedAssetId}`;
+          }
+
+          if (matchedEntityId) {
+            const incidentRepo = db?.getRepository?.('latticeIncidentCases');
+            if (incidentRepo) {
+              inc = await ingestOrDeduplicateAlarm(db, {
+                organizationId: auth.organizationId,
+                assetId: matchedAssetId,
+                assetEntityId: matchedEntityId,
+                ruleCode: 'MQTT-LWT-OFFLINE',
+                attribute: 'connectivity',
+                severity: 'high',
+                summary: `Thiết bị IoT ${dev.name || deviceKey} mất kết nối MQTT (${reason})`.slice(0, 500),
+                handlerId: 'unassigned',
+                metricName: 'connectivity',
+                numericValue: 0,
+                app: ctx?.app,
+                publishDomainEvent: resolvePublishDomainEvent(db, ctx)?.fn,
+              });
+            }
           }
         }
 
-        await emitDomainEventSafely(
-          db,
-          {
-            organizationId: auth.organizationId,
-            eventType: 'device.offline',
-            source: '/dxos/broker',
-            subject: deviceKey,
-            data: {
+        return {
+          device: dev,
+          previousStatus: prevStatus,
+          transitionedToOffline: toOffline,
+          incident: inc,
+          reason,
+        };
+      }).then(async (res) => {
+        if (res.transitionedToOffline) {
+          await emitDomainEventSafely(
+            db,
+            {
               organizationId: auth.organizationId,
-              deviceId: device.id,
-              deviceKey,
-              name: device.name,
-              assetId: matchedAssetId,
-              assetEntityId: matchedEntityId || null,
-              previousStatus: prevStatus,
-              reason,
-              observedAt: observedAt.toISOString(),
-              incidentId: incident?.id ?? null,
-              alarmCode: incident?.code ?? null,
+              eventType: 'device.offline',
+              source: '/dxos/broker',
+              subject: deviceKey,
+              data: {
+                organizationId: auth.organizationId,
+                deviceId: res.device.id,
+                deviceKey,
+                name: res.device.name,
+                assetId: res.device.assetId ?? null,
+                assetEntityId: res.device.assetEntityId || (res.device.assetId != null ? `urn:ngsi-ld:Asset:${auth.organizationId}:native:${res.device.assetId}` : null),
+                previousStatus: res.previousStatus,
+                reason: res.reason,
+                observedAt: observedAt.toISOString(),
+                incidentId: res.incident?.id ?? null,
+                alarmCode: res.incident?.code ?? null,
+              },
             },
-          },
-          { ctx },
-        );
-      }
+            { ctx },
+          );
+        }
+        return res;
+      });
 
       ctx.body = {
         device,
-        previousStatus: prevStatus,
+        previousStatus,
         transitionedToOffline,
         incident,
       };
@@ -1606,40 +1632,42 @@ function createDxosBrokerActions(db, {
 
       // Load local assets & locations for org diff
       const localByUrn = new Map();
-      const assetRows = (await db?.getRepository?.('latticeAssets')?.find?.({ filter: { organizationId }, limit: 200 })) || [];
-      for (const a of Array.isArray(assetRows) ? assetRows : []) {
-        if (val(a, 'organizationId') !== organizationId) continue;
-        const id = val(a, 'id');
-        if (id == null) continue;
-        const urn = `urn:ngsi-ld:Asset:${organizationId}:native:${id}`;
-        localByUrn.set(urn, {
-          entityId: urn,
-          type: 'Asset',
-          collection: 'latticeAssets',
-          recordId: id,
-          code: val(a, 'code') || null,
-          name: val(a, 'name') || null,
-          status: val(a, 'status') || null,
-          active: val(a, 'active') !== false,
-        });
-      }
-      const locationRows = (await db?.getRepository?.('latticeLocations')?.find?.({ filter: { organizationId }, limit: 200 })) || [];
-      for (const loc of Array.isArray(locationRows) ? locationRows : []) {
-        if (val(loc, 'organizationId') !== organizationId) continue;
-        const id = val(loc, 'id');
-        if (id == null) continue;
-        const urn = `urn:ngsi-ld:Location:${organizationId}:native:${id}`;
-        localByUrn.set(urn, {
-          entityId: urn,
-          type: 'Location',
-          collection: 'latticeLocations',
-          recordId: id,
-          code: val(loc, 'code') || null,
-          name: val(loc, 'name') || null,
-          status: null,
-          active: val(loc, 'active') !== false,
-        });
-      }
+      await runWithOptionalRls(db, organizationId, async () => {
+        const assetRows = (await db?.getRepository?.('latticeAssets')?.find?.({ filter: { organizationId }, limit: 200 })) || [];
+        for (const a of Array.isArray(assetRows) ? assetRows : []) {
+          if (val(a, 'organizationId') !== organizationId) continue;
+          const id = val(a, 'id');
+          if (id == null) continue;
+          const urn = `urn:ngsi-ld:Asset:${organizationId}:native:${id}`;
+          localByUrn.set(urn, {
+            entityId: urn,
+            type: 'Asset',
+            collection: 'latticeAssets',
+            recordId: id,
+            code: val(a, 'code') || null,
+            name: val(a, 'name') || null,
+            status: val(a, 'status') || null,
+            active: val(a, 'active') !== false,
+          });
+        }
+        const locationRows = (await db?.getRepository?.('latticeLocations')?.find?.({ filter: { organizationId }, limit: 200 })) || [];
+        for (const loc of Array.isArray(locationRows) ? locationRows : []) {
+          if (val(loc, 'organizationId') !== organizationId) continue;
+          const id = val(loc, 'id');
+          if (id == null) continue;
+          const urn = `urn:ngsi-ld:Location:${organizationId}:native:${id}`;
+          localByUrn.set(urn, {
+            entityId: urn,
+            type: 'Location',
+            collection: 'latticeLocations',
+            recordId: id,
+            code: val(loc, 'code') || null,
+            name: val(loc, 'name') || null,
+            status: null,
+            active: val(loc, 'active') !== false,
+          });
+        }
+      });
 
       const localFiltered = [...localByUrn.values()].filter((e) => !entityType || e.type === entityType);
       if (!brokerOrigin) {
@@ -1763,7 +1791,9 @@ function createDxosBrokerActions(db, {
         ...(organizationId ? { organizationId } : {}),
         brokerType: 'orion_ld',
       };
-      const rows = repo ? ((await repo.find({ filter, limit: 100, sort: ['-id'] })) || []) : [];
+      const rows = repo
+        ? await runWithOptionalRls(db, organizationId || null, () => repo.find({ filter, limit: 100, sort: ['-id'] })) || []
+        : [];
       const filtered = rows.filter((r) => !organizationId || val(r, 'organizationId') === organizationId);
 
       let orionReachable = false;
@@ -1835,9 +1865,11 @@ function createDxosBrokerActions(db, {
       if (!subRepo || typeof subRepo.create !== 'function') {
         throw failBroker('BROKER_REPO_UNAVAILABLE', 503, 'Kho subscription broker chưa sẵn sàng.');
       }
-      const existing = typeof subRepo.findOne === 'function'
-        ? await subRepo.findOne({ filter: { organizationId, subscriptionKey: rawKey } })
-        : ((await subRepo.find({ filter: { organizationId, subscriptionKey: rawKey }, limit: 1 })) || [])[0] || null;
+      const existing = await runWithOptionalRls(db, organizationId, () => (
+        typeof subRepo.findOne === 'function'
+          ? subRepo.findOne({ filter: { organizationId, subscriptionKey: rawKey } })
+          : subRepo.find({ filter: { organizationId, subscriptionKey: rawKey }, limit: 1 }).then((r) => (r || [])[0] || null)
+      ));
       if (existing) {
         throw failBroker('BROKER_SUB_EXISTS', 409, `Subscription "${rawKey}" đã tồn tại trong tổ chức.`);
       }
@@ -1893,21 +1925,23 @@ function createDxosBrokerActions(db, {
         }
       }
 
-      const created = await subRepo.create({
-        values: {
-          organizationId,
-          subscriptionKey: rawKey,
-          brokerType: 'orion_ld',
-          externalSubscriptionId,
-          entityType,
-          watchedAttributesJson: watchedAttributes,
-          notificationEndpoint: callbackUri,
-          throttlingSec: rawThrottle,
-          active: true,
-          lastNotifiedAt: null,
-          lastError,
-        },
-      });
+      const created = await runWithOptionalRls(db, organizationId, () =>
+        subRepo.create({
+          values: {
+            organizationId,
+            subscriptionKey: rawKey,
+            brokerType: 'orion_ld',
+            externalSubscriptionId,
+            entityType,
+            watchedAttributesJson: watchedAttributes,
+            notificationEndpoint: callbackUri,
+            throttlingSec: rawThrottle,
+            active: true,
+            lastNotifiedAt: null,
+            lastError,
+          },
+        }),
+      );
 
       ctx.body = {
         subscription: serializeSubscription(created),
@@ -1926,7 +1960,7 @@ function createDxosBrokerActions(db, {
       });
 
       const subRepo = db?.getRepository?.('latticeBrokerSubscriptions');
-      const row = await findSubscriptionRow(subRepo, scopedOrg, input);
+      const row = await runWithOptionalRls(db, scopedOrg || null, () => findSubscriptionRow(subRepo, scopedOrg, input));
       const organizationId = scopedOrg || val(row, 'organizationId');
       const nextActive = input.active !== undefined ? Boolean(input.active) : !Boolean(val(row, 'active'));
 
@@ -1958,11 +1992,13 @@ function createDxosBrokerActions(db, {
         }
       }
 
-      const updated = await saveRow(
-        subRepo,
-        row,
-        { active: nextActive, lastError },
-        organizationId,
+      const updated = await runWithOptionalRls(db, organizationId, () =>
+        saveRow(
+          subRepo,
+          row,
+          { active: nextActive, lastError },
+          organizationId,
+        ),
       );
 
       ctx.body = {
@@ -1982,7 +2018,7 @@ function createDxosBrokerActions(db, {
       });
 
       const subRepo = db?.getRepository?.('latticeBrokerSubscriptions');
-      const row = await findSubscriptionRow(subRepo, scopedOrg, input);
+      const row = await runWithOptionalRls(db, scopedOrg || null, () => findSubscriptionRow(subRepo, scopedOrg, input));
       const organizationId = scopedOrg || val(row, 'organizationId');
       const id = val(row, 'id');
       const subscriptionKey = val(row, 'subscriptionKey');
@@ -2008,9 +2044,9 @@ function createDxosBrokerActions(db, {
       }
 
       if (typeof row?.destroy === 'function') {
-        await row.destroy();
+        await runWithOptionalRls(db, organizationId, () => row.destroy());
       } else if (typeof subRepo?.destroy === 'function') {
-        await subRepo.destroy({ filter: { id, organizationId } });
+        await runWithOptionalRls(db, organizationId, () => subRepo.destroy({ filter: { id, organizationId } }));
       }
 
       ctx.body = {
@@ -2068,66 +2104,68 @@ function createDxosBrokerActions(db, {
       const entitiesSummary = [];
       const fallbackObservedAt = input.notifiedAt || null;
 
-      for (const entity of input.data) {
-        if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
-          throw failBroker('ORION_NOTIFY_ENTITY_INVALID', 400, 'Thực thể trong data[] không hợp lệ.');
-        }
-        const entityId = String(entity.id || '').trim();
-        if (!entityId || !ENTITY_ID_RE.test(entityId)) {
-          throw failBroker('ORION_NOTIFY_ENTITY_INVALID', 400, 'Thiếu hoặc sai định dạng entity.id.');
-        }
-        const urnMatch = URN_RE.exec(entityId);
-        if (urnMatch && urnMatch[1] !== auth.organizationId) {
-          throw failBroker('DXOS_CROSS_ORG_FORBIDDEN', 403, 'Thực thể trong thông báo không thuộc tổ chức.');
-        }
-
-        const entityMetrics = [];
-        for (const [attrName, rawAttr] of Object.entries(entity)) {
-          if (NON_TELEMETRY_NGSI_ATTRS.has(attrName)) continue;
-          if (!ATTR_NAME_RE.test(attrName)) continue;
-          const parsedAttr = parseNgsiValue(rawAttr);
-          if (!parsedAttr) continue;
-          const numVal = parseFiniteTelemetry(parsedAttr.rawValue);
-          if (numVal === null) continue;
-
-          const res = await ingestTelemetryPoint(db, {
-            organizationId: auth.organizationId,
-            assetEntityId: entityId,
-            metricName: attrName,
-            numericValue: numVal,
-            unit: parsedAttr.unit || 'CEL',
-            sourceProtocol: 'orion_ld',
-            observedAt: parsedAttr.observedAt || entity.observedAt || fallbackObservedAt,
-            app: ctx?.app,
-          });
-          if (res?.quarantined) {
-            quarantined.push(res);
-          } else if (res?.point) {
-            points.push(res.point);
-            entityMetrics.push({ metricName: attrName, numericValue: numVal, unit: res.point.unit });
+      await runWithOptionalRls(db, auth.organizationId, async () => {
+        for (const entity of input.data) {
+          if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
+            throw failBroker('ORION_NOTIFY_ENTITY_INVALID', 400, 'Thực thể trong data[] không hợp lệ.');
           }
-          if (Array.isArray(res?.triggeredAlarms) && res.triggeredAlarms.length) {
-            triggeredAlarms.push(...res.triggeredAlarms);
+          const entityId = String(entity.id || '').trim();
+          if (!entityId || !ENTITY_ID_RE.test(entityId)) {
+            throw failBroker('ORION_NOTIFY_ENTITY_INVALID', 400, 'Thiếu hoặc sai định dạng entity.id.');
+          }
+          const urnMatch = URN_RE.exec(entityId);
+          if (urnMatch && urnMatch[1] !== auth.organizationId) {
+            throw failBroker('DXOS_CROSS_ORG_FORBIDDEN', 403, 'Thực thể trong thông báo không thuộc tổ chức.');
+          }
+
+          const entityMetrics = [];
+          for (const [attrName, rawAttr] of Object.entries(entity)) {
+            if (NON_TELEMETRY_NGSI_ATTRS.has(attrName)) continue;
+            if (!ATTR_NAME_RE.test(attrName)) continue;
+            const parsedAttr = parseNgsiValue(rawAttr);
+            if (!parsedAttr) continue;
+            const numVal = parseFiniteTelemetry(parsedAttr.rawValue);
+            if (numVal === null) continue;
+
+            const res = await ingestTelemetryPoint(db, {
+              organizationId: auth.organizationId,
+              assetEntityId: entityId,
+              metricName: attrName,
+              numericValue: numVal,
+              unit: parsedAttr.unit || 'CEL',
+              sourceProtocol: 'orion_ld',
+              observedAt: parsedAttr.observedAt || entity.observedAt || fallbackObservedAt,
+              app: ctx?.app,
+            });
+            if (res?.quarantined) {
+              quarantined.push(res);
+            } else if (res?.point) {
+              points.push(res.point);
+              entityMetrics.push({ metricName: attrName, numericValue: numVal, unit: res.point.unit });
+            }
+            if (Array.isArray(res?.triggeredAlarms) && res.triggeredAlarms.length) {
+              triggeredAlarms.push(...res.triggeredAlarms);
+            }
+          }
+          entitiesSummary.push({ entityId, metrics: entityMetrics });
+        }
+
+        // Touch matching mirrored subscription row when present
+        const subRepo = db?.getRepository?.('latticeBrokerSubscriptions');
+        if (subRepo && subscriptionId && typeof subRepo.find === 'function') {
+          const subRows = (await subRepo.find({ filter: { organizationId: auth.organizationId }, limit: 100 })) || [];
+          const matchedSub = subRows.find((s) => (
+            val(s, 'organizationId') === auth.organizationId
+            && (
+              val(s, 'externalSubscriptionId') === subscriptionId
+              || `urn:ngsi-ld:Subscription:${auth.organizationId}:${val(s, 'subscriptionKey')}` === subscriptionId
+            )
+          ));
+          if (matchedSub) {
+            await saveRow(subRepo, matchedSub, { lastNotifiedAt: new Date(), lastError: null }, auth.organizationId);
           }
         }
-        entitiesSummary.push({ entityId, metrics: entityMetrics });
-      }
-
-      // Touch matching mirrored subscription row when present
-      const subRepo = db?.getRepository?.('latticeBrokerSubscriptions');
-      if (subRepo && subscriptionId && typeof subRepo.find === 'function') {
-        const subRows = (await subRepo.find({ filter: { organizationId: auth.organizationId }, limit: 100 })) || [];
-        const matchedSub = subRows.find((s) => (
-          val(s, 'organizationId') === auth.organizationId
-          && (
-            val(s, 'externalSubscriptionId') === subscriptionId
-            || `urn:ngsi-ld:Subscription:${auth.organizationId}:${val(s, 'subscriptionKey')}` === subscriptionId
-          )
-        ));
-        if (matchedSub) {
-          await saveRow(subRepo, matchedSub, { lastNotifiedAt: new Date(), lastError: null }, auth.organizationId);
-        }
-      }
+      });
 
       await emitDomainEventSafely(
         db,

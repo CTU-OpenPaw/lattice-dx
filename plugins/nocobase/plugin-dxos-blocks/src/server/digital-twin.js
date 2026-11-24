@@ -11,6 +11,7 @@
 const { createHash, randomBytes } = require('node:crypto');
 const path = require('node:path');
 const { emitDomainEventSafely } = require('./domain-events');
+const { runWithOptionalRls } = require('./blocks-rls');
 
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
@@ -322,7 +323,10 @@ async function resolveAssetEntity(db, { organizationId, assetId = null, assetEnt
   let assetRow = null;
   const assetRepo = db?.getRepository?.('latticeAssets');
   if (resolvedAssetId != null && assetRepo && typeof assetRepo.findOne === 'function') {
-    assetRow = await assetRepo.findOne({ filter: { id: resolvedAssetId, organizationId: org } });
+    assetRow = await runWithOptionalRls(db, org, (transaction) => assetRepo.findOne({
+      filter: { id: resolvedAssetId, organizationId: org },
+      ...(transaction ? { transaction } : {}),
+    }));
     if (!assetRow || (val(assetRow, 'organizationId') && val(assetRow, 'organizationId') !== org)) {
       throw failTwin('DXOS_ASSET_NOT_FOUND', 404, 'Không tìm thấy tài sản trong phạm vi tổ chức.');
     }
@@ -387,20 +391,25 @@ function serializeShadow(row, defaults = {}) {
 }
 
 async function runInTwinTx(db, organizationId, fn) {
-  const execute = async (transaction) => {
-    const isPostgres = typeof db?.sequelize?.getDialect === 'function' && db.sequelize.getDialect() === 'postgres';
-    if (isPostgres && transaction) {
-      const pgRls = loadFoundationModule('pg-rls');
-      if (pgRls && typeof pgRls.setTransactionRlsOrg === 'function') {
-        await pgRls.setTransactionRlsOrg(db, organizationId, transaction);
-      }
+  return runWithOptionalRls(db, organizationId, async (rlsTx) => {
+    if (rlsTx) {
+      return fn(rlsTx);
     }
-    return fn(transaction || null);
-  };
-  if (typeof db?.sequelize?.transaction === 'function') {
-    return db.sequelize.transaction(execute);
-  }
-  return execute(null);
+    const execute = async (transaction) => {
+      const isPostgres = typeof db?.sequelize?.getDialect === 'function' && db.sequelize.getDialect() === 'postgres';
+      if (isPostgres && transaction) {
+        const pgRls = loadFoundationModule('pg-rls');
+        if (pgRls && typeof pgRls.setTransactionRlsOrg === 'function') {
+          await pgRls.setTransactionRlsOrg(db, organizationId, transaction);
+        }
+      }
+      return fn(transaction || null);
+    };
+    if (typeof db?.sequelize?.transaction === 'function') {
+      return db.sequelize.transaction(execute);
+    }
+    return execute(null);
+  });
 }
 
 async function findShadowRow(shadowRepo, organizationId, assetEntityId, transaction = null) {
@@ -445,7 +454,9 @@ async function updateShadowRow(repo, row, patch, { organizationId = null, transa
 async function getTwinShadow(db, opts = {}) {
   const { organizationId, assetId, assetEntityId, asset } = await resolveAssetEntity(db, opts);
   const shadowRepo = db?.getRepository?.('latticeTwinShadows');
-  const existing = await findShadowRow(shadowRepo, organizationId, assetEntityId);
+  const existing = await runWithOptionalRls(db, organizationId, (transaction) =>
+    findShadowRow(shadowRepo, organizationId, assetEntityId, transaction),
+  );
   const shadow = existing
     ? serializeShadow(existing)
     : serializeShadow(null, {

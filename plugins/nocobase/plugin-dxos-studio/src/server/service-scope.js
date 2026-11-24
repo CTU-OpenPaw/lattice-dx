@@ -40,6 +40,7 @@ function loadPgRls() {
 
 const pgRls = loadPgRls();
 const withTenantRlsContext = pgRls?.withTenantRlsContext || null;
+const withSystemRlsBypass = pgRls?.withSystemRlsBypass || null;
 const installRlsTransactionBridge = pgRls?.installRlsTransactionBridge || null;
 const setContextRlsTransaction = pgRls?.setContextRlsTransaction || ((ctx, transaction) => {
   if (!ctx || !transaction) return;
@@ -219,7 +220,16 @@ function createServiceScopeMiddleware(db) {
   return async function serviceScopeMiddleware(ctx, next) {
     const { resourceName, actionName } = ctx.action || {};
     const params = ctx.action?.params || (ctx.action ? (ctx.action.params = {}) : {});
-    if (resourceName === 'charts' && actionName === 'queryData' && params?.values?.collection === 'latticeServiceTickets' && ctx.state?.currentRole !== 'root') {
+    if (resourceName === 'charts' && actionName === 'queryData' && params?.values?.collection === 'latticeServiceTickets') {
+      if (ctx.state?.currentRole === 'root') {
+        if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function' && typeof withSystemRlsBypass === 'function') {
+          return withSystemRlsBypass(db, (transaction) => {
+            setContextRlsTransaction(ctx, transaction);
+            return next();
+          });
+        }
+        return next();
+      }
       if (params.values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
       const actor = await resolveServiceActor(db, ctx.state?.currentUser);
       const sanitizedFilter = params.values.filter !== undefined
@@ -243,7 +253,15 @@ function createServiceScopeMiddleware(db) {
 
     const collectionName = resourceName?.split('.')[0];
     if (collectionName !== 'latticeServiceTickets') return next();
-    if (ctx.state?.currentRole === 'root') return next();
+    if (ctx.state?.currentRole === 'root') {
+      if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function' && typeof withSystemRlsBypass === 'function') {
+        return withSystemRlsBypass(db, (transaction) => {
+          setContextRlsTransaction(ctx, transaction);
+          return next();
+        });
+      }
+      return next();
+    }
 
     const actor = await resolveServiceActor(db, ctx.state?.currentUser);
     if (resourceName !== 'latticeServiceTickets') throw failure('NATIVE_ASSOCIATION_ACTION_UNSUPPORTED');

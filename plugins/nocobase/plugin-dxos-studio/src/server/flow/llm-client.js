@@ -190,12 +190,13 @@ async function assertSafeLlmUrl(rawUrl, { env = process.env, connectorVault, loo
     }
   }
 
-  const vault = connectorVault || loadFoundationModule('connector-vault');
-  const vaultEnv = isExplicitLocal ? { ...env, DX_CONNECTOR_INTERNAL_ALLOWLIST: [env?.DX_CONNECTOR_INTERNAL_ALLOWLIST, bare].filter(Boolean).join(',') } : env;
-  if (typeof vault?.assertSafeConnectorUrlAsync === 'function') {
-    await vault.assertSafeConnectorUrlAsync(trimmed, { connectorType: 'http_api', env: vaultEnv, allowInternal: isExplicitLocal, lookupImpl, skipDnsCheck: isExplicitLocal || skipDnsCheck });
-  } else if (typeof vault?.assertSafeConnectorUrl === 'function') {
-    vault.assertSafeConnectorUrl(trimmed, { connectorType: 'http_api', env: vaultEnv, allowInternal: isExplicitLocal });
+  if (!isExplicitLocal) {
+    const vault = connectorVault || loadFoundationModule('connector-vault');
+    if (typeof vault?.assertSafeConnectorUrlAsync === 'function') {
+      await vault.assertSafeConnectorUrlAsync(trimmed, { connectorType: 'http_api', env, allowInternal: false, lookupImpl, skipDnsCheck });
+    } else if (typeof vault?.assertSafeConnectorUrl === 'function') {
+      vault.assertSafeConnectorUrl(trimmed, { connectorType: 'http_api', env, allowInternal: false });
+    }
   }
 
   if (typeof lookupImpl === 'function' || (!isExplicitLocal && !skipDnsCheck && net.isIP(bare) === 0)) {
