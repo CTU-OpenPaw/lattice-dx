@@ -513,3 +513,55 @@ test('persistent quota hydrates after restart via latticeAiQuotaUsage & audit fa
   assert.equal(midDaySummary.usage.tokens, 370);
   resetQuotaBuckets();
 });
+
+test('Wave 4B P1 #3: redactPiiText & redactPiiForLlm scrub JSON-quoted secrets and object keys before JSON.stringify', () => {
+  const gov = require(path.join(PLUGIN_ROOT, 'src/server/ai-governance.js'));
+  const { redactPiiText, redactPiiForLlm } = gov;
+  assert.equal(typeof redactPiiForLlm, 'function');
+
+  // 1. JSON-stringified secrets with quoted keys must be redacted cleanly while preserving promptTokens
+  const rawJson = JSON.stringify({
+    apiKey: 'raw-unprefixed-api-key-999',
+    secret: 'super-secret-value-456',
+    client_secret: 'cs-secret-789',
+    password: 'my-db-password',
+    token: 'tok-abc-123',
+    promptTokens: 120,
+    safeNote: 'Kho lanh A1 binh thuong',
+  });
+  const textRes = redactPiiText(rawJson);
+  assert.equal(textRes.text.includes('raw-unprefixed-api-key-999'), false);
+  assert.equal(textRes.text.includes('super-secret-value-456'), false);
+  assert.equal(textRes.text.includes('cs-secret-789'), false);
+  assert.equal(textRes.text.includes('my-db-password'), false);
+  assert.equal(textRes.text.includes('tok-abc-123'), false);
+  assert.ok(textRes.count >= 5);
+  const reparsed = JSON.parse(textRes.text);
+  assert.equal(reparsed.apiKey, '[REDACTED]');
+  assert.equal(reparsed.secret, '[REDACTED]');
+  assert.equal(reparsed.promptTokens, 120);
+  assert.equal(reparsed.safeNote, 'Kho lanh A1 binh thuong');
+
+  // Escaped JSON embedded inside a log/prompt string
+  const nestedEscaped = JSON.stringify({ payload: JSON.stringify({ apiKey: 'nested-secret-xyz' }) });
+  const nestedRes = redactPiiText(nestedEscaped);
+  assert.equal(nestedRes.text.includes('nested-secret-xyz'), false);
+
+  // 2. redactPiiForLlm scrubs SENSITIVE_KEY_RE object keys BEFORE JSON.stringify and does not truncate > 600 chars
+  const longPad = 'B'.repeat(700);
+  const llmObj = redactPiiForLlm({
+    apiKey: 'unprefixed-secret-key-1',
+    nested: { secret: 'nested-val-2', password: 'pw-3', note: `${longPad} contact alice@example.com` },
+    jsonText: '{"apiKey":"inline-secret-4","secret":"inline-secret-5"}',
+    safe: 'ok',
+  });
+  assert.equal(llmObj.redacted.apiKey, '[REDACTED]');
+  assert.equal(llmObj.redacted.nested.secret, '[REDACTED]');
+  assert.equal(llmObj.redacted.nested.password, '[REDACTED]');
+  assert.ok(llmObj.redacted.nested.note.length > 700);
+  assert.equal(llmObj.redacted.nested.note.includes('alice@example.com'), false);
+  assert.equal(llmObj.redacted.jsonText.includes('inline-secret-4'), false);
+  assert.equal(llmObj.redacted.jsonText.includes('inline-secret-5'), false);
+  assert.equal(llmObj.redacted.safe, 'ok');
+  assert.ok(llmObj.redactedCount >= 6);
+});

@@ -45,8 +45,7 @@ const aiNodes = [
       const env = options?.env || process.env;
       const systemPrompt = cfg.systemPrompt ? String(interp(cfg.systemPrompt, evalCtx)) : '';
       const rawUser = cfg.userPrompt ? interp(cfg.userPrompt, evalCtx) : (input ?? evalCtx.data ?? {});
-      const userPrompt = typeof rawUser === 'string' ? rawUser : JSON.stringify(rawUser);
-      const messages = [...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []), { role: 'user', content: userPrompt }];
+      const messages = [...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []), { role: 'user', content: rawUser ?? '' }];
       const responseFormat = cfg.responseFormat === 'text' ? 'text' : 'json';
 
       if (options?.dryRun && typeof options?.fetchImpl !== 'function') {

@@ -49,7 +49,7 @@ const READ_ONLY_MUTATING_ACTIONS = new Set([
   'saveTable', 'saveDelegation', 'freezeSnapshot', 'quarantineResolve', 'resolveQuarantine',
   'telemetryIngest', 'alarmIngest', 'alarmAck', 'alarmClear',
   'outboxDlqReplay', 'solutionBundleImport', 'solutionBundleRollback',
-  'reindex', 'extractAttachment', 'bootstrapDefaults', 'portalCopilot',
+  'reindex', 'extractAttachment', 'bootstrapDefaults', 'portalAgents',
   'rollbackPageSnapshot', 'approveAction', 'rejectAction', 'dispatch', 'retry', 'upload',
   'publish', 'rotateSecret', 'testConnection', 'toggleSubscription', 'deleteSubscription',
   'replayDlq', 'resetCircuit', 'dispatchNow', 'provisionDevice', 'revokeDevice',

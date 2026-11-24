@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { recordAiAuditLog, sanitizeAuditSummary } = require('./ai-schemas');
+const { recordAiAuditLog, sanitizeAuditSummary, normalizeToolPermissionsMap } = require('./ai-schemas');
 
 const VALID_TOOL_MODES = new Set(['ALLOW', 'ASK', 'OFF']);
 const VALID_RISK_LEVELS = new Set(['low', 'medium', 'high', 'critical']);
@@ -58,8 +58,11 @@ async function resolveEffectiveToolMode(db, { aiEmployee = null, toolName = '', 
   if (!profile) return fallback;
   if (val(profile, 'enabled') === false) return 'OFF';
 
-  const perms = val(profile, 'toolPermissions');
-  if (perms && typeof perms === 'object' && !Array.isArray(perms)) {
+  const rawPerms = val(profile, 'toolPermissions') ?? val(profile, 'toolPermissionsJson');
+  const hasPermsMap = (rawPerms && typeof rawPerms === 'object' && !Array.isArray(rawPerms))
+    || (typeof rawPerms === 'string' && rawPerms.trim().startsWith('{'));
+  if (hasPermsMap) {
+    const perms = normalizeToolPermissionsMap(rawPerms);
     if (Object.prototype.hasOwnProperty.call(perms, targetTool)) {
       return normalizeToolMode(perms[targetTool], 'OFF');
     }
@@ -189,7 +192,7 @@ async function notifyApproversOfPendingApproval(db, row) {
     const approvalId = val(row, 'id');
     const requesterUserId = val(row, 'requesterUserId');
     const requesterUsername = val(row, 'requesterUsername') || `user-${requesterUserId}`;
-    const aiEmployee = val(row, 'aiEmployee') || 'AI Copilot';
+    const aiEmployee = val(row, 'aiEmployee') || 'DX-OS AI Agent';
     const targetCollection = val(row, 'targetCollection');
     const targetRecordId = val(row, 'targetRecordId');
     const operation = val(row, 'operation') || 'update';

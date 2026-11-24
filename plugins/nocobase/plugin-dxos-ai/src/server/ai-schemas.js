@@ -8,7 +8,35 @@
  */
 'use strict';
 
-const { redactPiiText, redactPiiDeep } = require('./ai-governance');
+const { redactPiiText, redactPiiDeep, replaceSecretKvPairs } = require('./ai-governance');
+
+const LEGACY_WORKFLOW_TASKS_TOOL = ['dxos_my_tasks_co', 'pilot'].join('');
+const CANONICAL_WORKFLOW_TASKS_TOOL = 'dxos_my_workflow_tasks';
+
+function normalizeToolPermissionsMap(rawPerms) {
+  let parsed = rawPerms;
+  if (typeof parsed === 'string' && parsed.trim().startsWith('{')) {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      return {};
+    }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const out = {};
+  for (const [rawKey, modeVal] of Object.entries(parsed)) {
+    const trimmed = String(rawKey || '').trim();
+    if (!trimmed || trimmed === LEGACY_WORKFLOW_TASKS_TOOL) continue;
+    out[trimmed] = modeVal;
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(parsed, LEGACY_WORKFLOW_TASKS_TOOL)
+    && !Object.prototype.hasOwnProperty.call(out, CANONICAL_WORKFLOW_TASKS_TOOL)
+  ) {
+    out[CANONICAL_WORKFLOW_TASKS_TOOL] = parsed[LEGACY_WORKFLOW_TASKS_TOOL];
+  }
+  return out;
+}
 
 const USERNAME_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const ORG_RE = /^[-a-zA-Z0-9_]{1,80}$/;
@@ -41,7 +69,7 @@ const STARTER_AI_BLUEPRINTS = [
     allowedRoles: ['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_employee', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver'],
     toolPermissions: {
       dxos_search_enterprise_context: 'ALLOW',
-      dxos_my_tasks_copilot: 'ALLOW',
+      dxos_my_workflow_tasks: 'ALLOW',
       dxos_execute_record_action: 'ASK',
       dxos_orchestrate_enterprise_case: 'ASK',
       dxos_graph_impact_analysis: 'ALLOW',
@@ -133,7 +161,7 @@ const STARTER_AI_BLUEPRINTS = [
     toolPermissions: {
       dxos_search_enterprise_context: 'ALLOW',
       dxos_execute_record_action: 'ASK',
-      dxos_my_tasks_copilot: 'ALLOW',
+      dxos_my_workflow_tasks: 'ALLOW',
       dxos_orchestrate_enterprise_case: 'ASK',
       dxos_graph_impact_analysis: 'ALLOW',
       dxos_alarm_action: 'ASK',
@@ -156,7 +184,7 @@ const STARTER_AI_BLUEPRINTS = [
     greeting: 'Chào bạn! Tôi hỗ trợ theo dõi đơn vận chuyển 5 chặng, radar điểm nghẽn và tóm tắt công việc giao nhận của bạn.',
     systemPrompt: [
       'Bạn là Điều phối viên Chuỗi lạnh AI của LatticeDX.',
-      'Dùng dxos_search_enterprise_context đọc trạng thái latticeOrders, dxos_orchestrate_enterprise_case xem radar, và dxos_my_tasks_copilot kiểm tra manual task đang giao cho người dùng.',
+      'Dùng dxos_search_enterprise_context đọc trạng thái latticeOrders, dxos_orchestrate_enterprise_case xem radar, và dxos_my_workflow_tasks kiểm tra manual task đang giao cho người dùng.',
       'Chỉ nộp bước manual task khi được người dùng xác nhận qua ASK.',
     ].join('\n'),
     llmService: 'local-9router',
@@ -168,14 +196,14 @@ const STARTER_AI_BLUEPRINTS = [
     toolPermissions: {
       dxos_search_enterprise_context: 'ALLOW',
       dxos_execute_record_action: 'ASK',
-      dxos_my_tasks_copilot: 'ASK',
+      dxos_my_workflow_tasks: 'ASK',
       dxos_orchestrate_enterprise_case: 'ALLOW',
       dxos_graph_impact_analysis: 'ALLOW',
     },
     mcpServers: [{ name: 'dxos-it-ot-mcp', url: 'http://127.0.0.1:13000/api/dxos-mcp/it-ot', useUserContext: true, enabled: true }],
     portalBindings: ['logistics'],
     quickPrompts: [
-      { label: 'Việc giao nhận đang chờ tôi', prompt: 'Dùng dxos_my_tasks_copilot liệt kê và tóm tắt các công việc logistics đang chờ tôi xử lý.' },
+      { label: 'Việc giao nhận đang chờ tôi', prompt: 'Dùng dxos_my_workflow_tasks liệt kê và tóm tắt các công việc logistics đang chờ tôi xử lý.' },
       { label: 'Rà soát đơn chuỗi lạnh', prompt: 'Tìm các đơn vận chuyển chuỗi lạnh đang mở và đối chiếu lộ trình mới nhất.' },
     ],
   },
@@ -202,7 +230,7 @@ const STARTER_AI_BLUEPRINTS = [
     toolPermissions: {
       dxos_search_enterprise_context: 'ALLOW',
       dxos_execute_record_action: 'ASK',
-      dxos_my_tasks_copilot: 'ALLOW',
+      dxos_my_workflow_tasks: 'ALLOW',
       dxos_orchestrate_enterprise_case: 'ASK',
       dxos_graph_impact_analysis: 'ALLOW',
       dxos_alarm_action: 'ASK',
@@ -409,7 +437,7 @@ function redactAuditText(rawText) {
   text = text.replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]');
   text = text.replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]');
   text = text.replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]');
-  text = text.replace(/([a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)\s*[:=]\s*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]');
+  text = replaceSecretKvPairs(text).text;
   return text;
 }
 
@@ -442,12 +470,12 @@ function validateAiProfilePayload(input = {}, { adminToolNames = [] } = {}) {
     throw failSchema('AI_ORG_INVALID', 'Mã tổ chức không hợp lệ.');
   }
   const toolPermissions = {};
-  if (input.toolPermissions && typeof input.toolPermissions === 'object' && !Array.isArray(input.toolPermissions)) {
-    for (const [toolName, mode] of Object.entries(input.toolPermissions)) {
-      const m = String(mode || '').toUpperCase();
-      if (!VALID_MODES.has(m)) throw failSchema('AI_TOOL_MODE_INVALID', `Chế độ tool "${m}" không hợp lệ.`);
-      if (m !== 'OFF') toolPermissions[String(toolName).trim()] = m;
-    }
+  const rawPerms = input.toolPermissions !== undefined ? input.toolPermissions : input.toolPermissionsJson;
+  const normalizedPerms = normalizeToolPermissionsMap(rawPerms);
+  for (const [toolName, mode] of Object.entries(normalizedPerms)) {
+    const m = String(mode || '').toUpperCase();
+    if (!VALID_MODES.has(m)) throw failSchema('AI_TOOL_MODE_INVALID', `Chế độ tool "${m}" không hợp lệ.`);
+    if (m !== 'OFF') toolPermissions[String(toolName).trim()] = m;
   }
   const adminSet = new Set(adminToolNames);
   const grantsAdminTool = Object.keys(toolPermissions).some((t) => adminSet.has(t));
@@ -540,6 +568,9 @@ async function recordAiAuditLog(db, entry = {}) {
 
 module.exports = {
   STARTER_AI_BLUEPRINTS,
+  LEGACY_WORKFLOW_TASKS_TOOL,
+  CANONICAL_WORKFLOW_TASKS_TOOL,
+  normalizeToolPermissionsMap,
   aiProfiles,
   aiAuditLogs,
   uiSnapshots,

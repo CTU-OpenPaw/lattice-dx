@@ -650,3 +650,145 @@ test('architect.js and test file stay <= 350 lines, carry SPDX headers, and cont
   assert.equal(addSourceHeader(archSrc, archPath).status, 'present');
   assert.equal(addSourceHeader(testSrc, testPath).status, 'present');
 });
+
+test('Whole-Delta P1-3 & P2-4/5/6/7: unstringified LLM redaction, collision-free IDs, empty suggest, map condition + DMN node patch, lazy dryRun security refusal', async () => {
+  // 1. P1-3: architect.js passes unstringified objects to callConfiguredLlm so nested secrets in baseGraph/runTrace are redacted
+  const llmDb = makeConfiguredLlmDb({
+    latticeDecisionTables: [
+      { id: 1, organizationId: 'org-a', tableKey: 'risk_matrix_v2', name: 'Risk Matrix V2', active: true, outputsJson: [{ name: 'tier' }] },
+    ],
+  });
+  let sentBodyText = '';
+  const leakGraph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.manual', config: {} },
+      { id: 'n1', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Hi', headers: { apiKey: 'graph-secret-999' } } },
+    ],
+    edges: [{ id: 'e1', source: 't1', target: 'n1' }],
+  };
+  await runFlowArchitect({
+    db: llmDb,
+    env: {},
+    organizationId: 'org-a',
+    mode: 'suggest',
+    graph: leakGraph,
+    runTrace: { runUid: 'r1', status: 'failed', errorMessage: 'err', nodeStatesJson: { n1: { status: 'failed', secret: 'trace-secret-888' } } },
+    fetchImpl: async (_url, init) => {
+      sentBodyText = init.body;
+      return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content: JSON.stringify({ summary: 'OK', operations: [], suggestions: [] }) } }] }) };
+    },
+  });
+  assert.equal(sentBodyText.includes('graph-secret-999'), false);
+  assert.equal(sentBodyText.includes('trace-secret-888'), false);
+
+  // 2. P2-5: LLM suggest mode with baseGraph === null and empty operations succeeds cleanly
+  const emptySuggestRes = await runFlowArchitect({
+    db: llmDb,
+    env: {},
+    organizationId: 'org-a',
+    mode: 'suggest',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify({ summary: 'General advice', operations: [], suggestions: [{ id: 's1', title: 'Add guard' }] }) } }] }),
+    }),
+  });
+  assert.equal(emptySuggestRes.ok, true);
+  assert.equal(emptySuggestRes.refused, false);
+  assert.equal(emptySuggestRes.draftGraph.nodes.length >= 1, true);
+
+  // 3. P2-4: Collision-free node IDs in suggest and fix_error
+  const collidingGraph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.manual', config: {} },
+      { id: 'if1', type: 'control.if', config: { condition: { 'data.tempC': { $gt: 8 } } } },
+      { id: 'http1', type: 'integration.http', config: { connectorKey: 'erp', path: '/sync' } },
+      { id: 'notify_err_http1', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Existing err' } },
+      { id: 'notify_else_if1', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Existing else' } },
+      { id: 'approval_hitl', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Existing hitl name' } },
+      { id: 'err_notify_http1', type: 'notify.send', config: { roleNames: ['ldx_operator'], title: 'Existing fix err' } },
+    ],
+    edges: [
+      { id: 'e1', source: 't1', target: 'if1' },
+      { id: 'e2', source: 'if1', sourceHandle: 'true', target: 'http1' },
+      { id: 'e3', source: 'http1', target: 'notify_err_http1' },
+      { id: 'e4', source: 't1', target: 'notify_else_if1' },
+      { id: 'e5', source: 't1', target: 'approval_hitl' },
+      { id: 'e6', source: 't1', target: 'err_notify_http1' },
+    ],
+  };
+  const sugCollision = await runFlowArchitect({ db: makeMockDb(), env: {}, organizationId: 'org-a', mode: 'suggest', graph: collidingGraph });
+  assert.equal(sugCollision.ok, true);
+  const allSugOps = sugCollision.suggestions.flatMap((s) => s.operations || []);
+  const appliedSug = applyGraphOperations(collidingGraph, allSugOps);
+  assert.equal(validateFlowGraph(appliedSug.graph, { nodeRegistry: createDefaultRegistry() }).ok, true);
+
+  const fixCollision = await runFlowArchitect({
+    db: makeMockDb(),
+    env: {},
+    organizationId: 'org-a',
+    mode: 'fix_error',
+    graph: collidingGraph,
+    runTrace: { runUid: 'r_col', status: 'failed', failedNodeId: 'http1', errorMessage: 'HTTP error' },
+  });
+  assert.equal(fixCollision.ok, true);
+  assert.equal(validateFlowGraph(fixCollision.draftGraph, { nodeRegistry: createDefaultRegistry() }).ok, true);
+
+  // 4. P2-6: Offline node patch preserves map-style control.if condition and supports logic.dmn tableKey
+  const mapIfPatch = await runFlowArchitect({
+    db: makeMockDb(),
+    env: {},
+    organizationId: 'org-a',
+    mode: 'node',
+    graph: collidingGraph,
+    targetNodeId: 'if1',
+    prompt: 'Update threshold > 12',
+  });
+  assert.equal(mapIfPatch.ok, true);
+  const patchedCond = mapIfPatch.draftGraph.nodes.find((n) => n.id === 'if1').config.condition;
+  assert.deepEqual(patchedCond, { 'data.tempC': { $gt: 12 } });
+  assert.equal('value' in patchedCond, false);
+
+  const dmnGraph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.manual', config: {} },
+      { id: 'dmn1', type: 'logic.dmn', config: { tableKey: 'old_table' } },
+    ],
+    edges: [{ id: 'e1', source: 't1', target: 'dmn1' }],
+  };
+  const dmnPatch = await runFlowArchitect({
+    db: makeMockDb({ latticeDecisionTables: [{ id: 1, organizationId: 'org-a', tableKey: 'risk_matrix_v2', name: 'Risk Matrix V2', active: true, outputsJson: [{ name: 'tier' }] }] }),
+    env: {},
+    organizationId: 'org-a',
+    mode: 'node',
+    graph: dmnGraph,
+    targetNodeId: 'dmn1',
+    prompt: 'Switch table to risk_matrix_v2',
+  });
+  assert.equal(dmnPatch.ok, true);
+  assert.equal(dmnPatch.draftGraph.nodes.find((n) => n.id === 'dmn1').config.tableKey, 'risk_matrix_v2');
+
+  // 5. P2-7: runFlowArchitect catches lazy dryRunFlowGraph security errors as { ok: false, refused: true }
+  const execMod = require('../src/server/flow/executor');
+  const origDryRun = execMod.dryRunFlowGraph;
+  execMod.dryRunFlowGraph = async () => {
+    throw Object.assign(new Error('SSRF blocked during dryRun'), { code: 'CONNECTOR_URL_UNSAFE' });
+  };
+  try {
+    const secRefuseRes = await runFlowArchitect({
+      db: makeMockDb(),
+      env: {},
+      organizationId: 'org-a',
+      mode: 'full',
+      prompt: 'Tạo thông báo cho ldx_operator',
+    });
+    assert.equal(secRefuseRes.ok, false);
+    assert.equal(secRefuseRes.refused, true);
+    assert.match(secRefuseRes.error, /SSRF/i);
+  } finally {
+    execMod.dryRunFlowGraph = origDryRun;
+  }
+});

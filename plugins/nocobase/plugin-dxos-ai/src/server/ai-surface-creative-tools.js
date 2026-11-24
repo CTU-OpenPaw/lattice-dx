@@ -1201,7 +1201,7 @@ function createSurfaceAndCreativeTools(deps) {
           portalBindings: [args.portalSlug],
           toolPermissions: {
             dxos_search_enterprise_context: 'ALLOW',
-            dxos_my_tasks_copilot: 'ALLOW',
+            dxos_my_workflow_tasks: 'ALLOW',
             dxos_execute_record_action: 'ASK',
             dxos_orchestrate_enterprise_case: 'ASK',
           },

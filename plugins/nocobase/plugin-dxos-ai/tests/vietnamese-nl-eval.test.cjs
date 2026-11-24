@@ -211,6 +211,6 @@ test('Vietnamese Natural-Language 80-case Eval Suite achieves 100% pass rate wit
   assert.match(architectBp.systemPrompt, /LatticeFlow v2/);
   for (const uname of ['dxos-coordinator', 'dxos-ops', 'dxos-logistics', 'dxos-workspace']) {
     const bp = STARTER_AI_BLUEPRINTS.find((b) => b.username === uname);
-    assert.ok(bp && bp.toolPermissions?.dxos_my_tasks_copilot, `dxos_my_tasks_copilot must remain intact on ${uname}`);
+    assert.ok(bp && bp.toolPermissions?.dxos_my_workflow_tasks, `dxos_my_workflow_tasks must remain intact on ${uname}`);
   }
 });

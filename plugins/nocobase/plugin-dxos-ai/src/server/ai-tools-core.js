@@ -9,7 +9,7 @@
 'use strict';
 
 const { defineToolSchema } = require('./schema-helper');
-const { recordAiAuditLog, redactAuditText } = require('./ai-schemas');
+const { recordAiAuditLog, redactAuditText, normalizeToolPermissionsMap } = require('./ai-schemas');
 const {
   redactPiiText,
   redactPiiDeep,
@@ -20,7 +20,7 @@ const {
   recordQuotaUsagePersistent,
 } = require('./ai-governance');
 const { createBuilderTools } = require('./ai-builder-tools');
-const { createCopilotTools } = require('./ai-copilot-tools');
+const { createOperationalTools } = require('./ai-operational-tools');
 const { createSurfaceAndCreativeTools } = require('./ai-surface-creative-tools');
 
 const ADMIN_BUILDER_TOOL_NAMES = [
@@ -40,7 +40,7 @@ const ADMIN_BUILDER_TOOL_NAMES = [
 const OPERATIONAL_TOOL_NAMES = [
   'dxos_search_enterprise_context',
   'dxos_execute_record_action',
-  'dxos_my_tasks_copilot',
+  'dxos_my_workflow_tasks',
   'dxos_orchestrate_enterprise_case',
   'dxos_graph_impact_analysis',
   'dxos_alarm_action',
@@ -254,6 +254,26 @@ function createAuditedTool(spec) {
           throw failTool('DXOS_ADMIN_REQUIRED', 403, `Công cụ "${spec.name}" chỉ dành cho Quản trị viên.`);
         }
         const isHitlApprovedReplay = Boolean(ctx?.state?.dxosApprovedQueueId);
+        const aiEmployeeName = String(aiEmployee || '').trim().toLowerCase();
+        if (aiEmployeeName && !isHitlApprovedReplay) {
+          const profRepo = db?.getRepository?.('latticeAiProfiles');
+          if (profRepo && typeof profRepo.findOne === 'function') {
+            const profile = await profRepo.findOne({ filter: { username: aiEmployeeName } });
+            const matchedUsername = String(val(profile, 'username') || '').trim().toLowerCase();
+            if (profile && (!matchedUsername || matchedUsername === aiEmployeeName)) {
+              if (val(profile, 'enabled') === false) {
+                throw failTool('TOOL_PERMISSION_OFF', 403, `Hồ sơ AI "${aiEmployeeName}" đang bị vô hiệu hóa.`);
+              }
+              const rawPerms = val(profile, 'toolPermissions') ?? val(profile, 'toolPermissionsJson');
+              if (rawPerms && (typeof rawPerms === 'object' || typeof rawPerms === 'string')) {
+                const perms = normalizeToolPermissionsMap(rawPerms);
+                if (Object.prototype.hasOwnProperty.call(perms, spec.name) && String(perms[spec.name] || '').trim().toUpperCase() === 'OFF') {
+                  throw failTool('TOOL_PERMISSION_OFF', 403, `Công cụ ${spec.name} đang tắt trên hồ sơ AI này.`);
+                }
+              }
+            }
+          }
+        }
         if (!isHitlApprovedReplay) {
           await hydrateQuotaBucketFromDb(db, actor.organizationId);
           checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
@@ -351,7 +371,7 @@ function createDxosTools() {
   return [
     ...createBuilderTools(shared),
     ...createSurfaceAndCreativeTools(shared),
-    ...createCopilotTools(shared),
+    ...createOperationalTools(shared),
   ];
 }
 
@@ -441,6 +461,7 @@ module.exports = {
   isRowVisibleToActor,
   safeGetResource,
   invokeResourceAction,
+  normalizeToolPermissionsMap,
   createAuditedTool,
   createDxosTools,
   registerDxosToolsWithHost,

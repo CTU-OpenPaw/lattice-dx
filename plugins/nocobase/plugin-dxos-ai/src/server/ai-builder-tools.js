@@ -183,23 +183,48 @@ function hasForbiddenProtoKeys(value, seen = new WeakSet()) {
   return false;
 }
 
-function hasUnsafeAutomationTemplate(value, seen = new WeakSet()) {
-  if (typeof value === 'string') {
-    for (const match of value.matchAll(/\{\{([\s\S]*?)\}\}/g)) {
-      const expr = String(match[1] || '').trim();
-      if (!expr || !/^[a-zA-Z0-9_.\-$]+$/.test(expr)) return true;
-      const parts = expr.split('.').filter(Boolean);
-      if (!parts.length || parts.some((p) => FORBIDDEN_AUTOMATION_KEYS.has(p) || p === 'process' || p === 'env' || p === 'global')) {
-        return true;
-      }
+const UNSAFE_TEMPLATE_PATH_SEGMENTS = new Set([
+  '__proto__', 'constructor', 'prototype', 'process', 'env', 'global', 'globalThis',
+]);
+const UNSAFE_TEMPLATE_EXPRESSION_RE = /(?:__proto__|constructor\s*\.\s*prototype|\bprocess\s*\.\s*env\b|require\s*\(|eval\s*\(|Function\s*\(|child_process)/i;
+
+function hasUnsafeAutomationTemplateString(str) {
+  if (!str) return false;
+  if (str.includes('`') || str.includes('${')) return true;
+  if (UNSAFE_TEMPLATE_EXPRESSION_RE.test(str)) return true;
+  let pos = 0;
+  while (pos < str.length) {
+    const openIdx = str.indexOf('{{', pos);
+    const strayCloseIdx = str.indexOf('}}', pos);
+    if (openIdx === -1) return strayCloseIdx !== -1;
+    if (strayCloseIdx !== -1 && strayCloseIdx < openIdx) return true;
+    const closeIdx = str.indexOf('}}', openIdx + 2);
+    if (closeIdx === -1) return true;
+    const inner = str.slice(openIdx + 2, closeIdx);
+    if (inner.includes('{{')) return true;
+    const expr = inner.trim();
+    if (!expr || !/^[a-zA-Z0-9_.\-$]+$/.test(expr)) return true;
+    const parts = expr.split('.').filter(Boolean);
+    if (!parts.length || parts.some((p) => FORBIDDEN_AUTOMATION_KEYS.has(p) || UNSAFE_TEMPLATE_PATH_SEGMENTS.has(p))) {
+      return true;
     }
-    return false;
+    pos = closeIdx + 2;
   }
-  if (value === null || value === undefined || typeof value !== 'object') return false;
+  return false;
+}
+
+function hasUnsafeAutomationTemplate(value, seen = new WeakSet()) {
+  if (typeof value === 'string') return hasUnsafeAutomationTemplateString(value);
+  if (value === null || value === undefined || typeof value !== 'object' || value instanceof Date) return false;
   if (seen.has(value)) return false;
   seen.add(value);
   if (Array.isArray(value)) return value.some((item) => hasUnsafeAutomationTemplate(item, seen));
-  return Object.entries(value).some(([k, v]) => FORBIDDEN_AUTOMATION_KEYS.has(k) || hasUnsafeAutomationTemplate(v, seen));
+  for (const key of Object.getOwnPropertyNames(value)) {
+    if (FORBIDDEN_AUTOMATION_KEYS.has(key) || hasUnsafeAutomationTemplateString(key) || hasUnsafeAutomationTemplate(value[key], seen)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isAllowlistedAutomationCollection(collectionName) {
@@ -491,6 +516,11 @@ function assertSafeAutomationInput(goalText, ruleObj, args, failTool, protectedC
     || hasUnsafeAutomationTemplate(args?.pinnedInputs)
     || hasUnsafeAutomationTemplate(args?.payload)
     || hasUnsafeAutomationTemplate(args?.runTrace)
+    || hasUnsafeAutomationTemplate(args?.configPatch)
+    || hasUnsafeAutomationTemplate(args?.config)
+    || hasUnsafeAutomationTemplate(args?.sampleEvent)
+    || hasUnsafeAutomationTemplate(args?.actionsJson)
+    || hasUnsafeAutomationTemplate(args?.filterJson)
   ) {
     throw failTool('AUTOMATION_AI_REFUSED', 400, 'Dữ liệu Graph v2 hoặc tham số chứa biểu thức template không an toàn.');
   }
@@ -1003,7 +1033,7 @@ function getSafePathLocal(root, rawPath) {
   const segments = pathStr.split('.').filter(Boolean);
   let cur = root;
   for (const seg of segments) {
-    if (FORBIDDEN_AUTOMATION_KEYS.has(seg)) return undefined;
+    if (FORBIDDEN_AUTOMATION_KEYS.has(seg) || UNSAFE_TEMPLATE_PATH_SEGMENTS.has(seg)) return undefined;
     if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
     if (Array.isArray(cur)) {
       const idx = Number(seg);
@@ -1141,20 +1171,44 @@ function matchesFilterLocal(filterJson, eventContext) {
 
 function interpolateLocal(value, context) {
   if (typeof value === 'string') {
-    const exact = value.match(/^\{\{\s*([^{}]+?)\s*\}\}$/);
-    if (exact) {
-      const expr = exact[1].trim();
+    if (value.startsWith('{{') && value.endsWith('}}') && value.indexOf('{{', 2) === -1 && value.indexOf('}}', 2) === value.length - 2) {
+      const expr = value.slice(2, -2).trim();
+      if (!expr || !/^[a-zA-Z0-9_.\-$]+$/.test(expr)) return '';
       let resolved = getSafePathLocal(context, expr);
       if (resolved === undefined && isPlainObject(context?.data)) resolved = getSafePathLocal(context.data, expr);
       return resolved === undefined ? '' : resolved;
     }
-    return value.replace(/\{\{([\s\S]*?)\}\}/g, (_m, rawExpr) => {
-      const expr = String(rawExpr || '').trim();
-      let resolved = getSafePathLocal(context, expr);
-      if (resolved === undefined && isPlainObject(context?.data)) resolved = getSafePathLocal(context.data, expr);
-      if (resolved === undefined || resolved === null) return '';
-      return typeof resolved === 'object' ? JSON.stringify(resolved) : String(resolved);
-    });
+    let out = '';
+    let pos = 0;
+    while (pos < value.length) {
+      const openIdx = value.indexOf('{{', pos);
+      if (openIdx === -1) {
+        out += value.slice(pos);
+        break;
+      }
+      const closeIdx = value.indexOf('}}', openIdx + 2);
+      if (closeIdx === -1) {
+        out += value.slice(pos);
+        break;
+      }
+      out += value.slice(pos, openIdx);
+      const inner = value.slice(openIdx + 2, closeIdx);
+      if (inner.includes('{{')) {
+        out += '{{';
+        pos = openIdx + 2;
+        continue;
+      }
+      const expr = inner.trim();
+      if (expr && /^[a-zA-Z0-9_.\-$]+$/.test(expr)) {
+        let resolved = getSafePathLocal(context, expr);
+        if (resolved === undefined && isPlainObject(context?.data)) resolved = getSafePathLocal(context.data, expr);
+        if (resolved !== undefined && resolved !== null) {
+          out += typeof resolved === 'object' ? JSON.stringify(resolved) : String(resolved);
+        }
+      }
+      pos = closeIdx + 2;
+    }
+    return out;
   }
   if (Array.isArray(value)) return value.map((item) => interpolateLocal(item, context));
   if (isPlainObject(value)) {
@@ -3109,47 +3163,47 @@ async function runResumeAutomation(ctx, db, actor, args, deps) {
 
   if (args.dryRun) {
     const runsRepo = db?.getRepository?.('latticeAutomationRuns');
-    let previewRun = null;
-    if (runsRepo && typeof runsRepo.findOne === 'function') {
-      const ownRow = await runsRepo.findOne({ filter: { organizationId: actor.organizationId, runUid } });
-      if (!ownRow) {
-        const crossRow = await runsRepo.findOne({ filter: { runUid } });
-        if (crossRow) {
-          throw failTool('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không được phép truy cập lượt chạy thuộc tổ chức khác.');
-        }
-        throw failTool('RUN_NOT_FOUND', 404, `Không tìm thấy automation run "${runUid}" trong phạm vi tổ chức.`);
-      }
-      if (val(ownRow, 'organizationId') !== actor.organizationId) {
+    if (!runsRepo || typeof runsRepo.findOne !== 'function') {
+      throw failTool('AUTOMATION_ENGINE_UNAVAILABLE', 503, 'Dịch vụ Automation (latticeAutomationRuns) chưa sẵn sàng.');
+    }
+    const ownRow = await runsRepo.findOne({ filter: { organizationId: actor.organizationId, runUid } });
+    if (!ownRow) {
+      const crossRow = await runsRepo.findOne({ filter: { runUid } });
+      if (crossRow) {
         throw failTool('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không được phép truy cập lượt chạy thuộc tổ chức khác.');
       }
-      const currentStatus = val(ownRow, 'status') || null;
-      if (currentStatus !== 'suspended') {
-        throw failTool('RUN_ALREADY_RESUMED', 409, `Lượt chạy "${runUid}" đang ở trạng thái "${currentStatus || 'unknown'}", không thể resume.`);
-      }
-      if (hasResumeTokenArg) {
-        const expectedHash = val(ownRow, 'resumeTokenHash') ? String(val(ownRow, 'resumeTokenHash')).trim() : '';
-        const expectedPlain = val(ownRow, 'resumeToken') ? String(val(ownRow, 'resumeToken')).trim() : '';
-        let tokenMatched = false;
-        if (expectedHash && /^[0-9a-f]{64}$/i.test(expectedHash)) {
-          const actualDigest = createHash('sha256').update(String(resumeToken)).digest();
-          const expectedDigest = Buffer.from(expectedHash, 'hex');
-          tokenMatched = actualDigest.length === expectedDigest.length && timingSafeEqual(actualDigest, expectedDigest);
-        } else if (expectedPlain) {
-          const actualDigest = createHash('sha256').update(String(resumeToken)).digest();
-          const expectedDigest = createHash('sha256').update(expectedPlain).digest();
-          tokenMatched = timingSafeEqual(actualDigest, expectedDigest);
-        }
-        if (!tokenMatched) {
-          throw failTool('INVALID_RESUME_TOKEN', 403, 'Token tiếp tục (resumeToken) không khớp hoặc không hợp lệ.');
-        }
-      }
-      previewRun = {
-        runUid: val(ownRow, 'runUid') || runUid,
-        ruleKey: val(ownRow, 'ruleKey') || null,
-        currentStatus,
-        suspendedNodeId: val(ownRow, 'suspendedNodeId') || null,
-      };
+      throw failTool('RUN_NOT_FOUND', 404, `Không tìm thấy automation run "${runUid}" trong phạm vi tổ chức.`);
     }
+    if (val(ownRow, 'organizationId') !== actor.organizationId) {
+      throw failTool('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không được phép truy cập lượt chạy thuộc tổ chức khác.');
+    }
+    const currentStatus = val(ownRow, 'status') || null;
+    if (currentStatus !== 'suspended') {
+      throw failTool('RUN_ALREADY_RESUMED', 409, `Lượt chạy "${runUid}" đang ở trạng thái "${currentStatus || 'unknown'}", không thể resume.`);
+    }
+    if (hasResumeTokenArg) {
+      const expectedHash = val(ownRow, 'resumeTokenHash') ? String(val(ownRow, 'resumeTokenHash')).trim() : '';
+      const expectedPlain = val(ownRow, 'resumeToken') ? String(val(ownRow, 'resumeToken')).trim() : '';
+      let tokenMatched = false;
+      if (expectedHash && /^[0-9a-f]{64}$/i.test(expectedHash)) {
+        const actualDigest = createHash('sha256').update(String(resumeToken)).digest();
+        const expectedDigest = Buffer.from(expectedHash, 'hex');
+        tokenMatched = actualDigest.length === expectedDigest.length && timingSafeEqual(actualDigest, expectedDigest);
+      } else if (expectedPlain) {
+        const actualDigest = createHash('sha256').update(String(resumeToken)).digest();
+        const expectedDigest = createHash('sha256').update(expectedPlain).digest();
+        tokenMatched = timingSafeEqual(actualDigest, expectedDigest);
+      }
+      if (!tokenMatched) {
+        throw failTool('INVALID_RESUME_TOKEN', 403, 'Token tiếp tục (resumeToken) không khớp hoặc không hợp lệ.');
+      }
+    }
+    const previewRun = {
+      runUid: val(ownRow, 'runUid') || runUid,
+      ruleKey: val(ownRow, 'ruleKey') || null,
+      currentStatus,
+      suspendedNodeId: val(ownRow, 'suspendedNodeId') || null,
+    };
     return {
       dryRun: true,
       applied: false,
@@ -3158,7 +3212,7 @@ async function runResumeAutomation(ctx, db, actor, args, deps) {
       runUid,
       decision,
       payload,
-      ...(previewRun ? { previewRun } : {}),
+      previewRun,
     };
   }
 
@@ -4190,6 +4244,9 @@ function createBuilderTools(deps) {
         }
 
         if (args.operation === 'updateNodeConfig') {
+          if (hasForbiddenProtoKeys(args.configPatch || args.config) || hasUnsafeAutomationTemplate(args.configPatch || args.config)) {
+            throw failTool('AUTOMATION_AI_REFUSED', 400, 'configPatch chứa khóa hoặc biểu thức template không an toàn.');
+          }
           const numericNodeId = args.nodeId != null && /^\d+$/.test(String(args.nodeId).trim()) ? Number(args.nodeId) : args.nodeId;
           let node = numericNodeId ? await nodeRepo.findOne({ filterByTk: numericNodeId }) : null;
           if (!node && args.workflowId && args.nodeKey) {
@@ -4342,4 +4399,4 @@ function createBuilderTools(deps) {
   ];
 }
 
-module.exports = { createBuilderTools };
+module.exports = { createBuilderTools, hasUnsafeAutomationTemplate, interpolateLocal };

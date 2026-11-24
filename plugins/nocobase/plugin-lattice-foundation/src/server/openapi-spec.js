@@ -117,7 +117,7 @@ const API_OPERATIONS = Object.freeze([
   ['/api/dxosAi:saveProfile', 'post', 'AI Workforce & MCP', 'Create or update an AI employee profile', false],
   ['/api/dxosAi:deleteProfile', 'post', 'AI Workforce & MCP', 'Delete an AI employee profile', false],
   ['/api/dxosAi:bootstrapDefaults', 'post', 'AI Workforce & MCP', 'Bootstrap default AI workforce and LLM providers', false],
-  ['/api/dxosAi:portalCopilot', 'post', 'AI Workforce & MCP', 'Invoke scoped portal AI copilot', false],
+  ['/api/dxosAi:portalAgents', 'post', 'AI Workforce & MCP', 'Invoke scoped portal AI agents', false],
   ['/api/dxosAi:auditLogs', 'get', 'AI Workforce & MCP', 'Read AI tool execution audit logs', false],
   ['/api/dxosAi:quotaSummary', 'get', 'AI Workforce & MCP', 'Read organization AI token/budget quota summary', false],
   ['/api/dxosAi:enterpriseTopology', 'get', 'AI Workforce & MCP', 'Read 6-plane enterprise topology metadata', false],

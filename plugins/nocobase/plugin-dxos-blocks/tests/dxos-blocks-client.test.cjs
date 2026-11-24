@@ -174,12 +174,12 @@ test('dxosBlockSettings stepParams take precedence over stale props and renderCo
   assert.equal(merged.title, 'Live Step Title');
 });
 
-test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when plugin-dxos-ai disabled, and triggers flowEngine AI task', async () => {
+test('Dynamic Block Agent Strip resolves portal slug, degrades silently when plugin-dxos-ai disabled, and triggers flowEngine AI task', async () => {
   const {
     inferPortalSlugFromLocation,
-    fetchPortalCopilot,
-    triggerDxosCopilot,
-    createCopilotStripElement,
+    fetchPortalAgents,
+    triggerDxosAgent,
+    createAgentStripElement,
   } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
 
   assert.equal(inferPortalSlugFromLocation('/p/logistics'), 'logistics');
@@ -191,15 +191,15 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
   const disabledApi = {
     request: async () => { throw Object.assign(new Error('Not found'), { response: { status: 404 } }); },
   };
-  const offRes = await fetchPortalCopilot(disabledApi, { portalSlug: 'logistics' });
+  const offRes = await fetchPortalAgents(disabledApi, { portalSlug: 'logistics' });
   assert.equal(offRes.pluginDisabled, true);
   assert.deepEqual(offRes.employees, []);
-  assert.equal(createCopilotStripElement(React, { employees: [], loading: false }), null);
+  assert.equal(createAgentStripElement(React, { employees: [], loading: false }), null);
 
   // Enabled response returns scoped AI employees + quickPrompts
   const activeApi = {
     request: async ({ url, params }) => {
-      assert.equal(url, 'dxosAi:portalCopilot');
+      assert.equal(url, 'dxosAi:portalAgents');
       assert.equal(params.portalSlug, 'logistics');
       return {
         data: {
@@ -216,7 +216,7 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
       };
     },
   };
-  const onRes = await fetchPortalCopilot(activeApi, { portalSlug: 'logistics' });
+  const onRes = await fetchPortalAgents(activeApi, { portalSlug: 'logistics' });
   assert.equal(onRes.pluginDisabled, false);
   assert.equal(onRes.employees.length, 1);
 
@@ -230,7 +230,7 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
       },
     },
   };
-  const triggerOut = await triggerDxosCopilot(mockApp, {
+  const triggerOut = await triggerDxosAgent(mockApp, {
     aiEmployee: 'dxos-logistics',
     prompt: 'Kiểm tra công việc logistics chờ xử lý.',
     blockTitle: 'Hộp việc Logistics',
@@ -242,14 +242,14 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
   assert.equal(triggeredCalls[0].open, true);
   assert.ok(triggeredCalls[0].tasks[0].text.includes('Hộp việc Logistics'));
 
-  const noAiOut = await triggerDxosCopilot({}, { aiEmployee: 'dxos-logistics', prompt: 'Test' });
+  const noAiOut = await triggerDxosAgent({}, { aiEmployee: 'dxos-logistics', prompt: 'Test' });
   assert.equal(noAiOut.triggered, false);
 
-  const stripEl = createCopilotStripElement(React, {
+  const stripEl = createAgentStripElement(React, {
     employees: onRes.employees,
     onRunPrompt: () => {},
   });
-  assert.ok(stripEl && stripEl.props['data-testid'] === 'dxos-block-copilot-strip');
+  assert.ok(stripEl && stripEl.props['data-testid'] === 'dxos-block-agent-strip');
 });
 
 test('DxosPortalHeroView renders clean page header with zero inline AI strips or bars even for admins', () => {
@@ -289,7 +289,7 @@ test('DxosPortalHeroView renders clean page header with zero inline AI strips or
   walk(tree);
 
   assert.ok(testIds.includes('dxos-portal-hero-block'));
-  assert.equal(testIds.includes('dxos-block-copilot-strip'), false);
+  assert.equal(testIds.includes('dxos-block-agent-strip'), false);
   assert.equal(testIds.includes('dxos-admin-architect-bar'), false);
   assert.equal(testIds.includes('dxos-picker-toggle-btn'), false);
   assert.equal(testIds.includes('dxos-rollback-page-btn'), false);

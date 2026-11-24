@@ -29,7 +29,7 @@ const ADMIN_TOOLS = [
 const OPERATIONAL_TOOLS = [
   'dxos_search_enterprise_context',
   'dxos_execute_record_action',
-  'dxos_my_tasks_copilot',
+  'dxos_my_workflow_tasks',
   'dxos_orchestrate_enterprise_case',
   'dxos_graph_impact_analysis',
   'dxos_alarm_action',
@@ -59,7 +59,7 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     employeeBuilderToolsHidden: false,
     employeeBuilderCallDenied: false,
     employeeTopology403: false,
-    employeePortalCopilotScoped: false,
+    employeePortalAgentsScoped: false,
     adminMcpInitialize: false,
     adminMcpToolsListed15: false,
     adminMcpToolsListed17: false,
@@ -115,11 +115,11 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     assert.ok(!empTopo.ok && empTopo.status === 403, `Expected 403 on dxosAi:enterpriseTopology for employee, got ${empTopo.status}`);
     checks.employeeTopology403 = true;
 
-    const empCopilot = await callActor('employee', 'dxosAi:portalCopilot?portalSlug=services');
-    assert.ok(empCopilot.ok && empCopilot.status < 300);
-    const visibleBefore = (empCopilot.data?.employees || []).map((e) => e.username);
-    assert.ok(!visibleBefore.includes('dxos-architect'), 'dxos-architect leaked into non-admin portalCopilot');
-    checks.employeePortalCopilotScoped = true;
+    const empAgents = await callActor('employee', 'dxosAi:portalAgents?portalSlug=services');
+    assert.ok(empAgents.ok && empAgents.status < 300);
+    const visibleBefore = (empAgents.data?.employees || []).map((e) => e.username);
+    assert.ok(!visibleBefore.includes('dxos-architect'), 'dxos-architect leaked into non-admin portalAgents');
+    checks.employeePortalAgentsScoped = true;
 
     // 3. Admin MCP initialize, tools/list, tools/call, resources/read (6 planes)
     const initRes = await rpcRequest('root', '/api/dxos-mcp', {
@@ -339,7 +339,7 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     assert.equal(itOtTelem.json?.result?.isError, false);
     checks.itOtMcpTelemetrySafe = true;
 
-    // 5. Dynamic Admin-created AI Employee lifecycle & portalCopilot propagation
+    // 5. Dynamic Admin-created AI Employee lifecycle & portalAgents propagation
     const saveRes = await callActor('root', 'dxosAi:saveProfile', {
       method: 'POST',
       values: {
@@ -349,16 +349,16 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
         organizationId: 'native-ui-lab',
         allowedRoles: ['ldx_employee', 'ldx_manager'],
         portalBindings: ['services'],
-        toolPermissions: { dxos_search_enterprise_context: 'ALLOW', dxos_my_tasks_copilot: 'ALLOW' },
-        quickPrompts: [{ label: 'E2E Copilot Check', prompt: 'Kiểm tra phiếu dịch vụ đang mở.' }],
+        toolPermissions: { dxos_search_enterprise_context: 'ALLOW', dxos_my_workflow_tasks: 'ALLOW' },
+        quickPrompts: [{ label: 'E2E Agent Check', prompt: 'Kiểm tra phiếu dịch vụ đang mở.' }],
       },
     });
     assert.ok(saveRes.ok && saveRes.status < 300, `saveProfile failed: ${JSON.stringify(saveRes.data)}`);
 
-    const empCopilotAfter = await callActor('employee', 'dxosAi:portalCopilot?portalSlug=services');
-    assert.ok(empCopilotAfter.ok);
-    const visibleAfter = (empCopilotAfter.data?.employees || []).map((e) => e.username);
-    assert.ok(visibleAfter.includes(customUsername), `Custom AI employee ${customUsername} missing from portalCopilot`);
+    const empAgentsAfter = await callActor('employee', 'dxosAi:portalAgents?portalSlug=services');
+    assert.ok(empAgentsAfter.ok);
+    const visibleAfter = (empAgentsAfter.data?.employees || []).map((e) => e.username);
+    assert.ok(visibleAfter.includes(customUsername), `Custom AI employee ${customUsername} missing from portalAgents`);
     checks.customAiCreatedAndVisible = true;
   } finally {
     const delRes = await callActor('root', 'dxosAi:deleteProfile', { method: 'POST', values: { username: customUsername } }).catch(() => ({ ok: false }));

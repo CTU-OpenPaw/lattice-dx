@@ -6,7 +6,7 @@
   "type": "commonjs",
   "main": "dist/server/index.js",
   "displayName": "LatticeDX AI Workforce & Enterprise MCP Gateway",
-  "description": "Admin-configurable AI Employee workforce, NocoBase Admin Builder tools, cross-department workflow copilot, 6-plane Enterprise OS topology, and two-way Streamable HTTP MCP gateway.",
+  "description": "Admin-configurable AI Employee workforce, NocoBase Admin Builder tools, cross-department workflow agent, 6-plane Enterprise OS topology, and two-way Streamable HTTP MCP gateway.",
   "files": ["dist", "server.js", "client.js", "client-v2.js", "README.md", "LICENSE"],
   "scripts": {
     "build": "node build.mjs",

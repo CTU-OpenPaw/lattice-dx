@@ -12,6 +12,8 @@ const { randomBytes } = require('node:crypto');
 const path = require('node:path');
 const {
   STARTER_AI_BLUEPRINTS,
+  LEGACY_WORKFLOW_TASKS_TOOL,
+  normalizeToolPermissionsMap,
   validateAiProfilePayload,
   recordAiAuditLog,
 } = require('./ai-schemas');
@@ -675,7 +677,7 @@ function serializeProfile(row) {
     isAdminBuilder: Boolean(val(row, 'isAdminBuilder')),
     allowSubAgentDispatch: Boolean(val(row, 'allowSubAgentDispatch')),
     allowedRoles: Array.isArray(val(row, 'allowedRoles')) ? val(row, 'allowedRoles') : [],
-    toolPermissions: val(row, 'toolPermissions') && typeof val(row, 'toolPermissions') === 'object' ? val(row, 'toolPermissions') : {},
+    toolPermissions: normalizeToolPermissionsMap(val(row, 'toolPermissions') ?? val(row, 'toolPermissionsJson')),
     mcpServers: Array.isArray(val(row, 'mcpServers')) ? val(row, 'mcpServers') : [],
     portalBindings: Array.isArray(val(row, 'portalBindings')) ? val(row, 'portalBindings') : [],
     quickPrompts: Array.isArray(val(row, 'quickPrompts')) ? val(row, 'quickPrompts') : [],
@@ -950,6 +952,26 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         profiles.push(res.profile.username);
       }
 
+      const profRepo = targetDb?.getRepository?.('latticeAiProfiles');
+      if (profRepo && typeof profRepo.find === 'function') {
+        const existingRows = (await profRepo.find({ limit: 500 })) || [];
+        const starterSet = new Set(STARTER_AI_BLUEPRINTS.map((b) => b.username));
+        for (const row of existingRows) {
+          const uname = String(val(row, 'username') || '').trim().toLowerCase();
+          if (!uname || starterSet.has(uname)) continue;
+          const rawPerms = val(row, 'toolPermissions') ?? val(row, 'toolPermissionsJson');
+          const hasLegacyKey = rawPerms && typeof rawPerms === 'object' && Object.prototype.hasOwnProperty.call(rawPerms, LEGACY_WORKFLOW_TASKS_TOOL);
+          const hasLegacyCol = val(row, 'toolPermissionsJson') !== undefined;
+          if (hasLegacyKey || hasLegacyCol) {
+            await upsertAndSyncProfile(targetDb, serializeProfile(row), {
+              actorUser,
+              defaultOrigin,
+              auditToolName: null,
+            });
+          }
+        }
+      }
+
       const llm = await ensureLocalLlmServiceRecord(targetDb, env);
       await recordAiAuditLog(targetDb, {
         actorUserId: val(actorUser, 'id') ?? null,
@@ -969,7 +991,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       if (typeof next === 'function') await next();
     },
 
-    async portalCopilot(ctx, next) {
+    async portalAgents(ctx, next) {
       const targetDb = resolveDb(ctx);
       const user = ctx?.state?.currentUser || ctx?.auth?.user;
       const userId = val(user, 'id');

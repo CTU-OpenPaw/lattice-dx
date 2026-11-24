@@ -313,7 +313,7 @@ test('validateSolutionBundle rejects privileged roles and invalid schema/collect
   // Modified incoming bundle adds 1 role and 1 AI profile
   const incoming = structuredClone(current);
   incoming.roles.push({ name: 'ldx_cold_lead', title: 'Trưởng ca lạnh', snippets: ['lattice.integrations.propose'] });
-  incoming.aiProfiles.push({ username: 'dxos-cold-copilot', nickname: 'Copilot Lạnh', organizationId: 'foreign-org', enabled: true });
+  incoming.aiProfiles.push({ username: 'dxos-cold-agent', nickname: 'Agent Kho Lạnh', organizationId: 'foreign-org', enabled: true });
 
   const diff = diffSolutionBundle(current, incoming);
   assert.equal(diff.summary.added, 2);
@@ -324,7 +324,7 @@ test('validateSolutionBundle rejects privileged roles and invalid schema/collect
   assert.equal(dryRes.dryRun, true);
   assert.equal(dryRes.applied, null);
   assert.equal(roles.some((r) => r.name === 'ldx_cold_lead'), false);
-  assert.equal(aiProfiles.some((p) => p.username === 'dxos-cold-copilot'), false);
+  assert.equal(aiProfiles.some((p) => p.username === 'dxos-cold-agent'), false);
 
   // Apply (dryRun: false) idempotently upserts scoped to caller org without escalation
   const applyRes = await importSolutionBundle(db, incoming, { dryRun: false, organizationId: 'org-a' });
@@ -335,7 +335,7 @@ test('validateSolutionBundle rejects privileged roles and invalid schema/collect
   assert.ok(newRole);
   assert.equal(newRole.allowAll, false);
   assert.equal(newRole.allowConfigure, false);
-  const newAi = aiProfiles.find((p) => p.username === 'dxos-cold-copilot');
+  const newAi = aiProfiles.find((p) => p.username === 'dxos-cold-agent');
   assert.equal(newAi.organizationId, 'org-a');
 });
 
@@ -879,11 +879,11 @@ test('Fix Round 1 (Important): AI profile toolPermissions validation & stale adm
   mixed.aiProfiles[0].toolPermissions = {
     dxos_manage_rbac_permissions: 'ALLOW',
     dxos_search_enterprise_context: 'ask',
-    dxos_my_tasks_copilot: 'OFF',
+    dxos_my_workflow_tasks: 'OFF',
   };
   await importSolutionBundle(db, mixed, { dryRun: false, organizationId: 'org-a' });
   assert.deepEqual(aiProfiles[0].toolPermissions, {
-    dxos_my_tasks_copilot: 'OFF',
+    dxos_my_workflow_tasks: 'OFF',
     dxos_search_enterprise_context: 'ASK',
   });
 });

@@ -12,9 +12,17 @@ const dns = require('node:dns');
 const net = require('node:net');
 const path = require('node:path');
 const { val, toPlain, fail, loadFoundationModule } = require('../wms-dmn-shared');
+const {
+  SENSITIVE_KEY_RE,
+  extractRawAuthorityHost,
+  isBlockedIpv6,
+  isMetadataTarget,
+  isNonCanonicalHost,
+  isPrivateOrMetaIpv4,
+  redactJsonQuotedSecrets,
+} = require('./security-helpers');
 
 const EXPLICIT_LOCAL_LLM_HOSTS = new Set(['host.docker.internal', 'localhost', '127.0.0.1']);
-const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|cookie|credential|jwt|bearer|privatekey|private_key|sessionid|session_id|passphrase|access_key|client_secret/i;
 
 function loadSiblingAiGovernance() {
   const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
@@ -46,7 +54,7 @@ function fallbackRedactPiiText(rawText) {
     [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]'],
     [/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]'],
     [/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]'],
-    [/([a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)\s*[:=]\s*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]'],
+    [/((?:["'])?[a-zA-Z0-9_.-]*(?:token|secret|password|apikey|api_key|jwt|privatekey|private_key|client_secret|access_key|credential|passphrase|sessionid|session_id|authorization|cookie)(?:["'])?\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}"']+)/gi, '$1[REDACTED]'],
     [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]'],
     [/(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?)\s*[:#=-]?\s*)\d{9,12}\b/gi, '$1[REDACTED_CCCD]'],
     [/(?<![0-9A-Za-z-])0\d{11}(?![0-9A-Za-z-])/g, '[REDACTED_CCCD]'],
@@ -72,8 +80,9 @@ function redactPiiForLlm(input) {
     if (node == null || typeof node === 'number' || typeof node === 'boolean') return node;
     if (typeof node === 'string') {
       const res = redactText(node);
-      redactedCount += Number(res?.count) || 0;
-      return res?.text ?? node;
+      const jsonFixed = redactJsonQuotedSecrets(res?.text ?? node);
+      redactedCount += (Number(res?.count) || 0) + jsonFixed.count;
+      return jsonFixed.text;
     }
     if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
     if (typeof node === 'object') {
@@ -146,55 +155,6 @@ async function resolveActiveLlmService(db, env = process.env) {
   };
 }
 
-function isNonCanonicalHost(host) {
-  const clean = String(host || '').toLowerCase().replace(/\.+$/, '');
-  if (!clean) return false;
-  if (/^\d+$/.test(clean) || /^0x[0-9a-f]+$/i.test(clean)) return true;
-  const parts = clean.split('.');
-  if (parts.length >= 1 && parts.length <= 4 && parts.every((p) => /^(?:0x[0-9a-f]+|0[0-7]*|[1-9]\d*)$/i.test(p))) {
-    return parts.length !== 4 || parts.some((p) => /^0x/i.test(p) || (p.length > 1 && p.startsWith('0')));
-  }
-  return false;
-}
-
-function isPrivateOrMetaIpv4(ip) {
-  const parts = String(ip || '').split('.');
-  if (parts.length !== 4 || !parts.every((p) => /^(?:0|[1-9]\d{0,2})$/.test(p))) return false;
-  const octets = parts.map(Number);
-  if (octets.some((n) => n < 0 || n > 255)) return true;
-  const [a, b] = octets;
-  return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 169 && b === 254)
-    || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-}
-
-function isMetadataTarget(host) {
-  const clean = String(host || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-  if (!clean) return false;
-  if (clean === 'metadata.google.internal' || clean.endsWith('.metadata.google.internal') || clean === 'metadata.azure.com'
-    || clean.endsWith('.metadata.azure.com') || clean === 'metadata.aws.internal' || clean === 'instance-data'
-    || clean === 'fd00:ec2::254') return true;
-  if (net.isIPv4(clean) && clean.startsWith('169.254.')) return true;
-  if (!clean.includes(':')) return false;
-  let norm = clean.split('%')[0];
-  try { norm = new URL(`http://[${norm}]/`).hostname.replace(/^\[|\]$/g, ''); } catch {}
-  return norm.includes('169.254.') || clean.includes('169.254.')
-    || norm.startsWith('::ffff:') || /^(?:0+:){5}ffff:/i.test(clean)
-    || /(?:^|:)a9fe:[0-9a-f]{1,4}$/i.test(norm) || /(?:^|:)a9fe:[0-9a-f]{1,4}$/i.test(clean)
-    || norm.startsWith('fe80:') || norm.startsWith('fc') || norm.startsWith('fd');
-}
-
-function extractRawAuthorityHost(rawUrl) {
-  const m = String(rawUrl || '').match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]*)/i);
-  if (!m || !m[1] || m[1].includes('@') || m[1].includes('\\')) return '';
-  const auth = m[1];
-  if (auth.startsWith('[')) {
-    const end = auth.indexOf(']');
-    return end < 0 ? '' : auth.slice(1, end).toLowerCase().replace(/\.+$/, '');
-  }
-  const colon = auth.indexOf(':');
-  return (colon >= 0 ? auth.slice(0, colon) : auth).toLowerCase().replace(/\.+$/, '');
-}
-
 async function assertSafeLlmUrl(rawUrl, { env = process.env, connectorVault, lookupImpl, allowExplicitHost = null, skipDnsCheck = false } = {}) {
   const trimmed = typeof rawUrl === 'string' ? rawUrl.trim() : '';
   if (!trimmed || trimmed.length > 2048 || /[\u0000-\u001f\u007f\s]/.test(trimmed)) {
@@ -225,7 +185,7 @@ async function assertSafeLlmUrl(rawUrl, { env = process.env, connectorVault, loo
     if (bare === 'localhost' || bare.endsWith('.localhost') || bare.endsWith('.local') || bare.endsWith('.internal')) {
       throw fail('LLM_URL_UNSAFE', 400, `Internal hostname ${bare} is blocked by SSRF policy.`);
     }
-    if ((net.isIPv4(bare) && isPrivateOrMetaIpv4(bare)) || bare.includes(':') || !bare.includes('.')) {
+    if (bare.includes(':') ? isBlockedIpv6(bare) : ((net.isIPv4(bare) && isPrivateOrMetaIpv4(bare)) || !bare.includes('.'))) {
       throw fail('LLM_URL_UNSAFE', 400, `Private, IPv6, or non-FQDN host ${bare} is blocked by SSRF policy.`);
     }
   }
@@ -244,7 +204,7 @@ async function assertSafeLlmUrl(rawUrl, { env = process.env, connectorVault, loo
     const addrs = (Array.isArray(records) ? records : (records ? [records] : [])).map((r) => (typeof r === 'string' ? r : r?.address)).filter(Boolean);
     if (!addrs.length) throw fail('LLM_URL_UNSAFE', 400, `DNS returned no addresses for ${bare}.`);
     for (const addr of addrs) {
-      if (isMetadataTarget(addr) || (!isExplicitLocal && ((net.isIPv4(addr) && isPrivateOrMetaIpv4(addr)) || addr.includes(':')))) {
+      if (isMetadataTarget(addr) || (!isExplicitLocal && ((net.isIPv4(addr) && isPrivateOrMetaIpv4(addr)) || (addr.includes(':') && isBlockedIpv6(addr))))) {
         throw fail('LLM_URL_UNSAFE', 400, `Resolved IP ${addr} for ${bare} is blocked by SSRF policy.`);
       }
     }

@@ -11,6 +11,7 @@
 const crypto = require('node:crypto');
 const path = require('node:path');
 const { fail, loadFoundationModule } = require('../../wms-dmn-shared');
+const { sanitizeOutgoingHeaders, scrubAndCapHttpBody } = require('../security-helpers');
 const { flowHelpers } = require('./triggers');
 
 const { isPlainObject, sanitizePlainObject, interpolateTemplate, buildEvalContext, resolveOrgId, pickHelper } = flowHelpers;
@@ -152,7 +153,8 @@ const integrationNodes = [
       const authHeaders = typeof vaultMod.buildConnectorAuthHeaders === 'function' ? vaultMod.buildConnectorAuthHeaders(connector.authType, secrets) : buildFallbackAuthHeaders(connector.authType, secrets);
       const bodyPayload = method === 'GET' || method === 'DELETE' ? undefined : JSON.stringify(interp(cfg.body ?? cfg.payload ?? evalCtx.data ?? {}, evalCtx));
       const hmacHeaders = connector.authType === 'hmac' ? pickHelper(helpers, 'buildHmacHeaders', buildHmacHeaders)(bodyPayload || '', secrets) : {};
-      const headers = { Accept: 'application/json', ...(bodyPayload !== undefined ? { 'Content-Type': 'application/json' } : {}), ...customHeaders, ...authHeaders, ...hmacHeaders };
+      const cleanCustom = sanitizeOutgoingHeaders(customHeaders, authHeaders, hmacHeaders);
+      const headers = { Accept: 'application/json', ...(bodyPayload !== undefined ? { 'Content-Type': 'application/json' } : {}), ...cleanCustom, ...authHeaders, ...hmacHeaders };
 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), Math.max(100, Math.min(60000, Number(cfg.timeoutMs) || DEFAULT_HTTP_TIMEOUT_MS)));
@@ -166,8 +168,15 @@ const integrationNodes = [
         try { await response?.body?.cancel?.(); } catch {}
         throw fail('CONNECTOR_HTTP_ERROR', 502, `Connector ${connectorKey} responded with HTTP ${response?.status}`);
       }
-      let responseBody = null;
-      if (typeof response.json === 'function') responseBody = await response.json().catch(() => null);
+      let rawRespBody = null;
+      if (typeof response.text === 'function') {
+        const txt = await response.text().catch(() => '');
+        if (txt.length > 65536) rawRespBody = txt.slice(0, 16384);
+        else if (txt.trim()) { try { rawRespBody = JSON.parse(txt); } catch { rawRespBody = txt; } }
+      } else if (typeof response.json === 'function') {
+        rawRespBody = await response.json().catch(() => null);
+      }
+      const responseBody = scrubAndCapHttpBody(rawRespBody, secrets);
       return { output: { connectorKey, authType: connector.authType, method, url: safePathUrl, status: response.status, ok: true, response: responseBody }, nextPort: 'main' };
     },
   },

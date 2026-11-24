@@ -38,7 +38,7 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
       deletedCustom = true;
       return { ok: true, status: 200, data: { deleted: true } };
     }
-    if (clean === 'dxosAi:portalCopilot') {
+    if (clean === 'dxosAi:portalAgents') {
       const employees = [{ username: 'dxos-workspace' }];
       if (savedUsername && !deletedCustom) employees.push({ username: savedUsername });
       return { ok: true, status: 200, data: { employees } };
@@ -69,7 +69,7 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
             { name: 'dxos_configure_workflow' },
             { name: 'dxos_search_enterprise_context' },
             { name: 'dxos_execute_record_action' },
-            { name: 'dxos_my_tasks_copilot' },
+            { name: 'dxos_my_workflow_tasks' },
             { name: 'dxos_orchestrate_enterprise_case' },
             { name: 'dxos_graph_impact_analysis' },
             { name: 'dxos_alarm_action' },
@@ -77,7 +77,7 @@ test('runDxosAiAndMcpAcceptance verifies 2-way MCP, 6-plane topology, custom AI 
           : [
             { name: 'dxos_search_enterprise_context' },
             { name: 'dxos_execute_record_action' },
-            { name: 'dxos_my_tasks_copilot' },
+            { name: 'dxos_my_workflow_tasks' },
             { name: 'dxos_orchestrate_enterprise_case' },
             { name: 'dxos_graph_impact_analysis' },
             { name: 'dxos_alarm_action' },

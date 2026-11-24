@@ -20,7 +20,7 @@ const {
 const { buildEnterpriseTopology } = require('./mcp-itot-tools');
 const { recordAiAuditLog } = require('./ai-schemas');
 const { redactPiiText, redactPiiDeep } = require('./ai-governance');
-const { analyzeGraphImpact } = require('./ai-copilot-tools');
+const { analyzeGraphImpact } = require('./ai-operational-tools');
 
 const SUPPORTED_PROTOCOL_VERSIONS = ['2025-03-26', '2024-11-05'];
 const ORG_ALARMS_URI_RE = /^dxos:\/\/org\/([a-zA-Z0-9_-]{1,80})\/alarms\/active$/;
@@ -76,7 +76,7 @@ const MCP_PROMPT_CATALOG = [
     render: ({ focusArea }) => [
       `Tạo báo cáo nhanh điều hành doanh nghiệp${focusArea ? ` (trọng tâm: ${focusArea})` : ''}:`,
       '1. Gọi dxos_orchestrate_enterprise_case(mode="radar") để tổng hợp số liệu các phân hệ được cấp quyền.',
-      '2. Gọi dxos_my_tasks_copilot(action="list") kiểm tra tác vụ tồn đọng.',
+      '2. Gọi dxos_my_workflow_tasks(action="list") kiểm tra tác vụ tồn đọng.',
       '3. Nêu rõ các điểm nghẽn ưu tiên cao nhất kèm mã tham chiếu.',
     ].join('\n'),
   },
@@ -555,7 +555,7 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
       try {
         ctx.app = app || ctx.app;
         ctx.db = activeDb;
-        if (tool.definition.name === 'dxos_my_tasks_copilot' && ctx.state.currentRoles) {
+        if (tool.definition.name === 'dxos_my_workflow_tasks' && ctx.state.currentRoles) {
           await resolveActorScope(ctx, activeDb);
         }
         const out = await tool.invoke(ctx, req.params?.arguments || {});

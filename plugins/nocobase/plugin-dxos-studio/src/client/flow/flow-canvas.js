@@ -95,9 +95,13 @@ function createFlowCanvas(React, vendor = {}) {
       else if (typeof vendor?.injectFlowCss === 'function') vendor.injectFlowCss();
     }, []);
 
+    const resetDrag = () => { handlersRef.dragPending = false; handlersRef.dragStartGraph = null; handlersRef.expectedDragGraph = null; };
+    const applyPos = (nodes, posMap) => (posMap.size ? nodes.map((n) => (posMap.has(n.id) ? { ...n, position: { x: Number(posMap.get(n.id).x), y: Number(posMap.get(n.id).y) } } : n)) : nodes);
+
     const safeGraph = graph && typeof graph === 'object' ? graph : { version: 2, nodes: [], edges: [] };
     const safeNodes = Array.isArray(safeGraph.nodes) ? safeGraph.nodes : [];
     const safeEdges = Array.isArray(safeGraph.edges) ? safeGraph.edges : [];
+    if (handlersRef.dragPending && safeGraph !== handlersRef.dragStartGraph && safeGraph !== handlersRef.expectedDragGraph) resetDrag();
 
     const schemaByType = React.useMemo(() => {
       const map = new Map();
@@ -237,14 +241,26 @@ function createFlowCanvas(React, vendor = {}) {
       if (!relevant.length) return;
       const removedIds = new Set(relevant.filter((c) => c.type === 'remove').map((c) => c.id));
       const posMap = new Map(relevant.filter((c) => c.type === 'position' && c.position).map((c) => [c.id, c.position]));
-      const nextNodes = safeNodes
-        .filter((n) => !removedIds.has(n.id))
-        .map((n) => (posMap.has(n.id) ? { ...n, position: { x: Number(posMap.get(n.id).x), y: Number(posMap.get(n.id).y) } } : n));
+      const nextNodes = applyPos(removedIds.size ? safeNodes.filter((n) => !removedIds.has(n.id)) : safeNodes, posMap);
       const nextEdges = removedIds.size
         ? safeEdges.filter((e) => !removedIds.has(e.source) && !removedIds.has(e.target))
         : safeEdges;
-      const skipUndo = changes.length > 0 && changes.every((c) => c && c.type === 'position' && c.dragging === true);
-      onNodesChangeGraph({ ...safeGraph, nodes: nextNodes, edges: nextEdges }, { skipUndo });
+      const skipUndo = relevant.length > 0 && relevant.every((c) => c.type === 'position' && c.dragging === true);
+      const nextG = { ...safeGraph, nodes: nextNodes, edges: nextEdges };
+      if (skipUndo) {
+        if (!handlersRef.dragPending) handlersRef.dragStartGraph = safeGraph;
+        handlersRef.dragPending = true;
+        handlersRef.expectedDragGraph = nextG;
+      } else resetDrag();
+      onNodesChangeGraph(nextG, { skipUndo });
+    }
+
+    function handleNodeDragStop(_evt, node, nodes) {
+      if (!handlersRef.dragPending || typeof onNodesChangeGraph !== 'function') return;
+      resetDrag();
+      const moved = Array.isArray(nodes) && nodes.length ? nodes : (node ? [node] : []);
+      const posMap = new Map(moved.filter((n) => n?.id && n?.position && Number.isFinite(Number(n.position.x)) && Number.isFinite(Number(n.position.y))).map((n) => [n.id, n.position]));
+      onNodesChangeGraph({ ...safeGraph, nodes: applyPos(safeNodes, posMap) }, { skipUndo: false });
     }
 
     function handleRfEdgesChange(changes) {
@@ -297,7 +313,7 @@ function createFlowCanvas(React, vendor = {}) {
           onNodeClick: (_evt, node) => onSelectNode?.(node?.id || null),
           onPaneClick: () => onSelectNode?.(null),
           onConnect: (params) => onConnectNodes?.(params),
-          onNodesChange: handleRfNodesChange, onEdgesChange: handleRfEdgesChange, onInit: setRfInstance,
+          onNodesChange: handleRfNodesChange, onEdgesChange: handleRfEdgesChange, onNodeDragStop: handleNodeDragStop, onInit: setRfInstance,
           fitView: true, proOptions: { hideAttribution: true },
         },
           BackgroundComp ? h(BackgroundComp, { gap: 16, size: 1, color: '#cbd5e1' }) : null,

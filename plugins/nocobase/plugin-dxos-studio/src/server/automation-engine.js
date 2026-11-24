@@ -36,6 +36,13 @@ const {
   runFlowArchitect,
 } = require('./flow/architect');
 const flowRegistry = require('./flow/registry');
+const {
+  getOrmTriggerDepth,
+  resolveTrustedOrgId,
+  runAutomationWithRls,
+  runWithOrmDepth,
+  sanitizeOutgoingHeaders,
+} = require('./flow/security-helpers');
 const getFlowExecutor = () => require('./flow/executor');
 const {
   assertPatScope,
@@ -141,7 +148,7 @@ function getSafePath(root, rawPath) {
   let current = root;
   for (const seg of segments) {
     if (BLOCKED_PATH_SEGMENTS.has(seg)) return undefined;
-    if (current === null || current === undefined || (typeof current !== 'object' && typeof current !== 'function')) {
+    if (current === null || current === undefined || typeof current !== 'object') {
       return undefined;
     }
     if (Array.isArray(current)) {
@@ -481,14 +488,20 @@ function validateRulePayload(payload) {
   const isV2 = Number(payload.schemaVersion) === 2 || isPlainObject(payload.graphJson);
   let normalizedGraph = null;
   let normalizedDraft = null;
-  if (isPlainObject(payload.graphJson)) {
+  if (payload.graphJson !== undefined && payload.graphJson !== null) {
+    if (!isPlainObject(payload.graphJson)) {
+      throw fail('FLOW_INVALID_GRAPH', 400, 'graphJson must be a plain object or null');
+    }
     const gRes = validateFlowGraph(payload.graphJson, { nodeRegistry: flowRegistry, requireTrigger: true });
     if (!gRes.ok) {
       throw fail(gRes.errors[0]?.code || 'FLOW_INVALID_GRAPH', 400, gRes.errors[0]?.message || 'Invalid flow graph');
     }
     normalizedGraph = gRes.graph;
   }
-  if (isPlainObject(payload.draftGraphJson)) {
+  if (payload.draftGraphJson !== undefined && payload.draftGraphJson !== null) {
+    if (!isPlainObject(payload.draftGraphJson)) {
+      throw fail('FLOW_INVALID_GRAPH', 400, 'draftGraphJson must be a plain object or null');
+    }
     const dRes = validateFlowGraph(payload.draftGraphJson, { nodeRegistry: flowRegistry, requireTrigger: false });
     if (!dRes.ok) {
       throw fail(dRes.errors[0]?.code || 'FLOW_INVALID_GRAPH', 400, dRes.errors[0]?.message || 'Invalid draft flow graph');
@@ -806,7 +819,9 @@ async function executeActionStep({
       const rawValues = interpolateTemplate(action.values || action.data || action.payload || {}, eventContext);
       const values = sanitizeAutomationWriteValues(targetCollection, rawValues);
       values.organizationId = organizationId;
-      const created = await repo.create({ values });
+      const baseDepth = eventContext?.depth !== undefined && eventContext?.depth !== null ? Number(eventContext.depth) : getOrmTriggerDepth();
+      const nextDepth = (Number.isFinite(baseDepth) && baseDepth >= 0 ? baseDepth : 0) + 1;
+      const created = await runWithOrmDepth(nextDepth, () => repo.create({ values }));
       const plain = toPlain(created) || {};
       output = {
         collection: targetCollection,
@@ -838,7 +853,9 @@ async function executeActionStep({
       const existing = await repo.find({ filter: scopedFilter, limit: Number(action.limit || 20) });
       const list = Array.isArray(existing) ? existing : [];
       if (list.length > 0 && typeof repo.update === 'function') {
-        await repo.update({ filter: scopedFilter, values });
+        const baseDepth = eventContext?.depth !== undefined && eventContext?.depth !== null ? Number(eventContext.depth) : getOrmTriggerDepth();
+        const nextDepth = (Number.isFinite(baseDepth) && baseDepth >= 0 ? baseDepth : 0) + 1;
+        await runWithOrmDepth(nextDepth, () => repo.update({ filter: scopedFilter, values }));
       }
       output = {
         collection: targetCollection,
@@ -943,10 +960,11 @@ async function executeActionStep({
           ? undefined
           : JSON.stringify(interpolateTemplate(action.body ?? action.payload ?? eventContext.data ?? {}, eventContext));
       const hmacHeaders = connector.authType === 'hmac' ? buildHmacHeaders(bodyPayload || '', secrets) : {};
+      const cleanCustom = sanitizeOutgoingHeaders(customHeaders, authHeaders, hmacHeaders);
       const headers = {
         Accept: 'application/json',
         ...(bodyPayload !== undefined ? { 'Content-Type': 'application/json' } : {}),
-        ...customHeaders,
+        ...cleanCustom,
         ...authHeaders,
         ...hmacHeaders,
       };
@@ -1135,7 +1153,7 @@ async function executeActionStep({
 
 async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
   const rule = toPlain(ruleRow) || {};
-  const authOrgId = String(rule.organizationId || options.organizationId || '').trim();
+  const authOrgId = resolveTrustedOrgId(options.organizationId, rule.organizationId, 'Rule belongs to another organization');
   const scopedOpts = authOrgId ? { ...options, organizationId: authOrgId } : options;
   if (
     Number(rule.schemaVersion) === 2
@@ -1160,7 +1178,8 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
   const runsRepo = db.getRepository('latticeAutomationRuns');
   const rulesRepo = db.getRepository('latticeAutomationRules');
 
-  const finalizeRun = async (fields) => {
+  return runAutomationWithRls(db, organizationId, async () => {
+    const finalizeRun = async (fields) => {
     const finishedAt = new Date();
     const record = {
       organizationId,
@@ -1344,51 +1363,53 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
   }
 
   const stepTraces = [];
-  for (let i = 0; i < actions.length; i += 1) {
-    const act = actions[i] || {};
-    const type = String(act.type || '').trim();
-    const label = typeof act.label === 'string' && act.label.trim() ? act.label.trim() : null;
-    const branchLabel = typeof act.branchLabel === 'string' && act.branchLabel.trim() ? act.branchLabel.trim() : null;
+  await runWithOrmDepth(depth + 1, async () => {
+    for (let i = 0; i < actions.length; i += 1) {
+      const act = actions[i] || {};
+      const type = String(act.type || '').trim();
+      const label = typeof act.label === 'string' && act.label.trim() ? act.label.trim() : null;
+      const branchLabel = typeof act.branchLabel === 'string' && act.branchLabel.trim() ? act.branchLabel.trim() : null;
 
-    if (isPlainObject(act.when) && Object.keys(act.when).length > 0 && !matchesFilter(act.when, eventContext)) {
-      eventContext.steps[i] = { status: 'skipped', type, output: null };
-      stepTraces.push({
+      if (isPlainObject(act.when) && Object.keys(act.when).length > 0 && !matchesFilter(act.when, eventContext)) {
+        eventContext.steps[i] = { status: 'skipped', type, output: null };
+        stepTraces.push({
+          stepIndex: i,
+          type,
+          ...(label ? { label } : {}),
+          ...(branchLabel ? { branchLabel } : {}),
+          status: 'skipped',
+          skipReason: 'BRANCH_CONDITION_NOT_MATCHED',
+          output: null,
+          error: null,
+          durationMs: 0,
+        });
+        continue;
+      }
+
+      const trace = await executeActionStep({
+        action: act,
         stepIndex: i,
-        type,
-        ...(label ? { label } : {}),
-        ...(branchLabel ? { branchLabel } : {}),
-        status: 'skipped',
-        skipReason: 'BRANCH_CONDITION_NOT_MATCHED',
-        output: null,
-        error: null,
-        durationMs: 0,
+        organizationId,
+        eventContext,
+        rule,
+        db,
+        app,
+        options,
       });
-      continue;
+      if (label) trace.label = label;
+      if (branchLabel) trace.branchLabel = branchLabel;
+      stepTraces.push(trace);
+      eventContext.steps[i] = {
+        ...(isPlainObject(trace.output) ? trace.output : {}),
+        status: trace.status,
+        type: trace.type,
+        output: trace.output,
+      };
+      if (trace.status === 'failed' && act.stopOnError === true) {
+        break;
+      }
     }
-
-    const trace = await executeActionStep({
-      action: act,
-      stepIndex: i,
-      organizationId,
-      eventContext,
-      rule,
-      db,
-      app,
-      options,
-    });
-    if (label) trace.label = label;
-    if (branchLabel) trace.branchLabel = branchLabel;
-    stepTraces.push(trace);
-    eventContext.steps[i] = {
-      ...(isPlainObject(trace.output) ? trace.output : {}),
-      status: trace.status,
-      type: trace.type,
-      output: trace.output,
-    };
-    if (trace.status === 'failed' && act.stopOnError === true) {
-      break;
-    }
-  }
+  });
 
   const failedSteps = stepTraces.filter((s) => s.status === 'failed');
   const completedSteps = stepTraces.filter((s) => s.status === 'completed');
@@ -1413,6 +1434,7 @@ async function executeRuleAgainstEvent(db, ruleRow, rawEvent, options = {}) {
     stepTracesJson: stepTraces,
     errorMessage: failedSteps.length > 0 ? failedSteps.map((s) => s.error).join('; ') : null,
   });
+  });
 }
 
 async function handleDomainEvent(db, cloudEvent, options = {}) {
@@ -1420,27 +1442,34 @@ async function handleDomainEvent(db, cloudEvent, options = {}) {
   if (!evt.organizationId) return [];
   const rulesRepo = db.getRepository('latticeAutomationRules');
   if (!rulesRepo) return [];
-  const rows = await rulesRepo.find({
-    filter: { organizationId: evt.organizationId, active: true },
-    limit: 500,
-  });
-  const candidates = (Array.isArray(rows) ? rows : []).filter((row) =>
-    matchesEventPatternLocal(val(row, 'triggerEventType') || '*', evt.type),
-  );
-  const runs = [];
-  for (const row of candidates) {
-    try {
-      const run = await executeRuleAgainstEvent(db, row, evt, options);
-      runs.push(run);
-    } catch (err) {
-      runs.push({
-        ruleKey: val(row, 'ruleKey'),
-        status: 'failed',
-        errorMessage: err?.message || String(err),
-      });
+  return runAutomationWithRls(db, evt.organizationId, async () => {
+    const rows = await rulesRepo.find({
+      filter: { organizationId: evt.organizationId, active: true },
+      limit: 500,
+    });
+    const candidates = (Array.isArray(rows) ? rows : []).filter((row) => {
+      const p = toPlain(row) || {};
+      const trigIdx = Array.isArray(p.triggerIndexJson) && p.triggerIndexJson.length
+        ? p.triggerIndexJson
+        : (p.graphJson?.nodes?.length ? buildTriggerIndex(p.graphJson, p) : []);
+      if (trigIdx.length > 0 && trigIdx.every((t) => t?.triggerType === 'webhook')) return false;
+      return matchesEventPatternLocal(val(row, 'triggerEventType') || '*', evt.type);
+    });
+    const runs = [];
+    for (const row of candidates) {
+      try {
+        const run = await executeRuleAgainstEvent(db, row, evt, options);
+        runs.push(run);
+      } catch (err) {
+        runs.push({
+          ruleKey: val(row, 'ruleKey'),
+          status: 'failed',
+          errorMessage: err?.message || String(err),
+        });
+      }
     }
-  }
-  return runs;
+    return runs;
+  });
 }
 
 function createAutomationDirectGuardMiddleware(db, foundationOverride) {
@@ -1493,10 +1522,12 @@ function registerAutomationEventListener(app, db, options = {}) {
   let active = true;
   const unsubscribe = registerFn(async (cloudEvent, meta = {}) => {
     if (!active) return;
-    await handleDomainEvent(meta.db || db, cloudEvent, {
+    const targetDb = meta.db || db;
+    const orgId = String(cloudEvent?.organizationId || cloudEvent?.organizationid || cloudEvent?.data?.organizationId || '').trim();
+    await runAutomationWithRls(targetDb, orgId, () => handleDomainEvent(targetDb, cloudEvent, {
       ...options,
       app: meta.app || app,
-    });
+    }));
   });
 
   return {
@@ -1527,12 +1558,14 @@ function registerRecordTriggerHooks(app, db, options = {}) {
         const record = toPlain(model) || {};
         const orgId = String(record.organizationId || hookOpts?.organizationId || '').trim();
         if (!orgId) return;
+        const targetDb = hookOpts?.db || db;
+        const depth = getOrmTriggerDepth(hookOpts);
         try {
-          await getFlowExecutor().dispatchRecordTriggerEvent(
-            hookOpts?.db || db,
-            { collection: col, operation: op, organizationId: orgId, recordId: val(model, 'id') ?? record.id ?? null, record, data: record, depth: Number(hookOpts?.depth || 0) },
+          await runAutomationWithRls(targetDb, orgId, () => getFlowExecutor().dispatchRecordTriggerEvent(
+            targetDb,
+            { collection: col, operation: op, organizationId: orgId, recordId: val(model, 'id') ?? record.id ?? null, record, data: record, depth },
             { ...options, app: hookOpts?.app || app },
-          );
+          ));
         } catch (err) {
           app?.logger?.error?.('[dxosFlow] Record hook dispatch failed', { collection: col, operation: op, error: err?.message || String(err) });
         }
@@ -1679,6 +1712,14 @@ function appendStepViaFlowGraph({ targetRule, targetGraph, prompt, sampleEvent }
   };
 }
 
+function sanitizeRunRecord(row) {
+  const plain = toPlain(row);
+  if (!plain) return plain;
+  delete plain.resumeTokenHash;
+  delete plain.resumeToken;
+  return plain;
+}
+
 function createDxosAutomationsActions(db, options = {}) {
   const foundation = options.foundation || loadFoundationSet();
 
@@ -1737,16 +1778,16 @@ function createDxosAutomationsActions(db, options = {}) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
-      const repo = db.getRepository('latticeAutomationRules');
-      const filter = { organizationId };
-      if (params.active !== undefined) filter.active = params.active === true || params.active === 'true';
-      if (params.triggerEventType) filter.triggerEventType = String(params.triggerEventType);
-      const limit = clampPageLimit(params.limit ?? params.pageSize);
-      const rawOffset = Number(params.offset);
-      const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
-      const rows = repo
-        ? await repo.find({ filter, sort: ['-updatedAt', '-id'], limit, offset })
-        : [];
+      const rows = await runAutomationWithRls(db, organizationId, () => {
+        const repo = db.getRepository('latticeAutomationRules');
+        const filter = { organizationId };
+        if (params.active !== undefined) filter.active = params.active === true || params.active === 'true';
+        if (params.triggerEventType) filter.triggerEventType = String(params.triggerEventType);
+        const limit = clampPageLimit(params.limit ?? params.pageSize);
+        const rawOffset = Number(params.offset);
+        const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
+        return repo ? repo.find({ filter, sort: ['-updatedAt', '-id'], limit, offset }) : [];
+      });
       ctx.body = { items: (Array.isArray(rows) ? rows : []).map(toPlain) };
       return next();
     },
@@ -1758,7 +1799,7 @@ function createDxosAutomationsActions(db, options = {}) {
         allowedPatScopes: ['write', 'ai', 'iot'],
       });
       const validated = validateRulePayload(isPlainObject(params.rule) ? params.rule : params);
-      const saved = await upsertAutomationRule(organizationId, validated, actor);
+      const saved = await runAutomationWithRls(db, organizationId, () => upsertAutomationRule(organizationId, validated, actor));
       ctx.body = { rule: toPlain(saved) };
       return next();
     },
@@ -1771,16 +1812,14 @@ function createDxosAutomationsActions(db, options = {}) {
       });
       const ruleKey = String(params.ruleKey || params.automationCode || '').trim();
       if (!ruleKey) throw fail('MISSING_RULE_KEY', 400, 'ruleKey is required');
-      const repo = db.getRepository('latticeAutomationRules');
-      const existing = repo ? await repo.findOne({ filter: { organizationId, ruleKey } }) : null;
-      if (!existing) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
-
-      const nextActive = params.active !== undefined ? Boolean(params.active) : !Boolean(val(existing, 'active'));
-      await repo.update({
-        filter: { organizationId, ruleKey },
-        values: { active: nextActive },
+      const updated = await runAutomationWithRls(db, organizationId, async () => {
+        const repo = db.getRepository('latticeAutomationRules');
+        const existing = repo ? await repo.findOne({ filter: { organizationId, ruleKey } }) : null;
+        if (!existing) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
+        const nextActive = params.active !== undefined ? Boolean(params.active) : !Boolean(val(existing, 'active'));
+        await repo.update({ filter: { organizationId, ruleKey }, values: { active: nextActive } });
+        return repo.findOne({ filter: { organizationId, ruleKey } });
       });
-      const updated = await repo.findOne({ filter: { organizationId, ruleKey } });
       ctx.body = { rule: toPlain(updated) };
       return next();
     },
@@ -1793,10 +1832,12 @@ function createDxosAutomationsActions(db, options = {}) {
       });
       const ruleKey = String(params.ruleKey || params.automationCode || '').trim();
       if (!ruleKey) throw fail('MISSING_RULE_KEY', 400, 'ruleKey is required');
-      const repo = db.getRepository('latticeAutomationRules');
-      const existing = repo ? await repo.findOne({ filter: { organizationId, ruleKey } }) : null;
-      if (!existing) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
-      await repo.destroy({ filter: { organizationId, ruleKey } });
+      await runAutomationWithRls(db, organizationId, async () => {
+        const repo = db.getRepository('latticeAutomationRules');
+        const existing = repo ? await repo.findOne({ filter: { organizationId, ruleKey } }) : null;
+        if (!existing) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
+        await repo.destroy({ filter: { organizationId, ruleKey } });
+      });
       ctx.body = { deleted: true, ruleKey };
       return next();
     },
@@ -1805,32 +1846,32 @@ function createDxosAutomationsActions(db, options = {}) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId, actor } = await requireOrgRoles(ctx, params, { mutating: false });
-      const repo = db.getRepository('latticeAutomationRules');
-
-      let ruleObj = null;
-      if (isPlainObject(params.rule)) {
-        ruleObj = { ...validateRulePayload(params.rule), organizationId };
-      } else if (params.ruleKey || params.automationCode) {
-        const key = String(params.ruleKey || params.automationCode).trim();
-        const found = repo ? await repo.findOne({ filter: { organizationId, ruleKey: key } }) : null;
-        if (!found) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${key} not found`);
-        ruleObj = toPlain(found);
-      } else {
-        ruleObj = { ...validateRulePayload(params), organizationId };
-      }
-
-      const rawEvent = params.event || params.sampleEvent || params.context || params.data || params.payload || {};
-      const scopedEvent = isPlainObject(rawEvent)
-        ? { ...sanitizePlainObject(rawEvent), organizationId, organizationid: organizationId }
-        : rawEvent;
-      const simulation = await executeRuleAgainstEvent(db, ruleObj, scopedEvent, {
-        ...options,
-        organizationId,
-        app: ctx?.app || db?.app,
-        actor,
-        dryRun: true,
-        ignoreCooldown: true,
-        useDraft: Boolean(params.useDraft),
+      const simulation = await runAutomationWithRls(db, organizationId, async () => {
+        const repo = db.getRepository('latticeAutomationRules');
+        let ruleObj = null;
+        if (isPlainObject(params.rule)) {
+          ruleObj = { ...validateRulePayload(params.rule), organizationId };
+        } else if (params.ruleKey || params.automationCode) {
+          const key = String(params.ruleKey || params.automationCode).trim();
+          const found = repo ? await repo.findOne({ filter: { organizationId, ruleKey: key } }) : null;
+          if (!found) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${key} not found`);
+          ruleObj = toPlain(found);
+        } else {
+          ruleObj = { ...validateRulePayload(params), organizationId };
+        }
+        const rawEvent = params.event || params.sampleEvent || params.context || params.data || params.payload || {};
+        const scopedEvent = isPlainObject(rawEvent)
+          ? { ...sanitizePlainObject(rawEvent), organizationId, organizationid: organizationId }
+          : rawEvent;
+        return executeRuleAgainstEvent(db, ruleObj, scopedEvent, {
+          ...options,
+          organizationId,
+          app: ctx?.app || db?.app,
+          actor,
+          dryRun: true,
+          ignoreCooldown: true,
+          useDraft: Boolean(params.useDraft),
+        });
       });
       ctx.body = { simulation };
       return next();
@@ -1844,31 +1885,31 @@ function createDxosAutomationsActions(db, options = {}) {
       });
       const ruleKey = String(params.ruleKey || params.automationCode || '').trim();
       if (!ruleKey) throw fail('MISSING_RULE_KEY', 400, 'ruleKey or automationCode is required');
-      const repo = db.getRepository('latticeAutomationRules');
-      const ruleRow = repo ? await repo.findOne({ filter: { organizationId, ruleKey } }) : null;
-      if (!ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
-
-      const defaultEventType = String(val(ruleRow, 'triggerEventType') || 'manual.trigger').split(',')[0].trim() || 'manual.trigger';
-      const baseEventPayload = isPlainObject(params.event)
-        ? sanitizePlainObject(params.event)
-        : isPlainObject(params.sampleEvent)
-          ? sanitizePlainObject(params.sampleEvent)
-          : {
-              id: params.eventId,
-              type: params.eventType || defaultEventType,
-              source: params.source || 'dxos-studio:manual',
-              subject: params.subject,
-              depth: params.depth ?? 0,
-              data: params.data || params.context || params.payload || {},
-            };
-      const eventPayload = { ...baseEventPayload, organizationId, organizationid: organizationId };
-
-      const run = await executeRuleAgainstEvent(db, ruleRow, eventPayload, {
-        ...options,
-        organizationId,
-        app: ctx?.app || db?.app,
-        actor,
-        ignoreCooldown: params.ignoreCooldown !== false,
+      const run = await runAutomationWithRls(db, organizationId, async () => {
+        const repo = db.getRepository('latticeAutomationRules');
+        const ruleRow = repo ? await repo.findOne({ filter: { organizationId, ruleKey } }) : null;
+        if (!ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${ruleKey} not found`);
+        const defaultEventType = String(val(ruleRow, 'triggerEventType') || 'manual.trigger').split(',')[0].trim() || 'manual.trigger';
+        const baseEventPayload = isPlainObject(params.event)
+          ? sanitizePlainObject(params.event)
+          : isPlainObject(params.sampleEvent)
+            ? sanitizePlainObject(params.sampleEvent)
+            : {
+                id: params.eventId,
+                type: params.eventType || defaultEventType,
+                source: params.source || 'dxos-studio:manual',
+                subject: params.subject,
+                depth: params.depth ?? 0,
+                data: params.data || params.context || params.payload || {},
+              };
+        const eventPayload = { ...baseEventPayload, organizationId, organizationid: organizationId };
+        return executeRuleAgainstEvent(db, ruleRow, eventPayload, {
+          ...options,
+          organizationId,
+          app: ctx?.app || db?.app,
+          actor,
+          ignoreCooldown: params.ignoreCooldown !== false,
+        });
       });
       ctx.body = { run };
       return next();
@@ -1878,17 +1919,17 @@ function createDxosAutomationsActions(db, options = {}) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
-      const repo = db.getRepository('latticeAutomationRuns');
-      const filter = { organizationId };
-      if (params.ruleKey) filter.ruleKey = String(params.ruleKey).trim();
-      if (params.status) filter.status = String(params.status).trim();
-      const limit = clampPageLimit(params.limit ?? params.pageSize);
-      const rawOffset = Number(params.offset);
-      const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
-      const rows = repo
-        ? await repo.find({ filter, sort: ['-startedAt', '-id'], limit, offset })
-        : [];
-      ctx.body = { items: (Array.isArray(rows) ? rows : []).map(toPlain) };
+      const rows = await runAutomationWithRls(db, organizationId, () => {
+        const repo = db.getRepository('latticeAutomationRuns');
+        const filter = { organizationId };
+        if (params.ruleKey) filter.ruleKey = String(params.ruleKey).trim();
+        if (params.status) filter.status = String(params.status).trim();
+        const limit = clampPageLimit(params.limit ?? params.pageSize);
+        const rawOffset = Number(params.offset);
+        const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
+        return repo ? repo.find({ filter, sort: ['-startedAt', '-id'], limit, offset }) : [];
+      });
+      ctx.body = { items: (Array.isArray(rows) ? rows : []).map(sanitizeRunRecord) };
       return next();
     },
 
@@ -1896,15 +1937,17 @@ function createDxosAutomationsActions(db, options = {}) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
-      const repo = db.getRepository('latticeAutomationRuns');
       const runUid = params.runUid ? String(params.runUid).trim() : null;
       const filter = runUid ? { organizationId, runUid } : { organizationId, id: params.id };
       if (!runUid && params.id === undefined) {
         throw fail('MISSING_RUN_ID', 400, 'runUid or id is required');
       }
-      const row = repo ? await repo.findOne({ filter }) : null;
+      const row = await runAutomationWithRls(db, organizationId, () => {
+        const repo = db.getRepository('latticeAutomationRuns');
+        return repo ? repo.findOne({ filter }) : null;
+      });
       if (!row) throw fail('RUN_NOT_FOUND', 404, 'Automation run not found');
-      ctx.body = { run: toPlain(row) };
+      ctx.body = { run: sanitizeRunRecord(row) };
       return next();
     },
 
@@ -1914,57 +1957,38 @@ function createDxosAutomationsActions(db, options = {}) {
         mutating: true,
         allowedPatScopes: ['write', 'ai', 'iot'],
       });
-      const runsRepo = db.getRepository('latticeAutomationRuns');
-      const rulesRepo = db.getRepository('latticeAutomationRules');
       const runUid = params.runUid ? String(params.runUid).trim() : null;
       const runFilter = runUid ? { organizationId, runUid } : { organizationId, id: params.id };
       if (!runUid && params.id === undefined) {
         throw fail('MISSING_RUN_ID', 400, 'runUid or id is required');
       }
-      const origRow = runsRepo ? await runsRepo.findOne({ filter: runFilter }) : null;
-      if (!origRow) throw fail('RUN_NOT_FOUND', 404, 'Automation run not found');
-      const orig = toPlain(origRow);
-
-      const ruleRow = rulesRepo
-        ? await rulesRepo.findOne({ filter: { organizationId, ruleKey: orig.ruleKey } })
-        : null;
-      if (!ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${orig.ruleKey} not found`);
-
-      let eventEnvelope = params.event ? normalizeIncomingEvent(params.event, organizationId) : null;
-      if (!eventEnvelope && orig.triggerEventId) {
-        const busRepo = db.getRepository('latticeEventBus');
-        const busRow = busRepo
-          ? await busRepo.findOne({ filter: { organizationId, eventId: orig.triggerEventId } })
-          : null;
-        if (busRow) {
-          const payloadJson = toPlain(busRow).payloadJson || {};
-          eventEnvelope = normalizeIncomingEvent(payloadJson, organizationId);
+      const { replay, orig } = await runAutomationWithRls(db, organizationId, async () => {
+        const runsRepo = db.getRepository('latticeAutomationRuns');
+        const rulesRepo = db.getRepository('latticeAutomationRules');
+        const origRow = runsRepo ? await runsRepo.findOne({ filter: runFilter }) : null;
+        if (!origRow) throw fail('RUN_NOT_FOUND', 404, 'Automation run not found');
+        const origRun = toPlain(origRow);
+        const ruleRow = rulesRepo ? await rulesRepo.findOne({ filter: { organizationId, ruleKey: origRun.ruleKey } }) : null;
+        if (!ruleRow) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${origRun.ruleKey} not found`);
+        let eventEnvelope = params.event ? normalizeIncomingEvent(params.event, organizationId) : null;
+        if (!eventEnvelope && origRun.triggerEventId) {
+          const busRepo = db.getRepository('latticeEventBus');
+          const busRow = busRepo ? await busRepo.findOne({ filter: { organizationId, eventId: origRun.triggerEventId } }) : null;
+          if (busRow) eventEnvelope = normalizeIncomingEvent(toPlain(busRow).payloadJson || {}, organizationId);
         }
-      }
-      if (!eventEnvelope && orig.runUid && recentRunEventSnapshots.has(orig.runUid)) {
-        eventEnvelope = { ...recentRunEventSnapshots.get(orig.runUid) };
-      }
-      if (!eventEnvelope) {
-        eventEnvelope = normalizeIncomingEvent(
-          {
-            id: orig.triggerEventId,
-            type: orig.triggerEventType,
-            organizationId,
-            data: params.data || {},
-          },
-          organizationId,
-        );
-      }
-      eventEnvelope.organizationId = organizationId;
-      eventEnvelope.organizationid = organizationId;
-      eventEnvelope.depth = Number(orig.depth || 0) + 1;
-
-      const replay = await executeRuleAgainstEvent(db, ruleRow, eventEnvelope, {
-        ...options,
-        organizationId,
-        app: ctx?.app || db?.app,
-        actor,
-        ignoreCooldown: true,
+        if (!eventEnvelope && origRun.runUid && recentRunEventSnapshots.has(origRun.runUid)) {
+          eventEnvelope = { ...recentRunEventSnapshots.get(origRun.runUid) };
+        }
+        if (!eventEnvelope) {
+          eventEnvelope = normalizeIncomingEvent({ id: origRun.triggerEventId, type: origRun.triggerEventType, organizationId, data: params.data || {} }, organizationId);
+        }
+        eventEnvelope.organizationId = organizationId;
+        eventEnvelope.organizationid = organizationId;
+        eventEnvelope.depth = Number(origRun.depth || 0) + 1;
+        const rep = await executeRuleAgainstEvent(db, ruleRow, eventEnvelope, {
+          ...options, organizationId, app: ctx?.app || db?.app, actor, ignoreCooldown: true,
+        });
+        return { replay: rep, orig: origRun };
       });
       ctx.body = { run: replay, replayedFromRunUid: orig.runUid };
       return next();
@@ -1974,7 +1998,7 @@ function createDxosAutomationsActions(db, options = {}) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
       const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
-      ctx.body = await buildFlowStudioCatalog(db, organizationId, { env: options.env || process.env });
+      ctx.body = await runAutomationWithRls(db, organizationId, () => buildFlowStudioCatalog(db, organizationId, { env: options.env || process.env }));
       return next();
     },
 
@@ -1984,78 +2008,68 @@ function createDxosAutomationsActions(db, options = {}) {
         mutating: true,
         allowedPatScopes: ['write', 'ai', 'iot'],
       });
-      const rulesRepo = db.getRepository('latticeAutomationRules');
-      const runsRepo = db.getRepository('latticeAutomationRuns');
-      const requestedMode = String(params.mode || '').trim().toLowerCase();
-      let targetRule = params.rule !== undefined ? params.rule : null;
-      const targetGraph = params.graph !== undefined ? params.graph : params.graphJson;
-      const requestedRuleKey = String(params.ruleKey || params.automationCode || '').trim();
-      if (targetRule === null && requestedRuleKey && rulesRepo) {
-        const found = await rulesRepo.findOne({ filter: { organizationId, ruleKey: requestedRuleKey } });
-        if (found) {
-          targetRule = toPlain(found);
-        } else if (requestedMode === 'node') {
-          throw fail('RULE_NOT_FOUND', 404, `Automation rule ${requestedRuleKey} not found`);
+      const body = await runAutomationWithRls(db, organizationId, async () => {
+        const rulesRepo = db.getRepository('latticeAutomationRules');
+        const runsRepo = db.getRepository('latticeAutomationRuns');
+        const requestedMode = String(params.mode || '').trim().toLowerCase();
+        let targetRule = params.rule !== undefined ? params.rule : null;
+        const targetGraph = params.graph !== undefined ? params.graph : params.graphJson;
+        const requestedRuleKey = String(params.ruleKey || params.automationCode || '').trim();
+        if (targetRule === null && requestedRuleKey && rulesRepo) {
+          const found = await rulesRepo.findOne({ filter: { organizationId, ruleKey: requestedRuleKey } });
+          if (found) targetRule = toPlain(found);
+          else if (requestedMode === 'node') throw fail('RULE_NOT_FOUND', 404, `Automation rule ${requestedRuleKey} not found`);
         }
-      }
 
-      let runTrace = params.runTrace !== undefined ? params.runTrace : null;
-      const requestedRunUid = String(params.runUid || (isPlainObject(runTrace) ? runTrace.runUid : '') || '').trim();
-      if ((runTrace === null || (isPlainObject(runTrace) && !runTrace.nodeStatesJson && !runTrace.stepTracesJson)) && requestedRunUid) {
-        const foundRun = runsRepo ? await runsRepo.findOne({ filter: { organizationId, runUid: requestedRunUid } }) : null;
-        if (!foundRun) {
-          throw fail('RUN_NOT_FOUND', 404, `Automation run ${requestedRunUid} not found`);
+        let runTrace = params.runTrace !== undefined ? params.runTrace : null;
+        const requestedRunUid = String(params.runUid || (isPlainObject(runTrace) ? runTrace.runUid : '') || '').trim();
+        if ((runTrace === null || (isPlainObject(runTrace) && !runTrace.nodeStatesJson && !runTrace.stepTracesJson)) && requestedRunUid) {
+          const foundRun = runsRepo ? await runsRepo.findOne({ filter: { organizationId, runUid: requestedRunUid } }) : null;
+          if (!foundRun) throw fail('RUN_NOT_FOUND', 404, `Automation run ${requestedRunUid} not found`);
+          const plainRun = toPlain(foundRun);
+          runTrace = isPlainObject(runTrace) ? { ...plainRun, ...runTrace } : plainRun;
         }
-        const plainRun = toPlain(foundRun);
-        runTrace = isPlainObject(runTrace) ? { ...plainRun, ...runTrace } : plainRun;
-      }
-      if (targetRule === null && !isPlainObject(targetGraph) && runTrace?.ruleKey && rulesRepo) {
-        const traceRule = await rulesRepo.findOne({ filter: { organizationId, ruleKey: String(runTrace.ruleKey).trim() } });
-        if (traceRule) targetRule = toPlain(traceRule);
-      }
+        if (targetRule === null && !isPlainObject(targetGraph) && runTrace?.ruleKey && rulesRepo) {
+          const traceRule = await rulesRepo.findOne({ filter: { organizationId, ruleKey: String(runTrace.ruleKey).trim() } });
+          if (traceRule) targetRule = toPlain(traceRule);
+        }
 
-      const rawTarget = String(params.targetNodeId || params.targetNode || '').trim();
-      let result = await runFlowArchitect({
-        db,
-        env: options.env || process.env,
-        mode: params.mode,
-        prompt: params.prompt,
-        rule: targetRule,
-        graph: targetGraph,
-        targetNodeId: params.targetNodeId,
-        targetNode: params.targetNode,
-        runTrace,
-        organizationId,
-        fetchImpl: options.fetchImpl,
-        lookupImpl: options.lookupImpl,
-        ...(params.sampleEvent !== undefined ? { sampleEvent: params.sampleEvent } : {}),
-      });
-      if (
-        result?.refused
-        && requestedMode === 'node'
-        && ['step:append', 'actions', 'step:new'].includes(rawTarget.toLowerCase())
-        && /Target node "(?:step:append|actions|step:new)" not found/i.test(String(result.error || ''))
-      ) {
-        const appended = appendStepViaFlowGraph({
-          targetRule,
-          targetGraph,
+        const rawTarget = String(params.targetNodeId || params.targetNode || '').trim();
+        let result = await runFlowArchitect({
+          db,
+          env: options.env || process.env,
+          mode: params.mode,
           prompt: params.prompt,
-          sampleEvent: params.sampleEvent,
+          rule: targetRule,
+          ...(requestedRuleKey ? { ruleKey: requestedRuleKey } : {}),
+          graph: targetGraph,
+          targetNodeId: params.targetNodeId,
+          targetNode: params.targetNode,
+          runTrace,
+          organizationId,
+          fetchImpl: options.fetchImpl,
+          lookupImpl: options.lookupImpl,
+          ...(params.sampleEvent !== undefined ? { sampleEvent: params.sampleEvent } : {}),
         });
-        if (appended) result = appended;
-      }
-      if (result?.refused) {
-        throw fail('AI_ASSIST_REFUSED', 400, result.error || 'Flow Architect request refused');
-      }
+        if (
+          result?.refused
+          && requestedMode === 'node'
+          && ['step:append', 'actions', 'step:new'].includes(rawTarget.toLowerCase())
+          && /Target node "(?:step:append|actions|step:new)" not found/i.test(String(result.error || ''))
+        ) {
+          const appended = appendStepViaFlowGraph({ targetRule, targetGraph, prompt: params.prompt, sampleEvent: params.sampleEvent });
+          if (appended) result = appended;
+        }
+        if (result?.refused) throw fail('AI_ASSIST_REFUSED', 400, result.error || 'Flow Architect request refused');
 
-      if (params.apply === true && result.draftRule) {
-        const validated = validateRulePayload(result.draftRule);
-        const saved = await upsertAutomationRule(organizationId, validated, actor);
-        ctx.body = { ...result, applied: true, savedRule: toPlain(saved) };
-        return next();
-      }
-
-      ctx.body = { ...result, applied: false };
+        if (params.apply === true && result.draftRule) {
+          const validated = validateRulePayload(result.draftRule);
+          const saved = await upsertAutomationRule(organizationId, validated, actor);
+          return { ...result, applied: true, savedRule: toPlain(saved) };
+        }
+        return { ...result, applied: false };
+      });
+      ctx.body = body;
       return next();
     },
 
@@ -2074,24 +2088,26 @@ function createDxosAutomationsActions(db, options = {}) {
         mutating: isLive,
         allowedPatScopes: isLive ? ['write', 'ai', 'iot'] : ['read', 'write', 'ai', 'iot'],
       });
-      let ruleObj = isPlainObject(params.rule) ? { ...sanitizePlainObject(params.rule), organizationId } : null;
-      const inlineGraph = isPlainObject(params.graph)
-        ? { ...sanitizePlainObject(params.graph), organizationId }
-        : (isPlainObject(params.graphJson) ? { ...sanitizePlainObject(params.graphJson), organizationId } : null);
-      if (!inlineGraph && !ruleObj && (params.ruleKey || params.automationCode)) {
-        const key = String(params.ruleKey || params.automationCode).trim();
-        const found = await db.getRepository('latticeAutomationRules')?.findOne({ filter: { organizationId, ruleKey: key } });
-        if (!found) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${key} not found`);
-        ruleObj = toPlain(found);
-      }
-      const result = await getFlowExecutor().testSingleFlowNode(db, {
-        graph: inlineGraph,
-        rule: ruleObj,
-        nodeId: params.nodeId,
-        pinnedInputs: params.pinnedInputs || params.input || {},
-        organizationId,
-        actor,
-        options: { ...options, organizationId, app: ctx?.app || db?.app, dryRun: !isLive, live: isLive, useDraft: Boolean(params.useDraft) },
+      const result = await runAutomationWithRls(db, organizationId, async () => {
+        let ruleObj = isPlainObject(params.rule) ? { ...sanitizePlainObject(params.rule), organizationId } : null;
+        const inlineGraph = isPlainObject(params.graph)
+          ? { ...sanitizePlainObject(params.graph), organizationId }
+          : (isPlainObject(params.graphJson) ? { ...sanitizePlainObject(params.graphJson), organizationId } : null);
+        if (!inlineGraph && !ruleObj && (params.ruleKey || params.automationCode)) {
+          const key = String(params.ruleKey || params.automationCode).trim();
+          const found = await db.getRepository('latticeAutomationRules')?.findOne({ filter: { organizationId, ruleKey: key } });
+          if (!found) throw fail('RULE_NOT_FOUND', 404, `Automation rule ${key} not found`);
+          ruleObj = toPlain(found);
+        }
+        return getFlowExecutor().testSingleFlowNode(db, {
+          graph: inlineGraph,
+          rule: ruleObj,
+          nodeId: params.nodeId,
+          pinnedInputs: params.pinnedInputs || params.input || {},
+          organizationId,
+          actor,
+          options: { ...options, organizationId, app: ctx?.app || db?.app, dryRun: !isLive, live: isLive, useDraft: Boolean(params.useDraft) },
+        });
       });
       ctx.body = { result };
       return next();
@@ -2122,18 +2138,16 @@ function createDxosAutomationsActions(db, options = {}) {
       const headers = ctx?.request?.headers || ctx?.headers || {};
       const organizationId = String(params.organizationId || params.orgId || headers['x-organization-id'] || '').trim();
       const ruleKey = String(params.ruleKey || params.automationCode || '').trim();
-      const rawBody = ctx?.request?.rawBody ?? (typeof ctx?.request?.body === 'string' ? ctx.request.body : undefined);
-      const parsedBody = isPlainObject(ctx?.request?.body)
-        ? ctx.request.body
-        : (isPlainObject(params.payload) ? params.payload : (isPlainObject(params.body) ? params.body : undefined));
-      const res = await getFlowExecutor().dispatchWebhookIngress(db, {
+      const rawBody = ctx?.request?.rawBody ?? (typeof ctx?.request?.body === 'string' || Buffer.isBuffer(ctx?.request?.body) ? ctx.request.body : undefined);
+      const parsedBody = isPlainObject(ctx?.request?.body) ? ctx.request.body : undefined;
+      const res = await runAutomationWithRls(db, organizationId, () => getFlowExecutor().dispatchWebhookIngress(db, {
         organizationId,
         ruleKey,
         headers,
         rawBody,
         parsedBody,
         options: { ...options, app: ctx?.app || db?.app },
-      });
+      }));
       ctx.body = { ok: true, run: { runUid: res.runUid, status: res.status } };
       return next();
     },

@@ -547,7 +547,7 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     return {
       intent: 'MY_TASKS',
       refused: false,
-      toolName: 'dxos_my_tasks_copilot',
+      toolName: 'dxos_my_workflow_tasks',
       args: { action: 'list' },
     };
   }

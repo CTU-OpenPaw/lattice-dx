@@ -2217,3 +2217,200 @@ test('all server automation & Flow Architect files satisfy CTU-OpenPaw SPDX head
     `Legacy ${legacyFilename} must be removed`,
   );
 });
+
+test('Whole-Delta P1 & P2 regressions in automation-engine: getSafePath, validateRulePayload, resumeTokenHash strip, trigger.webhook exclusion, ruleKey, webhookIngress query ignore, RLS', async () => {
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+
+  try {
+    // P2-1: getSafePath rejects functions
+    const fnObj = () => 'x';
+    fnObj.prop = 'leaked';
+    assert.equal(automationModule.getSafePath(fnObj, 'prop'), undefined);
+
+    // P2-3: validateRulePayload throws 400 FLOW_INVALID_GRAPH on non-null non-object graphJson / draftGraphJson
+    for (const badField of [
+      { graphJson: 'not-an-object' },
+      { graphJson: ['array'] },
+      { draftGraphJson: 123 },
+      { draftGraphJson: true },
+    ]) {
+      assert.throws(
+        () => validateRulePayload({ ruleKey: 'bad_graph_type', name: 'Bad', ...badField }),
+        (err) => err.status === 400 && err.code === 'FLOW_INVALID_GRAPH',
+      );
+    }
+
+    const whSecret = 'wh-engine-test-secret';
+    const db = makeInMemoryDb({
+      latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+      rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+      latticeAutomationRules: [
+        {
+          organizationId: 'org-a',
+          ruleKey: 'wh_only_rule',
+          name: 'Webhook Only',
+          triggerEventType: 'webhook.inbound',
+          schemaVersion: 2,
+          triggerIndexJson: [{ nodeId: 'wh1', triggerType: 'webhook', eventType: 'webhook.inbound', webhookPath: '/in' }],
+          graphJson: {
+            version: 2,
+            nodes: [
+              { id: 'wh1', type: 'trigger.webhook', config: { webhookPath: '/in', authMode: 'hmac' } },
+              { id: 'c1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: '{{data.code}}' } } },
+            ],
+            edges: [{ id: 'e1', source: 'wh1', target: 'c1' }],
+          },
+          active: true,
+        },
+      ],
+      latticeAutomationRuns: [
+        {
+          id: 1,
+          organizationId: 'org-a',
+          ruleKey: 'wh_only_rule',
+          runUid: 'run_with_hash',
+          status: 'suspended',
+          resumeTokenHash: 'sensitive_sha256_hash_value',
+          startedAt: new Date(),
+        },
+      ],
+      latticeConnectors: [
+        {
+          organizationId: 'org-a',
+          connectorKey: 'webhook:wh_only_rule',
+          connectorType: 'webhook',
+          baseUrl: 'https://partner.example.com',
+          authType: 'hmac',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ webhookSecret: whSecret }, process.env),
+          active: true,
+        },
+      ],
+    });
+    const actions = createDxosAutomationsActions(db);
+
+    // P2-10a: listRuns & getRunTrace strip resumeTokenHash
+    const lrCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: {} });
+    await actions.listRuns(lrCtx, async () => {});
+    assert.equal(lrCtx.body.items.length, 1);
+    assert.equal(lrCtx.body.items[0].resumeTokenHash, undefined);
+
+    const gtCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { runUid: 'run_with_hash' } });
+    await actions.getRunTrace(gtCtx, async () => {});
+    assert.equal(gtCtx.body.run.resumeTokenHash, undefined);
+
+    // P2-10b: handleDomainEvent excludes trigger.webhook rules from generic webhook.inbound event bus messages
+    const busRuns = await automationModule.handleDomainEvent(db, {
+      organizationId: 'org-a',
+      type: 'webhook.inbound',
+      data: { code: 'SPOOFED-BUS' },
+    });
+    assert.equal(busRuns.length, 0);
+    assert.equal((db.store.latticeServiceTickets || []).length, 0);
+
+    // P2-10d: aiAssist full mode preserves params.ruleKey when creating new rule
+    const assistCtx = makeCtx({
+      userId: 20,
+      role: 'ldx_admin',
+      params: { mode: 'full', ruleKey: 'explicit_new_flow_key', prompt: 'Tạo phiếu trên latticeServiceTickets khi tạo bản ghi', apply: true },
+    });
+    await actions.aiAssist(assistCtx, async () => {});
+    assert.equal(assistCtx.body.draftRule.ruleKey, 'explicit_new_flow_key');
+    assert.equal(assistCtx.body.savedRule.ruleKey, 'explicit_new_flow_key');
+
+    // P1-4: webhookIngress ignores query params.payload / params.body when rawBody is signed
+    const rawWh = JSON.stringify({ code: 'REAL-RAW-WH' });
+    const sigWh = 'sha256=' + crypto.createHmac('sha256', whSecret).update(rawWh, 'utf8').digest('hex');
+    const whCtx = makeCtx({
+      params: { organizationId: 'org-a', ruleKey: 'wh_only_rule' },
+    });
+    whCtx.headers = { 'x-lattice-signature-256': sigWh };
+    whCtx.query = { payload: { code: 'EVIL-QUERY-PAYLOAD' }, body: { code: 'EVIL-QUERY-BODY' } };
+    whCtx.request = { rawBody: rawWh, headers: whCtx.headers };
+    await actions.webhookIngress(whCtx, async () => {});
+    assert.equal(db.store.latticeServiceTickets[0].code, 'REAL-RAW-WH');
+
+    // P1-9: registerAutomationEventListener, registerRecordTriggerHooks, webhookIngress wrap in runWithOptionalRls when DX_PG_RLS_SESSION=true
+    const prevRls = process.env.DX_PG_RLS_SESSION;
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const rlsLog = [];
+    let busCb = null;
+    try {
+      const rlsDb = makeInMemoryDb({
+        latticeConnectors: db.store.latticeConnectors,
+        latticeAutomationRules: [
+          ...db.store.latticeAutomationRules,
+          {
+            organizationId: 'org-a',
+            ruleKey: 'evt_rls_rule',
+            name: 'Evt RLS',
+            triggerEventType: 'ticket.ping',
+            actionsJson: [],
+            active: true,
+          },
+          {
+            organizationId: 'org-a',
+            ruleKey: 'rec_rls_rule',
+            name: 'Rec RLS',
+            schemaVersion: 2,
+            triggerIndexJson: [{ nodeId: 't1', triggerType: 'record', collection: 'latticeOrders', operation: 'create' }],
+            graphJson: { version: 2, nodes: [{ id: 't1', type: 'trigger.record', config: { collection: 'latticeOrders', operation: 'create' } }], edges: [] },
+            active: true,
+          },
+        ],
+      });
+      rlsDb.sequelize = {
+        getDialect: () => 'postgres',
+        async transaction(fn) { return fn({ id: 'tx-eng' }); },
+        async query(sql, opts) {
+          rlsLog.push({ sql: String(sql), orgId: opts?.replacements?.orgId || null });
+          return [[], { rowCount: 1 }];
+        },
+      };
+      const hooks = new Map();
+      rlsDb.on = (ev, fn) => {
+        const list = hooks.get(ev) || [];
+        list.push(fn);
+        hooks.set(ev, list);
+      };
+      rlsDb.off = (ev, fn) => {
+        hooks.set(ev, (hooks.get(ev) || []).filter((f) => f !== fn));
+      };
+      rlsDb.emitHook = async (ev, model, opts) => {
+        for (const fn of hooks.get(ev) || []) await fn(model, opts);
+      };
+      const mockApp = {
+        latticeEvents: {
+          registerEventBusListener(fn) { busCb = fn; return () => {}; },
+        },
+      };
+      const evHandle = automationModule.registerAutomationEventListener(mockApp, rlsDb);
+      const recHandle = automationModule.registerRecordTriggerHooks(mockApp, rlsDb);
+      try {
+        await busCb({ organizationId: 'org-a', type: 'ticket.ping', data: {} });
+        assert.ok(rlsLog.some((q) => q.sql.includes("set_config('app.current_org'") && q.orgId === 'org-a'));
+        rlsLog.length = 0;
+
+        await rlsDb.emitHook('latticeOrders.afterCreate', { id: 1, organizationId: 'org-a' });
+        assert.ok(rlsLog.some((q) => q.sql.includes("set_config('app.current_org'") && q.orgId === 'org-a'));
+        rlsLog.length = 0;
+
+        const rlsActions = createDxosAutomationsActions(rlsDb);
+        const rlsWhCtx = makeCtx({ params: { organizationId: 'org-a', ruleKey: 'wh_only_rule' } });
+        rlsWhCtx.headers = { 'x-lattice-signature-256': sigWh };
+        rlsWhCtx.request = { rawBody: rawWh, headers: rlsWhCtx.headers };
+        await rlsActions.webhookIngress(rlsWhCtx, async () => {});
+        assert.ok(rlsLog.some((q) => q.sql.includes("set_config('app.current_org'") && q.orgId === 'org-a'));
+      } finally {
+        evHandle.stop();
+        recHandle.stop();
+      }
+    } finally {
+      if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+      else process.env.DX_PG_RLS_SESSION = prevRls;
+    }
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});

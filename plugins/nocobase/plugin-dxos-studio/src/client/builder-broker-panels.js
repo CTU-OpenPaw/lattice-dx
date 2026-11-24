@@ -52,9 +52,30 @@ function formatTs(value) {
   return s.length > 19 ? s.slice(0, 19).replace('T', ' ') : s;
 }
 
+const BLOCKED_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function stripProtoKeys(value, seen = new WeakSet()) {
+  if (value == null || typeof value !== 'object') return value;
+  if (seen.has(value)) return undefined;
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((item) => stripProtoKeys(item, seen));
+  const out = {};
+  for (const key of Object.keys(value)) {
+    if (BLOCKED_PROTO_KEYS.has(key)) continue;
+    const next = stripProtoKeys(value[key], seen);
+    if (next !== undefined) out[key] = next;
+  }
+  return out;
+}
+
+function parseJsonSafe(rawText) {
+  const reviver = (k, v) => (BLOCKED_PROTO_KEYS.has(k) ? undefined : v);
+  return stripProtoKeys(JSON.parse(String(rawText || ''), reviver));
+}
+
 function safeJsonParse(rawText, label) {
   try {
-    return { ok: true, value: JSON.parse(String(rawText || '')) };
+    return { ok: true, value: parseJsonSafe(rawText) };
   } catch {
     return { ok: false, error: `${label} không phải JSON hợp lệ.` };
   }
@@ -295,62 +316,81 @@ function createBrokerAndEventsPanel(client, React, _antd, app) {
       signingSecret: '',
     });
 
+    const [loadSeqRef] = React.useState(() => ({ current: 0 }));
+
     React.useEffect(() => {
+      loadSeqRef.current += 1;
+      setLoading(false);
       setProvisionedSecret(null);
+      setDevices([]);
+      setOrionData({
+        orionReachable: false,
+        brokerConfigured: false,
+        matched: [],
+        orionOnly: [],
+        localOnly: [],
+        subscriptions: [],
+      });
+      setEvents([]);
+      setWebhookSubs([]);
+      setDeliveries([]);
     }, [effectiveOrg]);
 
     const loadAll = React.useCallback(async () => {
       const clientApi = runtimeRef.api;
       if (!clientApi?.request) return;
+      const seq = (loadSeqRef.current += 1);
+      const reqOrg = effectiveOrg;
+      const reqOrgPayload = { ...orgPayload };
+      const isFresh = () => seq === loadSeqRef.current;
+      let errReported = false;
+      const onErr = (err) => {
+        if (isFresh() && !errReported) {
+          errReported = true;
+          reportFeedback({ type: 'error', text: extractError(err, 'Không tải được đầy đủ dữ liệu Broker & Sự kiện.') });
+        }
+      };
       setLoading(true);
       try {
-        const calls = [
-          clientApi.request({ url: 'dxosBroker:listDevices', method: 'get', params: { ...orgPayload, limit: 100 }, skipNotify: true }),
-          effectiveOrg
-            ? clientApi.request({ url: 'dxosBroker:orionEntities', method: 'get', params: orgPayload, skipNotify: true })
-            : Promise.resolve({ data: { data: { orionReachable: false, brokerConfigured: false, matched: [], orionOnly: [], localOnly: [] } } }),
-          clientApi.request({ url: 'dxosBroker:orionListSubscriptions', method: 'get', params: orgPayload, skipNotify: true }),
-          clientApi.request({ url: 'dxosEvents:listEvents', method: 'get', params: { ...orgPayload, limit: 30 }, skipNotify: true }),
-          clientApi.request({ url: 'dxosEvents:listSubscriptions', method: 'get', params: orgPayload, skipNotify: true }),
-          clientApi.request({ url: 'dxosEvents:listDeliveries', method: 'get', params: { ...orgPayload, limit: 50 }, skipNotify: true }),
-        ];
-        const results = await Promise.allSettled(calls);
-        const firstErr = results.find((r) => r.status === 'rejected');
-        if (firstErr) {
-          reportFeedback({ type: 'error', text: extractError(firstErr.reason, 'Không tải được đầy đủ dữ liệu Broker & Sự kiện.') });
-        }
-        if (results[0].status === 'fulfilled') {
-          const d = unwrapData(results[0].value);
-          setDevices(Array.isArray(d.items) ? d.items : []);
-        }
-        const entRes = results[1].status === 'fulfilled' ? unwrapData(results[1].value) : {};
-        const subRes = results[2].status === 'fulfilled' ? unwrapData(results[2].value) : {};
-        if (results[1].status === 'fulfilled' || results[2].status === 'fulfilled') {
-          setOrionData((prev) => ({
-            orionReachable: Boolean(entRes.orionReachable ?? subRes.orionReachable ?? prev.orionReachable),
-            brokerConfigured: Boolean(entRes.brokerConfigured ?? prev.brokerConfigured),
-            matched: Array.isArray(entRes.matched) ? entRes.matched : prev.matched,
-            orionOnly: Array.isArray(entRes.orionOnly) ? entRes.orionOnly : prev.orionOnly,
-            localOnly: Array.isArray(entRes.localOnly) ? entRes.localOnly : prev.localOnly,
-            subscriptions: Array.isArray(subRes.items) ? subRes.items : prev.subscriptions,
-          }));
-        }
-        if (results[3].status === 'fulfilled') {
-          const d = unwrapData(results[3].value);
-          setEvents(Array.isArray(d.items) ? d.items : []);
-        }
-        if (results[4].status === 'fulfilled') {
-          const d = unwrapData(results[4].value);
-          setWebhookSubs(Array.isArray(d.items) ? d.items : []);
-        }
-        if (results[5].status === 'fulfilled') {
-          const d = unwrapData(results[5].value);
-          setDeliveries(Array.isArray(d.items) ? d.items : []);
-        }
+        await Promise.allSettled([
+          clientApi.request({ url: 'dxosBroker:listDevices', method: 'get', params: { ...reqOrgPayload, limit: 100 }, skipNotify: true })
+            .then((res) => { if (isFresh()) { const d = unwrapData(res); setDevices(Array.isArray(d.items) ? d.items : []); } }, onErr),
+          (reqOrg
+            ? clientApi.request({ url: 'dxosBroker:orionEntities', method: 'get', params: reqOrgPayload, skipNotify: true })
+            : Promise.resolve({ data: { data: { orionReachable: false, brokerConfigured: false, matched: [], orionOnly: [], localOnly: [] } } }))
+            .then((res) => {
+              if (!isFresh()) return;
+              const d = unwrapData(res);
+              setOrionData((prev) => ({
+                ...prev,
+                orionReachable: Boolean(d.orionReachable ?? prev.orionReachable),
+                brokerConfigured: Boolean(d.brokerConfigured ?? prev.brokerConfigured),
+                matched: Array.isArray(d.matched) ? d.matched : prev.matched,
+                orionOnly: Array.isArray(d.orionOnly) ? d.orionOnly : prev.orionOnly,
+                localOnly: Array.isArray(d.localOnly) ? d.localOnly : prev.localOnly,
+              }));
+            }, onErr),
+          clientApi.request({ url: 'dxosBroker:orionListSubscriptions', method: 'get', params: reqOrgPayload, skipNotify: true })
+            .then((res) => {
+              if (!isFresh()) return;
+              const d = unwrapData(res);
+              setOrionData((prev) => ({
+                ...prev,
+                orionReachable: Boolean(prev.orionReachable || d.orionReachable),
+                subscriptions: Array.isArray(d.items) ? d.items : prev.subscriptions,
+              }));
+            }, onErr),
+          clientApi.request({ url: 'dxosEvents:listEvents', method: 'get', params: { ...reqOrgPayload, limit: 30 }, skipNotify: true })
+            .then((res) => { if (isFresh()) { const d = unwrapData(res); setEvents(Array.isArray(d.items) ? d.items : []); } }, onErr),
+          clientApi.request({ url: 'dxosEvents:listSubscriptions', method: 'get', params: reqOrgPayload, skipNotify: true })
+            .then((res) => { if (isFresh()) { const d = unwrapData(res); setWebhookSubs(Array.isArray(d.items) ? d.items : []); } }, onErr),
+          clientApi.request({ url: 'dxosEvents:listDeliveries', method: 'get', params: { ...reqOrgPayload, limit: 50 }, skipNotify: true })
+            .then((res) => { if (isFresh()) { const d = unwrapData(res); setDeliveries(Array.isArray(d.items) ? d.items : []); } }, onErr),
+        ]);
       } catch (err) {
-        reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Broker & Sự kiện.') });
+        onErr(err);
       } finally {
-        setLoading(false);
+        if (isFresh()) setLoading(false);
       }
     }, [effectiveOrg, hasApi]);
 
@@ -1488,42 +1528,53 @@ function createDomainBuilderAndTenantsPanel(client, React, _antd, app) {
       adminPassword: '',
     });
 
+    const [loadSeqRef] = React.useState(() => ({ current: 0 }));
+
+    React.useEffect(() => {
+      loadSeqRef.current += 1;
+      setLoading(false);
+      setDomains([]);
+      setPacks([DEFAULT_CMMS_PACK]);
+      setTenants([]);
+    }, [effectiveOrg]);
+
     const loadAll = React.useCallback(async () => {
       const clientApi = runtimeRef.api;
       if (!clientApi?.request) return;
+      const seq = (loadSeqRef.current += 1);
+      const reqOrgPayload = { ...orgPayload };
+      const isFresh = () => seq === loadSeqRef.current;
+      let errReported = false;
+      const onErr = (err) => {
+        if (isFresh() && !errReported) {
+          errReported = true;
+          reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Domain Builder & Tenant.') });
+        }
+      };
       setLoading(true);
       try {
-        const results = await Promise.allSettled([
-          clientApi.request({ url: 'dxosBuilder:listDomains', method: 'get', params: orgPayload, skipNotify: true }),
-          clientApi.request({ url: 'dxosBuilder:listBusinessPacks', method: 'get', params: orgPayload, skipNotify: true }),
-          clientApi.request({ url: 'dxosBuilder:listTenants', method: 'get', skipNotify: true }),
+        await Promise.allSettled([
+          clientApi.request({ url: 'dxosBuilder:listDomains', method: 'get', params: reqOrgPayload, skipNotify: true })
+            .then((res) => { if (isFresh()) { const d = unwrapData(res); setDomains(Array.isArray(d.items) ? d.items : []); } }, onErr),
+          clientApi.request({ url: 'dxosBuilder:listBusinessPacks', method: 'get', params: reqOrgPayload, skipNotify: true })
+            .then((res) => {
+              if (!isFresh()) return;
+              const d = unwrapData(res);
+              const items = Array.isArray(d.items) ? d.items : [];
+              if (items.length) {
+                const hasCmms = items.some((p) => p.packKey === 'cmms-maintenance');
+                setPacks(hasCmms ? items : [DEFAULT_CMMS_PACK, ...items]);
+              } else {
+                setPacks([DEFAULT_CMMS_PACK]);
+              }
+            }, onErr),
+          clientApi.request({ url: 'dxosBuilder:listTenants', method: 'get', skipNotify: true })
+            .then((res) => { if (isFresh()) { const d = unwrapData(res); setTenants(Array.isArray(d.items) ? d.items : []); } }, onErr),
         ]);
-        const firstErr = results.find((r) => r.status === 'rejected');
-        if (firstErr) {
-          reportFeedback({ type: 'error', text: extractError(firstErr.reason, 'Không tải được dữ liệu Domain Builder & Tenant.') });
-        }
-        if (results[0].status === 'fulfilled') {
-          const d = unwrapData(results[0].value);
-          setDomains(Array.isArray(d.items) ? d.items : []);
-        }
-        if (results[1].status === 'fulfilled') {
-          const d = unwrapData(results[1].value);
-          const items = Array.isArray(d.items) ? d.items : [];
-          if (items.length) {
-            const hasCmms = items.some((p) => p.packKey === 'cmms-maintenance');
-            setPacks(hasCmms ? items : [DEFAULT_CMMS_PACK, ...items]);
-          } else {
-            setPacks([DEFAULT_CMMS_PACK]);
-          }
-        }
-        if (results[2].status === 'fulfilled') {
-          const d = unwrapData(results[2].value);
-          setTenants(Array.isArray(d.items) ? d.items : []);
-        }
       } catch (err) {
-        reportFeedback({ type: 'error', text: extractError(err, 'Không tải được dữ liệu Domain Builder & Tenant.') });
+        onErr(err);
       } finally {
-        setLoading(false);
+        if (isFresh()) setLoading(false);
       }
     }, [effectiveOrg, hasApi]);
 
@@ -1975,6 +2026,9 @@ function makeDirectPanelWrapper(factory) {
 }
 
 module.exports = {
+  stripProtoKeys,
+  parseJsonSafe,
+  safeJsonParse,
   createBuilderBrokerPanels,
   createBrokerAndEventsPanel,
   createVaultAndAutomationPanel,

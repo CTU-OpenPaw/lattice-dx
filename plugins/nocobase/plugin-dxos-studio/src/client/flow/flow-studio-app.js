@@ -48,13 +48,19 @@ const INP = { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', 
 const unwrap = (r) => r?.data?.data ?? r?.data ?? {};
 const errMsg = (e, fb) => e?.response?.data?.errors?.[0]?.message || e?.response?.data?.message || e?.message || fb;
 const primaryEvt = (a, b) => String(a || b || 'manual.trigger').split(',')[0].trim() || 'manual.trigger';
+const isPolicyRefusal = (e, msg) => ['AI_ASSIST_REFUSED', 'AUTOMATION_AI_REFUSED'].includes(e?.response?.data?.errors?.[0]?.code || e?.response?.data?.code || e?.code)
+  || (Number(e?.response?.status ?? e?.status) === 400 && /refus|unsafe|inject|forbidden|proto/i.test(String(msg || '')));
+const syncMeta = (s, cdVal, mdVal) => {
+  const [cd, md] = [cdVal ?? s?.cooldownSec, mdVal ?? s?.maxDepth];
+  return { ...(cd != null && cd !== '' && Number.isFinite(Number(cd)) ? { cooldownSec: Number(cd) } : {}), ...(md != null && md !== '' && Number.isFinite(Number(md)) ? { maxDepth: Number(md) } : {}) };
+};
 const btnS = (pri, dng, dis) => ({
   padding: '5px 10px', borderRadius: 6, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', cursor: dis ? 'not-allowed' : 'pointer',
   border: `1px solid ${dis ? '#cbd5e1' : dng ? '#dc2626' : pri ? '#1677ff' : '#cbd5e1'}`,
   background: dis ? '#e2e8f0' : dng ? '#dc2626' : pri ? '#1677ff' : '#ffffff', color: dis ? '#94a3b8' : (pri || dng) ? '#ffffff' : '#1e293b',
 });
 
-const freshDoc = (seed) => { const b = makeBlankFlow(seed); return { rule: b.rule, graph: b.graph, undo: [], redo: [], selId: b.graph.nodes[0]?.id || 'trig_1' }; };
+const freshDoc = (seed) => { const b = makeBlankFlow(seed); return { rule: b.rule, graph: b.graph, undo: [], redo: [], selId: b.graph.nodes[0]?.id || 'trig_1', preDragGraph: null }; };
 const FRESH = { data: { rules: [], runs: [], catalog: null, regTypes: [], loading: false }, run: { selectedRun: null, idx: 0, playing: false, testOut: null, archRes: null }, ui: { archOpen: false, bpOpen: false, insertEdge: null, fb: null, busy: {} } };
 
 function createFlowStudioApp(client, React, _antd, app) {
@@ -86,11 +92,9 @@ function createFlowStudioApp(client, React, _antd, app) {
     const nextId = (pfx, g = doc.graph) => nextCollisionFreeId(pfx, g);
     const setRunWithIdx = (r) => setRunUi((s) => ({ ...s, playing: false, selectedRun: r, idx: Math.max(0, getRunTraces(r).length - 1) }));
     const applyRule = React.useCallback((r) => {
-      const g = ruleToGraph(r);
-      refs.initDone = true;
-      setDoc({ rule: { ...r, cooldownSec: g.settings.cooldownSec, maxDepth: g.settings.maxDepth }, graph: g, undo: [], redo: [], selId: g.nodes[0]?.id || null });
-      setRunUi((s) => ({ ...s, testOut: null }));
-      setUi((u) => ({ ...u, insertEdge: null }));
+      const g = ruleToGraph(r); refs.initDone = true;
+      setDoc({ rule: { ...r, cooldownSec: g.settings.cooldownSec, maxDepth: g.settings.maxDepth }, graph: g, undo: [], redo: [], selId: g.nodes[0]?.id || null, preDragGraph: null });
+      setRunUi((s) => ({ ...s, testOut: null })); setUi((u) => ({ ...u, insertEdge: null }));
     }, []);
 
     React.useEffect(() => {
@@ -145,11 +149,10 @@ function createFlowStudioApp(client, React, _antd, app) {
 
     const commitGraph = (nextG, nextSel, rulePatch, opts = {}) => setDoc((d) => {
       const g = typeof nextG === 'function' ? nextG(d.graph) : nextG;
-      return {
-        ...d, ...(opts.skipUndo ? {} : { undo: [...d.undo.slice(-39), d.graph], redo: [] }), graph: g,
-        selId: nextSel !== undefined ? nextSel : (g.nodes.some((n) => n.id === d.selId) ? d.selId : (g.nodes[0]?.id || null)),
-        ...(rulePatch ? { rule: { ...d.rule, ...rulePatch } } : {}),
-      };
+      const selId = nextSel !== undefined ? nextSel : (g.nodes.some((n) => n.id === d.selId) ? d.selId : (g.nodes[0]?.id || null));
+      const patch = rulePatch ? { rule: { ...d.rule, ...rulePatch } } : {};
+      if (opts.skipUndo) return { ...d, preDragGraph: d.preDragGraph || d.graph, graph: g, selId, ...patch };
+      return { ...d, preDragGraph: null, undo: [...d.undo.slice(-39), d.preDragGraph || d.graph], redo: [], graph: g, selId, ...patch };
     });
     const handleNodesChangeGraph = (nextArg, meta) => commitGraph(
       Array.isArray(nextArg) ? (g) => ({ ...g, nodes: nextArg }) : nextArg, undefined, null, { skipUndo: Boolean(meta && !Array.isArray(meta) && meta.skipUndo === true) },
@@ -220,14 +223,14 @@ function createFlowStudioApp(client, React, _antd, app) {
     const handleArchitect = (req) => runAction('architect', 'dxosAutomations:aiAssist', {
       ...orgPayload, mode: req.mode, prompt: req.prompt, ruleKey: req.ruleKey || undefined, rule: doc.rule, graph: req.graph,
       targetNodeId: req.targetNodeId || undefined, runUid: req.runUid && !req.runTrace?.simulated ? req.runUid : undefined, runTrace: req.runTrace || undefined,
-    }, (d) => setRunUi((s) => ({ ...s, archRes: d })), (err) => setRunUi((s) => ({ ...s, archRes: { ok: false, refused: true, error: errMsg(err, 'Flow Architect error') } })));
+    }, (d) => setRunUi((s) => ({ ...s, archRes: d })), (err) => { const m = errMsg(err, 'Flow Architect error'); setRunUi((s) => ({ ...s, archRes: { ok: false, refused: isPolicyRefusal(err, m), error: m } })); });
     const handleApplyArch = (res) => {
       if (res?.draftGraph) {
         const g = ruleToGraph({ graphJson: res.draftGraph, cooldownSec: res?.draftRule?.cooldownSec ?? doc.rule.cooldownSec, maxDepth: res?.draftRule?.maxDepth ?? doc.rule.maxDepth });
         commitGraph(g, g.nodes?.[0]?.id || null, { ...(res.draftRule ? sanitizeSafeValue(res.draftRule) : {}), ...(res.sampleEvent ? { sampleEvent: sanitizeSafeValue(res.sampleEvent) } : {}) });
       } else if (Array.isArray(res?.operations)) {
-        const g = applyOpsLocal(doc.graph, res.operations);
-        commitGraph(g, undefined, g.settings?.cooldownSec !== undefined ? { cooldownSec: g.settings.cooldownSec } : null);
+        const g = applyOpsLocal(doc.graph, res.operations), sMeta = syncMeta(g.settings);
+        commitGraph(g, undefined, Object.keys(sMeta).length ? sMeta : null);
       }
       reportFb({ type: 'success', text: 'Đã áp dụng kết quả DX-OS Flow Architect lên Canvas.' });
     };
@@ -236,21 +239,20 @@ function createFlowStudioApp(client, React, _antd, app) {
       if (!parsed.ok) return setDsl((m) => ({ ...m, error: parsed.error }));
       const d = parsed.value, gRaw = isObj(d?.graphJson) ? d.graphJson : (Array.isArray(d?.nodes) ? d : null);
       if (!gRaw || !Array.isArray(gRaw.nodes)) return setDsl((m) => ({ ...m, error: 'DSL phải chứa graphJson.nodes hoặc nodes[].' }));
-      const nextG = ruleToGraph({ graphJson: gRaw, cooldownSec: d.cooldownSec ?? doc.rule.cooldownSec, maxDepth: d.maxDepth ?? doc.rule.maxDepth });
-      const meta = isObj(d?.graphJson) ? {
-        ...(d.ruleKey ? { ruleKey: String(d.ruleKey) } : {}), ...(d.name ? { name: String(d.name) } : {}),
-        ...(d.cooldownSec !== undefined ? { cooldownSec: Number(d.cooldownSec) } : {}), ...(d.maxDepth !== undefined ? { maxDepth: Number(d.maxDepth) } : {}),
-      } : null;
-      commitGraph(nextG, nextG.nodes[0]?.id || null, meta);
+      const nextG = ruleToGraph({ graphJson: gRaw, cooldownSec: d.cooldownSec ?? gRaw.settings?.cooldownSec ?? doc.rule.cooldownSec, maxDepth: d.maxDepth ?? gRaw.settings?.maxDepth ?? doc.rule.maxDepth });
+      const sMeta = syncMeta(nextG.settings, d.cooldownSec, d.maxDepth);
+      const syncedG = Object.keys(sMeta).length ? { ...nextG, settings: { ...(nextG.settings || {}), ...sMeta } } : nextG;
+      const meta = { ...(isObj(d?.graphJson) ? { ...(d.ruleKey ? { ruleKey: String(d.ruleKey) } : {}), ...(d.name ? { name: String(d.name) } : {}) } : {}), ...sMeta };
+      commitGraph(syncedG, syncedG.nodes[0]?.id || null, Object.keys(meta).length ? meta : null);
       return setDsl({ open: false, format: dsl.format, text: '', error: null });
     };
     const undoRedo = (dir) => setDoc((d) => {
       const src = dir < 0 ? d.undo : d.redo;
       if (!src.length) return d;
-      const target = src[src.length - 1];
-      return { ...d, graph: target, selId: target.nodes.some((n) => n.id === d.selId) ? d.selId : (target.nodes[0]?.id || null), undo: dir < 0 ? d.undo.slice(0, -1) : [...d.undo, d.graph], redo: dir < 0 ? [...d.redo, d.graph] : d.redo.slice(0, -1) };
+      const target = src[src.length - 1], sMeta = syncMeta(target.settings);
+      return { ...d, preDragGraph: null, rule: Object.keys(sMeta).length ? { ...d.rule, ...sMeta } : d.rule, graph: target, selId: target.nodes.some((n) => n.id === d.selId) ? d.selId : (target.nodes[0]?.id || null), undo: dir < 0 ? d.undo.slice(0, -1) : [...d.undo, d.graph], redo: dir < 0 ? [...d.redo, d.graph] : d.redo.slice(0, -1) };
     });
-    const handleNewFlow = () => { setDoc(freshDoc((refs.idSeq += 1))); setRunUi((s) => ({ ...s, selectedRun: null })); };
+    const handleNewFlow = () => { setDoc(freshDoc((refs.idSeq += 1))); setRunUi((s) => ({ ...s, playing: false, selectedRun: null, idx: 0, testOut: null, archRes: null })); setUi((u) => (u.insertEdge ? { ...u, insertEdge: null } : u)); };
     const handleRuleMeta = (meta) => setDoc((d) => {
       const hasS = meta.cooldownSec !== undefined || meta.maxDepth !== undefined;
       const nextS = hasS ? { ...(d.graph.settings || {}), ...(meta.cooldownSec !== undefined ? { cooldownSec: meta.cooldownSec } : {}), ...(meta.maxDepth !== undefined ? { maxDepth: meta.maxDepth } : {}) } : d.graph.settings;

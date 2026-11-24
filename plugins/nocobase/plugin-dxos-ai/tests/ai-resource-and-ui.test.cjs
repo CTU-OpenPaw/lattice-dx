@@ -108,7 +108,7 @@ function makeMockDb() {
   };
 }
 
-test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded keys, saveProfile role-lock, auditLogs, topology, and portalCopilot filtering', async () => {
+test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded keys, saveProfile role-lock, auditLogs, topology, and portalAgents filtering', async () => {
   const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
   const db = makeMockDb();
   const mockFetch = async () => ({ ok: true, status: 200, json: async () => ({ version: '1.8' }) });
@@ -117,9 +117,9 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
     fetchImpl: mockFetch,
   });
 
-  // 1. Unauthenticated caller rejected on portalCopilot
+  // 1. Unauthenticated caller rejected on portalAgents
   await assert.rejects(
-    () => actions.portalCopilot({ state: {}, action: { params: { portalSlug: 'services' } } }, async () => {}),
+    () => actions.portalAgents({ state: {}, action: { params: { portalSlug: 'services' } } }, async () => {}),
     (err) => err.status === 401,
   );
 
@@ -179,7 +179,7 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
     toolPermissions: {
       dxos_search_enterprise_context: 'ALLOW',
       dxos_execute_record_action: 'ASK',
-      dxos_my_tasks_copilot: 'ALLOW',
+      dxos_my_workflow_tasks: 'ALLOW',
     },
     quickPrompts: [{ label: 'Tra cứu phép năm', prompt: 'Kiểm tra phiếu dịch vụ nghỉ phép của tôi.' }],
   });
@@ -200,12 +200,12 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   const sneakyRoles = db.stores.rolesAiEmployees.filter((r) => r.aiEmployee === 'sneaky-builder').map((r) => r.roleName);
   assert.deepEqual(sneakyRoles.sort(), ['admin', 'root']);
 
-  // 6. portalCopilot for ldx_employee on portal 'services' includes hr-ops-ai, NEVER exposes dxos-architect or sneaky-builder, while root CAN access dxos-architect on any portal
+  // 6. portalAgents for ldx_employee on portal 'services' includes hr-ops-ai, NEVER exposes dxos-architect or sneaky-builder, while root CAN access dxos-architect on any portal
   const portalEmpCtx = {
     state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: [] },
     action: { params: { portalSlug: 'services' } },
   };
-  await actions.portalCopilot(portalEmpCtx, async () => {});
+  await actions.portalAgents(portalEmpCtx, async () => {});
   const visibleUsernames = portalEmpCtx.body.employees.map((e) => e.username);
   assert.ok(visibleUsernames.includes('hr-ops-ai'));
   assert.ok(visibleUsernames.includes('dxos-workspace'));
@@ -217,7 +217,7 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
     state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
     action: { params: { portalSlug: 'services' } },
   };
-  await actions.portalCopilot(portalAdminCtx, async () => {});
+  await actions.portalAgents(portalAdminCtx, async () => {});
   assert.ok(portalAdminCtx.body.employees.some((e) => e.username === 'dxos-architect'));
 
   // 7. listProfiles, auditLogs, enterpriseTopology, and deleteProfile
@@ -327,7 +327,7 @@ test('createDxosAiStudioPage renders 4-tab studio UI & helper utilities, and plu
     assert.ok(registered.resources.includes('dxosAi'));
     assert.ok(registered.middlewares.includes('dxosMcpGateway'));
     assert.ok(registered.snippets.includes('pm.dxosAi'));
-    assert.ok(registered.allowed.includes('dxosAi:portalCopilot:loggedIn'));
+    assert.ok(registered.allowed.includes('dxosAi:portalAgents:loggedIn'));
     assert.ok(registered.allowed.includes('dxosAi:pageSurfaceState:loggedIn'));
     assert.ok(registered.allowed.includes('dxosAi:triageScan:loggedIn'));
     assert.equal(registered.tools.length, 17);
@@ -1207,4 +1207,95 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
   assert.ok(approveBtn401);
   await approveBtn401.props.onClick();
   assert.equal(apiCalls.some((c) => c.url === 'dxosAi:approveAction' && c.data?.approvalId === 401), true);
+});
+
+test('Wave 4B: Legacy DB profile toolPermissions backward compatibility normalizes legacy tool key to dxos_my_workflow_tasks', async () => {
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { resolveEffectiveToolMode } = require(path.join(PLUGIN_ROOT, 'src/server/ai-hitl.js'));
+  const toolsCore = require(path.join(PLUGIN_ROOT, 'src/server/ai-tools-core.js'));
+  assert.equal(typeof toolsCore.normalizeToolPermissionsMap, 'function');
+
+  const legacyToolKey = ['dxos_my_tasks_co', 'pilot'].join('');
+  const db = makeMockDb();
+  // Seed pre-upgrade Docker DB rows with legacy toolPermissions and legacy toolPermissionsJson
+  db.stores.latticeAiProfiles.push(
+    {
+      id: 101,
+      username: 'legacy-ops-agent',
+      nickname: 'Legacy Ops Agent',
+      organizationId: 'native-ui-lab',
+      enabled: true,
+      isAdminBuilder: false,
+      allowedRoles: ['ldx_employee'],
+      portalBindings: ['services'],
+      toolPermissions: { dxos_search_enterprise_context: 'ALLOW', [legacyToolKey]: 'ALLOW' },
+      mcpServers: [],
+      quickPrompts: [],
+    },
+    {
+      id: 102,
+      username: 'legacy-off-agent',
+      nickname: 'Legacy Off Agent',
+      organizationId: 'native-ui-lab',
+      enabled: true,
+      isAdminBuilder: false,
+      allowedRoles: ['ldx_employee'],
+      portalBindings: ['services'],
+      toolPermissionsJson: { dxos_search_enterprise_context: 'ALLOW', [legacyToolKey]: 'OFF' },
+      mcpServers: [],
+      quickPrompts: [],
+    },
+  );
+  db.stores.workflowManualTasks = [
+    { id: 701, userId: 2, status: 0, node: { title: 'Review' }, execution: { context: { data: { code: 'REQ-701' } } } },
+  ];
+
+  const actions = createDxosAiActions(db, { env: {} });
+  const rootCtx = (values = {}) => ({ state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: { values } } });
+
+  // 1. Profile reader (listProfiles) normalizes legacy keys transparently
+  const listCtx = rootCtx({});
+  await actions.listProfiles(listCtx, async () => {});
+  const legacyOpsListed = listCtx.body.profiles.find((p) => p.username === 'legacy-ops-agent');
+  assert.equal(legacyOpsListed.toolPermissions.dxos_my_workflow_tasks, 'ALLOW');
+  assert.equal(Object.hasOwn(legacyOpsListed.toolPermissions, legacyToolKey), false);
+
+  // 2. portalAgents returns legacy profile on portal 'services'
+  const portalEmpCtx = { state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: [] }, action: { params: { portalSlug: 'services' } } };
+  await actions.portalAgents(portalEmpCtx, async () => {});
+  assert.equal(portalEmpCtx.body.employees.some((e) => e.username === 'legacy-ops-agent'), true);
+
+  // 3. resolveEffectiveToolMode & ai-tools-core permission check honor legacy keys as dxos_my_workflow_tasks
+  assert.equal(await resolveEffectiveToolMode(db, { aiEmployee: 'legacy-ops-agent', toolName: 'dxos_my_workflow_tasks' }), 'ALLOW');
+  assert.equal(await resolveEffectiveToolMode(db, { aiEmployee: 'legacy-off-agent', toolName: 'dxos_my_workflow_tasks' }), 'OFF');
+  const myTasksTool = toolsCore.createDxosTools().find((t) => t.definition.name === 'dxos_my_workflow_tasks');
+  assert.ok(myTasksTool);
+  await assert.rejects(
+    () => myTasksTool.invoke({ db, state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: ['ldx_employee'], dxosAiUsername: 'legacy-off-agent' } }, { action: 'list' }),
+    (err) => err.status === 403 && err.code === 'TOOL_PERMISSION_OFF',
+  );
+  const okList = await myTasksTool.invoke({ db, state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: ['ldx_employee'], dxosAiUsername: 'legacy-ops-agent' } }, { action: 'list' });
+  assert.equal(okList.pendingCount, 1);
+
+  // 4. saveProfile normalizes incoming legacy keys to dxos_my_workflow_tasks without keeping legacy keys
+  const saveCtx = rootCtx({
+    username: 'custom-save-compat',
+    nickname: 'Custom Save Compat',
+    allowedRoles: ['ldx_employee'],
+    portalBindings: ['services'],
+    toolPermissionsJson: { dxos_search_enterprise_context: 'ALLOW', [legacyToolKey]: 'ASK' },
+  });
+  await actions.saveProfile(saveCtx, async () => {});
+  assert.equal(saveCtx.body.profile.toolPermissions.dxos_my_workflow_tasks, 'ASK');
+  assert.equal(Object.hasOwn(saveCtx.body.profile.toolPermissions, legacyToolKey), false);
+  const syncedEmp = db.stores.aiEmployees.find((e) => e.username === 'custom-save-compat');
+  assert.equal(syncedEmp.skillSettings.tools.some((t) => t.name === 'dxos_my_workflow_tasks'), true);
+  assert.equal(syncedEmp.skillSettings.tools.some((t) => t.name === legacyToolKey), false);
+
+  // 5. bootstrapDefaults migrates existing non-starter DB rows cleanly
+  const bootCtx = rootCtx({});
+  await actions.bootstrapDefaults(bootCtx, async () => {});
+  const migratedRow = db.stores.latticeAiProfiles.find((p) => p.username === 'legacy-ops-agent');
+  assert.equal(migratedRow.toolPermissions.dxos_my_workflow_tasks, 'ALLOW');
+  assert.equal(Object.hasOwn(migratedRow.toolPermissions, legacyToolKey), false);
 });

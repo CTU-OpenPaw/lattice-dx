@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { aiProfiles, validateMcpServerUrl } = require('./ai-schemas');
+const { aiProfiles, validateMcpServerUrl, normalizeToolPermissionsMap } = require('./ai-schemas');
 
 const ALL_LDX_ROLES = ['ldx_employee', 'ldx_manager', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_director', 'ldx_admin'];
 const DEFAULT_ADMIN_ROLES = ['root', 'admin'];
@@ -18,16 +18,20 @@ const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.
 
 function enforceProfileRoleLock(profile = {}, adminToolNames = []) {
   const adminSet = new Set(adminToolNames);
-  const perms = profile.toolPermissions && typeof profile.toolPermissions === 'object' ? profile.toolPermissions : {};
+  const rawPerms = profile.toolPermissions !== undefined ? profile.toolPermissions : profile.toolPermissionsJson;
+  const perms = normalizeToolPermissionsMap(rawPerms);
   const grantsBuilderTool = Object.entries(perms).some(([name, mode]) => adminSet.has(name) && (mode === 'ALLOW' || mode === 'ASK'));
   const isAdminBuilder = Boolean(profile.isAdminBuilder) || grantsBuilderTool;
   const rawRoles = Array.isArray(profile.allowedRoles) ? profile.allowedRoles.filter(Boolean) : [];
-  return {
+  const next = {
     ...profile,
+    ...(rawPerms !== undefined ? { toolPermissions: perms } : {}),
     isAdminBuilder,
     // Fail-closed: host plugin-ai isBuilderAI only locks nathan/orin/dara, so we force admin-only roles whenever Builder tools are enabled.
     allowedRoles: isAdminBuilder ? [...DEFAULT_ADMIN_ROLES] : rawRoles.length ? [...new Set(rawRoles)] : ['ldx_employee', 'ldx_manager'],
   };
+  delete next.toolPermissionsJson;
+  return next;
 }
 
 function resolveLoopbackOrigin(rawOrigin) {
@@ -96,7 +100,7 @@ async function syncProfileToNocobaseAi(db, profileInput, { adminToolNames = [], 
   if (!db?.getRepository) return { synced: false };
   const profile = enforceProfileRoleLock(profileInput, adminToolNames);
   const tools = [];
-  const perms = profile.toolPermissions && typeof profile.toolPermissions === 'object' ? profile.toolPermissions : {};
+  const perms = normalizeToolPermissionsMap(profile.toolPermissions !== undefined ? profile.toolPermissions : profile.toolPermissionsJson);
   for (const [name, mode] of Object.entries(perms)) {
     if (mode === 'ALLOW' || mode === 'ASK') {
       tools.push({ name, autoCall: mode === 'ALLOW' });

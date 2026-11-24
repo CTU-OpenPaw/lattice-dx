@@ -2778,3 +2778,130 @@ test('W2-B Fix Round 2 regressions: Graph v2 NL patching, aiAssist Graph v2 guar
     );
   });
 });
+
+test('Wave 4B security regressions: linear O(n) template scanner, uniform expression checks, and resumeAutomation dryRun missing repo', async () => {
+  const builderMod = require('../src/server/ai-builder-tools');
+  const { db, ctx, byName } = makeBuilderHarness();
+  const wfTool = byName.get('dxos_configure_workflow');
+  const noResCtx = { ...ctx, app: { ...ctx.app, resourceManager: { getResource: () => null } } };
+
+  // 1. 100KB '{{'.repeat(50000) must reject in < 50ms without quadratic ReDoS
+  const hugeUnclosed = '{{'.repeat(50000);
+  assert.equal(typeof builderMod.hasUnsafeAutomationTemplate, 'function');
+  const t0 = performance.now();
+  const unsafeRes = builderMod.hasUnsafeAutomationTemplate(hugeUnclosed);
+  const elapsedMs = performance.now() - t0;
+  assert.equal(unsafeRes, true, '100KB unclosed {{ payload must be rejected as unsafe');
+  assert.ok(elapsedMs < 50, `hasUnsafeAutomationTemplate took ${elapsedMs.toFixed(2)}ms (>= 50ms)`);
+
+  // interpolateLocal must also complete in < 50ms on 100KB unclosed {{
+  assert.equal(typeof builderMod.interpolateLocal, 'function');
+  const t1 = performance.now();
+  builderMod.interpolateLocal(hugeUnclosed, { data: { ok: 1 } });
+  const interpMs = performance.now() - t1;
+  assert.ok(interpMs < 50, `interpolateLocal took ${interpMs.toFixed(2)}ms (>= 50ms)`);
+
+  // saveAutomation rejects 100KB ReDoS payload in < 50ms
+  const t2 = performance.now();
+  await assert.rejects(
+    () => wfTool.invoke(noResCtx, {
+      operation: 'saveAutomation',
+      rule: {
+        ruleKey: 'auto_redos_guard',
+        name: 'ReDoS Guard',
+        triggerEventType: 'alarm.triggered',
+        actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: hugeUnclosed }],
+      },
+    }),
+    (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+  );
+  assert.ok(performance.now() - t2 < 100, 'saveAutomation with 100KB payload must fail fast');
+
+  // 2. Unclosed {{, stray }}, ${...}, backticks, and dangerous expressions blocked uniformly across v1 actionsJson, filterJson, configPatch, and Graph v2 nodes
+  const badPayloads = [
+    'Alert {{data.deviceKey',
+    'Alert data.deviceKey}}',
+    'Alert ${process.env.SECRET}',
+    'Alert `whoami`',
+    'Alert require("fs")',
+  ];
+  for (const badExpr of badPayloads) {
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'saveAutomation',
+        rule: {
+          ruleKey: 'auto_bad_v1_act',
+          name: 'Bad v1 Action',
+          triggerEventType: 'alarm.triggered',
+          actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: badExpr }],
+        },
+      }),
+      (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+      `v1 actionsJson should reject ${badExpr}`,
+    );
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'saveAutomation',
+        rule: {
+          ruleKey: 'auto_bad_v1_filter',
+          name: 'Bad v1 Filter',
+          triggerEventType: 'alarm.triggered',
+          filterJson: { field: 'note', op: 'eq', value: badExpr },
+          actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'Ok' }],
+        },
+      }),
+      (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+      `v1 filterJson should reject ${badExpr}`,
+    );
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'patchAutomation',
+        rule: {
+          ruleKey: 'auto_ok_base',
+          name: 'Ok Base',
+          triggerEventType: 'alarm.triggered',
+          actionsJson: [{ type: 'notify_role', role: 'ldx_manager', title: 'Ok' }],
+        },
+        targetNode: 'step:0',
+        configPatch: { title: badExpr },
+      }),
+      (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+      `configPatch should reject ${badExpr}`,
+    );
+    await assert.rejects(
+      () => wfTool.invoke(noResCtx, {
+        operation: 'saveAutomation',
+        rule: {
+          ruleKey: 'auto_bad_v2_node',
+          name: 'Bad v2 Node',
+          schemaVersion: 2,
+          graphJson: {
+            version: 2,
+            nodes: [
+              { id: 't1', type: 'trigger.manual', label: 'Start', config: {} },
+              { id: 'n1', type: 'notify.send', label: 'Notify', config: { roleNames: ['ldx_manager'], title: badExpr } },
+            ],
+            edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1', targetHandle: 'in' }],
+          },
+        },
+      }),
+      (err) => err.status === 400 && err.code === 'AUTOMATION_AI_REFUSED',
+      `Graph v2 node should reject ${badExpr}`,
+    );
+  }
+
+  // 3. resumeAutomation dryRun throws 503 AUTOMATION_ENGINE_UNAVAILABLE when latticeAutomationRuns repo is missing
+  const noRunsRepoDb = {
+    ...db,
+    getRepository: (name) => (name === 'latticeAutomationRuns' ? null : db.getRepository(name)),
+  };
+  await assert.rejects(
+    () => wfTool.invoke({ ...noResCtx, db: noRunsRepoDb }, {
+      operation: 'resumeAutomation',
+      runUid: 'run_dry_missing_repo',
+      decision: 'approved',
+      dryRun: true,
+    }),
+    (err) => err.status === 503 && err.code === 'AUTOMATION_ENGINE_UNAVAILABLE',
+  );
+});

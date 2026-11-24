@@ -845,7 +845,7 @@ test('OpenAPI 3.1.0, AsyncAPI 3.0.0, observability dxos:openapi/asyncapi endpoin
     '/api/dxosDataGov:freezeSnapshot',
     '/api/dxosBlocks:telemetryIngest',
     '/api/dxosStudio:composePortals',
-    '/api/dxosAi:portalCopilot',
+    '/api/dxosAi:portalAgents',
     '/api/dxos-mcp',
   ]) {
     assert.ok(openapi.paths[requiredPath], `OpenAPI missing path ${requiredPath}`);

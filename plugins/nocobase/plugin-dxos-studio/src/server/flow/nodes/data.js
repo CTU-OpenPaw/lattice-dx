@@ -10,6 +10,7 @@
 
 const { SYSTEM_PROTECTED_COLLECTIONS } = require('../../solution-bundle');
 const { assertSafeDirectSort, clampPageLimit, fail, sanitizeDirectFilter, toPlain, val } = require('../../wms-dmn-shared');
+const { getOrmTriggerDepth, runWithOrmDepth } = require('../security-helpers');
 const { flowHelpers } = require('./triggers');
 
 const { isPlainObject, sanitizePlainObject, interpolateTemplate, buildEvalContext, resolveOrgId, pickHelper } = flowHelpers;
@@ -33,6 +34,11 @@ const PROTECTED_VOUCHER_FIELDS = new Set([
   'submittedAt', 'submittedBy', 'cancelledAt', 'cancelledBy', 'cancelReason',
 ]);
 
+const resolveNextOrmDepth = (context) => {
+  const raw = context?.depth !== undefined && context?.depth !== null ? context.depth : context?.event?.depth;
+  const base = raw !== undefined && raw !== null && Number.isFinite(Number(raw)) ? Number(raw) : getOrmTriggerDepth();
+  return Math.max(0, base) + 1;
+};
 function isForbiddenCollection(name) {
   const clean = String(name || '').trim();
   return !clean || FORBIDDEN_COLLECTIONS_LOWER.has(clean.toLowerCase());
@@ -136,7 +142,7 @@ const dataNodes = [
       if (options?.dryRun) return { output: { collection, id: null, record: values, simulated: true }, nextPort: 'main' };
       const repo = db?.getRepository?.(collection);
       if (!repo || typeof repo.create !== 'function') throw fail('REPOSITORY_UNAVAILABLE', 503, `Repository not found for collection ${collection}`);
-      const created = await repo.create({ values });
+      const created = await runWithOrmDepth(resolveNextOrmDepth(context), () => repo.create({ values }));
       const plain = toPlain(created) || values;
       return { output: { collection, id: val(created, 'id') ?? plain.id ?? null, record: plain }, nextPort: 'main' };
     },
@@ -181,7 +187,7 @@ const dataNodes = [
       const repo = db?.getRepository?.(collection);
       if (!repo || typeof repo.find !== 'function') throw fail('REPOSITORY_UNAVAILABLE', 503, `Repository not found for collection ${collection}`);
       const list = (await repo.find({ filter: scopedFilter, limit: clampPageLimit(cfg.limit) })) || [];
-      if (list.length > 0 && typeof repo.update === 'function') await repo.update({ filter: scopedFilter, values });
+      if (list.length > 0 && typeof repo.update === 'function') await runWithOrmDepth(resolveNextOrmDepth(context), () => repo.update({ filter: scopedFilter, values }));
       return { output: { collection, matchedCount: list.length, updatedCount: list.length }, nextPort: 'main' };
     },
   },

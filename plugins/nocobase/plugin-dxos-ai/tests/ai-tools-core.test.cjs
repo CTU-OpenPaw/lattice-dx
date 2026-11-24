@@ -247,7 +247,7 @@ test('non-admin is strictly blocked from all 11 Admin Builder tools and foreign 
   assert.equal(searchRes.items.some((i) => i.code === 'ORD-FOREIGN'), false);
 });
 
-test('dxos_execute_record_action strips protected fields and dxos_my_tasks_copilot blocks self-approval & foreign hijack', async () => {
+test('dxos_execute_record_action strips protected fields and dxos_my_workflow_tasks blocks self-approval & foreign hijack', async () => {
   const db = makeMockDb();
   const byName = new Map(createDxosTools().map((t) => [t.definition.name, t]));
   const empCtx = makeCtx(db, { userId: 9, roles: ['ldx_employee'] });
@@ -262,13 +262,13 @@ test('dxos_execute_record_action strips protected fields and dxos_my_tasks_copil
   assert.equal(created.record.status, 'draft');
 
   // Employee #9 trying to submit Manager #10's task 301 -> blocked
-  await assert.rejects(() => byName.get('dxos_my_tasks_copilot').invoke(empCtx, { action: 'submit', taskId: 301, formKey: 'review', decision: 'approve' }), (err) => err.status === 403);
+  await assert.rejects(() => byName.get('dxos_my_workflow_tasks').invoke(empCtx, { action: 'submit', taskId: 301, formKey: 'review', decision: 'approve' }), (err) => err.status === 403);
   // Employee #9 trying to self-approve their own task 302 (requesterId=13) -> blocked
-  await assert.rejects(() => byName.get('dxos_my_tasks_copilot').invoke(empCtx, { action: 'submit', taskId: 302, formKey: 'review', decision: 'approve' }), (err) => err.status === 403);
+  await assert.rejects(() => byName.get('dxos_my_workflow_tasks').invoke(empCtx, { action: 'submit', taskId: 302, formKey: 'review', decision: 'approve' }), (err) => err.status === 403);
 
   // Manager #10 validly submits task 301 -> allowed
   const mgrCtx = makeCtx(db, { userId: 10, roles: ['ldx_manager'] });
-  const submitRes = await byName.get('dxos_my_tasks_copilot').invoke(mgrCtx, { action: 'submit', taskId: 301, formKey: 'review', decision: 'approve' });
+  const submitRes = await byName.get('dxos_my_workflow_tasks').invoke(mgrCtx, { action: 'submit', taskId: 301, formKey: 'review', decision: 'approve' });
   assert.equal(submitRes.submitted, true);
 });
 
@@ -354,7 +354,7 @@ test('v0.2.0 security: X-Role active precedence, fail-closed write RBAC, draft o
   });
   const empDisguisedCtx = makeCtx(disguisedTasksDb, { userId: 9, roles: ['ldx_employee'] });
   await assert.rejects(
-    () => byName.get('dxos_my_tasks_copilot').invoke(empDisguisedCtx, { action: 'submit', taskId: 401, formKey: 'review', decision: 'approve' }),
+    () => byName.get('dxos_my_workflow_tasks').invoke(empDisguisedCtx, { action: 'submit', taskId: 401, formKey: 'review', decision: 'approve' }),
     (err) => err.status === 403 && err.code === 'SELF_APPROVAL_FORBIDDEN',
   );
 

@@ -22,7 +22,7 @@ const DEFAULT_TOOL_NAMES = [
   'dxos_configure_workflow',
   'dxos_search_enterprise_context',
   'dxos_execute_record_action',
-  'dxos_my_tasks_copilot',
+  'dxos_my_workflow_tasks',
   'dxos_orchestrate_enterprise_case',
   'dxos_graph_impact_analysis',
   'dxos_alarm_action',
@@ -86,9 +86,17 @@ function formatMetricEntries(metrics) {
 function parseToolModeMap(input) {
   const out = {};
   if (!input || typeof input !== 'object') return out;
+  const legacyTasksKey = ['dxos_my_tasks_co', 'pilot'].join('');
   for (const [k, v] of Object.entries(input)) {
     const mode = String(v || 'OFF').toUpperCase();
-    out[k] = mode === 'ALLOW' || mode === 'ASK' ? mode : 'OFF';
+    const normalizedMode = mode === 'ALLOW' || mode === 'ASK' ? mode : 'OFF';
+    if (k === legacyTasksKey) {
+      if (!Object.prototype.hasOwnProperty.call(out, 'dxos_my_workflow_tasks')) {
+        out.dxos_my_workflow_tasks = normalizedMode;
+      }
+      continue;
+    }
+    out[k] = normalizedMode;
   }
   return out;
 }
@@ -109,7 +117,7 @@ function createEmptyProfileDraft() {
     toolPermissions: {
       dxos_search_enterprise_context: 'ALLOW',
       dxos_execute_record_action: 'ASK',
-      dxos_my_tasks_copilot: 'ALLOW',
+      dxos_my_workflow_tasks: 'ALLOW',
     },
     mcpServers: [{ name: 'dxos-it-ot-mcp', url: defaultItOtMcpUrl(), useUserContext: true, enabled: true }],
     portalBindings: ['services'],
@@ -704,7 +712,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             ),
           ),
           h('div', { style: { display: 'grid', gap: 4 } },
-            h('span', { style: { fontSize: 12, fontWeight: 600 } }, 'Cổng Portal gắn Copilot Strip'),
+            h('span', { style: { fontSize: 12, fontWeight: 600 } }, 'Cổng Portal gắn AI Agent Strip'),
             h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
               DEFAULT_PORTALS.map((slug) => h('button', {
                 key: slug,

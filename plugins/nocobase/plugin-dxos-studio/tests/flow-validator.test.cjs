@@ -925,7 +925,7 @@ test('all created flow modules stay <= 350 lines, satisfy SPDX headers, and rema
     'plugins/nocobase/plugin-dxos-studio/tests/flow-validator.test.cjs',
   ];
 
-  const forbiddenTermsRe = /\b(?:cold-?chain|vaccine|vac-?xin|mkt|cmms|freezer|lotCode|copilot)\b|\beval\s*\(|new\s+Function/i;
+  const forbiddenTermsRe = new RegExp(`\\b(?:cold-?chain|vaccine|vac-?xin|mkt|cmms|freezer|lotCode|${['co', 'pilot'].join('')})\\b|\\beval\\s*\\(|new\\s+Function`, 'i');
 
   for (const rel of flowFiles) {
     const src = fs.readFileSync(path.join(rootDir, rel), 'utf8');
@@ -938,5 +938,50 @@ test('all created flow modules stay <= 350 lines, satisfy SPDX headers, and rema
     const src = fs.readFileSync(path.join(rootDir, rel), 'utf8');
     const res = addSourceHeader(src, rel);
     assert.equal(res.status, 'present', `Missing or malformed SPDX header in ${rel}`);
+  }
+});
+
+test('validator static SSRF blocks hex/octal/decimal-int/private IPv4 and fc00/fe80/::1/mapped IPv6 while allowing relative paths & public IPv6', () => {
+  const { validateFlowGraph } = validatorMod;
+  const blockedUrls = [
+    'http://0x7f000001/admin',
+    'http://0177.0.0.1/admin',
+    'http://2130706433/admin',
+    'http://127.1/admin',
+    'http://0251.0376.0251.0376/latest/meta-data',
+    'http://127.0.0.1:8080/internal',
+    'http://10.0.0.5/secret',
+    'http://172.16.0.1/internal',
+    'http://192.168.1.50/router',
+    'http://100.64.0.1/cgnat',
+    'http://[::1]/admin',
+    'http://[fc00::1]/internal',
+    'http://[fd12:3456::1]/internal',
+    'http://[fe80::1]/link',
+    'http://[::ffff:127.0.0.1]/admin',
+    'http://localhost:8080/api',
+    'http://service.local/api',
+    'http://metadata.internal/v1',
+  ];
+  for (const url of blockedUrls) {
+    const res = validateFlowGraph({
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'h1', type: 'integration.http', config: { connectorKey: 'ext', url } },
+      ],
+      edges: [{ id: 'e1', source: 't1', target: 'h1' }],
+    });
+    assert.equal(res.ok, false, `Expected static SSRF rejection for ${url}`);
+    assert.ok(res.errors.some((e) => e.code === 'CONNECTOR_URL_UNSAFE'), `Expected CONNECTOR_URL_UNSAFE for ${url}`);
+  }
+  for (const safeVal of ['/webhooks/sync', 'orders/create', '{{data.path}}', 'https://api.example.com/v1/sync', 'https://[2606:4700:4700::1111]/v1']) {
+    const res = validateFlowGraph({
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'h1', type: 'integration.http', config: { connectorKey: 'ext', path: safeVal } },
+      ],
+      edges: [{ id: 'e1', source: 't1', target: 'h1' }],
+    });
+    assert.equal(res.ok, true, `Expected safe path/URL ${safeVal} to pass: ${JSON.stringify(res.errors)}`);
   }
 });

@@ -264,7 +264,7 @@ function buildSearchPoolEntry(colName, row, val, pgVectorSim = null) {
   };
 }
 
-function createCopilotTools(deps) {
+function createOperationalTools(deps) {
   const {
     val, failTool, invokeResourceAction, createAuditedTool,
     resolveReadablePolicies, isRowVisibleToActor,
@@ -513,13 +513,13 @@ function createCopilotTools(deps) {
     }),
 
     createAuditedTool({
-      name: 'dxos_my_tasks_copilot',
+      name: 'dxos_my_workflow_tasks',
       adminOnly: false,
       defaultPermission: 'ASK',
-      introduction: { title: 'Copilot Quy trình Dài', about: 'Đọc các manual task được giao cho chính bạn và hỗ trợ xử lý đúng thẩm quyền.' },
+      introduction: { title: 'Tác vụ Quy trình Của Tôi', about: 'Đọc các manual task được giao cho chính bạn và hỗ trợ xử lý đúng thẩm quyền.' },
       description: 'List/analyze pending manual workflow tasks assigned to the current caller, or submit their own assigned task (never approves own requests or another user task).',
       schema: {
-        description: 'Personal workflow task copilot operation.',
+        description: 'Personal workflow task agent operation.',
         properties: {
           action: { type: 'string', required: true, enum: ['list', 'analyze', 'submit'] },
           taskId: { type: 'integer' },
@@ -573,7 +573,7 @@ function createCopilotTools(deps) {
       adminOnly: false,
       defaultPermission: 'ASK',
       introduction: { title: 'Điều phối Liên phòng ban 360°', about: 'Radar điểm nghẽn, gom ngữ cảnh đa phân hệ + P.A.R.A. và phối hợp tạo chuỗi hồ sơ liên thông.' },
-      description: 'Cross-department copilot: run org-wide operational bottleneck radar, correlate incidents/SOPs/assets/tasks, or execute a coordinated multi-record response enforcing field-level RBAC.',
+      description: 'Cross-department enterprise agent: run org-wide operational bottleneck radar, correlate incidents/SOPs/assets/tasks, or execute a coordinated multi-record response enforcing field-level RBAC.',
       schema: {
         description: 'Cross-department case orchestration input.',
         properties: {
@@ -1585,4 +1585,4 @@ async function executeAlarmActionTool(ctx, db, actor, args, deps) {
   };
 }
 
-module.exports = { createCopilotTools, analyzeGraphImpact };
+module.exports = { createOperationalTools, analyzeGraphImpact };

@@ -153,11 +153,11 @@ function inferPortalSlugFromLocation(pathname) {
   return '';
 }
 
-async function fetchPortalCopilot(api, { portalSlug = '' } = {}) {
+async function fetchPortalAgents(api, { portalSlug = '' } = {}) {
   if (!api?.request) return { pluginDisabled: true, employees: [] };
   try {
     const res = await api.request({
-      url: 'dxosAi:portalCopilot',
+      url: 'dxosAi:portalAgents',
       method: 'get',
       params: portalSlug ? { portalSlug } : {},
     });
@@ -171,7 +171,7 @@ async function fetchPortalCopilot(api, { portalSlug = '' } = {}) {
   }
 }
 
-async function triggerDxosCopilot(appOrFlowEngine, { aiEmployee, prompt, blockTitle = '', portalSlug = '' } = {}) {
+async function triggerDxosAgent(appOrFlowEngine, { aiEmployee, prompt, blockTitle = '', portalSlug = '' } = {}) {
   const aiCtx = appOrFlowEngine?.flowEngine?.context?.ai || appOrFlowEngine?.context?.ai;
   if (!aiCtx || typeof aiCtx.triggerTask !== 'function' || !aiEmployee || !prompt) {
     return { triggered: false, reason: 'ai_unavailable' };
@@ -187,7 +187,7 @@ async function triggerDxosCopilot(appOrFlowEngine, { aiEmployee, prompt, blockTi
   return { triggered: true, aiEmployee };
 }
 
-function createCopilotStripElement(React, { employees = [], onRunPrompt } = {}) {
+function createAgentStripElement(React, { employees = [], onRunPrompt } = {}) {
   if (!React?.createElement || !Array.isArray(employees) || !employees.length) return null;
   const h = React.createElement;
   const chips = [];
@@ -217,7 +217,7 @@ function createCopilotStripElement(React, { employees = [], onRunPrompt } = {}) 
   }
   if (!chips.length) return null;
   return h('div', {
-    'data-testid': 'dxos-block-copilot-strip',
+    'data-testid': 'dxos-block-agent-strip',
     style: { marginTop: 12, paddingTop: 10, borderTop: '1px dashed #cbd5e1', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
   },
     h('span', { style: { fontSize: 11, fontWeight: 700, color: '#0369a1' } }, 'Trợ lý AI ngữ cảnh:'),
@@ -306,9 +306,9 @@ module.exports = {
   fetchParaVault,
   fetchParaSummary,
   inferPortalSlugFromLocation,
-  fetchPortalCopilot,
-  triggerDxosCopilot,
-  createCopilotStripElement,
+  fetchPortalAgents,
+  triggerDxosAgent,
+  createAgentStripElement,
   triggerBase64Download,
   requestAndDownloadExport,
 };

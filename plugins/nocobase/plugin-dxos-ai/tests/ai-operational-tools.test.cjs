@@ -26,9 +26,9 @@ const {
   SEARCHABLE_COLLECTIONS,
   CUSTOM_COLLECTION_RE,
 } = require('../src/server/ai-tools-core');
-const { createCopilotTools } = require('../src/server/ai-copilot-tools');
+const { createOperationalTools } = require('../src/server/ai-operational-tools');
 
-function makeCopilotHarness() {
+function makeOperationalHarness() {
   const coldAudits = [];
   const tickets = [];
   const paraDocs = [
@@ -160,7 +160,7 @@ function makeCopilotHarness() {
     app: { resourceManager: { getResource: () => null } },
   });
 
-  const tools = createCopilotTools({
+  const tools = createOperationalTools({
     val, failTool, resolveCallerRoleNames, isStudioAdmin, resolveActorScope,
     resolveReadablePolicies, isRowVisibleToActor,
     invokeResourceAction, createAuditedTool, WRITABLE_BUSINESS_COLLECTIONS,
@@ -177,7 +177,7 @@ function makeCopilotHarness() {
 }
 
 test('dynamic latticeCustom* collections are searchable and enforce field-level RBAC on writes', async () => {
-  const { db, byName, empCtx, mgrCtx } = makeCopilotHarness();
+  const { db, byName, empCtx, mgrCtx } = makeOperationalHarness();
   const execTool = byName.get('dxos_execute_record_action');
   const searchTool = byName.get('dxos_search_enterprise_context');
 
@@ -221,7 +221,7 @@ test('dynamic latticeCustom* collections are searchable and enforce field-level 
 });
 
 test('dxos_orchestrate_enterprise_case performs cross-module radar, correlateCase, and coordinated response with RBAC guard', async () => {
-  const { db, byName, empCtx, mgrCtx } = makeCopilotHarness();
+  const { db, byName, empCtx, mgrCtx } = makeOperationalHarness();
   const orch = byName.get('dxos_orchestrate_enterprise_case');
 
   const correlated = await orch.invoke(empCtx, { mode: 'correlateCase', query: 'Kho lạnh' });
@@ -274,7 +274,7 @@ test('dxos_orchestrate_enterprise_case performs cross-module radar, correlateCas
 });
 
 test('fail-closed read & write RBAC blocks unpermitted collections and row-scopes employee reads', async () => {
-  const { db, byName } = makeCopilotHarness();
+  const { db, byName } = makeOperationalHarness();
   db.store.latticeOrders.push({ id: 3, code: 'ORD-PEER-SAMEORG', name: 'Đơn đồng nghiệp cùng công ty', organizationId: 'org-a', status: 'submitted', requesterId: 14 });
   db.store.latticeEmployees.push({ id: 15, userId: 11, code: 'DRV-11', organizationId: 'org-a', active: true });
   const driverCtx = {
@@ -303,7 +303,7 @@ test('fail-closed read & write RBAC blocks unpermitted collections and row-scope
 });
 
 test('dxos_search_enterprise_context ranks diacritic-stripped Vietnamese queries via hybrid RRF with P.A.R.A. citations', async () => {
-  const { db, byName } = makeCopilotHarness();
+  const { db, byName } = makeOperationalHarness();
   db.store.latticeParaDocuments.push({
     id: 99,
     code: 'SOP-POWER-01',
@@ -336,7 +336,7 @@ test('dxos_search_enterprise_context ranks diacritic-stripped Vietnamese queries
 });
 
 test('dxos_search_enterprise_context bridges latticeParaChunks with section citations, org isolation, and PARA view RBAC', async () => {
-  const { db, byName } = makeCopilotHarness();
+  const { db, byName } = makeOperationalHarness();
   db.store.latticeParaChunks = [
     {
       id: 701,

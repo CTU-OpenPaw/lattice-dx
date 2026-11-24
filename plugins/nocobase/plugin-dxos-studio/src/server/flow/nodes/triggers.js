@@ -32,7 +32,7 @@ function getSafePath(root, rawPath) {
   if (!pathStr || !/^[a-zA-Z0-9_.\-$]+$/.test(pathStr)) return undefined;
   let current = root;
   for (const seg of pathStr.split('.').filter(Boolean)) {
-    if (BLOCKED_PROTO_KEYS.has(seg) || current == null || (typeof current !== 'object' && typeof current !== 'function')) return undefined;
+    if (BLOCKED_PROTO_KEYS.has(seg) || current == null || typeof current !== 'object') return undefined;
     if (Array.isArray(current)) {
       const idx = Number(seg);
       if (!Number.isInteger(idx) || idx < 0 || idx >= current.length) return undefined;
@@ -85,10 +85,9 @@ function buildEvalContext(context, input) {
   return { ...ctx, input: input ?? null, data };
 }
 
-function resolveOrgId(context, input, options, config) {
+function resolveOrgId(context, _input, options, _config) {
   const raw = String(
-    context?.organizationId || context?.event?.organizationId || context?.event?.organizationid
-      || input?.organizationId || options?.organizationId || config?.organizationId || '',
+    options?.organizationId || context?.organizationId || context?.event?.organizationId || context?.event?.organizationid || '',
   ).trim();
   return ORG_ID_RE.test(raw) ? raw : '';
 }

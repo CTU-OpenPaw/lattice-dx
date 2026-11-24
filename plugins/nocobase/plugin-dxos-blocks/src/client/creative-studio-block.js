@@ -13,7 +13,7 @@ const {
   isSafeAppPath,
   safeJsonParse,
   inferPortalSlugFromLocation,
-  triggerDxosCopilot,
+  triggerDxosAgent,
   requestAndDownloadExport,
 } = require('./blocks-helpers');
 const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
@@ -318,7 +318,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
       }
       if (btn.kind === 'askAi') {
         const portalSlug = typeof window !== 'undefined' && window.location ? inferPortalSlugFromLocation(window.location.pathname) : '';
-        await triggerDxosCopilot(app, { aiEmployee: btn.aiEmployee, prompt: btn.prompt, blockTitle: mergedCfg.title || bp.title, portalSlug });
+        await triggerDxosAgent(app, { aiEmployee: btn.aiEmployee, prompt: btn.prompt, blockTitle: mergedCfg.title || bp.title, portalSlug });
         return;
       }
       if (btn.kind === 'createRecord' && api?.request) {

@@ -188,7 +188,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       }
       let cancelled = false;
       api.request({
-        url: 'dxosAi:portalCopilot',
+        url: 'dxosAi:portalAgents',
         method: 'get',
         params: { portalSlug },
       }).then((res) => {

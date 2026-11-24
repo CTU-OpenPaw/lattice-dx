@@ -9,7 +9,7 @@
 'use strict';
 
 const { createDxosGovernanceConsoles, GOVERNANCE_SECTIONS } = require('./governance-consoles');
-const { createBuilderBrokerPanels } = require('./builder-broker-panels');
+const { createBuilderBrokerPanels, parseJsonSafe } = require('./builder-broker-panels');
 
 function createDxosStudioSettingsPage(client, React, antd, app) {
   const h = React.createElement;
@@ -247,7 +247,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       setBusyAction(true);
       setFeedback(null);
       try {
-        const parsed = JSON.parse(bundleText || '{}');
+        const parsed = parseJsonSafe(bundleText || '{}');
         const res = await api.request({
           url: 'dxosStudio:solutionBundleImport',
           method: 'post',

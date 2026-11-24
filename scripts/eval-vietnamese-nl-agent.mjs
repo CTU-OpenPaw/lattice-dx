@@ -26,12 +26,12 @@ export const VIETNAMESE_NL_EVAL_CASES = [
   { id: 'search-08', category: 'rag-search', isAdmin: false, portalSlug: 'incidents', prompt: 'Nhiệt độ hiện tại của tủ bảo quản lạnh A1 là bao nhiêu?', expectedTool: 'dxos_search_enterprise_context', refused: false },
 
   // Category 2: Workflow Tasks (6 cases)
-  { id: 'task-01', category: 'workflow-tasks', isAdmin: false, portalSlug: 'services', prompt: 'Tôi có những việc cần duyệt nào hôm nay?', expectedTool: 'dxos_my_tasks_copilot', refused: false },
-  { id: 'task-02', category: 'workflow-tasks', isAdmin: false, portalSlug: 'logistics', prompt: 'Liệt kê danh sách tác vụ chờ duyệt của tôi', expectedTool: 'dxos_my_tasks_copilot', refused: false },
-  { id: 'task-03', category: 'workflow-tasks', isAdmin: false, portalSlug: 'procurement', prompt: 'Hôm nay tôi có việc gì tồn đọng cần xử lý không?', expectedTool: 'dxos_my_tasks_copilot', refused: false },
-  { id: 'task-04', category: 'workflow-tasks', isAdmin: false, portalSlug: 'services', prompt: 'Kiểm tra các phiếu yêu cầu đang chờ tôi phê duyệt', expectedTool: 'dxos_my_tasks_copilot', refused: false },
-  { id: 'task-05', category: 'workflow-tasks', isAdmin: false, portalSlug: 'logistics', prompt: 'Cho xem việc của tôi cần xác nhận giao hàng', expectedTool: 'dxos_my_tasks_copilot', refused: false },
-  { id: 'task-06', category: 'workflow-tasks', isAdmin: true, portalSlug: 'services', prompt: 'Xem danh sách duyệt quy trình nội bộ còn đang chờ', expectedTool: 'dxos_my_tasks_copilot', refused: false },
+  { id: 'task-01', category: 'workflow-tasks', isAdmin: false, portalSlug: 'services', prompt: 'Tôi có những việc cần duyệt nào hôm nay?', expectedTool: 'dxos_my_workflow_tasks', refused: false },
+  { id: 'task-02', category: 'workflow-tasks', isAdmin: false, portalSlug: 'logistics', prompt: 'Liệt kê danh sách tác vụ chờ duyệt của tôi', expectedTool: 'dxos_my_workflow_tasks', refused: false },
+  { id: 'task-03', category: 'workflow-tasks', isAdmin: false, portalSlug: 'procurement', prompt: 'Hôm nay tôi có việc gì tồn đọng cần xử lý không?', expectedTool: 'dxos_my_workflow_tasks', refused: false },
+  { id: 'task-04', category: 'workflow-tasks', isAdmin: false, portalSlug: 'services', prompt: 'Kiểm tra các phiếu yêu cầu đang chờ tôi phê duyệt', expectedTool: 'dxos_my_workflow_tasks', refused: false },
+  { id: 'task-05', category: 'workflow-tasks', isAdmin: false, portalSlug: 'logistics', prompt: 'Cho xem việc của tôi cần xác nhận giao hàng', expectedTool: 'dxos_my_workflow_tasks', refused: false },
+  { id: 'task-06', category: 'workflow-tasks', isAdmin: true, portalSlug: 'services', prompt: 'Xem danh sách duyệt quy trình nội bộ còn đang chờ', expectedTool: 'dxos_my_workflow_tasks', refused: false },
 
   // Category 3: Cross-department Radar & Orchestration (5 cases)
   { id: 'radar-01', category: 'orchestration', isAdmin: false, portalSlug: 'services', prompt: 'Chạy radar phát hiện điểm nghẽn toàn doanh nghiệp', expectedTool: 'dxos_orchestrate_enterprise_case', refused: false },
@@ -95,7 +95,7 @@ export const VIETNAMESE_NL_EVAL_CASES = [
   { id: 'wms-03', category: 'wms-coldchain', isAdmin: false, portalSlug: 'incidents', prompt: 'Xác nhận tiếp nhận cảnh báo nhiệt độ cao ALM-CHILLER-02 để ca trực kiểm tra', expectedTool: 'dxos_alarm_action', refused: false, check: (r) => r.args.action === 'ack' },
   { id: 'wms-04', category: 'wms-coldchain', isAdmin: false, portalSlug: 'incidents', prompt: 'Đã xử lý xong quá nhiệt máy nén, giải tỏa cảnh báo kho lạnh ngay', expectedTool: 'dxos_alarm_action', refused: false, check: (r) => r.args.action === 'clear' },
   { id: 'wms-05', category: 'wms-coldchain', isAdmin: true, portalSlug: 'logistics', prompt: 'Tổng hợp toàn hệ thống xem điểm nghẽn tồn kho FEFO và giao nhận ePOD', expectedTool: 'dxos_orchestrate_enterprise_case', refused: false },
-  { id: 'wms-06', category: 'wms-coldchain', isAdmin: false, portalSlug: 'logistics', prompt: 'Kiểm tra danh sách công việc kho lạnh đang chờ tôi phê duyệt', expectedTool: 'dxos_my_tasks_copilot', refused: false },
+  { id: 'wms-06', category: 'wms-coldchain', isAdmin: false, portalSlug: 'logistics', prompt: 'Kiểm tra danh sách công việc kho lạnh đang chờ tôi phê duyệt', expectedTool: 'dxos_my_workflow_tasks', refused: false },
 
   // Category 10: DX-OS Flow Architect (14 cases)
   {

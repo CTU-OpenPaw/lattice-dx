@@ -9,6 +9,7 @@
 'use strict';
 
 const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|cookie|credential|jwt|bearer|privatekey|private_key|sessionid|session_id|passphrase|access_key|client_secret/i;
+const SECRET_KV_RE = /((?:\\?["'])?(?:[a-zA-Z0-9_]*(?:secret|password|apikey|api_key|jwt|private_?key|client_secret|access_key|passphrase|credential|authorization|cookie)[a-zA-Z0-9_]*|[a-zA-Z0-9_]*(?:token|session_?id))(?:\\?["'])?\s*[:=]\s*)(?!\\?["']?\[REDACTED(?:_[A-Z]+)?\])(\\"(?:[^"\\]|\\[^"])+\\"|"(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+'|[^\s,;}"'&]+)/gi;
 
 const DEFAULT_PRICING_USD_PER_1M = { input: 0.35, output: 1.05 };
 const MODEL_PRICING_USD_PER_1M = {
@@ -48,6 +49,18 @@ function replaceCounted(text, regex, replacement) {
   return { text: next, hits };
 }
 
+function replaceSecretKvPairs(rawText) {
+  let hits = 0;
+  const text = String(rawText ?? '').replace(SECRET_KV_RE, (_full, prefix, valPart) => {
+    hits += 1;
+    if (valPart.startsWith('\\"')) return `${prefix}\\"[REDACTED]\\"`;
+    if (valPart.startsWith('"')) return `${prefix}"[REDACTED]"`;
+    if (valPart.startsWith("'")) return `${prefix}'[REDACTED]'`;
+    return `${prefix}[REDACTED]`;
+  });
+  return { text, hits };
+}
+
 function redactPiiText(rawText) {
   let text = String(rawText ?? '');
   if (!text) return { text, count: 0 };
@@ -56,7 +69,6 @@ function redactPiiText(rawText) {
     [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]'],
     [/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]'],
     [/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]'],
-    [/([a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)\s*[:=]\s*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]'],
     [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]'],
     [/(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?)\s*[:#=-]?\s*)\d{9,12}\b/gi, '$1[REDACTED_CCCD]'],
     [/(?<![0-9A-Za-z-])0\d{11}(?![0-9A-Za-z-])/g, '[REDACTED_CCCD]'],
@@ -64,7 +76,13 @@ function redactPiiText(rawText) {
     [/(\b(?:stk|số tài khoản|tài khoản ngân hàng|iban)\s*[:#=-]?\s*)[A-Z0-9 -]{8,24}(?=\s*[,;.\n]|$)/gi, '$1[REDACTED_BANK]'],
     [/(\b(?:mst|mã số thuế)\s*[:#=-]?\s*)\d{10}(?:-\d{3})?\b/gi, '$1[REDACTED_MST]'],
   ];
-  for (const [regex, replacement] of rules) {
+  for (let i = 0; i < rules.length; i += 1) {
+    if (i === 3) {
+      const kv = replaceSecretKvPairs(text);
+      text = kv.text;
+      count += kv.hits;
+    }
+    const [regex, replacement] = rules[i];
     const res = replaceCounted(text, regex, replacement);
     text = res.text;
     count += res.hits;
@@ -109,6 +127,35 @@ function redactPiiDeep(value, depth = 0) {
     return { value: out, count };
   }
   return { value: String(value), count: 0 };
+}
+
+function redactPiiForLlm(input) {
+  let redactedCount = 0;
+  function walk(node, depth = 0) {
+    if (depth > 16) return '[TRUNCATED]';
+    if (node == null || typeof node === 'number' || typeof node === 'boolean') return node;
+    if (typeof node === 'string') {
+      const res = redactPiiText(node);
+      redactedCount += Number(res?.count) || 0;
+      return res?.text ?? node;
+    }
+    if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
+    if (typeof node === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(node)) {
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+        if (SENSITIVE_KEY_RE.test(k)) {
+          out[k] = '[REDACTED]';
+          redactedCount += 1;
+        } else {
+          out[k] = walk(v, depth + 1);
+        }
+      }
+      return out;
+    }
+    return String(node);
+  }
+  return { redacted: walk(input, 0), redactedCount };
 }
 
 function estimateTokens(input) {
@@ -563,9 +610,11 @@ function resetQuotaBuckets() {
 module.exports = {
   MODEL_PRICING_USD_PER_1M,
   utcDayKey,
+  replaceSecretKvPairs,
   redactPiiText,
   redactPiiString,
   redactPiiDeep,
+  redactPiiForLlm,
   estimateTokens,
   estimateCostUsd,
   getQuotaLimits,

@@ -14,6 +14,7 @@ const {
   FORBIDDEN_SYSTEM_COLLECTIONS, MAX_FLOW_NODES, MAX_HARD_DEPTH, MAX_LOOP_ITERATIONS,
   STANDARD_PORTS, isPlainObject, normalizeGraph,
 } = require('./schema');
+const { isUnsafeStaticUrl } = require('./security-helpers');
 
 const TEMPLATE_EXPR_RE = /^[a-zA-Z0-9_.\-$]+$/;
 const VALID_FILTER_OPERATORS = new Set([
@@ -131,19 +132,6 @@ const isSafeTemplateString = (val) => {
   return s.startsWith('{{') && s.endsWith('}}') && !hasUnsafeTemplateSyntax(s);
 };
 
-function isUnsafeMetadataUrl(rawUrl) {
-  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
-  const lower = rawUrl.trim().toLowerCase();
-  if (['169.254.', 'metadata.google.internal', 'metadata.azure.com', 'metadata.aws.internal', 'instance-data', 'fd00:ec2::254', '0xa9fea9fe', '2852039166'].some((p) => lower.includes(p))) return true;
-  try {
-    const host = new URL(lower).hostname.replace(/^\[|\]$/g, '');
-    return host.startsWith('169.254.') || host.startsWith('::ffff:169.254.') || host.startsWith('::ffff:a9fe:')
-      || /(?:^|:)a9fe:[0-9a-f]{1,4}$/.test(host)
-      || host === 'metadata.google.internal' || host === 'metadata.azure.com'
-      || host === 'metadata.aws.internal' || host === 'instance-data';
-  } catch { return false; }
-}
-
 function lookupRegistrySchema(nodeRegistry, type) {
   if (!nodeRegistry || !type) return null;
   if (typeof nodeRegistry.getNodeType === 'function') return nodeRegistry.getNodeType(type) || null;
@@ -183,7 +171,7 @@ function validateNodeSecurity(node, graphRuleKey, opts, errors) {
   }
   if (node.type === 'integration.http' || node.type === 'ai.llm' || node.type === 'iot.twin_command') {
     for (const key of ['url', 'path', 'baseUrl', 'baseURL', 'endpoint', 'downlinkUrl']) {
-      if (isUnsafeMetadataUrl(cfg[key])) errors.push({ code: 'CONNECTOR_URL_UNSAFE', nodeId: node.id, message: `Unsafe metadata URL in ${node.type}.${key}` });
+      if (isUnsafeStaticUrl(cfg[key])) errors.push({ code: 'CONNECTOR_URL_UNSAFE', nodeId: node.id, message: `Unsafe SSRF/metadata URL in ${node.type}.${key}` });
     }
   }
   if (node.type === 'trigger.schedule' && cfg.cron !== undefined && cfg.cron !== null && String(cfg.cron).trim() !== '') {
