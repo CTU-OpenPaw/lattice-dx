@@ -33,7 +33,7 @@ const DXOS_MODAL_SCROLL_CSS = [
   '.ant-modal-wrap.ant-modal-centered { display: flex !important; align-items: flex-start !important; justify-content: center !important; padding: 24px 16px !important; }',
   '.ant-modal-wrap.ant-modal-centered::before { display: none !important; }',
   '.ant-modal-wrap .ant-modal { top: 24px !important; margin: 0 auto !important; padding-bottom: 24px !important; max-width: calc(100vw - 32px); }',
-  '.ant-modal-wrap.ant-modal-centered .ant-modal { top: 0 !important; margin: auto !important; }',
+  '.ant-modal-wrap.ant-modal-centered .ant-modal { top: 0 !important; margin: 0 auto !important; }',
   '.ant-modal-wrap .ant-modal-content { max-height: calc(100vh - 48px); display: flex; flex-direction: column; }',
   '.ant-modal-wrap .ant-modal-body { max-height: 78vh; overflow-y: auto; }',
 ].join('\n');

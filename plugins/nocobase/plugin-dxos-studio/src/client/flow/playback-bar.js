@@ -152,7 +152,7 @@ function createPlaybackBar(React) {
 
     return h('div', {
       'data-testid': 'dxos-flow-playback-bar',
-      style: { borderTop: '1px solid #cbd5e1', background: '#ffffff', padding: expanded ? '8px 14px' : '5px 14px', minHeight: 38, boxSizing: 'border-box', display: 'grid', gap: 8 },
+      style: { borderTop: '1px solid #cbd5e1', background: '#ffffff', padding: expanded ? '8px 92px 8px 14px' : '5px 92px 5px 14px', minHeight: 38, boxSizing: 'border-box', display: 'grid', gap: 8 },
     },
       hitlBanner,
       !expanded

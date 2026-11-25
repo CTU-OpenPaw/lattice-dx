@@ -1721,3 +1721,47 @@ test('approval-engine rejects __proto__, constructor, prototype, all, and ALL as
   });
 });
 
+test('listUnifiedInbox forwards diffPreview and proposedArgs on ai_hitl and business items', async () => {
+  await withMockedNocobase(async () => {
+    const { listUnifiedInbox } = require('../src/server/approval-engine');
+    const { db, tables } = makeApprovalHarness();
+    tables.latticeAiApprovalQueue.push({
+      id: 701,
+      organizationId: 'org-a',
+      toolName: 'orders.escalate',
+      aiEmployee: 'dispatch-ai',
+      targetCollection: 'latticeOrders',
+      targetRecordId: 88,
+      operation: 'update',
+      riskLevel: 'high',
+      status: 'pending',
+      requesterUserId: 101,
+      requesterUsername: 'emp_a1',
+      diffPreview: {
+        title: 'Nâng ưu tiên đơn gấp #88',
+        summary: 'Đơn cold-chain sắp quá hạn SLA',
+        before: { priority: 'normal', assignedDriver: 'DRV-01' },
+        after: { priority: 'urgent', assignedDriver: 'DRV-09' },
+      },
+      proposedArgs: { priority: 'urgent', assignedDriver: 'DRV-09' },
+      createdAt: '2026-11-26T03:00:00.000Z',
+    });
+
+    const out = await listUnifiedInbox(db, {
+      organizationId: 'org-a',
+      actor: { userId: 1, isRoot: true, isAdmin: true, roles: ['root'] },
+      source: 'ai_hitl',
+      status: 'pending',
+    });
+    assert.equal(out.items.length, 1);
+    assert.deepEqual(out.items[0].diffPreview, {
+      title: 'Nâng ưu tiên đơn gấp #88',
+      summary: 'Đơn cold-chain sắp quá hạn SLA',
+      before: { priority: 'normal', assignedDriver: 'DRV-01' },
+      after: { priority: 'urgent', assignedDriver: 'DRV-09' },
+    });
+    assert.deepEqual(out.items[0].proposedArgs, { priority: 'urgent', assignedDriver: 'DRV-09' });
+  });
+});
+
+
