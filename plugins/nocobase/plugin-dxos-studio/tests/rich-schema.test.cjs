@@ -480,7 +480,13 @@ test('portal-composer validates ALLOWED_DXOS_BLOCK_USES and includes DxosBiChart
   assert.equal(ALLOWED_DXOS_BLOCK_USES.size, 12);
 
   const biBlocks = OVERVIEW_SPECS.flatMap((s) => s.blocks || []).filter((b) => b.use === 'DxosBiChartBlockModel');
-  assert.ok(biBlocks.length >= 1, 'Expected at least 1 DxosBiChartBlockModel in OVERVIEW_SPECS');
+  assert.ok(biBlocks.length >= 2, 'Expected DxosBiChartBlockModel in procurement and logistics OVERVIEW_SPECS');
+  const logisticsSpec = OVERVIEW_SPECS.find((s) => s.slug === 'logistics');
+  const logisticsBi = (logisticsSpec?.blocks || []).find((b) => b.use === 'DxosBiChartBlockModel');
+  assert.ok(logisticsBi, 'Expected Logistics portal OVERVIEW_SPECS to seed DxosBiChartBlockModel');
+  assert.equal(logisticsBi.config.collection, 'latticeOrders');
+  assert.equal(logisticsBi.config.groupBy, 'status');
+  assert.equal(logisticsBi.config.chartType, 'bar');
 
   await assert.rejects(
     () => attachDxosBlocksToTab({

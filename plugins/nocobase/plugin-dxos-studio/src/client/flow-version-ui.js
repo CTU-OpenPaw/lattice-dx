@@ -52,6 +52,27 @@ function renderVersionStatusBadge(h, doc) {
   }, st.label);
 }
 
+function synthesizeBaselineVersionIfMissing(items, rule) {
+  const list = Array.isArray(items) ? items.slice() : [];
+  const pubVer = Math.max(0, Number(rule?.publishedVersion || 0));
+  const hasLiveGraph = Boolean(rule?.graphJson?.nodes?.length || rule?.publishedGraphJson?.nodes?.length || (pubVer >= 1 && rule?.id));
+  if (pubVer >= 1 && hasLiveGraph && !list.some((v) => Number(v?.version || 0) === pubVer)) {
+    list.unshift({
+      id: `baseline-${rule?.id ?? rule?.ruleKey ?? 'rule'}-v${pubVer}`,
+      ruleKey: rule?.ruleKey || '',
+      version: pubVer,
+      status: 'published',
+      isCurrent: true,
+      syntheticBaseline: true,
+      note: 'Phiên bản đang chạy (Live Baseline)',
+      changeSummary: 'Phiên bản đang chạy (Live Baseline)',
+      publishedBy: rule?.createdBy || 'system',
+      publishedAt: rule?.updatedAt || rule?.createdAt || null,
+    });
+  }
+  return list.sort((a, b) => Number(b?.version || 0) - Number(a?.version || 0));
+}
+
 function renderVersionsModal(h, { modal, currentVersion, busy, onRollback, onClose, btnS }) {
   if (!modal?.open) return null;
   const items = Array.isArray(modal.items) ? modal.items : [];
@@ -75,7 +96,8 @@ function renderVersionsModal(h, { modal, currentVersion, busy, onRollback, onClo
           ? h('div', { style: { fontSize: 12, color: '#64748b', padding: 12 } }, 'Chưa có phiên bản đã publish nào.')
           : items.map((v) => {
             const ver = Number(v.version || 0);
-            const isCurrent = ver === Number(currentVersion || 0);
+            const isCurrent = Boolean(v.isCurrent) || ver === Number(currentVersion || 0);
+            const summaryText = v.note || v.changeSummary || '';
             return h('div', {
               key: v.id || ver,
               'data-testid': `dxos-flow-version-row-v${ver}`,
@@ -85,9 +107,9 @@ function renderVersionsModal(h, { modal, currentVersion, busy, onRollback, onClo
                 h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
                   h('strong', { style: { fontSize: 12, color: '#0f172a' } }, `v${ver}`),
                   isCurrent ? h('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 999, background: '#dcfce7', color: '#166534' } }, 'Live') : null,
-                  h('span', { style: { fontSize: 11, color: '#64748b' } }, `${v.publishedBy || 'system'} · ${v.publishedAt ? String(v.publishedAt).slice(0, 19).replace('T', ' ') : ''}`),
+                  h('span', { style: { fontSize: 11, color: '#64748b' } }, `${v.publishedBy || 'system'}${v.publishedAt ? ` · ${String(v.publishedAt).slice(0, 19).replace('T', ' ')}` : ''}`),
                 ),
-                v.changeSummary ? h('span', { style: { fontSize: 11, color: '#334155' } }, v.changeSummary) : null,
+                summaryText ? h('span', { style: { fontSize: 11, color: '#334155' } }, summaryText) : null,
               ),
               h('button', {
                 type: 'button',
@@ -134,11 +156,15 @@ function createVersionLifecycleHandlers({
     });
   };
   const handleOpenVersions = () => {
-    const rk = String(getDoc().rule?.ruleKey || '').trim();
+    const currentRule = getDoc().rule;
+    const rk = String(currentRule?.ruleKey || '').trim();
     if (!rk || !refs.api?.request) return;
     setVerModal({ open: true, loading: true, items: [] });
     refs.api.request({ url: 'dxosAutomations:listRuleVersions', method: 'get', params: { ...getOrgPayload(), ruleKey: rk }, skipNotify: true })
-      .then((res) => setVerModal({ open: true, loading: false, items: Array.isArray(unwrap(res)?.items) ? unwrap(res).items : [] }))
+      .then((res) => {
+        const rawItems = Array.isArray(unwrap(res)?.items) ? unwrap(res).items : [];
+        setVerModal({ open: true, loading: false, items: synthesizeBaselineVersionIfMissing(rawItems, currentRule) });
+      })
       .catch((err) => { setVerModal({ open: false, loading: false, items: [] }); reportFb({ type: 'error', text: errMsg(err, 'Không tải được lịch sử phiên bản.') }); });
   };
   const handleRollbackVersion = (ver) => runAction('rollback', 'dxosAutomations:rollbackRuleVersion', { ...getOrgPayload(), ruleKey: getDoc().rule.ruleKey, version: ver }, (d) => {
@@ -165,6 +191,7 @@ function createVersionLifecycleHandlers({
 module.exports = {
   buildDraftPayload,
   getVersionStatusMeta,
+  synthesizeBaselineVersionIfMissing,
   renderVersionStatusBadge,
   renderVersionsModal,
   createVersionLifecycleHandlers,

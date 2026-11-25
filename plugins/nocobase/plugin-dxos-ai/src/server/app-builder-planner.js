@@ -712,10 +712,205 @@ function computeSpecDiff(baseSpec = null, candidateSpec = {}, baseSorted = [], c
   };
 }
 
+function buildDraftSpecFromNaturalPrompt(promptText = '') {
+  const raw = String(promptText || '').trim();
+  const norm = stripDiacriticsSimple(raw).toLowerCase().replace(/\s+/g, ' ').trim();
+
+  if (/(phong\s*kham|benh\s*nhan|kham\s*benh|don\s*thuoc|clinic|medical)/i.test(norm)) {
+    return {
+      appKey: 'clinic-suite',
+      appName: 'Quản lý Phòng khám Đa khoa',
+      creativeTheme: 'clean-light',
+      collections: [
+        {
+          collectionName: 'latticeCustomClinicPatients',
+          collectionTitle: 'Bệnh nhân',
+          fields: [
+            { name: 'code', type: 'string', title: 'Mã bệnh nhân', required: true, unique: true },
+            { name: 'fullName', type: 'string', title: 'Họ và tên', required: true },
+            { name: 'phone', type: 'string', title: 'Số điện thoại' },
+            { name: 'allergies', type: 'text', title: 'Tiền sử dị ứng' },
+            { name: 'status', type: 'string', title: 'Trạng thái' },
+          ],
+        },
+        {
+          collectionName: 'latticeCustomClinicVisits',
+          collectionTitle: 'Phiếu Khám bệnh',
+          fields: [
+            { name: 'visitCode', type: 'string', title: 'Mã lượt khám', required: true, unique: true },
+            { name: 'patient', type: 'belongsTo', target: 'latticeCustomClinicPatients', title: 'Bệnh nhân' },
+            { name: 'doctorName', type: 'string', title: 'Bác sĩ phụ trách' },
+            { name: 'diagnosis', type: 'text', title: 'Chẩn đoán' },
+            { name: 'feeVnd', type: 'float', title: 'Phí khám (VNĐ)' },
+            { name: 'status', type: 'string', title: 'Trạng thái' },
+          ],
+        },
+        {
+          collectionName: 'latticeCustomClinicPrescriptions',
+          collectionTitle: 'Đơn thuốc',
+          fields: [
+            { name: 'rxCode', type: 'string', title: 'Mã đơn thuốc', required: true },
+            { name: 'visit', type: 'belongsTo', target: 'latticeCustomClinicVisits', title: 'Phiếu khám' },
+            { name: 'medication', type: 'string', title: 'Tên thuốc' },
+            { name: 'quantity', type: 'integer', title: 'Số lượng' },
+            { name: 'unitPrice', type: 'float', title: 'Đơn giá' },
+            { name: 'totalAmount', type: 'formula', interface: 'formula', formulaExpression: 'quantity * unitPrice', formulaReturnType: 'float', title: 'Thành tiền' },
+          ],
+        },
+      ],
+      roles: [{ roleName: 'ldx_clinic_staff', roleTitle: 'Nhân viên Phòng khám' }],
+      portals: [{
+        portalSlug: 'clinic-ops',
+        pageTitle: 'Quản lý Phòng khám Đa khoa',
+        roleName: 'ldx_clinic_staff',
+        collectionName: 'latticeCustomClinicVisits',
+        creativeTheme: 'clean-light',
+        blocks: [
+          { blockUse: 'DxosPortalHeroBlockModel', title: 'Cổng Phòng khám Đa khoa' },
+          { blockUse: 'DxosRecordWorkbenchBlockModel', title: 'Hàng chờ Khám bệnh', collection: 'latticeCustomClinicVisits' },
+          { blockUse: 'DxosBiChartBlockModel', title: 'Thống kê Lượt khám theo Trạng thái', collection: 'latticeCustomClinicVisits', chartType: 'bar', groupBy: 'status', metricOp: 'count' },
+        ],
+      }],
+    };
+  }
+
+  if (/(crm|ban\s*hang|co\s*hoi|bao\s*gia|khach\s*hang|b2b|deal|pipeline)/i.test(norm)) {
+    return {
+      appKey: 'b2b-crm-suite',
+      appName: 'CRM Bán hàng B2B',
+      creativeTheme: 'royal-indigo',
+      collections: [
+        {
+          collectionName: 'latticeCustomCrmAccounts',
+          collectionTitle: 'Khách hàng Doanh nghiệp',
+          fields: [
+            { name: 'code', type: 'string', title: 'Mã KH', required: true, unique: true },
+            { name: 'companyName', type: 'string', title: 'Tên doanh nghiệp', required: true },
+            { name: 'taxCode', type: 'string', title: 'Mã số thuế' },
+            { name: 'tier', type: 'string', title: 'Phân hạng' },
+            { name: 'status', type: 'string', title: 'Trạng thái' },
+          ],
+        },
+        {
+          collectionName: 'latticeCustomCrmDeals',
+          collectionTitle: 'Cơ hội Kinh doanh B2B',
+          fields: [
+            { name: 'dealCode', type: 'string', title: 'Mã cơ hội', required: true, unique: true },
+            { name: 'title', type: 'string', title: 'Tên cơ hội', required: true },
+            { name: 'account', type: 'belongsTo', target: 'latticeCustomCrmAccounts', title: 'Khách hàng' },
+            { name: 'stage', type: 'string', title: 'Giai đoạn' },
+            { name: 'valueVnd', type: 'float', title: 'Giá trị (VNĐ)' },
+            { name: 'probability', type: 'float', title: 'Xác suất (%)' },
+            { name: 'expectedRevenue', type: 'formula', interface: 'formula', formulaExpression: 'valueVnd * probability / 100', formulaReturnType: 'float', title: 'Doanh thu kỳ vọng' },
+          ],
+        },
+      ],
+      roles: [{ roleName: 'ldx_crm_sales', roleTitle: 'Kinh doanh B2B' }],
+      portals: [{
+        portalSlug: 'b2b-crm',
+        pageTitle: 'CRM Bán hàng B2B',
+        roleName: 'ldx_crm_sales',
+        collectionName: 'latticeCustomCrmDeals',
+        creativeTheme: 'royal-indigo',
+        blocks: [
+          { blockUse: 'DxosPortalHeroBlockModel', title: 'CRM Bán hàng B2B' },
+          { blockUse: 'DxosKanbanScheduleBlockModel', title: 'Pipeline Cơ hội B2B', collection: 'latticeCustomCrmDeals', statusField: 'stage' },
+          { blockUse: 'DxosBiChartBlockModel', title: 'Giá trị Cơ hội theo Giai đoạn', collection: 'latticeCustomCrmDeals', chartType: 'bar', groupBy: 'stage', metricOp: 'sum', metricField: 'valueVnd' },
+        ],
+      }],
+    };
+  }
+
+  if (/(itsm|ho\s*tro\s*noi\s*bo|helpdesk|ticket|su\s*co\s*it|yeu\s*cau\s*it)/i.test(norm)) {
+    return {
+      appKey: 'internal-itsm-suite',
+      appName: 'ITSM Hỗ trợ Nội bộ',
+      creativeTheme: 'industrial-cockpit',
+      collections: [
+        {
+          collectionName: 'latticeCustomItAssets',
+          collectionTitle: 'Tài sản & Thiết bị IT',
+          fields: [
+            { name: 'assetTag', type: 'string', title: 'Mã tài sản', required: true, unique: true },
+            { name: 'name', type: 'string', title: 'Tên thiết bị', required: true },
+            { name: 'category', type: 'string', title: 'Phân loại' },
+            { name: 'status', type: 'string', title: 'Trạng thái' },
+          ],
+        },
+        {
+          collectionName: 'latticeCustomItTickets',
+          collectionTitle: 'Phiếu Yêu cầu ITSM',
+          fields: [
+            { name: 'ticketCode', type: 'string', title: 'Mã phiếu', required: true, unique: true },
+            { name: 'title', type: 'string', title: 'Tiêu đề sự cố', required: true },
+            { name: 'asset', type: 'belongsTo', target: 'latticeCustomItAssets', title: 'Thiết bị liên quan' },
+            { name: 'priority', type: 'string', title: 'Độ ưu tiên' },
+            { name: 'slaHours', type: 'integer', title: 'Cam kết SLA (giờ)' },
+            { name: 'status', type: 'string', title: 'Trạng thái' },
+          ],
+        },
+      ],
+      roles: [{ roleName: 'ldx_itsm_agent', roleTitle: 'Kỹ thuật viên ITSM' }],
+      portals: [{
+        portalSlug: 'itsm-desk',
+        pageTitle: 'ITSM Hỗ trợ Nội bộ',
+        roleName: 'ldx_itsm_agent',
+        collectionName: 'latticeCustomItTickets',
+        creativeTheme: 'industrial-cockpit',
+        blocks: [
+          { blockUse: 'DxosPortalHeroBlockModel', title: 'Bàn Hỗ trợ Kỹ thuật ITSM' },
+          { blockUse: 'DxosRecordWorkbenchBlockModel', title: 'Hàng chờ Yêu cầu ITSM', collection: 'latticeCustomItTickets' },
+          { blockUse: 'DxosBiChartBlockModel', title: 'Phân bố Mức độ Ưu tiên', collection: 'latticeCustomItTickets', chartType: 'pie', groupBy: 'priority', metricOp: 'count' },
+        ],
+      }],
+    };
+  }
+
+  const words = norm.replace(/[^a-z0-9\s]/g, ' ').trim().split(/\s+/).filter(Boolean).slice(0, 4);
+  const slugBase = (words.join('-') || 'custom-app').slice(0, 28).replace(/^-+|-+$/g, '') || 'custom-app';
+  const pascal = (words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join('') || 'CustomApp').slice(0, 24);
+  const colName = `latticeCustom${pascal}`;
+  const roleSuffix = slugBase.replace(/-/g, '_').slice(0, 24) || 'custom_app';
+  const title = raw.slice(0, 64) || 'Ứng dụng Doanh nghiệp Mới';
+
+  return {
+    appKey: `${slugBase}-app`,
+    appName: title,
+    creativeTheme: 'industrial-cockpit',
+    collections: [
+      {
+        collectionName: colName,
+        collectionTitle: title,
+        fields: [
+          { name: 'code', type: 'string', title: 'Mã hồ sơ', required: true, unique: true },
+          { name: 'title', type: 'string', title: 'Tiêu đề', required: true },
+          { name: 'description', type: 'text', title: 'Mô tả chi tiết' },
+          { name: 'priority', type: 'string', title: 'Độ ưu tiên' },
+          { name: 'status', type: 'string', title: 'Trạng thái' },
+        ],
+      },
+    ],
+    roles: [{ roleName: `ldx_${roleSuffix}`, roleTitle: `Điều hành ${title}` }],
+    portals: [{
+      portalSlug: slugBase,
+      pageTitle: title,
+      roleName: `ldx_${roleSuffix}`,
+      collectionName: colName,
+      creativeTheme: 'industrial-cockpit',
+      blocks: [
+        { blockUse: 'DxosPortalHeroBlockModel', title },
+        { blockUse: 'DxosRecordWorkbenchBlockModel', title: `Quản lý ${title}`, collection: colName },
+        { blockUse: 'DxosBiChartBlockModel', title: `Thống kê ${title}`, collection: colName, chartType: 'bar', groupBy: 'status', metricOp: 'count' },
+      ],
+    }],
+  };
+}
+
 module.exports = {
   FORBIDDEN_PROTO_KEYS,
   assertNoPrototypePollution,
   cloneSafeDeep,
+  buildDraftSpecFromNaturalPrompt,
   parseNaturalAppPlanOrPatch,
   applySpecPatch,
   buildErGraph,

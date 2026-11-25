@@ -8,11 +8,18 @@
  */
 'use strict';
 
+const {
+  getStatusMeta,
+  formatStatusLabel,
+  stripDevBracketTags,
+  createCompactIdBadge,
+} = require('./blocks-helpers');
+
 const IMPORT_COLLECTIONS = [
-  { label: 'Lô kho lạnh (latticeStockLots)', value: 'latticeStockLots' },
-  { label: 'Tài sản & Thiết bị (latticeAssets)', value: 'latticeAssets' },
-  { label: 'Đơn Logistics (latticeOrders)', value: 'latticeOrders' },
-  { label: 'Yêu cầu mua sắm (latticeRequests)', value: 'latticeRequests' },
+  { label: 'Lô kho lạnh', value: 'latticeStockLots' },
+  { label: 'Tài sản & Thiết bị', value: 'latticeAssets' },
+  { label: 'Đơn Logistics', value: 'latticeOrders' },
+  { label: 'Yêu cầu mua sắm', value: 'latticeRequests' },
 ];
 
 function parseSamplesList(rawText) {
@@ -184,7 +191,8 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
         });
         const d = unwrapPayload(res);
         setMktResult(d);
-        setFeedback({ type: 'success', text: `MKT=${d.mktCelsius ?? '—'}°C -> ${d.lotStatus || (d.held ? 'hold_mkt' : 'ok')}.` });
+        const mktStatusLabel = formatStatusLabel(d.lotStatus || (d.held ? 'hold_mkt' : 'ok'));
+        setFeedback({ type: 'success', text: `MKT=${d.mktCelsius ?? '—'}°C → ${mktStatusLabel}.` });
         await loadLots();
       } catch (err) {
         setFeedback({ type: 'error', text: extractErr(err, 'Không kiểm định MKT được.') });
@@ -250,7 +258,7 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
     };
 
     const S = {
-      root: { background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16, display: 'grid', gap: 14 },
+      root: { background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: 12, padding: 16, paddingBottom: 56, display: 'grid', gap: 14 },
       header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
       tabs: { display: 'flex', gap: 8, flexWrap: 'wrap' },
       tabBtn: (active) => ({
@@ -265,7 +273,8 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
       }),
       grid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 12 },
       card: { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 10, padding: 12, display: 'grid', gap: 8 },
-      input: { width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box' },
+      fieldLabel: { display: 'grid', gap: 4, fontSize: 11, fontWeight: 600, color: '#475569' },
+      input: { width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box', background: '#ffffff', color: '#0f172a' },
       btn: (primary = false, disabled = false) => ({
         padding: '6px 12px',
         borderRadius: 6,
@@ -283,8 +292,8 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
       { 'data-testid': 'dxos-wms-ops-block', style: S.root },
       h('div', { style: S.header },
         h('div', null,
-          h('h3', { style: { margin: 0, fontSize: 16, fontWeight: 700, color: '#0f172a' } }, cfg.title || 'Vận hành Kho FEFO & Nhập lô hàng loạt [W]'),
-          h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Phân bổ FEFO, xuất kho, phong tỏa Arrhenius MKT & Import 2 pha SHA-256'),
+          h('h3', { style: { margin: 0, fontSize: 16, fontWeight: 700, color: '#0f172a' } }, stripDevBracketTags(cfg.title || 'Vận hành Kho FEFO & Nhập lô hàng loạt')),
+          h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Phân bổ FEFO, xuất kho, phong tỏa Arrhenius MKT & Nhập lô kiểm tra toàn vẹn'),
         ),
         h('div', { style: S.tabs },
           h('button', {
@@ -298,7 +307,7 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
             'data-testid': 'dxos-wms-ops-tab-import',
             onClick: () => setActiveTab('import'),
             style: S.tabBtn(activeTab === 'import'),
-          }, 'Nhập lô hàng loạt (2-Phase)') : null,
+          }, 'Nhập lô hàng loạt (2 pha)') : null,
           h('button', {
             type: 'button',
             'data-testid': 'dxos-wms-ops-refresh-btn',
@@ -330,33 +339,67 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
             h('tbody', null,
               !lots.length
                 ? h('tr', null, h('td', { colSpan: 6, style: { padding: 10, color: '#64748b' } }, 'Chưa có lô kho nào.'))
-                : lots.map((lot) => h('tr', { key: lot.lotCode || lot.id, style: { borderTop: '1px solid #f1f5f9' } },
-                  h('td', { style: { padding: '6px 8px', fontWeight: 600 } }, lot.lotCode),
-                  h('td', { style: { padding: '6px 8px' } }, lot.sku),
-                  h('td', { style: { padding: '6px 8px' } }, lot.productName || '—'),
-                  h('td', { style: { padding: '6px 8px' } }, `${lot.qtyAvailable ?? lot.qtyOnHand ?? 0} ${lot.unit || ''}`),
-                  h('td', { style: { padding: '6px 8px' } }, lot.mktCelsius ?? '—'),
-                  h('td', { style: { padding: '6px 8px' } }, lot.status || 'available'),
-                )),
+                : lots.map((lot) => {
+                  const lotStatusMeta = getStatusMeta(lot.status || 'available');
+                  return h('tr', { key: lot.lotCode || lot.id, style: { borderTop: '1px solid #f1f5f9' } },
+                    h('td', { style: { padding: '6px 8px', fontWeight: 600 } }, lot.lotCode),
+                    h('td', { style: { padding: '6px 8px' } }, lot.sku),
+                    h('td', { style: { padding: '6px 8px' } }, lot.productName || '—'),
+                    h('td', { style: { padding: '6px 8px' } }, `${lot.qtyAvailable ?? lot.qtyOnHand ?? 0} ${lot.unit || ''}`),
+                    h('td', { style: { padding: '6px 8px' } }, lot.mktCelsius ?? '—'),
+                    h('td', { style: { padding: '6px 8px' } }, h('span', {
+                      'data-testid': `dxos-wms-lot-status-${lot.lotCode || lot.id}`,
+                      style: {
+                        display: 'inline-block',
+                        padding: '2px 8px',
+                        borderRadius: 999,
+                        fontSize: 11,
+                        fontWeight: 700,
+                        background: lotStatusMeta.bg,
+                        color: lotStatusMeta.color,
+                        border: `1px solid ${lotStatusMeta.border}`,
+                        whiteSpace: 'nowrap',
+                      },
+                    }, lotStatusMeta.label)),
+                  );
+                }),
             ),
           ),
         ),
         h('div', { style: S.grid },
           h('form', { 'data-testid': 'dxos-wms-ops-fefo-form', onSubmit: handleAllocateFefo, style: S.card },
             h('strong', { style: { fontSize: 13 } }, '1. Phân bổ FEFO'),
-            h('input', { 'data-testid': 'dxos-wms-ops-fefo-sku', placeholder: 'Mã SKU (VD: VAC-01)', value: fefoSku, onChange: (e) => setFefoSku(e.target.value), style: S.input }),
-            h('input', { 'data-testid': 'dxos-wms-ops-fefo-qty', type: 'number', placeholder: 'Số lượng', value: fefoQty, onChange: (e) => setFefoQty(e.target.value), style: S.input }),
-            h('input', { 'data-testid': 'dxos-wms-ops-fefo-order', placeholder: 'Mã đơn (tùy chọn)', value: fefoOrder, onChange: (e) => setFefoOrder(e.target.value), style: S.input }),
+            h('label', { style: S.fieldLabel },
+              'Mã SKU',
+              h('input', { 'data-testid': 'dxos-wms-ops-fefo-sku', placeholder: 'VD: VAC-01', value: fefoSku, onChange: (e) => setFefoSku(e.target.value), style: S.input }),
+            ),
+            h('label', { style: S.fieldLabel },
+              'Số lượng phân bổ',
+              h('input', { 'data-testid': 'dxos-wms-ops-fefo-qty', type: 'number', min: 1, placeholder: 'Nhập số lượng', value: fefoQty, onChange: (e) => setFefoQty(e.target.value), style: S.input }),
+            ),
+            h('label', { style: S.fieldLabel },
+              'Mã đơn hàng (tùy chọn)',
+              h('input', { 'data-testid': 'dxos-wms-ops-fefo-order', placeholder: 'VD: ORD-001', value: fefoOrder, onChange: (e) => setFefoOrder(e.target.value), style: S.input }),
+            ),
             h('button', { type: 'submit', disabled: busy, style: S.btn(true, busy) }, 'Phân bổ FEFO'),
             fefoResult ? h('div', { 'data-testid': 'dxos-wms-ops-fefo-result', style: { fontSize: 11, color: '#0f172a' } },
               `Đã giữ ${fefoResult.allocatedTotal ?? 0}: ${(fefoResult.allocations || []).map((a) => `${a.lotCode}:${a.qtyAllocated}`).join(', ')}`,
             ) : null,
           ),
           h('form', { 'data-testid': 'dxos-wms-ops-issue-form', onSubmit: handleIssueStock, style: S.card },
-            h('strong', { style: { fontSize: 13 } }, '2. Xuất kho thực tế (issueStock)'),
-            h('input', { 'data-testid': 'dxos-wms-ops-issue-lot', placeholder: 'Mã lô (lotCode)', value: issueLot, onChange: (e) => setIssueLot(e.target.value), style: S.input }),
-            h('input', { 'data-testid': 'dxos-wms-ops-issue-qty', type: 'number', placeholder: 'Số lượng xuất', value: issueQty, onChange: (e) => setIssueQty(e.target.value), style: S.input }),
-            h('input', { 'data-testid': 'dxos-wms-ops-issue-order', placeholder: 'Mã đơn (tùy chọn)', value: issueOrder, onChange: (e) => setIssueOrder(e.target.value), style: S.input }),
+            h('strong', { style: { fontSize: 13 } }, '2. Xuất kho thực tế (FEFO)'),
+            h('label', { style: S.fieldLabel },
+              'Mã lô hàng',
+              h('input', { 'data-testid': 'dxos-wms-ops-issue-lot', placeholder: 'VD: LOT-CT-01', value: issueLot, onChange: (e) => setIssueLot(e.target.value), style: S.input }),
+            ),
+            h('label', { style: S.fieldLabel },
+              'Số lượng xuất kho',
+              h('input', { 'data-testid': 'dxos-wms-ops-issue-qty', type: 'number', min: 1, placeholder: 'Nhập số lượng xuất', value: issueQty, onChange: (e) => setIssueQty(e.target.value), style: S.input }),
+            ),
+            h('label', { style: S.fieldLabel },
+              'Mã đơn hàng (tùy chọn)',
+              h('input', { 'data-testid': 'dxos-wms-ops-issue-order', placeholder: 'VD: ORD-001', value: issueOrder, onChange: (e) => setIssueOrder(e.target.value), style: S.input }),
+            ),
             h('button', { type: 'submit', disabled: busy, style: S.btn(true, busy) }, 'Xuất kho'),
             issueResult ? h('div', { 'data-testid': 'dxos-wms-ops-issue-result', style: { fontSize: 11, color: '#0f172a' } },
               `Đã xuất ${issueResult.issuedQty ?? 0} từ ${issueResult.lot?.lotCode || issueLot}`,
@@ -364,19 +407,28 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
           ),
           h('form', { 'data-testid': 'dxos-wms-ops-mkt-form', onSubmit: handleHoldMkt, style: S.card },
             h('strong', { style: { fontSize: 13 } }, '3. Phong tỏa Lô theo MKT'),
-            h('input', { 'data-testid': 'dxos-wms-ops-mkt-lot', placeholder: 'Mã lô (lotCode)', value: mktLot, onChange: (e) => setMktLot(e.target.value), style: S.input }),
-            h('input', { 'data-testid': 'dxos-wms-ops-mkt-samples', placeholder: 'Mẫu °C (VD: 2.5, 14.0)', value: mktSamples, onChange: (e) => setMktSamples(e.target.value), style: S.input }),
-            h('input', { 'data-testid': 'dxos-wms-ops-mkt-max', type: 'number', placeholder: 'Ngưỡng tối đa °C', value: mktMax, onChange: (e) => setMktMax(e.target.value), style: S.input }),
+            h('label', { style: S.fieldLabel },
+              'Mã lô hàng',
+              h('input', { 'data-testid': 'dxos-wms-ops-mkt-lot', placeholder: 'VD: LOT-CT-01', value: mktLot, onChange: (e) => setMktLot(e.target.value), style: S.input }),
+            ),
+            h('label', { style: S.fieldLabel },
+              'Chuỗi mẫu nhiệt độ (°C)',
+              h('input', { 'data-testid': 'dxos-wms-ops-mkt-samples', placeholder: 'VD: 2.5, 14.0', value: mktSamples, onChange: (e) => setMktSamples(e.target.value), style: S.input }),
+            ),
+            h('label', { style: S.fieldLabel },
+              'Ngưỡng nhiệt tối đa (°C)',
+              h('input', { 'data-testid': 'dxos-wms-ops-mkt-max', type: 'number', placeholder: 'VD: 8', value: mktMax, onChange: (e) => setMktMax(e.target.value), style: S.input }),
+            ),
             h('button', { type: 'submit', disabled: busy, style: S.btn(true, busy) }, 'Kiểm định & Phong tỏa MKT'),
             mktResult ? h('div', { 'data-testid': 'dxos-wms-ops-mkt-result', style: { fontSize: 11, color: '#0f172a' } },
-              `Trạng thái: ${mktResult.lotStatus || (mktResult.held ? 'hold_mkt' : 'ok')} (MKT ${mktResult.mktCelsius ?? '—'}°C)`,
+              `Trạng thái: ${formatStatusLabel(mktResult.lotStatus || (mktResult.held ? 'hold_mkt' : 'ok'))} (MKT ${mktResult.mktCelsius ?? '—'}°C)`,
             ) : null,
           ),
         ),
       ) : null,
 
       activeTab === 'import' && showBulkImport ? h('div', { 'data-testid': 'dxos-wms-ops-import-wizard', style: S.card },
-        h('strong', { style: { fontSize: 13 } }, 'Wizard Nhập lô hàng loạt 2 pha (Dry-Run SHA-256 -> Commit)'),
+        h('strong', { style: { fontSize: 13 } }, 'Nhập lô hàng loạt 2 pha (Kiểm thử dữ liệu → Xác nhận lưu)'),
         h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
           h('select', {
             'data-testid': 'dxos-wms-ops-import-collection',
@@ -415,9 +467,9 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
             style: S.btn(true, busy || !dryRunResult?.previewToken),
           }, 'Pha 2: Xác nhận Commit'),
         ),
-        dryRunResult ? h('div', { 'data-testid': 'dxos-wms-ops-import-preview', style: { padding: 10, background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: 6, fontSize: 12 } },
+        dryRunResult ? h('div', { 'data-testid': 'dxos-wms-ops-import-preview', style: { padding: 10, background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: 6, fontSize: 12, display: 'grid', gap: 6 } },
           h('div', null, `Tổng: ${dryRunResult.totalRows ?? 0} · Hợp lệ: ${dryRunResult.validCount ?? 0} · Lỗi: ${dryRunResult.invalidCount ?? 0}`),
-          h('div', { style: { fontSize: 11, color: '#475569' } }, `SHA-256: ${dryRunResult.payloadSha256 || '—'}`),
+          dryRunResult.payloadSha256 ? h('div', null, createCompactIdBadge(React, dryRunResult.payloadSha256, { labelPrefix: 'SHA-256' })) : null,
         ) : null,
         commitResult ? h('div', { 'data-testid': 'dxos-wms-ops-import-commit-result', style: { padding: 10, background: '#dcfce7', borderRadius: 6, fontSize: 12, color: '#166534' } },
           `Đã nhập thành công ${commitResult.committedCount ?? 0} bản ghi (bỏ qua trùng: ${commitResult.skippedDuplicates ?? 0}).`,

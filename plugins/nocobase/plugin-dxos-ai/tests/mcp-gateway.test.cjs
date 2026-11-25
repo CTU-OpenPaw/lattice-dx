@@ -289,3 +289,46 @@ test('v0.2.0 MCP/IT-OT hardening: Orion-LD ?local=true, outbox state/schema, red
   await mw(initCtx, async () => {});
   assert.equal(initCtx.body.result.serverInfo.version, pkgVersion);
 });
+
+test('Plane #3 activeWorkflowsCount accurately sums active latticeAutomationRules (org-scoped) and enabled NocoBase workflows', async () => {
+  const wrap = (row) => ({ ...row, get: (k) => row[k], toJSON: () => row });
+  const store = {
+    latticeOrganizations: [{ organizationId: 'default', active: true, status: 'active' }],
+    latticeAutomationRules: [
+      ...Array.from({ length: 8 }, (_, i) => ({ id: i + 1, organizationId: 'default', ruleKey: `r-${i + 1}`, active: true })),
+      { id: 9, organizationId: 'default', ruleKey: 'r-inactive', active: false },
+      { id: 10, organizationId: 'other-org', ruleKey: 'r-other', active: true },
+    ],
+    workflows: [
+      { id: 1, enabled: true, current: true },
+      { id: 2, enabled: true, current: false },
+      { id: 3, enabled: false, current: true },
+    ],
+    roles: [{ name: 'root' }],
+    latticeAssets: [],
+    latticeContextOutbox: [],
+    uiLayouts: [],
+    latticeParaDocuments: [],
+    latticeAiProfiles: [],
+    latticeAiAuditLogs: [],
+    collections: [],
+  };
+  const db = {
+    hasCollection: (name) => Boolean(store[name]),
+    getRepository(name) {
+      const arr = store[name];
+      if (!arr) return null;
+      return {
+        find: async ({ filter = {}, limit = 50 } = {}) => arr.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v)).slice(0, limit).map(wrap),
+        count: async ({ filter = {} } = {}) => arr.filter((r) => Object.entries(filter).every(([k, v]) => r[k] === v)).length,
+      };
+    },
+  };
+  const offlineFetch = async () => { throw new Error('offline'); };
+  const topology = await buildEnterpriseTopology(db, { ORION_LD_URL: 'http://127.0.0.1:1026', N8N_URL: 'http://127.0.0.1:5678' }, offlineFetch);
+  const plane3 = topology.planes.find((p) => p.key === 'integrationEventBus');
+  assert.ok(plane3);
+  // 8 active rules in 'default' + 2 enabled NocoBase workflows = 10
+  assert.equal(plane3.metrics.activeWorkflowsCount, 10);
+  assert.equal(plane3.healthy, true);
+});

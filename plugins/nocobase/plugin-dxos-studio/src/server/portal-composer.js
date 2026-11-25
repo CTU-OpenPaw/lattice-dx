@@ -254,6 +254,22 @@ const OVERVIEW_SPECS = [
           showBulkImport: true,
         },
       },
+      {
+        uidSuffix: 'bi-chart',
+        use: 'DxosBiChartBlockModel',
+        config: {
+          title: 'Phân tích Đơn vận chuyển [BI]',
+          collection: 'latticeOrders',
+          chartType: 'bar',
+          groupBy: 'status',
+          secondaryGroupBy: '',
+          metricOp: 'count',
+          metricField: '',
+          metric: { op: 'count' },
+          limit: 20,
+          filterJson: '',
+        },
+      },
     ],
   },
   {

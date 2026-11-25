@@ -97,6 +97,82 @@ function buildClientScriptSource() {
     return node;
   }
 
+  var PRIORITY_LABELS = {
+    low: 'Th\u1ea5p',
+    normal: 'B\u00ecnh th\u01b0\u1eddng',
+    medium: 'Trung b\u00ecnh',
+    high: 'Cao',
+    urgent: 'Kh\u1ea9n c\u1ea5p',
+  };
+
+  function localizeFormError(msg) {
+    var text = String(msg || '').trim();
+    if (!text || text === 'Public form not found or inactive.') {
+      return 'Bi\u1ec3u m\u1eabu c\u00f4ng khai kh\u00f4ng t\u1ed3n t\u1ea1i ho\u1eb7c \u0111\u00e3 ng\u1eebng ti\u1ebfp nh\u1eadn.';
+    }
+    return text;
+  }
+
+  function formatTimestampVi(ts) {
+    if (!ts) return '\\u2014';
+    var d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return String(ts);
+    try {
+      return d.toLocaleString('vi-VN');
+    } catch (e) {
+      return d.toISOString();
+    }
+  }
+
+  function resolveOptionLabel(fieldName, opt) {
+    if (opt && typeof opt === 'object') {
+      return String(opt.label !== undefined ? opt.label : (opt.value !== undefined ? opt.value : ''));
+    }
+    var raw = String(opt);
+    var lower = raw.toLowerCase();
+    if ((fieldName === 'priority' || Object.hasOwn(PRIORITY_LABELS, lower)) && Object.hasOwn(PRIORITY_LABELS, lower)) {
+      return PRIORITY_LABELS[lower];
+    }
+    return raw;
+  }
+
+  function copyTokenText(text, btn) {
+    var value = String(text || '');
+    if (!value) return;
+    var markCopied = function () {
+      if (!btn) return;
+      btn.textContent = '\u0110\u00e3 sao ch\u00e9p';
+      setTimeout(function () {
+        btn.textContent = 'Sao ch\u00e9p m\u00e3 tra c\u1ee9u';
+      }, 2000);
+    };
+    if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(value).then(markCopied).catch(function () {
+        fallbackCopyText(value, markCopied, btn);
+      });
+      return;
+    }
+    fallbackCopyText(value, markCopied, btn);
+  }
+
+  function fallbackCopyText(value, onDone, btn) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = value;
+      ta.setAttribute('readonly', '');
+      ta.className = 'dxos-hp';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = typeof document.execCommand === 'function' ? document.execCommand('copy') : false;
+      document.body.removeChild(ta);
+      if (ok) {
+        onDone();
+        return;
+      }
+    } catch (e) {}
+    if (btn) btn.textContent = 'Kh\u00f4ng th\u1ec3 t\u1ef1 sao ch\u00e9p';
+  }
+
   var page = el('div', { 'data-testid': 'public-form-page', class: 'dxos-page' });
   var header = el('header', { class: 'dxos-header' });
   header.appendChild(el('div', { class: 'dxos-eyebrow' }, 'LatticeDX Public Intake \\u00b7 Zero-PII'));
@@ -122,7 +198,7 @@ function buildClientScriptSource() {
   root.appendChild(page);
 
   function showError(msg) {
-    errorBox.textContent = String(msg || 'Public form not found or inactive.');
+    errorBox.textContent = localizeFormError(msg);
     errorBox.classList.remove('dxos-hidden');
   }
 
@@ -148,7 +224,7 @@ function buildClientScriptSource() {
     card.appendChild(el('div', { class: 'dxos-card-title' }, 'Tr\\u1ea1ng th\\u00e1i h\\u1ed3 s\\u01a1 c\\u00f4ng khai (Zero-PII)'));
     card.appendChild(el('div', { class: 'dxos-meta-line' }, 'M\\u00e3 h\\u1ed3 s\\u01a1: ' + (data.submissionCode || '\\u2014')));
     card.appendChild(el('div', { class: 'dxos-meta-line' }, 'Tr\\u1ea1ng th\\u00e1i hi\\u1ec7n t\\u1ea1i: ' + (data.status || '\\u2014')));
-    card.appendChild(el('div', { class: 'dxos-meta-sub' }, 'C\\u1eadp nh\\u1eadt l\\u00fac: ' + (data.updatedAt || data.submittedAt || '\\u2014')));
+    card.appendChild(el('div', { class: 'dxos-meta-sub' }, 'C\\u1eadp nh\\u1eadt l\\u00fac: ' + formatTimestampVi(data.updatedAt || data.submittedAt)));
     statusArea.appendChild(card);
   }
 
@@ -253,7 +329,8 @@ function buildClientScriptSource() {
       });
       control.appendChild(el('option', { value: '' }, '-- Ch\\u1ecdn gi\\u00e1 tr\\u1ecb --'));
       field.options.forEach(function (opt) {
-        control.appendChild(el('option', { value: String(opt) }, String(opt)));
+        var optVal = (opt && typeof opt === 'object') ? String(opt.value !== undefined ? opt.value : '') : String(opt);
+        control.appendChild(el('option', { value: optVal }, resolveOptionLabel(field.name, opt)));
       });
     } else if (field.type === 'boolean') {
       control = el('input', {
@@ -334,10 +411,21 @@ function buildClientScriptSource() {
         formArea.classList.add('dxos-hidden');
         while (receiptArea.firstChild) receiptArea.removeChild(receiptArea.firstChild);
         var rec = el('section', { 'data-testid': 'public-form-receipt', role: 'status', class: 'dxos-receipt' });
-        rec.appendChild(el('div', { class: 'dxos-receipt-title' }, '\\u0110\\u00e3 ti\\u1ebfp nh\\u1eadn h\\u1ed3 s\\u01a1 (Zero-PII Receipt)'));
-        rec.appendChild(el('div', { class: 'dxos-meta-line' }, 'M\\u00e3 h\\u1ed3 s\\u01a1: ' + (res.submissionCode || '')));
-        rec.appendChild(el('div', { class: 'dxos-token-line' }, 'Status Token: ' + (res.statusToken || '')));
-        rec.appendChild(el('div', { class: 'dxos-meta-sub' }, 'Tr\\u1ea1ng th\\u00e1i ban \\u0111\\u1ea7u: ' + (res.status || 'submitted') + ' \\u00b7 L\\u00fac: ' + (res.submittedAt || '\\u2014')));
+        rec.appendChild(el('div', { class: 'dxos-receipt-title' }, 'Đã tiếp nhận hồ sơ — Biên nhận bảo mật (Không lộ PII)'));
+        rec.appendChild(el('div', { class: 'dxos-meta-line' }, 'Mã hồ sơ: ' + (res.submissionCode || '')));
+        var tokenRow = el('div', { class: 'dxos-token-row' });
+        tokenRow.appendChild(el('div', { class: 'dxos-token-line' }, 'Status Token: ' + (res.statusToken || '')));
+        var copyBtn = el('button', {
+          type: 'button',
+          'data-testid': 'public-form-copy-token-btn',
+          class: 'dxos-btn dxos-btn-secondary',
+        }, 'Sao chép mã tra cứu');
+        copyBtn.addEventListener('click', function () {
+          copyTokenText(res.statusToken || '', copyBtn);
+        });
+        tokenRow.appendChild(copyBtn);
+        rec.appendChild(tokenRow);
+        rec.appendChild(el('div', { class: 'dxos-meta-sub' }, 'Trạng thái ban đầu: ' + (res.status || 'submitted') + ' · Lúc: ' + formatTimestampVi(res.submittedAt)));
         var checkBtn = el('button', {
           type: 'button',
           'data-testid': 'public-form-check-status-btn',
@@ -375,7 +463,7 @@ function renderPublicFormHtml({
     ok: Boolean(formMeta),
     slug: String(slug || ''),
     form: formMeta || null,
-    error: formMeta ? '' : String(errorMessage || 'Public form not found or inactive.'),
+    error: formMeta ? '' : String(errorMessage || 'Biểu mẫu công khai không tồn tại hoặc đã ngừng tiếp nhận.'),
     apiBasePath: normalizedApiBase,
   };
   const pageTitle = formMeta?.title
@@ -406,7 +494,9 @@ function renderPublicFormHtml({
     .dxos-btn { padding: 10px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
     .dxos-btn:disabled { cursor: not-allowed; opacity: 0.65; }
     .dxos-btn-primary { border: 1px solid #0284c7; background: #0284c7; color: #ffffff; }
+    .dxos-btn-secondary { border: 1px solid #94a3b8; background: #ffffff; color: #0f172a; padding: 6px 12px; font-size: 13px; flex-shrink: 0; }
     .dxos-btn-success { border: 1px solid #15803d; background: #15803d; color: #ffffff; padding: 8px 14px; margin-top: 8px; }
+    .dxos-token-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
     .dxos-alert { padding: 14px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
     .dxos-alert-error { background: #fee2e2; color: #991b1b; }
     .dxos-alert-warn { background: #fef3c7; color: #92400e; }
@@ -455,7 +545,7 @@ function createPublicFormGatewayHandler({ db = null, getDb = null, apiBasePath =
 
     const activeDb = (typeof getDb === 'function' ? getDb() : null) || db || appInstance?.db || null;
     let formMeta = null;
-    let errorMessage = 'Public form not found or inactive.';
+    let errorMessage = 'Biểu mẫu công khai không tồn tại hoặc đã ngừng tiếp nhận.';
 
     if (isValidSlug && activeDb) {
       try {
@@ -466,7 +556,7 @@ function createPublicFormGatewayHandler({ db = null, getDb = null, apiBasePath =
         }
       } catch {
         formMeta = null;
-        errorMessage = 'Public form not found or inactive.';
+        errorMessage = 'Biểu mẫu công khai không tồn tại hoặc đã ngừng tiếp nhận.';
       }
     }
 

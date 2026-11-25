@@ -8,19 +8,25 @@
  */
 'use strict';
 
-const { SAFE_COLLECTION_RE, requestAndDownloadExport } = require('./blocks-helpers');
+const {
+  SAFE_COLLECTION_RE,
+  requestAndDownloadExport,
+  getStatusMeta,
+  formatStatusLabel,
+  createCompactIdBadge,
+} = require('./blocks-helpers');
 
 const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
 const BLOCKED_COLLECTION_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CANCELLABLE_STATUSES = new Set(['submitted', 'approved', 'in_progress']);
 const PRINTABLE_ORDER_DOCUMENT_TYPES = new Set(['order', 'delivery_note', 'epod']);
 const VOUCHER_STATUS_META = {
-  draft: { label: 'Nháp (draft)', bg: '#f1f5f9', color: '#334155', border: '#cbd5e1' },
-  submitted: { label: 'Đã trình duyệt (submitted)', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
-  approved: { label: 'Đã phê duyệt (approved)', bg: '#dcfce7', color: '#166534', border: '#86efac' },
-  in_progress: { label: 'Đang xử lý (in_progress)', bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' },
-  completed: { label: 'Hoàn tất (completed)', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
-  cancelled: { label: 'Đã hủy (cancelled)', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  draft: getStatusMeta('draft'),
+  submitted: getStatusMeta('submitted'),
+  approved: getStatusMeta('approved'),
+  in_progress: getStatusMeta('in_progress'),
+  completed: getStatusMeta('completed'),
+  cancelled: getStatusMeta('cancelled'),
 };
 
 function formatMentionSegments(body) {
@@ -718,12 +724,11 @@ function createVoucherLifecycleBar(client, React, app) {
     };
 
     const curStatus = String(info.status || '').toLowerCase();
-    const statusBadge = VOUCHER_STATUS_META[curStatus] || {
-      label: curStatus || 'Chưa tải trạng thái',
-      bg: '#f8fafc',
-      color: '#475569',
-      border: '#cbd5e1',
-    };
+    const statusBadge = VOUCHER_STATUS_META[curStatus] || (
+      curStatus
+        ? getStatusMeta(curStatus)
+        : { label: 'Chưa tải trạng thái', bg: '#f8fafc', color: '#475569', border: '#cbd5e1' }
+    );
 
     const runAction = async (action) => {
       if (!api?.request || busy || !validVoucherTarget) return;
@@ -755,7 +760,7 @@ function createVoucherLifecycleBar(client, React, app) {
         if (action === 'amend') {
           setStatusNote(`Đã lập bản điều chỉnh ${updated.code || `#${updated.id || ''}`} (Lần #${updated.amendmentNo || 1}).`);
         } else {
-          setStatusNote(`Đã cập nhật trạng thái: ${updated.status || action}.`);
+          setStatusNote(`Đã cập nhật trạng thái: ${formatStatusLabel(updated.status || action)}.`);
         }
         await loadVoucherState();
         await loadPkiEntries();
@@ -831,7 +836,7 @@ function createVoucherLifecycleBar(client, React, app) {
       ),
       validVoucherTarget && info.lineage.length > 1 ? h('div', { style: { fontSize: 11, color: '#475569', display: 'flex', flexWrap: 'wrap', gap: 4 } },
         'Chuỗi phiên bản: ',
-        info.lineage.map((it) => `${it.code || `#${it.id}`} [${it.status || '?'}]`).join(' → '),
+        info.lineage.map((it) => `${it.code || `#${it.id}`} [${formatStatusLabel(it.status, '?')}]`).join(' → '),
       ) : null,
       validVoucherTarget ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
         h('input', {
@@ -900,7 +905,10 @@ function createVoucherLifecycleBar(client, React, app) {
           },
             h('strong', { style: { color: '#0f172a' } }, 'Ed25519 PKI:'),
             pkiState.entry
-              ? h('span', { style: { color: '#334155' } }, `Seq #${pkiState.entry.seq} · ${pkiState.entry.keyId || 'key'} · ${String(pkiState.entry.entryHash || '').slice(0, 12)}`)
+              ? h('span', { style: { display: 'inline-flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, color: '#334155' } },
+                  `Seq #${pkiState.entry.seq} · ${pkiState.entry.keyId || 'key'}`,
+                  pkiState.entry.entryHash ? createCompactIdBadge(React, pkiState.entry.entryHash, { prefixLen: 12 }) : null,
+                )
               : h('span', { style: { color: '#64748b' } }, 'Chưa có bút ký sổ cái'),
             h('button', {
               type: 'button',
@@ -938,9 +946,9 @@ function createVoucherLifecycleBar(client, React, app) {
               onChange: (e) => setPrintDocType(e.target.value),
               style: { padding: '4px 6px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#ffffff', fontSize: 11 },
             },
-              h('option', { value: 'order' }, 'Đơn hàng (order)'),
-              h('option', { value: 'delivery_note' }, 'Phiếu giao hàng (delivery_note)'),
-              h('option', { value: 'epod' }, 'Chứng thư ePOD (epod)'),
+              h('option', { value: 'order' }, 'Đơn hàng'),
+              h('option', { value: 'delivery_note' }, 'Phiếu giao hàng'),
+              h('option', { value: 'epod' }, 'Chứng thư ePOD'),
             ),
             h('button', {
               type: 'button',

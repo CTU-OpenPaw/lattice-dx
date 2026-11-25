@@ -33,6 +33,7 @@ const { runProactiveIncidentTriage } = require('./proactive-triage');
 const { runWithTenantRls, runWithSystemRlsBypass } = require('./ai-rls');
 const {
   listBuiltApps: listBuiltAppsRegistry,
+  orchestrateEnterpriseAppBuild,
   rebuildEnterpriseApp,
   exportAppBundle,
   teardownBuiltApp: teardownBuiltAppEngine,
@@ -41,7 +42,7 @@ const {
   rollbackEnterpriseApp,
   listBuiltAppVersions: listBuiltAppVersionsEngine,
 } = require('./app-builder-orchestrator');
-const { assertNoPrototypePollution } = require('./app-builder-planner');
+const { assertNoPrototypePollution, buildDraftSpecFromNaturalPrompt, cloneSafeDeep } = require('./app-builder-planner');
 const {
   SUPPORTED_HITL_TOOLS,
   parseOptionalPositiveInt,
@@ -650,6 +651,35 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         specPatch: payload.specPatch || null,
         maxHealRounds: payload.maxHealRounds,
       }, { env, fetchImpl });
+      if (typeof next === 'function') await next();
+    },
+
+    async buildBuiltApp(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      assertNoPrototypePollution(payload, 'buildBuiltApp');
+      const requestedOrg = String(payload.organizationId || ctx?.action?.params?.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép dựng ứng dụng của tổ chức khác.');
+      }
+      const effectiveActor = isRootActor(actor) && requestedOrg ? { ...actor, organizationId: requestedOrg } : actor;
+      let spec = payload.spec && typeof payload.spec === 'object' ? cloneSafeDeep(payload.spec) : null;
+      if (!spec) {
+        const promptText = String(payload.prompt || '').trim();
+        if (payload.collections || payload.collectionName) {
+          const { prompt: _p, organizationId: _o, spec: _s, ...rest } = payload;
+          spec = cloneSafeDeep(rest);
+        } else if (promptText) {
+          spec = buildDraftSpecFromNaturalPrompt(promptText);
+        } else {
+          throw failTool('SPEC_OR_PROMPT_REQUIRED', 400, 'Cần cung cấp spec hoặc mô tả prompt để dựng ứng dụng.');
+        }
+      }
+      ctx.body = await orchestrateEnterpriseAppBuild(ctx, targetDb, effectiveActor, spec, { env, fetchImpl });
       if (typeof next === 'function') await next();
     },
 

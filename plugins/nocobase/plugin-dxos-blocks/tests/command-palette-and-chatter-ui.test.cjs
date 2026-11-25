@@ -346,7 +346,7 @@ test('VoucherLifecycleBar, creative-studio export/voucher-actions, and Chatter e
   });
   const barDump = JSON.stringify(barTree);
   assert.ok(barDump.includes('dxos-voucher-lifecycle-bar'));
-  assert.ok(barDump.includes('cancelled'));
+  assert.ok(barDump.includes('Đã hủy'));
   assert.ok(barDump.includes('#4') || barDump.includes('4'));
 
   // Creative Studio supports voucher-actions widget
@@ -603,7 +603,7 @@ test('createVoucherLifecycleBar resets stale lineage/version/reason across recor
   await new Promise((r) => setTimeout(r, 10));
   tree = render(Bar, { targetCollection: 'latticeServiceTickets', targetRecordId: 22 });
   assert.equal(textOf(findByTestId(tree, 'dxos-voucher-lineage')), 'Chứng từ gốc');
-  assert.ok(textOf(findByTestId(tree, 'dxos-voucher-status-badge')).includes('draft'));
+  assert.ok(textOf(findByTestId(tree, 'dxos-voucher-status-badge')).includes('Bản nháp'));
 
   // 3. Clicking submit on #22 must NOT pass stale expectedVersion: 7 from #10
   await findByTestId(tree, 'dxos-voucher-submit-btn').props.onClick();

@@ -271,7 +271,7 @@ test('DxosWebGisBlockView loads assets/locations/incidents/twinShadow, degrades 
   allPins[1].props.onClick();
   tree = render(View, { model: { props: { title: 'WebGIS Chuỗi lạnh', showTwinOverlay: true } } });
   assert.ok(textOf(tree).includes('COLD-HN-02'));
-  assert.ok(textOf(tree).includes('synced'));
+  assert.ok(textOf(tree).includes('Đã đồng bộ'));
 });
 
 test('kanban-schedule-block helpers group voucher & stock lot stages and build 7-day UTC schedule grid', () => {
@@ -1527,7 +1527,7 @@ test('Task 15b: DxosWmsOpsBlockModel registers cleanly and executes FEFO, issueS
   await findByTestId(tree, 'dxos-wms-ops-mkt-form').props.onSubmit({ preventDefault() {} });
   tree = render(View, { model: { props: { title: 'Kho FEFO /p/logistics' } } });
   assert.ok(calls.some((c) => c.url === 'dxosWms:holdLotByMkt' && c.data.lotCode === 'LOT-CT-01'));
-  assert.ok(textOf(findByTestId(tree, 'dxos-wms-ops-mkt-result')).includes('hold_mkt'));
+  assert.ok(textOf(findByTestId(tree, 'dxos-wms-ops-mkt-result')).includes('Tạm giữ MKT'));
 
   // 4. 2-Phase Bulk Import Wizard: switch tab -> Dry-Run -> Commit (single-use token cleared after commit)
   findByTestId(tree, 'dxos-wms-ops-tab-import').props.onClick();
@@ -1651,7 +1651,7 @@ test('Task 16: DxosKanbanScheduleBlockView renders unscheduled bucket in schedul
   const unschedText = textOf(unschedSection);
   assert.ok(unschedText.includes('ORD-UNSCHED-2'));
   assert.ok(unschedText.includes('Đơn chưa có ngày hẹn'));
-  assert.ok(unschedText.includes('draft'));
+  assert.ok(unschedText.includes('Bản nháp'));
   assert.ok(unschedText.includes('SLA Quá hạn'));
 
   const unschedItem = findByTestId(tree, 'dxos-schedule-unscheduled-item-2');
@@ -3244,4 +3244,370 @@ test('M1.1 Iteration 3: parseBiFilterJson precedence, whitespace empty-brace han
     assert.ok(pivotTxt.includes('60'));
     assert.equal(pivotTxt.includes('90'), false);
   }
+});
+
+test('BI Pivot validation guard prevents 400 on missing/duplicate secondaryGroupBy, auto-selects distinct field when available, and supports interactive viewer controls', async () => {
+  const { createBiChartBlockView, resolvePivotSecondaryField, buildAggregateQueryPayload } = require(path.join(PLUGIN_ROOT, 'src/client/bi-chart-block.js'));
+
+  assert.equal(resolvePivotSecondaryField('status', '', [{ value: 'status' }, { value: 'region' }]), 'region');
+  assert.equal(resolvePivotSecondaryField('status', 'status', [{ value: 'status' }, { value: 'priority' }]), 'priority');
+  assert.equal(resolvePivotSecondaryField('status', '', [{ value: 'status' }]), '');
+  assert.equal(buildAggregateQueryPayload({ collection: 'latticeOrders', maxGroups: 75 }).limit, 75);
+
+  // 1. Missing secondaryGroupBy & only 1 field in collectionsMeta -> zero aggregateQuery calls + inline Vietnamese prompt
+  const hooks1 = createMiniHooks();
+  const aggCalls1 = [];
+  const api1 = {
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return { data: { data: { collections: [{ name: 'latticeOrders', title: 'Đơn Logistics', fields: [{ name: 'status', type: 'string' }] }] } } };
+      }
+      if (req.url === 'dxosBlocks:aggregateQuery') {
+        aggCalls1.push(req.data);
+        return {
+          data: {
+            data: {
+              ok: true,
+              collection: req.data.collection,
+              chartType: req.data.chartType,
+              series: [{ key: 'draft', label: 'draft', value: 3, count: 3 }],
+              summary: { count: 3, value: 3, op: 'count', field: null },
+              pivotMatrix: null,
+              totalRows: 3,
+              meta: {},
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  const View1 = createBiChartBlockView({ useAPIClient: () => api1 }, hooks1.React, {}, {});
+  let tree1 = hooks1.render(View1, { model: { props: { title: 'BI [D]', collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree1 = hooks1.render(View1, { model: { props: { title: 'BI [D]', collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  assert.equal(aggCalls1.length, 1);
+  assert.equal(textOf(resolveTree(tree1)).includes('[D]'), false, 'Dev bracket tag [D] must be stripped from rendered BI title');
+  assert.equal(findByTestId(resolveTree(tree1), 'dxos-bi-chart-block').props.style.paddingBottom, 56);
+
+  // Switch to pivot via header button -> must NOT fire a guaranteed 400 request; shows inline prompt instead
+  findByTestId(resolveTree(tree1), 'dxos-bi-mode-pivot').props.onClick();
+  tree1 = hooks1.render(View1, { model: { props: { title: 'BI [D]', collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree1 = hooks1.render(View1, { model: { props: { title: 'BI [D]', collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  assert.equal(aggCalls1.length, 1, 'Switching to pivot without a second distinct field must NOT fire aggregateQuery');
+  const promptEl = findByTestId(resolveTree(tree1), 'dxos-bi-chart-pivot-prompt');
+  assert.ok(promptEl);
+  assert.ok(textOf(promptEl).includes('Vui lòng chọn trường nhóm phụ (Cột Pivot) để xem bảng chéo.'));
+  hooks1.unmount();
+
+  // 2. Collection with multiple fields -> switching to pivot auto-selects distinct secondaryGroupBy, and viewer controls update queries interactively
+  const hooks2 = createMiniHooks();
+  const aggCalls2 = [];
+  const api2 = {
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                {
+                  name: 'latticeOrders',
+                  title: 'Đơn Logistics',
+                  fields: [
+                    { name: 'status', type: 'string', title: 'Trạng thái' },
+                    { name: 'region', type: 'string', title: 'Khu vực' },
+                    { name: 'totalAmount', type: 'decimal', title: 'Giá trị' },
+                  ],
+                },
+                {
+                  name: 'latticeRequests',
+                  title: 'Yêu cầu mua sắm',
+                  fields: [
+                    { name: 'status', type: 'string', title: 'Trạng thái' },
+                    { name: 'priority', type: 'string', title: 'Độ ưu tiên' },
+                    { name: 'estimatedCost', type: 'float', title: 'Chi phí dự kiến' },
+                  ],
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosBlocks:aggregateQuery') {
+        aggCalls2.push(req.data);
+        if (req.data.chartType === 'pivot') {
+          return {
+            data: {
+              data: {
+                ok: true,
+                collection: req.data.collection,
+                chartType: 'pivot',
+                series: [{ key: 'draft', label: 'draft', value: 100 }],
+                summary: { count: 1, value: 100, op: req.data.metric?.op || 'count' },
+                pivotMatrix: {
+                  rowField: req.data.groupBy,
+                  colField: req.data.secondaryGroupBy,
+                  rows: ['draft'],
+                  columns: ['HCM'],
+                  cells: { draft: { HCM: 100 } },
+                  rowTotals: { draft: 100 },
+                  colTotals: { HCM: 100 },
+                  grandTotal: 100,
+                },
+                totalRows: 1,
+                meta: {},
+              },
+            },
+          };
+        }
+        return {
+          data: {
+            data: {
+              ok: true,
+              collection: req.data.collection,
+              chartType: req.data.chartType,
+              series: [{ key: 'draft', label: 'draft', value: 10, count: 10 }],
+              summary: { count: 10, value: 10, op: req.data.metric?.op || 'count' },
+              pivotMatrix: null,
+              totalRows: 10,
+              meta: {},
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const View2 = createBiChartBlockView({ useAPIClient: () => api2 }, hooks2.React, {}, {});
+  let tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+
+  const resolved2 = resolveTree(tree2);
+  assert.ok(findByTestId(resolved2, 'dxos-bi-viewer-controls'));
+  assert.ok(findByTestId(resolved2, 'dxos-bi-viewer-collection'));
+  assert.ok(findByTestId(resolved2, 'dxos-bi-viewer-groupby'));
+  assert.ok(findByTestId(resolved2, 'dxos-bi-viewer-metric-op'));
+
+  // Switch chartType to pivot -> auto-selects region (distinct from status) and fires valid pivot query
+  findByTestId(resolved2, 'dxos-bi-mode-pivot').props.onClick();
+  tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  const pivotQuery = aggCalls2.find((q) => q.chartType === 'pivot');
+  assert.ok(pivotQuery, 'Pivot query must fire automatically when a distinct secondaryGroupBy exists');
+  assert.equal(pivotQuery.groupBy, 'status');
+  assert.equal(pivotQuery.secondaryGroupBy, 'region');
+  assert.ok(findByTestId(resolveTree(tree2), 'dxos-bi-viewer-secondary-groupby'));
+
+  // Change viewer metricOp to sum -> auto-selects totalAmount numeric field & renders numeric selector
+  findByTestId(resolveTree(tree2), 'dxos-bi-viewer-metric-op').props.onChange({ target: { value: 'sum' } });
+  tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  assert.ok(findByTestId(resolveTree(tree2), 'dxos-bi-viewer-metric-field'));
+  assert.ok(aggCalls2.some((q) => q.metric?.op === 'sum' && q.metric?.field === 'totalAmount'));
+
+  // Change viewer collection to latticeRequests -> resets fields cleanly for new collection
+  findByTestId(resolveTree(tree2), 'dxos-bi-viewer-collection').props.onChange({ target: { value: 'latticeRequests' } });
+  tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status', secondaryGroupBy: '' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(aggCalls2.some((q) => q.collection === 'latticeRequests' && q.metric?.field === 'estimatedCost'));
+  hooks2.unmount();
+});
+
+test('Settings modal scroll CSS & DxosBiChartBlockModel limit/maxGroups input prevent top clipping and expose 1-500 bounds', () => {
+  const { registerDxosBlockModels, DXOS_MODAL_SCROLL_CSS, ensureSettingsModalScrollStyle } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { React } = createMiniHooks();
+
+  assert.ok(DXOS_MODAL_SCROLL_CSS.includes('max-height: 78vh'));
+  assert.ok(DXOS_MODAL_SCROLL_CSS.includes('overflow-y: auto'));
+  assert.ok(DXOS_MODAL_SCROLL_CSS.includes('top: 24px'));
+
+  const origDoc = global.document;
+  const appended = [];
+  try {
+    global.document = {
+      head: { appendChild: (el) => appended.push(el) },
+      getElementById: (id) => appended.find((el) => el.id === id) || null,
+      createElement: (tag) => ({ tagName: tag, id: '', textContent: '' }),
+    };
+    assert.equal(ensureSettingsModalScrollStyle(), true);
+    assert.equal(appended.length, 1);
+    assert.equal(appended[0].id, 'dxos-block-settings-modal-style');
+    assert.ok(appended[0].textContent.includes('78vh'));
+
+    class MockBlockModel {
+      constructor(opts = {}) { this.props = opts.props || {}; this.stepParams = opts.stepParams || {}; }
+      setProps(next) { this.props = { ...this.props, ...next }; }
+      getStepParams(f, s) { return this.stepParams?.[f]?.[s]; }
+      static define(meta) { this.meta = meta; }
+      static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+    }
+
+    const models = registerDxosBlockModels(
+      { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+      React,
+      {},
+      { BlockModel: MockBlockModel },
+      { registerModels() {} },
+      {},
+    );
+    const biStep = models.DxosBiChartBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
+    assert.equal(biStep.modalProps?.top, 24);
+    assert.equal(biStep.modalProps?.styles?.body?.maxHeight, '78vh');
+    assert.equal(biStep.modalProps?.styles?.body?.overflowY, 'auto');
+    assert.equal(biStep.uiSchema.limit.title, 'Số nhóm tối đa (1-500)');
+    assert.deepEqual(biStep.uiSchema.limit['x-component-props'], { min: 1, max: 500, step: 1, precision: 0, style: { width: '100%' } });
+  } finally {
+    global.document = origDoc;
+  }
+});
+
+test('Status/Digital Twin Vietnamese label mappings, WMS action labels, empty-filter Twin access, bottom padding, and bracket tag stripping', async () => {
+  const { getStatusMeta, formatStatusLabel, stripDevBracketTags, formatCompactIdentifier } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+  const { createWmsOpsBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/wms-ops-block.js'));
+  const { createWebGisBlockView, TWIN_DEFROST_OPTIONS, TWIN_FAN_OPTIONS, TWIN_DOOR_OPTIONS } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+  const { createKanbanScheduleBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/kanban-schedule-block.js'));
+
+  const expectedStatusPairs = [
+    ['draft', 'Bản nháp'],
+    ['submitted', 'Đã gửi'],
+    ['hold_mkt', 'Tạm giữ MKT'],
+    ['proposed', 'Đề xuất AI'],
+    ['manager_approval', 'Chờ quản lý duyệt'],
+    ['synced', 'Đã đồng bộ'],
+    ['open', 'Đang mở'],
+    ['pending', 'Chờ xử lý'],
+    ['critical', 'Nghiêm trọng'],
+    ['high', 'Cao'],
+    ['medium', 'Trung bình'],
+    ['low', 'Thấp'],
+    ['approved', 'Đã duyệt'],
+    ['rejected', 'Từ chối'],
+    ['completed', 'Hoàn tất'],
+    ['issued', 'Đã xuất kho'],
+  ];
+  for (const [raw, vi] of expectedStatusPairs) {
+    assert.equal(formatStatusLabel(raw), vi, `Status ${raw} must map to "${vi}"`);
+    assert.ok(getStatusMeta(raw).bg && getStatusMeta(raw).color);
+  }
+
+  assert.equal(stripDevBracketTags('Phân tích & Biểu đồ BI [D]'), 'Phân tích & Biểu đồ BI');
+  assert.equal(stripDevBracketTags('Hộp việc Quy trình Poka-yoke [P]'), 'Hộp việc Quy trình Poka-yoke');
+  assert.equal(stripDevBracketTags('Vận hành Kho FEFO [W]'), 'Vận hành Kho FEFO');
+  assert.equal(stripDevBracketTags('Kho tri thức P.A.R.A. [H]'), 'Kho tri thức P.A.R.A.');
+  assert.equal(stripDevBracketTags('Đề xuất AI & Bằng chứng [I]'), 'Đề xuất AI & Bằng chứng');
+  assert.equal(formatCompactIdentifier('urn:ngsi-ld:Asset:org-a:native:12'), 'Asset:org-a:#12');
+
+  // Verify Digital Twin enum option labels map to Vietnamese while preserving canonical backend values
+  assert.deepEqual(TWIN_DEFROST_OPTIONS, [
+    { value: 'auto', label: 'Tự động' },
+    { value: 'manual', label: 'Thủ công' },
+    { value: 'off', label: 'Tắt' },
+  ]);
+  assert.deepEqual(TWIN_FAN_OPTIONS, [
+    { value: 'auto', label: 'Tự động' },
+    { value: 'high', label: 'Cao' },
+    { value: 'low', label: 'Thấp' },
+    { value: 'eco', label: 'Tiết kiệm (Eco)' },
+  ]);
+  assert.deepEqual(TWIN_DOOR_OPTIONS, [
+    { value: 'locked', label: 'Đã khóa' },
+    { value: 'unlocked', label: 'Mở khóa' },
+  ]);
+
+  // WMS Ops: no raw issueStock in label, Vietnamese lot status badge, safe bottom padding
+  const wmsHooks = createMiniHooks();
+  const wmsApi = {
+    async request(req) {
+      if (req.url === 'dxosWms:lots') {
+        return { data: { data: { items: [{ id: 1, lotCode: 'LOT-01', sku: 'VAC-1', qtyAvailable: 10, status: 'hold_mkt' }] } } };
+      }
+      return { data: { data: {} } };
+    },
+  };
+  const WmsView = createWmsOpsBlockView({ useAPIClient: () => wmsApi }, wmsHooks.React, {}, {});
+  let wmsTree = wmsHooks.render(WmsView, { model: { props: { title: 'Vận hành Kho [W]' } } });
+  await new Promise((r) => setTimeout(r, 15));
+  wmsTree = wmsHooks.render(WmsView, { model: { props: { title: 'Vận hành Kho [W]' } } });
+  const wmsResolved = resolveTree(wmsTree);
+  const wmsDump = textOf(wmsResolved);
+  assert.equal(wmsDump.includes('issueStock'), false, 'WMS block must not leak camelCase issueStock');
+  assert.equal(wmsDump.includes('[W]'), false, 'WMS block must strip [W] dev tag');
+  assert.ok(wmsDump.includes('2. Xuất kho thực tế (FEFO)'));
+  assert.ok(wmsDump.includes('Tạm giữ MKT'));
+  assert.equal(findByTestId(wmsResolved, 'dxos-wms-ops-block').props.style.paddingBottom, 56);
+  wmsHooks.unmount();
+
+  // Kanban bottom padding & stripped [H] tag
+  const kbHooks = createMiniHooks();
+  const KbView = createKanbanScheduleBlockView({ useAPIClient: () => null }, kbHooks.React, {}, {});
+  const kbTree = resolveTree(kbHooks.render(KbView, { model: { props: { title: 'Bảng Kanban [H]' } } }));
+  assert.equal(textOf(kbTree).includes('[H]'), false);
+  assert.equal(findByTestId(kbTree, 'dxos-kanban-schedule-block').props.style.paddingBottom, 56);
+  kbHooks.unmount();
+
+  // WebGIS: Digital Twin control card remains accessible when alarms filter matches 0 points, and submits canonical enum values
+  const gisHooks = createMiniHooks();
+  const gisCalls = [];
+  const gisApi = {
+    async request(req) {
+      gisCalls.push(req);
+      if (req.url === 'latticeAssets:list') {
+        return { data: { data: [{ id: 30, code: 'COLD-30', name: 'Kho Cần Thơ 30', kind: 'cold_room', status: 'active', temperatureC: -18, targetTempC: -18, organizationId: 'org-a' }] } };
+      }
+      if (req.url === 'latticeLocations:list' || req.url === 'latticeIncidentCases:list') {
+        return { data: { data: [] } };
+      }
+      if (req.url === 'dxosBlocks:twinShadow') {
+        return { data: { data: { shadow: { assetId: 30, commandStatus: 'synced', desiredJson: { targetTempC: -18, defrostMode: 'auto', fanMode: 'auto', doorLock: 'locked' }, reportedJson: { targetTempC: -18 } } } } };
+      }
+      if (req.url === 'dxosBlocks:twinSetDesired') {
+        return { data: { data: { commandId: 'cmd-30', shadow: { assetId: 30, commandStatus: 'dispatched', desiredJson: req.data.desiredPatch, reportedJson: { targetTempC: -18 } } } } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  const GisView = createWebGisBlockView({ useAPIClient: () => gisApi }, gisHooks.React, {}, {});
+  let gisTree = gisHooks.render(GisView, { model: { props: { title: 'WebGIS [D]', showTwinOverlay: true } } });
+  await new Promise((r) => setTimeout(r, 20));
+  gisTree = gisHooks.render(GisView, { model: { props: { title: 'WebGIS [D]', showTwinOverlay: true } } });
+  assert.equal(findByTestId(resolveTree(gisTree), 'dxos-webgis-block').props.style.paddingBottom, 56);
+  assert.equal(textOf(resolveTree(gisTree)).includes('[D]'), false);
+  assert.ok(textOf(findByTestId(resolveTree(gisTree), 'dxos-webgis-urn-badge')).includes('Asset:org-a:#30'));
+
+  // Filter to Cảnh báo Chuỗi lạnh -> 0 matching map pins, yet Digital Twin card & button remain accessible!
+  findByTestId(resolveTree(gisTree), 'dxos-webgis-filter-alarms').props.onClick();
+  gisTree = gisHooks.render(GisView, { model: { props: { title: 'WebGIS [D]', showTwinOverlay: true } } });
+  const emptyFiltered = resolveTree(gisTree);
+  assert.equal(collectNodes(emptyFiltered).filter((n) => n.props?.['data-testid'] === 'dxos-webgis-pin').length, 0);
+  assert.ok(findByTestId(emptyFiltered, 'dxos-webgis-filter-empty-notice'));
+  assert.ok(findByTestId(emptyFiltered, 'dxos-webgis-twin-fallback-card'));
+  assert.ok(findByTestId(emptyFiltered, 'dxos-webgis-open-twin-drawer-btn'));
+
+  // Open Digital Twin drawer while filtered to 0 map pins, change selects, and submit canonical enum values
+  findByTestId(emptyFiltered, 'dxos-webgis-open-twin-drawer-btn').props.onClick();
+  gisTree = gisHooks.render(GisView, { model: { props: { title: 'WebGIS [D]', showTwinOverlay: true } } });
+  const drawerTree = resolveTree(gisTree);
+  assert.ok(findByTestId(drawerTree, 'dxos-webgis-twin-drawer'));
+  assert.ok(textOf(findByTestId(drawerTree, 'dxos-twin-fan-select')).includes('Tiết kiệm (Eco)'));
+  assert.ok(textOf(findByTestId(drawerTree, 'dxos-twin-door-select')).includes('Mở khóa'));
+
+  findByTestId(drawerTree, 'dxos-twin-defrost-select').props.onChange({ target: { value: 'manual' } });
+  findByTestId(drawerTree, 'dxos-twin-fan-select').props.onChange({ target: { value: 'eco' } });
+  findByTestId(drawerTree, 'dxos-twin-door-select').props.onChange({ target: { value: 'unlocked' } });
+  gisTree = gisHooks.render(GisView, { model: { props: { title: 'WebGIS [D]', showTwinOverlay: true } } });
+  await findByTestId(resolveTree(gisTree), 'dxos-twin-submit-btn').props.onClick();
+  const twinCall = gisCalls.find((c) => c.url === 'dxosBlocks:twinSetDesired');
+  assert.ok(twinCall);
+  assert.deepEqual(twinCall.data.desiredPatch, {
+    targetTempC: -18,
+    defrostMode: 'manual',
+    fanMode: 'eco',
+    doorLock: 'unlocked',
+  });
+  gisHooks.unmount();
 });

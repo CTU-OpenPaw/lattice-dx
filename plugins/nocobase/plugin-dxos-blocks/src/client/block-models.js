@@ -22,7 +22,33 @@ const {
   subscribeCollectionsMeta,
   fetchCollectionsMeta,
   extractBiFieldOptions,
+  getStatusMeta,
+  stripDevBracketTags,
+  createCompactIdBadge,
 } = require('./blocks-helpers');
+
+const DXOS_SETTINGS_MODAL_STYLE_ID = 'dxos-block-settings-modal-style';
+const DXOS_MODAL_SCROLL_CSS = [
+  '.ant-modal-wrap { overflow-y: auto !important; }',
+  '.ant-modal-wrap.ant-modal-centered { display: flex !important; align-items: flex-start !important; justify-content: center !important; padding: 24px 16px !important; }',
+  '.ant-modal-wrap.ant-modal-centered::before { display: none !important; }',
+  '.ant-modal-wrap .ant-modal { top: 24px !important; margin: 0 auto !important; padding-bottom: 24px !important; max-width: calc(100vw - 32px); }',
+  '.ant-modal-wrap.ant-modal-centered .ant-modal { top: 0 !important; margin: auto !important; }',
+  '.ant-modal-wrap .ant-modal-content { max-height: calc(100vh - 48px); display: flex; flex-direction: column; }',
+  '.ant-modal-wrap .ant-modal-body { max-height: 78vh; overflow-y: auto; }',
+].join('\n');
+
+function ensureSettingsModalScrollStyle() {
+  if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return false;
+  if (document.getElementById(DXOS_SETTINGS_MODAL_STYLE_ID)) return true;
+  const target = document.head || document.documentElement || document.body;
+  if (!target || typeof document.createElement !== 'function' || typeof target.appendChild !== 'function') return false;
+  const el = document.createElement('style');
+  el.id = DXOS_SETTINGS_MODAL_STYLE_ID;
+  el.textContent = DXOS_MODAL_SCROLL_CSS;
+  target.appendChild(el);
+  return true;
+}
 const { createCreativeStudioView, DEFAULT_CREATIVE_BLUEPRINT } = require('./creative-studio-block');
 const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
 const { createWebGisBlockView } = require('./webgis-block');
@@ -170,7 +196,7 @@ function createBlockRenderers(client, React, antd, app) {
           fontSize: 11, fontWeight: 700, color: accent, background: `${accent}1a`, marginBottom: 8,
         },
       }, String(cfg.badge)) : null,
-      h('h2', { style: { margin: '0 0 6px', fontSize: 20, fontWeight: 700, color: '#0f172a' } }, String(cfg.title || '')),
+      h('h2', { style: { margin: '0 0 6px', fontSize: 20, fontWeight: 700, color: '#0f172a' } }, stripDevBracketTags(cfg.title || '')),
       cfg.subtitle ? h('p', { style: { margin: '0 0 14px', fontSize: 13, color: '#475569' } }, String(cfg.subtitle)) : null,
       actions.length ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8 } },
         actions.map((btn, idx) => h('button', {
@@ -225,7 +251,7 @@ function createBlockRenderers(client, React, antd, app) {
     const cols = Math.max(1, Math.min(4, Number(cfg.columns) || 4));
     return h('div', { 'data-testid': 'dxos-kpi-metric-block' },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 } },
-        h('strong', { style: { fontSize: 15, color: '#0f172a', minWidth: 0 } }, String(cfg.title || 'KPI DX-OS')),
+        h('strong', { style: { fontSize: 15, color: '#0f172a', minWidth: 0 } }, stripDevBracketTags(cfg.title || 'KPI DX-OS')),
         h('button', { type: 'button', onClick: loadCounts, disabled: loading, style: { border: '1px solid #cbd5e1', background: '#fff', borderRadius: 6, padding: '2px 10px', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' } }, loading ? 'Đang tải…' : 'Làm mới'),
       ),
       h('div', { style: { display: 'grid', gridTemplateColumns: cols <= 1 ? 'minmax(0, 1fr)' : 'repeat(auto-fit, minmax(135px, 1fr))', gap: 12 } },
@@ -276,21 +302,23 @@ function createBlockRenderers(client, React, antd, app) {
     React.useEffect(() => { load(); }, [load]);
 
     const data = state.data;
+    const brokerStatusMeta = data?.brokerStatus ? getStatusMeta(data.brokerStatus) : null;
     return h('div', { 'data-testid': 'dxos-context-telemetry-block' },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
-        h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'NGSI-LD Context')),
-        data?.brokerStatus ? h('span', {
+        h('strong', { style: { fontSize: 15 } }, stripDevBracketTags(cfg.title || 'Ngữ cảnh NGSI-LD')),
+        brokerStatusMeta ? h('span', {
           style: {
             fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 999,
-            background: data.brokerStatus === 'online' ? '#dcfce7' : '#fef3c7',
-            color: data.brokerStatus === 'online' ? '#166534' : '#92400e',
+            background: brokerStatusMeta.bg,
+            color: brokerStatusMeta.color,
+            border: `1px solid ${brokerStatusMeta.border}`,
           },
-        }, `Orion-LD: ${data.brokerStatus}`) : null,
+        }, `Orion-LD: ${brokerStatusMeta.label}`) : null,
       ),
       state.error ? h('div', { style: { fontSize: 13, color: '#b45309' } }, state.error) : null,
       data?.asset ? h('div', { style: { fontSize: 13, color: '#334155', display: 'grid', gap: 6 } },
         h('div', null, `Tài sản: `, h('strong', null, `${data.asset.name} (${data.asset.code})`)),
-        h('div', { style: { fontSize: 12, color: '#64748b' } }, `URN: ${data.asset.entityId}`),
+        data.asset.entityId ? h('div', null, createCompactIdBadge(React, data.asset.entityId, { labelPrefix: 'NGSI-LD' })) : null,
         data.telemetry && Object.keys(data.telemetry).length ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 4 } },
           Object.entries(data.telemetry).slice(0, 6).map(([k, v]) => {
             const val = v && typeof v === 'object' && 'value' in v ? v.value : v;
@@ -345,26 +373,39 @@ function createBlockRenderers(client, React, antd, app) {
 
     return h('div', { 'data-testid': 'dxos-ai-proposal-block' },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
-        h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'Đề xuất AI')),
+        h('strong', { style: { fontSize: 15 } }, stripDevBracketTags(cfg.title || 'Đề xuất AI')),
         h('span', { style: { fontSize: 11, color: '#64748b' } }, `${cfg.targetCollection} · ${state.items.length} mục`),
       ),
       state.error ? h('div', { style: { fontSize: 13, color: '#b45309' } }, state.error) : null,
       !state.loading && !state.items.length && !state.error
         ? h('div', { style: { fontSize: 13, color: '#64748b' } }, 'Chưa có đề xuất AI nào cho phân hệ này.')
         : h('div', { style: { display: 'grid', gap: 8 } },
-          state.items.map((item) => h('div', {
-            key: item.id,
-            style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc' },
-          },
-            h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: 4, fontSize: 12 } },
-              h('strong', null, `#${item.targetRecordId}`),
-              h('span', { style: { color: item.state === 'reviewed' ? '#166534' : '#92400e', fontWeight: 600 } }, item.state),
-            ),
-            h('div', { style: { fontSize: 13, color: '#1e293b' } }, String(item.recommendation || '')),
-            cfg.showEvidence !== false && Array.isArray(item.evidence) && item.evidence.length
-              ? h('div', { style: { marginTop: 4, fontSize: 11, color: '#64748b' } }, `Nguồn bằng chứng: ${item.evidence.map((e) => e.kind).join(', ')}`)
-              : null,
-          )),
+          state.items.map((item) => {
+            const propStateMeta = getStatusMeta(item.state || 'proposed');
+            return h('div', {
+              key: item.id,
+              style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc' },
+            },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, fontSize: 12 } },
+                h('strong', null, `#${item.targetRecordId}`),
+                h('span', {
+                  style: {
+                    fontSize: 11,
+                    padding: '2px 8px',
+                    borderRadius: 999,
+                    background: propStateMeta.bg,
+                    color: propStateMeta.color,
+                    border: `1px solid ${propStateMeta.border}`,
+                    fontWeight: 700,
+                  },
+                }, propStateMeta.label),
+              ),
+              h('div', { style: { fontSize: 13, color: '#1e293b' } }, String(item.recommendation || '')),
+              cfg.showEvidence !== false && Array.isArray(item.evidence) && item.evidence.length
+                ? h('div', { style: { marginTop: 4, fontSize: 11, color: '#64748b' } }, `Nguồn bằng chứng: ${item.evidence.map((e) => e.kind).join(', ')}`)
+                : null,
+            );
+          }),
         ),
     );
   }
@@ -388,7 +429,7 @@ function createBlockRenderers(client, React, antd, app) {
 
     return h('div', { 'data-testid': 'dxos-workflow-tasks-block' },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
-        h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'Công việc của tôi')),
+        h('strong', { style: { fontSize: 15 } }, stripDevBracketTags(cfg.title || 'Công việc của tôi')),
         h('button', {
           type: 'button',
           onClick: () => go(app, '/admin/lattice-workspace'),
@@ -606,7 +647,7 @@ function createBlockRenderers(client, React, antd, app) {
     const tabs = [['all', 'Tất cả'], ['projects', 'Projects'], ['areas', 'Areas'], ['resources', 'Resources'], ['archives', 'Archives']];
     return h('div', { 'data-testid': 'dxos-para-vault-block' },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
-        h('strong', { style: { fontSize: 15 } }, String(cfg.title || 'Kho P.A.R.A.')),
+        h('strong', { style: { fontSize: 15 } }, stripDevBracketTags(cfg.title || 'Kho P.A.R.A.')),
         h('input', {
           type: 'search', value: search, placeholder: 'Tìm tài liệu...',
           onChange: (e) => setSearch(e.target.value),
@@ -832,7 +873,7 @@ function createBlockRenderers(client, React, antd, app) {
       },
     },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-        h('strong', { style: { fontSize: 15, color: '#0f172a', minWidth: 0, wordBreak: 'break-word' } }, String(cfg.title || 'Trao đổi Chatter, Chứng từ & Xuất báo cáo')),
+        h('strong', { style: { fontSize: 15, color: '#0f172a', minWidth: 0, wordBreak: 'break-word' } }, stripDevBracketTags(cfg.title || 'Trao đổi Chatter, Chứng từ & Xuất báo cáo')),
         cfg.showExport !== false ? h('div', {
           'data-testid': 'dxos-workbench-export-bar',
           style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
@@ -1074,7 +1115,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
     [
       DxosKpiMetricBlockModel,
       'DX-OS KPI Metric Grid',
-      { title: 'Chỉ số vận hành [D]', columns: 4, metricsJson: DEFAULT_KPI_METRICS },
+      { title: 'Chỉ số vận hành', columns: 4, metricsJson: DEFAULT_KPI_METRICS },
       {
         title: { type: 'string', title: 'Tiêu đề', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         columns: { type: 'number', title: 'Số cột (1-4)', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
@@ -1084,7 +1125,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
     [
       DxosContextTelemetryBlockModel,
       'DX-OS NGSI-LD Context & Telemetry',
-      { title: 'Ngữ cảnh NGSI-LD & Cảm biến [D]', assetEntityId: '', warningThreshold: '80', showSyncStatus: true },
+      { title: 'Ngữ cảnh NGSI-LD & Cảm biến', assetEntityId: '', warningThreshold: '80', showSyncStatus: true },
       {
         title: { type: 'string', title: 'Tiêu đề', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         assetEntityId: { type: 'string', title: 'Asset Code hoặc URN (để trống = tự chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
@@ -1095,7 +1136,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
     [
       DxosAiProposalBlockModel,
       'DX-OS AI Proposal & Evidence',
-      { title: 'Đề xuất AI & Bằng chứng [I]', targetCollection: 'latticeIncidentCases', state: 'all', pageSize: 5, showEvidence: true },
+      { title: 'Đề xuất AI & Bằng chứng', targetCollection: 'latticeIncidentCases', state: 'all', pageSize: 5, showEvidence: true },
       {
         title: { type: 'string', title: 'Tiêu đề', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         targetCollection: {
@@ -1119,7 +1160,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
     [
       DxosWorkflowTasksBlockModel,
       'DX-OS Workflow & My Tasks',
-      { title: 'Hộp việc Quy trình Poka-yoke [P]', statusFilter: 'pending', pageSize: 6 },
+      { title: 'Hộp việc Quy trình Poka-yoke', statusFilter: 'pending', pageSize: 6 },
       {
         title: { type: 'string', title: 'Tiêu đề', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         statusFilter: {
@@ -1132,7 +1173,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
     [
       DxosParaVaultBlockModel,
       'DX-OS P.A.R.A. Knowledge Vault',
-      { title: 'Kho tri thức P.A.R.A. [H]', paraSpace: 'all', pageSize: 6, enableQuickCreate: true, defaultOrganizationId: '' },
+      { title: 'Kho tri thức P.A.R.A.', paraSpace: 'all', pageSize: 6, enableQuickCreate: true, defaultOrganizationId: '' },
       {
         title: { type: 'string', title: 'Tiêu đề', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         paraSpace: {
@@ -1192,7 +1233,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       DxosWebGisBlockModel,
       'DX-OS Bản đồ Giám sát WebGIS [D]',
       {
-        title: 'Bản đồ Giám sát Chuỗi lạnh WebGIS [D]',
+        title: 'Bản đồ Giám sát Chuỗi lạnh WebGIS',
         defaultOrganizationId: '',
         centerLat: 15.8,
         centerLng: 106.5,
@@ -1220,7 +1261,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       DxosKanbanScheduleBlockModel,
       'DX-OS Bảng Kanban & Lịch [H]',
       {
-        title: 'Bảng Kanban & Lịch vận hành [H]',
+        title: 'Bảng Kanban & Lịch vận hành',
         collection: 'latticeOrders',
         viewMode: 'kanban',
         pageSize: 40,
@@ -1257,7 +1298,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       DxosWmsOpsBlockModel,
       'DX-OS Vận hành Kho FEFO & Bulk Import [W]',
       {
-        title: 'Vận hành Kho FEFO & Nhập lô hàng loạt [W]',
+        title: 'Vận hành Kho FEFO & Nhập lô hàng loạt',
         defaultOrganizationId: '',
         defaultTab: 'fefo',
         defaultImportCollection: 'latticeStockLots',
@@ -1295,7 +1336,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       DxosBiChartBlockModel,
       'DX-OS Biểu đồ & Phân tích BI [D]',
       {
-        title: 'Phân tích & Biểu đồ BI [D]',
+        title: 'Phân tích & Biểu đồ BI',
         collection: 'latticeOrders',
         chartType: 'bar',
         groupBy: 'status',
@@ -1364,11 +1405,19 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           enum: biMetricFieldEnum,
           'x-reactions': applyBiFieldReaction({ numericOnly: true }),
         },
-        limit: { type: 'number', title: 'Số nhóm tối đa (1-500)', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        limit: {
+          type: 'number',
+          title: 'Số nhóm tối đa (1-500)',
+          'x-decorator': 'FormItem',
+          'x-component': 'InputNumber',
+          'x-component-props': { min: 1, max: 500, step: 1, precision: 0, style: { width: '100%' } },
+        },
         filterJson: { type: 'string', title: 'Bộ lọc JSON (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input.TextArea' },
       },
     ],
   ];
+
+  ensureSettingsModalScrollStyle();
 
   const models = {};
   for (const [ModelClass, label, defaultParams, uiSchema] of specs) {
@@ -1382,6 +1431,11 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           title: 'Cấu hình nội dung',
           defaultParams,
           uiSchema,
+          modalProps: {
+            top: 24,
+            style: { top: 24 },
+            styles: { body: { maxHeight: '78vh', overflowY: 'auto' } },
+          },
           handler(ctx, params) {
             ctx.model.setProps(params || {});
             notifyModelListeners(ctx.model);
@@ -1396,4 +1450,9 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   return models;
 }
 
-module.exports = { registerDxosBlockModels, readModelConfig };
+module.exports = {
+  registerDxosBlockModels,
+  readModelConfig,
+  DXOS_MODAL_SCROLL_CSS,
+  ensureSettingsModalScrollStyle,
+};

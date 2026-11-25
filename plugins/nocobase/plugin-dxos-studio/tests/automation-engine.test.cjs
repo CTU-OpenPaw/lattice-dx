@@ -2993,3 +2993,37 @@ test('actions.resumeRun allows non-root delegated approver with active latticeDe
     else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
 });
+
+test('listRuleVersions synthesizes active live baseline version when rule has publishedVersion >= 1 without persisted version rows', async () => {
+  const db = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+    latticeAutomationRules: [{
+      id: 901,
+      organizationId: 'org-a',
+      ruleKey: 'seeded_baseline_rule',
+      name: 'Seeded Baseline Flow',
+      active: true,
+      schemaVersion: 2,
+      publishedVersion: 1,
+      graphJson: {
+        version: 2,
+        nodes: [{ id: 't1', type: 'trigger.manual', config: {} }],
+        edges: [],
+      },
+      triggerIndexJson: [{ nodeId: 't1', eventType: 'manual.trigger' }],
+      createdBy: 'seeder',
+    }],
+    latticeAutomationRuleVersions: [],
+  });
+  const actions = createDxosAutomationsActions(db, {});
+  const ctx = makeCtx({ userId: 20, role: 'ldx_admin', params: { organizationId: 'org-a', ruleKey: 'seeded_baseline_rule' } });
+  await actions.listRuleVersions(ctx, async () => {});
+
+  assert.equal(ctx.body.items.length, 1);
+  assert.equal(ctx.body.items[0].version, 1);
+  assert.equal(ctx.body.items[0].status, 'published');
+  assert.equal(ctx.body.items[0].isCurrent, true);
+  assert.equal(ctx.body.items[0].note, 'Phiên bản đang chạy (Live Baseline)');
+  assert.equal(ctx.body.items[0].publishedBy, 'seeder');
+});

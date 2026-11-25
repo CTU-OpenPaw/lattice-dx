@@ -2062,3 +2062,106 @@ test('Task 16 baseline (mobile-offline-db): preserves deterministic FIFO order f
     Date.now = origNow;
   }
 });
+
+test('MobileFieldPwaPage renders above-the-fold approvals/deliveries/incidents/tickets cards and collapsible AI pill/drawer', async () => {
+  const { createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+  const mockIdb = createMockIndexedDb();
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+    indexedDB: globalThis.indexedDB,
+    fetch: globalThis.fetch,
+  };
+
+  const apiCalls = [];
+  const authApi = {
+    auth: { role: 'ldx_manager', getToken: () => 'jwt-ops-mobile' },
+    async request(req) {
+      apiCalls.push(req);
+      if (req.url === 'latticeNotifications:unreadCount') return { data: { data: { unreadCount: 1 } } };
+      if (req.url === 'dxosApprovals:listInbox') {
+        return { data: { data: { items: [{ id: 101, source: 'approval', title: 'Duyệt đơn lạnh #ORD-V100', riskLevel: 'high', summary: 'Vượt ngưỡng 200tr' }] } } };
+      }
+      if (req.url === 'latticeOrders:list') {
+        return { data: { data: [{ id: 55, code: 'ORD-V100-001', name: 'Giao vắc-xin Cần Thơ', destination: 'Bệnh viện Cần Thơ', status: 'in_transit' }] } };
+      }
+      if (req.url === 'latticeIncidentCases:list') {
+        return { data: { data: [{ id: 77, code: 'INC-077', name: 'Cảnh báo nhiệt kho A2', severity: 'critical', status: 'open' }] } };
+      }
+      if (req.url === 'latticeServiceTickets:list') {
+        return { data: { data: [{ id: 88, code: 'TKT-088', name: 'Bảo trì cảm biến cửa kho', priority: 'high', status: 'submitted' }] } };
+      }
+      if (req.url === 'dxosApprovals:decide') return { data: { data: { ok: true } } };
+      if (req.url === 'dxosAi:agentChat') return { data: { data: { reply: 'Đơn ORD-V100-001 đang giao đúng lộ trình.' } } };
+      return { data: {} };
+    },
+  };
+
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: mockIdb });
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    writable: true,
+    value: async (_u, init) => ({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: () => new Promise((_, reject) => {
+            init?.signal?.addEventListener?.('abort', () => {
+              reject(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' }));
+            });
+          }),
+          cancel: async () => { throw Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' }); },
+        }),
+      },
+    }),
+  });
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'window', { configurable: true, value: { localStorage: storage, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(global, 'document', { configurable: true, value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } } });
+
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 25));
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+
+    const aboveFold = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-above-fold-cards');
+    assert.ok(aboveFold, 'Above-the-fold operations cards section must render');
+    const aboveText = collectText(aboveFold);
+    assert.ok(aboveText.includes('Duyệt đơn lạnh #ORD-V100'));
+    assert.ok(aboveText.includes('ORD-V100-001'));
+    assert.ok(aboveText.includes('INC-077'));
+    assert.ok(aboveText.includes('TKT-088'));
+
+    // Select delivery order -> prefills ePOD orderCode
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-delivery-select-55').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-order-input').props.value, 'ORD-V100-001');
+
+    // Approve pending item inline
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-approval-approve-101').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    assert.ok(apiCalls.some((c) => c.url === 'dxosApprovals:decide' && c.data?.decision === 'approved'));
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-approval-card-101'), null);
+
+    // AI assistant starts collapsed as pill, opens drawer on click
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-drawer'), null);
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-pill').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    assert.ok(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-drawer'));
+
+    fakeReact._unmount();
+    await new Promise((r) => setTimeout(r, 15));
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: prevGlobals.indexedDB });
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
+  }
+});

@@ -840,6 +840,16 @@ async function loadFullVietnameseSuite() {
   return [...WAVE1_3_EVAL_CASES, ...SECURITY_RED_TEAM_CASES];
 }
 
+function toPreviewCase(tc) {
+  return {
+    id: tc.id,
+    category: tc.category || 'general',
+    prompt: tc.prompt,
+    expectedTool: tc.expectedTool ?? null,
+    refused: Boolean(tc.refused),
+  };
+}
+
 function listEvalSuites() {
   return [
     {
@@ -848,6 +858,7 @@ function listEvalSuites() {
       description: 'Đánh giá toàn diện router tiếng Việt tự nhiên (RAG, Tasks, Radar, GraphRAG, Flow Architect, App Builder 2.0, BI Chart, ReAct/Memory, A2A, Approvals, Omnichannel, Public Forms & Security Refusals).',
       supportsLiveLlm: true,
       estimatedCaseCount: 163,
+      sampleCases: [...WAVE1_3_EVAL_CASES.slice(0, 5), ...SECURITY_RED_TEAM_CASES.slice(0, 3)].map(toPreviewCase),
     },
     {
       id: 'wave1-3-capabilities',
@@ -855,6 +866,7 @@ function listEvalSuites() {
       description: 'Bộ kiểm thử tập trung các năng lực mới Wave 1–3: Plan/Patch/Rollback App, BI Chart, ReAct & Memory, A2A, Draft/Publish Workflow, Multi-level Approvals, Omnichannel Notify, Public Forms.',
       supportsLiveLlm: true,
       estimatedCaseCount: WAVE1_3_EVAL_CASES.length,
+      sampleCases: WAVE1_3_EVAL_CASES.map(toPreviewCase),
     },
     {
       id: 'security-red-team',
@@ -862,6 +874,7 @@ function listEvalSuites() {
       description: 'Kiểm thử từ chối prompt injection, lộ secret/PII, leo thang đặc quyền, SSRF metadata và vượt RLS/RBAC.',
       supportsLiveLlm: true,
       estimatedCaseCount: SECURITY_RED_TEAM_CASES.length,
+      sampleCases: SECURITY_RED_TEAM_CASES.map(toPreviewCase),
     },
     {
       id: 'custom',
@@ -869,6 +882,7 @@ function listEvalSuites() {
       description: 'Chạy bộ test case tùy chỉnh do quản trị viên nhập từ Eval Lab UI hoặc API.',
       supportsLiveLlm: true,
       estimatedCaseCount: 0,
+      sampleCases: [],
     },
   ];
 }

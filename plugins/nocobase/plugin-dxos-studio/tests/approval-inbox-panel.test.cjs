@@ -426,3 +426,62 @@ test('resists [null] array elements across inbox items, stages, decisions, deleg
   const dlgBanner = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-delegation-banner')[0];
   assert.ok(dlgBanner && textOf(dlgBanner).includes('DLG-NULLSAFE'));
 });
+
+test('formatDiffPreview handles old/new, before/after objects, and ApprovalInboxPanel renders Vietnamese risk/status badges', async () => {
+  const { createApprovalInboxPanel, formatDiffPreview, riskLabel, statusLabel } = require(SOURCE_PATH);
+
+  assert.equal(riskLabel('high'), 'Cao');
+  assert.equal(riskLabel('medium'), 'Trung bình');
+  assert.equal(riskLabel('low'), 'Thấp');
+  assert.equal(statusLabel('pending'), 'Chờ duyệt');
+  assert.equal(statusLabel('approved'), 'Đã duyệt');
+  assert.equal(statusLabel('rejected'), 'Từ chối');
+
+  const fromOldNew = formatDiffPreview({
+    summary: 'Cập nhật hạn mức',
+    changes: [{ field: 'limit', old: 100, new: 250 }],
+  });
+  assert.deepEqual(fromOldNew, { summary: 'Cập nhật hạn mức', changes: [{ field: 'limit', before: 100, after: 250 }] });
+
+  const fromObjectPair = formatDiffPreview({
+    before: { status: 'draft', qty: 5 },
+    after: { status: 'submitted', qty: 10 },
+  });
+  assert.equal(fromObjectPair.changes.length, 2);
+  assert.deepEqual(fromObjectPair.changes[0], { field: 'status', before: 'draft', after: 'submitted' });
+
+  const harness = createReactHarness();
+  const { client } = createApiMock({
+    'get dxosDelegations:activeForUser': async () => ({ items: [], roles: [] }),
+    'get dxosApprovals:listInbox': async () => ({
+      organizationId: 'org-a',
+      items: [
+        {
+          itemKey: 'ai-diff-1',
+          source: 'ai_hitl',
+          id: 101,
+          title: 'Đổi mức ưu tiên đơn hàng',
+          targetCollection: 'latticeOrders',
+          targetRecordId: '501',
+          requesterUsername: 'ai_ops',
+          riskLevel: 'high',
+          status: 'pending',
+          diffPreview: {
+            before: { priority: 'medium', threshold: 8 },
+            after: { priority: 'high', threshold: 4 },
+          },
+        },
+      ],
+      total: 1,
+    }),
+  });
+
+  const Panel = createApprovalInboxPanel(client, harness.React, {}, {});
+  const tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const card = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-card-ai-diff-1')[0];
+  const cardText = textOf(card);
+  assert.ok(cardText.includes('Rủi ro: Cao'));
+  assert.ok(cardText.includes('Chờ duyệt'));
+  assert.ok(cardText.includes('priority: "medium" -> "high"'));
+  assert.ok(cardText.includes('threshold: 8 -> 4'));
+});

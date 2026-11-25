@@ -248,7 +248,7 @@ async function seedWmsShowcase(api, organizationId, ctx) {
       method: 'POST',
       values: {
         code: 'ORD-V100-001',
-        name: 'Lô Vắc-xin Cold-Chain Cần Thơ -> TP.HCM (v1.0.0)',
+        name: 'Lô Vắc-xin Cold-Chain Cần Thơ -> TP.HCM (v0.4.0)',
         organizationId,
         customer: 'Hệ thống Tiêm chủng Mekong',
         origin: 'Kho Lạnh Trung Tâm Cần Thơ',
@@ -371,7 +371,7 @@ async function seedWmsShowcase(api, organizationId, ctx) {
         lotCode: 'LOT-V100-MKT-HOLD',
         samplesC: [9.4, 10.2, 11.1],
         maxAllowedC: 8,
-        reason: 'Showcase v1.0.0 MKT quarantine example',
+        reason: 'Showcase v0.4.0 MKT quarantine example',
       },
     });
     heldMkt = true;
@@ -479,7 +479,7 @@ async function seedDelegationSample(api, organizationId, ctx) {
   const existing = unwrapList(
     await api(`dxosDelegations:list?organizationId=${encodeURIComponent(organizationId)}`),
   );
-  if (existing.some((d) => d.status === 'active' || String(d.reason || '').includes('[v1.0.0]'))) {
+  if (existing.some((d) => d.status === 'active' || String(d.reason || '').includes('[v0.4.0]') || String(d.reason || '').includes('[v1.0.0]'))) {
     return { seeded: false, existingCount: existing.length };
   }
   if (ctx.distinctUserEmps.length < 2) {
@@ -500,7 +500,7 @@ async function seedDelegationSample(api, organizationId, ctx) {
         delegateUserId: Number(delegate.userId),
         roleName: 'ldx_manager',
         scopeCollection: 'latticeOrders',
-        reason: '[v1.0.0] Ủy quyền điều phối ca trực chuỗi lạnh Cần Thơ - TP.HCM',
+        reason: '[v0.4.0] Ủy quyền điều phối ca trực chuỗi lạnh Cần Thơ - TP.HCM',
         startsAt,
         endsAt,
       },
@@ -544,7 +544,7 @@ async function seedPkiAndColdSnapshot(api, organizationId, orderId) {
         organizationId,
         targetCollection: 'latticeOrders',
         targetRecordId: orderId,
-        reason: 'Niêm phong chứng từ vận đơn Vắc-xin Cold-Chain v1.0.0',
+        reason: 'Niêm phong chứng từ vận đơn Vắc-xin Cold-Chain v0.4.0',
       },
     });
   }
@@ -730,7 +730,7 @@ async function seedPartnerSettlementClaim(api, organizationId, assets) {
       settlementAmountVnd: 106250000,
       status: 'open',
       settlementStatus: 'pending',
-      resolutionNote: '[v1.0.0] Hồ sơ bồi hoàn chuỗi lạnh chờ phản hồi 2 chiều từ n8n External Apps.',
+      resolutionNote: '[v0.4.0] Hồ sơ bồi hoàn chuỗi lạnh chờ phản hồi 2 chiều từ n8n External Apps.',
     },
   });
 

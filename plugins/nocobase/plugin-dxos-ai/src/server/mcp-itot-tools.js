@@ -290,24 +290,36 @@ async function listActiveOrganizationIds(db, env = process.env) {
   return orgs;
 }
 
+async function countActiveAutomationRules(db, organizations = []) {
+  if (Array.isArray(organizations) && organizations.length > 0) {
+    const counts = await Promise.all(
+      organizations.map((orgId) => safeCount(db, 'latticeAutomationRules', { organizationId: orgId, active: true })),
+    );
+    return counts.reduce((sum, n) => sum + Number(n || 0), 0);
+  }
+  return safeCount(db, 'latticeAutomationRules', { active: true });
+}
+
 async function buildEnterpriseTopology(db, env = process.env, fetchImpl = globalThis.fetch, app = null) {
   const urls = resolveServiceUrls(env);
   const nocobaseVersion = await resolveHostVersion(env, db?.app?.version, app?.version);
-  const [orion, n8n, keycloak, rolesCount, assetsCount, outboxPending, workflowsCount, portalsCount, paraCount, profilesCount, auditCount, collectionsCount, organizations] = await Promise.all([
+  const organizations = await listActiveOrganizationIds(db, env);
+  const [orion, n8n, keycloak, rolesCount, assetsCount, outboxPending, nocobaseWorkflowsCount, automationRulesCount, portalsCount, paraCount, profilesCount, auditCount, collectionsCount] = await Promise.all([
     probeService(`${urls.orionUrl}/version`, fetchImpl),
     probeService(`${urls.n8nUrl}/healthz`, fetchImpl),
     probeService(`${urls.keycloakUrl}/realms/lattice`, fetchImpl),
     safeCount(db, 'roles', {}),
     safeCount(db, 'latticeAssets', {}),
     safeCount(db, 'latticeContextOutbox', { state: 'pending' }),
-    safeCount(db, 'workflows', { current: true }),
+    safeCount(db, 'workflows', { enabled: true }),
+    countActiveAutomationRules(db, organizations),
     safeCount(db, 'uiLayouts', {}),
     safeCount(db, 'latticeParaDocuments', {}),
     safeCount(db, 'latticeAiProfiles', { enabled: true }),
     safeCount(db, 'latticeAiAuditLogs', {}),
     safeCount(db, 'collections', {}),
-    listActiveOrganizationIds(db, env),
   ]);
+  const workflowsCount = Number(automationRulesCount || 0) + Number(nocobaseWorkflowsCount || 0);
 
   return {
     platform: 'LatticeDX Enterprise Digital OS (DX-OS)',

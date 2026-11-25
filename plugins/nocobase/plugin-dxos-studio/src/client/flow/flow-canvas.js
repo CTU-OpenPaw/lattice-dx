@@ -101,7 +101,7 @@ function createFlowCanvas(React, vendor = {}) {
 
   return function FlowCanvas(props = {}) {
     const {
-      graph, nodeTypes, selectedNodeId, onSelectNode, onInspectTraceNode, onConnectNodes, onNodesChangeGraph, onInsertBetweenEdge,
+      graph, nodeTypes, selectedNodeId, inspectorOpen = false, onSelectNode, onInspectTraceNode, onConnectNodes, onNodesChangeGraph, onInsertBetweenEdge,
       runOverlay, onAutoLayout, onDropNode, onAddNode, onQuickTestNode, onDuplicateNode, onDeleteNode,
       canUndo = false, canRedo = false, onUndo, onRedo, xyflowOverride,
       validationByNodeId = {}, onAppendFromNode, focusNodeId = null, focusSeq = 0,
@@ -297,7 +297,7 @@ function createFlowCanvas(React, vendor = {}) {
       'data-testid': 'dxos-flow-canvas',
       onDragOver: (evt) => { evt?.preventDefault?.(); if (evt?.dataTransfer) evt.dataTransfer.dropEffect = 'copy'; },
       onDrop: handleDrop,
-      style: { flex: 1, height: '100%', minHeight: 420, position: 'relative', background: '#F8FAFC', overflow: 'hidden' },
+      style: { flex: 1, height: '100%', minHeight: 420, position: 'relative', background: '#F8FAFC', overflow: 'hidden', paddingRight: inspectorOpen ? 376 : 0, paddingBottom: 16, boxSizing: 'border-box' },
     },
       ReactFlowComp
         ? h(ReactFlowComp, {
@@ -309,7 +309,7 @@ function createFlowCanvas(React, vendor = {}) {
           BackgroundComp ? h(BackgroundComp, { gap: 18, size: 1, color: '#CBD5E1' }) : null,
           showMiniMap && MiniMapComp ? h(MiniMapComp, { pannable: true, zoomable: true }) : null,
         )
-        : h('div', { 'data-testid': 'dxos-flow-headless-canvas', style: { padding: '56px 16px 64px', display: 'grid', gap: 12, height: '100%', overflowY: 'auto', alignContent: 'start' } },
+        : h('div', { 'data-testid': 'dxos-flow-headless-canvas', style: { padding: inspectorOpen ? '56px 380px 84px 16px' : '56px 16px 84px', display: 'grid', gap: 12, height: '100%', overflowY: 'auto', alignContent: 'start', boxSizing: 'border-box' } },
           !rfNodes.length
             ? h('div', { style: { padding: 24, border: '1px dashed #CBD5E1', borderRadius: 12, textAlign: 'center', color: '#64748B', background: '#FFFFFF' } }, 'Nhấn "+ Thêm Node" ở góc trên trái để bắt đầu dựng luồng.')
             : h('div', { 'data-testid': 'dxos-flow-headless-nodes', style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))', gap: 14, paddingTop: 28 } }, rfNodes.map((n) => h(customNodeTypes.dxosNode, { key: n.id, id: n.id, data: n.data, selected: n.selected }))),
@@ -324,7 +324,7 @@ function createFlowCanvas(React, vendor = {}) {
             }),
           ) : null,
         ),
-      h('div', { 'data-testid': 'dxos-flow-canvas-dock', style: { position: 'absolute', bottom: 14, left: '50%', transform: 'translateX(-50%)', zIndex: 18, display: 'inline-flex', alignItems: 'center', gap: 3, padding: '4px 8px', borderRadius: 10, border: '1px solid #CBD5E1', background: 'rgba(255, 255, 255, 0.96)', boxShadow: '0 8px 24px rgba(15, 23, 42, 0.12)', whiteSpace: 'nowrap' } },
+      h('div', { 'data-testid': 'dxos-flow-canvas-dock', style: { position: 'absolute', bottom: 14, left: inspectorOpen ? 'calc(50% - 184px)' : '50%', transform: 'translateX(-50%)', zIndex: 18, display: 'inline-flex', alignItems: 'center', gap: 3, padding: '4px 8px', borderRadius: 10, border: '1px solid #CBD5E1', background: 'rgba(255, 255, 255, 0.96)', boxShadow: '0 8px 24px rgba(15, 23, 42, 0.12)', whiteSpace: 'nowrap' } },
         h('button', { type: 'button', 'data-testid': 'dxos-flow-zoom-out-btn', onClick: () => rfInstance?.zoomOut?.(), style: dockBtn(false, false) }, '−'),
         h('button', { type: 'button', 'data-testid': 'dxos-flow-zoom-in-btn', onClick: () => rfInstance?.zoomIn?.(), style: dockBtn(false, false) }, '+'),
         h('button', { type: 'button', 'data-testid': 'dxos-flow-fitview-btn', onClick: () => rfInstance?.fitView?.({ padding: 0.24, duration: 200 }), style: dockBtn(false, false) }, '⊡ Fit'),

@@ -69,7 +69,7 @@ function btnS(tone = 'ghost', dis = false) {
     ghost: ['#ffffff', '#0f172a', '#cbd5e1'],
   }[tone] || ['#ffffff', '#0f172a', '#cbd5e1'];
   return {
-    padding: '5px 9px', borderRadius: 7, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap',
+    padding: '4px 8px', borderRadius: 7, fontSize: 11.5, fontWeight: 600, whiteSpace: 'nowrap',
     cursor: dis ? 'not-allowed' : 'pointer', border: `1px solid ${dis ? '#cbd5e1' : m[2]}`,
     background: dis ? '#e2e8f0' : m[0], color: dis ? '#94a3b8' : m[1], flexShrink: 0,
   };

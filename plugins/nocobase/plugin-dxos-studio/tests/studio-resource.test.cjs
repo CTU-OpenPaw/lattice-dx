@@ -366,7 +366,10 @@ test('composePortals attaches blocks, orders grid rows above seed row, and creat
   assert.equal(ctx.body.dxosBlocksAttached, true);
   assert.equal(ctx.body.createdPages, 6);
   assert.equal(ctx.body.mobilePagesCreated, 4);
-  assert.equal(ctx.body.attachedBlocks, 19);
+  assert.equal(ctx.body.attachedBlocks, 20);
+  const logisticsBiModel = flowModels.find((m) => m.uid === 'dxos-ov-logistics-bi-chart');
+  assert.ok(logisticsBiModel, 'Expected flowModel dxos-ov-logistics-bi-chart');
+  assert.equal(logisticsBiModel.use, 'DxosBiChartBlockModel');
   assert.equal(updatedGrids.length, 4);
   for (const slug of ['procurement', 'logistics', 'services']) {
     const wbModel = flowModels.find((m) => m.uid === `dxos-ov-${slug}-workbench`);

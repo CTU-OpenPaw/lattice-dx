@@ -8,9 +8,12 @@
  */
 'use strict';
 
+const { subscribeSurfaceEvents } = require('./sse-hub');
+
 const POLL_INTERVAL_MS = 60_000;
 const SSE_RECONNECT_BASE_MS = 3_000;
 const PORTAL_SLUG_RE = /^[a-z0-9_-]{1,64}$/i;
+let bellInstanceSeq = 0;
 
 const CATEGORY_TABS = [
   { key: 'all', label: 'Tất cả' },
@@ -122,6 +125,20 @@ function isAuthenticatedClient(api) {
   return Boolean(resolveClientAuthToken(api));
 }
 
+function hasExistingBellInDom(ownInstanceId) {
+  if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return false;
+  try {
+    const nodes = document.querySelectorAll('[data-latticedx-notification-bell]');
+    const list = Array.from(nodes || []);
+    return list.some((node) => {
+      const inst = node?.getAttribute?.('data-ldx-bell-instance');
+      return !ownInstanceId || inst !== ownInstanceId;
+    });
+  } catch {
+    return false;
+  }
+}
+
 function isSafeInternalTargetPath(rawPath) {
   const p = String(rawPath || '').trim();
   return /^\/(?!\/)[^\s\\]{0,500}$/.test(p);
@@ -162,6 +179,11 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
     const [category, setCategory] = React.useState('all');
     const [loading, setLoading] = React.useState(false);
     const [authRejected, setAuthRejected] = React.useState(false);
+    const bellInstanceIdRef = useRefSafe(null);
+    if (!bellInstanceIdRef.current) {
+      bellInstanceIdRef.current = `ldx-bell-${++bellInstanceSeq}`;
+    }
+    const [duplicateBell, setDuplicateBell] = React.useState(() => hasExistingBellInDom(bellInstanceIdRef.current));
     const openRef = useRefSafe(open);
     openRef.current = open;
 
@@ -194,7 +216,7 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
     const pathAllowed = isTopbar
       ? (!effectivePath || isVisibleBellPath(effectivePath))
       : isVisibleBellPath(effectivePath);
-    const visible = Boolean(!suppressedByTopbar && !authRejected && pathAllowed && isAuthenticatedClient(api));
+    const visible = Boolean(!suppressedByTopbar && !duplicateBell && !authRejected && pathAllowed && isAuthenticatedClient(api));
 
     const fetchUnreadCount = useCb(async () => {
       if (!visible || typeof api?.request !== 'function') return;
@@ -246,7 +268,8 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
 
     React.useEffect(() => {
       setAuthRejected(false);
-    }, [api?.auth?.role, effectivePath]);
+      setDuplicateBell(hasExistingBellInDom(bellInstanceIdRef.current));
+    }, [api?.auth?.role, effectivePath, isTopbar]);
 
     const portalSlug = resolveBellPortalSlug(effectivePath);
 
@@ -259,10 +282,6 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
       if (typeof window === 'undefined') return undefined;
 
       let disposed = false;
-      let controller = null;
-      let activeReader = null;
-      let reconnectTimer = null;
-      let retryAttempt = 0;
 
       const timer = setInterval(() => {
         if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
@@ -285,75 +304,33 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
         }
       };
 
-      const connectSse = async () => {
-        if (disposed) return;
-        const token = resolveClientAuthToken(api);
-        const fetchFn = typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function'
-          ? globalThis.fetch
-          : (typeof fetch === 'function' ? fetch : null);
-        if (!token || typeof fetchFn !== 'function') return;
+      const token = resolveClientAuthToken(api);
+      const fetchFn = typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function'
+        ? globalThis.fetch
+        : (typeof fetch === 'function' ? fetch : null);
+      const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
+      const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
+      const sseUrl = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
 
-        const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
-        const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
-        const sseUrl = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
-        controller = typeof AbortController === 'function' ? new AbortController() : null;
-        let stopReconnect = false;
-        try {
-          const res = await fetchFn(sseUrl, {
-            method: 'GET',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: 'text/event-stream',
-            },
-            credentials: 'same-origin',
-            ...(controller ? { signal: controller.signal } : {}),
-          });
-          if (res && (res.status === 401 || res.status === 403)) {
-            stopReconnect = true;
-            if (!disposed) setAuthRejected(true);
-            return;
-          }
-          if (!res?.ok || !res.body?.getReader) {
-            throw new Error('SSE_UNAVAILABLE');
-          }
-          retryAttempt = 0;
-          activeReader = res.body.getReader();
-          const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
-          let buffer = '';
-          while (!disposed) {
-            const part = await activeReader.read();
-            if (part.done) break;
-            const text = decoder ? decoder.decode(part.value, { stream: true }) : String(part.value || '');
-            buffer += text;
-            const parsed = parseSseChunk(buffer);
-            buffer = parsed.rest;
-            for (const frame of parsed.frames) {
-              if (frame.event === 'snapshot') {
-                retryAttempt = 0;
-                continue;
-              }
-              if (['notification', 'unread_count', 'update', 'message'].includes(frame.event)) {
-                handleSsePayload(frame.event, frame.data);
-              }
+      const unsubscribeSse = (token && typeof fetchFn === 'function')
+        ? subscribeSurfaceEvents({
+          portalSlug,
+          sseUrl,
+          token,
+          fetchFn,
+          minBackoffMs: SSE_RECONNECT_BASE_MS,
+          maxBackoffMs: POLL_INTERVAL_MS,
+          win: typeof window !== 'undefined' ? window : null,
+          onEvent: (eventName, data) => {
+            if (['notification', 'unread_count', 'update', 'message'].includes(eventName)) {
+              handleSsePayload(eventName, data);
             }
-          }
-        } catch {
-          // Transient drop handled below unless disposed or 401/403
-        } finally {
-          activeReader = null;
-        }
-        if (!disposed && !stopReconnect && !reconnectTimer) {
-          const delayMs = Math.min(POLL_INTERVAL_MS, SSE_RECONNECT_BASE_MS * (2 ** Math.min(4, retryAttempt)));
-          retryAttempt += 1;
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            connectSse();
-          }, delayMs);
-          if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
-        }
-      };
-
-      connectSse();
+          },
+          onAuthError: () => {
+            if (!disposed) setAuthRejected(true);
+          },
+        })
+        : () => {};
 
       const onVisibility = () => {
         if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
@@ -366,13 +343,7 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
       return () => {
         disposed = true;
         clearInterval(timer);
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
-        controller?.abort?.();
-        try { activeReader?.cancel?.(); } catch {}
-        activeReader = null;
+        unsubscribeSse();
         if (typeof document !== 'undefined') {
           document.removeEventListener?.('visibilitychange', onVisibility);
         }
@@ -522,7 +493,13 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
       color: '#0f172a',
     };
 
-    const bellWrap = h('div', { 'data-testid': 'ldx-notification-bell-wrap', 'data-variant': isTopbar ? 'topbar' : 'floating', style: wrapStyle },
+    const bellWrap = h('div', {
+      'data-testid': 'ldx-notification-bell-wrap',
+      'data-variant': isTopbar ? 'topbar' : 'floating',
+      'data-latticedx-notification-bell': isTopbar ? 'topbar' : 'floating',
+      'data-ldx-bell-instance': bellInstanceIdRef.current,
+      style: wrapStyle,
+    },
       h('button', {
         type: 'button',
         'data-testid': 'ldx-notification-bell-btn',

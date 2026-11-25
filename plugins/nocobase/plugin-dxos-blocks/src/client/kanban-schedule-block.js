@@ -13,6 +13,9 @@ const {
   CUSTOM_COLLECTION_RE,
   fetchCollectionsMeta,
   inferCollectionFieldsMeta,
+  getStatusMeta,
+  formatStatusLabel,
+  stripDevBracketTags,
 } = require('./blocks-helpers');
 
 const KANBAN_STAGE_ORDER = ['draft', 'submitted', 'approved', 'in_progress', 'completed', 'cancelled'];
@@ -28,16 +31,16 @@ const CANCELLABLE_STAGES = new Set(['submitted', 'approved', 'in_progress']);
 const DEFAULT_SCHEDULE_DATE_FIELDS = ['dueDate', 'scheduledAt', 'startDate', 'expiryDate', 'submittedAt', 'createdAt'];
 
 const STAGE_META = {
-  draft: { label: 'Nháp (draft)', color: '#475569', bg: '#f1f5f9', border: '#cbd5e1' },
-  submitted: { label: 'Đã trình duyệt (submitted)', color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd' },
-  approved: { label: 'Đã phê duyệt (approved)', color: '#166534', bg: '#dcfce7', border: '#86efac' },
-  in_progress: { label: 'Đang xử lý (in_progress)', color: '#0369a1', bg: '#e0f2fe', border: '#7dd3fc' },
-  completed: { label: 'Hoàn tất (completed)', color: '#065f46', bg: '#d1fae5', border: '#6ee7b7' },
-  cancelled: { label: 'Đã hủy (cancelled)', color: '#991b1b', bg: '#fee2e2', border: '#fca5a5' },
-  available: { label: 'Sẵn sàng (available)', color: '#065f46', bg: '#d1fae5', border: '#6ee7b7' },
-  reserved: { label: 'Đã giữ chỗ (reserved)', color: '#1d4ed8', bg: '#dbeafe', border: '#93c5fd' },
-  hold_mkt: { label: 'Tạm giữ MKT (hold_mkt)', color: '#92400e', bg: '#fef3c7', border: '#fcd34d' },
-  expired: { label: 'Hết hạn (expired)', color: '#991b1b', bg: '#fee2e2', border: '#fca5a5' },
+  draft: getStatusMeta('draft'),
+  submitted: getStatusMeta('submitted'),
+  approved: getStatusMeta('approved'),
+  in_progress: getStatusMeta('in_progress'),
+  completed: getStatusMeta('completed'),
+  cancelled: getStatusMeta('cancelled'),
+  available: getStatusMeta('available'),
+  reserved: getStatusMeta('reserved'),
+  hold_mkt: getStatusMeta('hold_mkt'),
+  expired: getStatusMeta('expired'),
 };
 
 const WEEKDAY_LABELS = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
@@ -589,7 +592,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
       const targetCollection = activeCollection;
       setBusyId(rec.id);
       try {
-        setStatusNote(`Đang cập nhật ${rec.code || rec.lotCode || `#${rec.id}`} → ${nextStage}…`);
+        setStatusNote(`Đang cập nhật ${rec.code || rec.lotCode || `#${rec.id}`} → ${formatStatusLabel(nextStage)}…`);
         await api.request({
           url: `${targetCollection}:update`,
           method: 'post',
@@ -598,7 +601,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
           skipNotify: true,
         });
         if (reqTracker.unmounted || reqTracker.collection !== targetCollection) return;
-        setStatusNote(`Đã chuyển sang giai đoạn ${nextStage}.`);
+        setStatusNote(`Đã chuyển sang giai đoạn ${formatStatusLabel(nextStage)}.`);
         await loadRecords();
       } catch (err) {
         if (!reqTracker.unmounted && reqTracker.collection === targetCollection) {
@@ -651,6 +654,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
       'data-testid': 'dxos-kanban-schedule-block',
       style: {
         padding: 16,
+        paddingBottom: 56,
         borderRadius: 12,
         border: '1px solid #cbd5e1',
         background: '#ffffff',
@@ -662,7 +666,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
     },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
         h('div', null,
-          h('strong', { style: { fontSize: 15, color: '#0f172a' } }, String(cfg.title || 'Bảng Kanban & Lịch [H]')),
+          h('strong', { style: { fontSize: 15, color: '#0f172a' } }, stripDevBracketTags(cfg.title || 'Bảng Kanban & Lịch')),
           h('div', { style: { fontSize: 11, color: '#64748b' } }, `${activeCollection} · ${filteredRecords.length} bản ghi`),
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
@@ -922,7 +926,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                         h('strong', null, String(rec.code || rec.lotCode || `#${rec.id}`)),
                         h('div', { style: { color: '#475569' } }, resolveRecordDisplayTitle(rec, effectiveTitleField)),
                         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
-                          h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: meta.bg, color: meta.color, fontWeight: 700 } }, st),
+                          h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: meta.bg, color: meta.color, fontWeight: 700 } }, meta.label || formatStatusLabel(st)),
                           sla ? h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: sla.bg, color: sla.color, fontWeight: 700 } }, sla.label) : null,
                         ),
                       );
@@ -978,7 +982,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                         h('strong', { style: { color: '#0f172a' } }, String(rec.code || rec.lotCode || `#${rec.id ?? idx}`)),
                         h('div', { style: { color: '#475569', wordBreak: 'break-word' } }, resolveRecordDisplayTitle(rec, effectiveTitleField)),
                         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4 } },
-                          h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: meta.bg, color: meta.color, fontWeight: 700 } }, st),
+                          h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: meta.bg, color: meta.color, fontWeight: 700 } }, meta.label || formatStatusLabel(st)),
                           sla ? h('span', { style: { fontSize: 10, padding: '1px 5px', borderRadius: 999, background: sla.bg, color: sla.color, fontWeight: 700 } }, sla.label) : null,
                         ),
                       );

@@ -48,12 +48,110 @@ function riskTone(risk) {
   return 'info';
 }
 
+function riskLabel(risk) {
+  const r = String(risk || 'medium').toLowerCase();
+  if (r === 'critical') return 'Nghiêm trọng';
+  if (r === 'high') return 'Cao';
+  if (r === 'medium') return 'Trung bình';
+  if (r === 'low') return 'Thấp';
+  return risk || 'Trung bình';
+}
+
 function statusTone(status) {
   const s = String(status || 'pending').toLowerCase();
   if (s === 'approved' || s === 'executed') return 'ok';
   if (s === 'rejected' || s === 'expired' || s === 'failed') return 'danger';
   if (s === 'pending' || s === 'suspended') return 'warn';
   return 'neutral';
+}
+
+function statusLabel(status) {
+  const s = String(status || 'pending').toLowerCase();
+  if (s === 'pending') return 'Chờ duyệt';
+  if (s === 'approved') return 'Đã duyệt';
+  if (s === 'rejected') return 'Từ chối';
+  if (s === 'executed') return 'Đã thực thi';
+  if (s === 'suspended') return 'Tạm dừng';
+  if (s === 'expired') return 'Hết hạn';
+  if (s === 'failed') return 'Thất bại';
+  if (s === 'all') return 'Tất cả';
+  return status || 'Chờ duyệt';
+}
+
+function formatDiffScalar(v) {
+  if (v === undefined) return '∅';
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+function formatDiffPreview(diffPreview) {
+  if (diffPreview == null) return null;
+  if (typeof diffPreview === 'string') {
+    const trimmed = diffPreview.trim();
+    return trimmed ? { summary: trimmed, changes: [] } : null;
+  }
+  if (Array.isArray(diffPreview)) {
+    const changes = diffPreview
+      .filter((x) => x && typeof x === 'object')
+      .map((c) => ({
+        field: String(c.field || c.key || c.name || 'field'),
+        before: c.before !== undefined ? c.before : (c.old !== undefined ? c.old : (c.oldValue !== undefined ? c.oldValue : c.from)),
+        after: c.after !== undefined ? c.after : (c.new !== undefined ? c.new : (c.newValue !== undefined ? c.newValue : c.to)),
+      }));
+    return changes.length ? { summary: 'Chi tiết thay đổi đề xuất:', changes } : null;
+  }
+  if (typeof diffPreview !== 'object') return null;
+
+  const summary = typeof diffPreview.summary === 'string' && diffPreview.summary.trim()
+    ? diffPreview.summary.trim()
+    : 'Chi tiết thay đổi đề xuất:';
+
+  if (Array.isArray(diffPreview.changes)) {
+    const changes = diffPreview.changes
+      .filter((x) => x && typeof x === 'object')
+      .map((c) => ({
+        field: String(c.field || c.key || c.name || 'field'),
+        before: c.before !== undefined ? c.before : (c.old !== undefined ? c.old : (c.oldValue !== undefined ? c.oldValue : c.from)),
+        after: c.after !== undefined ? c.after : (c.new !== undefined ? c.new : (c.newValue !== undefined ? c.newValue : c.to)),
+      }));
+    return { summary, changes };
+  }
+
+  const beforeObj = (diffPreview.before && typeof diffPreview.before === 'object' && !Array.isArray(diffPreview.before))
+    ? diffPreview.before
+    : ((diffPreview.old && typeof diffPreview.old === 'object' && !Array.isArray(diffPreview.old)) ? diffPreview.old : null);
+  const afterObj = (diffPreview.after && typeof diffPreview.after === 'object' && !Array.isArray(diffPreview.after))
+    ? diffPreview.after
+    : ((diffPreview.new && typeof diffPreview.new === 'object' && !Array.isArray(diffPreview.new)) ? diffPreview.new : null);
+
+  if (beforeObj || afterObj) {
+    const keys = new Set([...Object.keys(beforeObj || {}), ...Object.keys(afterObj || {})]);
+    const changes = [];
+    for (const k of keys) {
+      const bVal = beforeObj ? beforeObj[k] : undefined;
+      const aVal = afterObj ? afterObj[k] : undefined;
+      if (JSON.stringify(bVal) !== JSON.stringify(aVal)) {
+        changes.push({ field: k, before: bVal, after: aVal });
+      }
+    }
+    return { summary, changes };
+  }
+
+  const kvChanges = [];
+  for (const [k, v] of Object.entries(diffPreview)) {
+    if (k === 'summary' || k === 'changes') continue;
+    if (v && typeof v === 'object' && !Array.isArray(v) && ('before' in v || 'after' in v || 'old' in v || 'new' in v)) {
+      kvChanges.push({
+        field: k,
+        before: v.before !== undefined ? v.before : v.old,
+        after: v.after !== undefined ? v.after : v.new,
+      });
+    }
+  }
+  return { summary, changes: kvChanges };
 }
 
 function makeStyles() {
@@ -294,8 +392,8 @@ function createApprovalInboxPanel(client, React, _antd, app) {
       h('div', { style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
-            h('h3', { style: { margin: 0, fontSize: 16, color: '#0f172a' } }, 'Hộp thư Phê duyệt Hợp nhất (Unified Approval Inbox)'),
-            h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Hợp nhất phê duyệt Nghiệp vụ M-of-N, AI HITL và LatticeFlow v2 Pause/Resume.'),
+            h('h3', { style: { margin: 0, fontSize: 16, color: '#0f172a' } }, 'Hộp thư Phê duyệt Thống nhất'),
+            h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Hợp nhất phê duyệt Nghiệp vụ nhiều cấp, AI HITL và tạm dừng/tiếp tục quy trình LatticeFlow v2.'),
           ),
           h('button', {
             type: 'button',
@@ -354,7 +452,7 @@ function createApprovalInboxPanel(client, React, _antd, app) {
               value: status,
               onChange: (e) => setStatus(e.target.value),
               style: S.input,
-            }, STATUS_OPTIONS.map((opt) => h('option', { key: opt, value: opt }, opt))),
+            }, STATUS_OPTIONS.map((opt) => h('option', { key: opt, value: opt }, statusLabel(opt)))),
             h('label', { style: { fontSize: 12, display: 'flex', alignItems: 'center', gap: 5 } },
               h('input', {
                 'data-testid': 'dxos-approvals-assigned-toggle',
@@ -377,13 +475,14 @@ function createApprovalInboxPanel(client, React, _antd, app) {
               : Array.isArray(item.stages) ? item.stages : []).filter((x) => x && typeof x === 'object');
             const dlgTag = findItemDelegation(item, delegations, delegatedRolesSet);
             const canAct = (item.status === 'pending' || item.status === 'suspended') && item.canAct !== false;
+            const parsedDiff = formatDiffPreview(item.diffPreview);
 
             return h('div', { key: itemKey, 'data-testid': `dxos-approval-card-${itemKey}`, style: S.itemCard },
               h('div', { style: S.rowBetween },
                 h('div', { style: S.rowWrap },
                   h('span', { style: S.badge('info') }, sourceLabel(normSrc)),
-                  h('span', { style: S.badge(riskTone(item.riskLevel)) }, `Rủi ro: ${item.riskLevel || 'medium'}`),
-                  h('span', { style: S.badge(statusTone(item.status)) }, item.status || 'pending'),
+                  h('span', { style: S.badge(riskTone(item.riskLevel)) }, `Rủi ro: ${riskLabel(item.riskLevel)}`),
+                  h('span', { style: S.badge(statusTone(item.status)) }, statusLabel(item.status)),
                   dlgTag
                     ? h('span', { 'data-testid': `dxos-approval-delegation-${itemKey}`, style: S.badge('info') }, `Ủy quyền: ${dlgTag}`)
                     : null,
@@ -417,7 +516,7 @@ function createApprovalInboxPanel(client, React, _antd, app) {
                           h('strong', null, `Bước ${(st.stageIndex ?? sIdx) + 1}: ${st.name || 'Phê duyệt'}`),
                           ` (${st.mode || 'sequential'} · ${approveCount}/${reqCount})`,
                         ),
-                        h('span', { style: S.badge(statusTone(st.status)) }, st.status || 'pending'),
+                        h('span', { style: S.badge(statusTone(st.status)) }, statusLabel(st.status)),
                       ),
                       Array.isArray(st.approverRoles) && st.approverRoles.length
                         ? h('div', { style: { fontSize: 11, color: '#64748b' } }, `Vai trò duyệt: ${st.approverRoles.join(', ')}`)
@@ -434,13 +533,21 @@ function createApprovalInboxPanel(client, React, _antd, app) {
                 )
                 : null,
 
-              item.diffPreview && typeof item.diffPreview === 'object'
+              parsedDiff
                 ? h('div', { 'data-testid': `dxos-approval-diff-${itemKey}`, style: S.subCard },
-                  h('strong', { style: { fontSize: 11, color: '#475569' } }, item.diffPreview.summary || 'Chi tiết thay đổi đề xuất:'),
-                  Array.isArray(item.diffPreview.changes)
-                    ? item.diffPreview.changes.filter((x) => x && typeof x === 'object').map((c, cIdx) => h('div', { key: cIdx, style: { fontSize: 12, fontFamily: 'monospace' } },
-                      `${c.field}: ${JSON.stringify(c.before)} -> ${JSON.stringify(c.after)}`,
-                    ))
+                  h('strong', { style: { fontSize: 11, color: '#475569' } }, parsedDiff.summary),
+                  parsedDiff.changes.length
+                    ? h('div', { style: { display: 'grid', gap: 4 } },
+                      parsedDiff.changes.map((c, cIdx) => h('div', {
+                        key: cIdx,
+                        style: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 4, fontSize: 12, fontFamily: 'monospace' },
+                      },
+                        h('span', { style: { fontWeight: 600, color: '#0f172a' } }, `${c.field}: `),
+                        h('span', { style: { padding: '1px 6px', borderRadius: 4, background: '#fee2e2', color: '#991b1b' } }, formatDiffScalar(c.before)),
+                        h('span', { style: { color: '#64748b' } }, ' -> '),
+                        h('span', { style: { padding: '1px 6px', borderRadius: 4, background: '#dcfce7', color: '#166534' } }, formatDiffScalar(c.after)),
+                      )),
+                    )
                     : null,
                 )
                 : null,
@@ -493,4 +600,7 @@ module.exports = {
   APPROVAL_SOURCE_TABS,
   createApprovalInboxPanel,
   ApprovalInboxPanel: makeDirectPanelWrapper(createApprovalInboxPanel),
+  formatDiffPreview,
+  riskLabel,
+  statusLabel,
 };

@@ -12,6 +12,10 @@ const {
   isSafeAppPath,
   fetchCollectionsMeta,
   inferCollectionFieldsMeta,
+  getStatusMeta,
+  formatStatusLabel,
+  stripDevBracketTags,
+  createCompactIdBadge,
 } = require('./blocks-helpers');
 
 const SVG_WIDTH = 640;
@@ -33,12 +37,30 @@ const DEFAULT_VIETNAM_BOUNDS = {
 };
 
 const TWIN_STATUS_LABELS = {
-  synced: { label: 'synced', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
-  pending_hitl: { label: 'pending_hitl', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
-  dispatched: { label: 'dispatched', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
-  acked: { label: 'acked', bg: '#e0e7ff', color: '#3730a3', border: '#a5b4fc' },
-  failed: { label: 'failed', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  synced: getStatusMeta('synced'),
+  pending_hitl: getStatusMeta('pending_hitl'),
+  dispatched: getStatusMeta('dispatched'),
+  acked: getStatusMeta('acked'),
+  failed: { ...getStatusMeta('failed'), label: 'Lỗi đồng bộ' },
 };
+
+const TWIN_DEFROST_OPTIONS = [
+  { value: 'auto', label: 'Tự động' },
+  { value: 'manual', label: 'Thủ công' },
+  { value: 'off', label: 'Tắt' },
+];
+
+const TWIN_FAN_OPTIONS = [
+  { value: 'auto', label: 'Tự động' },
+  { value: 'high', label: 'Cao' },
+  { value: 'low', label: 'Thấp' },
+  { value: 'eco', label: 'Tiết kiệm (Eco)' },
+];
+
+const TWIN_DOOR_OPTIONS = [
+  { value: 'locked', label: 'Đã khóa' },
+  { value: 'unlocked', label: 'Mở khóa' },
+];
 
 const DEFAULT_VIETNAM_GEO_MARKERS = [
   {
@@ -1106,6 +1128,16 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         || null;
     }, [visibleMarkers, selectedId]);
 
+    const twinMarker = React.useMemo(() => {
+      if (selectedMarker && selectedMarker.assetId != null) return selectedMarker;
+      const explicitAny = classifiedMarkers.find((m) => m.id === selectedId && m.assetId != null);
+      if (explicitAny) return explicitAny;
+      return classifiedMarkers.find((m) => m.meta.level === 'critical' && m.assetId != null)
+        || classifiedMarkers.find((m) => m.meta.level === 'warning' && m.assetId != null)
+        || classifiedMarkers.find((m) => m.assetId != null)
+        || null;
+    }, [selectedMarker, classifiedMarkers, selectedId]);
+
     const markersGeoJson = React.useMemo(() => buildMarkersGeoJson(visibleMarkers), [visibleMarkers]);
     const corridorsGeoJson = React.useMemo(
       () => buildCorridorsGeoJson(visibleMarkers, customCollection ? [] : DEFAULT_VIETNAM_GEO_MARKERS),
@@ -1216,9 +1248,9 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
     }, [mapHolder, markersGeoJson, corridorsGeoJson, selectedMarker?.id]);
 
     const baselineTemp = React.useMemo(() => {
-      if (!selectedMarker) return null;
-      return parseFiniteGeo(selectedMarker.desiredJson?.targetTempC ?? selectedMarker.targetTempC ?? selectedMarker.temperatureC);
-    }, [selectedMarker]);
+      if (!twinMarker) return null;
+      return parseFiniteGeo(twinMarker.desiredJson?.targetTempC ?? twinMarker.targetTempC ?? twinMarker.temperatureC);
+    }, [twinMarker]);
 
     const parsedInputTemp = parseFiniteGeo(twinForm.targetTempInput);
     const previewDeltaTemp = baselineTemp !== null && parsedInputTemp !== null
@@ -1228,14 +1260,14 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
 
     async function handleTwinSubmit(e) {
       if (e && typeof e.preventDefault === 'function') e.preventDefault();
-      if (!api?.request || !selectedMarker || selectedMarker.assetId == null || twinBusy) return;
+      if (!api?.request || !twinMarker || twinMarker.assetId == null || twinBusy) return;
       if (parsedInputTemp === null || parsedInputTemp < -80 || parsedInputTemp > 120) {
-        setTwinFeedback({ type: 'error', text: 'targetTempC phải là số hợp lệ trong [-80, 120]°C.' });
+        setTwinFeedback({ type: 'error', text: 'Nhiệt độ mục tiêu phải là số hợp lệ trong [-80, 120]°C.' });
         return;
       }
-      const twinOrg = String(selectedMarker.organizationId || cfg.defaultOrganizationId || '').trim();
+      const twinOrg = String(twinMarker.organizationId || cfg.defaultOrganizationId || '').trim();
       if (!twinOrg) {
-        setTwinFeedback({ type: 'error', text: 'Thiếu organizationId để gửi lệnh Digital Twin.' });
+        setTwinFeedback({ type: 'error', text: 'Thiếu mã tổ chức để gửi lệnh Digital Twin.' });
         return;
       }
 
@@ -1252,8 +1284,8 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           url: 'dxosBlocks:twinSetDesired',
           method: 'post',
           data: {
-            ...(selectedMarker.assetId != null ? { assetId: selectedMarker.assetId } : {}),
-            ...(selectedMarker.assetEntityId ? { assetEntityId: selectedMarker.assetEntityId } : {}),
+            ...(twinMarker.assetId != null ? { assetId: twinMarker.assetId } : {}),
+            ...(twinMarker.assetEntityId ? { assetEntityId: twinMarker.assetEntityId } : {}),
             organizationId: twinOrg,
             desiredPatch,
           },
@@ -1264,7 +1296,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         if (nextShadow) {
           setState((prev) => ({
             ...prev,
-            markers: prev.markers.map((m) => (m.id === selectedMarker.id
+            markers: prev.markers.map((m) => (m.id === twinMarker.id
               ? {
                   ...m,
                   twinStatus: nextShadow.commandStatus || m.twinStatus,
@@ -1275,15 +1307,16 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
               : m)),
           }));
         }
+        const statusText = formatStatusLabel(nextShadow?.commandStatus || (payload.gatedByHitl ? 'pending_hitl' : 'dispatched'));
         if (payload.gatedByHitl) {
           setTwinFeedback({
             type: 'warning',
-            text: `Yêu cầu vượt ±2.0°C đã chuyển phê duyệt HITL (Mã #${payload.approvalId ?? '—'}, trạng thái: ${nextShadow?.commandStatus || 'pending_hitl'}, Δ = ${payload.deltaTempC ?? previewDeltaTemp}°C).`,
+            text: `Yêu cầu vượt ±2.0°C đã chuyển phê duyệt HITL (Mã #${payload.approvalId ?? '—'}, trạng thái: ${statusText}, Δ = ${payload.deltaTempC ?? previewDeltaTemp}°C).`,
           });
         } else {
           setTwinFeedback({
             type: 'success',
-            text: `Đã gửi lệnh Digital Twin (${payload.commandId || 'cmd'}, trạng thái: ${nextShadow?.commandStatus || 'dispatched'}).`,
+            text: `Đã gửi lệnh Digital Twin (${payload.commandId || 'cmd'}, trạng thái: ${statusText}).`,
           });
         }
       } catch (err) {
@@ -1317,7 +1350,8 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
 
     const centerGeo = projectGeoPoint(cfg.centerLat, cfg.centerLng);
     const showUnmappedNotice = Boolean(customCollection && !state.loading && state.markers.length === 0);
-    const hasTwinControls = Boolean(selectedMarker && selectedMarker.assetId != null && cfg.showTwinOverlay !== false);
+    const hasTwinControls = Boolean(twinMarker && twinMarker.assetId != null && cfg.showTwinOverlay !== false);
+    const emptyFilterWithTwin = Boolean(!selectedMarker && visibleMarkers.length === 0 && classifiedMarkers.length > 0);
     const unmappedSubsetCount = customCollection && state.totalRecords > state.markers.length
       ? state.totalRecords - state.markers.length
       : 0;
@@ -1326,6 +1360,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       'data-testid': 'dxos-webgis-block',
       style: {
         padding: 16,
+        paddingBottom: 56,
         borderRadius: 12,
         border: '1px solid #cbd5e1',
         background: '#ffffff',
@@ -1337,7 +1372,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
     },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
         h('div', null,
-          h('strong', { style: { fontSize: 15, color: '#0f172a' } }, String(cfg.title || 'WebGIS Chuỗi lạnh [D]')),
+          h('strong', { style: { fontSize: 15, color: '#0f172a' } }, stripDevBracketTags(cfg.title || 'Bản đồ Giám sát Chuỗi lạnh WebGIS')),
           h('div', { style: { fontSize: 11, color: '#64748b' } },
             customCollection
               ? `${customCollection} · ${visibleMarkers.length} điểm hiển thị${unmappedSubsetCount > 0 ? ` (${unmappedSubsetCount} chưa có tọa độ)` : ''}${useMapLibreCanvas ? (offlineStyleMode ? ' · MapLibre WGS84 Offline' : ' · MapLibre GL') : ' · Vector WGS84 Fallback'}`
@@ -1501,26 +1536,30 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                 )
               : h('div', { style: { padding: 8, borderRadius: 8, background: '#ffffff', border: '1px solid #e2e8f0', fontSize: 12 } },
                   h('div', { style: { color: '#64748b', fontSize: 11 } }, `Trạng thái (${selectedMarker.collection || 'collection'})`),
-                  h('strong', { style: { fontSize: 13, color: selectedMarker.meta.color } }, String(selectedMarker.status || selectedMarker.meta.label)),
+                  h('strong', { style: { fontSize: 13, color: selectedMarker.meta.color } }, formatStatusLabel(selectedMarker.status, selectedMarker.meta.label)),
                 ),
+            selectedMarker.assetEntityId ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+              createCompactIdBadge(React, selectedMarker.assetEntityId, { labelPrefix: 'NGSI-LD', testId: 'dxos-webgis-urn-badge' }),
+            ) : null,
             hasTwinControls ? h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 } },
               h('span', { style: { color: '#475569' } }, 'Trạng thái Digital Twin:'),
               h('span', {
+                'data-testid': 'dxos-webgis-twin-status-badge',
                 style: {
                   fontSize: 11,
                   fontWeight: 700,
                   padding: '2px 8px',
                   borderRadius: 999,
-                  background: selectedMarker.meta.twinMeta.bg,
-                  color: selectedMarker.meta.twinMeta.color,
-                  border: `1px solid ${selectedMarker.meta.twinMeta.border}`,
+                  background: twinMarker.meta.twinMeta.bg,
+                  color: twinMarker.meta.twinMeta.color,
+                  border: `1px solid ${twinMarker.meta.twinMeta.border}`,
                 },
-              }, selectedMarker.meta.twinStatus),
+              }, twinMarker.meta.twinMeta.label),
             ) : null,
             hasTwinControls ? h('button', {
               type: 'button',
               'data-testid': 'dxos-webgis-open-twin-drawer-btn',
-              onClick: () => handleSelectMarker(selectedMarker),
+              onClick: () => handleSelectMarker(twinMarker),
               style: {
                 padding: '6px 10px',
                 borderRadius: 6,
@@ -1549,13 +1588,58 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                 cursor: 'pointer',
               },
             }, 'Mở trang Xử lý Sự cố') : null,
-          ) : h('div', { style: { fontSize: 13, color: '#64748b' } }, customCollection ? 'Chưa có điểm bản đồ hợp lệ để hiển thị.' : 'Không có điểm giám sát phù hợp với bộ lọc hiện tại.'),
+          ) : h('div', { style: { display: 'grid', gap: 8 } },
+            h('div', {
+              'data-testid': 'dxos-webgis-filter-empty-notice',
+              style: { fontSize: 12, color: '#475569', padding: 10, borderRadius: 8, background: '#ffffff', border: '1px dashed #cbd5e1' },
+            }, customCollection
+              ? 'Chưa có điểm bản đồ hợp lệ để hiển thị.'
+              : (emptyFilterWithTwin
+                ? 'Không có điểm giám sát nào khớp bộ lọc hiện tại. Điều khiển Digital Twin vẫn sẵn sàng bên dưới cho tài sản đang chọn.'
+                : 'Không có điểm giám sát phù hợp với bộ lọc hiện tại.')),
+            hasTwinControls ? h('div', {
+              'data-testid': 'dxos-webgis-twin-fallback-card',
+              style: { padding: 10, borderRadius: 8, background: '#ffffff', border: '1px solid #cbd5e1', display: 'grid', gap: 8 },
+            },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+                h('strong', { style: { fontSize: 13, color: '#0f172a' } }, `${twinMarker.code} — ${twinMarker.name}`),
+                h('span', {
+                  'data-testid': 'dxos-webgis-twin-status-badge',
+                  style: {
+                    fontSize: 11,
+                    fontWeight: 700,
+                    padding: '2px 8px',
+                    borderRadius: 999,
+                    background: twinMarker.meta.twinMeta.bg,
+                    color: twinMarker.meta.twinMeta.color,
+                    border: `1px solid ${twinMarker.meta.twinMeta.border}`,
+                  },
+                }, twinMarker.meta.twinMeta.label),
+              ),
+              twinMarker.assetEntityId ? h('div', null, createCompactIdBadge(React, twinMarker.assetEntityId, { labelPrefix: 'NGSI-LD', testId: 'dxos-webgis-urn-badge' })) : null,
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-webgis-open-twin-drawer-btn',
+                onClick: () => handleSelectMarker(twinMarker),
+                style: {
+                  padding: '6px 10px',
+                  borderRadius: 6,
+                  border: '1px solid #0284c7',
+                  background: '#f0f9ff',
+                  color: '#0369a1',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                },
+              }, 'Điều khiển Digital Twin'),
+            ) : null,
+          ),
         ),
       ),
       drawerOpen && hasTwinControls ? h('div', {
         'data-testid': 'dxos-webgis-twin-drawer',
         role: 'region',
-        'aria-label': `Điều khiển Digital Twin ${selectedMarker.code}`,
+        'aria-label': `Điều khiển Digital Twin ${twinMarker.code}`,
         style: {
           borderRadius: 10,
           border: '1px solid #93c5fd',
@@ -1565,8 +1649,11 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           gap: 10,
         },
       },
-        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-          h('strong', { style: { fontSize: 13, color: '#0f172a' } }, `Desktop Digital Twin Control — ${selectedMarker.code} (${selectedMarker.name})`),
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0 } },
+            h('strong', { style: { fontSize: 13, color: '#0f172a' } }, `Điều khiển Digital Twin — ${twinMarker.code} (${twinMarker.name})`),
+            twinMarker.assetEntityId ? createCompactIdBadge(React, twinMarker.assetEntityId, { labelPrefix: 'NGSI-LD' }) : null,
+          ),
           h('button', {
             type: 'button',
             'data-testid': 'dxos-webgis-close-twin-drawer-btn',
@@ -1587,42 +1674,36 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
             }),
           ),
           h('label', { style: { display: 'grid', gap: 4, fontSize: 11, color: '#475569' } },
-            'Chế độ xả đá (defrost)',
+            'Chế độ xả đá',
             h('select', {
               'data-testid': 'dxos-twin-defrost-select',
               value: twinForm.defrostMode,
               onChange: (e) => setTwinForm((prev) => ({ ...prev, defrostMode: e.target.value })),
               style: { padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
             },
-              h('option', { value: 'auto' }, 'auto'),
-              h('option', { value: 'manual' }, 'manual'),
-              h('option', { value: 'off' }, 'off'),
+              TWIN_DEFROST_OPTIONS.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label)),
             ),
           ),
           h('label', { style: { display: 'grid', gap: 4, fontSize: 11, color: '#475569' } },
-            'Quạt dàn lạnh (fan)',
+            'Quạt dàn lạnh',
             h('select', {
               'data-testid': 'dxos-twin-fan-select',
               value: twinForm.fanMode,
               onChange: (e) => setTwinForm((prev) => ({ ...prev, fanMode: e.target.value })),
               style: { padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
             },
-              h('option', { value: 'auto' }, 'auto'),
-              h('option', { value: 'high' }, 'high'),
-              h('option', { value: 'low' }, 'low'),
-              h('option', { value: 'eco' }, 'eco'),
+              TWIN_FAN_OPTIONS.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label)),
             ),
           ),
           h('label', { style: { display: 'grid', gap: 4, fontSize: 11, color: '#475569' } },
-            'Khóa cửa kho (doorLock)',
+            'Khóa cửa kho',
             h('select', {
               'data-testid': 'dxos-twin-door-select',
               value: twinForm.doorLock,
               onChange: (e) => setTwinForm((prev) => ({ ...prev, doorLock: e.target.value })),
               style: { padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#ffffff' },
             },
-              h('option', { value: 'locked' }, 'locked'),
-              h('option', { value: 'unlocked' }, 'unlocked'),
+              TWIN_DOOR_OPTIONS.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label)),
             ),
           ),
         ),
@@ -1667,6 +1748,10 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
 module.exports = {
   DEFAULT_VIETNAM_BOUNDS,
   DEFAULT_VIETNAM_GEO_MARKERS,
+  TWIN_STATUS_LABELS,
+  TWIN_DEFROST_OPTIONS,
+  TWIN_FAN_OPTIONS,
+  TWIN_DOOR_OPTIONS,
   normalizeWebGisCollection,
   normalizeWebGisFieldName,
   buildCustomCollectionMarkers,

@@ -79,7 +79,15 @@ const BLOCKED_TARGET_FIELDS = Object.freeze(new Set([
 
 const SENSITIVE_FIELD_NAME_RE = /password|secret|token|apikey|api_key|privatekey|private_key|hash|salt/i;
 const ALLOWED_FIELD_TYPES = new Set(['string', 'text', 'number', 'integer', 'boolean', 'date', 'email', 'select']);
-const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders']);
+const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
+const PUBLIC_STATUS_COLLECTIONS = new Set([
+  'latticeRequests',
+  'latticeOrders',
+  'latticeServiceTickets',
+  'latticeIncidentCases',
+  'latticeParaDocuments',
+  'latticeAgentProposals',
+]);
 const DEFAULT_RATE_LIMIT_PER_MIN = 20;
 const STATUS_RATE_LIMIT_PER_MIN = 60;
 const PRE_LOOKUP_IP_FLOOD_LIMIT = 300;
@@ -753,6 +761,20 @@ function createDxosFormsActions(db, options = {}) {
       const recordName = cleanValues.name
         || `${String(cleanValues.title || cleanValues.subject || val(form, 'title') || 'Public Form').slice(0, 120)} #${recordCode}`;
 
+      const submittedAt = new Date();
+      const isVoucherTarget = VOUCHER_COLLECTIONS.has(targetCollection);
+      const targetColMeta = typeof db?.getCollection === 'function' ? db.getCollection(targetCollection) : null;
+      const colHasStatusField = Boolean(
+        targetColMeta && (
+          typeof targetColMeta.hasField === 'function' ? targetColMeta.hasField('status') : targetColMeta.getField?.('status')
+        ),
+      );
+      const shouldInitializeSubmitted = isVoucherTarget
+        || PUBLIC_STATUS_COLLECTIONS.has(targetCollection)
+        || colHasStatusField
+        || Object.hasOwn(safeDefaults, 'status')
+        || Object.hasOwn(cleanValues, 'status');
+
       const targetPayload = {
         ...safeDefaults,
         ...cleanValues,
@@ -760,15 +782,15 @@ function createDxosFormsActions(db, options = {}) {
         name: recordName,
         active: true,
         organizationId: formOrgId,
-        ...(VOUCHER_COLLECTIONS.has(targetCollection)
-          ? { status: 'draft', version: 1, amendmentNo: 0 }
+        ...(shouldInitializeSubmitted ? { status: 'submitted' } : {}),
+        ...(isVoucherTarget
+          ? { status: 'submitted', version: 1, amendmentNo: 0, submittedAt }
           : {}),
       };
 
       const submissionCode = `LDX-FRM-${randomBytes(4).toString('hex').toUpperCase()}`;
       const statusToken = `ldx_frm_${randomBytes(24).toString('hex')}`;
       const statusTokenHash = sha256Hex(statusToken);
-      const submittedAt = new Date();
 
       const executeSubmit = async (transaction) => {
         const txOpt = transaction ? { transaction } : {};
@@ -888,9 +910,13 @@ function createDxosFormsActions(db, options = {}) {
         const readLiveStatus = async (transaction) => {
           const targetRepo = getRepo(db, targetCollection);
           if (!targetRepo || typeof targetRepo.findOne !== 'function') return null;
+          const colMeta = typeof db?.getCollection === 'function' ? db.getCollection(targetCollection) : null;
+          const hasStatus = colMeta
+            ? Boolean(typeof colMeta.hasField === 'function' ? colMeta.hasField('status') : colMeta.getField?.('status'))
+            : true;
           return targetRepo.findOne({
             filter: { id: Number(targetRecordId), organizationId: subOrgId },
-            fields: ['id', 'status', 'updatedAt'],
+            fields: hasStatus ? ['id', 'status', 'updatedAt'] : ['id', 'updatedAt'],
             ...(transaction ? { transaction } : {}),
           });
         };

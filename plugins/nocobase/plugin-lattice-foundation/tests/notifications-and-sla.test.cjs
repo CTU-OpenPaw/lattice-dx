@@ -1884,6 +1884,136 @@ test('Task 4 (Review Focus #1): Notification Bell skips /api/dxosAi:surfaceEvent
   }
 });
 
+test('SSE Hub pools 1 stream per portalSlug, ignores AbortError on unmount, and bell guards against duplicate DOM mount', async () => {
+  const { createTopbarNotificationBell } = require('../src/client/notification-bell');
+  const { subscribeSurfaceEvents, isAbortError } = require('../src/client/sse-hub');
+
+  assert.equal(isAbortError(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' })), true);
+
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevFetch = globalThis.fetch;
+  try {
+    const fetchCalls = [];
+    const rejectHandlers = [];
+    const mockWin = {
+      location: { pathname: '/p/logistics', assign() {} },
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    globalThis.window = mockWin;
+
+    // 1. Two subscribers on same portalSlug open ONLY 1 fetch SSE stream and cancel rejects with AbortError silently
+    let abortRejectFn = null;
+    const mockFetch = async (url, init) => {
+      fetchCalls.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: () => new Promise((_, reject) => {
+              abortRejectFn = reject;
+              init?.signal?.addEventListener?.('abort', () => {
+                reject(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' }));
+              });
+            }),
+            cancel: async () => {
+              throw Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' });
+            },
+          }),
+        },
+      };
+    };
+
+    const eventsA = [];
+    const eventsB = [];
+    const unsubA = subscribeSurfaceEvents({
+      portalSlug: 'logistics',
+      sseUrl: '/api/dxosAi:surfaceEvents?portalSlug=logistics',
+      token: 'tok-pool-1',
+      fetchFn: mockFetch,
+      win: mockWin,
+      onEvent: (e, d) => eventsA.push({ e, d }),
+    });
+    const unsubB = subscribeSurfaceEvents({
+      portalSlug: 'logistics',
+      sseUrl: '/api/dxosAi:surfaceEvents?portalSlug=logistics',
+      token: 'tok-pool-1',
+      fetchFn: mockFetch,
+      win: mockWin,
+      onEvent: (e, d) => eventsB.push({ e, d }),
+    });
+
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(fetchCalls.length, 1, 'Shared SSE hub must open at most 1 stream per portalSlug');
+    assert.ok(mockWin.__LATTICEDX_SSE_HUB__);
+
+    unsubA();
+    assert.equal(fetchCalls[0].init.signal.aborted, false, 'Stream stays open while 2nd subscriber remains');
+    unsubB();
+    assert.equal(fetchCalls[0].init.signal.aborted, true, 'Last unsubscribe aborts stream cleanly without unhandled rejection');
+    await new Promise((r) => setTimeout(r, 15));
+
+    // 2. Duplicate bell guard suppresses rendering & SSE when [data-latticedx-notification-bell] is already in DOM
+    globalThis.fetch = mockFetch;
+    globalThis.document = {
+      visibilityState: 'visible',
+      addEventListener() {},
+      removeEventListener() {},
+      querySelectorAll(sel) {
+        if (sel === '[data-latticedx-notification-bell]') {
+          return [{ getAttribute: (k) => (k === 'data-ldx-bell-instance' ? 'existing-host-bell' : 'topbar') }];
+        }
+        return [];
+      },
+    };
+    const api = {
+      auth: { role: 'ldx_manager', getToken: () => 'tok-dup-check' },
+      request: async () => ({ data: { data: { unreadCount: 1 } } }),
+    };
+    let cursor = 0;
+    const state = [];
+    const effects = [];
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState(init) {
+        const idx = cursor++;
+        if (!(idx in state)) state[idx] = typeof init === 'function' ? init() : init;
+        return [state[idx], (v) => { state[idx] = typeof v === 'function' ? v(state[idx]) : v; }];
+      },
+      useEffect(fn, deps) {
+        const idx = cursor++;
+        const prev = state[idx];
+        if (!prev || !deps || deps.some((d, i) => d !== prev.deps[i])) {
+          state[idx] = { deps };
+          effects.push({ idx, fn });
+        }
+      },
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useRef: (init) => {
+        const idx = cursor++;
+        return state[idx] ?? (state[idx] = { current: init });
+      },
+    };
+    const DupBell = createTopbarNotificationBell({ useAPIClient: () => api }, React, {}, {});
+    const fetchCountBeforeDup = fetchCalls.length;
+    const dupUi = DupBell({ variant: 'topbar', pathname: '/p/logistics' });
+    while (effects.length) effects.shift().fn();
+    assert.equal(dupUi, null, 'Duplicate notification bell must suppress itself when existing bell is present');
+    assert.equal(fetchCalls.length, fetchCountBeforeDup, 'Suppressed duplicate bell must NOT open SSE');
+    void rejectHandlers;
+    void abortRejectFn;
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window; else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document; else globalThis.document = prevDocument;
+    if (prevFetch === undefined) delete globalThis.fetch; else globalThis.fetch = prevFetch;
+  }
+});
+
 test('notification-center integrates omnichannel Vault adapter (channelConfig + no duplicate webhook + skipOmnichannel)', async () => {
   const { dispatchNotification } = require('../src/server/notification-center');
   const { encryptVaultSecrets } = require('../src/server/connector-vault');

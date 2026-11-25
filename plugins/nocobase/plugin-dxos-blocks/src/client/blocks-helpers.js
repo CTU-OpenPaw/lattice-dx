@@ -492,9 +492,142 @@ function extractBiFieldOptions(collectionMeta, { numericOnly = false } = {}) {
   return out;
 }
 
+const STATUS_META_MAP = {
+  draft: { label: 'Bản nháp', bg: '#f1f5f9', color: '#334155', border: '#cbd5e1' },
+  submitted: { label: 'Đã gửi', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  hold_mkt: { label: 'Tạm giữ MKT', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  proposed: { label: 'Đề xuất AI', bg: '#eef2ff', color: '#4338ca', border: '#c7d2fe' },
+  manager_approval: { label: 'Chờ quản lý duyệt', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  synced: { label: 'Đã đồng bộ', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  open: { label: 'Đang mở', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  pending: { label: 'Chờ xử lý', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  critical: { label: 'Nghiêm trọng', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  high: { label: 'Cao', bg: '#ffedd5', color: '#9a3412', border: '#fdba74' },
+  medium: { label: 'Trung bình', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  low: { label: 'Thấp', bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' },
+  approved: { label: 'Đã duyệt', bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  rejected: { label: 'Từ chối', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  completed: { label: 'Hoàn tất', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  issued: { label: 'Đã xuất kho', bg: '#e0e7ff', color: '#3730a3', border: '#a5b4fc' },
+  in_progress: { label: 'Đang xử lý', bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' },
+  cancelled: { label: 'Đã hủy', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  available: { label: 'Sẵn sàng', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  reserved: { label: 'Đã giữ chỗ', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  expired: { label: 'Hết hạn', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  reviewed: { label: 'Đã xem xét', bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  pending_hitl: { label: 'Chờ duyệt HITL', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  dispatched: { label: 'Đã gửi lệnh', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  acked: { label: 'Đã xác nhận', bg: '#e0e7ff', color: '#3730a3', border: '#a5b4fc' },
+  failed: { label: 'Thất bại', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  active: { label: 'Đang hoạt động', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  inactive: { label: 'Ngừng hoạt động', bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  acknowledged: { label: 'Đã tiếp nhận', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  closed: { label: 'Đã đóng', bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  resolved: { label: 'Đã xử lý', bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  ok: { label: 'Đạt chuẩn', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  online: { label: 'Trực tuyến', bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  offline: { label: 'Ngoại tuyến', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  not_synced: { label: 'Chưa đồng bộ', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  unconfigured: { label: 'Chưa cấu hình', bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  ready: { label: 'Sẵn sàng', bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' },
+};
+
+function getStatusMeta(rawStatus, fallbackLabel = '') {
+  const key = String(rawStatus ?? '').trim().toLowerCase();
+  if (key && Object.hasOwn(STATUS_META_MAP, key)) {
+    return { value: key, ...STATUS_META_MAP[key] };
+  }
+  const cleanRaw = String(rawStatus ?? '').trim();
+  return {
+    value: key,
+    label: fallbackLabel || cleanRaw || 'Chưa xác định',
+    bg: '#f1f5f9',
+    color: '#334155',
+    border: '#cbd5e1',
+  };
+}
+
+function formatStatusLabel(rawStatus, fallbackLabel = '') {
+  return getStatusMeta(rawStatus, fallbackLabel).label;
+}
+
+function stripDevBracketTags(rawTitle) {
+  return String(rawTitle ?? '')
+    .replace(/\s*\[(?:D|P|W|H|I)\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function formatCompactIdentifier(rawVal, { prefixLen = 10, suffixLen = 6 } = {}) {
+  const text = String(rawVal ?? '').trim();
+  if (!text) return '—';
+  const urnMatch = /^urn:ngsi-ld:([A-Za-z0-9_-]+):([A-Za-z0-9_-]+):native:(\d+)$/.exec(text);
+  if (urnMatch) {
+    return `${urnMatch[1]}:${urnMatch[2]}:#${urnMatch[3]}`;
+  }
+  if (text.length <= prefixLen + suffixLen + 3) return text;
+  return `${text.slice(0, prefixLen)}…${text.slice(-suffixLen)}`;
+}
+
+function createCompactIdBadge(React, rawVal, { labelPrefix = '', testId = '', prefixLen = 10, suffixLen = 6 } = {}) {
+  if (!React?.createElement || !rawVal) return null;
+  const full = String(rawVal).trim();
+  if (!full) return null;
+  const h = React.createElement;
+  const shortText = formatCompactIdentifier(full, { prefixLen, suffixLen });
+  const canCopy = typeof navigator !== 'undefined' && typeof navigator?.clipboard?.writeText === 'function';
+  return h('span', {
+    ...(testId ? { 'data-testid': testId } : {}),
+    title: full,
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 4,
+      maxWidth: '100%',
+      padding: '2px 7px',
+      borderRadius: 6,
+      border: '1px solid #cbd5e1',
+      background: '#f8fafc',
+      color: '#334155',
+      fontSize: 11,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      verticalAlign: 'middle',
+      overflow: 'hidden',
+    },
+  },
+    labelPrefix ? h('span', { style: { fontWeight: 700, color: '#475569', flexShrink: 0 } }, `${labelPrefix}:`) : null,
+    h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, shortText),
+    canCopy ? h('button', {
+      type: 'button',
+      title: `Sao chép ${full}`,
+      'aria-label': `Sao chép ${labelPrefix || 'mã định danh'}`,
+      onClick: (e) => {
+        e?.stopPropagation?.();
+        try { navigator.clipboard.writeText(full); } catch {}
+      },
+      style: {
+        border: 'none',
+        background: 'transparent',
+        color: '#0284c7',
+        fontSize: 10,
+        fontWeight: 700,
+        cursor: 'pointer',
+        padding: '0 2px',
+        flexShrink: 0,
+      },
+    }, 'Sao chép') : null,
+  );
+}
+
 module.exports = {
   SAFE_COLLECTION_RE,
   CUSTOM_COLLECTION_RE,
+  STATUS_META_MAP,
+  getStatusMeta,
+  formatStatusLabel,
+  stripDevBracketTags,
+  formatCompactIdentifier,
+  createCompactIdBadge,
   isSafeAppPath,
   safeJsonParse,
   filterHeroActions,

@@ -1605,12 +1605,12 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
   assert.ok(requests.some((r) => r.url === 'dxosAutomations:deleteRule' && r.data.ruleKey === delKey));
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-list-card-${delKey}`).length, 0);
 
-  // 2. Open rule, check 1280px toolbar wrap, edit label -> dirty -> Unsaved Guard (Cancel, Discard, Save)
+  // 2. Open rule, check single-row crisp toolbar, edit label -> dirty -> Unsaved Guard (Cancel, Discard, Save)
   const editKey = blueprints[0].ruleKey;
   collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-edit-${editKey}`)[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   const toolbar = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-toolbar')[0];
-  assert.equal(toolbar.props.style.flexWrap, 'wrap');
+  assert.equal(toolbar.props.style.flexWrap, 'nowrap');
   assert.notEqual(toolbar.props.style.overflowX, 'auto');
 
   const firstNodeId = blueprints[0].graphJson.nodes[0].id;
@@ -2362,4 +2362,86 @@ test('buildWebhookCurlCommand sanitizes secretHeader and single-quotes URL and h
   assert.equal(cmd.includes("POST 'https://portal.example.com/api/dxosAutomations:webhookIngress"), true);
   assert.equal(cmd.includes('$(id)'), false, 'Must strip non-token chars like ( and ) from secretHeader');
   assert.match(cmd, /-H 'X-Sig-[^']*: sha256=<WEBHOOK_HMAC_SHA256_HEX>'/);
+});
+
+test('Flow Studio fixes: baseline version fallback, 1-row toolbar, Vietnamese ai.agent labels, webhook endpoint clarity, and inspector clearance', async () => {
+  const { synthesizeBaselineVersionIfMissing } = require(path.join(PLUGIN_ROOT, 'src/client/flow-version-ui.js'));
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+
+  // 1. Version history fallback synthesizes Live v1 when backend returns empty array
+  const synthesized = synthesizeBaselineVersionIfMissing([], {
+    id: 77,
+    ruleKey: 'seeded_flow',
+    publishedVersion: 1,
+    graphJson: { version: 2, nodes: [{ id: 't1', type: 'trigger.manual', config: {} }], edges: [] },
+  });
+  assert.equal(synthesized.length, 1);
+  assert.equal(synthesized[0].version, 1);
+  assert.equal(synthesized[0].status, 'published');
+  assert.equal(synthesized[0].isCurrent, true);
+  assert.equal(synthesized[0].note, 'Phiên bản đang chạy (Live Baseline)');
+
+  // 2. Render FlowStudioApp with seeded Live v1 rule + empty listRuleVersions response
+  const harness = createQueuedReactHarness();
+  const nodeTypes = getRegistrySchemas();
+  const blueprints = getBlueprints();
+  const seededRule = {
+    id: 77,
+    ruleKey: 'seeded_wh_ai_flow',
+    name: 'Quy trình Cảnh báo Chuỗi lạnh với Tên Rất Dài Cần Thu Gọn Mượt Mà',
+    active: true,
+    publishedVersion: 1,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 'wh_1', type: 'trigger.webhook', label: 'Webhook', position: { x: 80, y: 160 }, config: { webhookPath: '/hooks/coldchain', authMode: 'hmac' } },
+        { id: 'ai_1', type: 'ai.agent', label: 'AI Agent', position: { x: 340, y: 160 }, config: { mode: 'react', maxTurns: 4, tools: ['memory_recall'] } },
+      ],
+      edges: [{ id: 'e1', source: 'wh_1', sourceHandle: 'main', target: 'ai_1', targetHandle: 'in' }],
+    },
+  };
+  const { client } = createApiMock({
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: [seededRule] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosAutomations:listRuleVersions': async () => ({ items: [] }),
+  });
+
+  const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: seededRule.ruleKey });
+
+  // Single-row toolbar & truncated title with tooltip
+  const toolbar = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-toolbar')[0];
+  assert.equal(toolbar.props.style.flexWrap, 'nowrap');
+  const titleEl = collectNodes(toolbar, (n) => n.type === 'strong')[0];
+  assert.equal(titleEl.props.title, seededRule.name);
+  assert.equal(titleEl.props.style.textOverflow, 'ellipsis');
+
+  // Open Version History modal -> shows synthesized Live v1 instead of empty state
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-versions-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: seededRule.ruleKey });
+  const verModal = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-versions-modal')[0];
+  assert.ok(verModal);
+  assert.equal(textOf(verModal).includes('Chưa có phiên bản đã publish nào'), false);
+  assert.ok(textOf(verModal).includes('Phiên bản đang chạy (Live Baseline)'));
+
+  // Select webhook node -> canvas gains right clearance & webhook helper shows ingress URL + webhookPath
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-wh_1')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: seededRule.ruleKey });
+  const canvasEl = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-canvas')[0];
+  assert.ok(Number(canvasEl.props.style.paddingRight) >= 360, 'Canvas must leave right clearance when inspector is open');
+  const whEndpoints = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-webhook-endpoints')[0];
+  assert.ok(whEndpoints);
+  assert.ok(textOf(whEndpoints).includes('POST /api/dxosAutomations:webhookIngress'));
+  assert.ok(textOf(whEndpoints).includes('/hooks/coldchain'));
+
+  // Select ai.agent node -> Vietnamese inspector labels
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-ai_1')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: seededRule.ruleKey });
+  const inspText = textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector')[0]);
+  for (const viLabel of ['Chế độ suy luận', 'Số vòng tối đa', 'Công cụ được phép', 'Schema JSON đầu ra', 'Phạm vi bộ nhớ']) {
+    assert.ok(inspText.includes(viLabel), `Missing Vietnamese ai.agent label: ${viLabel}`);
+  }
+  harness.unmount();
 });

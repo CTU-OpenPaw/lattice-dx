@@ -15,6 +15,8 @@ const {
   inferPortalSlugFromLocation,
   triggerDxosAgent,
   requestAndDownloadExport,
+  formatStatusLabel,
+  stripDevBracketTags,
 } = require('./blocks-helpers');
 const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
 
@@ -416,7 +418,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
           activeAlarms.length
             ? h('div', { style: { marginTop: 8, display: 'grid', gap: 6 } },
               activeAlarms.slice(0, 3).map((alm) => h('div', { key: alm.id, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, background: '#ef444418', border: '1px solid #ef444444', fontSize: 11 } },
-                h('span', null, `[${alm.severity}] ${alm.code} (${alm.status}, lặp ${alm.occurrenceCount || 1}x)`),
+                h('span', null, `[${formatStatusLabel(alm.severity)}] ${alm.code} (${formatStatusLabel(alm.status)}, lặp ${alm.occurrenceCount || 1}x)`),
                 h('div', { style: { display: 'flex', gap: 6 } },
                   alm.status === 'open' ? h('button', { type: 'button', onClick: () => handleAlarmTransition(alm.id, 'ack'), style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #f59e0b', background: 'transparent', color: '#f59e0b', cursor: 'pointer', fontWeight: 700 } }, 'Xác nhận (Ack)') : null,
                   h('button', { type: 'button', onClick: () => handleAlarmTransition(alm.id, 'clear'), style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #10b981', background: 'transparent', color: '#10b981', cursor: 'pointer', fontWeight: 700 } }, 'Đóng (Clear)'),
@@ -577,7 +579,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
               background: palette.badgeBg, color: palette.badgeColor, marginBottom: 6,
             },
           }, bp.badge),
-          h('h3', { style: { margin: 0, fontSize: 17, fontWeight: 800, color: palette.titleColor } }, String(mergedCfg.title || bp.title)),
+          h('h3', { style: { margin: 0, fontSize: 17, fontWeight: 800, color: palette.titleColor } }, stripDevBracketTags(mergedCfg.title || bp.title)),
           bp.subtitle ? h('div', { style: { fontSize: 12, color: palette.mutedColor, marginTop: 2 } }, bp.subtitle) : null,
         ),
         bp.queries.length ? h('button', {

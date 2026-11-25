@@ -12,6 +12,8 @@ const {
   SAFE_COLLECTION_RE,
   fetchCollectionsMeta,
   subscribeCollectionsMeta,
+  extractBiFieldOptions,
+  stripDevBracketTags,
 } = require('./blocks-helpers');
 
 const BI_CHART_TYPES = ['bar', 'line', 'pie', 'kpi', 'pivot'];
@@ -21,6 +23,21 @@ const BI_DEFAULT_COLLECTION = 'latticeOrders';
 const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DANGEROUS_FILTER_KEYS = new Set(['$where', '$raw', '$sql', '$eval', '$function', '$expr']);
 const SAFE_FIELD_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,62}$/;
+
+const BI_COLLECTION_FALLBACKS = [
+  { value: 'latticeOrders', label: 'Đơn Logistics' },
+  { value: 'latticeOrderLines', label: 'Dòng đơn hàng' },
+  { value: 'latticeRequests', label: 'Yêu cầu mua sắm' },
+  { value: 'latticeServiceTickets', label: 'Phiếu dịch vụ nội bộ' },
+  { value: 'latticeStockLots', label: 'Lô kho lạnh' },
+  { value: 'latticeAssets', label: 'Tài sản & Thiết bị' },
+  { value: 'latticeLocations', label: 'Địa điểm & Kho trạm' },
+  { value: 'latticeDepartments', label: 'Phòng ban' },
+  { value: 'latticeIncidentCases', label: 'Sự cố IoT' },
+  { value: 'latticeParaDocuments', label: 'Tài liệu P.A.R.A.' },
+  { value: 'latticeAgentProposals', label: 'Đề xuất AI' },
+  { value: 'latticeEpodRecords', label: 'Chứng từ ePOD' },
+];
 
 const CHART_TYPE_LABELS = {
   bar: 'Cột (Bar)',
@@ -124,7 +141,7 @@ function buildAggregateQueryPayload(cfg = {}) {
   const op = BI_METRIC_OPS.includes(rawOp) ? rawOp : 'count';
   const metricField = op !== 'count' ? normalizeBiField(cfg.metric?.field ?? cfg.metricField) : '';
 
-  const parsedLimit = Number(cfg.limit);
+  const parsedLimit = Number(cfg.limit ?? cfg.maxGroups);
   const limit = Number.isFinite(parsedLimit) && parsedLimit >= 1
     ? Math.min(500, Math.max(1, Math.floor(parsedLimit)))
     : 20;
@@ -309,6 +326,22 @@ function readSafeObjProp(obj, key, fallback = 0) {
   return Object.hasOwn(obj, key) ? obj[key] : fallback;
 }
 
+function resolvePivotSecondaryField(groupBy, secondaryGroupBy, fieldOptions = []) {
+  const cleanGroup = normalizeBiField(groupBy);
+  const cleanSecondary = normalizeBiField(secondaryGroupBy);
+  if (cleanSecondary && cleanSecondary !== cleanGroup) {
+    return cleanSecondary;
+  }
+  if (Array.isArray(fieldOptions) && fieldOptions.length > 0) {
+    const distinct = fieldOptions.find((opt) => {
+      const val = normalizeBiField(opt?.value);
+      return val && val !== cleanGroup;
+    });
+    if (distinct) return normalizeBiField(distinct.value);
+  }
+  return '';
+}
+
 function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfig } = {}) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
@@ -327,7 +360,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       || model?.stepParams?.dxosBlockSettings?.config
       || {};
     const cfg = {
-      title: 'Phân tích & Biểu đồ BI [D]',
+      title: 'Phân tích & Biểu đồ BI',
       collection: BI_DEFAULT_COLLECTION,
       chartType: 'bar',
       groupBy: 'status',
@@ -341,13 +374,29 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       ...(liveConfig || {}),
     };
 
+    const configCollection = normalizeBiCollection(cfg.collection);
     const configChartType = BI_CHART_TYPES.includes(String(cfg.chartType || '').toLowerCase())
       ? String(cfg.chartType).toLowerCase()
       : 'bar';
+    const configGroupBy = normalizeBiField(cfg.groupBy);
+    const configSecondaryGroupBy = normalizeBiField(cfg.secondaryGroupBy);
+    const rawConfigMetricOp = String(cfg.metric?.op ?? cfg.metricOp ?? 'count').trim().toLowerCase();
+    const configMetricOp = BI_METRIC_OPS.includes(rawConfigMetricOp) ? rawConfigMetricOp : 'count';
+    const configMetricField = normalizeBiField(cfg.metric?.field ?? cfg.metricField);
+
+    const [activeCollection, setActiveCollection] = React.useState(configCollection);
     const [activeChartType, setActiveChartType] = React.useState(configChartType);
-    React.useEffect(() => {
-      setActiveChartType(configChartType);
-    }, [configChartType]);
+    const [activeGroupBy, setActiveGroupBy] = React.useState(configGroupBy);
+    const [activeSecondaryGroupBy, setActiveSecondaryGroupBy] = React.useState(configSecondaryGroupBy);
+    const [activeMetricOp, setActiveMetricOp] = React.useState(configMetricOp);
+    const [activeMetricField, setActiveMetricField] = React.useState(configMetricField);
+
+    React.useEffect(() => { setActiveCollection(configCollection); }, [configCollection]);
+    React.useEffect(() => { setActiveChartType(configChartType); }, [configChartType]);
+    React.useEffect(() => { setActiveGroupBy(configGroupBy); }, [configGroupBy]);
+    React.useEffect(() => { setActiveSecondaryGroupBy(configSecondaryGroupBy); }, [configSecondaryGroupBy]);
+    React.useEffect(() => { setActiveMetricOp(configMetricOp); }, [configMetricOp]);
+    React.useEffect(() => { setActiveMetricField(configMetricField); }, [configMetricField]);
 
     const [collectionsMeta, setCollectionsMeta] = React.useState([]);
     const [state, setState] = React.useState({ loading: false, error: '', data: null });
@@ -375,7 +424,29 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       };
     }, [api]);
 
-    const payload = buildAggregateQueryPayload({ ...cfg, chartType: activeChartType });
+    const matchedCollection = collectionsMeta.find((c) => c?.name === activeCollection)
+      || (cfg.collectionMeta && typeof cfg.collectionMeta === 'object' && (!cfg.collectionMeta.name || cfg.collectionMeta.name === activeCollection) ? cfg.collectionMeta : null)
+      || null;
+    const allFieldOptions = extractBiFieldOptions(matchedCollection, { numericOnly: false });
+    const numericFieldOptions = extractBiFieldOptions(matchedCollection, { numericOnly: true });
+
+    const effectiveGroupBy = activeGroupBy || (activeChartType !== 'kpi' ? (allFieldOptions[0]?.value || '') : '');
+    const effectiveSecondaryGroupBy = activeChartType === 'pivot'
+      ? resolvePivotSecondaryField(effectiveGroupBy, activeSecondaryGroupBy, allFieldOptions)
+      : '';
+    const effectiveMetricField = activeMetricOp !== 'count'
+      ? (activeMetricField || numericFieldOptions[0]?.value || '')
+      : '';
+
+    const payload = buildAggregateQueryPayload({
+      ...cfg,
+      collection: activeCollection,
+      chartType: activeChartType,
+      groupBy: effectiveGroupBy,
+      secondaryGroupBy: effectiveSecondaryGroupBy,
+      metricOp: activeMetricOp,
+      metricField: effectiveMetricField,
+    });
     const rawFilterStr = typeof cfg.filterJson === 'string' ? cfg.filterJson.trim() : '';
     const hasFilterObjInput = hasOwnProps(cfg.filter)
       || (cfg.filter != null && cfg.filter !== '' && (typeof cfg.filter !== 'object' || Array.isArray(cfg.filter)));
@@ -389,10 +460,15 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       (hasFilterObjInput && !payload.filter)
       || (!hasFilterObjInput && (hasFilterJsonStrInput || hasFilterJsonObjInput) && !payload.filter),
     );
+    const needsGroupBy = activeChartType !== 'kpi' && !effectiveGroupBy;
+    const needsPivotSecondaryGroupBy = activeChartType === 'pivot'
+      && (!effectiveSecondaryGroupBy || effectiveSecondaryGroupBy === effectiveGroupBy);
+    const needsMetricField = activeMetricOp !== 'count' && !effectiveMetricField;
+    const blockQueryGuard = hasInvalidFilter || needsGroupBy || needsPivotSecondaryGroupBy || needsMetricField;
     const payloadKey = JSON.stringify(payload);
 
     React.useEffect(() => {
-      if (hasInvalidFilter) {
+      if (blockQueryGuard) {
         reqTracker.seq += 1;
         setState({ loading: false, error: '', data: null });
         return undefined;
@@ -421,17 +497,113 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
         });
 
       return undefined;
-    }, [api, payloadKey, refreshNonce, hasInvalidFilter]);
+    }, [api, payloadKey, refreshNonce, blockQueryGuard]);
 
-    const matchedCollection = collectionsMeta.find((c) => c?.name === payload.collection);
-    const collectionTitle = matchedCollection?.title || payload.collection;
+    const viewerCollectionOptions = React.useMemo(() => {
+      const map = new Map(BI_COLLECTION_FALLBACKS.map((o) => [o.value, o]));
+      for (const col of collectionsMeta) {
+        const name = String(col?.name || '').trim();
+        if (!name || BLOCKED_KEYS.has(name)) continue;
+        map.set(name, { value: name, label: String(col.title || name).trim() || name });
+      }
+      if (activeCollection && !map.has(activeCollection)) {
+        map.set(activeCollection, { value: activeCollection, label: activeCollection });
+      }
+      return [...map.values()];
+    }, [collectionsMeta, activeCollection]);
+
+    const groupBySelectOptions = React.useMemo(() => {
+      const opts = allFieldOptions.slice();
+      if (effectiveGroupBy && !opts.some((o) => o.value === effectiveGroupBy)) {
+        opts.unshift({ value: effectiveGroupBy, label: effectiveGroupBy });
+      }
+      return opts;
+    }, [allFieldOptions, effectiveGroupBy]);
+
+    const secondarySelectOptions = React.useMemo(() => {
+      const opts = allFieldOptions.filter((o) => o.value !== effectiveGroupBy);
+      if (effectiveSecondaryGroupBy && effectiveSecondaryGroupBy !== effectiveGroupBy && !opts.some((o) => o.value === effectiveSecondaryGroupBy)) {
+        opts.unshift({ value: effectiveSecondaryGroupBy, label: effectiveSecondaryGroupBy });
+      }
+      return opts;
+    }, [allFieldOptions, effectiveGroupBy, effectiveSecondaryGroupBy]);
+
+    const metricFieldSelectOptions = React.useMemo(() => {
+      const opts = numericFieldOptions.slice();
+      if (effectiveMetricField && !opts.some((o) => o.value === effectiveMetricField)) {
+        opts.unshift({ value: effectiveMetricField, label: effectiveMetricField });
+      }
+      return opts;
+    }, [numericFieldOptions, effectiveMetricField]);
+
+    const handleSelectChartType = (nextType) => {
+      setActiveChartType(nextType);
+      if (nextType === 'pivot') {
+        const resolved = resolvePivotSecondaryField(effectiveGroupBy, activeSecondaryGroupBy, allFieldOptions);
+        if (resolved && resolved !== activeSecondaryGroupBy) {
+          setActiveSecondaryGroupBy(resolved);
+        }
+      }
+    };
+
+    const handleSelectCollection = (nextCollectionRaw) => {
+      const nextCollection = normalizeBiCollection(nextCollectionRaw);
+      setActiveCollection(nextCollection);
+      const nextMeta = collectionsMeta.find((c) => c?.name === nextCollection) || null;
+      const nextAll = extractBiFieldOptions(nextMeta, { numericOnly: false });
+      const nextNums = extractBiFieldOptions(nextMeta, { numericOnly: true });
+      const nextGroup = nextAll.some((o) => o.value === activeGroupBy)
+        ? activeGroupBy
+        : (nextAll.find((o) => o.value === 'status')?.value || nextAll[0]?.value || '');
+      setActiveGroupBy(nextGroup);
+      if (activeChartType === 'pivot') {
+        const candidateSec = nextAll.some((o) => o.value === activeSecondaryGroupBy) ? activeSecondaryGroupBy : '';
+        setActiveSecondaryGroupBy(resolvePivotSecondaryField(nextGroup, candidateSec, nextAll));
+      } else if (activeSecondaryGroupBy && nextAll.length && !nextAll.some((o) => o.value === activeSecondaryGroupBy)) {
+        setActiveSecondaryGroupBy('');
+      }
+      if (activeMetricOp !== 'count') {
+        if (nextNums.some((o) => o.value === activeMetricField)) {
+          // keep current numeric field
+        } else if (nextNums.length > 0) {
+          setActiveMetricField(nextNums[0].value);
+        } else {
+          setActiveMetricOp('count');
+          setActiveMetricField('');
+        }
+      }
+    };
+
+    const handleSelectGroupBy = (nextRaw) => {
+      const nextField = normalizeBiField(nextRaw);
+      setActiveGroupBy(nextField);
+      if (activeChartType === 'pivot' && activeSecondaryGroupBy === nextField) {
+        setActiveSecondaryGroupBy(resolvePivotSecondaryField(nextField, '', allFieldOptions));
+      }
+    };
+
+    const handleSelectMetricOp = (nextRaw) => {
+      const nextOp = BI_METRIC_OPS.includes(String(nextRaw || '').toLowerCase())
+        ? String(nextRaw).toLowerCase()
+        : 'count';
+      setActiveMetricOp(nextOp);
+      if (nextOp === 'count') {
+        setActiveMetricField('');
+      } else if (!activeMetricField || (numericFieldOptions.length > 0 && !numericFieldOptions.some((o) => o.value === activeMetricField))) {
+        setActiveMetricField(numericFieldOptions[0]?.value || '');
+      }
+    };
+
+    const fallbackColOpt = BI_COLLECTION_FALLBACKS.find((o) => o.value === payload.collection);
+    const collectionTitle = matchedCollection?.title || fallbackColOpt?.label || payload.collection;
+    const cleanTitle = stripDevBracketTags(cfg.title) || 'Phân tích & Biểu đồ BI';
     const data = state.data || {};
     const series = Array.isArray(data.series) ? data.series : [];
     const summary = data.summary || null;
     const pivotMatrix = data.pivotMatrix || null;
     const totalRows = Number(data.totalRows ?? summary?.count ?? 0);
 
-    const isEmpty = !hasInvalidFilter && !state.loading && !state.error && (
+    const isEmpty = !blockQueryGuard && !state.loading && !state.error && (
       activeChartType === 'pivot'
         ? !pivotMatrix || !Array.isArray(pivotMatrix.rows) || pivotMatrix.rows.length === 0
         : activeChartType === 'kpi'
@@ -650,6 +822,17 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       );
     };
 
+    const viewerSelectStyle = {
+      padding: '4px 8px',
+      borderRadius: 6,
+      border: '1px solid #cbd5e1',
+      background: '#ffffff',
+      color: '#0f172a',
+      fontSize: 12,
+      minWidth: 0,
+      maxWidth: 210,
+    };
+
     return h('section', {
       'data-testid': 'dxos-bi-chart-block',
       style: {
@@ -657,13 +840,14 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
         border: '1px solid #e2e8f0',
         borderRadius: 12,
         padding: 16,
+        paddingBottom: 56,
         display: 'grid',
         gap: 12,
       },
     },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
         h('div', null,
-          h('h3', { style: { margin: 0, fontSize: 16, fontWeight: 700, color: '#0f172a' } }, cfg.title),
+          h('h3', { style: { margin: 0, fontSize: 16, fontWeight: 700, color: '#0f172a' } }, cleanTitle),
           h('div', { style: { fontSize: 12, color: '#64748b', marginTop: 2 } }, `${collectionTitle} · ${METRIC_OP_LABELS[payload.metric.op] || payload.metric.op}${payload.metric.field ? ` (${payload.metric.field})` : ''}`),
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' } },
@@ -671,7 +855,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
             key: ct,
             type: 'button',
             'data-testid': `dxos-bi-mode-${ct}`,
-            onClick: () => setActiveChartType(ct),
+            onClick: () => handleSelectChartType(ct),
             style: {
               padding: '4px 9px',
               borderRadius: 6,
@@ -700,11 +884,99 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
           }, 'Làm mới'),
         ),
       ),
+      h('div', {
+        'data-testid': 'dxos-bi-viewer-controls',
+        style: {
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 8,
+          alignItems: 'center',
+          padding: '8px 10px',
+          borderRadius: 8,
+          background: '#f8fafc',
+          border: '1px solid #e2e8f0',
+        },
+      },
+        h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color: '#475569' } },
+          'Nguồn dữ liệu',
+          h('select', {
+            'data-testid': 'dxos-bi-viewer-collection',
+            'aria-label': 'Chọn nguồn dữ liệu BI',
+            value: activeCollection,
+            onChange: (e) => handleSelectCollection(e.target.value),
+            style: viewerSelectStyle,
+          }, viewerCollectionOptions.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label))),
+        ),
+        activeChartType !== 'kpi' ? h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color: '#475569' } },
+          activeChartType === 'pivot' ? 'Nhóm hàng' : 'Nhóm theo',
+          h('select', {
+            'data-testid': 'dxos-bi-viewer-groupby',
+            'aria-label': 'Chọn trường nhóm chính BI',
+            value: effectiveGroupBy,
+            onChange: (e) => handleSelectGroupBy(e.target.value),
+            style: viewerSelectStyle,
+          },
+            !effectiveGroupBy ? h('option', { value: '' }, '-- Chọn trường nhóm --') : null,
+            groupBySelectOptions.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label)),
+          ),
+        ) : null,
+        activeChartType === 'pivot' ? h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color: '#475569' } },
+          'Cột Pivot',
+          h('select', {
+            'data-testid': 'dxos-bi-viewer-secondary-groupby',
+            'aria-label': 'Chọn trường nhóm phụ Pivot',
+            value: effectiveSecondaryGroupBy,
+            onChange: (e) => setActiveSecondaryGroupBy(normalizeBiField(e.target.value)),
+            style: viewerSelectStyle,
+          },
+            h('option', { value: '' }, '-- Chọn cột Pivot --'),
+            secondarySelectOptions.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label)),
+          ),
+        ) : null,
+        h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color: '#475569' } },
+          'Phép tính',
+          h('select', {
+            'data-testid': 'dxos-bi-viewer-metric-op',
+            'aria-label': 'Chọn phép tổng hợp BI',
+            value: activeMetricOp,
+            onChange: (e) => handleSelectMetricOp(e.target.value),
+            style: viewerSelectStyle,
+          }, BI_METRIC_OPS.map((opKey) => h('option', { key: opKey, value: opKey }, METRIC_OP_LABELS[opKey]))),
+        ),
+        activeMetricOp !== 'count' ? h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 600, color: '#475569' } },
+          'Trường số',
+          h('select', {
+            'data-testid': 'dxos-bi-viewer-metric-field',
+            'aria-label': 'Chọn trường số tổng hợp BI',
+            value: effectiveMetricField,
+            onChange: (e) => setActiveMetricField(normalizeBiField(e.target.value)),
+            style: viewerSelectStyle,
+          },
+            !effectiveMetricField ? h('option', { value: '' }, '-- Chọn trường số --') : null,
+            metricFieldSelectOptions.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label)),
+          ),
+        ) : null,
+      ),
       hasInvalidFilter ? h('div', {
         'data-testid': 'dxos-bi-chart-filter-warning',
         role: 'alert',
         style: { padding: 12, borderRadius: 8, background: '#fffbeb', border: '1px solid #fde68a', color: '#92400e', fontSize: 13 },
       }, 'Bộ lọc JSON không hợp lệ hoặc chứa khóa/toán tử bị chặn — đã từ chối truy vấn.') : null,
+      !hasInvalidFilter && needsPivotSecondaryGroupBy ? h('div', {
+        'data-testid': 'dxos-bi-chart-pivot-prompt',
+        role: 'status',
+        style: { padding: 14, borderRadius: 8, background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e40af', fontSize: 13 },
+      }, 'Vui lòng chọn trường nhóm phụ (Cột Pivot) để xem bảng chéo.') : null,
+      !hasInvalidFilter && !needsPivotSecondaryGroupBy && needsGroupBy ? h('div', {
+        'data-testid': 'dxos-bi-chart-groupby-prompt',
+        role: 'status',
+        style: { padding: 14, borderRadius: 8, background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e40af', fontSize: 13 },
+      }, 'Vui lòng chọn trường nhóm chính để xem biểu đồ.') : null,
+      !hasInvalidFilter && !needsPivotSecondaryGroupBy && !needsGroupBy && needsMetricField ? h('div', {
+        'data-testid': 'dxos-bi-chart-metric-prompt',
+        role: 'status',
+        style: { padding: 14, borderRadius: 8, background: '#eff6ff', border: '1px solid #bfdbfe', color: '#1e40af', fontSize: 13 },
+      }, 'Vui lòng chọn trường số để tính chỉ số.') : null,
       state.loading ? h('div', { 'data-testid': 'dxos-bi-chart-loading', style: { padding: 16, fontSize: 13, color: '#475569' } }, 'Đang tổng hợp dữ liệu BI...') : null,
       state.error ? h('div', {
         'data-testid': 'dxos-bi-chart-error',
@@ -715,7 +987,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
         'data-testid': 'dxos-bi-chart-empty',
         style: { padding: 20, textAlign: 'center', color: '#64748b', fontSize: 13, background: '#f8fafc', borderRadius: 8 },
       }, 'Chưa có dữ liệu phù hợp để hiển thị biểu đồ.') : null,
-      !hasInvalidFilter && !state.loading && !state.error && !isEmpty ? (
+      !blockQueryGuard && !state.loading && !state.error && !isEmpty ? (
         activeChartType === 'line' ? renderLineView()
           : activeChartType === 'pie' ? renderPieView()
             : activeChartType === 'kpi' ? renderKpiView()
@@ -735,6 +1007,7 @@ module.exports = {
   normalizeBiField,
   parseBiFilterJson,
   buildAggregateQueryPayload,
+  resolvePivotSecondaryField,
   computeBarGeometry,
   computeLineGeometry,
   computePieSlices,

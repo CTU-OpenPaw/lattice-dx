@@ -851,7 +851,8 @@ test('ai-studio-page renders Tab 5 Quota, readable metric chips, model presets, 
   const dump1 = JSON.stringify(tab1.tree);
   assert.equal(dump1.includes('2.2.55'), true);
   assert.equal(dump1.includes('2.2.38'), false);
-  assert.equal(dump1.includes('rolesCount: 5'), true);
+  assert.equal(dump1.includes('Số vai trò: 5'), true);
+  assert.equal(dump1.includes('rolesCount:'), false);
   assert.equal(dump1.includes('{"rolesCount":5}'), false);
   assert.equal(dump1.includes('5. Hạn mức & Chi phí AI'), true);
   let readyPillStyle = null;
@@ -877,19 +878,22 @@ test('ai-studio-page renders Tab 5 Quota, readable metric chips, model presets, 
   assert.equal(hasPresetSelect, true);
   assert.equal(hasPaddedSaveBox, true);
 
-  // Tab 4: flexWrap wrap, minWidth 0, overflowWrap anywhere, badge nowrap + flexShrink 0
+  // Tab 4: filter bar, structured table, overflowWrap anywhere, Vietnamese status badge nowrap + flexShrink 0
   const tab4 = renderWithTab('audit');
-  let auditRowWrap = false;
+  let hasAuditFilterBar = false;
+  let hasAuditTable = false;
   let auditTextWrap = false;
   let auditBadgeNoClip = false;
   walk(tab4.tree, (n) => {
-    if (n.type === 'div' && n.props?.style?.flexWrap === 'wrap' && JSON.stringify(n.children).includes('dxos_compose_page_blocks')) auditRowWrap = true;
-    if (n.type === 'div' && n.props?.style?.minWidth === 0 && n.props?.style?.overflowWrap === 'anywhere') auditTextWrap = true;
-    if (n.type === 'span' && JSON.stringify(n.children).includes('denied (ROLE_FORBIDDEN)') && n.props?.style?.whiteSpace === 'nowrap' && n.props?.style?.flexShrink === 0) {
+    if (n.props?.['data-testid'] === 'dxos-audit-filter-bar') hasAuditFilterBar = true;
+    if (n.props?.['data-testid'] === 'dxos-audit-table' && JSON.stringify(n.children).includes('dxos_compose_page_blocks')) hasAuditTable = true;
+    if (n.type === 'td' && n.props?.style?.minWidth === 0 && n.props?.style?.overflowWrap === 'anywhere') auditTextWrap = true;
+    if (n.type === 'span' && JSON.stringify(n.children).includes('Từ chối (ROLE_FORBIDDEN)') && n.props?.style?.whiteSpace === 'nowrap' && n.props?.style?.flexShrink === 0) {
       auditBadgeNoClip = true;
     }
   });
-  assert.equal(auditRowWrap, true);
+  assert.equal(hasAuditFilterBar, true);
+  assert.equal(hasAuditTable, true);
   assert.equal(auditTextWrap, true);
   assert.equal(auditBadgeNoClip, true);
 
@@ -1005,7 +1009,10 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
   tree5 = harness5.render();
   assert.deepEqual(quotaRequests, ['native-ui-lab']);
 
-  // Type 'org-x' character by character -> ZERO new requests fired while typing
+  // Switch Org select to __custom__ -> reveals dxos-quota-org-input, and typing 'org-fast' fires ZERO requests per keystroke
+  const orgSelect = findAll(tree5, (n) => n.type === 'select' && n.props?.['data-testid'] === 'dxos-quota-org-select')[0];
+  orgSelect.props.onChange({ target: { value: '__custom__' } });
+  tree5 = harness5.render();
   const orgInput = findAll(tree5, (n) => n.type === 'input' && n.props?.['data-testid'] === 'dxos-quota-org-input')[0];
   orgInput.props.onChange({ target: { value: 'o' } });
   tree5 = harness5.render();
@@ -1174,7 +1181,9 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
   const dump = JSON.stringify(tree);
   assert.equal(dump.includes('latticeServiceTickets'), true);
   assert.equal(dump.includes('critical'), true);
-  assert.equal(dump.includes('high'), true);
+  assert.equal(dump.includes('Mức rủi ro: Cao'), true);
+  assert.equal(dump.includes('Chờ duyệt'), true);
+  assert.equal(dump.includes('DIFFPREVIEW'), false);
   assert.equal(dump.includes('Tăng mức ưu tiên phiếu xử lý máy nén A1'), true);
   assert.equal(dump.includes('LOT-VAC-301 (VAC-01)'), true);
 
@@ -2933,6 +2942,202 @@ test('Frontend hygiene patch: unauthenticated portalAgents gate, activeReader ca
     const badge = findTid(pt, 'dxos-built-app-verify-result-unverified-app');
     assert.ok(badge);
     assert.equal(JSON.stringify(badge).includes('PASS'), false, 'Empty lastVerificationJson must NOT show PASS');
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.localStorage = origStorage;
+  }
+});
+
+test('UI & SSE remediation: left-rail sidebar, Vietnamese plane metrics, Audit filter bar, Tab 7 Quick-Start planBuiltApp/buildBuiltApp, and AbortError-safe SSE hub', async () => {
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const { createPortalAgentLauncher } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+
+  // 1. Server planBuiltApp with NL prompt only (no appKey/spec) & buildBuiltApp action
+  const db = makeMockDb();
+  db.stores.latticeBuiltApps = [];
+  db.stores.latticeUiSnapshots = [];
+  db.stores.collections = [];
+  db.stores.fields = [];
+  db.stores.roles = [{ name: 'root', allowConfigure: true }];
+  db.stores.rolesUsers = [{ userId: 1, roleName: 'root' }];
+  db.stores.uiLayouts = [];
+  db.stores.desktopRoutes = [];
+  db.stores.rolesDesktopRoutes = [];
+  db.stores.dataSourcesRoles = [];
+  db.stores.dataSourcesRolesResources = [];
+  db.stores.dataSourcesRolesResourcesActions = [];
+  const actions = createDxosAiActions(db);
+  const planCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
+    request: { body: { organizationId: 'org-a', prompt: 'Tạo ứng dụng Phòng khám Đa khoa' } },
+    action: { params: {} },
+  };
+  await actions.planBuiltApp(planCtx, async () => {});
+  assert.equal(planCtx.body.ok, true);
+  assert.equal(planCtx.body.dryRun, true);
+  assert.equal(planCtx.body.appKey, 'clinic-suite');
+  assert.ok(planCtx.body.erGraph.nodes.length >= 3);
+
+  // 2. UI checks: sidebar, Vietnamese metrics, audit filters, Tab 7 empty Quick-Start
+  const apiCalls = [];
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let sIdx = 0; let rIdx = 0; let eIdx = 0; let mIdx = 0;
+  const depsChanged = (p, n) => !p || !n || p.length !== n.length || n.some((d, i) => d !== p[i]);
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => { const i = sIdx++; if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init; return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }]; },
+    useRef: (init) => { const i = rIdx++; if (!(i in refSlots)) refSlots[i] = { current: init }; return refSlots[i]; },
+    useEffect: (fn, deps) => { const i = eIdx++; effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) }; },
+    useMemo: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps }; return memoSlots[i].value; },
+    useCallback: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps }; return memoSlots[i].value; },
+  };
+  const builtAppsList = [];
+  const api = {
+    request: async (req) => {
+      apiCalls.push(req);
+      if (req.url === 'dxosAi:enterpriseTopology') {
+        return {
+          data: {
+            data: {
+              defaultOrganizationId: 'org-a',
+              organizations: ['org-a'],
+              planes: [
+                { key: 'identitySecurity', order: 1, name: 'Identity', healthy: true, metrics: { rolesCount: 9 } },
+                { key: 'integrationEventBus', order: 3, name: 'Bus', healthy: true, metrics: { activeWorkflowsCount: 8 } },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:auditLogs') {
+        return {
+          data: {
+            data: {
+              items: [
+                { id: 1, toolName: 'dxos_alarm_action', channel: 'mcp', aiEmployee: 'dxos-ops', status: 'allowed', resultSummary: 'Ack ALM-1' },
+                { id: 2, toolName: 'dxos_compose_page_blocks', channel: 'studio', aiEmployee: 'dxos-architect', status: 'denied', errorCode: 'FORBIDDEN', resultSummary: 'Denied' },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:listBuiltApps') return { data: { data: { apps: builtAppsList } } };
+      if (req.url === 'dxosAi:planBuiltApp') return { data: { data: planCtx.body } };
+      if (req.url === 'dxosAi:buildBuiltApp') {
+        builtAppsList.push({ id: 99, appKey: 'clinic-suite', name: 'Phòng khám Đa khoa', status: 'active', version: 1, organizationId: 'org-a', artifactRefsJson: { collections: ['latticeCustomClinicPatients'], roles: ['ldx_clinic_staff'], portals: [{ portalSlug: 'clinic-ops' }] } });
+        return { data: { data: { ok: true, built: true, appKey: 'clinic-suite', collections: ['latticeCustomClinicPatients'], portalSlug: 'clinic-ops' } } };
+      }
+      return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, { defaultOrganizationId: 'org-a' });
+  const render = () => { sIdx = 0; rIdx = 0; eIdx = 0; mIdx = 0; const t = Page(); for (const ef of effectSlots) if (ef.changed) { ef.changed = false; ef.fn(); } return t; };
+  const findTid = (n, id) => { if (!n || typeof n !== 'object') return null; if (n.props?.['data-testid'] === id) return n; for (const k of (Array.isArray(n.children) ? n.children.flat(Infinity) : [])) { const h = findTid(k, id); if (h) return h; } return null; };
+
+  let tree = render();
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+  assert.ok(findTid(tree, 'dxos-studio-sidebar'), 'Must render categorized left-rail sidebar');
+  const topoDump = JSON.stringify(tree);
+  assert.ok(topoDump.includes('Số vai trò: 9'));
+  assert.ok(topoDump.includes('Luồng tự động hóa hoạt động: 8'));
+  assert.equal(topoDump.includes('rolesCount:'), false);
+  assert.equal(topoDump.includes('activeWorkflowsCount:'), false);
+
+  // Audit filter bar filters rows
+  findTid(tree, 'dxos-tab-audit').props.onClick();
+  tree = render();
+  assert.ok(findTid(tree, 'dxos-audit-filter-bar'));
+  findTid(tree, 'dxos-audit-status-filter').props.onChange({ target: { value: 'denied' } });
+  tree = render();
+  const auditDump = JSON.stringify(findTid(tree, 'dxos-audit-table'));
+  assert.ok(auditDump.includes('dxos_compose_page_blocks'));
+  assert.equal(auditDump.includes('dxos_alarm_action'), false);
+
+  // Tab 7 empty state Quick-Start -> preset -> planBuiltApp -> buildBuiltApp
+  findTid(tree, 'dxos-tab-built-apps').props.onClick();
+  tree = render();
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+  assert.ok(findTid(tree, 'dxos-built-apps-quickstart'));
+  assert.equal(JSON.stringify(findTid(tree, 'dxos-built-apps-panel')).includes('latticeBuiltApps'), false);
+  findTid(tree, 'dxos-quickstart-preset-clinic').props.onClick();
+  tree = render();
+  await findTid(tree, 'dxos-quickstart-plan-btn').props.onClick();
+  tree = render();
+  assert.ok(findTid(tree, 'dxos-quickstart-plan-preview'));
+  assert.ok(findTid(tree, 'dxos-quickstart-er-panel'));
+  await findTid(tree, 'dxos-quickstart-build-btn').props.onClick();
+  tree = render();
+  assert.ok(apiCalls.some((c) => c.url === 'dxosAi:buildBuiltApp'));
+  assert.ok(findTid(tree, 'dxos-built-app-card-clinic-suite'));
+
+  // 3. PortalAgentLauncher: AbortError caught cleanly, shared __LATTICEDX_SSE_HUB__ prevents duplicate streams, drawer/inspector hides button
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origStorage = global.localStorage;
+  try {
+    let fetchCount = 0;
+    global.localStorage = { getItem: () => '' };
+    global.window = { location: { pathname: '/p/services' }, addEventListener() {}, removeEventListener() {}, dispatchEvent() {} };
+    global.document = {
+      visibilityState: 'visible',
+      title: 'Services',
+      querySelector: (sel) => (String(sel).includes('lf-node-inspector') ? { className: 'lf-node-inspector' } : null),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    global.fetch = async () => {
+      fetchCount += 1;
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: () => Promise.reject(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' })),
+            cancel: () => Promise.reject(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' })),
+          }),
+        },
+      };
+    };
+    const makeLauncherHarness = () => {
+      const slots = []; const effects = []; let si = 0; let ei = 0; const cleanups = [];
+      const R = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => { const i = si++; if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init; return [slots[i], (v) => { slots[i] = typeof v === 'function' ? v(slots[i]) : v; }]; },
+        useEffect: (fn, deps) => { const i = ei++; effects[i] = { fn, deps, changed: !effects[i] || depsChanged(effects[i].deps, deps) }; },
+      };
+      const r = (Comp) => { si = 0; ei = 0; const t = Comp({ children: 'b' }); for (const ef of effects) if (ef.changed) { ef.changed = false; const c = ef.fn(); if (typeof c === 'function') cleanups.push(c); } return t; };
+      return { R, r, clean: () => cleanups.forEach((f) => f()) };
+    };
+    const sharedClient = {
+      useAPIClient: () => ({
+        auth: { getToken: () => 'tok-shared' },
+        getBaseURL: () => '/api/',
+        request: async () => ({ data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect' }] } } }),
+      }),
+    };
+    const h1 = makeLauncherHarness();
+    const h2 = makeLauncherHarness();
+    const L1 = createPortalAgentLauncher(sharedClient, h1.R, {}, {});
+    const L2 = createPortalAgentLauncher(sharedClient, h2.R, {}, {});
+    const tree1 = h1.r(L1);
+    h2.r(L2);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(fetchCount, 1, 'Shared __LATTICEDX_SSE_HUB__ must prevent duplicate concurrent SSE streams');
+    assert.ok(global.window.__LATTICEDX_SSE_HUB__);
+    assert.equal(findTid(tree1, 'dxos-portal-ai-float-btn'), null, 'Must hide float button when .lf-node-inspector / .ant-drawer-open is visible');
+    h1.clean();
+    h2.clean();
   } finally {
     global.window = origWin;
     global.document = origDoc;

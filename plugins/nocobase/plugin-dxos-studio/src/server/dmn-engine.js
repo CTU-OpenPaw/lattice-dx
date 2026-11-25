@@ -40,9 +40,92 @@ const ALLOWED_OPERATORS = new Set([
   'any', '*',
 ]);
 
+function parseScalarValue(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '';
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    return s.slice(1, -1);
+  }
+  if (s === 'true') return true;
+  if (s === 'false') return false;
+  if (s === 'null') return null;
+  const num = parseFinite(s);
+  if (num !== null && /^-?\d+(?:\.\d+)?$/.test(s)) return num;
+  return s;
+}
+
+function parseListValue(raw) {
+  const s = String(raw ?? '').trim();
+  if (s.startsWith('[') && s.endsWith(']')) {
+    const inner = s.slice(1, -1).trim();
+    if (!inner) return [];
+    const parts = [];
+    let cur = '';
+    let quote = null;
+    for (let i = 0; i < inner.length; i += 1) {
+      const ch = inner[i];
+      if (quote) {
+        cur += ch;
+        if (ch === quote && inner[i - 1] !== '\\') quote = null;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+        cur += ch;
+      } else if (ch === ',') {
+        parts.push(parseScalarValue(cur));
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    if (cur.trim() !== '') parts.push(parseScalarValue(cur));
+    return parts;
+  }
+  return s.split(',').map((item) => parseScalarValue(item)).filter((item) => item !== '');
+}
+
+function parseStringConditionSpec(rawText) {
+  const text = String(rawText ?? '').trim();
+  if (!text || text === '-' || text === '*' || text.toLowerCase() === 'any') {
+    return { op: 'any', value: null };
+  }
+  const rangeMatch = /^\[\s*(-?\d+(?:\.\d+)?)\s*\.\.\s*(-?\d+(?:\.\d+)?)\s*\]$/.exec(text);
+  if (rangeMatch) {
+    const a = Number(rangeMatch[1]);
+    const b = Number(rangeMatch[2]);
+    return { op: 'between', value: [Math.min(a, b), Math.max(a, b)] };
+  }
+  const cmpMatch = /^(<=|>=|!==|!=|===|==|=|<|>)\s*(.+)$/.exec(text);
+  if (cmpMatch) {
+    const opMap = {
+      '<': 'lt', '<=': 'lte', '>': 'gt', '>=': 'gte',
+      '!=': 'neq', '!==': 'neq', '=': 'eq', '==': 'eq', '===': 'eq',
+    };
+    const op = opMap[cmpMatch[1]];
+    const rhs = cmpMatch[2].trim();
+    if (['lt', 'lte', 'gt', 'gte'].includes(op)) {
+      const n = parseFinite(rhs);
+      if (n === null) {
+        throw fail('DMN_RULE_INVALID', 400, `Toán tử ${op} yêu cầu giá trị số hữu hạn.`);
+      }
+      return { op, value: n };
+    }
+    return { op, value: parseScalarValue(rhs) };
+  }
+  const notInMatch = /^(?:not_in|not\s+in)\s+(.+)$/i.exec(text);
+  if (notInMatch) return { op: 'not_in', value: parseListValue(notInMatch[1]) };
+  const inMatch = /^in\s+(.+)$/i.exec(text);
+  if (inMatch) return { op: 'in', value: parseListValue(inMatch[1]) };
+  const containsMatch = /^contains\s+(.+)$/i.exec(text);
+  if (containsMatch) return { op: 'contains', value: String(parseScalarValue(containsMatch[1])) };
+  return { op: 'eq', value: parseScalarValue(text) };
+}
+
 function normalizeConditionSpec(rawCond) {
   if (rawCond === undefined || rawCond === null || rawCond === '*') {
     return { op: 'any', value: null };
+  }
+  if (typeof rawCond === 'string') {
+    return parseStringConditionSpec(rawCond);
   }
   if (typeof rawCond !== 'object' || Array.isArray(rawCond)) {
     return { op: 'eq', value: rawCond };

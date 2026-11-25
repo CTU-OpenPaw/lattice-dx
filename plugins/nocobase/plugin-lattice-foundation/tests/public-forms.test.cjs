@@ -497,11 +497,26 @@ test('dxosForms public meta, submit, and status enforce zero-PII, honeypot, acce
 
       assert.equal(env.store.latticeRequests.length, 1);
       assert.equal(env.store.latticeRequests[0].organizationId, 'org-alpha');
-      assert.equal(env.store.latticeRequests[0].status, 'draft');
+      assert.equal(env.store.latticeRequests[0].status, 'submitted');
+      assert.equal(env.store.latticeRequests[0].version, 1);
+      assert.equal(env.store.latticeRequests[0].amendmentNo, 0);
       assert.equal(env.store.latticePublicFormSubmissions.length, 1);
       assert.equal(env.store.latticePublicFormSubmissions[0].organizationId, 'org-alpha');
       assert.equal(JSON.stringify(env.store.latticePublicFormSubmissions[0]).includes('alice@example.com'), false);
       assert.ok(env.rlsEvents.some((e) => e.sql.includes("set_config('app.current_org'") && e.replacements?.orgId === 'org-alpha'));
+
+      // 5b. Immediate status lookup right after submit ALSO reports 'submitted' (no draft/submitted contradiction)
+      const immediateStatusCtx = makeCtx({
+        method: 'GET',
+        ip: '198.51.100.5',
+        params: {
+          slug: 'cold-intake',
+          submissionCode: okCtx.body.submissionCode,
+          token: okCtx.body.statusToken,
+        },
+      });
+      await res.actions.status(immediateStatusCtx);
+      assert.equal(immediateStatusCtx.body.status, 'submitted');
 
       // 6. Zero-PII status check reflects live status updates from target record without leaking PII
       env.store.latticeRequests[0].status = 'approved';
@@ -930,7 +945,7 @@ test('public-forms covers rate limiter bounding/window expiry, field validation 
     pf.registerPublicForms(env.app);
     const res = env.definedResources.dxosForms;
 
-    // Submit with only description auto-generates code, name, status='draft', version=1
+    // Submit with only description auto-generates code, name, status='submitted', version=1
     const subCtx = makeCtx({
       method: 'POST',
       ip: '198.51.100.99',
@@ -939,7 +954,7 @@ test('public-forms covers rate limiter bounding/window expiry, field validation 
     await res.actions.submit(subCtx);
     assert.match(env.store.latticeRequests[0].code, /^FRM-[A-F0-9]{8}$/);
     assert.ok(env.store.latticeRequests[0].name.includes('Desc Only Intake'));
-    assert.equal(env.store.latticeRequests[0].status, 'draft');
+    assert.equal(env.store.latticeRequests[0].status, 'submitted');
     assert.equal(env.store.latticeRequests[0].version, 1);
 
     // Org-b admin cannot list, get, update, rotateToken, or delete org-a form
@@ -1775,11 +1790,113 @@ test('public-form-html serves standalone nonce-CSP HTML shell for /v/form/:slug 
         const outMissing = resMissing._out();
         assert.equal(outMissing.statusCode, 200);
         assert.match(outMissing.body, /"ok":false/);
-        assert.match(outMissing.body, /Public form not found or inactive\./);
+        assert.match(outMissing.body, /Biểu mẫu công khai không tồn tại hoặc đã ngừng tiếp nhận\./);
       }
     } finally {
       if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
       else process.env.DX_PG_RLS_SESSION = prevRls;
     }
+  });
+});
+
+test('dxosForms:submit & immediate dxosForms:status both report submitted for latticeServiceTickets, latticeOrders, and latticeIncidentCases', async () => {
+  await withMockedNocobase(async () => {
+    const { registerPublicForms } = require('../src/server/public-forms');
+    const env = createFakeEnv({
+      forms: [
+        {
+          id: 71,
+          organizationId: 'org-alpha',
+          slug: 'it-ticket-intake',
+          title: 'IT Support Intake',
+          targetCollection: 'latticeServiceTickets',
+          allowedFieldsJson: [
+            { name: 'name', type: 'string', required: true },
+            { name: 'priority', type: 'select', options: ['low', 'normal', 'high', 'urgent'], required: true },
+          ],
+          defaultValuesJson: { serviceType: 'it_support' },
+          active: true,
+        },
+        {
+          id: 72,
+          organizationId: 'org-alpha',
+          slug: 'order-intake',
+          title: 'Order Intake',
+          targetCollection: 'latticeOrders',
+          allowedFieldsJson: [{ name: 'name', type: 'string', required: true }],
+          active: true,
+        },
+        {
+          id: 73,
+          organizationId: 'org-alpha',
+          slug: 'incident-intake',
+          title: 'Incident Intake',
+          targetCollection: 'latticeIncidentCases',
+          allowedFieldsJson: [{ name: 'name', type: 'string', required: true }],
+          defaultValuesJson: { runId: 'pub-1', assetEntityId: 'urn:ngsi-ld:Asset:org-alpha:native:1', handlerId: 'emp-1' },
+          active: true,
+        },
+      ],
+    });
+    registerPublicForms(env.app);
+    const res = env.definedResources.dxosForms;
+
+    for (const [slug, col] of [
+      ['it-ticket-intake', 'latticeServiceTickets'],
+      ['order-intake', 'latticeOrders'],
+      ['incident-intake', 'latticeIncidentCases'],
+    ]) {
+      const subCtx = makeCtx({
+        method: 'POST',
+        ip: '198.51.100.77',
+        body: { slug, values: { name: `Test ${slug}`, ...(slug === 'it-ticket-intake' ? { priority: 'high' } : {}) } },
+      });
+      await res.actions.submit(subCtx);
+      assert.equal(subCtx.body.status, 'submitted');
+      assert.equal(env.store[col][0].status, 'submitted');
+      if (col === 'latticeServiceTickets' || col === 'latticeOrders') {
+        assert.equal(env.store[col][0].version, 1);
+        assert.equal(env.store[col][0].amendmentNo, 0);
+      }
+
+      const stCtx = makeCtx({
+        method: 'GET',
+        ip: '198.51.100.77',
+        params: { slug, submissionCode: subCtx.body.submissionCode, token: subCtx.body.statusToken },
+      });
+      await res.actions.status(stCtx);
+      assert.equal(stCtx.body.status, 'submitted');
+    }
+  });
+});
+
+test('public-form-html includes Vietnamese priority labels, 1-click copy token button, vi-VN timestamps, and localized receipt/error text', async () => {
+  await withMockedNocobase(async () => {
+    const { renderPublicFormHtml } = require('../src/server/public-form-html');
+    const html = renderPublicFormHtml({
+      slug: 'service-intake',
+      formMeta: {
+        slug: 'service-intake',
+        title: 'Phiếu tiếp nhận',
+        fields: [{ name: 'priority', label: 'Mức ưu tiên', type: 'select', options: ['low', 'normal', 'high', 'urgent'], required: true }],
+        honeypotField: '_hp_website',
+        requireAccessToken: false,
+        active: true,
+      },
+      nonce: 'nonce-polish-1',
+    });
+
+    assert.match(html, /Thấp/);
+    assert.match(html, /Bình thường/);
+    assert.match(html, /Khẩn cấp/);
+    assert.match(html, /public-form-copy-token-btn/);
+    assert.match(html, /Sao chép mã tra cứu/);
+    assert.match(html, /Đã sao chép/);
+    assert.match(html, /toLocaleString\('vi-VN'\)/);
+    assert.match(html, /Biên nhận bảo mật \(Không lộ PII\)/);
+    assert.equal(html.includes('Zero-PII Receipt'), false);
+
+    const errHtml = renderPublicFormHtml({ slug: 'missing', formMeta: null, nonce: 'nonce-err-1' });
+    assert.match(errHtml, /Biểu mẫu công khai không tồn tại hoặc đã ngừng tiếp nhận\./);
   });
 });

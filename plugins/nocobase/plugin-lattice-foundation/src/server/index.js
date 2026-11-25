@@ -71,6 +71,7 @@ const {
 }=require('./approval-engine');
 const {registerPublicForms}=require('./public-forms');
 const {createPublicFormGatewayHandler}=require('./public-form-html');
+const {createPublicTrackGatewayHandler}=require('./public-track-html');
 const {attachRlsPolicyToTable, canUsePgRlsSession, withSystemRlsBypass}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
@@ -129,6 +130,11 @@ class LatticeFoundationPlugin extends Plugin {
     if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
       Gateway.registerRequestHandler(this._publicFormGatewayHandler);
     }
+    this.unregisterPublicTrackGatewayHandler();
+    this._publicTrackGatewayHandler = createPublicTrackGatewayHandler();
+    if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
+      Gateway.registerRequestHandler(this._publicTrackGatewayHandler);
+    }
     this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'auth'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
@@ -172,20 +178,31 @@ class LatticeFoundationPlugin extends Plugin {
       this._publicFormGatewayHandler = null;
     }
   }
+  unregisterPublicTrackGatewayHandler() {
+    if (this._publicTrackGatewayHandler) {
+      if (Gateway && typeof Gateway.unregisterRequestHandler === 'function') {
+        Gateway.unregisterRequestHandler(this._publicTrackGatewayHandler);
+      }
+      this._publicTrackGatewayHandler = null;
+    }
+  }
   async unload() {
     this.unregisterPublicFormGatewayHandler();
+    this.unregisterPublicTrackGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.unload === 'function') await super.unload();
   }
   async remove() {
     this.unregisterPublicFormGatewayHandler();
+    this.unregisterPublicTrackGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.remove === 'function') await super.remove();
   }
   async destroy() {
     this.unregisterPublicFormGatewayHandler();
+    this.unregisterPublicTrackGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.destroy === 'function') await super.destroy();

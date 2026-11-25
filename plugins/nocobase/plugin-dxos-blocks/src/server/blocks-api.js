@@ -1271,7 +1271,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
       let rawMetric = input.metric;
       if (typeof rawMetric === 'string' && rawMetric.trim()) {
-        try { rawMetric = JSON.parse(rawMetric); } catch { throw fail('DXOS_INVALID_METRIC_OP', 400); }
+        try { rawMetric = JSON.parse(rawMetric); } catch { throw fail('DXOS_INVALID_METRIC_OP', 400, 'Cấu hình phép tính (metric) không hợp lệ.'); }
       }
       const metricObj = rawMetric && typeof rawMetric === 'object' && !Array.isArray(rawMetric)
         ? rawMetric
@@ -1286,11 +1286,11 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       let limit = 100;
       if (input.limit !== undefined && input.limit !== null && input.limit !== '') {
         if (typeof input.limit === 'boolean' || typeof input.limit === 'object') {
-          throw fail('DXOS_INVALID_LIMIT', 400);
+          throw fail('DXOS_INVALID_LIMIT', 400, 'Số nhóm tối đa (limit) phải là số nguyên trong khoảng 1..500.');
         }
         const parsedLimit = Number(input.limit);
         if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 500) {
-          throw fail('DXOS_INVALID_LIMIT', 400, 'limit phải là số nguyên trong khoảng 1..500.');
+          throw fail('DXOS_INVALID_LIMIT', 400, 'Số nhóm tối đa (limit) phải là số nguyên trong khoảng 1..500.');
         }
         limit = parsedLimit;
       }
@@ -1422,11 +1422,11 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         : '';
       if (chartType === 'pivot') {
         if (!secondaryGroupBy) {
-          throw fail('DXOS_SECONDARY_GROUP_BY_REQUIRED', 400, 'Biểu đồ pivot yêu cầu secondaryGroupBy.');
+          throw fail('DXOS_SECONDARY_GROUP_BY_REQUIRED', 400, 'Biểu đồ bảng chéo (Pivot) yêu cầu chọn trường nhóm phụ (secondaryGroupBy).');
         }
         assertValidField(secondaryGroupBy);
         if (secondaryGroupBy === groupBy) {
-          throw fail('DXOS_INVALID_FIELD', 400, 'secondaryGroupBy phải khác groupBy.');
+          throw fail('DXOS_INVALID_FIELD', 400, 'Trường nhóm phụ (Cột Pivot) phải khác trường nhóm chính.');
         }
       }
 
@@ -1444,7 +1444,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       };
       if (op !== 'count') {
         if (!metricField) {
-          throw fail('DXOS_METRIC_FIELD_REQUIRED', 400, `Phép tính "${op}" yêu cầu metric.field.`);
+          throw fail('DXOS_METRIC_FIELD_REQUIRED', 400, `Phép tính "${op}" yêu cầu trường số (metric.field).`);
         }
         const mFieldMeta = assertValidField(metricField);
         if (!isNumericServerField(mFieldMeta)) {
@@ -1456,7 +1456,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
       const safeFilter = assertSafeFilter(input.filter);
       if (safeFilter !== null && (Array.isArray(safeFilter) || typeof safeFilter !== 'object')) {
-        throw fail('DXOS_INVALID_FILTER', 400, 'Filter must be a JSON object');
+        throw fail('DXOS_INVALID_FILTER', 400, 'Bộ lọc truy vấn phải là một đối tượng JSON hợp lệ.');
       }
       const validateFilterKeys = (node) => {
         if (!node || typeof node !== 'object') return;
@@ -1473,7 +1473,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
           } else {
             if (k.toLowerCase() === '$col') {
               if (typeof node[k] !== 'string' || !node[k].trim()) {
-                throw fail('DXOS_INVALID_FILTER', 400, 'Filter $col value must be a string field name');
+                throw fail('DXOS_INVALID_FILTER', 400, 'Giá trị toán tử $col trong bộ lọc phải là tên trường hợp lệ.');
               }
               assertValidField(node[k], { allowSystemFilterField: true });
             } else {

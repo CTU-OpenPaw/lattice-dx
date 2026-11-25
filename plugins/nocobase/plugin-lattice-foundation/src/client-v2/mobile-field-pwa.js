@@ -27,6 +27,7 @@ const {
   removeOutboxItem,
   updateOutboxStatus,
 } = require('./mobile-offline-db');
+const { subscribeSurfaceEvents } = require('../client/sse-hub');
 
 const OFFLINE_QUEUE_STORAGE_KEY = OUTBOX_STORAGE_KEY;
 const MAX_OFFLINE_QUEUE_ITEMS = MAX_OUTBOX_ITEMS;
@@ -603,6 +604,18 @@ function createMobileFieldPwaPage(client, React, app) {
     const [twinAssetId, setTwinAssetId] = React.useState('');
     const [twinTargetTempC, setTwinTargetTempC] = React.useState('');
 
+    const [opsTab, setOpsTab] = React.useState('all');
+    const [opsLoading, setOpsLoading] = React.useState(false);
+    const [pendingApprovals, setPendingApprovals] = React.useState(() => (Array.isArray(props.initialApprovals) ? props.initialApprovals : []));
+    const [deliveryOrders, setDeliveryOrders] = React.useState(() => (Array.isArray(props.initialDeliveries) ? props.initialDeliveries : []));
+    const [incidentCases, setIncidentCases] = React.useState(() => (Array.isArray(props.initialIncidents) ? props.initialIncidents : []));
+    const [serviceTickets, setServiceTickets] = React.useState(() => (Array.isArray(props.initialTickets) ? props.initialTickets : []));
+    const [decidingApprovalId, setDecidingApprovalId] = React.useState(null);
+    const [aiOpen, setAiOpen] = React.useState(false);
+    const [aiPrompt, setAiPrompt] = React.useState('');
+    const [aiBusy, setAiBusy] = React.useState(false);
+    const [aiReply, setAiReply] = React.useState('');
+
     // Keep canvasRef as the first useRef(null) to preserve deterministic signature-canvas test ref lookup.
     const canvasRef = React.useRef(null);
     const videoRef = React.useRef(null);
@@ -623,6 +636,7 @@ function createMobileFieldPwaPage(client, React, app) {
     const qrFrameDecoderRef = React.useRef(null);
     qrFrameDecoderRef.current = props.qrFrameDecoder || (typeof window !== 'undefined' ? window.jsQR : null);
     const refreshUnreadCountRef = React.useRef(null);
+    const refreshOpsSummaryRef = React.useRef(null);
 
     const handleSync = React.useCallback(async (overrideOnline) => {
       if (syncingRef.current) {
@@ -757,20 +771,57 @@ function createMobileFieldPwaPage(client, React, app) {
 
     refreshUnreadCountRef.current = refreshUnreadCount;
 
+    const extractListItems = (res) => {
+      const d = res?.data;
+      if (Array.isArray(d?.data?.items)) return d.data.items;
+      if (Array.isArray(d?.data)) return d.data;
+      if (Array.isArray(d?.items)) return d.items;
+      if (Array.isArray(d)) return d;
+      return [];
+    };
+
+    const refreshOpsSummary = React.useCallback(async () => {
+      if (!isOnline || !isAuthenticatedMobileClient(apiClient, storageRef.current)) return null;
+      if (mountedRef.current) setOpsLoading(true);
+      try {
+        const [appRes, ordRes, incRes, tktRes] = await Promise.allSettled([
+          apiClient.request({ url: 'dxosApprovals:listInbox', method: 'get', params: { status: 'pending', limit: 5 }, skipNotify: true }),
+          apiClient.request({ url: 'latticeOrders:list', method: 'get', params: { pageSize: 5, sort: ['-updatedAt'] }, skipNotify: true }),
+          apiClient.request({ url: 'latticeIncidentCases:list', method: 'get', params: { pageSize: 5, sort: ['-createdAt'] }, skipNotify: true }),
+          apiClient.request({ url: 'latticeServiceTickets:list', method: 'get', params: { pageSize: 5, sort: ['-createdAt'] }, skipNotify: true }),
+        ]);
+        if (!mountedRef.current) return null;
+        if (appRes.status === 'fulfilled' && appRes.value) setPendingApprovals(extractListItems(appRes.value));
+        if (ordRes.status === 'fulfilled' && ordRes.value) setDeliveryOrders(extractListItems(ordRes.value));
+        if (incRes.status === 'fulfilled' && incRes.value) setIncidentCases(extractListItems(incRes.value));
+        if (tktRes.status === 'fulfilled' && tktRes.value) setServiceTickets(extractListItems(tktRes.value));
+        return true;
+      } catch {
+        return null;
+      } finally {
+        if (mountedRef.current) setOpsLoading(false);
+      }
+    }, [apiClient, isOnline]);
+
+    refreshOpsSummaryRef.current = refreshOpsSummary;
+
     React.useEffect(() => {
       if (!isAuthenticatedMobileClient(apiClient, storageRef.current)) return undefined;
       refreshUnreadCountRef.current?.();
+      refreshOpsSummaryRef.current?.();
 
       const fetchFn = props.fetchImpl
         || (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function' ? globalThis.fetch : null)
         || (typeof fetch === 'function' ? fetch : null);
       if (!isOnline || typeof fetchFn !== 'function') return undefined;
 
+      const token = resolveClientAuthToken(apiClient, storageRef.current);
+      if (!token) return undefined;
+
       let disposed = false;
-      let controller = null;
-      let activeReader = null;
-      let reconnectTimer = null;
-      let retryAttempt = 0;
+      const baseApi = typeof apiClient?.getBaseURL === 'function' ? apiClient.getBaseURL() : '/api/';
+      const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
+      const sseUrl = props.notificationSseUrl || `${prefix}dxosAi:surfaceEvents?portalSlug=mobile`;
 
       const handleSsePayload = (eventName, parsed) => {
         if (!mountedRef.current || disposed || !parsed || typeof parsed !== 'object') return;
@@ -781,83 +832,28 @@ function createMobileFieldPwaPage(client, React, app) {
         const kind = String(parsed.kind || parsed.type || '').trim().toLowerCase();
         if (kind === 'notification' || kind === 'unread_count' || eventName === 'notification' || eventName === 'unread_count') {
           refreshUnreadCountRef.current?.();
+          refreshOpsSummaryRef.current?.();
         }
       };
 
-      const connectSse = async () => {
-        if (disposed || !mountedRef.current) return;
-        const token = resolveClientAuthToken(apiClient, storageRef.current);
-        if (!token) return;
-        const baseApi = typeof apiClient?.getBaseURL === 'function' ? apiClient.getBaseURL() : '/api/';
-        const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
-        const sseUrl = props.notificationSseUrl || `${prefix}dxosAi:surfaceEvents?portalSlug=mobile`;
-        controller = typeof AbortController === 'function' ? new AbortController() : null;
-        let stopReconnect = false;
-        try {
-          const res = await fetchFn(sseUrl, {
-            method: 'GET',
-            headers: {
-              Authorization: `Bearer ${token}`,
-              Accept: 'text/event-stream',
-            },
-            credentials: 'same-origin',
-            ...(controller ? { signal: controller.signal } : {}),
-          });
-          if (res && (res.status === 401 || res.status === 403)) {
-            stopReconnect = true;
-            return;
+      const unsubscribeSse = subscribeSurfaceEvents({
+        portalSlug: 'mobile',
+        sseUrl,
+        token,
+        fetchFn,
+        minBackoffMs: 3_000,
+        maxBackoffMs: 60_000,
+        win: typeof window !== 'undefined' ? window : null,
+        onEvent: (eventName, data) => {
+          if (['notification', 'unread_count', 'update', 'message'].includes(eventName)) {
+            handleSsePayload(eventName, data);
           }
-          if (!res?.ok || !res.body?.getReader) {
-            throw new Error('SSE_UNAVAILABLE');
-          }
-          retryAttempt = 0;
-          activeReader = res.body.getReader();
-          const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
-          let buffer = '';
-          while (!disposed && mountedRef.current) {
-            const part = await activeReader.read();
-            if (part.done) break;
-            const text = decoder ? decoder.decode(part.value, { stream: true }) : String(part.value || '');
-            buffer += text;
-            const parsed = parseSseChunk(buffer);
-            buffer = parsed.rest;
-            for (const frame of parsed.frames) {
-              if (frame.event === 'snapshot') {
-                retryAttempt = 0;
-                continue;
-              }
-              if (['notification', 'unread_count', 'update', 'message'].includes(frame.event)) {
-                handleSsePayload(frame.event, frame.data);
-              }
-            }
-          }
-        } catch {
-          // Transient drop handled below unless disposed or 401/403
-        } finally {
-          activeReader = null;
-        }
-        if (!disposed && mountedRef.current && !stopReconnect && !reconnectTimer) {
-          const delayMs = Math.min(60_000, 3_000 * (2 ** Math.min(4, retryAttempt)));
-          retryAttempt += 1;
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            connectSse();
-          }, delayMs);
-          if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
-        }
-      };
-
-      connectSse();
+        },
+      });
 
       return () => {
         disposed = true;
-        if (reconnectTimer) {
-          clearTimeout(reconnectTimer);
-          reconnectTimer = null;
-        }
-        controller?.abort?.();
-        try { activeReader?.cancel?.(); } catch {}
-        activeReader = null;
+        unsubscribeSse();
       };
     }, [apiClient, isOnline, props.fetchImpl, props.notificationSseUrl]);
 
@@ -1408,6 +1404,72 @@ function createMobileFieldPwaPage(client, React, app) {
       }
     };
 
+    const decideMobileApproval = React.useCallback(async (item, decision) => {
+      if (!item || !apiClient || typeof apiClient.request !== 'function') return null;
+      const itemKey = String(item.id ?? item.requestUid ?? '');
+      setDecidingApprovalId(itemKey);
+      try {
+        await apiClient.request({
+          url: 'dxosApprovals:decide',
+          method: 'post',
+          data: {
+            source: item.source || 'approval',
+            ...(item.id != null ? { id: item.id } : {}),
+            ...(item.requestUid ? { requestUid: item.requestUid } : {}),
+            decision,
+          },
+        });
+        setPendingApprovals((prev) => prev.filter((x) => String(x.id ?? x.requestUid ?? '') !== itemKey));
+        setStatusNotice({
+          type: 'success',
+          text: decision === 'approved'
+            ? `Đã phê duyệt: ${item.title || item.targetCode || itemKey}.`
+            : `Đã từ chối: ${item.title || item.targetCode || itemKey}.`,
+        });
+        return true;
+      } catch (err) {
+        const errMsg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể xử lý phê duyệt.';
+        setStatusNotice({ type: 'error', text: errMsg });
+        return null;
+      } finally {
+        setDecidingApprovalId(null);
+      }
+    }, [apiClient]);
+
+    const selectOrderForEpod = React.useCallback((order) => {
+      if (!order) return;
+      if (order.code) setOrderCode(String(order.code));
+      if (order.id != null) setOrderId(String(order.id));
+      setStatusNotice({ type: 'info', text: `Đã chọn đơn giao nhận ${order.code || `#${order.id}`} vào biểu mẫu ePOD.` });
+    }, []);
+
+    const submitMobileAiPrompt = React.useCallback(async (ev) => {
+      ev?.preventDefault?.();
+      const promptText = String(aiPrompt || '').trim();
+      if (!promptText) return;
+      if (!isOnline || !apiClient || typeof apiClient.request !== 'function') {
+        setAiReply('Trợ lý AI cần kết nối mạng và phiên đăng nhập hợp lệ.');
+        return;
+      }
+      setAiBusy(true);
+      try {
+        const res = await apiClient.request({
+          url: 'dxosAi:agentChat',
+          method: 'post',
+          data: { prompt: promptText, portalSlug: 'mobile' },
+          skipNotify: true,
+        });
+        const body = res?.data?.data ?? res?.data ?? {};
+        const text = body.reply || body.answer || body.message || body.content || 'Đã tiếp nhận yêu cầu trợ lý AI.';
+        setAiReply(String(text));
+      } catch (err) {
+        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể kết nối trợ lý AI lúc này.';
+        setAiReply(String(msg));
+      } finally {
+        setAiBusy(false);
+      }
+    }, [aiPrompt, apiClient, isOnline]);
+
     const cardStyle = {
       background: '#1e293b',
       border: '1px solid #334155',
@@ -1469,6 +1531,8 @@ function createMobileFieldPwaPage(client, React, app) {
         background: '#0f172a',
         color: '#f8fafc',
         padding: 16,
+        paddingBottom: 76,
+        overflowX: 'hidden',
         fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
         boxSizing: 'border-box',
       },
@@ -1660,6 +1724,156 @@ function createMobileFieldPwaPage(client, React, app) {
           fontWeight: 600,
         },
       }, statusNotice.text) : null,
+
+      // Above-the-Fold Compact Mobile Operations Cards (Approvals, Deliveries, Incidents, Service Tickets)
+      h('section', {
+        'data-testid': 'mobile-pwa-above-fold-cards',
+        style: cardStyle,
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8 } },
+          h('div', { style: { fontSize: 15, fontWeight: 700 } }, 'Tác vụ Hiện trường Ưu tiên'),
+          isAuthenticatedMobileClient(apiClient, storageRef.current) ? h('button', {
+            type: 'button',
+            'data-testid': 'mobile-pwa-ops-refresh-btn',
+            disabled: opsLoading,
+            onClick: refreshOpsSummary,
+            style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12 },
+          }, opsLoading ? 'Đang tải...' : 'Làm mới') : null,
+        ),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 } },
+          [
+            { key: 'all', label: 'Tất cả' },
+            { key: 'approvals', label: `Phê duyệt (${pendingApprovals.length})` },
+            { key: 'deliveries', label: `Giao nhận (${deliveryOrders.length})` },
+            { key: 'incidents', label: `Sự cố (${incidentCases.length})` },
+            { key: 'tickets', label: `Phiếu DV (${serviceTickets.length})` },
+          ].map((tab) => h('button', {
+            key: tab.key,
+            type: 'button',
+            'data-testid': `mobile-pwa-ops-tab-${tab.key}`,
+            onClick: () => setOpsTab(tab.key),
+            style: {
+              minHeight: 34,
+              padding: '5px 10px',
+              borderRadius: 999,
+              border: `1px solid ${opsTab === tab.key ? '#38bdf8' : '#475569'}`,
+              background: opsTab === tab.key ? '#0369a1' : '#0f172a',
+              color: '#f8fafc',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+            },
+          }, tab.label)),
+        ),
+        (opsTab === 'all' || opsTab === 'approvals') ? h('div', {
+          'data-testid': 'mobile-pwa-approvals-section',
+          style: { marginBottom: 10 },
+        },
+          h('div', { style: { fontSize: 12, fontWeight: 700, color: '#93c5fd', marginBottom: 6, textTransform: 'uppercase' } }, `Phê duyệt chờ xử lý (${pendingApprovals.length})`),
+          pendingApprovals.length === 0
+            ? h('div', { style: { fontSize: 12, color: '#94a3b8', padding: '6px 0' } }, 'Không có yêu cầu phê duyệt tồn đọng.')
+            : pendingApprovals.slice(0, 4).map((ap, idx) => {
+                const apKey = String(ap.id ?? ap.requestUid ?? idx);
+                const busy = decidingApprovalId === apKey;
+                return h('div', {
+                  key: apKey,
+                  'data-testid': `mobile-pwa-approval-card-${apKey}`,
+                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #334155', marginBottom: 8 },
+                },
+                  h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
+                    h('strong', { style: { fontSize: 13, lineHeight: 1.35 } }, ap.title || ap.targetCode || `Yêu cầu #${apKey}`),
+                    h('span', { style: { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#78350f', color: '#fde68a', flexShrink: 0 } }, ap.riskLevel || ap.status || 'Chờ duyệt'),
+                  ),
+                  ap.summary ? h('div', { style: { fontSize: 12, color: '#cbd5e1', marginTop: 4 } }, String(ap.summary).slice(0, 120)) : null,
+                  h('div', { style: { display: 'flex', gap: 8, marginTop: 8 } },
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `mobile-pwa-approval-approve-${apKey}`,
+                      disabled: busy,
+                      onClick: () => decideMobileApproval(ap, 'approved'),
+                      style: { ...btnSecondaryStyle, flex: 1, minHeight: 38, padding: '6px 10px', fontSize: 13, background: '#15803d', borderColor: '#16a34a' },
+                    }, busy ? 'Đang xử lý...' : 'Phê duyệt'),
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `mobile-pwa-approval-reject-${apKey}`,
+                      disabled: busy,
+                      onClick: () => decideMobileApproval(ap, 'rejected'),
+                      style: { ...btnSecondaryStyle, flex: 1, minHeight: 38, padding: '6px 10px', fontSize: 13, background: '#991b1b', borderColor: '#dc2626' },
+                    }, 'Từ chối'),
+                  ),
+                );
+              }),
+        ) : null,
+        (opsTab === 'all' || opsTab === 'deliveries') ? h('div', {
+          'data-testid': 'mobile-pwa-deliveries-section',
+          style: { marginBottom: 10 },
+        },
+          h('div', { style: { fontSize: 12, fontWeight: 700, color: '#6ee7b7', marginBottom: 6, textTransform: 'uppercase' } }, `Giao nhận Logistics (${deliveryOrders.length})`),
+          deliveryOrders.length === 0
+            ? h('div', { style: { fontSize: 12, color: '#94a3b8', padding: '6px 0' } }, 'Chưa có chuyến giao nhận nào.')
+            : deliveryOrders.slice(0, 4).map((ord, idx) => {
+                const ordKey = String(ord.id ?? ord.code ?? idx);
+                return h('div', {
+                  key: ordKey,
+                  'data-testid': `mobile-pwa-delivery-card-${ordKey}`,
+                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #334155', marginBottom: 8 },
+                },
+                  h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+                    h('strong', { style: { fontSize: 13 } }, `${ord.code || `#${ordKey}`} — ${ord.name || ord.customer || 'Đơn vận chuyển'}`),
+                    h('span', { style: { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#064e3b', color: '#a7f3d0', flexShrink: 0 } }, ord.status || 'submitted'),
+                  ),
+                  ord.destination ? h('div', { style: { fontSize: 12, color: '#cbd5e1', marginTop: 4 } }, `Điểm đến: ${ord.destination}`) : null,
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `mobile-pwa-delivery-select-${ordKey}`,
+                    onClick: () => selectOrderForEpod(ord),
+                    style: { ...btnSecondaryStyle, width: '100%', minHeight: 36, marginTop: 8, padding: '6px 10px', fontSize: 12, background: '#0369a1', borderColor: '#0284c7' },
+                  }, 'Chọn giao ePOD'),
+                );
+              }),
+        ) : null,
+        (opsTab === 'all' || opsTab === 'incidents') ? h('div', {
+          'data-testid': 'mobile-pwa-incidents-section',
+          style: { marginBottom: 10 },
+        },
+          h('div', { style: { fontSize: 12, fontWeight: 700, color: '#fca5a5', marginBottom: 6, textTransform: 'uppercase' } }, `Sự cố hiện trường (${incidentCases.length})`),
+          incidentCases.length === 0
+            ? h('div', { style: { fontSize: 12, color: '#94a3b8', padding: '6px 0' } }, 'Không có sự cố đang mở.')
+            : incidentCases.slice(0, 4).map((inc, idx) => {
+                const incKey = String(inc.id ?? inc.code ?? idx);
+                return h('div', {
+                  key: incKey,
+                  'data-testid': `mobile-pwa-incident-card-${incKey}`,
+                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #334155', marginBottom: 8 },
+                },
+                  h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+                    h('strong', { style: { fontSize: 13 } }, `${inc.code || `#${incKey}`} — ${inc.name || 'Sự cố thiết bị'}`),
+                    h('span', { style: { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#7f1d1d', color: '#fecaca', flexShrink: 0 } }, `${inc.severity || 'medium'} · ${inc.status || 'open'}`),
+                  ),
+                );
+              }),
+        ) : null,
+        (opsTab === 'all' || opsTab === 'tickets') ? h('div', {
+          'data-testid': 'mobile-pwa-tickets-section',
+        },
+          h('div', { style: { fontSize: 12, fontWeight: 700, color: '#fde68a', marginBottom: 6, textTransform: 'uppercase' } }, `Phiếu dịch vụ (${serviceTickets.length})`),
+          serviceTickets.length === 0
+            ? h('div', { style: { fontSize: 12, color: '#94a3b8', padding: '6px 0' } }, 'Không có phiếu dịch vụ mới.')
+            : serviceTickets.slice(0, 4).map((tkt, idx) => {
+                const tktKey = String(tkt.id ?? tkt.code ?? idx);
+                return h('div', {
+                  key: tktKey,
+                  'data-testid': `mobile-pwa-ticket-card-${tktKey}`,
+                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #334155', marginBottom: 8 },
+                },
+                  h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+                    h('strong', { style: { fontSize: 13 } }, `${tkt.code || `#${tktKey}`} — ${tkt.name || 'Phiếu hỗ trợ'}`),
+                    h('span', { style: { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: '#1e3a8a', color: '#bfdbfe', flexShrink: 0 } }, `${tkt.priority || 'normal'} · ${tkt.status || 'submitted'}`),
+                  ),
+                );
+              }),
+        ) : null,
+      ),
 
       // QR Scanner Card
       h('section', { style: cardStyle },
@@ -1960,6 +2174,76 @@ function createMobileFieldPwaPage(client, React, app) {
           style: { ...btnSecondaryStyle, width: '100%' },
         }, 'Gửi lệnh Digital Twin'),
       ),
+
+      // Collapsible Floating AI Assistant Drawer + Pill (never buries above-the-fold cards)
+      aiOpen ? h('section', {
+        'data-testid': 'mobile-pwa-ai-drawer',
+        style: {
+          position: 'fixed',
+          right: 12,
+          bottom: 66,
+          width: 'calc(100vw - 24px)',
+          maxWidth: 380,
+          background: '#1e293b',
+          border: '1px solid #38bdf8',
+          borderRadius: 12,
+          padding: 12,
+          boxShadow: '0 12px 30px rgba(0, 0, 0, 0.45)',
+          zIndex: 1045,
+        },
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 } },
+          h('strong', { style: { fontSize: 13 } }, 'Trợ lý AI Hiện trường'),
+          h('button', {
+            type: 'button',
+            'data-testid': 'mobile-pwa-ai-close',
+            onClick: () => setAiOpen(false),
+            style: { ...btnSecondaryStyle, minHeight: 30, padding: '4px 10px', fontSize: 12 },
+          }, 'Thu gọn'),
+        ),
+        aiReply ? h('div', {
+          'data-testid': 'mobile-pwa-ai-reply',
+          style: { fontSize: 12, color: '#e2e8f0', background: '#0f172a', padding: 8, borderRadius: 8, marginBottom: 8 },
+        }, aiReply) : null,
+        h('div', { style: { display: 'flex', gap: 6 } },
+          h('input', {
+            type: 'text',
+            'data-testid': 'mobile-pwa-ai-input',
+            value: aiPrompt,
+            onChange: (e) => setAiPrompt(e?.target?.value ?? ''),
+            placeholder: 'Hỏi AI về đơn giao nhận hoặc sự cố...',
+            style: { ...inputStyle, marginBottom: 0, flex: 1, minHeight: 38, fontSize: 13 },
+          }),
+          h('button', {
+            type: 'button',
+            'data-testid': 'mobile-pwa-ai-send',
+            disabled: aiBusy,
+            onClick: submitMobileAiPrompt,
+            style: { ...btnSecondaryStyle, minHeight: 38, padding: '6px 12px', background: '#0284c7', borderColor: '#0284c7', fontSize: 12 },
+          }, aiBusy ? '...' : 'Gửi'),
+        ),
+      ) : null,
+      h('button', {
+        type: 'button',
+        'data-testid': 'mobile-pwa-ai-pill',
+        onClick: () => setAiOpen((v) => !v),
+        style: {
+          position: 'fixed',
+          right: 14,
+          bottom: 14,
+          zIndex: 1046,
+          minHeight: 40,
+          padding: '8px 14px',
+          borderRadius: 999,
+          border: '1px solid #38bdf8',
+          background: '#0369a1',
+          color: '#ffffff',
+          fontSize: 13,
+          fontWeight: 700,
+          cursor: 'pointer',
+          boxShadow: '0 4px 14px rgba(2, 132, 199, 0.35)',
+        },
+      }, aiOpen ? 'Ẩn Trợ lý AI' : 'Trợ lý AI'),
     );
   };
 }

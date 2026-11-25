@@ -38,6 +38,7 @@ const {
 const {
   assertNoPrototypePollution,
   cloneSafeDeep,
+  buildDraftSpecFromNaturalPrompt,
   applySpecPatch,
   buildErGraph,
   computeSpecDiff,
@@ -2912,6 +2913,8 @@ async function planEnterpriseApp(ctx, db, actor, params = {}) {
     candidateSpec = baseSpec ? applySpecPatch(baseSpec, { ...restSpec, ...(patchObj || {}) }, promptText) : restSpec;
   } else if (baseSpec) {
     candidateSpec = applySpecPatch(baseSpec, patchObj, promptText);
+  } else if (promptText) {
+    candidateSpec = buildDraftSpecFromNaturalPrompt(promptText);
   } else {
     throw failBuild('SPEC_OR_APP_KEY_REQUIRED', 400, 'Cần cung cấp spec/collections hoặc appKey hợp lệ để lập kế hoạch.');
   }
@@ -2953,6 +2956,7 @@ async function planEnterpriseApp(ctx, db, actor, params = {}) {
     currentVersion,
     erGraph: candValidated.erGraph,
     diff,
+    candidateSpec,
     plan: {
       organizationId,
       appKey: candValidated.appKey,

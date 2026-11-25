@@ -497,3 +497,45 @@ test('Task 3: DmnVisualEditor syncs simContext/simJsonText on props.table change
   assert.deepEqual(JSON.parse(jsonText), { weightKg: 0, express: false });
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-result').length, 0, 'simResult must clear when switching table');
 });
+
+test('DMN visual editor supports plain unquoted strings seamlessly and enforces non-clipped column widths', async () => {
+  const { parseFeelCell, matchDmnCondition, simulateDmnTable, createDmnVisualEditor } = require(DMN_EDITOR_PATH);
+
+  // Plain unquoted string parsing & simulation alongside quoted/operators
+  assert.deepEqual(parseFeelCell('critical'), { op: 'eq', value: 'critical' });
+  assert.deepEqual(parseFeelCell('!= low'), { op: 'neq', value: 'low' });
+  assert.deepEqual(parseFeelCell('in [high, critical]'), { op: 'in', value: ['high', 'critical'] });
+  assert.equal(matchDmnCondition('critical', parseFeelCell('critical')), true);
+  assert.equal(matchDmnCondition('critical', parseFeelCell('"critical"')), true);
+  assert.equal(matchDmnCondition('high', parseFeelCell('critical')), false);
+
+  const tbl = {
+    tableKey: 'cmms_priority_routing_v1',
+    name: 'CMMS Routing',
+    hitPolicy: 'FIRST',
+    inputsJson: [
+      { name: 'severity', type: 'string' },
+      { name: 'eventType', type: 'string' },
+    ],
+    outputsJson: [{ name: 'workOrderPriority', type: 'string' }],
+    rulesJson: [
+      { when: { severity: 'critical', eventType: 'alarm.triggered' }, then: { workOrderPriority: 'P1' } },
+      { when: { severity: '*', eventType: '*' }, then: { workOrderPriority: 'P3' } },
+    ],
+  };
+  assert.equal(simulateDmnTable(tbl, { severity: 'critical', eventType: 'alarm.triggered' }).outputs.workOrderPriority, 'P1');
+  assert.equal(simulateDmnTable(tbl, { severity: 'low', eventType: 'other' }).outputs.workOrderPriority, 'P3');
+
+  // Column minWidth & horizontal scroll wrapper prevent clipping long headers (severity, eventType, workOrderPriority)
+  const harness = createReactHarness();
+  const Editor = createDmnVisualEditor(harness.React, {});
+  const tree = await harness.mountAndFlush(Editor, { table: tbl });
+  const grid = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-decision-table-grid')[0];
+  assert.equal(grid.props.style.width, 'max-content');
+  const inName0 = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-input-col-name-0')[0];
+  const inName1 = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-input-col-name-1')[0];
+  const outName0 = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-output-col-name-0')[0];
+  assert.ok(Number(inName0.props.style.minWidth) >= 120);
+  assert.ok(Number(inName1.props.style.minWidth) >= 120);
+  assert.ok(Number(outName0.props.style.minWidth) >= 120);
+});

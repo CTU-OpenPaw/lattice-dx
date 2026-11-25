@@ -227,17 +227,17 @@ test('studio-settings exposes Tabs 7-9 and GitOps Solution Bundle v3 heading', a
   assert.deepEqual(
     tabs.map((t) => t.props['data-testid']),
     [
-      'dxos-studio-tab-workflows',
       'dxos-studio-tab-portals',
-      'dxos-studio-tab-plugins',
-      'dxos-studio-tab-pof',
-      'dxos-studio-tab-outbox',
-      'dxos-studio-tab-gitops',
-      'dxos-studio-tab-broker',
-      'dxos-studio-tab-automation',
       'dxos-studio-tab-builder',
       'dxos-studio-tab-forms',
+      'dxos-studio-tab-gitops',
+      'dxos-studio-tab-workflows',
       'dxos-studio-tab-approvals',
+      'dxos-studio-tab-automation',
+      'dxos-studio-tab-broker',
+      'dxos-studio-tab-outbox',
+      'dxos-studio-tab-plugins',
+      'dxos-studio-tab-pof',
     ],
   );
 

@@ -2014,3 +2014,20 @@ test('RLS Remediation (Findings 1 & 6): publicTrack & verifyTrackSignature enfor
     else process.env.DX_PG_RLS_SESSION = prevRls;
   }
 });
+
+test('dmn-engine matches plain unquoted strings, quoted strings, ranges, lists, and comparison operators cleanly', () => {
+  const { evaluateDecisionTable } = require(path.join(PLUGIN_ROOT, 'src/server/dmn-engine.js'));
+  const table = {
+    hitPolicy: 'FIRST',
+    rulesJson: [
+      { when: { severity: 'critical', tempC: '> 8' }, then: { workOrderPriority: 'P1' } },
+      { when: { severity: '"high"', tempC: '[2..8]' }, then: { workOrderPriority: 'P2' } },
+      { when: { severity: 'in [low, medium]', tempC: '< 2' }, then: { workOrderPriority: 'P3' } },
+      { when: { severity: '*', tempC: '-' }, then: { workOrderPriority: 'P4' } },
+    ],
+  };
+  assert.equal(evaluateDecisionTable(table, { severity: 'critical', tempC: 10 }).outputs.workOrderPriority, 'P1');
+  assert.equal(evaluateDecisionTable(table, { severity: 'high', tempC: 5 }).outputs.workOrderPriority, 'P2');
+  assert.equal(evaluateDecisionTable(table, { severity: 'medium', tempC: 0 }).outputs.workOrderPriority, 'P3');
+  assert.equal(evaluateDecisionTable(table, { severity: 'unknown', tempC: 1 }).outputs.workOrderPriority, 'P4');
+});

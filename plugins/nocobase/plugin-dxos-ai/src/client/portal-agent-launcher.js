@@ -16,7 +16,8 @@ function inferPortalSlug(pathname) {
 
 function isFlowStudioPath(pathname) {
   const clean = String(pathname || '').split('?')[0].split('#')[0].trim().toLowerCase().replace(/\/+$/, '');
-  return /^\/admin\/settings\/(?:workflow\/(?:automation|connectors)|dxos-flow-studio)(?:\/.*)?$/.test(clean);
+  return /^\/admin\/settings\/(?:workflow\/(?:automation|connectors)|dxos-flow-studio)(?:\/.*)?$/.test(clean)
+    || /\/workflow\/automation(?:\/|$)/.test(clean);
 }
 
 function sanitizeFlowCtxText(raw, maxLen = 120) {
@@ -133,6 +134,39 @@ function isUserEditingForm() {
 function isNativeAiChatOpen() {
   if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return false;
   return Boolean(document.querySelector('[role="dialog"] .ant-sender-input, .ant-drawer-open .ant-sender-input'));
+}
+
+function isRightPanelOrDrawerOpen() {
+  if (typeof document === 'undefined' || typeof document.querySelector !== 'function') return false;
+  return Boolean(document.querySelector('.ant-drawer-open, .lf-node-inspector'));
+}
+
+function isAbortLikeError(err) {
+  if (!err) return false;
+  const name = String(err?.name || '');
+  const msg = String(err?.message || err || '');
+  return name === 'AbortError' || /abort|BodyStreamBuffer/i.test(msg);
+}
+
+function safeCancelReader(reader) {
+  if (!reader || typeof reader.cancel !== 'function') return;
+  try {
+    const p = reader.cancel();
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch {}
+}
+
+function safeAbortController(ctrl) {
+  if (!ctrl || typeof ctrl.abort !== 'function') return;
+  try { ctrl.abort(); } catch {}
+}
+
+function getOrCreateSseHub() {
+  if (typeof window === 'undefined') return null;
+  if (!window.__LATTICEDX_SSE_HUB__ || typeof window.__LATTICEDX_SSE_HUB__ !== 'object') {
+    window.__LATTICEDX_SSE_HUB__ = { channels: new Map() };
+  }
+  return window.__LATTICEDX_SSE_HUB__;
 }
 
 function pickDefaultPortalEmployee(employees = [], isAdmin = false) {
@@ -276,6 +310,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
     const [dialogOpen, setDialogOpen] = React.useState(() => isNativeAiChatOpen());
     const [pendingUpdate, setPendingUpdate] = React.useState(null);
     const [llmHealth, setLlmHealth] = React.useState(null);
+    const [panelOpen, setPanelOpen] = React.useState(() => isRightPanelOrDrawerOpen());
 
     React.useEffect(() => {
       if (typeof window === 'undefined') return undefined;
@@ -293,6 +328,8 @@ function createPortalAgentLauncher(client, React, _antd, app) {
         setPathname((prev) => (prev === nextPath ? prev : nextPath));
         const nextOpen = isNativeAiChatOpen();
         setDialogOpen((prev) => (prev === nextOpen ? prev : nextOpen));
+        const nextPanelOpen = isRightPanelOrDrawerOpen();
+        setPanelOpen((prev) => (prev === nextPanelOpen ? prev : nextPanelOpen));
       };
       const unsubRouter = typeof app?.router?.subscribe === 'function' ? app.router.subscribe(syncPath) : null;
       window.addEventListener?.('popstate', syncPath);
@@ -344,22 +381,20 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       return () => { cancelled = true; };
     }, [api, portalSlug, onFlowStudio]);
 
-    // Realtime SSE Canvas Sync on /p/* (surface-updated) & Flow Studio (flow-updated): zero polling loops, zero destructive reloads
+    // Realtime SSE Canvas Sync on /p/* (surface-updated) & Flow Studio (flow-updated): idempotent shared hub, zero polling loops
     React.useEffect(() => {
       if (!portalSlug || onFlowStudio) {
         setPendingUpdate(null);
       }
       if (!sseSlug || typeof fetch !== 'function' || typeof window === 'undefined') return undefined;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return undefined;
-      let cancelled = false;
-      let controller = null;
-      let activeReader = null;
-      let reconnectTimer = null;
-      let attempt = 0;
+
+      const hub = getOrCreateSseHub();
+      const channels = hub?.channels instanceof Map ? hub.channels : new Map();
       let baseRev = null;
       let baseSignature = null;
 
-      const handleFrame = (eventName, ev) => {
+      const subscriber = (eventName, ev) => {
         if (!ev || typeof ev !== 'object') return;
         const isFlowEvent = sseSlug === 'flow-studio' || ev.type === 'flow-updated';
         const sig = `${ev.blockCount ?? 0}:${ev.layoutSignature || ''}`;
@@ -395,84 +430,139 @@ function createPortalAgentLauncher(client, React, _antd, app) {
         }
       };
 
-      const connectSurfaceEvents = async () => {
-        if (cancelled) return;
-        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-        const token = resolveClientAuthToken(api);
-        if (!token) return;
-        controller = typeof AbortController === 'function' ? new AbortController() : null;
-        let stopReconnect = false;
-        try {
-          const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
-          const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
-          const url = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(sseSlug)}`;
-          const headers = {
-            Accept: 'text/event-stream',
-            Authorization: `Bearer ${token}`,
-          };
-          const res = await fetch(url, {
-            method: 'GET',
-            headers,
-            credentials: 'same-origin',
-            ...(controller ? { signal: controller.signal } : {}),
-          });
-          if (res && (res.status === 401 || res.status === 403)) {
-            stopReconnect = true;
-            return;
-          }
-          if (!res?.ok || !res.body?.getReader) throw new Error('SSE_UNAVAILABLE');
-          attempt = 0;
-          const reader = res.body.getReader();
-          activeReader = reader;
-          const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
-          let buffer = '';
-          while (!cancelled) {
-            const part = await reader.read();
-            if (part.done) break;
-            const text = decoder ? decoder.decode(part.value, { stream: true }) : String(part.value || '');
-            buffer += text;
-            const parsed = parseSseChunk(buffer);
-            buffer = parsed.rest;
-            for (const f of parsed.frames) handleFrame(f.event, f.data);
-          }
-        } catch {
-          // Graceful reconnect unless aborted cleanly
-        } finally {
-          activeReader = null;
-        }
-        if (!cancelled && !stopReconnect && (typeof document === 'undefined' || document.visibilityState !== 'hidden')) {
-          const delay = Math.min(15000, 1500 * (2 ** Math.min(4, attempt++)));
-          reconnectTimer = setTimeout(connectSurfaceEvents, delay);
-          if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
-        }
-      };
+      const token = resolveClientAuthToken(api);
+      if (!token) return undefined;
+      const channelKey = `${sseSlug}::${token.slice(0, 12)}`;
+      let entry = channels.get(channelKey);
+      if (!entry) {
+        entry = {
+          subscribers: new Set(),
+          lastSnapshot: null,
+          cancelled: false,
+          connecting: false,
+          controller: null,
+          activeReader: null,
+          reconnectTimer: null,
+          attempt: 0,
+          cleanupListeners: null,
+        };
+        channels.set(channelKey, entry);
+      }
+      entry.cancelled = false;
+      entry.subscribers.add(subscriber);
+      if (entry.lastSnapshot) {
+        subscriber('snapshot', entry.lastSnapshot);
+      }
 
-      const onVisibilityChange = () => {
-        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-          activeReader?.cancel?.().catch?.(() => {});
-          controller?.abort?.();
-          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-        } else if (!cancelled && !reconnectTimer) {
-          attempt = 0;
-          connectSurfaceEvents();
-        }
-      };
+      if (!entry.started) {
+        entry.started = true;
+        const connectSurfaceEvents = async () => {
+          if (entry.cancelled || entry.subscribers.size === 0 || entry.connecting) return;
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+          const activeToken = resolveClientAuthToken(api);
+          if (!activeToken) return;
+          entry.connecting = true;
+          entry.controller = typeof AbortController === 'function' ? new AbortController() : null;
+          let stopReconnect = false;
+          try {
+            const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
+            const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
+            const url = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(sseSlug)}`;
+            const headers = {
+              Accept: 'text/event-stream',
+              Authorization: `Bearer ${activeToken}`,
+            };
+            const res = await fetch(url, {
+              method: 'GET',
+              headers,
+              credentials: 'same-origin',
+              ...(entry.controller ? { signal: entry.controller.signal } : {}),
+            });
+            if (res && (res.status === 401 || res.status === 403)) {
+              stopReconnect = true;
+              return;
+            }
+            if (!res?.ok || !res.body?.getReader) throw new Error('SSE_UNAVAILABLE');
+            entry.attempt = 0;
+            const reader = res.body.getReader();
+            entry.activeReader = reader;
+            const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
+            let buffer = '';
+            while (!entry.cancelled && entry.subscribers.size > 0) {
+              let part;
+              try {
+                part = await reader.read();
+              } catch (readErr) {
+                if (entry.cancelled || entry.controller?.signal?.aborted || isAbortLikeError(readErr)) {
+                  stopReconnect = true;
+                  break;
+                }
+                throw readErr;
+              }
+              if (!part || part.done) break;
+              const text = decoder ? decoder.decode(part.value, { stream: true }) : String(part.value || '');
+              buffer += text;
+              const parsed = parseSseChunk(buffer);
+              buffer = parsed.rest;
+              for (const f of parsed.frames) {
+                if (f.event === 'snapshot' && f.data && typeof f.data === 'object') {
+                  entry.lastSnapshot = f.data;
+                }
+                for (const sub of [...entry.subscribers]) {
+                  try { sub(f.event, f.data); } catch {}
+                }
+              }
+            }
+          } catch (err) {
+            if (entry.cancelled || entry.controller?.signal?.aborted || isAbortLikeError(err)) {
+              stopReconnect = true;
+            }
+          } finally {
+            entry.connecting = false;
+            entry.activeReader = null;
+          }
+          if (!entry.cancelled && entry.subscribers.size > 0 && !stopReconnect && (typeof document === 'undefined' || document.visibilityState !== 'hidden')) {
+            const delay = Math.min(30000, Math.max(3000, 3000 * (2 ** Math.min(3, entry.attempt++))));
+            entry.reconnectTimer = setTimeout(connectSurfaceEvents, delay);
+            if (typeof entry.reconnectTimer?.unref === 'function') entry.reconnectTimer.unref();
+          }
+        };
 
-      document?.addEventListener?.('visibilitychange', onVisibilityChange);
-      connectSurfaceEvents();
+        const onVisibilityChange = () => {
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+            safeCancelReader(entry.activeReader);
+            safeAbortController(entry.controller);
+            if (entry.reconnectTimer) { clearTimeout(entry.reconnectTimer); entry.reconnectTimer = null; }
+          } else if (!entry.cancelled && entry.subscribers.size > 0 && !entry.reconnectTimer) {
+            entry.attempt = 0;
+            connectSurfaceEvents();
+          }
+        };
+
+        document?.addEventListener?.('visibilitychange', onVisibilityChange);
+        entry.cleanupListeners = () => {
+          document?.removeEventListener?.('visibilitychange', onVisibilityChange);
+        };
+        connectSurfaceEvents();
+      }
+
       return () => {
-        cancelled = true;
-        document?.removeEventListener?.('visibilitychange', onVisibilityChange);
-        if (reconnectTimer) clearTimeout(reconnectTimer);
-        activeReader?.cancel?.().catch?.(() => {});
-        controller?.abort?.();
+        entry.subscribers.delete(subscriber);
+        if (entry.subscribers.size === 0) {
+          entry.cancelled = true;
+          entry.cleanupListeners?.();
+          if (entry.reconnectTimer) { clearTimeout(entry.reconnectTimer); entry.reconnectTimer = null; }
+          safeCancelReader(entry.activeReader);
+          safeAbortController(entry.controller);
+          channels.delete(channelKey);
+        }
       };
     }, [api, sseSlug, portalSlug, onFlowStudio]);
 
     const defaultEmployee = (!portalSlug && onFlowStudio && !isAdmin)
       ? null
       : pickDefaultPortalEmployee(employees, isAdmin);
-    const showFloatButton = Boolean(portalSlug && !onFlowStudio && defaultEmployee && !dialogOpen);
+    const showFloatButton = Boolean(portalSlug && !onFlowStudio && defaultEmployee && !dialogOpen && !panelOpen && !isRightPanelOrDrawerOpen());
 
     const checkLlmHealthNow = async () => {
       if (!api?.request || !resolveClientAuthToken(api)) return null;
@@ -671,6 +761,8 @@ module.exports = {
   readFlowStudioContext,
   readActivePageTitle,
   isNativeAiChatOpen,
+  isRightPanelOrDrawerOpen,
+  isAbortLikeError,
   pickDefaultPortalEmployee,
   buildHiddenPageSystemContext,
   openNativePortalChat,

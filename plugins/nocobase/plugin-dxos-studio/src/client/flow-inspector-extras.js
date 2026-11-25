@@ -65,6 +65,8 @@ function createWebhookHelperComponent(React, S) {
     const [sampleText, setSampleText] = React.useState('{"code":"WH-01","source":"webhook"}');
     const [copied, setCopied] = React.useState(false);
     const origin = (typeof window !== 'undefined' && window?.location?.origin) ? window.location.origin : 'http://localhost:13014';
+    const ingressPath = `/api/dxosAutomations:webhookIngress?organizationId=${encodeURIComponent(String(orgKey || 'default'))}&ruleKey=${encodeURIComponent(String(ruleKey || 'flow_rule'))}`;
+    const configuredWebhookPath = String(nodeCfg?.webhookPath || '').trim();
     const curlCmd = buildWebhookCurlCommand({
       origin,
       organizationId: orgKey,
@@ -79,7 +81,7 @@ function createWebhookHelperComponent(React, S) {
     };
     return h('div', { 'data-testid': 'dxos-flow-webhook-helper', style: { ...S.card, background: '#f0f9ff', border: '1px solid #bae6fd' } },
       h('div', { style: S.rowBetween },
-        h('strong', { style: { fontSize: 12, color: '#0369a1' } }, 'Webhook Test & cURL Helper'),
+        h('strong', { style: { fontSize: 12, color: '#0369a1' } }, 'Kiểm thử Webhook & Lệnh cURL'),
         h('button', {
           type: 'button',
           'data-testid': 'dxos-flow-webhook-copy-btn',
@@ -88,7 +90,11 @@ function createWebhookHelperComponent(React, S) {
             setCopied(true);
           },
           style: S.btn(false, false, false),
-        }, copied ? '✓ Copied' : 'Copy cURL'),
+        }, copied ? '✓ Đã chép' : 'Sao chép cURL'),
+      ),
+      h('div', { 'data-testid': 'dxos-flow-webhook-endpoints', style: { display: 'grid', gap: 3, padding: '6px 8px', borderRadius: 6, background: '#e0f2fe', fontSize: 11, color: '#0c4a6e' } },
+        h('div', null, h('strong', null, 'URL nhận Webhook Ingress: '), h('code', null, `POST ${ingressPath}`)),
+        h('div', null, h('strong', null, 'Đường dẫn cấu hình (webhookPath): '), h('code', null, configuredWebhookPath || '(chưa cấu hình)')),
       ),
       h('pre', { 'data-testid': 'dxos-flow-webhook-curl', style: { margin: 0, padding: 8, borderRadius: 6, background: '#0f172a', color: '#e2e8f0', fontSize: 10, overflowX: 'auto', whiteSpace: 'pre-wrap' } }, curlCmd),
       h('textarea', {
@@ -113,13 +119,13 @@ function createWebhookHelperComponent(React, S) {
             });
           },
           style: S.btn(true, false, Boolean(testBusy)),
-        }, testBusy ? 'Testing…' : 'Test Trigger'),
+        }, testBusy ? 'Đang thử…' : 'Thử Trigger'),
         onDryRunWebhook ? h('button', {
           type: 'button',
           'data-testid': 'dxos-flow-webhook-dryrun-btn',
           onClick: () => onDryRunWebhook(parseSample()),
           style: S.btn(false, false, false),
-        }, 'Dry-Run Flow') : null,
+        }, 'Chạy thử luồng') : null,
       ),
     );
   };
@@ -137,7 +143,7 @@ function renderToolsPicker(h, { val, catalog, updateConfigField, inputStyle }) {
       if (picked) updateConfigField('tools', cur.includes(picked) ? cur : [...cur, picked]);
     },
   },
-    h('option', { value: '' }, '+ Add allowlisted tool...'),
+    h('option', { value: '' }, '+ Thêm công cụ được phép...'),
     options.map((t) => h('option', { key: t, value: t }, t)),
   );
 }

@@ -705,7 +705,12 @@ test('portal-composer OVERVIEW_SPECS includes WebGIS in incidents, Kanban in log
 
   const logistics = OVERVIEW_SPECS.find((s) => s.slug === 'logistics');
   assert.ok(logistics);
-  assert.deepEqual(logistics.blocks.map((b) => b.uidSuffix), ['hero', 'kpi', 'tasks', 'workbench', 'kanban', 'wms-ops']);
+  assert.deepEqual(logistics.blocks.map((b) => b.uidSuffix), ['hero', 'kpi', 'tasks', 'workbench', 'kanban', 'wms-ops', 'bi-chart']);
+  const biChart = logistics.blocks.find((b) => b.uidSuffix === 'bi-chart');
+  assert.equal(biChart.use, 'DxosBiChartBlockModel');
+  assert.equal(biChart.config.collection, 'latticeOrders');
+  assert.equal(biChart.config.chartType, 'bar');
+  assert.equal(biChart.config.groupBy, 'status');
   const kanban = logistics.blocks.find((b) => b.uidSuffix === 'kanban');
   assert.equal(kanban.use, 'DxosKanbanScheduleBlockModel');
   assert.deepEqual(kanban.config, {

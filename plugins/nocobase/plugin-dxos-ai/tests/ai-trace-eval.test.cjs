@@ -494,6 +494,50 @@ test('ai-trace-eval-panel.js has ZERO external npm require() imports and renders
   assert.ok(traceDump.includes('dxos-trace-waterfall-svg'));
   assert.ok(traceDump.includes('dxos-trace-span-sp-2'));
   assert.ok(traceDump.includes('dxos-trace-span-detail'));
+  assert.ok(traceDump.includes('2 spans'));
+
+  // Singular '1 span' + widened agent filter + parent/child inferred depth indentation
+  const singleTraceTree = AiTraceWaterfallPanel({
+    React,
+    organizationId: 'org-a',
+    initialTraces: [{ traceId: 'trace-single', agentName: 'dxos-architect', status: 'ok', durationMs: 50, totalTokens: 10, spanCount: 1 }],
+    initialTraceDetail: {
+      traceId: 'trace-single',
+      totalDurationMs: 100,
+      spans: [
+        { spanId: 'root-a', name: 'invoke_agent dxos-ops', startOffsetMs: 0, durationMs: 100 },
+        { spanId: 'child-b', parentSpanId: 'root-a', name: 'execute_tool dxos_alarm_action', startOffsetMs: 20, durationMs: 40 },
+      ],
+    },
+  });
+  const singleDump = JSON.stringify(singleTraceTree);
+  assert.ok(singleDump.includes('1 span'));
+  assert.equal(singleDump.includes('1 spans'), false);
+  assert.ok(singleDump.includes('"minWidth":230'));
+  const inferredBars = computeWaterfallBars({
+    totalDurationMs: 100,
+    spans: [
+      { spanId: 'root-a', name: 'root', startOffsetMs: 0, durationMs: 100 },
+      { spanId: 'child-b', parentSpanId: 'root-a', name: 'child', startOffsetMs: 20, durationMs: 40 },
+    ],
+  });
+  assert.equal(inferredBars.bars[0].depth, 0);
+  assert.equal(inferredBars.bars[1].depth, 1);
+
+  // Eval Lab localized tool placeholder, Case Preview toggle/list, and Recent Runs table
+  const { renderEvalLabPanel } = require(clientFilePath);
+  const evalPreviewTree = renderEvalLabPanel(React, {
+    organizationId: 'org-a',
+    selectedSuiteId: 'wave1-3-capabilities',
+    casePreviewOpen: true,
+    recentRuns: [{ runId: 'eval-prev-1', suiteId: 'wave1-3-capabilities', passed: 11, total: 11, passRate: 100, avgLatencyMs: 1.2, p95LatencyMs: 2.4 }],
+  });
+  const evalPreviewDump = JSON.stringify(evalPreviewTree);
+  assert.ok(evalPreviewDump.includes('Công cụ kỳ vọng (tùy chọn)'));
+  assert.equal(evalPreviewDump.includes('expectedTool (tùy chọn)'), false);
+  assert.ok(evalPreviewDump.includes('dxos-eval-case-preview-list'));
+  assert.ok(evalPreviewDump.includes('dxos-eval-recent-runs'));
+  assert.ok(evalPreviewDump.includes('eval-prev-1'));
 
   const sampleEval = {
     runId: 'eval-ui-01',

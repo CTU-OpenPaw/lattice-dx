@@ -2057,10 +2057,48 @@ function createDxosAutomationsActions(db, options = {}) {
       const ruleKey = String(params.ruleKey || params.automationCode || '').trim();
       const items = await runAutomationWithRls(db, organizationId, async () => {
         const verRepo = db.getRepository('latticeAutomationRuleVersions');
-        if (!verRepo || typeof verRepo.find !== 'function') return [];
+        const rulesRepo = db.getRepository('latticeAutomationRules');
+        const limit = clampPageLimit(params.limit ?? 50);
         const filter = { organizationId, ...(ruleKey ? { ruleKey } : {}) };
-        const rows = (await verRepo.find({ filter, sort: ['-version', '-id'], limit: clampPageLimit(params.limit ?? 50) })) || [];
-        return rows.map(toPlain).sort((a, b) => Number(b.version || 0) - Number(a.version || 0));
+        const rows = (verRepo && typeof verRepo.find === 'function')
+          ? ((await verRepo.find({ filter, sort: ['-version', '-id'], limit })) || [])
+          : [];
+        const list = rows.map(toPlain);
+
+        if (rulesRepo) {
+          const ruleRows = ruleKey
+            ? [await rulesRepo.findOne({ filter: { organizationId, ruleKey } })].filter(Boolean)
+            : (typeof rulesRepo.find === 'function'
+              ? ((await rulesRepo.find({ filter: { organizationId }, limit })) || [])
+              : []);
+          for (const rawRule of ruleRows) {
+            const r = toPlain(rawRule);
+            if (!r || !r.ruleKey) continue;
+            const pubVer = Number(r.publishedVersion || 0);
+            const liveGraph = isPlainObject(r.graphJson) ? r.graphJson : (isPlainObject(r.publishedGraphJson) ? r.publishedGraphJson : null);
+            if (pubVer >= 1 && liveGraph && !list.some((v) => v.ruleKey === r.ruleKey && Number(v.version || 0) === pubVer)) {
+              list.push({
+                id: `baseline-${r.id ?? r.ruleKey}-v${pubVer}`,
+                organizationId,
+                ruleId: r.id ?? null,
+                ruleUid: r.ruleUid || null,
+                ruleKey: r.ruleKey,
+                version: pubVer,
+                status: 'published',
+                isCurrent: true,
+                syntheticBaseline: true,
+                graphJson: liveGraph,
+                triggerIndexJson: Array.isArray(r.triggerIndexJson) ? r.triggerIndexJson : [],
+                note: 'Phiên bản đang chạy (Live Baseline)',
+                changeSummary: 'Phiên bản đang chạy (Live Baseline)',
+                publishedBy: r.createdBy || 'system',
+                publishedAt: r.updatedAt || r.createdAt || null,
+              });
+            }
+          }
+        }
+
+        return list.sort((a, b) => Number(b.version || 0) - Number(a.version || 0));
       });
       ctx.body = { items };
       return next();
