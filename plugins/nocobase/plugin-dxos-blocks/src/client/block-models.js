@@ -18,6 +18,8 @@ const {
   fetchParaSummary,
   inferPortalSlugFromLocation,
   requestAndDownloadExport,
+  resolveClientAuthToken,
+  subscribeCollectionsMeta,
   fetchCollectionsMeta,
 } = require('./blocks-helpers');
 const { createCreativeStudioView, DEFAULT_CREATIVE_BLUEPRINT } = require('./creative-studio-block');
@@ -933,23 +935,27 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   const workbenchCollectionEnum = WORKBENCH_COLLECTION_ENUM.map((opt) => ({ ...opt }));
   const kanbanCollectionEnum = KANBAN_COLLECTION_ENUM.map((opt) => ({ ...opt }));
 
+  const syncBlockModelCollectionEnums = (cols) => {
+    if (!Array.isArray(cols)) return;
+    for (const targetEnum of [workbenchCollectionEnum, kanbanCollectionEnum]) {
+      const seen = new Set(targetEnum.map((o) => o.value));
+      for (const col of cols) {
+        const name = String(col?.name || '').trim();
+        if (!name || ['__proto__', 'constructor', 'prototype'].includes(name) || seen.has(name)) continue;
+        seen.add(name);
+        targetEnum.push({
+          value: name,
+          label: col.title && col.title !== name ? `${col.title} (${name})` : name,
+        });
+      }
+    }
+  };
+  subscribeCollectionsMeta(syncBlockModelCollectionEnums);
+
   const bootstrapApi = app?.apiClient?.request ? app.apiClient : null;
-  if (bootstrapApi) {
+  if (bootstrapApi && resolveClientAuthToken(bootstrapApi)) {
     Promise.resolve(fetchCollectionsMeta(bootstrapApi))
-      .then((cols) => {
-        if (!Array.isArray(cols)) return;
-        for (const targetEnum of [workbenchCollectionEnum, kanbanCollectionEnum]) {
-          const seen = new Set(targetEnum.map((o) => o.value));
-          for (const col of cols) {
-            if (!col?.name || seen.has(col.name)) continue;
-            seen.add(col.name);
-            targetEnum.push({
-              value: col.name,
-              label: col.title && col.title !== col.name ? `${col.title} (${col.name})` : col.name,
-            });
-          }
-        }
-      })
+      .then(syncBlockModelCollectionEnums)
       .catch(() => {});
   }
 

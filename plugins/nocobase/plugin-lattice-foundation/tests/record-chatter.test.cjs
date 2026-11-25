@@ -380,6 +380,18 @@ test('Task 7: isChatterCollectionAllowed, latticeChatter actions, and recordFiel
   );
   await assert.rejects(
     () => leakyActions.list(
+      {
+        method: 'GET',
+        state: { currentUser: { id: 101, username: 'an' }, currentRole: '' },
+        action: { params: { targetCollection: 'latticeCustomWorkOrders', targetRecordId: 31 } },
+        throw(status, message) { throw Object.assign(new Error(message || String(status)), { status }); },
+      },
+      async () => {},
+    ),
+    (err) => err.status === 403 && err.code === 'CHATTER_ACCESS_DENIED',
+  );
+  await assert.rejects(
+    () => leakyActions.list(
       makeCtx({ targetCollection: 'latticeCustomWorkOrders', targetRecordId: 32 }, 'GET', { can: () => true }),
       async () => {},
     ),

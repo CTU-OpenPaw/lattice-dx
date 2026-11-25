@@ -502,4 +502,21 @@ test('Task 7: resolveAllowedExportColumns and executeGovernedExport inspect db.g
     isRoot: false,
   });
   assert.deepEqual(restrictedRes.columns, ['code', 'status']);
+
+  // 4. Prototype keys (__proto__, constructor, prototype) are blocked in explicit requestedFields
+  await assert.rejects(
+    () => resolveAllowedExportColumns(db, ctx, {
+      collection: 'latticeCustomMaintenanceOrders',
+      requestedFields: ['__proto__', 'constructor', 'prototype'],
+      isRoot: true,
+    }),
+    (err) => err.status === 403 && err.code === 'EXPORT_FIELDS_FORBIDDEN',
+  );
+  const mixedProtoRes = await resolveAllowedExportColumns(db, ctx, {
+    collection: 'latticeCustomMaintenanceOrders',
+    requestedFields: ['code', '__proto__', 'constructor'],
+    isRoot: true,
+  });
+  assert.deepEqual(mixedProtoRes.columns, ['code']);
+  assert.deepEqual(mixedProtoRes.omittedColumns, ['__proto__', 'constructor']);
 });

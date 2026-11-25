@@ -297,6 +297,38 @@ async function requestAndDownloadExport(api, { collection, format = 'csv', field
   return { ok: true, meta, download };
 }
 
+const collectionsMetaListeners = new Set();
+
+function resolveClientAuthToken(api) {
+  if (!api) return '';
+  try {
+    const t = typeof api.auth?.getToken === 'function' ? api.auth.getToken() : '';
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    const t = api.auth?.token;
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    if (typeof window !== 'undefined' && window?.localStorage && typeof window.localStorage.getItem === 'function') {
+      const t = window.localStorage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    } else if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
+      const t = localStorage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    }
+  } catch {}
+  return '';
+}
+
+function subscribeCollectionsMeta(listener) {
+  if (typeof listener !== 'function') return () => {};
+  collectionsMetaListeners.add(listener);
+  return () => {
+    collectionsMetaListeners.delete(listener);
+  };
+}
+
 async function fetchCollectionsMeta(api) {
   if (!api?.request) return [];
   try {
@@ -306,7 +338,11 @@ async function fetchCollectionsMeta(api) {
       skipNotify: true,
     });
     const list = res?.data?.data?.collections ?? res?.data?.collections ?? [];
-    return Array.isArray(list) ? list : [];
+    const cols = Array.isArray(list) ? list : [];
+    for (const fn of [...collectionsMetaListeners]) {
+      try { fn(cols); } catch {}
+    }
+    return cols;
   } catch {
     return [];
   }
@@ -429,6 +465,8 @@ module.exports = {
   createAgentStripElement,
   triggerBase64Download,
   requestAndDownloadExport,
+  resolveClientAuthToken,
+  subscribeCollectionsMeta,
   fetchCollectionsMeta,
   inferCollectionFieldsMeta,
 };

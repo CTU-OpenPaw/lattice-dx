@@ -513,6 +513,7 @@ test('Task 7: DxosRecordWorkbenchBlockModel preserves strict defaultParams while
   }
 
   const bootstrapApi = {
+    auth: { getToken: () => 'tok-valid' },
     async request(req) {
       if (req.url === 'dxosBlocks:collectionsMeta') {
         return {
@@ -551,5 +552,89 @@ test('Task 7: DxosRecordWorkbenchBlockModel preserves strict defaultParams while
   assert.ok(
     cfgStep.uiSchema.collection.enum.some((opt) => opt.value === 'latticeCustomMaintenanceOrders'),
     'DxosRecordWorkbenchBlockModel config collection dropdown must include dynamic latticeCustom* collections',
+  );
+});
+
+test('Task 7 Fix Round 1: registerDxosBlockModels skips collectionsMeta when unauthenticated (0 requests on /signin) and lazily populates enums after post-login fetchCollectionsMeta', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { fetchCollectionsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const unauthCalls = [];
+  const unauthApiWithAuth = {
+    auth: { getToken: () => '' },
+    async request(req) {
+      unauthCalls.push(req);
+      return { data: { data: { collections: [] } } };
+    },
+  };
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => unauthApiWithAuth, useUIConfigurationPermissions: () => ({ allowAll: false }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    { apiClient: unauthApiWithAuth },
+  );
+
+  const tokenlessCalls = [];
+  const tokenlessApi = {
+    async request(req) {
+      tokenlessCalls.push(req);
+      return { data: { data: { collections: [] } } };
+    },
+  };
+  registerDxosBlockModels(
+    { useAPIClient: () => tokenlessApi, useUIConfigurationPermissions: () => ({ allowAll: false }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    { apiClient: tokenlessApi },
+  );
+
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(unauthCalls.length, 0, 'Unauthenticated bootstrap with empty getToken() must make 0 requests');
+  assert.equal(tokenlessCalls.length, 0, 'Tokenless bootstrap without NOCOBASE_TOKEN must make 0 requests');
+
+  // Simulate post-login SPA navigation where a block view triggers fetchCollectionsMeta(api)
+  const postLoginApi = {
+    auth: { getToken: () => 'tok-post-login' },
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                { name: 'latticeCustomColdAlerts', title: 'Cảnh báo Chuỗi lạnh', isCustom: true, fields: [] },
+              ],
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  await fetchCollectionsMeta(postLoginApi);
+
+  const wbEnum = models.DxosRecordWorkbenchBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config.uiSchema.collection.enum;
+  const kbEnum = models.DxosKanbanScheduleBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config.uiSchema.collection.enum;
+  assert.ok(
+    wbEnum.some((opt) => opt.value === 'latticeCustomColdAlerts'),
+    'Post-login fetchCollectionsMeta must lazily populate DxosRecordWorkbenchBlockModel config dropdown',
+  );
+  assert.ok(
+    kbEnum.some((opt) => opt.value === 'latticeCustomColdAlerts'),
+    'Post-login fetchCollectionsMeta must lazily populate DxosKanbanScheduleBlockModel config dropdown',
   );
 });

@@ -104,7 +104,7 @@ function assertSafeFilter(node, depth = 0) {
 
 function isSensitiveField(name) {
   const clean = String(name || '').trim();
-  if (!clean || clean.includes('.') || clean.startsWith('$')) return true;
+  if (!clean || BLOCKED_EXPORT_KEYS.has(clean) || clean.includes('.') || clean.startsWith('$')) return true;
   return SENSITIVE_EXPORT_FIELDS.has(clean) || SENSITIVE_KEY_RE.test(clean);
 }
 

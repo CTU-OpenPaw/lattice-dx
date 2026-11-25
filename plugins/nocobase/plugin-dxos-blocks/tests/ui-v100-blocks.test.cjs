@@ -2584,6 +2584,9 @@ test('Task 7: VoucherLifecycleBar renders PKI & Lineage badges for latticeCustom
 
   const Bar = createVoucherLifecycleBar({ useAPIClient: () => api }, React, {});
   assert.equal(Bar({ targetCollection: 'latticeCustomWorkOrders', targetRecordId: 0 }), null);
+  assert.equal(Bar({ targetCollection: 'latticeCustomWorkOrders', targetRecordId: 17.5 }), null);
+  assert.equal(Bar({ targetCollection: '__proto__', targetRecordId: 17 }), null);
+  assert.equal(Bar({ targetCollection: 'constructor', targetRecordId: 17 }), null);
   assert.equal(Bar({ targetCollection: 'bad collection!', targetRecordId: 17 }), null);
 
   let tree = render(Bar, { targetCollection: 'latticeCustomWorkOrders', targetRecordId: 17 });

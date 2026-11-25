@@ -11,6 +11,7 @@
 const { SAFE_COLLECTION_RE, requestAndDownloadExport } = require('./blocks-helpers');
 
 const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
+const BLOCKED_COLLECTION_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const CANCELLABLE_STATUSES = new Set(['submitted', 'approved', 'in_progress']);
 const PRINTABLE_ORDER_DOCUMENT_TYPES = new Set(['order', 'delivery_note', 'epod']);
 const VOUCHER_STATUS_META = {
@@ -220,7 +221,10 @@ function createVoucherLifecycleBar(client, React, app) {
     const propOrg = String(organizationId || record?.organizationId || ctxRecord?.organizationId || '').trim();
     const colName = String(targetCollection || '').trim();
     const numericRecordId = Number(targetRecordId);
-    const validRecordTarget = SAFE_COLLECTION_RE.test(colName) && Number.isFinite(numericRecordId) && numericRecordId > 0;
+    const validRecordTarget = SAFE_COLLECTION_RE.test(colName)
+      && !BLOCKED_COLLECTION_KEYS.has(colName)
+      && Number.isInteger(numericRecordId)
+      && numericRecordId > 0;
     const validVoucherTarget = showVoucherActions !== false && VOUCHER_COLLECTIONS.has(colName) && validRecordTarget;
     const [info, setInfo] = React.useState({
       status: String(recordStatus || ''),

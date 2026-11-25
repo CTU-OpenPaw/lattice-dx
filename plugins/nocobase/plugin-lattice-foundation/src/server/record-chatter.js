@@ -204,8 +204,11 @@ async function hasCollectionReadPermission(db, ctx, collection) {
   const roleName = ctx?.state?.currentRole;
   const rolesRepo = db?.getRepository?.('roles');
   const dsrRepo = db?.getRepository?.('dataSourcesRolesResources');
-  if (!roleName || !dsrRepo) {
+  if (!dsrRepo || typeof dsrRepo.findOne !== 'function') {
     return true;
+  }
+  if (!roleName) {
+    return false;
   }
   if (rolesRepo && typeof rolesRepo.findOne === 'function') {
     const role = await rolesRepo.findOne({ filter: { name: roleName } });
