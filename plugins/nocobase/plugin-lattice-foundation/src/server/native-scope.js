@@ -89,6 +89,14 @@ const SENSITIVE_SCOPED_COLLECTIONS = new Set([
   'latticeUiSnapshots',
   'latticeAiProfiles',
   'latticeAiApprovalQueue',
+  'latticeAiTraces',
+  'latticeAiMemory',
+  'latticeA2aTasks',
+  'latticeNotificationDeliveries',
+  'latticeApprovalPolicies',
+  'latticeApprovalRequests',
+  'latticePublicForms',
+  'latticePublicFormSubmissions',
 ]);
 const SENSITIVE_CHART_COLLECTIONS = new Set([
   'users', 'roles', 'dataSourcesRoles', 'dataSourcesRolesResources',

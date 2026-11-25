@@ -329,7 +329,7 @@ test('Solution Bundle v3 exports routesAndBlocks and org-scoped governance clean
   const { db } = makeV3Harness();
   const bundle = await exportSolutionBundle(db, { organizationId: 'org-a' });
   assert.equal(bundle.metadata.schemaVersion, 'latticedx.solution-bundle/v3');
-  assert.equal(bundle.metadata.platformVersion, '1.0.0');
+  assert.equal(bundle.metadata.platformVersion, '0.4.0');
   assert.equal(bundle.metadata.organizationId, 'org-a');
   assert.equal(validateSolutionBundle(bundle).valid, true);
 
@@ -625,7 +625,7 @@ test('studio-resource enforces non-root organizationId isolation (403 DXOS_ORG_M
   const rootAllCtx = { method: 'GET', state: rootState, action: { params: { organizationId: 'all' } } };
   await actions.solutionBundleExport(rootAllCtx, async () => {});
   assert.equal(rootAllCtx.body.metadata.organizationId, 'all');
-  assert.equal(rootAllCtx.body.metadata.platformVersion, '1.0.0');
+  assert.equal(rootAllCtx.body.metadata.platformVersion, '0.4.0');
 
   const rootOrgBCtx = { method: 'GET', state: rootState, action: { params: { organizationId: 'org-b' } } };
   await actions.solutionBundleExport(rootOrgBCtx, async () => {});

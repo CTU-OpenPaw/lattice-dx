@@ -56,6 +56,19 @@
     }
     return null;
   }
+  function resolveLegacyFormRedirect(winLike) {
+    if (!winLike || winLike.__nocobase_app_client_entry_mode__ !== 'legacy-default') return null;
+    const loc = winLike.location;
+    if (!loc) return null;
+    const pathname = String(loc.pathname || '');
+    if (!pathname || pathname === '/mobile' || pathname.startsWith('/mobile/') || pathname.startsWith('/v/')) {
+      return null;
+    }
+    if (pathname === '/form' || pathname.startsWith('/form/')) {
+      return `/v${pathname}${loc.search || ''}${loc.hash || ''}`;
+    }
+    return null;
+  }
 
   class LatticeFoundationClient extends client.Plugin {
     async load() {
@@ -67,6 +80,11 @@
       const trackV2Dest = resolveLegacyTrackRedirect(typeof window !== 'undefined' ? window : null);
       if (trackV2Dest && typeof window?.location?.replace === 'function') {
         window.location.replace(trackV2Dest);
+        return;
+      }
+      const formV2Dest = resolveLegacyFormRedirect(typeof window !== 'undefined' ? window : null);
+      if (formV2Dest && typeof window?.location?.replace === 'function') {
+        window.location.replace(formV2Dest);
         return;
       }
       const BrandLogo=createBrandLogo(client,React);
@@ -197,6 +215,15 @@
         };
         this.app.router.add('lattice-track-v2', { path: '/track/:code', Component: TrackV2Redirect });
         this.app.router.add('lattice-track-v2-root', { path: '/track', Component: TrackV2Redirect });
+        const FormV2Redirect = () => {
+          React.useEffect(() => {
+            const dest = resolveLegacyFormRedirect(window);
+            if (dest && typeof window?.location?.replace === 'function') window.location.replace(dest);
+          }, []);
+          return React.createElement('div', { role: 'status', style: { padding: 32, textAlign: 'center', color: '#64748b' } }, 'Đang chuyển đến Biểu mẫu Công khai...');
+        };
+        this.app.router.add('lattice-form-v2', { path: '/form/:slug', Component: FormV2Redirect });
+        this.app.router.add('lattice-form-v2-root', { path: '/form', Component: FormV2Redirect });
       }
       if (window.location.hostname === '127.0.0.1' && window.location.pathname.startsWith('/lattice')) {
         const canonical = new URL(window.location.href);canonical.hostname='localhost';

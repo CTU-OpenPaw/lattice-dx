@@ -17,6 +17,8 @@
   const { createDxosStudioSettingsPage, createFlowPinStorage } = require('./studio-settings');
   const { createFlowStudioApp } = require('./flow/flow-studio-app');
   const { createConnectedAppsPanel } = require('./flow/connected-apps-panel');
+  const { createPublicFormBuilderPanel, PublicFormBuilderPanel } = require('./public-form-builder');
+  const { createApprovalInboxPanel, ApprovalInboxPanel } = require('./approval-inbox-panel');
 
   function createWorkflowConnectorsPage(app) {
     const h = React.createElement;
@@ -129,5 +131,9 @@
     createDxosStudioSettingsPage,
     createFlowStudioApp,
     registerStudioSettings,
+    createPublicFormBuilderPanel,
+    PublicFormBuilderPanel,
+    createApprovalInboxPanel,
+    ApprovalInboxPanel,
   };
 });

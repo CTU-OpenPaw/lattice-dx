@@ -30,7 +30,7 @@ const ACCEPTED_SCHEMA_VERSIONS = new Set([
   'latticedx.solution-bundle/v2',
   'latticedx.solution-bundle/v3',
 ]);
-const DEFAULT_PLATFORM_VERSION = '1.0.0';
+const DEFAULT_PLATFORM_VERSION = '0.4.0';
 const FORBIDDEN_ROLES = new Set(['root', 'admin', 'ldx_admin']);
 const SAFE_ROLE_RE = /^ldx_[a-z0-9_]{2,48}$/;
 const SAFE_PORTAL_UID_RE = /^ldx-portal-[a-z0-9-]+$/;

@@ -101,7 +101,7 @@ function createFlowCanvas(React, vendor = {}) {
 
   return function FlowCanvas(props = {}) {
     const {
-      graph, nodeTypes, selectedNodeId, onSelectNode, onConnectNodes, onNodesChangeGraph, onInsertBetweenEdge,
+      graph, nodeTypes, selectedNodeId, onSelectNode, onInspectTraceNode, onConnectNodes, onNodesChangeGraph, onInsertBetweenEdge,
       runOverlay, onAutoLayout, onDropNode, onAddNode, onQuickTestNode, onDuplicateNode, onDeleteNode,
       canUndo = false, canRedo = false, onUndo, onRedo, xyflowOverride,
       validationByNodeId = {}, onAppendFromNode, focusNodeId = null, focusSeq = 0,
@@ -112,7 +112,7 @@ function createFlowCanvas(React, vendor = {}) {
     const [containerEl, setContainerEl] = React.useState(null);
     const [appendMenuNodeId, setAppendMenuNodeId] = React.useState(null);
     const [handlersRef] = React.useState(() => ({}));
-    Object.assign(handlersRef, { onSelectNode, onInsertBetweenEdge, onQuickTestNode, onDuplicateNode, onDeleteNode, onAppendFromNode, setAppendMenuNodeId });
+    Object.assign(handlersRef, { onSelectNode, onInspectTraceNode, onInsertBetweenEdge, onQuickTestNode, onDuplicateNode, onDeleteNode, onAppendFromNode, setAppendMenuNodeId });
 
     React.useEffect(() => {
       if (typeof vendor?.injectFlowStudioCss === 'function') vendor.injectFlowStudioCss();
@@ -222,7 +222,11 @@ function createFlowCanvas(React, vendor = {}) {
           HandleComp ? inputs.map((inp, i) => h(HandleComp, { key: `in-${inp}`, type: 'target', position: PositionObj.Left, id: inp, style: { top: `${((i + 1) / (inputs.length + 1)) * 100}%`, background: '#475569', width: 9, height: 9 } })) : null,
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 } },
             h('span', { style: { fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 999, background: catMeta.bg, color: stripe } }, `${catMeta.symbol} ${d.nodeType || catMeta.badge}`),
-            tStyle ? h('span', { style: { fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 999, background: '#FFFFFF', border: `1px solid ${tStyle.border}`, color: tStyle.color } }, `${tStyle.label}${d.trace?.durationMs != null ? ` · ${d.trace.durationMs}ms` : ''}`) : null,
+            tStyle ? h('span', {
+              'data-testid': `dxos-flow-node-trace-badge-${nodeId}`, title: 'Click to inspect Input/Output trace',
+              onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onInspectTraceNode?.(nodeId); },
+              style: { fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 999, background: '#FFFFFF', border: `1px solid ${tStyle.border}`, color: tStyle.color, cursor: 'pointer' },
+            }, `${tStyle.label}${d.trace?.durationMs != null ? ` · ${d.trace.durationMs}ms` : ''}`) : null,
           ),
           h('strong', { style: { fontSize: 13, color: '#0F172A', lineHeight: 1.3, wordBreak: 'break-word' } }, d.label),
           d.preview ? h('div', { 'data-testid': `dxos-flow-node-preview-${nodeId}`, style: { fontSize: 11, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', color: '#64748B', background: '#F8FAFC', padding: '3px 6px', borderRadius: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, d.preview) : null,

@@ -2086,3 +2086,93 @@ test('Task 4: migration 20261127000300, pinned graphSnapshotJson, triggerPayload
     else process.env.DX_PG_RLS_SESSION = prevRlsEnv;
   }
 });
+
+test('executor captures sanitized secret-scrubbed input on stepTracesJson and nodeStatesJson and preserves it across resumeFlowRun', async () => {
+  const db = makeFlowDb({
+    latticeEmployees: [{ id: 1, userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+  });
+  const rule = {
+    organizationId: 'org-a',
+    ruleKey: 'trace_io_rule',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'tr1', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'greeting', value: 'hello-{{data.code}}' }] } },
+        { id: 'ap1', type: 'control.approval', config: { approverRole: 'ldx_admin', title: 'Approve' } },
+        { id: 'tr2', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'finalOk', value: true }] } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'tr1' },
+        { id: 'e2', source: 'tr1', sourceHandle: 'main', target: 'ap1' },
+        { id: 'e3', source: 'ap1', sourceHandle: 'approved', target: 'tr2' },
+      ],
+    },
+  };
+  await db.getRepository('latticeAutomationRules').create({ values: rule });
+
+  const susp = await executeFlowGraph(db, rule, {
+    organizationId: 'org-a',
+    data: { code: 'ORD-1', apiKey: 'sk-super-secret-token-9999', password: 'plain-password-123' },
+  });
+  assert.equal(susp.status, 'suspended');
+  const tr1Trace = susp.stepTracesJson.find((t) => t.nodeId === 'tr1');
+  assert.ok(tr1Trace.input !== undefined, 'stepTracesJson must capture node input');
+  assert.equal(susp.nodeStatesJson.tr1.input !== undefined, true, 'nodeStatesJson must capture node input');
+  assert.equal(JSON.stringify(tr1Trace.input).includes('sk-super-secret-token-9999'), false, 'input trace must scrub secrets');
+  assert.equal(JSON.stringify(tr1Trace.input).includes('plain-password-123'), false, 'input trace must redact sensitive keys');
+
+  const apTraceBefore = susp.stepTracesJson.find((t) => t.nodeId === 'ap1');
+  assert.ok(apTraceBefore.input !== undefined);
+  const resumed = await resumeFlowRun(db, {
+    organizationId: 'org-a',
+    runUid: susp.runUid,
+    decision: 'approved',
+    resumeToken: susp.resumeToken,
+    actor: { userId: 20, username: 'admin' },
+  });
+  assert.equal(resumed.status, 'completed');
+  const apTraceAfter = resumed.stepTracesJson.find((t) => t.nodeId === 'ap1');
+  assert.ok(apTraceAfter.input !== undefined, 'resumeFlowRun must preserve original node input on stepTracesJson');
+  assert.ok(resumed.nodeStatesJson.ap1.input !== undefined, 'resumeFlowRun must preserve original node input on nodeStatesJson');
+});
+
+test('executor scrubs secrets from stepTracesJson[*].output and nodeStatesJson[*].output while keeping downstream expressions functional', async () => {
+  const db = makeFlowDb();
+  const rule = {
+    organizationId: 'org-a',
+    ruleKey: 'trace_output_scrub_rule',
+    schemaVersion: 2,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.webhook', config: { authMode: 'hmac' } },
+        { id: 'tr1', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'echoTag', value: 'tag-{{data.safeTag}}' }] } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'tr1' },
+      ],
+    },
+  };
+  const run = await executeFlowGraph(db, rule, {
+    organizationId: 'org-a',
+    type: 'webhook.inbound',
+    data: {
+      safeTag: 'alpha-42',
+      apiKey: 'ak-secret-1234',
+      token: 'tok-secret-5678',
+      password: 'pw-secret-9012',
+      authorization: 'Bearer sk-secret-abcdef12',
+    },
+  });
+  assert.equal(run.status, 'completed');
+  assert.equal(run.nodeStatesJson.tr1.output.echoTag, 'tag-alpha-42');
+  const serializedTraces = JSON.stringify(run.stepTracesJson);
+  const serializedStates = JSON.stringify(run.nodeStatesJson);
+  for (const rawSecret of ['ak-secret-1234', 'tok-secret-5678', 'pw-secret-9012', 'sk-secret-abcdef12']) {
+    assert.equal(serializedTraces.includes(rawSecret), false, `stepTracesJson leaked secret ${rawSecret}`);
+    assert.equal(serializedStates.includes(rawSecret), false, `nodeStatesJson leaked secret ${rawSecret}`);
+  }
+});

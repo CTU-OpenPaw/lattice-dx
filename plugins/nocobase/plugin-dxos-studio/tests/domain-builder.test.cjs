@@ -1172,6 +1172,10 @@ test('all new builder server & test files satisfy CTU-OpenPaw SPDX header check'
   const { addSourceHeader } = await import('../../../../scripts/source-headers.mjs');
   const files = [
     'plugins/nocobase/plugin-dxos-studio/src/server/domain-builder.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/domain-portal-composer.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/domain-schema-rls.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/domain-tenant-provisioner.js',
+    'plugins/nocobase/plugin-dxos-studio/src/server/domain-packs.js',
     'plugins/nocobase/plugin-dxos-studio/tests/domain-builder.test.cjs',
   ];
   const rootDir = path.resolve(__dirname, '../../../..');
@@ -1369,4 +1373,120 @@ test('RLS Remediation (Finding 4): installBusinessPack, listBusinessPacks, listT
     if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
     else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
+});
+
+test('domain-builder facade preserves all 24 public exports identically', () => {
+  const mod = require('../src/server/domain-builder');
+  const expected = [
+    'ALLOWED_FIELD_TYPES',
+    'ALLOWED_FORMULA_RETURN_TYPES',
+    'BUSINESS_PACK_CATALOG',
+    'applyFormulaFields',
+    'attachAndVerifyPgRls',
+    'attachRichSchemaHooksForCollection',
+    'buildSafeJoinCollectionName',
+    'buildSafePgIndexName',
+    'createDxosBuilderActions',
+    'createOrUpdateDomainCollection',
+    'ensureBelongsToManyJoinCollection',
+    'evaluateFormulaExpression',
+    'generateOrEnsureOrgPkiKey',
+    'mapFieldSpecToNocoBase',
+    'parseFormulaAst',
+    'parseRegexAst',
+    'registerRichSchemaHooks',
+    'resolveThroughCollectionName',
+    'sanitizeFieldValidation',
+    'sanitizeFields',
+    'upsertPortalPageForDomain',
+    'validateFormulaExpression',
+    'validateRecordFields',
+    'validateSafeRegexPattern',
+  ].sort();
+  assert.deepEqual(Object.keys(mod).sort(), expected);
+  for (const key of expected) {
+    assert.notEqual(mod[key], undefined, `Export "${key}" must be defined`);
+  }
+});
+
+test('sanitizeFields and createDomain reject own prototype-pollution keys and excessive depth with 400', async () => {
+  const { sanitizeFields } = require('../src/server/domain-builder');
+
+  // 1. Top-level enumerable own __proto__ via JSON.parse
+  const jsonProtoFields = JSON.parse('[{"name":"note","type":"string","__proto__":{"polluted":true}}]');
+  assert.throws(
+    () => sanitizeFields(jsonProtoFields),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+
+  // 2. Top-level own constructor / prototype keys
+  assert.throws(
+    () => sanitizeFields([{ name: 'note', type: 'string', constructor: { polluted: true } }]),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+  assert.throws(
+    () => sanitizeFields([{ name: 'note', type: 'string', prototype: { polluted: true } }]),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+
+  // 3. Non-enumerable own __proto__ via Object.defineProperty
+  const nonEnumField = { name: 'note', type: 'string' };
+  Object.defineProperty(nonEnumField, '__proto__', { value: { polluted: true }, enumerable: false });
+  assert.throws(
+    () => sanitizeFields([nonEnumField]),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+
+  // 4. Nested uiSchema (2+ levels deep) and nested validation
+  const nestedUiSchema = JSON.parse('{"x-component-props":{"__proto__":{"polluted":true}}}');
+  assert.throws(
+    () => sanitizeFields([{ name: 'note', type: 'string', uiSchema: nestedUiSchema }]),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+  assert.throws(
+    () => sanitizeFields([{ name: 'note', type: 'string', uiSchema: { constructor: {} } }]),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+  const nestedValidation = JSON.parse('{"__proto__":{"polluted":true}}');
+  assert.throws(
+    () => sanitizeFields([{ name: 'note', type: 'string', validation: nestedValidation }]),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+  assert.throws(
+    () => sanitizeFields([{ name: 'note', type: 'string', validation: { prototype: {} } }]),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+
+  // 5. Depth > 24 rejected with 400 PAYLOAD_DEPTH_EXCEEDED
+  let deep = { leaf: true };
+  for (let i = 0; i < 26; i += 1) {
+    deep = { nested: deep };
+  }
+  assert.throws(
+    () => sanitizeFields([{ name: 'note', type: 'string', uiSchema: deep }]),
+    (err) => err.status === 400 && err.code === 'PAYLOAD_DEPTH_EXCEEDED',
+  );
+
+  // 6. End-to-end createDomain rejection & zero Object.prototype pollution
+  const db = makeBuilderDb({
+    rolesUsers: [{ userId: 1, roleName: 'root' }],
+  });
+  const builder = createDxosBuilderActions(db);
+  await assert.rejects(
+    () => builder.createDomain(makeCtx({
+      userId: 1,
+      role: 'root',
+      isRoot: true,
+      params: {
+        collectionName: 'latticeCustomProtoGuard',
+        fields: [{
+          name: 'note',
+          type: 'string',
+          uiSchema: JSON.parse('{"x-component-props":{"__proto__":{"polluted":true}}}'),
+        }],
+      },
+    }), async () => {}),
+    (err) => err.status === 400 && err.code === 'PROTOTYPE_POLLUTION_FORBIDDEN',
+  );
+  assert.equal(({}).polluted, undefined);
 });

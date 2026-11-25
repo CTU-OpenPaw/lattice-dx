@@ -985,3 +985,33 @@ test('validator static SSRF blocks hex/octal/decimal-int/private IPv4 and fc00/f
     assert.equal(res.ok, true, `Expected safe path/URL ${safeVal} to pass: ${JSON.stringify(res.errors)}`);
   }
 });
+
+test('FORBIDDEN_SYSTEM_COLLECTIONS blocks Wave 2 tables across data.* and ai.agent', () => {
+  const { validateFlowGraph, isAllowlistedTargetCollection, validatePromptSecurity } = validatorMod;
+  const { isAllowlistedTargetCollection: engineAllowlisted } = require('../src/server/automation-engine');
+  const { FORBIDDEN_SYSTEM_COLLECTIONS } = require('../src/server/flow/schema');
+  const { isAllowlistedTargetCollection: dataAllowlisted, isForbiddenCollection } = require('../src/server/flow/nodes/data');
+  const wave2Tables = ['latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions', 'latticeA2aTasks'];
+
+  for (const col of wave2Tables) {
+    assert.equal(FORBIDDEN_SYSTEM_COLLECTIONS.has(col), true, `FORBIDDEN_SYSTEM_COLLECTIONS must contain ${col}`);
+    assert.equal(isForbiddenCollection(col), true, `data.isForbiddenCollection must reject ${col}`);
+    assert.equal(isAllowlistedTargetCollection(col), false, `validator must block ${col}`);
+    assert.equal(engineAllowlisted(col), false, `automation-engine must block ${col}`);
+    assert.equal(dataAllowlisted(col), false, `data node must block ${col}`);
+    for (const nodeType of ['data.query', 'data.create', 'data.update', 'ai.agent']) {
+      const cfg = nodeType === 'ai.agent' ? { targetCollection: col } : { collection: col, filter: { id: 1 }, values: { a: 1 } };
+      const res = validateFlowGraph({
+        nodes: [
+          { id: 't1', type: 'trigger.manual', config: {} },
+          { id: 'n1', type: nodeType, config: cfg },
+        ],
+        edges: [{ id: 'e1', source: 't1', target: 'n1' }],
+      });
+      assert.equal(res.ok, false, `${nodeType} must reject ${col}`);
+      assert.ok(res.errors.some((e) => e.code === 'TARGET_COLLECTION_FORBIDDEN'), `Expected TARGET_COLLECTION_FORBIDDEN for ${nodeType} -> ${col}`);
+    }
+    const promptSec = validatePromptSecurity({ prompt: `Read records from ${col}` });
+    assert.equal(promptSec.refused, true, `validatePromptSecurity must refuse prompt targeting ${col}`);
+  }
+});

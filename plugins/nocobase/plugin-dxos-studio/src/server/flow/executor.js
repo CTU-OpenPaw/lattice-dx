@@ -14,14 +14,12 @@ const { MAX_HARD_DEPTH, buildTriggerIndex, cloneSafe, isPlainObject, normalizeGr
 const { validateFlowGraph } = require('./validator');
 const { claimSuspendedRun, createRunRecord, generateResumeToken, hashResumeToken, suspendRun } = require('./durable-store');
 const { getOrmTriggerDepth, resolveTrustedOrgId, runAutomationWithRls, runNodeInRlsSavepoint, runRlsAwareBatch, runWithOrmDepth } = require('./security-helpers');
+const { sanitizeTraceData } = require('./trace-sanitizer');
 const registry = require('./registry');
 
 const getEngine = () => require('../automation-engine');
 const HELPER_KEYS = ['interpolateTemplate', 'matchesFilter', 'getSafePath', 'sanitizePlainObject', 'isAllowlistedTargetCollection', 'sanitizeAutomationWriteValues', 'buildConnectorUrl', 'buildHmacHeaders', 'buildFallbackAuthHeaders', 'scrubSecrets'];
-const getHeader = (headers, name) => {
-  const entry = Object.entries(headers || {}).find(([k]) => String(k).toLowerCase() === String(name || '').toLowerCase());
-  return entry ? (Array.isArray(entry[1]) ? String(entry[1][0] ?? '') : String(entry[1] ?? '')) : '';
-};
+const getHeader = (headers, name) => { const e = Object.entries(headers || {}).find(([k]) => String(k).toLowerCase() === String(name || '').toLowerCase()); return e ? (Array.isArray(e[1]) ? String(e[1][0] ?? '') : String(e[1] ?? '')) : ''; };
 function buildNodeHelpers(db, app, options, execState) {
   const eng = getEngine();
   const out = { loadCrossPluginModules: (a, o) => eng.loadCrossPluginModules(a ?? app, o ?? options) };
@@ -42,28 +40,24 @@ function recordNodeOutput(execState, node, output, status, error = null) {
   execState.steps[node.id] = stepObj;
   if (Number.isInteger(node.config?.stepIndex)) execState.steps[node.config.stepIndex] = stepObj;
 }
-function collectSubgraph(startIds, edges, allowedSet) {
-  const [visited, queue] = [new Set(), [...startIds]];
-  for (let i = 0; i < queue.length; i += 1) if (!visited.has(queue[i]) && (!allowedSet || allowedSet.has(queue[i]))) { visited.add(queue[i]); edges.forEach((e) => { if (e.source === queue[i] && !visited.has(e.target)) queue.push(e.target); }); }
-  return visited;
-}
+function collectSubgraph(startIds, edges, allowedSet) { const [v, q] = [new Set(), [...startIds]]; for (let i = 0; i < q.length; i += 1) if (!v.has(q[i]) && (!allowedSet || allowedSet.has(q[i]))) { v.add(q[i]); edges.forEach((e) => { if (e.source === q[i] && !v.has(e.target)) q.push(e.target); }); } return v; }
 const RESERVED_CTX = new Set(['event', 'data', 'dmn', 'dmnResult', 'steps', 'nodes', 'loop', 'actor', 'organizationId']);
 const resolveFlowContext = (node, nodeInput, execState) => { const k = node.type === 'control.loop' && isPlainObject(nodeInput) ? String(node.config?.itemsPath || 'items').trim().split('.')[0] : ''; return (k && !RESERVED_CTX.has(k) && execState[k] === undefined && execState.data?.[k] === undefined && nodeInput[k] !== undefined) ? { ...execState, [k]: nodeInput[k] } : execState; };
 const computeRunStatus = (traces, halted) => !traces.some((t) => t.status === 'failed') ? (halted ? 'failed' : 'completed') : traces.some((t) => t.status === 'completed' && !String(t.type || '').startsWith('trigger.')) ? 'partial' : 'failed';
 async function runSingleNode({ node, nodeInput, reg, execState, db, app, options, helpers, loopMeta }) {
-  const [t0, def] = [Date.now(), reg.getNodeType(node.type)];
+  const [t0, def, safeIn] = [Date.now(), reg.getNodeType(node.type), sanitizeTraceData(nodeInput)];
   if (!def) throw fail('FLOW_UNKNOWN_NODE_TYPE', 400, `Unknown node type "${node.type}"`);
   const nodeOpts = node.type === 'iot.twin_command' && !options?.digitalTwin ? { ...options, digitalTwin: helpers.loadCrossPluginModules(app, options).digitalTwinMod } : options;
   try {
     const [timeoutMs, execP] = [Number(node.timeoutMs ?? node.config?.timeoutMs), runNodeInRlsSavepoint(db, () => def.execute({ node, config: node.config, input: nodeInput, context: resolveFlowContext(node, nodeInput, execState), db, app, options: nodeOpts, helpers }))];
     let timerId; if (Number.isFinite(timeoutMs) && timeoutMs > 0) execP.catch(() => {}); const res = await (Number.isFinite(timeoutMs) && timeoutMs > 0 ? Promise.race([execP, new Promise((_, rej) => { timerId = setTimeout(() => rej(fail('FLOW_NODE_TIMEOUT', 504, `Node "${node.id}" timed out after ${timeoutMs}ms`)), timeoutMs); })]).finally(() => { if (timerId) clearTimeout(timerId); }) : execP);
     const durationMs = Math.max(0, Date.now() - t0);
-    if (res?.error) { recordNodeOutput(execState, node, res.output ?? null, 'failed', String(res.error)); return { ok: false, node, output: res.output ?? null, error: String(res.error), durationMs, loopMeta }; }
-    if (res?.suspend && !options.dryRun) { recordNodeOutput(execState, node, res.output ?? null, 'suspended'); return { ok: true, suspend: res.suspend, node, output: res.output ?? null, durationMs, loopMeta }; }
+    if (res?.error) { recordNodeOutput(execState, node, res.output ?? null, 'failed', String(res.error)); return { ok: false, node, input: safeIn, output: res.output ?? null, error: String(res.error), durationMs, loopMeta }; }
+    if (res?.suspend && !options.dryRun) { recordNodeOutput(execState, node, res.output ?? null, 'suspended'); return { ok: true, suspend: res.suspend, node, input: safeIn, output: res.output ?? null, durationMs, loopMeta }; }
     const ports = Array.isArray(res?.nextPorts) && res.nextPorts.length ? res.nextPorts : [res?.nextPort || 'main'];
     recordNodeOutput(execState, node, res?.output ?? null, 'completed');
-    return { ok: true, node, output: res?.output ?? null, nextPort: ports[0], nextPorts: ports, durationMs, loopMeta };
-  } catch (err) { recordNodeOutput(execState, node, null, 'failed', err?.message || String(err)); return { ok: false, node, output: null, error: err?.message || String(err), durationMs: Math.max(0, Date.now() - t0), loopMeta }; }
+    return { ok: true, node, input: safeIn, output: res?.output ?? null, nextPort: ports[0], nextPorts: ports, durationMs, loopMeta };
+  } catch (err) { recordNodeOutput(execState, node, null, 'failed', err?.message || String(err)); return { ok: false, node, input: safeIn, output: null, error: err?.message || String(err), durationMs: Math.max(0, Date.now() - t0), loopMeta }; }
 }
 async function traverseDag({ graph, subTopo, nodeMap, edges, initialInputs, execState, nodeStatesJson, stepTracesJson, reg, db, app, options, helpers, loopMeta = null }) {
   const subSet = new Set(subTopo);
@@ -88,11 +82,11 @@ async function traverseDag({ graph, subTopo, nodeMap, edges, initialInputs, exec
     }
     if (!toRun.length) continue;
     for (const r of await runRlsAwareBatch(db, toRun, ({ node, nodeInput }) => runSingleNode({ node, nodeInput, reg, execState, db, app, options, helpers, loopMeta }))) {
-      const n = r.node; settled.add(n.id);
-      stepTracesJson.push({ nodeId: n.id, type: n.type, label: n.label, status: r.suspend ? 'suspended' : (r.ok ? 'completed' : 'failed'), output: r.output, error: r.error || null, durationMs: r.durationMs, ...(options.dryRun ? { simulated: true } : {}), ...(loopMeta ? { loopNodeId: loopMeta.nodeId, loopIteration: loopMeta.index } : {}) });
-      if (r.suspend) { localStatuses.set(n.id, 'suspended'); nodeStatesJson[n.id] = { status: 'suspended', output: r.output, suspend: r.suspend, durationMs: r.durationMs }; suspended = { node: n, suspend: r.suspend, output: r.output }; }
+      const [n, safeOut] = [r.node, sanitizeTraceData(r.output ?? null)]; settled.add(n.id);
+      stepTracesJson.push({ nodeId: n.id, type: n.type, label: n.label, status: r.suspend ? 'suspended' : (r.ok ? 'completed' : 'failed'), input: r.input ?? null, output: safeOut, error: r.error || null, durationMs: r.durationMs, ...(options.dryRun ? { simulated: true } : {}), ...(loopMeta ? { loopNodeId: loopMeta.nodeId, loopIteration: loopMeta.index } : {}) });
+      if (r.suspend) { localStatuses.set(n.id, 'suspended'); nodeStatesJson[n.id] = { status: 'suspended', input: r.input ?? null, output: safeOut, suspend: r.suspend, durationMs: r.durationMs }; suspended = { node: n, suspend: r.suspend, output: r.output }; }
       else if (!r.ok) {
-        localStatuses.set(n.id, 'failed'); nodeStatesJson[n.id] = { status: 'failed', output: r.output, error: r.error, durationMs: r.durationMs };
+        localStatuses.set(n.id, 'failed'); nodeStatesJson[n.id] = { status: 'failed', input: r.input ?? null, output: safeOut, error: r.error, durationMs: r.durationMs };
         const errEdges = (outEdges.get(n.id) || []).filter((e) => e.sourceHandle === 'error');
         if (errEdges.length) errEdges.forEach((e) => activeInputs.get(e.target)?.push({ from: n.id, output: { error: r.error, output: r.output } }));
         else if (!n.continueOnFail && graph.settings?.errorPolicy !== 'continue') { halted = true; haltError = r.error; }
@@ -116,14 +110,14 @@ async function traverseDag({ graph, subTopo, nodeMap, edges, initialInputs, exec
           execState.loop = null;
           if (!halted && !suspended) localTopo.forEach((id) => { if (!nodeStatesJson[id]) nodeStatesJson[id] = { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' }; });
         } else localTopo.forEach((id) => { nodeStatesJson[id] = { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' }; });
-        const finalOut = { ...(r.output || {}), results: loopResults };
+        const finalOut = { ...(r.output || {}), results: loopResults }; const safeFinal = sanitizeTraceData(finalOut);
         localStatuses.set(n.id, suspended ? 'suspended' : 'completed');
         recordNodeOutput(execState, n, finalOut, suspended ? 'suspended' : 'completed');
-        nodeStatesJson[n.id] = suspended ? { status: 'suspended', output: finalOut, durationMs: r.durationMs } : { status: 'completed', output: finalOut, nextPort: 'done', nextPorts: ['done'], durationMs: r.durationMs };
+        nodeStatesJson[n.id] = suspended ? { status: 'suspended', input: r.input ?? null, output: safeFinal, durationMs: r.durationMs } : { status: 'completed', input: r.input ?? null, output: safeFinal, nextPort: 'done', nextPorts: ['done'], durationMs: r.durationMs };
         if (!halted && !suspended) (outEdges.get(n.id) || []).filter((e) => e.sourceHandle === 'done').forEach((e) => activeInputs.get(e.target)?.push({ from: n.id, output: finalOut }));
       } else {
         localStatuses.set(n.id, 'completed');
-        nodeStatesJson[n.id] = { status: 'completed', output: r.output, nextPort: r.nextPort, nextPorts: r.nextPorts, durationMs: r.durationMs };
+        nodeStatesJson[n.id] = { status: 'completed', input: r.input ?? null, output: safeOut, nextPort: r.nextPort, nextPorts: r.nextPorts, durationMs: r.durationMs };
         const activePorts = new Set(r.nextPorts || [r.nextPort || 'main']);
         (outEdges.get(n.id) || []).filter((e) => activePorts.has(e.sourceHandle)).forEach((e) => activeInputs.get(e.target)?.push({ from: n.id, output: r.output }));
       }
@@ -173,6 +167,8 @@ async function executeFlowGraph(db, ruleRow, triggerContext = {}, options = {}) 
       const rec = { organizationId, ruleId: val(ruleRow, 'id') ?? rule.id ?? null, ruleKey: String(rule.ruleKey || 'inline_flow'), runUid, triggerEventId: event.id, triggerEventType: event.type, status, depth: Number(event.depth || 0), matched: false, dmnResultJson: null, stepTracesJson, errorMessage, startedAt: new Date(startMs), finishedAt: new Date(), durationMs: Math.max(0, Date.now() - startMs), graphVersion: 2, nodeStatesJson: {} };
       return scopedOpts.dryRun ? rec : createRunRecord(db, rec);
     };
+    const isUnpubV2 = Number(ruleRow?.schemaVersion ?? rule.schemaVersion) === 2 && !isPlainObject(ruleRow?.graphJson ?? rule.graphJson) && !(Array.isArray(rule.actionsJson) && rule.actionsJson.length);
+    if (isUnpubV2 && !scopedOpts.useDraft) return finishEarly('skipped', 'RULE_UNPUBLISHED');
     const validation = validateFlowGraph(graph, { nodeRegistry: reg, requireTrigger: false });
     if (!validation.ok) return finishEarly('failed', validation.errors.map((e) => e.message).join('; '));
     const maxDepth = Math.min(MAX_HARD_DEPTH, Math.max(1, Number(rule.maxDepth || graph.settings?.maxDepth || MAX_HARD_DEPTH)));
@@ -215,10 +211,10 @@ async function testSingleFlowNode(db, { graph, rule, nodeId, pinnedInputs = {}, 
   return runAutomationWithRls(db, orgId, async () => {
     try {
       const res = await runNodeInRlsSavepoint(db, () => reg.getNodeType(target.type).execute({ node: target, config: target.config, input: nodeInput, context: execState, db, app: options.app || db?.app, options: scopedOpts, helpers }));
-      return { ok: !res?.error, nodeId: target.id, status: res?.error ? 'failed' : 'completed', input: nodeInput, output: res?.output ?? null, nextPort: res?.nextPort || 'main', durationMs: Math.max(0, Date.now() - t0), error: res?.error || null };
+      return { ok: !res?.error, nodeId: target.id, status: res?.error ? 'failed' : 'completed', input: sanitizeTraceData(nodeInput), output: sanitizeTraceData(res?.output ?? null), nextPort: res?.nextPort || 'main', durationMs: Math.max(0, Date.now() - t0), error: res?.error || null };
     } catch (err) {
       if (err?.status && err.status < 500 && err?.code) throw err;
-      return { ok: false, nodeId: target.id, status: 'failed', input: nodeInput, output: null, nextPort: 'error', durationMs: Math.max(0, Date.now() - t0), error: err?.message || String(err) };
+      return { ok: false, nodeId: target.id, status: 'failed', input: sanitizeTraceData(nodeInput), output: null, nextPort: 'error', durationMs: Math.max(0, Date.now() - t0), error: err?.message || String(err) };
     }
   });
 }
@@ -247,8 +243,8 @@ async function resumeFlowRun(db, { organizationId, runUid, decision = 'approved'
       if (!validation.ok) throw fail('FLOW_INVALID_GRAPH', 400, validation.errors[0]?.message || 'Invalid flow graph');
       const sNode = graph.nodes.find((n) => n.id === run.suspendedNodeId);
       if (!sNode) throw fail('FLOW_NODE_NOT_FOUND', 404, `Suspended node "${run.suspendedNodeId}" not found`);
-      const resumedPort = sNode.type === 'control.approval' ? (String(decision || 'approved').toLowerCase() === 'rejected' ? 'rejected' : 'approved') : (sNode.type === 'control.delay' ? 'main' : String(decision || 'main'));
-      if (sNode.type === 'control.approval' && run.approvalId != null && !dryRun) await db?.getRepository?.('latticeAiApprovalQueue')?.update?.({ filter: { organizationId: orgId, id: run.approvalId, status: 'pending' }, values: { status: resumedPort, decidedByUserId: actor?.userId ? Number(actor.userId) : null, decidedByUsername: actor?.username ? String(actor.username) : null, decisionNote: payload?.note || payload?.reason || null, decidedAt: new Date() } }).catch(() => {});
+      const resumedPort = sNode.type === 'control.approval' ? (String(decision || 'approved').toLowerCase() === 'rejected' ? 'rejected' : 'approved') : (sNode.type === 'ai.agent' ? (String(decision || 'approved').toLowerCase() === 'rejected' ? 'error' : 'main') : (sNode.type === 'control.delay' ? 'main' : String(decision || 'main')));
+      if ((sNode.type === 'control.approval' || sNode.type === 'ai.agent') && run.approvalId != null && !dryRun) await db?.getRepository?.('latticeAiApprovalQueue')?.update?.({ filter: { organizationId: orgId, id: run.approvalId, status: 'pending' }, values: { status: String(decision || 'approved').toLowerCase() === 'rejected' ? 'rejected' : 'approved', decidedByUserId: actor?.userId ? Number(actor.userId) : null, decidedByUsername: actor?.username ? String(actor.username) : null, decisionNote: payload?.note || payload?.reason || null, decidedAt: new Date() } }).catch(() => {});
       const tp = isPlainObject(run.triggerPayloadJson) ? run.triggerPayloadJson : {};
       const event = eng.normalizeIncomingEvent(tp.event || { id: run.triggerEventId, type: run.triggerEventType, organizationId: orgId, depth: run.depth, data: tp.data || {} }, orgId);
       event.organizationId = orgId; event.organizationid = orgId;
@@ -260,9 +256,11 @@ async function resumeFlowRun(db, { organizationId, runUid, decision = 'approved'
       Object.entries(nodeStatesJson).forEach(([nid, st]) => { const n = nodeMap.get(nid); if (n) recordNodeOutput(execState, n, st.output ?? null, st.status || 'completed', st.error || null); });
       const resumedOut = { ...(isPlainObject(nodeStatesJson[sNode.id]?.output) ? nodeStatesJson[sNode.id].output : {}), status: resumedPort, decision: resumedPort, payload: execState.resumePayload, resumedAt: new Date().toISOString(), ...(run._delegation ? { delegatedFromUserId: run._delegation.delegatorUserId, delegationUid: run._delegation.delegationUid } : {}) };
       recordNodeOutput(execState, sNode, resumedOut, 'completed');
-      nodeStatesJson[sNode.id] = { status: 'completed', output: resumedOut, nextPort: resumedPort, nextPorts: [resumedPort] };
       const sTrace = [...stepTracesJson].reverse().find((t) => t.nodeId === sNode.id);
-      if (sTrace) Object.assign(sTrace, { status: 'completed', output: resumedOut });
+      const origIn = nodeStatesJson[sNode.id]?.input ?? sTrace?.input ?? null;
+      const safeResumed = sanitizeTraceData(resumedOut);
+      nodeStatesJson[sNode.id] = { status: 'completed', input: origIn, output: safeResumed, nextPort: resumedPort, nextPorts: [resumedPort] };
+      if (sTrace) Object.assign(sTrace, { status: 'completed', input: origIn, output: safeResumed });
       const downSet = collectSubgraph(graph.edges.filter((e) => e.source === sNode.id).map((e) => e.target), graph.edges);
       const subTopo = validation.topoOrder.filter((id) => downSet.has(id));
       const initInputs = new Map(subTopo.map((id) => [id, []]));
@@ -288,7 +286,8 @@ async function dispatchRecordTriggerEvent(db, eventCtx = {}, options = {}) {
       const p = toPlain(row);
       const idx = Array.isArray(p?.triggerIndexJson) && p.triggerIndexJson.length ? p.triggerIndexJson : (p?.graphJson ? buildTriggerIndex(p.graphJson, p) : []);
       if (!idx.some((t) => t?.triggerType === 'record' && t.collection === collection && String(t.operation || 'create').toLowerCase() === operation)) continue;
-      try { runs.push(await executeFlowGraph(db, row, { id: eventCtx.id || `rec_${crypto.randomUUID()}`, type: `record.${collection}.${operation}`, source: 'dxos-studio:orm', subject: String(eventCtx.recordId || eventCtx.record?.id || ''), organizationId: orgId, depth, data: eng.sanitizePlainObject(eventCtx.data || eventCtx.record || {}), record: eng.sanitizePlainObject(eventCtx.record || eventCtx.data || {}) }, options)); }
+      if (Number(p?.schemaVersion) === 2 && !p?.graphJson?.nodes?.length) continue;
+      try { runs.push(await executeFlowGraph(db, row, { id: eventCtx.id || `rec_${crypto.randomUUID()}`, type: `record.${collection}.${operation}`, source: 'dxos-studio:orm', subject: String(eventCtx.recordId || eventCtx.record?.id || ''), organizationId: orgId, depth, data: eng.sanitizePlainObject(eventCtx.data || eventCtx.record || {}), record: eng.sanitizePlainObject(eventCtx.record || eventCtx.data || {}) }, { ...options, useDraft: false })); }
       catch (err) { runs.push({ ruleKey: val(row, 'ruleKey'), status: 'failed', errorMessage: err?.message || String(err) }); }
     }
     return runs;
@@ -310,7 +309,8 @@ async function dispatchWebhookIngress(db, { organizationId, ruleKey, headers = {
     const ruleRow = await db?.getRepository?.('latticeAutomationRules')?.findOne({ filter: { organizationId: orgId, ruleKey: key } });
     const rule = toPlain(ruleRow);
     if (!rule || rule.active === false) throw fail('RULE_NOT_FOUND', 404, `Active webhook rule "${key}" not found`);
-    const trig = resolveNormalizedRuleAndGraph(rule, options).graph.nodes.find((n) => n.type === 'trigger.webhook');
+    if (Number(rule.schemaVersion) === 2 && !rule.graphJson?.nodes?.length) throw fail('RULE_NOT_FOUND', 404, `Published webhook rule "${key}" not found`);
+    const trig = resolveNormalizedRuleAndGraph(rule, { ...options, useDraft: false }).graph.nodes.find((n) => n.type === 'trigger.webhook');
     if (!trig) throw fail('WEBHOOK_TRIGGER_NOT_CONFIGURED', 400, 'Rule does not declare a trigger.webhook node');
     const secret = await resolveWebhookSecret(db, orgId, key, trig.config, rule, options);
     if (!secret) throw fail('WEBHOOK_SIGNATURE_INVALID', 401, 'Webhook secret is not configured');
@@ -326,7 +326,7 @@ async function dispatchWebhookIngress(db, { organizationId, ruleKey, headers = {
       if (!stdOk && !timingSafeEqualHex(providedHex, expectedHex)) throw fail('WEBHOOK_SIGNATURE_INVALID', 401, 'Invalid or missing webhook HMAC signature');
     }
     const bodyObj = hasRawBody ? (() => { try { const p = JSON.parse(payloadText || '{}'); return isPlainObject(p) ? p : {}; } catch { return {}; } })() : (isPlainObject(parsedBody) ? parsedBody : {});
-    const run = await executeFlowGraph(db, ruleRow, { type: 'webhook.inbound', source: 'dxos-studio:webhook', subject: trig.config?.webhookPath || key, organizationId: orgId, data: isPlainObject(bodyObj.data) ? bodyObj.data : (isPlainObject(bodyObj) ? bodyObj : {}), webhook: { webhookPath: trig.config?.webhookPath || '', authMode } }, { ...options, organizationId: orgId, ignoreCooldown: options.ignoreCooldown ?? false });
+    const run = await executeFlowGraph(db, ruleRow, { type: 'webhook.inbound', source: 'dxos-studio:webhook', subject: trig.config?.webhookPath || key, organizationId: orgId, data: isPlainObject(bodyObj.data) ? bodyObj.data : (isPlainObject(bodyObj) ? bodyObj : {}), webhook: { webhookPath: trig.config?.webhookPath || '', authMode } }, { ...options, useDraft: false, organizationId: orgId, ignoreCooldown: options.ignoreCooldown ?? false });
     return { runUid: run.runUid, status: run.status };
   });
 }

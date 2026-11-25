@@ -153,7 +153,7 @@ test('plugin-dxos-studio renders accessible single-row tablist/tabs and muted gr
   assert.equal(tablists[0].props.style.flexWrap, 'nowrap');
   assert.equal(tablists[0].props.style.overflowX, 'auto');
   const tabs = collectNodes(tablists[0], (n) => n.props?.role === 'tab');
-  assert.equal(tabs.length, 9);
+  assert.equal(tabs.length, 11);
   assert.equal(tabs[0].props['aria-selected'], true);
   assert.equal(tabs[1].props['aria-selected'], false);
   const tabIds = tabs.map((t) => t.props['data-testid']);
@@ -161,10 +161,14 @@ test('plugin-dxos-studio renders accessible single-row tablist/tabs and muted gr
     'dxos-studio-tab-broker',
     'dxos-studio-tab-automation',
     'dxos-studio-tab-builder',
+    'dxos-studio-tab-forms',
+    'dxos-studio-tab-approvals',
   ]);
   assert.ok(textOf(tabs[6]).includes('7. Broker & Sự kiện'));
   assert.ok(textOf(tabs[7]).includes('8. Vault & Automation'));
   assert.ok(textOf(tabs[8]).includes('9. Domain Builder & Tenant'));
+  assert.ok(textOf(tabs[9]).includes('10. Public Forms'));
+  assert.ok(textOf(tabs[10]).includes('11. Hộp thư Phê duyệt'));
   for (const t of tabs) {
     assert.equal(t.props.style.whiteSpace, 'nowrap');
     assert.equal(t.props.style.flexShrink, 0);

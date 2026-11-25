@@ -23,11 +23,14 @@ const {
 } = require('./ai-hitl');
 const { redactPiiText: defaultRedactPiiText } = require('./ai-governance');
 const { runInRlsSavepoint } = require('./ai-rls');
+const { recallMemories, buildMemoryContextPrompt } = require('./ai-memory');
 
 const DEFAULT_SYSTEM_PROTECTED = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
   'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue', 'latticeUiSnapshots',
+  'latticeBuiltApps', 'latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions',
+  'latticeA2aTasks', 'latticeApprovalPolicies', 'latticeApprovalRequests', 'latticeNotificationDeliveries', 'latticePublicForms',
 ]);
 
 const MAX_GRAPH_DEPTH = 4;
@@ -284,10 +287,84 @@ function createOperationalTools(deps) {
         properties: {
           query: { type: 'string', maxLength: 120, description: 'Optional keyword matched against title, name, or code.' },
           collections: { type: 'array', items: { type: 'string' }, description: 'Subset of business or latticeCustom* collections.' },
+          scope: { type: 'string', maxLength: 40, description: 'Optional search scope (e.g. "ai_memory" to search persistent latticeAiMemory).' },
+          scopes: { type: 'array', items: { type: 'string' }, description: 'Optional memory scopes when searching persistent latticeAiMemory.' },
+          memoryScope: { type: 'string', description: 'Optional single memory scope filter (org, agent, user, session).' },
+          agentId: { type: 'string', maxLength: 128, description: 'Optional agent identifier for admin memory inspection.' },
+          includeMemories: { type: 'boolean', description: 'Optional flag to attach advisory recalled memory context.' },
           limit: { type: 'integer', default: 8 },
         },
       },
       async run(ctx, db, actor, args) {
+        const limit = Math.max(1, Math.min(30, Number(args.limit) || 8));
+        const q = String(args.query || '').trim();
+        let rawMemScopes = args?.scopes;
+        if (typeof rawMemScopes === 'string' && rawMemScopes.trim().startsWith('[')) {
+          try { rawMemScopes = JSON.parse(rawMemScopes); } catch {}
+        }
+        const rawMemScopeSingle = args?.memoryScope != null && String(args.memoryScope).trim() !== ''
+          ? String(args.memoryScope).trim().toLowerCase()
+          : '';
+        const memScopesArr = Array.isArray(rawMemScopes)
+          ? rawMemScopes.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean)
+          : [];
+        const requestedMemScopes = [...new Set([
+          ...(rawMemScopeSingle ? [rawMemScopeSingle] : []),
+          ...memScopesArr,
+        ])];
+        const rawScopeLower = String(args?.scope || '').trim().toLowerCase();
+        if (!actor.isAdmin && (rawScopeLower === 'agent' || requestedMemScopes.includes('agent'))) {
+          throw failTool('MEMORY_AGENT_FORBIDDEN', 403, 'Chỉ Quản trị viên mới được truy cập bộ nhớ nội bộ phạm vi agent.');
+        }
+        const trustedAgentId = ctx?.state?.dxosAiUsername || actor?.aiEmployee || actor?.username || null;
+        const argAgentId = args?.agentId != null ? String(args.agentId).trim() : '';
+        if (!actor.isAdmin && argAgentId && argAgentId !== String(trustedAgentId || '')) {
+          throw failTool('MEMORY_AGENT_FORBIDDEN', 403, 'Không được phép giả mạo agentId khi truy cập bộ nhớ.');
+        }
+        const allowedMemScopes = requestedMemScopes.length > 0
+          ? requestedMemScopes.filter((s) => ['org', 'agent', 'user', 'session'].includes(s) && (actor.isAdmin || s !== 'agent'))
+          : (actor.isAdmin ? ['org', 'agent', 'user'] : ['org', 'user']);
+        const effectiveMemAgentId = actor.isAdmin ? (argAgentId || trustedAgentId || undefined) : (trustedAgentId || undefined);
+
+        if (args.scope === 'ai_memory') {
+          let memories = [];
+          let memoryContext = '';
+          if (db?.getRepository?.('latticeAiMemory')) {
+            try {
+              const recalled = await recallMemories(db, {
+                organizationId: actor.organizationId,
+                scopes: allowedMemScopes.length ? allowedMemScopes : (actor.isAdmin ? ['org', 'agent', 'user'] : ['org', 'user']),
+                agentId: effectiveMemAgentId,
+                userId: actor?.userId != null ? String(actor.userId) : undefined,
+                sessionId: ctx?.state?.dxosSessionId || ctx?.state?.sessionId || undefined,
+                enforceSessionOwner: !actor.isAdmin,
+                query: q,
+                limit,
+              });
+              memories = recalled.memories || [];
+              memoryContext = buildMemoryContextPrompt(memories, { maxChars: 2400, maxItems: limit });
+            } catch {
+              memories = [];
+            }
+          }
+          const memoryItems = memories.map((m) => ({
+            collection: 'latticeAiMemory',
+            id: m.id,
+            code: m.memoryKey,
+            title: m.content,
+            scope: m.scope,
+            score: m.score,
+            citation: `[latticeAiMemory:${m.memoryKey}#${m.id ?? 0}]`,
+          }));
+          return {
+            organizationId: actor.organizationId,
+            searchedCollections: ['latticeAiMemory'],
+            scope: 'ai_memory',
+            count: memoryItems.length,
+            items: memoryItems,
+            memoryContext,
+          };
+        }
         const candidates = await resolveSearchableTargets(db, args.collections, SEARCHABLE_COLLECTIONS, CUSTOM_COLLECTION_RE, val);
         const requestedParaChunks = Array.isArray(args.collections) && args.collections.includes('latticeParaChunks');
         const policyProbeCols = requestedParaChunks && !candidates.includes('latticeParaDocuments')
@@ -298,8 +375,6 @@ function createOperationalTools(deps) {
         const targets = requestedParaChunks && !candidates.includes('latticeParaDocuments')
           ? rawTargets.filter((c) => c !== 'latticeParaDocuments')
           : rawTargets;
-        const limit = Math.max(1, Math.min(30, Number(args.limit) || 8));
-        const q = String(args.query || '').trim();
         const pool = [];
         const visibleParaDocMap = new Map();
         const docPoolEntryById = new Map();
@@ -423,12 +498,31 @@ function createOperationalTools(deps) {
           ? [...targets, 'latticeParaChunks']
           : targets;
         const items = rankHybridRecords(q, pool, { limit });
+        let memoryContext = '';
+        if (args.includeMemories && db?.getRepository?.('latticeAiMemory')) {
+          try {
+            const recalled = await recallMemories(db, {
+              organizationId: actor.organizationId,
+              scopes: allowedMemScopes.length ? allowedMemScopes : (actor.isAdmin ? ['org', 'agent', 'user'] : ['org', 'user']),
+              agentId: effectiveMemAgentId,
+              userId: actor?.userId != null ? String(actor.userId) : undefined,
+              sessionId: ctx?.state?.dxosSessionId || ctx?.state?.sessionId || undefined,
+              enforceSessionOwner: !actor.isAdmin,
+              query: q,
+              limit: 5,
+            });
+            memoryContext = buildMemoryContextPrompt(recalled.memories || [], { maxChars: 1600, maxItems: 5 });
+          } catch {
+            memoryContext = '';
+          }
+        }
         return {
           organizationId: actor.organizationId,
           searchedCollections,
           ...(q ? { engine: 'hybrid-rrf' } : {}),
           count: items.length,
           items,
+          ...(memoryContext ? { memoryContext } : {}),
         };
       },
     }),

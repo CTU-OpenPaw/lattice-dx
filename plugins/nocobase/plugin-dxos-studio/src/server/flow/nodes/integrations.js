@@ -17,6 +17,22 @@ const { flowHelpers } = require('./triggers');
 const { isPlainObject, sanitizePlainObject, interpolateTemplate, buildEvalContext, resolveOrgId, pickHelper } = flowHelpers;
 const MAX_HARD_DEPTH = 8;
 const DEFAULT_HTTP_TIMEOUT_MS = 5000;
+const NOTIFY_CHANNELS = ['in_app', 'email_smtp', 'telegram', 'slack', 'webhook'];
+const VALID_NOTIFY_CHANNEL_SET = new Set([...NOTIFY_CHANNELS, 'smtp', 'apprise', 'all', 'external']);
+function normalizeNotifyChannels(raw) {
+  let list = raw;
+  if (typeof list === 'string') {
+    const t = list.trim();
+    if (t.startsWith('[')) { try { list = JSON.parse(t); } catch { list = [t]; } } else list = t ? t.split(',') : [];
+  }
+  const out = (Array.isArray(list) ? list : []).map((c) => String(c || '').trim().toLowerCase()).filter((c) => VALID_NOTIFY_CHANNEL_SET.has(c));
+  return out.length ? [...new Set(out)] : ['in_app'];
+}
+function parseChannelConfig(raw) {
+  let val = raw;
+  if (typeof val === 'string' && val.trim().startsWith('{')) { try { val = JSON.parse(val); } catch { return undefined; } }
+  return isPlainObject(val) ? sanitizePlainObject(val) : undefined;
+}
 
 function loadSiblingBlocksModule(relName) {
   const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
@@ -228,7 +244,7 @@ const integrationNodes = [
     color: '#eb2f96',
     inputs: ['in'],
     outputs: ['main', 'error'],
-    defaultConfig: { roleNames: ['ldx_operator'], title: '', body: '', severity: 'warning', category: 'system', targetCollection: '', targetRecordId: '', targetPath: '' },
+    defaultConfig: { roleNames: ['ldx_operator'], title: '', body: '', severity: 'warning', category: 'system', targetCollection: '', targetRecordId: '', targetPath: '', notifyChannels: ['in_app'], templateKey: '', channelConfig: {} },
     inputSchema: {
       fields: [
         { name: 'roleNames', label: 'Role Names (JSON Array)', type: 'json', required: true },
@@ -239,6 +255,9 @@ const integrationNodes = [
         { name: 'targetCollection', label: 'Target Collection', type: 'collection' },
         { name: 'targetRecordId', label: 'Target Record ID', type: 'string' },
         { name: 'targetPath', label: 'Target Portal Path', type: 'string' },
+        { name: 'notifyChannels', label: 'Notification Channels (JSON Array)', type: 'json', options: NOTIFY_CHANNELS, placeholder: '["in_app","email_smtp","telegram","slack","webhook"]' },
+        { name: 'templateKey', label: 'Template Key', type: 'string', placeholder: 'incident_alert' },
+        { name: 'channelConfig', label: 'Channel Config (JSON)', type: 'json', placeholder: '{"connectorKey":"tg-ops"}' },
       ],
     },
     async execute({ node, config, input, context, db, app, options = {}, helpers }) {
@@ -256,15 +275,18 @@ const integrationNodes = [
       const targetCollection = cfg.targetCollection ? String(interp(cfg.targetCollection, evalCtx)) : undefined;
       const targetRecordId = cfg.targetRecordId ? interp(cfg.targetRecordId, evalCtx) : undefined;
       const targetPath = cfg.targetPath ? String(interp(cfg.targetPath, evalCtx)) : undefined;
-      if (options.dryRun) return { output: { roleNames, title, body, severity, category, dispatched: roleNames.length, simulated: true }, nextPort: 'main' };
+      const notifyChannels = normalizeNotifyChannels(interp(cfg.notifyChannels, evalCtx));
+      const templateKey = cfg.templateKey ? String(interp(cfg.templateKey, evalCtx)).trim().slice(0, 120) : undefined;
+      const channelConfig = cfg.channelConfig !== undefined ? parseChannelConfig(interp(cfg.channelConfig, evalCtx)) : undefined;
+      if (options.dryRun) return { output: { roleNames, title, body, severity, category, notifyChannels, ...(templateKey ? { templateKey } : {}), dispatched: roleNames.length, simulated: true }, nextPort: 'main' };
 
       const { notificationMod } = loadIntegrations(app, options);
       if (typeof notificationMod?.dispatchRoleNotifications === 'function') {
         const res = await notificationMod.dispatchRoleNotifications(db, {
-          organizationId: orgId, roleNames, category, severity, title, body, targetCollection, targetRecordId, targetPath,
-          notifyChannels: Array.isArray(cfg.notifyChannels) ? cfg.notifyChannels : ['in_app'],
-        }, { env: options.env, fetchImpl: options.fetchImpl });
-        return { output: { roleNames, dispatched: res?.dispatchedCount ?? res?.createdCount ?? res?.count ?? roleNames.length, title }, nextPort: 'main' };
+          organizationId: orgId, roleNames, category, severity, title, body, targetCollection, targetRecordId, targetPath, notifyChannels,
+          ...(templateKey ? { templateKey } : {}), ...(channelConfig ? { channelConfig } : {}),
+        }, { env: options.env, fetchImpl: options.fetchImpl, ...(typeof options.lookupImpl === 'function' ? { lookupImpl: options.lookupImpl } : {}) });
+        return { output: { roleNames, notifyChannels, ...(templateKey ? { templateKey } : {}), dispatched: res?.dispatchedCount ?? res?.createdCount ?? res?.count ?? roleNames.length, title }, nextPort: 'main' };
       }
       const notifRepo = db?.getRepository?.('latticeNotifications');
       if (typeof notifRepo?.create === 'function') {
@@ -322,4 +344,4 @@ const integrationNodes = [
   },
 ];
 
-module.exports = { integrationNodes, buildConnectorUrl, buildHmacHeaders, scrubSecrets };
+module.exports = { integrationNodes, buildConnectorUrl, buildHmacHeaders, scrubSecrets, NOTIFY_CHANNELS, normalizeNotifyChannels, parseChannelConfig };

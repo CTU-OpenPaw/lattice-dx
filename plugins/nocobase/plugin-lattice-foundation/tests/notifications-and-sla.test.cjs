@@ -1883,3 +1883,412 @@ test('Task 4 (Review Focus #1): Notification Bell skips /api/dxosAi:surfaceEvent
     if (prevStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevStorage;
   }
 });
+
+test('notification-center integrates omnichannel Vault adapter (channelConfig + no duplicate webhook + skipOmnichannel)', async () => {
+  const { dispatchNotification } = require('../src/server/notification-center');
+  const { encryptVaultSecrets } = require('../src/server/connector-vault');
+  const { registerOmnichannelNotify } = require('../src/server/omnichannel-notify');
+
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  try {
+    const encryptedWebhook = encryptVaultSecrets({
+      webhookUrl: 'https://hooks.example.test/vault-notify',
+      signingSecret: 'whsec_test_123',
+    });
+
+    const { db, tables } = makeEnterpriseHarness();
+    tables.latticeConnectors = [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        connectorKey: 'wh-ops',
+        connectorType: 'webhook',
+        name: 'Ops Webhook',
+        baseUrl: 'https://hooks.example.test/vault-notify',
+        secretsEncrypted: encryptedWebhook,
+        active: true,
+      },
+    ];
+    tables.latticeNotificationDeliveries = [];
+    const origGetRepo = db.getRepository.bind(db);
+    let deliverySeq = 0;
+    db.getRepository = (name) => {
+      if (name === 'latticeConnectors' || name === 'latticeNotificationDeliveries') {
+        return {
+          find: async ({ filter } = {}) => tables[name].filter((r) => (!filter?.organizationId || r.organizationId === filter.organizationId)).map((r) => ({ ...r, get: (k) => r[k] })),
+          findOne: async ({ filter } = {}) => {
+            const found = tables[name].find((r) => Object.entries(filter || {}).every(([k, v]) => r[k] === v));
+            return found ? { ...found, get: (k) => found[k] } : null;
+          },
+          create: async ({ values }) => {
+            deliverySeq += 1;
+            const row = { id: deliverySeq, ...values };
+            tables[name].push(row);
+            return { ...row, get: (k) => row[k], update: async (patch) => Object.assign(row, patch) };
+          },
+          update: async ({ filterByTk, values }) => {
+            const row = tables[name].find((r) => r.id === filterByTk);
+            if (row) Object.assign(row, values);
+            return row ? [row] : [];
+          },
+        };
+      }
+      return origGetRepo(name);
+    };
+
+    const mockApp = {
+      db,
+      resourceManager: { use: () => {}, define: () => {} },
+      acl: { allow: () => {} },
+    };
+    registerOmnichannelNotify(mockApp);
+
+    const calls = [];
+    const mockFetch = async (url, init) => {
+      calls.push({ url: String(url), init });
+      return { ok: true, status: 200, text: async () => 'ok', body: { cancel: async () => {} } };
+    };
+
+    // 1. Singular channelConfig (like notify.send flow node) dispatches via Vault and avoids duplicate env webhook
+    const res1 = await dispatchNotification(db, {
+      organizationId: 'org-a',
+      recipientUserId: 101,
+      title: 'Vault Alert',
+      body: 'Something happened',
+      notifyChannels: ['webhook'],
+      channelConfig: { connectorKey: 'wh-ops' },
+      templateKey: 'incident_alert',
+      dedupKey: 'vault-int-1',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      env: { DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.test/env-fallback' },
+    });
+
+    assert.deepEqual(res1.channelsDispatched, ['in_app', 'webhook']);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://hooks.example.test/vault-notify');
+    assert.equal(tables.latticeNotificationDeliveries.length, 1);
+    assert.equal(tables.latticeNotificationDeliveries[0].templateKey, 'incident_alert');
+
+    // 2. skipOmnichannel: true skips Vault adapter completely
+    const res2 = await dispatchNotification(db, {
+      organizationId: 'org-a',
+      recipientUserId: 101,
+      title: 'Skip Omni',
+      notifyChannels: ['webhook'],
+      skipOmnichannel: true,
+      dedupKey: 'vault-int-2',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      env: {},
+    });
+    assert.deepEqual(res2.channelsDispatched, ['in_app']);
+    assert.equal(calls.length, 1);
+    assert.equal(tables.latticeNotificationDeliveries.length, 1);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
+test('sla-engine aggregates evaluateApprovalSlas when latticeApprovalRequests repo exists and guards cron re-entrancy', async () => {
+  const { evaluateSlaBreaches, registerSlaEngine } = require('../src/server/sla-engine');
+  const now = new Date('2026-11-25T15:00:00.000Z');
+  const { db, tables } = makeEnterpriseHarness({
+    serviceTickets: [
+      { id: 1, organizationId: 'org-a', code: 'TKT-1', name: 'Open Ticket', status: 'open', priority: 'high', createdAt: '2026-11-25T12:00:00.000Z' },
+    ],
+  });
+  tables.latticeApprovalRequests = [
+    {
+      id: 10,
+      organizationId: 'org-a',
+      requestUid: 'apr-sla-1',
+      targetCollection: 'latticeOrders',
+      targetRecordId: 55,
+      title: 'Overdue PO Approval',
+      status: 'pending',
+      currentStageIndex: 0,
+      dueAt: '2026-11-25T13:00:00.000Z',
+      stagesStateJson: [{
+        name: 'Manager',
+        mode: 'sequential',
+        requiredApprovals: 1,
+        approverRoles: ['ldx_manager'],
+        escalateToRole: 'ldx_manager',
+        dueAt: '2026-11-25T13:00:00.000Z',
+        status: 'pending',
+        decisions: [],
+      }],
+      payloadJson: {},
+      active: true,
+    },
+  ];
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'latticeApprovalRequests') {
+      return {
+        find: async ({ filter } = {}) => tables.latticeApprovalRequests
+          .filter((r) => (!filter?.organizationId || r.organizationId === filter.organizationId))
+          .map((r) => ({ ...r, get: (k) => r[k], update: async (patch) => Object.assign(r, patch) })),
+        update: async ({ filterByTk, values }) => {
+          const row = tables.latticeApprovalRequests.find((r) => r.id === filterByTk);
+          if (row) Object.assign(row, values);
+          return row ? [row] : [];
+        },
+      };
+    }
+    return origGetRepo(name);
+  };
+
+  const report = await evaluateSlaBreaches(db, { organizationId: 'org-a', now, dryRun: false });
+  assert.equal(report.scanned, 2);
+  assert.equal(report.breachedCount, 2);
+  assert.equal(report.escalatedCount, 2);
+  assert.ok(report.approvalSlas);
+  assert.equal(report.approvalSlas.breachedCount, 1);
+  const approvalItem = report.items.find((i) => i.collection === 'latticeApprovalRequests' && i.requestUid === 'apr-sla-1');
+  assert.ok(approvalItem);
+  assert.equal(approvalItem.status, 'breached');
+  assert.equal(approvalItem.slaState, 'breached');
+
+  // Cron re-entrancy guard prevents overlapping ticks
+  const prevCron = process.env.DX_SLA_CRON_ENABLED;
+  process.env.DX_SLA_CRON_ENABLED = 'true';
+  try {
+    let addedJob = null;
+    let releaseFind;
+    const slowGate = new Promise((resolve) => { releaseFind = resolve; });
+    let findCalls = 0;
+    const slowDb = {
+      ...db,
+      getRepository: (name) => {
+        const repo = db.getRepository(name);
+        if (name !== 'latticeSlaPolicies') return repo;
+        return {
+          ...repo,
+          find: async (opts) => {
+            findCalls += 1;
+            await slowGate;
+            return repo.find(opts);
+          },
+        };
+      },
+    };
+    const cronApp = {
+      db: slowDb,
+      resourceManager: { define: () => {} },
+      acl: { allow: () => {} },
+      cronJobManager: { addJob: (job) => { addedJob = job; } },
+      logger: { error: () => {} },
+    };
+    registerSlaEngine(cronApp);
+    assert.ok(addedJob && typeof addedJob.onTick === 'function');
+    const tick1 = addedJob.onTick();
+    const tick2 = addedJob.onTick();
+    releaseFind();
+    await Promise.all([tick1, tick2]);
+    assert.equal(findCalls, 1, 'Overlapping SLA cron tick must be skipped while previous tick is in flight');
+  } finally {
+    if (prevCron === undefined) delete process.env.DX_SLA_CRON_ENABLED;
+    else process.env.DX_SLA_CRON_ENABLED = prevCron;
+  }
+});
+
+test('notification-center deduplicates channel aliases (partner_webhook/webhook, email_smtp/smtp) without double-dispatch', async () => {
+  const {
+    dispatchNotification,
+    dispatchRoleNotifications,
+    normalizeNotificationChannelConfigs,
+  } = require('../src/server/notification-center');
+  const { encryptVaultSecrets } = require('../src/server/connector-vault');
+  const { registerOmnichannelNotify } = require('../src/server/omnichannel-notify');
+
+  // 1. Unit check on normalizeNotificationChannelConfigs alias normalization & deduplication
+  const webhookCfg = normalizeNotificationChannelConfigs(
+    ['partner_webhook', 'webhook'],
+    { channel: 'webhook', url: 'https://hooks.example.test/alias-hook' },
+    null,
+    'tpl_alias',
+  );
+  assert.equal(webhookCfg.length, 1);
+  assert.deepEqual(webhookCfg[0], {
+    channel: 'webhook',
+    url: 'https://hooks.example.test/alias-hook',
+    templateKey: 'tpl_alias',
+  });
+
+  const smtpCfg = normalizeNotificationChannelConfigs(
+    ['email_smtp', 'smtp_notify', 'email'],
+    { channel: 'smtp', to: 'ops@example.test' },
+    null,
+    'tpl_smtp',
+  );
+  assert.equal(smtpCfg.length, 1);
+  assert.deepEqual(smtpCfg[0], {
+    channel: 'smtp',
+    to: 'ops@example.test',
+    templateKey: 'tpl_smtp',
+  });
+
+  const multiCfg = normalizeNotificationChannelConfigs(
+    ['webhook', 'partner_webhook', 'email_smtp'],
+    { connectorKey: 'wh-ops' },
+    null,
+    'tpl_multi',
+  );
+  assert.deepEqual(multiCfg, [
+    { connectorKey: 'wh-ops', templateKey: 'tpl_multi', channel: 'webhook' },
+    { connectorKey: 'wh-ops', templateKey: 'tpl_multi', channel: 'smtp' },
+  ]);
+
+  // 2. End-to-end dispatchNotification & dispatchRoleNotifications with aliases
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  try {
+    const encryptedWebhook = encryptVaultSecrets({
+      webhookUrl: 'https://hooks.example.test/vault-alias',
+      signingSecret: 'whsec_alias_123',
+    });
+    const encryptedSmtp = encryptVaultSecrets({
+      host: 'smtp.example.test',
+      port: 587,
+      username: 'alerts@example.test',
+      password: 'smtp-secret-value',
+      fromEmail: 'alerts@example.test',
+      defaultTo: 'ops@example.test',
+    });
+
+    const { db, tables } = makeEnterpriseHarness();
+    tables.latticeConnectors = [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        connectorKey: 'wh-ops',
+        connectorType: 'webhook',
+        appType: 'partner_webhook',
+        name: 'Ops Webhook',
+        baseUrl: 'https://hooks.example.test/vault-alias',
+        secretsEncrypted: encryptedWebhook,
+        active: true,
+      },
+      {
+        id: 2,
+        organizationId: 'org-a',
+        connectorKey: 'smtp-ops',
+        connectorType: 'smtp_notify',
+        appType: 'email_smtp',
+        name: 'Ops SMTP',
+        baseUrl: 'smtp://smtp.example.test:587',
+        secretsEncrypted: encryptedSmtp,
+        active: true,
+      },
+    ];
+    tables.latticeNotificationDeliveries = [];
+    const origGetRepo = db.getRepository.bind(db);
+    let deliverySeq = 0;
+    db.getRepository = (name) => {
+      if (name === 'latticeConnectors' || name === 'latticeNotificationDeliveries') {
+        return {
+          find: async ({ filter } = {}) => tables[name]
+            .filter((r) => (!filter?.organizationId || r.organizationId === filter.organizationId))
+            .map((r) => ({ ...r, get: (k) => r[k] })),
+          findOne: async ({ filter } = {}) => {
+            const found = tables[name].find((r) => Object.entries(filter || {}).every(([k, v]) => r[k] === v));
+            return found ? { ...found, get: (k) => found[k] } : null;
+          },
+          create: async ({ values }) => {
+            deliverySeq += 1;
+            const row = { id: deliverySeq, ...values };
+            tables[name].push(row);
+            return { ...row, get: (k) => row[k], update: async (patch) => Object.assign(row, patch) };
+          },
+          update: async ({ filterByTk, values }) => {
+            const row = tables[name].find((r) => r.id === filterByTk);
+            if (row) Object.assign(row, values);
+            return row ? [row] : [];
+          },
+        };
+      }
+      return origGetRepo(name);
+    };
+
+    const mockApp = {
+      db,
+      resourceManager: { use: () => {}, define: () => {} },
+      acl: { allow: () => {} },
+    };
+    registerOmnichannelNotify(mockApp);
+
+    const fetchCalls = [];
+    const mockFetch = async (url, init) => {
+      fetchCalls.push({ url: String(url), init });
+      return { ok: true, status: 200, text: async () => 'ok', body: { cancel: async () => {} } };
+    };
+    const dnsLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+
+    // 2a. notifyChannels: ['partner_webhook'] + channelConfig: { channel: 'webhook', ... } -> exactly 1 webhook
+    const whRes = await dispatchNotification(db, {
+      organizationId: 'org-a',
+      recipientUserId: 101,
+      title: 'Partner Webhook Alias',
+      notifyChannels: ['partner_webhook'],
+      channelConfig: { channel: 'webhook', url: 'https://hooks.example.test/explicit-hook' },
+      templateKey: 'tpl_wh',
+      dedupKey: 'alias-wh-1',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      lookupImpl: dnsLookup,
+      env: { DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.test/env-fallback' },
+    });
+    assert.deepEqual(whRes.channelsDispatched, ['in_app', 'webhook']);
+    assert.equal(fetchCalls.length, 1, 'Expected exactly 1 webhook delivery for partner_webhook + webhook');
+    assert.equal(fetchCalls[0].url, 'https://hooks.example.test/explicit-hook');
+    assert.equal(tables.latticeNotificationDeliveries.length, 1);
+
+    // 2b. dispatchRoleNotifications with ['webhook', 'partner_webhook'] (no channelConfig) -> 1 webhook
+    const roleRes = await dispatchRoleNotifications(db, {
+      organizationId: 'org-a',
+      roleNames: ['ldx_manager'],
+      title: 'Role Alias Dedup',
+      notifyChannels: ['webhook', 'partner_webhook'],
+      dedupKey: 'alias-role-wh-1',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      lookupImpl: dnsLookup,
+      env: { DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.test/env-fallback' },
+    });
+    assert.equal(roleRes.dispatchedCount, 1);
+    assert.equal(fetchCalls.length, 2, 'Expected exactly 1 additional webhook delivery for duplicate alias array');
+
+    // 2c. notifyChannels: ['email_smtp'] + channelConfig: { channel: 'smtp', dryRun: true } -> exactly 1 SMTP delivery
+    const smtpRes = await dispatchNotification(db, {
+      organizationId: 'org-a',
+      recipientUserId: 101,
+      title: 'SMTP Alias',
+      body: 'Body text',
+      notifyChannels: ['email_smtp'],
+      channelConfig: { channel: 'smtp', connectorKey: 'smtp-ops', to: 'ops@example.test', dryRun: true },
+      templateKey: 'tpl_smtp_1',
+      dedupKey: 'alias-smtp-1',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      lookupImpl: dnsLookup,
+      env: {},
+    });
+    assert.ok(smtpRes);
+    const smtpDeliveries = tables.latticeNotificationDeliveries.filter((d) => d.channel === 'smtp');
+    assert.equal(smtpDeliveries.length, 1, 'Expected exactly 1 canonical SMTP delivery for email_smtp + smtp');
+    assert.equal(smtpDeliveries[0].status, 'dry_run');
+    assert.equal(smtpDeliveries[0].templateKey, 'tpl_smtp_1');
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});

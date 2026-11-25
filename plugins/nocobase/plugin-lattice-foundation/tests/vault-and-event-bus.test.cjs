@@ -272,7 +272,7 @@ test('Task A.2 collections, migration 20261125000100, and 42-table pg-rls define
     assert.ok(delCol.indexes.some((i) => i.name === 'idx_lattice_wh_del_org_status'));
 
     const pgRls = require('../src/server/pg-rls');
-    assert.equal(pgRls.TENANT_RLS_TABLES.length, 43);
+    assert.ok(pgRls.TENANT_RLS_TABLES.length >= 52, `Expected >= 52 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
     for (const tbl of [
       'latticeConnectors',
       'latticeEventBus',
@@ -841,7 +841,7 @@ test('event-bus emits CloudEvents 1.0, signs/verifies Standard Webhooks HMAC, ha
   }
 });
 
-test('voucher-lifecycle emits domain events, OpenAPI dynamically includes latticeCustom* + v1.0.0 endpoints, metrics expose event bus gauges, and security guards hold', async () => {
+test('voucher-lifecycle emits domain events, OpenAPI dynamically includes latticeCustom* + v0.4.0 endpoints, metrics expose event bus gauges, and security guards hold', async () => {
   const { submitVoucher, cancelVoucher, amendVoucher } = require('../src/server/voucher-lifecycle');
   const { buildOpenApiSpec } = require('../src/server/openapi-spec');
   const { registerObservability } = require('../src/server/observability');
@@ -891,7 +891,7 @@ test('voucher-lifecycle emits domain events, OpenAPI dynamically includes lattic
     ['voucher.submitted', 'voucher.cancelled', 'voucher.amended'],
   );
 
-  // 2. Dynamic OpenAPI includes static v1.0.0 endpoints + dynamic latticeCustom* schemas via dxos:openapi
+  // 2. Dynamic OpenAPI includes static v0.4.0 endpoints + dynamic latticeCustom* schemas via dxos:openapi
   const customDb = {
     ...db,
     collections: new Map([

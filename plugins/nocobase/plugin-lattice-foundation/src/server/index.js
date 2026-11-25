@@ -26,7 +26,13 @@ const {registerVoucherLifecycleResource}=require('./voucher-lifecycle');
 const {registerNotificationCenter}=require('./notification-center');
 const {registerSlaEngine}=require('./sla-engine');
 const {registerObservability}=require('./observability');
-const {createOtelExporter}=require('./otel-exporter');
+const {
+  createOtelExporter,
+  recordGenAiSpan,
+  startGenAiSpan,
+  persistGenAiTrace,
+  listGenAiTraces,
+}=require('./otel-exporter');
 const {registerPaasApiKeys, createPaasApiKeyAuthMiddleware}=require('./paas-api-keys');
 const {registerPkiLedger, appendLedgerEntrySafely}=require('./pki-ledger');
 const {
@@ -45,6 +51,25 @@ const {
   registerEventBusListener,
   verifyStandardWebhookSignature,
 }=require('./event-bus');
+const {
+  registerOmnichannelNotify,
+  dispatchOmnichannel,
+  dispatchChannelNotification,
+  createNotificationCenterAdapter,
+}=require('./omnichannel-notify');
+const {
+  registerApprovalEngine,
+  requestApproval,
+  evaluateApprovalSlas,
+  listUnifiedInbox,
+  decideUnifiedInboxItem,
+  saveApprovalPolicy,
+  listApprovalPolicies,
+  deleteApprovalPolicy,
+  decideApprovalRequest,
+  cancelApprovalRequest,
+}=require('./approval-engine');
+const {registerPublicForms}=require('./public-forms');
 const {attachRlsPolicyToTable, canUsePgRlsSession, withSystemRlsBypass}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
@@ -84,6 +109,20 @@ class LatticeFoundationPlugin extends Plugin {
     this.app.latticeVault = vaultApi;
     this.app.latticeEvents = eventBusApi;
     this._stopEventBusDrainer = eventBusApi.stopDrainer;
+    registerOmnichannelNotify(this.app);
+    registerApprovalEngine(this.app);
+    this.app.latticeApprovals = {
+      requestApproval,
+      evaluateApprovalSlas,
+      listUnifiedInbox,
+      decideUnifiedInboxItem,
+      saveApprovalPolicy,
+      listApprovalPolicies,
+      deleteApprovalPolicy,
+      decideApprovalRequest,
+      cancelApprovalRequest,
+    };
+    registerPublicForms(this.app);
     this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'auth'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
@@ -151,5 +190,16 @@ LatticeFoundationPlugin.publishDomainEvent = publishDomainEvent;
 LatticeFoundationPlugin.registerEventBusListener = registerEventBusListener;
 LatticeFoundationPlugin.verifyStandardWebhookSignature = verifyStandardWebhookSignature;
 LatticeFoundationPlugin.resolveConnectorSecrets = resolveConnectorSecrets;
+LatticeFoundationPlugin.recordGenAiSpan = recordGenAiSpan;
+LatticeFoundationPlugin.startGenAiSpan = startGenAiSpan;
+LatticeFoundationPlugin.persistGenAiTrace = persistGenAiTrace;
+LatticeFoundationPlugin.listGenAiTraces = listGenAiTraces;
+LatticeFoundationPlugin.dispatchOmnichannel = dispatchOmnichannel;
+LatticeFoundationPlugin.dispatchChannelNotification = dispatchChannelNotification;
+LatticeFoundationPlugin.createNotificationCenterAdapter = createNotificationCenterAdapter;
+LatticeFoundationPlugin.requestApproval = requestApproval;
+LatticeFoundationPlugin.evaluateApprovalSlas = evaluateApprovalSlas;
+LatticeFoundationPlugin.listUnifiedInbox = listUnifiedInbox;
+LatticeFoundationPlugin.decideUnifiedInboxItem = decideUnifiedInboxItem;
 module.exports = LatticeFoundationPlugin;
 module.exports.default = LatticeFoundationPlugin;

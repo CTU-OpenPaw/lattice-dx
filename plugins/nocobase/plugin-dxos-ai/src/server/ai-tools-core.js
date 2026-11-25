@@ -25,6 +25,13 @@ const { createBuilderTools } = require('./ai-builder-tools');
 const { createOperationalTools } = require('./ai-operational-tools');
 const { createSurfaceAndCreativeTools } = require('./ai-surface-creative-tools');
 const {
+  MEMORY_TOOL_NAMES,
+  MEMORY_TOOL_DEFINITIONS,
+  recallMemories,
+  buildMemoryContextPrompt,
+  executeMemoryTool,
+} = require('./ai-memory');
+const {
   orchestrateEnterpriseAppBuild,
   verifyEnterpriseApp,
   listBuiltApps,
@@ -94,6 +101,14 @@ const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'workflows', 'flow_nodes', 'collections', 'fields',
   'latticeNotifications', 'latticeSlaPolicies', 'latticeAiApprovalQueue', 'latticeParaChunks',
   'latticeBuiltApps',
+  'latticeAiMemory',
+  'latticeAiTraces',
+  'latticeAutomationRuleVersions',
+  'latticeA2aTasks',
+  'latticeApprovalPolicies',
+  'latticeApprovalRequests',
+  'latticeNotificationDeliveries',
+  'latticePublicForms',
 ]);
 const SYSTEM_PROTECTED_COLLECTIONS_LOWER = new Set(
   [...SYSTEM_PROTECTED_COLLECTIONS].map((c) => c.toLowerCase()),
@@ -695,7 +710,77 @@ function createDxosTools() {
     ...createBuilderTools(shared),
     ...surfaceTools,
     ...createOperationalTools(shared),
+    ...createMemoryTools(),
   ];
+}
+
+function createMemoryTools() {
+  return MEMORY_TOOL_DEFINITIONS.map((def) => createAuditedTool({
+    name: def.name,
+    adminOnly: Boolean(def.adminOnly),
+    defaultPermission: def.defaultPermission || 'ALLOW',
+    introduction: def.introduction,
+    description: def.description,
+    schema: def.schema,
+    async run(ctx, db, actor, args) {
+      const rawSingleScope = args?.scope != null && String(args.scope).trim() !== ''
+        ? String(args.scope).trim().toLowerCase()
+        : '';
+      let parsedScopes = args?.scopes;
+      if (typeof parsedScopes === 'string' && parsedScopes.trim().startsWith('[')) {
+        try { parsedScopes = JSON.parse(parsedScopes); } catch {}
+      }
+      const scopesArr = Array.isArray(parsedScopes)
+        ? parsedScopes.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean)
+        : [];
+      const combinedScopes = [
+        ...(rawSingleScope ? [rawSingleScope] : []),
+        ...scopesArr,
+      ];
+      const scopeList = combinedScopes.length > 0 ? [...new Set(combinedScopes)] : ['org'];
+      const isMutation = def.name === 'dxos_memory_remember' || def.name === 'dxos_memory_forget';
+      for (const targetScope of scopeList) {
+        if (isMutation && targetScope === 'org' && !actor.isAdmin) {
+          throw failTool('MEMORY_ORG_WRITE_FORBIDDEN', 403, 'Chỉ Quản trị viên mới được ghi hoặc xóa bộ nhớ dùng chung phạm vi tổ chức (org).');
+        }
+        if (targetScope === 'agent' && !actor.isAdmin) {
+          throw failTool('MEMORY_AGENT_FORBIDDEN', 403, 'Chỉ Quản trị viên mới được truy cập bộ nhớ nội bộ phạm vi agent.');
+        }
+      }
+      return executeMemoryTool(db, def.name, args, {
+        actor,
+        agentId: ctx?.state?.dxosAiUsername || actor?.aiEmployee || actor?.username || null,
+        sessionId: ctx?.state?.dxosSessionId || ctx?.state?.sessionId || null,
+      });
+    },
+  }));
+}
+
+async function buildAgentMemoryContext(db, actor = {}, options = {}) {
+  if (!db?.getRepository || !db.getRepository('latticeAiMemory')) return '';
+  const organizationId = String(options.organizationId || actor?.organizationId || '').trim();
+  if (!organizationId || organizationId.toLowerCase() === 'all') return '';
+  const scopes = Array.isArray(options.scopes) && options.scopes.length
+    ? options.scopes
+    : ['org', ...(options.agentId || actor?.aiEmployee ? ['agent'] : [])];
+  try {
+    const recalled = await recallMemories(db, {
+      organizationId,
+      scopes,
+      agentId: options.agentId || actor?.aiEmployee || actor?.username || undefined,
+      userId: actor?.userId != null ? String(actor.userId) : undefined,
+      sessionId: options.sessionId || undefined,
+      query: String(options.query || ''),
+      limit: options.limit || 6,
+      touchAccess: options.touchAccess === true,
+    });
+    return buildMemoryContextPrompt(recalled.memories || [], {
+      maxChars: options.maxChars || 2400,
+      maxItems: options.maxItems || 8,
+    });
+  } catch {
+    return '';
+  }
 }
 
 const OWN_SCOPED_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
@@ -767,6 +852,7 @@ function registerDxosToolsWithHost(appOrPlugin) {
 module.exports = {
   ADMIN_BUILDER_TOOL_NAMES,
   OPERATIONAL_TOOL_NAMES,
+  MEMORY_TOOL_NAMES,
   WRITABLE_BUSINESS_COLLECTIONS,
   PROTECTED_SERVER_FIELDS,
   SYSTEM_PROTECTED_COLLECTIONS,
@@ -787,6 +873,10 @@ module.exports = {
   invokeResourceAction,
   normalizeToolPermissionsMap,
   createAuditedTool,
+  createMemoryTools,
+  buildMemoryContextPrompt,
+  recallMemories,
+  buildAgentMemoryContext,
   createDxosTools,
   registerDxosToolsWithHost,
 };

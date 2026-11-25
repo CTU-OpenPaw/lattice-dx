@@ -9,6 +9,14 @@
 'use strict';
 
 const { randomBytes } = require('node:crypto');
+const {
+  ORG_ID_RE,
+  assertValidOrganizationId,
+  canUsePgRlsSession,
+  getActiveRlsContext,
+  withTenantRlsContext,
+  runInRlsSavepoint,
+} = require('./pg-rls');
 
 const TRACEPARENT_RE = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i;
 const TRACE_ID_RE = /^[0-9a-f]{32}$/i;
@@ -19,10 +27,144 @@ const DEFAULT_MAX_QUEUE_SIZE = 256;
 const DEFAULT_BATCH_SIZE = 64;
 const DEFAULT_EXPORT_TIMEOUT_MS = 2000;
 const DEFAULT_FLUSH_INTERVAL_MS = 5000;
-const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|secret|token|password|passwd|credential|cookie|signature|private[-_]?key|session)/i;
+const SENSITIVE_KEY_RE = /(authorization|api[-_]?key|apikey|secret|token|password|passwd|credential|cookie|signature|private[-_]?key|privatekey|session|jwt|bearer|passphrase|access_key|client_secret)/i;
+const SAFE_TOKEN_COUNT_KEY_RE = /^(?:gen_ai\.usage\.(?:input|output|total)_tokens|input[_-]?tokens?|output[_-]?tokens?|prompt[_-]?tokens?|completion[_-]?tokens?|total[_-]?tokens?|max[_-]?tokens?|token[_-]?(?:count|source))$/i;
+const SECRET_KV_RE = /((?:\\?["'])?([a-zA-Z0-9_]*(?:secret|password|apikey|api_key|jwt|private_?key|client_secret|access_key|passphrase|credential|authorization|cookie)[a-zA-Z0-9_]*|[a-zA-Z0-9_]*(?:token|session_?id))(?:\\?["'])?\s*[:=]\s*)(?!\\?["']?(?:Bearer\s+)?\[REDACTED(?:_[A-Z]+)?\])(\\"(?:[^"\\]|\\[^"])+\\"|"(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+'|[^\s,;}"'&]+)/gi;
+const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const VALID_TRACE_STATUSES = new Set(['ok', 'error', 'suspended']);
 
 function randomHex(byteCount) {
   return randomBytes(byteCount).toString('hex');
+}
+
+function nonNegInt(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0;
+}
+
+function isSensitiveKey(key) {
+  if (typeof key !== 'string' || !key) return false;
+  if (SAFE_TOKEN_COUNT_KEY_RE.test(key)) return false;
+  return SENSITIVE_KEY_RE.test(key);
+}
+
+function replaceCounted(text, regex, replacement) {
+  let hits = 0;
+  const next = text.replace(regex, (...args) => {
+    hits += 1;
+    if (typeof replacement === 'function') return replacement(...args);
+    const full = args[0];
+    if (typeof replacement === 'string' && replacement.includes('$1') && args.length >= 2) {
+      return replacement.replace('$1', String(args[1] ?? ''));
+    }
+    return replacement || full;
+  });
+  return { text: next, hits };
+}
+
+function replaceSecretKvPairs(rawText) {
+  let hits = 0;
+  const text = String(rawText ?? '').replace(SECRET_KV_RE, (full, prefix, keyName, valPart) => {
+    if (SAFE_TOKEN_COUNT_KEY_RE.test(String(keyName || ''))) {
+      return full;
+    }
+    hits += 1;
+    if (valPart.startsWith('\\"')) return `${prefix}\\"[REDACTED]\\"`;
+    if (valPart.startsWith('"')) return `${prefix}"[REDACTED]"`;
+    if (valPart.startsWith("'")) return `${prefix}'[REDACTED]'`;
+    return `${prefix}[REDACTED]`;
+  });
+  return { text, hits };
+}
+
+function redactPiiText(rawText) {
+  let text = String(rawText ?? '');
+  if (!text) return { text, count: 0 };
+  let count = 0;
+  const rules = [
+    [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]'],
+    [/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]'],
+    [/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]'],
+    [/\bldx_pat_[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]'],
+    [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]'],
+    [/(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?)\s*[:#=-]?\s*)\d{9,12}\b/gi, '$1[REDACTED_CCCD]'],
+    [/(?<![0-9A-Za-z_-])0\d{11}(?![0-9A-Za-z_-])/g, '[REDACTED_CCCD]'],
+    [/(?<![0-9A-Za-z_-])(?:\+?84[\s.-]?|0)(?:3|5|7|8|9)(?:[\s.-]?\d){8}(?![0-9A-Za-z_-])/g, '[REDACTED_PHONE]'],
+    [/(\b(?:stk|số tài khoản|tài khoản ngân hàng|iban)\s*[:#=-]?\s*)[A-Z0-9 -]{8,24}(?=\s*[,;.\n]|$)/gi, '$1[REDACTED_BANK]'],
+    [/(\b(?:mst|mã số thuế)\s*[:#=-]?\s*)\d{10}(?:-\d{3})?\b/gi, '$1[REDACTED_MST]'],
+  ];
+  for (let i = 0; i < rules.length; i += 1) {
+    if (i === 4) {
+      const kv = replaceSecretKvPairs(text);
+      text = kv.text;
+      count += kv.hits;
+    }
+    const [regex, replacement] = rules[i];
+    const res = replaceCounted(text, regex, replacement);
+    text = res.text;
+    count += res.hits;
+  }
+  return { text, count };
+}
+
+function redactPiiDeep(value, depthOrOptions = 0, internalSeen = null) {
+  const opts = typeof depthOrOptions === 'object' && depthOrOptions !== null
+    ? {
+        depth: Number(depthOrOptions.depth || 0),
+        maxDepth: Number.isInteger(depthOrOptions.maxDepth) ? depthOrOptions.maxDepth : 8,
+        maxArray: Number.isInteger(depthOrOptions.maxArray) ? depthOrOptions.maxArray : 50,
+        maxStringLen: Number.isInteger(depthOrOptions.maxStringLen) ? depthOrOptions.maxStringLen : 4096,
+      }
+    : {
+        depth: Number(depthOrOptions || 0),
+        maxDepth: 8,
+        maxArray: 50,
+        maxStringLen: 4096,
+      };
+  const seen = internalSeen || new WeakSet();
+
+  if (opts.depth > opts.maxDepth) return { value: '[TRUNCATED]', count: 0 };
+  if (value == null || typeof value === 'boolean') return { value, count: 0 };
+  if (typeof value === 'number') return { value: Number.isFinite(value) ? value : String(value), count: 0 };
+  if (typeof value === 'string') {
+    const scrubbed = redactPiiText(value);
+    const truncated = scrubbed.text.length > opts.maxStringLen
+      ? `${scrubbed.text.slice(0, opts.maxStringLen)}...`
+      : scrubbed.text;
+    return { value: truncated, count: scrubbed.count };
+  }
+  if (value instanceof Date) {
+    return { value: Number.isNaN(value.getTime()) ? null : value.toISOString(), count: 0 };
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) return { value: '[CIRCULAR]', count: 0 };
+    seen.add(value);
+    if (Array.isArray(value)) {
+      let count = 0;
+      const out = value.slice(0, opts.maxArray).map((item) => {
+        const res = redactPiiDeep(item, { ...opts, depth: opts.depth + 1 }, seen);
+        count += res.count;
+        return res.value;
+      });
+      return { value: out, count };
+    }
+    let count = 0;
+    const out = {};
+    for (const [key, val] of Object.entries(value)) {
+      if (!key || BLOCKED_KEYS.has(key) || val === undefined) continue;
+      if (isSensitiveKey(key)) {
+        out[key] = '[REDACTED]';
+        if (val !== '[REDACTED]') count += 1;
+      } else {
+        const res = redactPiiDeep(val, { ...opts, depth: opts.depth + 1 }, seen);
+        out[key] = res.value;
+        count += res.count;
+      }
+    }
+    return { value: out, count };
+  }
+  const scrubbed = redactPiiText(String(value));
+  return { value: scrubbed.text.slice(0, 512), count: scrubbed.count };
 }
 
 function normalizeEndpoint(endpoint) {
@@ -77,28 +219,53 @@ function formatTraceparent(traceId, spanId, traceFlags = '01') {
   return `00-${validTraceId}-${validSpanId}-${validFlags}`;
 }
 
-function redactAttributes(attributes) {
+function redactAttributesWithCount(attributes) {
   if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
-    return {};
+    return { attributes: {}, redactedCount: 0 };
   }
   const safe = {};
+  let redactedCount = 0;
   for (const [key, rawValue] of Object.entries(attributes)) {
-    if (!key || rawValue === undefined || rawValue === null) continue;
-    if (SENSITIVE_KEY_RE.test(key)) {
+    if (!key || BLOCKED_KEYS.has(key) || rawValue === undefined || rawValue === null) continue;
+    if (isSensitiveKey(key)) {
       safe[key] = '[REDACTED]';
+      if (rawValue !== '[REDACTED]') {
+        redactedCount += 1;
+      }
       continue;
     }
     if (typeof rawValue === 'string') {
-      safe[key] = rawValue.length > 2048 ? rawValue.slice(0, 2048) : rawValue;
+      const scrubbed = redactPiiText(rawValue);
+      safe[key] = scrubbed.text.length > 2048 ? scrubbed.text.slice(0, 2048) : scrubbed.text;
+      redactedCount += scrubbed.count;
     } else if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
       safe[key] = rawValue;
     } else if (typeof rawValue === 'boolean') {
       safe[key] = rawValue;
+    } else if (typeof rawValue === 'object') {
+      const deep = redactPiiDeep(rawValue, { maxDepth: 8, maxArray: 50, maxStringLen: 2048 });
+      redactedCount += deep.count;
+      let serialized = '[UNSERIALIZABLE]';
+      try {
+        const json = JSON.stringify(deep.value);
+        if (typeof json === 'string') {
+          serialized = json.length > 2048 ? `${json.slice(0, 2045)}...` : json;
+        }
+      } catch {
+        serialized = '[UNSERIALIZABLE]';
+      }
+      safe[key] = serialized;
     } else {
-      safe[key] = String(rawValue).slice(0, 512);
+      const scrubbed = redactPiiText(String(rawValue));
+      safe[key] = scrubbed.text.slice(0, 512);
+      redactedCount += scrubbed.count;
     }
   }
-  return safe;
+  return { attributes: safe, redactedCount };
+}
+
+function redactAttributes(attributes) {
+  return redactAttributesWithCount(attributes).attributes;
 }
 
 function toOtlpAttributes(attributes) {
@@ -151,6 +318,401 @@ function sanitizePath(rawPath) {
   return str.startsWith('/') ? str.slice(0, 512) : `/${str.slice(0, 511)}`;
 }
 
+function serializePreview(value, maxLen = 512) {
+  const str = typeof value === 'string' ? value : JSON.stringify(value ?? '');
+  return str.length > maxLen ? `${str.slice(0, maxLen)}...` : str;
+}
+
+function normalizeTimestamp(rawDate, fallbackMs = Date.now()) {
+  if (rawDate instanceof Date && !Number.isNaN(rawDate.getTime())) return rawDate;
+  if (typeof rawDate === 'number' && Number.isFinite(rawDate)) return new Date(rawDate);
+  if (typeof rawDate === 'string' && rawDate.trim()) {
+    const parsed = new Date(rawDate);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date(fallbackMs);
+}
+
+function validHexOrNull(val, regex, zeroVal) {
+  if (typeof val !== 'string') return null;
+  const trimmed = val.trim().toLowerCase();
+  if (!regex.test(trimmed) || trimmed === zeroVal) return null;
+  return trimmed;
+}
+
+function readRowField(row, key) {
+  return typeof row?.get === 'function' ? row.get(key) : row?.[key];
+}
+
+function serializeAiTrace(row) {
+  if (!row) return null;
+  const plain = typeof row.toJSON === 'function' ? row.toJSON() : { ...row };
+  return {
+    id: readRowField(plain, 'id') ?? null,
+    uid: readRowField(plain, 'uid') || null,
+    organizationId: readRowField(plain, 'organizationId') || null,
+    traceId: readRowField(plain, 'traceId') || null,
+    spanId: readRowField(plain, 'spanId') || null,
+    parentSpanId: readRowField(plain, 'parentSpanId') || null,
+    runUid: readRowField(plain, 'runUid') || null,
+    operationName: readRowField(plain, 'operationName') || 'chat',
+    genAiSystem: readRowField(plain, 'genAiSystem') || 'latticedx',
+    model: readRowField(plain, 'model') || null,
+    agentName: readRowField(plain, 'agentName') || null,
+    toolName: readRowField(plain, 'toolName') || null,
+    status: readRowField(plain, 'status') || 'ok',
+    durationMs: nonNegInt(readRowField(plain, 'durationMs')),
+    inputTokens: nonNegInt(readRowField(plain, 'inputTokens')),
+    outputTokens: nonNegInt(readRowField(plain, 'outputTokens')),
+    totalTokens: nonNegInt(readRowField(plain, 'totalTokens')),
+    piiRedactedCount: nonNegInt(readRowField(plain, 'piiRedactedCount')),
+    attributesJson: readRowField(plain, 'attributesJson') || {},
+    startedAt: readRowField(plain, 'startedAt') || null,
+    endedAt: readRowField(plain, 'endedAt') || null,
+    errorMessage: readRowField(plain, 'errorMessage') || null,
+    createdAt: readRowField(plain, 'createdAt') || null,
+    updatedAt: readRowField(plain, 'updatedAt') || null,
+  };
+}
+
+async function runTraceScopedDb(db, organizationId, options, fn) {
+  if (options?.transaction) {
+    const active = getActiveRlsContext();
+    if (active?.transaction === options.transaction && canUsePgRlsSession(db) && options.useSavepoint !== false) {
+      return runInRlsSavepoint(db, fn);
+    }
+    return fn(options.transaction);
+  }
+  if (canUsePgRlsSession(db)) {
+    const active = getActiveRlsContext();
+    if (
+      active?.transaction
+      && active.sequelize === db?.sequelize
+      && (active.systemRlsBypass === true || active.organizationId === organizationId)
+    ) {
+      if (options?.useSavepoint !== false) {
+        return runInRlsSavepoint(db, fn);
+      }
+      return fn(active.transaction);
+    }
+    return withTenantRlsContext(db, organizationId, fn);
+  }
+  return fn(null);
+}
+
+async function persistGenAiTrace(db, traceRecord = {}, options = {}) {
+  const repo = db?.getRepository?.('latticeAiTraces');
+  if (!repo || typeof repo.create !== 'function') {
+    throw Object.assign(new Error('latticeAiTraces repository is unavailable.'), {
+      code: 'TRACE_REPO_UNAVAILABLE',
+      status: 503,
+    });
+  }
+  const organizationId = String(traceRecord?.organizationId || options?.organizationId || '').trim();
+  assertValidOrganizationId(organizationId);
+
+  const traceId = validHexOrNull(traceRecord.traceId, TRACE_ID_RE, ZERO_TRACE_ID) || randomHex(16);
+  const spanId = validHexOrNull(traceRecord.spanId, SPAN_ID_RE, ZERO_SPAN_ID) || randomHex(8);
+  const parentSpanId = validHexOrNull(traceRecord.parentSpanId, SPAN_ID_RE, ZERO_SPAN_ID);
+
+  const operationName = String(traceRecord.operationName || 'chat').trim().slice(0, 64) || 'chat';
+  const genAiSystem = String(traceRecord.genAiSystem || 'latticedx').trim().slice(0, 64) || 'latticedx';
+  const statusRaw = String(traceRecord.status || 'ok').trim().toLowerCase();
+  const status = VALID_TRACE_STATUSES.has(statusRaw) ? statusRaw : 'ok';
+
+  const inputTokens = nonNegInt(traceRecord.inputTokens);
+  const outputTokens = nonNegInt(traceRecord.outputTokens);
+  const totalTokens = Math.max(inputTokens + outputTokens, nonNegInt(traceRecord.totalTokens));
+  const durationMs = nonNegInt(traceRecord.durationMs);
+
+  const startedAt = normalizeTimestamp(traceRecord.startedAt);
+  const endedAt = traceRecord.endedAt
+    ? normalizeTimestamp(traceRecord.endedAt, startedAt.getTime() + durationMs)
+    : new Date(startedAt.getTime() + durationMs);
+
+  const rawAttrs = traceRecord.attributesJson && typeof traceRecord.attributesJson === 'object' && !Array.isArray(traceRecord.attributesJson)
+    ? traceRecord.attributesJson
+    : {};
+  const scrubbedAttrs = redactPiiDeep(rawAttrs, { maxDepth: 8, maxArray: 50, maxStringLen: 2048 });
+  const rawErr = traceRecord.errorMessage ? String(traceRecord.errorMessage) : '';
+  const scrubbedErr = rawErr ? redactPiiText(rawErr) : { text: '', count: 0 };
+  const scrubbedModel = traceRecord.model ? redactPiiText(String(traceRecord.model).trim()) : { text: '', count: 0 };
+  const scrubbedAgent = traceRecord.agentName ? redactPiiText(String(traceRecord.agentName).trim()) : { text: '', count: 0 };
+  const scrubbedTool = traceRecord.toolName ? redactPiiText(String(traceRecord.toolName).trim()) : { text: '', count: 0 };
+  const scrubbedRun = traceRecord.runUid ? redactPiiText(String(traceRecord.runUid).trim()) : { text: '', count: 0 };
+
+  const basePiiCount = nonNegInt(traceRecord.piiRedactedCount);
+  const piiRedactedCount = basePiiCount
+    + scrubbedAttrs.count
+    + scrubbedErr.count
+    + scrubbedModel.count
+    + scrubbedAgent.count
+    + scrubbedTool.count
+    + scrubbedRun.count;
+
+  const uid = String(traceRecord.uid || `trc_${randomHex(12)}`).trim().slice(0, 128);
+  const values = {
+    uid,
+    organizationId,
+    traceId,
+    spanId,
+    parentSpanId: parentSpanId || null,
+    runUid: scrubbedRun.text ? scrubbedRun.text.slice(0, 128) : null,
+    operationName,
+    genAiSystem,
+    model: scrubbedModel.text ? scrubbedModel.text.slice(0, 160) : null,
+    agentName: scrubbedAgent.text ? scrubbedAgent.text.slice(0, 160) : null,
+    toolName: scrubbedTool.text ? scrubbedTool.text.slice(0, 160) : null,
+    status,
+    durationMs,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    piiRedactedCount,
+    attributesJson: {
+      ...(scrubbedAttrs.value && typeof scrubbedAttrs.value === 'object' ? scrubbedAttrs.value : {}),
+      'dxos.pii.redacted_count': piiRedactedCount,
+    },
+    startedAt,
+    endedAt,
+    errorMessage: scrubbedErr.text ? scrubbedErr.text.slice(0, 2000) : null,
+  };
+
+  const created = await runTraceScopedDb(db, organizationId, options, (transaction) => repo.create({
+    values,
+    ...(transaction ? { transaction } : {}),
+  }));
+  return serializeAiTrace(created);
+}
+
+async function listGenAiTraces(db, query = {}, options = {}) {
+  const repo = db?.getRepository?.('latticeAiTraces');
+  if (!repo) {
+    throw Object.assign(new Error('latticeAiTraces repository is unavailable.'), {
+      code: 'TRACE_REPO_UNAVAILABLE',
+      status: 503,
+    });
+  }
+  const organizationId = String(query?.organizationId || options?.organizationId || '').trim();
+  assertValidOrganizationId(organizationId);
+
+  const filter = { organizationId };
+  for (const key of ['runUid', 'traceId', 'operationName', 'agentName', 'toolName', 'model']) {
+    if (typeof query?.[key] === 'string' && query[key].trim()) {
+      filter[key] = query[key].trim();
+    }
+  }
+  if (typeof query?.status === 'string' && VALID_TRACE_STATUSES.has(query.status.trim().toLowerCase())) {
+    filter.status = query.status.trim().toLowerCase();
+  }
+
+  const rawLimit = Number(query?.limit);
+  const limit = Number.isFinite(rawLimit) && rawLimit >= 1 ? Math.min(200, Math.trunc(rawLimit)) : 50;
+  const rawOffset = Number(query?.offset);
+  const offset = Number.isFinite(rawOffset) && rawOffset >= 0 ? Math.trunc(rawOffset) : 0;
+
+  let sort;
+  if (query?.order === 'asc') {
+    sort = ['startedAt', 'id'];
+  } else if (query?.order === 'desc') {
+    sort = ['-startedAt', '-id'];
+  } else {
+    sort = (filter.traceId || filter.runUid) ? ['startedAt', 'id'] : ['-startedAt', '-id'];
+  }
+
+  const { rows, count } = await runTraceScopedDb(db, organizationId, options, async (transaction) => {
+    const queryOpts = {
+      filter,
+      limit,
+      offset,
+      sort,
+      ...(transaction ? { transaction } : {}),
+    };
+    if (typeof repo.findAndCount === 'function') {
+      const res = await repo.findAndCount(queryOpts);
+      if (Array.isArray(res)) return { rows: res[0] || [], count: Number(res[1] || 0) };
+      return { rows: res?.rows || [], count: Number(res?.count || 0) };
+    }
+    const foundRows = (await repo.find(queryOpts)) || [];
+    const totalCount = typeof repo.count === 'function'
+      ? Number(await repo.count({ filter, ...(transaction ? { transaction } : {}) }))
+      : foundRows.length;
+    return { rows: foundRows, count: totalCount };
+  });
+
+  return {
+    items: rows.map(serializeAiTrace),
+    total: count,
+    limit,
+    offset,
+  };
+}
+
+function buildNormalizedGenAiSpan(input = {}, options = {}) {
+  const incomingTp = typeof input.traceparent === 'string' ? parseTraceparent(input.traceparent) : null;
+  const traceId = validHexOrNull(input.traceId, TRACE_ID_RE, ZERO_TRACE_ID)
+    || incomingTp?.traceId
+    || randomHex(16);
+  const spanId = validHexOrNull(input.spanId, SPAN_ID_RE, ZERO_SPAN_ID)
+    || randomHex(8);
+  const parentSpanId = validHexOrNull(input.parentSpanId, SPAN_ID_RE, ZERO_SPAN_ID)
+    || incomingTp?.parentSpanId
+    || undefined;
+  const traceparent = formatTraceparent(traceId, spanId, input.traceFlags || incomingTp?.traceFlags || '01');
+
+  const rawModel = String(input.model || input.requestModel || input['gen_ai.request.model'] || '').trim();
+  const rawAgentName = String(input.agentName || input['gen_ai.agent.name'] || '').trim();
+  const rawToolName = String(input.toolName || input['gen_ai.tool.name'] || '').trim();
+  const rawRunUid = String(input.runUid || input['dxos.run_uid'] || '').trim();
+
+  const modelRes = rawModel ? redactPiiText(rawModel) : { text: '', count: 0 };
+  const agentRes = rawAgentName ? redactPiiText(rawAgentName) : { text: '', count: 0 };
+  const toolRes = rawToolName ? redactPiiText(rawToolName) : { text: '', count: 0 };
+  const runUidRes = rawRunUid ? redactPiiText(rawRunUid) : { text: '', count: 0 };
+
+  const model = modelRes.text ? modelRes.text.slice(0, 160) : null;
+  const agentName = agentRes.text ? agentRes.text.slice(0, 160) : null;
+  const toolName = toolRes.text ? toolRes.text.slice(0, 160) : null;
+  const runUid = runUidRes.text ? runUidRes.text.slice(0, 128) : null;
+  const organizationId = String(input.organizationId || options?.organizationId || input['dxos.org'] || '').trim();
+  const operationName = String(
+    input.operationName
+    || input.operation
+    || input['gen_ai.operation.name']
+    || (toolName ? 'execute_tool' : agentName ? 'invoke_agent' : 'chat'),
+  ).trim() || 'chat';
+  const genAiSystem = String(input.genAiSystem || input.system || input['gen_ai.system'] || 'latticedx').trim() || 'latticedx';
+
+  const status = (input.status === 'error' || input.status?.code === 2 || input.error || input.errorMessage)
+    ? 'error'
+    : (input.status === 'suspended' ? 'suspended' : 'ok');
+
+  const inputTokens = nonNegInt(
+    input.inputTokens ?? input.promptTokens ?? input.usage?.input_tokens ?? input.usage?.promptTokens ?? input.usage?.prompt_tokens ?? input['gen_ai.usage.input_tokens'],
+  );
+  const outputTokens = nonNegInt(
+    input.outputTokens ?? input.completionTokens ?? input.usage?.output_tokens ?? input.usage?.completionTokens ?? input.usage?.completion_tokens ?? input['gen_ai.usage.output_tokens'],
+  );
+  const rawTotal = input.totalTokens ?? input.usage?.total_tokens ?? input.usage?.totalTokens;
+  const totalTokens = rawTotal != null && Number.isFinite(Number(rawTotal))
+    ? Math.max(inputTokens + outputTokens, nonNegInt(rawTotal))
+    : (inputTokens + outputTokens);
+
+  const startedAt = normalizeTimestamp(input.startedAt ?? input.startTimeMs);
+  const computedDuration = input.endedAt
+    ? Math.max(0, Math.round(normalizeTimestamp(input.endedAt).getTime() - startedAt.getTime()))
+    : 0;
+  const durationMs = input.durationMs !== undefined ? nonNegInt(input.durationMs) : computedDuration;
+  const endedAt = input.endedAt
+    ? normalizeTimestamp(input.endedAt, startedAt.getTime() + durationMs)
+    : new Date(startedAt.getTime() + durationMs);
+
+  const startTimeUnixNano = input.startTimeUnixNano !== undefined
+    ? String(input.startTimeUnixNano)
+    : (BigInt(startedAt.getTime()) * 1_000_000n).toString();
+  const endTimeUnixNano = input.endTimeUnixNano !== undefined
+    ? String(input.endTimeUnixNano)
+    : (BigInt(startedAt.getTime()) * 1_000_000n + BigInt(durationMs) * 1_000_000n).toString();
+
+  const rawError = input.errorMessage || input.error?.message || (typeof input.error === 'string' ? input.error : '');
+  const errRes = rawError ? redactPiiText(String(rawError)) : { text: '', count: 0 };
+  const errorMessage = errRes.text ? errRes.text.slice(0, 1000) : null;
+
+  const hasInputPreview = input.inputPreview !== undefined && input.inputPreview !== null;
+  const hasOutputPreview = input.outputPreview !== undefined && input.outputPreview !== null;
+  const inputPrevRes = hasInputPreview ? redactPiiDeep(input.inputPreview) : { value: undefined, count: 0 };
+  const outputPrevRes = hasOutputPreview ? redactPiiDeep(input.outputPreview) : { value: undefined, count: 0 };
+
+  const incomingAttrs = input.attributes && typeof input.attributes === 'object' && !Array.isArray(input.attributes)
+    ? { ...input.attributes }
+    : {};
+  const callerAttrPiiCount = nonNegInt(incomingAttrs['dxos.pii.redacted_count']);
+  delete incomingAttrs['dxos.pii.redacted_count'];
+  const attrRes = redactAttributesWithCount(incomingAttrs);
+
+  const basePiiCount = Math.max(nonNegInt(input.piiRedactedCount), callerAttrPiiCount);
+  const piiRedactedCount = basePiiCount
+    + attrRes.redactedCount
+    + errRes.count
+    + inputPrevRes.count
+    + outputPrevRes.count
+    + modelRes.count
+    + agentRes.count
+    + toolRes.count
+    + runUidRes.count;
+
+  const spanAttributes = {
+    ...attrRes.attributes,
+    'gen_ai.operation.name': operationName,
+    'gen_ai.system': genAiSystem,
+    ...(model ? { 'gen_ai.request.model': model } : {}),
+    'gen_ai.usage.input_tokens': inputTokens,
+    'gen_ai.usage.output_tokens': outputTokens,
+    ...(agentName ? { 'gen_ai.agent.name': agentName } : {}),
+    ...(toolName ? { 'gen_ai.tool.name': toolName } : {}),
+    ...(runUid ? { 'dxos.run_uid': runUid } : {}),
+    ...(organizationId ? { 'dxos.org': organizationId } : {}),
+    'dxos.status': status,
+    'dxos.pii.redacted_count': piiRedactedCount,
+    ...(hasInputPreview ? { 'dxos.input_preview': serializePreview(inputPrevRes.value, 512) } : {}),
+    ...(hasOutputPreview ? { 'dxos.output_preview': serializePreview(outputPrevRes.value, 512) } : {}),
+  };
+
+  const spanName = String(
+    input.name || `${operationName}${toolName ? ` ${toolName}` : agentName ? ` ${agentName}` : model ? ` ${model}` : ''}`,
+  ).trim().slice(0, 256);
+
+  const traceRecord = {
+    uid: String(input.uid || `trc_${randomHex(12)}`).trim().slice(0, 128),
+    organizationId: organizationId || null,
+    traceId,
+    spanId,
+    parentSpanId: parentSpanId || null,
+    runUid,
+    operationName,
+    genAiSystem,
+    model,
+    agentName,
+    toolName,
+    status,
+    durationMs,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    piiRedactedCount,
+    attributesJson: spanAttributes,
+    startedAt,
+    endedAt,
+    errorMessage,
+  };
+
+  const otlpInput = {
+    name: spanName,
+    kind: Number.isInteger(input.kind) ? input.kind : 3,
+    traceId,
+    spanId,
+    parentSpanId,
+    startTimeUnixNano,
+    endTimeUnixNano,
+    attributes: spanAttributes,
+    status: {
+      code: status === 'error' ? 2 : 1,
+      ...(errorMessage ? { message: errorMessage.slice(0, 512) } : {}),
+    },
+  };
+
+  return {
+    traceId,
+    spanId,
+    parentSpanId: parentSpanId || null,
+    traceparent,
+    spanAttributes,
+    piiRedactedCount,
+    traceRecord,
+    otlpInput,
+  };
+}
+
 function createOtelExporter(options = {}) {
   const serviceName =
     typeof options.serviceName === 'string' && options.serviceName.trim()
@@ -159,7 +721,7 @@ function createOtelExporter(options = {}) {
   const serviceVersion =
     typeof options.serviceVersion === 'string' && options.serviceVersion.trim()
       ? options.serviceVersion.trim()
-      : '1.0.0';
+      : '0.4.0';
   const rawEndpoint =
     options.endpoint !== undefined ? options.endpoint : process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   const tracesUrl = normalizeEndpoint(rawEndpoint);
@@ -228,7 +790,7 @@ function createOtelExporter(options = {}) {
         : 1;
     const status = { code: statusCode };
     if (spanInput.status?.message) {
-      status.message = String(spanInput.status.message).slice(0, 512);
+      status.message = redactPiiText(String(spanInput.status.message)).text.slice(0, 512);
     }
 
     const otlpSpan = {
@@ -276,7 +838,7 @@ function createOtelExporter(options = {}) {
                 {
                   scope: {
                     name: '@latticedx/otel-exporter',
-                    version: '1.0.0',
+                    version: '0.4.0',
                   },
                   spans: batch,
                 },
@@ -398,6 +960,117 @@ function createOtelExporter(options = {}) {
     };
   }
 
+  function recordGenAiSpan(input = {}, spanOptions = {}) {
+    const normalized = buildNormalizedGenAiSpan(input, spanOptions);
+    const targetExporter = spanOptions?.exporter && typeof spanOptions.exporter.recordSpan === 'function'
+      ? spanOptions.exporter
+      : { recordSpan };
+    const queued = targetExporter.recordSpan(normalized.otlpInput);
+
+    const baseResult = {
+      ok: true,
+      queued,
+      traceId: normalized.traceId,
+      spanId: normalized.spanId,
+      parentSpanId: normalized.parentSpanId,
+      traceparent: normalized.traceparent,
+      attributes: normalized.spanAttributes,
+      piiRedactedCount: normalized.piiRedactedCount,
+      traceRecord: normalized.traceRecord,
+      persisted: null,
+    };
+
+    const orgId = normalized.traceRecord.organizationId || '';
+    const shouldPersist = Boolean(
+      spanOptions?.db
+      && spanOptions.persist !== false
+      && (ORG_ID_RE.test(orgId) || spanOptions.strictPersist === true),
+    );
+    if (!shouldPersist) {
+      return baseResult;
+    }
+
+    return persistGenAiTrace(spanOptions.db, normalized.traceRecord, spanOptions)
+      .then((persisted) => ({ ...baseResult, persisted }))
+      .catch((error) => {
+        if (spanOptions.strictPersist === true) throw error;
+        return { ...baseResult, persisted: null, persistError: String(error?.code || error?.message || 'PERSIST_FAILED') };
+      });
+  }
+
+  function startGenAiSpan(input = {}, startOptions = {}) {
+    const incomingTp = typeof input.traceparent === 'string' ? parseTraceparent(input.traceparent) : null;
+    const traceId = validHexOrNull(input.traceId, TRACE_ID_RE, ZERO_TRACE_ID)
+      || incomingTp?.traceId
+      || randomHex(16);
+    const parentSpanId = validHexOrNull(input.parentSpanId, SPAN_ID_RE, ZERO_SPAN_ID)
+      || incomingTp?.parentSpanId
+      || undefined;
+    const spanId = validHexOrNull(input.spanId, SPAN_ID_RE, ZERO_SPAN_ID) || randomHex(8);
+    const traceparent = formatTraceparent(traceId, spanId, input.traceFlags || incomingTp?.traceFlags || '01');
+    const startedAt = normalizeTimestamp(input.startedAt);
+    const startUnixNano = BigInt(startedAt.getTime()) * 1_000_000n;
+    const startHr = process.hrtime.bigint();
+
+    let ended = false;
+    let cachedResult = null;
+
+    const span = {
+      traceId,
+      spanId,
+      parentSpanId: parentSpanId || null,
+      traceparent,
+      operationName: String(input.operationName || input.operation || 'chat').trim() || 'chat',
+      genAiSystem: String(input.genAiSystem || input.system || 'latticedx').trim() || 'latticedx',
+      model: input.model ? String(input.model).trim() : null,
+      agentName: input.agentName ? String(input.agentName).trim() : null,
+      toolName: input.toolName ? String(input.toolName).trim() : null,
+      runUid: input.runUid ? String(input.runUid).trim() : null,
+      organizationId: input.organizationId ? String(input.organizationId).trim() : null,
+      startedAt,
+    };
+
+    function end(result = {}, endOptions = {}) {
+      if (ended) return cachedResult;
+      ended = true;
+      const elapsedNs = process.hrtime.bigint() - startHr;
+      const computedDurationMs = Math.max(0, Math.round(Number(elapsedNs) / 1e6));
+      const durationMs = result?.durationMs !== undefined ? nonNegInt(result.durationMs) : computedDurationMs;
+      const endUnixNano = result?.endTimeUnixNano !== undefined
+        ? String(result.endTimeUnixNano)
+        : (startUnixNano + (elapsedNs >= 0n ? elapsedNs : 0n)).toString();
+      const mergedInput = {
+        ...input,
+        ...result,
+        traceId,
+        spanId,
+        parentSpanId,
+        traceparent,
+        startedAt,
+        endedAt: result?.endedAt || new Date(startedAt.getTime() + durationMs),
+        durationMs,
+        startTimeUnixNano: startUnixNano.toString(),
+        endTimeUnixNano: endUnixNano,
+        attributes: {
+          ...(input.attributes && typeof input.attributes === 'object' ? input.attributes : {}),
+          ...(result?.attributes && typeof result.attributes === 'object' ? result.attributes : {}),
+        },
+      };
+      cachedResult = recordGenAiSpan(mergedInput, { ...startOptions, ...endOptions });
+      return cachedResult;
+    }
+
+    return {
+      span,
+      traceId,
+      spanId,
+      parentSpanId: parentSpanId || null,
+      traceparent,
+      startedAt,
+      end,
+    };
+  }
+
   function getOtelStats() {
     return {
       enabled: Boolean(tracesUrl),
@@ -430,6 +1103,8 @@ function createOtelExporter(options = {}) {
     flushOtel,
     getOtelStats,
     shutdown,
+    recordGenAiSpan,
+    startGenAiSpan,
   };
 }
 
@@ -458,6 +1133,16 @@ function getOtelStats() {
   return getDefaultOtelExporter().getOtelStats();
 }
 
+function recordGenAiSpan(input, options = {}) {
+  const exporter = options?.exporter || getDefaultOtelExporter();
+  return exporter.recordGenAiSpan(input, options);
+}
+
+function startGenAiSpan(input, options = {}) {
+  const exporter = options?.exporter || getDefaultOtelExporter();
+  return exporter.startGenAiSpan(input, options);
+}
+
 module.exports = {
   DEFAULT_MAX_QUEUE_SIZE,
   createOtelExporter,
@@ -468,5 +1153,12 @@ module.exports = {
   flushOtel,
   getOtelStats,
   redactAttributes,
+  redactAttributesWithCount,
+  redactPiiText,
+  redactPiiDeep,
   getDefaultOtelExporter,
+  recordGenAiSpan,
+  startGenAiSpan,
+  persistGenAiTrace,
+  listGenAiTraces,
 };

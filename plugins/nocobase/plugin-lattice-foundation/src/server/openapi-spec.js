@@ -31,7 +31,7 @@ function resolveVersionFallback() {
   } catch {
     // Fallback below
   }
-  return '1.0.0';
+  return '0.4.0';
 }
 
 const API_OPERATIONS = Object.freeze([
@@ -185,6 +185,29 @@ const API_OPERATIONS = Object.freeze([
   ['/api/dxosBuilder:installBusinessPack', 'post', 'Visual Domain Builder', 'Install a business pack into organization scope', false],
   ['/api/dxosBuilder:listTenants', 'get', 'Visual Domain Builder', 'List provisioned tenant organizations', false],
   ['/api/dxosBuilder:provisionTenant', 'post', 'Visual Domain Builder', 'Provision a new multi-tenant organization workspace', false],
+
+  ['/api/dxosApprovals:listInbox', 'get', 'Unified Approvals', 'List unified approval inbox items across business, AI HITL, and LatticeFlow', false],
+  ['/api/dxosApprovals:decide', 'post', 'Unified Approvals', 'Approve or reject a business, AI HITL, or LatticeFlow approval item', false],
+  ['/api/dxosApprovals:request', 'post', 'Unified Approvals', 'Submit a new multi-level approval request', false],
+  ['/api/dxosApprovals:cancel', 'post', 'Unified Approvals', 'Cancel a pending approval request', false],
+  ['/api/dxosApprovals:listPolicies', 'get', 'Unified Approvals', 'List organization multi-level approval policies', false],
+  ['/api/dxosApprovals:savePolicy', 'post', 'Unified Approvals', 'Create or update an organization approval policy', false],
+  ['/api/dxosApprovals:deletePolicy', 'post', 'Unified Approvals', 'Delete an organization approval policy', false],
+  ['/api/dxosApprovals:evaluateSlaNow', 'post', 'Unified Approvals', 'Evaluate approval request SLAs and dispatch escalations', false],
+
+  ['/api/dxosNotify:send', 'post', 'Omnichannel Notifications', 'Dispatch an omnichannel notification via Vault-backed connectors', false],
+  ['/api/dxosNotify:testSend', 'post', 'Omnichannel Notifications', 'Execute a dry-run or test send for an omnichannel notification channel', false],
+  ['/api/dxosNotify:logs', 'get', 'Omnichannel Notifications', 'List omnichannel notification delivery logs', false],
+  ['/api/dxosNotify:channels', 'get', 'Omnichannel Notifications', 'List supported omnichannel notification channels', false],
+
+  ['/api/dxosForms:meta', 'get', 'Public Forms', 'Fetch sanitized public form metadata without PII', true],
+  ['/api/dxosForms:submit', 'post', 'Public Forms', 'Submit a public form entry with honeypot, token, and rate-limit guards', true],
+  ['/api/dxosForms:status', 'get', 'Public Forms', 'Look up zero-PII submission status by code and status token', true],
+  ['/api/dxosForms:list', 'get', 'Public Forms', 'List organization public forms', false],
+  ['/api/dxosForms:get', 'get', 'Public Forms', 'Get full organization public form configuration', false],
+  ['/api/dxosForms:save', 'post', 'Public Forms', 'Create or update an organization public form', false],
+  ['/api/dxosForms:delete', 'post', 'Public Forms', 'Delete an organization public form', false],
+  ['/api/dxosForms:rotateToken', 'post', 'Public Forms', 'Rotate public form access token', false],
 ]);
 
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Za-z0-9_]+$/;

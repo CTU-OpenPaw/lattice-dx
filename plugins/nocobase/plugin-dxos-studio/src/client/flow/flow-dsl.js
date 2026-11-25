@@ -146,24 +146,18 @@ function nextCollisionFreeId(prefix, graph, startSeq = 1) {
   return `${pfx}_${seq}`;
 }
 
-function ruleToGraph(r) {
-  const g = isObj(r?.graphJson) && Array.isArray(r.graphJson.nodes) ? r.graphJson : (isObj(r?.draftGraphJson) && Array.isArray(r.draftGraphJson.nodes) ? r.draftGraphJson : null);
+function ruleToGraph(r, opts) {
+  const [a, b] = opts?.preferDraft ? [r?.draftGraphJson, r?.graphJson] : [r?.graphJson, r?.draftGraphJson];
+  const g = isObj(a) && Array.isArray(a.nodes) ? a : (isObj(b) && Array.isArray(b.nodes) ? b : null);
   const baseSettings = { errorPolicy: 'stop', cooldownSec: Number(r?.cooldownSec || 0), maxDepth: Number(r?.maxDepth || 8), timeoutMs: 30000 };
   if (g) {
-    const cleanG = sanitizeSafeValue(g);
-    const nodes = Array.isArray(cleanG.nodes) ? cleanG.nodes : [];
-    const rawEdges = Array.isArray(cleanG.edges) ? cleanG.edges : [];
-    const usedIds = new Set([...nodes.map((n) => n?.id), ...rawEdges.map((e) => e?.id)].filter(Boolean).map((x) => String(x).trim()).filter(Boolean));
-    const assigned = new Set();
+    const cleanG = sanitizeSafeValue(g), nodes = Array.isArray(cleanG.nodes) ? cleanG.nodes : [], rawEdges = Array.isArray(cleanG.edges) ? cleanG.edges : [];
+    const usedIds = new Set([...nodes.map((n) => n?.id), ...rawEdges.map((e) => e?.id)].filter(Boolean).map((x) => String(x).trim()).filter(Boolean)), assigned = new Set();
     let edgeSeq = 1;
     const edges = rawEdges.map((raw) => {
       const e = isObj(raw) ? raw : {};
       let eid = e.id != null ? String(e.id).trim() : '';
-      if (!eid || assigned.has(eid)) {
-        while (usedIds.has(`edge_${edgeSeq}`)) edgeSeq += 1;
-        eid = `edge_${edgeSeq++}`;
-        usedIds.add(eid);
-      }
+      if (!eid || assigned.has(eid)) { while (usedIds.has(`edge_${edgeSeq}`)) edgeSeq += 1; eid = `edge_${edgeSeq++}`; usedIds.add(eid); }
       assigned.add(eid);
       return { ...e, id: eid };
     });

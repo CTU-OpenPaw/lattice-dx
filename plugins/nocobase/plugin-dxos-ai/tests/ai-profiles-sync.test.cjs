@@ -34,14 +34,22 @@ const ADMIN_TOOLS = [
   'dxos_deploy_workflow',
 ];
 
-test('collections & starter blueprints cover 5 customizable AI roles without hardcoded secrets', () => {
+test('collections & starter blueprints cover 7 customizable AI roles without hardcoded secrets', () => {
   assert.equal(aiProfiles.name, 'latticeAiProfiles');
   assert.equal(aiProfiles.uiManageable, true);
   assert.equal(aiAuditLogs.name, 'latticeAiAuditLogs');
   assert.equal(aiAuditLogs.uiManageable, false);
 
   const usernames = STARTER_AI_BLUEPRINTS.map((b) => b.username);
-  assert.deepEqual(usernames, ['dxos-coordinator', 'dxos-architect', 'dxos-ops', 'dxos-logistics', 'dxos-workspace']);
+  assert.deepEqual(usernames, [
+    'dxos-coordinator',
+    'dxos-architect',
+    'dxos-ops',
+    'dxos-logistics',
+    'dxos-workspace',
+    'dxos-operator',
+    'dxos-analyst',
+  ]);
   const architect = STARTER_AI_BLUEPRINTS.find((b) => b.username === 'dxos-architect');
   assert.equal(architect.isAdminBuilder, true);
   assert.deepEqual(architect.allowedRoles, ['root', 'admin']);

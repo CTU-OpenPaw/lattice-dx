@@ -28,6 +28,8 @@ const FORBIDDEN_SYSTEM_COLLECTIONS = new Set([
   'latticePkiKeys', 'latticeCryptoLedger', 'latticeConnectors', 'latticeWebhookSubscriptions',
   'latticeWebhookDeliveries', 'latticeEventBus', 'latticeApiKeys', 'latticeDelegations',
   'latticeDecisionTables', 'latticeEpodRecords', 'latticeOrganizations', 'latticeAutomationRules', 'latticeAutomationRuns',
+  'latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions', 'latticeA2aTasks',
+  'latticeNotificationDeliveries', 'latticeApprovalPolicies', 'latticeApprovalRequests', 'latticePublicForms', 'latticePublicFormSubmissions',
 ]);
 const STANDARD_PORTS = Object.freeze(['in', 'main', 'true', 'false', 'default', 'item', 'done', 'approved', 'rejected', 'error', 'case_0', 'case_1', 'case_2', 'case_3', 'case_4', 'case_5', 'case_6', 'case_7', 'case_8', 'case_9']);
 const V1_TO_V2_TYPE = Object.freeze({

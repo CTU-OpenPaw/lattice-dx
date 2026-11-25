@@ -139,11 +139,11 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   });
   const noKeyCtx = adminCtx({});
   await actions.bootstrapDefaults(noKeyCtx, async () => {});
-  assert.equal(noKeyCtx.body.bootstrappedCount, 5);
+  assert.equal(noKeyCtx.body.bootstrappedCount, 7);
   assert.equal(noKeyCtx.body.llm.skipped, true);
   assert.equal(db.stores.llmServices.length, 0);
-  assert.equal(db.stores.latticeAiProfiles.length, 5);
-  assert.equal(db.stores.aiEmployees.length, 5);
+  assert.equal(db.stores.latticeAiProfiles.length, 7);
+  assert.equal(db.stores.aiEmployees.length, 7);
 
   const itOtMcp = db.stores.aiMcpClients.find((m) => m.name === 'dxos-it-ot-mcp');
   assert.ok(itOtMcp, 'dxos-it-ot-mcp must be synced into aiMcpClients');
@@ -167,7 +167,7 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   assert.equal(db.stores.llmServices[0].name, 'local-9router');
   assert.equal(db.stores.llmServices[0].provider, 'openai-completions');
   assert.equal(db.stores.llmServices[0].options.apiKey, 'sk-test-env-9router');
-  assert.equal(db.stores.latticeAiProfiles.length, 5);
+  assert.equal(db.stores.latticeAiProfiles.length, 7);
 
   // 5. saveProfile creates custom employee hr-ops-ai, syncs 2-way, and forces admin lock when builder tools added
   const customCtx = adminCtx({
@@ -223,9 +223,9 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   // 7. listProfiles, auditLogs, enterpriseTopology, and deleteProfile
   const listCtx = adminCtx({});
   await actions.listProfiles(listCtx, async () => {});
-  assert.equal(listCtx.body.profiles.length, 7);
+  assert.equal(listCtx.body.profiles.length, 9);
   assert.ok(Array.isArray(listCtx.body.catalog.availableTools));
-  assert.equal(listCtx.body.catalog.availableTools.length, 17);
+  assert.equal(listCtx.body.catalog.availableTools.length, 20);
 
   const auditCtx = adminCtx({});
   await actions.auditLogs(auditCtx, async () => {});
@@ -330,7 +330,7 @@ test('createDxosAiStudioPage renders 4-tab studio UI & helper utilities, and plu
     assert.ok(registered.allowed.includes('dxosAi:portalAgents:loggedIn'));
     assert.ok(registered.allowed.includes('dxosAi:pageSurfaceState:loggedIn'));
     assert.ok(registered.allowed.includes('dxosAi:triageScan:loggedIn'));
-    assert.equal(registered.tools.length, 17);
+    assert.equal(registered.tools.length, 20);
 
     const ClientPluginMod = require(path.join(PLUGIN_ROOT, 'src/client/index.js'));
     const clientUsedProviders = [];
@@ -1057,7 +1057,7 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
 
 test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk badge, reason validation, and approve/reject actions', async () => {
   const { createDxosAiStudioPage, DEFAULT_TOOL_NAMES } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
-  assert.equal(DEFAULT_TOOL_NAMES.length, 17);
+  assert.equal(DEFAULT_TOOL_NAMES.length, 20);
   assert.equal(DEFAULT_TOOL_NAMES.includes('dxos_graph_impact_analysis'), true);
   assert.equal(DEFAULT_TOOL_NAMES.includes('dxos_alarm_action'), true);
 
@@ -2198,8 +2198,8 @@ test('Task 8 (Review Focus #4): DxosAiPlugin.install() & afterEnable() auto-boot
     await plugin.afterEnable();
 
     assert.equal(db.stores.llmServices.length, 0);
-    assert.equal(db.stores.latticeAiProfiles.length, 5);
-    assert.equal(db.stores.aiEmployees.length, 5);
+    assert.equal(db.stores.latticeAiProfiles.length, 7);
+    assert.equal(db.stores.aiEmployees.length, 7);
     const archProfile = db.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect');
     const archEmp = db.stores.aiEmployees.find((e) => e.username === 'dxos-architect');
     assert.ok(archProfile, 'dxos-architect must be auto-bootstrapped in latticeAiProfiles');

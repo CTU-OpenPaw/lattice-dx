@@ -232,11 +232,11 @@ function makeOrchestratorHarness({ dialect = 'mock', pgRlsActive = true } = {}) 
   return { db, ctx, store };
 }
 
-test('17 canonical MCP tool names remain unchanged and all 10 Native v2 BlockModels are in ALLOWED_BLOCK_MODELS', () => {
+test('20 canonical MCP tool names (11 admin + 6 operational + 3 memory) remain unchanged and all 12 Native v2 BlockModels are in ALLOWED_BLOCK_MODELS', () => {
   assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
   assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
   const tools = createDxosTools();
-  assert.equal(tools.length, 17);
+  assert.equal(tools.length, 20);
   for (const model of [
     'DxosPortalHeroBlockModel',
     'DxosKpiMetricBlockModel',

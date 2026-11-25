@@ -105,6 +105,14 @@ const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'workflows', 'flow_nodes', 'collections', 'fields',
   'latticeNotifications', 'latticeSlaPolicies', 'latticeAiApprovalQueue', 'latticeParaChunks',
   'latticeBuiltApps',
+  'latticeAiMemory',
+  'latticeAiTraces',
+  'latticeAutomationRuleVersions',
+  'latticeA2aTasks',
+  'latticeApprovalPolicies',
+  'latticeApprovalRequests',
+  'latticeNotificationDeliveries',
+  'latticePublicForms',
 ]);
 const SYSTEM_PROTECTED_COLLECTIONS_LOWER = new Set(
   [...SYSTEM_PROTECTED_COLLECTIONS].map((c) => c.toLowerCase()),
@@ -2361,7 +2369,7 @@ async function rebuildEnterpriseApp(ctx, db, actor, opts = {}, deps = {}) {
   };
 }
 
-async function exportAppBundle(db, actor, { appKey = null, organizationId = null, platformVersion = '1.0.0' } = {}) {
+async function exportAppBundle(db, actor, { appKey = null, organizationId = null, platformVersion = '0.4.0' } = {}) {
   if (!actor?.isAdmin && !actor?.isRoot) {
     throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được xuất gói giải pháp.');
   }

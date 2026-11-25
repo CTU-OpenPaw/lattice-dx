@@ -13,6 +13,7 @@ const { fail, val } = require('../../wms-dmn-shared');
 const { assertSafeLlmUrl, callConfiguredLlm, resolveActiveLlmService } = require('../llm-client');
 const { isAllowlistedTargetCollection, isForbiddenCollection } = require('./data');
 const { flowHelpers } = require('./triggers');
+const { executeReactAgent } = require('../react-agent');
 
 const { isPlainObject, sanitizePlainObject, interpolateTemplate, buildEvalContext, resolveOrgId, pickHelper } = flowHelpers;
 const VALID_SEVERITIES = new Set(['low', 'medium', 'high', 'critical']);
@@ -120,18 +121,27 @@ const aiNodes = [
     color: '#722ed1',
     inputs: ['in'],
     outputs: ['main', 'error'],
-    defaultConfig: { targetCollection: 'latticeAssets', targetRecordId: 0, severity: 'medium', recommendation: '', prompt: '', evidence: null, aiEmployee: 'ops_triage', toolName: 'triage_flow_event', model: '', temperature: 0.2, maxTokens: 1000 },
+    defaultConfig: {
+      mode: 'single', enableReact: false, maxTurns: 5, tools: [], outputSchema: null, memoryScope: 'org', enableMemory: false, systemPrompt: '',
+      targetCollection: 'latticeAssets', targetRecordId: 0, severity: 'medium', recommendation: '', prompt: '', evidence: null, aiEmployee: 'ops_triage', toolName: 'triage_flow_event', model: '', temperature: 0.2, maxTokens: 1000,
+    },
     inputSchema: {
       fields: [
+        { name: 'mode', label: 'Agent Mode', type: 'select', options: ['single', 'react'] },
+        { name: 'maxTurns', label: 'Max ReAct Turns (1..12)', type: 'number' },
+        { name: 'tools', label: 'Allowlisted Tools (JSON)', type: 'json' },
+        { name: 'outputSchema', label: 'Output JSON Schema', type: 'json' },
+        { name: 'memoryScope', label: 'Memory Scope', type: 'select', options: ['org', 'agent', 'user', 'none'] },
+        { name: 'systemPrompt', label: 'System Prompt', type: 'textarea' },
         { name: 'targetCollection', label: 'Target Collection', type: 'collection', required: true },
         { name: 'targetRecordId', label: 'Target Record ID', type: 'string' },
         { name: 'severity', label: 'Severity', type: 'select', options: ['low', 'medium', 'high', 'critical'] },
-        { name: 'recommendation', label: 'Recommendation', type: 'textarea', required: true },
+        { name: 'recommendation', label: 'Recommendation', type: 'textarea', required: false },
         { name: 'prompt', label: 'Agent Triage Prompt', type: 'textarea' },
         { name: 'evidence', label: 'Evidence (JSON)', type: 'json' },
       ],
     },
-    async execute({ node, config, input, context, db, options, helpers }) {
+    async execute({ node, config, input, context, db, app, options, helpers }) {
       const cfg = config || node?.config || {};
       const evalCtx = buildEvalContext(context, input);
       const interp = pickHelper(helpers, 'interpolateTemplate', interpolateTemplate);
@@ -144,6 +154,11 @@ const aiNodes = [
         throw fail('TARGET_COLLECTION_FORBIDDEN', 403, `TARGET_COLLECTION_FORBIDDEN: ${targetCollection || '(empty)'}`);
       }
       if (!orgId) throw fail('AI_AGENT_ORG_REQUIRED', 400, 'Valid organizationId is required for ai.agent');
+
+      const useReact = cfg.mode === 'react' || cfg.enableReact === true || (Array.isArray(cfg.tools) && cfg.tools.length > 0);
+      if (useReact) {
+        return executeReactAgent({ cfg, evalCtx, input, context, db, app: app || db?.app, options, interp, orgId, targetCollection, node });
+      }
 
       const rawRecId = interp(cfg.targetRecordId ?? evalCtx.data?.recordId ?? 0, evalCtx);
       const targetRecordId = Number.isFinite(Number(rawRecId)) ? Number(rawRecId) : 0;

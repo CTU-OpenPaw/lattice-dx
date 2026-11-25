@@ -212,6 +212,9 @@ test('studio-settings exposes Tabs 7-9 and GitOps Solution Bundle v3 heading', a
     'dxosBuilder:listDomains': async () => ({ items: [] }),
     'dxosBuilder:listBusinessPacks': async () => ({ items: [] }),
     'dxosBuilder:listTenants': async () => ({ items: [] }),
+    'dxosForms:list': async () => ({ items: [] }),
+    'dxosApprovals:listInbox': async () => ({ items: [], counts: {} }),
+    'dxosDelegations:activeForUser': async () => ({ items: [], roles: [] }),
   });
 
   const Page = createDxosStudioSettingsPage(client, harness.React, {}, {});
@@ -220,7 +223,7 @@ test('studio-settings exposes Tabs 7-9 and GitOps Solution Bundle v3 heading', a
   const tablist = collectNodes(tree, (n) => n.props?.role === 'tablist')[0];
   assert.ok(tablist);
   const tabs = collectNodes(tablist, (n) => n.props?.role === 'tab');
-  assert.equal(tabs.length, 9);
+  assert.equal(tabs.length, 11);
   assert.deepEqual(
     tabs.map((t) => t.props['data-testid']),
     [
@@ -233,6 +236,8 @@ test('studio-settings exposes Tabs 7-9 and GitOps Solution Bundle v3 heading', a
       'dxos-studio-tab-broker',
       'dxos-studio-tab-automation',
       'dxos-studio-tab-builder',
+      'dxos-studio-tab-forms',
+      'dxos-studio-tab-approvals',
     ],
   );
 
@@ -255,6 +260,16 @@ test('studio-settings exposes Tabs 7-9 and GitOps Solution Bundle v3 heading', a
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-studio-tab-builder')[0].props.onClick();
   tree = await harness.mountAndFlush(Page);
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-studio-builder-panel').length, 1);
+
+  // Tab 10 mounts PublicFormBuilderPanel
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-studio-tab-forms')[0].props.onClick();
+  tree = await harness.mountAndFlush(Page);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-public-form-builder').length, 1);
+
+  // Tab 11 mounts ApprovalInboxPanel
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-studio-tab-approvals')[0].props.onClick();
+  tree = await harness.mountAndFlush(Page);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-inbox').length, 1);
 });
 
 test('Tab 7 (BrokerAndEventsPanel): provisions MQTT device with one-time password reveal/dismiss, Orion-LD, and replays DLQ / resets circuit', async () => {
@@ -961,6 +976,10 @@ test('studio-settings initializes tab from URL ?tab= query param safely and fall
     'dxosEvents:listEvents': async () => ({ items: [] }),
     'dxosEvents:listSubscriptions': async () => ({ items: [] }),
     'dxosEvents:listDeliveries': async () => ({ items: [] }),
+    'dxosForms:list': async () => ({ items: [] }),
+    'dxosBuilder:listDomains': async () => ({ items: [] }),
+    'dxosApprovals:listInbox': async () => ({ items: [], counts: {} }),
+    'dxosDelegations:activeForUser': async () => ({ items: [], roles: [] }),
   });
 
   const origWindow = globalThis.window;
@@ -968,6 +987,8 @@ test('studio-settings initializes tab from URL ?tab= query param safely and fall
     for (const [search, expectedPanelTestId] of [
       ['?tab=automation', 'dxos-studio-automation-panel'],
       ['?tab=broker', 'dxos-studio-broker-panel'],
+      ['?tab=forms', 'dxos-public-form-builder'],
+      ['?tab=approvals', 'dxos-approval-inbox'],
     ]) {
       globalThis.window = { location: { search } };
       const harness = createReactHarness();

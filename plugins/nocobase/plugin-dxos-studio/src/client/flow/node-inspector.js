@@ -10,6 +10,7 @@
 
 const { N8N_WEBHOOK_PRESETS } = require('./n8n-setup-modal');
 const { insertVariableAtCursor, buildUpstreamPinnedInputs } = require('./flow-validation');
+const { renderTraceIoView, createWebhookHelperComponent, renderToolsPicker } = require('../flow-inspector-extras');
 
 function createNodeInspector(React) {
   const h = React.createElement;
@@ -36,6 +37,7 @@ function createNodeInspector(React) {
       return { display: 'inline-block', padding: '2px 7px', borderRadius: 999, fontSize: 10, fontWeight: 700, background: m[0], color: m[1] };
     },
   };
+  const WebhookHelper = createWebhookHelperComponent(React, S);
 
   function safeParseJson(text) {
     try {
@@ -90,7 +92,7 @@ function createNodeInspector(React) {
   return function NodeInspector(props = {}) {
     const {
       rule = null, graph = null, selectedNode = null, nodeSchema = null, catalog = {},
-      onUpdateNode, onDeleteNode, onCloseInspector, onTestNode, onOpenN8nSetup,
+      onUpdateNode, onDeleteNode, onCloseInspector, onTestNode, onDryRunWebhook, onOpenN8nSetup,
       testOutput = null, testBusy = false, activeTrace = null, externalTab = null, externalTabSeq = 0,
       nodeValidationIssues = [], selectedRun = null, organizationId = '', pinStorage = null,
     } = props;
@@ -121,7 +123,7 @@ function createNodeInspector(React) {
       if (extChanged) {
         tabSeqRef.val = externalTabSeq;
         if (externalTab) setTab(externalTab);
-      } else if (nodeChanged) {
+      } else if (nodeChanged && !(selectedRun && tab === 'output')) {
         setTab('config');
       }
     }, [nodeId, externalTab, externalTabSeq]);
@@ -280,6 +282,7 @@ function createNodeInspector(React) {
         const onRolePick = (r) => r && updateConfigField('roleNames', Array.isArray(val) && val.includes(r) ? val : [...(Array.isArray(val) ? val : []), r]);
         return h('div', { style: S.grid(4) },
           f.name === 'roleNames' && safeRoles.length ? h('select', { 'data-testid': 'dxos-flow-field-roleNames-picker', value: '', style: S.input, onChange: (e) => onRolePick(e?.target?.value) }, h('option', { value: '' }, '+ Add role from catalog...'), safeRoles.map((r) => h('option', { key: r, value: r }, r))) : null,
+          f.name === 'tools' ? renderToolsPicker(h, { val, catalog, updateConfigField, inputStyle: S.input }) : null,
           h('textarea', { ...base, rows: 3, placeholder: '{} (tùy chọn)', value: currentJsonFieldText(f.name, schema?.defaultConfig?.[f.name]), style: S.textarea, onChange: (e) => { trackCursor(f.name, e); updateJsonFieldText(f.name, e?.target?.value ?? ''); } }),
           err ? h('span', { style: S.err(10) }, err) : null);
       }
@@ -303,7 +306,7 @@ function createNodeInspector(React) {
         inpField('Node Label', 'dxos-flow-node-label-input', { type: 'text', value: node.label || '', onChange: (e) => onUpdateNode?.(node.id, { label: e?.target?.value ?? '' }) }),
       ),
       h('div', { role: 'tablist', style: { display: 'flex', gap: 6 } },
-        [['config', 'Config'], ['input', 'Input / Pin'], ['output', 'Output']].map(([key, lbl]) => h('button', { key, role: 'tab', type: 'button', 'aria-selected': tab === key, 'data-testid': `dxos-flow-inspector-tab-${key}`, onClick: () => setTab(key), style: S.tab(tab === key) }, lbl)),
+        [['config', 'Config'], ['input', 'Input / Pin'], ['output', 'Trace / I/O']].map(([key, lbl]) => h('button', { key, role: 'tab', type: 'button', 'aria-selected': tab === key, 'data-testid': `dxos-flow-inspector-tab-${key}`, onClick: () => setTab(key), style: S.tab(tab === key) }, lbl)),
       ),
       tab === 'config' ? h('div', { style: S.grid(8) },
         Array.isArray(nodeValidationIssues) && nodeValidationIssues.length
@@ -326,6 +329,7 @@ function createNodeInspector(React) {
           )),
         ) : null,
         fields.map((f) => h('div', { key: f.name, style: S.grid(2) }, f.type !== 'boolean' ? h('label', { style: S.label }, `${f.label || f.name}${f.required ? ' *' : ''}`) : null, renderFieldControl(f))),
+        node.type === 'trigger.webhook' ? h(WebhookHelper, { nodeId: node.id, nodeCfg, ruleKey, orgKey, onTestNode, onDryRunWebhook, onSwitchToOutput: () => setTab('output'), testBusy }) : null,
         h('div', { style: S.card },
           h('button', { type: 'button', 'data-testid': 'dxos-flow-inspector-advanced-toggle', 'aria-expanded': advancedOpen, onClick: () => setAdvancedOpen((v) => !v), style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#334155' } }, 'Nâng cao (Execution Policy & Raw JSON)', h('span', null, advancedOpen ? '▾' : '▸')),
           advancedOpen ? h('div', { style: S.grid(8) },
@@ -347,14 +351,7 @@ function createNodeInspector(React) {
         pinnedEntry.error ? h('span', { style: S.err(11) }, pinnedEntry.error) : null,
         h('button', { 'data-testid': 'dxos-flow-test-node-btn', type: 'button', disabled: Boolean(testBusy || pinnedEntry.error), onClick: () => { const parsed = safeParseJson(pinnedEntry.text); if (parsed.ok) { setTab('output'); onTestNode?.(node.id, parsed.value); } }, style: S.btn(true, false, Boolean(testBusy || pinnedEntry.error)) }, testBusy ? 'Testing Node…' : 'Test This Node'),
       ) : null,
-      tab === 'output' ? h('div', { 'data-testid': 'dxos-flow-output-view', style: S.card }, !displayOut
-        ? h('span', { style: { fontSize: 12, color: '#64748b' } }, 'No test output or trace yet. Run "Test This Node" or Dry-Run.')
-        : h(React.Fragment, null,
-          h('div', { style: S.rowBetween },
-            h('span', { 'data-testid': 'dxos-flow-output-status', style: S.badge(statusTone(displayOut.status)) }, displayOut.status || 'completed'),
-            h('span', { style: { fontSize: 11, color: '#475569' } }, `${displayOut.durationMs ?? 0} ms · nextPort: ${displayOut.nextPort || displayOut.nextPorts?.[0] || '-'}`)),
-          (displayOut.error || displayOut.reason) ? h('div', { style: { padding: 8, borderRadius: 6, background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', fontSize: 11 } }, String(displayOut.error || displayOut.reason)) : null,
-          h('pre', { 'data-testid': 'dxos-flow-output-json', style: { margin: 0, padding: 8, borderRadius: 6, background: '#0f172a', color: '#e2e8f0', fontSize: 11, overflowX: 'auto', maxHeight: 300 } }, formatJson(displayOut.output !== undefined ? displayOut.output : displayOut, null)))) : null,
+      tab === 'output' ? renderTraceIoView(h, { displayOut, activeTrace, formatJson, statusTone, S }) : null,
     );
   };
 }

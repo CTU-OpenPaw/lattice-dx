@@ -1319,7 +1319,7 @@ function createMockAcceptanceCaller({
         paths[`/api/${name}:create`] = { post: {} };
         schemas[name] = { type: 'object', title: dom.title, properties: { organizationId: { type: 'string' } } };
       }
-      return okResp({ openapi: '3.1.0', info: { version: '1.0.0' }, paths, components: { schemas } });
+      return okResp({ openapi: '3.1.0', info: { version: '0.4.0' }, paths, components: { schemas } });
     }
 
     const customMatch = resourceAction.match(/^(latticeCustomAcc[A-Za-z0-9]+):(create|list|get|destroy)$/);

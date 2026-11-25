@@ -405,6 +405,9 @@ test('sensitive tenant collections are blocked on non-root charts:queryData and 
     'latticeUiSnapshots',
     'latticeAiProfiles',
     'latticeAiApprovalQueue',
+    'latticeAiTraces',
+    'latticeAiMemory',
+    'latticeA2aTasks',
   ];
 
   for (const table of sensitiveTables) {

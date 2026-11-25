@@ -6,15 +6,15 @@
 @see https://github.com/CTU-OpenPaw/lattice-dx
 SPDX-License-Identifier: Apache-2.0
 -->
-# Kịch bản Trình diễn Chung kết 15 Phút — OLP PMNM 2026 (`v1.0.0`)
+# Kịch bản Trình diễn Chung kết 15 Phút — OLP PMNM 2026 (`v0.4.0`)
 
-Kịch bản tác chiến từng phút (**0:00–15:00**) dành cho đội **CTU-OpenPaw** trình diễn **LatticeDX `v1.0.0` (DX-OS Open-Core Championship Edition)** trước Hội đồng Giám khảo Chung kết VFOSSA.
+Kịch bản tác chiến từng phút (**0:00–15:00**) dành cho đội **CTU-OpenPaw** trình diễn **LatticeDX `v0.4.0` (DX-OS Open-Core Championship Edition)** trước Hội đồng Giám khảo Chung kết VFOSSA.
 
 ---
 
 ## 0. Chuẩn bị Trước giờ G (T-5 Phút)
 
-### Khởi động & Nạp Showcase `v1.0.0` (trên cổng cô lập `13014`)
+### Khởi động & Nạp Showcase `v0.4.0` (trên cổng cô lập `13014`)
 ```sh
 pnpm native:clean --port=13014
 node scripts/setup-native-multi-portal-demo.mjs "<path-to-report.json>"
@@ -45,14 +45,14 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
 - **Màn hình:** `/admin/settings/dxos-ai` (Tab `1. Hệ điều hành 6 Phân hệ`) -> `/admin/pm/list` -> chân trang hệ thống.
 - **Thao tác & Thông điệp:**
   1. Định vị bài toán: Doanh nghiệp Việt cần **Hệ điều hành Doanh nghiệp Số (H–P–D–I)** chứ không chỉ CRUD rời rạc. LatticeDX điều phối **6 phân hệ** với **NocoBase `2.2.50`** làm **Plane #6 (`appDataSubstrate`)**.
-  2. Chỉ rõ **7 plugin Apache-2.0 (`1.0.0`)** bật/tắt sống trong `/admin/pm/list` (`sdkProvidedByHost: true`), giữ nguyên nhận diện **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`).
+  2. Chỉ rõ **7 plugin Apache-2.0 (`0.4.0`)** bật/tắt sống trong `/admin/pm/list` (`sdkProvidedByHost: true`), giữ nguyên nhận diện **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`).
   3. Nhấn mạnh **Cam kết Thuần khiết Giấy phép Pure-OSI**: 0% BSL-1.1 (loại bỏ ThingsBoard/EMQX và các image cache nguồn hạn chế), dùng **Valkey `8.1` (`valkey/valkey:8.1-alpine`, `BSD-3-Clause`)**, **Mosquitto `2.0.21` Dynamic Security (`EPL-2.0 OR BSD-3-Clause`)**, **Node-RED `4.0.9` (`Apache-2.0`)** và **PostgreSQL `16` (`latticeTelemetryPoints`, không cần container `timescaledb` tách rời)**, cùng Prometheus & OTel Collector.
 
 ### 1:45 – 4:15 · Plug-and-Play Chuỗi lạnh OMS/WMS/FEFO/ePOD, Ed25519 PKI & DMN
-- **Màn hình:** `/p/logistics` -> `/admin/settings/dxos-studio` (thanh `Quản trị DX-OS v1.0:`).
+- **Màn hình:** `/p/logistics` -> `/admin/settings/dxos-studio` (thanh `Quản trị DX-OS v0.4.0:`).
 - **Thao tác & Thông điệp:**
   1. Trên **`/p/logistics`**, giới thiệu **`DxosKanbanScheduleBlockModel`** (vận đơn `ORD-V100-001` Cần Thơ -> TP.HCM, chuyển nhanh Lịch 7 ngày), **`DxosWmsOpsBlockModel`** (tác vụ FEFO/MKT/2-phase bulk import trực tiếp trên `/p/logistics`), và **`DxosRecordWorkbenchBlockModel`**: bấm xác minh **Ed25519 PKI & Merkle Ledger** (`dxosLedger:verify`), mở ngăn **Phả hệ dữ liệu (Lineage)** (`dxosDataGov:lineageTrace`), và **In chứng từ QR ISO/IEC 18004 SVG** an toàn (`<iframe sandbox="" srcDoc>`) kèm link tra cứu công khai **`/v/track/:code`** (`dxosWms:verifyTrackSignature` không PII).
-  2. Chuyển sang **`/admin/settings/dxos-studio`** thanh **`Quản trị DX-OS v1.0:`**:
+  2. Chuyển sang **`/admin/settings/dxos-studio`** thanh **`Quản trị DX-OS v0.4.0:`**:
      - Console **`Kho FEFO & ePOD`**: chỉ lô `LOT-V100-FEFO-A` đã phân bổ FEFO và lô `LOT-V100-MKT-HOLD` bị khóa bởi **Arrhenius MKT**.
      - Console **`Bảng Quyết định DMN`**: trình diễn **Visual Interactive DMN** & đánh giá bảng `cold_chain_approval_v1` (`maxTempC: 9.5` -> `quality_hold_director`, SLA 15 phút, zero-`eval`).
 
@@ -94,7 +94,7 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
 - **Màn hình:** Đăng xuất `admin@nocobase.com` -> đăng nhập **`native.lab.employee@example.invalid` / `NativeLab-2026!`**.
 - **Thao tác & Thông điệp:**
   1. Chứng minh cô lập giao diện & API: thanh chuyển cổng ẩn `/p/incidents` và `/admin/settings/*`, chỉ giữ cổng thuộc thẩm quyền (`Mua sắm & Tài sản`, `Dịch vụ Nội bộ & Danh bạ`, `Logistics · Đơn của tôi`); mọi lời gọi trái quyền sang Admin Builder, Vault/Broker/Builder hoặc cross-org trả `HTTP 403`.
-  2. Chốt thông điệp: **LatticeDX `v1.0.0`** đạt đồng thời **50 điểm PoF thuần OSI** và **Hệ điều hành Doanh nghiệp Số 6 Phân hệ hoàn chỉnh**, cài sạch 100% từ `latticedx-1.0.0-src.tar.gz`.
+  2. Chốt thông điệp: **LatticeDX `v0.4.0`** đạt đồng thời **50 điểm PoF thuần OSI** và **Hệ điều hành Doanh nghiệp Số 6 Phân hệ hoàn chỉnh**, cài sạch 100% từ `latticedx-0.4.0-src.tar.gz`.
 
 ---
 
@@ -125,7 +125,7 @@ pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014
 ## 3. Ngân hàng Trả lời Phản biện Giám khảo (Q&A Defense Points)
 
 1. **Hỏi: Dùng NocoBase làm nền tảng thì có vi phạm bản quyền hoặc bị phụ thuộc (vendor lock-in) không?**
-   - **Đáp:** Không. Toàn bộ mã nguồn của nhóm đặt trong 7 plugin `Apache-2.0` độc lập với `"sdkProvidedByHost": true` — kho mã nguồn Git và `latticedx-1.0.0-src.tar.gz` là **100% thuần chuẩn OSI**, hoàn toàn không chứa Git submodule `upstream/nocobase` hay `.gitmodules` (host `nocobase/nocobase:2.2.50` chỉ được nạp độc lập lúc chạy dưới dạng OCI container bên ngoài kho Git), đồng thời bảo toàn tuyệt đối **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`). Lõi nghiệp vụ, hợp đồng `@dx/contracts`, Headless API (`apps/api`, `dxosApiKeys`, `dxosLedger`, `dxosDataGov`, `dxosWms`, `dxosDmn`) chạy độc lập qua OpenAPI 3.1 / AsyncAPI 3.0 / MCP mà không khóa chặt vào UI.
+   - **Đáp:** Không. Toàn bộ mã nguồn của nhóm đặt trong 7 plugin `Apache-2.0` độc lập với `"sdkProvidedByHost": true` — kho mã nguồn Git và `latticedx-0.4.0-src.tar.gz` là **100% thuần chuẩn OSI**, hoàn toàn không chứa Git submodule `upstream/nocobase` hay `.gitmodules` (host `nocobase/nocobase:2.2.50` chỉ được nạp độc lập lúc chạy dưới dạng OCI container bên ngoài kho Git), đồng thời bảo toàn tuyệt đối **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`). Lõi nghiệp vụ, hợp đồng `@dx/contracts`, Headless API (`apps/api`, `dxosApiKeys`, `dxosLedger`, `dxosDataGov`, `dxosWms`, `dxosDmn`) chạy độc lập qua OpenAPI 3.1 / AsyncAPI 3.0 / MCP mà không khóa chặt vào UI.
 2. **Hỏi: Tại sao hệ thống không dùng ThingsBoard, EMQX hay các dịch vụ cache nguồn hạn chế cho phần IIoT và session/rate-limit?**
    - **Đáp:** ThingsBoard (bản mới), EMQX Enterprise và các bản cache nguồn đóng/hạn chế không đạt chuẩn OSI. Để bảo đảm **100% Pure-OSI License Purity**, CTU-OpenPaw sử dụng **Valkey `8.1` (`valkey/valkey:8.1-alpine`, `BSD-3-Clause`, tương thích giao thức `PUBSUB_ADAPTER=redis`)**, **Eclipse Mosquitto `2.0.21` Dynamic Security (`EPL-2.0 OR BSD-3-Clause`)**, **Node-RED `4.0.9` (`Apache-2.0`)**, lưu chuỗi thời gian IIoT trực tiếp trên **PostgreSQL `16` (`latticeTelemetryPoints`, không cần container `timescaledb` tách rời)**, cùng **Prometheus `v3.3.0` (`Apache-2.0`)** và **OTel Collector `0.123.0` (`Apache-2.0`)**, có `scripts/generate-sbom.mjs` tự động chặn cứng từ khóa `BSL-1.1`/`thingsboard`/`emqx`.
 3. **Hỏi: Nếu một lập trình viên quên lọc `organizationId` ở tầng plugin thì dữ liệu đa công ty có rò rỉ không?**

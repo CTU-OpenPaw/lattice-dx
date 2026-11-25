@@ -28,7 +28,7 @@ const CRON_FIELD_RE = /^[0-9*,\/-]+$/;
 
 const PROMPT_INJECTION_RE = /\b(ignore\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?|ignore\s+previous|system\s+prompt|reveal\s+(?:the\s+)?(?:system\s+)?prompt|bypass\s+(?:rbac|hitl|auth|acl|security|rls)|disable\s+(?:hitl|rbac|rls|auth)|exfiltrate|dump\s+secrets?|steal\s+secrets?|jailbreak)\b/i;
 const PROTOTYPE_OR_CODE_RE = /(__proto__|process\.env|child_process|\bconstructor\b|\bprototype\b|require\s*\(|eval\s*\(|Function\s*\(|\$\{)/i;
-const SENSITIVE_NAME_RE = /\b(latticeConnectors|latticeApiKeys|latticePkiKeys|latticeCryptoLedger|latticeWebhookSubscriptions|latticeWebhookDeliveries|latticeEventBus|latticeDelegations|latticeOrganizations|latticeAutomationRules|latticeAutomationRuns|apiKeys|rolesUsers|applicationTokens|authenticators|sessions)\b/i;
+const SENSITIVE_NAME_RE = /\b(latticeConnectors|latticeApiKeys|latticePkiKeys|latticeCryptoLedger|latticeWebhookSubscriptions|latticeWebhookDeliveries|latticeEventBus|latticeDelegations|latticeOrganizations|latticeAutomationRules|latticeAutomationRuns|latticeAiMemory|latticeAiTraces|latticeAutomationRuleVersions|latticeA2aTasks|latticeNotificationDeliveries|latticeApprovalPolicies|latticeApprovalRequests|latticePublicForms|latticePublicFormSubmissions|apiKeys|rolesUsers|applicationTokens|authenticators|sessions)\b/i;
 const SYSTEM_TABLE_PROMPT_RE = /(?:\b(?:create|update|read|write|delete|drop|insert|query|modify|target|access|dump|into|from|on|in|table|collection)\b[\s:='"]*(?:the\s+)?(?:users|roles)\b|\b(?:users|roles)\s+(?:table|collection)\b)/i;
 
 function scanTemplateString(str) {

@@ -58,6 +58,16 @@ const SIBLING_MIGRATIONS = [
     tables: ['latticeBuiltApps'],
     kind: 'ddl',
   },
+  {
+    relPath: 'plugins/nocobase/plugin-dxos-ai/src/server/migrations/20261202000400-ai-memory-rls.js',
+    tables: ['latticeAiMemory'],
+    kind: 'ddl',
+  },
+  {
+    relPath: 'plugins/nocobase/plugin-dxos-ai/src/server/migrations/20261202000500-a2a-tasks-rls.js',
+    tables: ['latticeA2aTasks'],
+    kind: 'ddl',
+  },
 ];
 
 function loadMigrationClass(absPath) {
@@ -93,7 +103,7 @@ function makeMockRepoDb(extra = {}) {
   };
 }
 
-test('all 8 sibling-plugin migrations attach PG RLS across all 9 tables via db.attachLatticeRlsPolicy and pg-rls fallback', async () => {
+test('all 10 sibling-plugin migrations attach PG RLS across all 11 tables via db.attachLatticeRlsPolicy and pg-rls fallback', async () => {
   for (const spec of SIBLING_MIGRATIONS) {
     const absPath = path.join(REPO_ROOT, spec.relPath);
     const MigrationCls = loadMigrationClass(absPath);
@@ -168,7 +178,11 @@ test('all 8 sibling-plugin migrations attach PG RLS across all 9 tables via db.a
         true,
         `${spec.relPath} down() must detach RLS policy on ${tableName}`,
       );
-      if (spec.relPath.includes('20261128000100-built-apps-registry-rls.js')) {
+      if (
+        spec.relPath.includes('20261128000100-built-apps-registry-rls.js')
+        || spec.relPath.includes('20261202000400-ai-memory-rls.js')
+        || spec.relPath.includes('20261202000500-a2a-tasks-rls.js')
+      ) {
         assert.equal(
           sqlFallback.some((q) => q.sql.includes(`ALTER TABLE IF EXISTS public."${tableName}" NO FORCE ROW LEVEL SECURITY`)),
           true,
@@ -216,7 +230,7 @@ test('all 8 sibling-plugin migrations attach PG RLS across all 9 tables via db.a
   }
 });
 
-test('migration 20261124000500-reconcile-sibling-rls discovers and attaches PG RLS for all 43 TENANT_RLS_TABLES and is a safe no-op on non-Postgres and down()', async () => {
+test('migration 20261124000500-reconcile-sibling-rls discovers and attaches PG RLS for all >=47 TENANT_RLS_TABLES and is a safe no-op on non-Postgres and down()', async () => {
   const migPath = path.join(REPO_ROOT, 'plugins/nocobase/plugin-dxos-ai/src/server/migrations/20261124000500-reconcile-sibling-rls.js');
   const migSrc = readFileSync(migPath, 'utf8');
   assert.match(migSrc, /SPDX-License-Identifier:\s*Apache-2\.0/);
@@ -224,8 +238,10 @@ test('migration 20261124000500-reconcile-sibling-rls discovers and attaches PG R
   assert.match(migSrc, /attachRlsPolicyToTable/);
 
   const pgRls = require(PG_RLS_PATH);
-  assert.equal(pgRls.TENANT_RLS_TABLES.length, 43);
-  assert.equal(pgRls.TENANT_RLS_TABLES.includes('latticeBuiltApps'), true);
+  assert.ok(pgRls.TENANT_RLS_TABLES.length >= 47, `Expected >=47 TENANT_RLS_TABLES, got ${pgRls.TENANT_RLS_TABLES.length}`);
+  for (const tbl of ['latticeBuiltApps', 'latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions', 'latticeA2aTasks']) {
+    assert.equal(pgRls.TENANT_RLS_TABLES.includes(tbl), true, `TENANT_RLS_TABLES missing ${tbl}`);
+  }
 
   const MigrationCls = loadMigrationClass(migPath);
 

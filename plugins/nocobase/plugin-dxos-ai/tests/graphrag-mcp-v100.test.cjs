@@ -366,14 +366,14 @@ function makeV100Harness({ dialect = 'sqlite', pgQueryHandler = null } = {}) {
   };
 }
 
-test('tools catalog registers 17 tools (11 admin + 6 operational) and starter blueprints configure GraphRAG & Alarm tools', () => {
+test('tools catalog registers 20 tools (11 admin + 6 operational + 3 memory) and starter blueprints configure GraphRAG & Alarm tools', () => {
   assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
   assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
   assert.equal(OPERATIONAL_TOOL_NAMES.includes('dxos_graph_impact_analysis'), true);
   assert.equal(OPERATIONAL_TOOL_NAMES.includes('dxos_alarm_action'), true);
 
   const tools = createDxosTools();
-  assert.equal(tools.length, 17);
+  assert.equal(tools.length, 20);
 
   const opsBp = STARTER_AI_BLUEPRINTS.find((b) => b.username === 'dxos-ops');
   const coordBp = STARTER_AI_BLUEPRINTS.find((b) => b.username === 'dxos-coordinator');

@@ -11,6 +11,8 @@
 const { createDxosGovernanceConsoles, GOVERNANCE_SECTIONS } = require('./governance-consoles');
 const { createBuilderBrokerPanels, parseJsonSafe } = require('./builder-broker-panels');
 const { createFlowPinStorage } = require('./flow-pin-storage');
+const { createPublicFormBuilderPanel } = require('./public-form-builder');
+const { createApprovalInboxPanel } = require('./approval-inbox-panel');
 
 const VALID_STUDIO_TABS = new Set([
   'workflows',
@@ -22,6 +24,8 @@ const VALID_STUDIO_TABS = new Set([
   'broker',
   'automation',
   'builder',
+  'forms',
+  'approvals',
 ]);
 
 function readInitialStudioTab() {
@@ -43,6 +47,8 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     VaultAndAutomationPanel,
     DomainBuilderAndTenantsPanel,
   } = createBuilderBrokerPanels(client, React, antd, app);
+  const PublicFormBuilderPanel = createPublicFormBuilderPanel(client, React, antd, app);
+  const ApprovalInboxPanel = createApprovalInboxPanel(client, React, antd, app);
 
   function openRoute(path) {
     const url = app?.getRouteUrl?.(path) || path;
@@ -347,6 +353,8 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       ['broker', '7. Broker & Sự kiện'],
       ['automation', '8. Vault & Automation'],
       ['builder', '9. Domain Builder & Tenant'],
+      ['forms', '10. Public Forms'],
+      ['approvals', '11. Hộp thư Phê duyệt'],
     ];
 
     const btnStyle = (primary = false, danger = false, disabled = false) => ({
@@ -410,11 +418,11 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       ),
       h('div', {
         role: 'navigation',
-        'aria-label': 'Quản trị DX-OS v1.0',
+        'aria-label': 'Quản trị DX-OS v0.4',
         'data-testid': 'dxos-studio-governance-nav',
         style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 6, padding: '8px 10px', borderRadius: 10, border: '1px solid #e2e8f0', background: '#f8fafc' },
       },
-        h('span', { style: { fontSize: 12, fontWeight: 700, color: '#334155', marginRight: 4 } }, 'Quản trị DX-OS v1.0:'),
+        h('span', { style: { fontSize: 12, fontWeight: 700, color: '#334155', marginRight: 4 } }, 'Quản trị DX-OS v0.4:'),
         GOVERNANCE_SECTIONS.map((sec) => {
           const active = isGovernanceTab && activeGovSection === sec.id;
           return h('button', {
@@ -660,6 +668,22 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       }) : null,
 
       tab === 'builder' ? h(DomainBuilderAndTenantsPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      tab === 'forms' ? h(PublicFormBuilderPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      tab === 'approvals' ? h(ApprovalInboxPanel, {
         api,
         selectedOrg,
         organizations,

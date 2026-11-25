@@ -566,7 +566,7 @@ test('Wave 4B P1 #3: redactPiiText & redactPiiForLlm scrub JSON-quoted secrets a
   assert.ok(llmObj.redactedCount >= 6);
 });
 
-test('Task 11: recordAiAuditLog, quota accounting, and createAuditedTool track real provider usage & tokenSource while preserving 17 canonical tools', async () => {
+test('Task 11: recordAiAuditLog, quota accounting, and createAuditedTool track real provider usage & tokenSource while preserving canonical tools (11 admin + 6 operational + 3 memory = 20)', async () => {
   const {
     recordQuotaUsage,
     recordQuotaUsagePersistent,
@@ -580,15 +580,17 @@ test('Task 11: recordAiAuditLog, quota accounting, and createAuditedTool track r
   const {
     ADMIN_BUILDER_TOOL_NAMES,
     OPERATIONAL_TOOL_NAMES,
+    MEMORY_TOOL_NAMES,
     createAuditedTool,
     createDxosTools,
   } = require(path.join(PLUGIN_ROOT, 'src/server/ai-tools-core.js'));
 
-  // 1. Canonical 17-tool matrix preserved intact
+  // 1. Canonical 20-tool matrix preserved intact (11 admin + 6 operational + 3 memory)
   const allTools = createDxosTools();
   assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
   assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
-  assert.equal(allTools.length, 17);
+  assert.equal(MEMORY_TOOL_NAMES.length, 3);
+  assert.equal(allTools.length, 20);
 
   // 2. aiAuditLogs schema & recordAiAuditLog support usage + totalTokens + tokenSource ('provider' vs 'estimated')
   const fieldNames = aiAuditLogs.fields.map((f) => f.name);

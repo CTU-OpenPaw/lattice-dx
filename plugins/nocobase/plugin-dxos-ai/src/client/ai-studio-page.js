@@ -9,6 +9,7 @@
 'use strict';
 
 const { deriveErGraphFromSpec, renderErGraphPanel } = require('./er-graph-panel');
+const { AiTraceWaterfallPanel, AiEvalLabPanel } = require('./ai-trace-eval-panel');
 
 const DEFAULT_TOOL_NAMES = [
   'dxos_inspect_architecture',
@@ -28,6 +29,9 @@ const DEFAULT_TOOL_NAMES = [
   'dxos_orchestrate_enterprise_case',
   'dxos_graph_impact_analysis',
   'dxos_alarm_action',
+  'dxos_memory_remember',
+  'dxos_memory_recall',
+  'dxos_memory_forget',
 ];
 
 const DEFAULT_ROLE_OPTIONS = [
@@ -601,7 +605,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         const d = res?.data?.data || res?.data || {};
         setNotice({
           type: 'ok',
-          text: `Đã đồng bộ ${d.bootstrappedCount || 5} Starter AI Blueprints + dxos-it-ot-mcp${d.llm?.skipped ? ' (bỏ qua local-9router do chưa có AGENT_API_KEY)' : ' + local-9router'}.`,
+          text: `Đã đồng bộ ${d.bootstrappedCount || 7} Starter AI Blueprints + dxos-it-ot-mcp${d.llm?.skipped ? ' (bỏ qua local-9router do chưa có AGENT_API_KEY)' : ' + local-9router'}.`,
         });
         await loadAll();
       } catch (err) {
@@ -1066,6 +1070,8 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       ['quota', '5. Hạn mức & Chi phí AI'],
       ['hitl', '6. Duyệt AI (HITL)'],
       ['built-apps', '7. Ứng dụng Đã dựng (Built Apps)'],
+      ['traces', '8. Agent Trace Waterfall'],
+      ['eval-lab', '9. Eval Lab'],
     ];
 
     const availableTools = Array.isArray(catalog?.availableTools) ? catalog.availableTools : DEFAULT_TOOL_NAMES;
@@ -1080,6 +1086,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       ...(profiles || []).map((p) => p?.organizationId),
     ].map((o) => String(o || '').trim()).filter((o) => o && o.toLowerCase() !== 'all');
     const orgOptions = [...new Set([...discoveredOrgOptions, ...(discoveredOrgOptions.length ? [] : [quotaOrg])].filter(Boolean))];
+    const activeOrgId = String(quotaOrg || resolveStudioDefaultOrg({ topology, catalog, profiles, app }) || orgOptions[0] || '').trim();
     const dayUsage = quotaSummary?.dayUsage || quotaSummary?.usage || {};
     const limits = quotaSummary?.limits || {};
     const allTimeTotals = quotaSummary?.allTimeTotals || quotaSummary?.auditTotals || {};
@@ -1107,7 +1114,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         ),
         h('div', { style: { display: 'flex', gap: 8 } },
           h('button', { type: 'button', onClick: handleBootstrap, disabled: busy, style: btnStyle(true) },
-            busy ? 'Đang đồng bộ…' : 'Cài 5 Starter Blueprints & IT/OT MCP'),
+            busy ? 'Đang đồng bộ…' : 'Cài 7 Starter Blueprints & IT/OT MCP'),
           h('button', {
             type: 'button',
             onClick: async () => {
@@ -1922,6 +1929,18 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             JSON.stringify(builtAppBundlePreview.bundle, null, 2)),
         ) : null,
       ) : null,
+
+      tab === 'traces' ? h(AiTraceWaterfallPanel, {
+        React,
+        api,
+        organizationId: activeOrgId,
+      }) : null,
+
+      tab === 'eval-lab' ? h(AiEvalLabPanel, {
+        React,
+        api,
+        organizationId: activeOrgId,
+      }) : null,
     );
   };
 }

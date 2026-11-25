@@ -724,10 +724,10 @@ test('studio-settings integrates 6 governance tabs alongside preserved 6 studio 
   const Page = createDxosStudioSettingsPage(client, harness.React, {}, {});
   let tree = await harness.mountAndFlush(Page);
 
-  // All 9 studio tabs preserved inside single role="tablist" (original 6 + Tabs 7-9 Broker/Automation/Builder)
+  // All 11 studio tabs preserved inside single role="tablist" (original 6 + Tabs 7-11 Broker/Automation/Builder/Forms/Approvals)
   const tablists = collectNodes(tree, (n) => n.props?.role === 'tablist');
   assert.equal(tablists.length, 1);
-  assert.equal(collectNodes(tablists[0], (n) => n.props?.role === 'tab').length, 9);
+  assert.equal(collectNodes(tablists[0], (n) => n.props?.role === 'tab').length, 11);
 
   // All 6 governance sub-tabs exposed 1 click away via data-testid="dxos-studio-tab-<id>"
   for (const id of ['api-keys', 'ledger', 'data-gov', 'wms-epod', 'dmn', 'delegations']) {

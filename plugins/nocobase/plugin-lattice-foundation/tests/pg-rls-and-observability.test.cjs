@@ -46,10 +46,10 @@ function withMockedNocobase(fn) {
     });
 }
 
-test('pg-rls defines all 43 tenant-scoped tables, validates identifiers strictly, and parameterizes set_config', async () => {
+test('pg-rls defines at least 52 tenant-scoped tables (including Wave 2 & Wave 3 tables), validates identifiers strictly, and parameterizes set_config', async () => {
   const pgRls = require('../src/server/pg-rls');
 
-  assert.equal(pgRls.TENANT_RLS_TABLES.length, 43);
+  assert.ok(pgRls.TENANT_RLS_TABLES.length >= 52, `Expected >= 52 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
   for (const required of [
     'latticeRequests', 'latticeOrders', 'latticeAssets', 'latticeEmployees',
     'latticeDepartments', 'latticeLocations', 'latticeIncidentCases', 'latticeIncidentRules',
@@ -65,6 +65,9 @@ test('pg-rls defines all 43 tenant-scoped tables, validates identifiers strictly
     'latticeConnectors', 'latticeEventBus', 'latticeWebhookSubscriptions',
     'latticeWebhookDeliveries', 'latticeIotDevices', 'latticeBrokerSubscriptions',
     'latticeAutomationRules', 'latticeAutomationRuns', 'latticeBuiltApps',
+    'latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions', 'latticeA2aTasks',
+    'latticeNotificationDeliveries', 'latticeApprovalPolicies', 'latticeApprovalRequests',
+    'latticePublicForms', 'latticePublicFormSubmissions',
   ]) {
     assert.ok(pgRls.TENANT_RLS_TABLES.includes(required), `Missing RLS table ${required}`);
   }
@@ -1572,4 +1575,91 @@ test('Task 1 remediation: foundation custom-resource HTTP handlers wrap DB opera
     if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
     else process.env.DX_PG_RLS_SESSION = prevFlag;
   }
+});
+
+test('version lock is 0.4.0 across package/openapi/observability and OpenAPI registers dxosForms, dxosApprovals, dxosNotify + server index loads cleanly', async () => {
+  const pkg = require('../package.json');
+  assert.equal(pkg.version, '0.4.0');
+
+  const { buildOpenApiSpec } = require('../src/server/openapi-spec');
+  const spec = buildOpenApiSpec({ serverUrl: 'http://localhost:13015' });
+  assert.equal(spec.info.version, '0.4.0');
+
+  // Public form endpoints have security: []
+  for (const pubPath of ['/api/dxosForms:meta', '/api/dxosForms:submit', '/api/dxosForms:status']) {
+    const method = pubPath.endsWith(':submit') ? 'post' : 'get';
+    assert.ok(spec.paths[pubPath]?.[method], `Missing public OpenAPI path ${method.toUpperCase()} ${pubPath}`);
+    assert.deepEqual(spec.paths[pubPath][method].security, []);
+  }
+  // Authenticated admin/ops endpoints require bearerAuth / latticeApiKey
+  for (const [privPath, method] of [
+    ['/api/dxosForms:list', 'get'],
+    ['/api/dxosForms:get', 'get'],
+    ['/api/dxosForms:save', 'post'],
+    ['/api/dxosForms:delete', 'post'],
+    ['/api/dxosForms:rotateToken', 'post'],
+    ['/api/dxosApprovals:listInbox', 'get'],
+    ['/api/dxosApprovals:decide', 'post'],
+    ['/api/dxosApprovals:request', 'post'],
+    ['/api/dxosApprovals:cancel', 'post'],
+    ['/api/dxosApprovals:listPolicies', 'get'],
+    ['/api/dxosApprovals:savePolicy', 'post'],
+    ['/api/dxosApprovals:deletePolicy', 'post'],
+    ['/api/dxosApprovals:evaluateSlaNow', 'post'],
+    ['/api/dxosNotify:send', 'post'],
+    ['/api/dxosNotify:testSend', 'post'],
+    ['/api/dxosNotify:logs', 'get'],
+    ['/api/dxosNotify:channels', 'get'],
+  ]) {
+    assert.ok(spec.paths[privPath]?.[method], `Missing OpenAPI path ${method.toUpperCase()} ${privPath}`);
+    assert.ok(Array.isArray(spec.paths[privPath][method].security) && spec.paths[privPath][method].security.length > 0);
+  }
+
+  // Verify LatticeFoundationPlugin.load() wires Wave 3 resources, app.latticeApprovals, and middleware order
+  await withMockedNocobase(async () => {
+    const LatticeFoundationPlugin = require('../src/server/index');
+    const defined = new Map();
+    const middlewares = [];
+    const allowed = [];
+    const fakeApp = {
+      db: {
+        sequelize: { getDialect: () => 'sqlite', query: async () => [[]], transaction: async (cb) => cb({}) },
+        getRepository: () => null,
+        on: () => {},
+        off: () => {},
+      },
+      use: () => {},
+      cronJobManager: { addJob: () => {} },
+      resourceManager: {
+        use: (mw, opts) => middlewares.push({ mw, opts }),
+        define: (def) => defined.set(def.name, def.actions),
+      },
+      acl: {
+        allow: (res, actions, role) => allowed.push({ res, actions, role }),
+        registerSnippet: () => {},
+      },
+    };
+    const plugin = new LatticeFoundationPlugin(fakeApp);
+    plugin.app = fakeApp;
+    plugin.db = fakeApp.db;
+    await plugin.load();
+
+    try {
+      assert.ok(defined.has('dxosNotify'));
+      assert.ok(defined.has('dxosApprovals'));
+      assert.ok(defined.has('dxosForms'));
+      assert.ok(fakeApp.latticeOmnichannelNotify);
+      assert.equal(typeof fakeApp.latticeApprovals?.requestApproval, 'function');
+      assert.equal(typeof fakeApp.latticeApprovals?.evaluateApprovalSlas, 'function');
+      assert.equal(typeof LatticeFoundationPlugin.requestApproval, 'function');
+      assert.equal(typeof LatticeFoundationPlugin.dispatchOmnichannel, 'function');
+
+      const approvalGuardIdx = middlewares.findIndex((m) => m.opts?.tag === 'dxosApprovalsDirectGuard');
+      const nativeScopeIdx = middlewares.findIndex((m) => m.opts?.tag === 'latticeNativeScope');
+      assert.ok(approvalGuardIdx >= 0 && nativeScopeIdx > approvalGuardIdx, 'dxosApprovalsDirectGuard must precede latticeNativeScope');
+      assert.ok(allowed.some((a) => a.res === 'dxosForms' && a.role === 'public' && a.actions.includes('submit')));
+    } finally {
+      await plugin.unload();
+    }
+  });
 });

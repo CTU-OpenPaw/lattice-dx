@@ -1,0 +1,606 @@
+/**
+ * @file LatticeDX — Open Digital Enterprise Platform
+ * @author CTU-OpenPaw
+ * @copyright (C) 2026 CTU-OpenPaw
+ * @license Apache-2.0
+ * @see https://github.com/CTU-OpenPaw/lattice-dx
+ * SPDX-License-Identifier: Apache-2.0
+ */
+'use strict';
+
+const { RULE_KEY_RE } = require('./automation-engine');
+const { getFlowBlueprint } = require('./flow/blueprints');
+const { buildTriggerIndex, graphV2SummaryToV1Compat } = require('./flow/schema');
+const {
+  fail,
+  readParams,
+  runWithOptionalRls,
+  runWithSystemRlsBypass,
+  toPlain,
+} = require('./wms-dmn-shared');
+const { createBuilderApplyBlueprint, upsertRepoRow } = require('./domain-portal-composer');
+const { createOrUpdateDomainCollection } = require('./domain-schema-rls');
+
+function replaceStepNodeRefs(value, nodeIndexById) {
+  if (typeof value === 'string') {
+    let out = value;
+    for (const [nodeId, idx] of nodeIndexById.entries()) {
+      out = out.split(`{{steps.${nodeId}.`).join(`{{steps.${idx}.`);
+    }
+    return out;
+  }
+  if (Array.isArray(value)) return value.map((item) => replaceStepNodeRefs(item, nodeIndexById));
+  if (value && typeof value === 'object') {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = replaceStepNodeRefs(v, nodeIndexById);
+    return out;
+  }
+  return value;
+}
+
+function projectBlueprintToV1Actions(flowBlueprint) {
+  if (!flowBlueprint?.graphJson?.nodes?.length) return [];
+  const compat = graphV2SummaryToV1Compat(flowBlueprint);
+  const actions = Array.isArray(compat.actionsJson) ? compat.actionsJson : [];
+  const { nodes = [], edges = [] } = flowBlueprint.graphJson;
+  const nodeMap = new Map(nodes.map((n) => [n.id, n]));
+  const v1MappedTypes = new Set(['data.create', 'data.update', 'notify.send', 'integration.http', 'iot.twin_command', 'ai.agent']);
+  const actionNodes = nodes
+    .filter((n) => v1MappedTypes.has(n.type))
+    .sort((a, b) => Number(a.config?.stepIndex ?? 9999) - Number(b.config?.stepIndex ?? 9999));
+  const nodeIndexById = new Map(actionNodes.map((n, idx) => [n.id, idx]));
+
+  const findBranchGuard = (startId) => {
+    const visited = new Set();
+    const queue = [startId];
+    while (queue.length) {
+      const id = queue.shift();
+      if (visited.has(id)) continue;
+      visited.add(id);
+      for (const edge of edges.filter((e) => e.target === id)) {
+        const src = nodeMap.get(edge.source);
+        if (!src) continue;
+        if (src.type === 'control.if' && edge.sourceHandle === 'true' && src.config?.condition) {
+          const c = src.config.condition;
+          const when = typeof c.field === 'string' && (c.op === 'eq' || c.op === '$eq') && c.value !== undefined
+            ? { [c.field]: c.value }
+            : structuredClone(c);
+          return { when, branchLabel: edge.label || src.config?.branchLabel || null };
+        }
+        if (src.type === 'control.parallel') queue.push(src.id);
+      }
+    }
+    return null;
+  };
+
+  return actions.map((act, idx) => {
+    const node = actionNodes[idx];
+    const guard = node ? findBranchGuard(node.id) : null;
+    const enriched = guard && !act.when ? { ...act, when: guard.when, branchLabel: guard.branchLabel ?? act.branchLabel ?? null } : act;
+    return replaceStepNodeRefs(enriched, nodeIndexById);
+  });
+}
+
+const BUSINESS_PACK_CATALOG = Object.freeze([
+  {
+    packKey: 'cmms-maintenance',
+    name: 'CMMS Cold-Chain Maintenance',
+    description: 'Equipment work orders, DMN priority routing, cold-chain alarm automation, and /p/cmms portal workspace.',
+    version: '0.4.0',
+    components: {
+      collection: 'latticeCustomWorkOrders',
+      dmnTableKey: 'cmms_priority_routing_v1',
+      automationRuleKey: 'auto_cmms_on_coldchain_fault',
+      portalSlug: 'cmms',
+    },
+  },
+  {
+    packKey: 'coldchain-partner-settlement',
+    name: 'Cold-Chain Partner Settlement & 2-Way n8n Compliance',
+    description: 'Partner settlement claims (latticeCustomPartnerClaims), DMN settlement policy, LatticeFlow v2 n8n orchestrator rule, and /p/partner-claims portal workspace.',
+    version: '0.4.0',
+    components: {
+      collection: 'latticeCustomPartnerClaims',
+      dmnTableKey: 'coldchain_settlement_policy_v1',
+      automationRuleKey: 'auto_coldchain_partner_settlement',
+      portalSlug: 'partner-claims',
+    },
+  },
+]);
+
+function buildPartnerSettlementGraphV2() {
+  return {
+    version: 2,
+    nodes: [
+      {
+        id: 'trig_settlement',
+        type: 'trigger.event',
+        label: 'Cold-Chain Settlement / MKT Hold Trigger',
+        position: { x: 60, y: 220 },
+        config: {
+          eventType: 'coldchain.settlement_requested,lot.held_mkt',
+          filterJson: null,
+        },
+      },
+      {
+        id: 'dmn_settlement',
+        type: 'logic.dmn',
+        label: 'Evaluate Settlement Policy (DMN)',
+        position: { x: 340, y: 220 },
+        config: {
+          tableKey: 'coldchain_settlement_policy_v1',
+          facts: {},
+        },
+      },
+      {
+        id: 'if_claim_required',
+        type: 'control.if',
+        label: 'Partner Claim Required?',
+        position: { x: 620, y: 220 },
+        config: {
+          condition: {
+            field: 'dmn.approveClaim',
+            op: 'eq',
+            value: true,
+          },
+        },
+      },
+      {
+        id: 'compute_settlement_amount',
+        type: 'logic.transform',
+        label: 'Normalize & Compute Settlement VND',
+        position: { x: 900, y: 140 },
+        config: {
+          baseFromInput: false,
+          operations: [
+            { op: 'coerceNumber', source: 'data.amount', target: 'safeAmount', fallback: 0 },
+            { op: 'coerceNumber', source: 'dmn.settlementRatePct', target: 'safeRate', fallback: 0 },
+            { op: 'coerceNumber', source: 'data.riskScore', target: 'riskScore', fallback: null },
+            { op: 'coerceNumber', source: 'data.assetId', target: 'assetId', fallback: null },
+            { op: 'coerceNumber', source: 'data.sourceRecordId', target: 'sourceRecordId', fallback: null },
+            { op: 'math', operator: 'mul', left: 'safeAmount', right: 'safeRate', target: 'rawSettlement' },
+            { op: 'math', operator: 'div', left: 'rawSettlement', right: 100, precision: 0, target: 'computedSettlementVnd' },
+          ],
+        },
+      },
+      {
+        id: 'create_partner_claim',
+        type: 'data.create',
+        label: 'Create Partner Settlement Claim',
+        position: { x: 1180, y: 140 },
+        config: {
+          collection: 'latticeCustomPartnerClaims',
+          values: {
+            claimCode: 'CLM-{{event.id}}',
+            partnerCode: '{{data.partnerCode}}',
+            partnerEmail: '{{data.partnerEmail}}',
+            lotCode: '{{data.lotCode}}',
+            assetId: '{{steps.compute_settlement_amount.assetId}}',
+            sourceCollection: '{{data.sourceCollection}}',
+            sourceRecordId: '{{steps.compute_settlement_amount.sourceRecordId}}',
+            severity: '{{data.severity}}',
+            riskScore: '{{steps.compute_settlement_amount.riskScore}}',
+            settlementTier: '{{dmn.settlementTier}}',
+            settlementRatePct: '{{dmn.settlementRatePct}}',
+            claimAmountVnd: '{{steps.compute_settlement_amount.safeAmount}}',
+            settlementAmountVnd: '{{steps.compute_settlement_amount.computedSettlementVnd}}',
+            status: 'open',
+            settlementStatus: 'pending',
+          },
+        },
+      },
+      {
+        id: 'call_n8n_enterprise',
+        type: 'integration.http',
+        label: 'Dispatch 26-Node n8n Enterprise Orchestrator',
+        position: { x: 1460, y: 140 },
+        timeoutMs: 15000,
+        config: {
+          connectorKey: 'n8n-enterprise-orchestrator',
+          method: 'POST',
+          path: '/webhook/latticedx/v1/enterprise-compliance-orchestrator',
+          timeoutMs: 15000,
+          body: {
+            eventType: '{{event.type}}',
+            organizationId: '{{organizationId}}',
+            targetCollection: 'latticeCustomPartnerClaims',
+            targetRecordId: '{{steps.create_partner_claim.id}}',
+            code: '{{steps.create_partner_claim.record.claimCode}}',
+            amount: '{{steps.compute_settlement_amount.safeAmount}}',
+            severity: '{{data.severity}}',
+            temperatureC: '{{data.temperatureC}}',
+            slaOverdueMinutes: '{{data.slaOverdueMinutes}}',
+            partnerCode: '{{data.partnerCode}}',
+            partnerEmail: '{{data.partnerEmail}}',
+            lotCode: '{{data.lotCode}}',
+            assetId: '{{steps.compute_settlement_amount.assetId}}',
+            items: '{{data.items}}',
+          },
+        },
+      },
+      {
+        id: 'notify_settlement_manager',
+        type: 'notify.send',
+        label: 'Notify Settlement Manager',
+        position: { x: 1740, y: 80 },
+        config: {
+          roleNames: ['{{dmn.assignedRole}}'],
+          category: 'settlement',
+          severity: 'high',
+          title: 'Partner Claim {{steps.create_partner_claim.record.claimCode}} ({{dmn.settlementTier}})',
+          body: 'DMN {{dmn.settlementRatePct}}% ({{steps.compute_settlement_amount.computedSettlementVnd}} VND) · n8n Exec #{{steps.call_n8n_enterprise.output.response.n8nExecutionId}}',
+          targetCollection: 'latticeCustomPartnerClaims',
+          targetRecordId: '{{steps.create_partner_claim.id}}',
+          targetPath: '/p/partner-claims',
+        },
+      },
+      {
+        id: 'notify_n8n_error',
+        type: 'notify.send',
+        label: 'Alert n8n Settlement Dispatch Failure',
+        position: { x: 1740, y: 280 },
+        config: {
+          roleNames: ['ldx_operator'],
+          category: 'alarm',
+          severity: 'high',
+          title: 'n8n Settlement Dispatch Error',
+          body: 'Failed to dispatch claim {{steps.create_partner_claim.record.claimCode}} to n8n-enterprise-orchestrator.',
+          targetCollection: 'latticeCustomPartnerClaims',
+          targetRecordId: '{{steps.create_partner_claim.id}}',
+          targetPath: '/p/partner-claims',
+        },
+      },
+    ],
+    edges: [
+      { id: 'e_trig_dmn', source: 'trig_settlement', sourceHandle: 'main', target: 'dmn_settlement', targetHandle: 'in' },
+      { id: 'e_dmn_if', source: 'dmn_settlement', sourceHandle: 'main', target: 'if_claim_required', targetHandle: 'in' },
+      { id: 'e_if_calc', source: 'if_claim_required', sourceHandle: 'true', target: 'compute_settlement_amount', targetHandle: 'in', label: 'approveClaim' },
+      { id: 'e_calc_create', source: 'compute_settlement_amount', sourceHandle: 'main', target: 'create_partner_claim', targetHandle: 'in' },
+      { id: 'e_create_n8n', source: 'create_partner_claim', sourceHandle: 'main', target: 'call_n8n_enterprise', targetHandle: 'in' },
+      { id: 'e_n8n_ok', source: 'call_n8n_enterprise', sourceHandle: 'main', target: 'notify_settlement_manager', targetHandle: 'in' },
+      { id: 'e_n8n_err', source: 'call_n8n_enterprise', sourceHandle: 'error', target: 'notify_n8n_error', targetHandle: 'in', label: 'error' },
+    ],
+    viewport: { x: 0, y: 0, zoom: 1 },
+    settings: {
+      errorPolicy: 'stop',
+      cooldownSec: 0,
+      maxDepth: 8,
+      timeoutMs: 30000,
+    },
+  };
+}
+
+async function listBusinessPacksAction(db, ctx, next, { foundation, requireBuilderAdmin }) {
+  const params = readParams(ctx);
+  const { organizationId } = await requireBuilderAdmin(ctx, params, { requireOrg: false, rootOnly: false, patScopes: ['read', 'write'] });
+
+  const colsRepo = db.getRepository?.('collections');
+  const dmnRepo = db.getRepository?.('latticeDecisionTables');
+  const rulesRepo = db.getRepository?.('latticeAutomationRules');
+
+  const collectionMatches = new Map();
+  for (const pack of BUSINESS_PACK_CATALOG) {
+    const hasCollection =
+      (colsRepo ? Boolean(await colsRepo.findOne({ filter: { name: pack.components.collection } })) : false) ||
+      Boolean(db.getCollection?.(pack.components.collection));
+    collectionMatches.set(pack.packKey, hasCollection);
+  }
+
+  const runPackRls = (fn) => (
+    organizationId
+      ? runWithOptionalRls(db, organizationId, fn, foundation)
+      : runWithSystemRlsBypass(db, fn, foundation)
+  );
+  const items = await runPackRls(async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const out = [];
+    for (const pack of BUSINESS_PACK_CATALOG) {
+      const hasCollection = collectionMatches.get(pack.packKey) === true;
+      const hasDmn = dmnRepo
+        ? Boolean(await dmnRepo.findOne({ filter: { organizationId, tableKey: pack.components.dmnTableKey }, ...txOpt }))
+        : false;
+      const hasRule = rulesRepo
+        ? Boolean(await rulesRepo.findOne({ filter: { organizationId, ruleKey: pack.components.automationRuleKey }, ...txOpt }))
+        : false;
+
+      out.push({
+        ...pack,
+        installed: Boolean(hasCollection && hasDmn && hasRule),
+      });
+    }
+    return out;
+  });
+  ctx.body = { items };
+  return next();
+}
+
+async function installBusinessPackAction(db, ctx, next, { foundation, requireBuilderAdmin }) {
+  const params = readParams(ctx);
+  const { organizationId, actor } = await requireBuilderAdmin(ctx, params, { requireOrg: true, rootOnly: true, patScopes: ['write'] });
+  const packKey = String(params.packKey || '').trim();
+  if (packKey !== 'cmms-maintenance' && packKey !== 'coldchain-partner-settlement') {
+    throw fail('UNKNOWN_BUSINESS_PACK', 400, `Unsupported business pack "${packKey || '(empty)'}"`);
+  }
+
+  if (packKey === 'coldchain-partner-settlement') {
+    const domain = await createOrUpdateDomainCollection(db, {
+      collectionName: 'latticeCustomPartnerClaims',
+      title: 'Cold-Chain Partner Claims',
+      description: 'Automated cold-chain excursion partner settlement claims with 2-way n8n external-app callbacks.',
+      fields: [
+        { name: 'claimCode', type: 'string', title: 'Claim Code', required: true, indexed: true },
+        { name: 'partnerCode', type: 'string', title: 'Partner Code', required: true, indexed: true },
+        {
+          name: 'status',
+          type: 'string',
+          title: 'Claim Status',
+          required: true,
+          enumValues: ['open', 'acknowledged', 'approved', 'settled', 'rejected', 'disputed', 'resolved'],
+        },
+        {
+          name: 'settlementStatus',
+          type: 'string',
+          title: 'Settlement Status',
+          required: true,
+          enumValues: ['pending', 'in_review', 'approved', 'settled', 'rejected', 'disputed'],
+        },
+        {
+          name: 'settlementTier',
+          type: 'string',
+          title: 'Settlement Tier',
+          enumValues: ['standard', 'escalated', 'critical'],
+        },
+        { name: 'settlementAmountVnd', type: 'float', title: 'Settlement Amount (VND)' },
+        { name: 'settlementRatePct', type: 'float', title: 'Settlement Rate (%)' },
+        { name: 'claimAmountVnd', type: 'float', title: 'Claim Amount (VND)' },
+        { name: 'riskScore', type: 'integer', title: 'Risk Score' },
+        {
+          name: 'severity',
+          type: 'string',
+          title: 'Severity',
+          enumValues: ['low', 'normal', 'medium', 'high', 'urgent', 'critical'],
+        },
+        { name: 'partnerEmail', type: 'string', title: 'Partner Email' },
+        { name: 'lotCode', type: 'string', title: 'Lot Code', indexed: true },
+        { name: 'assetId', type: 'integer', title: 'Asset ID' },
+        { name: 'sourceCollection', type: 'string', title: 'Source Collection' },
+        { name: 'sourceRecordId', type: 'integer', title: 'Source Record ID' },
+        { name: 'externalAppSource', type: 'string', title: 'External App Source' },
+        { name: 'partnerReference', type: 'string', title: 'Partner Reference' },
+        { name: 'partnerDecisionAt', type: 'datetime', title: 'Partner Decision At' },
+        { name: 'resolutionNote', type: 'text', title: 'Resolution Note' },
+        { name: 'n8nExecutionId', type: 'string', title: 'n8n Execution ID' },
+        { name: 'merkleRoot', type: 'string', title: 'PKI Merkle Root' },
+        { name: 'orionEntityId', type: 'string', title: 'Orion-LD Entity ID' },
+      ],
+      roles: ['ldx_admin', 'ldx_manager', 'ldx_dispatcher', 'ldx_warehouse', 'ldx_operator', 'ldx_employee'],
+      portalSlug: 'partner-claims',
+      portalTitle: 'Partner Settlement Claims',
+    }, {
+      ctx,
+      applyBlueprint: createBuilderApplyBlueprint(ctx),
+    });
+
+    const dmnRepo = db.getRepository?.('latticeDecisionTables');
+    const dmnValues = {
+      organizationId,
+      tableKey: 'coldchain_settlement_policy_v1',
+      name: 'Cold-Chain Excursion Partner Settlement Policy',
+      description: 'Evaluates cold-chain severity, temperature excursion, riskScore, and claim amount into settlementTier, settlementRatePct, approveClaim, and assignedRole.',
+      hitPolicy: 'FIRST',
+      version: 1,
+      active: true,
+      inputsJson: [
+        { name: 'severity', type: 'string' },
+        { name: 'riskScore', type: 'number' },
+        { name: 'temperatureC', type: 'number' },
+        { name: 'amount', type: 'number' },
+        { name: 'slaOverdueMinutes', type: 'number' },
+      ],
+      outputsJson: [
+        { name: 'settlementTier', type: 'string' },
+        { name: 'settlementRatePct', type: 'number' },
+        { name: 'approveClaim', type: 'boolean' },
+        { name: 'assignedRole', type: 'string' },
+      ],
+      rulesJson: [
+        {
+          id: 'r1',
+          when: { severity: 'critical', temperatureC: { op: 'gt', value: -12 } },
+          then: { settlementTier: 'critical', settlementRatePct: 85, approveClaim: true, assignedRole: 'ldx_manager' },
+        },
+        {
+          id: 'r2',
+          when: { riskScore: { op: 'gte', value: 75 } },
+          then: { settlementTier: 'critical', settlementRatePct: 85, approveClaim: true, assignedRole: 'ldx_manager' },
+        },
+        {
+          id: 'r3',
+          when: { temperatureC: { op: 'gt', value: -12 }, amount: { op: 'gte', value: 15000000 } },
+          then: { settlementTier: 'escalated', settlementRatePct: 40, approveClaim: true, assignedRole: 'ldx_manager' },
+        },
+        {
+          id: 'r4',
+          when: { riskScore: { op: 'gte', value: 40 } },
+          then: { settlementTier: 'escalated', settlementRatePct: 40, approveClaim: false, assignedRole: 'ldx_operator' },
+        },
+        {
+          id: 'r5',
+          when: {},
+          then: { settlementTier: 'standard', settlementRatePct: 0, approveClaim: false, assignedRole: 'ldx_operator' },
+        },
+      ],
+    };
+    const rulesRepo = db.getRepository?.('latticeAutomationRules');
+    const ruleKey = 'auto_coldchain_partner_settlement';
+    if (!RULE_KEY_RE.test(ruleKey)) throw fail('INVALID_PACK_RULE', 500, 'Invalid pack rule key');
+    const graphJson = buildPartnerSettlementGraphV2();
+    const ruleValues = {
+      organizationId,
+      ruleKey,
+      name: 'Cold-Chain Partner Settlement & 2-Way n8n Compliance (LatticeFlow v2)',
+      description:
+        'Evaluates coldchain_settlement_policy_v1 DMN, creates partner claim on latticeCustomPartnerClaims, and dispatches 26-node n8n Enterprise Compliance Orchestrator with 2-way callback support.',
+      triggerEventType: 'coldchain.settlement_requested,lot.held_mkt',
+      filterJson: null,
+      dmnTableKey: 'coldchain_settlement_policy_v1',
+      actionsJson: projectBlueprintToV1Actions({ graphJson }),
+      graphJson: structuredClone(graphJson),
+      draftGraphJson: structuredClone(graphJson),
+      triggerIndexJson: buildTriggerIndex(graphJson, { triggerEventType: 'coldchain.settlement_requested,lot.held_mkt' }),
+      schemaVersion: 2,
+      maxDepth: 8,
+      cooldownSec: 0,
+      active: true,
+      createdBy: actor?.username ? String(actor.username) : null,
+    };
+    const { dmnRow, ruleRow } = await runWithOptionalRls(db, organizationId, async (transaction) => {
+      const savedDmn = dmnRepo
+        ? await upsertRepoRow(dmnRepo, { organizationId, tableKey: 'coldchain_settlement_policy_v1' }, dmnValues, transaction)
+        : dmnValues;
+      const savedRule = rulesRepo
+        ? await upsertRepoRow(rulesRepo, { organizationId, ruleKey }, ruleValues, transaction)
+        : ruleValues;
+      return { dmnRow: savedDmn, ruleRow: savedRule };
+    }, foundation);
+
+    ctx.body = {
+      installed: true,
+      packKey,
+      organizationId,
+      domain,
+      dmnTable: toPlain(dmnRow),
+      automationRule: toPlain(ruleRow),
+    };
+    return next();
+  }
+
+  const domain = await createOrUpdateDomainCollection(db, {
+    collectionName: 'latticeCustomWorkOrders',
+    title: 'CMMS Work Orders',
+    description: 'Automated maintenance and cold-chain work orders.',
+    fields: [
+      { name: 'workOrderCode', type: 'string', title: 'Work Order Code', required: true, indexed: true },
+      { name: 'title', type: 'string', title: 'Title', required: true },
+      { name: 'assetId', type: 'integer', title: 'Asset ID' },
+      { name: 'deviceKey', type: 'string', title: 'Device Key', indexed: true },
+      {
+        name: 'priority',
+        type: 'string',
+        title: 'Priority',
+        required: true,
+        enumValues: ['low', 'medium', 'high', 'critical'],
+      },
+      {
+        name: 'status',
+        type: 'string',
+        title: 'Status',
+        required: true,
+        enumValues: ['open', 'in_progress', 'completed', 'cancelled'],
+      },
+      { name: 'faultSummary', type: 'text', title: 'Fault Summary' },
+      { name: 'assignedRole', type: 'string', title: 'Assigned Role' },
+      { name: 'dueAt', type: 'datetime', title: 'Due At' },
+    ],
+    roles: ['ldx_admin', 'ldx_manager', 'ldx_dispatcher', 'ldx_warehouse', 'ldx_operator', 'ldx_employee'],
+    portalSlug: 'cmms',
+    portalTitle: 'CMMS Maintenance',
+  }, {
+    ctx,
+    applyBlueprint: createBuilderApplyBlueprint(ctx),
+  });
+
+  const dmnRepo = db.getRepository?.('latticeDecisionTables');
+  const dmnValues = {
+    organizationId,
+    tableKey: 'cmms_priority_routing_v1',
+    name: 'CMMS Cold-Chain Fault Priority Routing',
+    description: 'Maps cold-chain alarm severity and eventType to CMMS priority, assignedRole, and SLA hours.',
+    hitPolicy: 'FIRST',
+    version: 1,
+    active: true,
+    inputsJson: [
+      { name: 'severity', type: 'string' },
+      { name: 'eventType', type: 'string' },
+    ],
+    outputsJson: [
+      { name: 'workOrderPriority', type: 'string' },
+      { name: 'assignedRole', type: 'string' },
+      { name: 'slaHours', type: 'number' },
+    ],
+    rulesJson: [
+      {
+        id: 'r1',
+        when: { severity: 'critical', eventType: 'alarm.triggered' },
+        then: { workOrderPriority: 'critical', assignedRole: 'ldx_manager', slaHours: 2 },
+      },
+      {
+        id: 'r2',
+        when: { severity: 'high', eventType: 'alarm.triggered' },
+        then: { workOrderPriority: 'high', assignedRole: 'ldx_operator', slaHours: 4 },
+      },
+      {
+        id: 'r3',
+        when: { eventType: 'lot.held_mkt' },
+        then: { workOrderPriority: 'critical', assignedRole: 'ldx_manager', slaHours: 1 },
+      },
+      {
+        id: 'r4',
+        when: {},
+        then: { workOrderPriority: 'medium', assignedRole: 'ldx_operator', slaHours: 24 },
+      },
+    ],
+  };
+  const rulesRepo = db.getRepository?.('latticeAutomationRules');
+  const ruleKey = 'auto_cmms_on_coldchain_fault';
+  if (!RULE_KEY_RE.test(ruleKey)) throw fail('INVALID_PACK_RULE', 500, 'Invalid pack rule key');
+  const flowBlueprint = getFlowBlueprint(ruleKey);
+  const compatActions = projectBlueprintToV1Actions(flowBlueprint);
+  const ruleValues = {
+    organizationId,
+    ruleKey,
+    name: flowBlueprint?.name || 'Auto Create CMMS Work Order on Cold-Chain Alarm',
+    description:
+      flowBlueprint?.description ||
+      'Evaluates cmms_priority_routing_v1 DMN and creates a CMMS work order plus notifies the assigned role.',
+    triggerEventType: flowBlueprint?.triggerEventType || 'alarm.triggered,device.offline',
+    filterJson: null,
+    dmnTableKey: flowBlueprint?.dmnTableKey || 'cmms_priority_routing_v1',
+    actionsJson: compatActions,
+    draftGraphJson: flowBlueprint?.graphJson ? structuredClone(flowBlueprint.graphJson) : null,
+    triggerIndexJson: flowBlueprint?.graphJson ? buildTriggerIndex(flowBlueprint.graphJson, flowBlueprint) : [],
+    schemaVersion: 1,
+    maxDepth: flowBlueprint?.maxDepth ?? 8,
+    cooldownSec: flowBlueprint?.cooldownSec ?? 60,
+    active: true,
+    createdBy: actor?.username ? String(actor.username) : null,
+  };
+  const { dmnRow, ruleRow } = await runWithOptionalRls(db, organizationId, async (transaction) => {
+    const savedDmn = dmnRepo
+      ? await upsertRepoRow(dmnRepo, { organizationId, tableKey: 'cmms_priority_routing_v1' }, dmnValues, transaction)
+      : dmnValues;
+    const savedRule = rulesRepo
+      ? await upsertRepoRow(rulesRepo, { organizationId, ruleKey }, ruleValues, transaction)
+      : ruleValues;
+    return { dmnRow: savedDmn, ruleRow: savedRule };
+  }, foundation);
+
+  ctx.body = {
+    installed: true,
+    packKey,
+    organizationId,
+    domain,
+    dmnTable: toPlain(dmnRow),
+    automationRule: toPlain(ruleRow),
+  };
+  return next();
+}
+
+module.exports = {
+  BUSINESS_PACK_CATALOG,
+  buildPartnerSettlementGraphV2,
+  installBusinessPackAction,
+  listBusinessPacksAction,
+  projectBlueprintToV1Actions,
+  replaceStepNodeRefs,
+};

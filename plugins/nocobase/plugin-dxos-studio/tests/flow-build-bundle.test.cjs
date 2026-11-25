@@ -61,7 +61,7 @@ function createReactMockWithHooks() {
 
 test('package.json pins MIT @xyflow/react@12.12.1 and @dagrejs/dagre@3.1.3 in devDependencies only', () => {
   const pkg = JSON.parse(readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '1.0.0');
+  assert.equal(pkg.version, '0.4.0');
   assert.equal(pkg.license, 'Apache-2.0');
   assert.equal(pkg.nocobase?.sdkProvidedByHost, true);
   assert.equal(pkg.nocobase?.testedRuntime, '2.2.50');
@@ -207,6 +207,10 @@ test('dist/client/index.js loads cleanly via CJS without react-dom installed AND
 
   assert.equal(loadedMod.__esModule, true);
   assert.equal(typeof loadedMod.default, 'function');
+  assert.equal(typeof loadedMod.createPublicFormBuilderPanel, 'function');
+  assert.equal(typeof loadedMod.PublicFormBuilderPanel, 'function');
+  assert.equal(typeof loadedMod.createApprovalInboxPanel, 'function');
+  assert.equal(typeof loadedMod.ApprovalInboxPanel, 'function');
   const registered = {};
   const routerAdded = {};
   const pluginInstance = new loadedMod.default({
@@ -285,6 +289,8 @@ test('dist/client/index.js loads cleanly via CJS without react-dom installed AND
   const amdExports = amdDef.factory(mockClient, mockReact, {});
   assert.equal(amdExports.__esModule, true);
   assert.equal(typeof amdExports.default, 'function');
+  assert.equal(typeof amdExports.createPublicFormBuilderPanel, 'function');
+  assert.equal(typeof amdExports.createApprovalInboxPanel, 'function');
   assert.ok(amdExports.__dxosVendorShims.getXyflow()?.ReactFlow, 'AMD factory must also retain bundled @xyflow/react');
 });
 

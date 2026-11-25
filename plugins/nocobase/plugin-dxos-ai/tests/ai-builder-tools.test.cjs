@@ -598,12 +598,12 @@ test('DxosRecordWorkbenchBlockModel is allowed and createCollection ensures orga
   }
 });
 
-test('17-tool registry invariant (adminMcpToolsListed17 === 17) holds after Native Automation extension', async () => {
+test('20-tool registry invariant (11 admin + 6 operational + 3 memory) holds after Native Automation and Memory extension', async () => {
   const { db } = makeBuilderHarness();
   const allTools = createDxosTools();
   assert.equal(ADMIN_BUILDER_TOOL_NAMES.length, 11);
   assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
-  assert.equal(allTools.length, 17);
+  assert.equal(allTools.length, 20);
 
   const mw = createMcpGatewayMiddleware({
     db,
@@ -624,8 +624,8 @@ test('17-tool registry invariant (adminMcpToolsListed17 === 17) holds after Nati
     set() {},
   };
   await mw(adminListCtx, async () => {});
-  const adminMcpToolsListed17 = adminListCtx.body.result.tools.length;
-  assert.equal(adminMcpToolsListed17, 17);
+  const adminMcpToolsListed = adminListCtx.body.result.tools.length;
+  assert.equal(adminMcpToolsListed, 20);
 
   const wfToolMeta = adminListCtx.body.result.tools.find((t) => t.name === 'dxos_configure_workflow');
   assert.ok(wfToolMeta, 'dxos_configure_workflow must remain in the 17-tool matrix');
@@ -677,7 +677,7 @@ test('17-tool registry invariant (adminMcpToolsListed17 === 17) holds after Nati
     set() {},
   };
   await mw(empListCtx, async () => {});
-  assert.equal(empListCtx.body.result.tools.length, 6);
+  assert.equal(empListCtx.body.result.tools.length, 9);
   assert.equal(empListCtx.body.result.tools.some((t) => t.name === 'dxos_configure_workflow'), false);
 });
 

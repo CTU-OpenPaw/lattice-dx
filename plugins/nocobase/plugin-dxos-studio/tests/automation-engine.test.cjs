@@ -2469,3 +2469,527 @@ test('automation-engine call_connector injects fresh OAuth2 Bearer token via get
   assert.deepEqual(seenAuthHeaders, ['Bearer ya29.fresh-oauth-token-123']);
   assert.equal(JSON.stringify(run).includes('ya29.fresh-oauth-token-123'), false);
 });
+
+test('latticeAutomationRuleVersions collection, FORCE RLS migration, direct guard, and saveDraft/publishRule/listRuleVersions/rollbackRuleVersion lifecycle', async () => {
+  // 1. Collection schema + migration filename/FORCE RLS check
+  const origLoad = Module._load;
+  let versionsCol;
+  let VersionsMigration;
+  Module._load = function mocked(req, parent, isMain) {
+    if (req === '@nocobase/server') return { Plugin: class {}, Migration: class {} };
+    if (req === '@nocobase/database') return { defineCollection: (def) => def };
+    return origLoad.call(this, req, parent, isMain);
+  };
+  try {
+    versionsCol = require('../src/server/collections/automation-rule-versions');
+    VersionsMigration = require('../src/server/migrations/20261201000100-automation-rule-versions-rls');
+  } finally {
+    Module._load = origLoad;
+  }
+
+  assert.equal(versionsCol.name, 'latticeAutomationRuleVersions');
+  assert.deepEqual(versionsCol.migrationRules, ['schema-only']);
+  assert.equal(versionsCol.fields.some((f) => f.unique === true), false);
+  for (const fname of ['organizationId', 'ruleId', 'ruleUid', 'ruleKey', 'version', 'graphJson', 'triggerIndexJson', 'changeSummary', 'publishedBy', 'publishedAt']) {
+    assert.ok(versionsCol.fields.some((f) => f.name === fname), `Missing field ${fname}`);
+  }
+  assert.ok(versionsCol.indexes.some((ix) => ix.name === 'uidx_lattice_auto_rule_ver_org_key_ver' && ix.unique === true));
+  assert.ok(AUTOMATION_COLLECTIONS.includes('latticeAutomationRuleVersions'));
+
+  const migSql = [];
+  const mig = new VersionsMigration();
+  mig.context = {
+    db: {
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (fn) => fn({ id: 'tx-ver' }),
+        query: async (sql) => { migSql.push(String(sql)); return [[], {}]; },
+      },
+    },
+  };
+  assert.equal(mig.on, 'afterSync');
+  await mig.up();
+  assert.ok(migSql.some((s) => s.includes('CREATE TABLE IF NOT EXISTS "latticeAutomationRuleVersions"')));
+  assert.ok(migSql.some((s) => s.includes('ENABLE ROW LEVEL SECURITY')));
+  assert.ok(migSql.some((s) => s.includes('FORCE ROW LEVEL SECURITY')));
+  assert.ok(migSql.some((s) => s.includes('TO PUBLIC')));
+  await mig.down();
+  assert.ok(migSql.some((s) => s.includes('DROP TABLE IF EXISTS "latticeAutomationRuleVersions"')));
+
+  // 2. Direct guard blocks non-root CRUD & charts:queryData on latticeAutomationRuleVersions
+  const db = makeInMemoryDb({
+    latticeEmployees: [
+      { userId: 20, organizationId: 'org-a', active: true },
+      { userId: 21, organizationId: 'org-a', active: true },
+      { userId: 22, organizationId: 'org-a', active: true },
+      { userId: 30, organizationId: 'org-b', active: true },
+    ],
+    rolesUsers: [
+      { userId: 20, roleName: 'ldx_admin' },
+      { userId: 21, roleName: 'ldx_manager' },
+      { userId: 22, roleName: 'ldx_operator' },
+      { userId: 30, roleName: 'ldx_admin' },
+    ],
+  });
+  const guard = createAutomationDirectGuardMiddleware(db);
+  await assert.rejects(
+    () => guard({ action: { resourceName: 'latticeAutomationRuleVersions', actionName: 'list', params: {} }, state: { currentUser: { id: 20 }, currentRole: 'ldx_admin' } }, async () => {}),
+    (err) => err.code === 'AUTOMATION_DIRECT_CRUD_FORBIDDEN' && err.status === 403,
+  );
+  await assert.rejects(
+    () => guard({ action: { resourceName: 'charts', actionName: 'queryData', params: { collection: 'latticeAutomationRuleVersions' } }, state: { currentUser: { id: 20 }, currentRole: 'ldx_admin' } }, async () => {}),
+    (err) => err.code === 'AUTOMATION_DIRECT_CRUD_FORBIDDEN' && err.status === 403,
+  );
+
+  // 3. saveDraft -> unpublished rule (active: false, graphJson: null, publishedVersion: 0)
+  const actions = createDxosAutomationsActions(db);
+  const draftV1Graph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.event', config: { eventType: 'order.created' } },
+      { id: 'c1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'V1-PUB', name: 'Published v1' } } },
+    ],
+    edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'c1' }],
+  };
+  const saveNewDraftCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: { ruleKey: 'draft_pub_flow', name: 'Draft Publish Flow', draftGraphJson: draftV1Graph },
+  });
+  await actions.saveDraft(saveNewDraftCtx, async () => {});
+  assert.equal(saveNewDraftCtx.body.rule.active, false);
+  assert.equal(saveNewDraftCtx.body.rule.graphJson, null);
+  assert.equal(saveNewDraftCtx.body.rule.publishedVersion, 0);
+  assert.equal(saveNewDraftCtx.body.rule.draftGraphJson.nodes[1].config.values.code, 'V1-PUB');
+
+  // Unpublished draft-only rule NEVER runs on live handleDomainEvent
+  const unpubRuns = await automationModule.handleDomainEvent(db, { type: 'order.created', organizationId: 'org-a', data: {} });
+  assert.equal(unpubRuns.filter((r) => r.ruleKey === 'draft_pub_flow' && r.status === 'completed').length, 0);
+
+  // 4. publishRule -> v1, writes snapshot to latticeAutomationRuleVersions, activates rule
+  const pub1Ctx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: { ruleKey: 'draft_pub_flow', changeSummary: 'Initial release v1' },
+  });
+  await actions.publishRule(pub1Ctx, async () => {});
+  assert.equal(pub1Ctx.body.rule.publishedVersion, 1);
+  assert.equal(pub1Ctx.body.rule.active, true);
+  assert.equal(pub1Ctx.body.rule.graphJson.nodes[1].config.values.code, 'V1-PUB');
+  assert.equal(db.store.latticeAutomationRuleVersions.length, 1);
+  assert.equal(db.store.latticeAutomationRuleVersions[0].version, 1);
+
+  // 5. saveDraft on published rule does NOT alter live graphJson, publishedVersion, or live trigger executions
+  const draftV2Graph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.event', config: { eventType: 'order.created' } },
+      { id: 'c1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'V2-DRAFT-ONLY', name: 'Unpublished Draft' } } },
+    ],
+    edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'c1' }],
+  };
+  await actions.saveDraft(makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'draft_pub_flow', draftGraphJson: draftV2Graph } }), async () => {});
+  const storedAfterDraft = await db.getRepository('latticeAutomationRules').findOne({ filter: { organizationId: 'org-a', ruleKey: 'draft_pub_flow' } });
+  assert.equal(storedAfterDraft.publishedVersion, 1);
+  assert.equal(storedAfterDraft.graphJson.nodes[1].config.values.code, 'V1-PUB');
+
+  // Live event & runNow execute V1-PUB, while testRule(useDraft: true) executes V2-DRAFT-ONLY
+  const liveEvtRuns = await automationModule.handleDomainEvent(db, { type: 'order.created', organizationId: 'org-a', data: {} });
+  assert.equal(liveEvtRuns.length, 1);
+  assert.equal(liveEvtRuns[0].nodeStatesJson.c1.output.record.code, 'V1-PUB');
+
+  const runNowCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'draft_pub_flow' } });
+  await actions.runNow(runNowCtx, async () => {});
+  assert.equal(runNowCtx.body.run.nodeStatesJson.c1.output.record.code, 'V1-PUB');
+
+  const dryDraftCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'draft_pub_flow', useDraft: true } });
+  await actions.testRule(dryDraftCtx, async () => {});
+  assert.equal(dryDraftCtx.body.simulation.nodeStatesJson.c1.output.record.code, 'V2-DRAFT-ONLY');
+
+  // 6. publishRule -> v2, listRuleVersions, and rollbackRuleVersion -> v3 restoring V1-PUB
+  await actions.publishRule(makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'draft_pub_flow', changeSummary: 'Release v2' } }), async () => {});
+  const listVerCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'draft_pub_flow' } });
+  await actions.listRuleVersions(listVerCtx, async () => {});
+  assert.deepEqual(listVerCtx.body.items.map((v) => v.version), [2, 1]);
+
+  const rbCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'draft_pub_flow', version: 1 } });
+  await actions.rollbackRuleVersion(rbCtx, async () => {});
+  assert.equal(rbCtx.body.rule.publishedVersion, 3);
+  assert.equal(rbCtx.body.rule.graphJson.nodes[1].config.values.code, 'V1-PUB');
+  assert.equal(db.store.latticeAutomationRuleVersions.length, 3);
+
+  // 7. Strict Admin RBAC + Org Isolation + PAT scope checks
+  for (const [uid, role] of [[21, 'ldx_manager'], [22, 'ldx_operator']]) {
+    await assert.rejects(
+      () => actions.saveDraft(makeCtx({ userId: uid, role, params: { ruleKey: 'draft_pub_flow', draftGraphJson: draftV2Graph } }), async () => {}),
+      (err) => err.status === 403,
+    );
+    await assert.rejects(
+      () => actions.publishRule(makeCtx({ userId: uid, role, params: { ruleKey: 'draft_pub_flow' } }), async () => {}),
+      (err) => err.status === 403,
+    );
+    await assert.rejects(
+      () => actions.rollbackRuleVersion(makeCtx({ userId: uid, role, params: { ruleKey: 'draft_pub_flow', version: 1 } }), async () => {}),
+      (err) => err.status === 403,
+    );
+  }
+  await assert.rejects(
+    () => actions.listRuleVersions(makeCtx({ userId: 30, role: 'ldx_admin', params: { organizationId: 'org-a', ruleKey: 'draft_pub_flow' } }), async () => {}),
+    (err) => err.code === 'NATIVE_ORGANIZATION_MISMATCH' && err.status === 403,
+  );
+  await assert.rejects(
+    () => actions.publishRule(makeCtx({ userId: 20, role: 'ldx_admin', patScopes: ['read'], params: { ruleKey: 'draft_pub_flow' } }), async () => {}),
+    (err) => err.code === 'PAT_SCOPE_DENIED' && err.status === 403,
+  );
+
+  // 8. DxosStudioPlugin.load() registers new actions in acl.allow('dxosAutomations', ..., 'loggedIn')
+  const allowedActions = [];
+  const plugin = Object.create(DxosStudioPlugin.prototype);
+  plugin.db = { on() {}, off() {}, collections: new Map() };
+  plugin.app = {
+    resourceManager: { use() {}, define() {} },
+    acl: { registerSnippet() {}, allow(res, acts, scope) { if (res === 'dxosAutomations' && scope === 'loggedIn') allowedActions.push(...acts); } },
+  };
+  await plugin.load();
+  plugin.stopAutomationListener();
+  for (const act of ['saveDraft', 'publishRule', 'listRuleVersions', 'rollbackRuleVersion']) {
+    assert.ok(allowedActions.includes(act), `DxosStudioPlugin must allow dxosAutomations:${act}`);
+  }
+});
+
+test('publishRule and rollbackRuleVersion recompute triggerEventType when graph trigger node changes', async () => {
+  const db = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+  });
+  const actions = createDxosAutomationsActions(db, {});
+  const v1Graph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.event', config: { eventType: 'order.created' } },
+      { id: 'n1', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'ver', value: 'v1' }] } },
+    ],
+    edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1' }],
+  };
+  const v2Graph = {
+    version: 2,
+    nodes: [
+      { id: 't1', type: 'trigger.event', config: { eventType: 'ticket.created' } },
+      { id: 'n1', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'ver', value: 'v2' }] } },
+    ],
+    edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1' }],
+  };
+
+  const pub1Ctx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'trig_refresh_flow', name: 'Trigger Refresh', draftGraphJson: v1Graph } });
+  await actions.publishRule(pub1Ctx, async () => {});
+  assert.equal(pub1Ctx.body.rule.triggerEventType, 'order.created');
+
+  await actions.saveDraft(makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'trig_refresh_flow', draftGraphJson: v2Graph } }), async () => {});
+  const pub2Ctx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'trig_refresh_flow' } });
+  await actions.publishRule(pub2Ctx, async () => {});
+  assert.equal(pub2Ctx.body.rule.triggerEventType, 'ticket.created', 'publishRule must refresh triggerEventType from newly published graph');
+
+  const rbCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'trig_refresh_flow', version: 1 } });
+  await actions.rollbackRuleVersion(rbCtx, async () => {});
+  assert.equal(rbCtx.body.rule.triggerEventType, 'order.created', 'rollbackRuleVersion must restore triggerEventType from target version graph');
+});
+
+test('getRunTrace and listRuns scrub secrets inside triggerPayloadJson while preserving replayRun', async () => {
+  const { executeFlowGraph } = require('../src/server/flow/executor');
+  const db = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+  });
+  const rule = {
+    id: 91,
+    organizationId: 'org-a',
+    ruleKey: 'webhook_secret_scrub_flow',
+    name: 'Webhook Secret Scrub Flow',
+    schemaVersion: 2,
+    triggerEventType: 'webhook.received',
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.event', config: { eventType: 'webhook.received' } },
+        { id: 'n1', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'orderCode', value: '{{data.orderCode}}' }] } },
+      ],
+      edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1' }],
+    },
+    active: true,
+  };
+  await db.getRepository('latticeAutomationRules').create({ values: rule });
+
+  const run = await executeFlowGraph(db, rule, {
+    id: 'evt-sec-1',
+    type: 'webhook.received',
+    organizationId: 'org-a',
+    data: {
+      orderCode: 'ORD-777',
+      apiKey: 'ak-secret-val',
+      token: 'tok-secret-val',
+      password: 'pw-secret-val',
+      authorization: 'Bearer sk-secret-val',
+    },
+  });
+  assert.equal(run.status, 'completed');
+
+  const actions = createDxosAutomationsActions(db, {});
+  const traceCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { runUid: run.runUid } });
+  await actions.getRunTrace(traceCtx, async () => {});
+  const traceJson = JSON.stringify(traceCtx.body);
+  assert.equal(traceJson.includes('ak-secret-val'), false, 'getRunTrace must scrub triggerPayloadJson apiKey');
+  assert.equal(traceJson.includes('tok-secret-val'), false, 'getRunTrace must scrub triggerPayloadJson token');
+  assert.equal(traceJson.includes('pw-secret-val'), false, 'getRunTrace must scrub triggerPayloadJson password');
+  assert.equal(traceJson.includes('sk-secret-val'), false, 'getRunTrace must scrub triggerPayloadJson Bearer token');
+  assert.equal(traceCtx.body.run.triggerPayloadJson?.data?.orderCode, 'ORD-777');
+
+  const listCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'webhook_secret_scrub_flow' } });
+  await actions.listRuns(listCtx, async () => {});
+  const listJson = JSON.stringify(listCtx.body);
+  assert.equal(listJson.includes('ak-secret-val'), false, 'listRuns must scrub triggerPayloadJson apiKey');
+  assert.equal(listJson.includes('sk-secret-val'), false, 'listRuns must scrub triggerPayloadJson Bearer token');
+  assert.equal(listCtx.body.items[0].triggerPayloadJson?.data?.orderCode, 'ORD-777');
+
+  const replayCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { runUid: run.runUid } });
+  await actions.replayRun(replayCtx, async () => {});
+  assert.equal(replayCtx.body.run.status, 'completed');
+  assert.equal(replayCtx.body.run.depth, 1);
+  assert.equal(replayCtx.body.run.nodeStatesJson?.n1?.output?.orderCode, 'ORD-777');
+});
+
+test('replayRun, resumeRun, and runNow scrub triggerPayloadJson secrets and strip resumeTokenHash while preserving resumeToken only when suspended', async () => {
+  const db = makeInMemoryDb({
+    latticeEmployees: [{ userId: 20, organizationId: 'org-a', active: true }],
+    rolesUsers: [{ userId: 20, roleName: 'ldx_admin' }],
+  });
+  const actions = createDxosAutomationsActions(db, {});
+  const transformRule = {
+    id: 92,
+    organizationId: 'org-a',
+    ruleKey: 'action_secret_scrub_flow',
+    name: 'Action Secret Scrub Flow',
+    schemaVersion: 2,
+    triggerEventType: 'webhook.received',
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.event', config: { eventType: 'webhook.received' } },
+        { id: 'n1', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'orderCode', value: '{{data.orderCode}}' }] } },
+      ],
+      edges: [{ id: 'e1', source: 't1', sourceHandle: 'main', target: 'n1' }],
+    },
+    active: true,
+  };
+  const approvalRule = {
+    id: 93,
+    organizationId: 'org-a',
+    ruleKey: 'approval_secret_scrub_flow',
+    name: 'Approval Secret Scrub Flow',
+    schemaVersion: 2,
+    triggerEventType: 'webhook.received',
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.event', config: { eventType: 'webhook.received' } },
+        { id: 'ap1', type: 'control.approval', config: { approverRole: 'ldx_admin', title: 'Approve' } },
+        { id: 'n1', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'orderCode', value: '{{data.orderCode}}' }] } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'ap1' },
+        { id: 'e2', source: 'ap1', sourceHandle: 'approved', target: 'n1' },
+      ],
+    },
+    active: true,
+  };
+  await db.getRepository('latticeAutomationRules').create({ values: transformRule });
+  await db.getRepository('latticeAutomationRules').create({ values: approvalRule });
+
+  const secretPayload = {
+    orderCode: 'ORD-777',
+    apiKey: 'ak-secret-val',
+    token: 'tok-val',
+    password: 'pw-secret-val',
+    authorization: 'Bearer sk-secret-val',
+  };
+  const assertNoSecrets = (payload, label) => {
+    const serialized = JSON.stringify(payload);
+    for (const secret of ['ak-secret-val', 'tok-val', 'pw-secret-val', 'sk-secret-val']) {
+      assert.equal(serialized.includes(secret), false, `${label} must scrub ${secret}`);
+    }
+  };
+
+  // 1. runNow (completed) scrubs triggerPayloadJson and strips resumeTokenHash / resumeToken
+  const runNowCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'action_secret_scrub_flow', data: secretPayload } });
+  await actions.runNow(runNowCtx, async () => {});
+  assert.equal(runNowCtx.body.run.status, 'completed');
+  assert.equal(runNowCtx.body.run.nodeStatesJson?.n1?.output?.orderCode, 'ORD-777');
+  assert.equal(runNowCtx.body.run.resumeTokenHash, undefined);
+  assert.equal(runNowCtx.body.run.resumeToken, undefined);
+  assert.equal(runNowCtx.body.run.triggerPayloadJson?.data?.orderCode, 'ORD-777');
+  assertNoSecrets(runNowCtx.body, 'runNow');
+
+  // 2. replayRun scrubs triggerPayloadJson while still interpolating ORD-777
+  const replayCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { runUid: runNowCtx.body.run.runUid } });
+  await actions.replayRun(replayCtx, async () => {});
+  assert.equal(replayCtx.body.run.status, 'completed');
+  assert.equal(replayCtx.body.run.depth, 1);
+  assert.equal(replayCtx.body.run.nodeStatesJson?.n1?.output?.orderCode, 'ORD-777');
+  assert.equal(replayCtx.body.run.resumeTokenHash, undefined);
+  assert.equal(replayCtx.body.run.resumeToken, undefined);
+  assert.equal(replayCtx.body.run.triggerPayloadJson?.data?.orderCode, 'ORD-777');
+  assertNoSecrets(replayCtx.body, 'replayRun');
+
+  // 3. runNow (suspended) scrubs triggerPayloadJson & strips resumeTokenHash, but preserves resumeToken
+  const suspCtx = makeCtx({ userId: 20, role: 'ldx_admin', params: { ruleKey: 'approval_secret_scrub_flow', data: secretPayload } });
+  await actions.runNow(suspCtx, async () => {});
+  assert.equal(suspCtx.body.run.status, 'suspended');
+  assert.equal(typeof suspCtx.body.run.resumeToken, 'string');
+  assert.ok(suspCtx.body.run.resumeToken.length > 0, 'suspended runNow must preserve resumeToken');
+  assert.equal(suspCtx.body.run.resumeTokenHash, undefined, 'suspended runNow must strip resumeTokenHash');
+  assert.equal(suspCtx.body.run.triggerPayloadJson?.data?.orderCode, 'ORD-777');
+  assertNoSecrets(suspCtx.body, 'suspended runNow');
+
+  // 4. resumeRun scrubs triggerPayloadJson and strips resumeTokenHash / resumeToken
+  const resumeCtx = makeCtx({
+    userId: 20,
+    role: 'ldx_admin',
+    params: { runUid: suspCtx.body.run.runUid, decision: 'approved', resumeToken: suspCtx.body.run.resumeToken },
+  });
+  await actions.resumeRun(resumeCtx, async () => {});
+  assert.equal(resumeCtx.body.run.status, 'completed');
+  assert.equal(resumeCtx.body.run.nodeStatesJson?.n1?.output?.orderCode, 'ORD-777');
+  assert.equal(resumeCtx.body.run.resumeTokenHash, undefined);
+  assert.equal(resumeCtx.body.run.resumeToken, undefined);
+  assert.equal(resumeCtx.body.run.triggerPayloadJson?.data?.orderCode, 'ORD-777');
+  assertNoSecrets(resumeCtx.body, 'resumeRun');
+});
+
+test('actions.resumeRun allows non-root delegated approver with active latticeDelegations grant and rejects non-delegated operator with 403', async () => {
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = 'unit-test-vault-master-key-32bytes!!';
+
+  try {
+    const whSecret = 'wh-delegated-approval-secret';
+    const nowMs = Date.now();
+    const db = makeInMemoryDb({
+      latticeEmployees: [
+        { userId: 25, organizationId: 'org-a', active: true },
+        { userId: 35, organizationId: 'org-a', active: true },
+        { userId: 36, organizationId: 'org-a', active: true },
+      ],
+      roles: [
+        { name: 'ldx_manager' },
+        { name: 'ldx_operator' },
+      ],
+      rolesUsers: [
+        { userId: 25, roleName: 'ldx_manager' },
+        { userId: 35, roleName: 'ldx_operator' },
+        { userId: 36, roleName: 'ldx_operator' },
+      ],
+      latticeDelegations: [
+        {
+          delegationUid: 'del-35',
+          organizationId: 'org-a',
+          delegatorUserId: 25,
+          delegateUserId: 35,
+          roleName: 'ldx_manager',
+          scopeCollection: 'latticeAutomationRuns',
+          status: 'active',
+          active: true,
+          startsAt: new Date(nowMs - 60_000).toISOString(),
+          endsAt: new Date(nowMs + 3_600_000).toISOString(),
+        },
+      ],
+      latticeConnectors: [
+        {
+          organizationId: 'org-a',
+          connectorKey: 'webhook:wh_delegated_approval_flow',
+          connectorType: 'webhook',
+          baseUrl: 'https://partner.example.com',
+          authType: 'hmac',
+          encryptedSecretsJson: connectorVault.encryptVaultSecrets({ webhookSecret: whSecret }, process.env),
+          active: true,
+        },
+      ],
+      latticeAutomationRules: [
+        {
+          id: 94,
+          organizationId: 'org-a',
+          ruleKey: 'wh_delegated_approval_flow',
+          name: 'Webhook Delegated Approval Flow',
+          schemaVersion: 2,
+          triggerEventType: 'webhook.inbound',
+          triggerIndexJson: [{ nodeId: 'wh1', triggerType: 'webhook', eventType: 'webhook.inbound', webhookPath: '/delegated' }],
+          graphJson: {
+            version: 2,
+            nodes: [
+              { id: 'wh1', type: 'trigger.webhook', config: { webhookPath: '/delegated', authMode: 'hmac' } },
+              { id: 'ap1', type: 'control.approval', config: { approverRole: 'ldx_manager', title: 'Approve Order' } },
+              { id: 'n1', type: 'logic.transform', config: { operations: [{ op: 'set', target: 'orderRef', value: 'ORD-{{data.orderCode}}' }] } },
+            ],
+            edges: [
+              { id: 'e1', source: 'wh1', sourceHandle: 'main', target: 'ap1' },
+              { id: 'e2', source: 'ap1', sourceHandle: 'approved', target: 'n1' },
+            ],
+          },
+          active: true,
+        },
+      ],
+    });
+
+    const actions = createDxosAutomationsActions(db, {});
+    const rawWh = JSON.stringify({
+      data: {
+        orderCode: '777',
+        apiKey: 'ak-secret-val',
+        token: 'tok-val',
+        authorization: 'Bearer sk-secret-val',
+      },
+    });
+    const sigWh = 'sha256=' + crypto.createHmac('sha256', whSecret).update(rawWh, 'utf8').digest('hex');
+    const whCtx = makeCtx({
+      params: { organizationId: 'org-a', ruleKey: 'wh_delegated_approval_flow' },
+    });
+    whCtx.headers = { 'x-lattice-signature-256': sigWh };
+    whCtx.request = { rawBody: rawWh, headers: whCtx.headers };
+    await actions.webhookIngress(whCtx, async () => {});
+
+    assert.equal(whCtx.body.ok, true);
+    assert.equal(whCtx.body.run.status, 'suspended');
+    const runUid = whCtx.body.run.runUid;
+    assert.ok(runUid);
+
+    // Non-delegated ldx_operator (userId: 36) must still be rejected with 403 FORBIDDEN
+    await assert.rejects(
+      () => actions.resumeRun(makeCtx({
+        userId: 36,
+        role: 'ldx_operator',
+        params: { runUid, decision: 'approved' },
+      }), async () => {}),
+      (err) => err.status === 403 && err.code === 'FORBIDDEN',
+    );
+
+    // Delegated ldx_operator (userId: 35) holding active ldx_manager grant on latticeAutomationRuns must succeed
+    const resumeCtx = makeCtx({
+      userId: 35,
+      role: 'ldx_operator',
+      params: { runUid, decision: 'approved', payload: { note: 'Delegated approval' } },
+    });
+    await actions.resumeRun(resumeCtx, async () => {});
+
+    const resumedRun = resumeCtx.body?.run;
+    assert.ok(resumedRun, 'resumeRun must return run');
+    assert.equal(resumedRun.status, 'completed');
+    assert.equal(resumedRun.nodeStatesJson?.n1?.output?.orderRef, 'ORD-777');
+    assert.equal(resumedRun.nodeStatesJson?.ap1?.output?.delegationUid, 'del-35');
+    assert.equal('resumeTokenHash' in resumedRun, false, 'resumeRun must strip resumeTokenHash');
+    assert.equal('resumeToken' in resumedRun, false, 'completed resumeRun must strip resumeToken');
+    const serialized = JSON.stringify(resumedRun);
+    for (const secret of ['ak-secret-val', 'tok-val', 'sk-secret-val']) {
+      assert.equal(serialized.includes(secret), false, `delegated resumeRun must scrub ${secret}`);
+    }
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});

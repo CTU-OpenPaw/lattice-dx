@@ -147,7 +147,7 @@ function detectUnsafeOrInjection(n) {
       reason: 'Yêu cầu vi phạm chính sách bảo mật (injection, lộ bí mật, vượt tenant hoặc leo thang đặc quyền hệ thống).',
     };
   }
-  const extraSecurityRe = /(?:tat\s+(?:postgresql\s+)?rls|vo\s+hieu\s+hoa\s+(?:postgresql\s+)?rls|(?:tren|vao|voi)\s+bang(?:\s+he\s+thong)?\s+users\b|(?:de\s+)?tu\s+(?:phe\s+duyet|duyet)\s+(?:cho\s+(?:toi|chinh\s+minh)|yeu\s+cau|don|phieu|ho\s+so|run)|cap\s+quyen\s+admin\b)/;
+  const extraSecurityRe = /(?:tat\s+(?:postgresql\s+)?rls|vo\s+hieu\s+hoa\s+(?:postgresql\s+)?rls|(?:tren|vao|voi)\s+bang(?:\s+he\s+thong)?\s+users\b|(?:de\s+)?tu\s+(?:phe\s+duyet|duyet)\s+(?:cho\s+(?:toi|chinh\s+minh)|yeu\s+cau|don|phieu|ho\s+so|run)|cap\s+quyen\s+admin\b|169\.254\.169\.254|metadata\.google\.internal|metadata\.azure\.com|(?:public\s*form|bieu\s+mau\s+cong\s+khai|\/v\/form\/)[^\n]{0,60}(?:users|mat\s+khau|password|token|secret)|bo\s+qua\s+(?:co\s+che\s+)?m-?of-?n|(?:truy\s+cap|doc|xem|lay)\s+(?:tri\s+nho|latticeaimemory)[^\n]{0,30}(?:to\s+chuc|tenant|org)\s+khac)/;
   if (extraSecurityRe.test(n)) {
     return {
       refused: true,
@@ -298,6 +298,47 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     return null;
   };
 
+  // 0.8 Workflow Draft/Publish & Version Rollback (LatticeFlow v2 lifecycle)
+  const earlyRuleKey = extractAutomationRuleKey(raw);
+  if (
+    /(hoan tac|khoi phuc|rollback)/.test(n)
+    && /(?:workflow|\bflow\b|luong|automation|\brule\b|publishedversion|ban\s+da\s+xuat\s+ban)/.test(n)
+    && !/(?:ung\s+dung|phan\s+he|\bapp\b|\bappkey\b|giao\s+dien|bo\s+cuc|trang\s+nay)/.test(n)
+  ) {
+    const denied = requireAdminOrRefuse('rollback_automation');
+    if (denied) return denied;
+    const wfVerMatch = n.match(/\b(?:publishedversion|phien\s+ban|version|v)\s*v?(\d+)\b/);
+    return {
+      intent: 'AUTOMATION_ROLLBACK',
+      refused: false,
+      toolName: 'dxos_configure_workflow',
+      args: {
+        operation: 'rollbackAutomation',
+        ...(earlyRuleKey ? { ruleKey: earlyRuleKey } : {}),
+        ...(wfVerMatch?.[1] ? { targetVersion: Number(wfVerMatch[1]) } : {}),
+        goal: raw,
+      },
+    };
+  }
+  if (
+    /(?:xuat\s+ban|\bpublish\b|phat\s+hanh)/.test(n)
+    && /(?:ban\s+nhap|\bdraft\b|workflow|\bflow\b|luong|automation|\brule\b)/.test(n)
+    && !/(?:ung\s+dung|phan\s+he|\bapp\b)/.test(n)
+  ) {
+    const denied = requireAdminOrRefuse('publish_automation');
+    if (denied) return denied;
+    return {
+      intent: 'AUTOMATION_PUBLISH',
+      refused: false,
+      toolName: 'dxos_configure_workflow',
+      args: {
+        operation: 'publishAutomation',
+        ...(earlyRuleKey ? { ruleKey: earlyRuleKey } : {}),
+        goal: raw,
+      },
+    };
+  }
+
   // 0.9 Built App Rollback (must precede layout rollback so app-level rollback isn't shadowed)
   const extractBuiltAppKeyEarly = (input) => {
     const clean = stripDiacritics(input).trim();
@@ -353,7 +394,7 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     [...raw.matchAll(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/g)].map((m) => m[1]),
   )];
 
-  if (/(?:lap\s+ke\s+hoach|ke\s+hoach\s+(?:thay\s+doi|cap\s+nhat|dung)|xem\s+truoc\s+(?:plan|diff|thay\s+doi)|\bplan(?:_enterprise_app)?)(?:\s+dry[\s-]?run)?\s+(?:cho\s+|voi\s+)?(?:ung\s+dung|phan\s+he|app|appkey)\b/.test(n)) {
+  if (/(?:lap\s+ke\s+hoach|ke\s+hoach\s+(?:thay\s+doi|cap\s+nhat|dung)|xem\s+truoc\s+(?:plan|diff|thay\s+doi)|\bplan(?:_enterprise_app)?)(?:[^\n]{0,30}?)(?:ung\s+dung|phan\s+he|app|appkey)\b/.test(n)) {
     const denied = requireAdminOrRefuse('plan_enterprise_app');
     if (denied) return denied;
     const appKey = extractBuiltAppKey(raw);
@@ -488,8 +529,8 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
-  // 2.5 Schema Extension (belongsTo / json / enum) — Admin only
-  if (/(?:them|bo\s+sung|tao)\s+(?:truong|cot)(?:\s+quan\s+he)?[^\n]{0,60}\b(?:belongsto|json|enum)\b/.test(n)) {
+  // 2.5 Schema Extension (belongsTo / hasOne / belongsToMany / formula / validation / json / enum) — Admin only
+  if (/(?:them|bo\s+sung|tao)\s+(?:truong|cot)(?:\s+quan\s+he)?[^\n]{0,60}\b(?:belongsto|hasone|belongstomany|formula|validation|json|enum)\b/.test(n)) {
     const denied = requireAdminOrRefuse('extend_schema');
     if (denied) return denied;
     const customMatch = raw.match(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/);
@@ -507,16 +548,33 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
   }
 
   // 2.6 Native v2 BlockModels (WebGIS / Kanban / WMS Ops / BI Chart) — Admin only
-  if (/(?:gan|them)\s+(?:khoi|block)?[^\n]{0,60}\b(?:dxoswebgisblockmodel|dxoskanbanscheduleblockmodel|dxoswmsopsblockmodel|dxosbichartblockmodel|bieu\s+do\s+bi|ban\s+do\s+webgis|(?:bang|lich)\s+kanban)\b/.test(n)) {
+  if (
+    /(?:gan|them|ve|tao)\s+(?:khoi|block|the|bang)?[^\n]{0,70}\b(?:dxoswebgisblockmodel|dxoskanbanscheduleblockmodel|dxoswmsopsblockmodel|dxosbichartblockmodel|bieu\s+do\s+(?:bi|(?:cot|duong|tron|kpi|pivot)\s+bi)|(?:the|chi\s+so)\s+kpi\s+bi|bang\s+pivot\s+bi|ban\s+do\s+webgis|(?:bang|lich)\s+kanban)\b/.test(n)
+    || /\bdxosbichartblockmodel\b/.test(n)
+  ) {
     const denied = requireAdminOrRefuse('compose_page_blocks');
     if (denied) return denied;
     let blockUse = 'DxosWebGisBlockModel';
-    if (n.includes('dxosbichartblockmodel') || n.includes('bieu do bi')) blockUse = 'DxosBiChartBlockModel';
-    else if (n.includes('dxoskanbanscheduleblockmodel') || n.includes('kanban')) blockUse = 'DxosKanbanScheduleBlockModel';
-    else if (n.includes('dxoswmsopsblockmodel') || n.includes('wms')) blockUse = 'DxosWmsOpsBlockModel';
+    let chartType = null;
+    if (n.includes('dxosbichartblockmodel') || n.includes('bieu do bi') || /\b(?:cot|duong|tron|kpi|pivot)\s+bi\b/.test(n) || /\bbi\b/.test(n)) {
+      blockUse = 'DxosBiChartBlockModel';
+      if (/\bpivot\b/.test(n)) chartType = 'pivot';
+      else if (/\bkpi\b/.test(n)) chartType = 'kpi';
+      else if (/(?:bieu\s+do\s+tron|\bpie\b)/.test(n)) chartType = 'pie';
+      else if (/(?:bieu\s+do\s+duong|\bline\b)/.test(n)) chartType = 'line';
+      else chartType = 'bar';
+    } else if (n.includes('dxoskanbanscheduleblockmodel') || n.includes('kanban')) {
+      blockUse = 'DxosKanbanScheduleBlockModel';
+    } else if (n.includes('dxoswmsopsblockmodel') || n.includes('wms')) {
+      blockUse = 'DxosWmsOpsBlockModel';
+    }
     const customColMatch = raw.match(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/);
     const colMatch = customColMatch || raw.match(/\b(lattice[A-Z][A-Za-z0-9]{1,40})\b/);
     const targetCollection = colMatch?.[1] || null;
+    const config = {
+      ...(targetCollection ? { collection: targetCollection } : {}),
+      ...(chartType ? { chartType } : {}),
+    };
     return {
       intent: 'COMPOSE_NATIVE_V2_BLOCK',
       refused: false,
@@ -525,8 +583,29 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
         action: 'addBlock',
         portalSlug: targetPortal,
         blockUse,
-        ...(targetCollection ? { collection: targetCollection, config: { collection: targetCollection } } : {}),
+        ...(targetCollection ? { collection: targetCollection } : {}),
+        ...(Object.keys(config).length ? { config } : {}),
         dryRun: false,
+      },
+    };
+  }
+
+  // 2.7 Public Form Builder (/v/form/:slug) — Admin only
+  if (/(?:tao|thiet\s+ke|cau\s+hinh|mo)\s+(?:bieu\s+mau\s+cong\s+khai|public\s*form)\b/.test(n) || /\/v\/form\/[a-z0-9-]+/i.test(raw)) {
+    const denied = requireAdminOrRefuse('configure_public_form');
+    if (denied) return denied;
+    const slugMatch = raw.match(/\/v\/form\/([a-z0-9][a-z0-9-]{1,60})/i)
+      || raw.match(/\bslug\s*[:=]?\s*([a-z0-9][a-z0-9-]{1,60})\b/i);
+    const slug = slugMatch?.[1] ? slugMatch[1].toLowerCase() : 'public-intake';
+    return {
+      intent: 'CONFIGURE_PUBLIC_FORM',
+      refused: false,
+      toolName: 'dxos_compose_page_blocks',
+      args: {
+        action: 'configurePublicForm',
+        slug,
+        publicRoute: `/v/form/${slug}`,
+        portalSlug: targetPortal,
       },
     };
   }
@@ -672,6 +751,42 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     }
   }
 
+  // 3.45 Multi-level Approval Policies & Omnichannel Notification Dispatchers — Admin only
+  if (/(?:tao|thiet\s+lap|cau\s+hinh|cap\s+nhat)\s+(?:chinh\s+sach|quy\s+trinh|luat)\s+(?:phe\s+duyet|duyet)\s+(?:da\s+cap|tuan\s+tu|song\s+song|m-?of-?n)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('configure_approval_policy');
+    if (denied) return denied;
+    const mode = /\bm-?of-?n\b|song\s+song/.test(n) ? 'parallel_m_of_n' : 'sequential';
+    return {
+      intent: 'APPROVAL_POLICY_CONFIGURE',
+      refused: false,
+      toolName: 'dxos_configure_workflow',
+      args: {
+        operation: 'configureApprovalPolicy',
+        approvalMode: mode,
+        goal: raw,
+      },
+    };
+  }
+  if (/(?:gui\s+thu|test|kiem\s+tra|cau\s+hinh|thiet\s+lap)\s+(?:thong\s+bao|kenh(?:\s+gui)?\s+thong\s+bao)?[^\n]{0,40}\b(?:smtp|email|telegram|slack|omnichannel)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('omnichannel_notify');
+    if (denied) return denied;
+    const isTest = /(?:gui\s+thu|test|kiem\s+tra)/.test(n);
+    const channels = [];
+    if (/\bsmtp\b|\bemail\b/.test(n)) channels.push('email_smtp');
+    if (/\btelegram\b/.test(n)) channels.push('telegram');
+    if (/\bslack\b/.test(n)) channels.push('slack');
+    return {
+      intent: isTest ? 'OMNICHANNEL_NOTIFY_TEST' : 'OMNICHANNEL_NOTIFY_CONFIGURE',
+      refused: false,
+      toolName: 'dxos_configure_workflow',
+      args: {
+        operation: isTest ? 'testNotificationChannel' : 'configureNotificationChannel',
+        channels: channels.length ? channels : ['email_smtp'],
+        goal: raw,
+      },
+    };
+  }
+
   // 3.5. DX-OS Flow Architect (Suggest / Test / Patch / Draft / Resume / Fix Error) — Admin only
   const runUid = extractAutomationRunUid(raw);
   const preExtractedRuleKey = extractAutomationRuleKey(raw);
@@ -684,15 +799,15 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     hasResumeSignal
     || hasFixErrorSignal
     || Boolean(preExtractedRuleKey)
-    || /(?:automation|luong\s+tu\s+dong|tu\s+dong\s+hoa|rule\s+tu\s+dong|quy\s+trinh\s+tu\s+dong|\bauto_[a-z0-9][a-z0-9_-]*\b|(?:toi\s+uu|va|sua|doi|cap\s+nhat|chay\s+thu|mo\s+phong|test)\s+(?:rule|luat|luong|flow|node)\b|\bflow\b|\bdag\b|\bnode\s+(?:ai|llm)\b|\bcron\b|dinh\s+ky\s+cron|moi\s+sang\s+\d+h|inbound\s+webhook|(?:nhan|tao|dung|thiet\s+ke|cau\s+hinh)\s+(?:inbound\s+)?webhook|re\s+nhanh\s+song\s+song|dung\s+llm\s+tom\s+tat)/.test(n)
+    || /(?:automation|luong\s+tu\s+dong|tu\s+dong\s+hoa|rule\s+tu\s+dong|quy\s+trinh\s+tu\s+dong|\bauto_[a-z0-9][a-z0-9_-]*\b|(?:toi\s+uu|va|sua|doi|cap\s+nhat|chay\s+thu|mo\s+phong|test)\s+(?:rule|luat|luong|flow|workflow|node)\b|\bflow\b|\bworkflow\b|\bdag\b|\bai\.agent\b|\bnode\s+(?:ai|llm)\b|\bcron\b|dinh\s+ky\s+cron|moi\s+sang\s+\d+h|inbound\s+webhook|(?:nhan|tao|dung|thiet\s+ke|cau\s+hinh)\s+(?:inbound\s+)?webhook|re\s+nhanh\s+song\s+song|dung\s+llm\s+tom\s+tat)/.test(n)
   );
   if (hasAutomationTopic) {
     const ruleKey = preExtractedRuleKey;
     const nodeId = extractAutomationNodeId(raw);
-    const isList = /(?:liet\s+ke|xem\s+danh\s+sach)\s+(?:cac\s+)?(?:automation|flow|luong\s+tu\s+dong|rule\s+tu\s+dong)/.test(n);
-    const isSuggest = /(goi y toi uu|de xuat cai tien|toi uu(?:\s+(?:automation|rule|luong|flow|dag))?|phan tich\s+(?:automation|rule|luong|flow|dag)|kiem tra\s+(?:automation|rule|luong|flow|dag))/.test(n);
+    const isList = /(?:liet\s+ke|xem\s+danh\s+sach)\s+(?:cac\s+)?(?:automation|flow|workflow|luong\s+tu\s+dong|rule\s+tu\s+dong)/.test(n);
+    const isSuggest = /(goi y toi uu|de xuat cai tien|toi uu(?:\s+(?:automation|rule|luong|flow|workflow|dag))?|phan tich\s+(?:automation|rule|luong|flow|workflow|dag)|kiem tra\s+(?:automation|rule|luong|flow|workflow|dag))/.test(n);
     const isTest = /(mo phong|dry[\s-]?run|chay thu|test\s+node|kiem\s+thu\s+node)/.test(n);
-    const isDraftExplicit = /(?:^|\s)(?:tao|dung|lap|thiet ke|xay dung)\s+(?:moi\s+)?(?:automation|flow|dag|luong tu dong|quy trinh tu dong|rule tu dong|tu dong hoa|lich\s+(?:chay\s+)?cron)\b/.test(n);
+    const isDraftExplicit = /(?:^|\s)(?:tao|dung|lap|thiet ke|xay dung)\s+(?:moi\s+)?(?:automation|flow|workflow|dag|luong tu dong|quy trinh tu dong|rule tu dong|tu dong hoa|lich\s+(?:chay\s+)?cron)\b/.test(n);
     const isPatchVerb = /(?:doi|sua|va|chinh|cap nhat|xoa|gan)\s+(?:[^\n]{0,24}?\s)?(?:buoc(?:\s+\d+)?|step(?:\s*:\s*\d+)?|node(?:\s+[a-z0-9_.-]+)?|dieu kien|nguong|nhiet do|cooldown|dmn|nhanh|bo loc|filter|trigger)/.test(n)
       || (/(?:them|bo sung|gan)\s+(?:[^\n]{0,20}?\s)?(?:buoc|node|dieu kien|cooldown|nhanh|bo loc)/.test(n) && (Boolean(ruleKey) || /(?:cua|cho|trong|vao)\s+(?:automation|rule|luong|flow)\b/.test(n)));
     const isPatch = isPatchVerb && (!isDraftExplicit || Boolean(ruleKey));
@@ -803,6 +918,9 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     ) {
       const denied = requireAdminOrRefuse('automation_architect');
       if (denied) return denied;
+      const isReact = /\breact\b|\bai\.agent\b|da\s+vong|multi[-\s]?turn/.test(n);
+      const turnsMatch = n.match(/(?:toi\s+da|maxturns\s*[:=]?)\s*(\d+)\s*(?:vong|luot|turns?)?/);
+      const maxTurns = turnsMatch?.[1] ? Number(turnsMatch[1]) : undefined;
       return {
         intent: 'AUTOMATION_DRAFT',
         refused: false,
@@ -810,6 +928,7 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
         args: {
           operation: 'draftAutomation',
           ...(ruleKey ? { ruleKey } : {}),
+          ...(isReact ? { agentMode: 'react', ...(maxTurns ? { maxTurns } : {}) } : {}),
           goal: raw,
           apply: false,
         },
@@ -869,6 +988,28 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
+  // 6.5 A2A Protocol (agent-card, tasks/send, dxos-operator, dxos-analyst)
+  if (/(?:\ba2a\b|agent[\s-]?card|\/\.well-known\/agent-card\.json|\/api\/dxos-a2a|\buy\s+quyen\b[^\n]{0,40}\bdxos-(?:operator|analyst|architect)\b)/.test(n)) {
+    const agentMatch = raw.match(/\b(dxos-(?:operator|analyst|architect|coordinator))\b/i);
+    const targetAgent = agentMatch?.[1] ? agentMatch[1].toLowerCase() : null;
+    if (targetAgent === 'dxos-architect') {
+      const denied = requireAdminOrRefuse('a2a_admin_agent');
+      if (denied) return denied;
+    }
+    const isCard = /(?:agent[\s-]?card|\.well-known\/agent-card\.json|danh\s+sach\s+(?:nang\s+luc|agent)\s+a2a)/.test(n);
+    return {
+      intent: 'A2A_PROTOCOL',
+      refused: false,
+      toolName: 'dxos_orchestrate_enterprise_case',
+      args: {
+        protocol: 'a2a',
+        action: isCard ? 'get_agent_card' : 'tasks/send',
+        ...(targetAgent ? { targetAgent } : {}),
+        query: raw,
+      },
+    };
+  }
+
   // 7. Cross-department Radar & Orchestration (check before personal tasks if asking company-wide)
   if (/(radar|diem\s+nghen|tong\s+hop\s+(?:toan\s+cong\s+ty|toan\s+he\s+thong|6\s+phan\s+he|lien\s+phong\s+ban)|dieu\s+phoi\s+lien|tong\s+quan\s+tinh\s+hinh\s+van\s+hanh)/.test(n)) {
     return {
@@ -879,13 +1020,37 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
-  // 7. My Workflow Tasks & Approvals
+  // 7. My Workflow Tasks & Unified Approval Inbox
+  if (/(?:hop\s+thu\s+(?:phe\s+duyet|duyet)\s+hop\s+nhat|unified\s+(?:approval\s+)?inbox|phe\s+duyet\s+da\s+cap)/.test(n)) {
+    return {
+      intent: 'UNIFIED_APPROVAL_INBOX',
+      refused: false,
+      toolName: 'dxos_my_workflow_tasks',
+      args: { action: 'list', scope: 'unified_inbox' },
+    };
+  }
   if (/(viec\s+(?:can\s+duyet|cua\s+toi|toi\s+can\s+xu\s+ly|ton\s+dong)|tac\s+vu\s+(?:cho\s+duyet|cua\s+toi)|danh\s+sach\s+(?:cong\s+viec|duyet)|(?:cho\s+(?:toi\s+)?)?phe\s+duyet(?:\s+(?:phieu|don|yeu\s+cau))?|cho\s+toi\s+duyet|toi\s+co\s+(?:bao\s+nhieu|viec\s+gi))/.test(n)) {
     return {
       intent: 'MY_TASKS',
       refused: false,
       toolName: 'dxos_my_workflow_tasks',
       args: { action: 'list' },
+    };
+  }
+
+  // 7.5 Persistent Org/Agent Memory (latticeAiMemory)
+  if (/(?:tri\s+nho(?:\s+to\s+chuc|\s+agent)?|latticeaimemory|ghi\s+nho\s+vao\s+memory)/.test(n)) {
+    const isRemember = /(?:ghi\s+nho|luu\s+(?:vao\s+)?tri\s+nho|\bnho\s+(?:quy\s+uoc|quy\s+tac))/.test(n);
+    return {
+      intent: 'AI_MEMORY',
+      refused: false,
+      toolName: 'dxos_search_enterprise_context',
+      args: {
+        query: raw,
+        scope: 'ai_memory',
+        memoryAction: isRemember ? 'remember' : 'recall',
+        limit: 8,
+      },
     };
   }
 

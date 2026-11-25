@@ -344,7 +344,7 @@ async function tickScheduledRules(db, options = {}) {
             data: { cron: item.cron, timezone: item.timezone, scheduledAt: nowDate.toISOString() },
             schedule: { cron: item.cron, timezone: item.timezone, scheduledAt: nowDate.toISOString() },
           },
-          { ...options, organizationId: orgId, ignoreCooldown: options.ignoreCooldown ?? true },
+          { ...options, organizationId: orgId, useDraft: false, ignoreCooldown: options.ignoreCooldown ?? true },
         );
         results.push({ ruleKey: item.rule.ruleKey, runUid: run.runUid, status: run.status });
       } catch (err) {

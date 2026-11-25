@@ -137,26 +137,220 @@ function serializeNotification(row) {
   };
 }
 
+const PROTO_POLLUTION_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function copySafePlainConfig(obj) {
+  const clean = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (PROTO_POLLUTION_KEYS.has(k) || !Object.hasOwn(obj, k)) continue;
+    clean[k] = v;
+  }
+  return clean;
+}
+
+function normalizeNotificationChannelName(rawChannel) {
+  const ch = String(rawChannel || '').trim().toLowerCase();
+  if (ch === 'email' || ch === 'email_smtp' || ch === 'smtp_notify') return 'smtp';
+  if (ch === 'partner_webhook') return 'webhook';
+  return ch;
+}
+
+function normalizeNotifyChannels(notifyChannels) {
+  if (!Array.isArray(notifyChannels)) return notifyChannels;
+  const out = [];
+  const seen = new Set();
+  for (const entry of notifyChannels) {
+    if (typeof entry === 'string') {
+      const canonical = normalizeNotificationChannelName(entry);
+      if (!canonical || seen.has(canonical)) continue;
+      seen.add(canonical);
+      out.push(canonical);
+    } else if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+      const cleanEntry = copySafePlainConfig(entry);
+      const canonical = typeof cleanEntry.channel === 'string'
+        ? normalizeNotificationChannelName(cleanEntry.channel)
+        : '';
+      if (canonical) {
+        if (seen.has(canonical)) continue;
+        seen.add(canonical);
+        cleanEntry.channel = canonical;
+      }
+      out.push(cleanEntry);
+    }
+  }
+  return out;
+}
+
 function channelAllowed(notifyChannels, channelName) {
   if (!Array.isArray(notifyChannels) || notifyChannels.length === 0) return true;
-  return notifyChannels.includes(channelName) || notifyChannels.includes('all') || notifyChannels.includes('external');
+  const target = normalizeNotificationChannelName(channelName);
+  return notifyChannels.some((entry) => {
+    const raw = typeof entry === 'string'
+      ? entry
+      : (entry && typeof entry === 'object' && typeof entry.channel === 'string' ? entry.channel : '');
+    const canonical = normalizeNotificationChannelName(raw);
+    return canonical === target || canonical === 'all' || canonical === 'external';
+  });
+}
+
+function normalizeNotificationChannelConfigs(notifyChannels, channelConfig, channelConfigs, templateKey) {
+  const cleanTemplateKey = typeof templateKey === 'string' && templateKey.trim()
+    ? templateKey.trim().slice(0, 120)
+    : null;
+  const seenExternal = new Set();
+  const externalChannels = [];
+  if (Array.isArray(notifyChannels)) {
+    for (const raw of notifyChannels) {
+      if (typeof raw !== 'string') continue;
+      const canonical = normalizeNotificationChannelName(raw);
+      if (!canonical || canonical === 'in_app' || seenExternal.has(canonical)) continue;
+      seenExternal.add(canonical);
+      externalChannels.push(canonical);
+    }
+  }
+
+  if (Array.isArray(channelConfigs) && channelConfigs.length > 0) {
+    const out = [];
+    const seenCanonical = new Set();
+    for (const cfg of channelConfigs) {
+      if (cfg && typeof cfg === 'object' && !Array.isArray(cfg)) {
+        const cleanCfg = copySafePlainConfig(cfg);
+        const canonical = typeof cleanCfg.channel === 'string'
+          ? normalizeNotificationChannelName(cleanCfg.channel)
+          : '';
+        if (canonical === 'in_app') continue;
+        if (canonical) {
+          if (seenCanonical.has(canonical)) continue;
+          seenCanonical.add(canonical);
+          cleanCfg.channel = canonical;
+        }
+        if (cleanTemplateKey && !cleanCfg.templateKey) {
+          cleanCfg.templateKey = cleanTemplateKey;
+        }
+        out.push(cleanCfg);
+      } else if (typeof cfg === 'string') {
+        const canonical = normalizeNotificationChannelName(cfg);
+        if (!canonical || canonical === 'in_app' || seenCanonical.has(canonical)) continue;
+        seenCanonical.add(canonical);
+        out.push(cleanTemplateKey && canonical !== 'all' && canonical !== 'external'
+          ? { channel: canonical, templateKey: cleanTemplateKey }
+          : canonical);
+      }
+    }
+    return out;
+  }
+
+  if (channelConfig && typeof channelConfig === 'object' && !Array.isArray(channelConfig)) {
+    const baseCfg = copySafePlainConfig(channelConfig);
+    if (cleanTemplateKey && !baseCfg.templateKey) {
+      baseCfg.templateKey = cleanTemplateKey;
+    }
+    const targetChannel = typeof baseCfg.channel === 'string'
+      ? normalizeNotificationChannelName(baseCfg.channel)
+      : '';
+    if (targetChannel) {
+      if (targetChannel === 'in_app') {
+        return externalChannels.map((ch) => {
+          if (ch === 'all' || ch === 'external') return ch;
+          return cleanTemplateKey ? { channel: ch, templateKey: cleanTemplateKey } : ch;
+        });
+      }
+      baseCfg.channel = targetChannel;
+      const out = [baseCfg];
+      for (const ch of externalChannels) {
+        if (ch === 'all' || ch === 'external' || ch === targetChannel) continue;
+        out.push(cleanTemplateKey ? { channel: ch, templateKey: cleanTemplateKey } : ch);
+      }
+      return out;
+    }
+    if (externalChannels.length > 0) {
+      return externalChannels.map((ch) => {
+        if (ch === 'all' || ch === 'external') return ch;
+        return { ...baseCfg, channel: ch };
+      });
+    }
+  }
+
+  if (cleanTemplateKey && externalChannels.length > 0) {
+    return externalChannels.map((ch) => {
+      if (ch === 'all' || ch === 'external') return ch;
+      return { channel: ch, templateKey: cleanTemplateKey };
+    });
+  }
+
+  return [];
 }
 
 async function dispatchExternalChannels({
+  db = null,
+  app = null,
   env,
   fetchImpl,
   lookupImpl,
   enforceDnsInMock = false,
+  allowInternal,
+  netConnectImpl,
+  tlsConnectImpl,
+  tlsOptions,
   notification,
   notifyChannels,
+  channelConfigs = [],
+  skipOmnichannel = false,
 }) {
-  if (typeof fetchImpl !== 'function' || !env || typeof env !== 'object') return [];
+  const vaultChannels = [];
+  const normalizedNotifyChannels = normalizeNotifyChannels(notifyChannels);
+  const hasChannelConfigs = Array.isArray(channelConfigs) && channelConfigs.length > 0;
+  const hasExternalNotifyChannels = Array.isArray(normalizedNotifyChannels)
+    && normalizedNotifyChannels.some((entry) => {
+      if (typeof entry === 'string') {
+        return Boolean(entry) && entry !== 'in_app';
+      }
+      return Boolean(entry && typeof entry === 'object');
+    });
+
+  if (!skipOmnichannel && db && (hasChannelConfigs || (db.getRepository?.('latticeConnectors') && hasExternalNotifyChannels))) {
+    try {
+      const adapter = typeof app?.latticeOmnichannelNotify?.createNotificationCenterAdapter === 'function'
+        ? app.latticeOmnichannelNotify.createNotificationCenterAdapter()
+        : require('./omnichannel-notify').createNotificationCenterAdapter();
+      if (typeof adapter === 'function') {
+        const omniRes = await adapter(
+          db,
+          { notification, notifyChannels: normalizedNotifyChannels, channelConfigs },
+          {
+            env,
+            fetchImpl,
+            lookupImpl,
+            enforceDnsInMock,
+            ...(allowInternal !== undefined ? { allowInternal } : {}),
+            ...(netConnectImpl ? { netConnectImpl } : {}),
+            ...(tlsConnectImpl ? { tlsConnectImpl } : {}),
+            ...(tlsOptions ? { tlsOptions } : {}),
+          },
+        );
+        if (Array.isArray(omniRes?.channelsDispatched)) {
+          for (const ch of omniRes.channelsDispatched) {
+            const canonical = normalizeNotificationChannelName(ch);
+            if (canonical && !vaultChannels.includes(canonical)) {
+              vaultChannels.push(canonical);
+            }
+          }
+        }
+      }
+    } catch {
+      // Non-fatal Vault omnichannel fallback; env channels below may still dispatch
+    }
+  }
+
+  if (typeof fetchImpl !== 'function' || !env || typeof env !== 'object') {
+    return vaultChannels;
+  }
 
   const isMockFetch = fetchImpl !== globalThis.fetch;
   const skipDnsCheck = isMockFetch && typeof lookupImpl !== 'function' && !enforceDnsInMock;
   const tasks = [];
   const appriseUrl = String(env.DX_APPRISE_URL || '').trim();
-  if (appriseUrl && channelAllowed(notifyChannels, 'apprise') && isSafeExternalWebhookUrl(appriseUrl)) {
+  if (appriseUrl && !vaultChannels.includes('apprise') && channelAllowed(normalizedNotifyChannels, 'apprise') && isSafeExternalWebhookUrl(appriseUrl)) {
     const typeMap = { critical: 'failure', high: 'failure', warning: 'warning', info: 'info' };
     tasks.push((async () => {
       if (!(await isSafeExternalWebhookUrlAsync(appriseUrl, { lookupImpl, skipDnsCheck }))) return null;
@@ -171,7 +365,7 @@ async function dispatchExternalChannels({
   }
 
   const webhookUrl = String(env.DX_NOTIFICATION_WEBHOOK_URL || '').trim();
-  if (webhookUrl && channelAllowed(notifyChannels, 'webhook') && isSafeExternalWebhookUrl(webhookUrl)) {
+  if (webhookUrl && !vaultChannels.includes('webhook') && channelAllowed(normalizedNotifyChannels, 'webhook') && isSafeExternalWebhookUrl(webhookUrl)) {
     tasks.push((async () => {
       if (!(await isSafeExternalWebhookUrlAsync(webhookUrl, { lookupImpl, skipDnsCheck }))) return null;
       const ok = await sendJsonWebhook(fetchImpl, webhookUrl, {
@@ -194,7 +388,7 @@ async function dispatchExternalChannels({
 
   const tgToken = String(env.DX_TELEGRAM_BOT_TOKEN || '').trim();
   const tgChat = String(env.DX_TELEGRAM_CHAT_ID || '').trim();
-  if (tgToken && tgChat && channelAllowed(notifyChannels, 'telegram') && TELEGRAM_TOKEN_RE.test(tgToken) && TELEGRAM_CHAT_RE.test(tgChat)) {
+  if (tgToken && tgChat && !vaultChannels.includes('telegram') && channelAllowed(normalizedNotifyChannels, 'telegram') && TELEGRAM_TOKEN_RE.test(tgToken) && TELEGRAM_CHAT_RE.test(tgChat)) {
     const tgUrl = `https://api.telegram.org/bot${tgToken}/sendMessage`;
     tasks.push((async () => {
       if (!(await isSafeExternalWebhookUrlAsync(tgUrl, { lookupImpl, skipDnsCheck }))) return null;
@@ -207,9 +401,9 @@ async function dispatchExternalChannels({
     })());
   }
 
-  if (!tasks.length) return [];
+  if (!tasks.length) return vaultChannels;
   const outcomes = await Promise.all(tasks);
-  return outcomes.filter(Boolean);
+  return [...new Set([...vaultChannels, ...outcomes.filter(Boolean)])];
 }
 
 function runNotifTenantDb(db, organizationId, fn, explicitTx = null) {
@@ -228,6 +422,11 @@ async function dispatchNotification(
     fetchImpl = globalThis.fetch,
     lookupImpl,
     enforceDnsInMock = false,
+    allowInternal,
+    netConnectImpl,
+    tlsConnectImpl,
+    tlsOptions,
+    skipOmnichannel = false,
     transaction = null,
     app = null,
   } = {},
@@ -317,13 +516,28 @@ async function dispatchNotification(
   }
 
   const { created, serialized } = persisted;
+  const effectiveApp = app || payload.app || db?.app || null;
+  const channelConfigs = normalizeNotificationChannelConfigs(
+    payload.notifyChannels,
+    payload.channelConfig,
+    payload.channelConfigs,
+    payload.templateKey,
+  );
   const externalChannels = await dispatchExternalChannels({
+    db,
+    app: effectiveApp,
     env,
     fetchImpl,
     lookupImpl,
     enforceDnsInMock,
+    allowInternal,
+    netConnectImpl,
+    tlsConnectImpl,
+    tlsOptions,
     notification: serialized,
     notifyChannels: payload.notifyChannels,
+    channelConfigs,
+    skipOmnichannel: Boolean(payload.skipOmnichannel || skipOmnichannel),
   });
 
   const channelsDispatched = ['in_app', ...externalChannels];
@@ -345,7 +559,6 @@ async function dispatchNotification(
     } catch {}
   }
 
-  const effectiveApp = app || payload.app || db?.app || null;
   await publishNotificationSurfaceUpdate(effectiveApp, {
     kind: 'notification',
     type: 'notification',
@@ -720,6 +933,8 @@ module.exports = {
   EXTERNAL_TIMEOUT_MS,
   isSafeExternalWebhookUrl,
   isSafeExternalWebhookUrlAsync,
+  normalizeNotificationChannelName,
+  normalizeNotificationChannelConfigs,
   resolveNotificationTargetPath,
   dispatchNotification,
   dispatchRoleNotifications,

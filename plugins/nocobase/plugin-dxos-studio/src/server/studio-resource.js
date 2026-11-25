@@ -193,7 +193,7 @@ function buildPluginStatusList(rows) {
       sdkProvidedByHost: true,
       installed: Boolean(row),
       enabled: val(row, 'enabled') === true,
-      version: val(row, 'version') || '1.0.0',
+      version: val(row, 'version') || '0.4.0',
     };
   });
 }
@@ -526,7 +526,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       await requireAdmin(ctx);
       const params = readParams(ctx);
       const { organizationId } = await resolveSolutionBundleScope(ctx, params, null, { allowAllString: true });
-      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '1.0.0' });
+      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.4.0' });
       return next();
     },
 

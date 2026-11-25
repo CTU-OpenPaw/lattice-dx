@@ -6,19 +6,19 @@
 @see https://github.com/CTU-OpenPaw/lattice-dx
 SPDX-License-Identifier: Apache-2.0
 -->
-# Kịch bản Trình diễn & Kiểm chứng Trực tiếp (`v1.0.0` · 15 phút Demo Pack)
+# Kịch bản Trình diễn & Kiểm chứng Trực tiếp (`v0.4.0` · 15 phút Demo Pack)
 
-Tài liệu này hướng dẫn Giám khảo / Quản trị viên tự kiểm chứng toàn bộ nền tảng **LatticeDX `v1.0.0` (DX-OS Open-Core Championship Edition)** trực tiếp từ môi trường cài sạch NocoBase `2.2.50`, không cần sửa mã nguồn thủ công. (Xem thêm kịch bản thuyết trình chi tiết từng phút cho Vòng Chung kết tại [FINALS_15MIN_SCRIPT.md](FINALS_15MIN_SCRIPT.md)).
+Tài liệu này hướng dẫn Giám khảo / Quản trị viên tự kiểm chứng toàn bộ nền tảng **LatticeDX `v0.4.0` (DX-OS Open-Core Championship Edition)** trực tiếp từ môi trường cài sạch NocoBase `2.2.50`, không cần sửa mã nguồn thủ công. (Xem thêm kịch bản thuyết trình chi tiết từng phút cho Vòng Chung kết tại [FINALS_15MIN_SCRIPT.md](FINALS_15MIN_SCRIPT.md)).
 
 ---
 
-## Phút 0–3: Cài sạch hoàn toàn, 7 Plugin `1.0.0` & Dữ liệu Showcase `v1.0.0`
+## Phút 0–3: Cài sạch hoàn toàn, 7 Plugin `0.4.0` & Dữ liệu Showcase `v0.4.0`
 
-1. Bảo đảm Docker Desktop đã khởi động, sau đó dựng một môi trường NocoBase `2.2.50` trắng (0 bảng ban đầu) cùng toàn bộ **7 plugin Apache-2.0 (`1.0.0`)**:
+1. Bảo đảm Docker Desktop đã khởi động, sau đó dựng một môi trường NocoBase `2.2.50` trắng (0 bảng ban đầu) cùng toàn bộ **7 plugin Apache-2.0 (`0.4.0`)**:
    ```sh
    pnpm native:clean --port=13014
    ```
-2. Nạp 4 Cổng nghiệp vụ đa vai trò (Mua sắm, Sự cố IoT, Logistics, Dịch vụ Nội bộ & P.A.R.A.) + cổng di động **`/v/mobile`**, trang Tổng quan Đa-Block, bộ 5 Starter AI Workforce + 17 Tools + 2-Way IT/OT MCP và dữ liệu trình diễn `v0.3.0` + `v1.0.0`:
+2. Nạp 4 Cổng nghiệp vụ đa vai trò (Mua sắm, Sự cố IoT, Logistics, Dịch vụ Nội bộ & P.A.R.A.) + cổng di động **`/v/mobile`**, trang Tổng quan Đa-Block, bộ 7 Starter AI Workforce + 20 Tools + 2-Way IT/OT MCP + A2A và dữ liệu trình diễn `v0.3.0` + `v0.4.0`:
    ```sh
    node scripts/setup-native-multi-portal-demo.mjs "<path-to-report.json>"
    node scripts/setup-native-workspace-demo.mjs "<path-to-report.json>"
@@ -26,14 +26,14 @@ Tài liệu này hướng dẫn Giám khảo / Quản trị viên tự kiểm ch
    NOCOBASE_ADMIN_PASSWORD="<admin-password>" node scripts/seed-v030-demo-showcase.mjs --origin=http://localhost:13014
    NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=http://localhost:13014
    ```
-3. Mở trình duyệt tại `http://localhost:13014`, đăng nhập quản trị (`admin@nocobase.com` / `admin123`) và truy cập `/admin/pm/list` để kiểm tra đủ 7 plugin `@latticedx/*` đều đang bật ở phiên bản **`1.0.0`**:
-   - `@latticedx/plugin-action-bridge` (`1.0.0`)
-   - `@latticedx/plugin-lattice-foundation` (`1.0.0`)
-   - `@latticedx/plugin-enterprise-auth` (`1.0.0`)
-   - `@latticedx/plugin-dxos-para` (`1.0.0`)
-   - `@latticedx/plugin-dxos-blocks` (`1.0.0`)
-   - `@latticedx/plugin-dxos-studio` (`1.0.0`)
-   - `@latticedx/plugin-dxos-ai` (`1.0.0`)
+3. Mở trình duyệt tại `http://localhost:13014`, đăng nhập quản trị (`admin@nocobase.com` / `admin123`) và truy cập `/admin/pm/list` để kiểm tra đủ 7 plugin `@latticedx/*` đều đang bật ở phiên bản **`0.4.0`**:
+   - `@latticedx/plugin-action-bridge` (`0.4.0`)
+   - `@latticedx/plugin-lattice-foundation` (`0.4.0`)
+   - `@latticedx/plugin-enterprise-auth` (`0.4.0`)
+   - `@latticedx/plugin-dxos-para` (`0.4.0`)
+   - `@latticedx/plugin-dxos-blocks` (`0.4.0`)
+   - `@latticedx/plugin-dxos-studio` (`0.4.0`)
+   - `@latticedx/plugin-dxos-ai` (`0.4.0`)
 4. Kiểm tra chân trang giữ nguyên nhận diện **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`).
 
 ---
@@ -47,9 +47,9 @@ Tài liệu này hướng dẫn Giám khảo / Quản trị viên tự kiểm ch
 3. Tại tab **`2. Dựng cổng đa-block`** & **`6. GitOps Bundle`**:
    - Bấm **`Dựng Cổng Đa-Block ngay`** để bảo đảm 4 cổng (`/p/procurement`, `/p/incidents`, `/p/logistics`, `/p/services`) và `/v/mobile` đồng bộ đủ block tùy biến.
    - Chuyển sang tab **`6. GitOps Bundle`**: bấm **`Xuất Bundle JSON`** xem gói **`latticedx.solution-bundle/v3`** (bao gồm `roles`, `portals`, `routesAndBlocks`, `governance`, `workflows`, `customCollections`, `aiProfiles` đã lọc sạch secret + mã băm SHA-256), sau đó thử **`Kiểm tra Diff (Dry-Run)`**.
-4. Mở thanh **`Quản trị DX-OS v1.0:`** ngay dưới thanh tab để kiểm chứng **6 Governance Consoles**:
+4. Mở thanh **`Quản trị DX-OS v0.4.0:`** ngay dưới thanh tab để kiểm chứng **6 Governance Consoles**:
    - `1. Khóa API Phạm vi (PaaS PAT)` (`ldx_pat_*`), `2. Sổ cái Mật mã Ed25519 & Merkle` (Verify chain), `3. Phân tầng Dữ liệu, Reading Room, Cách ly & MKT` (tính Arrhenius MKT & Freeze Cold Snapshot), `4. Kho lạnh FEFO, Tạm giữ MKT & Chứng từ ePOD` (`ORD-V100-001`, `LOT-V100-FEFO-A`, `LOT-V100-MKT-HOLD`), `5. Bảng Quyết định DMN` (`cold_chain_approval_v1`), `6. Ủy quyền Vai trò Có Phạm vi & Thời hạn`.
-5. Mở **`/admin/settings/dxos-ai`**: kiểm tra **Tab 1 (`1. Hệ điều hành 6 Phân hệ`)**, **Tab 2 (`2. Quản trị Nhân sự AI Động` — 17 Unified Tools: 11 Admin Builder + 6 Operational)**, **Tab 3 (`3. Cổng Enterprise MCP 2 Chiều`)**, **Tab 5 (`5. Hạn mức & Chi phí AI`)**, và **Tab 6 (`6. Duyệt AI (HITL)`)** kèm kết quả quét chủ động (`dxosAi:triageScan`).
+5. Mở **`/admin/settings/dxos-ai`**: kiểm tra **Tab 1 (`1. Hệ điều hành 6 Phân hệ`)**, **Tab 2 (`2. Quản trị Nhân sự AI Động` — 20 Unified Tools: 11 Admin Builder + 6 Operational + 3 Persistent Memory)**, **Tab 3 (`3. Cổng Enterprise MCP 2 Chiều`)**, **Tab 5 (`5. Hạn mức & Chi phí AI`)**, **Tab 6 (`6. Duyệt AI (HITL)`)** kèm kết quả quét chủ động (`dxosAi:triageScan`), **Tab 7 Built Apps Manager (Visual ER / Plan-Diff / Rollback)**, và **Trace Waterfall & Eval Lab UI**.
 
 ---
 
@@ -96,7 +96,7 @@ node scripts/generate-sbom.mjs --check
 pnpm release:tarball
 ```
 
-Giải nén `output/release/latticedx-1.0.0-src.tar.gz` sang thư mục tạm ngoài workspace (không có `.git/`), kiểm tra `COPYRIGHT.txt`, `NOTICE`, `LICENSE`, `docs/sbom-cyclonedx.json` (`233` thành phần) và chạy lại:
+Giải nén `output/release/latticedx-0.4.0-src.tar.gz` sang thư mục tạm ngoài workspace (không có `.git/`), kiểm tra `COPYRIGHT.txt`, `NOTICE`, `LICENSE`, `docs/sbom-cyclonedx.json` (`257` thành phần) và chạy lại:
 
 ```sh
 pnpm install --frozen-lockfile

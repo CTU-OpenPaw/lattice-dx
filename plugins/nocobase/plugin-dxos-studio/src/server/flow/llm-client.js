@@ -12,6 +12,7 @@ const dns = require('node:dns');
 const net = require('node:net');
 const path = require('node:path');
 const { val, toPlain, fail, loadFoundationModule } = require('../wms-dmn-shared');
+const { stripUnsafeKeys } = require('./json-schema-validator');
 const {
   SENSITIVE_KEY_RE,
   extractRawAuthorityHost,
@@ -219,15 +220,54 @@ const scrubSecretText = (text, apiKey) => {
   return out.replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]').replace(/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]');
 };
 
-const stripJsonFence = (content) => {
-  const trimmed = String(content ?? '').trim();
-  const m = trimmed.match(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n?```$/i);
-  return m ? m[1].trim() : trimmed;
-};
+const stripJsonFence = (c) => { const t = String(c ?? '').trim(), m = t.match(/^```(?:json)?\s*\r?\n([\s\S]*?)\r?\n?```$/i); return m ? m[1].trim() : t; };
+
+function normalizeToolDefs(rawTools) {
+  if (!Array.isArray(rawTools) || !rawTools.length) return undefined;
+  const out = rawTools.map((t) => {
+    const fn = t?.function && typeof t.function === 'object' ? t.function : t;
+    const name = String(fn?.name || '').trim();
+    if (!name) return null;
+    const params = stripUnsafeKeys(fn.parameters && typeof fn.parameters === 'object' ? fn.parameters : { type: 'object', properties: {} });
+    return { type: 'function', function: { name, ...(fn.description ? { description: String(fn.description).slice(0, 1000) } : {}), parameters: params } };
+  }).filter(Boolean);
+  return out.length ? out : undefined;
+}
+
+function parseToolCalls(rawToolCalls) {
+  if (!Array.isArray(rawToolCalls)) return [];
+  return rawToolCalls.map((tc, idx) => {
+    const fn = tc?.function && typeof tc.function === 'object' ? tc.function : tc;
+    const rawArgs = typeof fn?.arguments === 'string' ? fn.arguments : JSON.stringify(fn?.arguments ?? {});
+    let args = {};
+    try { const p = rawArgs.trim() ? JSON.parse(rawArgs) : {}; args = p && typeof p === 'object' && !Array.isArray(p) ? stripUnsafeKeys(p) : {}; } catch { args = {}; }
+    return { id: String(tc?.id || `call_${idx + 1}`), type: 'function', name: String(fn?.name || tc?.name || '').trim(), argumentsRaw: rawArgs, arguments: args };
+  }).filter((tc) => tc.name);
+}
+
+function normalizeLlmMessage(m) {
+  let count = 0;
+  const role = String(m?.role || 'user');
+  let content = null;
+  if (m?.content !== null && m?.content !== undefined) {
+    const red = redactPiiForLlm(m.content); count += red.redactedCount;
+    content = typeof red.redacted === 'string' ? red.redacted : JSON.stringify(red.redacted ?? '');
+  } else if (role !== 'assistant' || !Array.isArray(m?.tool_calls)) content = '';
+  const msg = { role, content, ...(m?.name ? { name: String(m.name) } : {}), ...(m?.tool_call_id ? { tool_call_id: String(m.tool_call_id) } : {}) };
+  if (Array.isArray(m?.tool_calls) && m.tool_calls.length) {
+    msg.tool_calls = m.tool_calls.map((tc) => {
+      const fn = tc?.function || {};
+      const argRed = redactPiiForLlm(typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {}));
+      count += argRed.redactedCount;
+      return { id: String(tc?.id || ''), type: 'function', function: { name: String(fn.name || ''), arguments: typeof argRed.redacted === 'string' ? argRed.redacted : JSON.stringify(argRed.redacted ?? {}) } };
+    });
+  }
+  return { msg, count };
+}
 
 async function callConfiguredLlm({
   db, env = process.env, messages = [], model, temperature = 0.2, maxTokens = 1600,
-  responseFormat = 'json', timeoutMs = 15000, fetchImpl, lookupImpl, connectorVault,
+  responseFormat = 'json', tools, toolChoice, tool_choice, timeoutMs = 15000, fetchImpl, lookupImpl, connectorVault,
 } = {}) {
   const service = await resolveActiveLlmService(db, env);
   if (!service.configured) return { ok: false, mode: 'unconfigured', reason: service.reason };
@@ -244,12 +284,13 @@ async function callConfiguredLlm({
 
   let piiRedactedCount = 0;
   const redactedMessages = (Array.isArray(messages) ? messages : []).map((m) => {
-    const red = redactPiiForLlm(m?.content ?? '');
-    piiRedactedCount += red.redactedCount;
-    const content = typeof red.redacted === 'string' ? red.redacted : JSON.stringify(red.redacted ?? '');
-    return { role: String(m?.role || 'user'), content };
+    const res = normalizeLlmMessage(m);
+    piiRedactedCount += res.count;
+    return res.msg;
   });
 
+  const normTools = normalizeToolDefs(tools);
+  const effToolChoice = toolChoice !== undefined ? toolChoice : tool_choice;
   const targetModel = String(model || service.modelName || 'ag/gemini-3.8-flash').trim();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.max(500, Math.min(120000, Number(timeoutMs) || 15000)));
@@ -262,6 +303,7 @@ async function callConfiguredLlm({
         temperature: Number.isFinite(Number(temperature)) ? Number(temperature) : 0.2,
         max_tokens: Math.max(1, Math.floor(Number(maxTokens) || 1600)),
         ...(responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
+        ...(normTools ? { tools: normTools, ...(effToolChoice !== undefined ? { tool_choice: effToolChoice } : {}) } : {}),
       }),
     });
     if (!response?.ok) {
@@ -269,12 +311,18 @@ async function callConfiguredLlm({
       return { ok: false, mode: 'error', code: `LLM_HTTP_${response?.status || 'ERR'}`, reason: scrubSecretText(errBody || `LLM HTTP ${response?.status || 'error'}`, service.apiKey) };
     }
     const payload = await response.json();
-    const rawContent = String(payload?.choices?.[0]?.message?.content ?? '');
+    const rawMsg = payload?.choices?.[0]?.message || null;
+    const rawContent = rawMsg?.content != null ? String(rawMsg.content) : '';
+    const toolCalls = parseToolCalls(rawMsg?.tool_calls);
     let parsedJson = null;
     if (responseFormat === 'json' && rawContent.trim()) {
-      try { parsedJson = JSON.parse(stripJsonFence(rawContent)); } catch { parsedJson = null; }
+      try { parsedJson = stripUnsafeKeys(JSON.parse(stripJsonFence(rawContent))); } catch { parsedJson = null; }
     }
-    return { ok: true, mode: 'llm', content: rawContent, parsedJson, usage: payload?.usage || null, model: payload?.model || targetModel, piiRedactedCount };
+    return {
+      ok: true, mode: 'llm', content: rawContent, parsedJson, toolCalls,
+      message: rawMsg ? stripUnsafeKeys(rawMsg) : null,
+      usage: payload?.usage || null, model: payload?.model || targetModel, piiRedactedCount, raw: payload,
+    };
   } catch (err) {
     return {
       ok: false, mode: 'error',

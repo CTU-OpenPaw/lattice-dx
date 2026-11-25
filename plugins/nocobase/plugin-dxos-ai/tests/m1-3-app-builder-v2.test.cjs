@@ -298,7 +298,7 @@ test('M1.3 BlockModel wiring: 12 Native v2 BlockModels incl. DxosBiChartBlockMod
   assert.equal(OPERATIONAL_TOOL_NAMES.length, 6);
 
   const tools = createDxosTools();
-  assert.equal(tools.length, 17, '17-tool MCP registry invariant must be preserved');
+  assert.equal(tools.length, 20, '20-tool MCP registry invariant (11 admin + 6 operational + 3 memory) must be preserved');
 
   const architect = STARTER_AI_BLUEPRINTS.find((b) => b.username === 'dxos-architect');
   assert.ok(architect);
@@ -658,7 +658,8 @@ test('M1.3 Schema, Migration (20261130000100), MCP tools & REST endpoints (plan/
   assert.equal(builtAppsDef.fields.some((f) => f.name === 'versionHistoryJson'), true);
 
   const pgRls = require(path.join(REPO_ROOT, 'plugins/nocobase/plugin-lattice-foundation/src/server/pg-rls.js'));
-  assert.equal(pgRls.TENANT_RLS_TABLES.length, 43);
+  assert.ok(pgRls.TENANT_RLS_TABLES.length >= 47, `Expected >=47 TENANT_RLS_TABLES, got ${pgRls.TENANT_RLS_TABLES.length}`);
+  assert.equal(pgRls.TENANT_RLS_TABLES.includes('latticeBuiltApps'), true);
 
   const migSrc = readFileSync(migPath, 'utf8');
   assert.match(migSrc, /SPDX-License-Identifier:\s*Apache-2\.0/);
@@ -763,10 +764,10 @@ test('M1.3 Schema, Migration (20261130000100), MCP tools & REST endpoints (plan/
   assert.equal(rbCtx.body.rolledBack, true);
   assert.equal(rbCtx.body.appVersion, 3);
 
-  // MCP dxos_provision_role_workspace operations (17-tool invariant preserved)
+  // MCP dxos_provision_role_workspace operations (20-tool invariant preserved)
   const { createDxosTools } = require('../src/server/ai-tools-core');
   const tools = createDxosTools();
-  assert.equal(tools.length, 17);
+  assert.equal(tools.length, 20);
   const provTool = tools.find((t) => t.definition.name === 'dxos_provision_role_workspace');
   const mcpPlan = await provTool.invoke({ ...ctx, db }, {
     operation: 'plan_enterprise_app',

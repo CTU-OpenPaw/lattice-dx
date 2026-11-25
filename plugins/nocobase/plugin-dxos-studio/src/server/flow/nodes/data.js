@@ -24,6 +24,8 @@ const SENSITIVE_COLLECTIONS = new Set([
   'latticePkiKeys', 'latticeCryptoLedger', 'latticeConnectors', 'latticeWebhookSubscriptions',
   'latticeWebhookDeliveries', 'latticeEventBus', 'latticeApiKeys', 'latticeDelegations',
   'latticeDecisionTables', 'latticeEpodRecords', 'latticeOrganizations', 'latticeAutomationRules', 'latticeAutomationRuns',
+  'latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions', 'latticeA2aTasks',
+  'latticeNotificationDeliveries', 'latticeApprovalPolicies', 'latticeApprovalRequests', 'latticePublicForms', 'latticePublicFormSubmissions',
 ]);
 const FORBIDDEN_COLLECTIONS_LOWER = new Set(
   [...(SYSTEM_PROTECTED_COLLECTIONS || []), ...SENSITIVE_COLLECTIONS].map((c) => String(c).toLowerCase()),

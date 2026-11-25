@@ -59,6 +59,7 @@ const READ_ONLY_MUTATING_ACTIONS = new Set([
   'runNow', 'replayRun', 'createDomain', 'installBusinessPack', 'provisionTenant',
   'twinSetDesired', 'twinAckCommand', 'bulkImportDryRun', 'bulkImportCommit',
   'createWorkflow', 'updateWorkflow', 'activateWorkflow', 'retryExecution', 'syncCredential',
+  'send', 'testSend', 'decide', 'request', 'deletePolicy', 'evaluateSlaNow', 'rotateToken',
 ]);
 const LAST_USED_THROTTLE_MS = 60_000;
 
@@ -252,6 +253,7 @@ const MUTATING_RESOURCE_ACTION_SCOPE_OVERRIDES = new Map([
   ['dxosBlocks:provisionDevice', ['iot']],
   ['dxosBlocks:revokeDevice', ['iot']],
   ['dxosBlocks:deviceStatusIngest', ['iot']],
+  ['dxosApprovals:decide', ['ai']],
 ]);
 const MUTATING_RESOURCE_SCOPE_OVERRIDES = new Map([
   ['dxosWms', ['wms']],

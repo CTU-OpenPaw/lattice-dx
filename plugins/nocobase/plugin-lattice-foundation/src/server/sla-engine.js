@@ -360,7 +360,7 @@ async function evaluateCollectionSla(db, collection, options) {
   return { scanned, warningCount, breachedCount, items, pendingEscalations };
 }
 
-async function evaluateSlaBreaches(db, { organizationId = null, now = new Date(), env = process.env, fetchImpl, dryRun = false, businessHoursOnly = false } = {}) {
+async function evaluateSlaBreaches(db, { organizationId = null, now = new Date(), env = process.env, fetchImpl, dryRun = false, businessHoursOnly = false, includeApprovals = true, app = null } = {}) {
   const nowDate = now instanceof Date ? now : new Date(now);
   const nowMs = Number.isFinite(nowDate.getTime()) ? nowDate.getTime() : Date.now();
   const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
@@ -429,12 +429,41 @@ async function evaluateSlaBreaches(db, { organizationId = null, now = new Date()
     }
   }
 
+  let approvalSlas = null;
+  if (includeApprovals !== false && db?.getRepository?.('latticeApprovalRequests')) {
+    try {
+      const { evaluateApprovalSlas } = require('./approval-engine');
+      if (typeof evaluateApprovalSlas === 'function') {
+        approvalSlas = await evaluateApprovalSlas(db, {
+          organizationId,
+          now: nowDate,
+          dryRun,
+          env,
+          fetchImpl,
+          app: app || db?.app || null,
+        });
+      }
+    } catch (err) {
+      (app || db?.app)?.logger?.warn?.('Approval SLA evaluation failed (non-fatal).', { error: err?.message || String(err) });
+    }
+  }
+
+  const mappedApprovalItems = Array.isArray(approvalSlas?.items)
+    ? approvalSlas.items.map((item) => ({
+        ...item,
+        collection: 'latticeApprovalRequests',
+        status: 'breached',
+        slaState: 'breached',
+      }))
+    : [];
+
   return {
-    scanned: scanResult.scanned,
+    scanned: scanResult.scanned + (approvalSlas?.scanned || 0),
     warningCount: scanResult.warningCount,
-    breachedCount: scanResult.breachedCount,
-    escalatedCount,
-    items: scanResult.items,
+    breachedCount: scanResult.breachedCount + (approvalSlas?.breachedCount || 0),
+    escalatedCount: escalatedCount + (approvalSlas?.escalatedCount || 0),
+    items: [...scanResult.items, ...mappedApprovalItems],
+    ...(approvalSlas ? { approvalSlas } : {}),
   };
 }
 
@@ -494,6 +523,7 @@ function registerSlaEngine(app) {
           organizationId,
           dryRun: true,
           businessHoursOnly: parseBooleanFlag(params.businessHoursOnly),
+          app,
         });
         ctx.body = { organizationId, ...report };
         return next();
@@ -625,6 +655,7 @@ function registerSlaEngine(app) {
           now: new Date(),
           dryRun: false,
           businessHoursOnly: parseBooleanFlag(params.businessHoursOnly),
+          app,
         });
         return next();
       },
@@ -636,12 +667,22 @@ function registerSlaEngine(app) {
   if (process.env.DX_SLA_CRON_ENABLED === 'true' && !app._latticeSlaCronRegistered) {
     app._latticeSlaCronRegistered = true;
     const intervalMs = Math.max(60_000, Number(process.env.DX_SLA_INTERVAL_MS) || 5 * 60_000);
+    let slaCronInFlight = false;
+    const runCronTick = async () => {
+      if (slaCronInFlight) return;
+      slaCronInFlight = true;
+      try {
+        await evaluateSlaBreaches(db, { app });
+      } finally {
+        slaCronInFlight = false;
+      }
+    };
     if (app.cronJobManager && typeof app.cronJobManager.addJob === 'function') {
       app.cronJobManager.addJob({
         cronTime: '*/5 * * * *',
         onTick: async () => {
           try {
-            await evaluateSlaBreaches(db);
+            await runCronTick();
           } catch (err) {
             app.logger?.error?.('SLA evaluation job failed.', { error: err?.message || String(err) });
           }
@@ -649,7 +690,7 @@ function registerSlaEngine(app) {
       });
     } else {
       const timer = setInterval(() => {
-        evaluateSlaBreaches(db).catch((err) => {
+        runCronTick().catch((err) => {
           app.logger?.error?.('SLA evaluation interval failed.', { error: err?.message || String(err) });
         });
       }, intervalMs);

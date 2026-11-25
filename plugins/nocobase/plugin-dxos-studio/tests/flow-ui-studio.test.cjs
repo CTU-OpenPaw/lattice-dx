@@ -242,6 +242,8 @@ test('flow/* modules obey strict per-file line limits, SPDX header, zero forbidd
     ...flowFiles.map((f) => path.join(flowDir, f)),
     path.join(PLUGIN_ROOT, 'src/client/index.js'),
     path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'),
+    path.join(PLUGIN_ROOT, 'src/client/flow-version-ui.js'),
+    path.join(PLUGIN_ROOT, 'src/client/flow-inspector-extras.js'),
   ];
 
   for (const filePath of clientFiles) {
@@ -778,7 +780,7 @@ test('JSON / YAML DSL modal blocks prototype pollution, imports valid JSON/YAML,
     'dxosAutomations:listRuns': async (req) => (req.params?.organizationId === 'org-a'
       ? new Promise((resolve) => { resolveSlowRuns = resolve; })
       : { items: [{ id: 9, runUid: 'run-org-b', ruleKey: 'rule_org_b', status: 'completed', durationMs: 5, stepTracesJson: [] }] }),
-    'dxosAutomations:saveRule': async (req) => ({ rule: { id: 1, ...req.data } }),
+    'dxosAutomations:saveDraft': async (req) => ({ rule: { id: 1, ...req.data } }),
   });
 
   const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
@@ -804,9 +806,9 @@ test('JSON / YAML DSL modal blocks prototype pollution, imports valid JSON/YAML,
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor' });
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-trig_yaml').length, 1);
 
-  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-save-btn')[0].props.onClick();
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-save-draft-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor' });
-  const saveReq = requests.find((r) => r.url === 'dxosAutomations:saveRule');
+  const saveReq = requests.find((r) => r.url === 'dxosAutomations:saveDraft');
   assert.equal(saveReq.data.organizationId, 'org-a');
   assert.equal(saveReq.data.ruleKey, 'yaml_imported_flow');
   assert.equal(saveReq.data.triggerEventType, 'record.latticeOrders.update');
@@ -1024,7 +1026,7 @@ test('P1-3: DSL import (bare & wrapped) and Undo/Redo keep doc.rule.{cooldownSec
     'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
     'dxosAutomations:listRules': async () => ({ items: [] }),
     'dxosAutomations:listRuns': async () => ({ items: [] }),
-    'dxosAutomations:saveRule': async (req) => ({ rule: req.data }),
+    'dxosAutomations:saveDraft': async (req) => ({ rule: req.data }),
   });
 
   const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
@@ -1046,9 +1048,9 @@ test('P1-3: DSL import (bare & wrapped) and Undo/Redo keep doc.rule.{cooldownSec
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-rule-cooldown-input')[0].props.value, 95);
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-rule-maxdepth-input')[0].props.value, 4);
 
-  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-save-btn')[0].props.onClick();
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-save-draft-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor' });
-  let lastSave = requests.filter((r) => r.url === 'dxosAutomations:saveRule').at(-1);
+  let lastSave = requests.filter((r) => r.url === 'dxosAutomations:saveDraft').at(-1);
   assert.equal(lastSave.data.cooldownSec, 95);
   assert.equal(lastSave.data.maxDepth, 4);
 
@@ -1280,7 +1282,7 @@ test('Round 2 Leaf + quick-append, validation badge/pill click-to-focus, AI dism
       'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
       'dxosAutomations:listRules': async () => ({ items: [bp0] }),
       'dxosAutomations:listRuns': async () => ({ items: [] }),
-      'dxosAutomations:saveRule': async (req) => ({ rule: req.data }),
+      'dxosAutomations:saveDraft': async (req) => ({ rule: req.data }),
     });
     const mockApp = { flowEngine: { context: { ai: { triggerTask: async (p) => triggered.push(p) } } } };
 
@@ -1329,7 +1331,7 @@ test('Round 2 Leaf + quick-append, validation badge/pill click-to-focus, AI dism
 
     await winHandlers.keydown?.({ key: 's', ctrlKey: true, preventDefault() {} });
     tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: bp0.ruleKey });
-    assert.ok(requests.some((r) => r.url === 'dxosAutomations:saveRule'));
+    assert.ok(requests.some((r) => r.url === 'dxosAutomations:saveDraft'));
     assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dirty-badge').length, 0);
   } finally {
     if (origWin === undefined) delete globalThis.window;
@@ -1565,6 +1567,14 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
         : [saved, ...rules];
       return { rule: saved };
     },
+    'dxosAutomations:saveDraft': async (req) => {
+      if (failSave) throw new Error('Save failed 400');
+      const saved = { ...req.data };
+      rules = rules.some((r) => r.ruleKey === saved.ruleKey)
+        ? rules.map((r) => (r.ruleKey === saved.ruleKey ? { ...r, ...saved } : r))
+        : [saved, ...rules];
+      return { rule: saved };
+    },
     'dxosAutomations:runNow': async (req) => ({
       run: { runUid: `run-${req.data.ruleKey}`, ruleKey: req.data.ruleKey, status: 'completed', durationMs: 7, stepTracesJson: [] },
     }),
@@ -1623,13 +1633,13 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dirty-badge').length, 1);
 
   // Back to list -> Discard -> returns to list without saving
-  const savesBeforeDiscard = requests.filter((r) => r.url === 'dxosAutomations:saveRule').length;
+  const savesBeforeDiscard = requests.filter((r) => r.url === 'dxosAutomations:saveDraft').length;
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-back-to-list-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-guard-discard-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-view').length, 1);
-  assert.equal(requests.filter((r) => r.url === 'dxosAutomations:saveRule').length, savesBeforeDiscard);
+  assert.equal(requests.filter((r) => r.url === 'dxosAutomations:saveDraft').length, savesBeforeDiscard);
 
   // Re-open rule, edit label -> Back -> Save & Back -> saves and returns to list
   collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-edit-${editKey}`)[0].props.onClick();
@@ -1642,7 +1652,7 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-guard-save-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
-  assert.equal(requests.filter((r) => r.url === 'dxosAutomations:saveRule').length, savesBeforeDiscard + 1);
+  assert.equal(requests.filter((r) => r.url === 'dxosAutomations:saveDraft').length, savesBeforeDiscard + 1);
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-view').length, 1);
 
   // 3. + Tạo luồng mới resets PlaybackBar runs=[], and Run Now auto-saves unedited/dirty drafts or aborts on invalid/failed save
@@ -2190,4 +2200,166 @@ test('Task 3 hygiene: createFlowPinStorage bare localStorage fallback and handle
   } finally {
     global.window = prevWin;
   }
+});
+
+test('M2.2 Draft/Publish/Versions UI, sticky Live Canvas Trace I/O inspection, Webhook Copy-cURL/Test, and ai.agent ReAct config', async () => {
+  const { createFlowStudioApp, ruleToGraph } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const harness = createQueuedReactHarness();
+  const nodeTypes = getRegistrySchemas();
+  const blueprints = getBlueprints();
+
+  const sampleRule = {
+    id: 10,
+    ruleKey: 'm22_lifecycle_flow',
+    name: 'M2.2 Lifecycle Flow',
+    schemaVersion: 2,
+    publishedVersion: 2,
+    active: true,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 'wh_1', type: 'trigger.webhook', label: 'Inbound Hook', position: { x: 80, y: 160 }, config: { webhookPath: '/hooks/m22', authMode: 'hmac', secretHeader: 'X-Lattice-Signature-256' } },
+        { id: 'ai_1', type: 'ai.agent', label: 'ReAct Agent', position: { x: 360, y: 160 }, config: { mode: 'react', maxTurns: 4, tools: ['memory_recall'], targetCollection: 'latticeServiceTickets' } },
+      ],
+      edges: [{ id: 'e1', source: 'wh_1', sourceHandle: 'main', target: 'ai_1', targetHandle: 'in' }],
+    },
+    draftGraphJson: {
+      version: 2,
+      nodes: [
+        { id: 'wh_1', type: 'trigger.webhook', label: 'Draft Hook Label', position: { x: 80, y: 160 }, config: { webhookPath: '/hooks/m22-draft', authMode: 'hmac', secretHeader: 'X-Lattice-Signature-256' } },
+        { id: 'ai_1', type: 'ai.agent', label: 'ReAct Agent', position: { x: 360, y: 160 }, config: { mode: 'react', maxTurns: 4, tools: ['memory_recall'], targetCollection: 'latticeServiceTickets' } },
+      ],
+      edges: [{ id: 'e1', source: 'wh_1', sourceHandle: 'main', target: 'ai_1', targetHandle: 'in' }],
+    },
+  };
+
+  // ruleToGraph prefers draftGraphJson when preferDraft: true
+  const loadedDraft = ruleToGraph(sampleRule, { preferDraft: true });
+  assert.equal(loadedDraft.nodes[0].label, 'Draft Hook Label');
+
+  const { client, requests } = createApiMock({
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: [sampleRule] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+    'dxosAutomations:saveDraft': async (req) => ({ rule: { ...sampleRule, ...req.data, publishedVersion: 2 } }),
+    'dxosAutomations:publishRule': async (req) => ({
+      rule: { ...sampleRule, ...req.data, graphJson: req.data.draftGraphJson || req.data.graphJson, publishedVersion: 3 },
+      version: { version: 3 },
+    }),
+    'dxosAutomations:listRuleVersions': async () => ({
+      items: [
+        { id: 2, version: 2, changeSummary: 'Second release', publishedBy: 'admin', publishedAt: '2026-11-25T10:00:00Z', graphJson: sampleRule.graphJson },
+        { id: 1, version: 1, changeSummary: 'Initial v1', publishedBy: 'admin', publishedAt: '2026-11-24T10:00:00Z', graphJson: sampleRule.graphJson },
+      ],
+    }),
+    'dxosAutomations:rollbackRuleVersion': async () => ({
+      rule: { ...sampleRule, publishedVersion: 4, graphJson: sampleRule.graphJson, draftGraphJson: sampleRule.graphJson },
+      rolledBackFromVersion: 1,
+    }),
+    'dxosAutomations:testRule': async () => ({
+      simulation: {
+        runUid: 'sim_trace_1',
+        ruleKey: sampleRule.ruleKey,
+        status: 'completed',
+        durationMs: 42,
+        nodeStatesJson: {
+          wh_1: { status: 'completed', durationMs: 3, input: { webhook: true }, output: { data: { code: 'WH-1' } } },
+          ai_1: { status: 'completed', durationMs: 39, input: { code: 'WH-1' }, output: { mode: 'react_llm', turnsUsed: 2 } },
+        },
+        stepTracesJson: [
+          { nodeId: 'wh_1', type: 'trigger.webhook', label: 'Draft Hook Label', status: 'completed', durationMs: 3, input: { webhook: true }, output: { data: { code: 'WH-1' } } },
+          { nodeId: 'ai_1', type: 'ai.agent', label: 'ReAct Agent', status: 'completed', durationMs: 39, input: { code: 'WH-1' }, output: { mode: 'react_llm', turnsUsed: 2 } },
+        ],
+      },
+    }),
+    'dxosAutomations:testNode': async (req) => ({
+      result: { ok: true, nodeId: req.data.nodeId, status: 'completed', durationMs: 4, input: req.data.pinnedInputs, output: { type: 'webhook.inbound', data: { code: 'WH-01' } } },
+    }),
+  });
+
+  const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+
+  // 1. Draft vs Published badge & Draft graph loaded on canvas
+  const verBadge = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-version-badge')[0];
+  assert.ok(verBadge && textOf(verBadge).includes('Draft'), 'Version badge must indicate Draft state');
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-wh_1')[0]).includes('Draft Hook Label'));
+
+  // 2. Save Draft calls saveDraft (not publishRule), Publish calls publishRule -> v3
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-save-draft-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:saveDraft'), true);
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:publishRule'), false);
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-publish-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:publishRule'), true);
+
+  // 3. Version History modal & 1-click Rollback
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-versions-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-versions-modal').length, 1);
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-rollback-v1')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:rollbackRuleVersion' && r.data.version === 1), true);
+
+  // 4. Webhook Helper (cURL with placeholder, zero leaked secret, + Test Trigger)
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-wh_1')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-webhook-helper').length, 1);
+  const curlPre = textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-webhook-curl')[0]);
+  assert.ok(curlPre.includes('dxosAutomations:webhookIngress'));
+  assert.ok(curlPre.includes('<WEBHOOK_HMAC_SHA256_HEX>'));
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-webhook-test-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:testNode' && r.data.nodeId === 'wh_1'), true);
+
+  // 5. ai.agent ReAct config fields + tools picker
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-ai_1')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-mode').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-maxTurns').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-tools').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-tools-picker').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-outputSchema').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-memoryScope').length, 1);
+
+  // 6. Live Canvas Trace Highlight & Sticky I/O Inspection
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dryrun-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-trace-badge-wh_1').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-trace-badge-ai_1').length, 1);
+
+  // Click trace badge on wh_1 -> opens output tab showing Input JSON + Output JSON
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-trace-badge-wh_1')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector-tab-output')[0].props['aria-selected'], true);
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-trace-input-json')[0]).includes('"webhook": true'));
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-output-json')[0]).includes('"WH-1"'));
+
+  // Click ai_1 on canvas while in active trace mode -> stays on 'output' tab and updates Input/Output JSON!
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-ai_1')[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: sampleRule.ruleKey });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector-tab-output')[0].props['aria-selected'], true);
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-trace-input-json')[0]).includes('"WH-1"'));
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-output-json')[0]).includes('"react_llm"'));
+  harness.unmount();
+});
+
+test('buildWebhookCurlCommand sanitizes secretHeader and single-quotes URL and headers safely', () => {
+  const { buildWebhookCurlCommand } = require(path.join(PLUGIN_ROOT, 'src/client/flow-inspector-extras.js'));
+  const cmd = buildWebhookCurlCommand({
+    origin: 'https://portal.example.com',
+    organizationId: 'org-a',
+    ruleKey: 'r1',
+    authMode: 'hmac',
+    secretHeader: 'X-Sig-$(id)-`whoami`-$HOME',
+    samplePayloadText: '{"a":1}',
+  });
+  assert.equal(cmd.includes('-H "'), false, 'Headers must not use double quotes');
+  assert.equal(cmd.includes('POST "'), false, 'URL must not use double quotes');
+  assert.equal(cmd.includes("POST 'https://portal.example.com/api/dxosAutomations:webhookIngress"), true);
+  assert.equal(cmd.includes('$(id)'), false, 'Must strip non-token chars like ( and ) from secretHeader');
+  assert.match(cmd, /-H 'X-Sig-[^']*: sha256=<WEBHOOK_HMAC_SHA256_HEX>'/);
 });

@@ -155,7 +155,8 @@ class DxosStudioPlugin extends Plugin {
     this.app.acl.allow(
       'dxosAutomations',
       [
-        'listRules', 'saveRule', 'toggleRule', 'deleteRule', 'testRule', 'runNow',
+        'listRules', 'saveRule', 'saveDraft', 'publishRule', 'listRuleVersions', 'rollbackRuleVersion',
+        'toggleRule', 'deleteRule', 'testRule', 'runNow',
         'listRuns', 'getRunTrace', 'replayRun', 'builderCatalog', 'aiAssist',
         'nodeRegistry', 'testNode', 'resumeRun',
       ],
