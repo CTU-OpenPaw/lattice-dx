@@ -581,8 +581,14 @@ export async function runBlankSlateAppBuilderAcceptance(callActor, rpcRequest, {
       await destroyMatchingIds(callActor, 'latticeUiSnapshots', { snapshotUid: cleanup.preBuildSnapshotUid });
     }
     for (const p of cleanup.portals) {
+      const uids = new Set([
+        ...(Array.isArray(p?.blockUids) ? p.blockUids : []),
+        ...(Array.isArray(p?.attachedBlocks) ? p.attachedBlocks.map((b) => b?.blockUid || b?.uid).filter(Boolean) : []),
+      ]);
+      for (const blkUid of uids) {
+        await callActor('root', `flowModels:destroy?filterByTk=${encodeURIComponent(blkUid)}`, { method: 'POST' }).catch(() => {});
+      }
       if (p?.gridUid) {
-        await destroyMatchingIds(callActor, 'flowModels', { parentId: p.gridUid });
         await callActor('root', `flowModels:destroy?filterByTk=${encodeURIComponent(p.gridUid)}`, { method: 'POST' }).catch(() => {});
       }
       const pageId = p?.pageRoute?.id;

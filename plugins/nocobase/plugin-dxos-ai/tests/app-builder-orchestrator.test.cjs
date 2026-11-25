@@ -1109,3 +1109,103 @@ test('Task 10 Fix Round 1: exportAppBundle strict isolation, teardownBuiltApp re
   );
   assert.equal(store.collections.some((c) => c.name === 'latticeCustomDropFail'), true, 'Metadata must remain intact if DROP TABLE fails');
 });
+
+test('Task 11 live E2E regressions: verifyEnterpriseApp allows NocoBase 2.2.50 TableBlockModel and teardownBuiltApp clears uiManageable before destroying fields/collections', async () => {
+  const {
+    orchestrateEnterpriseAppBuild,
+    verifyEnterpriseApp,
+    teardownBuiltApp,
+  } = require('../src/server/app-builder-orchestrator');
+  const { db, ctx, store } = makeOrchestratorHarness();
+  store.latticeBuiltApps = [];
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+
+  // Simulate NocoBase 2.2.50 flowSurfaces:applyBlueprint placing TableBlockModel inside BlockGridModel
+  const origGetRes = ctx.app.resourceManager.getResource;
+  ctx.app.resourceManager.getResource = (resName) => {
+    const base = origGetRes(resName);
+    if (resName !== 'flowSurfaces') return base;
+    return {
+      actions: {
+        get: () => ({
+          handler: async (subCtx) => {
+            await base.actions.get().handler(subCtx);
+            const gridUid = `grid-${subCtx.body.data.pageId}`;
+            const tblUid = `tbl-${subCtx.body.data.pageId}`;
+            store.flowModels.push({
+              uid: tblUid,
+              use: 'TableBlockModel',
+              parentId: gridUid,
+              subKey: 'items',
+              subType: 'array',
+              props: {},
+              stepParams: {},
+            });
+            const gridModel = store.flowModels.find((m) => m.uid === gridUid);
+            if (gridModel) {
+              gridModel.props.rows = { row1: [[tblUid]] };
+              gridModel.props.sizes = { row1: [24] };
+              gridModel.props.rowOrder = ['row1'];
+            }
+          },
+        }),
+      },
+    };
+  };
+
+  // Simulate NocoBase plugin-data-source-main uiManageable destroy guard
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!repo) return null;
+    if (name === 'fields') {
+      return {
+        ...repo,
+        destroy: async ({ filter = {} } = {}) => {
+          const colRow = store.collections.find((c) => c.name === filter.collectionName);
+          if (colRow?.options?.uiManageable) {
+            throw new Error('Cannot remove a UI manageable field');
+          }
+          return repo.destroy({ filter });
+        },
+      };
+    }
+    if (name === 'collections') {
+      return {
+        ...repo,
+        destroy: async ({ filter = {} } = {}) => {
+          const colRow = store.collections.find((c) => c.name === filter.name);
+          if (colRow?.options?.uiManageable) {
+            throw new Error('Cannot remove a UI manageable collection');
+          }
+          return repo.destroy({ filter });
+        },
+      };
+    }
+    return repo;
+  };
+
+  const built = await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    appKey: 'live-table-block-compat',
+    portalSlug: 'cold-assets',
+    pageTitle: 'Live TableBlockModel Compat',
+    roleName: 'ldx_live_compat',
+    roleTitle: 'Live Compat',
+    collectionName: 'latticeCustomLiveCompat',
+    fields: [{ name: 'itemCode', type: 'string', title: 'Item Code' }],
+  });
+  assert.equal(built.ok, true, `Expected built.ok === true with TableBlockModel, got failed=${JSON.stringify(built.verification?.failedChecks)}`);
+
+  const ver = await verifyEnterpriseApp(ctx, db, actor, {
+    portalSlug: 'cold-assets',
+    pageTitle: 'Live TableBlockModel Compat',
+    collectionName: 'latticeCustomLiveCompat',
+  });
+  assert.equal(ver.checks.find((c) => c.id === 'portal_ui_routes')?.ok, true);
+
+  // Teardown with keepData: false must succeed without "Cannot remove a UI manageable field/collection"
+  const td = await teardownBuiltApp(ctx, db, actor, { appKey: 'live-table-block-compat', keepData: false });
+  assert.equal(td.torndown, true);
+  assert.deepEqual(td.droppedCollections, ['latticeCustomLiveCompat']);
+  assert.equal(store.collections.some((c) => c.name === 'latticeCustomLiveCompat'), false);
+});

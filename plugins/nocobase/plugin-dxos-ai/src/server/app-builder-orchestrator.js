@@ -59,6 +59,18 @@ const ORCHESTRATOR_ALLOWED_BLOCKS = new Set([
   'NativeTableBlock',
   'NativeFormBlock',
   'NativeDetailsBlock',
+  'TableBlockModel',
+  'CreateFormModel',
+  'EditFormModel',
+  'DetailsBlockModel',
+  'FilterFormModel',
+  'KanbanBlockModel',
+  'ChartBlockModel',
+  'CalendarBlockModel',
+  'ListBlockModel',
+  'GridCardBlockModel',
+  'MarkdownBlockModel',
+  'ActionPanelModel',
   'table',
   'createForm',
   'editForm',
@@ -936,17 +948,22 @@ async function verifyEnterpriseApp(ctx, db, actor, target = {}, deps = {}) {
     const resolved = await resolvePageGrid(db, portalSlug, pageTitle, val);
     const ordered = resolved.grid ? extractGridBlockUids(resolved.grid).ordered : [];
     const subMap = new Map((Array.isArray(resolved.grid?.subModels?.items) ? resolved.grid.subModels.items : []).map((m) => [m.uid, m]));
-    let allAllowed = true;
+    const disallowedUses = [];
     for (const uid of ordered) {
       const model = resolved.flowModelsRepo?.findModelById ? await resolved.flowModelsRepo.findModelById(uid) : subMap.get(uid);
-      if (model?.use && !ORCHESTRATOR_ALLOWED_BLOCKS.has(model.use)) allAllowed = false;
+      if (model?.use && !ORCHESTRATOR_ALLOWED_BLOCKS.has(model.use)) {
+        disallowedUses.push(model.use);
+      }
     }
+    const allAllowed = disallowedUses.length === 0;
     const uiOk = Boolean(resolved.pageRoute && resolved.grid?.uid && allAllowed);
     checks.push({
       id: 'portal_ui_routes',
       name: 'Portal Route, Grid & Native v2 BlockModels',
       ok: uiOk,
-      detail: uiOk ? `Portal /p/${portalSlug} grid=${resolved.grid.uid} (${ordered.length} blocks)` : 'Portal page or grid missing/invalid',
+      detail: uiOk
+        ? `Portal /p/${portalSlug} grid=${resolved.grid.uid} (${ordered.length} blocks)`
+        : (!allAllowed ? `Disallowed block models: ${disallowedUses.join(', ')}` : 'Portal page or grid missing/invalid'),
       repairable: true,
       repairAction: 'repair_portal_ui',
     });
@@ -2176,6 +2193,22 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
       }
       if (resRepo && typeof resRepo.destroy === 'function') {
         await resRepo.destroy({ filter: roles.length ? { name: colName, roleName: { $in: roles } } : { name: colName } });
+      }
+      const liveCol = db?.getCollection?.(colName);
+      if (liveCol?.options && liveCol.options.uiManageable) {
+        liveCol.options.uiManageable = false;
+      }
+      if (colsRepo && typeof colsRepo.findOne === 'function') {
+        const colRow = await colsRepo.findOne({ filter: { name: colName } }).catch(() => null);
+        const colOpts = colRow ? (val(colRow, 'options') || {}) : {};
+        if (colRow && colOpts?.uiManageable) {
+          const nextOpts = { ...colOpts, uiManageable: false };
+          if (typeof colRow.update === 'function') {
+            await colRow.update({ options: nextOpts }).catch(() => {});
+          } else if (typeof colsRepo.update === 'function') {
+            await colsRepo.update({ filter: { name: colName }, values: { options: nextOpts } }).catch(() => {});
+          }
+        }
       }
       if (fieldsRepo && typeof fieldsRepo.destroy === 'function') {
         await fieldsRepo.destroy({ filter: { collectionName: colName } });

@@ -109,7 +109,48 @@ const ADMIN_BUILDER_TOOL_NAMES = new Set([
 ]);
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
-const toObj = (row) => (typeof row?.toJSON === 'function' ? row.toJSON() : { ...(row || {}) });
+const toObj = (row, seen) => {
+  const visited = seen instanceof WeakSet ? seen : new WeakSet();
+  if (row == null) return {};
+  if (typeof row !== 'object') return row;
+  if (row instanceof Date) return row.toISOString();
+  if (typeof row.toJSON === 'function') {
+    try {
+      return row.toJSON();
+    } catch {
+      if (row.dataValues && typeof row.dataValues === 'object') {
+        if (visited.has(row)) return undefined;
+        visited.add(row);
+        const hiddenFields = new Set();
+        const colFields = row.constructor?.collection?.fields;
+        if (colFields && typeof colFields.values === 'function') {
+          for (const f of colFields.values()) {
+            if (f?.options?.hidden && f?.options?.name) hiddenFields.add(f.options.name);
+          }
+        }
+        const out = {};
+        for (const key of Object.keys(row.dataValues)) {
+          if (hiddenFields.has(key)) continue;
+          const v = row.dataValues[key];
+          if (Array.isArray(v)) {
+            out[key] = v
+              .map((item) => (item && typeof item === 'object' ? toObj(item, visited) : item))
+              .filter((item) => item !== undefined);
+          } else if (v && typeof v === 'object' && !(v instanceof Date) && (v.dataValues || typeof v.toJSON === 'function')) {
+            const plain = toObj(v, visited);
+            if (plain !== undefined) out[key] = plain;
+          } else if (v instanceof Date) {
+            out[key] = v.toISOString();
+          } else {
+            out[key] = v;
+          }
+        }
+        return out;
+      }
+    }
+  }
+  return { ...(row || {}) };
+};
 
 function failBundle(code, status = 400, message = code) {
   return Object.assign(new Error(message), { code, status });

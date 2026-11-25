@@ -1085,3 +1085,50 @@ test('Task 16: solution-bundle resolves organizationId dynamically from active l
     (err) => err.status === 400 && err.code === 'ORGANIZATION_REQUIRED',
   );
 });
+
+test('exportSolutionBundle unwraps Sequelize Model instances inside desktopRoutes.dataValues.uiLayouts without crashing on toJSON cloneDeep', async () => {
+  const { exportSolutionBundle } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { db } = makeSolutionBundleDbHarness();
+
+  // Simulate Sequelize Model instance inside uiLayouts association where super.toJSON() throws on nested Model._options/delegates
+  const nestedLayoutModel = {
+    dataValues: {
+      uid: 'ldx-portal-work',
+      title: 'Công việc',
+      desktopRoutesUiLayouts: { dataValues: { desktopRouteId: 10, uiLayoutUid: 'ldx-portal-work' } },
+    },
+    toJSON() {
+      return { uid: 'ldx-portal-work', title: 'Công việc' };
+    },
+  };
+  const routeModelWithThrowingToJson = {
+    dataValues: {
+      id: 10,
+      title: 'Ops Page',
+      type: 'flowPage',
+      schemaUid: 'ops_schema_1',
+      uiLayouts: [nestedLayoutModel],
+    },
+    toJSON() {
+      throw new TypeError("Cannot read properties of undefined (reading 'length')");
+    },
+  };
+
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'desktopRoutes') {
+      return { find: async () => [routeModelWithThrowingToJson] };
+    }
+    if (name === 'desktopRoutesUiLayouts') {
+      return { find: async () => [{ desktopRouteId: 10, uiLayoutUid: 'ldx-portal-work' }] };
+    }
+    if (name === 'rolesDesktopRoutes' || name === 'flowModels') {
+      return { find: async () => [] };
+    }
+    return origGetRepo(name);
+  };
+
+  const exported = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '1.0.0' });
+  assert.equal(Array.isArray(exported.routesAndBlocks?.routes), true);
+  assert.equal(exported.routesAndBlocks.routes.some((r) => r.title === 'Ops Page' && r.layoutUid === 'ldx-portal-work'), true);
+});
