@@ -29,7 +29,7 @@ const {
 
 const DXOS_SETTINGS_MODAL_STYLE_ID = 'dxos-block-settings-modal-style';
 const DXOS_MODAL_SCROLL_CSS = [
-  '.ant-modal-wrap { overflow-y: auto !important; }',
+  '.ant-modal-wrap { position: fixed !important; inset: 0 !important; top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important; overflow-y: auto !important; }',
   '.ant-modal-wrap.ant-modal-centered { display: flex !important; align-items: flex-start !important; justify-content: center !important; padding: 24px 16px !important; }',
   '.ant-modal-wrap.ant-modal-centered::before { display: none !important; }',
   '.ant-modal-wrap .ant-modal { top: 24px !important; margin: 0 auto !important; padding-bottom: 24px !important; max-width: calc(100vw - 32px); }',
