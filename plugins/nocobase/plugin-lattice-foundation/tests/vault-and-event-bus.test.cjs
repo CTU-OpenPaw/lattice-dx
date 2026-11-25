@@ -272,7 +272,7 @@ test('Task A.2 collections, migration 20261125000100, and 42-table pg-rls define
     assert.ok(delCol.indexes.some((i) => i.name === 'idx_lattice_wh_del_org_status'));
 
     const pgRls = require('../src/server/pg-rls');
-    assert.ok(pgRls.TENANT_RLS_TABLES.length >= 52, `Expected >= 52 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
+    assert.ok(pgRls.TENANT_RLS_TABLES.length >= 54, `Expected >= 54 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
     for (const tbl of [
       'latticeConnectors',
       'latticeEventBus',

@@ -20,6 +20,12 @@
   import security_headers
   encode gzip zstd
 
+  handle /.well-known/agent-card.json {
+    reverse_proxy gateway:9080 {
+      flush_interval -1
+    }
+  }
+
   handle /api/* {
     reverse_proxy gateway:9080 {
       flush_interval -1

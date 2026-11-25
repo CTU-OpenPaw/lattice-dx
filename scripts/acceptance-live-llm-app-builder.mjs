@@ -13,10 +13,22 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertSafeLabOrigin } from './setup-native-multi-portal-demo.mjs';
-import { createBlankSlateAcceptanceCallers } from './acceptance-blank-slate-app-builder.mjs';
+import {
+  cleanupPortalRoleReferences,
+  createBlankSlateAcceptanceCallers,
+} from './acceptance-blank-slate-app-builder.mjs';
 
 const require = createRequire(import.meta.url);
 const DEFAULT_LLM_BASE_URL = 'http://127.0.0.1:20128/v1';
+const STARTER_AI_PROFILES = new Set([
+  'dxos-coordinator',
+  'dxos-architect',
+  'dxos-ops',
+  'dxos-logistics',
+  'dxos-workspace',
+  'dxos-operator',
+  'dxos-analyst',
+]);
 
 export function parseLiveLlmArgs(argv = []) {
   let origin = 'http://127.0.0.1:13015';
@@ -380,10 +392,124 @@ export async function runLiveLlmAppBuilderAcceptance({
     };
   } finally {
     const cleanKey = builtResult?.appKey || appKey;
+    const preAppsRes = await callActor(
+      'root',
+      `dxosAi:listBuiltApps?organizationId=${encodeURIComponent(organizationId)}`,
+    ).catch(() => null);
+    const preAppRow = (preAppsRes?.data?.apps || []).find((a) => a?.appKey === cleanKey) || null;
+    const refs = preAppRow?.artifactRefsJson || {};
+
     await callActor('root', 'dxosAi:teardownBuiltApp', {
       method: 'POST',
       values: { organizationId, appKey: cleanKey, keepData: false },
     }).catch(() => {});
+
+    // 1. Destroy latticeBuiltApps row
+    const postAppsRes = await callActor(
+      'root',
+      `dxosAi:listBuiltApps?organizationId=${encodeURIComponent(organizationId)}`,
+    ).catch(() => null);
+    for (const row of postAppsRes?.data?.apps || []) {
+      if (row?.appKey === cleanKey && row?.id != null) {
+        await callActor('root', `latticeBuiltApps:destroy?filterByTk=${encodeURIComponent(row.id)}`, {
+          method: 'POST',
+        }).catch(() => {});
+      }
+    }
+
+    // 2. Delete non-starter latticeAiProfiles created for this app
+    const aiUsernames = new Set([
+      ...(Array.isArray(refs.aiEmployees) ? refs.aiEmployees : []),
+      ...(Array.isArray(builtResult?.aiEmployees) ? builtResult.aiEmployees : []),
+      ...(refs.aiEmployee ? [refs.aiEmployee] : []),
+      ...(builtResult?.aiEmployee ? [builtResult.aiEmployee] : []),
+    ].filter((u) => typeof u === 'string' && u.trim() && !STARTER_AI_PROFILES.has(u.trim())));
+    for (const username of aiUsernames) {
+      await callActor('root', 'dxosAi:deleteProfile', {
+        method: 'POST',
+        values: { username },
+      }).catch(() => {});
+    }
+
+    // 3. Destroy flowModels & desktopRoutes children, pageId, and groupId from artifactRefsJson.portals
+    const portals = [
+      ...(Array.isArray(refs.portals) ? refs.portals : []),
+      ...(Array.isArray(builtResult?.portals) ? builtResult.portals : []),
+    ];
+    const seenPageIds = new Set();
+    const seenGroupIds = new Set();
+    for (const p of portals) {
+      const uids = new Set([
+        ...(Array.isArray(p?.blockUids) ? p.blockUids : []),
+        ...(Array.isArray(p?.attachedBlocks) ? p.attachedBlocks.map((b) => b?.blockUid || b?.uid).filter(Boolean) : []),
+      ]);
+      for (const blkUid of uids) {
+        await callActor('root', `flowModels:destroy?filterByTk=${encodeURIComponent(blkUid)}`, { method: 'POST' }).catch(() => {});
+      }
+      if (p?.gridUid) {
+        await callActor('root', `flowModels:destroy?filterByTk=${encodeURIComponent(p.gridUid)}`, { method: 'POST' }).catch(() => {});
+      }
+      const pageId = p?.pageRoute?.id ?? p?.pageId;
+      const groupId = p?.pageRoute?.parentId ?? p?.groupId;
+      if (pageId != null && !seenPageIds.has(String(pageId))) {
+        seenPageIds.add(String(pageId));
+        const childFilter = encodeURIComponent(JSON.stringify({ parentId: pageId }));
+        const childrenRes = await callActor('root', `desktopRoutes:list?filter=${childFilter}&pageSize=200`).catch(() => null);
+        const childRows = Array.isArray(childrenRes?.data?.data)
+          ? childrenRes.data.data
+          : (Array.isArray(childrenRes?.data?.rows) ? childrenRes.data.rows : (Array.isArray(childrenRes?.data) ? childrenRes.data : []));
+        for (const child of childRows) {
+          if (child?.id != null) {
+            await callActor('root', `desktopRoutes:destroy?filterByTk=${encodeURIComponent(child.id)}`, { method: 'POST' }).catch(() => {});
+          }
+        }
+        await callActor('root', `desktopRoutes:destroy?filterByTk=${encodeURIComponent(pageId)}`, { method: 'POST' }).catch(() => {});
+      }
+      if (groupId != null && !seenGroupIds.has(String(groupId))) {
+        seenGroupIds.add(String(groupId));
+        await callActor('root', `desktopRoutes:destroy?filterByTk=${encodeURIComponent(groupId)}`, { method: 'POST' }).catch(() => {});
+      }
+    }
+
+    // 4. Destroy latticeDecisionTables / dxosAutomations:deleteRule from artifactRefsJson
+    const dmnKeys = new Set([
+      ...(Array.isArray(refs.dmnTableKeys) ? refs.dmnTableKeys : []),
+      ...(Array.isArray(builtResult?.dmnTableKeys) ? builtResult.dmnTableKeys : []),
+    ].filter(Boolean));
+    for (const tableKey of dmnKeys) {
+      const dmnFilter = encodeURIComponent(JSON.stringify({ organizationId, tableKey }));
+      const dmnRes = await callActor('root', `latticeDecisionTables:list?filter=${dmnFilter}&pageSize=50`).catch(() => null);
+      const dmnRows = Array.isArray(dmnRes?.data?.data)
+        ? dmnRes.data.data
+        : (Array.isArray(dmnRes?.data?.rows) ? dmnRes.data.rows : (Array.isArray(dmnRes?.data) ? dmnRes.data : []));
+      for (const row of dmnRows) {
+        if (row?.id != null) {
+          await callActor('root', `latticeDecisionTables:destroy?filterByTk=${encodeURIComponent(row.id)}`, { method: 'POST' }).catch(() => {});
+        }
+      }
+    }
+
+    const flowKeys = new Set([
+      ...(Array.isArray(refs.flowRuleKeys) ? refs.flowRuleKeys : []),
+      ...(Array.isArray(builtResult?.flowRuleKeys) ? builtResult.flowRuleKeys : []),
+    ].filter(Boolean));
+    for (const ruleKey of flowKeys) {
+      await callActor('root', 'dxosAutomations:deleteRule', {
+        method: 'POST',
+        values: { organizationId, ruleKey },
+      }).catch(() => {});
+    }
+
+    // 5. Destroy roles (name PK) & 6. Remove role references from applicationPlugins.options.portals
+    const rolesToClean = new Set([
+      roleName,
+      ...(Array.isArray(refs.roles) ? refs.roles : []),
+      ...(Array.isArray(builtResult?.roles) ? builtResult.roles : []),
+    ].filter(Boolean));
+    for (const rName of rolesToClean) {
+      await callActor('root', `roles:destroy?filterByTk=${encodeURIComponent(rName)}`, { method: 'POST' }).catch(() => {});
+    }
+    await cleanupPortalRoleReferences(callActor, [...rolesToClean]);
   }
 }
 

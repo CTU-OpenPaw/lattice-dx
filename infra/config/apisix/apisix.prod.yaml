@@ -38,6 +38,8 @@ routes:
   - id: dxos-public-paas
     priority: 90
     uris:
+      - /.well-known/agent-card.json
+      - /api/dxos-a2a/agent-card.json
       - /api/dxos:health
       - /api/dxos:openapi
       - /api/dxos:asyncapi
@@ -45,6 +47,9 @@ routes:
       - /api/dxos:sw.js
       - /api/dxosWms:publicTrack
       - /api/dxosLedger:verifySignature
+      - /api/dxosForms:meta
+      - /api/dxosForms:submit
+      - /api/dxosForms:status
     plugins:
       limit-count:
         count: 120

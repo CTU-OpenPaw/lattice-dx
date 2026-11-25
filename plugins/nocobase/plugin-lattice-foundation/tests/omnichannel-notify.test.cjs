@@ -1349,3 +1349,42 @@ test('dispatchChannelNotification brackets IPv6 hosts in SMTP dryRun, honors sec
   });
   assert.equal(deliveries[deliveries.length - 1].notificationId, 42);
 });
+
+test('omnichannel-notify rejects __proto__, constructor, prototype, all, and ALL as organizationId with HTTP 400', async () => {
+  await withMockedNocobase(async () => {
+    const {
+      dispatchChannelNotification,
+      dispatchOmnichannel,
+      listDeliveryLogs,
+      registerOmnichannelNotify,
+    } = require('../src/server/omnichannel-notify');
+    const { db } = makeInMemoryNotifyDb();
+    const { app, resources } = makeAppHarness(db);
+    registerOmnichannelNotify(app);
+    const actions = resources.get('dxosNotify');
+
+    for (const badOrg of ['__proto__', 'constructor', 'prototype', 'all', 'ALL']) {
+      await assert.rejects(
+        () => dispatchChannelNotification(db, { organizationId: badOrg, channel: 'webhook', url: 'https://example.com' }),
+        (err) => err && err.status === 400,
+      );
+      await assert.rejects(
+        () => dispatchOmnichannel(db, { organizationId: badOrg, channels: ['webhook'] }),
+        (err) => err && err.status === 400,
+      );
+      await assert.rejects(
+        () => listDeliveryLogs(db, { organizationId: badOrg }),
+        (err) => err && err.status === 400,
+      );
+      const sendCtx = makeHttpCtx({
+        method: 'POST',
+        state: { currentUser: { id: 1 }, currentRole: 'root', currentRoles: ['root'] },
+        params: { organizationId: badOrg, channel: 'webhook', dryRun: true },
+      });
+      await assert.rejects(
+        () => actions.send(sendCtx),
+        (err) => err && err.status === 400,
+      );
+    }
+  });
+});

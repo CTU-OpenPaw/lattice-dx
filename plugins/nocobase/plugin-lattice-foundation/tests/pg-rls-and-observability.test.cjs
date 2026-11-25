@@ -46,10 +46,10 @@ function withMockedNocobase(fn) {
     });
 }
 
-test('pg-rls defines at least 52 tenant-scoped tables (including Wave 2 & Wave 3 tables), validates identifiers strictly, and parameterizes set_config', async () => {
+test('pg-rls defines at least 54 tenant-scoped tables (including snake_case attachment/upload tables), validates identifiers strictly, and parameterizes set_config', async () => {
   const pgRls = require('../src/server/pg-rls');
 
-  assert.ok(pgRls.TENANT_RLS_TABLES.length >= 52, `Expected >= 52 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
+  assert.ok(pgRls.TENANT_RLS_TABLES.length >= 54, `Expected >= 54 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
   for (const required of [
     'latticeRequests', 'latticeOrders', 'latticeAssets', 'latticeEmployees',
     'latticeDepartments', 'latticeLocations', 'latticeIncidentCases', 'latticeIncidentRules',
@@ -68,6 +68,7 @@ test('pg-rls defines at least 52 tenant-scoped tables (including Wave 2 & Wave 3
     'latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions', 'latticeA2aTasks',
     'latticeNotificationDeliveries', 'latticeApprovalPolicies', 'latticeApprovalRequests',
     'latticePublicForms', 'latticePublicFormSubmissions',
+    'lattice_native_request_attachments', 'lattice_native_request_uploads',
   ]) {
     assert.ok(pgRls.TENANT_RLS_TABLES.includes(required), `Missing RLS table ${required}`);
   }
@@ -1662,4 +1663,160 @@ test('version lock is 0.4.0 across package/openapi/observability and OpenAPI reg
       await plugin.unload();
     }
   });
+});
+
+test('pg-rls exports isValidOrganizationId, PROTO_POLLUTION_KEYS, resolveTenantOrgColumn, snake_case discovery, and migration 20261203000100 attaches/detaches FORCE RLS cleanly', async () => {
+  await withMockedNocobase(async () => {
+    const pgRls = require('../src/server/pg-rls');
+
+    assert.equal(pgRls.PROTO_POLLUTION_KEYS.has('__proto__'), true);
+    assert.equal(pgRls.PROTO_POLLUTION_KEYS.has('constructor'), true);
+    assert.equal(pgRls.PROTO_POLLUTION_KEYS.has('prototype'), true);
+
+    assert.equal(pgRls.isValidOrganizationId('org-alpha_01'), true);
+    for (const bad of ['', '   ', null, undefined, 123, 'all', 'ALL', 'All', '__proto__', 'constructor', 'prototype', 'Constructor', 'PROTOTYPE', 'org a', 'org;drop']) {
+      assert.equal(pgRls.isValidOrganizationId(bad), false, `Expected isValidOrganizationId(${String(bad)}) to be false`);
+      assert.throws(() => pgRls.assertValidOrganizationId(bad), { code: 'INVALID_RLS_ORGANIZATION' });
+    }
+
+    assert.equal(pgRls.resolveTenantOrgColumn('latticeOrders'), 'organizationId');
+    assert.equal(pgRls.resolveTenantOrgColumn('lattice_native_request_attachments'), 'organization_id');
+    assert.equal(pgRls.resolveTenantOrgColumn('lattice_native_request_uploads'), 'organization_id');
+    assert.equal(pgRls.resolveTenantOrgColumn('latticeCustomFoo', 'organization_id'), 'organization_id');
+    assert.throws(() => pgRls.resolveTenantOrgColumn('latticeOrders', 'bad;col'), { code: 'INVALID_SQL_IDENTIFIER' });
+
+    const attSql = pgRls.buildRlsPolicySql('lattice_native_request_attachments');
+    assert.match(attSql.enableSql, /ALTER TABLE public\."lattice_native_request_attachments" ENABLE ROW LEVEL SECURITY/);
+    assert.match(attSql.enableSql, /ALTER TABLE public\."lattice_native_request_attachments" FORCE ROW LEVEL SECURITY/);
+    assert.match(attSql.createSql, /FOR ALL TO PUBLIC USING/);
+    assert.match(attSql.createSql, /"organization_id" = nullif\(current_setting\('app\.current_org', true\), ''\)/);
+
+    const queries = [];
+    const fakeTx = { id: 'tx-snake-1' };
+    const fakeDb = {
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (cb) => cb(fakeTx),
+        query: async (sql, opts) => {
+          queries.push({ sql, opts });
+          if (sql.includes('information_schema.columns')) {
+            return [[
+              { table_name: 'latticeRequests' },
+              { table_name: 'lattice_native_request_attachments' },
+              { table_name: 'lattice_native_request_uploads' },
+            ]];
+          }
+          if (sql.includes('information_schema.tables')) {
+            return [[
+              { table_name: 'lattice_native_request_attachments' },
+              { table_name: 'lattice_native_request_uploads' },
+            ]];
+          }
+          return [[]];
+        },
+      },
+    };
+
+    const discovered = await pgRls.discoverTenantRlsTables(fakeDb, { transaction: fakeTx });
+    assert.match(queries[0].sql, /column_name IN \('organizationId', 'organization_id'\)/);
+    assert.deepEqual(discovered, [
+      'latticeRequests',
+      'lattice_native_request_attachments',
+      'lattice_native_request_uploads',
+    ]);
+
+    const MigCls = require('../src/server/migrations/20261203000100-snake-case-rls-attachments-uploads');
+    const mig = new MigCls({ db: fakeDb });
+    assert.equal(mig.on, 'afterSync');
+
+    queries.length = 0;
+    await mig.up();
+    const upSql = queries.map((q) => q.sql).join('\n');
+    assert.match(upSql, /ALTER TABLE public\."lattice_native_request_attachments" ENABLE ROW LEVEL SECURITY;[\s\S]*FORCE ROW LEVEL SECURITY/);
+    assert.match(upSql, /"organization_id" = nullif\(current_setting\('app\.current_org', true\), ''\)/);
+    assert.match(upSql, /ALTER TABLE public\."lattice_native_request_uploads" ENABLE ROW LEVEL SECURITY;[\s\S]*FORCE ROW LEVEL SECURITY/);
+
+    queries.length = 0;
+    await mig.down();
+    const downSql = queries.map((q) => q.sql).join('\n');
+    assert.match(downSql, /DROP POLICY IF EXISTS lattice_tenant_isolation ON public\."lattice_native_request_uploads"/);
+    assert.match(downSql, /DROP POLICY IF EXISTS lattice_tenant_isolation ON public\."lattice_native_request_attachments"/);
+
+    // Non-postgres and missing tables no-op cleanly
+    const sqliteMig = new MigCls({
+      db: { sequelize: { getDialect: () => 'sqlite', transaction: async () => { throw new Error('must not run'); } } },
+    });
+    await sqliteMig.up();
+    await sqliteMig.down();
+
+    const emptyQueries = [];
+    const emptyMig = new MigCls({
+      db: {
+        sequelize: {
+          getDialect: () => 'postgres',
+          transaction: async (cb) => cb({ id: 'tx-empty' }),
+          query: async (sql) => { emptyQueries.push(sql); return [[]]; },
+        },
+      },
+    });
+    await emptyMig.up();
+    assert.equal(emptyQueries.some((s) => s.includes('ALTER TABLE')), false);
+  });
+});
+
+test('LatticeFoundationPlugin registers and unregisters publicFormGatewayHandler via Gateway', async () => {
+  const origLoad = Module._load;
+  const registered = [];
+  const unregistered = [];
+  class MockPlugin {
+    constructor(app, options = {}) {
+      this.app = app;
+      this.db = app?.db;
+      this.options = options;
+    }
+  }
+  const MockGateway = {
+    registerRequestHandler: (fn) => registered.push(fn),
+    unregisterRequestHandler: (fn) => unregistered.push(fn),
+  };
+  Module._load = function mockedLoad(request, parent, isMain) {
+    if (request === '@nocobase/server') {
+      return { Migration: class {}, Plugin: MockPlugin, Gateway: MockGateway };
+    }
+    if (request === '@nocobase/database') {
+      return { defineCollection: (def) => def };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const idxPath = require.resolve('../src/server/index');
+    delete require.cache[idxPath];
+    const LatticeFoundationPlugin = require('../src/server/index');
+    const fakeApp = {
+      db: {
+        sequelize: { getDialect: () => 'sqlite', query: async () => [[]], transaction: async (cb) => cb({}) },
+        getRepository: () => null,
+        on: () => {},
+        off: () => {},
+      },
+      use: () => {},
+      cronJobManager: { addJob: () => {} },
+      resourceManager: { use: () => {}, define: () => {} },
+      acl: { allow: () => {}, registerSnippet: () => {} },
+    };
+    const plugin = new LatticeFoundationPlugin(fakeApp);
+    plugin.app = fakeApp;
+    plugin.db = fakeApp.db;
+    await plugin.load();
+    assert.equal(registered.length, 1);
+    assert.equal(typeof plugin._publicFormGatewayHandler, 'function');
+    assert.equal(registered[0], plugin._publicFormGatewayHandler);
+    await plugin.unload();
+    assert.equal(unregistered.length, 1);
+    assert.equal(unregistered[0], registered[0]);
+    assert.equal(plugin._publicFormGatewayHandler, null);
+  } finally {
+    Module._load = origLoad;
+    delete require.cache[require.resolve('../src/server/index')];
+  }
 });

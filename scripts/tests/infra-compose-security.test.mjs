@@ -350,6 +350,7 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(caddy, /X-Content-Type-Options\s+"?nosniff"?/);
   assert.match(caddy, /X-Frame-Options\s+"?SAMEORIGIN"?/);
   assert.match(caddy, /Permissions-Policy\s+"camera=\(self\),\s*microphone=\(\),\s*geolocation=\(self\)"/);
+  assert.match(caddy, /handle\s+\/\.well-known\/agent-card\.json\s*\{\s*reverse_proxy\s+gateway:9080\s*\{\s*flush_interval\s+-1\s*\}\s*\}[\s\S]*handle\s+\{\s*reverse_proxy\s+nocobase:80/s);
   assert.match(caddy, /handle\s+\/api\/\*\s*\{\s*reverse_proxy\s+gateway:9080\s*\{\s*flush_interval\s+-1\s*\}/s);
   assert.doesNotMatch(caddy, /\/v1\/\*/);
   assert.match(caddy, /reverse_proxy\s+nocobase:80/);
@@ -383,6 +384,12 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(apisixProd, /\/api\/dxos:manifest/);
   assert.match(apisixProd, /\/api\/dxos:sw\.js/);
   assert.match(apisixProd, /\/api\/dxosWms:publicTrack/);
+  assert.match(apisixProd, /\/\.well-known\/agent-card\.json/);
+  assert.match(apisixProd, /\/api\/dxos-a2a\/agent-card\.json/);
+  assert.match(apisixProd, /\/api\/dxosForms:meta/);
+  assert.match(apisixProd, /\/api\/dxosForms:submit/);
+  assert.match(apisixProd, /\/api\/dxosForms:status/);
+  assert.match(apisixProd, /id:\s*dxos-public-paas[\s\S]*?\/\.well-known\/agent-card\.json[\s\S]*?\/api\/dxos-a2a\/agent-card\.json[\s\S]*?\/api\/dxosForms:meta[\s\S]*?\/api\/dxosForms:submit[\s\S]*?\/api\/dxosForms:status[\s\S]*?"nocobase:80"/);
   assert.match(apisixProd, /uri:\s*\/api\/\*/);
   assert.match(apisixProd, /"nocobase:80"/);
   assert.match(apisixProd, /ssl_verify:\s*true/);

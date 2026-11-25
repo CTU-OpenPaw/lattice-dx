@@ -11,10 +11,9 @@
 const { createHash, randomBytes, timingSafeEqual } = require('node:crypto');
 const { resolveNativeActor } = require('./native-scope');
 const { val, callerRoles, getRepo } = require('./native-portal-helpers');
-const { canUsePgRlsSession, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
+const { canUsePgRlsSession, isValidOrganizationId, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
 const { assertApiKeyScope, readParams } = require('./paas-api-keys');
 
-const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/;
 const FIELD_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
 const HONEYPOT_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_]{1,63}$/;
@@ -597,7 +596,7 @@ async function resolveAdminContext(ctx, db, { requireWriteScope = false } = {}) 
   if (isRoot) {
     if (params.organizationId != null && String(params.organizationId).trim() !== '') {
       const cleanOrg = String(params.organizationId).trim();
-      if (!ORG_ID_RE.test(cleanOrg)) {
+      if (!isValidOrganizationId(cleanOrg)) {
         throw failForm('FORM_ORG_INVALID', 400, 'Invalid organizationId.');
       }
       organizationId = cleanOrg;
@@ -628,21 +627,23 @@ function runWithRls(db, isRoot, organizationId, fn) {
   return withTenantRlsContext(db, organizationId, fn);
 }
 
+async function lookupFormBySlug(db, slug) {
+  const formRepo = getRepo(db, 'latticePublicForms');
+  if (!formRepo || typeof formRepo.findOne !== 'function') {
+    throw failForm('FORM_REPO_UNAVAILABLE', 503, 'Public forms repository unavailable.');
+  }
+  const runFind = (transaction) => formRepo.findOne({
+    filter: { slug },
+    ...(transaction ? { transaction } : {}),
+  });
+  return canUsePgRlsSession(db) ? withSystemRlsBypass(db, runFind) : runFind(undefined);
+}
+
 function createDxosFormsActions(db, options = {}) {
   const rateLimiter = options.rateLimiter || createSlidingWindowRateLimiter();
   const nowFn = typeof options.now === 'function' ? options.now : () => Date.now();
 
-  async function lookupFormBySlug(slug) {
-    const formRepo = getRepo(db, 'latticePublicForms');
-    if (!formRepo || typeof formRepo.findOne !== 'function') {
-      throw failForm('FORM_REPO_UNAVAILABLE', 503, 'Public forms repository unavailable.');
-    }
-    const runFind = (transaction) => formRepo.findOne({
-      filter: { slug },
-      ...(transaction ? { transaction } : {}),
-    });
-    return canUsePgRlsSession(db) ? withSystemRlsBypass(db, runFind) : runFind(undefined);
-  }
+  const findFormBySlug = (slug) => lookupFormBySlug(db, slug);
 
   return {
     meta: async (ctx, next) => {
@@ -653,7 +654,7 @@ function createDxosFormsActions(db, options = {}) {
       if (!SLUG_RE.test(slug) || RESERVED_FORM_SLUGS.has(slug)) {
         throw failForm('FORM_SLUG_INVALID', 400, 'Invalid form slug.');
       }
-      const form = await lookupFormBySlug(slug);
+      const form = await findFormBySlug(slug);
       if (!form || val(form, 'active') !== true) {
         throw failForm('FORM_NOT_FOUND', 404, 'Public form not found or inactive.');
       }
@@ -689,7 +690,7 @@ function createDxosFormsActions(db, options = {}) {
         throw failForm('RATE_LIMIT_EXCEEDED', 429, 'Too many requests; please retry later.');
       }
 
-      const form = await lookupFormBySlug(slug);
+      const form = await findFormBySlug(slug);
       const formLimit = form
         ? Math.max(1, Math.min(300, Number(val(form, 'rateLimitPerMinute')) || DEFAULT_RATE_LIMIT_PER_MIN))
         : DEFAULT_RATE_LIMIT_PER_MIN;
@@ -732,7 +733,7 @@ function createDxosFormsActions(db, options = {}) {
       }
 
       const formOrgId = String(val(form, 'organizationId') || '').trim();
-      if (!ORG_ID_RE.test(formOrgId)) {
+      if (!isValidOrganizationId(formOrgId)) {
         throw failForm('FORM_ORG_INVALID', 500, 'Persisted form organizationId is invalid.');
       }
 
@@ -883,7 +884,7 @@ function createDxosFormsActions(db, options = {}) {
       let liveStatus = String(val(submission, 'status') || 'submitted');
       let updatedAt = val(submission, 'updatedAt') || val(submission, 'submittedAt') || null;
 
-      if (ORG_ID_RE.test(subOrgId) && isAllowlistedPublicFormCollection(targetCollection) && /^[1-9]\d*$/.test(targetRecordId)) {
+      if (isValidOrganizationId(subOrgId) && isAllowlistedPublicFormCollection(targetCollection) && /^[1-9]\d*$/.test(targetRecordId)) {
         const readLiveStatus = async (transaction) => {
           const targetRepo = getRepo(db, targetCollection);
           if (!targetRepo || typeof targetRepo.findOne !== 'function') return null;
@@ -963,7 +964,7 @@ function createDxosFormsActions(db, options = {}) {
       if ((ctx.method || 'POST').toUpperCase() !== 'POST') ctx.throw(405);
       const { callerUserId, isRoot, organizationId, params } = await resolveAdminContext(ctx, db, { requireWriteScope: true });
       const targetOrgId = organizationId || (typeof params.organizationId === 'string' ? params.organizationId.trim() : '');
-      if (!ORG_ID_RE.test(targetOrgId)) {
+      if (!isValidOrganizationId(targetOrgId)) {
         throw failForm('FORM_ORG_REQUIRED', 400, 'organizationId is required.');
       }
 
@@ -984,7 +985,7 @@ function createDxosFormsActions(db, options = {}) {
 
       const editId = params.id != null ? Number(params.id) : null;
       const isEdit = Boolean(editId && Number.isInteger(editId) && editId > 0);
-      const existingBySlug = await lookupFormBySlug(validated.slug);
+      const existingBySlug = await findFormBySlug(validated.slug);
       if (!isEdit && existingBySlug) {
         throw failForm('FORM_SLUG_CONFLICT', 409, `Slug "${validated.slug}" is already in use.`);
       }
@@ -1180,6 +1181,8 @@ module.exports = {
   validatePublicFormDefinition,
   sanitizeSubmissionPayload,
   createSlidingWindowRateLimiter,
+  lookupFormBySlug,
+  serializePublicMeta,
   createDxosFormsActions,
   registerPublicFormsGuard,
   registerPublicForms,

@@ -146,12 +146,59 @@ function parseMcpToolResult(rpcRes, label) {
   return JSON.parse(text);
 }
 
-async function destroyMatchingIds(callActor, collection, filter) {
+async function destroyMatchingIds(callActor, collection, filter, pkField = 'id') {
   const qs = encodeURIComponent(JSON.stringify(filter));
   const res = await callActor('root', `${collection}:list?filter=${qs}&pageSize=200`).catch(() => null);
   for (const row of unwrapList(res?.data)) {
-    if (row?.id != null) {
-      await callActor('root', `${collection}:destroy?filterByTk=${encodeURIComponent(row.id)}`, { method: 'POST' }).catch(() => {});
+    const pk = row?.[pkField] ?? row?.id ?? row?.name;
+    if (pk != null) {
+      await callActor('root', `${collection}:destroy?filterByTk=${encodeURIComponent(pk)}`, { method: 'POST' }).catch(() => {});
+    }
+  }
+}
+
+export async function cleanupPortalRoleReferences(callActor, removedRoles = []) {
+  const removedSet = new Set((Array.isArray(removedRoles) ? removedRoles : []).filter(Boolean));
+  if (!removedSet.size) return;
+
+  const portalsRes = await callActor('root', 'latticePortals:list').catch(() => null);
+  if (portalsRes?.ok && Array.isArray(portalsRes.data)) {
+    for (const p of portalsRes.data) {
+      if (!p?.uid || p.builtin || p.uid === 'admin-layout-model' || p.uid === 'mobile-layout-model') continue;
+      const curRoles = Array.isArray(p.roles) ? p.roles : [];
+      const nextRoles = curRoles.filter((r) => !removedSet.has(r));
+      if (nextRoles.length !== curRoles.length || p.uid === 'ldx-portal-services') {
+        await callActor('root', 'latticePortals:save', {
+          method: 'POST',
+          values: { uid: p.uid, slug: p.slug, title: p.title, roles: nextRoles },
+        }).catch(() => {});
+      }
+    }
+  }
+
+  const pluginFilter = encodeURIComponent(JSON.stringify({ packageName: '@latticedx/plugin-lattice-foundation' }));
+  const pluginRes = await callActor('root', `applicationPlugins:list?filter=${pluginFilter}&pageSize=5`).catch(() => null);
+  const pluginRow = unwrapList(pluginRes?.data)[0];
+  const portalsMap = pluginRow?.options?.portals;
+  if (pluginRow && portalsMap && typeof portalsMap === 'object') {
+    let changed = false;
+    const nextPortals = { ...portalsMap };
+    for (const [uid, entry] of Object.entries(portalsMap)) {
+      if (!entry || !Array.isArray(entry.roles)) continue;
+      const filtered = entry.roles.filter((r) => !removedSet.has(r));
+      if (filtered.length !== entry.roles.length) {
+        nextPortals[uid] = { ...entry, roles: filtered };
+        changed = true;
+      }
+    }
+    if (changed) {
+      const tk = pluginRow.name || pluginRow.packageName || pluginRow.id;
+      if (tk != null) {
+        await callActor('root', `applicationPlugins:update?filterByTk=${encodeURIComponent(tk)}`, {
+          method: 'POST',
+          values: { options: { ...pluginRow.options, portals: nextPortals } },
+        }).catch(() => {});
+      }
     }
   }
 }
@@ -601,7 +648,8 @@ export async function runBlankSlateAppBuilderAcceptance(callActor, rpcRequest, {
         await callActor('root', `desktopRoutes:destroy?filterByTk=${encodeURIComponent(groupId)}`, { method: 'POST' }).catch(() => {});
       }
     }
-    await destroyMatchingIds(callActor, 'roles', { name: roleName });
+    await destroyMatchingIds(callActor, 'roles', { name: roleName }, 'name');
+    await cleanupPortalRoleReferences(callActor, [roleName]);
   }
 }
 

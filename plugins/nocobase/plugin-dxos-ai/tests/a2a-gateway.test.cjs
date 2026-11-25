@@ -17,8 +17,11 @@ const {
   A2A_AGENT_CARD_PATHS,
   A2A_RPC_PATH,
   A2A_AGENT_CATALOG,
+  resolveRequestOriginFromHeaders,
+  resolveSafeCardEndpointUrl,
   buildAgentCard,
   createAgentCardMiddleware,
+  createGatewayAgentCardRequestHandler,
   assertSafePeerUrl,
   delegateToExternalA2aPeer,
   handleA2aJsonRpc,
@@ -1118,4 +1121,255 @@ test('A2A JSON-RPC rejects prototype-pollution strings and "all" in organization
 
   assert.equal(db.store.latticeA2aTasks.length, 0, 'Zero tasks may be persisted for invalid organizationId');
   assert.equal(dbWithDefault.store.latticeA2aTasks.length, 0, 'Zero tasks may be persisted when default org exists');
+});
+
+test('resolveRequestOriginFromHeaders and resolveSafeCardEndpointUrl derive safe origin from forwarded/host headers and reject host-header injection', async () => {
+  assert.equal(typeof resolveRequestOriginFromHeaders, 'function');
+  assert.equal(typeof resolveSafeCardEndpointUrl, 'function');
+
+  // 1. Direct :13015 Host + X-Forwarded-Proto
+  assert.equal(
+    resolveRequestOriginFromHeaders({ headers: { host: '127.0.0.1:13015', 'x-forwarded-proto': 'http' } }),
+    'http://127.0.0.1:13015',
+  );
+  assert.equal(
+    resolveSafeCardEndpointUrl(undefined, {}, { headers: { host: '127.0.0.1:13015', 'x-forwarded-proto': 'http' } }),
+    'http://127.0.0.1:13015/api/dxos-a2a',
+  );
+
+  // 2. HTTPS multi-hop X-Forwarded-* headers (first comma-separated token)
+  assert.equal(
+    resolveRequestOriginFromHeaders({
+      headers: {
+        'x-forwarded-proto': 'https, http',
+        'x-forwarded-host': 'portal.example.com:8443, internal.local:13000',
+        host: '127.0.0.1:13000',
+      },
+    }),
+    'https://portal.example.com:8443',
+  );
+
+  // 3. IPv6 bracketed host + default proto fallback
+  assert.equal(
+    resolveRequestOriginFromHeaders({ headers: { host: '[::1]:13015' } }),
+    'http://[::1]:13015',
+  );
+
+  // 4. Invalid/non-http(s) x-forwarded-proto cannot smuggle javascript:/ftp:
+  assert.equal(
+    resolveRequestOriginFromHeaders({ headers: { 'x-forwarded-proto': 'javascript', host: '127.0.0.1:13015' } }),
+    'http://127.0.0.1:13015',
+  );
+
+  // 5. Missing or injected host headers return '' and fall back to http://127.0.0.1:13000/api/dxos-a2a
+  for (const badHeaders of [
+    {},
+    { host: '' },
+    { host: 'evil.com/steal' },
+    { host: 'evil.com\\steal' },
+    { host: 'user@evil.com' },
+    { host: 'evil.com?q=1' },
+    { host: 'evil.com#frag' },
+    { host: 'evil.com badhost' },
+    { host: 'evil.com\r\nX-Test: 1' },
+    { host: 'evil.com:notaport' },
+    { 'x-forwarded-host': 'evil.com/inject', host: '127.0.0.1:13015' },
+  ]) {
+    assert.equal(
+      resolveRequestOriginFromHeaders({ headers: badHeaders }),
+      '',
+      `Expected empty origin for headers ${JSON.stringify(badHeaders)}`,
+    );
+    const card = buildAgentCard({ env: {}, reqOrCtx: { headers: badHeaders } });
+    assert.equal(card.url, 'http://127.0.0.1:13000/api/dxos-a2a');
+  }
+
+  // 6. Precedence: baseUrl > DXOS_A2A_PUBLIC_URL > DXOS_PUBLIC_URL > NOCOBASE_PUBLIC_URL > headers > default
+  const reqHeaders = { headers: { host: '127.0.0.1:13015', 'x-forwarded-proto': 'http' } };
+  assert.equal(
+    resolveSafeCardEndpointUrl('https://explicit.example.com', { DXOS_A2A_PUBLIC_URL: 'https://a2a.example.com' }, reqHeaders),
+    'https://explicit.example.com/api/dxos-a2a',
+  );
+  assert.equal(
+    resolveSafeCardEndpointUrl(undefined, { DXOS_A2A_PUBLIC_URL: 'https://a2a.example.com', DXOS_PUBLIC_URL: 'https://dxos.example.com' }, reqHeaders),
+    'https://a2a.example.com/api/dxos-a2a',
+  );
+  assert.equal(
+    resolveSafeCardEndpointUrl(undefined, { DXOS_PUBLIC_URL: 'https://dxos.example.com', NOCOBASE_PUBLIC_URL: 'https://nb.example.com' }, reqHeaders),
+    'https://dxos.example.com/api/dxos-a2a',
+  );
+  assert.equal(
+    resolveSafeCardEndpointUrl(undefined, { NOCOBASE_PUBLIC_URL: 'https://nb.example.com' }, reqHeaders),
+    'https://nb.example.com/api/dxos-a2a',
+  );
+
+  // 7. createAgentCardMiddleware passes ctx as reqOrCtx
+  const cardMw = createAgentCardMiddleware({ env: {} });
+  const mwRes = await invokeMiddleware(cardMw, {
+    path: '/.well-known/agent-card.json',
+    method: 'GET',
+    headers: { host: '127.0.0.1:13015', 'x-forwarded-proto': 'http' },
+  });
+  assert.equal(mwRes.ctx.status, 200);
+  assert.equal(mwRes.ctx.body.url, 'http://127.0.0.1:13015/api/dxos-a2a');
+  assert.equal(mwRes.ctx.body.version, '0.4.0');
+});
+
+test('createGatewayAgentCardRequestHandler handles /.well-known/agent-card.json and /api/dxos-a2a/agent-card.json on GET/HEAD/405 and passes through non-card routes', async () => {
+  assert.equal(typeof createGatewayAgentCardRequestHandler, 'function');
+  const handler = createGatewayAgentCardRequestHandler({ env: {} });
+
+  function makeMockRes() {
+    const headers = {};
+    let body = '';
+    let ended = false;
+    return {
+      statusCode: 200,
+      headers,
+      get body() { return body; },
+      get ended() { return ended; },
+      setHeader(k, v) { headers[String(k).toLowerCase()] = v; },
+      end(chunk) {
+        if (chunk !== undefined && chunk !== null) body += String(chunk);
+        ended = true;
+      },
+    };
+  }
+
+  // Pass-through for unrelated paths
+  for (const passUrl of ['/', '/index.html', '/v/form/demo', '/api/dxos-a2a', '/api/other']) {
+    const res = makeMockRes();
+    const handled = await handler({ url: passUrl, method: 'GET', headers: { host: '127.0.0.1:13015' } }, res);
+    assert.equal(handled, false, `Expected pass-through false for ${passUrl}`);
+    assert.equal(res.ended, false);
+  }
+
+  // GET /.well-known/agent-card.json -> 200 JSON with 13015 origin & 0.4.0
+  {
+    const res = makeMockRes();
+    const handled = await handler(
+      {
+        url: '/.well-known/agent-card.json?source=probe',
+        method: 'GET',
+        headers: { host: '127.0.0.1:13015', 'x-forwarded-proto': 'http' },
+      },
+      res,
+    );
+    assert.equal(handled, true);
+    assert.equal(res.ended, true);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['content-type'], 'application/json; charset=utf-8');
+    assert.equal(res.headers['cache-control'], 'no-store');
+    assert.equal(res.headers['x-content-type-options'], 'nosniff');
+    const parsed = JSON.parse(res.body);
+    assert.equal(parsed.version, '0.4.0');
+    assert.equal(parsed.url, 'http://127.0.0.1:13015/api/dxos-a2a');
+    assert.equal(parsed.skills.length, 7);
+  }
+
+  // GET /api/dxos-a2a/agent-card.json with forwarded https host
+  {
+    const res = makeMockRes();
+    const handled = await handler(
+      {
+        url: '/api/dxos-a2a/agent-card.json',
+        method: 'GET',
+        headers: { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'dxos.example.com' },
+      },
+      res,
+    );
+    assert.equal(handled, true);
+    assert.equal(res.statusCode, 200);
+    assert.equal(JSON.parse(res.body).url, 'https://dxos.example.com/api/dxos-a2a');
+  }
+
+  // HEAD /.well-known/agent-card.json -> 200 headers with empty body
+  {
+    const res = makeMockRes();
+    const handled = await handler(
+      { url: '/.well-known/agent-card.json', method: 'HEAD', headers: { host: '127.0.0.1:13015' } },
+      res,
+    );
+    assert.equal(handled, true);
+    assert.equal(res.ended, true);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['content-type'], 'application/json; charset=utf-8');
+    assert.equal(res.body, '');
+  }
+
+  // POST /.well-known/agent-card.json -> 405 Method Not Allowed
+  {
+    const res = makeMockRes();
+    const handled = await handler(
+      { url: '/.well-known/agent-card.json', method: 'POST', headers: { host: '127.0.0.1:13015' } },
+      res,
+    );
+    assert.equal(handled, true);
+    assert.equal(res.ended, true);
+    assert.equal(res.statusCode, 405);
+    assert.equal(res.headers.allow, 'GET, HEAD');
+    assert.equal(res.headers['content-type'], 'application/json; charset=utf-8');
+    assert.equal(res.headers['cache-control'], 'no-store');
+    assert.equal(res.headers['x-content-type-options'], 'nosniff');
+    assert.deepEqual(JSON.parse(res.body), { error: 'Method Not Allowed' });
+  }
+});
+
+test('DxosAiPlugin registers and unregisters Gateway request handler for /.well-known/agent-card.json across load/unload/remove/destroy', async () => {
+  const origLoad = Module._load;
+  class MockPlugin {
+    constructor(app) {
+      this.app = app;
+      this.db = app?.db;
+    }
+  }
+  const registered = [];
+  const unregistered = [];
+  const MockGateway = {
+    registerRequestHandler(fn) { registered.push(fn); },
+    unregisterRequestHandler(fn) { unregistered.push(fn); },
+  };
+  Module._load = function mocked(request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin, Gateway: MockGateway };
+    if (request === '@nocobase/database') return { defineCollection: (def) => def };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  const indexPath = path.resolve(__dirname, '../src/server/index.js');
+  try {
+    const pluginApp = {
+      db: makeMockDb(),
+      use: () => {},
+      resourceManager: { define: () => {}, use: () => {} },
+      acl: { registerSnippet: () => {}, allow: () => {} },
+    };
+    delete require.cache[indexPath];
+    const DxosAiPlugin = require(indexPath);
+
+    for (const teardownMethod of ['unload', 'remove', 'destroy']) {
+      const inst = new DxosAiPlugin(pluginApp);
+      await inst.load();
+      assert.equal(registered.length >= 1, true);
+      const handler = registered[registered.length - 1];
+      assert.equal(typeof handler, 'function');
+
+      let body = '';
+      const res = {
+        statusCode: 0,
+        headers: {},
+        setHeader(k, v) { this.headers[k] = v; },
+        end(c) { if (c) body += String(c); },
+      };
+      const handled = await handler({ url: '/.well-known/agent-card.json', method: 'GET', headers: { host: '127.0.0.1:13015' } }, res);
+      assert.equal(handled, true);
+      assert.equal(res.statusCode, 200);
+      assert.equal(JSON.parse(body).url, 'http://127.0.0.1:13015/api/dxos-a2a');
+
+      await inst[teardownMethod]();
+      assert.equal(unregistered.includes(handler), true, `${teardownMethod}() must unregister Gateway handler`);
+      assert.equal(inst._gatewayAgentCardHandler, null);
+    }
+  } finally {
+    Module._load = origLoad;
+    delete require.cache[indexPath];
+  }
 });

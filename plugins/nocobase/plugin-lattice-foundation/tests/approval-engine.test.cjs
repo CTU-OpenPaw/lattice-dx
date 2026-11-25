@@ -1670,3 +1670,54 @@ test('non-admin cannot bypass active org policy or set allowSelfApproval:true, a
   assert.equal(await runPat(aiTok, 'POST', 'decide'), 'ok');
 });
 
+test('approval-engine rejects __proto__, constructor, prototype, all, and ALL as organizationId with HTTP 400', async () => {
+  await withMockedNocobase(async () => {
+    const {
+      saveApprovalPolicy,
+      requestApproval,
+      registerApprovalEngine,
+    } = require('../src/server/approval-engine');
+    const { db } = makeApprovalHarness();
+    const resources = new Map();
+    const app = {
+      db,
+      resourceManager: { define: (def) => resources.set(def.name, def.actions), use() {} },
+      acl: { allow() {} },
+    };
+    registerApprovalEngine(app);
+    const actions = resources.get('dxosApprovals');
+
+    for (const badOrg of ['__proto__', 'constructor', 'prototype', 'all', 'ALL']) {
+      await assert.rejects(
+        () => saveApprovalPolicy(db, {
+          organizationId: badOrg,
+          actor: { userId: 1, isRoot: true, isAdmin: true },
+          input: { policyKey: 'pol-1', name: 'Pol', targetCollection: 'latticeRequests', stages: [] },
+        }),
+        (err) => err && err.status === 400 && err.code === 'APPROVAL_ORG_REQUIRED',
+      );
+      await assert.rejects(
+        () => requestApproval(db, {
+          organizationId: badOrg,
+          actor: { userId: 1 },
+          policyKey: 'pol-1',
+          targetCollection: 'latticeRequests',
+          targetRecordId: 1,
+        }),
+        (err) => err && err.status === 400 && err.code === 'APPROVAL_ORG_REQUIRED',
+      );
+      const listCtx = {
+        method: 'GET',
+        state: { currentUser: { id: 1 }, currentRole: 'root', currentRoles: ['root'] },
+        action: { params: { organizationId: badOrg } },
+        request: { body: {} },
+        throw(status, msg) { throw Object.assign(new Error(msg || `HTTP ${status}`), { status }); },
+      };
+      await assert.rejects(
+        () => actions.listInbox(listCtx),
+        (err) => err && err.status === 400 && err.code === 'APPROVAL_ORG_INVALID',
+      );
+    }
+  });
+});
+

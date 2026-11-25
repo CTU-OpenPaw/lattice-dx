@@ -1607,3 +1607,179 @@ test('dist/client-v2/index.js & dist/client/index.js mount /form/:slug, /form, a
   assert.ok(legacyRoutes.some((r) => r.name === 'lattice-form-v2' && r.path === '/form/:slug'));
   assert.ok(legacyRoutes.some((r) => r.name === 'lattice-form-v2-root' && r.path === '/form'));
 });
+
+test('dxosForms rejects __proto__, constructor, prototype, all, and ALL as organizationId with HTTP 400', async () => {
+  await withMockedNocobase(async () => {
+    const { registerPublicForms } = require('../src/server/public-forms');
+    const env = createFakeEnv({
+      roles: [{ name: 'root', allowAll: true }],
+      rolesUsers: [{ userId: 999, roleName: 'root' }],
+    });
+    registerPublicForms(env.app);
+    const res = env.definedResources.dxosForms;
+
+    for (const badOrg of ['__proto__', 'constructor', 'prototype', 'all', 'ALL']) {
+      const saveCtx = makeCtx({
+        method: 'POST',
+        user: { id: 999 },
+        role: 'root',
+        roles: ['root'],
+        body: {
+          organizationId: badOrg,
+          slug: 'valid-slug',
+          title: 'Test Form',
+          targetCollection: 'latticeRequests',
+          allowedFieldsJson: [{ name: 'name', type: 'string' }],
+        },
+      });
+      await assert.rejects(
+        () => res.actions.save(saveCtx),
+        (err) => err && err.status === 400,
+        `Expected HTTP 400 for organizationId=${badOrg}`,
+      );
+    }
+  });
+});
+
+test('public-form-html serves standalone nonce-CSP HTML shell for /v/form/:slug without 401/404 or XSS', async () => {
+  await withMockedNocobase(async () => {
+    const {
+      matchPublicFormPath,
+      renderPublicFormHtml,
+      createPublicFormGatewayHandler,
+    } = require('../src/server/public-form-html');
+
+    // 1. matchPublicFormPath
+    assert.deepEqual(matchPublicFormPath('/v/form'), { matched: true, rawSlug: '' });
+    assert.deepEqual(matchPublicFormPath('/v/form/'), { matched: true, rawSlug: '' });
+    assert.deepEqual(matchPublicFormPath('/v/form/cold-intake'), { matched: true, rawSlug: 'cold-intake' });
+    assert.deepEqual(matchPublicFormPath('/v/form/cold-intake/'), { matched: true, rawSlug: 'cold-intake' });
+    assert.deepEqual(matchPublicFormPath('/v/form/%E0%A4%A'), { matched: true, rawSlug: '' });
+    assert.deepEqual(matchPublicFormPath('/v/signin'), { matched: false, rawSlug: '' });
+    assert.deepEqual(matchPublicFormPath('/v/assets/index.js'), { matched: false, rawSlug: '' });
+    assert.deepEqual(matchPublicFormPath('/api/dxosForms:meta'), { matched: false, rawSlug: '' });
+    assert.deepEqual(matchPublicFormPath('/v/form/a/b'), { matched: false, rawSlug: '' });
+
+    // 2. renderPublicFormHtml security invariants (nonce, inline SVG favicon, zero on*, zero innerHTML, XSS escaping)
+    const xssTitle = 'Cold </script><script>alert(1)</script> & Intake';
+    const htmlOk = renderPublicFormHtml({
+      slug: 'cold-intake',
+      formMeta: {
+        slug: 'cold-intake',
+        title: xssTitle,
+        description: 'Desc </script>',
+        fields: [{ name: 'name', label: 'Subject', type: 'string', required: true }],
+        honeypotField: '_hp_website',
+        requireAccessToken: true,
+        active: true,
+      },
+      nonce: 'test-nonce-123',
+      apiBasePath: '/api',
+    });
+    assert.match(htmlOk, /<link rel="icon" type="image\/svg\+xml" href="data:image\/svg\+xml,/);
+    assert.equal(htmlOk.includes('favicon_no_exist.ico'), false);
+    assert.match(htmlOk, /<style nonce="test-nonce-123">/);
+    assert.match(htmlOk, /<script type="application\/json" id="dxos-form-bootstrap" nonce="test-nonce-123">/);
+    assert.match(htmlOk, /<script nonce="test-nonce-123">/);
+    assert.equal(/\son[a-z]+\s*=/i.test(htmlOk), false, 'Must have zero inline on* event attributes');
+    assert.equal(htmlOk.includes('innerHTML'), false, 'Must never use innerHTML');
+    assert.equal(htmlOk.includes('<script>alert(1)</script>'), false, 'Raw </script> must be escaped');
+    assert.match(htmlOk, /\\u003c\/script\\u003e/);
+    assert.match(htmlOk, /public-form-receipt/);
+    assert.match(htmlOk, /public-form-status-card/);
+    assert.match(htmlOk, /public-form-check-status-btn/);
+
+    const htmlErr = renderPublicFormHtml({
+      slug: 'nonexistent-test',
+      formMeta: null,
+      errorMessage: 'Public form not found or inactive.',
+      nonce: 'err-nonce-456',
+    });
+    assert.match(htmlErr, /"ok":false/);
+    assert.match(htmlErr, /Public form not found or inactive\./);
+    // Client script must skip dxosForms:meta fetch when bootstrap.ok is false
+    assert.match(htmlErr, /if\s*\(\s*!bootstrap\.ok\b/);
+    assert.equal(htmlErr.includes('dxosForms:meta'), false);
+
+    // 3. createPublicFormGatewayHandler intercepts GET/HEAD /v/form/:slug cleanly
+    const env = createFakeEnv({
+      forms: [{
+        id: 7,
+        organizationId: 'org-secret-tenant',
+        slug: 'partner-intake',
+        title: 'Partner Intake',
+        description: 'Zero-PII intake',
+        targetCollection: 'latticeRequests',
+        allowedFieldsJson: [{ name: 'name', label: 'Subject', type: 'string', required: true }],
+        requireAccessToken: true,
+        accessTokenHash: sha256('secret-token-value'),
+        workflowRuleKey: 'secret-workflow-rule',
+        active: true,
+      }],
+    });
+
+    const prevRls = process.env.DX_PG_RLS_SESSION;
+    process.env.DX_PG_RLS_SESSION = 'true';
+    try {
+      const handler = createPublicFormGatewayHandler({ getDb: () => env.db });
+
+      const makeRes = () => {
+        const headers = {};
+        let statusCode = null;
+        let body = '';
+        return {
+          writeHead(code, hdrs) {
+            statusCode = code;
+            for (const [k, v] of Object.entries(hdrs || {})) headers[k.toLowerCase()] = v;
+          },
+          setHeader(k, v) { headers[k.toLowerCase()] = v; },
+          end(chunk = '') { body += String(chunk || ''); },
+          _out: () => ({ statusCode, headers, body }),
+        };
+      };
+
+      // Non-matching paths/methods return false
+      assert.equal(await handler({ method: 'POST', url: '/v/form/partner-intake' }, makeRes()), false);
+      assert.equal(await handler({ method: 'GET', url: '/v/signin' }, makeRes()), false);
+      assert.equal(await handler({ method: 'GET', url: '/v/assets/index.js' }, makeRes()), false);
+      assert.equal(await handler({ method: 'GET', url: '/api/dxosForms:meta?slug=partner-intake' }, makeRes()), false);
+
+      // Valid active slug returns 200 HTML with strict CSP + zero leaked secrets
+      const resValid = makeRes();
+      const handledValid = await handler({ method: 'GET', url: '/v/form/partner-intake?code=LDX-FRM-1' }, resValid);
+      assert.equal(handledValid, true);
+      const outValid = resValid._out();
+      assert.equal(outValid.statusCode, 200);
+      assert.equal(outValid.headers['content-type'], 'text/html; charset=utf-8');
+      assert.equal(outValid.headers['cache-control'], 'no-store');
+      assert.equal(outValid.headers['x-content-type-options'], 'nosniff');
+      assert.equal(outValid.headers['x-frame-options'], 'SAMEORIGIN');
+      assert.equal(outValid.headers['referrer-policy'], 'no-referrer');
+      assert.match(outValid.headers['content-security-policy'], /^default-src 'none'; script-src 'nonce-[A-Za-z0-9_-]+'; style-src 'nonce-[A-Za-z0-9_-]+'; img-src data:; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'self'$/);
+      assert.equal(outValid.body.includes('org-secret-tenant'), false);
+      assert.equal(outValid.body.includes('secret-workflow-rule'), false);
+      assert.equal(outValid.body.includes(sha256('secret-token-value')), false);
+      assert.match(outValid.body, /"ok":true/);
+      assert.ok(env.rlsEvents.some((e) => e.sql.includes("set_config('app.rls_bypass', 'on'")));
+
+      // HEAD returns empty body
+      const resHead = makeRes();
+      assert.equal(await handler({ method: 'HEAD', url: '/v/form/partner-intake' }, resHead), true);
+      assert.equal(resHead._out().statusCode, 200);
+      assert.equal(resHead._out().body, '');
+
+      // Unknown / invalid / malformed slug returns 200 HTML with ok: false without DB error
+      for (const testUrl of ['/v/form/nonexistent-test', '/v/form/admin', '/v/form/%E0%A4%A', '/v/form']) {
+        const resMissing = makeRes();
+        assert.equal(await handler({ method: 'GET', url: testUrl }, resMissing), true);
+        const outMissing = resMissing._out();
+        assert.equal(outMissing.statusCode, 200);
+        assert.match(outMissing.body, /"ok":false/);
+        assert.match(outMissing.body, /Public form not found or inactive\./);
+      }
+    } finally {
+      if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+      else process.env.DX_PG_RLS_SESSION = prevRls;
+    }
+  });
+});

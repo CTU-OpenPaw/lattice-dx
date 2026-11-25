@@ -24,12 +24,12 @@ const {
 const {
   canUsePgRlsSession,
   getActiveRlsContext,
+  isValidOrganizationId,
   runInRlsSavepoint,
   withSystemRlsBypass,
   withTenantRlsContext,
 } = require('./pg-rls');
 
-const ORG_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const POLICY_KEY_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const COLLECTION_NAME_RE = /^lattice[A-Z][A-Za-z0-9]{1,64}$/;
 const ROLE_NAME_RE = /^[a-zA-Z0-9_-]{2,64}$/;
@@ -139,7 +139,7 @@ function readParams(ctx) {
 
 function assertValidOrgId(rawOrgId) {
   const clean = typeof rawOrgId === 'string' ? rawOrgId.trim() : '';
-  if (!ORG_RE.test(clean)) {
+  if (!isValidOrganizationId(clean)) {
     throw failApproval('APPROVAL_ORG_REQUIRED', 400, 'Valid organizationId is required.');
   }
   return clean;
@@ -380,7 +380,7 @@ async function resolveActorContext(db, ctx, { requestedOrgId = null, allowRootCr
   const reqOrgClean = requestedOrgId != null && String(requestedOrgId).trim() !== ''
     ? String(requestedOrgId).trim()
     : null;
-  if (reqOrgClean && !ORG_RE.test(reqOrgClean)) {
+  if (reqOrgClean && !isValidOrganizationId(reqOrgClean)) {
     throw failApproval('APPROVAL_ORG_INVALID', 400, 'Invalid organizationId.');
   }
 

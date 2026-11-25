@@ -12,6 +12,11 @@ const { AsyncLocalStorage } = require('node:async_hooks');
 
 const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+const PROTO_POLLUTION_KEYS = Object.freeze(new Set(['__proto__', 'constructor', 'prototype']));
+const SNAKE_CASE_ORG_TABLES = Object.freeze(new Set([
+  'lattice_native_request_attachments',
+  'lattice_native_request_uploads',
+]));
 const CUSTOM_RLS_TABLE_RE = /^latticeCustom[A-Za-z0-9_]*$/;
 const RLS_POLICY_NAME = 'lattice_tenant_isolation';
 const RLS_BRIDGE_MARKER = Symbol.for('latticedx.pgRlsBridgeInstalled');
@@ -81,6 +86,8 @@ const TENANT_RLS_TABLES = Object.freeze([
   'latticeApprovalRequests',
   'latticePublicForms',
   'latticePublicFormSubmissions',
+  'lattice_native_request_attachments',
+  'lattice_native_request_uploads',
 ]);
 
 const TENANT_RLS_TABLE_SET = new Set(TENANT_RLS_TABLES);
@@ -96,11 +103,26 @@ function assertSafeSqlIdentifier(identifier) {
   return identifier;
 }
 
+function isValidOrganizationId(raw) {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim();
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (lower === 'all' || PROTO_POLLUTION_KEYS.has(lower)) return false;
+  return ORG_ID_RE.test(clean);
+}
+
 function assertValidOrganizationId(organizationId) {
-  if (typeof organizationId !== 'string' || !ORG_ID_RE.test(organizationId)) {
+  if (typeof organizationId !== 'string' || organizationId.trim() !== organizationId || !isValidOrganizationId(organizationId)) {
     throw rlsError('INVALID_RLS_ORGANIZATION', 400, 'Invalid RLS organization identifier.');
   }
   return organizationId;
+}
+
+function resolveTenantOrgColumn(tableName, explicitCol) {
+  return assertSafeSqlIdentifier(
+    explicitCol || (SNAKE_CASE_ORG_TABLES.has(tableName) ? 'organization_id' : 'organizationId'),
+  );
 }
 
 function quoteIdentifier(identifier) {
@@ -252,15 +274,16 @@ function installRlsTransactionBridge(db, RepositoryClass) {
   return true;
 }
 
-function buildRlsPolicySql(tableName, { schema = 'public', policyName = RLS_POLICY_NAME } = {}) {
+function buildRlsPolicySql(tableName, { schema = 'public', policyName = RLS_POLICY_NAME, orgColumn } = {}) {
   const safeSchema = assertSafeSqlIdentifier(schema);
   const safeTable = quoteIdentifier(tableName);
   const safePolicy = assertSafeSqlIdentifier(policyName);
+  const safeOrgCol = quoteIdentifier(resolveTenantOrgColumn(tableName, orgColumn));
   const qualifiedTable = `${safeSchema}.${safeTable}`;
   const predicate = [
     "current_setting('app.rls_bypass', true) = 'on'",
     "current_setting('app.current_org', true) = '*'",
-    '"organizationId" = nullif(current_setting(\'app.current_org\', true), \'\')',
+    `${safeOrgCol} = nullif(current_setting('app.current_org', true), '')`,
   ].join(' OR ');
 
   return {
@@ -315,7 +338,7 @@ async function discoverTenantRlsTables(db, options = {}) {
     'SELECT table_name',
     'FROM information_schema.columns',
     "WHERE table_schema = 'public'",
-    "  AND column_name = 'organizationId'",
+    "  AND column_name IN ('organizationId', 'organization_id')",
     "  AND table_name LIKE 'lattice%'",
     'ORDER BY table_name;',
   ].join('\n');
@@ -459,11 +482,15 @@ function setContextRlsTransaction(ctx, transaction) {
 module.exports = {
   IDENTIFIER_RE,
   ORG_ID_RE,
+  PROTO_POLLUTION_KEYS,
+  SNAKE_CASE_ORG_TABLES,
   RLS_POLICY_NAME,
   RLS_BRIDGE_MARKER,
   TENANT_RLS_TABLES,
   assertSafeSqlIdentifier,
+  isValidOrganizationId,
   assertValidOrganizationId,
+  resolveTenantOrgColumn,
   quoteIdentifier,
   canUsePgRlsSession,
   getActiveRlsContext,

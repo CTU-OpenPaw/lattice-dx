@@ -6,7 +6,7 @@
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
-const { Plugin } = require('@nocobase/server');
+const { Plugin, Gateway } = require('@nocobase/server');
 const { seedFoundation } = require('./seed');
 const {createApplicationCatalog}=require('../shared/application-catalog');
 const {registerSampleApplications}=require('../applications/catalog');
@@ -70,11 +70,12 @@ const {
   cancelApprovalRequest,
 }=require('./approval-engine');
 const {registerPublicForms}=require('./public-forms');
+const {createPublicFormGatewayHandler}=require('./public-form-html');
 const {attachRlsPolicyToTable, canUsePgRlsSession, withSystemRlsBypass}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
     this.db.attachLatticeRlsPolicy = (tableName, txOrOpts) => {
-      const opts = txOrOpts && typeof txOrOpts === 'object' && ('transaction' in txOrOpts || 'schema' in txOrOpts || 'policyName' in txOrOpts)
+      const opts = txOrOpts && typeof txOrOpts === 'object' && ('transaction' in txOrOpts || 'schema' in txOrOpts || 'policyName' in txOrOpts || 'orgColumn' in txOrOpts)
         ? txOrOpts
         : (txOrOpts ? { transaction: txOrOpts } : {});
       return attachRlsPolicyToTable(this.db, tableName, opts);
@@ -123,6 +124,11 @@ class LatticeFoundationPlugin extends Plugin {
       cancelApprovalRequest,
     };
     registerPublicForms(this.app);
+    this.unregisterPublicFormGatewayHandler();
+    this._publicFormGatewayHandler = createPublicFormGatewayHandler({ getDb: () => this.db });
+    if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
+      Gateway.registerRequestHandler(this._publicFormGatewayHandler);
+    }
     this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'auth'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
@@ -158,17 +164,28 @@ class LatticeFoundationPlugin extends Plugin {
       await exporter.shutdown().catch(() => {});
     }
   }
+  unregisterPublicFormGatewayHandler() {
+    if (this._publicFormGatewayHandler) {
+      if (Gateway && typeof Gateway.unregisterRequestHandler === 'function') {
+        Gateway.unregisterRequestHandler(this._publicFormGatewayHandler);
+      }
+      this._publicFormGatewayHandler = null;
+    }
+  }
   async unload() {
+    this.unregisterPublicFormGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.unload === 'function') await super.unload();
   }
   async remove() {
+    this.unregisterPublicFormGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.remove === 'function') await super.remove();
   }
   async destroy() {
+    this.unregisterPublicFormGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.destroy === 'function') await super.destroy();

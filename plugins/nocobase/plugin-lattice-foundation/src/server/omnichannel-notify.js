@@ -25,13 +25,13 @@ const {
 const {
   canUsePgRlsSession,
   getActiveRlsContext,
+  isValidOrganizationId,
   runInRlsSavepoint,
   withTenantRlsContext,
 } = require('./pg-rls');
 
 const SUPPORTED_CHANNELS = Object.freeze(['smtp', 'telegram', 'slack', 'webhook']);
 const SUPPORTED_CHANNEL_SET = new Set(SUPPORTED_CHANNELS);
-const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const TELEGRAM_TOKEN_RE = /^[0-9]{5,16}:[A-Za-z0-9_-]{20,120}$/;
 const TELEGRAM_CHAT_RE = /^-?[0-9a-zA-Z_@.-]{1,64}$/;
 const HEADER_INJECTION_RE = /[\r\n\0]/;
@@ -1073,7 +1073,7 @@ async function resolveChannelConnector(db, organizationId, channel, connectorKey
 
 async function dispatchChannelNotification(db, params = {}, options = {}) {
   const organizationId = typeof params.organizationId === 'string' ? params.organizationId.trim() : '';
-  if (!ORG_ID_RE.test(organizationId)) {
+  if (!isValidOrganizationId(organizationId)) {
     throw failNotify('NOTIFY_ORG_REQUIRED', 400, 'Valid organizationId is required.');
   }
   const channel = normalizeChannelName(params.channel);
@@ -1397,7 +1397,7 @@ async function resolveActiveConnectorsForOrg(db, organizationId, options = {}) {
 
 async function dispatchOmnichannel(db, payload = {}, options = {}) {
   const organizationId = typeof payload.organizationId === 'string' ? payload.organizationId.trim() : '';
-  if (!ORG_ID_RE.test(organizationId)) {
+  if (!isValidOrganizationId(organizationId)) {
     throw failNotify('NOTIFY_ORG_REQUIRED', 400, 'Valid organizationId is required.');
   }
 
@@ -1536,7 +1536,7 @@ function serializeDeliveryLog(row) {
 
 async function listDeliveryLogs(db, { organizationId, channel, status, dryRun, limit = 50, offset = 0 } = {}) {
   const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
-  if (!ORG_ID_RE.test(orgId)) {
+  if (!isValidOrganizationId(orgId)) {
     throw failNotify('NOTIFY_ORG_REQUIRED', 400, 'Valid organizationId is required.');
   }
   const repo = getRepo(db, 'latticeNotificationDeliveries');
@@ -1617,7 +1617,7 @@ async function resolveNotifyCaller(db, ctx, requestedOrgId = null) {
   if (isRoot) {
     const cleanReq = requestedOrgId != null ? String(requestedOrgId).trim() : '';
     if (cleanReq) {
-      if (!ORG_ID_RE.test(cleanReq)) throw failNotify('NOTIFY_ORG_REQUIRED', 400, 'Invalid organizationId.');
+      if (!isValidOrganizationId(cleanReq)) throw failNotify('NOTIFY_ORG_REQUIRED', 400, 'Invalid organizationId.');
       return { isRoot: true, isAdmin: true, isOperator: true, organizationId: cleanReq };
     }
     const actor = await resolveNativeActor(db, ctx.state.currentUser);

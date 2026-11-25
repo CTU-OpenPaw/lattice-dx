@@ -194,14 +194,92 @@ function buildStaticAgentCatalog() {
 
 const A2A_AGENT_CATALOG = buildStaticAgentCatalog();
 
-function resolveSafeCardEndpointUrl(baseUrl, env = process.env) {
-  const raw = String(
-    baseUrl
-      || env?.DXOS_A2A_PUBLIC_URL
-      || env?.DXOS_PUBLIC_URL
-      || env?.NOCOBASE_PUBLIC_URL
-      || 'http://127.0.0.1:13000',
-  ).trim();
+function readHeaderValue(reqOrCtx, headerName) {
+  if (!reqOrCtx || typeof reqOrCtx !== 'object') return '';
+  const target = String(headerName || '').toLowerCase();
+  const sources = [reqOrCtx.headers, reqOrCtx.request?.headers];
+  for (const bag of sources) {
+    if (!bag || typeof bag !== 'object') continue;
+    for (const [k, v] of Object.entries(bag)) {
+      if (String(k).toLowerCase() !== target) continue;
+      const raw = Array.isArray(v) ? v[0] : v;
+      if (raw !== undefined && raw !== null) {
+        const str = String(raw).trim();
+        if (str) return str;
+      }
+    }
+  }
+  if (typeof reqOrCtx.get === 'function') {
+    try {
+      const got = reqOrCtx.get(headerName);
+      if (got !== undefined && got !== null) {
+        const str = String(got).trim();
+        if (str) return str;
+      }
+    } catch {
+      // ignore header getter errors
+    }
+  }
+  return '';
+}
+
+function resolveRequestOriginFromHeaders(reqOrCtx) {
+  if (!reqOrCtx || typeof reqOrCtx !== 'object') return '';
+  const rawProto = readHeaderValue(reqOrCtx, 'x-forwarded-proto');
+  const protoToken = String(rawProto || '').split(',')[0].trim().toLowerCase();
+  let proto = '';
+  if (protoToken === 'http' || protoToken === 'https') {
+    proto = protoToken;
+  } else {
+    const ctxProto = String(reqOrCtx.protocol || '').trim().toLowerCase();
+    if (ctxProto === 'http' || ctxProto === 'https') {
+      proto = ctxProto;
+    } else {
+      proto = reqOrCtx.socket?.encrypted ? 'https' : 'http';
+    }
+  }
+
+  const rawHostHeader = readHeaderValue(reqOrCtx, 'x-forwarded-host') || readHeaderValue(reqOrCtx, 'host');
+  const rawHost = String(rawHostHeader || '').split(',')[0].trim();
+  if (!rawHost || rawHost.length > 255) return '';
+  if (/[\s/\\@?#%\u0000-\u001f\u007f]/.test(rawHost)) return '';
+
+  try {
+    const parsed = new URL(`${proto}://${rawHost}`);
+    if (parsed.protocol !== `${proto}:`) return '';
+    if (parsed.username || parsed.password) return '';
+    if ((parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) return '';
+    if (!parsed.host || !parsed.hostname) return '';
+    const lowerRaw = rawHost.toLowerCase();
+    const lowerHost = parsed.host.toLowerCase();
+    const isExplicitDefaultPort = (proto === 'http' && lowerRaw === `${parsed.hostname.toLowerCase()}:80`)
+      || (proto === 'https' && lowerRaw === `${parsed.hostname.toLowerCase()}:443`);
+    if (lowerHost !== lowerRaw && !isExplicitDefaultPort) {
+      return '';
+    }
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return '';
+  }
+}
+
+function resolveSafeCardEndpointUrl(baseUrl, env = process.env, reqOrCtx = null) {
+  const candidates = [
+    baseUrl,
+    env?.DXOS_A2A_PUBLIC_URL,
+    env?.DXOS_PUBLIC_URL,
+    env?.NOCOBASE_PUBLIC_URL,
+    resolveRequestOriginFromHeaders(reqOrCtx),
+    'http://127.0.0.1:13000',
+  ];
+  let raw = 'http://127.0.0.1:13000';
+  for (const candidate of candidates) {
+    const trimmed = String(candidate ?? '').trim();
+    if (trimmed) {
+      raw = trimmed;
+      break;
+    }
+  }
   try {
     const parsed = new URL(raw);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -218,7 +296,7 @@ function resolveSafeCardEndpointUrl(baseUrl, env = process.env) {
   }
 }
 
-function buildAgentCard({ baseUrl, version, env = process.env } = {}) {
+function buildAgentCard({ baseUrl, version, env = process.env, reqOrCtx = null } = {}) {
   const skills = Object.values(A2A_AGENT_CATALOG).map((entry) => ({
     id: entry.id,
     name: entry.name,
@@ -231,7 +309,7 @@ function buildAgentCard({ baseUrl, version, env = process.env } = {}) {
   return {
     name: 'LatticeDX Enterprise A2A Gateway',
     description: 'Governed Google/LF A2A protocol gateway for LatticeDX enterprise AI agents.',
-    url: resolveSafeCardEndpointUrl(baseUrl, env),
+    url: resolveSafeCardEndpointUrl(baseUrl, env, reqOrCtx),
     version: String(version || resolveGatewayVersion()),
     capabilities: {
       streaming: false,
@@ -254,13 +332,53 @@ function createAgentCardMiddleware({ baseUrl, version, env = process.env } = {})
     const method = String(ctx.method || 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD') {
       ctx.status = 405;
+      ctx.set?.('Allow', 'GET, HEAD');
+      ctx.set?.('X-Content-Type-Options', 'nosniff');
       ctx.body = { error: { code: 'METHOD_NOT_ALLOWED', message: 'Agent Card endpoint only accepts GET/HEAD.' } };
       return;
     }
     ctx.set?.('Content-Type', 'application/json; charset=utf-8');
     ctx.set?.('Cache-Control', 'no-store');
+    ctx.set?.('X-Content-Type-Options', 'nosniff');
     ctx.status = 200;
-    ctx.body = buildAgentCard({ baseUrl, version, env });
+    ctx.body = buildAgentCard({ baseUrl, version, env, reqOrCtx: ctx });
+  };
+}
+
+function createGatewayAgentCardRequestHandler({ baseUrl, version, env = process.env } = {}) {
+  return async function dxosA2aGatewayAgentCardHandler(req, res) {
+    let pathname = '/';
+    try {
+      pathname = new URL(String(req?.url || '/'), 'http://127.0.0.1').pathname;
+    } catch {
+      return false;
+    }
+    if (!isAgentCardPath(pathname)) {
+      return false;
+    }
+
+    const method = String(req?.method || 'GET').trim().toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD') {
+      res.statusCode = 405;
+      res.setHeader?.('Allow', 'GET, HEAD');
+      res.setHeader?.('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader?.('Cache-Control', 'no-store');
+      res.setHeader?.('X-Content-Type-Options', 'nosniff');
+      res.end(JSON.stringify({ error: 'Method Not Allowed' }));
+      return true;
+    }
+
+    const card = buildAgentCard({ baseUrl, version, env, reqOrCtx: req });
+    res.statusCode = 200;
+    res.setHeader?.('Content-Type', 'application/json; charset=utf-8');
+    res.setHeader?.('Cache-Control', 'no-store');
+    res.setHeader?.('X-Content-Type-Options', 'nosniff');
+    if (method === 'HEAD') {
+      res.end();
+    } else {
+      res.end(JSON.stringify(card));
+    }
+    return true;
   };
 }
 
@@ -1687,8 +1805,11 @@ module.exports = {
   A2A_VALID_STATUSES,
   A2A_TERMINAL_STATES,
   A2A_AGENT_CATALOG,
+  resolveRequestOriginFromHeaders,
+  resolveSafeCardEndpointUrl,
   buildAgentCard,
   createAgentCardMiddleware,
+  createGatewayAgentCardRequestHandler,
   assertSafePeerUrl,
   delegateToExternalA2aPeer,
   handleA2aJsonRpc,

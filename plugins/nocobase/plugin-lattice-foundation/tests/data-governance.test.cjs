@@ -404,7 +404,7 @@ test('Task 2.1 collections, migration 20261124000200, and 42-table pg-rls define
     assert.ok(quarantineCol.indexes.some((i) => i.name === 'idx_lattice_quarantine_org_status'));
 
     const pgRls = require('../src/server/pg-rls');
-    assert.ok(pgRls.TENANT_RLS_TABLES.length >= 52, `Expected >= 52 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
+    assert.ok(pgRls.TENANT_RLS_TABLES.length >= 54, `Expected >= 54 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
     for (const tbl of [
       'latticeFrozenSnapshots', 'latticeDataLineage', 'latticeDataQuarantine',
       'latticeOrderLines', 'latticeStockLots', 'latticeEpodRecords',

@@ -8,13 +8,13 @@
  */
 'use strict';
 
-const { Plugin } = require('@nocobase/server');
+const { Plugin, Gateway } = require('@nocobase/server');
 const { ADMIN_BUILDER_TOOL_NAMES, createDxosTools, registerDxosToolsWithHost, isStudioAdmin, resolveActorScope, failTool, val } = require('./ai-tools-core');
 const { validateMcpServerUrl } = require('./ai-schemas');
 const { enforceProfileRoleLock, rebindStarterAgentsToService } = require('./ai-sync');
 const { createItOtMcpTools } = require('./mcp-itot-tools');
 const { createMcpGatewayMiddleware } = require('./mcp-gateway');
-const { createAgentCardMiddleware, createA2aMiddleware } = require('./a2a-gateway');
+const { createAgentCardMiddleware, createGatewayAgentCardRequestHandler, createA2aMiddleware } = require('./a2a-gateway');
 const { createDxosAiActions, ensureDefaultAiWorkforce } = require('./ai-resource');
 const { attachAppPubSub } = require('./surface-events');
 const { startProactiveTriageScheduler } = require('./proactive-triage');
@@ -46,6 +46,12 @@ class DxosAiPlugin extends Plugin {
       itOtTools: createItOtMcpTools(this.db),
     });
     const agentCardMiddleware = createAgentCardMiddleware({ env: process.env });
+    if (this._gatewayAgentCardHandler) {
+      Gateway?.unregisterRequestHandler?.(this._gatewayAgentCardHandler);
+      this._gatewayAgentCardHandler = null;
+    }
+    this._gatewayAgentCardHandler = createGatewayAgentCardRequestHandler({ env: process.env });
+    Gateway?.registerRequestHandler?.(this._gatewayAgentCardHandler);
     const a2aMiddleware = createA2aMiddleware({
       app: this.app,
       db: this.db,
@@ -267,6 +273,31 @@ class DxosAiPlugin extends Plugin {
   async unload() {
     this._triageScheduler?.stop?.();
     this._triageScheduler = null;
+    if (this._gatewayAgentCardHandler) {
+      Gateway?.unregisterRequestHandler?.(this._gatewayAgentCardHandler);
+      this._gatewayAgentCardHandler = null;
+    }
+    if (typeof super.unload === 'function') await super.unload();
+  }
+
+  async remove() {
+    this._triageScheduler?.stop?.();
+    this._triageScheduler = null;
+    if (this._gatewayAgentCardHandler) {
+      Gateway?.unregisterRequestHandler?.(this._gatewayAgentCardHandler);
+      this._gatewayAgentCardHandler = null;
+    }
+    if (typeof super.remove === 'function') await super.remove();
+  }
+
+  async destroy() {
+    this._triageScheduler?.stop?.();
+    this._triageScheduler = null;
+    if (this._gatewayAgentCardHandler) {
+      Gateway?.unregisterRequestHandler?.(this._gatewayAgentCardHandler);
+      this._gatewayAgentCardHandler = null;
+    }
+    if (typeof super.destroy === 'function') await super.destroy();
   }
 }
 
