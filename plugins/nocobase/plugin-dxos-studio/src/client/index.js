@@ -14,7 +14,7 @@
   }
 })(function (client, React, antd) {
   'use strict';
-  const { createDxosStudioSettingsPage } = require('./studio-settings');
+  const { createDxosStudioSettingsPage, createFlowPinStorage } = require('./studio-settings');
   const { createFlowStudioApp } = require('./flow/flow-studio-app');
   const { createConnectedAppsPanel } = require('./flow/connected-apps-panel');
 
@@ -116,7 +116,8 @@
   class DxosStudioClientPlugin extends client.Plugin {
     async load() {
       const Page = createDxosStudioSettingsPage(client, React, antd, this.app);
-      const FlowPage = createFlowStudioApp(client, React, antd, this.app);
+      const pinStorage = typeof createFlowPinStorage === 'function' ? createFlowPinStorage() : null;
+      const FlowPage = createFlowStudioApp(client, React, antd, this.app, { pinStorage });
       const ConnectorsPage = createWorkflowConnectorsPage(this.app);
       registerStudioSettings(this.app, Page, FlowPage, ConnectorsPage);
     }

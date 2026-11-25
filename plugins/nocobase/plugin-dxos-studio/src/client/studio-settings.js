@@ -10,6 +10,7 @@
 
 const { createDxosGovernanceConsoles, GOVERNANCE_SECTIONS } = require('./governance-consoles');
 const { createBuilderBrokerPanels, parseJsonSafe } = require('./builder-broker-panels');
+const { createFlowPinStorage } = require('./flow-pin-storage');
 
 const VALID_STUDIO_TABS = new Set([
   'workflows',
@@ -679,4 +680,4 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
   };
 }
 
-module.exports = { createDxosStudioSettingsPage };
+module.exports = { createDxosStudioSettingsPage, createFlowPinStorage };

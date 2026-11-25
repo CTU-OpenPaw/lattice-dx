@@ -9,6 +9,7 @@
 'use strict';
 
 const { N8N_WEBHOOK_PRESETS } = require('./n8n-setup-modal');
+const { insertVariableAtCursor, buildUpstreamPinnedInputs } = require('./flow-validation');
 
 function createNodeInspector(React) {
   const h = React.createElement;
@@ -91,7 +92,7 @@ function createNodeInspector(React) {
       rule = null, graph = null, selectedNode = null, nodeSchema = null, catalog = {},
       onUpdateNode, onDeleteNode, onCloseInspector, onTestNode, onOpenN8nSetup,
       testOutput = null, testBusy = false, activeTrace = null, externalTab = null, externalTabSeq = 0,
-      nodeValidationIssues = [],
+      nodeValidationIssues = [], selectedRun = null, organizationId = '', pinStorage = null,
     } = props;
     const node = React.useMemo(() => (!selectedNode ? null : typeof selectedNode === 'string' ? (graph?.nodes || []).find((n) => n.id === selectedNode) || null : selectedNode), [selectedNode, graph]);
     const schema = React.useMemo(() => nodeSchema || (node?.type ? (catalog?.nodeTypes || []).find((t) => t.type === node.type) || null : null), [nodeSchema, node, catalog]);
@@ -103,16 +104,45 @@ function createNodeInspector(React) {
     const [activeFieldState, setActiveFieldState] = React.useState({ scopeKey: '', name: null });
     const [jsonBuf, setJsonBuf] = React.useState({ scopeKey: '', configSig: '', entries: {}, raw: null });
     const [pinnedMap, setPinnedMap] = React.useState({});
-    const [tabSeqRef] = React.useState(() => ({ val: externalTabSeq || 0 }));
-
-    React.useEffect(() => {
-      if (externalTabSeq && externalTabSeq !== tabSeqRef.val) { tabSeqRef.val = externalTabSeq; if (externalTab) setTab(externalTab); }
-    }, [externalTab, externalTabSeq]);
+    const [tabSeqRef] = React.useState(() => ({ val: externalTabSeq || 0, nodeId: null }));
+    const [cursorRef] = React.useState(() => ({ scopeKey: '', field: null, start: null, end: null }));
 
     const ruleKey = rule?.ruleKey || '__draft__';
     const nodeId = node?.id || null;
     const scopeKey = nodeId ? `${ruleKey}:${nodeId}` : '';
-    const pinKey = nodeId ? `${ruleKey}::${nodeId}` : null;
+    const orgKey = String(organizationId || 'default').trim() || 'default';
+    const pinKey = nodeId ? `${orgKey}::${ruleKey}::${nodeId}` : null;
+    const pinStorageKey = `latticedx:flow-pin:${orgKey}:${ruleKey}`;
+
+    React.useEffect(() => {
+      const extChanged = Boolean(externalTabSeq && externalTabSeq !== tabSeqRef.val);
+      const nodeChanged = nodeId !== tabSeqRef.nodeId;
+      tabSeqRef.nodeId = nodeId;
+      if (extChanged) {
+        tabSeqRef.val = externalTabSeq;
+        if (externalTab) setTab(externalTab);
+      } else if (nodeChanged) {
+        setTab('config');
+      }
+    }, [nodeId, externalTab, externalTabSeq]);
+
+    React.useEffect(() => {
+      if (!pinStorage || typeof pinStorage.getItem !== 'function') return;
+      let raw = null;
+      try { raw = pinStorage.getItem(pinStorageKey); } catch { return; }
+      if (!raw) return;
+      const parsed = safeParseJson(raw);
+      if (!parsed.ok || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) return;
+      setPinnedMap((prev) => {
+        const next = { ...prev };
+        for (const [nid, textVal] of Object.entries(parsed.value)) {
+          if (!nid || BLOCKED.has(nid) || typeof textVal !== 'string') continue;
+          const chk = safeParseJson(textVal);
+          next[`${orgKey}::${ruleKey}::${nid}`] = { text: textVal, error: chk.ok ? null : chk.error };
+        }
+        return next;
+      });
+    }, [pinStorageKey, pinStorage, orgKey, ruleKey]);
     const nodeCfg = node?.config && typeof node.config === 'object' ? node.config : {};
     const configSig = React.useMemo(() => formatJson(nodeCfg, {}), [nodeCfg]);
     const fields = React.useMemo(() => (Array.isArray(schema?.inputSchema?.fields) ? schema.inputSchema.fields : []), [schema]);
@@ -168,19 +198,51 @@ function createNodeInspector(React) {
       setJsonBuf({ scopeKey, configSig: validObj ? formatJson(parsed.value, {}) : configSig, entries: {}, raw: { text, error: err } });
       if (validObj) onUpdateNode?.(node.id, { config: parsed.value });
     }
+    function trackCursor(fieldName, evt) {
+      setActiveField(fieldName);
+      const el = evt?.target;
+      if (el && Number.isFinite(Number(el.selectionStart))) {
+        Object.assign(cursorRef, {
+          scopeKey, field: fieldName, start: Number(el.selectionStart),
+          end: Number.isFinite(Number(el.selectionEnd)) ? Number(el.selectionEnd) : Number(el.selectionStart),
+        });
+      } else if (cursorRef.scopeKey !== scopeKey || cursorRef.field !== fieldName) {
+        Object.assign(cursorRef, { scopeKey, field: fieldName, start: null, end: null });
+      }
+    }
     function insertVariable(expr) {
       if (!node) return;
-      if (activeField === '__raw__') return updateRawConfigText(`${currentRawText()}${expr}`);
+      const hasPos = cursorRef.scopeKey === scopeKey && cursorRef.field === activeField && Number.isFinite(cursorRef.start);
+      const selStart = hasPos ? cursorRef.start : null;
+      const selEnd = hasPos ? cursorRef.end : null;
+      if (activeField === '__raw__') return updateRawConfigText(insertVariableAtCursor(currentRawText(), expr, selStart, selEnd, true));
       const def = fields.find((f) => f.name === activeField);
-      if (def?.type === 'json') return updateJsonFieldText(activeField, `${currentJsonFieldText(activeField, schema?.defaultConfig?.[activeField])}${expr}`);
+      if (def?.type === 'json') return updateJsonFieldText(activeField, insertVariableAtCursor(currentJsonFieldText(activeField, schema?.defaultConfig?.[activeField]), expr, selStart, selEnd, true));
       const cur = nodeCfg[activeField];
-      updateConfigField(activeField, `${cur === undefined || cur === null ? '' : String(cur)}${expr}`);
+      const next = insertVariableAtCursor(cur === undefined || cur === null ? '' : String(cur), expr, selStart, selEnd, false);
+      if (hasPos) {
+        const nextPos = Math.min(next.length, selStart + String(expr || '').length);
+        Object.assign(cursorRef, { start: nextPos, end: nextPos });
+      }
+      updateConfigField(activeField, next);
     }
 
     const defaultPinnedText = React.useMemo(() => {
       const ev = rule?.sampleEvent && typeof rule.sampleEvent === 'object' ? rule.sampleEvent : { type: 'manual.trigger', data: {} };
-      return formatJson({ event: ev, data: ev.data || {}, dmn: {}, steps: {} }, {});
-    }, [rule]);
+      return formatJson(buildUpstreamPinnedInputs(graph, nodeId, selectedRun, ev), {});
+    }, [rule, graph, nodeId, selectedRun]);
+    const persistPins = (nextMap) => {
+      if (!pinStorage || typeof pinStorage.setItem !== 'function') return;
+      const prefix = `${orgKey}::${ruleKey}::`;
+      const out = {};
+      for (const [k, v] of Object.entries(nextMap || {})) {
+        if (k.startsWith(prefix) && v && typeof v.text === 'string') {
+          const nid = k.slice(prefix.length);
+          if (nid && !BLOCKED.has(nid)) out[nid] = v.text;
+        }
+      }
+      try { pinStorage.setItem(pinStorageKey, JSON.stringify(out)); } catch { /* ignore */ }
+    };
     const pinnedEntry = pinKey && pinnedMap[pinKey] ? pinnedMap[pinKey] : { text: defaultPinnedText, error: null };
     const varGroups = React.useMemo(() => buildVariableGroups({ rule, graph, node, catalog }), [rule, graph, node, catalog]);
     const displayOut = (testOutput && (!node || !testOutput.nodeId || testOutput.nodeId === node.id)) ? testOutput : (activeTrace || null);
@@ -190,7 +252,7 @@ function createNodeInspector(React) {
     function renderFieldControl(f) {
       const val = nodeCfg[f.name] !== undefined ? nodeCfg[f.name] : (schema?.defaultConfig?.[f.name] ?? '');
       const testId = `dxos-flow-field-${f.name}`;
-      const base = { 'data-testid': testId, placeholder: f.placeholder || '', onFocus: () => setActiveField(f.name) };
+      const base = { 'data-testid': testId, placeholder: f.placeholder || '', onFocus: (e) => trackCursor(f.name, e), onClick: (e) => trackCursor(f.name, e), onKeyUp: (e) => trackCursor(f.name, e), onSelect: (e) => trackCursor(f.name, e) };
       const selectSpec = resolveSelectOptions(f);
       if (selectSpec) {
         const strVal = String(val || '');
@@ -206,20 +268,20 @@ function createNodeInspector(React) {
       }
       if (f.type === 'boolean') return h('label', { style: S.checkRow }, h('input', { 'data-testid': testId, type: 'checkbox', checked: Boolean(val), onChange: (e) => updateConfigField(f.name, Boolean(e?.target?.checked)) }), f.label || f.name);
       if (f.type === 'number') return h('input', { ...base, type: 'number', value: val ?? '', style: S.input, onChange: (e) => updateConfigField(f.name, toNum(e)) });
-      if (f.type === 'textarea') return h('textarea', { ...base, rows: 3, value: String(val || ''), style: S.textarea, onChange: (e) => updateConfigField(f.name, e?.target?.value ?? '') });
+      if (f.type === 'textarea') return h('textarea', { ...base, rows: 3, value: String(val || ''), style: S.textarea, onChange: (e) => { trackCursor(f.name, e); updateConfigField(f.name, e?.target?.value ?? ''); } });
       if (f.type === 'json') {
         const err = bufActive ? jsonBuf.entries[f.name]?.error : null;
         const onRolePick = (r) => r && updateConfigField('roleNames', Array.isArray(val) && val.includes(r) ? val : [...(Array.isArray(val) ? val : []), r]);
         return h('div', { style: S.grid(4) },
           f.name === 'roleNames' && safeRoles.length ? h('select', { 'data-testid': 'dxos-flow-field-roleNames-picker', value: '', style: S.input, onChange: (e) => onRolePick(e?.target?.value) }, h('option', { value: '' }, '+ Add role from catalog...'), safeRoles.map((r) => h('option', { key: r, value: r }, r))) : null,
-          h('textarea', { ...base, rows: 3, placeholder: '{} (tùy chọn)', value: currentJsonFieldText(f.name, schema?.defaultConfig?.[f.name]), style: S.textarea, onChange: (e) => updateJsonFieldText(f.name, e?.target?.value ?? '') }),
+          h('textarea', { ...base, rows: 3, placeholder: '{} (tùy chọn)', value: currentJsonFieldText(f.name, schema?.defaultConfig?.[f.name]), style: S.textarea, onChange: (e) => { trackCursor(f.name, e); updateJsonFieldText(f.name, e?.target?.value ?? ''); } }),
           err ? h('span', { style: S.err(10) }, err) : null);
       }
       return h('div', { style: S.grid(4) },
         f.name === 'eventType' && safeEvents.length ? h('select', { 'data-testid': 'dxos-flow-field-eventType-picker', style: S.input, value: safeEvents.some((ev) => ev.type === val) ? String(val) : '', onChange: (e) => e?.target?.value && updateConfigField(f.name, e.target.value) }, h('option', { value: '' }, '-- Pick standard event --'), safeEvents.map((ev) => h('option', { key: ev.type, value: ev.type }, `${ev.type} — ${ev.label}`))) : null,
         f.name === 'path' && node.type === 'integration.http' ? h('select', { 'data-testid': 'dxos-flow-n8n-path-picker', style: S.input, value: N8N_WEBHOOK_PRESETS.some((p) => p.path === val) ? String(val) : '', onChange: (e) => e?.target?.value && updateConfigField(f.name, e.target.value) }, h('option', { value: '' }, '-- Chọn preset n8n Webhook --'), N8N_WEBHOOK_PRESETS.map((p) => h('option', { key: p.key, value: p.path }, `${p.path} — ${p.name}`))) : null,
         f.name === 'connectorKey' && onOpenN8nSetup ? h('button', { type: 'button', 'data-testid': 'dxos-flow-open-n8n-from-inspector', onClick: () => onOpenN8nSetup(), style: S.btn(false, false, false) }, '⚙ Cấu hình dịch vụ n8n') : null,
-        h('input', { ...base, type: 'text', value: String(val ?? ''), style: S.input, onChange: (e) => updateConfigField(f.name, e?.target?.value ?? '') }));
+        h('input', { ...base, type: 'text', value: String(val ?? ''), style: S.input, onChange: (e) => { trackCursor(f.name, e); updateConfigField(f.name, e?.target?.value ?? ''); } }));
     }
 
     const inpField = (label, testId, inputProps) => h('div', null, h('label', { style: S.label }, label), h('input', { 'data-testid': testId, ...inputProps, style: S.input }));
@@ -265,7 +327,7 @@ function createNodeInspector(React) {
               h('label', { style: S.checkRow }, h('input', { 'data-testid': 'dxos-flow-continue-on-fail-checkbox', type: 'checkbox', checked: Boolean(node.continueOnFail), onChange: (e) => onUpdateNode?.(node.id, { continueOnFail: Boolean(e?.target?.checked) }) }), 'Continue on Fail'),
               inpField('Timeout (ms)', 'dxos-flow-timeout-input', { type: 'number', min: 100, value: node.timeoutMs ?? '', placeholder: '30000', onChange: (e) => { const raw = e?.target?.value ?? ''; const n = Number(raw); onUpdateNode?.(node.id, { timeoutMs: raw !== '' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined }); } }),
             ),
-            h('textarea', { 'data-testid': 'dxos-flow-raw-config-json', rows: 4, value: currentRawText(), onFocus: () => setActiveField('__raw__'), onChange: (e) => updateRawConfigText(e?.target?.value ?? ''), style: S.textarea }),
+            h('textarea', { 'data-testid': 'dxos-flow-raw-config-json', rows: 4, value: currentRawText(), onFocus: (e) => trackCursor('__raw__', e), onClick: (e) => trackCursor('__raw__', e), onKeyUp: (e) => trackCursor('__raw__', e), onSelect: (e) => trackCursor('__raw__', e), onChange: (e) => { trackCursor('__raw__', e); updateRawConfigText(e?.target?.value ?? ''); }, style: S.textarea }),
             bufActive && jsonBuf.raw?.error ? h('span', { style: S.err(10) }, jsonBuf.raw.error) : null,
           ) : null,
         ),
@@ -273,11 +335,11 @@ function createNodeInspector(React) {
       tab === 'input' ? h('div', { style: S.grid(8) },
         h('div', { style: S.rowBetween },
           h('strong', { style: { fontSize: 12, color: '#0f172a' } }, 'Pinned Mock Input (JSON)'),
-          h('button', { type: 'button', onClick: () => pinKey && setPinnedMap((p) => ({ ...p, [pinKey]: { text: defaultPinnedText, error: null } })), style: S.btn(false, false, false) }, 'Reset Sample'),
+          h('button', { type: 'button', onClick: () => { if (!pinKey) return; const nextMap = { ...pinnedMap }; delete nextMap[pinKey]; setPinnedMap(nextMap); persistPins(nextMap); }, style: S.btn(false, false, false) }, 'Reset Sample'),
         ),
-        h('textarea', { 'data-testid': 'dxos-flow-pinned-input-json', rows: 8, value: pinnedEntry.text, style: S.textarea, onChange: (e) => { if (!pinKey) return; const t = e?.target?.value ?? ''; const parsed = safeParseJson(t); setPinnedMap((p) => ({ ...p, [pinKey]: { text: t, error: parsed.ok ? null : parsed.error } })); } }),
+        h('textarea', { 'data-testid': 'dxos-flow-pinned-input-json', rows: 8, value: pinnedEntry.text, style: S.textarea, onChange: (e) => { if (!pinKey) return; const t = e?.target?.value ?? ''; const parsed = safeParseJson(t); const nextMap = { ...pinnedMap, [pinKey]: { text: t, error: parsed.ok ? null : parsed.error } }; setPinnedMap(nextMap); persistPins(nextMap); } }),
         pinnedEntry.error ? h('span', { style: S.err(11) }, pinnedEntry.error) : null,
-        h('button', { 'data-testid': 'dxos-flow-test-node-btn', type: 'button', disabled: Boolean(testBusy || pinnedEntry.error), onClick: () => { const parsed = safeParseJson(pinnedEntry.text); if (parsed.ok) onTestNode?.(node.id, parsed.value); }, style: S.btn(true, false, Boolean(testBusy || pinnedEntry.error)) }, testBusy ? 'Testing Node…' : 'Test This Node'),
+        h('button', { 'data-testid': 'dxos-flow-test-node-btn', type: 'button', disabled: Boolean(testBusy || pinnedEntry.error), onClick: () => { const parsed = safeParseJson(pinnedEntry.text); if (parsed.ok) { setTab('output'); onTestNode?.(node.id, parsed.value); } }, style: S.btn(true, false, Boolean(testBusy || pinnedEntry.error)) }, testBusy ? 'Testing Node…' : 'Test This Node'),
       ) : null,
       tab === 'output' ? h('div', { 'data-testid': 'dxos-flow-output-view', style: S.card }, !displayOut
         ? h('span', { style: { fontSize: 12, color: '#64748b' } }, 'No test output or trace yet. Run "Test This Node" or Dry-Run.')

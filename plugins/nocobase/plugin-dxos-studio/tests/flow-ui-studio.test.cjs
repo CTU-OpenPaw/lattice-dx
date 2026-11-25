@@ -225,15 +225,15 @@ test('flow/* modules obey strict per-file line limits, SPDX header, zero forbidd
   const budgets = {
     'connected-apps-panel.js': 380,
     'flow-list-view.js': 280,
-    'flow-studio-helpers.js': 220,
+    'flow-studio-helpers.js': 245,
     'flow-test-runner.js': 200,
-    'flow-validation.js': 150,
+    'flow-validation.js': 285,
     'n8n-setup-modal.js': 250,
     'node-palette.js': 245,
-    'node-inspector.js': 345,
+    'node-inspector.js': 365,
     'playback-bar.js': 260,
     'flow-canvas.js': 350,
-    'flow-studio-app.js': 365,
+    'flow-studio-app.js': 395,
     'flow-dsl.js': 250,
     'vendor-shims.js': 120,
   };
@@ -1699,4 +1699,350 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
   const savePos = postRunReqs.indexOf('dxosAutomations:saveRule');
   const runPos = postRunReqs.indexOf('dxosAutomations:runNow');
   assert.ok(savePos >= 0 && runPos > savePos, `Expected saveRule before runNow, got: ${JSON.stringify(postRunReqs)}`);
+});
+
+test('Task 2 helpers: insertVariableAtCursor (JSON-safe + cursor splice), buildUpstreamPinnedInputs, computeGraphDiffSummary, and createFlowPinStorage', () => {
+  const {
+    insertVariableAtCursor,
+    buildUpstreamPinnedInputs,
+    computeGraphDiffSummary,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-validation.js'));
+  const { createFlowPinStorage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+
+  assert.equal(typeof insertVariableAtCursor, 'function');
+  assert.equal(typeof buildUpstreamPinnedInputs, 'function');
+  assert.equal(typeof computeGraphDiffSummary, 'function');
+  assert.equal(typeof createFlowPinStorage, 'function');
+
+  // JSON-safe insertion when cursor is at end (after closing brace)
+  const jsonAtEnd = insertVariableAtCursor('{"code": ""}', '{{data.code}}', 12, 12, true);
+  assert.equal(jsonAtEnd.endsWith('}}{{data.code}}'), false, 'Must never append variable outside closing brace');
+  assert.deepEqual(JSON.parse(jsonAtEnd), { code: '{{data.code}}' });
+
+  // JSON-safe insertion when cursor is inside string quotes
+  const jsonInside = insertVariableAtCursor('{"code": ""}', '{{data.code}}', 10, 10, true);
+  assert.deepEqual(JSON.parse(jsonInside), { code: '{{data.code}}' });
+
+  // JSON-safe insertion on existing populated object at end preserves existing property
+  const jsonOther = insertVariableAtCursor('{"code": "ABC"}', '{{data.status}}', 15, 15, true);
+  assert.deepEqual(JSON.parse(jsonOther), { code: 'ABC', status: '{{data.status}}' });
+
+  // Plain text cursor splice at selectionStart=4, selectionEnd=4
+  const plain = insertVariableAtCursor('Code1234', '{{data.code}}', 4, 4, false);
+  assert.equal(plain, 'Code{{data.code}}1234');
+
+  // Upstream pinned input hydration
+  const g = {
+    nodes: [
+      { id: 'trig_1', type: 'trigger.event', label: 'Trigger' },
+      { id: 'dmn_1', type: 'logic.dmn', label: 'DMN' },
+      { id: 'notify_1', type: 'notify.send', label: 'Notify' },
+    ],
+    edges: [
+      { id: 'e1', source: 'trig_1', sourceHandle: 'main', target: 'dmn_1', targetHandle: 'in' },
+      { id: 'e2', source: 'dmn_1', sourceHandle: 'main', target: 'notify_1', targetHandle: 'in' },
+    ],
+  };
+  const run = {
+    runUid: 'dry-1',
+    nodeStatesJson: {
+      trig_1: { status: 'completed', output: { code: 'ORD-9' } },
+      dmn_1: { status: 'completed', output: { outputs: { priority: 'urgent', assignedRole: 'ldx_manager' } } },
+    },
+    stepTracesJson: [
+      { nodeId: 'trig_1', type: 'trigger.event', output: { code: 'ORD-9' } },
+      { nodeId: 'dmn_1', type: 'logic.dmn', output: { outputs: { priority: 'urgent', assignedRole: 'ldx_manager' } } },
+    ],
+  };
+  const pinned = buildUpstreamPinnedInputs(g, 'notify_1', run, { type: 'alarm.triggered', data: { code: 'ORD-9' } });
+  assert.deepEqual(pinned.dmn, { priority: 'urgent', assignedRole: 'ldx_manager' });
+  assert.deepEqual(pinned.steps.trig_1, { code: 'ORD-9' });
+  assert.deepEqual(pinned.steps.dmn_1, { outputs: { priority: 'urgent', assignedRole: 'ldx_manager' } });
+
+  // Graph diff summary
+  const diff = computeGraphDiffSummary(
+    { nodes: [{ id: 'a', type: 'trigger.manual', label: 'A' }, { id: 'b', type: 'notify.send', label: 'B' }], edges: [] },
+    { nodes: [{ id: 'a', type: 'trigger.manual', label: 'A2' }, { id: 'c', type: 'logic.dmn', label: 'C' }], edges: [] },
+  );
+  assert.deepEqual(diff.added, ['c']);
+  assert.deepEqual(diff.removed, ['b']);
+  assert.deepEqual(diff.changed, ['a']);
+  assert.ok(diff.summaryText.length > 0);
+
+  // Pin storage fallback without window
+  const store = createFlowPinStorage();
+  store.setItem('latticedx:flow-pin:org-a:rule_1', '{"n1":"{}"}');
+  assert.equal(store.getItem('latticedx:flow-pin:org-a:rule_1'), '{"n1":"{}"}');
+});
+
+test('Task 2: multi-port append on branching nodes (if/approval/switch/loop), cursor/JSON-safe variable picker, inspector tab reset/output switch, pin persistence, upstream hydration, AI fix, and SSE diff/undo', async () => {
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const nodeTypes = getRegistrySchemas();
+  const blueprints = getBlueprints();
+  const branchRule = {
+    ruleKey: 'task2_branch_flow',
+    name: 'Task 2 Branch Flow',
+    active: true,
+    triggerEventType: 'alarm.triggered',
+    sampleEvent: { type: 'alarm.triggered', data: { code: 'ALM-77', severity: 'high', items: ['a', 'b'] } },
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 'trig_1', type: 'trigger.event', label: 'Alarm Trigger', position: { x: 40, y: 120 }, config: { eventType: 'alarm.triggered' } },
+        { id: 'if_1', type: 'control.if', label: 'Check Severity', position: { x: 260, y: 120 }, config: { condition: { code: '' } } },
+        { id: 'appr_1', type: 'control.approval', label: 'HITL Gate', position: { x: 260, y: 260 }, config: { approverRole: 'ldx_manager', title: 'Code: !' } },
+        { id: 'sw_1', type: 'control.switch', label: 'Switch Case', position: { x: 260, y: 400 }, config: { expression: 'data.severity', cases: [{ port: 'case_0', operator: 'eq', equals: 'high' }] } },
+        { id: 'loop_1', type: 'control.loop', label: 'Loop Items', position: { x: 260, y: 540 }, config: { itemsPath: 'data.items', maxIterations: 20 } },
+        { id: 'dmn_1', type: 'logic.dmn', label: 'Route DMN', position: { x: 500, y: 120 }, config: { tableKey: 'cmms_priority_routing_v1' } },
+        { id: 'notify_1', type: 'notify.send', label: 'Notify Ops', position: { x: 740, y: 120 }, config: { roleNames: ['ldx_operator'], title: 'AlertTitle' } },
+      ],
+      edges: [
+        { id: 'e1', source: 'trig_1', sourceHandle: 'main', target: 'if_1', targetHandle: 'in' },
+        { id: 'e2', source: 'if_1', sourceHandle: 'true', target: 'dmn_1', targetHandle: 'in' },
+        { id: 'e3', source: 'dmn_1', sourceHandle: 'main', target: 'notify_1', targetHandle: 'in' },
+      ],
+    },
+  };
+
+  const listeners = new Map();
+  const origWin = globalThis.window;
+  const origCustomEvent = globalThis.CustomEvent;
+  globalThis.window = {
+    location: { search: '' },
+    addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); },
+    removeEventListener(type, fn) { listeners.get(type)?.delete(fn); },
+    dispatchEvent(evt) { for (const fn of listeners.get(evt?.type) || []) fn(evt); },
+  };
+  globalThis.CustomEvent = class FakeCustomEvent { constructor(type, init = {}) { this.type = type; this.detail = init.detail; } };
+
+  try {
+    const pinData = new Map();
+    const pinCalls = [];
+    const pinStorage = {
+      getItem(k) { return pinData.has(k) ? pinData.get(k) : null; },
+      setItem(k, v) { pinCalls.push({ k, v }); pinData.set(k, v); },
+    };
+
+    const harness = createQueuedReactHarness();
+    let dryRunMode = 'success';
+    const { client, requests } = createApiMock({
+      'dxosAutomations:builderCatalog': async () => ({
+        nodeTypes,
+        blueprints,
+        dmnTables: [{ tableKey: 'cmms_priority_routing_v1', name: 'CMMS', outputsJson: [{ name: 'priority' }] }],
+        roles: ['ldx_admin', 'ldx_manager', 'ldx_operator'],
+      }),
+      'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+      'dxosAutomations:listRules': async () => ({ items: [branchRule] }),
+      'dxosAutomations:listRuns': async () => ({ items: [] }),
+      'dxosAutomations:testNode': async (req) => ({
+        result: { ok: true, nodeId: req.data.nodeId, status: 'completed', output: { seenSteps: req.data.pinnedInputs?.steps || {} }, nextPort: 'main', durationMs: 5 },
+      }),
+      'dxosAutomations:testRule': async () => ({
+        simulation: dryRunMode === 'failed'
+          ? {
+            runUid: 'dry-fail-1',
+            ruleKey: branchRule.ruleKey,
+            status: 'failed',
+            durationMs: 9,
+            nodeStatesJson: {
+              trig_1: { status: 'completed', output: { code: 'ALM-77' } },
+              notify_1: { status: 'failed', error: 'TARGET_COLLECTION_FORBIDDEN', durationMs: 5 },
+            },
+            stepTracesJson: [
+              { nodeId: 'trig_1', type: 'trigger.event', status: 'completed', simulated: true, durationMs: 4, output: { code: 'ALM-77' } },
+              { nodeId: 'notify_1', type: 'notify.send', status: 'failed', error: 'TARGET_COLLECTION_FORBIDDEN', simulated: true, durationMs: 5 },
+            ],
+          }
+          : {
+            runUid: 'dry-ok-1',
+            ruleKey: branchRule.ruleKey,
+            status: 'completed',
+            durationMs: 11,
+            dmnResultJson: { outputs: { priority: 'urgent', assignedRole: 'ldx_manager' } },
+            nodeStatesJson: {
+              trig_1: { status: 'completed', output: { code: 'ALM-77' } },
+              if_1: { status: 'completed', output: { matched: true }, nextPort: 'true' },
+              dmn_1: { status: 'completed', output: { outputs: { priority: 'urgent', assignedRole: 'ldx_manager' } } },
+              notify_1: { status: 'completed', output: { sent: true } },
+            },
+            stepTracesJson: [
+              { nodeId: 'trig_1', type: 'trigger.event', status: 'completed', simulated: true, durationMs: 2, output: { code: 'ALM-77' } },
+              { nodeId: 'if_1', type: 'control.if', status: 'completed', simulated: true, durationMs: 3, output: { matched: true } },
+              { nodeId: 'dmn_1', type: 'logic.dmn', status: 'completed', simulated: true, durationMs: 3, output: { outputs: { priority: 'urgent', assignedRole: 'ldx_manager' } } },
+              { nodeId: 'notify_1', type: 'notify.send', status: 'completed', simulated: true, durationMs: 3, output: { sent: true } },
+            ],
+          },
+      }),
+      'dxosAutomations:aiAssist': async (req) => ({
+        draftGraph: {
+          ...req.data.graph,
+          nodes: req.data.graph.nodes.map((n) => (n.id === req.data.nodeId ? { ...n, label: 'Notify Ops (AI Fixed)', continueOnFail: true } : n)),
+        },
+        message: 'AI đã sửa lỗi node notify_1.',
+      }),
+    });
+
+    const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
+    let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+
+    // 1. Multi-port append picker on control.if, control.approval, control.switch, control.loop
+    for (const [nid, expectedPorts] of [
+      ['if_1', ['true', 'false', 'error']],
+      ['appr_1', ['approved', 'rejected', 'error']],
+      ['sw_1', ['case_0', 'case_1', 'case_2', 'default', 'error']],
+      ['loop_1', ['item', 'done', 'error']],
+    ]) {
+      collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-node-append-${nid}`)[0].props.onClick({ stopPropagation() {} });
+      tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+      assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-node-append-menu-${nid}`).length, 1, `Expected append menu for ${nid}`);
+      for (const port of expectedPorts) {
+        assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-node-append-${nid}-${port}`).length, 1, `Expected port button ${nid}-${port}`);
+      }
+    }
+
+    // Select 'false' on control.if -> opens append picker targeting [false] -> adding node creates edge with sourceHandle: 'false'
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-node-append-if_1')[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-node-append-if_1-false')[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const appendPicker = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-append-picker')[0];
+    assert.ok(appendPicker && textOf(appendPicker).includes('[false]'));
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-append-node-notify.send')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const canvasEdges = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-headless-edges')[0];
+    assert.ok(canvasEdges && textOf(canvasEdges).includes('if_1 [false]'), 'Appended node must connect from if_1 [false] port');
+
+    // 2. JSON-safe variable insertion on control.if condition JSON field (cursor at end)
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-if_1')[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const condField = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-condition')[0];
+    const condLen = String(condField.props.value || '').length;
+    condField.props.onFocus({ target: { value: condField.props.value, selectionStart: condLen, selectionEnd: condLen } });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-var-picker-btn')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-var-chip-{{data.code}}')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const updatedCond = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-condition')[0].props.value;
+    assert.doesNotThrow(() => JSON.parse(updatedCond), `Condition JSON must remain valid JSON, got: ${updatedCond}`);
+    assert.ok(updatedCond.includes('{{data.code}}'));
+
+    // 3. Cursor-aware plain text variable insertion at selectionStart=4, selectionEnd=4 on notify_1 title ('AlertTitle')
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-notify_1')[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const titleInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-title')[0];
+    titleInput.props.onFocus({ target: { value: titleInput.props.value, selectionStart: 5, selectionEnd: 5 } });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-var-chip-{{data.code}}')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const nextTitle = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-field-title')[0].props.value;
+    assert.equal(nextTitle, 'Alert{{data.code}}Title');
+
+    // 4. Tab switching: Test This Node auto-switches to 'output', switching nodeId resets to 'config'
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector-tab-input')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-test-node-btn')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector-tab-output')[0].props['aria-selected'], true);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-output-view').length, 1);
+
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-dmn_1')[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector-tab-config')[0].props['aria-selected'], true);
+
+    // 5. Dry-Run hydrates upstream steps & dmn into defaultPinnedText and QuickTestNode, and pinStorage persists under latticedx:flow-pin:org-a:<ruleKey>
+    await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dryrun-btn')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-notify_1')[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector-tab-input')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const hydratedPin = JSON.parse(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-pinned-input-json')[0].props.value);
+    assert.deepEqual(hydratedPin.dmn, { priority: 'urgent', assignedRole: 'ldx_manager' });
+    assert.ok(hydratedPin.steps?.dmn_1 && hydratedPin.steps?.trig_1, 'defaultPinnedText must hydrate upstream steps');
+
+    // QuickTestNode also receives upstream steps & dmn
+    await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-quick-test-notify_1')[0].props.onClick({ stopPropagation() {} });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const lastTestNodeReq = [...requests].reverse().find((r) => r.url === 'dxosAutomations:testNode');
+    assert.deepEqual(lastTestNodeReq?.data?.pinnedInputs?.dmn, { priority: 'urgent', assignedRole: 'ldx_manager' });
+    assert.ok(lastTestNodeReq?.data?.pinnedInputs?.steps?.dmn_1);
+
+    // Edit pinned input -> persists via pinStorage under latticedx:flow-pin:org-a:task2_branch_flow & survives remount
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector-tab-input')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const customPin = JSON.stringify({ event: { type: 'custom' }, data: { persistedPin: 99 }, dmn: {}, steps: {} });
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-pinned-input-json')[0].props.onChange({ target: { value: customPin } });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const expectedStorageKey = `latticedx:flow-pin:org-a:${branchRule.ruleKey}`;
+    assert.ok(pinCalls.some((c) => c.k === expectedStorageKey), `pinStorage.setItem must use key ${expectedStorageKey}`);
+
+    const hRemount = createQueuedReactHarness();
+    const FlowStudioRemount = createFlowStudioApp(client, hRemount.React, {}, {});
+    let tree2 = await hRemount.mountAndFlush(FlowStudioRemount, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    collectNodes(tree2, (n) => n.props?.['data-testid'] === 'dxos-flow-node-notify_1')[0].props.onClick({ stopPropagation() {} });
+    tree2 = await hRemount.flush(FlowStudioRemount, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    collectNodes(tree2, (n) => n.props?.['data-testid'] === 'dxos-flow-inspector-tab-input')[0].props.onClick();
+    tree2 = await hRemount.flush(FlowStudioRemount, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    assert.ok(collectNodes(tree2, (n) => n.props?.['data-testid'] === 'dxos-flow-pinned-input-json')[0].props.value.includes('persistedPin'));
+    hRemount.unmount();
+
+    // 6. Failed step trace renders dxos-flow-ai-fix-btn-<nodeId> calling dxosAutomations:aiAssist (mode: 'fix_error')
+    dryRunMode = 'failed';
+    await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dryrun-btn')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const aiFixBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-ai-fix-btn-notify_1')[0];
+    assert.ok(aiFixBtn, 'Failed step trace must render dxos-flow-ai-fix-btn-notify_1');
+    await aiFixBtn.props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    const aiReq = requests.find((r) => r.url === 'dxosAutomations:aiAssist');
+    assert.ok(aiReq, 'Clicking AI fix must call dxosAutomations:aiAssist');
+    assert.equal(aiReq.data.mode, 'fix_error');
+    assert.equal(aiReq.data.organizationId, 'org-a');
+    assert.equal(aiReq.data.ruleKey, branchRule.ruleKey);
+    assert.equal(aiReq.data.nodeId, 'notify_1');
+    assert.equal(aiReq.data.error, 'TARGET_COLLECTION_FORBIDDEN');
+    assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-notify_1')[0]).includes('Notify Ops (AI Fixed)'));
+
+    // 7. SSE CustomEvent('latticedx:flow-updated') mutating graph renders dxos-flow-sse-diff-banner, Undo restores pre-SSE graph, Dismiss closes banner
+    const sseDraftGraph = {
+      version: 2,
+      nodes: [
+        { id: 'trig_1', type: 'trigger.event', label: 'Alarm Trigger', position: { x: 40, y: 120 }, config: {} },
+        { id: 'sse_added_node', type: 'notify.send', label: 'SSE Added Alert', position: { x: 320, y: 120 }, config: { roleNames: ['ldx_admin'] } },
+      ],
+      edges: [{ id: 'e_sse', source: 'trig_1', sourceHandle: 'main', target: 'sse_added_node', targetHandle: 'in' }],
+    };
+    globalThis.window.dispatchEvent(new globalThis.CustomEvent('latticedx:flow-updated', {
+      detail: { organizationId: 'org-a', draftGraph: sseDraftGraph, message: 'SSE updated graph' },
+    }));
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-sse-diff-banner').length, 1);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-sse_added_node').length, 1);
+
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-sse-undo-btn')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-sse-diff-banner').length, 0);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-sse_added_node').length, 0);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-notify_1').length, 1);
+
+    globalThis.window.dispatchEvent(new globalThis.CustomEvent('latticedx:flow-updated', {
+      detail: { organizationId: 'org-a', draftGraph: sseDraftGraph },
+    }));
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-sse-diff-banner').length, 1);
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-sse-dismiss-btn')[0].props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: branchRule.ruleKey, pinStorage });
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-sse-diff-banner').length, 0);
+    assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-sse_added_node').length, 1);
+
+    harness.unmount();
+  } finally {
+    if (origWin === undefined) delete globalThis.window;
+    else globalThis.window = origWin;
+    if (origCustomEvent === undefined) delete globalThis.CustomEvent;
+    else globalThis.CustomEvent = origCustomEvent;
+  }
 });

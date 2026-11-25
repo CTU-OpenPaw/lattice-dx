@@ -110,8 +110,9 @@ function createFlowCanvas(React, vendor = {}) {
     const [rfInstance, setRfInstance] = React.useState(null);
     const [showMiniMap, setShowMiniMap] = React.useState(false);
     const [containerEl, setContainerEl] = React.useState(null);
+    const [appendMenuNodeId, setAppendMenuNodeId] = React.useState(null);
     const [handlersRef] = React.useState(() => ({}));
-    Object.assign(handlersRef, { onSelectNode, onInsertBetweenEdge, onQuickTestNode, onDuplicateNode, onDeleteNode, onAppendFromNode });
+    Object.assign(handlersRef, { onSelectNode, onInsertBetweenEdge, onQuickTestNode, onDuplicateNode, onDeleteNode, onAppendFromNode, setAppendMenuNodeId });
 
     React.useEffect(() => {
       if (typeof vendor?.injectFlowStudioCss === 'function') vendor.injectFlowStudioCss();
@@ -171,9 +172,10 @@ function createFlowCanvas(React, vendor = {}) {
           issues: Array.isArray(validationByNodeId?.[n.id]) ? validationByNodeId[n.id] : null,
           inputs: Array.isArray(schema?.inputs) ? schema.inputs : ports.inputs,
           outputs: Array.isArray(schema?.outputs) && schema.outputs.length ? schema.outputs : ports.outputs,
+          appendMenuOpen: appendMenuNodeId === n.id,
         },
       };
-    }), [safeNodes, schemaByType, nodeStates, selectedNodeId, activeNodeId, validationByNodeId]);
+    }), [safeNodes, schemaByType, nodeStates, selectedNodeId, activeNodeId, validationByNodeId, appendMenuNodeId]);
 
     const rfEdges = React.useMemo(() => safeEdges.map((e, idx) => {
       const strokeColor = getEdgeColor(e.sourceHandle);
@@ -198,11 +200,20 @@ function createFlowCanvas(React, vendor = {}) {
         const miniBtn = (col) => ({ padding: '3px 7px', borderRadius: 6, border: 'none', background: 'transparent', color: col, fontSize: 11, fontWeight: 600, cursor: 'pointer' });
         return h('div', {
           'data-testid': `dxos-flow-node-${nodeId}`,
-          onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onSelectNode?.(nodeId); },
+          onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.setAppendMenuNodeId?.(null); handlersRef.onSelectNode?.(nodeId); },
           style: { minWidth: 224, maxWidth: 268, padding: '10px 12px', borderRadius: 12, background: tStyle?.bg || '#FFFFFF', border: `1.5px ${traceStatus === 'skipped' && !isSel ? 'dashed' : 'solid'} ${borderCol}`, borderLeft: `4px solid ${stripe}`, boxShadow: (isSel || d.isPlaybackCurrent) ? '0 0 0 3px rgba(37,99,235,0.16), 0 8px 20px rgba(15,23,42,0.08)' : '0 2px 6px rgba(15,23,42,0.05)', cursor: 'pointer', position: 'relative', display: 'grid', gap: 6, fontSize: 12 },
         },
           issues.length ? h('span', { 'data-testid': `dxos-node-val-badge-${nodeId}`, title: issues.map((x) => x.message).join(' · '), style: { position: 'absolute', top: -8, right: -8, zIndex: 20, minWidth: 18, height: 18, padding: '0 5px', borderRadius: 999, background: hasErr ? '#DC2626' : '#D97706', color: '#FFFFFF', fontSize: 10, fontWeight: 700, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 2px 6px rgba(15,23,42,0.18)' } }, hasErr ? `!${issues.length}` : `${issues.length}`) : null,
-          h('button', { type: 'button', className: 'nodrag nopan', 'data-testid': `dxos-node-append-${nodeId}`, title: 'Thêm node nối tiếp', onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onAppendFromNode?.(nodeId, outputs[0] || 'main'); }, style: { position: 'absolute', right: -11, top: '50%', transform: 'translateY(-50%)', zIndex: 22, width: 20, height: 20, borderRadius: 999, border: '1px solid #2563EB', background: '#FFFFFF', color: '#2563EB', fontSize: 13, fontWeight: 700, lineHeight: '16px', padding: 0, cursor: 'pointer', boxShadow: '0 2px 6px rgba(37,99,235,0.22)' } }, '+'),
+          h('button', { type: 'button', className: 'nodrag nopan', 'data-testid': `dxos-node-append-${nodeId}`, title: outputs.length > 1 ? 'Chọn nhánh nối tiếp' : 'Thêm node nối tiếp', onClick: (evt) => { evt?.stopPropagation?.(); if (outputs.length > 1) handlersRef.setAppendMenuNodeId?.((cur) => (cur === nodeId ? null : nodeId)); else { handlersRef.setAppendMenuNodeId?.(null); handlersRef.onAppendFromNode?.(nodeId, outputs[0] || 'main'); } }, style: { position: 'absolute', right: -11, top: '50%', transform: 'translateY(-50%)', zIndex: 22, width: 20, height: 20, borderRadius: 999, border: '1px solid #2563EB', background: '#FFFFFF', color: '#2563EB', fontSize: 13, fontWeight: 700, lineHeight: '16px', padding: 0, cursor: 'pointer', boxShadow: '0 2px 6px rgba(37,99,235,0.22)' } }, '+'),
+          d.appendMenuOpen && outputs.length > 1 ? h('div', {
+            className: 'nodrag nopan',
+            'data-testid': `dxos-node-append-menu-${nodeId}`,
+            style: { position: 'absolute', right: -12, top: 'calc(50% + 14px)', zIndex: 30, minWidth: 112, padding: 4, borderRadius: 8, border: '1px solid #CBD5E1', background: '#FFFFFF', boxShadow: '0 10px 24px rgba(15,23,42,0.16)', display: 'grid', gap: 3 },
+          }, outputs.map((port) => h('button', {
+            key: port, type: 'button', className: 'nodrag nopan', 'data-testid': `dxos-node-append-${nodeId}-${port}`,
+            onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.setAppendMenuNodeId?.(null); handlersRef.onAppendFromNode?.(nodeId, port); },
+            style: { textAlign: 'left', padding: '4px 8px', borderRadius: 6, border: `1px solid ${getEdgeColor(port)}44`, background: '#F8FAFC', color: getEdgeColor(port), fontSize: 11, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' },
+          }, `+ ${port}`))) : null,
           isSel ? h('div', { className: 'nodrag nopan', 'data-testid': `dxos-flow-node-mini-toolbar-${nodeId}`, style: { position: 'absolute', top: -36, left: '50%', transform: 'translateX(-50%)', zIndex: 25, display: 'inline-flex', alignItems: 'center', gap: 2, padding: '3px 6px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#FFFFFF', boxShadow: '0 6px 16px rgba(15,23,42,0.12)', whiteSpace: 'nowrap' } },
             h('button', { type: 'button', 'data-testid': `dxos-flow-node-quick-test-${nodeId}`, onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onQuickTestNode?.(nodeId); }, style: miniBtn('#2563EB') }, '▶ Test'),
             h('button', { type: 'button', 'data-testid': `dxos-flow-node-quick-dup-${nodeId}`, onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onDuplicateNode?.(nodeId); }, style: miniBtn('#334155') }, '⎘ Nhân bản'),
@@ -287,7 +298,7 @@ function createFlowCanvas(React, vendor = {}) {
       ReactFlowComp
         ? h(ReactFlowComp, {
           nodes: rfNodes, edges: rfEdges, nodeTypes: customNodeTypes, edgeTypes: customEdgeTypes,
-          onNodeClick: (_evt, node) => onSelectNode?.(node?.id || null), onPaneClick: () => onSelectNode?.(null),
+          onNodeClick: (_evt, node) => { setAppendMenuNodeId(null); onSelectNode?.(node?.id || null); }, onPaneClick: () => { setAppendMenuNodeId(null); onSelectNode?.(null); },
           onConnect: (params) => onConnectNodes?.(params), onNodesChange: handleRfNodesChange, onEdgesChange: handleRfEdgesChange,
           onNodeDragStop: handleNodeDragStop, onInit: setRfInstance, fitView: true, fitViewOptions: { padding: 0.24, maxZoom: 1 }, proOptions: { hideAttribution: true },
         },

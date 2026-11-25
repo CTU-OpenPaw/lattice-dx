@@ -48,6 +48,7 @@ function createPlaybackBar(React) {
     const {
       runs, selectedRun, onSelectRun, playbackIndex, onStepChange,
       playing, onTogglePlay, onResumeApproval, resumeBusy, autoExpandSeq = 0, onFocusNode,
+      onFixErrorWithAi, aiFixBusy = false,
     } = props;
 
     const [expanded, setExpanded] = React.useState(() => Boolean(autoExpandSeq > 0));
@@ -86,6 +87,14 @@ function createPlaybackBar(React) {
     const canPrev = traces.length > 0 && activeIdx > 0;
     const canNext = traces.length > 0 && activeIdx < traces.length - 1;
     const canPlay = traces.length > 0;
+    const failedTraces = React.useMemo(() => {
+      const seen = new Set();
+      return traces.filter((t) => {
+        if (!t?.nodeId || String(t.status || '').toLowerCase() !== 'failed' || seen.has(t.nodeId)) return false;
+        seen.add(t.nodeId);
+        return true;
+      });
+    }, [traces]);
 
     function handleRunSelect(evt) {
       const uid = evt?.target?.value ?? '';
@@ -199,7 +208,7 @@ function createPlaybackBar(React) {
                   : h('span', { style: { color: '#64748b' } }, 'Chưa có trace · Nhấn "▶ Chạy thử" để mô phỏng'),
             ),
           ),
-          traces.length > 0 ? h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } },
+          traces.length > 0 ? h('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' } },
             traces.map((t, idx) => {
               const active = idx === activeIdx;
               return h('button', {
@@ -213,6 +222,17 @@ function createPlaybackBar(React) {
                 },
               }, `${idx + 1}. ${t.nodeId || t.label || t.type} (${t.durationMs ?? 0}ms)`);
             }),
+            failedTraces.map((t) => h('button', {
+              key: `ai-fix-${t.nodeId}`,
+              type: 'button',
+              'data-testid': `dxos-flow-ai-fix-btn-${t.nodeId}`,
+              disabled: Boolean(aiFixBusy),
+              onClick: () => onFixErrorWithAi?.(t),
+              style: {
+                padding: '2px 9px', borderRadius: 999, fontSize: 11, fontWeight: 700, cursor: aiFixBusy ? 'not-allowed' : 'pointer',
+                border: '1px solid #fca5a5', background: aiFixBusy ? '#e2e8f0' : '#fef2f2', color: aiFixBusy ? '#94a3b8' : '#b91c1c',
+              },
+            }, `✦ Sửa lỗi bằng AI (${t.nodeId})`)),
           ) : null,
         ),
     );

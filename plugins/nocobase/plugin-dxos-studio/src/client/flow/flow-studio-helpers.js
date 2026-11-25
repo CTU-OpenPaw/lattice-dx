@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { insertVariableAtCursor, buildUpstreamPinnedInputs, computeGraphDiffSummary } = require('./flow-validation');
+
 const DEFAULT_NODES = [
   ['trigger.event', 'trigger', 'Event Trigger', ['main'], { eventType: '*' }],
   ['trigger.manual', 'trigger', 'Manual Trigger', ['main'], {}],
@@ -209,9 +211,25 @@ function renderUnsavedGuard(h, { ruleName, busy, onSaveAndBack, onDiscardAndBack
   );
 }
 
+function renderSseDiffBanner(h, { sseDiff, onUndo, onDismiss }) {
+  if (!sseDiff) return null;
+  return h('div', {
+    'data-testid': 'dxos-flow-sse-diff-banner',
+    role: 'status',
+    style: { padding: '6px 14px', background: '#eff6ff', borderBottom: '1px solid #bfdbfe', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, fontSize: 12, color: '#1e3a8a' },
+  },
+    h('span', null, `✦ AI / SSE vừa cập nhật luồng: ${sseDiff.diff?.summaryText || 'Đã cập nhật đồ thị'}`),
+    h('div', { style: ROW },
+      h('button', { type: 'button', 'data-testid': 'dxos-flow-sse-undo-btn', onClick: onUndo, style: btnS('act') }, '↶ Hoàn tác'),
+      h('button', { type: 'button', 'data-testid': 'dxos-flow-sse-dismiss-btn', onClick: onDismiss, style: btnS('ghost') }, 'Bỏ qua'),
+    ),
+  );
+}
+
 module.exports = {
   DEFAULT_NODES, DEFAULT_BLUEPRINTS, ROW, INP,
   unwrap, errMsg, primaryEvt, cleanCtx, syncMeta, btnS,
   freshDoc, FRESH_DATA, FRESH_RUN, makeFreshUi, buildRuleSavePayload, dispatchFlowKeyDown,
   renderValidationPopover, renderSettingsPopover, renderBlueprintsGallery, renderDslModal, renderUnsavedGuard,
+  renderSseDiffBanner, insertVariableAtCursor, buildUpstreamPinnedInputs, computeGraphDiffSummary,
 };

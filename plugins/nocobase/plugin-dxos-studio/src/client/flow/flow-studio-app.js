@@ -14,8 +14,9 @@ const {
   DEFAULT_NODES, DEFAULT_BLUEPRINTS, ROW, INP, unwrap, errMsg, primaryEvt, cleanCtx,
   syncMeta, btnS, freshDoc: makeFreshDoc, FRESH_DATA, FRESH_RUN, makeFreshUi, buildRuleSavePayload, dispatchFlowKeyDown,
   renderValidationPopover, renderSettingsPopover, renderBlueprintsGallery, renderDslModal, renderUnsavedGuard,
+  renderSseDiffBanner,
 } = require('./flow-studio-helpers');
-const { validateFlowClient } = require('./flow-validation');
+const { validateFlowClient, buildUpstreamPinnedInputs, computeGraphDiffSummary } = require('./flow-validation');
 const { createFlowTestRunner } = require('./flow-test-runner');
 const { createFlowCanvas } = require('./flow-canvas');
 const { createNodePalette } = require('./node-palette');
@@ -26,7 +27,7 @@ const { createN8nSetupModal } = require('./n8n-setup-modal');
 
 const freshDoc = (seed) => makeFreshDoc(seed, makeBlankFlow);
 
-function createFlowStudioApp(client, React, _antd, app) {
+function createFlowStudioApp(client, React, _antd, app, opts = {}) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
   const [FlowCanvas, NodePalette, PlaybackBar, NodeInspector, FlowListView, FlowTestRunner, N8nSetupModal] = [
@@ -36,6 +37,7 @@ function createFlowStudioApp(client, React, _antd, app) {
 
   return function FlowStudioApp(props = {}) {
     const api = props.api || useApi();
+    const pinStorage = props.pinStorage || opts.pinStorage || null;
     const [urlInit] = React.useState(() => { try { const p = new URLSearchParams(window?.location?.search || ''); return { org: p.get('organizationId') || '', ruleKey: p.get('ruleKey') || '' }; } catch { return { org: '', ruleKey: '' }; } });
     const defaultView = (props.ruleKey || urlInit.ruleKey || props.initialView === 'editor') ? 'editor' : 'list';
     const [discoveredOrgs, setDiscoveredOrgs] = React.useState([]);
@@ -52,6 +54,7 @@ function createFlowStudioApp(client, React, _antd, app) {
     const [ui, setUi] = React.useState(() => makeFreshUi(defaultView));
     const [focus, setFocus] = React.useState({ nodeId: null, seq: 0 });
     const [dsl, setDsl] = React.useState({ open: false, format: 'json', text: '', error: null });
+    const [sseDiff, setSseDiff] = React.useState(null);
     const [refs] = React.useState(() => ({ loadSeq: 0, actionEpoch: 0, activeOrg: effectiveOrg, latestOrg: effectiveOrg, api, idSeq: 1, initDone: false }));
     refs.api = api; refs.latestOrg = effectiveOrg;
 
@@ -64,11 +67,12 @@ function createFlowStudioApp(client, React, _antd, app) {
       setDoc({ rule: { ...r, cooldownSec: g.settings.cooldownSec, maxDepth: g.settings.maxDepth }, graph: g, undo: [], redo: [], selId: null, preDragGraph: null, dirty: Boolean(opts.dirty) });
       setRunUi((s) => ({ ...s, testOut: null, selectedRun: (s.selectedRun && r?.ruleKey && s.selectedRun.ruleKey && s.selectedRun.ruleKey !== r.ruleKey) ? null : s.selectedRun }));
       setUi((u) => ({ ...u, insertEdge: null, appendSource: null, unsavedGuardOpen: false, settingsOpen: false, bpOpen: false, testRunnerOpen: false, valOpen: false }));
+      setSseDiff(null);
     }, []);
 
     React.useEffect(() => {
       Object.assign(refs, { activeOrg: effectiveOrg, actionEpoch: refs.actionEpoch + 1, loadSeq: refs.loadSeq + 1, initDone: false, docRule: null });
-      setDoc(freshDoc(effectiveOrg || 1)); setData(FRESH_DATA); setRunUi(FRESH_RUN);
+      setDoc(freshDoc(effectiveOrg || 1)); setData(FRESH_DATA); setRunUi(FRESH_RUN); setSseDiff(null);
       setUi(makeFreshUi((props.ruleKey || urlInit.ruleKey || props.initialView === 'editor') ? 'editor' : 'list'));
       setDsl((m) => ({ ...m, open: false, text: '', error: null }));
     }, [effectiveOrg]);
@@ -146,7 +150,7 @@ function createFlowStudioApp(client, React, _antd, app) {
       return () => { if (typeof window !== 'undefined') delete window.__LATTICEDX_FLOW_CONTEXT__; };
     }, [effectiveOrg, ui.view, doc.rule.ruleKey, doc.rule.name, doc.selId, doc.graph.nodes, runUi.selectedRun]);
 
-    Object.assign(refs, { commitGraph, handleRuleMeta, loadAll, reportFb, setRunWithIdx, docRule: doc.rule });
+    Object.assign(refs, { commitGraph, handleRuleMeta, loadAll, reportFb, setRunWithIdx, docRule: doc.rule, docGraph: doc.graph, docDirty: doc.dirty });
     React.useEffect(() => {
       if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined;
       const onFlowUpdated = (evt) => {
@@ -155,10 +159,14 @@ function createFlowStudioApp(client, React, _antd, app) {
         if (d.organizationId && refs.latestOrg && String(d.organizationId) !== refs.latestOrg) return;
         const nextRaw = d.draftGraph || d.draftRule?.graphJson;
         if (nextRaw && Array.isArray(nextRaw.nodes)) {
+          const [prevGraph, prevRule, prevDirty] = [refs.docGraph, refs.docRule, Boolean(refs.docDirty)];
           const g = ruleToGraph({ graphJson: nextRaw, cooldownSec: d.draftRule?.cooldownSec ?? refs.docRule?.cooldownSec, maxDepth: d.draftRule?.maxDepth ?? refs.docRule?.maxDepth });
           const cleanMeta = d.draftRule ? sanitizeSafeValue({ ...d.draftRule, graphJson: undefined }) : {};
           if (d.ruleKey && !cleanMeta.ruleKey) cleanMeta.ruleKey = String(d.ruleKey);
+          const diff = computeGraphDiffSummary(prevGraph, g);
+          const mutated = diff.added.length > 0 || diff.removed.length > 0 || diff.changed.length > 0 || JSON.stringify(prevGraph?.edges || []) !== JSON.stringify(g.edges || []);
           refs.commitGraph(g, null, { ...cleanMeta, cooldownSec: g.settings.cooldownSec, maxDepth: g.settings.maxDepth });
+          if (mutated) setSseDiff({ prevGraph, prevRule, prevDirty, nextGraph: g, diff });
           setUi((u) => (u.view === 'list' ? { ...u, view: 'editor' } : u));
         } else if (d.draftRule) { refs.handleRuleMeta(sanitizeSafeValue(d.draftRule)); setUi((u) => (u.view === 'list' ? { ...u, view: 'editor' } : u)); }
         if (d.simulation || d.run) refs.setRunWithIdx(sanitizeSafeValue(d.simulation || d.run), true);
@@ -248,7 +256,27 @@ function createFlowStudioApp(client, React, _antd, app) {
       setUi((u) => ({ ...u, view: 'editor' }));
     };
     const handleTestNode = (nodeId, pinnedInputs) => runAction('testNode', 'dxosAutomations:testNode', { ...orgPayload, ruleKey: doc.rule.ruleKey, graph: doc.graph, nodeId, pinnedInputs }, (d) => setRunUi((s) => ({ ...s, testOut: d.result || d })), (err) => setRunUi((s) => ({ ...s, testOut: { nodeId, status: 'failed', error: errMsg(err, 'Test node failed') } })));
-    const handleQuickTestNode = (nodeId) => { const ev = sampleEvt(buildSavePayload()); setDoc((d) => ({ ...d, selId: nodeId })); setUi((u) => ({ ...u, inspTab: 'output', inspTabSeq: (u.inspTabSeq || 0) + 1 })); return handleTestNode(nodeId, { event: ev, data: ev.data || {}, dmn: {}, steps: {} }); };
+    const handleQuickTestNode = (nodeId) => { const ev = sampleEvt(buildSavePayload()); setDoc((d) => ({ ...d, selId: nodeId })); setUi((u) => ({ ...u, inspTab: 'output', inspTabSeq: (u.inspTabSeq || 0) + 1 })); return handleTestNode(nodeId, buildUpstreamPinnedInputs(doc.graph, nodeId, runUi.selectedRun, ev)); };
+    const handleFixErrorWithAi = (trace) => {
+      if (!trace?.nodeId) return undefined;
+      const errTxt = String(trace.error || trace.reason || 'Step execution failed');
+      return runAction('aiFix', 'dxosAutomations:aiAssist', {
+        ...orgPayload, mode: 'fix_error', ruleKey: String(doc.rule?.ruleKey || '').trim() || undefined,
+        graph: doc.graph, nodeId: trace.nodeId, error: errTxt,
+        runTrace: { nodeId: trace.nodeId, failedNodeId: trace.nodeId, errorMessage: errTxt, stepTracesJson: [trace], nodeStatesJson: runUi.selectedRun?.nodeStatesJson || {} },
+      }, (d) => {
+        const nextRaw = d?.draftGraph || d?.draftRule?.graphJson;
+        if (nextRaw && Array.isArray(nextRaw.nodes)) {
+          commitGraph(ruleToGraph({ graphJson: nextRaw, cooldownSec: doc.rule?.cooldownSec, maxDepth: doc.rule?.maxDepth }), trace.nodeId);
+        }
+        reportFb({ type: 'success', text: d?.message || d?.summary || `AI đã đề xuất sửa lỗi cho node "${trace.nodeId}".` });
+      });
+    };
+    const handleUndoSseDiff = () => {
+      if (!sseDiff?.prevGraph) return setSseDiff(null);
+      setDoc((d) => ({ ...d, preDragGraph: null, graph: sseDiff.prevGraph, rule: sseDiff.prevRule || d.rule, dirty: Boolean(sseDiff.prevDirty), selId: null, redo: [...d.redo, d.graph] }));
+      return setSseDiff(null);
+    };
     const handleResume = (runUid, decision) => runAction('resume', 'dxosAutomations:resumeRun', { ...orgPayload, runUid, decision }, doneRun(`HITL ${decision} hoàn tất`));
     const openRoute = (path) => { if (app?.router?.navigate) app.router.navigate(path); else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(path) || path); };
     const handleImportDsl = () => {
@@ -280,8 +308,8 @@ function createFlowStudioApp(client, React, _antd, app) {
     const handleBackToList = () => (doc.dirty ? setUi((u) => ({ ...u, unsavedGuardOpen: true, settingsOpen: false, bpOpen: false, testRunnerOpen: false, valOpen: false })) : closeEditorToList());
     const handleGuardSaveAndBack = async () => { if (await saveDraft()) closeEditorToList(); else setUi((u) => ({ ...u, unsavedGuardOpen: false })); };
     const handleGuardDiscardAndBack = () => { setDoc((d) => ({ ...d, dirty: false })); closeEditorToList(); };
-    const handleNewFlow = () => { const f = freshDoc((refs.idSeq += 1)); refs.docRule = f.rule; setDoc(f); setData((s) => ({ ...s, runs: [] })); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, insertEdge: null, appendSource: null, bpOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false })); };
-    const loadBlueprint = (bp) => { applyRule(bp, { dirty: true }); setData((s) => ({ ...s, runs: [] })); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, bpOpen: false, settingsOpen: false })); };
+    const handleNewFlow = () => { const f = freshDoc((refs.idSeq += 1)); refs.docRule = f.rule; setDoc(f); setData((s) => ({ ...s, runs: [] })); setRunUi(FRESH_RUN); setSseDiff(null); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, insertEdge: null, appendSource: null, bpOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false })); };
+    const loadBlueprint = (bp) => { applyRule(bp, { dirty: true }); setData((s) => ({ ...s, runs: [] })); setRunUi(FRESH_RUN); setSseDiff(null); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, bpOpen: false, settingsOpen: false })); };
 
     refs.kbHandler = (evt) => dispatchFlowKeyDown(evt, {
       ui, dslOpen: dsl.open, selId: doc.selId,
@@ -329,6 +357,7 @@ function createFlowStudioApp(client, React, _antd, app) {
             h('div', { style: { ...ROW, flexWrap: 'wrap', flexShrink: 1 } }, tools.map(([tid, lbl, onClick, tone, dis]) => h('button', { key: tid, 'data-testid': tid, type: 'button', disabled: dis, onClick, style: btnS(tone, dis) }, lbl))),
           ),
           fbBar,
+          renderSseDiffBanner(h, { sseDiff, onUndo: handleUndoSseDiff, onDismiss: () => setSseDiff(null) }),
           ui.valOpen ? renderValidationPopover(h, { totalIssues, validation, onClose: () => setUi((u) => ({ ...u, valOpen: false })), onSelectIssue: (it) => { if (it.nodeId) { setDoc((d) => ({ ...d, selId: it.nodeId })); focusNode(it.nodeId); } setUi((u) => ({ ...u, valOpen: false })); } }) : null,
           h(FlowTestRunner, { open: ui.testRunnerOpen, rule: doc.rule, graph: doc.graph, busyDryRun: Boolean(ui.busy.dryRun), busyRunNow: Boolean(ui.busy.runNow), onClose: () => setUi((u) => ({ ...u, testRunnerOpen: false })), onUpdateSampleEvent: (ev) => handleRuleMeta({ sampleEvent: ev }), onDryRun: (ev) => { setUi((u) => ({ ...u, testRunnerOpen: false })); return handleDryRun(ev); }, onRunNow: (ev) => { setUi((u) => ({ ...u, testRunnerOpen: false })); return handleRunNow(null, ev); } }),
           ui.settingsOpen ? renderSettingsPopover(h, { doc, handleRuleMeta, blueprintsCount: blueprints.length, onClose: () => setUi((u) => ({ ...u, settingsOpen: false })), onToggleBlueprints: () => setUi((u) => ({ ...u, bpOpen: !u.bpOpen, settingsOpen: false })) }) : null,
@@ -343,9 +372,9 @@ function createFlowStudioApp(client, React, _antd, app) {
               canUndo: doc.undo.length > 0, canRedo: doc.redo.length > 0, onUndo: () => undoRedo(-1), onRedo: () => undoRedo(1), xyflowOverride: props.xyflowOverride,
             }),
             h(NodePalette, { nodeTypes, onAddNode: addNodeOnly, insertEdge: ui.insertEdge, onInsertNode: insertBetweenEdge, onCancelInsert: () => setUi((u) => ({ ...u, insertEdge: null })), appendSource: ui.appendSource, onAppendNode: appendNodeAfter, onCancelAppend: () => setUi((u) => ({ ...u, appendSource: null })), open: ui.paletteOpen, onToggleOpen: (next) => setUi((u) => ({ ...u, paletteOpen: Boolean(next) })) }),
-            h(NodeInspector, { rule: doc.rule, graph: doc.graph, selectedNode, nodeSchema: selectedSchema, catalog, activeTrace, nodeValidationIssues: selectedNode ? (validation.byNodeId[selectedNode.id] || []) : [], testOutput: runUi.testOut, testBusy: Boolean(ui.busy.testNode), onTestNode: handleTestNode, onOpenN8nSetup: () => setUi((u) => ({ ...u, n8nOpen: true })), onCloseInspector: () => setDoc((d) => ({ ...d, selId: null })), onUpdateNode: (id, pt) => commitGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === id ? { ...n, ...pt } : n)) })), onDeleteNode: handleDeleteNode, externalTab: ui.inspTab, externalTabSeq: ui.inspTabSeq }),
+            h(NodeInspector, { rule: doc.rule, graph: doc.graph, selectedNode, nodeSchema: selectedSchema, catalog, activeTrace, nodeValidationIssues: selectedNode ? (validation.byNodeId[selectedNode.id] || []) : [], testOutput: runUi.testOut, testBusy: Boolean(ui.busy.testNode), onTestNode: handleTestNode, onOpenN8nSetup: () => setUi((u) => ({ ...u, n8nOpen: true })), onCloseInspector: () => setDoc((d) => ({ ...d, selId: null })), onUpdateNode: (id, pt) => commitGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === id ? { ...n, ...pt } : n)) })), onDeleteNode: handleDeleteNode, externalTab: ui.inspTab, externalTabSeq: ui.inspTabSeq, selectedRun: runUi.selectedRun, organizationId: effectiveOrg, pinStorage }),
           ),
-          h(PlaybackBar, { runs: data.runs, selectedRun: runUi.selectedRun, onSelectRun: (r) => setRunWithIdx(r, false), playbackIndex: runUi.idx, onStepChange: (idx) => setRunUi((s) => ({ ...s, playing: false, idx })), onFocusNode: focusNode, playing: runUi.playing, onTogglePlay: () => setRunUi((s) => ({ ...s, idx: !s.playing && s.idx >= tracesLen - 1 ? 0 : s.idx, playing: !s.playing })), onResumeApproval: handleResume, resumeBusy: Boolean(ui.busy.resume), autoExpandSeq: runUi.autoExpandSeq }),
+          h(PlaybackBar, { runs: data.runs, selectedRun: runUi.selectedRun, onSelectRun: (r) => setRunWithIdx(r, false), playbackIndex: runUi.idx, onStepChange: (idx) => setRunUi((s) => ({ ...s, playing: false, idx })), onFocusNode: focusNode, playing: runUi.playing, onTogglePlay: () => setRunUi((s) => ({ ...s, idx: !s.playing && s.idx >= tracesLen - 1 ? 0 : s.idx, playing: !s.playing })), onResumeApproval: handleResume, resumeBusy: Boolean(ui.busy.resume), autoExpandSeq: runUi.autoExpandSeq, onFixErrorWithAi: handleFixErrorWithAi, aiFixBusy: Boolean(ui.busy.aiFix) }),
         ),
       h(N8nSetupModal, { open: ui.n8nOpen, api, organizationId: effectiveOrg, selectedNode, onClose: () => setUi((u) => ({ ...u, n8nOpen: false })), onConnectorsChanged: () => loadAll(), onApplyToSelectedNode: (p) => selectedNode && commitGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === selectedNode.id ? { ...n, config: { ...(n.config || {}), connectorKey: p.connectorKey, method: 'POST', path: p.path } } : n)) })), onOpenEnterpriseBlueprint: () => { const bp = blueprints.find((b) => (b.blueprintKey || b.ruleKey) === 'auto_enterprise_n8n_compliance'); if (bp) loadBlueprint(bp); setUi((u) => ({ ...u, view: 'editor', bpOpen: false, n8nOpen: false })); } }),
       dsl.open ? renderDslModal(h, { dsl, dslObj, serializeFlowDsl, setDsl, handleImportDsl }) : null,
