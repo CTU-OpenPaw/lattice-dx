@@ -82,6 +82,25 @@ const META_EXCLUDED_LOWER = new Set([...META_EXCLUDED_COLLECTIONS].map((c) => c.
 const META_SENSITIVE_FIELD_RE = /password|secret|token|apikey|api_key|privatekey|hash|salt|embedding|searchvector/i;
 const META_BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
+function isValidOrganizationId(raw) {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim();
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (lower === 'all' || META_BLOCKED_KEYS.has(lower)) return false;
+  return ORG_ID_RE.test(clean);
+}
+
+function parseOptionalRootOrgId(raw, code = 'DXOS_ORG_REQUIRED', message = 'organizationId không hợp lệ.') {
+  if (raw === undefined || raw === null) return null;
+  const clean = typeof raw === 'string' ? raw.trim() : String(raw).trim();
+  if (!clean) return null;
+  if (!isValidOrganizationId(clean)) {
+    throw fail(code, 400, message);
+  }
+  return clean;
+}
+
 function fail(code, status = 403, message = code) {
   return Object.assign(new Error(message), { code, status });
 }
@@ -200,7 +219,7 @@ async function resolveTelemetryIngestAuth(db, ctx, input = {}, { ingestToken } =
       throw fail('TELEMETRY_EDGE_AUTH_INVALID', 401, 'Token IIoT edge không khớp.');
     }
     const orgId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
-    if (!ORG_ID_RE.test(orgId)) {
+    if (!isValidOrganizationId(orgId)) {
       throw fail('TELEMETRY_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho điểm đo IIoT.');
     }
     auth = { mode: 'edge-token', organizationId: orgId, isRoot: false, actor: null };
@@ -209,7 +228,7 @@ async function resolveTelemetryIngestAuth(db, ctx, input = {}, { ingestToken } =
   } else if (ctx.state?.currentRole === 'root') {
     if (!ctx.state?.currentUser) throw fail('NATIVE_LOGIN_REQUIRED', 401);
     const orgId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
-    if (!ORG_ID_RE.test(orgId)) {
+    if (!isValidOrganizationId(orgId)) {
       throw fail('TELEMETRY_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho điểm đo IIoT.');
     }
     auth = { mode: 'root', organizationId: orgId, isRoot: true, actor: null };
@@ -259,7 +278,7 @@ async function resolveNativeEmployee(db, user) {
   const emp = rows[0];
   if (!emp || val(emp, 'active') !== true) throw fail('NATIVE_MEMBERSHIP_REQUIRED', 403);
   const organizationId = val(emp, 'organizationId');
-  if (typeof organizationId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(organizationId)) {
+  if (!isValidOrganizationId(organizationId)) {
     throw fail('NATIVE_MEMBERSHIP_INVALID', 403);
   }
   return { userId: String(id), employeeId: val(emp, 'id'), organizationId };
@@ -374,12 +393,12 @@ function resolveScopedOrganizationId(isRoot, actor, input = {}) {
     }
     return actor.organizationId;
   }
-  if (typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim())) {
+  if (isValidOrganizationId(input.organizationId)) {
     return input.organizationId.trim();
   }
   if (typeof input.assetEntityId === 'string') {
     const m = URN_RE.exec(input.assetEntityId.trim());
-    if (m) return m[1];
+    if (m && isValidOrganizationId(m[1])) return m[1];
   }
   throw fail('DXOS_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ.');
 }
@@ -413,8 +432,8 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const pageSize = Number.isFinite(rawPageSize) ? Math.max(1, Math.min(50, Math.floor(rawPageSize))) : 10;
 
       let organizationId = isRoot ? null : actor.organizationId;
-      if (isRoot && typeof input.organizationId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(input.organizationId.trim())) {
-        organizationId = input.organizationId.trim();
+      if (isRoot) {
+        organizationId = parseOptionalRootOrgId(input.organizationId);
       }
 
       ctx.body = await runWithOptionalRls(db, organizationId || null, async () => {
@@ -491,6 +510,9 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         const urnMatch = URN_RE.exec(rawEntity);
         if (urnMatch) {
           const [, urnOrg, urnId] = urnMatch;
+          if (!isValidOrganizationId(urnOrg)) {
+            throw fail('DXOS_ORG_REQUIRED', 400, 'organizationId trong URN không hợp lệ.');
+          }
           if (!isRoot && urnOrg !== actor.organizationId) {
             throw fail('DXOS_CROSS_ORG_FORBIDDEN', 403);
           }
@@ -504,8 +526,8 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         lookupId = Number(input.assetId);
       }
 
-      if (isRoot && !requestedOrg && typeof input.organizationId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(input.organizationId.trim())) {
-        requestedOrg = input.organizationId.trim();
+      if (isRoot && !requestedOrg) {
+        requestedOrg = parseOptionalRootOrgId(input.organizationId);
       }
 
       const { asset, syncSummary } = await runWithOptionalRls(db, requestedOrg || null, async () => {
@@ -603,6 +625,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       if (assetEntityId) {
         const m = URN_RE.exec(assetEntityId);
         if (m) {
+          if (!isValidOrganizationId(m[1])) throw fail('DXOS_ORG_REQUIRED', 400, 'organizationId trong URN không hợp lệ.');
           if (!isRoot && m[1] !== actor.organizationId) throw fail('DXOS_CROSS_ORG_FORBIDDEN', 403);
           requestedOrg = m[1];
           lookupId = Number(m[2]);
@@ -612,8 +635,8 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         lookupId = Number(input.assetId);
       }
 
-      if (isRoot && !requestedOrg && typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim())) {
-        requestedOrg = input.organizationId.trim();
+      if (isRoot && !requestedOrg) {
+        requestedOrg = parseOptionalRootOrgId(input.organizationId);
       }
 
       const windowHours = parseOptionalNumber(input.windowHours, 'DXOS_INVALID_WINDOW_HOURS', { min: 0 });
@@ -685,11 +708,16 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
       let orgId = isRoot ? '' : actor.organizationId;
       if (isRoot) {
-        if (typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim())) {
-          orgId = input.organizationId.trim();
+        const parsedRootOrg = parseOptionalRootOrgId(
+          input.organizationId,
+          'ORG_REQUIRED',
+          'Cần organizationId hợp lệ để ghi nhận cảnh báo.',
+        );
+        if (parsedRootOrg) {
+          orgId = parsedRootOrg;
         } else if (assetEntityId) {
           const urnMatch = URN_RE.exec(assetEntityId);
-          if (urnMatch) orgId = urnMatch[1];
+          if (urnMatch && isValidOrganizationId(urnMatch[1])) orgId = urnMatch[1];
         }
       }
 
@@ -697,7 +725,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         if (isRoot && !orgId && assetId != null) {
           const assetRow = await db.getRepository?.('latticeAssets')?.findOne?.({ filter: { id: assetId } });
           const assetOrg = String(val(assetRow, 'organizationId') || '').trim();
-          if (ORG_ID_RE.test(assetOrg)) orgId = assetOrg;
+          if (isValidOrganizationId(assetOrg)) orgId = assetOrg;
         }
         if (isRoot && !orgId) {
           const orgRepo = db.getRepository?.('latticeOrganizations');
@@ -710,7 +738,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
               orgRow = await orgRepo.findOne({ filter: { active: true }, sort: ['id'] });
             }
             const candidate = String(val(orgRow, 'organizationId') || '').trim();
-            if (ORG_ID_RE.test(candidate)) orgId = candidate;
+            if (isValidOrganizationId(candidate)) orgId = candidate;
           }
         }
         if (!orgId) {
@@ -779,7 +807,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const collection = String(input.collection || '').trim();
       const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'view' });
       const orgScope = isRoot
-        ? (typeof input.organizationId === 'string' && ORG_ID_RE.test(input.organizationId.trim()) ? input.organizationId.trim() : null)
+        ? parseOptionalRootOrgId(input.organizationId)
         : actor.organizationId;
       const result = await runWithOptionalRls(db, orgScope, () =>
         executeGovernedExport(db, ctx, input, { isRoot, actor, fetchImpl }),
@@ -825,8 +853,8 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const limit = Math.max(1, Math.min(20, Math.floor(Number(input.limit) || 10)));
 
       let organizationId = isRoot ? null : actor.organizationId;
-      if (isRoot && typeof input.organizationId === 'string' && /^[a-zA-Z0-9_-]{1,80}$/.test(input.organizationId.trim())) {
-        organizationId = input.organizationId.trim();
+      if (isRoot) {
+        organizationId = parseOptionalRootOrgId(input.organizationId);
       }
       const activeRole = String(ctx.state?.currentRole || '').trim();
 
@@ -1229,7 +1257,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         effectiveOrg = actor.organizationId;
       } else if (input.organizationId !== undefined && input.organizationId !== null && String(input.organizationId).trim() !== '') {
         const cleanOrg = String(input.organizationId).trim();
-        if (!ORG_ID_RE.test(cleanOrg)) {
+        if (!isValidOrganizationId(cleanOrg)) {
           throw fail('DXOS_ORG_REQUIRED', 400, 'organizationId không hợp lệ.');
         }
         effectiveOrg = cleanOrg;

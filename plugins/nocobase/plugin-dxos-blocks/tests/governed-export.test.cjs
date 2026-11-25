@@ -520,3 +520,21 @@ test('Task 7: resolveAllowedExportColumns and executeGovernedExport inspect db.g
   assert.deepEqual(mixedProtoRes.columns, ['code']);
   assert.deepEqual(mixedProtoRes.omittedColumns, ['__proto__', 'constructor']);
 });
+
+test('executeGovernedExport rejects prototype-pollution strings and "all" in organizationId', async () => {
+  const { executeGovernedExport } = require('../src/server/governed-export');
+  const { db } = makeExportHarness();
+  const ctx = { state: { currentUser: { id: 1, username: 'root' }, currentRole: 'root' } };
+  for (const badOrg of ['__proto__', 'constructor', 'prototype', '__PROTO__', 'all', 'ALL']) {
+    await assert.rejects(
+      () => executeGovernedExport(
+        db,
+        ctx,
+        { collection: 'latticeRequests', format: 'csv', organizationId: badOrg },
+        { isRoot: true, actor: null },
+      ),
+      (err) => err.status === 400 && err.code === 'EXPORT_ORG_INVALID',
+      `executeGovernedExport must reject organizationId="${badOrg}"`,
+    );
+  }
+});

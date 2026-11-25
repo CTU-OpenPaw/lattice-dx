@@ -48,6 +48,15 @@ const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const TASK_ID_RE = /^[a-zA-Z0-9._:-]{1,128}$/;
 const AGENT_ID_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const PROTO_POLLUTION_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isValidOrganizationId(raw) {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim();
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (lower === 'all' || PROTO_POLLUTION_KEYS.has(lower)) return false;
+  return ORG_ID_RE.test(clean);
+}
 const SENSITIVE_HEADER_KEYS = new Set([
   'authorization',
   'cookie',
@@ -810,19 +819,21 @@ async function resolveCallerOrganizationAndRoles(ctx, db, authState, params = {}
   if (empOrg && stateOrg && empOrg !== stateOrg) {
     throw a2aError('A2A_CROSS_ORG_FORBIDDEN', 403, 'Caller organization mismatch.', -32003);
   }
+  const requestedOrgs = [...new Set(collectRequestedOrgIds(ctx, params))];
+  for (const requested of requestedOrgs) {
+    if (!isValidOrganizationId(requested)) {
+      throw a2aError('A2A_INVALID_ORG', 400, `Invalid organizationId "${requested}".`, -32602);
+    }
+  }
   if (!callerOrgId && isRoot) {
-    const requestedOrgs = [...new Set(collectRequestedOrgIds(ctx, params))];
-    if (requestedOrgs.length === 1) {
-      const candidate = requestedOrgs[0];
-      if (candidate.toLowerCase() !== 'all' && ORG_ID_RE.test(candidate)) {
-        callerOrgId = candidate;
-      }
+    if (requestedOrgs.length === 1 && isValidOrganizationId(requestedOrgs[0])) {
+      callerOrgId = requestedOrgs[0];
     }
   }
   if (!callerOrgId && isAdmin) {
     callerOrgId = await resolveDefaultOrganizationId(db, { ctx, fallback: '' });
   }
-  if (!callerOrgId || callerOrgId.toLowerCase() === 'all' || !ORG_ID_RE.test(callerOrgId)) {
+  if (!isValidOrganizationId(callerOrgId)) {
     throw a2aError('A2A_ORG_REQUIRED', 403, 'Valid organization scope is required for A2A requests.', -32003);
   }
 
@@ -838,6 +849,9 @@ async function resolveCallerOrganizationAndRoles(ctx, db, authState, params = {}
 
 function assertNoCrossOrgSpoofing(ctx, params = {}, callerOrgId) {
   for (const requested of collectRequestedOrgIds(ctx, params)) {
+    if (!isValidOrganizationId(requested)) {
+      throw a2aError('A2A_INVALID_ORG', 400, `Invalid organizationId "${requested}".`, -32602);
+    }
     if (requested !== callerOrgId) {
       throw a2aError(
         'A2A_CROSS_ORG_FORBIDDEN',

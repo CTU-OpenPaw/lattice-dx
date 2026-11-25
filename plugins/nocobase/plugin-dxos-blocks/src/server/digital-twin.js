@@ -287,7 +287,8 @@ function validateDesiredPatch(rawPatch) {
  */
 async function resolveAssetEntity(db, { organizationId, assetId = null, assetEntityId = '' } = {}) {
   const org = typeof organizationId === 'string' ? organizationId.trim() : '';
-  if (!ORG_ID_RE.test(org)) {
+  const lowerOrg = org.toLowerCase();
+  if (!org || lowerOrg === 'all' || FORBIDDEN_KEYS.has(lowerOrg) || !ORG_ID_RE.test(org)) {
     throw failTwin('TWIN_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho digital twin.');
   }
 

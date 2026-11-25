@@ -140,7 +140,8 @@ function assertAllowedImportCollection(db, rawCollection) {
 
 function assertValidOrgId(organizationId) {
   const org = typeof organizationId === 'string' ? organizationId.trim() : '';
-  if (!ORG_ID_RE.test(org)) {
+  const lower = org.toLowerCase();
+  if (!org || lower === 'all' || FORBIDDEN_ROW_KEYS.has(lower) || !ORG_ID_RE.test(org)) {
     throw failImport('BULK_IMPORT_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ để import dữ liệu.');
   }
   return org;

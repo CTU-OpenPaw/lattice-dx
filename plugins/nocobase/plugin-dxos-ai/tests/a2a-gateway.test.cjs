@@ -1014,3 +1014,108 @@ test('Unbound root caller can scope A2A tasks/send and tasks/get via explicit or
   assert.equal(getRes.ctx.status, 200);
   assert.equal(getRes.ctx.body.result.id, 'unbound-root-task-1');
 });
+
+test('A2A JSON-RPC rejects prototype-pollution strings and "all" in organizationId fail-closed (400/403) with 0 rows persisted', async () => {
+  const invalidOrgValues = ['__proto__', 'constructor', 'prototype', '__PROTO__', 'Constructor', 'all', 'ALL'];
+  const db = makeMockDb({
+    latticeOrganizations: [],
+    latticeEmployees: [
+      { id: 2, userId: 2, organizationId: 'org-a', active: true },
+    ],
+    rolesUsers: [
+      { userId: 1, roleName: 'root' },
+      { userId: 2, roleName: 'ldx_operator' },
+    ],
+  });
+  const mw = createA2aMiddleware({
+    db,
+    authResolver: async (tok) => {
+      if (tok === 'tok-unbound-root') return { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] };
+      if (tok === 'tok-op-a') return { currentUser: { id: 2, username: 'op_a' }, currentRoles: ['ldx_operator'] };
+      return null;
+    },
+  });
+
+  for (const badOrg of invalidOrgValues) {
+    // 1. Unbound root via params.organizationId
+    const resParam = await invokeMiddleware(mw, {
+      token: 'tok-unbound-root',
+      body: {
+        jsonrpc: '2.0',
+        id: 400,
+        method: 'tasks/send',
+        params: { targetAgentId: 'dxos-analyst', organizationId: badOrg, prompt: 'Probe bad org' },
+      },
+    });
+    assert.equal(resParam.ctx.status === 400 || resParam.ctx.status === 403, true, `Expected 400/403 for params.organizationId="${badOrg}", got ${resParam.ctx.status}`);
+
+    // 2. Unbound root via metadata.organizationId and message.metadata.organizationId and task.organizationId
+    for (const extraParams of [
+      { metadata: { organizationId: badOrg } },
+      { message: { role: 'user', parts: [{ type: 'text', text: 'hi' }], metadata: { organizationId: badOrg } } },
+      { task: { organizationId: badOrg } },
+    ]) {
+      const resNested = await invokeMiddleware(mw, {
+        token: 'tok-unbound-root',
+        body: {
+          jsonrpc: '2.0',
+          id: 401,
+          method: 'tasks/send',
+          params: { targetAgentId: 'dxos-analyst', prompt: 'Probe nested org', ...extraParams },
+        },
+      });
+      assert.equal(resNested.ctx.status === 400 || resNested.ctx.status === 403, true, `Expected 400/403 for nested org="${badOrg}"`);
+    }
+
+    // 3. Unbound root via X-Organization-Id header
+    const resHeader = await invokeMiddleware(mw, {
+      token: 'tok-unbound-root',
+      headers: { 'x-organization-id': badOrg },
+      body: {
+        jsonrpc: '2.0',
+        id: 402,
+        method: 'tasks/send',
+        params: { targetAgentId: 'dxos-analyst', prompt: 'Probe header org' },
+      },
+    });
+    assert.equal(resHeader.ctx.status === 400 || resHeader.ctx.status === 403, true, `Expected 400/403 for header org="${badOrg}"`);
+
+    // 4. Bound non-root user attempting invalid organizationId
+    const resNonRoot = await invokeMiddleware(mw, {
+      token: 'tok-op-a',
+      body: {
+        jsonrpc: '2.0',
+        id: 403,
+        method: 'tasks/send',
+        params: { targetAgentId: 'dxos-operator', organizationId: badOrg, prompt: 'Non-root probe' },
+      },
+    });
+    assert.equal(resNonRoot.ctx.status === 400 || resNonRoot.ctx.status === 403, true, `Expected 400/403 for non-root org="${badOrg}"`);
+  }
+
+  // Also test when latticeOrganizations has a default org (bound default fallback must NOT override an explicit invalid org)
+  const dbWithDefault = makeMockDb({
+    latticeOrganizations: [{ id: 1, organizationId: 'org-default', active: true }],
+    latticeEmployees: [],
+    rolesUsers: [{ userId: 1, roleName: 'root' }],
+  });
+  const mwWithDefault = createA2aMiddleware({
+    db: dbWithDefault,
+    authResolver: async (tok) => (tok === 'tok-unbound-root' ? { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] } : null),
+  });
+  for (const badOrg of invalidOrgValues) {
+    const res = await invokeMiddleware(mwWithDefault, {
+      token: 'tok-unbound-root',
+      body: {
+        jsonrpc: '2.0',
+        id: 404,
+        method: 'tasks/send',
+        params: { targetAgentId: 'dxos-analyst', organizationId: badOrg, prompt: 'Probe with default org' },
+      },
+    });
+    assert.equal(res.ctx.status === 400 || res.ctx.status === 403, true, `Expected 400/403 with default org present for "${badOrg}"`);
+  }
+
+  assert.equal(db.store.latticeA2aTasks.length, 0, 'Zero tasks may be persisted for invalid organizationId');
+  assert.equal(dbWithDefault.store.latticeA2aTasks.length, 0, 'Zero tasks may be persisted when default org exists');
+});

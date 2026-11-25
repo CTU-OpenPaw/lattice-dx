@@ -54,6 +54,16 @@ const VIRTUAL_OR_ASSOC_FIELD_TYPES = new Set([
 ]);
 const BLOCKED_EXPORT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const DANGEROUS_FILTER_OPERATORS = new Set(['$where', '$raw', '$sql', '$eval', '$function', '$expr']);
+const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+
+function isValidOrganizationId(raw) {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim();
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (lower === 'all' || BLOCKED_EXPORT_KEYS.has(lower)) return false;
+  return ORG_ID_RE.test(clean);
+}
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -903,7 +913,11 @@ async function executeGovernedExport(
     throw failExport('EXPORT_FORMAT_INVALID', 400, 'Định dạng xuất phải là csv, xlsx hoặc pdf.');
   }
 
-  const requestedOrg = params.organizationId ? String(params.organizationId).trim() : '';
+  const hasRequestedOrg = params.organizationId !== undefined && params.organizationId !== null && String(params.organizationId).trim() !== '';
+  const requestedOrg = hasRequestedOrg ? String(params.organizationId).trim() : '';
+  if (hasRequestedOrg && !isValidOrganizationId(requestedOrg)) {
+    throw failExport('EXPORT_ORG_INVALID', 400, 'organizationId không hợp lệ.');
+  }
   if (!isRoot && requestedOrg && requestedOrg !== actor.organizationId) {
     throw failExport('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không thể xuất dữ liệu tổ chức khác.');
   }

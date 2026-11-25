@@ -17,6 +17,14 @@ const { emitDomainEventSafely, resolvePublishDomainEvent } = require('./domain-e
 const { runWithOptionalRls } = require('./blocks-rls');
 
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+const BLOCKED_ORG_IDS = new Set(['__proto__', 'constructor', 'prototype', 'all']);
+
+function isValidOrganizationId(raw) {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim();
+  if (!clean || BLOCKED_ORG_IDS.has(clean.toLowerCase())) return false;
+  return ORG_ID_RE.test(clean);
+}
 const DEVICE_KEY_RE = /^[a-zA-Z0-9_.-]{1,64}$/;
 const SUB_KEY_RE = /^[a-zA-Z0-9_.-]{1,64}$/;
 const ENTITY_TYPE_RE = /^[a-zA-Z0-9_.:/-]{1,128}$/;
@@ -716,7 +724,7 @@ async function resolveNativeEmployee(db, user) {
   const emp = rows[0];
   if (!emp || val(emp, 'active') !== true) throw failBroker('NATIVE_MEMBERSHIP_REQUIRED', 403);
   const organizationId = val(emp, 'organizationId');
-  if (typeof organizationId !== 'string' || !ORG_ID_RE.test(organizationId)) {
+  if (!isValidOrganizationId(organizationId)) {
     throw failBroker('NATIVE_MEMBERSHIP_INVALID', 403);
   }
   return { userId: String(id), employeeId: val(emp, 'id'), organizationId };
@@ -829,7 +837,7 @@ async function resolveEdgeOrJwtAuth(db, ctx, input = {}, { ingestToken } = {}) {
       throw failBroker('TELEMETRY_EDGE_AUTH_INVALID', 401, 'Token IIoT edge không khớp.');
     }
     const orgId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
-    if (!ORG_ID_RE.test(orgId)) {
+    if (!isValidOrganizationId(orgId)) {
       throw failBroker('BROKER_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho ingest broker.');
     }
     return { mode: 'edge-token', organizationId: orgId, isRoot: false, actor: null };
@@ -846,7 +854,7 @@ async function resolveEdgeOrJwtAuth(db, ctx, input = {}, { ingestToken } = {}) {
 
   if (ctx?.state?.currentRole === 'root') {
     const orgId = typeof input.organizationId === 'string' ? input.organizationId.trim() : '';
-    if (!ORG_ID_RE.test(orgId)) {
+    if (!isValidOrganizationId(orgId)) {
       throw failBroker('BROKER_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho thao tác root.');
     }
     return { mode: 'root', organizationId: orgId, isRoot: true, actor: null };
@@ -906,12 +914,16 @@ async function resolveBrokerOperator(db, ctx, input = {}, { write = false, requi
     }
     organizationId = actor.organizationId;
   } else if (rawOrg) {
-    if (!ORG_ID_RE.test(rawOrg)) {
+    if (!isValidOrganizationId(rawOrg)) {
       throw failBroker('DXOS_ORG_REQUIRED', 400, 'organizationId không hợp lệ.');
     }
     organizationId = rawOrg;
   } else if (typeof input.assetEntityId === 'string' && URN_RE.test(input.assetEntityId.trim())) {
-    organizationId = URN_RE.exec(input.assetEntityId.trim())[1];
+    const urnOrg = URN_RE.exec(input.assetEntityId.trim())[1];
+    if (!isValidOrganizationId(urnOrg)) {
+      throw failBroker('DXOS_ORG_REQUIRED', 400, 'organizationId không hợp lệ.');
+    }
+    organizationId = urnOrg;
   } else if (requireRootOrg) {
     throw failBroker('DXOS_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ.');
   }
@@ -2068,7 +2080,7 @@ function createDxosBrokerActions(db, {
       if (!inferredOrg && tenantHeader) inferredOrg = tenantHeader;
       if (!inferredOrg && subscriptionId.startsWith('urn:ngsi-ld:Subscription:')) {
         const subParts = subscriptionId.split(':');
-        if (subParts.length >= 4 && ORG_ID_RE.test(subParts[3])) {
+        if (subParts.length >= 4 && isValidOrganizationId(subParts[3])) {
           inferredOrg = subParts[3];
         }
       }

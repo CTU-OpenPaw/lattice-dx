@@ -16,9 +16,17 @@ const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
 const ALARM_NOTIF_SEVERITIES = new Set(['high', 'critical']);
 const ALARM_NOTIF_DEDUP_WINDOW_MS = 30 * 60 * 1000;
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+const BLOCKED_ORG_IDS = new Set(['__proto__', 'constructor', 'prototype', 'all']);
 const METRIC_NAME_RE = /^[a-zA-Z0-9_.-]{1,128}$/;
 const TELEMETRY_URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
 const BAD_TELEMETRY_QUALITIES = new Set(['bad', 'fault', 'corrupt', 'quarantined']);
+
+function isValidOrganizationId(raw) {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim();
+  if (!clean || BLOCKED_ORG_IDS.has(clean.toLowerCase())) return false;
+  return ORG_ID_RE.test(clean);
+}
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -424,7 +432,7 @@ async function ingestTelemetryPoint(db, {
   publishDomainEvent = null,
 } = {}) {
   const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
-  if (!ORG_ID_RE.test(orgId)) {
+  if (!isValidOrganizationId(orgId)) {
     throw failAlarm('TELEMETRY_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ để ghi nhận telemetry.');
   }
 

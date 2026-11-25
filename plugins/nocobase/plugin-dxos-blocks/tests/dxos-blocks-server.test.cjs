@@ -953,3 +953,109 @@ test('M1.1 Iteration 3: pivotMatrix.grandTotal aggregates count/sum/avg/min/max 
     ],
   });
 });
+
+test('dxosBlocks:aggregateQuery and sibling blocks-api endpoints reject prototype-pollution strings and "all" in organizationId', async () => {
+  const { createDxosBlocksActions } = require(path.join(PLUGIN_ROOT, 'src/server/blocks-api.js'));
+  const collectionsMap = new Map([
+    [
+      'latticeOrders',
+      {
+        name: 'latticeOrders',
+        fields: new Map([
+          ['id', { name: 'id', type: 'integer' }],
+          ['organizationId', { name: 'organizationId', type: 'string' }],
+          ['status', { name: 'status', type: 'string' }],
+          ['totalAmount', { name: 'totalAmount', type: 'decimal' }],
+        ]),
+      },
+    ],
+  ]);
+  const db = {
+    collections: collectionsMap,
+    getCollection: (name) => collectionsMap.get(name) || null,
+    getRepository(name) {
+      if (name === 'latticeOrders' || name === 'latticeRequests' || name === 'latticeAgentProposals' || name === 'latticeAssets' || name === 'latticeIncidentCases') {
+        return { find: async () => [], findOne: async () => null, count: async () => 0 };
+      }
+      if (name === 'latticeEmployees') {
+        return { find: async () => [{ id: 10, userId: 201, organizationId: 'org-a', active: true }] };
+      }
+      if (name === 'roles') {
+        return { findOne: async ({ filter }) => ({ name: filter.name, allowAll: false }) };
+      }
+      if (name === 'dataSourcesRolesResources') {
+        return { findOne: async ({ filter }) => ({ roleName: filter.roleName, name: filter.name, usingActionsConfig: false }) };
+      }
+      return null;
+    },
+  };
+
+  const actions = createDxosBlocksActions(db);
+  const badOrgValues = ['__proto__', 'constructor', 'prototype', '__PROTO__', 'Constructor', 'all', 'ALL'];
+
+  for (const badOrg of badOrgValues) {
+    // 1. aggregateQuery as root -> 400
+    await assert.rejects(
+      () => actions.aggregateQuery({
+        method: 'POST',
+        state: { currentRole: 'root', currentUser: { id: 1 } },
+        action: { params: { values: { collection: 'latticeOrders', chartType: 'kpi', organizationId: badOrg } } },
+      }, async () => {}),
+      (err) => err.status === 400 || err.status === 403,
+      `aggregateQuery must reject root organizationId="${badOrg}"`,
+    );
+
+    // 2. aggregateQuery as non-root -> 403
+    await assert.rejects(
+      () => actions.aggregateQuery({
+        method: 'POST',
+        state: { currentRole: 'ldx_manager', currentUser: { id: 201 } },
+        can: () => ({}),
+        action: { params: { values: { collection: 'latticeOrders', chartType: 'kpi', organizationId: badOrg } } },
+      }, async () => {}),
+      (err) => err.status === 400 || err.status === 403,
+      `aggregateQuery must reject non-root organizationId="${badOrg}"`,
+    );
+
+    // 3. Sibling blocks-api root actions: proposals, exportReport, globalSearch, twinShadow
+    await assert.rejects(
+      () => actions.proposals({
+        method: 'POST',
+        state: { currentRole: 'root', currentUser: { id: 1 } },
+        action: { params: { values: { targetCollection: 'latticeIncidentCases', organizationId: badOrg } } },
+      }, async () => {}),
+      (err) => err.status === 400 || err.status === 403,
+      `proposals must reject root organizationId="${badOrg}"`,
+    );
+
+    await assert.rejects(
+      () => actions.exportReport({
+        method: 'POST',
+        state: { currentRole: 'root', currentUser: { id: 1 } },
+        action: { params: { values: { collection: 'latticeRequests', format: 'csv', organizationId: badOrg } } },
+      }, async () => {}),
+      (err) => err.status === 400 || err.status === 403,
+      `exportReport must reject root organizationId="${badOrg}"`,
+    );
+
+    await assert.rejects(
+      () => actions.globalSearch({
+        method: 'POST',
+        state: { currentRole: 'root', currentUser: { id: 1 } },
+        action: { params: { values: { query: 'test', organizationId: badOrg } } },
+      }, async () => {}),
+      (err) => err.status === 400 || err.status === 403,
+      `globalSearch must reject root organizationId="${badOrg}"`,
+    );
+
+    await assert.rejects(
+      () => actions.twinShadow({
+        method: 'POST',
+        state: { currentRole: 'root', currentUser: { id: 1 } },
+        action: { params: { values: { assetId: 1, organizationId: badOrg } } },
+      }, async () => {}),
+      (err) => err.status === 400 || err.status === 403,
+      `twinShadow must reject root organizationId="${badOrg}"`,
+    );
+  }
+});
