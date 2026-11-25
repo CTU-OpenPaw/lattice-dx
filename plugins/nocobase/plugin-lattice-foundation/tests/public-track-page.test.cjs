@@ -314,5 +314,5 @@ test('dist/client-v2/index.js & dist/client/index.js mount /mobile, /mobile/*, a
 
   assert.ok(routesV2.some((r) => r.name === 'dxos-mobile-field' && r.path === '/mobile' && typeof r.Component === 'function'));
   assert.ok(routesV2.some((r) => r.name === 'dxos-mobile-field-sub' && r.path === '/mobile/*' && typeof r.Component === 'function'));
-  assert.ok(routesV2.some((r) => r.name === 'dxos-public-track' && r.path === '/track/:code' && typeof r.Component === 'function'));
+  assert.ok(routesV2.some((r) => r.name === 'dxos-public-track' && r.path === '/track/:code' && r.skipAuthCheck === true && typeof r.Component === 'function'));
 });

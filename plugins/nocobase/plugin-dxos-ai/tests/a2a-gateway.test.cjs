@@ -959,3 +959,58 @@ test('latticeA2aTasks collection and 20261202000500-a2a-tasks-rls migration enfo
   }).up();
   assert.equal(sqliteSql.some((s) => /ROW LEVEL SECURITY|CREATE POLICY/i.test(s)), false);
 });
+
+test('Unbound root caller can scope A2A tasks/send and tasks/get via explicit organizationId when latticeOrganizations is empty, while conflicting org headers still fail 403', async () => {
+  const db = makeMockDb({
+    latticeOrganizations: [],
+    latticeEmployees: [],
+    rolesUsers: [{ userId: 1, roleName: 'root' }],
+  });
+  const mw = createA2aMiddleware({
+    db,
+    authResolver: async (tok) => (tok === 'tok-unbound-root' ? { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] } : null),
+    localExecutor: async ({ actor }) => ({
+      status: 'completed',
+      messages: [{ role: 'agent', parts: [{ type: 'text', text: `Scoped ${actor.organizationId}` }] }],
+      artifacts: [],
+    }),
+  });
+
+  // Conflicting header vs param still rejected 403
+  const conflict = await invokeMiddleware(mw, {
+    token: 'tok-unbound-root',
+    headers: { 'x-organization-id': 'org-a' },
+    body: {
+      jsonrpc: '2.0',
+      id: 300,
+      method: 'tasks/send',
+      params: { targetAgentId: 'dxos-analyst', organizationId: 'org-b', prompt: 'Conflict' },
+    },
+  });
+  assert.equal(conflict.ctx.status, 403);
+
+  // Explicit single valid organizationId succeeds for unbound root
+  const sendRes = await invokeMiddleware(mw, {
+    token: 'tok-unbound-root',
+    body: {
+      jsonrpc: '2.0',
+      id: 301,
+      method: 'tasks/send',
+      params: { id: 'unbound-root-task-1', targetAgentId: 'dxos-analyst', organizationId: 'native-ui-lab', prompt: 'Health check' },
+    },
+  });
+  assert.equal(sendRes.ctx.status, 200);
+  assert.equal(sendRes.ctx.body.result.organizationId, 'native-ui-lab');
+
+  const getRes = await invokeMiddleware(mw, {
+    token: 'tok-unbound-root',
+    body: {
+      jsonrpc: '2.0',
+      id: 302,
+      method: 'tasks/get',
+      params: { id: 'unbound-root-task-1', organizationId: 'native-ui-lab' },
+    },
+  });
+  assert.equal(getRes.ctx.status, 200);
+  assert.equal(getRes.ctx.body.result.id, 'unbound-root-task-1');
+});

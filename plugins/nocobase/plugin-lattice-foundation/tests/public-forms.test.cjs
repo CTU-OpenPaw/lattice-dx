@@ -1548,8 +1548,8 @@ test('dist/client-v2/index.js & dist/client/index.js mount /form/:slug, /form, a
   pluginV2.app = { router: { add: (name, route) => routesV2.push({ name, ...route }) } };
   await pluginV2.load();
 
-  assert.ok(routesV2.some((r) => r.name === 'dxos-public-form' && r.path === '/form/:slug' && typeof r.Component === 'function'));
-  assert.ok(routesV2.some((r) => r.name === 'dxos-public-form-root' && r.path === '/form' && typeof r.Component === 'function'));
+  assert.ok(routesV2.some((r) => r.name === 'dxos-public-form' && r.path === '/form/:slug' && r.skipAuthCheck === true && typeof r.Component === 'function'));
+  assert.ok(routesV2.some((r) => r.name === 'dxos-public-form-root' && r.path === '/form' && r.skipAuthCheck === true && typeof r.Component === 'function'));
 
   const distLegacyPath = join(PLUGIN_ROOT, 'dist/client/index.js');
   const distLegacySrc = readFileSync(distLegacyPath, 'utf8');

@@ -30,10 +30,10 @@
       if (this.app?.router && typeof this.app.router.add === 'function') {
         this.app.router.add('dxos-mobile-field', { path: '/mobile', Component: MobileFieldPwaPage });
         this.app.router.add('dxos-mobile-field-sub', { path: '/mobile/*', Component: MobileFieldPwaPage });
-        this.app.router.add('dxos-public-track', { path: '/track/:code', Component: PublicTrackPage });
-        this.app.router.add('dxos-public-track-root', { path: '/track', Component: PublicTrackPage });
-        this.app.router.add('dxos-public-form', { path: '/form/:slug', Component: PublicFormPage });
-        this.app.router.add('dxos-public-form-root', { path: '/form', Component: PublicFormPage });
+        this.app.router.add('dxos-public-track', { path: '/track/:code', Component: PublicTrackPage, skipAuthCheck: true });
+        this.app.router.add('dxos-public-track-root', { path: '/track', Component: PublicTrackPage, skipAuthCheck: true });
+        this.app.router.add('dxos-public-form', { path: '/form/:slug', Component: PublicFormPage, skipAuthCheck: true });
+        this.app.router.add('dxos-public-form-root', { path: '/form', Component: PublicFormPage, skipAuthCheck: true });
       }
     }
   }

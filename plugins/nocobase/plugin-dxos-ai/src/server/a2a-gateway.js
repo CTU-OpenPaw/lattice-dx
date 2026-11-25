@@ -752,7 +752,28 @@ async function resolveA2aAuthState(ctx, { app, db, authResolver } = {}) {
   };
 }
 
-async function resolveCallerOrganizationAndRoles(ctx, db, authState) {
+function collectRequestedOrgIds(ctx, params = {}) {
+  const candidates = [
+    ctx?.headers?.['x-organization-id'],
+    ctx?.headers?.['x-org-id'],
+    ctx?.request?.headers?.['x-organization-id'],
+    ctx?.request?.headers?.['x-org-id'],
+    ctx?.state?.dxosTargetOrganizationId,
+    params?.organizationId,
+    params?.metadata?.organizationId,
+    params?.message?.metadata?.organizationId,
+    params?.task?.organizationId,
+  ];
+  const out = [];
+  for (const raw of candidates) {
+    if (raw === undefined || raw === null) continue;
+    const clean = String(raw).trim();
+    if (clean) out.push(clean);
+  }
+  return out;
+}
+
+async function resolveCallerOrganizationAndRoles(ctx, db, authState, params = {}) {
   const user = authState?.currentUser;
   const userId = val(user, 'id');
   if (!userId) {
@@ -789,6 +810,15 @@ async function resolveCallerOrganizationAndRoles(ctx, db, authState) {
   if (empOrg && stateOrg && empOrg !== stateOrg) {
     throw a2aError('A2A_CROSS_ORG_FORBIDDEN', 403, 'Caller organization mismatch.', -32003);
   }
+  if (!callerOrgId && isRoot) {
+    const requestedOrgs = [...new Set(collectRequestedOrgIds(ctx, params))];
+    if (requestedOrgs.length === 1) {
+      const candidate = requestedOrgs[0];
+      if (candidate.toLowerCase() !== 'all' && ORG_ID_RE.test(candidate)) {
+        callerOrgId = candidate;
+      }
+    }
+  }
   if (!callerOrgId && isAdmin) {
     callerOrgId = await resolveDefaultOrganizationId(db, { ctx, fallback: '' });
   }
@@ -807,21 +837,7 @@ async function resolveCallerOrganizationAndRoles(ctx, db, authState) {
 }
 
 function assertNoCrossOrgSpoofing(ctx, params = {}, callerOrgId) {
-  const candidates = [
-    ctx?.headers?.['x-organization-id'],
-    ctx?.headers?.['x-org-id'],
-    ctx?.request?.headers?.['x-organization-id'],
-    ctx?.request?.headers?.['x-org-id'],
-    ctx?.state?.dxosTargetOrganizationId,
-    params?.organizationId,
-    params?.metadata?.organizationId,
-    params?.message?.metadata?.organizationId,
-    params?.task?.organizationId,
-  ];
-  for (const raw of candidates) {
-    if (raw === undefined || raw === null) continue;
-    const requested = String(raw).trim();
-    if (!requested) continue;
+  for (const requested of collectRequestedOrgIds(ctx, params)) {
     if (requested !== callerOrgId) {
       throw a2aError(
         'A2A_CROSS_ORG_FORBIDDEN',
@@ -1210,7 +1226,7 @@ async function handleA2aJsonRpc(ctx, {
 
   let actor;
   try {
-    actor = await resolveCallerOrganizationAndRoles(ctx, activeDb, authState);
+    actor = await resolveCallerOrganizationAndRoles(ctx, activeDb, authState, params);
     assertNoCrossOrgSpoofing(ctx, params, actor.organizationId);
   } catch (err) {
     await recordAiAuditLog(activeDb, {

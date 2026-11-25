@@ -213,8 +213,8 @@
           }, []);
           return React.createElement('div', { role: 'status', style: { padding: 32, textAlign: 'center', color: '#64748b' } }, 'Đang chuyển đến Trang Tra cứu Vận đơn...');
         };
-        this.app.router.add('lattice-track-v2', { path: '/track/:code', Component: TrackV2Redirect });
-        this.app.router.add('lattice-track-v2-root', { path: '/track', Component: TrackV2Redirect });
+        this.app.router.add('lattice-track-v2', { path: '/track/:code', Component: TrackV2Redirect, skipAuthCheck: true });
+        this.app.router.add('lattice-track-v2-root', { path: '/track', Component: TrackV2Redirect, skipAuthCheck: true });
         const FormV2Redirect = () => {
           React.useEffect(() => {
             const dest = resolveLegacyFormRedirect(window);
@@ -222,8 +222,8 @@
           }, []);
           return React.createElement('div', { role: 'status', style: { padding: 32, textAlign: 'center', color: '#64748b' } }, 'Đang chuyển đến Biểu mẫu Công khai...');
         };
-        this.app.router.add('lattice-form-v2', { path: '/form/:slug', Component: FormV2Redirect });
-        this.app.router.add('lattice-form-v2-root', { path: '/form', Component: FormV2Redirect });
+        this.app.router.add('lattice-form-v2', { path: '/form/:slug', Component: FormV2Redirect, skipAuthCheck: true });
+        this.app.router.add('lattice-form-v2-root', { path: '/form', Component: FormV2Redirect, skipAuthCheck: true });
       }
       if (window.location.hostname === '127.0.0.1' && window.location.pathname.startsWith('/lattice')) {
         const canonical = new URL(window.location.href);canonical.hostname='localhost';
