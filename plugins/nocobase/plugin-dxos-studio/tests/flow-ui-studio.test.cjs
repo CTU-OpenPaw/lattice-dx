@@ -233,7 +233,7 @@ test('flow/* modules obey strict per-file line limits, SPDX header, zero forbidd
     'node-inspector.js': 345,
     'playback-bar.js': 260,
     'flow-canvas.js': 350,
-    'flow-studio-app.js': 345,
+    'flow-studio-app.js': 365,
     'flow-dsl.js': 250,
     'vendor-shims.js': 120,
   };
@@ -359,7 +359,7 @@ test('Screen 1 FlowListView supports search, active/paused/HITL filters, HITL ca
   // 1-click n8n Vault and Broker links
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-goto-vault-btn')[0].props.onClick();
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-goto-broker-btn')[0].props.onClick();
-  assert.deepEqual(navigated, ['/admin/settings/dxos-studio?tab=automation', '/admin/settings/dxos-studio?tab=broker']);
+  assert.deepEqual(navigated, ['/admin/settings/workflow/connectors', '/admin/settings/dxos-studio?tab=broker']);
 
   // Status filter pills & search
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-filter-paused')[0].props.onClick();
@@ -1006,6 +1006,8 @@ test('P1-2: multi-frame node drag captures exact pre-drag position for Undo/Redo
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor', xyflowOverride: mockXy });
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-back-to-list-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor', xyflowOverride: mockXy });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-guard-discard-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor', xyflowOverride: mockXy });
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-new-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor', xyflowOverride: mockXy });
   assert.deepEqual(getTrigPos(tree), { x: 80, y: 180 });
@@ -1238,6 +1240,7 @@ test('Round 2 FlowListView KPI strip, inline active toggle, and quick duplicate 
     'dxosAutomations:listRules': async () => ({ items: rules }),
     'dxosAutomations:listRuns': async () => ({ items: [{ runUid: 'r1', ruleKey: rules[0].ruleKey, status: 'completed', durationMs: 4 }] }),
     'dxosAutomations:saveRule': async (req) => ({ rule: req.data }),
+    'dxosAutomations:toggleRule': async (req) => ({ rule: { ...rules[0], active: req.data.active } }),
   });
 
   const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
@@ -1246,9 +1249,10 @@ test('Round 2 FlowListView KPI strip, inline active toggle, and quick duplicate 
 
   await collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-toggle-active-${rules[0].ruleKey}`)[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
-  const saveReq = requests.find((r) => r.url === 'dxosAutomations:saveRule');
-  assert.ok(saveReq);
-  assert.equal(saveReq.data.active, false);
+  const toggleReq = requests.find((r) => r.url === 'dxosAutomations:toggleRule');
+  assert.ok(toggleReq);
+  assert.equal(toggleReq.data.ruleKey, rules[0].ruleKey);
+  assert.equal(toggleReq.data.active, false);
 
   collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-dup-rule-${rules[0].ruleKey}`)[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
@@ -1528,4 +1532,155 @@ test('ConnectedAppsPanel renders 11 App Catalog cards, capability badges, OAuth2
   tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
   assert.ok(requests.some((r) => r.url === 'dxosN8n:retryExecution' && r.data.executionId === 'exec-500'));
   assert.ok(JSON.stringify(tree).includes('exec-501'));
+});
+
+test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + New Flow clears PlaybackBar runs, Run Now auto-save/validation guard, and 1280px toolbar wrap', async () => {
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const harness = createQueuedReactHarness();
+  const nodeTypes = getRegistrySchemas();
+  const blueprints = getBlueprints();
+  let rules = [
+    { ...blueprints[0], active: true },
+    { ...blueprints[1], active: true },
+  ];
+  const priorRuns = [
+    { id: 101, runUid: 'prior-run-1', ruleKey: blueprints[0].ruleKey, status: 'completed', durationMs: 12, stepTracesJson: [{ nodeId: 'trig_1', status: 'completed', durationMs: 3 }] },
+  ];
+  let failSave = false;
+
+  const { client, requests } = createApiMock({
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: rules }),
+    'dxosAutomations:listRuns': async () => ({ items: priorRuns }),
+    'dxosAutomations:deleteRule': async (req) => {
+      rules = rules.filter((r) => r.ruleKey !== req.data.ruleKey);
+      return { deleted: true, ruleKey: req.data.ruleKey };
+    },
+    'dxosAutomations:saveRule': async (req) => {
+      if (failSave) throw new Error('Save failed 400');
+      const saved = { ...req.data };
+      rules = rules.some((r) => r.ruleKey === saved.ruleKey)
+        ? rules.map((r) => (r.ruleKey === saved.ruleKey ? saved : r))
+        : [saved, ...rules];
+      return { rule: saved };
+    },
+    'dxosAutomations:runNow': async (req) => ({
+      run: { runUid: `run-${req.data.ruleKey}`, ruleKey: req.data.ruleKey, status: 'completed', durationMs: 7, stepTracesJson: [] },
+    }),
+  });
+
+  const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a' });
+
+  // 1. Delete rule confirmation flow (Cancel then Confirm)
+  const delKey = blueprints[1].ruleKey;
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-list-card-${delKey}`).length, 1);
+  collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-rule-${delKey}`)[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const confirmBar = collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-confirm-${delKey}`)[0];
+  assert.ok(confirmBar, 'Delete confirmation bar must render');
+  const cancelDelBtn = collectNodes(confirmBar, (n) => n.type === 'button' && textOf(n).includes('Cancel'))[0];
+  cancelDelBtn.props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-confirm-${delKey}`).length, 0);
+  assert.equal(requests.some((r) => r.url === 'dxosAutomations:deleteRule'), false);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-rule-${delKey}`)[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const confirmBar2 = collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-confirm-${delKey}`)[0];
+  const confirmDelBtn = collectNodes(confirmBar2, (n) => n.type === 'button' && textOf(n).includes('Confirm'))[0];
+  await confirmDelBtn.props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosAutomations:deleteRule' && r.data.ruleKey === delKey));
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-list-card-${delKey}`).length, 0);
+
+  // 2. Open rule, check 1280px toolbar wrap, edit label -> dirty -> Unsaved Guard (Cancel, Discard, Save)
+  const editKey = blueprints[0].ruleKey;
+  collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-edit-${editKey}`)[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const toolbar = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-toolbar')[0];
+  assert.equal(toolbar.props.style.flexWrap, 'wrap');
+  assert.notEqual(toolbar.props.style.overflowX, 'auto');
+
+  const firstNodeId = blueprints[0].graphJson.nodes[0].id;
+  collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-node-${firstNodeId}`)[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-label-input')[0].props.onChange({ target: { value: 'Edited Trigger Label' } });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dirty-badge').length, 1);
+
+  // Back to list -> stays in editor & renders unsaved guard
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-back-to-list-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-unsaved-guard').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-view').length, 0);
+
+  // Cancel guard -> closes guard & keeps editor dirty
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-guard-cancel-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-unsaved-guard').length, 0);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dirty-badge').length, 1);
+
+  // Back to list -> Discard -> returns to list without saving
+  const savesBeforeDiscard = requests.filter((r) => r.url === 'dxosAutomations:saveRule').length;
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-back-to-list-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-guard-discard-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-view').length, 1);
+  assert.equal(requests.filter((r) => r.url === 'dxosAutomations:saveRule').length, savesBeforeDiscard);
+
+  // Re-open rule, edit label -> Back -> Save & Back -> saves and returns to list
+  collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-edit-${editKey}`)[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-node-${firstNodeId}`)[0].props.onClick({ stopPropagation() {} });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-label-input')[0].props.onChange({ target: { value: 'Saved Trigger Label' } });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-back-to-list-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-guard-save-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(requests.filter((r) => r.url === 'dxosAutomations:saveRule').length, savesBeforeDiscard + 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-view').length, 1);
+
+  // 3. + Tạo luồng mới resets PlaybackBar runs=[], and Run Now auto-saves dirty drafts or aborts on invalid/failed save
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-new-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const runSelect = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-run-select')[0];
+  assert.equal(runSelect, undefined, 'PlaybackBar must receive runs=[] with no prior rule runs on + Tạo luồng mới');
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-hitl-banner').length, 0);
+
+  // Invalid empty ruleKey/name while dirty aborts runNow cleanly
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-settings-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-rule-name-input')[0].props.onChange({ target: { value: '' } });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const reqCountBeforeInvalidRun = requests.length;
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-run-now-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(requests.slice(reqCountBeforeInvalidRun).some((r) => r.url === 'dxosAutomations:runNow'), false);
+  assert.equal(requests.slice(reqCountBeforeInvalidRun).some((r) => r.url === 'dxosAutomations:saveRule'), false);
+
+  // Valid dirty flow -> save failure aborts runNow cleanly
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-rule-key-input')[0].props.onChange({ target: { value: 'new_valid_flow' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-rule-name-input')[0].props.onChange({ target: { value: 'New Valid Flow' } });
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  failSave = true;
+  const reqCountBeforeFailedSaveRun = requests.length;
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-run-now-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  assert.equal(requests.slice(reqCountBeforeFailedSaveRun).some((r) => r.url === 'dxosAutomations:saveRule'), true);
+  assert.equal(requests.slice(reqCountBeforeFailedSaveRun).some((r) => r.url === 'dxosAutomations:runNow'), false);
+
+  // Valid dirty flow -> save succeeds BEFORE runNow fires
+  failSave = false;
+  const reqStartIdx = requests.length;
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-run-now-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const postRunReqs = requests.slice(reqStartIdx).map((r) => r.url);
+  const savePos = postRunReqs.indexOf('dxosAutomations:saveRule');
+  const runPos = postRunReqs.indexOf('dxosAutomations:runNow');
+  assert.ok(savePos >= 0 && runPos > savePos, `Expected saveRule before runNow, got: ${JSON.stringify(postRunReqs)}`);
 });

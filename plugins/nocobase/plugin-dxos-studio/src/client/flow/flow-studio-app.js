@@ -13,7 +13,7 @@ const { isObj, sanitizeSafeValue, safeJsonParse, parseDslText, serializeFlowDsl,
 const {
   DEFAULT_NODES, DEFAULT_BLUEPRINTS, ROW, INP, unwrap, errMsg, primaryEvt, cleanCtx,
   syncMeta, btnS, freshDoc: makeFreshDoc, FRESH_DATA, FRESH_RUN, makeFreshUi, buildRuleSavePayload, dispatchFlowKeyDown,
-  renderValidationPopover, renderSettingsPopover, renderBlueprintsGallery, renderDslModal,
+  renderValidationPopover, renderSettingsPopover, renderBlueprintsGallery, renderDslModal, renderUnsavedGuard,
 } = require('./flow-studio-helpers');
 const { validateFlowClient } = require('./flow-validation');
 const { createFlowTestRunner } = require('./flow-test-runner');
@@ -63,7 +63,7 @@ function createFlowStudioApp(client, React, _antd, app) {
       const g = ruleToGraph(r); refs.initDone = true; refs.docRule = r;
       setDoc({ rule: { ...r, cooldownSec: g.settings.cooldownSec, maxDepth: g.settings.maxDepth }, graph: g, undo: [], redo: [], selId: null, preDragGraph: null, dirty: Boolean(opts.dirty) });
       setRunUi((s) => ({ ...s, testOut: null, selectedRun: (s.selectedRun && r?.ruleKey && s.selectedRun.ruleKey && s.selectedRun.ruleKey !== r.ruleKey) ? null : s.selectedRun }));
-      setUi((u) => ({ ...u, insertEdge: null, appendSource: null, settingsOpen: false, bpOpen: false, testRunnerOpen: false, valOpen: false }));
+      setUi((u) => ({ ...u, insertEdge: null, appendSource: null, unsavedGuardOpen: false, settingsOpen: false, bpOpen: false, testRunnerOpen: false, valOpen: false }));
     }, []);
 
     React.useEffect(() => {
@@ -165,7 +165,7 @@ function createFlowStudioApp(client, React, _antd, app) {
         if (d.message) refs.reportFb({ type: 'success', text: String(d.message) });
         if (d.applied === true) refs.loadAll?.();
       };
-      const onAiOpening = () => { setDoc((d) => (d.selId ? { ...d, selId: null } : d)); setUi((u) => ({ ...u, paletteOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false, n8nOpen: false, insertEdge: null, appendSource: null })); };
+      const onAiOpening = () => { setDoc((d) => (d.selId ? { ...d, selId: null } : d)); setUi((u) => ({ ...u, paletteOpen: false, unsavedGuardOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false, n8nOpen: false, insertEdge: null, appendSource: null })); };
       window.addEventListener('latticedx:flow-updated', onFlowUpdated);
       window.addEventListener('latticedx:ai-chat-opening', onAiOpening);
       return () => { window.removeEventListener?.('latticedx:flow-updated', onFlowUpdated); window.removeEventListener?.('latticedx:ai-chat-opening', onAiOpening); };
@@ -217,10 +217,29 @@ function createFlowStudioApp(client, React, _antd, app) {
     }
     const doneRun = (msg) => (d) => { const r = d.run || d; setRunWithIdx(r, true); reportFb({ type: 'success', text: `${msg} (${r?.status || 'completed'}).` }); loadAll(); };
     const sampleEvt = (p, customEv) => customEv || doc.rule.sampleEvent || { type: primaryEvt(p.triggerEventType, doc.rule.triggerEventType), data: {} };
-    const handleSave = () => { const p = buildSavePayload(); if (!p.ruleKey || !p.name) return reportFb({ type: 'error', text: 'Rule Key và Rule Name không được để trống.' }); return runAction('save', 'dxosAutomations:saveRule', p, (d) => { setDoc((s) => ({ ...s, dirty: false, rule: d.rule ? { ...s.rule, ...d.rule } : s.rule })); reportFb({ type: 'success', text: `Đã lưu & publish "${p.ruleKey}".` }); loadAll(); }); };
+    const saveDraft = async () => {
+      const p = buildSavePayload();
+      if (!p.ruleKey || !p.name) { reportFb({ type: 'error', text: 'Rule Key và Rule Name không được để trống.' }); return false; }
+      let ok = false;
+      await runAction('save', 'dxosAutomations:saveRule', p, (d) => { ok = true; setDoc((s) => ({ ...s, dirty: false, rule: d?.rule ? { ...s.rule, ...d.rule } : s.rule })); reportFb({ type: 'success', text: `Đã lưu & publish "${p.ruleKey}".` }); loadAll(); });
+      return ok;
+    };
+    const handleSave = () => saveDraft();
     const handleDryRun = (customEv) => { setRunUi((s) => ({ ...s, playing: false })); const p = buildSavePayload(); return runAction('dryRun', 'dxosAutomations:testRule', { ...orgPayload, rule: p, sampleEvent: sampleEvt(p, customEv), useDraft: true }, (d) => setRunWithIdx(d.simulation || d.run || d, true)); };
-    const handleRunNow = (targetRule, customEv) => { const r = targetRule || doc.rule; const ev = customEv || r.sampleEvent || { type: primaryEvt(targetRule ? r.triggerEventType : deriveTriggerEventType(doc.graph, r), r.triggerEventType), data: {} }; return runAction('runNow', 'dxosAutomations:runNow', { ...orgPayload, ruleKey: r.ruleKey, sampleEvent: ev }, doneRun(`Đã chạy "${r.ruleKey}"`)); };
-    const handleToggleRuleActive = (r) => { const next = { ...r, active: r.active === false }; return runAction('save', 'dxosAutomations:saveRule', buildRuleSavePayload(next, next.graphJson, orgPayload, deriveTriggerEventType), () => { reportFb({ type: 'success', text: `Đã ${next.active ? 'kích hoạt' : 'tạm dừng'} "${r.ruleKey}".` }); loadAll(); }); };
+    const handleRunNow = async (targetRule, customEv) => {
+      if (!targetRule && doc.dirty && !(await saveDraft())) return false;
+      const r = targetRule || doc.rule;
+      const rk = String(r?.ruleKey || '').trim();
+      if (!rk) { reportFb({ type: 'error', text: 'Rule Key không được để trống.' }); return false; }
+      const ev = customEv || r.sampleEvent || { type: primaryEvt(targetRule ? r.triggerEventType : deriveTriggerEventType(doc.graph, r), r.triggerEventType), data: {} };
+      return runAction('runNow', 'dxosAutomations:runNow', { ...orgPayload, ruleKey: rk, sampleEvent: ev }, doneRun(`Đã chạy "${rk}"`));
+    };
+    const handleToggleRuleActive = (r) => { const nextActive = r.active === false; return runAction('save', 'dxosAutomations:toggleRule', { ...orgPayload, ruleKey: r.ruleKey, active: nextActive }, () => { reportFb({ type: 'success', text: `Đã ${nextActive ? 'kích hoạt' : 'tạm dừng'} "${r.ruleKey}".` }); loadAll(); }); };
+    const handleDeleteRule = (r) => r?.ruleKey && runAction('delete', 'dxosAutomations:deleteRule', { ...orgPayload, ruleKey: r.ruleKey }, () => {
+      setData((s) => ({ ...s, rules: s.rules.filter((x) => x.ruleKey !== r.ruleKey) }));
+      if (doc.rule?.ruleKey === r.ruleKey) { const f = freshDoc(effectiveOrg || 1); refs.docRule = f.rule; setDoc(f); setRunUi(FRESH_RUN); }
+      reportFb({ type: 'success', text: `Đã xóa quy trình "${r.ruleKey}".` }); loadAll();
+    });
     const handleDuplicateRule = (r) => {
       const taken = new Set(data.rules.map((x) => x.ruleKey).filter(Boolean));
       let copyKey = `${r.ruleKey || 'rule'}_copy`;
@@ -257,14 +276,18 @@ function createFlowStudioApp(client, React, _antd, app) {
       }
       setUi((u) => ({ ...u, view: 'editor', bpOpen: false, settingsOpen: false }));
     };
-    const handleNewFlow = () => { const f = freshDoc((refs.idSeq += 1)); refs.docRule = f.rule; setDoc(f); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', insertEdge: null, appendSource: null, bpOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false })); };
-    const loadBlueprint = (bp) => { applyRule(bp, { dirty: true }); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', bpOpen: false, settingsOpen: false })); };
+    const closeEditorToList = () => { setUi((u) => ({ ...u, view: 'list', unsavedGuardOpen: false, settingsOpen: false, bpOpen: false, testRunnerOpen: false, valOpen: false })); loadAll(); };
+    const handleBackToList = () => (doc.dirty ? setUi((u) => ({ ...u, unsavedGuardOpen: true, settingsOpen: false, bpOpen: false, testRunnerOpen: false, valOpen: false })) : closeEditorToList());
+    const handleGuardSaveAndBack = async () => { if (await saveDraft()) closeEditorToList(); else setUi((u) => ({ ...u, unsavedGuardOpen: false })); };
+    const handleGuardDiscardAndBack = () => { setDoc((d) => ({ ...d, dirty: false })); closeEditorToList(); };
+    const handleNewFlow = () => { const f = freshDoc((refs.idSeq += 1)); refs.docRule = f.rule; setDoc(f); setData((s) => ({ ...s, runs: [] })); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, insertEdge: null, appendSource: null, bpOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false })); };
+    const loadBlueprint = (bp) => { applyRule(bp, { dirty: true }); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, bpOpen: false, settingsOpen: false })); };
 
     refs.kbHandler = (evt) => dispatchFlowKeyDown(evt, {
       ui, dslOpen: dsl.open, selId: doc.selId,
-      hasOpenPopover: Boolean(ui.settingsOpen || ui.testRunnerOpen || ui.valOpen || ui.bpOpen || ui.paletteOpen || ui.insertEdge || ui.appendSource),
+      hasOpenPopover: Boolean(ui.unsavedGuardOpen || ui.settingsOpen || ui.testRunnerOpen || ui.valOpen || ui.bpOpen || ui.paletteOpen || ui.insertEdge || ui.appendSource),
       closeDsl: () => setDsl((m) => ({ ...m, open: false })),
-      closePopovers: () => setUi((u) => ({ ...u, settingsOpen: false, testRunnerOpen: false, valOpen: false, bpOpen: false, paletteOpen: false, insertEdge: null, appendSource: null })),
+      closePopovers: () => setUi((u) => ({ ...u, unsavedGuardOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false, bpOpen: false, paletteOpen: false, insertEdge: null, appendSource: null })),
       clearSel: () => setDoc((d) => ({ ...d, selId: null })),
       save: handleSave, togglePalette: () => setUi((u) => ({ ...u, paletteOpen: !u.paletteOpen })),
       undo: () => undoRedo(-1), redo: () => undoRedo(1), deleteSel: () => handleDeleteNode(doc.selId),
@@ -293,17 +316,17 @@ function createFlowStudioApp(client, React, _antd, app) {
     ];
 
     return h('div', { 'data-testid': 'dxos-flow-studio-app', style: { height: props.embedded ? 640 : 'calc(100vh - 196px)', minHeight: 540, display: 'flex', flexDirection: 'column', background: '#f8fafc', overflow: 'hidden', position: 'relative' } },
-      ui.view === 'list' ? h(React.Fragment, null, fbBar, h(FlowListView, { rules: data.rules, runs: data.runs, blueprints, loading: data.loading, runBusy: Boolean(ui.busy.runNow), effectiveOrg, orgList, onOrgChange: setOrgOverride, bpOpen: ui.bpOpen, onToggleBlueprints: (force) => setUi((u) => ({ ...u, bpOpen: typeof force === 'boolean' ? force : !u.bpOpen })), onLoadBlueprint: loadBlueprint, onOpenRule: openRuleInEditor, onRunNow: (r) => handleRunNow(r), onNewFlow: handleNewFlow, onOpenN8nSetup: () => setUi((u) => ({ ...u, n8nOpen: true })), onOpenRoute: openRoute, onToggleRuleActive: handleToggleRuleActive, onDuplicateRule: handleDuplicateRule }))
+      ui.view === 'list' ? h(React.Fragment, null, fbBar, h(FlowListView, { rules: data.rules, runs: data.runs, blueprints, loading: data.loading, runBusy: Boolean(ui.busy.runNow), deleteBusy: Boolean(ui.busy.delete), effectiveOrg, orgList, onOrgChange: setOrgOverride, bpOpen: ui.bpOpen, onToggleBlueprints: (force) => setUi((u) => ({ ...u, bpOpen: typeof force === 'boolean' ? force : !u.bpOpen })), onLoadBlueprint: loadBlueprint, onOpenRule: openRuleInEditor, onRunNow: (r) => handleRunNow(r), onNewFlow: handleNewFlow, onOpenN8nSetup: () => setUi((u) => ({ ...u, n8nOpen: true })), onOpenRoute: openRoute, onToggleRuleActive: handleToggleRuleActive, onDuplicateRule: handleDuplicateRule, onDeleteRule: handleDeleteRule }))
         : h(React.Fragment, null,
-          h('header', { 'data-testid': 'dxos-flow-toolbar', style: { minHeight: 50, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'nowrap', overflowX: 'auto', gap: 10, padding: '6px 12px', borderBottom: '1px solid #e2e8f0', background: '#ffffff', boxSizing: 'border-box' } },
-            h('div', { style: { ...ROW, flexShrink: 0 } },
-              h('button', { 'data-testid': 'dxos-flow-back-to-list-btn', type: 'button', onClick: () => setUi((u) => ({ ...u, view: 'list', settingsOpen: false, bpOpen: false, testRunnerOpen: false, valOpen: false })), style: btnS('ghost') }, '← Danh sách'),
+          h('header', { 'data-testid': 'dxos-flow-toolbar', style: { minHeight: 50, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10, padding: '6px 12px', borderBottom: '1px solid #e2e8f0', background: '#ffffff', boxSizing: 'border-box' } },
+            h('div', { style: { ...ROW, flexWrap: 'wrap', flexShrink: 1 } },
+              h('button', { 'data-testid': 'dxos-flow-back-to-list-btn', type: 'button', onClick: handleBackToList, style: btnS('ghost') }, '← Danh sách'),
               h('strong', { title: doc.rule.name || doc.rule.ruleKey || 'Workflow', style: { fontSize: 13, color: '#0f172a', maxWidth: 210, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, doc.rule.name || doc.rule.ruleKey || 'Workflow'),
               h('span', { style: { fontSize: 11, fontWeight: 600, padding: '2px 7px', borderRadius: 999, flexShrink: 0, background: doc.rule.active === false ? '#f1f5f9' : '#ecfdf5', color: doc.rule.active === false ? '#475569' : '#047857' } }, doc.rule.active === false ? 'Tạm dừng' : 'Đang bật'),
               doc.dirty ? h('span', { 'data-testid': 'dxos-flow-dirty-badge', style: { fontSize: 11, fontWeight: 700, padding: '2px 7px', borderRadius: 999, flexShrink: 0, background: '#fffbeb', color: '#b45309', border: '1px solid #fcd34d' } }, '● Chưa lưu') : null,
               h('button', { 'data-testid': 'dxos-flow-settings-btn', type: 'button', onClick: () => setUi((u) => ({ ...u, settingsOpen: !u.settingsOpen, testRunnerOpen: false, valOpen: false })), style: btnS(ui.settingsOpen ? 'act' : 'ghost') }, '⚙️ Cài đặt'),
             ),
-            h('div', { style: ROW }, tools.map(([tid, lbl, onClick, tone, dis]) => h('button', { key: tid, 'data-testid': tid, type: 'button', disabled: dis, onClick, style: btnS(tone, dis) }, lbl))),
+            h('div', { style: { ...ROW, flexWrap: 'wrap', flexShrink: 1 } }, tools.map(([tid, lbl, onClick, tone, dis]) => h('button', { key: tid, 'data-testid': tid, type: 'button', disabled: dis, onClick, style: btnS(tone, dis) }, lbl))),
           ),
           fbBar,
           ui.valOpen ? renderValidationPopover(h, { totalIssues, validation, onClose: () => setUi((u) => ({ ...u, valOpen: false })), onSelectIssue: (it) => { if (it.nodeId) { setDoc((d) => ({ ...d, selId: it.nodeId })); focusNode(it.nodeId); } setUi((u) => ({ ...u, valOpen: false })); } }) : null,
@@ -326,6 +349,7 @@ function createFlowStudioApp(client, React, _antd, app) {
         ),
       h(N8nSetupModal, { open: ui.n8nOpen, api, organizationId: effectiveOrg, selectedNode, onClose: () => setUi((u) => ({ ...u, n8nOpen: false })), onConnectorsChanged: () => loadAll(), onApplyToSelectedNode: (p) => selectedNode && commitGraph((g) => ({ ...g, nodes: g.nodes.map((n) => (n.id === selectedNode.id ? { ...n, config: { ...(n.config || {}), connectorKey: p.connectorKey, method: 'POST', path: p.path } } : n)) })), onOpenEnterpriseBlueprint: () => { const bp = blueprints.find((b) => (b.blueprintKey || b.ruleKey) === 'auto_enterprise_n8n_compliance'); if (bp) loadBlueprint(bp); setUi((u) => ({ ...u, view: 'editor', bpOpen: false, n8nOpen: false })); } }),
       dsl.open ? renderDslModal(h, { dsl, dslObj, serializeFlowDsl, setDsl, handleImportDsl }) : null,
+      ui.unsavedGuardOpen ? renderUnsavedGuard(h, { ruleName: doc.rule.name || doc.rule.ruleKey, busy: Boolean(ui.busy.save), onSaveAndBack: handleGuardSaveAndBack, onDiscardAndBack: handleGuardDiscardAndBack, onCancel: () => setUi((u) => ({ ...u, unsavedGuardOpen: false })) }) : null,
     );
   };
 }

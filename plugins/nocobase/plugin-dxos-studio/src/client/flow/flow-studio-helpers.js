@@ -80,7 +80,7 @@ const freshDoc = (seed, makeBlankFlow) => {
 const FRESH_DATA = { rules: [], runs: [], catalog: null, regTypes: [], loading: false };
 const FRESH_RUN = { selectedRun: null, idx: 0, playing: false, testOut: null, autoExpandSeq: 0 };
 const makeFreshUi = (view) => ({
-  view, settingsOpen: false, bpOpen: false, paletteOpen: false,
+  view, settingsOpen: false, bpOpen: false, paletteOpen: false, unsavedGuardOpen: false,
   testRunnerOpen: false, valOpen: false, n8nOpen: false, insertEdge: null, appendSource: null,
   fb: null, busy: {}, inspTab: null, inspTabSeq: 0,
 });
@@ -195,9 +195,23 @@ function dispatchFlowKeyDown(evt, ctx) {
   if (!editable && (evt.key === 'Delete' || evt.key === 'Backspace') && ctx.selId) { evt.preventDefault?.(); ctx.deleteSel(); }
 }
 
+function renderUnsavedGuard(h, { ruleName, busy, onSaveAndBack, onDiscardAndBack, onCancel }) {
+  return h('div', { 'data-testid': 'dxos-flow-unsaved-guard', role: 'dialog', 'aria-modal': 'true', style: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 55, padding: 16 } },
+    h('div', { style: { width: 420, maxWidth: '100%', background: '#ffffff', borderRadius: 12, padding: 18, display: 'grid', gap: 12, boxShadow: '0 14px 36px rgba(15,23,42,0.22)' } },
+      h('strong', { style: { fontSize: 15, color: '#0f172a' } }, 'Có thay đổi chưa lưu'),
+      h('span', { style: { fontSize: 13, color: '#475569', lineHeight: 1.5 } }, `Quy trình "${ruleName || 'Workflow'}" đang có chỉnh sửa chưa lưu. Bạn muốn lưu trước khi quay lại danh sách không?`),
+      h('div', { style: { display: 'flex', justifyContent: 'flex-end', flexWrap: 'wrap', gap: 8 } },
+        h('button', { 'data-testid': 'dxos-flow-guard-cancel-btn', type: 'button', onClick: onCancel, style: btnS('ghost') }, 'Ở lại tiếp tục sửa'),
+        h('button', { 'data-testid': 'dxos-flow-guard-discard-btn', type: 'button', onClick: onDiscardAndBack, style: btnS('err') }, 'Bỏ thay đổi'),
+        h('button', { 'data-testid': 'dxos-flow-guard-save-btn', type: 'button', disabled: Boolean(busy), onClick: onSaveAndBack, style: btnS('pri', Boolean(busy)) }, 'Lưu & Quay lại'),
+      ),
+    ),
+  );
+}
+
 module.exports = {
   DEFAULT_NODES, DEFAULT_BLUEPRINTS, ROW, INP,
   unwrap, errMsg, primaryEvt, cleanCtx, syncMeta, btnS,
   freshDoc, FRESH_DATA, FRESH_RUN, makeFreshUi, buildRuleSavePayload, dispatchFlowKeyDown,
-  renderValidationPopover, renderSettingsPopover, renderBlueprintsGallery, renderDslModal,
+  renderValidationPopover, renderSettingsPopover, renderBlueprintsGallery, renderDslModal, renderUnsavedGuard,
 };

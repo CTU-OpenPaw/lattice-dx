@@ -18,7 +18,7 @@ function createFlowListView(React) {
     input: { padding: '6px 10px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#FFFFFF', color: '#0F172A', fontSize: 12, outline: 'none' },
     card: { padding: '14px 16px', borderRadius: 12, background: '#FFFFFF', border: '1px solid #E2E8F0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 },
     btn: (tone = 'ghost', disabled = false) => {
-      const m = { primary: ['#2563EB', '#FFFFFF', '#2563EB'], ai: ['#0F172A', '#FFFFFF', '#0F172A'], active: ['#EFF6FF', '#1D4ED8', '#93C5FD'], infra: ['#F8FAFC', '#334155', '#CBD5E1'], ghost: ['#FFFFFF', '#0F172A', '#CBD5E1'] }[tone] || ['#FFFFFF', '#0F172A', '#CBD5E1'];
+      const m = { primary: ['#2563EB', '#FFFFFF', '#2563EB'], ai: ['#0F172A', '#FFFFFF', '#0F172A'], active: ['#EFF6FF', '#1D4ED8', '#93C5FD'], danger: ['#FEF2F2', '#B91C1C', '#FCA5A5'], infra: ['#F8FAFC', '#334155', '#CBD5E1'], ghost: ['#FFFFFF', '#0F172A', '#CBD5E1'] }[tone] || ['#FFFFFF', '#0F172A', '#CBD5E1'];
       return { padding: '6px 12px', borderRadius: 8, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap', cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.55 : 1, background: disabled ? '#E2E8F0' : m[0], color: disabled ? '#64748B' : m[1], border: `1px solid ${disabled ? '#CBD5E1' : m[2]}` };
     },
     pill: (active) => ({ padding: '5px 11px', borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap', border: `1px solid ${active ? '#2563EB' : '#CBD5E1'}`, background: active ? '#EFF6FF' : '#FFFFFF', color: active ? '#1D4ED8' : '#475569' }),
@@ -33,10 +33,11 @@ function createFlowListView(React) {
       rules = [], runs = [], blueprints = [], loading = false, runBusy = false,
       effectiveOrg = '', orgList = [], onOrgChange, bpOpen = false, onToggleBlueprints,
       onLoadBlueprint, onOpenRule, onRunNow, onNewFlow, onOpenN8nSetup, onOpenRoute,
-      onToggleRuleActive, onDuplicateRule,
+      onToggleRuleActive, onDuplicateRule, onDeleteRule, deleteBusy = false,
     } = props;
     const [search, setSearch] = React.useState('');
     const [filter, setFilter] = React.useState('all');
+    const [confirmDeleteKey, setConfirmDeleteKey] = React.useState(null);
 
     const safeRules = Array.isArray(rules) ? rules : [];
     const safeRuns = Array.isArray(runs) ? runs : [];
@@ -107,7 +108,7 @@ function createFlowListView(React) {
           }, key === 'hitl' && suspendedRuleKeys.size ? `${label} (${suspendedRuleKeys.size})` : label)),
         ),
         h('div', { style: S.row },
-          h('button', { 'data-testid': 'dxos-flow-goto-vault-btn', type: 'button', onClick: () => onOpenRoute?.('/admin/settings/dxos-studio?tab=automation'), style: S.btn('infra') }, '🔗 Connectors / n8n ↗'),
+          h('button', { 'data-testid': 'dxos-flow-goto-vault-btn', type: 'button', onClick: () => onOpenRoute?.('/admin/settings/workflow/connectors'), style: S.btn('infra') }, '🔗 Connectors / n8n ↗'),
           h('button', { 'data-testid': 'dxos-flow-goto-broker-btn', type: 'button', onClick: () => onOpenRoute?.('/admin/settings/dxos-studio?tab=broker'), style: S.btn('infra') }, '📡 Broker (MQTT / Orion-LD) ↗'),
         ),
       ),
@@ -179,7 +180,18 @@ function createFlowListView(React) {
                   h('button', { 'data-testid': `dxos-flow-dup-rule-${r.ruleKey}`, type: 'button', onClick: () => onDuplicateRule?.(r), style: S.btn('ghost') }, 'Nhân bản'),
                   h('button', { 'data-testid': `dxos-flow-list-run-${r.ruleKey}`, type: 'button', disabled: Boolean(runBusy), onClick: () => onRunNow?.(r), style: S.btn('ghost', Boolean(runBusy)) }, '▶ Chạy'),
                   h('button', { 'data-testid': `dxos-flow-edit-${r.ruleKey}`, type: 'button', onClick: () => onOpenRule?.(r.ruleKey), style: S.btn('primary') }, 'Mở Canvas'),
+                  h('button', { 'data-testid': `dxos-flow-delete-rule-${r.ruleKey}`, type: 'button', disabled: Boolean(deleteBusy), onClick: () => setConfirmDeleteKey((cur) => (cur === r.ruleKey ? null : r.ruleKey)), style: S.btn('danger', Boolean(deleteBusy)) }, 'Xóa'),
                 ),
+                confirmDeleteKey === r.ruleKey ? h('div', {
+                  'data-testid': `dxos-flow-delete-confirm-${r.ruleKey}`,
+                  style: { width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, padding: '8px 10px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', fontSize: 12, color: '#991B1B' },
+                },
+                  h('span', null, `Xác nhận xóa quy trình "${r.name || r.ruleKey}"?`),
+                  h('div', { style: S.row },
+                    h('button', { 'data-testid': `dxos-flow-delete-confirm-yes-${r.ruleKey}`, type: 'button', disabled: Boolean(deleteBusy), onClick: async () => { setConfirmDeleteKey(null); await onDeleteRule?.(r); }, style: S.btn('danger', Boolean(deleteBusy)) }, 'Confirm'),
+                    h('button', { 'data-testid': `dxos-flow-delete-confirm-no-${r.ruleKey}`, type: 'button', onClick: () => setConfirmDeleteKey(null), style: S.btn('ghost') }, 'Cancel'),
+                  ),
+                ) : null,
               );
             }),
           ),
