@@ -305,6 +305,15 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const quotaOrgCommittedRef = typeof React.useRef === 'function'
       ? React.useRef(false)
       : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: false }), []) : { current: false });
+    const [builtApps, setBuiltApps] = React.useState([]);
+    const [builtAppsLoading, setBuiltAppsLoading] = React.useState(false);
+    const [builtAppBusyKey, setBuiltAppBusyKey] = React.useState(null);
+    const [builtAppSelected, setBuiltAppSelected] = React.useState(null);
+    const [builtAppBundlePreview, setBuiltAppBundlePreview] = React.useState(null);
+    const [builtAppVerifyResults, setBuiltAppVerifyResults] = React.useState({});
+    const builtAppsReqSeqRef = typeof React.useRef === 'function'
+      ? React.useRef(0)
+      : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: 0 }), []) : { current: 0 });
 
     const selectDraft = (next) => {
       const fallbackOrg = resolveStudioDefaultOrg({ topology, catalog, profiles, app });
@@ -453,6 +462,32 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       }
     }, [api, clientDenied, approvalStatusFilter]);
 
+    const loadBuiltApps = React.useCallback(async () => {
+      if (clientDenied || !api?.request) return;
+      const reqSeq = ++builtAppsReqSeqRef.current;
+      setBuiltAppsLoading(true);
+      try {
+        const targetOrg = String(quotaOrg || resolveStudioDefaultOrg({ topology, catalog, profiles, app }) || '').trim();
+        const res = await api.request({
+          url: 'dxosAi:listBuiltApps',
+          method: 'get',
+          params: targetOrg ? { organizationId: targetOrg } : {},
+        });
+        if (reqSeq !== builtAppsReqSeqRef.current) return;
+        const data = res?.data?.data || res?.data || {};
+        const nextApps = Array.isArray(data.apps) ? data.apps : [];
+        setBuiltApps(nextApps);
+        setBuiltAppSelected((prev) => (prev ? (nextApps.find((a) => a.appKey === prev.appKey) || prev) : null));
+      } catch (err) {
+        if (reqSeq !== builtAppsReqSeqRef.current) return;
+        setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được danh sách ứng dụng đã dựng.' });
+      } finally {
+        if (reqSeq === builtAppsReqSeqRef.current) {
+          setBuiltAppsLoading(false);
+        }
+      }
+    }, [api, clientDenied, quotaOrg]);
+
     React.useEffect(() => {
       loadAll();
     }, [loadAll]);
@@ -463,6 +498,9 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       }
       if (tab === 'hitl' && !clientDenied && !forbidden) {
         loadApprovals(approvalStatusFilter);
+      }
+      if (tab === 'built-apps' && !clientDenied && !forbidden) {
+        loadBuiltApps();
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tab, quotaOrg, approvalStatusFilter, clientDenied, forbidden]);
@@ -681,6 +719,165 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       }
     };
 
+    const handleRebuildBuiltApp = async (appItem) => {
+      if (!api?.request || !appItem?.appKey || builtAppBusyKey) return;
+      setBuiltAppBusyKey(appItem.appKey);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:rebuildBuiltApp',
+          method: 'post',
+          data: {
+            appKey: appItem.appKey,
+            ...(appItem.organizationId ? { organizationId: appItem.organizationId } : {}),
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        setNotice({
+          type: d.ok === false ? 'error' : 'ok',
+          text: `Đã dựng lại ứng dụng "${appItem.appKey}" lên phiên bản v${d.appVersion || ((Number(appItem.version) || 1) + 1)} (${d.ok === false ? 'NEEDS_REVIEW' : 'PASS'}).`,
+        });
+        await loadBuiltApps();
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || `Dựng lại "${appItem.appKey}" thất bại.`,
+        });
+      } finally {
+        setBuiltAppBusyKey(null);
+      }
+    };
+
+    const handleExportBuiltAppBundle = async (appItem) => {
+      if (!api?.request || !appItem?.appKey || builtAppBusyKey) return;
+      setBuiltAppBusyKey(appItem.appKey);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:exportBuiltAppBundle',
+          method: 'get',
+          params: {
+            appKey: appItem.appKey,
+            ...(appItem.organizationId ? { organizationId: appItem.organizationId } : {}),
+          },
+        });
+        const bundle = res?.data?.data || res?.data || {};
+        setBuiltAppBundlePreview({ appKey: appItem.appKey, bundle });
+        if (
+          typeof document !== 'undefined'
+          && typeof document.createElement === 'function'
+          && typeof Blob !== 'undefined'
+          && typeof URL?.createObjectURL === 'function'
+        ) {
+          try {
+            const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = url;
+            anchor.download = `${appItem.appKey}-bundle-v3.json`;
+            document.body?.appendChild?.(anchor);
+            anchor.click?.();
+            anchor.remove?.();
+            URL.revokeObjectURL?.(url);
+          } catch {
+            // Preview panel already captures exported bundle JSON
+          }
+        }
+        setNotice({
+          type: 'ok',
+          text: `Đã xuất gói giải pháp v3 cho "${appItem.appKey}" (${bundle?.metadata?.schemaVersion || 'latticedx.solution-bundle/v3'}).`,
+        });
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || `Xuất bundle v3 cho "${appItem.appKey}" thất bại.`,
+        });
+      } finally {
+        setBuiltAppBusyKey(null);
+      }
+    };
+
+    const handleVerifyBuiltApp = async (appItem) => {
+      if (!api?.request || !appItem?.appKey || builtAppBusyKey) return;
+      setBuiltAppBusyKey(appItem.appKey);
+      setNotice(null);
+      try {
+        const [metaRes, listRes] = await Promise.all([
+          api.request({ url: 'dxosBlocks:collectionsMeta', method: 'get', skipNotify: true }),
+          api.request({
+            url: 'dxosAi:listBuiltApps',
+            method: 'get',
+            params: appItem.organizationId ? { organizationId: appItem.organizationId } : {},
+          }),
+        ]);
+        const metaData = metaRes?.data?.data || metaRes?.data || {};
+        const liveCols = new Set((Array.isArray(metaData.collections) ? metaData.collections : []).map((c) => c?.name).filter(Boolean));
+        const listData = listRes?.data?.data || listRes?.data || {};
+        const nextApps = Array.isArray(listData.apps) ? listData.apps : [];
+        if (nextApps.length) setBuiltApps(nextApps);
+        const freshApp = nextApps.find((a) => a.appKey === appItem.appKey) || appItem;
+        const expectedCols = Array.isArray(freshApp?.artifactRefsJson?.collections) ? freshApp.artifactRefsJson.collections : [];
+        const missingCols = expectedCols.filter((c) => !liveCols.has(c));
+        const ver = freshApp?.lastVerificationJson || {};
+        const passedCount = Number(ver.passedCount ?? 0);
+        const totalCount = Number(ver.totalCount ?? 0);
+        const ok = Boolean(ver.ok !== false && missingCols.length === 0 && freshApp.status !== 'torndown');
+        const summary = {
+          ok,
+          passedCount,
+          totalCount,
+          missingCollections: missingCols,
+          status: freshApp.status || 'active',
+          checkedAt: new Date().toISOString(),
+        };
+        setBuiltAppVerifyResults((prev) => ({ ...prev, [appItem.appKey]: summary }));
+        setNotice({
+          type: ok ? 'ok' : 'error',
+          text: ok
+            ? `Kiểm chứng "${appItem.appKey}" PASS (${passedCount}/${totalCount} checks, ${expectedCols.length} bảng sẵn sàng).`
+            : `Kiểm chứng "${appItem.appKey}" phát hiện cảnh báo: thiếu bảng [${missingCols.join(', ') || 'none'}], trạng thái ${freshApp.status}.`,
+        });
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || `Kiểm chứng "${appItem.appKey}" thất bại.`,
+        });
+      } finally {
+        setBuiltAppBusyKey(null);
+      }
+    };
+
+    const handleTeardownBuiltApp = async (appItem, keepData = true) => {
+      if (!api?.request || !appItem?.appKey || builtAppBusyKey) return;
+      setBuiltAppBusyKey(appItem.appKey);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:teardownBuiltApp',
+          method: 'post',
+          data: {
+            appKey: appItem.appKey,
+            keepData: keepData !== false,
+            ...(appItem.organizationId ? { organizationId: appItem.organizationId } : {}),
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        const preservedCount = Array.isArray(d.preservedCollections) ? d.preservedCollections.length : 0;
+        setNotice({
+          type: 'ok',
+          text: `Đã gỡ ứng dụng "${appItem.appKey}" (keepData=${d.keepData !== false}, bảo toàn ${preservedCount} bảng dữ liệu).`,
+        });
+        await loadBuiltApps();
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || `Gỡ ứng dụng "${appItem.appKey}" thất bại.`,
+        });
+      } finally {
+        setBuiltAppBusyKey(null);
+      }
+    };
+
     const tabItems = [
       ['topology', '1. Hệ điều hành 6 Phân hệ'],
       ['workforce', '2. Quản trị Nhân sự AI Động'],
@@ -688,6 +885,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       ['audit', '4. Nhật ký Kiểm toán'],
       ['quota', '5. Hạn mức & Chi phí AI'],
       ['hitl', '6. Duyệt AI (HITL)'],
+      ['built-apps', '7. Ứng dụng Đã dựng (Built Apps)'],
     ];
 
     const availableTools = Array.isArray(catalog?.availableTools) ? catalog.availableTools : DEFAULT_TOOL_NAMES;
@@ -737,9 +935,10 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               if (!clientDenied && !forbidden) {
                 await loadQuota(quotaOrg);
                 if (tab === 'hitl') await loadApprovals(approvalStatusFilter);
+                if (tab === 'built-apps') await loadBuiltApps();
               }
             },
-            disabled: loading || busy || quotaLoading || approvalsLoading,
+            disabled: loading || busy || quotaLoading || approvalsLoading || builtAppsLoading,
             style: btnStyle(false),
           }, 'Làm mới'),
         ),
@@ -835,6 +1034,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           key,
           type: 'button',
           role: 'tab',
+          'data-testid': `dxos-tab-${key}`,
           'aria-selected': tab === key,
           onClick: () => setTab(key),
           style: { ...btnStyle(tab === key), whiteSpace: 'nowrap', flexShrink: 0 },
@@ -1273,6 +1473,150 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               );
             }),
           ),
+      ) : null,
+
+      tab === 'built-apps' ? h('div', {
+        'data-testid': 'dxos-built-apps-panel',
+        style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 14 },
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
+          h('div', null,
+            h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '7. Quản trị Ứng dụng Doanh nghiệp Đã dựng (Built Apps Registry)'),
+            h('div', { style: { fontSize: 12, color: '#64748b' } },
+              `Hiển thị ${builtApps.length} ứng dụng trong tổ chức ${quotaOrg || '(mặc định)'}${builtAppsLoading ? ' · Đang tải…' : ''}`),
+          ),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-built-apps-refresh-btn',
+              onClick: loadBuiltApps,
+              disabled: builtAppsLoading || Boolean(builtAppBusyKey),
+              style: btnStyle(false),
+            }, builtAppsLoading ? 'Đang tải…' : 'Tải lại danh sách'),
+          ),
+        ),
+        !builtApps.length
+          ? h('div', { style: { padding: 20, textAlign: 'center', borderRadius: 10, border: '1px dashed #cbd5e1', color: '#64748b', fontSize: 13 } },
+            'Chưa có ứng dụng nào được ghi nhận trong bảng latticeBuiltApps.')
+          : h('div', { style: { display: 'grid', gap: 12 } },
+            builtApps.map((appItem) => {
+              const refs = appItem?.artifactRefsJson || {};
+              const cols = Array.isArray(refs.collections) ? refs.collections : [];
+              const roles = Array.isArray(refs.roles) ? refs.roles : [];
+              const portals = Array.isArray(refs.portals) ? refs.portals : [];
+              const dmns = Array.isArray(refs.dmnTableKeys) ? refs.dmnTableKeys : [];
+              const flows = Array.isArray(refs.flowRuleKeys) ? refs.flowRuleKeys : [];
+              const n8ns = Array.isArray(refs.n8nWorkflowIds) ? refs.n8nWorkflowIds : [];
+              const statusStr = String(appItem.status || 'active');
+              const statusBg = statusStr === 'active' ? '#dcfce7' : statusStr === 'torndown' ? '#f1f5f9' : '#fef3c7';
+              const statusFg = statusStr === 'active' ? '#166534' : statusStr === 'torndown' ? '#475569' : '#92400e';
+              const rowBusy = builtAppBusyKey === appItem.appKey;
+              const verifyState = builtAppVerifyResults[appItem.appKey] || null;
+              const lastVer = appItem.lastVerificationJson || {};
+
+              return h('div', {
+                key: appItem.appKey,
+                'data-testid': `dxos-built-app-card-${appItem.appKey}`,
+                style: { padding: 14, borderRadius: 10, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 10 },
+              },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+                  h('div', { style: { fontSize: 14, color: '#0f172a' } },
+                    h('strong', null, appItem.name || appItem.appKey),
+                    ' · ',
+                    h('code', null, appItem.appKey),
+                    ` · v${appItem.version || 1}`,
+                  ),
+                  h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' } },
+                    h('span', { style: badgeStyle('#e0f2fe', '#075985') }, `v${appItem.version || 1}`),
+                    h('span', { style: badgeStyle(statusBg, statusFg) }, statusStr),
+                  ),
+                ),
+                h('div', { style: { fontSize: 12, color: '#475569', display: 'flex', flexWrap: 'wrap', gap: 8 } },
+                  h('span', null, `Tổ chức: ${appItem.organizationId || '—'}`),
+                  h('span', null, `Bảng (${cols.length}): ${cols.join(', ') || '—'}`),
+                  h('span', null, `Vai trò (${roles.length}): ${roles.join(', ') || '—'}`),
+                  h('span', null, `Portals: ${portals.map((p) => `/p/${p.portalSlug}`).join(', ') || '—'}`),
+                  dmns.length ? h('span', null, `DMN: ${dmns.join(', ')}`) : null,
+                  flows.length ? h('span', null, `Flows: ${flows.join(', ')}`) : null,
+                  n8ns.length ? h('span', null, `n8n: ${n8ns.join(', ')}`) : null,
+                ),
+                verifyState ? h('div', {
+                  'data-testid': `dxos-built-app-verify-result-${appItem.appKey}`,
+                  style: {
+                    padding: '6px 10px',
+                    borderRadius: 6,
+                    fontSize: 12,
+                    border: `1px solid ${verifyState.ok ? '#86efac' : '#fca5a5'}`,
+                    background: verifyState.ok ? '#f0fdf4' : '#fef2f2',
+                    color: verifyState.ok ? '#166534' : '#991b1b',
+                  },
+                }, verifyState.ok
+                  ? `PASS · ${verifyState.passedCount}/${verifyState.totalCount} checks · ${cols.length} bảng đã xác minh`
+                  : `FAIL · thiếu bảng [${(verifyState.missingCollections || []).join(', ')}] · trạng thái ${verifyState.status}`)
+                  : (lastVer && typeof lastVer.totalCount === 'number' ? h('div', { style: { fontSize: 11, color: '#64748b' } },
+                    `Lần kiểm chứng gần nhất: ${lastVer.ok ? 'PASS' : 'NEEDS_REVIEW'} (${lastVer.passedCount ?? 0}/${lastVer.totalCount})`) : null),
+                h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `dxos-built-app-view-${appItem.appKey}`,
+                    onClick: () => setBuiltAppSelected((prev) => (prev?.appKey === appItem.appKey ? null : appItem)),
+                    style: btnStyle(builtAppSelected?.appKey === appItem.appKey, false),
+                  }, builtAppSelected?.appKey === appItem.appKey ? 'Ẩn chi tiết' : 'Xem chi tiết'),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `dxos-built-app-verify-${appItem.appKey}`,
+                    onClick: () => handleVerifyBuiltApp(appItem),
+                    disabled: rowBusy || Boolean(builtAppBusyKey),
+                    style: btnStyle(false, false),
+                  }, rowBusy ? 'Đang xử lý…' : 'Kiểm chứng'),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `dxos-built-app-rebuild-${appItem.appKey}`,
+                    onClick: () => handleRebuildBuiltApp(appItem),
+                    disabled: rowBusy || Boolean(builtAppBusyKey),
+                    style: btnStyle(true, false),
+                  }, rowBusy ? 'Đang xử lý…' : 'Dựng lại'),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `dxos-built-app-export-${appItem.appKey}`,
+                    onClick: () => handleExportBuiltAppBundle(appItem),
+                    disabled: rowBusy || Boolean(builtAppBusyKey),
+                    style: btnStyle(false, false),
+                  }, 'Xuất Bundle v3'),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `dxos-built-app-teardown-${appItem.appKey}`,
+                    onClick: () => handleTeardownBuiltApp(appItem, true),
+                    disabled: rowBusy || Boolean(builtAppBusyKey),
+                    style: btnStyle(false, true),
+                  }, 'Gỡ bỏ (Giữ dữ liệu)'),
+                ),
+                builtAppSelected?.appKey === appItem.appKey ? h('div', {
+                  'data-testid': `dxos-built-app-detail-${appItem.appKey}`,
+                  style: { padding: 12, borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', display: 'grid', gap: 8, fontSize: 12 },
+                },
+                  h('strong', null, `Chi tiết Manifest: ${appItem.appKey} (snapshot: ${appItem.bundleSnapshotUid || '—'})`),
+                  h('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 11, background: '#f8fafc', padding: 8, borderRadius: 6 } },
+                    JSON.stringify({
+                      sourceSpecJson: appItem.sourceSpecJson || {},
+                      artifactRefsJson: appItem.artifactRefsJson || {},
+                      lastVerificationJson: appItem.lastVerificationJson || null,
+                    }, null, 2)),
+                ) : null,
+              );
+            }),
+          ),
+        builtAppBundlePreview ? h('div', {
+          'data-testid': 'dxos-built-app-bundle-preview',
+          style: { padding: 12, borderRadius: 8, border: '1px solid #bae6fd', background: '#f0f9ff', display: 'grid', gap: 8, fontSize: 12 },
+        },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+            h('strong', null, `Bundle v3 Preview: ${builtAppBundlePreview.appKey} (${builtAppBundlePreview.bundle?.metadata?.schemaVersion || 'latticedx.solution-bundle/v3'})`),
+            h('button', { type: 'button', onClick: () => setBuiltAppBundlePreview(null), style: btnStyle(false) }, 'Đóng'),
+          ),
+          h('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 11, maxHeight: 280, overflowY: 'auto', background: '#fff', padding: 8, borderRadius: 6, border: '1px solid #cbd5e1' } },
+            JSON.stringify(builtAppBundlePreview.bundle, null, 2)),
+        ) : null,
       ) : null,
     );
   };

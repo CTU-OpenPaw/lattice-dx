@@ -2542,3 +2542,212 @@ test('Task 9 (Review Focus #4): ai-studio-page renders Quick-Connect LLM Key car
   assert.equal(qcReq.data.testConnection, true);
   assert.equal(findByTestId(tree, 'dxos-qc-apikey-input').props.value, '', 'API key input must clear after connect');
 });
+
+test('Task 11: ai-studio-page renders Tab 7 Built Apps Manager (dxos-tab-built-apps, dxos-built-apps-panel) with View, Rebuild, Export Bundle v3, Verify, and Teardown keepData: true', async () => {
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const apiCalls = [];
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let stateIdx = 0;
+  let refIdx = 0;
+  let effectIdx = 0;
+  let memoIdx = 0;
+  const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, idx) => d !== prev[idx]);
+
+  let builtAppsList = [
+    {
+      id: 1,
+      organizationId: 'native-ui-lab',
+      appKey: 'cold-fleet-suite',
+      name: 'Quản lý Đội xe Lạnh Đa thực thể',
+      version: 1,
+      status: 'active',
+      bundleSnapshotUid: 'snap-pre-101',
+      sourceSpecJson: {
+        appKey: 'cold-fleet-suite',
+        collections: [{ collectionName: 'latticeCustomFleetTrips' }, { collectionName: 'latticeCustomFleetStops' }],
+      },
+      artifactRefsJson: {
+        collections: ['latticeCustomFleetTrips', 'latticeCustomFleetStops'],
+        roles: ['ldx_fleet_ops'],
+        portals: [{ portalSlug: 'cold-fleet', pageTitle: 'Đội xe Lạnh', blockUids: ['blk-1'] }],
+        dmnTableKeys: ['fleet_sla_v1'],
+        flowRuleKeys: ['auto_fleet_alert_v2'],
+        n8nWorkflowIds: ['wf-fleet-1'],
+      },
+      lastVerifiedAt: '2026-11-25T06:00:00Z',
+      lastVerificationJson: { ok: true, passedCount: 8, totalCount: 8, checks: [{ id: 'pg_rls_enforced', ok: true }] },
+    },
+  ];
+
+  const api = {
+    request: async (req) => {
+      apiCalls.push(req);
+      if (req.url === 'dxosAi:listBuiltApps') {
+        return { data: { data: { organizationId: 'native-ui-lab', apps: builtAppsList, total: builtAppsList.length } } };
+      }
+      if (req.url === 'dxosAi:rebuildBuiltApp') {
+        builtAppsList = builtAppsList.map((a) => (a.appKey === req.data.appKey ? { ...a, version: a.version + 1, status: 'active' } : a));
+        return { data: { data: { rebuilt: true, ok: true, appKey: req.data.appKey, appVersion: 2 } } };
+      }
+      if (req.url === 'dxosAi:exportBuiltAppBundle') {
+        return {
+          data: {
+            data: {
+              metadata: {
+                schemaVersion: 'latticedx.solution-bundle/v3',
+                appKey: req.params?.appKey || req.data?.appKey,
+                appVersion: 2,
+                contentSha256: 'abc123',
+              },
+              customCollections: [{ name: 'latticeCustomFleetTrips' }, { name: 'latticeCustomFleetStops' }],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                { name: 'latticeCustomFleetTrips', isCustom: true, fields: [{ name: 'status' }] },
+                { name: 'latticeCustomFleetStops', isCustom: true, fields: [{ name: 'status' }] },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:teardownBuiltApp') {
+        builtAppsList = builtAppsList.map((a) => (a.appKey === req.data.appKey ? { ...a, status: 'torndown' } : a));
+        return {
+          data: {
+            data: {
+              torndown: true,
+              appKey: req.data.appKey,
+              keepData: req.data.keepData,
+              preservedCollections: ['latticeCustomFleetTrips', 'latticeCustomFleetStops'],
+              droppedCollections: [],
+            },
+          },
+        };
+      }
+      return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+    },
+  };
+
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const i = stateIdx++;
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+      return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+    },
+    useRef: (init) => {
+      const i = refIdx++;
+      if (!(i in refSlots)) refSlots[i] = { current: init };
+      return refSlots[i];
+    },
+    useEffect: (fn, deps) => {
+      const i = effectIdx++;
+      effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+    },
+    useMemo: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps };
+      return memoSlots[i].value;
+    },
+    useCallback: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps };
+      return memoSlots[i].value;
+    },
+  };
+
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, { defaultOrganizationId: 'native-ui-lab' });
+  const render = () => {
+    stateIdx = 0; refIdx = 0; effectIdx = 0; memoIdx = 0;
+    const tree = Page();
+    for (const eff of effectSlots) {
+      if (eff.changed) { eff.changed = false; eff.fn(); }
+    }
+    return tree;
+  };
+  const findByTestId = (node, tid) => {
+    if (!node || typeof node !== 'object') return null;
+    if (node.props?.['data-testid'] === tid) return node;
+    const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    for (const k of kids) {
+      const hit = findByTestId(k, tid);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  let tree = render();
+  const builtAppsTabBtn = findByTestId(tree, 'dxos-tab-built-apps');
+  assert.ok(builtAppsTabBtn, 'Built Apps tab button (dxos-tab-built-apps) must exist');
+  builtAppsTabBtn.props.onClick();
+  tree = render();
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+
+  const panel = findByTestId(tree, 'dxos-built-apps-panel');
+  assert.ok(panel, 'Built Apps panel (dxos-built-apps-panel) must render when tab active');
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:listBuiltApps'), true);
+  assert.equal(JSON.stringify(panel).includes('cold-fleet-suite'), true);
+  assert.equal(JSON.stringify(panel).includes('latticeCustomFleetTrips'), true);
+
+  // View details
+  const viewBtn = findByTestId(tree, 'dxos-built-app-view-cold-fleet-suite');
+  assert.ok(viewBtn, 'View button must exist');
+  viewBtn.props.onClick();
+  tree = render();
+  const detailBox = findByTestId(tree, 'dxos-built-app-detail-cold-fleet-suite');
+  assert.ok(detailBox, 'Clicking View must render built app detail inspector');
+  assert.equal(JSON.stringify(detailBox).includes('auto_fleet_alert_v2'), true);
+
+  // Verify
+  const verifyBtn = findByTestId(tree, 'dxos-built-app-verify-cold-fleet-suite');
+  assert.ok(verifyBtn, 'Verify button must exist');
+  await verifyBtn.props.onClick();
+  tree = render();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosBlocks:collectionsMeta'), true);
+  const verifyBadge = findByTestId(tree, 'dxos-built-app-verify-result-cold-fleet-suite');
+  assert.ok(verifyBadge, 'Verify result badge/summary must render');
+  assert.equal(JSON.stringify(verifyBadge).includes('8/8') || JSON.stringify(verifyBadge).includes('PASS'), true);
+
+  // Rebuild
+  const rebuildBtn = findByTestId(tree, 'dxos-built-app-rebuild-cold-fleet-suite');
+  assert.ok(rebuildBtn, 'Rebuild button must exist');
+  await rebuildBtn.props.onClick();
+  tree = render();
+  const rebuildReq = apiCalls.find((c) => c.url === 'dxosAi:rebuildBuiltApp' && c.method === 'post');
+  assert.ok(rebuildReq, 'Rebuild must POST dxosAi:rebuildBuiltApp');
+  assert.equal(rebuildReq.data.appKey, 'cold-fleet-suite');
+  assert.equal(JSON.stringify(tree).includes('v2'), true);
+
+  // Export Bundle v3
+  const exportBtn = findByTestId(tree, 'dxos-built-app-export-cold-fleet-suite');
+  assert.ok(exportBtn, 'Export Bundle v3 button must exist');
+  await exportBtn.props.onClick();
+  tree = render();
+  const exportReq = apiCalls.find((c) => c.url === 'dxosAi:exportBuiltAppBundle');
+  assert.ok(exportReq, 'Export must call dxosAi:exportBuiltAppBundle');
+  const bundleBox = findByTestId(tree, 'dxos-built-app-bundle-preview');
+  assert.ok(bundleBox, 'Export must display bundle v3 preview');
+  assert.equal(JSON.stringify(bundleBox).includes('latticedx.solution-bundle/v3'), true);
+
+  // Teardown (keepData: true default)
+  const teardownBtn = findByTestId(tree, 'dxos-built-app-teardown-cold-fleet-suite');
+  assert.ok(teardownBtn, 'Teardown button must exist');
+  await teardownBtn.props.onClick();
+  tree = render();
+  const tdReq = apiCalls.find((c) => c.url === 'dxosAi:teardownBuiltApp' && c.method === 'post');
+  assert.ok(tdReq, 'Teardown must POST dxosAi:teardownBuiltApp');
+  assert.equal(tdReq.data.appKey, 'cold-fleet-suite');
+  assert.equal(tdReq.data.keepData, true);
+  assert.equal(JSON.stringify(tree).includes('torndown'), true);
+});

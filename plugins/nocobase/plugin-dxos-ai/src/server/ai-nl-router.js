@@ -140,7 +140,7 @@ function inferPortalFromUtterance(utterance, fallback = 'services') {
 }
 
 function detectUnsafeOrInjection(n) {
-  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*(?:huong dan|kiem tra|quyen|rbac|acl|phe duyet|hitl|bao mat)|bo qua\s+(?:buoc\s+)?(?:kiem\s+tra\s+)?(?:quyen\s+)?hitl|ignore\s+(?:all\s+)?previous|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|phe duyet|bao mat)|vuot\s+quyen|vo\s+hieu\s+hoa\s+(?:audit|nhat\s+ky|rls|bao\s+mat|hitl|phe\s+duyet)|in\s+ra\s+[^\n]{0,40}?(?:mat\s+khau|api\s*key|token|bi\s+mat|secret|credential|private\s*key)|tiet\s+lo\s+[^\n]{0,40}?(?:mat\s+khau|bi\s+mat|token|api\s*key|secret|private\s*key|credential)|doc\s+(?:bien\s+moi\s+truong|\.env|process\.env)|xuat\s+toan\s+bo\s+(?:api\s*key|token|mat\s+khau|secret(?:\s*key)?|bang\s+users|du\s+lieu)|(?:xem|doc|xuat|lay)\s+(?:toan\s+bo\s+)?(?:du\s+lieu|don\s+hang|lo\s+hang|su\s+co|tai\s+lieu|bang)[^\n]{0,30}?(?:to\s+chuc|cong\s+ty|tenant|org)\s+khac|(?:doc|xem|sua|xoa|tao|ghi|cap\s+nhat|truy\s+cap)\s+(?:bang|table|collection)?\s*(?:latticeconnectors|latticeapikeys|latticepkikeys|latticecryptoledger|latticeautomationrules|latticeautomationruns|rolesusers)\b|xem\s+luong\s+toan\s+cong\s+ty|cross[\s-]?tenant|tu\s+(?:phe\s+duyet|duyet)\s+(?:yeu\s+cau|don|phieu|ho\s+so|run)\s+(?:cua\s+)?(?:chinh\s+minh|toi)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong)|__proto__|constructor\s*\.\s*prototype|\beval\s*\(|\bnew\s+Function\s*\()/;
+  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*(?:huong dan|kiem tra|quyen|rbac|acl|phe duyet|hitl|bao mat)|bo qua\s+(?:buoc\s+)?(?:kiem\s+tra\s+)?(?:quyen\s+)?hitl|ignore\s+(?:all\s+)?previous|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|phe duyet|bao mat)|vuot\s+quyen|vo\s+hieu\s+hoa\s+(?:audit|nhat\s+ky|rls|bao\s+mat|hitl|phe\s+duyet)|in\s+ra\s+[^\n]{0,40}?(?:mat\s+khau|api\s*key|token|bi\s+mat|secret|credential|private\s*key)|tiet\s+lo\s+[^\n]{0,40}?(?:mat\s+khau|bi\s+mat|token|api\s*key|secret|private\s*key|credential)|doc\s+(?:bien\s+moi\s+truong|\.env|process\.env)|xuat\s+toan\s+bo\s+(?:api\s*key|token|mat\s+khau|secret(?:\s*key)?|bang\s+users|du\s+lieu)|(?:xem|doc|xuat|lay)\s+(?:toan\s+bo\s+)?(?:du\s+lieu|don\s+hang|lo\s+hang|su\s+co|tai\s+lieu|bang)[^\n]{0,30}?(?:to\s+chuc|cong\s+ty|tenant|org)\s+khac|(?:doc|xem|sua|xoa|tao|ghi|cap\s+nhat|truy\s+cap)\s+(?:[^\n]{0,20}\s+)?(?:bang|table|collection)?\s*(?:latticeconnectors|latticeapikeys|latticepkikeys|latticecryptoledger|latticeautomationrules|latticeautomationruns|latticebuiltapps|rolesusers)\b|xem\s+luong\s+toan\s+cong\s+ty|cross[\s-]?tenant|tu\s+(?:phe\s+duyet|duyet)\s+(?:yeu\s+cau|don|phieu|ho\s+so|run)\s+(?:cua\s+)?(?:chinh\s+minh|toi)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong)|__proto__|constructor\s*\.\s*prototype|\beval\s*\(|\bnew\s+Function\s*\()/;
   if (promptInjection.test(n)) {
     return {
       refused: true,
@@ -447,17 +447,26 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
   }
 
   // 2.6 Native v2 BlockModels (WebGIS / Kanban / WMS Ops) — Admin only
-  if (/(?:gan|them)\s+(?:khoi|block)?[^\n]{0,40}\b(?:dxoswebgisblockmodel|dxoskanbanscheduleblockmodel|dxoswmsopsblockmodel|ban\s+do\s+webgis)\b/.test(n)) {
+  if (/(?:gan|them)\s+(?:khoi|block)?[^\n]{0,40}\b(?:dxoswebgisblockmodel|dxoskanbanscheduleblockmodel|dxoswmsopsblockmodel|ban\s+do\s+webgis|(?:bang|lich)\s+kanban)\b/.test(n)) {
     const denied = requireAdminOrRefuse('compose_page_blocks');
     if (denied) return denied;
     let blockUse = 'DxosWebGisBlockModel';
     if (n.includes('dxoskanbanscheduleblockmodel') || n.includes('kanban')) blockUse = 'DxosKanbanScheduleBlockModel';
     else if (n.includes('dxoswmsopsblockmodel') || n.includes('wms')) blockUse = 'DxosWmsOpsBlockModel';
+    const customColMatch = raw.match(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/);
+    const colMatch = customColMatch || raw.match(/\b(lattice[A-Z][A-Za-z0-9]{1,40})\b/);
+    const targetCollection = colMatch?.[1] || null;
     return {
       intent: 'COMPOSE_NATIVE_V2_BLOCK',
       refused: false,
       toolName: 'dxos_compose_page_blocks',
-      args: { action: 'addBlock', portalSlug: targetPortal, blockUse, dryRun: false },
+      args: {
+        action: 'addBlock',
+        portalSlug: targetPortal,
+        blockUse,
+        ...(targetCollection ? { collection: targetCollection, config: { collection: targetCollection } } : {}),
+        dryRun: false,
+      },
     };
   }
 

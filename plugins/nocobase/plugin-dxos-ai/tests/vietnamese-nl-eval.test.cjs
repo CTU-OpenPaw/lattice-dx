@@ -198,7 +198,9 @@ test('Vietnamese Natural-Language 80-case Eval Suite achieves 100% pass rate wit
   assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.category === legacyCategory), false);
   assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.category === 'automation-architect'), true);
   const report = mod.runVietnameseNlEval();
-  assert.ok(report.total >= 80, `Expected >=80 eval cases, got ${report.total}`);
+  assert.ok(report.total >= 126, `Expected >=126 eval cases, got ${report.total}`);
+  assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.category === 'built-apps-lifecycle'), true);
+  assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.id === 'app-multi-01'), true);
   assert.equal(report.passRate, 100, `Vietnamese NL eval passRate ${report.passRate}% != 100%; failures=${JSON.stringify(report.failures)}`);
 
   const { STARTER_AI_BLUEPRINTS } = require(path.join(PLUGIN_ROOT, 'src/server/ai-schemas.js'));
