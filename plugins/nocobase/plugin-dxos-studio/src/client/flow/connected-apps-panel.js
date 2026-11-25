@@ -28,6 +28,11 @@ const unwrap = (res) => res?.data?.data ?? res?.data ?? {};
 const errMsg = (err, fb) => err?.response?.data?.errors?.[0]?.message || err?.response?.data?.message || err?.message || fb;
 const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
+function resolveConnectorsRedirectUri() {
+  const origin = typeof window !== 'undefined' && window.location?.origin ? window.location.origin : 'http://localhost:13014';
+  return `${origin}/admin/settings/workflow/connectors`;
+}
+
 function parseSecretsInput(rawText, authType, appType) {
   const trimmed = String(rawText || '').trim();
   if (!trimmed) return { provided: false, value: undefined };
@@ -92,7 +97,7 @@ function createConnectedAppsPanel(client, React, _antd, app) {
     const [modalApp, setModalApp] = React.useState(null);
     const [wizardMode, setWizardMode] = React.useState('token');
     const [form, setForm] = React.useState({ connectorKey: '', name: '', baseUrl: '', authType: 'api_key', secretsText: '' });
-    const [oauth, setOauth] = React.useState({ clientId: '', clientSecret: '', redirectUri: 'http://localhost:13014/admin/settings/workflow/connectors', scopes: '', authorizeUrl: '', state: '', code: '' });
+    const [oauth, setOauth] = React.useState(() => ({ clientId: '', clientSecret: '', redirectUri: resolveConnectorsRedirectUri(), scopes: '', authorizeUrl: '', state: '', code: '' }));
     const [refs] = React.useState(() => ({ api, seq: 0 }));
     refs.api = api;
 
@@ -138,7 +143,7 @@ function createConnectedAppsPanel(client, React, _antd, app) {
       setModalApp(item);
       setWizardMode(hasOAuth ? 'oauth2' : 'token');
       setForm({ connectorKey: `${item.appType.replace(/_/g, '-')}-primary`, name: item.name, baseUrl: item.defaultBaseUrl || '', authType: item.defaultAuthType || (hasOAuth ? 'oauth2' : 'api_key'), secretsText: '' });
-      setOauth({ clientId: '', clientSecret: '', redirectUri: 'http://localhost:13014/admin/settings/workflow/connectors', scopes: Array.isArray(item.oauth2?.defaultScopes) ? item.oauth2.defaultScopes.join(' ') : '', authorizeUrl: '', state: '', code: '' });
+      setOauth({ clientId: '', clientSecret: '', redirectUri: resolveConnectorsRedirectUri(), scopes: Array.isArray(item.oauth2?.defaultScopes) ? item.oauth2.defaultScopes.join(' ') : '', authorizeUrl: '', state: '', code: '' });
     };
 
     const handleSaveToken = (e) => {
@@ -349,4 +354,4 @@ function createConnectedAppsPanel(client, React, _antd, app) {
   };
 }
 
-module.exports = { DEFAULT_APP_CATALOG, createConnectedAppsPanel };
+module.exports = { DEFAULT_APP_CATALOG, resolveConnectorsRedirectUri, createConnectedAppsPanel };

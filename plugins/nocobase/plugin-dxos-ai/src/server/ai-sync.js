@@ -10,7 +10,7 @@
 
 const { aiProfiles, validateMcpServerUrl, normalizeToolPermissionsMap } = require('./ai-schemas');
 
-const ALL_LDX_ROLES = ['ldx_employee', 'ldx_manager', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_director', 'ldx_admin'];
+const ALL_LDX_ROLES = ['ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_operator', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_employee'];
 const DEFAULT_ADMIN_ROLES = ['root', 'admin'];
 const DEFAULT_SKILLS = ['data-metadata', 'data-query'];
 const SUB_AGENT_TOOLS = ['dispatch-sub-agent-task', 'list-ai-employees', 'get-ai-employee'];

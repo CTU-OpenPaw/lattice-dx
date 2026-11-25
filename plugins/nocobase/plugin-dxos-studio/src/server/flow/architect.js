@@ -30,7 +30,7 @@ const isBusinessRoleName = (roleName) => {
 };
 const SENSITIVE_FIELD_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt|signatureDataUrl|encrypted/i;
 const VI_SECURITY_RE = /(?:bo qua (?:tat ca )?(?:huong dan|kiem tra|bao mat|quyen)|(?:bang|table|collection|vao|tren|trong|tao|ghi|sua|xoa|doc)\s+(?:the\s+)?(?:users|roles)\b)/i;
-const DEFAULT_LDX_ROLES = Object.freeze(['ldx_admin', 'ldx_manager', 'ldx_operator', 'ldx_dispatcher', 'ldx_employee', 'ldx_viewer']);
+const DEFAULT_LDX_ROLES = Object.freeze(['ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_operator', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_employee', 'ldx_viewer']);
 const STANDARD_EVENT_CATALOG = Object.freeze([
   ['record.created', 'Record Created', 'record', 'dxos-studio:orm', { id: 1, code: 'REC-001', status: 'open', severity: 'medium' }],
   ['record.updated', 'Record Updated', 'record', 'dxos-studio:orm', { id: 1, code: 'REC-001', status: 'updated', severity: 'medium' }],
@@ -328,4 +328,4 @@ async function runFlowArchitect({
   return { ok: true, refused: false, mode: resolvedMode, modeUsed, repairAttempts, summary, graphDiff: applied.graphDiff, draftGraph: applied.graph, draftRule, sampleEvent: resolvedSample, suggestions, dryRunPreview };
 }
 
-module.exports = { STANDARD_EVENT_CATALOG, buildFlowStudioCatalog, applyGraphOperations, runFlowArchitect };
+module.exports = { STANDARD_EVENT_CATALOG, DEFAULT_LDX_ROLES, buildFlowStudioCatalog, applyGraphOperations, runFlowArchitect };

@@ -206,3 +206,18 @@ test('validateMcpServerUrl blocks 127.0.0.0/8 outside LOOPBACK_HOSTS and IPv6-ma
   assert.equal(validateMcpServerUrl('http://[::1]:8080/mcp'), 'http://[::1]:8080/mcp');
   assert.equal(validateMcpServerUrl('http://host.docker.internal:8080/mcp'), 'http://host.docker.internal:8080/mcp');
 });
+
+test('Task 3: ALL_LDX_ROLES and DEFAULT_ROLE_OPTIONS include unified ldx_* role set including ldx_operator', () => {
+  const { ALL_LDX_ROLES } = require('../src/server/ai-sync');
+  const { DEFAULT_ROLE_OPTIONS } = require('../src/client/ai-studio-page');
+  const expectedLdxRoles = [
+    'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_operator',
+    'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_employee',
+  ];
+  for (const r of expectedLdxRoles) {
+    assert.ok(ALL_LDX_ROLES.includes(r), `ALL_LDX_ROLES missing ${r}`);
+    assert.ok(Array.isArray(DEFAULT_ROLE_OPTIONS) && DEFAULT_ROLE_OPTIONS.includes(r), `DEFAULT_ROLE_OPTIONS missing ${r}`);
+  }
+  assert.ok(DEFAULT_ROLE_OPTIONS.includes('root'));
+  assert.ok(DEFAULT_ROLE_OPTIONS.includes('admin'));
+});

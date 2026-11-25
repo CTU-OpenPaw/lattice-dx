@@ -447,3 +447,53 @@ test('DmnVisualEditor integrates with NocoBase api.request (dxosDmn:evaluate & d
   assert.ok(requests.some((r) => r.url === 'dxosDmn:evaluate' && r.data.organizationId === 'org-a' && r.data.tableKey === 'cold_rule'));
   assert.ok(requests.some((r) => r.url === 'dxosDmn:saveTable' && r.data.organizationId === 'org-a' && r.data.tableKey === 'cold_rule'));
 });
+
+test('Task 3: DmnVisualEditor syncs simContext/simJsonText on props.table change and sets minWidth >= 140 on Mô tả column', async () => {
+  const { createDmnVisualEditor } = require(DMN_EDITOR_PATH);
+  const harness = createReactHarness();
+  const Editor = createDmnVisualEditor(harness.React, {});
+
+  const tableA = {
+    tableKey: 'cold_triage',
+    name: 'Cold Triage',
+    hitPolicy: 'FIRST',
+    inputsJson: [{ name: 'tempC', type: 'number' }],
+    outputsJson: [{ name: 'action', type: 'string' }],
+    rulesJson: [{ when: { tempC: { op: 'gt', value: 8 } }, then: { action: 'hold' }, description: 'Over 8C' }],
+  };
+  const tableB = {
+    tableKey: 'shipping_tier',
+    name: 'Shipping Tier',
+    hitPolicy: 'FIRST',
+    inputsJson: [
+      { name: 'weightKg', type: 'number' },
+      { name: 'express', type: 'boolean' },
+    ],
+    outputsJson: [{ name: 'carrier', type: 'string' }],
+    rulesJson: [{ when: { weightKg: { op: 'gte', value: 5 }, express: { op: 'eq', value: true } }, then: { carrier: 'air' }, description: 'Fast air' }],
+  };
+
+  let tree = await harness.mountAndFlush(Editor, { table: tableA });
+
+  // Column width check on Mô tả header, td, and input
+  const descTh = collectNodes(tree, (n) => n.type === 'th' && textOf(n) === 'Mô tả')[0];
+  assert.ok(descTh && Number(descTh.props?.style?.minWidth) >= 140, 'Mô tả <th> must have minWidth >= 140');
+  const descInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-rule-desc-0')[0];
+  assert.ok(descInput && Number(descInput.props?.style?.minWidth) >= 140, 'dmn-rule-desc-0 <input> must have minWidth >= 140');
+  const descTd = collectNodes(tree, (n) => n.type === 'td' && collectNodes(n, (c) => c.props?.['data-testid'] === 'dmn-rule-desc-0').length > 0)[0];
+  assert.ok(descTd && Number(descTd.props?.style?.minWidth) >= 140, 'Mô tả <td> must have minWidth >= 140');
+
+  // Run simulation on tableA so simResult is populated
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-run-btn')[0].props.onClick();
+  tree = harness.render(Editor, { table: tableA });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-result').length, 1);
+
+  // Switch props.table to tableB -> simContext, simJsonText, and simResult must reset from tableB.inputsJson
+  tree = await harness.mountAndFlush(Editor, { table: tableB });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-input-weightKg').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-input-express').length, 1);
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-input-tempC').length, 0);
+  const jsonText = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-json-input')[0].props.value;
+  assert.deepEqual(JSON.parse(jsonText), { weightKg: 0, express: false });
+  assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-result').length, 0, 'simResult must clear when switching table');
+});

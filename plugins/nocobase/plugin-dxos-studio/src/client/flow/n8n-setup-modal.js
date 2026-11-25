@@ -35,21 +35,19 @@ const N8N_WEBHOOK_PRESETS = Object.freeze([
   },
 ]);
 
-function resolveN8nEditorUrl(baseUrl) {
+function resolveN8nEditorUrl(baseUrl, hostHeaderHostname) {
+  const rawHost = String(hostHeaderHostname || (typeof window !== 'undefined' && window.location?.hostname) || 'localhost').trim() || 'localhost';
+  const browserHost = rawHost.includes(':') && !rawHost.startsWith('[') ? `[${rawHost}]` : rawHost;
+  const fallback = `http://${browserHost}:5678`;
   const raw = String(baseUrl || '').trim();
-  if (!raw) return 'http://localhost:5678';
+  if (!raw) return fallback;
   try {
     const parsed = new URL(raw);
-    if (!['http:', 'https:'].includes(parsed.protocol)) return 'http://localhost:5678';
+    if (!['http:', 'https:'].includes(parsed.protocol)) return fallback;
     const host = String(parsed.hostname || '').toLowerCase();
-    if (host === 'n8n') {
-      const port = parsed.port ? `:${parsed.port}` : ':5678';
-      return `${parsed.protocol}//localhost${port}`;
-    }
+    if (host === 'n8n') return `${parsed.protocol}//${browserHost}${parsed.port ? `:${parsed.port}` : ':5678'}`;
     return parsed.origin;
-  } catch {
-    return 'http://localhost:5678';
-  }
+  } catch { return fallback; }
 }
 
 const buildSecretPayload = (authType, rawSecret) => {

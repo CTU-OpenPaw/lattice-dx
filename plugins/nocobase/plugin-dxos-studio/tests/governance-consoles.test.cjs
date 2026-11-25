@@ -1029,3 +1029,60 @@ test('Minor 3 (input/timezone): local datetime-local default, trimmed userId in 
   assert.ok(errBanner && textOf(errBanner).includes('bad-temp'));
 });
 
+test('Task 3: DMN console collapses raw JSON forms inside closed <details> and regenerates simContextText on table selection', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const harness = createReactHarness();
+  const tables = [
+    {
+      id: 1,
+      tableKey: 'cold-chain-rule',
+      name: 'Cold Chain Policy',
+      hitPolicy: 'FIRST',
+      inputsJson: [{ name: 'temperature', type: 'number' }],
+      outputsJson: [{ name: 'action', type: 'string' }],
+      rulesJson: [{ when: { temperature: { op: 'gt', value: 8 } }, then: { action: 'hold_mkt' } }],
+      version: 1,
+    },
+    {
+      id: 2,
+      tableKey: 'shipping-tier-rule',
+      name: 'Shipping Tier Policy',
+      hitPolicy: 'FIRST',
+      inputsJson: [
+        { name: 'weightKg', type: 'number' },
+        { name: 'express', type: 'boolean' },
+        { name: 'region', type: 'string' },
+      ],
+      outputsJson: [{ name: 'carrier', type: 'string' }],
+      rulesJson: [{ when: { weightKg: { op: 'gt', value: 10 } }, then: { carrier: 'freight' } }],
+      version: 1,
+    },
+  ];
+  const { client } = createApiMock({
+    'dxosDmn:listTables': async () => ({ organizationId: 'org-a', items: tables }),
+  });
+
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Consoles, { initialSection: 'dmn', selectedOrg: 'org-a' });
+
+  const details = collectNodes(tree, (n) => n.type === 'details' && n.props?.['data-testid'] === 'dxos-dmn-raw-json-details')[0];
+  assert.ok(details, 'Legacy raw JSON DMN forms must be wrapped in <details data-testid="dxos-dmn-raw-json-details">');
+  assert.equal(Boolean(details.props.open), false, 'Legacy raw JSON <details> must be closed by default');
+  assert.equal(collectNodes(details, (n) => n.props?.['data-testid'] === 'dxos-dmn-save-form').length, 1);
+  assert.equal(collectNodes(details, (n) => n.props?.['data-testid'] === 'dxos-dmn-eval-form').length, 1);
+
+  const evalFormInitial = collectNodes(details, (n) => n.props?.['data-testid'] === 'dxos-dmn-eval-form')[0];
+  const initialEvalCtx = JSON.parse(collectNodes(evalFormInitial, (n) => n.type === 'textarea')[0].props.value);
+  assert.deepEqual(initialEvalCtx, { temperature: 0 }, 'Initial simContextText must be built from DEFAULT_DMN_INPUTS with numeric 0');
+
+  // Switch to shipping-tier-rule via "Nạp vào Editor"
+  const loadButtons = collectNodes(tree, (n) => n.type === 'button' && textOf(n) === 'Nạp vào Editor');
+  assert.equal(loadButtons.length, 2);
+  loadButtons[1].props.onClick();
+  tree = harness.render(Consoles, { initialSection: 'dmn', selectedOrg: 'org-a' });
+
+  const evalFormAfter = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-dmn-eval-form')[0];
+  const nextEvalCtx = JSON.parse(collectNodes(evalFormAfter, (n) => n.type === 'textarea')[0].props.value);
+  assert.deepEqual(nextEvalCtx, { weightKg: 0, express: false, region: '' }, 'Selecting a DMN table must regenerate simContextText from tbl.inputsJson');
+});
+

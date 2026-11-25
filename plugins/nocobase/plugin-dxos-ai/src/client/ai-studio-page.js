@@ -30,7 +30,7 @@ const DEFAULT_TOOL_NAMES = [
 
 const DEFAULT_ROLE_OPTIONS = [
   'root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager',
-  'ldx_employee', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver',
+  'ldx_operator', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_employee',
 ];
 
 const DEFAULT_PORTALS = ['procurement', 'logistics', 'incidents', 'services', 'admin-studio'];
@@ -1082,6 +1082,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
 
 module.exports = {
   DEFAULT_TOOL_NAMES,
+  DEFAULT_ROLE_OPTIONS,
   MODEL_PRESETS,
   createDxosAiStudioPage,
   buildProfileDraftFromStarter,

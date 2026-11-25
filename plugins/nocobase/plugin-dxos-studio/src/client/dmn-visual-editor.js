@@ -561,8 +561,10 @@ function extractMatchedIndices(evalResult) {
 
 function buildInitialSimContext(table) {
   const ctx = {};
-  for (const col of table.inputsJson || []) {
-    ctx[col.name] = col.type === 'number' ? 0 : col.type === 'boolean' ? false : '';
+  for (const col of table?.inputsJson || []) {
+    if (col?.name) {
+      ctx[col.name] = col.type === 'number' ? 0 : col.type === 'boolean' ? false : '';
+    }
   }
   return ctx;
 }
@@ -617,7 +619,12 @@ function createDmnVisualEditor(ReactLib, antdLib) {
 
     React.useEffect(() => {
       if (props.table) {
-        setTable(normalizeDmnTable(props.table));
+        const next = normalizeDmnTable(props.table);
+        const nextCtx = buildInitialSimContext(next);
+        setTable(next);
+        setSimContext(nextCtx);
+        setSimJsonText(JSON.stringify(nextCtx, null, 2));
+        setSimResult(null);
       }
     }, [props.table]);
 
@@ -886,7 +893,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
                   }, '×') : null,
                 ),
               )),
-              h('th', { style: S.thMeta }, 'Mô tả'),
+              h('th', { style: { ...S.thMeta, minWidth: 160 } }, 'Mô tả'),
               h('th', { style: S.thMeta }, 'Xóa'),
             ),
           ),
@@ -939,14 +946,14 @@ function createDmnVisualEditor(ReactLib, antdLib) {
                       }),
                     );
                   }),
-                  h('td', { style: S.td },
+                  h('td', { style: { ...S.td, minWidth: 160 } },
                     h('input', {
                       'data-testid': `dmn-rule-desc-${rIdx}`,
                       type: 'text',
                       value: rule.description || '',
                       placeholder: 'Ghi chú luật',
                       onChange: (e) => commitTable((p) => updateRuleMeta(p, rIdx, { description: e.target.value })),
-                      style: S.input,
+                      style: { ...S.input, minWidth: 160 },
                     }),
                   ),
                   h('td', { style: S.td },
@@ -1065,6 +1072,7 @@ module.exports = {
   deleteRuleRow,
   matchDmnCondition,
   simulateDmnTable,
+  buildInitialSimContext,
   createDmnVisualEditor,
   DmnVisualEditor,
 };

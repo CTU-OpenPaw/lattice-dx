@@ -2046,3 +2046,48 @@ test('Task 2: multi-port append on branching nodes (if/approval/switch/loop), cu
     else globalThis.CustomEvent = origCustomEvent;
   }
 });
+
+test('Task 3: origin-aware OAuth redirect URI, n8n Editor URL, and unified DEFAULT_LDX_ROLES', async () => {
+  const { createConnectedAppsPanel, resolveConnectorsRedirectUri } = require(path.join(PLUGIN_ROOT, 'src/client/flow/connected-apps-panel.js'));
+  const { resolveN8nEditorUrl } = require(path.join(PLUGIN_ROOT, 'src/client/flow/n8n-setup-modal.js'));
+  const { buildFlowStudioCatalog } = require(path.join(PLUGIN_ROOT, 'src/server/flow/architect.js'));
+
+  const origWin = globalThis.window;
+  try {
+    delete globalThis.window;
+    assert.equal(typeof resolveConnectorsRedirectUri, 'function', 'connected-apps-panel.js must export resolveConnectorsRedirectUri');
+    assert.equal(resolveConnectorsRedirectUri(), 'http://localhost:13014/admin/settings/workflow/connectors');
+    assert.equal(resolveN8nEditorUrl('http://n8n:5678'), 'http://localhost:5678');
+
+    globalThis.window = { location: { origin: 'https://erp.example.com', hostname: '10.0.0.5' } };
+    assert.equal(resolveConnectorsRedirectUri(), 'https://erp.example.com/admin/settings/workflow/connectors');
+    assert.equal(resolveN8nEditorUrl('http://n8n:5678'), 'http://10.0.0.5:5678');
+    assert.equal(resolveN8nEditorUrl(''), 'http://10.0.0.5:5678');
+    assert.equal(resolveN8nEditorUrl('https://n8n.example.org/hook'), 'https://n8n.example.org');
+    assert.equal(resolveN8nEditorUrl('http://n8n:5678', 'proxy.corp.local'), 'http://proxy.corp.local:5678');
+
+    const harness = createQueuedReactHarness();
+    const { client } = createApiMock({
+      'dxosN8n:appCatalog': async () => ({ items: [] }),
+      'dxosVault:list': async () => ({ items: [] }),
+      'dxosN8n:status': async () => ({ ok: false }),
+      'dxosN8n:workflows': async () => ({ data: [] }),
+      'dxosN8n:executions': async () => ({ data: [] }),
+    });
+    const ConnectedAppsPanel = createConnectedAppsPanel(client, harness.React, {}, {});
+    let tree = await harness.mountAndFlush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+    collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-app-connect-gmail_oauth2')[0].props.onClick();
+    tree = await harness.flush(ConnectedAppsPanel, { selectedOrg: 'org-a' });
+    const redirectInputs = collectNodes(tree, (n) => n.type === 'input' && n.props?.value === 'https://erp.example.com/admin/settings/workflow/connectors');
+    assert.equal(redirectInputs.length, 1, 'OAuth redirectUri input must use window.location.origin');
+    harness.unmount();
+  } finally {
+    if (origWin === undefined) delete globalThis.window;
+    else globalThis.window = origWin;
+  }
+
+  const catalog = await buildFlowStudioCatalog({ getRepository: () => null }, 'org-a', { env: {} });
+  for (const role of ['ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_operator', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_employee', 'ldx_viewer']) {
+    assert.ok(catalog.roles.includes(role), `architect.js DEFAULT_LDX_ROLES missing ${role}`);
+  }
+});
