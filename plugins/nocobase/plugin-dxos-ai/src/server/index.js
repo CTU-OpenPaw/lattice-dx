@@ -11,7 +11,7 @@
 const { Plugin } = require('@nocobase/server');
 const { ADMIN_BUILDER_TOOL_NAMES, createDxosTools, registerDxosToolsWithHost, isStudioAdmin, resolveActorScope, failTool, val } = require('./ai-tools-core');
 const { validateMcpServerUrl } = require('./ai-schemas');
-const { enforceProfileRoleLock } = require('./ai-sync');
+const { enforceProfileRoleLock, rebindStarterAgentsToService } = require('./ai-sync');
 const { createItOtMcpTools } = require('./mcp-itot-tools');
 const { createMcpGatewayMiddleware } = require('./mcp-gateway');
 const { createDxosAiActions, ensureDefaultAiWorkforce } = require('./ai-resource');
@@ -65,6 +65,49 @@ class DxosAiPlugin extends Plugin {
         const builderNames = builderRows.map((p) => val(p, 'username')).filter(Boolean);
         if (builderNames.length) {
           await joinRepo.destroy({ filter: { aiEmployee: { $in: builderNames }, roleName }, transaction });
+        }
+      });
+
+      this.db.on('llmServices.afterSave', async (serviceInstance) => {
+        if (this._rebindingLlmServices || !serviceInstance) return;
+        if (val(serviceInstance, 'enabled') === false) return;
+        const serviceName = String(val(serviceInstance, 'name') || '').trim();
+        if (!serviceName) return;
+        if (!this.db?.getRepository) return;
+        if (!this.db.getRepository('latticeAiProfiles') && !this.db.getRepository('aiEmployees')) return;
+
+        let enabledModels = val(serviceInstance, 'enabledModels');
+        if (typeof enabledModels === 'string' && enabledModels.trim().startsWith('{')) {
+          try { enabledModels = JSON.parse(enabledModels); } catch { enabledModels = null; }
+        }
+        const modelList = Array.isArray(enabledModels?.models)
+          ? enabledModels.models
+          : (Array.isArray(enabledModels) ? enabledModels : []);
+        const firstModel = modelList[0];
+        const opts = val(serviceInstance, 'options');
+        const modelName = String(
+          (typeof firstModel === 'string' ? firstModel : (firstModel?.value || firstModel?.model || firstModel?.name))
+          || (opts && typeof opts === 'object' ? (opts.model || opts.modelName) : '')
+          || '',
+        ).trim();
+
+        this._rebindingLlmServices = true;
+        try {
+          await rebindStarterAgentsToService(this.db, {
+            llmService: serviceName,
+            modelName,
+            defaultOrigin: process.env.NOCOBASE_INTERNAL_URL || '',
+            preserveActiveArchitect: true,
+            adminToolNames: ADMIN_BUILDER_TOOL_NAMES,
+          });
+        } catch (err) {
+          const msg = String(err?.message || '');
+          const code = err?.original?.code || err?.parent?.code || err?.code || '';
+          if (code !== '42P01' && !/does not exist|no such table/i.test(msg)) {
+            throw err;
+          }
+        } finally {
+          this._rebindingLlmServices = false;
         }
       });
     }

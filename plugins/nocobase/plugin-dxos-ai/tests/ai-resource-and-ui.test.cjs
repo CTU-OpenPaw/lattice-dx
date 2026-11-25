@@ -2232,3 +2232,313 @@ test('Task 8 (Review Focus #4): DxosAiPlugin.install() & afterEnable() auto-boot
     else process.env.NINE_ROUTER_API_KEY = origNineKey;
   }
 });
+
+test('Task 9 (Review Focus #4): dxosAi:quickConnectLlm enforces admin/POST/SSRF, upserts llmServices, auto-binds starters without leaking apiKey, and llmServices.afterSave auto-binds safely', async () => {
+  const { createDxosAiActions, ensureDefaultAiWorkforce } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+
+  const db = makeMockDb();
+  await ensureDefaultAiWorkforce(db, { env: {}, forceUpdate: false });
+  assert.equal(db.stores.llmServices.length, 0);
+
+  const probeCalls = [];
+  const actions = createDxosAiActions(db, {
+    env: {},
+    fetchImpl: async (url, init) => {
+      probeCalls.push({ url, headers: init?.headers || {} });
+      return { ok: true, status: 200 };
+    },
+  });
+
+  assert.equal(typeof actions.quickConnectLlm, 'function', 'dxosAi:quickConnectLlm action must exist');
+
+  // 1. Non-POST rejected 405, non-admin rejected 403
+  await assert.rejects(
+    () => actions.quickConnectLlm({
+      method: 'GET',
+      state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
+      action: { params: { values: { provider: 'openai', apiKey: 'sk-test-123456', modelName: 'gpt-4o' } } },
+    }, async () => {}),
+    (err) => err.status === 405 && err.code === 'METHOD_NOT_ALLOWED',
+  );
+  await assert.rejects(
+    () => actions.quickConnectLlm({
+      method: 'POST',
+      state: { currentUser: { id: 2, username: 'emp2' }, currentRoles: [] },
+      action: { params: { values: { provider: 'openai', apiKey: 'sk-test-123456', modelName: 'gpt-4o' } } },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_ADMIN_REQUIRED',
+  );
+
+  // 2. SSRF metadata/private/non-http URLs & unsupported provider blocked 400
+  const postAdmin = (values) => ({
+    method: 'POST',
+    state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
+    action: { params: { values } },
+  });
+  for (const badUrl of [
+    'http://169.254.169.254/latest/meta-data',
+    'file:///etc/passwd',
+    'http://10.0.0.8:8080/v1',
+    'https://user:pass@api.openai.com/v1',
+    'http://plain-external.example.com/v1',
+  ]) {
+    await assert.rejects(
+      () => actions.quickConnectLlm(postAdmin({ provider: 'openai', apiKey: 'sk-test-123456', baseURL: badUrl, modelName: 'gpt-4o' }), async () => {}),
+      (err) => err.status === 400,
+    );
+  }
+  await assert.rejects(
+    () => actions.quickConnectLlm(postAdmin({ provider: 'unknown-llm', apiKey: 'sk-test-123456', modelName: 'x' }), async () => {}),
+    (err) => err.status === 400,
+  );
+  await assert.rejects(
+    () => actions.quickConnectLlm(postAdmin({ provider: 'openai', apiKey: '', modelName: 'gpt-4o' }), async () => {}),
+    (err) => err.status === 400,
+  );
+
+  // 3. Admin quickConnectLlm with OpenAI key upserts llmServices, binds dxos-architect + unbound starters, probes health, and NEVER leaks apiKey
+  const secretKey = 'sk-live-secret-987654321';
+  const openaiCtx = postAdmin({
+    provider: 'openai',
+    apiKey: secretKey,
+    modelName: 'gpt-4o',
+    testConnection: true,
+  });
+  await actions.quickConnectLlm(openaiCtx, async () => {});
+  assert.equal(openaiCtx.body.service.provider, 'openai');
+  assert.equal(openaiCtx.body.service.modelName, 'gpt-4o');
+  assert.equal(openaiCtx.body.service.enabled, true);
+  assert.ok(openaiCtx.body.reboundAgents.includes('dxos-architect'));
+  assert.equal(openaiCtx.body.health.ok, true);
+  assert.equal(probeCalls[0].url, 'https://api.openai.com/v1/models');
+  assert.equal(JSON.stringify(openaiCtx.body).includes(secretKey), false, 'Response must NEVER contain apiKey');
+  assert.equal(Object.hasOwn(openaiCtx.body.service, 'options'), false);
+
+  const savedSvc = db.stores.llmServices.find((s) => s.name === openaiCtx.body.service.name);
+  assert.ok(savedSvc, 'llmServices row must be created');
+  assert.equal(savedSvc.options.apiKey, secretKey);
+  assert.equal(savedSvc.enabledModels.mode, 'custom');
+  assert.ok(savedSvc.enabledModels.models.some((m) => m.value === 'gpt-4o'));
+
+  const archProfile = db.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect');
+  const archEmp = db.stores.aiEmployees.find((e) => e.username === 'dxos-architect');
+  assert.equal(archProfile.llmService, savedSvc.name);
+  assert.equal(archProfile.modelName, 'gpt-4o');
+  assert.deepEqual(archEmp.modelSettings.models, [{ llmService: savedSvc.name, model: 'gpt-4o' }]);
+
+  const auditStr = JSON.stringify(db.stores.latticeAiAuditLogs);
+  assert.equal(auditStr.includes(secretKey), false, 'Audit logs must NEVER contain apiKey');
+
+  // 4. Loopback & host.docker.internal & other supported providers (google-genai, anthropic, deepseek, ollama, 9router) work cleanly
+  const nineCtx = postAdmin({
+    provider: '9router',
+    apiKey: 'sk-9router-secret-abc',
+    baseURL: 'http://127.0.0.1:20128/v1',
+    modelName: 'ag/gemini-3.8-flash',
+    testConnection: true,
+  });
+  await actions.quickConnectLlm(nineCtx, async () => {});
+  assert.equal(nineCtx.body.service.name, 'local-9router');
+  assert.equal(nineCtx.body.service.provider, 'openai-completions');
+  assert.ok(nineCtx.body.reboundAgents.includes('dxos-architect'));
+  assert.equal(JSON.stringify(nineCtx.body).includes('sk-9router-secret-abc'), false);
+
+  const ollamaCtx = postAdmin({
+    provider: 'ollama',
+    apiKey: '',
+    baseURL: 'http://host.docker.internal:11434',
+    modelName: 'llama3.1',
+    testConnection: true,
+  });
+  await actions.quickConnectLlm(ollamaCtx, async () => {});
+  assert.equal(ollamaCtx.body.service.provider, 'ollama');
+  assert.equal(ollamaCtx.body.health.ok, true);
+
+  for (const [prov, model] of [
+    ['google-genai', 'gemini-2.5-flash'],
+    ['anthropic', 'claude-3-5-sonnet-latest'],
+    ['deepseek', 'deepseek-chat'],
+  ]) {
+    const pCtx = postAdmin({
+      provider: prov,
+      apiKey: `key-${prov}-supersecret`,
+      modelName: model,
+      testConnection: true,
+    });
+    await actions.quickConnectLlm(pCtx, async () => {});
+    assert.equal(pCtx.body.service.provider, prov);
+    assert.equal(pCtx.body.health.ok, true);
+    assert.equal(JSON.stringify(pCtx.body).includes(`key-${prov}-supersecret`), false);
+  }
+
+  // 5. DxosAiPlugin.load() registers llmServices.afterSave with re-entry & missing-repo guards and preserves active starter bindings
+  const hooks = new Map();
+  const origLoad = Module._load;
+  class MockPlugin { constructor(app) { this.app = app; this.db = app?.db; } }
+  Module._load = function (request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const hookDb = makeMockDb();
+    await ensureDefaultAiWorkforce(hookDb, { env: {}, forceUpdate: false });
+    // Customize dxos-ops to an active enabled service while dxos-architect points to missing local-9router
+    hookDb.stores.llmServices.push({ name: 'custom-active', provider: 'anthropic', enabled: true });
+    const opsProf = hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-ops');
+    opsProf.llmService = 'custom-active';
+    opsProf.modelName = 'claude-3-5-sonnet-latest';
+
+    hookDb.on = (evt, fn) => hooks.set(evt, fn);
+    const ServerPlugin = require(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+    await new ServerPlugin({
+      db: hookDb,
+      use: () => {},
+      resourceManager: { define: () => {}, use: () => {} },
+      acl: { registerSnippet: () => {}, allow: () => {} },
+    }).load();
+
+    const afterSave = hooks.get('llmServices.afterSave');
+    assert.equal(typeof afterSave, 'function', 'DxosAiPlugin.load() must register llmServices.afterSave hook');
+
+    // Disabled service does not rebind
+    await afterSave({
+      get: (k) => ({ name: 'disabled-svc', enabled: false, enabledModels: { mode: 'custom', models: [{ value: 'gpt-4o' }] } })[k],
+    });
+    assert.equal(hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect').llmService, 'local-9router');
+
+    // Enabled service auto-binds dxos-architect + unbound starters while preserving dxos-ops (custom-active)
+    await afterSave({
+      get: (k) => ({
+        name: 'saved-gemini',
+        provider: 'google-genai',
+        enabled: true,
+        enabledModels: { mode: 'custom', models: [{ value: 'gemini-2.5-flash' }] },
+      })[k],
+    });
+    assert.equal(hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect').llmService, 'saved-gemini');
+    assert.equal(hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect').modelName, 'gemini-2.5-flash');
+    assert.equal(hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-ops').llmService, 'custom-active');
+
+    // Missing repos guard does not throw
+    const bareHooks = new Map();
+    await new ServerPlugin({
+      db: { on: (evt, fn) => bareHooks.set(evt, fn), getRepository: () => null },
+      use: () => {},
+      resourceManager: { define: () => {}, use: () => {} },
+      acl: { registerSnippet: () => {}, allow: () => {} },
+    }).load();
+    await bareHooks.get('llmServices.afterSave')({ get: (k) => ({ name: 'x', enabled: true })[k] });
+  } finally {
+    Module._load = origLoad;
+  }
+});
+
+test('Task 9 (Review Focus #4): ai-studio-page renders Quick-Connect LLM Key card (dxos-quick-connect-llm-card) and Health Check button (dxos-llm-health-btn)', async () => {
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const apiCalls = [];
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let stateIdx = 0;
+  let refIdx = 0;
+  let effectIdx = 0;
+  let memoIdx = 0;
+  const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, idx) => d !== prev[idx]);
+  const api = {
+    request: async (req) => {
+      apiCalls.push(req);
+      if (req.url === 'dxosAi:checkLlmHealth') {
+        return { data: { data: { ok: true, status: 200, code: 'OK', llmService: 'quick-openai', modelName: 'gpt-4o', message: 'Dịch vụ LLM "quick-openai" sẵn sàng.' } } };
+      }
+      if (req.url === 'dxosAi:quickConnectLlm') {
+        return {
+          data: {
+            data: {
+              service: { name: 'quick-openai', title: 'OpenAI', provider: 'openai', modelName: 'gpt-4o', enabled: true },
+              reboundAgents: ['dxos-architect', 'dxos-coordinator'],
+              health: { ok: true, status: 200, code: 'OK', message: 'Sẵn sàng' },
+            },
+          },
+        };
+      }
+      return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+    },
+  };
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const i = stateIdx++;
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+      return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+    },
+    useRef: (init) => {
+      const i = refIdx++;
+      if (!(i in refSlots)) refSlots[i] = { current: init };
+      return refSlots[i];
+    },
+    useEffect: (fn, deps) => {
+      const i = effectIdx++;
+      effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+    },
+    useMemo: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps };
+      return memoSlots[i].value;
+    },
+    useCallback: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps };
+      return memoSlots[i].value;
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, {});
+  const render = () => {
+    stateIdx = 0; refIdx = 0; effectIdx = 0; memoIdx = 0;
+    const tree = Page();
+    for (const eff of effectSlots) {
+      if (eff.changed) { eff.changed = false; eff.fn(); }
+    }
+    return tree;
+  };
+  const findByTestId = (node, tid) => {
+    if (!node || typeof node !== 'object') return null;
+    if (node.props?.['data-testid'] === tid) return node;
+    const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    for (const k of kids) {
+      const hit = findByTestId(k, tid);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  let tree = render();
+  const card = findByTestId(tree, 'dxos-quick-connect-llm-card');
+  assert.ok(card, 'ai-studio-page must render dxos-quick-connect-llm-card');
+  const healthBtn = findByTestId(tree, 'dxos-llm-health-btn');
+  assert.ok(healthBtn, 'ai-studio-page must render dxos-llm-health-btn');
+
+  // Click health check button
+  await healthBtn.props.onClick();
+  tree = render();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:checkLlmHealth'), true);
+
+  // Fill Quick-Connect form and submit
+  findByTestId(tree, 'dxos-qc-provider-select').props.onChange({ target: { value: 'openai' } });
+  findByTestId(tree, 'dxos-qc-apikey-input').props.onChange({ target: { value: 'sk-ui-test-key-123' } });
+  findByTestId(tree, 'dxos-qc-model-input').props.onChange({ target: { value: 'gpt-4o' } });
+  tree = render();
+  const form = findByTestId(tree, 'dxos-quick-connect-llm-form');
+  assert.ok(form, 'Quick-Connect card must contain form');
+  await form.props.onSubmit({ preventDefault() {} });
+  tree = render();
+
+  const qcReq = apiCalls.find((c) => c.url === 'dxosAi:quickConnectLlm' && c.method === 'post');
+  assert.ok(qcReq, 'Submitting Quick-Connect form must POST dxosAi:quickConnectLlm');
+  assert.equal(qcReq.data.provider, 'openai');
+  assert.equal(qcReq.data.apiKey, 'sk-ui-test-key-123');
+  assert.equal(qcReq.data.modelName, 'gpt-4o');
+  assert.equal(qcReq.data.testConnection, true);
+  assert.equal(findByTestId(tree, 'dxos-qc-apikey-input').props.value, '', 'API key input must clear after connect');
+});

@@ -41,6 +41,39 @@ const MODEL_PRESETS = [
   'local-9router:openai/gpt-4o-mini',
 ];
 
+const QUICK_CONNECT_PROVIDER_DEFAULTS = {
+  openai: {
+    label: 'OpenAI',
+    baseURL: 'https://api.openai.com/v1',
+    modelName: 'gpt-4o-mini',
+  },
+  'openai-completions': {
+    label: 'OpenAI-compatible / 9router',
+    baseURL: 'http://127.0.0.1:20128/v1',
+    modelName: 'ag/gemini-3.8-flash',
+  },
+  'google-genai': {
+    label: 'Google Gemini',
+    baseURL: 'https://generativelanguage.googleapis.com',
+    modelName: 'gemini-2.5-flash',
+  },
+  anthropic: {
+    label: 'Anthropic Claude',
+    baseURL: 'https://api.anthropic.com/v1',
+    modelName: 'claude-3-5-sonnet-latest',
+  },
+  deepseek: {
+    label: 'DeepSeek',
+    baseURL: 'https://api.deepseek.com/v1',
+    modelName: 'deepseek-chat',
+  },
+  ollama: {
+    label: 'Ollama (Local)',
+    baseURL: 'http://127.0.0.1:11434',
+    modelName: 'llama3.1',
+  },
+};
+
 function defaultItOtMcpUrl() {
   const origin = typeof window !== 'undefined' && window.location?.origin
     ? window.location.origin
@@ -256,6 +289,13 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const [approvalNotes, setApprovalNotes] = React.useState({});
     const [approvalBusyId, setApprovalBusyId] = React.useState(null);
     const [triageScanning, setTriageScanning] = React.useState(false);
+    const [qcProvider, setQcProvider] = React.useState('openai');
+    const [qcApiKey, setQcApiKey] = React.useState('');
+    const [qcBaseUrl, setQcBaseUrl] = React.useState(QUICK_CONNECT_PROVIDER_DEFAULTS.openai.baseURL);
+    const [qcModelName, setQcModelName] = React.useState(QUICK_CONNECT_PROVIDER_DEFAULTS.openai.modelName);
+    const [qcBusy, setQcBusy] = React.useState(false);
+    const [llmHealth, setLlmHealth] = React.useState(null);
+    const [llmHealthBusy, setLlmHealthBusy] = React.useState(false);
     const quotaReqSeqRef = typeof React.useRef === 'function'
       ? React.useRef(0)
       : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: 0 }), []) : { current: 0 });
@@ -299,14 +339,21 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         if (Array.isArray(pData.profiles)) setProfiles(loadedProfiles);
         if (pData.catalog) setCatalog(pData.catalog);
 
-        const [tRes, aRes] = await Promise.allSettled([
+        const [tRes, aRes, hRes] = await Promise.allSettled([
           api.request({ url: 'dxosAi:enterpriseTopology', method: 'get' }),
           api.request({ url: 'dxosAi:auditLogs', method: 'get', params: { pageSize: 40 } }),
+          api.request({ url: 'dxosAi:checkLlmHealth', method: 'get', skipNotify: true }),
         ]);
         let loadedTopology = null;
         if (tRes.status === 'fulfilled') {
           loadedTopology = tRes.value?.data?.data || tRes.value?.data || null;
           setTopology(loadedTopology);
+        }
+        if (hRes.status === 'fulfilled') {
+          const hData = hRes.value?.data?.data || hRes.value?.data || null;
+          if (hData && typeof hData === 'object' && Object.hasOwn(hData, 'ok')) {
+            setLlmHealth(hData);
+          }
         }
         const discoveredOrg = resolveStudioDefaultOrg({
           topology: loadedTopology,
@@ -508,6 +555,81 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       }
     };
 
+    const handleCheckLlmHealth = async () => {
+      if (!api?.request || llmHealthBusy) return;
+      setLlmHealthBusy(true);
+      try {
+        const res = await api.request({ url: 'dxosAi:checkLlmHealth', method: 'get', skipNotify: true });
+        const d = res?.data?.data || res?.data || null;
+        setLlmHealth(d);
+        if (d) {
+          setNotice({
+            type: d.ok ? 'ok' : 'error',
+            text: d.message || (d.ok ? 'Kết nối LLM sẵn sàng.' : 'Kết nối LLM chưa sẵn sàng.'),
+          });
+        }
+      } catch (err) {
+        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Kiểm tra kết nối LLM thất bại.';
+        setLlmHealth({ ok: false, status: Number(err?.response?.status) || 503, code: 'LLM_UNAVAILABLE', message: msg });
+        setNotice({ type: 'error', text: msg });
+      } finally {
+        setLlmHealthBusy(false);
+      }
+    };
+
+    const handleQuickConnectProviderChange = (nextProvider) => {
+      const key = String(nextProvider || 'openai');
+      setQcProvider(key);
+      const preset = QUICK_CONNECT_PROVIDER_DEFAULTS[key];
+      if (preset) {
+        setQcBaseUrl(preset.baseURL);
+        setQcModelName(preset.modelName);
+      }
+    };
+
+    const handleQuickConnectLlm = async (e) => {
+      if (e?.preventDefault) e.preventDefault();
+      if (!api?.request || qcBusy) return;
+      if (qcProvider !== 'ollama' && !String(qcApiKey || '').trim()) {
+        setNotice({ type: 'error', text: 'Vui lòng nhập API Key trước khi kết nối nhanh LLM.' });
+        return;
+      }
+      setQcBusy(true);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:quickConnectLlm',
+          method: 'post',
+          data: {
+            provider: qcProvider,
+            apiKey: qcApiKey,
+            baseURL: qcBaseUrl,
+            modelName: qcModelName,
+            testConnection: true,
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        setQcApiKey('');
+        if (d.health) setLlmHealth(d.health);
+        const reboundCount = Array.isArray(d.reboundAgents) ? d.reboundAgents.length : 0;
+        const healthNote = d.health
+          ? (d.health.ok ? ' · Kết nối LLM OK' : ` · Cảnh báo kiểm tra kết nối: ${d.health.message || d.health.code}`)
+          : '';
+        setNotice({
+          type: d.health && !d.health.ok ? 'error' : 'ok',
+          text: `Đã kết nối ${d.service?.name || qcProvider} (${d.service?.modelName || qcModelName}) và gắn ${reboundCount} nhân sự AI mặc định${healthNote}`,
+        });
+        await loadAll();
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Kết nối nhanh LLM thất bại.',
+        });
+      } finally {
+        setQcBusy(false);
+      }
+    };
+
     const handleSaveProfile = async (e) => {
       if (e?.preventDefault) e.preventDefault();
       if (!api?.request) return;
@@ -631,6 +753,82 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           color: notice.type === 'error' ? '#991b1b' : '#166534',
         },
       }, notice.text) : null,
+
+      h('div', {
+        'data-testid': 'dxos-quick-connect-llm-card',
+        style: { padding: 16, borderRadius: 12, border: '1px solid #bae6fd', background: '#f0f9ff', display: 'grid', gap: 10 },
+      },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
+          h('div', null,
+            h('strong', { style: { fontSize: 14, color: '#0c4a6e' } }, 'Kết nối nhanh LLM Key (1-Click Quick-Connect cho AI Architect)'),
+            h('div', { style: { fontSize: 12, color: '#0369a1' } },
+              'Nhập API key OpenAI, Gemini, Anthropic, DeepSeek, Ollama hoặc 9router để lưu vào llmServices và tự động gắn cho dxos-architect & các trợ lý chưa gán.'),
+          ),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            llmHealth ? h('span', {
+              'data-testid': 'dxos-llm-health-status',
+              style: badgeStyle(llmHealth.ok ? '#dcfce7' : '#fee2e2', llmHealth.ok ? '#166534' : '#991b1b'),
+            }, llmHealth.ok
+              ? `LLM Sẵn sàng (${llmHealth.llmService || 'active'}${llmHealth.modelName ? `: ${llmHealth.modelName}` : ''})`
+              : `${llmHealth.code || 'LLM_UNAVAILABLE'}${llmHealth.status ? ` (${llmHealth.status})` : ''}`) : null,
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-llm-health-btn',
+              onClick: handleCheckLlmHealth,
+              disabled: llmHealthBusy || qcBusy,
+              style: btnStyle(false),
+            }, llmHealthBusy ? 'Đang kiểm tra…' : 'Kiểm tra kết nối LLM'),
+          ),
+        ),
+        h('form', {
+          'data-testid': 'dxos-quick-connect-llm-form',
+          onSubmit: handleQuickConnectLlm,
+          style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 8, alignItems: 'end' },
+        },
+          h('label', { style: { fontSize: 12, display: 'grid', gap: 4, color: '#0f172a' } }, 'Nhà cung cấp (Provider)',
+            h('select', {
+              'data-testid': 'dxos-qc-provider-select',
+              value: qcProvider,
+              onChange: (e) => handleQuickConnectProviderChange(e.target.value),
+              style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff' },
+            }, Object.entries(QUICK_CONNECT_PROVIDER_DEFAULTS).map(([key, meta]) => h('option', { key, value: key }, meta.label)))),
+          h('label', { style: { fontSize: 12, display: 'grid', gap: 4, color: '#0f172a' } }, 'API Key (bảo mật)',
+            h('input', {
+              'data-testid': 'dxos-qc-apikey-input',
+              type: 'password',
+              autoComplete: 'off',
+              value: qcApiKey,
+              onChange: (e) => setQcApiKey(e.target.value),
+              placeholder: qcProvider === 'ollama' ? '(Không bắt buộc cho Ollama)' : 'sk-... / AIza...',
+              style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff' },
+            })),
+          h('label', { style: { fontSize: 12, display: 'grid', gap: 4, color: '#0f172a' } }, 'Base URL',
+            h('input', {
+              'data-testid': 'dxos-qc-baseurl-input',
+              value: qcBaseUrl,
+              onChange: (e) => setQcBaseUrl(e.target.value),
+              placeholder: 'https://api.openai.com/v1',
+              style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff' },
+            })),
+          h('label', { style: { fontSize: 12, display: 'grid', gap: 4, color: '#0f172a' } }, 'Model mặc định',
+            h('input', {
+              'data-testid': 'dxos-qc-model-input',
+              value: qcModelName,
+              onChange: (e) => setQcModelName(e.target.value),
+              placeholder: 'gpt-4o-mini',
+              style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff' },
+            })),
+          h('button', {
+            type: 'submit',
+            'data-testid': 'dxos-qc-submit-btn',
+            disabled: qcBusy,
+            style: { ...btnStyle(true), height: 32 },
+          }, qcBusy ? 'Đang kết nối…' : 'Kết nối & Gắn AI Architect'),
+        ),
+        llmHealth && !llmHealth.ok && llmHealth.message ? h('div', {
+          style: { fontSize: 12, color: '#991b1b', padding: '6px 10px', borderRadius: 6, background: '#fef2f2', border: '1px solid #fecaca' },
+        }, llmHealth.message) : null,
+      ),
 
       h('div', { role: 'tablist', style: { display: 'flex', gap: 8, borderBottom: '1px solid #e2e8f0', paddingBottom: 10, overflowX: 'auto' } },
         tabItems.map(([key, label]) => h('button', {
@@ -1084,6 +1282,7 @@ module.exports = {
   DEFAULT_TOOL_NAMES,
   DEFAULT_ROLE_OPTIONS,
   MODEL_PRESETS,
+  QUICK_CONNECT_PROVIDER_DEFAULTS,
   createDxosAiStudioPage,
   buildProfileDraftFromStarter,
   createEmptyProfileDraft,

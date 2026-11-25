@@ -9,6 +9,7 @@
 'use strict';
 
 const { randomBytes } = require('node:crypto');
+const net = require('node:net');
 const path = require('node:path');
 const {
   STARTER_AI_BLUEPRINTS,
@@ -24,6 +25,7 @@ const {
   val,
   enforceProfileRoleLock,
   syncProfileToNocobaseAi,
+  rebindStarterAgentsToService,
 } = require('./ai-sync');
 const {
   ADMIN_BUILDER_TOOL_NAMES,
@@ -765,6 +767,124 @@ async function ensureLocalLlmServiceRecord(db, env = process.env) {
   return { configured: true, skipped: false, serviceName: 'local-9router', baseURL };
 }
 
+const QUICK_CONNECT_PROVIDER_PRESETS = Object.freeze({
+  openai: {
+    storedProvider: 'openai',
+    defaultServiceName: 'quick-openai',
+    defaultTitle: 'OpenAI (Quick-Connect)',
+    defaultBaseURL: 'https://api.openai.com/v1',
+    defaultModelName: 'gpt-4o-mini',
+    requireKey: true,
+  },
+  'openai-completions': {
+    storedProvider: 'openai-completions',
+    defaultServiceName: 'quick-openai-completions',
+    defaultTitle: 'OpenAI-compatible (Quick-Connect)',
+    defaultBaseURL: 'http://127.0.0.1:20128/v1',
+    defaultModelName: 'ag/gemini-3.8-flash',
+    requireKey: true,
+  },
+  '9router': {
+    storedProvider: 'openai-completions',
+    defaultServiceName: 'local-9router',
+    defaultTitle: 'Local 9router (OpenAI-compatible)',
+    defaultBaseURL: 'http://127.0.0.1:20128/v1',
+    defaultModelName: 'ag/gemini-3.8-flash',
+    requireKey: true,
+  },
+  'google-genai': {
+    storedProvider: 'google-genai',
+    defaultServiceName: 'quick-google-genai',
+    defaultTitle: 'Google Gemini (Quick-Connect)',
+    defaultBaseURL: 'https://generativelanguage.googleapis.com',
+    defaultModelName: 'gemini-2.5-flash',
+    requireKey: true,
+  },
+  anthropic: {
+    storedProvider: 'anthropic',
+    defaultServiceName: 'quick-anthropic',
+    defaultTitle: 'Anthropic Claude (Quick-Connect)',
+    defaultBaseURL: 'https://api.anthropic.com/v1',
+    defaultModelName: 'claude-3-5-sonnet-latest',
+    requireKey: true,
+  },
+  deepseek: {
+    storedProvider: 'deepseek',
+    defaultServiceName: 'quick-deepseek',
+    defaultTitle: 'DeepSeek (Quick-Connect)',
+    defaultBaseURL: 'https://api.deepseek.com/v1',
+    defaultModelName: 'deepseek-chat',
+    requireKey: true,
+  },
+  ollama: {
+    storedProvider: 'ollama',
+    defaultServiceName: 'quick-ollama',
+    defaultTitle: 'Ollama Local (Quick-Connect)',
+    defaultBaseURL: 'http://127.0.0.1:11434',
+    defaultModelName: 'llama3.1',
+    requireKey: false,
+  },
+});
+
+const QUICK_CONNECT_LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', 'host.docker.internal']);
+const QUICK_CONNECT_SERVICE_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
+const QUICK_CONNECT_PRIVATE_IPV4_RE = /^(?:0\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|127\.\d+\.\d+\.\d+|169\.254\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$/;
+const QUICK_CONNECT_META_HOSTS = new Set(['metadata.google.internal', 'metadata.azure.com', '169.254.169.254', '100.100.100.200']);
+
+function validateQuickConnectBaseUrl(rawUrl) {
+  const str = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!str || str.length > 2048 || /[\u0000-\u001f\u007f\s]/.test(str)) {
+    throw failTool('LLM_URL_UNSAFE', 400, 'baseURL không hợp lệ.');
+  }
+  let parsed;
+  try {
+    parsed = new URL(str);
+  } catch {
+    throw failTool('LLM_URL_UNSAFE', 400, 'Định dạng baseURL không hợp lệ.');
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw failTool('LLM_URL_UNSAFE', 400, 'Chỉ hỗ trợ giao thức http:// hoặc https:// cho LLM baseURL.');
+  }
+  if (parsed.username || parsed.password) {
+    throw failTool('LLM_URL_UNSAFE', 400, 'Không được nhúng username/password trong LLM baseURL.');
+  }
+  const authMatch = str.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]+)/);
+  const rawAuthority = authMatch ? authMatch[1] : '';
+  const rawHost = rawAuthority.startsWith('[')
+    ? rawAuthority.slice(0, rawAuthority.indexOf(']') + 1)
+    : rawAuthority.split(':')[0];
+  const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  const rawBare = String(rawHost || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!bare || !rawBare) {
+    throw failTool('LLM_URL_UNSAFE', 400, 'baseURL thiếu hostname hợp lệ.');
+  }
+  if (/^(?:\d+|0x[0-9a-f]+)$/i.test(rawBare) || /(?:^|\.)0\d+/.test(rawBare)) {
+    throw failTool('LLM_URL_UNSAFE', 400, 'Hostname dạng số/hex/octal không được phép.');
+  }
+  if (QUICK_CONNECT_META_HOSTS.has(bare) || QUICK_CONNECT_META_HOSTS.has(rawBare) || /^169\.254\./.test(bare)) {
+    throw failTool('LLM_URL_UNSAFE', 400, 'Chặn truy cập địa chỉ metadata nội bộ.');
+  }
+  const isLocalAllowed = QUICK_CONNECT_LOCAL_HOSTS.has(bare);
+  if (!isLocalAllowed) {
+    if (bare.endsWith('.localhost') || bare.endsWith('.local') || bare.endsWith('.internal')) {
+      throw failTool('LLM_URL_UNSAFE', 400, `Tên miền nội bộ "${bare}" bị chặn bởi chính sách SSRF.`);
+    }
+    if (bare.includes(':')) {
+      throw failTool('LLM_URL_UNSAFE', 400, 'Địa chỉ IPv6 nội bộ/không công khai bị chặn.');
+    }
+    if (net.isIPv4(bare) && QUICK_CONNECT_PRIVATE_IPV4_RE.test(bare)) {
+      throw failTool('LLM_URL_UNSAFE', 400, `Địa chỉ IP nội bộ "${bare}" bị chặn bởi chính sách SSRF.`);
+    }
+    if (!bare.includes('.')) {
+      throw failTool('LLM_URL_UNSAFE', 400, 'Hostname không đầy đủ (non-FQDN) bị chặn.');
+    }
+    if (parsed.protocol !== 'https:') {
+      throw failTool('LLM_URL_UNSAFE', 400, 'Nhà cung cấp LLM bên ngoài phải dùng https://.');
+    }
+  }
+  return parsed.toString().replace(/\/+$/, '');
+}
+
 function buildLlmProbeTarget(provider, rawBase, apiKey) {
   const lower = String(provider || '').trim().toLowerCase();
   let base = String(rawBase || '').trim().replace(/\/+$/, '');
@@ -772,6 +892,7 @@ function buildLlmProbeTarget(provider, rawBase, apiKey) {
     if (lower.includes('ollama')) base = 'http://127.0.0.1:11434';
     else if (lower.includes('gemini') || lower.includes('google')) base = 'https://generativelanguage.googleapis.com';
     else if (lower.includes('anthropic')) base = 'https://api.anthropic.com/v1';
+    else if (lower.includes('deepseek') && apiKey) base = 'https://api.deepseek.com/v1';
     else if (lower.includes('openai') && apiKey) base = 'https://api.openai.com/v1';
   }
   if (!base) return null;
@@ -1886,11 +2007,153 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       });
       if (typeof next === 'function') await next();
     },
+
+    async quickConnectLlm(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actorUser = ctx?.state?.currentUser || ctx?.auth?.user;
+      const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
+      const organizationId = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env, fallback: '' });
+      const payload = readActionPayload(ctx);
+
+      const rawProvider = String(payload.provider || '').trim().toLowerCase();
+      const preset = QUICK_CONNECT_PROVIDER_PRESETS[rawProvider];
+      if (!preset) {
+        throw failTool(
+          'LLM_PROVIDER_UNSUPPORTED',
+          400,
+          `Provider "${rawProvider || '(trống)'}" không được hỗ trợ. Hỗ trợ: openai, openai-completions, google-genai, anthropic, deepseek, ollama, 9router.`,
+        );
+      }
+
+      const apiKey = String(payload.apiKey || '').trim();
+      if (preset.requireKey && !apiKey) {
+        throw failTool('LLM_API_KEY_REQUIRED', 400, `Cần nhập API Key cho nhà cung cấp "${rawProvider}".`);
+      }
+
+      const fallbackBase = rawProvider === '9router' || rawProvider === 'openai-completions'
+        ? (String(env?.AGENT_BASE_URL || '').trim() || preset.defaultBaseURL)
+        : preset.defaultBaseURL;
+      const rawBase = String(payload.baseURL || payload.baseUrl || fallbackBase).trim();
+      const baseURL = validateQuickConnectBaseUrl(rawBase);
+
+      const serviceName = String(payload.serviceName || preset.defaultServiceName).trim().toLowerCase();
+      if (!QUICK_CONNECT_SERVICE_RE.test(serviceName)) {
+        throw failTool('LLM_SERVICE_NAME_INVALID', 400, 'serviceName chỉ được gồm 2-63 ký tự [a-z0-9_-].');
+      }
+
+      const modelName = String(payload.modelName || preset.defaultModelName).trim();
+      if (!modelName) {
+        throw failTool('LLM_MODEL_REQUIRED', 400, 'Cần nhập modelName hợp lệ.');
+      }
+      const serviceTitle = String(payload.title || preset.defaultTitle).trim().slice(0, 120) || serviceName;
+
+      const llmRepo = targetDb?.getRepository?.('llmServices');
+      if (!llmRepo) {
+        throw failTool('NO_LLM_SERVICE', 503, 'Repository llmServices chưa sẵn sàng.');
+      }
+
+      await runWithSystemRlsBypass(targetDb, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const existing = typeof llmRepo.findOne === 'function'
+          ? await llmRepo.findOne({ filter: { name: serviceName }, ...txOpt }).catch(() => null)
+          : null;
+        const existingOpts = existing && typeof val(existing, 'options') === 'object' ? val(existing, 'options') : {};
+        const existingEnabledModels = existing && typeof val(existing, 'enabledModels') === 'object' ? val(existing, 'enabledModels') : {};
+        const prevModels = Array.isArray(existingEnabledModels?.models) ? existingEnabledModels.models : [];
+        const modelEntries = [];
+        const seenModels = new Set();
+        for (const m of [{ label: `${modelName} (${serviceTitle})`, value: modelName }, ...prevModels]) {
+          const mv = typeof m === 'string' ? m.trim() : String(m?.value || m?.model || '').trim();
+          if (!mv || seenModels.has(mv)) continue;
+          seenModels.add(mv);
+          modelEntries.push(typeof m === 'string' ? { label: mv, value: mv } : { label: String(m?.label || mv), value: mv });
+        }
+
+        const values = {
+          name: serviceName,
+          title: serviceTitle,
+          provider: preset.storedProvider,
+          options: {
+            ...(existingOpts || {}),
+            baseURL,
+            ...(apiKey ? { apiKey } : {}),
+          },
+          enabledModels: {
+            mode: 'custom',
+            models: modelEntries,
+          },
+          enabled: true,
+        };
+        if (existing && typeof existing.update === 'function') {
+          await existing.update(values, txOpt);
+        } else {
+          await llmRepo.create({ values, ...txOpt });
+        }
+      });
+
+      const rebindRes = await rebindStarterAgentsToService(targetDb, {
+        llmService: serviceName,
+        modelName,
+        actorUser,
+        defaultOrigin: env?.NOCOBASE_INTERNAL_URL || '',
+        preserveActiveArchitect: false,
+        adminToolNames: ADMIN_BUILDER_TOOL_NAMES,
+      });
+
+      const shouldTest = Boolean(payload.testConnection);
+      const health = shouldTest
+        ? await probeLlmHealth(targetDb, {
+          env,
+          fetchImpl,
+          isAdmin: true,
+          llmServiceName: serviceName,
+          modelName,
+        })
+        : null;
+
+      await recordAiAuditLog(targetDb, {
+        actorUserId: val(actorUser, 'id') ?? null,
+        actorUsername: val(actorUser, 'username') || null,
+        organizationId: organizationId || null,
+        channel: 'studio-sync',
+        aiEmployee: 'dxos-architect',
+        toolName: 'dxosAi:quickConnectLlm',
+        argsSummary: {
+          serviceName,
+          provider: preset.storedProvider,
+          modelName,
+          baseURL,
+          testConnection: shouldTest,
+          hasApiKey: Boolean(apiKey),
+        },
+        status: 'allowed',
+        resultSummary: `Quick-connected LLM ${serviceName} (${preset.storedProvider}/${modelName}); rebound ${rebindRes.reboundAgents.length} starter agents`,
+      });
+
+      ctx.body = {
+        service: {
+          name: serviceName,
+          title: serviceTitle,
+          provider: preset.storedProvider,
+          modelName,
+          baseURL,
+          enabled: true,
+        },
+        reboundAgents: rebindRes.reboundAgents,
+        health,
+      };
+      if (typeof next === 'function') await next();
+    },
   };
 }
 
 module.exports = {
   SUPPORTED_HITL_TOOLS,
+  QUICK_CONNECT_PROVIDER_PRESETS,
+  validateQuickConnectBaseUrl,
   serializeProfile,
   ensureLocalLlmServiceRecord,
   ensureDefaultAiWorkforce,

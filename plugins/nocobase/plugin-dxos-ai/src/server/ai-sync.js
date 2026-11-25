@@ -8,7 +8,8 @@
  */
 'use strict';
 
-const { aiProfiles, validateMcpServerUrl, normalizeToolPermissionsMap } = require('./ai-schemas');
+const { STARTER_AI_BLUEPRINTS, aiProfiles, validateMcpServerUrl, normalizeToolPermissionsMap } = require('./ai-schemas');
+const { runWithSystemRlsBypass } = require('./ai-rls');
 
 const ALL_LDX_ROLES = ['ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_operator', 'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_employee'];
 const DEFAULT_ADMIN_ROLES = ['root', 'admin'];
@@ -190,6 +191,139 @@ async function installAiRoleGrants(db) {
   return { granted };
 }
 
+async function rebindStarterAgentsToService(
+  db,
+  {
+    llmService,
+    modelName = '',
+    actorUser = null,
+    defaultOrigin = '',
+    preserveActiveArchitect = false,
+    adminToolNames = [],
+  } = {},
+) {
+  const targetService = String(llmService || '').trim();
+  const targetModel = String(modelName || '').trim();
+  if (!db?.getRepository || !targetService) {
+    return { reboundAgents: [], llmService: targetService, modelName: targetModel || null };
+  }
+
+  const starterUsernames = STARTER_AI_BLUEPRINTS.map((b) => b.username);
+  return runWithSystemRlsBypass(db, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const llmRepo = db.getRepository('llmServices');
+    const activeServices = new Set();
+    if (llmRepo && typeof llmRepo.find === 'function') {
+      const llmRows = (await llmRepo.find({ limit: 200, ...txOpt })) || [];
+      for (const row of llmRows) {
+        const name = String(val(row, 'name') || '').trim();
+        if (name && val(row, 'enabled') !== false) {
+          activeServices.add(name);
+        }
+      }
+    } else if (llmRepo && typeof llmRepo.findOne === 'function') {
+      const targetRow = await llmRepo.findOne({ filter: { name: targetService }, ...txOpt }).catch(() => null);
+      if (targetRow && val(targetRow, 'enabled') !== false) {
+        activeServices.add(targetService);
+      }
+    }
+
+    const profRepo = db.getRepository('latticeAiProfiles');
+    const empRepo = db.getRepository('aiEmployees');
+    const profMap = new Map();
+    const empMap = new Map();
+
+    if (profRepo && typeof profRepo.find === 'function') {
+      const profRows = (await profRepo.find({ filter: { username: { $in: starterUsernames } }, limit: 50, ...txOpt })) || [];
+      for (const r of profRows) {
+        const uname = String(val(r, 'username') || '').trim().toLowerCase();
+        if (uname) profMap.set(uname, r);
+      }
+    }
+    if (empRepo && typeof empRepo.find === 'function') {
+      const empRows = (await empRepo.find({ filter: { username: { $in: starterUsernames } }, limit: 50, ...txOpt })) || [];
+      for (const r of empRows) {
+        const uname = String(val(r, 'username') || '').trim().toLowerCase();
+        if (uname) empMap.set(uname, r);
+      }
+    }
+
+    const reboundAgents = [];
+    for (const username of starterUsernames) {
+      const profRow = profMap.get(username) || null;
+      const empRow = empMap.get(username) || null;
+      if (!profRow && !empRow) continue;
+
+      const empModels = val(empRow, 'modelSettings')?.models;
+      const empFirst = Array.isArray(empModels) ? empModels[0] : null;
+      const currentService = String(val(profRow, 'llmService') || empFirst?.llmService || '').trim();
+      const currentModel = String(val(profRow, 'modelName') || empFirst?.model || '').trim();
+
+      let hasActiveService = Boolean(currentService) && activeServices.has(currentService);
+      if (!hasActiveService && currentService && llmRepo && typeof llmRepo.find !== 'function' && typeof llmRepo.findOne === 'function') {
+        const svcRow = await llmRepo.findOne({ filter: { name: currentService }, ...txOpt }).catch(() => null);
+        hasActiveService = Boolean(svcRow && val(svcRow, 'enabled') !== false);
+      }
+
+      const isArchitect = username === 'dxos-architect';
+      const shouldRebind = isArchitect
+        ? (!preserveActiveArchitect || !hasActiveService)
+        : !hasActiveService;
+      if (!shouldRebind) continue;
+
+      const nextModel = targetModel || currentModel || 'ag/gemini-3.8-flash';
+      if (profRow) {
+        if (typeof profRow.update === 'function') {
+          await profRow.update({ llmService: targetService, modelName: nextModel }, txOpt);
+        } else if (typeof profRepo?.update === 'function') {
+          await profRepo.update({ filter: { username }, values: { llmService: targetService, modelName: nextModel }, ...txOpt });
+        }
+      }
+
+      if (empRow) {
+        const prevSettings = val(empRow, 'modelSettings');
+        const nextSettings = {
+          ...(prevSettings && typeof prevSettings === 'object' ? prevSettings : {}),
+          enabled: true,
+          models: [{ llmService: targetService, model: nextModel }],
+        };
+        if (typeof empRow.update === 'function') {
+          await empRow.update({ modelSettings: nextSettings }, txOpt);
+        } else if (typeof empRepo?.update === 'function') {
+          await empRepo.update({ filter: { username }, values: { modelSettings: nextSettings }, ...txOpt });
+        }
+      } else if (profRow && empRepo) {
+        const blueprint = STARTER_AI_BLUEPRINTS.find((b) => b.username === username) || {};
+        await syncProfileToNocobaseAi(db, {
+          ...blueprint,
+          username,
+          nickname: val(profRow, 'nickname') || blueprint.nickname || username,
+          position: val(profRow, 'position') || blueprint.position,
+          bio: val(profRow, 'bio') ?? blueprint.bio,
+          greeting: val(profRow, 'greeting') ?? blueprint.greeting,
+          systemPrompt: val(profRow, 'systemPrompt') ?? blueprint.systemPrompt,
+          enabled: val(profRow, 'enabled') !== false,
+          isAdminBuilder: Boolean(val(profRow, 'isAdminBuilder')),
+          allowSubAgentDispatch: Boolean(val(profRow, 'allowSubAgentDispatch')),
+          allowedRoles: val(profRow, 'allowedRoles') || blueprint.allowedRoles,
+          toolPermissions: val(profRow, 'toolPermissions') || blueprint.toolPermissions,
+          mcpServers: val(profRow, 'mcpServers') || blueprint.mcpServers,
+          llmService: targetService,
+          modelName: nextModel,
+        }, { adminToolNames, defaultOrigin });
+      }
+      reboundAgents.push(username);
+    }
+
+    return {
+      reboundAgents,
+      llmService: targetService,
+      modelName: targetModel || null,
+      actorUsername: val(actorUser, 'username') || null,
+    };
+  });
+}
+
 module.exports = {
   ALL_LDX_ROLES,
   DEFAULT_ADMIN_ROLES,
@@ -198,4 +332,5 @@ module.exports = {
   syncMcpClients,
   syncProfileToNocobaseAi,
   installAiRoleGrants,
+  rebindStarterAgentsToService,
 };

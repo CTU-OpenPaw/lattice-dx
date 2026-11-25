@@ -221,3 +221,90 @@ test('Task 3: ALL_LDX_ROLES and DEFAULT_ROLE_OPTIONS include unified ldx_* role 
   assert.ok(DEFAULT_ROLE_OPTIONS.includes('root'));
   assert.ok(DEFAULT_ROLE_OPTIONS.includes('admin'));
 });
+
+test('Task 9: rebindStarterAgentsToService updates dxos-architect & unbound starters while preserving active bindings', async () => {
+  const { rebindStarterAgentsToService } = require('../src/server/ai-sync');
+  assert.equal(typeof rebindStarterAgentsToService, 'function', 'rebindStarterAgentsToService must be exported from ai-sync.js');
+
+  const profileRows = [
+    { username: 'dxos-architect', llmService: 'local-9router', modelName: 'ag/gemini-3.8-flash', isAdminBuilder: true },
+    { username: 'dxos-coordinator', llmService: 'local-9router', modelName: 'ag/gemini-3.8-flash', isAdminBuilder: false },
+    { username: 'dxos-ops', llmService: 'active-anthropic', modelName: 'claude-3-5-sonnet-latest', isAdminBuilder: false },
+    { username: 'dxos-logistics', llmService: 'disabled-svc', modelName: 'old-model', isAdminBuilder: false },
+    { username: 'custom-dept-ai', llmService: 'local-9router', modelName: 'ag/gemini-3.8-flash', isAdminBuilder: false },
+  ];
+  const empRows = profileRows.map((p) => ({
+    username: p.username,
+    modelSettings: { enabled: true, models: [{ llmService: p.llmService, model: p.modelName }] },
+  }));
+  const llmRows = [
+    { name: 'active-anthropic', provider: 'anthropic', enabled: true },
+    { name: 'disabled-svc', provider: 'openai', enabled: false },
+    { name: 'quick-openai', provider: 'openai', enabled: true },
+  ];
+
+  const wrap = (row) => ({
+    ...row,
+    get: (k) => row[k],
+    set: (k, v) => { row[k] = v; },
+    async update(values = {}) { Object.assign(row, values); return this; },
+  });
+  const match = (row, filter = {}) => Object.entries(filter).every(([k, cond]) => (
+    cond && typeof cond === 'object' && '$in' in cond ? cond.$in.includes(row[k]) : String(row[k]) === String(cond)
+  ));
+
+  const fakeDb = {
+    sequelize: { transaction: async (fn) => fn({}) },
+    getRepository(name) {
+      const map = { latticeAiProfiles: profileRows, aiEmployees: empRows, llmServices: llmRows };
+      const arr = map[name];
+      if (!arr) return null;
+      return {
+        find: async ({ filter = {}, limit } = {}) => {
+          const hit = arr.filter((r) => match(r, filter));
+          return (limit ? hit.slice(0, limit) : hit).map(wrap);
+        },
+        findOne: async ({ filter = {} } = {}) => {
+          const hit = arr.find((r) => match(r, filter));
+          return hit ? wrap(hit) : null;
+        },
+      };
+    },
+  };
+
+  // 1. With preserveActiveArchitect: true (afterSave mode), if dxos-architect points to missing local-9router, it gets rebound;
+  // dxos-ops (active-anthropic) is preserved; custom-dept-ai (non-starter) is untouched.
+  const res1 = await rebindStarterAgentsToService(fakeDb, {
+    llmService: 'quick-openai',
+    modelName: 'gpt-4o',
+    preserveActiveArchitect: true,
+  });
+  assert.deepEqual(res1.reboundAgents.sort(), ['dxos-architect', 'dxos-coordinator', 'dxos-logistics']);
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').llmService, 'quick-openai');
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').modelName, 'gpt-4o');
+  assert.deepEqual(empRows.find((r) => r.username === 'dxos-architect').modelSettings.models, [
+    { llmService: 'quick-openai', model: 'gpt-4o' },
+  ]);
+  assert.equal(profileRows.find((r) => r.username === 'dxos-ops').llmService, 'active-anthropic');
+  assert.equal(profileRows.find((r) => r.username === 'custom-dept-ai').llmService, 'local-9router');
+
+  // 2. With preserveActiveArchitect: true when dxos-architect already points to active quick-openai, saving secondary service preserves dxos-architect
+  llmRows.push({ name: 'backup-ollama', provider: 'ollama', enabled: true });
+  const res2 = await rebindStarterAgentsToService(fakeDb, {
+    llmService: 'backup-ollama',
+    modelName: 'llama3.1',
+    preserveActiveArchitect: true,
+  });
+  assert.deepEqual(res2.reboundAgents, []);
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').llmService, 'quick-openai');
+
+  // 3. Explicit mode (preserveActiveArchitect: false, default) binds dxos-architect even when its service is active
+  const res3 = await rebindStarterAgentsToService(fakeDb, {
+    llmService: 'backup-ollama',
+    modelName: 'llama3.1',
+  });
+  assert.deepEqual(res3.reboundAgents, ['dxos-architect']);
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').llmService, 'backup-ollama');
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').modelName, 'llama3.1');
+  assert.equal(profileRows.find((r) => r.username === 'dxos-ops').llmService, 'active-anthropic');
+});
