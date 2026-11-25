@@ -1668,3 +1668,338 @@ test('Task 16: DxosKanbanScheduleBlockView renders unscheduled bucket in schedul
   refreshHooks.unmount();
   unmount();
 });
+
+test('Task 5: dxosBlocks:collectionsMeta enforces auth, excludes internal/protected tables, filters by RBAC view permission, and extracts field enumValues', async () => {
+  const Module = require('node:module');
+  const { createDxosBlocksActions } = require(path.join(PLUGIN_ROOT, 'src/server/blocks-api.js'));
+  const origLoad = Module._load;
+  let DxosBlocksServerPlugin;
+  Module._load = function (request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: class Plugin {} };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const srvPath = path.join(PLUGIN_ROOT, 'src/server/index.js');
+    delete require.cache[require.resolve(srvPath)];
+    DxosBlocksServerPlugin = require(srvPath);
+  } finally {
+    Module._load = origLoad;
+  }
+
+  assert.equal(typeof createDxosBlocksActions({}).collectionsMeta, 'function', 'collectionsMeta action must exist');
+
+  // Verify src/server/index.js registers collectionsMeta in loggedIn ACL
+  const aclAllowCalls = [];
+  const fakePlugin = new DxosBlocksServerPlugin({
+    app: {
+      resourceManager: { use() {}, define() {} },
+      acl: { allow: (res, actions, role) => aclAllowCalls.push({ res, actions, role }) },
+    },
+    db: {},
+  });
+  fakePlugin.app = {
+    resourceManager: { use() {}, define() {} },
+    acl: { allow: (res, actions, role) => aclAllowCalls.push({ res, actions, role }) },
+  };
+  fakePlugin.db = {};
+  await fakePlugin.load();
+  const loggedInAllow = aclAllowCalls.find((c) => c.res === 'dxosBlocks' && c.role === 'loggedIn');
+  assert.ok(loggedInAllow && loggedInAllow.actions.includes('collectionsMeta'), 'dxosBlocks:collectionsMeta must be allowed for loggedIn');
+
+  const collectionsMap = new Map([
+    [
+      'users',
+      {
+        name: 'users',
+        options: { title: 'Users' },
+        fields: new Map([
+          ['id', { name: 'id', type: 'integer' }],
+          ['password', { name: 'password', type: 'password' }],
+        ]),
+      },
+    ],
+    [
+      'roles',
+      {
+        name: 'roles',
+        options: { title: 'Roles' },
+        fields: new Map([['name', { name: 'name', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticeBuiltApps',
+      {
+        name: 'latticeBuiltApps',
+        options: { title: 'Built Apps' },
+        fields: new Map([['appKey', { name: 'appKey', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticeAiProfiles',
+      {
+        name: 'latticeAiProfiles',
+        options: { title: 'AI Profiles' },
+        fields: new Map([['username', { name: 'username', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticeAiAuditLogs',
+      {
+        name: 'latticeAiAuditLogs',
+        options: { title: 'AI Audit Logs' },
+        fields: new Map([['action', { name: 'action', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticeOrders',
+      {
+        name: 'latticeOrders',
+        options: { title: 'Đơn Logistics' },
+        fields: new Map([
+          ['code', { name: 'code', type: 'string', options: { interface: 'input', uiSchema: { title: 'Mã đơn' } } }],
+          ['status', { name: 'status', type: 'string', options: { interface: 'select', uiSchema: { title: 'Trạng thái', enum: ['draft', 'submitted'] } } }],
+        ]),
+      },
+    ],
+    [
+      'latticeCustomMaintenanceOrders',
+      {
+        name: 'latticeCustomMaintenanceOrders',
+        options: { title: 'Lệnh Bảo trì' },
+        fields: new Map([
+          ['code', { name: 'code', type: 'string', options: { interface: 'input', uiSchema: { title: 'Mã lệnh' } } }],
+          ['equipmentName', { name: 'equipmentName', type: 'string', options: { interface: 'input', uiSchema: { title: 'Thiết bị' } } }],
+          [
+            'status',
+            {
+              name: 'status',
+              type: 'string',
+              options: {
+                interface: 'select',
+                uiSchema: {
+                  title: 'Trạng thái bảo trì',
+                  enum: [
+                    { value: 'reported', label: 'Mới báo' },
+                    { value: 'assigned', label: 'Đã giao' },
+                    { value: 'fixed', label: 'Đã sửa' },
+                  ],
+                },
+              },
+            },
+          ],
+          ['scheduledAt', { name: 'scheduledAt', type: 'datetime', options: { interface: 'datetime', uiSchema: { title: 'Lịch bảo trì' } } }],
+          ['apiKeyHash', { name: 'apiKeyHash', type: 'string' }],
+        ]),
+      },
+    ],
+    [
+      'latticeCustomSecretVault',
+      {
+        name: 'latticeCustomSecretVault',
+        options: { title: 'Restricted Custom Table' },
+        fields: new Map([['title', { name: 'title', type: 'string' }]]),
+      },
+    ],
+  ]);
+
+  const db = {
+    collections: collectionsMap,
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return {
+          find: async ({ filter }) => (Number(filter?.userId) === 201
+            ? [{ id: 10, userId: 201, organizationId: 'org-a', active: true }]
+            : []),
+        };
+      }
+      if (name === 'roles') {
+        return { findOne: async () => null };
+      }
+      if (name === 'dataSourcesRolesResources') {
+        return { findOne: async () => null };
+      }
+      return null;
+    },
+  };
+
+  const actions = createDxosBlocksActions(db);
+
+  // 1. Rejects unauthenticated 401 and POST 405
+  await assert.rejects(
+    () => actions.collectionsMeta({ method: 'GET', state: {} }, async () => {}),
+    (err) => err.status === 401 && err.code === 'NATIVE_LOGIN_REQUIRED',
+  );
+  await assert.rejects(
+    () => actions.collectionsMeta({ method: 'POST', state: { currentRole: 'root', currentUser: { id: 1 } } }, async () => {}),
+    (err) => err.status === 405 && err.code === 'METHOD_NOT_ALLOWED',
+  );
+
+  // 2. Non-root user only sees permitted collections, NEVER internal/secret tables even if can() returns true for them
+  const userCtx = {
+    method: 'GET',
+    state: { currentRole: 'ldx_operator', currentUser: { id: 201 } },
+    can: ({ resource, action }) => action === 'view' && resource !== 'latticeCustomSecretVault',
+  };
+  await actions.collectionsMeta(userCtx, async () => {});
+  const names = userCtx.body.collections.map((c) => c.name);
+  assert.ok(names.includes('latticeCustomMaintenanceOrders'));
+  assert.ok(names.includes('latticeOrders'));
+  assert.equal(names.includes('latticeCustomSecretVault'), false, 'Unpermitted custom collection must be filtered out');
+  for (const forbidden of ['users', 'roles', 'latticeBuiltApps', 'latticeAiProfiles', 'latticeAiAuditLogs']) {
+    assert.equal(names.includes(forbidden), false, `Protected table ${forbidden} must be excluded`);
+  }
+
+  const maint = userCtx.body.collections.find((c) => c.name === 'latticeCustomMaintenanceOrders');
+  assert.equal(maint.isCustom, true);
+  assert.equal(maint.title, 'Lệnh Bảo trì');
+  const statusField = maint.fields.find((f) => f.name === 'status');
+  assert.ok(statusField);
+  assert.deepEqual(statusField.enumValues, [
+    { value: 'reported', label: 'Mới báo' },
+    { value: 'assigned', label: 'Đã giao' },
+    { value: 'fixed', label: 'Đã sửa' },
+  ]);
+  assert.equal(maint.fields.some((f) => f.name === 'apiKeyHash'), false, 'Sensitive field must be excluded');
+
+  // 3. Root sees latticeCustomSecretVault too, while protected system tables stay excluded
+  const rootCtx = {
+    method: 'GET',
+    state: { currentRole: 'root', currentUser: { id: 1 } },
+  };
+  await actions.collectionsMeta(rootCtx, async () => {});
+  const rootNames = rootCtx.body.collections.map((c) => c.name);
+  assert.ok(rootNames.includes('latticeCustomSecretVault'));
+  assert.equal(rootNames.includes('users'), false);
+  assert.equal(rootNames.includes('latticeBuiltApps'), false);
+});
+
+test('Task 5: DxosKanbanScheduleBlockView renders dynamic latticeCustomMaintenanceOrders from metadata without falling back to latticeOrders and supports drag-drop & stage update', async () => {
+  const {
+    normalizeKanbanCollection,
+    inferKanbanStages,
+    createKanbanScheduleBlockView,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/kanban-schedule-block.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  assert.equal(typeof normalizeKanbanCollection, 'function');
+  assert.equal(typeof inferKanbanStages, 'function');
+  assert.equal(normalizeKanbanCollection('latticeCustomMaintenanceOrders'), 'latticeCustomMaintenanceOrders');
+  assert.equal(normalizeKanbanCollection(''), 'latticeOrders');
+
+  const customMeta = {
+    name: 'latticeCustomMaintenanceOrders',
+    title: 'Lệnh Bảo trì',
+    isCustom: true,
+    fields: [
+      { name: 'code', type: 'string', interface: 'input', title: 'Mã lệnh', enumValues: [] },
+      { name: 'equipmentName', type: 'string', interface: 'input', title: 'Thiết bị', enumValues: [] },
+      {
+        name: 'status',
+        type: 'string',
+        interface: 'select',
+        title: 'Trạng thái',
+        enumValues: [
+          { value: 'reported', label: 'Mới báo' },
+          { value: 'assigned', label: 'Đã giao' },
+          { value: 'fixed', label: 'Đã sửa' },
+        ],
+      },
+      { name: 'scheduledAt', type: 'datetime', interface: 'datetime', title: 'Lịch bảo trì', enumValues: [] },
+    ],
+  };
+
+  assert.deepEqual(inferKanbanStages(customMeta, [], { stages: ['triage', 'done'] }), ['triage', 'done']);
+  assert.deepEqual(inferKanbanStages(customMeta, [], {}), ['reported', 'assigned', 'fixed']);
+  assert.deepEqual(inferKanbanStages(null, [{ id: 1, status: 'queued' }, { id: 2, status: 'running' }], {}), ['queued', 'running']);
+  assert.deepEqual(inferKanbanStages(null, [], {}), ['draft', 'submitted', 'approved', 'in_progress', 'completed', 'cancelled']);
+
+  const todayIso = new Date().toISOString();
+  const requests = [];
+  let denyUpdate = false;
+  let recordsState = [
+    { id: 101, code: 'MNT-101', equipmentName: 'Máy nén lạnh Chiller-01', status: 'reported', scheduledAt: todayIso },
+    { id: 102, code: 'MNT-102', equipmentName: 'Cảm biến Kho B', status: 'assigned', scheduledAt: todayIso },
+  ];
+
+  const api = {
+    async request(req) {
+      requests.push(req);
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return { data: { data: { collections: [customMeta] } } };
+      }
+      if (req.url === 'latticeCustomMaintenanceOrders:list') {
+        return { data: { data: recordsState } };
+      }
+      if (req.url === 'latticeCustomMaintenanceOrders:update') {
+        if (denyUpdate) {
+          const err = new Error('Forbidden');
+          err.response = { status: 403, data: { errors: [{ message: 'RLS/RBAC từ chối cập nhật' }] } };
+          throw err;
+        }
+        const id = Number(req.params?.filterByTk);
+        const patch = req.data || {};
+        recordsState = recordsState.map((r) => (r.id === id ? { ...r, ...patch } : r));
+        return { data: { data: recordsState.find((r) => r.id === id) } };
+      }
+      throw new Error(`Unexpected API call: ${req.url}`);
+    },
+  };
+
+  const View = createKanbanScheduleBlockView({ useAPIClient: () => api }, React, {}, {});
+  let tree = render(View, { model: { props: { collection: 'latticeCustomMaintenanceOrders', viewMode: 'kanban' } } });
+  await new Promise((r) => setTimeout(r, 30));
+  tree = render(View, { model: { props: { collection: 'latticeCustomMaintenanceOrders', viewMode: 'kanban' } } });
+
+  // Zero calls to latticeOrders:list!
+  assert.equal(requests.some((r) => r.url === 'latticeOrders:list'), false, 'Must NEVER fall back to latticeOrders:list');
+  assert.ok(requests.some((r) => r.url === 'latticeCustomMaintenanceOrders:list'));
+
+  // Custom stages rendered from collectionsMeta
+  const cols = collectNodes(tree).filter((n) => n.props?.['data-testid'] === 'dxos-kanban-column');
+  assert.deepEqual(cols.map((c) => c.props['data-stage']), ['reported', 'assigned', 'fixed']);
+  const dump = textOf(tree);
+  assert.ok(dump.includes('Mới báo') && dump.includes('Đã giao') && dump.includes('Đã sửa'));
+  assert.ok(dump.includes('Máy nén lạnh Chiller-01'));
+
+  // Drag card 101 to 'assigned' column -> calls latticeCustomMaintenanceOrders:update
+  const card101 = findByTestId(tree, 'dxos-kanban-card-101');
+  assert.ok(card101 && card101.props.draggable === true, 'Custom Kanban card must be draggable');
+  let dragPayload = '';
+  card101.props.onDragStart({ dataTransfer: { setData: (_k, v) => { dragPayload = v; } } });
+  const assignedCol = cols.find((c) => c.props['data-stage'] === 'assigned');
+  assignedCol.props.onDragOver({ preventDefault() {} });
+  await assignedCol.props.onDrop({ preventDefault() {}, dataTransfer: { getData: () => dragPayload } });
+  tree = render(View, { model: { props: { collection: 'latticeCustomMaintenanceOrders', viewMode: 'kanban' } } });
+  assert.ok(
+    requests.some((r) => r.url === 'latticeCustomMaintenanceOrders:update' && Number(r.params?.filterByTk) === 101 && r.data?.status === 'assigned'),
+    'Drop must invoke latticeCustomMaintenanceOrders:update with filterByTk and new status',
+  );
+
+  // Move card 102 via select control to 'fixed'
+  const moveSelect102 = findByTestId(tree, 'dxos-kanban-move-102');
+  assert.ok(moveSelect102, 'Stage move select must render for dynamic collection record');
+  await moveSelect102.props.onChange({ target: { value: 'fixed' } });
+  tree = render(View, { model: { props: { collection: 'latticeCustomMaintenanceOrders', viewMode: 'kanban' } } });
+  assert.ok(
+    requests.some((r) => r.url === 'latticeCustomMaintenanceOrders:update' && Number(r.params?.filterByTk) === 102 && r.data?.status === 'fixed'),
+    'Stage select must invoke latticeCustomMaintenanceOrders:update',
+  );
+
+  // Schedule mode uses scheduledAt so records appear on the calendar grid (not unscheduled)
+  findByTestId(tree, 'dxos-view-mode-schedule').props.onClick();
+  tree = render(View, { model: { props: { collection: 'latticeCustomMaintenanceOrders', viewMode: 'kanban' } } });
+  const schedGrid = findByTestId(tree, 'dxos-schedule-grid');
+  assert.ok(schedGrid);
+  assert.ok(textOf(schedGrid).includes('MNT-101'));
+  assert.equal(findByTestId(tree, 'dxos-schedule-unscheduled'), null);
+
+  // RBAC/RLS 403 error surfaces cleanly without crashing
+  findByTestId(tree, 'dxos-view-mode-kanban').props.onClick();
+  tree = render(View, { model: { props: { collection: 'latticeCustomMaintenanceOrders', viewMode: 'kanban' } } });
+  denyUpdate = true;
+  await findByTestId(tree, 'dxos-kanban-move-101').props.onChange({ target: { value: 'fixed' } });
+  tree = render(View, { model: { props: { collection: 'latticeCustomMaintenanceOrders', viewMode: 'kanban' } } });
+  assert.ok(textOf(tree).includes('RLS/RBAC từ chối cập nhật'));
+
+  unmount();
+});

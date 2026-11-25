@@ -74,6 +74,7 @@ class DxosBlocksServerPlugin extends Plugin {
       'twinSetDesired',
       'bulkImportDryRun',
       'bulkImportCommit',
+      'collectionsMeta',
     ], 'loggedIn');
     // Handler-level fail-closed auth verifies either valid X-Lattice-Edge-Token (timingSafeEqual) or logged-in ACL user.
     this.app.acl.allow('dxosBlocks', ['telemetryIngest', 'twinAckCommand'], 'public');

@@ -393,3 +393,107 @@ test('DxosRecordWorkbenchBlockModel exposes uiSchema and renders Export Bar, Vou
   assert.ok(dump.includes('dxos-voucher-lifecycle-bar'));
   assert.ok(dump.includes('dxos-record-chatter'));
 });
+
+test('Task 5: fetchCollectionsMeta & inferCollectionFieldsMeta infer statusField, stages, dateFields, titleField, and geo fields', async () => {
+  const { fetchCollectionsMeta, inferCollectionFieldsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  assert.equal(typeof fetchCollectionsMeta, 'function');
+  assert.equal(typeof inferCollectionFieldsMeta, 'function');
+
+  const seenUrls = [];
+  const api = {
+    async request(req) {
+      seenUrls.push(`${req.method}:${req.url}`);
+      return {
+        data: {
+          data: {
+            collections: [
+              {
+                name: 'latticeCustomFleetTrips',
+                title: 'Chuyến xe lạnh',
+                isCustom: true,
+                fields: [
+                  { name: 'tripName', type: 'string', interface: 'input', title: 'Tên chuyến' },
+                  {
+                    name: 'tripStage',
+                    type: 'string',
+                    interface: 'select',
+                    title: 'Giai đoạn',
+                    enumValues: [
+                      { value: 'planned', label: 'Đã lên lịch' },
+                      { value: 'en_route', label: 'Đang chạy' },
+                      { value: 'arrived', label: 'Đã đến' },
+                    ],
+                  },
+                  { name: 'departureAt', type: 'datetime', interface: 'datetime', title: 'Giờ xuất phát' },
+                  { name: 'geoLat', type: 'float', interface: 'number', title: 'Vĩ độ' },
+                  { name: 'geoLng', type: 'float', interface: 'number', title: 'Kinh độ' },
+                ],
+              },
+            ],
+          },
+        },
+      };
+    },
+  };
+
+  const cols = await fetchCollectionsMeta(api);
+  assert.deepEqual(seenUrls, ['get:dxosBlocks:collectionsMeta']);
+  assert.equal(cols.length, 1);
+  assert.equal(cols[0].name, 'latticeCustomFleetTrips');
+
+  const inferred = inferCollectionFieldsMeta(cols[0]);
+  assert.equal(inferred.statusField, 'tripStage');
+  assert.deepEqual(inferred.stages, [
+    { value: 'planned', label: 'Đã lên lịch' },
+    { value: 'en_route', label: 'Đang chạy' },
+    { value: 'arrived', label: 'Đã đến' },
+  ]);
+  assert.equal(inferred.dateFields[0], 'departureAt');
+  assert.equal(inferred.titleField, 'tripName');
+  assert.equal(inferred.latField, 'geoLat');
+  assert.equal(inferred.lngField, 'geoLng');
+
+  const failingApi = {
+    async request() {
+      throw Object.assign(new Error('Unauthorized'), { response: { status: 401 } });
+    },
+  };
+  assert.deepEqual(await fetchCollectionsMeta(failingApi), []);
+});
+
+test('Task 5: DxosKanbanScheduleBlockModel uiSchema keeps existing fields and adds optional statusField, dateField, titleField', () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    {},
+  );
+
+  const KanbanModel = models.DxosKanbanScheduleBlockModel;
+  const cfgStep = KanbanModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
+  for (const field of ['title', 'collection', 'viewMode', 'pageSize', 'statusField', 'dateField', 'titleField']) {
+    assert.ok(cfgStep.uiSchema[field], `DxosKanbanScheduleBlockModel uiSchema missing ${field}`);
+  }
+  const inst = new KanbanModel({ props: { collection: 'latticeCustomMaintenanceOrders', statusField: 'status', dateField: 'scheduledAt', titleField: 'equipmentName' } });
+  const el = inst.renderComponent();
+  assert.equal(el.props.liveConfig.collection, 'latticeCustomMaintenanceOrders');
+  assert.equal(el.props.liveConfig.statusField, 'status');
+  assert.equal(el.props.liveConfig.dateField, 'scheduledAt');
+  assert.equal(el.props.liveConfig.titleField, 'equipmentName');
+});

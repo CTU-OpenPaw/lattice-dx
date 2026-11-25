@@ -41,6 +41,26 @@ const PROPOSAL_STATES = new Set(['all', 'proposed', 'reviewed']);
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
 const MIN_EDGE_TOKEN_LENGTH = 16;
+const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
+const SAFE_COLLECTION_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{1,63}$/;
+const META_EXCLUDED_COLLECTIONS = new Set([
+  'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
+  'applicationPlugins', 'applicationTokens', 'sessions', 'verification', 'auditLogs',
+  'aiSettings', 'aiEmployees', 'aiMcpClients', 'rolesAiEmployees',
+  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue',
+  'latticeUiSnapshots', 'latticeBuiltApps',
+  'dataSources', 'dataSourcesCollections', 'dataSourcesRoles', 'dataSourcesRolesResources',
+  'dataSourcesRolesResourcesActions', 'dataSourcesRolesResourcesScopes',
+  'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts', 'uiSchemas', 'uiSchemaTemplates',
+  'workflows', 'flow_nodes', 'flowModels', 'workflowManualTasks', 'executions', 'jobs', 'users_jobs',
+  'collections', 'fields', 'collectionCategories', 'systemSettings', 'storages', 'attachments',
+  'latticeNotifications', 'latticeSlaPolicies', 'latticeParaChunks',
+  'latticeTelemetryPoints', 'latticeTwinShadows', 'latticeIotDevices', 'latticeBrokerSubscriptions',
+  'latticeContextOutbox', 'latticeDataQuarantine',
+]);
+const META_EXCLUDED_LOWER = new Set([...META_EXCLUDED_COLLECTIONS].map((c) => c.toLowerCase()));
+const META_SENSITIVE_FIELD_RE = /password|secret|token|apikey|api_key|privatekey|hash|salt|embedding|searchvector/i;
+const META_BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function fail(code, status = 403, message = code) {
   return Object.assign(new Error(message), { code, status });
@@ -987,11 +1007,168 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       );
       return next();
     },
+
+    collectionsMeta: async (ctx, next) => {
+      if ((ctx.method || 'GET') !== 'GET') throw fail('METHOD_NOT_ALLOWED', 405);
+      if (!ctx.state?.currentUser?.id && ctx.state?.currentRole !== 'root') {
+        throw fail('NATIVE_LOGIN_REQUIRED', 401);
+      }
+      const isRoot = ctx.state?.currentRole === 'root';
+      if (isRoot && !ctx.state?.currentUser) {
+        throw fail('NATIVE_LOGIN_REQUIRED', 401);
+      }
+      if (!isRoot) {
+        await resolveNativeEmployee(db, ctx.state.currentUser);
+      }
+
+      const normalizeEnumValues = (rawField) => {
+        const uiSchema = val(rawField, 'uiSchema') || rawField?.options?.uiSchema;
+        const candidates = [
+          val(rawField, 'enumValues'),
+          rawField?.options?.enumValues,
+          uiSchema?.enum,
+          rawField?.options?.enum,
+          val(rawField, 'enum'),
+        ];
+        const out = [];
+        const seen = new Set();
+        for (const list of candidates) {
+          if (!Array.isArray(list)) continue;
+          for (const item of list) {
+            let value = '';
+            let label = '';
+            if (item && typeof item === 'object') {
+              value = String(item.value ?? item.label ?? '').trim();
+              label = String(item.label ?? item.value ?? '').trim();
+            } else if (item !== null && item !== undefined) {
+              value = String(item).trim();
+              label = value;
+            }
+            if (!value || seen.has(value)) continue;
+            seen.add(value);
+            out.push({ value, label: label || value });
+          }
+          if (out.length) break;
+        }
+        return out;
+      };
+
+      const mergeFields = (colObj, repoFieldRows) => {
+        const fieldMap = new Map();
+        const addField = (rawField) => {
+          const fname = String(val(rawField, 'name') || rawField?.options?.name || '').trim();
+          if (!fname || META_BLOCKED_KEYS.has(fname) || fname.startsWith('__') || META_SENSITIVE_FIELD_RE.test(fname)) {
+            return;
+          }
+          const options = rawField?.options && typeof rawField.options === 'object' ? rawField.options : {};
+          const uiSchema = val(rawField, 'uiSchema') || options.uiSchema || {};
+          const ftype = String(val(rawField, 'type') || options.type || 'string').trim() || 'string';
+          const iface = String(val(rawField, 'interface') || options.interface || '').trim();
+          const title = String(uiSchema?.title || val(rawField, 'title') || options.title || fname).trim() || fname;
+          const enumValues = normalizeEnumValues(rawField);
+          const prev = fieldMap.get(fname);
+          fieldMap.set(fname, {
+            name: fname,
+            type: ftype !== 'string' || !prev ? ftype : prev.type,
+            interface: iface || prev?.interface || '',
+            title: title !== fname || !prev ? title : prev.title,
+            enumValues: enumValues.length ? enumValues : (prev?.enumValues || []),
+          });
+        };
+
+        const rawColFields = colObj?.fields;
+        if (rawColFields instanceof Map) {
+          for (const f of rawColFields.values()) addField(f);
+        } else if (Array.isArray(rawColFields)) {
+          for (const f of rawColFields) addField(f);
+        } else if (rawColFields && typeof rawColFields === 'object') {
+          for (const f of Object.values(rawColFields)) addField(f);
+        }
+        for (const f of Array.isArray(repoFieldRows) ? repoFieldRows : []) {
+          addField(f);
+        }
+        return [...fieldMap.values()];
+      };
+
+      let repoCollections = [];
+      let repoFields = [];
+      try {
+        const colRepo = db?.getRepository?.('collections');
+        if (colRepo && typeof colRepo.find === 'function') {
+          repoCollections = (await colRepo.find({ limit: 500 })) || [];
+        }
+      } catch {
+        repoCollections = [];
+      }
+      try {
+        const fieldRepo = db?.getRepository?.('fields');
+        if (fieldRepo && typeof fieldRepo.find === 'function') {
+          repoFields = (await fieldRepo.find({ limit: 2000 })) || [];
+        }
+      } catch {
+        repoFields = [];
+      }
+
+      const fieldsByCol = new Map();
+      for (const f of Array.isArray(repoFields) ? repoFields : []) {
+        const colName = String(val(f, 'collectionName') || '').trim();
+        if (!colName) continue;
+        if (!fieldsByCol.has(colName)) fieldsByCol.set(colName, []);
+        fieldsByCol.get(colName).push(f);
+      }
+
+      const rawMap = new Map();
+      const registerCandidate = (rawName, obj) => {
+        const name = String(rawName || val(obj, 'name') || obj?.options?.name || '').trim();
+        if (!name || !SAFE_COLLECTION_NAME_RE.test(name)) return;
+        if (name.startsWith('r_') || name.startsWith('__') || name.startsWith('pg_') || name.startsWith('sqlite_')) return;
+        if (META_EXCLUDED_LOWER.has(name.toLowerCase())) return;
+        if (obj?.hidden === true || obj?.options?.hidden === true || val(obj, 'hidden') === true) return;
+        const prev = rawMap.get(name);
+        const title = String(obj?.options?.title || val(obj, 'title') || obj?.title || prev?.title || name).trim() || name;
+        const mergedColObj = obj?.fields ? obj : (prev?.colObj || obj);
+        rawMap.set(name, { name, title, colObj: mergedColObj });
+      };
+
+      if (db?.collections instanceof Map) {
+        for (const [k, c] of db.collections.entries()) registerCandidate(c?.name || c?.options?.name || k, c);
+      } else if (Array.isArray(db?.collections)) {
+        for (const c of db.collections) registerCandidate(c?.name || c?.options?.name, c);
+      } else if (db?.collections && typeof db.collections === 'object') {
+        for (const [k, c] of Object.entries(db.collections)) registerCandidate(c?.name || c?.options?.name || k, c);
+      } else if (typeof db?.getCollections === 'function') {
+        const list = db.getCollections() || [];
+        for (const c of Array.isArray(list) ? list : [...list]) registerCandidate(c?.name || c?.options?.name, c);
+      }
+
+      for (const row of Array.isArray(repoCollections) ? repoCollections : []) {
+        registerCandidate(val(row, 'name'), row);
+      }
+
+      const collections = [];
+      for (const entry of rawMap.values()) {
+        if (!isRoot && !(await hasViewPermission(db, ctx, entry.name, 'view'))) {
+          continue;
+        }
+        collections.push({
+          name: entry.name,
+          title: entry.title,
+          isCustom: CUSTOM_COLLECTION_RE.test(entry.name),
+          fields: mergeFields(entry.colObj, fieldsByCol.get(entry.name)),
+        });
+      }
+
+      collections.sort((a, b) => (a.isCustom !== b.isCustom ? (a.isCustom ? -1 : 1) : a.name.localeCompare(b.name)));
+      ctx.body = { collections };
+      return next();
+    },
   };
 }
 
 module.exports = {
   ALLOWED_PROPOSAL_COLLECTIONS,
+  CUSTOM_COLLECTION_RE,
+  META_EXCLUDED_COLLECTIONS,
   createDxosBlocksActions,
   resolveCallerContext,
   resolveTelemetryIngestAuth,

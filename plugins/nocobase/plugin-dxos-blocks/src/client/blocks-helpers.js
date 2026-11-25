@@ -9,6 +9,7 @@
 'use strict';
 
 const SAFE_COLLECTION_RE = /^[a-zA-Z0-9_]{1,64}$/;
+const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const SAFE_COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
 const MAX_KPI_METRICS = 6;
 const MAX_HERO_ACTIONS = 4;
@@ -296,8 +297,125 @@ async function requestAndDownloadExport(api, { collection, format = 'csv', field
   return { ok: true, meta, download };
 }
 
+async function fetchCollectionsMeta(api) {
+  if (!api?.request) return [];
+  try {
+    const res = await api.request({
+      url: 'dxosBlocks:collectionsMeta',
+      method: 'get',
+      skipNotify: true,
+    });
+    const list = res?.data?.data?.collections ?? res?.data?.collections ?? [];
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function inferCollectionFieldsMeta(collectionMeta) {
+  const fields = Array.isArray(collectionMeta?.fields) ? collectionMeta.fields : [];
+  const byLower = new Map();
+  for (const f of fields) {
+    if (!f || !f.name) continue;
+    byLower.set(String(f.name).toLowerCase(), f);
+  }
+
+  let statusFieldObj = null;
+  for (const cand of ['status', 'stage', 'state', 'workflowstatus']) {
+    if (byLower.has(cand)) {
+      statusFieldObj = byLower.get(cand);
+      break;
+    }
+  }
+  if (!statusFieldObj) {
+    statusFieldObj = fields.find((f) => Array.isArray(f?.enumValues) && f.enumValues.length > 0)
+      || fields.find((f) => f?.interface === 'select' || f?.type === 'enum')
+      || null;
+  }
+  const statusField = statusFieldObj?.name || 'status';
+
+  const rawEnums = Array.isArray(statusFieldObj?.enumValues) ? statusFieldObj.enumValues : [];
+  const stages = [];
+  const seenStages = new Set();
+  for (const item of rawEnums) {
+    const value = item && typeof item === 'object' ? String(item.value ?? item.label ?? '').trim() : String(item ?? '').trim();
+    const label = item && typeof item === 'object' ? String(item.label ?? item.value ?? '').trim() : value;
+    if (!value || seenStages.has(value)) continue;
+    seenStages.add(value);
+    stages.push({ value, label: label || value });
+  }
+
+  const preferredBusinessDates = ['dueDate', 'scheduledAt', 'startDate', 'expiryDate', 'submittedAt'];
+  const dateFields = [];
+  const seenDates = new Set();
+  for (const pref of preferredBusinessDates) {
+    const hit = byLower.get(pref.toLowerCase());
+    if (hit && !seenDates.has(hit.name)) {
+      seenDates.add(hit.name);
+      dateFields.push(hit.name);
+    }
+  }
+  for (const f of fields) {
+    if (!f?.name || seenDates.has(f.name) || f.name === 'createdAt' || f.name === 'updatedAt') continue;
+    const t = String(f.type || '').toLowerCase();
+    const iface = String(f.interface || '').toLowerCase();
+    if (['date', 'datetime', 'time'].includes(t) || ['datetime', 'date'].includes(iface)) {
+      seenDates.add(f.name);
+      dateFields.push(f.name);
+    }
+  }
+  const createdAtField = byLower.get('createdat');
+  if (createdAtField && !seenDates.has(createdAtField.name)) {
+    seenDates.add(createdAtField.name);
+    dateFields.push(createdAtField.name);
+  }
+  for (const fallbackDate of [...preferredBusinessDates, 'createdAt']) {
+    if (!seenDates.has(fallbackDate)) {
+      seenDates.add(fallbackDate);
+      dateFields.push(fallbackDate);
+    }
+  }
+
+  let titleFieldObj = null;
+  for (const cand of ['title', 'name', 'subject', 'summary', 'productname', 'label']) {
+    if (byLower.has(cand)) {
+      titleFieldObj = byLower.get(cand);
+      break;
+    }
+  }
+  if (!titleFieldObj) {
+    titleFieldObj = fields.find((f) => {
+      if (!f?.name) return false;
+      const lower = String(f.name).toLowerCase();
+      if (f.name === statusField || ['id', 'code', 'lotcode', 'organizationid'].includes(lower)) return false;
+      const t = String(f.type || '').toLowerCase();
+      return t === 'string' || t === 'text';
+    }) || byLower.get('code') || byLower.get('lotcode') || null;
+  }
+  const titleField = titleFieldObj?.name || 'name';
+
+  const latCand = ['lat', 'latitude', 'geolat', 'y'];
+  const lngCand = ['lng', 'lon', 'longitude', 'geolng', 'x'];
+  const latFieldObj = latCand.map((c) => byLower.get(c)).find(Boolean)
+    || fields.find((f) => /lat/i.test(String(f?.name || '')))
+    || null;
+  const lngFieldObj = lngCand.map((c) => byLower.get(c)).find(Boolean)
+    || fields.find((f) => /lng|lon/i.test(String(f?.name || '')))
+    || null;
+
+  return {
+    statusField,
+    stages,
+    dateFields,
+    titleField,
+    latField: latFieldObj?.name || null,
+    lngField: lngFieldObj?.name || null,
+  };
+}
+
 module.exports = {
   SAFE_COLLECTION_RE,
+  CUSTOM_COLLECTION_RE,
   isSafeAppPath,
   safeJsonParse,
   filterHeroActions,
@@ -311,4 +429,6 @@ module.exports = {
   createAgentStripElement,
   triggerBase64Download,
   requestAndDownloadExport,
+  fetchCollectionsMeta,
+  inferCollectionFieldsMeta,
 };

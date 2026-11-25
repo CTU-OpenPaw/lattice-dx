@@ -1087,6 +1087,9 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
         collection: 'latticeOrders',
         viewMode: 'kanban',
         pageSize: 40,
+        statusField: '',
+        dateField: '',
+        titleField: '',
       },
       {
         title: { type: 'string', title: 'Tiêu đề Block', 'x-decorator': 'FormItem', 'x-component': 'Input' },
@@ -1113,6 +1116,9 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           ],
         },
         pageSize: { type: 'number', title: 'Số bản ghi tối đa', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        statusField: { type: 'string', title: 'Trường trạng thái Kanban (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        dateField: { type: 'string', title: 'Trường ngày hiển thị lịch (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        titleField: { type: 'string', title: 'Trường tiêu đề thẻ (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
       },
     ],
     [
