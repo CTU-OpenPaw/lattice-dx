@@ -462,12 +462,13 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       }
     }, [api, clientDenied, approvalStatusFilter]);
 
+    const resolvedBuiltAppsDefaultOrg = resolveStudioDefaultOrg({ topology, catalog, profiles, app });
     const loadBuiltApps = React.useCallback(async () => {
       if (clientDenied || !api?.request) return;
       const reqSeq = ++builtAppsReqSeqRef.current;
       setBuiltAppsLoading(true);
       try {
-        const targetOrg = String(quotaOrg || resolveStudioDefaultOrg({ topology, catalog, profiles, app }) || '').trim();
+        const targetOrg = String(quotaOrg || resolvedBuiltAppsDefaultOrg || '').trim();
         const res = await api.request({
           url: 'dxosAi:listBuiltApps',
           method: 'get',
@@ -486,7 +487,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           setBuiltAppsLoading(false);
         }
       }
-    }, [api, clientDenied, quotaOrg]);
+    }, [api, clientDenied, quotaOrg, resolvedBuiltAppsDefaultOrg]);
 
     React.useEffect(() => {
       loadAll();
@@ -597,7 +598,12 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       if (!api?.request || llmHealthBusy) return;
       setLlmHealthBusy(true);
       try {
-        const res = await api.request({ url: 'dxosAi:checkLlmHealth', method: 'get', skipNotify: true });
+        const res = await api.request({
+          url: 'dxosAi:checkLlmHealth',
+          method: 'get',
+          params: { verifyCompletion: '1' },
+          skipNotify: true,
+        });
         const d = res?.data?.data || res?.data || null;
         setLlmHealth(d);
         if (d) {
@@ -644,6 +650,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             baseURL: qcBaseUrl,
             modelName: qcModelName,
             testConnection: true,
+            verifyCompletion: true,
           },
         });
         const d = res?.data?.data || res?.data || {};
@@ -821,7 +828,8 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         const ver = freshApp?.lastVerificationJson || {};
         const passedCount = Number(ver.passedCount ?? 0);
         const totalCount = Number(ver.totalCount ?? 0);
-        const ok = Boolean(ver.ok !== false && missingCols.length === 0 && freshApp.status !== 'torndown');
+        const hasVerifiedPass = ver.ok === true;
+        const ok = Boolean(hasVerifiedPass && missingCols.length === 0 && freshApp.status !== 'torndown');
         const summary = {
           ok,
           passedCount,
@@ -835,7 +843,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           type: ok ? 'ok' : 'error',
           text: ok
             ? `Kiểm chứng "${appItem.appKey}" PASS (${passedCount}/${totalCount} checks, ${expectedCols.length} bảng sẵn sàng).`
-            : `Kiểm chứng "${appItem.appKey}" phát hiện cảnh báo: thiếu bảng [${missingCols.join(', ') || 'none'}], trạng thái ${freshApp.status}.`,
+            : `Kiểm chứng "${appItem.appKey}" phát hiện cảnh báo: ${hasVerifiedPass ? '' : 'chưa có kết quả kiểm chứng hợp lệ (ver.ok !== true), '}thiếu bảng [${missingCols.join(', ') || 'none'}], trạng thái ${freshApp.status}.`,
         });
       } catch (err) {
         setNotice({

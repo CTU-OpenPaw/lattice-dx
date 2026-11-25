@@ -810,6 +810,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
     React.useEffect(() => {
       setSelectedId('');
       setDrawerOpen(false);
+      setFilterMode('all');
       setTwinFeedback({ type: '', text: '' });
       if (customCollection) {
         setState({

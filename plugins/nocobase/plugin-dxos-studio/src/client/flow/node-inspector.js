@@ -215,9 +215,15 @@ function createNodeInspector(React) {
       const hasPos = cursorRef.scopeKey === scopeKey && cursorRef.field === activeField && Number.isFinite(cursorRef.start);
       const selStart = hasPos ? cursorRef.start : null;
       const selEnd = hasPos ? cursorRef.end : null;
-      if (activeField === '__raw__') return updateRawConfigText(insertVariableAtCursor(currentRawText(), expr, selStart, selEnd, true));
+      if (activeField === '__raw__') {
+        Object.assign(cursorRef, { start: null, end: null });
+        return updateRawConfigText(insertVariableAtCursor(currentRawText(), expr, selStart, selEnd, true));
+      }
       const def = fields.find((f) => f.name === activeField);
-      if (def?.type === 'json') return updateJsonFieldText(activeField, insertVariableAtCursor(currentJsonFieldText(activeField, schema?.defaultConfig?.[activeField]), expr, selStart, selEnd, true));
+      if (def?.type === 'json') {
+        Object.assign(cursorRef, { start: null, end: null });
+        return updateJsonFieldText(activeField, insertVariableAtCursor(currentJsonFieldText(activeField, schema?.defaultConfig?.[activeField]), expr, selStart, selEnd, true));
+      }
       const cur = nodeCfg[activeField];
       const next = insertVariableAtCursor(cur === undefined || cur === null ? '' : String(cur), expr, selStart, selEnd, false);
       if (hasPos) {

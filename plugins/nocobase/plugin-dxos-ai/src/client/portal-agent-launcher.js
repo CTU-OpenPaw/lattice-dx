@@ -314,7 +314,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
 
     React.useEffect(() => {
       const agentPortalSlug = portalSlug || (onFlowStudio ? 'services' : '');
-      if (!api?.request || !agentPortalSlug) {
+      if (!api?.request || !agentPortalSlug || !resolveClientAuthToken(api)) {
         setEmployees([]);
         setIsAdmin(false);
         return undefined;
@@ -353,6 +353,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return undefined;
       let cancelled = false;
       let controller = null;
+      let activeReader = null;
       let reconnectTimer = null;
       let attempt = 0;
       let baseRev = null;
@@ -422,6 +423,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
           if (!res?.ok || !res.body?.getReader) throw new Error('SSE_UNAVAILABLE');
           attempt = 0;
           const reader = res.body.getReader();
+          activeReader = reader;
           const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
           let buffer = '';
           while (!cancelled) {
@@ -435,6 +437,8 @@ function createPortalAgentLauncher(client, React, _antd, app) {
           }
         } catch {
           // Graceful reconnect unless aborted cleanly
+        } finally {
+          activeReader = null;
         }
         if (!cancelled && !stopReconnect && (typeof document === 'undefined' || document.visibilityState !== 'hidden')) {
           const delay = Math.min(15000, 1500 * (2 ** Math.min(4, attempt++)));
@@ -445,6 +449,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
 
       const onVisibilityChange = () => {
         if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+          activeReader?.cancel?.().catch?.(() => {});
           controller?.abort?.();
           if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         } else if (!cancelled && !reconnectTimer) {
@@ -459,6 +464,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
         cancelled = true;
         document?.removeEventListener?.('visibilitychange', onVisibilityChange);
         if (reconnectTimer) clearTimeout(reconnectTimer);
+        activeReader?.cancel?.().catch?.(() => {});
         controller?.abort?.();
       };
     }, [api, sseSlug, portalSlug, onFlowStudio]);
@@ -516,8 +522,8 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       await checkLlmHealthNow();
       if (onFlowStudio && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
         const evt = typeof CustomEvent === 'function'
-          ? new CustomEvent('latticedx:ai-chat-opening', { detail: { pathname } })
-          : { type: 'latticedx:ai-chat-opening', detail: { pathname } };
+          ? new CustomEvent('latticedx:ai-chat-opening', { detail: { pathname, fromLauncher: true } })
+          : { type: 'latticedx:ai-chat-opening', detail: { pathname, fromLauncher: true } };
         window.dispatchEvent(evt);
       }
       await openNativePortalChat(app, {
@@ -532,8 +538,16 @@ function createPortalAgentLauncher(client, React, _antd, app) {
     React.useEffect(() => {
       if (!onFlowStudio || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined;
       const onOpenArchitect = () => { handleOpenChat(); };
+      const onExternalChatOpening = (evt) => {
+        if (evt?.detail?.fromLauncher === true) return;
+        checkLlmHealthNow().catch(() => {});
+      };
       window.addEventListener('latticedx:open-ai-architect', onOpenArchitect);
-      return () => { window.removeEventListener?.('latticedx:open-ai-architect', onOpenArchitect); };
+      window.addEventListener('latticedx:ai-chat-opening', onExternalChatOpening);
+      return () => {
+        window.removeEventListener?.('latticedx:open-ai-architect', onOpenArchitect);
+        window.removeEventListener?.('latticedx:ai-chat-opening', onExternalChatOpening);
+      };
     }, [onFlowStudio, defaultEmployee, pathname, portalSlug]);
 
     const healthWarningNode = (llmHealth && llmHealth.ok === false && (portalSlug || onFlowStudio)) ? h('div', {

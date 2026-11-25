@@ -433,10 +433,10 @@ function inferCollectionFieldsMeta(collectionMeta) {
   const latCand = ['lat', 'latitude', 'geolat', 'y'];
   const lngCand = ['lng', 'lon', 'longitude', 'geolng', 'x'];
   const latFieldObj = latCand.map((c) => byLower.get(c)).find(Boolean)
-    || fields.find((f) => /lat/i.test(String(f?.name || '')))
+    || fields.find((f) => /(?:^|_)(?:lat|latitude)$|(?:geo|gps|coord|pos)lat$/i.test(String(f?.name || '')))
     || null;
   const lngFieldObj = lngCand.map((c) => byLower.get(c)).find(Boolean)
-    || fields.find((f) => /lng|lon/i.test(String(f?.name || '')))
+    || fields.find((f) => /(?:^|_)(?:lng|lon|longitude)$|(?:geo|gps|coord|pos)(?:lng|lon)$/i.test(String(f?.name || '')))
     || null;
 
   return {

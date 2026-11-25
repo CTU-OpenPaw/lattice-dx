@@ -637,4 +637,24 @@ test('Task 7 Fix Round 1: registerDxosBlockModels skips collectionsMeta when una
     kbEnum.some((opt) => opt.value === 'latticeCustomColdAlerts'),
     'Post-login fetchCollectionsMeta must lazily populate DxosKanbanScheduleBlockModel config dropdown',
   );
+
+  // Tightened lat/lng inference avoids substring false positives like escalation / prolong
+  const { inferCollectionFieldsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+  const nonGeoMeta = inferCollectionFieldsMeta({
+    name: 'latticeCustomTickets',
+    fields: [
+      { name: 'escalation', type: 'integer' },
+      { name: 'prolongDays', type: 'integer' },
+      { name: 'geoLat', type: 'double' },
+      { name: 'geoLng', type: 'double' },
+    ],
+  });
+  assert.equal(nonGeoMeta.latField, 'geoLat');
+  assert.equal(nonGeoMeta.lngField, 'geoLng');
+  const falsePositiveOnly = inferCollectionFieldsMeta({
+    name: 'latticeCustomEscalations',
+    fields: [{ name: 'escalation', type: 'integer' }, { name: 'prolongDays', type: 'integer' }],
+  });
+  assert.equal(falsePositiveOnly.latField, null);
+  assert.equal(falsePositiveOnly.lngField, null);
 });

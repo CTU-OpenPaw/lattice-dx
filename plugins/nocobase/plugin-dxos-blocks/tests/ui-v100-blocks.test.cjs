@@ -2715,3 +2715,41 @@ test('Task 7: DxosRecordWorkbenchView dynamically merges latticeCustom* from col
   assert.ok(textOf(findByTestId(cTree, 'dxos-record-chatter')).includes('Đã kiểm tra'));
   chatterHooks.unmount();
 });
+
+test('WebGIS resets filterMode to all when switching dynamic customCollection', async () => {
+  const { createWebGisBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+  const hooks = createMiniHooks();
+  const api = {
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return { data: { data: { collections: [{ name: 'latticeCustomSites', isCustom: true, fields: [{ name: 'lat', type: 'double' }, { name: 'lng', type: 'double' }] }] } } };
+      }
+      if (req.url === 'latticeCustomSites:list') {
+        return { data: { data: [{ id: 1, code: 'SITE-1', name: 'Site 1', lat: 10.03, lng: 105.78 }] } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  const WebGisView = createWebGisBlockView({ useAPIClient: () => api }, hooks.React, {}, {});
+  let tree = hooks.render(WebGisView, { model: { props: { showTwinOverlay: false } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = hooks.render(WebGisView, { model: { props: { showTwinOverlay: false } } });
+  const initAllBtn = collectNodes(resolveTree(tree)).find((n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-webgis-filter-all');
+  const activeBg = initAllBtn.props.style?.background;
+  const alarmsBtn = collectNodes(resolveTree(tree)).find((n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-webgis-filter-alarms');
+  assert.ok(alarmsBtn);
+  alarmsBtn.props.onClick();
+  tree = hooks.render(WebGisView, { model: { props: { showTwinOverlay: false } } });
+  const alarmsAfterClick = collectNodes(resolveTree(tree)).find((n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-webgis-filter-alarms');
+  assert.equal(alarmsAfterClick.props.style?.background, activeBg);
+
+  // Switch collection prop -> filterMode resets to 'all' so SITE-1 renders & 'all' button regains active style
+  tree = hooks.render(WebGisView, { model: { props: { collection: 'latticeCustomSites', showTwinOverlay: false } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = hooks.render(WebGisView, { model: { props: { collection: 'latticeCustomSites', showTwinOverlay: false } } });
+  const resolvedSwitched = resolveTree(tree);
+  const allAfterSwitch = collectNodes(resolvedSwitched).find((n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-webgis-filter-all');
+  assert.equal(allAfterSwitch.props.style?.background, activeBg);
+  assert.ok(textOf(resolvedSwitched).includes('SITE-1'), 'Resetting filterMode to all allows SITE-1 custom marker to render');
+  hooks.unmount();
+});

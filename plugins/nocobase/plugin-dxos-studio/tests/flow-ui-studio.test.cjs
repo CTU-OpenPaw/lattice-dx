@@ -2129,3 +2129,65 @@ test('Task 4: dxos-flow-ai-architect-btn sits in dxos-flow-toolbar and invokes n
   assert.ok(String(triggered[0].tasks?.[0]?.message?.system || '').includes(blueprints[0].ruleKey));
   harness.unmount();
 });
+
+test('Task 3 hygiene: createFlowPinStorage bare localStorage fallback and handleUndoSseDiff pops redundant undo entry', async () => {
+  const { createFlowPinStorage } = require(path.join(PLUGIN_ROOT, 'src/client/flow-pin-storage.js'));
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+
+  const origWin = global.window;
+  const origStorage = global.localStorage;
+  try {
+    const storeMap = new Map();
+    global.window = {};
+    global.localStorage = {
+      getItem: (k) => (storeMap.has(k) ? storeMap.get(k) : null),
+      setItem: (k, v) => storeMap.set(k, v),
+    };
+    const pinStore = createFlowPinStorage();
+    pinStore.setItem('pin:k', '{"ok":1}');
+    assert.equal(pinStore.getItem('pin:k'), '{"ok":1}');
+    assert.equal(storeMap.get('pin:k'), '{"ok":1}');
+  } finally {
+    global.window = origWin;
+    global.localStorage = origStorage;
+  }
+
+  // SSE diff undo pops SSE-pushed prevGraph from undo stack so undo button doesn't become a duplicate no-op step
+  const listeners = new Map();
+  const prevWin = global.window;
+  global.window = {
+    ...(prevWin || {}),
+    addEventListener: (k, fn) => listeners.set(k, fn),
+    removeEventListener: (k) => listeners.delete(k),
+  };
+  try {
+    const harness = createQueuedReactHarness();
+    const nodeTypes = getRegistrySchemas();
+    const blueprints = getBlueprints();
+    const { client } = createApiMock({
+      'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints }),
+      'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+      'dxosAutomations:listRules': async () => ({ items: [{ ...blueprints[0], active: true }] }),
+      'dxosAutomations:listRuns': async () => ({ items: [] }),
+    });
+    const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, {});
+    let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: blueprints[0].ruleKey });
+    const nextGraph = {
+      ...blueprints[0].graphJson,
+      nodes: [...blueprints[0].graphJson.nodes, { id: 'ai_extra_1', type: 'notify.send', label: 'AI Added', position: { x: 400, y: 120 }, config: { message: 'hi' } }],
+    };
+    listeners.get('latticedx:flow-updated')?.({
+      detail: { organizationId: 'org-a', ruleKey: blueprints[0].ruleKey, draftGraph: nextGraph, message: 'AI updated' },
+    });
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: blueprints[0].ruleKey });
+    const sseUndoBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-sse-undo-btn')[0];
+    assert.ok(sseUndoBtn, 'SSE diff banner undo button must appear');
+    sseUndoBtn.props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: blueprints[0].ruleKey });
+    const toolbarUndoBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-undo-btn')[0];
+    assert.equal(toolbarUndoBtn.props.disabled, true, 'Toolbar undo button must be disabled after popping SSE entry');
+    harness.unmount();
+  } finally {
+    global.window = prevWin;
+  }
+});

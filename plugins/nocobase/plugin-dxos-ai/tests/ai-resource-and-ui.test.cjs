@@ -1482,6 +1482,7 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
     const nonAdminHarness = makeStatefulReact();
     const NonAdminLauncher = createPortalAgentLauncher({
       useAPIClient: () => ({
+        auth: { getToken: () => 'test-emp-token' },
         request: async (req) => {
           nonAdminApiCalls.push(req);
           return { data: { data: { isAdmin: false, employees: [{ username: 'dxos-workspace', nickname: 'Workspace' }] } } };
@@ -2796,4 +2797,146 @@ test('probeLlmHealth verifyCompletion catches upstream 503 on /chat/completions 
   await actions.checkLlmHealth(ctx, async () => {});
   assert.equal(ctx.body.ok, true);
   assert.equal(ctx.body.completionChecked, true);
+});
+
+test('Frontend hygiene patch: unauthenticated portalAgents gate, activeReader cancel, empty lastVerificationJson fails verify, and external ai-chat-opening re-probes health', async () => {
+  const { createPortalAgentLauncher } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origStorage = global.localStorage;
+  try {
+    const apiReqs = [];
+    const listeners = new Map();
+    let readerCancelled = false;
+    global.localStorage = { getItem: () => '' };
+    global.window = {
+      location: { pathname: '/p/services' },
+      addEventListener: (k, fn) => listeners.set(k, fn),
+      removeEventListener: (k) => listeners.delete(k),
+      dispatchEvent: () => {},
+    };
+    global.document = { visibilityState: 'visible', title: 'Services', querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+
+    const makeHarness = () => {
+      const stateSlots = [];
+      const effectSlots = [];
+      let sIdx = 0;
+      let eIdx = 0;
+      const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, i) => d !== prev[i]);
+      const cleanups = [];
+      const React = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => {
+          const i = sIdx++;
+          if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+          return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+        },
+        useEffect: (fn, deps) => {
+          const i = eIdx++;
+          effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+        },
+      };
+      const render = (Comp) => {
+        sIdx = 0; eIdx = 0;
+        const tree = Comp({ children: 'body' });
+        for (const eff of effectSlots) {
+          if (eff.changed) { eff.changed = false; const cln = eff.fn(); if (typeof cln === 'function') cleanups.push(cln); }
+        }
+        return tree;
+      };
+      return { React, render, cleanup: () => cleanups.forEach((fn) => fn()) };
+    };
+
+    // 1. Unauthenticated /p/services skips dxosAi:portalAgents completely
+    const unauthH = makeHarness();
+    const UnauthComp = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => '' },
+        request: async (req) => { apiReqs.push(req); return { data: { data: {} } }; },
+      }),
+    }, unauthH.React, {}, {});
+    unauthH.render(UnauthComp);
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(apiReqs.length, 0, 'Unauthenticated /p/* must NOT fetch dxosAi:portalAgents');
+    unauthH.cleanup();
+
+    // 2. Authenticated Flow Studio cancels activeReader on cleanup and re-probes health on external latticedx:ai-chat-opening
+    global.window.location.pathname = '/admin/settings/workflow/automation';
+    let healthCalls = 0;
+    global.fetch = async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: () => new Promise(() => {}),
+          cancel: async () => { readerCancelled = true; },
+        }),
+      },
+    });
+    const authH = makeHarness();
+    const AuthComp = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'tok-admin' },
+        getBaseURL: () => '/api/',
+        request: async (req) => {
+          if (req.url === 'dxosAi:checkLlmHealth') { healthCalls += 1; return { data: { data: { ok: true, status: 200 } } }; }
+          return { data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect' }] } } };
+        },
+      }),
+    }, authH.React, {}, {});
+    authH.render(AuthComp);
+    await new Promise((r) => setTimeout(r, 20));
+    authH.render(AuthComp);
+    await new Promise((r) => setTimeout(r, 20));
+    const beforeExternal = healthCalls;
+    await listeners.get('latticedx:ai-chat-opening')?.({ detail: { fromLauncher: false } });
+    assert.equal(healthCalls > beforeExternal, true, 'External latticedx:ai-chat-opening must re-probe health');
+    authH.cleanup();
+    assert.equal(readerCancelled, true, 'SSE cleanup must call activeReader.cancel()');
+
+    // 3. handleVerifyBuiltApp rejects empty lastVerificationJson (ver.ok !== true)
+    const stateSlots = [];
+    const refSlots = [];
+    const effectSlots = [];
+    const memoSlots = [];
+    let sIdx = 0; let rIdx = 0; let eIdx = 0; let mIdx = 0;
+    const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, i) => d !== prev[i]);
+    const pageReact = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState: (init) => { const i = sIdx++; if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init; return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }]; },
+      useRef: (init) => { const i = rIdx++; if (!(i in refSlots)) refSlots[i] = { current: init }; return refSlots[i]; },
+      useEffect: (fn, deps) => { const i = eIdx++; effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) }; },
+      useMemo: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps }; return memoSlots[i].value; },
+      useCallback: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps }; return memoSlots[i].value; },
+    };
+    const Page = createDxosAiStudioPage({
+      useAPIClient: () => ({
+        request: async (req) => {
+          if (req.url === 'dxosAi:listBuiltApps') return { data: { data: { apps: [{ id: 1, appKey: 'unverified-app', status: 'active', artifactRefsJson: { collections: ['latticeCustomX'] }, lastVerificationJson: null }] } } };
+          if (req.url === 'dxosBlocks:collectionsMeta') return { data: { data: { collections: [{ name: 'latticeCustomX', isCustom: true, fields: [] }] } } };
+          return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+        },
+      }),
+    }, pageReact, {}, { defaultOrganizationId: 'org-a' });
+    const renderPage = () => { sIdx = 0; rIdx = 0; eIdx = 0; mIdx = 0; const t = Page(); for (const ef of effectSlots) if (ef.changed) { ef.changed = false; ef.fn(); } return t; };
+    const findTid = (n, id) => { if (!n || typeof n !== 'object') return null; if (n.props?.['data-testid'] === id) return n; for (const k of (Array.isArray(n.children) ? n.children.flat(Infinity) : [])) { const h = findTid(k, id); if (h) return h; } return null; };
+    let pt = renderPage();
+    findTid(pt, 'dxos-tab-built-apps').props.onClick();
+    pt = renderPage();
+    await new Promise((r) => setTimeout(r, 20));
+    pt = renderPage();
+    await findTid(pt, 'dxos-built-app-verify-unverified-app').props.onClick();
+    pt = renderPage();
+    const badge = findTid(pt, 'dxos-built-app-verify-result-unverified-app');
+    assert.ok(badge);
+    assert.equal(JSON.stringify(badge).includes('PASS'), false, 'Empty lastVerificationJson must NOT show PASS');
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.localStorage = origStorage;
+  }
 });

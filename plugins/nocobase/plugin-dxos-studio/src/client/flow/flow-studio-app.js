@@ -275,7 +275,10 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
     };
     const handleUndoSseDiff = () => {
       if (!sseDiff?.prevGraph) return setSseDiff(null);
-      setDoc((d) => ({ ...d, preDragGraph: null, graph: sseDiff.prevGraph, rule: sseDiff.prevRule || d.rule, dirty: Boolean(sseDiff.prevDirty), selId: null, redo: [...d.redo, d.graph] }));
+      setDoc((d) => {
+        const nextUndo = (d.undo.length && d.undo[d.undo.length - 1] === sseDiff.prevGraph) ? d.undo.slice(0, -1) : d.undo;
+        return { ...d, preDragGraph: null, graph: sseDiff.prevGraph, rule: sseDiff.prevRule || d.rule, dirty: Boolean(sseDiff.prevDirty), selId: null, undo: nextUndo, redo: [...d.redo, d.graph] };
+      });
       return setSseDiff(null);
     };
     const handleResume = (runUid, decision) => runAction('resume', 'dxosAutomations:resumeRun', { ...orgPayload, runUid, decision }, doneRun(`HITL ${decision} hoàn tất`));

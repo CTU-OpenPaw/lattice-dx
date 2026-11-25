@@ -11,8 +11,11 @@
 function createFlowPinStorage() {
   const mem = new Map();
   const resolveStore = () => {
-    try { return typeof window !== 'undefined' && window.localStorage ? window.localStorage : null; }
-    catch { return null; }
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) return window.localStorage;
+      if (typeof localStorage !== 'undefined' && localStorage) return localStorage;
+      return null;
+    } catch { return null; }
   };
   return {
     getItem(key) {
