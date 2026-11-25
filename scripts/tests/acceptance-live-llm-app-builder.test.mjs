@@ -151,6 +151,7 @@ test('runLiveLlmToolLoop executes multi-turn tool calls and feeds tool errors ba
     assert.equal(out.toolExecutions[1].ok, true);
     assert.equal(out.finalReply, 'Đã dựng xong ứng dụng Phòng khám.');
   } finally {
+    server.closeAllConnections?.();
     await new Promise((r) => server.close(r));
   }
 });
