@@ -904,3 +904,208 @@ test('Task 10: Multi-Entity Build, latticeBuiltApps registry, Rebuild v2, Export
   assert.equal(store.collections.some((c) => c.name === 'latticeCustomOrders'), false);
   assert.equal(store.collections.some((c) => c.name === 'latticeCustomVendors'), false);
 });
+
+test('Task 10 Fix Round 1: exportAppBundle strict isolation, teardownBuiltApp reverse drop order & shared-grant preservation, bidirectional 1:N topologicalSort, and full case-insensitive SYSTEM_PROTECTED_COLLECTIONS', async () => {
+  const {
+    topologicalSortCollections,
+    orchestrateEnterpriseAppBuild,
+    exportAppBundle,
+    teardownBuiltApp,
+  } = require('../src/server/app-builder-orchestrator');
+  const coreMod = require('../src/server/ai-tools-core');
+  const orchMod = require('../src/server/app-builder-orchestrator');
+  const bundleMod = require('../../plugin-dxos-studio/src/server/solution-bundle');
+
+  // 1. Full 34-table SYSTEM_PROTECTED_COLLECTIONS sync across all 3 modules
+  const expectedProtected = [
+    'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
+    'applicationPlugins', 'applicationTokens', 'sessions',
+    'aiSettings', 'aiEmployees', 'aiMcpClients', 'rolesAiEmployees',
+    'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeUiSnapshots',
+    'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
+    'dataSourcesRolesResourcesScopes',
+    'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts',
+    'workflows', 'flow_nodes', 'collections', 'fields',
+    'latticeNotifications', 'latticeSlaPolicies', 'latticeAiApprovalQueue', 'latticeParaChunks',
+    'latticeBuiltApps',
+  ];
+  for (const tbl of expectedProtected) {
+    assert.equal(orchMod.SYSTEM_PROTECTED_COLLECTIONS.has(tbl), true, `orchestrator missing protected ${tbl}`);
+    assert.equal(coreMod.SYSTEM_PROTECTED_COLLECTIONS.has(tbl), true, `ai-tools-core missing protected ${tbl}`);
+    assert.equal(bundleMod.isProtectedCollection(tbl), true, `solution-bundle missing protected ${tbl}`);
+  }
+
+  // Case-insensitive protected check on topologicalSortCollections & relation targets
+  assert.throws(
+    () => topologicalSortCollections([{ collectionName: 'Collections', fields: [{ name: 'title', type: 'string' }] }]),
+    (err) => err.status === 403 && err.code === 'SYSTEM_COLLECTION_FORBIDDEN',
+  );
+  assert.throws(
+    () => topologicalSortCollections([{ collectionName: 'latticeCustomHack', fields: [{ name: 'svc', type: 'belongsTo', target: 'LlmServices' }] }]),
+    (err) => err.status === 403 && err.code === 'SYSTEM_COLLECTION_FORBIDDEN',
+  );
+
+  // 2. Bidirectional 1:N (Parent hasMany Child + Child belongsTo Parent) succeeds without false cycle
+  const biSorted = topologicalSortCollections([
+    { collectionName: 'latticeCustomItems', fields: [{ name: 'parent', type: 'belongsTo', target: 'latticeCustomHeaders' }] },
+    { collectionName: 'latticeCustomHeaders', fields: [{ name: 'items', type: 'hasMany', target: 'latticeCustomItems' }] },
+  ]);
+  assert.deepEqual(biSorted.map((c) => c.collectionName), ['latticeCustomHeaders', 'latticeCustomItems']);
+
+  // Conflicting edge (A hasMany B AND A belongsTo B) must still throw BLUEPRINT_CYCLE_DETECTED
+  assert.throws(
+    () => topologicalSortCollections([
+      {
+        collectionName: 'latticeCustomBadParent',
+        fields: [
+          { name: 'children', type: 'hasMany', target: 'latticeCustomBadChild' },
+          { name: 'childRef', type: 'belongsTo', target: 'latticeCustomBadChild' },
+        ],
+      },
+      { collectionName: 'latticeCustomBadChild', fields: [{ name: 'code', type: 'string' }] },
+    ]),
+    (err) => err.status === 400 && err.code === 'BLUEPRINT_CYCLE_DETECTED',
+  );
+
+  // 3. exportAppBundle strict isolation (empty artifactRefsJson sections must NOT leak other org items, routesAndBlocks/workflows/governance scoped)
+  const { db, ctx, store } = makeOrchestratorHarness();
+  store.latticeBuiltApps = [];
+  store.workflows = [
+    { id: 1, key: 'wf-unrelated', title: 'Unrelated Org WF', current: true, enabled: true, options: { dxosOrganizationId: 'native-ui-lab' }, config: {} },
+  ];
+  store.flow_nodes = [];
+  store.latticeSlaPolicies = [
+    { id: 1, organizationId: 'native-ui-lab', targetCollection: 'latticeOrders', priority: 'high', warnAfterMinutes: 60, breachAfterMinutes: 120, escalateToRole: 'ldx_manager' },
+  ];
+  store.latticeIncidentRules = [
+    { id: 1, organizationId: 'native-ui-lab', code: 'INC-UNRELATED', name: 'Unrelated Rule', assetEntityId: 'urn:ngsi-ld:Asset:1', attribute: 'temp', operator: '>', threshold: '8', severity: 'high' },
+  ];
+  store.latticeWebhookSubscriptions = [
+    { id: 1, organizationId: 'native-ui-lab', subscriptionKey: 'wh-unrelated', name: 'Unrelated WH', targetUrl: 'https://example.com/hook', eventPattern: '*' },
+  ];
+  store.latticeDecisionTables.push({
+    id: 901,
+    organizationId: 'native-ui-lab',
+    tableKey: 'dmn_unrelated_org',
+    name: 'Unrelated DMN',
+    hitPolicy: 'FIRST',
+    inputsJson: [{ name: 'x', type: 'number' }],
+    outputsJson: [{ name: 'y', type: 'string' }],
+    rulesJson: [{ when: { x: '*' }, then: { y: 'ok' } }],
+    active: true,
+  });
+  store.latticeAutomationRules.push({
+    id: 902,
+    organizationId: 'native-ui-lab',
+    ruleKey: 'auto_unrelated_org',
+    name: 'Unrelated Auto Rule',
+    triggerEventType: '*',
+    actionsJson: [],
+    active: true,
+  });
+  store.uiLayouts.push({ uid: 'ldx-portal-other', title: 'Other Portal', layoutType: 'desktop', routeName: 'p_other', routePath: '/p/other', enabled: true, authCheck: true });
+  store.desktopRoutes.push({ id: 801, parentId: null, type: 'group', title: 'Other Group', uiLayoutUid: 'ldx-portal-other' });
+  store.desktopRoutesUiLayouts.push({ id: 802, desktopRouteId: 801, uiLayoutUid: 'ldx-portal-other' });
+  store.flowModels.push({ uid: 'unrelated-block-1', use: 'DxosPortalHeroBlockModel', parentId: 'other-grid', subKey: 'items', props: { title: 'Other' } });
+
+  const origHasCol = db.hasCollection.bind(db);
+  db.hasCollection = (n) => Boolean(store[n]) || origHasCol(n);
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+
+  // Build app-isolated with NO DMN, NO flowGraph, NO SLA, NO incidentRules
+  await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    appKey: 'app-isolated',
+    portalSlug: 'cold-assets',
+    pageTitle: 'App Isolated',
+    roleName: 'ldx_isolated_ops',
+    roleTitle: 'Isolated Ops',
+    collections: [
+      { collectionName: 'latticeCustomIsoChild', fields: [{ name: 'parentRef', type: 'belongsTo', target: 'latticeCustomIsoParent' }] },
+      { collectionName: 'latticeCustomIsoParent', fields: [{ name: 'label', type: 'string' }] },
+    ],
+    blocks: [{ blockUse: 'DxosPortalHeroBlockModel', title: 'Iso Hero' }],
+  });
+
+  const isoBundle = await exportAppBundle(db, actor, { appKey: 'app-isolated' });
+  assert.deepEqual(isoBundle.governance.decisionTables, [], 'Empty app DMN must NOT leak org DMN tables');
+  assert.deepEqual(isoBundle.governance.automationRules, [], 'Empty app flowRules must NOT leak org automation rules');
+  assert.deepEqual(isoBundle.governance.slaPolicies, [], 'Unrelated SLA policies must NOT leak');
+  assert.deepEqual(isoBundle.governance.incidentRules, [], 'Unrelated incident rules must NOT leak');
+  assert.deepEqual(isoBundle.governance.webhookSubscriptions, [], 'Unrelated webhooks must NOT leak');
+  assert.deepEqual(isoBundle.workflows, [], 'Unrelated org workflows must NOT leak');
+  assert.equal(isoBundle.routesAndBlocks.routes.some((r) => r.layoutUid === 'ldx-portal-other'), false);
+  assert.equal(isoBundle.routesAndBlocks.flowModels.some((m) => m.uid === 'unrelated-block-1'), false);
+  assert.equal(bundleMod.validateSolutionBundle(isoBundle).valid, true);
+
+  // 4. teardownBuiltApp keepData:false reverse drop order (Child before Parent), shared-grant preservation, & aiEmployees sync
+  // Build a second active app referencing latticeCustomIsoParent with role ldx_shared_viewer
+  await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    appKey: 'app-sharing-parent',
+    portalSlug: 'cold-assets',
+    pageTitle: 'App Sharing Parent',
+    roleName: 'ldx_shared_viewer',
+    roleTitle: 'Shared Viewer',
+    collectionName: 'latticeCustomIsoParent',
+    fields: [{ name: 'label', type: 'string' }],
+  });
+
+  // Verify aiEmployees sync on teardown of app-isolated (no shared child)
+  assert.equal(store.aiEmployees.some((e) => e.username && e.enabled !== false), true);
+  const droppedOrder = [];
+  const origQuery = db.sequelize.query.bind(db.sequelize);
+  db.sequelize.query = async (sql, opts) => {
+    const m = String(sql).match(/DROP TABLE IF EXISTS "([^"]+)"/i);
+    if (m) droppedOrder.push(m[1]);
+    return origQuery(sql, opts);
+  };
+
+  const tdIso = await teardownBuiltApp(ctx, db, actor, { appKey: 'app-isolated', keepData: false });
+  assert.equal(tdIso.torndown, true);
+  // Child dropped, Parent preserved because app-sharing-parent is still active!
+  assert.deepEqual(tdIso.droppedCollections, ['latticeCustomIsoChild']);
+  assert.equal(tdIso.preservedCollections.includes('latticeCustomIsoParent'), true);
+  assert.equal(store.collections.some((c) => c.name === 'latticeCustomIsoParent'), true);
+  assert.equal(store.dataSourcesRolesResources.some((r) => r.roleName === 'ldx_shared_viewer' && r.name === 'latticeCustomIsoParent'), true);
+  assert.equal(store.dataSourcesRolesResources.some((r) => r.roleName === 'ldx_isolated_ops'), false);
+  const isoAiUser = store.latticeBuiltApps.find((a) => a.appKey === 'app-isolated').artifactRefsJson.aiEmployees[0];
+  assert.equal(store.aiEmployees.find((e) => e.username === isoAiUser)?.enabled, false);
+
+  // Now teardown app-sharing-parent with keepData:false and also verify reverse drop order on a 2-table unshared app
+  await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    appKey: 'app-reverse-drop',
+    portalSlug: 'cold-assets',
+    pageTitle: 'Reverse Drop',
+    roleName: 'ldx_rev_drop',
+    roleTitle: 'Rev Drop',
+    collections: [
+      { collectionName: 'latticeCustomRevChild', fields: [{ name: 'parentRef', type: 'belongsTo', target: 'latticeCustomRevParent' }] },
+      { collectionName: 'latticeCustomRevParent', fields: [{ name: 'itemCode', type: 'string' }] },
+    ],
+  });
+  droppedOrder.length = 0;
+  const tdRev = await teardownBuiltApp(ctx, db, actor, { appKey: 'app-reverse-drop', keepData: false });
+  assert.deepEqual(tdRev.droppedCollections, ['latticeCustomRevChild', 'latticeCustomRevParent']);
+  assert.deepEqual(droppedOrder, ['latticeCustomRevChild', 'latticeCustomRevParent']);
+
+  // Verify DROP TABLE failure surfaces rather than silently destroying collection metadata
+  await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    appKey: 'app-drop-fail',
+    portalSlug: 'cold-assets',
+    pageTitle: 'Drop Fail',
+    roleName: 'ldx_drop_fail',
+    roleTitle: 'Drop Fail',
+    collectionName: 'latticeCustomDropFail',
+    fields: [{ name: 'itemCode', type: 'string' }],
+  });
+  db.sequelize.query = async (sql, opts) => {
+    if (/DROP TABLE IF EXISTS "latticeCustomDropFail"/i.test(String(sql))) {
+      throw new Error('PG_FK_CONSTRAINT_ERROR');
+    }
+    return origQuery(sql, opts);
+  };
+  await assert.rejects(
+    () => teardownBuiltApp(ctx, db, actor, { appKey: 'app-drop-fail', keepData: false }),
+    /PG_FK_CONSTRAINT_ERROR/,
+  );
+  assert.equal(store.collections.some((c) => c.name === 'latticeCustomDropFail'), true, 'Metadata must remain intact if DROP TABLE fails');
+});

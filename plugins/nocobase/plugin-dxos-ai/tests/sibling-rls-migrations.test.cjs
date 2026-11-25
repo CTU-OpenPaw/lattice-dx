@@ -168,6 +168,13 @@ test('all 8 sibling-plugin migrations attach PG RLS across all 9 tables via db.a
         true,
         `${spec.relPath} down() must detach RLS policy on ${tableName}`,
       );
+      if (spec.relPath.includes('20261128000100-built-apps-registry-rls.js')) {
+        assert.equal(
+          sqlFallback.some((q) => q.sql.includes(`ALTER TABLE IF EXISTS public."${tableName}" NO FORCE ROW LEVEL SECURITY`)),
+          true,
+          `${spec.relPath} down() must issue NO FORCE ROW LEVEL SECURITY on ${tableName}`,
+        );
+      }
     }
 
     // 3. Non-Postgres dialect (sqlite) skips RLS cleanly

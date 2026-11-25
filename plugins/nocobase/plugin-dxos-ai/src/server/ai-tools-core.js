@@ -79,11 +79,24 @@ const PROTECTED_SERVER_FIELDS = new Set([
 
 const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
-  'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
-  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue', 'latticeUiSnapshots', 'latticeBuiltApps',
+  'applicationPlugins', 'applicationTokens', 'sessions',
+  'aiSettings', 'aiEmployees', 'aiMcpClients', 'rolesAiEmployees',
+  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeUiSnapshots',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
+  'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts',
+  'workflows', 'flow_nodes', 'collections', 'fields',
+  'latticeNotifications', 'latticeSlaPolicies', 'latticeAiApprovalQueue', 'latticeParaChunks',
+  'latticeBuiltApps',
 ]);
+const SYSTEM_PROTECTED_COLLECTIONS_LOWER = new Set(
+  [...SYSTEM_PROTECTED_COLLECTIONS].map((c) => c.toLowerCase()),
+);
+
+function isProtectedCollection(name) {
+  const s = String(name || '').trim();
+  return SYSTEM_PROTECTED_COLLECTIONS.has(s) || SYSTEM_PROTECTED_COLLECTIONS_LOWER.has(s.toLowerCase());
+}
 
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const FIELD_NAME_RE = /^[a-z][a-zA-Z0-9_]{1,48}$/;
@@ -414,6 +427,7 @@ function createDxosTools() {
     WRITABLE_BUSINESS_COLLECTIONS,
     PROTECTED_SERVER_FIELDS,
     SYSTEM_PROTECTED_COLLECTIONS,
+    isProtectedCollection,
     CUSTOM_COLLECTION_RE,
     FIELD_NAME_RE,
     SLUG_RE,
@@ -613,6 +627,7 @@ module.exports = {
   WRITABLE_BUSINESS_COLLECTIONS,
   PROTECTED_SERVER_FIELDS,
   SYSTEM_PROTECTED_COLLECTIONS,
+  isProtectedCollection,
   CUSTOM_COLLECTION_RE,
   FIELD_NAME_RE,
   SLUG_RE,

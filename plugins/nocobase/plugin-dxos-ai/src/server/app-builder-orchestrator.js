@@ -75,12 +75,24 @@ const ORCHESTRATOR_ALLOWED_BLOCKS = new Set([
 
 const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
-  'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
-  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage',
-  'latticeAiApprovalQueue', 'latticeUiSnapshots', 'latticeBuiltApps',
+  'applicationPlugins', 'applicationTokens', 'sessions',
+  'aiSettings', 'aiEmployees', 'aiMcpClients', 'rolesAiEmployees',
+  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeUiSnapshots',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
+  'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts',
+  'workflows', 'flow_nodes', 'collections', 'fields',
+  'latticeNotifications', 'latticeSlaPolicies', 'latticeAiApprovalQueue', 'latticeParaChunks',
+  'latticeBuiltApps',
 ]);
+const SYSTEM_PROTECTED_COLLECTIONS_LOWER = new Set(
+  [...SYSTEM_PROTECTED_COLLECTIONS].map((c) => c.toLowerCase()),
+);
+
+function isProtectedCollection(name) {
+  const s = String(name || '').trim();
+  return SYSTEM_PROTECTED_COLLECTIONS.has(s) || SYSTEM_PROTECTED_COLLECTIONS_LOWER.has(s.toLowerCase());
+}
 
 const FIELD_INTERFACE_MAP = {
   text: { interface: 'textarea', uiType: 'string' },
@@ -174,7 +186,7 @@ function normalizeOrchestratorField(rawField) {
   const rawType = String(rawField?.type || 'string').trim();
   if (rawType === 'belongsTo') {
     const target = String(rawField?.target || rawField?.targetCollection || '').trim();
-    if (SYSTEM_PROTECTED_COLLECTIONS.has(target)) {
+    if (isProtectedCollection(target)) {
       throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ belongsTo vào bảng hệ thống "${target}".`);
     }
     if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
@@ -201,7 +213,7 @@ function normalizeOrchestratorField(rawField) {
   }
   if (rawType === 'hasMany') {
     const target = String(rawField?.target || rawField?.targetCollection || '').trim();
-    if (SYSTEM_PROTECTED_COLLECTIONS.has(target)) {
+    if (isProtectedCollection(target)) {
       throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ hasMany vào bảng hệ thống "${target}".`);
     }
     if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
@@ -324,11 +336,11 @@ async function attachCollectionRls(db, collectionName) {
 }
 
 async function ensureCollectionAndFields(db, organizationId, { collectionName, collectionTitle, fields = [] }) {
+  if (isProtectedCollection(collectionName)) {
+    throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép sửa bảng hệ thống "${collectionName}".`);
+  }
   if (!CUSTOM_COLLECTION_RE.test(collectionName)) {
     throw failBuild('COLLECTION_NAME_INVALID', 400, 'Collection mới phải theo mẫu latticeCustom<TenVietHoa>.');
-  }
-  if (SYSTEM_PROTECTED_COLLECTIONS.has(collectionName)) {
-    throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép sửa bảng hệ thống "${collectionName}".`);
   }
   const normalizedFields = fields.map((f) => normalizeOrchestratorField(f));
   const hasFieldName = (name) => normalizedFields.some((f) => f.name === name);
@@ -1119,7 +1131,7 @@ function topologicalSortCollections(collections = []) {
   const seenNames = new Set();
   for (const item of collections) {
     const colName = String(item?.collectionName || item?.name || '').trim();
-    if (SYSTEM_PROTECTED_COLLECTIONS.has(colName)) {
+    if (isProtectedCollection(colName)) {
       throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép sửa hoặc ghi đè bảng hệ thống "${colName}".`);
     }
     if (!colName || !CUSTOM_COLLECTION_RE.test(colName)) {
@@ -1143,9 +1155,9 @@ function topologicalSortCollections(collections = []) {
   const entryByName = new Map(normalizedEntries.map((e) => [e.collectionName, e]));
   const adj = new Map(normalizedEntries.map((e) => [e.collectionName, []]));
   const inDegree = new Map(normalizedEntries.map((e) => [e.collectionName, 0]));
+  const edgeSet = new Set();
 
   for (const entry of normalizedEntries) {
-    const depsSeen = new Set();
     for (const f of entry.normalizedFields) {
       if (f.type !== 'belongsTo' && f.type !== 'hasMany') continue;
       const target = String(f.target || '').trim();
@@ -1153,10 +1165,15 @@ function topologicalSortCollections(collections = []) {
       if (target === entry.collectionName) {
         throw failBuild('BLUEPRINT_CYCLE_DETECTED', 400, `Phát hiện quan hệ tự tham chiếu vòng lặp trên "${entry.collectionName}".`);
       }
-      if (!depsSeen.has(target)) {
-        depsSeen.add(target);
-        adj.get(target).push(entry.collectionName);
-        inDegree.set(entry.collectionName, (inDegree.get(entry.collectionName) || 0) + 1);
+      // belongsTo: target (parent) must be created BEFORE entry (child) -> edge target -> entry
+      // hasMany: entry (parent) must be created BEFORE target (child) -> edge entry -> target
+      const parentNode = f.type === 'belongsTo' ? target : entry.collectionName;
+      const childNode = f.type === 'belongsTo' ? entry.collectionName : target;
+      const edgeKey = `${parentNode}->${childNode}`;
+      if (!edgeSet.has(edgeKey)) {
+        edgeSet.add(edgeKey);
+        adj.get(parentNode).push(childNode);
+        inDegree.set(childNode, (inDegree.get(childNode) || 0) + 1);
       }
     }
   }
@@ -1256,10 +1273,10 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     sortedCollections = topologicalSortCollections(spec.collections);
   } else {
     const singleCollectionName = String(spec.collectionName || '').trim();
-    if (!singleCollectionName || SYSTEM_PROTECTED_COLLECTIONS.has(singleCollectionName) || !CUSTOM_COLLECTION_RE.test(singleCollectionName)) {
+    if (!singleCollectionName || isProtectedCollection(singleCollectionName) || !CUSTOM_COLLECTION_RE.test(singleCollectionName)) {
       throw failBuild(
-        SYSTEM_PROTECTED_COLLECTIONS.has(singleCollectionName) ? 'SYSTEM_COLLECTION_FORBIDDEN' : 'COLLECTION_NAME_INVALID',
-        SYSTEM_PROTECTED_COLLECTIONS.has(singleCollectionName) ? 403 : 400,
+        isProtectedCollection(singleCollectionName) ? 'SYSTEM_COLLECTION_FORBIDDEN' : 'COLLECTION_NAME_INVALID',
+        isProtectedCollection(singleCollectionName) ? 403 : 400,
         'collectionName phải theo mẫu latticeCustom<TenVietHoa> và không được chạm bảng hệ thống.',
       );
     }
@@ -1334,7 +1351,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
       }
     }
     const targetCol = String(p?.collectionName || collectionName).trim();
-    if (SYSTEM_PROTECTED_COLLECTIONS.has(targetCol)) {
+    if (isProtectedCollection(targetCol)) {
       throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép gắn portal vào bảng hệ thống "${targetCol}".`);
     }
     return {
@@ -1863,22 +1880,100 @@ async function exportAppBundle(db, actor, { appKey = null, organizationId = null
   const refs = val(builtRow, 'artifactRefsJson') || {};
   const colSet = new Set(Array.isArray(refs.collections) ? refs.collections : []);
   const roleSet = new Set(Array.isArray(refs.roles) ? refs.roles : []);
-  const layoutSet = new Set((Array.isArray(refs.portals) ? refs.portals : []).map((p) => p.layoutUid).filter(Boolean));
+  const portalRefs = Array.isArray(refs.portals) ? refs.portals : [];
+  const layoutSet = new Set(portalRefs.map((p) => p?.layoutUid).filter(Boolean));
+  const gridUidSet = new Set(portalRefs.map((p) => p?.gridUid).filter(Boolean));
+  const blockUidSet = new Set(portalRefs.flatMap((p) => (Array.isArray(p?.blockUids) ? p.blockUids : [])).filter(Boolean));
+  const pageTitleSet = new Set(portalRefs.map((p) => String(p?.pageTitle || '').trim().toLowerCase()).filter(Boolean));
   const aiSet = new Set(Array.isArray(refs.aiEmployees) ? refs.aiEmployees : []);
   const dmnSet = new Set(Array.isArray(refs.dmnTableKeys) ? refs.dmnTableKeys : []);
+  const flowRuleSet = new Set(Array.isArray(refs.flowRuleKeys) ? refs.flowRuleKeys : []);
+  const n8nWfSet = new Set(Array.isArray(refs.n8nWorkflowIds) ? refs.n8nWorkflowIds : []);
+  const incRuleSet = new Set(Array.isArray(refs.incidentRuleCodes) ? refs.incidentRuleCodes : []);
+  const whSet = new Set(Array.isArray(refs.webhookSubscriptionKeys) ? refs.webhookSubscriptionKeys : []);
 
+  const rawRoutes = Array.isArray(rawBundle.routesAndBlocks?.routes) ? rawBundle.routesAndBlocks.routes : [];
+  const rawFlowModels = Array.isArray(rawBundle.routesAndBlocks?.flowModels) ? rawBundle.routesAndBlocks.flowModels : [];
+
+  const keepModelUids = new Set([...gridUidSet, ...blockUidSet]);
+  let modelAdded = keepModelUids.size > 0;
+  while (modelAdded) {
+    modelAdded = false;
+    for (const m of rawFlowModels) {
+      if (m?.uid && m?.parentId && keepModelUids.has(m.parentId) && !keepModelUids.has(m.uid)) {
+        keepModelUids.add(m.uid);
+        modelAdded = true;
+      }
+    }
+  }
+  const filteredFlowModels = keepModelUids.size
+    ? rawFlowModels.filter((m) => keepModelUids.has(m.uid))
+    : [];
+
+  let filteredRoutes = [];
+  if (layoutSet.size) {
+    const layoutRoutes = rawRoutes.filter((r) => layoutSet.has(r.layoutUid));
+    const tabSchemaUids = new Set(
+      rawFlowModels
+        .filter((m) => gridUidSet.has(m.uid) && m.parentId)
+        .map((m) => String(m.parentId).trim()),
+    );
+    const byScopedKey = new Map(layoutRoutes.map((r) => [`${r.layoutUid}::${r.key}`, r]));
+    const matchedSeed = layoutRoutes.filter((r) => (
+      (r.schemaUid && tabSchemaUids.has(r.schemaUid))
+      || (pageTitleSet.size && ['flowPage', 'page'].includes(r.type) && pageTitleSet.has(String(r.title || '').trim().toLowerCase()))
+    ));
+    if (matchedSeed.length) {
+      const keepRouteKeys = new Set();
+      const addWithAncestors = (r) => {
+        const sk = `${r.layoutUid}::${r.key}`;
+        if (keepRouteKeys.has(sk)) return;
+        keepRouteKeys.add(sk);
+        if (r.parentKey) {
+          const parent = byScopedKey.get(`${r.layoutUid}::${r.parentKey}`);
+          if (parent) addWithAncestors(parent);
+        }
+      };
+      for (const r of matchedSeed) addWithAncestors(r);
+      let childAdded = true;
+      while (childAdded) {
+        childAdded = false;
+        for (const r of layoutRoutes) {
+          if (r.parentKey && keepRouteKeys.has(`${r.layoutUid}::${r.parentKey}`)) {
+            const sk = `${r.layoutUid}::${r.key}`;
+            if (!keepRouteKeys.has(sk)) {
+              keepRouteKeys.add(sk);
+              childAdded = true;
+            }
+          }
+        }
+      }
+      filteredRoutes = layoutRoutes.filter((r) => keepRouteKeys.has(`${r.layoutUid}::${r.key}`));
+    } else {
+      filteredRoutes = layoutRoutes;
+    }
+  }
+
+  const wfKeySet = new Set([...flowRuleSet, ...n8nWfSet]);
+  const rawGov = rawBundle.governance || {};
   const filteredPayload = {
-    roles: roleSet.size ? (rawBundle.roles || []).filter((r) => roleSet.has(r.name)) : (rawBundle.roles || []),
-    portals: layoutSet.size ? (rawBundle.portals || []).filter((p) => layoutSet.has(p.uid)) : (rawBundle.portals || []),
-    workflows: rawBundle.workflows || [],
-    aiProfiles: aiSet.size ? (rawBundle.aiProfiles || []).filter((a) => aiSet.has(a.username)) : (rawBundle.aiProfiles || []),
-    customCollections: colSet.size ? (rawBundle.customCollections || []).filter((c) => colSet.has(c.name)) : (rawBundle.customCollections || []),
-    routesAndBlocks: rawBundle.routesAndBlocks || { routes: [], flowModels: [] },
+    roles: roleSet.size ? (rawBundle.roles || []).filter((r) => roleSet.has(r.name)) : [],
+    portals: layoutSet.size ? (rawBundle.portals || []).filter((p) => layoutSet.has(p.uid)) : [],
+    workflows: (wfKeySet.size || colSet.size)
+      ? (rawBundle.workflows || []).filter((w) => wfKeySet.has(w.key) || (w.config?.collection && colSet.has(w.config.collection)))
+      : [],
+    aiProfiles: aiSet.size ? (rawBundle.aiProfiles || []).filter((a) => aiSet.has(a.username)) : [],
+    customCollections: colSet.size ? (rawBundle.customCollections || []).filter((c) => colSet.has(c.name)) : [],
+    routesAndBlocks: {
+      routes: filteredRoutes,
+      flowModels: filteredFlowModels,
+    },
     governance: {
-      ...(rawBundle.governance || {}),
-      decisionTables: dmnSet.size
-        ? ((rawBundle.governance?.decisionTables) || []).filter((t) => dmnSet.has(t.tableKey))
-        : ((rawBundle.governance?.decisionTables) || []),
+      decisionTables: dmnSet.size ? (rawGov.decisionTables || []).filter((t) => dmnSet.has(t.tableKey)) : [],
+      slaPolicies: colSet.size ? (rawGov.slaPolicies || []).filter((s) => colSet.has(s.targetCollection)) : [],
+      incidentRules: incRuleSet.size ? (rawGov.incidentRules || []).filter((r) => incRuleSet.has(r.code)) : [],
+      automationRules: flowRuleSet.size ? (rawGov.automationRules || []).filter((r) => flowRuleSet.has(r.ruleKey)) : [],
+      webhookSubscriptions: whSet.size ? (rawGov.webhookSubscriptions || []).filter((w) => whSet.has(w.subscriptionKey)) : [],
     },
   };
   const contentSha256 = createHash('sha256').update(JSON.stringify(filteredPayload)).digest('hex');
@@ -2001,21 +2096,30 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
     });
   }
 
-  // 3. Disable non-starter app AI assistants
+  // 3. Disable non-starter app AI assistants (scoped by organizationId and synced to aiEmployees)
   const customAi = aiEmployees.filter((u) => u && !STARTER_AI_USERNAMES.has(u));
   if (customAi.length) {
     const profRepo = db?.getRepository?.('latticeAiProfiles');
-    if (profRepo) {
-      await withOptionalTenantRls(db, organizationId, async (transaction) => {
-        const txOpt = transaction ? { transaction } : {};
-        for (const uname of customAi) {
-          const pRow = await profRepo.findOne({ filter: { username: uname }, ...txOpt });
-          if (pRow && typeof pRow.update === 'function') {
+    const aiEmpRepo = db?.getRepository?.('aiEmployees');
+    await withOptionalTenantRls(db, organizationId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      for (const uname of customAi) {
+        if (profRepo) {
+          const pRow = await profRepo.findOne({ filter: { organizationId, username: uname }, ...txOpt });
+          if (pRow && val(pRow, 'organizationId') === organizationId && typeof pRow.update === 'function') {
             await pRow.update({ enabled: false }, txOpt);
           }
         }
-      });
-    }
+        if (aiEmpRepo) {
+          const eRow = await aiEmpRepo.findOne({ filter: { username: uname }, ...txOpt });
+          if (eRow && typeof eRow.update === 'function') {
+            await eRow.update({ enabled: false }, txOpt);
+          } else if (typeof aiEmpRepo.update === 'function') {
+            await aiEmpRepo.update({ filter: { username: uname }, values: { enabled: false }, ...txOpt });
+          }
+        }
+      }
+    });
   }
 
   // 4. Deactivate Stock n8n workflows STRICTLY OUTSIDE DB transactions
@@ -2032,30 +2136,52 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
     }
   }
 
-  // 5. Data preservation vs explicit drop
+  // 5. Data preservation vs explicit reverse-topological drop (preserving collections shared by other active apps)
+  const sharedCollections = new Set();
+  if (typeof repo.find === 'function') {
+    const otherRows = (await withOptionalTenantRls(db, organizationId, (transaction) => repo.find({
+      filter: { organizationId },
+      limit: 500,
+      ...(transaction ? { transaction } : {}),
+    }))) || [];
+    for (const other of otherRows) {
+      if (val(other, 'organizationId') !== organizationId) continue;
+      if (val(other, 'appKey') === appKey) continue;
+      if (val(other, 'status') === 'torndown') continue;
+      const otherCols = val(other, 'artifactRefsJson')?.collections;
+      if (Array.isArray(otherCols)) {
+        for (const oc of otherCols) sharedCollections.add(oc);
+      }
+    }
+  }
+
   const droppedCollections = [];
   const preservedCollections = [];
   if (!keepData) {
     const resRepo = db?.getRepository?.('dataSourcesRolesResources');
     const fieldsRepo = db?.getRepository?.('fields');
     const colsRepo = db?.getRepository?.('collections');
-    for (const colName of collections) {
-      if (!CUSTOM_COLLECTION_RE.test(colName) || SYSTEM_PROTECTED_COLLECTIONS.has(colName)) continue;
+    for (const colName of [...collections].reverse()) {
+      if (!CUSTOM_COLLECTION_RE.test(colName) || isProtectedCollection(colName)) continue;
+      if (sharedCollections.has(colName)) {
+        if (resRepo && typeof resRepo.destroy === 'function' && roles.length) {
+          await resRepo.destroy({ filter: { name: colName, roleName: { $in: roles } } });
+        }
+        preservedCollections.push(colName);
+        continue;
+      }
+      // Drop physical table FIRST (reverse topological order: Child before Parent); do not swallow DDL errors
+      if (typeof db?.sequelize?.query === 'function') {
+        await db.sequelize.query(`DROP TABLE IF EXISTS "${colName}";`);
+      }
       if (resRepo && typeof resRepo.destroy === 'function') {
-        await resRepo.destroy({ filter: { name: colName } });
+        await resRepo.destroy({ filter: roles.length ? { name: colName, roleName: { $in: roles } } : { name: colName } });
       }
       if (fieldsRepo && typeof fieldsRepo.destroy === 'function') {
         await fieldsRepo.destroy({ filter: { collectionName: colName } });
       }
       if (colsRepo && typeof colsRepo.destroy === 'function') {
         await colsRepo.destroy({ filter: { name: colName } });
-      }
-      if (typeof db?.sequelize?.query === 'function') {
-        try {
-          await db.sequelize.query(`DROP TABLE IF EXISTS "${colName}";`);
-        } catch {
-          // Non-fatal in mock harnesses
-        }
       }
       droppedCollections.push(colName);
     }
@@ -2106,6 +2232,7 @@ module.exports = {
   ALL_NATIVE_V2_BLOCK_MODELS,
   DEFAULT_SELF_HEAL_MAX_ROUNDS,
   SYSTEM_PROTECTED_COLLECTIONS,
+  isProtectedCollection,
   topologicalSortCollections,
   orchestrateEnterpriseAppBuild,
   verifyEnterpriseApp,

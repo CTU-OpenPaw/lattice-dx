@@ -74,6 +74,19 @@ function buildSafePgIndexName(colLower, suffix) {
   return `idx_${colLower.slice(0, maxBase)}_${hash}_${suffix}`;
 }
 
+function hasProtectedCollectionMatch(protectedCollections, name) {
+  if (!protectedCollections) return false;
+  if (typeof protectedCollections === 'function') return Boolean(protectedCollections(name));
+  const raw = String(name || '').trim();
+  if (!raw) return false;
+  if (protectedCollections.has?.(raw)) return true;
+  const low = raw.toLowerCase();
+  for (const item of protectedCollections) {
+    if (String(item).toLowerCase() === low) return true;
+  }
+  return false;
+}
+
 function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE, protectedCollections = null) {
   const fname = String(rawField?.name || '').trim();
   if (!FIELD_NAME_RE.test(fname)) {
@@ -82,7 +95,10 @@ function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE, protectedCollec
   const rawType = String(rawField?.type || 'string').trim();
   if (rawType === 'belongsTo') {
     const target = String(rawField?.target || rawField?.targetCollection || '').trim();
-    if (!target || protectedCollections?.has(target) || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
+    if (hasProtectedCollectionMatch(protectedCollections, target)) {
+      throw failTool('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ belongsTo vào bảng hệ thống "${target}".`);
+    }
+    if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
       throw failTool('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ belongsTo "${target || '(empty)'}" không hợp lệ hoặc bị bảo vệ.`);
     }
     const foreignKey = String(rawField?.foreignKey || `${fname}Id`).trim();
@@ -3630,8 +3646,11 @@ function createBuilderTools(deps) {
   const {
     val, failTool, safeGetResource, invokeResourceAction, createAuditedTool,
     resolveCallerRoleNames, isStudioAdmin,
-    SYSTEM_PROTECTED_COLLECTIONS, CUSTOM_COLLECTION_RE, FIELD_NAME_RE, SLUG_RE, ALLOWED_BLOCK_MODELS,
+    SYSTEM_PROTECTED_COLLECTIONS, isProtectedCollection, CUSTOM_COLLECTION_RE, FIELD_NAME_RE, SLUG_RE, ALLOWED_BLOCK_MODELS,
   } = deps;
+  const isProtected = (name) => (typeof isProtectedCollection === 'function'
+    ? isProtectedCollection(name)
+    : hasProtectedCollectionMatch(SYSTEM_PROTECTED_COLLECTIONS, name));
   const hasRes = (ctx, name) => (typeof safeGetResource === 'function' ? safeGetResource(ctx, name) : null);
 
   return [
@@ -4088,7 +4107,7 @@ function createBuilderTools(deps) {
         },
       },
       async run(_ctx, db, actor, args) {
-        if (SYSTEM_PROTECTED_COLLECTIONS.has(args.collectionName)) {
+        if (isProtected(args.collectionName)) {
           throw failTool('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép sửa bảng hệ thống "${args.collectionName}".`);
         }
         const colsRepo = db.getRepository('collections');
@@ -4313,7 +4332,7 @@ function createBuilderTools(deps) {
         if (!isBusinessRoleName(args.roleName || '')) {
           throw failTool('ROLE_TARGET_FORBIDDEN', 403, `Không được phép cấu hình vai trò hệ thống hoặc tên vai trò không hợp lệ "${args.roleName}".`);
         }
-        if (args.collectionName && SYSTEM_PROTECTED_COLLECTIONS.has(args.collectionName)) {
+        if (args.collectionName && isProtected(args.collectionName)) {
           throw failTool('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được thay đổi phân quyền bảng hệ thống "${args.collectionName}".`);
         }
 
@@ -4843,7 +4862,7 @@ function createBuilderTools(deps) {
         }
 
         // buildCustomWorkflow
-        if (!args.collectionName || SYSTEM_PROTECTED_COLLECTIONS.has(args.collectionName)) {
+        if (!args.collectionName || isProtected(args.collectionName)) {
           throw failTool('COLLECTION_FORBIDDEN_FOR_WORKFLOW', 403, `Collection "${args.collectionName}" không hợp lệ hoặc bị bảo vệ.`);
         }
         const title = args.title || `Quy trình ${args.collectionName}`;

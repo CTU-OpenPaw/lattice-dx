@@ -3303,6 +3303,7 @@ module.exports = {
   ACCEPTED_SCHEMA_VERSIONS,
   RESERVED_SYSTEM_LAYOUT_UIDS,
   SYSTEM_PROTECTED_COLLECTIONS,
+  isProtectedCollection,
   applyGovernanceSection,
   getRouteKey,
   sortRoutesTopologically,

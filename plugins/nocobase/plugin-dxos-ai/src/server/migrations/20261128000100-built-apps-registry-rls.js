@@ -66,6 +66,7 @@ async function detachTableRls(db, tableName, transaction) {
   if (typeof sequelize?.query === 'function') {
     const queryOpts = transaction ? { transaction } : undefined;
     await sequelize.query(`DROP POLICY IF EXISTS lattice_tenant_isolation ON public."${tableName}";`, queryOpts);
+    await sequelize.query(`ALTER TABLE IF EXISTS public."${tableName}" NO FORCE ROW LEVEL SECURITY;`, queryOpts);
     await sequelize.query(`ALTER TABLE IF EXISTS public."${tableName}" DISABLE ROW LEVEL SECURITY;`, queryOpts);
   }
 }

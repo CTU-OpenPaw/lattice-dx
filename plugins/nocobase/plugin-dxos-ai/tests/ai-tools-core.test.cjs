@@ -545,6 +545,13 @@ test('Task 10: dxos_extend_collection_schema updateFieldMeta & deprecateField, d
     () => extendTool.invoke(adminCtx, { operation: 'deprecateField', collectionName: 'latticeCustomInspections', fieldName: 'organizationId' }),
     (err) => err.status === 403,
   );
+  // Newly synced system collections (e.g. collections, llmServices, workflows) & case variants must be blocked (403)
+  for (const sysCol of ['collections', 'Collections', 'llmServices', 'LlmServices', 'workflows', 'latticeBuiltApps', 'latticebuiltapps']) {
+    await assert.rejects(
+      () => extendTool.invoke(adminCtx, { operation: 'updateFieldMeta', collectionName: sysCol, fieldName: 'title', title: 'Hijacked' }),
+      (err) => err.status === 403 && err.code === 'SYSTEM_COLLECTION_FORBIDDEN',
+    );
+  }
 
   // 2. dxos_provision_role_workspace registry ops + skipOuterTx check
   const prevRls = process.env.DX_PG_RLS_SESSION;
