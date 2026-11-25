@@ -765,6 +765,257 @@ async function ensureLocalLlmServiceRecord(db, env = process.env) {
   return { configured: true, skipped: false, serviceName: 'local-9router', baseURL };
 }
 
+function buildLlmProbeTarget(provider, rawBase, apiKey) {
+  const lower = String(provider || '').trim().toLowerCase();
+  let base = String(rawBase || '').trim().replace(/\/+$/, '');
+  if (!base) {
+    if (lower.includes('ollama')) base = 'http://127.0.0.1:11434';
+    else if (lower.includes('gemini') || lower.includes('google')) base = 'https://generativelanguage.googleapis.com';
+    else if (lower.includes('anthropic')) base = 'https://api.anthropic.com/v1';
+    else if (lower.includes('openai') && apiKey) base = 'https://api.openai.com/v1';
+  }
+  if (!base) return null;
+  if (lower.includes('ollama')) {
+    return { baseURL: base, probeUrl: `${base.replace(/\/v1$/i, '')}/api/tags`, headers: {} };
+  }
+  if (lower.includes('gemini') || lower.includes('google')) {
+    const probeUrl = base.endsWith('/v1beta/models')
+      ? base
+      : (base.endsWith('/v1beta') ? `${base}/models` : `${base}/v1beta/models`);
+    return { baseURL: base, probeUrl, headers: apiKey ? { 'x-goog-api-key': apiKey } : {} };
+  }
+  if (lower.includes('anthropic')) {
+    const probeUrl = base.endsWith('/v1') ? `${base}/models` : `${base}/v1/models`;
+    return {
+      baseURL: base,
+      probeUrl,
+      headers: {
+        ...(apiKey ? { 'x-api-key': apiKey } : {}),
+        'anthropic-version': '2023-06-01',
+      },
+    };
+  }
+  return {
+    baseURL: base,
+    probeUrl: `${base}/models`,
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+  };
+}
+
+async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = false, llmServiceName = '', modelName = '' } = {}) {
+  const resultBase = (fields) => ({
+    ok: Boolean(fields.ok),
+    status: Number(fields.status) || 503,
+    code: String(fields.code || 'LLM_UNAVAILABLE'),
+    llmService: String(fields.llmService || ''),
+    modelName: String(fields.modelName || ''),
+    provider: String(fields.provider || ''),
+    message: String(fields.message || ''),
+    ...(isAdmin && fields.baseURL !== undefined ? { baseURL: String(fields.baseURL || '') } : {}),
+  });
+
+  let boundService = String(llmServiceName || '').trim();
+  let boundModel = String(modelName || '').trim();
+  if (!boundService || !boundModel) {
+    await runWithSystemRlsBypass(db, async () => {
+      const profRepo = db?.getRepository?.('latticeAiProfiles');
+      const profRow = profRepo && typeof profRepo.findOne === 'function'
+        ? await profRepo.findOne({ filter: { username: 'dxos-architect' } }).catch(() => null)
+        : null;
+      const empRepo = db?.getRepository?.('aiEmployees');
+      const empRow = (!profRow && empRepo && typeof empRepo.findOne === 'function')
+        ? await empRepo.findOne({ filter: { username: 'dxos-architect' } }).catch(() => null)
+        : null;
+      const empModels = val(empRow, 'modelSettings')?.models;
+      const firstEmpModel = Array.isArray(empModels) ? empModels[0] : null;
+      if (!boundService) {
+        boundService = String(val(profRow, 'llmService') || firstEmpModel?.llmService || 'local-9router').trim();
+      }
+      if (!boundModel) {
+        boundModel = String(val(profRow, 'modelName') || firstEmpModel?.model || 'ag/gemini-3.8-flash').trim();
+      }
+    });
+  }
+
+  const llmRepo = db?.getRepository?.('llmServices');
+  if (!llmRepo) {
+    return resultBase({
+      ok: false,
+      status: 503,
+      code: 'NO_LLM_SERVICE',
+      llmService: boundService,
+      modelName: boundModel,
+      provider: '',
+      message: 'Chưa cấu hình dịch vụ LLM (llmServices repository unavailable).',
+    });
+  }
+
+  const llmRow = await runWithSystemRlsBypass(db, async () => {
+    if (boundService && typeof llmRepo.findOne === 'function') {
+      const exact = await llmRepo.findOne({ filter: { name: boundService } }).catch(() => null);
+      if (exact) return exact;
+    }
+    if (!llmServiceName && typeof llmRepo.find === 'function') {
+      const rows = (await llmRepo.find({ filter: { enabled: true }, limit: 1 }).catch(() => [])) || [];
+      return rows[0] || null;
+    }
+    return null;
+  });
+
+  if (!llmRow) {
+    return resultBase({
+      ok: false,
+      status: 503,
+      code: 'NO_LLM_SERVICE',
+      llmService: boundService,
+      modelName: boundModel,
+      provider: '',
+      message: 'Chưa kết nối dịch vụ LLM cho AI Architect. Vui lòng nhập API key trong DX-OS AI Studio.',
+      baseURL: '',
+    });
+  }
+
+  const serviceName = String(val(llmRow, 'name') || boundService || '').trim();
+  const provider = String(val(llmRow, 'provider') || val(llmRow, 'type') || 'openai-completions').trim();
+  if (val(llmRow, 'enabled') === false) {
+    return resultBase({
+      ok: false,
+      status: 503,
+      code: 'LLM_UNAVAILABLE',
+      llmService: serviceName,
+      modelName: boundModel,
+      provider,
+      message: `Dịch vụ LLM "${serviceName}" đang bị tắt (disabled).`,
+    });
+  }
+
+  const options = val(llmRow, 'options') && typeof val(llmRow, 'options') === 'object' ? val(llmRow, 'options') : {};
+  const rawBase = String(options.baseURL || val(llmRow, 'baseURL') || '').trim();
+  const apiKey = String(options.apiKey || val(llmRow, 'apiKey') || '').trim();
+  const target = buildLlmProbeTarget(provider, rawBase, apiKey);
+  if (!target) {
+    return resultBase({
+      ok: false,
+      status: 503,
+      code: 'NO_LLM_SERVICE',
+      llmService: serviceName,
+      modelName: boundModel,
+      provider,
+      message: `Dịch vụ LLM "${serviceName}" thiếu baseURL hoặc API key hợp lệ.`,
+      baseURL: '',
+    });
+  }
+
+  const doFetch = fetchImpl || (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function' ? globalThis.fetch : null);
+  if (typeof doFetch !== 'function') {
+    return resultBase({
+      ok: false,
+      status: 503,
+      code: 'LLM_UNAVAILABLE',
+      llmService: serviceName,
+      modelName: boundModel,
+      provider,
+      baseURL: target.baseURL,
+      message: 'Môi trường không hỗ trợ HTTP fetch để kiểm tra LLM.',
+    });
+  }
+
+  let timeoutId = null;
+  let controller = null;
+  let signal = null;
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    signal = AbortSignal.timeout(5000);
+  } else if (typeof AbortController === 'function') {
+    controller = new AbortController();
+    signal = controller.signal;
+    timeoutId = setTimeout(() => controller.abort(), 5000);
+    if (typeof timeoutId?.unref === 'function') timeoutId.unref();
+  }
+
+  try {
+    const res = await doFetch(target.probeUrl, {
+      method: 'GET',
+      headers: target.headers,
+      ...(signal ? { signal } : {}),
+    });
+    const status = Number(res?.status) || (res?.ok ? 200 : 503);
+    if (res?.ok) {
+      return resultBase({
+        ok: true,
+        status,
+        code: 'OK',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL: target.baseURL,
+        message: `Dịch vụ LLM "${serviceName}" sẵn sàng.`,
+      });
+    }
+    if (status === 401 || status === 403) {
+      return resultBase({
+        ok: false,
+        status,
+        code: 'LLM_AUTH_ERROR',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL: target.baseURL,
+        message: `Dịch vụ LLM "${serviceName}" từ chối xác thực (HTTP ${status}). Kiểm tra lại API key.`,
+      });
+    }
+    if (status === 502) {
+      return resultBase({
+        ok: false,
+        status: 502,
+        code: 'LLM_BAD_GATEWAY',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL: target.baseURL,
+        message: `Upstream LLM gateway "${serviceName}" lỗi 502 Bad Gateway.`,
+      });
+    }
+    if (status === 504) {
+      return resultBase({
+        ok: false,
+        status: 504,
+        code: 'LLM_TIMEOUT',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL: target.baseURL,
+        message: `Upstream LLM "${serviceName}" quá thời gian phản hồi (HTTP 504).`,
+      });
+    }
+    return resultBase({
+      ok: false,
+      status,
+      code: 'LLM_UNAVAILABLE',
+      llmService: serviceName,
+      modelName: boundModel,
+      provider,
+      baseURL: target.baseURL,
+      message: `Dịch vụ LLM "${serviceName}" không khả dụng (HTTP ${status}).`,
+    });
+  } catch (err) {
+    const isTimeout = err?.name === 'TimeoutError' || err?.name === 'AbortError' || /timeout|aborted/i.test(String(err?.message || ''));
+    return resultBase({
+      ok: false,
+      status: isTimeout ? 504 : 503,
+      code: isTimeout ? 'LLM_TIMEOUT' : 'LLM_UNAVAILABLE',
+      llmService: serviceName,
+      modelName: boundModel,
+      provider,
+      baseURL: target.baseURL,
+      message: isTimeout
+        ? `Kết nối tới dịch vụ LLM "${serviceName}" quá thời gian chờ (5s).`
+        : `Không thể kết nối tới dịch vụ LLM "${serviceName}": ${String(err?.code || err?.message || 'network error').slice(0, 140)}`,
+    });
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 async function upsertAndSyncProfile(db, input, { actorUser, defaultOrigin, defaultOrganizationId = '', auditToolName = 'dxosAi:saveProfile' } = {}) {
   const resolvedDefaultOrg = defaultOrganizationId || (await resolveDefaultOrganizationId(db, { actor: actorUser, fallback: 'default' }));
   const validated = validateAiProfilePayload(input, {
@@ -1542,6 +1793,27 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       ctx.body = await runHitlDecision(ctx, 'reject');
       if (typeof next === 'function') await next();
     },
+
+    async checkLlmHealth(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'GET') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức GET.');
+      }
+      const targetDb = resolveDb(ctx);
+      const user = ctx?.state?.currentUser || ctx?.auth?.user;
+      if (!val(user, 'id')) {
+        throw failTool('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập để kiểm tra sức khỏe LLM.');
+      }
+      const adminOk = await isStudioAdmin(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      const llmServiceName = String(ctx?.action?.params?.llmService || payload.llmService || '').trim();
+      ctx.body = await probeLlmHealth(targetDb, {
+        env,
+        fetchImpl,
+        isAdmin: adminOk,
+        llmServiceName,
+      });
+      if (typeof next === 'function') await next();
+    },
   };
 }
 
@@ -1549,6 +1821,7 @@ module.exports = {
   SUPPORTED_HITL_TOOLS,
   serializeProfile,
   ensureLocalLlmServiceRecord,
+  probeLlmHealth,
   upsertAndSyncProfile,
   createDxosAiActions,
 };

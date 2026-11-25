@@ -63,14 +63,48 @@ function resolveBellPortalSlug(pathname) {
   return 'workspace';
 }
 
-function resolveEventSourceCtor() {
-  if (typeof globalThis !== 'undefined' && typeof globalThis.EventSource === 'function') {
-    return globalThis.EventSource;
+function resolveClientAuthToken(api, storage) {
+  if (!api) return '';
+  try {
+    const t = typeof api.auth?.getToken === 'function' ? api.auth.getToken() : '';
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    const t = api.auth?.token;
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    if (storage && typeof storage.getItem === 'function') {
+      const t = storage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    }
+    if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
+      const t = localStorage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    }
+  } catch {}
+  return '';
+}
+
+function parseSseChunk(chunk) {
+  const normalized = String(chunk || '').replace(/\r\n/g, '\n');
+  const blocks = normalized.split('\n\n');
+  const rest = blocks.pop() ?? '';
+  const frames = [];
+  for (const block of blocks) {
+    if (!block.trim() || block.startsWith(':')) continue;
+    let eventName = 'message';
+    const dataLines = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim() || 'message';
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if (!dataLines.length) continue;
+    let data = {};
+    try { data = JSON.parse(dataLines.join('\n')); } catch { data = { raw: dataLines.join('\n') }; }
+    frames.push({ event: eventName, data });
   }
-  if (typeof window !== 'undefined' && typeof window.EventSource === 'function') {
-    return window.EventSource;
-  }
-  return null;
+  return { frames, rest };
 }
 
 function isMobileViewport() {
@@ -85,16 +119,7 @@ function isMobileViewport() {
 
 function isAuthenticatedClient(api) {
   if (!api || typeof api.request !== 'function') return false;
-  try {
-    if (typeof api.auth?.getToken === 'function' && api.auth.getToken()) return true;
-  } catch {}
-  if (api.auth?.role && api.auth.role !== 'anonymous') return true;
-  try {
-    if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function' && localStorage.getItem('NOCOBASE_TOKEN')) {
-      return true;
-    }
-  } catch {}
-  return false;
+  return Boolean(resolveClientAuthToken(api));
 }
 
 function isSafeInternalTargetPath(rawPath) {
@@ -234,7 +259,8 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
       if (typeof window === 'undefined') return undefined;
 
       let disposed = false;
-      let es = null;
+      let controller = null;
+      let activeReader = null;
       let reconnectTimer = null;
       let retryAttempt = 0;
 
@@ -245,60 +271,78 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
       }, POLL_INTERVAL_MS);
       if (typeof timer?.unref === 'function') timer.unref();
 
-      const handleSsePayload = (ev) => {
-        if (disposed) return;
-        let parsed = null;
-        if (ev && typeof ev.data === 'string' && ev.data.trim()) {
-          try {
-            parsed = JSON.parse(ev.data);
-          } catch {
-            parsed = null;
-          }
-        }
-        if (!parsed || typeof parsed !== 'object') return;
+      const handleSsePayload = (eventName, parsed) => {
+        if (disposed || !parsed || typeof parsed !== 'object') return;
         if (Number.isFinite(Number(parsed.unreadCount)) && Number(parsed.unreadCount) >= 0) {
           setUnreadCount(Number(parsed.unreadCount));
           if (openRef.current) fetchInboxRef.current?.();
           return;
         }
         const kind = String(parsed.kind || parsed.type || '').trim().toLowerCase();
-        if (kind === 'notification' || kind === 'unread_count' || ev?.type === 'notification' || ev?.type === 'unread_count') {
+        if (kind === 'notification' || kind === 'unread_count' || eventName === 'notification' || eventName === 'unread_count') {
           fetchUnreadCountRef.current?.();
           if (openRef.current) fetchInboxRef.current?.();
         }
       };
 
-      const connectSse = () => {
+      const connectSse = async () => {
         if (disposed) return;
-        const EventSourceCtor = resolveEventSourceCtor();
-        if (typeof EventSourceCtor !== 'function') return;
-        const sseUrl = `/api/dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
+        const token = resolveClientAuthToken(api);
+        const fetchFn = typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function'
+          ? globalThis.fetch
+          : (typeof fetch === 'function' ? fetch : null);
+        if (!token || typeof fetchFn !== 'function') return;
+
+        const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
+        const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
+        const sseUrl = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
+        controller = typeof AbortController === 'function' ? new AbortController() : null;
+        let stopReconnect = false;
         try {
-          es = new EventSourceCtor(sseUrl, { withCredentials: true });
-        } catch {
-          es = null;
-          return;
-        }
-
-        const resetRetry = () => {
+          const res = await fetchFn(sseUrl, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'text/event-stream',
+            },
+            credentials: 'same-origin',
+            ...(controller ? { signal: controller.signal } : {}),
+          });
+          if (res && (res.status === 401 || res.status === 403)) {
+            stopReconnect = true;
+            if (!disposed) setAuthRejected(true);
+            return;
+          }
+          if (!res?.ok || !res.body?.getReader) {
+            throw new Error('SSE_UNAVAILABLE');
+          }
           retryAttempt = 0;
-        };
-
-        if (typeof es.addEventListener === 'function') {
-          es.addEventListener('snapshot', resetRetry);
-          es.addEventListener('notification', handleSsePayload);
-          es.addEventListener('unread_count', handleSsePayload);
-          es.addEventListener('update', handleSsePayload);
-          es.addEventListener('message', handleSsePayload);
-        } else {
-          es.onmessage = handleSsePayload;
+          activeReader = res.body.getReader();
+          const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
+          let buffer = '';
+          while (!disposed) {
+            const part = await activeReader.read();
+            if (part.done) break;
+            const text = decoder ? decoder.decode(part.value, { stream: true }) : String(part.value || '');
+            buffer += text;
+            const parsed = parseSseChunk(buffer);
+            buffer = parsed.rest;
+            for (const frame of parsed.frames) {
+              if (frame.event === 'snapshot') {
+                retryAttempt = 0;
+                continue;
+              }
+              if (['notification', 'unread_count', 'update', 'message'].includes(frame.event)) {
+                handleSsePayload(frame.event, frame.data);
+              }
+            }
+          }
+        } catch {
+          // Transient drop handled below unless disposed or 401/403
+        } finally {
+          activeReader = null;
         }
-
-        es.onopen = resetRetry;
-        es.onerror = () => {
-          try { es?.close?.(); } catch {}
-          es = null;
-          if (disposed || reconnectTimer) return;
+        if (!disposed && !stopReconnect && !reconnectTimer) {
           const delayMs = Math.min(POLL_INTERVAL_MS, SSE_RECONNECT_BASE_MS * (2 ** Math.min(4, retryAttempt)));
           retryAttempt += 1;
           reconnectTimer = setTimeout(() => {
@@ -306,7 +350,7 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
             connectSse();
           }, delayMs);
           if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
-        };
+        }
       };
 
       connectSse();
@@ -326,8 +370,9 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
           clearTimeout(reconnectTimer);
           reconnectTimer = null;
         }
-        try { es?.close?.(); } catch {}
-        es = null;
+        controller?.abort?.();
+        try { activeReader?.cancel?.(); } catch {}
+        activeReader = null;
         if (typeof document !== 'undefined') {
           document.removeEventListener?.('visibilitychange', onVisibility);
         }
@@ -640,6 +685,7 @@ module.exports = {
   isVisibleBellPath,
   resolveBellPortalSlug,
   isMobileViewport,
+  resolveClientAuthToken,
   isAuthenticatedClient,
   isSafeInternalTargetPath,
   createNotificationBellProvider,

@@ -2091,3 +2091,41 @@ test('Task 3: origin-aware OAuth redirect URI, n8n Editor URL, and unified DEFAU
     assert.ok(catalog.roles.includes(role), `architect.js DEFAULT_LDX_ROLES missing ${role}`);
   }
 });
+
+test('Task 4: dxos-flow-ai-architect-btn sits in dxos-flow-toolbar and invokes native ai.triggerTask with dxos-architect and flowContext', async () => {
+  const { createFlowStudioApp } = require(path.join(PLUGIN_ROOT, 'src/client/flow/flow-studio-app.js'));
+  const harness = createQueuedReactHarness();
+  const nodeTypes = getRegistrySchemas();
+  const blueprints = getBlueprints();
+  const triggered = [];
+  const mockApp = {
+    flowEngine: {
+      context: {
+        ai: {
+          async triggerTask(payload) {
+            triggered.push(payload);
+          },
+        },
+      },
+    },
+  };
+  const { client } = createApiMock({
+    'dxosAutomations:builderCatalog': async () => ({ nodeTypes, blueprints }),
+    'dxosAutomations:nodeRegistry': async () => ({ nodeTypes }),
+    'dxosAutomations:listRules': async () => ({ items: [{ ...blueprints[0], active: true }] }),
+    'dxosAutomations:listRuns': async () => ({ items: [] }),
+  });
+
+  const FlowStudioApp = createFlowStudioApp(client, harness.React, {}, mockApp);
+  let tree = await harness.mountAndFlush(FlowStudioApp, { selectedOrg: 'org-a', ruleKey: blueprints[0].ruleKey });
+  const toolbar = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-toolbar')[0];
+  assert.ok(toolbar, 'dxos-flow-toolbar must render in editor');
+  const aiBtn = collectNodes(toolbar, (n) => n.props?.['data-testid'] === 'dxos-flow-ai-architect-btn')[0];
+  assert.ok(aiBtn, 'dxos-flow-ai-architect-btn must render inside dxos-flow-toolbar');
+  await aiBtn.props.onClick();
+  assert.equal(triggered.length, 1);
+  assert.equal(triggered[0].aiEmployee, 'dxos-architect');
+  assert.equal(triggered[0].open, true);
+  assert.ok(String(triggered[0].tasks?.[0]?.message?.system || '').includes(blueprints[0].ruleKey));
+  harness.unmount();
+});

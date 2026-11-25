@@ -453,19 +453,53 @@ function buildEpodPayload(fields = {}) {
   return { ok: true, payload };
 }
 
-function isAuthenticatedMobileClient(api, storage) {
-  if (!api || typeof api.request !== 'function') return false;
+function resolveClientAuthToken(api, storage) {
+  if (!api) return '';
   try {
-    if (typeof api.auth?.getToken === 'function' && api.auth.getToken()) return true;
+    const t = typeof api.auth?.getToken === 'function' ? api.auth.getToken() : '';
+    if (typeof t === 'string' && t.trim()) return t.trim();
   } catch {}
-  if (api.auth?.role && api.auth.role !== 'anonymous') return true;
   try {
-    if (storage && typeof storage.getItem === 'function' && storage.getItem('NOCOBASE_TOKEN')) return true;
-    if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function' && localStorage.getItem('NOCOBASE_TOKEN')) {
-      return true;
+    const t = api.auth?.token;
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    if (storage && typeof storage.getItem === 'function') {
+      const t = storage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    }
+    if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
+      const t = localStorage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
     }
   } catch {}
-  return false;
+  return '';
+}
+
+function parseSseChunk(chunk) {
+  const normalized = String(chunk || '').replace(/\r\n/g, '\n');
+  const blocks = normalized.split('\n\n');
+  const rest = blocks.pop() ?? '';
+  const frames = [];
+  for (const block of blocks) {
+    if (!block.trim() || block.startsWith(':')) continue;
+    let eventName = 'message';
+    const dataLines = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim() || 'message';
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if (!dataLines.length) continue;
+    let data = {};
+    try { data = JSON.parse(dataLines.join('\n')); } catch { data = { raw: dataLines.join('\n') }; }
+    frames.push({ event: eventName, data });
+  }
+  return { frames, rest };
+}
+
+function isAuthenticatedMobileClient(api, storage) {
+  if (!api || typeof api.request !== 'function') return false;
+  return Boolean(resolveClientAuthToken(api, storage));
 }
 
 function formatOutboxItemSummary(item) {
@@ -727,53 +761,105 @@ function createMobileFieldPwaPage(client, React, app) {
       if (!isAuthenticatedMobileClient(apiClient, storageRef.current)) return undefined;
       refreshUnreadCountRef.current?.();
 
-      const EventSourceCtor = props.EventSource
-        || (typeof globalThis !== 'undefined' ? globalThis.EventSource : null)
-        || (typeof window !== 'undefined' ? window.EventSource : null);
-      if (!isOnline || typeof EventSourceCtor !== 'function') return undefined;
+      const fetchFn = props.fetchImpl
+        || (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function' ? globalThis.fetch : null)
+        || (typeof fetch === 'function' ? fetch : null);
+      if (!isOnline || typeof fetchFn !== 'function') return undefined;
 
-      let es = null;
-      const sseUrl = props.notificationSseUrl || '/api/dxosAi:surfaceEvents?portalSlug=mobile';
-      try {
-        es = new EventSourceCtor(sseUrl, { withCredentials: true });
-      } catch {
-        return undefined;
-      }
+      let disposed = false;
+      let controller = null;
+      let activeReader = null;
+      let reconnectTimer = null;
+      let retryAttempt = 0;
 
-      const handleSsePayload = (ev) => {
-        if (!mountedRef.current) return;
-        let parsed = null;
-        if (ev && typeof ev.data === 'string' && ev.data.trim()) {
-          try {
-            parsed = JSON.parse(ev.data);
-          } catch {
-            parsed = null;
-          }
-        }
-        if (!parsed || typeof parsed !== 'object') return;
+      const handleSsePayload = (eventName, parsed) => {
+        if (!mountedRef.current || disposed || !parsed || typeof parsed !== 'object') return;
         if (Number.isFinite(Number(parsed.unreadCount)) && Number(parsed.unreadCount) >= 0) {
           setNotifUnreadCount(Number(parsed.unreadCount));
           return;
         }
         const kind = String(parsed.kind || parsed.type || '').trim().toLowerCase();
-        if (kind === 'notification' || kind === 'unread_count' || ev?.type === 'notification' || ev?.type === 'unread_count') {
+        if (kind === 'notification' || kind === 'unread_count' || eventName === 'notification' || eventName === 'unread_count') {
           refreshUnreadCountRef.current?.();
         }
       };
 
-      if (typeof es.addEventListener === 'function') {
-        es.addEventListener('notification', handleSsePayload);
-        es.addEventListener('unread_count', handleSsePayload);
-        es.addEventListener('update', handleSsePayload);
-        es.addEventListener('message', handleSsePayload);
-      } else {
-        es.onmessage = handleSsePayload;
-      }
+      const connectSse = async () => {
+        if (disposed || !mountedRef.current) return;
+        const token = resolveClientAuthToken(apiClient, storageRef.current);
+        if (!token) return;
+        const baseApi = typeof apiClient?.getBaseURL === 'function' ? apiClient.getBaseURL() : '/api/';
+        const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
+        const sseUrl = props.notificationSseUrl || `${prefix}dxosAi:surfaceEvents?portalSlug=mobile`;
+        controller = typeof AbortController === 'function' ? new AbortController() : null;
+        let stopReconnect = false;
+        try {
+          const res = await fetchFn(sseUrl, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'text/event-stream',
+            },
+            credentials: 'same-origin',
+            ...(controller ? { signal: controller.signal } : {}),
+          });
+          if (res && (res.status === 401 || res.status === 403)) {
+            stopReconnect = true;
+            return;
+          }
+          if (!res?.ok || !res.body?.getReader) {
+            throw new Error('SSE_UNAVAILABLE');
+          }
+          retryAttempt = 0;
+          activeReader = res.body.getReader();
+          const decoder = typeof TextDecoder === 'function' ? new TextDecoder('utf-8') : null;
+          let buffer = '';
+          while (!disposed && mountedRef.current) {
+            const part = await activeReader.read();
+            if (part.done) break;
+            const text = decoder ? decoder.decode(part.value, { stream: true }) : String(part.value || '');
+            buffer += text;
+            const parsed = parseSseChunk(buffer);
+            buffer = parsed.rest;
+            for (const frame of parsed.frames) {
+              if (frame.event === 'snapshot') {
+                retryAttempt = 0;
+                continue;
+              }
+              if (['notification', 'unread_count', 'update', 'message'].includes(frame.event)) {
+                handleSsePayload(frame.event, frame.data);
+              }
+            }
+          }
+        } catch {
+          // Transient drop handled below unless disposed or 401/403
+        } finally {
+          activeReader = null;
+        }
+        if (!disposed && mountedRef.current && !stopReconnect && !reconnectTimer) {
+          const delayMs = Math.min(60_000, 3_000 * (2 ** Math.min(4, retryAttempt)));
+          retryAttempt += 1;
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connectSse();
+          }, delayMs);
+          if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
+        }
+      };
+
+      connectSse();
 
       return () => {
-        try { es?.close?.(); } catch {}
+        disposed = true;
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+        controller?.abort?.();
+        try { activeReader?.cancel?.(); } catch {}
+        activeReader = null;
       };
-    }, [apiClient, isOnline, props.EventSource, props.notificationSseUrl]);
+    }, [apiClient, isOnline, props.fetchImpl, props.notificationSseUrl]);
 
     const toggleNotifications = React.useCallback(async () => {
       const next = !notifOpen;
@@ -1893,5 +1979,7 @@ module.exports = {
   updateOutboxStatus,
   parseFieldQrPayload,
   buildEpodPayload,
+  resolveClientAuthToken,
+  isAuthenticatedMobileClient,
   createMobileFieldPwaPage,
 };

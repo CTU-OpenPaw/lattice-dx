@@ -1552,6 +1552,7 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
     const adminHarness = makeStatefulReact();
     const AdminLauncher = createPortalAgentLauncher({
       useAPIClient: () => ({
+        auth: { getToken: () => 'test-token' },
         getBaseURL: () => '/api/',
         request: async () => ({
           data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect', nickname: 'Kiến trúc sư' }] } },
@@ -1571,16 +1572,9 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
     assert.equal(adminHarness.getStates()[4], null, 'Flow Studio SSE must NOT set pendingUpdate reload banner');
     assert.equal(JSON.stringify(adminTree).includes('dxos-surface-update-banner'), false);
 
-    // Clicking floating button on Flow Studio injects live __LATTICEDX_FLOW_CONTEXT__ and stacks above built-in plugin-ai button
-    const adminBtn = findBtn(adminTree);
-    assert.ok(adminBtn, 'Admin on Flow Studio must see single floating AI chat button');
-    assert.equal(adminBtn.props.style.zIndex, 1052, 'Flow Studio launcher must sit above built-in plugin-ai zIndex 1050');
-    await adminBtn.props.onClick({ stopPropagation() {} });
-    assert.equal(triggeredAdmin.length, 1);
-    assert.equal(triggeredAdmin[0].aiEmployee, 'dxos-architect');
-    assert.ok(triggeredAdmin[0].tasks[0].message.system.includes('ruleKey="auto_1"'));
-    assert.ok(triggeredAdmin[0].tasks[0].message.system.includes('invokeN8n'));
-    assert.equal(dispatchedEvents.some((e) => e.type === 'latticedx:ai-chat-opening'), true);
+    // Non-overlapping AI launcher: portal-agent-launcher must NOT render bottom-right float button on /admin/settings/workflow/* or /admin/settings/dxos-flow-studio
+    assert.equal(findBtn(adminTree), null, 'Flow Studio must NOT render floating dxos-portal-ai-float-btn over native NocoBase button');
+    assert.equal(triggeredAdmin.length, 0);
 
     // MutationObserver ignores mutations inside dxos-portal-ai-float-btn cleanly
     assert.ok(observerCallbacks.length >= 1);
@@ -1620,6 +1614,7 @@ test('Flow Studio native agent launcher: path matching, sanitized flowContext, S
     const portalHarness = makeStatefulReact();
     const PortalLauncher = createPortalAgentLauncher({
       useAPIClient: () => ({
+        auth: { getToken: () => 'test-token' },
         getBaseURL: () => '/api/',
         request: async () => ({ data: { data: { isAdmin: false, employees: [{ username: 'dxos-workspace' }] } } }),
       }),
@@ -1944,4 +1939,224 @@ test('Task 16: multi-tenant non-native-ui-lab org resolution works dynamically a
   const dump = JSON.stringify(selectEl);
   assert.equal(dump.includes('acme-pharma'), true);
   assert.equal(dump.includes('native-ui-lab'), false);
+});
+
+test('Task 4: unauthenticated SSE skip, non-overlapping Flow Studio launcher, nickname & entity fix, checkLlmHealth 502/503, and health warning banner', async () => {
+  const { STARTER_AI_BLUEPRINTS } = require(path.join(PLUGIN_ROOT, 'src/server/ai-schemas.js'));
+  const { createDxosAiActions, probeLlmHealth } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { createPortalAgentLauncher } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+  const serverIndexSrc = require('node:fs').readFileSync(path.join(PLUGIN_ROOT, 'src/server/index.js'), 'utf8');
+
+  // 1. Nicknames in STARTER_AI_BLUEPRINTS contain zero '&' characters
+  for (const bp of STARTER_AI_BLUEPRINTS) {
+    assert.equal(String(bp.nickname || '').includes('&'), false, `Nickname for ${bp.username} must not contain '&'`);
+  }
+
+  // 2. server/index.js allows loggedIn access to dxosAi:checkLlmHealth
+  assert.match(serverIndexSrc, /acl\.allow\(['"]dxosAi['"],\s*['"]checkLlmHealth['"],\s*['"]loggedIn['"]\)/);
+
+  // 3. probeLlmHealth & dxosAi:checkLlmHealth handle NO_LLM_SERVICE, 502, 503, timeout, 401, 200, and omit baseURL/apiKey for non-admin callers
+  assert.equal(typeof probeLlmHealth, 'function', 'probeLlmHealth must be exported for Task 9 reuse');
+  const db = makeMockDb();
+  db.stores.rolesUsers = [
+    { userId: 1, roleName: 'root' },
+    { userId: 2, roleName: 'ldx_employee' },
+  ];
+  db.stores.latticeEmployees = [{ id: 20, userId: 2, organizationId: 'org-a', active: true }];
+  db.stores.latticeAiProfiles = [{ username: 'dxos-architect', llmService: 'local-9router', modelName: 'ag/gemini-3.8-flash' }];
+  db.stores.llmServices = [];
+
+  const noSvc = await probeLlmHealth(db, { fetchImpl: async () => assert.fail('Must not fetch when no llmServices row') });
+  assert.equal(noSvc.ok, false);
+  assert.equal(noSvc.status, 503);
+  assert.equal(noSvc.code, 'NO_LLM_SERVICE');
+
+  db.stores.llmServices.push({
+    name: 'local-9router',
+    provider: 'openai-completions',
+    enabled: true,
+    options: { baseURL: 'http://127.0.0.1:20128/v1', apiKey: 'sk-secret-do-not-leak' },
+  });
+
+  // 502 Bad Gateway
+  const actions502 = createDxosAiActions(db, {
+    fetchImpl: async () => ({ ok: false, status: 502 }),
+  });
+  const nonAdminCtx = { method: 'GET', state: { currentUser: { id: 2, username: 'emp2' }, currentRole: 'ldx_employee' }, action: { params: {} } };
+  await actions502.checkLlmHealth(nonAdminCtx, async () => {});
+  assert.equal(nonAdminCtx.body.ok, false);
+  assert.equal(nonAdminCtx.body.status, 502);
+  assert.equal(nonAdminCtx.body.code, 'LLM_BAD_GATEWAY');
+  assert.equal(Object.hasOwn(nonAdminCtx.body, 'baseURL'), false, 'Non-admin caller must omit baseURL');
+  assert.equal(JSON.stringify(nonAdminCtx.body).includes('sk-secret-do-not-leak'), false);
+  assert.equal(Object.hasOwn(nonAdminCtx.body, 'options'), false);
+
+  // 503 Service Unavailable
+  const actions503 = createDxosAiActions(db, {
+    fetchImpl: async () => ({ ok: false, status: 503 }),
+  });
+  const adminCtx = { method: 'GET', state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions503.checkLlmHealth(adminCtx, async () => {});
+  assert.equal(adminCtx.body.ok, false);
+  assert.equal(adminCtx.body.status, 503);
+  assert.equal(adminCtx.body.code, 'LLM_UNAVAILABLE');
+  assert.equal(adminCtx.body.baseURL, 'http://127.0.0.1:20128/v1');
+  assert.equal(JSON.stringify(adminCtx.body).includes('sk-secret-do-not-leak'), false);
+
+  // Timeout classification
+  const timeoutRes = await probeLlmHealth(db, {
+    fetchImpl: async () => { throw Object.assign(new Error('The operation timed out'), { name: 'TimeoutError' }); },
+  });
+  assert.equal(timeoutRes.ok, false);
+  assert.equal(timeoutRes.status, 504);
+  assert.equal(timeoutRes.code, 'LLM_TIMEOUT');
+
+  // Healthy 200
+  const okRes = await probeLlmHealth(db, {
+    isAdmin: true,
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'http://127.0.0.1:20128/v1/models');
+      assert.equal(init.headers.Authorization, 'Bearer sk-secret-do-not-leak');
+      return { ok: true, status: 200 };
+    },
+  });
+  assert.equal(okRes.ok, true);
+  assert.equal(okRes.status, 200);
+  assert.equal(okRes.code, 'OK');
+
+  // 401 LLM_AUTH_ERROR, unauthenticated 401, POST 405, Ollama /api/tags, Gemini x-goog-api-key
+  const authErrRes = await probeLlmHealth(db, { fetchImpl: async () => ({ ok: false, status: 401 }) });
+  assert.equal(authErrRes.ok, false);
+  assert.equal(authErrRes.status, 401);
+  assert.equal(authErrRes.code, 'LLM_AUTH_ERROR');
+  await assert.rejects(() => actions502.checkLlmHealth({ method: 'GET', state: {}, action: { params: {} } }), (e) => e.status === 401);
+  await assert.rejects(() => actions502.checkLlmHealth({ method: 'POST', state: { currentUser: { id: 1 } }, action: { params: {} } }), (e) => e.status === 405);
+
+  db.stores.llmServices.push(
+    { name: 'ollama-local', provider: 'ollama', enabled: true, options: { baseURL: 'http://127.0.0.1:11434/v1' } },
+    { name: 'gemini-cloud', provider: 'gemini', enabled: true, options: { apiKey: 'AIza-secret' } },
+  );
+  const ollamaRes = await probeLlmHealth(db, {
+    llmServiceName: 'ollama-local',
+    fetchImpl: async (url) => { assert.equal(url, 'http://127.0.0.1:11434/api/tags'); return { ok: true, status: 200 }; },
+  });
+  assert.equal(ollamaRes.ok, true);
+  const geminiRes = await probeLlmHealth(db, {
+    llmServiceName: 'gemini-cloud',
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/models');
+      assert.equal(init.headers['x-goog-api-key'], 'AIza-secret');
+      return { ok: true, status: 200 };
+    },
+  });
+  assert.equal(geminiRes.ok, true);
+  assert.equal(JSON.stringify(geminiRes).includes('AIza-secret'), false);
+
+  // 4. portal-agent-launcher skips SSE when unauthenticated, hides float btn on /admin/settings/workflow/*, and renders dxos-ai-health-warning when unhealthy
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origStorage = global.localStorage;
+  try {
+    const fetchCalls = [];
+    global.fetch = async (url, init) => {
+      fetchCalls.push({ url, init });
+      return { ok: true, body: null };
+    };
+    global.localStorage = { getItem: () => '' };
+    global.window = { location: { pathname: '/p/services' }, addEventListener() {}, removeEventListener() {} };
+    global.document = { visibilityState: 'visible', title: 'Services', querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+
+    const makeHarness = () => {
+      const stateSlots = [];
+      const effectSlots = [];
+      let sIdx = 0;
+      let eIdx = 0;
+      const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, i) => d !== prev[i]);
+      const cleanups = [];
+      const React = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => {
+          const i = sIdx++;
+          if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+          return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+        },
+        useEffect: (fn, deps) => {
+          const i = eIdx++;
+          effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+        },
+      };
+      const render = (Comp) => {
+        sIdx = 0; eIdx = 0;
+        const tree = Comp({ children: 'body' });
+        for (const eff of effectSlots) {
+          if (eff.changed) {
+            eff.changed = false;
+            const cln = eff.fn();
+            if (typeof cln === 'function') cleanups.push(cln);
+          }
+        }
+        return tree;
+      };
+      return { React, render, cleanup: () => cleanups.forEach((fn) => fn()) };
+    };
+
+    const unauthHarness = makeHarness();
+    const UnauthLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => '' },
+        getBaseURL: () => '/api/',
+        request: async () => ({ data: { data: { isAdmin: false, employees: [] } } }),
+      }),
+    }, unauthHarness.React, {}, {});
+    unauthHarness.render(UnauthLauncher);
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(fetchCalls.length, 0, 'Unauthenticated portal-agent-launcher must NOT open /api/dxosAi:surfaceEvents');
+    unauthHarness.cleanup();
+
+    // Authenticated on /admin/settings/workflow/automation with 502 health check -> no float button AND dxos-ai-health-warning banner visible
+    global.window.location.pathname = '/admin/settings/workflow/automation';
+    const warnHarness = makeHarness();
+    const WarnLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'tok-admin' },
+        getBaseURL: () => '/api/',
+        request: async (req) => {
+          if (req.url === 'dxosAi:checkLlmHealth') {
+            return { data: { data: { ok: false, status: 502, code: 'LLM_BAD_GATEWAY', message: 'Upstream LLM gateway lỗi 502 Bad Gateway.' } } };
+          }
+          return { data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect', nickname: 'Kiến trúc sư Hệ thống - Block AI' }] } } };
+        },
+      }),
+    }, warnHarness.React, {}, {});
+    warnHarness.render(WarnLauncher);
+    await new Promise((r) => setTimeout(r, 20));
+    warnHarness.render(WarnLauncher);
+    await new Promise((r) => setTimeout(r, 20));
+    let warnTree = warnHarness.render(WarnLauncher);
+    const findByTestId = (node, tid) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.props?.['data-testid'] === tid) return node;
+      const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+      for (const k of kids) {
+        const hit = findByTestId(k, tid);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    assert.equal(findByTestId(warnTree, 'dxos-portal-ai-float-btn'), null, 'Must not render float button on /admin/settings/workflow/*');
+    const warnBanner = findByTestId(warnTree, 'dxos-ai-health-warning');
+    assert.ok(warnBanner, 'Must render dxos-ai-health-warning when checkLlmHealth returns !ok');
+    assert.ok(JSON.stringify(warnBanner).includes('502'));
+    findByTestId(warnTree, 'dxos-ai-health-dismiss-btn').props.onClick();
+    warnTree = warnHarness.render(WarnLauncher);
+    assert.equal(findByTestId(warnTree, 'dxos-ai-health-warning'), null, 'Dismissing health warning must hide banner');
+    warnHarness.cleanup();
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.localStorage = origStorage;
+  }
 });

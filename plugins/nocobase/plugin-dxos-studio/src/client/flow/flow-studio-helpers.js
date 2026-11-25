@@ -226,10 +226,19 @@ function renderSseDiffBanner(h, { sseDiff, onUndo, onDismiss }) {
   );
 }
 
+function triggerFlowAiArchitect(app, fc) {
+  if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+    window.dispatchEvent(new CustomEvent('latticedx:ai-chat-opening', { detail: { flowContext: fc } }));
+  }
+  const ai = app?.flowEngine?.context?.ai || app?.context?.ai;
+  if (ai?.triggerTask) return ai.triggerTask({ aiEmployee: 'dxos-architect', auto: true, open: true, flowContext: fc, tasks: [{ autoSend: false, message: { system: `[Ngữ cảnh Workflow Automation Studio: organizationId="${cleanCtx(fc?.organizationId)}", ruleKey="${cleanCtx(fc?.ruleKey)}", nodeCount=${Number(fc?.nodeCount) || 0}, selectedNodeId="${cleanCtx(fc?.selectedNodeId)}", selectedRunUid="${cleanCtx(fc?.selectedRunUid)}"]\nHãy hỗ trợ thiết kế, sửa lỗi hoặc chạy thử quy trình qua công cụ dxos_configure_workflow.` } }] });
+  if (typeof window !== 'undefined' && typeof CustomEvent === 'function') window.dispatchEvent?.(new CustomEvent('latticedx:open-ai-architect', { detail: { flowContext: fc } }));
+}
+
 module.exports = {
   DEFAULT_NODES, DEFAULT_BLUEPRINTS, ROW, INP,
   unwrap, errMsg, primaryEvt, cleanCtx, syncMeta, btnS,
   freshDoc, FRESH_DATA, FRESH_RUN, makeFreshUi, buildRuleSavePayload, dispatchFlowKeyDown,
   renderValidationPopover, renderSettingsPopover, renderBlueprintsGallery, renderDslModal, renderUnsavedGuard,
-  renderSseDiffBanner, insertVariableAtCursor, buildUpstreamPinnedInputs, computeGraphDiffSummary,
+  renderSseDiffBanner, triggerFlowAiArchitect, insertVariableAtCursor, buildUpstreamPinnedInputs, computeGraphDiffSummary,
 };

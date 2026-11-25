@@ -112,6 +112,7 @@ class DxosAiPlugin extends Plugin {
       actions: ['dxosAi:*'],
     });
     this.app.acl.allow('dxosAi', 'portalAgents', 'loggedIn');
+    this.app.acl.allow('dxosAi', 'checkLlmHealth', 'loggedIn');
     this.app.acl.allow('dxosAi', 'pageSurfaceState', 'loggedIn');
     this.app.acl.allow('dxosAi', 'surfaceEvents', 'loggedIn');
     this.app.acl.allow('dxosAi', 'listApprovals', 'loggedIn');

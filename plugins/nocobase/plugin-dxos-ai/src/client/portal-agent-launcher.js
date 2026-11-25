@@ -82,6 +82,25 @@ function readCurrentPathname() {
   return String(window.location.pathname || '');
 }
 
+function resolveClientAuthToken(api) {
+  if (!api) return '';
+  try {
+    const t = typeof api.auth?.getToken === 'function' ? api.auth.getToken() : '';
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    const t = api.auth?.token;
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
+      const t = localStorage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    }
+  } catch {}
+  return '';
+}
+
 function sanitizePageTitle(rawTitle) {
   return String(rawTitle || '')
     .replace(/[\r\n\t\0<>[\]{}`#]/g, ' ')
@@ -256,6 +275,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
     const [isAdmin, setIsAdmin] = React.useState(false);
     const [dialogOpen, setDialogOpen] = React.useState(() => isNativeAiChatOpen());
     const [pendingUpdate, setPendingUpdate] = React.useState(null);
+    const [llmHealth, setLlmHealth] = React.useState(null);
 
     React.useEffect(() => {
       if (typeof window === 'undefined') return undefined;
@@ -265,7 +285,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
             const target = m?.target;
             const el = typeof target?.closest === 'function' ? target : target?.parentElement;
             if (!el || typeof el.closest !== 'function') return false;
-            return Boolean(el.closest('[data-testid="dxos-portal-ai-float-btn"], [data-testid="dxos-surface-update-banner"]'));
+            return Boolean(el.closest('[data-testid="dxos-portal-ai-float-btn"], [data-testid="dxos-surface-update-banner"], [data-testid="dxos-ai-health-warning"]'));
           });
           if (allOwnControls) return;
         }
@@ -377,21 +397,28 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       const connectSurfaceEvents = async () => {
         if (cancelled) return;
         if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+        const token = resolveClientAuthToken(api);
+        if (!token) return;
         controller = typeof AbortController === 'function' ? new AbortController() : null;
+        let stopReconnect = false;
         try {
-          const token = api?.auth?.getToken?.()
-            || (typeof localStorage !== 'undefined' ? localStorage.getItem('NOCOBASE_TOKEN') : '');
           const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
           const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
           const url = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(sseSlug)}`;
-          const headers = { Accept: 'text/event-stream' };
-          if (token) headers.Authorization = `Bearer ${token}`;
+          const headers = {
+            Accept: 'text/event-stream',
+            Authorization: `Bearer ${token}`,
+          };
           const res = await fetch(url, {
             method: 'GET',
             headers,
             credentials: 'same-origin',
             ...(controller ? { signal: controller.signal } : {}),
           });
+          if (res && (res.status === 401 || res.status === 403)) {
+            stopReconnect = true;
+            return;
+          }
           if (!res?.ok || !res.body?.getReader) throw new Error('SSE_UNAVAILABLE');
           attempt = 0;
           const reader = res.body.getReader();
@@ -409,9 +436,10 @@ function createPortalAgentLauncher(client, React, _antd, app) {
         } catch {
           // Graceful reconnect unless aborted cleanly
         }
-        if (!cancelled && (typeof document === 'undefined' || document.visibilityState !== 'hidden')) {
+        if (!cancelled && !stopReconnect && (typeof document === 'undefined' || document.visibilityState !== 'hidden')) {
           const delay = Math.min(15000, 1500 * (2 ** Math.min(4, attempt++)));
           reconnectTimer = setTimeout(connectSurfaceEvents, delay);
+          if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
         }
       };
 
@@ -438,10 +466,54 @@ function createPortalAgentLauncher(client, React, _antd, app) {
     const defaultEmployee = (!portalSlug && onFlowStudio && !isAdmin)
       ? null
       : pickDefaultPortalEmployee(employees, isAdmin);
-    const showFloatButton = Boolean((portalSlug || onFlowStudio) && defaultEmployee && !dialogOpen);
+    const showFloatButton = Boolean(portalSlug && !onFlowStudio && defaultEmployee && !dialogOpen);
+
+    const checkLlmHealthNow = async () => {
+      if (!api?.request || !resolveClientAuthToken(api)) return null;
+      try {
+        const res = await api.request({
+          url: 'dxosAi:checkLlmHealth',
+          method: 'get',
+          skipNotify: true,
+        });
+        const health = res?.data?.data || res?.data || null;
+        if (health && health.ok === false) {
+          setLlmHealth(health);
+        } else if (health && health.ok === true) {
+          setLlmHealth(null);
+        }
+        return health;
+      } catch (err) {
+        const status = Number(err?.response?.status ?? err?.status);
+        if (status === 502 || status === 503 || status === 504) {
+          const fallbackHealth = {
+            ok: false,
+            status,
+            code: status === 502 ? 'LLM_BAD_GATEWAY' : (status === 504 ? 'LLM_TIMEOUT' : 'LLM_UNAVAILABLE'),
+            message: err?.response?.data?.errors?.[0]?.message || err?.message || `Upstream LLM error (HTTP ${status}).`,
+          };
+          setLlmHealth(fallbackHealth);
+          return fallbackHealth;
+        }
+        return null;
+      }
+    };
+
+    React.useEffect(() => {
+      if (!resolveClientAuthToken(api) || (!portalSlug && !onFlowStudio) || !employees.length) {
+        return undefined;
+      }
+      let cancelled = false;
+      checkLlmHealthNow().then((health) => {
+        if (cancelled) return;
+        if (health && health.ok === false) setLlmHealth(health);
+      }).catch(() => {});
+      return () => { cancelled = true; };
+    }, [api, portalSlug, onFlowStudio, employees.length]);
 
     const handleOpenChat = async (e) => {
       e?.stopPropagation?.();
+      await checkLlmHealthNow();
       if (onFlowStudio && typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
         const evt = typeof CustomEvent === 'function'
           ? new CustomEvent('latticedx:ai-chat-opening', { detail: { pathname } })
@@ -456,6 +528,46 @@ function createPortalAgentLauncher(client, React, _antd, app) {
         flowContext: onFlowStudio ? readFlowStudioContext() : null,
       });
     };
+
+    React.useEffect(() => {
+      if (!onFlowStudio || typeof window === 'undefined' || typeof window.addEventListener !== 'function') return undefined;
+      const onOpenArchitect = () => { handleOpenChat(); };
+      window.addEventListener('latticedx:open-ai-architect', onOpenArchitect);
+      return () => { window.removeEventListener?.('latticedx:open-ai-architect', onOpenArchitect); };
+    }, [onFlowStudio, defaultEmployee, pathname, portalSlug]);
+
+    const healthWarningNode = (llmHealth && llmHealth.ok === false && (portalSlug || onFlowStudio)) ? h('div', {
+      'data-testid': 'dxos-ai-health-warning',
+      role: 'alert',
+      style: {
+        position: 'fixed',
+        top: 56,
+        right: 20,
+        zIndex: 1061,
+        maxWidth: 420,
+        display: 'flex',
+        alignItems: 'flex-start',
+        gap: 10,
+        padding: '10px 14px',
+        borderRadius: 10,
+        border: '1px solid #fca5a5',
+        background: '#fef2f2',
+        color: '#991b1b',
+        boxShadow: '0 10px 25px rgba(15, 23, 42, 0.16)',
+        fontSize: 12,
+      },
+    },
+      h('div', { style: { flex: 1, display: 'grid', gap: 2 } },
+        h('strong', null, `Cảnh báo LLM (${llmHealth.code || 'LLM_UNAVAILABLE'} · HTTP ${llmHealth.status || 503})`),
+        h('span', null, String(llmHealth.message || 'Dịch vụ LLM hiện không phản hồi. Vui lòng kiểm tra cấu hình trong DX-OS AI Studio.')),
+      ),
+      h('button', {
+        type: 'button',
+        'data-testid': 'dxos-ai-health-dismiss-btn',
+        onClick: () => setLlmHealth(null),
+        style: { padding: '2px 7px', borderRadius: 6, border: '1px solid #fca5a5', background: '#ffffff', color: '#991b1b', cursor: 'pointer', fontWeight: 700 },
+      }, '×'),
+    ) : null;
 
     const bannerNode = (pendingUpdate && portalSlug && !onFlowStudio) ? h('div', {
       'data-testid': 'dxos-surface-update-banner',
@@ -494,11 +606,12 @@ function createPortalAgentLauncher(client, React, _antd, app) {
     ) : null;
 
     if (!showFloatButton) {
-      return h(React.Fragment, null, children, bannerNode);
+      return h(React.Fragment, null, children, healthWarningNode, bannerNode);
     }
 
     return h(React.Fragment, null,
       children,
+      healthWarningNode,
       bannerNode,
       h('style', null, '.dxos-portal-ai-float-btn:hover{transform:translateX(-8px)!important;opacity:1!important;}'),
       h('div', {
@@ -540,6 +653,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
 module.exports = {
   inferPortalSlug,
   isFlowStudioPath,
+  resolveClientAuthToken,
   readFlowStudioContext,
   readActivePageTitle,
   isNativeAiChatOpen,

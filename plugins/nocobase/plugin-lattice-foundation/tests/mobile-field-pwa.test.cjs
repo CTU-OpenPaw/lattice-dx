@@ -1796,26 +1796,56 @@ test('Task 17 (Outbox Inspector & Notification Badge SSE): lists pending/failed 
     window: global.window,
     document: global.document,
     indexedDB: globalThis.indexedDB,
-    EventSource: globalThis.EventSource,
+    fetch: globalThis.fetch,
   };
 
-  let createdEs = null;
-  let closedEs = false;
-  class FakeEventSource {
-    constructor(url) {
-      this.url = url;
-      this.listeners = new Map();
-      createdEs = this;
-    }
-    addEventListener(type, fn) {
-      this.listeners.set(type, fn);
-    }
-    emit(type, data) {
-      const fn = this.listeners.get(type);
-      if (fn) fn({ data: typeof data === 'string' ? data : JSON.stringify(data) });
-    }
-    close() { closedEs = true; }
-  }
+  const encoder = new TextEncoder();
+  const fetchCalls = [];
+  let pushSseChunk = null;
+  let closeSseStream = null;
+  const mockFetch = async (url, init) => {
+    const ctrlState = { aborted: false };
+    init?.signal?.addEventListener?.('abort', () => {
+      ctrlState.aborted = true;
+      closeSseStream?.();
+    });
+    fetchCalls.push({ url, init, ctrlState });
+    const pending = ['event: snapshot\ndata: {"portalSlug":"mobile","revision":1}\n\n'];
+    let waitingResolve = null;
+    let closed = false;
+    pushSseChunk = (raw) => {
+      if (closed) return;
+      if (waitingResolve) {
+        const r = waitingResolve;
+        waitingResolve = null;
+        r({ done: false, value: encoder.encode(raw) });
+      } else {
+        pending.push(raw);
+      }
+    };
+    closeSseStream = () => {
+      closed = true;
+      if (waitingResolve) {
+        const r = waitingResolve;
+        waitingResolve = null;
+        r({ done: true });
+      }
+    };
+    return {
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (pending.length) return { done: false, value: encoder.encode(pending.shift()) };
+            if (closed) return { done: true };
+            return new Promise((resolve) => { waitingResolve = resolve; });
+          },
+          cancel: async () => { closeSseStream(); },
+        }),
+      },
+    };
+  };
 
   let failRetry = false;
   let serverUnread = 3;
@@ -1838,11 +1868,11 @@ test('Task 17 (Outbox Inspector & Notification Badge SSE): lists pending/failed 
   };
 
   Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: mockIdb });
-  Object.defineProperty(globalThis, 'EventSource', { configurable: true, writable: true, value: FakeEventSource });
+  Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: mockFetch });
   Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
   Object.defineProperty(global, 'window', {
     configurable: true,
-    value: { localStorage: storage, EventSource: FakeEventSource, addEventListener() {}, removeEventListener() {} },
+    value: { localStorage: storage, addEventListener() {}, removeEventListener() {} },
   });
   Object.defineProperty(global, 'document', {
     configurable: true,
@@ -1856,20 +1886,23 @@ test('Task 17 (Outbox Inspector & Notification Badge SSE): lists pending/failed 
     await new Promise((r) => setTimeout(r, 20));
     tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
 
-    // 1. Header notification badge shows unreadCount = 3 and updates via SSE
+    // 1. Header notification badge shows unreadCount = 3 and updates via authenticated fetch() SSE
     const notifBadge = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge');
     assert.ok(notifBadge, 'Notification badge must render in header');
     assert.ok(collectText(notifBadge).includes('3'));
-    assert.ok(createdEs, 'EventSource must subscribe when authenticated');
+    assert.equal(fetchCalls.length, 1, 'Authenticated fetch SSE must subscribe');
+    assert.equal(fetchCalls[0].url, '/api/dxosAi:surfaceEvents?portalSlug=mobile');
+    assert.equal(fetchCalls[0].init.headers.Authorization, 'Bearer jwt-mobile-1');
+    assert.equal(fetchCalls[0].init.headers.Accept, 'text/event-stream');
 
-    createdEs.emit('notification', { unreadCount: 7 });
+    pushSseChunk('event: notification\ndata: {"unreadCount":7}\n\n');
+    await new Promise((r) => setTimeout(r, 15));
     tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
     assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge')).includes('7'));
 
     serverUnread = 9;
-    createdEs.emit('update', { kind: 'notification', type: 'notification', portalSlug: 'mobile' });
-    await Promise.resolve();
-    await Promise.resolve();
+    pushSseChunk('event: update\ndata: {"kind":"notification","type":"notification","portalSlug":"mobile"}\n\n');
+    await new Promise((r) => setTimeout(r, 20));
     tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
     assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge')).includes('9'));
     serverUnread = 3;
@@ -1922,13 +1955,55 @@ test('Task 17 (Outbox Inspector & Notification Badge SSE): lists pending/failed 
     assert.equal((await listOutboxItems({ indexedDB: mockIdb, storage })).length, 0);
 
     fakeReact._unmount();
-    assert.equal(closedEs, true, 'EventSource must close on unmount');
+    assert.equal(fetchCalls[0].ctrlState.aborted, true, 'Authenticated fetch SSE stream must abort on unmount');
   } finally {
     Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
     Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
     Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
     Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: prevGlobals.indexedDB });
-    Object.defineProperty(globalThis, 'EventSource', { configurable: true, writable: true, value: prevGlobals.EventSource });
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
+  }
+});
+
+test('Task 4 (Review Focus #1): MobileFieldPwaPage makes ZERO SSE or unreadCount requests when NOCOBASE_TOKEN is empty', async () => {
+  const { createMobileFieldPwaPage, isAuthenticatedMobileClient } = require('../src/client-v2/mobile-field-pwa');
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+  const mockIdb = createMockIndexedDb();
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+    indexedDB: globalThis.indexedDB,
+    fetch: globalThis.fetch,
+  };
+  const fetchCalls = [];
+  let apiCalls = 0;
+  const unauthApi = {
+    auth: { role: 'ldx_driver', getToken: () => '' },
+    request: async () => { apiCalls += 1; return { data: {} }; },
+  };
+  assert.equal(isAuthenticatedMobileClient(unauthApi, storage), false);
+
+  Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: mockIdb });
+  Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: async (u, i) => { fetchCalls.push({ u, i }); return { ok: true, body: null }; } });
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'window', { configurable: true, value: { localStorage: storage, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(global, 'document', { configurable: true, value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } } });
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: unauthApi });
+    fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(fetchCalls.length, 0, 'Unauthenticated PWA must make ZERO fetch SSE calls');
+    assert.equal(apiCalls, 0, 'Unauthenticated PWA must make ZERO unreadCount API calls');
+    fakeReact._unmount();
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: prevGlobals.indexedDB });
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
   }
 });
 

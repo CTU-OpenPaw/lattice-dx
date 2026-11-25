@@ -14,7 +14,7 @@ const {
   DEFAULT_NODES, DEFAULT_BLUEPRINTS, ROW, INP, unwrap, errMsg, primaryEvt, cleanCtx,
   syncMeta, btnS, freshDoc: makeFreshDoc, FRESH_DATA, FRESH_RUN, makeFreshUi, buildRuleSavePayload, dispatchFlowKeyDown,
   renderValidationPopover, renderSettingsPopover, renderBlueprintsGallery, renderDslModal, renderUnsavedGuard,
-  renderSseDiffBanner,
+  renderSseDiffBanner, triggerFlowAiArchitect,
 } = require('./flow-studio-helpers');
 const { validateFlowClient, buildUpstreamPinnedInputs, computeGraphDiffSummary } = require('./flow-validation');
 const { createFlowTestRunner } = require('./flow-test-runner');
@@ -138,15 +138,16 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
       return { ...d, dirty: true, rule: { ...d.rule, ...meta }, graph: hasS ? { ...d.graph, settings: nextS } : d.graph };
     });
 
+    const flowCtx = {
+      organizationId: effectiveOrg, view: ui.view, ruleKey: doc.rule.ruleKey || '', ruleName: doc.rule.name || '',
+      selectedNodeId: doc.selId || '', selectedNodeType: selectedNode?.type || '', selectedNodeLabel: selectedNode?.label || '',
+      selectedRunUid: runUi.selectedRun?.runUid || '', selectedRunStatus: runUi.selectedRun?.status || '',
+      nodeCount: Array.isArray(doc.graph?.nodes) ? doc.graph.nodes.length : 0,
+      nodeSummary: (doc.graph?.nodes || []).slice(0, 20).map((n) => ({ id: n.id, type: n.type, label: n.label || '' })),
+    };
     React.useEffect(() => {
       if (typeof window === 'undefined') return undefined;
-      window.__LATTICEDX_FLOW_CONTEXT__ = {
-        organizationId: effectiveOrg, view: ui.view, ruleKey: doc.rule.ruleKey || '', ruleName: doc.rule.name || '',
-        selectedNodeId: doc.selId || '', selectedNodeType: selectedNode?.type || '', selectedNodeLabel: selectedNode?.label || '',
-        selectedRunUid: runUi.selectedRun?.runUid || '', selectedRunStatus: runUi.selectedRun?.status || '',
-        nodeCount: Array.isArray(doc.graph?.nodes) ? doc.graph.nodes.length : 0,
-        nodeSummary: (doc.graph?.nodes || []).slice(0, 20).map((n) => ({ id: n.id, type: n.type, label: n.label || '' })),
-      };
+      window.__LATTICEDX_FLOW_CONTEXT__ = flowCtx;
       return () => { if (typeof window !== 'undefined') delete window.__LATTICEDX_FLOW_CONTEXT__; };
     }, [effectiveOrg, ui.view, doc.rule.ruleKey, doc.rule.name, doc.selId, doc.graph.nodes, runUi.selectedRun]);
 
@@ -334,6 +335,7 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
     const valTone = validation.errors.length ? 'err' : (validation.warnings.length ? 'act' : 'ok');
     const valLbl = validation.errors.length ? `⚠ ${validation.errors.length} lỗi` : (validation.warnings.length ? `⚠ ${validation.warnings.length} cảnh báo` : '✓ Hợp lệ');
     const tools = [
+      ['dxos-flow-ai-architect-btn', '✦ AI Architect', () => triggerFlowAiArchitect(props.app || app, flowCtx), 'ai', false],
       ['dxos-flow-validation-btn', valLbl, () => setUi((u) => ({ ...u, valOpen: !u.valOpen, testRunnerOpen: false, settingsOpen: false, n8nOpen: false })), valTone, false],
       ['dxos-flow-test-data-btn', '🧪 Test Data', () => setUi((u) => ({ ...u, testRunnerOpen: !u.testRunnerOpen, valOpen: false, settingsOpen: false, n8nOpen: false })), ui.testRunnerOpen ? 'act' : 'ghost', false],
       ['dxos-flow-n8n-setup-btn', '⚡ n8n', () => setUi((u) => ({ ...u, n8nOpen: !u.n8nOpen, testRunnerOpen: false, valOpen: false, settingsOpen: false })), ui.n8nOpen ? 'act' : 'ghost', false],

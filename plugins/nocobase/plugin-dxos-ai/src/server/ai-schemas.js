@@ -121,7 +121,7 @@ const STARTER_AI_BLUEPRINTS = [
   },
   {
     username: 'dxos-architect',
-    nickname: 'Kiến trúc sư Hệ thống & Block AI',
+    nickname: 'Kiến trúc sư Hệ thống - Block AI',
     position: 'Admin System Builder (Chỉ Root/Admin)',
     departmentScope: 'platform-admin',
     avatar: 'nocobase-002-male',
@@ -177,7 +177,7 @@ const STARTER_AI_BLUEPRINTS = [
   },
   {
     username: 'dxos-ops',
-    nickname: 'Chuyên viên Kho lạnh & Sự cố IoT AI',
+    nickname: 'Chuyên viên Kho lạnh - Sự cố IoT AI',
     position: 'Kỹ sư AI Vận hành IT/OT',
     departmentScope: 'operations-itot',
     avatar: 'nocobase-001-male',
@@ -244,7 +244,7 @@ const STARTER_AI_BLUEPRINTS = [
   },
   {
     username: 'dxos-workspace',
-    nickname: 'Trợ lý Nội bộ, Mua sắm & P.A.R.A. AI',
+    nickname: 'Trợ lý Nội bộ, Mua sắm và P.A.R.A. AI',
     position: 'Chuyên viên AI Dịch vụ & Tri thức',
     departmentScope: 'workspace-para',
     avatar: 'nocobase-004-female',

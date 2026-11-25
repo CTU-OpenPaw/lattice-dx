@@ -1526,7 +1526,7 @@ test('Task 1 remediation: evaluateSlaBreaches never holds a DB transaction open 
   }
 });
 
-test('Task 16: Notification Bell supports /v/mobile, Topbar variant, EventSource SSE updates/reconnect/cleanup, and server pub/sub bridge', async () => {
+test('Task 16: Notification Bell supports /v/mobile, Topbar variant, authenticated fetch SSE updates/reconnect/cleanup, and server pub/sub bridge', async () => {
   const {
     isVisibleBellPath,
     resolveBellPortalSlug,
@@ -1547,39 +1547,76 @@ test('Task 16: Notification Bell supports /v/mobile, Topbar variant, EventSource
   assert.equal(resolveBellPortalSlug('/p/incidents/case-1'), 'incidents');
   assert.equal(resolveBellPortalSlug('/admin/lattice-workspace'), 'admin');
 
-  // 2. Topbar Bell renders inline variant, subscribes via EventSource, reconnects on error, and closes on unmount
+  // 2. Topbar Bell renders inline variant, subscribes via authenticated fetch() SSE, updates badge, and aborts on unmount
   const prevWindow = globalThis.window;
   const prevDocument = globalThis.document;
-  const prevEventSource = globalThis.EventSource;
+  const prevFetch = globalThis.fetch;
   try {
-    const esInstances = [];
-    class FakeEventSource {
-      constructor(url, opts) {
-        this.url = url;
-        this.opts = opts;
-        this.listeners = new Map();
-        this.closed = false;
-        esInstances.push(this);
-      }
-      addEventListener(type, fn) {
-        this.listeners.set(type, fn);
-      }
-      emit(type, payload) {
-        const fn = this.listeners.get(type);
-        if (fn) fn({ type, data: JSON.stringify(payload) });
-      }
-      close() {
-        this.closed = true;
-      }
-    }
+    const encoder = new TextEncoder();
+    const fetchCalls = [];
+    let pushChunk = null;
+    let closeStream = null;
 
-    globalThis.EventSource = FakeEventSource;
+    globalThis.fetch = async (url, init) => {
+      const controller = {
+        aborted: false,
+        signal: init?.signal || null,
+      };
+      init?.signal?.addEventListener?.('abort', () => {
+        controller.aborted = true;
+        closeStream?.();
+      });
+      fetchCalls.push({ url, init, controller });
+      const pendingChunks = [
+        'event: snapshot\ndata: {"portalSlug":"incidents","revision":1}\n\n',
+      ];
+      let waitingResolve = null;
+      let closed = false;
+      pushChunk = (raw) => {
+        if (closed) return;
+        if (waitingResolve) {
+          const r = waitingResolve;
+          waitingResolve = null;
+          r({ done: false, value: encoder.encode(raw) });
+        } else {
+          pendingChunks.push(raw);
+        }
+      };
+      closeStream = () => {
+        closed = true;
+        if (waitingResolve) {
+          const r = waitingResolve;
+          waitingResolve = null;
+          r({ done: true });
+        }
+      };
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (pendingChunks.length) {
+                return { done: false, value: encoder.encode(pendingChunks.shift()) };
+              }
+              if (closed) return { done: true };
+              return new Promise((resolve) => {
+                waitingResolve = resolve;
+              });
+            },
+            cancel: async () => {
+              closeStream();
+            },
+          }),
+        },
+      };
+    };
+
     globalThis.window = {
       location: { pathname: '/v/mobile', assign() {} },
       matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
       addEventListener() {},
       removeEventListener() {},
-      EventSource: FakeEventSource,
     };
     globalThis.document = {
       visibilityState: 'visible',
@@ -1647,8 +1684,7 @@ test('Task 16: Notification Bell supports /v/mobile, Topbar variant, EventSource
     };
 
     let ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
-    await Promise.resolve();
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 15));
     ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
 
     const wrap = find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-bell-wrap');
@@ -1656,29 +1692,30 @@ test('Task 16: Notification Bell supports /v/mobile, Topbar variant, EventSource
     assert.equal(wrap.props['data-variant'], 'topbar');
     assert.equal(wrap.props.style.position, 'relative');
     assert.equal(wrap.props.style.height, 46);
-    assert.equal(esInstances.length, 1);
-    assert.equal(esInstances[0].url, '/api/dxosAi:surfaceEvents?portalSlug=incidents');
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, '/api/dxosAi:surfaceEvents?portalSlug=incidents');
+    assert.equal(fetchCalls[0].init.headers.Authorization, 'Bearer tok-mobile');
+    assert.equal(fetchCalls[0].init.headers.Accept, 'text/event-stream');
     assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '2');
 
     // Direct unreadCount SSE update on 'unread_count'
-    esInstances[0].emit('unread_count', { unreadCount: 5 });
+    pushChunk('event: unread_count\ndata: {"unreadCount":5}\n\n');
+    await new Promise((r) => setTimeout(r, 15));
     ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
     assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '5');
 
     // 'update' frame emitted by surface-events.js with type: 'notification' triggers unreadCount refresh
     serverUnread = 9;
     const beforeUpdateCalls = unreadCalls;
-    esInstances[0].emit('update', { kind: 'notification', type: 'notification', portalSlug: 'incidents' });
-    await Promise.resolve();
-    await Promise.resolve();
+    pushChunk('event: update\ndata: {"kind":"notification","type":"notification","portalSlug":"incidents"}\n\n');
+    await new Promise((r) => setTimeout(r, 15));
     assert.equal(unreadCalls, beforeUpdateCalls + 1);
     ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
     assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '9');
 
-    // Error closes EventSource cleanly; unmount cleans up all EventSource handles
-    esInstances[0].onerror();
-    assert.equal(esInstances[0].closed, true);
+    // Unmount aborts active SSE fetch stream cleanly
     while (cleanups.length) cleanups.pop()();
+    assert.equal(fetchCalls[0].controller.aborted, true);
 
     // Floating provider suppresses duplicate desktop pill when hasTopbar: true, but still renders on /v/mobile
     state.length = 0;
@@ -1705,8 +1742,8 @@ test('Task 16: Notification Bell supports /v/mobile, Topbar variant, EventSource
     else globalThis.window = prevWindow;
     if (prevDocument === undefined) delete globalThis.document;
     else globalThis.document = prevDocument;
-    if (prevEventSource === undefined) delete globalThis.EventSource;
-    else globalThis.EventSource = prevEventSource;
+    if (prevFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = prevFetch;
   }
 
   // 3. Server dispatchNotification publishes to 'latticedx:surface-updates'
@@ -1751,4 +1788,98 @@ test('Task 16: Notification Bell supports /v/mobile, Topbar variant, EventSource
   }, { app: mockApp });
   assert.equal(deduped.deduplicated, true);
   assert.equal(published.length, 1);
+});
+
+test('Task 4 (Review Focus #1): Notification Bell skips /api/dxosAi:surfaceEvents completely when NOCOBASE_TOKEN is empty and aborts reconnect on 401', async () => {
+  const { createTopbarNotificationBell, isAuthenticatedClient } = require('../src/client/notification-bell');
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevFetch = globalThis.fetch;
+  const prevStorage = globalThis.localStorage;
+  try {
+    const fetchCalls = [];
+    globalThis.fetch = async (url, init) => {
+      fetchCalls.push({ url, init });
+      return { ok: false, status: 401, body: null };
+    };
+    globalThis.localStorage = { getItem: () => '' };
+    globalThis.window = {
+      location: { pathname: '/p/incidents', assign() {} },
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    globalThis.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+
+    let apiCalls = 0;
+    const unauthApi = {
+      auth: { role: 'ldx_driver', getToken: () => '' },
+      request: async () => { apiCalls += 1; return { data: {} }; },
+    };
+    assert.equal(isAuthenticatedClient(unauthApi), false, 'Unauthenticated client without token must return false even if role is set');
+
+    let cursor = 0;
+    const state = [];
+    const effects = [];
+    const cleanups = [];
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState(init) {
+        const idx = cursor++;
+        if (!(idx in state)) state[idx] = typeof init === 'function' ? init() : init;
+        return [state[idx], (v) => { state[idx] = typeof v === 'function' ? v(state[idx]) : v; }];
+      },
+      useEffect(fn, deps) {
+        const idx = cursor++;
+        const prev = state[idx];
+        if (!prev || !deps || deps.some((d, i) => d !== prev.deps[i])) {
+          state[idx] = { deps };
+          effects.push({ idx, fn });
+        }
+      },
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useRef: (init) => {
+        const idx = cursor++;
+        return state[idx] ?? (state[idx] = { current: init });
+      },
+    };
+
+    const TopbarBell = createTopbarNotificationBell({ useAPIClient: () => unauthApi }, React, {}, {});
+    cursor = 0;
+    const ui = TopbarBell({ variant: 'topbar', pathname: '/p/incidents' });
+    while (effects.length) {
+      const cln = effects.shift().fn();
+      if (typeof cln === 'function') cleanups.push(cln);
+    }
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(ui, null);
+    assert.equal(fetchCalls.length, 0, 'Unauthenticated Bell must make ZERO fetch SSE calls');
+    assert.equal(apiCalls, 0, 'Unauthenticated Bell must make ZERO API calls');
+    while (cleanups.length) cleanups.pop()();
+
+    // Token present but server returns 401 -> stops without retry spam
+    state.length = 0;
+    const expiredApi = {
+      auth: { role: 'ldx_driver', getToken: () => 'expired-tok' },
+      request: async () => ({ data: { data: { unreadCount: 0 } } }),
+    };
+    const ExpiredBell = createTopbarNotificationBell({ useAPIClient: () => expiredApi }, React, {}, {});
+    cursor = 0;
+    ExpiredBell({ variant: 'topbar', pathname: '/p/incidents' });
+    while (effects.length) {
+      const cln = effects.shift().fn();
+      if (typeof cln === 'function') cleanups.push(cln);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].init.headers.Authorization, 'Bearer expired-tok');
+    while (cleanups.length) cleanups.pop()();
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window; else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document; else globalThis.document = prevDocument;
+    if (prevFetch === undefined) delete globalThis.fetch; else globalThis.fetch = prevFetch;
+    if (prevStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevStorage;
+  }
 });
