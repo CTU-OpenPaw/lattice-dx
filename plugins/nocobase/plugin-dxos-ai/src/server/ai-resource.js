@@ -62,7 +62,12 @@ const {
   rebuildEnterpriseApp,
   exportAppBundle,
   teardownBuiltApp: teardownBuiltAppEngine,
+  planEnterpriseApp,
+  patchEnterpriseApp,
+  rollbackEnterpriseApp,
+  listBuiltAppVersions: listBuiltAppVersionsEngine,
 } = require('./app-builder-orchestrator');
+const { assertNoPrototypePollution } = require('./app-builder-planner');
 
 const TRIAGE_SCAN_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_dispatcher']);
 const SUPPORTED_HITL_TOOLS = new Set([
@@ -2244,6 +2249,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const targetDb = await requireAdmin(ctx);
       const actor = await resolveActorScope(ctx, targetDb);
       const payload = readActionPayload(ctx);
+      assertNoPrototypePollution(payload, 'rebuildBuiltApp');
       const requestedOrg = String(payload.organizationId || ctx?.action?.params?.organizationId || '').trim();
       if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
         throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép dựng lại ứng dụng của tổ chức khác.');
@@ -2258,6 +2264,104 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         specPatch: payload.specPatch || null,
         maxHealRounds: payload.maxHealRounds,
       }, { env, fetchImpl });
+      if (typeof next === 'function') await next();
+    },
+
+    async planBuiltApp(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      assertNoPrototypePollution(payload, 'planBuiltApp');
+      const requestedOrg = String(payload.organizationId || ctx?.action?.params?.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép lập kế hoạch ứng dụng của tổ chức khác.');
+      }
+      const effectiveActor = isRootActor(actor) && requestedOrg ? { ...actor, organizationId: requestedOrg } : actor;
+      ctx.body = await planEnterpriseApp(ctx, targetDb, effectiveActor, {
+        ...payload,
+        ...(ctx?.action?.params?.appKey && !payload.appKey ? { appKey: ctx.action.params.appKey } : {}),
+      });
+      if (typeof next === 'function') await next();
+    },
+
+    async patchBuiltApp(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      assertNoPrototypePollution(payload, 'patchBuiltApp');
+      const requestedOrg = String(payload.organizationId || ctx?.action?.params?.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép cập nhật ứng dụng của tổ chức khác.');
+      }
+      const effectiveActor = isRootActor(actor) && requestedOrg ? { ...actor, organizationId: requestedOrg } : actor;
+      const appKey = String(payload.appKey || ctx?.action?.params?.appKey || ctx?.action?.params?.filterByTk || '').trim();
+      if (!appKey) {
+        throw failTool('APP_KEY_REQUIRED', 400, 'Cần appKey để cập nhật ứng dụng.');
+      }
+      ctx.body = await patchEnterpriseApp(ctx, targetDb, effectiveActor, {
+        appKey,
+        patch: payload.patch || payload.specPatch || null,
+        targetSpec: payload.targetSpec || null,
+        prompt: payload.prompt || payload.editPrompt || '',
+        summary: payload.summary || '',
+        dryRun: payload.dryRun === true,
+        maxHealRounds: payload.maxHealRounds,
+      }, { env, fetchImpl });
+      if (typeof next === 'function') await next();
+    },
+
+    async rollbackBuiltApp(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      assertNoPrototypePollution(payload, 'rollbackBuiltApp');
+      const requestedOrg = String(payload.organizationId || ctx?.action?.params?.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép hoàn tác ứng dụng của tổ chức khác.');
+      }
+      const effectiveActor = isRootActor(actor) && requestedOrg ? { ...actor, organizationId: requestedOrg } : actor;
+      const appKey = String(payload.appKey || ctx?.action?.params?.appKey || ctx?.action?.params?.filterByTk || '').trim();
+      if (!appKey) {
+        throw failTool('APP_KEY_REQUIRED', 400, 'Cần appKey để hoàn tác ứng dụng.');
+      }
+      let targetVersion = null;
+      if (payload.targetVersion !== undefined && payload.targetVersion !== null && payload.targetVersion !== '') {
+        targetVersion = parseOptionalPositiveInt(payload.targetVersion, 'targetVersion');
+      }
+      ctx.body = await rollbackEnterpriseApp(ctx, targetDb, effectiveActor, {
+        appKey,
+        targetVersion,
+      }, { env, fetchImpl });
+      if (typeof next === 'function') await next();
+    },
+
+    async listBuiltAppVersions(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'GET') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức GET.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      assertNoPrototypePollution(payload, 'listBuiltAppVersions');
+      const requestedOrg = String(ctx?.action?.params?.organizationId || payload.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép xem phiên bản ứng dụng của tổ chức khác.');
+      }
+      const effectiveActor = isRootActor(actor) && requestedOrg ? { ...actor, organizationId: requestedOrg } : actor;
+      const appKey = String(ctx?.action?.params?.appKey || payload.appKey || ctx?.action?.params?.filterByTk || '').trim();
+      if (!appKey) {
+        throw failTool('APP_KEY_REQUIRED', 400, 'Cần appKey để xem lịch sử phiên bản.');
+      }
+      ctx.body = await listBuiltAppVersionsEngine(targetDb, effectiveActor, { appKey });
       if (typeof next === 'function') await next();
     },
 

@@ -21,12 +21,14 @@ const {
   resolveClientAuthToken,
   subscribeCollectionsMeta,
   fetchCollectionsMeta,
+  extractBiFieldOptions,
 } = require('./blocks-helpers');
 const { createCreativeStudioView, DEFAULT_CREATIVE_BLUEPRINT } = require('./creative-studio-block');
 const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
 const { createWebGisBlockView } = require('./webgis-block');
 const { createKanbanScheduleBlockView } = require('./kanban-schedule-block');
 const { createWmsOpsBlockView } = require('./wms-ops-block');
+const { createBiChartBlockView } = require('./bi-chart-block');
 const {
   fetchPageSurfaceState,
   fetchInspectPageBlocks,
@@ -103,6 +105,21 @@ const KANBAN_COLLECTION_ENUM = [
   { label: 'Yêu cầu mua sắm (latticeRequests)', value: 'latticeRequests' },
   { label: 'Phiếu dịch vụ (latticeServiceTickets)', value: 'latticeServiceTickets' },
   { label: 'Lô kho lạnh (latticeStockLots)', value: 'latticeStockLots' },
+];
+
+const BI_COLLECTION_ENUM = [
+  { label: 'Đơn Logistics (latticeOrders)', value: 'latticeOrders' },
+  { label: 'Dòng đơn hàng (latticeOrderLines)', value: 'latticeOrderLines' },
+  { label: 'Yêu cầu mua sắm (latticeRequests)', value: 'latticeRequests' },
+  { label: 'Phiếu dịch vụ (latticeServiceTickets)', value: 'latticeServiceTickets' },
+  { label: 'Lô kho lạnh (latticeStockLots)', value: 'latticeStockLots' },
+  { label: 'Tài sản (latticeAssets)', value: 'latticeAssets' },
+  { label: 'Địa điểm (latticeLocations)', value: 'latticeLocations' },
+  { label: 'Phòng ban (latticeDepartments)', value: 'latticeDepartments' },
+  { label: 'Sự cố IoT (latticeIncidentCases)', value: 'latticeIncidentCases' },
+  { label: 'Tài liệu P.A.R.A. (latticeParaDocuments)', value: 'latticeParaDocuments' },
+  { label: 'Đề xuất AI (latticeAgentProposals)', value: 'latticeAgentProposals' },
+  { label: 'Chứng từ ePOD (latticeEpodRecords)', value: 'latticeEpodRecords' },
 ];
 
 const DEFAULT_HERO_ACTIONS = JSON.stringify([
@@ -923,6 +940,7 @@ function createBlockRenderers(client, React, antd, app) {
     DxosWebGisView: createWebGisBlockView(client, React, antd, app, { subscribeModelConfig }),
     DxosKanbanScheduleView: createKanbanScheduleBlockView(client, React, antd, app, { subscribeModelConfig }),
     DxosWmsOpsView: createWmsOpsBlockView(client, React, antd, app, { subscribeModelConfig }),
+    DxosBiChartView: createBiChartBlockView(client, React, antd, app, { subscribeModelConfig }),
   };
 }
 
@@ -934,10 +952,35 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   const views = createBlockRenderers(client, React, antd, app);
   const workbenchCollectionEnum = WORKBENCH_COLLECTION_ENUM.map((opt) => ({ ...opt }));
   const kanbanCollectionEnum = KANBAN_COLLECTION_ENUM.map((opt) => ({ ...opt }));
+  const biCollectionEnum = BI_COLLECTION_ENUM.map((opt) => ({ ...opt }));
+  const collectionsMetaMap = new Map();
+  const biGroupByEnum = [];
+  const biSecondaryGroupByEnum = [];
+  const biMetricFieldEnum = [];
+
+  const syncTargetEnumArray = (targetArr, nextItems) => {
+    targetArr.splice(0, targetArr.length, ...nextItems);
+  };
+
+  const applyBiFieldReaction = ({ numericOnly = false } = {}) => (field) => {
+    try {
+      const colName = String(field?.query?.('collection')?.value?.() || 'latticeOrders').trim();
+      const metricOp = String(field?.query?.('metricOp')?.value?.() || 'count').trim().toLowerCase();
+      const colMeta = collectionsMetaMap.get(colName);
+      if (!colMeta) return;
+      const opts = extractBiFieldOptions(colMeta, {
+        numericOnly: numericOnly && metricOp !== 'count',
+      });
+      field.dataSource = opts;
+      field.componentProps = { ...(field.componentProps || {}), options: opts };
+    } catch {
+      // ignore reaction errors in minimal host contexts
+    }
+  };
 
   const syncBlockModelCollectionEnums = (cols) => {
     if (!Array.isArray(cols)) return;
-    for (const targetEnum of [workbenchCollectionEnum, kanbanCollectionEnum]) {
+    for (const targetEnum of [workbenchCollectionEnum, kanbanCollectionEnum, biCollectionEnum]) {
       const seen = new Set(targetEnum.map((o) => o.value));
       for (const col of cols) {
         const name = String(col?.name || '').trim();
@@ -948,6 +991,19 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           label: col.title && col.title !== name ? `${col.title} (${name})` : name,
         });
       }
+    }
+    for (const col of cols) {
+      const name = String(col?.name || '').trim();
+      if (!name || ['__proto__', 'constructor', 'prototype'].includes(name)) continue;
+      collectionsMetaMap.set(name, col);
+    }
+    const seedMeta = collectionsMetaMap.get('latticeOrders') || cols[0];
+    if (seedMeta) {
+      const allOpts = extractBiFieldOptions(seedMeta, { numericOnly: false });
+      const numOpts = extractBiFieldOptions(seedMeta, { numericOnly: true });
+      if (!biGroupByEnum.length) syncTargetEnumArray(biGroupByEnum, allOpts);
+      if (!biSecondaryGroupByEnum.length) syncTargetEnumArray(biSecondaryGroupByEnum, allOpts);
+      if (!biMetricFieldEnum.length) syncTargetEnumArray(biMetricFieldEnum, numOpts.length ? numOpts : allOpts);
     }
   };
   subscribeCollectionsMeta(syncBlockModelCollectionEnums);
@@ -991,6 +1047,9 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   }
   class DxosWmsOpsBlockModel extends BaseBlockModel {
     renderComponent() { return h(views.DxosWmsOpsView, { model: this, liveConfig: extractLiveConfig(this) }); }
+  }
+  class DxosBiChartBlockModel extends BaseBlockModel {
+    renderComponent() { return h(views.DxosBiChartView, { model: this, liveConfig: extractLiveConfig(this) }); }
   }
 
   const specs = [
@@ -1230,6 +1289,83 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           ],
         },
         showBulkImport: { type: 'boolean', title: 'Hiển thị Wizard Nhập lô 2 pha', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
+      },
+    ],
+    [
+      DxosBiChartBlockModel,
+      'DX-OS Biểu đồ & Phân tích BI [D]',
+      {
+        title: 'Phân tích & Biểu đồ BI [D]',
+        collection: 'latticeOrders',
+        chartType: 'bar',
+        groupBy: 'status',
+        secondaryGroupBy: '',
+        metricOp: 'count',
+        metricField: '',
+        limit: 20,
+        filterJson: '',
+      },
+      {
+        title: { type: 'string', title: 'Tiêu đề Biểu đồ', 'x-decorator': 'FormItem', 'x-component': 'Input' },
+        collection: {
+          type: 'string',
+          title: 'Collection dữ liệu',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: biCollectionEnum,
+        },
+        chartType: {
+          type: 'string',
+          title: 'Loại biểu đồ',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: [
+            { label: 'Cột (Bar)', value: 'bar' },
+            { label: 'Đường (Line)', value: 'line' },
+            { label: 'Tròn (Pie)', value: 'pie' },
+            { label: 'Chỉ số KPI (KPI)', value: 'kpi' },
+            { label: 'Bảng chéo (Pivot)', value: 'pivot' },
+          ],
+        },
+        groupBy: {
+          type: 'string',
+          title: 'Trường nhóm chính (groupBy)',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: biGroupByEnum,
+          'x-reactions': applyBiFieldReaction({ numericOnly: false }),
+        },
+        secondaryGroupBy: {
+          type: 'string',
+          title: 'Trường nhóm cột (Pivot)',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: biSecondaryGroupByEnum,
+          'x-reactions': applyBiFieldReaction({ numericOnly: false }),
+        },
+        metricOp: {
+          type: 'string',
+          title: 'Phép tổng hợp',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: [
+            { label: 'Đếm số lượng (count)', value: 'count' },
+            { label: 'Tổng (sum)', value: 'sum' },
+            { label: 'Trung bình (avg)', value: 'avg' },
+            { label: 'Nhỏ nhất (min)', value: 'min' },
+            { label: 'Lớn nhất (max)', value: 'max' },
+          ],
+        },
+        metricField: {
+          type: 'string',
+          title: 'Trường tính chỉ số (số)',
+          'x-decorator': 'FormItem',
+          'x-component': 'Select',
+          enum: biMetricFieldEnum,
+          'x-reactions': applyBiFieldReaction({ numericOnly: true }),
+        },
+        limit: { type: 'number', title: 'Số nhóm tối đa (1-500)', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        filterJson: { type: 'string', title: 'Bộ lọc JSON (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input.TextArea' },
       },
     ],
   ];

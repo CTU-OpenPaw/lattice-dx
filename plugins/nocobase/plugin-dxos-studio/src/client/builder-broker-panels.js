@@ -10,7 +10,20 @@
 
 const CONNECTOR_TYPES = ['n8n', 'webhook', 'mqtt', 'orion_ld', 'http_api', 'smtp_notify'];
 const AUTH_TYPES = ['bearer', 'hmac', 'basic', 'api_key', 'none'];
-const FIELD_TYPES = ['string', 'text', 'integer', 'float', 'boolean', 'date', 'datetime', 'json'];
+const FIELD_TYPES = [
+  'string',
+  'text',
+  'integer',
+  'float',
+  'boolean',
+  'date',
+  'datetime',
+  'json',
+  'belongsTo',
+  'hasOne',
+  'belongsToMany',
+  'formula',
+];
 const BUILDER_ROLES = [
   'ldx_admin',
   'ldx_manager',
@@ -1356,8 +1369,63 @@ function createDomainBuilderAndTenantsPanel(client, React, _antd, app) {
         return;
       }
       const validFields = domainForm.fields
-        .map((f) => ({ name: String(f.name || '').trim(), type: f.type || 'string', title: String(f.title || f.name || '').trim(), required: Boolean(f.required) }))
-        .filter((f) => f.name);
+        .map((f) => {
+          const name = String(f.name || '').trim();
+          if (!name) return null;
+          const type = f.type || 'string';
+          const out = {
+            name,
+            type,
+            title: String(f.title || name).trim(),
+            required: Boolean(f.required),
+          };
+          if (type === 'belongsTo' || type === 'hasOne' || type === 'belongsToMany') {
+            if (f.target && String(f.target).trim()) out.target = String(f.target).trim();
+            if (f.foreignKey && String(f.foreignKey).trim()) out.foreignKey = String(f.foreignKey).trim();
+            if (type === 'belongsToMany') {
+              if (f.through && String(f.through).trim()) out.through = String(f.through).trim();
+              if (f.otherKey && String(f.otherKey).trim()) out.otherKey = String(f.otherKey).trim();
+            }
+          }
+          if (type === 'formula') {
+            const expr = String(f.formulaExpression || f.formula || '').trim();
+            if (expr) {
+              out.formula = expr;
+              out.formulaExpression = expr;
+            }
+            if (f.formulaReturnType && String(f.formulaReturnType).trim()) {
+              out.formulaReturnType = String(f.formulaReturnType).trim();
+            }
+          }
+          const isRel = type === 'belongsTo' || type === 'hasOne' || type === 'belongsToMany';
+          const supportsRangeEnum = !isRel && type !== 'boolean' && type !== 'json';
+          const supportsPattern = type === 'string' || type === 'text';
+          const supportsUnique = !['hasOne', 'belongsToMany', 'json', 'formula'].includes(type);
+          const rawVal = f.validation && typeof f.validation === 'object' ? { ...f.validation } : {};
+          if (!supportsUnique) delete rawVal.unique;
+          if (!supportsPattern) delete rawVal.pattern;
+          if (!supportsRangeEnum) {
+            delete rawVal.min;
+            delete rawVal.max;
+            delete rawVal.enum;
+          }
+          if (f.required) rawVal.required = true;
+          if (supportsUnique && f.unique) rawVal.unique = true;
+          if (supportsPattern && f.pattern && String(f.pattern).trim()) rawVal.pattern = String(f.pattern).trim();
+          if (supportsRangeEnum) {
+            if (f.min !== undefined && f.min !== '' && Number.isFinite(Number(f.min))) rawVal.min = Number(f.min);
+            if (f.max !== undefined && f.max !== '' && Number.isFinite(Number(f.max))) rawVal.max = Number(f.max);
+            if (typeof f.enumText === 'string' && f.enumText.trim()) {
+              const enumList = f.enumText.split(',').map((s) => s.trim()).filter(Boolean);
+              if (enumList.length) rawVal.enum = enumList;
+            }
+          }
+          if (Object.keys(rawVal).length > 0) {
+            out.validation = rawVal;
+          }
+          return out;
+        })
+        .filter(Boolean);
       if (!validFields.length) {
         reportFeedback({ type: 'error', text: 'Vui lòng khai báo ít nhất 1 trường dữ liệu cho phân hệ.' });
         return;
@@ -1539,65 +1607,198 @@ function createDomainBuilderAndTenantsPanel(client, React, _antd, app) {
                 style: S.btn(false),
               }, '+ Thêm trường'),
             ),
-            domainForm.fields.map((f, idx) => h('div', {
-              key: idx,
-              'data-testid': `dxos-builder-field-row-${idx}`,
-              style: { display: 'grid', gridTemplateColumns: '1fr 120px 1fr auto auto', gap: 8, alignItems: 'center' },
-            },
-              h('input', {
-                'data-testid': `dxos-builder-field-name-${idx}`,
-                type: 'text',
-                required: true,
-                placeholder: 'Tên cột (VD: severity)',
-                value: f.name,
-                onChange: (e) => setDomainForm((p) => ({
-                  ...p,
-                  fields: p.fields.map((item, i) => (i === idx ? { ...item, name: e.target.value } : item)),
-                })),
-                style: S.input,
-              }),
-              h('select', {
-                'data-testid': `dxos-builder-field-type-${idx}`,
-                value: f.type,
-                onChange: (e) => setDomainForm((p) => ({
-                  ...p,
-                  fields: p.fields.map((item, i) => (i === idx ? { ...item, type: e.target.value } : item)),
-                })),
-                style: S.input,
-              }, FIELD_TYPES.map((ft) => h('option', { key: ft, value: ft }, ft))),
-              h('input', {
-                'data-testid': `dxos-builder-field-title-${idx}`,
-                type: 'text',
-                placeholder: 'Nhãn hiển thị',
-                value: f.title,
-                onChange: (e) => setDomainForm((p) => ({
-                  ...p,
-                  fields: p.fields.map((item, i) => (i === idx ? { ...item, title: e.target.value } : item)),
-                })),
-                style: S.input,
-              }),
-              h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, whiteSpace: 'nowrap' } },
-                h('input', {
-                  'data-testid': `dxos-builder-field-required-${idx}`,
-                  type: 'checkbox',
-                  checked: Boolean(f.required),
-                  onChange: (e) => setDomainForm((p) => ({
-                    ...p,
-                    fields: p.fields.map((item, i) => (i === idx ? { ...item, required: Boolean(e?.target?.checked) } : item)),
-                  })),
-                }),
-                'Bắt buộc',
-              ),
-              h('button', {
-                'data-testid': `dxos-builder-field-remove-${idx}`,
-                type: 'button',
-                onClick: () => setDomainForm((p) => ({
-                  ...p,
-                  fields: p.fields.filter((_, i) => i !== idx),
-                })),
-                style: S.btn(false, true),
-              }, 'Xóa'),
-            )),
+            domainForm.fields.map((f, idx) => {
+              const isRel = f.type === 'belongsTo' || f.type === 'hasOne' || f.type === 'belongsToMany';
+              const isM2m = f.type === 'belongsToMany';
+              const isFormula = f.type === 'formula';
+              const updateField = (patch) => setDomainForm((p) => ({
+                ...p,
+                fields: p.fields.map((item, i) => (i === idx ? { ...item, ...patch } : item)),
+              }));
+              return h('div', {
+                key: idx,
+                'data-testid': `dxos-builder-field-row-${idx}`,
+                style: { display: 'grid', gap: 6, padding: 8, borderRadius: 6, border: '1px solid #e2e8f0', background: '#ffffff' },
+              },
+                h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 140px 1fr auto auto auto', gap: 8, alignItems: 'center' } },
+                  h('input', {
+                    'data-testid': `dxos-builder-field-name-${idx}`,
+                    type: 'text',
+                    required: true,
+                    placeholder: 'Tên cột (VD: severity)',
+                    value: f.name,
+                    onChange: (e) => updateField({ name: e.target.value }),
+                    style: S.input,
+                  }),
+                  h('select', {
+                    'data-testid': `dxos-builder-field-type-${idx}`,
+                    value: f.type,
+                    onChange: (e) => {
+                      const nextType = e.target.value;
+                      const nextIsRel = nextType === 'belongsTo' || nextType === 'hasOne' || nextType === 'belongsToMany';
+                      const nextSupportsRangeEnum = !nextIsRel && nextType !== 'boolean' && nextType !== 'json';
+                      const nextSupportsPattern = nextType === 'string' || nextType === 'text';
+                      const nextSupportsUnique = !['hasOne', 'belongsToMany', 'json', 'formula'].includes(nextType);
+                      const patch = { type: nextType };
+                      if (!nextSupportsPattern) patch.pattern = '';
+                      if (!nextSupportsRangeEnum) {
+                        patch.pattern = '';
+                        patch.min = '';
+                        patch.max = '';
+                        patch.enumText = '';
+                      }
+                      if (!nextSupportsUnique) patch.unique = false;
+                      if (!nextIsRel) {
+                        patch.target = '';
+                        patch.foreignKey = '';
+                        patch.through = '';
+                        patch.otherKey = '';
+                      } else if (nextType !== 'belongsToMany') {
+                        patch.through = '';
+                        patch.otherKey = '';
+                      }
+                      if (nextType !== 'formula') {
+                        patch.formulaExpression = '';
+                        patch.formula = '';
+                        patch.formulaReturnType = 'float';
+                      }
+                      if (f.validation && typeof f.validation === 'object') {
+                        const nextVal = { ...f.validation };
+                        if (!nextSupportsUnique) delete nextVal.unique;
+                        if (!nextSupportsPattern) delete nextVal.pattern;
+                        if (!nextSupportsRangeEnum) {
+                          delete nextVal.min;
+                          delete nextVal.max;
+                          delete nextVal.enum;
+                        }
+                        patch.validation = Object.keys(nextVal).length > 0 ? nextVal : undefined;
+                      }
+                      updateField(patch);
+                    },
+                    style: S.input,
+                  }, FIELD_TYPES.map((ft) => h('option', { key: ft, value: ft }, ft))),
+                  h('input', {
+                    'data-testid': `dxos-builder-field-title-${idx}`,
+                    type: 'text',
+                    placeholder: 'Nhãn hiển thị',
+                    value: f.title,
+                    onChange: (e) => updateField({ title: e.target.value }),
+                    style: S.input,
+                  }),
+                  h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, whiteSpace: 'nowrap' } },
+                    h('input', {
+                      'data-testid': `dxos-builder-field-required-${idx}`,
+                      type: 'checkbox',
+                      checked: Boolean(f.required),
+                      onChange: (e) => updateField({ required: Boolean(e?.target?.checked) }),
+                    }),
+                    'Bắt buộc',
+                  ),
+                  h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 12, whiteSpace: 'nowrap' } },
+                    h('input', {
+                      'data-testid': `dxos-builder-field-unique-${idx}`,
+                      type: 'checkbox',
+                      checked: Boolean(f.unique),
+                      onChange: (e) => updateField({ unique: Boolean(e?.target?.checked) }),
+                    }),
+                    'Duy nhất',
+                  ),
+                  h('button', {
+                    'data-testid': `dxos-builder-field-remove-${idx}`,
+                    type: 'button',
+                    onClick: () => setDomainForm((p) => ({
+                      ...p,
+                      fields: p.fields.filter((_, i) => i !== idx),
+                    })),
+                    style: S.btn(false, true),
+                  }, 'Xóa'),
+                ),
+                isRel ? h('div', { style: { display: 'grid', gridTemplateColumns: isM2m ? 'repeat(4, 1fr)' : 'repeat(2, 1fr)', gap: 8 } },
+                  h('input', {
+                    'data-testid': `dxos-builder-field-target-${idx}`,
+                    type: 'text',
+                    placeholder: 'Target collection (VD: latticeAssets)',
+                    value: f.target || '',
+                    onChange: (e) => updateField({ target: e.target.value }),
+                    style: S.input,
+                  }),
+                  h('input', {
+                    'data-testid': `dxos-builder-field-fk-${idx}`,
+                    type: 'text',
+                    placeholder: 'foreignKey (tùy chọn)',
+                    value: f.foreignKey || '',
+                    onChange: (e) => updateField({ foreignKey: e.target.value }),
+                    style: S.input,
+                  }),
+                  isM2m ? h('input', {
+                    'data-testid': `dxos-builder-field-through-${idx}`,
+                    type: 'text',
+                    placeholder: 'through join collection (latticeCustom...)',
+                    value: f.through || '',
+                    onChange: (e) => updateField({ through: e.target.value }),
+                    style: S.input,
+                  }) : null,
+                  isM2m ? h('input', {
+                    'data-testid': `dxos-builder-field-ok-${idx}`,
+                    type: 'text',
+                    placeholder: 'otherKey (tùy chọn)',
+                    value: f.otherKey || '',
+                    onChange: (e) => updateField({ otherKey: e.target.value }),
+                    style: S.input,
+                  }) : null,
+                ) : null,
+                isFormula ? h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 140px', gap: 8 } },
+                  h('input', {
+                    'data-testid': `dxos-builder-field-formula-${idx}`,
+                    type: 'text',
+                    placeholder: 'Công thức (VD: ROUND(qty * unitPrice, 2))',
+                    value: f.formulaExpression || f.formula || '',
+                    onChange: (e) => updateField({ formulaExpression: e.target.value }),
+                    style: S.input,
+                  }),
+                  h('select', {
+                    'data-testid': `dxos-builder-field-formula-type-${idx}`,
+                    value: f.formulaReturnType || 'float',
+                    onChange: (e) => updateField({ formulaReturnType: e.target.value }),
+                    style: S.input,
+                  }, ['float', 'integer', 'string', 'boolean'].map((rt) => h('option', { key: rt, value: rt }, rt))),
+                ) : null,
+                !isRel && f.type !== 'boolean' && f.type !== 'json' ? h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 90px 90px 1fr', gap: 8 } },
+                  f.type === 'string' || f.type === 'text' ? h('input', {
+                    'data-testid': `dxos-builder-field-pattern-${idx}`,
+                    type: 'text',
+                    placeholder: 'Regex pattern (tùy chọn)',
+                    value: f.pattern || '',
+                    onChange: (e) => updateField({ pattern: e.target.value }),
+                    style: S.input,
+                  }) : null,
+                  h('input', {
+                    'data-testid': `dxos-builder-field-min-${idx}`,
+                    type: 'number',
+                    placeholder: 'Min',
+                    value: f.min ?? '',
+                    onChange: (e) => updateField({ min: e.target.value }),
+                    style: S.input,
+                  }),
+                  h('input', {
+                    'data-testid': `dxos-builder-field-max-${idx}`,
+                    type: 'number',
+                    placeholder: 'Max',
+                    value: f.max ?? '',
+                    onChange: (e) => updateField({ max: e.target.value }),
+                    style: S.input,
+                  }),
+                  h('input', {
+                    'data-testid': `dxos-builder-field-enum-${idx}`,
+                    type: 'text',
+                    placeholder: 'Enum values (VD: low, medium, high)',
+                    value: f.enumText || '',
+                    onChange: (e) => updateField({ enumText: e.target.value }),
+                    style: S.input,
+                  }),
+                ) : null,
+              );
+            }),
           ),
 
           h('div', { 'data-testid': 'dxos-builder-roles' },

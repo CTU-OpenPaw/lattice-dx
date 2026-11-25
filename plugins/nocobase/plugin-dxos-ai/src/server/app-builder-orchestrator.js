@@ -22,6 +22,7 @@ const {
   propagatePortalRolesToRoutes,
   buildRbacActionsSpec,
   capturePageSnapshot,
+  restorePageSnapshot,
   ensureUiSnapshotsReady,
   bumpSurfaceRevision,
   buildRecommendedBlueprintFromFields,
@@ -34,6 +35,13 @@ const {
   runUpdateN8nWorkflow,
   runActivateN8nWorkflow,
 } = require('./n8n-bridge-tool');
+const {
+  assertNoPrototypePollution,
+  cloneSafeDeep,
+  applySpecPatch,
+  buildErGraph,
+  computeSpecDiff,
+} = require('./app-builder-planner');
 
 const DEFAULT_SELF_HEAL_MAX_ROUNDS = 2;
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
@@ -52,6 +60,7 @@ const ALL_NATIVE_V2_BLOCK_MODELS = Object.freeze([
   'DxosWebGisBlockModel',
   'DxosKanbanScheduleBlockModel',
   'DxosWmsOpsBlockModel',
+  'DxosBiChartBlockModel',
 ]);
 
 const ORCHESTRATOR_ALLOWED_BLOCKS = new Set([
@@ -112,12 +121,27 @@ const FIELD_INTERFACE_MAP = {
   float: { interface: 'number', uiType: 'number' },
   boolean: { interface: 'checkbox', uiType: 'boolean' },
   date: { interface: 'datetime', uiType: 'string' },
+  datetime: { interface: 'datetime', uiType: 'string', component: 'DatePicker', componentProps: { showTime: true } },
   select: { interface: 'select', uiType: 'string' },
   enum: { interface: 'select', uiType: 'string' },
   json: { interface: 'json', uiType: 'object' },
   jsonb: { interface: 'json', uiType: 'object' },
   string: { interface: 'input', uiType: 'string' },
 };
+
+const FALLBACK_ALLOWLISTED_BUSINESS_COLLECTIONS = new Set([
+  'latticeRequests',
+  'latticeOrders',
+  'latticeOrderLines',
+  'latticeServiceTickets',
+  'latticeParaDocuments',
+  'latticeIncidentCases',
+  'latticeLocations',
+  'latticeAssets',
+  'latticeAgentProposals',
+]);
+
+const FORBIDDEN_FIELD_NAMES_SET = new Set(['__proto__', 'constructor', 'prototype']);
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -145,6 +169,7 @@ function loadCrossPluginModule(pkgName, dirSlug, relPath) {
 const getPgRlsMod = () => loadCrossPluginModule('@latticedx/plugin-lattice-foundation', 'plugin-lattice-foundation', 'pg-rls');
 const getOpenApiMod = () => loadCrossPluginModule('@latticedx/plugin-lattice-foundation', 'plugin-lattice-foundation', 'openapi-spec');
 const getDmnMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'dmn-engine');
+const getRichSchemaMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'rich-schema');
 const getFlowExecutorMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'flow/executor');
 const getFlowValidatorMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'flow/validator');
 const getFlowSchemaMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'flow/schema');
@@ -190,53 +215,109 @@ function buildSafePgIndexName(colLower, suffix) {
   return `idx_${colLower.slice(0, maxBase)}_${hash}_${suffix}`;
 }
 
-function normalizeOrchestratorField(rawField) {
+function getAllowlistedBusinessCollections(richSchema) {
+  if (richSchema?.DEFAULT_ALLOWLISTED_BUSINESS_COLLECTIONS instanceof Set) {
+    return new Set([...FALLBACK_ALLOWLISTED_BUSINESS_COLLECTIONS, ...richSchema.DEFAULT_ALLOWLISTED_BUSINESS_COLLECTIONS]);
+  }
+  return FALLBACK_ALLOWLISTED_BUSINESS_COLLECTIONS;
+}
+
+function assertAllowedRelationTarget(target, relType, richSchema) {
+  if (isProtectedCollection(target)) {
+    throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ ${relType} vào bảng hệ thống "${target}".`);
+  }
+  if (relType === 'hasOne' || relType === 'belongsToMany') {
+    const allowlisted = getAllowlistedBusinessCollections(richSchema);
+    if (!target || (!CUSTOM_COLLECTION_RE.test(target) && !allowlisted.has(target))) {
+      throw failBuild('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ ${relType} "${target || '(empty)'}" phải là latticeCustom* hoặc bảng nghiệp vụ được phép.`);
+    }
+    return;
+  }
+  if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
+    throw failBuild('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ ${relType} "${target || '(empty)'}" không hợp lệ hoặc bị cấm.`);
+  }
+}
+
+function applyNormalizedDeprecation(normalized, rawField) {
+  if (rawField?.deprecated !== true) return normalized;
+  const deprecatedAt = rawField.deprecatedAt || rawField.uiSchema?.deprecatedAt || rawField.options?.deprecatedAt || new Date().toISOString();
+  const deprecatedReason = rawField.deprecatedReason || rawField.reason || rawField.uiSchema?.deprecatedReason || rawField.options?.deprecatedReason || null;
+  return {
+    ...normalized,
+    deprecated: true,
+    deprecatedAt,
+    ...(deprecatedReason ? { deprecatedReason } : {}),
+    readOnly: true,
+    options: {
+      ...(normalized.options || {}),
+      deprecated: true,
+      deprecatedAt,
+      ...(deprecatedReason ? { deprecatedReason } : {}),
+      readOnly: true,
+    },
+    uiSchema: {
+      ...(normalized.uiSchema || {}),
+      deprecated: true,
+      deprecatedAt,
+      ...(deprecatedReason ? { deprecatedReason } : {}),
+      'x-hidden': true,
+      readOnly: true,
+    },
+  };
+}
+
+function normalizeOrchestratorField(rawField, sourceCollection = null) {
+  assertNoPrototypePollution(rawField, 'field');
   const fname = String(rawField?.name || '').trim();
-  if (!FIELD_NAME_RE.test(fname)) {
+  if (!FIELD_NAME_RE.test(fname) || FORBIDDEN_FIELD_NAMES_SET.has(fname)) {
     throw failBuild('FIELD_NAME_INVALID', 400, `Tên trường "${fname}" không hợp lệ.`);
   }
+  const richSchema = getRichSchemaMod();
   const rawType = String(rawField?.type || 'string').trim();
+  const titleStr = String(rawField?.title || rawField?.label || fname).trim();
+
   if (rawType === 'belongsTo') {
     const target = String(rawField?.target || rawField?.targetCollection || '').trim();
-    if (isProtectedCollection(target)) {
-      throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ belongsTo vào bảng hệ thống "${target}".`);
-    }
-    if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
-      throw failBuild('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ belongsTo "${target || '(empty)'}" không hợp lệ hoặc bị cấm.`);
-    }
+    assertAllowedRelationTarget(target, 'belongsTo', richSchema);
     const foreignKey = String(rawField?.foreignKey || `${fname}Id`).trim();
     const targetKey = String(rawField?.targetKey || 'id').trim();
     if (!FIELD_NAME_RE.test(foreignKey) || !FIELD_NAME_RE.test(targetKey)) {
       throw failBuild('FIELD_NAME_INVALID', 400, `foreignKey/targetKey không hợp lệ cho trường "${fname}".`);
     }
-    return {
+    const validation = (rawField?.validation !== undefined && rawField.validation !== null) || rawField?.required === true || rawField?.unique === true
+      ? (() => {
+          if (typeof richSchema?.sanitizeFieldValidation !== 'function') {
+            throw failBuild('RICH_SCHEMA_UNAVAILABLE', 503, 'Module rich-schema chưa sẵn sàng để kiểm tra validation.');
+          }
+          return richSchema.sanitizeFieldValidation({ ...rawField, name: fname, type: 'belongsTo' });
+        })()
+      : undefined;
+    return applyNormalizedDeprecation({
       name: fname,
       type: 'belongsTo',
       interface: 'obo',
       target,
       foreignKey,
       targetKey,
+      ...(validation ? { validation, options: { validation }, ...(validation.required ? { allowNull: false, required: true } : {}) } : {}),
       uiSchema: {
         type: 'object',
-        title: String(rawField?.title || fname),
+        title: titleStr,
         'x-component': 'AssociationField',
+        ...(validation ? { 'x-validation': validation } : {}),
       },
-    };
+    }, rawField);
   }
+
   if (rawType === 'hasMany') {
     const target = String(rawField?.target || rawField?.targetCollection || '').trim();
-    if (isProtectedCollection(target)) {
-      throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ hasMany vào bảng hệ thống "${target}".`);
-    }
-    if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
-      throw failBuild('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ hasMany "${target || '(empty)'}" không hợp lệ hoặc bị cấm.`);
-    }
+    assertAllowedRelationTarget(target, 'hasMany', richSchema);
     const foreignKey = String(rawField?.foreignKey || `${fname}Id`).trim();
     const sourceKey = String(rawField?.sourceKey || 'id').trim();
     if (!FIELD_NAME_RE.test(foreignKey) || !FIELD_NAME_RE.test(sourceKey)) {
       throw failBuild('FIELD_NAME_INVALID', 400, `foreignKey/sourceKey không hợp lệ cho trường "${fname}".`);
     }
-    return {
+    return applyNormalizedDeprecation({
       name: fname,
       type: 'hasMany',
       interface: 'o2m',
@@ -245,11 +326,113 @@ function normalizeOrchestratorField(rawField) {
       sourceKey,
       uiSchema: {
         type: 'array',
-        title: String(rawField?.title || fname),
+        title: titleStr,
         'x-component': 'AssociationField',
       },
-    };
+    }, rawField);
   }
+
+  if (rawType === 'hasOne') {
+    const target = String(rawField?.target || rawField?.targetCollection || '').trim();
+    assertAllowedRelationTarget(target, 'hasOne', richSchema);
+    const foreignKey = String(rawField?.foreignKey || `${fname}Id`).trim();
+    const sourceKey = String(rawField?.sourceKey || 'id').trim();
+    if (!FIELD_NAME_RE.test(foreignKey) || !FIELD_NAME_RE.test(sourceKey)) {
+      throw failBuild('FIELD_NAME_INVALID', 400, `foreignKey/sourceKey không hợp lệ cho trường "${fname}".`);
+    }
+    return applyNormalizedDeprecation({
+      name: fname,
+      type: 'hasOne',
+      interface: 'oho',
+      target,
+      foreignKey,
+      sourceKey,
+      uiSchema: {
+        type: 'object',
+        title: titleStr,
+        'x-component': 'AssociationField',
+      },
+    }, rawField);
+  }
+
+  if (rawType === 'belongsToMany') {
+    const target = String(rawField?.target || rawField?.targetCollection || '').trim();
+    assertAllowedRelationTarget(target, 'belongsToMany', richSchema);
+    if (typeof richSchema?.resolveThroughCollectionName !== 'function') {
+      throw failBuild('RICH_SCHEMA_UNAVAILABLE', 503, 'Module rich-schema chưa sẵn sàng để tạo bảng trung gian belongsToMany.');
+    }
+    const { through, foreignKey, otherKey } = richSchema.resolveThroughCollectionName(
+      sourceCollection || 'latticeCustomEntity',
+      { ...rawField, name: fname, target },
+      { isProtectedCollection },
+    );
+    const sourceKey = String(rawField?.sourceKey || 'id').trim();
+    const targetKey = String(rawField?.targetKey || 'id').trim();
+    if (!FIELD_NAME_RE.test(sourceKey) || !FIELD_NAME_RE.test(targetKey)) {
+      throw failBuild('FIELD_NAME_INVALID', 400, `sourceKey/targetKey không hợp lệ cho trường "${fname}".`);
+    }
+    return applyNormalizedDeprecation({
+      name: fname,
+      type: 'belongsToMany',
+      interface: 'm2m',
+      target,
+      through,
+      foreignKey,
+      otherKey,
+      sourceKey,
+      targetKey,
+      uiSchema: {
+        type: 'array',
+        title: titleStr,
+        'x-component': 'AssociationField',
+      },
+    }, rawField);
+  }
+
+  if (rawType === 'formula') {
+    if (typeof richSchema?.validateFormulaExpression !== 'function' || typeof richSchema?.sanitizeFieldValidation !== 'function') {
+      throw failBuild('FORMULA_ENGINE_UNAVAILABLE', 503, 'Bộ phân tích công thức Rich Schema chưa sẵn sàng (fail-closed).');
+    }
+    const rawExpr = rawField?.formulaExpression ?? rawField?.formula ?? rawField?.options?.formulaExpression ?? rawField?.options?.formula;
+    const expr = typeof rawExpr === 'string' ? rawExpr.trim() : '';
+    const check = richSchema.validateFormulaExpression(expr, { selfFieldName: fname, throwOnError: true });
+    const allowedReturns = richSchema.ALLOWED_FORMULA_RETURN_TYPES || new Set(['float', 'integer', 'string', 'boolean']);
+    const requestedReturn = rawField?.formulaReturnType ? String(rawField.formulaReturnType).trim() : '';
+    if (requestedReturn && !allowedReturns.has(requestedReturn)) {
+      throw failBuild('INVALID_FORMULA_RETURN_TYPE', 400, `formulaReturnType "${requestedReturn}" không hợp lệ.`);
+    }
+    const formulaReturnType = requestedReturn || (allowedReturns.has(check?.inferredReturnType) ? check.inferredReturnType : 'float');
+    const validation = richSchema.sanitizeFieldValidation({ ...rawField, name: fname, type: 'formula', formulaReturnType });
+    const uiType = formulaReturnType === 'boolean' ? 'boolean' : (formulaReturnType === 'string' ? 'string' : 'number');
+    const comp = formulaReturnType === 'boolean' ? 'Checkbox' : (formulaReturnType === 'string' ? 'Input' : 'InputNumber');
+    return applyNormalizedDeprecation({
+      name: fname,
+      type: formulaReturnType,
+      interface: 'formula',
+      readOnly: true,
+      formula: expr,
+      formulaExpression: expr,
+      formulaReturnType,
+      ...(validation ? { validation } : {}),
+      options: {
+        formula: expr,
+        formulaExpression: expr,
+        formulaReturnType,
+        readOnly: true,
+        ...(validation ? { validation } : {}),
+      },
+      uiSchema: {
+        type: uiType,
+        title: titleStr,
+        'x-component': comp,
+        'x-read-pretty': true,
+        readOnly: true,
+        'x-formula': expr,
+        ...(validation ? { 'x-validation': validation } : {}),
+      },
+    }, rawField);
+  }
+
   const ftype = Object.prototype.hasOwnProperty.call(FIELD_INTERFACE_MAP, rawType) ? rawType : 'string';
   const meta = FIELD_INTERFACE_MAP[ftype];
   const rawEnums = Array.isArray(rawField?.enumValues) ? rawField.enumValues : (Array.isArray(rawField?.enum) ? rawField.enum : []);
@@ -257,20 +440,53 @@ function normalizeOrchestratorField(rawField) {
     .map((v) => (v && typeof v === 'object' ? String(v.value ?? v.label ?? '').trim() : String(v ?? '').trim()))
     .filter(Boolean);
   const resolvedType = (ftype === 'select' || ftype === 'enum') ? 'string' : (ftype === 'jsonb' ? 'json' : ftype);
-  return {
+
+  let validation;
+  const hasValidationInput = (rawField?.validation !== undefined && rawField.validation !== null)
+    || rawField?.required === true
+    || rawField?.unique === true;
+  if (hasValidationInput) {
+    if (rawField?.validation?.pattern != null && typeof richSchema?.validateSafeRegexPattern !== 'function') {
+      throw failBuild('REGEX_ENGINE_UNAVAILABLE', 503, 'Bộ kiểm tra regex Thompson NFA chưa sẵn sàng (fail-closed).');
+    }
+    if (typeof richSchema?.sanitizeFieldValidation !== 'function') {
+      throw failBuild('RICH_SCHEMA_UNAVAILABLE', 503, 'Module rich-schema chưa sẵn sàng để kiểm tra validation.');
+    }
+    validation = richSchema.sanitizeFieldValidation({
+      ...rawField,
+      name: fname,
+      type: resolvedType,
+      ...(enumValues.length ? { enumValues } : {}),
+    });
+  }
+
+  const finalEnums = enumValues.length ? enumValues : (Array.isArray(validation?.enum) ? validation.enum.map(String) : []);
+  const opts = {
+    ...(validation ? { validation } : {}),
+    ...(rawField?.indexed ? { index: true } : {}),
+  };
+
+  return applyNormalizedDeprecation({
     name: fname,
     type: resolvedType,
-    interface: meta.interface,
+    interface: (ftype === 'select' || ftype === 'enum' || (!enumValues.length && validation?.enum?.length)) ? 'select' : meta.interface,
     ...(rawField?.defaultValue !== undefined ? { defaultValue: rawField.defaultValue } : {}),
-    ...(enumValues.length ? { enum: enumValues } : {}),
+    ...(validation?.required ? { allowNull: false, required: true } : {}),
+    ...(rawField?.indexed ? { index: true } : {}),
+    ...(finalEnums.length ? { enum: finalEnums } : {}),
+    ...(validation ? { validation } : {}),
+    ...(Object.keys(opts).length ? { options: opts } : {}),
     uiSchema: {
       type: meta.uiType,
-      title: String(rawField?.title || rawField?.label || fname).trim(),
-      ...((ftype === 'select' || ftype === 'enum') && enumValues.length
-        ? { enum: enumValues.map((v) => ({ value: v, label: v })) }
+      title: titleStr,
+      ...(meta.component ? { 'x-component': meta.component } : {}),
+      ...(meta.componentProps ? { 'x-component-props': meta.componentProps } : {}),
+      ...(validation ? { 'x-validation': validation } : {}),
+      ...((ftype === 'select' || ftype === 'enum' || (!enumValues.length && validation?.enum?.length)) && finalEnums.length
+        ? { enum: finalEnums.map((v) => ({ value: v, label: v })) }
         : {}),
     },
-  };
+  }, rawField);
 }
 
 function safeGetResource(ctx, resourceName) {
@@ -347,6 +563,83 @@ async function attachCollectionRls(db, collectionName) {
   return attached;
 }
 
+async function ensureBelongsToManyJoinCollection(db, organizationId, { sourceCollection, field }) {
+  const joinName = String(field.through || '').trim();
+  if (!CUSTOM_COLLECTION_RE.test(joinName) || isProtectedCollection(joinName)) {
+    throw failBuild('INVALID_THROUGH_COLLECTION', 400, `Tên bảng trung gian "${joinName}" không hợp lệ.`);
+  }
+  const fk = String(field.foreignKey || '').trim();
+  const ok = String(field.otherKey || '').trim();
+  const joinFieldsSpec = [
+    { name: 'organizationId', type: 'string', interface: 'input', allowNull: false, defaultValue: organizationId, index: true, uiSchema: { type: 'string', title: 'Mã tổ chức' } },
+    { name: fk, type: 'bigInt', interface: 'integer', allowNull: false, index: true, uiSchema: { type: 'number', title: fk } },
+    { name: ok, type: 'bigInt', interface: 'integer', allowNull: false, index: true, uiSchema: { type: 'number', title: ok } },
+  ];
+
+  const colsRepo = db?.getRepository?.('collections');
+  const fieldsRepo = db?.getRepository?.('fields');
+  if (colsRepo) {
+    const existingJoin = await colsRepo.findOne({ filter: { name: joinName }, appends: ['fields'] });
+    if (!existingJoin) {
+      const created = await colsRepo.create({
+        values: {
+          name: joinName,
+          title: `${sourceCollection} -> ${field.target} Join`,
+          autoGenId: true,
+          createdAt: true,
+          updatedAt: true,
+          options: { uiManageable: true },
+          fields: joinFieldsSpec,
+        },
+      });
+      if (typeof created?.load === 'function') await created.load({ resetFields: true });
+    } else if (fieldsRepo) {
+      const existingNames = new Set((val(existingJoin, 'fields') || []).map((f) => val(f, 'name')).filter(Boolean));
+      for (const jf of joinFieldsSpec) {
+        if (!existingNames.has(jf.name)) {
+          const cf = await fieldsRepo.create({ values: { ...jf, collectionName: joinName } });
+          if (typeof cf?.load === 'function') await cf.load();
+        }
+      }
+      if (typeof existingJoin.load === 'function') await existingJoin.load({ resetFields: true });
+    }
+  }
+
+  const colInst = db.getCollection?.(joinName);
+  if (colInst && typeof colInst.sync === 'function') await colInst.sync({ force: false, alter: { drop: false } });
+  else if (typeof db.sync === 'function') await db.sync();
+
+  const createdIndexes = [];
+  if (typeof db?.sequelize?.query === 'function') {
+    const colLower = joinName.toLowerCase();
+    const indexDefs = [
+      ['org', `"organizationId"`, false],
+      ['fk', `"${fk}"`, false],
+      ['ok', `"${ok}"`, false],
+      ['uq', `"organizationId", "${fk}", "${ok}"`, true],
+    ];
+    for (const [suffix, colsSql, unique] of indexDefs) {
+      const idxName = buildSafePgIndexName(colLower, suffix);
+      try {
+        await db.sequelize.query(`CREATE ${unique ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS "${idxName}" ON "${joinName}" (${colsSql});`);
+        createdIndexes.push(idxName);
+      } catch {
+        // Non-fatal in mock harnesses without SQL DDL
+      }
+    }
+  }
+
+  const rlsAttached = await attachCollectionRls(db, joinName);
+  return {
+    collectionName: joinName,
+    foreignKey: fk,
+    otherKey: ok,
+    fields: joinFieldsSpec,
+    indexes: createdIndexes,
+    rlsAttached,
+  };
+}
+
 async function ensureCollectionAndFields(db, organizationId, { collectionName, collectionTitle, fields = [] }) {
   if (isProtectedCollection(collectionName)) {
     throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép sửa bảng hệ thống "${collectionName}".`);
@@ -354,13 +647,25 @@ async function ensureCollectionAndFields(db, organizationId, { collectionName, c
   if (!CUSTOM_COLLECTION_RE.test(collectionName)) {
     throw failBuild('COLLECTION_NAME_INVALID', 400, 'Collection mới phải theo mẫu latticeCustom<TenVietHoa>.');
   }
-  const normalizedFields = fields.map((f) => normalizeOrchestratorField(f));
+  const normalizedFields = fields.map((f) => normalizeOrchestratorField(f, collectionName));
   const hasFieldName = (name) => normalizedFields.some((f) => f.name === name);
   if (!hasFieldName('status')) normalizedFields.unshift({ name: 'status', type: 'string', interface: 'input', defaultValue: 'draft', uiSchema: { type: 'string', title: 'Trạng thái' } });
   if (!hasFieldName('name')) normalizedFields.unshift({ name: 'name', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Tên hồ sơ' } });
   if (!hasFieldName('code')) normalizedFields.unshift({ name: 'code', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Mã hồ sơ' } });
   if (!hasFieldName('organizationId')) {
     normalizedFields.unshift({ name: 'organizationId', type: 'string', interface: 'input', allowNull: false, defaultValue: organizationId, uiSchema: { type: 'string', title: 'Mã tổ chức' } });
+  }
+
+  // Provision belongsToMany join collections BEFORE syncing main collection
+  const joinCollections = [];
+  for (const field of normalizedFields) {
+    if (field.type === 'belongsToMany') {
+      const joinInfo = await ensureBelongsToManyJoinCollection(db, organizationId, {
+        sourceCollection: collectionName,
+        field,
+      });
+      joinCollections.push(joinInfo);
+    }
   }
 
   const colsRepo = db?.getRepository?.('collections');
@@ -380,13 +685,72 @@ async function ensureCollectionAndFields(db, organizationId, { collectionName, c
     });
     if (typeof created?.load === 'function') await created.load({ resetFields: true });
   } else {
-    const existingFieldNames = new Set((val(existing, 'fields') || []).map((f) => val(f, 'name')).filter(Boolean));
-    const missingFields = normalizedFields.filter((f) => !existingFieldNames.has(f.name));
+    const existingFieldMap = new Map((val(existing, 'fields') || []).map((f) => [val(f, 'name'), f]).filter(([k]) => Boolean(k)));
     const fieldsRepo = db?.getRepository?.('fields');
-    if (missingFields.length && fieldsRepo) {
-      for (const f of missingFields) {
-        const cf = await fieldsRepo.create({ values: { ...f, collectionName } });
-        if (typeof cf?.load === 'function') await cf.load();
+    if (fieldsRepo) {
+      for (const f of normalizedFields) {
+        const exField = existingFieldMap.get(f.name);
+        if (!exField) {
+          const cf = await fieldsRepo.create({ values: { ...f, collectionName } });
+          if (typeof cf?.load === 'function') await cf.load();
+        } else {
+          // Non-destructive metadata sync: preserve deprecation when f.deprecated === true; clear when re-enabled
+          const prevUi = val(exField, 'uiSchema') && typeof val(exField, 'uiSchema') === 'object' ? { ...val(exField, 'uiSchema') } : {};
+          const prevOpts = val(exField, 'options') && typeof val(exField, 'options') === 'object' ? { ...val(exField, 'options') } : {};
+          let metaPatch;
+          if (f.deprecated === true) {
+            const depAt = f.deprecatedAt || f.uiSchema?.deprecatedAt || prevUi.deprecatedAt || prevOpts.deprecatedAt || new Date().toISOString();
+            const depReason = f.deprecatedReason || f.uiSchema?.deprecatedReason || prevUi.deprecatedReason || prevOpts.deprecatedReason || null;
+            metaPatch = {
+              ...f,
+              deprecated: true,
+              deprecatedAt: depAt,
+              ...(depReason ? { deprecatedReason: depReason } : {}),
+              readOnly: true,
+              options: {
+                ...prevOpts,
+                ...(f.options || {}),
+                deprecated: true,
+                deprecatedAt: depAt,
+                ...(depReason ? { deprecatedReason: depReason } : {}),
+                readOnly: true,
+              },
+              uiSchema: {
+                ...prevUi,
+                ...(f.uiSchema || {}),
+                deprecated: true,
+                deprecatedAt: depAt,
+                ...(depReason ? { deprecatedReason: depReason } : {}),
+                'x-hidden': true,
+                readOnly: true,
+              },
+            };
+          } else {
+            delete prevUi.deprecated;
+            delete prevUi.deprecatedAt;
+            delete prevUi.deprecatedReason;
+            delete prevUi['x-hidden'];
+            if (!f.readOnly) delete prevUi.readOnly;
+            delete prevOpts.deprecated;
+            delete prevOpts.deprecatedAt;
+            delete prevOpts.deprecatedReason;
+            if (!f.readOnly) delete prevOpts.readOnly;
+            metaPatch = {
+              ...f,
+              deprecated: undefined,
+              deprecatedAt: undefined,
+              deprecatedReason: undefined,
+              ...(!f.readOnly ? { readOnly: undefined } : {}),
+              options: { ...prevOpts, ...(f.options || {}) },
+              uiSchema: { ...prevUi, ...(f.uiSchema || {}) },
+            };
+          }
+          if (typeof exField.update === 'function') {
+            await exField.update(metaPatch);
+          } else if (typeof fieldsRepo.update === 'function') {
+            await fieldsRepo.update({ filter: { collectionName, name: f.name }, values: metaPatch });
+          }
+        }
       }
     }
     if (typeof existing.load === 'function') await existing.load({ resetFields: true });
@@ -410,7 +774,11 @@ async function ensureCollectionAndFields(db, organizationId, { collectionName, c
     }
   }
   const rlsAttached = await attachCollectionRls(db, collectionName);
-  return { collectionName, fields: normalizedFields, indexes: createdIndexes, rlsAttached };
+  const richSchema = getRichSchemaMod();
+  if (typeof richSchema?.attachRichSchemaHooksForCollection === 'function') {
+    richSchema.attachRichSchemaHooksForCollection(db, collectionName, normalizedFields);
+  }
+  return { collectionName, fields: normalizedFields, indexes: createdIndexes, rlsAttached, joinCollections };
 }
 
 async function ensureRoleAndRbac(ctx, db, actor, { roleName, roleTitle, collectionName, fields = [], lockedFields = [] }) {
@@ -444,11 +812,16 @@ async function ensureRoleAndRbac(ctx, db, actor, { roleName, roleTitle, collecti
   }
 
   const fieldNames = [...new Set(['id', 'code', 'name', 'status', ...fields.map((f) => f.name)].filter(Boolean))];
+  const isDeprecatedField = (f) => Boolean(f && (f.deprecated === true || f.uiSchema?.deprecated === true || f.options?.deprecated === true));
+  const deprecatedFieldNames = new Set(fields.filter(isDeprecatedField).map((f) => f.name));
+  const writableFieldNames = fieldNames.filter((name) => !deprecatedFieldNames.has(name));
+  const readOnlyFieldNames = fields.filter((f) => f && (f.interface === 'formula' || f.readOnly === true || isDeprecatedField(f))).map((f) => f.name);
+  const effectiveLocked = [...new Set([...(lockedFields || []), ...readOnlyFieldNames])];
   const actionsSpec = buildRbacActionsSpec({
     actions: ['view', 'create', 'update'],
     readableFields: fieldNames,
-    writableFields: fieldNames,
-    lockedFields,
+    writableFields: writableFieldNames,
+    lockedFields: effectiveLocked,
     collectionName,
     db,
   });
@@ -597,7 +970,10 @@ async function ensurePortalAndBlocks(ctx, db, actor, {
       }
       if (existingUses.has(blockUse) && specItem?.allowDuplicate !== true) continue;
       const flatAliasCfg = {};
-      for (const aliasKey of ['collection', 'statusField', 'dateField', 'titleField', 'latField', 'lngField', 'labelField']) {
+      for (const aliasKey of [
+        'collection', 'statusField', 'dateField', 'titleField', 'latField', 'lngField', 'labelField',
+        'chartType', 'groupBy', 'secondaryGroupBy', 'metricOp', 'metricField', 'limit', 'filterJson',
+      ]) {
         if (specItem?.[aliasKey] !== undefined && specItem[aliasKey] !== '') {
           flatAliasCfg[aliasKey] = specItem[aliasKey];
         }
@@ -849,34 +1225,61 @@ async function verifyEnterpriseApp(ctx, db, actor, target = {}, deps = {}) {
       repairAction: 'ensure_collection',
     });
 
-    // 2. PG FORCE ROW LEVEL SECURITY check
-    let rlsOk = false;
-    let rlsDetail = 'RLS not attached';
-    const isPg = typeof db?.sequelize?.getDialect === 'function' && db.sequelize.getDialect() === 'postgres';
-    if (isPg && typeof db?.sequelize?.query === 'function') {
-      try {
+    // 2. PG FORCE ROW LEVEL SECURITY check (including belongsToMany joinCollections)
+    const joinColsToVerify = [...new Set([
+      ...(Array.isArray(target.joinCollections) ? target.joinCollections : []),
+      ...colFields
+        .filter((f) => (val(f, 'type') || f?.type) === 'belongsToMany')
+        .map((f) => val(f, 'through') || f?.through)
+        .filter(Boolean),
+    ])];
+    const checkSingleRls = async (tblName) => {
+      if (isPg && typeof db?.sequelize?.query === 'function') {
         const clsRes = await withOptionalSystemRls(db, (transaction) => db.sequelize.query(
           `SELECT relname, relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = :tableName LIMIT 1;`,
-          { replacements: { tableName: collectionName }, ...(transaction ? { transaction } : {}) },
+          { replacements: { tableName: tblName }, ...(transaction ? { transaction } : {}) },
         ));
         const row = Array.isArray(clsRes?.[0]) ? clsRes[0][0] : clsRes?.[0];
         const polRes = await withOptionalSystemRls(db, (transaction) => db.sequelize.query(
           `SELECT policyname FROM pg_policies WHERE tablename = :tableName AND policyname = 'lattice_tenant_isolation' LIMIT 1;`,
-          { replacements: { tableName: collectionName }, ...(transaction ? { transaction } : {}) },
+          { replacements: { tableName: tblName }, ...(transaction ? { transaction } : {}) },
         ));
         const polRow = Array.isArray(polRes?.[0]) ? polRes[0][0] : polRes?.[0];
-        rlsOk = Boolean(row?.relrowsecurity && row?.relforcerowsecurity && polRow?.policyname);
-        rlsDetail = rlsOk ? 'relrowsecurity=true, relforcerowsecurity=true, policy=lattice_tenant_isolation' : 'Missing FORCE ROW LEVEL SECURITY or policy';
-      } catch (err) {
-        rlsOk = false;
-        rlsDetail = err?.message || 'PG RLS query failed';
+        const ok = Boolean(row?.relrowsecurity && row?.relforcerowsecurity && polRow?.policyname);
+        return {
+          ok,
+          detail: ok ? 'relrowsecurity=true, relforcerowsecurity=true, policy=lattice_tenant_isolation' : `Missing FORCE ROW LEVEL SECURITY or policy on ${tblName}`,
+        };
       }
-    } else if (db?.rlsAttachedTables instanceof Set) {
-      rlsOk = db.rlsAttachedTables.has(collectionName);
-      rlsDetail = rlsOk ? 'RLS attached via attachLatticeRlsPolicy' : 'Missing attachLatticeRlsPolicy record';
-    } else {
-      rlsOk = hasOrgField;
-      rlsDetail = rlsOk ? 'Tenant organizationId column verified' : 'Missing organizationId';
+      if (db?.rlsAttachedTables instanceof Set) {
+        const ok = db.rlsAttachedTables.has(tblName);
+        return { ok, detail: ok ? 'RLS attached via attachLatticeRlsPolicy' : `Missing attachLatticeRlsPolicy record on ${tblName}` };
+      }
+      return { ok: hasOrgField, detail: hasOrgField ? 'Tenant organizationId column verified' : 'Missing organizationId' };
+    };
+    let rlsOk = false;
+    let rlsDetail = 'RLS not attached';
+    const isPg = typeof db?.sequelize?.getDialect === 'function' && db.sequelize.getDialect() === 'postgres';
+    try {
+      const mainRls = await checkSingleRls(collectionName);
+      rlsOk = mainRls.ok;
+      rlsDetail = mainRls.detail;
+      if (rlsOk && joinColsToVerify.length) {
+        for (const jc of joinColsToVerify) {
+          const jRes = await checkSingleRls(jc);
+          if (!jRes.ok) {
+            rlsOk = false;
+            rlsDetail = jRes.detail;
+            break;
+          }
+        }
+        if (rlsOk) {
+          rlsDetail = `${rlsDetail}; joinCollections=[${joinColsToVerify.join(', ')}]`;
+        }
+      }
+    } catch (err) {
+      rlsOk = false;
+      rlsDetail = err?.message || 'PG RLS query failed';
     }
     checks.push({
       id: 'pg_rls_enforced',
@@ -1071,7 +1474,17 @@ async function applyTargetedRepair(ctx, db, actor, check, state, deps) {
       await ensureCollectionAndFields(db, actor.organizationId, { collectionName, collectionTitle, fields: normalizedFields });
       return { checkId: check.id, repairAction: check.repairAction, repaired: true };
     case 'attach_rls': {
-      const ok = await attachCollectionRls(db, collectionName);
+      let ok = await attachCollectionRls(db, collectionName);
+      const joinCols = [...new Set([
+        ...(Array.isArray(state.joinCollections) ? state.joinCollections : []),
+        ...(Array.isArray(normalizedFields)
+          ? normalizedFields.filter((f) => f?.type === 'belongsToMany' && f?.through).map((f) => f.through)
+          : []),
+      ].filter(Boolean))];
+      for (const joinCol of joinCols) {
+        const jOk = await attachCollectionRls(db, joinCol);
+        if (!jOk) ok = false;
+      }
       return { checkId: check.id, repairAction: check.repairAction, repaired: ok };
     }
     case 'reload_collection': {
@@ -1134,6 +1547,7 @@ function serializeBuiltAppRow(row) {
     status: val(row, 'status') || 'active',
     sourceSpecJson: val(row, 'sourceSpecJson') || {},
     artifactRefsJson: val(row, 'artifactRefsJson') || {},
+    versionHistoryJson: Array.isArray(val(row, 'versionHistoryJson')) ? val(row, 'versionHistoryJson') : [],
     bundleSnapshotUid: val(row, 'bundleSnapshotUid') || null,
     lastVerifiedAt: val(row, 'lastVerifiedAt') || null,
     lastVerificationJson: val(row, 'lastVerificationJson') || null,
@@ -1145,7 +1559,7 @@ function serializeBuiltAppRow(row) {
 
 /**
  * Validate and topologically sort Multi-Entity collections using Kahn's algorithm so
- * referenced targets (belongsTo / hasMany) are created BEFORE their dependents.
+ * referenced targets (belongsTo / hasMany / hasOne) are created BEFORE their dependents.
  * Rejects SYSTEM_PROTECTED_COLLECTIONS (403) and cyclic graphs (400) before any DB write.
  */
 function topologicalSortCollections(collections = []) {
@@ -1168,7 +1582,7 @@ function topologicalSortCollections(collections = []) {
     }
     seenNames.add(colName);
     const rawFields = Array.isArray(item?.fields) ? item.fields : [];
-    const normalizedFields = rawFields.map((f) => normalizeOrchestratorField(f));
+    const normalizedFields = rawFields.map((f) => normalizeOrchestratorField(f, colName));
     normalizedEntries.push({
       ...item,
       collectionName: colName,
@@ -1185,14 +1599,14 @@ function topologicalSortCollections(collections = []) {
 
   for (const entry of normalizedEntries) {
     for (const f of entry.normalizedFields) {
-      if (f.type !== 'belongsTo' && f.type !== 'hasMany') continue;
+      if (f.type !== 'belongsTo' && f.type !== 'hasMany' && f.type !== 'hasOne') continue;
       const target = String(f.target || '').trim();
       if (!target || !entryByName.has(target)) continue;
       if (target === entry.collectionName) {
         throw failBuild('BLUEPRINT_CYCLE_DETECTED', 400, `Phát hiện quan hệ tự tham chiếu vòng lặp trên "${entry.collectionName}".`);
       }
       // belongsTo: target (parent) must be created BEFORE entry (child) -> edge target -> entry
-      // hasMany: entry (parent) must be created BEFORE target (child) -> edge entry -> target
+      // hasMany/hasOne: entry (parent) must be created BEFORE target (child) -> edge entry -> target
       const parentNode = f.type === 'belongsTo' ? target : entry.collectionName;
       const childNode = f.type === 'belongsTo' ? entry.collectionName : target;
       const edgeKey = `${parentNode}->${childNode}`;
@@ -1233,7 +1647,7 @@ function topologicalSortCollections(collections = []) {
   return sorted;
 }
 
-async function upsertBuiltAppRecord(db, actor, recordValues) {
+async function upsertBuiltAppRecord(db, actor, recordValues, opts = {}) {
   const repo = db?.getRepository?.('latticeBuiltApps');
   if (!repo) return null;
   const organizationId = actor.organizationId;
@@ -1244,10 +1658,15 @@ async function upsertBuiltAppRecord(db, actor, recordValues) {
       : null;
     if (existing) {
       const nextVersion = (Number(val(existing, 'version')) || 1) + 1;
+      const prevHistory = Array.isArray(val(existing, 'versionHistoryJson')) ? val(existing, 'versionHistoryJson') : [];
+      const nextHistory = opts.appendHistoryEntry
+        ? [...prevHistory, opts.appendHistoryEntry].slice(-50)
+        : (Array.isArray(recordValues.versionHistoryJson) ? recordValues.versionHistoryJson : prevHistory);
       const patch = {
         ...recordValues,
         organizationId,
         version: nextVersion,
+        versionHistoryJson: nextHistory,
       };
       if (typeof existing.update === 'function') {
         await existing.update(patch, txOpt);
@@ -1262,6 +1681,7 @@ async function upsertBuiltAppRecord(db, actor, recordValues) {
     const created = await repo.create({
       values: {
         ...recordValues,
+        versionHistoryJson: Array.isArray(recordValues.versionHistoryJson) ? recordValues.versionHistoryJson : [],
         organizationId,
         version: 1,
         createdBy: actor.username || null,
@@ -1272,27 +1692,15 @@ async function upsertBuiltAppRecord(db, actor, recordValues) {
   });
 }
 
-/**
- * Full-stack Enterprise App Builder Orchestrator with pre-build Snapshot, Multi-Entity topological schema/relations/RLS/OpenAPI,
- * RBAC, Multi-Portal 10-BlockModel pages, DMN, LatticeFlow v2 DAG, Stock n8n workflow,
- * Deterministic Verifier, up to 2 rounds of closed-loop targeted self-healing, and latticeBuiltApps registry.
- */
-async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {}) {
-  if (!actor?.isAdmin && !actor?.isRoot) {
-    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được dựng ứng dụng doanh nghiệp.');
-  }
-  const organizationId = String(actor.organizationId || '').trim();
-  if (!organizationId) {
-    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
-  }
-
+function validateAndNormalizeAppSpec(actor, spec = {}) {
+  assertNoPrototypePollution(spec, 'spec');
+  const organizationId = String(actor?.organizationId || '').trim();
   const defaultPortalSlug = String(spec.portalSlug || spec.portals?.[0]?.portalSlug || 'services').trim().toLowerCase();
   if (!SLUG_RE.test(defaultPortalSlug)) {
     throw failBuild('PORTAL_SLUG_INVALID', 400, 'portalSlug không hợp lệ.');
   }
   const defaultPageTitle = String(spec.pageTitle || spec.title || spec.name || spec.portals?.[0]?.pageTitle || 'Phân hệ Doanh nghiệp Mới').trim();
 
-  // 0. Validate & topologically sort collections BEFORE any snapshot or DB write (Review Focus #5)
   const isMultiEntity = Array.isArray(spec.collections) && spec.collections.length > 0;
   let sortedCollections;
   if (isMultiEntity) {
@@ -1307,7 +1715,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
       );
     }
     const rawFields = Array.isArray(spec.fields) ? spec.fields : [];
-    const normalizedFields = rawFields.map((f) => normalizeOrchestratorField(f));
+    const normalizedFields = rawFields.map((f) => normalizeOrchestratorField(f, singleCollectionName));
     sortedCollections = [{
       collectionName: singleCollectionName,
       collectionTitle: String(spec.collectionTitle || defaultPageTitle).trim(),
@@ -1319,7 +1727,6 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
   const primaryCollection = sortedCollections[0];
   const collectionName = primaryCollection.collectionName;
 
-  // Validate roles BEFORE snapshot/DB
   const rawRolesList = Array.isArray(spec.roles) && spec.roles.length > 0
     ? spec.roles
     : [{
@@ -1349,7 +1756,6 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
   });
   const primaryRole = normalizedRoles[0];
 
-  // Validate portals & blocks BEFORE snapshot/DB
   const rawPortalsList = Array.isArray(spec.portals) && spec.portals.length > 0
     ? spec.portals
     : [{
@@ -1419,20 +1825,73 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     ...(spec.n8nWorkflow ? [spec.n8nWorkflow] : []),
   ];
 
+  const erGraph = buildErGraph(sortedCollections);
+
+  return {
+    organizationId,
+    appKey,
+    appName,
+    sortedCollections,
+    primaryCollection,
+    collectionName,
+    normalizedRoles,
+    primaryRole,
+    normalizedPortals,
+    primaryPortal,
+    dmnInputList,
+    flowInputList,
+    n8nInputList,
+    erGraph,
+  };
+}
+
+/**
+ * Full-stack Enterprise App Builder Orchestrator with pre-build Snapshot, Multi-Entity topological schema/relations/RLS/OpenAPI,
+ * RBAC, Multi-Portal 12-BlockModel pages, DMN, LatticeFlow v2 DAG, Stock n8n workflow,
+ * Deterministic Verifier, up to 2 rounds of closed-loop targeted self-healing, and latticeBuiltApps registry.
+ */
+async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được dựng ứng dụng doanh nghiệp.');
+  }
+  const organizationId = String(actor.organizationId || '').trim();
+  if (!organizationId) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+
+  // 0. Validate & topologically sort collections BEFORE any snapshot or DB write (Review Focus #5)
+  const validated = validateAndNormalizeAppSpec(actor, spec);
+  const {
+    appKey,
+    appName,
+    sortedCollections,
+    primaryCollection,
+    collectionName,
+    normalizedRoles,
+    primaryRole,
+    normalizedPortals,
+    primaryPortal,
+    dmnInputList,
+    flowInputList,
+    n8nInputList,
+    erGraph,
+  } = validated;
+
   if (spec.dryRun === true) {
     return {
       dryRun: true,
       built: false,
       appKey,
+      erGraph,
       planned: {
         organizationId,
         appKey,
         collectionName,
         collections: sortedCollections.map((c) => ({
           collectionName: c.collectionName,
-          fields: c.normalizedFields.map((f) => ({ name: f.name, type: f.type, target: f.target || null })),
+          fields: c.normalizedFields.map((f) => ({ name: f.name, type: f.type, target: f.target || null, through: f.through || null })),
         })),
-        fields: primaryCollection.normalizedFields.map((f) => ({ name: f.name, type: f.type, target: f.target || null })),
+        fields: primaryCollection.normalizedFields.map((f) => ({ name: f.name, type: f.type, target: f.target || null, through: f.through || null })),
         roleName: primaryRole.roleName,
         roles: normalizedRoles.map((r) => r.roleName),
         portalSlug: primaryPortal.portalSlug,
@@ -1449,30 +1908,33 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
   }
 
   // 1. Pre-build Snapshot (only AFTER all blueprint & cycle validations pass)
-  await ensureUiSnapshotsReady(db);
-  const preSnap = await capturePageSnapshot(db, {
-    portalSlug: primaryPortal.portalSlug,
-    pageTitle: primaryPortal.pageTitle,
-    note: `Pre-build snapshot for ${sortedCollections.map((c) => c.collectionName).join(', ')}`,
-    createdByUsername: actor.username,
-  }, val);
-  const preBuildSnapshotUid = preSnap?.snapshotUid || `snap-pre-${primaryPortal.portalSlug}-${Date.now().toString(36)}`;
-  if (!preSnap) {
-    const snapRepo = db?.getRepository?.('latticeUiSnapshots');
-    if (snapRepo && typeof snapRepo.create === 'function') {
-      await withOptionalTenantRls(db, organizationId, (transaction) => snapRepo.create({
-        values: {
-          organizationId,
-          snapshotUid: preBuildSnapshotUid,
-          portalSlug: primaryPortal.portalSlug,
-          pageTitle: primaryPortal.pageTitle,
-          note: `Pre-build snapshot for ${sortedCollections.map((c) => c.collectionName).join(', ')}`,
-          createdByUsername: actor.username,
-          layoutState: {},
-          blocks: [],
-        },
-        ...(transaction ? { transaction } : {}),
-      }));
+  let preBuildSnapshotUid = deps._overrideSnapshotUid || null;
+  if (!preBuildSnapshotUid) {
+    await ensureUiSnapshotsReady(db);
+    const preSnap = await capturePageSnapshot(db, {
+      portalSlug: primaryPortal.portalSlug,
+      pageTitle: primaryPortal.pageTitle,
+      note: `Pre-build snapshot for ${sortedCollections.map((c) => c.collectionName).join(', ')}`,
+      createdByUsername: actor.username,
+    }, val);
+    preBuildSnapshotUid = preSnap?.snapshotUid || `snap-pre-${primaryPortal.portalSlug}-${Date.now().toString(36)}`;
+    if (!preSnap) {
+      const snapRepo = db?.getRepository?.('latticeUiSnapshots');
+      if (snapRepo && typeof snapRepo.create === 'function') {
+        await withOptionalTenantRls(db, organizationId, (transaction) => snapRepo.create({
+          values: {
+            organizationId,
+            snapshotUid: preBuildSnapshotUid,
+            portalSlug: primaryPortal.portalSlug,
+            pageTitle: primaryPortal.pageTitle,
+            note: `Pre-build snapshot for ${sortedCollections.map((c) => c.collectionName).join(', ')}`,
+            createdByUsername: actor.username,
+            layoutState: {},
+            blocks: [],
+          },
+          ...(transaction ? { transaction } : {}),
+        }));
+      }
     }
   }
 
@@ -1489,14 +1951,16 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     schemaByCol.set(colSpec.collectionName, res);
   }
   const primarySchemaResult = schemaResults[0];
+  const allJoinCollections = [...new Set(schemaResults.flatMap((s) => (s.joinCollections || []).map((j) => j.collectionName)))];
 
-  // 3. Roles + RBAC + Locked Fields + AI Assistants
+  // 3. Roles + RBAC + Locked Fields + AI Assistants (including belongsToMany join collections)
   const roleResults = [];
   const aiUsernames = [];
   for (const rSpec of normalizedRoles) {
     let lastRbac = null;
     for (const targetCol of rSpec.collections) {
-      const colFields = schemaByCol.get(targetCol)?.fields || primarySchemaResult.fields;
+      const colRes = schemaByCol.get(targetCol);
+      const colFields = colRes?.fields || primarySchemaResult.fields;
       lastRbac = await ensureRoleAndRbac(ctx, db, actor, {
         roleName: rSpec.roleName,
         roleTitle: rSpec.roleTitle,
@@ -1504,6 +1968,15 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
         fields: colFields,
         lockedFields: rSpec.lockedFields,
       });
+      for (const jc of (colRes?.joinCollections || [])) {
+        await ensureRoleAndRbac(ctx, db, actor, {
+          roleName: rSpec.roleName,
+          roleTitle: rSpec.roleTitle,
+          collectionName: jc.collectionName,
+          fields: jc.fields || [],
+          lockedFields: [],
+        });
+      }
     }
     if (lastRbac) roleResults.push(lastRbac);
     const aiUser = await ensureAiAssistant(db, actor, {
@@ -1586,6 +2059,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
   const verifyTarget = {
     organizationId,
     collectionName,
+    joinCollections: (primarySchemaResult.joinCollections || []).map((j) => j.collectionName),
     expectedFields: primarySchemaResult.fields.map((f) => f.name),
     portalSlug: primaryPortal.portalSlug,
     pageTitle: primaryPortal.pageTitle,
@@ -1612,6 +2086,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
       const subTarget = {
         organizationId,
         collectionName: extraCol.collectionName,
+        joinCollections: (extraSchema.joinCollections || []).map((j) => j.collectionName),
         expectedFields: extraSchema.fields.map((f) => f.name),
         roleName: primaryRole.roleName,
         lockedFields: primaryRole.lockedFields,
@@ -1693,6 +2168,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
         collectionName: rt.collectionName || collectionName,
         collectionTitle: rt.collectionTitle || primaryCollection.collectionTitle,
         normalizedFields: rt.rawFields || primaryCollection.fields,
+        joinCollections: Array.isArray(rt.joinCollections) ? rt.joinCollections : allJoinCollections,
         roleName: rt.roleName || primaryRole.roleName,
         roleTitle: rt.roleTitle || primaryRole.roleTitle,
         lockedFields: rt.lockedFields || primaryRole.lockedFields,
@@ -1708,17 +2184,25 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     }
   }
 
-  // 9. Persist latticeBuiltApps registry record
-  const artifactRefsJson = {
-    collections: schemaResults.map((s) => s.collectionName),
-    roles: roleResults.map((r) => r.roleName),
-    portals: portalResults.map((p) => ({
+  // 9. Persist latticeBuiltApps registry record (merge preserved blockUids from existing portals if patching)
+  const mergedPortalsRef = portalResults.map((p) => {
+    const prevBlockUids = Array.isArray(deps._preservedBlockUidsByPortal?.[p.portalSlug])
+      ? deps._preservedBlockUidsByPortal[p.portalSlug]
+      : [];
+    return {
       portalSlug: p.portalSlug,
       layoutUid: p.layoutUid,
       pageTitle: p.pageTitle,
       gridUid: p.gridUid,
-      blockUids: (p.attachedBlocks || []).map((b) => b.uid),
-    })),
+      blockUids: [...new Set([...prevBlockUids, ...(p.attachedBlocks || []).map((b) => b.uid)])],
+    };
+  });
+
+  const artifactRefsJson = {
+    collections: schemaResults.map((s) => s.collectionName),
+    joinCollections: allJoinCollections,
+    roles: roleResults.map((r) => r.roleName),
+    portals: mergedPortalsRef,
     aiEmployees: aiUsernames,
     dmnTableKeys,
     flowRuleKeys,
@@ -1729,11 +2213,13 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     appKey,
     name: appName,
     status: verification.ok ? 'active' : 'needs_review',
-    sourceSpecJson: spec,
+    sourceSpecJson: cloneSafeDeep(spec),
     artifactRefsJson,
     bundleSnapshotUid: preBuildSnapshotUid,
     lastVerifiedAt: new Date().toISOString(),
     lastVerificationJson: verification,
+  }, {
+    appendHistoryEntry: deps._appendHistoryEntry || null,
   });
 
   for (const pRes of portalResults) {
@@ -1751,9 +2237,10 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     aiEmployee: aiUsername,
     toolName: 'dxos_provision_role_workspace',
     argsSummary: {
-      operation: 'build_enterprise_app',
+      operation: deps._auditOperation || 'build_enterprise_app',
       appKey,
       collections: artifactRefsJson.collections,
+      joinCollections: allJoinCollections,
       portalSlug: primaryPortal.portalSlug,
       roleName: primaryRole.roleName,
     },
@@ -1771,6 +2258,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     organizationId,
     collectionName,
     collections: artifactRefsJson.collections,
+    joinCollections: allJoinCollections,
     fields: primarySchemaResult.fields.map((f) => f.name),
     indexes: primarySchemaResult.indexes,
     roleName: primaryRbacResult.roleName,
@@ -1789,6 +2277,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     n8nWorkflowIds,
     artifactRefs: artifactRefsJson,
     preBuildSnapshotUid,
+    erGraph,
     verification,
     healRounds,
     repairs,
@@ -1910,7 +2399,10 @@ async function exportAppBundle(db, actor, { appKey = null, organizationId = null
   if (!builtRow) return rawBundle;
 
   const refs = val(builtRow, 'artifactRefsJson') || {};
-  const colSet = new Set(Array.isArray(refs.collections) ? refs.collections : []);
+  const colSet = new Set([
+    ...(Array.isArray(refs.collections) ? refs.collections : []),
+    ...(Array.isArray(refs.joinCollections) ? refs.joinCollections : []),
+  ]);
   const roleSet = new Set(Array.isArray(refs.roles) ? refs.roles : []);
   const portalRefs = Array.isArray(refs.portals) ? refs.portals : [];
   const layoutSet = new Set(portalRefs.map((p) => p?.layoutUid).filter(Boolean));
@@ -2169,6 +2661,7 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
   }
 
   // 5. Data preservation vs explicit reverse-topological drop (preserving collections shared by other active apps)
+  const joinCollections = Array.isArray(refs.joinCollections) ? refs.joinCollections : [];
   const sharedCollections = new Set();
   if (typeof repo.find === 'function') {
     const otherRows = (await withOptionalTenantRls(db, organizationId, (transaction) => repo.find({
@@ -2180,20 +2673,23 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
       if (val(other, 'organizationId') !== organizationId) continue;
       if (val(other, 'appKey') === appKey) continue;
       if (val(other, 'status') === 'torndown') continue;
-      const otherCols = val(other, 'artifactRefsJson')?.collections;
-      if (Array.isArray(otherCols)) {
-        for (const oc of otherCols) sharedCollections.add(oc);
-      }
+      const otherRefs = val(other, 'artifactRefsJson') || {};
+      const otherCols = [
+        ...(Array.isArray(otherRefs.collections) ? otherRefs.collections : []),
+        ...(Array.isArray(otherRefs.joinCollections) ? otherRefs.joinCollections : []),
+      ];
+      for (const oc of otherCols) sharedCollections.add(oc);
     }
   }
 
+  const dropOrderList = [...new Set([...[...joinCollections].reverse(), ...[...collections].reverse()])];
   const droppedCollections = [];
   const preservedCollections = [];
   if (!keepData) {
     const resRepo = db?.getRepository?.('dataSourcesRolesResources');
     const fieldsRepo = db?.getRepository?.('fields');
     const colsRepo = db?.getRepository?.('collections');
-    for (const colName of [...collections].reverse()) {
+    for (const colName of dropOrderList) {
       if (!CUSTOM_COLLECTION_RE.test(colName) || isProtectedCollection(colName)) continue;
       if (sharedCollections.has(colName)) {
         if (resRepo && typeof resRepo.destroy === 'function' && roles.length) {
@@ -2202,7 +2698,7 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
         preservedCollections.push(colName);
         continue;
       }
-      // Drop physical table FIRST (reverse topological order: Child before Parent); do not swallow DDL errors
+      // Drop physical table FIRST (reverse topological order: Join & Child before Parent); do not swallow DDL errors
       if (typeof db?.sequelize?.query === 'function') {
         await db.sequelize.query(`DROP TABLE IF EXISTS "${colName}";`);
       }
@@ -2234,7 +2730,7 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
       droppedCollections.push(colName);
     }
   } else {
-    preservedCollections.push(...collections);
+    preservedCollections.push(...collections, ...joinCollections);
   }
 
   // 6. Update latticeBuiltApps status
@@ -2276,6 +2772,700 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
   };
 }
 
+async function capturePortalsSnapshots(db, actor, portals = [], note = 'Pre-mutation snapshot') {
+  const organizationId = actor.organizationId;
+  await ensureUiSnapshotsReady(db);
+  const byPortal = {};
+  let primaryUid = null;
+  for (const p of portals) {
+    const pSlug = p?.portalSlug;
+    if (!pSlug) continue;
+    const snap = await capturePageSnapshot(db, {
+      portalSlug: pSlug,
+      pageTitle: p.pageTitle,
+      note,
+      createdByUsername: actor.username,
+    }, val);
+    let uid = snap?.snapshotUid || null;
+    if (!uid) {
+      uid = `snap-${pSlug}-${Date.now().toString(36)}`;
+      const snapRepo = db?.getRepository?.('latticeUiSnapshots');
+      if (snapRepo && typeof snapRepo.create === 'function') {
+        await withOptionalTenantRls(db, organizationId, (transaction) => snapRepo.create({
+          values: {
+            organizationId,
+            snapshotUid: uid,
+            portalSlug: pSlug,
+            pageTitle: p.pageTitle || '',
+            note,
+            createdByUsername: actor.username,
+            layoutState: {},
+            blocks: [],
+          },
+          ...(transaction ? { transaction } : {}),
+        }));
+      }
+    }
+    byPortal[pSlug] = uid;
+    if (!primaryUid) primaryUid = uid;
+  }
+  return { primaryUid, byPortal };
+}
+
+async function removeBlocksFromPortals(db, portals = [], blockTitlesOrUses = []) {
+  const rmSet = new Set(blockTitlesOrUses.map((x) => String(typeof x === 'string' ? x : (x?.uid || x?.title || x?.blockUse || x?.use || '')).trim()).filter(Boolean));
+  if (!rmSet.size) return [];
+  const flowModelsRepo = db?.getRepository?.('flowModels');
+  if (!flowModelsRepo) return [];
+  const removedUids = [];
+  for (const p of portals) {
+    if (!p?.gridUid) continue;
+    const grid = typeof flowModelsRepo.findModelById === 'function' ? await flowModelsRepo.findModelById(p.gridUid) : null;
+    const blockUids = Array.isArray(p.blockUids) ? p.blockUids : (grid ? extractGridBlockUids(grid).ordered : []);
+    const portalRemovedUids = [];
+    for (const uid of blockUids) {
+      const m = typeof flowModelsRepo.findModelById === 'function' ? await flowModelsRepo.findModelById(uid) : null;
+      const mTitle = m?.props?.title || m?.stepParams?.dxosBlockSettings?.config?.title || '';
+      if (rmSet.has(uid) || (m?.use && rmSet.has(m.use)) || (mTitle && rmSet.has(mTitle))) {
+        portalRemovedUids.push(uid);
+        removedUids.push(uid);
+      }
+    }
+    if (portalRemovedUids.length && grid?.props && typeof flowModelsRepo.upsertModel === 'function') {
+      const uidRmSet = new Set(portalRemovedUids);
+      const nextRows = {};
+      for (const [rk, rowCols] of Object.entries(grid.props.rows || {})) {
+        const filteredCols = (Array.isArray(rowCols) ? rowCols : [])
+          .map((col) => (Array.isArray(col) ? col.filter((u) => !uidRmSet.has(u)) : col))
+          .filter((col) => !Array.isArray(col) || col.length > 0);
+        if (filteredCols.length) nextRows[rk] = filteredCols;
+      }
+      const nextOrder = (Array.isArray(grid.props.rowOrder) ? grid.props.rowOrder : []).filter((rk) => Object.prototype.hasOwnProperty.call(nextRows, rk));
+      await flowModelsRepo.upsertModel({ ...grid, props: { ...grid.props, rows: nextRows, rowOrder: nextOrder } });
+    }
+  }
+  if (removedUids.length && typeof flowModelsRepo.destroy === 'function') {
+    await flowModelsRepo.destroy({ filter: { uid: { $in: removedUids } } });
+  }
+  return removedUids;
+}
+
+/**
+ * Pure dry-run Plan-Diff-Approve: ZERO DB mutations.
+ */
+async function planEnterpriseApp(ctx, db, actor, params = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được lập kế hoạch ứng dụng.');
+  }
+  const organizationId = String(actor.organizationId || '').trim();
+  if (!organizationId) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+  assertNoPrototypePollution(params, 'planParams');
+
+  const safeParams = cloneSafeDeep(params || {});
+  const incomingSpec = safeParams.targetSpec || safeParams.spec || null;
+  const hasExplicitSpec = Boolean(
+    incomingSpec
+    || (Array.isArray(safeParams.collections) && safeParams.collections.length)
+    || safeParams.collectionName,
+  );
+  const patchObj = safeParams.patch || safeParams.specPatch || null;
+  const promptText = String(safeParams.prompt || safeParams.editPrompt || '').trim();
+  const requestedAppKey = String(safeParams.appKey || incomingSpec?.appKey || '').trim() || null;
+
+  let existingRow = null;
+  if (requestedAppKey && db?.getRepository) {
+    const repo = db.getRepository('latticeBuiltApps');
+    if (repo && typeof repo.findOne === 'function') {
+      existingRow = await withOptionalTenantRls(db, organizationId, (transaction) => repo.findOne({
+        filter: { organizationId, appKey: requestedAppKey },
+        ...(transaction ? { transaction } : {}),
+      }));
+    }
+  }
+
+  if (requestedAppKey && !existingRow && !hasExplicitSpec) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Không tìm thấy ứng dụng "${requestedAppKey}" trong tổ chức.`);
+  }
+
+  const baseSpec = existingRow && val(existingRow, 'sourceSpecJson') && typeof val(existingRow, 'sourceSpecJson') === 'object'
+    ? cloneSafeDeep(val(existingRow, 'sourceSpecJson'))
+    : null;
+
+  let candidateSpec;
+  if (incomingSpec && typeof incomingSpec === 'object') {
+    candidateSpec = cloneSafeDeep(incomingSpec);
+  } else if (hasExplicitSpec) {
+    const {
+      appKey: _ak, patch: _p, specPatch: _sp, prompt: _pr, editPrompt: _ep,
+      targetSpec: _ts, dryRun: _dr, summary: _sm, ...restSpec
+    } = safeParams;
+    candidateSpec = baseSpec ? applySpecPatch(baseSpec, { ...restSpec, ...(patchObj || {}) }, promptText) : restSpec;
+  } else if (baseSpec) {
+    candidateSpec = applySpecPatch(baseSpec, patchObj, promptText);
+  } else {
+    throw failBuild('SPEC_OR_APP_KEY_REQUIRED', 400, 'Cần cung cấp spec/collections hoặc appKey hợp lệ để lập kế hoạch.');
+  }
+
+  if (requestedAppKey && !candidateSpec.appKey) {
+    candidateSpec.appKey = requestedAppKey;
+  }
+
+  const candValidated = validateAndNormalizeAppSpec(actor, candidateSpec);
+  let baseValidated = null;
+  if (baseSpec) {
+    try {
+      baseValidated = validateAndNormalizeAppSpec(actor, baseSpec);
+    } catch {
+      baseValidated = null;
+    }
+  }
+
+  const diff = computeSpecDiff(
+    baseSpec,
+    candidateSpec,
+    baseValidated?.sortedCollections || [],
+    candValidated.sortedCollections,
+    baseValidated?.normalizedRoles || [],
+    candValidated.normalizedRoles,
+    baseValidated?.normalizedPortals || [],
+    candValidated.normalizedPortals,
+  );
+
+  const isUpdate = Boolean(existingRow);
+  const currentVersion = existingRow ? (Number(val(existingRow, 'version')) || 1) : 0;
+
+  return {
+    ok: true,
+    dryRun: true,
+    built: false,
+    appKey: candValidated.appKey,
+    isUpdate,
+    currentVersion,
+    erGraph: candValidated.erGraph,
+    diff,
+    plan: {
+      organizationId,
+      appKey: candValidated.appKey,
+      appName: candValidated.appName,
+      collectionName: candValidated.collectionName,
+      collections: candValidated.sortedCollections.map((c) => ({
+        collectionName: c.collectionName,
+        collectionTitle: c.collectionTitle,
+        fields: c.normalizedFields.map((f) => ({
+          name: f.name,
+          type: f.interface === 'formula' ? 'formula' : f.type,
+          target: f.target || null,
+          through: f.through || null,
+          validation: f.validation || null,
+          formulaExpression: f.formulaExpression || null,
+        })),
+      })),
+      roles: candValidated.normalizedRoles.map((r) => ({ roleName: r.roleName, roleTitle: r.roleTitle, lockedFields: r.lockedFields })),
+      portals: candValidated.normalizedPortals.map((p) => ({
+        portalSlug: p.portalSlug,
+        pageTitle: p.pageTitle,
+        collectionName: p.collectionName,
+        blocks: p.blocks.map((b) => ({ blockUse: b?.blockUse || b?.use, title: b?.title || null })),
+      })),
+      dmnTableKeys: candValidated.dmnInputList.map((d) => d?.tableKey).filter(Boolean),
+      flowRuleKeys: candValidated.flowInputList.map((f) => f?.ruleKey).filter(Boolean),
+      hasN8nWorkflow: candValidated.n8nInputList.length > 0,
+    },
+  };
+}
+
+/**
+ * Iterative patch_enterprise_app with pre-patch snapshot into versionHistoryJson,
+ * incremental schema/block/role/DMN/Flow application, verification + self-healing, and version increment.
+ */
+async function patchEnterpriseApp(ctx, db, actor, params = {}, deps = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được cập nhật ứng dụng.');
+  }
+  const organizationId = String(actor.organizationId || '').trim();
+  if (!organizationId) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+  assertNoPrototypePollution(params, 'patchParams');
+
+  const safeParams = cloneSafeDeep(params || {});
+  const appKey = String(safeParams.appKey || '').trim();
+  if (!appKey) {
+    throw failBuild('APP_KEY_REQUIRED', 400, 'Cần appKey để cập nhật ứng dụng.');
+  }
+  const repo = db?.getRepository?.('latticeBuiltApps');
+  if (!repo) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Repository latticeBuiltApps chưa sẵn sàng cho "${appKey}".`);
+  }
+  const existing = await withOptionalTenantRls(db, organizationId, (transaction) => repo.findOne({
+    filter: { organizationId, appKey },
+    ...(transaction ? { transaction } : {}),
+  }));
+  if (!existing || val(existing, 'organizationId') !== organizationId) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Không tìm thấy ứng dụng "${appKey}" trong tổ chức.`);
+  }
+  if (val(existing, 'status') === 'torndown') {
+    throw failBuild('BUILT_APP_TORNDOWN', 409, `Ứng dụng "${appKey}" đã bị gỡ bỏ.`);
+  }
+
+  const baseSpec = val(existing, 'sourceSpecJson') && typeof val(existing, 'sourceSpecJson') === 'object'
+    ? cloneSafeDeep(val(existing, 'sourceSpecJson'))
+    : {};
+  const currentRefs = val(existing, 'artifactRefsJson') && typeof val(existing, 'artifactRefsJson') === 'object'
+    ? cloneSafeDeep(val(existing, 'artifactRefsJson'))
+    : {};
+  const currentVersion = Number(val(existing, 'version')) || 1;
+  const patchObj = safeParams.patch || safeParams.specPatch || null;
+  const promptText = String(safeParams.prompt || safeParams.editPrompt || '').trim();
+
+  if (!patchObj && !promptText && !safeParams.targetSpec) {
+    throw failBuild('PATCH_INPUT_REQUIRED', 400, 'Cần cung cấp patch/specPatch, targetSpec hoặc prompt để cập nhật.');
+  }
+
+  const nextSpec = safeParams.targetSpec
+    ? { ...cloneSafeDeep(safeParams.targetSpec), appKey }
+    : applySpecPatch(baseSpec, patchObj, promptText);
+  nextSpec.appKey = appKey;
+  if (safeParams.maxHealRounds != null) nextSpec.maxHealRounds = safeParams.maxHealRounds;
+
+  // Validate & compute diff + ER Graph first (pure dry-run)
+  const planPreview = await planEnterpriseApp(ctx, db, actor, {
+    appKey,
+    targetSpec: nextSpec,
+  });
+
+  if (safeParams.dryRun === true) {
+    return planPreview;
+  }
+
+  // Capture pre-patch UI snapshot BEFORE any mutation
+  const snapInfo = await capturePortalsSnapshots(
+    db,
+    actor,
+    currentRefs.portals || [],
+    `Pre-patch snapshot v${currentVersion} -> v${currentVersion + 1}`,
+  );
+  const prePatchSnapshot = {
+    version: currentVersion,
+    sourceSpecJson: baseSpec,
+    artifactRefsJson: currentRefs,
+    uiSnapshotUid: snapInfo.primaryUid || val(existing, 'bundleSnapshotUid') || null,
+    uiSnapshotUidsByPortal: snapInfo.byPortal,
+    status: val(existing, 'status') || 'active',
+    lastVerifiedAt: val(existing, 'lastVerifiedAt') || null,
+    patchedAt: new Date().toISOString(),
+    patchedBy: actor.username || null,
+    summary: String(safeParams.summary || planPreview.diff.summary || 'Incremental patch').trim(),
+    action: 'patch',
+  };
+
+  // Non-destructive field deprecation if explicitly requested in patch.deprecateFields
+  if (Array.isArray(patchObj?.deprecateFields) && patchObj.deprecateFields.length) {
+    const fieldsRepo = db?.getRepository?.('fields');
+    if (fieldsRepo) {
+      const deprecatedAt = new Date().toISOString();
+      for (const df of patchObj.deprecateFields) {
+        const colName = String(df?.collectionName || currentRefs.collections?.[0] || '').trim();
+        const fname = String(df?.name || df?.fieldName || df || '').trim();
+        if (!colName || !fname) continue;
+        const exField = await fieldsRepo.findOne({ filter: { collectionName: colName, name: fname } });
+        if (exField) {
+          const prevUi = val(exField, 'uiSchema') && typeof val(exField, 'uiSchema') === 'object' ? { ...val(exField, 'uiSchema') } : {};
+          const prevOpts = val(exField, 'options') && typeof val(exField, 'options') === 'object' ? { ...val(exField, 'options') } : {};
+          const depPatch = {
+            uiSchema: { ...prevUi, deprecated: true, deprecatedAt, 'x-hidden': true, readOnly: true },
+            options: { ...prevOpts, deprecated: true, deprecatedAt },
+          };
+          if (typeof exField.update === 'function') await exField.update(depPatch);
+          else if (typeof fieldsRepo.update === 'function') await fieldsRepo.update({ filter: { collectionName: colName, name: fname }, values: depPatch });
+        }
+      }
+    }
+  }
+
+  // Remove blocks requested in patch.removeBlocks and prune removed UIDs from preservedBlockUidsByPortal
+  let removedBlockUidSet = new Set();
+  if (Array.isArray(patchObj?.removeBlocks) && patchObj.removeBlocks.length) {
+    const removedUids = await removeBlocksFromPortals(db, currentRefs.portals || [], patchObj.removeBlocks);
+    removedBlockUidSet = new Set(Array.isArray(removedUids) ? removedUids : []);
+  }
+
+  const preservedBlockUidsByPortal = {};
+  for (const p of (currentRefs.portals || [])) {
+    if (p?.portalSlug && Array.isArray(p.blockUids)) {
+      preservedBlockUidsByPortal[p.portalSlug] = p.blockUids.filter((u) => !removedBlockUidSet.has(u));
+    }
+  }
+
+  const result = await orchestrateEnterpriseAppBuild(ctx, db, actor, nextSpec, {
+    ...deps,
+    _overrideSnapshotUid: prePatchSnapshot.uiSnapshotUid,
+    _appendHistoryEntry: prePatchSnapshot,
+    _preservedBlockUidsByPortal: preservedBlockUidsByPortal,
+    _auditOperation: 'patch_enterprise_app',
+  });
+
+  return {
+    patched: true,
+    ok: result.ok,
+    appKey,
+    previousVersion: currentVersion,
+    appVersion: result.appVersion,
+    builtApp: result.builtApp,
+    diff: planPreview.diff,
+    plan: planPreview.plan,
+    erGraph: result.erGraph,
+    prePatchSnapshot,
+    verification: result.verification,
+    healRounds: result.healRounds,
+    repairs: result.repairs,
+  };
+}
+
+/**
+ * 1-click rollbackEnterpriseApp: restores sourceSpecJson, non-destructively deprecates post-target fields,
+ * restores UI via restorePageSnapshot + flowModels reconciliation, restores DMN/Flows & deactivates newer ones,
+ * re-attaches rich-schema hooks, re-syncs RBAC, verifies, and bumps version.
+ */
+async function rollbackEnterpriseApp(ctx, db, actor, params = {}, deps = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được hoàn tác ứng dụng.');
+  }
+  const organizationId = String(actor.organizationId || '').trim();
+  if (!organizationId) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+  assertNoPrototypePollution(params, 'rollbackParams');
+
+  const appKey = String(params?.appKey || '').trim();
+  if (!appKey) {
+    throw failBuild('APP_KEY_REQUIRED', 400, 'Cần appKey để hoàn tác ứng dụng.');
+  }
+  const repo = db?.getRepository?.('latticeBuiltApps');
+  if (!repo) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Repository latticeBuiltApps chưa sẵn sàng cho "${appKey}".`);
+  }
+  const existing = await withOptionalTenantRls(db, organizationId, (transaction) => repo.findOne({
+    filter: { organizationId, appKey },
+    ...(transaction ? { transaction } : {}),
+  }));
+  if (!existing || val(existing, 'organizationId') !== organizationId) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Không tìm thấy ứng dụng "${appKey}" trong tổ chức.`);
+  }
+
+  const history = Array.isArray(val(existing, 'versionHistoryJson')) ? cloneSafeDeep(val(existing, 'versionHistoryJson')) : [];
+  if (!history.length) {
+    throw failBuild('VERSION_SNAPSHOT_NOT_FOUND', 404, `Ứng dụng "${appKey}" chưa có lịch sử phiên bản để hoàn tác.`);
+  }
+  const targetVer = params?.targetVersion != null ? Number(params.targetVersion) : null;
+  let targetSnap = null;
+  if (targetVer != null && Number.isFinite(targetVer)) {
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (Number(history[i]?.version) === targetVer) {
+        targetSnap = history[i];
+        break;
+      }
+    }
+  } else {
+    targetSnap = history[history.length - 1];
+  }
+  if (!targetSnap || !targetSnap.sourceSpecJson) {
+    throw failBuild('VERSION_SNAPSHOT_NOT_FOUND', 404, `Không tìm thấy snapshot phiên bản ${targetVer ?? 'gần nhất'} cho "${appKey}".`);
+  }
+
+  const currentVersion = Number(val(existing, 'version')) || 1;
+  const currentSpec = val(existing, 'sourceSpecJson') && typeof val(existing, 'sourceSpecJson') === 'object'
+    ? cloneSafeDeep(val(existing, 'sourceSpecJson'))
+    : {};
+  const currentRefs = val(existing, 'artifactRefsJson') && typeof val(existing, 'artifactRefsJson') === 'object'
+    ? cloneSafeDeep(val(existing, 'artifactRefsJson'))
+    : {};
+
+  // Capture pre-rollback snapshot before restoring
+  const preSnapInfo = await capturePortalsSnapshots(
+    db,
+    actor,
+    currentRefs.portals || [],
+    `Pre-rollback snapshot v${currentVersion} -> restore v${targetSnap.version}`,
+  );
+  const preRollbackSnapshot = {
+    version: currentVersion,
+    sourceSpecJson: currentSpec,
+    artifactRefsJson: currentRefs,
+    uiSnapshotUid: preSnapInfo.primaryUid || val(existing, 'bundleSnapshotUid') || null,
+    uiSnapshotUidsByPortal: preSnapInfo.byPortal,
+    status: val(existing, 'status') || 'active',
+    lastVerifiedAt: val(existing, 'lastVerifiedAt') || null,
+    patchedAt: new Date().toISOString(),
+    patchedBy: actor.username || null,
+    summary: `Rollback from v${currentVersion} to v${targetSnap.version}`,
+    action: 'rollback',
+  };
+
+  const targetSpec = { ...cloneSafeDeep(targetSnap.sourceSpecJson), appKey };
+  const targetValidated = validateAndNormalizeAppSpec(actor, targetSpec);
+  const targetRefs = targetSnap.artifactRefsJson && typeof targetSnap.artifactRefsJson === 'object'
+    ? cloneSafeDeep(targetSnap.artifactRefsJson)
+    : {};
+
+  // 1. Non-destructively deprecate post-target fields (NEVER DROP COLUMN) and restore target fields + hooks
+  const fieldsRepo = db?.getRepository?.('fields');
+  const colsRepo = db?.getRepository?.('collections');
+  const CORE_SYSTEM_FIELDS = new Set(['id', 'organizationId', 'code', 'name', 'status', 'createdAt', 'updatedAt']);
+  const targetColMap = new Map(targetValidated.sortedCollections.map((c) => [c.collectionName, c]));
+
+  for (const colName of (currentRefs.collections || [])) {
+    const targetColSpec = targetColMap.get(colName);
+    const keepFieldNames = new Set([
+      ...CORE_SYSTEM_FIELDS,
+      ...((targetColSpec?.normalizedFields || []).map((f) => f.name)),
+    ]);
+    let existingColFields = [];
+    if (fieldsRepo && typeof fieldsRepo.find === 'function') {
+      existingColFields = (await fieldsRepo.find({ filter: { collectionName: colName }, limit: 500 })) || [];
+    } else if (colsRepo && typeof colsRepo.findOne === 'function') {
+      const colRow = await colsRepo.findOne({ filter: { name: colName }, appends: ['fields'] });
+      existingColFields = Array.isArray(val(colRow, 'fields')) ? val(colRow, 'fields') : [];
+    }
+    const deprecatedAt = new Date().toISOString();
+    for (const exField of existingColFields) {
+      const fname = val(exField, 'name');
+      if (!fname || keepFieldNames.has(fname)) continue;
+      const prevUi = val(exField, 'uiSchema') && typeof val(exField, 'uiSchema') === 'object' ? { ...val(exField, 'uiSchema') } : {};
+      const prevOpts = val(exField, 'options') && typeof val(exField, 'options') === 'object' ? { ...val(exField, 'options') } : {};
+      const depPatch = {
+        uiSchema: { ...prevUi, deprecated: true, deprecatedAt, 'x-hidden': true, readOnly: true },
+        options: { ...prevOpts, deprecated: true, deprecatedAt },
+      };
+      if (typeof exField.update === 'function') await exField.update(depPatch);
+      else if (fieldsRepo && typeof fieldsRepo.update === 'function') {
+        await fieldsRepo.update({ filter: { collectionName: colName, name: fname }, values: depPatch });
+      }
+    }
+  }
+
+  // Re-ensure target collections, join collections, metadata, and rich-schema hooks
+  const schemaResults = [];
+  const schemaByCol = new Map();
+  for (const colSpec of targetValidated.sortedCollections) {
+    const res = await ensureCollectionAndFields(db, organizationId, {
+      collectionName: colSpec.collectionName,
+      collectionTitle: colSpec.collectionTitle,
+      fields: colSpec.fields,
+    });
+    schemaResults.push(res);
+    schemaByCol.set(colSpec.collectionName, res);
+  }
+  const allJoinCollections = [...new Set(schemaResults.flatMap((s) => (s.joinCollections || []).map((j) => j.collectionName)))];
+
+  // 2. Re-sync RBAC
+  const roleResults = [];
+  for (const rSpec of targetValidated.normalizedRoles) {
+    let lastRbac = null;
+    for (const targetCol of rSpec.collections) {
+      const colRes = schemaByCol.get(targetCol);
+      lastRbac = await ensureRoleAndRbac(ctx, db, actor, {
+        roleName: rSpec.roleName,
+        roleTitle: rSpec.roleTitle,
+        collectionName: targetCol,
+        fields: colRes?.fields || schemaResults[0].fields,
+        lockedFields: rSpec.lockedFields,
+      });
+      for (const jc of (colRes?.joinCollections || [])) {
+        await ensureRoleAndRbac(ctx, db, actor, {
+          roleName: rSpec.roleName,
+          roleTitle: rSpec.roleTitle,
+          collectionName: jc.collectionName,
+          fields: jc.fields || [],
+          lockedFields: [],
+        });
+      }
+    }
+    if (lastRbac) roleResults.push(lastRbac);
+  }
+
+  // 3. Restore UI via restorePageSnapshot + reconcile post-target flowModels
+  const targetPortalUidsMap = targetSnap.uiSnapshotUidsByPortal && typeof targetSnap.uiSnapshotUidsByPortal === 'object'
+    ? targetSnap.uiSnapshotUidsByPortal
+    : {};
+  const targetPortalBlockSet = new Set(
+    (Array.isArray(targetRefs.portals) ? targetRefs.portals : []).flatMap((p) => (Array.isArray(p?.blockUids) ? p.blockUids : [])),
+  );
+  const currentPortalBlockUids = (Array.isArray(currentRefs.portals) ? currentRefs.portals : [])
+    .flatMap((p) => (Array.isArray(p?.blockUids) ? p.blockUids : []));
+  const postTargetBlockUids = currentPortalBlockUids.filter((u) => u && !targetPortalBlockSet.has(u));
+
+  for (const pSpec of targetValidated.normalizedPortals) {
+    const snapUid = targetPortalUidsMap[pSpec.portalSlug] || targetSnap.uiSnapshotUid || '';
+    if (snapUid) {
+      await restorePageSnapshot(db, {
+        portalSlug: pSpec.portalSlug,
+        pageTitle: pSpec.pageTitle,
+        snapshotUid: snapUid,
+      }, val);
+    }
+  }
+  if (postTargetBlockUids.length) {
+    await removeBlocksFromPortals(db, currentRefs.portals || [], postTargetBlockUids);
+  }
+
+  // 4. Restore target DMN & Flows, deactivate post-target ones
+  const targetDmnKeys = [];
+  for (const dmnSpec of targetValidated.dmnInputList) {
+    const saved = await upsertDmnTable(ctx, db, actor, dmnSpec);
+    const key = saved?.tableKey || dmnSpec.tableKey;
+    if (key) targetDmnKeys.push(key);
+  }
+  const targetDmnSet = new Set(targetDmnKeys);
+  const dmnRepo = db?.getRepository?.('latticeDecisionTables');
+  if (dmnRepo) {
+    await withOptionalTenantRls(db, organizationId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      for (const dk of (currentRefs.dmnTableKeys || [])) {
+        if (!targetDmnSet.has(dk)) {
+          const row = await dmnRepo.findOne({ filter: { organizationId, tableKey: dk }, ...txOpt });
+          if (row && typeof row.update === 'function') await row.update({ active: false }, txOpt);
+        }
+      }
+    });
+  }
+
+  const targetFlowKeys = [];
+  for (const fSpec of targetValidated.flowInputList) {
+    const saved = await upsertFlowV2Rule(db, actor, fSpec);
+    const key = saved?.ruleKey || fSpec.ruleKey;
+    if (key) targetFlowKeys.push(key);
+  }
+  const targetFlowSet = new Set(targetFlowKeys);
+  const flowRepo = db?.getRepository?.('latticeAutomationRules');
+  if (flowRepo) {
+    await withOptionalTenantRls(db, organizationId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      for (const rk of (currentRefs.flowRuleKeys || [])) {
+        if (!targetFlowSet.has(rk)) {
+          const row = await flowRepo.findOne({ filter: { organizationId, ruleKey: rk }, ...txOpt });
+          if (row && typeof row.update === 'function') await row.update({ active: false }, txOpt);
+        }
+      }
+    });
+  }
+
+  // 5. Verify restored state & persist
+  const verifyTarget = {
+    organizationId,
+    collectionName: targetValidated.collectionName,
+    joinCollections: allJoinCollections,
+    expectedFields: schemaResults[0].fields.map((f) => f.name),
+    portalSlug: targetValidated.primaryPortal.portalSlug,
+    pageTitle: targetValidated.primaryPortal.pageTitle,
+    roleName: targetValidated.primaryRole.roleName,
+    lockedFields: targetValidated.primaryRole.lockedFields,
+    dmnTableKey: targetDmnKeys[0] || null,
+    dmnSampleInput: targetValidated.dmnInputList[0]?.sampleInput || {},
+    flowRuleKey: targetFlowKeys[0] || null,
+    flowSampleEvent: targetValidated.flowInputList[0]?.sampleEvent || null,
+  };
+  const verification = typeof deps.verifierOverride === 'function'
+    ? await deps.verifierOverride(ctx, db, actor, verifyTarget, 1)
+    : await verifyEnterpriseApp(ctx, db, actor, verifyTarget, deps);
+
+  const restoredPortals = [];
+  for (const pSpec of targetValidated.normalizedPortals) {
+    const resolved = await resolvePageGrid(db, pSpec.portalSlug, pSpec.pageTitle, val);
+    const orderedUids = resolved.grid ? extractGridBlockUids(resolved.grid).ordered : [];
+    restoredPortals.push({
+      portalSlug: pSpec.portalSlug,
+      layoutUid: resolved.layoutUid || `ldx-portal-${pSpec.portalSlug}`,
+      pageTitle: pSpec.pageTitle,
+      gridUid: resolved.grid?.uid || null,
+      blockUids: orderedUids,
+    });
+  }
+
+  const restoredRefs = {
+    collections: schemaResults.map((s) => s.collectionName),
+    joinCollections: allJoinCollections,
+    roles: roleResults.map((r) => r.roleName),
+    portals: restoredPortals.length ? restoredPortals : (Array.isArray(targetRefs.portals) ? targetRefs.portals : []),
+    aiEmployees: Array.isArray(targetRefs.aiEmployees) ? targetRefs.aiEmployees : (currentRefs.aiEmployees || []),
+    dmnTableKeys: targetDmnKeys,
+    flowRuleKeys: targetFlowKeys,
+    n8nWorkflowIds: Array.isArray(targetRefs.n8nWorkflowIds) ? targetRefs.n8nWorkflowIds : [],
+  };
+
+  const updatedBuiltApp = await upsertBuiltAppRecord(db, actor, {
+    appKey,
+    name: targetValidated.appName,
+    status: verification.ok ? 'active' : 'needs_review',
+    sourceSpecJson: targetSpec,
+    artifactRefsJson: restoredRefs,
+    bundleSnapshotUid: targetSnap.uiSnapshotUid || preRollbackSnapshot.uiSnapshotUid,
+    lastVerifiedAt: new Date().toISOString(),
+    lastVerificationJson: verification,
+  }, {
+    appendHistoryEntry: preRollbackSnapshot,
+  });
+
+  await withOptionalTenantRls(db, organizationId, (transaction) => recordAiAuditLog(db, {
+    actorUserId: actor.userId,
+    actorUsername: actor.username,
+    organizationId,
+    channel: 'app-builder',
+    toolName: 'dxos_provision_role_workspace',
+    argsSummary: { operation: 'rollback_enterprise_app', appKey, targetVersion: targetSnap.version },
+    status: verification.ok ? 'allowed' : 'degraded',
+    resultSummary: `Rolled back ${appKey} from v${currentVersion} to v${targetSnap.version} (newVersion=${updatedBuiltApp?.version})`,
+    ...(transaction ? { transaction } : {}),
+  }));
+
+  return {
+    rolledBack: true,
+    ok: verification.ok,
+    appKey,
+    previousVersion: currentVersion,
+    restoredFromVersion: targetSnap.version,
+    appVersion: updatedBuiltApp?.version || currentVersion + 1,
+    builtApp: updatedBuiltApp,
+    verification,
+  };
+}
+
+async function listBuiltAppVersions(db, actor, { appKey } = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được xem lịch sử phiên bản ứng dụng.');
+  }
+  const organizationId = String(actor.organizationId || '').trim();
+  if (!organizationId) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+  const cleanKey = String(appKey || '').trim();
+  if (!cleanKey) {
+    throw failBuild('APP_KEY_REQUIRED', 400, 'Cần appKey để xem lịch sử phiên bản.');
+  }
+  const repo = db?.getRepository?.('latticeBuiltApps');
+  if (!repo) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Repository latticeBuiltApps chưa sẵn sàng cho "${cleanKey}".`);
+  }
+  const existing = await withOptionalTenantRls(db, organizationId, (transaction) => repo.findOne({
+    filter: { organizationId, appKey: cleanKey },
+    ...(transaction ? { transaction } : {}),
+  }));
+  if (!existing || val(existing, 'organizationId') !== organizationId) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Không tìm thấy ứng dụng "${cleanKey}" trong tổ chức.`);
+  }
+  const versions = Array.isArray(val(existing, 'versionHistoryJson')) ? val(existing, 'versionHistoryJson') : [];
+  return {
+    ok: true,
+    appKey: cleanKey,
+    organizationId,
+    currentVersion: Number(val(existing, 'version')) || 1,
+    status: val(existing, 'status') || 'active',
+    versions,
+  };
+}
+
 module.exports = {
   ALL_NATIVE_V2_BLOCK_MODELS,
   DEFAULT_SELF_HEAL_MAX_ROUNDS,
@@ -2288,4 +3478,8 @@ module.exports = {
   rebuildEnterpriseApp,
   exportAppBundle,
   teardownBuiltApp,
+  planEnterpriseApp,
+  patchEnterpriseApp,
+  rollbackEnterpriseApp,
+  listBuiltAppVersions,
 };

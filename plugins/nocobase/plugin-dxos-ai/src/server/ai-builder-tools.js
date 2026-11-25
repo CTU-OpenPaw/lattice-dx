@@ -53,12 +53,44 @@ const FIELD_INTERFACE_MAP = {
   float: { interface: 'number', uiType: 'number' },
   boolean: { interface: 'checkbox', uiType: 'boolean' },
   date: { interface: 'datetime', uiType: 'string' },
+  datetime: { interface: 'datetime', uiType: 'string', component: 'DatePicker', componentProps: { showTime: true } },
   select: { interface: 'select', uiType: 'string' },
   enum: { interface: 'select', uiType: 'string' },
   json: { interface: 'json', uiType: 'object' },
   jsonb: { interface: 'json', uiType: 'object' },
   string: { interface: 'input', uiType: 'string' },
 };
+
+const TOOL_CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
+const TOOL_FORBIDDEN_FIELD_NAMES = new Set(['__proto__', 'constructor', 'prototype']);
+const TOOL_FALLBACK_ALLOWLISTED_BUSINESS_COLLECTIONS = new Set([
+  'latticeRequests',
+  'latticeOrders',
+  'latticeOrderLines',
+  'latticeServiceTickets',
+  'latticeParaDocuments',
+  'latticeIncidentCases',
+  'latticeLocations',
+  'latticeAssets',
+  'latticeAgentProposals',
+]);
+
+function loadRichSchemaForTools() {
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? ['@latticedx/plugin-dxos-studio/dist/server/rich-schema', '@latticedx/plugin-dxos-studio/src/server/rich-schema', '../../../plugin-dxos-studio/dist/server/rich-schema', '../../../plugin-dxos-studio/src/server/rich-schema']
+    : ['@latticedx/plugin-dxos-studio/src/server/rich-schema', '../../../plugin-dxos-studio/src/server/rich-schema', '@latticedx/plugin-dxos-studio/dist/server/rich-schema', '../../../plugin-dxos-studio/dist/server/rich-schema'];
+  for (const modPath of candidates) {
+    try {
+      return require(modPath);
+    } catch (err) {
+      const direct = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!direct) throw err;
+    }
+  }
+  return null;
+}
 
 const NATIVE_BLOCK_ALIASES = {
   NativeTableBlock: 'table',
@@ -87,12 +119,18 @@ function hasProtectedCollectionMatch(protectedCollections, name) {
   return false;
 }
 
-function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE, protectedCollections = null) {
+function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE, protectedCollections = null, sourceCollection = null) {
   const fname = String(rawField?.name || '').trim();
-  if (!FIELD_NAME_RE.test(fname)) {
+  if (!FIELD_NAME_RE.test(fname) || TOOL_FORBIDDEN_FIELD_NAMES.has(fname)) {
     throw failTool('FIELD_NAME_INVALID', 400, `Tên trường "${fname}" không hợp lệ.`);
   }
+  const richSchema = loadRichSchemaForTools();
+  const allowlisted = richSchema?.DEFAULT_ALLOWLISTED_BUSINESS_COLLECTIONS instanceof Set
+    ? new Set([...TOOL_FALLBACK_ALLOWLISTED_BUSINESS_COLLECTIONS, ...richSchema.DEFAULT_ALLOWLISTED_BUSINESS_COLLECTIONS])
+    : TOOL_FALLBACK_ALLOWLISTED_BUSINESS_COLLECTIONS;
   const rawType = String(rawField?.type || 'string').trim();
+  const titleStr = String(rawField?.title || rawField?.label || fname).trim();
+
   if (rawType === 'belongsTo') {
     const target = String(rawField?.target || rawField?.targetCollection || '').trim();
     if (hasProtectedCollectionMatch(protectedCollections, target)) {
@@ -115,11 +153,127 @@ function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE, protectedCollec
       targetKey,
       uiSchema: {
         type: 'object',
-        title: String(rawField?.title || fname),
+        title: titleStr,
         'x-component': 'AssociationField',
       },
     };
   }
+
+  if (rawType === 'hasMany' || rawType === 'hasOne') {
+    const target = String(rawField?.target || rawField?.targetCollection || '').trim();
+    if (hasProtectedCollectionMatch(protectedCollections, target)) {
+      throw failTool('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ ${rawType} vào bảng hệ thống "${target}".`);
+    }
+    if (rawType === 'hasOne') {
+      if (!target || (!TOOL_CUSTOM_COLLECTION_RE.test(target) && !allowlisted.has(target))) {
+        throw failTool('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ hasOne "${target || '(empty)'}" không hợp lệ hoặc bị bảo vệ.`);
+      }
+    } else if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
+      throw failTool('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ hasMany "${target || '(empty)'}" không hợp lệ hoặc bị bảo vệ.`);
+    }
+    const foreignKey = String(rawField?.foreignKey || `${fname}Id`).trim();
+    const sourceKey = String(rawField?.sourceKey || 'id').trim();
+    if (!FIELD_NAME_RE.test(foreignKey) || !FIELD_NAME_RE.test(sourceKey)) {
+      throw failTool('FIELD_NAME_INVALID', 400, `foreignKey/sourceKey không hợp lệ cho trường "${fname}".`);
+    }
+    return {
+      name: fname,
+      type: rawType,
+      interface: rawType === 'hasOne' ? 'oho' : 'o2m',
+      target,
+      foreignKey,
+      sourceKey,
+      uiSchema: {
+        type: rawType === 'hasOne' ? 'object' : 'array',
+        title: titleStr,
+        'x-component': 'AssociationField',
+      },
+    };
+  }
+
+  if (rawType === 'belongsToMany') {
+    const target = String(rawField?.target || rawField?.targetCollection || '').trim();
+    if (hasProtectedCollectionMatch(protectedCollections, target)) {
+      throw failTool('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ belongsToMany vào bảng hệ thống "${target}".`);
+    }
+    if (!target || (!TOOL_CUSTOM_COLLECTION_RE.test(target) && !allowlisted.has(target))) {
+      throw failTool('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ belongsToMany "${target || '(empty)'}" không hợp lệ hoặc bị bảo vệ.`);
+    }
+    if (typeof richSchema?.resolveThroughCollectionName !== 'function') {
+      throw failTool('RICH_SCHEMA_UNAVAILABLE', 503, 'Module rich-schema chưa sẵn sàng.');
+    }
+    const { through, foreignKey, otherKey } = richSchema.resolveThroughCollectionName(
+      sourceCollection || 'latticeCustomEntity',
+      { ...rawField, name: fname, target },
+      { isProtectedCollection: (n) => hasProtectedCollectionMatch(protectedCollections, n) },
+    );
+    const sourceKey = String(rawField?.sourceKey || 'id').trim();
+    const targetKey = String(rawField?.targetKey || 'id').trim();
+    if (!FIELD_NAME_RE.test(sourceKey) || !FIELD_NAME_RE.test(targetKey)) {
+      throw failTool('FIELD_NAME_INVALID', 400, `sourceKey/targetKey không hợp lệ cho trường "${fname}".`);
+    }
+    return {
+      name: fname,
+      type: 'belongsToMany',
+      interface: 'm2m',
+      target,
+      through,
+      foreignKey,
+      otherKey,
+      sourceKey,
+      targetKey,
+      uiSchema: {
+        type: 'array',
+        title: titleStr,
+        'x-component': 'AssociationField',
+      },
+    };
+  }
+
+  if (rawType === 'formula') {
+    if (typeof richSchema?.validateFormulaExpression !== 'function' || typeof richSchema?.sanitizeFieldValidation !== 'function') {
+      throw failTool('FORMULA_ENGINE_UNAVAILABLE', 503, 'Bộ phân tích công thức Rich Schema chưa sẵn sàng (fail-closed).');
+    }
+    const rawExpr = rawField?.formulaExpression ?? rawField?.formula ?? rawField?.options?.formulaExpression ?? rawField?.options?.formula;
+    const expr = typeof rawExpr === 'string' ? rawExpr.trim() : '';
+    const check = richSchema.validateFormulaExpression(expr, { selfFieldName: fname, throwOnError: true });
+    const allowedReturns = richSchema.ALLOWED_FORMULA_RETURN_TYPES || new Set(['float', 'integer', 'string', 'boolean']);
+    const requestedReturn = rawField?.formulaReturnType ? String(rawField.formulaReturnType).trim() : '';
+    if (requestedReturn && !allowedReturns.has(requestedReturn)) {
+      throw failTool('INVALID_FORMULA_RETURN_TYPE', 400, `formulaReturnType "${requestedReturn}" không hợp lệ.`);
+    }
+    const formulaReturnType = requestedReturn || (allowedReturns.has(check?.inferredReturnType) ? check.inferredReturnType : 'float');
+    const validation = richSchema.sanitizeFieldValidation({ ...rawField, name: fname, type: 'formula', formulaReturnType });
+    const uiType = formulaReturnType === 'boolean' ? 'boolean' : (formulaReturnType === 'string' ? 'string' : 'number');
+    const comp = formulaReturnType === 'boolean' ? 'Checkbox' : (formulaReturnType === 'string' ? 'Input' : 'InputNumber');
+    return {
+      name: fname,
+      type: formulaReturnType,
+      interface: 'formula',
+      readOnly: true,
+      formula: expr,
+      formulaExpression: expr,
+      formulaReturnType,
+      ...(validation ? { validation } : {}),
+      options: {
+        formula: expr,
+        formulaExpression: expr,
+        formulaReturnType,
+        readOnly: true,
+        ...(validation ? { validation } : {}),
+      },
+      uiSchema: {
+        type: uiType,
+        title: titleStr,
+        'x-component': comp,
+        'x-read-pretty': true,
+        readOnly: true,
+        'x-formula': expr,
+        ...(validation ? { 'x-validation': validation } : {}),
+      },
+    };
+  }
+
   const ftype = Object.prototype.hasOwnProperty.call(FIELD_INTERFACE_MAP, rawType) ? rawType : 'string';
   const meta = FIELD_INTERFACE_MAP[ftype];
   const rawEnumList = Array.isArray(rawField?.enumValues)
@@ -129,16 +283,50 @@ function buildFieldDefinition(rawField, failTool, FIELD_NAME_RE, protectedCollec
     .map((v) => (v && typeof v === 'object' ? String(v.value ?? v.label ?? '').trim() : String(v ?? '').trim()))
     .filter(Boolean);
   const resolvedType = (ftype === 'select' || ftype === 'enum') ? 'string' : (ftype === 'jsonb' ? 'json' : ftype);
+
+  let validation;
+  const hasValidationInput = (rawField?.validation !== undefined && rawField.validation !== null)
+    || rawField?.required === true
+    || rawField?.unique === true;
+  if (hasValidationInput) {
+    if (rawField?.validation?.pattern != null && typeof richSchema?.validateSafeRegexPattern !== 'function') {
+      throw failTool('REGEX_ENGINE_UNAVAILABLE', 503, 'Bộ kiểm tra regex Thompson NFA chưa sẵn sàng (fail-closed).');
+    }
+    if (typeof richSchema?.sanitizeFieldValidation !== 'function') {
+      throw failTool('RICH_SCHEMA_UNAVAILABLE', 503, 'Module rich-schema chưa sẵn sàng.');
+    }
+    validation = richSchema.sanitizeFieldValidation({
+      ...rawField,
+      name: fname,
+      type: resolvedType,
+      ...(enumValues.length ? { enumValues } : {}),
+    });
+  }
+  const finalEnums = enumValues.length ? enumValues : (Array.isArray(validation?.enum) ? validation.enum.map(String) : []);
+  const opts = {
+    ...(validation ? { validation } : {}),
+    ...(rawField?.indexed ? { index: true } : {}),
+  };
+
   return {
     name: fname,
     type: resolvedType,
-    interface: meta.interface,
+    interface: (ftype === 'select' || ftype === 'enum' || (!enumValues.length && validation?.enum?.length)) ? 'select' : meta.interface,
     ...(rawField?.defaultValue !== undefined ? { defaultValue: rawField.defaultValue } : {}),
-    ...(enumValues.length ? { enum: enumValues } : {}),
+    ...(validation?.required ? { allowNull: false, required: true } : {}),
+    ...(rawField?.indexed ? { index: true } : {}),
+    ...(finalEnums.length ? { enum: finalEnums } : {}),
+    ...(validation ? { validation } : {}),
+    ...(Object.keys(opts).length ? { options: opts } : {}),
     uiSchema: {
       type: meta.uiType,
-      title: String(rawField?.title || fname),
-      ...((ftype === 'select' || ftype === 'enum') && enumValues.length ? { enum: enumValues.map((v) => ({ value: v, label: v })) } : {}),
+      title: titleStr,
+      ...(meta.component ? { 'x-component': meta.component } : {}),
+      ...(meta.componentProps ? { 'x-component-props': meta.componentProps } : {}),
+      ...(validation ? { 'x-validation': validation } : {}),
+      ...((ftype === 'select' || ftype === 'enum' || (!enumValues.length && validation?.enum?.length)) && finalEnums.length
+        ? { enum: finalEnums.map((v) => ({ value: v, label: v })) }
+        : {}),
     },
   };
 }
@@ -3966,7 +4154,14 @@ function createBuilderTools(deps) {
           await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, note: `Before addBlock ${args.blockUse}`, createdByUsername: actor.username }, val);
           if (args.blockUse.startsWith('Dxos') && resolved.flowModelsRepo?.upsertModel) {
             const blockUid = `dxos-ai-${args.portalSlug}-${Date.now().toString(36)}`;
-            const cfg = { title, ...parsedConfig };
+            const cfg = {
+              title,
+              ...(args.collection && !parsedConfig.collection ? { collection: args.collection } : {}),
+              ...parsedConfig,
+            };
+            if (cfg.collection && isProtected(cfg.collection)) {
+              throw failTool('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép gắn block vào bảng hệ thống "${cfg.collection}".`);
+            }
             await resolved.flowModelsRepo.upsertModel({
               uid: blockUid,
               use: args.blockUse,
@@ -4102,7 +4297,7 @@ function createBuilderTools(deps) {
           uiSchema: { type: 'object' },
           enumValues: { type: 'array', items: { type: 'string' } },
           reason: { type: 'string', maxLength: 200 },
-          fields: { type: 'array', items: { type: 'object' }, description: 'Field definitions ({ name, type, title, enumValues }).' },
+          fields: { type: 'array', items: { type: 'object' }, description: 'Field definitions ({ name, type, title, enumValues, target, through, foreignKey, otherKey, formulaExpression, formulaReturnType, validation, required, unique }).' },
           dryRun: { type: 'boolean', default: false },
         },
       },
@@ -4221,7 +4416,7 @@ function createBuilderTools(deps) {
         }
         const rawFields = Array.isArray(args.fields) ? args.fields : [];
         if (!rawFields.length) throw failTool('FIELDS_REQUIRED', 400, 'Cần ít nhất 1 trường dữ liệu trong fields.');
-        const normalizedFields = rawFields.map((f) => buildFieldDefinition(f, failTool, FIELD_NAME_RE, SYSTEM_PROTECTED_COLLECTIONS));
+        const normalizedFields = rawFields.map((f) => buildFieldDefinition(f, failTool, FIELD_NAME_RE, SYSTEM_PROTECTED_COLLECTIONS, args.collectionName));
         if (args.operation === 'createCollection') {
           const has = (n) => normalizedFields.some((f) => f.name === n);
           if (!has('status')) normalizedFields.unshift({ name: 'status', type: 'string', interface: 'input', defaultValue: 'draft', uiSchema: { type: 'string', title: 'Trạng thái' } });
@@ -4234,12 +4429,61 @@ function createBuilderTools(deps) {
         if (args.dryRun) return { dryRun: true, operation: args.operation, collectionName: args.collectionName, fields: normalizedFields };
         if (!colsRepo) throw failTool('SCHEMA_REPO_UNAVAILABLE', 503, 'Repository collections chưa sẵn sàng.');
 
+        const provisionJoinTablesForFields = async (targetFields) => {
+          const joinCols = [];
+          const fieldsRepoLocal = db.getRepository('fields');
+          for (const jf of targetFields) {
+            if (jf.type !== 'belongsToMany' || !jf.through) continue;
+            const joinName = jf.through;
+            const fk = jf.foreignKey;
+            const ok = jf.otherKey;
+            const joinFieldsSpec = [
+              { name: 'organizationId', type: 'string', interface: 'input', allowNull: false, defaultValue: actor.organizationId, index: true },
+              { name: fk, type: 'bigInt', interface: 'integer', allowNull: false, index: true },
+              { name: ok, type: 'bigInt', interface: 'integer', allowNull: false, index: true },
+            ];
+            const exJoin = await colsRepo.findOne({ filter: { name: joinName }, appends: ['fields'] });
+            if (!exJoin) {
+              const cj = await colsRepo.create({
+                values: { name: joinName, title: `${args.collectionName} -> ${jf.target} Join`, autoGenId: true, createdAt: true, updatedAt: true, options: { uiManageable: true }, fields: joinFieldsSpec },
+              });
+              if (typeof cj?.load === 'function') await cj.load({ resetFields: true });
+            } else if (fieldsRepoLocal) {
+              const exNames = new Set((val(exJoin, 'fields') || []).map((x) => val(x, 'name')).filter(Boolean));
+              for (const jfs of joinFieldsSpec) {
+                if (!exNames.has(jfs.name)) {
+                  const cf = await fieldsRepoLocal.create({ values: { ...jfs, collectionName: joinName } });
+                  if (typeof cf?.load === 'function') await cf.load();
+                }
+              }
+            }
+            const jInst = db.getCollection?.(joinName);
+            if (jInst && typeof jInst.sync === 'function') await jInst.sync({ force: false, alter: { drop: false } });
+            else if (typeof db.sync === 'function') await db.sync();
+            if (typeof db?.sequelize?.query === 'function') {
+              const jl = joinName.toLowerCase();
+              for (const [suf, colsSql, uq] of [['org', '"organizationId"', false], ['fk', `"${fk}"`, false], ['ok', `"${ok}"`, false], ['uq', `"organizationId", "${fk}", "${ok}"`, true]]) {
+                const idxN = buildSafePgIndexName(jl, suf);
+                try { await db.sequelize.query(`CREATE ${uq ? 'UNIQUE ' : ''}INDEX IF NOT EXISTS "${idxN}" ON "${joinName}" (${colsSql});`); } catch {}
+              }
+            }
+            if (typeof db?.attachLatticeRlsPolicy === 'function') {
+              try { await db.attachLatticeRlsPolicy(joinName); } catch {}
+            }
+            joinCols.push(joinName);
+          }
+          return joinCols;
+        };
+
+        const richSchema = loadRichSchemaForTools();
+
         if (args.operation === 'createCollection') {
           const existing = await colsRepo.findOne({ filter: { name: args.collectionName }, appends: ['fields'] });
           if (existing) {
             if (typeof existing.load === 'function') await existing.load({ resetFields: true });
             return { created: false, alreadyExists: true, collectionName: args.collectionName };
           }
+          await provisionJoinTablesForFields(normalizedFields);
           const created = await colsRepo.create({
             values: {
               name: args.collectionName,
@@ -4276,11 +4520,15 @@ function createBuilderTools(deps) {
               // Non-fatal in mock test harnesses without physical SQL tables
             }
           }
+          if (typeof richSchema?.attachRichSchemaHooksForCollection === 'function') {
+            richSchema.attachRichSchemaHooksForCollection(db, args.collectionName, normalizedFields);
+          }
           return { created: true, collectionName: args.collectionName, fieldCount: normalizedFields.length, fields: normalizedFields.map((f) => f.name), indexes: createdIndexes };
         }
 
         const fieldsRepo = db.getRepository('fields');
         if (!fieldsRepo) throw failTool('FIELDS_REPO_UNAVAILABLE', 503, 'Repository fields chưa sẵn sàng.');
+        await provisionJoinTablesForFields(normalizedFields);
         for (const f of normalizedFields) {
           const cf = await fieldsRepo.create({ values: { ...f, collectionName: args.collectionName } });
           if (typeof cf?.load === 'function') await cf.load();
@@ -4300,6 +4548,12 @@ function createBuilderTools(deps) {
           } catch {
             // Non-fatal in mock test harnesses without physical SQL tables
           }
+        }
+        if (typeof richSchema?.attachRichSchemaHooksForCollection === 'function') {
+          const allColFields = Array.isArray(val(parentCol, 'fields')) && val(parentCol, 'fields').length
+            ? val(parentCol, 'fields').map((r) => (typeof r?.toJSON === 'function' ? r.toJSON() : { ...r }))
+            : normalizedFields;
+          richSchema.attachRichSchemaHooksForCollection(db, args.collectionName, allColFields);
         }
         return { updated: true, collectionName: args.collectionName, addedFields: normalizedFields.map((f) => f.name) };
       },

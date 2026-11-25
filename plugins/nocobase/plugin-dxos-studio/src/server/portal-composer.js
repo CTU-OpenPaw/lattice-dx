@@ -10,6 +10,21 @@
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
+const ALLOWED_DXOS_BLOCK_USES = new Set([
+  'DxosPortalHeroBlockModel',
+  'DxosKpiMetricBlockModel',
+  'DxosContextTelemetryBlockModel',
+  'DxosAiProposalBlockModel',
+  'DxosWorkflowTasksBlockModel',
+  'DxosParaVaultBlockModel',
+  'DxosCreativeStudioBlockModel',
+  'DxosRecordWorkbenchBlockModel',
+  'DxosWebGisBlockModel',
+  'DxosKanbanScheduleBlockModel',
+  'DxosWmsOpsBlockModel',
+  'DxosBiChartBlockModel',
+]);
+
 const COLLECTION_FIELD_GROUPS = {
   latticeIncidentCases: [
     { title: 'Định danh & Tài sản', fields: ['code', 'name', 'organizationId', 'assetEntityId', 'runId', 'notificationId'] },
@@ -89,6 +104,22 @@ const OVERVIEW_SPECS = [
         uidSuffix: 'workbench',
         use: 'DxosRecordWorkbenchBlockModel',
         config: { title: 'Chứng từ, Chatter & Xuất báo cáo Mua sắm [W]', collection: 'latticeRequests', showExport: true, showVoucherActions: true, showChatter: true },
+      },
+      {
+        uidSuffix: 'bi-chart',
+        use: 'DxosBiChartBlockModel',
+        config: {
+          title: 'Phân tích Yêu cầu Mua sắm [BI]',
+          collection: 'latticeRequests',
+          chartType: 'bar',
+          groupBy: 'status',
+          secondaryGroupBy: '',
+          metricOp: 'count',
+          metricField: '',
+          metric: { op: 'count' },
+          limit: 20,
+          filterJson: '',
+        },
       },
     ],
   },
@@ -565,6 +596,13 @@ async function attachDxosBlocksToTab(db, tabSchemaUid, slug, blocks) {
   let attached = 0;
   const allUids = [];
   for (const block of blocks) {
+    const blockUse = String(block?.use || '').trim();
+    if (!ALLOWED_DXOS_BLOCK_USES.has(blockUse)) {
+      throw Object.assign(new Error(`Disallowed DX-OS block use "${blockUse || '(empty)'}"`), {
+        code: 'DISALLOWED_BLOCK_USE',
+        status: 400,
+      });
+    }
     const uid = `dxos-ov-${slug}-${block.uidSuffix}`;
     allUids.push(uid);
     const existing = typeof flowModelsRepo.findOne === 'function'
@@ -692,4 +730,13 @@ async function composePortals(db, { applyBlueprint }) {
   return { createdPages, mobilePagesCreated: mobileRes.mobilePagesCreated, attachedBlocks, dxosBlocksAttached: dxosBlocksEnabled };
 }
 
-module.exports = { COLLECTION_FIELD_GROUPS, OVERVIEW_SPECS, EXTRA_DATA_PAGES, MOBILE_PORTAL_PAGES, composeMobilePortal, composePortals };
+module.exports = {
+  ALLOWED_DXOS_BLOCK_USES,
+  COLLECTION_FIELD_GROUPS,
+  OVERVIEW_SPECS,
+  EXTRA_DATA_PAGES,
+  MOBILE_PORTAL_PAGES,
+  attachDxosBlocksToTab,
+  composeMobilePortal,
+  composePortals,
+};

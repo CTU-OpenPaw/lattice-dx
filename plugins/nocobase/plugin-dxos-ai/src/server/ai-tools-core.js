@@ -31,6 +31,9 @@ const {
   rebuildEnterpriseApp,
   exportAppBundle,
   teardownBuiltApp,
+  planEnterpriseApp,
+  patchEnterpriseApp,
+  rollbackEnterpriseApp,
 } = require('./app-builder-orchestrator');
 
 const ORCHESTRATOR_OPS = new Set([
@@ -40,6 +43,9 @@ const ORCHESTRATOR_OPS = new Set([
   'rebuild_enterprise_app',
   'export_app_bundle',
   'teardown_built_app',
+  'plan_enterprise_app',
+  'patch_enterprise_app',
+  'rollback_enterprise_app',
 ]);
 
 const ADMIN_BUILDER_TOOL_NAMES = [
@@ -105,7 +111,7 @@ const ALLOWED_BLOCK_MODELS = [
   'DxosPortalHeroBlockModel', 'DxosKpiMetricBlockModel', 'DxosContextTelemetryBlockModel',
   'DxosAiProposalBlockModel', 'DxosWorkflowTasksBlockModel', 'DxosParaVaultBlockModel',
   'DxosCreativeStudioBlockModel', 'DxosRecordWorkbenchBlockModel',
-  'DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel', 'DxosWmsOpsBlockModel',
+  'DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel', 'DxosWmsOpsBlockModel', 'DxosBiChartBlockModel',
   'NativeTableBlock', 'NativeFormBlock', 'NativeDetailsBlock',
   'table', 'createForm', 'editForm', 'details', 'filterForm', 'kanban', 'chart', 'calendar', 'list', 'gridCard', 'markdown', 'actionPanel',
 ];
@@ -323,7 +329,7 @@ function createAuditedTool(spec) {
         }
         const preparedArgs = typeof spec.prepareArgs === 'function' ? spec.prepareArgs(normalizedRawArgs) : normalizedRawArgs;
         const checked = schemaHelper.validate(preparedArgs);
-        if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
+        if (!checked.ok) throw failTool(checked.code || 'TOOL_ARGS_INVALID', 400, checked.error);
         const skipOuterTx = spec.name === 'dxos_provision_role_workspace'
           && ORCHESTRATOR_OPS.has(checked.value?.operation);
         const result = skipOuterTx
@@ -442,9 +448,9 @@ function createDxosTools() {
       defaultPermission: 'ASK',
       introduction: {
         title: 'Kiến trúc sư Ứng dụng Doanh nghiệp & Phân hệ Mới',
-        about: 'Dựng trọn gói phân hệ (Snapshot + Schema/Relations/RLS/OpenAPI + RBAC + Portal 10 BlockModels + DMN + LatticeFlow v2 + Stock n8n + Verifier & 2-round Self-Healing) hoặc kiểm chứng ứng dụng.',
+        about: 'Dựng trọn gói phân hệ (Snapshot + Rich Schema/Relations/RLS/OpenAPI + RBAC + Portal 12 BlockModels + DMN + LatticeFlow v2 + Stock n8n + Verifier & 2-round Self-Healing), lập kế hoạch dry-run (plan_enterprise_app), vá nâng cấp (patch_enterprise_app), hoàn tác (rollback_enterprise_app) hoặc kiểm chứng ứng dụng.',
       },
-      description: 'End-to-end Multi-Entity Enterprise App Builder & Workspace Architect: provision role/workspace/AI (default), build single/multi-entity enterprise app (build_enterprise_app), verify (verify_app), list_built_apps, rebuild_enterprise_app, export_app_bundle (v3), or teardown_built_app.',
+      description: 'End-to-end Multi-Entity Enterprise App Builder & Workspace Architect: provision role/workspace/AI (default), plan_enterprise_app (dry-run ER & diff), build_enterprise_app, patch_enterprise_app, rollback_enterprise_app, verify_app, list_built_apps, rebuild_enterprise_app, export_app_bundle (v3), or teardown_built_app.',
       schema: {
         description: 'Role-to-Workspace & Full-Stack Multi-Entity Enterprise App Builder request.',
         properties: {
@@ -453,7 +459,10 @@ function createDxosTools() {
             default: 'provision_role_workspace',
             enum: [
               'provision_role_workspace',
+              'plan_enterprise_app',
               'build_enterprise_app',
+              'patch_enterprise_app',
+              'rollback_enterprise_app',
               'verify_app',
               'list_built_apps',
               'rebuild_enterprise_app',
@@ -466,9 +475,15 @@ function createDxosTools() {
           status: { type: 'string', maxLength: 32 },
           keepData: { type: 'boolean', default: true },
           specPatch: { type: 'object', description: 'Partial spec update for rebuild_enterprise_app (collections, portals, roles, dmnTables, flowGraphs).' },
+          patch: { type: 'object', description: 'Incremental patch spec for plan_enterprise_app / patch_enterprise_app (addCollections, addFields, updateFields, deprecateFields, addRelations, addBlocks, removeBlocks, addRoles, addFlows, addDmnTables).' },
+          targetSpec: { type: 'object', description: 'Optional full candidate spec for plan_enterprise_app / patch_enterprise_app.' },
+          prompt: { type: 'string', maxLength: 2000, description: 'Natural-language instruction for plan_enterprise_app / patch_enterprise_app.' },
+          editPrompt: { type: 'string', maxLength: 2000 },
+          targetVersion: { type: 'integer', description: 'Target version number for rollback_enterprise_app.' },
+          summary: { type: 'string', maxLength: 300 },
           collections: {
             type: 'array',
-            description: 'Multi-Entity custom collections (latticeCustom<Name>), auto topologically sorted (belongsTo/hasMany). Never target system tables.',
+            description: 'Multi-Entity custom collections (latticeCustom<Name>), auto topologically sorted (belongsTo/hasMany/hasOne). Never target system tables.',
             items: {
               type: 'object',
               properties: {
@@ -481,11 +496,23 @@ function createDxosTools() {
                     properties: {
                       name: { type: 'string', description: 'Field name matching ^[a-z][a-zA-Z0-9_]{1,48}$.' },
                       title: { type: 'string' },
-                      type: { type: 'string', enum: ['string', 'text', 'integer', 'float', 'boolean', 'date', 'select', 'enum', 'json', 'jsonb', 'belongsTo', 'hasMany'] },
-                      target: { type: 'string', description: 'Target latticeCustom* collection when type is belongsTo or hasMany.' },
+                      label: { type: 'string' },
+                      type: { type: 'string', enum: ['string', 'text', 'integer', 'float', 'boolean', 'date', 'datetime', 'select', 'enum', 'json', 'jsonb', 'belongsTo', 'hasMany', 'hasOne', 'belongsToMany', 'formula'] },
+                      target: { type: 'string', description: 'Target latticeCustom* or allowlisted business collection when type is belongsTo, hasMany, hasOne, or belongsToMany.' },
+                      through: { type: 'string', description: 'Optional latticeCustom* join collection name for belongsToMany.' },
                       foreignKey: { type: 'string' },
+                      otherKey: { type: 'string' },
+                      sourceKey: { type: 'string' },
                       targetKey: { type: 'string' },
+                      formulaExpression: { type: 'string' },
+                      formula: { type: 'string' },
+                      formulaReturnType: { type: 'string', enum: ['float', 'integer', 'string', 'boolean'] },
+                      validation: { type: 'object' },
+                      required: { type: 'boolean' },
+                      unique: { type: 'boolean' },
+                      indexed: { type: 'boolean' },
                       enum: { type: 'array', items: { type: 'string' } },
+                      enumValues: { type: 'array', items: { type: 'string' } },
                       defaultValue: { type: 'string' },
                     },
                   },
@@ -525,15 +552,22 @@ function createDxosTools() {
                   items: {
                     type: 'object',
                     properties: {
-                      blockUse: { type: 'string', description: 'Allowed BlockModel name (DxosPortalHeroBlockModel, DxosCreativeStudioBlockModel, DxosRecordWorkbenchBlockModel, DxosKanbanScheduleBlockModel, DxosWebGisBlockModel, DxosWmsOpsBlockModel, TableBlockModel, etc.).' },
+                      blockUse: { type: 'string', description: 'Allowed BlockModel name (12 Native v2 BlockModels incl. DxosPortalHeroBlockModel, DxosCreativeStudioBlockModel, DxosRecordWorkbenchBlockModel, DxosKanbanScheduleBlockModel, DxosWebGisBlockModel, DxosWmsOpsBlockModel, DxosBiChartBlockModel, TableBlockModel, etc.).' },
                       title: { type: 'string' },
-                      collection: { type: 'string', description: 'Target latticeCustom* collection for Kanban/WebGIS/RecordWorkbench.' },
+                      collection: { type: 'string', description: 'Target latticeCustom* collection for Kanban/WebGIS/RecordWorkbench/BiChart.' },
                       statusField: { type: 'string' },
                       dateField: { type: 'string' },
                       titleField: { type: 'string' },
                       latField: { type: 'string' },
                       lngField: { type: 'string' },
                       labelField: { type: 'string' },
+                      chartType: { type: 'string', enum: ['bar', 'line', 'pie', 'kpi', 'pivot'] },
+                      groupBy: { type: 'string' },
+                      secondaryGroupBy: { type: 'string' },
+                      metricOp: { type: 'string', enum: ['count', 'sum', 'avg', 'min', 'max'] },
+                      metricField: { type: 'string' },
+                      limit: { type: 'integer' },
+                      filterJson: { type: 'string' },
                       config: { type: 'object' },
                     },
                   },
@@ -595,6 +629,18 @@ function createDxosTools() {
         },
       },
       async run(ctx, db, actor, args) {
+        if (args.operation === 'plan_enterprise_app') {
+          return planEnterpriseApp(ctx, db, actor, args);
+        }
+        if (args.operation === 'patch_enterprise_app') {
+          return patchEnterpriseApp(ctx, db, actor, args);
+        }
+        if (args.operation === 'rollback_enterprise_app') {
+          return rollbackEnterpriseApp(ctx, db, actor, {
+            appKey: args.appKey,
+            targetVersion: args.targetVersion,
+          });
+        }
         if (args.operation === 'verify_app') {
           const target = args.target && typeof args.target === 'object' ? { ...args.target } : {};
           return verifyEnterpriseApp(ctx, db, actor, {

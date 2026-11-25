@@ -298,6 +298,36 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     return null;
   };
 
+  // 0.9 Built App Rollback (must precede layout rollback so app-level rollback isn't shadowed)
+  const extractBuiltAppKeyEarly = (input) => {
+    const clean = stripDiacritics(input).trim();
+    const explicit = clean.match(/\bappKey\s*[:=]\s*([a-z0-9][a-z0-9_-]{1,79})\b/i);
+    if (explicit?.[1]) return explicit[1].toLowerCase();
+    const named = clean.match(/\b(?:ung\s+dung|phan\s+he|app)\s+([a-z0-9]+(?:[_-][a-z0-9]+)+)\b/i);
+    if (named?.[1]) return named[1].toLowerCase();
+    return null;
+  };
+  if (
+    /(hoan tac|khoi phuc|rollback)/.test(n)
+    && /(?:ung\s+dung|phan\s+he|\bapp\b|\bappkey\b)/.test(n)
+    && !/(?:giao\s+dien|bo\s+cuc|trang\s+nay)/.test(n)
+  ) {
+    const denied = requireAdminOrRefuse('rollback_enterprise_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKeyEarly(raw);
+    const verMatch = n.match(/\b(?:phien\s+ban|version|v)\s*v?(\d+)\b/);
+    return {
+      intent: 'ROLLBACK_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'rollback_enterprise_app',
+        ...(appKey ? { appKey } : {}),
+        ...(verMatch?.[1] ? { targetVersion: Number(verMatch[1]) } : {}),
+      },
+    };
+  }
+
   // 1. Rollback Time-Machine
   if (/(hoan tac|quay lai\s+bo\s+cuc|khoi phuc\s+(?:giao dien|trang|bo cuc)|rollback|tro ve\s+ban\s+dau)/.test(n)) {
     const denied = requireAdminOrRefuse('rollback');
@@ -323,6 +353,36 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     [...raw.matchAll(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/g)].map((m) => m[1]),
   )];
 
+  if (/(?:lap\s+ke\s+hoach|ke\s+hoach\s+(?:thay\s+doi|cap\s+nhat|dung)|xem\s+truoc\s+(?:plan|diff|thay\s+doi)|\bplan(?:_enterprise_app)?)(?:\s+dry[\s-]?run)?\s+(?:cho\s+|voi\s+)?(?:ung\s+dung|phan\s+he|app|appkey)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('plan_enterprise_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    return {
+      intent: 'PLAN_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'plan_enterprise_app',
+        ...(appKey ? { appKey } : {}),
+        prompt: raw,
+      },
+    };
+  }
+  if (/(?:cap\s+nhat(?:\s+bo\s+sung)?|bo\s+sung|sua\s+doi|\bpatch\b)\s+(?:ung\s+dung|phan\s+he|app|appkey)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('patch_enterprise_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    return {
+      intent: 'PATCH_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'patch_enterprise_app',
+        ...(appKey ? { appKey } : {}),
+        prompt: raw,
+      },
+    };
+  }
   if (/(?:liet\s+ke|xem\s+danh\s+sach|danh\s+sach)\s+(?:cac\s+)?(?:ung\s+dung\s+da\s+dung|built\s+apps|phan\s+he\s+da\s+tao)\b/.test(n)) {
     const denied = requireAdminOrRefuse('list_built_apps');
     if (denied) return denied;
@@ -446,12 +506,13 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
-  // 2.6 Native v2 BlockModels (WebGIS / Kanban / WMS Ops) — Admin only
-  if (/(?:gan|them)\s+(?:khoi|block)?[^\n]{0,40}\b(?:dxoswebgisblockmodel|dxoskanbanscheduleblockmodel|dxoswmsopsblockmodel|ban\s+do\s+webgis|(?:bang|lich)\s+kanban)\b/.test(n)) {
+  // 2.6 Native v2 BlockModels (WebGIS / Kanban / WMS Ops / BI Chart) — Admin only
+  if (/(?:gan|them)\s+(?:khoi|block)?[^\n]{0,60}\b(?:dxoswebgisblockmodel|dxoskanbanscheduleblockmodel|dxoswmsopsblockmodel|dxosbichartblockmodel|bieu\s+do\s+bi|ban\s+do\s+webgis|(?:bang|lich)\s+kanban)\b/.test(n)) {
     const denied = requireAdminOrRefuse('compose_page_blocks');
     if (denied) return denied;
     let blockUse = 'DxosWebGisBlockModel';
-    if (n.includes('dxoskanbanscheduleblockmodel') || n.includes('kanban')) blockUse = 'DxosKanbanScheduleBlockModel';
+    if (n.includes('dxosbichartblockmodel') || n.includes('bieu do bi')) blockUse = 'DxosBiChartBlockModel';
+    else if (n.includes('dxoskanbanscheduleblockmodel') || n.includes('kanban')) blockUse = 'DxosKanbanScheduleBlockModel';
     else if (n.includes('dxoswmsopsblockmodel') || n.includes('wms')) blockUse = 'DxosWmsOpsBlockModel';
     const customColMatch = raw.match(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/);
     const colMatch = customColMatch || raw.match(/\b(lattice[A-Z][A-Za-z0-9]{1,40})\b/);

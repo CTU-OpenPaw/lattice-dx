@@ -25,6 +25,7 @@ module.exports = require('@nocobase/database').defineCollection({
     { name: 'status', type: 'string', interface: 'input', allowNull: false, defaultValue: 'active' },
     { name: 'sourceSpecJson', type: 'jsonb', defaultValue: {} },
     { name: 'artifactRefsJson', type: 'jsonb', defaultValue: {} },
+    { name: 'versionHistoryJson', type: 'jsonb', defaultValue: [] },
     { name: 'bundleSnapshotUid', type: 'string', interface: 'input' },
     { name: 'lastVerifiedAt', type: 'date', interface: 'datetime' },
     { name: 'lastVerificationJson', type: 'jsonb' },

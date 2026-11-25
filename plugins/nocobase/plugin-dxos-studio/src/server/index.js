@@ -28,6 +28,13 @@ const {
 } = require('./automation-engine');
 const { tickFlowScheduler } = require('./flow/cron');
 const { createDxosBuilderActions } = require('./domain-builder');
+const {
+  evaluateFormulaExpression,
+  parseFormulaAst,
+  registerRichSchemaHooks,
+  validateFormulaExpression,
+  validateSafeRegexPattern,
+} = require('./rich-schema');
 const { createN8nRouteHandlers } = require('./n8n-api-client');
 const { fail, readParams, resolveVerifiedRoles } = require('./wms-dmn-shared');
 
@@ -84,6 +91,10 @@ class DxosStudioPlugin extends Plugin {
       this._recordHooksHandle.stop();
     }
     this._recordHooksHandle = null;
+    if (this._richSchemaHooksHandle && typeof this._richSchemaHooksHandle.stop === 'function') {
+      this._richSchemaHooksHandle.stop();
+    }
+    this._richSchemaHooksHandle = null;
     if (this._delayTicker) {
       clearInterval(this._delayTicker);
       this._delayTicker = null;
@@ -164,6 +175,7 @@ class DxosStudioPlugin extends Plugin {
     this.stopAutomationListener();
     this._automationListenerHandle = registerAutomationEventListener(this.app, this.db);
     this._recordHooksHandle = registerRecordTriggerHooks(this.app, this.db);
+    this._richSchemaHooksHandle = registerRichSchemaHooks(this.db, { app: this.app });
     const rawTickMs = process.env.DX_FLOW_DELAY_TICK_MS;
     const delayTickMs = rawTickMs === undefined || rawTickMs === '' ? 15000 : Number(rawTickMs);
     if (Number.isFinite(delayTickMs) && delayTickMs >= 100) {
@@ -188,5 +200,10 @@ class DxosStudioPlugin extends Plugin {
 }
 
 DxosStudioPlugin.createOrganizationDirectGuardMiddleware = createOrganizationDirectGuardMiddleware;
+DxosStudioPlugin.parseFormulaAst = parseFormulaAst;
+DxosStudioPlugin.evaluateFormulaExpression = evaluateFormulaExpression;
+DxosStudioPlugin.validateFormulaExpression = validateFormulaExpression;
+DxosStudioPlugin.validateSafeRegexPattern = validateSafeRegexPattern;
+DxosStudioPlugin.registerRichSchemaHooks = registerRichSchemaHooks;
 module.exports = DxosStudioPlugin;
 module.exports.default = DxosStudioPlugin;

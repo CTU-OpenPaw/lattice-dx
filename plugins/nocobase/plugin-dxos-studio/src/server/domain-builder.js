@@ -34,7 +34,24 @@ const {
   val,
 } = require('./wms-dmn-shared');
 
-const FIELD_NAME_RE = /^[a-z][a-zA-Z0-9_]{0,62}$/;
+const {
+  ALLOWED_FIELD_TYPES,
+  ALLOWED_FORMULA_RETURN_TYPES,
+  BLOCKED_FIELD_NAMES,
+  FIELD_NAME_RE,
+  applyFormulaFields,
+  attachRichSchemaHooksForCollection,
+  buildSafeJoinCollectionName,
+  evaluateFormulaExpression,
+  parseFormulaAst,
+  parseRegexAst,
+  registerRichSchemaHooks,
+  resolveThroughCollectionName,
+  sanitizeFieldValidation,
+  validateFormulaExpression,
+  validateRecordFields,
+  validateSafeRegexPattern,
+} = require('./rich-schema');
 const ROLE_NAME_RE = /^[a-z][a-z0-9_]{1,40}$/;
 const RESERVED_SYSTEM_ROLES = new Set(['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector']);
 function isEnterpriseBusinessRole(roleName) {
@@ -44,18 +61,6 @@ function isEnterpriseBusinessRole(roleName) {
   return !RESERVED_SYSTEM_ROLES.has(clean);
 }
 const PORTAL_SLUG_RE = /^[a-z0-9][a-z0-9-]{1,48}$/;
-const BLOCKED_FIELD_NAMES = new Set(['__proto__', 'constructor', 'prototype', 'id', 'createdAt', 'updatedAt']);
-const ALLOWED_FIELD_TYPES = new Set([
-  'string',
-  'text',
-  'integer',
-  'float',
-  'boolean',
-  'date',
-  'datetime',
-  'json',
-  'belongsTo',
-]);
 const ADMIN_ROLES = new Set(['ldx_admin', 'root', 'admin']);
 
 function replaceStepNodeRefs(value, nodeIndexById) {
@@ -332,7 +337,7 @@ function mapFieldSpecToNocoBase(field) {
   const type = String(field.type || 'string');
   const name = String(field.name || '').trim();
   const title = String(field.title || name).trim();
-  const required = Boolean(field.required);
+  const required = Boolean(field.required || field.validation?.required);
   const allowNull = !required;
 
   const base = {
@@ -380,10 +385,68 @@ function mapFieldSpecToNocoBase(field) {
     base.foreignKey = String(field.foreignKey || `${name}Id`).trim();
     base.uiSchema.type = 'object';
     base.uiSchema['x-component'] = 'AssociationField';
+  } else if (type === 'hasOne') {
+    base.interface = 'oho';
+    base.target = String(field.target || '').trim();
+    base.foreignKey = String(field.foreignKey || `${name}Id`).trim();
+    base.sourceKey = String(field.sourceKey || 'id').trim();
+    base.uiSchema.type = 'object';
+    base.uiSchema['x-component'] = 'AssociationField';
+  } else if (type === 'belongsToMany') {
+    base.interface = 'm2m';
+    base.target = String(field.target || '').trim();
+    base.through = String(field.through || '').trim();
+    base.foreignKey = String(field.foreignKey || '').trim();
+    base.otherKey = String(field.otherKey || '').trim();
+    base.sourceKey = String(field.sourceKey || 'id').trim();
+    base.targetKey = String(field.targetKey || 'id').trim();
+    base.uiSchema.type = 'array';
+    base.uiSchema['x-component'] = 'AssociationField';
+  } else if (type === 'formula') {
+    const returnType = ALLOWED_FORMULA_RETURN_TYPES.has(field.formulaReturnType)
+      ? field.formulaReturnType
+      : 'float';
+    const formulaExpr = String(field.formulaExpression || field.formula || '').trim();
+    base.type = returnType;
+    base.interface = 'formula';
+    base.readOnly = true;
+    base.formula = formulaExpr;
+    base.formulaExpression = formulaExpr;
+    base.formulaReturnType = returnType;
+    base.options = {
+      ...(base.options || {}),
+      formula: formulaExpr,
+      formulaExpression: formulaExpr,
+      formulaReturnType: returnType,
+      readOnly: true,
+    };
+    base.uiSchema.type = returnType === 'boolean' ? 'boolean' : returnType === 'string' ? 'string' : 'number';
+    base.uiSchema['x-component'] = returnType === 'boolean'
+      ? 'Checkbox'
+      : returnType === 'string'
+        ? 'Input'
+        : 'InputNumber';
+    base.uiSchema['x-read-pretty'] = true;
+    base.uiSchema.readOnly = true;
+    base.uiSchema['x-formula'] = formulaExpr;
   } else if (Array.isArray(field.enumValues) && field.enumValues.length > 0) {
     base.interface = 'select';
     base.uiSchema.enum = field.enumValues.map((v) => ({ value: String(v), label: String(v) }));
     base.uiSchema['x-component'] = 'Select';
+  }
+
+  if (field.validation && typeof field.validation === 'object') {
+    base.validation = field.validation;
+    base.options = {
+      ...(base.options || {}),
+      validation: field.validation,
+    };
+    base.uiSchema['x-validation'] = field.validation;
+    if (Array.isArray(field.validation.enum) && field.validation.enum.length > 0 && !base.uiSchema.enum) {
+      base.interface = 'select';
+      base.uiSchema.enum = field.validation.enum.map((v) => ({ value: String(v), label: String(v) }));
+      base.uiSchema['x-component'] = 'Select';
+    }
   }
 
   if (field.indexed) {
@@ -392,10 +455,11 @@ function mapFieldSpecToNocoBase(field) {
   return base;
 }
 
-function sanitizeFields(rawFields) {
+function sanitizeFields(rawFields, opts = {}) {
   if (!Array.isArray(rawFields) || rawFields.length === 0) {
     throw fail('INVALID_FIELDS', 400, 'fields must be a non-empty array');
   }
+  const sourceCollection = String(opts.collectionName || 'latticeCustomDomain').trim();
   const seen = new Set();
   const sanitized = [];
   for (let i = 0; i < rawFields.length; i += 1) {
@@ -416,13 +480,20 @@ function sanitizeFields(rawFields) {
     if (!ALLOWED_FIELD_TYPES.has(type)) {
       throw fail('INVALID_FIELD_TYPE', 400, `Unsupported field type "${type}" on field "${name}"`);
     }
+
     let target = null;
     let foreignKey = null;
-    if (type === 'belongsTo') {
+    let otherKey = null;
+    let through = null;
+    let formulaExpression = null;
+    let formulaReturnType = null;
+
+    if (type === 'belongsTo' || type === 'hasOne') {
       target = String(f.target || '').trim();
       const targetAllowed = CUSTOM_COLLECTION_RE.test(target) || ALLOWLISTED_BUSINESS_COLLECTIONS.has(target);
+      const errCode = type === 'hasOne' ? 'INVALID_HAS_ONE_TARGET' : 'INVALID_BELONGS_TO_TARGET';
       if (!target || SYSTEM_PROTECTED_COLLECTIONS.has(target) || !targetAllowed) {
-        throw fail('INVALID_BELONGS_TO_TARGET', 400, `Disallowed belongsTo target "${target || '(empty)'}" on field "${name}"`);
+        throw fail(errCode, 400, `Disallowed ${type} target "${target || '(empty)'}" on field "${name}"`);
       }
       if (f.foreignKey !== undefined && f.foreignKey !== null) {
         if (typeof f.foreignKey !== 'string') {
@@ -435,19 +506,55 @@ function sanitizeFields(rawFields) {
       if (!FIELD_NAME_RE.test(foreignKey) || BLOCKED_FIELD_NAMES.has(foreignKey) || foreignKey === 'organizationId') {
         throw fail('INVALID_FOREIGN_KEY', 400, `Invalid foreignKey "${foreignKey || '(empty)'}" on field "${name}"`);
       }
+    } else if (type === 'belongsToMany') {
+      target = String(f.target || '').trim();
+      const targetAllowed = CUSTOM_COLLECTION_RE.test(target) || ALLOWLISTED_BUSINESS_COLLECTIONS.has(target);
+      if (!target || SYSTEM_PROTECTED_COLLECTIONS.has(target) || !targetAllowed) {
+        throw fail('INVALID_BELONGS_TO_MANY_TARGET', 400, `Disallowed belongsToMany target "${target || '(empty)'}" on field "${name}"`);
+      }
+      ({ through, foreignKey, otherKey } = resolveThroughCollectionName(sourceCollection, { ...f, name, target }, {
+        isProtectedCollection: (col) => SYSTEM_PROTECTED_COLLECTIONS.has(col),
+      }));
+    } else if (type === 'formula') {
+      const rawExpr = f.formulaExpression !== undefined ? f.formulaExpression : f.formula;
+      const formulaCheck = validateFormulaExpression(rawExpr, { selfFieldName: name });
+      if (!formulaCheck.valid) {
+        throw fail(formulaCheck.code || 'INVALID_FORMULA_EXPRESSION', 400, formulaCheck.error);
+      }
+      formulaExpression = String(rawExpr).trim();
+      if (f.formulaReturnType !== undefined && f.formulaReturnType !== null) {
+        const rt = String(f.formulaReturnType).trim();
+        if (!ALLOWED_FORMULA_RETURN_TYPES.has(rt)) {
+          throw fail('INVALID_FORMULA_RETURN_TYPE', 400, `Invalid formulaReturnType "${rt}" on field "${name}"`);
+        }
+        formulaReturnType = rt;
+      } else {
+        formulaReturnType = formulaCheck.inferredReturnType || 'float';
+      }
     }
+
     const enumValues = Array.isArray(f.enumValues)
       ? f.enumValues.map((v) => String(v).trim()).filter(Boolean).slice(0, 50)
       : undefined;
+    const validation = sanitizeFieldValidation({
+      ...f,
+      name,
+      type,
+      ...(formulaReturnType ? { formulaReturnType } : {}),
+      ...(enumValues ? { enumValues } : {}),
+    });
 
     sanitized.push({
       name,
       type,
       title: f.title ? String(f.title).trim() : name,
-      required: Boolean(f.required),
+      required: Boolean(f.required || validation?.required),
       indexed: Boolean(f.indexed),
       ...(enumValues && enumValues.length > 0 ? { enumValues } : {}),
+      ...(validation ? { validation } : {}),
       ...(target ? { target, foreignKey } : {}),
+      ...(through ? { through, otherKey } : {}),
+      ...(formulaExpression ? { formula: formulaExpression, formulaExpression, formulaReturnType } : {}),
     });
   }
   return sanitized;
@@ -742,7 +849,7 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
 
     if (!pageRoute) {
       const visibleFields = (Array.isArray(fields) ? fields : [])
-        .filter((f) => f && f.name && f.type !== 'json' && f.type !== 'belongsTo')
+        .filter((f) => f && f.name && !['json', 'belongsTo', 'hasOne', 'belongsToMany'].includes(f.type))
         .map((f) => f.name)
         .slice(0, 6);
       if (!visibleFields.length) visibleFields.push('organizationId');
@@ -750,7 +857,9 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
       const allPopupFields = Array.from(
         new Set([
           ...visibleFields,
-          ...(Array.isArray(fields) ? fields.filter((f) => f && f.name && f.type !== 'belongsTo').map((f) => f.name) : []),
+          ...(Array.isArray(fields)
+            ? fields.filter((f) => f && f.name && !['belongsTo', 'hasOne', 'belongsToMany'].includes(f.type)).map((f) => f.name)
+            : []),
           'organizationId',
         ]),
       );
@@ -952,6 +1061,143 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
   };
 }
 
+async function syncCollectionWithSafeRls(db, collectionDef, expectedColumns, indexCreates = []) {
+  const collectionName = collectionDef.name;
+  const isPgWithQuery = Boolean(
+    db?.sequelize
+    && typeof db.sequelize.query === 'function'
+    && (typeof db.sequelize.getDialect !== 'function' || db.sequelize.getDialect() === 'postgres'),
+  );
+  let rlsDroppedForAlter = false;
+  let registered = null;
+  if (typeof db.collection === 'function') {
+    registered = db.collection(collectionDef);
+    if (registered && typeof registered.sync === 'function') {
+      let existingCols = new Set();
+      if (isPgWithQuery) {
+        const colRes = await db.sequelize.query(
+          'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = :tableName',
+          { replacements: { tableName: collectionName } },
+        ).catch(() => [[], []]);
+        const colRows = Array.isArray(colRes) && Array.isArray(colRes[0]) ? colRes[0] : Array.isArray(colRes) ? colRes : [];
+        existingCols = new Set(colRows.map((row) => String(row?.column_name || '').trim()).filter(Boolean));
+      }
+
+      if (existingCols.size === 0) {
+        await registered.sync({ alter: true });
+      } else if (expectedColumns.every((col) => existingCols.has(col))) {
+        await registered.sync();
+      } else {
+        // Keep RLS enabled (fail-closed) and temporarily drop only the policy referencing organizationId during column DDL.
+        await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${collectionName}"`);
+        rlsDroppedForAlter = true;
+        try {
+          await registered.sync({ alter: true });
+        } finally {
+          await attachAndVerifyPgRls(db, collectionName);
+          rlsDroppedForAlter = false;
+        }
+      }
+    }
+  }
+  if (typeof db.sync === 'function' && !rlsDroppedForAlter) {
+    await db.sync();
+  }
+  if (registered && typeof db.emitAsync === 'function') {
+    await db.emitAsync('collection:loaded', { collection: registered }).catch(() => {});
+  }
+  if (isPgWithQuery) {
+    for (const sql of indexCreates) {
+      await db.sequelize.query(sql).catch(() => {});
+    }
+  }
+  return registered;
+}
+
+async function ensureBelongsToManyJoinCollection(db, { sourceCollection, field, roles, ctx = null }) {
+  const joinName = String(field.through || '').trim();
+  if (!CUSTOM_COLLECTION_RE.test(joinName) || SYSTEM_PROTECTED_COLLECTIONS.has(joinName)) {
+    throw fail('INVALID_THROUGH_COLLECTION', 400, `Invalid belongsToMany through collection "${joinName}"`);
+  }
+  const fk = String(field.foreignKey || '').trim();
+  const ok = String(field.otherKey || '').trim();
+  const joinFieldsSpec = [
+    { name: 'organizationId', type: 'string', allowNull: false, index: true },
+    { name: fk, type: 'bigInt', allowNull: false, index: true },
+    { name: ok, type: 'bigInt', allowNull: false, index: true },
+  ];
+  const collectionsRepo = db.getRepository?.('collections');
+  const fieldsRepo = db.getRepository?.('fields');
+
+  if (collectionsRepo) {
+    await upsertRepoRow(
+      collectionsRepo,
+      { name: joinName },
+      {
+        name: joinName,
+        title: `${sourceCollection} -> ${field.target} Join`,
+        createdAt: true,
+        updatedAt: true,
+        autoGenId: true,
+        logging: true,
+      },
+    );
+  }
+  if (fieldsRepo) {
+    for (const fSpec of joinFieldsSpec) {
+      await upsertRepoRow(
+        fieldsRepo,
+        { collectionName: joinName, name: fSpec.name },
+        { collectionName: joinName, ...fSpec },
+      );
+    }
+  }
+
+  const orgIdx = buildSafePgIndexName(joinName, 'org');
+  const fkIdx = buildSafePgIndexName(joinName, 'fk');
+  const okIdx = buildSafePgIndexName(joinName, 'ok');
+  const uqIdx = buildSafePgIndexName(joinName, 'uq');
+
+  await syncCollectionWithSafeRls(
+    db,
+    {
+      name: joinName,
+      title: `${sourceCollection} -> ${field.target} Join`,
+      autoGenId: true,
+      logging: true,
+      loadedFromCollectionManager: true,
+      timestamps: true,
+      createdAt: true,
+      updatedAt: true,
+      fields: joinFieldsSpec,
+      indexes: [
+        { name: orgIdx, fields: ['organizationId'] },
+        { name: fkIdx, fields: [fk] },
+        { name: okIdx, fields: [ok] },
+        { name: uqIdx, unique: true, fields: ['organizationId', fk, ok] },
+      ],
+    },
+    ['organizationId', fk, ok],
+    [
+      `CREATE INDEX IF NOT EXISTS "${orgIdx}" ON "${joinName}" ("organizationId")`,
+      `CREATE INDEX IF NOT EXISTS "${fkIdx}" ON "${joinName}" ("${fk}")`,
+      `CREATE INDEX IF NOT EXISTS "${okIdx}" ON "${joinName}" ("${ok}")`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS "${uqIdx}" ON "${joinName}" ("organizationId", "${fk}", "${ok}")`,
+    ],
+  );
+
+  const rls = await attachAndVerifyPgRls(db, joinName);
+  const grantedRoles = await grantDomainRbac(db, joinName, roles, joinFieldsSpec, ctx);
+  return {
+    collectionName: joinName,
+    foreignKey: fk,
+    otherKey: ok,
+    rls,
+    grantedRoles,
+    indexes: [orgIdx, fkIdx, okIdx, uqIdx],
+  };
+}
+
 async function createOrUpdateDomainCollection(db, params, opts = {}) {
   const collectionName = String(params.collectionName || '').trim();
   if (!CUSTOM_COLLECTION_RE.test(collectionName)) {
@@ -961,7 +1207,7 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
     throw fail('SYSTEM_COLLECTION_FORBIDDEN', 400, `${collectionName} is a protected system table`);
   }
 
-  const sanitizedFields = sanitizeFields(params.fields);
+  const sanitizedFields = sanitizeFields(params.fields, { collectionName });
   const title = String(params.title || collectionName).trim();
   const description = params.description ? String(params.description).trim() : null;
   const firstStringField = sanitizedFields.find((f) => f && f.name && ['string', 'text'].includes(f.type));
@@ -1004,21 +1250,32 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
     }
   }
 
+  // Provision, sync, index, and RLS-protect all belongsToMany `through` join collections BEFORE
+  // syncing the main collection so Sequelize/NocoBase never auto-creates an un-RLSed join table.
+  const joinCollections = [];
+  for (const field of sanitizedFields) {
+    if (field.type === 'belongsToMany') {
+      const joinInfo = await ensureBelongsToManyJoinCollection(db, {
+        sourceCollection: collectionName,
+        field,
+        roles: params.roles,
+        ctx: opts.ctx || null,
+      });
+      joinCollections.push(joinInfo);
+    }
+  }
+
   const indexName = buildSafePgIndexName(collectionName, 'org');
-  const isPgWithQuery = Boolean(
-    db?.sequelize
-    && typeof db.sequelize.query === 'function'
-    && (typeof db.sequelize.getDialect !== 'function' || db.sequelize.getDialect() === 'postgres'),
-  );
   const expectedColumns = [
     'organizationId',
-    ...sanitizedFields.map((f) => (f.type === 'belongsTo' ? String(f.foreignKey || `${f.name}Id`).trim() : f.name)),
+    ...sanitizedFields
+      .filter((f) => f.type !== 'hasOne' && f.type !== 'belongsToMany')
+      .map((f) => (f.type === 'belongsTo' ? String(f.foreignKey || `${f.name}Id`).trim() : f.name)),
   ];
 
-  let rlsDroppedForAlter = false;
-  let registered = null;
-  if (typeof db.collection === 'function') {
-    registered = db.collection({
+  await syncCollectionWithSafeRls(
+    db,
+    {
       name: collectionName,
       title,
       description,
@@ -1031,50 +1288,15 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
       updatedAt: true,
       fields: fullFieldsSpec,
       indexes: [{ name: indexName, fields: ['organizationId'] }],
-    });
-    if (registered && typeof registered.sync === 'function') {
-      let existingCols = new Set();
-      if (isPgWithQuery) {
-        const colRes = await db.sequelize.query(
-          'SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = :tableName',
-          { replacements: { tableName: collectionName } },
-        ).catch(() => [[], []]);
-        const colRows = Array.isArray(colRes) && Array.isArray(colRes[0]) ? colRes[0] : Array.isArray(colRes) ? colRes : [];
-        existingCols = new Set(colRows.map((row) => String(row?.column_name || '').trim()).filter(Boolean));
-      }
-
-      if (existingCols.size === 0) {
-        await registered.sync({ alter: true });
-      } else if (expectedColumns.every((col) => existingCols.has(col))) {
-        await registered.sync();
-      } else {
-        // Keep RLS enabled (fail-closed) and temporarily drop only the policy referencing organizationId during column DDL.
-        await db.sequelize.query(`DROP POLICY IF EXISTS "lattice_tenant_isolation" ON "${collectionName}"`);
-        rlsDroppedForAlter = true;
-        try {
-          await registered.sync({ alter: true });
-        } finally {
-          await attachAndVerifyPgRls(db, collectionName);
-          rlsDroppedForAlter = false;
-        }
-      }
-    }
-  }
-  if (typeof db.sync === 'function' && !rlsDroppedForAlter) {
-    await db.sync();
-  }
-  if (registered && typeof db.emitAsync === 'function') {
-    await db.emitAsync('collection:loaded', { collection: registered }).catch(() => {});
-  }
-
-  if (isPgWithQuery) {
-    await db.sequelize.query(
-      `CREATE INDEX IF NOT EXISTS "${indexName}" ON "${collectionName}" ("organizationId")`,
-    ).catch(() => {});
-  }
+    },
+    expectedColumns,
+    [`CREATE INDEX IF NOT EXISTS "${indexName}" ON "${collectionName}" ("organizationId")`],
+  );
 
   const rls = await attachAndVerifyPgRls(db, collectionName);
   const grantedRoles = await grantDomainRbac(db, collectionName, params.roles, sanitizedFields, opts.ctx || null);
+
+  attachRichSchemaHooksForCollection(db, collectionName, sanitizedFields);
 
   let portalPage = null;
   if (params.portalSlug) {
@@ -1095,6 +1317,7 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
     indexName,
     rls,
     grantedRoles,
+    ...(joinCollections.length ? { joinCollections } : {}),
     portalPage,
   };
 }
@@ -1981,12 +2204,28 @@ function createDxosBuilderActions(db, options = {}) {
 }
 
 module.exports = {
+  ALLOWED_FIELD_TYPES,
+  ALLOWED_FORMULA_RETURN_TYPES,
   BUSINESS_PACK_CATALOG,
+  applyFormulaFields,
   attachAndVerifyPgRls,
+  attachRichSchemaHooksForCollection,
+  buildSafeJoinCollectionName,
   buildSafePgIndexName,
   createDxosBuilderActions,
   createOrUpdateDomainCollection,
+  ensureBelongsToManyJoinCollection,
+  evaluateFormulaExpression,
   generateOrEnsureOrgPkiKey,
+  mapFieldSpecToNocoBase,
+  parseFormulaAst,
+  parseRegexAst,
+  registerRichSchemaHooks,
+  resolveThroughCollectionName,
+  sanitizeFieldValidation,
   sanitizeFields,
   upsertPortalPageForDomain,
+  validateFormulaExpression,
+  validateRecordFields,
+  validateSafeRegexPattern,
 };

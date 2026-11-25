@@ -449,6 +449,49 @@ function inferCollectionFieldsMeta(collectionMeta) {
   };
 }
 
+const NUMERIC_FIELD_TYPES = new Set(['integer', 'float', 'double', 'decimal', 'number', 'bigint']);
+const NUMERIC_FIELD_INTERFACES = new Set(['number', 'integer', 'percent', 'float']);
+const BI_BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const BI_SENSITIVE_FIELD_RE = /password|secret|token|apikey|api_key|privatekey|hash|salt|embedding|searchvector/i;
+const BI_VIRTUAL_OR_ASSOC_TYPES = new Set(['virtual', 'hasmany', 'belongstomany', 'hasone', 'belongsto', 'password', 'encryption']);
+
+function isNumericCollectionField(field) {
+  if (!field || typeof field !== 'object') return false;
+  const ftype = String(field.type || '').trim().toLowerCase();
+  if (NUMERIC_FIELD_TYPES.has(ftype)) return true;
+  if (ftype === 'formula') {
+    const dataType = String(field.dataType || field.options?.dataType || '').trim().toLowerCase();
+    const iface = String(field.interface || field.options?.interface || '').trim().toLowerCase();
+    return NUMERIC_FIELD_TYPES.has(dataType) || NUMERIC_FIELD_INTERFACES.has(iface);
+  }
+  return false;
+}
+
+function extractBiFieldOptions(collectionMeta, { numericOnly = false } = {}) {
+  const fields = Array.isArray(collectionMeta?.fields) ? collectionMeta.fields : [];
+  const out = [];
+  const seen = new Set();
+  for (const f of fields) {
+    if (!f || typeof f !== 'object') continue;
+    const name = String(f.name || '').trim();
+    if (!name || BI_BLOCKED_KEYS.has(name) || name.startsWith('__') || name.startsWith('$') || name.includes('.') || seen.has(name)) {
+      continue;
+    }
+    if (BI_SENSITIVE_FIELD_RE.test(name)) continue;
+    const ftype = String(f.type || 'string').trim().toLowerCase();
+    if (BI_VIRTUAL_OR_ASSOC_TYPES.has(ftype)) continue;
+    if (numericOnly && !isNumericCollectionField(f)) continue;
+    seen.add(name);
+    const title = String(f.title || '').trim();
+    out.push({
+      value: name,
+      label: title && title !== name ? `${title} (${name})` : name,
+      type: f.type || 'string',
+    });
+  }
+  return out;
+}
+
 module.exports = {
   SAFE_COLLECTION_RE,
   CUSTOM_COLLECTION_RE,
@@ -469,4 +512,6 @@ module.exports = {
   subscribeCollectionsMeta,
   fetchCollectionsMeta,
   inferCollectionFieldsMeta,
+  isNumericCollectionField,
+  extractBiFieldOptions,
 };

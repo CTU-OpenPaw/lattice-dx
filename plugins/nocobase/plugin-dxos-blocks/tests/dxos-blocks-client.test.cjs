@@ -52,7 +52,7 @@ test('dxos-blocks helpers reject unsafe URLs, enforce ACL button filtering, and 
   assert.equal(metrics[1].targetPath, null);
 });
 
-test('registerDxosBlockModels registers all 11 configurable BlockModel subclasses with flowEngine settings flows', () => {
+test('registerDxosBlockModels registers all 12 configurable BlockModel subclasses with flowEngine settings flows', () => {
   const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
 
   class MockBlockModel {
@@ -84,6 +84,7 @@ test('registerDxosBlockModels registers all 11 configurable BlockModel subclasse
     'DxosWebGisBlockModel',
     'DxosKanbanScheduleBlockModel',
     'DxosWmsOpsBlockModel',
+    'DxosBiChartBlockModel',
   ];
   assert.deepEqual(Object.keys(models).sort(), expectedNames.slice().sort());
   assert.deepEqual(Object.keys(registered).sort(), expectedNames.slice().sort());
@@ -657,4 +658,128 @@ test('Task 7 Fix Round 1: registerDxosBlockModels skips collectionsMeta when una
   });
   assert.equal(falsePositiveOnly.latField, null);
   assert.equal(falsePositiveOnly.lngField, null);
+});
+
+test('DxosBiChartBlockModel registers uiSchema with dynamic collection & numeric-filtered metricField options via collectionsMeta', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { isNumericCollectionField, extractBiFieldOptions, fetchCollectionsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  assert.equal(typeof isNumericCollectionField, 'function');
+  assert.equal(typeof extractBiFieldOptions, 'function');
+
+  assert.equal(isNumericCollectionField({ name: 'totalAmount', type: 'decimal' }), true);
+  assert.equal(isNumericCollectionField({ name: 'qty', type: 'integer' }), true);
+  assert.equal(isNumericCollectionField({ name: 'status', type: 'string' }), false);
+
+  const invoiceMeta = {
+    name: 'latticeCustomInvoices',
+    title: 'Hóa đơn',
+    fields: [
+      { name: 'status', type: 'string', title: 'Trạng thái' },
+      { name: 'region', type: 'string', title: 'Khu vực' },
+      { name: 'totalAmount', type: 'decimal', title: 'Tổng tiền' },
+      { name: 'secretToken', type: 'string', title: 'Token' },
+      { name: '__proto__', type: 'string', title: 'Proto' },
+    ],
+  };
+  assert.deepEqual(
+    extractBiFieldOptions(invoiceMeta).map((o) => o.value),
+    ['status', 'region', 'totalAmount'],
+  );
+  assert.deepEqual(
+    extractBiFieldOptions(invoiceMeta, { numericOnly: true }).map((o) => o.value),
+    ['totalAmount'],
+  );
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const bootstrapApi = {
+    auth: { getToken: () => 'tok-bi' },
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return { data: { data: { collections: [invoiceMeta] } } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => bootstrapApi, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    { apiClient: bootstrapApi },
+  );
+  await fetchCollectionsMeta(bootstrapApi);
+
+  const biModel = models.DxosBiChartBlockModel;
+  assert.ok(biModel, 'DxosBiChartBlockModel must be registered');
+  const cfgStep = biModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
+  for (const key of ['title', 'collection', 'chartType', 'groupBy', 'secondaryGroupBy', 'metricOp', 'metricField', 'limit', 'filterJson']) {
+    assert.ok(key in cfgStep.defaultParams, `defaultParams missing ${key}`);
+    assert.ok(cfgStep.uiSchema[key], `uiSchema missing ${key}`);
+  }
+  assert.ok(cfgStep.uiSchema.collection.enum.some((o) => o.value === 'latticeCustomInvoices'));
+
+  const runReaction = (schemaField, queryValues) => {
+    const field = {
+      dataSource: [],
+      componentProps: {},
+      query: (name) => ({ value: () => queryValues[name] }),
+    };
+    const fn = schemaField['x-reactions'];
+    assert.equal(typeof fn, 'function');
+    fn(field);
+    return field;
+  };
+
+  const gbField = runReaction(cfgStep.uiSchema.groupBy, { collection: 'latticeCustomInvoices', metricOp: 'sum' });
+  assert.deepEqual(gbField.dataSource.map((o) => o.value), ['status', 'region', 'totalAmount']);
+
+  const secField = runReaction(cfgStep.uiSchema.secondaryGroupBy, { collection: 'latticeCustomInvoices', metricOp: 'sum' });
+  assert.deepEqual(secField.dataSource.map((o) => o.value), ['status', 'region', 'totalAmount']);
+
+  const metricSumField = runReaction(cfgStep.uiSchema.metricField, { collection: 'latticeCustomInvoices', metricOp: 'sum' });
+  assert.deepEqual(metricSumField.dataSource.map((o) => o.value), ['totalAmount']);
+
+  const metricCountField = runReaction(cfgStep.uiSchema.metricField, { collection: 'latticeCustomInvoices', metricOp: 'count' });
+  assert.deepEqual(metricCountField.dataSource.map((o) => o.value), ['status', 'region', 'totalAmount']);
+});
+
+test('M1.1 Iteration 2: isNumericCollectionField aligns formula eligibility with server (numeric dataType/interface only)', () => {
+  const { isNumericCollectionField, extractBiFieldOptions } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  assert.equal(isNumericCollectionField({ name: 'calcNum', type: 'formula', interface: 'number' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcInt', type: 'formula', interface: 'integer' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcFloat', type: 'formula', interface: 'float' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcPct', type: 'formula', interface: 'percent' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcData', type: 'formula', dataType: 'decimal' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcStr', type: 'formula', interface: 'input' }), false);
+  assert.equal(isNumericCollectionField({ name: 'calcStrData', type: 'formula', dataType: 'string' }), false);
+  assert.equal(isNumericCollectionField({ name: 'calcBare', type: 'formula' }), false);
+  assert.equal(isNumericCollectionField({ name: 'badStr', type: 'string', interface: 'number' }), false);
+
+  const meta = {
+    name: 'latticeCustomFormulas',
+    fields: [
+      { name: 'calcNum', type: 'formula', interface: 'number' },
+      { name: 'calcData', type: 'formula', dataType: 'float' },
+      { name: 'calcStr', type: 'formula', interface: 'input', dataType: 'string' },
+      { name: 'badStr', type: 'string', interface: 'number' },
+    ],
+  };
+  assert.deepEqual(
+    extractBiFieldOptions(meta, { numericOnly: true }).map((o) => o.value),
+    ['calcNum', 'calcData'],
+  );
 });

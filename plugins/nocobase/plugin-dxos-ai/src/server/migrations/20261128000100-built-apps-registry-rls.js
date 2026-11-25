@@ -92,6 +92,7 @@ class BuiltAppsRegistryRlsMigration extends Migration {
           status VARCHAR(32) NOT NULL DEFAULT 'active',
           "sourceSpecJson" JSONB NOT NULL DEFAULT '{}'::jsonb,
           "artifactRefsJson" JSONB NOT NULL DEFAULT '{}'::jsonb,
+          "versionHistoryJson" JSONB NOT NULL DEFAULT '[]'::jsonb,
           "bundleSnapshotUid" VARCHAR(128),
           "lastVerifiedAt" TIMESTAMPTZ,
           "lastVerificationJson" JSONB,

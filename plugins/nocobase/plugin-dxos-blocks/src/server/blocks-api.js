@@ -16,7 +16,7 @@ const {
   clearAlarm,
   queryTelemetryTimeSeries,
 } = require('./alarm-engine');
-const { executeGovernedExport } = require('./governed-export');
+const { executeGovernedExport, assertSafeFilter, SENSITIVE_EXPORT_FIELDS } = require('./governed-export');
 const {
   getTwinShadow,
   requestDesiredSetpoint,
@@ -1087,13 +1087,16 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
           const uiSchema = val(rawField, 'uiSchema') || options.uiSchema || {};
           const ftype = String(val(rawField, 'type') || options.type || 'string').trim() || 'string';
           const iface = String(val(rawField, 'interface') || options.interface || '').trim();
+          const dataType = String(val(rawField, 'dataType') || options.dataType || '').trim();
           const title = String(uiSchema?.title || val(rawField, 'title') || options.title || fname).trim() || fname;
           const enumValues = normalizeEnumValues(rawField);
           const prev = fieldMap.get(fname);
+          const nextDataType = dataType || prev?.dataType || '';
           fieldMap.set(fname, {
             name: fname,
             type: ftype !== 'string' || !prev ? ftype : prev.type,
             interface: iface || prev?.interface || '',
+            ...(nextDataType ? { dataType: nextDataType } : {}),
             title: title !== fname || !prev ? title : prev.title,
             enumValues: enumValues.length ? enumValues : (prev?.enumValues || []),
           });
@@ -1189,6 +1192,500 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
       collections.sort((a, b) => (a.isCustom !== b.isCustom ? (a.isCustom ? -1 : 1) : a.name.localeCompare(b.name)));
       ctx.body = { collections };
+      return next();
+    },
+
+    aggregateQuery: async (ctx, next) => {
+      if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
+      if (!ctx.state?.currentUser?.id && ctx.state?.currentRole !== 'root') {
+        throw fail('NATIVE_LOGIN_REQUIRED', 401);
+      }
+      if (ctx.state?.currentRole === 'root' && !ctx.state?.currentUser) {
+        throw fail('NATIVE_LOGIN_REQUIRED', 401);
+      }
+
+      const input = readParams(ctx);
+      const collection = String(input.collection || '').trim();
+      const isAllowedAggregateCollection = (
+        META_ALLOWED_BUSINESS_COLLECTIONS.has(collection)
+        || (SAFE_COLLECTION_NAME_RE.test(collection) && /^latticeCustom[A-Za-z0-9_]+$/.test(collection))
+      ) && !META_EXCLUDED_LOWER.has(collection.toLowerCase()) && !META_BLOCKED_KEYS.has(collection);
+      if (!isAllowedAggregateCollection) {
+        throw fail('DXOS_COLLECTION_FORBIDDEN', 403, `Collection "${collection}" không nằm trong danh sách cho phép truy vấn BI.`);
+      }
+
+      const { isRoot, actor } = await resolveCallerContext(db, ctx, { collection, action: 'view' });
+
+      let effectiveOrg = null;
+      if (!isRoot) {
+        if (
+          input.organizationId !== undefined
+          && input.organizationId !== null
+          && String(input.organizationId).trim() !== ''
+          && String(input.organizationId).trim() !== actor.organizationId
+        ) {
+          throw fail('DXOS_CROSS_ORG_FORBIDDEN', 403);
+        }
+        effectiveOrg = actor.organizationId;
+      } else if (input.organizationId !== undefined && input.organizationId !== null && String(input.organizationId).trim() !== '') {
+        const cleanOrg = String(input.organizationId).trim();
+        if (!ORG_ID_RE.test(cleanOrg)) {
+          throw fail('DXOS_ORG_REQUIRED', 400, 'organizationId không hợp lệ.');
+        }
+        effectiveOrg = cleanOrg;
+      }
+
+      const VALID_CHART_TYPES = new Set(['bar', 'line', 'pie', 'kpi', 'pivot']);
+      const chartType = input.chartType === undefined ? 'bar' : String(input.chartType || '').trim().toLowerCase();
+      if (!VALID_CHART_TYPES.has(chartType)) {
+        throw fail('DXOS_INVALID_CHART_TYPE', 400, `Loại biểu đồ "${chartType}" không hợp lệ.`);
+      }
+
+      let rawMetric = input.metric;
+      if (typeof rawMetric === 'string' && rawMetric.trim()) {
+        try { rawMetric = JSON.parse(rawMetric); } catch { throw fail('DXOS_INVALID_METRIC_OP', 400); }
+      }
+      const metricObj = rawMetric && typeof rawMetric === 'object' && !Array.isArray(rawMetric)
+        ? rawMetric
+        : { op: input.metricOp ?? 'count', field: input.metricField };
+      const VALID_METRIC_OPS = new Set(['count', 'sum', 'avg', 'min', 'max']);
+      const op = String(metricObj.op ?? 'count').trim().toLowerCase();
+      if (!VALID_METRIC_OPS.has(op)) {
+        throw fail('DXOS_INVALID_METRIC_OP', 400, `Phép tính "${op}" không hợp lệ.`);
+      }
+      const metricField = metricObj.field !== undefined && metricObj.field !== null ? String(metricObj.field).trim() : '';
+
+      let limit = 100;
+      if (input.limit !== undefined && input.limit !== null && input.limit !== '') {
+        if (typeof input.limit === 'boolean' || typeof input.limit === 'object') {
+          throw fail('DXOS_INVALID_LIMIT', 400);
+        }
+        const parsedLimit = Number(input.limit);
+        if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 500) {
+          throw fail('DXOS_INVALID_LIMIT', 400, 'limit phải là số nguyên trong khoảng 1..500.');
+        }
+        limit = parsedLimit;
+      }
+
+      const repo = db?.getRepository?.(collection);
+      if (!repo || typeof repo.find !== 'function') {
+        throw fail('DXOS_COLLECTION_NOT_FOUND', 404, `Không tìm thấy repository cho "${collection}".`);
+      }
+
+      const VIRTUAL_OR_ASSOC_TYPES = new Set(['virtual', 'hasmany', 'belongstomany', 'hasone', 'belongsto', 'password', 'encryption']);
+      const fieldMap = new Map();
+      const registerField = (rawField, fallbackKey = '') => {
+        const rawOpts = val(rawField, 'options');
+        const opts = rawOpts && typeof rawOpts === 'object' ? rawOpts : {};
+        const fname = String(val(rawField, 'name') || opts.name || fallbackKey || '').trim();
+        if (!fname || META_BLOCKED_KEYS.has(fname) || fname.startsWith('__') || fname.startsWith('$') || fname.includes('.')) return;
+        const ftype = String(val(rawField, 'type') || opts.type || 'string').trim().toLowerCase();
+        if (VIRTUAL_OR_ASSOC_TYPES.has(ftype) || rawField?.virtual === true || opts.virtual === true || rawField?.isAssociation === true) {
+          return;
+        }
+        const iface = String(val(rawField, 'interface') || opts.interface || '').trim().toLowerCase();
+        const dataType = String(val(rawField, 'dataType') || opts.dataType || '').trim().toLowerCase();
+        const prev = fieldMap.get(fname);
+        fieldMap.set(fname, {
+          name: fname,
+          type: ftype !== 'string' || !prev ? ftype : prev.type,
+          interface: iface || prev?.interface || '',
+          dataType: dataType || prev?.dataType || '',
+        });
+      };
+
+      const colObj = typeof db?.getCollection === 'function'
+        ? db.getCollection(collection)
+        : (db?.collections instanceof Map ? db.collections.get(collection) : db?.collections?.[collection]) || null;
+      const rawColFields = colObj?.fields;
+      if (rawColFields instanceof Map) {
+        for (const [k, f] of rawColFields.entries()) registerField(f, k);
+      } else if (Array.isArray(rawColFields)) {
+        for (const f of rawColFields) registerField(f);
+      } else if (rawColFields && typeof rawColFields === 'object') {
+        for (const [k, f] of Object.entries(rawColFields)) registerField(f, k);
+      }
+      const rawAttrs = db?.getModel?.(collection)?.rawAttributes;
+      if (rawAttrs && typeof rawAttrs === 'object') {
+        for (const [k, attr] of Object.entries(rawAttrs)) {
+          if (!fieldMap.has(k)) {
+            const typeName = String(attr?.type?.key || attr?.type || 'string').toLowerCase();
+            registerField({ name: k, type: typeName }, k);
+          }
+        }
+      }
+      if (!fieldMap.size) {
+        try {
+          const fieldRepo = db?.getRepository?.('fields');
+          if (fieldRepo && typeof fieldRepo.find === 'function') {
+            const rows = (await fieldRepo.find({ filter: { collectionName: collection }, limit: 500 })) || [];
+            for (const r of rows) registerField(r);
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (!fieldMap.size) {
+        throw fail('DXOS_COLLECTION_NOT_FOUND', 404, `Không tìm thấy metadata trường cho "${collection}".`);
+      }
+
+      let roleAllowedSet = null;
+      if (!isRoot) {
+        const roleName = ctx.state?.currentRole;
+        if (roleName && db?.getRepository) {
+          const role = await db.getRepository('roles')?.findOne({ filter: { name: roleName } });
+          if (val(role, 'allowAll') !== true) {
+            const res = await db.getRepository('dataSourcesRolesResources')?.findOne({
+              filter: { roleName, name: collection, dataSourceKey: 'main' },
+            });
+            if (res && val(res, 'usingActionsConfig') !== false) {
+              const actions = val(res, 'actions') || [];
+              const viewAct = actions.find((a) => (a?.name || a) === 'view' && Array.isArray(a?.fields) && a.fields.length > 0)
+                || actions.find((a) => (a?.name || a) === 'list' && Array.isArray(a?.fields) && a.fields.length > 0);
+              const rawAllowed = Array.isArray(viewAct?.fields) ? viewAct.fields : [];
+              if (rawAllowed.length) {
+                roleAllowedSet = new Set(rawAllowed.map((f) => String(f?.name || f)));
+              }
+            }
+          }
+        }
+      }
+
+      const isSensitiveOrBlockedField = (name) => (
+        !name
+        || META_BLOCKED_KEYS.has(name)
+        || name.startsWith('__')
+        || name.startsWith('$')
+        || name.includes('.')
+        || META_SENSITIVE_FIELD_RE.test(name)
+        || SENSITIVE_EXPORT_FIELDS.has(name)
+      );
+
+      const assertValidField = (rawName, { allowSystemFilterField = false } = {}) => {
+        const fname = String(rawName || '').trim();
+        if (isSensitiveOrBlockedField(fname)) {
+          throw fail('DXOS_FIELD_FORBIDDEN', 403, `Trường "${fname}" không được phép truy vấn.`);
+        }
+        const meta = fieldMap.get(fname);
+        if (!meta) {
+          if (allowSystemFilterField && ['organizationId', 'id', 'createdAt', 'updatedAt'].includes(fname)) {
+            return { name: fname, type: 'string' };
+          }
+          throw fail('DXOS_INVALID_FIELD', 400, `Trường "${fname}" không tồn tại hoặc không hỗ trợ trong "${collection}".`);
+        }
+        if (roleAllowedSet && !roleAllowedSet.has(fname)) {
+          if (!(allowSystemFilterField && ['organizationId', 'id'].includes(fname))) {
+            throw fail('DXOS_FIELD_FORBIDDEN', 403, `Vai trò hiện tại không có quyền truy cập trường "${fname}".`);
+          }
+        }
+        return meta;
+      };
+
+      const groupBy = input.groupBy !== undefined && input.groupBy !== null ? String(input.groupBy).trim() : '';
+      if (chartType !== 'kpi' && !groupBy) {
+        throw fail('DXOS_GROUP_BY_REQUIRED', 400, `Biểu đồ "${chartType}" yêu cầu trường groupBy.`);
+      }
+      if (groupBy) {
+        assertValidField(groupBy);
+      }
+
+      const secondaryGroupBy = input.secondaryGroupBy !== undefined && input.secondaryGroupBy !== null
+        ? String(input.secondaryGroupBy).trim()
+        : '';
+      if (chartType === 'pivot') {
+        if (!secondaryGroupBy) {
+          throw fail('DXOS_SECONDARY_GROUP_BY_REQUIRED', 400, 'Biểu đồ pivot yêu cầu secondaryGroupBy.');
+        }
+        assertValidField(secondaryGroupBy);
+        if (secondaryGroupBy === groupBy) {
+          throw fail('DXOS_INVALID_FIELD', 400, 'secondaryGroupBy phải khác groupBy.');
+        }
+      }
+
+      const NUMERIC_FIELD_TYPES = new Set(['integer', 'float', 'double', 'bigint', 'decimal', 'number']);
+      const NUMERIC_FIELD_INTERFACES = new Set(['number', 'integer', 'float', 'percent']);
+      const isNumericServerField = (meta) => {
+        const ftype = String(meta?.type || '').trim().toLowerCase();
+        if (NUMERIC_FIELD_TYPES.has(ftype)) return true;
+        if (ftype === 'formula') {
+          const dataType = String(meta?.dataType || '').trim().toLowerCase();
+          const iface = String(meta?.interface || '').trim().toLowerCase();
+          return NUMERIC_FIELD_TYPES.has(dataType) || NUMERIC_FIELD_INTERFACES.has(iface);
+        }
+        return false;
+      };
+      if (op !== 'count') {
+        if (!metricField) {
+          throw fail('DXOS_METRIC_FIELD_REQUIRED', 400, `Phép tính "${op}" yêu cầu metric.field.`);
+        }
+        const mFieldMeta = assertValidField(metricField);
+        if (!isNumericServerField(mFieldMeta)) {
+          throw fail('DXOS_NUMERIC_FIELD_REQUIRED', 400, `Trường "${metricField}" phải có kiểu số để tính "${op}".`);
+        }
+      } else if (metricField) {
+        assertValidField(metricField);
+      }
+
+      const safeFilter = assertSafeFilter(input.filter);
+      if (safeFilter !== null && (Array.isArray(safeFilter) || typeof safeFilter !== 'object')) {
+        throw fail('DXOS_INVALID_FILTER', 400, 'Filter must be a JSON object');
+      }
+      const validateFilterKeys = (node) => {
+        if (!node || typeof node !== 'object') return;
+        if (Array.isArray(node)) {
+          for (const item of node) validateFilterKeys(item);
+          return;
+        }
+        for (const k of Object.getOwnPropertyNames(node)) {
+          if (!k.startsWith('$')) {
+            assertValidField(k, { allowSystemFilterField: true });
+            if (node[k] && typeof node[k] === 'object') {
+              validateFilterKeys(node[k]);
+            }
+          } else {
+            if (k.toLowerCase() === '$col') {
+              if (typeof node[k] !== 'string' || !node[k].trim()) {
+                throw fail('DXOS_INVALID_FILTER', 400, 'Filter $col value must be a string field name');
+              }
+              assertValidField(node[k], { allowSystemFilterField: true });
+            } else {
+              validateFilterKeys(node[k]);
+            }
+          }
+        }
+      };
+      if (safeFilter && typeof safeFilter === 'object') {
+        validateFilterKeys(safeFilter);
+      }
+
+      const activeRole = String(ctx.state?.currentRole || '').trim();
+      const enforceOwnScope = !isRoot && OWN_SCOPED_COLLECTIONS.has(collection) && !ORG_WIDE_PROPOSAL_ROLES.has(activeRole);
+      const BATCH_SIZE = 500;
+      const MAX_SCAN = 5000;
+
+      const queryResult = await runWithOptionalRls(db, effectiveOrg, async (transaction) => {
+        const clauses = [];
+        if (effectiveOrg) clauses.push({ organizationId: effectiveOrg });
+        if (enforceOwnScope) {
+          const ownerClauses = buildOwnerFilterClauses(db, collection, actor);
+          if (ownerClauses.length) clauses.push({ $or: ownerClauses });
+        }
+        if (safeFilter && typeof safeFilter === 'object' && !Array.isArray(safeFilter) && Object.keys(safeFilter).length) {
+          clauses.push(safeFilter);
+        }
+        const dbFilter = clauses.length === 0 ? {} : clauses.length === 1 ? clauses[0] : { $and: clauses };
+
+        const collected = [];
+        let offset = 0;
+        let truncated = false;
+        while (collected.length < MAX_SCAN) {
+          const batch = (await repo.find({
+            filter: dbFilter,
+            limit: BATCH_SIZE,
+            offset,
+            sort: ['-id'],
+            ...(transaction ? { transaction } : {}),
+          })) || [];
+          const scopedBatch = enforceOwnScope
+            ? batch.filter((r) => isRecordOwnedByActor(r, actor))
+            : batch;
+          for (const row of scopedBatch) {
+            collected.push(row);
+            if (collected.length >= MAX_SCAN) break;
+          }
+          if (batch.length < BATCH_SIZE) break;
+          offset += BATCH_SIZE;
+          if (collected.length >= MAX_SCAN) {
+            truncated = true;
+            break;
+          }
+        }
+        return { rows: collected, truncated };
+      });
+
+      const createAcc = () => ({ count: 0, nonNullCount: 0, numericCount: 0, sum: 0, min: null, max: null });
+      const updateAcc = (acc, rawMetricVal) => {
+        acc.count += 1;
+        if (rawMetricVal !== undefined && rawMetricVal !== null && rawMetricVal !== '') {
+          acc.nonNullCount += 1;
+        }
+        if (op !== 'count') {
+          const isValidMetricInput = (
+            (typeof rawMetricVal === 'number' && Number.isFinite(rawMetricVal))
+            || (typeof rawMetricVal === 'string' && rawMetricVal.trim() !== '')
+          );
+          if (isValidMetricInput) {
+            const num = Number(rawMetricVal);
+            if (Number.isFinite(num)) {
+              acc.numericCount += 1;
+              acc.sum += num;
+              acc.min = acc.min === null ? num : Math.min(acc.min, num);
+              acc.max = acc.max === null ? num : Math.max(acc.max, num);
+            }
+          }
+        }
+      };
+      const finalizeAcc = (acc) => {
+        if (op === 'count') {
+          const c = metricField ? acc.nonNullCount : acc.count;
+          return { count: acc.count, sum: c, avg: c, min: c, max: c, value: c };
+        }
+        const avg = acc.numericCount > 0 ? acc.sum / acc.numericCount : 0;
+        const min = acc.min ?? 0;
+        const max = acc.max ?? 0;
+        const value = op === 'sum' ? acc.sum : op === 'avg' ? avg : op === 'min' ? min : max;
+        return { count: acc.count, sum: acc.sum, avg, min, max, value };
+      };
+      const mergeAcc = (target, source) => {
+        if (!source) return target;
+        target.count += source.count;
+        target.nonNullCount += source.nonNullCount;
+        target.numericCount += source.numericCount;
+        target.sum += source.sum;
+        if (source.min !== null) {
+          target.min = target.min === null ? source.min : Math.min(target.min, source.min);
+        }
+        if (source.max !== null) {
+          target.max = target.max === null ? source.max : Math.max(target.max, source.max);
+        }
+        return target;
+      };
+      const normGroupKey = (raw) => {
+        if (raw === undefined || raw === null || raw === '') return '(Trống)';
+        return String(raw);
+      };
+
+      const totalAcc = createAcc();
+      const groupMap = new Map();
+      const pivotRowColMap = new Map();
+      const pivotColsSet = new Set();
+
+      for (const row of queryResult.rows) {
+        const rawMetricVal = metricField ? val(row, metricField) : undefined;
+        updateAcc(totalAcc, rawMetricVal);
+
+        if (groupBy) {
+          const gKey = normGroupKey(val(row, groupBy));
+          let gAcc = groupMap.get(gKey);
+          if (!gAcc) {
+            gAcc = createAcc();
+            groupMap.set(gKey, gAcc);
+          }
+          updateAcc(gAcc, rawMetricVal);
+
+          if (chartType === 'pivot' && secondaryGroupBy) {
+            const cKey = normGroupKey(val(row, secondaryGroupBy));
+            pivotColsSet.add(cKey);
+            let colMap = pivotRowColMap.get(gKey);
+            if (!colMap) {
+              colMap = new Map();
+              pivotRowColMap.set(gKey, colMap);
+            }
+            let cellAcc = colMap.get(cKey);
+            if (!cellAcc) {
+              cellAcc = createAcc();
+              colMap.set(cKey, cellAcc);
+            }
+            updateAcc(cellAcc, rawMetricVal);
+          }
+        }
+      }
+
+      const rawSeries = [...groupMap.entries()].map(([key, acc]) => {
+        const stats = finalizeAcc(acc);
+        return {
+          key,
+          label: key,
+          ...stats,
+        };
+      });
+      rawSeries.sort((a, b) => (b.value - a.value) || a.key.localeCompare(b.key));
+      const series = rawSeries.slice(0, limit);
+
+      const summaryStats = finalizeAcc(totalAcc);
+      const summary = {
+        ...summaryStats,
+        op,
+        field: metricField || null,
+        groupCount: groupMap.size,
+      };
+
+      let pivotMatrix = null;
+      if (chartType === 'pivot') {
+        const rowsList = series.map((s) => s.key);
+        const colsList = [...pivotColsSet].slice(0, limit);
+        const cells = Object.create(null);
+        const rowTotals = Object.create(null);
+        const colTotalsAcc = new Map();
+        const grandAcc = createAcc();
+
+        for (const rKey of rowsList) {
+          const rowCells = Object.create(null);
+          const colMap = pivotRowColMap.get(rKey) || new Map();
+          const rowAcc = createAcc();
+          for (const cKey of colsList) {
+            const cAcc = colMap.get(cKey);
+            const cellVal = cAcc ? finalizeAcc(cAcc).value : 0;
+            Object.defineProperty(rowCells, cKey, { value: cellVal, enumerable: true, configurable: true, writable: true });
+            if (cAcc) {
+              mergeAcc(rowAcc, cAcc);
+
+              let totC = colTotalsAcc.get(cKey);
+              if (!totC) {
+                totC = createAcc();
+                colTotalsAcc.set(cKey, totC);
+              }
+              mergeAcc(totC, cAcc);
+              mergeAcc(grandAcc, cAcc);
+            }
+          }
+          Object.defineProperty(cells, rKey, { value: rowCells, enumerable: true, configurable: true, writable: true });
+          Object.defineProperty(rowTotals, rKey, { value: finalizeAcc(rowAcc).value, enumerable: true, configurable: true, writable: true });
+        }
+
+        const colTotals = Object.create(null);
+        for (const cKey of colsList) {
+          const cAcc = colTotalsAcc.get(cKey);
+          Object.defineProperty(colTotals, cKey, {
+            value: cAcc ? finalizeAcc(cAcc).value : 0,
+            enumerable: true,
+            configurable: true,
+            writable: true,
+          });
+        }
+
+        const grandTotal = finalizeAcc(grandAcc).value;
+
+        pivotMatrix = {
+          rowField: groupBy,
+          colField: secondaryGroupBy,
+          rows: rowsList,
+          columns: colsList,
+          cells,
+          rowTotals,
+          colTotals,
+          grandTotal,
+        };
+      }
+
+      ctx.body = {
+        ok: true,
+        collection,
+        chartType,
+        series,
+        summary,
+        pivotMatrix,
+        totalRows: queryResult.rows.length,
+        meta: {
+          organizationId: effectiveOrg,
+          preview: Boolean(isRoot && !effectiveOrg),
+          groupBy: groupBy || null,
+          secondaryGroupBy: chartType === 'pivot' ? secondaryGroupBy : null,
+          metric: { op, ...(metricField ? { field: metricField } : {}) },
+          limit,
+          truncated: queryResult.truncated,
+        },
+      };
       return next();
     },
   };

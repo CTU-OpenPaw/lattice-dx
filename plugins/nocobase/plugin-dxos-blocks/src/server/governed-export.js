@@ -53,6 +53,7 @@ const VIRTUAL_OR_ASSOC_FIELD_TYPES = new Set([
   'encryption',
 ]);
 const BLOCKED_EXPORT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const DANGEROUS_FILTER_OPERATORS = new Set(['$where', '$raw', '$sql', '$eval', '$function', '$expr']);
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -81,7 +82,7 @@ function assertSafeFilter(node, depth = 0) {
   if (node == null) return null;
   if (depth > 15) throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Bộ lọc vượt quá độ sâu cho phép.');
   let target = node;
-  if (typeof target === 'string') {
+  if (depth === 0 && typeof target === 'string') {
     const trimmed = target.trim();
     if (!trimmed) return null;
     try { target = JSON.parse(trimmed); } catch { throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Bộ lọc không hợp lệ.'); }
@@ -90,14 +91,18 @@ function assertSafeFilter(node, depth = 0) {
     return target.map((item) => assertSafeFilter(item, depth + 1));
   }
   if (typeof target !== 'object') return target;
-  for (const [k, entry] of Object.entries(target)) {
-    if (k === '$where' || k === '$raw' || k === '$sql') {
+  for (const k of Object.getOwnPropertyNames(target)) {
+    if (BLOCKED_EXPORT_KEYS.has(k)) {
+      throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Bộ lọc chứa khóa không hợp lệ.');
+    }
+    const lowerKey = k.toLowerCase();
+    if (DANGEROUS_FILTER_OPERATORS.has(lowerKey)) {
       throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Toán tử lọc không an toàn bị từ chối.');
     }
-    if (!k.startsWith('$') && (k.includes('.') || SENSITIVE_KEY_RE.test(k))) {
+    if (!k.startsWith('$') && (k.includes('.') || SENSITIVE_EXPORT_FIELDS.has(k) || SENSITIVE_KEY_RE.test(k) || /searchvector/i.test(k))) {
       throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Bộ lọc chứa trường bị hạn chế.');
     }
-    assertSafeFilter(entry, depth + 1);
+    assertSafeFilter(target[k], depth + 1);
   }
   return target;
 }
@@ -981,6 +986,7 @@ module.exports = {
   EXPORTABLE_COLLECTIONS,
   SENSITIVE_EXPORT_FIELDS,
   isExportableCollection,
+  assertSafeFilter,
   sanitizeFormulaCell,
   resolveAllowedExportColumns,
   buildCsvBuffer,

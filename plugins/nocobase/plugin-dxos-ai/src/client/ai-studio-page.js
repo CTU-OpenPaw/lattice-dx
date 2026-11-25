@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { deriveErGraphFromSpec, renderErGraphPanel } = require('./er-graph-panel');
+
 const DEFAULT_TOOL_NAMES = [
   'dxos_inspect_architecture',
   'dxos_recommend_page_blueprint',
@@ -314,6 +316,13 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const builtAppsReqSeqRef = typeof React.useRef === 'function'
       ? React.useRef(0)
       : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: 0 }), []) : { current: 0 });
+    const [builtAppPlanOpenKey, setBuiltAppPlanOpenKey] = React.useState(null);
+    const [builtAppPlanInputs, setBuiltAppPlanInputs] = React.useState({});
+    const [builtAppPlanResults, setBuiltAppPlanResults] = React.useState({});
+    const [builtAppVersionsMap, setBuiltAppVersionsMap] = React.useState({});
+    const [builtAppVersionsOpenKey, setBuiltAppVersionsOpenKey] = React.useState(null);
+    const [erSelectedNode, setErSelectedNode] = React.useState(null);
+    const [erSelectedEdge, setErSelectedEdge] = React.useState(null);
 
     const selectDraft = (next) => {
       const fallbackOrg = resolveStudioDefaultOrg({ topology, catalog, profiles, app });
@@ -477,8 +486,16 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         if (reqSeq !== builtAppsReqSeqRef.current) return;
         const data = res?.data?.data || res?.data || {};
         const nextApps = Array.isArray(data.apps) ? data.apps : [];
-        setBuiltApps(nextApps);
-        setBuiltAppSelected((prev) => (prev ? (nextApps.find((a) => a.appKey === prev.appKey) || prev) : null));
+        setBuiltApps((prev) => nextApps.map((na) => {
+          const existing = prev.find((p) => p.appKey === na.appKey);
+          return (existing && (Number(existing.version) || 0) > (Number(na.version) || 0)) ? existing : na;
+        }));
+        setBuiltAppSelected((prev) => {
+          if (!prev) return null;
+          const fresh = nextApps.find((a) => a.appKey === prev.appKey);
+          if (!fresh) return prev;
+          return (Number(fresh.version) || 0) >= (Number(prev.version) || 0) ? fresh : prev;
+        });
       } catch (err) {
         if (reqSeq !== builtAppsReqSeqRef.current) return;
         setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được danh sách ứng dụng đã dựng.' });
@@ -880,6 +897,161 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         setNotice({
           type: 'error',
           text: err?.response?.data?.errors?.[0]?.message || err?.message || `Gỡ ứng dụng "${appItem.appKey}" thất bại.`,
+        });
+      } finally {
+        setBuiltAppBusyKey(null);
+      }
+    };
+
+    const parsePlanPatchJson = (rawText) => {
+      const trimmed = String(rawText || '').trim();
+      if (!trimmed) return null;
+      return JSON.parse(trimmed);
+    };
+
+    const handlePlanBuiltApp = async (appItem) => {
+      if (!api?.request || !appItem?.appKey || builtAppBusyKey) return;
+      const inputState = builtAppPlanInputs[appItem.appKey] || {};
+      let parsedPatch = null;
+      try {
+        parsedPatch = parsePlanPatchJson(inputState.patchText);
+      } catch (err) {
+        setNotice({ type: 'error', text: `JSON Patch không hợp lệ: ${err.message}` });
+        return;
+      }
+      setBuiltAppBusyKey(appItem.appKey);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:planBuiltApp',
+          method: 'post',
+          data: {
+            appKey: appItem.appKey,
+            prompt: inputState.prompt || '',
+            ...(parsedPatch ? { patch: parsedPatch } : {}),
+            ...(appItem.organizationId ? { organizationId: appItem.organizationId } : {}),
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        setBuiltAppPlanResults((prev) => ({ ...prev, [appItem.appKey]: d }));
+        setNotice({
+          type: 'ok',
+          text: `Đã lập kế hoạch dry-run cho "${appItem.appKey}": ${d.diff?.summary || 'sẵn sàng áp dụng'}.`,
+        });
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || `Lập kế hoạch cho "${appItem.appKey}" thất bại.`,
+        });
+      } finally {
+        setBuiltAppBusyKey(null);
+      }
+    };
+
+    const handleApplyPatchBuiltApp = async (appItem) => {
+      if (!api?.request || !appItem?.appKey || builtAppBusyKey) return;
+      const inputState = builtAppPlanInputs[appItem.appKey] || {};
+      let parsedPatch = null;
+      try {
+        parsedPatch = parsePlanPatchJson(inputState.patchText);
+      } catch (err) {
+        setNotice({ type: 'error', text: `JSON Patch không hợp lệ: ${err.message}` });
+        return;
+      }
+      setBuiltAppBusyKey(appItem.appKey);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:patchBuiltApp',
+          method: 'post',
+          data: {
+            appKey: appItem.appKey,
+            prompt: inputState.prompt || '',
+            ...(parsedPatch ? { patch: parsedPatch } : {}),
+            ...(appItem.organizationId ? { organizationId: appItem.organizationId } : {}),
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        if (d.builtApp && d.builtApp.appKey) {
+          setBuiltApps((prev) => prev.map((a) => (a.appKey === appItem.appKey ? d.builtApp : a)));
+          setBuiltAppSelected((prev) => (prev?.appKey === appItem.appKey ? d.builtApp : prev));
+        }
+        setBuiltAppPlanOpenKey(null);
+        setBuiltAppPlanResults((prev) => ({ ...prev, [appItem.appKey]: null }));
+        setNotice({
+          type: d.ok === false ? 'error' : 'ok',
+          text: `Đã cập nhật "${appItem.appKey}" lên phiên bản v${d.appVersion || ((Number(appItem.version) || 1) + 1)}.`,
+        });
+        await loadBuiltApps();
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || `Cập nhật "${appItem.appKey}" thất bại.`,
+        });
+      } finally {
+        setBuiltAppBusyKey(null);
+      }
+    };
+
+    const handleToggleBuiltAppVersions = async (appItem) => {
+      if (!api?.request || !appItem?.appKey) return;
+      if (builtAppVersionsOpenKey === appItem.appKey) {
+        setBuiltAppVersionsOpenKey(null);
+        return;
+      }
+      setBuiltAppVersionsOpenKey(appItem.appKey);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:listBuiltAppVersions',
+          method: 'get',
+          params: {
+            appKey: appItem.appKey,
+            ...(appItem.organizationId ? { organizationId: appItem.organizationId } : {}),
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        setBuiltAppVersionsMap((prev) => ({ ...prev, [appItem.appKey]: d }));
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || `Không tải được lịch sử phiên bản của "${appItem.appKey}".`,
+        });
+      }
+    };
+
+    const handleRollbackBuiltApp = async (appItem, targetVersion) => {
+      if (!api?.request || !appItem?.appKey || builtAppBusyKey) return;
+      setBuiltAppBusyKey(appItem.appKey);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:rollbackBuiltApp',
+          method: 'post',
+          data: {
+            appKey: appItem.appKey,
+            targetVersion,
+            ...(appItem.organizationId ? { organizationId: appItem.organizationId } : {}),
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        setNotice({
+          type: d.ok === false ? 'error' : 'ok',
+          text: `Đã hoàn tác "${appItem.appKey}" về cấu hình v${d.restoredFromVersion || targetVersion} (phiên bản mới v${d.appVersion || ''}).`,
+        });
+        await loadBuiltApps();
+        const verRes = await api.request({
+          url: 'dxosAi:listBuiltAppVersions',
+          method: 'get',
+          params: {
+            appKey: appItem.appKey,
+            ...(appItem.organizationId ? { organizationId: appItem.organizationId } : {}),
+          },
+        });
+        setBuiltAppVersionsMap((prev) => ({ ...prev, [appItem.appKey]: verRes?.data?.data || verRes?.data || {} }));
+      } catch (err) {
+        setNotice({
+          type: 'error',
+          text: err?.response?.data?.errors?.[0]?.message || err?.message || `Hoàn tác "${appItem.appKey}" thất bại.`,
         });
       } finally {
         setBuiltAppBusyKey(null);
@@ -1593,24 +1765,148 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                   }, 'Xuất Bundle v3'),
                   h('button', {
                     type: 'button',
+                    'data-testid': `dxos-built-app-plan-toggle-${appItem.appKey}`,
+                    onClick: () => setBuiltAppPlanOpenKey((prev) => (prev === appItem.appKey ? null : appItem.appKey)),
+                    disabled: rowBusy || Boolean(builtAppBusyKey),
+                    style: btnStyle(builtAppPlanOpenKey === appItem.appKey, false),
+                  }, 'Plan-Diff & Patch'),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `dxos-built-app-versions-btn-${appItem.appKey}`,
+                    onClick: () => handleToggleBuiltAppVersions(appItem),
+                    disabled: rowBusy || Boolean(builtAppBusyKey),
+                    style: btnStyle(builtAppVersionsOpenKey === appItem.appKey, false),
+                  }, 'Lịch sử & Rollback'),
+                  h('button', {
+                    type: 'button',
                     'data-testid': `dxos-built-app-teardown-${appItem.appKey}`,
                     onClick: () => handleTeardownBuiltApp(appItem, true),
                     disabled: rowBusy || Boolean(builtAppBusyKey),
                     style: btnStyle(false, true),
                   }, 'Gỡ bỏ (Giữ dữ liệu)'),
                 ),
-                builtAppSelected?.appKey === appItem.appKey ? h('div', {
-                  'data-testid': `dxos-built-app-detail-${appItem.appKey}`,
-                  style: { padding: 12, borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', display: 'grid', gap: 8, fontSize: 12 },
-                },
-                  h('strong', null, `Chi tiết Manifest: ${appItem.appKey} (snapshot: ${appItem.bundleSnapshotUid || '—'})`),
-                  h('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 11, background: '#f8fafc', padding: 8, borderRadius: 6 } },
-                    JSON.stringify({
-                      sourceSpecJson: appItem.sourceSpecJson || {},
-                      artifactRefsJson: appItem.artifactRefsJson || {},
-                      lastVerificationJson: appItem.lastVerificationJson || null,
-                    }, null, 2)),
-                ) : null,
+                builtAppPlanOpenKey === appItem.appKey ? (() => {
+                  const planInput = builtAppPlanInputs[appItem.appKey] || { prompt: '', patchText: '' };
+                  const planRes = builtAppPlanResults[appItem.appKey] || null;
+                  const diffObj = planRes?.diff || null;
+                  return h('div', {
+                    'data-testid': `dxos-built-app-plan-panel-${appItem.appKey}`,
+                    style: { padding: 12, borderRadius: 8, border: '1px solid #bae6fd', background: '#f0f9ff', display: 'grid', gap: 8, fontSize: 12 },
+                  },
+                    h('strong', null, `Plan-Diff-Approve & Patch cho ${appItem.appKey}`),
+                    h('input', {
+                      type: 'text',
+                      'data-testid': `dxos-plan-prompt-${appItem.appKey}`,
+                      placeholder: 'Mô tả thay đổi bằng tiếng Việt/Anh (vd: Thêm trường priority hoặc gắn khối Biểu đồ BI)',
+                      value: planInput.prompt || '',
+                      onChange: (e) => setBuiltAppPlanInputs((prev) => ({
+                        ...prev,
+                        [appItem.appKey]: { ...(prev[appItem.appKey] || {}), prompt: e.target.value },
+                      })),
+                      style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
+                    }),
+                    h('textarea', {
+                      'data-testid': `dxos-plan-patch-${appItem.appKey}`,
+                      placeholder: 'Tùy chọn JSON Patch (vd: {"addFields":[{"name":"priority","type":"string"}]})',
+                      rows: 3,
+                      value: planInput.patchText || '',
+                      onChange: (e) => setBuiltAppPlanInputs((prev) => ({
+                        ...prev,
+                        [appItem.appKey]: { ...(prev[appItem.appKey] || {}), patchText: e.target.value },
+                      })),
+                      style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 11, fontFamily: 'monospace' },
+                    }),
+                    h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+                      h('button', {
+                        type: 'button',
+                        'data-testid': `dxos-plan-preview-btn-${appItem.appKey}`,
+                        onClick: () => handlePlanBuiltApp(appItem),
+                        disabled: rowBusy || Boolean(builtAppBusyKey),
+                        style: btnStyle(true, false),
+                      }, 'Xem trước Plan & ER'),
+                      planRes ? h('button', {
+                        type: 'button',
+                        'data-testid': `dxos-patch-apply-btn-${appItem.appKey}`,
+                        onClick: () => handleApplyPatchBuiltApp(appItem),
+                        disabled: rowBusy || Boolean(builtAppBusyKey),
+                        style: btnStyle(true, false),
+                      }, 'Xác nhận Áp dụng Patch') : null,
+                    ),
+                    diffObj ? h('div', {
+                      'data-testid': `dxos-plan-diff-preview-${appItem.appKey}`,
+                      style: { padding: 10, borderRadius: 6, border: '1px solid #cbd5e1', background: '#ffffff', display: 'grid', gap: 8 },
+                    },
+                      h('strong', null, `Diff Preview: ${diffObj.summary || (diffObj.hasChanges ? 'Có thay đổi' : 'Không thay đổi')}`),
+                      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 11 } },
+                        ['collections', 'fields', 'relations', 'roles', 'pages', 'blocks', 'flows', 'dmnTables'].map((cat) => {
+                          const c = diffObj[cat] || { added: [], modified: [], removed: [] };
+                          return h('span', { key: cat, style: badgeStyle('#f1f5f9', '#334155') },
+                            `${cat}: +${c.added?.length || 0} / ~${c.modified?.length || 0} / -${c.removed?.length || 0}`);
+                        }),
+                      ),
+                      planRes.erGraph ? renderErGraphPanel(React, {
+                        erGraph: planRes.erGraph,
+                        selectedNode: erSelectedNode,
+                        onSelectNode: setErSelectedNode,
+                        selectedEdge: erSelectedEdge,
+                        onSelectEdge: setErSelectedEdge,
+                        testIdPrefix: `dxos-plan-er-${appItem.appKey}`,
+                      }) : null,
+                    ) : null,
+                  );
+                })() : null,
+                builtAppVersionsOpenKey === appItem.appKey ? (() => {
+                  const verInfo = builtAppVersionsMap[appItem.appKey] || {};
+                  const versions = Array.isArray(verInfo.versions) ? verInfo.versions : [];
+                  return h('div', {
+                    'data-testid': `dxos-built-app-versions-${appItem.appKey}`,
+                    style: { padding: 12, borderRadius: 8, border: '1px solid #cbd5e1', background: '#ffffff', display: 'grid', gap: 8, fontSize: 12 },
+                  },
+                    h('strong', null, `Lịch sử Phiên bản: ${appItem.appKey} (Hiện tại: v${verInfo.currentVersion || appItem.version || 1})`),
+                    !versions.length
+                      ? h('div', { style: { color: '#64748b', fontSize: 12 } }, 'Chưa có snapshot phiên bản cũ.')
+                      : versions.map((snap, sIdx) => h('div', {
+                        key: `${snap.version}-${sIdx}`,
+                        style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, border: '1px solid #e2e8f0', background: '#f8fafc' },
+                      },
+                        h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                          h('span', { style: badgeStyle('#e0f2fe', '#075985') }, `v${snap.version}`),
+                          h('span', { style: badgeStyle('#f1f5f9', '#334155') }, snap.action || 'patch'),
+                          h('span', null, snap.summary || 'Snapshot'),
+                          snap.patchedAt ? h('span', { style: { color: '#64748b', fontSize: 11 } }, snap.patchedAt) : null,
+                        ),
+                        h('button', {
+                          type: 'button',
+                          'data-testid': `dxos-rollback-btn-${appItem.appKey}-v${snap.version}`,
+                          onClick: () => handleRollbackBuiltApp(appItem, snap.version),
+                          disabled: rowBusy || Boolean(builtAppBusyKey),
+                          style: btnStyle(false, true),
+                        }, `Hoàn tác về v${snap.version}`),
+                      )),
+                  );
+                })() : null,
+                builtAppSelected?.appKey === appItem.appKey ? (() => {
+                  const detailApp = builtAppSelected;
+                  return h('div', {
+                    'data-testid': `dxos-built-app-detail-${appItem.appKey}`,
+                    style: { padding: 12, borderRadius: 8, border: '1px solid #cbd5e1', background: '#fff', display: 'grid', gap: 8, fontSize: 12 },
+                  },
+                    h('strong', null, `Chi tiết Manifest: ${detailApp.appKey} (snapshot: ${detailApp.bundleSnapshotUid || '—'})`),
+                    renderErGraphPanel(React, {
+                      erGraph: deriveErGraphFromSpec(detailApp.sourceSpecJson, detailApp.artifactRefsJson),
+                      selectedNode: erSelectedNode,
+                      onSelectNode: setErSelectedNode,
+                      selectedEdge: erSelectedEdge,
+                      onSelectEdge: setErSelectedEdge,
+                    }),
+                    h('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: 11, background: '#f8fafc', padding: 8, borderRadius: 6 } },
+                      JSON.stringify({
+                        sourceSpecJson: detailApp.sourceSpecJson || {},
+                        artifactRefsJson: detailApp.artifactRefsJson || {},
+                        lastVerificationJson: detailApp.lastVerificationJson || null,
+                      }, null, 2)),
+                  );
+                })() : null,
               );
             }),
           ),

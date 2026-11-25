@@ -10,6 +10,19 @@
 
 const { createHash, randomBytes } = require('node:crypto');
 const net = require('node:net');
+const {
+  ALLOWED_FIELD_TYPES,
+  ALLOWED_FORMULA_RETURN_TYPES,
+  CUSTOM_RLS_TABLE_RE,
+  DEFAULT_ALLOWLISTED_BUSINESS_COLLECTIONS,
+  LEGACY_STORAGE_FIELD_TYPES,
+  attachRichSchemaHooksForCollection,
+  extractFieldValidation,
+  extractFormulaExpression,
+  resolveThroughCollectionName,
+  validateFieldValidationSpec,
+  validateFormulaExpression,
+} = require('./rich-schema');
 
 const BUNDLE_SCHEMA_VERSION = 'latticedx.solution-bundle/v3';
 const ACCEPTED_SCHEMA_VERSIONS = new Set([
@@ -49,6 +62,7 @@ const ALLOWED_FLOW_MODEL_USES = new Set([
   'DxosAiProposalBlockModel', 'DxosWorkflowTasksBlockModel', 'DxosParaVaultBlockModel',
   'DxosCreativeStudioBlockModel', 'DxosRecordWorkbenchBlockModel',
   'DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel', 'DxosWmsOpsBlockModel',
+  'DxosBiChartBlockModel',
   'LatticeFormBlockModel', 'LatticeListBlockModel', 'LatticeTaskInboxBlockModel',
   'LatticeApprovalBlockModel', 'LatticeAttachmentBlockModel', 'LatticeActivityTimelineBlockModel',
   'LatticeContextEntityBlockModel', 'LatticeWorkflowFormBlockModel',
@@ -339,6 +353,11 @@ function inferFieldInterface(type) {
   if (type === 'boolean') return 'checkbox';
   if (type === 'date' || type === 'datetime') return 'datetime';
   if (type === 'text') return 'textarea';
+  if (type === 'json' || type === 'jsonb') return 'json';
+  if (type === 'belongsTo') return 'obo';
+  if (type === 'hasOne') return 'oho';
+  if (type === 'belongsToMany') return 'm2m';
+  if (type === 'formula') return 'formula';
   return 'input';
 }
 
@@ -990,12 +1009,17 @@ async function exportSolutionBundle(db, { organizationId = null, platformVersion
   const customCollections = rawCollections
     .map(toObj)
     .filter((c) => typeof c.name === 'string' && CUSTOM_COLLECTION_RE.test(c.name))
-    .map((c) => stripSecretsDeep({
-      name: c.name,
-      title: c.title || c.name,
-      ...(c.options && typeof c.options === 'object' && !Array.isArray(c.options) ? { options: c.options } : {}),
-      fields: Array.isArray(c.fields) ? c.fields.map(sanitizeCustomField).filter(Boolean) : [],
-    }))
+    .map((c) => {
+      const cleanOptions = c.options && typeof c.options === 'object' && !Array.isArray(c.options)
+        ? stripSecretsDeep(c.options)
+        : null;
+      return stripSecretsDeep({
+        name: c.name,
+        title: c.title || c.name,
+        ...(cleanOptions && Object.keys(cleanOptions).length > 0 ? { options: cleanOptions } : {}),
+        fields: Array.isArray(c.fields) ? c.fields.map(sanitizeCustomField).filter(Boolean) : [],
+      });
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const routesAndBlocks = await exportRoutesAndBlocksSection(db, rawPortals);
@@ -1764,16 +1788,111 @@ function validateSolutionBundle(bundle) {
     }
   }
   if (Array.isArray(bundle.customCollections)) {
-    for (const c of bundle.customCollections) {
+    for (let idx = 0; idx < bundle.customCollections.length; idx += 1) {
+      const c = bundle.customCollections[idx];
       const cname = String(c?.name || '');
       if (!CUSTOM_COLLECTION_RE.test(cname)) {
         errors.push(`Custom collection must match latticeCustom*: ${cname || '(empty)'}`);
       }
+      if (!c || typeof c !== 'object' || Array.isArray(c)) {
+        errors.push(`customCollections[${idx}] must be an object`);
+        continue;
+      }
+      validateNoUnsafeCodeOrXss(c, `customCollections[${idx}]`, errors);
       if (Array.isArray(c?.fields)) {
         for (const f of c.fields) {
           const fname = String(f?.name || '').trim();
           if (!SAFE_FIELD_NAME_RE.test(fname)) {
             errors.push(`Invalid field name on ${cname}: ${fname || '(empty)'}`);
+            continue;
+          }
+          if (fname === 'organizationId') continue;
+          const ftype = String(f?.type || 'string').trim();
+          const logicalType = f?.interface === 'formula' ? 'formula' : ftype;
+          if (!ALLOWED_FIELD_TYPES.has(ftype) && !LEGACY_STORAGE_FIELD_TYPES.has(ftype) && logicalType !== 'formula') {
+            errors.push(`Unsupported field type "${ftype}" on ${cname}.${fname}`);
+            continue;
+          }
+
+          if (ftype === 'belongsTo' || ftype === 'hasOne') {
+            const target = String(f?.target || '').trim();
+            const targetAllowed = CUSTOM_COLLECTION_RE.test(target) || DEFAULT_ALLOWLISTED_BUSINESS_COLLECTIONS.has(target);
+            if (!target || isProtectedCollection(target) || !targetAllowed) {
+              errors.push(`Disallowed ${ftype} target "${target || '(empty)'}" on ${cname}.${fname}`);
+            }
+            if (f.foreignKey !== undefined && f.foreignKey !== null) {
+              const fk = String(f.foreignKey).trim();
+              if (!SAFE_FIELD_NAME_RE.test(fk) || fk === 'organizationId') {
+                errors.push(`Invalid foreignKey "${fk || '(empty)'}" on ${cname}.${fname}`);
+              }
+            }
+          } else if (ftype === 'belongsToMany') {
+            const target = String(f?.target || '').trim();
+            const targetAllowed = CUSTOM_COLLECTION_RE.test(target) || DEFAULT_ALLOWLISTED_BUSINESS_COLLECTIONS.has(target);
+            if (!target || isProtectedCollection(target) || !targetAllowed) {
+              errors.push(`Disallowed belongsToMany target "${target || '(empty)'}" on ${cname}.${fname}`);
+            }
+            const fk = f.foreignKey !== undefined && f.foreignKey !== null ? String(f.foreignKey).trim() : null;
+            const ok = f.otherKey !== undefined && f.otherKey !== null ? String(f.otherKey).trim() : null;
+            if (fk !== null && (!SAFE_FIELD_NAME_RE.test(fk) || fk === 'organizationId')) {
+              errors.push(`Invalid foreignKey "${fk || '(empty)'}" on ${cname}.${fname}`);
+            }
+            if (ok !== null && (!SAFE_FIELD_NAME_RE.test(ok) || ok === 'organizationId')) {
+              errors.push(`Invalid otherKey "${ok || '(empty)'}" on ${cname}.${fname}`);
+            }
+            try {
+              resolveThroughCollectionName(cname || 'latticeCustomItem', f, { isProtectedCollection });
+            } catch (err) {
+              errors.push(`${err?.message || 'Invalid belongsToMany configuration'} (${cname}.${fname})`);
+            }
+          }
+
+          const extractedFormula = extractFormulaExpression(f);
+          let inferredFormulaRet;
+          if (logicalType === 'formula' || extractedFormula !== null) {
+            const expr = f.formulaExpression !== undefined
+              ? f.formulaExpression
+              : (f.formula ?? f.options?.formulaExpression ?? f.options?.formula ?? f.uiSchema?.['x-formula']);
+            const fRes = validateFormulaExpression(expr, { selfFieldName: fname });
+            if (!fRes.valid) {
+              errors.push(`Invalid formula on ${cname}.${fname}: ${fRes.error}`);
+            } else {
+              inferredFormulaRet = fRes.inferredReturnType;
+            }
+            const rawRetType = f.formulaReturnType ?? f.options?.formulaReturnType;
+            if (rawRetType !== undefined && rawRetType !== null && !ALLOWED_FORMULA_RETURN_TYPES.has(String(rawRetType).trim())) {
+              errors.push(`Invalid formulaReturnType "${String(rawRetType)}" on ${cname}.${fname}`);
+            }
+          }
+
+          const formulaRet = f.formulaReturnType
+            ?? f.options?.formulaReturnType
+            ?? (f.type !== 'formula' && logicalType === 'formula' ? f.type : undefined)
+            ?? inferredFormulaRet;
+          for (const rawValCandidate of [f.validation, f.options?.validation, f.uiSchema?.['x-validation']]) {
+            if (rawValCandidate !== undefined && rawValCandidate !== null) {
+              const vRes = validateFieldValidationSpec(
+                rawValCandidate,
+                logicalType,
+                `${cname}.${fname}`,
+                { formulaReturnType: formulaRet },
+              );
+              if (!vRes.valid) {
+                errors.push(vRes.error);
+              }
+            }
+          }
+          const mergedValidation = extractFieldValidation(f);
+          if (mergedValidation) {
+            const vRes = validateFieldValidationSpec(
+              mergedValidation,
+              logicalType,
+              `${cname}.${fname}`,
+              { formulaReturnType: formulaRet },
+            );
+            if (!vRes.valid) {
+              errors.push(vRes.error);
+            }
           }
         }
       }
@@ -2223,6 +2342,67 @@ async function resolveFirstActiveOrg(db, transaction) {
   return '';
 }
 
+function normalizeBundleCustomField(f, cname) {
+  if (!f || typeof f !== 'object') return null;
+  if (f.type === 'formula' || f.interface === 'formula') {
+    const expr = extractFormulaExpression(f) || '';
+    const explicitRet = String(
+      f.formulaReturnType || f.options?.formulaReturnType || (f.type !== 'formula' ? f.type : '') || '',
+    ).trim();
+    const inferredRet = !explicitRet && expr ? (validateFormulaExpression(expr).inferredReturnType || '') : '';
+    const rawRet = explicitRet || inferredRet || 'float';
+    const returnType = ALLOWED_FORMULA_RETURN_TYPES.has(rawRet) ? rawRet : 'float';
+    const prevOpts = f.options && typeof f.options === 'object' && !Array.isArray(f.options) ? f.options : {};
+    const prevUi = f.uiSchema && typeof f.uiSchema === 'object' && !Array.isArray(f.uiSchema) ? f.uiSchema : {};
+    return {
+      ...f,
+      type: returnType,
+      interface: 'formula',
+      readOnly: true,
+      formula: expr,
+      formulaExpression: expr,
+      formulaReturnType: returnType,
+      options: {
+        ...prevOpts,
+        formula: expr,
+        formulaExpression: expr,
+        formulaReturnType: returnType,
+        readOnly: true,
+      },
+      uiSchema: {
+        ...prevUi,
+        type: returnType === 'boolean' ? 'boolean' : returnType === 'string' ? 'string' : 'number',
+        'x-component': returnType === 'boolean' ? 'Checkbox' : returnType === 'string' ? 'Input' : 'InputNumber',
+        'x-formula': expr,
+        'x-read-pretty': true,
+        readOnly: true,
+      },
+    };
+  }
+  const normalized = {
+    ...f,
+    type: f.type === 'json' ? 'jsonb' : f.type,
+    interface: f.interface || inferFieldInterface(f.type === 'json' ? 'jsonb' : f.type),
+  };
+  if (normalized.type === 'belongsToMany' && normalized.target) {
+    const resolvedJoin = resolveThroughCollectionName(cname, normalized, { isProtectedCollection });
+    normalized.through = resolvedJoin.through;
+    normalized.foreignKey = resolvedJoin.foreignKey;
+    normalized.otherKey = resolvedJoin.otherKey;
+  }
+  return normalized;
+}
+
+async function attachBundleCollectionRls(db, tableName, transaction) {
+  if (typeof db?.attachLatticeRlsPolicy === 'function' && CUSTOM_RLS_TABLE_RE.test(tableName)) {
+    try {
+      await db.attachLatticeRlsPolicy(tableName, transaction);
+    } catch {
+      // Non-fatal in mock test harnesses without physical SQL tables
+    }
+  }
+}
+
 async function applyCustomCollectionsSection(db, collectionsList, targetOrg, transaction) {
   const colsRepo = db?.getRepository?.('collections');
   if (!colsRepo || !Array.isArray(collectionsList)) return 0;
@@ -2230,6 +2410,12 @@ async function applyCustomCollectionsSection(db, collectionsList, targetOrg, tra
   const fieldsRepo = db?.getRepository?.('fields');
   let customCollectionsUpserted = 0;
   let cachedDefaultOrg;
+  const declaredCollectionNames = new Set(
+    collectionsList.map((c) => String(c?.name || '').trim()).filter(Boolean),
+  );
+  const autoJoinSpecs = new Map();
+  const referencedJoinNames = new Set();
+  const preparedCollections = [];
 
   const txOpts = transaction ? { transaction } : {};
 
@@ -2276,21 +2462,136 @@ async function applyCustomCollectionsSection(db, collectionsList, targetOrg, tra
             },
           };
         }
-        return {
-          ...f,
-          interface: f.interface || inferFieldInterface(f.type),
-        };
+        const normalized = normalizeBundleCustomField(f, cname);
+        if (normalized.type === 'belongsToMany' && normalized.target) {
+          referencedJoinNames.add(normalized.through);
+          if (!declaredCollectionNames.has(normalized.through) && !autoJoinSpecs.has(normalized.through)) {
+            autoJoinSpecs.set(normalized.through, {
+              name: normalized.through,
+              sourceCollection: cname,
+              targetCollection: normalized.target,
+              foreignKey: normalized.foreignKey,
+              otherKey: normalized.otherKey,
+              organizationId: resolvedOrg,
+            });
+          }
+        }
+        return normalized;
       });
     const normalizedFields = rawNormalizedFields.some((f) => f.name === 'organizationId')
       ? rawNormalizedFields
       : [clampedOrgField, ...rawNormalizedFields];
 
+    const cleanOptions = cleanCol.options && typeof cleanCol.options === 'object' && !Array.isArray(cleanCol.options)
+      ? cleanCol.options
+      : {};
+    preparedCollections.push({
+      cname,
+      cleanCol,
+      resolvedOrg,
+      clampedOrgField,
+      normalizedFields,
+      options: cleanOptions,
+    });
+  }
+
+  // Phase 1: Provision, repair, sync, and RLS-protect all auto-derived belongsToMany `through`
+  // join collections BEFORE syncing source collections that reference them.
+  for (const joinSpec of autoJoinSpecs.values()) {
+    const jName = joinSpec.name;
+    if (!CUSTOM_COLLECTION_RE.test(jName) || isProtectedCollection(jName)) continue;
+    const joinFields = [
+      {
+        name: 'organizationId',
+        type: 'string',
+        interface: 'input',
+        allowNull: false,
+        defaultValue: joinSpec.organizationId,
+        index: true,
+        uiSchema: { type: 'string', title: 'Mã tổ chức' },
+      },
+      {
+        name: joinSpec.foreignKey,
+        type: 'bigInt',
+        interface: 'integer',
+        allowNull: false,
+        index: true,
+      },
+      {
+        name: joinSpec.otherKey,
+        type: 'bigInt',
+        interface: 'integer',
+        allowNull: false,
+        index: true,
+      },
+    ];
+    const existingJoin = await findOneSafe(colsRepo, { name: jName }, { appends: ['fields'], transaction });
+    if (!existingJoin && typeof colsRepo.create === 'function') {
+      const createdJoin = await colsRepo.create({
+        values: {
+          name: jName,
+          title: `${joinSpec.sourceCollection} -> ${joinSpec.targetCollection} Join`,
+          autoGenId: true,
+          createdAt: true,
+          updatedAt: true,
+          options: { uiManageable: true },
+          fields: joinFields,
+        },
+        transaction,
+      });
+      if (typeof createdJoin?.load === 'function') await createdJoin.load({ resetFields: true, ...txOpts });
+    } else if (existingJoin) {
+      const existingJoinFields = Array.isArray(val(existingJoin, 'fields')) ? val(existingJoin, 'fields').map(toObj) : [];
+      const existingByName = new Map(existingJoinFields.map((jf) => [jf.name, jf]));
+      const missingJoinFields = joinFields.filter((jf) => !existingByName.has(jf.name));
+      if (missingJoinFields.length > 0) {
+        if (fieldsRepo && typeof fieldsRepo.create === 'function') {
+          for (const mf of missingJoinFields) {
+            const cf = await fieldsRepo.create({ values: { ...mf, collectionName: jName }, transaction });
+            if (typeof cf?.load === 'function') await cf.load(txOpts);
+          }
+        } else {
+          const mergedJoinFields = [...existingJoinFields, ...missingJoinFields];
+          if (typeof colsRepo.update === 'function') {
+            await colsRepo.update({ filter: { name: jName }, values: { fields: mergedJoinFields }, transaction });
+          } else if (typeof existingJoin.update === 'function') {
+            await existingJoin.update({ fields: mergedJoinFields }, { transaction });
+          }
+        }
+        if (typeof existingJoin.load === 'function') await existingJoin.load({ resetFields: true, ...txOpts });
+      }
+    }
+    const joinInst = db?.getCollection?.(jName);
+    if (joinInst && typeof joinInst.sync === 'function') {
+      await joinInst.sync({ force: false, alter: { drop: false }, ...txOpts });
+    }
+    await attachBundleCollectionRls(db, jName, transaction);
+  }
+
+  // Phase 2: Process explicitly declared join collections before non-join collections so any
+  // explicitly declared `through` table is synced & RLS-protected prior to referencing sources.
+  const orderedCollections = [
+    ...preparedCollections.filter((item) => referencedJoinNames.has(item.cname)),
+    ...preparedCollections.filter((item) => !referencedJoinNames.has(item.cname)),
+  ];
+
+  for (const { cname, cleanCol, clampedOrgField, normalizedFields, options } of orderedCollections) {
     const existing = await findOneSafe(colsRepo, { name: cname }, { appends: ['fields'], transaction });
-    const options = { titleField: 'name', uiManageable: true, ...(cleanCol.options || {}) };
     if (existing) {
       const existingFields = Array.isArray(val(existing, 'fields')) ? val(existing, 'fields').map(toObj) : [];
-      const existingNames = new Set(existingFields.map((f) => f.name));
-      const missingFields = normalizedFields.filter((f) => !existingNames.has(f.name));
+      const existingByName = new Map(existingFields.map((f) => [f.name, f]));
+      const missingFields = normalizedFields.filter((f) => !existingByName.has(f.name));
+      const updatedFields = [];
+
+      for (const nf of normalizedFields) {
+        if (nf.name === 'organizationId') continue;
+        const prev = existingByName.get(nf.name);
+        if (!prev) continue;
+        const prevClean = normalizeBundleCustomField(sanitizeCustomField(prev), cname);
+        if (JSON.stringify(stripSecretsDeep(prevClean)) !== JSON.stringify(stripSecretsDeep(nf))) {
+          updatedFields.push(nf);
+        }
+      }
 
       if (fieldsRepo && typeof fieldsRepo.create === 'function') {
         for (const mf of missingFields) {
@@ -2298,10 +2599,31 @@ async function applyCustomCollectionsSection(db, collectionsList, targetOrg, tra
           if (typeof cf?.load === 'function') await cf.load(txOpts);
         }
       }
+      if (fieldsRepo && typeof fieldsRepo.update === 'function') {
+        for (const uf of updatedFields) {
+          await fieldsRepo.update({
+            filter: { collectionName: cname, name: uf.name },
+            values: { ...uf, collectionName: cname },
+            transaction,
+          });
+        }
+      }
+
+      const updatedByName = new Map(updatedFields.map((f) => [f.name, f]));
+      const mergedFields = [
+        ...existingFields.map((ef) => {
+          if (ef.name === 'organizationId') return clampedOrgField;
+          return updatedByName.get(ef.name) || ef;
+        }),
+        ...missingFields,
+      ];
+
       const nextValues = {
         title: cleanCol.title || cname,
         options,
-        ...(!fieldsRepo && missingFields.length ? { fields: [...existingFields, ...missingFields] } : {}),
+        ...((!fieldsRepo || typeof fieldsRepo.update !== 'function') && (missingFields.length || updatedFields.length)
+          ? { fields: mergedFields }
+          : {}),
       };
       if (typeof colsRepo.update === 'function') {
         await colsRepo.update({ filter: { name: cname }, values: nextValues, transaction });
@@ -2329,15 +2651,11 @@ async function applyCustomCollectionsSection(db, collectionsList, targetOrg, tra
     if (colInst && typeof colInst.sync === 'function') {
       await colInst.sync({ force: false, alter: { drop: false }, ...txOpts });
     }
-    if (typeof db?.attachLatticeRlsPolicy === 'function' && /^latticeCustom[A-Za-z0-9_]*$/.test(cname)) {
-      try {
-        await db.attachLatticeRlsPolicy(cname, transaction);
-      } catch {
-        // Non-fatal in mock test harnesses without physical SQL tables
-      }
-    }
+    await attachBundleCollectionRls(db, cname, transaction);
+    attachRichSchemaHooksForCollection(db, cname, normalizedFields);
     customCollectionsUpserted += 1;
   }
+
   return customCollectionsUpserted;
 }
 
@@ -3347,6 +3665,7 @@ async function rollbackLastSolutionBundle(db, { organizationId = null, snapshotU
 module.exports = {
   BUNDLE_SCHEMA_VERSION,
   ACCEPTED_SCHEMA_VERSIONS,
+  ALLOWED_FLOW_MODEL_USES,
   RESERVED_SYSTEM_LAYOUT_UIDS,
   SYSTEM_PROTECTED_COLLECTIONS,
   isProtectedCollection,

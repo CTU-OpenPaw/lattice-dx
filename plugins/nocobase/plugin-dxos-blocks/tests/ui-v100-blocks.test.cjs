@@ -638,6 +638,7 @@ test('Task 3.1 client submodules obey build.mjs bundler rule, XSS safety, and SP
     'src/client/webgis-block.js',
     'src/client/kanban-schedule-block.js',
     'src/client/chatter-panel.js',
+    'src/client/bi-chart-block.js',
     'src/client/block-models.js',
   ];
   for (const rel of clientModules) {
@@ -2752,4 +2753,495 @@ test('WebGIS resets filterMode to all when switching dynamic customCollection', 
   assert.equal(allAfterSwitch.props.style?.background, activeBg);
   assert.ok(textOf(resolvedSwitched).includes('SITE-1'), 'Resetting filterMode to all allows SITE-1 custom marker to render');
   hooks.unmount();
+});
+
+test('bi-chart-block pure helpers normalize payloads and compute SVG geometry for bar/line/pie', () => {
+  const {
+    buildAggregateQueryPayload,
+    computeBarGeometry,
+    computeLineGeometry,
+    computePieSlices,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/bi-chart-block.js'));
+
+  const flatPayload = buildAggregateQueryPayload({
+    collection: 'latticeOrders',
+    chartType: 'bar',
+    groupBy: 'status',
+    secondaryGroupBy: 'region',
+    metricOp: 'sum',
+    metricField: 'totalAmount',
+    limit: 999,
+    filterJson: '{"status":"approved"}',
+  });
+  assert.deepEqual(flatPayload, {
+    collection: 'latticeOrders',
+    chartType: 'bar',
+    groupBy: 'status',
+    metric: { op: 'sum', field: 'totalAmount' },
+    filter: { status: 'approved' },
+    limit: 500,
+  });
+
+  const nestedPayload = buildAggregateQueryPayload({
+    collection: 'latticeCustom_join_items',
+    chartType: 'pivot',
+    groupBy: 'month',
+    secondaryGroupBy: 'region',
+    metric: { op: 'count', field: 'ignoredOnCount' },
+    filter: { region: 'HCM' },
+    limit: 25,
+  });
+  assert.deepEqual(nestedPayload, {
+    collection: 'latticeCustom_join_items',
+    chartType: 'pivot',
+    groupBy: 'month',
+    secondaryGroupBy: 'region',
+    metric: { op: 'count' },
+    filter: { region: 'HCM' },
+    limit: 25,
+  });
+
+  const barGeo = computeBarGeometry([
+    { key: 'approved', label: 'approved', value: 400 },
+    { key: 'draft', label: 'draft', value: 100 },
+  ]);
+  assert.equal(barGeo.bars.length, 2);
+  assert.ok(barGeo.bars[0].height > barGeo.bars[1].height);
+
+  const lineGeo = computeLineGeometry([
+    { key: '2026-01', label: '2026-01', value: 10 },
+    { key: '2026-02', label: '2026-02', value: 30 },
+  ]);
+  assert.equal(lineGeo.points.length, 2);
+  assert.ok(lineGeo.polylinePoints.includes(','));
+
+  const pieGeo = computePieSlices([
+    { key: 'A', label: 'A', value: 75 },
+    { key: 'B', label: 'B', value: 25 },
+  ]);
+  assert.equal(pieGeo.total, 100);
+  assert.equal(pieGeo.slices.length, 2);
+  assert.ok(Math.abs(pieGeo.slices[0].pct - 0.75) < 0.001);
+
+  const singlePie = computePieSlices([{ key: 'Only', label: 'Only', value: 42 }]);
+  assert.equal(singlePie.slices[0].isFullCircle, true);
+});
+
+test('DxosBiChartView renders bar, line, pie, kpi, pivot views, error/empty states, and cancels stale responses', async () => {
+  const { createBiChartBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/bi-chart-block.js'));
+
+  const calls = [];
+  let mode = 'bar';
+  let slowResolve = null;
+  const api = {
+    async request(req) {
+      calls.push(req);
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return { data: { data: { collections: [{ name: 'latticeOrders', title: 'Đơn Logistics', fields: [{ name: 'status', type: 'string' }, { name: 'totalAmount', type: 'decimal' }] }] } } };
+      }
+      if (req.url === 'dxosBlocks:aggregateQuery') {
+        if (mode === 'slow') {
+          return new Promise((resolve) => { slowResolve = resolve; });
+        }
+        if (mode === 'error') {
+          const err = new Error('Forbidden');
+          err.response = { status: 403, data: { errors: [{ message: 'Không có quyền xem collection' }] } };
+          throw err;
+        }
+        if (mode === 'empty') {
+          return { data: { data: { ok: true, collection: 'latticeOrders', chartType: req.data.chartType, series: [], summary: { count: 0, value: 0 }, pivotMatrix: null, totalRows: 0, meta: {} } } };
+        }
+        if (req.data.chartType === 'pivot') {
+          return {
+            data: {
+              data: {
+                ok: true,
+                collection: 'latticeOrders',
+                chartType: 'pivot',
+                series: [{ key: 'approved', label: 'approved', value: 400 }],
+                summary: { count: 2, sum: 400, value: 400, op: 'sum', field: 'totalAmount' },
+                pivotMatrix: {
+                  rowField: 'status',
+                  colField: 'region',
+                  rows: ['approved', '__proto__'],
+                  columns: ['HCM', 'constructor'],
+                  cells: {
+                    approved: { HCM: 300, constructor: 100 },
+                    __proto__: { HCM: 0, constructor: 25 },
+                  },
+                  rowTotals: { approved: 400 },
+                  colTotals: { HCM: 300, constructor: 125 },
+                  grandTotal: 425,
+                },
+                totalRows: 3,
+                meta: {},
+              },
+            },
+          };
+        }
+        return {
+          data: {
+            data: {
+              ok: true,
+              collection: 'latticeOrders',
+              chartType: req.data.chartType,
+              series: [
+                { key: 'approved', label: 'Đã duyệt', value: 400, count: 2 },
+                { key: 'draft', label: 'Nháp', value: 100, count: 1 },
+              ],
+              summary: { count: 3, sum: 500, avg: 166.67, min: 100, max: 300, value: 500, op: 'sum', field: 'totalAmount' },
+              pivotMatrix: null,
+              totalRows: 3,
+              meta: {},
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  for (const [chartType, testId, itemTestId] of [
+    ['bar', 'dxos-bi-chart-bar', 'dxos-bi-bar-item'],
+    ['line', 'dxos-bi-chart-line', 'dxos-bi-line-point'],
+    ['pie', 'dxos-bi-chart-pie', 'dxos-bi-pie-slice'],
+    ['kpi', 'dxos-bi-chart-kpi', 'dxos-bi-kpi-value'],
+    ['pivot', 'dxos-bi-chart-pivot', null],
+  ]) {
+    mode = chartType;
+    const hooks = createMiniHooks();
+    const View = createBiChartBlockView({ useAPIClient: () => api }, hooks.React, {}, {});
+    const props = {
+      model: {
+        props: {
+          title: `Test ${chartType}`,
+          collection: 'latticeOrders',
+          chartType,
+          groupBy: 'status',
+          secondaryGroupBy: chartType === 'pivot' ? 'region' : '',
+          metricOp: 'sum',
+          metricField: 'totalAmount',
+        },
+      },
+    };
+    let tree = hooks.render(View, props);
+    await new Promise((r) => setTimeout(r, 20));
+    tree = hooks.render(View, props);
+    const resolved = resolveTree(tree);
+    assert.ok(findByTestId(resolved, testId), `Expected ${testId} for chartType=${chartType}`);
+    if (itemTestId) {
+      assert.ok(findByTestId(resolved, itemTestId), `Expected ${itemTestId} for chartType=${chartType}`);
+    }
+    if (chartType === 'pivot') {
+      assert.ok(textOf(findByTestId(resolved, 'dxos-bi-chart-pivot')).includes('425'));
+    }
+    hooks.unmount();
+  }
+
+  assert.ok(calls.some((c) => c.url === 'dxosBlocks:aggregateQuery' && c.method === 'post' && c.skipNotify === true));
+
+  // Error state
+  mode = 'error';
+  const errHooks = createMiniHooks();
+  const ErrView = createBiChartBlockView({ useAPIClient: () => api }, errHooks.React, {}, {});
+  let errTree = errHooks.render(ErrView, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  errTree = errHooks.render(ErrView, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status' } } });
+  const errEl = findByTestId(resolveTree(errTree), 'dxos-bi-chart-error');
+  assert.ok(errEl);
+  assert.equal(errEl.props.role, 'alert');
+  errHooks.unmount();
+
+  // Empty state
+  mode = 'empty';
+  const emptyHooks = createMiniHooks();
+  const EmptyView = createBiChartBlockView({ useAPIClient: () => api }, emptyHooks.React, {}, {});
+  let emptyTree = emptyHooks.render(EmptyView, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  emptyTree = emptyHooks.render(EmptyView, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status' } } });
+  assert.ok(findByTestId(resolveTree(emptyTree), 'dxos-bi-chart-empty'));
+  emptyHooks.unmount();
+
+  // Stale slow response ignored when switching config
+  mode = 'slow';
+  const staleHooks = createMiniHooks();
+  const StaleView = createBiChartBlockView({ useAPIClient: () => api }, staleHooks.React, {}, {});
+  staleHooks.render(StaleView, { model: { props: { collection: 'latticeOrders', chartType: 'bar', groupBy: 'status' } } });
+  mode = 'kpi';
+  let freshTree = staleHooks.render(StaleView, { model: { props: { collection: 'latticeOrders', chartType: 'kpi', metricOp: 'count' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  if (typeof slowResolve === 'function') {
+    slowResolve({ data: { data: { ok: true, collection: 'latticeOrders', chartType: 'bar', series: [{ key: 'STALE', label: 'STALE', value: 99999 }], summary: { value: 99999 }, totalRows: 1, meta: {} } } });
+  }
+  await new Promise((r) => setTimeout(r, 20));
+  freshTree = staleHooks.render(StaleView, { model: { props: { collection: 'latticeOrders', chartType: 'kpi', metricOp: 'count' } } });
+  assert.equal(textOf(resolveTree(freshTree)).includes('STALE'), false, 'Stale slow response must be ignored');
+  staleHooks.unmount();
+});
+
+test('M1.1 Iteration 2: parseBiFilterJson fails closed on dangerous operators, dot-paths, and prototype keys nested anywhere', async () => {
+  const { parseBiFilterJson, buildAggregateQueryPayload } = require(path.join(PLUGIN_ROOT, 'src/client/bi-chart-block.js'));
+
+  assert.equal(parseBiFilterJson('{"$and":[{"$where":"1=1"}]}'), undefined);
+  assert.equal(parseBiFilterJson('{"status":"open","$and":[{"$sql":"SELECT 1"}]}'), undefined);
+  assert.equal(parseBiFilterJson('{"$or":[{"user.password":"x"}]}'), undefined);
+  assert.equal(parseBiFilterJson('{"status":"open","__proto__":{"polluted":true}}'), undefined);
+  assert.equal(parseBiFilterJson('{"$and":[{"constructor":{"x":1}}]}'), undefined);
+  assert.equal(parseBiFilterJson('{"status":{"$eval":"1"}}'), undefined);
+
+  const payload = buildAggregateQueryPayload({
+    collection: 'latticeOrders',
+    chartType: 'bar',
+    groupBy: 'status',
+    filterJson: '{"$and":[{"$where":"1=1"}]}',
+  });
+  assert.equal(payload.filter, undefined);
+
+  assert.deepEqual(
+    parseBiFilterJson('{"$and":[{"status":{"$in":["open","closed"]}},{"totalAmount":{"$gte":100}}]}'),
+    { $and: [{ status: { $in: ['open', 'closed'] } }, { totalAmount: { $gte: 100 } }] },
+  );
+
+  // DxosBiChartView fails closed with warning banner and skips aggregateQuery when filterJson is dangerous/invalid
+  const { createBiChartBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/bi-chart-block.js'));
+  const hooks = createMiniHooks();
+  const aggCalls = [];
+  const api = {
+    async request(req) {
+      if (req.url === 'dxosBlocks:aggregateQuery') aggCalls.push(req);
+      return { data: { data: { collections: [] } } };
+    },
+  };
+  const View = createBiChartBlockView({ useAPIClient: () => api }, hooks.React, {}, {});
+  let tree = hooks.render(View, {
+    model: {
+      props: {
+        collection: 'latticeOrders',
+        chartType: 'bar',
+        groupBy: 'status',
+        filterJson: '{"$and":[{"$where":"1=1"}]}',
+      },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = hooks.render(View, {
+    model: {
+      props: {
+        collection: 'latticeOrders',
+        chartType: 'bar',
+        groupBy: 'status',
+        filterJson: '{"$and":[{"$where":"1=1"}]}',
+      },
+    },
+  });
+  const warnEl = findByTestId(resolveTree(tree), 'dxos-bi-chart-filter-warning');
+  assert.ok(warnEl, 'Expected dxos-bi-chart-filter-warning banner on dangerous filterJson');
+  assert.equal(aggCalls.length, 0, 'Must not send unfiltered aggregateQuery when filterJson is invalid/dangerous');
+  hooks.unmount();
+});
+
+test('M1.1 Iteration 3: parseBiFilterJson precedence, whitespace empty-brace handling, filter warning matrix, and Pivot avg/min/max rendering', async () => {
+  const {
+    parseBiFilterJson,
+    buildAggregateQueryPayload,
+    createBiChartBlockView,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/bi-chart-block.js'));
+
+  // 1. Precedence & whitespace empty-brace cases
+  assert.deepEqual(parseBiFilterJson('{"status":"open"}', {}), { status: 'open' });
+  assert.deepEqual(
+    buildAggregateQueryPayload({
+      collection: 'latticeOrders',
+      chartType: 'bar',
+      filter: {},
+      filterJson: '{"status":"open"}',
+    }).filter,
+    { status: 'open' },
+  );
+  assert.deepEqual(parseBiFilterJson('{"status":"open"}', { region: 'HCM' }), { region: 'HCM' });
+  assert.equal(parseBiFilterJson('{"status":"open"}', { $where: '1=1' }), undefined);
+  assert.equal(parseBiFilterJson('{ }'), undefined);
+  assert.equal(parseBiFilterJson(' { \n\t } '), undefined);
+
+  // 2. DxosBiChartView filter warning matrix (valid/empty -> 0 warnings + 1 API call; invalid/dangerous -> warning + 0 API calls)
+  const renderWithProps = async (extraProps, mockAggResponse) => {
+    const hooks = createMiniHooks();
+    const aggCalls = [];
+    const api = {
+      async request(req) {
+        if (req.url === 'dxosBlocks:aggregateQuery') {
+          aggCalls.push(req);
+          if (mockAggResponse) return mockAggResponse(req);
+          return {
+            data: {
+              data: {
+                ok: true,
+                collection: 'latticeOrders',
+                chartType: req.data.chartType,
+                series: [{ key: 'open', label: 'open', value: 10, count: 10 }],
+                summary: { count: 10, value: 10, op: 'count', field: null },
+                pivotMatrix: null,
+                totalRows: 10,
+                meta: {},
+              },
+            },
+          };
+        }
+        return { data: { data: { collections: [] } } };
+      },
+    };
+    const View = createBiChartBlockView({ useAPIClient: () => api }, hooks.React, {}, {});
+    const props = {
+      model: {
+        props: {
+          collection: 'latticeOrders',
+          chartType: 'bar',
+          groupBy: 'status',
+          ...extraProps,
+        },
+      },
+    };
+    hooks.render(View, props);
+    await new Promise((r) => setTimeout(r, 20));
+    const tree = hooks.render(View, props);
+    const resolved = resolveTree(tree);
+    hooks.unmount();
+    return { resolved, aggCalls };
+  };
+
+  for (const emptyJson of ['', '  ', '{}', '{ }', ' { \n\t } ']) {
+    for (const filterVal of [undefined, {}]) {
+      const { resolved, aggCalls } = await renderWithProps({ filterJson: emptyJson, filter: filterVal });
+      assert.equal(
+        findByTestId(resolved, 'dxos-bi-chart-filter-warning'),
+        null,
+        `Unexpected warning for filterJson=${JSON.stringify(emptyJson)} filter=${JSON.stringify(filterVal)}`,
+      );
+      assert.equal(aggCalls.length, 1);
+      assert.equal(aggCalls[0].data.filter, undefined);
+      assert.ok(findByTestId(resolved, 'dxos-bi-chart-bar'));
+    }
+  }
+
+  {
+    const { resolved, aggCalls } = await renderWithProps({ filter: {}, filterJson: '{"status":"open"}' });
+    assert.equal(findByTestId(resolved, 'dxos-bi-chart-filter-warning'), null);
+    assert.equal(aggCalls.length, 1);
+    assert.deepEqual(aggCalls[0].data.filter, { status: 'open' });
+  }
+
+  for (const badProps of [
+    { filterJson: '{bad}' },
+    { filterJson: '[{"status":"open"}]' },
+    { filterJson: '{"$expr":{"$eq":[1,1]}}' },
+    { filter: { $where: '1=1' }, filterJson: '{ }' },
+    { filter: ['bad'] },
+    { filterJson: { $where: '1' } },
+  ]) {
+    const { resolved, aggCalls } = await renderWithProps(badProps);
+    assert.ok(
+      findByTestId(resolved, 'dxos-bi-chart-filter-warning'),
+      `Expected filter warning for ${JSON.stringify(badProps)}`,
+    );
+    assert.equal(aggCalls.length, 0);
+  }
+
+  // 3. Pivot UI rendering for avg, min (including grandTotal: 0 distinct from summary.value: 15), and max
+  {
+    const { resolved } = await renderWithProps(
+      { chartType: 'pivot', groupBy: 'status', secondaryGroupBy: 'region', metricOp: 'avg', metricField: 'totalAmount' },
+      () => ({
+        data: {
+          data: {
+            ok: true,
+            collection: 'latticeOrders',
+            chartType: 'pivot',
+            series: [{ key: 'r1', label: 'r1', value: 20 }],
+            summary: { count: 5, avg: 32, value: 32, op: 'avg', field: 'totalAmount' },
+            pivotMatrix: {
+              rowField: 'status',
+              colField: 'region',
+              rows: ['r1', 'r2'],
+              columns: ['c1', 'c2'],
+              cells: { r1: { c1: 15, c2: 30 }, r2: { c1: 40, c2: 60 } },
+              rowTotals: { r1: 20, r2: 50 },
+              colTotals: { c1: 23.3333333333, c2: 45 },
+              grandTotal: 32,
+            },
+            totalRows: 5,
+            meta: {},
+          },
+        },
+      }),
+    );
+    const pivotTxt = textOf(findByTestId(resolved, 'dxos-bi-chart-pivot'));
+    assert.ok(pivotTxt.includes('23.33'));
+    assert.ok(pivotTxt.includes('32'));
+    assert.equal(pivotTxt.includes('70'), false);
+  }
+
+  {
+    const { resolved } = await renderWithProps(
+      { chartType: 'pivot', groupBy: 'status', secondaryGroupBy: 'region', metricOp: 'min', metricField: 'totalAmount' },
+      () => ({
+        data: {
+          data: {
+            ok: true,
+            collection: 'latticeOrders',
+            chartType: 'pivot',
+            series: [{ key: 'r1', label: 'r1', value: 0 }],
+            summary: { count: 4, min: 15, value: 15, op: 'min', field: 'totalAmount' },
+            pivotMatrix: {
+              rowField: 'status',
+              colField: 'region',
+              rows: ['r1', 'r2'],
+              columns: ['c1', 'c2'],
+              cells: { r1: { c1: 0, c2: 20 }, r2: { c1: 40, c2: 30 } },
+              rowTotals: { r1: 0, r2: 40 },
+              colTotals: { c1: 0, c2: 30 },
+              grandTotal: 0,
+            },
+            totalRows: 4,
+            meta: {},
+          },
+        },
+      }),
+    );
+    const pivotEl = findByTestId(resolved, 'dxos-bi-chart-pivot');
+    const tfoot = collectNodes(pivotEl).find((n) => n.type === 'tfoot');
+    const footerCells = collectNodes(tfoot).filter((n) => n.type === 'td');
+    assert.equal(textOf(footerCells[footerCells.length - 1]), '0');
+  }
+
+  {
+    const { resolved } = await renderWithProps(
+      { chartType: 'pivot', groupBy: 'status', secondaryGroupBy: 'region', metricOp: 'max', metricField: 'totalAmount' },
+      () => ({
+        data: {
+          data: {
+            ok: true,
+            collection: 'latticeOrders',
+            chartType: 'pivot',
+            series: [{ key: 'r2', label: 'r2', value: 60 }],
+            summary: { count: 4, max: 60, value: 60, op: 'max', field: 'totalAmount' },
+            pivotMatrix: {
+              rowField: 'status',
+              colField: 'region',
+              rows: ['r1', 'r2'],
+              columns: ['c1', 'c2'],
+              cells: { r1: { c1: 20, c2: 30 }, r2: { c1: 40, c2: 60 } },
+              rowTotals: { r1: 30, r2: 60 },
+              colTotals: { c1: 40, c2: 60 },
+              grandTotal: 60,
+            },
+            totalRows: 4,
+            meta: {},
+          },
+        },
+      }),
+    );
+    const pivotTxt = textOf(findByTestId(resolved, 'dxos-bi-chart-pivot'));
+    assert.ok(pivotTxt.includes('60'));
+    assert.equal(pivotTxt.includes('90'), false);
+  }
 });

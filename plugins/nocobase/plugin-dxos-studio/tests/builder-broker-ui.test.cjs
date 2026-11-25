@@ -1069,3 +1069,108 @@ test('Task 15b: governance-consoles DMN section embeds DmnVisualEditor with grid
   await saveBtn.props.onClick();
   assert.ok(requests.some((r) => r.url === 'dxosDmn:saveTable' && r.data?.rulesJson?.length === 2));
 });
+
+test('Tab 9 Domain Builder exposes all 12 rich FIELD_TYPES and forwards relation, formula, and validation metadata', async () => {
+  const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
+  const harness = createReactHarness();
+  const { client, requests } = createApiMock({
+    'dxosBuilder:listDomains': async () => ({ items: [] }),
+    'dxosBuilder:listBusinessPacks': async () => ({ items: [] }),
+    'dxosBuilder:listTenants': async () => ({ items: [] }),
+    'dxosBuilder:createDomain': async (req) => ({ domain: req.data }),
+  });
+
+  const { DomainBuilderAndTenantsPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+
+  const typeSelect = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-type-0')[0];
+  const optionValues = collectNodes(typeSelect, (n) => n.type === 'option').map((o) => o.props.value);
+  for (const ft of ['string', 'text', 'integer', 'float', 'boolean', 'date', 'datetime', 'json', 'belongsTo', 'hasOne', 'belongsToMany', 'formula']) {
+    assert.equal(optionValues.includes(ft), true, `Missing FIELD_TYPES option "${ft}"`);
+  }
+
+  // Add field 2 (formula) and field 3 (belongsToMany)
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-add-field-btn')[0].props.onClick();
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-add-field-btn')[0].props.onClick();
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-name-2')[0].props.onChange({ target: { value: 'lineTotal' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-type-2')[0].props.onChange({ target: { value: 'formula' } });
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-formula-2')[0].props.onChange({ target: { value: 'qty * price' } });
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-name-3')[0].props.onChange({ target: { value: 'tags' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-type-3')[0].props.onChange({ target: { value: 'belongsToMany' } });
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-target-3')[0].props.onChange({ target: { value: 'latticeCustomTags' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-through-3')[0].props.onChange({ target: { value: 'latticeCustomInspectTags' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-pattern-0')[0].props.onChange({ target: { value: '^INS-[0-9]+$' } });
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-domain-form')[0].props.onSubmit({ preventDefault() {} });
+  const req = requests.find((r) => r.url === 'dxosBuilder:createDomain');
+  assert.ok(req);
+  assert.equal(req.data.fields[0].validation.pattern, '^INS-[0-9]+$');
+  assert.equal(req.data.fields[2].type, 'formula');
+  assert.equal(req.data.fields[2].formulaExpression, 'qty * price');
+  assert.equal(req.data.fields[3].type, 'belongsToMany');
+  assert.equal(req.data.fields[3].target, 'latticeCustomTags');
+  assert.equal(req.data.fields[3].through, 'latticeCustomInspectTags');
+});
+
+test('Regression (M1.2 R2 F7): Tab 9 Domain Builder clears stale validation fields when switching field type and omits incompatible validation on submit', async () => {
+  const { createBuilderBrokerPanels } = require(path.join(PLUGIN_ROOT, 'src/client/builder-broker-panels.js'));
+  const harness = createReactHarness();
+  const { client, requests } = createApiMock({
+    'dxosBuilder:listDomains': async () => ({ items: [] }),
+    'dxosBuilder:listBusinessPacks': async () => ({ items: [] }),
+    'dxosBuilder:listTenants': async () => ({ items: [] }),
+    'dxosBuilder:createDomain': async (req) => ({ domain: req.data }),
+  });
+
+  const { DomainBuilderAndTenantsPanel } = createBuilderBrokerPanels(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+
+  // Enter pattern, min, max, enumText on field 0 (string)
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-pattern-0')[0].props.onChange({ target: { value: '^[A-Z]+$' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-min-0')[0].props.onChange({ target: { value: '2' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-max-0')[0].props.onChange({ target: { value: '10' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-enum-0')[0].props.onChange({ target: { value: 'A, B' } });
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+
+  // Switch field 0 type to belongsTo -> must clear pattern/min/max/enumText
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-type-0')[0].props.onChange({ target: { value: 'belongsTo' } });
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-target-0')[0].props.onChange({ target: { value: 'latticeAssets' } });
+
+  // Add field 2, set pattern on string, then switch to boolean -> must clear pattern and hide/omit incompatible validation
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-add-field-btn')[0].props.onClick();
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-name-2')[0].props.onChange({ target: { value: 'isActive' } });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-pattern-2')[0].props.onChange({ target: { value: '^[0-9]+$' } });
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-type-2')[0].props.onChange({ target: { value: 'boolean' } });
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-domain-form')[0].props.onSubmit({ preventDefault() {} });
+  const req = requests.find((r) => r.url === 'dxosBuilder:createDomain');
+  assert.ok(req);
+  assert.equal(req.data.fields[0].type, 'belongsTo');
+  assert.equal(req.data.fields[0].validation?.pattern, undefined);
+  assert.equal(req.data.fields[0].validation?.min, undefined);
+  assert.equal(req.data.fields[0].validation?.max, undefined);
+  assert.equal(req.data.fields[0].validation?.enum, undefined);
+
+  assert.equal(req.data.fields[2].type, 'boolean');
+  assert.equal(req.data.fields[2].validation?.pattern, undefined);
+  assert.equal(req.data.fields[2].validation?.min, undefined);
+  assert.equal(req.data.fields[2].validation?.max, undefined);
+  assert.equal(req.data.fields[2].validation?.enum, undefined);
+
+  // Switching field 2 back to string shows cleared pattern input
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-type-2')[0].props.onChange({ target: { value: 'string' } });
+  tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
+  const patInput2 = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-pattern-2')[0];
+  assert.equal(patInput2.props.value, '');
+});

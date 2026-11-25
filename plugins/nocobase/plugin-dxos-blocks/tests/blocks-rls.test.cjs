@@ -143,3 +143,72 @@ test('dxosBlocks:telemetryIngest, dxosBlocks:twinShadow, and dxosBroker:listDevi
     else process.env.DX_PG_RLS_SESSION = prev;
   }
 });
+
+test('dxosBlocks:aggregateQuery executes inside PostgreSQL RLS transaction for tenant user and unscoped root', async () => {
+  const prev = process.env.DX_PG_RLS_SESSION;
+  process.env.DX_PG_RLS_SESSION = 'true';
+  try {
+    const { db, queries } = makePgMockDb({
+      latticeEmployees: [{ id: 10, userId: 201, organizationId: 'org-rls', active: true }],
+      latticeCustomInvoices: [
+        { id: 1, organizationId: 'org-rls', status: 'paid', totalAmount: 250 },
+        { id: 2, organizationId: 'org-rls', status: 'paid', totalAmount: 150 },
+      ],
+      roles: [{ name: 'ldx_manager', allowAll: true }],
+    });
+    db.getCollection = (name) => (name === 'latticeCustomInvoices'
+      ? {
+          name: 'latticeCustomInvoices',
+          fields: new Map([
+            ['id', { name: 'id', type: 'bigInt' }],
+            ['organizationId', { name: 'organizationId', type: 'string' }],
+            ['status', { name: 'status', type: 'string' }],
+            ['totalAmount', { name: 'totalAmount', type: 'decimal' }],
+          ]),
+        }
+      : null);
+
+    const blocks = createDxosBlocksActions(db);
+    const userCtx = {
+      method: 'POST',
+      state: { currentRole: 'ldx_manager', currentUser: { id: 201 } },
+      can: () => true,
+      action: {
+        params: {
+          values: {
+            collection: 'latticeCustomInvoices',
+            chartType: 'bar',
+            groupBy: 'status',
+            metric: { op: 'sum', field: 'totalAmount' },
+          },
+        },
+      },
+    };
+    await blocks.aggregateQuery(userCtx, async () => {});
+    assert.equal(userCtx.body.ok, true);
+    assert.equal(userCtx.body.summary.sum, 400);
+
+    const rootCtx = {
+      method: 'POST',
+      state: { currentRole: 'root', currentUser: { id: 1 } },
+      action: {
+        params: {
+          values: {
+            collection: 'latticeCustomInvoices',
+            chartType: 'kpi',
+            metric: { op: 'count' },
+          },
+        },
+      },
+    };
+    await blocks.aggregateQuery(rootCtx, async () => {});
+    assert.equal(rootCtx.body.ok, true);
+    assert.equal(rootCtx.body.meta.preview, true);
+
+    assert.ok(queries.some((q) => /set_config\('app\.current_org'/.test(q.sql) && q.opts?.replacements?.orgId === 'org-rls'));
+    assert.ok(queries.some((q) => /set_config\('app\.rls_bypass', 'on'/.test(q.sql)));
+  } finally {
+    if (prev === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prev;
+  }
+});
