@@ -68,3 +68,19 @@ test('incident portal grants only missing, read-only resources to supported role
   assert.ok(resources.every(row=>row.roleName!=='ldx_employee'));
   for(const row of resources.slice(1))assert.deepEqual(row.actions.map(action=>action.name),['view']);
 });
+test('20261129000100-sync-role-presets migration idempotently backfills missing ldx_operator on upgraded DBs',async()=>{
+  const Module=require('node:module');
+  const origLoad=Module._load;
+  class MockMigration{constructor(ctx){this.context=ctx;}}
+  Module._load=function(req,parent,isMain){if(req==='@nocobase/server')return {Migration:MockMigration};return origLoad.call(this,req,parent,isMain);};
+  let Mig;
+  try{Mig=require('../src/server/migrations/20261129000100-sync-role-presets');}finally{Module._load=origLoad;}
+  const rows=rolePresets().filter(p=>p.name!=='ldx_operator');
+  const db={getRepository:()=>({findOne:async({filter})=>rows.find(r=>r.name===filter.name)||null,create:async({values})=>rows.push(values)})};
+  const mig=new Mig({db});
+  assert.equal(mig.on,'afterSync');
+  await mig.up();
+  await mig.up();
+  assert.equal(rows.length,8);
+  assert.equal(rows.some(r=>r.name==='ldx_operator'),true);
+});

@@ -1132,3 +1132,52 @@ test('exportSolutionBundle unwraps Sequelize Model instances inside desktopRoute
   assert.equal(Array.isArray(exported.routesAndBlocks?.routes), true);
   assert.equal(exported.routesAndBlocks.routes.some((r) => r.title === 'Ops Page' && r.layoutUid === 'ldx-portal-work'), true);
 });
+
+test('toObj preserves diamond DAG shared Model references, terminates cycles, and strips forbidden prototype keys', async () => {
+  const { toObj, exportSolutionBundle } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { db } = makeSolutionBundleDbHarness();
+
+  const sharedLayout = {
+    dataValues: { uid: 'ldx-portal-work', title: 'Công việc' },
+    toJSON() { throw new TypeError('force nested dataValues fallback'); },
+  };
+  const diamondRoute = {
+    dataValues: {
+      id: 12,
+      title: 'Diamond Route',
+      type: 'flowPage',
+      schemaUid: 'diamond_schema_1',
+      uiLayouts: [sharedLayout, sharedLayout],
+    },
+    toJSON() { throw new TypeError('force dataValues fallback'); },
+  };
+  Object.defineProperty(diamondRoute.dataValues, '__proto__', { value: { polluted: true }, enumerable: true, configurable: true });
+
+  const plainDiamond = toObj(diamondRoute);
+  assert.equal(plainDiamond.uiLayouts.length, 2, 'Diamond DAG must preserve both references to sharedLayout');
+  assert.equal(plainDiamond.uiLayouts[0].uid, 'ldx-portal-work');
+  assert.equal(plainDiamond.uiLayouts[1].uid, 'ldx-portal-work');
+  assert.equal(Object.hasOwn(plainDiamond, '__proto__'), false);
+
+  // True cycle still terminates safely without stack overflow
+  const cyclic = {
+    dataValues: { id: 99 },
+    toJSON() { throw new TypeError('force cyclic fallback'); },
+  };
+  cyclic.dataValues.self = cyclic;
+  const plainCyclic = toObj(cyclic);
+  assert.equal(plainCyclic.id, 99);
+  assert.equal(plainCyclic.self, undefined);
+
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'desktopRoutes') return { find: async () => [diamondRoute] };
+    if (name === 'desktopRoutesUiLayouts') return { find: async () => [{ desktopRouteId: 12, uiLayoutUid: 'ldx-portal-work' }] };
+    if (name === 'rolesDesktopRoutes' || name === 'flowModels') return { find: async () => [] };
+    return origGetRepo(name);
+  };
+
+  const exported = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '1.0.0' });
+  const hit = exported.routesAndBlocks.routes.find((r) => r.title === 'Diamond Route' && r.layoutUid === 'ldx-portal-work');
+  assert.ok(hit);
+});

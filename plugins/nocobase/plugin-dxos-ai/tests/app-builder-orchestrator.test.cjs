@@ -1270,3 +1270,37 @@ test('orchestrateEnterpriseAppBuild normalizes LLM aliases (name/title/slug/targ
     (err) => err.status === 403 && err.code === 'SYSTEM_COLLECTION_FORBIDDEN',
   );
 });
+
+test('teardownBuiltApp surfaces uiManageable update failures rather than silently swallowing them', async () => {
+  const { orchestrateEnterpriseAppBuild, teardownBuiltApp } = require('../src/server/app-builder-orchestrator');
+  const { db, ctx, store } = makeOrchestratorHarness();
+  store.latticeBuiltApps = [];
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+  await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    appKey: 'app-ui-manageable-err',
+    portalSlug: 'cold-assets',
+    pageTitle: 'UI Manageable Err',
+    roleName: 'ldx_uim_err',
+    collectionName: 'latticeCustomUiErr',
+    fields: [{ name: 'code', type: 'string' }],
+  });
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (name !== 'collections') return repo;
+    return {
+      ...repo,
+      findOne: async (args) => {
+        const row = await repo.findOne(args);
+        if (!row) return null;
+        row.options = { ...(row.options || {}), uiManageable: true };
+        row.update = async () => { throw new Error('UI_MANAGEABLE_UPDATE_FAILED'); };
+        return row;
+      },
+    };
+  };
+  await assert.rejects(
+    () => teardownBuiltApp(ctx, db, actor, { appKey: 'app-ui-manageable-err', keepData: false }),
+    /UI_MANAGEABLE_UPDATE_FAILED/,
+  );
+});

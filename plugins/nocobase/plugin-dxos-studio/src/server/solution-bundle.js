@@ -121,31 +121,36 @@ const toObj = (row, seen) => {
       if (row.dataValues && typeof row.dataValues === 'object') {
         if (visited.has(row)) return undefined;
         visited.add(row);
-        const hiddenFields = new Set();
-        const colFields = row.constructor?.collection?.fields;
-        if (colFields && typeof colFields.values === 'function') {
-          for (const f of colFields.values()) {
-            if (f?.options?.hidden && f?.options?.name) hiddenFields.add(f.options.name);
+        try {
+          const hiddenFields = new Set();
+          const colFields = row.constructor?.collection?.fields;
+          if (colFields && typeof colFields.values === 'function') {
+            for (const f of colFields.values()) {
+              if (f?.options?.hidden && f?.options?.name) hiddenFields.add(f.options.name);
+            }
           }
-        }
-        const out = {};
-        for (const key of Object.keys(row.dataValues)) {
-          if (hiddenFields.has(key)) continue;
-          const v = row.dataValues[key];
-          if (Array.isArray(v)) {
-            out[key] = v
-              .map((item) => (item && typeof item === 'object' ? toObj(item, visited) : item))
-              .filter((item) => item !== undefined);
-          } else if (v && typeof v === 'object' && !(v instanceof Date) && (v.dataValues || typeof v.toJSON === 'function')) {
-            const plain = toObj(v, visited);
-            if (plain !== undefined) out[key] = plain;
-          } else if (v instanceof Date) {
-            out[key] = v.toISOString();
-          } else {
-            out[key] = v;
+          const out = {};
+          for (const key of Object.keys(row.dataValues)) {
+            if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue;
+            if (hiddenFields.has(key)) continue;
+            const v = row.dataValues[key];
+            if (Array.isArray(v)) {
+              out[key] = v
+                .map((item) => (item && typeof item === 'object' ? toObj(item, visited) : item))
+                .filter((item) => item !== undefined);
+            } else if (v && typeof v === 'object' && !(v instanceof Date) && (v.dataValues || typeof v.toJSON === 'function')) {
+              const plain = toObj(v, visited);
+              if (plain !== undefined) out[key] = plain;
+            } else if (v instanceof Date) {
+              out[key] = v.toISOString();
+            } else {
+              out[key] = v;
+            }
           }
+          return out;
+        } finally {
+          visited.delete(row);
         }
-        return out;
       }
     }
   }
@@ -3348,6 +3353,7 @@ module.exports = {
   applyGovernanceSection,
   getRouteKey,
   sortRoutesTopologically,
+  toObj,
   stripSecretsDeep,
   validateSafeWebhookTargetUrl,
   exportSolutionBundle,

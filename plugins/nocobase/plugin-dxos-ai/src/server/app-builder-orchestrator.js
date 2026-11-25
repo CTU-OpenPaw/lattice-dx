@@ -2214,14 +2214,14 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
         liveCol.options.uiManageable = false;
       }
       if (colsRepo && typeof colsRepo.findOne === 'function') {
-        const colRow = await colsRepo.findOne({ filter: { name: colName } }).catch(() => null);
+        const colRow = await colsRepo.findOne({ filter: { name: colName } });
         const colOpts = colRow ? (val(colRow, 'options') || {}) : {};
         if (colRow && colOpts?.uiManageable) {
           const nextOpts = { ...colOpts, uiManageable: false };
           if (typeof colRow.update === 'function') {
-            await colRow.update({ options: nextOpts }).catch(() => {});
+            await colRow.update({ options: nextOpts });
           } else if (typeof colsRepo.update === 'function') {
-            await colsRepo.update({ filter: { name: colName }, values: { options: nextOpts } }).catch(() => {});
+            await colsRepo.update({ filter: { name: colName }, values: { options: nextOpts } });
           }
         }
       }
