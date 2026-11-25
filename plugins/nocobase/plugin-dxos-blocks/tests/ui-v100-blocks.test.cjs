@@ -634,6 +634,7 @@ test('Task 3.1 client submodules obey build.mjs bundler rule, XSS safety, and SP
   const { addSourceHeader } = await import(pathToFileURL(path.join(REPO_ROOT, 'scripts/source-headers.mjs')).href);
 
   const clientModules = [
+    'src/client/blocks-helpers.js',
     'src/client/webgis-block.js',
     'src/client/kanban-schedule-block.js',
     'src/client/chatter-panel.js',
@@ -1751,6 +1752,62 @@ test('Task 5: dxosBlocks:collectionsMeta enforces auth, excludes internal/protec
       },
     ],
     [
+      'latticeApiKeys',
+      {
+        name: 'latticeApiKeys',
+        options: { title: 'API Keys' },
+        fields: new Map([['keyHash', { name: 'keyHash', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticePkiKeys',
+      {
+        name: 'latticePkiKeys',
+        options: { title: 'PKI Keys' },
+        fields: new Map([['publicKey', { name: 'publicKey', type: 'text' }]]),
+      },
+    ],
+    [
+      'latticeConnectors',
+      {
+        name: 'latticeConnectors',
+        options: { title: 'Connectors' },
+        fields: new Map([['connectorKey', { name: 'connectorKey', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticeWebhookSubscriptions',
+      {
+        name: 'latticeWebhookSubscriptions',
+        options: { title: 'Webhook Subscriptions' },
+        fields: new Map([['targetUrl', { name: 'targetUrl', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticeCryptoLedger',
+      {
+        name: 'latticeCryptoLedger',
+        options: { title: 'Crypto Ledger' },
+        fields: new Map([['entryHash', { name: 'entryHash', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticeOrganizations',
+      {
+        name: 'latticeOrganizations',
+        options: { title: 'Organizations' },
+        fields: new Map([['organizationId', { name: 'organizationId', type: 'string' }]]),
+      },
+    ],
+    [
+      'latticeCustomHiddenCheck',
+      {
+        name: 'latticeCustomHiddenCheck',
+        options: { title: 'Initially Visible' },
+        fields: new Map([['name', { name: 'name', type: 'string' }]]),
+      },
+    ],
+    [
       'latticeOrders',
       {
         name: 'latticeOrders',
@@ -1812,6 +1869,13 @@ test('Task 5: dxosBlocks:collectionsMeta enforces auth, excludes internal/protec
             : []),
         };
       }
+      if (name === 'collections') {
+        return {
+          find: async () => [
+            { get: (k) => (k === 'name' ? 'latticeCustomHiddenCheck' : k === 'options' ? { hidden: true } : undefined) },
+          ],
+        };
+      }
       if (name === 'roles') {
         return { findOne: async () => null };
       }
@@ -1861,7 +1925,7 @@ test('Task 5: dxosBlocks:collectionsMeta enforces auth, excludes internal/protec
   ]);
   assert.equal(maint.fields.some((f) => f.name === 'apiKeyHash'), false, 'Sensitive field must be excluded');
 
-  // 3. Root sees latticeCustomSecretVault too, while protected system tables stay excluded
+  // 3. Root sees latticeCustomSecretVault too, while protected/secret tables stay excluded
   const rootCtx = {
     method: 'GET',
     state: { currentRole: 'root', currentUser: { id: 1 } },
@@ -1869,8 +1933,20 @@ test('Task 5: dxosBlocks:collectionsMeta enforces auth, excludes internal/protec
   await actions.collectionsMeta(rootCtx, async () => {});
   const rootNames = rootCtx.body.collections.map((c) => c.name);
   assert.ok(rootNames.includes('latticeCustomSecretVault'));
-  assert.equal(rootNames.includes('users'), false);
-  assert.equal(rootNames.includes('latticeBuiltApps'), false);
+  for (const forbidden of [
+    'users',
+    'roles',
+    'latticeBuiltApps',
+    'latticeApiKeys',
+    'latticePkiKeys',
+    'latticeConnectors',
+    'latticeWebhookSubscriptions',
+    'latticeCryptoLedger',
+    'latticeOrganizations',
+    'latticeCustomHiddenCheck',
+  ]) {
+    assert.equal(rootNames.includes(forbidden), false, `Root must NEVER receive ${forbidden} from collectionsMeta`);
+  }
 });
 
 test('Task 5: DxosKanbanScheduleBlockView renders dynamic latticeCustomMaintenanceOrders from metadata without falling back to latticeOrders and supports drag-drop & stage update', async () => {
@@ -2001,5 +2077,151 @@ test('Task 5: DxosKanbanScheduleBlockView renders dynamic latticeCustomMaintenan
   tree = render(View, { model: { props: { collection: 'latticeCustomMaintenanceOrders', viewMode: 'kanban' } } });
   assert.ok(textOf(tree).includes('RLS/RBAC từ chối cập nhật'));
 
+  unmount();
+});
+
+test('Task 5 Fix Round 1: prototype keys, time-field fallback, non-status statusField :update, and collectionMeta scoping', async () => {
+  const {
+    normalizeKanbanCollection,
+    groupRecordsByKanbanStage,
+    buildScheduleDaysGrid,
+    createKanbanScheduleBlockView,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/kanban-schedule-block.js'));
+  const { inferCollectionFieldsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  // 1. Prototype keys and leading-digit names fall back safely to latticeOrders
+  assert.equal(normalizeKanbanCollection('__proto__'), 'latticeOrders');
+  assert.equal(normalizeKanbanCollection('constructor'), 'latticeOrders');
+  assert.equal(normalizeKanbanCollection('prototype'), 'latticeOrders');
+  assert.equal(normalizeKanbanCollection('12345'), 'latticeOrders');
+
+  const protoGrouped = groupRecordsByKanbanStage(
+    [{ id: 1, status: '__proto__' }, { id: 2, status: 'open' }],
+    'latticeCustomTickets',
+    { statusField: 'status' },
+  );
+  assert.equal(Object.getPrototypeOf(protoGrouped.byStage), null);
+  assert.equal(protoGrouped.stages.includes('__proto__'), false);
+
+  // 2. time-only field excluded from dateFields, and parseRecordScheduleDate falls back past unparseable string
+  const timeMeta = inferCollectionFieldsMeta({
+    name: 'latticeCustomShifts',
+    fields: [
+      { name: 'shiftWindow', type: 'time', interface: 'time', title: 'Giờ trực' },
+      { name: 'createdAt', type: 'datetime', interface: 'datetime', title: 'Ngày tạo' },
+    ],
+  });
+  assert.equal(timeMeta.dateFields.includes('shiftWindow'), false, 'time field must not be treated as a calendar date');
+  const grid = buildScheduleDaysGrid(
+    [{ id: 1, code: 'SH-1', shiftWindow: '08:30:00', createdAt: '2026-11-25T10:00:00Z' }],
+    '2026-11-25',
+    { dateFields: ['shiftWindow', 'createdAt'] },
+  );
+  assert.equal(grid.unscheduled.length, 0, 'Unparseable time string must fall back to createdAt');
+  assert.equal(grid.days[2].items.length, 1);
+
+  // 3. Non-'status' statusField (ticketState) on latticeCustomSupportTickets + collection switch clears stale cfg.collectionMeta
+  const { React, render, unmount } = createMiniHooks();
+  const requests = [];
+  const ticketsMeta = {
+    name: 'latticeCustomSupportTickets',
+    title: 'Phiếu hỗ trợ',
+    isCustom: true,
+    fields: [
+      { name: 'subject', type: 'string', title: 'Tiêu đề' },
+      {
+        name: 'ticketState',
+        type: 'string',
+        interface: 'select',
+        enumValues: [
+          { value: 'new', label: 'Mới' },
+          { value: 'resolved', label: 'Đã xong' },
+        ],
+      },
+    ],
+  };
+  const customOrdersMeta = {
+    name: 'latticeCustomMaintenanceOrders',
+    title: 'Bảo trì',
+    isCustom: true,
+    fields: [
+      {
+        name: 'status',
+        type: 'string',
+        interface: 'select',
+        enumValues: [{ value: 'reported', label: 'Báo hỏng' }],
+      },
+    ],
+  };
+  const api = {
+    async request(req) {
+      requests.push(req);
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return { data: { data: { collections: [customOrdersMeta, ticketsMeta] } } };
+      }
+      if (req.url === 'latticeCustomMaintenanceOrders:list') {
+        return { data: { data: [{ id: 1, code: 'M-1', status: 'reported' }] } };
+      }
+      if (req.url === 'latticeCustomSupportTickets:list') {
+        return { data: { data: [{ id: 77, code: 'TK-77', subject: 'Lỗi tủ âm sâu', ticketState: 'new' }] } };
+      }
+      if (req.url === 'latticeCustomSupportTickets:update') {
+        return { data: { data: { id: 77, ticketState: req.data?.ticketState } } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const View = createKanbanScheduleBlockView({ useAPIClient: () => api }, React, {}, {});
+  let tree = render(View, {
+    model: {
+      props: {
+        collection: 'latticeCustomMaintenanceOrders',
+        collectionMeta: customOrdersMeta,
+        viewMode: 'kanban',
+      },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render(View, {
+    model: {
+      props: {
+        collection: 'latticeCustomMaintenanceOrders',
+        collectionMeta: customOrdersMeta,
+        viewMode: 'kanban',
+      },
+    },
+  });
+
+  // Switch dropdown to latticeCustomSupportTickets -> must NOT keep customOrdersMeta!
+  const colSelect = collectNodes(tree).find((n) => n.type === 'select' && n.props['aria-label'] === 'Chọn phân hệ Kanban');
+  colSelect.props.onChange({ target: { value: 'latticeCustomSupportTickets' } });
+  tree = render(View, {
+    model: {
+      props: {
+        collection: 'latticeCustomMaintenanceOrders',
+        collectionMeta: customOrdersMeta,
+        viewMode: 'kanban',
+      },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render(View, {
+    model: {
+      props: {
+        collection: 'latticeCustomMaintenanceOrders',
+        collectionMeta: customOrdersMeta,
+        viewMode: 'kanban',
+      },
+    },
+  });
+
+  const cols = collectNodes(tree).filter((n) => n.props?.['data-testid'] === 'dxos-kanban-column');
+  assert.deepEqual(cols.map((c) => c.props['data-stage']), ['new', 'resolved']);
+  await findByTestId(tree, 'dxos-kanban-move-77').props.onChange({ target: { value: 'resolved' } });
+  assert.ok(
+    requests.some((r) => r.url === 'latticeCustomSupportTickets:update' && Number(r.params?.filterByTk) === 77 && r.data?.ticketState === 'resolved'),
+    'Must update using non-status statusField (ticketState)',
+  );
   unmount();
 });

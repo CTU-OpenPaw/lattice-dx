@@ -359,7 +359,7 @@ function inferCollectionFieldsMeta(collectionMeta) {
     if (!f?.name || seenDates.has(f.name) || f.name === 'createdAt' || f.name === 'updatedAt') continue;
     const t = String(f.type || '').toLowerCase();
     const iface = String(f.interface || '').toLowerCase();
-    if (['date', 'datetime', 'time'].includes(t) || ['datetime', 'date'].includes(iface)) {
+    if (['date', 'datetime'].includes(t) || ['datetime', 'date'].includes(iface)) {
       seenDates.add(f.name);
       dateFields.push(f.name);
     }

@@ -43,12 +43,32 @@ const URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$
 const MIN_EDGE_TOKEN_LENGTH = 16;
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const SAFE_COLLECTION_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]{1,63}$/;
+const META_ALLOWED_BUSINESS_COLLECTIONS = new Set([
+  'latticeOrders',
+  'latticeOrderLines',
+  'latticeRequests',
+  'latticeServiceTickets',
+  'latticeStockLots',
+  'latticeAssets',
+  'latticeLocations',
+  'latticeDepartments',
+  'latticeIncidentCases',
+  'latticeParaDocuments',
+  'latticeAgentProposals',
+  'latticeEpodRecords',
+]);
 const META_EXCLUDED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'applicationTokens', 'sessions', 'verification', 'auditLogs',
   'aiSettings', 'aiEmployees', 'aiMcpClients', 'rolesAiEmployees',
   'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue',
   'latticeUiSnapshots', 'latticeBuiltApps',
+  'latticeApiKeys', 'latticePkiKeys', 'latticeConnectors',
+  'latticeWebhookSubscriptions', 'latticeWebhookDeliveries', 'latticeCryptoLedger',
+  'latticeEventBus', 'latticeDataLineage', 'latticeFrozenSnapshots', 'latticeRecordChatter',
+  'latticeDelegations', 'latticeAutomationRules', 'latticeAutomationRuns',
+  'latticeDecisionTables', 'latticeOrganizations', 'latticeApps', 'latticePortals',
+  'latticeEmployees', 'latticeIncidentRules',
   'dataSources', 'dataSourcesCollections', 'dataSourcesRoles', 'dataSourcesRolesResources',
   'dataSourcesRolesResourcesActions', 'dataSourcesRolesResourcesScopes',
   'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts', 'uiSchemas', 'uiSchemaTemplates',
@@ -1022,12 +1042,14 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       }
 
       const normalizeEnumValues = (rawField) => {
-        const uiSchema = val(rawField, 'uiSchema') || rawField?.options?.uiSchema;
+        const rawOptions = val(rawField, 'options');
+        const options = rawOptions && typeof rawOptions === 'object' ? rawOptions : {};
+        const uiSchema = val(rawField, 'uiSchema') || options.uiSchema;
         const candidates = [
           val(rawField, 'enumValues'),
-          rawField?.options?.enumValues,
+          options.enumValues,
           uiSchema?.enum,
-          rawField?.options?.enum,
+          options.enum,
           val(rawField, 'enum'),
         ];
         const out = [];
@@ -1056,11 +1078,12 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const mergeFields = (colObj, repoFieldRows) => {
         const fieldMap = new Map();
         const addField = (rawField) => {
-          const fname = String(val(rawField, 'name') || rawField?.options?.name || '').trim();
+          const rawOptions = val(rawField, 'options');
+          const options = rawOptions && typeof rawOptions === 'object' ? rawOptions : {};
+          const fname = String(val(rawField, 'name') || options.name || '').trim();
           if (!fname || META_BLOCKED_KEYS.has(fname) || fname.startsWith('__') || META_SENSITIVE_FIELD_RE.test(fname)) {
             return;
           }
-          const options = rawField?.options && typeof rawField.options === 'object' ? rawField.options : {};
           const uiSchema = val(rawField, 'uiSchema') || options.uiSchema || {};
           const ftype = String(val(rawField, 'type') || options.type || 'string').trim() || 'string';
           const iface = String(val(rawField, 'interface') || options.interface || '').trim();
@@ -1119,13 +1142,19 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
       const rawMap = new Map();
       const registerCandidate = (rawName, obj) => {
-        const name = String(rawName || val(obj, 'name') || obj?.options?.name || '').trim();
+        const rawOptions = val(obj, 'options');
+        const options = rawOptions && typeof rawOptions === 'object' ? rawOptions : {};
+        const name = String(rawName || val(obj, 'name') || options.name || '').trim();
         if (!name || !SAFE_COLLECTION_NAME_RE.test(name)) return;
         if (name.startsWith('r_') || name.startsWith('__') || name.startsWith('pg_') || name.startsWith('sqlite_')) return;
         if (META_EXCLUDED_LOWER.has(name.toLowerCase())) return;
-        if (obj?.hidden === true || obj?.options?.hidden === true || val(obj, 'hidden') === true) return;
+        if (!META_ALLOWED_BUSINESS_COLLECTIONS.has(name) && !CUSTOM_COLLECTION_RE.test(name)) return;
+        if (obj?.hidden === true || options.hidden === true || val(obj, 'hidden') === true) {
+          rawMap.delete(name);
+          return;
+        }
         const prev = rawMap.get(name);
-        const title = String(obj?.options?.title || val(obj, 'title') || obj?.title || prev?.title || name).trim() || name;
+        const title = String(options.title || val(obj, 'title') || obj?.title || prev?.title || name).trim() || name;
         const mergedColObj = obj?.fields ? obj : (prev?.colObj || obj);
         rawMap.set(name, { name, title, colObj: mergedColObj });
       };

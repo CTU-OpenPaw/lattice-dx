@@ -41,11 +41,13 @@ const STAGE_META = {
 };
 
 const WEEKDAY_LABELS = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+const SAFE_KANBAN_COLLECTION_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
+const BLOCKED_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function normalizeKanbanCollection(raw) {
   const clean = String(raw || '').trim();
-  if (!clean) return 'latticeOrders';
-  if (ALLOWED_KANBAN_COLLECTIONS.has(clean) || CUSTOM_COLLECTION_RE.test(clean) || SAFE_COLLECTION_RE.test(clean)) {
+  if (!clean || BLOCKED_PROTO_KEYS.has(clean)) return 'latticeOrders';
+  if (ALLOWED_KANBAN_COLLECTIONS.has(clean) || CUSTOM_COLLECTION_RE.test(clean) || SAFE_KANBAN_COLLECTION_RE.test(clean)) {
     return clean;
   }
   return 'latticeOrders';
@@ -62,7 +64,7 @@ function dedupeStageValues(items) {
     const val = item && typeof item === 'object'
       ? String(item.value ?? item.stage ?? item.label ?? '').trim()
       : String(item ?? '').trim();
-    if (!val || seen.has(val)) continue;
+    if (!val || BLOCKED_PROTO_KEYS.has(val) || seen.has(val)) continue;
     seen.add(val);
     out.push(val);
   }
@@ -102,7 +104,7 @@ function inferKanbanStages(meta, records = [], cfg = {}) {
   for (const rec of Array.isArray(records) ? records : []) {
     if (!rec || typeof rec !== 'object') continue;
     const rawVal = String(rec[statusField] ?? '').trim();
-    if (!rawVal || seenLive.has(rawVal)) continue;
+    if (!rawVal || BLOCKED_PROTO_KEYS.has(rawVal) || seenLive.has(rawVal)) continue;
     seenLive.add(rawVal);
     liveStages.push(rawVal);
   }
@@ -166,7 +168,7 @@ function groupRecordsByKanbanStage(records, collection = 'latticeOrders', option
     stages: options?.stages,
   });
   const stageLabels = buildStageLabelMap(meta, statusField, options);
-  const byStage = {};
+  const byStage = Object.create(null);
   for (const st of stages) byStage[st] = [];
 
   for (const rec of Array.isArray(records) ? records : []) {
@@ -200,17 +202,13 @@ function parseRecordScheduleDate(record, dateFields = null, preferredField = '')
   for (const f of ['submittedAt', 'expiryDate', 'dueDate', 'scheduledAt', 'startDate', 'createdAt']) {
     if (!candidates.includes(f)) candidates.push(f);
   }
-  let raw = null;
   for (const field of candidates) {
-    if (record?.[field] != null && record?.[field] !== '') {
-      raw = record[field];
-      break;
-    }
+    const raw = record?.[field];
+    if (raw == null || raw === '') continue;
+    const ts = raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
+    if (Number.isFinite(ts)) return new Date(ts);
   }
-  if (!raw) return null;
-  const ts = raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
-  if (!Number.isFinite(ts)) return null;
-  return new Date(ts);
+  return null;
 }
 
 function toUtcDateKey(date) {
@@ -406,7 +404,11 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
     }, [activeCollection, reqTracker]);
 
     const activeMeta = React.useMemo(() => {
-      if (cfg.collectionMeta && typeof cfg.collectionMeta === 'object') return cfg.collectionMeta;
+      if (cfg.collectionMeta && typeof cfg.collectionMeta === 'object') {
+        if (!cfg.collectionMeta.name || cfg.collectionMeta.name === activeCollection) {
+          return cfg.collectionMeta;
+        }
+      }
       return collectionsMeta.find((c) => c?.name === activeCollection) || null;
     }, [cfg.collectionMeta, collectionsMeta, activeCollection]);
 
