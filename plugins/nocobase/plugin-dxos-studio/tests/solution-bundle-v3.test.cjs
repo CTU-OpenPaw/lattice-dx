@@ -1225,3 +1225,55 @@ test('Whole-delta security: solution-bundle blocks SSRF webhook targetUrls and u
     );
   }
 });
+
+test('Task 7: Solution Bundle v3 exports, validates, imports, and rolls back DxosWmsOpsBlockModel', async () => {
+  const {
+    exportSolutionBundle,
+    validateSolutionBundle,
+    importSolutionBundle,
+    rollbackLastSolutionBundle,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { db, flowModels } = makeV3Harness();
+
+  flowModels.push({
+    uid: 'dxos-ov-logistics-wms-ops',
+    use: 'DxosWmsOpsBlockModel',
+    parentId: 'grid_logistics_ov',
+    subKey: 'items',
+    subType: 'array',
+    props: {
+      title: 'Vận hành Kho FEFO & Nhập lô hàng loạt [W]',
+      defaultOrganizationId: '',
+      defaultTab: 'fefo',
+      defaultImportCollection: 'latticeStockLots',
+      showBulkImport: true,
+    },
+    stepParams: {
+      dxosBlockSettings: {
+        config: {
+          title: 'Vận hành Kho FEFO & Nhập lô hàng loạt [W]',
+          defaultTab: 'fefo',
+          defaultImportCollection: 'latticeStockLots',
+          showBulkImport: true,
+        },
+      },
+    },
+  });
+  const grid = flowModels.find((m) => m.uid === 'grid_logistics_ov');
+  grid.props.rows.dxos_row_0.push(['dxos-ov-logistics-wms-ops']);
+  grid.stepParams.gridSettings.grid.rows.dxos_row_0.push(['dxos-ov-logistics-wms-ops']);
+
+  const exported = await exportSolutionBundle(db, { organizationId: 'org-a' });
+  const wmsExported = exported.routesAndBlocks.flowModels.find((m) => m.uid === 'dxos-ov-logistics-wms-ops');
+  assert.ok(wmsExported, 'Solution Bundle v3 export must include DxosWmsOpsBlockModel');
+  assert.equal(wmsExported.use, 'DxosWmsOpsBlockModel');
+  assert.equal(validateSolutionBundle(exported).valid, true);
+
+  const incoming = structuredClone(exported);
+  incoming.routesAndBlocks.flowModels.find((m) => m.uid === 'dxos-ov-logistics-wms-ops').props.defaultTab = 'import';
+  const applied = await importSolutionBundle(db, incoming, { dryRun: false, organizationId: 'org-a' });
+  assert.equal(flowModels.find((m) => m.uid === 'dxos-ov-logistics-wms-ops').props.defaultTab, 'import');
+
+  await rollbackLastSolutionBundle(db, { organizationId: 'org-a', snapshotUid: applied.snapshotUid });
+  assert.equal(flowModels.find((m) => m.uid === 'dxos-ov-logistics-wms-ops').props.defaultTab, 'fefo');
+});

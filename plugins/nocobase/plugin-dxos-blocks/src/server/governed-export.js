@@ -43,6 +43,16 @@ const FORMULA_PREFIX_RE = /^(?:[=+\-@\t\r]|\s+[=+\-@])/;
 const EXPORT_FORMATS = new Set(['csv', 'xlsx', 'pdf']);
 
 const DEFAULT_FALLBACK_COLUMNS = ['id', 'code', 'name', 'status', 'organizationId', 'createdAt'];
+const VIRTUAL_OR_ASSOC_FIELD_TYPES = new Set([
+  'virtual',
+  'hasmany',
+  'belongstomany',
+  'hasone',
+  'belongsto',
+  'password',
+  'encryption',
+]);
+const BLOCKED_EXPORT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -98,6 +108,42 @@ function isSensitiveField(name) {
   return SENSITIVE_EXPORT_FIELDS.has(clean) || SENSITIVE_KEY_RE.test(clean);
 }
 
+function extractExportableCollectionFields(db, collection) {
+  const colObj = typeof db?.getCollection === 'function'
+    ? db.getCollection(collection)
+    : (db?.collections instanceof Map ? db.collections.get(collection) : db?.collections?.[collection]) || null;
+  const rawFields = colObj?.fields;
+  if (!rawFields) return null;
+  const list = rawFields instanceof Map
+    ? [...rawFields.entries()].map(([key, f]) => ({ key, f }))
+    : Array.isArray(rawFields)
+      ? rawFields.map((f) => ({ key: f?.name || f?.options?.name || (typeof f === 'string' ? f : ''), f }))
+      : typeof rawFields === 'object'
+        ? Object.entries(rawFields).map(([key, f]) => ({ key, f }))
+        : [];
+  const out = [];
+  const seen = new Set();
+  for (const { key, f } of list) {
+    const opts = f?.options && typeof f.options === 'object' ? f.options : {};
+    const name = String(f?.name || opts.name || key || '').trim();
+    if (!name || BLOCKED_EXPORT_KEYS.has(name) || name.includes('.') || name.startsWith('$') || seen.has(name)) {
+      continue;
+    }
+    const fieldType = String(f?.type || opts.type || '').trim().toLowerCase();
+    if (
+      VIRTUAL_OR_ASSOC_FIELD_TYPES.has(fieldType)
+      || f?.virtual === true
+      || opts.virtual === true
+      || f?.isAssociation === true
+    ) {
+      continue;
+    }
+    seen.add(name);
+    out.push(name);
+  }
+  return out.some((name) => !isSensitiveField(name)) ? out : null;
+}
+
 async function resolveAllowedExportColumns(
   db,
   ctx,
@@ -132,11 +178,16 @@ async function resolveAllowedExportColumns(
 
   const omittedSet = new Set();
   const columns = [];
+  const metaColumns = !requested.length && !roleAllowedSet
+    ? extractExportableCollectionFields(db, collection)
+    : null;
   const candidates = requested.length
     ? requested
     : roleAllowedSet
       ? [...roleAllowedSet]
-      : (Array.isArray(fallbackFields) && fallbackFields.length ? fallbackFields : DEFAULT_FALLBACK_COLUMNS);
+      : metaColumns
+        ? metaColumns
+        : (Array.isArray(fallbackFields) && fallbackFields.length ? fallbackFields : DEFAULT_FALLBACK_COLUMNS);
 
   for (const col of candidates) {
     if (isSensitiveField(col)) {

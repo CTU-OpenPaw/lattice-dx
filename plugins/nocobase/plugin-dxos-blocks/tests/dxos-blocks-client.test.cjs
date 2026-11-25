@@ -497,3 +497,59 @@ test('Task 5: DxosKanbanScheduleBlockModel uiSchema keeps existing fields and ad
   assert.equal(el.props.liveConfig.dateField, 'scheduledAt');
   assert.equal(el.props.liveConfig.titleField, 'equipmentName');
 });
+
+test('Task 7: DxosRecordWorkbenchBlockModel preserves strict defaultParams while populating dynamic latticeCustom* collections in block config dropdowns', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const bootstrapApi = {
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                { name: 'latticeCustomMaintenanceOrders', title: 'Lệnh Bảo trì', isCustom: true, fields: [] },
+              ],
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => bootstrapApi, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    { apiClient: bootstrapApi },
+  );
+
+  await new Promise((r) => setTimeout(r, 15));
+  const cfgStep = models.DxosRecordWorkbenchBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
+  assert.deepEqual(cfgStep.defaultParams, {
+    title: 'Trao đổi Chatter, Chứng từ & Xuất báo cáo',
+    collection: 'latticeRequests',
+    recordId: '',
+    showExport: true,
+    showVoucherActions: true,
+    showChatter: true,
+  });
+  assert.ok(
+    cfgStep.uiSchema.collection.enum.some((opt) => opt.value === 'latticeCustomMaintenanceOrders'),
+    'DxosRecordWorkbenchBlockModel config collection dropdown must include dynamic latticeCustom* collections',
+  );
+});

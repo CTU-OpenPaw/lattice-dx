@@ -211,13 +211,17 @@ function createVoucherLifecycleBar(client, React, app) {
     showPkiBadge = true,
     showLineage = true,
     showPrintVoucher = true,
+    showVoucherActions = true,
     printDocumentType = 'order',
     onUpdated,
   }) {
     const api = useApi();
     const ctxRecord = useRecord();
     const propOrg = String(organizationId || record?.organizationId || ctxRecord?.organizationId || '').trim();
-    const validTarget = VOUCHER_COLLECTIONS.has(String(targetCollection || '')) && Number(targetRecordId) > 0;
+    const colName = String(targetCollection || '').trim();
+    const numericRecordId = Number(targetRecordId);
+    const validRecordTarget = SAFE_COLLECTION_RE.test(colName) && Number.isFinite(numericRecordId) && numericRecordId > 0;
+    const validVoucherTarget = showVoucherActions !== false && VOUCHER_COLLECTIONS.has(colName) && validRecordTarget;
     const [info, setInfo] = React.useState({
       status: String(recordStatus || ''),
       version: recordVersion ?? null,
@@ -340,7 +344,7 @@ function createVoucherLifecycleBar(client, React, app) {
     const recordOrg = String(propOrg || info.organizationId || '').trim();
 
     const loadPkiEntries = React.useCallback(async (isCancelled = () => false) => {
-      if (!api?.request || !validTarget || showPkiBadge === false) return;
+      if (!api?.request || !validRecordTarget || showPkiBadge === false) return;
       const reqKey = currentTargetKey;
       const recId = String(Number(targetRecordId));
       const myEntriesSeq = ++reqTracker.pkiEntriesSeq;
@@ -385,34 +389,36 @@ function createVoucherLifecycleBar(client, React, app) {
           });
         }
       }
-    }, [api, targetCollection, targetRecordId, validTarget, showPkiBadge, currentTargetKey, reqTracker, recordOrg]);
+    }, [api, targetCollection, targetRecordId, validRecordTarget, showPkiBadge, currentTargetKey, reqTracker, recordOrg]);
 
     const loadVoucherState = React.useCallback(async (isCancelled = () => false) => {
-      if (!api?.request || !validTarget) return;
+      if (!api?.request || !validRecordTarget) return;
       const recId = Number(targetRecordId);
-      try {
-        const res = await api.request({
-          url: 'latticeVoucher:lineage',
-          method: 'get',
-          params: { collection: targetCollection, id: recId },
-          skipNotify: true,
-        });
-        if (isCancelled()) return;
-        const payload = res?.data?.data || res?.data || {};
-        const items = Array.isArray(payload.items) ? payload.items : [];
-        const current = items.find((it) => Number(it?.id) === recId);
-        const resolvedOrg = String(current?.organizationId || items[0]?.organizationId || propOrg || '').trim();
-        setInfo({
-          status: current?.status != null ? String(current.status) : String(recordStatus || ''),
-          version: current?.version ?? null,
-          amendmentNo: Number(current?.amendmentNo) || 0,
-          amendedFromId: current?.amendedFromId ?? null,
-          organizationId: resolvedOrg,
-          lineage: items,
-        });
-        return;
-      } catch {
-        // Fallback to single record fetch when lineage endpoint unavailable for collection
+      if (validVoucherTarget) {
+        try {
+          const res = await api.request({
+            url: 'latticeVoucher:lineage',
+            method: 'get',
+            params: { collection: targetCollection, id: recId },
+            skipNotify: true,
+          });
+          if (isCancelled()) return;
+          const payload = res?.data?.data || res?.data || {};
+          const items = Array.isArray(payload.items) ? payload.items : [];
+          const current = items.find((it) => Number(it?.id) === recId);
+          const resolvedOrg = String(current?.organizationId || items[0]?.organizationId || propOrg || '').trim();
+          setInfo({
+            status: current?.status != null ? String(current.status) : String(recordStatus || ''),
+            version: current?.version ?? null,
+            amendmentNo: Number(current?.amendmentNo) || 0,
+            amendedFromId: current?.amendedFromId ?? null,
+            organizationId: resolvedOrg,
+            lineage: items,
+          });
+          return;
+        } catch {
+          // Fallback to single record fetch when lineage endpoint unavailable for collection
+        }
       }
       if (isCancelled()) return;
       try {
@@ -426,7 +432,7 @@ function createVoucherLifecycleBar(client, React, app) {
         const rec = recRes?.data?.data || recRes?.data || null;
         if (rec && typeof rec === 'object') {
           setInfo({
-            status: rec.status != null ? String(rec.status) : '',
+            status: rec.status != null ? String(rec.status) : String(recordStatus || ''),
             version: rec.version ?? null,
             amendmentNo: Number(rec.amendmentNo) || 0,
             amendedFromId: rec.amendedFromId ?? null,
@@ -435,7 +441,7 @@ function createVoucherLifecycleBar(client, React, app) {
           });
         }
       } catch {}
-    }, [api, targetCollection, targetRecordId, validTarget, recordStatus, propOrg]);
+    }, [api, targetCollection, targetRecordId, validRecordTarget, validVoucherTarget, recordStatus, propOrg]);
 
     React.useEffect(() => {
       let cancelled = false;
@@ -444,7 +450,8 @@ function createVoucherLifecycleBar(client, React, app) {
       return () => { cancelled = true; };
     }, [loadVoucherState, loadPkiEntries]);
 
-    if (!validTarget) return null;
+    const showGovernanceRow = showPkiBadge !== false || showLineage !== false || canPrintOrder;
+    if (!validRecordTarget || (!validVoucherTarget && !showGovernanceRow)) return null;
 
     const handleVerifyPki = async () => {
       if (!api?.request || pkiState.loading || reqTracker.pkiVerifying) return;
@@ -715,7 +722,7 @@ function createVoucherLifecycleBar(client, React, app) {
     };
 
     const runAction = async (action) => {
-      if (!api?.request || busy) return;
+      if (!api?.request || busy || !validVoucherTarget) return;
       const recId = Number(targetRecordId);
       const trimmedReason = String(reasonText || '').trim();
       if (action === 'cancel' && (trimmedReason.length < 3 || trimmedReason.length > 255)) {
@@ -776,8 +783,6 @@ function createVoucherLifecycleBar(client, React, app) {
       textAlign: 'center',
     });
 
-    const showGovernanceRow = showPkiBadge !== false || showLineage !== false || canPrintOrder;
-
     return h('div', {
       'data-testid': 'dxos-voucher-lifecycle-bar',
       style: {
@@ -794,8 +799,12 @@ function createVoucherLifecycleBar(client, React, app) {
     },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
         h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, minWidth: 0 } },
-          h('strong', { style: { fontSize: 12, minWidth: 0 } }, `Vòng đời chứng từ (${targetCollection} #${targetRecordId})`),
-          h('span', {
+          h('strong', { style: { fontSize: 12, minWidth: 0 } },
+            validVoucherTarget
+              ? `Vòng đời chứng từ (${targetCollection} #${targetRecordId})`
+              : `Xác thực & Phả hệ bản ghi (${targetCollection} #${targetRecordId})`,
+          ),
+          (validVoucherTarget || curStatus) ? h('span', {
             'data-testid': 'dxos-voucher-status-badge',
             style: {
               fontSize: 11,
@@ -807,20 +816,20 @@ function createVoucherLifecycleBar(client, React, app) {
               border: `1px solid ${statusBadge.border}`,
               whiteSpace: 'nowrap',
             },
-          }, statusBadge.label),
+          }, statusBadge.label) : null,
         ),
-        h('span', {
+        validVoucherTarget ? h('span', {
           'data-testid': 'dxos-voucher-lineage',
           style: { fontSize: 11, color: '#475569' },
         }, info.amendmentNo > 0 || info.amendedFromId != null
           ? `Điều chỉnh #${info.amendmentNo}${info.amendedFromId != null ? ` (từ #${info.amendedFromId})` : ''}`
-          : 'Chứng từ gốc'),
+          : 'Chứng từ gốc') : null,
       ),
-      info.lineage.length > 1 ? h('div', { style: { fontSize: 11, color: '#475569', display: 'flex', flexWrap: 'wrap', gap: 4 } },
+      validVoucherTarget && info.lineage.length > 1 ? h('div', { style: { fontSize: 11, color: '#475569', display: 'flex', flexWrap: 'wrap', gap: 4 } },
         'Chuỗi phiên bản: ',
         info.lineage.map((it) => `${it.code || `#${it.id}`} [${it.status || '?'}]`).join(' → '),
       ) : null,
-      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
+      validVoucherTarget ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
         h('input', {
           'data-testid': 'dxos-voucher-reason-input',
           type: 'text',
@@ -860,7 +869,7 @@ function createVoucherLifecycleBar(client, React, app) {
             style: btnStyle(canAmend, '#0f766e'),
           }, 'Lập bản điều chỉnh'),
         ),
-      ),
+      ) : null,
       statusNote ? h('div', { style: { fontSize: 11, color: '#1d4ed8' } }, statusNote) : null,
       showGovernanceRow ? h('div', {
         style: {

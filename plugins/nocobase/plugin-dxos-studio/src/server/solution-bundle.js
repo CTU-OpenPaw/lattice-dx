@@ -48,7 +48,7 @@ const ALLOWED_FLOW_MODEL_USES = new Set([
   'DxosPortalHeroBlockModel', 'DxosKpiMetricBlockModel', 'DxosContextTelemetryBlockModel',
   'DxosAiProposalBlockModel', 'DxosWorkflowTasksBlockModel', 'DxosParaVaultBlockModel',
   'DxosCreativeStudioBlockModel', 'DxosRecordWorkbenchBlockModel',
-  'DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel',
+  'DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel', 'DxosWmsOpsBlockModel',
   'LatticeFormBlockModel', 'LatticeListBlockModel', 'LatticeTaskInboxBlockModel',
   'LatticeApprovalBlockModel', 'LatticeAttachmentBlockModel', 'LatticeActivityTimelineBlockModel',
   'LatticeContextEntityBlockModel', 'LatticeWorkflowFormBlockModel',

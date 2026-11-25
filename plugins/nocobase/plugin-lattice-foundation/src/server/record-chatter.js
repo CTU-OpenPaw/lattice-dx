@@ -25,6 +25,12 @@ const ALLOWED_CHATTER_COLLECTIONS = new Set([
   'latticeServiceTickets',
   'latticeParaDocuments',
 ]);
+const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
+
+function isChatterCollectionAllowed(name) {
+  const clean = String(name || '').trim();
+  return ALLOWED_CHATTER_COLLECTIONS.has(clean) || CUSTOM_COLLECTION_RE.test(clean);
+}
 
 const DIFF_IGNORED_FIELDS = new Set([
   'id',
@@ -191,8 +197,42 @@ async function recordChatterEntry(
   return writeEntry(activeTx);
 }
 
+async function hasCollectionReadPermission(db, ctx, collection) {
+  if (typeof ctx?.can === 'function') {
+    return ['view', 'list'].some((act) => ctx.can({ resource: collection, action: act }));
+  }
+  const roleName = ctx?.state?.currentRole;
+  const rolesRepo = db?.getRepository?.('roles');
+  const dsrRepo = db?.getRepository?.('dataSourcesRolesResources');
+  if (!roleName || !dsrRepo) {
+    return true;
+  }
+  if (rolesRepo && typeof rolesRepo.findOne === 'function') {
+    const role = await rolesRepo.findOne({ filter: { name: roleName } });
+    if (val(role, 'allowAll') === true) return true;
+    const res = await dsrRepo.findOne({
+      filter: { roleName, name: collection, dataSourceKey: 'main' },
+    });
+    if (res) {
+      if (val(res, 'usingActionsConfig') === false) return true;
+      const actions = val(res, 'actions') || [];
+      return actions.some((a) => ['view', 'list'].includes(a?.name || a));
+    }
+    const strategyActions = val(role, 'strategy')?.actions || [];
+    return Array.isArray(strategyActions) && strategyActions.some((a) => ['view', 'list'].includes(a) || a === '*:*');
+  }
+  const res = await dsrRepo.findOne({
+    filter: { roleName, name: collection, dataSourceKey: 'main' },
+  });
+  if (!res) return false;
+  if (val(res, 'usingActionsConfig') === false) return true;
+  const actions = val(res, 'actions') || [];
+  return actions.some((a) => ['view', 'list'].includes(a?.name || a));
+}
+
 async function recordFieldDiffChatter(db, { organizationId, targetCollection, targetRecordId, before, after, actor }, opts = {}) {
-  if (!ALLOWED_CHATTER_COLLECTIONS.has(targetCollection)) return null;
+  if (!isChatterCollectionAllowed(targetCollection)) return null;
+  if (!organizationId || !targetRecordId) return null;
   const diffs = computeRecordFieldDiff(before, after);
   if (!diffs.length) return null;
   const summary = `Cập nhật ${diffs.map((d) => d.field).join(', ')}`;
@@ -215,7 +255,7 @@ async function recordFieldDiffChatter(db, { organizationId, targetCollection, ta
 }
 
 async function resolveVerifiedTarget(db, ctx, targetCollection, targetRecordId) {
-  if (!ALLOWED_CHATTER_COLLECTIONS.has(targetCollection)) {
+  if (!isChatterCollectionAllowed(targetCollection)) {
     throw failChatter('CHATTER_COLLECTION_INVALID', 400, 'Collection không hỗ trợ Record Chatter.');
   }
   const id = Number(targetRecordId);
@@ -246,6 +286,9 @@ async function resolveVerifiedTarget(db, ctx, targetCollection, targetRecordId) 
   }
 
   const actor = await resolveNativeActor(db, ctx.state?.currentUser);
+  if (!(await hasCollectionReadPermission(db, ctx, targetCollection))) {
+    throw failChatter('CHATTER_ACCESS_DENIED', 403, 'Không có quyền truy cập bản ghi này.');
+  }
   const findOrgRow = (transaction) => repo.findOne({
     filter: { id, organizationId: actor.organizationId },
     ...(transaction ? { transaction } : {}),
@@ -253,7 +296,8 @@ async function resolveVerifiedTarget(db, ctx, targetCollection, targetRecordId) 
   const row = canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction
     ? await withTenantRlsContext(db, actor.organizationId, findOrgRow)
     : await findOrgRow(getActiveRlsContext()?.transaction);
-  if (!row) {
+  const rowOrg = val(row, 'organizationId');
+  if (!row || (rowOrg != null ? String(rowOrg) !== actor.organizationId : CUSTOM_COLLECTION_RE.test(targetCollection))) {
     throw failChatter('CHATTER_TARGET_NOT_FOUND', 404, 'Không tìm thấy bản ghi trong phạm vi tổ chức.');
   }
   return {
@@ -395,6 +439,8 @@ function registerChatterResource(app) {
 
 module.exports = {
   ALLOWED_CHATTER_COLLECTIONS,
+  CUSTOM_COLLECTION_RE,
+  isChatterCollectionAllowed,
   extractMentionTokens,
   resolveOrganizationMentions,
   computeRecordFieldDiff,

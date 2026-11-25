@@ -2549,3 +2549,166 @@ test('Task 6: webgis-block rejects prototype keys (__proto__, constructor, proto
   assert.ok(calls.some((c) => c.url === 'latticeAssets:list'), 'Rejected prototype collection falls back to default Twin view');
   hooks.unmount();
 });
+
+test('Task 7: VoucherLifecycleBar renders PKI & Lineage badges for latticeCustom* records while gating voucher workflow actions', async () => {
+  const { createVoucherLifecycleBar } = require(path.join(PLUGIN_ROOT, 'src/client/chatter-panel.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  const calls = [];
+  const api = {
+    async request(req) {
+      calls.push(req);
+      if (req.url === 'latticeCustomWorkOrders:get') {
+        return { data: { data: { id: 17, code: 'WO-17', status: 'in_progress', organizationId: 'org-a' } } };
+      }
+      if (req.url === 'dxosLedger:entries') {
+        return { data: { data: { total: 1, items: [{ seq: 91, keyId: 'ed25519-org-a', entryHash: 'abc123def4567890' }] } } };
+      }
+      if (req.url === 'dxosLedger:verify') {
+        return { data: { data: { valid: true, checkedCount: 91 } } };
+      }
+      if (req.url === 'dxosDataGov:lineageTrace') {
+        return {
+          data: {
+            data: {
+              nodes: [{ key: 'latticeCustomWorkOrders:17', collection: 'latticeCustomWorkOrders', recordId: '17', depth: 0 }],
+              edges: [{ edgeUid: 'lin-wo-1', sourceCollection: 'latticeIncidentCases', sourceRecordId: '5', targetCollection: 'latticeCustomWorkOrders', targetRecordId: '17', relationType: 'generated_work_order' }],
+              truncated: false,
+            },
+          },
+        };
+      }
+      return { data: { data: {} } };
+    },
+  };
+
+  const Bar = createVoucherLifecycleBar({ useAPIClient: () => api }, React, {});
+  assert.equal(Bar({ targetCollection: 'latticeCustomWorkOrders', targetRecordId: 0 }), null);
+  assert.equal(Bar({ targetCollection: 'bad collection!', targetRecordId: 17 }), null);
+
+  let tree = render(Bar, { targetCollection: 'latticeCustomWorkOrders', targetRecordId: 17 });
+  await new Promise((r) => setTimeout(r, 25));
+  tree = render(Bar, { targetCollection: 'latticeCustomWorkOrders', targetRecordId: 17 });
+
+  assert.equal(calls.some((c) => c.url === 'latticeVoucher:lineage'), false, 'Non-voucher custom collection must not call latticeVoucher:lineage');
+  assert.ok(calls.some((c) => c.url === 'latticeCustomWorkOrders:get'));
+  assert.ok(calls.some((c) => c.url === 'dxosLedger:entries' && c.params?.targetCollection === 'latticeCustomWorkOrders' && c.params?.organizationId === 'org-a'));
+
+  // PKI and Lineage render, while voucher actions (submit/cancel/amend/print) are gated out
+  assert.ok(findByTestId(tree, 'dxos-voucher-lifecycle-bar'));
+  assert.ok(findByTestId(tree, 'dxos-workbench-pki-badge'));
+  assert.ok(textOf(findByTestId(tree, 'dxos-workbench-pki-badge')).includes('91'));
+  assert.ok(findByTestId(tree, 'dxos-workbench-lineage-panel'));
+  assert.equal(findByTestId(tree, 'dxos-voucher-submit-btn'), null);
+  assert.equal(findByTestId(tree, 'dxos-voucher-cancel-btn'), null);
+  assert.equal(findByTestId(tree, 'dxos-voucher-amend-btn'), null);
+  assert.equal(findByTestId(tree, 'dxos-voucher-reason-input'), null);
+  assert.equal(findByTestId(tree, 'dxos-workbench-print-voucher-btn'), null);
+
+  await findByTestId(tree, 'dxos-workbench-pki-verify-btn').props.onClick();
+  await findByTestId(tree, 'dxos-workbench-lineage-btn').props.onClick();
+  tree = render(Bar, { targetCollection: 'latticeCustomWorkOrders', targetRecordId: 17 });
+  assert.ok(textOf(findByTestId(tree, 'dxos-workbench-pki-badge')).includes('Hợp lệ (91 mục)'));
+  assert.ok(textOf(findByTestId(tree, 'dxos-workbench-lineage-panel')).includes('generated_work_order'));
+  unmount();
+});
+
+test('Task 7: DxosRecordWorkbenchView dynamically merges latticeCustom* from collectionsMeta and operates Chatter, Export, and PKI/Lineage on custom records', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { React, render, unmount } = createMiniHooks();
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const calls = [];
+  const api = {
+    async request(req) {
+      calls.push(req);
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                { name: 'latticeCustomMaintenanceOrders', title: 'Lệnh Bảo trì', isCustom: true, fields: [{ name: 'equipmentName', type: 'string' }] },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'latticeCustomMaintenanceOrders:list') {
+        return { data: { data: [{ id: 8, code: 'MNT-8', equipmentName: 'Chiller 08', organizationId: 'org-a', status: 'open' }] } };
+      }
+      if (req.url === 'latticeCustomMaintenanceOrders:get') {
+        return { data: { data: { id: 8, code: 'MNT-8', equipmentName: 'Chiller 08', organizationId: 'org-a', status: 'open' } } };
+      }
+      if (req.url === 'latticeChatter:list') {
+        return { data: { data: { items: [{ id: 1, entryType: 'comment', body: 'Đã kiểm tra @EMP-A1', authorName: 'an' }] } } };
+      }
+      if (req.url === 'dxosLedger:entries') {
+        return { data: { data: { total: 1, items: [{ seq: 55, keyId: 'ed25519-k1', entryHash: 'beef1234567890' }] } } };
+      }
+      if (req.url === 'dxosBlocks:exportReport') {
+        return { data: { data: { filename: 'latticeCustomMaintenanceOrders-org-a.csv', rowCount: 1, sha256: 'deadbeef1234', contentBase64: '' } } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => api, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    {},
+  );
+
+  const Workbench = models.DxosRecordWorkbenchBlockModel;
+  const inst = new Workbench({
+    props: { collection: 'latticeCustomMaintenanceOrders', recordId: '8', showExport: true, showVoucherActions: true, showChatter: true },
+  });
+  const el = inst.renderComponent();
+  let tree = render(el.type, el.props);
+  await new Promise((r) => setTimeout(r, 30));
+  tree = render(el.type, el.props);
+  const resolved = resolveTree(tree);
+
+  // Select dropdown includes dynamic custom collection option from collectionsMeta
+  const colSelect = collectNodes(resolved).find((n) => n.type === 'select' && n.props['aria-label'] === 'Lọc phân hệ nghiệp vụ');
+  assert.ok(colSelect);
+  const optValues = collectNodes(colSelect).filter((n) => n.type === 'option').map((n) => n.props.value);
+  assert.ok(optValues.includes('latticeCustomMaintenanceOrders'), 'Workbench dropdown must include dynamic latticeCustom* collection');
+  assert.ok(textOf(colSelect).includes('Lệnh Bảo trì (latticeCustomMaintenanceOrders)'));
+
+  // Recent custom records dropdown + PKI badge + Lineage panel + Chatter + Export bar all render cleanly
+  assert.ok(calls.some((c) => c.url === 'latticeCustomMaintenanceOrders:list'));
+  assert.ok(textOf(resolved).includes('MNT-8'));
+  assert.ok(findByTestId(resolved, 'dxos-record-chatter'));
+  assert.ok(findByTestId(resolved, 'dxos-workbench-pki-badge'));
+  assert.ok(findByTestId(resolved, 'dxos-workbench-lineage-panel'));
+  assert.equal(findByTestId(resolved, 'dxos-voucher-submit-btn'), null);
+
+  const csvBtn = collectNodes(findByTestId(resolved, 'dxos-workbench-export-bar')).find((n) => n.type === 'button' && textOf(n).includes('CSV'));
+  await csvBtn.props.onClick();
+  assert.ok(calls.some((c) => c.url === 'dxosBlocks:exportReport' && c.data?.collection === 'latticeCustomMaintenanceOrders'));
+  unmount();
+
+  // Verify RecordChatterView directly on latticeCustomMaintenanceOrders (list + post)
+  const { createRecordChatterView } = require(path.join(PLUGIN_ROOT, 'src/client/chatter-panel.js'));
+  const chatterHooks = createMiniHooks();
+  const ChatterView = createRecordChatterView({ useAPIClient: () => api }, chatterHooks.React, {});
+  let cTree = chatterHooks.render(ChatterView, { targetCollection: 'latticeCustomMaintenanceOrders', targetRecordId: 8 });
+  await new Promise((r) => setTimeout(r, 25));
+  cTree = chatterHooks.render(ChatterView, { targetCollection: 'latticeCustomMaintenanceOrders', targetRecordId: 8 });
+  assert.ok(calls.some((c) => c.url === 'latticeChatter:list' && c.params?.targetCollection === 'latticeCustomMaintenanceOrders' && Number(c.params?.targetRecordId) === 8));
+  assert.ok(textOf(findByTestId(cTree, 'dxos-record-chatter')).includes('Đã kiểm tra'));
+  chatterHooks.unmount();
+});

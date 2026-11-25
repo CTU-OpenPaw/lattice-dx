@@ -331,7 +331,11 @@ test('VoucherLifecycleBar, creative-studio export/voucher-actions, and Chatter e
   };
 
   const Bar = createVoucherLifecycleBar({ useAPIClient: () => ({ request: async () => ({ data: {} }) }) }, React, {});
-  assert.equal(Bar({ targetCollection: 'latticeAssets', targetRecordId: 1 }), null);
+  assert.equal(Bar({ targetCollection: 'latticeAssets', targetRecordId: 0 }), null);
+  const assetBarDump = JSON.stringify(Bar({ targetCollection: 'latticeAssets', targetRecordId: 1 }));
+  assert.ok(assetBarDump.includes('dxos-workbench-pki-badge'));
+  assert.ok(assetBarDump.includes('dxos-workbench-lineage-panel'));
+  assert.equal(assetBarDump.includes('dxos-voucher-submit-btn'), false);
 
   const barTree = Bar({
     targetCollection: 'latticeRequests',

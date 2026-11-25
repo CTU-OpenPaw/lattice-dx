@@ -18,6 +18,7 @@ const {
   fetchParaSummary,
   inferPortalSlugFromLocation,
   requestAndDownloadExport,
+  fetchCollectionsMeta,
 } = require('./blocks-helpers');
 const { createCreativeStudioView, DEFAULT_CREATIVE_BLUEPRINT } = require('./creative-studio-block');
 const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
@@ -93,6 +94,13 @@ const WORKBENCH_COLLECTION_ENUM = [
   { label: 'Tài sản (latticeAssets)', value: 'latticeAssets' },
   { label: 'Sự cố IoT (latticeIncidentCases)', value: 'latticeIncidentCases' },
   { label: 'Tài liệu P.A.R.A. (latticeParaDocuments)', value: 'latticeParaDocuments' },
+];
+
+const KANBAN_COLLECTION_ENUM = [
+  { label: 'Đơn Logistics (latticeOrders)', value: 'latticeOrders' },
+  { label: 'Yêu cầu mua sắm (latticeRequests)', value: 'latticeRequests' },
+  { label: 'Phiếu dịch vụ (latticeServiceTickets)', value: 'latticeServiceTickets' },
+  { label: 'Lô kho lạnh (latticeStockLots)', value: 'latticeStockLots' },
 ];
 
 const DEFAULT_HERO_ACTIONS = JSON.stringify([
@@ -694,9 +702,23 @@ function createBlockRenderers(client, React, antd, app) {
       : 'latticeRequests';
     const [selectedCollection, setSelectedCollection] = React.useState(safeCfgCollection);
     const [recordIdInput, setRecordIdInput] = React.useState(String(cfg.recordId ?? '').trim());
+    const [collectionsMeta, setCollectionsMeta] = React.useState([]);
     const [recentRecords, setRecentRecords] = React.useState([]);
     const [exportStatus, setExportStatus] = React.useState('');
     const [exportBusy, setExportBusy] = React.useState(false);
+
+    React.useEffect(() => {
+      let cancelled = false;
+      if (!api?.request) return undefined;
+      fetchCollectionsMeta(api)
+        .then((cols) => {
+          if (!cancelled && Array.isArray(cols)) {
+            setCollectionsMeta(cols);
+          }
+        })
+        .catch(() => {});
+      return () => { cancelled = true; };
+    }, [api]);
 
     React.useEffect(() => {
       setSelectedCollection(safeCfgCollection);
@@ -710,6 +732,23 @@ function createBlockRenderers(client, React, antd, app) {
       ? String(selectedCollection)
       : 'latticeRequests';
     const activeRecordId = Number(recordIdInput) > 0 ? Math.floor(Number(recordIdInput)) : 0;
+
+    const collectionOptions = React.useMemo(() => {
+      const map = new Map(WORKBENCH_COLLECTION_ENUM.map((d) => [d.value, d]));
+      for (const col of collectionsMeta) {
+        if (!col?.name) continue;
+        if (!map.has(col.name)) {
+          map.set(col.name, {
+            value: col.name,
+            label: col.title && col.title !== col.name ? `${col.title} (${col.name})` : col.name,
+          });
+        }
+      }
+      if (activeCollection && !map.has(activeCollection)) {
+        map.set(activeCollection, { value: activeCollection, label: activeCollection });
+      }
+      return [...map.values()];
+    }, [collectionsMeta, activeCollection]);
 
     const loadRecentRecords = React.useCallback(async (isCancelled = () => false) => {
       if (!api?.request || !SAFE_COLLECTION_RE.test(activeCollection)) {
@@ -812,7 +851,7 @@ function createBlockRenderers(client, React, antd, app) {
           value: activeCollection,
           onChange: (e) => { setSelectedCollection(e.target.value); setRecordIdInput(''); },
           style: { minWidth: 0, width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
-        }, WORKBENCH_COLLECTION_ENUM.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label))),
+        }, collectionOptions.map((opt) => h('option', { key: opt.value, value: opt.value }, opt.label))),
         recentRecords.length ? h('select', {
           'aria-label': 'Chọn bản ghi',
           value: recordIdInput,
@@ -820,7 +859,7 @@ function createBlockRenderers(client, React, antd, app) {
           style: { minWidth: 0, width: '100%', padding: '5px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         },
           h('option', { value: '' }, '-- Chọn bản ghi gần đây --'),
-          recentRecords.map((rec) => h('option', { key: rec.id, value: String(rec.id) }, `${rec.code || `#${rec.id}`} — ${rec.name || rec.title || ''}`)),
+          recentRecords.map((rec) => h('option', { key: rec.id, value: String(rec.id) }, `${rec.code || rec.lotCode || `#${rec.id}`} — ${rec.name || rec.title || rec.subject || rec.equipmentName || ''}`)),
         ) : null,
         h('input', {
           type: 'text',
@@ -846,11 +885,12 @@ function createBlockRenderers(client, React, antd, app) {
           },
         }, 'Làm mới'),
       ) : null,
-      cfg.showVoucherActions !== false ? h(VoucherLifecycleBar, {
+      (cfg.showVoucherActions !== false || cfg.showPkiBadge !== false || cfg.showLineage !== false) ? h(VoucherLifecycleBar, {
         targetCollection: activeCollection,
         targetRecordId: activeRecordId,
         organizationId: activeRecord?.organizationId || cfg.organizationId || cfg.defaultOrganizationId || '',
         record: activeRecord,
+        showVoucherActions: cfg.showVoucherActions !== false,
         showPkiBadge: cfg.showPkiBadge !== false,
         showLineage: cfg.showLineage !== false,
         showPrintVoucher: cfg.showPrintVoucher !== false,
@@ -890,6 +930,28 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
 
   const h = React.createElement;
   const views = createBlockRenderers(client, React, antd, app);
+  const workbenchCollectionEnum = WORKBENCH_COLLECTION_ENUM.map((opt) => ({ ...opt }));
+  const kanbanCollectionEnum = KANBAN_COLLECTION_ENUM.map((opt) => ({ ...opt }));
+
+  const bootstrapApi = app?.apiClient?.request ? app.apiClient : null;
+  if (bootstrapApi) {
+    Promise.resolve(fetchCollectionsMeta(bootstrapApi))
+      .then((cols) => {
+        if (!Array.isArray(cols)) return;
+        for (const targetEnum of [workbenchCollectionEnum, kanbanCollectionEnum]) {
+          const seen = new Set(targetEnum.map((o) => o.value));
+          for (const col of cols) {
+            if (!col?.name || seen.has(col.name)) continue;
+            seen.add(col.name);
+            targetEnum.push({
+              value: col.name,
+              label: col.title && col.title !== col.name ? `${col.title} (${col.name})` : col.name,
+            });
+          }
+        }
+      })
+      .catch(() => {});
+  }
 
   class DxosPortalHeroBlockModel extends BaseBlockModel {
     renderComponent() { return h(views.DxosPortalHeroView, { model: this, liveConfig: extractLiveConfig(this) }); }
@@ -1050,7 +1112,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           title: 'Collection nghiệp vụ',
           'x-decorator': 'FormItem',
           'x-component': 'Select',
-          enum: WORKBENCH_COLLECTION_ENUM,
+          enum: workbenchCollectionEnum,
         },
         recordId: { type: 'string', title: 'ID bản ghi (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         showExport: { type: 'boolean', title: 'Hiển thị thanh Xuất báo cáo', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
@@ -1108,12 +1170,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           title: 'Collection nghiệp vụ',
           'x-decorator': 'FormItem',
           'x-component': 'Select',
-          enum: [
-            { label: 'Đơn Logistics (latticeOrders)', value: 'latticeOrders' },
-            { label: 'Yêu cầu mua sắm (latticeRequests)', value: 'latticeRequests' },
-            { label: 'Phiếu dịch vụ (latticeServiceTickets)', value: 'latticeServiceTickets' },
-            { label: 'Lô kho lạnh (latticeStockLots)', value: 'latticeStockLots' },
-          ],
+          enum: kanbanCollectionEnum,
         },
         viewMode: {
           type: 'string',
