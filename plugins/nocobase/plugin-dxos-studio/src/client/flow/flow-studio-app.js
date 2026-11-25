@@ -221,20 +221,20 @@ function createFlowStudioApp(client, React, _antd, app) {
       const p = buildSavePayload();
       if (!p.ruleKey || !p.name) { reportFb({ type: 'error', text: 'Rule Key và Rule Name không được để trống.' }); return false; }
       let ok = false;
-      await runAction('save', 'dxosAutomations:saveRule', p, (d) => { ok = true; setDoc((s) => ({ ...s, dirty: false, rule: d?.rule ? { ...s.rule, ...d.rule } : s.rule })); reportFb({ type: 'success', text: `Đã lưu & publish "${p.ruleKey}".` }); loadAll(); });
+      await runAction('save', 'dxosAutomations:saveRule', p, (d) => { ok = true; refs.docRule = d?.rule ? { ...doc.rule, ...d.rule } : { ...doc.rule, ruleKey: p.ruleKey, name: p.name }; setDoc((s) => ({ ...s, dirty: false, rule: d?.rule ? { ...s.rule, ...d.rule } : s.rule })); reportFb({ type: 'success', text: `Đã lưu & publish "${p.ruleKey}".` }); loadAll(); });
       return ok;
     };
     const handleSave = () => saveDraft();
     const handleDryRun = (customEv) => { setRunUi((s) => ({ ...s, playing: false })); const p = buildSavePayload(); return runAction('dryRun', 'dxosAutomations:testRule', { ...orgPayload, rule: p, sampleEvent: sampleEvt(p, customEv), useDraft: true }, (d) => setRunWithIdx(d.simulation || d.run || d, true)); };
     const handleRunNow = async (targetRule, customEv) => {
-      if (!targetRule && doc.dirty && !(await saveDraft())) return false;
-      const r = targetRule || doc.rule;
-      const rk = String(r?.ruleKey || '').trim();
+      const preRk = String(doc.rule?.ruleKey || '').trim();
+      if (!targetRule && (doc.dirty || !preRk || !data.rules.some((x) => x.ruleKey === preRk)) && !(await saveDraft())) return false;
+      const r = targetRule || refs.docRule || doc.rule, rk = String(r?.ruleKey || '').trim();
       if (!rk) { reportFb({ type: 'error', text: 'Rule Key không được để trống.' }); return false; }
       const ev = customEv || r.sampleEvent || { type: primaryEvt(targetRule ? r.triggerEventType : deriveTriggerEventType(doc.graph, r), r.triggerEventType), data: {} };
       return runAction('runNow', 'dxosAutomations:runNow', { ...orgPayload, ruleKey: rk, sampleEvent: ev }, doneRun(`Đã chạy "${rk}"`));
     };
-    const handleToggleRuleActive = (r) => { const nextActive = r.active === false; return runAction('save', 'dxosAutomations:toggleRule', { ...orgPayload, ruleKey: r.ruleKey, active: nextActive }, () => { reportFb({ type: 'success', text: `Đã ${nextActive ? 'kích hoạt' : 'tạm dừng'} "${r.ruleKey}".` }); loadAll(); }); };
+    const handleToggleRuleActive = (r) => r?.ruleKey && runAction('toggle', 'dxosAutomations:toggleRule', { ...orgPayload, ruleKey: r.ruleKey, active: r.active === false }, () => { reportFb({ type: 'success', text: `Đã ${r.active === false ? 'kích hoạt' : 'tạm dừng'} "${r.ruleKey}".` }); loadAll(); });
     const handleDeleteRule = (r) => r?.ruleKey && runAction('delete', 'dxosAutomations:deleteRule', { ...orgPayload, ruleKey: r.ruleKey }, () => {
       setData((s) => ({ ...s, rules: s.rules.filter((x) => x.ruleKey !== r.ruleKey) }));
       if (doc.rule?.ruleKey === r.ruleKey) { const f = freshDoc(effectiveOrg || 1); refs.docRule = f.rule; setDoc(f); setRunUi(FRESH_RUN); }
@@ -281,7 +281,7 @@ function createFlowStudioApp(client, React, _antd, app) {
     const handleGuardSaveAndBack = async () => { if (await saveDraft()) closeEditorToList(); else setUi((u) => ({ ...u, unsavedGuardOpen: false })); };
     const handleGuardDiscardAndBack = () => { setDoc((d) => ({ ...d, dirty: false })); closeEditorToList(); };
     const handleNewFlow = () => { const f = freshDoc((refs.idSeq += 1)); refs.docRule = f.rule; setDoc(f); setData((s) => ({ ...s, runs: [] })); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, insertEdge: null, appendSource: null, bpOpen: false, settingsOpen: false, testRunnerOpen: false, valOpen: false })); };
-    const loadBlueprint = (bp) => { applyRule(bp, { dirty: true }); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, bpOpen: false, settingsOpen: false })); };
+    const loadBlueprint = (bp) => { applyRule(bp, { dirty: true }); setData((s) => ({ ...s, runs: [] })); setRunUi(FRESH_RUN); setUi((u) => ({ ...u, view: 'editor', unsavedGuardOpen: false, bpOpen: false, settingsOpen: false })); };
 
     refs.kbHandler = (evt) => dispatchFlowKeyDown(evt, {
       ui, dslOpen: dsl.open, selId: doc.selId,

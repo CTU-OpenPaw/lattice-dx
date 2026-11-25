@@ -1544,7 +1544,7 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
     { ...blueprints[1], active: true },
   ];
   const priorRuns = [
-    { id: 101, runUid: 'prior-run-1', ruleKey: blueprints[0].ruleKey, status: 'completed', durationMs: 12, stepTracesJson: [{ nodeId: 'trig_1', status: 'completed', durationMs: 3 }] },
+    { id: 101, runUid: 'prior-run-1', ruleKey: blueprints[0].ruleKey, status: 'suspended', suspendedNodeId: 'trig_1', durationMs: 12, stepTracesJson: [{ nodeId: 'trig_1', status: 'suspended', durationMs: 3 }] },
   ];
   let failSave = false;
 
@@ -1645,12 +1645,28 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
   assert.equal(requests.filter((r) => r.url === 'dxosAutomations:saveRule').length, savesBeforeDiscard + 1);
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-list-view').length, 1);
 
-  // 3. + Tạo luồng mới resets PlaybackBar runs=[], and Run Now auto-saves dirty drafts or aborts on invalid/failed save
+  // 3. + Tạo luồng mới resets PlaybackBar runs=[], and Run Now auto-saves unedited/dirty drafts or aborts on invalid/failed save
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-new-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
-  const runSelect = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-run-select')[0];
-  assert.equal(runSelect, undefined, 'PlaybackBar must receive runs=[] with no prior rule runs on + Tạo luồng mới');
+  const toggleTraceBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-toggle-trace-btn')[0];
+  assert.ok(toggleTraceBtn && textOf(toggleTraceBtn).includes('(0)'), 'PlaybackBar toggle button must report (0) runs on + Tạo luồng mới');
+  if (!toggleTraceBtn.props['aria-expanded']) {
+    toggleTraceBtn.props.onClick();
+    tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  }
+  const runSelector = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-run-selector')[0];
+  assert.ok(runSelector, 'PlaybackBar must render dxos-flow-run-selector when expanded');
+  assert.equal(runSelector.children.length, 1, 'PlaybackBar must have only placeholder option (runs=[]) on + Tạo luồng mới');
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-hitl-banner').length, 0);
+
+  // Immediately clicking Run Now on unedited + Tạo luồng mới (dirty === false, not persisted) must auto-save BEFORE runNow
+  const uneditedIdx = requests.length;
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-run-now-btn')[0].props.onClick();
+  tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
+  const uneditedReqs = requests.slice(uneditedIdx).map((r) => r.url);
+  const uneditedSavePos = uneditedReqs.indexOf('dxosAutomations:saveRule');
+  const uneditedRunPos = uneditedReqs.indexOf('dxosAutomations:runNow');
+  assert.ok(uneditedSavePos >= 0 && uneditedRunPos > uneditedSavePos, `Expected saveRule before runNow for unedited new flow, got: ${JSON.stringify(uneditedReqs)}`);
 
   // Invalid empty ruleKey/name while dirty aborts runNow cleanly
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-settings-btn')[0].props.onClick();

@@ -38,6 +38,7 @@ function createFlowListView(React) {
     const [search, setSearch] = React.useState('');
     const [filter, setFilter] = React.useState('all');
     const [confirmDeleteKey, setConfirmDeleteKey] = React.useState(null);
+    React.useEffect(() => { setConfirmDeleteKey(null); }, [effectiveOrg]);
 
     const safeRules = Array.isArray(rules) ? rules : [];
     const safeRuns = Array.isArray(runs) ? runs : [];
