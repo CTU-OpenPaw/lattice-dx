@@ -21,9 +21,12 @@ async function ensure(db, collection, values, transaction) {
   }
   return repo.create({values, transaction});
 }
-async function seedFoundation(db, transaction) {
+async function seedFoundation(db, transaction, { env = process.env } = {}) {
+  if (String(env?.LATTICE_SKIP_DEMO_SEED || '').trim() === '1') {
+    return { skipped: true, reason: 'LATTICE_SKIP_DEMO_SEED' };
+  }
   if (!transaction && canUsePgRlsSession(db)) {
-    return withSystemRlsBypass(db, (bypassTx) => seedFoundation(db, bypassTx));
+    return withSystemRlsBypass(db, (bypassTx) => seedFoundation(db, bypassTx, { env }));
   }
   const activeRls = getActiveRlsContext();
   if (transaction && canUsePgRlsSession(db) && !(activeRls?.systemRlsBypass === true && activeRls.transaction === transaction)) {

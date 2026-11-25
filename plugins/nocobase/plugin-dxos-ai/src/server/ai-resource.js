@@ -1111,6 +1111,104 @@ async function computeAllTimeAuditTotals(targetDb, organizationId) {
   });
 }
 
+async function ensureDefaultAiWorkforce(
+  db,
+  { env = process.env, actorUser = null, defaultOrigin = '', defaultOrganizationId = '', forceUpdate = false } = {},
+) {
+  const profRepo = db?.getRepository?.('latticeAiProfiles');
+  if (!profRepo || typeof profRepo.create !== 'function') {
+    return { seeded: [], skipped: true, reason: 'REPOS_NOT_READY' };
+  }
+
+  const resolvedOrigin = defaultOrigin || env?.NOCOBASE_INTERNAL_URL || '';
+  let outcome;
+  try {
+    outcome = await runWithSystemRlsBypass(db, async () => {
+      const resolvedDefaultOrg = defaultOrganizationId
+        || (await resolveDefaultOrganizationId(db, { actor: actorUser, env, fallback: 'default' }));
+      const seeded = [];
+      const existing = [];
+      const starterSet = new Set(STARTER_AI_BLUEPRINTS.map((b) => b.username));
+
+      const existingMap = new Map();
+      if (!forceUpdate && typeof profRepo.find === 'function') {
+        const existingStarterRows = (await profRepo.find({
+          filter: { username: { $in: [...starterSet] } },
+          limit: 100,
+        })) || [];
+        for (const row of existingStarterRows) {
+          const uname = String(val(row, 'username') || '').trim().toLowerCase();
+          if (uname) existingMap.set(uname, row);
+        }
+      }
+
+      for (const bp of STARTER_AI_BLUEPRINTS) {
+        if (!forceUpdate) {
+          let already = existingMap.get(bp.username);
+          if (!already && typeof profRepo.findOne === 'function') {
+            already = await profRepo.findOne({ filter: { username: bp.username } });
+          }
+          if (already) {
+            existing.push(bp.username);
+            continue;
+          }
+        }
+        const res = await upsertAndSyncProfile(db, { ...bp, organizationId: bp.organizationId || resolvedDefaultOrg }, {
+          actorUser,
+          defaultOrigin: resolvedOrigin,
+          defaultOrganizationId: resolvedDefaultOrg,
+          auditToolName: null,
+        });
+        seeded.push(res.profile.username);
+      }
+
+      if (forceUpdate && typeof profRepo.find === 'function') {
+        const existingRows = (await profRepo.find({ limit: 500 })) || [];
+        for (const row of existingRows) {
+          const uname = String(val(row, 'username') || '').trim().toLowerCase();
+          if (!uname || starterSet.has(uname)) continue;
+          const rawPerms = val(row, 'toolPermissions') ?? val(row, 'toolPermissionsJson');
+          const hasLegacyKey = rawPerms && typeof rawPerms === 'object' && Object.prototype.hasOwnProperty.call(rawPerms, LEGACY_WORKFLOW_TASKS_TOOL);
+          const hasLegacyCol = val(row, 'toolPermissionsJson') !== undefined;
+          if (hasLegacyKey || hasLegacyCol) {
+            await upsertAndSyncProfile(db, serializeProfile(row, resolvedDefaultOrg), {
+              actorUser,
+              defaultOrigin: resolvedOrigin,
+              defaultOrganizationId: resolvedDefaultOrg,
+              auditToolName: null,
+            });
+          }
+        }
+      }
+
+      return { seeded, existing };
+    });
+  } catch (err) {
+    const msg = String(err?.message || '');
+    const code = err?.original?.code || err?.parent?.code || err?.code || '';
+    if (!forceUpdate && (code === '42P01' || /does not exist|no such table/i.test(msg))) {
+      return { seeded: [], skipped: true, reason: 'REPOS_NOT_READY' };
+    }
+    throw err;
+  }
+
+  let llm;
+  try {
+    llm = await runWithSystemRlsBypass(db, () => ensureLocalLlmServiceRecord(db, env));
+  } catch (err) {
+    if (forceUpdate) throw err;
+    llm = { configured: false, skipped: true, reason: err?.message || 'LLM_SERVICE_NOT_READY' };
+  }
+
+  return {
+    seeded: outcome.seeded,
+    existing: outcome.existing,
+    profiles: outcome.seeded,
+    skipped: false,
+    llm,
+  };
+}
+
 function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
   const resolveDb = (ctx) => ctx?.db || db;
 
@@ -1394,42 +1492,16 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const defaultOrg = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env, fallback: 'default' });
       const defaultOrigin = env?.NOCOBASE_INTERNAL_URL;
 
-      const profiles = await runWithSystemRlsBypass(targetDb, async () => {
-        const synced = [];
-        for (const bp of STARTER_AI_BLUEPRINTS) {
-          const res = await upsertAndSyncProfile(targetDb, { ...bp, organizationId: bp.organizationId || defaultOrg }, {
-            actorUser,
-            defaultOrigin,
-            defaultOrganizationId: defaultOrg,
-            auditToolName: null,
-          });
-          synced.push(res.profile.username);
-        }
-
-        const profRepo = targetDb?.getRepository?.('latticeAiProfiles');
-        if (profRepo && typeof profRepo.find === 'function') {
-          const existingRows = (await profRepo.find({ limit: 500 })) || [];
-          const starterSet = new Set(STARTER_AI_BLUEPRINTS.map((b) => b.username));
-          for (const row of existingRows) {
-            const uname = String(val(row, 'username') || '').trim().toLowerCase();
-            if (!uname || starterSet.has(uname)) continue;
-            const rawPerms = val(row, 'toolPermissions') ?? val(row, 'toolPermissionsJson');
-            const hasLegacyKey = rawPerms && typeof rawPerms === 'object' && Object.prototype.hasOwnProperty.call(rawPerms, LEGACY_WORKFLOW_TASKS_TOOL);
-            const hasLegacyCol = val(row, 'toolPermissionsJson') !== undefined;
-            if (hasLegacyKey || hasLegacyCol) {
-              await upsertAndSyncProfile(targetDb, serializeProfile(row, defaultOrg), {
-                actorUser,
-                defaultOrigin,
-                defaultOrganizationId: defaultOrg,
-                auditToolName: null,
-              });
-            }
-          }
-        }
-        return synced;
+      const workforce = await ensureDefaultAiWorkforce(targetDb, {
+        env,
+        actorUser,
+        defaultOrigin,
+        defaultOrganizationId: defaultOrg,
+        forceUpdate: true,
       });
+      const profiles = workforce.seeded || [];
+      const llm = workforce.llm || { configured: false, skipped: true };
 
-      const llm = await ensureLocalLlmServiceRecord(targetDb, env);
       await recordAiAuditLog(targetDb, {
         actorUserId: val(actorUser, 'id') ?? null,
         actorUsername: val(actorUser, 'username') || null,
@@ -1821,6 +1893,7 @@ module.exports = {
   SUPPORTED_HITL_TOOLS,
   serializeProfile,
   ensureLocalLlmServiceRecord,
+  ensureDefaultAiWorkforce,
   probeLlmHealth,
   upsertAndSyncProfile,
   createDxosAiActions,

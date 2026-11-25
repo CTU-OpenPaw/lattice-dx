@@ -136,10 +136,10 @@ class LatticeFoundationPlugin extends Plugin {
   }
   async install() {
     if (canUsePgRlsSession(this.db)) {
-      await withSystemRlsBypass(this.db, (transaction) => seedFoundation(this.db, transaction));
+      await withSystemRlsBypass(this.db, (transaction) => seedFoundation(this.db, transaction, { env: process.env }));
       return;
     }
-    await this.db.sequelize.transaction((transaction) => seedFoundation(this.db, transaction));
+    await this.db.sequelize.transaction((transaction) => seedFoundation(this.db, transaction, { env: process.env }));
   }
 }
 LatticeFoundationPlugin.appendLedgerEntrySafely = appendLedgerEntrySafely;

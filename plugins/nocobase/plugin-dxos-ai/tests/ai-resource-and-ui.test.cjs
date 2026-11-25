@@ -2160,3 +2160,75 @@ test('Task 4: unauthenticated SSE skip, non-overlapping Flow Studio launcher, ni
     global.localStorage = origStorage;
   }
 });
+
+test('Task 8 (Review Focus #4): DxosAiPlugin.install() & afterEnable() auto-bootstrap dxos-architect + starter workforce with 0 llmServices, handle REPOS_NOT_READY, and preserve customized bindings', async () => {
+  const { ensureDefaultAiWorkforce } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  assert.equal(typeof ensureDefaultAiWorkforce, 'function', 'ensureDefaultAiWorkforce must be exported from ai-resource.js');
+
+  // 1. Safely no-ops with REPOS_NOT_READY when latticeAiProfiles repository is absent
+  const notReadyRes = await ensureDefaultAiWorkforce({ getRepository: () => null }, { env: {} });
+  assert.deepEqual(notReadyRes, { seeded: [], skipped: true, reason: 'REPOS_NOT_READY' });
+
+  // 2. DxosAiPlugin.install() and afterEnable() auto-bootstrap 5 starter profiles with 0 llmServices and no AGENT_API_KEY
+  const origLoad = Module._load;
+  const origApiKey = process.env.AGENT_API_KEY;
+  const origNineKey = process.env.NINE_ROUTER_API_KEY;
+  delete process.env.AGENT_API_KEY;
+  delete process.env.NINE_ROUTER_API_KEY;
+  class MockPlugin {
+    constructor(app) {
+      this.app = app;
+      this.db = app?.db;
+    }
+  }
+  Module._load = function (request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const db = makeMockDb();
+    db.stores.llmServices = [];
+    const ServerPlugin = require(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+    const plugin = new ServerPlugin({ db });
+    assert.equal(typeof plugin.install, 'function', 'DxosAiPlugin must define install()');
+    assert.equal(typeof plugin.afterEnable, 'function', 'DxosAiPlugin must define afterEnable()');
+
+    await plugin.install();
+    await plugin.afterEnable();
+
+    assert.equal(db.stores.llmServices.length, 0);
+    assert.equal(db.stores.latticeAiProfiles.length, 5);
+    assert.equal(db.stores.aiEmployees.length, 5);
+    const archProfile = db.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect');
+    const archEmp = db.stores.aiEmployees.find((e) => e.username === 'dxos-architect');
+    assert.ok(archProfile, 'dxos-architect must be auto-bootstrapped in latticeAiProfiles');
+    assert.ok(archEmp, 'dxos-architect must be synced into aiEmployees');
+    const archRoles = db.stores.rolesAiEmployees
+      .filter((r) => r.aiEmployee === 'dxos-architect')
+      .map((r) => r.roleName)
+      .sort();
+    assert.deepEqual(archRoles, ['admin', 'root']);
+
+    // 3. Customize dxos-architect binding, remove one non-architect starter, and re-run afterEnable()
+    archProfile.llmService = 'user-openai';
+    archProfile.modelName = 'gpt-4o';
+    archEmp.modelSettings = { enabled: true, models: [{ llmService: 'user-openai', model: 'gpt-4o' }] };
+    const opsIdx = db.stores.latticeAiProfiles.findIndex((p) => p.username === 'dxos-ops');
+    if (opsIdx >= 0) db.stores.latticeAiProfiles.splice(opsIdx, 1);
+
+    await plugin.afterEnable();
+
+    const afterProfile = db.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect');
+    const afterEmp = db.stores.aiEmployees.find((e) => e.username === 'dxos-architect');
+    assert.equal(afterProfile.llmService, 'user-openai', 'afterEnable must preserve customized llmService');
+    assert.equal(afterProfile.modelName, 'gpt-4o', 'afterEnable must preserve customized modelName');
+    assert.equal(afterEmp.modelSettings.models[0].llmService, 'user-openai', 'afterEnable must not overwrite aiEmployees.modelSettings');
+    assert.ok(db.stores.latticeAiProfiles.some((p) => p.username === 'dxos-ops'), 'afterEnable must still seed missing starter profiles');
+  } finally {
+    Module._load = origLoad;
+    if (origApiKey === undefined) delete process.env.AGENT_API_KEY;
+    else process.env.AGENT_API_KEY = origApiKey;
+    if (origNineKey === undefined) delete process.env.NINE_ROUTER_API_KEY;
+    else process.env.NINE_ROUTER_API_KEY = origNineKey;
+  }
+});
