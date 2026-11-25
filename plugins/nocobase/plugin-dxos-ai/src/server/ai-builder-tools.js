@@ -4071,14 +4071,18 @@ function createBuilderTools(deps) {
       name: 'dxos_extend_collection_schema',
       adminOnly: true,
       defaultPermission: 'ASK',
-      introduction: { title: 'Mở rộng Bảng & Trường Dữ liệu', about: 'Inspect, tạo mới collection nghiệp vụ latticeCustom* hoặc thêm trường (string/number/select/boolean/date).' },
-      description: 'Inspect or create custom collection (latticeCustom*) or add typed/select fields to business collections (Admin only; blocks system tables).',
+      introduction: { title: 'Mở rộng Bảng & Trường Dữ liệu', about: 'Inspect, tạo mới collection nghiệp vụ latticeCustom*, thêm trường, cập nhật metadata hoặc ngừng sử dụng trường an toàn.' },
+      description: 'Inspect or create custom collection (latticeCustom*), add typed/select fields, update field metadata (updateFieldMeta), or safely deprecate a field without dropping columns (deprecateField).',
       schema: {
         description: 'Schema extension definition.',
         properties: {
-          operation: { type: 'string', enum: ['createCollection', 'addFields', 'inspectCollection'], required: true },
+          operation: { type: 'string', enum: ['createCollection', 'addFields', 'inspectCollection', 'updateFieldMeta', 'deprecateField'], required: true },
           collectionName: { type: 'string', required: true, maxLength: 60 },
           title: { type: 'string', maxLength: 100 },
+          fieldName: { type: 'string', maxLength: 60 },
+          uiSchema: { type: 'object' },
+          enumValues: { type: 'array', items: { type: 'string' } },
+          reason: { type: 'string', maxLength: 200 },
           fields: { type: 'array', items: { type: 'object' }, description: 'Field definitions ({ name, type, title, enumValues }).' },
           dryRun: { type: 'boolean', default: false },
         },
@@ -4097,6 +4101,100 @@ function createBuilderTools(deps) {
             exists: Boolean(existing || liveCol),
             title: val(existing, 'title') || liveCol?.options?.title || args.collectionName,
             fields: dbFields,
+          };
+        }
+        if (args.operation === 'updateFieldMeta' || args.operation === 'deprecateField') {
+          const targetFieldName = String(args.fieldName || args.fields?.[0]?.name || '').trim();
+          if (!FIELD_NAME_RE.test(targetFieldName)) {
+            throw failTool('FIELD_NAME_INVALID', 400, `Tên trường "${targetFieldName}" không hợp lệ.`);
+          }
+          if (args.operation === 'deprecateField' && ['id', 'organizationId', 'createdAt', 'updatedAt'].includes(targetFieldName)) {
+            throw failTool('PROTECTED_FIELD_FORBIDDEN', 403, `Không được phép ngừng sử dụng trường lõi "${targetFieldName}".`);
+          }
+          if (args.dryRun) {
+            return { dryRun: true, operation: args.operation, collectionName: args.collectionName, fieldName: targetFieldName };
+          }
+          const fieldsRepo = db.getRepository?.('fields');
+          let existingField = fieldsRepo
+            ? await fieldsRepo.findOne({ filter: { collectionName: args.collectionName, name: targetFieldName } })
+            : null;
+          if (!existingField && colsRepo) {
+            const colRow = await colsRepo.findOne({ filter: { name: args.collectionName }, appends: ['fields'] });
+            const colFields = Array.isArray(val(colRow, 'fields')) ? val(colRow, 'fields') : [];
+            existingField = colFields.find((f) => val(f, 'name') === targetFieldName) || null;
+          }
+          if (!existingField) {
+            throw failTool('FIELD_NOT_FOUND', 404, `Không tìm thấy trường "${targetFieldName}" trong "${args.collectionName}".`);
+          }
+          const prevUiSchema = val(existingField, 'uiSchema') && typeof val(existingField, 'uiSchema') === 'object'
+            ? { ...val(existingField, 'uiSchema') }
+            : {};
+          if (args.operation === 'updateFieldMeta') {
+            const nextUiSchema = {
+              ...prevUiSchema,
+              ...(args.uiSchema && typeof args.uiSchema === 'object' ? args.uiSchema : {}),
+              ...(args.title ? { title: String(args.title).trim() } : {}),
+            };
+            let nextEnums = null;
+            if (Array.isArray(args.enumValues)) {
+              nextEnums = args.enumValues.map((v) => String(v || '').trim()).filter(Boolean);
+              nextUiSchema.enum = nextEnums.map((v) => ({ value: v, label: v }));
+            }
+            const patch = {
+              uiSchema: nextUiSchema,
+              ...(nextEnums ? { enum: nextEnums } : {}),
+            };
+            if (typeof existingField.update === 'function') {
+              await existingField.update(patch);
+            } else if (fieldsRepo && typeof fieldsRepo.update === 'function') {
+              await fieldsRepo.update({ filter: { collectionName: args.collectionName, name: targetFieldName }, values: patch });
+            } else {
+              Object.assign(existingField, patch);
+            }
+            const parentCol = colsRepo ? await colsRepo.findOne({ filter: { name: args.collectionName }, appends: ['fields'] }) : null;
+            if (typeof parentCol?.load === 'function') await parentCol.load({ resetFields: true });
+            return {
+              updated: true,
+              operation: 'updateFieldMeta',
+              collectionName: args.collectionName,
+              fieldName: targetFieldName,
+              uiSchema: nextUiSchema,
+            };
+          }
+
+          // deprecateField: non-destructive metadata deprecation (never drops DB column)
+          const deprecatedAt = new Date().toISOString();
+          const nextUiSchema = {
+            ...prevUiSchema,
+            deprecated: true,
+            deprecatedAt,
+            ...(args.reason ? { deprecatedReason: String(args.reason).trim() } : {}),
+            'x-hidden': true,
+            readOnly: true,
+          };
+          const prevOptions = val(existingField, 'options') && typeof val(existingField, 'options') === 'object'
+            ? { ...val(existingField, 'options') }
+            : {};
+          const patch = {
+            uiSchema: nextUiSchema,
+            options: { ...prevOptions, deprecated: true, deprecatedAt },
+          };
+          if (typeof existingField.update === 'function') {
+            await existingField.update(patch);
+          } else if (fieldsRepo && typeof fieldsRepo.update === 'function') {
+            await fieldsRepo.update({ filter: { collectionName: args.collectionName, name: targetFieldName }, values: patch });
+          } else {
+            Object.assign(existingField, patch);
+          }
+          const parentCol = colsRepo ? await colsRepo.findOne({ filter: { name: args.collectionName }, appends: ['fields'] }) : null;
+          if (typeof parentCol?.load === 'function') await parentCol.load({ resetFields: true });
+          return {
+            deprecated: true,
+            nonDestructive: true,
+            operation: 'deprecateField',
+            collectionName: args.collectionName,
+            fieldName: targetFieldName,
+            uiSchema: nextUiSchema,
           };
         }
         if (args.operation === 'createCollection' && !CUSTOM_COLLECTION_RE.test(args.collectionName)) {

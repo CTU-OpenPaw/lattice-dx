@@ -77,7 +77,7 @@ const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
   'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage',
-  'latticeAiApprovalQueue', 'latticeUiSnapshots',
+  'latticeAiApprovalQueue', 'latticeUiSnapshots', 'latticeBuiltApps',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
 ]);
@@ -126,6 +126,7 @@ const getFlowValidatorMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-
 const getFlowSchemaMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'flow/schema');
 const getFlowArchitectMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'flow/architect');
 const getN8nApiClientMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'n8n-api-client');
+const getSolutionBundleMod = () => loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'solution-bundle');
 const getVaultMod = () => loadCrossPluginModule('@latticedx/plugin-lattice-foundation', 'plugin-lattice-foundation', 'connector-vault');
 
 async function withOptionalTenantRls(db, organizationId, fn) {
@@ -173,7 +174,10 @@ function normalizeOrchestratorField(rawField) {
   const rawType = String(rawField?.type || 'string').trim();
   if (rawType === 'belongsTo') {
     const target = String(rawField?.target || rawField?.targetCollection || '').trim();
-    if (!target || SYSTEM_PROTECTED_COLLECTIONS.has(target) || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
+    if (SYSTEM_PROTECTED_COLLECTIONS.has(target)) {
+      throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ belongsTo vào bảng hệ thống "${target}".`);
+    }
+    if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
       throw failBuild('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ belongsTo "${target || '(empty)'}" không hợp lệ hoặc bị cấm.`);
     }
     const foreignKey = String(rawField?.foreignKey || `${fname}Id`).trim();
@@ -190,6 +194,33 @@ function normalizeOrchestratorField(rawField) {
       targetKey,
       uiSchema: {
         type: 'object',
+        title: String(rawField?.title || fname),
+        'x-component': 'AssociationField',
+      },
+    };
+  }
+  if (rawType === 'hasMany') {
+    const target = String(rawField?.target || rawField?.targetCollection || '').trim();
+    if (SYSTEM_PROTECTED_COLLECTIONS.has(target)) {
+      throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép trỏ quan hệ hasMany vào bảng hệ thống "${target}".`);
+    }
+    if (!target || !/^[a-zA-Z][a-zA-Z0-9_]{1,60}$/.test(target)) {
+      throw failBuild('RELATION_TARGET_FORBIDDEN', 403, `Bảng đích quan hệ hasMany "${target || '(empty)'}" không hợp lệ hoặc bị cấm.`);
+    }
+    const foreignKey = String(rawField?.foreignKey || `${fname}Id`).trim();
+    const sourceKey = String(rawField?.sourceKey || 'id').trim();
+    if (!FIELD_NAME_RE.test(foreignKey) || !FIELD_NAME_RE.test(sourceKey)) {
+      throw failBuild('FIELD_NAME_INVALID', 400, `foreignKey/sourceKey không hợp lệ cho trường "${fname}".`);
+    }
+    return {
+      name: fname,
+      type: 'hasMany',
+      interface: 'o2m',
+      target,
+      foreignKey,
+      sourceKey,
+      uiSchema: {
+        type: 'array',
         title: String(rawField?.title || fname),
         'x-component': 'AssociationField',
       },
@@ -498,7 +529,7 @@ async function ensurePortalAndBlocks(ctx, db, actor, {
             await linksRepo.create({ values: { desktopRouteId: rid, uiLayoutUid: layoutUid } });
           }
         }
-        await flowModelsRepo.upsertModel({
+        await flowModelsRepo.upsertModel?.({
           uid: `grid-${tabUid}`,
           use: 'BlockGridModel',
           parentId: tabUid,
@@ -1038,10 +1069,170 @@ async function applyTargetedRepair(ctx, db, actor, check, state, deps) {
   }
 }
 
+const APP_KEY_RE = /^[a-z0-9][a-z0-9_-]{1,119}$/i;
+const STARTER_AI_USERNAMES = new Set(['dxos-architect', 'dxos-coordinator', 'dxos-ops', 'dxos-logistics', 'dxos-workspace']);
+
+function normalizeAppKey(raw, fallback = 'dxos-custom-app') {
+  const base = String(raw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'D')
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80);
+  return base && APP_KEY_RE.test(base) ? base : fallback;
+}
+
+function serializeBuiltAppRow(row) {
+  if (!row) return null;
+  return {
+    id: val(row, 'id') ?? null,
+    organizationId: val(row, 'organizationId') || null,
+    appKey: val(row, 'appKey') || null,
+    name: val(row, 'name') || null,
+    version: Number(val(row, 'version')) || 1,
+    status: val(row, 'status') || 'active',
+    sourceSpecJson: val(row, 'sourceSpecJson') || {},
+    artifactRefsJson: val(row, 'artifactRefsJson') || {},
+    bundleSnapshotUid: val(row, 'bundleSnapshotUid') || null,
+    lastVerifiedAt: val(row, 'lastVerifiedAt') || null,
+    lastVerificationJson: val(row, 'lastVerificationJson') || null,
+    createdBy: val(row, 'createdBy') || null,
+    createdAt: val(row, 'createdAt') || null,
+    updatedAt: val(row, 'updatedAt') || null,
+  };
+}
+
 /**
- * Full-stack Enterprise App Builder Orchestrator with pre-build Snapshot, schema/relations/RLS/OpenAPI,
+ * Validate and topologically sort Multi-Entity collections using Kahn's algorithm so
+ * referenced targets (belongsTo / hasMany) are created BEFORE their dependents.
+ * Rejects SYSTEM_PROTECTED_COLLECTIONS (403) and cyclic graphs (400) before any DB write.
+ */
+function topologicalSortCollections(collections = []) {
+  if (!Array.isArray(collections) || collections.length === 0) {
+    throw failBuild('COLLECTIONS_REQUIRED', 400, 'Multi-Entity Blueprint cần ít nhất 1 collection.');
+  }
+
+  const normalizedEntries = [];
+  const seenNames = new Set();
+  for (const item of collections) {
+    const colName = String(item?.collectionName || item?.name || '').trim();
+    if (SYSTEM_PROTECTED_COLLECTIONS.has(colName)) {
+      throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép sửa hoặc ghi đè bảng hệ thống "${colName}".`);
+    }
+    if (!colName || !CUSTOM_COLLECTION_RE.test(colName)) {
+      throw failBuild('COLLECTION_NAME_INVALID', 400, `Tên collection "${colName || '(trống)'}" phải theo mẫu latticeCustom<TenVietHoa>.`);
+    }
+    if (seenNames.has(colName)) {
+      throw failBuild('DUPLICATE_COLLECTION_IN_BLUEPRINT', 400, `Collection "${colName}" bị khai báo trùng lặp trong blueprint.`);
+    }
+    seenNames.add(colName);
+    const rawFields = Array.isArray(item?.fields) ? item.fields : [];
+    const normalizedFields = rawFields.map((f) => normalizeOrchestratorField(f));
+    normalizedEntries.push({
+      ...item,
+      collectionName: colName,
+      collectionTitle: String(item?.collectionTitle || item?.title || colName).trim(),
+      fields: rawFields,
+      normalizedFields,
+    });
+  }
+
+  const entryByName = new Map(normalizedEntries.map((e) => [e.collectionName, e]));
+  const adj = new Map(normalizedEntries.map((e) => [e.collectionName, []]));
+  const inDegree = new Map(normalizedEntries.map((e) => [e.collectionName, 0]));
+
+  for (const entry of normalizedEntries) {
+    const depsSeen = new Set();
+    for (const f of entry.normalizedFields) {
+      if (f.type !== 'belongsTo' && f.type !== 'hasMany') continue;
+      const target = String(f.target || '').trim();
+      if (!target || !entryByName.has(target)) continue;
+      if (target === entry.collectionName) {
+        throw failBuild('BLUEPRINT_CYCLE_DETECTED', 400, `Phát hiện quan hệ tự tham chiếu vòng lặp trên "${entry.collectionName}".`);
+      }
+      if (!depsSeen.has(target)) {
+        depsSeen.add(target);
+        adj.get(target).push(entry.collectionName);
+        inDegree.set(entry.collectionName, (inDegree.get(entry.collectionName) || 0) + 1);
+      }
+    }
+  }
+
+  const queue = [];
+  for (const entry of normalizedEntries) {
+    if ((inDegree.get(entry.collectionName) || 0) === 0) {
+      queue.push(entry.collectionName);
+    }
+  }
+
+  const sorted = [];
+  while (queue.length > 0) {
+    const cur = queue.shift();
+    sorted.push(entryByName.get(cur));
+    for (const dependent of adj.get(cur) || []) {
+      const nextDeg = (inDegree.get(dependent) || 0) - 1;
+      inDegree.set(dependent, nextDeg);
+      if (nextDeg === 0) queue.push(dependent);
+    }
+  }
+
+  if (sorted.length !== normalizedEntries.length) {
+    throw failBuild(
+      'BLUEPRINT_CYCLE_DETECTED',
+      400,
+      'Phát hiện vòng lặp quan hệ (belongsTo/hasMany) giữa các bảng trong Multi-Entity Blueprint.',
+    );
+  }
+
+  return sorted;
+}
+
+async function upsertBuiltAppRecord(db, actor, recordValues) {
+  const repo = db?.getRepository?.('latticeBuiltApps');
+  if (!repo) return null;
+  const organizationId = actor.organizationId;
+  return withOptionalTenantRls(db, organizationId, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const existing = typeof repo.findOne === 'function'
+      ? await repo.findOne({ filter: { organizationId, appKey: recordValues.appKey }, ...txOpt })
+      : null;
+    if (existing) {
+      const nextVersion = (Number(val(existing, 'version')) || 1) + 1;
+      const patch = {
+        ...recordValues,
+        organizationId,
+        version: nextVersion,
+      };
+      if (typeof existing.update === 'function') {
+        await existing.update(patch, txOpt);
+        return serializeBuiltAppRow(existing);
+      }
+      if (typeof repo.update === 'function') {
+        await repo.update({ filter: { organizationId, appKey: recordValues.appKey }, values: patch, ...txOpt });
+        const refreshed = await repo.findOne({ filter: { organizationId, appKey: recordValues.appKey }, ...txOpt });
+        return serializeBuiltAppRow(refreshed || { ...existing, ...patch });
+      }
+    }
+    const created = await repo.create({
+      values: {
+        ...recordValues,
+        organizationId,
+        version: 1,
+        createdBy: actor.username || null,
+      },
+      ...txOpt,
+    });
+    return serializeBuiltAppRow(created);
+  });
+}
+
+/**
+ * Full-stack Enterprise App Builder Orchestrator with pre-build Snapshot, Multi-Entity topological schema/relations/RLS/OpenAPI,
  * RBAC, Multi-Portal 10-BlockModel pages, DMN, LatticeFlow v2 DAG, Stock n8n workflow,
- * Deterministic Verifier, and up to 2 rounds of closed-loop targeted self-healing.
+ * Deterministic Verifier, up to 2 rounds of closed-loop targeted self-healing, and latticeBuiltApps registry.
  */
 async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {}) {
   if (!actor?.isAdmin && !actor?.isRoot) {
@@ -1051,63 +1242,172 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
   if (!organizationId) {
     throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
   }
-  const portalSlug = String(spec.portalSlug || 'services').trim().toLowerCase();
-  if (!SLUG_RE.test(portalSlug)) {
+
+  const defaultPortalSlug = String(spec.portalSlug || spec.portals?.[0]?.portalSlug || 'services').trim().toLowerCase();
+  if (!SLUG_RE.test(defaultPortalSlug)) {
     throw failBuild('PORTAL_SLUG_INVALID', 400, 'portalSlug không hợp lệ.');
   }
-  const pageTitle = String(spec.pageTitle || spec.title || 'Phân hệ Doanh nghiệp Mới').trim();
-  const collectionName = String(spec.collectionName || '').trim();
-  if (!collectionName || SYSTEM_PROTECTED_COLLECTIONS.has(collectionName) || !CUSTOM_COLLECTION_RE.test(collectionName)) {
-    throw failBuild(
-      SYSTEM_PROTECTED_COLLECTIONS.has(collectionName) ? 'SYSTEM_COLLECTION_FORBIDDEN' : 'COLLECTION_NAME_INVALID',
-      SYSTEM_PROTECTED_COLLECTIONS.has(collectionName) ? 403 : 400,
-      'collectionName phải theo mẫu latticeCustom<TenVietHoa> và không được chạm bảng hệ thống.',
-    );
-  }
-  const roleTitle = String(spec.roleTitle || `Quản trị ${pageTitle}`).trim();
-  const roleName = spec.roleName ? String(spec.roleName).trim() : slugifyVietnameseToLdxRole(roleTitle);
-  if (!LDX_ROLE_RE.test(roleName)) {
-    throw failBuild('ROLE_FORBIDDEN', 403, 'roleName phải bắt đầu bằng ldx_*.');
-  }
-  const rawFields = Array.isArray(spec.fields) ? spec.fields : [];
-  const normalizedFieldsPreview = rawFields.map((f) => normalizeOrchestratorField(f));
-  const lockedFields = Array.isArray(spec.lockedFields) ? spec.lockedFields.map((f) => String(f).trim()).filter(Boolean) : [];
-  const blocks = Array.isArray(spec.blocks) ? spec.blocks : [];
-  for (const b of blocks) {
-    const useName = String(b?.blockUse || b?.use || '').trim();
-    if (!ORCHESTRATOR_ALLOWED_BLOCKS.has(useName)) {
-      throw failBuild('BLOCK_MODEL_FORBIDDEN', 400, `BlockModel "${useName}" không được phép.`);
+  const defaultPageTitle = String(spec.pageTitle || spec.title || spec.name || spec.portals?.[0]?.pageTitle || 'Phân hệ Doanh nghiệp Mới').trim();
+
+  // 0. Validate & topologically sort collections BEFORE any snapshot or DB write (Review Focus #5)
+  const isMultiEntity = Array.isArray(spec.collections) && spec.collections.length > 0;
+  let sortedCollections;
+  if (isMultiEntity) {
+    sortedCollections = topologicalSortCollections(spec.collections);
+  } else {
+    const singleCollectionName = String(spec.collectionName || '').trim();
+    if (!singleCollectionName || SYSTEM_PROTECTED_COLLECTIONS.has(singleCollectionName) || !CUSTOM_COLLECTION_RE.test(singleCollectionName)) {
+      throw failBuild(
+        SYSTEM_PROTECTED_COLLECTIONS.has(singleCollectionName) ? 'SYSTEM_COLLECTION_FORBIDDEN' : 'COLLECTION_NAME_INVALID',
+        SYSTEM_PROTECTED_COLLECTIONS.has(singleCollectionName) ? 403 : 400,
+        'collectionName phải theo mẫu latticeCustom<TenVietHoa> và không được chạm bảng hệ thống.',
+      );
     }
+    const rawFields = Array.isArray(spec.fields) ? spec.fields : [];
+    const normalizedFields = rawFields.map((f) => normalizeOrchestratorField(f));
+    sortedCollections = [{
+      collectionName: singleCollectionName,
+      collectionTitle: String(spec.collectionTitle || defaultPageTitle).trim(),
+      fields: rawFields,
+      normalizedFields,
+    }];
   }
+
+  const primaryCollection = sortedCollections[0];
+  const collectionName = primaryCollection.collectionName;
+
+  // Validate roles BEFORE snapshot/DB
+  const rawRolesList = Array.isArray(spec.roles) && spec.roles.length > 0
+    ? spec.roles
+    : [{
+        roleName: spec.roleName,
+        roleTitle: spec.roleTitle || `Quản trị ${defaultPageTitle}`,
+        lockedFields: spec.lockedFields,
+        aiUsername: spec.aiUsername,
+        aiNickname: spec.aiNickname,
+      }];
+  const normalizedRoles = rawRolesList.map((r) => {
+    const rTitle = String(r?.roleTitle || `Quản trị ${defaultPageTitle}`).trim();
+    const rName = r?.roleName ? String(r.roleName).trim() : slugifyVietnameseToLdxRole(rTitle);
+    if (!LDX_ROLE_RE.test(rName)) {
+      throw failBuild('ROLE_FORBIDDEN', 403, `roleName "${rName}" phải bắt đầu bằng ldx_*.`);
+    }
+    return {
+      roleName: rName,
+      roleTitle: rTitle,
+      lockedFields: Array.isArray(r?.lockedFields) ? r.lockedFields.map((f) => String(f).trim()).filter(Boolean) : [],
+      collections: Array.isArray(r?.collections) && r.collections.length
+        ? r.collections.map((c) => String(c).trim()).filter(Boolean)
+        : sortedCollections.map((c) => c.collectionName),
+      aiUsername: r?.aiUsername || spec.aiUsername,
+      aiNickname: r?.aiNickname || spec.aiNickname,
+    };
+  });
+  const primaryRole = normalizedRoles[0];
+
+  // Validate portals & blocks BEFORE snapshot/DB
+  const rawPortalsList = Array.isArray(spec.portals) && spec.portals.length > 0
+    ? spec.portals
+    : [{
+        portalSlug: defaultPortalSlug,
+        pageTitle: defaultPageTitle,
+        roleName: primaryRole.roleName,
+        roleTitle: primaryRole.roleTitle,
+        collectionName,
+        blocks: spec.blocks,
+        creativeTheme: spec.creativeTheme || 'industrial-cockpit',
+      }];
+  const normalizedPortals = rawPortalsList.map((p) => {
+    const pSlug = String(p?.portalSlug || defaultPortalSlug).trim().toLowerCase();
+    if (!SLUG_RE.test(pSlug)) {
+      throw failBuild('PORTAL_SLUG_INVALID', 400, `portalSlug "${pSlug}" không hợp lệ.`);
+    }
+    const pRoleName = p?.roleName ? String(p.roleName).trim() : primaryRole.roleName;
+    if (!LDX_ROLE_RE.test(pRoleName)) {
+      throw failBuild('ROLE_FORBIDDEN', 403, `roleName "${pRoleName}" phải bắt đầu bằng ldx_*.`);
+    }
+    const pBlocks = Array.isArray(p?.blocks) ? p.blocks : [];
+    for (const b of pBlocks) {
+      const useName = String(b?.blockUse || b?.use || '').trim();
+      if (!ORCHESTRATOR_ALLOWED_BLOCKS.has(useName)) {
+        throw failBuild('BLOCK_MODEL_FORBIDDEN', 400, `BlockModel "${useName}" không được phép.`);
+      }
+    }
+    const targetCol = String(p?.collectionName || collectionName).trim();
+    if (SYSTEM_PROTECTED_COLLECTIONS.has(targetCol)) {
+      throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép gắn portal vào bảng hệ thống "${targetCol}".`);
+    }
+    return {
+      portalSlug: pSlug,
+      pageTitle: String(p?.pageTitle || defaultPageTitle).trim(),
+      roleName: pRoleName,
+      roleTitle: String(p?.roleTitle || primaryRole.roleTitle).trim(),
+      collectionName: targetCol,
+      blocks: pBlocks,
+      creativeTheme: p?.creativeTheme || spec.creativeTheme || 'industrial-cockpit',
+    };
+  });
+  const primaryPortal = normalizedPortals[0];
+
+  const appKey = spec.appKey
+    ? String(spec.appKey).trim()
+    : normalizeAppKey(`${primaryPortal.portalSlug}-${collectionName}`);
+  if (!APP_KEY_RE.test(appKey)) {
+    throw failBuild('APP_KEY_INVALID', 400, `appKey "${appKey}" không hợp lệ.`);
+  }
+  const appName = String(spec.appName || spec.name || primaryPortal.pageTitle || appKey).trim();
+
+  const dmnInputList = [
+    ...(Array.isArray(spec.dmnTables) ? spec.dmnTables : []),
+    ...(spec.dmnTable ? [spec.dmnTable] : []),
+  ];
+  const flowInputList = [
+    ...(Array.isArray(spec.flowGraphs) ? spec.flowGraphs : []),
+    ...(spec.flowGraph ? [spec.flowGraph] : []),
+  ];
+  const n8nInputList = [
+    ...(Array.isArray(spec.n8nWorkflows) ? spec.n8nWorkflows : []),
+    ...(spec.n8nWorkflow ? [spec.n8nWorkflow] : []),
+  ];
 
   if (spec.dryRun === true) {
     return {
       dryRun: true,
       built: false,
+      appKey,
       planned: {
         organizationId,
+        appKey,
         collectionName,
-        fields: normalizedFieldsPreview.map((f) => ({ name: f.name, type: f.type, target: f.target || null })),
-        roleName,
-        portalSlug,
-        pageTitle,
-        blocks: blocks.map((b) => b?.blockUse || b?.use),
-        dmnTableKey: spec.dmnTable?.tableKey || null,
-        flowRuleKey: spec.flowGraph?.ruleKey || null,
-        hasN8nWorkflow: Boolean(spec.n8nWorkflow),
+        collections: sortedCollections.map((c) => ({
+          collectionName: c.collectionName,
+          fields: c.normalizedFields.map((f) => ({ name: f.name, type: f.type, target: f.target || null })),
+        })),
+        fields: primaryCollection.normalizedFields.map((f) => ({ name: f.name, type: f.type, target: f.target || null })),
+        roleName: primaryRole.roleName,
+        roles: normalizedRoles.map((r) => r.roleName),
+        portalSlug: primaryPortal.portalSlug,
+        pageTitle: primaryPortal.pageTitle,
+        portals: normalizedPortals.map((p) => ({ portalSlug: p.portalSlug, pageTitle: p.pageTitle, collectionName: p.collectionName })),
+        blocks: primaryPortal.blocks.map((b) => b?.blockUse || b?.use),
+        dmnTableKey: dmnInputList[0]?.tableKey || null,
+        dmnTableKeys: dmnInputList.map((d) => d?.tableKey).filter(Boolean),
+        flowRuleKey: flowInputList[0]?.ruleKey || null,
+        flowRuleKeys: flowInputList.map((f) => f?.ruleKey).filter(Boolean),
+        hasN8nWorkflow: n8nInputList.length > 0,
       },
     };
   }
 
-  // 1. Pre-build Snapshot
+  // 1. Pre-build Snapshot (only AFTER all blueprint & cycle validations pass)
   await ensureUiSnapshotsReady(db);
   const preSnap = await capturePageSnapshot(db, {
-    portalSlug,
-    pageTitle,
-    note: `Pre-build snapshot for ${collectionName}`,
+    portalSlug: primaryPortal.portalSlug,
+    pageTitle: primaryPortal.pageTitle,
+    note: `Pre-build snapshot for ${sortedCollections.map((c) => c.collectionName).join(', ')}`,
     createdByUsername: actor.username,
   }, val);
-  const preBuildSnapshotUid = preSnap?.snapshotUid || `snap-pre-${portalSlug}-${Date.now().toString(36)}`;
+  const preBuildSnapshotUid = preSnap?.snapshotUid || `snap-pre-${primaryPortal.portalSlug}-${Date.now().toString(36)}`;
   if (!preSnap) {
     const snapRepo = db?.getRepository?.('latticeUiSnapshots');
     if (snapRepo && typeof snapRepo.create === 'function') {
@@ -1115,9 +1415,9 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
         values: {
           organizationId,
           snapshotUid: preBuildSnapshotUid,
-          portalSlug,
-          pageTitle,
-          note: `Pre-build snapshot for ${collectionName}`,
+          portalSlug: primaryPortal.portalSlug,
+          pageTitle: primaryPortal.pageTitle,
+          note: `Pre-build snapshot for ${sortedCollections.map((c) => c.collectionName).join(', ')}`,
           createdByUsername: actor.username,
           layoutState: {},
           blocks: [],
@@ -1127,86 +1427,200 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     }
   }
 
-  // 2. Schema + Relations + PG RLS + OpenAPI
-  const schemaResult = await ensureCollectionAndFields(db, organizationId, {
-    collectionName,
-    collectionTitle: spec.collectionTitle || pageTitle,
-    fields: rawFields,
-  });
-
-  // 3. Role + RBAC + Locked Fields + AI Assistant
-  const rbacResult = await ensureRoleAndRbac(ctx, db, actor, {
-    roleName,
-    roleTitle,
-    collectionName,
-    fields: schemaResult.fields,
-    lockedFields,
-  });
-  const aiUsername = await ensureAiAssistant(db, actor, {
-    roleName,
-    roleTitle,
-    portalSlug,
-    pageTitle,
-    lockedFields,
-    aiUsername: spec.aiUsername,
-    aiNickname: spec.aiNickname,
-  });
-
-  // 4. Multi-Portal Page + Native v2 BlockModels
-  const portalResult = await ensurePortalAndBlocks(ctx, db, actor, {
-    portalSlug,
-    pageTitle,
-    roleName,
-    roleTitle,
-    collectionName,
-    fields: schemaResult.fields,
-    blocks,
-    creativeTheme: spec.creativeTheme || 'industrial-cockpit',
-  });
-
-  // 5. DMN Table (if provided)
-  let dmnTableKey = null;
-  if (spec.dmnTable) {
-    const savedDmn = await upsertDmnTable(ctx, db, actor, spec.dmnTable);
-    dmnTableKey = savedDmn?.tableKey || spec.dmnTable.tableKey;
+  // 2. Schema + Relations + PG RLS + OpenAPI (in topological order)
+  const schemaResults = [];
+  const schemaByCol = new Map();
+  for (const colSpec of sortedCollections) {
+    const res = await ensureCollectionAndFields(db, organizationId, {
+      collectionName: colSpec.collectionName,
+      collectionTitle: colSpec.collectionTitle,
+      fields: colSpec.fields,
+    });
+    schemaResults.push(res);
+    schemaByCol.set(colSpec.collectionName, res);
   }
+  const primarySchemaResult = schemaResults[0];
 
-  // 6. LatticeFlow v2 DAG (if provided)
-  let flowRuleKey = null;
-  if (spec.flowGraph) {
-    const savedFlow = await upsertFlowV2Rule(db, actor, spec.flowGraph);
-    flowRuleKey = savedFlow?.ruleKey || spec.flowGraph.ruleKey;
+  // 3. Roles + RBAC + Locked Fields + AI Assistants
+  const roleResults = [];
+  const aiUsernames = [];
+  for (const rSpec of normalizedRoles) {
+    let lastRbac = null;
+    for (const targetCol of rSpec.collections) {
+      const colFields = schemaByCol.get(targetCol)?.fields || primarySchemaResult.fields;
+      lastRbac = await ensureRoleAndRbac(ctx, db, actor, {
+        roleName: rSpec.roleName,
+        roleTitle: rSpec.roleTitle,
+        collectionName: targetCol,
+        fields: colFields,
+        lockedFields: rSpec.lockedFields,
+      });
+    }
+    if (lastRbac) roleResults.push(lastRbac);
+    const aiUser = await ensureAiAssistant(db, actor, {
+      roleName: rSpec.roleName,
+      roleTitle: rSpec.roleTitle,
+      portalSlug: primaryPortal.portalSlug,
+      pageTitle: primaryPortal.pageTitle,
+      lockedFields: rSpec.lockedFields,
+      aiUsername: rSpec.aiUsername,
+      aiNickname: rSpec.aiNickname,
+    });
+    aiUsernames.push(aiUser);
   }
+  const primaryRbacResult = roleResults[0];
+  const aiUsername = aiUsernames[0];
 
-  // 7. Stock n8n Workflow (if provided)
-  let n8nWorkflowId = null;
-  if (spec.n8nWorkflow) {
+  // 4. Multi-Portal Pages + Native v2 BlockModels
+  const portalResults = [];
+  for (const pSpec of normalizedPortals) {
+    const colFields = schemaByCol.get(pSpec.collectionName)?.fields || primarySchemaResult.fields;
+    const pRes = await ensurePortalAndBlocks(ctx, db, actor, {
+      portalSlug: pSpec.portalSlug,
+      pageTitle: pSpec.pageTitle,
+      roleName: pSpec.roleName,
+      roleTitle: pSpec.roleTitle,
+      collectionName: pSpec.collectionName,
+      fields: colFields,
+      blocks: pSpec.blocks,
+      creativeTheme: pSpec.creativeTheme,
+    });
+    portalResults.push({
+      portalSlug: pSpec.portalSlug,
+      pageTitle: pSpec.pageTitle,
+      collectionName: pSpec.collectionName,
+      roleName: pSpec.roleName,
+      ...pRes,
+    });
+  }
+  const primaryPortalResult = portalResults[0];
+
+  // 5. DMN Tables
+  const dmnTableKeys = [];
+  for (const dmnSpec of dmnInputList) {
+    const savedDmn = await upsertDmnTable(ctx, db, actor, dmnSpec);
+    const key = savedDmn?.tableKey || dmnSpec.tableKey;
+    if (key) dmnTableKeys.push(key);
+  }
+  const dmnTableKey = dmnTableKeys[0] || null;
+
+  // 6. LatticeFlow v2 DAGs
+  const flowRuleKeys = [];
+  for (const fSpec of flowInputList) {
+    const savedFlow = await upsertFlowV2Rule(db, actor, fSpec);
+    const key = savedFlow?.ruleKey || fSpec.ruleKey;
+    if (key) flowRuleKeys.push(key);
+  }
+  const flowRuleKey = flowRuleKeys[0] || null;
+
+  // 7. Stock n8n Workflows (strictly OUTSIDE DB transactions)
+  const n8nWorkflowIds = [];
+  if (n8nInputList.length) {
     const bridgeDeps = { val, failTool: failBuild, hasRes: (c, n) => Boolean(safeGetResource(c, n)), invokeResourceAction: invokeResAction, ...deps };
-    const createdWf = spec.n8nWorkflow.id
-      ? await runUpdateN8nWorkflow(ctx, db, actor, { workflowId: spec.n8nWorkflow.id, workflow: spec.n8nWorkflow, connectorKey: spec.n8nConnectorKey }, bridgeDeps)
-      : await runCreateN8nWorkflow(ctx, db, actor, { workflow: spec.n8nWorkflow, connectorKey: spec.n8nConnectorKey }, bridgeDeps);
-    n8nWorkflowId = String(createdWf?.id || createdWf?.data?.id || spec.n8nWorkflow.id || '').trim() || null;
-    if (n8nWorkflowId && spec.activateN8n !== false) {
-      await runActivateN8nWorkflow(ctx, db, actor, { workflowId: n8nWorkflowId, active: true, connectorKey: spec.n8nConnectorKey }, bridgeDeps);
+    for (const wfSpec of n8nInputList) {
+      const createdWf = wfSpec.id
+        ? await runUpdateN8nWorkflow(ctx, db, actor, { workflowId: wfSpec.id, workflow: wfSpec, connectorKey: spec.n8nConnectorKey }, bridgeDeps)
+        : await runCreateN8nWorkflow(ctx, db, actor, { workflow: wfSpec, connectorKey: spec.n8nConnectorKey }, bridgeDeps);
+      const wfId = String(createdWf?.id || createdWf?.data?.id || wfSpec.id || '').trim() || null;
+      if (wfId) {
+        n8nWorkflowIds.push(wfId);
+        if (spec.activateN8n !== false) {
+          await runActivateN8nWorkflow(ctx, db, actor, { workflowId: wfId, active: true, connectorKey: spec.n8nConnectorKey }, bridgeDeps);
+        }
+      }
     }
   }
+  const n8nWorkflowId = n8nWorkflowIds[0] || null;
 
   // 8. Deterministic Verification + Up to 2 Rounds Targeted Self-Healing
   const maxHealRounds = Math.max(0, Math.min(2, Number(spec.maxHealRounds ?? DEFAULT_SELF_HEAL_MAX_ROUNDS)));
   const verifyTarget = {
     organizationId,
     collectionName,
-    expectedFields: schemaResult.fields.map((f) => f.name),
-    portalSlug,
-    pageTitle,
-    roleName,
-    lockedFields,
+    expectedFields: primarySchemaResult.fields.map((f) => f.name),
+    portalSlug: primaryPortal.portalSlug,
+    pageTitle: primaryPortal.pageTitle,
+    roleName: primaryRole.roleName,
+    lockedFields: primaryRole.lockedFields,
     dmnTableKey,
-    dmnSampleInput: spec.dmnTable?.sampleInput || {},
+    dmnSampleInput: dmnInputList[0]?.sampleInput || {},
     flowRuleKey,
-    flowSampleEvent: spec.flowGraph?.sampleEvent || null,
+    flowSampleEvent: flowInputList[0]?.sampleEvent || null,
     n8nWorkflowId,
   };
+
+  async function runVerificationPass(round) {
+    if (typeof deps.verifierOverride === 'function') {
+      return deps.verifierOverride(ctx, db, actor, verifyTarget, round);
+    }
+    const primaryRes = await verifyEnterpriseApp(ctx, db, actor, verifyTarget, deps);
+    const extraChecks = [...primaryRes.checks.map((c) => ({ ...c, _repairTarget: { ...verifyTarget, rawFields: sortedCollections[0].fields, blocks: primaryPortal.blocks, creativeTheme: primaryPortal.creativeTheme, dmnSpec: dmnInputList[0] || null, flowSpec: flowInputList[0] || null } }))];
+
+    // Verify additional collections, portals, DMNs, flows, and n8n workflows when multi-entity
+    for (let ci = 1; ci < sortedCollections.length; ci += 1) {
+      const extraCol = sortedCollections[ci];
+      const extraSchema = schemaResults[ci];
+      const subTarget = {
+        organizationId,
+        collectionName: extraCol.collectionName,
+        expectedFields: extraSchema.fields.map((f) => f.name),
+        roleName: primaryRole.roleName,
+        lockedFields: primaryRole.lockedFields,
+      };
+      const subRes = await verifyEnterpriseApp(ctx, db, actor, subTarget, deps);
+      for (const chk of subRes.checks) {
+        extraChecks.push({
+          ...chk,
+          id: `${chk.id}:${extraCol.collectionName}`,
+          _repairTarget: { ...subTarget, collectionTitle: extraCol.collectionTitle, rawFields: extraCol.fields },
+        });
+      }
+    }
+    for (let pi = 1; pi < normalizedPortals.length; pi += 1) {
+      const ep = normalizedPortals[pi];
+      const subTarget = { organizationId, portalSlug: ep.portalSlug, pageTitle: ep.pageTitle };
+      const subRes = await verifyEnterpriseApp(ctx, db, actor, subTarget, deps);
+      for (const chk of subRes.checks) {
+        extraChecks.push({
+          ...chk,
+          id: `${chk.id}:${ep.portalSlug}:${pi}`,
+          _repairTarget: { ...subTarget, roleName: ep.roleName, roleTitle: ep.roleTitle, collectionName: ep.collectionName, rawFields: schemaByCol.get(ep.collectionName)?.fields || [], blocks: ep.blocks, creativeTheme: ep.creativeTheme },
+        });
+      }
+    }
+    for (let di = 1; di < dmnTableKeys.length; di += 1) {
+      const subTarget = { organizationId, dmnTableKey: dmnTableKeys[di], dmnSampleInput: dmnInputList[di]?.sampleInput || {} };
+      const subRes = await verifyEnterpriseApp(ctx, db, actor, subTarget, deps);
+      for (const chk of subRes.checks) {
+        extraChecks.push({ ...chk, id: `${chk.id}:${dmnTableKeys[di]}`, _repairTarget: { ...subTarget, dmnSpec: dmnInputList[di] } });
+      }
+    }
+    for (let fi = 1; fi < flowRuleKeys.length; fi += 1) {
+      const subTarget = { organizationId, flowRuleKey: flowRuleKeys[fi], flowSampleEvent: flowInputList[fi]?.sampleEvent || null };
+      const subRes = await verifyEnterpriseApp(ctx, db, actor, subTarget, deps);
+      for (const chk of subRes.checks) {
+        extraChecks.push({ ...chk, id: `${chk.id}:${flowRuleKeys[fi]}`, _repairTarget: { ...subTarget, flowSpec: flowInputList[fi] } });
+      }
+    }
+    for (let ni = 1; ni < n8nWorkflowIds.length; ni += 1) {
+      const subTarget = { organizationId, n8nWorkflowId: n8nWorkflowIds[ni] };
+      const subRes = await verifyEnterpriseApp(ctx, db, actor, subTarget, deps);
+      for (const chk of subRes.checks) {
+        extraChecks.push({ ...chk, id: `${chk.id}:${n8nWorkflowIds[ni]}`, _repairTarget: subTarget });
+      }
+    }
+
+    const publicChecks = extraChecks.map(({ _repairTarget, ...rest }) => rest);
+    const failedChecks = extraChecks.filter((c) => !c.ok);
+    return {
+      ok: failedChecks.length === 0,
+      passedCount: publicChecks.length - failedChecks.length,
+      totalCount: publicChecks.length,
+      checks: publicChecks,
+      failedChecks: failedChecks.map(({ _repairTarget, ...rest }) => rest),
+      _failedWithTarget: failedChecks,
+    };
+  }
 
   const repairs = [];
   let healRounds = 0;
@@ -1216,37 +1630,70 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     if (typeof deps.onBeforeVerify === 'function') {
       await deps.onBeforeVerify(round, verifyTarget);
     }
-    verification = typeof deps.verifierOverride === 'function'
-      ? await deps.verifierOverride(ctx, db, actor, verifyTarget, round)
-      : await verifyEnterpriseApp(ctx, db, actor, verifyTarget, deps);
+    const rawVer = await runVerificationPass(round);
+    const failedWithTarget = rawVer._failedWithTarget || rawVer.failedChecks.map((f) => ({ ...f, _repairTarget: null }));
+    const { _failedWithTarget, ...cleanVer } = rawVer;
+    verification = cleanVer;
 
     if (verification.ok || round > maxHealRounds) break;
 
     healRounds += 1;
-    for (const failed of verification.failedChecks) {
+    for (const failed of failedWithTarget) {
+      const rt = failed._repairTarget || {};
       const repair = await applyTargetedRepair(ctx, db, actor, failed, {
-        collectionName,
-        collectionTitle: spec.collectionTitle || pageTitle,
-        normalizedFields: rawFields,
-        roleName,
-        roleTitle,
-        lockedFields,
-        portalSlug,
-        pageTitle,
-        blocks,
-        creativeTheme: spec.creativeTheme || 'industrial-cockpit',
-        dmnSpec: spec.dmnTable || null,
-        flowSpec: spec.flowGraph || null,
-        n8nWorkflowId,
+        collectionName: rt.collectionName || collectionName,
+        collectionTitle: rt.collectionTitle || primaryCollection.collectionTitle,
+        normalizedFields: rt.rawFields || primaryCollection.fields,
+        roleName: rt.roleName || primaryRole.roleName,
+        roleTitle: rt.roleTitle || primaryRole.roleTitle,
+        lockedFields: rt.lockedFields || primaryRole.lockedFields,
+        portalSlug: rt.portalSlug || primaryPortal.portalSlug,
+        pageTitle: rt.pageTitle || primaryPortal.pageTitle,
+        blocks: rt.blocks || primaryPortal.blocks,
+        creativeTheme: rt.creativeTheme || primaryPortal.creativeTheme,
+        dmnSpec: rt.dmnSpec !== undefined ? rt.dmnSpec : (dmnInputList[0] || null),
+        flowSpec: rt.flowSpec !== undefined ? rt.flowSpec : (flowInputList[0] || null),
+        n8nWorkflowId: rt.n8nWorkflowId !== undefined ? rt.n8nWorkflowId : n8nWorkflowId,
       }, deps);
       repairs.push({ round: healRounds, ...repair });
     }
   }
 
-  bumpSurfaceRevision(portalSlug, {
-    pageTitle,
-    message: `App Builder đã dựng phân hệ "${pageTitle}" (${verification.ok ? 'PASS' : 'NEEDS_REVIEW'})`,
+  // 9. Persist latticeBuiltApps registry record
+  const artifactRefsJson = {
+    collections: schemaResults.map((s) => s.collectionName),
+    roles: roleResults.map((r) => r.roleName),
+    portals: portalResults.map((p) => ({
+      portalSlug: p.portalSlug,
+      layoutUid: p.layoutUid,
+      pageTitle: p.pageTitle,
+      gridUid: p.gridUid,
+      blockUids: (p.attachedBlocks || []).map((b) => b.uid),
+    })),
+    aiEmployees: aiUsernames,
+    dmnTableKeys,
+    flowRuleKeys,
+    n8nWorkflowIds,
+  };
+
+  const builtApp = await upsertBuiltAppRecord(db, actor, {
+    appKey,
+    name: appName,
+    status: verification.ok ? 'active' : 'needs_review',
+    sourceSpecJson: spec,
+    artifactRefsJson,
+    bundleSnapshotUid: preBuildSnapshotUid,
+    lastVerifiedAt: new Date().toISOString(),
+    lastVerificationJson: verification,
   });
+
+  for (const pRes of portalResults) {
+    bumpSurfaceRevision(pRes.portalSlug, {
+      pageTitle: pRes.pageTitle,
+      message: `App Builder đã dựng phân hệ "${pRes.pageTitle}" (${verification.ok ? 'PASS' : 'NEEDS_REVIEW'})`,
+    });
+  }
+
   await withOptionalTenantRls(db, organizationId, (transaction) => recordAiAuditLog(db, {
     actorUserId: actor.userId,
     actorUsername: actor.username,
@@ -1254,28 +1701,44 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
     channel: 'app-builder',
     aiEmployee: aiUsername,
     toolName: 'dxos_provision_role_workspace',
-    argsSummary: { operation: 'build_enterprise_app', collectionName, portalSlug, roleName },
+    argsSummary: {
+      operation: 'build_enterprise_app',
+      appKey,
+      collections: artifactRefsJson.collections,
+      portalSlug: primaryPortal.portalSlug,
+      roleName: primaryRole.roleName,
+    },
     status: verification.ok ? 'allowed' : 'degraded',
-    resultSummary: `Built ${collectionName} on /p/${portalSlug} (ok=${verification.ok}, healRounds=${healRounds})`,
+    resultSummary: `Built ${appKey} (${artifactRefsJson.collections.join(', ')}) on /p/${primaryPortal.portalSlug} (ok=${verification.ok}, healRounds=${healRounds})`,
     ...(transaction ? { transaction } : {}),
   }));
 
   return {
     built: true,
     ok: verification.ok,
+    appKey,
+    appVersion: builtApp?.version || 1,
+    builtApp,
     organizationId,
     collectionName,
-    fields: schemaResult.fields.map((f) => f.name),
-    indexes: schemaResult.indexes,
-    roleName: rbacResult.roleName,
-    portalSlug,
-    pageTitle,
-    gridUid: portalResult.gridUid,
-    blocks: portalResult.attachedBlocks,
+    collections: artifactRefsJson.collections,
+    fields: primarySchemaResult.fields.map((f) => f.name),
+    indexes: primarySchemaResult.indexes,
+    roleName: primaryRbacResult.roleName,
+    roles: artifactRefsJson.roles,
+    portalSlug: primaryPortal.portalSlug,
+    pageTitle: primaryPortal.pageTitle,
+    portals: portalResults,
+    gridUid: primaryPortalResult.gridUid,
+    blocks: primaryPortalResult.attachedBlocks,
     aiEmployee: aiUsername,
     dmnTableKey,
+    dmnTableKeys,
     flowRuleKey,
+    flowRuleKeys,
     n8nWorkflowId,
+    n8nWorkflowIds,
+    artifactRefs: artifactRefsJson,
     preBuildSnapshotUid,
     verification,
     healRounds,
@@ -1283,9 +1746,371 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
   };
 }
 
+async function listBuiltApps(db, actor, { status } = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được xem danh sách ứng dụng đã dựng.');
+  }
+  const organizationId = String(actor.organizationId || '').trim();
+  if (!organizationId) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+  const repo = db?.getRepository?.('latticeBuiltApps');
+  if (!repo) return { organizationId, apps: [], total: 0 };
+  const rows = (await withOptionalTenantRls(db, organizationId, (transaction) => repo.find({
+    filter: { organizationId, ...(status ? { status: String(status).trim() } : {}) },
+    sort: ['-id'],
+    limit: 200,
+    ...(transaction ? { transaction } : {}),
+  }))) || [];
+  const apps = rows
+    .filter((r) => val(r, 'organizationId') === organizationId && (!status || val(r, 'status') === String(status).trim()))
+    .map(serializeBuiltAppRow);
+  return { organizationId, apps, total: apps.length };
+}
+
+async function rebuildEnterpriseApp(ctx, db, actor, opts = {}, deps = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được dựng lại ứng dụng.');
+  }
+  const organizationId = String(actor.organizationId || '').trim();
+  if (!organizationId) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+  const appKey = String(opts?.appKey || '').trim();
+  if (!appKey) {
+    throw failBuild('APP_KEY_REQUIRED', 400, 'Cần appKey để dựng lại ứng dụng.');
+  }
+  const repo = db?.getRepository?.('latticeBuiltApps');
+  if (!repo) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Repository latticeBuiltApps chưa sẵn sàng cho "${appKey}".`);
+  }
+  const existing = await withOptionalTenantRls(db, organizationId, (transaction) => repo.findOne({
+    filter: { organizationId, appKey },
+    ...(transaction ? { transaction } : {}),
+  }));
+  if (!existing || val(existing, 'organizationId') !== organizationId) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Không tìm thấy ứng dụng "${appKey}" trong tổ chức.`);
+  }
+
+  const baseSpec = val(existing, 'sourceSpecJson') && typeof val(existing, 'sourceSpecJson') === 'object'
+    ? { ...val(existing, 'sourceSpecJson') }
+    : {};
+  const specPatch = opts?.specPatch && typeof opts.specPatch === 'object' ? opts.specPatch : {};
+  const refs = val(existing, 'artifactRefsJson') && typeof val(existing, 'artifactRefsJson') === 'object'
+    ? val(existing, 'artifactRefsJson')
+    : {};
+  const prevN8nIds = Array.isArray(refs.n8nWorkflowIds) ? refs.n8nWorkflowIds : [];
+
+  const mergedSpec = {
+    ...baseSpec,
+    ...specPatch,
+    appKey,
+    ...(opts?.maxHealRounds != null ? { maxHealRounds: opts.maxHealRounds } : {}),
+  };
+  if (mergedSpec.n8nWorkflow && !mergedSpec.n8nWorkflow.id && prevN8nIds[0]) {
+    mergedSpec.n8nWorkflow = { ...mergedSpec.n8nWorkflow, id: prevN8nIds[0] };
+  }
+  if (Array.isArray(mergedSpec.n8nWorkflows) && prevN8nIds.length) {
+    mergedSpec.n8nWorkflows = mergedSpec.n8nWorkflows.map((wf, idx) => (
+      wf && !wf.id && prevN8nIds[idx] ? { ...wf, id: prevN8nIds[idx] } : wf
+    ));
+  }
+
+  const result = await orchestrateEnterpriseAppBuild(ctx, db, actor, mergedSpec, deps);
+  return {
+    rebuilt: true,
+    ...result,
+  };
+}
+
+async function exportAppBundle(db, actor, { appKey = null, organizationId = null, platformVersion = '1.0.0' } = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được xuất gói giải pháp.');
+  }
+  const targetOrg = String(organizationId || actor.organizationId || '').trim();
+  if (!targetOrg) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+  if (!actor.isRoot && actor.organizationId && targetOrg !== actor.organizationId) {
+    throw failBuild('DXOS_ORG_MISMATCH', 403, 'Không được xuất gói giải pháp của tổ chức khác.');
+  }
+
+  const bundleMod = getSolutionBundleMod();
+  if (typeof bundleMod?.exportSolutionBundle !== 'function') {
+    throw failBuild('SOLUTION_BUNDLE_UNAVAILABLE', 503, 'Module solution-bundle chưa sẵn sàng.');
+  }
+
+  let builtRow = null;
+  if (appKey) {
+    const repo = db?.getRepository?.('latticeBuiltApps');
+    if (!repo) {
+      throw failBuild('BUILT_APP_NOT_FOUND', 404, `Không tìm thấy ứng dụng "${appKey}".`);
+    }
+    builtRow = await withOptionalTenantRls(db, targetOrg, (transaction) => repo.findOne({
+      filter: { organizationId: targetOrg, appKey: String(appKey).trim() },
+      ...(transaction ? { transaction } : {}),
+    }));
+    if (!builtRow || val(builtRow, 'organizationId') !== targetOrg) {
+      throw failBuild('BUILT_APP_NOT_FOUND', 404, `Không tìm thấy ứng dụng "${appKey}" trong tổ chức.`);
+    }
+  }
+
+  const rawBundle = await withOptionalTenantRls(db, targetOrg, () => (
+    bundleMod.exportSolutionBundle(db, { organizationId: targetOrg, platformVersion })
+  ));
+  if (!builtRow) return rawBundle;
+
+  const refs = val(builtRow, 'artifactRefsJson') || {};
+  const colSet = new Set(Array.isArray(refs.collections) ? refs.collections : []);
+  const roleSet = new Set(Array.isArray(refs.roles) ? refs.roles : []);
+  const layoutSet = new Set((Array.isArray(refs.portals) ? refs.portals : []).map((p) => p.layoutUid).filter(Boolean));
+  const aiSet = new Set(Array.isArray(refs.aiEmployees) ? refs.aiEmployees : []);
+  const dmnSet = new Set(Array.isArray(refs.dmnTableKeys) ? refs.dmnTableKeys : []);
+
+  const filteredPayload = {
+    roles: roleSet.size ? (rawBundle.roles || []).filter((r) => roleSet.has(r.name)) : (rawBundle.roles || []),
+    portals: layoutSet.size ? (rawBundle.portals || []).filter((p) => layoutSet.has(p.uid)) : (rawBundle.portals || []),
+    workflows: rawBundle.workflows || [],
+    aiProfiles: aiSet.size ? (rawBundle.aiProfiles || []).filter((a) => aiSet.has(a.username)) : (rawBundle.aiProfiles || []),
+    customCollections: colSet.size ? (rawBundle.customCollections || []).filter((c) => colSet.has(c.name)) : (rawBundle.customCollections || []),
+    routesAndBlocks: rawBundle.routesAndBlocks || { routes: [], flowModels: [] },
+    governance: {
+      ...(rawBundle.governance || {}),
+      decisionTables: dmnSet.size
+        ? ((rawBundle.governance?.decisionTables) || []).filter((t) => dmnSet.has(t.tableKey))
+        : ((rawBundle.governance?.decisionTables) || []),
+    },
+  };
+  const contentSha256 = createHash('sha256').update(JSON.stringify(filteredPayload)).digest('hex');
+  return {
+    metadata: {
+      ...rawBundle.metadata,
+      appKey: val(builtRow, 'appKey'),
+      appVersion: Number(val(builtRow, 'version')) || 1,
+      contentSha256,
+    },
+    ...filteredPayload,
+  };
+}
+
+async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
+  if (!actor?.isAdmin && !actor?.isRoot) {
+    throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được gỡ ứng dụng.');
+  }
+  const organizationId = String(actor.organizationId || '').trim();
+  if (!organizationId) {
+    throw failBuild('NATIVE_TENANT_REQUIRED', 403, 'Yêu cầu organizationId hợp lệ.');
+  }
+  const appKey = String(opts?.appKey || '').trim();
+  if (!appKey) {
+    throw failBuild('APP_KEY_REQUIRED', 400, 'Cần appKey để gỡ ứng dụng.');
+  }
+  const keepData = opts?.keepData !== false;
+
+  const repo = db?.getRepository?.('latticeBuiltApps');
+  if (!repo) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Repository latticeBuiltApps chưa sẵn sàng cho "${appKey}".`);
+  }
+  const existing = await withOptionalTenantRls(db, organizationId, (transaction) => repo.findOne({
+    filter: { organizationId, appKey },
+    ...(transaction ? { transaction } : {}),
+  }));
+  if (!existing || val(existing, 'organizationId') !== organizationId) {
+    throw failBuild('BUILT_APP_NOT_FOUND', 404, `Không tìm thấy ứng dụng "${appKey}" trong tổ chức.`);
+  }
+
+  const refs = val(existing, 'artifactRefsJson') || {};
+  const sourceSpec = val(existing, 'sourceSpecJson') || {};
+  const collections = Array.isArray(refs.collections) ? refs.collections : [];
+  const roles = Array.isArray(refs.roles) ? refs.roles : [];
+  const portals = Array.isArray(refs.portals) ? refs.portals : [];
+  const aiEmployees = Array.isArray(refs.aiEmployees) ? refs.aiEmployees : [];
+  const dmnTableKeys = Array.isArray(refs.dmnTableKeys) ? refs.dmnTableKeys : [];
+  const flowRuleKeys = Array.isArray(refs.flowRuleKeys) ? refs.flowRuleKeys : [];
+  const n8nWorkflowIds = Array.isArray(refs.n8nWorkflowIds) ? refs.n8nWorkflowIds : [];
+
+  // 1. Remove UI block flowModels & portal role bindings
+  let removedBlocks = 0;
+  const flowModelsRepo = db?.getRepository?.('flowModels');
+  const blockUids = [...new Set(portals.flatMap((p) => (Array.isArray(p?.blockUids) ? p.blockUids : [])).filter(Boolean))];
+  if (flowModelsRepo && blockUids.length) {
+    if (typeof flowModelsRepo.destroy === 'function') {
+      await flowModelsRepo.destroy({ filter: { uid: { $in: blockUids } } });
+      removedBlocks = blockUids.length;
+    }
+    for (const p of portals) {
+      if (p?.gridUid && typeof flowModelsRepo.findModelById === 'function' && typeof flowModelsRepo.upsertModel === 'function') {
+        const grid = await flowModelsRepo.findModelById(p.gridUid);
+        if (grid?.props) {
+          const rmSet = new Set(blockUids);
+          const nextRows = {};
+          for (const [rk, rowCols] of Object.entries(grid.props.rows || {})) {
+            const filteredCols = (Array.isArray(rowCols) ? rowCols : [])
+              .map((col) => (Array.isArray(col) ? col.filter((u) => !rmSet.has(u)) : col))
+              .filter((col) => !Array.isArray(col) || col.length > 0);
+            if (filteredCols.length) nextRows[rk] = filteredCols;
+          }
+          const nextOrder = (Array.isArray(grid.props.rowOrder) ? grid.props.rowOrder : []).filter((rk) => Object.prototype.hasOwnProperty.call(nextRows, rk));
+          await flowModelsRepo.upsertModel({ ...grid, props: { ...grid.props, rows: nextRows, rowOrder: nextOrder } });
+        }
+      }
+    }
+  }
+
+  const rolesRoutesRepo = db?.getRepository?.('rolesDesktopRoutes');
+  if (rolesRoutesRepo && typeof rolesRoutesRepo.destroy === 'function' && roles.length) {
+    for (const p of portals) {
+      if (!p?.portalSlug) continue;
+      const pSet = await collectPortalRouteSet(db, p.portalSlug);
+      const pRoutes = resolvePortalRoutes(pSet.routes, pSet.links, p.layoutUid || `ldx-portal-${p.portalSlug}`, val);
+      const rIds = pRoutes.map((r) => val(r, 'id')).filter((id) => id != null);
+      if (rIds.length) {
+        await rolesRoutesRepo.destroy({ filter: { desktopRouteId: { $in: rIds }, roleName: { $in: roles } } });
+      }
+    }
+  }
+
+  // 2. Deactivate Flow v2 rules & DMN tables under tenant RLS
+  let deactivatedFlows = 0;
+  const flowRepo = db?.getRepository?.('latticeAutomationRules');
+  if (flowRepo && flowRuleKeys.length) {
+    await withOptionalTenantRls(db, organizationId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      for (const rk of flowRuleKeys) {
+        const row = await flowRepo.findOne({ filter: { organizationId, ruleKey: rk }, ...txOpt });
+        if (row && typeof row.update === 'function') {
+          await row.update({ active: false }, txOpt);
+          deactivatedFlows += 1;
+        }
+      }
+    });
+  }
+
+  let deactivatedDmn = 0;
+  const dmnRepo = db?.getRepository?.('latticeDecisionTables');
+  if (dmnRepo && dmnTableKeys.length) {
+    await withOptionalTenantRls(db, organizationId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      for (const dk of dmnTableKeys) {
+        const row = await dmnRepo.findOne({ filter: { organizationId, tableKey: dk }, ...txOpt });
+        if (row && typeof row.update === 'function') {
+          await row.update({ active: false }, txOpt);
+          deactivatedDmn += 1;
+        }
+      }
+    });
+  }
+
+  // 3. Disable non-starter app AI assistants
+  const customAi = aiEmployees.filter((u) => u && !STARTER_AI_USERNAMES.has(u));
+  if (customAi.length) {
+    const profRepo = db?.getRepository?.('latticeAiProfiles');
+    if (profRepo) {
+      await withOptionalTenantRls(db, organizationId, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        for (const uname of customAi) {
+          const pRow = await profRepo.findOne({ filter: { username: uname }, ...txOpt });
+          if (pRow && typeof pRow.update === 'function') {
+            await pRow.update({ enabled: false }, txOpt);
+          }
+        }
+      });
+    }
+  }
+
+  // 4. Deactivate Stock n8n workflows STRICTLY OUTSIDE DB transactions
+  let deactivatedN8n = 0;
+  if (n8nWorkflowIds.length) {
+    const bridgeDeps = { val, failTool: failBuild, hasRes: (c, n) => Boolean(safeGetResource(c, n)), invokeResourceAction: invokeResAction, ...deps };
+    for (const wfId of n8nWorkflowIds) {
+      try {
+        await runActivateN8nWorkflow(ctx, db, actor, { workflowId: wfId, active: false, connectorKey: sourceSpec.n8nConnectorKey }, bridgeDeps);
+        deactivatedN8n += 1;
+      } catch {
+        // Non-fatal if connector unavailable during teardown
+      }
+    }
+  }
+
+  // 5. Data preservation vs explicit drop
+  const droppedCollections = [];
+  const preservedCollections = [];
+  if (!keepData) {
+    const resRepo = db?.getRepository?.('dataSourcesRolesResources');
+    const fieldsRepo = db?.getRepository?.('fields');
+    const colsRepo = db?.getRepository?.('collections');
+    for (const colName of collections) {
+      if (!CUSTOM_COLLECTION_RE.test(colName) || SYSTEM_PROTECTED_COLLECTIONS.has(colName)) continue;
+      if (resRepo && typeof resRepo.destroy === 'function') {
+        await resRepo.destroy({ filter: { name: colName } });
+      }
+      if (fieldsRepo && typeof fieldsRepo.destroy === 'function') {
+        await fieldsRepo.destroy({ filter: { collectionName: colName } });
+      }
+      if (colsRepo && typeof colsRepo.destroy === 'function') {
+        await colsRepo.destroy({ filter: { name: colName } });
+      }
+      if (typeof db?.sequelize?.query === 'function') {
+        try {
+          await db.sequelize.query(`DROP TABLE IF EXISTS "${colName}";`);
+        } catch {
+          // Non-fatal in mock harnesses
+        }
+      }
+      droppedCollections.push(colName);
+    }
+  } else {
+    preservedCollections.push(...collections);
+  }
+
+  // 6. Update latticeBuiltApps status
+  const torndownAt = new Date().toISOString();
+  await withOptionalTenantRls(db, organizationId, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const patch = {
+      status: 'torndown',
+      lastVerifiedAt: torndownAt,
+      lastVerificationJson: { torndown: true, keepData, torndownAt },
+    };
+    if (typeof existing.update === 'function') await existing.update(patch, txOpt);
+    else if (typeof repo.update === 'function') await repo.update({ filter: { organizationId, appKey }, values: patch, ...txOpt });
+  });
+
+  await withOptionalTenantRls(db, organizationId, (transaction) => recordAiAuditLog(db, {
+    actorUserId: actor.userId,
+    actorUsername: actor.username,
+    organizationId,
+    channel: 'app-builder',
+    toolName: 'dxos_provision_role_workspace',
+    argsSummary: { operation: 'teardown_built_app', appKey, keepData },
+    status: 'allowed',
+    resultSummary: `Torn down ${appKey} (keepData=${keepData}, dropped=${droppedCollections.length})`,
+    ...(transaction ? { transaction } : {}),
+  }));
+
+  return {
+    torndown: true,
+    appKey,
+    organizationId,
+    keepData,
+    preservedCollections,
+    droppedCollections,
+    removedBlocks,
+    deactivatedFlows,
+    deactivatedDmn,
+    deactivatedN8n,
+  };
+}
+
 module.exports = {
   ALL_NATIVE_V2_BLOCK_MODELS,
   DEFAULT_SELF_HEAL_MAX_ROUNDS,
+  SYSTEM_PROTECTED_COLLECTIONS,
+  topologicalSortCollections,
   orchestrateEnterpriseAppBuild,
   verifyEnterpriseApp,
+  listBuiltApps,
+  rebuildEnterpriseApp,
+  exportAppBundle,
+  teardownBuiltApp,
 };

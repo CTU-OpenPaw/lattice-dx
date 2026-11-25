@@ -24,7 +24,23 @@ const {
 const { createBuilderTools } = require('./ai-builder-tools');
 const { createOperationalTools } = require('./ai-operational-tools');
 const { createSurfaceAndCreativeTools } = require('./ai-surface-creative-tools');
-const { orchestrateEnterpriseAppBuild, verifyEnterpriseApp } = require('./app-builder-orchestrator');
+const {
+  orchestrateEnterpriseAppBuild,
+  verifyEnterpriseApp,
+  listBuiltApps,
+  rebuildEnterpriseApp,
+  exportAppBundle,
+  teardownBuiltApp,
+} = require('./app-builder-orchestrator');
+
+const ORCHESTRATOR_OPS = new Set([
+  'build_enterprise_app',
+  'verify_app',
+  'list_built_apps',
+  'rebuild_enterprise_app',
+  'export_app_bundle',
+  'teardown_built_app',
+]);
 
 const ADMIN_BUILDER_TOOL_NAMES = [
   'dxos_inspect_architecture',
@@ -64,7 +80,7 @@ const PROTECTED_SERVER_FIELDS = new Set([
 const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
-  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue', 'latticeUiSnapshots',
+  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue', 'latticeUiSnapshots', 'latticeBuiltApps',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
 ]);
@@ -296,7 +312,7 @@ function createAuditedTool(spec) {
         const checked = schemaHelper.validate(preparedArgs);
         if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
         const skipOuterTx = spec.name === 'dxos_provision_role_workspace'
-          && (checked.value?.operation === 'build_enterprise_app' || checked.value?.operation === 'verify_app');
+          && ORCHESTRATOR_OPS.has(checked.value?.operation);
         const result = skipOuterTx
           ? await spec.run(ctx, db, actor, checked.value)
           : await runWithTenantRls(db, actor.organizationId, () => spec.run(ctx, db, actor, checked.value));
@@ -414,11 +430,34 @@ function createDxosTools() {
         title: 'Kiến trúc sư Ứng dụng Doanh nghiệp & Phân hệ Mới',
         about: 'Dựng trọn gói phân hệ (Snapshot + Schema/Relations/RLS/OpenAPI + RBAC + Portal 10 BlockModels + DMN + LatticeFlow v2 + Stock n8n + Verifier & 2-round Self-Healing) hoặc kiểm chứng ứng dụng.',
       },
-      description: 'End-to-end Enterprise App Builder & Workspace Architect: provision role/workspace/AI (default), build full-stack enterprise app with deterministic verification & 2-round self-healing (operation="build_enterprise_app"), or verify existing app (operation="verify_app").',
+      description: 'End-to-end Multi-Entity Enterprise App Builder & Workspace Architect: provision role/workspace/AI (default), build single/multi-entity enterprise app (build_enterprise_app), verify (verify_app), list_built_apps, rebuild_enterprise_app, export_app_bundle (v3), or teardown_built_app.',
       schema: {
-        description: 'Role-to-Workspace & Full-Stack Enterprise App Builder request.',
+        description: 'Role-to-Workspace & Full-Stack Multi-Entity Enterprise App Builder request.',
         properties: {
-          operation: { type: 'string', default: 'provision_role_workspace', enum: ['provision_role_workspace', 'build_enterprise_app', 'verify_app'] },
+          operation: {
+            type: 'string',
+            default: 'provision_role_workspace',
+            enum: [
+              'provision_role_workspace',
+              'build_enterprise_app',
+              'verify_app',
+              'list_built_apps',
+              'rebuild_enterprise_app',
+              'export_app_bundle',
+              'teardown_built_app',
+            ],
+          },
+          appKey: { type: 'string', maxLength: 120 },
+          name: { type: 'string', maxLength: 160 },
+          status: { type: 'string', maxLength: 32 },
+          keepData: { type: 'boolean', default: true },
+          specPatch: { type: 'object' },
+          collections: { type: 'array', items: { type: 'object' } },
+          roles: { type: 'array', items: { type: 'object' } },
+          portals: { type: 'array', items: { type: 'object' } },
+          dmnTables: { type: 'array', items: { type: 'object' } },
+          flowGraphs: { type: 'array', items: { type: 'object' } },
+          n8nWorkflows: { type: 'array', items: { type: 'object' } },
           roleName: { type: 'string', maxLength: 42 },
           roleTitle: { type: 'string', maxLength: 100 },
           portalSlug: { type: 'string', maxLength: 40 },
@@ -459,14 +498,36 @@ function createDxosTools() {
             ...(args.n8nWorkflowId ? { n8nWorkflowId: args.n8nWorkflowId } : {}),
           });
         }
+        if (args.operation === 'list_built_apps') {
+          return listBuiltApps(db, actor, { status: args.status });
+        }
+        if (args.operation === 'rebuild_enterprise_app') {
+          return rebuildEnterpriseApp(ctx, db, actor, {
+            appKey: args.appKey,
+            specPatch: args.specPatch,
+            maxHealRounds: args.maxHealRounds,
+          });
+        }
+        if (args.operation === 'export_app_bundle') {
+          return exportAppBundle(db, actor, { appKey: args.appKey });
+        }
+        if (args.operation === 'teardown_built_app') {
+          return teardownBuiltApp(ctx, db, actor, {
+            appKey: args.appKey,
+            keepData: args.keepData !== false,
+          });
+        }
         return orchestrateEnterpriseAppBuild(ctx, db, actor, args);
       },
     });
     return {
       ...orchestratorTool,
       async invoke(ctx, rawArgs = {}) {
-        const op = rawArgs && typeof rawArgs === 'object' ? rawArgs.operation : undefined;
-        if (op === 'build_enterprise_app' || op === 'verify_app') {
+        let op = rawArgs && typeof rawArgs === 'object' ? rawArgs.operation : undefined;
+        if (!op && typeof rawArgs === 'string' && rawArgs.trim().startsWith('{')) {
+          try { op = JSON.parse(rawArgs).operation; } catch {}
+        }
+        if (ORCHESTRATOR_OPS.has(op)) {
           return orchestratorTool.invoke(ctx, rawArgs);
         }
         return tool.invoke(ctx, rawArgs);

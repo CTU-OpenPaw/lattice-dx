@@ -82,6 +82,7 @@ const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts',
   'workflows', 'flow_nodes', 'collections', 'fields',
   'latticeNotifications', 'latticeSlaPolicies', 'latticeAiApprovalQueue', 'latticeParaChunks',
+  'latticeBuiltApps',
 ]);
 const SYSTEM_PROTECTED_COLLECTIONS_LOWER = new Set(
   [...SYSTEM_PROTECTED_COLLECTIONS].map((c) => c.toLowerCase()),

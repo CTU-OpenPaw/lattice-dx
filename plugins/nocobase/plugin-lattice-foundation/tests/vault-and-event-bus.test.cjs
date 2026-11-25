@@ -272,7 +272,7 @@ test('Task A.2 collections, migration 20261125000100, and 42-table pg-rls define
     assert.ok(delCol.indexes.some((i) => i.name === 'idx_lattice_wh_del_org_status'));
 
     const pgRls = require('../src/server/pg-rls');
-    assert.equal(pgRls.TENANT_RLS_TABLES.length, 42);
+    assert.equal(pgRls.TENANT_RLS_TABLES.length, 43);
     for (const tbl of [
       'latticeConnectors',
       'latticeEventBus',
@@ -282,8 +282,9 @@ test('Task A.2 collections, migration 20261125000100, and 42-table pg-rls define
       'latticeBrokerSubscriptions',
       'latticeAutomationRules',
       'latticeAutomationRuns',
+      'latticeBuiltApps',
     ]) {
-      assert.ok(pgRls.TENANT_RLS_TABLES.includes(tbl), `Missing 42-table RLS entry ${tbl}`);
+      assert.ok(pgRls.TENANT_RLS_TABLES.includes(tbl), `Missing 43-table RLS entry ${tbl}`);
     }
 
     const Migration = require('../src/server/migrations/20261125000100-connectors-events-webhooks');

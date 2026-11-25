@@ -310,12 +310,78 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
-  // 2. Role Workspace Provisioning & Enterprise App Builder / Verifier
-  if (/(?:xay\s+dung|dung|tao)\s+(?:tron\s+bo\s+)?(?:phan\s+he|ung\s+dung(?:\s+doanh\s+nghiep)?(?:\s+hoan\s+chinh)?|app\s+moi)\b/.test(n)) {
+  // 2. Role Workspace Provisioning & Multi-Entity Enterprise App Builder / Rebuild / Export / Teardown / Verifier
+  const extractBuiltAppKey = (input) => {
+    const clean = stripDiacritics(input).trim();
+    const explicit = clean.match(/\bappKey\s*[:=]\s*([a-z0-9][a-z0-9_-]{1,79})\b/i);
+    if (explicit?.[1]) return explicit[1].toLowerCase();
+    const named = clean.match(/\b(?:ung\s+dung|phan\s+he|app)\s+([a-z0-9]+(?:[_-][a-z0-9]+)+)\b/i);
+    if (named?.[1]) return named[1].toLowerCase();
+    return null;
+  };
+  const matchedCustomCols = [...new Set(
+    [...raw.matchAll(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/g)].map((m) => m[1]),
+  )];
+
+  if (/(?:liet\s+ke|xem\s+danh\s+sach|danh\s+sach)\s+(?:cac\s+)?(?:ung\s+dung\s+da\s+dung|built\s+apps|phan\s+he\s+da\s+tao)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('list_built_apps');
+    if (denied) return denied;
+    return {
+      intent: 'LIST_BUILT_APPS',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: { operation: 'list_built_apps' },
+    };
+  }
+  if (/(?:dung\s+lai|xay\s+dung\s+lai|rebuild|tai\s+tao)\s+(?:ung\s+dung|phan\s+he|app)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('rebuild_enterprise_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    return {
+      intent: 'REBUILD_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'rebuild_enterprise_app',
+        ...(appKey ? { appKey } : {}),
+      },
+    };
+  }
+  if (/(?:xuat|export)\s+(?:goi\s+)?(?:giai\s+phap|solution\s+bundle|bundle(?:\s+v3)?)(?:\s+(?:cua\s+)?(?:ung\s+dung|phan\s+he|app))?/.test(n)) {
+    const denied = requireAdminOrRefuse('export_app_bundle');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    return {
+      intent: 'EXPORT_APP_BUNDLE',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'export_app_bundle',
+        ...(appKey ? { appKey } : {}),
+      },
+    };
+  }
+  if (/(?:go\s+bo|teardown|thu\s+hoi|xoa\s+(?:giao\s+dien|phan\s+he|ung\s+dung))\s+(?:ung\s+dung|phan\s+he|app)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('teardown_built_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    const keepData = !/(?:xoa\s+ca\s+du\s+lieu|xoa\s+sach\s+du\s+lieu|keepdata\s*[:=]\s*false|drop\s+data)/.test(n);
+    return {
+      intent: 'TEARDOWN_BUILT_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'teardown_built_app',
+        ...(appKey ? { appKey } : {}),
+        keepData,
+      },
+    };
+  }
+  if (/(?:xay\s+dung|dung|tao)\s+(?:tron\s+bo\s+)?(?:phan\s+he|ung\s+dung(?:\s+doanh\s+nghiep|\s+da\s+thuc\s+the)?(?:\s+hoan\s+chinh)?|he\s+thong\s+da\s+bang|app\s+moi)\b/.test(n)) {
     const denied = requireAdminOrRefuse('build_enterprise_app');
     if (denied) return denied;
-    const colMatch = raw.match(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/);
     const slugMatch = raw.match(/\/p\/([a-z0-9][a-z0-9-]{1,39})\b/i);
+    const isMulti = matchedCustomCols.length >= 2 || /(?:da\s+bang|da\s+thuc\s+the|multi[-\s]?entity)/.test(n);
     return {
       intent: 'BUILD_ENTERPRISE_APP',
       refused: false,
@@ -323,7 +389,9 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
       args: {
         operation: 'build_enterprise_app',
         portalSlug: slugMatch?.[1] ? slugMatch[1].toLowerCase() : targetPortal,
-        ...(colMatch?.[1] ? { collectionName: colMatch[1] } : {}),
+        ...(isMulti && matchedCustomCols.length
+          ? { collections: matchedCustomCols.map((c) => ({ collectionName: c, fields: [] })) }
+          : (matchedCustomCols[0] ? { collectionName: matchedCustomCols[0] } : {})),
         pageTitle: raw.slice(0, 80),
         dryRun: false,
       },

@@ -589,3 +589,318 @@ test('RLS Remediation (Findings 2b & 4): app-builder-orchestrator wraps latticeU
     else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
 });
+
+test('Task 10: latticeBuiltApps collection, FORCE RLS migration, and SYSTEM_PROTECTED_COLLECTIONS sync across 3 modules', async () => {
+  const Module = require('node:module');
+  const path = require('node:path');
+  const { readFileSync } = require('node:fs');
+  const origLoad = Module._load;
+  class MockMigration { constructor(context) { this.context = context; } }
+  Module._load = function mocked(request, parent, isMain) {
+    if (request === '@nocobase/database') return { defineCollection: (def) => def };
+    if (request === '@nocobase/server') return { Migration: MockMigration };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  let colDef;
+  let MigCls;
+  try {
+    colDef = require('../src/server/collections/built-apps');
+    MigCls = require('../src/server/migrations/20261128000100-built-apps-registry-rls');
+  } finally {
+    Module._load = origLoad;
+  }
+
+  assert.equal(colDef.name, 'latticeBuiltApps');
+  assert.deepEqual(colDef.migrationRules, ['schema-only']);
+  for (const fieldName of [
+    'organizationId', 'appKey', 'name', 'version', 'status',
+    'sourceSpecJson', 'artifactRefsJson', 'bundleSnapshotUid',
+    'lastVerifiedAt', 'lastVerificationJson', 'createdBy',
+  ]) {
+    assert.ok(colDef.fields.some((f) => f.name === fieldName), `built-apps.js missing field ${fieldName}`);
+  }
+  assert.ok(colDef.indexes.some((i) => i.unique === true && i.fields.includes('organizationId') && i.fields.includes('appKey')));
+
+  const sqlCalls = [];
+  const attached = [];
+  const detached = [];
+  const fakeTx = { id: 'tx-built-apps' };
+  const mig = new MigCls({
+    db: {
+      attachLatticeRlsPolicy: async (t, opts) => { attached.push({ t, tx: opts?.transaction }); },
+      detachLatticeRlsPolicy: async (t, opts) => { detached.push({ t, tx: opts?.transaction }); },
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (fn) => fn(fakeTx),
+        query: async (sql, opts) => { sqlCalls.push({ sql, opts }); return [[]]; },
+      },
+    },
+  });
+  assert.equal(mig.on, 'afterSync');
+  await mig.up();
+  assert.equal(sqlCalls.some((q) => /CREATE TABLE IF NOT EXISTS "latticeBuiltApps"/i.test(q.sql)), true);
+  assert.equal(sqlCalls.some((q) => /CREATE UNIQUE INDEX IF NOT EXISTS/i.test(q.sql) && q.sql.includes('"organizationId", "appKey"')), true);
+  assert.deepEqual(attached, [{ t: 'latticeBuiltApps', tx: fakeTx }]);
+
+  await mig.down();
+  assert.deepEqual(detached, [{ t: 'latticeBuiltApps', tx: fakeTx }]);
+  assert.equal(sqlCalls.some((q) => /DROP TABLE IF EXISTS "latticeBuiltApps"/i.test(q.sql)), true);
+
+  // Sync check across app-builder-orchestrator.js, ai-tools-core.js, and solution-bundle.js
+  const orchMod = require('../src/server/app-builder-orchestrator');
+  const coreMod = require('../src/server/ai-tools-core');
+  const bundleMod = require('../../plugin-dxos-studio/src/server/solution-bundle');
+  assert.equal(orchMod.SYSTEM_PROTECTED_COLLECTIONS.has('latticeBuiltApps'), true);
+  assert.equal(coreMod.SYSTEM_PROTECTED_COLLECTIONS.has('latticeBuiltApps'), true);
+  const bundleSrc = readFileSync(path.join(__dirname, '../../plugin-dxos-studio/src/server/solution-bundle.js'), 'utf8');
+  assert.match(bundleSrc, /latticeBuiltApps/);
+  assert.equal(typeof bundleMod.exportSolutionBundle, 'function');
+});
+
+test('Task 10 (Review Focus #5): topologicalSortCollections and orchestrateEnterpriseAppBuild reject cycles (400) and SYSTEM_PROTECTED_COLLECTIONS (403) BEFORE snapshot or DB writes', async () => {
+  const { topologicalSortCollections, orchestrateEnterpriseAppBuild } = require('../src/server/app-builder-orchestrator');
+
+  // 1. Direct topologicalSortCollections ordering check
+  const sorted = topologicalSortCollections([
+    { collectionName: 'latticeCustomOrders', fields: [{ name: 'vendor', type: 'belongsTo', target: 'latticeCustomVendors' }] },
+    { collectionName: 'latticeCustomVendors', fields: [{ name: 'title', type: 'string' }] },
+  ]);
+  assert.deepEqual(sorted.map((c) => c.collectionName), ['latticeCustomVendors', 'latticeCustomOrders']);
+
+  // 2. Cycle A -> B -> A must throw 400 BLUEPRINT_CYCLE_DETECTED before snapshot or DB writes
+  const { db, ctx, store } = makeOrchestratorHarness();
+  store.latticeBuiltApps = [];
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+  const initialColsCount = store.collections.length;
+
+  await assert.rejects(
+    () => orchestrateEnterpriseAppBuild(ctx, db, actor, {
+      appKey: 'cyclic-app',
+      portalSlug: 'cold-assets',
+      pageTitle: 'Cyclic App',
+      collections: [
+        { collectionName: 'latticeCustomAlpha', fields: [{ name: 'betaRef', type: 'belongsTo', target: 'latticeCustomBeta' }] },
+        { collectionName: 'latticeCustomBeta', fields: [{ name: 'alphaRef', type: 'belongsTo', target: 'latticeCustomAlpha' }] },
+      ],
+    }),
+    (err) => err.status === 400 && err.code === 'BLUEPRINT_CYCLE_DETECTED',
+  );
+  assert.equal(store.latticeUiSnapshots.length, 0, 'Cycle must reject BEFORE creating any snapshot');
+  assert.equal(store.collections.length, initialColsCount, 'Cycle must reject BEFORE creating any collection');
+  assert.equal(store.latticeBuiltApps.length, 0, 'Cycle must reject BEFORE writing latticeBuiltApps');
+
+  // 3. SYSTEM_PROTECTED_COLLECTIONS target ('users' and 'latticeBuiltApps') must throw 403 SYSTEM_COLLECTION_FORBIDDEN before snapshot or DB writes
+  for (const forbiddenTarget of ['users', 'latticeBuiltApps']) {
+    await assert.rejects(
+      () => orchestrateEnterpriseAppBuild(ctx, db, actor, {
+        appKey: `forbidden-${forbiddenTarget}`,
+        portalSlug: 'cold-assets',
+        pageTitle: 'Forbidden Target',
+        collections: [
+          { collectionName: 'latticeCustomSafeHeader', fields: [{ name: 'code', type: 'string' }] },
+          { collectionName: 'latticeCustomBadChild', fields: [{ name: 'sysRef', type: 'belongsTo', target: forbiddenTarget }] },
+        ],
+      }),
+      (err) => err.status === 403 && err.code === 'SYSTEM_COLLECTION_FORBIDDEN',
+    );
+    await assert.rejects(
+      () => orchestrateEnterpriseAppBuild(ctx, db, actor, {
+        appKey: `forbidden-direct-${forbiddenTarget}`,
+        portalSlug: 'cold-assets',
+        pageTitle: 'Forbidden Direct',
+        collections: [
+          { collectionName: forbiddenTarget, fields: [{ name: 'code', type: 'string' }] },
+        ],
+      }),
+      (err) => err.status === 403 && err.code === 'SYSTEM_COLLECTION_FORBIDDEN',
+    );
+  }
+  assert.equal(store.latticeUiSnapshots.length, 0, 'System target must reject BEFORE creating any snapshot');
+  assert.equal(store.collections.length, initialColsCount, 'System target must reject BEFORE creating any collection');
+});
+
+test('Task 10: Multi-Entity Build, latticeBuiltApps registry, Rebuild v2, Export Bundle v3, and safe Teardown (keepData=true vs keepData=false)', async () => {
+  const {
+    orchestrateEnterpriseAppBuild,
+    listBuiltApps,
+    rebuildEnterpriseApp,
+    exportAppBundle,
+    teardownBuiltApp,
+  } = require('../src/server/app-builder-orchestrator');
+  const { validateSolutionBundle } = require('../../plugin-dxos-studio/src/server/solution-bundle');
+
+  const { db, ctx, store } = makeOrchestratorHarness();
+  store.latticeBuiltApps = [];
+  store.latticeCustomVendors = [{ id: 1, code: 'V-01', name: 'NCC A', organizationId: 'native-ui-lab' }];
+  store.latticeCustomOrders = [{ id: 1, code: 'PO-01', name: 'Đơn A', organizationId: 'native-ui-lab', vendorId: 1 }];
+  store.workflows = [];
+  store.flow_nodes = [];
+  store.latticeSlaPolicies = [];
+  store.latticeIncidentRules = [];
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+
+  // Track collection creation order & ensure n8n HTTP stays outside DB transactions
+  const createdOrder = [];
+  const origHasCol = db.hasCollection.bind(db);
+  db.hasCollection = (n) => Boolean(store[n]) || origHasCol(n);
+  const origColsRepo = db.getRepository('collections');
+  const origGetRepo = db.getRepository.bind(db);
+  let activeTx = 0;
+  let n8nInsideTx = false;
+  db.sequelize.transaction = async (fn) => {
+    activeTx += 1;
+    try { return await fn({ id: `tx-${activeTx}` }); } finally { activeTx -= 1; }
+  };
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (name === 'collections' && repo) {
+      return {
+        ...repo,
+        create: async (args) => {
+          createdOrder.push(args.values.name);
+          return origColsRepo.create(args);
+        },
+      };
+    }
+    return repo;
+  };
+
+  let wfSeq = 0;
+  const n8nCalls = [];
+  const fakeN8nClient = {
+    async createWorkflow(wf) {
+      if (activeTx > 0) n8nInsideTx = true;
+      n8nCalls.push({ op: 'create', wf });
+      return { id: `wf-multi-${++wfSeq}`, name: wf.name, active: false };
+    },
+    async updateWorkflow(id, wf) {
+      if (activeTx > 0) n8nInsideTx = true;
+      n8nCalls.push({ op: 'update', id, wf });
+      return { id, name: wf.name, active: true };
+    },
+    async activateWorkflow(id, active) {
+      if (activeTx > 0) n8nInsideTx = true;
+      n8nCalls.push({ op: 'activate', id, active });
+      return { id, active };
+    },
+    async getWorkflow(id) {
+      if (activeTx > 0) n8nInsideTx = true;
+      return { id, name: 'Multi Entity WF', active: true };
+    },
+  };
+
+  const multiSpec = {
+    appKey: 'vendor-po-suite',
+    name: 'Hệ thống Quản lý Nhà cung cấp & Đơn mua',
+    portalSlug: 'cold-assets',
+    pageTitle: 'Đơn mua hàng Đa thực thể',
+    collections: [
+      {
+        collectionName: 'latticeCustomOrders',
+        collectionTitle: 'Đơn mua hàng',
+        fields: [
+          { name: 'vendor', type: 'belongsTo', target: 'latticeCustomVendors', title: 'Nhà cung cấp' },
+          { name: 'amount', type: 'float', title: 'Tổng tiền' },
+        ],
+      },
+      {
+        collectionName: 'latticeCustomVendors',
+        collectionTitle: 'Nhà cung cấp',
+        fields: [
+          { name: 'tier', type: 'enum', enumValues: ['gold', 'silver'], title: 'Hạng NCC' },
+        ],
+      },
+    ],
+    roles: [
+      { roleName: 'ldx_po_buyer', roleTitle: 'Chuyên viên Mua hàng', lockedFields: ['amount'] },
+    ],
+    portals: [
+      {
+        portalSlug: 'cold-assets',
+        pageTitle: 'Đơn mua hàng Đa thực thể',
+        collectionName: 'latticeCustomOrders',
+        roleName: 'ldx_po_buyer',
+        blocks: [{ blockUse: 'DxosKanbanScheduleBlockModel', title: 'Kanban Đơn mua' }],
+      },
+    ],
+    dmnTables: [
+      {
+        tableKey: 'po_approval_tier_v1',
+        name: 'Phân cấp duyệt PO',
+        hitPolicy: 'FIRST',
+        inputsJson: [{ name: 'amount', type: 'number' }],
+        outputsJson: [{ name: 'tier', type: 'string' }],
+        rulesJson: [{ when: { amount: { op: 'gt', value: 1000 } }, then: { tier: 'director' } }, { when: { amount: '*' }, then: { tier: 'manager' } }],
+        sampleInput: { amount: 2500 },
+      },
+    ],
+    flowGraphs: [
+      {
+        ruleKey: 'auto_po_multi_v2',
+        name: 'PO Multi Flow v2',
+        graphJson: {
+          version: 2,
+          nodes: [
+            { id: 'trig_1', type: 'trigger.record', label: 'On PO', config: { collection: 'latticeCustomOrders', operation: 'create' } },
+            { id: 'dmn_1', type: 'logic.dmn', label: 'DMN PO', config: { tableKey: 'po_approval_tier_v1' } },
+          ],
+          edges: [{ id: 'e1', source: 'trig_1', sourceHandle: 'main', target: 'dmn_1', targetHandle: 'in' }],
+        },
+        sampleEvent: { type: 'record.latticeCustomOrders.create', data: { code: 'PO-01', amount: 2500 } },
+      },
+    ],
+    n8nWorkflows: [
+      { name: 'PO Vendor ERP Sync', nodes: [], connections: {} },
+    ],
+  };
+
+  const built = await orchestrateEnterpriseAppBuild(ctx, db, actor, multiSpec, { n8nClient: fakeN8nClient });
+  assert.equal(built.built, true);
+  assert.equal(built.ok, true);
+  assert.equal(built.appKey, 'vendor-po-suite');
+  assert.equal(built.appVersion, 1);
+  assert.equal(n8nInsideTx, false, 'Outbound n8n calls must stay outside DB transactions');
+  assert.deepEqual(createdOrder, ['latticeCustomVendors', 'latticeCustomOrders'], 'Vendors must be created BEFORE Orders');
+  assert.equal(store.latticeBuiltApps.length, 1);
+  assert.equal(store.latticeBuiltApps[0].version, 1);
+  assert.equal(store.latticeBuiltApps[0].status, 'active');
+
+  // listBuiltApps
+  const listed = await listBuiltApps(db, actor);
+  assert.equal(listed.apps.length, 1);
+  assert.equal(listed.apps[0].appKey, 'vendor-po-suite');
+
+  // rebuildEnterpriseApp -> bumps version to 2 & reconciles existing n8n workflow in-place
+  const rebuilt = await rebuildEnterpriseApp(ctx, db, actor, { appKey: 'vendor-po-suite' }, { n8nClient: fakeN8nClient });
+  assert.equal(rebuilt.rebuilt, true);
+  assert.equal(rebuilt.ok, true);
+  assert.equal(rebuilt.appVersion, 2);
+  assert.equal(store.latticeBuiltApps[0].version, 2);
+  assert.equal(n8nCalls.some((c) => c.op === 'update' && c.id === 'wf-multi-1'), true);
+
+  // exportAppBundle -> valid v3 bundle
+  const exported = await exportAppBundle(db, actor, { appKey: 'vendor-po-suite' });
+  assert.equal(exported.metadata.schemaVersion, 'latticedx.solution-bundle/v3');
+  assert.equal(exported.metadata.appKey, 'vendor-po-suite');
+  assert.equal(exported.customCollections.some((c) => c.name === 'latticeCustomVendors'), true);
+  assert.equal(exported.customCollections.some((c) => c.name === 'latticeCustomOrders'), true);
+  const valRes = validateSolutionBundle(exported);
+  assert.equal(valRes.valid, true, `Exported v3 bundle must be valid: ${valRes.errors.join('; ')}`);
+
+  // teardownBuiltApp default keepData: true preserves custom collections & data while disabling automation/DMN/blocks
+  const tdKeep = await teardownBuiltApp(ctx, db, actor, { appKey: 'vendor-po-suite' }, { n8nClient: fakeN8nClient });
+  assert.equal(tdKeep.torndown, true);
+  assert.equal(tdKeep.keepData, true);
+  assert.equal(store.collections.some((c) => c.name === 'latticeCustomOrders'), true);
+  assert.equal(store.latticeCustomOrders.length, 1);
+  assert.equal(store.latticeAutomationRules.every((r) => r.active === false), true);
+  assert.equal(store.latticeDecisionTables.every((t) => t.active === false), true);
+  assert.equal(store.latticeBuiltApps[0].status, 'torndown');
+
+  // teardownBuiltApp keepData: false explicitly drops custom collections
+  const tdDrop = await teardownBuiltApp(ctx, db, actor, { appKey: 'vendor-po-suite', keepData: false }, { n8nClient: fakeN8nClient });
+  assert.equal(tdDrop.torndown, true);
+  assert.equal(tdDrop.keepData, false);
+  assert.equal(store.collections.some((c) => c.name === 'latticeCustomOrders'), false);
+  assert.equal(store.collections.some((c) => c.name === 'latticeCustomVendors'), false);
+});

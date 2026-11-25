@@ -56,6 +56,12 @@ const { createSurfaceEventsHandler, publishSurfaceUpdate } = require('./surface-
 const { getQuotaSummaryPersistent } = require('./ai-governance');
 const { runProactiveIncidentTriage } = require('./proactive-triage');
 const { runWithTenantRls, runWithSystemRlsBypass, runInRlsSavepoint } = require('./ai-rls');
+const {
+  listBuiltApps: listBuiltAppsRegistry,
+  rebuildEnterpriseApp,
+  exportAppBundle,
+  teardownBuiltApp: teardownBuiltAppEngine,
+} = require('./app-builder-orchestrator');
 
 const TRIAGE_SCAN_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_dispatcher']);
 const SUPPORTED_HITL_TOOLS = new Set([
@@ -2145,6 +2151,87 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         reboundAgents: rebindRes.reboundAgents,
         health,
       };
+      if (typeof next === 'function') await next();
+    },
+
+    async listBuiltApps(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'GET') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức GET.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      const requestedOrg = String(ctx?.action?.params?.organizationId || payload.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép xem ứng dụng của tổ chức khác.');
+      }
+      const effectiveActor = isRootActor(actor) && requestedOrg ? { ...actor, organizationId: requestedOrg } : actor;
+      const status = String(ctx?.action?.params?.status || payload.status || '').trim() || undefined;
+      ctx.body = await listBuiltAppsRegistry(targetDb, effectiveActor, { status });
+      if (typeof next === 'function') await next();
+    },
+
+    async rebuildBuiltApp(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      const requestedOrg = String(payload.organizationId || ctx?.action?.params?.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép dựng lại ứng dụng của tổ chức khác.');
+      }
+      const effectiveActor = isRootActor(actor) && requestedOrg ? { ...actor, organizationId: requestedOrg } : actor;
+      const appKey = String(payload.appKey || ctx?.action?.params?.appKey || ctx?.action?.params?.filterByTk || '').trim();
+      if (!appKey) {
+        throw failTool('APP_KEY_REQUIRED', 400, 'Cần appKey để dựng lại ứng dụng.');
+      }
+      ctx.body = await rebuildEnterpriseApp(ctx, targetDb, effectiveActor, {
+        appKey,
+        specPatch: payload.specPatch || null,
+        maxHealRounds: payload.maxHealRounds,
+      }, { env, fetchImpl });
+      if (typeof next === 'function') await next();
+    },
+
+    async exportBuiltAppBundle(ctx, next) {
+      if (ctx.method && !['GET', 'POST'].includes(String(ctx.method).toUpperCase())) {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức GET hoặc POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      const requestedOrg = String(ctx?.action?.params?.organizationId || payload.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép xuất gói giải pháp của tổ chức khác.');
+      }
+      const appKey = String(ctx?.action?.params?.appKey || payload.appKey || ctx?.action?.params?.filterByTk || '').trim() || null;
+      ctx.body = await exportAppBundle(targetDb, actor, {
+        appKey,
+        organizationId: requestedOrg || actor.organizationId,
+      });
+      if (typeof next === 'function') await next();
+    },
+
+    async teardownBuiltApp(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const actor = await resolveActorScope(ctx, targetDb);
+      const payload = readActionPayload(ctx);
+      const requestedOrg = String(payload.organizationId || ctx?.action?.params?.organizationId || '').trim();
+      if (!isRootActor(actor) && requestedOrg && requestedOrg !== actor.organizationId) {
+        throw failTool('DXOS_ORG_MISMATCH', 403, 'Không được phép gỡ ứng dụng của tổ chức khác.');
+      }
+      const effectiveActor = isRootActor(actor) && requestedOrg ? { ...actor, organizationId: requestedOrg } : actor;
+      const appKey = String(payload.appKey || ctx?.action?.params?.appKey || ctx?.action?.params?.filterByTk || '').trim();
+      if (!appKey) {
+        throw failTool('APP_KEY_REQUIRED', 400, 'Cần appKey để gỡ ứng dụng.');
+      }
+      const keepData = payload.keepData === false ? false : true;
+      ctx.body = await teardownBuiltAppEngine(ctx, targetDb, effectiveActor, { appKey, keepData }, { env, fetchImpl });
       if (typeof next === 'function') await next();
     },
   };

@@ -71,6 +71,7 @@ const TENANT_RLS_TABLES = Object.freeze([
   'latticeBrokerSubscriptions',
   'latticeAutomationRules',
   'latticeAutomationRuns',
+  'latticeBuiltApps',
 ]);
 
 const TENANT_RLS_TABLE_SET = new Set(TENANT_RLS_TABLES);

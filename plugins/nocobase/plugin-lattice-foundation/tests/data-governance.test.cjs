@@ -404,13 +404,14 @@ test('Task 2.1 collections, migration 20261124000200, and 42-table pg-rls define
     assert.ok(quarantineCol.indexes.some((i) => i.name === 'idx_lattice_quarantine_org_status'));
 
     const pgRls = require('../src/server/pg-rls');
-    assert.equal(pgRls.TENANT_RLS_TABLES.length, 42);
+    assert.equal(pgRls.TENANT_RLS_TABLES.length, 43);
     for (const tbl of [
       'latticeFrozenSnapshots', 'latticeDataLineage', 'latticeDataQuarantine',
       'latticeOrderLines', 'latticeStockLots', 'latticeEpodRecords',
       'latticeDecisionTables', 'latticeDelegations', 'latticeTwinShadows',
       'latticeConnectors', 'latticeEventBus', 'latticeWebhookSubscriptions', 'latticeWebhookDeliveries',
       'latticeIotDevices', 'latticeBrokerSubscriptions', 'latticeAutomationRules', 'latticeAutomationRuns',
+      'latticeBuiltApps',
     ]) {
       assert.ok(pgRls.TENANT_RLS_TABLES.includes(tbl), `Missing Wave 2/v1.0.0 RLS table ${tbl}`);
     }
